@@ -2477,6 +2477,36 @@ PYEOF
             warn "${PODMAN_RW_SUDOERS_SRC} not found — podman write sudoers grant not installed"
         fi
     fi
+
+    # Privileged seam #8 (#2993): hal0-flmctl runs `flm list` / `flm pull`
+    # inside the pinned flm runner image, in ROOT's podman store, with the FLM
+    # store mounted exactly where the NPU slot mounts it, so the host
+    # FastFlowLM .deb no longer decides which weights land in the store. Every
+    # podman flag is a literal in the wrapper; its operands (slot token, image
+    # ref, store dir, model tag) are validated root-side.
+    FLMCTL_SRC="${REPO_ROOT}/installer/wrappers/hal0-flmctl"
+    if [[ -f "${FLMCTL_SRC}" ]]; then
+        install -d "${LIB_DIR}/bin"
+        install -m 0755 "${FLMCTL_SRC}" "${LIB_DIR}/bin/hal0-flmctl"
+        info "wrote ${LIB_DIR}/bin/hal0-flmctl"
+    else
+        warn "${FLMCTL_SRC} not found — FLM CLI seam helper not installed"
+    fi
+
+    if [[ "${DEV_MODE}" -eq 0 ]]; then
+        FLMCTL_SUDOERS_SRC="${REPO_ROOT}/packaging/sudoers/hal0-flmctl"
+        FLMCTL_SUDOERS_DST="/etc/sudoers.d/hal0-flmctl"
+        if [[ -f "${FLMCTL_SUDOERS_SRC}" ]]; then
+            if visudo -cf "${FLMCTL_SUDOERS_SRC}" >/dev/null 2>&1; then
+                install -m 0440 "${FLMCTL_SUDOERS_SRC}" "${FLMCTL_SUDOERS_DST}"
+                info "wrote ${FLMCTL_SUDOERS_DST}"
+            else
+                warn "${FLMCTL_SUDOERS_SRC} failed visudo check — FLM CLI sudoers grant not installed"
+            fi
+        else
+            warn "${FLMCTL_SUDOERS_SRC} not found — FLM CLI sudoers grant not installed"
+        fi
+    fi
 else
     warn "${AGENT_UNIT_SRC} not found — hal0-agent@ template not installed"
 fi

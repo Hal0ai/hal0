@@ -60,8 +60,6 @@ async def test_progress_recovers_transient_none_target_dir(
         "flm_pull_command",
         lambda tag: ([sys.executable, "-c", _FAKE_PULL, host_models_dir], host_models_dir),
     )
-    monkeypatch.setattr(flm_mod, "ensure_host_flm_store_link", lambda: host_models_dir)
-    monkeypatch.setattr(flm_mod, "flm_host_async_spawn", lambda argv: (argv, {}))
     monkeypatch.setattr(flm_mod, "flm_served_models", lambda: [])
     monkeypatch.setattr(flm_mod, "reset_flm_catalog_cache", lambda: None)
     monkeypatch.setattr(cat_mod, "reset_flm_image_present_cache", lambda: None)

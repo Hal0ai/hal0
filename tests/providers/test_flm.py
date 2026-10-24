@@ -547,14 +547,15 @@ async def test_infer_raises_typed_error_on_upstream_failure(
 
 
 # ─── host-flm catalog probe + pull (no docker toolbox) ──────────────────────────
-# Regression: the probe used to run the docker toolbox (FLM v0.9.42) against an
-# empty mount, reporting installed=False for every model so the dashboard hid
-# them. It now runs the host flm binary as the hal0 user against the real cache.
+# #2993: the probe runs ``flm list`` inside the flm runner image through the
+# hal0-flmctl seam; the host binary answers only when no seam route exists
+# (dev/CI here). tests/providers/test_flm_cli.py covers the seam routes.
 
 
-def test_probe_uses_host_flm_binary_not_docker() -> None:
-    """_probe_flm_catalog shells the host flm binary, never `docker run`."""
+def test_probe_falls_back_to_host_binary_without_seam() -> None:
+    """No route into the runner image: the host flm answers, as the hal0 identity."""
     import hal0.providers.flm as flm
+    from hal0.providers import flm_cli
 
     captured: dict[str, Any] = {}
 
@@ -563,12 +564,10 @@ def test_probe_uses_host_flm_binary_not_docker() -> None:
         captured["kwargs"] = kwargs
         return MagicMock(returncode=0, stdout=b'{"models": []}')
 
-    with patch("subprocess.run", _fake_run):
-        flm._probe_flm_catalog()
+    with patch.object(flm_cli, "_launcher", lambda: None), patch("subprocess.run", _fake_run):
+        assert flm._probe_flm_catalog() == []
 
-    assert captured["argv"][0] == flm._HOST_FLM_BIN
-    assert captured["argv"][1:] == ["list", "-j"]
-    assert "docker" not in captured["argv"]
+    assert captured["argv"] == [flm._HOST_FLM_BIN, "list", "-j"]
     # HOME is set so flm resolves ~/.config/flm/models to the real cache.
     assert captured["kwargs"]["env"]["HOME"] == flm._HOST_FLM_HOME
 
@@ -636,14 +635,32 @@ def test_flm_validate_none_when_binary_missing() -> None:
         assert flm.flm_validate() is None
 
 
-def test_pull_command_is_host_flm_and_real_cache_dir() -> None:
+def test_pull_command_runs_in_the_runner_image_into_the_slot_store() -> None:
+    """flm_pull_command: a one-shot run-pull through the seam, never host flm."""
     import hal0.providers.flm as flm
+    from hal0.providers import flm_cli
 
-    argv, host_dir = flm.flm_pull_command("gemma4-it:e4b")
-    assert argv == [flm._HOST_FLM_BIN, "pull", "gemma4-it:e4b"]
-    assert "docker" not in argv
-    assert host_dir == flm._host_flm_models_dir()
-    assert host_dir == flm._host_flm_models_dir()
+    launcher = ["sudo", "-n", flm_cli.SEAM_BIN]
+    with patch.object(flm_cli, "_launcher", lambda: launcher):
+        argv, store = flm.flm_pull_command("gemma4-it:e4b")
+
+    image = flm.FLMProvider().image_ref({})
+    assert argv == [*launcher, "run-pull", image, store, "gemma4-it:e4b"]
+    assert flm._HOST_FLM_BIN not in argv
+    # The store is the serving slot's mount source.
+    assert store == flm.FLMProvider().models_store({}) == flm._host_flm_models_dir()
+
+
+def test_pull_command_has_no_host_fallback() -> None:
+    """Without a seam route the pull refuses rather than run the host binary."""
+    import hal0.providers.flm as flm
+    from hal0.providers import flm_cli
+
+    with (
+        patch.object(flm_cli, "_launcher", lambda: None),
+        pytest.raises(flm_cli.FLMRunnerUnavailableError),
+    ):
+        flm.flm_pull_command("gemma4-it:e4b")
 
 
 def test_spawn_kwargs_sets_home_and_skips_user_when_not_root() -> None:
@@ -654,39 +671,6 @@ def test_spawn_kwargs_sets_home_and_skips_user_when_not_root() -> None:
         kw = flm.flm_host_spawn_kwargs()
     assert kw["env"]["HOME"] == flm._HOST_FLM_HOME
     assert "user" not in kw
-
-
-def test_async_spawn_demotes_via_setpriv_not_kwargs() -> None:
-    """As root, the drop to hal0 rides the argv (setpriv) — never user=/group=
-    kwargs, which uvloop's subprocess_exec rejects (the prod FLM-pull bug)."""
-    import os
-    import pwd
-
-    import hal0.providers.flm as flm
-
-    fake_pw = pwd.getpwuid(os.getuid())
-    with (
-        patch("os.geteuid", lambda: 0),
-        patch("pwd.getpwnam", lambda _name: fake_pw),
-        patch("shutil.which", lambda tool: f"/usr/bin/{tool}" if tool == "setpriv" else None),
-    ):
-        argv, kwargs = flm.flm_host_async_spawn(["/usr/bin/flm", "pull", "x:1b"])
-    assert "user" not in kwargs and "group" not in kwargs
-    assert kwargs["env"]["HOME"] == flm._HOST_FLM_HOME
-    assert argv[0] == "/usr/bin/setpriv"
-    assert argv[-3:] == ["/usr/bin/flm", "pull", "x:1b"]
-    u = flm._HOST_FLM_USER
-    assert f"--reuid={u}" in argv and f"--regid={u}" in argv
-
-
-def test_async_spawn_passes_through_when_not_root() -> None:
-    """Non-root (dev/test): argv untouched, no demotion tools involved."""
-    import hal0.providers.flm as flm
-
-    with patch("os.geteuid", lambda: 1000):
-        argv, kwargs = flm.flm_host_async_spawn(["/usr/bin/flm", "pull", "x:1b"])
-    assert argv == ["/usr/bin/flm", "pull", "x:1b"]
-    assert "user" not in kwargs and "group" not in kwargs
 
 
 # ─── is_installed_flm_id (slot-apply provider-resolvability) ─────────────────

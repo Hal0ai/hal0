@@ -4,8 +4,9 @@ Every privileged operation hal0 performs post-P3-perms goes through one of a
 handful of narrow ``sudo -n /usr/lib/hal0/bin/hal0-*`` wrappers: slot lifecycle
 (``hal0-systemctl``), self-update (``hal0-update``), agent env files
 (``hal0-agentenv``), the benchmark harness (``hal0-benchctl``), read-only
-podman introspection (``hal0-podman-ro``), and the podman write surface
-(``hal0-podman-rw``). ``install.sh`` installs each best-effort — a
+podman introspection (``hal0-podman-ro``), the podman write surface
+(``hal0-podman-rw``), and the FLM CLI in the runner image
+(``hal0-flmctl``). ``install.sh`` installs each best-effort — a
 ``visudo -cf`` failure, or a missing source file, produced only a mid-log
 ``warn`` and the install still printed its success box.
 
@@ -34,8 +35,8 @@ Three independent facts per seam:
 
 The grant probe only runs for seams that expose a genuinely side-effect-free
 verb. ``hal0-systemctl help``, ``hal0-update check``, ``hal0-podman-ro
-check-slot-token`` and ``hal0-podman-rw check-image-ref`` do; the remaining
-seams are presence-checked only, which is stated in the row detail rather
+check-slot-token``, ``hal0-podman-rw check-image-ref`` and ``hal0-flmctl
+check-tag`` do; the remaining seams are presence-checked only, which is stated in the row detail rather
 than silently implied.
 """
 
@@ -124,6 +125,16 @@ SEAMS: tuple[SeamSpec, ...] = (
         probe=("check-image-ref", "hal0probe"),
         required=False,
         role="podman image write (manifest-gated pull / stale-image eviction)",
+    ),
+    # #2993: `flm list` / `flm pull` inside the flm runner image. Without it
+    # FLM pulls fail and the FLM catalogue falls back to the host binary.
+    # `check-tag` is its side-effect-free validator probe (never touches
+    # podman), the same shape as podman-rw's `check-image-ref`.
+    SeamSpec(
+        "hal0-flmctl",
+        probe=("check-tag", "hal0:probe"),
+        required=False,
+        role="FLM model pulls and catalogue inside the flm runner image",
     ),
 )
 

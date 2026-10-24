@@ -60,6 +60,24 @@ from hal0.providers.base import Mount, Provider, RuntimeLaunchPlan
 #     debug shells). Container runs never reference it.
 _CONTAINER_FLM_ROOT = "/opt/fastflowlm"
 _NATIVE_FLM_ROOT = "/opt/hal0/flm-ubuntu"
+# The in-image flm binary (``podman exec`` bypasses the image ENTRYPOINT).
+_CONTAINER_FLM_BIN = f"{_CONTAINER_FLM_ROOT}/bin/flm"
+# Where FLM reads its model cache inside the image: the image runs as the
+# non-root ``hal0`` user (uid 1000, HOME=/var/lib/hal0) and FLM hardcodes
+# ~/.config/flm/models. The serving slot and the one-shot ``flm pull`` /
+# ``flm list`` containers (hal0-flmctl, #2993) all mount the store here.
+_CONTAINER_FLM_MODELS = "/var/lib/hal0/.config/flm/models"
+# Container env for every FLM container: the serving slot and the one-shot
+# CLI containers (installer/wrappers/hal0-flmctl spells the same two values).
+# Podman ``--env LD_LIBRARY_PATH=...`` REPLACES the image ENV set by the
+# Dockerfile rather than augmenting it, so every path is spelled out:
+# libxrt_coreutil.so.2 (XRT runtime) and the FLM libs (libllama_npu.so &c,
+# dlopen'd when models load) both need to be findable; missing either crashes
+# /usr/local/bin/flm at startup before main().
+_CONTAINER_FLM_ENV = {
+    "FLM_CONFIG_PATH": f"{_CONTAINER_FLM_ROOT}/share/flm/model_list.json",
+    "LD_LIBRARY_PATH": f"{_CONTAINER_FLM_ROOT}/lib:/opt/xilinx/xrt/lib:/usr/lib/x86_64-linux-gnu",
+}
 # FLM's per-user model cache default lives in config.paths.default_flm_models_dir
 # (bind-mounted writable so `flm pull` downloads survive container restarts).
 # FLM hardcodes ~/.config/flm/models as its model cache. The container runs
@@ -68,16 +86,13 @@ _NATIVE_FLM_ROOT = "/opt/hal0/flm-ubuntu"
 # otherwise flm reports every model as not-installed and hides them from
 # the dashboard.
 
-# ── Host FLM (catalog probe + pull) ─────────────────────────────────────────────
-# The catalog probe and model pulls run the HOST flm binary directly — NOT the
-# docker toolbox — so they use the exact binary + on-disk cache the NPU slot
-# *serves* with. The toolbox had drifted to FLM v0.9.42 while the host serves
-# v0.9.43: it (a) bind-mounted the empty `_DEFAULT_FLM_MODELS_DIR`, so every
-# model reported installed=False and vanished from the dashboard (the UI hides
-# not-installed models), and (b) emitted "model may not be compatible" warnings
-# that broke JSON parsing once pointed at the real cache. Serving was already
-# host-native; probe/pull now match it.
-# See docs/superpowers/plans/2026-06-07-flm-host-probe-and-unified-model-storage.md.
+# ── Host FLM (validate + catalogue fallback) ───────────────────────────────────
+# ``flm pull`` and ``flm list`` run inside the flm runner image the NPU slot
+# serves with (:mod:`hal0.providers.flm_cli`, #2993, ADR-0036), so the host
+# FastFlowLM .deb no longer decides which weights land in the store. The host
+# binary is still used for ``flm validate`` (the setup-time NPU gate, which runs
+# before any runner image is pulled) and as the labelled last-resort catalogue
+# fallback when no route into the image answers.
 #
 # Run as the `hal0` user with HOME=/var/lib/hal0 so flm resolves its real cache
 # at ~/.config/flm/models. All three are env-overridable for dev/test.
@@ -163,6 +178,11 @@ def _ensure_flm_models_dir(path: str) -> None:
 
 def _reconcile_flm_store_link() -> str:
     """Reconcile flm's hardcoded host cache with the resolved store; return the store.
+
+    Since #2993 hal0's own pulls run inside the flm runner image with the store
+    bind-mounted, so they never depend on this link. It still keeps the host
+    ``flm list`` fallback and any operator-run host ``flm`` pointed at the
+    store, and ``hal0 doctor perms`` audits and repairs it.
 
     The host ``flm pull`` (and ``flm list``) always read/write
     ``$HOME/.config/flm/models`` — flm hardcodes it, with no dir flag or env
@@ -805,6 +825,19 @@ class FLMProvider(Provider):
 
         return resolve_family_image(slot_cfg, "flm")
 
+    def models_store(self, slot_cfg: dict[str, Any]) -> str:
+        """Host FLM store the slot mounts at :data:`_CONTAINER_FLM_MODELS`.
+
+        Per-slot ``[_paths].flm_models`` wins (rare, test/debug shape);
+        otherwise the shared resolver: ``HAL0_FLM_MODELS_DIR`` env >
+        ``[models].flm_store`` > FLM's default HOME cache. The serving slot and
+        the one-shot ``flm pull`` / ``flm list`` containers
+        (:func:`hal0.providers.flm_cli.resolve_target`) both mount this, so a
+        pull lands where the slot reads.
+        """
+        paths = slot_cfg.get("_paths", {}) or {}
+        return str(paths.get("flm_models") or _host_flm_models_dir())
+
     def container_spec(
         self,
         slot_cfg: dict[str, Any],
@@ -828,12 +861,7 @@ class FLMProvider(Provider):
         env = self.build_env(slot_cfg, model_info)
         port = int(env["HAL0_PORT"])
 
-        # Per-slot [_paths].flm_models wins (rare, test/debug shape); otherwise
-        # the shared resolver: HAL0_FLM_MODELS_DIR env > [models].flm_store >
-        # FLM's default HOME cache. Historically this chain never consulted
-        # config — [models]-level relocation only worked via the env var.
-        paths = slot_cfg.get("_paths", {}) or {}
-        flm_models = paths.get("flm_models") or _host_flm_models_dir()
+        flm_models = self.models_store(slot_cfg)
         _ensure_flm_models_dir(flm_models)
 
         # Only the model cache is bind-mounted. FLM hardcodes
@@ -843,7 +871,7 @@ class FLMProvider(Provider):
         # /var/lib/hal0/.config — NOT /root/.config. Mounting at the
         # wrong HOME would silently drop every pulled model into the
         # container's writable overlay and lose it on exit.
-        mounts = [Mount(flm_models, "/var/lib/hal0/.config/flm/models")]
+        mounts = [Mount(flm_models, _CONTAINER_FLM_MODELS)]
 
         # Build the argv passed to the image's ENTRYPOINT. The image runs
         # /usr/local/bin/flm via tini, so what we provide here is the
@@ -875,19 +903,9 @@ class FLMProvider(Provider):
         return RuntimeLaunchPlan(
             image=self.image_ref(slot_cfg),
             command=command,
-            env={
-                # Image-internal paths (the Dockerfile installs FLM at
-                # /opt/fastflowlm and XRT at /opt/xilinx/xrt).
-                "FLM_CONFIG_PATH": f"{_CONTAINER_FLM_ROOT}/share/flm/model_list.json",
-                # Docker `--env LD_LIBRARY_PATH=...` REPLACES the image ENV
-                # set by the Dockerfile rather than augmenting it, so we
-                # must spell out every path here even though the image's
-                # own ENV would be correct on its own. libxrt_coreutil.so.2
-                # (XRT runtime) and the FLM libs (libllama_npu.so &c, dlopen'd
-                # when models load) both need to be findable; missing either
-                # crashes /usr/local/bin/flm at startup before main().
-                "LD_LIBRARY_PATH": f"{_CONTAINER_FLM_ROOT}/lib:/opt/xilinx/xrt/lib:/usr/lib/x86_64-linux-gnu",
-            },
+            # Image-internal paths (the Dockerfile installs FLM at
+            # /opt/fastflowlm and XRT at /opt/xilinx/xrt); see _CONTAINER_FLM_ENV.
+            env=dict(_CONTAINER_FLM_ENV),
             mounts=mounts,
             # accel node: XDNA2 NPU. render node: iGPU companion. Probe-recorded
             # paths from hardware.json when present; Strix Halo constants
@@ -1183,8 +1201,8 @@ def flm_host_spawn_kwargs() -> dict[str, Any]:
 
     SYNC CALLERS ONLY: ``user``/``group`` are Popen kwargs (Python ≥ 3.9) that
     uvloop's ``subprocess_exec`` rejects (``ValueError: unexpected kwargs``),
-    and hal0-api serves under uvicorn/uvloop — async callers must use
-    :func:`flm_host_async_spawn` instead.
+    and hal0-api serves under uvicorn/uvloop. Only ``flm validate`` and the
+    catalogue's host fallback use this, both through ``subprocess.run``.
     """
     import pwd
 
@@ -1198,32 +1216,6 @@ def flm_host_spawn_kwargs() -> dict[str, Any]:
         # Unknown user, or geteuid unavailable (non-POSIX) — run as-is.
         pass
     return kwargs
-
-
-def flm_host_async_spawn(argv: list[str]) -> tuple[list[str], dict[str, Any]]:
-    """Return ``(argv, kwargs)`` for spawning host ``flm`` from async code.
-
-    Same identity semantics as :func:`flm_host_spawn_kwargs`, but safe for
-    ``asyncio.create_subprocess_exec`` under uvloop: uvloop rejects the
-    ``user``/``group`` Popen kwargs (``ValueError: unexpected kwargs``), so
-    the drop to the hal0 user happens on the command line instead — via
-    ``setpriv`` (util-linux), falling back to ``runuser``. If neither tool
-    exists we spawn undemoted rather than fail the pull; the weights then
-    land root-owned but world-readable, so serving still works.
-    """
-    import shutil
-
-    kwargs = flm_host_spawn_kwargs()
-    user = kwargs.pop("user", None)
-    kwargs.pop("group", None)
-    if user:
-        setpriv = shutil.which("setpriv")
-        runuser = shutil.which("runuser")
-        if setpriv:
-            argv = [setpriv, f"--reuid={user}", f"--regid={user}", "--init-groups", "--", *argv]
-        elif runuser:
-            argv = [runuser, "-u", user, "--", *argv]
-    return argv, kwargs
 
 
 def _extract_json_object(text: str) -> dict[str, Any] | None:
@@ -1246,46 +1238,44 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
     return obj if isinstance(obj, dict) else None
 
 
-def _probe_flm_catalog() -> list[dict[str, Any]] | None:
-    """Run host ``flm list -j`` (as the hal0 user) and parse the JSON output.
-
-    Uses the host ``/usr/bin/flm`` — the SAME binary the NPU slot serves
-    with, NOT a docker toolbox — so the reported ``installed`` flag reflects the weights
-    actually on disk at ``~/.config/flm/models`` and there is no
-    toolbox-vs-host version skew. Returns the raw model list (FLM's own shape)
-    or ``None`` on any failure (missing binary, perms, crash, parse error,
-    timeout); the caller treats ``None`` as "advertise NPU with no served
-    models" so the dashboard renders cleanly.
-
-    No ``--device`` is needed: ``flm list`` reads the bundled
-    ``model_list.json`` and checks on-disk files; it never touches NPU
-    hardware, so the probe still works on dev hosts without XDNA.
-    """
-    import subprocess
-
-    try:
-        proc = subprocess.run(
-            [_HOST_FLM_BIN, "list", "-j"],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=30.0,
-            **flm_host_spawn_kwargs(),
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return None
-    if proc.returncode != 0:
-        return None
-    payload = _extract_json_object(proc.stdout.decode("utf-8", errors="replace"))
+def _parse_flm_list(text: str) -> list[dict[str, Any]] | None:
+    """The ``models`` list from ``flm list -j`` output, or ``None`` if unusable."""
+    payload = _extract_json_object(text)
     if payload is None:
         return None
     models = payload.get("models")
-    if not isinstance(models, list):
-        return None
-    return models
+    return models if isinstance(models, list) else None
+
+
+def _probe_flm_catalog() -> list[dict[str, Any]] | None:
+    """Run ``flm list -j`` in the flm runner image and parse the JSON output.
+
+    Runs where the slot serves (:func:`hal0.providers.flm_cli.flm_list_output`):
+    ``podman exec`` into the running FLM slot, else a one-shot container of the
+    slot's image with the slot's store mount, so ``installed`` reflects the
+    store the slot reads and the tag list is the runner's FastFlowLM version,
+    not the host ``.deb``'s (#2993). The host binary answers only when neither
+    route can (logged as ``flm.cli_host_fallback``).
+
+    Returns the raw model list (FLM's own shape) or ``None`` on any failure;
+    the caller treats ``None`` as "advertise NPU with no served models" so the
+    dashboard renders cleanly. ``flm list`` needs no NPU device, so it also
+    works while a slot holds the NPU and on hosts without XDNA.
+    """
+    from hal0.providers.flm_cli import flm_list_output
+
+    return flm_list_output(parse=_parse_flm_list)
 
 
 def flm_validate() -> bool | None:
     """Run host ``flm validate`` — the upstream NPU-runtime health check.
+
+    Deliberately the HOST binary, unlike ``flm pull`` / ``flm list`` (#2993):
+    setup runs it to decide whether to set up the NPU lane at all, before any
+    runner image is pulled, and what it checks (amdxdna driver, NPU firmware,
+    memlock limit) are host facts the container shares. It writes nothing to
+    the model store, so a host/runner version gap cannot put wrong weights
+    anywhere.
 
     Unlike :func:`_probe_flm_catalog` (``flm list``, which never touches the
     NPU), ``flm validate`` exercises the actual XDNA runtime. Returns:
@@ -1525,24 +1515,22 @@ async def flm_id_to_tag_async(model_id: str) -> str | None:
 
 
 def flm_pull_command(tag: str) -> tuple[list[str], str]:
-    """Return ``(argv, host_models_dir)`` for a host ``flm pull <tag>`` run.
+    """Return ``(argv, store)`` for ``flm pull <tag>`` inside the flm runner image.
 
-    Uses the host ``/usr/bin/flm`` (same binary the NPU slot serves with),
-    NOT a docker toolbox. The caller spawns ``argv`` with
-    :func:`flm_host_spawn_kwargs` so it runs as the ``hal0`` user with ``HOME``
-    set; flm writes to its hardcoded ``$HOME/.config/flm/models``. The returned
-    ``host_models_dir`` is the RESOLVED store (:func:`_host_flm_models_dir`),
-    which the caller uses for progress polling + registry bookkeeping and which
-    the serving container bind-mounts — so when the store is relocated it
-    differs from flm's default path. :func:`ensure_host_flm_store_link` (call
-    it before the pull) symlinks flm's default path onto the store so the two
-    agree; without it a relocated-store pull lands weights on the root-fs cache
-    and progress reads 0.
+    A one-shot ``podman run --rm`` of the FLM slot's image (honouring its
+    ``image_pin`` and the runner pin table) with the slot's store mounted where
+    the slot mounts it, through the ``hal0-flmctl`` seam
+    (:func:`hal0.providers.flm_cli.flm_pull_invocation`, #2993). ``store`` is
+    that mount source, which the caller polls for progress and records in the
+    registry: the same directory the slot serves from.
 
-    No ``--device``: ``flm pull`` downloads files; it doesn't touch the NPU,
-    so it still runs on dev hosts without XDNA passthrough.
+    Raises :class:`~hal0.providers.flm_cli.FLMRunnerUnavailableError` when this
+    process cannot reach the image. There is no host-binary fallback.
     """
-    return [_HOST_FLM_BIN, "pull", tag], _host_flm_models_dir()
+    from hal0.providers.flm_cli import flm_pull_invocation
+
+    invocation, store = flm_pull_invocation(tag)
+    return invocation.argv, store
 
 
 _FLM_PROGRESS_RE = re.compile(

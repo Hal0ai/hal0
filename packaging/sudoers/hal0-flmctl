@@ -1,0 +1,30 @@
+# hal0 — privileged seam grant for running the FastFlowLM CLI (`flm list`,
+# `flm pull`) inside the pinned `flm` runner image (#2993, ADR-0036).
+#
+# FLM pulls and the FLM catalogue probe run in the same rootful image the NPU
+# slot serves with, against the same store mount, so the host FastFlowLM .deb
+# version no longer decides which weights land in the store. Slots and their
+# images live in ROOT's podman store; hal0-api runs as the unprivileged `hal0`
+# user, so it delegates exactly these verbs to /usr/lib/hal0/bin/hal0-flmctl:
+#
+#   exec-list <token>               flm list -j in the running hal0-slot-<token>
+#   run-list <image> <store>        flm list -j in a one-shot container
+#   run-pull <image> <store> <tag>  flm pull <tag> in a one-shot container
+#   check-tag <tag>                 side-effect-free validator probe
+#
+# Every podman subcommand, flag and in-container argv word is a literal in the
+# wrapper; each operand is validated ROOT-side before podman is invoked. The
+# one-shot containers get no devices, capabilities or security options, and
+# `--pull=never` means nothing is pulled implicitly.
+#
+# Install (as root):
+#   install -m 0755 -o root -g root hal0-flmctl /usr/lib/hal0/bin/hal0-flmctl
+#   install -m 0440 -o root -g root hal0-flmctl /etc/sudoers.d/hal0-flmctl
+#   visudo -cf /etc/sudoers.d/hal0-flmctl
+#
+# The grant is pinned to the helper binary and deliberately does not enumerate
+# argv: the wrapper is the control surface, as for hal0-podman-ro/-rw.
+# Revoke with: rm /etc/sudoers.d/hal0-flmctl. FLM pulls then fail with a clear
+# error and the FLM catalogue falls back to the host flm binary.
+
+hal0 ALL=(root) NOPASSWD: /usr/lib/hal0/bin/hal0-flmctl

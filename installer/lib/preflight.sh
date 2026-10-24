@@ -1625,7 +1625,7 @@ resolve_node() {
 # down, and `hal0 doctor all` carries the same predicate in Python
 # (src/hal0/system/seam_check.py). Keep the two inventories in lock-step.
 HAL0_REQUIRED_SEAMS=("hal0-systemctl" "hal0-update")
-HAL0_OPTIONAL_SEAMS=("hal0-agentenv" "hal0-benchctl" "hal0-podman-ro" "hal0-podman-rw")
+HAL0_OPTIONAL_SEAMS=("hal0-agentenv" "hal0-benchctl" "hal0-podman-ro" "hal0-podman-rw" "hal0-flmctl")
 
 # Probe verbs that are provably side-effect-free (`help` prints usage,
 # `check` only proves the interpreter loads). Seams absent from this map are
@@ -1648,6 +1648,10 @@ _hal0_seam_probe() {
         # a stale wrapper missing image-pull/image-rm probe green. Keep in
         # lock-step with src/hal0/system/seam_check.py.
         hal0-podman-rw) printf 'check-image-ref hal0probe\n' ;;
+        # #2993: FLM list/pull in the runner image. `check-tag` validates a
+        # model tag and never touches podman. Keep in lock-step with
+        # src/hal0/system/seam_check.py.
+        hal0-flmctl)    printf 'check-tag hal0:probe\n' ;;
         *)              return 1 ;;
     esac
 }

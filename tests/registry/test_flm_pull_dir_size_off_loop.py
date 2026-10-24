@@ -70,8 +70,6 @@ async def test_dir_size_walks_run_off_the_event_loop(
         "flm_pull_command",
         lambda tag: ([sys.executable, "-c", _FAKE_PULL, host_models_dir], host_models_dir),
     )
-    monkeypatch.setattr(flm_mod, "ensure_host_flm_store_link", lambda: host_models_dir)
-    monkeypatch.setattr(flm_mod, "flm_host_async_spawn", lambda argv: (argv, {}))
     monkeypatch.setattr(flm_mod, "flm_served_models", lambda: [])
 
     async def _no_models() -> list[dict[str, Any]]:

@@ -102,6 +102,7 @@ def test_root_refreshes_every_wrapper_present_in_the_release_tree(
             "hal0-benchctl",
             "hal0-podman-ro",
             "hal0-podman-rw",
+            "hal0-flmctl",
         ),
     )
 
@@ -114,10 +115,11 @@ def test_root_refreshes_every_wrapper_present_in_the_release_tree(
         "hal0-benchctl",
         "hal0-podman-ro",
         "hal0-podman-rw",
+        "hal0-flmctl",
     }
     assert result["errors"] == {}
     install_calls = [c for c in fake_run.calls if c[0] == "install"]
-    assert len(install_calls) == 6
+    assert len(install_calls) == 7
     for call in install_calls:
         assert call[:3] == ["install", "-m", "0755"]
         assert "-o" in call and "root" in call
