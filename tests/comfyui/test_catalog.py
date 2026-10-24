@@ -11,6 +11,7 @@ import pytest
 from hal0.comfyui import paths as comfyui_paths
 from hal0.comfyui.catalog import (
     CATALOG,
+    USER_CKPT_TEMPLATES,
     Component,
     ComponentKind,
     ImageModel,
@@ -204,9 +205,10 @@ def test_lightning_loras_match_their_base_model() -> None:
 
 
 def test_every_shipped_template_belongs_to_a_model() -> None:
+    """A template is a model's, or a generic one for a caller-supplied checkpoint."""
     package = resources.files("hal0.providers.workflows")
     shipped = {p.name.removesuffix(".json") for p in package.iterdir() if p.name.endswith(".json")}
-    assert shipped == {m.template for m in CATALOG.values()}
+    assert shipped == {m.template for m in CATALOG.values()} | set(USER_CKPT_TEMPLATES.values())
 
 
 def test_workflow_filenames_unique() -> None:
@@ -350,7 +352,7 @@ def test_models_using(models_root: Path) -> None:
 
 def test_load_template_keeps_meta() -> None:
     template = load_template("sdxl_turbo_simple")
-    assert template["_meta"]["model_class"] == "sdxl-turbo"
+    assert template["_meta"]["params"]["positive_prompt"] == "node:6.inputs.text"
     assert template["4"]["class_type"] == "CheckpointLoaderSimple"
 
 

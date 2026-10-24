@@ -159,6 +159,26 @@ class InstallState:
 
 _WEIGHT_SUFFIXES = (".safetensors", ".pth", ".ckpt", ".pt", ".gguf")
 
+# The pointer contract of an API-renderable template. ``_meta.params`` maps a parameter name
+# to ``node:<id>.inputs.<field>``, the graph input that parameter patches, so the generation
+# route sets prompts, sizes and seeds without knowing which model a graph belongs to.
+# ``_meta.defaults`` holds the graph's own ``steps`` and ``cfg`` for requests that omit them.
+REQUIRED_PARAMS = (
+    "positive_prompt",
+    "width",
+    "height",
+    "seed",
+    "steps",
+    "cfg",
+    "filename_prefix",
+)
+OPTIONAL_PARAMS = ("negative_prompt", "batch_size", "ckpt_name")
+
+# Templates that load a caller-chosen checkpoint (``ckpt_name`` is patched), by model family.
+USER_CKPT_TEMPLATES: Mapping[str, str] = MappingProxyType(
+    {"sdxl": "sdxl_simple", "sd15": "sd15_simple"}
+)
+
 
 def load_template(stem: str) -> dict[str, Any]:
     """The workflow template ``stem`` from package resources, ``_meta`` included.
