@@ -169,7 +169,7 @@ async def test_models_list_all_keeps_the_loop_running(slow_flm_list: _SlowFlmLis
     slow_flm_list.assert_ran_off_loop()
     # ~_PROBE_BLOCK_S / _HEARTBEAT_S ticks when the loop is free; 0-1 if blocked.
     assert ticks >= 5, f"event loop stalled during `flm list` (ticks={ticks})"
-    assert "qwen3-0.6b-FLM" in {m["id"] for m in out["models"]}
+    assert "qwen3:0.6b" in {m["id"] for m in out["models"]}
 
 
 # ── capabilities ────────────────────────────────────────────────────────────

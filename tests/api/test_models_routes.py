@@ -866,18 +866,26 @@ def test_list_models_surfaces_installed_flm_models(
     monkeypatch.setattr("hal0.providers.flm.flm_served_models", lambda: fake)
 
     rows = {m["id"]: m for m in inspect_client.get("/api/models").json()["models"]}
-    g4 = rows["gemma4-it-e4b-FLM"]
+    # Keyed by FLM's native tag, like a pulled FLM model's registry row, with
+    # the legacy generated id kept as an alias for slots still bound to it.
+    assert "gemma4-it-e4b-FLM" not in rows
+    g4 = rows["gemma4-it:e4b"]
+    assert g4["aliases"] == ["gemma4-it-e4b-FLM"]
     # FLM-seed shape the NPU slot pickers (slots.jsx isFlmModel) gate on.
     assert g4["device"] == "npu"
     assert g4["backend"] == "flm"
     assert g4["upstream"] == "npu"
     assert g4["installed"] is True
+    # The engine identity the picker's runtime chip reads.
+    assert g4["provider_effective"] == "flm"
+    assert g4["runs_on"] == ["npu"]
     # dispatcher vocab (chat→llm), chat-first for the multimodal tag.
     assert g4["type"] == "llm"
     assert g4["capability"] == "chat"
     # embed model → dispatcher "embedding".
-    assert rows["embed-gemma-300m-FLM"]["type"] == "embedding"
+    assert rows["embed-gemma:300m"]["type"] == "embedding"
     # not-installed FLM tag omitted.
+    assert "qwen3:0.6b" not in rows
     assert "qwen3-0.6b-FLM" not in rows
 
 
@@ -920,7 +928,8 @@ def test_list_models_dedups_flm_probe_against_registry_rows(
     rows = {m["id"]: m for m in inspect_client.get("/api/models").json()["models"]}
     assert "gemma4-it:e4b" in rows
     assert "gemma4-it-e4b-FLM" not in rows
-    assert rows["llama3.2-1b-FLM"]["backend"] == "flm"
+    assert rows["llama3.2:1b"]["backend"] == "flm"
+    assert "llama3.2-1b-FLM" not in rows
 
 
 def test_list_models_dedupe_merges_flm_probe_capabilities_into_registry_row(
@@ -954,6 +963,47 @@ def test_list_models_dedupe_merges_flm_probe_capabilities_into_registry_row(
     row = rows["embed-gemma:300m"]
     assert row["capabilities"] == ["embed"]
     assert row["type"] == "embedding"
+
+
+def test_list_models_types_a_multimodal_flm_registry_row_as_chat(
+    inspect_client: TestClient,
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pulled FLM chat model that also does speech (gemma4-it is chat + stt)
+    keeps type ``llm`` on its registry row. ``dispatch_type`` ranks stt above
+    chat, so the row came back as ``transcription`` and the NPU chat picker,
+    which lists only llm rows, dropped it."""
+    fpath = Path(tmp_hal0_home) / "gemma4-e4b.gguf"
+    fpath.write_bytes(b"\x00" * 8)
+    inspect_client.post(
+        "/api/models",
+        json={"id": "gemma4-it:e4b", "path": str(fpath), "capabilities": ["chat", "stt"]},
+    )
+    fake = [
+        {
+            "tag": "gemma4-it:e4b",
+            "capabilities": ["chat", "stt"],
+            "installed": True,
+            "size_bytes": 1,
+            "footprint_gb": 0.0,
+            "family": "gemma4",
+        },
+        {
+            "tag": "whisper-v3:turbo",
+            "capabilities": ["stt"],
+            "installed": True,
+            "size_bytes": 1,
+            "footprint_gb": 0.0,
+            "family": "whisper",
+        },
+    ]
+    monkeypatch.setattr("hal0.providers.flm.flm_served_models", lambda: fake)
+
+    rows = {m["id"]: m for m in inspect_client.get("/api/models").json()["models"]}
+    assert rows["gemma4-it:e4b"]["type"] == "llm"
+    # A speech-only FLM tag still lands under transcription.
+    assert rows["whisper-v3:turbo"]["type"] == "transcription"
 
 
 def test_list_models_dedupe_keeps_legacy_flm_id_as_an_alias(

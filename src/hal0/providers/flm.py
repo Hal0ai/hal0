@@ -1495,7 +1495,7 @@ def is_flm_tag(model_id: str) -> bool:
 
 
 def is_installed_flm_id(model_id: str) -> bool:
-    """True iff ``model_id`` is the ``<tag>-FLM`` id of an INSTALLED FLM model.
+    """True iff ``model_id`` names an INSTALLED FLM model (native tag or ``<tag>-FLM`` id).
 
     FLM models are host-flm-owned tags and are **never** in hal0's ModelRegistry
     (see docs/internal/brain-redesign/{model,slot}-shapes-audit-2026-06-07.md):
@@ -1505,11 +1505,13 @@ def is_installed_flm_id(model_id: str) -> bool:
     the same id fine. This lets slot-apply accept an on-disk
     FLM model by *provider-resolvability* instead of registry membership.
 
-    ``model_id`` is the served ``-FLM`` form (``gemma4-it-e4b-FLM``); we
-    match it against the forward transform of each installed probe tag
-    (``gemma4-it:e4b`` → ``gemma4-it-e4b-FLM``), the same map used to synthesise
-    the picker rows in ``routes/models.py``.
+    ``model_id`` is either FLM's native tag (``gemma4-it:e4b``, the id the
+    ``/api/models`` picker rows carry) or the legacy ``-FLM`` form
+    (``gemma4-it-e4b-FLM``) that older slots are still bound to; the latter is
+    matched against the forward transform of each installed probe tag.
     """
+    if ":" in model_id:
+        return any(m.get("installed") and m["tag"] == model_id for m in flm_served_models())
     if not model_id.endswith("-FLM"):
         return False
     return any(
