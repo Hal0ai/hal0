@@ -71,6 +71,9 @@ PROCESS_CONTROL_ENV_NAMES = frozenset(
         # Python's ssl, httpx, curl and Node write every TLS session key to the
         # named file, so a passive capture decrypts upstream tokens (#2997).
         "SSLKEYLOGFILE",
+        # Set to 0, turns off certificate checks for every Node child (the Hermes
+        # web build, npm): simpler than swapping the CA bundle #2941 guards (#2999).
+        "NODE_TLS_REJECT_UNAUTHORIZED",
     }
 )
 #: Prefix families with the same effect: the dynamic loader (``LD_*``,
