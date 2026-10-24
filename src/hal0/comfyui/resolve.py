@@ -29,6 +29,7 @@ from hal0.comfyui.catalog import (
     CATALOG,
     USER_CKPT_TEMPLATES,
     get_model,
+    install_route,
     install_state,
     load_template,
 )
@@ -132,7 +133,7 @@ def resolve_image_model(model_id: str | None, *, selection_model: str | None) ->
             )
         state = install_state(model)
         if state.state != "complete":
-            install = f"POST /api/comfyui/models/{model.id}/install"
+            install = install_route(model.id)
             raise ImageModelNotInstalled(
                 f"image model {model.id!r} is not installed ({state.missing_gb} GB still to "
                 f"download); install it with {install}",

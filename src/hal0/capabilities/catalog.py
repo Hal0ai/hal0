@@ -570,7 +570,7 @@ def _runtime_host_backends(runtime: str) -> list[str]:
     return [c for c in _RUNTIME_TO_HOST_BACKENDS.get(runtime, ()) if c in host_backends]
 
 
-def _comfyui_backends() -> list[str]:
+def comfyui_backends() -> list[str]:
     """Backend ids the ComfyUI image can run under here; empty without a ROCm lane.
 
     The one answer to "can this host serve image generation": the image picker
@@ -579,6 +579,18 @@ def _comfyui_backends() -> list[str]:
     ``["gpu-vulkan"]``, the picker's generic GPU row (#1941).
     """
     return _runtime_host_backends("comfyui")
+
+
+def comfyui_row_backend(device: str) -> str:
+    """The picker backend id a selection's ``device`` reads for the ComfyUI image.
+
+    ComfyUI's one picker row is labelled ``gpu-vulkan``, the generic GPU row
+    (#1941), but its image is ROCm-only. The installer seeds the ``img`` slot
+    with ``device = "gpu-rocm"`` (#2067) and first boot lifts that into the
+    capability selection, so a persisted or explicit ``gpu-rocm`` names the same
+    GPU lane as the row. Any other device is its own id and is not on the row.
+    """
+    return _RUNTIME_TO_HOST_BACKENDS["comfyui"][0] if device == "gpu-rocm" else device
 
 
 def _backend_variants(entry: Any) -> list[str]:
@@ -910,7 +922,7 @@ def _flat_rows_for_capability(
     never the curated / registry loop below.
     """
     if capability == "image":
-        return image_picker_rows(_comfyui_backends())
+        return image_picker_rows(comfyui_backends())
 
     rows: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
@@ -1188,6 +1200,23 @@ def models_for_capability(
             ],
         }
 
+    ``image`` entries also carry the model-level ``display_name``,
+    ``license`` and ``recommended`` the image picker shows; the other
+    capabilities' entries do not::
+
+        {
+            "id":           "sdxl-lightning",
+            "capabilities": ["image"],
+            "size_gb":      7.6,
+            "display_name": "SDXL Lightning (8-step)",
+            "license":      "CreativeML-OpenRAIL++",
+            "recommended":  True,
+            "backends": [
+                {"id": "gpu-vulkan", "provider": "comfyui",
+                 "downloaded": False, "pullable": True},
+            ],
+        }
+
     The model-first shape lets the dashboard offer the user a single
     model dropdown and narrow the backend dropdown to the picked model's
     legal options — replacing the old flat per-(model, backend) row
@@ -1356,6 +1385,8 @@ def runs_on_for_model(model: Any) -> list[str]:
 __all__ = [
     "available_backends",
     "catalogs_by_slot",
+    "comfyui_backends",
+    "comfyui_row_backend",
     "get_backend",
     "models_for_capability",
     "runs_on_for_model",

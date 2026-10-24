@@ -8,7 +8,7 @@ registry, and its rows never go through the LLM model-fit check.
 A row has the keys :func:`hal0.capabilities.catalog._entry_to_row` emits, plus the three the
 image picker shows: ``display_name``, ``license`` and ``recommended``. There is one row per
 model and backend id; which backends the host can serve is the caller's decision
-(:func:`hal0.capabilities.catalog._comfyui_backends`).
+(:func:`hal0.capabilities.catalog.comfyui_backends`).
 """
 
 from __future__ import annotations
