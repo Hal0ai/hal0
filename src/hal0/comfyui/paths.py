@@ -86,3 +86,20 @@ def is_under_models_root(path: Path) -> bool:
     never by string prefix: ``models-backup`` is not under ``models``.
     """
     return path.resolve().is_relative_to(models_root().resolve())
+
+
+def is_under_data_root(path: Path) -> bool:
+    """True when ``path`` resolves to ``data_root()`` or something inside it.
+
+    The whole ComfyUI tree (models, workflows, user data, custom nodes and
+    ``extra_model_paths.yaml``) is owned by the image catalog and the ComfyUI
+    container, never by the model registry or its store GC. Both sides are
+    resolved first, like :func:`is_under_models_root`, and the comparison is by
+    path components. A path that cannot be resolved (a symlink loop, an
+    unreadable parent) counts as outside, so a caller walking a tree never
+    aborts on it.
+    """
+    try:
+        return path.resolve().is_relative_to(data_root().resolve())
+    except (OSError, RuntimeError):
+        return False

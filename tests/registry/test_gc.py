@@ -261,6 +261,23 @@ class TestDeleteModelFiles:
         assert dest_b.exists()  # surviving referent (and the bytes) live on
 
 
+def _make_comfyui_tree(data_root: Path) -> list[Path]:
+    """A ComfyUI data root holding files no registry row tracks: model weights,
+    a workflow, user data, a custom node and ``extra_model_paths.yaml``."""
+    files = [
+        data_root / "models" / "checkpoints" / "sd-turbo.safetensors",
+        data_root / "models" / "vae" / "ae.safetensors",
+        data_root / "workflows" / "flow.json",
+        data_root / "user" / "default" / "settings.json",
+        data_root / "custom_nodes" / "node" / "__init__.py",
+        data_root / "extra_model_paths.yaml",
+    ]
+    for path in files:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"comfy")
+    return files
+
+
 class TestReconcileStoreTree:
     """#9: fs-walk reconcile — reap bare bytes (on disk, tracked by NO
     store_blob AND no model_file row) while retaining every tracked file and
@@ -321,30 +338,34 @@ class TestReconcileStoreTree:
         assert partial.exists()  # in-flight .tmp partial skipped
 
     def test_never_reaps_the_comfyui_tree(self, db_path: Path, tmp_path: Path, monkeypatch) -> None:
-        """ComfyUI's tree follows the store and holds files no ``store_blob`` /
-        ``model_file`` row tracks, so the walk must skip it entirely: nothing
+        """ComfyUI's data root follows the store and holds files no ``store_blob``
+        / ``model_file`` row tracks (models, workflows, user data, custom nodes,
+        ``extra_model_paths.yaml``), so the walk must skip it entirely: nothing
         under it is reaped or counted as an orphan, while an untracked file
         elsewhere in the store is still reaped."""
         monkeypatch.setenv("HAL0_MODEL_STORE", str(tmp_path))
         monkeypatch.delenv("HAL0_COMFYUI_DATA_ROOT", raising=False)
-        ckpts = tmp_path / "comfyui" / "models" / "checkpoints"
-        ckpts.mkdir(parents=True)
-        image_model = ckpts / "sd-turbo.safetensors"
-        image_model.write_bytes(b"image")
+        comfy_files = _make_comfyui_tree(tmp_path / "comfyui")
         snap = tmp_path / "models--org--repo" / "snapshots" / "rev"
         snap.mkdir(parents=True)
         bare = snap / "leftover.gguf"
         bare.write_bytes(b"orphaned")
+        # A sibling that only shares the name prefix is not the ComfyUI tree.
+        sibling = tmp_path / "comfyui-notes" / "a.bin"
+        sibling.parent.mkdir()
+        sibling.write_bytes(b"orphaned")
 
         with connect(db_path) as conn:
             migrate(conn)
             report = gc.reconcile_store_tree(conn, dry_run=False)
 
-        assert report.orphans_found == 1  # the ComfyUI file is not counted
-        assert report.orphans_deleted == 1
+        assert report.orphans_found == 2  # no ComfyUI file is counted
+        assert report.orphans_deleted == 2
         assert report.errors == []
         assert not bare.exists()
-        assert image_model.read_bytes() == b"image"
+        assert not sibling.exists()
+        for path in comfy_files:
+            assert path.read_bytes() == b"comfy", path
 
     def test_never_reaps_a_relocated_comfyui_tree(
         self, db_path: Path, tmp_path: Path, monkeypatch
@@ -355,9 +376,7 @@ class TestReconcileStoreTree:
         store.mkdir()
         monkeypatch.setenv("HAL0_MODEL_STORE", str(store))
         relocated = store / "images-box"
-        (relocated / "models" / "vae").mkdir(parents=True)
-        image_model = relocated / "models" / "vae" / "ae.safetensors"
-        image_model.write_bytes(b"image")
+        comfy_files = _make_comfyui_tree(relocated)
         link = tmp_path / "comfy-link"
         link.symlink_to(relocated)
         monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(link))
@@ -370,7 +389,8 @@ class TestReconcileStoreTree:
 
         assert report.orphans_found == 1
         assert not bare.exists()
-        assert image_model.exists()
+        for path in comfy_files:
+            assert path.read_bytes() == b"comfy", path
 
     def test_dry_run_reports_without_unlinking(
         self, db_path: Path, tmp_path: Path, monkeypatch
