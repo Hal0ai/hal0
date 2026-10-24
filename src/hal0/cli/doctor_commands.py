@@ -724,7 +724,7 @@ def perms(
     table, and relinks the FLM store, moving stranded models into it (all need
     root, and all prompt for confirmation unless ``--force``/``-f`` is also
     passed); Hermes drift is still reconciled via
-    ``sudo hal0 agent bootstrap hermes --repair``. This command is audit-only by
+    ``sudo hal0 agent reprovision hermes --repair``. This command is audit-only by
     default — nothing is ever written without ``--fix``. ``--json`` prints the
     §21.4 ``Diagnosis`` rows (``HAL0-PERMS-HERMES-DRIFT`` /
     ``HAL0-PERMS-TREE-NOT-SHARED`` / ``HAL0-PERMS-PATH-OWNERSHIP-DRIFT``, the
@@ -816,8 +816,8 @@ def perms(
                 next_steps=[
                     NextStep(
                         kind="command",
-                        label="sudo hal0 agent bootstrap hermes --repair",
-                        target="hal0 agent bootstrap hermes --repair",
+                        label="sudo hal0 agent reprovision hermes --repair",
+                        target="hal0 agent reprovision hermes --repair",
                     )
                 ],
             )
@@ -944,7 +944,7 @@ def perms(
     if hermes_drift:
         console.print(
             "[red]✗[/red]  Hermes ownership drift — run "
-            "`sudo hal0 agent bootstrap hermes --repair` to reconcile."
+            "`sudo hal0 agent reprovision hermes --repair` to reconcile."
         )
     if tree_drift and not fix:
         console.print(

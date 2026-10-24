@@ -44,7 +44,7 @@ host{% if env.container.kind %} (container: {{ env.container.kind }}){% endif %}
 - Never edit `/etc/hal0/capabilities.toml` directly; go through
   `hal0_admin:capability_set` so the orchestrator reconciles.
 - Never run `hermes setup` — it will overwrite your model wiring.
-  Use `hal0 agent bootstrap hermes --repair` if config drifts.
+  Use `hal0 agent reprovision hermes --repair` if config drifts.
 {% if oauth_providers %}
 # Connecting a skill that needs OAuth
 

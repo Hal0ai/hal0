@@ -675,7 +675,7 @@ class TestCmdReprovision:
         monkeypatch.setattr(subprocess, "call", fake_call)
         rc = agent_shim.cmd_reprovision(_cfg())
         assert rc == 0
-        assert recorded["argv"][-3:] == ["bootstrap", "hermes", "--repair"]
+        assert recorded["argv"][-3:] == ["reprovision", "hermes", "--repair"]
 
 
 # ---------------------------------------------------------------------------

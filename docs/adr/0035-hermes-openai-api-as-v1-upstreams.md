@@ -204,8 +204,8 @@ line above disagree.
    - After the `hermes` component converge job ends `converged`, `stale` or
      `upgraded`; the job attaches `hermes_upstreams` to its result.
    - On `POST /api/agents/hermes/reconcile-upstreams` (404
-     `agent.not_installed` when Hermes is absent). `hal0 agent bootstrap
-     hermes` and `reprovision` call it best-effort.
+     `agent.not_installed` when Hermes is absent). `hal0 agent reprovision
+     hermes` (once `hal0 agent bootstrap hermes`, removed in #2863) calls it best-effort.
    - Right after `DELETE /api/agents/hermes` and after an install of Hermes
      or a `switch` install, so an uninstalled agent's pinned entries and
      process-environment keys do not linger for up to 120 s, still

@@ -11,7 +11,7 @@ never transit the CRUD surface; ``create --api-key`` chains the two calls.
 
 CLI consolidation (2026-07): ``hal0 upstream set-credentials`` is renamed to
 ``hal0 upstream credentials set`` — every other multi-facet resource in this
-cluster (``agent bootstrap``, ``mcp catalog``, ``memory graph``) uses a
+cluster (``agent approvals``, ``mcp catalog``, ``memory graph``) uses a
 noun-subgroup, and the flat verb left no home for a future ``credentials
 show``/``credentials clear``. The old flat verb has been removed.
 """

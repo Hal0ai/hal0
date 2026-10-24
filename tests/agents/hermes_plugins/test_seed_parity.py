@@ -3,7 +3,7 @@
 History: the seed at ``installer/agents/hermes/plugins/hal0-memory/`` and the
 source at ``src/hal0/agents/hermes/plugins/memory_hindsight/`` drifted apart
 (sync-client rework landed only in the seed; a three-tier prompt landed only
-on a live box). This lock keeps them unified so ``hal0 agent bootstrap
+on a live box). This lock keeps them unified so ``hal0 agent reprovision
 hermes --repair`` can never clobber behavior that isn't in the repo.
 """
 

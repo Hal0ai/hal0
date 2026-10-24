@@ -322,7 +322,7 @@ def _refresh_hermes_driver_env() -> None:
     Never raises — a running hal0-agent@hermes doesn't pick up the new
     token until its next restart regardless (same caveat as `hal0 auth
     rotate`); a failure here just means that refresh has to happen by hand
-    (`hal0 agent bootstrap hermes --repair`) instead of automatically.
+    (`hal0 agent reprovision hermes --repair`) instead of automatically.
     """
     try:
         from hal0.agents.hermes_provision import refresh_driver_env

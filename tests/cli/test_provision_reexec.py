@@ -1,7 +1,7 @@
 """The privilege-drop re-exec must run the RUNNING hal0, not PATH's (#2092).
 
 ``_provision_hermes``'s root branch drops to the hal0 user by re-exec'ing
-``hal0 agent bootstrap hermes``. It resolved that binary with
+``hal0 agent reprovision hermes``. It resolved that binary with
 ``shutil.which("hal0")`` — i.e. whatever is first on PATH, which is not
 necessarily the code doing the re-exec.
 
@@ -96,7 +96,7 @@ def test_provision_reexec_uses_the_running_binary(
 
     assert seen, "the root branch never re-exec'd"
     assert seen[0][0] == str(running)
-    assert seen[0][1:4] == ["agent", "bootstrap", "hermes"]
+    assert seen[0][1:4] == ["agent", "reprovision", "hermes"]
 
 
 def test_offline_rides_the_reexec(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -107,7 +107,7 @@ def test_offline_rides_the_reexec(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[list[str]] = []
     monkeypatch.setattr(agent_commands, "_run_as_hal0", lambda argv, **_k: seen.append(argv) or 0)
     agent_commands._provision_hermes(offline=True)
-    assert seen == [["/x/hal0", "agent", "bootstrap", "hermes", "--offline"]]
+    assert seen == [["/x/hal0", "agent", "reprovision", "hermes", "--offline"]]
 
 
 def test_in_process_offline_sets_the_variable_the_builder_reads(

@@ -24,7 +24,7 @@ Born-owned contract (§7.4 F.7): every ``$HERMES_HOME`` write here is born
 ``hal0:hal0`` because the CLI drops provisioning to the hal0 service user before
 running this module (``cli/agent_commands._provision_hermes``: a root-only prelude
 installs the ``/usr/local/bin`` wrapper + ensures the setgid hal0-owned skeleton,
-then re-execs ``hal0 agent bootstrap hermes`` as hal0). Root:root artifacts (seed
+then re-execs ``hal0 agent reprovision hermes`` as hal0). Root:root artifacts (seed
 TOML, driver env, gateway drop-in) go through the ``hal0-agentenv`` /
 ``hal0-systemctl`` sudo seams. ``--repair`` (root) additionally reconciles a
 root-clobbered tree via :func:`reconcile_ownership_on_repair` before the
@@ -244,7 +244,7 @@ REPO_ROOT_FOR_INSTALLER = _resolve_installer_root()
 
 # ── Install artifacts (issue #432) ───────────────────────────────────────────
 #
-# ``hal0 agent bootstrap hermes`` is a separate install path from
+# ``hal0 agent reprovision hermes`` is a separate install path from
 # ``AgentManager.install``; the provision pipeline writes data/state but
 # never wrote the two artifacts downstream components key off, each of
 # which falsely assumed "some other step writes it":
@@ -7554,7 +7554,7 @@ def ensure_gateway_api_server_key(
 # drops to hal0 so files are born hal0:hal0 with nothing to reconcile. But a box
 # provisioned by an OLD root-clobbering installer can still have HERMES_HOME /
 # venv / config owned root:root — `hal0 doctor perms` flags this as "Hermes
-# ownership drift" (halo150 O3). `hal0 agent bootstrap hermes --repair` must
+# ownership drift" (halo150 O3). `hal0 agent reprovision hermes --repair` must
 # ACTUALLY FIX what that audit reports, not just re-run the converging writes.
 # So repair (root only) reconciles the exact perms.py rows the audit checks.
 
@@ -8966,7 +8966,7 @@ def _phase_install_artifacts(ctx: _StepCtx) -> PhaseResult:
     """Write the seed TOML and driver env file (issue #432).
 
     These artifacts were previously only written by
-    ``AgentManager.install``; the ``hal0 agent bootstrap hermes`` path skipped
+    ``AgentManager.install``; the ``hal0 agent reprovision hermes`` path skipped
     them entirely, leaving the manager reporting ``broken``. Idempotent +
     ``--repair``-aware (mirrors persona_seed).
 
@@ -9024,7 +9024,7 @@ def _phase_install_artifacts(ctx: _StepCtx) -> PhaseResult:
             status=PhaseStatus.FAIL,
             reason=(
                 f"driver env not written: {exc} — fix the MCP registry, then "
-                "rerun `hal0 agent bootstrap hermes --repair`"
+                "rerun `hal0 agent reprovision hermes --repair`"
             ),
             details={
                 "seed_path": str(seed_path),

@@ -108,7 +108,7 @@ A restart that went through drops the agent's cached overview.
 
 ### Repair job
 
-`POST /api/agents/hermes/repair` runs `hal0 agent bootstrap hermes --repair --verbose` as the
+`POST /api/agents/hermes/repair` runs `hal0 agent reprovision hermes --repair --verbose` as the
 `hal0` user, as a child of hal0-api, and returns the
 queued job: `id`, `state: "queued"`, `phase: "repair:hermes"`, `kind: "repair"`, `agent`,
 `created_at`, `updated_at`, `error: null`, `steps: []`, `log_path`, `api_pid` (the hal0-api

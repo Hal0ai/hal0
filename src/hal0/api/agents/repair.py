@@ -3,7 +3,7 @@
 The Hermes card's Repair button. The route registers a job in the updater's
 registry (``app.state.update_jobs``, mirrored to ``update-jobs/<id>.json``) with
 ``phase: "repair:hermes"`` and returns the queued snapshot with ``202``; a
-background task then runs ``hal0 agent bootstrap hermes --repair --verbose`` and
+background task then runs ``hal0 agent reprovision hermes --repair --verbose`` and
 moves the job through ``running`` to ``applied`` or ``failed``. Progress is read
 through the existing ``GET /api/updates/status/{id}``, so the CLI, the Services
 page and the card all see the same job, and a repair and a converge refuse each
@@ -105,7 +105,7 @@ _REPAIR_AGENTS: Final[frozenset[str]] = frozenset({"hermes"})
 _PHASE: Final[str] = "repair:hermes"
 
 #: What the child is asked to do, after the binary.
-_BOOTSTRAP_ARGS: Final[tuple[str, ...]] = ("agent", "bootstrap", "hermes", "--repair", "--verbose")
+_BOOTSTRAP_ARGS: Final[tuple[str, ...]] = ("agent", "reprovision", "hermes", "--repair", "--verbose")  # fmt: skip
 
 #: A ``--verbose`` provisioner prints this before each install step.
 _STEP_PREFIX: Final[str] = "[run ] "

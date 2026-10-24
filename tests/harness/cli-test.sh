@@ -254,31 +254,29 @@ fi
 
 # ── Hermes-Agent bootstrap surface (Phase 10, #246) ─────────────────────────
 #
-# Drives the bootstrap dry-run path so the CLI surface is exercised
+# Drives --help and the removed-command refusal so the CLI surface is exercised
 # without requiring pypi + Python 3.11 on the harness host. Real
 # end-to-end install happens in the γ-tier (release-test.sh on the LXC).
-log_step "Hermes bootstrap surface"
+log_step "Hermes reprovision surface"
 
-run_row "cli-agent-bootstrap-help" 0 "bootstrap --help" -- \
-    "${HAL0_BIN}" agent bootstrap hermes --help
+run_row "cli-agent-reprovision-help" 0 "reprovision --help" -- \
+    "${HAL0_BIN}" agent reprovision hermes --help
 
-# 'bootstrap --dry-run' / '--skip-phase' are refused with exit 2 before
-# anything is written (#2445): the installer has no preview mode. The row
-# pins that refusal so a regression back to a silent real install shows.
-# A PermissionError from a real install also exits non-zero, so check
-# for exit 2 and the refusal text, not just "non-zero".
-_dry_log="${SCRIPT_DIR}/reports/cli-cli-agent-bootstrap-dry-run.log"
-_dry_start=$(start_ms)
+# `agent bootstrap` was a second name for `agent reprovision` (#2863); it has
+# no alias. A regression that brings it back would run a real install, so the
+# row pins the unknown-command refusal (exit 2) and that nothing was written.
+_gone_log="${SCRIPT_DIR}/reports/cli-cli-agent-bootstrap-gone.log"
+_gone_start=$(start_ms)
 set +e
-"${HAL0_BIN}" agent bootstrap hermes --dry-run >"${_dry_log}" 2>&1
-_dry_rc=$?
+"${HAL0_BIN}" agent bootstrap hermes >"${_gone_log}" 2>&1
+_gone_rc=$?
 set -e
-if [[ "${_dry_rc}" -eq 2 ]] && grep -q "not supported" "${_dry_log}"; then
-    add_row "cli-agent-bootstrap-dry-run" "pass" "$(since_ms "${_dry_start}")" \
-        "bootstrap --dry-run refused (exit=2)"
+if [[ "${_gone_rc}" -eq 2 ]] && grep -qi "no such command" "${_gone_log}"; then
+    add_row "cli-agent-bootstrap-gone" "pass" "$(since_ms "${_gone_start}")" \
+        "agent bootstrap refused (exit=2)"
 else
-    add_row "cli-agent-bootstrap-dry-run" "fail" "$(since_ms "${_dry_start}")" \
-        "expected exit 2 + 'not supported', got exit=${_dry_rc}: $(tail -n1 "${_dry_log}" 2>/dev/null | tr -d '\n')"
+    add_row "cli-agent-bootstrap-gone" "fail" "$(since_ms "${_gone_start}")" \
+        "expected exit 2 + 'No such command', got exit=${_gone_rc}: $(tail -n1 "${_gone_log}" 2>/dev/null | tr -d '\n')"
 fi
 
 run_row "cli-agent-status-help" 0 "agent status --help" -- \

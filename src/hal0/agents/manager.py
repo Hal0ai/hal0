@@ -668,7 +668,7 @@ class AgentManager:
             # No seed (or unreadable) but is_present_on_disk says
             # something else is here. Before synthesising ``broken``,
             # consult the driver's live health probe (#432): the
-            # ``hal0 agent bootstrap hermes`` path used to leave the
+            # ``hal0 agent reprovision hermes`` path used to leave the
             # data + state dirs on disk without the /etc seed, so a
             # *running, reachable* agent reported ``broken`` purely
             # because the seed write never happened. If the driver says

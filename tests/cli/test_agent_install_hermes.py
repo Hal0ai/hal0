@@ -9,6 +9,7 @@ best-effort daemon register/switch.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from typing import Any
 
@@ -769,7 +770,7 @@ def test_run_as_hal0_places_extra_env_as_env_assignments(monkeypatch) -> None:
     )
 
     ac._run_as_hal0(
-        ["hal0", "agent", "bootstrap", "hermes"], extra_env={"HAL0_HERMES_TERMINAL": "1"}
+        ["hal0", "agent", "reprovision", "hermes"], extra_env={"HAL0_HERMES_TERMINAL": "1"}
     )
 
     cmd = captured["cmd"]
@@ -914,7 +915,7 @@ def test_provision_hermes_non_root_runs_in_process(monkeypatch) -> None:
 
 
 def test_provision_hermes_root_drops_to_hal0(monkeypatch, tmp_path) -> None:
-    """euid == 0: run the root prelude then re-exec `agent bootstrap hermes` as hal0.
+    """euid == 0: run the root prelude then re-exec `agent reprovision hermes` as hal0.
 
     Re-baselined for #2092: this used to assert the re-exec target came from
     ``shutil.which("hal0")``. That is the defect — on a box with a stale
@@ -958,7 +959,7 @@ def test_provision_hermes_root_drops_to_hal0(monkeypatch, tmp_path) -> None:
     assert events == ["prelude", "run_as_hal0"]
     argv = captured["argv"]
     assert argv[0] == str(running), "must re-exec the running hal0, not PATH's (#2092)"
-    assert argv[1:4] == ["agent", "bootstrap", "hermes"]
+    assert argv[1:4] == ["agent", "reprovision", "hermes"]
     assert "--repair" in argv and "--verbose" in argv
     assert "--adopt" not in argv  # retired flag never re-exec'd (O14)
     # #2445: the unsupported preview flags are refused up front, never re-exec'd.
@@ -978,14 +979,14 @@ def test_run_as_hal0_builds_runuser_argv(monkeypatch) -> None:
     # _run_as_hal0 imports subprocess locally; patch the module-level run.
     monkeypatch.setattr("subprocess.run", _fake_run)
 
-    rc = ac._run_as_hal0(["/usr/local/bin/hal0", "agent", "bootstrap", "hermes"])
+    rc = ac._run_as_hal0(["/usr/local/bin/hal0", "agent", "reprovision", "hermes"])
 
     assert rc == 0
     cmd = captured["cmd"]
     assert cmd[:4] == ["runuser", "-u", "hal0", "--"]
     assert "env" in cmd and "-u" in cmd and "HERMES_HOME" in cmd
     # The actual command is preserved at the tail.
-    assert cmd[-4:] == ["/usr/local/bin/hal0", "agent", "bootstrap", "hermes"]
+    assert cmd[-4:] == ["/usr/local/bin/hal0", "agent", "reprovision", "hermes"]
 
 
 @pytest.mark.parametrize(
@@ -996,7 +997,7 @@ def test_run_as_hal0_builds_runuser_argv(monkeypatch) -> None:
         (["--dry-run", "--skip-phase", "mcp_wire", "--skip-phase", "smoke_tests"], "--dry-run"),
     ],
 )
-def test_bootstrap_hermes_rejects_unsupported_preview_flags(monkeypatch, flags, named) -> None:
+def test_reprovision_hermes_rejects_unsupported_preview_flags(monkeypatch, flags, named) -> None:
     """#2445: `--dry-run` used to run a full (re)install and only skip the
     report, and `--skip-phase` was parsed then dropped. The installer is one
     linear convergent pass with no plan-only mode, so both flags must fail
@@ -1011,27 +1012,59 @@ def test_bootstrap_hermes_rejects_unsupported_preview_flags(monkeypatch, flags, 
     monkeypatch.setattr(ac, "_run_as_hal0", _boom)
     monkeypatch.setattr("hal0.agents.hermes_provision.bootstrap_cli", _boom, raising=True)
 
-    res = CliRunner().invoke(ac.app, ["bootstrap", "hermes", *flags])
+    res = CliRunner().invoke(ac.app, ["reprovision", "hermes", *flags])
     assert res.exit_code == 2, res.output
-    assert named in res.output
-    assert "not supported" in res.output.lower()
+    assert "no such option" in res.output.lower()
 
 
-def test_bootstrap_hermes_help_does_not_advertise_preview_flags() -> None:
+def test_reprovision_hermes_help_does_not_advertise_preview_flags() -> None:
     """#2445: help must not promise a dry run or phase skipping it cannot do."""
     from typer.testing import CliRunner
 
-    res = CliRunner().invoke(ac.app, ["bootstrap", "hermes", "--help"])
+    res = CliRunner().invoke(ac.app, ["reprovision", "hermes", "--help"])
     assert res.exit_code == 0
-    assert "--dry-run" not in res.output
-    assert "--skip-phase" not in res.output
+    # Rich styles each option name separately when colour is forced (CI sets
+    # GITHUB_ACTIONS), splitting "--offline" with escape codes; compare plain text.
+    out = re.sub(r"\x1b\[[0-9;]*m", "", res.output)
+    assert "--dry-run" not in out
+    assert "--skip-phase" not in out
+    assert "--offline" in out
+
+
+@pytest.mark.parametrize("args", [["bootstrap", "hermes"], ["bootstrap", "hermes", "--repair"]])
+def test_bootstrap_is_gone_and_provisions_nothing(monkeypatch, args) -> None:
+    """#2863: `agent bootstrap` was a second name for `agent reprovision`; it has no alias."""
+    from typer.testing import CliRunner
+
+    def _boom(*_a, **_k):  # type: ignore[no-untyped-def]
+        raise AssertionError("a removed command must not provision")
+
+    monkeypatch.setattr(ac, "_provision_hermes", _boom)
+    res = CliRunner().invoke(ac.app, args)
+    assert res.exit_code == 2, res.output
+    assert "no such command" in res.output.lower()
+
+
+def test_reprovision_offline_sets_the_variable_the_builder_reads(monkeypatch) -> None:
+    import os
+
+    from typer.testing import CliRunner
+
+    monkeypatch.delenv("HAL0_HERMES_OFFLINE", raising=False)
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(ac, "_provision_hermes", lambda **kw: seen.update(kw) or 3)
+    res = CliRunner().invoke(ac.app, ["reprovision", "hermes", "--offline", "--repair"])
+    assert res.exit_code == 3, res.output
+    assert seen == {"repair": True, "offline": True, "verbose": False}
+    assert os.environ["HAL0_HERMES_OFFLINE"] == "1"
+    monkeypatch.delenv("HAL0_HERMES_OFFLINE")
 
 
 # ── Upstream reconcile after provisioning ───────────────────────────────────
 
 
-def test_bootstrap_calls_reconcile_best_effort(monkeypatch) -> None:
-    """A successful bootstrap asks hal0-api to reconcile Hermes upstreams; an
+def test_reprovision_reconcile_is_best_effort_when_the_api_is_down(monkeypatch) -> None:
+    """A successful reprovision asks hal0-api to reconcile Hermes upstreams; an
     unreachable API only prints a dim hint and never fails the command."""
     from typer.testing import CliRunner
 
@@ -1044,7 +1077,7 @@ def test_bootstrap_calls_reconcile_best_effort(monkeypatch) -> None:
 
     monkeypatch.setattr(ac, "auth_client", _boom)
 
-    res = CliRunner().invoke(ac.app, ["bootstrap", "hermes"])
+    res = CliRunner().invoke(ac.app, ["reprovision", "hermes"])
 
     assert res.exit_code == 0, res.output
     assert calls == ["auth_client"]
@@ -1092,7 +1125,7 @@ def test_failed_provision_skips_reconcile(monkeypatch) -> None:
         lambda **_k: pytest.fail("reconcile must not run after a failed provision"),
     )
 
-    res = CliRunner().invoke(ac.app, ["bootstrap", "hermes"])
+    res = CliRunner().invoke(ac.app, ["reprovision", "hermes"])
 
     assert res.exit_code == 3, res.output
 

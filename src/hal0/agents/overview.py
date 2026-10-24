@@ -214,7 +214,7 @@ def doctor_rows(
 
 #: The root-only command that repairs ownership drift (the daemon runs as
 #: ``hal0`` and cannot ``chown`` the Hermes tree itself).
-_OWNERSHIP_REPAIR_COMMAND = "sudo hal0 agent bootstrap hermes --repair"
+_OWNERSHIP_REPAIR_COMMAND = "sudo hal0 agent reprovision hermes --repair"
 
 #: The root-only command that installs the gateway unit. The daemon cannot: the
 #: unit lives under ``/etc/systemd/system``.

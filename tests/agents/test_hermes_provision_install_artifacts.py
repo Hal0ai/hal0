@@ -1,6 +1,6 @@
 """Install-artifacts phase contract (issue #432).
 
-``hal0 agent bootstrap hermes`` is a separate install path from
+``hal0 agent reprovision hermes`` is a separate install path from
 ``AgentManager.install``. The provision pipeline wrote data/state but
 never the two artifacts downstream components key off:
 

@@ -1,7 +1,7 @@
 """``POST /api/agents/hermes/repair``: the provisioner as a tracked job.
 
 The route registers a job in the updater's registry and a background task runs
-``hal0 agent bootstrap hermes --repair --verbose`` as a child. Nothing here
+``hal0 agent reprovision hermes --repair --verbose`` as a child. Nothing here
 starts a real child, touches the real release tree or writes under
 ``/var/lib/hal0``: the spawn, the log directory and the release layout are
 module attributes of :mod:`hal0.api.agents.repair` and the fixtures replace each
@@ -212,7 +212,7 @@ def test_repair_queues_job_and_records_steps(
         "[run ] install",
     ]
     argv = spawn.await_args.args
-    assert argv[1:] == ("agent", "bootstrap", "hermes", "--repair", "--verbose")
+    assert argv[1:] == ("agent", "reprovision", "hermes", "--repair", "--verbose")
     assert "HERMES_HOME" not in spawn.await_args.kwargs["env"]
     # Its own session, so the whole process group can be signalled with it.
     assert spawn.await_args.kwargs["start_new_session"] is True
