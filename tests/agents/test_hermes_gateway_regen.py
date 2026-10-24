@@ -927,3 +927,163 @@ def test_a_rollback_that_cannot_start_the_canonical_unit_says_it_is_left_stopped
     with pytest.raises(regen.GatewayRegenError, match=f"{CANON} left stopped"):
         _migrate(tmp_path, sc)
     assert sc.states[CANON] == ("enabled", False)
+
+
+# ── #2950: mixed and interrupted states ──────────────────────────────────────
+
+
+def test_the_state_capture_reads_the_suffixed_unit_after_an_interrupted_move(
+    tmp_path: Path,
+) -> None:
+    """#2950 item 1: a move killed after writing the canonical unit leaves it
+    disabled and stopped beside the enabled suffixed unit. The outer callers'
+    capture must read the suffixed unit, by the same rule the move uses."""
+    _hashed_unit(tmp_path)
+    _new_unit(tmp_path)
+    sc = UnitSystemctl({HASHED: ("enabled", True), CANON: ("disabled", False)})
+    unit_path = tmp_path / CANON
+    assert regen.gateway_state_unit(unit_path=unit_path, run=sc) == HASHED
+    assert regen.effective_gateway_state(unit_path=unit_path, run=sc) == ("enabled", True)
+    # ...but an enabled, running or masked canonical unit is the operator's.
+    for canon in [("enabled", False), ("disabled", True), ("masked-runtime", False)]:
+        sc = UnitSystemctl({HASHED: ("enabled", True), CANON: canon})
+        assert regen.gateway_state_unit(unit_path=unit_path, run=sc) == CANON
+    assert sc.mutating == []
+
+
+def test_a_rollback_of_a_resumed_move_turns_the_canonical_unit_back_off(
+    tmp_path: Path,
+) -> None:
+    """#2950 item 3: the canonical unit was disabled and stopped (an interrupted
+    move); this run enabled it and its start failed. The rollback must disable
+    it again, or both units stay enabled and the next boot starts two pollers."""
+    hashed = _hashed_unit(tmp_path)
+    canonical = _new_unit(tmp_path)
+    before = canonical.read_text()
+    sc = UnitSystemctl(
+        {HASHED: ("enabled", True), CANON: ("disabled", False)},
+        fail=["systemctl", "start", CANON],
+    )
+    with pytest.raises(regen.GatewayRegenError, match="start"):
+        _migrate(tmp_path, sc)
+    assert hashed.exists() and canonical.read_text() == before
+    assert sc.states[CANON] == ("disabled", False)
+    assert ["systemctl", "disable", CANON] in sc.mutating
+    assert sc.states[HASHED] == ("enabled", True)
+
+
+def test_a_runtime_only_rollback_disables_runtime_only(tmp_path: Path) -> None:
+    _hashed_unit(tmp_path)
+    _new_unit(tmp_path)
+    sc = UnitSystemctl(
+        {HASHED: ("enabled-runtime", True), CANON: ("disabled", False)},
+        fail=["systemctl", "start", CANON],
+    )
+    with pytest.raises(regen.GatewayRegenError):
+        _migrate(tmp_path, sc)
+    assert ["systemctl", "disable", "--runtime", CANON] in sc.mutating
+
+
+@pytest.mark.parametrize("unit", [HASHED, CANON])
+@pytest.mark.parametrize("failure", ["timeout", "exit 1"])
+def test_a_failed_is_active_probe_aborts_before_any_change(
+    tmp_path: Path, unit: str, failure: str
+) -> None:
+    """#2950 item 4: a timed-out or failed ``is-active`` is not "stopped". Read
+    as stopped, a disabled-but-running suffixed gateway would be stopped and
+    removed with nothing started in its place."""
+    hashed = _hashed_unit(tmp_path)
+    if unit == CANON:
+        _new_unit(tmp_path)
+    sc = UnitSystemctl({HASHED: ("disabled", True), CANON: ("disabled", False)})
+
+    def run(argv: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        if list(argv[:2]) == ["systemctl", "is-active"] and argv[-1] == unit:
+            sc.calls.append(list(argv))
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(argv, 30)
+            return subprocess.CompletedProcess(argv, 1, "", "Failed to connect to bus")
+        return sc(argv, **kw)
+
+    with pytest.raises(regen.GatewayRegenError, match="cannot read whether"):
+        _migrate(tmp_path, run)  # type: ignore[arg-type]
+    assert hashed.exists() and sc.mutating == []
+    assert sc.states[HASHED] == ("disabled", True)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    ["User=root\n", 'Environment="HERMES_HOME=/root/.hermes"\n'],
+)
+def test_a_unit_with_a_second_identity_assignment_is_not_hal0s(tmp_path: Path, extra: str) -> None:
+    """#2950 item 5: systemd lets a later ``User=`` or ``HERMES_HOME=`` override
+    the first. A hand-edited unit with one is not hal0's to remove."""
+    unit = _hashed_unit(tmp_path)
+    text = unit.read_text()
+    unit.write_text(text.replace("[Install]", extra + "[Install]"), encoding="utf-8")
+    assert "[Install]" in text
+    assert regen.hal0_hashed_units(tmp_path) == []
+    sc = UnitSystemctl({HASHED: ("enabled", True)})
+    assert _migrate(tmp_path, sc).action == "noop"
+    assert unit.exists() and sc.mutating == []
+
+
+def test_a_linked_canonical_unit_is_not_a_mask(tmp_path: Path) -> None:
+    """#2950: a canonical unit put in place by ``systemctl link`` is a symlink to
+    a real file, not to /dev/null. Read as masked, the suffixed gateway would be
+    stopped and removed with nothing started in its place."""
+    elsewhere = tmp_path / "opt"
+    elsewhere.mkdir()
+    target = elsewhere / CANON
+    target.write_text(regen.render_unit(UID), encoding="utf-8")
+    canonical = tmp_path / CANON
+    canonical.symlink_to(target)
+    assert not regen.is_masked(canonical)
+    hashed = _hashed_unit(tmp_path)
+    sc = UnitSystemctl({HASHED: ("enabled", True), CANON: ("linked", False)})
+    _migrate(tmp_path, sc)
+    assert not hashed.exists()
+    assert canonical.is_file() and not canonical.is_symlink()
+    assert sc.states[CANON] == ("enabled", True)
+
+
+def test_only_a_dev_null_symlink_is_a_mask(tmp_path: Path) -> None:
+    mask = tmp_path / "mask.service"
+    mask.symlink_to("/dev/null")
+    regular = tmp_path / "plain.service"
+    regular.write_text("[Unit]\n")
+    assert regen.is_masked(mask)
+    assert not regen.is_masked(regular) and not regen.is_masked(tmp_path / "absent.service")
+
+
+def test_a_runtime_masked_canonical_unit_is_never_enabled_by_the_move(tmp_path: Path) -> None:
+    """masked-runtime lives under /run, so the /etc file is a regular one. The
+    move must still read it as the operator's off switch."""
+    hashed = _hashed_unit(tmp_path)
+    _new_unit(tmp_path)
+    sc = UnitSystemctl({HASHED: ("enabled", True), CANON: ("masked-runtime", False)})
+    _migrate(tmp_path, sc)
+    assert not hashed.exists()
+    assert not [c for c in sc.mutating if c[-1] == CANON and c[1] in ("enable", "start")]
+
+
+def test_a_failed_unlink_raises_the_cleanup_error(tmp_path: Path, monkeypatch: Any) -> None:
+    """#2950 review residual: the CLI tells a finished move from a failed one."""
+    hashed = _hashed_unit(tmp_path)
+    sc = UnitSystemctl({HASHED: ("enabled", True)})
+    real_unlink = Path.unlink
+
+    def unlink(self: Path, *a: Any, **k: Any) -> None:
+        if self == hashed:
+            raise OSError("busy")
+        real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    with pytest.raises(regen.GatewayCleanupError, match="busy"):
+        _migrate(tmp_path, sc)
+
+
+def test_main_migrate_needs_root(monkeypatch: Any, capsys: Any) -> None:
+    monkeypatch.setattr(regen.os, "geteuid", lambda: 1000)
+    assert regen.main(["migrate"]) == 1
+    assert "migrate needs root" in capsys.readouterr().err

@@ -4058,11 +4058,18 @@ else
     _gateway_was_active=0
     systemctl is-active --quiet hermes-gateway.service 2>/dev/null && _gateway_was_active=1
     # A box a 1.6.0 nightly installed has no hermes-gateway.service, only
-    # upstream's suffixed unit (#2943). Its on/off state is the operator's
-    # choice, which the template install carries over, so read that instead.
-    if [[ "${_gateway_state}" == "not-found" && -x "${VENV_DIR}/bin/python" ]]; then
+    # upstream's suffixed unit (#2943), and a move killed half way leaves a
+    # disabled, stopped hermes-gateway.service beside the enabled suffixed
+    # unit (#2950). Either way the suffixed unit's on/off state is the
+    # operator's choice, which the template install carries over. The `state`
+    # verb applies the same ownership rule as the move
+    # (hermes_gateway_regen.canonical_owns_state), so ask it whenever the
+    # canonical unit might not own the state: not there, or neither on,
+    # masked nor running.
+    if [[ -x "${VENV_DIR}/bin/python" && "${_gateway_was_active}" -eq 0 ]] \
+        && [[ "${_gateway_state}" != enabled* && "${_gateway_state}" != masked* ]]; then
         _eff="$("${VENV_DIR}/bin/python" -m hal0.agents.hermes_gateway_regen state 2>/dev/null || true)"
-        if [[ -n "${_eff}" && "${_eff%% *}" != "not-found" ]]; then
+        if [[ -n "${_eff}" && "${_eff%% *}" != "not-found" && "${_eff%% *}" != "unknown" ]]; then
             _gateway_state="${_eff%% *}"
             [[ "${_eff##* }" == "1" ]] && _gateway_was_active=1
         fi
@@ -4150,6 +4157,11 @@ else
         #   - disabled (or runtime-masked): refresh the unit file and leave it
         #     off (the disable below).
         if [[ "${_gateway_state}" == "masked" ]]; then
+            # Nothing is written through the mask, but a suffixed gateway still
+            # running beside it is moved off: `migrate` keeps the mask and
+            # stops and removes the suffixed unit, so the mask means off (#2950).
+            "${VENV_DIR}/bin/python" -m hal0.agents.hermes_gateway_regen migrate \
+                || warn "suffixed hermes-gateway unit not moved off — re-run '${HAL0_BIN} agent install hermes'"
             unit_left_off_note hermes-gateway.service "${_gateway_state}"
         else
             "${VENV_DIR}/bin/python" -m hal0.agents.hermes_gateway_regen install \

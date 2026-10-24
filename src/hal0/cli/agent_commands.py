@@ -1125,6 +1125,41 @@ def _normalise_gateway_unit_or_warn(has_systemctl: bool, *, turn_off: bool = Tru
     return False
 
 
+def _migrate_past_mask() -> None:
+    """Move a gateway off hal0's suffixed unit while the canonical unit is masked.
+
+    ``migrate_hashed_units`` never writes through the mask; it stops, disables
+    and removes the suffixed unit, so a gateway it ran stops polling (#2950).
+    Best-effort: needs root, warns on failure.
+    """
+    import os as _os
+    from pathlib import Path as _Path
+
+    from hal0.agents.hermes_gateway_regen import (
+        GatewayRegenError,
+        hal0_hashed_units,
+        migrate_hashed_units,
+    )
+
+    if not hal0_hashed_units(_Path(_HERMES_GATEWAY_UNIT).parent):
+        return
+    if _os.geteuid() != 0:
+        console.print(
+            "[yellow]a suffixed hermes gateway unit is still in place next to the mask: "
+            "removing it needs root (sudo hal0 agent install hermes).[/yellow]"
+        )
+        return
+    try:
+        moved = migrate_hashed_units(unit_path=_Path(_HERMES_GATEWAY_UNIT))
+    except GatewayRegenError as exc:
+        console.print(
+            f"[yellow]the suffixed hermes gateway unit could not be moved off ({exc}); "
+            "re-run 'sudo hal0 agent install hermes'.[/yellow]"
+        )
+        return
+    console.print(f"[dim]{moved.message}[/dim]")
+
+
 def _install_hermes_gateway() -> None:
     """Install ``hermes-gateway.service`` from hal0's template + enable the unit.
 
@@ -1151,17 +1186,17 @@ def _install_hermes_gateway() -> None:
     # venv) must not reconnect a gateway that was turned off.
     unit = "hermes-gateway.service"
     has_systemctl = _shutil.which("systemctl") is not None
-    # The gateway the operator actually has: on a box a 1.6.0 nightly
+    # The gateway the operator actually has, by the same rule the move uses
+    # (hermes_gateway_regen.canonical_owns_state): on a box a 1.6.0 nightly
     # installed that is upstream's suffixed unit, whose on/off state the
-    # template install carries over (#2943).
-    from hal0.agents.hermes_gateway_regen import HASHED_UNIT, hal0_hashed_units
+    # template install carries over (#2943), and so it is after a move that
+    # was killed half way, which left a disabled, stopped canonical unit
+    # beside the enabled suffixed one (#2950).
+    from hal0.agents.hermes_gateway_regen import gateway_state_unit
 
-    hashed_only = (
-        not _Path(_HERMES_GATEWAY_UNIT).exists()
-        and not _Path(_HERMES_GATEWAY_UNIT).is_symlink()
-        and bool(hal0_hashed_units(_Path(_HERMES_GATEWAY_UNIT).parent))
-    )
-    probe_unit = HASHED_UNIT if hashed_only else unit
+    probe_unit = (
+        gateway_state_unit(unit_path=_Path(_HERMES_GATEWAY_UNIT)) if has_systemctl else None
+    ) or unit
     state = _gateway_enable_state(probe_unit) if has_systemctl else "not-found"
     disabled = state in ("disabled", "masked-runtime")
     was_active = has_systemctl and disabled and _gateway_unit_active(probe_unit)
@@ -1170,6 +1205,10 @@ def _install_hermes_gateway() -> None:
         # /dev/null symlink, and writing through it would unmask the unit.
         # (masked-runtime lives under /run, so the /etc unit file the
         # generator writes is safe to refresh: treated like disabled.)
+        # A suffixed gateway still running next to the mask is moved off all
+        # the same: the move keeps the mask and stops and removes the
+        # suffixed unit, so the mask means off (#2950).
+        _migrate_past_mask()
         _gateway_left_off_note(unit, state)
         return
 
@@ -1217,6 +1256,7 @@ def _install_hermes_gateway() -> None:
     # template never enables or starts the unit; the off switch below and the
     # enable logic further down decide that, as before.
     from hal0.agents.hermes_gateway_regen import (
+        GatewayCleanupError,
         GatewayRegenError,
         hal0_hashed_units,
         install_gateway_unit,
@@ -1230,6 +1270,17 @@ def _install_hermes_gateway() -> None:
         return
     try:
         installed = install_gateway_unit()
+    except GatewayCleanupError as exc:
+        # The move itself finished: hermes-gateway.service already carries the
+        # gateway's on/off state. Only the stopped, disabled suffixed file is
+        # left; saying the canonical unit "is not enabled" would be wrong
+        # (#2950 review).
+        console.print(
+            f"[yellow]hermes gateway moved to {unit}, but the old suffixed unit "
+            f"could not be removed ({exc}); re-run 'sudo hal0 agent install hermes' "
+            "to remove it.[/yellow]"
+        )
+        return
     except GatewayRegenError as exc:
         what = (
             "hermes gateway unit written, but its install did not finish"

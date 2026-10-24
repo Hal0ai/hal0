@@ -100,6 +100,15 @@ class GatewayRegenError(Exception):
     """The unit could not be regenerated; the message says what was done."""
 
 
+class GatewayCleanupError(GatewayRegenError):
+    """The move finished but the suffixed unit file could not be removed.
+
+    ``hermes-gateway.service`` has taken over the gateway's on/off state by
+    then; only the stopped, disabled suffixed file is left behind, and a re-run
+    removes it (#2950).
+    """
+
+
 def _launcher(module: str, args: tuple[str, ...] = ()) -> str:
     """Upstream's ``runtime_command`` launcher, quoted the way systemd reads it."""
     code = (
@@ -310,12 +319,28 @@ def _enabled_state(run: Runner, unit: str = GATEWAY_UNIT) -> str:
     return out.splitlines()[0] if out else "unknown"
 
 
-def _is_active(run: Runner, unit: str = GATEWAY_UNIT) -> bool:
+def _active_state(run: Runner, unit: str = GATEWAY_UNIT) -> bool | None:
+    """``True`` running, ``False`` not running, ``None`` when the probe failed.
+
+    ``systemctl is-active`` exits 0 for an active unit and 3 (4 for a unit
+    systemd does not know) for an inactive one. A timeout, an OSError or any
+    other exit (1 when the bus is unreachable) is not "stopped": a caller
+    that would act on a stopped gateway has to stop instead (#2950).
+    """
     try:
         proc = _run(run, ["systemctl", "is-active", "--quiet", unit], timeout=30)
     except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode == 0:
+        return True
+    if proc.returncode in (3, 4):
         return False
-    return proc.returncode == 0
+    return None
+
+
+def _is_active(run: Runner, unit: str = GATEWAY_UNIT) -> bool:
+    """:func:`_active_state` for callers where a failed probe means "do nothing"."""
+    return _active_state(run, unit) is True
 
 
 def _check(run: Runner, argv: list[str], what: str, done: list[str]) -> None:
@@ -359,10 +384,51 @@ HASHED_UNIT = (
 
 
 def _is_hal0_hashed_unit(text: str) -> bool:
-    """A suffixed unit for hal0's Hermes: ``User=hal0`` and ``HERMES_HOME`` set to hal0's home."""
-    user = re.search(r"^User=(\S+)\s*$", text, re.MULTILINE)
-    home = re.search(r'^Environment="?HERMES_HOME=([^"\s]+)"?\s*$', text, re.MULTILINE)
-    return bool(user and user.group(1) == GATEWAY_USER and home and home.group(1) == HERMES_HOME)
+    """A suffixed unit for hal0's Hermes: ``User=hal0`` and ``HERMES_HOME`` set to hal0's home.
+
+    Exactly one ``User=`` line and exactly one ``HERMES_HOME`` assignment, each
+    hal0's. systemd lets a later assignment override an earlier one, so a
+    hand-edited unit with a second ``User=`` or ``HERMES_HOME=`` may run as
+    someone else; it is not hal0's to remove (#2950).
+    """
+    users = re.findall(r"^\s*User\s*=(.*)$", text, re.MULTILINE)
+    homes = [
+        line
+        for line in text.splitlines()
+        if re.match(r"\s*Environment\s*=", line) and "HERMES_HOME=" in line
+    ]
+    if len(users) != 1 or len(homes) != 1:
+        return False
+    home = re.fullmatch(r'\s*Environment="?HERMES_HOME=([^"\s]+)"?\s*', homes[0])
+    return users[0].strip() == GATEWAY_USER and bool(home and home.group(1) == HERMES_HOME)
+
+
+def is_masked(path: Path) -> bool:
+    """``path`` is a persistent mask: a symlink to ``/dev/null``.
+
+    A unit linked in with ``systemctl link`` is a symlink too, but to a real
+    unit file; it is not a mask (#2950). Read-only.
+    """
+    try:
+        return path.is_symlink() and os.path.realpath(path) == os.devnull
+    except OSError:
+        return False
+
+
+def canonical_owns_state(state: str, active: bool | None) -> bool:
+    """Whether ``hermes-gateway.service``'s own on/off state is the operator's.
+
+    It is when the unit is enabled, masked (persistently or for this boot) or
+    running, or when either probe failed (never override what cannot be
+    read). One that exists but is disabled and stopped while hal0's suffixed
+    unit is still on disk is what an interrupted move leaves (killed between
+    the write and the handoff, #2946 review): the suffixed unit's state is
+    the operator's then. Upgraded boxes never have a suffixed unit, so this
+    never overrides an operator's own off switch there. The one rule shared
+    by :func:`migrate_hashed_units`, :func:`gateway_state_unit` and so the
+    installer's and ``hal0 agent install hermes``'s state capture (#2950).
+    """
+    return state.startswith(("enabled", "masked")) or state == "unknown" or active is not False
 
 
 def hal0_hashed_units(unit_dir: Path) -> list[Path]:
@@ -384,6 +450,30 @@ def hal0_hashed_units(unit_dir: Path) -> list[Path]:
     return [path] if _is_hal0_hashed_unit(text) else []
 
 
+def gateway_state_unit(
+    *,
+    unit_path: Path = GATEWAY_UNIT_PATH,
+    run: Runner | None = None,
+) -> str | None:
+    """Name of the unit whose on/off state is the operator's gateway choice.
+
+    hal0's suffixed unit when there is one and the canonical unit is absent
+    or does not own the state (:func:`canonical_owns_state`: an interrupted
+    move, #2950); otherwise the canonical unit; ``None`` when neither exists.
+    Read-only and unprivileged.
+    """
+    run = run if run is not None else subprocess.run
+    present = unit_path.is_symlink() or unit_path.exists()
+    hashed = hal0_hashed_units(unit_path.parent)
+    if not hashed:
+        return unit_path.name if present else None
+    if not present:
+        return hashed[0].name
+    state = _enabled_state(run, unit_path.name)
+    active = _active_state(run, unit_path.name)
+    return unit_path.name if canonical_owns_state(state, active) else hashed[0].name
+
+
 def effective_gateway_state(
     *,
     unit_path: Path = GATEWAY_UNIT_PATH,
@@ -391,18 +481,18 @@ def effective_gateway_state(
 ) -> tuple[str, bool]:
     """``(is-enabled word, active)`` of the gateway the operator actually has.
 
-    The canonical unit when it exists (a mask counts); otherwise hal0's
-    suffixed unit, so a caller deciding whether to turn the gateway on reads
-    the operator's real on/off choice on a box a 1.6.0 nightly installed
-    (#2943); otherwise ``("not-found", False)``.
+    The unit :func:`gateway_state_unit` names: the canonical unit when it
+    owns the state (a mask counts), else hal0's suffixed unit, so a caller
+    deciding whether to turn the gateway on reads the operator's real on/off
+    choice on a box a 1.6.0 nightly installed (#2943) or a move left half
+    done (#2950); otherwise ``("not-found", False)``. A failed ``is-active``
+    probe reads as running, so a caller never stops what it cannot see.
     """
     run = run if run is not None else subprocess.run
-    if unit_path.is_symlink() or unit_path.exists():
-        return _enabled_state(run, unit_path.name), _is_active(run, unit_path.name)
-    hashed = hal0_hashed_units(unit_path.parent)
-    if not hashed:
+    unit = gateway_state_unit(unit_path=unit_path, run=run)
+    if unit is None:
         return "not-found", False
-    return _enabled_state(run, hashed[0].name), _is_active(run, hashed[0].name)
+    return _enabled_state(run, unit), _active_state(run, unit) is not False
 
 
 def _write_rendered(unit_path: Path, uid_of: Callable[[str], int], done: list[str]) -> None:
@@ -469,20 +559,14 @@ def migrate_hashed_units(
         return RegenResult("noop", "no hashed hermes-gateway unit")
     if which("systemctl") is None:
         return RegenResult("noop", "hashed hermes-gateway unit found but no systemctl; left alone")
-    masked = unit_path.is_symlink()
-    pre_existing = masked or unit_path.exists()
+    masked = is_masked(unit_path)
+    pre_existing = unit_path.is_symlink() or unit_path.exists()
     old_text = None
     if pre_existing and not masked:
         with contextlib.suppress(OSError, UnicodeDecodeError):
             old_text = unit_path.read_text(encoding="utf-8")
-    # Whose on/off state wins. A canonical unit the operator manages is
-    # enabled, running, or masked. One that exists but is disabled and
-    # stopped while a suffixed unit is still there is what an interrupted
-    # move leaves (killed between the write and the handoff, #2946 review),
-    # so the suffixed unit's state still carries over. Upgraded boxes never
-    # have a suffixed unit, so this never overrides an operator's own off
-    # switch there.
-    canonical_owns_state = masked
+    # Whose on/off state wins: see canonical_owns_state.
+    canon_owns = masked
     canon_was_active = False
     if pre_existing and not masked:
         canon_state = _enabled_state(run, GATEWAY_UNIT)
@@ -490,8 +574,13 @@ def migrate_hashed_units(
             raise GatewayRegenError(
                 f"cannot read the enablement of {GATEWAY_UNIT}; nothing changed"
             )
-        canon_was_active = _is_active(run, GATEWAY_UNIT)
-        canonical_owns_state = canon_state in ("enabled", "enabled-runtime") or canon_was_active
+        canon_active = _active_state(run, GATEWAY_UNIT)
+        if canon_active is None:
+            raise GatewayRegenError(
+                f"cannot read whether {GATEWAY_UNIT} is running; nothing changed"
+            )
+        canon_was_active = canon_active
+        canon_owns = canonical_owns_state(canon_state, canon_active)
     result = RegenResult("migrated", "")
     done = result.steps
     runtime_only = False
@@ -506,10 +595,19 @@ def migrate_hashed_units(
         elif state == "enabled-runtime":
             result.was_enabled = True
             runtime_only = True
-        result.was_active = result.was_active or _is_active(run, path.name)
+        active = _active_state(run, path.name)
+        if active is None:
+            # Same for "running": a disabled-but-running gateway read as
+            # stopped would be stopped and nothing started in its place (#2950).
+            raise GatewayRegenError(f"cannot read whether {path.name} is running; nothing changed")
+        result.was_active = result.was_active or active
     runtime_only = runtime_only and not any(
         _enabled_state(run, p.name) == "enabled" for p in hashed
     )
+
+    # What this run turned on in a pre-existing canonical unit that did not own
+    # the state, so a rollback puts it back off (#2950).
+    canon_touched = {"enabled": False, "started": False}
 
     def rollback() -> str | None:
         # Undo this run's half-done move so a retry starts from the same box:
@@ -530,6 +628,17 @@ def migrate_hashed_units(
                 _write_unit(unit_path, old_text)
         with contextlib.suppress(OSError, subprocess.SubprocessError):
             _run(run, ["systemctl", "daemon-reload"])
+        if pre_existing and not canon_owns:
+            # A resumed interrupted move: the canonical unit was disabled and
+            # stopped. Turn off what this run turned on, or both units end up
+            # enabled and the next boot starts two pollers (#2950).
+            if canon_touched["enabled"]:
+                argv = ["systemctl", "disable", *(["--runtime"] if runtime_only else [])]
+                with contextlib.suppress(OSError, subprocess.SubprocessError):
+                    _run(run, [*argv, GATEWAY_UNIT])
+            if canon_touched["started"]:
+                with contextlib.suppress(OSError, subprocess.SubprocessError):
+                    _run(run, ["systemctl", "stop", GATEWAY_UNIT])
         left_stopped: str | None = None
         if pre_existing and not masked and canon_was_active:
             # A failed restart of the operator's canonical unit: bring it back
@@ -564,7 +673,7 @@ def migrate_hashed_units(
             _check(run, ["systemctl", "disable", path.name], f"systemctl disable {path.name}", done)
         if masked:
             done.append(f"{GATEWAY_UNIT} is masked; left off")
-        elif not canonical_owns_state:
+        elif not canon_owns:
             start = result.was_enabled or result.was_active
             if start:
                 linger_error = _ensure_linger(run, linger_dir, which, done)
@@ -578,9 +687,11 @@ def migrate_hashed_units(
                     *(["--runtime"] if runtime_only else []),
                     GATEWAY_UNIT,
                 ]
+                canon_touched["enabled"] = True
                 _check(run, argv, " ".join(argv), done)
                 done.append("enabled (runtime)" if runtime_only else "enabled")
             if start:
+                canon_touched["started"] = True
                 _check(
                     run,
                     ["systemctl", "start", GATEWAY_UNIT],
@@ -590,7 +701,7 @@ def migrate_hashed_units(
                 result.restarted = True
                 done.append("started")
         if (
-            canonical_owns_state
+            canon_owns
             and not masked
             and old_text is not None
             and unit_stale_reason(old_text) is not None
@@ -624,7 +735,7 @@ def migrate_hashed_units(
         done.append(f"removed {path.name}")
     _check(run, ["systemctl", "daemon-reload"], "systemctl daemon-reload", done)
     if unlink_errors:
-        raise GatewayRegenError(_failure("; ".join(unlink_errors), "left behind", done))
+        raise GatewayCleanupError(_failure("; ".join(unlink_errors), "left behind", done))
     result.message = f"{GATEWAY_UNIT}: " + ", ".join(done)
     return result
 
@@ -657,7 +768,7 @@ def install_gateway_unit(
     result = RegenResult("installed", "", migrated.was_enabled, migrated.was_active)
     done = result.steps
     done.extend(migrated.steps)
-    if unit_path.is_symlink():
+    if is_masked(unit_path):
         result.action = "noop"
         result.message = f"{GATEWAY_UNIT} is masked; left alone" + (
             f" ({', '.join(done)})" if done else ""
@@ -819,11 +930,15 @@ def regenerate_gateway_unit(
 __all__ = [
     "GATEWAY_UNIT",
     "HASHED_UNIT",
+    "GatewayCleanupError",
     "GatewayRegenError",
     "RegenResult",
+    "canonical_owns_state",
     "effective_gateway_state",
+    "gateway_state_unit",
     "hal0_hashed_units",
     "install_gateway_unit",
+    "is_masked",
     "migrate_hashed_units",
     "regenerate_gateway_unit",
     "render_unit",
@@ -834,7 +949,7 @@ __all__ = [
 
 
 def main(argv: list[str] | None = None) -> int:
-    """``python -m hal0.agents.hermes_gateway_regen install|state`` (the installer's entries)."""
+    """``python -m hal0.agents.hermes_gateway_regen install|migrate|state`` (the installer's entries)."""
     import sys
 
     args = list(sys.argv[1:] if argv is None else argv)
@@ -844,14 +959,20 @@ def main(argv: list[str] | None = None) -> int:
         state, active = effective_gateway_state()
         print(f"{state} {int(active)}")
         return 0
-    if args != ["install"]:
-        print("usage: python -m hal0.agents.hermes_gateway_regen install|state", file=sys.stderr)
+    if args not in (["install"], ["migrate"]):
+        print(
+            "usage: python -m hal0.agents.hermes_gateway_regen install|migrate|state",
+            file=sys.stderr,
+        )
         return 2
     if os.geteuid() != 0:
-        print("hermes-gateway unit: install needs root", file=sys.stderr)
+        print(f"hermes-gateway unit: {args[0]} needs root", file=sys.stderr)
         return 1
     try:
-        result = install_gateway_unit()
+        # `migrate` only moves a gateway off hal0's suffixed unit: the
+        # installer's masked branch, which must not write the canonical unit
+        # but must not leave a suffixed gateway running past the mask (#2950).
+        result = install_gateway_unit() if args == ["install"] else migrate_hashed_units()
     except GatewayRegenError as exc:
         print(f"hermes-gateway unit: {exc}", file=sys.stderr)
         return 1
