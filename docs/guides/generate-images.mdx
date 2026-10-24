@@ -46,8 +46,11 @@ download starts, not after it. `list` marks the pick
 recommended for this box with `*` and shows the state of each model (`none`,
 `partial`, `complete`, or `installing`). `hal0 comfyui models remove <id>`
 deletes a model's weights and workflow (a file another installed model uses
-stays; a file that cannot be deleted stops the removal with 409
-`comfyui.remove_failed`, which lists what had already gone), and `hal0 comfyui files` lists the weight files on disk, grouped by kind.
+stays and is listed with the models that hold it, unless you pass
+`--include-shared`, which deletes it and names the models it uninstalls; a file
+that cannot be deleted stops the removal with 409 `comfyui.remove_failed`, which
+lists what had already gone), and `hal0 comfyui files` lists the weight files on
+disk, grouped by kind.
 
 Then point the `img` capability at the model you installed:
 
