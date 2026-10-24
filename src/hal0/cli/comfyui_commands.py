@@ -245,25 +245,56 @@ def _print_outcome(model_id: str, job: dict[str, Any]) -> bool:
 @models_app.command("remove")
 def models_remove(
     model_id: str = typer.Argument(..., metavar="ID", help="Image model id to remove."),
+    include_shared: bool = typer.Option(
+        False,
+        "--include-shared",
+        help="Also delete weight files other installed models load; those models stop working.",
+    ),
 ) -> None:
     """Delete an image model's weight files and workflow.
 
-    A weight file that another installed model also loads stays on disk. Refused while
-    an install of the model, or of a model sharing its files, is running.
+    A weight file that another installed model also loads stays on disk, and is listed
+    with the models that hold it; `--include-shared` deletes it too and names the models
+    that are no longer installed. Refused while an install of the model, or of a model
+    sharing its files, is running.
     """
     _require_api()
     try:
-        data = api_delete(f"/api/comfyui/models/{model_id}")
+        if include_shared:
+            data = api_delete(f"/api/comfyui/models/{model_id}", params={"include_shared": "true"})
+        else:
+            data = api_delete(f"/api/comfyui/models/{model_id}")
     except CliApiError as exc:
         die(str(exc))
         return
-    removed = data.get("removed", []) if isinstance(data, dict) else []
-    if not removed:
+    body = data if isinstance(data, dict) else {}
+    removed = body.get("removed", [])
+    kept = body.get("kept", [])
+    affected = body.get("affected", [])
+    if not removed and not kept:
         console.print(f"Nothing to remove for {escape(model_id)}: none of its files are on disk.")
         return
-    console.print(f"Removed {len(removed)} file(s) of [bold]{escape(model_id)}[/bold]:")
-    for relpath in removed:
-        console.print(f"  {relpath}", markup=False, highlight=False)
+    if removed:
+        console.print(f"Removed {len(removed)} file(s) of [bold]{escape(model_id)}[/bold]:")
+        for relpath in removed:
+            console.print(f"  {relpath}", markup=False, highlight=False)
+    else:
+        console.print(f"Removed no files of [bold]{escape(model_id)}[/bold].")
+    for entry in kept:
+        holders = ", ".join(entry.get("models") or [])
+        console.print(
+            f"  kept {entry.get('relpath', '—')} (also used by {holders})",
+            markup=False,
+            highlight=False,
+        )
+    if kept:
+        console.print(
+            "Rerun with --include-shared to delete the kept files too.",
+            markup=False,
+            highlight=False,
+        )
+    if affected:
+        console.print(f"No longer installed: {escape(', '.join(affected))}")
 
 
 @app.command("files")

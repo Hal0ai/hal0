@@ -750,9 +750,14 @@ def test_remove_keeps_component_shared_with_complete_model() -> None:
     qwen = _complete("qwen-image")
     edit = _complete("qwen-image-edit")
 
-    removed = install.remove_model(qwen)
+    result = install.remove_model(qwen)
 
-    assert removed == ["diffusion_models/qwen_image_2512_bf16.safetensors"]
+    assert result["removed"] == ["diffusion_models/qwen_image_2512_bf16.safetensors"]
+    assert result["kept"] == [
+        {"relpath": "text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors", "models": [edit.id]},
+        {"relpath": "vae/qwen_image_vae.safetensors", "models": [edit.id]},
+    ]
+    assert result["affected"] == []
     assert install_state(edit).state == "complete"
     assert install_state(qwen).state == "partial"
 
@@ -763,9 +768,13 @@ def test_remove_deletes_component_shared_only_with_partial_model() -> None:
     assert lightning is not None
     assert install_state(lightning).state == "partial"  # shares all three, lacks its LoRA
 
-    removed = install.remove_model(qwen)
+    result = install.remove_model(qwen)
 
-    assert sorted(removed) == sorted(f"{c.kind.subdir}/{c.relpath}" for c in qwen.components)
+    assert sorted(result["removed"]) == sorted(
+        f"{c.kind.subdir}/{c.relpath}" for c in qwen.components
+    )
+    assert result["kept"] == []  # a partial neighbour cannot run, so it holds nothing back
+    assert result["affected"] == []
     assert install_state(qwen).state == "none"
     assert install_state(lightning).state == "none"
 
@@ -774,8 +783,12 @@ def test_remove_ignores_missing_files_and_reports_only_what_it_deleted() -> None
     model = _fake_model()
     _touch(_VAE)
 
-    assert install.remove_model(model) == ["vae/fake-b.safetensors"]
-    assert install.remove_model(model) == []
+    assert install.remove_model(model) == {
+        "removed": ["vae/fake-b.safetensors"],
+        "kept": [],
+        "affected": [],
+    }
+    assert install.remove_model(model) == {"removed": [], "kept": [], "affected": []}
 
 
 def test_remove_reports_nested_relpaths_from_the_models_root() -> None:
@@ -784,7 +797,7 @@ def test_remove_reports_nested_relpaths_from_the_models_root() -> None:
     lora = next(c for c in wan.components if "/" in c.relpath)
     _touch(lora)
 
-    removed = install.remove_model(wan)
+    removed = install.remove_model(wan)["removed"]
 
     assert removed == [f"loras/{lora.relpath}"]
     assert not lora.dest.exists()
@@ -800,7 +813,7 @@ def test_remove_model_deletes_its_workflow() -> None:
     (wf / model.workflow_filename).write_text("{}", encoding="utf-8")
     (wf / other.workflow_filename).write_text("{}", encoding="utf-8")
 
-    removed = install.remove_model(model)
+    removed = install.remove_model(model)["removed"]
 
     assert removed == [
         "checkpoints/fake-a.safetensors",
@@ -819,8 +832,113 @@ def test_remove_model_deletes_the_workflow_even_when_every_weight_is_shared() ->
     wf.mkdir(parents=True)
     (wf / qwen.workflow_filename).write_text("{}", encoding="utf-8")
 
-    assert install.remove_model(qwen) == ["workflows/qwen-image.json"]
+    result = install.remove_model(qwen)
+
+    assert result["removed"] == ["workflows/qwen-image.json"]
+    assert {entry["models"][0] for entry in result["kept"]} == {"qwen-image-lightning"}
     assert install_state(qwen).state == "complete"
+
+
+def _ltx2_pair() -> tuple[ImageModel, ImageModel]:
+    """``ltx2-t2v`` and ``ltx2-i2v`` load the same four files, so each completes the other."""
+    t2v = _complete("ltx2-t2v")
+    i2v = get_model("ltx2-i2v")
+    assert i2v is not None
+    assert install_state(i2v).state == "complete"
+    assert {c.dest for c in t2v.components} == {c.dest for c in i2v.components}
+    wf = paths.workflows_dir()
+    wf.mkdir(parents=True, exist_ok=True)
+    (wf / t2v.workflow_filename).write_text("{}", encoding="utf-8")
+    (wf / i2v.workflow_filename).write_text("{}", encoding="utf-8")
+    return t2v, i2v
+
+
+def test_remove_identical_pair_keeps_shared_and_reports_kept() -> None:
+    """Two models with one file set keep each other complete: the default remove frees the
+    workflow only, and says which models hold each file back, so the operator can choose."""
+    t2v, i2v = _ltx2_pair()
+
+    result = install.remove_model(t2v)
+
+    assert result["removed"] == ["workflows/ltx2-t2v.json"]
+    assert result["kept"] == [
+        {"relpath": f"{c.kind.subdir}/{c.relpath}", "models": ["ltx2-i2v"]} for c in t2v.components
+    ]
+    assert result["affected"] == []
+    assert install_state(i2v).state == "complete"
+    assert (paths.workflows_dir() / i2v.workflow_filename).is_file()  # the other's workflow stays
+
+
+def test_remove_include_shared_deletes_and_reports_affected() -> None:
+    t2v, i2v = _ltx2_pair()
+
+    result = install.remove_model(t2v, include_shared=True)
+
+    assert result["removed"] == [
+        *(f"{c.kind.subdir}/{c.relpath}" for c in t2v.components),
+        "workflows/ltx2-t2v.json",
+    ]
+    assert result["kept"] == []
+    assert result["affected"] == ["ltx2-i2v"]
+    assert install_state(t2v).state == "none"
+    assert install_state(i2v).state == "none"
+
+
+def test_remove_include_shared_reports_each_affected_model_once_in_catalog_order() -> None:
+    qwen = _complete("qwen-image")
+    _complete("qwen-image-edit")
+    _complete("qwen-image-lightning")  # shares all three of qwen-image's files
+    partial = get_model("qwen-image-edit-lightning")
+    assert partial is not None
+    assert install_state(partial).state == "partial"
+
+    result = install.remove_model(qwen, include_shared=True)
+
+    # ``qwen-image-lightning`` shares three files, ``qwen-image-edit`` two; the partial
+    # ``qwen-image-edit-lightning`` was not installed to begin with, so it is not affected.
+    assert result["affected"] == ["qwen-image-lightning", "qwen-image-edit"]
+    assert partial.id not in result["affected"]
+
+
+def test_remove_include_shared_without_neighbours_affects_nothing() -> None:
+    model = _complete("esrgan-4x")
+
+    result = install.remove_model(model, include_shared=True)
+
+    assert result == {"removed": ["upscale_models/4x-UltraSharp.pth"], "kept": [], "affected": []}
+
+
+def test_remove_lightning_keeps_base_for_qwen_image_by_default() -> None:
+    """Installing the Lightning variant makes ``qwen-image`` complete, so removing the variant
+    must not take the 40 GB base the operator may be using as ``qwen-image``."""
+    lightning = _complete("qwen-image-lightning")
+    base = get_model("qwen-image")
+    assert base is not None
+    assert install_state(base).state == "complete"
+
+    result = install.remove_model(lightning)
+
+    lora = next(c for c in lightning.components if c.kind is ComponentKind.lora)
+    assert result["removed"] == [f"loras/{lora.relpath}"]
+    assert result["kept"] == [
+        {"relpath": f"{c.kind.subdir}/{c.relpath}", "models": [base.id]}
+        for c in lightning.components
+        if c is not lora
+    ]
+    assert result["affected"] == []
+    assert install_state(base).state == "complete"
+
+
+def test_remove_kept_entry_names_every_complete_holder() -> None:
+    qwen = _complete("qwen-image")
+    _complete("qwen-image-edit")
+    _complete("qwen-image-lightning")
+
+    result = install.remove_model(qwen)
+
+    by_path = {entry["relpath"]: entry["models"] for entry in result["kept"]}
+    assert by_path["vae/qwen_image_vae.safetensors"] == ["qwen-image-lightning", "qwen-image-edit"]
+    assert by_path["diffusion_models/qwen_image_2512_bf16.safetensors"] == ["qwen-image-lightning"]
 
 
 async def test_install_then_remove_leaves_nothing_behind() -> None:
@@ -828,7 +946,7 @@ async def test_install_then_remove_leaves_nothing_behind() -> None:
     await _install(model, _Hub().transport)
     assert (paths.workflows_dir() / model.workflow_filename).is_file()
 
-    removed = install.remove_model(model)
+    removed = install.remove_model(model)["removed"]
 
     assert removed[-1] == "workflows/fake-model.json"
     assert install_state(model).state == "none"
@@ -977,6 +1095,24 @@ def test_remove_reports_partial_removal_on_permission_error(
     assert not _CKPT.dest.exists()
     assert _VAE.dest.exists()
     assert (wf / model.workflow_filename).exists()  # the removal stopped at the first failure
+
+
+def test_remove_include_shared_failure_reports_how_far_it_got(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    t2v, _ = _ltx2_pair()
+    stuck = t2v.components[1]
+    _failing_unlink(monkeypatch, Path(stuck.relpath).name, PermissionError(13, "Permission denied"))
+
+    with pytest.raises(install.RemoveFailed) as excinfo:
+        install.remove_model(t2v, include_shared=True)
+
+    first = t2v.components[0]
+    assert excinfo.value.details == {
+        "removed": [f"{first.kind.subdir}/{first.relpath}"],
+        "failed_path": str(stuck.dest),
+        "error": "[Errno 13] Permission denied",
+    }
 
 
 def test_remove_reports_a_workflow_that_cannot_be_deleted(

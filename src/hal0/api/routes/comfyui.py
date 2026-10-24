@@ -740,12 +740,22 @@ async def comfyui_model_install(model_id: str, request: Request) -> JSONResponse
 
 
 @router.delete("/models/{model_id}")
-async def comfyui_model_remove(model_id: str, request: Request) -> dict[str, list[str]]:
-    """Delete the model's weight files and workflow; ``{"removed": [...]}`` lists them.
+async def comfyui_model_remove(
+    model_id: str, request: Request, include_shared: bool = False
+) -> dict[str, Any]:
+    """Delete the model's weight files and workflow; the body says what went and what stayed.
 
-    A file another complete model loads stays. 409 ``comfyui.install_running`` while
-    the model's install is queued or running, or while an install of a model that shares
-    a weight file with it is (``error.details.busy_model_id`` names that model). 409
+    Returns ``{"removed": [...], "kept": [...], "affected": [...]}``: the paths deleted
+    (weights, then ``workflows/<file>``); each weight file left in place, as
+    ``{"relpath", "models"}`` with the complete models that hold it; and the other models
+    that were complete and are not now.
+
+    A file another complete model loads stays (``kept``) unless ``include_shared=true``,
+    which deletes every file of the model and lists the models it broke in ``affected``.
+    Models can share a whole file set, so without the flag a removal may free only the
+    workflow. 409 ``comfyui.install_running`` while the model's install is queued or
+    running, or while an install of a model that shares a weight file with it is
+    (``error.details.busy_model_id`` names that model), in either mode. 409
     ``comfyui.remove_failed`` when a file cannot be deleted (a read-only directory):
     ``error.details`` lists what was removed before it and the path that failed.
     """
@@ -756,8 +766,9 @@ async def comfyui_model_remove(model_id: str, request: Request) -> dict[str, lis
             raise _install_running(CATALOG[job.model_id], job, removing=model)
         # The delete runs off the event loop (hundreds of unlinks on a slow store); the
         # lock keeps an install from starting under it.
-        removed = await asyncio.to_thread(comfyui_install.remove_model, model)
-    return {"removed": removed}
+        return await asyncio.to_thread(
+            comfyui_install.remove_model, model, include_shared=include_shared
+        )
 
 
 @router.get("/jobs")

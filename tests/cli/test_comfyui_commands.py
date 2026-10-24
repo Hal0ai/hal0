@@ -57,6 +57,8 @@ class FakeApi:
         # one jobs listing per GET /jobs; the last one repeats
         self.job_polls: list[list[dict[str, Any]]] = []
         self.removed: dict[str, Any] = {}
+        # the keyword arguments of each DELETE (the query params, when the command sends any)
+        self.delete_kwargs: list[dict[str, Any]] = []
 
     def get(self, path: str, **_kw: Any) -> Any:
         self.calls.append(("GET", path))
@@ -77,8 +79,9 @@ class FakeApi:
             raise outcome
         return outcome
 
-    def delete(self, path: str, **_kw: Any) -> Any:
+    def delete(self, path: str, **kw: Any) -> Any:
         self.calls.append(("DELETE", path))
+        self.delete_kwargs.append(kw)
         outcome = self.removed.get(path.removeprefix("/api/comfyui/models/"), {"removed": []})
         if isinstance(outcome, Exception):
             raise outcome
@@ -425,6 +428,109 @@ def test_cli_remove_says_when_nothing_was_there(api: FakeApi) -> None:
 
     assert result.exit_code == 0, result.output
     assert "nothing" in result.output.lower()
+
+
+_LTX2_SHARED = [
+    "checkpoints/ltx-2-19b-dev-fp8.safetensors",
+    "text_encoders/gemma_3_12B_it_fp4_mixed.safetensors",
+]
+
+
+def _flat(output: str) -> str:
+    """The output with line wraps and runs of spaces collapsed, for substring checks."""
+    return " ".join(output.split())
+
+
+def test_cli_remove_sends_no_query_by_default(api: FakeApi) -> None:
+    _run("models", "remove", "sdxl-turbo")
+
+    assert api.calls == [("DELETE", "/api/comfyui/models/sdxl-turbo")]
+    assert api.delete_kwargs == [{}]
+
+
+def test_cli_remove_names_the_models_that_keep_a_file_and_hints_at_the_flag(api: FakeApi) -> None:
+    api.removed["ltx2-t2v"] = {
+        "removed": ["workflows/ltx2-t2v.json"],
+        "kept": [{"relpath": rel, "models": ["ltx2-i2v"]} for rel in _LTX2_SHARED],
+        "affected": [],
+    }
+
+    result = _run("models", "remove", "ltx2-t2v")
+
+    assert result.exit_code == 0, result.output
+    out = _flat(result.output)
+    assert "workflows/ltx2-t2v.json" in out
+    for rel in _LTX2_SHARED:
+        assert f"{rel} (also used by ltx2-i2v)" in out
+    lines = [line for line in result.output.splitlines() if line.strip()]
+    assert "--include-shared" in lines[-1]  # the hint comes last, once
+    assert result.output.count("--include-shared") == 1
+    assert "no longer installed" not in out
+
+
+def test_cli_remove_lists_every_holder_of_a_kept_file(api: FakeApi) -> None:
+    api.removed["qwen-image"] = {
+        "removed": [],
+        "kept": [{"relpath": "vae/qwen_image_vae.safetensors", "models": ["a-model", "b-model"]}],
+        "affected": [],
+    }
+
+    result = _run("models", "remove", "qwen-image")
+
+    assert result.exit_code == 0, result.output
+    out = _flat(result.output)
+    assert "vae/qwen_image_vae.safetensors (also used by a-model, b-model)" in out
+    assert "--include-shared" in out
+
+
+def test_cli_remove_does_not_claim_the_files_are_off_disk_when_they_are_kept(
+    api: FakeApi,
+) -> None:
+    api.removed["ltx2-t2v"] = {
+        "removed": [],
+        "kept": [{"relpath": _LTX2_SHARED[0], "models": ["ltx2-i2v"]}],
+        "affected": [],
+    }
+
+    result = _run("models", "remove", "ltx2-t2v")
+
+    assert "none of its files are on disk" not in result.output
+    assert "Removed no files" in result.output
+
+
+def test_cli_remove_include_shared_sends_the_flag_and_names_the_models_it_broke(
+    api: FakeApi,
+) -> None:
+    api.removed["ltx2-t2v"] = {
+        "removed": [*_LTX2_SHARED, "workflows/ltx2-t2v.json"],
+        "kept": [],
+        "affected": ["ltx2-i2v", "ltx2-t2v-bf16"],
+    }
+
+    result = _run("models", "remove", "ltx2-t2v", "--include-shared")
+
+    assert result.exit_code == 0, result.output
+    assert api.calls == [("DELETE", "/api/comfyui/models/ltx2-t2v")]
+    assert api.delete_kwargs == [{"params": {"include_shared": "true"}}]
+    out = _flat(result.output)
+    assert "Removed 3 file(s) of ltx2-t2v" in out
+    assert "No longer installed: ltx2-i2v, ltx2-t2v-bf16" in out
+    assert "Rerun" not in out  # nothing was kept, so there is nothing to suggest
+
+
+def test_cli_remove_include_shared_with_no_other_model_affected_says_nothing_extra(
+    api: FakeApi,
+) -> None:
+    api.removed["esrgan-4x"] = {
+        "removed": ["upscale_models/4x-UltraSharp.pth"],
+        "kept": [],
+        "affected": [],
+    }
+
+    result = _run("models", "remove", "esrgan-4x", "--include-shared")
+
+    assert result.exit_code == 0, result.output
+    assert "No longer installed" not in result.output
 
 
 def test_cli_remove_exits_1_on_a_running_install(api: FakeApi) -> None:

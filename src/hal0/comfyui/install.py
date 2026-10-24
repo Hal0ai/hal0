@@ -27,6 +27,7 @@ import shutil
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -390,34 +391,67 @@ async def run_install(
 # ── remove ──────────────────────────────────────────────────────────────────
 
 
-def remove_model(model: ImageModel) -> list[str]:
-    """Delete ``model``'s weight files and its provisioned workflow; return what was deleted.
+def remove_model(model: ImageModel, *, include_shared: bool = False) -> dict[str, Any]:
+    """Delete ``model``'s weight files and its provisioned workflow; report what happened.
 
-    A file another catalog model loads stays while that model is complete. A model that is
-    only partly installed does not hold files back: it cannot run without its missing ones.
+    By default a file another catalog model loads stays while that model is complete (a model
+    only partly installed does not hold files back: it cannot run without its missing ones).
+    Two models can share a whole file set (``ltx2-t2v`` and ``ltx2-i2v``, or ``qwen-image``
+    and its Lightning variant), and then each keeps the other complete, so the default frees
+    nothing but the workflow. Which of the two the operator still wants is not for hal0 to
+    guess: ``include_shared=True`` deletes every component, shared or not, and the result
+    lists the models that stopped being complete.
+
     The workflow (``<workflows dir>/<id>.json``, written by :func:`run_install`, which is its
-    only writer) belongs to this model alone, so it goes regardless of shared weights.
+    only writer) belongs to this model alone, so it goes in either mode.
 
-    Returns the weight paths relative to the models root, then ``workflows/<filename>`` for
-    the workflow. Files already gone are ignored and not reported.
+    Returns ``{"removed", "kept", "affected"}``:
+
+    * ``removed``: the weight paths relative to the models root, then
+      ``workflows/<filename>`` for the workflow. Files already gone are not reported.
+    * ``kept``: ``{"relpath", "models"}`` for each weight file left in place, ``models``
+      being the complete models that hold it. Always empty with ``include_shared=True``.
+    * ``affected``: the other models that were complete before and are not after, in catalog
+      order; computed before anything is deleted. Always empty by default.
 
     Raises :class:`RemoveFailed` at the first file that cannot be deleted (a read-only
     directory, say): the removal stops there, and ``details["removed"]`` lists what had
     already gone, so the operator sees how far it got. The models root is resolved once.
     """
     root = paths.models_root()
+    complete: dict[str, bool] = {}
+
+    def holders_of(component: Component) -> list[str]:
+        """Ids of the other catalog models that are complete and load ``component``."""
+        ids = [other for other in models_using(component, root) if other != model.id]
+        for other in ids:
+            if other not in complete:
+                complete[other] = install_state(CATALOG[other], root).state == "complete"
+        return [other for other in ids if complete[other]]
+
+    # Read every neighbour's state before the first delete: it is what "affected" is measured from.
+    holders = [(component, holders_of(component)) for component in model.components]
+    affected: set[str] = (
+        {other for _, held in holders for other in held} if include_shared else set()
+    )
+
     removed: list[str] = []
-    for component in model.components:
-        neighbours = (CATALOG[other_id] for other_id in models_using(component, root))
-        if any(n.id != model.id and install_state(n, root).state == "complete" for n in neighbours):
-            continue
+    kept: list[dict[str, Any]] = []
+    for component, held in holders:
         dest = component_path(component, root)
-        if _unlink(dest, removed):
-            removed.append(dest.relative_to(root).as_posix())
+        relpath = dest.relative_to(root).as_posix()
+        if held and not include_shared:
+            kept.append({"relpath": relpath, "models": held})
+        elif _unlink(dest, removed):
+            removed.append(relpath)
     workflow = paths.workflows_dir() / model.workflow_filename
     if _unlink(workflow, removed):
         removed.append(f"workflows/{model.workflow_filename}")
-    return removed
+    return {
+        "removed": removed,
+        "kept": kept,
+        "affected": [model_id for model_id in CATALOG if model_id in affected],
+    }
 
 
 def _unlink(path: Path, removed: list[str]) -> bool:
