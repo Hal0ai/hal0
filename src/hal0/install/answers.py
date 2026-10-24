@@ -4,8 +4,8 @@ Spec: ``docs/archive/handoffs/hal0-setup-answers-spec-2026-07-05.md``. This modu
 implements ONLY the subset of the schema that maps to
 :class:`hal0.install.orchestrate.Selections` today (§5 "wired now" column):
 ``model_store.path``, ``slots[]``, ``apps.*.enabled`` + ``gen.mode``
-(→ ``extensions``), ``npu.opt_in``, and ``gen.capabilities``
-(→ ``comfyui_defaults``). Every other top-level key (``network``,
+(→ ``extensions``), ``npu.opt_in``, and ``gen.models``
+(→ ``image_models``). Every other top-level key (``network``,
 ``huggingface``, ``apps.*.when``, ``apps.hermes.gateway``, the download side
 of ``gen.mode: scaffold_and_download``, ``slots[].context_size``,
 ``slots[].enabled_on_pull``) is accepted and warned about, not applied — their
@@ -68,11 +68,11 @@ def _warn(msg: str) -> None:
 def _yaml_word(value: Any) -> Any:
     """Undo PyYAML's YAML-1.1 bareword-bool coercion for our own enum words.
 
-    The schema uses bare ``off``/``on`` as enum values (``gen.mode: off``,
-    ``gen.capabilities.<cap>: off``), but ``yaml.safe_load`` parses unquoted
-    ``off``/``no``/``false`` as Python ``False`` and ``on``/``yes``/``true`` as
-    ``True`` (YAML 1.1 bool resolver). Map those back to the words the spec
-    documents so downstream comparisons see ``"off"``/``"on"`` as intended.
+    The schema uses bare ``off``/``on`` as enum values (``gen.mode: off``), but
+    ``yaml.safe_load`` parses unquoted ``off``/``no``/``false`` as Python ``False``
+    and ``on``/``yes``/``true`` as ``True`` (YAML 1.1 bool resolver). Map those back
+    to the words the spec documents so downstream comparisons see ``"off"``/``"on"``
+    as intended.
     """
     if value is False:
         return "off"
@@ -207,9 +207,13 @@ def _resolve_npu_opt_in(doc: dict[str, Any], hw: HardwareInfo) -> bool:
     raise AnswersError(f"npu.opt_in must be true, false, or 'auto', got {opt_in!r}")
 
 
-def _resolve_gen(doc: dict[str, Any]) -> tuple[bool, tuple[tuple[str, str], ...]]:
-    """Return (comfyui_enabled, comfyui_defaults)."""
-    from hal0.comfyui.capabilities import CAPABILITIES
+def _resolve_gen(doc: dict[str, Any]) -> tuple[bool, tuple[str, ...]]:
+    """Return (comfyui_enabled, image_models).
+
+    ``gen.models`` is a list of image-catalog ids (:data:`hal0.comfyui.catalog.CATALOG`),
+    installed in the order given; a repeated id installs once.
+    """
+    from hal0.comfyui.catalog import CATALOG
 
     gen = doc.get("gen") or {}
     if not isinstance(gen, dict):
@@ -220,38 +224,39 @@ def _resolve_gen(doc: dict[str, Any]) -> tuple[bool, tuple[tuple[str, str], ...]
         raise AnswersError(f"gen.mode must be one of {sorted(_GEN_MODES)}, got {mode!r}")
     comfyui_enabled = mode in _GEN_MODES_ON
 
-    caps_raw = gen.get("capabilities") or {}
-    if not isinstance(caps_raw, dict):
-        raise AnswersError("gen.capabilities must be a mapping")
+    known = ", ".join(CATALOG)
+    if "capabilities" in gen:
+        raise AnswersError(
+            "gen.capabilities was replaced by gen.models: a list of image model ids "
+            f"(e.g. ['sdxl-lightning']); known: {known}"
+        )
 
-    defaults: list[tuple[str, str]] = []
-    for cap_id, family in caps_raw.items():
-        if cap_id not in CAPABILITIES:
-            raise AnswersError(
-                f"gen.capabilities key {cap_id!r} is not a known ComfyUI capability "
-                f"(known: {sorted(CAPABILITIES)})"
-            )
-        family = _yaml_word(family)
-        if family == "off":
-            continue
-        if family == "auto":
-            family = CAPABILITIES[cap_id].default_family
-        elif not isinstance(family, str):
-            raise AnswersError(
-                f"gen.capabilities[{cap_id!r}] must be a family string, 'auto', or 'off', "
-                f"got {family!r}"
-            )
-        defaults.append((cap_id, family))
+    models_raw = gen.get("models")
+    if models_raw is None:
+        models_raw = []
+    if not isinstance(models_raw, list):
+        raise AnswersError(f"gen.models must be a list of image model ids, got {models_raw!r}")
 
-    return comfyui_enabled, tuple(defaults)
+    models: list[str] = []
+    for model_id in models_raw:
+        if not isinstance(model_id, str):
+            raise AnswersError(f"gen.models entries must be image model ids, got {model_id!r}")
+        if model_id not in CATALOG:
+            raise AnswersError(
+                f"gen.models has unknown image model id {model_id!r} (known: {known})"
+            )
+        if model_id not in models:
+            models.append(model_id)
+
+    return comfyui_enabled, tuple(models)
 
 
 def gen_download_requested(path: str) -> bool:
     """True iff the answer file's ``gen.mode`` is ``scaffold_and_download``.
 
     Read WITHOUT applying anything so the real-apply path (setup_command) can
-    decide whether to run the ComfyUI per-variant fetch (WS-G, #1113) after
-    ``load_answers`` produces the ``Selections`` (whose ``comfyui_defaults`` carry
+    decide whether to install the image models (WS-G, #1113) after
+    ``load_answers`` produces the ``Selections`` (whose ``image_models`` carry
     the picks). ``scaffold_only`` / ``off`` return ``False`` — those never
     download here. Malformed files return ``False`` rather than raising; the
     apply path's :func:`load_answers` is the single source of validation errors.
@@ -370,7 +375,7 @@ def load_answers(path: str, hw: HardwareInfo) -> Selections:
     storage_dir = _resolve_storage_dir(doc)
     slots = _resolve_slots(doc, hw)
     npu_opt_in = _resolve_npu_opt_in(doc, hw)
-    comfyui_enabled, comfyui_defaults = _resolve_gen(doc)
+    comfyui_enabled, image_models = _resolve_gen(doc)
     extensions = _resolve_extensions(doc, comfyui_enabled)
 
     return Selections(
@@ -378,7 +383,7 @@ def load_answers(path: str, hw: HardwareInfo) -> Selections:
         slots=slots,
         extensions=extensions,
         npu_opt_in=npu_opt_in,
-        comfyui_defaults=comfyui_defaults,
+        image_models=image_models,
     )
 
 
@@ -427,6 +432,10 @@ def dump_answers(sel: Selections) -> dict[str, Any]:
         slots.append(entry)
 
     comfyui_enabled = bool(sel.extensions.get("comfyui", False))
+    # Models to install mean a replay has to download them, not only scaffold the slot.
+    gen_mode = "off"
+    if comfyui_enabled:
+        gen_mode = "scaffold_and_download" if sel.image_models else "scaffold_only"
     apps = {
         ext_id: {"enabled": enabled}
         for ext_id, enabled in sel.extensions.items()
@@ -440,10 +449,7 @@ def dump_answers(sel: Selections) -> dict[str, Any]:
         "huggingface": {"token_env": "HF_TOKEN"},
         "slots": slots,
         "npu": {"opt_in": sel.npu_opt_in},
-        "gen": {
-            "mode": "scaffold_only" if comfyui_enabled else "off",
-            "capabilities": dict(sel.comfyui_defaults),
-        },
+        "gen": {"mode": gen_mode, "models": list(sel.image_models)},
         "apps": apps,
     }
 

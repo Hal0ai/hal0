@@ -41,8 +41,9 @@ from hal0.registry.model_store import describe_store_state
 
 #: capability → (slot_name, port) for the slots first-run provisions. Mirrors
 #: installer.py:_SLOT_META for the shared capabilities (chat/coder/embed/stt/
-#: tts) and adds rerank on a free port in the 8081-8099 pool. ``img`` is
-#: handled via the ComfyUI ``comfyui_defaults`` sidecar, not this table.
+#: tts) and adds rerank on a free port in the 8081-8099 pool. ``img`` is the
+#: ComfyUI extension's seeded slot; its models come from ``hal0 comfyui models
+#: install``, not this table.
 #: The chat capability's slot is NAMED ``agent`` per ADR-0023: `agent` is the
 #: default LLM anchor every ``hal0/<slot>`` fallback chain ends in, so first
 #: run must seed a slot by that name or the chains dead-end on fresh boxes.
@@ -147,7 +148,6 @@ def build_auto_selections(
     else:
         ext = {e.id: False for e in EXTENSIONS}
     slots: list[SlotSelection] = []
-    comfyui_defaults: tuple[tuple[str, str], ...] = ()
     if with_slots:
         # Scaffold the capability + NPU slot STRUCTURE with no model picks
         # (pick-free): device/profile/port are wired but ``model.default`` is
@@ -172,14 +172,6 @@ def build_auto_selections(
         ):
             name, port = _SETUP_SLOTS["coder"]
             slots.append(SlotSelection("coder", name, port, None))
-        # Record ComfyUI default image capability picks as (capability_id,
-        # family) pairs. No pull at install — the operator triggers downloads
-        # later via POST /api/comfyui/models/fetch.
-        from hal0.comfyui.capabilities import CAPABILITIES as _CAPS
-
-        comfyui_defaults = tuple(
-            (cap_id, cap.alternatives[0].family) for cap_id, cap in _CAPS.items()
-        )
     return Selections(
         storage_dir=storage_dir,
         slots=slots,
@@ -188,7 +180,9 @@ def build_auto_selections(
         # broken NPU (npu.validated False/None) must not auto-advertise a lane
         # apply_setup would skip. Same single npu_opt_in the picker + apply use.
         npu_opt_in=npu_healthy(hw) if npu_opt_in is None else npu_opt_in,
-        comfyui_defaults=comfyui_defaults,
+        # Pick-free like the slots: image models are chosen later with `hal0 comfyui
+        # models install` or the dashboard. Only an answer file's gen.models names any.
+        image_models=(),
     )
 
 
@@ -297,14 +291,11 @@ def setup(
 
         sel = load_answers(answers, hw)
         asyncio.run(_run_auto(sel, hw, no_pull=no_pull))
-        # WS-G (#1113): gen.mode: scaffold_and_download opts into the ComfyUI
-        # per-variant fetch. The loader records the picks in comfyui_defaults;
-        # perform the working download here (skipped under --no-pull, matching
-        # the LLM-slot pull deferral). The img slot activates on the first land.
-        if not no_pull and gen_download_requested(answers) and sel.comfyui_defaults:
-            from hal0.comfyui.provision import provision_comfyui_downloads
-
-            provision_comfyui_downloads(sel.comfyui_defaults)
+        # gen.mode: scaffold_and_download opts into installing gen.models (skipped under
+        # --no-pull, matching the LLM-slot pull deferral). The img slot comes up once
+        # the first model lands.
+        if not no_pull and gen_download_requested(answers) and sel.image_models:
+            _install_image_models(sel.image_models)
         return
     if auto:
         sel = build_auto_selections(
@@ -317,6 +308,30 @@ def setup(
         asyncio.run(_run_auto(sel, hw, no_pull=no_pull))
         return
     run_interactive(hw, storage_dir=storage_dir)
+
+
+def _install_image_models(model_ids: tuple[str, ...]) -> None:
+    """Install ``model_ids`` from the image catalog, blocking; then bring the img slot up.
+
+    Per-model failures are printed by the installer and do not stop the others or change
+    the exit code; the slot is only enabled when at least one model landed, so it never
+    comes up against an empty model dir.
+    """
+    from hal0.comfyui.install import hf_token_from_env, install_models_blocking
+    from hal0.install.extensions import install_extension
+
+    results = install_models_blocking(model_ids, hf_token=hf_token_from_env(), on_line=typer.echo)
+    incomplete = [model_id for model_id, state in results if state != "completed"]
+    if incomplete:
+        typer.echo(
+            f"warning: not installed: {', '.join(incomplete)} "
+            "(retry with `hal0 comfyui models install <id>`)",
+            err=True,
+        )
+    if any(state == "completed" for _, state in results):
+        outcome = install_extension("comfyui")
+        if outcome.error:
+            typer.echo(f"warning: could not enable the img slot ({outcome.error})", err=True)
 
 
 async def _run_auto(sel: Selections, hw: HardwareInfo, *, no_pull: bool = False) -> None:

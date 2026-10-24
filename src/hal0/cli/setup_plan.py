@@ -176,14 +176,17 @@ def _render_plan_table(sel: Selections, *, strict: bool) -> bool:
         ext_table.add_row("[dim]-- none --[/dim]")
     console.print(ext_table)
 
-    if sel.comfyui_defaults:
-        console.print("[bold]ComfyUI defaults[/bold]")
-        comfy_table = Table()
-        comfy_table.add_column("Capability")
-        comfy_table.add_column("Family")
-        for cap_id, family in sel.comfyui_defaults:
-            comfy_table.add_row(cap_id, family)
-        console.print(comfy_table)
+    if sel.image_models:
+        from hal0.comfyui.catalog import get_model
+
+        console.print("[bold]Image models[/bold]")
+        image_table = Table()
+        image_table.add_column("Model")
+        image_table.add_column("Download (GB)", justify="right")
+        for model_id in sel.image_models:
+            model = get_model(model_id)
+            image_table.add_row(model_id, f"{model.approx_gb:.1f}" if model else "?")
+        console.print(image_table)
 
     console.print()
     console.print("[dim]--plan: nothing was written (no slots, no sentinel, no pulls).[/dim]")

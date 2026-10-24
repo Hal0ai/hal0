@@ -257,11 +257,16 @@ config with `auth_style = "google_query"` still loads: it's coerced to `bearer` 
 | `capabilities set <slot> <child>` | `slot`, `child` | `--model`, `--backend`, `--provider`, `--enabled`/`--disabled` |
 | `capabilities migrate` | — | `--apply` (default: dry-run) |
 
-## `hal0 comfyui`
+## `hal0 comfyui` — image models and files
 
-| Command | Flags |
-|---|---|
-| `comfyui orchestrate-models` | `--dry-run`, `--log-dir` (default `""`) |
+| Command | Args | Flags |
+|---|---|---|
+| `comfyui models list` | — | `--json` |
+| `comfyui models install <id>...` | one or more model ids | — |
+| `comfyui models remove <id>` | `id` | — |
+| `comfyui files` | — | — |
+
+`models install` follows every download and exits 1 if any fails.
 
 ## `hal0 agent` — manage bundled agents
 

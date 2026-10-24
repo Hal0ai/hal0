@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import re
+import time
 from collections import namedtuple
 from collections.abc import Callable
 from dataclasses import replace
@@ -190,6 +193,22 @@ async def test_install_sends_the_token_as_a_bearer_header() -> None:
     anonymous = _Hub()
     await _install(_fake_model(id="fake-anon"), anonymous.transport)
     assert all("authorization" not in r.headers for r in anonymous.requests)
+
+
+async def test_install_ignores_the_endpoint_and_cache_overrides_in_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Downloads go to huggingface.co however the API process environment is set."""
+    monkeypatch.setenv("HF_ENDPOINT", "https://mirror.invalid")
+    monkeypatch.setenv("HF_HOME", "/nonexistent/hf-home")
+    monkeypatch.setenv("HF_HUB_CACHE", "/nonexistent/hf-cache")
+    hub = _Hub()
+
+    job = await _install(_fake_model(), hub.transport)
+
+    assert job.state == "completed", job.error
+    assert {r.url.host for r in hub.requests} == {"huggingface.co"}
+    assert _CKPT.dest.is_relative_to(paths.models_root())
 
 
 async def test_install_skips_present_components() -> None:
@@ -896,6 +915,66 @@ def test_install_models_blocking_runs_sequentially_and_reports_each(
     assert order == ["sdxl-turbo", "sd-1.5-pruned-emaonly"]
     assert any("sdxl-turbo" in line for line in lines)
     assert any("boom" in line for line in lines)
+
+
+def test_install_models_blocking_emits_throttled_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A long download reports where it is, at most once per interval, between start and end."""
+    interval = 0.04
+    monkeypatch.setattr(install, "_PROGRESS_INTERVAL_S", interval)
+    monkeypatch.setattr(install, "preflight_disk", lambda model: None)
+
+    async def fake_run_install(job: PullJob, model: ImageModel, **kwargs: Any) -> None:
+        job.state = "running"
+        job.bytes_total = 8_000_000_000
+        for step in range(1, 17):  # 16 updates, each far more often than the interval
+            job.bytes_downloaded = step * 500_000_000
+            await asyncio.sleep(0.01)
+        job.state = "completed"
+
+    monkeypatch.setattr(install, "run_install", fake_run_install)
+    lines: list[str] = []
+
+    began = time.monotonic()
+    results = install.install_models_blocking(["sdxl-turbo"], hf_token=None, on_line=lines.append)
+    elapsed = time.monotonic() - began
+
+    assert results == [("sdxl-turbo", "completed")]
+    progress = [
+        line for line in lines if re.fullmatch(r"  sdxl-turbo: \d+% \(\d+\.\d/8\.0 GB\)", line)
+    ]
+    assert progress, lines
+    assert len(progress) <= elapsed / interval  # never faster than one line per interval
+    assert len(progress) < 16  # throttled: not one line per update
+    percents = [int(line.split(":")[1].split("%")[0]) for line in progress]
+    assert percents == sorted(percents)
+    # the start and end lines are still there, around the progress
+    assert "installing" in lines[0] and lines[-1].startswith("sdxl-turbo: completed")
+    assert lines.index(progress[0]) > 0 and lines.index(progress[-1]) < len(lines) - 1
+
+
+def test_install_models_blocking_is_silent_between_start_and_end_when_install_is_quick(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default interval is seconds: a quick install prints no progress and waits for none."""
+
+    async def fake_run_install(job: PullJob, model: ImageModel, **kwargs: Any) -> None:
+        job.state = "running"
+        job.bytes_total = 1_000_000_000
+        job.bytes_downloaded = 500_000_000
+        await asyncio.sleep(0.02)
+        job.state = "completed"
+
+    monkeypatch.setattr(install, "run_install", fake_run_install)
+    monkeypatch.setattr(install, "preflight_disk", lambda model: None)
+    lines: list[str] = []
+
+    began = time.monotonic()
+    install.install_models_blocking(["sdxl-turbo"], hf_token=None, on_line=lines.append)
+
+    assert time.monotonic() - began < 1.0  # the progress task is cancelled, not waited for
+    assert len(lines) == 2
 
 
 def test_install_models_blocking_downloads_for_real(monkeypatch: pytest.MonkeyPatch) -> None:
