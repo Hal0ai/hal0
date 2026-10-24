@@ -22,6 +22,7 @@ and rename the weight files at render time (:attr:`ImageModel.file_substitutions
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -178,6 +179,20 @@ OPTIONAL_PARAMS = ("negative_prompt", "batch_size", "ckpt_name")
 USER_CKPT_TEMPLATES: Mapping[str, str] = MappingProxyType(
     {"sdxl": "sdxl_simple", "sd15": "sd15_simple"}
 )
+
+
+_POINTER = re.compile(r"node:(?P<node>\w+)\.inputs\.(?P<field>\w+)")
+
+
+def parse_pointer(pointer: str) -> tuple[str, str]:
+    """``(node id, input field)`` of a ``node:<id>.inputs.<field>`` pointer.
+
+    Raises :class:`ValueError` when ``pointer`` is not in that grammar.
+    """
+    match = _POINTER.fullmatch(pointer)
+    if match is None:
+        raise ValueError(f"malformed pointer {pointer!r}: expected node:<id>.inputs.<field>")
+    return match["node"], match["field"]
 
 
 def load_template(stem: str) -> dict[str, Any]:

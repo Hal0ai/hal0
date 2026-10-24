@@ -124,7 +124,7 @@ def _owui_baked_workflow(model_id: str) -> tuple[str, str] | None:
     API-renderable ComfyUI catalog entry) — the caller must then treat
     images as not wired rather than claim a broken default.
     """
-    from hal0.comfyui.catalog import get_model
+    from hal0.comfyui.catalog import get_model, parse_pointer
     from hal0.providers.comfyui_workflows import (
         WorkflowTemplateError,
         build_workflow,
@@ -147,9 +147,12 @@ def _owui_baked_workflow(model_id: str) -> tuple[str, str] | None:
     nodes: list[dict[str, Any]] = []
     for owui_type, param_key, field in _OWUI_NODE_TYPES:
         pointer = params.get(param_key)
-        if not isinstance(pointer, str) or not pointer.startswith("node:"):
+        if not isinstance(pointer, str):
             continue
-        node_id = pointer[len("node:") :].split(".", 1)[0]
+        try:
+            node_id, _ = parse_pointer(pointer)
+        except ValueError:
+            continue
         nodes.append({"type": owui_type, "key": field, "node_ids": [node_id]})
 
     return (

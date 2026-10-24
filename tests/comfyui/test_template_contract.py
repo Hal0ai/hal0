@@ -7,7 +7,6 @@ through those pointers, so it never needs to know which model class a graph belo
 
 from __future__ import annotations
 
-import re
 from importlib import resources
 from typing import Any
 
@@ -19,9 +18,8 @@ from hal0.comfyui.catalog import (
     REQUIRED_PARAMS,
     USER_CKPT_TEMPLATES,
     load_template,
+    parse_pointer,
 )
-
-_POINTER = re.compile(r"^node:(?P<node>\w+)\.inputs\.(?P<field>\w+)$")
 
 #: Every template the generation route can render: the API-renderable catalog models'
 #: templates plus the generic user-checkpoint ones.
@@ -31,9 +29,7 @@ CONTRACT_TEMPLATES = sorted(
 
 
 def _split(pointer: str) -> tuple[str, str]:
-    match = _POINTER.match(pointer)
-    assert match, f"malformed pointer {pointer!r}"
-    return match["node"], match["field"]
+    return parse_pointer(pointer)
 
 
 def _graph(stem: str) -> dict[str, Any]:
@@ -167,3 +163,35 @@ def test_only_user_ckpt_templates_carry_ckpt_name(stem: str) -> None:
         assert "ckpt_name" in params
     else:
         assert "ckpt_name" not in params
+
+
+@pytest.mark.parametrize(
+    ("pointer", "expected"),
+    [
+        ("node:6.inputs.text", ("6", "text")),
+        ("node:58.inputs.batch_size", ("58", "batch_size")),
+        ("node:node_7.inputs.ckpt_name", ("node_7", "ckpt_name")),
+    ],
+)
+def test_parse_pointer(pointer: str, expected: tuple[str, str]) -> None:
+    assert parse_pointer(pointer) == expected
+
+
+@pytest.mark.parametrize(
+    "pointer",
+    [
+        "",
+        "6.inputs.text",
+        "node:6",
+        "node:6.text",
+        "node:6.inputs.",
+        "node:.inputs.text",
+        "node:6.outputs.text",
+        "node:6.inputs.a.b",
+        "node:6.inputs.text\n",
+        "xnode:6.inputs.text",
+    ],
+)
+def test_parse_pointer_rejects_bad_grammar(pointer: str) -> None:
+    with pytest.raises(ValueError, match="pointer"):
+        parse_pointer(pointer)
