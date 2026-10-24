@@ -38,6 +38,7 @@ from typing import Any
 
 import httpx
 
+from hal0.comfyui import paths as comfyui_paths
 from hal0.errors import Hal0Error
 from hal0.http_client import async_client
 from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
@@ -50,15 +51,10 @@ log = logging.getLogger(__name__)
 # In-container app + working-data layout. The image has ComfyUI
 # checked out at /opt/ComfyUI (venv at /opt/venv). Host-side working data
 # (models / output / input / user / custom_nodes + extra_model_paths.yaml)
-# lives under "<model-store>/comfyui" and is bind-mounted in so weights and
-# custom nodes persist across container restarts.
+# lives under the data root owned by hal0.comfyui.paths and is bind-mounted in
+# so weights and custom nodes persist across container restarts.
 _COMFYUI_APP_DIR = "/opt/ComfyUI"
 _COMFYUI_BASE_DIR = "/var/lib/hal0/comfyui"
-
-# ComfyUI's working data tracks the configured model store ([models].store /
-# HAL0_MODEL_STORE, default /mnt/ai-models) under a "comfyui" subdir, resolved
-# per-render in container_spec(). Still overridable via HAL0_COMFYUI_DATA_ROOT.
-_COMFYUI_DATA_SUBDIR = "comfyui"
 
 # Live-validated flag bundle (matches the "comfyui" seed profile). Used
 # when the slot has no resolvable profile.
@@ -272,12 +268,9 @@ class ComfyUIProvider(Provider):
         ).strip()
         command: list[str] = ["bash", "-lc", payload]
 
-        from hal0.config.paths import model_store_root
-
-        data_root = (
-            os.environ.get("HAL0_COMFYUI_DATA_ROOT", "").strip()
-            or f"{model_store_root()}/{_COMFYUI_DATA_SUBDIR}"
-        )
+        # ComfyUI's working data tracks the configured model store; hal0.comfyui.paths
+        # owns the root (and the HAL0_COMFYUI_DATA_ROOT override), resolved per render.
+        data_root = str(comfyui_paths.data_root())
         # Podman refuses a bind mount whose host path is absent (statfs →
         # exit 125), which crash-looped the img slot on any box where the
         # comfyui tree hadn't been provisioned (fresh install, or a store

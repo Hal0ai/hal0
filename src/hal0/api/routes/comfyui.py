@@ -47,6 +47,7 @@ import hal0.comfyui.fetch as _fetch_module
 from hal0.api._redact import redact_log_line
 from hal0.api.middleware.error_codes import Conflict, UnprocessableEntity
 from hal0.api.routes.power import _probe_power
+from hal0.comfyui import paths as comfyui_paths
 from hal0.comfyui.selection import auto_selections, variant_for
 from hal0.hardware import gpu_view
 from hal0.http_client import async_client
@@ -295,10 +296,6 @@ _INVENTORY_DIRS: dict[str, tuple[str, ...]] = {
 _MODEL_EXTS = (".safetensors", ".ckpt", ".pt", ".pth", ".gguf", ".bin", ".sft")
 
 
-def _comfyui_models_dir() -> str:
-    return os.environ.get("COMFYUI_MODELS_DIR", "/mnt/ai-models/comfyui/models")
-
-
 def _count_models(base: str, subdirs: tuple[str, ...]) -> int:
     total = 0
     for sub in subdirs:
@@ -317,7 +314,7 @@ def _model_inventory() -> dict[str, int] | None:
     Returns ``None`` when the share root is absent (dev box / fresh install) so
     the pane hides the counts rather than rendering zeros it can't stand behind.
     """
-    base = _comfyui_models_dir()
+    base = str(comfyui_paths.models_root())
     if not os.path.isdir(base):
         return None
     return {cat: _count_models(base, subdirs) for cat, subdirs in _INVENTORY_DIRS.items()}
@@ -594,24 +591,19 @@ async def comfyui_models_fetch(body: _FetchBody) -> JSONResponse:
     return JSONResponse(status_code=202, content={"jobs": job_ids})
 
 
-def _comfyui_workflows_dir() -> str:
-    """Primary workflow directory — env override for tests; default is the bind-mount path."""
-    return os.environ.get("COMFYUI_WORKFLOWS_DIR", "/mnt/ai-models/comfyui/workflows")
-
-
-def _comfyui_data_dir() -> str:
-    """Root of the ComfyUI data directory (for fallback user/default/workflows path)."""
-    return os.environ.get("COMFYUI_DATA_DIR", "/mnt/ai-models/comfyui")
+def _user_workflows_dir() -> str:
+    """ComfyUI's own saved-workflows dir (``user/default/workflows`` under the data root)."""
+    return os.path.join(comfyui_paths.data_root(), "user", "default", "workflows")
 
 
 def _find_workflow(name: str) -> str | None:
     """Locate <name>.json, trying primary then user/default fallback. None if absent."""
     if not _WORKFLOW_NAME_RE.fullmatch(name) or ".." in name:
         return None
-    primary = os.path.join(_comfyui_workflows_dir(), f"{name}.json")
+    primary = os.path.join(comfyui_paths.workflows_dir(), f"{name}.json")
     if os.path.isfile(primary):
         return primary
-    fallback = os.path.join(_comfyui_data_dir(), "user", "default", "workflows", f"{name}.json")
+    fallback = os.path.join(_user_workflows_dir(), f"{name}.json")
     if os.path.isfile(fallback):
         return fallback
     return None
@@ -641,8 +633,8 @@ def _list_workflow_names() -> list[dict[str, Any]]:
     """
     seen: dict[str, dict[str, Any]] = {}
     for source, directory in (
-        ("primary", _comfyui_workflows_dir()),
-        ("user", os.path.join(_comfyui_data_dir(), "user", "default", "workflows")),
+        ("primary", str(comfyui_paths.workflows_dir())),
+        ("user", _user_workflows_dir()),
     ):
         try:
             entries = sorted(os.listdir(directory))

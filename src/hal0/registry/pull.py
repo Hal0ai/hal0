@@ -35,6 +35,7 @@ from typing import Any, NamedTuple
 
 import httpx
 
+from hal0.comfyui import paths as comfyui_paths
 from hal0.config import paths, store
 from hal0.db import repository
 from hal0.db.connection import connect, tx
@@ -266,20 +267,18 @@ def _final_path(model_id: str, filename: str) -> Path:
 
 
 def _comfyui_models_dir(subdir: str) -> Path:
-    """ComfyUI checkpoints/loras/vae directory under the model store.
+    """ComfyUI checkpoints/loras/vae directory under ``comfyui.paths.models_root()``.
 
-    ComfyUI models live under the configurable model-store root
-    (default /mnt/ai-models) at /comfyui/models/<subdir>, aligned
-    with the slot's bind-mount path into the container. This ensures
-    ComfyUI's own CheckpointLoaderSimple / LoraLoader / etc. find
-    models when --base-directory points at the root.
+    The models root is the one the slot bind-mounts into the container, so
+    ComfyUI's own CheckpointLoaderSimple / LoraLoader / etc. find what a pull
+    writes here.
 
     The subdir name is sanitised the same way model ids are so a curated
     entry can't escape the comfyui tree by setting
     ``comfyui_subdir="../../etc/passwd"``.
     """
     cleaned = _SANITISE_RE.sub("-", subdir).strip("-.") or "checkpoints"
-    return Path(paths.model_store_root()) / "comfyui" / "models" / cleaned
+    return comfyui_paths.models_root() / cleaned
 
 
 def _final_path_for_entry(
