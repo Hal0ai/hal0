@@ -420,6 +420,20 @@ def is_masked(path: Path) -> bool:
         return False
 
 
+def _runtime_masked(run: Runner, unit_path: Path) -> bool:
+    """No ``unit_path`` file, and ``is-enabled`` reports a mask (a ``/run`` one).
+
+    systemd reads ``/etc/systemd/system`` before ``/run/systemd/system``, so a
+    runtime mask (``systemctl mask --runtime``, a ``/run`` symlink to
+    ``/dev/null``) only holds while there is no canonical file in ``/etc``:
+    exactly a box a 1.6.0 nightly installed, which has only the suffixed unit.
+    Writing the ``/etc`` file there would shadow the mask (#3024).
+    """
+    if unit_path.is_symlink() or unit_path.exists():
+        return False
+    return _enabled_state(run, unit_path.name).startswith("masked")
+
+
 def canonical_owns_state(state: str, active: bool | None) -> bool:
     """Whether ``hermes-gateway.service``'s own on/off state is the operator's.
 
@@ -473,7 +487,8 @@ def gateway_state_unit(
     if not hashed:
         return unit_path.name if present else None
     if not present:
-        return hashed[0].name
+        # A runtime mask is the operator's off switch even with no file (#3024).
+        return unit_path.name if _runtime_masked(run, unit_path) else hashed[0].name
     state = _enabled_state(run, unit_path.name)
     active = _active_state(run, unit_path.name)
     return unit_path.name if canonical_owns_state(state, active) else hashed[0].name
@@ -564,8 +579,11 @@ def migrate_hashed_units(
         return RegenResult("noop", "no hashed hermes-gateway unit")
     if which("systemctl") is None:
         return RegenResult("noop", "hashed hermes-gateway unit found but no systemctl; left alone")
-    masked = is_masked(unit_path)
     pre_existing = unit_path.is_symlink() or unit_path.exists()
+    # A persistent mask (the /etc file is a /dev/null symlink), or a runtime
+    # mask that holds because there is no /etc file (#3024). Either way nothing
+    # is written to the canonical path: an /etc file would shadow the /run mask.
+    masked = is_masked(unit_path) or _runtime_masked(run, unit_path)
     old_text = None
     if pre_existing and not masked:
         with contextlib.suppress(OSError, UnicodeDecodeError):
@@ -639,7 +657,7 @@ def migrate_hashed_units(
                     f"{GATEWAY_UNIT} {what}: {' '.join(argv[1:-1])} failed: {detail[:200]}"
                 )
 
-        if not pre_existing:
+        if not pre_existing and not masked:
             # An `enable --runtime` lives under /run; only `disable --runtime`
             # removes it.
             argv = ["systemctl", "disable", *runtime_flag, "--now", GATEWAY_UNIT]
@@ -770,6 +788,14 @@ def migrate_hashed_units(
         if not unlink_errors:
             raise
         unlink_errors.append(str(exc))
+    for path in hashed:
+        if path.exists():
+            continue
+        # A unit stopped (or crash-looping) before its file went stays listed
+        # as `not-found failed` in `systemctl --failed` until this. Cosmetic
+        # for the box, so a failure is ignored.
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            _run(run, ["systemctl", "reset-failed", path.name], timeout=30)
     if unlink_errors:
         result.message = f"{GATEWAY_UNIT}: " + ", ".join(done)
         raise GatewayCleanupError(_failure("; ".join(unlink_errors), "left behind", done), result)
@@ -815,7 +841,7 @@ def install_gateway_unit(
     result = RegenResult("installed", "", migrated.was_enabled, migrated.was_active)
     done = result.steps
     done.extend(migrated.steps)
-    if is_masked(unit_path):
+    if is_masked(unit_path) or (which("systemctl") is not None and _runtime_masked(run, unit_path)):
         result.action = "noop"
         result.message = f"{GATEWAY_UNIT} is masked; left alone" + (
             f" ({', '.join(done)})" if done else ""

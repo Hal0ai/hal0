@@ -345,10 +345,13 @@ def test_gateway_masked_generator_is_skipped(tmp_path: Path) -> None:
     assert not [c for c in box.log() if c.startswith("hermes ")]
     assert link.is_symlink() and os.readlink(link) == "/dev/null"
     assert box.state_of("hermes-gateway.service") == "masked"
+    # No unit file is left to enable under a mask: the remedy re-runs the
+    # install after the unmask (#3025).
     assert (
-        "(run 'systemctl unmask hermes-gateway.service && systemctl enable --now "
-        "hermes-gateway.service'" in res.stdout
+        f"(run 'systemctl unmask hermes-gateway.service && {box.bin / 'hal0'} agent install "
+        "hermes'" in res.stdout
     )
+    assert "systemctl enable --now hermes-gateway.service" not in res.stdout
 
 
 def test_gateway_fresh_install_enables(tmp_path: Path) -> None:
@@ -514,3 +517,29 @@ def test_a_failed_install_still_warns_not_installed(tmp_path: Path, monkeypatch)
     res = box.run(HERMES_BLOCK)
     assert res.returncode == 0, res.stderr
     assert "hermes-gateway unit not installed" in res.stdout + res.stderr
+
+
+# ── #3024: a runtime mask with no /etc canonical file ────────────────────────
+
+
+def test_a_runtime_mask_runs_the_move_and_writes_no_unit(tmp_path: Path) -> None:
+    """#3024: is-enabled reports masked-runtime only while there is no /etc file.
+    The installer runs the mask-safe `migrate`, never `install` (whose /etc file
+    would shadow the /run mask), and enables nothing."""
+    box = Box(tmp_path)
+    box.provisioned()
+    box.set_state("hermes-gateway.service", "masked-runtime")
+    res = box.run(HERMES_BLOCK)
+    assert res.returncode == 0, res.stderr
+    log = box.log()
+    assert "python -m hal0.agents.hermes_gateway_regen migrate" in log
+    assert "python -m hal0.agents.hermes_gateway_regen install" not in log
+    assert not (box.unit_dir / "hermes-gateway.service").exists()
+    assert not [
+        c for c in log if "hermes-gateway" in c and c.startswith(("enable", "disable", "start"))
+    ]
+    assert "hermes-gateway.service is masked-runtime; left as is" in res.stdout
+    assert (
+        f"systemctl unmask --runtime hermes-gateway.service && {box.bin / 'hal0'} agent install "
+        "hermes'" in res.stdout
+    )

@@ -639,6 +639,12 @@ def repair_host_flm_store_link(*, fchown: Any = os.fchown, link: Any = None) -> 
 
 # ── Timeouts ───────────────────────────────────────────────────────────────────
 # TIER1: separate health budget from infer budget.
+#: The one embeddings model FLM's ``--embed 1`` loads (FLM has no per-role
+#: model selection). The embed gate names it explicitly: ``/v1/models`` lists
+#: only chat tags, so its ``models[0]`` is a chat model, which on FLM 1.0.x may
+#: not be installed and gets pulled on first request (#3023).
+FLM_EMBED_TAG = "embed-gemma:300m"
+
 _HEALTH_TIMEOUT = httpx.Timeout(5.0)
 # The sentinel completion can take a moment on cold NPU; give it a
 # more generous read window than llama-server.
@@ -987,9 +993,7 @@ class FLMProvider(Provider):
             # Do not silently swallow — surface the failure to the fail-watcher.
             return {"ok": False, "status": "exception", "detail": str(exc)}
 
-    async def verify_inference(
-        self, port: int, expected_model: str | None = None
-    ) -> dict[str, Any]:
+    async def verify_inference(self, port: int, expected_model: str | None) -> dict[str, Any]:
         """One-shot real-inference gate — a single ``/v1/chat/completions``.
 
         Run EXACTLY ONCE at the warm→ready promotion (see
@@ -998,14 +1002,16 @@ class FLMProvider(Provider):
         not proof the NPU can actually produce a token (haloai
         lib/slots.py:899-920).
 
-        ``expected_model`` is the slot's assigned tag (the one it serves). The
-        sentinel MUST probe that model, not ``models[0]``: FLM's ``/v1/models``
-        returns its whole installed catalogue (sorted), so ``models[0]`` is an
-        arbitrary OTHER model. Probing it makes FLM switch/reload the wrong
-        weights onto its single NPU context mid-gate, which deadlocks the
-        in-flight load — the slot then sits in ``warming`` forever (#1171). We
-        fall back to ``models[0]`` only when the expected tag isn't advertised,
-        so this can never make an otherwise-working slot worse.
+        ``expected_model`` is the tag the slot was started with (the one the
+        load resolved, which may be an override not yet persisted to TOML).
+        The sentinel probes that model and no other. FLM's ``/v1/models``
+        lists a catalogue, not just the served model: on 0.9.x every installed
+        model, on 1.0.x every model FLM knows, installed or not. A chat request
+        naming any other tag makes FLM switch weights mid-gate, which
+        deadlocks the in-flight load (#1171), or, on 1.0.x, pull a model nobody
+        asked for into the shared store (#3023). So when ``expected_model`` is
+        empty or not advertised, the gate fails with a clear status instead of
+        probing ``models[0]``.
 
         The sentinel POST is wrapped in :func:`asyncio.shield`: if the load
         coroutine is cancelled mid-flight we must NOT abort an in-progress NPU
@@ -1032,8 +1038,24 @@ class FLMProvider(Provider):
                         "status": "models_endpoint_empty",
                         "detail": "/v1/models returned no entries",
                     }
+                if not expected_model:
+                    return {
+                        "ok": False,
+                        "status": "expected_model_missing",
+                        "detail": "no model tag to probe; the gate never guesses one",
+                    }
                 ids = [m.get("id") for m in models]
-                model_id = expected_model if expected_model in ids else models[0].get("id")
+                if expected_model not in ids:
+                    return {
+                        "ok": False,
+                        "status": "expected_model_not_served",
+                        "detail": (
+                            f"/v1/models does not list {expected_model!r}; refusing "
+                            "to probe a different model"
+                        ),
+                        "model": expected_model,
+                    }
+                model_id = expected_model
 
             async with async_client(timeout=_HEALTH_INFER_TIMEOUT) as client:
                 probe_body = {
@@ -1081,10 +1103,13 @@ class FLMProvider(Provider):
         WARMING forever. This exercises the embed path instead — the actual
         role the slot serves — so an embed-primary slot can promote to READY.
 
-        Mirrors :meth:`verify_inference`: reads ``/v1/models`` for the served
-        model id, then a single shielded ``/v1/embeddings`` POST (shield: never
-        hand FLM a cancelled request → NPU double-free). Never raises; a
-        transport failure resolves to ``ok=False`` (retryable WARMING).
+        Mirrors :meth:`verify_inference`: reads ``/v1/models`` as a liveness
+        check, then a single shielded ``/v1/embeddings`` POST naming
+        :data:`FLM_EMBED_TAG` (shield: never hand FLM a cancelled request →
+        NPU double-free). It never names ``models[0]``: that list holds chat
+        tags only, and on FLM 1.0.x naming an uninstalled one starts a pull
+        (#3023). Never raises; a transport failure resolves to ``ok=False``
+        (retryable WARMING).
         """
         models_url = f"http://127.0.0.1:{port}/v1/models"
         embed_url = f"http://127.0.0.1:{port}/v1/embeddings"
@@ -1100,7 +1125,7 @@ class FLMProvider(Provider):
                         "status": "models_endpoint_empty",
                         "detail": "/v1/models returned no entries",
                     }
-                model_id = models[0].get("id")
+                model_id = FLM_EMBED_TAG
 
             async with async_client(timeout=_HEALTH_INFER_TIMEOUT) as client:
                 probe_body = {"model": model_id, "input": "ping"}

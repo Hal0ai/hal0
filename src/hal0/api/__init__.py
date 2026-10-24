@@ -150,6 +150,7 @@ from hal0.dispatcher.router import Dispatcher
 from hal0.events import EventBus
 from hal0.hardware.probe import HardwareProbe
 from hal0.observability import sentry
+from hal0.providers.flm import FLM_EMBED_TAG
 from hal0.registry.discover import _collect_referenced_model_ids, scan_and_register
 from hal0.registry.model import _BLESSED_PREFIX
 from hal0.registry.runner_image_store import RunnerImageStore
@@ -736,7 +737,7 @@ async def hal0_refresh_composite_models(app: Any, *, evict: Iterable[str] = ()) 
 # ``/v1/models`` response (it only lists chat tags), so the dispatcher's
 # passthrough cache never learns about them and routes the canonical tags
 # to nowhere. Seed the cache explicitly.
-_FLM_EMBED_TAG = "embed-gemma:300m"
+_FLM_EMBED_TAG = FLM_EMBED_TAG
 _FLM_ASR_TAG = "whisper-v3:turbo"
 
 

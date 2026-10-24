@@ -1084,12 +1084,18 @@ def _gateway_unit_active(unit: str) -> bool:
 def _gateway_left_off_note(unit: str, state: str) -> None:
     """Report that ``unit`` was left off and how to turn it on (install.sh
     ``unit_left_off_note``). A runtime mask lives under /run, so only
-    ``unmask --runtime`` removes it."""
+    ``unmask --runtime`` removes it.
+
+    A masked gateway has no unit file to enable: a persistent mask is the /etc
+    unit path itself, and systemd reports a runtime mask only while there is no
+    /etc file. After the unmask, this command lays the unit down and turns it
+    on, so that is the remedy, not ``systemctl enable --now`` (#3025).
+    """
     turn_on = f"systemctl enable --now {unit}"
     if state == "masked":
-        turn_on = f"systemctl unmask {unit} && {turn_on}"
+        turn_on = f"systemctl unmask {unit} && sudo hal0 agent install hermes"
     elif state == "masked-runtime":
-        turn_on = f"systemctl unmask --runtime {unit} && {turn_on}"
+        turn_on = f"systemctl unmask --runtime {unit} && sudo hal0 agent install hermes"
     console.print(f"[yellow]{unit} is {state}; left as is (run '{turn_on}' to turn it on)[/yellow]")
 
 
@@ -1209,11 +1215,13 @@ def _install_hermes_gateway() -> None:
     state = _gateway_enable_state(probe_unit) if has_systemctl else "not-found"
     disabled = state in ("disabled", "masked-runtime")
     was_active = has_systemctl and disabled and _gateway_unit_active(probe_unit)
-    if state == "masked":
-        # Never run the generator over a persistent mask: the unit path is a
-        # /dev/null symlink, and writing through it would unmask the unit.
-        # (masked-runtime lives under /run, so the /etc unit file the
-        # generator writes is safe to refresh: treated like disabled.)
+    if state in ("masked", "masked-runtime"):
+        # Never run the generator over a mask. A persistent mask is the /etc
+        # unit path itself (a /dev/null symlink): writing through it would
+        # unmask the unit. A runtime mask lives under /run and only holds while
+        # there is no /etc file (systemd reads /etc first, and reports
+        # `disabled` once one exists), so writing the /etc file would shadow it
+        # and turn the gateway back on (#3024).
         # A suffixed gateway still running next to the mask is moved off all
         # the same: the move keeps the mask and stops and removes the
         # suffixed unit, so the mask means off (#2950).

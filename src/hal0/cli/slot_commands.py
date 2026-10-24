@@ -379,8 +379,20 @@ def slot_load(
     if json_out:
         typer.echo(jsonlib.dumps(snap, indent=2))
         return
+    state = snap.get("state")
+    if state == "offline":
+        # load() returns an OFFLINE snapshot, not an error, when the slot has
+        # no model to serve (no -m and an empty [model].default). Nothing was
+        # loaded, so do not print "Loaded" (#3023).
+        reason = (snap.get("metadata") or {}).get("message") or "no model to load"
+        console.print(
+            f"[bold yellow]Not loaded[/bold yellow] [bold]{name}[/bold] → "
+            f"state={_fmt_state(state)}: {reason}"
+        )
+        console.print(f"  pass a model: [bold]hal0 slot load {name} -m <model>[/bold]")
+        raise typer.Exit(1)
     console.print(
-        f"Loaded [bold]{name}[/bold] → state={_fmt_state(snap.get('state'))} model={snap.get('model_id', '—')}"
+        f"Loaded [bold]{name}[/bold] → state={_fmt_state(state)} model={snap.get('model_id', '—')}"
     )
 
 
