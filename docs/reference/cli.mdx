@@ -263,10 +263,10 @@ config with `auth_style = "google_query"` still loads: it's coerced to `bearer` 
 |---|---|---|
 | `comfyui models list` | — | `--json` |
 | `comfyui models install <id>...` | one or more model ids | — |
-| `comfyui models remove <id>` | `id` | — |
+| `comfyui models remove <id>` | `id` | `--include-shared` |
 | `comfyui files` | — | — |
 
-`models install` installs the models one at a time, following each download, and exits 1 if any fails. A failure does not stop the models after it.
+`models install` installs the models one at a time, following each download, and exits 1 if any fails. A failure does not stop the models after it. `models remove` keeps a weight file another installed model loads and lists it; `--include-shared` deletes it too.
 
 ## `hal0 agent` — manage bundled agents
 
