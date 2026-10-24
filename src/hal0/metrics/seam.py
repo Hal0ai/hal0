@@ -124,6 +124,7 @@ class RequestSeam:
             first_content_ts: float | None = None
             token_chunks = 0
             last_payload: dict[str, Any] | None = None
+            stop_reason: str | None = None
             stall_reason: str | None = None
             ok = True
             error_code: str | None = None
@@ -161,6 +162,16 @@ class RequestSeam:
                             stall_reason = str(stall_info.get("reason") or "unknown")
                         else:
                             last_payload = parsed
+                            # A trailing usage-only chunk (empty ``choices``,
+                            # #2994) would otherwise erase the stop reason.
+                            choices = parsed.get("choices")
+                            if isinstance(choices, list) and choices:
+                                first = choices[0]
+                                reason = (
+                                    first.get("finish_reason") if isinstance(first, dict) else None
+                                )
+                                if isinstance(reason, str):
+                                    stop_reason = reason
                     yield chunk
             except Exception as exc:  # pragma: no cover -- upstream/client disconnect
                 ok = False
@@ -196,6 +207,8 @@ class RequestSeam:
                 )
                 if last_payload is not None:
                     row.update(extract_usage_fields(last_payload))
+                    if row.get("stop_reason") is None and stop_reason is not None:
+                        row["stop_reason"] = stop_reason
                     timings = extract_timings_fields(last_payload)
                     if timings:
                         row.update(timings)

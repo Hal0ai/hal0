@@ -38,6 +38,7 @@ from fastapi.responses import Response, StreamingResponse
 from hal0.api import image_cache, live_sockets
 from hal0.api.deps import DispatcherDep
 from hal0.dispatcher.lane_pin import lane_slot_pin, preferred_slot, set_lane_pin, set_upstream_only
+from hal0.dispatcher.stream_usage import ensure_include_usage, strip_usage_only_chunk
 from hal0.memory.extraction_env import MEMORY_ALIAS
 from hal0.upstreams.filters import apply_filters
 
@@ -858,6 +859,34 @@ async def _wake_capability_slot(request: Request) -> None:
         )
 
 
+async def _request_flm_stream_usage(request: Request, call: Any) -> bool:
+    """Ask a streamed FLM chat upstream for its usage chunk (#2994).
+
+    FastFlowLM >= 1.0.10 omits ``usage`` from streams unless
+    ``stream_options.include_usage`` is set, which the metrics seam needs for
+    exact token counts. Rewrites ``call.body`` and returns True when the extra
+    usage-only chunk must be hidden from the client. Scoped to NPU (FLM) slots;
+    other upstreams are untouched.
+    """
+    if not call.streaming or not request.url.path.endswith("/chat/completions"):
+        return False
+    slot = call.slot_name or call.container_slot_name
+    slot_manager = getattr(request.app.state, "slot_manager", None)
+    if not slot or slot_manager is None:
+        return False
+    try:
+        cfg = await slot_manager.get_config(slot)
+    except Exception:
+        return False
+    if not isinstance(cfg, dict) or cfg.get("device") != "npu":
+        return False
+    rewritten = ensure_include_usage(call.body)
+    if rewritten is None:
+        return False
+    call.body, strip = rewritten
+    return strip
+
+
 async def _dispatch_and_forward(
     request: Request,
     dispatcher: DispatcherDep,
@@ -906,6 +935,7 @@ async def _dispatch_and_forward(
         # — anything before this point (auth, body parse, dispatcher
         # routing) is local overhead, not prefill cost.
         dispatch_started = time.monotonic()
+        strip_usage = await _request_flm_stream_usage(request, call)
         if call.streaming:
             # The relay keeps the upstream's content type, which need not be
             # text/event-stream; register it for revocation either way (#2816).
@@ -930,6 +960,9 @@ async def _dispatch_and_forward(
                 t_entry=t_entry,
                 dispatch_started=dispatch_started,
             )
+        if strip_usage:
+            # Outside the seam: the seam has already read the usage chunk.
+            response.body_iterator = strip_usage_only_chunk(response.body_iterator)
         return response
     if isinstance(response, Response) and getattr(response, "body", None):
         _record_nonstreaming_throughput(response.body, request.app.state, call.upstream_name)
