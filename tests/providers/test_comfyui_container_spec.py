@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from hal0.providers.comfyui import ComfyUIProvider
+from hal0.providers.comfyui import ComfyUIProvider, provision_data_root
 from hal0.providers.container import _render_quadlet_from_plan, _spec_provider_for
 
 _GPU_NODES = ["/dev/kfd", "/dev/dri/card1", "/dev/dri/renderD128"]
@@ -59,6 +59,18 @@ def _pin_model_store(monkeypatch: pytest.MonkeyPatch) -> None:
     sources — pin the resolver to it (ML-3's unified store.store_root()
     default is now paths.models_dir(), not /mnt/ai-models)."""
     monkeypatch.setenv("HAL0_MODEL_STORE", "/mnt/ai-models")
+
+
+@pytest.fixture(autouse=True)
+def _no_data_root_provisioning(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Building a spec must not touch the literal paths these tests assert on.
+
+    ``container_spec`` provisions the data root; against ``/mnt/ai-models`` or
+    ``/srv/comfy-data`` that would create directories and write files on any
+    box where they are writable. Provisioning itself is tested against
+    ``tmp_path`` in test_comfyui_provisioning.py.
+    """
+    monkeypatch.setattr("hal0.providers.comfyui.provision_data_root", lambda: None)
 
 
 # ── container_spec live parity ────────────────────────────────────────────────
@@ -233,6 +245,8 @@ def test_comfyui_container_spec_provisions_data_dirs(
     """
     root = tmp_path / "comfy-data"
     monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(root))
+    # This one test wants the real provisioning (the autouse fixture no-ops it).
+    monkeypatch.setattr("hal0.providers.comfyui.provision_data_root", provision_data_root)
     ComfyUIProvider().container_spec(_img_cfg(), {})
     for sub in ("models", "output", "input", "user", "custom_nodes"):
         assert (root / sub).is_dir(), sub
