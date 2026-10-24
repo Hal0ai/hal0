@@ -63,6 +63,11 @@ def workflows_dir() -> Path:
     return data_root() / "workflows"
 
 
+def user_dir() -> Path:
+    """ComfyUI's ``user`` directory: its saved workflows, settings and user data."""
+    return data_root() / "user"
+
+
 def custom_nodes_dir() -> Path:
     """Directory of ComfyUI custom nodes."""
     return data_root() / "custom_nodes"

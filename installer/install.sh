@@ -3263,11 +3263,13 @@ fi
 # The docker comfy-up/down/logs/postinstall.sh scripts have been retired; the
 # podman img slot (hal0-slot@img.service) is the sole lifecycle owner of :8188
 # (#984, also resolves #874).  We still create the model-share subdirectories
-# and seed the optional helper assets (custom nodes, extra_model_paths.yaml)
-# because the img slot bind-mounts the same paths.
+# because the img slot bind-mounts the same paths.  Everything inside them is
+# the ComfyUI provider's: at every container launch it writes
+# extra_model_paths.yaml (when absent or empty), syncs the hal0_gpu_gate custom
+# node and creates the model subdirectories (ADR-0036), so this block no longer
+# copies either file.
 ui_step "ComfyUI model share" "~2-10s"
 
-COMFYUI_CUSTOM_NODES_SRC="${REPO_ROOT}/installer/comfyui/custom_nodes"
 COMFYUI_MODELS_ROOT="/mnt/ai-models/comfyui"
 
 if [[ "${DEV_MODE}" -eq 1 ]]; then
@@ -3281,7 +3283,7 @@ else
     # DENIES chmod — so `install -d`/`install -m` blow up with "Operation not
     # permitted" and abort the whole install. ComfyUI is optional (the img
     # slot only needs the dirs to EXIST), so use plain mkdir -p (no mode
-    # change) and treat perms/copy failures as warnings, never fatal. Operators
+    # change) and treat perms failures as warnings, never fatal. Operators
     # who don't want ComfyUI at all can set HAL0_SKIP_COMFYUI=1.
     _comfy_ok=1
     for _subdir in models output input user custom_nodes; do
@@ -3291,32 +3293,6 @@ else
         info "ensured ${COMFYUI_MODELS_ROOT}/{models,output,input,user,custom_nodes}"
     else
         warn "could not create some ${COMFYUI_MODELS_ROOT} subdirs (read-only or NFS-squashed perms?) — ComfyUI img slot may be degraded; set HAL0_SKIP_COMFYUI=1 to silence"
-    fi
-
-    if [[ -d "${COMFYUI_CUSTOM_NODES_SRC}" ]]; then
-        if cp "${COMFYUI_CUSTOM_NODES_SRC}"/*.py "${COMFYUI_MODELS_ROOT}/custom_nodes/" 2>/dev/null; then
-            info "wrote ComfyUI custom nodes → ${COMFYUI_MODELS_ROOT}/custom_nodes/"
-        else
-            warn "could not write ComfyUI custom nodes to ${COMFYUI_MODELS_ROOT}/custom_nodes/ (perms) — skipped"
-        fi
-    else
-        warn "${COMFYUI_CUSTOM_NODES_SRC} not found — ComfyUI custom nodes not installed"
-    fi
-
-    # Place extra_model_paths.yaml if not already present (operator may have a
-    # customised copy — never overwrite).
-    _EXTRA_PATHS_SRC="${REPO_ROOT}/installer/comfyui/extra_model_paths.yaml"
-    _EXTRA_PATHS_DST="${COMFYUI_MODELS_ROOT}/extra_model_paths.yaml"
-    if [[ -f "${_EXTRA_PATHS_DST}" ]]; then
-        info "${_EXTRA_PATHS_DST} exists — left alone"
-    elif [[ -f "${_EXTRA_PATHS_SRC}" ]]; then
-        if cp "${_EXTRA_PATHS_SRC}" "${_EXTRA_PATHS_DST}" 2>/dev/null; then
-            info "wrote ${_EXTRA_PATHS_DST}"
-        else
-            warn "could not write ${_EXTRA_PATHS_DST} (perms) — create manually"
-        fi
-    else
-        warn "${_EXTRA_PATHS_SRC} not found — extra_model_paths.yaml not placed (create manually)"
     fi
 fi
 

@@ -8,8 +8,10 @@ inference mode, this middleware asks hal0-api's GpuArbiter to switch to image
 mode and waits briefly for the switch to complete before allowing ComfyUI to
 continue.
 
-Deployment: this single file is dropped into the host-mounted
-``custom_nodes`` dir (``/mnt/ai-models/comfyui/custom_nodes/``) — no image
+Deployment: this single file ships as a hal0 package asset
+(``hal0.comfyui.assets``); the ComfyUI provider copies it into the
+host-mounted ``custom_nodes`` dir (``hal0.comfyui.paths.custom_nodes_dir()``)
+whenever it builds the container spec, replacing a stale copy — no image
 rebuild. ComfyUI imports it at startup; ``_install()`` appends an aiohttp
 middleware to the PromptServer app (the same mechanism ComfyUI-Login uses).
 The container runs with host networking, so hal0-api is on loopback.
@@ -51,6 +53,7 @@ _SWITCH_POLL_S = _float_env("HAL0_COMFYUI_SWITCH_POLL_S", 0.5)
 #: Job-submission routes — and ONLY those. Everything the editor needs
 #: (/object_info, /queue GET, workflow save/load, uploads) always passes.
 _BLOCK_PATHS = frozenset({"/prompt", "/api/prompt"})
+
 
 def _is_prompt_submit(method: str, path: str) -> bool:
     return method == "POST" and path in _BLOCK_PATHS

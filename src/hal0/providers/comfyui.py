@@ -30,8 +30,8 @@ Endpoints we touch on the upstream:
 from __future__ import annotations
 
 import asyncio
+import importlib.resources
 import logging
-import os
 import time
 import uuid
 from typing import Any
@@ -55,6 +55,12 @@ log = logging.getLogger(__name__)
 # so weights and custom nodes persist across container restarts.
 _COMFYUI_APP_DIR = "/opt/ComfyUI"
 _COMFYUI_BASE_DIR = "/var/lib/hal0/comfyui"
+# Where the host's models dir is mounted inside the container; also the
+# base_path extra_model_paths.yaml points ComfyUI at.
+_COMFYUI_MODELS_MOUNT = "/root/comfy-models"
+# The GPU-gate custom node, shipped as a package asset (hal0.comfyui.assets)
+# and synced into custom_nodes/ at every container launch.
+_GPU_GATE_NODE = "hal0_gpu_gate.py"
 
 # Live-validated flag bundle (matches the "comfyui" seed profile). Used
 # when the slot has no resolvable profile.
@@ -93,6 +99,85 @@ class ComfyUIInferError(Hal0Error):
 
     code = "dispatch.upstream_failed"
     status = 502
+
+
+# ── Data-root provisioning ────────────────────────────────────────────────────
+
+
+def render_extra_model_paths() -> str:
+    """The ``extra_model_paths.yaml`` that maps ComfyUI's model types onto the mounted models dir.
+
+    One ``<type>: <dir>`` line per :data:`hal0.comfyui.paths.SUBDIRS` entry, in
+    sorted order, under ``base_path`` (the in-container models mount).
+    """
+    entries = (f"    {key}: {comfyui_paths.SUBDIRS[key]}" for key in sorted(comfyui_paths.SUBDIRS))
+    return "\n".join(["comfyui:", f"    base_path: {_COMFYUI_MODELS_MOUNT}", *entries]) + "\n"
+
+
+def _ensure_data_dirs() -> None:
+    """Create every directory the container spec bind-mounts (and ``workflows``)."""
+    root = comfyui_paths.data_root()
+    dirs = [
+        *(comfyui_paths.models_root() / sub for sub in comfyui_paths.SUBDIRS.values()),
+        root / "output",
+        root / "input",
+        comfyui_paths.user_dir(),
+        comfyui_paths.custom_nodes_dir(),
+        comfyui_paths.workflows_dir(),
+    ]
+    for directory in dirs:
+        directory.mkdir(parents=True, exist_ok=True)
+
+
+def _ensure_extra_model_paths() -> None:
+    """Write the model-paths file unless the operator already put content in it.
+
+    An empty file hides every model from ComfyUI, so absent or blank (after
+    strip) means "write ours"; anything else is the operator's and stays.
+    """
+    path = comfyui_paths.extra_model_paths_file()
+    try:
+        if path.read_bytes().strip():
+            return
+    except FileNotFoundError:
+        pass
+    path.write_text(render_extra_model_paths(), encoding="utf-8")
+
+
+def _sync_gpu_gate_node() -> None:
+    """Copy the packaged GPU-gate node into ``custom_nodes/`` when it is missing or differs."""
+    shipped = importlib.resources.files("hal0.comfyui.assets").joinpath(_GPU_GATE_NODE)
+    wanted = shipped.read_bytes()
+    dest = comfyui_paths.custom_nodes_dir() / _GPU_GATE_NODE
+    try:
+        if dest.read_bytes() == wanted:
+            return
+    except FileNotFoundError:
+        pass
+    dest.write_bytes(wanted)
+
+
+def provision_data_root() -> None:
+    """Make the ComfyUI data root ready to bind-mount; idempotent and best-effort.
+
+    Podman refuses a bind mount whose host path is absent (statfs, exit 125),
+    which crash-looped the img slot on any box where the tree hadn't been
+    provisioned (fresh install, or a store root that moved after install). So
+    this creates the mounted directories, writes ``extra_model_paths.yaml`` if
+    it is absent or empty, and syncs the GPU-gate custom node. Each step fails
+    on its own: a read-only store logs and degrades to podman reporting the
+    missing path, and one failing step never skips the others.
+    """
+    for step in (_ensure_data_dirs, _ensure_extra_model_paths, _sync_gpu_gate_node):
+        try:
+            step()
+        except OSError as exc:
+            log.warning(
+                "comfyui.data_root_provision_failed step=%s root=%s err=%s",
+                step.__name__,
+                comfyui_paths.data_root(),
+                exc,
+            )
 
 
 # ── The provider ──────────────────────────────────────────────────────────────
@@ -270,33 +355,18 @@ class ComfyUIProvider(Provider):
 
         # ComfyUI's working data tracks the configured model store; hal0.comfyui.paths
         # owns the root (and the HAL0_COMFYUI_DATA_ROOT override), resolved per render.
-        data_root = str(comfyui_paths.data_root())
-        # Podman refuses a bind mount whose host path is absent (statfs →
-        # exit 125), which crash-looped the img slot on any box where the
-        # comfyui tree hadn't been provisioned (fresh install, or a store
-        # root that moved after install). Ensure every mounted dir exists,
-        # and the extra_model_paths.yaml file too — an empty one is a valid
-        # ComfyUI config. Best-effort: a read-only store degrades to the old
-        # behaviour (podman reports the missing path).
-        try:
-            for sub in ("models", "output", "input", "user", "custom_nodes"):
-                os.makedirs(f"{data_root}/{sub}", exist_ok=True)
-            yaml_path = f"{data_root}/extra_model_paths.yaml"
-            if not os.path.exists(yaml_path):
-                with open(yaml_path, "w", encoding="utf-8"):
-                    pass
-        except OSError as exc:
-            log.warning("comfyui.data_root_provision_failed root=%s err=%s", data_root, exc)
+        provision_data_root()
+        data_root = comfyui_paths.data_root()
         # read_only is a first-class Mount flag; extra_model_paths.yaml is the
         # only read-only mount (the renderer appends ":ro").
         mounts: list[Mount] = [
-            Mount(f"{data_root}/models", "/root/comfy-models"),
-            Mount(f"{data_root}/output", f"{_COMFYUI_APP_DIR}/output"),
-            Mount(f"{data_root}/input", f"{_COMFYUI_APP_DIR}/input"),
-            Mount(f"{data_root}/user", f"{_COMFYUI_APP_DIR}/user"),
-            Mount(f"{data_root}/custom_nodes", f"{_COMFYUI_APP_DIR}/custom_nodes"),
+            Mount(str(comfyui_paths.models_root()), _COMFYUI_MODELS_MOUNT),
+            Mount(str(data_root / "output"), f"{_COMFYUI_APP_DIR}/output"),
+            Mount(str(data_root / "input"), f"{_COMFYUI_APP_DIR}/input"),
+            Mount(str(comfyui_paths.user_dir()), f"{_COMFYUI_APP_DIR}/user"),
+            Mount(str(comfyui_paths.custom_nodes_dir()), f"{_COMFYUI_APP_DIR}/custom_nodes"),
             Mount(
-                f"{data_root}/extra_model_paths.yaml",
+                str(comfyui_paths.extra_model_paths_file()),
                 f"{_COMFYUI_APP_DIR}/extra_model_paths.yaml",
                 read_only=True,
             ),

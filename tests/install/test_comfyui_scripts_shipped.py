@@ -11,8 +11,8 @@ Assertions:
   (c) installer/install.sh contains NO comfy-ui sudoers block
       (``packaging/sudoers/hal0-comfyui`` is retired).
   (d) The model-share setup block is still present (COMFYUI_MODELS_ROOT).
-  (e) The remaining non-docker scripts (get_*.sh, set_extra_paths.sh) still
-      exist and are bash -n clean.
+  (e) The remaining non-docker scripts (get_*.sh) still exist and are
+      bash -n clean.
   (f) No Python source file shells out to any of the retired scripts.
 """
 
@@ -43,7 +43,6 @@ RETAINED_SCRIPTS = [
     "get_qwen_image.sh",
     "get_sdxl.sh",
     "get_wan22.sh",
-    "set_extra_paths.sh",
 ]
 
 
@@ -93,9 +92,6 @@ def test_install_sh_still_sets_up_comfyui_model_share():
     content = INSTALL_SH.read_text()
     assert "COMFYUI_MODELS_ROOT" in content, (
         "install.sh no longer sets up the ComfyUI model-share directories"
-    )
-    assert "installer/comfyui/custom_nodes" in content or "COMFYUI_CUSTOM_NODES_SRC" in content, (
-        "install.sh no longer deploys ComfyUI custom nodes"
     )
 
 
