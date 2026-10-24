@@ -37,7 +37,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from hal0.capabilities.catalog import models_for_capability
+from hal0.capabilities.catalog import comfyui_row_backend, models_for_capability
 from hal0.capabilities.config import (
     CapabilityConfig,
     CapabilitySelection,
@@ -46,6 +46,7 @@ from hal0.capabilities.config import (
     save_capabilities_config,
 )
 from hal0.capabilities.profile_fit import profile_name_for_fit
+from hal0.comfyui.catalog import install_route
 from hal0.config import paths
 from hal0.config.loader import load_slot_config, write_toml_atomic
 from hal0.config.locking import file_lock
@@ -834,8 +835,11 @@ class CapabilityOrchestrator:
             )
         if not backend_id:
             return
+        # The row this device reads: an image selection's ``gpu-rocm`` (the seeded
+        # slot's device) is the picker's one ComfyUI GPU row.
+        row_backend = comfyui_row_backend(backend_id) if is_image else backend_id
         legal_backends = [b["id"] for b in match.get("backends", [])]
-        if backend_id not in legal_backends:
+        if row_backend not in legal_backends:
             raise BadRequest(
                 f"backend {backend_id!r} cannot serve model {model_id!r} for {slot}.{child}",
                 code="capability.illegal_backend_model_pair",
@@ -849,7 +853,7 @@ class CapabilityOrchestrator:
             )
         if require_downloaded and backend_id != "npu":
             backend_row = next(
-                (b for b in match.get("backends", []) if b.get("id") == backend_id),
+                (b for b in match.get("backends", []) if b.get("id") == row_backend),
                 None,
             )
             if backend_row is not None and backend_row.get("downloaded", True) is False:
@@ -859,7 +863,7 @@ class CapabilityOrchestrator:
                     model_id,
                     backend_id,
                     pullable=bool(backend_row.get("pullable")),
-                    install=f"POST /api/comfyui/models/{model_id}/install" if is_image else None,
+                    install=install_route(model_id) if is_image else None,
                 )
         if is_image:
             return
@@ -955,10 +959,12 @@ class CapabilityOrchestrator:
 
         ``install`` is the remediation for an image model, which is not a
         registry pull: the catalog install route, ``POST
-        /api/comfyui/models/<id>/install``. It replaces the pull remediation
-        and is echoed in ``details["install"]``.
+        /api/comfyui/models/<id>/install``. It replaces the pull remediation,
+        is echoed in ``details["install"]``, and reports ``pullable: False`` so
+        a client does not reach for the registry pull endpoint.
         """
         if install is not None:
+            pullable = False
             remediation = f"{install}, then re-apply once the install completes"
         elif pullable:
             remediation = f"POST /api/models/{model_id}/pull, then re-apply once the pull completes"

@@ -9,7 +9,9 @@ image branch), so model-fit rejected every row and the picker was empty on a rea
 from __future__ import annotations
 
 import json
+import os
 import struct
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -20,10 +22,20 @@ from hal0.capabilities.orchestrator import CapabilityOrchestrator
 from hal0.capabilities.profile_fit import profile_name_for_fit
 from hal0.comfyui import inventory, paths
 from hal0.comfyui.catalog import CATALOG, component_path
-from hal0.errors import Conflict, NotFound
+from hal0.errors import BadRequest, Conflict, NotFound
+from hal0.providers._gpu import (
+    GpuPreflightError,
+    require_kfd_for_gpu_slot,
+    runtime_lane_for_provider,
+)
+from hal0.providers.comfyui import ComfyUIProvider
 from tests.capabilities.test_orchestrator_reconciliation import FakeSlotManager
 
 _SDXL_KEY = "conditioner.embedders.1.x"
+# The img slot as the installer seeds it: provider comfyui, device gpu-rocm, profile comfyui.
+_SHIPPED_IMG_SEED = (
+    Path(__file__).resolve().parents[2] / "installer" / "etc-hal0" / "slots" / "img.toml"
+)
 _ALL_BACKENDS = [{"id": "gpu-vulkan"}, {"id": "gpu-rocm"}, {"id": "cpu"}]
 
 
@@ -78,13 +90,13 @@ def test_profile_fit_chat_on_gpu_is_unchanged() -> None:
     assert profile_name_for_fit("chat", "gpu-vulkan") not in (None, "comfyui")
 
 
-# ── _comfyui_backends: the one lane gate ────────────────────────────────────
+# ── comfyui_backends: the one lane gate ────────────────────────────────────
 
 
 def test_comfyui_backends_on_a_rocm_host(monkeypatch: pytest.MonkeyPatch) -> None:
     _host(monkeypatch)
 
-    assert catalog._comfyui_backends() == ["gpu-vulkan"]
+    assert catalog.comfyui_backends() == ["gpu-vulkan"]
 
 
 def test_comfyui_backends_empty_on_an_amd_host_without_the_rocm_lane(
@@ -92,13 +104,13 @@ def test_comfyui_backends_empty_on_an_amd_host_without_the_rocm_lane(
 ) -> None:
     _host(monkeypatch, rocm_lane=False)
 
-    assert catalog._comfyui_backends() == []
+    assert catalog.comfyui_backends() == []
 
 
 def test_comfyui_backends_untouched_on_a_non_amd_host(monkeypatch: pytest.MonkeyPatch) -> None:
     _host(monkeypatch, amd=False, rocm_lane=False)
 
-    assert catalog._comfyui_backends() == ["gpu-vulkan"]
+    assert catalog.comfyui_backends() == ["gpu-vulkan"]
 
 
 # ── the picker ──────────────────────────────────────────────────────────────
@@ -138,6 +150,11 @@ def test_image_picker_rows_carry_the_install_state(monkeypatch: pytest.MonkeyPat
 
 def test_image_picker_rows_skip_llm_model_fit(monkeypatch: pytest.MonkeyPatch) -> None:
     _host(monkeypatch)
+
+    def _boom(*_a: Any, **_k: Any) -> None:
+        raise AssertionError("an image row must not run the LLM model-fit check")
+
+    monkeypatch.setattr("hal0.capabilities.catalog.evaluate_model_fit", _boom)
 
     backend = catalog.models_for_capability("image", registry=None)[0]["backends"][0]
 
@@ -182,22 +199,12 @@ def test_image_picker_empty_without_rocm_lane(monkeypatch: pytest.MonkeyPatch) -
 
 @pytest.fixture
 def home(tmp_hal0_home: str) -> Path:
-    """Minimal on-disk state: the seeded ``img`` slot TOML, no capabilities.toml."""
+    """On-disk state of a fresh install: the shipped ``img`` slot TOML, no capabilities.toml."""
     home = Path(tmp_hal0_home)
     slots_dir = home / "etc" / "hal0" / "slots"
     slots_dir.mkdir(parents=True, exist_ok=True)
     (slots_dir / "img.toml").write_text(
-        "\n".join(
-            [
-                'name = "img"',
-                'type = "image"',
-                "port = 8188",
-                'provider = "comfyui"',
-                'backend = "vulkan"',
-                "",
-            ]
-        ),
-        encoding="utf-8",
+        _SHIPPED_IMG_SEED.read_text(encoding="utf-8"), encoding="utf-8"
     )
     return home
 
@@ -228,6 +235,8 @@ async def test_apply_img_not_downloaded_names_install_route(
     details = exc.value.details
     assert details["model"] == "sdxl-lightning"
     assert details["downloaded"] is False
+    # An image model is installed from the catalog, never pulled from the registry.
+    assert details["pullable"] is False
     assert details["install"] == "POST /api/comfyui/models/sdxl-lightning/install"
     assert "POST /api/comfyui/models/sdxl-lightning/install" in str(exc.value)
     # The LLM pull route is not the remedy for an image model.
@@ -303,3 +312,145 @@ async def test_apply_img_never_consults_the_llm_registry_or_model_fit(
     result = await orch.apply("img", "img", _body())
 
     assert result["model"] == "sdxl-lightning"
+
+
+# ── apply on the slot as the installer ships it ─────────────────────────────
+#
+# The seeded img slot says ``device = "gpu-rocm"`` (ComfyUI's runner is ROCm-only, #2067) and
+# first boot lifts that into the capability selection. The picker's one ComfyUI row is
+# labelled ``gpu-vulkan``, the generic GPU row (#1941). Both name the same lane, so neither
+# spelling may make `apply` refuse an installed model.
+
+
+def _slot(home: Path) -> dict[str, Any]:
+    with open(home / "etc" / "hal0" / "slots" / "img.toml", "rb") as f:
+        return tomllib.load(f)
+
+
+def _selection(home: Path) -> dict[str, Any]:
+    with open(home / "etc" / "hal0" / "capabilities.toml", "rb") as f:
+        return tomllib.load(f)["selections"]["img"]["img"]
+
+
+async def _first_boot(home: Path) -> CapabilityOrchestrator:
+    orch = CapabilityOrchestrator(slot_manager=FakeSlotManager())  # type: ignore[arg-type]
+    await orch.initialize_if_missing()
+    return orch
+
+
+async def test_first_boot_lifts_the_seeds_rocm_device_into_the_img_selection(home: Path) -> None:
+    """The premise of the cases below: a real box's persisted img device is gpu-rocm."""
+    await _first_boot(home)
+
+    assert _selection(home)["device"] == "gpu-rocm"
+    assert _selection(home)["provider"] == "comfyui"
+
+
+@pytest.mark.parametrize(
+    "partial",
+    [
+        pytest.param({"enabled": True, "model": "sdxl-lightning"}, id="no-device-in-the-request"),
+        pytest.param(
+            {"enabled": True, "model": "sdxl-lightning", "device": "gpu-rocm"}, id="gpu-rocm"
+        ),
+    ],
+)
+async def test_apply_img_on_the_seeded_rocm_device_ok(
+    home: Path, monkeypatch: pytest.MonkeyPatch, partial: dict[str, Any]
+) -> None:
+    _host(monkeypatch)
+    _install("sdxl-lightning")
+    orch = await _first_boot(home)
+
+    result = await orch.apply("img", "img", partial)
+
+    assert result["enabled"] is True
+    assert result["model"] == "sdxl-lightning"
+    # The seed's contract (#2067) is untouched: still a ROCm comfyui slot with its profile.
+    slot = _slot(home)
+    assert (slot["device"], slot["provider"], slot["profile"]) == ("gpu-rocm", "comfyui", "comfyui")
+    assert slot["model"]["default"] == "sdxl-lightning"
+
+
+async def test_apply_img_on_the_seeded_rocm_device_still_gates_on_the_install(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gpu-rocm spelling reads the same row, including its ``downloaded: false``."""
+    _host(monkeypatch)
+    orch = await _first_boot(home)
+
+    with pytest.raises(Conflict) as exc:
+        await orch.apply("img", "img", {"enabled": True, "model": "sdxl-lightning"})
+
+    assert exc.value.code == "capability.model_not_downloaded"
+    assert exc.value.details["install"] == "POST /api/comfyui/models/sdxl-lightning/install"
+    assert exc.value.details["backend"] == "gpu-rocm"
+
+
+@pytest.mark.parametrize("device", ["cpu", "gpu-cuda"])
+async def test_apply_img_refuses_a_device_that_is_not_the_gpu_lane(
+    home: Path, monkeypatch: pytest.MonkeyPatch, device: str
+) -> None:
+    """Only the GPU lane's two spellings are the picker's row; anything else is still illegal."""
+    _host(monkeypatch)
+    _install("sdxl-lightning")
+    orch = await _first_boot(home)
+
+    with pytest.raises(BadRequest) as exc:
+        await orch.apply(
+            "img", "img", {"enabled": True, "model": "sdxl-lightning", "device": device}
+        )
+
+    assert exc.value.code == "capability.illegal_backend_model_pair"
+    assert exc.value.details["legal_backends"] == ["gpu-vulkan"]
+    assert exc.value.details["backend"] == device
+
+
+# ── the slot an apply writes is one the comfyui provider launches ───────────
+
+
+def _kfd_and_render_node(tmp_path: Path) -> dict[str, Any]:
+    """Faked device nodes the kfd preflight accepts, for the current uid."""
+    kfd = tmp_path / "kfd"
+    kfd.write_text("")
+    dri = tmp_path / "dri"
+    dri.mkdir()
+    (dri / "renderD128").symlink_to("/dev/null")
+    return {
+        "kfd_path": str(kfd),
+        "dri_dir": str(dri),
+        "env": {},
+        "amd_host": True,
+        "runner_uid": os.getuid(),
+    }
+
+
+@pytest.mark.parametrize("device", ["gpu-rocm", "gpu-vulkan"])
+async def test_the_slot_an_img_apply_writes_passes_the_providers_launch_gates(
+    home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, device: str
+) -> None:
+    """Task 5 auto-selects with ``device = comfyui_backends()[0]`` (``gpu-vulkan``); an operator
+    on the seeded box sends ``gpu-rocm``. Whichever is written, the provider builds its env and
+    the ROCm-lane kfd preflight treats it as the same ROCm slot."""
+    _host(monkeypatch)
+    _install("sdxl-lightning")
+    orch = await _first_boot(home)
+
+    await orch.apply("img", "img", {"enabled": True, "model": "sdxl-lightning", "device": device})
+
+    slot = _slot(home)
+    assert slot["device"] == device
+    assert slot["provider"] == "comfyui"
+    assert slot["profile"] == "comfyui"
+    provider = ComfyUIProvider()
+    env = provider.build_env(slot, {"path": ""})
+    assert env["HAL0_BACKEND"] in {"rocm", "vulkan"}
+    lane = runtime_lane_for_provider(provider)
+    assert lane == "rocm"
+    nodes = _kfd_and_render_node(tmp_path)
+    require_kfd_for_gpu_slot("img", device=slot["device"], runtime_lane=lane, **nodes)  # no raise
+
+    # Without the compute node the gate refuses both spellings alike.
+    missing = {**nodes, "kfd_path": str(tmp_path / "no-kfd")}
+    with pytest.raises(GpuPreflightError):
+        require_kfd_for_gpu_slot("img", device=slot["device"], runtime_lane=lane, **missing)

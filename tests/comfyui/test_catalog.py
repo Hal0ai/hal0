@@ -16,6 +16,8 @@ from hal0.comfyui.catalog import (
     ComponentKind,
     ImageModel,
     get_model,
+    install_path,
+    install_route,
     install_state,
     load_template,
     models_using,
@@ -94,6 +96,23 @@ def test_catalog_keys_match_model_ids() -> None:
 def test_get_model() -> None:
     assert get_model("qwen-image") is CATALOG["qwen-image"]
     assert get_model("no-such-model") is None
+
+
+def test_install_route_names_the_install_call_for_messages_and_details() -> None:
+    assert install_path("sdxl-lightning") == "/api/comfyui/models/sdxl-lightning/install"
+    assert install_route("sdxl-lightning") == "POST /api/comfyui/models/sdxl-lightning/install"
+
+
+def test_install_path_is_the_route_the_api_serves() -> None:
+    """The one string the resolver, the capability gate and the CLI all name must be a route."""
+    from hal0.api.routes.comfyui import router
+
+    served = {
+        (method, f"/api/comfyui{route.path}")
+        for route in router.routes
+        for method in getattr(route, "methods", ())
+    }
+    assert ("POST", install_path("{model_id}")) in served
 
 
 def test_api_renderable_set() -> None:

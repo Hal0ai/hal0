@@ -723,6 +723,16 @@ def get_model(model_id: str) -> ImageModel | None:
     return CATALOG.get(model_id)
 
 
+def install_path(model_id: str) -> str:
+    """The API path that installs ``model_id`` (``POST``), for a client to call."""
+    return f"/api/comfyui/models/{model_id}/install"
+
+
+def install_route(model_id: str) -> str:
+    """The install call as an error message or ``details`` names it: ``POST <path>``."""
+    return f"POST {install_path(model_id)}"
+
+
 def recommended_model_id(pool_gb: float | None) -> str:
     """The starter model that suits a memory pool of ``pool_gb`` gigabytes.
 

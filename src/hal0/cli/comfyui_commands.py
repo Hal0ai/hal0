@@ -140,8 +140,10 @@ def _start_install(model_id: str) -> bool | None:
     ``True`` when there is a job to follow (a new one, or one already running), ``False``
     when the model is already installed, ``None`` when the daemon refused.
     """
+    from hal0.comfyui.catalog import install_path
+
     try:
-        api_post(f"/api/comfyui/models/{model_id}/install")
+        api_post(install_path(model_id))
     except CliApiError as exc:
         if exc.code == "comfyui.model_installed":
             console.print(f"{escape(model_id)} is already installed.")
