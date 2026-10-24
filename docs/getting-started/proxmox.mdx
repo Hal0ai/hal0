@@ -221,6 +221,11 @@ from FastFlowLM's GitHub releases — no third-party apt/PPA source is added.
 A single `flm serve` process backs the **NPU trio** — one chat model plus
 optional embedding and speech-to-text "passengers" sharing the NPU.
 
+The host `.deb` is used for `flm validate`, the setup-time NPU check. The
+NPU slot serves from the `flm` runner image, and FLM model pulls and the NPU
+model catalogue run inside that same image, so the FastFlowLM version that
+picks the weights is the runner image's, not the host `.deb`'s.
+
 Confirm the NPU runtime is reachable from inside the container:
 
 ```sh

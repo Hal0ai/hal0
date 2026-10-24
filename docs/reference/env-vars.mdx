@@ -156,7 +156,7 @@ egress — until a DSN is configured. Requires `pip install 'hal0ai[sentry]'` (o
 | `COMFYUI_DATA_DIR` | `/mnt/ai-models/comfyui` | — |
 | `HAL0_COMFYUI_DATA_ROOT` | `""` | — |
 | `HAL0_CONTAINER_RUNTIME` | unset (auto-detect) | Overrides the podman/container runtime binary. |
-| `HAL0_FLM_BIN` | `/usr/bin/flm` | — |
+| `HAL0_FLM_BIN` | `/usr/bin/flm` | Host FastFlowLM binary. hal0 uses it only for `flm validate` and as a last-resort `flm list` when the flm runner image cannot be reached. Model pulls never use it: they run inside the flm runner image. |
 | `HAL0_FLM_HOME` | `/var/lib/hal0` | — |
 | `HAL0_FLM_USER` | `hal0` | — |
 | `HAL0_FLM_BINARY` | `{native_flm_root}/bin/flm` | — |

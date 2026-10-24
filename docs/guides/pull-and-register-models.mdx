@@ -40,6 +40,17 @@ Gated or private repos return `401`/`403`. Set `HF_TOKEN` (or
 `Authorization: Bearer …` header automatically.
 </Aside>
 
+### NPU (FastFlowLM) models
+
+FLM tags such as `qwen3:0.6b` are pulled with FastFlowLM's own `flm pull`,
+not the Hugging Face downloader. hal0 runs it in a one-shot container of the
+`flm` runner image, the same image the NPU slot serves with, with the FLM
+model store mounted where the slot mounts it. The weights therefore match
+the FastFlowLM version the slot runs, whatever version of the host `.deb`
+is installed. The `flm` runner image must be downloaded first (see
+[Manage runner images](/docs/guides/manage-runner-images/)); until it is,
+an FLM pull fails and says so.
+
 ### Resuming an interrupted pull
 
 If a pull is interrupted — network drop, `hal0-api` restart, an OOM kill

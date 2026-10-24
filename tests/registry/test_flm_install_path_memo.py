@@ -56,8 +56,6 @@ def fake_flm_pull(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "flm_pull_command",
         lambda tag: ([sys.executable, "-c", _FAKE_PULL, host_models_dir], host_models_dir),
     )
-    monkeypatch.setattr(flm_mod, "ensure_host_flm_store_link", lambda: host_models_dir)
-    monkeypatch.setattr(flm_mod, "flm_host_async_spawn", lambda argv: (argv, {}))
     # The advertised-size lookup reads the separate cached catalog; keep it
     # out of the probe count.
     monkeypatch.setattr(flm_mod, "flm_served_models", lambda: [])

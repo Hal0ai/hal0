@@ -2345,7 +2345,12 @@ async def run_flm_pull(
     tag: str,
     registry: ModelRegistry,
 ) -> None:
-    """Background-task body: shell host ``flm pull <tag>`` (as the hal0 user).
+    """Background-task body: ``flm pull <tag>`` inside the flm runner image.
+
+    The pull runs in a one-shot container of the FLM slot's image with the
+    slot's store mounted where the slot mounts it (#2993, ADR-0036), so the
+    runner's FastFlowLM version picks the weights and they land in the
+    directory the slot serves from — the same directory progress polls.
 
     Mirrors :func:`run_pull`'s state machine (queued → running →
     {completed, failed, cancelled}) so the existing SSE / status routes
@@ -2362,9 +2367,14 @@ async def run_flm_pull(
         and refuses to use mismatched weights. Re-hashing would just
         double-read multi-GB files for the same guarantee.
 
-    Cancellation works via SIGTERM on the ``flm`` subprocess — it aborts the
-    download. The partial files are left on disk; FLM's next pull deletes &
-    redownloads them (it checks file sizes against the manifest before reusing).
+    Cancellation sends SIGTERM to the spawned process: sudo relays it to the
+    ``hal0-flmctl`` seam's exec'd ``podman run``, whose signal proxy stops flm,
+    and ``--rm`` removes the container. If the process has not exited after
+    10 s, the seam's ``stop-pull`` verb removes the container by name before
+    the process is killed, because podman cannot forward SIGKILL and the
+    container would otherwise keep writing. The partial files are left on disk; FLM's next pull deletes
+    & redownloads them (it checks file sizes against the manifest before
+    reusing).
 
     On success the FLM probe cache is reset so the next ``/api/capabilities``
     GET flips this tag's ``downloaded`` flag to True without an api restart.
@@ -2373,33 +2383,27 @@ async def run_flm_pull(
     # base pull module's import graph (tests pull this module in
     # environments without docker).
     from hal0.providers.flm import (
-        ensure_host_flm_store_link,
-        flm_host_async_spawn,
         flm_pull_command,
+        flm_pull_stop_command,
         flm_served_models,
         flm_served_models_async,
         reset_flm_catalog_cache,
     )
+    from hal0.providers.flm_cli import RC_IMAGE_MISSING
 
     job.state = "running"
     job.started_at = time.time()
     job._signal()
-
-    argv, host_models_dir = flm_pull_command(tag)
 
     # Setup awaits run inside the try so a cancellation or error here reaches
     # the same handlers as one during the download, and the job never stays
     # ``running`` (#2334).
     proc: asyncio.subprocess.Process | None = None
     try:
-        # flm hardcodes ~/.config/flm/models and has no dir flag, so a host pull
-        # writes to that default path — NOT the (possibly relocated) store the
-        # progress poller + serving container use. Point flm's default at the store
-        # via a symlink (host analog of the container bind-mount) before we spawn,
-        # so weights land in the store, progress tracks the real bytes, and serving
-        # finds them. Off-loaded to a thread: the one-time legacy-content migration
-        # can copy multi-GB weights and must not block the event loop.
-        await asyncio.to_thread(ensure_host_flm_store_link)
+        # Resolving the pull reads the slot TOMLs (the FLM slot's image and
+        # store), so it runs on a worker thread. It raises
+        # FLMRunnerUnavailableError when this process cannot reach the image.
+        argv, host_models_dir = await asyncio.to_thread(flm_pull_command, tag)
 
         # Resolve the install path + advertised total upfront so progress
         # reporting is monotonic. The install-path lookup keeps the raw
@@ -2430,16 +2434,16 @@ async def run_flm_pull(
             job.bytes_total = advertised_total
             job._signal()
 
-        # uvloop (hal0-api's event loop) rejects the user/group Popen kwargs, so
-        # the drop to the hal0 user rides the argv (setpriv/runuser) instead.
-        argv, spawn_kwargs = flm_host_async_spawn(argv)
-
+        # A new session, so the cancel SIGTERM is relayed to podman / flm on
+        # every sudo build: sudo skips relaying a signal it judges
+        # user-generated from its own process group (sudo(8), "Signal
+        # handling"). Sudo 1.9 on Ubuntu 24.04 relayed it either way.
         proc = await asyncio.create_subprocess_exec(
             *argv,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-            **spawn_kwargs,
+            start_new_session=True,
         )
         assert proc.stdout is not None
         last_emit = time.monotonic()
@@ -2505,12 +2509,7 @@ async def run_flm_pull(
 
         while True:
             if job.cancel_requested:
-                proc.terminate()
-                with contextlib.suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(proc.wait(), timeout=10.0)
-                if proc.returncode is None:
-                    proc.kill()
-                    await proc.wait()
+                await _end_flm_pull_process(proc, flm_pull_stop_command(tag), tag)
                 job.state = "cancelled"
                 job.finished_at = time.time()
                 job._signal()
@@ -2532,6 +2531,13 @@ async def run_flm_pull(
             await _tick_progress()
 
         await proc.wait()
+        if proc.returncode == RC_IMAGE_MISSING:
+            raise PullError(
+                f"flm pull {tag!r} needs the flm runner image, which is not downloaded "
+                "yet. Download it from Runner Images (or run "
+                "`hal0 runner-images pull flm`), then retry.",
+                details={"tag": tag, "exit_code": proc.returncode},
+            )
         if proc.returncode != 0:
             raise PullError(
                 f"flm pull {tag!r} exited with status {proc.returncode}",
@@ -2602,10 +2608,12 @@ async def run_flm_pull(
             extra={"tag": tag, "path": str(final_path), "bytes": size_bytes},
         )
     except asyncio.CancelledError:
+        # API shutdown cancels the task. The same graceful end as a user
+        # cancel: a bare kill would only kill the sudo/podman client and
+        # leave the container downloading into the store.
         if proc is not None and proc.returncode is None:
-            proc.kill()
             with contextlib.suppress(Exception):
-                await proc.wait()
+                await _end_flm_pull_process(proc, flm_pull_stop_command(tag), tag)
         job.state = "cancelled"
         job.finished_at = time.time()
         job._signal()
@@ -2657,32 +2665,63 @@ class _FlmInstallPathLookup:
         return _flm_install_path_from(self._models, self.host_models_dir, self.tag)
 
 
+#: Seconds a cancelled ``flm pull`` gets to exit on SIGTERM before its
+#: container is removed by name and the process is killed.
+_FLM_CANCEL_GRACE_S = 10.0
+
+
+async def _end_flm_pull_process(
+    proc: asyncio.subprocess.Process, stop_argv: list[str] | None, tag: str
+) -> None:
+    """End a running ``flm pull``: SIGTERM, grace, then remove its container and kill.
+
+    SIGTERM reaches flm through podman's signal proxy and ``--rm`` removes the
+    container. If the process outlives :data:`_FLM_CANCEL_GRACE_S`, the
+    container is removed by name (``stop-pull``) before the process is
+    killed, because podman does not proxy SIGKILL.
+    """
+    proc.terminate()
+    with contextlib.suppress(TimeoutError):
+        await asyncio.wait_for(proc.wait(), timeout=_FLM_CANCEL_GRACE_S)
+    if proc.returncode is None:
+        await _stop_flm_pull_container(stop_argv, tag)
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        await proc.wait()
+
+
+async def _stop_flm_pull_container(argv: list[str] | None, tag: str) -> None:
+    """Run the seam's ``stop-pull`` for ``tag``. Best-effort: logs, never raises."""
+    if argv is None:
+        return
+    try:
+        stopper = await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        rc = await asyncio.wait_for(stopper.wait(), timeout=30.0)
+    except (OSError, TimeoutError) as exc:
+        log.warning("flm.pull_stop_failed tag=%s error=%s", tag, exc)
+        return
+    if rc != 0:
+        log.warning("flm.pull_stop_failed tag=%s exit_code=%s", tag, rc)
+
+
 def _verify_flm_landing(path: str, host_models_dir: str, tag: str) -> None:
     """Raise :class:`PullError` unless ``path`` exists after a successful ``flm pull``.
 
     ``path`` is computed from the store and the tag's HF repo name, not read
-    back from flm, so it can name a dir that flm never wrote: when flm's
-    ``$HOME/.config/flm/models`` is not linked to the store, the weights land
-    there instead (#2446). The error names that directory when it holds the
-    tag's repo, so the user knows where the files went and how to move them.
+    back from flm, so a zero exit that wrote nothing there must not register a
+    model the slot cannot load (#2446). The pull runs in a container with the
+    store bind-mounted (#2993), so there is no second place it could land.
     """
     if os.path.isdir(path):
         return
-    from hal0.config.paths import default_flm_models_dir
-
-    details = {"tag": tag, "path": path}
-    stray = Path(default_flm_models_dir()) / Path(path).name
-    is_repo_dir = os.path.normpath(path) != os.path.normpath(host_models_dir)
-    if is_repo_dir and stray.is_dir() and os.path.realpath(stray) != os.path.realpath(path):
-        raise PullError(
-            f"flm pull {tag!r} finished, but the weights landed in {stray}, not in the "
-            f"FLM store at {path}. The NPU slot only mounts the store; run "
-            f"`sudo hal0 doctor perms --fix` to move them there and link flm's cache.",
-            details={**details, "landed": str(stray)},
-        )
     raise PullError(
         f"flm pull {tag!r} exited 0, but {path} does not exist.",
-        details=details,
+        details={"tag": tag, "path": path, "store": host_models_dir},
     )
 
 

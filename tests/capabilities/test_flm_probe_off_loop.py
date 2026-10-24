@@ -531,8 +531,6 @@ async def test_flm_pull_reset_keeps_the_known_answer_while_re_probing(
         "flm_pull_command",
         lambda tag: ([sys.executable, "-c", fake_pull, host_models_dir], host_models_dir),
     )
-    monkeypatch.setattr(flm_mod, "ensure_host_flm_store_link", lambda: host_models_dir)
-    monkeypatch.setattr(flm_mod, "flm_host_async_spawn", lambda argv: (argv, {}))
     monkeypatch.setattr(flm_mod, "flm_served_models", lambda: [])
     monkeypatch.setattr(flm_mod, "reset_flm_catalog_cache", lambda: None)
     monkeypatch.setattr(pull_mod, "_register_flm_pulled", lambda *a, **k: None)

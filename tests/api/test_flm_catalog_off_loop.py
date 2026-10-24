@@ -265,14 +265,9 @@ async def test_capacity_build_per_slot_probes_off_loop(slow_flm_list: _SlowFlmLi
 # ── slots routes ────────────────────────────────────────────────────────────
 
 
-async def test_slots_flm_models_probes_off_loop(
-    slow_flm_list: _SlowFlmList, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """GET /api/slots/flm/models falls back to host ``flm list`` when cold."""
+async def test_slots_flm_models_probes_off_loop(slow_flm_list: _SlowFlmList) -> None:
+    """GET /api/slots/flm/models reads the ``flm list`` catalogue off the loop."""
     from hal0.api.routes import slots as slots_routes
-    from hal0.slots import flm_catalog as slots_flm_catalog
-
-    monkeypatch.setattr(slots_flm_catalog, "_from_container", lambda: None)
 
     body = await slots_routes.list_flm_models(_request())  # type: ignore[arg-type]
 
@@ -346,8 +341,6 @@ async def test_run_flm_pull_probes_off_loop(
         "flm_pull_command",
         lambda tag: ([sys.executable, "-c", fake_pull, host_models_dir], host_models_dir),
     )
-    monkeypatch.setattr(flm_mod, "ensure_host_flm_store_link", lambda: host_models_dir)
-    monkeypatch.setattr(flm_mod, "flm_host_async_spawn", lambda argv: (argv, {}))
     monkeypatch.setattr(pull_mod, "_register_flm_pulled", lambda *a, **k: None)
     monkeypatch.setattr(catalog, "reset_flm_image_present_cache", lambda: None)
 
@@ -429,7 +422,6 @@ async def test_run_flm_pull_cancelled_during_setup_is_marked_cancelled(
         return []
 
     monkeypatch.setattr(flm_mod, "flm_pull_command", lambda tag: (["true"], str(tmp_path)))
-    monkeypatch.setattr(flm_mod, "ensure_host_flm_store_link", lambda: str(tmp_path))
     monkeypatch.setattr(flm_mod, "flm_served_models_async", hang)
     from hal0.registry import pull as pull_mod
 

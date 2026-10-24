@@ -1219,9 +1219,9 @@ def _flm_rows_for_capability(capability: str, *, host_gated: bool = False) -> li
 
     ``pullable`` is True for FLM tags — the pull route (routes/models.py)
     detects FLM ids via :func:`hal0.providers.flm.is_flm_tag` and dispatches
-    to :func:`hal0.registry.pull.run_flm_pull`, which shells ``flm pull
-    <tag>`` inside the toolbox image with the same bind mount the slot
-    uses. After a successful pull we reset the FLM probe cache so the
+    to :func:`hal0.registry.pull.run_flm_pull`, which runs ``flm pull
+    <tag>`` in a one-shot container of the flm runner image with the same
+    bind mount the slot uses (#2993). After a successful pull we reset the FLM probe cache so the
     next ``/api/capabilities`` GET flips ``downloaded`` to True without a
     process restart.
     """

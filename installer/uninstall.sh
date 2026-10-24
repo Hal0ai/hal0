@@ -455,6 +455,8 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     # install.sh's PODMAN_RW_SUDOERS_DST) — same shape as hal0-podman-ro
     # above, swept here from day one rather than repeating the O12 gap.
     rm_path "/etc/sudoers.d/hal0-podman-rw"
+    # #2993: hal0-flmctl (FLM list/pull in the runner image).
+    rm_path "/etc/sudoers.d/hal0-flmctl"
     # hal0.bench units (timer + scheduled session + run-queue worker). The
     # result store /var/lib/hal0-bench is data, kept unless --purge.
     systemctl disable --now hal0-bench.timer hal0-bench-worker.service >/dev/null 2>&1 || true

@@ -1,0 +1,339 @@
+#!/bin/bash
+# hal0-flmctl — privileged seam for running the FastFlowLM CLI (`flm list`,
+# `flm pull`) inside the pinned `flm` runner image (#2993, ADR-0036).
+#
+# Background: FLM model pulls and the FLM catalogue probe used to run the HOST
+# /usr/bin/flm from the FastFlowLM .deb. Only install.sh installs that .deb,
+# so a box that only ever ran `hal0 update` kept an old host flm while the NPU
+# slot served a newer runner image: the old binary pulled old weights (and
+# lacked newer tags) into the store the new container served from. hal0 now
+# runs `flm list` / `flm pull` in the SAME image the slot serves with, against
+# the SAME store mount, so only the runner image's FastFlowLM version matters.
+#
+# Slots run ROOTFUL podman, and the runner image lives in root's image store;
+# hal0-api runs as the unprivileged `hal0` service user. This wrapper is the
+# entire privileged surface for that, a separate and independently revocable
+# grant (packaging/sudoers/hal0-flmctl) — hal0-podman-ro stays read-only and
+# hal0-podman-rw stays image-store-only.
+#
+# Every podman subcommand, flag and in-container argv word is a literal here.
+# Callers supply only these operands, each validated on THIS side:
+#
+#   * a slot INSTANCE TOKEN (exec-list) — the container name hal0-slot-<token>
+#     is built here, so a caller can only ever name a hal0 slot container;
+#   * an image REFERENCE (run-*) — the OCI ref grammar, byte-identical to
+#     hal0-podman-ro / hal0-podman-rw. Grammar only, no repo allow-list: the
+#     caller resolves the ref from the runner pin table and the per-slot
+#     override exactly as the slot launch does, and hal0-systemctl's
+#     write-quadlet already lets the service user name any image for a slot.
+#     What runs inside is NOT the image's choice, though: the entrypoint is
+#     pinned below to tini -> /opt/fastflowlm/bin/flm, so whatever image is
+#     named, the only path the one-shot can start is that image's
+#     /opt/fastflowlm/bin/flm, with the fixed `list -j` / `pull <tag>` argv.
+#     A caller-chosen image owns that file, so this pins the argv and the
+#     path, not what the binary does;
+#   * the host FLM STORE directory (run-*) — absolute, a closed charset with no
+#     ':' or ',' (it is spliced into podman's -v spec), no '..', an existing
+#     directory, not a system directory once symlinks are resolved, and handed
+#     to the hal0 account: owned by its uid, or group-owned by one of its
+#     groups. It is mounted at the relative path FLM reads under the one-shot's
+#     HOME (.config/flm/models), as FLMProvider.container_spec mounts it under
+#     the serving slot's. The store's location is runtime config ([models].flm_store in
+#     hal0.toml, which the hal0 account itself writes), so there is no
+#     root-owned record to pin it to; the boundary below does not rely on it;
+#   * an FLM model TAG (run-pull, stop-pull) — family:variant, no leading '-'.
+#
+# HONEST BOUNDARY. The one-shot containers run with the hal0 ACCOUNT'S OWN
+# identity, resolved here from the passwd/group databases and never from the
+# caller: its uid, primary gid and supplementary groups, exactly what the old
+# host `flm pull` ran as. They get no devices, --cap-drop=all and
+# --security-opt=no-new-privileges. So the files the container can create or
+# change are the files the hal0 account can already create or change; naming
+# a different store directory buys the caller no write it did not already
+# have. What a mount does add is reach: a bind mount does not re-check the
+# search permission of the source's parent directories, so a directory the
+# account could not walk to by path becomes reachable inside the container.
+# The system-directory denylist and the ownership hand-off above narrow that
+# to directories already handed to the account, and the only path started
+# there is the image's /opt/fastflowlm/bin/flm. The check-then-mount is not atomic: an account that owns
+# a parent of the store can swap it for a symlink after the checks. That
+# changes which directory is mounted, not whose identity writes there, so it
+# reduces to the same reach-only gap. This seam is therefore not a sandbox
+# against a compromised hal0 account; it is a hard boundary against starting
+# any path but the image's /opt/fastflowlm/bin/flm, against running it with
+# more than the account's own write rights, and against any podman flag a
+# caller might want to add.
+#
+# The pull container has a fixed name, hal0-flm-pull-<encoded tag>: every '_'
+# in the tag doubled, then its one ':' written as '_'. The tag grammar puts an
+# alphanumeric right after the ':', so the encoding is reversible and two tags
+# never share a name (a_b:c -> a__b_c, a:b_c -> a_b__c). That way `stop-pull <tag>` can remove it if the client process is killed before
+# podman could forward the stop (podman does not proxy SIGKILL).
+#
+# EXIT-CODE CONTRACT:
+#
+#   * rc 0   — the verb ran and flm exited 0 (flm's own rc passes through for
+#              the exec'd verbs, so any other flm rc arrives unchanged).
+#   * rc 64  — this wrapper rejected the verb or an operand (before podman).
+#   * rc 65  — podman is not installed / not executable here.
+#   * rc 66  — podman ran but failed operationally while answering a
+#              precondition (container/image existence).
+#   * rc 69  — exec-list only: hal0-slot-<token> is not running. The caller
+#              falls back to a one-shot run-list.
+#   * rc 70  — run-* only: the image is not in root's store. Nothing is
+#              pulled implicitly (`--pull=never`): runner images arrive only
+#              through the manifest-verified runner pull.
+#
+# src/hal0/providers/flm_cli.py resolves the operands the way the slot launch
+# does, mirrors the tag validator so a bad tag fails before a sudo round-trip,
+# and runs this wrapper without sudo when hal0 itself is root. The container
+# literals below are pinned to src/hal0/providers/flm.py by
+# tests/installer/test_flmctl_wrapper.py.
+
+set -euo pipefail
+
+# LOCALE PIN — load-bearing for the validators below (see hal0-podman-ro):
+# under a UTF-8 locale `[A-Za-z0-9]` matches accented letters, and sudo's
+# default env_keep passes LANG/LC_* through from the caller.
+export LC_ALL=C
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# sudo keeps the caller's working directory; run from / so nothing here ever
+# resolves against it (#3007). Every path this script uses is absolute.
+cd /
+
+PODMAN=/usr/bin/podman
+SVC_USER=hal0
+# Test-suite overrides only. Honoured only when NOT running as root, so no
+# sudoers env_keep configuration can ever make root exec a caller-named binary
+# or run a container as a caller-named account.
+if [[ "${EUID}" -ne 0 ]]; then
+  PODMAN="${HAL0_FLMCTL_PODMAN:-$PODMAN}"
+  SVC_USER="${HAL0_FLMCTL_USER:-$SVC_USER}"
+fi
+
+# Container-side literals. Keep in lock-step with src/hal0/providers/flm.py
+# (_CONTAINER_FLM_BIN, _CONTAINER_FLM_ENV); the wrapper test asserts they agree.
+CTR_FLM=/opt/fastflowlm/bin/flm
+CTR_ENV_CONFIG=FLM_CONFIG_PATH=/opt/fastflowlm/share/flm/model_list.json
+CTR_ENV_LD=LD_LIBRARY_PATH=/opt/fastflowlm/lib:/opt/xilinx/xrt/lib:/usr/lib/x86_64-linux-gnu
+# The one-shot's HOME. FLM hardcodes its cache as ~/.config/flm/models. The
+# image's own HOME (/var/lib/hal0, where the serving slot mounts the store) is
+# mode 0700 for the image's uid 1000, which the hal0 account's uid usually is
+# not, so the one-shot gets a fresh tmpfs HOME and the store is mounted at the
+# same relative path under it.
+CTR_HOME=/flm-home
+CTR_STORE="${CTR_HOME}/.config/flm/models"
+# The runner image's ENTRYPOINT is tini -> /usr/local/bin/flm, a symlink to
+# CTR_FLM (hal0-runner-images runners/flm/Containerfile). Pinned here rather
+# than inherited, so a caller-named image cannot choose the program.
+CTR_ENTRYPOINT='["/usr/bin/tini","--","/opt/fastflowlm/bin/flm"]'
+PULL_NAME_PREFIX=hal0-flm-pull-
+
+die() { echo "hal0-flmctl: $1" >&2; exit 64; }
+
+# ── validators (root side of the privilege boundary) ───────────────────────
+
+SLOT_TOKEN_RE='^[A-Za-z0-9_-]{1,64}$'
+
+_REF_SEP='(__|[._]|-+)'
+_REF_IPV6='\[[0-9A-Fa-f:]{2,45}\]'
+_REF_HOST="([A-Za-z0-9]+(([.]|-+)[A-Za-z0-9]+)*|${_REF_IPV6})(:[0-9]{1,5})?"
+_REF_PATH="[A-Za-z0-9]+(${_REF_SEP}[A-Za-z0-9]+)*(/[A-Za-z0-9]+(${_REF_SEP}[A-Za-z0-9]+)*)*"
+_REF_TAG='(:[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?'
+_REF_DIGEST='(@sha256:[0-9a-f]{64})?'
+IMAGE_REF_RE="^(${_REF_HOST}/)?${_REF_PATH}${_REF_TAG}${_REF_DIGEST}\$"
+
+# Absolute path, closed charset without ':' or ',' (podman -v separators) and
+# without whitespace or shell metacharacters.
+STORE_RE='^/[A-Za-z0-9._/+@%=-]{1,510}$'
+
+# FLM tags: `qwen3:0.6b`, `hy-mt2-flash:1.8b`, `embed-gemma:300m`. One ':'
+# and an alphanumeric first byte on both sides, so never a flag.
+FLM_TAG_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}:[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
+
+NUM_RE='^[0-9]+$'
+
+validate_slot_token() {
+  local token="${1-}"
+  [[ -n "$token" ]] || die "missing slot token"
+  [[ "$token" =~ $SLOT_TOKEN_RE ]] || die "bad slot token: $token"
+}
+
+validate_image_ref() {
+  local ref="${1-}"
+  [[ -n "$ref" ]] || die "missing image ref"
+  (( ${#ref} <= 512 )) || die "image ref too long (${#ref} > 512)"
+  [[ "$ref" =~ $IMAGE_REF_RE ]] || die "bad image ref: $ref"
+}
+
+validate_tag() {
+  local tag="${1-}"
+  [[ -n "$tag" ]] || die "missing model tag"
+  [[ "$tag" =~ $FLM_TAG_RE ]] || die "bad model tag: $tag"
+}
+
+# Sets SVC_UID, SVC_GID and SVC_GROUPS (every gid, primary first) from the
+# account databases. Never from the caller.
+resolve_service_identity() {
+  local g
+  SVC_UID="$(id -u -- "$SVC_USER" 2>/dev/null)" || die "no '$SVC_USER' account on this host"
+  SVC_GID="$(id -g -- "$SVC_USER" 2>/dev/null)" || die "no '$SVC_USER' account on this host"
+  read -r -a SVC_GROUPS <<<"$(id -G -- "$SVC_USER" 2>/dev/null)" || true
+  [[ "$SVC_UID" =~ $NUM_RE && "$SVC_GID" =~ $NUM_RE ]] || die "unreadable '$SVC_USER' account"
+  # The account must not be root, or the whole boundary above is void.
+  [[ "$SVC_UID" -ne 0 ]] || die "'$SVC_USER' resolves to uid 0"
+  for g in "${SVC_GROUPS[@]}"; do
+    [[ "$g" =~ $NUM_RE ]] || die "unreadable '$SVC_USER' groups"
+    [[ "$g" -ne 0 ]] || die "'$SVC_USER' is in group 0"
+  done
+}
+
+# Sets STORE_REAL, the resolved directory that exec_oneshot mounts. Needs
+# resolve_service_identity first.
+validate_store() {
+  local store="${1-}" real owner group g handed=0
+  [[ -n "$store" ]] || die "missing store dir"
+  [[ "$store" =~ $STORE_RE ]] || die "bad store dir: $store"
+  [[ "$store" != *..* ]] || die "store dir traversal: $store"
+  [[ -d "$store" ]] || die "store dir does not exist: $store"
+  real="$(readlink -f -- "$store")" || die "store dir does not resolve: $store"
+  [[ "$real" =~ $STORE_RE ]] || die "bad resolved store dir: $real"
+  case "$real" in
+    /|/bin|/bin/*|/boot|/boot/*|/dev|/dev/*|/etc|/etc/*|/lib|/lib/*|/lib64|/lib64/*|\
+    /proc|/proc/*|/root|/root/*|/run|/run/*|/sbin|/sbin/*|/sys|/sys/*|/usr|/usr/*|\
+    /home|/var|/var/lib|/tmp|/srv|/mnt|/opt|/media)
+      die "store dir is a system directory: $store" ;;
+  esac
+  read -r owner group <<<"$(stat -c '%u %g' -- "$real")" || die "cannot stat store dir: $real"
+  [[ "$owner" == "$SVC_UID" ]] && handed=1
+  for g in "${SVC_GROUPS[@]}"; do
+    [[ "$group" == "$g" ]] && handed=1
+  done
+  [[ "$handed" -eq 1 ]] || die "store dir $real is not owned by the $SVC_USER account or one of its groups (owner $owner:$group)"
+  STORE_REAL="$real"
+}
+
+pull_name() {   # arg: validated tag. Injective; see the header.
+  local t="${1//_/__}"
+  printf '%s%s' "$PULL_NAME_PREFIX" "${t/:/_}"
+}
+
+require_podman() {
+  [[ -x "$PODMAN" ]] || { echo "hal0-flmctl: podman not found at $PODMAN" >&2; exit 65; }
+}
+
+podman_failed() { echo "hal0-flmctl: $1 (rc=$2)" >&2; exit 66; }
+
+# Run podman for a precondition answer; sets PODMAN_RC/PODMAN_OUT.
+run_podman() {
+  PODMAN_OUT=""
+  PODMAN_RC=0
+  PODMAN_OUT="$("$PODMAN" "$@" 2>/dev/null)" || PODMAN_RC=$?
+}
+
+require_image() {   # arg: validated image ref; rc 70 when absent
+  run_podman image exists -- "$1"
+  case "$PODMAN_RC" in
+    0) ;;
+    1) echo "hal0-flmctl: image not in root's store: $1" >&2; exit 70 ;;
+    *) podman_failed "podman image exists failed" "$PODMAN_RC" ;;
+  esac
+}
+
+# One-shot `podman run` — the store mounted where the serving slot mounts it,
+# the same FLM env, a pinned entrypoint, the hal0 account's own identity, no
+# capabilities, and nothing else. exec'd so flm's output streams to the
+# caller and a SIGTERM (pull cancel) reaches podman, whose signal proxy
+# forwards it to tini -> flm; --rm then removes the container.
+exec_oneshot() {   # args: image <podman run flags...> -- <flm argv...>
+  local image="$1" g
+  shift
+  local -a extra=() groups=()
+  while [[ $# -gt 0 && "$1" != "--" ]]; do extra+=("$1"); shift; done
+  shift
+  for g in "${SVC_GROUPS[@]}"; do
+    [[ "$g" == "$SVC_GID" ]] || groups+=("--group-add=$g")
+  done
+  exec "$PODMAN" run --rm --pull=never "${extra[@]}" \
+    --entrypoint="${CTR_ENTRYPOINT}" --user="${SVC_UID}:${SVC_GID}" "${groups[@]}" \
+    --cap-drop=all --security-opt=no-new-privileges \
+    --tmpfs="${CTR_HOME}:rw,nosuid,nodev,mode=1777" \
+    --volume="${STORE_REAL}:${CTR_STORE}" \
+    --env="${CTR_ENV_CONFIG}" --env="${CTR_ENV_LD}" --env="HOME=${CTR_HOME}" \
+    -- "$image" "$@"
+}
+
+cmd="${1:-help}"; shift || true
+
+case "$cmd" in
+  exec-list)               # arg: slot token -> `flm list -j` in the running slot
+    [[ $# -eq 1 ]] || die "exec-list takes exactly one argument"
+    validate_slot_token "$1"
+    require_podman
+    name="hal0-slot-$1"
+    run_podman container inspect --format '{{.State.Running}}' -- "$name"
+    case "$PODMAN_RC" in
+      0) [[ "$PODMAN_OUT" == "true" ]] || exit 69 ;;
+      *) exit 69 ;;   # no such container (Quadlet slots run --rm)
+    esac
+    exec "$PODMAN" exec -- "$name" "$CTR_FLM" list -j
+    ;;
+
+  run-list)                # args: image store -> one-shot `flm list -j`
+    [[ $# -eq 2 ]] || die "run-list takes exactly two arguments"
+    validate_image_ref "$1"
+    resolve_service_identity
+    validate_store "$2"
+    require_podman
+    require_image "$1"
+    exec_oneshot "$1" -- list -j
+    ;;
+
+  run-pull)                # args: image store tag -> one-shot `flm pull <tag>`
+    [[ $# -eq 3 ]] || die "run-pull takes exactly three arguments"
+    validate_image_ref "$1"
+    validate_tag "$3"
+    resolve_service_identity
+    validate_store "$2"
+    require_podman
+    require_image "$1"
+    # --replace: a container of this name left by a crashed pull of the same
+    # tag is stale; the new pull supersedes it.
+    exec_oneshot "$1" --name="$(pull_name "$3")" --replace -- pull "$3"
+    ;;
+
+  stop-pull)               # arg: tag -> remove hal0-flm-pull-<tag> if present
+    [[ $# -eq 1 ]] || die "stop-pull takes exactly one argument"
+    validate_tag "$1"
+    require_podman
+    exec "$PODMAN" rm --force --ignore --time=10 -- "$(pull_name "$1")"
+    ;;
+
+  check-tag)               # arg: model tag — side-effect-free validator probe
+    [[ $# -eq 1 ]] || die "check-tag takes exactly one argument"
+    validate_tag "$1"
+    printf '%s\n' "$1"
+    ;;
+
+  help|"")
+    cat <<EOF
+usage: hal0-flmctl <command> [args]
+  exec-list <token>              flm list -j inside the running hal0-slot-<token>
+  run-list <image> <store>       flm list -j in a one-shot container of <image>
+  run-pull <image> <store> <tag> flm pull <tag> in a one-shot container of <image>
+  stop-pull <tag>                remove the pull container for <tag>, if any
+  check-tag <tag>                validate a model tag only (no podman call)
+
+exit codes:
+  0    flm exited 0 (exec'd verbs pass flm's own exit code through)
+  64   verb or operand rejected (before podman is located)
+  65   podman not found
+  66   podman failed while checking a precondition
+  69   exec-list: the slot container is not running
+  70   run-*: the image is not in root's store (nothing is pulled implicitly)
+EOF
+    ;;
+
+  *) die "bad cmd: $cmd" ;;
+esac
