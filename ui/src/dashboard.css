@@ -573,6 +573,10 @@ a { color: inherit; text-decoration: none; }
   color: var(--fg-5);
 }
 .sb-list { display: flex; flex-direction: column; gap: 1px; padding: 0 8px; }
+/* With every page tab listed, an expanded section (Settings has 16) can be
+   taller than the window: the nav scrolls on its own so the Services zone
+   stays pinned at the bottom instead of being clipped. */
+.sidebar .sb-list { flex: 0 1 auto; min-height: 0; overflow-y: auto; }
 .sb-row {
   display: flex;
   align-items: center;

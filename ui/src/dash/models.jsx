@@ -58,6 +58,7 @@ function usePageReset(deps) {
 }
 
 // ── ModelsView ─────────────────────────────────────────────────────────
+const MODEL_TABS = ["inference", "image", "upstream", "profiles"];
 // `modelParam` mirrors SlotsView's slotParam: #models/profiles deep-links
 // the Profiles tab (runner-catalogue-v2 — Profiles moved here from Slots).
 function ModelsView({ modelParam = null }) {
@@ -68,14 +69,12 @@ function ModelsView({ modelParam = null }) {
   const [sortField, setSortField] = useStateM("name");
   const [sortDir, setSortDir] = useStateM("asc");
   const [q, setQ] = useStateM("");
-  // Tabs: "inference" (default), "image", "upstream", "profiles"
-  const [tab, setTab] = useStateM(modelParam === "profiles" ? "profiles" : "inference");
-  // Sidebar sub-link #models/profiles selects the tab; navigating back to
-  // bare #models drops out of the Profiles tab (same idiom as SlotsView).
-  useEffectM(() => {
-    if (modelParam === "profiles") setTab("profiles");
-    else setTab((t) => (t === "profiles" ? "inference" : t));
-  }, [modelParam]);
+  // Tabs: "inference" (default), "image", "upstream", "profiles". Each is
+  // hash-routed (#models/<tab>) so the sidebar sub-links track it; bare
+  // #models or an unknown param shows Inference (same idiom as SlotsView).
+  const tabFromParam = (p) => (MODEL_TABS.includes(p) ? p : "inference");
+  const [tab, setTab] = useStateM(tabFromParam(modelParam));
+  useEffectM(() => { setTab(tabFromParam(modelParam)); }, [modelParam]);
   // Pagination
   const [page, setPage] = useStateM(1);
   const [perPage, setPerPage] = useStateM(25);
@@ -295,7 +294,7 @@ function ModelsView({ modelParam = null }) {
           role="tab"
           aria-selected={tab === "inference"}
           className={"slot-tab" + (tab === "inference" ? " on" : "")}
-          onClick={() => { setTab("inference"); if (modelParam) window.location.hash = "#models"; }}
+          onClick={() => { window.location.hash = "#models/inference"; }}
         >
           <span>Inference Models</span>
           <span className="slot-tab-ct num">{inferenceRows.length}</span>
@@ -304,7 +303,7 @@ function ModelsView({ modelParam = null }) {
           role="tab"
           aria-selected={tab === "image"}
           className={"slot-tab comfy" + (tab === "image" ? " on" : "")}
-          onClick={() => { setTab("image"); if (modelParam) window.location.hash = "#models"; }}
+          onClick={() => { window.location.hash = "#models/image"; }}
         >
           <span>Image / ComfyUI</span>
           <span className="slot-tab-ct num">{comfyTotal}</span>
@@ -313,7 +312,7 @@ function ModelsView({ modelParam = null }) {
           role="tab"
           aria-selected={tab === "upstream"}
           className={"slot-tab" + (tab === "upstream" ? " on" : "")}
-          onClick={() => { setTab("upstream"); if (modelParam) window.location.hash = "#models"; }}
+          onClick={() => { window.location.hash = "#models/upstream"; }}
         >
           <span>Upstream Models</span>
           <span className="slot-tab-ct num">{upstreamTotal}</span>

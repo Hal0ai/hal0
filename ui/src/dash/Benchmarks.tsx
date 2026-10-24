@@ -433,8 +433,16 @@ function Sparkline({ points, lane }: { points: HistoryPoint[]; lane?: string }) 
 
 /* ── root ── */
 
-const Benchmarks: React.FC = () => {
-  const [tab, setTab] = useState<'roster' | 'runs' | 'evals' | 'queue'>('roster');
+type BenchTab = 'roster' | 'runs' | 'evals' | 'queue';
+const BENCH_TABS: BenchTab[] = ['roster', 'runs', 'evals', 'queue'];
+const benchTabFromParam = (param?: string | null): BenchTab =>
+  BENCH_TABS.includes(param as BenchTab) ? (param as BenchTab) : 'roster';
+
+// Tabs are hash-routed (#benchmarks/<tab>) so the sidebar sub-links track
+// them; bare #benchmarks or an unknown param shows the Roster.
+const Benchmarks: React.FC<{ param?: string | null }> = ({ param = null }) => {
+  const tab = benchTabFromParam(param);
+  const setTab = (id: BenchTab) => { window.location.hash = '#benchmarks/' + id; };
   const [roster, setRoster] = useState<RosterModel[]>([]);
   const [host, setHost] = useState<RosterResponse['host'] | null>(null);
   const [rosterErr, setRosterErr] = useState<string | null>(null);
