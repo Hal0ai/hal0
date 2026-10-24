@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import shutil
+import tempfile
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
@@ -42,6 +43,7 @@ from hal0.comfyui.catalog import (
     models_using,
     render_template,
 )
+from hal0.config.paths import var_lib
 from hal0.errors import Hal0Error
 from hal0.install.perms import ensure_shared_dir
 from hal0.registry.pull import (
@@ -267,18 +269,66 @@ def _write_workflow(model: ImageModel) -> Path:
     """Write the model's rendered workflow, without ``_meta``, where the launcher lists it.
 
     ``_meta`` describes the template to hal0 (parameters, defaults); ComfyUI would read
-    it as a node. The file is replaced atomically.
+    it as a node. The file is replaced atomically. Each write stages in a file of its own,
+    since :func:`ensure_workflows` and an install can write the same workflow at once and a
+    shared staging name would let one rename the other's file away.
     """
     graph = {key: value for key, value in render_template(model).items() if key != "_meta"}
     dest = paths.workflows_dir() / model.workflow_filename
     ensure_shared_dir(dest.parent)
-    tmp = dest.with_name(f"{dest.name}.tmp")
+    fd, tmp_name = tempfile.mkstemp(dir=dest.parent, prefix=f".{dest.name}.", suffix=".tmp")
+    tmp = Path(tmp_name)
     try:
-        tmp.write_text(json.dumps(graph, indent=2) + "\n", encoding="utf-8")
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(graph, indent=2) + "\n")
+        tmp.chmod(0o644)  # mkstemp creates 0600; the ComfyUI container reads this file
         os.replace(tmp, dest)
     finally:
         tmp.unlink(missing_ok=True)  # already gone after a successful replace
     return dest
+
+
+# ── operator removals ───────────────────────────────────────────────────────
+#
+# Removing a model whose weights other complete models hold deletes only its workflow, and the
+# model still reads ``complete``. :func:`ensure_workflows` would write the workflow straight
+# back on the next API boot or install, so an explicit removal leaves an empty marker file
+# and an explicit install takes it away.
+
+
+def _removed_marker(model_id: str) -> Path:
+    """The marker recording that the operator removed ``model_id`` (hal0's state dir)."""
+    return var_lib() / "state" / "comfyui-removed" / model_id
+
+
+def mark_removed(model_id: str) -> None:
+    """Record that the operator removed ``model_id``; logs and carries on if it cannot."""
+    marker = _removed_marker(model_id)
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+    except OSError as exc:
+        log.warning(
+            "comfyui.removal_marker_failed", extra={"model_id": model_id, "error": str(exc)}
+        )
+
+
+def clear_removed(model_id: str) -> None:
+    """Forget a removal: an explicit install of ``model_id`` is the operator changing their mind."""
+    try:
+        _removed_marker(model_id).unlink(missing_ok=True)
+    except OSError as exc:
+        log.warning(
+            "comfyui.removal_marker_failed", extra={"model_id": model_id, "error": str(exc)}
+        )
+
+
+def is_removed(model_id: str) -> bool:
+    """True while ``model_id``'s removal stands; an unreadable marker reads as "not removed"."""
+    try:
+        return _removed_marker(model_id).is_file()
+    except OSError:
+        return False
 
 
 def ensure_workflows() -> list[str]:
@@ -287,20 +337,24 @@ def ensure_workflows() -> list[str]:
     An install writes its model's workflow, but a model whose weights were put on disk by
     hand reports ``complete`` with no workflow, and the install route then refuses it, so
     nothing else would ever provision it. This covers those. A workflow file that exists is
-    never replaced, whatever it holds. Best-effort: a model whose state cannot be read or
-    whose workflow cannot be written (a directory the hal0 user cannot write) is logged and
-    skipped, and the models after it are still done.
+    never replaced, whatever it holds, and a model the operator removed (:func:`mark_removed`)
+    is left without one until an install clears the removal. Best-effort: a model whose state
+    cannot be read, whose template will not render or whose workflow cannot be written (a
+    directory the hal0 user cannot write) is logged and skipped, and the models after it are
+    still done.
     """
     root = paths.models_root()
     written: list[str] = []
     for model in CATALOG.values():
         try:
+            if is_removed(model.id):
+                continue
             if install_state(model, root).state != "complete":
                 continue
             if (paths.workflows_dir() / model.workflow_filename).is_file():
                 continue
             _write_workflow(model)
-        except OSError as exc:
+        except Exception as exc:
             log.warning(
                 "comfyui.ensure_workflow_failed", extra={"model_id": model.id, "error": str(exc)}
             )
@@ -454,6 +508,11 @@ def remove_model(model: ImageModel, *, include_shared: bool = False) -> dict[str
     no longer has its weights, so its workflow goes too and the launcher never offers one
     that cannot run.
 
+    The removal is recorded (:func:`mark_removed`) once the model's own workflow is dealt with,
+    so a model that stays ``complete`` because others hold its weights is not given its
+    workflow back by :func:`ensure_workflows`. The affected models are not recorded: they stop
+    being complete, and return with their weights.
+
     Returns ``{"removed", "kept", "affected"}``:
 
     * ``removed``: the weight paths relative to the models root, then
@@ -496,6 +555,8 @@ def remove_model(model: ImageModel, *, include_shared: bool = False) -> dict[str
     for owner in (model, *(CATALOG[model_id] for model_id in affected)):
         if _unlink(paths.workflows_dir() / owner.workflow_filename, removed):
             removed.append(f"workflows/{owner.workflow_filename}")
+        if owner is model:
+            mark_removed(model.id)  # before a neighbour's stuck workflow can raise
     return {"removed": removed, "kept": kept, "affected": affected}
 
 
@@ -561,6 +622,7 @@ async def _install_each(
                 results.append((model_id, "failed"))
                 continue
             say(f"{model_id}: installing {model.label}")
+            clear_removed(model.id)  # asking for it is the operator changing their mind
             job = make_job(model_id)
             progress = asyncio.create_task(_report_progress(job, say))
             try:

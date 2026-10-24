@@ -1128,11 +1128,19 @@ def test_app_state_has_the_install_registries(client: TestClient) -> None:
 
 
 def _complete_install(client: TestClient, installs: _Installs, model_id: str) -> None:
-    """Start an install that finishes at once, then run the ``on_complete`` the route handed it."""
+    """Start an install that finishes at once, then run the ``on_complete`` the route handed it.
+
+    The chain runs in a loop of its own, so it gets a lock of its own: the app's lock belongs
+    to the TestClient's loop. That the route hands the chain the app's lock is checked apart.
+    """
     installs.behaviour = _Installs.finish
     assert _post_install(client, model_id).status_code == 202
     _wait_for(lambda: bool(installs.calls))
-    asyncio.run(installs.calls[-1]["on_complete"](CATALOG[model_id]))
+    on_complete = installs.calls[-1]["on_complete"]
+    assert on_complete.keywords["tree_lock"] is client.app.state.image_tree_lock
+    asyncio.run(
+        on_complete.func(CATALOG[model_id], **{**on_complete.keywords, "tree_lock": asyncio.Lock()})
+    )
 
 
 def test_install_on_complete_provisions_selects_then_rewires_open_webui(
@@ -1251,16 +1259,33 @@ def test_remove_route_rewires_open_webui_after_a_removal(
     assert follow_ups.events == ["owui"]
 
 
-def test_remove_route_leaves_open_webui_alone_when_the_removal_failed(
+def test_remove_route_rewires_open_webui_after_a_removal_that_stopped_partway(
     client: TestClient, follow_ups: _FollowUps, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def refuse(model: ImageModel, **kwargs: Any) -> dict[str, Any]:
-        raise comfyui_install.RemoveFailed("could not delete", details={"removed": []})
+    """Files may already be gone when a delete fails, so what Open WebUI is wired to may be too."""
 
-    monkeypatch.setattr(comfyui_install, "remove_model", refuse)
+    def stuck(model: ImageModel, **kwargs: Any) -> dict[str, Any]:
+        raise comfyui_install.RemoveFailed("could not delete", details={"removed": ["a"]})
 
-    assert client.delete(f"/api/comfyui/models/{_SDXL}").status_code == 409
+    monkeypatch.setattr(comfyui_install, "remove_model", stuck)
 
+    resp = client.delete(f"/api/comfyui/models/{_SDXL}")
+
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "comfyui.remove_failed"
+    assert follow_ups.events == ["owui"]
+
+
+def test_remove_route_409_install_running_changes_nothing_so_rewires_nothing(
+    client: TestClient, installs: _Installs, follow_ups: _FollowUps
+) -> None:
+    assert _post_install(client).status_code == 202
+    _wait_for(lambda: _job_state(client, _SDXL) == "running")
+
+    resp = client.delete(f"/api/comfyui/models/{_SDXL}")
+
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "comfyui.install_running"
     assert follow_ups.events == []
 
 
@@ -1373,3 +1398,52 @@ def test_models_list_resolves_the_models_root_once(
     assert client.get("/api/comfyui/models").status_code == 200
 
     assert calls == 1
+
+
+# ── an operator's removal outlives a restart ────────────────────────────────
+
+
+def test_remove_route_leaves_a_workflow_only_removal_standing_across_a_restart(
+    tmp_hal0_home: str,
+) -> None:
+    """The reviewer's case: ``qwen-image`` under ``qwen-image-lightning`` loses only its workflow."""
+    _land(CATALOG["qwen-image-lightning"])
+    with TestClient(create_app()) as client:
+        assert (paths.workflows_dir() / "qwen-image.json").is_file()  # startup provisioned it
+
+        resp = client.delete("/api/comfyui/models/qwen-image")
+
+        assert resp.status_code == 200
+        assert resp.json()["removed"] == ["workflows/qwen-image.json"]
+        assert not (paths.workflows_dir() / "qwen-image.json").exists()
+
+    with TestClient(create_app()):  # the next API boot
+        pass
+
+    assert not (paths.workflows_dir() / "qwen-image.json").exists()
+    assert (paths.workflows_dir() / "qwen-image-lightning.json").is_file()
+
+
+def test_install_route_clears_the_operator_removal(client: TestClient, installs: _Installs) -> None:
+    """Installing the model again, even with every weight on disk, is asking for it back."""
+    _land(CATALOG["qwen-image-lightning"])
+    comfyui_install.mark_removed("qwen-image")
+
+    resp = _post_install(client, "qwen-image")
+
+    assert resp.status_code == 202, resp.text
+    assert not comfyui_install.is_removed("qwen-image")
+
+
+def test_refused_install_keeps_the_operator_removal(
+    client: TestClient, installs: _Installs
+) -> None:
+    comfyui_install.mark_removed(_SDXL)
+    assert _post_install(client).status_code == 202
+    _wait_for(lambda: _job_state(client, _SDXL) == "running")
+    comfyui_install.mark_removed(_SDXL)  # a removal recorded while the install is still running
+
+    resp = _post_install(client)
+
+    assert resp.status_code == 409
+    assert comfyui_install.is_removed(_SDXL)
