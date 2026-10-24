@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from hal0.comfyui import paths
-from hal0.comfyui.catalog import CATALOG, ComponentKind
+from hal0.comfyui.catalog import CATALOG, ComponentKind, component_path
 
 # Extensions of files worth listing; configs, indexes and partial downloads are not weights.
 _WEIGHT_EXTS = (".safetensors", ".ckpt", ".pt", ".pth", ".gguf", ".bin", ".sft")
@@ -48,12 +48,12 @@ _COUNT_GROUPS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _owners() -> dict[Path, list[str]]:
-    """Catalog model ids by the file each of their components lands at."""
+def _owners(root: Path) -> dict[Path, list[str]]:
+    """Catalog model ids by the file each of their components lands at under ``root``."""
     owners: dict[Path, list[str]] = {}
     for model in CATALOG.values():
         for component in model.components:
-            ids = owners.setdefault(component.dest, [])
+            ids = owners.setdefault(component_path(component, root), [])
             if model.id not in ids:
                 ids.append(model.id)
     return owners
@@ -70,7 +70,7 @@ def list_files() -> list[dict[str, Any]]:
     An absent tree, or one that cannot be read, yields an empty list.
     """
     root = paths.models_root()
-    owners = _owners()
+    owners = _owners(root)
     found: list[dict[str, Any]] = []
     for kind, subdir in _SCAN:
         base = root / subdir

@@ -317,8 +317,9 @@ def _install_image_models(model_ids: tuple[str, ...]) -> None:
     the exit code; the slot is only enabled when at least one model landed, so it never
     comes up against an empty model dir.
     """
-    from hal0.comfyui.install import hf_token_from_env, install_models_blocking
+    from hal0.comfyui.install import install_models_blocking
     from hal0.install.extensions import install_extension
+    from hal0.upstreams.huggingface import hf_token_from_env
 
     results = install_models_blocking(model_ids, hf_token=hf_token_from_env(), on_line=typer.echo)
     incomplete = [model_id for model_id, state in results if state != "completed"]

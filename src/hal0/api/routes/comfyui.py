@@ -90,9 +90,10 @@ _IMG_SLOT = "img"
 # Job states an install can still be changed from.
 _ACTIVE_JOB_STATES = ("queued", "running")
 
-# The starter pick when the memory pool cannot be read; the middle tier of
-# ``recommended_model_id``, which every box that can run ComfyUI at all can take.
-_UNPROBED_RECOMMENDATION = "sdxl-lightning"
+# Serialises the install route's check-then-start with a removal that is running in a
+# worker thread: an install must not start (and skip a file as present) while the files it
+# would skip are being deleted.
+_TREE_LOCK = asyncio.Lock()
 
 # Switchover target modes. "generation" hands the iGPU to ComfyUI
 # (arbiter.ensure_img); "inference" hands it back to the LLM stack
@@ -184,17 +185,18 @@ async def _fetch_json(path: str) -> dict[str, Any] | None:
         return None
 
 
-async def _list_files_or_none() -> list[dict[str, Any]]:
-    """The models-tree listing for ``/status``; an unexpected failure is an empty listing.
+async def _list_files_or_none() -> list[dict[str, Any]] | None:
+    """The models-tree listing for ``/status``; ``None`` when the scan fails.
 
     The pane polls ``/status`` and a failed scan must cost it the inventory counts, not
-    the whole answer.
+    the whole answer. ``None``, not an empty listing, so the counts are hidden rather than
+    shown as zeros nobody can vouch for.
     """
     try:
         return await asyncio.to_thread(inventory.list_files)
     except Exception:
         log.warning("comfyui.inventory_scan_failed", exc_info=True)
-        return []
+        return None
 
 
 async def _container_state(unit: str) -> str:
@@ -412,8 +414,9 @@ async def comfyui_status(request: Request) -> dict[str, Any]:
         "eta": None,
         "step": None,
         "inference": {"hermes": hermes},
-        # Verified counts of the weight files on disk, never faked; None without a models tree.
-        "inventory": inventory.status_counts(files),
+        # Verified counts of the weight files on disk, never faked; None without a models
+        # tree or when the scan failed.
+        "inventory": None if files is None else inventory.status_counts(files),
         "switchover": dict(_switch),
         "arbiter": arbiter_block,
     }
@@ -561,14 +564,13 @@ def _recommended_id() -> str:
     """The catalog's starter pick for this box's memory pool.
 
     Read per request: it is one small JSON file. A pool that cannot be read, or that
-    reads as zero because the box was never probed, gets the middle pick rather than
-    the smallest model.
+    reads as zero because the box was never probed, is passed on as unknown (``None``).
     """
     try:
-        pool_gb = _pool_gb(load_hardware_info())
+        pool_gb: float | None = _pool_gb(load_hardware_info())
     except Exception:  # an unreadable hardware.json must not take the catalog down
-        return _UNPROBED_RECOMMENDATION
-    return recommended_model_id(pool_gb) if pool_gb > 0 else _UNPROBED_RECOMMENDATION
+        pool_gb = None
+    return recommended_model_id(pool_gb if pool_gb else None)
 
 
 def _template_defaults(model: ImageModel) -> dict[str, Any]:
@@ -648,7 +650,8 @@ def _blocking_install(model: ImageModel, jobs: dict[str, PullJob]) -> PullJob | 
     skipped that file as already present, so deleting it would leave the neighbour
     reporting ``completed`` with the file gone.
     """
-    candidates = [model.id, *(other for c in model.components for other in models_using(c))]
+    root = comfyui_paths.models_root()
+    candidates = [model.id, *(other for c in model.components for other in models_using(c, root))]
     for model_id in dict.fromkeys(candidates):  # model first, then neighbours, once each
         job = jobs.get(model_id)
         if job is not None and job.state in _ACTIVE_JOB_STATES:
@@ -701,27 +704,31 @@ async def comfyui_model_install(model_id: str, request: Request) -> JSONResponse
     Refused before any job exists with 404 ``comfyui.model_unknown``, 409
     ``comfyui.install_running`` (its job rides in ``error.details.job``), 409
     ``comfyui.model_installed``, 409 ``comfyui.staging_cross_device`` (download staging
-    and models tree on two filesystems) and 507 ``comfyui.insufficient_disk``. The job
-    then runs in the background; follow it on ``GET /jobs``. A finished job stays
-    listed until the next install of the model replaces it.
+    and models tree on two filesystems), 409 ``comfyui.models_dir_not_writable`` (a
+    destination directory the hal0 user cannot write; ``error.details.path``) and 507
+    ``comfyui.insufficient_disk``. The job then runs in the background; follow it on
+    ``GET /jobs``. A finished job stays listed until the next install of the model
+    replaces it.
     """
     model = _require_model(model_id)
     jobs = _install_jobs(request)
-    existing = jobs.get(model_id)
-    if existing is not None and existing.state in _ACTIVE_JOB_STATES:
-        raise _install_running(model, existing)
-    if install_state(model).state == "complete":
-        raise Conflict(
-            f"{model.label} is already installed",
-            code="comfyui.model_installed",
-            details={"model_id": model_id},
-        )
-    # Past the complete check something is always missing, so both guards apply.
-    comfyui_install.require_one_filesystem()
-    comfyui_install.preflight_disk(model)
-    job = make_job(model_id)
-    jobs[model_id] = job
-    _schedule_install(request, model, job)
+    async with _TREE_LOCK:  # waits only while a removal is running
+        existing = jobs.get(model_id)
+        if existing is not None and existing.state in _ACTIVE_JOB_STATES:
+            raise _install_running(model, existing)
+        if install_state(model).state == "complete":
+            raise Conflict(
+                f"{model.label} is already installed",
+                code="comfyui.model_installed",
+                details={"model_id": model_id},
+            )
+        # Past the complete check something is always missing, so every guard applies.
+        comfyui_install.require_one_filesystem()
+        comfyui_install.require_writable_destinations(model)
+        comfyui_install.preflight_disk(model)
+        job = make_job(model_id)
+        jobs[model_id] = job
+        _schedule_install(request, model, job)
     return JSONResponse(status_code=202, content={"job": job.as_dict()})
 
 
@@ -731,14 +738,19 @@ async def comfyui_model_remove(model_id: str, request: Request) -> dict[str, lis
 
     A file another complete model loads stays. 409 ``comfyui.install_running`` while
     the model's install is queued or running, or while an install of a model that shares
-    a weight file with it is (``error.details.busy_model_id`` names that model).
+    a weight file with it is (``error.details.busy_model_id`` names that model). 409
+    ``comfyui.remove_failed`` when a file cannot be deleted (a read-only directory):
+    ``error.details`` lists what was removed before it and the path that failed.
     """
     model = _require_model(model_id)
-    job = _blocking_install(model, _install_jobs(request))
-    if job is not None:
-        raise _install_running(CATALOG[job.model_id], job, removing=model)
-    # No await between the check above and the delete, so an install cannot start in between.
-    return {"removed": comfyui_install.remove_model(model)}
+    async with _TREE_LOCK:
+        job = _blocking_install(model, _install_jobs(request))
+        if job is not None:
+            raise _install_running(CATALOG[job.model_id], job, removing=model)
+        # The delete runs off the event loop (hundreds of unlinks on a slow store); the
+        # lock keeps an install from starting under it.
+        removed = await asyncio.to_thread(comfyui_install.remove_model, model)
+    return {"removed": removed}
 
 
 @router.get("/jobs")

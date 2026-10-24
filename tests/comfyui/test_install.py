@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 import time
 from collections import namedtuple
@@ -22,6 +23,7 @@ from hal0.comfyui.catalog import (
     Component,
     ComponentKind,
     ImageModel,
+    component_path,
     get_model,
     install_state,
     render_template,
@@ -35,7 +37,6 @@ from hal0.registry.pull import (
     hf_download_url,
     make_job,
 )
-from hal0.upstreams import huggingface
 
 _REPO = "acme/fake-image"
 _CKPT = Component(
@@ -834,6 +835,196 @@ async def test_install_then_remove_leaves_nothing_behind() -> None:
     assert list(paths.workflows_dir().iterdir()) == []
 
 
+# ── writable destinations (I2) ──────────────────────────────────────────────
+
+
+def _deny_writes_under(monkeypatch: pytest.MonkeyPatch, *denied: Path) -> None:
+    """Make ``os.access`` report a write refusal for each path in ``denied`` and below it.
+
+    Patching beats ``chmod`` here: root ignores permission bits, and CI sometimes runs as root.
+    """
+    real_access = os.access
+
+    def access(path: Any, mode: int, **kwargs: Any) -> bool:
+        if mode & os.W_OK and any(Path(path).is_relative_to(d) for d in denied):
+            return False
+        return real_access(path, mode, **kwargs)
+
+    monkeypatch.setattr(install.os, "access", access)
+
+
+async def test_run_install_refuses_unwritable_destination_without_streaming(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read-only destination fails the job before a byte is requested, not after 40 GB."""
+    model = _fake_model()
+    blocked = _CKPT.dest.parent
+    blocked.mkdir(parents=True)
+    _deny_writes_under(monkeypatch, blocked)
+    hub = _Hub()
+
+    job = await _install(model, hub.transport)
+
+    assert job.state == "failed"
+    assert job.error_code == "comfyui.models_dir_not_writable"
+    assert str(blocked) in (job.error or "")
+    assert hub.requests == []  # nothing was requested
+    assert not any(_tmp_dir().glob("*"))  # nothing was staged
+    assert install_state(model).state == "none"
+
+
+def test_require_writable_destinations_names_the_first_unwritable_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _fake_model()
+    for component in model.components:
+        component.dest.parent.mkdir(parents=True, exist_ok=True)
+    _deny_writes_under(monkeypatch, _CKPT.dest.parent, _VAE.dest.parent)
+
+    with pytest.raises(install.InstallDirNotWritable) as excinfo:
+        install.require_writable_destinations(model)
+
+    exc = excinfo.value
+    assert exc.code == "comfyui.models_dir_not_writable"
+    assert exc.status == 409
+    assert exc.details == {"path": str(_CKPT.dest.parent)}  # component order: the checkpoint first
+    assert str(_CKPT.dest.parent) in exc.message
+    assert "hal0" in exc.message  # names the remedy
+
+
+def test_require_writable_destinations_checks_the_nearest_existing_ancestor(
+    monkeypatch: pytest.MonkeyPatch, store: Path
+) -> None:
+    """A fresh store has no models tree yet; the directory that must be writable is its ancestor."""
+    store.mkdir(parents=True)
+    assert not paths.models_root().exists()
+    _deny_writes_under(monkeypatch, store)
+
+    with pytest.raises(install.InstallDirNotWritable) as excinfo:
+        install.require_writable_destinations(_fake_model())
+
+    assert excinfo.value.details["path"] == str(store)
+
+
+def test_require_writable_destinations_passes_when_every_dir_is_writable() -> None:
+    model = _fake_model()
+    _CKPT.dest.parent.mkdir(parents=True)  # the other destination does not exist yet
+    install.require_writable_destinations(model)
+
+
+def test_require_writable_destinations_only_looks_at_missing_components(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _fake_model()
+    for component in model.components:
+        _touch(component)
+    _deny_writes_under(monkeypatch, paths.models_root())
+
+    install.require_writable_destinations(model)  # nothing left to write
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permission bits")
+def test_require_writable_destinations_sees_a_real_read_only_directory() -> None:
+    blocked = _CKPT.dest.parent
+    blocked.mkdir(parents=True)
+    blocked.chmod(0o555)
+    try:
+        with pytest.raises(install.InstallDirNotWritable):
+            install.require_writable_destinations(_fake_model())
+    finally:
+        blocked.chmod(0o755)
+
+
+# ── remove failures (I2) ────────────────────────────────────────────────────
+
+
+def _failing_unlink(monkeypatch: pytest.MonkeyPatch, name: str, exc: OSError) -> None:
+    """Make ``Path.unlink`` raise ``exc`` for the file called ``name`` and work for the rest."""
+    real_unlink = Path.unlink
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if self.name == name:
+            raise exc
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+
+
+def test_remove_reports_partial_removal_on_permission_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file that cannot be deleted stops the removal with a typed 409, not a 500 (I2)."""
+    model = _fake_model()
+    for component in model.components:
+        _touch(component)
+    wf = paths.workflows_dir()
+    wf.mkdir(parents=True)
+    (wf / model.workflow_filename).write_text("{}", encoding="utf-8")
+    _failing_unlink(monkeypatch, "fake-b.safetensors", PermissionError(13, "Permission denied"))
+
+    with pytest.raises(install.RemoveFailed) as excinfo:
+        install.remove_model(model)
+
+    exc = excinfo.value
+    assert exc.code == "comfyui.remove_failed"
+    assert exc.status == 409
+    assert exc.details == {
+        "removed": ["checkpoints/fake-a.safetensors"],  # gone before the failure
+        "failed_path": str(_VAE.dest),
+        "error": "[Errno 13] Permission denied",
+    }
+    assert str(_VAE.dest) in exc.message
+    assert not _CKPT.dest.exists()
+    assert _VAE.dest.exists()
+    assert (wf / model.workflow_filename).exists()  # the removal stopped at the first failure
+
+
+def test_remove_reports_a_workflow_that_cannot_be_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _fake_model()
+    for component in model.components:
+        _touch(component)
+    wf = paths.workflows_dir()
+    wf.mkdir(parents=True)
+    (wf / model.workflow_filename).write_text("{}", encoding="utf-8")
+    _failing_unlink(monkeypatch, model.workflow_filename, PermissionError(13, "Permission denied"))
+
+    with pytest.raises(install.RemoveFailed) as excinfo:
+        install.remove_model(model)
+
+    assert excinfo.value.details["removed"] == [
+        "checkpoints/fake-a.safetensors",
+        "vae/fake-b.safetensors",
+    ]
+    assert excinfo.value.details["failed_path"] == str(wf / model.workflow_filename)
+
+
+def test_remove_resolves_the_models_root_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``Component.dest`` re-reads the config on every call; a removal must not (M11)."""
+    qwen = _complete("qwen-image")
+    _complete("qwen-image-edit")
+    calls = 0
+    real = paths.models_root
+
+    def counting() -> Path:
+        nonlocal calls
+        calls += 1
+        return real()
+
+    monkeypatch.setattr(paths, "models_root", counting)
+
+    install.remove_model(qwen)
+
+    assert calls == 1
+
+
+def test_component_path_follows_the_given_root() -> None:
+    elsewhere = Path("/somewhere/else")
+    assert component_path(_CKPT, elsewhere) == elsewhere / "checkpoints" / "fake-a.safetensors"
+    assert _CKPT.dest == component_path(_CKPT, paths.models_root())
+
+
 # ── preflight_disk ──────────────────────────────────────────────────────────
 
 _Usage = namedtuple("_Usage", "total used free")
@@ -862,7 +1053,7 @@ def test_preflight_disk_raises_507(monkeypatch: pytest.MonkeyPatch) -> None:
     assert excinfo.value.status == 507
     details = excinfo.value.details
     assert details["free_bytes"] == 1
-    assert details["required_bytes"] == int(model.approx_gb * 1024**3)
+    assert details["required_bytes"] == int(model.approx_gb * 1e9)
     assert Path(details["path"]).exists()  # the ancestor that was measured
 
 
@@ -1072,7 +1263,3 @@ def test_error_classes_carry_their_codes() -> None:
     assert install.InstallInsufficientDisk.status == 507
     assert install.InstallStagingCrossDevice.code == "comfyui.staging_cross_device"
     assert install.InstallStagingCrossDevice.status == 409
-
-
-def test_install_exposes_the_one_hf_token_helper() -> None:
-    assert install.hf_token_from_env is huggingface.hf_token_from_env
