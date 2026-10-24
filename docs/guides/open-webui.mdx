@@ -188,8 +188,10 @@ registered then (see "When Hermes is down" above).
 ## When the env file re-renders
 
 `/etc/hal0/openwebui.env` re-renders automatically — you never edit it by
-hand for any of this. It re-renders (and the Open WebUI container restarts
-**only if the rendered file actually changed**) whenever:
+hand for any of this. It re-renders (and a running Open WebUI container
+restarts **only if the rendered file actually changed**; a stopped or skipped
+one is never started by this, and reads the new file at its next start)
+whenever:
 
 - You apply a capability change to `embed` or `img`
   (`hal0 capabilities set …` or the dashboard's Capabilities page).

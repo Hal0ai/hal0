@@ -84,7 +84,7 @@ def test_pull_failure_leaves_unit_untouched(tmp_path) -> None:
 
 
 def _restart_calls(runner: MagicMock) -> list:
-    return [c for c in runner.call_args_list if "restart" in c.args[0]]
+    return [c for c in runner.call_args_list if any("restart" in arg for arg in c.args[0])]
 
 
 def _installed_unit(tmp_path) -> Path:
@@ -232,6 +232,93 @@ def test_reconcile_openwebui_env_restarts_only_when_bytes_change(tmp_path) -> No
     assert second["status"] == "unchanged"
     assert second["env_changed"] is False
     assert _restart_calls(runner) == []
+
+
+class _FakeSystemd:
+    """A runner that models just enough systemd: ``restart`` starts an
+    inactive unit, ``try-restart`` only restarts one that is already active."""
+
+    def __init__(self, *, active: bool) -> None:
+        self.active = active
+        self.argvs: list[list[str]] = []
+
+    def __call__(self, argv, **_kwargs):
+        self.argvs.append(list(argv))
+        if any(a in {"restart", "svc-restart"} for a in argv):
+            self.active = True
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+
+def test_reconcile_never_starts_an_inactive_unit(tmp_path) -> None:
+    """An operator who skipped or stopped Open WebUI must not get it back from
+    an image install or any other reconcile: the env is re-rendered (a later
+    manual start reads it) but the unit is only try-restarted."""
+    _installed_unit(tmp_path)
+    _write_capabilities(tmp_path, "nomic-embed-text-v1.5")
+    systemd = _FakeSystemd(active=False)
+
+    res = openwebui_arm.reconcile_openwebui_env(runner=systemd, is_hal0_user=lambda: False)
+
+    assert res["status"] == "converged"
+    assert res["env_changed"] is True
+    assert systemd.active is False
+    env_path = tmp_path / "etc" / "hal0" / "openwebui.env"
+    assert "RAG_EMBEDDING_MODEL=nomic-embed-text-v1.5" in env_path.read_text(encoding="utf-8")
+
+
+def test_reconcile_restarts_an_active_unit_when_env_changed(tmp_path) -> None:
+    _installed_unit(tmp_path)
+    _write_capabilities(tmp_path, "nomic-embed-text-v1.5")
+    systemd = _FakeSystemd(active=True)
+
+    res = openwebui_arm.reconcile_openwebui_env(runner=systemd, is_hal0_user=lambda: False)
+
+    assert res == {"status": "converged", "env_changed": True, "restarted": True}
+    assert systemd.argvs == [["systemctl", "try-restart", "hal0-openwebui.service"]]
+
+
+def test_reconcile_try_restarts_through_the_seam_on_a_provisioned_box(tmp_path) -> None:
+    from hal0.system.seam import SEAM_BIN
+
+    _installed_unit(tmp_path)
+    _write_capabilities(tmp_path, "nomic-embed-text-v1.5")
+    systemd = _FakeSystemd(active=False)
+
+    openwebui_arm.reconcile_openwebui_env(runner=systemd, is_hal0_user=lambda: True)
+
+    assert systemd.argvs == [["sudo", "-n", SEAM_BIN, "svc-try-restart", "openwebui"]]
+    assert systemd.active is False
+
+
+def test_converge_env_only_pass_never_starts_an_inactive_unit(tmp_path) -> None:
+    """The boot-time / ``hal0 update`` pass with the image already on the pin
+    is an env-only reconcile too — same rule."""
+    unit = tmp_path / "u.service"
+    unit.write_text(UNIT.replace(OLD, NEW), encoding="utf-8")
+    _write_capabilities(tmp_path, "nomic-embed-text-v1.5")
+    systemd = _FakeSystemd(active=False)
+
+    res = openwebui_arm.converge_openwebui(
+        unit_path=unit, runner=systemd, is_hal0_user=lambda: False
+    )
+
+    assert res["env_changed"] is True
+    assert systemd.active is False
+
+
+def test_converge_image_repin_still_restarts_unconditionally(tmp_path) -> None:
+    """An image upgrade is the operator asking for the new image: ``restart``
+    stays (the reviewer's C1 ruling keeps it)."""
+    unit = _unit(tmp_path)
+    systemd = _FakeSystemd(active=False)
+
+    res = openwebui_arm.converge_openwebui(
+        unit_path=unit, runner=systemd, is_hal0_user=lambda: False
+    )
+
+    assert res["status"] == "upgraded"
+    assert ["systemctl", "restart", "hal0-openwebui.service"] in systemd.argvs
+    assert systemd.active is True
 
 
 def test_reconcile_leaves_operator_search_config_alone_and_does_not_restart(tmp_path) -> None:

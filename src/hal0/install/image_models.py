@@ -24,7 +24,8 @@ failed model is reported and the install carries on.
 
 The first model that lands and that the API can render becomes the ``img`` capability's
 selection, once (:func:`hal0.comfyui.autoselect.auto_select_first_image_model`), which
-starts the image engine, and Open WebUI is re-wired to match.
+starts the image engine; Open WebUI's environment is re-rendered to match (a running
+Open WebUI restarts, a stopped or skipped one stays down).
 """
 
 from __future__ import annotations
@@ -180,7 +181,7 @@ async def provision_image_models(
     Afterwards the first ``completed`` model the API can render is offered to
     :func:`~hal0.comfyui.autoselect.auto_select_first_image_model` (once; an existing
     selection is left alone), and Open WebUI's environment is re-rendered so it learns of
-    the new image model. The selection is a normal apply, so it writes the img slot's unit
+    the new image model (a running Open WebUI restarts; a stopped or skipped one stays down). The selection is a normal apply, so it writes the img slot's unit
     and starts the slot: that can wait on ComfyUI's runtime download and on its readiness,
     which is why a line says so first. A second line says what came of it; a failure in
     either follow-up is one such line, never a traceback, and changes no result.

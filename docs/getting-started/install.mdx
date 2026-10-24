@@ -115,9 +115,10 @@ Answer with menu numbers, catalog ids or `recommended`, separated by commas or
 spaces, or press Enter to download nothing. A bad answer is asked again. The
 first model that finishes downloading becomes the `img` capability's model,
 and the installer starts the image slot with it, which downloads the ComfyUI
-runtime on first start and can take several minutes. Open WebUI is re-wired to
-match. If an image model is already selected it stays selected, and the
-installer starts nothing. A failed download is reported and the
+runtime on first start and can take several minutes. Open WebUI's environment
+is re-rendered to match: a running Open WebUI restarts to pick it up, and one
+you skipped or stopped stays down. If an image model is already selected it
+stays selected, and the installer starts nothing. A failed download is reported and the
 install carries on; install a model later with `hal0 comfyui models install <id>`
 or from the dashboard.
 

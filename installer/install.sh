@@ -2908,7 +2908,8 @@ fi
 # HAL0_IMAGE_MODELS opts in unattended: `recommended`, or catalog ids / menu
 # numbers separated by commas or spaces. `none` or `0` forces the skip even on a
 # terminal. The first model that lands becomes the image-generation model, and
-# Open WebUI is rewired to it.
+# Open WebUI's environment is re-rendered for it (a running Open WebUI restarts;
+# a skipped or stopped one stays down).
 _img_plan=""
 _img_answer=""
 _img_ids=""
