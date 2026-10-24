@@ -52,7 +52,6 @@ import { laneTitle, profileApplyPreview, profileFitsSlot } from "./profile-apply
 import { resolvedCommandText } from "./resolved-command.js";
 import { useSlotLogsStream } from "@/api/hooks/useLogs";
 import { ENDPOINTS } from "@/api/endpoints";
-import { normalizeApiModel, isUpstreamModel } from "@/lib/normalizeApiModel";
 import {
 	stateChipClassForSlot,
 	slotButtonPhase,
@@ -61,8 +60,8 @@ import {
 import { statusCopyForSlotState } from "./status-copy";
 import { SlotBreakerChip } from "./breaker-chip.jsx";
 import { ConversionBlockedChip, ConversionBlockedDetail } from "./conversion-blocked-chip.jsx";
-import { npuModalityOn } from "./npu-modality.js";
-import { slotModelRow, npuAnchorSlot } from "./slots/slot-shared.js";
+import { npuModalityOn, npuApplyBody } from "./npu-modality.js";
+import { slotModelRow, npuAnchorSlot, compatibleModels } from "./slots/slot-shared.js";
 
 // The slot edit drawer's own width, and therefore the offset the stacked model
 // drawer docks at so its right edge lands flush against this drawer's left one.
@@ -102,19 +101,9 @@ function stateChipClass(stateOrSlot) {
 // fictional (`qwen3.6-27b-mtp` etc.) and the slot orchestrator correctly
 // rejects them against the real registry.
 
-// One shared compatible-models filter for all three slot surfaces (create
-// modal, edit drawer, swap popover): the raw /api/models list, normalized and
-// filtered to the requested `type`. Every model the registry holds loads on
-// every llama.cpp runner (fork-only quants are refused at add/pull), so the
-// backend no longer narrows the list.
-function compatibleModels(models, { type }) {
-	// Upstream-advertised rows are excluded outright: a slot binds a local
-	// file path, and these rows have none (they'd render as "will pull" and
-	// then 422 — there is no HF source to pull them from).
-	return (models ?? [])
-		.map(normalizeApiModel)
-		.filter((m) => m.type === type && !isUpstreamModel(m));
-}
+// compatibleModels() — the one shared compatible-models filter for the slot
+// surfaces (edit drawer, swap popover; the card + NPU pickers use it too) —
+// lives in slots/slot-shared.js.
 
 // A GPU/CPU lane → the device it drives (map_backend_to_device's FE mirror).
 // Module-level so the Lane pills share one source of truth.
@@ -641,8 +630,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		// model is FLM's positional tag, sent as a nested [model] table so the
 		// backend merge preserves sibling keys (context_size, n_gpu_layers)
 		// instead of clobbering them with a bare string.
-		const body = { npu: { chat, asr, embed } };
-		if (chat && chatModel) body.model = { default: chatModel };
+		const body = npuApplyBody({ chat, asr, embed, chatModel });
 		try {
 			await editMut.mutateAsync({ name: slot.name, body });
 			restartMut.mutate(slot.name, {
@@ -1623,6 +1611,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								// switch is pending.
 								const compatible = compatibleModels(modelsQuery.data, {
 									type: slot.type,
+									slot,
 								});
 								const cur = slot.model_id || slot.model || "";
 								const has = compatible.some((m) => m.id === cur);
@@ -2727,6 +2716,7 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
 	const ramFreeGb = hwQuery.data?.ram?.free ?? 0;
 	const compatible = compatibleModels(modelsQuery.data, {
 		type: slot.type,
+		slot,
 	});
 
 	// N2: container swap = cold systemctl restart (not a hot in-place swap).

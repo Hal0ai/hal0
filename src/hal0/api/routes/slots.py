@@ -724,6 +724,7 @@ async def create_slot(request: Request, background_tasks: BackgroundTasks) -> di
     _reject_slot_tuning_keys(body)
     _reject_unknown_config_keys(body)
     _validate_autoload_priority(body)
+    await _guard_model_fits_slot(request, name, body, _bound_model_id(body))
     async with record_action(
         request,
         category="slot",
@@ -1093,6 +1094,31 @@ async def _safe_config(sm: Any, name: str) -> dict[str, Any] | None:
         return None
 
 
+def _bound_model_id(body: dict[str, Any]) -> str | None:
+    """The model id a slot-config write binds (``model.default`` / flat ``model``)."""
+    model = body.get("model")
+    if isinstance(model, dict):
+        model = model.get("default")
+    return model if isinstance(model, str) and model else None
+
+
+async def _guard_model_fits_slot(
+    request: Request, name: str, cfg: dict[str, Any] | None, model_id: str | None
+) -> None:
+    """Refuse an FLM model on a non-FLM slot (and vice versa) before any write.
+
+    ``cfg`` is the slot config AS IT WILL BE after the request. Off the event
+    loop: the FLM-id check reads the host-flm probe (same reason as
+    ``is_resolvable`` above, #2334).
+    """
+    if not model_id or cfg is None:
+        return
+    from hal0.slots.config_write import check_model_fits_slot
+
+    registry = getattr(request.app.state, "model_registry", None)
+    await asyncio.to_thread(check_model_fits_slot, name, cfg, model_id, registry)
+
+
 async def _refresh_composite_catalogue(
     request: Request, before: dict[str, Any] | None = None
 ) -> None:
@@ -1242,6 +1268,15 @@ async def update_slot_config(name: str, request: Request) -> dict[str, object]:
         ]
         _reject_port_conflict(new_port, name, runtime_ports)
     before = await _safe_config(sm, name)
+    # Engine fit: judge the bound model against the slot AS IT WILL BE after
+    # this write (a body may change ``device`` and ``model`` together). Only a
+    # write that carries a model is checked — a stale GGUF default already on
+    # an NPU slot must not veto an unrelated modality toggle.
+    from hal0.slot_config import merge_slot_config
+
+    await _guard_model_fits_slot(
+        request, name, merge_slot_config(before or {}, body), _bound_model_id(body)
+    )
     async with record_action(
         request, category="slot", action="slot.edit_config", target=name, before=before
     ) as _rec:
@@ -1338,6 +1373,7 @@ async def load_slot(name: str, request: Request) -> dict[str, object]:
                 f"not an installed FLM model (slot {name!r} not touched)",
                 details={"model_id": model_id, "slot": name},
             )
+        await _guard_model_fits_slot(request, name, await _safe_config(sm, name), model_id)
     async with record_action(
         request,
         category="slot",
@@ -1437,6 +1473,7 @@ async def swap_slot(name: str, request: Request) -> dict[str, object]:
             f"not an installed FLM model (slot {name!r} not touched)",
             details={"model_id": model_id, "slot": name},
         )
+    await _guard_model_fits_slot(request, name, await _safe_config(sm, name), model_id)
     async with record_action(
         request,
         category="slot",

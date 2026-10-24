@@ -36,3 +36,15 @@ export const isNpuShadowSlot = (slot) =>
 // field (only shadows get it), so chat keeps reading the raw table.
 export const npuPillOn = (slot, anchorNpu, role) =>
   role === 'chat' ? npuModalityOn(anchorNpu, role) : !!slot?.npu_modality_active
+
+// The PUT /api/slots/{anchor}/config body for an NPU apply — shared by the slot
+// drawer (applyNpu) and the NPU occupancy card's model picker so the two cannot
+// diverge. `[npu]` always carries all three modality booleans (FLM loads its one
+// bundled whisper / embed-gemma, there is no per-role model choice); the chat
+// model rides as a nested `[model].default` table so the backend merge preserves
+// sibling keys (context_size, n_gpu_layers), and is only sent while chat is on.
+export const npuApplyBody = ({ chat, asr, embed, chatModel }) => {
+  const body = { npu: { chat, asr, embed } }
+  if (chat && chatModel) body.model = { default: chatModel }
+  return body
+}

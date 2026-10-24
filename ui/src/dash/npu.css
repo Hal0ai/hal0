@@ -617,3 +617,57 @@
   box-shadow: 0 0 8px var(--dev-npu), 0 0 16px var(--dev-npu);
   transition: box-shadow 0.3s ease;
 }
+
+/* ── per-slot model picker (RichSelect, same chrome as the inference cards) ──
+   The picker row sits under the name/metrics line. The shared model-picker
+   styles in engine-panes.css are scoped to .infer-pane/.npu-pane, which do not
+   wrap this card, so the same tokens are restated here — no new colours. */
+.npu-card .cslot-model {
+  min-width: 0;
+}
+.npu-card .cslot-model .model-picker-cell {
+  display: block;
+  min-width: 0;
+}
+.npu-card .rsel-trigger.model-picker {
+  width: 100%;
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--rad-sm);
+  background: var(--bg-1);
+  color: var(--fg);
+  font-family: var(--jbm);
+  font-size: 11.5px;
+  transition: border-color var(--dur-fast, 0.15s) var(--ease, ease);
+}
+.npu-card .rsel-trigger.model-picker:hover:not([disabled]) {
+  border-color: var(--dev-npu);
+}
+.npu-card .rsel-trigger.model-picker[disabled] {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* Open-dropdown escape hatch (same caveat as `.scard` in engine-panes.css).
+   Three ancestors would otherwise swallow the listbox, an absolutely-
+   positioned popover that must overflow the card:
+     · `.cslot` and `.wcard` are `overflow: hidden` (radius clip) — released
+       only while a listbox is open, so a closed card is unchanged;
+     · `.cslot:hover`'s transform makes the card a stacking context that traps
+       the listbox's z-index inside it — lift the card (and the whole NPU card
+       over the sections after it) while open;
+     · `.cslot.dim`'s opacity composites the popover see-through — full
+       opacity while the operator is choosing on it. */
+.npu-card:has(.rsel-trigger[aria-expanded='true']) {
+  position: relative;
+  z-index: 20;
+}
+.npu-card .wcard:has(.rsel-trigger[aria-expanded='true']) {
+  overflow: visible;
+}
+.npu-card .cslot:has(.rsel-trigger[aria-expanded='true']) {
+  overflow: visible;
+  z-index: 20;
+  opacity: 1;
+}

@@ -80,10 +80,10 @@ test.describe('NPU occupancy card', () => {
     await expect(card.locator('.aie-part .pl')).toContainText('npu')
     await expect(card.locator('.aie-part .pc')).toHaveText('· 8c')
 
-    // per-slot card: name + model (-FLM stripped) + the serving dot
+    // per-slot card: name + model picker (-FLM stripped) + the serving dot
     const cslot = card.locator('.cslot').filter({ hasText: 'npu' }).first()
     await expect(cslot.locator('.nm')).toHaveText('npu')
-    await expect(cslot.locator('.md')).toHaveText('gemma3-4b')
+    await expect(cslot.getByTestId('npu-model-npu')).toContainText('gemma3-4b')
     await expect(cslot.locator('.ldot.serving')).toHaveCount(1)
     // inline tok/s from slot.metrics
     await expect(cslot.locator('.cslot-mx .tps')).toContainText('52')

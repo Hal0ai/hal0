@@ -43,7 +43,7 @@ import { hostHwFlags, runnerOptions } from './hw-cascade.js'
 import { profileApplyPreview, profileFitsSlot } from './profile-apply-preview.js'
 import { runtimeChips } from './profiles.jsx'
 import { ConfirmDialog } from './primitives.jsx'
-import { isUpstreamModel } from '@/lib/normalizeApiModel'
+import { compatibleModels } from './slots/slot-shared.js'
 import { useMemoryMapModel } from './memory-map'
 import { slotIndicatorFromPhase, isSlotLive, imageStatusChip } from './slot-status.js'
 import { SlotBreakerChip } from './breaker-chip.jsx'
@@ -557,7 +557,7 @@ function BackendMismatch({ s, onEdit }) {
 // models get no modality tag. "asr" is the display label for either
 // capability spelling the backend may send (transcription | asr).
 const MODEL_MODALITY_CAPS = ['vision', 'embed', 'rerank', 'asr', 'tts', 'image']
-function modelModalityTag(m) {
+export function modelModalityTag(m) {
   const caps = Array.isArray(m?.capabilities) ? m.capabilities : []
   if (caps.includes('transcription') || caps.includes('asr')) return 'asr'
   return MODEL_MODALITY_CAPS.find((c) => c !== 'asr' && caps.includes(c)) || null
@@ -566,7 +566,7 @@ function modelModalityTag(m) {
 // Chip tone for a non-default runtime on the row's second line: the NPU
 // runtime (flm) takes the NPU lane's purple so it matches the device chips
 // elsewhere; any other runtime stays the neutral info tone.
-function runtimeChipTone(runtime) {
+export function runtimeChipTone(runtime) {
   return runtime === 'flm' ? 'dev-npu' : 'info'
 }
 
@@ -587,7 +587,7 @@ function modelFitChip(row) {
 // binding count is only interesting for OTHER slots — but marks the row
 // sensibly when it IS this slot's current model ("used by this slot" rather
 // than "used by 0 slots", which would misreport a real binding as unbound).
-function modelPickerOptions({ s, opts, cur, has, allSlots, verdictFor }) {
+export function modelPickerOptions({ s, opts, cur, has, allSlots, verdictFor }) {
   const list = []
   if (cur && !has) {
     list.push({ id: cur, row: s.model || cur })
@@ -654,11 +654,9 @@ export function ModelPicker({ s, models, allSlots, disabled, onSwap }) {
         {s.model || '—'}
       </div>
     )
-  // Upstream-advertised rows can't be bound to a slot (no local file) —
-  // same exclusion as slot-modals' compatibleModels().
-  const opts = (Array.isArray(models) ? models : []).filter(
-    (m) => m.type === 'llm' && !isUpstreamModel(m),
-  )
+  // Same list as the slot drawer / swap popover: upstream rows and engine
+  // mismatches (FLM models on a llama.cpp slot) are excluded.
+  const opts = compatibleModels(models, { type: 'llm', slot: s })
   const cur = s.model_id || s.model || ''
   const has = opts.some((m) => m.id === cur)
   // The window each candidate would launch with under this slot's profile —
