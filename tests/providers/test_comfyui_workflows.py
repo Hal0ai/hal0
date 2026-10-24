@@ -148,6 +148,27 @@ def test_build_defaults_from_meta() -> None:
     assert graph["3"]["inputs"]["steps"] == 20
 
 
+def test_build_cfg_keeps_the_graphs_number_type() -> None:
+    """Qwen's graph (and so its ``_meta.defaults``) has an int cfg; it is not widened to a float."""
+    template = _template_of("qwen-image-lightning")
+    graph, meta = build_workflow(body=_baseline_body(), template=template, request_tag="t1")
+    assert type(graph["3"]["inputs"]["cfg"]) is int
+    assert type(meta["cfg"]) is int
+
+
+@pytest.mark.parametrize(
+    ("requested", "expected"),
+    [(2, 2), (2.5, 2.5), ("3", 3.0), ("not a number", 1), (None, 1)],
+)
+def test_build_cfg_accepts_int_or_float_from_the_request(requested: Any, expected: float) -> None:
+    template = _template_of("qwen-image-lightning")
+    body = {**_baseline_body(), "extra_body": {"cfg": requested}}
+    graph, meta = build_workflow(body=body, template=template, request_tag="t1")
+    assert graph["3"]["inputs"]["cfg"] == expected
+    assert type(graph["3"]["inputs"]["cfg"]) is type(expected)
+    assert meta["cfg"] == expected
+
+
 def test_build_malformed_pointer_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     template = {
         "1": {"class_type": "CLIPTextEncode", "inputs": {"text": ""}},
