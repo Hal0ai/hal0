@@ -256,8 +256,9 @@ async def _set_secret(name: str, body: SecretBody, request: Request) -> Response
     # removed from the same panel.
     if is_process_control_env(key):
         raise SecretProtected(
-            f"{key!r} controls how hal0-api and every process it starts load code "
-            "or find programs, so it cannot be stored as a secret",
+            f"{key!r} controls how hal0-api and every process it starts run (code "
+            "loading, program lookup, TLS, configuration or network routing), so it "
+            "cannot be stored as a secret",
             details={"name": key, "protected": True, "reason": "process_control"},
         )
     _validate_value(body.value, key)

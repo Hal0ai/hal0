@@ -68,6 +68,9 @@ PROCESS_CONTROL_ENV_NAMES = frozenset(
         "PS4",
         # Redirects where hal0's Hermes helpers read and write its .env.
         "HERMES_HOME",
+        # Python's ssl, httpx, curl and Node write every TLS session key to the
+        # named file, so a passive capture decrypts upstream tokens (#2997).
+        "SSLKEYLOGFILE",
     }
 )
 #: Prefix families with the same effect: the dynamic loader (``LD_*``,
