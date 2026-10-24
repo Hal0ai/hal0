@@ -358,8 +358,9 @@ test.describe('Slot drawer — NPU modality + chat-model wiring', () => {
 
     await page.goto('/#slots/npu')
     const chatRow = page.locator('.drawer .form-row', { hasText: 'NPU · Chat' })
-    await expect(chatRow.locator('select')).toHaveValue('flm-chat')
-    await chatRow.locator('select').selectOption('flm-chat-xl')
+    const chatPicker = chatRow.getByTestId('npu-chat-model')
+    await expect(chatPicker).toContainText('flm-chat')
+    await pickRichOption(chatPicker, 'flm-chat-xl')
 
     await expect.poll(() => puts.length).toBe(1)
     expect(puts[0].npu).toEqual({ chat: true, asr: false, embed: false })
@@ -404,9 +405,17 @@ test.describe('Slot drawer — NPU modality + chat-model wiring', () => {
     await seedSlots(page, [NPU_SLOT, EMBED])
     await page.goto('/#slots/npu')
     const chatRow = page.locator('.drawer .form-row', { hasText: 'NPU · Chat' })
-    // Non-installed tags are offered with a ⬇ marker rather than hidden.
-    await expect(chatRow.locator('select option', { hasText: 'flm-chat-xl' })).toHaveText(/⬇ download/)
-    await chatRow.locator('select').selectOption('flm-chat-xl')
+    // Non-installed tags are offered with a ⬇ download chip rather than
+    // hidden, after the installed ones, each with the NPU runtime chip.
+    const chatPicker = chatRow.getByTestId('npu-chat-model')
+    const listbox = await openRichSelect(chatPicker)
+    const options = listbox.getByRole('option')
+    await expect(options.nth(0)).toHaveAttribute('data-option-id', 'flm-chat')
+    await expect(options.nth(1)).toHaveAttribute('data-option-id', 'flm-chat-xl')
+    await expect(options.nth(1)).toContainText('⬇ download')
+    await expect(options.nth(0)).not.toContainText('⬇ download')
+    await expect(options.nth(0).locator('.chip.dev-npu')).toHaveText('flm')
+    await pickRichOption(chatPicker, 'flm-chat-xl')
 
     // Pull is fired first; the slot config is NOT written yet.
     await expect.poll(() => pulls.length).toBe(1)
