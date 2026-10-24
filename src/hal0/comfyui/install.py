@@ -609,9 +609,12 @@ async def install_each(
 ) -> list[tuple[str, str]]:
     """Install ``model_ids`` one after another and return ``(model_id, final_state)`` for each.
 
-    The async body of :func:`install_models_blocking`, for a caller that already owns an event
-    loop (:func:`hal0.install.image_models.provision_image_models`). Each model's lines go to
-    ``say`` as that function documents.
+    An unknown id or a model that will not fit on disk is reported through ``say`` and comes
+    back ``failed``; the rest still run. Each model's lines are a start line,
+    ``  <id>: <pct>% (<done>/<total> GB)`` at most every :data:`_PROGRESS_INTERVAL_S` while it
+    downloads, and an end line. Used by the setup paths
+    (:func:`hal0.install.image_models.provision_image_models`), which run it on their own
+    event loop.
     """
     results: list[tuple[str, str]] = []
     async with _new_client() as client:
@@ -642,23 +645,6 @@ async def install_each(
     return results
 
 
-def install_models_blocking(
-    model_ids: Sequence[str],
-    *,
-    hf_token: str | None,
-    on_line: Callable[[str], None] | None = None,
-) -> list[tuple[str, str]]:
-    """Install ``model_ids`` one after another and return ``(model_id, final_state)`` for each.
-
-    The setup CLI's path: it owns an event loop (``asyncio.run``), so it cannot be called
-    from async code. An unknown id or a model that will not fit on disk is reported through
-    ``on_line`` and comes back ``failed``; the rest still run. Each model's lines are a
-    start line, ``  <id>: <pct>% (<done>/<total> GB)`` at most every
-    :data:`_PROGRESS_INTERVAL_S` while it downloads, and an end line.
-    """
-    return asyncio.run(install_each(model_ids, hf_token, on_line or (lambda _line: None)))
-
-
 __all__ = [
     "ImageModelNotFound",
     "InstallDirNotWritable",
@@ -666,7 +652,6 @@ __all__ = [
     "InstallStagingCrossDevice",
     "RemoveFailed",
     "install_each",
-    "install_models_blocking",
     "preflight_disk",
     "remove_model",
     "require_one_filesystem",
