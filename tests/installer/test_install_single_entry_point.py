@@ -273,9 +273,9 @@ def test_brain_model_pull_cannot_fail_the_install(install_sh_text: str) -> None:
 
 @pytest.fixture(scope="module")
 def agent_block(install_sh_text: str) -> str:
-    """The install.sh block that offers the agent anchor."""
+    """The install.sh block that offers the agent anchor (it ends where the image offer begins)."""
     start = install_sh_text.index("agent anchor model — OPT-IN")
-    end = install_sh_text.index("# ── NPU prerequisites", start)
+    end = install_sh_text.index("# ── starter image models", start)
     return install_sh_text[start:end]
 
 

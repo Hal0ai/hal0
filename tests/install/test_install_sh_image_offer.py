@@ -137,6 +137,7 @@ elif [[ "$*" == *"--resolve"* ]]; then
         2|sdxl-turbo) echo "sdxl-turbo" ;;
         1,2) echo "sdxl-lightning sdxl-turbo" ;;
         none|"") ;;
+        boom) echo "could not resolve 'boom' (RuntimeError: no hardware)" >&2; exit 1 ;;
         *) echo "'${@: -1}' is not a listed model. Answer 'none' to skip." >&2; exit 2 ;;
     esac
 else
@@ -310,6 +311,19 @@ def test_an_interactive_answer_is_asked_again_until_it_resolves(
         == ["PROMPT Image models to download (numbers, 'recommended', or Enter to skip)"] * 2
     )
     assert installs == [_installing("sdxl-lightning", "sdxl-turbo")]
+
+
+def test_an_internal_failure_is_not_asked_again(tmp_path: Path, image_block: str) -> None:
+    """`--resolve` exits 1 for an internal failure: another prompt cannot help, so skip the step."""
+    proc, installs, _ = _run_block(
+        tmp_path, image_block, env={"FAKE_INTERACTIVE": "1"}, answers=("boom", "1")
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert "WARN The image model step failed" in proc.stdout
+    assert "Not a valid choice" not in proc.stdout
+    assert (tmp_path / "prompts.log").read_text().count("PROMPT") == 1  # asked once, not again
+    assert installs == []
 
 
 def test_the_variable_wins_over_the_prompt(tmp_path: Path, image_block: str) -> None:
