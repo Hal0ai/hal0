@@ -27,6 +27,12 @@
 set -euo pipefail
 cmd="${1:-}"; agent="${2:-}"
 [[ "$agent" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || { echo "hal0-agentenv: bad agent name" >&2; exit 2; }
+# Run from / and start every python with -I (isolated mode: no cwd or script
+# dir on sys.path, PYTHON* env vars and user site-packages ignored). sudo keeps
+# the caller's working directory, so without both a planted tempfile.py there
+# would be imported by this root interpreter (#3007). Every path below is
+# absolute.
+cd /
 secrets="/var/lib/hal0/secrets/agents/${agent}.env"
 driver="/etc/hal0/agents/${agent}.env"
 seed="/etc/hal0/agents/${agent}.toml"
@@ -41,7 +47,7 @@ case "$cmd" in
     # NB: the script is passed via `-c` (an argv), NOT a `<<heredoc` — a heredoc
     # would become python's stdin and shadow the caller's piped KEY=VALUE
     # updates, silently no-op'ing the merge. With `-c`, stdin stays the caller's.
-    python3 -c '
+    python3 -I -c '
 import os, sys, tempfile
 path = sys.argv[1]
 updates = {}
@@ -94,7 +100,7 @@ except BaseException:
     # which cannot read the 0600 vault. A key whose value is empty or a false
     # flag (0, false, no, off) is not printed. No vault: no output, exit 0.
     [[ -f "$secrets" ]] || exit 0
-    python3 -c '
+    python3 -I -c '
 import sys
 names = []
 with open(sys.argv[1], encoding="utf-8", errors="replace") as f:

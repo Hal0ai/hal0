@@ -385,11 +385,13 @@ def test_seed_toml_root_writes_directly(tmp_path: Path, monkeypatch: pytest.Monk
 
 
 def _secret_keys_snippet() -> str:
-    """The python3 -c body of the wrapper's ``secret-keys`` verb, unescaped by bash."""
+    """The python3 -I -c body of the wrapper's ``secret-keys`` verb, unescaped by bash."""
     text = (Path(__file__).parents[2] / "installer" / "wrappers" / "hal0-agentenv").read_text()
     verb = text[text.index("  secret-keys)") :]
     verb = verb[: verb.index("\n    ;;")]
-    return verb[verb.index("python3 -c '") + len("python3 -c '") : verb.rindex('\' "$secrets"')]
+    return verb[
+        verb.index("python3 -I -c '") + len("python3 -I -c '") : verb.rindex('\' "$secrets"')
+    ]
 
 
 def test_secret_keys_prints_set_names_and_never_a_value(tmp_path: Path) -> None:
