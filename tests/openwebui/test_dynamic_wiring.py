@@ -225,6 +225,7 @@ def test_wiring_status_matrix(
 ) -> None:
     from hal0.openwebui.wiring import openwebui_wiring_status
 
+    _install("sdxl-turbo")  # the images chip needs the selected model installed and renderable
     _write_capabilities_toml(tmp_hal0_home, toml_body)
     status = openwebui_wiring_status()
     # Chat/voice are unconditional (env_writer's static defaults).
@@ -233,6 +234,39 @@ def test_wiring_status_matrix(
     assert status["documents"] is expect_documents
     assert status["images"] is expect_images
     assert status["web_search"] is False  # no provider seam wired up yet
+
+
+@pytest.mark.parametrize(
+    ("model_id", "install", "wired"),
+    [
+        ("sdxl-turbo", True, True),
+        ("sdxl-turbo", False, False),  # selected, never downloaded (or removed since)
+        ("wan22-t2v", False, False),  # a catalog model the API cannot render
+        ("ckpt/absent", False, False),  # no such user checkpoint
+        ("my-custom-checkpoint.safetensors", False, False),  # not an id at all
+    ],
+    ids=["installed", "not-installed", "not-renderable", "absent-checkpoint", "not-an-id"],
+)
+def test_images_chip_is_lit_exactly_when_the_env_block_is_written(
+    tmp_hal0_home: str, model_id: str, install: bool, wired: bool
+) -> None:
+    """One owner: the Services chip and OWUI's image env block read the same resolution.
+
+    A selection that does not resolve to an installed, API-renderable model writes no image
+    settings, so the dashboard must not say the image button is wired.
+    """
+    from hal0.openwebui.wiring import openwebui_wiring_status, resolve_dynamic_env_overrides
+
+    if install:
+        _install(model_id)
+    _write_capabilities_toml(tmp_hal0_home, _img_selection(model_id))
+
+    status = openwebui_wiring_status()
+    overrides = resolve_dynamic_env_overrides()
+
+    assert (overrides["ENABLE_IMAGE_GENERATION"] == "True") is wired
+    assert status["images"] is wired
+    assert status["image_model"] == (model_id if wired else None)
 
 
 def test_wiring_status_agents_empty_without_registry(tmp_hal0_home: str) -> None:

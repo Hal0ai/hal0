@@ -179,6 +179,10 @@ curl http://localhost:8080/api/services | jq '.services[] | select(.id == "openw
 }
 ```
 
+The Images chip follows the same rule as Open WebUI's image settings: it is lit
+only when the `img` selection names a model that is installed and that the API
+can render, and `image_model` is `null` otherwise, even with a model selected.
+
 The Agents chip is lit while hal0 has Hermes profiles registered; `agents`
 lists the model ids each profile advertises, which may include Hermes
 `model_routes` aliases as well as the profile's own id, and is an empty list
