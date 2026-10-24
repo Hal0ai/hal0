@@ -40,8 +40,10 @@ __all__ = [
     "chmod",
     "chown",
     "chown_tree",
+    "dir_owner",
     "ensure_dir",
     "open_dir",
+    "read_bytes",
     "read_text",
     "write_file",
 ]
@@ -142,8 +144,8 @@ def _parent(path: Path, **kwargs: object) -> Iterator[int]:
         os.close(fd)
 
 
-def read_text(path: Path | str, *, require_trusted_dir: bool = False) -> str | None:
-    """Text of regular file ``path``, or ``None`` when it is absent.
+def read_bytes(path: Path | str, *, require_trusted_dir: bool = False) -> bytes | None:
+    """Bytes of regular file ``path``, or ``None`` when it is absent.
 
     The file is opened ``O_NOFOLLOW|O_NONBLOCK`` relative to its directory, so
     a planted symlink (or FIFO) is refused instead of read as root. Raises
@@ -170,7 +172,23 @@ def read_text(path: Path | str, *, require_trusted_dir: bool = False) -> str | N
     with fh:
         if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
             raise UnsafePathError(path, "not a regular file")
-        return fh.read().decode("utf-8")
+        return fh.read()
+
+
+def read_text(path: Path | str, *, require_trusted_dir: bool = False) -> str | None:
+    """:func:`read_bytes`, decoded as UTF-8."""
+    data = read_bytes(path, require_trusted_dir=require_trusted_dir)
+    return None if data is None else data.decode("utf-8")
+
+
+def dir_owner(path: Path | str) -> tuple[int, int]:
+    """``(uid, gid)`` of directory ``path``, walked as :func:`open_dir` does."""
+    fd = open_dir(path)
+    try:
+        st = os.fstat(fd)
+        return st.st_uid, st.st_gid
+    finally:
+        os.close(fd)
 
 
 def write_file(

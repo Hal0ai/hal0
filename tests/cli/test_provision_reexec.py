@@ -19,6 +19,7 @@ executing — and that is what must be preferred.
 
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -245,3 +246,31 @@ def test_pre_layout_python_cleanup_honours_the_persisted_value(
     monkeypatch.setattr("hal0.agents.hermes_provision._read_hermes_python_env", lambda: None)
     assert agent_commands._cleanup_pre_layout_python() is True
     assert not legacy.exists()
+
+
+def test_uv_tree_handover_goes_through_the_nofollow_walker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2975: a pathname os.walk + lchown could be steered out of the tree mid-walk."""
+    import pwd
+
+    from hal0.security import nofollow
+
+    tree = tmp_path / "python"
+    (tree / "cpython" / "bin").mkdir(parents=True)
+    victim = tmp_path / "etc"
+    victim.mkdir()
+    (victim / "shadow").write_text("x")
+    (tree / "cpython" / "lib").symlink_to(victim)
+    walked: list[Path] = []
+    real = nofollow.chown_tree
+    monkeypatch.setattr(
+        nofollow, "chown_tree", lambda root, uid, gid: (walked.append(root), real(root, uid, gid))
+    )
+    me = pwd.getpwuid(os.getuid())
+    monkeypatch.setattr(pwd, "getpwnam", lambda _name: me)
+    agent_commands._hand_uv_trees_to_hal0((tree,))
+    assert walked == [tree]
+    # Re-owned to the same (non-root) uid, so the observable is the walk:
+    # the link itself is in the tree, its target never is.
+    assert (tree / "cpython" / "lib").is_symlink()

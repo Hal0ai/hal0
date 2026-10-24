@@ -354,13 +354,17 @@ def test_new_env_file_written_as_root_is_owned_like_its_directory(
     chowned: list[tuple[str, int, int]] = []
     pdir = home / "profiles" / "parked"
     monkeypatch.setattr(hermes_api.os, "geteuid", lambda: 0)
+    # The write goes by descriptor (#2975): record which file each fchown hit.
     monkeypatch.setattr(
-        hermes_api.os, "chown", lambda path, uid, gid: chowned.append((str(path), uid, gid))
+        hermes_api.os,
+        "fchown",
+        lambda fd, uid, gid: chowned.append((os.readlink(f"/proc/self/fd/{fd}"), uid, gid)),
     )
     assert hermes_api.ensure_profile_key("parked", home) is True
     st = pdir.stat()
-    assert len(chowned) == 1 and chowned[0][1:] == (st.st_uid, st.st_gid)
-    assert chowned[0][0].startswith(str(pdir / ".env."))  # the temp file, before os.replace
+    env_chowns = [c for c in chowned if not c[0].endswith(".lock")]
+    assert len(env_chowns) == 1 and env_chowns[0][1:] == (st.st_uid, st.st_gid)
+    assert env_chowns[0][0].startswith(str(pdir / "..env."))  # the temp file, before the rename
 
 
 def test_env_key_name() -> None:
@@ -428,3 +432,25 @@ def test_default_model_id_override_precedence(home: Path, monkeypatch: pytest.Mo
     assert hermes_api.model_id_for("default", home) == "from-config"
     # Named profiles keep their name: Hermes resolves them with an empty override.
     assert hermes_api.model_id_for("coder", home) == "coder"
+
+
+@pytest.mark.parametrize("as_root", [False, True])
+def test_default_key_mirror_refuses_a_symlinked_hermes_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, as_root: bool
+) -> None:
+    """#2975: the root prelude must not append the vault key through a swapped .hermes."""
+    state = tmp_path / "var-lib-hal0"
+    state.mkdir()
+    state.chmod(0o2775)  # hal0-owned, group-writable, not sticky
+    victim = tmp_path / "etc"
+    victim.mkdir()
+    (victim / ".env").write_text("ROOT_ONLY=1\n")
+    (state / ".hermes").symlink_to(victim)
+    if as_root:
+        monkeypatch.setattr(hermes_api.os, "geteuid", lambda: 0)
+        monkeypatch.setattr(hermes_api.os, "fchown", lambda *_a: None)
+    assert hermes_api.ensure_default_key(state / ".hermes", value=GOOD) is False
+    monkeypatch.undo()
+    assert (victim / ".env").read_text() == "ROOT_ONLY=1\n"
+    # Not even the lock file lands in the link's target.
+    assert sorted(p.name for p in victim.iterdir()) == [".env"]

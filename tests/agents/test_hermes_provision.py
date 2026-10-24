@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -6472,3 +6473,65 @@ def test_install_phase_rebuilds_the_update_target_override_not_the_pin(
     )
     assert out.status == hp.PhaseStatus.FAIL and "--clear-override" in (out.reason or "")
     assert calls == []
+
+
+# ── #2975 review: the remaining root writers in the provisioner ──────────────
+
+
+def _hal0_owned_root(tmp_path: Path) -> Path:
+    root = tmp_path / "hal0-owned"
+    root.mkdir()
+    root.chmod(0o2775)  # writable by someone untrusted, like /etc/hal0
+    return root
+
+
+def test_terminal_state_refuses_a_symlinked_agents_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    root = _hal0_owned_root(tmp_path)
+    (root / "agents").symlink_to(victim)
+    monkeypatch.setattr(hp, "TERMINAL_STATE_PATH", root / "agents" / "hermes-terminal-tool")
+    assert hp.write_terminal_state(True) is False
+    assert list(victim.iterdir()) == []
+
+
+def test_terminal_state_refuses_an_agents_dir_root_does_not_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hal0.security import nofollow
+
+    agents = _hal0_owned_root(tmp_path) / "agents"
+    agents.mkdir(mode=0o755)
+    monkeypatch.setattr(hp, "TERMINAL_STATE_PATH", agents / "hermes-terminal-tool")
+    # The test user stands in for the hal0 account here: root alone is trusted.
+    monkeypatch.setattr(nofollow, "_trusted_uids", lambda: frozenset({0}))
+    assert hp.write_terminal_state(True) is False
+    assert list(agents.iterdir()) == []
+
+
+def test_terminal_state_lands_0644_in_a_real_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "etc-hal0" / "agents" / "hermes-terminal-tool"
+    monkeypatch.setattr(hp, "TERMINAL_STATE_PATH", path)
+    assert hp.write_terminal_state(False) is True
+    assert path.read_text() == "0\n"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o644
+
+
+def test_uv_install_dir_is_never_chmodded_through_a_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    victim.chmod(0o700)
+    root = _hal0_owned_root(tmp_path)
+    (root / "python").symlink_to(victim)
+    monkeypatch.setattr(hp, "UV_PYTHON_INSTALL_DIR", root / "python")
+    managed = f"{root}/python/cpython-3.14-linux-x86_64-gnu/bin/python3.14"
+    hp._provision_python_via_uv(
+        _uv_prober(), _UvRunner(managed), fallback_bin=Path("/nonexistent/uv")
+    )
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o700

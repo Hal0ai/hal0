@@ -14,6 +14,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from hal0.config.locking import file_lock
 
 
@@ -78,3 +80,23 @@ def test_reentrant_within_same_process(tmp_path: Path) -> None:
     with file_lock(target), file_lock(target):
         entered = True
     assert entered
+
+
+def test_root_lock_refuses_a_symlinked_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2975: as root, the lock's directory is walked by descriptor, never through a planted link."""
+    from hal0.config import locking
+    from hal0.security import nofollow
+
+    state = tmp_path / "state"
+    state.mkdir()
+    state.chmod(0o2775)
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (state / ".hermes").symlink_to(victim)
+    monkeypatch.setattr(locking.os, "geteuid", lambda: 0)
+    with pytest.raises(nofollow.UnsafePathError), locking.file_lock(state / ".hermes" / ".env"):
+        pass
+    monkeypatch.undo()
+    assert list(victim.iterdir()) == []

@@ -797,10 +797,12 @@ def _provision_python_via_uv(
     # caller) must not abort an otherwise-working provision, so log and
     # continue rather than fall through to the None/range-error path.
     try:
-        UV_PYTHON_INSTALL_DIR.mkdir(parents=True, exist_ok=True)
         # setgid hal0 group, traversable by everyone: the same 2775 the perms
-        # table (hal0.install.perms) declares for this directory.
-        UV_PYTHON_INSTALL_DIR.chmod(0o2775)
+        # table (hal0.install.perms) declares for this directory. By descriptor
+        # (#2975): the dir sits in hal0-owned /var/lib/hal0, so a root caller
+        # must not mkdir or chmod through a link swapped in on the way.
+        os.close(nofollow.open_dir(UV_PYTHON_INSTALL_DIR, create=True))
+        nofollow.chmod(UV_PYTHON_INSTALL_DIR, 0o2775)
     except OSError as exc:
         log.warning(
             "uv-install-dir-perms-failed",
@@ -2208,14 +2210,20 @@ def write_terminal_state(enabled: bool) -> bool:
     being honoured unrecorded, while an already-working box is left alone.
     """
     try:
-        TERMINAL_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write(TERMINAL_STATE_PATH, "1\n" if enabled else "0\n")
-        # Explicit 0644: _atomic_write inherits the process umask, and a root
-        # umask of 077 would leave the marker 0600 — unreadable to the `hal0`
-        # user the provisioner drops to, which would then see no record and
-        # fail an operator's opt-in closed. The value is a posture, not a
-        # secret; root-owned + world-readable is exactly right.
-        TERMINAL_STATE_PATH.chmod(0o644)
+        # Explicit 0644: a root umask of 077 would leave the marker 0600 —
+        # unreadable to the `hal0` user the provisioner drops to, which would
+        # then see no record and fail an operator's opt-in closed. The value is
+        # a posture, not a secret; root-owned + world-readable is exactly right.
+        # mkdir, write and mode all go by descriptor, into a directory root
+        # must own alone (#2975): /etc/hal0 is hal0-owned, so agents/ could be
+        # swapped for a link or a tree that account owns.
+        nofollow.write_file(
+            TERMINAL_STATE_PATH,
+            "1\n" if enabled else "0\n",
+            mode=0o644,
+            mkdir_mode=0o755,
+            require_trusted_dir=True,
+        )
         return True
     except OSError as exc:
         log.warning("hermes_provision.terminal_state_write_failed", error=str(exc))
