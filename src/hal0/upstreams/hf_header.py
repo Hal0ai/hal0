@@ -8,19 +8,19 @@ or the byte cap is reached.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import httpx
 
 from hal0.registry.gguf_header import read_gguf_header_bytes
 from hal0.registry.pull import hf_download_url
+from hal0.upstreams.huggingface import hf_token_from_env
 
 _TIMEOUT_S = 30.0
 
 
 def _auth_headers(token: str | None) -> dict[str, str]:
-    tok = token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    tok = token or hf_token_from_env()
     return {"Authorization": f"Bearer {tok}"} if tok else {}
 
 

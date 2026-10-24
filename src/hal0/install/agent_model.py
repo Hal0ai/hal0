@@ -43,6 +43,7 @@ import sys
 
 from hal0.config.schema import HardwareInfo
 from hal0.install.brain_model import already_pulled, gpu_capable
+from hal0.upstreams.huggingface import hf_token_from_env
 
 log = logging.getLogger(__name__)
 
@@ -248,7 +249,7 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     logging.basicConfig(level=logging.WARNING, format="  %(message)s")
     override = (os.environ.get("HAL0_AGENT_MODEL") or "").strip() or None
-    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or None
+    hf_token = hf_token_from_env()
 
     if "--floor" in argv:
         print(f"{_smallest_rung_gb():.0f}")

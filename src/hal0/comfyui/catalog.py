@@ -73,16 +73,16 @@ class Component:
     """One weight file: where it lands, where it comes from, roughly how big it is.
 
     ``relpath`` is the path under the kind's subdirectory and may be nested (Wan's
-    LoRAs live in a directory of their own). The source is a Hugging Face file
-    (``hf_repo`` + ``hf_path``) or a plain ``url``, never both.
+    LoRAs live in a directory of their own). The source is a Hugging Face file,
+    ``hf_path`` within ``hf_repo``; it may differ from ``relpath`` when the file
+    is stored under another name or in a subdirectory of the repo.
     """
 
     kind: ComponentKind
     relpath: str
     approx_gb: float
-    hf_repo: str = ""
-    hf_path: str = ""
-    url: str = ""
+    hf_repo: str
+    hf_path: str
 
     @property
     def dest(self) -> Path:
@@ -92,7 +92,7 @@ class Component:
     @property
     def source_key(self) -> str:
         """A string that is equal for two components exactly when they share a source."""
-        return self.url or f"hf://{self.hf_repo}/{self.hf_path}"
+        return f"hf://{self.hf_repo}/{self.hf_path}"
 
 
 @dataclass(frozen=True)
@@ -407,9 +407,11 @@ def _wan_model(
     """A Wan 2.2 entry. Both precisions share the fp16 template; fp8 renames its weights."""
     catalog_task, noun, template, lora_dir = _WAN_TASKS[task]
     fp8 = precision == "fp8"
-    renames = {"umt5_xxl_fp16.safetensors": _WAN_UMT5_FP8.relpath}
-    for noise in ("high", "low"):
-        renames[_wan_unet(task, noise, "fp16").relpath] = _wan_unet(task, noise, "fp8").relpath
+    renames: dict[str, str] = {}
+    if fp8:
+        renames["umt5_xxl_fp16.safetensors"] = _WAN_UMT5_FP8.relpath
+        for noise in ("high", "low"):
+            renames[_wan_unet(task, noise, "fp16").relpath] = _wan_unet(task, noise, "fp8").relpath
     return ImageModel(
         id=f"wan22-{task}" if fp8 else f"wan22-{task}-fp16",
         label=f"Wan 2.2 {noun} ({precision})",
@@ -429,7 +431,7 @@ def _wan_model(
         license="Apache-2.0",
         notes="Seko 4-step Lightning LoRAs on both the high- and low-noise models."
         + (" The fp8 build is the smaller download." if fp8 else ""),
-        file_substitutions=renames if fp8 else {},
+        file_substitutions=renames,
     )
 
 

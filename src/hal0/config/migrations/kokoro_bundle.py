@@ -20,10 +20,11 @@ store and fetches only the curated HF coordinates, through the normal pull.
 from __future__ import annotations
 
 import asyncio
-import os
 from typing import Any
 
 import structlog
+
+from hal0.upstreams.huggingface import hf_token_from_env
 
 log = structlog.get_logger(__name__)
 
@@ -85,7 +86,7 @@ async def _pull_kokoro_bundle(job_id: str | None) -> None:
         hf_repo=curated.hf_repo,
         hf_file=curated.hf_file,
         registry=ModelRegistry(),
-        hf_token=os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN"),
+        hf_token=hf_token_from_env(),
         capability=curated.capability,
     )
     if job.state != "completed":

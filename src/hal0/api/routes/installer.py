@@ -52,6 +52,7 @@ from hal0.install.orchestrate import (
 )
 from hal0.registry.curated import CURATED_MODELS
 from hal0.slot_config import write_slot_toml
+from hal0.upstreams.huggingface import hf_token_from_env
 
 # Auth was removed by design. All endpoints are open on the local
 # network; the first-run wizard runs without any credential.
@@ -358,7 +359,7 @@ async def _apply_selections_core(
     never called ``/complete``. ``mark_first_run_done`` is idempotent, so a
     later ``/complete`` call (the wizard still makes one) is a harmless no-op.
     """
-    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    hf_token = hf_token_from_env()
     result = await apply_setup(
         selections,
         hardware=request.app.state.hardware_probe.probe(),
