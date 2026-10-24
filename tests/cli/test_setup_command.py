@@ -190,7 +190,8 @@ def test_setup_headless_installs_image_models(headless, tmp_path):
     assert model_ids == ("sdxl-lightning", "esrgan-4x")
     assert hf_token == "hf_from_env"
     assert callable(on_line)
-    assert headless["extension"] == ["comfyui"]  # something landed: bring the img slot up
+    # `provision_image_models` owns starting the img slot; the setup path never enables it.
+    assert headless["extension"] == []
 
 
 def test_setup_headless_skips_image_models_under_no_pull(headless, tmp_path):
@@ -234,12 +235,13 @@ def test_setup_headless_without_models_skips_the_installer(headless, tmp_path):
     assert headless["install"] == []
 
 
-def test_setup_headless_installs_selects_and_starts_then_enables_the_unit(monkeypatch, tmp_path):
+def test_setup_headless_installs_selects_and_starts_the_slot_once(monkeypatch, tmp_path):
     """The headless chain, unstubbed below `provision_offline`, in the order it must run.
 
-    Download, then a normal apply (which writes the img unit and starts the slot), then the
-    extension's `enable --now` on a unit that now exists; the operator reads what is happening
-    and what came of it on the way.
+    Download, then a normal apply (which writes the img unit and starts the slot); the
+    operator reads what is happening and what came of it on the way. Nothing else starts or
+    enables the unit: `provision_image_models` owns the start, and `systemctl enable` cannot
+    enable a Quadlet-generated unit anyway (it only printed a spurious warning).
     """
     events: list[str] = []
 
@@ -285,13 +287,54 @@ def test_setup_headless_installs_selects_and_starts_then_enables_the_unit(monkey
         "install sdxl-lightning",
         "apply img/img sdxl-lightning",
         "owui",
-        "extension comfyui",
     ]
+    assert "could not enable" not in result.output
     lines = result.output.splitlines()
     starting = next(i for i, line in enumerate(lines) if "this starts the image engine" in line)
     assert "downloads the ComfyUI runtime" in lines[starting]
     after = [line for line in lines[starting + 1 :] if "is the default image model" in line]
     assert after[0].endswith("is the default image model; the image engine is ready")
+
+
+def test_setup_headless_with_a_selection_in_place_starts_nothing(monkeypatch, tmp_path):
+    """A kept selection means nothing is started: not by the auto-select, not by the setup path."""
+    events: list[str] = []
+
+    class Orchestrator:
+        async def get_state(self):
+            selection = {"enabled": True, "model": "sdxl-turbo"}
+            return {"selections": {"img": {"img": selection}}}
+
+        async def apply(self, slot, child, partial):
+            events.append(f"apply {slot}/{child}")
+            return {"status": "ready"}
+
+    async def build_orchestrator():
+        return Orchestrator()
+
+    async def installed(model_ids, hf_token, say):
+        return [(model_id, "completed") for model_id in model_ids]
+
+    async def fake_run_auto(sel, hw, *, no_pull=False):
+        events.append("apply_setup")
+
+    monkeypatch.setattr("hal0.cli.setup_command.HardwareProbe", _FakeProbe)
+    monkeypatch.setattr("hal0.cli.setup_command._run_auto", fake_run_auto)
+    monkeypatch.setattr("hal0.capabilities.catalog.comfyui_backends", lambda: ["gpu-vulkan"])
+    monkeypatch.setattr("hal0.comfyui.install.install_each", installed)
+    monkeypatch.setattr("hal0.install.image_models._build_offline_orchestrator", build_orchestrator)
+    monkeypatch.setattr("hal0.components.openwebui_arm.reconcile_openwebui_env", lambda: {})
+    monkeypatch.setattr(
+        "hal0.install.extensions.install_extension",
+        lambda ext_id: events.append(f"extension {ext_id}") or ExtensionOutcome(ext_id=ext_id),
+    )
+    answers = _answers_file(tmp_path, "{ mode: scaffold_and_download, models: [sdxl-lightning] }")
+
+    result = CliRunner().invoke(app, ["--answers", answers])
+
+    assert result.exit_code == 0, result.output
+    assert events == ["apply_setup"]
+    assert "keeping sdxl-turbo as the default image model" in result.output
 
 
 def test_plan_lists_image_models_with_their_download_size(capsys):
