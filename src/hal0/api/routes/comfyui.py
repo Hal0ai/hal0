@@ -833,6 +833,7 @@ async def comfyui_model_install(model_id: str, request: Request) -> JSONResponse
                 comfyui_install.require_one_filesystem()
                 comfyui_install.require_writable_destinations(model)
                 comfyui_install.preflight_disk(model)
+        comfyui_install.clear_removed(model.id)  # asking for it is the operator changing their mind
         job = make_job(model_id)
         jobs[model_id] = job
         _schedule_install(request, model, job)
@@ -862,20 +863,29 @@ async def comfyui_model_remove(
     ``comfyui.remove_failed`` when a file cannot be deleted (a read-only directory):
     ``error.details`` lists what was removed before it and the path that failed. 409
     ``comfyui.models_dir_not_writable`` when the models tree cannot be read by the hal0
-    user. After a removal Open WebUI's image-generation env is re-rendered in the
-    background, so a model that is gone is no longer wired.
+    user. After a removal, including one that stopped partway, Open WebUI's
+    image-generation env is re-rendered, so a model that is gone is no longer wired.
+    The removal is also recorded: a model whose weights other models hold stays
+    ``complete``, and without the record the next startup or install would give it its
+    workflow back; installing the model again clears it.
     """
     model = _require_model(model_id)
-    async with _tree_lock(request):
-        job = _blocking_install(model, _install_jobs(request))
-        if job is not None:
-            raise _install_running(CATALOG[job.model_id], job, removing=model)
-        # The delete runs off the event loop (hundreds of unlinks on a slow store); the
-        # lock keeps an install from starting under it.
-        with _readable_tree():
-            result = await asyncio.to_thread(
-                comfyui_install.remove_model, model, include_shared=include_shared
-            )
+    try:
+        async with _tree_lock(request):
+            job = _blocking_install(model, _install_jobs(request))
+            if job is not None:
+                raise _install_running(CATALOG[job.model_id], job, removing=model)
+            # The delete runs off the event loop (hundreds of unlinks on a slow store); the
+            # lock keeps an install from starting under it.
+            with _readable_tree():
+                result = await asyncio.to_thread(
+                    comfyui_install.remove_model, model, include_shared=include_shared
+                )
+    except comfyui_install.RemoveFailed:
+        # Stopped partway: files may already be gone, so what Open WebUI is wired to may be
+        # too. Background tasks only run behind a successful response, so do it here.
+        await asyncio.to_thread(_rewire_open_webui, model_id)
+        raise
     background_tasks.add_task(_rewire_open_webui, model_id)  # so a removed model un-wires
     return result
 

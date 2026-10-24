@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
 from collections import namedtuple
 from collections.abc import Callable
@@ -1705,8 +1706,13 @@ def test_ensure_workflows_on_an_empty_store_writes_nothing() -> None:
     assert not paths.workflows_dir().exists()
 
 
-def test_ensure_workflows_logs_an_unwritable_workflow_and_carries_on(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize(
+    "error",
+    [PermissionError(13, "Permission denied"), ValueError("template is broken")],
+    ids=["unwritable", "broken-template"],
+)
+def test_ensure_workflows_logs_a_failed_workflow_and_carries_on(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, error: Exception
 ) -> None:
     """Best-effort: one model's failed write neither raises nor stops the models after it."""
     first = _land_weights("sdxl-turbo")
@@ -1715,7 +1721,7 @@ def test_ensure_workflows_logs_an_unwritable_workflow_and_carries_on(
 
     def write(model: ImageModel) -> Path:
         if model.id == first.id:
-            raise PermissionError(13, "Permission denied")
+            raise error
         return real(model)
 
     monkeypatch.setattr(install, "_write_workflow", write)
@@ -1725,7 +1731,8 @@ def test_ensure_workflows_logs_an_unwritable_workflow_and_carries_on(
 
     assert written == [second.workflow_filename]
     assert not (paths.workflows_dir() / first.workflow_filename).exists()
-    assert any(r.getMessage() == "comfyui.ensure_workflow_failed" for r in caplog.records)
+    failures = [r for r in caplog.records if r.getMessage() == "comfyui.ensure_workflow_failed"]
+    assert [r.model_id for r in failures] == [first.id]
 
 
 def test_ensure_workflows_survives_a_models_tree_it_cannot_read(
@@ -1739,3 +1746,221 @@ def test_ensure_workflows_survives_a_models_tree_it_cannot_read(
     monkeypatch.setattr(install, "install_state", denied)
 
     assert install.ensure_workflows() == []
+
+
+# ── ensure_workflows honours an operator's removal ──────────────────────────
+#
+# Removing a model whose weights other complete models hold deletes only its workflow, and the
+# model still reads ``complete``. Without a record of that removal, the next API boot (or the
+# next install of any model) would write the workflow straight back.
+
+
+def _land_qwen_family() -> None:
+    """Every component of ``qwen-image-lightning``, which holds all of ``qwen-image``'s files."""
+    _land_weights("qwen-image-lightning")
+    assert install_state(CATALOG["qwen-image"]).state == "complete"
+
+
+@pytest.mark.parametrize("provisioned_first", [False, True], ids=["no-workflow", "had-workflow"])
+def test_ensure_workflows_honours_operator_removal(provisioned_first: bool) -> None:
+    _land_qwen_family()
+    if provisioned_first:
+        assert "qwen-image.json" in install.ensure_workflows()
+
+    result = install.remove_model(CATALOG["qwen-image"])
+
+    assert result["kept"], "the shared weights stay: only the workflow is the removal"
+    assert install_state(CATALOG["qwen-image"]).state == "complete"
+    assert install.is_removed("qwen-image")
+    written = install.ensure_workflows()
+    assert "qwen-image.json" not in written
+    assert not (paths.workflows_dir() / "qwen-image.json").exists()
+    # The model that was not removed is still provisioned.
+    assert (paths.workflows_dir() / "qwen-image-lightning.json").is_file()
+
+
+def test_a_removal_marker_is_scoped_to_its_model() -> None:
+    _land_qwen_family()
+    install.remove_model(CATALOG["qwen-image"])
+
+    written = install.ensure_workflows()
+
+    assert written == ["qwen-image-lightning.json"]
+    assert not install.is_removed("qwen-image-lightning")
+
+
+def test_install_clears_operator_removal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An explicit install is the operator changing their mind: setup and the CLI go through here."""
+    _land_qwen_family()
+    install.remove_model(CATALOG["qwen-image"])
+    assert install.is_removed("qwen-image")
+    seen: list[bool] = []
+
+    async def fake_run_install(job: PullJob, model: ImageModel, **kwargs: Any) -> None:
+        seen.append(install.is_removed(model.id))  # cleared before the job is scheduled
+        job.state = "completed"
+
+    monkeypatch.setattr(install, "run_install", fake_run_install)
+    monkeypatch.setattr(install, "preflight_disk", lambda model: None)
+
+    results = install.install_models_blocking(["qwen-image"], hf_token=None)
+
+    assert results == [("qwen-image", "completed")]
+    assert seen == [False]
+    assert not install.is_removed("qwen-image")
+
+
+def test_install_that_never_starts_keeps_the_removal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A model refused for disk space was not installed, so it is still removed."""
+    _land_qwen_family()
+    install.remove_model(CATALOG["qwen-image"])
+
+    def refuse(model: ImageModel) -> None:
+        raise install.InstallInsufficientDisk("no room", details={})
+
+    monkeypatch.setattr(install, "preflight_disk", refuse)
+
+    results = install.install_models_blocking(["qwen-image"], hf_token=None)
+
+    assert results == [("qwen-image", "failed")]
+    assert install.is_removed("qwen-image")
+
+
+def test_include_shared_does_not_mark_affected() -> None:
+    """A model that loses its weights stops being complete; it comes back with them."""
+    _land_qwen_family()
+    result = install.remove_model(CATALOG["qwen-image-lightning"], include_shared=True)
+    assert "qwen-image" in result["affected"]
+
+    assert install.is_removed("qwen-image-lightning")
+    assert not install.is_removed("qwen-image")
+    _land_weights("qwen-image")  # the operator puts the weights back by hand
+    assert install.ensure_workflows() == ["qwen-image.json"]
+
+
+def test_include_shared_marks_the_removed_model() -> None:
+    _land_qwen_family()
+    install.remove_model(CATALOG["qwen-image"], include_shared=True)
+
+    assert install.is_removed("qwen-image")
+    assert install_state(CATALOG["qwen-image"]).state == "none"
+
+
+def test_removal_failing_on_a_weight_leaves_no_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The model's own workflow was not reached, so nothing was removed and nothing is recorded."""
+    _land_qwen_family()
+    real = install._unlink
+
+    def stuck(path: Path, removed: list[str]) -> bool:
+        if path.suffix == ".safetensors":
+            raise install.RemoveFailed("read-only", details={"removed": list(removed)})
+        return real(path, removed)
+
+    monkeypatch.setattr(install, "_unlink", stuck)
+
+    with pytest.raises(install.RemoveFailed):
+        install.remove_model(CATALOG["qwen-image"], include_shared=True)
+
+    assert not install.is_removed("qwen-image")
+
+
+def test_removal_failing_after_its_own_workflow_keeps_the_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Partway through: the model's workflow is gone, so the removal is recorded even if a neighbour's is stuck."""
+    _land_qwen_family()
+    assert {"qwen-image.json", "qwen-image-lightning.json"} <= set(install.ensure_workflows())
+    real = install._unlink
+
+    def stuck(path: Path, removed: list[str]) -> bool:
+        if path.name == "qwen-image-lightning.json":
+            raise install.RemoveFailed("read-only", details={"removed": list(removed)})
+        return real(path, removed)
+
+    monkeypatch.setattr(install, "_unlink", stuck)
+
+    with pytest.raises(install.RemoveFailed):
+        install.remove_model(CATALOG["qwen-image"], include_shared=True)
+
+    assert not (paths.workflows_dir() / "qwen-image.json").exists()
+    assert install.is_removed("qwen-image")
+    assert not install.is_removed("qwen-image-lightning")
+
+
+def test_a_marker_that_cannot_be_written_never_fails_the_removal(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A plain file where the marker directory belongs: the removal still succeeds, and says so."""
+    _land_qwen_family()
+    blocker = install._removed_marker("qwen-image").parent
+    blocker.parent.mkdir(parents=True, exist_ok=True)
+    blocker.write_text("not a directory", encoding="utf-8")
+
+    with caplog.at_level("WARNING", logger=install.log.name):
+        result = install.remove_model(CATALOG["qwen-image"])
+
+    assert result["kept"]
+    assert not install.is_removed("qwen-image")
+    assert any(r.getMessage() == "comfyui.removal_marker_failed" for r in caplog.records)
+    # Clearing and reading are just as forgiving.
+    install.clear_removed("qwen-image")
+    assert install.is_removed("qwen-image") is False
+
+
+# ── _write_workflow: concurrent writers ─────────────────────────────────────
+
+
+def test_write_workflow_writers_do_not_share_a_temp_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``ensure_workflows`` (under the API's lock) and ``run_install`` (not) can write one workflow.
+
+    A fixed ``<name>.tmp`` let the second writer's rename take the first writer's file, so the
+    first failed on its own rename. Each write now stages in its own file.
+    """
+    model = CATALOG["sdxl-turbo"]
+    first_in_replace, release_first = threading.Event(), threading.Event()
+    real_replace = os.replace
+    calls = 0
+    lock = threading.Lock()
+    staged: list[str] = []
+
+    def replace(src: Any, dst: Any) -> None:
+        nonlocal calls
+        with lock:
+            calls += 1
+            mine = calls
+        staged.append(str(src))
+        if mine == 1:
+            first_in_replace.set()
+            assert release_first.wait(5), "the second writer never finished"
+        real_replace(src, dst)
+
+    monkeypatch.setattr(install.os, "replace", replace)
+    errors: list[BaseException] = []
+
+    def first_writer() -> None:
+        try:
+            install._write_workflow(model)
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=first_writer)
+    thread.start()
+    try:
+        assert first_in_replace.wait(5)
+        install._write_workflow(model)  # the second writer runs start to finish meanwhile
+    finally:
+        release_first.set()
+        thread.join(5)
+
+    assert errors == []
+    assert len(set(staged)) == 2, "both writers staged in the same file"
+    written = paths.workflows_dir() / model.workflow_filename
+    assert json.loads(written.read_text(encoding="utf-8"))
+    assert [p.name for p in paths.workflows_dir().iterdir()] == [model.workflow_filename]
+
+
+def test_write_workflow_file_is_world_readable() -> None:
+    """The container reads it; a mkstemp file is 0600 unless the mode is set."""
+    written = install._write_workflow(CATALOG["sdxl-turbo"])
+
+    assert written.stat().st_mode & 0o777 == 0o644
