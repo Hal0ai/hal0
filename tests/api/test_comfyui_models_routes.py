@@ -769,6 +769,7 @@ def test_remove_route_include_shared_deletes_shared_files_and_reports_affected(
     t2v, i2v = CATALOG["ltx2-t2v"], CATALOG["ltx2-i2v"]
     _land(t2v)
     _provision_workflow(t2v)
+    i2v_workflow = _provision_workflow(i2v)
 
     resp = client.delete(f"/api/comfyui/models/{t2v.id}", params={"include_shared": "true"})
 
@@ -777,12 +778,14 @@ def test_remove_route_include_shared_deletes_shared_files_and_reports_affected(
         "removed": [
             *(f"{c.kind.subdir}/{c.relpath}" for c in t2v.components),
             "workflows/ltx2-t2v.json",
+            "workflows/ltx2-i2v.json",  # the affected model's workflow goes with its weights
         ],
         "kept": [],
         "affected": ["ltx2-i2v"],
     }
     assert install_state(t2v).state == "none"
     assert install_state(i2v).state == "none"
+    assert not i2v_workflow.exists()
 
 
 def test_remove_route_include_shared_false_is_the_default(client: TestClient) -> None:

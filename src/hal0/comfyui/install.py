@@ -406,12 +406,15 @@ def remove_model(model: ImageModel, *, include_shared: bool = False) -> dict[str
     lists the models that stopped being complete.
 
     The workflow (``<workflows dir>/<id>.json``, written by :func:`run_install`, which is its
-    only writer) belongs to this model alone, so it goes in either mode.
+    only writer) belongs to this model alone, so it goes in either mode. An affected model
+    no longer has its weights, so its workflow goes too and the launcher never offers one
+    that cannot run.
 
     Returns ``{"removed", "kept", "affected"}``:
 
     * ``removed``: the weight paths relative to the models root, then
-      ``workflows/<filename>`` for the workflow. Files already gone are not reported.
+      ``workflows/<filename>`` for the workflow, then (with ``include_shared``) the workflow
+      of each affected model. Files already gone are not reported.
     * ``kept``: ``{"relpath", "models"}`` for each weight file left in place, ``models``
       being the complete models that hold it. Always empty with ``include_shared=True``.
     * ``affected``: the other models that were complete before and are not after, in catalog
@@ -434,9 +437,8 @@ def remove_model(model: ImageModel, *, include_shared: bool = False) -> dict[str
 
     # Read every neighbour's state before the first delete: it is what "affected" is measured from.
     holders = [(component, holders_of(component)) for component in model.components]
-    affected: set[str] = (
-        {other for _, held in holders for other in held} if include_shared else set()
-    )
+    broken = {other for _, held in holders for other in held} if include_shared else set()
+    affected = [model_id for model_id in CATALOG if model_id in broken]  # catalog order
 
     removed: list[str] = []
     kept: list[dict[str, Any]] = []
@@ -447,14 +449,10 @@ def remove_model(model: ImageModel, *, include_shared: bool = False) -> dict[str
             kept.append({"relpath": relpath, "models": held})
         elif _unlink(dest, removed):
             removed.append(relpath)
-    workflow = paths.workflows_dir() / model.workflow_filename
-    if _unlink(workflow, removed):
-        removed.append(f"workflows/{model.workflow_filename}")
-    return {
-        "removed": removed,
-        "kept": kept,
-        "affected": [model_id for model_id in CATALOG if model_id in affected],
-    }
+    for owner in (model, *(CATALOG[model_id] for model_id in affected)):
+        if _unlink(paths.workflows_dir() / owner.workflow_filename, removed):
+            removed.append(f"workflows/{owner.workflow_filename}")
+    return {"removed": removed, "kept": kept, "affected": affected}
 
 
 def _unlink(path: Path, removed: list[str]) -> bool:
