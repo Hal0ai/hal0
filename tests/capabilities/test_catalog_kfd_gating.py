@@ -87,9 +87,10 @@ def test_comfyui_row_offered_when_kfd_present_on_amd_host() -> None:
     assert variants == ["gpu-vulkan"]
 
 
-def test_comfyui_row_unaffected_on_non_amd_host() -> None:
-    """The kfd gate is AMD-specific — a non-AMD box's Vulkan row (NVIDIA,
-    Intel) is untouched; it was never the ROCm-mislabelled shape."""
+def test_comfyui_row_suppressed_on_non_amd_host_without_a_rocm_lane() -> None:
+    """The gate is vendor-blind: ComfyUI's image is ROCm-only, so an NVIDIA or
+    Intel box's generic Vulkan row is just as guaranteed to fail at load (the kfd
+    guard refuses ``gpu-rocm`` there) as a kfd-less AMD box's."""
     with (
         patch(
             "hal0.capabilities.catalog.available_backends",
@@ -99,7 +100,7 @@ def test_comfyui_row_unaffected_on_non_amd_host() -> None:
         patch("hal0.capabilities.catalog.rocm_lane_present", return_value=False),
     ):
         variants = catalog._backend_variants(_image_entry())
-    assert variants == ["gpu-vulkan"]
+    assert variants == []
 
 
 def test_explicit_comfyui_provider_row_also_gated(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -107,10 +107,26 @@ def test_comfyui_backends_empty_on_an_amd_host_without_the_rocm_lane(
     assert catalog.comfyui_backends() == []
 
 
-def test_comfyui_backends_untouched_on_a_non_amd_host(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_comfyui_backends_empty_on_a_vulkan_host_without_the_rocm_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An NVIDIA or Intel box with a Vulkan render node has no lane the ROCm-only image can use.
+
+    The picker would list rows, the installer would offer downloads and the auto-select would
+    apply ``gpu-rocm``, which the kfd gate always refuses there.
+    """
     _host(monkeypatch, amd=False, rocm_lane=False)
 
-    assert catalog.comfyui_backends() == ["gpu-vulkan"]
+    assert catalog.comfyui_backends() == []
+
+
+def test_vulkan_host_without_the_rocm_lane_gets_no_image_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _host(monkeypatch, amd=False, rocm_lane=False)
+    _checkpoint("mine.safetensors")
+
+    assert catalog.models_for_capability("image", registry=None) == []
 
 
 # ── the picker ──────────────────────────────────────────────────────────────
