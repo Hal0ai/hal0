@@ -2434,11 +2434,16 @@ async def run_flm_pull(
             job.bytes_total = advertised_total
             job._signal()
 
+        # A new session, so the cancel SIGTERM is relayed to podman / flm on
+        # every sudo build: sudo skips relaying a signal it judges
+        # user-generated from its own process group (sudo(8), "Signal
+        # handling"). Sudo 1.9 on Ubuntu 24.04 relayed it either way.
         proc = await asyncio.create_subprocess_exec(
             *argv,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
         )
         assert proc.stdout is not None
         last_emit = time.monotonic()

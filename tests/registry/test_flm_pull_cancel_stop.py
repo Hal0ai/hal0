@@ -94,6 +94,25 @@ async def test_stop_helper_tolerates_no_route_and_failures(tmp_path: Path) -> No
     await pull_mod._stop_flm_pull_container([str(tmp_path / "missing-binary")], "a:b")
 
 
+async def test_pull_runs_in_its_own_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sudo without a pty ignores a SIGTERM from its own process group."""
+    _setup(monkeypatch, tmp_path, _POLITE_PULL)
+    seen: list[dict] = []
+    real = asyncio.create_subprocess_exec
+
+    async def spy(*argv, **kwargs):
+        seen.append(kwargs)
+        return await real(*argv, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spy)
+    job = PullJob(job_id="j4", model_id="qwen3:0.6b")
+    await _run_and_cancel(job)
+    assert job.state == "cancelled"
+    assert seen[0].get("start_new_session") is True
+
+
 async def test_task_cancel_at_shutdown_also_removes_the_container(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

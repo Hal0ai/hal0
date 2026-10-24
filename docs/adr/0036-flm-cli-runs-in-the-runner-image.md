@@ -66,8 +66,10 @@ every update.
    image reference (OCI grammar, the same validator as the other podman
    seams), the store directory and a model tag, and each is validated root
    side. The one-shot container:
-   - pins the entrypoint to `tini -- /opt/fastflowlm/bin/flm`, so the image a
-     caller names cannot choose which program runs;
+   - pins the entrypoint to `tini -- /opt/fastflowlm/bin/flm`, so the only
+     path the one-shot can start is the image's `/opt/fastflowlm/bin/flm`. A
+     caller-chosen image owns that file, so this pins the path and the argv,
+     not what the binary does;
    - runs as the hal0 account's own uid, primary gid and supplementary
      groups, read from the account databases by the wrapper and never from
      the caller, which is what the old host `flm pull` ran as. It has
@@ -78,8 +80,9 @@ every update.
      `/home`, `/var` or `/mnt` (checked after symlinks are resolved), and
      that is handed to the account: owned by its uid or group-owned by one
      of its groups;
-   - is named `hal0-flm-pull-<tag>` for a pull, so the `stop-pull <tag>` verb
-     can remove it;
+   - is named `hal0-flm-pull-<encoded tag>` for a pull (each `_` doubled,
+     then the `:` written as `_`, so no two tags share a name), so the
+     `stop-pull <tag>` verb can remove it;
    - uses `--pull=never`. A missing image is exit 70, which the pull job
      reports as "download the flm runner image first". Runner images still
      arrive only through the manifest-verified runner pull.
@@ -98,8 +101,9 @@ every update.
    swap it for a symlink between them, which changes the mounted directory
    but not the identity, so it reduces to the same reach-only gap. This
    seam is not a sandbox against a compromised hal0 account. It is a hard
-   boundary against running anything but flm, against more than the
-   account's own write rights, and against extra podman flags.
+   boundary against starting any path but the image's
+   `/opt/fastflowlm/bin/flm`, against more than the account's own write
+   rights, and against extra podman flags.
 5. **Update-only boxes get the seam.** `hal0-flmctl` is in
    `hal0.system.seam_check.SEAMS`, the inventory
    `refresh_privileged_wrappers` (`src/hal0/updater/updater.py`)

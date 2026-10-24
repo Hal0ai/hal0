@@ -15,7 +15,8 @@
 #
 # Every podman subcommand, flag and in-container argv word is a literal in the
 # wrapper; each operand is validated ROOT-side before podman is invoked. The
-# one-shot containers run flm only (pinned entrypoint), as the hal0 account's
+# one-shot containers start only the image's /opt/fastflowlm/bin/flm (pinned
+# entrypoint; a caller-chosen image owns that file), as the hal0 account's
 # own uid, gid and groups (resolved root-side), with no devices,
 # --cap-drop=all and --security-opt=no-new-privileges, and `--pull=never`
 # means nothing is pulled implicitly. They can write only what the hal0

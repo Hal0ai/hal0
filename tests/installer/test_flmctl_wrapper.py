@@ -411,3 +411,23 @@ def test_wrapper_runs_from_root_directory() -> None:
     lines = WRAPPER.read_text().splitlines()
     assert "cd /" in lines
     assert lines.index("cd /") < next(i for i, ln in enumerate(lines) if ln.startswith("case "))
+
+
+def test_pull_names_never_collide(podman, store: Path) -> None:
+    """`_` is legal on both sides of a tag, so ':' -> '_' alone would collide."""
+    run, log = podman
+    for tag in ("a_b:c", "a:b_c", "a_:b", "a__b:c"):
+        assert run("run-pull", IMAGE, str(store), tag).returncode == 0
+        assert run("stop-pull", tag).returncode == 0
+    calls = _calls(log)
+    names = [c.split("--name=")[1].split()[0] for c in calls if "--name=" in c]
+    assert names == [
+        "hal0-flm-pull-a__b_c",
+        "hal0-flm-pull-a_b__c",
+        "hal0-flm-pull-a___b",
+        "hal0-flm-pull-a____b_c",
+    ]
+    assert len(set(names)) == len(names)
+    # stop-pull targets exactly the container its own tag's pull created.
+    stops = [c.rsplit(" ", 1)[1] for c in calls if c.startswith("rm ")]
+    assert stops == names

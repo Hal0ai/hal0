@@ -27,9 +27,11 @@
 #     override exactly as the slot launch does, and hal0-systemctl's
 #     write-quadlet already lets the service user name any image for a slot.
 #     What runs inside is NOT the image's choice, though: the entrypoint is
-#     pinned below to tini -> the in-image flm binary, so whatever image is
-#     named, the only program the one-shot can start is flm with the fixed
-#     `list -j` / `pull <tag>` argv;
+#     pinned below to tini -> /opt/fastflowlm/bin/flm, so whatever image is
+#     named, the only path the one-shot can start is that image's
+#     /opt/fastflowlm/bin/flm, with the fixed `list -j` / `pull <tag>` argv.
+#     A caller-chosen image owns that file, so this pins the argv and the
+#     path, not what the binary does;
 #   * the host FLM STORE directory (run-*) — absolute, a closed charset with no
 #     ':' or ',' (it is spliced into podman's -v spec), no '..', an existing
 #     directory, not a system directory once symlinks are resolved, and handed
@@ -52,17 +54,20 @@
 # search permission of the source's parent directories, so a directory the
 # account could not walk to by path becomes reachable inside the container.
 # The system-directory denylist and the ownership hand-off above narrow that
-# to directories already handed to the account, and the only program that
-# runs there is flm. The check-then-mount is not atomic: an account that owns
+# to directories already handed to the account, and the only path started
+# there is the image's /opt/fastflowlm/bin/flm. The check-then-mount is not atomic: an account that owns
 # a parent of the store can swap it for a symlink after the checks. That
 # changes which directory is mounted, not whose identity writes there, so it
 # reduces to the same reach-only gap. This seam is therefore not a sandbox
-# against a compromised hal0 account; it is a hard boundary against running
-# anything but flm, against running it with more than the account's own
-# write rights, and against any podman flag a caller might want to add.
+# against a compromised hal0 account; it is a hard boundary against starting
+# any path but the image's /opt/fastflowlm/bin/flm, against running it with
+# more than the account's own write rights, and against any podman flag a
+# caller might want to add.
 #
-# The pull container has a fixed name, hal0-flm-pull-<tag with ':' as '_'>,
-# so `stop-pull <tag>` can remove it if the client process is killed before
+# The pull container has a fixed name, hal0-flm-pull-<encoded tag>: every '_'
+# in the tag doubled, then its one ':' written as '_'. The tag grammar puts an
+# alphanumeric right after the ':', so the encoding is reversible and two tags
+# never share a name (a_b:c -> a__b_c, a:b_c -> a_b__c). That way `stop-pull <tag>` can remove it if the client process is killed before
 # podman could forward the stop (podman does not proxy SIGKILL).
 #
 # EXIT-CODE CONTRACT:
@@ -209,7 +214,10 @@ validate_store() {
   STORE_REAL="$real"
 }
 
-pull_name() { printf '%s%s' "$PULL_NAME_PREFIX" "${1/:/_}"; }
+pull_name() {   # arg: validated tag. Injective; see the header.
+  local t="${1//_/__}"
+  printf '%s%s' "$PULL_NAME_PREFIX" "${t/:/_}"
+}
 
 require_podman() {
   [[ -x "$PODMAN" ]] || { echo "hal0-flmctl: podman not found at $PODMAN" >&2; exit 65; }
