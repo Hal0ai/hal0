@@ -33,8 +33,8 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
-import click
 import typer
 
 from hal0.bench.cli import build_parser as _bench_build_parser
@@ -219,14 +219,20 @@ def _top_level_table_rows(text: str) -> list[tuple[str, str]]:
     return rows
 
 
-def _resolve_click_command(path: str) -> click.Command:
+def _resolve_click_command(path: str) -> Any:
     """Walk the live Click command tree along a space-separated path.
 
     e.g. ``"update status"`` -> the ``status`` subcommand of the ``update`` group.
+
+    Typer 0.27 builds its commands on its own bundled copy of Click
+    (``typer._click``), so ``isinstance`` against the ``click`` package's
+    classes is false there. The walk reads the ``commands`` mapping a group
+    carries instead, which both Click copies have.
     """
-    node: click.Command = typer.main.get_command(app)
+    node: Any = typer.main.get_command(app)
     for part in path.split():
-        assert isinstance(node, click.Group) and part in node.commands, (
+        commands = getattr(node, "commands", None)
+        assert isinstance(commands, dict) and part in commands, (
             f"cli.mdx documents `hal0 {path}`, but `{part}` is not a real "
             "subcommand at that point in the live CLI."
         )
@@ -255,7 +261,7 @@ def test_cli_mdx_options_table_has_no_phantom_flags() -> None:
         command = _resolve_click_command(path)
         real_opts: set[str] = set()
         for param in command.params:
-            if isinstance(param, click.Option):
+            if param.param_type_name == "option":
                 real_opts.update(param.opts)
         for flag in flags:
             if flag not in real_opts:
