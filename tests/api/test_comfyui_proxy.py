@@ -148,14 +148,14 @@ def test_status_reports_model_inventory_from_the_share(
     client: TestClient, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The "models on share" card shows VERIFIED file counts per category — never
-    # invented. Point the scanner at a temp models dir laid out like the share.
-    models = tmp_path / "models"
+    # invented. Point the data root at a temp tree laid out like the share.
+    models = tmp_path / "comfyui-data" / "models"
     for cat, n in {"checkpoints": 6, "loras": 11, "vae": 3, "diffusion_models": 4}.items():
         d = models / cat
         d.mkdir(parents=True)
         for i in range(n):
             (d / f"m{i}.safetensors").touch()
-    monkeypatch.setenv("COMFYUI_MODELS_DIR", str(models))
+    monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(tmp_path / "comfyui-data"))
     c, s, f = _patch(container="running", hermes=False, fetch=_fetch_idle)
     with c, s, f:
         r = client.get("/api/comfyui/status")
@@ -171,8 +171,7 @@ def test_status_inventory_is_none_when_share_absent(client: TestClient, tmp_path
     # pane simply hides the counts rather than showing zeros it can't verify.
     import os as _os
 
-    _os.environ.pop("COMFYUI_MODELS_DIR", None)
-    with patch.dict(_os.environ, {"COMFYUI_MODELS_DIR": str(tmp_path / "nope")}):
+    with patch.dict(_os.environ, {"HAL0_COMFYUI_DATA_ROOT": str(tmp_path / "nope")}):
         c, s, f = _patch(container="absent", hermes=True, fetch=_fetch_down)
         with c, s, f:
             r = client.get("/api/comfyui/status")
@@ -570,8 +569,8 @@ async def test_container_state_running_when_img_unit_active(
 
     monkeypatch.setattr(mod, "_systemd_active", fake_active)
 
-    assert await mod._container_state() == "running"
-    assert "hal0-slot@img.service" in probed_units
+    assert await mod._container_state("hal0-slot@img.service") == "running"
+    assert probed_units == ["hal0-slot@img.service"]
 
 
 async def test_container_state_ignores_an_unrelated_docker_container(
@@ -592,4 +591,4 @@ async def test_container_state_ignores_an_unrelated_docker_container(
     monkeypatch.setattr(mod.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(mod.asyncio, "create_subprocess_exec", boom)
 
-    assert await mod._container_state() == "absent"
+    assert await mod._container_state("hal0-slot@img.service") == "absent"

@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Any
@@ -35,6 +34,7 @@ from hal0.registry.update_check import (
 from hal0.runners import RUNNER_IMAGES as _runner_images_registry
 from hal0.services import models_service as _svc
 from hal0.slots.capacity import estimate_file_size_kv_mb, gtt_feasibility_verdict
+from hal0.upstreams.huggingface import hf_token_from_env
 
 # See slots.py for the writer-gate rationale.
 
@@ -545,7 +545,7 @@ async def check_model_updates(request: Request, refresh: bool = False) -> dict[s
             for m in registry.list()
             if (m.hf_repo or "").strip() and (m.hf_filename or "").strip()
         ]
-        hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        hf_token = hf_token_from_env()
         repo_files = await fetch_remote_lfs_shas(
             {m.hf_repo.strip() for m in entries}, hf_token=hf_token
         )

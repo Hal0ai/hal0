@@ -57,8 +57,8 @@ WantedBy=multi-user.target
 
 - **Journal read** — `SupplementaryGroups=systemd-journal` lets the daemon
   read the journal behind `/api/logs` and the MCP `logs_tail` tool. The group
-  applies to this unit's process tree (children such as podman, flm and the
-  ComfyUI fetch steps inherit it); the `hal0` account is not added to it, so
+  applies to this unit's process tree (children such as podman and flm
+  inherit it); the `hal0` account is not added to it, so
   `hal0-agent@` units do not start with it. Under ADR-0002 the agent shares
   the `hal0` uid and can influence `hal0-api`, so this is a scoping measure,
   not an isolation boundary. The installer omits the line on a host that has

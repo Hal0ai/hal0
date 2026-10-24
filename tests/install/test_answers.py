@@ -44,12 +44,6 @@ npu:
   opt_in: auto
 gen:
   mode: scaffold_only
-  capabilities:
-    txt2img: auto
-    img2img: auto
-    txt2video: auto
-    img2video: auto
-    image_upscale: auto
 apps:
   openwebui: { enabled: true }
   hermes: { enabled: true }
@@ -72,14 +66,8 @@ def test_all_auto_matches_build_auto_selections(tmp_path):
     assert sel.npu_opt_in is True
     # every model_id resolved to a real suggestion (not left as the literal "auto")
     assert all(s.model_id and s.model_id != "auto" for s in sel.slots)
-    # comfyui_defaults populated for every capability requested as auto
-    assert {cap_id for cap_id, _family in sel.comfyui_defaults} == {
-        "txt2img",
-        "img2img",
-        "txt2video",
-        "img2video",
-        "image_upscale",
-    }
+    # no image models named: the auto path installs none either
+    assert sel.image_models == auto_sel.image_models == ()
 
 
 def test_missing_version_raises(tmp_path):
@@ -140,22 +128,6 @@ def test_unknown_extension_id_raises_naming_value(tmp_path):
         load_answers(path, _hw())
 
 
-def test_unknown_gen_capability_raises_naming_value(tmp_path):
-    path = _write(
-        tmp_path,
-        """
-        version: 1
-        model_store: { path: /var/lib/hal0/models }
-        slots: []
-        npu: { opt_in: false }
-        gen: { mode: scaffold_only, capabilities: { bogus_cap: auto } }
-        apps: { openwebui: { enabled: true }, hermes: { enabled: false } }
-        """,
-    )
-    with pytest.raises(AnswersError, match="bogus_cap"):
-        load_answers(path, _hw())
-
-
 def test_gen_mode_off_disables_comfyui(tmp_path):
     path = _write(
         tmp_path,
@@ -170,7 +142,7 @@ def test_gen_mode_off_disables_comfyui(tmp_path):
     )
     sel = load_answers(path, _hw())
     assert sel.extensions["comfyui"] is False
-    assert sel.comfyui_defaults == ()
+    assert sel.image_models == ()
 
 
 def test_gen_download_requested_only_for_scaffold_and_download(tmp_path):
@@ -179,7 +151,7 @@ def test_gen_download_requested_only_for_scaffold_and_download(tmp_path):
         model_store: {{ path: /var/lib/hal0/models }}
         slots: []
         npu: {{ opt_in: false }}
-        gen: {{ mode: {mode}, capabilities: {{ txt2img: auto }} }}
+        gen: {{ mode: {mode}, models: [sdxl-lightning] }}
         apps: {{ openwebui: {{ enabled: true }}, hermes: {{ enabled: false }} }}
     """
     off = _write(tmp_path, base.format(mode="off"))
@@ -192,7 +164,7 @@ def test_gen_download_requested_only_for_scaffold_and_download(tmp_path):
     assert gen_download_requested(str(tmp_path / "nope.yaml")) is False
 
 
-def test_scaffold_and_download_no_longer_warns_and_records_defaults(tmp_path):
+def test_scaffold_and_download_does_not_warn_and_records_image_models(tmp_path):
     path = _write(
         tmp_path,
         """
@@ -200,7 +172,7 @@ def test_scaffold_and_download_no_longer_warns_and_records_defaults(tmp_path):
         model_store: { path: /var/lib/hal0/models }
         slots: []
         npu: { opt_in: false }
-        gen: { mode: scaffold_and_download, capabilities: { txt2img: sdxl } }
+        gen: { mode: scaffold_and_download, models: [sdxl-lightning] }
         apps: { openwebui: { enabled: true }, hermes: { enabled: false } }
         """,
     )
@@ -208,11 +180,11 @@ def test_scaffold_and_download_no_longer_warns_and_records_defaults(tmp_path):
         warnings.simplefilter("error")  # any warning → failure
         sel = load_answers(path, _hw())
     assert sel.extensions["comfyui"] is True
-    assert sel.comfyui_defaults == (("txt2img", "sdxl"),)
+    assert sel.image_models == ("sdxl-lightning",)
     assert gen_download_requested(path) is True
 
 
-def test_gen_mode_scaffold_only_enables_comfyui_and_populates_defaults(tmp_path):
+def test_gen_mode_scaffold_only_enables_comfyui_and_keeps_image_models(tmp_path):
     path = _write(
         tmp_path,
         """
@@ -220,13 +192,13 @@ def test_gen_mode_scaffold_only_enables_comfyui_and_populates_defaults(tmp_path)
         model_store: { path: /var/lib/hal0/models }
         slots: []
         npu: { opt_in: false }
-        gen: { mode: scaffold_only, capabilities: { txt2img: auto } }
+        gen: { mode: scaffold_only, models: [qwen-image-lightning] }
         apps: { openwebui: { enabled: true }, hermes: { enabled: false } }
         """,
     )
     sel = load_answers(path, _hw())
     assert sel.extensions["comfyui"] is True
-    assert sel.comfyui_defaults == (("txt2img", "qwen-image"),)
+    assert sel.image_models == ("qwen-image-lightning",)
 
 
 def test_network_block_applied_huggingface_still_warns(tmp_path, monkeypatch):

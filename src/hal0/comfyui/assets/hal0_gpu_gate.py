@@ -8,9 +8,11 @@ inference mode, this middleware asks hal0-api's GpuArbiter to switch to image
 mode and waits briefly for the switch to complete before allowing ComfyUI to
 continue.
 
-Deployment: this single file is dropped into the host-mounted
-``custom_nodes`` dir (``/mnt/ai-models/comfyui/custom_nodes/``) — no image
-rebuild. ComfyUI imports it at startup; ``_install()`` appends an aiohttp
+Deployment: this single file ships as a hal0 package asset
+(``hal0.comfyui.assets``); the ComfyUI provider copies it into the
+host-mounted ``custom_nodes`` dir (``hal0.comfyui.paths.custom_nodes_dir()``)
+the first time it builds the container spec after hal0-api starts, replacing a
+stale copy — no image rebuild. ComfyUI imports it at startup; ``_install()`` appends an aiohttp
 middleware to the PromptServer app (the same mechanism ComfyUI-Login uses).
 The container runs with host networking, so hal0-api is on loopback.
 
@@ -52,6 +54,7 @@ _SWITCH_POLL_S = _float_env("HAL0_COMFYUI_SWITCH_POLL_S", 0.5)
 #: (/object_info, /queue GET, workflow save/load, uploads) always passes.
 _BLOCK_PATHS = frozenset({"/prompt", "/api/prompt"})
 
+
 def _is_prompt_submit(method: str, path: str) -> bool:
     return method == "POST" and path in _BLOCK_PATHS
 
@@ -67,15 +70,6 @@ def should_prepare_image_mode(method: str, path: str, status: "dict | None") -> 
     if not isinstance(status, dict):
         return False
     return status.get("mode") == "inference"
-
-
-def should_block(method: str, path: str, status: "dict | None") -> bool:
-    """Backward-compatible name for older tests/imports.
-
-    Prompt submission is no longer blocked by this custom node; it prepares
-    image mode best-effort, then lets ComfyUI handle the prompt.
-    """
-    return False
 
 
 def _fetch_status() -> "dict | None":

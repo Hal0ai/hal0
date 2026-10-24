@@ -13,3 +13,10 @@ def test_comfyui_models_dir_uses_store_root(monkeypatch, tmp_path):
     expected = tmp_path / "comfyui" / "models" / "loras"
 
     assert result == expected
+
+
+def test_comfyui_models_dir_follows_the_comfyui_data_root(monkeypatch, tmp_path):
+    """The pull target derives from the single path owner, so a data-root override moves it."""
+    monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(tmp_path / "data"))
+
+    assert pull._comfyui_models_dir("vae") == tmp_path / "data" / "models" / "vae"

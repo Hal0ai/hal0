@@ -99,6 +99,9 @@ The tune lives on the profile. `slot_create` and `slot_edit` take a `profile` na
 | `service_health` | `GET /api/services/health` |
 | `comfyui_status` | `GET /api/comfyui/status` |
 | `comfyui_workflows` | `GET /api/comfyui/workflows` |
+| `comfyui_models` | `GET /api/comfyui/models` — the image-model catalog with install state and each model's latest install job |
+| `comfyui_jobs` | `GET /api/comfyui/jobs` |
+| `comfyui_files` | `GET /api/comfyui/files` |
 | `updater_state` | `GET /api/updates/state` |
 | `updater_check` | `GET /api/updates/check` |
 | `updater_channel_get` | `GET /api/updates/channel` |
@@ -163,6 +166,7 @@ The tune lives on the profile. `slot_create` and `slot_edit` take a `profile` na
 | `slot_edit` | `PUT /api/slots/{name}/config` |
 | `settings_reload` | `POST /api/settings/reload` |
 | `hardware_reprobe` | `POST /api/hardware/probe` |
+| `comfyui_job_cancel` | `POST /api/comfyui/jobs/{model_id}/cancel` |
 | `memory_add`, `memory_curate`, `memory_mental_model_create`, `memory_mental_model_update`, `memory_mental_model_refresh`, `memory_directive_create`, `memory_directive_update`, `memory_operation_cancel`, `memory_operation_retry`, `memory_bank_consolidate` | delegate to `hal0-memory` — see below |
 | `memory_delete` | delegates to `hal0-memory` — gates itself when deleting more than one id, or a foreign/list dataset |
 
@@ -207,7 +211,8 @@ The tune lives on the profile. `slot_create` and `slot_edit` take a `profile` na
 | `service_action` | `POST /api/services/{service_id}/action` |
 | `comfyui_switchover` | `POST /api/comfyui/switchover` |
 | `comfyui_pin` | `POST /api/comfyui/pin` |
-| `comfyui_models_fetch` | `POST /api/comfyui/models/fetch` |
+| `comfyui_model_install` | `POST /api/comfyui/models/{model_id}/install` |
+| `comfyui_model_remove` | `DELETE /api/comfyui/models/{model_id}` — deletes the model's weight files and workflow; files other installed models load stay unless `include_shared=true`, which deletes them too and reports those models as affected |
 | `comfyui_render_cancel` | `POST /api/comfyui/render/cancel` |
 | `comfyui_restart` | `POST /api/comfyui/restart` |
 | `comfyui_workflow_launch` | `POST /api/comfyui/workflows/{name}/launch` |

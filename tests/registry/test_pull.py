@@ -22,7 +22,9 @@ import pytest
 
 from hal0.registry.pull import (
     _CHUNK_BYTES,
+    PullFile,
     PullJob,
+    _download_one,
     _pull_root,
     _register_flm_pulled,
     _register_pulled,
@@ -1089,6 +1091,43 @@ async def test_run_pull_resumes_from_partial_with_range(tmp_hal0_home: str) -> N
     # Staging cleaned up on success.
     assert not part.exists()
     assert not sidecar.exists()
+
+
+@pytest.mark.asyncio
+async def test_download_one_staging_key_moves_the_partial_off_the_model_id(
+    tmp_hal0_home: str,
+) -> None:
+    """``staging_key`` names the staging files; left out it is ``job.model_id`` (the key the
+    resume test above relies on). A second user of the same model id and filename, with its
+    own key, never shares a partial with the registry pull."""
+    body = _payload(_CHUNK_BYTES * 3)
+    job = make_job("shared-id")
+    rec = PullFile(hf_filename="shared.gguf", kind="gguf", bytes_total=len(body))
+    client = httpx.AsyncClient(
+        transport=_fail_midstream(body, _CHUNK_BYTES, httpx.ReadError("dropped"))
+    )
+    try:
+        with pytest.raises(httpx.ReadError):
+            await _download_one(
+                job,
+                rec,
+                client=client,
+                hf_repo="Org/Shared-GGUF",
+                base_headers={},
+                final=Path(tmp_hal0_home) / "out" / "shared.gguf",
+                base_done=0,
+                base_total=len(body),
+                staging_key="other-namespace-shared-id",
+            )
+    finally:
+        await client.aclose()
+
+    keyed_part, keyed_sidecar = _part_paths("other-namespace-shared-id", "shared.gguf")
+    assert keyed_part.stat().st_size == _CHUNK_BYTES
+    assert keyed_sidecar.exists()
+    default_part, default_sidecar = _part_paths("shared-id", "shared.gguf")
+    assert not default_part.exists()
+    assert not default_sidecar.exists()
 
 
 @pytest.mark.asyncio

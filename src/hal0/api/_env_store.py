@@ -112,10 +112,11 @@ PROXY_ENV_SUFFIX = "_PROXY"
 
 #: Hugging Face Hub variables that choose where the ``hf`` CLI and
 #: ``huggingface_hub`` send requests, the bearer token with them, or where
-#: they read cached weights (#3017). The ComfyUI fetch runs ``hf download``
-#: with hal0-api's environment plus ``HF_TOKEN``, so ``HF_ENDPOINT`` hands the
-#: token to another host and lets it choose the weights that are later loaded;
-#: a cache directory hal0 does not own serves planted files the same way.
+#: they read cached weights (#3017). A Hugging Face client run with hal0-api's
+#: environment plus ``HF_TOKEN`` would hand the token to another host through
+#: ``HF_ENDPOINT`` and let it choose the weights that are later loaded; a cache
+#: directory hal0 does not own serves planted files the same way. (ComfyUI
+#: downloads no longer run ``hf``; the names stay refused for any client that does.)
 #: ``HF_TOKEN`` (the credential) and ``HF_HOME`` (documented) stay allowed.
 HF_HUB_REDIRECT_ENV_NAMES = frozenset(
     {

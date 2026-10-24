@@ -30,16 +30,22 @@ Endpoints we touch on the upstream:
 from __future__ import annotations
 
 import asyncio
+import importlib.resources
 import logging
 import os
+import tempfile
 import time
 import uuid
+from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import httpx
 
+from hal0.comfyui import paths as comfyui_paths
 from hal0.errors import Hal0Error
 from hal0.http_client import async_client
+from hal0.install.perms import ensure_shared_dir
 from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
 from hal0.providers.base import Mount, Provider, RuntimeLaunchPlan
 from hal0.providers.comfyui_workflows import build_workflow
@@ -50,15 +56,16 @@ log = logging.getLogger(__name__)
 # In-container app + working-data layout. The image has ComfyUI
 # checked out at /opt/ComfyUI (venv at /opt/venv). Host-side working data
 # (models / output / input / user / custom_nodes + extra_model_paths.yaml)
-# lives under "<model-store>/comfyui" and is bind-mounted in so weights and
-# custom nodes persist across container restarts.
+# lives under the data root owned by hal0.comfyui.paths and is bind-mounted in
+# so weights and custom nodes persist across container restarts.
 _COMFYUI_APP_DIR = "/opt/ComfyUI"
 _COMFYUI_BASE_DIR = "/var/lib/hal0/comfyui"
-
-# ComfyUI's working data tracks the configured model store ([models].store /
-# HAL0_MODEL_STORE, default /mnt/ai-models) under a "comfyui" subdir, resolved
-# per-render in container_spec(). Still overridable via HAL0_COMFYUI_DATA_ROOT.
-_COMFYUI_DATA_SUBDIR = "comfyui"
+# Where the host's models dir is mounted inside the container; also the
+# base_path extra_model_paths.yaml points ComfyUI at.
+_COMFYUI_MODELS_MOUNT = "/root/comfy-models"
+# The GPU-gate custom node, shipped as a package asset (hal0.comfyui.assets)
+# and synced into custom_nodes/ once per process (see provision_data_root).
+_GPU_GATE_NODE = "hal0_gpu_gate.py"
 
 # Live-validated flag bundle (matches the "comfyui" seed profile). Used
 # when the slot has no resolvable profile.
@@ -97,6 +104,182 @@ class ComfyUIInferError(Hal0Error):
 
     code = "dispatch.upstream_failed"
     status = 502
+
+
+# ── Data-root provisioning ────────────────────────────────────────────────────
+
+
+def render_extra_model_paths() -> str:
+    """The ``extra_model_paths.yaml`` that maps ComfyUI's model types onto the mounted models dir.
+
+    One ``<type>: <dir>`` line per :data:`hal0.comfyui.paths.SUBDIRS` entry, in
+    sorted order, under ``base_path`` (the in-container models mount).
+    """
+    entries = (f"    {key}: {comfyui_paths.SUBDIRS[key]}" for key in sorted(comfyui_paths.SUBDIRS))
+    return "\n".join(["comfyui:", f"    base_path: {_COMFYUI_MODELS_MOUNT}", *entries]) + "\n"
+
+
+# Provisioning runs on every container_spec render, and the slot-drift probe the
+# dashboard polls renders every 30 s. The file writes are therefore memoised per
+# data root, and each distinct failure logs once per process.
+_provisioned: set[tuple[str, str]] = set()
+_warned: set[tuple[str, ...]] = set()
+
+
+def _reset_provision_memo() -> None:
+    """Forget what this process provisioned and warned about (test hook)."""
+    _provisioned.clear()
+    _warned.clear()
+
+
+def _warn_once(key: tuple[str, ...], message: str, *args: object) -> None:
+    if key in _warned:
+        return
+    _warned.add(key)
+    log.warning(message, *args)
+
+
+def _ensure_data_dirs() -> None:
+    """Create every directory the container spec bind-mounts (and ``workflows``).
+
+    The bind-mount sources come first, and each mkdir fails on its own: one
+    blocked directory must not leave another bind-mount source missing. A
+    directory that exists is left alone (this runs on every render), and one
+    that is created lands at the shared-directory mode whatever the umask.
+    """
+    root = comfyui_paths.data_root()
+    models = comfyui_paths.models_root()
+    dirs = [
+        models,
+        root / "output",
+        root / "input",
+        comfyui_paths.user_dir(),
+        comfyui_paths.custom_nodes_dir(),
+        comfyui_paths.workflows_dir(),
+        *(models / sub for sub in comfyui_paths.SUBDIRS.values()),
+    ]
+    for directory in dirs:
+        if directory.is_dir():
+            continue
+        try:
+            ensure_shared_dir(directory)
+        except OSError as exc:
+            _warn_once(
+                ("mkdir", str(directory)),
+                "comfyui.data_root_provision_failed step=mkdir path=%s err=%s",
+                directory,
+                exc,
+            )
+
+
+def _ensure_extra_model_paths() -> bool:
+    """Write the model-paths file unless the operator already put content in it.
+
+    An empty file hides every model from ComfyUI, so absent or blank (after
+    strip) means "write ours"; anything else is the operator's and stays.
+    Returns True once the file is settled.
+    """
+    path = comfyui_paths.extra_model_paths_file()
+    try:
+        if path.read_bytes().strip():
+            return True
+    except FileNotFoundError:
+        pass
+    path.write_text(render_extra_model_paths(), encoding="utf-8")
+    return True
+
+
+def _write_atomically(dest: Path, data: bytes) -> None:
+    """Stage ``data`` beside ``dest`` and rename it into place.
+
+    A reader (ComfyUI importing its custom nodes) never sees a half-written
+    file, and replacing a file only needs write access to the directory, not
+    to a root-owned file inside it.
+    """
+    fd, tmp_name = tempfile.mkstemp(dir=dest.parent, prefix=f".{dest.name}.", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        tmp.chmod(0o644)
+        os.replace(tmp, dest)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _sync_gpu_gate_node() -> bool:
+    """Copy the packaged GPU-gate node into ``custom_nodes/`` when it is missing or differs.
+
+    Returns True once the node is current, False when the directory is not
+    writable (already reported, once per process, with the remedy).
+    """
+    shipped = importlib.resources.files("hal0.comfyui.assets").joinpath(_GPU_GATE_NODE)
+    wanted = shipped.read_bytes()
+    dest = comfyui_paths.custom_nodes_dir() / _GPU_GATE_NODE
+    try:
+        if dest.read_bytes() == wanted:
+            return True
+    except FileNotFoundError:
+        pass
+    try:
+        _write_atomically(dest, wanted)
+    except PermissionError:
+        # A box whose installer copied the node as root, with a custom_nodes
+        # directory the hal0 user cannot write. The node stays as it is.
+        _warn_once(
+            ("node-permission", str(dest)),
+            "cannot update %s: make %s writable by the hal0 user or group "
+            "(e.g. chgrp <hal0 group> + chmod 2775), or replace the file as root",
+            dest,
+            dest.parent,
+        )
+        return False
+    return True
+
+
+def provision_data_root() -> None:
+    """Make the ComfyUI data root ready to bind-mount; idempotent and best-effort.
+
+    Podman refuses a bind mount whose host path is absent (statfs, exit 125),
+    which crash-looped the img slot on any box where the tree hadn't been
+    provisioned (fresh install, or a store root that moved after install). So
+    this creates the mounted directories, writes ``extra_model_paths.yaml`` if
+    it is absent or empty, and syncs the GPU-gate custom node.
+
+    Directories are checked on every render, since they are cheap and podman
+    needs each one. The file writes happen at most once per process per data
+    root: a step that succeeded is not repeated, and one that failed is retried
+    on a later render (so fixing a permission heals without a restart) but logs
+    only once. Each step, and each directory within the mkdir step, fails on
+    its own: a read-only store logs and degrades to podman reporting the missing
+    path, and one failure never skips the rest.
+    """
+    root_key = str(comfyui_paths.data_root())
+    _run_step(_ensure_data_dirs, root_key)
+    for step in (_ensure_extra_model_paths, _sync_gpu_gate_node):
+        memo = (root_key, step.__name__)
+        if memo not in _provisioned and _run_step(step, root_key):
+            _provisioned.add(memo)
+
+
+def _run_step(step: Callable[[], bool | None], root_key: str) -> bool:
+    """Run one provisioning step; True when it settled, False after a failure.
+
+    An OSError is logged (once per distinct failure) rather than raised.
+    """
+    try:
+        settled = step()
+    except OSError as exc:
+        _warn_once(
+            (step.__name__, root_key, type(exc).__name__),
+            "comfyui.data_root_provision_failed step=%s root=%s err=%s",
+            step.__name__,
+            root_key,
+            exc,
+        )
+        return False
+    return settled is not False
 
 
 # ── The provider ──────────────────────────────────────────────────────────────
@@ -272,38 +455,20 @@ class ComfyUIProvider(Provider):
         ).strip()
         command: list[str] = ["bash", "-lc", payload]
 
-        from hal0.config.paths import model_store_root
-
-        data_root = (
-            os.environ.get("HAL0_COMFYUI_DATA_ROOT", "").strip()
-            or f"{model_store_root()}/{_COMFYUI_DATA_SUBDIR}"
-        )
-        # Podman refuses a bind mount whose host path is absent (statfs →
-        # exit 125), which crash-looped the img slot on any box where the
-        # comfyui tree hadn't been provisioned (fresh install, or a store
-        # root that moved after install). Ensure every mounted dir exists,
-        # and the extra_model_paths.yaml file too — an empty one is a valid
-        # ComfyUI config. Best-effort: a read-only store degrades to the old
-        # behaviour (podman reports the missing path).
-        try:
-            for sub in ("models", "output", "input", "user", "custom_nodes"):
-                os.makedirs(f"{data_root}/{sub}", exist_ok=True)
-            yaml_path = f"{data_root}/extra_model_paths.yaml"
-            if not os.path.exists(yaml_path):
-                with open(yaml_path, "w", encoding="utf-8"):
-                    pass
-        except OSError as exc:
-            log.warning("comfyui.data_root_provision_failed root=%s err=%s", data_root, exc)
+        # ComfyUI's working data tracks the configured model store; hal0.comfyui.paths
+        # owns the root (and the HAL0_COMFYUI_DATA_ROOT override), resolved per render.
+        provision_data_root()
+        data_root = comfyui_paths.data_root()
         # read_only is a first-class Mount flag; extra_model_paths.yaml is the
         # only read-only mount (the renderer appends ":ro").
         mounts: list[Mount] = [
-            Mount(f"{data_root}/models", "/root/comfy-models"),
-            Mount(f"{data_root}/output", f"{_COMFYUI_APP_DIR}/output"),
-            Mount(f"{data_root}/input", f"{_COMFYUI_APP_DIR}/input"),
-            Mount(f"{data_root}/user", f"{_COMFYUI_APP_DIR}/user"),
-            Mount(f"{data_root}/custom_nodes", f"{_COMFYUI_APP_DIR}/custom_nodes"),
+            Mount(str(comfyui_paths.models_root()), _COMFYUI_MODELS_MOUNT),
+            Mount(str(data_root / "output"), f"{_COMFYUI_APP_DIR}/output"),
+            Mount(str(data_root / "input"), f"{_COMFYUI_APP_DIR}/input"),
+            Mount(str(comfyui_paths.user_dir()), f"{_COMFYUI_APP_DIR}/user"),
+            Mount(str(comfyui_paths.custom_nodes_dir()), f"{_COMFYUI_APP_DIR}/custom_nodes"),
             Mount(
-                f"{data_root}/extra_model_paths.yaml",
+                str(comfyui_paths.extra_model_paths_file()),
                 f"{_COMFYUI_APP_DIR}/extra_model_paths.yaml",
                 read_only=True,
             ),

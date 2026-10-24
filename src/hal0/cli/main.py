@@ -77,8 +77,8 @@ app.add_typer(doctor_app, name="doctor")
 app.add_typer(upstream_app, name="upstream")
 app.add_typer(oauth_app, name="oauth")
 app.add_typer(capabilities_app, name="capabilities")
-# Issue #1199 — ``hal0 comfyui orchestrate-models`` pulls the curated ComfyUI
-# model set in one logged sequence.
+# ADR-0037 — ``hal0 comfyui models {list,install,remove}`` and ``hal0 comfyui
+# files``: the image-model catalog and the weight files it puts on disk.
 app.add_typer(comfyui_app, name="comfyui")
 app.add_typer(agent_app, name="agent")
 # Issue #1102 — ``hal0 app install <name>`` (deferred install verb for apps

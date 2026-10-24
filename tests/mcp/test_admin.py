@@ -258,6 +258,8 @@ def test_destructive_tools_match_gated_destructive_set() -> None:
         # destructive, same tier as memory_delete's bulk path.
         "memory_mental_model_delete",
         "memory_directive_delete",
+        # Image-model removal deletes the weight files outright.
+        "comfyui_model_remove",
     }
     destructive_per_annotation = {
         name for name, ann in admin._ANNOTATIONS.items() if ann.destructiveHint
@@ -271,7 +273,7 @@ def test_open_world_tools_are_the_documented_set() -> None:
     downloads weights, update re-pulls in place, inspect fetches repo
     metadata); the platform-management expansion adds: updater_check
     (fetches the release manifest), hf_search (HF Hub search API),
-    comfyui_models_fetch (background HF-adjacent model downloads),
+    comfyui_model_install (background Hugging Face weight downloads),
     slot_pull_image (container-image pull from a registry),
     runner_image_sync (GHCR discovery probe), mcp_server_install
     (may fetch a manifest from an arbitrary URL), and profile_generate
@@ -290,7 +292,7 @@ def test_open_world_tools_are_the_documented_set() -> None:
         "updater_check",
         "update_check",
         "hf_search",
-        "comfyui_models_fetch",
+        "comfyui_model_install",
         "slot_pull_image",
         "runner_image_sync",
         "mcp_server_install",
@@ -1107,6 +1109,13 @@ async def test_slot_resolved_and_state_dispatch_get(
     )
     method, url, _, _ = mock_transport["calls"][-1]
     assert (method, url) == ("GET", "http://t/api/slots/agent/state")
+
+
+def test_comfyui_model_remove_description_names_include_shared() -> None:
+    """The REST ``include_shared`` query param is passed as an extra arg; the tool must say so."""
+    description = admin.TOOL_DESCRIPTIONS["comfyui_model_remove"]
+    assert "include_shared" in description
+    assert "affected" in description
 
 
 @pytest.mark.asyncio

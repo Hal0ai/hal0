@@ -45,7 +45,7 @@ def _manual_selections() -> Selections:
         ],
         extensions={"openwebui": True, "comfyui": True, "hermes": True},
         npu_opt_in=True,
-        comfyui_defaults=(("txt2img", "qwen-image"), ("img2img", "qwen-image-edit")),
+        image_models=("qwen-image-lightning", "qwen-image-edit-lightning"),
     )
 
 
@@ -80,7 +80,7 @@ def test_round_trip_manual_selections_is_equivalent(tmp_path):
     assert loaded.storage_dir == sel.storage_dir
     assert loaded.npu_opt_in == sel.npu_opt_in
     assert loaded.extensions == sel.extensions
-    assert loaded.comfyui_defaults == sel.comfyui_defaults
+    assert loaded.image_models == sel.image_models
     assert {
         (s.capability, s.slot_name, s.port, s.model_id, s.device, s.profile) for s in loaded.slots
     } == {(s.capability, s.slot_name, s.port, s.model_id, s.device, s.profile) for s in sel.slots}
@@ -107,7 +107,7 @@ def test_round_trip_from_build_auto_selections(tmp_path):
     assert loaded.storage_dir == sel.storage_dir
     assert loaded.npu_opt_in == sel.npu_opt_in
     assert loaded.extensions == sel.extensions
-    assert loaded.comfyui_defaults == sel.comfyui_defaults
+    assert loaded.image_models == sel.image_models
     assert {s.capability for s in loaded.slots} == {"chat", "coder"}
     orig_by_name = {s.slot_name: s for s in sel.slots if s.capability in ("chat", "coder")}
     assert {s.slot_name for s in loaded.slots} == set(orig_by_name)
@@ -138,19 +138,27 @@ def test_apps_omits_comfyui_key():
 def test_gen_mode_derived_from_comfyui_extension():
     sel = _manual_selections()
     doc = dump_answers(sel)
-    assert doc["gen"]["mode"] == "scaffold_only"
-    assert doc["gen"]["capabilities"] == {"txt2img": "qwen-image", "img2img": "qwen-image-edit"}
+    # image models to install mean the replay has to download, not only scaffold
+    assert doc["gen"]["mode"] == "scaffold_and_download"
+    assert doc["gen"]["models"] == ["qwen-image-lightning", "qwen-image-edit-lightning"]
+
+    scaffold_sel = Selections(
+        storage_dir="/var/lib/hal0/models",
+        slots=[],
+        extensions={"openwebui": True, "comfyui": True, "hermes": False},
+        npu_opt_in=False,
+    )
+    assert dump_answers(scaffold_sel)["gen"] == {"mode": "scaffold_only", "models": []}
 
     off_sel = Selections(
         storage_dir="/var/lib/hal0/models",
         slots=[],
         extensions={"openwebui": True, "comfyui": False, "hermes": False},
         npu_opt_in=False,
-        comfyui_defaults=(),
     )
     off_doc = dump_answers(off_sel)
     assert off_doc["gen"]["mode"] == "off"
-    assert off_doc["gen"]["capabilities"] == {}
+    assert off_doc["gen"]["models"] == []
 
 
 def test_slot_entry_omits_device_and_profile_when_none():

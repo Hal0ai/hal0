@@ -88,6 +88,9 @@ _GET_READS: list[tuple[str, dict[str, Any], str]] = [
     ("service_health", {}, "http://t/api/services/health"),
     ("comfyui_status", {}, "http://t/api/comfyui/status"),
     ("comfyui_workflows", {}, "http://t/api/comfyui/workflows"),
+    ("comfyui_models", {}, "http://t/api/comfyui/models"),
+    ("comfyui_jobs", {}, "http://t/api/comfyui/jobs"),
+    ("comfyui_files", {}, "http://t/api/comfyui/files"),
     ("updater_state", {}, "http://t/api/updates/state"),
     ("updater_check", {}, "http://t/api/updates/check"),
     ("updater_channel_get", {}, "http://t/api/updates/channel"),
@@ -212,11 +215,18 @@ _GATED_CASES: list[tuple[str, dict[str, Any], str, str, dict[str, Any] | None]] 
     ),
     ("comfyui_pin", {"pinned": True}, "POST", "http://t/api/comfyui/pin", {"pinned": True}),
     (
-        "comfyui_models_fetch",
-        {"auto": True},
+        "comfyui_model_install",
+        {"model_id": "sdxl-lightning"},
         "POST",
-        "http://t/api/comfyui/models/fetch",
-        {"auto": True},
+        "http://t/api/comfyui/models/sdxl-lightning/install",
+        None,
+    ),
+    (
+        "comfyui_model_remove",
+        {"model_id": "sdxl-lightning"},
+        "DELETE",
+        "http://t/api/comfyui/models/sdxl-lightning",
+        None,
     ),
     ("comfyui_render_cancel", {}, "POST", "http://t/api/comfyui/render/cancel", None),
     ("comfyui_restart", {}, "POST", "http://t/api/comfyui/restart", None),
@@ -311,6 +321,29 @@ async def test_gated_platform_tools_enqueue_then_forward_on_approve(
     if expected_payload is not None:
         assert payload == expected_payload
     assert headers["Authorization"] == "Bearer t"
+
+
+# ── comfyui_job_cancel: an autonomous write, like model_pull_cancel ──────────
+
+
+@pytest.mark.asyncio
+async def test_comfyui_job_cancel_dispatches_autonomously(
+    queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    assert "comfyui_job_cancel" in admin.AUTONOMOUS_WRITE_TOOLS
+    result = await admin.dispatch(
+        tool="comfyui_job_cancel",
+        args={"model_id": "sdxl-lightning"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert result == {"ok": "post"}
+    assert queue.list_pending() == []
+    method, url, _payload, _headers = mock_transport["calls"][-1]
+    assert method == "POST"
+    assert url == "http://t/api/comfyui/jobs/sdxl-lightning/cancel"
 
 
 # ── comfyui_logs: gated (MED-1 journald posture) + redacted before return ───
