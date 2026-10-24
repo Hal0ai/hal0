@@ -7581,7 +7581,7 @@ def reconcile_ownership_on_repair(
     observe_fn: Callable[..., Any] | None = None,
     chown: Callable[[str, int, int], None] = nofollow.chown,
     chmod: Callable[[str, int], None] = nofollow.chmod,
-    walk: Callable[[str], Any] = os.walk,
+    chown_tree: Callable[[Path, int, int], None] = nofollow.chown_tree,
 ) -> OwnershipReconcileResult:
     """Reconcile HERMES_HOME/agents + the venv to hal0:hal0 (repair path only).
 
@@ -7590,11 +7590,14 @@ def reconcile_ownership_on_repair(
     a reason. When enabled, it drives :mod:`hal0.install.perms` (the single
     declarative ownership truth) for the Hermes rows the audit checks, then
     recursively chowns the venv tree (which perms has no per-file row for).
-    The default ``chown``/``chmod`` never follow a link (#2975): a venv's
-    ``bin/python`` is a symlink to the interpreter, and a pathname ``chown``
-    re-owned the interpreter itself; a link is now skipped.
-    Every seam (observe/chown/chmod/walk) is injectable so tests exercise the
-    drift→fix path without a real filesystem.
+    The default seams never follow a link (#2975): a venv's ``bin/python`` is
+    a symlink to the interpreter, and a pathname ``chown`` re-owned the
+    interpreter itself. The release layout's ``venvs/hermes`` is a symlink by
+    design, so the tree re-owned there is the concrete venv of the release
+    ``current`` names (:func:`_venv_tree_for_reconcile`), walked with
+    :func:`hal0.security.nofollow.chown_tree`.
+    Every seam (observe/chown/chmod/chown_tree) is injectable so tests exercise
+    the drift→fix path without a real filesystem.
     """
     if not enabled:
         return OwnershipReconcileResult(
@@ -7617,18 +7620,39 @@ def reconcile_ownership_on_repair(
 
     # 2. The venv tree has no per-file perms row — recursively chown it to hal0
     #    so a root-installed venv the User=hal0 unit can't exec is repaired.
-    venv_path = Path(venv)
-    if venv_path.exists():
+    tree = _venv_tree_for_reconcile(Path(venv))
+    if tree is not None:
         uid = pwd.getpwnam("hal0").pw_uid
         gid = grp.getgrnam("hal0").gr_gid
-        chown(str(venv_path), uid, gid)
-        for root, dirs, files in walk(str(venv_path)):
-            for name in list(dirs) + list(files):
-                with contextlib.suppress(OSError):
-                    chown(str(Path(root) / name), uid, gid)
-        reconciled.append(str(venv_path))
+        chown_tree(tree, uid, gid)
+        reconciled.append(str(tree))
 
     return OwnershipReconcileResult(reconciled=reconciled)
+
+
+def _venv_tree_for_reconcile(venv: Path) -> Path | None:
+    """The real venv directory ``--repair`` re-owns, or ``None`` when there is none.
+
+    A pre-layout ``venvs/hermes`` is that directory. Under the release layout
+    it is a symlink through ``current`` (ADR-0032 decision 4), and following
+    it would let the hal0 account, which owns both links, aim root's chown
+    anywhere. Only the release id is taken from ``current`` (its last path
+    component), and the tree is ``<release root>/releases/<id>/venv``; the
+    walk itself still refuses a link on the way.
+    """
+    if venv.is_symlink():
+        try:
+            rid = Path(os.readlink(release_root_for(venv) / "current")).name
+        except OSError:
+            return None
+        if rid in ("", ".", ".."):
+            return None
+        venv = release_root_for(venv) / "releases" / rid / "venv"
+    try:
+        st = venv.lstat()
+    except OSError:
+        return None
+    return venv if stat.S_ISDIR(st.st_mode) else None
 
 
 def _phase_voice_wire(ctx: _StepCtx) -> PhaseResult:
@@ -8811,7 +8835,18 @@ def _write_driver_env(
     # The seam can only reach the real /etc path; a sandbox is ours to write.
     direct = sandboxed or os.geteuid() == 0
     existing: str | None = None
-    if path.exists():
+    if direct:
+        # Root reads by descriptor too (#2975 review): a pathname read follows
+        # an agents/ the hal0 account swapped for a link to its renamed
+        # original, finds identical content and reports a converged no-op.
+        # An unsafe path raises; anything else just forces a rewrite.
+        try:
+            existing = nofollow.read_text(path, require_trusted_dir=not sandboxed)
+        except nofollow.UnsafePathError:
+            raise
+        except (OSError, UnicodeDecodeError):
+            existing = None
+    elif path.exists():
         # Only for the no-op check below — not an operator NO_PROXY source
         # (#2534): folding the file's own value back in made every entry
         # permanent for root renders. Unreadable when unprivileged (0600
@@ -8845,7 +8880,7 @@ def _write_driver_env(
     else:
         lines += [f"NO_PROXY={no_proxy}", f"no_proxy={no_proxy}"]
     body = "\n".join(lines) + "\n"
-    if path.exists():
+    if existing is not None or (not direct and path.exists()):
         unchanged = existing == body
         if unchanged:
             # Re-tighten perms even on a no-op content match — self-heals a
@@ -8869,8 +8904,13 @@ def _write_driver_env(
             # the hal0-agentenv wrapper already deployed on the old boxes that
             # carry this defect.
             if direct:
-                with contextlib.suppress(OSError):
+                # An UnsafePathError propagates: a refused path is not converged.
+                try:
                     nofollow.chmod(path, 0o600)
+                except nofollow.UnsafePathError:
+                    raise
+                except OSError:
+                    pass
                 return path, False
             try:
                 mode = path.stat().st_mode & 0o777
@@ -8962,6 +9002,19 @@ def _phase_install_artifacts(ctx: _StepCtx) -> PhaseResult:
     seed_path, seed_wrote = _write_seed_toml(state, repair=repair)
     try:
         env_path, env_wrote = _write_driver_env(state)
+    except nofollow.UnsafePathError as exc:
+        # A swapped /etc/hal0/agents (#2975): refuse, and say so, rather than
+        # report a driver env that never converged.
+        log.warning("hermes_provision.install_artifacts_unsafe_path", error=str(exc))
+        return PhaseResult(
+            status=PhaseStatus.FAIL,
+            reason=(
+                f"driver env not written: {exc} — restore a root-owned "
+                "/etc/hal0/agents (`sudo hal0 doctor perms --fix`), then rerun "
+                "`hal0 agent bootstrap hermes --repair`"
+            ),
+            details={"seed_path": str(seed_path), "seed_wrote": seed_wrote},
+        )
     except DriverEnvPolicyUnknown as exc:
         # Fail the step, not the pipeline with a raw traceback: the reason is
         # actionable and a rerun converges once the registry is readable

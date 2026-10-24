@@ -225,3 +225,29 @@ def test_dropin_points_web_dist_at_a_drop_in() -> None:
     assert "set HERMES_WEB_DIST in /etc/hal0/agents/hermes.env" not in flat
     assert "systemctl edit hal0-agent@hermes" in flat
     assert "Environment=HERMES_WEB_DIST=" in flat
+
+
+# ── #2975 review: a refused driver-env path is not a converged no-op ────────
+
+
+def test_root_noop_through_a_swapped_agents_dir_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, driver_env: Path
+) -> None:
+    """hal0 renames agents/ away and links the name back to it: identical bytes, wrong dir."""
+    from hal0.security import nofollow
+
+    # A first, real render into the sandboxed agents/ gives the identical body.
+    hp.refresh_driver_env(no_proxy_hosts=["127.0.0.1"])
+    body = driver_env.read_text(encoding="utf-8")
+    etc = driver_env.parent.parent
+    etc.chmod(0o2775)  # hal0-owned /etc/hal0
+    moved = tmp_path / "renamed-agents"
+    driver_env.parent.rename(moved)
+    driver_env.parent.symlink_to(moved)
+    (moved / "hermes.env").chmod(0o644)
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(nofollow, "_trusted_uids", lambda: frozenset({0}))
+    with pytest.raises(nofollow.UnsafePathError):
+        hp._write_driver_env(no_proxy_hosts=["127.0.0.1"])
+    monkeypatch.undo()
+    assert (moved / "hermes.env").read_text(encoding="utf-8") == body

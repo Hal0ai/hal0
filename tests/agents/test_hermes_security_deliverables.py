@@ -187,6 +187,7 @@ def test_reconcile_fixes_hermes_home_and_venv(
     (venv / "bin" / "hermes").write_text("#!/bin/sh\n")
 
     chowned: list[tuple[str, int, int]] = []
+    trees: list[tuple[Path, int, int]] = []
 
     # Fake observe: report every declarative row as root-owned drift so commit
     # has something to reconcile.
@@ -201,14 +202,66 @@ def test_reconcile_fixes_hermes_home_and_venv(
         observe_fn=_observe,
         chown=lambda p, u, g: chowned.append((p, u, g)),
         chmod=lambda p, m: None,
+        chown_tree=lambda root, u, g: trees.append((root, u, g)),
     )
 
-    # The venv tree is chowned (root + bin/ + bin/hermes), and the declarative
+    # The venv tree is handed to the no-follow walker, and the declarative
     # HERMES_HOME/agents rows are committed.
     assert str(venv) in result.reconciled
-    chowned_paths = {c[0] for c in chowned}
-    assert str(venv) in chowned_paths
-    assert str(venv / "bin" / "hermes") in chowned_paths
+    assert trees == [(venv, 1500, 1500)]
+    assert chowned  # the HERMES_HOME/agents rows
+
+
+def test_reconcile_reowns_the_concrete_release_venv_not_the_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3003 review: venvs/hermes is a symlink by design; re-own the release it names."""
+    import grp as _grp
+    import pwd as _pwd
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(_pwd, "getpwnam", lambda name: SimpleNamespace(pw_uid=1500))
+    monkeypatch.setattr(_grp, "getgrnam", lambda name: SimpleNamespace(gr_gid=1500))
+    release_root = tmp_path / "hermes"
+    concrete = release_root / "releases" / "abc123-1" / "venv"
+    (concrete / "bin").mkdir(parents=True)
+    (release_root / "current").symlink_to("releases/abc123-1")
+    venv = tmp_path / "venvs" / "hermes"
+    venv.parent.mkdir()
+    venv.symlink_to(release_root / "current" / "venv")
+    trees: list[Path] = []
+    result = hp.reconcile_ownership_on_repair(
+        enabled=True,
+        venv=venv,
+        observe_fn=lambda path: _perms_ok(path),
+        chown=lambda *_a: None,
+        chmod=lambda *_a: None,
+        chown_tree=lambda root, u, g: trees.append(root),
+    )
+    assert trees == [concrete]
+    assert str(concrete) in result.reconciled
+
+
+def test_reconcile_takes_only_the_release_id_from_current(tmp_path: Path) -> None:
+    """``current`` is hal0-owned: an absolute or ``..`` target never leaves releases/."""
+    release_root = tmp_path / "hermes"
+    (release_root / "releases").mkdir(parents=True)
+    elsewhere = tmp_path / "etc"
+    (elsewhere / "venv").mkdir(parents=True)
+    (release_root / "current").symlink_to(elsewhere)
+    venv = tmp_path / "venvs" / "hermes"
+    venv.parent.mkdir()
+    venv.symlink_to(release_root / "current" / "venv")
+    assert hp._venv_tree_for_reconcile(venv) is None  # releases/etc/venv does not exist
+    (release_root / "current").unlink()
+    (release_root / "current").symlink_to("..")
+    assert hp._venv_tree_for_reconcile(venv) is None
+
+
+def _perms_ok(path: Path):  # type: ignore[no-untyped-def]
+    from hal0.install import perms as _perms
+
+    return _perms.PermObservation(path=path, exists=False, owner=None, group=None, mode=None)
 
 
 # ── #2908: a hal0 caller cannot stat the 0700 root vault directory ──────────
