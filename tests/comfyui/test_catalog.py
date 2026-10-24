@@ -135,14 +135,15 @@ def test_renderable_models_declare_wxh_sizes(model: ImageModel) -> None:
         (16, "sdxl-lightning"),
         (15.9, "sd-1.5-pruned-emaonly"),
         (0, "sd-1.5-pruned-emaonly"),
+        (None, "sdxl-lightning"),  # an unknown pool gets the middle pick
     ],
 )
-def test_recommended_by_pool(pool_gb: float, expected: str) -> None:
+def test_recommended_by_pool(pool_gb: float | None, expected: str) -> None:
     assert recommended_model_id(pool_gb) == expected
 
 
 def test_every_recommendation_is_an_api_renderable_catalog_model() -> None:
-    for pool_gb in (0, 16, 96):
+    for pool_gb in (None, 0, 16, 96):
         model = get_model(recommended_model_id(pool_gb))
         assert model is not None
         assert model.api_renderable

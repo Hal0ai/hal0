@@ -8,6 +8,8 @@ routes under test decide *whether* an install may start and how its job is surfa
 from __future__ import annotations
 
 import asyncio
+import os
+import threading
 import time
 from collections import namedtuple
 from collections.abc import Callable, Iterator
@@ -347,7 +349,10 @@ def test_status_inventory_is_none_without_a_models_tree(client: TestClient) -> N
 def test_status_survives_inventory_failure(
     client: TestClient, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A scan that blows up costs the pane its counts, never the whole poll."""
+    """A scan that blows up costs the pane its counts, never the whole poll.
+
+    The counts are hidden (``None``), not reported as zeros for a tree nobody could read.
+    """
     with (
         patch.object(inventory, "list_files", side_effect=RuntimeError("scan blew up")),
         patch(f"{_BASE}._systemd_active", new_callable=AsyncMock, return_value=False),
@@ -361,7 +366,7 @@ def test_status_survives_inventory_failure(
     assert without_tree.status_code == 200
     assert without_tree.json()["inventory"] is None
     assert with_tree.status_code == 200
-    assert set(with_tree.json()["inventory"].values()) == {0}  # nothing listed, nothing counted
+    assert with_tree.json()["inventory"] is None  # a tree exists, but the scan failed
     assert "comfyui.inventory_scan_failed" in caplog.text
 
 
@@ -478,6 +483,32 @@ def test_install_route_409_cross_device(
     assert client.app.state.image_install_jobs == {}
 
 
+def test_install_route_409_models_dir_not_writable(
+    client: TestClient, installs: _Installs, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A destination the hal0 user cannot write is refused synchronously, with no job (I2)."""
+    blocked = CATALOG[_SDXL].components[0].dest.parent
+    blocked.mkdir(parents=True)
+    real_access = os.access
+
+    def access(path: Any, mode: int, **kwargs: Any) -> bool:
+        if mode & os.W_OK and Path(path) == blocked:
+            return False
+        return real_access(path, mode, **kwargs)
+
+    monkeypatch.setattr(comfyui_install.os, "access", access)
+
+    resp = _post_install(client)
+
+    assert resp.status_code == 409
+    error = resp.json()["error"]
+    assert error["code"] == "comfyui.models_dir_not_writable"
+    assert error["details"] == {"path": str(blocked)}
+    assert str(blocked) in error["message"]
+    assert installs.calls == []
+    assert client.app.state.image_install_jobs == {}  # refused before a job existed
+
+
 # ── DELETE /models/{id} ─────────────────────────────────────────────────────
 
 
@@ -591,6 +622,107 @@ def test_remove_route_ignores_an_install_that_shares_nothing(
 
     assert resp.status_code == 200
     assert resp.json()["removed"] == ["upscale_models/4x-UltraSharp.pth"]
+
+
+def test_remove_route_409_reports_a_partial_removal(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file that cannot be deleted is a typed 409 with what already went, not a 500 (I2)."""
+    model = CATALOG[_SDXL]
+    _land(model)
+    stuck = model.components[1].dest
+    real_unlink = Path.unlink
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if self == stuck:
+            raise PermissionError(13, "Permission denied")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+
+    resp = client.delete(f"/api/comfyui/models/{_SDXL}")
+
+    assert resp.status_code == 409
+    error = resp.json()["error"]
+    assert error["code"] == "comfyui.remove_failed"
+    assert error["details"] == {
+        "removed": ["checkpoints/sd_xl_base_1.0.safetensors"],
+        "failed_path": str(stuck),
+        "error": "[Errno 13] Permission denied",
+    }
+
+
+def test_remove_route_deletes_off_the_event_loop(client: TestClient) -> None:
+    model = CATALOG["esrgan-4x"]
+    _land(model)
+
+    # ``asyncio.to_thread`` is patched process-wide, so unrelated background work (the
+    # app's own samplers) can show up in the call list too: look for the delete itself.
+    with patch(f"{_BASE}.asyncio.to_thread", wraps=asyncio.to_thread) as to_thread:
+        resp = client.delete("/api/comfyui/models/esrgan-4x")
+
+    assert resp.status_code == 200
+    assert any(
+        call.args == (comfyui_install.remove_model, model) for call in to_thread.call_args_list
+    )
+    assert install_state(model).state == "none"
+
+
+def test_remove_route_resolves_the_models_root_a_fixed_number_of_times(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The shared-install check and the delete used to re-read the config ~1000 times (M11)."""
+    _land(CATALOG["qwen-image"])
+    calls = 0
+    real = paths.models_root
+
+    def counting() -> Path:
+        nonlocal calls
+        calls += 1
+        return real()
+
+    monkeypatch.setattr(paths, "models_root", counting)
+
+    assert client.delete("/api/comfyui/models/qwen-image").status_code == 200
+
+    assert calls <= 2  # once for the blocking-install check, once for the delete
+
+
+def test_install_waits_for_a_removal_in_flight(
+    client: TestClient, installs: _Installs, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The delete runs in a worker thread, so an install must not start under it."""
+    model = CATALOG[_SDXL]
+    _land(model)
+    started, release = threading.Event(), threading.Event()
+    real_remove = comfyui_install.remove_model
+
+    def slow_remove(target: ImageModel) -> list[str]:
+        started.set()
+        assert release.wait(5), "the test never released the removal"
+        return real_remove(target)
+
+    monkeypatch.setattr(comfyui_install, "remove_model", slow_remove)
+    results: dict[str, Any] = {}
+    deleter = threading.Thread(
+        target=lambda: results.update(delete=client.delete(f"/api/comfyui/models/{_SDXL}"))
+    )
+    installer = threading.Thread(target=lambda: results.update(install=_post_install(client)))
+    deleter.start()
+    try:
+        assert started.wait(5)
+        installer.start()
+        time.sleep(0.3)
+        assert "install" not in results, "the install ran while the removal was in flight"
+    finally:
+        release.set()
+        deleter.join(5)
+        if installer.ident is not None:
+            installer.join(5)
+
+    assert results["delete"].status_code == 200
+    # The install saw the finished removal: nothing on disk, so it starts a job.
+    assert results["install"].status_code == 202
 
 
 # ── jobs ────────────────────────────────────────────────────────────────────

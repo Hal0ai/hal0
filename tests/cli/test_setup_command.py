@@ -147,7 +147,7 @@ def headless(monkeypatch: pytest.MonkeyPatch) -> dict[str, list]:
     monkeypatch.setattr(
         "hal0.comfyui.install.install_models_blocking", fake_install_models_blocking
     )
-    monkeypatch.setattr("hal0.comfyui.install.hf_token_from_env", lambda: "hf_from_env")
+    monkeypatch.setattr("hal0.upstreams.huggingface.hf_token_from_env", lambda: "hf_from_env")
     monkeypatch.setattr("hal0.install.extensions.install_extension", fake_install_extension)
     return calls
 

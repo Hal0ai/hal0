@@ -11,7 +11,9 @@ it lands (``Component.dest``), and what to write once it has landed (the workflo
 Bytes are staged in the registry's tmp dir and renamed into the models tree. A rename
 cannot cross filesystems, so a layout where the two differ is refused before anything
 streams (:func:`require_one_filesystem`); on one filesystem a single free-space check
-(:func:`preflight_disk`) covers both.
+(:func:`preflight_disk`) covers both. A destination directory hal0 cannot write is
+refused the same way (:func:`require_writable_destinations`), since otherwise the
+failure shows up only at the final rename, after the whole file has been fetched.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ from hal0.comfyui.catalog import (
     CATALOG,
     Component,
     ImageModel,
+    component_path,
     get_model,
     install_state,
     models_using,
@@ -51,7 +54,6 @@ from hal0.registry.pull import (
     _tmp_dir,
     make_job,
 )
-from hal0.upstreams.huggingface import hf_token_from_env
 
 log = logging.getLogger(__name__)
 
@@ -77,6 +79,20 @@ class InstallStagingCrossDevice(Hal0Error):
     """The registry staging dir and the models tree are on different filesystems."""
 
     code = "comfyui.staging_cross_device"
+    status = 409
+
+
+class InstallDirNotWritable(Hal0Error):
+    """A directory an install must write into is not writable by the hal0 user."""
+
+    code = "comfyui.models_dir_not_writable"
+    status = 409
+
+
+class RemoveFailed(Hal0Error):
+    """A file of a model being removed could not be deleted; ``details`` says how far it got."""
+
+    code = "comfyui.remove_failed"
     status = 409
 
 
@@ -106,7 +122,7 @@ def preflight_disk(model: ImageModel) -> None:
     skipped, as the downloader's own per-file check does.
     """
     state = install_state(model)
-    required = int(state.missing_gb * 1024**3)
+    required = int(state.missing_gb * 1e9)
     if required <= 0:
         return
     probe = _existing_ancestor(paths.models_root())
@@ -117,7 +133,7 @@ def preflight_disk(model: ImageModel) -> None:
     if required > free:
         raise InstallInsufficientDisk(
             f"insufficient disk for {model.label}: need about {state.missing_gb:g} GB, "
-            f"{free / 1024**3:.1f} GB free at {probe}",
+            f"{free / 1e9:.1f} GB free at {probe}",
             details={"required_bytes": required, "free_bytes": free, "path": str(probe)},
         )
 
@@ -146,6 +162,34 @@ def require_one_filesystem() -> None:
             "(unset HAL0_COMFYUI_DATA_ROOT or move it).",
             details={"models_root": str(models), "staging_dir": str(staging)},
         )
+
+
+def require_writable_destinations(model: ImageModel) -> None:
+    """Raise :class:`InstallDirNotWritable` when a missing component has nowhere to land.
+
+    For each component still to download, its destination directory, or the nearest
+    existing ancestor when it does not exist yet (the installer creates it), must be
+    writable by this process. Without this a read-only directory is found only at the
+    final rename, after the whole file has streamed and been thrown away, and every retry
+    downloads it again. ``details["path"]`` is the first directory that is not writable.
+
+    The install route calls this next to :func:`require_one_filesystem`;
+    :func:`run_install` calls it again as the backstop.
+    """
+    root = paths.models_root()
+    checked: set[Path] = set()
+    for component in install_state(model, root).missing:
+        probe = _existing_ancestor(component_path(component, root).parent)
+        if probe in checked:
+            continue
+        checked.add(probe)
+        if not os.access(probe, os.W_OK | os.X_OK):
+            raise InstallDirNotWritable(
+                f"cannot install {model.label}: {probe} is not writable by the hal0 user; "
+                "make it writable by the hal0 user or group "
+                "(e.g. chgrp <hal0 group> + chmod 2775), then retry",
+                details={"path": str(probe)},
+            )
 
 
 # ── install ─────────────────────────────────────────────────────────────────
@@ -259,7 +303,8 @@ async def run_install(
     there.
 
     Refuses, before streaming anything, a layout where the staging dir and the models tree
-    are on different filesystems (:class:`InstallStagingCrossDevice`).
+    are on different filesystems (:class:`InstallStagingCrossDevice`) and a destination
+    directory the hal0 user cannot write (:class:`InstallDirNotWritable`).
 
     Never raises: a typed error becomes ``failed`` with its own code, anything else
     ``failed`` with ``comfyui.install_failed``. Only the task's own cancellation
@@ -278,6 +323,7 @@ async def run_install(
         missing = install_state(model).missing
         if missing:
             require_one_filesystem()
+            require_writable_destinations(model)
         await _download_missing(job, missing, client=client, hf_token=hf_token)
         if job.cancel_requested:
             raise _PullCancelled()  # cancelled while the last file landed
@@ -320,25 +366,40 @@ def remove_model(model: ImageModel) -> list[str]:
 
     Returns the weight paths relative to the models root, then ``workflows/<filename>`` for
     the workflow. Files already gone are ignored and not reported.
+
+    Raises :class:`RemoveFailed` at the first file that cannot be deleted (a read-only
+    directory, say): the removal stops there, and ``details["removed"]`` lists what had
+    already gone, so the operator sees how far it got. The models root is resolved once.
     """
     root = paths.models_root()
     removed: list[str] = []
     for component in model.components:
-        neighbours = (CATALOG[other_id] for other_id in models_using(component))
-        if any(n.id != model.id and install_state(n).state == "complete" for n in neighbours):
+        neighbours = (CATALOG[other_id] for other_id in models_using(component, root))
+        if any(n.id != model.id and install_state(n, root).state == "complete" for n in neighbours):
             continue
-        try:
-            component.dest.unlink()
-        except FileNotFoundError:
-            continue
-        removed.append(component.dest.relative_to(root).as_posix())
-    try:
-        (paths.workflows_dir() / model.workflow_filename).unlink()
-    except FileNotFoundError:
-        pass
-    else:
+        dest = component_path(component, root)
+        if _unlink(dest, removed):
+            removed.append(dest.relative_to(root).as_posix())
+    workflow = paths.workflows_dir() / model.workflow_filename
+    if _unlink(workflow, removed):
         removed.append(f"workflows/{model.workflow_filename}")
     return removed
+
+
+def _unlink(path: Path, removed: list[str]) -> bool:
+    """Delete ``path``; False when it was already gone, :class:`RemoveFailed` on any other error."""
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise RemoveFailed(
+            f"could not delete {path}: {exc.strerror or exc}; {len(removed)} file(s) were "
+            "removed before it. Make the directory writable by the hal0 user or group "
+            "(e.g. chgrp <hal0 group> + chmod 2775), then remove the model again",
+            details={"removed": list(removed), "failed_path": str(path), "error": str(exc)},
+        ) from exc
+    return True
 
 
 # ── setup path ──────────────────────────────────────────────────────────────
@@ -419,12 +480,14 @@ def install_models_blocking(
 
 __all__ = [
     "ImageModelNotFound",
+    "InstallDirNotWritable",
     "InstallInsufficientDisk",
     "InstallStagingCrossDevice",
-    "hf_token_from_env",
+    "RemoveFailed",
     "install_models_blocking",
     "preflight_disk",
     "remove_model",
     "require_one_filesystem",
+    "require_writable_destinations",
     "run_install",
 ]

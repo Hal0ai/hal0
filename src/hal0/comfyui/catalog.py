@@ -86,13 +86,22 @@ class Component:
 
     @property
     def dest(self) -> Path:
-        """Where the file lives on disk."""
-        return paths.models_root() / self.kind.subdir / self.relpath
+        """Where the file lives on disk.
+
+        Reads the models root, which re-reads the config; code that resolves many
+        components in one pass takes the root once and calls :func:`component_path`.
+        """
+        return component_path(self, paths.models_root())
 
     @property
     def source_key(self) -> str:
         """A string that is equal for two components exactly when they share a source."""
         return f"hf://{self.hf_repo}/{self.hf_path}"
+
+
+def component_path(component: Component, root: Path) -> Path:
+    """Where ``component`` lands under the models tree ``root`` (``paths.models_root()``)."""
+    return root / component.kind.subdir / component.relpath
 
 
 @dataclass(frozen=True)
@@ -679,13 +688,17 @@ def get_model(model_id: str) -> ImageModel | None:
     return CATALOG.get(model_id)
 
 
-def recommended_model_id(pool_gb: float) -> str:
+def recommended_model_id(pool_gb: float | None) -> str:
     """The starter model that suits a memory pool of ``pool_gb`` gigabytes.
 
     The pool is unified memory when the box has it, else system RAM, as
-    :func:`hal0.install.agent_model._pool_gb` computes it. Every other catalog model
+    :func:`hal0.install.agent_model._pool_gb` computes it. ``None`` means the pool is
+    unknown (the hardware file is unreadable, or the box was never probed): the middle
+    pick, which any box that can run ComfyUI at all can take. Every other catalog model
     stays installable; this only picks the one to highlight.
     """
+    if pool_gb is None:
+        return "sdxl-lightning"
     if pool_gb >= 96:
         return "qwen-image-lightning"
     if pool_gb >= 16:
@@ -693,9 +706,13 @@ def recommended_model_id(pool_gb: float) -> str:
     return "sd-1.5-pruned-emaonly"
 
 
-def install_state(model: ImageModel) -> InstallState:
-    """``complete`` when every component file exists, ``none`` when none does, else ``partial``."""
-    missing = tuple(c for c in model.components if not c.dest.is_file())
+def install_state(model: ImageModel, root: Path | None = None) -> InstallState:
+    """``complete`` when every component file exists, ``none`` when none does, else ``partial``.
+
+    ``root`` is the models tree; a caller checking several models passes it once.
+    """
+    root = root or paths.models_root()
+    missing = tuple(c for c in model.components if not component_path(c, root).is_file())
     if not missing:
         state: Literal["none", "partial", "complete"] = "complete"
     elif len(missing) == len(model.components):
@@ -705,7 +722,13 @@ def install_state(model: ImageModel) -> InstallState:
     return InstallState(state, missing, round(sum(c.approx_gb for c in missing), 1))
 
 
-def models_using(component: Component) -> list[str]:
-    """Ids of the catalog models whose components include a file at ``component.dest``."""
-    dest = component.dest
-    return [m.id for m in CATALOG.values() if any(c.dest == dest for c in m.components)]
+def models_using(component: Component, root: Path | None = None) -> list[str]:
+    """Ids of the catalog models whose components include a file at ``component.dest``.
+
+    ``root`` is the models tree; a caller checking several components passes it once.
+    """
+    root = root or paths.models_root()
+    dest = component_path(component, root)
+    return [
+        m.id for m in CATALOG.values() if any(component_path(c, root) == dest for c in m.components)
+    ]
