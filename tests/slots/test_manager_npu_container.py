@@ -312,6 +312,70 @@ async def test_flm_inference_gate_passes_assigned_model(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("toml_default", "override", "served_tag"),
+    [
+        # Issue repro: empty [model].default, CLI `slot load flm -m gemma3-1b-FLM`.
+        ("", "gemma3-1b-FLM", "gemma3:1b"),
+        # TOML names a different model than the override.
+        ("gemma3:4b", "gemma3:1b", "gemma3:1b"),
+    ],
+)
+async def test_flm_inference_gate_probes_the_override_model(
+    slot_root: Path,
+    tmp_hal0_home: str,
+    toml_default: str,
+    override: str,
+    served_tag: str,
+) -> None:
+    """Regression (#3023): an override load (``slot load -m``, ``POST /load``
+    with ``model_id``) must gate on the model it spawned, not the TOML default.
+
+    ``load`` persists the override only after the gate, so reading
+    ``[model].default`` inside the gate saw an empty or stale value; FLM's
+    provider then probed ``models[0]``, which FLM 1.0.x downloads when it is
+    not installed.
+    """
+    from hal0.providers.flm import FLMProvider
+    from hal0.slots.manager import SlotState
+
+    _write_npu_container_slot(slot_root, "npu")
+    toml = slot_root / "npu.toml"
+    toml.write_text(
+        toml.read_text(encoding="utf-8").replace(
+            'default = "gemma3:4b"', f'default = "{toml_default}"'
+        ),
+        encoding="utf-8",
+    )
+    fake_provider = _make_container_provider_mock()
+    gate = AsyncMock(return_value={"ok": True, "status": "ready", "model": served_tag})
+
+    with (
+        patch("hal0.providers.container.container_provider", return_value=fake_provider),
+        patch.object(FLMProvider, "verify_inference", gate),
+        patch(
+            "hal0.providers.flm.flm_served_models",
+            return_value=[
+                {"tag": "deepseek-r1:8b", "installed": False},
+                {"tag": "gemma3:1b", "installed": True},
+                {"tag": "gemma3:4b", "installed": True},
+            ],
+        ),
+        patch("hal0.agents.hermes_refresh.spawn_context_refresh", lambda *a, **k: None),
+    ):
+        mgr = SlotManager()
+        await mgr.load("npu", override)
+
+        assert mgr.state("npu") == SlotState.READY
+        _cfg_arg, model_info_arg = fake_provider.load_sync.call_args.args
+        assert model_info_arg["flm_tag"] == served_tag, f"spawn served {model_info_arg!r}"
+        assert gate.call_args.kwargs.get("expected_model") == served_tag, (
+            "the gate must probe the model this load spawned, not the TOML "
+            f"default {toml_default!r}; got {gate.call_args!r}"
+        )
+
+
+@pytest.mark.anyio
 async def test_flm_inference_gate_wedged_npu_stays_warming(
     slot_root: Path,
     tmp_hal0_home: str,
