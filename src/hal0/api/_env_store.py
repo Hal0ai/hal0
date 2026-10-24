@@ -127,7 +127,7 @@ HF_HUB_REDIRECT_ENV_NAMES = frozenset(
         "HUGGINGFACE_ASSETS_CACHE",
     }
 )
-#: ``HF_HUB_CACHE``, ``HF_HUB_OFFLINE`` and the rest; the legacy
+#: ``HF_HUB_CACHE``, ``HF_HUB_OFFLINE`` and the rest; the older spelling
 #: ``HUGGINGFACE_HUB_CACHE``; the Xet transfer settings (``HF_XET_CACHE``).
 HF_HUB_REDIRECT_ENV_PREFIXES = ("HF_HUB_", "HUGGINGFACE_HUB_", "HF_XET_")
 
