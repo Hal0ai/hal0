@@ -304,8 +304,8 @@ def test_models_marks_recommended_by_pool(
 _NO_ROCM_REASON = "no ROCm lane on this host (ComfyUI needs /dev/kfd and a render node)"
 
 
-def _host(monkeypatch: pytest.MonkeyPatch, *, rocm_lane: bool) -> None:
-    """An AMD host that advertises every GPU lane; ``rocm_lane`` is whether kfd and a render node exist."""
+def _host(monkeypatch: pytest.MonkeyPatch, *, rocm_lane: bool, amd: bool = True) -> None:
+    """A host that advertises every GPU lane; ``rocm_lane`` is whether kfd and a render node exist."""
     from hal0.capabilities import catalog
 
     monkeypatch.setattr(
@@ -313,8 +313,19 @@ def _host(monkeypatch: pytest.MonkeyPatch, *, rocm_lane: bool) -> None:
         "available_backends",
         lambda: [{"id": "gpu-vulkan"}, {"id": "gpu-rocm"}, {"id": "cpu"}],
     )
-    monkeypatch.setattr(catalog, "host_is_amd_gpu", lambda: True)
+    monkeypatch.setattr(catalog, "host_is_amd_gpu", lambda: amd)
     monkeypatch.setattr(catalog, "rocm_lane_present", lambda: rocm_lane)
+
+
+def test_models_route_reports_engine_unavailable_on_a_vulkan_host(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An NVIDIA or Intel box with a Vulkan node has no ROCm lane either; the reason is exact."""
+    _host(monkeypatch, rocm_lane=False, amd=False)
+
+    body = client.get("/api/comfyui/models").json()
+
+    assert body["engine"] == {"available": False, "reason": _NO_ROCM_REASON}
 
 
 def test_models_route_reports_engine_unavailable(

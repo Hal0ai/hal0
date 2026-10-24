@@ -554,17 +554,18 @@ def _runtime_host_backends(runtime: str) -> list[str]:
     HOST_BACKENDS entry is labelled "gpu-vulkan" — the picker's GENERIC GPU row
     (#1941) — but the image behind it is ROCm-only
     (ComfyUIProvider.gpu_runtime_needs_rocm). available_backends() rightly
-    advertises gpu-vulkan whenever ANY Vulkan-capable render node exists, which on
-    a kfd-less AMD box is exactly the "reachable lane" this runtime does NOT have:
-    the load-time guard (require_kfd_for_gpu_slot) refuses it by name. Drop the
-    row rather than offer one guaranteed to fail — qwen3tts needs no separate
-    check here, its HOST_BACKENDS entry is the correctly-gated "gpu-rocm" id
-    itself. Gated on the whole ROCm lane, not /dev/kfd alone (#2313): the image
-    also opens a render node, and qwen3tts's "gpu-rocm" row asks
-    rocm_lane_present() too (_tts_rows_for_capability, #2447), so the two
-    ROCm-only runtimes agree about a kfd-only box.
+    advertises gpu-vulkan whenever ANY Vulkan-capable render node exists, which
+    on a host without a ROCm lane (a kfd-less AMD box, or any NVIDIA or Intel
+    box) is exactly the "reachable lane" this runtime does NOT have: the
+    load-time guard (require_kfd_for_gpu_slot) refuses it by name. Drop the row
+    rather than offer one guaranteed to fail, whatever the GPU vendor —
+    qwen3tts needs no separate check here, its HOST_BACKENDS entry is the
+    correctly-gated "gpu-rocm" id itself. Gated on the whole ROCm lane, not
+    /dev/kfd alone (#2313): the image also opens a render node, and qwen3tts's
+    "gpu-rocm" row asks rocm_lane_present() too (_tts_rows_for_capability,
+    #2447), so the two ROCm-only runtimes agree about a kfd-only box.
     """
-    if runtime in _ROCM_ONLY_RUNTIMES and host_is_amd_gpu() and not rocm_lane_present():
+    if runtime in _ROCM_ONLY_RUNTIMES and not rocm_lane_present():
         return []
     host_backends = {b["id"] for b in available_backends()}
     return [c for c in _RUNTIME_TO_HOST_BACKENDS.get(runtime, ()) if c in host_backends]

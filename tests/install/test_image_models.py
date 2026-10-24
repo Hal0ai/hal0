@@ -37,6 +37,8 @@ from hal0.install.image_models import (
 )
 
 _NO_LANE_REASON = "no ROCm lane on this host (ComfyUI needs /dev/kfd and a render node)"
+# The real lane gate, captured before the autouse fixture stubs it.
+_REAL_COMFYUI_BACKENDS = capability_catalog.comfyui_backends
 
 
 def _hw(pool_gb: int) -> HardwareInfo:
@@ -72,6 +74,21 @@ def _land(model_id: str) -> None:
 
 
 def test_offers_empty_without_rocm_lane(no_lane: None) -> None:
+    assert image_offers(_hw(128)) == []
+    assert no_offer_reason(_hw(128)) == _NO_LANE_REASON
+
+
+def test_offers_empty_on_a_vulkan_host_without_rocm_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real lane gate, not a stub: NVIDIA or Intel with a Vulkan node is offered nothing."""
+    monkeypatch.setattr(capability_catalog, "comfyui_backends", _REAL_COMFYUI_BACKENDS)
+    monkeypatch.setattr(
+        capability_catalog, "available_backends", lambda: [{"id": "gpu-vulkan"}, {"id": "cpu"}]
+    )
+    monkeypatch.setattr(capability_catalog, "host_is_amd_gpu", lambda: False)
+    monkeypatch.setattr(capability_catalog, "rocm_lane_present", lambda: False)
+
     assert image_offers(_hw(128)) == []
     assert no_offer_reason(_hw(128)) == _NO_LANE_REASON
 

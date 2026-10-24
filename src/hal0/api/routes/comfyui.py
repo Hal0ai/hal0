@@ -562,7 +562,7 @@ async def comfyui_pin(request: Request, body: SetPinnedBody | None = None) -> JS
 def _engine_availability() -> dict[str, Any]:
     """``{available, reason}``: whether this host can run the ComfyUI image at all.
 
-    ``comfyui_backends()`` is empty when an AMD host has no ROCm lane, and the dashboard
+    ``comfyui_backends()`` is empty when the host has no ROCm lane (any GPU vendor), and the dashboard
     shows ``reason`` beside the catalog.
     """
     available = bool(comfyui_backends())
