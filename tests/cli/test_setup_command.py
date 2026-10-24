@@ -234,6 +234,66 @@ def test_setup_headless_without_models_skips_the_installer(headless, tmp_path):
     assert headless["install"] == []
 
 
+def test_setup_headless_installs_selects_and_starts_then_enables_the_unit(monkeypatch, tmp_path):
+    """The headless chain, unstubbed below `provision_offline`, in the order it must run.
+
+    Download, then a normal apply (which writes the img unit and starts the slot), then the
+    extension's `enable --now` on a unit that now exists; the operator reads what is happening
+    and what came of it on the way.
+    """
+    events: list[str] = []
+
+    class Orchestrator:
+        async def get_state(self):
+            return {"selections": {}}
+
+        async def apply(self, slot, child, partial):
+            events.append(f"apply {slot}/{child} {partial['model']}")
+            return {"status": "ready"}
+
+    async def build_orchestrator():
+        return Orchestrator()
+
+    async def installed(model_ids, hf_token, say):
+        events.append("install " + ",".join(model_ids))
+        say("sdxl-lightning: installing")
+        return [(model_id, "completed") for model_id in model_ids]
+
+    def install_extension(ext_id):
+        events.append(f"extension {ext_id}")
+        return ExtensionOutcome(ext_id=ext_id, installed=True)
+
+    async def fake_run_auto(sel, hw, *, no_pull=False):
+        events.append("apply_setup")
+
+    monkeypatch.setattr("hal0.cli.setup_command.HardwareProbe", _FakeProbe)
+    monkeypatch.setattr("hal0.cli.setup_command._run_auto", fake_run_auto)
+    monkeypatch.setattr("hal0.capabilities.catalog.comfyui_backends", lambda: ["gpu-vulkan"])
+    monkeypatch.setattr("hal0.comfyui.install.install_each", installed)
+    monkeypatch.setattr("hal0.install.image_models._build_offline_orchestrator", build_orchestrator)
+    monkeypatch.setattr(
+        "hal0.components.openwebui_arm.reconcile_openwebui_env", lambda: events.append("owui") or {}
+    )
+    monkeypatch.setattr("hal0.install.extensions.install_extension", install_extension)
+    answers = _answers_file(tmp_path, "{ mode: scaffold_and_download, models: [sdxl-lightning] }")
+
+    result = CliRunner().invoke(app, ["--answers", answers])
+
+    assert result.exit_code == 0, result.output
+    assert events == [
+        "apply_setup",
+        "install sdxl-lightning",
+        "apply img/img sdxl-lightning",
+        "owui",
+        "extension comfyui",
+    ]
+    lines = result.output.splitlines()
+    starting = next(i for i, line in enumerate(lines) if "this starts the image engine" in line)
+    assert "downloads the ComfyUI runtime" in lines[starting]
+    after = [line for line in lines[starting + 1 :] if "is the default image model" in line]
+    assert after[0].endswith("is the default image model; the image engine is ready")
+
+
 def test_plan_lists_image_models_with_their_download_size(capsys):
     from hal0.cli.setup_plan import _render_plan_table
     from hal0.install.orchestrate import Selections

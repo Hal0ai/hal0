@@ -452,8 +452,6 @@ class CapabilityOrchestrator:
         slot: str,
         child: str,
         partial: dict[str, Any],
-        *,
-        start: bool = True,
     ) -> dict[str, Any]:
         """Merge a partial selection update and reconcile slot lifecycle.
 
@@ -461,13 +459,6 @@ class CapabilityOrchestrator:
         ``selections`` block of ``get_state()`` exposes. Wraps any
         underlying SlotManager / config error as :class:`CapabilityApplyFailed`
         so the HTTP layer renders a 503 envelope.
-
-        ``start=False`` is for a caller whose slots are started later (the
-        installer: ``hal0.target`` brings them up when the install finishes).
-        Validation and the atomic ``capabilities.toml`` + slot-TOML commit still
-        happen, and a missing slot's config is still created, but the slot is
-        never loaded, swapped or unloaded: starting ComfyUI, pulling its image
-        and waiting for readiness has no place inside an install step.
         """
         if slot not in LEGAL_SLOTS:
             raise BadRequest(
@@ -673,19 +664,17 @@ class CapabilityOrchestrator:
                 if enabled_changed and merged.enabled:
                     # off → on: ensure the slot exists, then load with the model.
                     await self._ensure_slot_exists(slot_name, merged)
-                    if merged.model and start:
+                    if merged.model:
                         await self._slot_manager.load(slot_name, model_id=merged.model)
                 elif enabled_changed and not merged.enabled:
                     # on → off: best-effort unload; tolerate slots that were
                     # never loaded (status() returns OFFLINE → unload is a no-op).
-                    if start:
-                        with contextlib.suppress(Exception):
-                            await self._slot_manager.unload(slot_name)
+                    with contextlib.suppress(Exception):
+                        await self._slot_manager.unload(slot_name)
                 elif merged.enabled and (model_changed or backend_changed) and merged.model:
                     # Still on, but model / backend changed → hot-swap.
                     await self._ensure_slot_exists(slot_name, merged)
-                    if start:
-                        await self._slot_manager.swap(slot_name, merged.model)
+                    await self._slot_manager.swap(slot_name, merged.model)
 
                 # Leaving the NPU (npu→gpu/cpu) for a trio modality: drop it
                 # from the anchor's flm_args so the FLM child stops serving

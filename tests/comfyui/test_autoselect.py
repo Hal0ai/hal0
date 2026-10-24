@@ -8,11 +8,13 @@ model the API cannot render (video) never gets picked, and a failure never fails
 
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 import pytest
 
 from hal0.capabilities import catalog
+from hal0.capabilities.orchestrator import CapabilityOrchestrator
 from hal0.comfyui.autoselect import AutoSelectStatus, auto_select_first_image_model
 from hal0.comfyui.catalog import CATALOG
 from hal0.errors import BadRequest
@@ -31,26 +33,24 @@ class _Orchestrator:
         enabled: bool = False,
         state_error: Exception | None = None,
         apply_error: Exception | None = None,
+        status: str = "",
     ) -> None:
+        self._status = status
         self._selection = {"model": model, "enabled": enabled}
         self._state_error = state_error
         self._apply_error = apply_error
         self.applied: list[tuple[str, str, dict[str, Any]]] = []
-        self.starts: list[bool] = []
 
     async def get_state(self) -> dict[str, Any]:
         if self._state_error is not None:
             raise self._state_error
         return {"selections": {"img": {"img": self._selection}}}
 
-    async def apply(
-        self, slot: str, child: str, partial: dict[str, Any], *, start: bool = True
-    ) -> dict[str, Any]:
+    async def apply(self, slot: str, child: str, partial: dict[str, Any]) -> dict[str, Any]:
         if self._apply_error is not None:
             raise self._apply_error
         self.applied.append((slot, child, partial))
-        self.starts.append(start)
-        return {}
+        return {"status": self._status} if self._status else {}
 
 
 @pytest.fixture(autouse=True)
@@ -149,33 +149,23 @@ async def test_no_auto_select_when_the_selection_cannot_be_read() -> None:
     assert orchestrator.applied == []
 
 
-# ── start: the install path persists the pick without starting the slot ─────
-
-
-async def test_auto_select_starts_the_slot_by_default() -> None:
-    orchestrator = _Orchestrator()
-
-    await auto_select_first_image_model(_SDXL, orchestrator=orchestrator)
-
-    assert orchestrator.starts == [True]
-
-
-async def test_auto_select_passes_start_false_through() -> None:
-    orchestrator = _Orchestrator()
-
-    await auto_select_first_image_model(_SDXL, orchestrator=orchestrator, start=False)
-
-    assert len(orchestrator.applied) == 1
-    assert orchestrator.starts == [False]
-
-
 # ── the outcome: what happened, for a caller that reports it ────────────────
 
 
-async def test_outcome_selected() -> None:
+async def test_outcome_selected_carries_the_slot_state_the_apply_reported() -> None:
+    outcome = await auto_select_first_image_model(
+        _SDXL, orchestrator=_Orchestrator(status="warming")
+    )
+
+    assert outcome.status is AutoSelectStatus.selected
+    assert outcome.detail == "warming"
+
+
+async def test_outcome_selected_without_a_reported_state() -> None:
     outcome = await auto_select_first_image_model(_SDXL, orchestrator=_Orchestrator())
 
     assert outcome.status is AutoSelectStatus.selected
+    assert outcome.detail == ""
 
 
 async def test_outcome_kept_names_the_existing_selection() -> None:
@@ -225,3 +215,12 @@ async def test_outcome_skipped_says_why(
 
     assert outcome.status is AutoSelectStatus.skipped
     assert reason in outcome.detail
+
+
+def test_applying_always_starts_the_slot() -> None:
+    """The img slot's unit is written only when the slot loads, so there is no apply that skips it.
+
+    A ``start`` switch was tried and left an install-time pick with a slot nothing ever started.
+    """
+    assert "start" not in inspect.signature(CapabilityOrchestrator.apply).parameters
+    assert "start" not in inspect.signature(auto_select_first_image_model).parameters
