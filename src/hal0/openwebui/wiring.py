@@ -92,27 +92,47 @@ def openwebui_wiring_status(
     point them at hal0's own ``/v1`` regardless of capability state — see
     ``_DEFAULT_OPENWEBUI_ENV``). Documents/images/web-search are gated on a
     real bound backend: an *enabled* capability selection with a non-empty
-    model, never merely a slot file existing on disk.
+    model, never merely a slot file existing on disk. Images go one step
+    further: the model must also resolve to something the API can render
+    (installed, renderable — :func:`_owui_baked_workflow`), because that is
+    the condition under which the image env block is written at all. The chip
+    and the env block read the same result, so the dashboard never claims an
+    image button Open WebUI does not have; ``image_model`` is the model the
+    block is written for, ``None`` when it is not.
 
     ``agents`` lists the model ids Hermes profiles answer as; it needs the
     live upstream registry, so callers outside the API process (the env
     writer) omit it and get ``[]``.
+    """
+    return _wiring(upstreams, model_cache)[0]
+
+
+def _wiring(
+    upstreams: Any | None, model_cache: Mapping[str, list[str]] | None
+) -> tuple[dict[str, Any], tuple[str, str, str] | None]:
+    """The status dict plus the baked image workflow it was derived from.
+
+    The workflow is resolved once here and handed to
+    :func:`resolve_dynamic_env_overrides`, so the chip and the env block can
+    never disagree about whether images are wired.
     """
     cfg = load_capabilities_config()
     embed_sel = _selection(cfg, "embed", "embed")
     img_sel = _selection(cfg, "img", "img")
     embed_model = embed_sel.model.strip() if embed_sel is not None and embed_sel.enabled else ""
     image_model = img_sel.model.strip() if img_sel is not None and img_sel.enabled else ""
-    return {
+    baked = _owui_baked_workflow(image_model) if image_model else None
+    status = {
         "chat": True,
         "voice": True,
         "documents": bool(embed_model),
-        "images": bool(image_model),
+        "images": baked is not None,
         "web_search": False,
         "embed_model": embed_model or None,
-        "image_model": image_model or None,
+        "image_model": image_model if baked is not None else None,
         "agents": _agent_model_ids(upstreams, model_cache),
     }
+    return status, baked
 
 
 def _owui_baked_workflow(model_id: str) -> tuple[str, str, str] | None:
@@ -170,23 +190,19 @@ def resolve_dynamic_env_overrides() -> dict[str, str | None]:
     """Live capability state → the overrides dict
     :func:`~hal0.openwebui.env_writer.write_openwebui_env` merges in.
     """
-    status = openwebui_wiring_status()
+    status, baked = _wiring(None, None)
     image_workflow_json: str | None = None
     image_nodes_json: str | None = None
     image_size: str | None = None
-    image_model = status["image_model"]
-    if status["images"] and image_model:
-        built = _owui_baked_workflow(image_model)
-        if built is None:
-            # Model resolution / template build failed — never claim a
-            # capability we can't actually back with a working workflow.
-            image_model = None
-        else:
-            image_workflow_json, image_nodes_json, image_size = built
+    if baked is not None:
+        image_workflow_json, image_nodes_json, image_size = baked
+    # An image model that does not resolve has no baked workflow and the status
+    # reports ``image_model`` None for it: never claim a capability we can't
+    # back with a working workflow.
 
     return dynamic_env_overrides(
         embed_model_id=status["embed_model"],
-        image_model_id=image_model,
+        image_model_id=status["image_model"],
         image_workflow_json=image_workflow_json,
         image_workflow_nodes_json=image_nodes_json,
         image_size=image_size,
