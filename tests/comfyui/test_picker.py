@@ -166,6 +166,24 @@ def test_recommended_follows_the_memory_pool(
     assert [r["id"] for r in rows if r["recommended"]] == [expected]
 
 
+@pytest.mark.parametrize(
+    ("hardware", "expected"),
+    [
+        (HardwareInfo(unified_memory_mb=128 * 1024), "qwen-image-lightning"),
+        (HardwareInfo(unified_memory_mb=64 * 1024), "sdxl-lightning"),
+        (HardwareInfo(ram_mb=8 * 1024), "sd-1.5-pruned-emaonly"),
+        # A pool that reads as zero is a box that was never probed: unknown, not small.
+        (HardwareInfo(), "sdxl-lightning"),
+        (HardwareInfo(ram_mb=0, unified_memory_mb=0), "sdxl-lightning"),
+    ],
+    ids=["128gb", "64gb", "8gb-ram", "unprobed", "zeroed"],
+)
+def test_recommended_for_is_the_one_owner_of_the_starter_pick(
+    hardware: HardwareInfo, expected: str
+) -> None:
+    assert picker.recommended_for(hardware) == expected
+
+
 def test_a_user_checkpoint_is_a_downloaded_unpullable_row_under_its_api_id() -> None:
     _checkpoint("sub/mine.safetensors", size=2048)
     api_id = next(f["api_id"] for f in inventory.list_files() if "api_id" in f)

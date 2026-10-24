@@ -9,7 +9,7 @@ instead of assuming. This module is the bridge, modelled on
 
 **Offered, never assumed.** The offer is the catalog models the API can render, in catalog
 order, with the one that suits this box's memory pool marked ``recommended``
-(:func:`hal0.comfyui.catalog.recommended_model_id`). Any of them can be picked instead, or
+(:func:`hal0.comfyui.picker.recommended_for`). Any of them can be picked instead, or
 none. The default answer is none.
 
 **Sizes come from here.** ``--plan`` renders each line off the catalog and the models tree,
@@ -51,10 +51,9 @@ from hal0.comfyui.catalog import (
     ImageModel,
     get_model,
     install_state,
-    recommended_model_id,
 )
+from hal0.comfyui.picker import recommended_for
 from hal0.config.schema import HardwareInfo
-from hal0.install.agent_model import _pool_gb
 from hal0.upstreams.huggingface import hf_token_from_env
 
 if TYPE_CHECKING:
@@ -85,7 +84,7 @@ def image_offers(hw: HardwareInfo) -> list[ImageOffer]:
     """
     if not capability_catalog.comfyui_backends():
         return []
-    recommended = recommended_model_id(_pool_gb(hw))
+    recommended = recommended_for(hw)
     root = comfyui_paths.models_root()
     return [
         ImageOffer(

@@ -24,6 +24,7 @@ import pytest
 from hal0.capabilities import catalog as capability_catalog
 from hal0.comfyui import install as comfyui_install
 from hal0.comfyui import paths as comfyui_paths
+from hal0.comfyui import picker
 from hal0.comfyui.catalog import CATALOG, component_path
 from hal0.config.schema import HardwareInfo
 from hal0.install import image_models
@@ -109,6 +110,20 @@ def test_offers_are_the_api_renderable_catalog_models_in_catalog_order() -> None
     assert first.approx_gb == CATALOG[first.id].approx_gb
     assert first.est_seconds == CATALOG[first.id].est_seconds
     assert first.license == CATALOG[first.id].license
+
+
+@pytest.mark.parametrize("pool_gb", [0, 8, 15, 16, 64, 96, 128])
+def test_the_installer_and_the_picker_recommend_the_same_model(
+    monkeypatch: pytest.MonkeyPatch, pool_gb: int
+) -> None:
+    """One owner (``picker.recommended_for``): an unprobed 0 GB box gets the same pick from the
+    install-time offer as from ``GET /api/comfyui/models``, not SD 1.5 in one place only."""
+    hw = _hw(pool_gb)
+    monkeypatch.setattr(picker, "load_hardware_info", lambda: hw)
+
+    marked = [o.id for o in image_offers(hw) if o.recommended]
+
+    assert marked == [picker.recommended_id()]
 
 
 @pytest.mark.parametrize(

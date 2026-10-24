@@ -73,7 +73,7 @@ SKIP_NOTICE = (
 )
 
 
-def _pool_gb(hw: HardwareInfo) -> float:
+def pool_gb(hw: HardwareInfo) -> float:
     """Detected memory pool in GB — unified first, else system RAM.
 
     Identical to :func:`hal0.install.suggest._ram_gb` on purpose: the
@@ -111,7 +111,7 @@ def agent_model_for_hardware(hw: HardwareInfo, *, override: str | None = None) -
         )
     if not gpu_capable(hw):
         return None
-    pool = _pool_gb(hw)
+    pool = pool_gb(hw)
     for model_id in AGENT_MODEL_IDS:  # largest first
         curated = get_curated(model_id)
         if curated is not None and curated.vram_gb_min <= pool + 0.01:
