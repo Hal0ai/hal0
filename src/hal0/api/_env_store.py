@@ -68,13 +68,47 @@ PROCESS_CONTROL_ENV_NAMES = frozenset(
         "PS4",
         # Redirects where hal0's Hermes helpers read and write its .env.
         "HERMES_HOME",
+        # Python's ssl, httpx, curl and Node write every TLS session key to the
+        # named file, so a passive capture decrypts upstream tokens (#2997).
+        "SSLKEYLOGFILE",
+        # Set to 0, turns off certificate checks for every Node child (the Hermes
+        # web build, npm): simpler than swapping the CA bundle #2941 guards (#2999).
+        "NODE_TLS_REJECT_UNAUTHORIZED",
     }
 )
 #: Prefix families with the same effect: the dynamic loader (``LD_*``,
 #: ``DYLD_*``), the interpreters and installers hal0's children run
 #: (``PYTHON*``, ``UV_*``, ``PIP_*``, ``NPM_CONFIG_*`` for the Hermes web
-#: build's npm) and git (``GIT_SSH_COMMAND`` and the rest).
-PROCESS_CONTROL_ENV_PREFIXES = ("LD_", "DYLD_", "PYTHON", "UV_", "PIP_", "NPM_CONFIG_", "GIT_")
+#: build's npm), git (``GIT_SSH_COMMAND`` and the rest), OpenSSL
+#: (``OPENSSL_CONF`` and its module and engine directories) and the XDG base
+#: directories those tools read their configuration, data and caches from.
+PROCESS_CONTROL_ENV_PREFIXES = (
+    "LD_",
+    "DYLD_",
+    "PYTHON",
+    "UV_",
+    "PIP_",
+    "NPM_CONFIG_",
+    "GIT_",
+    # OPENSSL_CONF loads an engine or provider shared object into every OpenSSL
+    # user; OPENSSL_MODULES and OPENSSL_ENGINES pick where those load from (#2998).
+    "OPENSSL_",
+    # The XDG base directories relocate the config, data and cache trees of
+    # git, pip, uv and npm, sidestepping the HOME/GIT_/PIP_/UV_ denies (#3000):
+    # XDG_CONFIG_HOME holds git's core.sshCommand/core.fsmonitor and pip/uv
+    # config, XDG_CONFIG_DIRS pip's site config, XDG_DATA_HOME the uv-managed
+    # Pythons the Hermes build runs, XDG_CACHE_HOME the wheels uv and pip reuse.
+    "XDG_",
+)
+
+#: Suffix of the proxy variables (#3006): ``HTTP_PROXY``, ``HTTPS_PROXY``,
+#: ``ALL_PROXY``, ``NO_PROXY`` and their lower-case spellings. httpx, requests,
+#: git, curl, uv and pip all honour them, so an entry routes hal0-api's
+#: outbound traffic, bearer tokens on plain-http upstreams included, through a
+#: proxy chosen by whoever wrote it. requests and urllib read any
+#: ``<scheme>_proxy``, hence a suffix rather than a list. A box behind a proxy
+#: sets these by editing ``api.env`` as root; no hal0 writer stores them.
+PROXY_ENV_SUFFIX = "_PROXY"
 
 #: Names that choose which CA bundle outbound TLS clients trust (#2941). A
 #: bundle the ``hal0`` user can write lets a man-in-the-middle read every
@@ -106,7 +140,16 @@ _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 def is_process_control_env(key: str) -> bool:
     """True when ``key`` changes how processes run, not what they authenticate with."""
     name = key.strip().upper()
-    return name in PROCESS_CONTROL_ENV_NAMES or name.startswith(PROCESS_CONTROL_ENV_PREFIXES)
+    return (
+        name in PROCESS_CONTROL_ENV_NAMES
+        or name.startswith(PROCESS_CONTROL_ENV_PREFIXES)
+        or is_proxy_env(name)
+    )
+
+
+def is_proxy_env(key: str) -> bool:
+    """True when ``key`` is a proxy variable (``HTTP_PROXY``, ``no_proxy``, ...) (#3006)."""
+    return key.strip().upper().endswith(PROXY_ENV_SUFFIX)
 
 
 def is_tls_trust_env(key: str) -> bool:
@@ -493,11 +536,13 @@ def list_env_keys(api_env: Path) -> list[str]:
 __all__ = [
     "PROCESS_CONTROL_ENV_NAMES",
     "PROCESS_CONTROL_ENV_PREFIXES",
+    "PROXY_ENV_SUFFIX",
     "TLS_TRUST_ENV_NAMES",
     "TlsTrustError",
     "api_env_lock",
     "delete_env_value",
     "is_process_control_env",
+    "is_proxy_env",
     "is_tls_trust_env",
     "list_env_keys",
     "tls_trust_violation",
