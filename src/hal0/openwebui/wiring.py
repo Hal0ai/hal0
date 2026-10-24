@@ -115,9 +115,10 @@ def openwebui_wiring_status(
     }
 
 
-def _owui_baked_workflow(model_id: str) -> tuple[str, str] | None:
+def _owui_baked_workflow(model_id: str) -> tuple[str, str, str] | None:
     """Build the static ``COMFYUI_WORKFLOW`` / ``COMFYUI_WORKFLOW_NODES``
-    pair OWUI needs, from the SAME resolution and translator hal0's own
+    pair OWUI needs, plus the ``IMAGE_SIZE`` default (the model's native
+    ``WxH``), from the SAME resolution and translator hal0's own
     ``/v1/images/generations`` route uses
     (:func:`hal0.comfyui.resolve.resolve_image_model`,
     :mod:`hal0.providers.comfyui_workflows`) — so the baked default never
@@ -161,6 +162,7 @@ def _owui_baked_workflow(model_id: str) -> tuple[str, str] | None:
     return (
         json.dumps(graph, separators=(",", ":")),
         json.dumps(nodes, separators=(",", ":")),
+        resolved.defaults["size"],
     )
 
 
@@ -171,6 +173,7 @@ def resolve_dynamic_env_overrides() -> dict[str, str | None]:
     status = openwebui_wiring_status()
     image_workflow_json: str | None = None
     image_nodes_json: str | None = None
+    image_size: str | None = None
     image_model = status["image_model"]
     if status["images"] and image_model:
         built = _owui_baked_workflow(image_model)
@@ -179,13 +182,14 @@ def resolve_dynamic_env_overrides() -> dict[str, str | None]:
             # capability we can't actually back with a working workflow.
             image_model = None
         else:
-            image_workflow_json, image_nodes_json = built
+            image_workflow_json, image_nodes_json, image_size = built
 
     return dynamic_env_overrides(
         embed_model_id=status["embed_model"],
         image_model_id=image_model,
         image_workflow_json=image_workflow_json,
         image_workflow_nodes_json=image_nodes_json,
+        image_size=image_size,
         search_provider=_search_provider_lookup(),
     )
 
