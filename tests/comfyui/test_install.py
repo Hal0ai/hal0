@@ -877,11 +877,61 @@ def test_remove_include_shared_deletes_and_reports_affected() -> None:
     assert result["removed"] == [
         *(f"{c.kind.subdir}/{c.relpath}" for c in t2v.components),
         "workflows/ltx2-t2v.json",
+        "workflows/ltx2-i2v.json",  # its weights are gone, so the launcher must not offer it
     ]
     assert result["kept"] == []
     assert result["affected"] == ["ltx2-i2v"]
     assert install_state(t2v).state == "none"
     assert install_state(i2v).state == "none"
+    assert not (paths.workflows_dir() / t2v.workflow_filename).exists()
+    assert not (paths.workflows_dir() / i2v.workflow_filename).exists()
+
+
+def test_remove_include_shared_leaves_an_unaffected_models_workflow() -> None:
+    """Only models that lost a weight lose their workflow: a partial neighbour keeps its own."""
+    qwen = _complete("qwen-image")
+    partial = get_model("qwen-image-edit-lightning")  # shares nothing complete with qwen-image
+    assert partial is not None
+    wf = paths.workflows_dir()
+    wf.mkdir(parents=True, exist_ok=True)
+    (wf / partial.workflow_filename).write_text("{}", encoding="utf-8")
+
+    result = install.remove_model(qwen, include_shared=True)
+
+    assert result["affected"] == []
+    assert result["removed"] == [f"{c.kind.subdir}/{c.relpath}" for c in qwen.components]
+    assert (wf / partial.workflow_filename).is_file()
+
+
+def test_remove_include_shared_skips_an_affected_model_without_a_workflow() -> None:
+    t2v, i2v = _ltx2_pair()
+    (paths.workflows_dir() / i2v.workflow_filename).unlink()
+
+    result = install.remove_model(t2v, include_shared=True)
+
+    assert result["affected"] == ["ltx2-i2v"]
+    assert result["removed"][-1] == "workflows/ltx2-t2v.json"
+    assert "workflows/ltx2-i2v.json" not in result["removed"]
+
+
+def test_remove_include_shared_failure_on_an_affected_workflow_reports_how_far_it_got(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    t2v, i2v = _ltx2_pair()
+    wf = paths.workflows_dir()
+    _failing_unlink(monkeypatch, i2v.workflow_filename, PermissionError(13, "Permission denied"))
+
+    with pytest.raises(install.RemoveFailed) as excinfo:
+        install.remove_model(t2v, include_shared=True)
+
+    assert excinfo.value.details == {
+        "removed": [
+            *(f"{c.kind.subdir}/{c.relpath}" for c in t2v.components),
+            "workflows/ltx2-t2v.json",
+        ],
+        "failed_path": str(wf / i2v.workflow_filename),
+        "error": "[Errno 13] Permission denied",
+    }
 
 
 def test_remove_include_shared_reports_each_affected_model_once_in_catalog_order() -> None:
@@ -891,6 +941,10 @@ def test_remove_include_shared_reports_each_affected_model_once_in_catalog_order
     partial = get_model("qwen-image-edit-lightning")
     assert partial is not None
     assert install_state(partial).state == "partial"
+    wf = paths.workflows_dir()
+    wf.mkdir(parents=True, exist_ok=True)
+    for model_id in ("qwen-image-edit", "qwen-image-lightning", "qwen-image-edit-lightning"):
+        (wf / f"{model_id}.json").write_text("{}", encoding="utf-8")
 
     result = install.remove_model(qwen, include_shared=True)
 
@@ -898,6 +952,11 @@ def test_remove_include_shared_reports_each_affected_model_once_in_catalog_order
     # ``qwen-image-edit-lightning`` was not installed to begin with, so it is not affected.
     assert result["affected"] == ["qwen-image-lightning", "qwen-image-edit"]
     assert partial.id not in result["affected"]
+    # Each affected model's workflow follows its weights, after the model's own, in that order.
+    assert result["removed"][-2:] == [
+        "workflows/qwen-image-lightning.json",
+        "workflows/qwen-image-edit.json",
+    ]
 
 
 def test_remove_include_shared_without_neighbours_affects_nothing() -> None:
