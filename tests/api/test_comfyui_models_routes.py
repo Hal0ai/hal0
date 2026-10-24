@@ -619,7 +619,9 @@ def test_remove_route_deletes_and_409_while_running(
             "loras/sdxl_lightning_8step_lora.safetensors",
             "vae/sdxl_vae_fp16_fix.safetensors",
             "workflows/sdxl-lightning.json",
-        ]
+        ],
+        "kept": [],
+        "affected": [],
     }
     assert install_state(model).state == "none"
     assert not workflow.exists()
@@ -659,7 +661,7 @@ def test_remove_route_of_a_model_with_nothing_on_disk_removes_nothing(
     resp = client.delete(f"/api/comfyui/models/{_SDXL}")
 
     assert resp.status_code == 200
-    assert resp.json() == {"removed": []}
+    assert resp.json() == {"removed": [], "kept": [], "affected": []}
 
 
 def test_remove_route_409_when_shared_component_installing(
@@ -741,6 +743,74 @@ def test_remove_route_409_reports_a_partial_removal(
     }
 
 
+def test_remove_route_keeps_shared_files_and_lists_them_by_default(client: TestClient) -> None:
+    """``ltx2-t2v`` and ``ltx2-i2v`` load one file set: removing one frees only its workflow."""
+    t2v, i2v = CATALOG["ltx2-t2v"], CATALOG["ltx2-i2v"]
+    _land(t2v)
+    _provision_workflow(t2v)
+
+    resp = client.delete(f"/api/comfyui/models/{t2v.id}")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {
+        "removed": ["workflows/ltx2-t2v.json"],
+        "kept": [
+            {"relpath": f"{c.kind.subdir}/{c.relpath}", "models": ["ltx2-i2v"]}
+            for c in t2v.components
+        ],
+        "affected": [],
+    }
+    assert install_state(i2v).state == "complete"
+
+
+def test_remove_route_include_shared_deletes_shared_files_and_reports_affected(
+    client: TestClient,
+) -> None:
+    t2v, i2v = CATALOG["ltx2-t2v"], CATALOG["ltx2-i2v"]
+    _land(t2v)
+    _provision_workflow(t2v)
+
+    resp = client.delete(f"/api/comfyui/models/{t2v.id}", params={"include_shared": "true"})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {
+        "removed": [
+            *(f"{c.kind.subdir}/{c.relpath}" for c in t2v.components),
+            "workflows/ltx2-t2v.json",
+        ],
+        "kept": [],
+        "affected": ["ltx2-i2v"],
+    }
+    assert install_state(t2v).state == "none"
+    assert install_state(i2v).state == "none"
+
+
+def test_remove_route_include_shared_false_is_the_default(client: TestClient) -> None:
+    t2v, i2v = CATALOG["ltx2-t2v"], CATALOG["ltx2-i2v"]
+    _land(t2v)
+
+    resp = client.delete(f"/api/comfyui/models/{t2v.id}", params={"include_shared": "false"})
+
+    assert resp.status_code == 200
+    assert resp.json()["affected"] == []
+    assert install_state(i2v).state == "complete"
+
+
+def test_remove_route_include_shared_still_409s_while_a_sharing_install_runs(
+    client: TestClient, installs: _Installs
+) -> None:
+    """The refusal is about the files, not about which mode asked to delete them."""
+    installing, removing = CATALOG["qwen-image"], CATALOG["qwen-image-edit"]
+    _land(removing)
+    assert _post_install(client, installing.id).status_code == 202
+
+    resp = client.delete(f"/api/comfyui/models/{removing.id}", params={"include_shared": "true"})
+
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "comfyui.install_running"
+    assert install_state(removing).state == "complete"  # not one file was deleted
+
+
 def test_remove_route_deletes_off_the_event_loop(client: TestClient) -> None:
     model = CATALOG["esrgan-4x"]
     _land(model)
@@ -752,7 +822,9 @@ def test_remove_route_deletes_off_the_event_loop(client: TestClient) -> None:
 
     assert resp.status_code == 200
     assert any(
-        call.args == (comfyui_install.remove_model, model) for call in to_thread.call_args_list
+        call.args == (comfyui_install.remove_model, model)
+        and call.kwargs == {"include_shared": False}
+        for call in to_thread.call_args_list
     )
     assert install_state(model).state == "none"
 
@@ -786,10 +858,10 @@ def test_install_waits_for_a_removal_in_flight(
     started, release = threading.Event(), threading.Event()
     real_remove = comfyui_install.remove_model
 
-    def slow_remove(target: ImageModel) -> list[str]:
+    def slow_remove(target: ImageModel, **kwargs: Any) -> dict[str, Any]:
         started.set()
         assert release.wait(5), "the test never released the removal"
-        return real_remove(target)
+        return real_remove(target, **kwargs)
 
     monkeypatch.setattr(comfyui_install, "remove_model", slow_remove)
     results: dict[str, Any] = {}
