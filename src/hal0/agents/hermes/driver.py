@@ -309,7 +309,10 @@ class HermesDriver(AgentDriver):
         # install: a fresh install must not rebuild an old one (#2865).
         from hal0.components.hermes_arm import override_path
 
-        override_path().unlink(missing_ok=True)
+        try:
+            override_path().unlink(missing_ok=True)
+        except OSError as exc:
+            log.warning("hermes.uninstall_override_not_removed", error=str(exc))
 
     def status(self) -> str:
         """Return ``"installed"`` when Hermes is running/reachable, ``"broken"`` otherwise.

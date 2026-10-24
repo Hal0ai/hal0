@@ -152,7 +152,7 @@ function _upgradeOutcome(result, pinLabel) {
   const status = result && result.status;
   const label = (result && result.to) || pinLabel;
   if (status === "upgraded") return ["Hermes upgraded to " + label, "ok"];
-  if (status === "override") return ["Hermes is held at the override " + label + " (hal0 update component hermes --clear-override returns to the pin)", "ok"];
+  if (status === "override") return ["Hermes is held at the override " + String((result && result.override) || "").slice(0, 12) + " (hal0 update component hermes --clear-override returns to the pin)", "ok"];
   if (status === "converged") return ["Hermes already matches the pin", "ok"];
   if (status === "skipped") return ["Hermes upgrade skipped: " + (result.reason || "no reason given"), "warn"];
   if (status === "busy") return ["Hermes builder is busy", "warn"];
