@@ -459,6 +459,51 @@ async def test_apply_img_on_the_seeded_rocm_device_still_gates_on_the_install(
     assert exc.value.details["backend"] == "gpu-rocm"
 
 
+async def test_apply_img_normalises_the_pickers_row_backend_to_the_rocm_device(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The picker advertises ``gpu-vulkan`` for ComfyUI's one row, but the image is ROCm-only.
+
+    A client that applies the row's own backend (the MCP ``capabilities_set`` tool, a model
+    picker) must not rewrite the seeded slot to a Vulkan backend: ``HAL0_BACKEND=vulkan``
+    reaches the ROCm image, and a later profile re-inference then vetoes ``comfyui``. The
+    selection persists the seed's ``gpu-rocm`` in both ``capabilities.toml`` and ``img.toml``.
+    """
+    _host(monkeypatch)
+    _install("sdxl-lightning")
+    orch = await _first_boot(home)
+
+    result = await orch.apply(
+        "img", "img", {"enabled": True, "model": "sdxl-lightning", "device": "gpu-vulkan"}
+    )
+
+    assert result["device"] == "gpu-rocm"
+    assert _selection(home)["device"] == "gpu-rocm"
+    slot = _slot(home)
+    assert (slot["device"], slot["provider"], slot["profile"]) == ("gpu-rocm", "comfyui", "comfyui")
+
+
+async def test_applying_the_row_backend_to_a_rocm_selection_is_not_a_backend_change(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spelling the same lane two ways must not hot-swap a slot that is already serving."""
+    _host(monkeypatch)
+    _install("sdxl-lightning")
+    slot_manager = FakeSlotManager()
+    orch = CapabilityOrchestrator(slot_manager=slot_manager)  # type: ignore[arg-type]
+    await orch.initialize_if_missing()
+    await orch.apply("img", "img", {"enabled": True, "model": "sdxl-lightning"})
+    slot_manager.calls.clear()
+
+    await orch.apply(
+        "img", "img", {"enabled": True, "model": "sdxl-lightning", "device": "gpu-vulkan"}
+    )
+
+    lifecycle = [c for c in slot_manager.calls if c[0] in {"load", "swap", "unload"}]
+    assert lifecycle == []
+    assert _selection(home)["device"] == "gpu-rocm"
+
+
 @pytest.mark.parametrize("device", ["cpu", "gpu-cuda"])
 async def test_apply_img_refuses_a_device_that_is_not_the_gpu_lane(
     home: Path, monkeypatch: pytest.MonkeyPatch, device: str
@@ -501,9 +546,9 @@ def _kfd_and_render_node(tmp_path: Path) -> dict[str, Any]:
 async def test_the_slot_an_img_apply_writes_passes_the_providers_launch_gates(
     home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, device: str
 ) -> None:
-    """Task 5 auto-selects with ``device = comfyui_backends()[0]`` (``gpu-vulkan``); an operator
-    on the seeded box sends ``gpu-rocm``. Whichever is written, the provider builds its env and
-    the ROCm-lane kfd preflight treats it as the same ROCm slot."""
+    """An operator on the seeded box sends ``gpu-rocm``; a client that applies the picker row's
+    own backend sends ``gpu-vulkan``. Either way the slot written is the ROCm one, the provider
+    builds its env and the ROCm-lane kfd preflight accepts it."""
     _host(monkeypatch)
     _install("sdxl-lightning")
     orch = await _first_boot(home)
@@ -511,12 +556,12 @@ async def test_the_slot_an_img_apply_writes_passes_the_providers_launch_gates(
     await orch.apply("img", "img", {"enabled": True, "model": "sdxl-lightning", "device": device})
 
     slot = _slot(home)
-    assert slot["device"] == device
+    assert slot["device"] == "gpu-rocm"  # the row's gpu-vulkan spelling persists as the seed's
     assert slot["provider"] == "comfyui"
     assert slot["profile"] == "comfyui"
     provider = ComfyUIProvider()
     env = provider.build_env(slot, {"path": ""})
-    assert env["HAL0_BACKEND"] in {"rocm", "vulkan"}
+    assert env["HAL0_BACKEND"] == "rocm"
     lane = runtime_lane_for_provider(provider)
     assert lane == "rocm"
     nodes = _kfd_and_render_node(tmp_path)

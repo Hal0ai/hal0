@@ -37,7 +37,11 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from hal0.capabilities.catalog import comfyui_row_backend, models_for_capability
+from hal0.capabilities.catalog import (
+    comfyui_row_backend,
+    comfyui_selection_device,
+    models_for_capability,
+)
 from hal0.capabilities.config import (
     CapabilityConfig,
     CapabilitySelection,
@@ -511,6 +515,12 @@ class CapabilityOrchestrator:
                 code="capability.invalid_selection",
                 details={"slot": slot, "child": child, "partial": partial},
             ) from exc
+
+        # The two spellings of the ComfyUI lane (the picker row's gpu-vulkan and the
+        # seed's gpu-rocm) persist as one device, so applying the row's own backend
+        # never rewrites the ROCm-only slot to a Vulkan one.
+        if _CHILD_TO_CAPABILITY.get((slot, child)) == "image":
+            merged = merged.model_copy(update={"device": comfyui_selection_device(merged.device)})
 
         # voice.stt is a device-keyed engine switch with engines on cpu
         # (moonshine) and npu (FLM whisper) ONLY — hal0 ships no GPU STT

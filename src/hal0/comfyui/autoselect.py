@@ -23,13 +23,6 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# The device the shipped ``img.toml`` seeds, and the one the capability apply accepts for the
-# ComfyUI row. The pinned ComfyUI image is ROCm-only, so this is a contract and not a
-# preference (#2067). ``comfyui_backends()[0]`` is the picker's generic GPU row
-# (``gpu-vulkan``); applying that would rewrite the seeded slot to a Vulkan backend this
-# runner has no lane for.
-_IMG_DEVICE = "gpu-rocm"
-
 
 class AutoSelectStatus(StrEnum):
     """What :func:`auto_select_first_image_model` did."""
@@ -103,7 +96,12 @@ async def auto_select_first_image_model(
         applied = await orchestrator.apply(
             "img",
             "img",
-            {"enabled": True, "model": model.id, "device": _IMG_DEVICE, "provider": "comfyui"},
+            {
+                "enabled": True,
+                "model": model.id,
+                "device": capability_catalog.COMFYUI_SELECTION_DEVICE,
+                "provider": "comfyui",
+            },
         )
     except Hal0Error as exc:
         log.warning(
