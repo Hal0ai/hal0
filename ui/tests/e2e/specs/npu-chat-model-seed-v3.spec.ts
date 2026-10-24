@@ -20,6 +20,7 @@
  * cold-restarted the slot. Silent config corruption on NPU boxes.
  */
 import { test, expect, type Page } from '../fixtures/apiMock'
+import { pickRichOption } from '../fixtures/richSelect'
 
 /** The tag the operator configured, in the slot TOML. */
 const CONFIGURED = 'qwen3:8b'
@@ -126,7 +127,7 @@ test.describe('NPU chat-model seeding (#1388)', () => {
 
     await page.goto('/#slots/npu')
     // An operator must be able to see what a toggle is about to send.
-    await expect(lane(page, 'NPU · Chat').locator('select')).toHaveValue(CONFIGURED)
+    await expect(lane(page, 'NPU · Chat').getByTestId('npu-chat-model')).toContainText(CONFIGURED)
   })
 
   test('an explicit chat-model pick still wins over the seed', async ({ page }) => {
@@ -138,7 +139,7 @@ test.describe('NPU chat-model seeding (#1388)', () => {
     await seedSlots(page, [NPU_SLOT])
 
     await page.goto('/#slots/npu')
-    await lane(page, 'NPU · Chat').locator('select').selectOption('flm-other')
+    await pickRichOption(lane(page, 'NPU · Chat').getByTestId('npu-chat-model'), 'flm-other')
 
     await expect.poll(() => puts.length).toBe(1)
     expect(puts[0].model).toEqual({ default: 'flm-other' })

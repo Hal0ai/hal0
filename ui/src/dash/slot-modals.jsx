@@ -286,6 +286,55 @@ function modelRichOptions({ compatible, cur, has, slotLong, allSlots, verdictChi
 	return opts;
 }
 
+// ── NPU · Chat RichSelect rows ─────────────────────────────────────────────
+// The anchor FLM slot's chat-model picker, styled like the slot card's model
+// picker (inference-pane.jsx modelPickerOptions): line 1 = tag + modality,
+// line 2 = the purple flm runtime chip, plus a download chip for a tag that is
+// not on disk yet (picking one pulls it first). Rows come from the FLM
+// catalogue (/api/slots/flm/models: {model, installed, capabilities}), so
+// installed tags sort ahead of downloadable ones. A current tag missing from
+// the catalogue stays selectable as a bare row, like modelRichOptions does.
+function npuChatRichOptions(chatModels, cur) {
+	const sorted = [...chatModels].sort((a, b) => Number(!!b.installed) - Number(!!a.installed));
+	const opts = [];
+	if (cur && !sorted.some((m) => m.model === cur)) {
+		opts.push({ id: cur, row: cur });
+	}
+	for (const m of sorted) {
+		const caps = Array.isArray(m.capabilities) ? m.capabilities : [];
+		// FLM multimodal chat tags (gemma4-it) also transcribe — the card's
+		// asr modality tag, from FLM's "stt" capability.
+		const modTag = caps.includes("stt") || caps.includes("asr") ? "asr" : null;
+		const name = (
+			<span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{m.model}</span>
+		);
+		const download = !m.installed && <span className="chip">⬇ download</span>;
+		opts.push({
+			id: m.model,
+			row: (
+				<span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+					{name}
+					<ModalityTag tag={modTag} />
+				</span>
+			),
+			trigger: (
+				<span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+					{name}
+					<ModalityTag tag={modTag} />
+					{download}
+				</span>
+			),
+			desc: (
+				<span className="rsel-desc-line">
+					<span className="chip dev-npu">flm</span>
+					{download}
+				</span>
+			),
+		});
+	}
+	return opts;
+}
+
 // ── Profile RichSelect rows (Task 11c) ────────────────────────────────────
 // name + the runtime it carries (title/chips, via profiles.jsx's shared
 // runtimeChips) + an intent line — mirrors how the Profiles view itself
@@ -2029,9 +2078,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								!m.model?.toLowerCase().includes("whisper") &&
 								!m.model?.toLowerCase().includes("embed"),
 						);
-						// Non-installed options carry a ⬇ marker; picking one downloads first.
-						const optLabel = (m) =>
-							m.installed ? m.model : `${m.model}  ⬇ download`;
 						// True while THIS tag is downloading (used to gate + show progress).
 						const pulling = (tag) => pull.inFlight && pull.modelId === tag;
 						const pullPct = pull.pct != null ? `${pull.pct}%` : "…";
@@ -2047,33 +2093,38 @@ function EditSlotDrawer({ open, slot, onClose }) {
 										<span
 											style={{ display: "flex", alignItems: "center", gap: 8 }}
 										>
-											<PillToggle
-												on={npuChat}
-												disabled={npuPending || saving}
-												label="Chat"
-												stateText={npuChat ? "On" : "Off"}
-												onToggle={(next) => {
-													setNpuChat(next);
-													applyNpu({ chat: next }, "chat");
-												}}
-											/>
-											<select
-												className="input mono"
-												style={{ width: 200 }}
-												value={npuChatModel}
-												onChange={(e) =>
-													onPickNpuModel("chat", "chatModel", e.target.value)
-												}
-												disabled={
-													npuPending || saving || !npuChat || pull.inFlight
-												}
-											>
-												{chatModels.map((m) => (
-													<option key={m.model} value={m.model}>
-														{optLabel(m)}
-													</option>
-												))}
-											</select>
+											{/* The picker takes the row's spare width; the toggle
+											    keeps its own so its On/Off text never wraps. */}
+											<span style={{ flexShrink: 0 }}>
+												<PillToggle
+													on={npuChat}
+													disabled={npuPending || saving}
+													label="Chat"
+													stateText={npuChat ? "On" : "Off"}
+													onToggle={(next) => {
+														setNpuChat(next);
+														applyNpu({ chat: next }, "chat");
+													}}
+												/>
+											</span>
+											{/* Non-installed tags carry a download chip; picking
+											    one downloads first (onPickNpuModel). */}
+											<span style={{ flex: "1 1 auto", minWidth: 0 }}>
+												<RichSelect
+													className="model-picker"
+													value={npuChatModel}
+													options={npuChatRichOptions(chatModels, npuChatModel)}
+													onChange={(tag) => {
+														if (tag && tag !== npuChatModel)
+															onPickNpuModel("chat", "chatModel", tag);
+													}}
+													disabled={
+														npuPending || saving || !npuChat || pull.inFlight
+													}
+													aria-label="NPU chat model"
+													data-testid="npu-chat-model"
+												/>
+											</span>
 											{pulling(npuChatModel) && (
 												<span style={{ fontSize: 11, color: "var(--accent)" }}>
 													⬇ {pullPct}
