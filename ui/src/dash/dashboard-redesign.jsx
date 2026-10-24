@@ -38,6 +38,7 @@ import {
   CELL_MAP,
   WIDGET_MAP,
 } from '@/api/hooks/useDashLayout'
+import { gpuUtilReading, GPU_PINNED_SHORT, GPU_PINNED_LONG } from '@/lib/gpuUtil'
 import { slotIndicatorFromPhase, isSlotLive } from './slot-status.js'
 import { useMemoryMapModel } from './memory-map'
 import { useNotifications } from './notifications.jsx'
@@ -285,7 +286,8 @@ function HealthStrip({ slots, heroTps, attentionItems }) {
   const ramUsedGb = st?.ram_used_mb != null ? mbToGb(st.ram_used_mb) : null
   const ramTotalGb = st?.ram_total_mb != null ? mbToGb(st.ram_total_mb) : null
   const memTotalGb = (mm.pool.kind === 'unified' ? mm.pool.totalGb : 0) || ramTotalGb
-  const gpuPct = typeof st?.gpu_util === 'number' ? Math.round(st.gpu_util * 100) : null
+  const gpuUtil = gpuUtilReading(st)
+  const gpuPct = gpuUtil.pct
   const gpuTemp = typeof st?.gpu_temp_c === 'number' ? Math.round(st.gpu_temp_c) : null
 
   return (
@@ -313,7 +315,7 @@ function HealthStrip({ slots, heroTps, attentionItems }) {
       <div className="rd-health-cell">
         <div className="rd-health-k mono">igpu</div>
         <div className="rd-health-v mono num" title={hasGpu ? undefined : 'No GPU compute access on this box'}>
-          {hasGpu && gpuPct != null ? <>{gpuPct}%{gpuTemp != null && <span className="sub"> · {gpuTemp}°C</span>}</> : '—'}
+          {hasGpu && gpuPct != null ? <>{gpuPct}%{gpuUtil.pinned && <span className="sub"> · {GPU_PINNED_SHORT}</span>}{gpuTemp != null && <span className="sub"> · {gpuTemp}°C</span>}</> : '—'}
         </div>
       </div>
       <div className="rd-health-cell">
@@ -608,6 +610,8 @@ function RDUtilizationCard({ swap }) {
     gpuTemp != null ? `${gpuTemp}°C` : null,
     gpuW != null ? `${gpuW} W` : null,
   ].filter(Boolean).join(' · ') || (st?.gpu_util == null ? 'pending driver' : null)
+  const gpuPinned = hasGpu && gpuUtilReading(st).pinned
+  const gpuRowCaption = gpuPinned ? [GPU_PINNED_LONG, gpuCaption].filter(Boolean).join(' · ') : gpuCaption
 
   const hasNpu = hasNpuAccess(hw.data)
   const cores = hw.data?.cores
@@ -629,7 +633,7 @@ function RDUtilizationCard({ swap }) {
           name="igpu"
           sub={hasGpu ? (hw.data?.gpu || null) : 'no gpu'}
           pct={hasGpu ? (st?.gpu_util ?? null) : null}
-          caption={gpuCaption}
+          caption={gpuRowCaption}
         />
         <UtilRow
           dotColor="var(--dev-cpu)"

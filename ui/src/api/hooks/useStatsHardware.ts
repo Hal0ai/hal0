@@ -32,6 +32,8 @@ export interface StatsHardware {
   gtt_used_mb?: number | null
   vram_used_mb?: number | null
   gpu_util?: number | null
+  // True when gpu-compute.service pins the perf level, so gpu_util reads a flat 100
+  util_is_forced_high?: boolean | null
   gpu_vram_used_mb?: number | null
   gpu_vram_total_mb?: number | null
   // Live iGPU clock + temperature — drive the Inference hero GPU gauge
