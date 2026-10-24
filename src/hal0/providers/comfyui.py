@@ -115,18 +115,28 @@ def render_extra_model_paths() -> str:
 
 
 def _ensure_data_dirs() -> None:
-    """Create every directory the container spec bind-mounts (and ``workflows``)."""
+    """Create every directory the container spec bind-mounts (and ``workflows``).
+
+    The bind-mount sources come first, and each mkdir fails on its own: one
+    blocked directory must not leave another bind-mount source missing.
+    """
     root = comfyui_paths.data_root()
     dirs = [
-        *(comfyui_paths.models_root() / sub for sub in comfyui_paths.SUBDIRS.values()),
+        comfyui_paths.models_root(),
         root / "output",
         root / "input",
         comfyui_paths.user_dir(),
         comfyui_paths.custom_nodes_dir(),
         comfyui_paths.workflows_dir(),
+        *(comfyui_paths.models_root() / sub for sub in comfyui_paths.SUBDIRS.values()),
     ]
     for directory in dirs:
-        directory.mkdir(parents=True, exist_ok=True)
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            log.warning(
+                "comfyui.data_root_provision_failed step=mkdir path=%s err=%s", directory, exc
+            )
 
 
 def _ensure_extra_model_paths() -> None:
@@ -164,9 +174,10 @@ def provision_data_root() -> None:
     which crash-looped the img slot on any box where the tree hadn't been
     provisioned (fresh install, or a store root that moved after install). So
     this creates the mounted directories, writes ``extra_model_paths.yaml`` if
-    it is absent or empty, and syncs the GPU-gate custom node. Each step fails
-    on its own: a read-only store logs and degrades to podman reporting the
-    missing path, and one failing step never skips the others.
+    it is absent or empty, and syncs the GPU-gate custom node. Each step, and
+    each directory within the mkdir step, fails on its own: a read-only store
+    logs and degrades to podman reporting the missing path, and one failure
+    never skips the rest.
     """
     for step in (_ensure_data_dirs, _ensure_extra_model_paths, _sync_gpu_gate_node):
         try:
