@@ -195,6 +195,25 @@ def _no_real_systemctl(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_sp, "Popen", _GuardedPopen)
 
 
+#: The account running the suite, captured before any test fakes ``geteuid``.
+_REAL_EUID = os.geteuid()
+
+
+@pytest.fixture(autouse=True)
+def _suite_account_is_trusted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let the account running the suite stand in for root in ``nofollow``.
+
+    Many tests fake ``os.geteuid() == 0`` to drive a root branch against a
+    ``tmp_path`` tree, which the real euid owns. ``hal0.security.nofollow``
+    trusts directories owned by root or the euid, so under the fake it would
+    refuse every such tree as "not root's". Tests that exercise the ownership
+    check set ``_trusted_uids`` themselves, after this fixture.
+    """
+    from hal0.security import nofollow
+
+    monkeypatch.setattr(nofollow, "_trusted_uids", lambda: frozenset({0, _REAL_EUID}))
+
+
 @pytest.fixture(autouse=True)
 def _no_static_slot_seed(monkeypatch: pytest.MonkeyPatch) -> None:
     """Silence the lifespan's static slot-TOML seeding (flm/tts/rerank/

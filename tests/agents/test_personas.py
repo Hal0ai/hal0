@@ -256,3 +256,35 @@ def test_activate_writes_active_and_returns_payload(tmp_path: Path) -> None:
 def test_activate_propagates_filenotfound_for_missing_persona(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         P.activate("ghost", root=tmp_path)
+
+
+# ── #2975: --reset-personas runs as root inside the hal0-owned Hermes home ──
+
+
+def test_save_persona_never_writes_through_a_planted_tmp(tmp_path: Path) -> None:
+    root = tmp_path / "personas"
+    root.mkdir()
+    victim = tmp_path / "root-only"
+    victim.write_text("precious\n")
+    (root / "example.toml.tmp").symlink_to(victim)
+    (root / "active.tmp").symlink_to(victim)
+    P.save_persona(P.Persona(id="example", display_name="Example"), root=root)
+    P.set_active("example", root=root)
+    assert victim.read_text() == "precious\n"
+    assert P.get_active(root=root) == "example"
+
+
+def test_save_persona_refuses_a_symlinked_hermes_home(tmp_path: Path) -> None:
+    from hal0.security.nofollow import UnsafePathError
+
+    state = tmp_path / "state"
+    state.mkdir()
+    state.chmod(0o2775)
+    victim = tmp_path / "etc"
+    victim.mkdir()
+    (state / ".hermes").symlink_to(victim)
+    with pytest.raises(UnsafePathError):
+        P.save_persona(
+            P.Persona(id="example", display_name="Example"), root=state / ".hermes" / "personas"
+        )
+    assert list(victim.iterdir()) == []

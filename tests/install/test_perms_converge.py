@@ -97,13 +97,14 @@ def test_secrets_rows_declare_0700(tmp_hal0_home: str) -> None:
 def test_agentenv_wrapper_and_table_agree_on_the_secrets_mode() -> None:
     """The two shipped components may never disagree again.
 
-    ``hal0-agentenv`` runs ``install -d -m <mode>`` on both secrets dirs on
-    every ``merge-secrets``. If that mode and the table's ever diverge the
-    audit oscillates forever (#1896) — so parse the wrapper and compare.
+    ``hal0-agentenv`` holds both secrets dirs at an explicit mode on every
+    ``merge-secrets`` (its descriptor-based writer, #2975). If that mode and
+    the table's ever diverge the audit oscillates forever (#1896) — so parse
+    the wrapper and compare.
     """
     body = AGENTENV_WRAPPER.read_text(encoding="utf-8")
     match = re.search(
-        r"install\s+-d\s+-m\s+0?(?P<mode>[0-7]{3,4})\b[^\n]*/var/lib/hal0/secrets",
+        r'merge\s+/var/lib/hal0\s+"secrets agents"\s+0?(?P<mode>[0-7]{3,4})\b',
         body,
     )
     assert match, "hal0-agentenv no longer creates the secrets dirs with an explicit mode"

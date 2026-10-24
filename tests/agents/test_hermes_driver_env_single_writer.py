@@ -112,13 +112,15 @@ def test_dashboard_install_keeps_mode_and_owner(
     driver_env.parent.mkdir(parents=True)
     driver_env.write_text("HAL0_API_URL=http://stale\n", encoding="utf-8")
     driver_env.chmod(0o644)
-    chowns: list[tuple[str, int, int]] = []
-    monkeypatch.setattr(hp.os, "chown", lambda p, u, g: chowns.append((str(p), u, g)))
+    fchowns: list[tuple[int, int]] = []
+    monkeypatch.setattr(hp.os, "chown", lambda *_a: pytest.fail("chown takes a swappable path"))
+    monkeypatch.setattr(hp.os, "fchown", lambda _fd, u, g: fchowns.append((u, g)))
 
     _driver().install(bearer_token=None)
 
     assert (driver_env.stat().st_mode & 0o777) == 0o600
-    assert (str(driver_env), 0, 0) in chowns
+    # Pinned through the temp file's descriptor before it replaces the old one (#2975).
+    assert (0, 0) in fchowns
 
 
 # ── $HAL0_HOME sandbox: the install path must not reach for the real /etc ───
@@ -223,3 +225,29 @@ def test_dropin_points_web_dist_at_a_drop_in() -> None:
     assert "set HERMES_WEB_DIST in /etc/hal0/agents/hermes.env" not in flat
     assert "systemctl edit hal0-agent@hermes" in flat
     assert "Environment=HERMES_WEB_DIST=" in flat
+
+
+# ── #2975 review: a refused driver-env path is not a converged no-op ────────
+
+
+def test_root_noop_through_a_swapped_agents_dir_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, driver_env: Path
+) -> None:
+    """hal0 renames agents/ away and links the name back to it: identical bytes, wrong dir."""
+    from hal0.security import nofollow
+
+    # A first, real render into the sandboxed agents/ gives the identical body.
+    hp.refresh_driver_env(no_proxy_hosts=["127.0.0.1"])
+    body = driver_env.read_text(encoding="utf-8")
+    etc = driver_env.parent.parent
+    etc.chmod(0o2775)  # hal0-owned /etc/hal0
+    moved = tmp_path / "renamed-agents"
+    driver_env.parent.rename(moved)
+    driver_env.parent.symlink_to(moved)
+    (moved / "hermes.env").chmod(0o644)
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(nofollow, "_trusted_uids", lambda: frozenset({0}))
+    with pytest.raises(nofollow.UnsafePathError):
+        hp._write_driver_env(no_proxy_hosts=["127.0.0.1"])
+    monkeypatch.undo()
+    assert (moved / "hermes.env").read_text(encoding="utf-8") == body

@@ -3048,9 +3048,13 @@ def _restore_service_ownership(root: Path, *, job_id: str | None = None) -> None
         entry = pwd.getpwnam("hal0")
     except (ImportError, KeyError):
         return
+    # #2975: the cache sits in hal0-owned /var/lib/hal0. A pathname chown of
+    # every rglob() hit followed any symlink the service account planted
+    # there and handed its target (say /etc/shadow) to hal0.
+    from hal0.security import nofollow
+
     try:
-        for path in (root, *root.rglob("*")):
-            os.chown(path, entry.pw_uid, entry.pw_gid)
+        nofollow.chown_tree(root, entry.pw_uid, entry.pw_gid)
     except OSError as exc:
         log.warning("updater.cache_chown_failed", job_id=job_id, path=str(root), error=str(exc))
 

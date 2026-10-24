@@ -35,8 +35,6 @@ from __future__ import annotations
 
 import os
 import re
-import stat
-import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -45,6 +43,7 @@ import structlog
 
 from hal0.agents import hermes_provision as hp
 from hal0.config.locking import file_lock
+from hal0.security import nofollow
 
 log = structlog.get_logger(__name__)
 
@@ -259,36 +258,29 @@ def _append_env_key(target: Path, value: str) -> bool:
     unreadable or unwritable target is skipped with ``hermes_api.key_skipped``
     rather than raised: one bad profile must never abort the sweep.
     """
+    # Through hal0.security.nofollow (#2975): this runs as root from the
+    # provisioning prelude (agent_commands._mirror_default_key_as_root), and
+    # the hal0 account can swap .hermes for a link. Every step goes by
+    # descriptor and refuses a link, so the vault's key never lands elsewhere.
     try:
-        existing = target.read_bytes()
-        st: os.stat_result | None = target.stat()
-    except FileNotFoundError:
-        existing, st = b"", None
-    except OSError as exc:  # unreadable / not a file: skip, never abort the sweep
+        existing = nofollow.read_bytes(target)
+    except OSError as exc:  # unreadable / not a file / a link: skip, never abort the sweep
         log.warning("hermes_api.key_skipped", path=str(target), error=str(exc))
         return False
     prefix = existing if not existing or existing.endswith(b"\n") else existing + b"\n"
     line = f"{_KEY_NAME}={value}\n".encode()
     try:
-        fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=".env.")
-    except OSError as exc:  # dir not writable by this user: skip, never abort the sweep
+        if existing is None:
+            # New file: 0600, owned like its directory (as root), so the gateway
+            # running as that owner can read it.
+            owner = nofollow.dir_owner(target.parent) if os.geteuid() == 0 else None
+            nofollow.write_file(target, line, mode=0o600, owner=owner, create_dirs=False)
+        else:
+            # Keeps the replaced file's mode and, as root, its owner.
+            nofollow.write_file(target, prefix + line, create_dirs=False)
+    except OSError as exc:  # dir not writable by this user, or unsafe: skip
         log.warning("hermes_api.key_skipped", path=str(target), error=str(exc))
         return False
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(prefix + line)
-        os.chmod(tmp, stat.S_IMODE(st.st_mode) if st is not None else 0o600)
-        if os.geteuid() == 0:
-            owner = st if st is not None else target.parent.stat()
-            os.chown(tmp, owner.st_uid, owner.st_gid)
-        os.replace(tmp, target)
-    except OSError as exc:
-        Path(tmp).unlink(missing_ok=True)
-        log.warning("hermes_api.key_skipped", path=str(target), error=str(exc))
-        return False
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
     return True
 
 

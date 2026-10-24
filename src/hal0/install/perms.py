@@ -69,6 +69,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from hal0.config import paths
+from hal0.security import nofollow
 
 log = logging.getLogger(__name__)
 
@@ -1171,10 +1172,15 @@ def _apply_one(
 def commit(
     plan_: OwnershipPlan,
     *,
-    chown: Callable[[str, int, int], None] = os.chown,
-    chmod: Callable[[str, int], None] = os.chmod,
+    chown: Callable[[str, int, int], None] = nofollow.chown,
+    chmod: Callable[[str, int], None] = nofollow.chmod,
 ) -> list[Path]:
     """Apply every drifted diff, rolling back on failure. Returns paths changed.
+
+    The default seams re-own and re-mode by descriptor (#2975): the path is
+    walked from ``/`` without following a symlink below a directory the
+    service account can write, so a ``slots/`` or ``.hermes`` swapped for a
+    link between :func:`plan` and here is refused rather than followed.
 
     Mirrors ``SlotConfigStore.commit``: each path is chowned+chmodded in order;
     if a later path fails, every already-applied path is restored to its

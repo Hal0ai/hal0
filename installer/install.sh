@@ -265,6 +265,18 @@ PY="${HAL0_PYTHON:-python3}"
 API_BIND_HOST="0.0.0.0"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Root-run chown/chmod/mkdir/write under ${VAR_DIR} goes through this (#2975).
+# ${VAR_DIR} is hal0-owned and not sticky, so the hal0 account can swap any
+# entry in it for a symlink, or rename another directory into its name,
+# between a `[[ -L ]]` check and a pathname chmod/install -d. The helper walks
+# from / by descriptor, opens the target O_NOFOLLOW, checks its owner on that
+# descriptor and fchown/fchmods it there. `-I`: no cwd or env reaches the
+# interpreter; the module imports only the stdlib, so it runs before the venv
+# exists. See hal0.security.nofollow.main for the verbs.
+nofollow() {
+    "${PY}" -I "${REPO_ROOT}/src/hal0/security/nofollow.py" "$@"
+}
 if [[ "${DEV_MODE}" -eq 1 ]]; then
     # Dev: editable checkout, everything under one prefix. `hal0 update`
     # hard-refuses in this mode (the updater detects the editable install via
@@ -1016,11 +1028,19 @@ info "directories under ${PREFIX}, ${ETC_DIR}, ${VAR_DIR} (pulls → ${MODELS_DI
 # OwnershipStore row's FHS-default target — chowned explicitly (not
 # ${MODELS_DIR}, which may point off-tree via --models-dir/HAL0_MODELS_DIR;
 # an external store's ownership is out of scope here).
+# Through the descriptor-based `nofollow` helper (#2975): ${VAR_DIR} is
+# hal0-owned and not sticky, so the hal0 account can swap any of these for a
+# link, or rename a root-owned directory such as secrets/ into one of these
+# names, and a pathname chown/chmod would re-own whatever it found.
+# `--expect adopt` takes only a directory hal0 already owns or an empty one
+# root just made; anything else is left as is with a warning.
 if [[ "${DEV_MODE}" -eq 0 ]] && getent passwd hal0 >/dev/null 2>&1; then
-    chown hal0:hal0 "${VAR_DIR}/slots" "${VAR_DIR}/registry" "${VAR_DIR}/models" \
-        "${VAR_DIR}/backups" 2>/dev/null || true
-    chmod 2775 "${VAR_DIR}/slots" "${VAR_DIR}/registry" "${VAR_DIR}/models" \
-        "${VAR_DIR}/backups" 2>/dev/null || true
+    for _state_dir in "${VAR_DIR}/slots" "${VAR_DIR}/registry" "${VAR_DIR}/models" \
+        "${VAR_DIR}/backups"; do
+        nofollow dir --owner hal0:hal0 --mode 2775 --expect adopt "${_state_dir}" \
+            || warn "${_state_dir}: ownership left as is (see the message above)"
+    done
+    unset _state_dir
 fi
 
 # mDNS addon advertisements (#2059): services/mdns.py (hal0-api, User=hal0)
@@ -1782,10 +1802,16 @@ if [[ -n "${HF_TOKEN_VAL}" ]]; then
     # "hal0 system user" follow-up below stays root:root because it sits in
     # the DEV_MODE=0 branch. Tolerant chown mirrors the HF_SECRETS_TMP idiom
     # a few lines down: best-effort in --dev, real in a root prod install.
-    install -d -m 0700 "${SECRETS_DIR}"  # 0700: see #1896
-    chown root:root "${SECRETS_DIR}" 2>/dev/null || true
-    HF_SECRETS_TMP="$(mktemp "${HF_SECRETS_ENV}.XXXXXX")"
-    cat > "${HF_SECRETS_TMP}" <<EOF
+    # Descriptor-based (#2975): ${VAR_DIR} is hal0-owned, so secrets/ can be
+    # swapped for a link or a hal0-owned tree; `install -d` and mktemp/mv by
+    # pathname would re-mode its target and drop the token wherever it points.
+    # `nofollow dir` births secrets/ 0700 (owner root:root only when root, so
+    # --dev still works) and refuses one root does not own; `nofollow write`
+    # writes the 0600 root:root file atomically (random O_EXCL temp file,
+    # fchown/fchmod, rename) inside that directory only. The HF step never
+    # fails the install: a refusal is a warning.
+    if nofollow dir --create --owner root:root --mode 0700 --expect root "${SECRETS_DIR}" \
+        && nofollow write --owner root:root --mode 0600 --require-trusted-dir "${HF_SECRETS_ENV}" <<EOF
 # HuggingFace token for gated / large model pulls — gathered at install time
 # from HF_TOKEN / HUGGING_FACE_HUB_TOKEN. Root-only (0600); loaded by
 # hal0-api.service as an EnvironmentFile (see the "Systemd units" step).
@@ -1794,10 +1820,11 @@ if [[ -n "${HF_TOKEN_VAL}" ]]; then
 #   sudo systemctl restart hal0-api
 HF_TOKEN=${HF_TOKEN_VAL}
 EOF
-    chown root:root "${HF_SECRETS_TMP}" 2>/dev/null || true
-    chmod 0600 "${HF_SECRETS_TMP}"
-    mv -f "${HF_SECRETS_TMP}" "${HF_SECRETS_ENV}"
-    info "wrote ${HF_SECRETS_ENV} (0600 root:root — not ${API_ENV})"
+    then
+        info "wrote ${HF_SECRETS_ENV} (0600 root:root — not ${API_ENV})"
+    else
+        warn "HuggingFace token NOT written to ${HF_SECRETS_ENV} (see the message above; restore a root-owned ${SECRETS_DIR} and re-run)"
+    fi
 else
     info "no HuggingFace token supplied — skipping (open-model pulls need none)"
     info "  add one later in the dashboard's Settings -> Secrets tab, or re-run install.sh with HF_TOKEN=hf_… in the environment"
@@ -3333,11 +3360,17 @@ else
     mkdir -p "${ETC_DIR}/agents"
     # secrets/ + secrets/agents are born 0700 root:root, matching BOTH the
     # ownership table (hal0.install.perms) and the hal0-agentenv seam's
-    # `install -d -m 0700`. A plain `mkdir -p` here births them 0755 under the
+    # descriptor-based 0700. A plain `mkdir -p` here births them 0755 under the
     # installer's umask, which the `doctor perms --fix` backstop then had to
     # tighten on every run — cosmetic drift the audit reported as a defect
     # (#1896). Explicit mode = born correct, nothing to reconcile.
-    install -d -m 0700 -o root -g root "${VAR_DIR}/secrets" "${VAR_DIR}/secrets/agents"
+    # Through the descriptor-based `nofollow` helper (#2975): ${VAR_DIR} is
+    # hal0-owned, and `install -d -o root -m 0700` by pathname on a swapped-in
+    # link or tree re-owns and re-modes its target. Either directory must be
+    # root's already (or be made here); anything else stops the install.
+    nofollow dir --create --owner root:root --mode 0700 --expect root \
+        "${VAR_DIR}/secrets" "${VAR_DIR}/secrets/agents" \
+        || die "${VAR_DIR}/secrets is not a root-owned directory; refusing to re-own it"
 
 fi
 

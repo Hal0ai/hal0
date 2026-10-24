@@ -47,6 +47,8 @@ from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
 
+from hal0.security import nofollow
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - non-POSIX platforms
@@ -71,7 +73,7 @@ def _depths() -> dict[str, int]:
 LOCK_FILE_MODE = 0o664
 
 
-def _adopt_target_ownership(fd: int, target: Path) -> None:
+def _adopt_target_ownership(fd: int, dir_fd: int, target_name: str) -> None:
     """Give a just-created lock file the guarded file's owner, when running as root.
 
     A root-run writer that creates the lock first (``sudo hal0 config migrate``,
@@ -87,13 +89,18 @@ def _adopt_target_ownership(fd: int, target: Path) -> None:
     rather than a hard-coded account, so it tracks whichever side of the
     service-user ownership flip the box is on. Best-effort: a non-root process
     cannot chown, and it does not need to — it created the file as itself.
+    The guarded file and its directory are looked at through the directory's
+    descriptor, without following a link (#2975).
     """
     os.fchmod(fd, LOCK_FILE_MODE)  # explicit: os.open's mode is umask-filtered
     if os.geteuid() != 0:
         return
-    source = target if target.exists() else target.parent
     try:
-        st = source.stat()
+        st = os.stat(target_name, dir_fd=dir_fd, follow_symlinks=False)
+        if not stat.S_ISREG(st.st_mode):
+            st = os.fstat(dir_fd)
+    except FileNotFoundError:
+        st = os.fstat(dir_fd)
     except OSError:
         return
     if st.st_uid == 0 and st.st_gid == 0:
@@ -118,23 +125,41 @@ def _open_lock_file(lock_path: Path, target: Path):  # type: ignore[no-untyped-d
     Creation is a separate ``O_EXCL`` attempt so the mode/ownership fix-up in
     :func:`_adopt_target_ownership` runs on the creating process only, and never
     re-chmods a lock another process is already holding.
+
+    The directory is made on demand and the lock opened relative to its
+    descriptor. As root it is reached with :func:`hal0.security.nofollow.open_dir`
+    (#2975): root must not create a lock file inside a directory the service
+    account swapped for a link, e.g. ``.hermes``. Any other caller can only
+    create what it could create anyway, so it keeps following links, which an
+    operator may have put inside a group-writable tree.
     """
-    created = False
+    if os.geteuid() == 0:
+        dir_fd = nofollow.open_dir(lock_path.parent, create=True)
+    else:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        dir_fd = os.open(lock_path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
-        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, LOCK_FILE_MODE)
-        created = True
-    except FileExistsError:
-        fd = os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW)
-    try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            raise OSError(f"lock path is not a regular file: {lock_path}")
-        if created:
-            _adopt_target_ownership(fd, target)
-    except BaseException:
-        os.close(fd)
-        raise
-    return os.fdopen(fd, "r+b")
+        created = False
+        flags = os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC
+        try:
+            fd = os.open(
+                lock_path.name, flags | os.O_CREAT | os.O_EXCL, LOCK_FILE_MODE, dir_fd=dir_fd
+            )
+            created = True
+        except FileExistsError:
+            fd = os.open(lock_path.name, flags, dir_fd=dir_fd)
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise OSError(f"lock path is not a regular file: {lock_path}")
+            if created:
+                _adopt_target_ownership(fd, dir_fd, target.name)
+            return os.fdopen(fd, "r+b")
+        except BaseException:
+            os.close(fd)
+            raise
+    finally:
+        os.close(dir_fd)
 
 
 def lock_path_for(target: Path | str) -> Path:
@@ -162,8 +187,6 @@ def file_lock(target: Path | str) -> Iterator[None]:
         finally:
             depths[key] -= 1
         return
-
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
 
     if fcntl is None:  # pragma: no cover - non-POSIX platforms
         # No advisory locking available: degrade to a no-op guard so the
@@ -334,8 +357,6 @@ async def async_file_lock(
         return
 
     async with _async_lock_for(key):
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-
         if fcntl is None:  # pragma: no cover - non-POSIX platforms
             owners[key] = current
             try:

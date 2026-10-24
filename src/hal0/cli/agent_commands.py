@@ -592,16 +592,21 @@ def _ensure_hermes_prelude_dirs() -> None:
     # hal0 → born hal0:hal0. /var/lib/hal0/hermes holds the release tree, the
     # uv-managed interpreters and uv's cache (ADR-0032 decision 5, ADR-0034
     # decision 2 amendment).
-    # A symlink here is left alone: chown/chmod would act on its target.
+    # A symlink here is left alone: chown/chmod would act on its target. The
+    # mkdir, chown and chmod go by descriptor (#2975): these dirs sit inside
+    # hal0-owned /var/lib/hal0, so an is_symlink() check followed by a
+    # pathname chown let the hal0 account swap a dir for a link in between.
+    from hal0.security import nofollow
+
     for d in _HERMES_PRELUDE_DIRS:
         p = _Path(d)
         if p.is_symlink():
             console.print(f"[dim]hermes prelude: {d} is a symlink; left as is[/dim]")
             continue
         try:
-            p.mkdir(parents=True, exist_ok=True)
-            _os.chown(p, ent.pw_uid, ent.pw_gid)
-            p.chmod(0o2775)
+            _os.close(nofollow.open_dir(p, create=True))
+            nofollow.chown(p, ent.pw_uid, ent.pw_gid)
+            nofollow.chmod(p, 0o2775)
         except OSError as exc:
             # Best-effort: `doctor perms --fix` (install.sh) is the authority for
             # this skeleton, so a gap here usually surfaces downstream as a loud
@@ -613,12 +618,16 @@ def _ensure_hermes_prelude_dirs() -> None:
 def _hand_uv_trees_to_hal0(roots: tuple[Any, ...] | None = None) -> None:
     """``lchown`` the builder's uv interpreter and cache trees to hal0 (root only).
 
-    Walks without following symlinks, so nothing outside the trees changes.
+    Through :func:`hal0.security.nofollow.chown_tree` (#2975): the trees sit in
+    hal0-owned /var/lib/hal0, and a pathname ``os.walk`` + ``lchown`` protects
+    only the last component, so a middle directory swapped for a link mid-walk
+    could hand any root file to hal0. ``fwalk`` with ``fchownat`` relative to
+    each directory's descriptor never leaves the tree.
     """
-    import os as _os
     import pwd as _pwd
 
     from hal0.agents.hermes_layout import HERMES_PYTHON_ROOT, HERMES_UV_CACHE
+    from hal0.security import nofollow
 
     try:
         ent = _pwd.getpwnam(_AGENT_RUNTIME_USER)
@@ -628,10 +637,7 @@ def _hand_uv_trees_to_hal0(roots: tuple[Any, ...] | None = None) -> None:
         if root.is_symlink() or not root.is_dir():
             continue
         try:
-            _os.lchown(root, ent.pw_uid, ent.pw_gid)
-            for dirpath, dirnames, filenames in _os.walk(root, followlinks=False):
-                for name in (*dirnames, *filenames):
-                    _os.lchown(_os.path.join(dirpath, name), ent.pw_uid, ent.pw_gid)
+            nofollow.chown_tree(root, ent.pw_uid, ent.pw_gid)
         except OSError as exc:
             console.print(f"[dim]hermes prelude: could not hand {root} to hal0: {exc}[/dim]")
 
