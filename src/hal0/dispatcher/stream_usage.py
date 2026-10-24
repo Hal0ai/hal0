@@ -14,8 +14,12 @@ still sees the usage chunk.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import AsyncIterator
 from typing import Any
+
+# SSE allows LF, CRLF or CR line endings; an event ends at a blank line.
+_EVENT_END = re.compile(rb"\r\n\r\n|\n\n|\r\r")
 
 
 def ensure_include_usage(body: bytes) -> tuple[bytes, bool] | None:
@@ -65,7 +69,7 @@ async def strip_usage_only_chunk(source: AsyncIterator[Any]) -> AsyncIterator[An
     """Relay ``source`` minus any usage-only SSE event.
 
     Upstream chunks are transport reads, not SSE events, so bytes are buffered
-    to event boundaries (blank line). Everything else is relayed unchanged.
+    to event boundaries (blank line, LF or CRLF). Everything else is relayed unchanged.
     """
     buffer = b""
     async for chunk in source:
@@ -75,10 +79,10 @@ async def strip_usage_only_chunk(source: AsyncIterator[Any]) -> AsyncIterator[An
         buffer += chunk
         out = b""
         while True:
-            end = buffer.find(b"\n\n")
-            if end < 0:
+            m = _EVENT_END.search(buffer)
+            if m is None:
                 break
-            event, buffer = buffer[: end + 2], buffer[end + 2 :]
+            event, buffer = buffer[: m.end()], buffer[m.end() :]
             if not _is_usage_only_event(event):
                 out += event
         if out:

@@ -85,6 +85,16 @@ async def test_strip_handles_events_split_across_transport_chunks() -> None:
 
 
 @pytest.mark.asyncio
+async def test_strip_handles_crlf_events_incrementally() -> None:
+    crlf = [c.replace(b"\n\n", b"\r\n\r\n") for c in STREAM]
+    gen = strip_usage_only_chunk(_agen(crlf))
+    first = await gen.__anext__()  # delivered per event, not buffered to EOF
+    assert first == crlf[0]
+    rest = first + b"".join([c async for c in gen])
+    assert rest == b"".join(c for c in crlf if c != crlf[3])
+
+
+@pytest.mark.asyncio
 async def test_strip_keeps_choice_chunk_carrying_usage() -> None:
     chunk = b'data: {"choices":[{"delta":{"content":"x"}}],"usage":{"prompt_tokens":1}}\n\n'
     assert await _collect(strip_usage_only_chunk(_agen([chunk]))) == chunk
