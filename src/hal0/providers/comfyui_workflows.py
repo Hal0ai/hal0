@@ -47,7 +47,7 @@ import json
 import secrets
 from typing import Any
 
-from hal0.comfyui.catalog import load_template
+from hal0.comfyui.catalog import load_template, parse_pointer
 from hal0.errors import Hal0Error
 
 # Hardcoded OpenAI-compat default size when caller omits ``size``.
@@ -233,22 +233,17 @@ def build_workflow(
     negative_prompt = (extra.get("negative_prompt") or "").strip()
 
     # ── Patch nodes via the meta.params pointers ─────────────────────────
-    # Each pointer string is "node:<node_id>.inputs.<field>". We split it
-    # to walk the dict — no eval(), no string interpolation into a query
-    # path. Templates that omit a param pointer just don't get patched
-    # (graceful degradation when a template legitimately doesn't expose
-    # that knob).
+    # Each pointer string is "node:<node_id>.inputs.<field>"; parse_pointer
+    # splits it — no eval(), no string interpolation into a query path.
+    # Templates that omit a param pointer just don't get patched (graceful
+    # degradation when a template legitimately doesn't expose that knob).
     def _set(pointer_key: str, value: Any) -> None:
         ptr = params.get(pointer_key)
         if not isinstance(ptr, str):
             return
-        if not ptr.startswith("node:"):
-            return
         try:
-            node_id, dotted = ptr[len("node:") :].split(".", 1)
-            assert dotted.startswith("inputs.")
-            field = dotted[len("inputs.") :]
-        except (AssertionError, ValueError) as exc:
+            node_id, field = parse_pointer(ptr)
+        except ValueError as exc:
             raise WorkflowTemplateError(
                 f"workflow template {stem!r} has malformed param pointer for {pointer_key!r}: {ptr}",
                 details={"pointer": ptr, "key": pointer_key},

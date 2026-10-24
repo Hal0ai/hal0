@@ -148,6 +148,20 @@ def test_build_defaults_from_meta() -> None:
     assert graph["3"]["inputs"]["steps"] == 20
 
 
+def test_build_malformed_pointer_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    template = {
+        "1": {"class_type": "CLIPTextEncode", "inputs": {"text": ""}},
+        "_meta": {
+            "params": {"positive_prompt": "node:1.text"},
+            "defaults": {"steps": 4, "cfg": 1.0},
+        },
+    }
+    monkeypatch.setattr(comfyui_workflows, "_load_template", lambda stem: template)
+    with pytest.raises(WorkflowTemplateError) as exc:
+        build_workflow(body=_baseline_body(), template="synthetic", request_tag="t1")
+    assert "positive_prompt" in exc.value.message
+
+
 def test_build_patches_negative_via_pointer() -> None:
     template = _template_of("sdxl-lightning")
     assert template == "SDXL-Lightning-8step"
