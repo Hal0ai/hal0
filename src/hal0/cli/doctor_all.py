@@ -37,6 +37,7 @@ import grp
 import json as jsonlib
 import os
 import pwd
+import re
 import shutil
 import stat
 import subprocess
@@ -875,6 +876,101 @@ def check_ui_dist(
         f"HAL0_UI_DIST={override} in api.env does not resolve inside {expected} (the current "
         "release bundle) — the dashboard may be serving a stale UI against the new API. Remove "
         f"the override (or point it at {expected}) in api.env, then restart hal0-api.",
+    )
+
+
+def _env_file_entries(text: str) -> list[tuple[str, str]]:
+    """``(key, value)`` for every uncommented ``KEY=value`` line, in file order.
+
+    Undoes the quoting :func:`hal0.api._env_store.upsert_env_value` writes (a
+    double-quoted value with ``\\`` and ``\"`` escaped). The values are only
+    handed to checks that never repeat them.
+    """
+    entries: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        key, sep, value = stripped.partition("=")
+        key = key.strip()
+        if not sep or not key:
+            continue
+        if len(value) >= 2 and value[0] == value[-1] == '"':
+            value = re.sub(r"\\(.)", r"\1", value[1:-1])
+        entries.append((key, value))
+    return entries
+
+
+def check_api_env_entries(
+    *, api_env_path: Path | None = None, read_text: Callable[[Path], str] | None = None
+) -> Check:
+    """Flag ``api.env`` entries hal0 now refuses to write (#2942).
+
+    The secrets and credentials routes refuse loader, interpreter, TLS,
+    configuration and proxy variables (#2936, #2997-#3000, #3006) and accept a
+    TLS trust variable only as a root-owned path hal0 cannot write (#2941).
+    An entry written before those guards, or planted by hand, stays in the
+    file, and hal0-api and every child keep inheriting it. This row names the
+    keys, never the values. Proxy variables are worded apart: a box behind a
+    corporate proxy sets them in this file as root on purpose.
+
+    Advisory (WARN): the row cannot tell a planted entry from one the operator
+    added deliberately.
+    """
+    from hal0.api._env_store import is_process_control_env, is_proxy_env, tls_trust_violation
+
+    key, label = "api-env-entries", "api.env entries"
+    path = api_env_path if api_env_path is not None else paths.api_env()
+    _read = read_text if read_text is not None else (lambda p: p.read_text(encoding="utf-8"))
+    try:
+        text = _read(path)
+    except FileNotFoundError:
+        return Check(key, label, _PASS, f"no {path} yet")
+    except PermissionError:
+        return Check(key, label, _WARN, f"cannot read {path}; run hal0 doctor as hal0 or root")
+    except (OSError, UnicodeDecodeError) as exc:
+        return Check(key, label, _WARN, f"cannot read {path}: {exc}")
+
+    control: list[str] = []
+    proxies: list[str] = []
+    tls: list[str] = []
+    for name, value in _env_file_entries(text):
+        if is_proxy_env(name):
+            proxies.append(name)
+        elif is_process_control_env(name):
+            control.append(name)
+        else:
+            reason = tls_trust_violation(name, value)
+            if reason is not None:
+                tls.append(f"{name} ({reason})")
+    control, proxies, tls = (sorted(set(group)) for group in (control, proxies, tls))
+    if not (control or proxies or tls):
+        return Check(key, label, _PASS, "no loader, interpreter, TLS or proxy overrides")
+
+    findings: list[str] = []
+    if control:
+        findings.append(
+            f"{', '.join(control)} change how hal0-api and every process it starts load "
+            "code, handle TLS or find their configuration"
+        )
+    if tls:
+        findings.append(
+            f"{', '.join(tls)} point outbound TLS at a CA bundle that is not a root-owned "
+            "path hal0 cannot write"
+        )
+    if proxies:
+        findings.append(
+            f"{', '.join(proxies)} route hal0-api's outbound traffic through a proxy; keep "
+            "them only if you set them as root for your network"
+        )
+    return Check(
+        key,
+        label,
+        _WARN,
+        f"{path} sets entries hal0 no longer writes: "
+        + "; ".join(findings)
+        + ". Unless you added one on purpose, remove it in Settings → Secrets or delete "
+        "the line as root, then sudo systemctl restart hal0-api.",
     )
 
 
@@ -2182,6 +2278,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_model_store(_get_any("/api/models", base)),
         check_leftover_registry_toml(),
         check_ui_dist(),
+        check_api_env_entries(),
         check_ports(slots_payload),
         check_port_dnat(slots_payload),
         check_netns_durability(),

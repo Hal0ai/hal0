@@ -1,6 +1,6 @@
 ---
 title: hal0 CLI reference
-description: "Reference for the hal0 CLI — the global flags, the top-level commands, and the slot, model, memory, config, doctor, upstream, capabilities, comfyui, agent and app sub-apps, with exact flags and defaults, verified against src/hal0/cli in the v1.0 tree. The remaining sub-apps are on a second page."
+description: "Reference for the hal0 CLI — the global flags, the top-level commands, and the slot, model, config, doctor, upstream, capabilities, comfyui, agent and app sub-apps, with exact flags and defaults, verified against src/hal0/cli in the v1.0 tree. The remaining sub-apps are on a second page."
 sidebar:
   order: 10
 ---
@@ -169,62 +169,6 @@ hardware backend. The hardware backend is selected with `--hardware`, and stored
 | `model store [path]` | optional `path` | `--migrate` |
 | `model run <ref>` | `ref` | `--slot`/`-s` (default `""`), `--timeout` (default: the derived slot-load budget from `hal0.slot_lifecycle_budget`, `622` at time of writing — see [Slot lifecycle timeouts](/docs/reference/cli-operator/#slot-lifecycle-timeouts)) |
 
-## `hal0 memory` — manage hal0 memory (Hindsight engine)
-
-| Command | Args | Flags |
-|---|---|---|
-| `memory status` | — | `--json` |
-| `memory enable` | — | `--json` |
-| `memory disable` | — | `--json` |
-| `memory recall <query>` | `query` | `--bank`, `--tags` (repeatable), `--types` (repeatable), `--max-tokens` (default `4096`), `--json` |
-| `memory graph status` | — | `--json` |
-| `memory graph enable` | — | `--slot`, `--model`, `--local`, `--json` |
-| `memory graph disable` | — | `--json` |
-| `memory graph check` | — | `--json` |
-
-`memory graph enable` turns graph extraction on and can repoint the memory engine. `--slot <name>` runs it on a local LLM slot and clears any upstream model. `--model <id>` runs it on an upstream model id that hal0's `/v1` already routes (the ids `memory graph status` lists under `Upstream models`); the configured slot is kept as the way back. `--local` clears `--model` and returns the engine to the local `[memory.graph].extraction_slot`. `--model` and `--local` cannot be combined, and `--model` cannot be combined with `--slot`. hindsight-api always calls the virtual id `hal0/memory`, which hal0 resolves on every call, so the change applies at once and does not restart the engine. `memory graph status` prints `Engine target` (the local slot or upstream model `hal0/memory` resolves to) and an `Engine running` line naming the provider and model hindsight-api really loads; the line is marked as overridden when `/etc/hal0/hindsight-llm.env` sets the provider, base URL or model, and as `cannot verify` when hal0-api can read neither the engine process nor that file (see [Services](/docs/operate/services/#hindsight-apiservice)).
-
-### `memory bank`
-
-| Command | Args | Flags |
-|---|---|---|
-| `bank list` | — | `--json` |
-| `bank stats <bank>` | `bank` | `--json` |
-| `bank profile get <bank>` | `bank` | `--json` |
-| `bank profile set <bank>` | `bank` | `--retain-mission`, `--observations-mission`, `--reflect-mission`, `--skepticism`/`--literalism`/`--empathy` (1-5), `--min-refresh-interval <seconds>` (mental-model refresh floor; `0` = after every consolidation), `--json` |
-| `bank export <bank>` | `bank` | `--out` |
-| `bank import <bank>` | `bank` | `--file` (required), `--dry-run`, `--json` |
-| `bank delete <bank>` | `bank` | `--confirm` (required, must equal the bank id), `--json` |
-| `bank consolidate <bank>` | `bank` | `--scope` (repeatable), `--json` |
-
-`bank profile set --reflect-mission` writes the same per-bank config override as the description editor in the dashboard's Memory workspace: the text under the bank picker is the bank's Hindsight `reflect_mission`, and clicking it edits it in place. A bank id may contain dots as well as colons (`coding-agent::ultrareview-1.4`); a leading dot, a dot-only segment and any `..` are refused with `invalid bank_id`.
-
-### `memory ops`
-
-| Command | Args | Flags |
-|---|---|---|
-| `ops list` | — | `--bank` (omit = all banks), `--failed`, `--json` |
-| `ops retry` | — | `--bank`, `--all-failed`, `--id` (requires `--bank`) — exactly one of `--all-failed`/`--id` required, `--json` |
-
-### `memory mm` (mental models)
-
-| Command | Args | Flags |
-|---|---|---|
-| `mm list <bank>` | `bank` | `--json` |
-| `mm refresh <bank> <model_id>` | `bank`, `model_id` | `--json` |
-| `mm history <bank> <model_id>` | `bank`, `model_id` | `--json` |
-
-### `memory migrate unify`
-
-```sh
-hal0 memory migrate unify --source BANK [--source BANK ...] [--target shared]
-                           [--apply|--dry-run] [--add-tag TAG ...]
-                           [--on-conflict skip|replace|new-id] [--skip-observations] [--json]
-```
-
-`--source` is repeatable and required. `--target` defaults to `"shared"`. Defaults to
-dry-run unless `--apply` is given. `--on-conflict` defaults to `skip`.
-
 ## `hal0 config` — inspect and manage configuration
 
 `ConfigFile` enum: `hal0|upstreams|providers`.
@@ -262,12 +206,14 @@ Bare `hal0 doctor` (no subcommand) runs `installer/lib/preflight.sh`:
 prompt and 32 decode tokens, capped at 30 s) when the slot's metrics carry no reading. Each row has a stable id
 (`Check.key`) used in `--json` output and cross-referenced elsewhere in the docs: `api`,
 `dns`, `runners`, `capabilities`, `memory`, `openwebui`, `hermes`, `auth`, `models`,
-`migrations`, `ui-dist`, `ports`, `port_dnat`, `netns`, `hal0_target`, `secret-modes`,
+`migrations`, `ui-dist`, `api-env-entries`, `ports`, `port_dnat`, `netns`, `hal0_target`, `secret-modes`,
 `hardware_freshness`, `seed_context_envelope`, `agent-uid`, `api-journal`, `stt-weights`, `seams`,
 `mcp_mounts`, `hermes-api`, `hermes_mcp_auth`, `hermes_profiles_mcp`, `hermes_generation`, `hermes_command_approvals`, `hermes_delegation_slot`, `hermes-gateway-unit`, `hermes_anchor_window`,
 `hal0_linger`, `hindsight_llm_auth`, `memory_engine_version`, `memory_extraction_throughput`.
 `hal0_linger` reads whether systemd linger is on for the `hal0` user (`loginctl show-user hal0 -p
 Linger`) and warns when that does not match whether the Hermes gateway is installed.
+
+`api-env-entries` ("api.env entries") warns when `/etc/hal0/api.env` holds a name the Secrets API now refuses to write: a loader, interpreter, TLS, configuration or proxy variable (`LD_PRELOAD`, `PYTHONPATH`, `SSLKEYLOGFILE`, `OPENSSL_CONF`, `NODE_TLS_REJECT_UNAUTHORIZED`, `XDG_CONFIG_HOME`, `HTTP_PROXY` and the rest of the families listed under [Secrets](/docs/reference/api/rest-api/)), or a TLS trust variable (`SSL_CERT_FILE` and the others) whose value is not a root-owned path `hal0` cannot write. It names the keys, never the values, and words proxy variables apart, since a box behind a corporate proxy sets them as root on purpose. Remove an entry you did not add in Settings → Secrets, or delete the line as root, then restart `hal0-api`. Run as a user that cannot read the file, it warns and asks for `hal0` or root.
 
 `api-journal` ("API journal read") warns until `hal0-api.service` carries `SupplementaryGroups=systemd-journal`. `hal0 update` does not rewrite that unit, so the fix is to re-run the installer once; until then the Logs page and `hal0 slot logs --follow` report that the journal cannot be read.
 
@@ -364,7 +310,7 @@ While the terminal tool is off (the default; `--no-terminal-tool` or `HAL0_HERME
 
 ## Runner images, profiles, MCP, auth and the rest
 
-The `runner-images`, `profile`, `mcp`, `auth`, `network`, `oauth` and `board`
-sub-apps, the slot lifecycle timeouts, and the separate `hal0-agent` binary have
+The `memory`, `runner-images`, `profile`, `mcp`, `auth`, `network`, `oauth` and
+`board` sub-apps, the slot lifecycle timeouts, and the separate `hal0-agent` binary have
 their own page,
-[hal0 CLI reference: runner images, profiles, MCP, auth & more](/docs/reference/cli-operator/).
+[hal0 CLI reference: memory, runner images, profiles, MCP, auth & more](/docs/reference/cli-operator/).
