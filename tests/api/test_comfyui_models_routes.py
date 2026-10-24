@@ -73,6 +73,40 @@ def _reset_comfyui_module_state() -> Iterator[None]:
     comfyui_mod._reset_state()
 
 
+class _FollowUps:
+    """What an install or a removal did after the files changed, in the order it did it.
+
+    The real auto-select and Open WebUI reconcile are replaced for every test here: the
+    first would apply a capability on whatever lane the machine running the suite has, the
+    second would restart whatever Open WebUI unit it has. Their own behaviour is covered by
+    ``tests/comfyui/test_autoselect.py`` and ``tests/components/test_openwebui_arm.py``.
+    """
+
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+        self.fail: set[str] = set()
+
+    def step(self, name: str, event: Any = None) -> None:
+        self.events.append(name if event is None else event)
+        if name in self.fail:
+            raise RuntimeError(f"{name} broke")
+
+
+@pytest.fixture(autouse=True)
+def follow_ups(monkeypatch: pytest.MonkeyPatch) -> _FollowUps:
+    rec = _FollowUps()
+
+    async def auto_select(model: ImageModel, *, orchestrator: Any) -> None:
+        rec.step("auto_select", ("auto_select", model.id, orchestrator))
+
+    monkeypatch.setattr(f"{_BASE}.auto_select_first_image_model", auto_select)
+    monkeypatch.setattr(
+        "hal0.components.openwebui_arm.reconcile_openwebui_env_background",
+        lambda: rec.step("owui"),
+    )
+    return rec
+
+
 def _land(model: ImageModel, *, only: int | None = None) -> None:
     """Put the model's weight files on disk (all of them, or just the first ``only``)."""
     for component in model.components[:only]:
@@ -138,7 +172,9 @@ def installs(monkeypatch: pytest.MonkeyPatch) -> _Installs:
         client: Any = None,
         on_complete: Any = None,
     ) -> None:
-        rec.calls.append({"job": job, "model_id": model.id, "hf_token": hf_token})
+        rec.calls.append(
+            {"job": job, "model_id": model.id, "hf_token": hf_token, "on_complete": on_complete}
+        )
         job.state = "running"
         job._signal()
         try:
@@ -1086,3 +1122,254 @@ def test_fetch_route_gone(client: TestClient) -> None:
 def test_app_state_has_the_install_registries(client: TestClient) -> None:
     assert client.app.state.image_install_jobs == {}
     assert client.app.state.image_install_tasks == {}
+
+
+# ── after an install or a removal ───────────────────────────────────────────
+
+
+def _complete_install(client: TestClient, installs: _Installs, model_id: str) -> None:
+    """Start an install that finishes at once, then run the ``on_complete`` the route handed it."""
+    installs.behaviour = _Installs.finish
+    assert _post_install(client, model_id).status_code == 202
+    _wait_for(lambda: bool(installs.calls))
+    asyncio.run(installs.calls[-1]["on_complete"](CATALOG[model_id]))
+
+
+def test_install_on_complete_provisions_selects_then_rewires_open_webui(
+    client: TestClient,
+    installs: _Installs,
+    follow_ups: _FollowUps,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orchestrator = object()
+    client.app.state.capability_orchestrator = orchestrator
+    monkeypatch.setattr(
+        comfyui_install, "ensure_workflows", lambda: follow_ups.step("workflows") or []
+    )
+
+    _complete_install(client, installs, _SDXL)
+
+    assert follow_ups.events == ["workflows", ("auto_select", _SDXL, orchestrator), "owui"]
+
+
+def test_install_on_complete_leaves_open_webui_alone_for_a_model_the_api_cannot_render(
+    client: TestClient, installs: _Installs, follow_ups: _FollowUps
+) -> None:
+    video = next(m.id for m in CATALOG.values() if not m.api_renderable)
+
+    _complete_install(client, installs, video)
+
+    assert "owui" not in follow_ups.events
+    assert [e for e in follow_ups.events if isinstance(e, tuple)] == [
+        ("auto_select", video, client.app.state.capability_orchestrator)
+    ]  # auto-select decides for itself that a video model is not a pick
+
+
+def test_install_on_complete_provisions_hand_installed_models_too(
+    client: TestClient, installs: _Installs
+) -> None:
+    """A model whose weights were copied in by hand has no install to write its workflow."""
+    by_hand = CATALOG["sd-1.5-pruned-emaonly"]
+    _land(by_hand)
+
+    _complete_install(client, installs, _SDXL)
+
+    assert (paths.workflows_dir() / by_hand.workflow_filename).is_file()
+
+
+@pytest.mark.parametrize("broken", ["workflows", "auto_select", "owui"])
+def test_install_on_complete_steps_are_independent(
+    client: TestClient,
+    installs: _Installs,
+    follow_ups: _FollowUps,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    broken: str,
+) -> None:
+    """One step's failure is logged and neither skips the steps after it nor fails the job."""
+    monkeypatch.setattr(
+        comfyui_install, "ensure_workflows", lambda: follow_ups.step("workflows") or []
+    )
+    follow_ups.fail = {broken}
+
+    with caplog.at_level("ERROR"):
+        _complete_install(client, installs, _SDXL)
+
+    ran = [e[0] if isinstance(e, tuple) else e for e in follow_ups.events]
+    assert ran == ["workflows", "auto_select", "owui"]
+    assert _job_state(client, _SDXL) == "completed"
+    step = {"workflows": "ensure_workflows", "auto_select": "auto_select", "owui": "open_webui"}
+    assert any(
+        r.getMessage() == "comfyui.follow_up_failed" and r.step == step[broken]
+        for r in caplog.records
+    )
+
+
+def test_install_on_complete_provisions_workflows_after_a_removal_in_flight(
+    follow_ups: _FollowUps, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under the tree lock: no workflow is written for a model a removal is deleting."""
+    from hal0.api.routes import comfyui as comfyui_mod
+
+    monkeypatch.setattr(
+        comfyui_install, "ensure_workflows", lambda: follow_ups.step("workflows") or []
+    )
+
+    async def scenario() -> None:
+        lock = asyncio.Lock()
+        await lock.acquire()  # a removal holds the tree
+        chain = asyncio.create_task(
+            comfyui_mod._after_install(CATALOG[_SDXL], orchestrator=None, tree_lock=lock)
+        )
+        await asyncio.sleep(0.1)
+        assert follow_ups.events == [], "provisioned while a removal held the tree"
+        lock.release()
+        await chain
+
+    asyncio.run(scenario())
+
+    assert follow_ups.events[0] == "workflows"
+
+
+def test_install_without_a_capability_orchestrator_still_runs_the_other_steps(
+    client: TestClient, installs: _Installs, follow_ups: _FollowUps
+) -> None:
+    client.app.state.capability_orchestrator = None
+
+    _complete_install(client, installs, _SDXL)
+
+    assert follow_ups.events == [("auto_select", _SDXL, None), "owui"]
+
+
+def test_remove_route_rewires_open_webui_after_a_removal(
+    client: TestClient, follow_ups: _FollowUps
+) -> None:
+    _land(CATALOG[_SDXL])
+
+    assert client.delete(f"/api/comfyui/models/{_SDXL}").status_code == 200
+
+    assert follow_ups.events == ["owui"]
+
+
+def test_remove_route_leaves_open_webui_alone_when_the_removal_failed(
+    client: TestClient, follow_ups: _FollowUps, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(model: ImageModel, **kwargs: Any) -> dict[str, Any]:
+        raise comfyui_install.RemoveFailed("could not delete", details={"removed": []})
+
+    monkeypatch.setattr(comfyui_install, "remove_model", refuse)
+
+    assert client.delete(f"/api/comfyui/models/{_SDXL}").status_code == 409
+
+    assert follow_ups.events == []
+
+
+def test_remove_route_succeeds_when_the_open_webui_rewire_breaks(
+    client: TestClient, follow_ups: _FollowUps
+) -> None:
+    follow_ups.fail = {"owui"}
+    _land(CATALOG[_SDXL])
+
+    resp = client.delete(f"/api/comfyui/models/{_SDXL}")
+
+    assert resp.status_code == 200
+    assert install_state(CATALOG[_SDXL]).state == "none"
+
+
+# ── startup ─────────────────────────────────────────────────────────────────
+
+
+def test_startup_provisions_workflows_of_hand_installed_models(tmp_hal0_home: str) -> None:
+    by_hand = CATALOG["sd-1.5-pruned-emaonly"]
+    _land(by_hand)
+    assert not (paths.workflows_dir() / by_hand.workflow_filename).exists()
+
+    with TestClient(create_app()):
+        pass
+
+    assert (paths.workflows_dir() / by_hand.workflow_filename).is_file()
+
+
+def test_startup_survives_a_workflow_provisioning_failure(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom() -> list[str]:
+        raise RuntimeError("workflows dir is on fire")
+
+    monkeypatch.setattr(comfyui_install, "ensure_workflows", boom)
+
+    with TestClient(create_app()) as client:
+        assert client.get("/api/comfyui/models").status_code == 200
+
+
+# ── the tree lock ───────────────────────────────────────────────────────────
+
+
+def test_each_app_owns_its_tree_lock(tmp_hal0_home: str) -> None:
+    """A module-level lock binds to the first event loop that contends on it; the app's does not."""
+    from hal0.api.routes import comfyui as comfyui_mod
+
+    assert not hasattr(comfyui_mod, "_TREE_LOCK")
+    first, second = create_app(), create_app()
+    with TestClient(first), TestClient(second):
+        assert isinstance(first.state.image_tree_lock, asyncio.Lock)
+        assert first.state.image_tree_lock is not second.state.image_tree_lock
+
+
+# ── a models tree the hal0 user cannot read ─────────────────────────────────
+
+
+def _denied(*_args: Any, **_kwargs: Any) -> Any:
+    raise PermissionError(13, "Permission denied", "/srv/models/checkpoints")
+
+
+@pytest.mark.parametrize(
+    ("method", "url", "target"),
+    [
+        ("get", "/api/comfyui/models", f"{_BASE}.install_state"),
+        ("post", f"/api/comfyui/models/{_SDXL}/install", f"{_BASE}.install_state"),
+        ("delete", f"/api/comfyui/models/{_SDXL}", "hal0.comfyui.install.remove_model"),
+    ],
+    ids=["list", "install", "remove"],
+)
+def test_unreadable_models_tree_is_a_409_not_a_500(
+    client: TestClient,
+    installs: _Installs,
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    url: str,
+    target: str,
+) -> None:
+    monkeypatch.setattr(target, _denied)
+
+    resp = getattr(client, method)(url)
+
+    assert resp.status_code == 409, resp.text
+    error = resp.json()["error"]
+    assert error["code"] == "comfyui.models_dir_not_writable"
+    assert error["details"] == {"path": "/srv/models/checkpoints"}
+    assert "/srv/models/checkpoints" in error["message"]
+    assert installs.calls == []
+    assert client.app.state.image_install_jobs == {}
+
+
+# ── the models root ─────────────────────────────────────────────────────────
+
+
+def test_models_list_resolves_the_models_root_once(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every row of the catalog is measured against one root, not one config read per model."""
+    calls = 0
+    real = paths.models_root
+
+    def counting() -> Path:
+        nonlocal calls
+        calls += 1
+        return real()
+
+    monkeypatch.setattr(paths, "models_root", counting)
+
+    assert client.get("/api/comfyui/models").status_code == 200
+
+    assert calls == 1
