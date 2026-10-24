@@ -33,25 +33,33 @@ what each model still has to download, and the pick recommended for this box:
 
 ```sh
 hal0 comfyui models list
-hal0 comfyui models install sdxl-lightning
+hal0 comfyui models install sdxl-turbo
 ```
 
-`install` follows each download until it finishes. It treats an already-installed
-model as done and exits 1 if an install fails, is cancelled or is refused; the
-same install is `POST /api/comfyui/models/{model_id}/install`. `list` marks the pick
+`install` follows each download until it finishes, one model at a time when you
+name several. It treats an already-installed model as done and exits 1 if an
+install fails, is cancelled or is refused; the same install is
+`POST /api/comfyui/models/{model_id}/install`. An install is refused up front
+(409 `comfyui.models_dir_not_writable`) when a directory it must write into is
+not writable by the hal0 user, so a permissions problem shows before the
+download starts, not after it. `list` marks the pick
 recommended for this box with `*` and shows the state of each model (`none`,
 `partial`, `complete`, or `installing`). `hal0 comfyui models remove <id>`
 deletes a model's weights and workflow (a file another installed model uses
-stays), and `hal0 comfyui files` lists the weight files on disk, grouped by kind.
+stays; a file that cannot be deleted stops the removal with 409
+`comfyui.remove_failed`, which lists what had already gone), and `hal0 comfyui files` lists the weight files on disk, grouped by kind.
 
 Then point the `img` capability at the model you installed:
 
 ```sh
-hal0 capabilities set img img --model sdxl-lightning
+hal0 capabilities set img img --model sdxl-turbo
 ```
 
 This is the same pattern as every other capability — set the child
 (`img`) under its parent (`img`), pointing at an installed image model.
+`/v1/images/generations` renders `sdxl-turbo` today; the other catalog models
+run from the workflows in ComfyUI's editor for now, and `/v1` support for them
+is coming in the next release.
 
 ## Read the generation-engine status
 
