@@ -39,14 +39,12 @@ def test_node_file_exists_and_imports_outside_comfyui() -> None:
     assert mod.NODE_CLASS_MAPPINGS == {}
 
 
-def test_prompt_post_in_inference_mode_prepares_but_does_not_block() -> None:
+def test_prompt_post_in_inference_mode_prepares_image_mode() -> None:
     mod = _load_node()
     status = {"mode": "inference"}
     assert mod.should_prepare_image_mode("POST", "/prompt", status) is True
     # The frontend posts to /api/prompt on recent ComfyUI versions.
     assert mod.should_prepare_image_mode("POST", "/api/prompt", status) is True
-    # The old 403 gate is gone; the middleware prepares image mode and forwards.
-    assert mod.should_block("POST", "/prompt", status) is False
 
 
 def test_allows_prompt_post_in_generation_mode() -> None:
