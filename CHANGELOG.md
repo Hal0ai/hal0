@@ -30,15 +30,13 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
-### Changed
-
-- **The installer installs FastFlowLM 1.0.10 on NPU hosts, up from 0.9.44.** The pinned host `.deb` now comes from `ROCm/FastFlowLM`, where the project moved, with new SHA-256 pins for each distro build. FastFlowLM 1.0 drops ffmpeg and fftw and needs `libxrt2` 2.25 or newer. The matching `flm` runner image ships separately as a runner pin.
 ### Breaking
 
 - **`hal0 agent upgrade hermes --to <sha>` is gone: use `hal0 update component hermes --target <sha>`.** There is no alias. `hal0 agent upgrade hermes` now exits with a message naming the new command, and `hal0 agent upgrade` takes only `pi`. The `--target` check is the one `--to` had: a full 40-hex commit listed in `VETTED_HERMES_REFS`, and a commit older than the live release is refused as a downgrade. The hidden `--ref` flag of `hal0 agent bootstrap hermes`, which only the old command used to hand a ref to the privilege-dropped child, is removed with it. (#2865)
 
 ### Changed
 
+- **The installer installs FastFlowLM 1.0.10 on NPU hosts, up from 0.9.44.** The pinned host `.deb` now comes from `ROCm/FastFlowLM`, where the project moved, with new SHA-256 pins for each distro build. FastFlowLM 1.0 drops ffmpeg and fftw and needs `libxrt2` 2.25 or newer. The matching `flm` runner image ships separately as a runner pin.
 - **A Hermes `--target` now persists until `--clear-override`, the way the OpenWebUI digest override does.** `--to` built a vetted commit that the next `hal0 update` replaced with the pin. `hal0 update component hermes --target <sha>` records the commit in `/var/lib/hal0/state/hermes.pin-override` once its release is live, and every later `hal0 update` keeps that release. `hal0 update status` shows the row as `override` with the override commit beside the pin, on every run, so a forgotten override stays visible; the converge counts a live release that matches the override as converged. When a later hal0 release no longer lists the override commit in `VETTED_HERMES_REFS`, `hal0 update` warns, refuses to keep or rebuild it, and names `hal0 update component hermes --clear-override`; it never builds an unvetted commit. `hal0 update component <id>` also takes `--yes`. `--target` with the release pin's own commit counts as `--clear-override`; `--clear-override` is refused when the pin is older than the live release and removes the marker only after the converge back to the pin succeeds; `hal0 agent reprovision hermes --repair`, the dashboard Repair and the MCP-client auto-repair in `hal0 update` rebuild the override commit instead of the pin (and refuse an override this release no longer vets); and the Agents card does not show an update for a box held at an override. `hal0 agent uninstall hermes` removes the override marker (a full `hal0 uninstall --purge` removes it with `/var/lib/hal0`; a conservative uninstall keeps it with the rest of the state), so a fresh install never rebuilds an old override. (#2865)
 
 ### Fixed
