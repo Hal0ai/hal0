@@ -1790,13 +1790,16 @@ if [[ -n "${HF_TOKEN_VAL}" ]]; then
     # "hal0 system user" follow-up below stays root:root because it sits in
     # the DEV_MODE=0 branch. Tolerant chown mirrors the HF_SECRETS_TMP idiom
     # a few lines down: best-effort in --dev, real in a root prod install.
-    # A symlinked secrets/ is refused (#2975): `install -d` would re-mode
-    # the link's target, and the token would land wherever it points.
-    [[ -L "${SECRETS_DIR}" ]] && die "${SECRETS_DIR} is a symlink; refusing to write the HF token through it"
-    install -d -m 0700 "${SECRETS_DIR}"  # 0700: see #1896
-    chown root:root "${SECRETS_DIR}" 2>/dev/null || true
-    HF_SECRETS_TMP="$(mktemp "${HF_SECRETS_ENV}.XXXXXX")"
-    cat > "${HF_SECRETS_TMP}" <<EOF
+    # A symlinked secrets/ is skipped with a warning (#2975): ${VAR_DIR} is
+    # hal0-owned, `install -d` would re-mode the link's target, and the token
+    # would land wherever it points. The HF step never fails the install.
+    if [[ -L "${SECRETS_DIR}" ]]; then
+        warn "${SECRETS_DIR} is a symlink; HuggingFace token NOT written (restore the real directory and re-run)"
+    else
+        install -d -m 0700 "${SECRETS_DIR}"  # 0700: see #1896
+        chown root:root "${SECRETS_DIR}" 2>/dev/null || true
+        HF_SECRETS_TMP="$(mktemp "${HF_SECRETS_ENV}.XXXXXX")"
+        cat > "${HF_SECRETS_TMP}" <<EOF
 # HuggingFace token for gated / large model pulls — gathered at install time
 # from HF_TOKEN / HUGGING_FACE_HUB_TOKEN. Root-only (0600); loaded by
 # hal0-api.service as an EnvironmentFile (see the "Systemd units" step).
@@ -1805,10 +1808,11 @@ if [[ -n "${HF_TOKEN_VAL}" ]]; then
 #   sudo systemctl restart hal0-api
 HF_TOKEN=${HF_TOKEN_VAL}
 EOF
-    chown root:root "${HF_SECRETS_TMP}" 2>/dev/null || true
-    chmod 0600 "${HF_SECRETS_TMP}"
-    mv -f "${HF_SECRETS_TMP}" "${HF_SECRETS_ENV}"
-    info "wrote ${HF_SECRETS_ENV} (0600 root:root — not ${API_ENV})"
+        chown root:root "${HF_SECRETS_TMP}" 2>/dev/null || true
+        chmod 0600 "${HF_SECRETS_TMP}"
+        mv -f "${HF_SECRETS_TMP}" "${HF_SECRETS_ENV}"
+        info "wrote ${HF_SECRETS_ENV} (0600 root:root — not ${API_ENV})"
+    fi
 else
     info "no HuggingFace token supplied — skipping (open-model pulls need none)"
     info "  add one later in the dashboard's Settings -> Secrets tab, or re-run install.sh with HF_TOKEN=hf_… in the environment"
