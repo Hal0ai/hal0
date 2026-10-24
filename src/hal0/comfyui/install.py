@@ -604,9 +604,15 @@ async def _report_progress(job: PullJob, say: Callable[[str], None]) -> None:
                 return
 
 
-async def _install_each(
+async def install_each(
     model_ids: Sequence[str], hf_token: str | None, say: Callable[[str], None]
 ) -> list[tuple[str, str]]:
+    """Install ``model_ids`` one after another and return ``(model_id, final_state)`` for each.
+
+    The async body of :func:`install_models_blocking`, for a caller that already owns an event
+    loop (:func:`hal0.install.image_models.provision_image_models`). Each model's lines go to
+    ``say`` as that function documents.
+    """
     results: list[tuple[str, str]] = []
     async with _new_client() as client:
         for model_id in model_ids:
@@ -650,7 +656,7 @@ def install_models_blocking(
     start line, ``  <id>: <pct>% (<done>/<total> GB)`` at most every
     :data:`_PROGRESS_INTERVAL_S` while it downloads, and an end line.
     """
-    return asyncio.run(_install_each(model_ids, hf_token, on_line or (lambda _line: None)))
+    return asyncio.run(install_each(model_ids, hf_token, on_line or (lambda _line: None)))
 
 
 __all__ = [
@@ -659,6 +665,7 @@ __all__ = [
     "InstallInsufficientDisk",
     "InstallStagingCrossDevice",
     "RemoveFailed",
+    "install_each",
     "install_models_blocking",
     "preflight_disk",
     "remove_model",
