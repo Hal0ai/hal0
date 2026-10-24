@@ -31,9 +31,14 @@ process to babysit.
 curl -fsSL https://hal0.dev/install.sh | sudo bash
 ```
 
-> **v1.6.0 is the current stable release.** A minor release (2026-10-23): new
-> functionality, no config-schema migration, and an ordinary `hal0 update`
-> from any 1.4.x or later box; a 1.3.x box hops through 1.5.0 first. With
+> **v1.6.5 is the current stable release.** A release on the 1.6 line
+> (2026-10-24): FastFlowLM 1.0.10 run from its runner image, privilege
+> hardening, and fixes, with no config-schema migration and an ordinary
+> `hal0 update` from any 1.4.x or later box; a 1.3.x box hops through 1.5.0
+> first. It removes four CLI spellings that had a second name
+> (`hal0 agent upgrade hermes --to`, `hal0 update owui`,
+> `hal0 agent bootstrap hermes`, `hal0 uninstall --keep-data`/`--clean-slate`);
+> read the 1.6.5 **Breaking** notes for the replacements. With
 > Hermes v0.22.4, a chat opened for a non-default profile and `hermes chat`
 > need the Hermes gateway running. Since 1.4.0, three changes can break a
 > script or a setup: `hal0 update`
@@ -42,9 +47,9 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash
 > brain profile is refused until hal0 enforces its tool policy; and an
 > installed MCP server that would send its secrets over plain `http://` to
 > another host no longer loads. After
-> updating, re-run the installer once to pick up the new Hindsight limits,
-> the Open WebUI client key and the Hermes wrappers. Read the 1.6.0
-> **Breaking** and **Migrations** notes in [CHANGELOG.md](CHANGELOG.md)
+> updating from before 1.6.0, re-run the installer once to pick up the new
+> Hindsight limits, the Open WebUI client key and the Hermes wrappers. Read the
+> 1.6.0 **Breaking** and **Migrations** notes in [CHANGELOG.md](CHANGELOG.md)
 > first. The project has followed semver since v1.0.0; a minor release's
 > **Breaking** notes flag behaviour changes an operator or a script may
 > notice. Upgrades start at 1.4.0; on anything older, read
