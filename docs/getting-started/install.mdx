@@ -1,6 +1,6 @@
 ---
 title: Install hal0
-description: Install hal0 with one command — the bootstrap cosign-verifies the signed release manifest and tarball, then hands off to a 16-step, idempotent installer that seeds config and starts the API.
+description: Install hal0 with one command — the bootstrap cosign-verifies the signed release manifest and tarball, then hands off to a 15-step, idempotent installer that seeds config and starts the API.
 sidebar:
   order: 10
 ---
@@ -58,7 +58,7 @@ Accepted values: `stable` (default), `preview`, `nightly`.
 
 ## What the installer does
 
-The bootstrap hands off to `installer/install.sh`, which runs 16 steps,
+The bootstrap hands off to `installer/install.sh`, which runs 15 steps,
 in order:
 
 <Steps>
@@ -86,11 +86,10 @@ in order:
     profile.
 12. **NPU prerequisites** — installs the FastFlowLM runtime on
     AMDXDNA/apt hosts (fail-soft elsewhere).
-13. **ComfyUI model share** — sets up the image-generation model path.
-14. **Bundle picker manifests** — writes the dashboard's first-run bundle
+13. **Bundle picker manifests** — writes the dashboard's first-run bundle
     catalog.
-15. **Bundled agent skills** — installs the shipped agent skill set.
-16. **Service start** — starts `hal0-api` and `hal0-openwebui` (unless
+14. **Bundled agent skills** — installs the shipped agent skill set.
+15. **Service start** — starts `hal0-api` and `hal0-openwebui` (unless
     `--no-start`), waits up to 60 s for `/api/health` to answer before the post-install checks run, stands up the Hindsight memory engine, then provisions the bundled Hermes agent (skip with `HAL0_SKIP_HERMES=1`; install later with `hal0 agent install hermes`). Hermes provisioning builds a release and can take a few minutes.
 
 </Steps>

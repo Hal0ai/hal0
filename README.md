@@ -173,7 +173,7 @@ Full step list and the complete env-var table:
 | `HAL0_BRAIN_MODEL=<id>` | Force a specific curated brain quant |
 | `HAL0_PULL_AGENT_MODEL=1` / `=0` | Opt in to the big agent pull unattended / force-skip it on a TTY |
 | `HAL0_PY_AUTOINSTALL=1` | Let the installer install `python3.12` when the box has no Python in 3.12-3.14 |
-| `HAL0_SKIP_HINDSIGHT=1`, `HAL0_SKIP_OPENWEBUI=1`, `HAL0_SKIP_HERMES=1`, `HAL0_SKIP_COMFYUI=1` | Skip individual companion services |
+| `HAL0_SKIP_HINDSIGHT=1`, `HAL0_SKIP_OPENWEBUI=1`, `HAL0_SKIP_HERMES=1` | Skip individual companion services |
 | `--no-start` | Provision everything, leave services stopped |
 | `--summary-json=PATH` | Write a versioned, machine-readable install summary (see [`installer/README.md`](./installer/README.md#--summary-jsonpath)) |
 
@@ -447,8 +447,9 @@ content-addressed, host-redacted archive you can attach anywhere, and
   OpenWebUI is prewired at `:3001` with zero config; its Services card shows an Agents chip once Hermes profiles
   are wired in.
 - **Image generation, day one** — `POST /v1/images/generations` via ComfyUI
-  in the `img` slot container (ROCm). The installer seeds the `img` slot and
-  its ComfyUI model share.
+  in the `img` slot container (ROCm). The installer seeds the `img` slot; the
+  ComfyUI provider creates its model tree under the model store when the slot
+  starts.
 - **Atomic self-update with rollback** — `hal0 update --channel
   stable|preview|nightly`. Cosign-verified tarballs swap a
   `/usr/lib/hal0/current` symlink; `--rollback` reverts. Staging happens in

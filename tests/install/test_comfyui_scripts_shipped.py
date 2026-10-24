@@ -11,7 +11,8 @@ Assertions:
       ``installer/comfyui/scripts`` source path (the install block is gone).
   (c) installer/install.sh contains NO comfy-ui sudoers block
       (``packaging/sudoers/hal0-comfyui`` is retired).
-  (d) The model-share setup block is still present (COMFYUI_MODELS_ROOT).
+  (d) install.sh no longer touches the ComfyUI tree at all: the provider creates
+      every directory at launch (ADR-0036), under the configured model store.
   (e) No Python source file shells out to any of the retired scripts.
 """
 
@@ -78,15 +79,19 @@ def test_install_sh_does_not_install_comfyui_sudoers():
     assert "hal0-comfyui" not in content, "install.sh still references hal0-comfyui sudoers"
 
 
-# ── (d) model-share setup block still present ────────────────────────────────
+# ── (d) install.sh does not create the ComfyUI tree ──────────────────────────
 
 
-def test_install_sh_still_sets_up_comfyui_model_share():
-    """The model-share subdirs (used by the img slot) must still be created."""
+def test_install_sh_no_longer_touches_the_comfyui_tree():
+    """The provider creates the data root under the configured store; install.sh must not.
+
+    The old block hardcoded ``/mnt/ai-models/comfyui``, ignored ``[models].store`` and
+    ``HAL0_COMFYUI_DATA_ROOT``, and made root-owned directories hal0 could not write.
+    """
     content = INSTALL_SH.read_text()
-    assert "COMFYUI_MODELS_ROOT" in content, (
-        "install.sh no longer sets up the ComfyUI model-share directories"
-    )
+    for gone in ("COMFYUI_MODELS_ROOT", "/mnt/ai-models/comfyui", "HAL0_SKIP_COMFYUI"):
+        assert gone not in content, f"install.sh still references {gone}"
+    assert "ComfyUI model share" not in content
 
 
 # ── (e) no Python src file shells out to retired scripts ─────────────────────
