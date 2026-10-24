@@ -20,6 +20,7 @@ working alongside the reactive editor.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from pathlib import Path
@@ -29,7 +30,7 @@ import structlog
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field, ValidationError
 
-from hal0.api._env_store import is_process_control_env, upsert_env_value
+from hal0.api._env_store import TlsTrustError, is_process_control_env, upsert_env_value
 from hal0.api._redact import redact_config
 from hal0.api.middleware.error_codes import Hal0Error
 from hal0.config import paths
@@ -578,7 +579,13 @@ def _write_credential_to_api_env(api_env: Path, key: str, value: str) -> None:
     :class:`ProviderCredentialError` so the route's envelope is unchanged.
     """
     try:
-        upsert_env_value(api_env, key, value)
+        upsert_env_value(api_env, key, value, environ=os.environ)
+    except TlsTrustError as exc:
+        raise ProviderCredentialError(
+            f"key {key!r} selects the CA bundle outbound TLS clients trust, so it is only "
+            f"accepted as a root-owned path hal0 cannot write: {exc.reason}",
+            details={"key": key, "reason": "tls_trust"},
+        ) from exc
     except ValueError as exc:
         # Writer-level guard tripped (e.g. newline in value) — surface as
         # a 400 rather than a 500.
@@ -674,7 +681,7 @@ async def write_provider_credential(
 
     api_env = paths.etc() / "api.env"
     try:
-        _write_credential_to_api_env(api_env, key, body.value)
+        await asyncio.to_thread(_write_credential_to_api_env, api_env, key, body.value)
     except ProviderCredentialError:
         raise
     except OSError as exc:
@@ -683,11 +690,10 @@ async def write_provider_credential(
             details={"path": str(api_env), "error": str(exc)},
         ) from exc
 
-    # Update the in-process environment so the running registry can
-    # observe the new value without a restart — the registry reads
-    # ``os.environ[upstream.auth_value_env]`` per call (registry.py:293).
+    # The writer above already updated the in-process environment, under the
+    # api.env lock, so the running registry observes the new value without a
+    # restart — it reads ``os.environ[upstream.auth_value_env]`` per call.
     # The persisted api.env line is the source of truth across restarts.
-    os.environ[key] = body.value
 
     identity = getattr(request.state, "identity", None)
     audit_identity = getattr(identity, "identity", None) if identity is not None else None

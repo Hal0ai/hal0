@@ -35,6 +35,7 @@ Security posture (auth removed, open on the trusted LAN):
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from datetime import UTC, datetime
@@ -47,6 +48,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from hal0.api._env_store import (
+    TlsTrustError,
     delete_env_value,
     is_process_control_env,
     list_env_keys,
@@ -259,20 +261,24 @@ async def _set_secret(name: str, body: SecretBody, request: Request) -> Response
             details={"name": key, "protected": True, "reason": "process_control"},
         )
     _validate_value(body.value, key)
-
     api_env = _api_env()
     try:
-        upsert_env_value(api_env, key, body.value)
+        # The writer vets a TLS trust path (#2941) with blocking filesystem
+        # calls, so it runs off the event loop.
+        # The live env is updated under the same lock as the write, so a
+        # concurrent DELETE cannot leave a deleted secret live in-process.
+        await asyncio.to_thread(upsert_env_value, api_env, key, body.value, environ=os.environ)
+    except TlsTrustError as exc:
+        raise SecretProtected(
+            f"{key!r} selects the CA bundle outbound TLS clients trust, so it is only "
+            f"accepted as a root-owned path hal0 cannot write: {exc.reason}",
+            details={"name": key, "protected": True, "reason": "tls_trust"},
+        ) from exc
     except OSError as exc:
         raise SecretWriteFailed(
             f"could not write secret to {api_env}: {exc}",
             details={"name": key, "error": str(exc)},
         ) from exc
-
-    # Mirror the provider-credential path: update the live process env so
-    # the new secret is observable without a restart; persisted api.env is
-    # the source of truth across restarts.
-    os.environ[key] = body.value
 
     _audit_log.info("secret.set", name=key, api_env_path=str(api_env))
     await _emit(request, "system.secret_updated", f"secret {key!r} set", key)
@@ -302,16 +308,14 @@ async def delete_secret(name: str, request: Request) -> Response:
     key = _validate_mutable(name)
     api_env = _api_env()
     try:
-        removed = delete_env_value(api_env, key)
+        # Also drops ``key`` from the live process env (under the file lock)
+        # regardless, so a restart isn't needed to stop honouring the secret.
+        removed = delete_env_value(api_env, key, environ=os.environ)
     except OSError as exc:
         raise SecretWriteFailed(
             f"could not delete secret from {api_env}: {exc}",
             details={"name": key, "error": str(exc)},
         ) from exc
-
-    # Drop from the live process env regardless so a restart isn't needed
-    # to stop honouring the secret.
-    os.environ.pop(key, None)
 
     if removed:
         _audit_log.info("secret.deleted", name=key, api_env_path=str(api_env))
