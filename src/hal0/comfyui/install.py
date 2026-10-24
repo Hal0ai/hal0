@@ -8,8 +8,10 @@ cooperative cancel all come from there. This module only decides *what* to fetch
 (the components :func:`~hal0.comfyui.catalog.install_state` reports missing), *where*
 it lands (``Component.dest``), and what to write once it has landed (the workflow).
 
-Bytes are staged in the registry's tmp dir and renamed into the models tree, so
-both directories need room: :func:`preflight_disk` measures each.
+Bytes are staged in the registry's tmp dir and renamed into the models tree. A rename
+cannot cross filesystems, so :func:`run_install` refuses a layout where the two differ
+before it streams anything; on one filesystem a single free-space check
+(:func:`preflight_disk`) covers both.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ import httpx
 from hal0.comfyui import paths
 from hal0.comfyui.catalog import (
     CATALOG,
+    Component,
     ImageModel,
     get_model,
     install_state,
@@ -42,6 +45,7 @@ from hal0.registry.pull import (
     PullFile,
     PullJob,
     _download_one,
+    _others_total,
     _PullCancelled,
     _tmp_dir,
     make_job,
@@ -68,6 +72,13 @@ class InstallInsufficientDisk(Hal0Error):
     status = 507  # Insufficient Storage
 
 
+class InstallStagingCrossDevice(Hal0Error):
+    """The registry staging dir and the models tree are on different filesystems."""
+
+    code = "comfyui.staging_cross_device"
+    status = 409
+
+
 # ── disk preflight ──────────────────────────────────────────────────────────
 
 
@@ -87,32 +98,50 @@ def _device_of(path: Path) -> int:
 def preflight_disk(model: ImageModel) -> None:
     """Raise :class:`InstallInsufficientDisk` when what is missing cannot fit.
 
-    The models tree and the registry staging dir are each measured against the whole
-    download; when both sit on one device that is a single check. ``details["path"]``
-    is the directory that came up short. A filesystem that cannot be measured is
+    Measures the filesystem under the models tree (its nearest existing ancestor, since a
+    fresh store has no tree yet) against the whole download. The staging dir is on the same
+    filesystem, which :func:`run_install` enforces, so that one check covers both.
+    ``details["path"]`` is the directory measured. A filesystem that cannot be measured is
     skipped, as the downloader's own per-file check does.
     """
     state = install_state(model)
     required = int(state.missing_gb * 1024**3)
     if required <= 0:
         return
-    measured: set[int] = set()
-    for target in (paths.models_root(), _tmp_dir()):
-        probe = _existing_ancestor(target)
-        try:
-            device = _device_of(probe)
-            if device in measured:
-                continue
-            measured.add(device)
-            free = shutil.disk_usage(probe).free
-        except OSError:
-            continue
-        if required > free:
-            raise InstallInsufficientDisk(
-                f"insufficient disk for {model.label}: need about {state.missing_gb:g} GB, "
-                f"{free / 1024**3:.1f} GB free at {probe}",
-                details={"required_bytes": required, "free_bytes": free, "path": str(probe)},
-            )
+    probe = _existing_ancestor(paths.models_root())
+    try:
+        free = shutil.disk_usage(probe).free
+    except OSError:
+        return
+    if required > free:
+        raise InstallInsufficientDisk(
+            f"insufficient disk for {model.label}: need about {state.missing_gb:g} GB, "
+            f"{free / 1024**3:.1f} GB free at {probe}",
+            details={"required_bytes": required, "free_bytes": free, "path": str(probe)},
+        )
+
+
+def _require_one_filesystem() -> None:
+    """Raise :class:`InstallStagingCrossDevice` when staging and models tree are on two devices.
+
+    The downloader stages a file in the registry tmp dir and ``os.replace``s it into the
+    models tree; across filesystems that fails with ``EXDEV`` after the whole file has been
+    fetched, and the partial is discarded, so every retry would fetch it again. A path that
+    cannot be inspected is not treated as a mismatch: the rename is the final arbiter.
+    """
+    models, staging = paths.models_root(), _tmp_dir()
+    try:
+        same = _device_of(_existing_ancestor(models)) == _device_of(_existing_ancestor(staging))
+    except OSError:
+        return
+    if not same:
+        raise InstallStagingCrossDevice(
+            f"the ComfyUI models tree ({models}) and the download staging dir ({staging}) "
+            "are on different filesystems, so a finished download cannot be moved into place. "
+            "Keep the ComfyUI data root on the same filesystem as the model store "
+            "(unset HAL0_COMFYUI_DATA_ROOT or move it).",
+            details={"models_root": str(models), "staging_dir": str(staging)},
+        )
 
 
 # ── install ─────────────────────────────────────────────────────────────────
@@ -155,11 +184,25 @@ def _write_workflow(model: ImageModel) -> Path:
 
 
 async def _download_missing(
-    job: PullJob, model: ImageModel, *, client: httpx.AsyncClient, hf_token: str | None
+    job: PullJob,
+    missing: tuple[Component, ...],
+    *,
+    client: httpx.AsyncClient,
+    hf_token: str | None,
 ) -> None:
-    """Fetch every component of ``model`` that is not on disk; seed ``job.files`` first."""
-    missing = install_state(model).missing
-    job.files = [PullFile(hf_filename=c.hf_path, kind=c.kind.value) for c in missing]
+    """Fetch each component in ``missing``, seeding ``job.files`` and the job totals first.
+
+    Every file starts with its catalog estimate as ``bytes_total``, so the job's total spans
+    the whole install from the first byte and progress cannot reach 100% at the end of one
+    component. A file's total becomes exact once the server reports its length, and again
+    when it lands on disk.
+    """
+    job.files = [
+        PullFile(hf_filename=c.hf_path, kind=c.kind.value, bytes_total=round(c.approx_gb * 1e9))
+        for c in missing
+    ]
+    job.bytes_downloaded = 0
+    job.bytes_total = sum(f.bytes_total for f in job.files)
     job._signal()
 
     headers = {"User-Agent": "hal0/installer"}
@@ -167,16 +210,14 @@ async def _download_missing(
         headers["Authorization"] = f"Bearer {hf_token}"
 
     base_done = 0
-    base_total = 0
     for component, rec in zip(missing, job.files, strict=True):
         if job.cancel_requested:
             raise _PullCancelled()
         dest = component.dest
         if dest.is_file():
             # Another install of a model sharing this file landed it since we looked.
-            size = dest.stat().st_size
             rec.dest = str(dest)
-            rec.bytes_done = rec.bytes_total = size
+            rec.bytes_done = dest.stat().st_size
         else:
             ensure_shared_dir(dest.parent)
             # The downloader keys its staging file by (job.model_id, rec.hf_filename);
@@ -189,12 +230,12 @@ async def _download_missing(
                 base_headers=headers,
                 final=dest,
                 base_done=base_done,
-                base_total=base_total,
+                base_total=_others_total(job, rec),
             )
+        rec.bytes_total = rec.bytes_done  # on disk: the size is known, not estimated
         base_done += rec.bytes_done
-        base_total = max(base_total + rec.bytes_total, base_done)
         job.bytes_downloaded = base_done
-        job.bytes_total = base_total
+        job.bytes_total = sum(f.bytes_total for f in job.files)
 
 
 async def run_install(
@@ -213,6 +254,9 @@ async def run_install(
     already landed stay on disk after a failure or a cancel, so a retry carries on from
     there.
 
+    Refuses, before streaming anything, a layout where the staging dir and the models tree
+    are on different filesystems (:class:`InstallStagingCrossDevice`).
+
     Never raises: a typed error becomes ``failed`` with its own code, anything else
     ``failed`` with ``comfyui.install_failed``. Only the task's own cancellation
     propagates, after the job is marked ``cancelled``. ``on_complete`` runs after the
@@ -227,7 +271,10 @@ async def run_install(
     if client is None:
         client = _new_client()
     try:
-        await _download_missing(job, model, client=client, hf_token=hf_token)
+        missing = install_state(model).missing
+        if missing:
+            _require_one_filesystem()
+        await _download_missing(job, missing, client=client, hf_token=hf_token)
         if job.cancel_requested:
             raise _PullCancelled()  # cancelled while the last file landed
         _write_workflow(model)
@@ -260,12 +307,15 @@ async def run_install(
 
 
 def remove_model(model: ImageModel) -> list[str]:
-    """Delete ``model``'s weight files and return their paths relative to the models root.
+    """Delete ``model``'s weight files and its provisioned workflow; return what was deleted.
 
     A file another catalog model loads stays while that model is complete. A model that is
     only partly installed does not hold files back: it cannot run without its missing ones.
-    Files already gone are ignored and not reported. The provisioned workflow is left for
-    the caller.
+    The workflow (``<workflows dir>/<id>.json``, written by :func:`run_install`, which is its
+    only writer) belongs to this model alone, so it goes regardless of shared weights.
+
+    Returns the weight paths relative to the models root, then ``workflows/<filename>`` for
+    the workflow. Files already gone are ignored and not reported.
     """
     root = paths.models_root()
     removed: list[str] = []
@@ -278,6 +328,12 @@ def remove_model(model: ImageModel) -> list[str]:
         except FileNotFoundError:
             continue
         removed.append(component.dest.relative_to(root).as_posix())
+    try:
+        (paths.workflows_dir() / model.workflow_filename).unlink()
+    except FileNotFoundError:
+        pass
+    else:
+        removed.append(f"workflows/{model.workflow_filename}")
     return removed
 
 
@@ -327,6 +383,7 @@ def install_models_blocking(
 __all__ = [
     "ImageModelNotFound",
     "InstallInsufficientDisk",
+    "InstallStagingCrossDevice",
     "hf_token_from_env",
     "install_models_blocking",
     "preflight_disk",
