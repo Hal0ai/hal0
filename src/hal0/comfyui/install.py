@@ -114,18 +114,30 @@ def _device_of(path: Path) -> int:
     return os.stat(path).st_dev
 
 
+def _staging_key(model: ImageModel) -> str:
+    """The model half of the staging key the installer and the preflight both use.
+
+    The curated registry still lists some of the same ids (``sdxl-turbo``,
+    ``sd-1.5-pruned-emaonly``), and a registry pull stages under the bare id, so two
+    downloaders with that id and filename would share one ``.part`` and either could
+    discard or replace the other's. Image installs get their own namespace instead;
+    job ids and the API keep the catalog id. ``_sanitise_id`` leaves the prefix intact.
+    """
+    return f"comfyui-{model.id}"
+
+
 def _staged_bytes(model: ImageModel, component: Component) -> int:
     """Bytes of ``component`` an interrupted install of ``model`` left staged and can resume.
 
-    The downloader keeps ``<staging>/<id>.part`` and its ``.part.json`` sidecar after a
-    transport error or a shutdown, keyed by the job's model id and the file's name in the
+    The downloader keeps ``<staging>/<key>.part`` and its ``.part.json`` sidecar after a
+    transport error or a shutdown, keyed by :func:`_staging_key` and the file's name in the
     repo (``Component.hf_path``, the ``rec.hf_filename`` :func:`_download_missing` passes);
     on the next run it continues from them. A ``.part`` without its sidecar is not resumable,
     so the downloader discards it and it counts for nothing. Not re-hashed here: the
     downloader validates the prefix when it resumes. Capped at the catalog's estimate for
     the file, so a partial larger than that cannot cover another component's download.
     """
-    part, sidecar = _staging_paths(model.id, component.hf_path)
+    part, sidecar = _staging_paths(_staging_key(model), component.hf_path)
     try:
         if not sidecar.is_file():
             return 0
@@ -275,6 +287,7 @@ async def _download_missing(
     *,
     client: httpx.AsyncClient,
     hf_token: str | None,
+    staging_key: str,
 ) -> None:
     """Fetch each component in ``missing``, seeding ``job.files`` and the job totals first.
 
@@ -306,7 +319,7 @@ async def _download_missing(
             rec.bytes_done = dest.stat().st_size
         else:
             ensure_shared_dir(dest.parent)
-            # The downloader keys its staging file by (job.model_id, rec.hf_filename);
+            # The downloader keys its staging file by (staging_key, rec.hf_filename);
             # hf_path is unique within a model, so two components never share a partial.
             await _download_one(
                 job,
@@ -317,6 +330,7 @@ async def _download_missing(
                 final=dest,
                 base_done=base_done,
                 base_total=_others_total(job, rec),
+                staging_key=staging_key,
             )
         rec.bytes_total = rec.bytes_done  # on disk: the size is known, not estimated
         base_done += rec.bytes_done
@@ -362,7 +376,9 @@ async def run_install(
         if missing:
             require_one_filesystem()
             require_writable_destinations(model)
-        await _download_missing(job, missing, client=client, hf_token=hf_token)
+        await _download_missing(
+            job, missing, client=client, hf_token=hf_token, staging_key=_staging_key(model)
+        )
         if job.cancel_requested:
             raise _PullCancelled()  # cancelled while the last file landed
         _write_workflow(model)

@@ -884,6 +884,7 @@ async def _download_one(
     base_done: int,
     base_total: int,
     revision: str = "main",
+    staging_key: str | None = None,
 ) -> str:
     """Stream ONE file of a pull to ``final``; return its hex SHA-256.
 
@@ -894,6 +895,11 @@ async def _download_one(
     install. Aggregate job progress is maintained as ``base_done + <this
     file's bytes>`` so ``job.bytes_downloaded`` is monotonic across the
     file boundary of a multi-file pull.
+
+    ``staging_key`` replaces ``job.model_id`` as the model half of the staging key (and
+    nothing else). A caller whose job id is also a registry pull's model id (the image
+    installer, for ids the curated registry shares) passes its own namespace so the two
+    never share a ``.part``; left out, the key is ``job.model_id``.
 
     Staging cleanup contract (mirrors the historic single-file behaviour):
       * user cancel        → discard partial + sidecar, raise ``_PullCancelled``
@@ -924,7 +930,9 @@ async def _download_one(
     # In-process pulls are deduped by model_pull_jobs (routes/models.pull_model),
     # so the only unguarded case is two SEPARATE processes pulling the identical
     # id at once (rare — not an expected flow); resumability is worth that edge.
-    part, sidecar = _staging_paths(job.model_id, rec.hf_filename)
+    part, sidecar = _staging_paths(
+        job.model_id if staging_key is None else staging_key, rec.hf_filename
+    )
 
     hasher = hashlib.sha256()
     last_emit = time.monotonic()
