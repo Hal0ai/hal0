@@ -40,9 +40,11 @@ secrets="/var/lib/hal0/secrets/agents/${agent}.env"
 # symlink, or a tree it owns, in its place. `install -d`, `mktemp` and `mv` by
 # pathname would then follow it as root. This walks every directory from /
 # by descriptor, opening each entry O_NOFOLLOW once inside a directory anyone
-# but root can write, creates the root-owned dirs with mkdirat, refuses an
-# existing one that root does not own, and writes a random O_EXCL temp file
-# that is renamed through the same descriptor.
+# but root can write, creates the root-owned dirs with mkdirat, refuses a
+# managed directory root does not own alone (even one it just made), and
+# writes a random O_EXCL temp file renamed through the same descriptor.
+# `python3 -I`: sudo keeps the caller's cwd, which plain `-c` puts first on
+# sys.path, so a planted secrets.py there would run as root.
 #   argv: verb  base  'dir dir…'  dir_mode  file_mode  name
 #   verb: merge (stdin = KEY=VALUE updates) or replace (stdin = full body)
 read -r -d '' _SAFE_WRITE <<'PY' || true
@@ -67,16 +69,15 @@ def trusted(fd):
 def step(fd, comp, *, create):
     flags = D if trusted(fd) else D | os.O_NOFOLLOW
     try:
-        return os.open(comp, flags, dir_fd=fd), False
+        return os.open(comp, flags, dir_fd=fd)
     except FileNotFoundError:
         if not create:
             raise
     try:
         os.mkdir(comp, 0o700, dir_fd=fd)
-        made = True
     except FileExistsError:
-        made = False
-    return os.open(comp, D | os.O_NOFOLLOW, dir_fd=fd), made
+        pass
+    return os.open(comp, D | os.O_NOFOLLOW, dir_fd=fd)
 
 
 fd = os.open("/", D)
@@ -86,7 +87,7 @@ try:
     for comp, is_managed in steps:
         walked += "/" + comp
         try:
-            nfd, made = step(fd, comp, create=is_managed)
+            nfd = step(fd, comp, create=is_managed)
         except OSError as exc:
             if exc.errno in (errno.ELOOP, errno.ENOTDIR):
                 die(f"{walked}: a symlink or not a directory")
@@ -94,9 +95,13 @@ try:
         os.close(fd)
         fd = nfd
         if is_managed:
+            # Checked on the opened descriptor whether or not this run just made
+            # the directory: between mkdirat and openat the hal0 account can
+            # rename a directory of its own over the new, empty one, and
+            # fchown/fchmod below would then adopt its tree (#2975 review).
             st = os.fstat(fd)
-            if not made and st.st_uid not in TRUSTED:
-                die(f"{walked}: not owned by root")
+            if st.st_uid != os.geteuid() or st.st_mode & 0o022:
+                die(f"{walked}: not a root-only directory (sudo hal0 doctor perms --fix repairs one)")
             if os.geteuid() == 0:
                 os.fchown(fd, 0, 0)
             os.fchmod(fd, dir_mode)

@@ -103,3 +103,72 @@ def test_every_write_verb_goes_through_the_writer() -> None:
         assert '"$_SAFE_WRITE"' in code, verb
         for unsafe in ("install -d", "mktemp", "mv -f", "chown ", "chmod "):
             assert unsafe not in code, (verb, unsafe)
+
+
+# Runs before the wrapper's program: after the real mkdirat of ``secrets`` it
+# swaps in the attacker's own directory (``rename(2)`` replaces an empty one),
+# exactly as the hal0 account could between the wrapper's mkdirat and openat.
+# The suite is not root, so ``os.fstat`` reports the attacker directory under
+# a foreign uid, which is what it would carry on a real host.
+_RACE_PRELUDE = """
+import os
+_real_mkdir, _real_fstat = os.mkdir, os.fstat
+_ATTACKER = os.environ["ATTACKER_DIR"]
+_ino = os.stat(_ATTACKER).st_ino
+def _mkdir(name, mode=0o777, *, dir_fd=None):
+    _real_mkdir(name, mode, dir_fd=dir_fd)
+    if name == "secrets":
+        os.rmdir(name, dir_fd=dir_fd)
+        os.rename(_ATTACKER, name, dst_dir_fd=dir_fd)
+def _fstat(fd):
+    st = _real_fstat(fd)
+    if st.st_ino == _ino:
+        st = os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, 4242, 4242, *tuple(st)[6:10]))
+    return st
+os.mkdir, os.fstat = _mkdir, _fstat
+"""
+
+
+def test_dir_swapped_in_after_mkdir_is_refused(base: Path, tmp_path: Path) -> None:
+    victim = tmp_path / "root-owned-victim"
+    victim.mkdir()
+    victim.chmod(0o755)
+    attacker = tmp_path / "attacker-secrets"
+    attacker.mkdir()
+    attacker.chmod(0o755)
+    (attacker / "agents").symlink_to(victim)
+    proc = subprocess.run(
+        [sys.executable, "-I", "-c", _RACE_PRELUDE + _program(), "merge", str(base),
+         "secrets agents", "0700", "0600", "hermes.env"],
+        input="K=v\n",
+        text=True,
+        capture_output=True,
+        check=False,
+        env={"ATTACKER_DIR": str(attacker), "PATH": "/usr/bin:/bin"},
+    )
+    assert proc.returncode == 3, proc.stderr
+    assert "not a root-only directory" in proc.stderr
+    swapped = base / "secrets"
+    assert stat.S_IMODE(swapped.stat().st_mode) == 0o755  # never re-moded
+    assert list(victim.iterdir()) == []
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o755
+
+
+def test_group_writable_managed_dir_is_refused(base: Path) -> None:
+    (base / "secrets").mkdir()
+    (base / "secrets").chmod(0o2775)
+    proc = _run(base, "merge", "secrets agents", "hermes.env", "K=v\n")
+    assert proc.returncode == 3
+    assert not (base / "secrets" / "agents").exists()
+
+
+def test_every_python_call_is_isolated() -> None:
+    # sudo keeps the caller's cwd; without -I, `python3 -c` imports a planted
+    # secrets.py from it as root.
+    code = "\n".join(
+        ln for ln in WRAPPER.read_text(encoding="utf-8").splitlines() if not ln.strip().startswith("#")
+    )
+    calls = [ln for ln in code.splitlines() if "python3 " in ln]
+    assert calls
+    for ln in calls:
+        assert "python3 -I " in ln, ln
