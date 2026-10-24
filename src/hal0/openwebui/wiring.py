@@ -42,9 +42,12 @@ _OWUI_PLACEHOLDER_PROMPT = "a placeholder prompt"
 #: node. Generic across every shipped template (sdxl_turbo_simple,
 #: sd15_simple, …) because it walks the template's own pointer map rather
 #: than hardcoding node ids — a new template needs no changes here.
+#:
+#: There is deliberately no ``model`` row. OWUI writes its configured model id
+#: into that node, and the id (``sd-1.5-pruned-emaonly``, ``ckpt/<stem>``) is
+#: never a checkpoint filename; the baked graph already carries the checkpoint.
 _OWUI_NODE_TYPES: tuple[tuple[str, str, str], ...] = (
     ("prompt", "positive_prompt", "text"),
-    ("model", "ckpt_name", "ckpt_name"),
     ("width", "width", "width"),
     ("height", "height", "height"),
     ("steps", "steps", "steps"),
@@ -114,36 +117,36 @@ def openwebui_wiring_status(
 
 def _owui_baked_workflow(model_id: str) -> tuple[str, str] | None:
     """Build the static ``COMFYUI_WORKFLOW`` / ``COMFYUI_WORKFLOW_NODES``
-    pair OWUI needs, from the SAME translator hal0's own
-    ``/v1/images/generations`` route uses (:mod:`hal0.providers.comfyui_workflows`)
-    — so the baked default never drifts from what the img slot actually
-    runs. Never bakes ODS's SDXL-Lightning graph; it renders the workflow
-    template of the operator's real bound model instead.
+    pair OWUI needs, from the SAME resolution and translator hal0's own
+    ``/v1/images/generations`` route uses
+    (:func:`hal0.comfyui.resolve.resolve_image_model`,
+    :mod:`hal0.providers.comfyui_workflows`) — so the baked default never
+    drifts from what the img slot actually runs. Never bakes ODS's
+    SDXL-Lightning graph; it renders the workflow template of the operator's
+    real bound model instead, at that model's native size.
 
-    Returns ``None`` when the workflow can't be built (the model has no
-    API-renderable ComfyUI catalog entry) — the caller must then treat
-    images as not wired rather than claim a broken default.
+    Returns ``None`` when the model does not resolve (unknown, not installed,
+    or not API-renderable) or its workflow can't be built — the caller must
+    then treat images as not wired rather than claim a broken default.
     """
-    from hal0.comfyui.catalog import get_model, parse_pointer
-    from hal0.providers.comfyui_workflows import (
-        WorkflowTemplateError,
-        build_workflow,
-        template_params,
-    )
+    from hal0.comfyui.catalog import parse_pointer
+    from hal0.comfyui.resolve import resolve_image_model
+    from hal0.errors import Hal0Error
+    from hal0.providers.comfyui_workflows import build_workflow, template_params
 
-    entry = get_model(model_id)
-    if entry is None or not entry.api_renderable:
-        return None
     try:
+        resolved = resolve_image_model(model_id, selection_model=None)
         graph, _debug_meta = build_workflow(
-            body={"prompt": _OWUI_PLACEHOLDER_PROMPT},
-            template=entry.template,
+            body={"prompt": _OWUI_PLACEHOLDER_PROMPT, "size": resolved.defaults["size"]},
+            template=resolved.template,
+            ckpt_override=resolved.ckpt_override,
             request_tag=_OWUI_REQUEST_TAG,
         )
-    except WorkflowTemplateError:
+        params = template_params(resolved.template)
+    except Hal0Error:
+        # Covers the resolution errors and WorkflowTemplateError, which share the base.
         return None
 
-    params = template_params(entry.template)
     nodes: list[dict[str, Any]] = []
     for owui_type, param_key, field in _OWUI_NODE_TYPES:
         pointer = params.get(param_key)
@@ -172,7 +175,7 @@ def resolve_dynamic_env_overrides() -> dict[str, str | None]:
     if status["images"] and image_model:
         built = _owui_baked_workflow(image_model)
         if built is None:
-            # Curated lookup / template resolution failed — never claim a
+            # Model resolution / template build failed — never claim a
             # capability we can't actually back with a working workflow.
             image_model = None
         else:
