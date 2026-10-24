@@ -92,3 +92,20 @@ async def test_stop_helper_tolerates_no_route_and_failures(tmp_path: Path) -> No
     await pull_mod._stop_flm_pull_container(None, "qwen3:0.6b")
     await pull_mod._stop_flm_pull_container([sys.executable, "-c", "raise SystemExit(3)"], "a:b")
     await pull_mod._stop_flm_pull_container([str(tmp_path / "missing-binary")], "a:b")
+
+
+async def test_task_cancel_at_shutdown_also_removes_the_container(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """API shutdown cancels the task; that path must not just SIGKILL the client."""
+    marker = _setup(monkeypatch, tmp_path, _STUBBORN_PULL)
+    job = PullJob(job_id="j3", model_id="qwen3:0.6b")
+    task = asyncio.create_task(run_flm_pull(job, tag="qwen3:0.6b", registry=object()))
+    while job.state != "running":
+        await asyncio.sleep(0.05)
+    await asyncio.sleep(0.5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=20)
+    assert job.state == "cancelled"
+    assert marker.read_text() == "qwen3:0.6b"

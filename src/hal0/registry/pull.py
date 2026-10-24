@@ -2504,13 +2504,7 @@ async def run_flm_pull(
 
         while True:
             if job.cancel_requested:
-                proc.terminate()
-                with contextlib.suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(proc.wait(), timeout=_FLM_CANCEL_GRACE_S)
-                if proc.returncode is None:
-                    await _stop_flm_pull_container(flm_pull_stop_command(tag), tag)
-                    proc.kill()
-                    await proc.wait()
+                await _end_flm_pull_process(proc, flm_pull_stop_command(tag), tag)
                 job.state = "cancelled"
                 job.finished_at = time.time()
                 job._signal()
@@ -2609,10 +2603,12 @@ async def run_flm_pull(
             extra={"tag": tag, "path": str(final_path), "bytes": size_bytes},
         )
     except asyncio.CancelledError:
+        # API shutdown cancels the task. The same graceful end as a user
+        # cancel: a bare kill would only kill the sudo/podman client and
+        # leave the container downloading into the store.
         if proc is not None and proc.returncode is None:
-            proc.kill()
             with contextlib.suppress(Exception):
-                await proc.wait()
+                await _end_flm_pull_process(proc, flm_pull_stop_command(tag), tag)
         job.state = "cancelled"
         job.finished_at = time.time()
         job._signal()
@@ -2667,6 +2663,26 @@ class _FlmInstallPathLookup:
 #: Seconds a cancelled ``flm pull`` gets to exit on SIGTERM before its
 #: container is removed by name and the process is killed.
 _FLM_CANCEL_GRACE_S = 10.0
+
+
+async def _end_flm_pull_process(
+    proc: asyncio.subprocess.Process, stop_argv: list[str] | None, tag: str
+) -> None:
+    """End a running ``flm pull``: SIGTERM, grace, then remove its container and kill.
+
+    SIGTERM reaches flm through podman's signal proxy and ``--rm`` removes the
+    container. If the process outlives :data:`_FLM_CANCEL_GRACE_S`, the
+    container is removed by name (``stop-pull``) before the process is
+    killed, because podman does not proxy SIGKILL.
+    """
+    proc.terminate()
+    with contextlib.suppress(TimeoutError):
+        await asyncio.wait_for(proc.wait(), timeout=_FLM_CANCEL_GRACE_S)
+    if proc.returncode is None:
+        await _stop_flm_pull_container(stop_argv, tag)
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        await proc.wait()
 
 
 async def _stop_flm_pull_container(argv: list[str] | None, tag: str) -> None:
