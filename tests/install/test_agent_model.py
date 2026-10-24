@@ -36,6 +36,7 @@ from hal0.install.agent_model import (
     agent_model_for_hardware,
     describe_offer,
     main,
+    pool_gb,
     provision_agent_model,
 )
 from hal0.registry.curated import get_curated
@@ -61,6 +62,13 @@ def _strix(unified_mb: int) -> HardwareInfo:
 
 
 # ── who gets offered what ───────────────────────────────────────────────────
+
+
+def test_pool_gb_is_unified_memory_first_else_system_ram() -> None:
+    """The one memory-pool figure the agent ladder and the image starter pick both read."""
+    assert pool_gb(HardwareInfo(ram_mb=32 * 1024, unified_memory_mb=96 * 1024)) == 96
+    assert pool_gb(HardwareInfo(ram_mb=32 * 1024)) == 32
+    assert pool_gb(HardwareInfo()) == 0
 
 
 def test_no_gpu_box_is_offered_nothing() -> None:

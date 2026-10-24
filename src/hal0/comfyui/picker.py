@@ -18,23 +18,33 @@ from typing import Any
 from hal0.comfyui import inventory, paths
 from hal0.comfyui.catalog import CATALOG, install_state, recommended_model_id
 from hal0.config.loader import load_hardware_info
-from hal0.install.agent_model import _pool_gb
+from hal0.config.schema import HardwareInfo
+from hal0.install.agent_model import pool_gb
 
 _PROVIDER = "comfyui"
 _CAPABILITY = "image"
 
 
-def recommended_id() -> str:
-    """The catalog's starter pick for this box's memory pool.
+def recommended_for(hw: HardwareInfo) -> str:
+    """The catalog's starter pick for ``hw``'s memory pool.
 
-    Read per call: it is one small JSON file. A pool that cannot be read, or that reads as
-    zero because the box was never probed, is passed on as unknown (``None``).
+    The one owner of the pick: the picker, ``GET /api/comfyui/models``, the install-time
+    offer and ``hal0 setup`` all call it. A pool that reads as zero is a box that was never
+    probed, so it is passed on as unknown (``None``), not as a tiny pool.
+    """
+    pool = pool_gb(hw)
+    return recommended_model_id(pool if pool else None)
+
+
+def recommended_id() -> str:
+    """:func:`recommended_for` this box, read per call: it is one small JSON file.
+
+    A hardware file that cannot be read is an unknown pool too.
     """
     try:
-        pool_gb: float | None = _pool_gb(load_hardware_info())
+        return recommended_for(load_hardware_info())
     except Exception:  # an unreadable hardware.json must not take the picker down
-        pool_gb = None
-    return recommended_model_id(pool_gb if pool_gb else None)
+        return recommended_model_id(None)
 
 
 def _models() -> list[dict[str, Any]]:
