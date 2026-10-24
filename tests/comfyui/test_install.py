@@ -1080,6 +1080,95 @@ def test_preflight_disk_measures_the_models_root_once(monkeypatch: pytest.Monkey
     assert paths.models_root().is_relative_to(probed[0])
 
 
+def _big_model() -> ImageModel:
+    """One 1 GB component (``approx_gb`` is estimate only; the tests stage sparse files)."""
+    return _fake_model(components=(replace(_CKPT, approx_gb=1.0),))
+
+
+def _stage_partial(model: ImageModel, component: Component, size: int, *, sidecar: bool) -> Path:
+    """Leave a ``size``-byte partial of ``component`` where the downloader resumes from."""
+    part, meta = _staging_paths(model.id, component.hf_path)
+    part.parent.mkdir(parents=True, exist_ok=True)
+    with part.open("wb") as fh:
+        fh.truncate(size)  # sparse: the test needs the size, not the bytes
+    if sidecar:
+        meta.write_text(json.dumps({"url": "u", "etag": None, "bytes": size, "total": 10**9}))
+    return part
+
+
+def test_preflight_subtracts_resumable_partial(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A staged partial with its resume sidecar is not downloaded again, so it needs no room."""
+    model = _big_model()
+    _stage_partial(model, model.components[0], 600_000_000, sidecar=True)
+    _free_space(monkeypatch, lambda path: 500_000_000)  # 1 GB would not fit; the 0.4 GB left does
+
+    install.preflight_disk(model)
+
+    _free_space(monkeypatch, lambda path: 300_000_000)
+    with pytest.raises(install.InstallInsufficientDisk) as excinfo:
+        install.preflight_disk(model)
+    assert excinfo.value.details["required_bytes"] == 400_000_000  # what is left, not the total
+    assert "about 0.4 GB" in excinfo.value.message  # the message names the remainder too
+
+
+def test_preflight_ignores_partial_without_sidecar(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The downloader discards a partial it cannot vouch for, so its bytes buy nothing."""
+    model = _big_model()
+    _stage_partial(model, model.components[0], 600_000_000, sidecar=False)
+    _free_space(monkeypatch, lambda path: 500_000_000)
+
+    with pytest.raises(install.InstallInsufficientDisk) as excinfo:
+        install.preflight_disk(model)
+
+    assert excinfo.value.details["required_bytes"] == 1_000_000_000
+    assert "about 1 GB" in excinfo.value.message
+
+
+def test_preflight_finds_the_partial_under_the_installers_staging_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The partial is keyed by the model id and the component's ``hf_path``, not its ``relpath``."""
+    model = _fake_model(components=(replace(_CKPT, approx_gb=1.0),))
+    assert _CKPT.hf_path != _CKPT.relpath
+    other = replace(model, id="another-model")  # same file, another model's staging key
+    _stage_partial(other, other.components[0], 600_000_000, sidecar=True)
+    _free_space(monkeypatch, lambda path: 500_000_000)
+
+    with pytest.raises(install.InstallInsufficientDisk):
+        install.preflight_disk(model)
+
+
+def test_preflight_clamps_what_is_required_at_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A partial larger than the catalog estimate cannot make the requirement negative, nor
+    cover another component's download."""
+    first = replace(_CKPT, approx_gb=1.0)
+    second = replace(_VAE, approx_gb=1.0)
+    model = _fake_model(components=(first, second))
+    _stage_partial(model, first, 1_500_000_000, sidecar=True)  # estimate was 1 GB
+    _free_space(monkeypatch, lambda path: 900_000_000)
+
+    with pytest.raises(install.InstallInsufficientDisk) as excinfo:
+        install.preflight_disk(model)
+    assert excinfo.value.details["required_bytes"] == 1_000_000_000  # only ``second`` is left
+
+    _stage_partial(model, second, 1_500_000_000, sidecar=True)
+    install.preflight_disk(model)  # both covered: nothing to download, nothing to measure
+
+
+def test_preflight_ignores_the_partial_of_a_component_already_on_disk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _fake_model(components=(replace(_CKPT, approx_gb=1.0), replace(_VAE, approx_gb=1.0)))
+    _touch(model.components[0])
+    _stage_partial(model, model.components[0], 600_000_000, sidecar=True)  # stale leftover
+    _free_space(monkeypatch, lambda path: 900_000_000)
+
+    with pytest.raises(install.InstallInsufficientDisk) as excinfo:
+        install.preflight_disk(model)
+
+    assert excinfo.value.details["required_bytes"] == 1_000_000_000  # the VAE, in full
+
+
 # ── install_models_blocking ─────────────────────────────────────────────────
 
 

@@ -51,6 +51,7 @@ from hal0.registry.pull import (
     _download_one,
     _others_total,
     _PullCancelled,
+    _staging_paths,
     _tmp_dir,
     make_job,
 )
@@ -112,17 +113,42 @@ def _device_of(path: Path) -> int:
     return os.stat(path).st_dev
 
 
+def _staged_bytes(model: ImageModel, component: Component) -> int:
+    """Bytes of ``component`` an interrupted install of ``model`` left staged and can resume.
+
+    The downloader keeps ``<staging>/<id>.part`` and its ``.part.json`` sidecar after a
+    transport error or a shutdown, keyed by the job's model id and the file's name in the
+    repo (``Component.hf_path``, the ``rec.hf_filename`` :func:`_download_missing` passes);
+    on the next run it continues from them. A ``.part`` without its sidecar is not resumable,
+    so the downloader discards it and it counts for nothing. Not re-hashed here: the
+    downloader validates the prefix when it resumes. Capped at the catalog's estimate for
+    the file, so a partial larger than that cannot cover another component's download.
+    """
+    part, sidecar = _staging_paths(model.id, component.hf_path)
+    try:
+        if not sidecar.is_file():
+            return 0
+        staged = part.stat().st_size
+    except OSError:  # no part, or it cannot be inspected: not resumable as far as we can tell
+        return 0
+    return min(staged, round(component.approx_gb * 1e9))
+
+
 def preflight_disk(model: ImageModel) -> None:
-    """Raise :class:`InstallInsufficientDisk` when what is missing cannot fit.
+    """Raise :class:`InstallInsufficientDisk` when what is still to download cannot fit.
 
     Measures the filesystem under the models tree (its nearest existing ancestor, since a
-    fresh store has no tree yet) against the whole download. The staging dir is on the same
-    filesystem, which :func:`run_install` enforces, so that one check covers both.
-    ``details["path"]`` is the directory measured. A filesystem that cannot be measured is
-    skipped, as the downloader's own per-file check does.
+    fresh store has no tree yet) against the missing components' size, less the bytes of
+    each already staged and resumable (:func:`_staged_bytes`), which the downloader does
+    not fetch again. The staging dir is on the same filesystem, which :func:`run_install`
+    enforces, so that one check covers both. ``details["path"]`` is the directory measured,
+    ``details["required_bytes"]`` what is still to fetch and ``details["staged_bytes"]`` what
+    was taken off. A filesystem that cannot be measured is skipped, as the downloader's own
+    per-file check does.
     """
     state = install_state(model)
-    required = int(state.missing_gb * 1e9)
+    staged = sum(_staged_bytes(model, component) for component in state.missing)
+    required = max(0, int(state.missing_gb * 1e9) - staged)
     if required <= 0:
         return
     probe = _existing_ancestor(paths.models_root())
@@ -131,10 +157,18 @@ def preflight_disk(model: ImageModel) -> None:
     except OSError:
         return
     if required > free:
+        need = f"{round(required / 1e9, 2):g} GB"
+        if staged:
+            need += f" more ({round(staged / 1e9, 2):g} GB already staged)"
         raise InstallInsufficientDisk(
-            f"insufficient disk for {model.label}: need about {state.missing_gb:g} GB, "
+            f"insufficient disk for {model.label}: need about {need}, "
             f"{free / 1e9:.1f} GB free at {probe}",
-            details={"required_bytes": required, "free_bytes": free, "path": str(probe)},
+            details={
+                "required_bytes": required,
+                "free_bytes": free,
+                "staged_bytes": staged,
+                "path": str(probe),
+            },
         )
 
 
