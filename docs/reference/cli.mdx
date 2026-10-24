@@ -262,12 +262,14 @@ Bare `hal0 doctor` (no subcommand) runs `installer/lib/preflight.sh`:
 prompt and 32 decode tokens, capped at 30 s) when the slot's metrics carry no reading. Each row has a stable id
 (`Check.key`) used in `--json` output and cross-referenced elsewhere in the docs: `api`,
 `dns`, `runners`, `capabilities`, `memory`, `openwebui`, `hermes`, `auth`, `models`,
-`migrations`, `ui-dist`, `ports`, `port_dnat`, `netns`, `hal0_target`, `secret-modes`,
+`migrations`, `ui-dist`, `api-env-entries`, `ports`, `port_dnat`, `netns`, `hal0_target`, `secret-modes`,
 `hardware_freshness`, `seed_context_envelope`, `agent-uid`, `api-journal`, `stt-weights`, `seams`,
 `mcp_mounts`, `hermes-api`, `hermes_mcp_auth`, `hermes_profiles_mcp`, `hermes_generation`, `hermes_command_approvals`, `hermes_delegation_slot`, `hermes-gateway-unit`, `hermes_anchor_window`,
 `hal0_linger`, `hindsight_llm_auth`, `memory_engine_version`, `memory_extraction_throughput`.
 `hal0_linger` reads whether systemd linger is on for the `hal0` user (`loginctl show-user hal0 -p
 Linger`) and warns when that does not match whether the Hermes gateway is installed.
+
+`api-env-entries` ("api.env entries") warns when `/etc/hal0/api.env` holds a name the Secrets API now refuses to write: a loader, interpreter, TLS, configuration or proxy variable (`LD_PRELOAD`, `PYTHONPATH`, `SSLKEYLOGFILE`, `OPENSSL_CONF`, `NODE_TLS_REJECT_UNAUTHORIZED`, `XDG_CONFIG_HOME`, `HTTP_PROXY` and the rest of the families listed under [Secrets](/docs/reference/api/rest-api/)), or a TLS trust variable (`SSL_CERT_FILE` and the others) whose value is not a root-owned path `hal0` cannot write. It names the keys, never the values, and words proxy variables apart, since a box behind a corporate proxy sets them as root on purpose. Remove an entry you did not add in Settings → Secrets, or delete the line as root, then restart `hal0-api`. Run as a user that cannot read the file, it warns and asks for `hal0` or root.
 
 `api-journal` ("API journal read") warns until `hal0-api.service` carries `SupplementaryGroups=systemd-journal`. `hal0 update` does not rewrite that unit, so the fix is to re-run the installer once; until then the Logs page and `hal0 slot logs --follow` report that the journal cannot be read.
 

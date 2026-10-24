@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json as jsonlib
+import os
 from pathlib import Path
 
 import pytest
@@ -194,6 +195,145 @@ def test_ui_dist_quoted_value_is_unquoted(tmp_path) -> None:  # type: ignore[no-
     env.write_text(f'HAL0_UI_DIST="{current}"\n')
     c = da.check_ui_dist(api_env_path=env, current_ui_dist=current)
     assert c.status == "pass"
+
+
+# ── check_api_env_entries (#2942) ────────────────────────────────────────────
+
+_PLANTED_VALUE = "/tmp/planted-value-xyz"
+
+
+def test_api_env_entries_missing_file_passes(tmp_path: Path) -> None:
+    c = da.check_api_env_entries(api_env_path=tmp_path / "missing.env")
+    assert c.status == "pass" and c.key == "api-env-entries"
+
+
+def test_api_env_entries_clean_file_passes(tmp_path: Path) -> None:
+    env = tmp_path / "api.env"
+    env.write_text(
+        'HAL0_PORT=8080\nHAL0_UI_DIST="/x"\nHF_TOKEN="hf_x"\nOPENROUTER_API_KEY="k"\n'
+        "# LD_PRELOAD=/commented/out.so\n"
+    )
+    c = da.check_api_env_entries(api_env_path=env)
+    assert c.status == "pass", c.detail
+
+
+def test_api_env_entries_unreadable_warns(tmp_path: Path) -> None:
+    def _deny(_p: Path) -> str:
+        raise PermissionError("denied")
+
+    c = da.check_api_env_entries(api_env_path=tmp_path / "api.env", read_text=_deny)
+    assert c.status == "warn"
+    assert "run hal0 doctor as hal0 or root" in c.detail
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        # #2936 loader and interpreter names
+        "LD_PRELOAD",
+        "PYTHONPATH",
+        "PATH",
+        "NODE_OPTIONS",
+        "GIT_SSH_COMMAND",
+        "HERMES_HOME",
+        # #2997-#3000
+        "SSLKEYLOGFILE",
+        "OPENSSL_CONF",
+        "OPENSSL_MODULES",
+        "OPENSSL_ENGINES",
+        "NODE_TLS_REJECT_UNAUTHORIZED",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "ld_preload",
+    ],
+)
+def test_api_env_entries_flags_process_control_names(tmp_path: Path, name: str) -> None:
+    env = tmp_path / "api.env"
+    env.write_text(f'HF_TOKEN="hf_x"\n{name}="{_PLANTED_VALUE}"\n')
+    c = da.check_api_env_entries(api_env_path=env)
+    assert c.status == "warn"
+    assert name in c.detail
+    assert "HF_TOKEN" not in c.detail
+    assert _PLANTED_VALUE not in c.detail
+    assert "Settings → Secrets" in c.detail
+    assert "proxy" not in c.detail
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"],
+)
+def test_api_env_entries_flags_proxy_names_separately(tmp_path: Path, name: str) -> None:
+    env = tmp_path / "api.env"
+    env.write_text(f"{name}=http://10.9.9.9:3128\n")
+    c = da.check_api_env_entries(api_env_path=env)
+    assert c.status == "warn"
+    assert name in c.detail
+    assert "proxy" in c.detail
+    assert "set them as root" in c.detail
+    assert "10.9.9.9" not in c.detail
+    assert "load code" not in c.detail
+
+
+def test_api_env_entries_groups_every_finding_in_one_row(tmp_path: Path) -> None:
+    env = tmp_path / "api.env"
+    env.write_text('PYTHONPATH="/a"\nLD_PRELOAD="/b"\nHTTPS_PROXY="http://p:1"\n')
+    c = da.check_api_env_entries(api_env_path=env)
+    assert c.status == "warn"
+    assert "LD_PRELOAD, PYTHONPATH" in c.detail
+    assert "HTTPS_PROXY" in c.detail
+
+
+@pytest.fixture
+def _trusted_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Treat the test user as root and ``tmp_path`` as the trusted top (as test_tls_trust_env)."""
+    from hal0.api import _env_store
+
+    root = tmp_path.resolve() / "trust"
+    root.mkdir(mode=0o755)
+    monkeypatch.setattr(_env_store, "_TRUSTED_UID", os.getuid())
+    monkeypatch.setattr(_env_store, "_TRUST_ANCHOR", root.parent)
+    return root
+
+
+def test_api_env_entries_accepts_a_trusted_ca_bundle(tmp_path: Path, _trusted_root: Path) -> None:
+    bundle = _trusted_root / "ca.pem"
+    bundle.write_text("-----BEGIN CERTIFICATE-----\n")
+    bundle.chmod(0o644)
+    env = tmp_path / "api.env"
+    env.write_text(f'SSL_CERT_FILE="{bundle}"\nREQUESTS_CA_BUNDLE={bundle}\n')
+    c = da.check_api_env_entries(api_env_path=env)
+    assert c.status == "pass", c.detail
+
+
+@pytest.mark.parametrize("name", ["SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS"])
+def test_api_env_entries_flags_a_writable_ca_bundle(
+    tmp_path: Path, _trusted_root: Path, name: str
+) -> None:
+    bundle = _trusted_root / "ca.pem"
+    bundle.write_text("-----BEGIN CERTIFICATE-----\n")
+    bundle.chmod(0o666)
+    env = tmp_path / "api.env"
+    env.write_text(f'{name}="{bundle}"\n')
+    c = da.check_api_env_entries(api_env_path=env)
+    assert c.status == "warn"
+    assert name in c.detail
+    assert "group- or world-writable" in c.detail
+    assert str(bundle) not in c.detail
+
+
+def test_api_env_entries_flags_a_missing_ca_bundle(tmp_path: Path, _trusted_root: Path) -> None:
+    env = tmp_path / "api.env"
+    env.write_text(f'CURL_CA_BUNDLE="{_trusted_root}/nope.pem"\n')
+    c = da.check_api_env_entries(api_env_path=env)
+    assert c.status == "warn"
+    assert "CURL_CA_BUNDLE" in c.detail
+
+
+def test_env_file_entries_undoes_writer_quoting() -> None:
+    text = 'A="x\\"y\\\\z"\n# B=1\nC=plain\nnot a line\n'
+    assert da._env_file_entries(text) == [("A", 'x"y\\z'), ("C", "plain")]
 
 
 # ── check_ports ───────────────────────────────────────────────────────────────
@@ -1184,6 +1324,11 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(
         da, "check_ui_dist", lambda: Check("ui-dist", "Dashboard bundle", "pass", "stubbed")
     )
+    monkeypatch.setattr(
+        da,
+        "check_api_env_entries",
+        lambda: Check("api-env-entries", "api.env entries", "pass", "stubbed"),
+    )
     # model file existence + hal0.target unit file: pretend present so
     # neither spuriously fails.
     monkeypatch.setattr(da.Path, "exists", lambda self: True)
@@ -1291,12 +1436,13 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
 
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
-    # 7 verify rows + 27 extras.
-    assert keys[-28:] == [
+    # 7 verify rows + 28 extras.
+    assert keys[-29:] == [
         "auth",
         "models",
         "registry-toml",
         "ui-dist",
+        "api-env-entries",
         "ports",
         "port_dnat",
         "netns",
