@@ -391,5 +391,8 @@ other tune live on the slot's profile (ADR-0029); a write carrying one is reject
 | Key | Type | Default | Constraints |
 |---|---|---|---|
 | `idle_restore_minutes` | int | `60` | `>= 0` |
-| `default_size` | str | `"1024x1024"` | — |
-| `default_steps` | int | `0` | `>= 0` |
+| `default_size` | str | `""` | — (a `WxH` string; empty means the model's native size) |
+| `default_steps` | int | `0` | `>= 0`; `0` means the workflow template's own default |
+
+A `/v1/images/generations` request that sets no `size` or `steps` gets these when they are set,
+and the model's own defaults otherwise.
