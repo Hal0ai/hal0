@@ -185,14 +185,13 @@ dashboard, logs, and `hal0 doctor verify` — see
 
 ```sh
 hal0 uninstall              # conservative: keep /etc/hal0 + models/registry
-hal0 uninstall --keep-data  # legacy alias for the same conservative default
 hal0 uninstall --purge      # clean slate: also wipe config, data, user, images
 ```
 
 The conservative default stops services and removes code, units, venvs,
 binaries, and every hal0 podman container, but keeps `/etc/hal0` (config)
 and the data directory (models, registry, OpenWebUI state) so a re-install
-reuses them. `--purge` (alias `--clean-slate`) additionally removes the
+reuses them. `--purge` additionally removes the
 config and data directories, the `hal0` system user and group, and all
 hal0 runner and OpenWebUI podman images — it prompts for a typed `DELETE` confirmation
 unless you pass `--force` (or set `HAL0_FORCE=1`).

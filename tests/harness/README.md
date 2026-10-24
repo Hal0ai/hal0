@@ -363,7 +363,7 @@ provider rows. CLI and installer tiers don't depend on the image.
 `harness-cleanup.sh:dev-manual-cleanup` only removes paths under the
 ephemeral `${HAL0_HOME}` (the `.harness/install-<pid>` dir). If you
 ran with `HAL0_HARNESS_PROD=1`, the prod uninstaller may have left
-the data dirs in place (intentionally — `--keep-data`). Check
+the data dirs in place (intentionally — the conservative default). Check
 `/etc/hal0`, `/var/lib/hal0`.
 
 ### "wanted to test against the real /etc/hal0"

@@ -11,8 +11,8 @@
 #   dev-files          assert filesystem layout
 #   dev-units          assert systemd unit files were rendered (under prefix)
 #   dev-api-up         start hal0 serve manually, hit /api/status
-#   dev-uninstall-keep bash installer/uninstall.sh --keep-data (forced)
-#   dev-uninstall-purge bash installer/uninstall.sh           (forced, full)
+#   dev-uninstall-keep bash installer/uninstall.sh            (forced, conservative)
+#   dev-uninstall-purge bash installer/uninstall.sh --purge   (forced, full)
 #   prod-no-start      sudo bash installer/install.sh --no-start
 #                      (only if HAL0_HARNESS_PROD=1 — opt-in, mutates /etc)
 #

@@ -343,16 +343,9 @@ def uninstall(
     purge: bool = typer.Option(
         False,
         "--purge",
-        "--clean-slate",
         help="Clean slate: ALSO delete /etc/hal0, /var/lib/hal0 (models, "
         "registry, memory banks), the hal0 system user, and all hal0 podman "
         "images. Prompts for DELETE unless --force.",
-    ),
-    keep_data: bool = typer.Option(
-        False,
-        "--keep-data",
-        help="Conservative mode (the default): keep /etc/hal0 + /var/lib/hal0. "
-        "Accepted for back-compat / explicitness.",
     ),
     force: bool = typer.Option(
         False,
@@ -402,7 +395,7 @@ def uninstall(
         die("bash is required to run the uninstaller.")
 
     # The script's DELETE prompt only fires under --purge. A conservative run
-    # (the default, or --keep-data) never prompts, so it's safe non-interactive.
+    # (the default) never prompts, so it's safe non-interactive.
     # For --purge we still require a TTY unless the caller opted out of the
     # prompt (--force / HAL0_FORCE=1), else the prompt would hang silently.
     force_env = os.environ.get("HAL0_FORCE") == "1"
@@ -415,8 +408,6 @@ def uninstall(
     argv = ["bash", str(script)]
     if purge:
         argv.append("--purge")
-    if keep_data:
-        argv.append("--keep-data")
     if force:
         argv.append("--force")
     if dev:

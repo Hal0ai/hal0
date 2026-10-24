@@ -46,7 +46,7 @@ def test_uninstall_default_args(captured_exec: dict[str, Any]) -> None:
     the Typer command function directly so the production isatty() check
     sees the True we monkeypatched."""
     with pytest.raises(typer.Exit) as exc:
-        uninstall(purge=False, keep_data=False, force=False, dev=False)
+        uninstall(purge=False, force=False, dev=False)
     assert (exc.value.exit_code or 0) == 0
     assert captured_exec["file"] == "bash"
     assert captured_exec["argv"][0] == "bash"
@@ -54,10 +54,15 @@ def test_uninstall_default_args(captured_exec: dict[str, Any]) -> None:
     assert captured_exec["argv"][2:] == []
 
 
-def test_uninstall_keep_data_flag(captured_exec: dict[str, Any]) -> None:
-    result = runner.invoke(app, ["uninstall", "--keep-data"])
-    assert result.exit_code == 0
-    assert captured_exec["argv"][2:] == ["--keep-data"]
+@pytest.mark.parametrize("flag", ["--keep-data", "--clean-slate"])
+def test_uninstall_removed_alias_flags_are_refused(
+    captured_exec: dict[str, Any], flag: str
+) -> None:
+    """#2866: no compat aliases; a removed spelling must not reach the script."""
+    result = runner.invoke(app, ["uninstall", flag, "--force"])
+    assert result.exit_code == 2, result.output
+    assert "no such option" in result.output.lower()
+    assert captured_exec == {}, "a refused flag must not exec the uninstaller"
 
 
 def test_uninstall_force_flag(captured_exec: dict[str, Any]) -> None:
@@ -73,21 +78,14 @@ def test_uninstall_short_force_flag(captured_exec: dict[str, Any]) -> None:
 
 
 def test_uninstall_dev_flag(captured_exec: dict[str, Any]) -> None:
-    result = runner.invoke(app, ["uninstall", "--dev", "--keep-data"])
+    result = runner.invoke(app, ["uninstall", "--dev"])
     assert result.exit_code == 0
-    assert captured_exec["argv"][2:] == ["--keep-data", "--dev"]
+    assert captured_exec["argv"][2:] == ["--dev"]
 
 
 def test_uninstall_purge_flag(captured_exec: dict[str, Any]) -> None:
     """--purge forwards to the script (with --force here to skip the prompt)."""
     result = runner.invoke(app, ["uninstall", "--purge", "--force"])
-    assert result.exit_code == 0
-    assert captured_exec["argv"][2:] == ["--purge", "--force"]
-
-
-def test_uninstall_clean_slate_alias(captured_exec: dict[str, Any]) -> None:
-    """--clean-slate is an alias of --purge and forwards --purge to the script."""
-    result = runner.invoke(app, ["uninstall", "--clean-slate", "--force"])
     assert result.exit_code == 0
     assert captured_exec["argv"][2:] == ["--purge", "--force"]
 
@@ -191,7 +189,7 @@ def test_uninstall_resolves_fhs_path_when_not_editable(
     monkeypatch.setattr(paths, "usr_lib", lambda: fhs_current)
 
     with pytest.raises(typer.Exit) as exc:
-        uninstall(purge=False, keep_data=False, force=True, dev=False)
+        uninstall(purge=False, force=True, dev=False)
     assert (exc.value.exit_code or 0) == 0
     assert captured_exec["argv"][1] == str(fhs_current / "installer" / "uninstall.sh")
 
