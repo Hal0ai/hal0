@@ -11,8 +11,8 @@ continue.
 Deployment: this single file ships as a hal0 package asset
 (``hal0.comfyui.assets``); the ComfyUI provider copies it into the
 host-mounted ``custom_nodes`` dir (``hal0.comfyui.paths.custom_nodes_dir()``)
-whenever it builds the container spec, replacing a stale copy — no image
-rebuild. ComfyUI imports it at startup; ``_install()`` appends an aiohttp
+the first time it builds the container spec after hal0-api starts, replacing a
+stale copy — no image rebuild. ComfyUI imports it at startup; ``_install()`` appends an aiohttp
 middleware to the PromptServer app (the same mechanism ComfyUI-Login uses).
 The container runs with host networking, so hal0-api is on loopback.
 
@@ -70,15 +70,6 @@ def should_prepare_image_mode(method: str, path: str, status: "dict | None") -> 
     if not isinstance(status, dict):
         return False
     return status.get("mode") == "inference"
-
-
-def should_block(method: str, path: str, status: "dict | None") -> bool:
-    """Backward-compatible name for older tests/imports.
-
-    Prompt submission is no longer blocked by this custom node; it prepares
-    image mode best-effort, then lets ComfyUI handle the prompt.
-    """
-    return False
 
 
 def _fetch_status() -> "dict | None":
