@@ -9,8 +9,8 @@ cooperative cancel all come from there. This module only decides *what* to fetch
 it lands (``Component.dest``), and what to write once it has landed (the workflow).
 
 Bytes are staged in the registry's tmp dir and renamed into the models tree. A rename
-cannot cross filesystems, so :func:`run_install` refuses a layout where the two differ
-before it streams anything; on one filesystem a single free-space check
+cannot cross filesystems, so a layout where the two differ is refused before anything
+streams (:func:`require_one_filesystem`); on one filesystem a single free-space check
 (:func:`preflight_disk`) covers both.
 """
 
@@ -121,13 +121,16 @@ def preflight_disk(model: ImageModel) -> None:
         )
 
 
-def _require_one_filesystem() -> None:
+def require_one_filesystem() -> None:
     """Raise :class:`InstallStagingCrossDevice` when staging and models tree are on two devices.
 
     The downloader stages a file in the registry tmp dir and ``os.replace``s it into the
     models tree; across filesystems that fails with ``EXDEV`` after the whole file has been
     fetched, and the partial is discarded, so every retry would fetch it again. A path that
     cannot be inspected is not treated as a mismatch: the rename is the final arbiter.
+
+    The install route calls this next to :func:`preflight_disk`, so a bad layout is a
+    synchronous 409 before any job exists; :func:`run_install` calls it again as the backstop.
     """
     models, staging = paths.models_root(), _tmp_dir()
     try:
@@ -273,7 +276,7 @@ async def run_install(
     try:
         missing = install_state(model).missing
         if missing:
-            _require_one_filesystem()
+            require_one_filesystem()
         await _download_missing(job, missing, client=client, hf_token=hf_token)
         if job.cancel_requested:
             raise _PullCancelled()  # cancelled while the last file landed
@@ -388,5 +391,6 @@ __all__ = [
     "install_models_blocking",
     "preflight_disk",
     "remove_model",
+    "require_one_filesystem",
     "run_install",
 ]

@@ -998,7 +998,7 @@ _PULL_SHUTDOWN_TIMEOUT_S = 10.0
 
 
 async def _shutdown_pull_jobs(app: FastAPI, timeout_s: float = _PULL_SHUTDOWN_TIMEOUT_S) -> None:
-    """Cancel every in-flight model pull so shutdown doesn't wait on them.
+    """Cancel every in-flight model pull and image-model install so shutdown doesn't wait.
 
     Issue #1225: pulls run as detached ``asyncio.Task``\\ s (see
     ``routes.models._schedule_pull_task``) precisely so a live download
@@ -1012,8 +1012,13 @@ async def _shutdown_pull_jobs(app: FastAPI, timeout_s: float = _PULL_SHUTDOWN_TI
     stays fast even if a task is slow to unwind.
     """
     app.state.shutting_down.set()
-    tasks: dict[str, asyncio.Task[None]] = getattr(app.state, "model_pull_tasks", {}) or {}
-    live = [t for t in tasks.values() if not t.done()]
+    # An image-model install is the same kind of detached download (hal0.comfyui.install).
+    live = [
+        t
+        for attr in ("model_pull_tasks", "image_install_tasks")
+        for t in (getattr(app.state, attr, {}) or {}).values()
+        if not t.done()
+    ]
     if not live:
         return
     log.info("hal0.api.shutdown_cancelling_pulls", count=len(live))
@@ -1096,6 +1101,8 @@ class BootState:
     hardware_stats: Any = None
     model_pull_jobs: dict[str, Any] = field(default_factory=dict)
     model_pull_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
+    image_install_jobs: dict[str, Any] = field(default_factory=dict)
+    image_install_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
     runner_image_registry: RunnerImageStore | None = None
     runner_image_pull_jobs: dict[str, Any] = field(default_factory=dict)
     runner_image_pull_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
@@ -1602,6 +1609,10 @@ async def _boot_pull_registry(app: FastAPI, ctx: BootState) -> None:
     # download — this dict is what lets the shutdown path below (
     # _shutdown_pull_jobs) find and cancel any still-running pull.
     app.state.model_pull_tasks = ctx.model_pull_tasks
+    # Image-model installs (hal0.comfyui.install): the latest ``PullJob`` per catalog
+    # model id and the task running it, so shutdown can cancel an install in flight.
+    app.state.image_install_jobs = ctx.image_install_jobs
+    app.state.image_install_tasks = ctx.image_install_tasks
     # Runner-image catalogue store + its own pull-job/task dicts, same
     # shape as the model-pull pair above but keyed by GHCR repo path
     # (feat/runner-image-catalogue).
