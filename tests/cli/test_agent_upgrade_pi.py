@@ -1,4 +1,4 @@
-"""`hal0 agent upgrade pi` dispatch: root gate, `--to` refusal, driver call.
+"""`hal0 agent upgrade pi` dispatch: root gate, Hermes redirect, driver call.
 
 The pi driver runs in-process in the invoking user's context (it re-pins the
 global npm prefix and redeploys into ``~/.pi``), so the command is CLI-local
@@ -34,10 +34,18 @@ def test_upgrade_pi_requires_root(monkeypatch: pytest.MonkeyPatch) -> None:
     assert r.exit_code == 1 and "sudo hal0 agent upgrade pi" in r.output
 
 
-def test_upgrade_pi_rejects_to(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_upgrade_no_longer_takes_to(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ac.os, "geteuid", lambda: 0)
     r = CliRunner().invoke(ac.app, ["upgrade", "pi", "--to", "a" * 40])
-    assert r.exit_code == 1 and "--to applies to hermes only" in r.output
+    assert r.exit_code == 2 and "No such option" in r.output
+
+
+@pytest.mark.parametrize("args", [["upgrade", "hermes"], ["upgrade"]])
+def test_upgrade_hermes_is_gone_and_names_the_replacement(args: list[str]) -> None:
+    r = CliRunner().invoke(ac.app, args)
+    assert r.exit_code != 0
+    if args == ["upgrade", "hermes"]:
+        assert "hal0 update component hermes" in r.output
 
 
 def test_upgrade_pi_reports_driver_error(monkeypatch: pytest.MonkeyPatch) -> None:

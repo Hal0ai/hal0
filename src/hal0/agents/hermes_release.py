@@ -5,7 +5,7 @@ ADR-0034 decisions 1, 3 and 4. Every path that builds or repairs the Hermes
 venv comes through :func:`ensure_release`:
 
 * ``hermes_provision._phase_install`` (install, bootstrap, reprovision,
-  ``--repair``, and ``hal0 agent upgrade hermes``);
+  ``--repair``, and ``hal0 update component hermes --target``);
 * ``components.hermes_arm.converge_hermes`` (``hal0 update``);
 * ``updater.repair_hermes_mcp_client`` (``hal0 update``).
 
@@ -2091,7 +2091,7 @@ def ensure_release(
     """Converge the live Hermes release onto ``ref`` (default: the pin).
 
     ``force`` builds even when no trigger applies (``--repair``, a failed MCP
-    client probe, ``hal0 agent upgrade``). ``wait=False`` returns ``busy``
+    client probe). ``wait=False`` returns ``busy``
     instead of waiting for the lock.
 
     Builds run as ``hal0`` (§7.4). A root caller (``sudo hal0 update`` reaching
@@ -2133,7 +2133,7 @@ def ensure_release(
     try:
         pin = read_pin(requirements)
         target = require_vetted(ref or pin.ref)
-        # Every builder (install, update, upgrade --to, bootstrap --ref) passes
+        # Every builder (install, update --target, reprovision) passes
         # here, so this is where an older vetted ref over a newer release's
         # state.db is refused (upstream #140060, manual rollback in #2805).
         refuse_downgrade(target, live=live_ref(layout))

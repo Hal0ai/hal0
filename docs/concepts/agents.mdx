@@ -52,7 +52,7 @@ A release also carries the SDKs for the messaging platforms the box configures
   systemd manager. `hal0 doctor all` shows the linger state, and uninstalling
   Hermes turns it off.
 
-The pin only moves forward. `hal0 agent upgrade hermes --to` takes only a
+The pin only moves forward. `hal0 update component hermes --target` takes only a
 vetted commit and refuses to build an older vetted release over a newer one's
 `state.db`, because the gateway's persisted runtime state would then run under
 a release that predates it. Once v0.22.4 is live, a request for the older
@@ -149,7 +149,7 @@ Re-pin an installed pi with `sudo hal0 agent upgrade pi`, run the same way you
 installed it. It reruns the pinned installer and redeploys hal0's two
 extensions, and leaves extensions you added, your default provider, model and
 theme alone. It refuses when pi's profile is in a different home or pi is not
-installed, and `--to` stays Hermes-only. A fresh `hal0 agent install pi` from a
+installed. A fresh `hal0 agent install pi` from a
 git checkout seeds a name-keyed `banks` alias (`coding-agent::hal0` to
 `coding-agent::hal0-mono`) in `~/.hindsight/coding-agent.json`; `upgrade pi`
 adds the alias to an existing file.

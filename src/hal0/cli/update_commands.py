@@ -1093,9 +1093,13 @@ def _print_component_table(rows: list[dict]) -> bool:
             status_txt = f"[yellow]{status_txt}[/yellow]"
         elif status_txt == "converged":
             status_txt = "[green]converged[/green]"
+        elif status_txt == "override":
+            status_txt = "[cyan]override[/cyan]"
         pinned = row.get("pinned") or "—"
         if row.get("pin_label"):
             pinned = f"{pinned} ({row['pin_label']})"
+        if row.get("override"):
+            pinned = f"{pinned} [overridden: {_short_override(str(row['override']))}]"
         table.add_row(
             row.get("name", row.get("id", "?")),
             str(row.get("installed") or "—"),
@@ -1104,6 +1108,12 @@ def _print_component_table(rows: list[dict]) -> bool:
         )
     console.print(table)
     for row in rows:
+        if row.get("override") and row.get("status") not in _COMPONENT_PENDING:
+            console.print(
+                f"[cyan]![/cyan] {row['id']}: held at override "
+                f"{_short_override(str(row['override']))}, not the release pin — "
+                f"[dim]hal0 update component {row['id']} --clear-override[/dim] to return"
+            )
         if row.get("note"):
             console.print(f"[yellow]![/yellow] {row['id']}: {escape(str(row['note']))}")
         if row.get("status") in _COMPONENT_PENDING and (row.get("error") or row.get("remedy")):
@@ -1136,12 +1146,58 @@ def update_status_cmd() -> None:
         raise typer.Exit(2)
 
 
+def _short_override(value: str) -> str:
+    return value[:19] if value.startswith("sha256:") else value[:12]
+
+
+def _component_body(component_id: str, target: str | None, clear_override: bool) -> dict:
+    """The converge POST body for ``--target`` / ``--clear-override`` (dies on a bad target)."""
+    body: dict[str, object] = {}
+    if target is not None:
+        if component_id == "hermes":
+            from hal0.agents import hermes_release as hr
+
+            try:
+                body["target"] = hr.require_vetted(target.strip())
+            except hr.ReleaseError as exc:
+                die(
+                    f"--target: {exc}. Pass a full commit sha from VETTED_HERMES_REFS; "
+                    "version strings and `==X.Y.Z` specs are not accepted."
+                )
+        else:
+            die(f"--target is not supported for {component_id!r}")
+    if clear_override:
+        if component_id != "hermes":
+            die(f"--clear-override is not supported for {component_id!r}")
+        body["clear_override"] = True
+    return body
+
+
 @update_app.command("component")
 def update_component_cmd(
     component_id: str = typer.Argument(..., help="Component id (see `hal0 update status`)."),
     check: bool = typer.Option(False, "--check", help="Status row only; don't converge."),
+    target: str | None = typer.Option(
+        None,
+        "--target",
+        help=(
+            "Hermes only. Pin a vetted commit other than the release pin: a full 40-hex sha "
+            "listed in VETTED_HERMES_REFS. Every later `hal0 update` keeps it until "
+            "--clear-override. The release pin's own commit counts as --clear-override."
+        ),
+    ),
+    clear_override: bool = typer.Option(
+        False,
+        "--clear-override",
+        help="Drop a --target override; converge back to the release pin.",
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
 ) -> None:
-    """Converge (or re-try) one component to its release pin."""
+    """Converge (or re-try) one component to its release pin, or to a --target override."""
+    if check and (target is not None or clear_override):
+        die("--check cannot be combined with --target or --clear-override")
+        return
+    body = _component_body(component_id, target, clear_override)
     url = _api_base()
     if _api_unreachable(url):
         raise typer.Exit(1)
@@ -1152,7 +1208,17 @@ def update_component_cmd(
     _print_component_table(rows)
     if check:
         return
-    _converge_component(component_id)
+    if body:
+        name = rows[0].get("name", component_id)
+        action = (
+            f"Pin {name} to {_short_override(str(body['target']))}"
+            if "target" in body
+            else f"Drop the {name} override"
+        )
+        if not yes and _interactive() and not typer.confirm(f"{action}?", default=True):
+            console.print("[dim]aborted.[/dim]")
+            return
+    _converge_component(component_id, body)
 
 
 def _converge_component(component_id: str, body: dict | None = None) -> None:

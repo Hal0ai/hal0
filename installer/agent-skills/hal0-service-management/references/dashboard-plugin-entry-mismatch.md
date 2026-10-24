@@ -98,11 +98,13 @@ different vetted commit (one already listed in hal0's `VETTED_HERMES_REFS`)
 with:
 
 ```bash
-sudo hal0 agent upgrade hermes --to <40-hex sha>
+sudo hal0 update component hermes --target <40-hex sha>
 ```
 
 That builds a fresh release with its own checkout, plugin files and
-dashboard, and switches to it; the next `hal0 update` returns to the pin.
+dashboard, and switches to it. The override persists across `hal0 update`
+(`hal0 update status` shows the row as overridden) until you return to the pin
+with `sudo hal0 update component hermes --clear-override`.
 
 ### Why `"entry": ""` does NOT work
 

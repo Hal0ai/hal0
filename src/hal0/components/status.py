@@ -61,6 +61,33 @@ def _pin_label(component_id: str) -> str | None:
     return None
 
 
+def _override(component_id: str) -> str | None:
+    """The persisted operator override for ``component_id`` (``--target``), if any."""
+    try:
+        if component_id == "openwebui":
+            from hal0.components.openwebui_arm import read_pin_override
+        elif component_id == "hermes":
+            from hal0.components.hermes_arm import read_pin_override
+        else:
+            return None
+        return read_pin_override()
+    except Exception as exc:
+        log.warning("components.override_probe_failed", component=component_id, error=str(exc))
+        return None
+
+
+def _hermes_override_state(override: str, installed: str | None) -> tuple[str, str | None]:
+    """``(status, note)`` of a Hermes row that carries a ``--target`` override."""
+    from hal0.agents.hermes_provision import VETTED_HERMES_REFS
+    from hal0.components.hermes_arm import UNVETTED_OVERRIDE_REMEDY, unvetted_override_error
+
+    if override not in VETTED_HERMES_REFS:
+        return "pending", f"{unvetted_override_error(override)}; {UNVETTED_OVERRIDE_REMEDY}"
+    if installed == override[:12] and not _hermes_needs_build():
+        return "override", None
+    return "pending", None
+
+
 def component_status_snapshot() -> dict[str, Any]:
     recorded = load_component_state()
     rows: list[dict[str, Any]] = []
@@ -77,6 +104,8 @@ def component_status_snapshot() -> dict[str, Any]:
             log.warning("components.pinned_probe_failed", component=comp.id, error=str(exc))
             pinned = "unknown"
 
+        override = _override(comp.id)
+        override_note: str | None = None
         if last.get("status") in _FAILURE_STATUSES:
             derived = last["status"]
         elif installed is None:
@@ -85,6 +114,8 @@ def component_status_snapshot() -> dict[str, Any]:
             # The last pass found the Hermes builder lock held and did not
             # run: not a failure, but not confirmed converged either.
             derived = "pending"
+        elif comp.id == "hermes" and override is not None:
+            derived, override_note = _hermes_override_state(override, installed)
         elif installed == pinned and comp.id == "hermes" and _hermes_needs_build():
             # A pre-layout host's stamp already equals the pin, but the next
             # update still has to migrate it (ADR-0032 decision 6).
@@ -93,11 +124,8 @@ def component_status_snapshot() -> dict[str, Any]:
             derived = "converged"
         else:
             derived = "pending"
-            if comp.id == "openwebui":
-                from hal0.components.openwebui_arm import read_pin_override
-
-                if read_pin_override() == installed:
-                    derived = "override"
+            if comp.id == "openwebui" and override == installed:
+                derived = "override"
 
         rows.append(
             {
@@ -108,12 +136,15 @@ def component_status_snapshot() -> dict[str, Any]:
                 "installed": installed,
                 "pinned": pinned,
                 "pin_label": _pin_label(comp.id),
+                # An operator --target that holds the row off the release pin
+                # until --clear-override (null when none is set).
+                "override": override,
                 "status": derived,
                 "error": last.get("error"),
                 "remedy": last.get("remedy"),
                 # An informational line from the last converge that is not a
                 # failure (e.g. Hermes config keys applied on a converged box).
-                "note": last.get("note"),
+                "note": last.get("note") or override_note,
                 "ts": last.get("ts"),
                 "detail": last.get("detail") or [],
             }

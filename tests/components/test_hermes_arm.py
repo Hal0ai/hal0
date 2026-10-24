@@ -615,3 +615,231 @@ def test_a_converge_without_a_report_writes_none(tmp_path) -> None:
     ):
         hermes_arm.converge_hermes(venv=venv)
     assert not (var_lib() / "state" / "agents" / "hermes" / "provision.json").exists()
+
+
+# ── --target / --clear-override (#2865) ─────────────────────────────────────
+
+
+def _write_override(ref: str) -> None:
+    hermes_arm.override_path().parent.mkdir(parents=True, exist_ok=True)
+    hermes_arm.override_path().write_text(ref + "\n", encoding="utf-8")
+
+
+def test_target_builds_that_ref_and_persists_it_once_live(tmp_path) -> None:
+    venv = _venv(tmp_path)
+    with patch(
+        "hal0.agents.hermes_release.ensure_release",
+        return_value=_outcome(status="activated", release_id="r1", ref=PREV_PIN),
+    ) as ensure:
+        res = hermes_arm.converge_hermes(venv=venv, is_hal0_user=lambda: False, target_ref=PREV_PIN)
+    assert ensure.call_args.kwargs["ref"] == PREV_PIN
+    assert res["status"] == "upgraded"
+    assert res["to"] == PREV_PIN[:12]
+    assert res["override"] == PREV_PIN
+    assert hermes_arm.read_pin_override() == PREV_PIN
+
+
+def test_a_failed_target_build_leaves_no_override(tmp_path) -> None:
+    venv = _venv(tmp_path)
+    with patch(
+        "hal0.agents.hermes_release.ensure_release",
+        return_value=_outcome(status="build_failed", error="boom"),
+    ):
+        res = hermes_arm.converge_hermes(venv=venv, is_hal0_user=lambda: False, target_ref=PREV_PIN)
+    assert res["status"] == "build_failed"
+    assert hermes_arm.read_pin_override() is None
+
+
+@pytest.mark.parametrize("bad", ["f" * 40, PIN[:12], "0.19.0", "v2026.7.20", PIN.upper()])
+def test_target_refuses_anything_but_a_vetted_sha(tmp_path, bad) -> None:
+    venv = _venv(tmp_path)
+    with patch("hal0.agents.hermes_release.ensure_release") as ensure:
+        res = hermes_arm.converge_hermes(venv=venv, target_ref=bad)
+    assert res["status"] == "build_failed"
+    ensure.assert_not_called()
+    assert hermes_arm.read_pin_override() is None
+
+
+def test_target_older_than_the_live_release_is_a_refused_downgrade(tmp_path) -> None:
+    venv = _live_release(ref=PIN)
+    with patch("hal0.agents.hermes_release.ensure_release") as ensure:
+        res = hermes_arm.converge_hermes(venv=venv, target_ref=PREV_PIN)
+    assert res["status"] == "build_failed"
+    assert "downgrade" in res["error"]
+    ensure.assert_not_called()
+    assert hermes_arm.read_pin_override() is None
+
+
+def test_live_release_matching_the_override_is_converged_not_drift(tmp_path) -> None:
+    """Pin is v0.22.4, the box runs the overridden v0.22.2: no rebuild, status override."""
+    venv = _live_release(ref=PREV_PIN)
+    _write_override(PREV_PIN)
+    with patch("hal0.agents.hermes_release.ensure_release") as ensure:
+        res = hermes_arm.converge_hermes(venv=venv)
+    ensure.assert_not_called()
+    assert res["status"] == "override"
+    assert res["override"] == PREV_PIN
+
+
+def test_override_is_stale_on_diagnose_only_when_the_live_ref_differs(tmp_path) -> None:
+    venv = _live_release(ref=PIN)
+    _write_override(PREV_PIN)  # operator override set, live release not built yet
+    res = hermes_arm.converge_hermes(venv=venv, apply=False)
+    assert res["status"] == "stale"
+    assert f"target {PREV_PIN[:12]}" in res["trigger"]
+
+
+def test_every_later_update_keeps_the_override_instead_of_rebuilding_the_pin(tmp_path) -> None:
+    venv = _live_release(ref=PREV_PIN)
+    _write_override(PREV_PIN)
+    with patch("hal0.agents.hermes_release.ensure_release") as ensure:
+        for _ in range(2):
+            assert hermes_arm.converge_hermes(venv=venv)["status"] == "override"
+    ensure.assert_not_called()
+    assert hermes_arm.read_pin_override() == PREV_PIN
+
+
+def test_an_override_the_release_no_longer_vets_is_refused_never_built(tmp_path) -> None:
+    venv = _live_release(ref=PREV_PIN)
+    _write_override(PREV_PIN)
+    with (
+        patch.object(hp, "VETTED_HERMES_REFS", frozenset({PIN})),
+        patch("hal0.agents.hermes_release.ensure_release") as ensure,
+    ):
+        res = hermes_arm.converge_hermes(venv=venv)
+        diagnose = hermes_arm.converge_hermes(venv=venv, apply=False)
+    ensure.assert_not_called()
+    for r in (res, diagnose):
+        assert r["status"] == "build_failed"
+        assert "no longer" in r["error"]
+        assert "--clear-override" in r["remedy"]
+    # The marker is left for the operator to clear; hal0 never rewrites it.
+    assert hermes_arm.read_pin_override() == PREV_PIN
+
+
+def test_clear_override_drops_the_marker_and_converges_to_the_pin(tmp_path) -> None:
+    venv = _live_release(ref=PREV_PIN)
+    _write_override(PREV_PIN)
+    with patch(
+        "hal0.agents.hermes_release.ensure_release",
+        return_value=_outcome(status="activated", release_id="r2", ref=PIN),
+    ) as ensure:
+        res = hermes_arm.converge_hermes(venv=venv, is_hal0_user=lambda: False, clear_override=True)
+    assert hermes_arm.read_pin_override() is None
+    assert ensure.call_args.kwargs["ref"] == PIN
+    assert res["status"] == "upgraded"
+    assert "override" not in res
+
+
+def test_clear_override_on_a_pin_box_is_a_converged_noop(tmp_path) -> None:
+    venv = _live_release(ref=PIN)
+    res = hermes_arm.converge_hermes(venv=venv, clear_override=True)
+    assert res["status"] == "converged"
+
+
+def test_a_garbage_marker_reads_as_no_override(tmp_path) -> None:
+    hermes_arm.override_path().parent.mkdir(parents=True, exist_ok=True)
+    hermes_arm.override_path().write_text("not-a-sha\n", encoding="utf-8")
+    assert hermes_arm.read_pin_override() is None
+
+
+# ── review follow-ups: clear ordering, target==pin, rebuild callers ──────────
+
+
+def test_clear_override_is_refused_up_front_when_the_pin_is_older_than_live(tmp_path) -> None:
+    """Override newer than the pin: returning to the pin is a downgrade; keep the marker."""
+    venv = _live_release(ref=PIN)
+    _write_override(PIN)
+    with (
+        patch.object(hermes_arm._rel, "read_pin", return_value=_pin_of(PREV_PIN)),
+        patch("hal0.agents.hermes_release.ensure_release") as ensure,
+    ):
+        res = hermes_arm.converge_hermes(venv=venv, clear_override=True)
+    ensure.assert_not_called()
+    assert res["status"] == "build_failed"
+    assert "override is kept" in res["error"]
+    assert hermes_arm.read_pin_override() == PIN
+
+
+def _pin_of(ref):
+    from hal0.agents.hermes_release import Pin
+
+    return Pin(url="https://example.invalid/h.git", extras=(), ref=ref)
+
+
+def test_clear_override_keeps_the_marker_when_the_pin_build_fails(tmp_path) -> None:
+    venv = _live_release(ref=PREV_PIN)
+    _write_override(PREV_PIN)
+    with patch(
+        "hal0.agents.hermes_release.ensure_release",
+        return_value=_outcome(status="build_failed", error="boom"),
+    ):
+        res = hermes_arm.converge_hermes(venv=venv, is_hal0_user=lambda: False, clear_override=True)
+    assert res["status"] == "build_failed"
+    assert hermes_arm.read_pin_override() == PREV_PIN
+
+
+def test_target_equal_to_the_pin_is_a_clear(tmp_path) -> None:
+    venv = _live_release(ref=PIN)
+    _write_override(PIN)
+    res = hermes_arm.converge_hermes(venv=venv, target_ref=PIN)
+    assert res["status"] == "converged"
+    assert hermes_arm.read_pin_override() is None
+
+
+def test_override_marker_write_is_atomic_and_leaves_no_tmp(tmp_path) -> None:
+    venv = _venv(tmp_path)
+    with patch(
+        "hal0.agents.hermes_release.ensure_release",
+        return_value=_outcome(status="activated", release_id="r1", ref=PREV_PIN),
+    ):
+        hermes_arm.converge_hermes(venv=venv, is_hal0_user=lambda: False, target_ref=PREV_PIN)
+    assert [p.name for p in hermes_arm.override_path().parent.glob("hermes.pin-override*")] == [
+        "hermes.pin-override"
+    ]
+
+
+def test_override_build_ref_vetted_unvetted_and_absent(tmp_path) -> None:
+    assert hermes_arm.override_build_ref() == (None, None)
+    _write_override(PREV_PIN)
+    assert hermes_arm.override_build_ref() == (PREV_PIN, None)
+    with patch.object(hp, "VETTED_HERMES_REFS", frozenset({PIN})):
+        ref, err = hermes_arm.override_build_ref()
+    assert ref is None and "--clear-override" in err
+
+
+def test_mcp_repair_rebuilds_the_override_not_the_pin(tmp_path, monkeypatch) -> None:
+    from hal0.updater import updater
+
+    _write_override(PREV_PIN)
+    seen: dict = {}
+
+    def fake_ensure(**kw):
+        seen.update(kw)
+        return _outcome(status="activated", release_id="r1")
+
+    monkeypatch.setattr("hal0.agents.hermes_release.ensure_release", fake_ensure)
+    _run_mcp_repair(updater, tmp_path, monkeypatch)
+    assert seen["ref"] == PREV_PIN
+
+
+def test_mcp_repair_refuses_an_unvetted_override(tmp_path, monkeypatch) -> None:
+    from hal0.updater import updater
+
+    _write_override(PREV_PIN)
+    called: list = []
+    monkeypatch.setattr("hal0.agents.hermes_release.ensure_release", lambda **kw: called.append(kw))
+    with patch.object(hp, "VETTED_HERMES_REFS", frozenset({PIN})):
+        assert _run_mcp_repair(updater, tmp_path, monkeypatch) is False
+    assert called == []
+
+
+def _run_mcp_repair(updater, tmp_path, monkeypatch):
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        "hal0.agents.hermes_provision._probe_mcp_client",
+        lambda *a, **k: {"ok": False, "stage": "import", "error": "x"},
+    )
+    return updater.repair_hermes_mcp_client(venv=venv, install=True)

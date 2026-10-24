@@ -134,3 +134,57 @@ def test_busy_counts_as_pending_in_the_update_cli() -> None:
     from hal0.cli.update_commands import _COMPONENT_PENDING
 
     assert "busy" in _COMPONENT_PENDING and "activation_failed" in _COMPONENT_PENDING
+
+
+# ── Hermes --target override (#2865) ────────────────────────────────────────
+
+_HPIN = "4d04303818b61bf3aa09278af48356315515965b"
+_HPREV = "d923a5eb487a17c0a68801bba9ef0f56c81040a8"
+
+
+def _hermes_row(*, installed: str | None, override: str | None, needs_build: bool = False):
+    from hal0.components import hermes_arm
+
+    if override is not None:
+        hermes_arm.override_path().parent.mkdir(parents=True, exist_ok=True)
+        hermes_arm.override_path().write_text(override + "\n", encoding="utf-8")
+    with (
+        patch("hal0.components.registry._hermes_installed", return_value=installed),
+        patch("hal0.components.registry._hermes_pinned", return_value=_HPIN[:12]),
+        patch("hal0.components.status._hermes_needs_build", return_value=needs_build),
+    ):
+        snap = status.component_status_snapshot()
+    return next(r for r in snap["components"] if r["id"] == "hermes")
+
+
+def test_hermes_row_without_an_override_has_none() -> None:
+    row = _hermes_row(installed=_HPIN[:12], override=None)
+    assert row["status"] == "converged"
+    assert row["override"] is None
+
+
+def test_hermes_live_on_the_override_reads_override_with_both_shas() -> None:
+    row = _hermes_row(installed=_HPREV[:12], override=_HPREV)
+    assert row["status"] == "override"
+    assert row["pinned"] == _HPIN[:12]
+    assert row["override"] == _HPREV
+
+
+def test_hermes_override_not_yet_live_is_pending() -> None:
+    row = _hermes_row(installed=_HPIN[:12], override=_HPREV)
+    assert row["status"] == "pending"
+    assert row["override"] == _HPREV
+
+
+def test_hermes_override_with_a_build_due_is_pending() -> None:
+    row = _hermes_row(installed=_HPREV[:12], override=_HPREV, needs_build=True)
+    assert row["status"] == "pending"
+
+
+def test_hermes_unvetted_override_is_pending_and_names_clear_override() -> None:
+    from hal0.agents import hermes_provision as hp
+
+    with patch.object(hp, "VETTED_HERMES_REFS", frozenset({_HPIN})):
+        row = _hermes_row(installed=_HPREV[:12], override=_HPREV)
+    assert row["status"] == "pending"
+    assert "--clear-override" in row["note"]

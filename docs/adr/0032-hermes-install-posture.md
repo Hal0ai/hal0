@@ -9,6 +9,13 @@ release, mirror fetches tags), decision 9 (a uv-managed 3.14 is preferred over
 a system one with an old SQLite) and decision 12 (the normaliser rewrites the
 whole unit file). The rest of this record stands.
 
+**Amendment (2026-10-23, #2865).** `hal0 agent upgrade hermes --to` is gone.
+Wherever this record names it, read `hal0 update component hermes --target`.
+The vetted-sha check and the downgrade refusal are unchanged; the one
+difference is that a `--target` commit now persists across `hal0 update` (the
+OpenWebUI override mechanism) until `--clear-override`, where `--to` lasted
+only until the next update. The decision text below is left as written.
+
 Proposed (2026-10-20). The operator chose option (a) on #2615 (2026-10-19): a
 pinned source checkout plus an editable install on Python 3.14. This record
 turns that choice into a design. On 2026-10-20 the operator cut two pieces

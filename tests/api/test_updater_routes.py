@@ -1454,6 +1454,45 @@ def test_component_converge_returns_job_and_completes(isolated_client: TestClien
     assert job["component_result"]["status"] == "upgraded"
 
 
+def _converge_kwargs(client: TestClient, component: str, body: dict[str, Any]) -> list[dict]:
+    seen: list[dict] = []
+
+    def fake(comp: Any, **kw: Any) -> dict[str, Any]:
+        seen.append(kw)
+        return {"status": "converged"}
+
+    with patch("hal0.components.runner.converge_component", side_effect=fake):
+        resp = client.post(f"/api/updates/components/{component}/converge", json=body)
+        if resp.status_code == 202:
+            job_id = resp.json()["id"]
+            for _ in range(50):
+                if client.get(f"/api/updates/status/{job_id}").json()["state"] in (
+                    "applied",
+                    "failed",
+                ):
+                    break
+                time.sleep(0.05)
+    return seen if resp.status_code == 202 else [{"status_code": resp.status_code}]
+
+
+def test_hermes_converge_passes_a_vetted_target_and_clear_override(
+    isolated_client: TestClient,
+) -> None:
+    sha = "d923a5eb487a17c0a68801bba9ef0f56c81040a8"
+    (kw,) = _converge_kwargs(isolated_client, "hermes", {"target": sha, "clear_override": True})
+    assert kw["target_ref"] == sha
+    assert kw["clear_override"] is True
+
+
+@pytest.mark.parametrize("bad", ["f" * 40, "0.19.0", "4d043038"])
+def test_hermes_converge_rejects_an_unvetted_target_400(
+    isolated_client: TestClient, bad: str
+) -> None:
+    resp = isolated_client.post("/api/updates/components/hermes/converge", json={"target": bad})
+    assert resp.status_code == 400
+    assert "VETTED_HERMES_REFS" in resp.text
+
+
 def test_component_converge_busy_409(isolated_client: TestClient) -> None:
     # Seed a running job into the registry the route reads.
     app = isolated_client.app
@@ -1497,7 +1536,7 @@ async def _run_hermes_job(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", ["converged", "stale", "upgraded"])
+@pytest.mark.parametrize("status", ["converged", "stale", "upgraded", "override"])
 async def test_hermes_converge_reconciles_upstreams(
     monkeypatch: pytest.MonkeyPatch, status: str
 ) -> None:

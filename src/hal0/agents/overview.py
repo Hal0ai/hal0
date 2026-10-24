@@ -51,8 +51,10 @@ def hermes_version(
     ``update_available`` follows the Services page rule: installed differs
     from pinned, or the derived status is one of the pending ones.
     """
+    # A box held at a `--target` override differs from the pin on purpose.
     update_available = bool(
         component is not None
+        and component.get("status") != "override"
         and (
             component.get("installed") != component.get("pinned")
             or component.get("status") in _PENDING_STATUSES

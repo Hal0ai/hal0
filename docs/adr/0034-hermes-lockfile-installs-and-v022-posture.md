@@ -294,8 +294,9 @@ Everything else in this record stands.
 - **v0.22.2 stays vetted, but not as a downgrade.** `d923a5eb` remains in
   `VETTED_HERMES_REFS`, so the automatic flip-back after a failed activation
   still has a built release to return to, and a box that never ran v0.22.4
-  can still build it with `hal0 agent upgrade hermes --to d923a5eb…`. Once
-  v0.22.4 is the live release, `--to d923a5eb…` is refused
+  can still build it with `hal0 update component hermes --target d923a5eb…`
+  (named `hal0 agent upgrade hermes --to` when this was written, #2865). Once
+  v0.22.4 is the live release, `--target d923a5eb…` is refused
   (`hermes_release.refuse_downgrade`, ordered by `VETTED_HERMES_VERSIONS`):
   the gateway runtime state v0.22.3+ writes to `state.db` (session guards,
   policy receipts) predates v0.22.2, upstream's own `hermes update` refuses

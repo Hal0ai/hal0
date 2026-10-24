@@ -84,6 +84,16 @@ def test_hermes_version_converged_is_not_update():
     assert out["update_available"] is False and out["live"] is None
 
 
+def test_hermes_version_held_at_an_override_is_not_an_update():
+    out = hermes_version(
+        None,
+        None,
+        pin_ref="a" * 40,
+        component={"installed": "d923a5eb", "pinned": "4d043038", "status": "override"},
+    )
+    assert out["update_available"] is False
+
+
 def test_pending_statuses_have_one_owner():
     from hal0.agents import overview
     from hal0.components import status

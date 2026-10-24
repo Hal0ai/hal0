@@ -98,16 +98,15 @@ def test_provision_reexec_uses_the_running_binary(
     assert seen[0][1:4] == ["agent", "bootstrap", "hermes"]
 
 
-def test_offline_and_ref_ride_the_reexec(monkeypatch: pytest.MonkeyPatch) -> None:
-    """#2838 / ADR-0032 d6: --offline and the upgrade ref reach the hal0 child."""
+def test_offline_rides_the_reexec(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#2838 / ADR-0032 d6: --offline reaches the hal0 child."""
     monkeypatch.setattr(agent_commands.os, "geteuid", lambda: 0)
     monkeypatch.setattr(agent_commands, "_hermes_root_prelude", lambda _env: None)
     monkeypatch.setattr(agent_commands, "_running_hal0_bin", lambda: "/x/hal0")
     seen: list[list[str]] = []
     monkeypatch.setattr(agent_commands, "_run_as_hal0", lambda argv, **_k: seen.append(argv) or 0)
-    ref = "3ef6bbd201263d354fd83ec55b3c306ded2eb72a"
-    agent_commands._provision_hermes(offline=True, ref=ref)
-    assert seen == [["/x/hal0", "agent", "bootstrap", "hermes", "--offline", "--ref", ref]]
+    agent_commands._provision_hermes(offline=True)
+    assert seen == [["/x/hal0", "agent", "bootstrap", "hermes", "--offline"]]
 
 
 def test_in_process_offline_sets_the_variable_the_builder_reads(
@@ -124,7 +123,7 @@ def test_in_process_offline_sets_the_variable_the_builder_reads(
         return 0
 
     monkeypatch.setattr("hal0.agents.hermes_provision.bootstrap_cli", _bootstrap)
-    assert agent_commands._provision_hermes(offline=True, ref=None) == 0
+    assert agent_commands._provision_hermes(offline=True) == 0
     assert seen["offline"] == "1"
     assert "HAL0_HERMES_OFFLINE" not in os.environ  # restored afterwards
 

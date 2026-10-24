@@ -146,11 +146,13 @@ function _isBusy(err) {
 }
 
 // What a finished converge job did, from the Hermes arm's result
-// (src/hal0/components/hermes_arm.py: upgraded, converged, skipped, busy; the
+// (src/hal0/components/hermes_arm.py: upgraded, converged, override, skipped, busy; the
 // failed kinds end the job as `failed`). Returns [message, toast kind].
 function _upgradeOutcome(result, pinLabel) {
   const status = result && result.status;
-  if (status === "upgraded") return ["Hermes upgraded to " + pinLabel, "ok"];
+  const label = (result && result.to) || pinLabel;
+  if (status === "upgraded") return ["Hermes upgraded to " + label, "ok"];
+  if (status === "override") return ["Hermes is held at the override " + String((result && result.override) || "").slice(0, 12) + " (hal0 update component hermes --clear-override returns to the pin)", "ok"];
   if (status === "converged") return ["Hermes already matches the pin", "ok"];
   if (status === "skipped") return ["Hermes upgrade skipped: " + (result.reason || "no reason given"), "warn"];
   if (status === "busy") return ["Hermes builder is busy", "warn"];

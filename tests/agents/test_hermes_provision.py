@@ -562,7 +562,7 @@ def test_install_phase_plugin_copy_failure_does_not_skip_the_release_build(
     assert "read-only plugins dir" in (out.reason or "")
 
 
-def test_install_phase_passes_offline_and_the_upgrade_ref(
+def test_install_phase_passes_offline_and_the_pin_ref(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """#2838: HAL0_HERMES_OFFLINE (written by ``--offline``) reaches the builder."""
@@ -570,14 +570,13 @@ def test_install_phase_passes_offline_and_the_upgrade_ref(
         hp, "HERMES_CLI_INSTALL_PATH", tmp_path / "usr" / "local" / "bin" / "hermes"
     )
     monkeypatch.setenv("HAL0_HERMES_OFFLINE", "1")
-    ref = "3ef6bbd201263d354fd83ec55b3c306ded2eb72a"
-    state = hp.BootstrapState(venv=str(tmp_path / "venv"), hermes_home=str(tmp_path / "h"), ref=ref)
+    state = hp.BootstrapState(venv=str(tmp_path / "venv"), hermes_home=str(tmp_path / "h"))
     calls: list[dict[str, Any]] = []
     hp._phase_install(
         hp._StepCtx(state=state, io=hp.InstallIO(ensure_release=fake_ensure_release(calls)))
     )
     assert calls[0]["offline"] is True
-    assert calls[0]["ref"] == ref
+    assert calls[0]["ref"] is None, "no override: install builds the pin"
 
 
 def test_persisted_hermes_python_is_atomic_and_idempotent(tmp_path: Path) -> None:
@@ -6336,3 +6335,34 @@ def test_hermes_md_primary_probe_skips_without_primary(
     passed, detail = hp._smoke_hermes_md_contains_primary(state, _box_io())
     assert passed is None
     assert "no primary" in detail
+
+
+def test_install_phase_rebuilds_the_update_target_override_not_the_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`reprovision --repair` after `hal0 update component hermes --target` keeps the override."""
+    from hal0.components import hermes_arm
+
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(
+        hp, "HERMES_CLI_INSTALL_PATH", tmp_path / "usr" / "local" / "bin" / "hermes"
+    )
+    prev = "d923a5eb487a17c0a68801bba9ef0f56c81040a8"
+    hermes_arm.override_path().parent.mkdir(parents=True, exist_ok=True)
+    hermes_arm.override_path().write_text(prev + "\n", encoding="utf-8")
+    state = hp.BootstrapState(venv=str(tmp_path / "venv"), hermes_home=str(tmp_path / "h"))
+    calls: list[dict[str, Any]] = []
+    hp._phase_install(
+        hp._StepCtx(state=state, io=hp.InstallIO(ensure_release=fake_ensure_release(calls)))
+    )
+    assert calls[0]["ref"] == prev
+    # An override this release no longer vets fails the step instead of building the pin.
+    calls.clear()
+    monkeypatch.setattr(
+        hp, "VETTED_HERMES_REFS", frozenset({"4d04303818b61bf3aa09278af48356315515965b"})
+    )
+    out = hp._phase_install(
+        hp._StepCtx(state=state, io=hp.InstallIO(ensure_release=fake_ensure_release(calls)))
+    )
+    assert out.status == hp.PhaseStatus.FAIL and "--clear-override" in (out.reason or "")
+    assert calls == []

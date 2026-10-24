@@ -1093,6 +1093,118 @@ def test_update_component_unknown_id_dies(monkeypatch: pytest.MonkeyPatch) -> No
     assert "nope" in result.output
 
 
+# ── `hal0 update component hermes --target / --clear-override` (#2865) ──────────
+
+_HERMES_PIN = "4d04303818b61bf3aa09278af48356315515965b"
+_HERMES_PREV = "d923a5eb487a17c0a68801bba9ef0f56c81040a8"
+
+
+def _wire_component_cli(monkeypatch: pytest.MonkeyPatch, rows: list[dict]) -> dict[str, object]:
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    monkeypatch.setattr(uc, "_interactive", lambda: False)
+    posted: dict[str, object] = {}
+
+    def fake_post(path: str, *, json: object = None, **kwargs: object) -> dict:
+        posted["path"] = path
+        posted["json"] = json
+        return {"id": "job9", "state": "queued"}
+
+    monkeypatch.setattr(uc, "api_get", lambda path, **kw: {"components": rows, "pending": 0})
+    monkeypatch.setattr(uc, "api_post", fake_post)
+    monkeypatch.setattr(
+        uc,
+        "_poll_job",
+        lambda job_id, **kw: {
+            "id": job_id,
+            "state": "applied",
+            "component_result": {"status": "override"},
+        },
+    )
+    return posted
+
+
+def test_update_component_hermes_target_posts_the_vetted_sha(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    posted = _wire_component_cli(monkeypatch, [_component_row(id="hermes", status="pending")])
+    result = runner.invoke(app, ["update", "component", "hermes", "--target", _HERMES_PREV])
+    assert result.exit_code == 0, result.output
+    assert posted["path"] == "/api/updates/components/hermes/converge"
+    assert posted["json"] == {"target": _HERMES_PREV}
+
+
+def test_update_component_hermes_clear_override_posts_the_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    posted = _wire_component_cli(monkeypatch, [_component_row(id="hermes", status="override")])
+    result = runner.invoke(app, ["update", "component", "hermes", "--clear-override"])
+    assert result.exit_code == 0, result.output
+    assert posted["json"] == {"clear_override": True}
+
+
+@pytest.mark.parametrize("bad", ["f" * 40, "0.19.0", "==0.19.0", _HERMES_PIN[:12], "v2026.7.20"])
+def test_update_component_hermes_target_refuses_anything_but_a_vetted_sha(
+    monkeypatch: pytest.MonkeyPatch, bad: str
+) -> None:
+    posted = _wire_component_cli(monkeypatch, [_component_row(id="hermes")])
+    result = runner.invoke(app, ["update", "component", "hermes", "--target", bad])
+    assert result.exit_code == 1
+    assert "VETTED_HERMES_REFS" in result.output
+    assert posted == {}, "a refused --target must not reach the API"
+
+
+def test_update_component_target_is_refused_for_other_components(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    posted = _wire_component_cli(monkeypatch, [_component_row(id="hindsight")])
+    result = runner.invoke(app, ["update", "component", "hindsight", "--target", _HERMES_PREV])
+    assert result.exit_code == 1 and "not supported" in result.output
+    assert posted == {}
+
+
+def test_update_component_check_cannot_be_combined_with_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    posted = _wire_component_cli(monkeypatch, [_component_row(id="hermes")])
+    result = runner.invoke(
+        app, ["update", "component", "hermes", "--check", "--target", _HERMES_PREV]
+    )
+    assert result.exit_code == 1 and "--check" in result.output
+    assert posted == {}
+
+
+def test_update_status_shows_a_hermes_override_with_both_shas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    row = _component_row(
+        id="hermes",
+        name="Hermes",
+        status="override",
+        installed=_HERMES_PREV[:12],
+        pinned=_HERMES_PIN[:12],
+        override=_HERMES_PREV,
+    )
+
+    def fake_get(path: str, **kwargs: object) -> dict:
+        if path == "/api/updates/components":
+            return {"components": [row], "pending": 0}
+        return {
+            "current": "1.0.0",
+            "latest": "1.0.0",
+            "channel": "stable",
+            "update_available": False,
+            "manifest": {},
+        }
+
+    monkeypatch.setattr(uc, "api_get", fake_get)
+    result = runner.invoke(app, ["update", "status"])
+    assert result.exit_code == 0, result.output
+    assert "override" in result.output
+    assert _HERMES_PIN[:12] in result.output and _HERMES_PREV[:12] in result.output
+    assert "--clear-override" in result.output
+
+
 # ── `hal0 update owui` (thin client rework; --tag GONE) ─────────────────────────
 
 

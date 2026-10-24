@@ -1766,10 +1766,18 @@ def repair_hermes_mcp_client(
     # is never started (#2822/#2823), and as the unprivileged hal0 user it goes
     # through the hal0-systemctl seam rather than a bare systemctl (#2828).
     from hal0.agents import hermes_release as rel
+    from hal0.components.hermes_arm import override_build_ref
 
+    # The cure rebuilds the commit the box runs: a `--target` override, not the
+    # pin (an unvetted override is refused rather than built over).
+    override_ref, override_error = override_build_ref()
+    if override_error is not None:
+        log.warning("updater.hermes_venv_repair_refused", job_id=job_id, error=override_error)
+        return False
     outcome = rel.ensure_release(
         caller="repair",
         venv=venv,
+        ref=override_ref,
         force=True,
         reason="mcp client import failed",
         wait=False,

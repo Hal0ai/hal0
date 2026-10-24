@@ -147,8 +147,6 @@ class BootstrapState:
     hermes_home: str = "/var/lib/hal0/.hermes"
     venv: str = "/var/lib/hal0/venvs/hermes"
     agent_id: str = "hermes"
-    #: A vetted ref other than the pin (``hal0 agent upgrade hermes --to``).
-    ref: str | None = None
     #: The terminal decision config_write APPLIED this run (env, marker, config,
     #: default), so later phases gate profiles on it rather than on a marker a
     #: non-root run may have failed to replace (#2878).
@@ -931,7 +929,7 @@ VETTED_HERMES_REFS: frozenset[str] = frozenset(
 )
 
 #: The upstream release each vetted ref is, for ordering two vetted refs.
-#: ``hal0 agent upgrade hermes --to`` refuses to build an older one over a
+#: ``hal0 update component hermes --target`` refuses to build an older one over a
 #: newer one's ``state.db``: upstream's own ``hermes update`` refuses that
 #: downgrade, and hal0's release switch snapshots only ``config.yaml``, so the
 #: persisted gateway runtime state (session guards, policy receipts) would run
@@ -1266,12 +1264,19 @@ def _phase_install(ctx: _StepCtx) -> PhaseResult:
     # flip-back on failure, writes the venv.pin stamp and prunes. A host that
     # needs nothing returns ``converged`` without building.
     offline = _truthy_env("HAL0_HERMES_OFFLINE")
+    # A `hal0 update component hermes --target` override is what this box runs:
+    # a repair or reprovision rebuilds that commit, never the pin over it.
+    from hal0.components.hermes_arm import override_build_ref
+
+    override_ref, override_error = override_build_ref()
+    if override_error is not None:
+        return PhaseResult(status=PhaseStatus.FAIL, reason=override_error, details=details)
     try:
         outcome = ctx.io.ensure_release(
             caller="provision",
             venv=venv,
             requirements=requirements,
-            ref=state.ref,
+            ref=override_ref,
             force=reinstall_reason is not None,
             reason=reinstall_reason,
             wait=True,
@@ -9202,7 +9207,6 @@ def install_hermes(
     state_root: Path | None = None,
     write_report: bool = True,
     verbose: bool = False,
-    ref: str | None = None,
 ) -> InstallReport:
     """Provision Hermes in one linear, convergent pass.
 
@@ -9222,7 +9226,7 @@ def install_hermes(
     is the whole public contract; tests point them at a tmp tree.
     """
     io = io if io is not None else InstallIO()
-    state = BootstrapState(hermes_home=str(hermes_home), venv=str(venv), agent_id=agent_id, ref=ref)
+    state = BootstrapState(hermes_home=str(hermes_home), venv=str(venv), agent_id=agent_id)
 
     # RATIFIED 2026-07-18 (inc-1 deliverable 6): `--repair` reconciles ownership
     # drift BEFORE the converging writes, so a root-clobbered HERMES_HOME/venv is
@@ -9383,7 +9387,6 @@ def bootstrap_cli(
     repair: bool,
     verbose: bool = False,
     state_root: Path | None = None,
-    ref: str | None = None,
 ) -> int:
     """CLI entry point — thin delegator to :func:`install_hermes`.
 
@@ -9395,7 +9398,7 @@ def bootstrap_cli(
     mode, so "dry run" only ever meant "real install, no report" and phase
     skipping was silently dropped. The CLI now refuses both flags up front.
     """
-    report = install_hermes(repair=repair, state_root=state_root, verbose=verbose, ref=ref)
+    report = install_hermes(repair=repair, state_root=state_root, verbose=verbose)
     if verbose:
         target = (state_root or _DEFAULT_STATE_ROOT) / _STATE_FILE_NAME
         print(f"state: {target}")
