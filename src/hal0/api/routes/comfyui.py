@@ -703,12 +703,17 @@ async def comfyui_model_install(model_id: str, request: Request) -> JSONResponse
 
     Refused before any job exists with 404 ``comfyui.model_unknown``, 409
     ``comfyui.install_running`` (its job rides in ``error.details.job``), 409
-    ``comfyui.model_installed``, 409 ``comfyui.staging_cross_device`` (download staging
-    and models tree on two filesystems), 409 ``comfyui.models_dir_not_writable`` (a
-    destination directory the hal0 user cannot write; ``error.details.path``) and 507
-    ``comfyui.insufficient_disk``. The job then runs in the background; follow it on
-    ``GET /jobs``. A finished job stays listed until the next install of the model
-    replaces it.
+    ``comfyui.model_installed`` (every weight is on disk and its workflow is provisioned),
+    409 ``comfyui.staging_cross_device`` (download staging and models tree on two
+    filesystems), 409 ``comfyui.models_dir_not_writable`` (a destination directory the
+    hal0 user cannot write; ``error.details.path``) and 507 ``comfyui.insufficient_disk``.
+    The job then runs in the background; follow it on ``GET /jobs``. A finished job stays
+    listed until the next install of the model replaces it.
+
+    A model whose weights are all on disk but whose workflow is not (another model loading
+    the same files completed it, or the weights were put there by hand) is not refused:
+    the job downloads nothing and writes the workflow, the only thing the launcher lists.
+    The download guards (one filesystem, writable destinations, free space) are skipped then.
     """
     model = _require_model(model_id)
     jobs = _install_jobs(request)
@@ -716,16 +721,18 @@ async def comfyui_model_install(model_id: str, request: Request) -> JSONResponse
         existing = jobs.get(model_id)
         if existing is not None and existing.state in _ACTIVE_JOB_STATES:
             raise _install_running(model, existing)
-        if install_state(model).state == "complete":
+        state = install_state(model)
+        provisioned = (comfyui_paths.workflows_dir() / model.workflow_filename).is_file()
+        if state.state == "complete" and provisioned:
             raise Conflict(
                 f"{model.label} is already installed",
                 code="comfyui.model_installed",
                 details={"model_id": model_id},
             )
-        # Past the complete check something is always missing, so every guard applies.
-        comfyui_install.require_one_filesystem()
-        comfyui_install.require_writable_destinations(model)
-        comfyui_install.preflight_disk(model)
+        if state.missing:  # the guards are about downloads; a workflow write needs none
+            comfyui_install.require_one_filesystem()
+            comfyui_install.require_writable_destinations(model)
+            comfyui_install.preflight_disk(model)
         job = make_job(model_id)
         jobs[model_id] = job
         _schedule_install(request, model, job)

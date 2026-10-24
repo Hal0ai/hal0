@@ -1305,6 +1305,25 @@ def test_install_models_blocking_downloads_for_real(monkeypatch: pytest.MonkeyPa
     assert (paths.workflows_dir() / model.workflow_filename).is_file()
 
 
+def test_install_models_blocking_provisions_a_missing_workflow_for_a_complete_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Setup never skips a complete model: its workflow is written without a request."""
+    model = _fake_model()
+    monkeypatch.setitem(CATALOG, model.id, model)
+    for component in model.components:
+        _touch(component)
+    hub = _Hub()
+    real = httpx.AsyncClient
+    monkeypatch.setattr(
+        install.httpx, "AsyncClient", lambda **kw: real(transport=hub.transport, **kw)
+    )
+
+    assert install.install_models_blocking([model.id], hf_token=None) == [(model.id, "completed")]
+    assert (paths.workflows_dir() / model.workflow_filename).is_file()
+    assert hub.requests == []
+
+
 def test_install_models_blocking_reports_unknown_ids_and_carries_on(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
