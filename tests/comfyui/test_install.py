@@ -6,6 +6,7 @@ import hashlib
 import json
 from collections import namedtuple
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -523,6 +524,173 @@ async def test_run_install_signals_each_state_transition(monkeypatch: pytest.Mon
     assert job.state == "completed"
 
 
+# ── same-filesystem guard ───────────────────────────────────────────────────
+
+
+def _split_devices(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Put the registry staging dir on 'another device'; return it."""
+    staging = tmp_path / "other-disk" / ".tmp"
+    staging.mkdir(parents=True)  # a separate mount exists before anything is installed
+    monkeypatch.setattr(install, "_tmp_dir", lambda: staging)
+    monkeypatch.setattr(
+        install, "_device_of", lambda p: 2 if Path(p).is_relative_to(staging.parent) else 1
+    )
+    return staging
+
+
+async def test_install_fails_fast_on_cross_device_staging(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A finished download cannot be renamed across filesystems; refuse before streaming any."""
+    staging = _split_devices(monkeypatch, tmp_path)
+    model = _fake_model()
+    hub = _Hub()
+    called: list[str] = []
+
+    async def on_complete(m: ImageModel) -> None:
+        called.append(m.id)
+
+    job = await _install(model, hub.transport, on_complete=on_complete)
+
+    assert hub.requests == []  # not one byte was requested
+    assert job.state == "failed"
+    assert job.error_code == "comfyui.staging_cross_device"
+    assert str(paths.models_root()) in (job.error or "")
+    assert str(staging) in (job.error or "")
+    assert "same filesystem as the model store" in (job.error or "")
+    assert "HAL0_COMFYUI_DATA_ROOT" in (job.error or "")
+    assert job.finished_at is not None
+    assert install_state(model).state == "none"
+    assert not (paths.workflows_dir() / model.workflow_filename).exists()
+    assert called == []
+
+
+def test_cross_device_error_names_both_paths(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = _split_devices(monkeypatch, tmp_path)
+
+    with pytest.raises(install.InstallStagingCrossDevice) as excinfo:
+        install._require_one_filesystem()
+
+    assert excinfo.value.code == "comfyui.staging_cross_device"
+    assert excinfo.value.status == 409
+    assert excinfo.value.details == {
+        "models_root": str(paths.models_root()),
+        "staging_dir": str(staging),
+    }
+
+
+async def test_cross_device_layout_does_not_block_an_install_with_nothing_to_download(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _split_devices(monkeypatch, tmp_path)
+    model = _fake_model()
+    _touch(_CKPT)
+    _touch(_VAE)
+
+    job = await _install(model, _Hub().transport)
+
+    assert job.state == "completed", job.error
+    assert (paths.workflows_dir() / model.workflow_filename).is_file()
+
+
+async def test_an_unmeasurable_device_does_not_block_the_install(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unreadable(path: Path) -> int:
+        raise PermissionError("no stat")
+
+    monkeypatch.setattr(install, "_device_of", unreadable)
+
+    job = await _install(_fake_model(), _Hub().transport)
+
+    assert job.state == "completed", job.error  # the rename itself is the arbiter
+
+
+# ── progress ────────────────────────────────────────────────────────────────
+
+
+async def test_install_progress_total_spans_all_components() -> None:
+    """The total covers every component from the start, so the bar cannot hit 100% early."""
+    a, b = _FILES[_CKPT.hf_path], _FILES[_VAE.hf_path]
+    model = _fake_model(
+        components=(
+            replace(_CKPT, approx_gb=len(a) / 1e9),  # estimates equal to the served sizes
+            replace(_VAE, approx_gb=len(b) / 1e9),
+        )
+    )
+    job = make_job(model.id)
+    inner = _Hub()._handle
+    seen: list[tuple[int, int]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((job.bytes_downloaded, job.bytes_total))
+        return inner(request)
+
+    await _install(model, httpx.MockTransport(handler), job=job)
+
+    total = len(a) + len(b)
+    # Before the first byte, and again once the first component has landed.
+    assert seen == [(0, total), (len(a), total)]
+    assert job.bytes_downloaded == job.bytes_total == total
+
+
+async def test_install_total_stays_whole_while_a_component_streams() -> None:
+    """Once the server reports a file's length, the job total is that plus the other files."""
+    first = b"f" * (_CHUNK_BYTES * 2)
+    second = _FILES[_VAE.hf_path]
+    model = _fake_model(
+        components=(
+            replace(_CKPT, approx_gb=len(first) / 1e9),
+            replace(_VAE, approx_gb=len(second) / 1e9),
+        )
+    )
+    job = make_job(model.id)
+    midway: list[tuple[int, int]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if not request.url.path.endswith(_CKPT.hf_path):
+            return _serve(request, second)
+
+        async def chunks():
+            yield first[:_CHUNK_BYTES]
+            midway.append((job.bytes_downloaded, job.bytes_total))
+            yield first[_CHUNK_BYTES:]
+
+        sha = hashlib.sha256(first).hexdigest()
+        return httpx.Response(
+            200,
+            content=chunks(),
+            headers={"Content-Length": str(len(first)), "X-Linked-ETag": f'"{sha}"'},
+        )
+
+    await _install(model, httpx.MockTransport(handler), job=job)
+
+    assert midway == [(_CHUNK_BYTES, len(first) + len(second))]
+    assert job.bytes_downloaded == job.bytes_total == len(first) + len(second)
+
+
+async def test_install_total_starts_as_the_catalog_estimate_and_ends_exact() -> None:
+    model = _fake_model()  # approx_gb 0.001 per component, far from the served sizes
+    job = make_job(model.id)
+    inner = _Hub()._handle
+    seen: list[tuple[int, int]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((job.bytes_downloaded, job.bytes_total))
+        return inner(request)
+
+    await _install(model, httpx.MockTransport(handler), job=job)
+
+    estimate = round(0.001 * 1e9)
+    assert seen[0] == (0, 2 * estimate)
+    # The first file's real size has replaced its estimate; the second is still an estimate.
+    assert seen[1] == (len(_FILES[_CKPT.hf_path]), len(_FILES[_CKPT.hf_path]) + estimate)
+    assert job.bytes_downloaded == job.bytes_total == sum(len(v) for v in _FILES.values())
+    assert [f.bytes_total for f in job.files] == [len(v) for v in _FILES.values()]
+
+
 # ── staging ─────────────────────────────────────────────────────────────────
 
 
@@ -602,6 +770,51 @@ def test_remove_reports_nested_relpaths_from_the_models_root() -> None:
     assert not lora.dest.exists()
 
 
+def test_remove_model_deletes_its_workflow() -> None:
+    model = _fake_model()
+    other = _fake_model(id="fake-other")
+    for component in model.components:
+        _touch(component)
+    wf = paths.workflows_dir()
+    wf.mkdir(parents=True)
+    (wf / model.workflow_filename).write_text("{}", encoding="utf-8")
+    (wf / other.workflow_filename).write_text("{}", encoding="utf-8")
+
+    removed = install.remove_model(model)
+
+    assert removed == [
+        "checkpoints/fake-a.safetensors",
+        "vae/fake-b.safetensors",
+        "workflows/fake-model.json",
+    ]
+    assert not (wf / model.workflow_filename).exists()
+    assert (wf / other.workflow_filename).exists()  # another model's workflow is not ours
+
+
+def test_remove_model_deletes_the_workflow_even_when_every_weight_is_shared() -> None:
+    """The workflow file is per model id; weights shared with a complete model do not keep it."""
+    qwen = _complete("qwen-image")
+    _complete("qwen-image-lightning")  # shares all three of qwen-image's files
+    wf = paths.workflows_dir()
+    wf.mkdir(parents=True)
+    (wf / qwen.workflow_filename).write_text("{}", encoding="utf-8")
+
+    assert install.remove_model(qwen) == ["workflows/qwen-image.json"]
+    assert install_state(qwen).state == "complete"
+
+
+async def test_install_then_remove_leaves_nothing_behind() -> None:
+    model = _fake_model()
+    await _install(model, _Hub().transport)
+    assert (paths.workflows_dir() / model.workflow_filename).is_file()
+
+    removed = install.remove_model(model)
+
+    assert removed[-1] == "workflows/fake-model.json"
+    assert install_state(model).state == "none"
+    assert list(paths.workflows_dir().iterdir()) == []
+
+
 # ── preflight_disk ──────────────────────────────────────────────────────────
 
 _Usage = namedtuple("_Usage", "total used free")
@@ -645,65 +858,16 @@ def test_preflight_disk_counts_only_what_is_missing(monkeypatch: pytest.MonkeyPa
     install.preflight_disk(model)  # nothing left to download
 
 
-def test_preflight_disk_measures_the_nearest_existing_ancestor(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    assert not paths.models_root().exists()
+def test_preflight_disk_measures_the_models_root_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One filesystem holds both the staging dir and the models tree, so one probe is enough."""
+    assert not paths.models_root().exists()  # a fresh store: the nearest ancestor is measured
     probed = _free_space(monkeypatch, lambda path: 10**15)
-
-    install.preflight_disk(CATALOG["sd-1.5-pruned-emaonly"])
-
-    assert probed
-    assert all(p.exists() for p in probed)
-
-
-def test_preflight_disk_checks_the_staging_filesystem_too(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """The bytes are staged in the registry tmp dir, which can be on another device."""
-    staging = tmp_path / "other-disk" / ".tmp"
-    staging.mkdir(parents=True)
-    models = paths.models_root()
-    models.mkdir(parents=True)
-    monkeypatch.setattr(install, "_tmp_dir", lambda: staging)
-    monkeypatch.setattr(
-        install, "_device_of", lambda p: 2 if Path(p).is_relative_to(staging) else 1
-    )
-    _free_space(monkeypatch, lambda path: 1 if path == staging else 10**15)
-
-    with pytest.raises(install.InstallInsufficientDisk) as excinfo:
-        install.preflight_disk(CATALOG["sd-1.5-pruned-emaonly"])
-
-    assert excinfo.value.details["path"] == str(staging)
-    assert excinfo.value.details["free_bytes"] == 1
-
-
-def test_preflight_disk_names_the_models_root_when_it_is_the_short_one(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    staging = tmp_path / "other-disk" / ".tmp"
-    staging.mkdir(parents=True)
-    models = paths.models_root()
-    models.mkdir(parents=True)
-    monkeypatch.setattr(install, "_tmp_dir", lambda: staging)
-    monkeypatch.setattr(
-        install, "_device_of", lambda p: 2 if Path(p).is_relative_to(staging) else 1
-    )
-    _free_space(monkeypatch, lambda path: 10**15 if path == staging else 1)
-
-    with pytest.raises(install.InstallInsufficientDisk) as excinfo:
-        install.preflight_disk(CATALOG["sd-1.5-pruned-emaonly"])
-
-    assert excinfo.value.details["path"] == str(models)
-
-
-def test_preflight_disk_measures_a_shared_device_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    probed = _free_space(monkeypatch, lambda path: 10**15)
-    # models_root and the staging dir both live under the one store in this fixture.
 
     install.preflight_disk(CATALOG["sd-1.5-pruned-emaonly"])
 
     assert len(probed) == 1
+    assert probed[0].exists()
+    assert paths.models_root().is_relative_to(probed[0])
 
 
 # ── install_models_blocking ─────────────────────────────────────────────────
@@ -793,6 +957,8 @@ def test_error_classes_carry_their_codes() -> None:
     assert install.ImageModelNotFound.status == 404
     assert install.InstallInsufficientDisk.code == "comfyui.insufficient_disk"
     assert install.InstallInsufficientDisk.status == 507
+    assert install.InstallStagingCrossDevice.code == "comfyui.staging_cross_device"
+    assert install.InstallStagingCrossDevice.status == 409
 
 
 def test_install_exposes_the_one_hf_token_helper() -> None:
