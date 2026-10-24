@@ -24,6 +24,7 @@ import {
   useStackSnapshot,
 } from '@/api/hooks/useStacks'
 import { useModels } from '@/api/hooks/useModels'
+import { modelFitsSlot } from '@/lib/slotModelFit'
 import { useProfiles } from '@/api/hooks/useProfiles'
 import { useSlots } from '@/api/hooks/useSlots'
 import { useSystemInfo } from '@/api/hooks/useRuntimes'
@@ -648,7 +649,9 @@ export function StackDrawer({ mode, source, existing = [], onClose, onSaved }) {
                     <select className="pf-input mono" value={s.model}
                       onChange={e => setSlot(i, 'model', e.target.value)} data-testid={`st-slot-model-${i}`}>
                       <option value="">— model —</option>
-                      {models.map(m => <option key={m.id} value={m.id}>{m.id}</option>)}
+                      {/* Engine fit: FLM models only under an NPU device, GGUF only off it. The
+                          current pick stays listed so a persisted mismatch is visible, not blanked. */}
+                      {models.filter(m => m.id === s.model || modelFitsSlot(m, { device: s.device })).map(m => <option key={m.id} value={m.id}>{m.id}</option>)}
                     </select>
                   </label>
                   <label className="st-fld">

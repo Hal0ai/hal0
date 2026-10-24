@@ -18,16 +18,19 @@
 const { useState: useStateSM } = React;
 
 import { useNpuOccupancy } from '@/api/hooks/useNpuOccupancy'
+import { useModels } from '@/api/hooks/useModels'
 import { useStatsHardware } from '@/api/hooks/useStatsHardware'
 import { useSlotRestart, useSlotUnload, useSlotLoad, useSlotEdit, useSlotConfig } from '@/api/hooks/useSlots'
-import { SlotControls, slotCtrlPhase } from './inference-pane.jsx'
+import { SlotControls, slotCtrlPhase, modelPickerOptions } from './inference-pane.jsx'
+import { RichSelect } from './rich-select.jsx'
+import { compatibleModels } from './slots/slot-shared.js'
 import { slotIndicatorFromPhase } from './slot-status.js'
 // devKind — one shared, meta-aware helper (src/lib/deviceMeta.ts); replaces
 // the local copy (which also mis-classified backend tokens like "flm" —
 // the shared helper folds them through backend_to_device → npu).
 import { devKind } from '@/lib/deviceMeta'
 import { PillToggle } from './primitives.jsx'
-import { npuPillOn, npuRoleForSlot, isNpuShadowSlot } from './npu-modality.js'
+import { npuPillOn, npuModalityOn, npuApplyBody, npuRoleForSlot, isNpuShadowSlot } from './npu-modality.js'
 
 // ─── icons (16×16, hal0 thin-line family — ported from the design) ─────────
 const NI = ({ d, size = 16, sw = 1.5, children, fill = 'none' }) => (
@@ -271,8 +274,58 @@ export function TileStrip({ owners, ownerName, act = 0, w = 10, h = 10 }) {
   )
 }
 
+// ═══ model picker (per-slot card) ═══════════════════════════════════════
+// The same RichSelect + chip rows the inference cards use (modelPickerOptions:
+// quant chip, runtime chip — `dev-npu` purple for flm — and ModalityTag), fed
+// by the shared compatibleModels() list so it offers ONLY FLM models of this
+// card's role (slot.type: llm -> chat, transcription -> STT, embedding -> embed).
+//
+// Only the CHAT anchor can change model: FLM's --asr / --embed are booleans
+// that load its single bundled whisper / embed-gemma (providers/flm.py), so a
+// stt/embed card has no per-role model to write. It still renders the same
+// control, read-only, so the three cards read as one family.
+function NpuModelPicker({ slot, models, role, disabled, onPick }) {
+  const rows = compatibleModels(models, { type: slot.type, slot })
+  // The CONFIGURED tag first (#1388 ordering), live id as fallback; the legacy
+  // `-FLM` suffix is stripped for display only.
+  const raw = String(slot.modelDefault || slot.model_id || slot.model || '')
+  // A slot may still be bound to the pre-#1629 generated `<tag>-FLM` id, or to
+  // FLM's native colon tag while the row carries the `-FLM` id: match all three.
+  const row = rows.find(
+    (m) =>
+      m.id === raw ||
+      (Array.isArray(m.aliases) && m.aliases.includes(raw)) ||
+      m.id === raw.replace(':', '-') + '-FLM',
+  )
+  const cur = row ? row.id : raw
+  const options = modelPickerOptions({
+    s: { ...slot, model: raw.replace(/-FLM$/, '') },
+    opts: rows,
+    cur,
+    has: !!row,
+    allSlots: [],
+    verdictFor: null,
+  })
+  const readOnly = role !== 'chat'
+  return (
+    <span className="model-picker-cell" onClick={(e) => e.stopPropagation()}>
+      <RichSelect
+        className="model-picker"
+        value={cur}
+        options={options}
+        disabled={disabled || readOnly}
+        aria-label={`Model for ${slot.name}`}
+        data-testid={`npu-model-${slot.name}`}
+        onChange={(id) => {
+          if (id && id !== cur) onPick(id)
+        }}
+      />
+    </span>
+  )
+}
+
 // ═══ per-slot card (right rail) ════════════════════════════════════════
-function ComboSlot({ slot, occ, owners, hue, handlers, act = 0, anchorNpu }) {
+function ComboSlot({ slot, occ, owners, hue, handlers, act = 0, anchorNpu, models }) {
   const ind = slotIndicatorFromPhase(slot)
   // Signal from BOTH the slot's own phase and the NPU occupancy's synthesised
   // state. The slot phase is authoritative for the anchor (esp. actively
@@ -304,13 +357,12 @@ function ComboSlot({ slot, occ, owners, hue, handlers, act = 0, anchorNpu }) {
   // for this slot class (trio slots never load as their own process; the
   // anchor's id lags while stopped), so leading with it made this card
   // disagree with the edit drawer about which model the slot runs.
-  const model = String(slot.modelDefault || slot.model_id || slot.model || occ?.model || '').replace(/-FLM$/, '')
+  const role = npuRoleForSlot(slot)
   return (
     <div className={'cslot' + (running ? ' running' : ' dim')} style={{ '--slot-hue': hue.hue, '--slot-fg': hue.fg }}>
       <div className="cslot-top">
         <span className={'ldot ' + dotCls} />
         <span className="nm">{slot.name}</span>
-        <span className="md">{model || '—'}</span>
         <span className="grow" />
         <span className="cslot-mx">
           <span className="tps">
@@ -326,6 +378,15 @@ function ComboSlot({ slot, occ, owners, hue, handlers, act = 0, anchorNpu }) {
           </span>
         </span>
       </div>
+      <div className="cslot-model">
+        <NpuModelPicker
+          slot={slot}
+          models={models}
+          role={role}
+          disabled={handlers.modalityBusy || (role === 'chat' && !npuPillOn(slot, anchorNpu, role))}
+          onPick={handlers.onModel}
+        />
+      </div>
       <div className="cslot-foot">
         <span className="grow" />
         {/* The pills APPLY the modality directly (PUT [npu] on the anchor +
@@ -339,7 +400,6 @@ function ComboSlot({ slot, occ, owners, hue, handlers, act = 0, anchorNpu }) {
             anchor's stale/pending `npu.asr=true` renders the pill ON while
             nothing actually routes (#1661). */}
         {(() => {
-          const role = npuRoleForSlot(slot)
           const roleLabel = role === 'asr' ? 'STT' : role === 'embed' ? 'Embed' : 'Chat'
           return (
             <span style={{display: 'flex', alignItems: 'center', gap: 8, fontSize: 11}}>
@@ -366,6 +426,7 @@ export function NpuOccupancyCard({ slots }) {
   const unloadMut = useSlotUnload()
   const loadMut = useSlotLoad()
   const editMut = useSlotEdit()
+  const modelsQuery = useModels()
 
   // The ANCHOR is resolved structurally — the non-shadow NPU LLM slot — not
   // by the canonical 'flm' display name. A renamed or legacy anchor ('npu')
@@ -475,17 +536,41 @@ export function NpuOccupancyCard({ slots }) {
     // Partial write on purpose: the backend one-level-deep-merges [npu]
     // (merge_slot_config), so sending only the flipped key can never clobber
     // sibling modalities off a stale or still-loading client snapshot.
+    writeAnchor({ npu: { [role]: next } }, `NPU ${role} ${next ? 'on' : 'off'}`)
+  }
+
+  // Chat-model pick: the drawer's applyNpu contract (slot-modals.jsx), body
+  // built by the SAME npuApplyBody helper — all three [npu] booleans from the
+  // anchor's current config + `[model].default` = the picked id, then a cold
+  // restart. Only the chat anchor reaches here (stt/embed pickers are
+  // read-only: FLM has no per-role model flag).
+  const applyModel = (id) => {
+    if (!anchorSlot || !id) return
+    writeAnchor(
+      npuApplyBody({
+        chat: npuModalityOn(anchorNpu, 'chat'),
+        asr: npuModalityOn(anchorNpu, 'asr'),
+        embed: npuModalityOn(anchorNpu, 'embed'),
+        chatModel: id,
+      }),
+      'NPU chat model updated'
+    )
+  }
+
+  // PUT the anchor's config, then cold-restart it (the drawer's two calls).
+  const writeAnchor = (body, label) => {
+    if (!anchorSlot || editMut.isPending || restartMut.isPending) return
     editMut.mutate(
-      { name: anchorSlot.name, body: { npu: { [role]: next } } },
+      { name: anchorSlot.name, body },
       {
         onSuccess: () => {
-          toast(`${anchorSlot.name} NPU ${role} ${next ? 'on' : 'off'} — restarting`, 'info')
+          toast(`${anchorSlot.name} ${label} — restarting`, 'info')
           restartMut.mutate(anchorSlot.name, {
             onError: (err) =>
               toast(`NPU restart failed — ${err?.message || 'see logs'}`, 'warn'),
           })
         },
-        onError: (err) => toast(err?.message || `NPU ${role} toggle failed`, 'warn'),
+        onError: (err) => toast(err?.message || `${label} change failed`, 'warn'),
       }
     )
   }
@@ -501,6 +586,7 @@ export function NpuOccupancyCard({ slots }) {
       window.dispatchEvent(new CustomEvent('hal0:slot-logs', { detail: { name: s.name } }))
     },
     onModality: applyModality,
+    onModel: applyModel,
     modalityBusy: editMut.isPending || restartMut.isPending,
   }
 
@@ -573,6 +659,7 @@ export function NpuOccupancyCard({ slots }) {
                   handlers={handlers}
                   act={act}
                   anchorNpu={anchorNpu}
+                  models={modelsQuery.data}
                 />
               ))}
             </div>

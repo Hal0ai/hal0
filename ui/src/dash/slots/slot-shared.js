@@ -8,6 +8,7 @@
 
 import { normalizeApiModel, isUpstreamModel } from '@/lib/normalizeApiModel'
 import { devKind } from '@/lib/deviceMeta'
+import { modelFitsSlot } from '@/lib/slotModelFit'
 import { isNpuShadowSlot } from '../npu-modality.js'
 
 // Local (non-upstream) models a slot can bind — a slot binds a local file path,
@@ -16,6 +17,20 @@ import { isNpuShadowSlot } from '../npu-modality.js'
 // the model first and derives the type/device from it.
 export function localModels(models) {
   return (models ?? []).map(normalizeApiModel).filter((m) => !isUpstreamModel(m));
+}
+
+// The models a given slot may bind — the ONE list behind every slot model
+// dropdown (inference card picker, slot drawer, swap popover, NPU card picker).
+// Normalized rows of the requested slot `type`, minus:
+//   - upstream-advertised rows: a slot binds a local file path and these have
+//     none (they'd render as "will pull" and then 422);
+//   - engine mismatches (modelFitsSlot): FLM models appear only on NPU/FLM slots,
+//     never on a llama.cpp slot, and an FLM slot is offered only FLM models.
+// The server refuses the same pairs (slots.config_write.check_model_fits_slot).
+export function compatibleModels(models, { type, slot }) {
+  return (models ?? [])
+    .map(normalizeApiModel)
+    .filter((m) => m.type === type && !isUpstreamModel(m) && modelFitsSlot(m, slot));
 }
 
 // Device token derived from a model's backends/device — a model's backends

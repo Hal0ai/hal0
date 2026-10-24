@@ -351,10 +351,40 @@ describe('ModelPicker (card-dropdowns Task 1)', () => {
     expect(optionById(host, 'm3')).toBeNull()
   })
 
+  it('never offers an FLM (NPU) model on a llama.cpp slot, and offers only FLM on an NPU slot', () => {
+    const flm = { ...M2, id: 'm2flm', provider_effective: 'flm' }
+    const probe = { id: 'qwen3-4b-FLM', longName: 'qwen3-4b-FLM', type: 'llm', backend: 'flm', installed: true }
+    const gpu = mount(
+      <ModelPicker s={SLOT} models={[M1, flm, probe]} allSlots={ALL_SLOTS} disabled={false} onSwap={() => {}} />,
+    )
+    openMenu(gpu.host, 'chat')
+    expect(optionEls(gpu.host).map((o) => o.getAttribute('data-option-id')).filter(Boolean)).toEqual(['m1'])
+    const npu = mount(
+      <ModelPicker
+        s={{ ...SLOT, device: 'npu' }}
+        models={[M1, flm, probe]}
+        allSlots={ALL_SLOTS}
+        disabled={false}
+        onSwap={() => {}}
+      />,
+    )
+    openMenu(npu.host, 'chat')
+    expect(optionEls(npu.host).map((o) => o.getAttribute('data-option-id')).filter(Boolean)).toEqual([
+      'm2flm',
+      'qwen3-4b-FLM',
+    ])
+  })
+
   it('shows the flm runtime as a purple (NPU-lane) chip on line 2', () => {
     const flm = { ...M2, id: 'm2flm', provider_effective: 'flm' }
     const { host } = mount(
-      <ModelPicker s={SLOT} models={[flm]} allSlots={ALL_SLOTS} disabled={false} onSwap={() => {}} />,
+      <ModelPicker
+        s={{ ...SLOT, device: 'npu' }}
+        models={[flm]}
+        allSlots={ALL_SLOTS}
+        disabled={false}
+        onSwap={() => {}}
+      />,
     )
     openMenu(host, 'chat')
     const row = optionById(host, 'm2flm')!
