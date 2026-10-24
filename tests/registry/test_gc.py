@@ -392,6 +392,38 @@ class TestReconcileStoreTree:
         for path in comfy_files:
             assert path.read_bytes() == b"comfy", path
 
+    @pytest.mark.parametrize("data_root_level", ["store_root", "above_store_root"])
+    def test_walks_nothing_when_the_store_is_inside_the_comfyui_data_root(
+        self, db_path: Path, tmp_path: Path, monkeypatch, data_root_level: str
+    ) -> None:
+        """When ``HAL0_COMFYUI_DATA_ROOT`` is the store root or a folder above
+        it, the whole store is ComfyUI's tree: pruning subdirectories is not
+        enough, because the files directly in the walk root (e.g.
+        ``extra_model_paths.yaml``) would still be reaped."""
+        store = tmp_path / "outer" / "store"
+        store.mkdir(parents=True)
+        monkeypatch.setenv("HAL0_MODEL_STORE", str(store))
+        data_root = store if data_root_level == "store_root" else store.parent
+        monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(data_root))
+        untracked = [
+            store / "extra_model_paths.yaml",
+            store / "workflows" / "f.json",
+            store / "models--org--repo" / "snapshots" / "rev" / "leftover.gguf",
+        ]
+        for path in untracked:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"untracked")
+
+        with connect(db_path) as conn:
+            migrate(conn)
+            report = gc.reconcile_store_tree(conn, dry_run=False)
+
+        assert report.orphans_found == 0
+        assert report.orphans_deleted == 0
+        assert report.errors == []
+        for path in untracked:
+            assert path.read_bytes() == b"untracked", path
+
     def test_dry_run_reports_without_unlinking(
         self, db_path: Path, tmp_path: Path, monkeypatch
     ) -> None:

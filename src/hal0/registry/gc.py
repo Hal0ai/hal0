@@ -353,7 +353,8 @@ def reconcile_store_tree(conn=None, *, dry_run: bool = True, max_files: int = 10
       * The ComfyUI data root is never walked. It follows the store, and its
         models, workflows, user data, custom nodes and ``extra_model_paths.yaml``
         have no ``store_blob`` / ``model_file`` row, so every file there would
-        look like bare bytes.
+        look like bare bytes. A data root that is the store root or contains it
+        leaves nothing to walk, so the pass reaps nothing.
       * Every unlink still passes through :func:`assert_under_store` (fail-fast).
       * The walk is bounded by ``max_files``; hitting the cap logs + records an
         error and stops rather than scanning an unbounded tree.
@@ -367,6 +368,12 @@ def reconcile_store_tree(conn=None, *, dry_run: bool = True, max_files: int = 10
     report = GCReport()
     root = store.store_root().resolve()
     if not root.is_dir():
+        return report
+    if is_under_data_root(root):
+        # The store sits inside ComfyUI's data root (the root is the store, or a
+        # folder above it), so everything the walk could reach is ComfyUI's:
+        # pruning subdirectories below would still leave the files directly in
+        # ``root`` (e.g. ``extra_model_paths.yaml``) reapable.
         return report
 
     tracked = _tracked_store_paths(conn)
