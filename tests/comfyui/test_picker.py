@@ -8,6 +8,8 @@ at ``tmp_path``), so "downloaded" here means the files really exist.
 from __future__ import annotations
 
 import json
+import logging
+import os
 import struct
 from pathlib import Path
 from typing import Any
@@ -182,6 +184,78 @@ def test_recommended_for_is_the_one_owner_of_the_starter_pick(
     hardware: HardwareInfo, expected: str
 ) -> None:
     assert picker.recommended_for(hardware) == expected
+
+
+# ── a models tree the service user cannot read ──────────────────────────────
+#
+# `GET /api/capabilities` builds the picker synchronously for every capability, so a raise here
+# is a 500 for the whole dashboard payload (voice and embed selections included).
+
+
+def _denied(*_args: Any, **_kwargs: Any) -> Any:
+    raise PermissionError(13, "Permission denied", "/srv/models/checkpoints")
+
+
+def test_an_unreadable_tree_lists_every_catalog_model_as_not_downloaded(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(picker, "install_state", _denied)
+    caplog.set_level(logging.WARNING, logger="hal0.comfyui.picker")
+
+    rows = picker.image_picker_rows(["gpu-vulkan"])
+
+    assert [r["id"] for r in rows] == _renderable_catalog_ids()
+    assert not any(r["downloaded"] for r in rows)
+    assert all(r["pullable"] for r in rows)  # still installable: the install route names the fix
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1  # once per call, not once per model
+    assert "/srv/models/checkpoints" in warnings[0].getMessage()
+
+
+def test_an_unreadable_checkpoint_scan_drops_only_the_user_checkpoint_rows(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _install("sdxl-lightning")
+    _checkpoint("mine.safetensors")
+    monkeypatch.setattr(picker.inventory, "list_files", _denied)
+    caplog.set_level(logging.WARNING, logger="hal0.comfyui.picker")
+
+    rows = _by_id(picker.image_picker_rows(["gpu-vulkan"]))
+
+    assert list(rows) == _renderable_catalog_ids()  # no ckpt/ rows, no raise
+    assert rows["sdxl-lightning"]["downloaded"] is True  # the catalog rows still read the disk
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "/srv/models/checkpoints" in warnings[0].getMessage()
+
+
+def test_a_readable_tree_logs_nothing(caplog: pytest.LogCaptureFixture) -> None:
+    _install("sdxl-lightning")
+    caplog.set_level(logging.WARNING, logger="hal0.comfyui.picker")
+
+    picker.image_picker_rows(["gpu-vulkan"])
+
+    assert caplog.records == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 directory")
+def test_a_models_dir_the_user_cannot_traverse_does_not_raise(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The real thing, not an injected error: ``Path.is_file()`` raises ``PermissionError`` below a
+    directory without the execute bit."""
+    root = paths.models_root()
+    (root / "checkpoints").mkdir(parents=True)
+    root.chmod(0o000)
+    caplog.set_level(logging.WARNING, logger="hal0.comfyui.picker")
+    try:
+        rows = picker.image_picker_rows(["gpu-vulkan"])
+    finally:
+        root.chmod(0o755)  # so tmp_path can be cleaned up
+
+    assert [r["id"] for r in rows] == _renderable_catalog_ids()
+    assert not any(r["downloaded"] for r in rows)
+    assert str(root) in next(r for r in caplog.records if r.levelno == logging.WARNING).getMessage()
 
 
 def test_a_user_checkpoint_is_a_downloaded_unpullable_row_under_its_api_id() -> None:
