@@ -323,8 +323,8 @@ function WorkflowsBlock({ flows = FLOWS_DEFAULT, comfyBaseUrl, max = 6, maxCusto
 
 // ── Models inventory ──────────────────────────────────────────────────────────
 // Labels for the backend's verified per-category weight-file counts
-// (src/hal0/api/routes/comfyui.py _INVENTORY_DIRS / _model_inventory —
-// counted on disk, never faked). Keys must stay in sync with that dict; an
+// (src/hal0/comfyui/inventory.py status_counts — counted on disk, never
+// faked). Keys must stay in sync with its _COUNT_GROUPS; an
 // unrecognised key still renders (falls back to the raw key) rather than
 // disappearing, so a new backend category is visible immediately.
 const INV_LABELS = {
@@ -364,7 +364,7 @@ function ModelsBlock({ inventory }) {
 // and on every poll error. Every field here is therefore reachable on a real
 // screen, not just in storybook. `inventory` is deliberately null: model
 // counts are the one thing the backend verifies by counting weight files on
-// disk (comfyui.py _model_inventory), so a fabricated count would be
+// disk (comfyui/inventory.py status_counts), so a fabricated count would be
 // indistinguishable from truth to the operator. null makes the pane hide the
 // models block until real data arrives, per the fresh-install contract.
 export const COMFYUI_V2_MOCK = {

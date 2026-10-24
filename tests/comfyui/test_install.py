@@ -571,7 +571,7 @@ def test_cross_device_error_names_both_paths(
     staging = _split_devices(monkeypatch, tmp_path)
 
     with pytest.raises(install.InstallStagingCrossDevice) as excinfo:
-        install._require_one_filesystem()
+        install.require_one_filesystem()
 
     assert excinfo.value.code == "comfyui.staging_cross_device"
     assert excinfo.value.status == 409

@@ -463,6 +463,9 @@ AUTONOMOUS_READ_TOOLS: frozenset[str] = frozenset(
         # ComfyUI
         "comfyui_status",
         "comfyui_workflows",
+        "comfyui_models",
+        "comfyui_jobs",
+        "comfyui_files",
         # Updater / doctor / health / features / metrics
         "updater_state",
         "updater_check",
@@ -542,6 +545,9 @@ AUTONOMOUS_WRITE_TOOLS: frozenset[str] = frozenset(
         "model_edit",
         "model_scan",
         "model_pull_cancel",
+        # Stops an in-flight image-model install; files that already landed stay and the
+        # install can be restarted, the same low blast radius as model_pull_cancel.
+        "comfyui_job_cancel",
         # Clears a TERMINAL pull job's bookkeeping only (409s if still
         # queued/running) — no bytes on disk are touched, and the job can
         # always be re-started via model_pull, so this is low-blast-radius
@@ -657,12 +663,15 @@ GATED_TOOLS: frozenset[str] = frozenset(
         "memory_directive_delete",
         # Services — start/stop/restart a systemd unit; destructive-adjacent.
         "service_action",
-        # ComfyUI — mode flips, model downloads, render cancel, container
-        # restart, prompt submission. comfyui_logs joins logs_tail/slot_logs
-        # under the MED-1 journald-secret precedent (redacted the same way).
+        # ComfyUI — mode flips, image-model installs and removals, render cancel,
+        # container restart, prompt submission. comfyui_model_remove deletes weight
+        # files, so it sits with the other destructive tools. comfyui_logs joins
+        # logs_tail/slot_logs under the MED-1 journald-secret precedent (redacted
+        # the same way).
         "comfyui_switchover",
         "comfyui_pin",
-        "comfyui_models_fetch",
+        "comfyui_model_install",
+        "comfyui_model_remove",
         "comfyui_render_cancel",
         "comfyui_restart",
         "comfyui_workflow_launch",
@@ -827,9 +836,14 @@ TOOL_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "GET:/api/comfyui/status": ("comfyui_status",),
     "GET:/api/comfyui/workflows": ("comfyui_workflows",),
     "GET:/api/comfyui/logs": ("comfyui_logs",),
+    "GET:/api/comfyui/models": ("comfyui_models",),
+    "GET:/api/comfyui/jobs": ("comfyui_jobs",),
+    "GET:/api/comfyui/files": ("comfyui_files",),
     "POST:/api/comfyui/switchover": ("comfyui_switchover",),
     "POST:/api/comfyui/pin": ("comfyui_pin",),
-    "POST:/api/comfyui/models/fetch": ("comfyui_models_fetch",),
+    "POST:/api/comfyui/models/{model_id}/install": ("comfyui_model_install",),
+    "DELETE:/api/comfyui/models/{model_id}": ("comfyui_model_remove",),
+    "POST:/api/comfyui/jobs/{model_id}/cancel": ("comfyui_job_cancel",),
     "POST:/api/comfyui/render/cancel": ("comfyui_render_cancel",),
     "POST:/api/comfyui/restart": ("comfyui_restart",),
     "POST:/api/comfyui/workflows/{name}/launch": ("comfyui_workflow_launch",),
@@ -1446,21 +1460,6 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
             },
         },
         "required": ["pinned"],
-    },
-    "comfyui_models_fetch": {
-        "properties": {
-            "auto": {
-                "type": "boolean",
-                "description": "Fetch the default variant for every ComfyUI capability (5 total)",
-            },
-            "selections": {
-                "type": "array",
-                "description": (
-                    "Explicit variants instead of 'auto': "
-                    "[{capability: 'txt2img', family: 'sdxl'}, ...]"
-                ),
-            },
-        },
     },
     "npu_backend_load": {
         "properties": {
@@ -2582,6 +2581,15 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     "comfyui_workflows": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
+    "comfyui_models": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "comfyui_jobs": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "comfyui_files": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
     "updater_state": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
@@ -2753,9 +2761,16 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     "comfyui_pin": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
-    # Triggers background HF-adjacent model-weight downloads.
-    "comfyui_models_fetch": ToolAnnotations(
+    # Starts a background Hugging Face weight download.
+    "comfyui_model_install": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
+    ),
+    # Deletes the model's weight files and workflow outright; a repeat finds nothing to remove.
+    "comfyui_model_remove": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
+    ),
+    "comfyui_job_cancel": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
     "comfyui_render_cancel": ToolAnnotations(
         readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
@@ -3069,6 +3084,9 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "service_health": "Stable 3-service (comfyui/hermes/openwebui) health summary for the Overview card.",
     "comfyui_status": "Aggregate ComfyUI engine status — container/systemd/HTTP reachability, queue, arbiter mode.",
     "comfyui_workflows": "List launchable ComfyUI workflow templates (bind-mounted dirs).",
+    "comfyui_models": "List the image-model catalog with each model's install state, latest install job and recommended flag.",
+    "comfyui_jobs": "List the latest install job of every image model that has had one (progress, state, error).",
+    "comfyui_files": "List every weight file under the ComfyUI models tree with the catalog models that own it.",
     "updater_state": "Aggregate hal0 + FLM version/channel update state.",
     "updater_check": "Fetch the release manifest and diff it against the running version.",
     "updater_channel_get": "Get the configured update channel.",
@@ -3147,9 +3165,17 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Args: mode='generation'|'inference', optional force, pin."
     ),
     "comfyui_pin": "Toggle the arbiter's manual pin (blocks idle auto-restore off generation mode) (gated).",
-    "comfyui_models_fetch": (
-        "Trigger background ComfyUI model-weight downloads (gated). "
-        "Args: auto=true, OR selections=[{capability, family}, ...]."
+    "comfyui_model_install": (
+        "Download an image model's missing weight files in the background (gated). "
+        "Args: model_id (path). Follow progress with comfyui_jobs."
+    ),
+    "comfyui_model_remove": (
+        "Delete an image model's weight files and workflow; files another installed model "
+        "loads stay (gated). Args: model_id (path). Refused while its install runs."
+    ),
+    "comfyui_job_cancel": (
+        "Cancel an image model's in-flight install; files already downloaded stay. "
+        "Args: model_id (path)."
     ),
     "comfyui_render_cancel": "Clear the ComfyUI queue and interrupt the current render (gated).",
     "comfyui_restart": "Restart the slot-managed ComfyUI runtime (gated).",

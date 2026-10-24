@@ -569,8 +569,8 @@ async def test_container_state_running_when_img_unit_active(
 
     monkeypatch.setattr(mod, "_systemd_active", fake_active)
 
-    assert await mod._container_state() == "running"
-    assert "hal0-slot@img.service" in probed_units
+    assert await mod._container_state("hal0-slot@img.service") == "running"
+    assert probed_units == ["hal0-slot@img.service"]
 
 
 async def test_container_state_ignores_an_unrelated_docker_container(
@@ -591,4 +591,4 @@ async def test_container_state_ignores_an_unrelated_docker_container(
     monkeypatch.setattr(mod.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(mod.asyncio, "create_subprocess_exec", boom)
 
-    assert await mod._container_state() == "absent"
+    assert await mod._container_state("hal0-slot@img.service") == "absent"

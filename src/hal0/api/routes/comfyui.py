@@ -5,8 +5,8 @@ of per-model slots (a single run loads many cooperating models at once, and it
 is mutually exclusive with the LLM stack on the single iGPU). The Image-Gen tab
 renders that engine pane from ``GET /api/comfyui/status``, which folds together:
 
-  - **systemd** state of the ``hal0-slot@img`` unit (the podman container
-    that runs ComfyUI: running / absent),
+  - **systemd** state of the img slot's unit (``hal0-slot@<token>``, the podman
+    container that runs ComfyUI: running / absent),
   - **systemd** state of the Hermes agent (``hal0-agent@hermes``) so the pane
     can show which mode currently owns the GPU, and
   - **ComfyUI's own HTTP API** (``/system_stats`` for GTT/RAM, ``/queue`` for the
@@ -23,9 +23,15 @@ ComfyUI container is only cold-started when it is down), inference →
 container and its web UI stay up — then reload the saved llm slots). It runs
 in the background behind a 202; the ``switchover`` block on /status tracks the
 transition. The API no longer shells out to any ComfyUI control scripts — the
-podman ``hal0-slot@img`` unit is the sole owner of the container lifecycle
+podman ``hal0-slot@<token>`` unit is the sole owner of the container lifecycle
 (the standalone ``comfy-*.sh`` docker scripts were retired in #984).
 ``POST /api/comfyui/pin`` toggles the arbiter's manual pin (blocks idle-restore).
+
+The image-model routes (ADR-0036) sit beside the engine ones: ``/models`` is the
+catalog with each model's install state, ``/models/{id}/install`` and
+``DELETE /models/{id}`` change what is on disk, ``/jobs`` tracks the installs, and
+``/files`` lists every weight file under the models tree. An install is a
+:class:`~hal0.registry.pull.PullJob` kept on ``app.state.image_install_jobs``.
 """
 
 from __future__ import annotations
@@ -43,14 +49,27 @@ from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
-import hal0.comfyui.fetch as _fetch_module
 from hal0.api._redact import redact_log_line
-from hal0.api.middleware.error_codes import Conflict, UnprocessableEntity
+from hal0.api.middleware.error_codes import Conflict, NotFound, UnprocessableEntity
 from hal0.api.routes.power import _probe_power
+from hal0.comfyui import install as comfyui_install
+from hal0.comfyui import inventory
 from hal0.comfyui import paths as comfyui_paths
-from hal0.comfyui.selection import auto_selections, variant_for
+from hal0.comfyui.catalog import (
+    CATALOG,
+    ImageModel,
+    get_model,
+    install_state,
+    load_template,
+    recommended_model_id,
+)
+from hal0.config.loader import load_hardware_info
 from hal0.hardware import gpu_view
 from hal0.http_client import async_client
+from hal0.install.agent_model import _pool_gb
+from hal0.registry.pull import PullJob, make_job
+from hal0.slots.naming import slot_container_name, slot_token_for, slot_unit_name
+from hal0.upstreams.huggingface import hf_token_from_env
 
 router = APIRouter()
 log = logging.getLogger(__name__)
@@ -63,7 +82,16 @@ _RAM_CEIL_GB = 96
 _PRESSURE_GB = 50
 
 _HERMES_UNIT = "hal0-agent@hermes.service"
-_IMG_UNIT = "hal0-slot@img.service"
+# The seeded name of the image slot; its unit and container are named after the slot's
+# id on a box migrated to id-keyed slots (see ``_img_artefacts``).
+_IMG_SLOT = "img"
+
+# Job states an install can still be changed from.
+_ACTIVE_JOB_STATES = ("queued", "running")
+
+# The starter pick when the memory pool cannot be read; the middle tier of
+# ``recommended_model_id``, which every box that can run ComfyUI at all can take.
+_UNPROBED_RECOMMENDATION = "sdxl-lightning"
 
 # Switchover target modes. "generation" hands the iGPU to ComfyUI
 # (arbiter.ensure_img); "inference" hands it back to the LLM stack
@@ -97,9 +125,17 @@ def _comfyui_base_url() -> str:
     return os.environ.get("COMFYUI_BASE_URL", "http://127.0.0.1:8188").rstrip("/")
 
 
-#: The podman container the ``hal0-slot@img`` unit runs (reported as
-#: ``container.name`` on ``/status``; the state comes from the unit).
-_IMG_CONTAINER = "hal0-slot-img"
+async def _img_artefacts(request: Request) -> tuple[str, str]:
+    """``(unit, container)`` names of the img slot, as the slot naming seam spells them.
+
+    Both are named after the slot's durable id on a box migrated to id-keyed slots and
+    after its name otherwise, so they are resolved from the slot's config rather than
+    assumed (#2302). With no slot manager, or none that knows the slot, the name-keyed
+    names are the answer.
+    """
+    manager = getattr(request.app.state, "slot_manager", None)
+    token = await slot_token_for(manager, _IMG_SLOT) if manager is not None else _IMG_SLOT
+    return slot_unit_name(token), slot_container_name(token)
 
 
 def _build_client(timeout: httpx.Timeout) -> httpx.AsyncClient:
@@ -147,14 +183,14 @@ async def _fetch_json(path: str) -> dict[str, Any] | None:
         return None
 
 
-async def _container_state() -> str:
+async def _container_state(unit: str) -> str:
     """Return the generation container state: 'running' or 'absent'.
 
-    The img slot runs as the ``hal0-slot@img`` systemd unit (podman), so the
-    unit's state is the truth. Any non-active state reads as 'absent' — the
-    pane treats it as stopped.
+    The img slot runs as a systemd unit (podman), so ``unit``'s state is the
+    truth. Any non-active state reads as 'absent' — the pane treats it as
+    stopped.
     """
-    return "running" if await _systemd_active(_IMG_UNIT) else "absent"
+    return "running" if await _systemd_active(unit) else "absent"
 
 
 async def _systemd_active(unit: str) -> bool:
@@ -281,45 +317,6 @@ async def _gpu_telemetry(request: Request, *, render_active: bool) -> dict[str, 
     return {"util": util, "temp": temp, "clock": clock}
 
 
-# Model categories surfaced in the pane's "models on share" card, mapped to the
-# share subdirs. ``diffusion`` folds the standalone diffusion/video model dirs.
-_INVENTORY_DIRS: dict[str, tuple[str, ...]] = {
-    "checkpoints": ("checkpoints",),
-    "diffusion": ("diffusion_models", "unet"),
-    "loras": ("loras",),
-    "vae": ("vae",),
-    "controlnet": ("controlnet",),
-    "upscale": ("upscale_models",),
-    "text_encoders": ("text_encoders", "clip"),
-}
-# Model weight extensions worth counting; ignore configs, indexes, dotfiles.
-_MODEL_EXTS = (".safetensors", ".ckpt", ".pt", ".pth", ".gguf", ".bin", ".sft")
-
-
-def _count_models(base: str, subdirs: tuple[str, ...]) -> int:
-    total = 0
-    for sub in subdirs:
-        path = os.path.join(base, sub)
-        try:
-            with os.scandir(path) as it:
-                total += sum(1 for e in it if e.is_file() and e.name.lower().endswith(_MODEL_EXTS))
-        except OSError:
-            continue
-    return total
-
-
-def _model_inventory() -> dict[str, int] | None:
-    """Count weight files per category on the model share — VERIFIED, never faked.
-
-    Returns ``None`` when the share root is absent (dev box / fresh install) so
-    the pane hides the counts rather than rendering zeros it can't stand behind.
-    """
-    base = str(comfyui_paths.models_root())
-    if not os.path.isdir(base):
-        return None
-    return {cat: _count_models(base, subdirs) for cat, subdirs in _INVENTORY_DIRS.items()}
-
-
 def _engine_state(container: str, reachable: bool, running_jobs: int) -> str:
     # A reachable ComfyUI IS the engine truth — the resident container must
     # not render as "stopped".
@@ -357,11 +354,13 @@ def _arbiter_api_mode(arbiter: Any) -> str | None:
 @router.get("/status")
 async def comfyui_status(request: Request) -> dict[str, Any]:
     """Aggregate systemd + ComfyUI HTTP into one engine-status object."""
-    container, hermes, stats, queue = await asyncio.gather(
-        _container_state(),
+    img_unit, img_container = await _img_artefacts(request)
+    container, hermes, stats, queue, files = await asyncio.gather(
+        _container_state(img_unit),
         _systemd_active(_HERMES_UNIT),
         _fetch_json("/system_stats"),
         _fetch_json("/queue"),
+        asyncio.to_thread(inventory.list_files),
     )
     reachable = stats is not None
     counts = _queue_counts(queue)
@@ -388,7 +387,7 @@ async def comfyui_status(request: Request) -> dict[str, Any]:
         "mode": mode,
         "reachable": reachable,
         "engine": engine,
-        "container": {"name": _IMG_CONTAINER, "state": container},
+        "container": {"name": img_container, "state": container},
         # Resident container: the web UI is usable whenever ComfyUI answers,
         # regardless of which mode owns the GPU memory.
         "endpoint": ":8188" if (reachable or mode == "generation") else None,
@@ -399,7 +398,8 @@ async def comfyui_status(request: Request) -> dict[str, Any]:
         "eta": None,
         "step": None,
         "inference": {"hermes": hermes},
-        "inventory": _model_inventory(),
+        # Verified counts of the weight files on disk, never faked; None without a models tree.
+        "inventory": inventory.status_counts(files),
         "switchover": dict(_switch),
         "arbiter": arbiter_block,
     }
@@ -539,56 +539,195 @@ async def comfyui_pin(request: Request, body: SetPinnedBody | None = None) -> JS
 
 
 # ---------------------------------------------------------------------------
-# POST /models/fetch — deferred model pull trigger (Task 3.5)
+# Image models: catalog, installs, jobs, files (ADR-0036)
 # ---------------------------------------------------------------------------
 
 
-class _SelectionItem(BaseModel):
-    capability: str
-    family: str
+def _recommended_id() -> str:
+    """The catalog's starter pick for this box's memory pool.
 
-
-class _FetchBody(BaseModel):
-    auto: bool | None = None
-    selections: list[_SelectionItem] | None = None
-
-
-@router.post("/models/fetch", status_code=202)
-async def comfyui_models_fetch(body: _FetchBody) -> JSONResponse:
-    """Trigger deferred model pulls for ComfyUI capabilities.
-
-    Body (one of):
-      {"auto": true}
-          Fetches the default variant for every capability (5 total).
-      {"selections": [{"capability": "txt2img", "family": "sdxl"}, ...]}
-          Fetches the named variant(s) explicitly.
-
-    Returns 202 with {"jobs": [job_id, ...]} immediately; each job runs in the
-    background via fetch.fetch_model (subprocess, non-blocking).
-
-    This is the DEFERRED post-install pull path — install runs with --no-pull
-    and this endpoint is called by the dashboard after setup completes.
+    Read per request: it is one small JSON file. A pool that cannot be read, or that
+    reads as zero because the box was never probed, gets the middle pick rather than
+    the smallest model.
     """
-    if body.auto is None and not body.selections:
-        raise UnprocessableEntity(
-            "body must be {'auto': true} or {'selections': [...]}",
-            code="comfyui.fetch.invalid_body",
+    try:
+        pool_gb = _pool_gb(load_hardware_info())
+    except Exception:  # an unreadable hardware.json must not take the catalog down
+        return _UNPROBED_RECOMMENDATION
+    return recommended_model_id(pool_gb) if pool_gb > 0 else _UNPROBED_RECOMMENDATION
+
+
+def _template_defaults(model: ImageModel) -> dict[str, Any]:
+    """The default sampler parameters the model's workflow template declares, if any."""
+    meta = load_template(model.template).get("_meta")
+    defaults = meta.get("defaults") if isinstance(meta, dict) else None
+    return dict(defaults) if isinstance(defaults, dict) else {}
+
+
+def _model_row(model: ImageModel, *, recommended: str, job: PullJob | None) -> dict[str, Any]:
+    """One catalog model with its install state, as ``GET /models`` lists it.
+
+    ``missing`` names each absent weight file relative to the models root, like the
+    paths ``DELETE /models/{id}`` reports. ``job`` is the model's latest install, if any.
+    """
+    state = install_state(model)
+    return {
+        "id": model.id,
+        "label": model.label,
+        "task": model.task,
+        "api_renderable": model.api_renderable,
+        "recommended": model.id == recommended,
+        "license": model.license,
+        "est_seconds": model.est_seconds,
+        "sizes": list(model.sizes),
+        "notes": model.notes,
+        "defaults": _template_defaults(model),
+        "approx_gb": model.approx_gb,
+        "missing_gb": state.missing_gb,
+        "state": state.state,
+        "missing": [f"{c.kind.subdir}/{c.relpath}" for c in state.missing],
+        "workflow": model.workflow_filename,
+        "job": job.as_dict() if job is not None else None,
+    }
+
+
+def _install_jobs(request: Request) -> dict[str, PullJob]:
+    jobs: dict[str, PullJob] = request.app.state.image_install_jobs
+    return jobs
+
+
+def _require_model(model_id: str) -> ImageModel:
+    model = get_model(model_id)
+    if model is None:
+        raise comfyui_install.ImageModelNotFound(
+            f"no image model {model_id!r}", details={"model_id": model_id}
         )
+    return model
 
-    if body.auto:
-        variants = auto_selections()
-    else:
-        # Resolve explicit selections; surface unknown cap/family as 422.
-        variants = []
-        for item in body.selections:  # type: ignore[union-attr]
-            try:
-                v = variant_for(item.capability, item.family)
-            except KeyError as exc:
-                raise UnprocessableEntity(str(exc), code="comfyui.fetch.unknown_variant") from exc
-            variants.append(v)
 
-    job_ids = [_fetch_module.fetch_model(v) for v in variants]
-    return JSONResponse(status_code=202, content={"jobs": job_ids})
+def _install_running(model: ImageModel, job: PullJob) -> Conflict:
+    return Conflict(
+        f"an install of {model.label} is already {job.state}",
+        code="comfyui.install_running",
+        details={"job": job.as_dict()},
+    )
+
+
+@router.get("/models")
+async def comfyui_models(request: Request) -> dict[str, Any]:
+    """The image-model catalog with each model's install state and latest install job.
+
+    Returns ``{"models": [...]}``, in catalog order. Exactly one row is
+    ``recommended``: the starter pick for this box's memory pool.
+    """
+    jobs = _install_jobs(request)
+    recommended = _recommended_id()
+    return {
+        "models": [
+            _model_row(model, recommended=recommended, job=jobs.get(model.id))
+            for model in CATALOG.values()
+        ]
+    }
+
+
+def _schedule_install(request: Request, model: ImageModel, job: PullJob) -> None:
+    """Run the install as a detached task tracked for shutdown, never a BackgroundTask.
+
+    Same reasoning as ``hal0.registry.pull_jobs.schedule_pull_task`` (#1225): a
+    background task would hold the request's connection open for the whole download
+    and block a graceful restart. ``app.state.image_install_tasks`` is what the lifespan
+    shutdown cancels.
+    """
+    task = asyncio.create_task(
+        comfyui_install.run_install(job, model, hf_token=hf_token_from_env())
+    )
+    tasks: dict[str, asyncio.Task[None]] = request.app.state.image_install_tasks
+    tasks[model.id] = task
+
+    def _untrack(finished: asyncio.Task[None], _model_id: str = model.id) -> None:
+        if tasks.get(_model_id) is finished:
+            tasks.pop(_model_id, None)
+
+    task.add_done_callback(_untrack)
+
+
+@router.post("/models/{model_id}/install", status_code=202)
+async def comfyui_model_install(model_id: str, request: Request) -> JSONResponse:
+    """Start downloading what the model is missing; 202 with the new install job.
+
+    Refused before any job exists with 404 ``comfyui.model_unknown``, 409
+    ``comfyui.install_running`` (its job rides in ``error.details.job``), 409
+    ``comfyui.model_installed``, 409 ``comfyui.staging_cross_device`` (download staging
+    and models tree on two filesystems) and 507 ``comfyui.insufficient_disk``. The job
+    then runs in the background; follow it on ``GET /jobs``. A finished job stays
+    listed until the next install of the model replaces it.
+    """
+    model = _require_model(model_id)
+    jobs = _install_jobs(request)
+    existing = jobs.get(model_id)
+    if existing is not None and existing.state in _ACTIVE_JOB_STATES:
+        raise _install_running(model, existing)
+    if install_state(model).state == "complete":
+        raise Conflict(
+            f"{model.label} is already installed",
+            code="comfyui.model_installed",
+            details={"model_id": model_id},
+        )
+    # Past the complete check something is always missing, so both guards apply.
+    comfyui_install.require_one_filesystem()
+    comfyui_install.preflight_disk(model)
+    job = make_job(model_id)
+    jobs[model_id] = job
+    _schedule_install(request, model, job)
+    return JSONResponse(status_code=202, content={"job": job.as_dict()})
+
+
+@router.delete("/models/{model_id}")
+async def comfyui_model_remove(model_id: str, request: Request) -> dict[str, list[str]]:
+    """Delete the model's weight files and workflow; ``{"removed": [...]}`` lists them.
+
+    A file another complete model loads stays. 409 ``comfyui.install_running`` while
+    the model's install is queued or running.
+    """
+    model = _require_model(model_id)
+    job = _install_jobs(request).get(model_id)
+    if job is not None and job.state in _ACTIVE_JOB_STATES:
+        raise _install_running(model, job)
+    # No await between the check above and the delete, so an install cannot start in between.
+    return {"removed": comfyui_install.remove_model(model)}
+
+
+@router.get("/jobs")
+async def comfyui_jobs(request: Request) -> dict[str, Any]:
+    """The latest install job of every model that has had one, finished or not."""
+    return {"jobs": [job.as_dict() for job in _install_jobs(request).values()]}
+
+
+@router.post("/jobs/{model_id}/cancel", status_code=202)
+async def comfyui_job_cancel(model_id: str, request: Request) -> JSONResponse:
+    """Ask the model's install to stop at the next chunk; 202 with the job.
+
+    Files that already landed stay, so a later install carries on from there. A job
+    that already finished is returned unchanged. 404 ``comfyui.job_not_found`` when
+    the model has no job.
+    """
+    job = _install_jobs(request).get(model_id)
+    if job is None:
+        raise NotFound(
+            f"no install job for {model_id!r}",
+            code="comfyui.job_not_found",
+            details={"model_id": model_id},
+        )
+    if job.state in _ACTIVE_JOB_STATES:
+        job.cancel_requested = True
+    return JSONResponse(status_code=202, content={"job": job.as_dict()})
+
+
+@router.get("/files")
+async def comfyui_files() -> dict[str, Any]:
+    """Every weight file under the models tree, with the catalog models that own it."""
+    files = await asyncio.to_thread(inventory.list_files)
+    return {"root": str(comfyui_paths.models_root()), "files": files}
 
 
 def _user_workflows_dir() -> str:
@@ -728,14 +867,14 @@ async def comfyui_restart(request: Request, background_tasks: BackgroundTasks) -
 
 
 @router.get("/logs")
-async def comfyui_logs(tail: int = 60) -> JSONResponse:
+async def comfyui_logs(request: Request, tail: int = 60) -> JSONResponse:
     """Return the last N lines of the ComfyUI slot's journal output.
 
-    Post-D9 the img slot runs as the podman ``hal0-slot-img`` container
-    under the ``hal0-slot@img`` systemd unit with ``StandardOutput=journal``
-    (the container itself uses the ``none`` log driver, so ``podman logs``
-    yields nothing). We therefore read the journal — matching the regular
-    slot logs endpoint — rather than ``podman/docker logs``.
+    Post-D9 the img slot runs as a podman container under its ``hal0-slot@<token>``
+    systemd unit with ``StandardOutput=journal`` (the container itself uses the
+    ``none`` log driver, so ``podman logs`` yields nothing). We therefore read the
+    journal — matching the regular slot logs endpoint — rather than
+    ``podman/docker logs``.
 
     Returns ``{"lines": []}`` when ``journalctl`` is absent or the slot
     has no journal entries yet — never a 500.
@@ -743,11 +882,12 @@ async def comfyui_logs(tail: int = 60) -> JSONResponse:
     if shutil.which("journalctl") is None:
         return JSONResponse(status_code=200, content={"lines": []})
     n = max(1, min(int(tail or 60), 5000))
+    img_unit, _container = await _img_artefacts(request)
     try:
         proc = await asyncio.create_subprocess_exec(
             "journalctl",
             "-u",
-            _IMG_UNIT,
+            img_unit,
             "-n",
             str(n),
             "--no-pager",
