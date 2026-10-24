@@ -61,6 +61,7 @@ from hal0.comfyui.catalog import (
     get_model,
     install_state,
     load_template,
+    models_using,
     recommended_model_id,
 )
 from hal0.config.loader import load_hardware_info
@@ -181,6 +182,19 @@ async def _fetch_json(path: str) -> dict[str, Any] | None:
         return data if isinstance(data, dict) else None
     except (httpx.HTTPError, ValueError):
         return None
+
+
+async def _list_files_or_none() -> list[dict[str, Any]]:
+    """The models-tree listing for ``/status``; an unexpected failure is an empty listing.
+
+    The pane polls ``/status`` and a failed scan must cost it the inventory counts, not
+    the whole answer.
+    """
+    try:
+        return await asyncio.to_thread(inventory.list_files)
+    except Exception:
+        log.warning("comfyui.inventory_scan_failed", exc_info=True)
+        return []
 
 
 async def _container_state(unit: str) -> str:
@@ -360,7 +374,7 @@ async def comfyui_status(request: Request) -> dict[str, Any]:
         _systemd_active(_HERMES_UNIT),
         _fetch_json("/system_stats"),
         _fetch_json("/queue"),
-        asyncio.to_thread(inventory.list_files),
+        _list_files_or_none(),
     )
     reachable = stats is not None
     counts = _queue_counts(queue)
@@ -605,12 +619,41 @@ def _require_model(model_id: str) -> ImageModel:
     return model
 
 
-def _install_running(model: ImageModel, job: PullJob) -> Conflict:
+def _install_running(
+    busy: ImageModel, job: PullJob, *, removing: ImageModel | None = None
+) -> Conflict:
+    """409 ``comfyui.install_running`` for ``busy``'s active ``job``.
+
+    ``removing`` is the model a delete was asked for, when it is not ``busy`` itself but
+    shares weight files with it. ``details.busy_model_id`` names the model that is installing.
+    """
+    if removing is None or removing.id == busy.id:
+        message = f"an install of {busy.label} is already {job.state}"
+    else:
+        message = (
+            f"an install of {busy.label} is {job.state} and loads files shared with "
+            f"{removing.label}; wait for it to finish"
+        )
     return Conflict(
-        f"an install of {model.label} is already {job.state}",
+        message,
         code="comfyui.install_running",
-        details={"job": job.as_dict()},
+        details={"job": job.as_dict(), "busy_model_id": busy.id},
     )
+
+
+def _blocking_install(model: ImageModel, jobs: dict[str, PullJob]) -> PullJob | None:
+    """The active install that removing ``model`` would cut under: its own, or a neighbour's.
+
+    A neighbour is any model loading a file ``model`` also loads. Its installer may have
+    skipped that file as already present, so deleting it would leave the neighbour
+    reporting ``completed`` with the file gone.
+    """
+    candidates = [model.id, *(other for c in model.components for other in models_using(c))]
+    for model_id in dict.fromkeys(candidates):  # model first, then neighbours, once each
+        job = jobs.get(model_id)
+        if job is not None and job.state in _ACTIVE_JOB_STATES:
+            return job
+    return None
 
 
 @router.get("/models")
@@ -687,12 +730,13 @@ async def comfyui_model_remove(model_id: str, request: Request) -> dict[str, lis
     """Delete the model's weight files and workflow; ``{"removed": [...]}`` lists them.
 
     A file another complete model loads stays. 409 ``comfyui.install_running`` while
-    the model's install is queued or running.
+    the model's install is queued or running, or while an install of a model that shares
+    a weight file with it is (``error.details.busy_model_id`` names that model).
     """
     model = _require_model(model_id)
-    job = _install_jobs(request).get(model_id)
-    if job is not None and job.state in _ACTIVE_JOB_STATES:
-        raise _install_running(model, job)
+    job = _blocking_install(model, _install_jobs(request))
+    if job is not None:
+        raise _install_running(CATALOG[job.model_id], job, removing=model)
     # No await between the check above and the delete, so an install cannot start in between.
     return {"removed": comfyui_install.remove_model(model)}
 

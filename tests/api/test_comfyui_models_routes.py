@@ -24,7 +24,7 @@ from hal0.comfyui import install as comfyui_install
 from hal0.comfyui import inventory, paths
 from hal0.comfyui.catalog import CATALOG, ImageModel, install_state
 from hal0.config.schema import HardwareInfo
-from hal0.registry.pull import PullJob
+from hal0.registry.pull import PullJob, _tmp_dir
 
 _BASE = "hal0.api.routes.comfyui"
 _SDXL = "sdxl-lightning"
@@ -39,7 +39,25 @@ def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
     assert paths.models_root().is_relative_to(tmp_path)
+    # Staging and the models tree share ``tmp_path``, so the same-filesystem guard passes
+    # on any machine without being patched.
+    assert _tmp_dir().is_relative_to(tmp_path)
     return root
+
+
+_Usage = namedtuple("_Usage", "total used free")
+
+
+@pytest.fixture(autouse=True)
+def plenty_of_disk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Report a huge free space, so no route test depends on the machine's real free disk.
+
+    ``qwen-image`` alone needs about 51 GB; CI runners have less. A test of the 507 path
+    overrides this.
+    """
+    monkeypatch.setattr(
+        comfyui_install.shutil, "disk_usage", lambda path: _Usage(10**16, 0, 10**16)
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -326,6 +344,27 @@ def test_status_inventory_is_none_without_a_models_tree(client: TestClient) -> N
     assert body["inventory"] is None
 
 
+def test_status_survives_inventory_failure(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A scan that blows up costs the pane its counts, never the whole poll."""
+    with (
+        patch.object(inventory, "list_files", side_effect=RuntimeError("scan blew up")),
+        patch(f"{_BASE}._systemd_active", new_callable=AsyncMock, return_value=False),
+        patch(f"{_BASE}._fetch_json", new_callable=AsyncMock, return_value=None),
+        caplog.at_level("WARNING", logger=_BASE),
+    ):
+        without_tree = client.get("/api/comfyui/status")
+        paths.models_root().mkdir(parents=True)
+        with_tree = client.get("/api/comfyui/status")
+
+    assert without_tree.status_code == 200
+    assert without_tree.json()["inventory"] is None
+    assert with_tree.status_code == 200
+    assert set(with_tree.json()["inventory"].values()) == {0}  # nothing listed, nothing counted
+    assert "comfyui.inventory_scan_failed" in caplog.text
+
+
 # ── POST /models/{id}/install ───────────────────────────────────────────────
 
 
@@ -398,9 +437,6 @@ def test_install_route_404_unknown(client: TestClient, installs: _Installs) -> N
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == "comfyui.model_unknown"
     assert installs.calls == []
-
-
-_Usage = namedtuple("_Usage", "total used free")
 
 
 def test_install_route_507_when_disk_short(
@@ -504,6 +540,57 @@ def test_remove_route_of_a_model_with_nothing_on_disk_removes_nothing(
 
     assert resp.status_code == 200
     assert resp.json() == {"removed": []}
+
+
+def test_remove_route_409_when_shared_component_installing(
+    client: TestClient, installs: _Installs
+) -> None:
+    """qwen-image-edit and qwen-image load the same text encoder and VAE: while one installs,
+    removing the other could pull out a file the installer just skipped as present."""
+    installing, removing = CATALOG["qwen-image"], CATALOG["qwen-image-edit"]
+    shared = {c.dest for c in installing.components} & {c.dest for c in removing.components}
+    assert len(shared) == 2, "the catalog shares the Qwen text encoder and VAE"
+    _land(removing)
+    assert _post_install(client, installing.id).status_code == 202
+
+    resp = client.delete(f"/api/comfyui/models/{removing.id}")
+
+    assert resp.status_code == 409
+    error = resp.json()["error"]
+    assert error["code"] == "comfyui.install_running"
+    assert error["details"]["busy_model_id"] == installing.id
+    assert error["details"]["job"]["model_id"] == installing.id
+    assert installing.label in error["message"]
+    assert install_state(removing).state == "complete"  # not one file was deleted
+
+
+def test_remove_route_allowed_again_once_the_shared_install_ends(
+    client: TestClient, installs: _Installs
+) -> None:
+    installs.behaviour = _Installs.until_cancel_requested
+    installing, removing = CATALOG["qwen-image"], CATALOG["qwen-image-edit"]
+    _land(removing)
+    assert _post_install(client, installing.id).status_code == 202
+    assert client.delete(f"/api/comfyui/models/{removing.id}").status_code == 409
+    client.post(f"/api/comfyui/jobs/{installing.id}/cancel")
+    _wait_for(lambda: _job_state(client, installing.id) == "cancelled")
+
+    resp = client.delete(f"/api/comfyui/models/{removing.id}")
+
+    assert resp.status_code == 200
+    assert install_state(removing).state == "none"
+
+
+def test_remove_route_ignores_an_install_that_shares_nothing(
+    client: TestClient, installs: _Installs
+) -> None:
+    _land(CATALOG["esrgan-4x"])
+    assert _post_install(client, _SDXL).status_code == 202
+
+    resp = client.delete("/api/comfyui/models/esrgan-4x")
+
+    assert resp.status_code == 200
+    assert resp.json()["removed"] == ["upscale_models/4x-UltraSharp.pth"]
 
 
 # ── jobs ────────────────────────────────────────────────────────────────────
