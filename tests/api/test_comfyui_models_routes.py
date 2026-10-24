@@ -191,7 +191,7 @@ def test_models_lists_catalog_with_state(client: TestClient) -> None:
     body = client.get("/api/comfyui/models").json()
 
     assert [m["id"] for m in body["models"]] == list(CATALOG)
-    assert "engine" not in body  # added with the generation work, not here
+    assert set(body) == {"models", "engine"}
     by_id = {m["id"]: m for m in body["models"]}
 
     sdxl = by_id[_SDXL]
@@ -258,11 +258,50 @@ def test_models_marks_recommended_by_pool(
             raise hardware
         return hardware
 
-    monkeypatch.setattr(f"{_BASE}.load_hardware_info", load)
+    monkeypatch.setattr("hal0.comfyui.picker.load_hardware_info", load)
 
     models = client.get("/api/comfyui/models").json()["models"]
 
     assert [m["id"] for m in models if m["recommended"]] == [expected]
+
+
+_NO_ROCM_REASON = "no ROCm lane on this host (ComfyUI needs /dev/kfd and a render node)"
+
+
+def _host(monkeypatch: pytest.MonkeyPatch, *, rocm_lane: bool) -> None:
+    """An AMD host that advertises every GPU lane; ``rocm_lane`` is whether kfd and a render node exist."""
+    from hal0.capabilities import catalog
+
+    monkeypatch.setattr(
+        catalog,
+        "available_backends",
+        lambda: [{"id": "gpu-vulkan"}, {"id": "gpu-rocm"}, {"id": "cpu"}],
+    )
+    monkeypatch.setattr(catalog, "host_is_amd_gpu", lambda: True)
+    monkeypatch.setattr(catalog, "rocm_lane_present", lambda: rocm_lane)
+
+
+def test_models_route_reports_engine_unavailable(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _host(monkeypatch, rocm_lane=False)
+
+    body = client.get("/api/comfyui/models").json()
+
+    assert body["engine"] == {"available": False, "reason": _NO_ROCM_REASON}
+    # The list itself is unchanged: the catalog is still browsable on a box that cannot run it.
+    assert [m["id"] for m in body["models"]] == list(CATALOG)
+
+
+def test_models_route_reports_engine_available(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _host(monkeypatch, rocm_lane=True)
+
+    body = client.get("/api/comfyui/models").json()
+
+    assert body["engine"] == {"available": True, "reason": None}
+    assert [m["id"] for m in body["models"]] == list(CATALOG)
 
 
 # ── GET /status ─────────────────────────────────────────────────────────────

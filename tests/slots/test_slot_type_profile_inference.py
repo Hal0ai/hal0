@@ -67,12 +67,12 @@ def _cfg(name: str, slot_type: str, device: str, model: str = "unstamped") -> di
         ("tts", "gpu-vulkan", None),
         ("tts", "gpu-cuda", None),
         ("transcription", "cpu", "moonshine"),
-        # ``image`` infers nothing today: the shared rule's generic GPU branch
-        # answers ``chat`` before its image branch and the fit veto drops it.
-        # Pinned as-is (the old ``("image", "img")`` row asserted an input no
-        # slot can have — ``img`` is a device_class, not a device; the shipped
-        # img.toml is device = "gpu-rocm").
-        ("image", "gpu-rocm", None),
+        # ``image`` infers ``comfyui`` on a GPU device: the shared rule answers it
+        # before its generic GPU branch (which would hand an image slot the ``chat``
+        # llama profile for the fit veto to drop). The old ``("image", "img")`` row
+        # asserted an input no slot can have — ``img`` is a device_class, not a
+        # device; the shipped img.toml is device = "gpu-rocm" with profile = "comfyui".
+        ("image", "gpu-rocm", "comfyui"),
         # An llm slot has no mode flag at stake — the tune stays the
         # operator's (or the model's) choice, so nothing is inferred.
         ("llm", "cpu", None),

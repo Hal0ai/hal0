@@ -27,6 +27,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from hal0.comfyui.picker import image_picker_rows
 from hal0.config.loader import load_hardware_info
 from hal0.errors import Hal0Error
 from hal0.model_fit import evaluate_model_fit
@@ -539,6 +540,47 @@ def _model_capabilities(entry: CuratedModel | Any) -> list[str]:
 _NPU_FANOUT_CAPS: frozenset[str] = frozenset({"chat", "embed", "stt"})
 
 
+def _runtime_host_backends(runtime: str) -> list[str]:
+    """Host backend ids ``runtime``'s toolbox image can serve on this host.
+
+    The runtime's :data:`_RUNTIME_TO_HOST_BACKENDS` entry intersected with what
+    :func:`available_backends` advertises. Moonshine ships with onnxruntime's
+    CPU EP only (no Vulkan/ROCm EP in the upstream wheel), so advertising it on
+    gpu-vulkan would let the operator pick a backend the slot can't honour — the
+    slot TOML would say backend=vulkan but the container would still pin every op
+    to CPU.
+
+    A :data:`_ROCM_ONLY_RUNTIMES` runtime gets one more check (#1966): its
+    HOST_BACKENDS entry is labelled "gpu-vulkan" — the picker's GENERIC GPU row
+    (#1941) — but the image behind it is ROCm-only
+    (ComfyUIProvider.gpu_runtime_needs_rocm). available_backends() rightly
+    advertises gpu-vulkan whenever ANY Vulkan-capable render node exists, which on
+    a kfd-less AMD box is exactly the "reachable lane" this runtime does NOT have:
+    the load-time guard (require_kfd_for_gpu_slot) refuses it by name. Drop the
+    row rather than offer one guaranteed to fail — qwen3tts needs no separate
+    check here, its HOST_BACKENDS entry is the correctly-gated "gpu-rocm" id
+    itself. Gated on the whole ROCm lane, not /dev/kfd alone (#2313): the image
+    also opens a render node, and qwen3tts's "gpu-rocm" row asks
+    rocm_lane_present() too (_tts_rows_for_capability, #2447), so the two
+    ROCm-only runtimes agree about a kfd-only box.
+    """
+    if runtime in _ROCM_ONLY_RUNTIMES and host_is_amd_gpu() and not rocm_lane_present():
+        return []
+    host_backends = {b["id"] for b in available_backends()}
+    return [c for c in _RUNTIME_TO_HOST_BACKENDS.get(runtime, ()) if c in host_backends]
+
+
+def _comfyui_backends() -> list[str]:
+    """Backend ids the ComfyUI image can run under here; empty without a ROCm lane.
+
+    The one answer to "can this host serve image generation": the image picker
+    (:func:`_flat_rows_for_capability`), ``GET /api/comfyui/models``' ``engine``
+    field and the image installs all read it. On a ROCm host it is
+    ``["gpu-vulkan"]``, the picker's generic GPU row (#1941).
+    """
+    return _runtime_host_backends("comfyui")
+
+
 def _backend_variants(entry: Any) -> list[str]:
     """Return the canonical backend ids this entry can run under.
 
@@ -569,11 +611,7 @@ def _backend_variants(entry: Any) -> list[str]:
         # CPU-only ONNX wheel, ComfyUI's Vulkan-only image, …) — an
         # explicit provider still can't advertise a lane the host can't
         # actually serve.
-        if explicit in _ROCM_ONLY_RUNTIMES and host_is_amd_gpu() and not rocm_lane_present():
-            # #1966 — see the identical guard on the tag-driven branch below.
-            return []
-        host_backends = {b["id"] for b in available_backends()}
-        return [c for c in _RUNTIME_TO_HOST_BACKENDS.get(explicit, ()) if c in host_backends]
+        return _runtime_host_backends(explicit)
     # explicit llama-server (or unset) falls through to the existing
     # lane fan-out, which already encodes host-present AMD/CPU logic.
 
@@ -682,32 +720,10 @@ def _backend_variants(entry: Any) -> list[str]:
                 out.append("cpu")
         elif low in _RUNTIME_TO_HOST_BACKENDS:
             # Provider-specific runtimes only fan out to the host
-            # backends their toolbox image can actually serve. Moonshine
-            # ships with onnxruntime CPU EP only (no Vulkan/ROCm EP in
-            # the upstream wheel), so advertising it on gpu-vulkan would
-            # let the operator pick a backend the slot can't honour —
-            # the slot TOML would say backend=vulkan but the container
-            # would still pin every op to CPU.
-            host_backends = {b["id"] for b in available_backends()}
-            if low in _ROCM_ONLY_RUNTIMES and host_is_amd_gpu() and not rocm_lane_present():
-                # #1966: comfyui's HOST_BACKENDS entry is labelled
-                # "gpu-vulkan" — the picker's GENERIC GPU row (#1941) — but
-                # the image behind it is ROCm-only (ComfyUIProvider.
-                # gpu_runtime_needs_rocm). available_backends() rightly
-                # advertises gpu-vulkan whenever ANY Vulkan-capable render
-                # node exists, which on a kfd-less AMD box is exactly the
-                # "reachable lane" this runtime does NOT have: the load-time
-                # guard (require_kfd_for_gpu_slot) refuses it by name. Drop
-                # the row rather than offer one guaranteed to fail — qwen3tts
-                # needs no separate check here, its HOST_BACKENDS entry is
-                # the correctly-gated "gpu-rocm" id itself. Gated on the
-                # whole ROCm lane, not /dev/kfd alone (#2313): the image also
-                # opens a render node, and qwen3tts's "gpu-rocm" row asks
-                # rocm_lane_present() too (_tts_rows_for_capability, #2447),
-                # so the two ROCm-only runtimes agree about a kfd-only box.
-                continue
-            for candidate in _RUNTIME_TO_HOST_BACKENDS[low]:
-                if candidate in host_backends and candidate not in out:
+            # backends their toolbox image can actually serve (see
+            # :func:`_runtime_host_backends`).
+            for candidate in _runtime_host_backends(low):
+                if candidate not in out:
                     out.append(candidate)
         # Unknown backend strings fall through silently — they're
         # surfaced for debugging via the registry view, not here.
@@ -889,7 +905,13 @@ def _flat_rows_for_capability(
     model emits one row per backend it can run on; FLM/NPU rows are
     appended after the curated / registry / llama-server fan-out.
 
+    ``image`` is the exception: its rows are the ComfyUI image catalog and the
+    operator's own checkpoints (:func:`hal0.comfyui.picker.image_picker_rows`),
+    never the curated / registry loop below.
     """
+    if capability == "image":
+        return image_picker_rows(_comfyui_backends())
+
     rows: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
 
@@ -1096,6 +1118,11 @@ def _row_with_model_fit(
     *,
     registry: ModelRegistry | None = None,
 ) -> dict[str, Any] | None:
+    if capability == "image":
+        # Image rows are not LLM models: model-fit judges a model id against a
+        # llama/FLM runtime profile, which has no opinion on a ComfyUI checkpoint.
+        # The image catalog lists only what ``/v1/images/generations`` renders.
+        return {**row, "fit_status": "allowed", "fit_reasons": [], "profile": "comfyui"}
     slot_type = _CAPABILITY_TO_SLOT_TYPE.get(capability)
     if slot_type is None:
         return row
@@ -1125,6 +1152,11 @@ def _row_with_model_fit(
         fitted["profile"] = profile.name
         fitted["runtime_family"] = profile.runtime_family
     return fitted
+
+
+#: Row fields that describe the model, not one of its backends, and so are
+#: lifted onto the grouped entry when a flat row carries them.
+_MODEL_LEVEL_ROW_FIELDS = ("display_name", "license", "recommended")
 
 
 def models_for_capability(
@@ -1184,6 +1216,10 @@ def models_for_capability(
                 "size_gb": row["size_gb"],
                 "backends": [],
             }
+            # Fields only some capabilities' rows carry (the image picker's).
+            for key in _MODEL_LEVEL_ROW_FIELDS:
+                if key in row:
+                    entry[key] = row[key]
             grouped[rid] = entry
             order.append(rid)
         else:
