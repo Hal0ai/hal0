@@ -2,13 +2,14 @@
 
 Thin clients over ``/api/comfyui/*``: the daemon owns the catalog, the downloads and
 the models tree. ``models install`` starts each download as a daemon job and follows it,
-so Ctrl-C stops the CLI, not the install.
+one model at a time, so Ctrl-C stops the CLI, not the install in flight.
 """
 
 from __future__ import annotations
 
 import json as jsonlib
 import time
+from collections.abc import Sequence
 from typing import Any, NoReturn
 
 import typer
@@ -107,46 +108,59 @@ def models_install(
         help="Image model ids to install (see `hal0 comfyui models list`).",
     ),
 ) -> None:
-    """Download image models from Hugging Face and follow each install to the end.
+    """Download image models from Hugging Face, one at a time, following each to the end.
 
-    Starts every install as a background job on the daemon, then polls
-    ``/api/comfyui/jobs`` every 500 ms and prints progress until each job is
-    terminal. A model that is already installed counts as done; one whose install is
-    already running is followed. Exits 1 if any install failed, was cancelled, or was
-    refused (unknown id, no disk space). Ctrl-C stops following, not the install.
+    Starts a model's install as a background job on the daemon, polls
+    ``/api/comfyui/jobs`` every 500 ms and prints progress until that job is
+    terminal, then moves to the next model. They never run side by side: models
+    share files, and two 40 GB downloads at once help nobody. A model that is
+    already installed counts as done; one whose install is already running is
+    followed. A failed, cancelled or refused model (unknown id, no disk space)
+    does not stop the ones after it. Exits 1 if any did not install. Ctrl-C stops
+    following, not the install in flight; models after it are not started.
     """
     _require_api()
-    started: list[str] = []
+    queue = list(dict.fromkeys(ids))
     failed = False
-    try:
-        for model_id in dict.fromkeys(ids):
-            try:
-                api_post(f"/api/comfyui/models/{model_id}/install")
-            except CliApiError as exc:
-                if exc.code == "comfyui.model_installed":
-                    console.print(f"{escape(model_id)} is already installed.")
-                elif exc.code == "comfyui.install_running":
-                    console.print(f"{escape(model_id)} is already installing; following it.")
-                    started.append(model_id)
-                else:
-                    console.print(f"[red]failed[/red] {escape(model_id)}: {escape(str(exc))}")
-                    failed = True
-                continue
-            console.print(f"Installing [bold]{escape(model_id)}[/bold]…")
-            started.append(model_id)
-    except KeyboardInterrupt:
-        _exit_interrupted()
-    if started and _follow(started):
-        failed = True
+    while queue:
+        model_id = queue.pop(0)
+        try:
+            following = _start_install(model_id)
+        except KeyboardInterrupt:
+            _exit_interrupted(queue)
+        if following is None or (following and _follow([model_id], not_started=queue)):
+            failed = True
     if failed:
         raise typer.Exit(1)
 
 
-def _follow(model_ids: list[str]) -> bool:
+def _start_install(model_id: str) -> bool | None:
+    """Ask the daemon to install ``model_id``.
+
+    ``True`` when there is a job to follow (a new one, or one already running), ``False``
+    when the model is already installed, ``None`` when the daemon refused.
+    """
+    try:
+        api_post(f"/api/comfyui/models/{model_id}/install")
+    except CliApiError as exc:
+        if exc.code == "comfyui.model_installed":
+            console.print(f"{escape(model_id)} is already installed.")
+            return False
+        if exc.code == "comfyui.install_running":
+            console.print(f"{escape(model_id)} is already installing; following it.")
+            return True
+        console.print(f"[red]failed[/red] {escape(model_id)}: {escape(str(exc))}")
+        return None
+    console.print(f"Installing [bold]{escape(model_id)}[/bold]…")
+    return True
+
+
+def _follow(model_ids: list[str], *, not_started: Sequence[str] = ()) -> bool:
     """Poll the install jobs of ``model_ids`` until each is terminal.
 
     Returns ``True`` if any ended other than ``completed``. A job missing from the
     daemon's list counts as failed: the daemon forgets its jobs when it restarts.
+    ``not_started`` names the models queued behind these, for the Ctrl-C message.
     """
     pending = list(model_ids)
     last_step: dict[str, int] = {}
@@ -177,16 +191,22 @@ def _follow(model_ids: list[str]) -> bool:
             if pending:
                 time.sleep(_POLL_INTERVAL_S)
     except KeyboardInterrupt:
-        _exit_interrupted()
+        _exit_interrupted(not_started)
     return unfinished
 
 
-def _exit_interrupted() -> NoReturn:
-    """Ctrl-C: stop the CLI, not the downloads the daemon already started."""
+def _exit_interrupted(not_started: Sequence[str] = ()) -> NoReturn:
+    """Ctrl-C: stop the CLI, not the download the daemon already started.
+
+    ``not_started`` are the models still queued behind it; installs run one at a time,
+    so they were never requested.
+    """
     console.print(
         "\nStopped. Installs already started continue on the daemon; "
         "check them with: [bold]hal0 comfyui models list[/bold]"
     )
+    if not_started:
+        console.print(f"Not started: {escape(', '.join(not_started))}")
     raise typer.Exit(130) from None
 
 
