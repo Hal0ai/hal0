@@ -1465,10 +1465,17 @@ def test_preflight_ignores_the_partial_of_a_component_already_on_disk(
     assert excinfo.value.details["required_bytes"] == 1_000_000_000  # the VAE, in full
 
 
-# ── install_models_blocking ─────────────────────────────────────────────────
+# ── install_each ────────────────────────────────────────────────────────────
 
 
-def test_install_models_blocking_runs_sequentially_and_reports_each(
+def _install_each(
+    model_ids: list[str], *, hf_token: str | None, on_line: Any = None
+) -> list[tuple[str, str]]:
+    """``install.install_each`` on a fresh event loop, as the setup paths run it."""
+    return asyncio.run(install.install_each(model_ids, hf_token, on_line or (lambda _line: None)))
+
+
+def test_install_each_runs_sequentially_and_reports_each(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     order: list[str] = []
@@ -1483,7 +1490,7 @@ def test_install_models_blocking_runs_sequentially_and_reports_each(
     monkeypatch.setattr(install, "preflight_disk", lambda model: None)
     lines: list[str] = []
 
-    results = install.install_models_blocking(
+    results = _install_each(
         ["sdxl-turbo", "sd-1.5-pruned-emaonly"], hf_token="hf_tok", on_line=lines.append
     )
 
@@ -1493,7 +1500,7 @@ def test_install_models_blocking_runs_sequentially_and_reports_each(
     assert any("boom" in line for line in lines)
 
 
-def test_install_models_blocking_emits_throttled_progress(
+def test_install_each_emits_throttled_progress(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A long download reports where it is, at most once per interval, between start and end."""
@@ -1513,7 +1520,7 @@ def test_install_models_blocking_emits_throttled_progress(
     lines: list[str] = []
 
     began = time.monotonic()
-    results = install.install_models_blocking(["sdxl-turbo"], hf_token=None, on_line=lines.append)
+    results = _install_each(["sdxl-turbo"], hf_token=None, on_line=lines.append)
     elapsed = time.monotonic() - began
 
     assert results == [("sdxl-turbo", "completed")]
@@ -1530,7 +1537,7 @@ def test_install_models_blocking_emits_throttled_progress(
     assert lines.index(progress[0]) > 0 and lines.index(progress[-1]) < len(lines) - 1
 
 
-def test_install_models_blocking_survives_a_raising_on_line_during_progress(
+def test_install_each_survives_a_raising_on_line_during_progress(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A progress sink that raises must not lose a finished model's result or skip the rest."""
@@ -1554,9 +1561,7 @@ def test_install_models_blocking_survives_a_raising_on_line_during_progress(
             raise BrokenPipeError("terminal went away")
         other.append(line)
 
-    results = install.install_models_blocking(
-        ["sdxl-turbo", "sd-1.5-pruned-emaonly"], hf_token=None, on_line=on_line
-    )
+    results = _install_each(["sdxl-turbo", "sd-1.5-pruned-emaonly"], hf_token=None, on_line=on_line)
 
     assert results == [("sdxl-turbo", "completed"), ("sd-1.5-pruned-emaonly", "completed")]
     assert len(progress_calls) == 2  # one failed attempt per model, then it stopped reporting
@@ -1564,7 +1569,7 @@ def test_install_models_blocking_survives_a_raising_on_line_during_progress(
     assert any(r.message == "comfyui.install_progress_report_failed" for r in caplog.records)
 
 
-def test_install_models_blocking_is_silent_between_start_and_end_when_install_is_quick(
+def test_install_each_is_silent_between_start_and_end_when_install_is_quick(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The default interval is seconds: a quick install prints no progress and waits for none."""
@@ -1581,13 +1586,13 @@ def test_install_models_blocking_is_silent_between_start_and_end_when_install_is
     lines: list[str] = []
 
     began = time.monotonic()
-    install.install_models_blocking(["sdxl-turbo"], hf_token=None, on_line=lines.append)
+    _install_each(["sdxl-turbo"], hf_token=None, on_line=lines.append)
 
     assert time.monotonic() - began < 1.0  # the progress task is cancelled, not waited for
     assert len(lines) == 2
 
 
-def test_install_models_blocking_downloads_for_real(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_install_each_downloads_for_real(monkeypatch: pytest.MonkeyPatch) -> None:
     model = _fake_model()
     monkeypatch.setitem(CATALOG, model.id, model)
     hub = _Hub()
@@ -1596,12 +1601,12 @@ def test_install_models_blocking_downloads_for_real(monkeypatch: pytest.MonkeyPa
         install.httpx, "AsyncClient", lambda **kw: real(transport=hub.transport, **kw)
     )
 
-    assert install.install_models_blocking([model.id], hf_token=None) == [(model.id, "completed")]
+    assert _install_each([model.id], hf_token=None) == [(model.id, "completed")]
     assert install_state(model).state == "complete"
     assert (paths.workflows_dir() / model.workflow_filename).is_file()
 
 
-def test_install_models_blocking_provisions_a_missing_workflow_for_a_complete_model(
+def test_install_each_provisions_a_missing_workflow_for_a_complete_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Setup never skips a complete model: its workflow is written without a request."""
@@ -1615,12 +1620,12 @@ def test_install_models_blocking_provisions_a_missing_workflow_for_a_complete_mo
         install.httpx, "AsyncClient", lambda **kw: real(transport=hub.transport, **kw)
     )
 
-    assert install.install_models_blocking([model.id], hf_token=None) == [(model.id, "completed")]
+    assert _install_each([model.id], hf_token=None) == [(model.id, "completed")]
     assert (paths.workflows_dir() / model.workflow_filename).is_file()
     assert hub.requests == []
 
 
-def test_install_models_blocking_reports_unknown_ids_and_carries_on(
+def test_install_each_reports_unknown_ids_and_carries_on(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fake_run_install(job: PullJob, model: ImageModel, **kwargs: Any) -> None:
@@ -1630,15 +1635,13 @@ def test_install_models_blocking_reports_unknown_ids_and_carries_on(
     monkeypatch.setattr(install, "preflight_disk", lambda model: None)
     lines: list[str] = []
 
-    results = install.install_models_blocking(
-        ["no-such-model", "sdxl-turbo"], hf_token=None, on_line=lines.append
-    )
+    results = _install_each(["no-such-model", "sdxl-turbo"], hf_token=None, on_line=lines.append)
 
     assert results == [("no-such-model", "failed"), ("sdxl-turbo", "completed")]
     assert any("no-such-model" in line for line in lines)
 
 
-def test_install_models_blocking_turns_insufficient_disk_into_a_failed_row(
+def test_install_each_turns_insufficient_disk_into_a_failed_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ran: list[str] = []
@@ -1650,7 +1653,7 @@ def test_install_models_blocking_turns_insufficient_disk_into_a_failed_row(
     _free_space(monkeypatch, lambda path: 1)
     lines: list[str] = []
 
-    results = install.install_models_blocking(["sdxl-turbo"], hf_token=None, on_line=lines.append)
+    results = _install_each(["sdxl-turbo"], hf_token=None, on_line=lines.append)
 
     assert results == [("sdxl-turbo", "failed")]
     assert ran == []
@@ -1803,7 +1806,7 @@ def test_install_clears_operator_removal(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(install, "run_install", fake_run_install)
     monkeypatch.setattr(install, "preflight_disk", lambda model: None)
 
-    results = install.install_models_blocking(["qwen-image"], hf_token=None)
+    results = _install_each(["qwen-image"], hf_token=None)
 
     assert results == [("qwen-image", "completed")]
     assert seen == [False]
@@ -1820,7 +1823,7 @@ def test_install_that_never_starts_keeps_the_removal(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(install, "preflight_disk", refuse)
 
-    results = install.install_models_blocking(["qwen-image"], hf_token=None)
+    results = _install_each(["qwen-image"], hf_token=None)
 
     assert results == [("qwen-image", "failed")]
     assert install.is_removed("qwen-image")
