@@ -6,10 +6,12 @@ implements ONLY the subset of the schema that maps to
 ``model_store.path``, ``slots[]``, ``apps.*.enabled`` + ``gen.mode``
 (→ ``extensions``), ``npu.opt_in``, and ``gen.models``
 (→ ``image_models``). Every other top-level key (``network``,
-``huggingface``, ``apps.*.when``, ``apps.hermes.gateway``, the download side
-of ``gen.mode: scaffold_and_download``, ``slots[].context_size``,
-``slots[].enabled_on_pull``) is accepted and warned about, not applied — their
-workstreams wire them in later per the field→destination map (§5).
+``huggingface``, ``apps.*.when``, ``apps.hermes.gateway``,
+``slots[].context_size``, ``slots[].enabled_on_pull``) is accepted and warned
+about, not applied — their workstreams wire them in later per the
+field→destination map (§5). The download side of ``gen.mode:
+scaffold_and_download`` is applied by ``hal0 setup --answers`` itself
+(:func:`gen_download_requested`, then ``install_models_blocking``).
 
 ``auto`` values resolve through the SAME resolvers ``build_auto_selections``
 uses (``suggest_models``, ``derive_device``/``derive_profile`` via

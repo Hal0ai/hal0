@@ -629,8 +629,7 @@ async def install_services() -> dict[str, Any]:
             "active": hermes_active,
             "repairable": True,
         },
-        # ComfyUI is slot-managed by hal0-slot@img.service; the /opt/comfyui
-        # scripts are manual-operator tools only.
+        # ComfyUI is slot-managed by hal0-slot@img.service.
         {
             "unit": "comfyui",
             "label": "ComfyUI",

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json as jsonlib
 import time
-from typing import Any
+from typing import Any, NoReturn
 
 import typer
 from rich.console import Console
@@ -118,21 +118,24 @@ def models_install(
     _require_api()
     started: list[str] = []
     failed = False
-    for model_id in dict.fromkeys(ids):
-        try:
-            api_post(f"/api/comfyui/models/{model_id}/install")
-        except CliApiError as exc:
-            if exc.code == "comfyui.model_installed":
-                console.print(f"{escape(model_id)} is already installed.")
-            elif exc.code == "comfyui.install_running":
-                console.print(f"{escape(model_id)} is already installing; following it.")
-                started.append(model_id)
-            else:
-                console.print(f"[red]failed[/red] {escape(model_id)}: {escape(str(exc))}")
-                failed = True
-            continue
-        console.print(f"Installing [bold]{escape(model_id)}[/bold]…")
-        started.append(model_id)
+    try:
+        for model_id in dict.fromkeys(ids):
+            try:
+                api_post(f"/api/comfyui/models/{model_id}/install")
+            except CliApiError as exc:
+                if exc.code == "comfyui.model_installed":
+                    console.print(f"{escape(model_id)} is already installed.")
+                elif exc.code == "comfyui.install_running":
+                    console.print(f"{escape(model_id)} is already installing; following it.")
+                    started.append(model_id)
+                else:
+                    console.print(f"[red]failed[/red] {escape(model_id)}: {escape(str(exc))}")
+                    failed = True
+                continue
+            console.print(f"Installing [bold]{escape(model_id)}[/bold]…")
+            started.append(model_id)
+    except KeyboardInterrupt:
+        _exit_interrupted()
     if started and _follow(started):
         failed = True
     if failed:
@@ -174,12 +177,17 @@ def _follow(model_ids: list[str]) -> bool:
             if pending:
                 time.sleep(_POLL_INTERVAL_S)
     except KeyboardInterrupt:
-        console.print(
-            "\nStopped following; the install continues on the daemon. "
-            "Check it with: [bold]hal0 comfyui models list[/bold]"
-        )
-        raise typer.Exit(130) from None
+        _exit_interrupted()
     return unfinished
+
+
+def _exit_interrupted() -> NoReturn:
+    """Ctrl-C: stop the CLI, not the downloads the daemon already started."""
+    console.print(
+        "\nStopped. Installs already started continue on the daemon; "
+        "check them with: [bold]hal0 comfyui models list[/bold]"
+    )
+    raise typer.Exit(130) from None
 
 
 def _print_progress(model_id: str, job: dict[str, Any], last_step: dict[str, int]) -> None:

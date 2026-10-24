@@ -28,13 +28,6 @@ memory extraction go dark) for as long as generation holds the GPU.
 
 ## Enable the img capability
 
-```sh
-hal0 capabilities set img img --model sdxl-turbo
-```
-
-This is the same pattern as every other capability — set the child
-(`img`) under its parent (`img`), pointing at an installed image model.
-
 Install an image model first. `hal0 comfyui models list` shows the catalog,
 what each model still has to download, and the pick recommended for this box:
 
@@ -45,11 +38,20 @@ hal0 comfyui models install sdxl-lightning
 
 `install` follows each download until it finishes. It treats an already-installed
 model as done and exits 1 if an install fails, is cancelled or is refused; the
-same install is `POST /api/comfyui/models/{id}/install`. `list` marks the pick
+same install is `POST /api/comfyui/models/{model_id}/install`. `list` marks the pick
 recommended for this box with `*` and shows the state of each model (`none`,
 `partial`, `complete`, or `installing`). `hal0 comfyui models remove <id>`
 deletes a model's weights and workflow (a file another installed model uses
 stays), and `hal0 comfyui files` lists the weight files on disk, grouped by kind.
+
+Then point the `img` capability at the model you installed:
+
+```sh
+hal0 capabilities set img img --model sdxl-lightning
+```
+
+This is the same pattern as every other capability — set the child
+(`img`) under its parent (`img`), pointing at an installed image model.
 
 ## Read the generation-engine status
 
@@ -119,7 +121,9 @@ curl -X POST http://localhost:8080/api/comfyui/pin \
 The `img` slot's `[image]` table carries `idle_restore_minutes` (default
 `60` — how long ComfyUI can sit idle before the GPU arbiter restores LLM
 slots, hot-reloadable with no `hal0-api` restart), `default_size`
-(default `"1024x1024"`), and `default_steps`. Set these from the
+(`"1024x1024"` for a slot that does not set it; the shipped `img` seed sets `""`,
+which is meant to mean the model's native size — until the render path honours
+that, an empty value falls back to `1024x1024`), and `default_steps`. Set these from the
 dashboard's Settings → Image-gen panel or edit the slot's TOML directly —
 see [Edit configuration](/docs/guides/configure).
 
