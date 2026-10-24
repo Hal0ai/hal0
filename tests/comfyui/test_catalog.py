@@ -143,6 +143,15 @@ def test_renderable_models_declare_wxh_sizes(model: ImageModel) -> None:
         assert height.isdigit()
 
 
+@pytest.mark.parametrize("model", CATALOG.values(), ids=lambda m: m.id)
+def test_id_and_label_are_safe_in_a_tab_separated_menu(model: ImageModel) -> None:
+    """`hal0.install.image_models --plan` prints `id<TAB>label — …<TAB>flag` lines for install.sh."""
+    for text in (model.id, model.label):
+        assert "\t" not in text
+        assert "\n" not in text
+        assert "\r" not in text
+
+
 # ── recommendation ──────────────────────────────────────────────────────────
 
 

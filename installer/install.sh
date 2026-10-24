@@ -2912,6 +2912,7 @@ fi
 _img_plan=""
 _img_answer=""
 _img_ids=""
+_img_rc=0
 _img_n=0
 _img_list=()
 
@@ -2948,10 +2949,19 @@ else
             if [[ -z "${_img_answer}" ]]; then
                 break
             fi
-            if _img_ids="$("${VENV_DIR}/bin/python" -m hal0.install.image_models --resolve "${_img_answer}")"; then
+            # --resolve exits 2 for an answer it cannot resolve (ask again) and 1 for
+            # an internal failure (asking again would not help: skip the step).
+            _img_rc=0
+            _img_ids="$("${VENV_DIR}/bin/python" -m hal0.install.image_models --resolve "${_img_answer}")" || _img_rc=$?
+            if [[ "${_img_rc}" -eq 0 ]]; then
+                break
+            elif [[ "${_img_rc}" -eq 2 ]]; then
+                warn "Not a valid choice (see above) — try again, or press Enter to skip."
+            else
+                warn "The image model step failed (see above) — skipping it; install a model later with 'hal0 comfyui models install <id>' or from the dashboard"
+                _img_ids=""
                 break
             fi
-            warn "Not a valid choice (see above) — try again, or press Enter to skip."
         done
     else
         info "Non-interactive install — no image model downloaded (set HAL0_IMAGE_MODELS=recommended to opt in)."
