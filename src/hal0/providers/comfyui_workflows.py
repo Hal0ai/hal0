@@ -141,7 +141,14 @@ def _coerce_int(value: Any, default: int) -> int:
         return default
 
 
-def _coerce_float(value: Any, default: float) -> float:
+def _coerce_number(value: Any, default: float) -> float:
+    """``value`` as a number, an ``int`` staying an ``int``; ``default`` untouched when it is none.
+
+    A graph's own ``cfg`` can be an int (Qwen's is ``1``), and patching ``1.0`` over it would
+    change the graph for no reason.
+    """
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -229,7 +236,7 @@ def build_workflow(
     # solid and does not touch the global random state.
     seed = _coerce_int(extra.get("seed"), secrets.randbelow(2**63 - 1))
     steps = _coerce_int(extra.get("steps"), int(_default(stem, defaults, "steps")))
-    cfg = _coerce_float(extra.get("cfg"), float(_default(stem, defaults, "cfg")))
+    cfg = _coerce_number(extra.get("cfg"), _default(stem, defaults, "cfg"))
     negative_prompt = (extra.get("negative_prompt") or "").strip()
 
     # ── Patch nodes via the meta.params pointers ─────────────────────────
