@@ -3,11 +3,12 @@
 ## Status
 
 Accepted (2026-10-24). The image-generation overhaul that this record governs
-lands as four pull requests, each leaving the product working: the catalog,
+lands as five pull requests, each leaving the product working: the catalog,
 the path owner and the installer first; then generation from the catalog;
-then the separation of the LLM registry; then the dashboard. This PR carries
-the record and the path owner (decision 5). The later decisions describe the
-end state the other three build.
+then the separation of the LLM registry; then the dashboard; then an opt-in
+plugin manager. This PR carries the record and decisions 1 to 5: the catalog,
+its data model and component rule, removal, and the path owner. Decision 6
+describes the end state the later pull requests build.
 
 It does not amend an earlier record. ADR-0026 (a model delete removes its
 files) keeps governing LLM models in the registry; this record keeps image
@@ -75,14 +76,15 @@ subdirectory it lives in:
 | `latent_upscaler` | `latent_upscale_models` |
 
 A component carries its path under that subdirectory (which may be nested, as
-Wan's LoRAs are), its kind, a source (a Hugging Face repo and file, or a plain
-URL), and an approximate size.
+Wan's LoRAs are), its kind, a source (a Hugging Face repo and file; components
+are Hugging Face only), and an approximate size.
 
 An **image model** has an id and a label, a task (`txt2img`, `img2img`,
 `txt2video`, `img2video` or `upscale`), a tuple of components, the workflow
 template that uses them, a flag for whether the API can render it, its sizes
-(the first is native), a time estimate, a licence, a recommended flag and
-notes.
+(the first is native), a time estimate, a licence and notes. Which model to
+highlight as the starter is a query, `recommended_model_id(pool_gb)`, that
+picks by the box's memory pool rather than a flag on an entry.
 
 Install state is `none`, `partial` or `complete`, decided by whether the
 component files exist. It is never stored, so a file an operator adds or
@@ -124,11 +126,17 @@ and `COMFYUI_DATA_DIR` are removed, with no fallback: `HAL0_COMFYUI_DATA_ROOT`
 moves the whole tree or nothing does. `COMFYUI_BASE_URL` stays, because it
 names an endpoint, not a path.
 
-When the provider launches the container it writes the canonical
+The provider provisions the data root each time it renders the container spec,
+which the slot-drift probe also does every 30 seconds. It creates the mounted
+directories on every render: that is cheap, silent when they exist, and podman
+refuses a bind mount whose source is absent. It writes the canonical
 `extra_model_paths.yaml` if that file is absent or empty, and syncs the GPU
-gate custom node from a package asset. An empty YAML hides every model from
-ComfyUI, and today the provider writes an empty one whenever the installer's
-copy is missing. The installer stops copying both.
+gate custom node from a package asset (staged beside the target and renamed
+into place), at most once per process per data root. A write that fails is
+retried on a later render, so fixing a permission heals without a restart, but
+it logs once. An empty YAML hides every model from ComfyUI, and today the
+provider writes an empty one whenever the installer's copy is missing. The
+installer stops copying both, and no longer creates the ComfyUI tree.
 
 ### 6. The registry stops seeing ComfyUI files
 
