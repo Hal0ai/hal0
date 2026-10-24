@@ -303,7 +303,7 @@ def setup(
         # --no-pull, matching the LLM-slot pull deferral). The img slot comes up once
         # the first model lands.
         if not no_pull and gen_download_requested(answers) and sel.image_models:
-            _install_image_models(sel.image_models, hw)
+            _install_image_models(sel.image_models)
         return
     if auto:
         sel = build_auto_selections(
@@ -318,20 +318,20 @@ def setup(
     run_interactive(hw, storage_dir=storage_dir)
 
 
-def _install_image_models(model_ids: tuple[str, ...], hw: HardwareInfo) -> None:
+def _install_image_models(model_ids: tuple[str, ...]) -> None:
     """Install ``model_ids`` from the image catalog, blocking; then bring the img slot up.
 
     The first usable model also becomes the ``img`` capability's selection
-    (:func:`hal0.install.image_models.provision_image_models`). Per-model failures are
-    printed by the installer and do not stop the others or change the exit code; the slot
-    is only enabled when at least one model landed, so it never comes up against an empty
-    model dir.
+    (:func:`hal0.install.image_models.provision_image_models`), persisted without loading
+    the slot. Per-model failures are printed by the installer and do not stop the others or
+    change the exit code; the slot's unit is only enabled, and so started, when at least one
+    model landed, so it never comes up against an empty model dir.
     """
     from hal0.install.extensions import install_extension
     from hal0.install.image_models import provision_offline
     from hal0.upstreams.huggingface import hf_token_from_env
 
-    results = provision_offline(model_ids, hw=hw, hf_token=hf_token_from_env(), on_line=typer.echo)
+    results = provision_offline(model_ids, hf_token=hf_token_from_env(), on_line=typer.echo)
     incomplete = [model_id for model_id, state in results if state != "completed"]
     if incomplete:
         typer.echo(
@@ -514,7 +514,7 @@ def run_interactive(hw: HardwareInfo, *, storage_dir: str) -> None:
     )
     asyncio.run(_run_auto(sel, hw, no_pull=False))
     if sel.image_models:
-        _install_image_models(sel.image_models, hw)
+        _install_image_models(sel.image_models)
 
     if launch_on_completion:
         try:

@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from hal0.capabilities import catalog
-from hal0.comfyui.autoselect import auto_select_first_image_model
+from hal0.comfyui.autoselect import AutoSelectStatus, auto_select_first_image_model
 from hal0.comfyui.catalog import CATALOG
 from hal0.errors import BadRequest
 
@@ -36,16 +36,20 @@ class _Orchestrator:
         self._state_error = state_error
         self._apply_error = apply_error
         self.applied: list[tuple[str, str, dict[str, Any]]] = []
+        self.starts: list[bool] = []
 
     async def get_state(self) -> dict[str, Any]:
         if self._state_error is not None:
             raise self._state_error
         return {"selections": {"img": {"img": self._selection}}}
 
-    async def apply(self, slot: str, child: str, partial: dict[str, Any]) -> dict[str, Any]:
+    async def apply(
+        self, slot: str, child: str, partial: dict[str, Any], *, start: bool = True
+    ) -> dict[str, Any]:
         if self._apply_error is not None:
             raise self._apply_error
         self.applied.append((slot, child, partial))
+        self.starts.append(start)
         return {}
 
 
@@ -143,3 +147,81 @@ async def test_no_auto_select_when_the_selection_cannot_be_read() -> None:
     await auto_select_first_image_model(_SDXL, orchestrator=orchestrator)  # does not raise
 
     assert orchestrator.applied == []
+
+
+# ── start: the install path persists the pick without starting the slot ─────
+
+
+async def test_auto_select_starts_the_slot_by_default() -> None:
+    orchestrator = _Orchestrator()
+
+    await auto_select_first_image_model(_SDXL, orchestrator=orchestrator)
+
+    assert orchestrator.starts == [True]
+
+
+async def test_auto_select_passes_start_false_through() -> None:
+    orchestrator = _Orchestrator()
+
+    await auto_select_first_image_model(_SDXL, orchestrator=orchestrator, start=False)
+
+    assert len(orchestrator.applied) == 1
+    assert orchestrator.starts == [False]
+
+
+# ── the outcome: what happened, for a caller that reports it ────────────────
+
+
+async def test_outcome_selected() -> None:
+    outcome = await auto_select_first_image_model(_SDXL, orchestrator=_Orchestrator())
+
+    assert outcome.status is AutoSelectStatus.selected
+
+
+async def test_outcome_kept_names_the_existing_selection() -> None:
+    orchestrator = _Orchestrator(model="sd-1.5-pruned-emaonly", enabled=True)
+
+    outcome = await auto_select_first_image_model(_SDXL, orchestrator=orchestrator)
+
+    assert outcome.status is AutoSelectStatus.kept
+    assert outcome.detail == "sd-1.5-pruned-emaonly"
+
+
+async def test_outcome_failed_carries_the_refusal_message() -> None:
+    orchestrator = _Orchestrator(
+        apply_error=BadRequest("device busy", code="capability.invalid_selection")
+    )
+
+    outcome = await auto_select_first_image_model(_SDXL, orchestrator=orchestrator)
+
+    assert outcome.status is AutoSelectStatus.failed
+    assert outcome.detail == "device busy"
+
+
+@pytest.mark.parametrize(
+    ("case", "reason"),
+    [
+        ("video", "cannot render"),
+        ("no-orchestrator", "orchestrator"),
+        ("no-lane", "ROCm lane"),
+        ("unreadable", "read"),
+    ],
+)
+async def test_outcome_skipped_says_why(
+    case: str, reason: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    orchestrator: _Orchestrator | None = _Orchestrator()
+    model = _SDXL
+    if case == "video":
+        model = _VIDEO
+    elif case == "no-orchestrator":
+        orchestrator = None
+    elif case == "no-lane":
+        monkeypatch.setattr(catalog, "comfyui_backends", lambda: [])
+    else:
+        orchestrator = _Orchestrator(state_error=RuntimeError("slot manager is down"))
+
+    outcome = await auto_select_first_image_model(model, orchestrator=orchestrator)
+
+    assert outcome.status is AutoSelectStatus.skipped
+    assert reason in outcome.detail

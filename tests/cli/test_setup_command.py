@@ -144,7 +144,7 @@ def headless(monkeypatch: pytest.MonkeyPatch) -> dict[str, list]:
     async def fake_run_auto(sel, hw, *, no_pull=False):
         calls["applied"] = [sel.image_models, no_pull]
 
-    def fake_provision_offline(model_ids, *, hw, hf_token, on_line):
+    def fake_provision_offline(model_ids, *, hf_token, on_line):
         calls["install"].append((tuple(model_ids), hf_token, on_line))
         return [(model_id, calls.get("state", "completed")) for model_id in model_ids]
 
@@ -292,7 +292,7 @@ def guided(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
         seen["events"].append("apply")
         seen["selection"] = sel
 
-    def fake_install_image_models(model_ids, hw):
+    def fake_install_image_models(model_ids):
         seen["events"].append("install")
         seen["installed"].append(tuple(model_ids))
 

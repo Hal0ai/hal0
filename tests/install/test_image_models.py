@@ -269,14 +269,18 @@ class _FakeOrchestrator:
 
     def __init__(self, selected: str | None = None) -> None:
         self.applied: list[tuple[str, str, dict[str, Any]]] = []
+        self.starts: list[bool] = []
         self._model = selected
 
     async def get_state(self) -> dict[str, Any]:
         selection = {"enabled": True, "model": self._model} if self._model else {}
         return {"selections": {"img": {"img": selection}}}
 
-    async def apply(self, slot: str, child: str, partial: dict[str, Any]) -> dict[str, Any]:
+    async def apply(
+        self, slot: str, child: str, partial: dict[str, Any], *, start: bool = True
+    ) -> dict[str, Any]:
         self.applied.append((slot, child, partial))
+        self.starts.append(start)
         self._model = partial["model"]
         return partial
 
@@ -312,7 +316,6 @@ def _provision(ids: list[str], orchestrator: Any, lines: list[str] | None = None
     return asyncio.run(
         provision_image_models(
             ids,
-            hw=_hw(64),
             orchestrator=orchestrator,
             hf_token="hf_token",
             on_line=(lines if lines is not None else []).append,
@@ -415,7 +418,7 @@ def test_a_refused_apply_does_not_fail_the_install(
     from hal0.errors import BadRequest
 
     class Refusing(_FakeOrchestrator):
-        async def apply(self, slot, child, partial):
+        async def apply(self, slot, child, partial, *, start=True):
             raise BadRequest("no", code="capability.illegal_backend_model_pair")
 
     assert _provision(["sdxl-lightning"], Refusing()) == [("sdxl-lightning", "completed")]
@@ -450,15 +453,159 @@ def test_provision_reports_an_unknown_id_as_failed_and_carries_on(
     assert results == [("not-a-model", "failed"), ("sdxl-lightning", "completed")]
 
 
+def test_provision_persists_the_selection_without_starting_the_slot(
+    installs: dict[str, Any], owui: list[str]
+) -> None:
+    """Setup must not start ComfyUI and wait for it: `hal0.target` starts the slots later."""
+    orchestrator = _FakeOrchestrator()
+
+    _provision(["sdxl-lightning"], orchestrator)
+
+    assert orchestrator.starts == [False]
+
+
+def test_provision_says_what_it_is_doing_and_what_came_of_it(
+    installs: dict[str, Any], owui: list[str]
+) -> None:
+    label = CATALOG["sdxl-lightning"].label
+    lines: list[str] = []
+
+    _provision(["sdxl-lightning"], _FakeOrchestrator(), lines)
+
+    before, after = lines[-2:]
+    assert before == f"setting {label} as the default image model"
+    assert after == f"{label} is the default image model; it loads when the img slot starts"
+
+
+def test_provision_says_when_it_kept_the_operators_selection(
+    installs: dict[str, Any], owui: list[str]
+) -> None:
+    label = CATALOG["sdxl-lightning"].label
+    lines: list[str] = []
+
+    _provision(["sdxl-lightning"], _FakeOrchestrator(selected="qwen-image"), lines)
+
+    assert lines[-1] == (
+        f"keeping qwen-image as the default image model; {label} is installed "
+        "and can be picked in the dashboard"
+    )
+
+
+def test_provision_prints_a_refusal_as_one_line_with_its_message(
+    installs: dict[str, Any], owui: list[str]
+) -> None:
+    from hal0.errors import BadRequest
+
+    class Refusing(_FakeOrchestrator):
+        async def apply(self, slot, child, partial, *, start=True):
+            raise BadRequest("device is busy", code="capability.invalid_selection")
+
+    lines: list[str] = []
+
+    _provision(["sdxl-lightning"], Refusing(), lines)
+
+    label = CATALOG["sdxl-lightning"].label
+    assert lines[-1] == (
+        f"could not make {label} the default image model (device is busy); pick it in the dashboard"
+    )
+
+
+def test_provision_turns_an_unexpected_error_into_a_line_not_a_traceback(
+    installs: dict[str, Any], owui: list[str], caplog: pytest.LogCaptureFixture
+) -> None:
+    class Broken(_FakeOrchestrator):
+        async def get_state(self):
+            return {"selections": {}}
+
+        async def apply(self, slot, child, partial, *, start=True):
+            raise RuntimeError("boom")
+
+    lines: list[str] = []
+    with caplog.at_level("DEBUG"):
+        results = _provision(["sdxl-lightning"], Broken(), lines)
+
+    assert results == [("sdxl-lightning", "completed")]
+    assert "RuntimeError: boom" in lines[-1]
+    assert "Traceback" not in "\n".join(lines)
+    assert owui == ["reconciled"]  # the rewire still runs
+
+
+def test_provision_says_why_a_pick_was_skipped(installs: dict[str, Any], owui: list[str]) -> None:
+    lines: list[str] = []
+
+    _provision(["sdxl-lightning"], None, lines)
+
+    assert "was not made the default image model (no capability orchestrator)" in lines[-1]
+
+
+def test_provision_prints_no_selection_lines_when_nothing_selectable_landed(
+    installs: dict[str, Any], owui: list[str]
+) -> None:
+    installs["outcomes"]["sdxl-lightning"] = "failed"
+    lines: list[str] = []
+
+    _provision(["sdxl-lightning"], _FakeOrchestrator(), lines)
+
+    assert not any("default image model" in line for line in lines)
+
+
+def test_provision_offline_still_downloads_when_the_orchestrator_cannot_be_built(
+    installs: dict[str, Any], owui: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def broken() -> Any:
+        raise RuntimeError("slot manager would not build")
+
+    monkeypatch.setattr(image_models, "_build_offline_orchestrator", broken)
+    lines: list[str] = []
+
+    results = image_models.provision_offline(
+        ["sdxl-lightning"], hf_token="hf_token", on_line=lines.append
+    )
+
+    assert results == [("sdxl-lightning", "completed")]
+    assert any(
+        "could not build the capability orchestrator (RuntimeError: slot manager would not build)"
+        in line
+        for line in lines
+    )
+    assert "no capability orchestrator" in lines[-1]
+
+
+def test_installer_log_lines_carry_no_traceback() -> None:
+    """A WARNING that logs an exception reaches the operator as one line."""
+    import logging
+    import sys
+
+    try:
+        raise RuntimeError("boom")
+    except RuntimeError:
+        record = logging.LogRecord(
+            "hal0.test", logging.WARNING, __file__, 1, "something failed", None, sys.exc_info()
+        )
+
+    text = image_models._OneLineFormatter("  %(message)s").format(record)
+
+    assert text == "  something failed\nRuntimeError: boom"
+    assert "Traceback" not in text
+
+
 # ── main() installing ids ───────────────────────────────────────────────────
 
 
 @pytest.fixture
-def offline(monkeypatch: pytest.MonkeyPatch, hw: HardwareInfo) -> dict[str, Any]:
-    """``provision_offline`` stubbed: what ``main`` handed it, and what it answers."""
+def offline(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """``provision_offline`` stubbed: what ``main`` handed it, and what it answers.
+
+    Hardware is made unreadable: installing ids has no use for it, so ``main`` must not ask.
+    """
     seen: dict[str, Any] = {"results": None}
 
-    def fake(model_ids, *, hw, hf_token, on_line):
+    def no_hardware() -> HardwareInfo:
+        raise AssertionError("installing ids must not read the hardware")
+
+    monkeypatch.setattr(image_models, "_load_hardware", no_hardware)
+
+    def fake(model_ids, *, hf_token, on_line):
         seen["call"] = (tuple(model_ids), hf_token)
         on_line("sdxl-lightning: installing")
         if isinstance(seen["results"], Exception):

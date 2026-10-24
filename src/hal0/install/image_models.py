@@ -23,8 +23,8 @@ hardcodes one. A model already on disk says so instead of quoting a download.
 failed model is reported and the install carries on.
 
 The first model that lands and that the API can render becomes the ``img`` capability's
-selection, once (:func:`hal0.comfyui.autoselect.auto_select_first_image_model`), and Open
-WebUI is re-wired to match.
+selection, once (:func:`hal0.comfyui.autoselect.auto_select_first_image_model`), persisted
+without starting the slot, and Open WebUI is re-wired to match.
 """
 
 from __future__ import annotations
@@ -35,13 +35,19 @@ import re
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from hal0.capabilities import catalog as capability_catalog
 from hal0.comfyui import install as comfyui_install
 from hal0.comfyui import paths as comfyui_paths
-from hal0.comfyui.autoselect import auto_select_first_image_model
-from hal0.comfyui.catalog import CATALOG, get_model, install_state, recommended_model_id
+from hal0.comfyui.autoselect import AutoSelectStatus, auto_select_first_image_model
+from hal0.comfyui.catalog import (
+    CATALOG,
+    ImageModel,
+    get_model,
+    install_state,
+    recommended_model_id,
+)
 from hal0.config.schema import HardwareInfo
 from hal0.install.agent_model import _pool_gb
 from hal0.upstreams.huggingface import hf_token_from_env
@@ -156,7 +162,6 @@ def _valid_inputs(offers: list[ImageOffer]) -> str:
 async def provision_image_models(
     model_ids: Sequence[str],
     *,
-    hw: HardwareInfo,
     orchestrator: CapabilityOrchestrator | None,
     hf_token: str | None,
     on_line: Callable[[str], None],
@@ -171,29 +176,64 @@ async def provision_image_models(
     Afterwards the first ``completed`` model the API can render is offered to
     :func:`~hal0.comfyui.autoselect.auto_select_first_image_model` (once; an existing
     selection is left alone), and Open WebUI's environment is re-rendered so it learns of
-    the new image model. A failure in either is logged and changes no result.
+    the new image model. The selection is persisted without starting the slot
+    (``start=False``): the installer's ``hal0.target`` starts it, and loading ComfyUI inside
+    an install step would block on its image and readiness. Two lines through ``on_line``
+    say what is being selected and what came of it; a failure in either follow-up is one
+    such line, never a traceback, and changes no result.
 
     This runs outside the API process, so it bypasses the API's install-job registry and
     its tree lock: a dashboard install of the same model running at the same time is not
     deduplicated against it. Setup runs before the API serves installs in the normal flow.
     """
     ids = list(model_ids)
-    log.info("install.image_models models=%s pool_gb=%.0f", ids, _pool_gb(hw))
+    log.info("install.image_models models=%s", ids)
     results = await comfyui_install.install_each(ids, hf_token, on_line)
 
     completed = (get_model(model_id) for model_id, state in results if state == "completed")
     renderable = [model for model in completed if model is not None and model.api_renderable]
     if renderable:
-        try:
-            await auto_select_first_image_model(renderable[0], orchestrator=orchestrator)
-        except Exception:
-            log.warning(
-                "install.image_models_auto_select_failed",
-                extra={"model_id": renderable[0].id},
-                exc_info=True,
-            )
+        model = renderable[0]
+        on_line(f"setting {model.label} as the default image model")
+        on_line(await _select_without_starting(model, orchestrator))
         await asyncio.to_thread(_reconcile_open_webui)
     return results
+
+
+async def _select_without_starting(
+    model: ImageModel, orchestrator: CapabilityOrchestrator | None
+) -> str:
+    """Make ``model`` the ``img`` selection and say, in one line, what came of it."""
+    try:
+        outcome = await auto_select_first_image_model(model, orchestrator=orchestrator, start=False)
+    except Exception as exc:
+        log.debug(
+            "install.image_models_auto_select_error",
+            extra={"model_id": model.id},
+            exc_info=True,
+        )
+        return (
+            f"could not make {model.label} the default image model "
+            f"({type(exc).__name__}: {exc}); pick it in the dashboard"
+        )
+    match outcome.status:
+        case AutoSelectStatus.selected:
+            return f"{model.label} is the default image model; it loads when the img slot starts"
+        case AutoSelectStatus.kept:
+            return (
+                f"keeping {outcome.detail} as the default image model; "
+                f"{model.label} is installed and can be picked in the dashboard"
+            )
+        case AutoSelectStatus.skipped:
+            return (
+                f"{model.label} was not made the default image model "
+                f"({outcome.detail}); pick it in the dashboard"
+            )
+        case _:
+            return (
+                f"could not make {model.label} the default image model "
+                f"({outcome.detail}); pick it in the dashboard"
+            )
 
 
 def _reconcile_open_webui() -> None:
@@ -234,25 +274,29 @@ async def _build_offline_orchestrator() -> CapabilityOrchestrator:
 def provision_offline(
     model_ids: Sequence[str],
     *,
-    hw: HardwareInfo,
     hf_token: str | None,
     on_line: Callable[[str], None],
 ) -> list[tuple[str, str]]:
     """:func:`provision_image_models` for a caller with no running API and no event loop.
 
     Owns its event loop (``asyncio.run``), so it cannot be called from async code. If the
-    orchestrator cannot be built the models still download; they just are not selected.
+    orchestrator cannot be built the models still download; they just are not selected, and
+    a line says so.
     """
 
     async def run() -> list[tuple[str, str]]:
         orchestrator: CapabilityOrchestrator | None
         try:
             orchestrator = await _build_offline_orchestrator()
-        except Exception:
-            log.warning("install.image_models_orchestrator_unavailable", exc_info=True)
+        except Exception as exc:
+            log.debug("install.image_models_orchestrator_unavailable", exc_info=True)
+            on_line(
+                f"could not build the capability orchestrator ({type(exc).__name__}: {exc}); "
+                "models will download but not be selected"
+            )
             orchestrator = None
         return await provision_image_models(
-            model_ids, hw=hw, orchestrator=orchestrator, hf_token=hf_token, on_line=on_line
+            model_ids, orchestrator=orchestrator, hf_token=hf_token, on_line=on_line
         )
 
     return asyncio.run(run())
@@ -294,6 +338,13 @@ def _resolve(answer: str) -> int:
     return 0
 
 
+class _OneLineFormatter(logging.Formatter):
+    """The installer's log format: an exception is its type and message, never a traceback."""
+
+    def formatException(self, ei: Any) -> str:
+        return f"{ei[0].__name__}: {ei[1]}"
+
+
 def _say(line: str) -> None:
     print(f"  {line.strip()}", flush=True)
 
@@ -311,7 +362,9 @@ def main(argv: list[str] | None = None) -> int:
     here would abort a whole install over an optional download.
     """
     argv = list(sys.argv[1:] if argv is None else argv)
-    logging.basicConfig(level=logging.WARNING, format="  %(message)s")
+    handler = logging.StreamHandler()
+    handler.setFormatter(_OneLineFormatter("  %(message)s"))
+    logging.basicConfig(level=logging.WARNING, handlers=[handler])
 
     if "--plan" in argv:
         return _plan()
@@ -323,9 +376,7 @@ def main(argv: list[str] | None = None) -> int:
     if not ids:
         return 0
     try:
-        results = provision_offline(
-            ids, hw=_load_hardware(), hf_token=hf_token_from_env(), on_line=_say
-        )
+        results = provision_offline(ids, hf_token=hf_token_from_env(), on_line=_say)
     except Exception as exc:
         print(f"  image model install failed ({type(exc).__name__}: {exc})", file=sys.stderr)
         return 1
