@@ -9,6 +9,7 @@ best-effort daemon register/switch.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from typing import Any
 
@@ -1022,9 +1023,12 @@ def test_reprovision_hermes_help_does_not_advertise_preview_flags() -> None:
 
     res = CliRunner().invoke(ac.app, ["reprovision", "hermes", "--help"])
     assert res.exit_code == 0
-    assert "--dry-run" not in res.output
-    assert "--skip-phase" not in res.output
-    assert "--offline" in res.output
+    # Rich styles each option name separately when colour is forced (CI sets
+    # GITHUB_ACTIONS), splitting "--offline" with escape codes; compare plain text.
+    out = re.sub(r"\x1b\[[0-9;]*m", "", res.output)
+    assert "--dry-run" not in out
+    assert "--skip-phase" not in out
+    assert "--offline" in out
 
 
 @pytest.mark.parametrize("args", [["bootstrap", "hermes"], ["bootstrap", "hermes", "--repair"]])
