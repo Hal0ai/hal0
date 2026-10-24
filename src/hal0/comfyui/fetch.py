@@ -40,6 +40,7 @@ import shutil
 import subprocess
 import threading
 import uuid
+from importlib import resources
 from pathlib import Path
 
 from hal0.comfyui.capabilities import ModelVariant
@@ -88,18 +89,11 @@ def _scripts_dir() -> Path:
 def _workflows_src_dir() -> Path:
     """Return the directory holding curated ComfyUI workflow JSONs.
 
-    Ships alongside the fetch scripts (same source tree, same install-shape
-    ambiguity), so this resolves the same way as :func:`_scripts_dir` — see
-    that docstring for the editable-vs-FHS candidate rationale. Not to be
-    confused with :func:`_workflows_dir`, which is the DESTINATION the
-    curated JSON is copied to.
+    They ship as package data in ``hal0.providers.workflows`` (a real directory
+    in editable and wheel installs alike). Not to be confused with
+    :func:`_workflows_dir`, which is the DESTINATION the curated JSON is copied to.
     """
-    editable_candidate = Path(__file__).resolve().parents[3] / "installer" / "comfyui" / "workflows"
-    fhs_candidate = _paths.usr_lib() / "installer" / "comfyui" / "workflows"
-
-    if editable_candidate.is_dir():
-        return editable_candidate
-    return fhs_candidate
+    return Path(str(resources.files("hal0.providers.workflows")))
 
 
 # Back-compat module-level alias: hal0.comfyui.orchestrate imports this name

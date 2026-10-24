@@ -1,4 +1,4 @@
-"""Finding 5: _scripts_dir() / _workflows_src_dir() FHS-aware resolution.
+"""Finding 5: _scripts_dir() FHS-aware resolution, and the workflow source dir.
 
 Same class of bug as #1284 (preflight.sh) / #1285 (agent installer
 scripts): ``hal0.comfyui.fetch`` used to resolve its scripts + curated
@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from hal0.comfyui import fetch as fetch_mod
+from hal0.providers import workflows as workflows_pkg
 
 # ── _scripts_dir ────────────────────────────────────────────────────────────
 
@@ -109,68 +110,36 @@ def test_scripts_dir_missing_everywhere_returns_fhs_candidate(
 # ── _workflows_src_dir ───────────────────────────────────────────────────────
 
 
-def test_workflows_src_dir_resolves_editable_when_present() -> None:
-    """Editable / dev checkout: real checkout has
-    ``installer/comfyui/workflows`` three parents up from
-    ``src/hal0/comfyui/fetch.py``."""
+def test_workflows_src_dir_is_the_package_workflows_dir() -> None:
+    """Curated workflows ship as package data, so the source directory is the
+    same in an editable checkout and in a wheel install."""
     resolved = fetch_mod._workflows_src_dir()
     assert resolved.is_dir()
-    assert resolved == (
-        Path(fetch_mod.__file__).resolve().parents[3] / "installer" / "comfyui" / "workflows"
-    )
+    assert resolved == Path(workflows_pkg.__file__).parent
+    assert (resolved / "ESRGAN-4x-Upscale.json").is_file()
 
 
-def test_workflows_src_dir_falls_back_to_fhs_for_wheel_install(
+# ── _provision_workflow() works from a wheel install ───────────────────────
+
+
+def test_provision_workflow_finds_asset_when_installed_as_wheel(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Same FHS-fallback contract as _scripts_dir(), for the curated
-    workflow JSON source dir."""
+    """With fetch.py "installed" under site-packages (no repo root three
+    parents up), _provision_workflow must still locate and copy the curated
+    workflow JSON instead of logging comfyui.workflow_asset_missing."""
     fake_module_path = (
         tmp_path / "venv" / "lib" / "python3.12" / "site-packages" / "hal0" / "comfyui" / "fetch.py"
     )
     fake_module_path.parent.mkdir(parents=True)
     monkeypatch.setattr(fetch_mod, "__file__", str(fake_module_path))
-
-    fhs_root = tmp_path / "usr-lib-hal0-current"
-    workflows_dir = fhs_root / "installer" / "comfyui" / "workflows"
-    workflows_dir.mkdir(parents=True)
-    monkeypatch.setattr(fetch_mod._paths, "usr_lib", lambda: fhs_root)
-
-    resolved = fetch_mod._workflows_src_dir()
-    assert resolved == workflows_dir
-    assert resolved.is_dir()
-
-
-# ── fetch_model() / _provision_workflow() actually use the FHS fallback ─────
-
-
-def test_provision_workflow_finds_asset_via_fhs_fallback(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """End-to-end: with fetch.py "installed" as a non-editable wheel,
-    _provision_workflow must still locate + copy the curated workflow
-    JSON by falling back to the FHS workflows dir, instead of silently
-    logging comfyui.workflow_asset_missing (the production symptom in
-    Finding 5)."""
-    fake_module_path = (
-        tmp_path / "venv" / "lib" / "python3.12" / "site-packages" / "hal0" / "comfyui" / "fetch.py"
-    )
-    fake_module_path.parent.mkdir(parents=True)
-    monkeypatch.setattr(fetch_mod, "__file__", str(fake_module_path))
-
-    fhs_root = tmp_path / "usr-lib-hal0-current"
-    workflows_src_dir = fhs_root / "installer" / "comfyui" / "workflows"
-    workflows_src_dir.mkdir(parents=True)
-    (workflows_src_dir / "sdxl.json").write_text("{}")
-    monkeypatch.setattr(fetch_mod._paths, "usr_lib", lambda: fhs_root)
 
     dest_dir = tmp_path / "workflows-dest"
     monkeypatch.setattr(fetch_mod, "_workflows_dir", lambda: dest_dir)
 
-    variant = type("V", (), {"workflow": "sdxl.json"})()
+    variant = type("V", (), {"workflow": "SDXL-Lightning-8step.json"})()
     result = fetch_mod._provision_workflow(variant)
 
-    assert result == str(dest_dir / "sdxl.json")
-    assert (dest_dir / "sdxl.json").is_file()
+    assert result == str(dest_dir / "SDXL-Lightning-8step.json")
+    assert (dest_dir / "SDXL-Lightning-8step.json").is_file()

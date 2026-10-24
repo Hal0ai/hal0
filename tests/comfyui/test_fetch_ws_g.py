@@ -24,7 +24,7 @@ from hal0.comfyui.fetch import _fetch_env, _provision_workflow, fetch_model, get
 
 REPO = Path(__file__).parent.parent.parent
 SCRIPTS_DIR = REPO / "installer" / "comfyui" / "scripts"
-WORKFLOWS_SRC = REPO / "installer" / "comfyui" / "workflows"
+WORKFLOWS_SRC = REPO / "src" / "hal0" / "providers" / "workflows"
 
 # Scripts that use the `hf` CLI (get_esrgan.sh uses curl only).
 HF_SCRIPTS = [
