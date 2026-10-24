@@ -250,6 +250,12 @@ def _resolve_gen(doc: dict[str, Any]) -> tuple[bool, tuple[str, ...]]:
         if model_id not in models:
             models.append(model_id)
 
+    if models and mode != "scaffold_and_download":
+        _warn(
+            f"gen.models lists {len(models)} image model(s) but gen.mode is {mode!r}, so they "
+            "will not be downloaded (set gen.mode: scaffold_and_download to install them)"
+        )
+
     return comfyui_enabled, tuple(models)
 
 
