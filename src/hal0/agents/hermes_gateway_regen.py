@@ -105,8 +105,13 @@ class GatewayCleanupError(GatewayRegenError):
 
     ``hermes-gateway.service`` has taken over the gateway's on/off state by
     then; only the stopped, disabled suffixed file is left behind, and a re-run
-    removes it (#2950).
+    removes it (#2950). ``result`` is what the move (and, from
+    :func:`install_gateway_unit`, its follow-up steps such as linger) did.
     """
+
+    def __init__(self, message: str, result: RegenResult | None = None) -> None:
+        super().__init__(message)
+        self.result = result
 
 
 def _launcher(module: str, args: tuple[str, ...] = ()) -> str:
@@ -616,9 +621,33 @@ def migrate_hashed_units(
         # suffixed unit left stopped or disabled would lose the operator's
         # on/off state. The suffixed file is only removed once the handoff
         # has succeeded, so it is always there to restore.
+        problems: list[str] = []
+        runtime_flag = ["--runtime"] if runtime_only else []
+
+        def undo(argv: list[str], what: str) -> None:
+            # A failed undo is reported, never swallowed: a canonical unit left
+            # enabled beside the restored suffixed one means two pollers on the
+            # next boot (#3020 review).
+            try:
+                proc = _run(run, argv)
+            except (OSError, subprocess.SubprocessError) as exc:
+                problems.append(f"{GATEWAY_UNIT} {what}: {' '.join(argv[1:-1])} failed: {exc}")
+                return
+            if proc.returncode != 0:
+                detail = (proc.stderr or proc.stdout or "").strip() or f"exit {proc.returncode}"
+                problems.append(
+                    f"{GATEWAY_UNIT} {what}: {' '.join(argv[1:-1])} failed: {detail[:200]}"
+                )
+
         if not pre_existing:
-            with contextlib.suppress(OSError, subprocess.SubprocessError):
-                _run(run, ["systemctl", "disable", "--now", GATEWAY_UNIT])
+            # An `enable --runtime` lives under /run; only `disable --runtime`
+            # removes it.
+            argv = ["systemctl", "disable", *runtime_flag, "--now", GATEWAY_UNIT]
+            if canon_touched["enabled"]:
+                undo(argv, "left enabled")
+            else:
+                with contextlib.suppress(OSError, subprocess.SubprocessError):
+                    _run(run, argv)
             with contextlib.suppress(OSError):
                 unit_path.unlink()
         elif not masked and old_text is not None:
@@ -633,12 +662,9 @@ def migrate_hashed_units(
             # stopped. Turn off what this run turned on, or both units end up
             # enabled and the next boot starts two pollers (#2950).
             if canon_touched["enabled"]:
-                argv = ["systemctl", "disable", *(["--runtime"] if runtime_only else [])]
-                with contextlib.suppress(OSError, subprocess.SubprocessError):
-                    _run(run, [*argv, GATEWAY_UNIT])
+                undo(["systemctl", "disable", *runtime_flag, GATEWAY_UNIT], "left enabled")
             if canon_touched["started"]:
-                with contextlib.suppress(OSError, subprocess.SubprocessError):
-                    _run(run, ["systemctl", "stop", GATEWAY_UNIT])
+                undo(["systemctl", "stop", GATEWAY_UNIT], "left running")
         left_stopped: str | None = None
         if pre_existing and not masked and canon_was_active:
             # A failed restart of the operator's canonical unit: bring it back
@@ -660,7 +686,9 @@ def migrate_hashed_units(
             if result.was_active:
                 with contextlib.suppress(OSError, subprocess.SubprocessError):
                     _run(run, ["systemctl", "start", path.name])
-        return left_stopped
+        if left_stopped:
+            problems.append(left_stopped)
+        return "; ".join(problems) or None
 
     try:
         if not masked:
@@ -733,9 +761,18 @@ def migrate_hashed_units(
             unlink_errors.append(f"remove {path}: {exc}")
             continue
         done.append(f"removed {path.name}")
-    _check(run, ["systemctl", "daemon-reload"], "systemctl daemon-reload", done)
+    try:
+        _check(run, ["systemctl", "daemon-reload"], "systemctl daemon-reload", done)
+    except GatewayRegenError as exc:
+        # The gateway has moved either way. A leftover file is the failure the
+        # caller has to report correctly; a reload failure on top of it must
+        # not hide that behind a plain error (#3020 review).
+        if not unlink_errors:
+            raise
+        unlink_errors.append(str(exc))
     if unlink_errors:
-        raise GatewayCleanupError(_failure("; ".join(unlink_errors), "left behind", done))
+        result.message = f"{GATEWAY_UNIT}: " + ", ".join(done)
+        raise GatewayCleanupError(_failure("; ".join(unlink_errors), "left behind", done), result)
     result.message = f"{GATEWAY_UNIT}: " + ", ".join(done)
     return result
 
@@ -762,9 +799,19 @@ def install_gateway_unit(
     """
     run = run if run is not None else subprocess.run
     uid_of = uid_of if uid_of is not None else (lambda name: pwd.getpwnam(name).pw_uid)
-    migrated = migrate_hashed_units(
-        unit_path=unit_path, linger_dir=linger_dir, run=run, uid_of=uid_of, which=which
-    )
+    cleanup: GatewayCleanupError | None = None
+    try:
+        migrated = migrate_hashed_units(
+            unit_path=unit_path, linger_dir=linger_dir, run=run, uid_of=uid_of, which=which
+        )
+    except GatewayCleanupError as exc:
+        # The move finished; only the old file is left. The rest of the
+        # install (linger above all) still runs, then the cleanup failure is
+        # raised with everything done (#3020 review).
+        if exc.result is None:
+            raise
+        cleanup = exc
+        migrated = exc.result
     result = RegenResult("installed", "", migrated.was_enabled, migrated.was_active)
     done = result.steps
     done.extend(migrated.steps)
@@ -773,6 +820,8 @@ def install_gateway_unit(
         result.message = f"{GATEWAY_UNIT} is masked; left alone" + (
             f" ({', '.join(done)})" if done else ""
         )
+        if cleanup is not None:
+            raise GatewayCleanupError(str(cleanup), result)
         return result
     if not migrated.unit_rewritten:
         old_text = None
@@ -803,6 +852,8 @@ def install_gateway_unit(
         result.linger_enabled = any(s.startswith("linger on") for s in done)
     result.restarted = result.restarted or migrated.restarted
     result.message = f"{GATEWAY_UNIT}: " + ", ".join(done)
+    if cleanup is not None:
+        raise GatewayCleanupError(str(cleanup), result)
     return result
 
 
@@ -973,6 +1024,14 @@ def main(argv: list[str] | None = None) -> int:
         # installer's masked branch, which must not write the canonical unit
         # but must not leave a suffixed gateway running past the mask (#2950).
         result = install_gateway_unit() if args == ["install"] else migrate_hashed_units()
+    except GatewayCleanupError as exc:
+        # Exit 3: the gateway moved onto hermes-gateway.service, only the old
+        # suffixed file is left. The installer says so instead of "not
+        # installed" (#3020 review).
+        if exc.result is not None and exc.result.message:
+            print(exc.result.message)
+        print(f"hermes-gateway unit: {exc}", file=sys.stderr)
+        return 3
     except GatewayRegenError as exc:
         print(f"hermes-gateway unit: {exc}", file=sys.stderr)
         return 1

@@ -174,6 +174,18 @@ unit_left_off_note() {
     info "${unit} is ${state}; left as is (run '${turn_on}' to turn it on)"
 }
 
+# Report the exit of `hermes_gateway_regen install|migrate`. Exit 3 means the
+# gateway moved onto hermes-gateway.service and only the old suffixed unit
+# file is left (GatewayCleanupError); any other non-zero exit warns `failed`.
+gateway_install_note() {
+    local rc="$1" failed="$2"
+    case "${rc}" in
+        0) ;;
+        3) warn "hermes-gateway moved to hermes-gateway.service, but the old suffixed unit file could not be removed — re-run '${HAL0_BIN} agent install hermes' to remove it" ;;
+        *) warn "${failed}" ;;
+    esac
+}
+
 DEV_MODE=0
 NO_START=0
 # ROCmFP4 + MTP note: the old `--rocmfp4` power pack (a host-side fork
@@ -4160,12 +4172,16 @@ else
             # Nothing is written through the mask, but a suffixed gateway still
             # running beside it is moved off: `migrate` keeps the mask and
             # stops and removes the suffixed unit, so the mask means off (#2950).
-            "${VENV_DIR}/bin/python" -m hal0.agents.hermes_gateway_regen migrate \
-                || warn "suffixed hermes-gateway unit not moved off — re-run '${HAL0_BIN} agent install hermes'"
+            _gw_rc=0
+            "${VENV_DIR}/bin/python" -m hal0.agents.hermes_gateway_regen migrate || _gw_rc=$?
+            gateway_install_note "${_gw_rc}" \
+                "suffixed hermes-gateway unit not moved off — re-run '${HAL0_BIN} agent install hermes'"
             unit_left_off_note hermes-gateway.service "${_gateway_state}"
         else
-            "${VENV_DIR}/bin/python" -m hal0.agents.hermes_gateway_regen install \
-                || warn "hermes-gateway unit not installed — Telegram/Discord bridge unavailable; continuing"
+            _gw_rc=0
+            "${VENV_DIR}/bin/python" -m hal0.agents.hermes_gateway_regen install || _gw_rc=$?
+            gateway_install_note "${_gw_rc}" \
+                "hermes-gateway unit not installed — Telegram/Discord bridge unavailable; continuing"
             # ADR-0032 decision 12: the unit must name only stable paths under
             # /var/lib/hal0/hermes/current/. The template already does; the
             # normaliser stays as the backstop for a unit left from an earlier

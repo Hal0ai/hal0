@@ -126,7 +126,7 @@ fi
 if [[ "$*" == "-m hal0.agents.hermes_gateway_regen install" ]]; then
     echo "[Unit]" > "$UNIT_DIR/hermes-gateway.service"
     systemctl daemon-reload
-    exit 0
+    exit "${GATEWAY_INSTALL_RC:-0}"
 fi
 exit "${NORMALISE_RC:-0}"
 """
@@ -486,3 +486,31 @@ def test_a_masked_gateway_still_moves_a_suffixed_unit_off(tmp_path: Path) -> Non
     assert "python -m hal0.agents.hermes_gateway_regen migrate" in box.log()
     assert "python -m hal0.agents.hermes_gateway_regen install" not in box.log()
     assert link.is_symlink() and os.readlink(link) == "/dev/null"
+
+
+# ── #3020 review follow-ups ──────────────────────────────────────────────────
+
+
+def test_a_finished_move_with_a_leftover_file_is_not_reported_as_not_installed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """(b) `install` exit 3: the gateway moved, only the old suffixed file is
+    left. The installer says so and still enables the gateway."""
+    monkeypatch.setenv("GATEWAY_INSTALL_RC", "3")
+    box = Box(tmp_path)
+    box.provisioned()
+    res = box.run(HERMES_BLOCK)
+    assert res.returncode == 0, res.stderr
+    out = res.stdout + res.stderr
+    assert "moved to hermes-gateway.service" in out
+    assert "hermes-gateway unit not installed" not in out
+    assert box.state_of("hermes-gateway.service") == "enabled"
+
+
+def test_a_failed_install_still_warns_not_installed(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("GATEWAY_INSTALL_RC", "1")
+    box = Box(tmp_path)
+    box.provisioned()
+    res = box.run(HERMES_BLOCK)
+    assert res.returncode == 0, res.stderr
+    assert "hermes-gateway unit not installed" in res.stdout + res.stderr

@@ -423,3 +423,25 @@ def test_a_finished_move_with_a_leftover_file_does_not_say_not_enabled(
     assert "is not enabled" not in out
     assert f"moved to {UNIT}" in out and "could not be removed" in out
     assert not any(c[:2] == ["systemctl", "disable"] for c in calls)
+
+
+def test_a_cleanup_failure_still_reports_a_failed_linger(monkeypatch, tmp_path, capsys) -> None:
+    """(c) install_gateway_unit ran its linger tail before raising; the CLI
+    surfaces a linger failure from it like on success."""
+    from hal0.agents import hermes_gateway_regen as regen
+
+    _setup(monkeypatch, tmp_path, state="not-found")
+    (tmp_path / regen.HASHED_UNIT).write_text(_HAL0_SUFFIXED)
+    done = regen.RegenResult(
+        "installed", f"{UNIT}: enabled, started, loginctl enable-linger hal0 failed: boom"
+    )
+
+    def _cleanup_fails(**_k):  # type: ignore[no-untyped-def]
+        (tmp_path / UNIT).write_text("[Unit]\n")
+        raise regen.GatewayCleanupError("remove suffixed: busy failed: left behind", done)
+
+    monkeypatch.setattr(regen, "install_gateway_unit", _cleanup_fails)
+    ac._install_hermes_gateway()
+    out = _out(capsys)
+    assert "could not be removed" in out
+    assert "sudo loginctl enable-linger hal0" in out

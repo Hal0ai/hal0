@@ -1125,6 +1125,15 @@ def _normalise_gateway_unit_or_warn(has_systemctl: bool, *, turn_off: bool = Tru
     return False
 
 
+def _warn_if_linger_failed(message: str) -> None:
+    """Warn when the gateway install's message reports a failed enable-linger."""
+    if "enable-linger" in message and "failed" in message:
+        console.print(
+            "[yellow]linger for hal0 is off: Hermes cron and kanban workers need it; "
+            "run 'sudo loginctl enable-linger hal0'.[/yellow]"
+        )
+
+
 def _migrate_past_mask() -> None:
     """Move a gateway off hal0's suffixed unit while the canonical unit is masked.
 
@@ -1280,6 +1289,10 @@ def _install_hermes_gateway() -> None:
             f"could not be removed ({exc}); re-run 'sudo hal0 agent install hermes' "
             "to remove it.[/yellow]"
         )
+        # install_gateway_unit still ran its tail (linger) before raising.
+        if exc.result is not None:
+            console.print(f"[dim]{exc.result.message}[/dim]")
+            _warn_if_linger_failed(exc.result.message)
         return
     except GatewayRegenError as exc:
         what = (
@@ -1307,11 +1320,7 @@ def _install_hermes_gateway() -> None:
             return
     else:
         console.print(f"[dim]{installed.message}[/dim]")
-        if "enable-linger" in installed.message and "failed" in installed.message:
-            console.print(
-                "[yellow]linger for hal0 is off: Hermes cron and kanban workers need it; "
-                "run 'sudo loginctl enable-linger hal0'.[/yellow]"
-            )
+        _warn_if_linger_failed(installed.message)
     if not _normalise_gateway_unit_or_warn(has_systemctl, turn_off=not disabled):
         return
 

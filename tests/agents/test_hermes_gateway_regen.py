@@ -1087,3 +1087,112 @@ def test_main_migrate_needs_root(monkeypatch: Any, capsys: Any) -> None:
     monkeypatch.setattr(regen.os, "geteuid", lambda: 1000)
     assert regen.main(["migrate"]) == 1
     assert "migrate needs root" in capsys.readouterr().err
+
+
+# ── #3020 review follow-ups ──────────────────────────────────────────────────
+
+
+def _unlink_fails(monkeypatch: Any, hashed: Path) -> None:
+    real_unlink = Path.unlink
+
+    def unlink(self: Path, *a: Any, **k: Any) -> None:
+        if self == hashed:
+            raise OSError("busy")
+        real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+
+
+def test_a_failed_rollback_disable_is_reported(tmp_path: Path) -> None:
+    """(d) The rollback of a resumed move cannot disable the canonical unit it
+    enabled: say so, never leave both units enabled silently."""
+    _hashed_unit(tmp_path)
+    _new_unit(tmp_path)
+    sc = UnitSystemctl(
+        {HASHED: ("enabled", True), CANON: ("disabled", False)},
+        fail=["systemctl", "start", CANON],
+        also_fail=[["systemctl", "disable", CANON]],
+    )
+    with pytest.raises(regen.GatewayRegenError, match=f"{CANON} left enabled: disable failed"):
+        _migrate(tmp_path, sc)
+
+
+def test_a_failed_rollback_disable_of_a_new_canonical_unit_is_reported(tmp_path: Path) -> None:
+    _hashed_unit(tmp_path)
+    sc = UnitSystemctl(
+        {HASHED: ("enabled", True)},
+        fail=["systemctl", "start", CANON],
+        also_fail=[["systemctl", "disable", "--now", CANON]],
+    )
+    with pytest.raises(regen.GatewayRegenError, match="left enabled: disable --now failed"):
+        _migrate(tmp_path, sc)
+
+
+def test_a_new_runtime_only_canonical_unit_is_rolled_back_runtime_only(tmp_path: Path) -> None:
+    """(h) `enable --runtime` lives under /run; only `disable --runtime` undoes it."""
+    _hashed_unit(tmp_path)
+    sc = UnitSystemctl({HASHED: ("enabled-runtime", True)}, fail=["systemctl", "start", CANON])
+    with pytest.raises(regen.GatewayRegenError):
+        _migrate(tmp_path, sc)
+    assert ["systemctl", "disable", "--runtime", "--now", CANON] in sc.mutating
+    assert ["systemctl", "disable", "--now", CANON] not in sc.mutating
+
+
+def test_a_reload_failure_after_a_failed_unlink_still_raises_the_cleanup_error(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """(e) The gateway moved; a reload failure on top of the leftover file must
+    not turn the cleanup error into a plain one (the old wrong message)."""
+    hashed = _hashed_unit(tmp_path)
+    reloads = {"n": 0}
+    sc = UnitSystemctl({HASHED: ("enabled", True)})
+
+    def run(argv: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        if list(argv) == ["systemctl", "daemon-reload"]:
+            reloads["n"] += 1
+            if reloads["n"] == 2:  # the reload after the removal
+                return subprocess.CompletedProcess(argv, 1, "", "reload boom")
+        return sc(argv, **kw)
+
+    _unlink_fails(monkeypatch, hashed)
+    with pytest.raises(regen.GatewayCleanupError, match="busy") as err:
+        _migrate(tmp_path, run)  # type: ignore[arg-type]
+    assert "reload boom" in str(err.value)
+    assert err.value.result is not None and sc.states[CANON] == ("enabled", True)
+
+
+def test_install_still_turns_linger_on_after_a_cleanup_failure(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """(c) install_gateway_unit runs its linger tail, then raises the cleanup
+    error carrying everything it did."""
+    hashed = _hashed_unit(tmp_path)
+    sc = UnitSystemctl({HASHED: ("disabled", False)})
+    linger_dir = tmp_path / "linger"
+    linger_dir.mkdir()
+    _unlink_fails(monkeypatch, hashed)
+    with pytest.raises(regen.GatewayCleanupError) as err:
+        regen.install_gateway_unit(
+            unit_path=tmp_path / CANON,
+            linger_dir=str(linger_dir),
+            run=sc,
+            uid_of=lambda name: UID,
+            which=_which,
+        )
+    assert ["loginctl", "enable-linger", "hal0"] in sc.calls
+    assert err.value.result is not None and "linger on for hal0" in err.value.result.message
+
+
+def test_main_exits_3_on_a_cleanup_failure(monkeypatch: Any, capsys: Any) -> None:
+    """(b) The installer tells a finished move with a leftover file (exit 3)
+    from a failed install."""
+    monkeypatch.setattr(regen.os, "geteuid", lambda: 0)
+    done = regen.RegenResult("installed", "hermes-gateway.service: enabled, started")
+
+    def boom() -> regen.RegenResult:
+        raise regen.GatewayCleanupError("remove x: busy failed: left behind", done)
+
+    monkeypatch.setattr(regen, "install_gateway_unit", boom)
+    assert regen.main(["install"]) == 3
+    out = capsys.readouterr()
+    assert "enabled, started" in out.out and "left behind" in out.err
