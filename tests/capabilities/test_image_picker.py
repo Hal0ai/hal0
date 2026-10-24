@@ -372,6 +372,27 @@ async def test_apply_img_on_the_seeded_rocm_device_ok(
     assert slot["model"]["default"] == "sdxl-lightning"
 
 
+async def test_auto_select_keeps_the_seeded_slots_rocm_device(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Auto-select applies ``gpu-rocm``, not the lane gate's ``gpu-vulkan``: the slot is not rewritten."""
+    from hal0.comfyui.autoselect import auto_select_first_image_model
+
+    _host(monkeypatch)
+    assert catalog.comfyui_backends() == ["gpu-vulkan"]  # the value auto-select must not pass on
+    _install("sdxl-lightning")
+    orch = await _first_boot(home)
+
+    await auto_select_first_image_model(CATALOG["sdxl-lightning"], orchestrator=orch)
+
+    slot = _slot(home)
+    assert (slot["device"], slot["provider"], slot["profile"]) == ("gpu-rocm", "comfyui", "comfyui")
+    assert slot["model"]["default"] == "sdxl-lightning"
+    assert _selection(home)["enabled"] is True
+    assert _selection(home)["model"] == "sdxl-lightning"
+    assert _selection(home)["device"] == "gpu-rocm"
+
+
 async def test_apply_img_on_the_seeded_rocm_device_still_gates_on_the_install(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
