@@ -587,6 +587,12 @@ def comfyui_backends() -> list[str]:
     return _runtime_host_backends("comfyui")
 
 
+#: The device an ``img`` selection persists: the one the installer seeds the ``img`` slot with
+#: (#2067), and the only lane the ROCm-only ComfyUI image has. :func:`comfyui_row_backend`
+#: reads it as the picker's generic GPU row.
+COMFYUI_SELECTION_DEVICE = "gpu-rocm"
+
+
 def comfyui_row_backend(device: str) -> str:
     """The picker backend id a selection's ``device`` reads for the ComfyUI image.
 
@@ -596,7 +602,21 @@ def comfyui_row_backend(device: str) -> str:
     capability selection, so a persisted or explicit ``gpu-rocm`` names the same
     GPU lane as the row. Any other device is its own id and is not on the row.
     """
-    return _RUNTIME_TO_HOST_BACKENDS["comfyui"][0] if device == "gpu-rocm" else device
+    return _RUNTIME_TO_HOST_BACKENDS["comfyui"][0] if device == COMFYUI_SELECTION_DEVICE else device
+
+
+def comfyui_selection_device(device: str) -> str:
+    """The device to persist for an ``img`` selection that asked for ``device``.
+
+    The two spellings of the ComfyUI lane, the row's own ``gpu-vulkan`` and the seed's
+    ``gpu-rocm``, both persist as :data:`COMFYUI_SELECTION_DEVICE`: a ``gpu-vulkan`` slot
+    would hand ``HAL0_BACKEND=vulkan`` to the ROCm image, and a later profile re-inference
+    would veto ``comfyui``. Any other device (including ``""``, not chosen yet) is returned
+    unchanged, so the catalog check still refuses one that is not on the row.
+    """
+    if comfyui_row_backend(device) == _RUNTIME_TO_HOST_BACKENDS["comfyui"][0]:
+        return COMFYUI_SELECTION_DEVICE
+    return device
 
 
 def _backend_variants(entry: Any) -> list[str]:
@@ -1389,10 +1409,12 @@ def runs_on_for_model(model: Any) -> list[str]:
 
 
 __all__ = [
+    "COMFYUI_SELECTION_DEVICE",
     "available_backends",
     "catalogs_by_slot",
     "comfyui_backends",
     "comfyui_row_backend",
+    "comfyui_selection_device",
     "get_backend",
     "models_for_capability",
     "runs_on_for_model",
