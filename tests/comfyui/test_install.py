@@ -31,6 +31,7 @@ from hal0.comfyui.catalog import (
 from hal0.registry.pull import (
     _CHUNK_BYTES,
     PullJob,
+    _sanitise_id,
     _staging_paths,
     _tmp_dir,
     _write_resume_sidecar,
@@ -365,7 +366,7 @@ async def test_install_resumes_existing_partial() -> None:
     model = _fake_model()
     body = _FILES[_CKPT.hf_path]
     have = 1500
-    part, sidecar = _staging_paths(model.id, _CKPT.hf_path)
+    part, sidecar = _staging_paths(install._staging_key(model), _CKPT.hf_path)
     part.parent.mkdir(parents=True, exist_ok=True)
     part.write_bytes(body[:have])
     _write_resume_sidecar(
@@ -716,8 +717,72 @@ async def test_install_total_starts_as_the_catalog_estimate_and_ends_exact() -> 
 
 def test_every_catalog_model_stages_its_components_apart() -> None:
     for model in CATALOG.values():
-        parts = {_staging_paths(model.id, c.hf_path)[0] for c in model.components}
+        key = install._staging_key(model)
+        parts = {_staging_paths(key, c.hf_path)[0] for c in model.components}
         assert len(parts) == len(model.components), model.id
+
+
+def test_image_install_staging_never_collides_with_registry_pull() -> None:
+    """``sdxl-turbo`` is also a curated registry entry. A registry pull stages under the bare
+    model id, so an image install of the same id must stage somewhere else or either
+    downloader could unlink or replace the other's partial."""
+    model = CATALOG["sdxl-turbo"]
+    key = install._staging_key(model)
+    assert key != model.id
+    assert _sanitise_id(key) == key  # the prefix survives the filename sanitiser
+    for component in model.components:
+        registry_part, registry_sidecar = _staging_paths(model.id, component.hf_path)
+        image_part, image_sidecar = _staging_paths(key, component.hf_path)
+        assert image_part != registry_part
+        assert image_sidecar != registry_sidecar
+    for other in CATALOG.values():  # nor does an image key equal any catalog id's bare key
+        assert install._staging_key(other) not in CATALOG
+
+
+async def test_install_leaves_a_registry_pull_partial_alone() -> None:
+    """The installer used to discard a partial it could not vouch for, and a registry pull's
+    partial of the same model id and file looked exactly like that."""
+    model = _fake_model()
+    foreign_part, foreign_sidecar = _staging_paths(model.id, _CKPT.hf_path)  # registry's key
+    foreign_part.parent.mkdir(parents=True, exist_ok=True)
+    foreign_part.write_bytes(b"registry-pull-bytes")
+    foreign_sidecar.write_text(
+        json.dumps({"url": "https://example.test/other", "etag": None, "bytes": 19, "total": 99})
+    )
+
+    job = await _install(model, _Hub().transport)
+
+    assert job.state == "completed", job.error
+    assert foreign_part.read_bytes() == b"registry-pull-bytes"
+    assert foreign_sidecar.exists()
+    assert _CKPT.dest.read_bytes() == _FILES[_CKPT.hf_path]
+
+
+async def test_interrupted_install_keeps_its_partial_under_the_image_key() -> None:
+    model = _fake_model()
+    body = b"z" * (_CHUNK_BYTES * 3)
+
+    async def drop(request: httpx.Request) -> httpx.Response:
+        async def stream():  # type: ignore[no-untyped-def]
+            yield body[:_CHUNK_BYTES]
+            raise httpx.ReadError("dropped")
+
+        sha = hashlib.sha256(body).hexdigest()
+        return httpx.Response(
+            200,
+            content=stream(),
+            headers={"Content-Length": str(len(body)), "X-Linked-ETag": f'"{sha}"'},
+        )
+
+    job = await _install(model, httpx.MockTransport(drop))
+
+    assert job.state == "failed"
+    image_part, image_sidecar = _staging_paths(install._staging_key(model), _CKPT.hf_path)
+    assert image_part.stat().st_size == _CHUNK_BYTES  # kept for the next run to resume
+    assert image_sidecar.exists()
+    registry_part, registry_sidecar = _staging_paths(model.id, _CKPT.hf_path)
+    assert not registry_part.exists()
+    assert not registry_sidecar.exists()
 
 
 def test_wan_lora_pair_with_one_basename_stages_apart_under_one_model_id() -> None:
@@ -1282,7 +1347,7 @@ def _big_model() -> ImageModel:
 
 def _stage_partial(model: ImageModel, component: Component, size: int, *, sidecar: bool) -> Path:
     """Leave a ``size``-byte partial of ``component`` where the downloader resumes from."""
-    part, meta = _staging_paths(model.id, component.hf_path)
+    part, meta = _staging_paths(install._staging_key(model), component.hf_path)
     part.parent.mkdir(parents=True, exist_ok=True)
     with part.open("wb") as fh:
         fh.truncate(size)  # sparse: the test needs the size, not the bytes
@@ -1332,6 +1397,26 @@ def test_preflight_ignores_partial_without_sidecar(monkeypatch: pytest.MonkeyPat
 
     assert excinfo.value.details["required_bytes"] == 1_000_000_000
     assert "about 1 GB" in excinfo.value.message
+
+
+def test_preflight_ignores_a_registry_pull_partial_of_the_same_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A registry pull of the same id stages under the bare id; the installer never resumes it,
+    so it must not be counted as already fetched."""
+    model = _big_model()
+    part, meta = _staging_paths(model.id, model.components[0].hf_path)
+    part.parent.mkdir(parents=True, exist_ok=True)
+    with part.open("wb") as fh:
+        fh.truncate(600_000_000)
+    meta.write_text(json.dumps({"url": "u", "etag": None, "bytes": 600_000_000, "total": 10**9}))
+    _free_space(monkeypatch, lambda path: 500_000_000)
+
+    with pytest.raises(install.InstallInsufficientDisk) as excinfo:
+        install.preflight_disk(model)
+
+    assert excinfo.value.details["required_bytes"] == 1_000_000_000
+    assert excinfo.value.details["staged_bytes"] == 0
 
 
 def test_preflight_finds_the_partial_under_the_installers_staging_key(
