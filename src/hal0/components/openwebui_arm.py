@@ -1,7 +1,7 @@
 """Converge the OpenWebUI companion image onto the release pin (spec §2).
 
 Pull FIRST, repin second, restart last — a failed pull never strands the
-unit on an unpullable digest (the order `hal0 update owui` proved). On a
+unit on an unpullable digest (the order `hal0 update component openwebui` proved). On a
 provisioned box (process runs as the hal0 service user) the unit rewrite
 + daemon-reload route through `sudo -n hal0-systemctl repin-owui` and the
 image pull through `sudo -n hal0-podman-rw image-pull` (rootful store —
@@ -301,7 +301,7 @@ def converge_openwebui(
             job_id=job_id,
             installed=current,
             pinned=desired,
-            remedy="run 'hal0 update' or 'hal0 update owui'",
+            remedy="run 'hal0 update' or 'hal0 update component openwebui'",
         )
         return {**result, "status": "override" if overridden else "stale"}
 

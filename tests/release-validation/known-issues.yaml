@@ -2606,7 +2606,7 @@ known_issues:
       decision 2026-10-08 in #2386 (closed): the per-release CHANGELOG `### Migrations` note tells
       operators to re-run the installer once after `hal0 update` (1.4.0: CHANGELOG.md:1957-1966, names
       hindsight-api.service and hal0-api.service; second remedy: save Settings > Memory once). The
-      Open WebUI pin runs through its own repin path (`hal0 update owui`). On ct150 the only drift is
+      Open WebUI pin runs through its own repin path (`hal0 update component openwebui`). On ct150 the only drift is
       comment-only hunks from #2521 (hal0-agent@.service lines 38-47, override.conf 33-42) because
       install.sh last ran 2026-10-08, after #2352. Comment-only drift is cosmetic. Fresh installs never
       hit this. Check an exposed box with `systemctl show hindsight-api -p Environment | grep RETAIN`.

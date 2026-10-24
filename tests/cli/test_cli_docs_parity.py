@@ -177,8 +177,8 @@ def test_allowed_missing_are_still_real_commands() -> None:
 # --- "## Top-level" table flag-drift guard (issue #1462) -------------------
 
 # Matches the command cell of a "## Top-level" table row, e.g. the
-# ``update`` in ``| `hal0 update` | ... |`` or ``update owui`` in
-# ``| `hal0 update owui` | ... |``. Rows whose first token after ``hal0``
+# ``update`` in ``| `hal0 update` | ... |`` or ``update status`` in
+# ``| `hal0 update status` | ... |``. Rows whose first token after ``hal0``
 # isn't a plain command word (e.g. the ``` `hal0 --version` / `-V` ``` row)
 # don't match on purpose — that row documents a root eager-option, not a
 # subcommand, and has no Typer command to check flags against.
@@ -222,7 +222,7 @@ def _top_level_table_rows(text: str) -> list[tuple[str, str]]:
 def _resolve_click_command(path: str) -> click.Command:
     """Walk the live Click command tree along a space-separated path.
 
-    e.g. ``"update owui"`` -> the ``owui`` subcommand of the ``update`` group.
+    e.g. ``"update status"`` -> the ``status`` subcommand of the ``update`` group.
     """
     node: click.Command = typer.main.get_command(app)
     for part in path.split():

@@ -2689,7 +2689,7 @@ regressions:
       Only on an upgraded box whose post-activation migration failed (#2657 condition). boot retry
       uses converge_companions=False so rows have remedy=null; `hal0 update status` footer does
       name `hal0 update component <id>`, while bare `hal0 update` prints 'nothing to apply.' rc 0.
-      Only `hal0 update component <id>` / `hal0 update owui` converges.
+      Only `hal0 update component <id>` converges.
 
   - id: dispatch-slot-alias-ignores-lane-pin
     issue: 2665
@@ -4170,7 +4170,7 @@ regressions:
       Rollup, three items (enumerate each separately): (1) `hal0 update --check --target <ver>`
       silently drops --target (`if check: return` at update_commands.py:828 runs before
       target_version at :831), prints the bare --check result and exits 0 even for 9.9.9; the
-      apply path enforces the pin (privileged.py:304). Same ordering in `update owui --check
+      apply path enforces the pin (privileged.py:304). Same ordering in `update component openwebui --check
       --target` (lines 1163-1168, not reproduced). (2) `hal0 slot unload <pinned slot>` fails 409
       slot.pinned telling the user to pass ?force=true, but the CLI has no --force (typer rc 2) and
       `slot edit` has no --pinned; README.md:569 shows `hal0 slot unload agent`, a default-pinned

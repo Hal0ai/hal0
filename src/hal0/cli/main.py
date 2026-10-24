@@ -235,7 +235,7 @@ def status() -> None:
 # ---------------------------------------------------------------------------
 # hal0 update — real implementation lives in hal0.cli.update_commands.
 # A Typer group: the bare `hal0 update` runs the self-update (group callback,
-# invoke_without_command), and `hal0 update owui` repins the OpenWebUI image.
+# invoke_without_command), and `hal0 update component openwebui` repins the OpenWebUI image.
 # ---------------------------------------------------------------------------
 
 app.add_typer(update_app, name="update")

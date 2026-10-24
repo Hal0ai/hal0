@@ -53,11 +53,11 @@ console = Console()
 _ROLLBACK_TIMEOUT_S = 300.0
 
 #: The `hal0 update` surface. The group callback runs the hal0 self-update
-#: (the historical behaviour of the bare `hal0 update`); `owui` is a sibling
-#: verb that updates the OpenWebUI companion image. Registered in main.py via
+#: (the historical behaviour of the bare `hal0 update`); `status` and `component`
+#: are sibling verbs for the release-pinned components. Registered in main.py via
 #: ``app.add_typer(update_app, name="update")``.
 update_app = typer.Typer(
-    help="Update hal0, or its OpenWebUI companion (`hal0 update owui`).",
+    help="Update hal0, or one of its components (`hal0 update component <id>`).",
     no_args_is_help=False,
 )
 
@@ -774,7 +774,7 @@ def update(
     This is a thin client over /api/updates/*; the actual swap happens in
     the daemon. Real progress comes from polling /api/updates/status/<id>.
     """
-    # `hal0 update owui` (and any future sibling verb) still runs this
+    # `hal0 update component` (and any other sibling verb) still runs this
     # callback first — bail so the bare `hal0 update` self-update only fires
     # when no sub-command was given, mirroring the `hal0 doctor` pattern.
     if ctx.invoked_subcommand is not None:
@@ -1150,11 +1150,22 @@ def _short_override(value: str) -> str:
     return value[:19] if value.startswith("sha256:") else value[:12]
 
 
+#: Components whose converge arm keeps a persisted ``--target`` override.
+_OVERRIDABLE_COMPONENTS = ("openwebui", "hermes")
+
+
 def _component_body(component_id: str, target: str | None, clear_override: bool) -> dict:
     """The converge POST body for ``--target`` / ``--clear-override`` (dies on a bad target)."""
     body: dict[str, object] = {}
     if target is not None:
-        if component_id == "hermes":
+        if component_id == "openwebui":
+            from hal0.openwebui.image_pin import normalize_digest
+
+            normalized = normalize_digest(target)
+            if normalized is None:
+                die(f"--target {target!r} is not a sha256 digest")
+            body["target"] = normalized
+        elif component_id == "hermes":
             from hal0.agents import hermes_release as hr
 
             try:
@@ -1167,7 +1178,7 @@ def _component_body(component_id: str, target: str | None, clear_override: bool)
         else:
             die(f"--target is not supported for {component_id!r}")
     if clear_override:
-        if component_id != "hermes":
+        if component_id not in _OVERRIDABLE_COMPONENTS:
             die(f"--clear-override is not supported for {component_id!r}")
         body["clear_override"] = True
     return body
@@ -1181,9 +1192,10 @@ def update_component_cmd(
         None,
         "--target",
         help=(
-            "Hermes only. Pin a vetted commit other than the release pin: a full 40-hex sha "
-            "listed in VETTED_HERMES_REFS. Every later `hal0 update` keeps it until "
-            "--clear-override. The release pin's own commit counts as --clear-override."
+            "Pin a target other than the release pin; every later `hal0 update` keeps it "
+            "until --clear-override. openwebui: a sha256 digest (sha256:… or bare 64-hex). "
+            "hermes: a full 40-hex sha listed in VETTED_HERMES_REFS; the release pin's own "
+            "commit counts as --clear-override."
         ),
     ),
     clear_override: bool = typer.Option(
@@ -1251,60 +1263,3 @@ def _converge_component(component_id: str, body: dict | None = None) -> None:
         f"{component_id} converge failed: {final.get('error') or 'unknown error'}"
         + (f" — {result.get('remedy')}" if result.get("remedy") else "")
     )
-
-
-# ── hal0 update owui — converge the OpenWebUI companion to its release pin ────
-#
-# OpenWebUI is a podman container whose pin now rides hal0 releases (the
-# component catalog owns it — hal0.components.openwebui_arm — same as every
-# other component). This is a thin alias for `hal0 update component openwebui`
-# that also exposes the --target / --clear-override operator escape hatches
-# (spec §2) for pinning an explicit digest outside the release cadence. The
-# old --tag float-to-upstream flag, and the unit-rewrite/podman-pull/systemctl
-# legwork it drove client-side, are gone — the daemon does that work now.
-
-
-@update_app.command("owui")
-def update_owui(
-    check: bool = typer.Option(False, "--check", help="Status only; don't converge."),
-    target: str | None = typer.Option(
-        None,
-        "--target",
-        help="Pin an explicit digest override (sha256:… or bare 64-hex) instead of the release pin.",
-    ),
-    clear_override: bool = typer.Option(
-        False,
-        "--clear-override",
-        help="Drop a --target override; converge back to the release pin.",
-    ),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
-) -> None:
-    """Converge the OpenWebUI companion to its release-carried pin.
-
-    Alias for `hal0 update component openwebui`, plus the --target /
-    --clear-override operator escape hatches (spec §2). The old --tag
-    float-to-upstream flag is gone: pins ride hal0 releases.
-    """
-    url = _api_base()
-    if _api_unreachable(url):
-        raise typer.Exit(1)
-    if check:
-        rows = [r for r in _component_rows() if r.get("id") == "openwebui"]
-        _print_component_table(rows)
-        return
-    body: dict[str, object] = {}
-    if target is not None:
-        from hal0.openwebui.image_pin import normalize_digest
-
-        normalized = normalize_digest(target)
-        if normalized is None:
-            die(f"--target {target!r} is not a sha256 digest")
-            return
-        body["target"] = normalized
-    if clear_override:
-        body["clear_override"] = True
-    prompt = "Repin OpenWebUI?" if not target else f"Repin OpenWebUI → {body['target'][:19]}…?"
-    if not yes and _interactive() and not typer.confirm(prompt, default=True):
-        console.print("[dim]aborted.[/dim]")
-        return
-    _converge_component("openwebui", body)

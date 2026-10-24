@@ -853,7 +853,7 @@ case "$cmd" in
     ;;
 
   repin-owui)                  # repin-owui <sha256:digest> — OWUI companion image pin
-    # `hal0 update owui` repins the *installed* OpenWebUI companion unit —
+    # `hal0 update component openwebui` repins the *installed* OpenWebUI companion unit —
     # the one privileged write that verb needs, same posture as the other
     # atomic tmp+mv arms above: the digest is validated BEFORE the unit is
     # touched, and rewriting happens via tmp+mv, never in place. The mode is
