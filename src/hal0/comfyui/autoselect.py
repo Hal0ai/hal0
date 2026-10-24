@@ -69,6 +69,11 @@ async def auto_select_first_image_model(
     (:func:`~hal0.capabilities.catalog.comfyui_backends` is non-empty). The apply sends
     ``device="gpu-rocm"``, the seeded slot's own, and not the lane gate's answer.
 
+    The "no selection yet" read is only a fast path. The apply is conditional
+    (``if_unselected=True``) and re-checks under the lock that commits the change, so two
+    installs finishing together select one model between them (the other reports ``kept``)
+    and an operator's pick made after the read is never replaced.
+
     Never raises for a refused apply (:class:`~hal0.errors.Hal0Error`, logged): the caller
     is an install that already succeeded. A selection that cannot be read is treated as
     "may exist" and left alone. The returned outcome says which of these happened.
@@ -93,6 +98,8 @@ async def auto_select_first_image_model(
     if existing:
         return AutoSelectOutcome(AutoSelectStatus.kept, existing)
     try:
+        # The read above is stale by the time this runs (another install may finish, or the
+        # operator may pick, in between), so the apply re-checks under the lock that commits.
         applied = await orchestrator.apply(
             "img",
             "img",
@@ -102,12 +109,15 @@ async def auto_select_first_image_model(
                 "device": capability_catalog.COMFYUI_SELECTION_DEVICE,
                 "provider": "comfyui",
             },
+            if_unselected=True,
         )
     except Hal0Error as exc:
         log.warning(
             "comfyui.auto_select_failed", extra={"model_id": model.id, "error": exc.message}
         )
         return AutoSelectOutcome(AutoSelectStatus.failed, exc.message)
+    if isinstance(applied, dict) and applied.get("kept"):
+        return AutoSelectOutcome(AutoSelectStatus.kept, str(applied.get("model", "")))
     log.info("comfyui.auto_selected", extra={"model_id": model.id})
     state = applied.get("status") if isinstance(applied, dict) else None
     return AutoSelectOutcome(AutoSelectStatus.selected, state if isinstance(state, str) else "")

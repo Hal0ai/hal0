@@ -307,7 +307,9 @@ class _FakeOrchestrator:
         selection = {"enabled": True, "model": self._model} if self._model else {}
         return {"selections": {"img": {"img": selection}}}
 
-    async def apply(self, slot: str, child: str, partial: dict[str, Any]) -> dict[str, Any]:
+    async def apply(
+        self, slot: str, child: str, partial: dict[str, Any], *, if_unselected: bool = False
+    ) -> dict[str, Any]:
         self.applied.append((slot, child, partial))
         self._model = partial["model"]
         return {**partial, "status": "ready"}
@@ -446,7 +448,7 @@ def test_a_refused_apply_does_not_fail_the_install(
     from hal0.errors import BadRequest
 
     class Refusing(_FakeOrchestrator):
-        async def apply(self, slot, child, partial):
+        async def apply(self, slot, child, partial, *, if_unselected=False):
             raise BadRequest("no", code="capability.illegal_backend_model_pair")
 
     assert _provision(["sdxl-lightning"], Refusing()) == [("sdxl-lightning", "completed")]
@@ -501,7 +503,7 @@ def test_provision_does_not_claim_more_than_the_apply_reported(
     installs: dict[str, Any], owui: list[str]
 ) -> None:
     class Warming(_FakeOrchestrator):
-        async def apply(self, slot, child, partial):
+        async def apply(self, slot, child, partial, *, if_unselected=False):
             await super().apply(slot, child, partial)
             return {"status": "warming"}
 
@@ -510,7 +512,7 @@ def test_provision_does_not_claim_more_than_the_apply_reported(
     assert lines[-1].endswith("the image engine is warming")
 
     class Silent(_FakeOrchestrator):
-        async def apply(self, slot, child, partial):
+        async def apply(self, slot, child, partial, *, if_unselected=False):
             await super().apply(slot, child, partial)
             return {}
 
@@ -539,7 +541,7 @@ def test_provision_prints_a_refusal_as_one_line_with_its_message(
     from hal0.errors import BadRequest
 
     class Refusing(_FakeOrchestrator):
-        async def apply(self, slot, child, partial):
+        async def apply(self, slot, child, partial, *, if_unselected=False):
             raise BadRequest("device is busy", code="capability.invalid_selection")
 
     lines: list[str] = []
@@ -559,7 +561,7 @@ def test_provision_points_at_slot_load_when_the_selection_was_saved_but_the_star
     from hal0.errors import Hal0Error
 
     class StartFailed(_FakeOrchestrator):
-        async def apply(self, slot, child, partial):
+        async def apply(self, slot, child, partial, *, if_unselected=False):
             await super().apply(slot, child, partial)  # the commit happens before the lifecycle
             raise Hal0Error("the unit did not come up", code="capability.apply_failed")
 
@@ -588,7 +590,7 @@ def test_the_failure_line_is_there_whatever_the_selection_state_reads(
                 raise RuntimeError("state is gone")
             return await super().get_state()
 
-        async def apply(self, slot, child, partial):
+        async def apply(self, slot, child, partial, *, if_unselected=False):
             await super().apply(slot, child, partial)
             raise Hal0Error("nope", code="capability.apply_failed")
 
@@ -606,7 +608,7 @@ def test_provision_turns_an_unexpected_error_into_a_line_not_a_traceback(
         async def get_state(self):
             return {"selections": {}}
 
-        async def apply(self, slot, child, partial):
+        async def apply(self, slot, child, partial, *, if_unselected=False):
             raise RuntimeError("boom")
 
     lines: list[str] = []
