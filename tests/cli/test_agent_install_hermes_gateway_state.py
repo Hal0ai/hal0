@@ -330,3 +330,96 @@ def test_a_failure_without_a_suffixed_unit_still_enables_the_gateway(
     ac._install_hermes_gateway()
     assert ["systemctl", "enable", "--now", UNIT] in _enables(calls)
     assert "continuing" in _out(capsys)
+
+
+# ── #2950: mixed and interrupted states ──────────────────────────────────────
+
+_HAL0_SUFFIXED = '[Service]\nUser=hal0\nEnvironment="HERMES_HOME=/var/lib/hal0/.hermes"\n'
+
+
+def _per_unit(monkeypatch: pytest.MonkeyPatch, calls: list[list[str]], states: dict) -> None:
+    """is-enabled/is-active answer per unit; everything else succeeds."""
+
+    def _run(argv, *_a, **_k):  # type: ignore[no-untyped-def]
+        argv = list(argv)
+        calls.append(argv)
+        state, active = states.get(argv[-1], ("not-found", False))
+        if argv[:2] == ["systemctl", "is-enabled"]:
+            return _Done(0 if state == "enabled" else 1, state + "\n")
+        if argv[:2] == ["systemctl", "is-active"]:
+            return _Done(0 if active else 3)
+        return _Done(0)
+
+    monkeypatch.setattr(subprocess, "run", _run)
+
+
+def test_an_interrupted_move_is_finished_not_turned_off(monkeypatch, tmp_path) -> None:
+    """#2950 item 1: the canonical unit exists, disabled and stopped, beside the
+    enabled suffixed unit. The capture must read the suffixed unit (the
+    operator's choice), so the disabled branch never stops the gateway."""
+    from hal0.agents.hermes_gateway_regen import HASHED_UNIT
+
+    calls = _setup(monkeypatch, tmp_path, state="disabled")
+    (tmp_path / UNIT).write_text("[Unit]\n")
+    (tmp_path / HASHED_UNIT).write_text(_HAL0_SUFFIXED)
+    _per_unit(monkeypatch, calls, {HASHED_UNIT: ("enabled", True), UNIT: ("disabled", False)})
+    ac._install_hermes_gateway()
+    assert ["systemctl", "disable", "--now", UNIT] not in calls
+    assert ["systemctl", "enable", "--now", UNIT] in calls
+
+
+def test_a_masked_canonical_unit_still_moves_a_live_suffixed_gateway_off(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """#2950 item 2: the early masked return used to skip the move, so a
+    running suffixed gateway stayed connected despite the mask."""
+    from hal0.agents import hermes_gateway_regen as regen
+
+    calls = _setup(monkeypatch, tmp_path, state="masked")
+    (tmp_path / UNIT).symlink_to("/dev/null")
+    (tmp_path / regen.HASHED_UNIT).write_text(_HAL0_SUFFIXED)
+    moved: list[Any] = []
+
+    def _fake_migrate(**kw):  # type: ignore[no-untyped-def]
+        moved.append(kw["unit_path"])
+        return regen.RegenResult("migrated", f"{UNIT}: {UNIT} is masked; left off")
+
+    monkeypatch.setattr(regen, "migrate_hashed_units", _fake_migrate)
+    ac._install_hermes_gateway()
+    assert moved == [tmp_path / UNIT]
+    assert _installs(calls) == [] and _enables(calls) == []
+    assert "is masked; left as is" in _out(capsys)
+
+
+def test_a_masked_unit_without_a_suffixed_one_runs_no_move(monkeypatch, tmp_path) -> None:
+    from hal0.agents import hermes_gateway_regen as regen
+
+    _setup(monkeypatch, tmp_path, state="masked")
+
+    def _boom(**_kw):  # type: ignore[no-untyped-def]
+        raise AssertionError("no suffixed unit: nothing to move")
+
+    monkeypatch.setattr(regen, "migrate_hashed_units", _boom)
+    ac._install_hermes_gateway()
+
+
+def test_a_finished_move_with_a_leftover_file_does_not_say_not_enabled(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """#2950 review residual: only the final unlink failed. The canonical unit
+    is enabled and running; the message must not say it is not enabled."""
+    from hal0.agents import hermes_gateway_regen as regen
+
+    calls = _setup(monkeypatch, tmp_path, state="not-found")
+    (tmp_path / regen.HASHED_UNIT).write_text(_HAL0_SUFFIXED)
+
+    def _cleanup_fails(**_k):  # type: ignore[no-untyped-def]
+        (tmp_path / UNIT).write_text("[Unit]\n")
+        raise regen.GatewayCleanupError("remove suffixed: busy failed: left behind")
+
+    monkeypatch.setattr(regen, "install_gateway_unit", _cleanup_fails)
+    ac._install_hermes_gateway()
+    out = _out(capsys)
+    assert "is not enabled" not in out
+    assert f"moved to {UNIT}" in out and "could not be removed" in out
+    assert not any(c[:2] == ["systemctl", "disable"] for c in calls)

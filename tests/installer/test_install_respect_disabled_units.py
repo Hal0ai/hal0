@@ -441,3 +441,48 @@ def test_runtime_only_enablement_stays_runtime_only(tmp_path: Path, monkeypatch)
     res = box.run(HERMES_BLOCK)
     assert res.returncode == 0, res.stderr
     assert "enable --runtime --now hermes-gateway.service" in box.log()
+
+
+# ── #2950: mixed and interrupted states ──────────────────────────────────────
+
+
+def test_an_interrupted_move_reads_the_suffixed_units_state(tmp_path: Path, monkeypatch) -> None:
+    """#2950 item 1: hermes-gateway.service exists, disabled and stopped, beside
+    the enabled suffixed unit a killed move left. The capture must ask the
+    `state` verb (the move's ownership rule), not stop the gateway."""
+    monkeypatch.setenv("EFFECTIVE_GATEWAY_STATE", "enabled 1")
+    box = Box(tmp_path)
+    box.provisioned()
+    box.set_state("hermes-gateway.service", "disabled")
+    (box.unit_dir / "hermes-gateway.service").write_text("[Unit]\n")
+    res = box.run(HERMES_BLOCK)
+    assert res.returncode == 0, res.stderr
+    assert "python -m hal0.agents.hermes_gateway_regen state" in box.log()
+    assert "disable --now hermes-gateway.service" not in box.log()
+    assert "enable --now hermes-gateway.service" in box.log()
+
+
+def test_an_enabled_canonical_unit_is_not_second_guessed(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("EFFECTIVE_GATEWAY_STATE", "disabled 0")
+    box = Box(tmp_path)
+    box.provisioned()
+    box.set_state("hermes-gateway.service", "enabled")
+    (box.unit_dir / "hermes-gateway.service").write_text("[Unit]\n")
+    res = box.run(HERMES_BLOCK)
+    assert res.returncode == 0, res.stderr
+    assert "python -m hal0.agents.hermes_gateway_regen state" not in box.log()
+    assert box.state_of("hermes-gateway.service") == "enabled"
+
+
+def test_a_masked_gateway_still_moves_a_suffixed_unit_off(tmp_path: Path) -> None:
+    """#2950 item 2: the masked branch runs the mask-safe `migrate` verb, so a
+    suffixed gateway beside the mask is stopped and removed; nothing is
+    written through the mask."""
+    box = Box(tmp_path)
+    box.provisioned()
+    link = box.mask("hermes-gateway.service")
+    res = box.run(HERMES_BLOCK)
+    assert res.returncode == 0, res.stderr
+    assert "python -m hal0.agents.hermes_gateway_regen migrate" in box.log()
+    assert "python -m hal0.agents.hermes_gateway_regen install" not in box.log()
+    assert link.is_symlink() and os.readlink(link) == "/dev/null"
