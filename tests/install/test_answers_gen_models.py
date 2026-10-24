@@ -1,4 +1,4 @@
-"""``gen.models`` in the answer file: a list of image-catalog ids (ADR-0036)."""
+"""``gen.models`` in the answer file: a list of image-catalog ids (ADR-0037)."""
 
 from __future__ import annotations
 

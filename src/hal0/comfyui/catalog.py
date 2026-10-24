@@ -1,4 +1,4 @@
-"""The image-model catalog: typed weight files, workflow templates, install state (ADR-0036).
+"""The image-model catalog: typed weight files, workflow templates, install state (ADR-0037).
 
 An image model is a set of typed weight files (*components*) that one workflow
 template loads together; the dashboard, the installer and the generation route

@@ -1,4 +1,4 @@
-"""Installs and removes image models from the catalog (ADR-0036).
+"""Installs and removes image models from the catalog (ADR-0037).
 
 An install is a :class:`~hal0.registry.pull.PullJob` run over the model's missing
 components, each streamed by the registry downloader

@@ -77,7 +77,7 @@ app.add_typer(doctor_app, name="doctor")
 app.add_typer(upstream_app, name="upstream")
 app.add_typer(oauth_app, name="oauth")
 app.add_typer(capabilities_app, name="capabilities")
-# ADR-0036 — ``hal0 comfyui models {list,install,remove}`` and ``hal0 comfyui
+# ADR-0037 — ``hal0 comfyui models {list,install,remove}`` and ``hal0 comfyui
 # files``: the image-model catalog and the weight files it puts on disk.
 app.add_typer(comfyui_app, name="comfyui")
 app.add_typer(agent_app, name="agent")

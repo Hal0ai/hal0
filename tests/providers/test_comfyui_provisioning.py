@@ -1,4 +1,4 @@
-"""ComfyUIProvider provisions its own data root (ADR-0036).
+"""ComfyUIProvider provisions its own data root (ADR-0037).
 
 The provider owns the model-paths file and the GPU-gate custom node: it writes
 ``extra_model_paths.yaml`` when that file is absent or empty and syncs the node

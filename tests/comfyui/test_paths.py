@@ -1,4 +1,4 @@
-"""hal0.comfyui.paths: the one owner of every ComfyUI data path (ADR-0036)."""
+"""hal0.comfyui.paths: the one owner of every ComfyUI data path (ADR-0037)."""
 
 from __future__ import annotations
 

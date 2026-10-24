@@ -1,6 +1,6 @@
 """``hal0 comfyui models {list,install,remove}`` and ``hal0 comfyui files``.
 
-Thin clients over ``/api/comfyui/*`` (ADR-0036): the tests replace the three ``api_*``
+Thin clients over ``/api/comfyui/*`` (ADR-0037): the tests replace the three ``api_*``
 helpers with an in-memory API and check what the commands send, print and exit with.
 """
 
