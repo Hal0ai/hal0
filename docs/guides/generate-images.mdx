@@ -79,8 +79,9 @@ This is the same pattern as every other capability — set the child
 Every installed catalog model the API can render works through
 `/v1/images/generations`: `sdxl-turbo`, `sd-1.5-pruned-emaonly`,
 `sdxl-lightning`, `qwen-image-lightning` and `qwen-image`. So do your own SDXL
-and SD 1.5 checkpoints, addressed as `ckpt/<name>`. Video, edit and upscale
-models stay in ComfyUI's editor.
+and SD 1.5 checkpoints, addressed as `ckpt/<path>`: put the file under the
+ComfyUI `checkpoints/` folder and `GET /api/comfyui/files` lists its id as
+`api_id`. Video, edit and upscale models stay in ComfyUI's editor.
 
 ## Read the generation-engine status
 
@@ -185,7 +186,7 @@ curl -X POST http://localhost:8080/v1/images/generations \
 
 The route flips the GPU to image mode before dispatching, so a single
 call also performs the switchover when needed. `model` is an installed
-catalog model or a `ckpt/<name>` checkpoint; leave it out to use the model
+catalog model or a `ckpt/<path>` checkpoint; leave it out to use the model
 selected for `img`. Any other id returns **404** (`image.model_unknown`, with
 the ids that work), a catalog model that is not installed **409**
 (`image.model_not_installed`, naming the install call), and a video, edit or
