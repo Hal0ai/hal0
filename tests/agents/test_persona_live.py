@@ -51,7 +51,7 @@ def _agent(home: Path) -> dict[str, Any]:
     return yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))["agent"]
 
 
-def test_activate_renders_new_prompt_and_restarts(env: dict[str, Any]) -> None:
+def test_activate_renders_new_prompt_without_restart(env: dict[str, Any]) -> None:
     P.activate("hal0-brain", root=env["root"])
     out = persona_live.refresh_persona_prompt(env["root"], hermes_home=env["home"])
     assert out["status"] == persona_live.APPLIED
@@ -113,3 +113,40 @@ def test_no_config_yaml_means_not_installed(env: dict[str, Any]) -> None:
     out = persona_live.refresh_persona_prompt(env["root"], hermes_home=env["home"])
     assert out["status"] == persona_live.NOT_INSTALLED
     assert env["restarts"] == []
+
+
+def test_operator_personality_is_flagged(env: dict[str, Any]) -> None:
+    cfg_path = env["home"] / "config.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    cfg["display"] = {"personality": "Concise"}
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    out = persona_live.refresh_persona_prompt(env["root"], hermes_home=env["home"])
+    assert out["status"] in (persona_live.APPLIED, persona_live.UNCHANGED)
+    assert "display.personality is 'Concise'" in out["message"]
+    assert (
+        yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["display"]["personality"] == "Concise"
+    )
+
+
+def test_concurrent_refreshes_end_on_latest_active(env: dict[str, Any]) -> None:
+    import threading
+
+    P.activate("hal0-brain", root=env["root"])
+    threads = [
+        threading.Thread(
+            target=persona_live.refresh_persona_prompt,
+            args=(env["root"],),
+            kwargs={"hermes_home": env["home"]},
+        )
+        for _ in range(6)
+    ]
+    for t in threads:
+        t.start()
+    P.activate("hermes", root=env["root"])
+    for t in threads:
+        t.join()
+    persona_live.refresh_persona_prompt(env["root"], hermes_home=env["home"])
+    expect = hp._active_persona_render(
+        hp.BootstrapState(hermes_home=str(env["home"])), personas_root=env["root"]
+    )[0]
+    assert _agent(env["home"])["system_prompt"] == expect

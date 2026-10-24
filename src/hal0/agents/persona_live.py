@@ -1,7 +1,7 @@
 """Make a persona edit reach the running Hermes (#2921, #2850).
 
 The persona prompt lives in Hermes's ``config.yaml`` as
-``agent.system_prompt`` (:func:`hermes_provision._persona_prompt_layer`), and
+``agent.system_prompt`` (:func:`hermes_provision._persona_prompt_layer`).
 Editing a persona TOML or moving ``active.txt`` changes nothing for Hermes
 until the active persona is rendered into ``config.yaml`` again.
 
@@ -16,6 +16,7 @@ imported lazily so importing :mod:`hal0.api` never loads it (golden path GP15).
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,11 @@ UNCHANGED = "unchanged"
 OVERRIDDEN = "overridden"
 NOT_INSTALLED = "not-installed"
 FAILED = "failed"
+
+#: Serialises refreshes in this process. The active-persona read, the render
+#: and the config write happen under it, so a refresh that started earlier can
+#: never overwrite a later activation's prompt with a stale render.
+_REFRESH_LOCK = threading.Lock()
 
 _REPAIR_HINT = "sudo hal0 agent reprovision hermes --repair"
 
@@ -65,6 +71,24 @@ def refresh_persona_prompt(
     written), ``not-installed`` (no config.yaml yet) or ``failed`` (config.yaml
     could not be written).
     """
+    with _REFRESH_LOCK:
+        return _refresh_locked(root, hermes_home)
+
+
+def _operator_personality(config: Path) -> str:
+    """The operator's ``display.personality``, or ``""``. Never raises."""
+    import yaml
+
+    try:
+        loaded = yaml.safe_load(config.read_text(encoding="utf-8")) or {}
+        display = loaded.get("display") if isinstance(loaded, dict) else None
+        value = display.get("personality") if isinstance(display, dict) else ""
+        return str(value).strip() if value else ""
+    except Exception:  # advisory only
+        return ""
+
+
+def _refresh_locked(root: Path, hermes_home: Path | str | None) -> dict[str, Any]:
     from hal0.agents import hermes_provision as hp
     from hal0.agents import personas as personas_mod
 
@@ -107,16 +131,25 @@ def refresh_persona_prompt(
             **base,
         )
 
+    # An operator-chosen display.personality is preserved on purpose; Hermes
+    # overlays a built-in personality of that name on agent.system_prompt.
+    personality = _operator_personality(config)
+    caveat = (
+        f" Note: display.personality is {personality!r}; if that names a Hermes "
+        "personality it overlays this prompt."
+        if personality
+        else ""
+    )
     if not changed:
         return _result(
             UNCHANGED,
-            "Saved. Hermes's config.yaml already carries this prompt.",
+            "Saved. Hermes's config.yaml already carries this prompt." + caveat,
             **base,
         )
     return _result(
         APPLIED,
         "Persona prompt written to Hermes's config.yaml; new sessions and the next "
         "gateway turn use it. Open dashboard chats keep the old prompt until you "
-        "start a new chat.",
+        "start a new chat." + caveat,
         changed=True,
     )
