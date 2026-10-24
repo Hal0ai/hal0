@@ -783,8 +783,12 @@ def test_is_installed_flm_id_matches_installed_tag() -> None:
         assert flm.is_installed_flm_id("qwen3-0.6b-FLM") is False
         # unknown tag → false
         assert flm.is_installed_flm_id("nope-7b-FLM") is False
-        # missing -FLM suffix (a colon tag or GGUF id) → false (fast path)
-        assert flm.is_installed_flm_id("gemma4-it:e4b") is False
+        # FLM's native colon tag (the /api/models picker row id) → true
+        # when installed, false when not or unknown
+        assert flm.is_installed_flm_id("gemma4-it:e4b") is True
+        assert flm.is_installed_flm_id("qwen3:0.6b") is False
+        assert flm.is_installed_flm_id("nope:7b") is False
+        # neither form (a GGUF id) → false
         assert flm.is_installed_flm_id("chadrock-35b-ace-saber") is False
 
 
