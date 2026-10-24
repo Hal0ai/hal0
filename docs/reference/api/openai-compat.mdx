@@ -198,9 +198,8 @@ request type goes through the dispatcher):
    5. **Capability/path routing** (last resort) — path fragments map to a capability
       slot (`/embeddings` → `embed`, `/rerankings`/`/rerank` → `rerank`,
       `/audio/speech` → `tts`, `/images/*` → `img`), then model-name substring hints
-      (`embed`, `rerank`) and image-model-id prefixes (`sdxl`, `sd-1.5`, `sd15`,
-      `flux`), then direct `SLOT_ALIASES` addressing — a caller can request a slot
-      literally by name as a final fallback.
+      (`embed`, `rerank`), then direct `SLOT_ALIASES` addressing — a caller can
+      request a slot literally by name as a final fallback.
 
 If `model` is omitted entirely, the path decides the default: `/embeddings` → `embed`,
 `/rerank` → `rerank`, `/audio/speech` → `tts`, `/images/*` → `img`, everything else →

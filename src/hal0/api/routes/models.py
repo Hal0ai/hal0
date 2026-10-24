@@ -25,7 +25,8 @@ from hal0.config.loader import load_hal0_config
 from hal0.model_meta import derive_model_provider
 from hal0.registry import pull_jobs as _pull_jobs
 from hal0.registry.curated import CURATED_MODELS
-from hal0.registry.pull import PullInvalidSource
+from hal0.registry.discover import is_comfyui_asset
+from hal0.registry.pull import ImageAsset, PullInvalidSource
 from hal0.registry.update_check import (
     evaluate_model_update,
     fetch_remote_lfs_shas,
@@ -409,6 +410,10 @@ async def create_model(request: Request) -> dict[str, Any]:
         raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
     if not isinstance(body, dict):
         raise BadRequest("body must be a JSON object")
+    # ComfyUI's models tree belongs to the image catalog, never to a registry row.
+    raw_path = body.get("path")
+    if isinstance(raw_path, str) and is_comfyui_asset(Path(raw_path).expanduser()):
+        raise ImageAsset(details={"path": raw_path})
     # Pop ``source`` before validation — it's an event-only tag, not a
     # Model field. Default to "manual" for hand-registered single files.
     source = body.pop("source", "manual")

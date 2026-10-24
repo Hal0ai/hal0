@@ -126,6 +126,53 @@ def test_pull_returns_job_handle_and_kicks_background_task(
     assert fake_run_pull[0]["hf_repo"] == body["hf_repo"]
 
 
+@pytest.mark.parametrize("model_id", ["sdxl-turbo", "esrgan-4x", "sd-1.5-pruned-emaonly"])
+def test_pull_refuses_a_comfyui_catalog_id(
+    model_id: str,
+    client_isolated: TestClient,
+    app_isolated: FastAPI,
+    fake_run_pull: list[dict[str, Any]],
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An image model is not a registry pull: 422, no job, no row, nothing on disk."""
+    store = Path(tmp_hal0_home) / "model-store"
+    monkeypatch.setenv("HAL0_MODEL_STORE", str(store))
+
+    r = client_isolated.post(f"/api/models/{model_id}/pull")
+
+    assert r.status_code == 422, r.text
+    error = r.json()["error"]
+    assert error["code"] == "model.image_asset"
+    assert "hal0 comfyui models install <id>" in error["message"]
+    assert fake_run_pull == []
+    assert model_id not in app_isolated.state.model_pull_jobs
+    assert not app_isolated.state.model_registry.has(model_id)
+    assert not store.exists()
+
+
+def test_pull_refuses_the_image_capability_in_the_body(
+    client_isolated: TestClient,
+    app_isolated: FastAPI,
+    fake_run_pull: list[dict[str, Any]],
+) -> None:
+    """A stack import or an Add-by-HF pull that asks for ``image`` hits the same refusal."""
+    r = client_isolated.post(
+        "/api/models/user.some-checkpoint/pull",
+        json={
+            "hf_repo": "someone/some-checkpoint",
+            "hf_filename": "some.safetensors",
+            "capability": "image",
+        },
+    )
+
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "model.image_asset"
+    assert fake_run_pull == []
+    assert "user.some-checkpoint" not in app_isolated.state.model_pull_jobs
+    assert not app_isolated.state.model_registry.has("user.some-checkpoint")
+
+
 def test_pull_unknown_model_returns_invalid_source(
     client_isolated: TestClient, fake_run_pull: list[dict[str, Any]]
 ) -> None:

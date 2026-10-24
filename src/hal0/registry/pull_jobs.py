@@ -16,8 +16,8 @@ Interface contract (the only names route handlers / callers should use):
         Repair a non-terminal snapshot whose worker is gone.
     resolve_pull_source(request, model_id) -> (hf_repo, hf_file)
         Registry row → curated catalogue; raises PullInvalidSource (422).
-    resolve_pull_capability(request, model_id, body) -> (capability, subdir)
-        body → registry → curated; (None, None) for ad-hoc → flat layout.
+    resolve_pull_capability(request, model_id, body) -> capability | None
+        body → registry → curated; None for ad-hoc → flat layout.
     resolve_pull_source_with_body(request, model_id, body)
         -> PullSource(repo, file, mmproj_file, from_body, draft_file, draft_repo)
     seed_registry_from_body(request, model_id, hf_repo, hf_file, labels, chat_template=None)
@@ -37,9 +37,10 @@ Route-facing orchestration (the whole start/track/update/cancel surface — the
 handlers in ``routes/models.py`` are now request→call→envelope shells over these):
 
     enqueue(request, *, model_id, run_wrapper=run_pull_with_events) -> dict
-        The ``POST /{id}/pull`` flow: in-flight dedup, FLM dispatch, source /
-        capability resolution, registry seeding, job creation + queued-snapshot
-        persist, ``pull.queued`` emit, detached scheduling. ``run_wrapper`` is
+        The ``POST /{id}/pull`` flow: in-flight dedup, FLM dispatch, image-model
+        refusal (``model.image_asset``), source / capability resolution,
+        registry seeding, job creation + queued-snapshot persist,
+        ``pull.queued`` emit, detached scheduling. ``run_wrapper`` is
         injected so the route can pass its module-level ``_run_pull_with_events``
         binding — preserving the monkeypatch seam.
     enqueue_update(request, *, model_id, hf_repo, hf_file, dest,
@@ -89,6 +90,7 @@ from hal0.registry.pull import (
     make_job,
     persist_pull_job,
     pull_job_file,
+    refuse_image_asset,
     run_flm_pull,
     run_pull,
 )
@@ -197,41 +199,28 @@ def resolve_pull_capability(
     request: Request,
     model_id: str,
     body: dict[str, Any] | None,
-) -> tuple[str | None, str | None]:
-    """Resolve ``(capability, comfyui_subdir)`` for a pull (P3 grouped layout).
+) -> str | None:
+    """Resolve the capability for a pull (P3 grouped layout).
 
-    Priority for capability: explicit ``body.capability`` → the registry row's
-    first capability → the curated entry's capability. ``comfyui_subdir`` comes
-    from the curated entry in EVERY branch — it used to be consulted only for
-    an unknown model, so RE-pulling an already-registered image model (the
-    repair path for deleted checkpoint bytes) dropped the subdir and landed
-    the safetensors under ``<store>/image/<id>/model.gguf``, where ComfyUI
-    never finds it. Returns ``(None, None)`` for an unknown ad-hoc model so
-    :func:`run_pull` falls back to the legacy flat layout.
+    Priority: explicit ``body.capability`` → the registry row's first
+    capability → the curated entry's capability. Returns ``None`` for an
+    unknown ad-hoc model so :func:`run_pull` falls back to the flat layout.
     """
-    curated = get_curated(model_id)
-    curated_subdir = (
-        ((getattr(curated, "comfyui_subdir", "") or "").strip() or None)
-        if curated is not None
-        else None
-    )
-
     if isinstance(body, dict):
         cap_raw = body.get("capability")
         if isinstance(cap_raw, str) and cap_raw.strip():
-            return cap_raw.strip(), curated_subdir
+            return cap_raw.strip()
 
     try:
         existing = request.app.state.model_registry.get(model_id)
         caps = getattr(existing, "capabilities", None) or []
         if caps:
-            return str(caps[0]), curated_subdir
+            return str(caps[0])
     except Exception:
         pass
 
-    if curated is not None:
-        return (curated.capability or None), curated_subdir
-    return None, None
+    curated = get_curated(model_id)
+    return (curated.capability or None) if curated is not None else None
 
 
 def seed_registry_from_body(
@@ -454,7 +443,6 @@ async def run_pull_with_events(
     hf_token: str | None,
     event_bus: Any | None,
     capability: str | None = None,
-    comfyui_subdir: str | None = None,
     mmproj_file: str | None = None,
     draft_file: str | None = None,
     draft_repo: str | None = None,
@@ -468,8 +456,8 @@ async def run_pull_with_events(
     HF download itself is untouched; we listen to the same progress
     signal SSE listens to so the byte counts stay authoritative.
 
-    ``capability``/``comfyui_subdir`` (P3) route the download into the
-    capability-grouped store layout; both default to None → legacy flat layout.
+    ``capability`` (P3) routes the download into the capability-grouped store
+    layout; it defaults to None → flat layout.
     """
     if event_bus is None:
         try:
@@ -480,7 +468,6 @@ async def run_pull_with_events(
                 registry=registry,
                 hf_token=hf_token,
                 capability=capability,
-                comfyui_subdir=comfyui_subdir,
                 mmproj_file=mmproj_file,
                 draft_file=draft_file,
                 draft_repo=draft_repo,
@@ -533,7 +520,6 @@ async def run_pull_with_events(
             registry=registry,
             hf_token=hf_token,
             capability=capability,
-            comfyui_subdir=comfyui_subdir,
             mmproj_file=mmproj_file,
             draft_file=draft_file,
             draft_repo=draft_repo,
@@ -730,6 +716,11 @@ async def enqueue(
     except Exception:
         body = None
 
+    # An image model is the ComfyUI catalog's, not the registry's: refuse before a
+    # row is seeded, a job exists or a byte moves. Stack imports pull through here.
+    body_capability = body.get("capability") if body else None
+    refuse_image_asset(model_id, body_capability if isinstance(body_capability, str) else None)
+
     source = resolve_pull_source_with_body(request, model_id, body)
     hf_repo, hf_file, mmproj_file, from_body = (
         source.repo,
@@ -813,7 +804,7 @@ async def enqueue(
     registry = request.app.state.model_registry
     # P3: route the download into the capability-grouped store layout when the
     # capability is resolvable (body → registry → curated); None → flat fallback.
-    capability, comfyui_subdir = resolve_pull_capability(request, model_id, body)
+    capability = resolve_pull_capability(request, model_id, body)
     schedule_pull_task(
         request.app.state,
         model_id,
@@ -825,7 +816,6 @@ async def enqueue(
             hf_token=hf_token,
             event_bus=event_bus,
             capability=capability,
-            comfyui_subdir=comfyui_subdir,
             mmproj_file=mmproj_file,
             draft_file=draft_file,
             draft_repo=draft_repo,

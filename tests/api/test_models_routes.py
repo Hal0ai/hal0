@@ -1219,14 +1219,15 @@ def test_models_listing_has_no_comfyui_category(
     ``comfyui`` backend or a ``comfyui`` provider (the image catalog owns them)."""
     data = Path(tmp_hal0_home) / "comfyui"
     monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(data))
-    inspect_client.post(
-        "/api/models",
-        json={
-            "id": "old-sdxl",
-            "path": str(data / "models" / "checkpoints" / "sdxl.safetensors"),
-            "capabilities": ["chat"],
-            "backends": [],
-        },
+    # A direct insert: ``POST /api/models`` refuses a path in the ComfyUI tree, but a
+    # row written before that rule (or by hand) can still sit in the registry.
+    inspect_client.app.state.model_registry.add(
+        Model(
+            id="old-sdxl",
+            path=str(data / "models" / "checkpoints" / "sdxl.safetensors"),
+            capabilities=["chat"],
+            backends=[],
+        )
     )
     rows = {m["id"]: m for m in inspect_client.get("/api/models").json()["models"]}
     row = rows["old-sdxl"]
@@ -1234,6 +1235,39 @@ def test_models_listing_has_no_comfyui_category(
     assert row["owned_by"] != "comfyui"
     assert "comfyui" not in row["backends"]
     assert row["provider"] != "comfyui"
+
+
+def test_create_model_under_comfyui_tree_422(
+    inspect_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str
+) -> None:
+    """``POST /api/models`` refuses a ``path`` in the ComfyUI tree and registers nothing."""
+    data = Path(tmp_hal0_home) / "comfy"
+    monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(data))
+    image = data / "models" / "checkpoints" / "sdxl.safetensors"
+
+    r = inspect_client.post("/api/models", json={"id": "an-sdxl", "path": str(image)})
+
+    assert r.status_code == 422, r.text
+    error = r.json()["error"]
+    assert error["code"] == "model.image_asset"
+    assert error["details"]["path"] == str(image)
+    assert "Image Gen" in error["message"]
+    assert not inspect_client.app.state.model_registry.has("an-sdxl")
+
+
+def test_create_model_outside_comfyui_tree_still_registers(
+    inspect_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str
+) -> None:
+    """The refusal is the ComfyUI tree only: a sibling directory is an ordinary path."""
+    data = Path(tmp_hal0_home) / "comfy"
+    monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(data))
+    sibling = Path(tmp_hal0_home) / "comfy-models" / "chat.gguf"
+    sibling.parent.mkdir(parents=True)
+    sibling.write_bytes(b"\x00" * 8)
+
+    r = inspect_client.post("/api/models", json={"id": "chat-row", "path": str(sibling)})
+
+    assert r.status_code == 201, r.text
 
 
 def test_add_by_path_under_comfyui_422(

@@ -180,7 +180,7 @@ def already_pulled(model_id: str, *, capability: str = "chat") -> Path | None:
     if curated is None:
         return None
     try:
-        dest: Path = _final_path_for_entry(model_id, curated.hf_file, None, capability)
+        dest: Path = _final_path_for_entry(model_id, curated.hf_file, capability)
         if not dest.is_file():
             return None
         meta = read_model_meta(dest)

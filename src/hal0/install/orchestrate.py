@@ -679,7 +679,6 @@ async def apply_setup(
                     hf_file=curated.hf_file,
                     registry=registry,
                     hf_token=hf_token,
-                    comfyui_subdir=curated.comfyui_subdir or None,
                     capability=s.capability,
                 ),
                 slot_names=[s.slot_name],

@@ -1903,12 +1903,7 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
         resolved = path
 
     if is_comfyui_asset(path):
-        raise ImageAsset(
-            f"{str(path)!r} is in ComfyUI's model tree, which the model registry does not "
-            "hold; manage image models under Image Gen → Models or with "
-            "`hal0 comfyui models install <id>`",
-            details={"path": str(path)},
-        )
+        raise ImageAsset(details={"path": str(path)})
 
     from hal0.registry.detect import (
         unsupported_moonshine_layout,

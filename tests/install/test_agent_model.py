@@ -391,7 +391,7 @@ def _place(model_id: str) -> None:
 
     curated = get_curated(model_id)
     assert curated is not None
-    dest = _final_path_for_entry(model_id, curated.hf_file, None, "chat")
+    dest = _final_path_for_entry(model_id, curated.hf_file, "chat")
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(b"weights")
     (dest.parent / "meta.json").write_text(

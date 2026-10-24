@@ -316,7 +316,7 @@ def _place(store_root, model_id: str, *, meta: dict | None = None, body: bytes =
 
     curated = get_curated(model_id)
     assert curated is not None
-    dest = _final_path_for_entry(model_id, curated.hf_file, None, "chat")
+    dest = _final_path_for_entry(model_id, curated.hf_file, "chat")
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(body)
     if meta is None:
@@ -375,7 +375,7 @@ def test_a_malformed_sidecar_re_pulls(store) -> None:
     curated = get_curated(BRAIN_MODEL_PORTABLE)
     assert curated is not None
     _place(store, BRAIN_MODEL_PORTABLE)
-    dest = _final_path_for_entry(BRAIN_MODEL_PORTABLE, curated.hf_file, None, "chat")
+    dest = _final_path_for_entry(BRAIN_MODEL_PORTABLE, curated.hf_file, "chat")
     (dest.parent / "meta.json").write_text("{not json")
     assert already_pulled(BRAIN_MODEL_PORTABLE) is None
 

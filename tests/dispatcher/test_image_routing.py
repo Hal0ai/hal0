@@ -1,7 +1,9 @@
 """Routing rules for image-gen requests in capability/path routing (Step 4).
 
-These tests cover the new ``/v1/images/*`` path pin + the SDXL/SD/Flux
-model-id prefix pin Team K added to ``hal0.dispatcher.router.resolve_by_capability``.
+These tests cover the ``/v1/images/*`` path pin in
+``hal0.dispatcher.router.resolve_by_capability``. The ``img`` slot is reached by
+that path, never by what a model id looks like: the image catalog owns image
+model ids (``hal0.comfyui``), so the dispatcher has no model-name rule for them.
 The chat / embed / NPU rules are intentionally not re-tested here — they
 have coverage in :mod:`tests.dispatcher.test_router`.
 """
@@ -52,35 +54,34 @@ def test_images_generations_path_routes_to_img_slot() -> None:
     assert upstream.name == "img"
 
 
-def test_sdxl_model_id_routes_to_img_even_without_image_path() -> None:
-    """A bare /v1/chat/completions with model='sdxl-turbo' must NOT hit primary."""
-    reg = _registry_with_slots("chat", "img")
+@pytest.mark.parametrize(
+    "model", ["sdxl-turbo", "sd-1.5-pruned-emaonly", "qwen-image", "ckpt/my-merge", "", None]
+)
+def test_image_path_routes_to_img_whatever_the_model_id(model: str | None) -> None:
+    """``img`` routes by the request path (the slot's type), not by the model id."""
+    reg = _registry_with_slots("agent", "img")
+    body = {"prompt": "x"} if model is None else {"model": model, "prompt": "x"}
+    upstream = resolve_by_capability("/v1/images/generations", body, reg)
+    assert upstream.name == "img"
+
+
+@pytest.mark.parametrize(
+    "model", ["sdxl-turbo", "sd15-anything", "flux-dev", "Flux-2-Klein-9B-GGUF"]
+)
+def test_image_looking_model_id_on_a_chat_path_is_not_pinned_to_img(model: str) -> None:
+    """A model id that merely looks like an image model no longer pins ``img``.
+
+    The old id-prefix rule routed ``sdxl``/``sd-1.5``/``sd15``/``flux`` names to the
+    image slot from a chat path. The catalog owns those ids now, so the request
+    falls through to the default ``agent`` slot like any other unknown model.
+    """
+    reg = _registry_with_slots("agent", "img")
     upstream = resolve_by_capability(
         "/v1/chat/completions",
-        {"model": "sdxl-turbo", "messages": [{"role": "user", "content": "hi"}]},
+        {"model": model, "messages": [{"role": "user", "content": "hi"}]},
         reg,
     )
-    assert upstream.name == "img"
-
-
-def test_sd15_model_prefix_routes_to_img() -> None:
-    reg = _registry_with_slots("chat", "img")
-    upstream = resolve_by_capability(
-        "/v1/images/generations",
-        {"model": "sd-1.5-pruned-emaonly", "prompt": "x"},
-        reg,
-    )
-    assert upstream.name == "img"
-
-
-def test_flux_model_prefix_routes_to_img() -> None:
-    reg = _registry_with_slots("chat", "img")
-    upstream = resolve_by_capability(
-        "/v1/images/generations",
-        {"model": "Flux-2-Klein-9B-GGUF", "prompt": "x"},
-        reg,
-    )
-    assert upstream.name == "img"
+    assert upstream.name == "agent"
 
 
 def test_chat_model_id_still_routes_to_primary() -> None:
@@ -114,20 +115,6 @@ def test_image_path_accepts_container_remote() -> None:
     reg = _registry_with_slots("chat")
     reg.upsert(_container_remote_img())
     upstream = resolve_by_capability("/v1/images/generations", {"model": "sdxl-turbo"}, reg)
-    assert upstream.name == "img"
-    assert upstream.kind == "remote"
-
-
-def test_image_model_prefix_accepts_container_remote() -> None:
-    """Rule 6 (sdxl-/sd-1.5-/flux- model prefix) on a non-image path must also
-    accept the container-backed img remote."""
-    reg = _registry_with_slots("chat")
-    reg.upsert(_container_remote_img())
-    upstream = resolve_by_capability(
-        "/v1/chat/completions",
-        {"model": "sdxl-turbo", "messages": [{"role": "user", "content": "hi"}]},
-        reg,
-    )
     assert upstream.name == "img"
     assert upstream.kind == "remote"
 
