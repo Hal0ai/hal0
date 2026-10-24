@@ -338,6 +338,101 @@ async def _first_boot(home: Path) -> CapabilityOrchestrator:
     return orch
 
 
+_LIFECYCLE = ("load", "swap", "unload")
+
+
+def _lifecycle(slot_manager: FakeSlotManager) -> list[tuple[str, str]]:
+    """The slot-lifecycle calls the orchestrator made, as ``(verb, slot)``."""
+    return [(verb, slot) for verb, slot, _ in slot_manager.calls if verb in _LIFECYCLE]
+
+
+async def test_apply_loads_the_slot_by_default(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _host(monkeypatch)
+    _install("sdxl-lightning")
+    slot_manager = FakeSlotManager()
+    orch = CapabilityOrchestrator(slot_manager=slot_manager)  # type: ignore[arg-type]
+    await orch.initialize_if_missing()
+
+    await orch.apply("img", "img", {"enabled": True, "model": "sdxl-lightning"})
+
+    assert _lifecycle(slot_manager) == [("load", "img")]
+
+
+async def test_apply_without_start_persists_the_selection_and_never_touches_the_slot(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The install path: the selection is committed now, and ``hal0.target`` starts the slot later."""
+    _host(monkeypatch)
+    _install("sdxl-lightning")
+    _install("sdxl-turbo")
+    slot_manager = FakeSlotManager()
+    orch = CapabilityOrchestrator(slot_manager=slot_manager)  # type: ignore[arg-type]
+    await orch.initialize_if_missing()
+
+    # off -> on, then a model change while on (the hot-swap branch), then on -> off.
+    result = await orch.apply(
+        "img", "img", {"enabled": True, "model": "sdxl-lightning"}, start=False
+    )
+    assert (result["enabled"], result["model"]) == (True, "sdxl-lightning")
+    assert _selection(home)["enabled"] is True
+    assert _selection(home)["model"] == "sdxl-lightning"
+    assert _slot(home)["model"]["default"] == "sdxl-lightning"
+
+    await orch.apply("img", "img", {"model": "sdxl-turbo"}, start=False)
+    assert _selection(home)["model"] == "sdxl-turbo"
+    assert _slot(home)["model"]["default"] == "sdxl-turbo"
+
+    await orch.apply("img", "img", {"enabled": False}, start=False)
+    assert _selection(home)["enabled"] is False
+
+    assert _lifecycle(slot_manager) == []
+
+
+async def test_apply_without_start_still_validates_the_selection(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``start=False`` skips the lifecycle only: a model the picker has never heard of is refused."""
+    _host(monkeypatch)
+    orch = CapabilityOrchestrator(slot_manager=FakeSlotManager())  # type: ignore[arg-type]
+    await orch.initialize_if_missing()
+
+    with pytest.raises(NotFound):
+        await orch.apply("img", "img", {"enabled": True, "model": "no-such-model"}, start=False)
+
+    assert _selection(home)["enabled"] is False
+
+
+async def test_provision_image_models_never_loads_the_slot(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The install-time pick lands in both files and starts nothing, against a real orchestrator."""
+    from hal0.install.image_models import provision_image_models
+
+    _host(monkeypatch)
+    _install("sdxl-lightning")
+    slot_manager = FakeSlotManager()
+    orch = CapabilityOrchestrator(slot_manager=slot_manager)  # type: ignore[arg-type]
+    await orch.initialize_if_missing()
+
+    async def installed(ids: Any, hf_token: Any, say: Any) -> list[tuple[str, str]]:
+        return [(model_id, "completed") for model_id in ids]
+
+    monkeypatch.setattr("hal0.comfyui.install.install_each", installed)
+    monkeypatch.setattr(
+        "hal0.components.openwebui_arm.reconcile_openwebui_env", lambda: {"status": "skipped"}
+    )
+
+    results = await provision_image_models(
+        ["sdxl-lightning"], orchestrator=orch, hf_token=None, on_line=lambda line: None
+    )
+
+    assert results == [("sdxl-lightning", "completed")]
+    assert _selection(home)["enabled"] is True
+    assert _selection(home)["model"] == "sdxl-lightning"
+    assert _slot(home)["model"]["default"] == "sdxl-lightning"
+    assert _lifecycle(slot_manager) == []
+
+
 async def test_first_boot_lifts_the_seeds_rocm_device_into_the_img_selection(home: Path) -> None:
     """The premise of the cases below: a real box's persisted img device is gpu-rocm."""
     await _first_boot(home)
