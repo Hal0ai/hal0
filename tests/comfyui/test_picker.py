@@ -242,20 +242,35 @@ def test_a_readable_tree_logs_nothing(caplog: pytest.LogCaptureFixture) -> None:
 def test_a_models_dir_the_user_cannot_traverse_does_not_raise(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The real thing, not an injected error: ``Path.is_file()`` raises ``PermissionError`` below a
-    directory without the execute bit."""
+    """The real thing, not an injected error: a directory without the execute bit.
+
+    Whether ``Path.is_file()`` raises ``PermissionError`` below it depends on the Python version
+    (it does on 3.12; on 3.14 it returns False), so the rows are asserted on every version and
+    the warning only where the platform actually raised. The injected-denial tests above pin the
+    warning everywhere.
+    """
     root = paths.models_root()
     (root / "checkpoints").mkdir(parents=True)
     root.chmod(0o000)
     caplog.set_level(logging.WARNING, logger="hal0.comfyui.picker")
     try:
+        try:
+            (root / "checkpoints" / "probe.safetensors").is_file()
+            platform_raises = False
+        except PermissionError:
+            platform_raises = True
         rows = picker.image_picker_rows(["gpu-vulkan"])
     finally:
         root.chmod(0o755)  # so tmp_path can be cleaned up
 
     assert [r["id"] for r in rows] == _renderable_catalog_ids()
     assert not any(r["downloaded"] for r in rows)
-    assert str(root) in next(r for r in caplog.records if r.levelno == logging.WARNING).getMessage()
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    if platform_raises:
+        assert len(warnings) == 1
+        assert str(root) in warnings[0].getMessage()
+    else:
+        assert warnings == []  # nothing raised, so there is nothing to report
 
 
 def test_a_user_checkpoint_is_a_downloaded_unpullable_row_under_its_api_id() -> None:
