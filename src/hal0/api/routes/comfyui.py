@@ -55,7 +55,7 @@ from pydantic import BaseModel, ConfigDict
 from hal0.api._redact import redact_log_line
 from hal0.api.middleware.error_codes import Conflict, NotFound, UnprocessableEntity
 from hal0.api.routes.power import _probe_power
-from hal0.capabilities.catalog import comfyui_backends
+from hal0.capabilities.catalog import COMFYUI_NO_ENGINE_REASON, comfyui_backends
 from hal0.comfyui import install as comfyui_install
 from hal0.comfyui import inventory
 from hal0.comfyui import paths as comfyui_paths
@@ -559,15 +559,14 @@ async def comfyui_pin(request: Request, body: SetPinnedBody | None = None) -> JS
 # ---------------------------------------------------------------------------
 
 
-# Why the engine cannot run here. ``comfyui_backends()`` is empty when an AMD host has no
-# ROCm lane, and the dashboard shows this text beside the catalog.
-_NO_ENGINE_REASON = "no ROCm lane on this host (ComfyUI needs /dev/kfd and a render node)"
-
-
 def _engine_availability() -> dict[str, Any]:
-    """``{available, reason}``: whether this host can run the ComfyUI image at all."""
+    """``{available, reason}``: whether this host can run the ComfyUI image at all.
+
+    ``comfyui_backends()`` is empty when an AMD host has no ROCm lane, and the dashboard
+    shows ``reason`` beside the catalog.
+    """
     available = bool(comfyui_backends())
-    return {"available": available, "reason": None if available else _NO_ENGINE_REASON}
+    return {"available": available, "reason": None if available else COMFYUI_NO_ENGINE_REASON}
 
 
 def _template_defaults(model: ImageModel) -> dict[str, Any]:

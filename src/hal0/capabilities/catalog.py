@@ -570,6 +570,11 @@ def _runtime_host_backends(runtime: str) -> list[str]:
     return [c for c in _RUNTIME_TO_HOST_BACKENDS.get(runtime, ()) if c in host_backends]
 
 
+#: Why the ComfyUI image cannot run on this host, for whoever shows :func:`comfyui_backends`
+#: being empty (the dashboard beside the catalog, the install-time image offer).
+COMFYUI_NO_ENGINE_REASON = "no ROCm lane on this host (ComfyUI needs /dev/kfd and a render node)"
+
+
 def comfyui_backends() -> list[str]:
     """Backend ids the ComfyUI image can run under here; empty without a ROCm lane.
 
