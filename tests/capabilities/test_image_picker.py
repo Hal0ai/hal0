@@ -8,6 +8,7 @@ image branch), so model-fit rejected every row and the picker was empty on a rea
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import struct
@@ -20,7 +21,7 @@ import pytest
 from hal0.capabilities import catalog
 from hal0.capabilities.orchestrator import CapabilityOrchestrator
 from hal0.capabilities.profile_fit import profile_name_for_fit
-from hal0.comfyui import inventory, paths
+from hal0.comfyui import autoselect, inventory, paths
 from hal0.comfyui.catalog import CATALOG, component_path
 from hal0.errors import BadRequest, Conflict, NotFound
 from hal0.providers._gpu import (
@@ -461,6 +462,158 @@ async def test_auto_select_keeps_the_seeded_slots_rocm_device(
     assert _selection(home)["enabled"] is True
     assert _selection(home)["model"] == "sdxl-lightning"
     assert _selection(home)["device"] == "gpu-rocm"
+
+
+# ── auto-select is a conditional update ─────────────────────────────────────
+#
+# Two installs that finish together, or an operator pick made while an install finishes, must not
+# let the auto-select replace a selection that is already there: the "is it empty" read is stale by
+# the time the apply runs, so the apply re-checks under the lock that commits the change.
+
+
+def _lifecycle(slot_manager: FakeSlotManager) -> list[tuple[str, str, dict[str, Any]]]:
+    return [c for c in slot_manager.calls if c[0] in {"load", "swap", "unload"}]
+
+
+async def test_apply_if_unselected_leaves_an_enabled_selection_alone(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _host(monkeypatch)
+    _install("sdxl-lightning")
+    _install("sdxl-turbo")
+    slot_manager = FakeSlotManager()
+    orch = CapabilityOrchestrator(slot_manager=slot_manager)  # type: ignore[arg-type]
+    await orch.initialize_if_missing()
+    await orch.apply("img", "img", {"enabled": True, "model": "sdxl-turbo"})
+    caps_path = home / "etc" / "hal0" / "capabilities.toml"
+    before = caps_path.read_bytes()
+    slot_manager.calls.clear()
+
+    result = await orch.apply(
+        "img", "img", {"enabled": True, "model": "sdxl-lightning"}, if_unselected=True
+    )
+
+    assert result["kept"] is True
+    assert result["model"] == "sdxl-turbo"
+    assert result["enabled"] is True
+    assert caps_path.read_bytes() == before
+    assert _lifecycle(slot_manager) == []
+    assert _slot(home)["model"]["default"] == "sdxl-turbo"
+
+
+async def test_apply_if_unselected_applies_when_nothing_is_selected(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _host(monkeypatch)
+    _install("sdxl-lightning")
+    slot_manager = FakeSlotManager()
+    orch = CapabilityOrchestrator(slot_manager=slot_manager)  # type: ignore[arg-type]
+    await orch.initialize_if_missing()
+
+    result = await orch.apply(
+        "img", "img", {"enabled": True, "model": "sdxl-lightning"}, if_unselected=True
+    )
+
+    assert "kept" not in result
+    assert result["model"] == "sdxl-lightning"
+    assert _selection(home)["model"] == "sdxl-lightning"
+    assert _lifecycle(slot_manager) == [("load", "img", {"model_id": "sdxl-lightning"})]
+
+
+async def test_apply_without_the_flag_still_replaces_an_enabled_selection(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The conditional is opt-in: an operator's own apply is never turned into a no-op."""
+    _host(monkeypatch)
+    _install("sdxl-lightning")
+    _install("sdxl-turbo")
+    orch = await _first_boot(home)
+    await orch.apply("img", "img", {"enabled": True, "model": "sdxl-turbo"})
+
+    result = await orch.apply("img", "img", {"enabled": True, "model": "sdxl-lightning"})
+
+    assert "kept" not in result
+    assert _selection(home)["model"] == "sdxl-lightning"
+
+
+async def test_two_concurrent_auto_selects_select_exactly_one_model(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both read an empty selection before either applies; only one may win, the other keeps it."""
+    _host(monkeypatch)
+    _install("sdxl-lightning")
+    _install("sdxl-turbo")
+    orch = await _first_boot(home)
+    real_read = autoselect.enabled_img_model
+    arrived = 0
+    both_have_read = asyncio.Event()
+
+    async def read_then_wait_for_the_other(orchestrator: Any) -> str | None:
+        nonlocal arrived
+        current = await real_read(orchestrator)
+        arrived += 1
+        if arrived == 2:
+            both_have_read.set()
+        await both_have_read.wait()
+        return current
+
+    monkeypatch.setattr(autoselect, "enabled_img_model", read_then_wait_for_the_other)
+
+    first, second = await asyncio.gather(
+        autoselect.auto_select_first_image_model(CATALOG["sdxl-lightning"], orchestrator=orch),
+        autoselect.auto_select_first_image_model(CATALOG["sdxl-turbo"], orchestrator=orch),
+    )
+
+    statuses = {first.status, second.status}
+    assert statuses == {autoselect.AutoSelectStatus.selected, autoselect.AutoSelectStatus.kept}
+    winner, loser = (
+        ("sdxl-lightning", second)
+        if first.status is autoselect.AutoSelectStatus.selected
+        else ("sdxl-turbo", first)
+    )
+    assert loser.detail == winner  # "kept" names the model that is selected
+    assert _selection(home)["model"] == winner
+    assert _slot(home)["model"]["default"] == winner
+
+
+async def test_an_operator_pick_between_the_auto_selects_read_and_apply_is_preserved(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _host(monkeypatch)
+    _install("sdxl-lightning")
+    _install("sdxl-turbo")
+    slot_manager = FakeSlotManager()
+    orch = CapabilityOrchestrator(slot_manager=slot_manager)  # type: ignore[arg-type]
+    await orch.initialize_if_missing()
+    real_read = autoselect.enabled_img_model
+    read_done = asyncio.Event()
+    operator_done = asyncio.Event()
+
+    async def read_then_let_the_operator_in(orchestrator: Any) -> str | None:
+        current = await real_read(orchestrator)  # empty: the auto-select would go ahead
+        read_done.set()
+        await operator_done.wait()
+        return current
+
+    async def operator_picks() -> None:
+        await read_done.wait()
+        await orch.apply("img", "img", {"enabled": True, "model": "sdxl-turbo"})
+        operator_done.set()
+
+    monkeypatch.setattr(autoselect, "enabled_img_model", read_then_let_the_operator_in)
+
+    outcome, _ = await asyncio.gather(
+        autoselect.auto_select_first_image_model(CATALOG["sdxl-lightning"], orchestrator=orch),
+        operator_picks(),
+    )
+
+    assert outcome.status is autoselect.AutoSelectStatus.kept
+    assert outcome.detail == "sdxl-turbo"
+    assert _selection(home)["model"] == "sdxl-turbo"
+    assert _slot(home)["model"]["default"] == "sdxl-turbo"
+    assert [c for c in _lifecycle(slot_manager) if c[0] == "load"] == [
+        ("load", "img", {"model_id": "sdxl-turbo"})
+    ]
 
 
 async def test_apply_img_on_the_seeded_rocm_device_still_gates_on_the_install(

@@ -249,7 +249,7 @@ def test_setup_headless_installs_selects_and_starts_the_slot_once(monkeypatch, t
         async def get_state(self):
             return {"selections": {}}
 
-        async def apply(self, slot, child, partial):
+        async def apply(self, slot, child, partial, *, if_unselected=False):
             events.append(f"apply {slot}/{child} {partial['model']}")
             return {"status": "ready"}
 
@@ -305,7 +305,7 @@ def test_setup_headless_with_a_selection_in_place_starts_nothing(monkeypatch, tm
             selection = {"enabled": True, "model": "sdxl-turbo"}
             return {"selections": {"img": {"img": selection}}}
 
-        async def apply(self, slot, child, partial):
+        async def apply(self, slot, child, partial, *, if_unselected=False):
             events.append(f"apply {slot}/{child}")
             return {"status": "ready"}
 

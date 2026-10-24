@@ -456,6 +456,8 @@ class CapabilityOrchestrator:
         slot: str,
         child: str,
         partial: dict[str, Any],
+        *,
+        if_unselected: bool = False,
     ) -> dict[str, Any]:
         """Merge a partial selection update and reconcile slot lifecycle.
 
@@ -463,6 +465,13 @@ class CapabilityOrchestrator:
         ``selections`` block of ``get_state()`` exposes. Wraps any
         underlying SlotManager / config error as :class:`CapabilityApplyFailed`
         so the HTTP layer renders a 503 envelope.
+
+        ``if_unselected`` makes the apply conditional, for a caller that only wants
+        to fill an empty selection (the auto-select after an image install). The
+        check is made under the same capabilities.toml lock that commits the
+        change, so a selection made by another writer after the caller last read it
+        is never replaced: when one is enabled with a model, nothing is written or
+        started and the result is that selection with ``"kept": True``.
         """
         if slot not in LEGAL_SLOTS:
             raise BadRequest(
@@ -633,9 +642,23 @@ class CapabilityOrchestrator:
         # CLI/API writer cannot interleave its RMW and drop this change (the
         # committed ChangeSet is computed under the lock).
         try:
-            self._store.apply_and_commit(
-                SlotSelection(slot=slot, child=child, slot_name=slot_name, selection=merged)
-            )
+            # ``transaction()`` is re-entrant, so the conditional re-check below and
+            # ``apply_and_commit`` share ONE critical section (no await inside it).
+            with self._store.transaction():
+                if if_unselected:
+                    current = self._selection_with_defaults(self._load(), slot, child)
+                    if current.enabled and current.model.strip():
+                        return {
+                            "device": current.device,
+                            "provider": current.provider,
+                            "model": current.model,
+                            "enabled": current.enabled,
+                            "slot": slot_name,
+                            "kept": True,
+                        }
+                self._store.apply_and_commit(
+                    SlotSelection(slot=slot, child=child, slot_name=slot_name, selection=merged)
+                )
         except Exception as exc:
             raise CapabilityApplyFailed(
                 f"failed to persist capability change: {exc}",

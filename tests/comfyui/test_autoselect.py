@@ -15,7 +15,11 @@ import pytest
 
 from hal0.capabilities import catalog
 from hal0.capabilities.orchestrator import CapabilityOrchestrator
-from hal0.comfyui.autoselect import AutoSelectStatus, auto_select_first_image_model
+from hal0.comfyui.autoselect import (
+    AutoSelectOutcome,
+    AutoSelectStatus,
+    auto_select_first_image_model,
+)
 from hal0.comfyui.catalog import CATALOG
 from hal0.errors import BadRequest
 
@@ -34,8 +38,11 @@ class _Orchestrator:
         state_error: Exception | None = None,
         apply_error: Exception | None = None,
         status: str = "",
+        kept_by_apply: str | None = None,
     ) -> None:
         self._status = status
+        self._kept_by_apply = kept_by_apply
+        self.conditional: list[bool] = []
         self._selection = {"model": model, "enabled": enabled}
         self._state_error = state_error
         self._apply_error = apply_error
@@ -46,9 +53,15 @@ class _Orchestrator:
             raise self._state_error
         return {"selections": {"img": {"img": self._selection}}}
 
-    async def apply(self, slot: str, child: str, partial: dict[str, Any]) -> dict[str, Any]:
+    async def apply(
+        self, slot: str, child: str, partial: dict[str, Any], *, if_unselected: bool = False
+    ) -> dict[str, Any]:
         if self._apply_error is not None:
             raise self._apply_error
+        self.conditional.append(if_unselected)
+        if self._kept_by_apply is not None:
+            # Someone selected a model after the caller's read: the real apply re-checks under the lock.
+            return {"model": self._kept_by_apply, "enabled": True, "kept": True}
         self.applied.append((slot, child, partial))
         return {"status": self._status} if self._status else {}
 
@@ -81,6 +94,23 @@ async def test_auto_select_on_first_renderable_install() -> None:
             },
         )
     ]
+
+
+async def test_auto_select_applies_conditionally() -> None:
+    """The read of "no selection yet" is stale by the apply, so the apply must re-check under its lock."""
+    orchestrator = _Orchestrator()
+
+    await auto_select_first_image_model(_SDXL, orchestrator=orchestrator)
+
+    assert orchestrator.conditional == [True]
+
+
+async def test_an_apply_that_found_a_selection_is_the_kept_outcome() -> None:
+    orchestrator = _Orchestrator(kept_by_apply="sdxl-turbo")
+
+    outcome = await auto_select_first_image_model(_SDXL, orchestrator=orchestrator)
+
+    assert outcome == AutoSelectOutcome(AutoSelectStatus.kept, "sdxl-turbo")
 
 
 async def test_auto_select_passes_the_seeded_rocm_device_not_the_picker_row() -> None:
