@@ -1752,15 +1752,12 @@ async def _img_selection_model(request: Request) -> str | None:
     orchestrator = getattr(request.app.state, "capability_orchestrator", None)
     if orchestrator is None:
         return None
+    from hal0.comfyui.autoselect import enabled_img_model
+
     try:
-        state = await orchestrator.get_state()
+        return await enabled_img_model(orchestrator)
     except Exception:  # defensive: a probe failure must not turn a missing model into a 500
         return None
-    selection = ((state.get("selections") or {}).get("img") or {}).get("img") or {}
-    model = selection.get("model")
-    if not selection.get("enabled") or not isinstance(model, str):
-        return None
-    return model.strip() or None
 
 
 def _extract_port_from_upstream_url(url: str) -> int | None:
