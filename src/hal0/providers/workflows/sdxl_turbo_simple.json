@@ -2,7 +2,6 @@
   "_meta": {
     "description": "SDXL Turbo (1-4 steps), Euler ancestral + sgm_uniform, single positive prompt, no negative. Tuned for ~1 image / 3-30s on Strix Halo (ROCm Vulkan path).",
     "params": {
-      "ckpt_name": "node:4.inputs.ckpt_name",
       "positive_prompt": "node:6.inputs.text",
       "negative_prompt": "node:7.inputs.text",
       "width": "node:5.inputs.width",

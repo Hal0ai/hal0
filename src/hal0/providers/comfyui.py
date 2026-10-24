@@ -332,11 +332,11 @@ class ComfyUIProvider(Provider):
     ) -> dict[str, str]:
         port = slot_cfg.get("port") or slot_cfg.get("slot", {}).get("port") or _DEFAULT_PORT
         backend = _slot_backend(slot_cfg)
-        # model_info["path"] is the on-disk checkpoint path. The actual
-        # filename gets picked up by the workflow translator (see
-        # comfyui_workflows.build_workflow's ckpt_filename arg). We pass
-        # the path through HAL0_COMFYUI_MODEL_PATH for diagnostics /
-        # future custom-node integrations.
+        # model_info["path"] is the on-disk checkpoint path. The workflow
+        # translator picks the checkpoint from the template (see
+        # comfyui_workflows.build_workflow). We pass the path through
+        # HAL0_COMFYUI_MODEL_PATH for diagnostics / future custom-node
+        # integrations.
         model_path = model_info.get("path", "")
         return {
             "HAL0_PORT": str(port),
@@ -577,27 +577,33 @@ class ComfyUIProvider(Provider):
         OpenAI response shape (``url`` vs ``b64_json``).
 
         The body must carry hal0-injected fields:
-          * ``_hal0_model_class``    — curated entry's model_class.
-          * ``_hal0_ckpt_filename``  — filename inside ComfyUI's checkpoints dir.
+          * ``_hal0_template``       — workflow template stem to render.
+          * ``_hal0_ckpt_override``  — optional checkpoint filename, for the
+            templates that let the caller choose one.
 
         These are stripped from what we send to ComfyUI and are how the
-        v1 route hands the curated metadata down without making this
-        provider re-look-up the registry.
+        v1 route hands the resolved template down without making this
+        provider re-look-up the catalog.
         """
-        model_class = body.pop("_hal0_model_class", None)
-        ckpt_filename = body.pop("_hal0_ckpt_filename", None)
-        if not isinstance(ckpt_filename, str) or not ckpt_filename:
+        template = body.pop("_hal0_template", None)
+        ckpt_override = body.pop("_hal0_ckpt_override", None)
+        if ckpt_override is not None and not isinstance(ckpt_override, str):
             raise ComfyUIInferError(
-                "comfyui.infer requires _hal0_ckpt_filename to be set "
-                "(passed by the /v1/images/generations route from the curated entry)",
+                "comfyui.infer: _hal0_ckpt_override must be a filename string",
+                details={"port": port},
+            )
+        if not isinstance(template, str) or not template:
+            raise ComfyUIInferError(
+                "comfyui.infer requires _hal0_template to be set "
+                "(passed by the /v1/images/generations route from the catalog entry)",
                 details={"port": port},
             )
 
         request_tag = f"hal0-{uuid.uuid4().hex[:12]}"
         graph, debug_meta = build_workflow(
             body=body,
-            model_class=model_class if isinstance(model_class, str) else None,
-            ckpt_filename=ckpt_filename,
+            template=template,
+            ckpt_override=ckpt_override or None,
             request_tag=request_tag,
         )
         client_id = uuid.uuid4().hex

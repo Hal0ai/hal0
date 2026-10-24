@@ -1741,37 +1741,28 @@ def _seed_tts_defaults(tts_cfg: dict[str, Any], body: dict[str, Any]) -> None:
 # ── /v1/images/generations (ComfyUI provider, hal0-managed translation) ────
 
 
-def _is_comfyui_checkpoint_renderable(curated: Any) -> bool:
-    """True iff ``curated`` is safe to drive through the ComfyUI translator.
+def _comfyui_catalog_template(curated: Any) -> str | None:
+    """The workflow template of the ComfyUI catalog entry sharing ``curated``'s id.
 
-    #1470: the old gate was a bare ``curated.capability != "image"`` check.
-    Six curated entries carry capability="image", but two of them are not
-    ComfyUI checkpoint files: ``esrgan-4x`` is a RealESRGAN ``.pth`` upscaler
-    (``comfyui_subdir="upscale_models"``) and ``sdxl-lightning`` is a LoRA
-    that needs the SDXL base checkpoint already loaded — its own notes say
-    so. Both used to pass the old gate because ``template_for_model_class``
-    deliberately falls back to ``sdxl_turbo_simple`` for any unrecognised
-    ``model_class`` (so a curated id never 404s just for lacking a
-    dedicated template) — so the LoRA/.pth got silently pinned in as the
-    workflow *checkpoint*, producing a ComfyUI node failure or garbage
-    output instead of a clean 4xx.
-
-    Require BOTH: the entry is staged as an actual checkpoint file
-    (``comfyui_subdir == "checkpoints"``) AND its ``model_class`` resolves
-    to a real, explicitly-declared template — not the "unknown class"
-    default. Curated entries that intentionally reuse a template as a
-    documented soft-fallback (e.g. ``flux-klein`` → sdxl_turbo_simple, see
-    ``comfyui_workflows.MODEL_CLASS_TO_TEMPLATE``) still pass, since that's
-    a deliberate choice, not an accident of the two placeholder classes
-    (``"image"``, or an untagged class) that ``sdxl-lightning``/``esrgan-4x``
-    fall through on.
+    ``None`` when the catalog has no such entry or the entry is not API-renderable
+    (editor-only video workflows, the ESRGAN upscaler).
     """
-    from hal0.providers.comfyui_workflows import MODEL_CLASS_TO_TEMPLATE
+    from hal0.comfyui.catalog import get_model
 
-    if (curated.comfyui_subdir or "") != "checkpoints":
-        return False
-    model_class = (curated.model_class or "").lower()
-    return model_class in MODEL_CLASS_TO_TEMPLATE
+    model = get_model(curated.id)
+    return model.template if model is not None and model.api_renderable else None
+
+
+def _is_comfyui_checkpoint_renderable(curated: Any) -> bool:
+    """True iff ``curated`` has an API-renderable entry in the ComfyUI catalog.
+
+    #1470: the gate used to be a bare ``curated.capability != "image"`` check,
+    which let the ESRGAN ``.pth`` upscaler and the SDXL-Lightning LoRA through
+    to be pinned in as the workflow *checkpoint*. The catalog owns what can be
+    rendered now: an entry is renderable only when it ships a pointer-contract
+    template (``api_renderable``).
+    """
+    return _comfyui_catalog_template(curated) is not None
 
 
 def _comfyui_renderable_builtin_ids() -> list[str]:
@@ -1903,9 +1894,8 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
     #    Rule 4 (/images/ path) succeeds even on a cold slot.
     call = await dispatcher.dispatch(request, body=body)
 
-    # 3. Find the curated metadata for the requested model id so we know
-    #    which workflow template + checkpoint filename to pin into the
-    #    workflow.
+    # 3. Find the curated entry for the requested model id, and through it
+    #    the catalog entry whose workflow template renders the request.
     requested = (body.get("model") or "").strip() or "sdxl-turbo"
     curated = get_curated(requested)
     if (
@@ -1935,14 +1925,15 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
             details={"upstream": call.upstream_name, "url": upstream.url},
         )
 
-    # 5. Drive the ComfyUI provider directly. Inject the curated metadata
+    # 5. Drive the ComfyUI provider directly. Inject the template stem
     #    into the body so the provider's translator knows what to render
-    #    without re-looking-up the registry.
+    #    without re-looking-up the catalog.
     provider = get_provider("comfyui")
     body_with_meta = {
         **body,
-        "_hal0_model_class": curated.model_class or "sdxl-turbo",
-        "_hal0_ckpt_filename": curated.hf_file,
+        "_hal0_template": _comfyui_catalog_template(curated),
+        # Always set: a client must not be able to choose the checkpoint.
+        "_hal0_ckpt_override": None,
     }
     result = await provider.infer(port, body_with_meta)
     if arbiter is not None:

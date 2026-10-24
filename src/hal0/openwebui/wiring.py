@@ -28,7 +28,6 @@ from typing import Any
 
 from hal0.capabilities.config import CapabilityConfig, load_capabilities_config
 from hal0.openwebui.env_writer import dynamic_env_overrides
-from hal0.registry.curated import get_curated
 
 #: filename_prefix / placeholder prompt baked into the static workflow OWUI
 #: ships with — real requests always overwrite both (see
@@ -118,34 +117,33 @@ def _owui_baked_workflow(model_id: str) -> tuple[str, str] | None:
     pair OWUI needs, from the SAME translator hal0's own
     ``/v1/images/generations`` route uses (:mod:`hal0.providers.comfyui_workflows`)
     — so the baked default never drifts from what the img slot actually
-    runs. Never bakes ODS's SDXL-Lightning graph; hal0 doesn't ship that
-    checkpoint by default, and this always reflects the operator's real
-    bound model instead.
+    runs. Never bakes ODS's SDXL-Lightning graph; it renders the workflow
+    template of the operator's real bound model instead.
 
-    Returns ``None`` when the workflow can't be built (unknown model with
-    no resolvable template/checkpoint) — the caller must then treat images
-    as not wired rather than claim a broken default.
+    Returns ``None`` when the workflow can't be built (the model has no
+    API-renderable ComfyUI catalog entry) — the caller must then treat
+    images as not wired rather than claim a broken default.
     """
+    from hal0.comfyui.catalog import get_model
     from hal0.providers.comfyui_workflows import (
         WorkflowTemplateError,
         build_workflow,
-        template_params_for_model_class,
+        template_params,
     )
 
-    curated = get_curated(model_id)
-    ckpt_filename = curated.hf_file if curated is not None else model_id
-    model_class = curated.model_class if curated is not None else None
+    entry = get_model(model_id)
+    if entry is None or not entry.api_renderable:
+        return None
     try:
         graph, _debug_meta = build_workflow(
             body={"prompt": _OWUI_PLACEHOLDER_PROMPT},
-            model_class=model_class,
-            ckpt_filename=ckpt_filename,
+            template=entry.template,
             request_tag=_OWUI_REQUEST_TAG,
         )
     except WorkflowTemplateError:
         return None
 
-    params = template_params_for_model_class(model_class)
+    params = template_params(entry.template)
     nodes: list[dict[str, Any]] = []
     for owui_type, param_key, field in _OWUI_NODE_TYPES:
         pointer = params.get(param_key)

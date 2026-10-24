@@ -157,3 +157,13 @@ def test_sdxl_simple_is_the_generic_sdxl_graph() -> None:
 @pytest.mark.parametrize("stem", _shipped_templates())
 def test_no_model_class_left(stem: str) -> None:
     assert "model_class" not in load_template(stem).get("_meta", {})
+
+
+@pytest.mark.parametrize("stem", _shipped_templates())
+def test_only_user_ckpt_templates_carry_ckpt_name(stem: str) -> None:
+    """The checkpoint is patched only where the caller picks it (ADR-0037, D5)."""
+    params = load_template(stem).get("_meta", {}).get("params", {})
+    if stem in USER_CKPT_TEMPLATES.values():
+        assert "ckpt_name" in params
+    else:
+        assert "ckpt_name" not in params

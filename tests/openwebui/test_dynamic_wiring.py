@@ -269,8 +269,7 @@ def test_wiring_comfyui_slot_bakes_the_real_translator_workflow(tmp_hal0_home: s
     # build_workflow() draws a random seed per call otherwise.
     expected_graph, _meta = build_workflow(
         body={"prompt": "a placeholder prompt", "extra_body": {"seed": 0}},
-        model_class=curated.model_class,
-        ckpt_filename=curated.hf_file,
+        template="sdxl_turbo_simple",
         request_tag="openwebui",
     )
     got_graph = json.loads(overrides["COMFYUI_WORKFLOW"])
@@ -283,11 +282,12 @@ def test_wiring_comfyui_slot_bakes_the_real_translator_workflow(tmp_hal0_home: s
 
     nodes = json.loads(overrides["COMFYUI_WORKFLOW_NODES"])
     node_types = {n["type"] for n in nodes}
-    assert {"prompt", "model", "width", "height", "steps", "seed", "n"} <= node_types
+    assert {"prompt", "width", "height", "steps", "seed", "n"} <= node_types
     prompt_node = next(n for n in nodes if n["type"] == "prompt")
     assert prompt_node["node_ids"] == ["6"]
-    model_node = next(n for n in nodes if n["type"] == "model")
-    assert model_node["node_ids"] == ["4"]
+    # sdxl_turbo_simple bakes its checkpoint: only the generic SDXL / SD 1.5 templates
+    # expose a ckpt_name pointer, so OWUI gets no "model" node to overwrite it with.
+    assert "model" not in node_types
 
 
 def test_wiring_both_slots_renders_both_blocks(tmp_hal0_home: str) -> None:
@@ -300,13 +300,11 @@ def test_wiring_both_slots_renders_both_blocks(tmp_hal0_home: str) -> None:
     assert overrides["ENABLE_IMAGE_GENERATION"] == "True"
 
 
-def test_wiring_non_curated_image_model_falls_back_to_raw_id_as_checkpoint(
+def test_wiring_image_model_without_a_catalog_entry_is_not_wired(
     tmp_hal0_home: str,
 ) -> None:
-    """An operator-pulled model with no curated registry entry still gets a
-    workflow — the raw model id is used as the checkpoint filename and the
-    template falls back to the generic sdxl_turbo_simple graph (same
-    fallback build_workflow already gives an unknown model_class)."""
+    """A model with no API-renderable ComfyUI catalog entry has no workflow to bake,
+    so images stay unwired rather than claim a default that cannot render."""
     from hal0.openwebui.wiring import resolve_dynamic_env_overrides
 
     _write_capabilities_toml(
@@ -321,6 +319,5 @@ enabled = true
 """,
     )
     overrides = resolve_dynamic_env_overrides()
-    assert overrides["ENABLE_IMAGE_GENERATION"] == "True"
-    graph = json.loads(overrides["COMFYUI_WORKFLOW"])
-    assert graph["4"]["inputs"]["ckpt_name"] == "my-custom-checkpoint.safetensors"
+    assert overrides["ENABLE_IMAGE_GENERATION"] is None
+    assert overrides["COMFYUI_WORKFLOW"] is None
