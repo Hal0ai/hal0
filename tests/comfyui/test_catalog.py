@@ -1,4 +1,4 @@
-"""hal0.comfyui.catalog: typed image-model catalog, templates and install state (ADR-0036)."""
+"""hal0.comfyui.catalog: typed image-model catalog, templates and install state (ADR-0037)."""
 
 from __future__ import annotations
 

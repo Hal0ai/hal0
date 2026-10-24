@@ -1,4 +1,4 @@
-"""hal0 comfyui subcommands — image models and the files they put on disk (ADR-0036).
+"""hal0 comfyui subcommands — image models and the files they put on disk (ADR-0037).
 
 Thin clients over ``/api/comfyui/*``: the daemon owns the catalog, the downloads and
 the models tree. ``models install`` starts each download as a daemon job and follows it,

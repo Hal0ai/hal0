@@ -1,4 +1,4 @@
-"""hal0.comfyui.install: the image-model installer on the registry downloader (ADR-0036)."""
+"""hal0.comfyui.install: the image-model installer on the registry downloader (ADR-0037)."""
 
 from __future__ import annotations
 

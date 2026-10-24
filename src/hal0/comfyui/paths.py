@@ -1,4 +1,4 @@
-"""The one owner of every ComfyUI data path (ADR-0036).
+"""The one owner of every ComfyUI data path (ADR-0037).
 
 ComfyUI's working data (models, workflows, custom nodes, the
 ``extra_model_paths.yaml`` that points ComfyUI at the models) lives under one

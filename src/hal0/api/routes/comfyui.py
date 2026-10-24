@@ -27,7 +27,7 @@ podman ``hal0-slot@<token>`` unit is the sole owner of the container lifecycle
 (the standalone ``comfy-*.sh`` docker scripts were retired in #984).
 ``POST /api/comfyui/pin`` toggles the arbiter's manual pin (blocks idle-restore).
 
-The image-model routes (ADR-0036) sit beside the engine ones: ``/models`` is the
+The image-model routes (ADR-0037) sit beside the engine ones: ``/models`` is the
 catalog with each model's install state, ``/models/{id}/install`` and
 ``DELETE /models/{id}`` change what is on disk, ``/jobs`` tracks the installs, and
 ``/files`` lists every weight file under the models tree. An install is a
@@ -556,7 +556,7 @@ async def comfyui_pin(request: Request, body: SetPinnedBody | None = None) -> JS
 
 
 # ---------------------------------------------------------------------------
-# Image models: catalog, installs, jobs, files (ADR-0036)
+# Image models: catalog, installs, jobs, files (ADR-0037)
 # ---------------------------------------------------------------------------
 
 

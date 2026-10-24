@@ -12,7 +12,7 @@ Assertions:
   (c) installer/install.sh contains NO comfy-ui sudoers block
       (``packaging/sudoers/hal0-comfyui`` is retired).
   (d) install.sh no longer touches the ComfyUI tree at all: the provider creates
-      every directory at launch (ADR-0036), under the configured model store.
+      every directory at launch (ADR-0037), under the configured model store.
   (e) No Python source file shells out to any of the retired scripts.
 """
 

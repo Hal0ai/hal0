@@ -1,4 +1,4 @@
-"""The ComfyUI image-model routes: catalog, installs, jobs and the on-disk file listing (ADR-0036).
+"""The ComfyUI image-model routes: catalog, installs, jobs and the on-disk file listing (ADR-0037).
 
 ``run_install`` is patched with small fakes that drive the job the way the real one does; its
 streaming, resume and checksum behaviour is covered by ``tests/comfyui/test_install.py``. The

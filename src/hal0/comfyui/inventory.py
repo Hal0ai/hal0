@@ -1,4 +1,4 @@
-"""The weight files on disk under the ComfyUI models tree, and who owns them (ADR-0036).
+"""The weight files on disk under the ComfyUI models tree, and who owns them (ADR-0037).
 
 :func:`list_files` is the one scan of ``models_root()``. Everything that reports on
 the tree is a projection of its result: the ``/api/comfyui/files`` listing returns it

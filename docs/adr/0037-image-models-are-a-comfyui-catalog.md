@@ -1,4 +1,4 @@
-# ADR-0036: Image models are a ComfyUI-owned catalog of typed components
+# ADR-0037: Image models are a ComfyUI-owned catalog of typed components
 
 ## Status
 

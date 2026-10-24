@@ -1,4 +1,4 @@
-"""hal0.comfyui.inventory: the weight files on disk, and which catalog models own them (ADR-0036)."""
+"""hal0.comfyui.inventory: the weight files on disk, and which catalog models own them (ADR-0037)."""
 
 from __future__ import annotations
 
