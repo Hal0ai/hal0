@@ -3171,7 +3171,9 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     "comfyui_model_remove": (
         "Delete an image model's weight files and workflow; files another installed model "
-        "loads stay (gated). Args: model_id (path). Refused while its install runs."
+        "loads stay unless include_shared=true, which deletes them too and reports those "
+        "models as affected (gated). Args: model_id (path), include_shared (optional). "
+        "Refused while its install runs."
     ),
     "comfyui_job_cancel": (
         "Cancel an image model's in-flight install; files already downloaded stay. "
