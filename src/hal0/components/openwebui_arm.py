@@ -22,8 +22,8 @@ Env re-render (RAG/image-gen/web-search full wiring): every ``apply``
 pass of :func:`converge_openwebui` also re-renders ``openwebui.env``'s
 dynamic blocks from live capability state
 (:func:`hal0.openwebui.wiring.resolve_dynamic_env_overrides`, via
-:func:`_render_dynamic_env`) and restarts the unit when the rendered bytes
-changed. That covers ``hal0 update``/``hal0 app converge`` and the
+:func:`_render_dynamic_env`) and try-restarts the unit (a stopped or skipped
+Open WebUI stays down) when the rendered bytes changed. That covers ``hal0 update``/``hal0 app converge`` and the
 boot-time convergence pass (:mod:`hal0.components.runner`), which are the
 only existing callers of this arm — capability apply
 (:mod:`hal0.api.routes.capabilities`) and slot create/delete for the
@@ -62,15 +62,22 @@ def override_path() -> Path:
     return var_lib() / "state" / "openwebui.pin-override"
 
 
-def _restart_openwebui(runner: Runner, is_hal0_user: Callable[[], bool]) -> bool:
+def _restart_openwebui(
+    runner: Runner, is_hal0_user: Callable[[], bool], *, verb: str = "restart"
+) -> bool:
     """Restart the OpenWebUI unit through the same seam every other branch
     of this module uses. Returns whether the restart command itself
     succeeded (a process failure never raises — callers treat this as a
-    best-effort signal, same posture as the rest of the arm)."""
+    best-effort signal, same posture as the rest of the arm).
+
+    ``verb`` is ``"restart"`` (starts a stopped unit — an image upgrade the
+    operator asked for) or ``"try-restart"`` (restarts only a unit that is
+    already active — every env-only reconcile, so an Open WebUI the operator
+    skipped or stopped is never started as a side effect)."""
     restart_argv = (
-        ["sudo", "-n", SEAM_BIN, "svc-restart", "openwebui"]
+        ["sudo", "-n", SEAM_BIN, f"svc-{verb}", "openwebui"]
         if is_hal0_user()
-        else ["systemctl", "restart", image_pin.OPENWEBUI_UNIT_NAME]
+        else ["systemctl", verb, image_pin.OPENWEBUI_UNIT_NAME]
     )
     try:
         proc = runner(restart_argv, capture_output=True, text=True, timeout=_CTL_TIMEOUT_S)
@@ -117,8 +124,15 @@ def reconcile_openwebui_env(
     runner: Runner | None = None,
     is_hal0_user: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
-    """Re-render the dynamic env blocks and restart the unit only when the
+    """Re-render the dynamic env blocks and try-restart the unit only when the
     rendered bytes actually changed.
+
+    A ``try-restart``: a unit that is not running stays down. The operator may
+    have skipped Open WebUI (``HAL0_SKIP_OPENWEBUI=1``, ``--no-start``; the
+    installer still lays the unit file down) or stopped it, and an image
+    install or a capability apply must never start an unauthenticated chat UI
+    behind their back. The rewritten env is read at its next start, so the
+    wiring still converges.
 
     The single reconcile point every event that changes that truth calls
     directly: capability apply (:mod:`hal0.api.routes.capabilities`), slot
@@ -131,11 +145,13 @@ def reconcile_openwebui_env(
     is_hal0_user = is_hal0_user if is_hal0_user is not None else is_hal0_service_user
 
     if not image_pin.installed_unit_path().is_file():
-        # Mirrors converge_openwebui's own early-exit: a box that never
-        # installed the OpenWebUI companion (HAL0_SKIP_OPENWEBUI=1) has
-        # nothing to restart, and writing an env file for a companion that
-        # isn't provisioned would be a surprising side effect of a
-        # capability apply / slot create/delete on an unrelated feature.
+        # Mirrors converge_openwebui's own early-exit: a box without the
+        # OpenWebUI unit file has nothing to restart, and writing an env file
+        # for a companion that isn't provisioned would be a surprising side
+        # effect of a capability apply / slot create/delete on an unrelated
+        # feature. (A unit file does NOT mean the operator wants it running:
+        # install.sh lays it down even under HAL0_SKIP_OPENWEBUI=1, which is
+        # why the restart below is a try-restart.)
         return {"status": "skipped", "reason": "openwebui unit not installed"}
 
     changed, error = _render_dynamic_env(job_id)
@@ -144,7 +160,7 @@ def reconcile_openwebui_env(
     if not changed:
         return {"status": "unchanged", "env_changed": False}
 
-    restarted = _restart_openwebui(runner, is_hal0_user)
+    restarted = _restart_openwebui(runner, is_hal0_user, verb="try-restart")
     if not restarted:
         log.warning(
             "components.owui_env_restart_failed",
@@ -194,7 +210,7 @@ def _env_reconcile_fields(
         return fields
     if changed:
         fields["env_changed"] = True
-        fields["restarted"] = _restart_openwebui(runner, is_hal0_user)
+        fields["restarted"] = _restart_openwebui(runner, is_hal0_user, verb="try-restart")
     return fields
 
 

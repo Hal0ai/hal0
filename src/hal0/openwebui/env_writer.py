@@ -424,7 +424,7 @@ def _rag_env_block(embed_model_id: str) -> dict[str, str]:
 
 
 def _image_gen_env_block(
-    model_id: str, workflow_json: str, workflow_nodes_json: str
+    model_id: str, workflow_json: str, workflow_nodes_json: str, size: str
 ) -> dict[str, str]:
     """Image generation routed through the ComfyUI slot on the host.
 
@@ -435,13 +435,15 @@ def _image_gen_env_block(
     ``workflow_json`` / ``workflow_nodes_json`` are pre-rendered by the
     caller (see :mod:`hal0.openwebui.wiring`) from the SAME translator
     hal0's own ``/v1/images/generations`` route uses, so the baked default
-    never drifts from what the slot actually runs.
+    never drifts from what the slot actually runs. ``size`` is the resolved
+    model's native ``WxH`` (from the same resolution); it is only OpenWebUI's
+    default ``IMAGE_SIZE``, which the operator can change in OpenWebUI itself.
     """
     return {
         "ENABLE_IMAGE_GENERATION": "True",
         "IMAGE_GENERATION_ENGINE": "comfyui",
         "COMFYUI_BASE_URL": "http://host.docker.internal:8188",
-        "IMAGE_SIZE": "1024x1024",
+        "IMAGE_SIZE": size,
         "IMAGE_GENERATION_MODEL": model_id,
         "COMFYUI_WORKFLOW": workflow_json,
         "COMFYUI_WORKFLOW_NODES": workflow_nodes_json,
@@ -471,6 +473,7 @@ def dynamic_env_overrides(
     image_model_id: str | None,
     image_workflow_json: str | None,
     image_workflow_nodes_json: str | None,
+    image_size: str | None,
     search_provider: dict[str, str] | None,
 ) -> dict[str, str | None]:
     """Render the RAG / image-gen / web-search blocks as a
@@ -483,17 +486,19 @@ def dynamic_env_overrides(
     deletes a capability's keys the moment it stops being true, rather than
     leaving them to survive as a stale claim under ``preserve_existing``.
 
-    ``image_model_id`` requires both workflow strings — a caller that
-    resolved a model id but failed to build its workflow (see the
-    ``WorkflowTemplateError`` catch in :mod:`hal0.openwebui.wiring`) must
-    pass ``None`` for all three rather than a half-built block.
+    ``image_model_id`` requires both workflow strings and ``image_size`` — a
+    caller that resolved a model id but failed to build its workflow (see
+    :func:`hal0.openwebui.wiring._owui_baked_workflow`) must pass ``None``
+    for all four rather than a half-built block.
     """
     merged: dict[str, str | None] = dict.fromkeys(_DYNAMIC_ENV_KEYS, None)
     if embed_model_id:
         merged.update(_rag_env_block(embed_model_id))
-    if image_model_id and image_workflow_json and image_workflow_nodes_json:
+    if image_model_id and image_workflow_json and image_workflow_nodes_json and image_size:
         merged.update(
-            _image_gen_env_block(image_model_id, image_workflow_json, image_workflow_nodes_json)
+            _image_gen_env_block(
+                image_model_id, image_workflow_json, image_workflow_nodes_json, image_size
+            )
         )
     if search_provider:
         merged.update(_web_search_env_block(search_provider))

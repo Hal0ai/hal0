@@ -83,7 +83,8 @@ in order:
 10. **Hardware probe** — detects CPU/RAM/GPU/NPU and writes
     `/etc/hal0/hardware.json`.
 11. **Steward + agent models** — seeds a hardware-recommended slot and
-    profile.
+    profile, then offers the optional agent model and a starter image
+    model (see [Starter image model](#starter-image-model)).
 12. **NPU prerequisites** — installs the FastFlowLM runtime on
     AMDXDNA/apt hosts (fail-soft elsewhere).
 13. **Bundle picker manifests** — writes the dashboard's first-run bundle
@@ -99,6 +100,33 @@ or just to pick up new configuration defaults. Existing config files are
 never clobbered, and a unit you disabled or masked (for example
 `hermes-gateway.service`) is left off on re-run; the installer prints the
 `systemctl` command to turn it back on.
+
+## Starter image model
+
+On a box that can run the ComfyUI image engine (it needs a ROCm lane: `/dev/kfd`
+and a render node), step 11 also offers a starter image model. Other boxes are
+not asked, and the installer says why. The menu lists the image models the API
+can render, each with the GB still to download and the time per image, and marks
+the one that suits the box's memory as `[recommended]`: Stable Diffusion 1.5
+below 16 GB, SDXL Lightning from 16 GB, Qwen-Image Lightning from 96 GB. The
+memory counted is the unified memory when the box has it, else system RAM.
+
+Answer with menu numbers, catalog ids or `recommended`, separated by commas or
+spaces, or press Enter to download nothing. A bad answer is asked again. The
+first model that finishes downloading becomes the `img` capability's model,
+and the installer starts the image slot with it, which downloads the ComfyUI
+runtime on first start and can take several minutes. Open WebUI's environment
+is re-rendered to match: a running Open WebUI restarts to pick it up, and one
+you skipped or stopped stays down. If an image model is already selected it
+stays selected, and the installer starts nothing. `--no-start` skips the step,
+since it starts the image slot, and the installer prints how to do it later. A
+failed download is reported and the install carries on; install a model later
+with `hal0 comfyui models install <id>` or from the dashboard.
+
+An unattended install (no terminal, or `HAL0_NONINTERACTIVE=1`) downloads
+nothing unless `HAL0_IMAGE_MODELS` is set. Set it to `recommended` or a list of
+ids to opt in, and to `none` to skip even on a terminal; see
+[Install-time overrides](/docs/reference/env-vars-install/#install-time-overrides).
 
 ## Flags and environment variables
 
@@ -125,6 +153,7 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash -s -- --no-start --models-dir
 | `HAL0_PY_AUTOINSTALL` | _(unset)_ | The installer already sets this itself when the default Python is below 3.12, so you rarely need it; it allows installing `python3.12` via apt or dnf when no 3.12-3.14 is on `PATH`. Other distros need `HAL0_PYTHON` pointed at a newer interpreter |
 | `HAL0_HINDSIGHT_PYTHON` | _(auto)_ | Interpreter (Python 3.11-3.14) for the Hindsight memory engine venv; use it when the installer reports none usable |
 | `HAL0_SKIP_HERMES` | _(unset)_ | Set to `1` to skip provisioning the bundled Hermes agent; install it later with `hal0 agent install hermes` |
+| `HAL0_IMAGE_MODELS` | _(unset)_ | Starter image models to download without a prompt: `recommended` or a list of ids; `none` skips the step |
 
 ### Install log and failure reports
 

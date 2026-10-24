@@ -31,9 +31,9 @@ def profile_name_for_fit(capability: str, device: str, provider: str = "") -> st
     kokoro except for TTS. Returns ``None`` when nothing can be inferred (the
     selection schema does not yet carry an explicit profile).
 
-    Order matters — the ``tts`` branch must precede the generic ``gpu`` branch
-    so a TTS slot never receives the rocm/vulkan llama profile (wrong runtime
-    family — the slot would never start the TTS image).
+    Order matters — the ``tts`` and ``image`` branches must precede the generic
+    ``gpu`` branch so a TTS or image slot never receives the rocm/vulkan llama
+    profile (wrong runtime family — the slot would never start its image).
     """
     if capability == "tts":
         # Engine switch within the tts slot — GPU resolves Qwen3, CPU Kokoro.
@@ -79,8 +79,12 @@ def profile_name_for_fit(capability: str, device: str, provider: str = "") -> st
         # stay a separate instance from embed. Device-agnostic for the same
         # reason as embed above (#1830).
         return "reranking"
+    if capability == "image":
+        # Before the GPU branch below: ComfyUI's picker row is labelled
+        # "gpu-vulkan" (the generic GPU row, #1941), so a device-first rule
+        # answered the GPU *chat* profile for an image selection and model-fit
+        # then rejected every image row — an empty picker on a ROCm host.
+        return "comfyui"
     if device in {"gpu-rocm", "gpu-vulkan"}:
         return DEVICE_DEFAULT_PROFILES.get(device)
-    if capability == "image":
-        return "comfyui"
     return None

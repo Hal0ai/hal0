@@ -1,4 +1,25 @@
 {
+  "_meta": {
+    "description": "Qwen-Image 2512 bf16 with the 4-step Lightning LoRA, Euler + simple at cfg 1.",
+    "params": {
+      "positive_prompt": "node:6.inputs.text",
+      "negative_prompt": "node:7.inputs.text",
+      "width": "node:58.inputs.width",
+      "height": "node:58.inputs.height",
+      "batch_size": "node:58.inputs.batch_size",
+      "seed": "node:3.inputs.seed",
+      "steps": "node:3.inputs.steps",
+      "cfg": "node:3.inputs.cfg",
+      "filename_prefix": "node:60.inputs.filename_prefix"
+    },
+    "defaults": {
+      "steps": 4,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1
+    }
+  },
   "3": {
     "inputs": {
       "seed": 695101294492382,

@@ -1103,6 +1103,7 @@ class BootState:
     model_pull_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
     image_install_jobs: dict[str, Any] = field(default_factory=dict)
     image_install_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
+    image_tree_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     runner_image_registry: RunnerImageStore | None = None
     runner_image_pull_jobs: dict[str, Any] = field(default_factory=dict)
     runner_image_pull_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
@@ -1613,6 +1614,9 @@ async def _boot_pull_registry(app: FastAPI, ctx: BootState) -> None:
     # model id and the task running it, so shutdown can cancel an install in flight.
     app.state.image_install_jobs = ctx.image_install_jobs
     app.state.image_install_tasks = ctx.image_install_tasks
+    # Serialises an install's check-then-start with a removal in a worker thread
+    # (routes.comfyui). Created here, in the running loop, and owned by this app.
+    app.state.image_tree_lock = ctx.image_tree_lock
     # Runner-image catalogue store + its own pull-job/task dicts, same
     # shape as the model-pull pair above but keyed by GHCR repo path
     # (feat/runner-image-catalogue).
@@ -1852,6 +1856,23 @@ async def _boot_seeds(app: FastAPI, ctx: BootState) -> None:
         await asyncio.to_thread(_hermes_join.reconcile_stale_joins)
     except Exception as exc:  # must never block startup
         log.warning("mcp.hermes_join.startup_reconcile_failed", error=str(exc))
+
+
+async def _boot_comfyui_workflows(app: FastAPI, ctx: BootState) -> None:
+    """Phase — give hand-installed image models the ComfyUI workflow their install would write.
+
+    A model whose weights were put on disk by hand reports ``complete``, so the install route
+    refuses it and nothing else ever provisions its workflow. Best-effort and local-FS only:
+    a failure is logged and never blocks the boot.
+    """
+    try:
+        from hal0.comfyui.install import ensure_workflows
+
+        written = await asyncio.to_thread(ensure_workflows)
+        if written:
+            log.info("comfyui.workflows_provisioned", workflows=written)
+    except Exception as exc:
+        log.warning("comfyui.workflows_provision_failed", error=str(exc))
 
 
 async def _boot_capabilities(app: FastAPI, ctx: BootState) -> None:
@@ -2619,6 +2640,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await _run_boot_phase(report, "pull_registry", lambda: _boot_pull_registry(app, ctx))
         await _run_boot_phase(report, "publish_runtime", lambda: _boot_publish_runtime(app, ctx))
         await _run_boot_phase(report, "seeds", lambda: _boot_seeds(app, ctx))
+        await _run_boot_phase(
+            report, "comfyui_workflows", lambda: _boot_comfyui_workflows(app, ctx)
+        )
         await _run_boot_phase(report, "capabilities", lambda: _boot_capabilities(app, ctx))
         await _run_boot_phase(report, "metrics_state", lambda: _boot_metrics_state(app, ctx))
         await _run_boot_phase(report, "background_tasks", lambda: _boot_background_tasks(app, ctx))

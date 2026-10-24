@@ -28,7 +28,6 @@ from typing import Any
 
 from hal0.capabilities.config import CapabilityConfig, load_capabilities_config
 from hal0.openwebui.env_writer import dynamic_env_overrides
-from hal0.registry.curated import get_curated
 
 #: filename_prefix / placeholder prompt baked into the static workflow OWUI
 #: ships with — real requests always overwrite both (see
@@ -43,9 +42,12 @@ _OWUI_PLACEHOLDER_PROMPT = "a placeholder prompt"
 #: node. Generic across every shipped template (sdxl_turbo_simple,
 #: sd15_simple, …) because it walks the template's own pointer map rather
 #: than hardcoding node ids — a new template needs no changes here.
+#:
+#: There is deliberately no ``model`` row. OWUI writes its configured model id
+#: into that node, and the id (``sd-1.5-pruned-emaonly``, ``ckpt/<path>``) is
+#: never a checkpoint filename; the baked graph already carries the checkpoint.
 _OWUI_NODE_TYPES: tuple[tuple[str, str, str], ...] = (
     ("prompt", "positive_prompt", "text"),
-    ("model", "ckpt_name", "ckpt_name"),
     ("width", "width", "width"),
     ("height", "height", "height"),
     ("steps", "steps", "steps"),
@@ -90,73 +92,97 @@ def openwebui_wiring_status(
     point them at hal0's own ``/v1`` regardless of capability state — see
     ``_DEFAULT_OPENWEBUI_ENV``). Documents/images/web-search are gated on a
     real bound backend: an *enabled* capability selection with a non-empty
-    model, never merely a slot file existing on disk.
+    model, never merely a slot file existing on disk. Images go one step
+    further: the model must also resolve to something the API can render
+    (installed, renderable — :func:`_owui_baked_workflow`), because that is
+    the condition under which the image env block is written at all. The chip
+    and the env block read the same result, so the dashboard never claims an
+    image button Open WebUI does not have; ``image_model`` is the model the
+    block is written for, ``None`` when it is not.
 
     ``agents`` lists the model ids Hermes profiles answer as; it needs the
     live upstream registry, so callers outside the API process (the env
     writer) omit it and get ``[]``.
+    """
+    return _wiring(upstreams, model_cache)[0]
+
+
+def _wiring(
+    upstreams: Any | None, model_cache: Mapping[str, list[str]] | None
+) -> tuple[dict[str, Any], tuple[str, str, str] | None]:
+    """The status dict plus the baked image workflow it was derived from.
+
+    The workflow is resolved once here and handed to
+    :func:`resolve_dynamic_env_overrides`, so the chip and the env block can
+    never disagree about whether images are wired.
     """
     cfg = load_capabilities_config()
     embed_sel = _selection(cfg, "embed", "embed")
     img_sel = _selection(cfg, "img", "img")
     embed_model = embed_sel.model.strip() if embed_sel is not None and embed_sel.enabled else ""
     image_model = img_sel.model.strip() if img_sel is not None and img_sel.enabled else ""
-    return {
+    baked = _owui_baked_workflow(image_model) if image_model else None
+    status = {
         "chat": True,
         "voice": True,
         "documents": bool(embed_model),
-        "images": bool(image_model),
+        "images": baked is not None,
         "web_search": False,
         "embed_model": embed_model or None,
-        "image_model": image_model or None,
+        "image_model": image_model if baked is not None else None,
         "agents": _agent_model_ids(upstreams, model_cache),
     }
+    return status, baked
 
 
-def _owui_baked_workflow(model_id: str) -> tuple[str, str] | None:
+def _owui_baked_workflow(model_id: str) -> tuple[str, str, str] | None:
     """Build the static ``COMFYUI_WORKFLOW`` / ``COMFYUI_WORKFLOW_NODES``
-    pair OWUI needs, from the SAME translator hal0's own
-    ``/v1/images/generations`` route uses (:mod:`hal0.providers.comfyui_workflows`)
-    — so the baked default never drifts from what the img slot actually
-    runs. Never bakes ODS's SDXL-Lightning graph; hal0 doesn't ship that
-    checkpoint by default, and this always reflects the operator's real
-    bound model instead.
+    pair OWUI needs, plus the ``IMAGE_SIZE`` default (the model's native
+    ``WxH``), from the SAME resolution and translator hal0's own
+    ``/v1/images/generations`` route uses
+    (:func:`hal0.comfyui.resolve.resolve_image_model`,
+    :mod:`hal0.providers.comfyui_workflows`) — so the baked default never
+    drifts from what the img slot actually runs. Never bakes ODS's
+    SDXL-Lightning graph; it renders the workflow template of the operator's
+    real bound model instead, at that model's native size.
 
-    Returns ``None`` when the workflow can't be built (unknown model with
-    no resolvable template/checkpoint) — the caller must then treat images
-    as not wired rather than claim a broken default.
+    Returns ``None`` when the model does not resolve (unknown, not installed,
+    or not API-renderable) or its workflow can't be built — the caller must
+    then treat images as not wired rather than claim a broken default.
     """
-    from hal0.providers.comfyui_workflows import (
-        WorkflowTemplateError,
-        build_workflow,
-        template_params_for_model_class,
-    )
+    from hal0.comfyui.catalog import parse_pointer
+    from hal0.comfyui.resolve import resolve_image_model
+    from hal0.errors import Hal0Error
+    from hal0.providers.comfyui_workflows import build_workflow, template_params
 
-    curated = get_curated(model_id)
-    ckpt_filename = curated.hf_file if curated is not None else model_id
-    model_class = curated.model_class if curated is not None else None
     try:
+        resolved = resolve_image_model(model_id, selection_model=None)
         graph, _debug_meta = build_workflow(
-            body={"prompt": _OWUI_PLACEHOLDER_PROMPT},
-            model_class=model_class,
-            ckpt_filename=ckpt_filename,
+            body={"prompt": _OWUI_PLACEHOLDER_PROMPT, "size": resolved.defaults["size"]},
+            template=resolved.template,
+            ckpt_override=resolved.ckpt_override,
             request_tag=_OWUI_REQUEST_TAG,
         )
-    except WorkflowTemplateError:
+        params = template_params(resolved.template)
+    except Hal0Error:
+        # Covers the resolution errors and WorkflowTemplateError, which share the base.
         return None
 
-    params = template_params_for_model_class(model_class)
     nodes: list[dict[str, Any]] = []
     for owui_type, param_key, field in _OWUI_NODE_TYPES:
         pointer = params.get(param_key)
-        if not isinstance(pointer, str) or not pointer.startswith("node:"):
+        if not isinstance(pointer, str):
             continue
-        node_id = pointer[len("node:") :].split(".", 1)[0]
+        try:
+            node_id, _ = parse_pointer(pointer)
+        except ValueError:
+            continue
         nodes.append({"type": owui_type, "key": field, "node_ids": [node_id]})
 
     return (
         json.dumps(graph, separators=(",", ":")),
         json.dumps(nodes, separators=(",", ":")),
+        resolved.defaults["size"],
     )
 
 
@@ -164,24 +190,22 @@ def resolve_dynamic_env_overrides() -> dict[str, str | None]:
     """Live capability state → the overrides dict
     :func:`~hal0.openwebui.env_writer.write_openwebui_env` merges in.
     """
-    status = openwebui_wiring_status()
+    status, baked = _wiring(None, None)
     image_workflow_json: str | None = None
     image_nodes_json: str | None = None
-    image_model = status["image_model"]
-    if status["images"] and image_model:
-        built = _owui_baked_workflow(image_model)
-        if built is None:
-            # Curated lookup / template resolution failed — never claim a
-            # capability we can't actually back with a working workflow.
-            image_model = None
-        else:
-            image_workflow_json, image_nodes_json = built
+    image_size: str | None = None
+    if baked is not None:
+        image_workflow_json, image_nodes_json, image_size = baked
+    # An image model that does not resolve has no baked workflow and the status
+    # reports ``image_model`` None for it: never claim a capability we can't
+    # back with a working workflow.
 
     return dynamic_env_overrides(
         embed_model_id=status["embed_model"],
-        image_model_id=image_model,
+        image_model_id=status["image_model"],
         image_workflow_json=image_workflow_json,
         image_workflow_nodes_json=image_nodes_json,
+        image_size=image_size,
         search_provider=_search_provider_lookup(),
     )
 

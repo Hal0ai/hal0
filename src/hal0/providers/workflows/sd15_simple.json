@@ -1,10 +1,10 @@
 {
   "_meta": {
-    "model_class": "sd-1.5",
     "description": "SD 1.5, 20-step Euler, single positive prompt, empty negative. Native 512x512 — caller can override but expect quality drop above 768.",
     "params": {
       "ckpt_name": "node:4.inputs.ckpt_name",
       "positive_prompt": "node:6.inputs.text",
+      "negative_prompt": "node:7.inputs.text",
       "width": "node:5.inputs.width",
       "height": "node:5.inputs.height",
       "batch_size": "node:5.inputs.batch_size",

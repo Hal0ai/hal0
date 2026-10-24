@@ -254,6 +254,36 @@ def test_generate_embed_capability_clones_embedding_seed(tmp_hal0_home: str) -> 
     assert result.profile["profile"]["cloned_from"] == "embedding"
 
 
+def test_generate_image_capability_on_a_gpu_clones_the_comfyui_seed(
+    tmp_hal0_home: str, rocm_nodes: None
+) -> None:
+    """``profile_name_for_fit`` answers ``comfyui`` for an image selection before it looks at
+    the device, so an img draft on a GPU box starts from the ComfyUI seed, not the llama GPU
+    chat profile (which a ComfyUI slot could never run)."""
+    reg = ModelRegistry(registry_dir=tmp_hal0_home + "/registry")
+    reg.add(
+        Model(
+            id="sdxl-turbo",
+            path="/models/sd_xl_turbo_1.0_fp16.safetensors",
+            capabilities=["image"],
+        )
+    )
+
+    import asyncio
+
+    result = asyncio.run(
+        generate_draft_profile(
+            model_id="sdxl-turbo",
+            exported_at=_EXPORTED_AT,
+            hw=_hw_rocm(),
+            registry=reg,
+        )
+    )
+
+    assert result.profile["profile"]["cloned_from"] == "comfyui"
+    assert result.warnings == ()
+
+
 def test_generate_cpu_only_host_clones_cpu_chat_seed(tmp_hal0_home: str) -> None:
     reg = ModelRegistry(registry_dir=tmp_hal0_home + "/registry")
     reg.add(Model(id="llama32-3b", path="/models/llama32.gguf", capabilities=["chat"]))

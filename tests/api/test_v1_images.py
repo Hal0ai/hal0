@@ -5,7 +5,9 @@ this exercises:
 
   * dispatcher routing (image-gen path lands on the ``img`` slot legacy
     fallback when no registry binding exists).
-  * curated-model gating (random model id 404s).
+  * model resolution (hal0.comfyui.resolve): unknown ids 404, models that are
+    not installed 409, models the API cannot render 422, user checkpoints
+    resolve as ``ckpt/<path>``.
   * URL response_format → cached PNG + ``/api/images/cache/...`` URL.
   * b64_json response_format → inline base64 PNG.
   * GET /api/images/cache/{name}.png serves the cached bytes.
@@ -16,13 +18,45 @@ this exercises:
 
 from __future__ import annotations
 
+import json
+import struct
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
 
+from hal0.comfyui import paths
+from hal0.comfyui.catalog import CATALOG, component_path
 from hal0.upstreams.registry import Upstream
+
+
+@pytest.fixture(autouse=True)
+def comfyui_data_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The ComfyUI models tree under ``tmp_path``: resolution reads it for install state."""
+    root = tmp_path / "comfyui-data"
+    monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(root))
+    assert paths.models_root().is_relative_to(tmp_path)
+    return root
+
+
+def _install(*model_ids: str) -> None:
+    """Put every component file of the catalog models where an install would."""
+    root = paths.models_root()
+    for model_id in model_ids:
+        for component in CATALOG[model_id].components:
+            path = component_path(component, root)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"x")
+
+
+def _user_checkpoint(relpath: str, key: str = "conditioner.embedders.1.x") -> None:
+    """A user checkpoint whose safetensors header sniffs as SDXL (default) or SD 1.5."""
+    raw = json.dumps({key: {"dtype": "F16", "shape": [1], "data_offsets": [0, 2]}}).encode("utf-8")
+    path = paths.models_root() / "checkpoints" / relpath
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(struct.pack("<Q", len(raw)) + raw + b"\x00\x00")
 
 
 def _seed_img_upstream(client: TestClient, port: int = 8186) -> None:
@@ -41,6 +75,7 @@ def _seed_img_upstream(client: TestClient, port: int = 8186) -> None:
 
 def test_v1_images_no_upstream_returns_envelope(client: TestClient) -> None:
     """No img slot configured → dispatch errors out with a 404 envelope."""
+    _install("sdxl-turbo")
     r = client.post(
         "/v1/images/generations",
         json={"model": "sdxl-turbo", "prompt": "a cat"},
@@ -71,32 +106,26 @@ def test_v1_images_unknown_model_404(
         "/v1/images/generations",
         json={"model": "not-a-real-image-model", "prompt": "anything"},
     )
-    # Could route to a model_not_curated 404 or the dispatcher's no_route 404.
     assert r.status_code == 404
-    body = r.json()
-    # Both shapes pass the test — what matters is a typed envelope.
-    assert body["error"]["code"] in ("image.model_not_curated", "dispatch.no_route")
+    assert r.json()["error"]["code"] == "image.model_unknown"
 
 
-# ─── curated gate: non-checkpoint entries must not silently render (#1470) ───
+# ─── entries without a renderable catalog template must not render (#1470) ───
 #
-# The gate used to be a bare ``curated.capability != "image"`` check. Six
-# curated entries carry capability="image", but two of them are not actually
-# ComfyUI checkpoint files: esrgan-4x is a RealESRGAN .pth upscaler
-# (comfyui_subdir="upscale_models") and sdxl-lightning is a LoRA that needs
-# the SDXL base checkpoint already loaded (notes say so explicitly) — yet
-# both used to pass the gate, and template_for_model_class's deliberate
-# "never 404 on an unknown class" fallback then rendered them through
-# sdxl_turbo_simple with curated.hf_file (the LoRA/.pth, not a checkpoint)
-# pinned as the checkpoint. That's a ComfyUI node failure or garbage output
-# instead of a clean 4xx.
+# The gate used to be a bare ``curated.capability != "image"`` check. esrgan-4x
+# is a RealESRGAN .pth upscaler whose catalog entry is not API-renderable, and
+# the old class-based fallback rendered it through sdxl_turbo_simple with the
+# .pth pinned as the checkpoint: a ComfyUI node failure or garbage output
+# instead of a clean 4xx. Resolution now owns the gate: only an installed,
+# API-renderable catalog entry (or a user checkpoint) renders.
 
 
 def test_v1_images_esrgan_upscaler_rejected_not_silently_rendered(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """esrgan-4x (comfyui_subdir="upscale_models") must 404, not render."""
+    """esrgan-4x is an upscaler: a clean 422 pointing at the editor, never a render."""
+    _install("esrgan-4x")
     _seed_img_upstream(client)
 
     from hal0.providers import get_provider
@@ -111,56 +140,529 @@ def test_v1_images_esrgan_upscaler_rejected_not_silently_rendered(
         "/v1/images/generations",
         json={"model": "esrgan-4x", "prompt": "anything"},
     )
-    assert r.status_code == 404, r.text
-    assert r.json()["error"]["code"] == "image.model_not_curated"
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "image.model_not_renderable"
     mock_infer.assert_not_called()
 
 
-def test_v1_images_sdxl_lightning_lora_rejected_not_silently_rendered(
+def _mock_png_infer(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """Patch the provider's ``infer`` with a mock that returns one tiny PNG."""
+    from hal0.providers import get_provider
+
+    mock_infer = AsyncMock(
+        return_value={
+            "images": [
+                {
+                    "png": b"\x89PNG\r\n\x1a\n" + b"q" * 64,
+                    "filename": "hal0-test.png",
+                    "subfolder": "",
+                    "type": "output",
+                }
+            ],
+            "meta": {},
+            "prompt_id": "p1",
+        }
+    )
+    monkeypatch.setattr(get_provider("comfyui"), "infer", mock_infer)
+    return mock_infer
+
+
+@pytest.mark.parametrize(
+    ("model", "template"),
+    [
+        ("sdxl-turbo", "sdxl_turbo_simple"),
+        ("sd-1.5-pruned-emaonly", "sd15_simple"),
+        # sdxl-lightning is no longer a lone LoRA on this path: the catalog entry's
+        # template loads the SDXL base, the LoRA and the VAE together.
+        ("sdxl-lightning", "SDXL-Lightning-8step"),
+    ],
+)
+def test_v1_images_renders_the_catalog_entrys_template(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    model: str,
+    template: str,
+) -> None:
+    _install(model)
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+
+    r = client.post("/v1/images/generations", json={"model": model, "prompt": "anything"})
+
+    assert r.status_code == 200, r.text
+    sent = mock_infer.call_args.args[1]
+    assert sent["_hal0_template"] == template
+    assert sent["_hal0_ckpt_override"] is None
+    assert "_hal0_model_class" not in sent
+    assert "_hal0_ckpt_filename" not in sent
+
+
+def test_v1_images_client_cannot_choose_the_checkpoint(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """sdxl-lightning (a LoRA, model_class="image" generic fallback) must 404."""
+    """The route always sets the internal body keys, so a client's copies never arrive."""
+    _install("sd-1.5-pruned-emaonly")
     _seed_img_upstream(client)
-
-    from hal0.providers import get_provider
-
-    mock_infer = AsyncMock(side_effect=AssertionError("must not reach provider.infer"))
-    monkeypatch.setattr(get_provider("comfyui"), "infer", mock_infer)
+    mock_infer = _mock_png_infer(monkeypatch)
 
     r = client.post(
         "/v1/images/generations",
-        json={"model": "sdxl-lightning", "prompt": "anything"},
+        json={
+            "model": "sd-1.5-pruned-emaonly",
+            "prompt": "anything",
+            "_hal0_template": "sdxl_simple",
+            "_hal0_ckpt_override": "evil.safetensors",
+        },
     )
+
+    assert r.status_code == 200, r.text
+    sent = mock_infer.call_args.args[1]
+    assert sent["_hal0_template"] == "sd15_simple"
+    assert sent["_hal0_ckpt_override"] is None
+
+
+def test_v1_images_user_checkpoint_renders_through_the_generic_template(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``ckpt/<path>`` loads the operator's file; the override comes from the scan, not the body."""
+    _user_checkpoint("anime/waifu.safetensors")
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+
+    r = client.post(
+        "/v1/images/generations",
+        json={
+            "model": "ckpt/anime/waifu",
+            "prompt": "anything",
+            "_hal0_ckpt_override": "../../etc/passwd",
+        },
+    )
+
+    assert r.status_code == 200, r.text
+    sent = mock_infer.call_args.args[1]
+    assert sent["_hal0_template"] == "sdxl_simple"
+    assert sent["_hal0_ckpt_override"] == "anime/waifu.safetensors"
+    assert sent["size"] == "1024x1024"
+    assert r.json()["_hal0"]["model"] == "ckpt/anime/waifu"
+
+
+def test_v1_images_response_names_the_model_and_template(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_hal0`` carries the resolved model id and template, whatever the provider's meta says.
+
+    The provider meta here names no template at all, and ``meta`` stays the provider's own.
+    """
+    _install("sdxl-turbo")
+    _seed_img_upstream(client)
+    mock_infer = AsyncMock(
+        return_value={
+            "images": [{"png": b"\x89PNG\r\n\x1a\n" + b"q" * 64}],
+            "meta": {"seed": 7},
+            "prompt_id": "p1",
+        }
+    )
+    from hal0.providers import get_provider
+
+    monkeypatch.setattr(get_provider("comfyui"), "infer", mock_infer)
+
+    r = client.post("/v1/images/generations", json={"model": "sdxl-turbo", "prompt": "x"})
+
+    assert r.status_code == 200, r.text
+    meta = r.json()["_hal0"]
+    assert meta["model"] == "sdxl-turbo"
+    assert meta["template"] == "sdxl_turbo_simple"
+    assert meta["meta"] == {"seed": 7}
+
+
+def test_v1_images_response_template_for_a_user_checkpoint(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _user_checkpoint("mine.safetensors", "cond_stage_model.transformer.x")
+    _seed_img_upstream(client)
+    _mock_png_infer(monkeypatch)  # its meta is empty
+
+    r = client.post("/v1/images/generations", json={"model": "ckpt/mine", "prompt": "x"})
+
+    assert r.status_code == 200, r.text
+    assert r.json()["_hal0"]["template"] == "sd15_simple"
+
+
+def test_v1_images_404_unknown_user_ckpt(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _user_checkpoint("present.safetensors")
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+
+    r = client.post("/v1/images/generations", json={"model": "ckpt/absent", "prompt": "x"})
+
     assert r.status_code == 404, r.text
-    assert r.json()["error"]["code"] == "image.model_not_curated"
+    error = r.json()["error"]
+    assert error["code"] == "image.model_unknown"
+    assert error["details"]["model"] == "ckpt/absent"
+    assert error["details"]["available"] == ["ckpt/present"]
     mock_infer.assert_not_called()
 
 
-def test_v1_images_404_message_lists_curated_builtins_not_hardcoded_pair(
+@pytest.mark.parametrize(
+    "crafted",
+    [
+        "ckpt/../present",
+        "ckpt/present.safetensors",
+        "ckpt/",
+        "ckpt//present",
+        "ckpt/sub/../present",
+        "ckpt/sub/absent",
+    ],
+)
+def test_v1_images_404_for_crafted_ckpt_ids(
     client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    crafted: str,
 ) -> None:
-    """The 404 copy must reflect the curated table, not a stale hardcoded pair.
-
-    Before the fix the message always said "sdxl-turbo, sd-1.5-pruned-
-    emaonly" even though the curated table carries more ComfyUI-renderable
-    entries than that (e.g. Flux-2-Klein-9B-GGUF). Assert the message is
-    built from the table: every genuinely renderable id appears, and a
-    rejected non-checkpoint id (esrgan-4x) — which is NOT something the
-    caller could actually pass — does not.
-    """
+    """A ``ckpt/`` id is matched to scanned ids, never joined into a path."""
+    _user_checkpoint("present.safetensors")
+    _user_checkpoint("sub/real.safetensors")
     _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+
+    r = client.post("/v1/images/generations", json={"model": crafted, "prompt": "x"})
+
+    assert r.status_code == 404, r.text
+    assert r.json()["error"]["code"] == "image.model_unknown"
+    assert r.json()["error"]["details"]["available"] == ["ckpt/present", "ckpt/sub/real"]
+    mock_infer.assert_not_called()
+
+
+def test_v1_images_404_lists_available(client: TestClient) -> None:
+    """The 404 names what the caller can actually pass: installed renderable models and ckpts."""
+    _install("sd-1.5-pruned-emaonly")  # installed: listed
+    # sdxl-turbo is renderable but not installed; esrgan-4x is installed but not renderable.
+    _install("esrgan-4x")
+    _user_checkpoint("mine.safetensors")
+    _seed_img_upstream(client)
+
     r = client.post(
         "/v1/images/generations",
         json={"model": "not-a-real-image-model", "prompt": "anything"},
     )
+
     assert r.status_code == 404
-    message = r.json()["error"]["message"]
-    assert "sdxl-turbo" in message
-    assert "sd-1.5-pruned-emaonly" in message
-    # A curated capability="image" entry that isn't gate-passable must not
-    # be advertised as a pickable built-in.
-    assert "esrgan-4x" not in message
+    error = r.json()["error"]
+    assert error["details"]["available"] == ["sd-1.5-pruned-emaonly", "ckpt/mine"]
+    assert "sd-1.5-pruned-emaonly" in error["message"]
+    assert "ckpt/mine" in error["message"]
+    assert "sdxl-turbo" not in error["message"]
+    assert "esrgan-4x" not in error["message"]
+
+
+def test_v1_images_409_when_the_model_is_not_installed(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+
+    r = client.post("/v1/images/generations", json={"model": "sdxl-turbo", "prompt": "x"})
+
+    assert r.status_code == 409, r.text
+    error = r.json()["error"]
+    assert error["code"] == "image.model_not_installed"
+    assert error["details"]["install"] == "POST /api/comfyui/models/sdxl-turbo/install"
+    assert error["details"]["missing_gb"] == CATALOG["sdxl-turbo"].approx_gb
+    mock_infer.assert_not_called()
+
+
+def test_v1_images_422_for_video_model(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install("sd-1.5-pruned-emaonly")
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+
+    r = client.post("/v1/images/generations", json={"model": "wan22-t2v", "prompt": "x"})
+
+    assert r.status_code == 422, r.text
+    error = r.json()["error"]
+    assert error["code"] == "image.model_not_renderable"
+    assert error["details"]["task"] == "txt2video"
+    assert "editor" in error["details"]["hint"]
+    mock_infer.assert_not_called()
+
+
+def test_v1_images_422_when_no_model_is_named_or_selected(client: TestClient) -> None:
+    _seed_img_upstream(client)
+
+    r = client.post("/v1/images/generations", json={"prompt": "x"})
+
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "image.model_required"
+
+
+def test_v1_images_non_string_model_is_unknown_not_a_crash(client: TestClient) -> None:
+    _seed_img_upstream(client)
+    r = client.post("/v1/images/generations", json={"model": 5, "prompt": "x"})
+    assert r.status_code == 404, r.text
+    assert r.json()["error"]["code"] == "image.model_unknown"
+
+
+class _FakeOrchestrator:
+    """Just the ``get_state()`` shape the route reads: the ``img.img`` selection."""
+
+    def __init__(self, model: str, *, enabled: bool = True) -> None:
+        self._selection = {"model": model, "enabled": enabled}
+        self.calls = 0
+
+    async def get_state(self) -> dict[str, Any]:
+        self.calls += 1
+        return {"selections": {"img": {"img": self._selection}}}
+
+
+def test_v1_images_empty_model_uses_the_enabled_img_selection(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install("sd-1.5-pruned-emaonly")
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+    client.app.state.capability_orchestrator = _FakeOrchestrator("sd-1.5-pruned-emaonly")
+
+    r = client.post("/v1/images/generations", json={"prompt": "x"})
+
+    assert r.status_code == 200, r.text
+    assert mock_infer.call_args.args[1]["_hal0_template"] == "sd15_simple"
+    assert r.json()["_hal0"]["model"] == "sd-1.5-pruned-emaonly"
+
+
+def test_v1_images_disabled_img_selection_is_no_model(client: TestClient) -> None:
+    _install("sd-1.5-pruned-emaonly")
+    _seed_img_upstream(client)
+    client.app.state.capability_orchestrator = _FakeOrchestrator(
+        "sd-1.5-pruned-emaonly", enabled=False
+    )
+
+    r = client.post("/v1/images/generations", json={"prompt": "x"})
+
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "image.model_required"
+
+
+def test_v1_images_named_model_does_not_read_the_selection(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The selection is only a fallback: a named model never pays for the capability state."""
+    _install("sdxl-turbo")
+    _seed_img_upstream(client)
+    _mock_png_infer(monkeypatch)
+    orchestrator = _FakeOrchestrator("sd-1.5-pruned-emaonly")
+    client.app.state.capability_orchestrator = orchestrator
+
+    r = client.post("/v1/images/generations", json={"model": "sdxl-turbo", "prompt": "x"})
+
+    assert r.status_code == 200, r.text
+    assert orchestrator.calls == 0
+
+
+def test_v1_images_no_orchestrator_means_no_selection(client: TestClient) -> None:
+    _seed_img_upstream(client)
+    client.app.state.capability_orchestrator = None
+
+    r = client.post("/v1/images/generations", json={"prompt": "x"})
+
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "image.model_required"
+
+
+def test_v1_images_unreadable_capability_state_means_no_selection(client: TestClient) -> None:
+    class _Broken:
+        async def get_state(self) -> dict[str, Any]:
+            raise RuntimeError("hardware probe failed")
+
+    _seed_img_upstream(client)
+    client.app.state.capability_orchestrator = _Broken()
+
+    r = client.post("/v1/images/generations", json={"prompt": "x"})
+
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "image.model_required"
+
+
+# ─── size and steps precedence (spec D9) ─────────────────────────────────────
+
+
+def _slot_manager_with_image_section(image: dict[str, Any]) -> Any:
+    class _Arbiter:
+        def __init__(self) -> None:
+            self.ensured = 0
+
+        async def ensure_img(self) -> None:
+            self.ensured += 1
+
+        def touch_img_activity(self) -> None:
+            pass
+
+    class _Manager:
+        arbiter = _Arbiter()
+
+        async def iter_configs(self) -> list[dict[str, Any]]:
+            return [{"name": "img", "provider": "comfyui", "enabled": True, "image": image}]
+
+    return _Manager()
+
+
+def test_v1_images_uses_model_native_size(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No size anywhere: the model's native size reaches the translator (SD 1.5 is 512, not 1024)."""
+    from hal0.providers.comfyui_workflows import build_workflow
+
+    _install("sd-1.5-pruned-emaonly")
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+
+    r = client.post(
+        "/v1/images/generations",
+        json={"model": "sd-1.5-pruned-emaonly", "prompt": "x"},
+    )
+
+    assert r.status_code == 200, r.text
+    sent = mock_infer.call_args.args[1]
+    _graph, meta = build_workflow(
+        body=sent, template=sent["_hal0_template"], request_tag="t", ckpt_override=None
+    )
+    assert (meta["width"], meta["height"]) == (512, 512)
+
+
+def test_v1_images_native_size_is_per_model(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install("sdxl-lightning")
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+
+    client.post("/v1/images/generations", json={"model": "sdxl-lightning", "prompt": "x"})
+
+    assert mock_infer.call_args.args[1]["size"] == "1024x1024"
+
+
+def test_v1_images_body_size_beats_slot_and_native_size(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install("sd-1.5-pruned-emaonly")
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+    client.app.state.slot_manager = _slot_manager_with_image_section({"default_size": "768x768"})
+
+    client.post(
+        "/v1/images/generations",
+        json={"model": "sd-1.5-pruned-emaonly", "prompt": "x", "size": "640x640"},
+    )
+
+    assert mock_infer.call_args.args[1]["size"] == "640x640"
+
+
+def test_v1_images_slot_default_size_beats_native_size(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install("sd-1.5-pruned-emaonly")
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+    client.app.state.slot_manager = _slot_manager_with_image_section({"default_size": "768x768"})
+
+    client.post("/v1/images/generations", json={"model": "sd-1.5-pruned-emaonly", "prompt": "x"})
+
+    assert mock_infer.call_args.args[1]["size"] == "768x768"
+
+
+def test_v1_images_empty_slot_default_size_means_native(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install("sd-1.5-pruned-emaonly")
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+    client.app.state.slot_manager = _slot_manager_with_image_section(
+        {"default_size": "", "default_steps": 0}
+    )
+
+    client.post("/v1/images/generations", json={"model": "sd-1.5-pruned-emaonly", "prompt": "x"})
+
+    sent = mock_infer.call_args.args[1]
+    assert sent["size"] == "512x512"
+    assert "extra_body" not in sent
+
+
+def test_v1_images_slot_default_steps_fill_an_omitted_step_count(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install("sdxl-turbo")
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+    client.app.state.slot_manager = _slot_manager_with_image_section({"default_steps": 6})
+
+    client.post("/v1/images/generations", json={"model": "sdxl-turbo", "prompt": "x"})
+    assert mock_infer.call_args.args[1]["extra_body"]["steps"] == 6
+
+    client.post(
+        "/v1/images/generations",
+        json={"model": "sdxl-turbo", "prompt": "x", "extra_body": {"steps": 2}},
+    )
+    assert mock_infer.call_args.args[1]["extra_body"]["steps"] == 2
+
+
+def test_v1_images_resolution_errors_do_not_start_the_gpu(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request that cannot render must not cold-start the img container to find out."""
+    _seed_img_upstream(client)
+    manager = _slot_manager_with_image_section({})
+    client.app.state.slot_manager = manager
+
+    for model in ("sdxl-turbo", "wan22-t2v", "nope"):
+        r = client.post("/v1/images/generations", json={"model": model, "prompt": "x"})
+        assert r.status_code in (404, 409, 422), r.text
+
+    assert manager.arbiter.ensured == 0
+
+
+def test_v1_images_unreadable_models_tree_is_a_409_not_a_500(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tree the hal0 user cannot traverse answers like the models routes do, not 500."""
+    _seed_img_upstream(client)
+    manager = _slot_manager_with_image_section({})
+    client.app.state.slot_manager = manager
+    mock_infer = _mock_png_infer(monkeypatch)
+
+    def denied(*_args: Any, **_kwargs: Any) -> Any:
+        raise PermissionError(13, "Permission denied", "/srv/models/checkpoints")
+
+    monkeypatch.setattr("hal0.comfyui.resolve.install_state", denied)
+
+    r = client.post("/v1/images/generations", json={"model": "sdxl-turbo", "prompt": "x"})
+
+    assert r.status_code == 409, r.text
+    error = r.json()["error"]
+    assert error["code"] == "comfyui.models_dir_not_writable"
+    assert error["details"] == {"path": "/srv/models/checkpoints"}
+    assert "/srv/models/checkpoints" in error["message"]
+    mock_infer.assert_not_called()
+    assert manager.arbiter.ensured == 0  # resolution failed before the GPU was touched
 
 
 def test_v1_images_url_response_format_writes_cache(
@@ -168,6 +670,7 @@ def test_v1_images_url_response_format_writes_cache(
     monkeypatch: pytest.MonkeyPatch,
     tmp_hal0_home: str,
 ) -> None:
+    _install("sdxl-turbo")
     _seed_img_upstream(client)
 
     fake_png = b"\x89PNG\r\n\x1a\n" + b"y" * 256
@@ -220,6 +723,7 @@ def test_v1_images_b64_json_returns_inline_base64(
     monkeypatch: pytest.MonkeyPatch,
     tmp_hal0_home: str,
 ) -> None:
+    _install("sdxl-turbo")
     _seed_img_upstream(client)
 
     import base64
@@ -262,6 +766,7 @@ def test_v1_images_provider_error_surfaces(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _install("sdxl-turbo")
     _seed_img_upstream(client)
 
     from hal0.providers import get_provider
@@ -303,6 +808,7 @@ def test_v1_images_cold_slot_ensure_img_before_dispatch(
     ensure_img() side-effect registers the img upstream in app.state.upstreams,
     exactly as the real arbiter does via _register_container_upstream.
     """
+    _install("sdxl-turbo")
     fake_png = b"\x89PNG\r\n\x1a\n" + b"c" * 64
 
     mock_infer = AsyncMock(
