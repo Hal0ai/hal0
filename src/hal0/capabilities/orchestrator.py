@@ -806,14 +806,24 @@ class CapabilityOrchestrator:
         Empty ``backend_id`` skips the pair check — backend is allowed
         to be unset transiently while the user is still mid-selection;
         the slot lifecycle won't start until a backend lands anyway.
+
+        ``img`` is validated against the image catalog alone: modes 1 and 2
+        read its rows, mode 3 raises the same ``capability.model_not_downloaded``
+        naming ``POST /api/comfyui/models/<id>/install`` instead of the pull
+        route, and the registry fallback and the LLM model-fit check are skipped.
         """
         capability = _CHILD_TO_CAPABILITY.get((slot, child))
         if capability is None:
             return
+        # An image selection is validated against the image catalog alone: its
+        # rows are ComfyUI models and the operator's checkpoints, never LLM
+        # registry entries, so the registry fallback, the llama-server pull
+        # remediation and the LLM model-fit check below do not apply to it.
+        is_image = capability == "image"
         rows = models_for_capability(capability, registry=self._registry)
         match = next((row for row in rows if row["id"] == model_id), None)
         if match is None:
-            if self._registry is not None and self._registry.has(model_id):
+            if not is_image and self._registry is not None and self._registry.has(model_id):
                 if require_downloaded and backend_id != "npu":
                     self._require_registry_weights_present(slot, child, model_id, backend_id)
                 return
@@ -849,7 +859,10 @@ class CapabilityOrchestrator:
                     model_id,
                     backend_id,
                     pullable=bool(backend_row.get("pullable")),
+                    install=f"POST /api/comfyui/models/{model_id}/install" if is_image else None,
                 )
+        if is_image:
+            return
         slot_type = _CAPABILITY_TO_SLOT_TYPE.get(capability)
         if slot_type is None:
             return
@@ -930,6 +943,7 @@ class CapabilityOrchestrator:
         backend_id: str,
         *,
         pullable: bool,
+        install: str | None = None,
     ) -> None:
         """Raise the typed 409 for an enabled selection with absent weights.
 
@@ -938,12 +952,18 @@ class CapabilityOrchestrator:
         before any container is spawned, naming the pull remediation,
         instead of launching llama-server with the bare model id and
         blocking through the crash-loop dwell.
+
+        ``install`` is the remediation for an image model, which is not a
+        registry pull: the catalog install route, ``POST
+        /api/comfyui/models/<id>/install``. It replaces the pull remediation
+        and is echoed in ``details["install"]``.
         """
-        remediation = (
-            f"POST /api/models/{model_id}/pull, then re-apply once the pull completes"
-            if pullable
-            else "stage the weights on disk and register them, then re-apply"
-        )
+        if install is not None:
+            remediation = f"{install}, then re-apply once the install completes"
+        elif pullable:
+            remediation = f"POST /api/models/{model_id}/pull, then re-apply once the pull completes"
+        else:
+            remediation = "stage the weights on disk and register them, then re-apply"
         details: dict[str, Any] = {
             "slot": slot,
             "child": child,
@@ -953,7 +973,9 @@ class CapabilityOrchestrator:
             "pullable": pullable,
             "remediation": remediation,
         }
-        if pullable:
+        if install is not None:
+            details["install"] = install
+        elif pullable:
             details["pull_endpoint"] = f"/api/models/{model_id}/pull"
         raise Conflict(
             f"weights for model {model_id!r} are not downloaded — {remediation}",

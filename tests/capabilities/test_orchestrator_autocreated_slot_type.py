@@ -49,7 +49,10 @@ def _read(home: Path, slot: str) -> dict[str, Any]:
     [
         ("rerank", "gpu-vulkan", "reranking", "reranking"),
         ("rerank", "cpu", "reranking", "reranking"),
-        ("img", "gpu-rocm", "image", None),
+        # The shipped img.toml seed carries ``profile = "comfyui"``; a recreated slot must too.
+        # (It used to be None: the generic GPU rule answered the llama profile first, and
+        # the slot-type veto dropped it.)
+        ("img", "gpu-rocm", "image", "comfyui"),
     ],
 )
 async def test_autocreated_non_trio_slot_carries_its_type(

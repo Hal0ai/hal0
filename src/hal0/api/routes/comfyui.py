@@ -52,6 +52,7 @@ from pydantic import BaseModel, ConfigDict
 from hal0.api._redact import redact_log_line
 from hal0.api.middleware.error_codes import Conflict, NotFound, UnprocessableEntity
 from hal0.api.routes.power import _probe_power
+from hal0.capabilities.catalog import _comfyui_backends
 from hal0.comfyui import install as comfyui_install
 from hal0.comfyui import inventory
 from hal0.comfyui import paths as comfyui_paths
@@ -62,12 +63,10 @@ from hal0.comfyui.catalog import (
     install_state,
     load_template,
     models_using,
-    recommended_model_id,
 )
-from hal0.config.loader import load_hardware_info
+from hal0.comfyui.picker import recommended_id
 from hal0.hardware import gpu_view
 from hal0.http_client import async_client
-from hal0.install.agent_model import _pool_gb
 from hal0.registry.pull import PullJob, make_job
 from hal0.slots.naming import slot_container_name, slot_token_for, slot_unit_name
 from hal0.upstreams.huggingface import hf_token_from_env
@@ -561,17 +560,15 @@ async def comfyui_pin(request: Request, body: SetPinnedBody | None = None) -> JS
 # ---------------------------------------------------------------------------
 
 
-def _recommended_id() -> str:
-    """The catalog's starter pick for this box's memory pool.
+# Why the engine cannot run here. ``_comfyui_backends()`` is empty when an AMD host has no
+# ROCm lane, and the dashboard shows this text beside the catalog.
+_NO_ENGINE_REASON = "no ROCm lane on this host (ComfyUI needs /dev/kfd and a render node)"
 
-    Read per request: it is one small JSON file. A pool that cannot be read, or that
-    reads as zero because the box was never probed, is passed on as unknown (``None``).
-    """
-    try:
-        pool_gb: float | None = _pool_gb(load_hardware_info())
-    except Exception:  # an unreadable hardware.json must not take the catalog down
-        pool_gb = None
-    return recommended_model_id(pool_gb if pool_gb else None)
+
+def _engine_availability() -> dict[str, Any]:
+    """``{available, reason}``: whether this host can run the ComfyUI image at all."""
+    available = bool(_comfyui_backends())
+    return {"available": available, "reason": None if available else _NO_ENGINE_REASON}
 
 
 def _template_defaults(model: ImageModel) -> dict[str, Any]:
@@ -664,16 +661,19 @@ def _blocking_install(model: ImageModel, jobs: dict[str, PullJob]) -> PullJob | 
 async def comfyui_models(request: Request) -> dict[str, Any]:
     """The image-model catalog with each model's install state and latest install job.
 
-    Returns ``{"models": [...]}``, in catalog order. Exactly one row is
-    ``recommended``: the starter pick for this box's memory pool.
+    Returns ``{"models": [...], "engine": {"available": bool, "reason": str | None}}``,
+    the models in catalog order. Exactly one row is ``recommended``: the starter pick for
+    this box's memory pool. ``engine`` says whether this host can run the ComfyUI image at
+    all; the catalog is listed either way, so a box without the ROCm lane can still see it.
     """
     jobs = _install_jobs(request)
-    recommended = _recommended_id()
+    recommended = recommended_id()
     return {
         "models": [
             _model_row(model, recommended=recommended, job=jobs.get(model.id))
             for model in CATALOG.values()
-        ]
+        ],
+        "engine": _engine_availability(),
     }
 
 
