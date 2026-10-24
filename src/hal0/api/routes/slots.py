@@ -1270,7 +1270,7 @@ async def update_slot_config(name: str, request: Request) -> dict[str, object]:
     before = await _safe_config(sm, name)
     # Engine fit: judge the bound model against the slot AS IT WILL BE after
     # this write (a body may change ``device`` and ``model`` together). Only a
-    # write that carries a model is checked — a legacy GGUF default already on
+    # write that carries a model is checked — a stale GGUF default already on
     # an NPU slot must not veto an unrelated modality toggle.
     from hal0.slot_config import merge_slot_config
 

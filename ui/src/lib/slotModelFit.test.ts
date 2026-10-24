@@ -47,7 +47,7 @@ describe('isFlmModel', () => {
     expect(isFlmModel({ id: 'x-FLM', provider_effective: 'llama-server' })).toBe(false)
   })
 
-  it('recognises probe rows, legacy tags and -FLM ids without provider_effective', () => {
+  it('recognises probe rows, old tags and -FLM ids without provider_effective', () => {
     expect(isFlmModel(FLM_PROBE_ROW)).toBe(true)
     expect(isFlmModel({ id: 'a', backends: ['npu'] })).toBe(true)
     expect(isFlmModel({ id: 'a', backends: ['FLM'] })).toBe(true)
@@ -68,7 +68,7 @@ describe('isFlmSlot', () => {
     expect(isFlmSlot(NPU_SLOT)).toBe(true)
     expect(isFlmSlot({ device_class: 'npu' })).toBe(true)
     expect(isFlmSlot({ provider: 'flm' })).toBe(true)
-    // a legacy backend token folds through backend_to_device -> npu
+    // an old backend token folds through backend_to_device -> npu
     expect(isFlmSlot({ device: 'flm' })).toBe(true)
   })
 

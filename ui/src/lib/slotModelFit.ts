@@ -23,7 +23,7 @@ export interface FlmModelLike {
   backend?: string | null
   backends?: string[] | null
   owned_by?: string | null
-  /** Legacy / normalized device token ("npu" for FLM rows). */
+  /** Older / normalized device token ("npu" for FLM rows). */
   device?: string | null
 }
 
@@ -45,7 +45,7 @@ export function isFlmModel(m: FlmModelLike | null | undefined): boolean {
   }
   if (typeof m.provider === 'string' && m.provider) return m.provider === 'flm'
   // Rows that skip model_to_dict: the host-flm probe rows (backend "flm",
-  // `<tag>-FLM` id) and legacy fixtures. Same tag set as the server's
+  // `<tag>-FLM` id) and older fixtures. Same tag set as the server's
   // derive_model_provider (flm | npu).
   if (typeof m.backend === 'string' && FLM_TAGS.has(m.backend)) return true
   if (Array.isArray(m.backends) && m.backends.some((b) => FLM_TAGS.has(String(b).toLowerCase()))) {

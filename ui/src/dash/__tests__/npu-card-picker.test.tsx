@@ -173,7 +173,7 @@ describe('NPU card model picker', () => {
     expect(trigger(host, 'flm')!.disabled).toBe(true)
   })
 
-  it('keeps the slot bound to the legacy <tag>-FLM id selected', () => {
+  it('keeps the slot bound to the older <tag>-FLM id selected', () => {
     modelsBox.current = [FLM('qwen3-4b-FLM', ['chat']), CHAT_B]
     const slots = [{ ...SLOTS[0], modelDefault: 'qwen3:4b' }]
     const host = document.createElement('div')

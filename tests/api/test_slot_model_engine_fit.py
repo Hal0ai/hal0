@@ -53,7 +53,7 @@ def slots(tmp_hal0_home: str) -> Path:
     )
     (root / "npu.toml").write_text(
         'name = "npu"\nport = 8082\ndevice = "npu"\ntype = "llm"\n'
-        '[model]\ndefault = "legacy-gguf"\n',
+        '[model]\ndefault = "stale-gguf"\n',
         encoding="utf-8",
     )
     return root

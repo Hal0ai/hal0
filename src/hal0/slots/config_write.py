@@ -312,7 +312,7 @@ def slot_is_flm(cfg: Any) -> bool:
     """True when the slot drives the NPU / FastFlowLM engine.
 
     Read off the slot's own scalars (``device`` normalised through
-    ``BACKEND_TO_DEVICE`` so a legacy ``backend``-era token still counts, or an
+    ``BACKEND_TO_DEVICE`` so an old ``backend``-era token still counts, or an
     explicit ``provider = "flm"``) rather than a profile lookup: this runs on
     the write path, which must not resolve (and possibly persist) a profile.
     """

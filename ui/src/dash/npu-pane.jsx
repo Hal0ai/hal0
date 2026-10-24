@@ -286,7 +286,7 @@ export function TileStrip({ owners, ownerName, act = 0, w = 10, h = 10 }) {
 // control, read-only, so the three cards read as one family.
 function NpuModelPicker({ slot, models, role, disabled, onPick }) {
   const rows = compatibleModels(models, { type: slot.type, slot })
-  // The CONFIGURED tag first (#1388 ordering), live id as fallback; the legacy
+  // The CONFIGURED tag first (#1388 ordering), live id as fallback; the old
   // `-FLM` suffix is stripped for display only.
   const raw = String(slot.modelDefault || slot.model_id || slot.model || '')
   // A slot may still be bound to the pre-#1629 generated `<tag>-FLM` id, or to
