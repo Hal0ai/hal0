@@ -42,8 +42,9 @@ class AutoSelectStatus(StrEnum):
 
 @dataclass(frozen=True)
 class AutoSelectOutcome:
-    """The result of an auto-select. ``detail`` is the existing model for ``kept`` and the reason
-    or the refusal message for ``skipped`` and ``failed``; it is empty for ``selected``."""
+    """The result of an auto-select. ``detail`` is the slot's state after the apply for
+    ``selected``, the existing model for ``kept``, and the reason or the refusal message for
+    ``skipped`` and ``failed``."""
 
     status: AutoSelectStatus
     detail: str = ""
@@ -65,7 +66,7 @@ async def enabled_img_model(orchestrator: Any) -> str | None:
 
 
 async def auto_select_first_image_model(
-    model: ImageModel, *, orchestrator: CapabilityOrchestrator | None, start: bool = True
+    model: ImageModel, *, orchestrator: CapabilityOrchestrator | None
 ) -> AutoSelectOutcome:
     """Select ``model`` for the ``img`` capability when nothing is selected yet.
 
@@ -74,9 +75,6 @@ async def auto_select_first_image_model(
     enabled selection with a model, and the host has a ComfyUI lane
     (:func:`~hal0.capabilities.catalog.comfyui_backends` is non-empty). The apply sends
     ``device="gpu-rocm"``, the seeded slot's own, and not the lane gate's answer.
-
-    ``start`` is the orchestrator's: ``False`` persists the pick without loading the slot,
-    for the installer, whose slots start when the install finishes.
 
     Never raises for a refused apply (:class:`~hal0.errors.Hal0Error`, logged): the caller
     is an install that already succeeded. A selection that cannot be read is treated as
@@ -102,11 +100,10 @@ async def auto_select_first_image_model(
     if existing:
         return AutoSelectOutcome(AutoSelectStatus.kept, existing)
     try:
-        await orchestrator.apply(
+        applied = await orchestrator.apply(
             "img",
             "img",
             {"enabled": True, "model": model.id, "device": _IMG_DEVICE, "provider": "comfyui"},
-            start=start,
         )
     except Hal0Error as exc:
         log.warning(
@@ -114,4 +111,5 @@ async def auto_select_first_image_model(
         )
         return AutoSelectOutcome(AutoSelectStatus.failed, exc.message)
     log.info("comfyui.auto_selected", extra={"model_id": model.id})
-    return AutoSelectOutcome(AutoSelectStatus.selected)
+    state = applied.get("status") if isinstance(applied, dict) else None
+    return AutoSelectOutcome(AutoSelectStatus.selected, state if isinstance(state, str) else "")

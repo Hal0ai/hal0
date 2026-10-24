@@ -269,20 +269,16 @@ class _FakeOrchestrator:
 
     def __init__(self, selected: str | None = None) -> None:
         self.applied: list[tuple[str, str, dict[str, Any]]] = []
-        self.starts: list[bool] = []
         self._model = selected
 
     async def get_state(self) -> dict[str, Any]:
         selection = {"enabled": True, "model": self._model} if self._model else {}
         return {"selections": {"img": {"img": selection}}}
 
-    async def apply(
-        self, slot: str, child: str, partial: dict[str, Any], *, start: bool = True
-    ) -> dict[str, Any]:
+    async def apply(self, slot: str, child: str, partial: dict[str, Any]) -> dict[str, Any]:
         self.applied.append((slot, child, partial))
-        self.starts.append(start)
         self._model = partial["model"]
-        return partial
+        return {**partial, "status": "ready"}
 
 
 @pytest.fixture
@@ -418,7 +414,7 @@ def test_a_refused_apply_does_not_fail_the_install(
     from hal0.errors import BadRequest
 
     class Refusing(_FakeOrchestrator):
-        async def apply(self, slot, child, partial, *, start=True):
+        async def apply(self, slot, child, partial):
             raise BadRequest("no", code="capability.illegal_backend_model_pair")
 
     assert _provision(["sdxl-lightning"], Refusing()) == [("sdxl-lightning", "completed")]
@@ -453,17 +449,6 @@ def test_provision_reports_an_unknown_id_as_failed_and_carries_on(
     assert results == [("not-a-model", "failed"), ("sdxl-lightning", "completed")]
 
 
-def test_provision_persists_the_selection_without_starting_the_slot(
-    installs: dict[str, Any], owui: list[str]
-) -> None:
-    """Setup must not start ComfyUI and wait for it: `hal0.target` starts the slots later."""
-    orchestrator = _FakeOrchestrator()
-
-    _provision(["sdxl-lightning"], orchestrator)
-
-    assert orchestrator.starts == [False]
-
-
 def test_provision_says_what_it_is_doing_and_what_came_of_it(
     installs: dict[str, Any], owui: list[str]
 ) -> None:
@@ -473,8 +458,33 @@ def test_provision_says_what_it_is_doing_and_what_came_of_it(
     _provision(["sdxl-lightning"], _FakeOrchestrator(), lines)
 
     before, after = lines[-2:]
-    assert before == f"setting {label} as the default image model"
-    assert after == f"{label} is the default image model; it loads when the img slot starts"
+    assert before == (
+        f"making {label} the default image model: this starts the image engine, "
+        "and its first start downloads the ComfyUI runtime, which can take several minutes"
+    )
+    assert after == f"{label} is the default image model; the image engine is ready"
+
+
+def test_provision_does_not_claim_more_than_the_apply_reported(
+    installs: dict[str, Any], owui: list[str]
+) -> None:
+    class Warming(_FakeOrchestrator):
+        async def apply(self, slot, child, partial):
+            await super().apply(slot, child, partial)
+            return {"status": "warming"}
+
+    lines: list[str] = []
+    _provision(["sdxl-lightning"], Warming(), lines)
+    assert lines[-1].endswith("the image engine is warming")
+
+    class Silent(_FakeOrchestrator):
+        async def apply(self, slot, child, partial):
+            await super().apply(slot, child, partial)
+            return {}
+
+    lines = []
+    _provision(["sdxl-lightning"], Silent(), lines)
+    assert lines[-1].endswith("the image engine has been started")
 
 
 def test_provision_says_when_it_kept_the_operators_selection(
@@ -497,7 +507,7 @@ def test_provision_prints_a_refusal_as_one_line_with_its_message(
     from hal0.errors import BadRequest
 
     class Refusing(_FakeOrchestrator):
-        async def apply(self, slot, child, partial, *, start=True):
+        async def apply(self, slot, child, partial):
             raise BadRequest("device is busy", code="capability.invalid_selection")
 
     lines: list[str] = []
@@ -505,9 +515,56 @@ def test_provision_prints_a_refusal_as_one_line_with_its_message(
     _provision(["sdxl-lightning"], Refusing(), lines)
 
     label = CATALOG["sdxl-lightning"].label
+    # Refused before the selection was saved: there is nothing to load yet.
     assert lines[-1] == (
         f"could not make {label} the default image model (device is busy); pick it in the dashboard"
     )
+
+
+def test_provision_points_at_slot_load_when_the_selection_was_saved_but_the_start_failed(
+    installs: dict[str, Any], owui: list[str]
+) -> None:
+    from hal0.errors import Hal0Error
+
+    class StartFailed(_FakeOrchestrator):
+        async def apply(self, slot, child, partial):
+            await super().apply(slot, child, partial)  # the commit happens before the lifecycle
+            raise Hal0Error("the unit did not come up", code="capability.apply_failed")
+
+    lines: list[str] = []
+
+    results = _provision(["sdxl-lightning"], StartFailed(), lines)
+
+    assert results == [("sdxl-lightning", "completed")]  # the install itself is untouched
+    label = CATALOG["sdxl-lightning"].label
+    assert lines[-1] == (
+        f"could not make {label} the default image model (the unit did not come up); "
+        "load it later with: hal0 slot load img"
+    )
+    assert owui == ["reconciled"]
+
+
+def test_the_failure_line_is_there_whatever_the_selection_state_reads(
+    installs: dict[str, Any], owui: list[str]
+) -> None:
+    """An unreadable selection after a failure falls back to the dashboard hint."""
+    from hal0.errors import Hal0Error
+
+    class Unreadable(_FakeOrchestrator):
+        async def get_state(self):
+            if self.applied:
+                raise RuntimeError("state is gone")
+            return await super().get_state()
+
+        async def apply(self, slot, child, partial):
+            await super().apply(slot, child, partial)
+            raise Hal0Error("nope", code="capability.apply_failed")
+
+    lines: list[str] = []
+
+    _provision(["sdxl-lightning"], Unreadable(), lines)
+
+    assert lines[-1].endswith("(nope); pick it in the dashboard")
 
 
 def test_provision_turns_an_unexpected_error_into_a_line_not_a_traceback(
@@ -517,7 +574,7 @@ def test_provision_turns_an_unexpected_error_into_a_line_not_a_traceback(
         async def get_state(self):
             return {"selections": {}}
 
-        async def apply(self, slot, child, partial, *, start=True):
+        async def apply(self, slot, child, partial):
             raise RuntimeError("boom")
 
     lines: list[str] = []

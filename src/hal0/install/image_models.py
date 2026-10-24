@@ -23,8 +23,8 @@ hardcodes one. A model already on disk says so instead of quoting a download.
 failed model is reported and the install carries on.
 
 The first model that lands and that the API can render becomes the ``img`` capability's
-selection, once (:func:`hal0.comfyui.autoselect.auto_select_first_image_model`), persisted
-without starting the slot, and Open WebUI is re-wired to match.
+selection, once (:func:`hal0.comfyui.autoselect.auto_select_first_image_model`), which
+starts the image engine, and Open WebUI is re-wired to match.
 """
 
 from __future__ import annotations
@@ -40,7 +40,11 @@ from typing import TYPE_CHECKING, Any
 from hal0.capabilities import catalog as capability_catalog
 from hal0.comfyui import install as comfyui_install
 from hal0.comfyui import paths as comfyui_paths
-from hal0.comfyui.autoselect import AutoSelectStatus, auto_select_first_image_model
+from hal0.comfyui.autoselect import (
+    AutoSelectStatus,
+    auto_select_first_image_model,
+    enabled_img_model,
+)
 from hal0.comfyui.catalog import (
     CATALOG,
     ImageModel,
@@ -176,11 +180,10 @@ async def provision_image_models(
     Afterwards the first ``completed`` model the API can render is offered to
     :func:`~hal0.comfyui.autoselect.auto_select_first_image_model` (once; an existing
     selection is left alone), and Open WebUI's environment is re-rendered so it learns of
-    the new image model. The selection is persisted without starting the slot
-    (``start=False``): the installer's ``hal0.target`` starts it, and loading ComfyUI inside
-    an install step would block on its image and readiness. Two lines through ``on_line``
-    say what is being selected and what came of it; a failure in either follow-up is one
-    such line, never a traceback, and changes no result.
+    the new image model. The selection is a normal apply, so it writes the img slot's unit
+    and starts the slot: that can wait on ComfyUI's runtime download and on its readiness,
+    which is why a line says so first. A second line says what came of it; a failure in
+    either follow-up is one such line, never a traceback, and changes no result.
 
     This runs outside the API process, so it bypasses the API's install-job registry and
     its tree lock: a dashboard install of the same model running at the same time is not
@@ -194,31 +197,30 @@ async def provision_image_models(
     renderable = [model for model in completed if model is not None and model.api_renderable]
     if renderable:
         model = renderable[0]
-        on_line(f"setting {model.label} as the default image model")
-        on_line(await _select_without_starting(model, orchestrator))
+        on_line(
+            f"making {model.label} the default image model: this starts the image engine, "
+            "and its first start downloads the ComfyUI runtime, which can take several minutes"
+        )
+        on_line(await _select_and_start(model, orchestrator))
         await asyncio.to_thread(_reconcile_open_webui)
     return results
 
 
-async def _select_without_starting(
-    model: ImageModel, orchestrator: CapabilityOrchestrator | None
-) -> str:
-    """Make ``model`` the ``img`` selection and say, in one line, what came of it."""
+async def _select_and_start(model: ImageModel, orchestrator: CapabilityOrchestrator | None) -> str:
+    """Make ``model`` the ``img`` selection, starting the slot, and say in one line what came of it."""
     try:
-        outcome = await auto_select_first_image_model(model, orchestrator=orchestrator, start=False)
+        outcome = await auto_select_first_image_model(model, orchestrator=orchestrator)
     except Exception as exc:
         log.debug(
             "install.image_models_auto_select_error",
             extra={"model_id": model.id},
             exc_info=True,
         )
-        return (
-            f"could not make {model.label} the default image model "
-            f"({type(exc).__name__}: {exc}); pick it in the dashboard"
-        )
+        return await _could_not(model, f"{type(exc).__name__}: {exc}", orchestrator)
     match outcome.status:
         case AutoSelectStatus.selected:
-            return f"{model.label} is the default image model; it loads when the img slot starts"
+            state = f"is {outcome.detail}" if outcome.detail else "has been started"
+            return f"{model.label} is the default image model; the image engine {state}"
         case AutoSelectStatus.kept:
             return (
                 f"keeping {outcome.detail} as the default image model; "
@@ -230,10 +232,24 @@ async def _select_without_starting(
                 f"({outcome.detail}); pick it in the dashboard"
             )
         case _:
-            return (
-                f"could not make {model.label} the default image model "
-                f"({outcome.detail}); pick it in the dashboard"
-            )
+            return await _could_not(model, outcome.detail, orchestrator)
+
+
+async def _could_not(
+    model: ImageModel, why: str, orchestrator: CapabilityOrchestrator | None
+) -> str:
+    """The failure line, with the one recovery step that fits how far the apply got.
+
+    A refusal before the selection was saved leaves nothing to load, so the pick is still to
+    make; a failure while starting the slot comes after the save, so loading it is enough.
+    """
+    try:
+        saved = orchestrator is not None and await enabled_img_model(orchestrator) == model.id
+    except Exception:
+        log.debug("install.image_models_selection_unreadable", exc_info=True)
+        saved = False
+    hint = "load it later with: hal0 slot load img" if saved else "pick it in the dashboard"
+    return f"could not make {model.label} the default image model ({why}); {hint}"
 
 
 def _reconcile_open_webui() -> None:

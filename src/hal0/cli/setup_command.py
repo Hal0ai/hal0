@@ -321,11 +321,11 @@ def setup(
 def _install_image_models(model_ids: tuple[str, ...]) -> None:
     """Install ``model_ids`` from the image catalog, blocking; then bring the img slot up.
 
-    The first usable model also becomes the ``img`` capability's selection
-    (:func:`hal0.install.image_models.provision_image_models`), persisted without loading
-    the slot. Per-model failures are printed by the installer and do not stop the others or
-    change the exit code; the slot's unit is only enabled, and so started, when at least one
-    model landed, so it never comes up against an empty model dir.
+    The first usable model also becomes the ``img`` capability's selection, which loads the
+    slot (:func:`hal0.install.image_models.provision_image_models`); the extension's unit is
+    enabled afterwards. Per-model failures are printed by the installer and do not stop the
+    others or change the exit code; nothing starts the slot when no model landed, so it never
+    comes up against an empty model dir.
     """
     from hal0.install.extensions import install_extension
     from hal0.install.image_models import provision_offline
