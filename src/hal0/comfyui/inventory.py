@@ -8,7 +8,8 @@ model's components lands (:attr:`~hal0.comfyui.catalog.Component.dest`); anythin
 else, such as an operator's own checkpoint, is listed with no owner. An owner-less
 checkpoint whose header sniffs as SDXL or SD 1.5
 (:func:`~hal0.comfyui.arch.sniff_checkpoint_arch`) also carries its ``arch`` and the
-``api_id`` (``ckpt/<file stem>``) that ``/v1/images/generations`` accepts as a model.
+``api_id`` (``ckpt/<path under checkpoints/ without the .safetensors suffix>``) that
+``/v1/images/generations`` accepts as a model.
 
 The scan reads only the model subdirectories ComfyUI itself is pointed at
 (:data:`hal0.comfyui.paths.SUBDIRS`), never follows a symlink into a directory, and
@@ -19,7 +20,7 @@ leftover ``.hf_stage_*`` staging dirs live.
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from hal0.comfyui import paths
@@ -63,14 +64,20 @@ def _owners(root: Path) -> dict[Path, list[str]]:
     return owners
 
 
-def list_files() -> list[dict[str, Any]]:
+def list_files(*, sniff: bool = True) -> list[dict[str, Any]]:
     """Every weight file under the models tree, sorted by subdirectory then path.
 
     Each entry is ``{kind, subdir, relpath, size_bytes, models}``: ``relpath`` is
     relative to ``subdir`` and uses ``/``, and ``models`` lists the catalog ids that load
     this file (empty for a file nobody in the catalog owns). A checkpoint nobody owns whose
-    family is known also has ``arch`` (``sdxl`` or ``sd15``) and ``api_id`` (``ckpt/`` plus
-    the file stem, wherever the file sits under ``checkpoints/``). A subdirectory that is
+    family is known also has ``arch`` (``sdxl`` or ``sd15``) and ``api_id``: ``ckpt/`` plus
+    its ``relpath`` without the ``.safetensors`` suffix, so ``a.safetensors`` is ``ckpt/a`` and
+    ``sub/a.safetensors`` is ``ckpt/sub/a``. Distinct relpaths give distinct ids; the one
+    exception, two files that differ only in the case of the suffix, leaves the second
+    without an ``api_id`` rather than naming two files alike.
+
+    ``sniff=False`` skips the header reads that find ``arch`` and ``api_id``, for callers
+    that only count files (``/status`` polls this). A subdirectory that is
     itself a symlink is skipped, a symlinked directory inside one is not entered, and a
     weight file that is a symlink is listed by its target's size unless the target is gone.
     An absent tree, or one that cannot be read, yields an empty list.
@@ -78,6 +85,7 @@ def list_files() -> list[dict[str, Any]]:
     root = paths.models_root()
     owners = _owners(root)
     found: list[dict[str, Any]] = []
+    api_ids: set[str] = set()
     for kind, subdir in _SCAN:
         base = root / subdir
         if os.path.islink(base) or not os.path.isdir(base):
@@ -99,11 +107,13 @@ def list_files() -> list[dict[str, Any]]:
                     "size_bytes": size,
                     "models": list(owners.get(path, ())),
                 }
-                if kind == ComponentKind.checkpoint.value and not entry["models"]:
+                if sniff and kind == ComponentKind.checkpoint.value and not entry["models"]:
                     arch = sniff_checkpoint_arch(path)
-                    if arch is not None:
+                    api_id = f"ckpt/{PurePosixPath(entry['relpath']).with_suffix('')}"
+                    if arch is not None and api_id not in api_ids:
+                        api_ids.add(api_id)
                         entry["arch"] = arch
-                        entry["api_id"] = f"ckpt/{Path(entry['relpath']).stem}"
+                        entry["api_id"] = api_id
                 found.append(entry)
     found.sort(key=lambda f: (f["subdir"], f["relpath"]))
     return found

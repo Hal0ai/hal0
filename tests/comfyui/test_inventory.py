@@ -296,9 +296,50 @@ def test_list_files_names_a_user_checkpoint_the_api_can_render() -> None:
 
     sdxl = by_path["checkpoints/my_finetune.safetensors"]
     assert (sdxl["arch"], sdxl["api_id"], sdxl["models"]) == ("sdxl", "ckpt/my_finetune", [])
-    # The id carries the file stem only; the nested directory stays in ``relpath``.
+    # A top-level file's id is its stem; a nested one's id keeps its directories.
     sd15 = by_path["checkpoints/anime/v1.5-mix.safetensors"]
-    assert (sd15["arch"], sd15["api_id"]) == ("sd15", "ckpt/v1.5-mix")
+    assert (sd15["arch"], sd15["api_id"]) == ("sd15", "ckpt/anime/v1.5-mix")
+
+
+def test_nested_and_top_level_same_stem_get_distinct_ids() -> None:
+    """``a.safetensors`` and ``sub/a.safetensors`` are two checkpoints, so two ids."""
+    _safetensors("checkpoints", "a.safetensors", "conditioner.embedders.1.x")
+    _safetensors("checkpoints", "sub/a.safetensors", "cond_stage_model.transformer.x")
+    _safetensors("checkpoints", "sub/deeper/a.safetensors", "conditioner.embedders.1.x")
+
+    ids = {f["relpath"]: f["api_id"] for f in inventory.list_files()}
+
+    assert ids == {
+        "a.safetensors": "ckpt/a",
+        "sub/a.safetensors": "ckpt/sub/a",
+        "sub/deeper/a.safetensors": "ckpt/sub/deeper/a",
+    }
+
+
+def test_two_files_that_differ_only_in_extension_case_share_no_id() -> None:
+    """``a.safetensors`` and ``a.SAFETENSORS`` would both be ``ckpt/a``: only one is addressable."""
+    _safetensors("checkpoints", "a.safetensors", "conditioner.embedders.1.x")
+    _safetensors("checkpoints", "a.SAFETENSORS", "conditioner.embedders.1.x")
+
+    entries = {f["relpath"]: f for f in inventory.list_files()}
+
+    assert [e.get("api_id") for e in entries.values()].count("ckpt/a") == 1
+
+
+def test_list_files_without_sniffing_reads_no_headers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``/status`` only counts files, so its scan must not open every user checkpoint."""
+    _safetensors("checkpoints", "mine.safetensors", "conditioner.embedders.1.x")
+
+    def boom(_path: Path) -> None:
+        raise AssertionError("sniffed a header")
+
+    monkeypatch.setattr(inventory, "sniff_checkpoint_arch", boom)
+
+    (entry,) = inventory.list_files(sniff=False)
+
+    assert entry["relpath"] == "mine.safetensors"
+    assert "arch" not in entry
+    assert "api_id" not in entry
 
 
 def test_list_files_gives_no_api_id_to_a_checkpoint_of_unknown_arch() -> None:

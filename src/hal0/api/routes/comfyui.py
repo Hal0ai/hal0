@@ -190,10 +190,11 @@ async def _list_files_or_none() -> list[dict[str, Any]] | None:
 
     The pane polls ``/status`` and a failed scan must cost it the inventory counts, not
     the whole answer. ``None``, not an empty listing, so the counts are hidden rather than
-    shown as zeros nobody can vouch for.
+    shown as zeros nobody can vouch for. Counting needs no checkpoint architectures, so the
+    scan skips reading their headers on every poll.
     """
     try:
-        return await asyncio.to_thread(inventory.list_files)
+        return await asyncio.to_thread(inventory.list_files, sniff=False)
     except Exception:
         log.warning("comfyui.inventory_scan_failed", exc_info=True)
         return None

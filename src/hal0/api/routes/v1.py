@@ -1785,7 +1785,7 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
     Body shape (subset honoured)::
 
         {
-          "model":           "sdxl-turbo",        # installed catalog id or "ckpt/<stem>";
+          "model":           "sdxl-turbo",        # installed catalog id or "ckpt/<path>";
                                                   # empty = the img capability's model
           "prompt":          "a cat in a hat",    # required
           "n":               1,                   # optional, batch_size
@@ -1940,16 +1940,15 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
             stem = image_cache.write_png(bytes(png))
             images.append({"url": f"/api/images/cache/{stem}.png"})
 
-    meta = result.get("meta", {})
     payload = {
         "created": int(time.time()),
         "data": images,
         "_hal0": {
-            "meta": meta,
+            "meta": result.get("meta", {}),
             "prompt_id": result.get("prompt_id", ""),
             "upstream": call.upstream_name,
             "model": resolved.id,
-            "template": meta.get("template"),
+            "template": resolved.template,
         },
     }
     return Response(

@@ -361,6 +361,38 @@ def test_status_inventory_derived_from_files(client: TestClient) -> None:
     }
 
 
+def test_status_does_not_read_checkpoint_headers(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``/status`` only needs counts, so a poll must not open every user checkpoint."""
+    import json
+    import struct
+
+    raw = json.dumps(
+        {"conditioner.embedders.1.x": {"dtype": "F16", "shape": [1], "data_offsets": [0, 2]}}
+    ).encode("utf-8")
+    ckpt = paths.models_root() / "checkpoints" / "mine.safetensors"
+    ckpt.parent.mkdir(parents=True)
+    ckpt.write_bytes(struct.pack("<Q", len(raw)) + raw + b"\x00\x00")
+
+    def boom(_path: Path) -> None:
+        raise AssertionError("/status sniffed a checkpoint header")
+
+    real_sniff = inventory.sniff_checkpoint_arch
+    monkeypatch.setattr(inventory, "sniff_checkpoint_arch", boom)
+    with (
+        patch(f"{_BASE}._systemd_active", new_callable=AsyncMock, return_value=False),
+        patch(f"{_BASE}._fetch_json", new_callable=AsyncMock, return_value=None),
+    ):
+        status = client.get("/api/comfyui/status").json()
+
+    assert status["inventory"]["checkpoints"] == 1
+    # The files route is the one that sniffs, and still does.
+    monkeypatch.setattr(inventory, "sniff_checkpoint_arch", real_sniff)
+    (entry,) = client.get("/api/comfyui/files").json()["files"]
+    assert (entry["arch"], entry["api_id"]) == ("sdxl", "ckpt/mine")
+
+
 def test_status_inventory_is_none_without_a_models_tree(client: TestClient) -> None:
     assert not paths.models_root().exists()
     with (
