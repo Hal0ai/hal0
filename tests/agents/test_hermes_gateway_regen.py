@@ -494,6 +494,7 @@ def test_an_enabled_running_suffixed_unit_moves_over_canonical_first(tmp_path: P
         ["systemctl", "enable", CANON],
         ["systemctl", "start", CANON],
         ["systemctl", "daemon-reload"],
+        ["systemctl", "reset-failed", HASHED],
     ]
     assert sc.states[CANON] == ("enabled", True)
 
@@ -662,6 +663,7 @@ def test_a_masked_canonical_unit_stays_masked_and_the_suffixed_one_goes(tmp_path
         ["systemctl", "stop", HASHED],
         ["systemctl", "disable", HASHED],
         ["systemctl", "daemon-reload"],
+        ["systemctl", "reset-failed", HASHED],
     ]
 
 
@@ -1242,3 +1244,32 @@ def test_the_state_capture_reads_a_runtime_mask_with_no_canonical_file(tmp_path:
     # No mask: the suffixed unit's state is the operator's, as before.
     sc = UnitSystemctl({HASHED: ("enabled", True)})
     assert regen.gateway_state_unit(unit_path=unit_path, run=sc) == HASHED
+
+
+def test_a_removed_suffixed_unit_is_reset_failed(tmp_path: Path) -> None:
+    """After the move the removed suffixed unit stays listed as `not-found
+    failed` in `systemctl --failed` until `reset-failed` (CT150 smoke)."""
+    hashed = _hashed_unit(tmp_path)
+    sc = UnitSystemctl({HASHED: ("enabled", True)})
+    _migrate(tmp_path, sc)
+    calls = sc.mutating
+    assert not hashed.exists()
+    reset = calls.index(["systemctl", "reset-failed", HASHED])
+    assert reset > max(i for i, c in enumerate(calls) if c == ["systemctl", "daemon-reload"])
+
+
+def test_a_failed_reset_failed_is_ignored(tmp_path: Path) -> None:
+    hashed = _hashed_unit(tmp_path)
+    sc = UnitSystemctl({HASHED: ("enabled", True)}, fail=["systemctl", "reset-failed"])
+    out = _migrate(tmp_path, sc)
+    assert out.action == "migrated" and not hashed.exists()
+    assert sc.states[CANON] == ("enabled", True)
+
+
+def test_a_suffixed_unit_left_on_disk_is_not_reset_failed(tmp_path: Path, monkeypatch: Any) -> None:
+    hashed = _hashed_unit(tmp_path)
+    sc = UnitSystemctl({HASHED: ("enabled", True)})
+    _unlink_fails(monkeypatch, hashed)
+    with pytest.raises(regen.GatewayCleanupError):
+        _migrate(tmp_path, sc)
+    assert ["systemctl", "reset-failed", HASHED] not in sc.mutating

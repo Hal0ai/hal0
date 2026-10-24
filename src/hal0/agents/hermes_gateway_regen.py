@@ -788,6 +788,14 @@ def migrate_hashed_units(
         if not unlink_errors:
             raise
         unlink_errors.append(str(exc))
+    for path in hashed:
+        if path.exists():
+            continue
+        # A unit stopped (or crash-looping) before its file went stays listed
+        # as `not-found failed` in `systemctl --failed` until this. Cosmetic
+        # for the box, so a failure is ignored.
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            _run(run, ["systemctl", "reset-failed", path.name], timeout=30)
     if unlink_errors:
         result.message = f"{GATEWAY_UNIT}: " + ", ".join(done)
         raise GatewayCleanupError(_failure("; ".join(unlink_errors), "left behind", done), result)
