@@ -7,7 +7,8 @@ for the installer, the install test harness, and support/debug runs, but it is
 deliberately absent from `hal0 --help` and from the docs. Don't re-advertise it,
 and don't reimplement its seeding logic elsewhere.
 
-`run_interactive` below is the six-prompt guided flow. `install.sh` no longer
+`run_interactive` below is the guided flow of up to six prompts (five when no NPU is
+detected, because the NPU question is only asked then). `install.sh` no longer
 offers to launch it (every answer it collects is now either asked by the
 installer or already performed by it), so it survives only as a hand-run
 recovery path — spec §17.8, NOT the "two-column terminal app with curated
@@ -319,15 +320,15 @@ def setup(
 
 
 def _install_image_models(model_ids: tuple[str, ...]) -> None:
-    """Install ``model_ids`` from the image catalog, blocking; then bring the img slot up.
+    """Install ``model_ids`` from the image catalog, blocking.
 
-    The first usable model also becomes the ``img`` capability's selection, which loads the
-    slot (:func:`hal0.install.image_models.provision_image_models`); the extension's unit is
-    enabled afterwards. Per-model failures are printed by the installer and do not stop the
-    others or change the exit code; nothing starts the slot when no model landed, so it never
-    comes up against an empty model dir.
+    The first usable model also becomes the ``img`` capability's selection when none is
+    selected, which writes the slot's unit and loads it
+    (:func:`hal0.install.image_models.provision_image_models` owns that start; nothing else
+    starts or enables the unit here). Per-model failures are printed by the installer and do
+    not stop the others or change the exit code; nothing starts the slot when no model
+    landed, so it never comes up against an empty model dir.
     """
-    from hal0.install.extensions import install_extension
     from hal0.install.image_models import provision_offline
     from hal0.upstreams.huggingface import hf_token_from_env
 
@@ -339,10 +340,6 @@ def _install_image_models(model_ids: tuple[str, ...]) -> None:
             "(retry with `hal0 comfyui models install <id>`)",
             err=True,
         )
-    if any(state == "completed" for _, state in results):
-        outcome = install_extension("comfyui")
-        if outcome.error:
-            typer.echo(f"warning: could not enable the img slot ({outcome.error})", err=True)
 
 
 async def _run_auto(sel: Selections, hw: HardwareInfo, *, no_pull: bool = False) -> None:
@@ -356,7 +353,7 @@ async def _run_auto(sel: Selections, hw: HardwareInfo, *, no_pull: bool = False)
 
 # ── Minimal interactive wizard (§17.8) ──────────────────────────────────────
 #
-# Six `rich.prompt` questions feed the same `build_auto_selections` scaffold that
+# Up to six `rich.prompt` questions (five without an NPU) feed the same `build_auto_selections` scaffold that
 # `--auto` uses (pick-free but for the optional starter image models); there is no
 # bespoke TUI, no raw-tty key-reading, and no LLM picker. On a non-tty stdin (spec
 # risk R8 — e.g. a test that sets HAL0_FORCE_INTERACTIVE to drive the flow over a
@@ -456,9 +453,9 @@ def _ask_image_models(hw: HardwareInfo, *, console: Console) -> tuple[str, ...]:
 
 
 def run_interactive(hw: HardwareInfo, *, storage_dir: str) -> None:
-    """The guided setup flow (§17.8): six prompts — storage dir, NPU opt-in,
-    extensions default set, scaffold slots y/n, starter image models, launch-on-
-    completion y/n — then apply runs exactly as `--auto` does
+    """The guided setup flow (§17.8): up to six prompts — storage dir, NPU opt-in
+    (only when an NPU is detected), extensions default set, scaffold slots y/n,
+    starter image models, launch-on-completion y/n — then apply runs exactly as `--auto` does
     (`build_auto_selections` + `_run_auto`) and any image models chosen download.
     No LLM picking, no network/HF-token step, no raw-tty widgets."""
     console = Console()
