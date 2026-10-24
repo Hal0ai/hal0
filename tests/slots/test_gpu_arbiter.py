@@ -1237,3 +1237,52 @@ async def test_restore_llm_when_idle_refuses_a_pinned_mode_before_polling_the_qu
     assert polled == 0
     assert arb.mode is GpuMode.IMG
     assert comfyui_http["free"] == 0
+
+
+# ── ensure_img in image mode: the img slot is down (#3048) ───────────────────
+
+
+async def test_ensure_img_cold_starts_an_img_slot_that_is_down_in_img_mode(
+    fake_mgr: FakeManager, state_path: Path
+) -> None:
+    """#3048: the persisted mode says img but the slot is down (a crash, a manual
+    unload). ensure_img must reload it instead of returning early."""
+    _write_img_state(state_path, last_activity=1.0)
+    fake_mgr.ready -= {"chat", "agent"}  # the original switch unloaded them
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+
+    await arb.ensure_img()
+
+    assert fake_mgr.calls == [("load", "img", "sdxl-turbo")]
+    assert arb.mode is GpuMode.IMG
+    assert arb.saved_llm_slots == ("chat", "agent")
+    assert _read_state(state_path)["last_img_activity"] > 1.0
+
+
+async def test_ensure_img_in_img_mode_rolls_back_when_the_reload_fails(
+    fake_mgr: FakeManager, state_path: Path
+) -> None:
+    _write_img_state(state_path)
+    fake_mgr.ready -= {"chat", "agent"}
+    fake_mgr.fail_loads.add("img")
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+
+    with pytest.raises(RuntimeError, match="load failed: img"):
+        await arb.ensure_img()
+
+    assert arb.mode is GpuMode.LLM
+    assert ("load", "chat", None) in fake_mgr.calls
+    assert ("load", "agent", None) in fake_mgr.calls
+    assert _read_state(state_path)["saved_llm_slots"] == []
+
+
+async def test_concurrent_requests_cold_start_a_down_img_slot_once(
+    fake_mgr: FakeManager, state_path: Path
+) -> None:
+    _write_img_state(state_path)
+    fake_mgr.ready -= {"chat", "agent"}
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+
+    await asyncio.gather(arb.ensure_img(), arb.ensure_img())
+
+    assert fake_mgr.calls.count(("load", "img", "sdxl-turbo")) == 1

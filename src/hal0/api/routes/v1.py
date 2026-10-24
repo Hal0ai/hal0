@@ -1883,13 +1883,13 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
             # tests) — nothing to arbitrate; generation proceeds as-is.
             if exc.code != "gpu.img_slot_missing":
                 raise
-        arbiter.touch_img_activity()
     if not body.get("size"):
         body["size"] = resolved.defaults["size"]
 
     # 3. Resolve the slot the request should land on.  ensure_img() above
     #    guarantees the img upstream is registered, so resolve_by_capability
-    #    Rule 4 (/images/ path) succeeds even on a cold slot.
+    #    Rule 4 (/images/ path) succeeds even on a cold slot, including after
+    #    it crashed or was unloaded while the GPU stayed in image mode (#3048).
     call = await dispatcher.dispatch(request, body=body)
 
     # 4. Discover the local slot's port from the resolved upstream.
@@ -1918,6 +1918,11 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
         "_hal0_template": resolved.template,
         "_hal0_ckpt_override": resolved.ckpt_override,
     }
+    if arbiter is not None:
+        # Start stamp: the render is about to run. A request that failed before
+        # this point never reached the slot and must not extend the idle
+        # window (#3048).
+        arbiter.touch_img_activity()
     result = await provider.infer(port, body_with_meta)
     if arbiter is not None:
         # Completion stamp — long jobs must reset the idle-restore clock.

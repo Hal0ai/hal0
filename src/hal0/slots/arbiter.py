@@ -470,13 +470,18 @@ class GpuArbiter:
         )
 
     async def ensure_img(self, *, pin: bool = False) -> None:
-        """Flip the GPU to exclusive image mode (no-op when already there).
+        """Flip the GPU to exclusive image mode.
 
         Order (locked): snapshot running llm slots → persist target state
         FIRST → drain in-flight requests (bounded) → unload llm slots →
         cold-start the img container ONLY when it isn't already dispatchable
         (resident design: restore_llm never stops it) → re-stamp activity at
         completion so a slow cold start can't eat the idle window.
+
+        Already in image mode, nothing is flipped, but the img slot is still
+        checked and cold-started when it is down (#3048), since a crash or a
+        manual unload can stop it without telling the arbiter. If that reload
+        fails, the usual rollback to LLM mode applies, and it drops a pin.
         """
         async with self._switch_lock:
             st = self._load_state()
@@ -484,6 +489,7 @@ class GpuArbiter:
                 if pin and not st["pinned"]:
                     st["pinned"] = True
                     self._persist()
+                await self._revive_img(st)
                 return
 
             cfgs = await self._manager.iter_configs()
@@ -546,6 +552,32 @@ class GpuArbiter:
                 "gpu_arbiter.img_mode",
                 extra={"saved_llm_slots": llm_slots, "img_slot": img_name},
             )
+
+    async def _revive_img(self, st: dict[str, Any]) -> None:
+        """Cold-start the img slot when image mode finds it down (#3048).
+
+        Called by ``ensure_img`` with the switch lock held, in image mode. The
+        persisted mode can outlive the slot: a crash or a manual unload stops
+        it without telling the arbiter. Nothing to do when no img-group slot is
+        configured or it is already dispatchable. Otherwise the existing cold
+        start runs, with its rollback to LLM mode if the reload fails.
+        """
+        cfgs = await self._manager.iter_configs()
+        self._refresh_group_cache(cfgs)
+        img_cfg = next((c for c in cfgs if gpu_exclusive_group(c) == "img"), None)
+        if img_cfg is None:
+            return
+        img_name = str(img_cfg.get("name") or "img")
+        state = self._manager.state(img_name)
+        if state in _DISPATCHABLE:
+            return
+        log.warning(
+            "gpu_arbiter.img_down_in_img_mode",
+            extra={"img_slot": img_name, "state": str(state)},
+        )
+        await self._cold_start_img(img_cfg, img_name, list(st["saved_llm_slots"]))
+        st["last_img_activity"] = time.time()
+        self._persist()
 
     async def _cold_start_img(
         self, img_cfg: dict[str, Any], img_name: str, llm_slots: list[str]

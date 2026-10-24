@@ -502,12 +502,13 @@ def _slot_manager_with_image_section(image: dict[str, Any]) -> Any:
     class _Arbiter:
         def __init__(self) -> None:
             self.ensured = 0
+            self.touches = 0
 
         async def ensure_img(self) -> None:
             self.ensured += 1
 
         def touch_img_activity(self) -> None:
-            pass
+            self.touches += 1
 
     class _Manager:
         arbiter = _Arbiter()
@@ -807,6 +808,9 @@ def test_v1_images_cold_slot_ensure_img_before_dispatch(
     succeeds.  We simulate this by installing a fake slot_manager/arbiter whose
     ensure_img() side-effect registers the img upstream in app.state.upstreams,
     exactly as the real arbiter does via _register_container_upstream.
+
+    The same order also covers #3048: when the slot is down while the GPU is
+    already in image mode, ``ensure_img()`` is what brings it back before dispatch.
     """
     _install("sdxl-turbo")
     fake_png = b"\x89PNG\r\n\x1a\n" + b"c" * 64
@@ -876,6 +880,35 @@ def test_v1_images_cold_slot_ensure_img_before_dispatch(
     )
     body = r.json()
     assert body["data"], "expected at least one image in the response"
+
+
+def test_v1_images_a_failed_dispatch_does_not_stamp_img_activity(client: TestClient) -> None:
+    """#3048: a request that never reached the img slot must not keep the image-mode
+    idle window open (a retrying client used to pin the box in image mode)."""
+    _install("sdxl-turbo")
+    manager = _slot_manager_with_image_section({})  # ensure_img is a no-op; no upstream seeded
+    client.app.state.slot_manager = manager
+
+    r = client.post("/v1/images/generations", json={"model": "sdxl-turbo", "prompt": "x"})
+
+    assert r.status_code in (404, 502, 503)
+    assert r.json()["error"]["code"].startswith("dispatch.")
+    assert manager.arbiter.touches == 0
+
+
+def test_v1_images_a_render_stamps_img_activity_at_start_and_at_completion(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install("sdxl-turbo")
+    _seed_img_upstream(client)
+    _mock_png_infer(monkeypatch)
+    manager = _slot_manager_with_image_section({})
+    client.app.state.slot_manager = manager
+
+    r = client.post("/v1/images/generations", json={"model": "sdxl-turbo", "prompt": "x"})
+
+    assert r.status_code == 200, r.text
+    assert manager.arbiter.touches == 2
 
 
 # ─── image cache route ────────────────────────────────────────────────────────
