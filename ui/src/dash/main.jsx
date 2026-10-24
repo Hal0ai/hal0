@@ -317,7 +317,7 @@ function App() {
       // Benchmarks (#benchmarks): roster board / run detail / evals / run
       // queue over /api/benchmarks/* (hal0.bench store).
       case "benchmarks":
-        return <Benchmarks />;
+        return <Benchmarks param={param} />;
       case "settings": return <SettingsShell param={param} />;
       default:         return <div className="view">Not found.</div>;
     }

@@ -3,10 +3,10 @@
  *
  * Two behaviours pinned here:
  *
- *  1. Accordion — parent rows with sub-links (Slots ▸ Endpoints/Runner
- *     Images/Stacks, Models ▸ Profiles, Agents ▸ Memory/MCP;
- *     runner-catalogue-v2 moved Runner Images under Slots and Profiles under
- *     Models) start COLLAPSED. The sub-links don't render until the parent is
+ *  1. Accordion — parent rows with sub-links (one per page tab: Slots ▸
+ *     Inference/Image Gen/Endpoints/Runner Images/Stacks, Models ▸ Inference/
+ *     Image/Upstream/Profiles, Benchmarks ▸ Roster/Runs/Evals/Run Queue,
+ *     Agents ▸ Overview/Memory/MCP, Settings ▸ its sections) start COLLAPSED. The sub-links don't render until the parent is
  *     opened (via its caret), and the section you navigate into auto-expands.
  *     This is the "sub-links don't show until their parent is clicked"
  *     contract.
@@ -72,6 +72,63 @@ test.describe('sidebar accordion', () => {
     const sb = page.locator('.sidebar')
     // Auto-expanded because the route is inside the Models section.
     await expect(sb.locator('[data-testid="nav-models-profiles"]')).toBeVisible({ timeout: FIVE_S })
+  })
+})
+
+test.describe('sidebar tab sub-links', () => {
+  test('every Slots tab has a sub-link, and the default tab owns bare #slots', async ({ page }) => {
+    await page.goto('/#slots')
+    const sb = page.locator('.sidebar')
+    const inference = sb.locator('[data-testid="nav-slots-inference"]')
+    await expect(inference).toBeVisible({ timeout: FIVE_S })
+    await expect(inference).toHaveAttribute('aria-current', 'page')
+    for (const id of ['image', 'endpoints', 'runner-images', 'stacks']) {
+      await expect(sb.locator(`[data-testid="nav-slots-${id}"]`)).toBeVisible()
+    }
+
+    // The sub-link switches the page tab ...
+    await sb.locator('[data-testid="nav-slots-image"]').click()
+    await expect(page).toHaveURL(/#slots\/image$/)
+    await expect(page.getByRole('tab', { name: /Image Gen/ })).toHaveAttribute('aria-selected', 'true')
+    await expect(sb.locator('[data-testid="nav-slots-image"]')).toHaveAttribute('aria-current', 'page')
+    await expect(inference).not.toHaveAttribute('aria-current', 'page')
+
+    // ... and clicking the in-page tab moves the sidebar highlight with it.
+    await page.getByRole('tab', { name: /Inference/ }).click()
+    await expect(page).toHaveURL(/#slots\/inference$/)
+    await expect(inference).toHaveAttribute('aria-current', 'page')
+  })
+
+  test('Models tabs are deep-linkable from the sidebar', async ({ page }) => {
+    await page.goto('/#models/upstream')
+    const sb = page.locator('.sidebar')
+    await expect(sb.locator('[data-testid="nav-models-upstream"]')).toHaveAttribute('aria-current', 'page', { timeout: FIVE_S })
+    await expect(page.getByRole('tab', { name: /Upstream Models/ })).toHaveAttribute('aria-selected', 'true')
+    await sb.locator('[data-testid="nav-models-image"]').click()
+    await expect(page.getByRole('tab', { name: /Image \/ ComfyUI/ })).toHaveAttribute('aria-selected', 'true')
+  })
+
+  test('Benchmarks tabs are deep-linkable from the sidebar', async ({ page }) => {
+    await page.goto('/#benchmarks/evals')
+    const sb = page.locator('.sidebar')
+    await expect(sb.locator('[data-testid="nav-benchmarks-evals"]')).toHaveAttribute('aria-current', 'page', { timeout: FIVE_S })
+    await expect(page.getByRole('tab', { name: /Evals/ })).toHaveAttribute('aria-selected', 'true')
+    await page.getByRole('tab', { name: /Run Queue/ }).click()
+    await expect(page).toHaveURL(/#benchmarks\/queue$/)
+    await expect(sb.locator('[data-testid="nav-benchmarks-queue"]')).toHaveAttribute('aria-current', 'page')
+  })
+
+  test('Agents has an Overview sub-link and Settings lists its sections', async ({ page }) => {
+    await page.goto('/#agent')
+    const sb = page.locator('.sidebar')
+    await expect(sb.locator('[data-testid="nav-agent-overview"]')).toHaveAttribute('aria-current', 'page', { timeout: FIVE_S })
+    await expect(sb.locator('[data-testid="nav-mcp"]')).toBeVisible()
+
+    await page.goto('/#settings')
+    await expect(sb.locator('[data-testid="nav-settings-overview"]')).toHaveAttribute('aria-current', 'page')
+    await sb.locator('[data-testid="nav-settings-updates"]').click()
+    await expect(page).toHaveURL(/#settings\/updates$/)
+    await expect(sb.locator('[data-testid="nav-settings-updates"]')).toHaveAttribute('aria-current', 'page')
   })
 })
 

@@ -681,15 +681,15 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
     }
   }, [slotParam, slots]);
 
-  // v0.5 nav: sidebar sub-links #slots/endpoints and #slots/runner-images
-  // select the matching tab (runner-catalogue-v2: Profiles moved to Models ▸
-  // Profiles — main.jsx redirects the legacy #slots/profiles deep-links);
-  // #slots/image deep-links the ComfyUI pane (AI Capabilities → Image
-  // generation links here); navigating back to bare #slots (or a slot-name
-  // param) drops out of a sub-tab back to Inference.
+  // Every tab is hash-routed so the sidebar sub-links track it: #slots/image,
+  // #slots/endpoints, #slots/runner-images and #slots/stacks select their tab
+  // (runner-catalogue-v2: Profiles moved to Models ▸ Profiles — main.jsx
+  // redirects the legacy #slots/profiles deep-links; AI Capabilities → Image
+  // generation links to #slots/image). Bare #slots, #slots/inference and a
+  // slot-name param (the edit drawer) all show Inference.
   React.useEffect(() => {
     if (slotParam === "endpoints" || slotParam === "runner-images" || slotParam === "stacks" || slotParam === "image") setTab(slotParam);
-    else setTab((t) => (t === "endpoints" || t === "runner-images" || t === "stacks" ? "inference" : t));
+    else setTab("inference");
   }, [slotParam]);
 
   // Listen for the N hotkey via global event (wired by main.jsx)
@@ -1012,7 +1012,7 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
           role="tab"
           aria-selected={tab === "inference"}
           className={"slot-tab infer" + (tab === "inference" ? " on" : "")}
-          onClick={() => { setTab("inference"); if (slotParam) window.location.hash = "#slots"; }}
+          onClick={() => { window.location.hash = "#slots/inference"; }}
         >
           {inferLive && <span className="slot-tab-dot infer live" />}
           <span>Inference</span>
@@ -1022,7 +1022,7 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
           role="tab"
           aria-selected={tab === "image"}
           className={"slot-tab comfy" + (tab === "image" ? " on" : "")}
-          onClick={() => { setTab("image"); if (slotParam) window.location.hash = "#slots"; }}
+          onClick={() => { window.location.hash = "#slots/image"; }}
         >
           {comfyLive && <span className="slot-tab-dot live" />}
           <span>Image Gen</span>

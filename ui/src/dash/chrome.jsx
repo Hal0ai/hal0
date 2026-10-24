@@ -18,6 +18,11 @@ import { slotIndicatorFromPhase } from './slot-status.js'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
 import { useNotifications, hal0Notify, dismissNotifMessage, NOTIF_KIND_HUE } from './notifications.jsx'
 import { SessionChip } from './auth/SessionChip.jsx'
+import { NAV_GROUPS as SETTINGS_NAV_GROUPS, VALID_IDS as SETTINGS_IDS } from './settings/SettingsNav.jsx'
+
+// Slots params that select a non-default tab; any other param (a slot name)
+// stays on Inference.
+const SLOT_SUB_TABS = ["image", "endpoints", "runner-images", "stacks"]
 
 const { useState: useStateC, useEffect: useEffectC, useRef: useRefC } = React;
 
@@ -495,6 +500,11 @@ function useNavItems() {
     // container images slots run on — a lifecycle concern, so it lives here,
     // not under the model catalog) and moves Profiles under Models.
     { id: "slots", label: "Slots", icon: Icons.slots, cnt: slotCount, children: [
+      // Inference is the default tab: it also owns bare #slots and the
+      // #slots/<slot-name> edit-drawer deep-links.
+      { id: "slots/inference",     label: "Inference",
+        match: (route, param) => route === "slots" && !SLOT_SUB_TABS.includes(param) },
+      { id: "slots/image",         label: "Image Gen" },
       { id: "slots/endpoints",     label: "Endpoints" },
       { id: "slots/runner-images", label: "Runner Images" },
       { id: "slots/stacks",        label: "Stacks" },
@@ -502,18 +512,29 @@ function useNavItems() {
     // Profiles (container-slot templates, #658) template what a slot SERVES —
     // model-catalog territory — so runner-catalogue-v2 files them under Models.
     { id: "models", label: "Models", icon: Icons.models, cnt: modelCount, children: [
-      { id: "models/profiles", label: "Profiles" },
+      { id: "models/inference", label: "Inference Models",
+        match: (route, param) => route === "models" && (!param || param === "inference") },
+      { id: "models/image",     label: "Image / ComfyUI" },
+      { id: "models/upstream",  label: "Upstream Models" },
+      { id: "models/profiles",  label: "Profiles" },
     ] },
     // The Operator Board (#board) is no longer a top-level nav row — it lives
     // in the sidebar Services zone (ServiceLinks) as the "Kanban" option, and
     // stays reachable via ⌘B.
-    { id: "benchmarks", label: "Benchmarks", icon: Icons.bench },
+    { id: "benchmarks", label: "Benchmarks", icon: Icons.bench, children: [
+      { id: "benchmarks/roster", label: "Roster",
+        match: (route, param) => route === "benchmarks" && (!param || param === "roster") },
+      { id: "benchmarks/runs",   label: "Runs" },
+      { id: "benchmarks/evals",  label: "Evals" },
+      { id: "benchmarks/queue",  label: "Run Queue" },
+    ] },
     // v0.5 nav: clicking Agents lands on the Overview (the agent-card library,
-    // with Hermes wired live) — that's the parent row's target, so no separate
-    // Overview sub-link. It then hosts Memory (full Hindsight page, gated on
-    // the memory subsystem) and MCP (bundled FastMCP servers) as tabs. MCP is
-    // always shown; Memory follows the gate.
+    // with Hermes wired live). It then hosts Memory (full Hindsight page, gated
+    // on the memory subsystem) and MCP (bundled FastMCP servers) as tabs. MCP
+    // is always shown; Memory follows the gate.
     { id: "agent", label: "Agents", icon: Icons.agent, children: [
+      { id: "agent/overview", label: "Overview",
+        match: (route, param) => route === "agent" && (!param || param === "overview") },
       ...(memoryEnabled ? [{ id: "memory", label: "Memory" }] : []),
       { id: "mcp", label: "MCP" },
     ] },
@@ -522,7 +543,16 @@ function useNavItems() {
     // stays as the quick external-launch shortcuts; this is the manager.
     { id: "services", label: "Services", icon: Icons.services },
     { id: "logs", label: "Logs", icon: Icons.logs },
-    { id: "settings", label: "Settings", icon: Icons.settings },
+    // Settings sections mirror the in-page SettingsNav (one list, imported),
+    // so the two can never drift. Overview also owns bare #settings.
+    { id: "settings", label: "Settings", icon: Icons.settings, children:
+      SETTINGS_NAV_GROUPS.flatMap(g => g.items).map(item => ({
+        id: "settings/" + item.id,
+        label: item.label,
+        ...(item.id === "overview"
+          ? { match: (route, param) => route === "settings" && (!param || !SETTINGS_IDS.includes(param) || param === "overview") }
+          : {}),
+      })) },
   ];
 }
 
@@ -530,7 +560,8 @@ function useNavItems() {
 // ("slots", "slots/endpoints", "agent", "memory", "mcp"). A parent row
 // highlights across its whole section; a child row highlights for its exact
 // sub-path. The Agent parent groups the agent/memory/mcp routes.
-function _navActive(route, param, id) {
+function _navActive(route, param, id, match) {
+  if (match) return match(route, param);
   const cur = route + (param ? "/" + param : "");
   if (cur === id) return true;
   if (id === route) return true;
@@ -545,6 +576,8 @@ function _navActive(route, param, id) {
 // default; a child group is revealed when its parent is expanded. The section
 // you're currently in auto-expands (and re-opens whenever you navigate into it),
 // so endpoints/profiles + agent sub-links don't show until you open Slots/Agents.
+// Moving into another section collapses the rest: with a sub-link per page tab
+// (Settings alone has 16) a trail of open sections would outgrow the sidebar.
 // `testPrefix` keeps the desktop ("nav-") and drawer ("nav-drawer-") test ids apart.
 function NavList({ route, param, onGo, testPrefix }) {
   const items = useNavItems();
@@ -553,7 +586,7 @@ function NavList({ route, param, onGo, testPrefix }) {
   const activeParent = items.find(it => it.children && _navActive(route, param, it.id))?.id;
   const [open, setOpen] = useStateC(() => (activeParent ? { [activeParent]: true } : {}));
   useEffectC(() => {
-    if (activeParent) setOpen(o => (o[activeParent] ? o : { ...o, [activeParent]: true }));
+    if (activeParent) setOpen({ [activeParent]: true });
   }, [activeParent]);
   const tid = (id) => testPrefix + id.replace(/\//g, "-");
   return (
@@ -596,12 +629,12 @@ function NavList({ route, param, onGo, testPrefix }) {
             {it.children && expanded && it.children.map(ch => (
               <div
                 key={ch.id}
-                className={"sb-row sb-sub" + (_navActive(route, param, ch.id) ? " active" : "")}
+                className={"sb-row sb-sub" + (_navActive(route, param, ch.id, ch.match) ? " active" : "")}
                 data-testid={tid(ch.id)}
                 role="button"
                 tabIndex={0}
                 aria-label={ch.label}
-                aria-current={_navActive(route, param, ch.id) ? "page" : undefined}
+                aria-current={_navActive(route, param, ch.id, ch.match) ? "page" : undefined}
                 onClick={() => onGo(ch.id)}
                 onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onGo(ch.id); } }}
               >
