@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -149,6 +150,31 @@ def installs(monkeypatch: pytest.MonkeyPatch) -> _Installs:
 
     monkeypatch.setattr(comfyui_install, "run_install", fake_run_install)
     return rec
+
+
+def _provision_workflow(model: ImageModel) -> Path:
+    """Leave the model's provisioned workflow where the launcher lists it."""
+    workflow = paths.workflows_dir() / model.workflow_filename
+    workflow.parent.mkdir(parents=True, exist_ok=True)
+    workflow.write_text("{}", encoding="utf-8")
+    return workflow
+
+
+@pytest.fixture
+def requests_made(monkeypatch: pytest.MonkeyPatch) -> list[httpx.Request]:
+    """Give the real ``run_install`` a client that records every request and fails it."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(500)
+
+    monkeypatch.setattr(
+        comfyui_install,
+        "_new_client",
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    return seen
 
 
 def _post_install(client: TestClient, model_id: str = _SDXL) -> Any:
@@ -425,8 +451,11 @@ def test_install_route_allows_a_retry_after_a_finished_job(
     assert client.app.state.image_install_jobs[_SDXL].job_id == resp.json()["job"]["id"]
 
 
-def test_install_route_409_when_complete(client: TestClient, installs: _Installs) -> None:
+def test_install_route_409_when_complete_and_workflow_present(
+    client: TestClient, installs: _Installs
+) -> None:
     _land(CATALOG[_SDXL])
+    _provision_workflow(CATALOG[_SDXL])
 
     resp = _post_install(client)
 
@@ -434,6 +463,66 @@ def test_install_route_409_when_complete(client: TestClient, installs: _Installs
     assert resp.json()["error"]["code"] == "comfyui.model_installed"
     assert installs.calls == []
     assert client.app.state.image_install_jobs == {}
+
+
+def test_install_complete_model_without_workflow_writes_workflow(
+    client: TestClient, requests_made: list[httpx.Request]
+) -> None:
+    """``ltx2-t2v`` leaves ``ltx2-i2v`` complete with no workflow; the launcher lists only
+    provisioned workflows, so the install must run to write it (and download nothing)."""
+    model = CATALOG["ltx2-i2v"]
+    _land(model)
+    workflow = paths.workflows_dir() / model.workflow_filename
+    assert install_state(model).state == "complete"
+    assert not workflow.exists()
+
+    resp = _post_install(client, model.id)
+
+    assert resp.status_code == 202, resp.text
+    assert resp.json()["job"]["model_id"] == model.id
+    _wait_for(lambda: _job_state(client, model.id) == "completed")
+    assert workflow.is_file()
+    assert requests_made == []  # every weight was already there
+    # With the workflow in place it is "already installed" from now on.
+    again = _post_install(client, model.id)
+    assert again.status_code == 409
+    assert again.json()["error"]["code"] == "comfyui.model_installed"
+
+
+def test_install_complete_model_without_workflow_skips_the_download_guards(
+    client: TestClient,
+    requests_made: list[httpx.Request],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing is downloaded, so a full disk or a read-only models tree is not a reason to refuse."""
+    model = CATALOG["ltx2-i2v"]
+    _land(model)
+    monkeypatch.setattr(comfyui_install.shutil, "disk_usage", lambda path: _Usage(0, 0, 1))
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("a download-only guard ran for a model with nothing to download")
+
+    monkeypatch.setattr(comfyui_install, "require_writable_destinations", forbidden)
+    monkeypatch.setattr(comfyui_install, "require_one_filesystem", forbidden)
+
+    resp = _post_install(client, model.id)
+
+    assert resp.status_code == 202, resp.text
+    _wait_for(lambda: _job_state(client, model.id) == "completed")
+    assert (paths.workflows_dir() / model.workflow_filename).is_file()
+
+
+def test_install_partial_model_still_runs_every_download_guard(
+    client: TestClient, installs: _Installs, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _land(CATALOG[_SDXL], only=1)
+    _provision_workflow(CATALOG[_SDXL])  # a workflow does not make a partial model installed
+    monkeypatch.setattr(comfyui_install.shutil, "disk_usage", lambda path: _Usage(0, 0, 1))
+
+    resp = _post_install(client)
+
+    assert resp.status_code == 507
+    assert resp.json()["error"]["code"] == "comfyui.insufficient_disk"
 
 
 def test_install_route_404_unknown(client: TestClient, installs: _Installs) -> None:
