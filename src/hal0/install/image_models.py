@@ -180,14 +180,18 @@ async def provision_image_models(
     Afterwards the first ``completed`` model the API can render is offered to
     :func:`~hal0.comfyui.autoselect.auto_select_first_image_model` (once; an existing
     selection is left alone), and Open WebUI's environment is re-rendered so it learns of
-    the new image model (a running Open WebUI restarts; a stopped or skipped one stays down). The selection is a normal apply, so it writes the img slot's unit
-    and starts the slot: that can wait on ComfyUI's runtime download and on its readiness,
-    which is why a line says so first. A second line says what came of it; a failure in
-    either follow-up is one such line, never a traceback, and changes no result.
+    the new image model (a running Open WebUI restarts; a stopped or skipped one stays
+    down). The selection is a normal apply, so it writes the img slot's unit and starts the
+    slot: that can wait on ComfyUI's runtime download and on its readiness, which is why a
+    line says so first. A second line says what came of it; a failure in either follow-up is
+    one such line, never a traceback, and changes no result.
 
     This runs outside the API process, so it bypasses the API's install-job registry and
-    its tree lock: a dashboard install of the same model running at the same time is not
-    deduplicated against it. Setup runs before the API serves installs in the normal flow.
+    its tree lock. ``install.sh`` runs it before the installer starts the API, so on a fresh
+    install nothing runs beside it. A guided ``hal0 setup`` run by hand on a box whose API
+    is already up does the same: a second-process install, slot load and
+    ``capabilities.toml`` write beside the live API, and a dashboard install of the same
+    model running at the same time is not deduplicated against it.
     """
     ids = list(model_ids)
     log.info("install.image_models models=%s", ids)
