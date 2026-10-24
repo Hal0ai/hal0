@@ -5,7 +5,10 @@ the tree is a projection of its result: the ``/api/comfyui/files`` listing retur
 as is, and the ``/api/comfyui/status`` ``inventory`` block is :func:`status_counts`
 over it. A file belongs to a catalog model when it sits exactly where one of that
 model's components lands (:attr:`~hal0.comfyui.catalog.Component.dest`); anything
-else, such as an operator's own checkpoint, is listed with no owner.
+else, such as an operator's own checkpoint, is listed with no owner. An owner-less
+checkpoint whose header sniffs as SDXL or SD 1.5
+(:func:`~hal0.comfyui.arch.sniff_checkpoint_arch`) also carries its ``arch`` and the
+``api_id`` (``ckpt/<file stem>``) that ``/v1/images/generations`` accepts as a model.
 
 The scan reads only the model subdirectories ComfyUI itself is pointed at
 (:data:`hal0.comfyui.paths.SUBDIRS`), never follows a symlink into a directory, and
@@ -20,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from hal0.comfyui import paths
+from hal0.comfyui.arch import sniff_checkpoint_arch
 from hal0.comfyui.catalog import CATALOG, ComponentKind, component_path
 
 # Extensions of files worth listing; configs, indexes and partial downloads are not weights.
@@ -64,7 +68,9 @@ def list_files() -> list[dict[str, Any]]:
 
     Each entry is ``{kind, subdir, relpath, size_bytes, models}``: ``relpath`` is
     relative to ``subdir`` and uses ``/``, and ``models`` lists the catalog ids that load
-    this file (empty for a file nobody in the catalog owns). A subdirectory that is
+    this file (empty for a file nobody in the catalog owns). A checkpoint nobody owns whose
+    family is known also has ``arch`` (``sdxl`` or ``sd15``) and ``api_id`` (``ckpt/`` plus
+    the file stem, wherever the file sits under ``checkpoints/``). A subdirectory that is
     itself a symlink is skipped, a symlinked directory inside one is not entered, and a
     weight file that is a symlink is listed by its target's size unless the target is gone.
     An absent tree, or one that cannot be read, yields an empty list.
@@ -86,15 +92,19 @@ def list_files() -> list[dict[str, Any]]:
                     size = path.stat().st_size
                 except OSError:
                     continue  # a dangling symlink, or a file that vanished mid-scan
-                found.append(
-                    {
-                        "kind": kind,
-                        "subdir": subdir,
-                        "relpath": path.relative_to(base).as_posix(),
-                        "size_bytes": size,
-                        "models": list(owners.get(path, ())),
-                    }
-                )
+                entry: dict[str, Any] = {
+                    "kind": kind,
+                    "subdir": subdir,
+                    "relpath": path.relative_to(base).as_posix(),
+                    "size_bytes": size,
+                    "models": list(owners.get(path, ())),
+                }
+                if kind == ComponentKind.checkpoint.value and not entry["models"]:
+                    arch = sniff_checkpoint_arch(path)
+                    if arch is not None:
+                        entry["arch"] = arch
+                        entry["api_id"] = f"ckpt/{Path(entry['relpath']).stem}"
+                found.append(entry)
     found.sort(key=lambda f: (f["subdir"], f["relpath"]))
     return found
 

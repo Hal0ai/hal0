@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import struct
 from pathlib import Path
 
 import pytest
@@ -272,3 +274,58 @@ def test_status_counts_counts_nested_lora_files() -> None:
 
     assert counts is not None
     assert counts["loras"] == 3
+
+
+# ── user checkpoints the image API can name (ADR-0037) ──────────────────────
+
+
+def _safetensors(subdir: str, relpath: str, key: str) -> Path:
+    """A weight file whose safetensors header names the single tensor ``key``."""
+    raw = json.dumps({key: {"dtype": "F16", "shape": [1], "data_offsets": [0, 2]}}).encode("utf-8")
+    path = paths.models_root() / subdir / relpath
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(struct.pack("<Q", len(raw)) + raw + b"\x00\x00")
+    return path
+
+
+def test_list_files_names_a_user_checkpoint_the_api_can_render() -> None:
+    _safetensors("checkpoints", "my_finetune.safetensors", "conditioner.embedders.1.x")
+    _safetensors("checkpoints", "anime/v1.5-mix.safetensors", "cond_stage_model.transformer.x")
+
+    by_path = _by_path(inventory.list_files())
+
+    sdxl = by_path["checkpoints/my_finetune.safetensors"]
+    assert (sdxl["arch"], sdxl["api_id"], sdxl["models"]) == ("sdxl", "ckpt/my_finetune", [])
+    # The id carries the file stem only; the nested directory stays in ``relpath``.
+    sd15 = by_path["checkpoints/anime/v1.5-mix.safetensors"]
+    assert (sd15["arch"], sd15["api_id"]) == ("sd15", "ckpt/v1.5-mix")
+
+
+def test_list_files_gives_no_api_id_to_a_checkpoint_of_unknown_arch() -> None:
+    _safetensors("checkpoints", "flux.safetensors", "double_blocks.0.x")
+    _touch("checkpoints", "junk.safetensors")
+    _touch("checkpoints", "pickle.ckpt")
+
+    for entry in inventory.list_files():
+        assert "arch" not in entry
+        assert "api_id" not in entry
+
+
+def test_list_files_gives_no_api_id_to_a_catalog_owned_checkpoint() -> None:
+    """The catalog entry is the way to name those weights, so they are not also ``ckpt/...``."""
+    _safetensors("checkpoints", "v1-5-pruned-emaonly.safetensors", "cond_stage_model.transformer.x")
+
+    (entry,) = inventory.list_files()
+
+    assert entry["models"] == ["sd-1.5-pruned-emaonly"]
+    assert "arch" not in entry
+    assert "api_id" not in entry
+
+
+def test_list_files_gives_no_api_id_outside_the_checkpoints_kind() -> None:
+    _safetensors("loras", "style.safetensors", "conditioner.embedders.1.x")
+    _safetensors("diffusion_models", "d.safetensors", "conditioner.embedders.1.x")
+
+    for entry in inventory.list_files():
+        assert "arch" not in entry
+        assert "api_id" not in entry
