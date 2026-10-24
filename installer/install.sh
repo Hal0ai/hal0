@@ -2907,7 +2907,8 @@ fi
 #
 # HAL0_IMAGE_MODELS opts in unattended: `recommended`, or catalog ids / menu
 # numbers separated by commas or spaces. `none` or `0` forces the skip even on a
-# terminal. The first model that lands becomes the image-generation model, and
+# terminal. --no-start skips the step: it starts the img slot. The first model
+# that lands becomes the image-generation model, and
 # Open WebUI's environment is re-rendered for it (a running Open WebUI restarts;
 # a skipped or stopped one stays down).
 _img_plan=""
@@ -2921,6 +2922,10 @@ if [[ "${DEV_MODE}" -eq 1 ]]; then
     :  # dev mode writes nothing to the system store — no offer, no notice
 elif [[ "${HAL0_SKIP_SETUP:-0}" == "1" || "${HAL0_IMAGE_MODELS:-}" == "none" || "${HAL0_IMAGE_MODELS:-}" == "0" ]]; then
     info "Skipping the starter image models (HAL0_SKIP_SETUP/HAL0_IMAGE_MODELS set to skip)."
+elif [[ "${NO_START}" -eq 1 ]]; then
+    # The step starts the img slot (and pulls ComfyUI's runtime) once a model lands,
+    # which --no-start promises not to do: skip the whole step, not just the start.
+    info "Skipping the starter image models (--no-start). Install one later with 'hal0 comfyui models install <id>' or from the dashboard."
 else
     # `|| true`: a plan that cannot be computed is simply no offer. Never fatal.
     _img_plan="$("${VENV_DIR}/bin/python" -m hal0.install.image_models --plan 2>/dev/null || true)"

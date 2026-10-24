@@ -118,9 +118,10 @@ and the installer starts the image slot with it, which downloads the ComfyUI
 runtime on first start and can take several minutes. Open WebUI's environment
 is re-rendered to match: a running Open WebUI restarts to pick it up, and one
 you skipped or stopped stays down. If an image model is already selected it
-stays selected, and the installer starts nothing. A failed download is reported and the
-install carries on; install a model later with `hal0 comfyui models install <id>`
-or from the dashboard.
+stays selected, and the installer starts nothing. `--no-start` skips the step,
+since it starts the image slot, and the installer prints how to do it later. A
+failed download is reported and the install carries on; install a model later
+with `hal0 comfyui models install <id>` or from the dashboard.
 
 An unattended install (no terminal, or `HAL0_NONINTERACTIVE=1`) downloads
 nothing unless `HAL0_IMAGE_MODELS` is set. Set it to `recommended` or a list of

@@ -75,6 +75,13 @@ def test_dev_mode_and_skip_setup_offer_nothing(code: str) -> None:
     assert 'HAL0_SKIP_SETUP:-0}" == "1"' in code
 
 
+def test_no_start_skips_the_whole_step(code: str) -> None:
+    """The step starts the img slot (and pulls its runtime), which ``--no-start`` forbids."""
+    assert re.search(r'elif \[\[ "\$\{NO_START\}" -eq 1 \]\]; then', code)
+    # Before the plan is computed: nothing downloads and nothing is selected under --no-start.
+    assert code.index('"${NO_START}" -eq 1') < code.index("hal0.install.image_models --plan")
+
+
 @pytest.mark.parametrize("value", ["none", "0"])
 def test_image_models_none_or_zero_skips_the_step(code: str, value: str) -> None:
     assert f'"${{HAL0_IMAGE_MODELS:-}}" == "{value}"' in code
@@ -161,6 +168,7 @@ _tty_read() {
 }
 exec 3< "$FAKE_DIR/answers"
 DEV_MODE="${DEV_MODE:-0}"
+NO_START="${NO_START:-0}"
 """
 
 
@@ -240,6 +248,26 @@ def test_the_opt_outs_skip_before_the_plan_is_even_computed(
     assert proc.returncode == 0, proc.stderr
     assert installs == []
     assert calls == []
+
+
+@pytest.mark.parametrize("interactive", ["0", "1"])
+def test_no_start_skips_the_step_and_says_how_to_install_later(
+    tmp_path: Path, image_block: str, interactive: str
+) -> None:
+    """``--no-start`` sets everything up without starting units: no download, no prompt, no slot."""
+    proc, installs, calls = _run_block(
+        tmp_path,
+        image_block,
+        env={"NO_START": "1", "HAL0_IMAGE_MODELS": "recommended", "FAKE_INTERACTIVE": interactive},
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert installs == []
+    assert calls == []
+    assert not (tmp_path / "prompts.log").exists()
+    assert proc.stdout.count("INFO ") == 1
+    assert "--no-start" in proc.stdout
+    assert "hal0 comfyui models install <id>" in proc.stdout
 
 
 def test_an_unresolvable_variable_warns_and_downloads_nothing(
