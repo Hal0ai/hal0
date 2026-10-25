@@ -14,6 +14,9 @@ import os
 import tomllib
 from pathlib import Path
 
+import pytest
+from structlog.testing import capture_logs
+
 from hal0.config.loader import load_slot_config
 from hal0.config.paths import slots_config_dir
 from hal0.updater.updater import strip_retired_image_keys
@@ -140,3 +143,29 @@ def test_strip_skips_an_unreadable_slot_file(tmp_hal0_home: str) -> None:
 def test_strip_with_no_slots_directory_changes_nothing(tmp_hal0_home: str) -> None:
     assert not os.path.exists(slots_config_dir())
     assert strip_retired_image_keys() == 0
+
+
+def test_a_slot_file_the_strip_cannot_rewrite_is_a_reported_pass_warning(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each file's failure is caught inside the pass, so only its own event can
+    reach hal0 update's summary: it must be one the update reports."""
+    from hal0.cli.update_commands import _MIGRATION_PASS_LABELS
+    from hal0.updater.updater import _NON_FATAL_MIGRATION_FAILURE_EVENTS
+
+    img = _write("img", _SHIPPED_IMG_SEED)
+
+    def _read_only(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError(13, "Permission denied", str(img))
+
+    monkeypatch.setattr("hal0.config.migrations.runner_system._replace_file", _read_only)
+    with capture_logs() as logs:
+        assert strip_retired_image_keys() == 0
+
+    assert "idle_restore_minutes" in img.read_text(encoding="utf-8")
+    events = [entry["event"] for entry in logs]
+    assert "updater.image_keys_write_failed" in events
+    for event in ("updater.image_keys_write_failed", "updater.image_keys_slot_unreadable"):
+        assert event in _NON_FATAL_MIGRATION_FAILURE_EVENTS
+        assert event in _MIGRATION_PASS_LABELS
+    assert "idle_restore_minutes" in _MIGRATION_PASS_LABELS["updater.image_keys_write_failed"]

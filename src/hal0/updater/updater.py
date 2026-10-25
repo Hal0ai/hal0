@@ -2063,8 +2063,9 @@ def run_post_activation_migrations(
         strip_retired_image_keys(job_id=job_id)
     except Exception as exc:
         log.warning("updater.image_keys_strip_failed", job_id=job_id, error=str(exc))
-        # Non-fatal: an img slot that still carries the key refuses to load
-        # until the operator deletes the line from its TOML.
+        # Non-fatal: the img slot still loads (the slot manager reads raw TOML),
+        # but a file that still carries the key fails hal0 doctor's slot
+        # validation until the operator deletes the line.
 
     # ── Kokoro store bundle (#2739, ADR-0030): from 1.4.0 the tts slot
     # launches only from the pulled kokoro-v1 bundle, so an upgraded box that
@@ -3697,6 +3698,8 @@ _NON_FATAL_MIGRATION_FAILURE_EVENTS: tuple[str, ...] = (
     "updater.registry_toml_retire_failed",
     "updater.vulkan_migration_failed",
     "updater.image_keys_strip_failed",
+    "updater.image_keys_write_failed",
+    "updater.image_keys_slot_unreadable",
     "updater.retired_skills_prune_failed",
     "updater.memory_engine_upgrade_failed",
     "updater.components_converge_failed",

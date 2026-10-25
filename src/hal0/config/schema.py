@@ -292,6 +292,10 @@ REMOVED_SLOT_KEYS: dict[str, str] = {
     "lru": (
         "retired — eviction order is 'priority' (0-100, lower first); use 'pinned' to exempt a slot"
     ),
+    "[image].idle_restore_minutes": (
+        "retired — image mode now ends when image generation stops (ADR-0038); delete the "
+        "line, or run hal0 update, which takes it out"
+    ),
 }
 
 
