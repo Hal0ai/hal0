@@ -752,6 +752,12 @@ async def _ensure_backend_for_model(request: Request, body: dict[str, Any]) -> N
     # swallowed by the best-effort block below — the guard is the outcome.
     arbiter = getattr(slot_manager, "arbiter", None)
     if arbiter is not None:
+        # An LLM request that finds image mode idle ends it and waits for the
+        # reload instead of a 503; while a render runs it returns at once and
+        # the guard answers.
+        make_room = getattr(arbiter, "make_room_for_llm", None)
+        if make_room is not None:
+            await make_room(slot_name)
         arbiter.guard_dispatch(slot_name)
     try:
         await slot_manager.load(slot_name)
@@ -847,6 +853,10 @@ async def _wake_capability_slot(request: Request) -> None:
     # arbiter's exclusive mode. The guard is the outcome — not swallowed.
     arbiter = getattr(slot_manager, "arbiter", None)
     if arbiter is not None:
+        # Same LLM-demand step as the chat branch: end an idle image mode first.
+        make_room = getattr(arbiter, "make_room_for_llm", None)
+        if make_room is not None:
+            await make_room(slot_name)
         arbiter.guard_dispatch(slot_name)
     try:
         await slot_manager.load(slot_name)
@@ -1853,80 +1863,76 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
     #    native size (below, once the slot has had its say).
     manager = getattr(request.app.state, "slot_manager", None)
     arbiter = manager.arbiter if manager is not None else None
-    if manager is not None:
-        from hal0.errors import NotFound
-        from hal0.slots.arbiter import gpu_exclusive_group
+    # The render is image work from before the GPU switch until provider.infer
+    # returns, so the arbiter never restores LLM mode under it; once it is done,
+    # an LLM request or the restore loop hands the GPU back.
+    async with arbiter.image_job() if arbiter is not None else contextlib.nullcontext():
+        if manager is not None:
+            from hal0.errors import NotFound
+            from hal0.slots.arbiter import gpu_exclusive_group
 
-        cfgs = await manager.iter_configs()
-        img_cfg = next((c for c in cfgs if gpu_exclusive_group(c) == "img"), None)
-        img_section = (img_cfg or {}).get("image") or {}
-        if isinstance(img_section, dict):
-            default_size = img_section.get("default_size")
-            if not body.get("size") and isinstance(default_size, str) and default_size:
-                body["size"] = default_size
-            default_steps = img_section.get("default_steps")
-            if (
-                isinstance(default_steps, int)
-                and not isinstance(default_steps, bool)
-                and default_steps > 0
-            ):
-                extra = body.get("extra_body")
-                if not isinstance(extra, dict):
-                    extra = {}
-                    body["extra_body"] = extra
-                extra.setdefault("steps", default_steps)
+            cfgs = await manager.iter_configs()
+            img_cfg = next((c for c in cfgs if gpu_exclusive_group(c) == "img"), None)
+            img_section = (img_cfg or {}).get("image") or {}
+            if isinstance(img_section, dict):
+                default_size = img_section.get("default_size")
+                if not body.get("size") and isinstance(default_size, str) and default_size:
+                    body["size"] = default_size
+                default_steps = img_section.get("default_steps")
+                if (
+                    isinstance(default_steps, int)
+                    and not isinstance(default_steps, bool)
+                    and default_steps > 0
+                ):
+                    extra = body.get("extra_body")
+                    if not isinstance(extra, dict):
+                        extra = {}
+                        body["extra_body"] = extra
+                    extra.setdefault("steps", default_steps)
 
-        try:
-            await arbiter.ensure_img()
-        except NotFound as exc:
-            # No img-group slot configured (manually-registered upstream,
-            # tests) — nothing to arbitrate; generation proceeds as-is.
-            if exc.code != "gpu.img_slot_missing":
-                raise
-    if not body.get("size"):
-        body["size"] = resolved.defaults["size"]
+            try:
+                await arbiter.ensure_img()
+            except NotFound as exc:
+                # No img-group slot configured (manually-registered upstream,
+                # tests) — nothing to arbitrate; generation proceeds as-is.
+                if exc.code != "gpu.img_slot_missing":
+                    raise
+        if not body.get("size"):
+            body["size"] = resolved.defaults["size"]
 
-    # 3. Resolve the slot the request should land on.  ensure_img() above
-    #    guarantees the img upstream is registered, so resolve_by_capability
-    #    Rule 4 (/images/ path) succeeds even on a cold slot, including after
-    #    it crashed or was unloaded while the GPU stayed in image mode (#3048).
-    call = await dispatcher.dispatch(request, body=body)
+        # 3. Resolve the slot the request should land on.  ensure_img() above
+        #    guarantees the img upstream is registered, so resolve_by_capability
+        #    Rule 4 (/images/ path) succeeds even on a cold slot, including after
+        #    it crashed or was unloaded while the GPU stayed in image mode (#3048).
+        call = await dispatcher.dispatch(request, body=body)
 
-    # 4. Discover the local slot's port from the resolved upstream.
-    upstream = request.app.state.upstreams.get(call.upstream_name)
-    if upstream is None:
-        raise NoRouteFound(
-            f"image-gen dispatch landed on upstream {call.upstream_name!r} which is not registered",
-            details={"upstream": call.upstream_name},
-        )
-    port = _extract_port_from_upstream_url(upstream.url)
-    if port is None:
-        raise UpstreamUnavailable(
-            f"image-gen upstream {call.upstream_name!r} has no parseable port "
-            f"in url={upstream.url!r}",
-            details={"upstream": call.upstream_name, "url": upstream.url},
-        )
+        # 4. Discover the local slot's port from the resolved upstream.
+        upstream = request.app.state.upstreams.get(call.upstream_name)
+        if upstream is None:
+            raise NoRouteFound(
+                f"image-gen dispatch landed on upstream {call.upstream_name!r} which is not registered",
+                details={"upstream": call.upstream_name},
+            )
+        port = _extract_port_from_upstream_url(upstream.url)
+        if port is None:
+            raise UpstreamUnavailable(
+                f"image-gen upstream {call.upstream_name!r} has no parseable port "
+                f"in url={upstream.url!r}",
+                details={"upstream": call.upstream_name, "url": upstream.url},
+            )
 
-    # 5. Drive the ComfyUI provider directly. Inject the resolved template and
-    #    checkpoint override so the provider's translator knows what to render
-    #    without resolving the model again. Always set from the resolution: a
-    #    client's own copies of these keys are overwritten, so a client can
-    #    never choose the template or the checkpoint file.
-    provider = get_provider("comfyui")
-    body_with_meta = {
-        **body,
-        "_hal0_template": resolved.template,
-        "_hal0_ckpt_override": resolved.ckpt_override,
-    }
-    if arbiter is not None:
-        # Start stamp: the render is about to run. A request that failed before
-        # this point never reached the slot and must not extend the idle
-        # window (#3048).
-        arbiter.touch_img_activity()
-    result = await provider.infer(port, body_with_meta)
-    if arbiter is not None:
-        # Completion stamp — long jobs must reset the idle-restore clock.
-        arbiter.touch_img_activity()
+        # 5. Drive the ComfyUI provider directly. Inject the resolved template and
+        #    checkpoint override so the provider's translator knows what to render
+        #    without resolving the model again. Always set from the resolution: a
+        #    client's own copies of these keys are overwritten, so a client can
+        #    never choose the template or the checkpoint file.
+        provider = get_provider("comfyui")
+        body_with_meta = {
+            **body,
+            "_hal0_template": resolved.template,
+            "_hal0_ckpt_override": resolved.ckpt_override,
+        }
+        result = await provider.infer(port, body_with_meta)
 
     # Track most-recent-model for dashboard.
     last_used = getattr(request.app.state, "last_used_model", None)

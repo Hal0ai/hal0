@@ -88,6 +88,52 @@ def test_prepare_image_mode_requests_switchover_and_waits(monkeypatch) -> None:
     assert calls == ["switch"]
 
 
+def test_prepare_image_mode_waits_out_a_running_switch_before_deciding(monkeypatch) -> None:
+    """hal0 is restoring the LLM set (mode still generation, the switch lock held):
+    the hook waits for it to finish, sees inference, and asks for image mode
+    instead of letting the prompt render under LLM weights that are loading."""
+    mod = _load_node()
+    statuses = iter(
+        [
+            {"mode": "generation", "arbiter": {"switching": True}},
+            {"mode": "generation", "arbiter": {"switching": True}},
+            {"mode": "inference", "arbiter": {"switching": False}},
+            {"mode": "generation", "arbiter": {"switching": False}},
+        ]
+    )
+    calls: list[str] = []
+
+    monkeypatch.setattr(mod, "_fetch_status", lambda: next(statuses))
+    monkeypatch.setattr(mod, "_post_switchover", lambda: calls.append("switch") or True)
+    monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
+
+    mod.prepare_image_mode()
+    assert calls == ["switch"]
+    assert next(statuses, None) is None
+
+
+def test_prepare_image_mode_returns_once_the_switch_has_finished(monkeypatch) -> None:
+    """ensure_img persists mode=img before it unloads the LLM set, so a
+    generation mode reported while the switch still runs is not ready yet."""
+    mod = _load_node()
+    statuses = iter(
+        [
+            {"mode": "inference", "arbiter": {"switching": False}},
+            {"mode": "generation", "arbiter": {"switching": True}},
+            {"mode": "generation", "arbiter": {"switching": False}},
+        ]
+    )
+    calls: list[str] = []
+
+    monkeypatch.setattr(mod, "_fetch_status", lambda: next(statuses))
+    monkeypatch.setattr(mod, "_post_switchover", lambda: calls.append("switch") or True)
+    monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
+
+    mod.prepare_image_mode()
+    assert calls == ["switch"]
+    assert next(statuses, None) is None
+
+
 def test_prepare_image_mode_fails_open_when_switchover_fails(monkeypatch) -> None:
     mod = _load_node()
     monkeypatch.setattr(mod, "_fetch_status", lambda: {"mode": "inference"})

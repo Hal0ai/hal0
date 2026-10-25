@@ -2054,18 +2054,18 @@ async def _boot_background_tasks(app: FastAPI, ctx: BootState) -> None:
     # slot promoted during boot is not missed (#2442). Its stop callback is
     # still registered with the AsyncExitStack in ``lifespan``.
 
-    # GpuArbiter idle-restore loop (Phase D, Task D6). Auto-restores the
-    # saved LLM set after the img (ComfyUI) slot idles out — window from the
-    # img slot's ``[image].idle_restore_minutes`` (default 60; 0 = manual-only).
+    # GpuArbiter restore loop: hands the GPU back to the LLM slots
+    # ``_RESTORE_GRACE_S`` after the last render, when ComfyUI's queue is empty
+    # (an LLM request does it sooner through ``make_room_for_llm``).
     # Mirrors the refresh_task pattern above: created at startup, cancelled +
     # awaited on shutdown via the AsyncExitStack. Guarded so an arbiter
     # construction failure never blocks API startup (omni-router precedent).
     gpu_arbiter_idle_task: asyncio.Task[None] | None = None
     try:
-        gpu_arbiter_idle_task = asyncio.create_task(ctx.slot_manager.arbiter.run_idle_loop())
-        log.info("gpu_arbiter.idle_loop_started")
+        gpu_arbiter_idle_task = asyncio.create_task(ctx.slot_manager.arbiter.run_restore_loop())
+        log.info("gpu_arbiter.restore_loop_started")
     except Exception as exc:  # pragma: no cover — defensive
-        log.warning("gpu_arbiter.idle_loop_start_failed", error=str(exc))
+        log.warning("gpu_arbiter.restore_loop_start_failed", error=str(exc))
     ctx.gpu_arbiter_idle_task = gpu_arbiter_idle_task
     app.state.gpu_arbiter_idle_task = ctx.gpu_arbiter_idle_task
 

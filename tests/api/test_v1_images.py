@@ -18,6 +18,7 @@ this exercises:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import struct
 from pathlib import Path
@@ -502,13 +503,20 @@ def _slot_manager_with_image_section(image: dict[str, Any]) -> Any:
     class _Arbiter:
         def __init__(self) -> None:
             self.ensured = 0
-            self.touches = 0
+            self.jobs = 0
+            self.open_jobs = 0
 
         async def ensure_img(self) -> None:
             self.ensured += 1
 
-        def touch_img_activity(self) -> None:
-            self.touches += 1
+        @contextlib.asynccontextmanager
+        async def image_job(self):
+            self.jobs += 1
+            self.open_jobs += 1
+            try:
+                yield
+            finally:
+                self.open_jobs -= 1
 
     class _Manager:
         arbiter = _Arbiter()
@@ -867,6 +875,19 @@ def test_v1_images_cold_slot_ensure_img_before_dispatch(
     _PORT = 8186
 
     class _FakeArbiter:
+        def __init__(self) -> None:
+            self.jobs = 0
+            self.open_jobs = 0
+
+        @contextlib.asynccontextmanager
+        async def image_job(self):
+            self.jobs += 1
+            self.open_jobs += 1
+            try:
+                yield
+            finally:
+                self.open_jobs -= 1
+
         async def ensure_img(self) -> None:
             # Simulate _register_container_upstream: wire the img upstream
             # so that resolve_by_capability Rule 4 can find it.
@@ -879,9 +900,6 @@ def test_v1_images_cold_slot_ensure_img_before_dispatch(
                     auth_style="none",
                 )
             )
-
-        def touch_img_activity(self) -> None:
-            pass
 
     class _FakeSlotManager:
         arbiter = _FakeArbiter()
@@ -910,9 +928,9 @@ def test_v1_images_cold_slot_ensure_img_before_dispatch(
     assert body["data"], "expected at least one image in the response"
 
 
-def test_v1_images_a_failed_dispatch_does_not_stamp_img_activity(client: TestClient) -> None:
-    """#3048: a request that never reached the img slot must not keep the image-mode
-    idle window open (a retrying client used to pin the box in image mode)."""
+def test_v1_images_a_failed_dispatch_leaves_no_image_job_open(client: TestClient) -> None:
+    """#3048: a request that never reached the img slot must not hold image mode
+    (a retrying client used to pin the box in image mode)."""
     _install("sdxl-turbo")
     manager = _slot_manager_with_image_section({})  # ensure_img is a no-op; no upstream seeded
     client.app.state.slot_manager = manager
@@ -921,22 +939,36 @@ def test_v1_images_a_failed_dispatch_does_not_stamp_img_activity(client: TestCli
 
     assert r.status_code in (404, 502, 503)
     assert r.json()["error"]["code"].startswith("dispatch.")
-    assert manager.arbiter.touches == 0
+    assert manager.arbiter.jobs == 1
+    assert manager.arbiter.open_jobs == 0
 
 
-def test_v1_images_a_render_stamps_img_activity_at_start_and_at_completion(
+def test_v1_images_a_render_runs_inside_one_image_job(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The arbiter counts the render as image work until provider.infer returns,
+    so it never restores LLM mode under it; the job closes with the render."""
     _install("sdxl-turbo")
     _seed_img_upstream(client)
-    _mock_png_infer(monkeypatch)
+    payload = _mock_png_infer(monkeypatch).return_value
     manager = _slot_manager_with_image_section({})
     client.app.state.slot_manager = manager
+    open_during_render: list[int] = []
+
+    async def _infer(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        open_during_render.append(manager.arbiter.open_jobs)
+        return payload
+
+    from hal0.providers import get_provider
+
+    monkeypatch.setattr(get_provider("comfyui"), "infer", _infer)
 
     r = client.post("/v1/images/generations", json={"model": "sdxl-turbo", "prompt": "x"})
 
     assert r.status_code == 200, r.text
-    assert manager.arbiter.touches == 2
+    assert open_during_render == [1]
+    assert manager.arbiter.jobs == 1
+    assert manager.arbiter.open_jobs == 0
 
 
 # ─── image cache route ────────────────────────────────────────────────────────

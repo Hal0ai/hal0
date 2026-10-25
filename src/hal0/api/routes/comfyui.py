@@ -25,7 +25,7 @@ in the background behind a 202; the ``switchover`` block on /status tracks the
 transition. The API no longer shells out to any ComfyUI control scripts — the
 podman ``hal0-slot@<token>`` unit is the sole owner of the container lifecycle
 (the standalone ``comfy-*.sh`` docker scripts were retired in #984).
-``POST /api/comfyui/pin`` toggles the arbiter's manual pin (blocks idle-restore).
+``POST /api/comfyui/pin`` toggles the arbiter's manual pin (holds image mode).
 
 The image-model routes (ADR-0037) sit beside the engine ones: ``/models`` is the
 catalog with each model's install state, ``/models/{id}/install`` and
@@ -466,7 +466,8 @@ async def comfyui_switchover(
     """Flip the iGPU between LLM inference and ComfyUI generation.
 
     Body: ``{"mode": "generation" | "inference", "force": bool, "pin": bool}``
-    (``pin`` only matters for generation: hold image mode against idle-restore).
+    (``pin`` only matters for generation: hold image mode until unpinned;
+    without it, image mode ends ``_RESTORE_GRACE_S`` after the last render).
     Refuses while a switch is in flight (409), no-ops when already in the
     target mode (200), and refuses to drop a busy render queue without
     ``force`` (409). Otherwise answers 202 and drives the GpuArbiter in the
@@ -504,18 +505,21 @@ async def comfyui_switchover(
         return JSONResponse(status_code=200, content={"status": "noop", "mode": mode})
     # Mid-render guard: switching to inference frees ComfyUI's models from GPU
     # memory, killing any running/pending renders (the container itself stays
-    # up). Refuse unless the caller forces it — the dashboard confirm dialog
-    # states the blast radius and passes force on user confirm.
+    # up). A /v1 image request counts too: it holds an image job from before
+    # its prompt reaches ComfyUI's queue. Refuse unless the caller forces it —
+    # the dashboard confirm dialog states the blast radius and passes force on
+    # user confirm.
     force = body.force
     if mode == "inference" and not force:
         counts = _queue_counts(await _fetch_json("/queue"))
-        busy = counts["running"] + counts["pending"]
+        image_jobs = int((arbiter.status() or {}).get("image_jobs") or 0)
+        busy = counts["running"] + counts["pending"] + image_jobs
         if busy:
             raise Conflict(
                 f"{busy} render job(s) running or queued would be dropped; "
                 "retry with {'force': true} to switch anyway.",
                 code="comfyui.busy",
-                details={"queue": counts},
+                details={"queue": counts, "image_jobs": image_jobs},
             )
     pin = body.pin
     # Dispatch in the background and answer 202 immediately — the drain/reload
@@ -536,10 +540,10 @@ class SetPinnedBody(BaseModel):
 
 @router.post("/pin")
 async def comfyui_pin(request: Request, body: SetPinnedBody | None = None) -> JSONResponse:
-    """Toggle the arbiter's manual pin (holds image mode against idle-restore).
+    """Toggle the arbiter's manual pin.
 
-    Body: ``{"pinned": bool}``. Pinning disables idle auto-restore while image
-    mode is active.
+    Body: ``{"pinned": bool}``. A pin holds image mode until unpinned or a
+    forced switch to inference.
     """
     pinned = body.pinned if body is not None else None
     if not isinstance(pinned, bool):

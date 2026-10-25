@@ -219,8 +219,9 @@ async def restore_caller_after_images(
     ``/v1/images/generations`` makes :class:`~hal0.slots.arbiter.GpuArbiter`
     enter image mode, which unloads the llm group — including the very slot
     whose tool_call is being served. Left there, the loop's next chat round
-    503s (``gpu.image_mode``), the rendered image is orphaned, and the GPU
-    stays parked in image mode for the idle-restore window.
+    503s (``gpu.image_mode``) and the rendered image is orphaned. The arbiter's
+    restore loop would bring the set back one grace later; the loop restores at
+    once because its caller is next.
 
     The loop calls this ONCE per tool round, after every tool call in the
     round has finished (a round may carry several image renders dispatched
@@ -228,13 +229,13 @@ async def restore_caller_after_images(
     the rest). Renders this loop cannot see — another request's, or one a
     cancelled caller left on the queue — are covered by going through
     :meth:`~hal0.slots.arbiter.GpuArbiter.restore_llm_when_idle`, which waits
-    for ComfyUI's queue to drain before freeing anything. The restore itself
-    is shielded from the request's cancellation: once started it runs to
-    completion detached, so a client leaving mid-restore cannot leave ComfyUI
-    freed with the LLM set half loaded. Acts only when the arbiter is in
-    image mode AND the caller is an llm-group slot — i.e. one the flip
-    evicted. An NPU/CPU caller, a GPU that did not flip, or a box with no
-    arbiter is left alone.
+    for hal0's in-flight image requests and ComfyUI's queue to drain before
+    freeing anything. The restore itself is shielded from the request's
+    cancellation: once started it runs to completion detached, so a client
+    leaving mid-restore cannot leave ComfyUI freed with the LLM set half
+    loaded. Acts only when the arbiter is in image mode AND the caller is an
+    llm-group slot — i.e. one the flip evicted. An NPU/CPU caller, a GPU that
+    did not flip, or a box with no arbiter is left alone.
 
     Returns ``None`` when the caller is available again (or never was
     unavailable), else a one-line reason it still is not — a pinned image

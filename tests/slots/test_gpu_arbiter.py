@@ -27,6 +27,7 @@ import hal0.slots.arbiter as arbiter_mod
 from hal0.errors import Hal0Error
 from hal0.slots.arbiter import (
     ArbiterPinned,
+    ArbiterQueueBusy,
     GpuArbiter,
     GpuImageMode,
     GpuInferenceMode,
@@ -79,7 +80,6 @@ def _base_configs() -> list[dict[str, Any]]:
             "provider": "comfyui",
             "type": "image",
             "model": {"default": "sdxl-turbo"},
-            "image": {"idle_restore_minutes": 5},
         },
     ]
 
@@ -189,8 +189,13 @@ def comfyui_http(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Stub the arbiter's ComfyUI HTTP seams (resident-container design).
 
     ``free`` counts /free calls (restore_llm frees models instead of
-    unloading the container); ``queue`` scripts the (running, pending)
-    counts the idle tick reads from /queue — ``None`` = unreachable.
+    unloading the container). ``queue`` scripts the strict ``GET /queue``
+    read, ``_comfyui_queue_state``:
+
+      - ``None`` means the connection was refused, which counts as idle (default);
+      - a ``(running, pending)`` tuple is returned as is;
+      - a list is consumed one entry per read, and the last entry sticks;
+      - ``"unknown"`` raises ``ComfyUIQueueUnknown`` (a failed read counts as busy).
     """
     rec: dict[str, Any] = {"free": 0, "queue": None}
 
@@ -199,10 +204,15 @@ def comfyui_http(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         return True
 
     async def _fake_queue() -> tuple[int, int] | None:
-        return rec["queue"]
+        val = rec["queue"]
+        if isinstance(val, list):
+            val = val.pop(0) if len(val) > 1 else val[0]
+        if val == "unknown":
+            raise arbiter_mod.ComfyUIQueueUnknown("scripted")
+        return val
 
     monkeypatch.setattr(arbiter_mod, "_comfyui_free", _fake_free, raising=False)
-    monkeypatch.setattr(arbiter_mod, "_comfyui_queue_counts", _fake_queue, raising=False)
+    monkeypatch.setattr(arbiter_mod, "_comfyui_queue_state", _fake_queue)
     return rec
 
 
@@ -282,7 +292,7 @@ async def test_ensure_img_drains_then_stops_then_starts(
     assert set(arb.saved_llm_slots) == {"chat", "agent"}
     final = _read_state(state_path)
     assert final["mode"] == "img"
-    assert isinstance(final["last_img_activity"], float)
+    assert "last_img_activity" not in final
 
 
 async def test_ensure_img_drain_blocks_on_committed_dispatch_ticket(
@@ -340,25 +350,33 @@ async def test_ensure_img_skips_load_when_img_already_running(
 
     assert fake_mgr.calls == [("unload", "chat"), ("unload", "agent")]
     assert arb.mode is GpuMode.IMG
-    assert isinstance(_read_state(state_path)["last_img_activity"], float)
+    assert "last_img_activity" not in _read_state(state_path)
 
 
-async def test_ensure_img_restamps_activity_at_completion(
+async def test_ensure_img_starts_the_quiet_clock_when_the_switch_finishes(
     fake_mgr: FakeManager, state_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The idle window must start when the switch COMPLETES, not when it
-    begins — a slow container start used to eat most of the window."""
+    """The restore grace runs from the end of the switch, not its start: a slow
+    container start must not eat it, and a prompt the gate node lets through
+    right after the switch lands inside it."""
     fake_mgr.slot_states = {"img": ["warming", "warming", "ready"]}
     monkeypatch.setattr(arbiter_mod, "_READY_POLL_S", 0.05)
     arb = GpuArbiter(fake_mgr, state_path=state_path)
 
-    stamps: list[float] = []
-    fake_mgr.on_unload = lambda _name: stamps.append(_read_state(state_path)["last_img_activity"])
+    seen: list[float | None] = []
+    unloaded_at: list[float] = []
+
+    def _on_unload(_name: str) -> None:
+        seen.append(arb._quiet_since)
+        unloaded_at.append(time.monotonic())
+
+    fake_mgr.on_unload = _on_unload
 
     await arb.ensure_img()
 
-    final = _read_state(state_path)["last_img_activity"]
-    assert final > stamps[0], "activity must be re-stamped after readiness"
+    assert seen == [None, None]  # the clock is not running while the switch is
+    assert arb._quiet_since is not None
+    assert arb._quiet_since >= unloaded_at[-1]
 
 
 async def test_drain_timeout_proceeds(
@@ -556,7 +574,6 @@ async def test_partial_crash_recovery_via_restore(state_path: Path) -> None:
                 "mode": "img",
                 "pinned": False,
                 "saved_llm_slots": ["chat", "agent"],
-                "last_img_activity": time.time(),
             }
         ),
         encoding="utf-8",
@@ -588,14 +605,13 @@ def test_corrupt_state_file_falls_back_to_llm(fake_mgr: FakeManager, state_path:
 # ── guard_dispatch ───────────────────────────────────────────────────────
 
 
-def _write_img_state(path: Path, *, last_activity: float | None = None) -> None:
+def _write_img_state(path: Path, *, pinned: bool = False) -> None:
     path.write_text(
         json.dumps(
             {
                 "mode": "img",
-                "pinned": False,
+                "pinned": pinned,
                 "saved_llm_slots": ["chat", "agent"],
-                "last_img_activity": time.time() if last_activity is None else last_activity,
             }
         ),
         encoding="utf-8",
@@ -626,11 +642,12 @@ def test_guard_dispatch_raises_in_img_mode(
     arb_llm.guard_dispatch("npu")
 
 
-def test_guard_retry_after_floor(
+def test_guard_retry_after_is_the_floor(
     fake_mgr: FakeManager, state_path: Path, tmp_hal0_home: str
 ) -> None:
-    # idle window long past → floor of 15s
-    _write_img_state(state_path, last_activity=time.time() - 10_000)
+    # No idle window to count down: image mode ends one grace after the last
+    # render, or at once for an LLM request, so the hint is the fixed floor.
+    _write_img_state(state_path)
     arb = GpuArbiter(fake_mgr, state_path=state_path)
     with pytest.raises(GpuImageMode) as ei:
         arb.guard_dispatch("agent")
@@ -701,49 +718,12 @@ def test_guard_dispatch_blocks_img_slot_in_llm_mode(
     arb.guard_dispatch("tts")
 
 
-# ── activity / pin / status ──────────────────────────────────────────────────
-
-
-async def test_touch_and_status(fake_mgr: FakeManager, state_path: Path) -> None:
-    arb = GpuArbiter(fake_mgr, state_path=state_path, idle_restore_minutes=7)
-    st = arb.status()
-    assert st == {
-        "mode": "llm",
-        "pinned": False,
-        "saved_llm_slots": [],
-        "idle_restore_at": None,
-    }
-
-    await arb.ensure_img()
-    before = time.time()
-    arb.touch_img_activity()
-    st = arb.status()
-    assert st["mode"] == "img"
-    assert st["idle_restore_at"] is not None
-    assert st["idle_restore_at"] >= before + 7 * 60 - 1
-    assert _read_state(state_path)["last_img_activity"] >= before
-
-    # pinned → no auto-restore window advertised
-    arb.set_pin(True)
-    assert arb.status()["pinned"] is True
-    assert arb.status()["idle_restore_at"] is None
-    arb.set_pin(False)
-    assert arb.status()["idle_restore_at"] is not None
-
-
-# ── idle-restore loop (D6) ───────────────────────────────────────────────────
-
-#: ~0.05s idle window expressed in minutes (idle_restore_minutes * 60 = secs).
-_TINY_WINDOW_MIN = 0.05 / 60
-
-
-async def _img_mode_arbiter(fake_mgr: FakeManager, state_path: Path) -> GpuArbiter:
-    """Arbiter already flipped to IMG with a tiny idle window, calls cleared."""
-    arb = GpuArbiter(fake_mgr, state_path=state_path)
-    await arb.ensure_img()
-    arb.idle_restore_minutes = _TINY_WINDOW_MIN
-    fake_mgr.calls.clear()
-    return arb
+# ── restore after each render ────────────────────────────────────────────────
+#
+# Image mode lasts only while image work runs: a /v1 image request (image_job),
+# a request forwarded to the img slot (in_flight_count), or a render in
+# ComfyUI's queue. The restore loop hands the GPU back one grace after the last
+# render; an LLM request does it at once (make_room_for_llm). A pin holds.
 
 
 async def _cancel_loop(task: asyncio.Task[None]) -> None:
@@ -752,127 +732,433 @@ async def _cancel_loop(task: asyncio.Task[None]) -> None:
         await task
 
 
-async def test_idle_restore_fires_after_window(fake_mgr: FakeManager, state_path: Path) -> None:
-    """Past the idle window the loop restores the LLM set EXACTLY once and
-    keeps ticking (mode flips to LLM so later ticks are no-ops)."""
-    arb = await _img_mode_arbiter(fake_mgr, state_path)
-
-    task = asyncio.create_task(arb.run_idle_loop(interval_s=0.01))
-    try:
-        await asyncio.sleep(0.3)
-        assert ("unload", "img") not in fake_mgr.calls  # container stays up
-        assert fake_mgr.calls.count(("load", "chat", None)) == 1  # restored ONCE
-        assert ("load", "agent", None) in fake_mgr.calls
-        assert arb.mode is GpuMode.LLM
-        assert not task.done(), "loop must stay alive after restoring"
-    finally:
-        await _cancel_loop(task)
-
-
-async def test_idle_restore_skipped_when_pinned(fake_mgr: FakeManager, state_path: Path) -> None:
-    arb = GpuArbiter(fake_mgr, state_path=state_path)
-    await arb.ensure_img(pin=True)
-    arb.idle_restore_minutes = _TINY_WINDOW_MIN
-    fake_mgr.calls.clear()
-
-    task = asyncio.create_task(arb.run_idle_loop(interval_s=0.01))
-    try:
-        await asyncio.sleep(0.2)
-        assert fake_mgr.calls == []  # nothing unloaded/loaded
-        assert arb.mode is GpuMode.IMG
-        assert not task.done()
-    finally:
-        await _cancel_loop(task)
-
-
-async def test_idle_restore_skipped_when_window_zero(
-    fake_mgr: FakeManager, state_path: Path
-) -> None:
-    """idle_restore_minutes=0 → manual-only restore (#599 schema), never auto."""
-    arb = GpuArbiter(fake_mgr, state_path=state_path, idle_restore_minutes=0)
-    await arb.ensure_img()
-    # backdate activity far past ANY window so a buggy 0-window would fire
-    arb._load_state()["last_img_activity"] = time.time() - 10_000
-    arb._persist()
-    fake_mgr.calls.clear()
-
-    task = asyncio.create_task(arb.run_idle_loop(interval_s=0.01))
-    try:
-        await asyncio.sleep(0.2)
-        assert fake_mgr.calls == []
-        assert arb.mode is GpuMode.IMG
-        assert not task.done()
-    finally:
-        await _cancel_loop(task)
-
-
-async def test_in_flight_img_job_defers_restore(fake_mgr: FakeManager, state_path: Path) -> None:
-    """An in-flight img job (long Wan video render) defers the restore even
-    past the window; it fires once the job count drops to zero."""
-    arb = await _img_mode_arbiter(fake_mgr, state_path)
-    fake_mgr.in_flight = {"img": 1}
-
-    task = asyncio.create_task(arb.run_idle_loop(interval_s=0.01))
-    try:
-        await asyncio.sleep(0.2)
-        assert fake_mgr.calls == []  # restore deferred
-        assert arb.mode is GpuMode.IMG
-
-        fake_mgr.in_flight = {"img": 0}  # render finished
-        await asyncio.sleep(0.2)
-        assert fake_mgr.calls.count(("load", "chat", None)) == 1
-        assert arb.mode is GpuMode.LLM
-    finally:
-        await _cancel_loop(task)
-
-
-async def test_idle_tick_defers_and_restamps_when_comfyui_queue_busy(
+async def test_restore_tick_restores_once_the_grace_has_passed_with_nothing_rendering(
     fake_mgr: FakeManager, state_path: Path, comfyui_http: dict[str, Any]
 ) -> None:
-    """Renders queued straight into ComfyUI's web UI never pass through the
-    dispatcher (in_flight_count can't see them), so the idle tick must also
-    consult ComfyUI's /queue: busy → defer the restore AND restart the idle
-    window; drained → restore on the next eligible tick."""
-    arb = await _img_mode_arbiter(fake_mgr, state_path)
+    arb = GpuArbiter(fake_mgr, state_path=state_path, restore_grace_s=10.0)
+    async with arb.image_job():
+        await arb.ensure_img()
+    fake_mgr.calls.clear()
+
+    await arb._restore_tick()  # inside the grace
+    assert fake_mgr.calls == [] and comfyui_http["free"] == 0
+    assert arb.mode is GpuMode.IMG
+
+    arb._quiet_since -= 11  # the grace has passed
+    await arb._restore_tick()
+    assert fake_mgr.calls == [("load", "chat", None), ("load", "agent", None)]
+    assert comfyui_http["free"] == 1
+    assert arb.mode is GpuMode.LLM
+
+
+async def test_back_to_back_renders_inside_the_grace_do_not_reload_llms(
+    fake_mgr: FakeManager, state_path: Path, comfyui_http: dict[str, Any]
+) -> None:
+    arb = GpuArbiter(fake_mgr, state_path=state_path, restore_grace_s=10.0)
+    for _ in range(3):
+        async with arb.image_job():
+            await arb.ensure_img()
+        await arb._restore_tick()
+
+    assert [c for c in fake_mgr.calls if c[0] == "load"] == [("load", "img", "sdxl-turbo")]
+    assert comfyui_http["free"] == 0
+    arb._quiet_since -= 11
+    await arb._restore_tick()
+    assert fake_mgr.calls.count(("load", "chat", None)) == 1
+    assert comfyui_http["free"] == 1
+
+
+async def test_restore_tick_waits_out_an_editor_render_then_restores(
+    fake_mgr: FakeManager, state_path: Path, comfyui_http: dict[str, Any]
+) -> None:
+    """A render queued in ComfyUI's editor never passes through hal0; only /queue shows it."""
+    _write_img_state(state_path)
+    fake_mgr.ready -= {"chat", "agent"}
+    comfyui_http["queue"] = [(1, 0), (0, 0)]
+    arb = GpuArbiter(fake_mgr, state_path=state_path, restore_grace_s=0.0)
+
+    await arb._restore_tick()  # first tick in this process: the quiet clock starts
+    await arb._restore_tick()  # the editor render is running: no restore, clock restarts
+    assert fake_mgr.calls == [] and comfyui_http["free"] == 0
+
+    await arb._restore_tick()  # queue empty
+    assert fake_mgr.calls == [("load", "chat", None), ("load", "agent", None)]
+    assert arb.mode is GpuMode.LLM
+
+
+async def test_a_render_in_flight_is_never_restored_under(
+    fake_mgr: FakeManager, state_path: Path, comfyui_http: dict[str, Any]
+) -> None:
+    arb = GpuArbiter(fake_mgr, state_path=state_path, restore_grace_s=0.0)
+    async with arb.image_job():
+        await arb.ensure_img()
+        fake_mgr.calls.clear()
+        arb._quiet_since = time.monotonic() - 3600
+        await arb._restore_tick()
+        await arb.make_room_for_llm("chat")
+        with pytest.raises(ArbiterQueueBusy):
+            await arb.restore_llm()
+        with pytest.raises(GpuImageMode):
+            arb.guard_dispatch("chat")
+        assert fake_mgr.calls == [] and comfyui_http["free"] == 0
+        assert arb.status()["image_jobs"] == 1
+    assert arb.status()["image_jobs"] == 0
+
+
+async def test_a_request_arriving_during_the_quiet_check_cancels_the_restore(
+    fake_mgr: FakeManager, state_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_img_state(state_path)
+    fake_mgr.ready -= {"chat", "agent"}
+    arb = GpuArbiter(fake_mgr, state_path=state_path, restore_grace_s=0.0)
+    job = arb.image_job()
+
+    async def _queue_read_while_a_request_arrives() -> tuple[int, int]:
+        await job.__aenter__()  # a /v1 request enters during the /queue read
+        return (0, 0)
+
+    monkeypatch.setattr(arbiter_mod, "_comfyui_queue_state", _queue_read_while_a_request_arrives)
+    assert await arb._restore_if_quiet(honour_grace=False) is False
+    assert fake_mgr.calls == []
+    assert arb.mode is GpuMode.IMG
+    await job.__aexit__(None, None, None)
+
+
+async def test_a_restore_queued_behind_an_img_revive_waits_a_full_grace(
+    fake_mgr: FakeManager, state_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tick passes its grace check, then waits for the switch lock while
+    ensure_img revives a down img slot. The revive restarts the quiet clock,
+    so the queued restore must re-check the grace under the lock and stand
+    down instead of freeing ComfyUI right after it came up."""
+    _write_img_state(state_path)
+    fake_mgr.ready -= {"chat", "agent"}  # image mode; the img slot is down too
+    arb = GpuArbiter(fake_mgr, state_path=state_path, restore_grace_s=10.0)
+    arb._quiet_since = time.monotonic() - 3600
+
+    release = asyncio.Event()
+    real_load = fake_mgr.load
+
+    async def _gated_load(name: str, model_id: str | None = None) -> None:
+        if name == "img":
+            await release.wait()
+        await real_load(name, model_id)
+
+    monkeypatch.setattr(fake_mgr, "load", _gated_load)
+    revive = asyncio.create_task(arb.ensure_img())
+    for _ in range(50):
+        if arb.status()["switching"]:
+            break
+        await asyncio.sleep(0)
+    assert arb.status()["switching"] is True
+
+    tick = asyncio.create_task(arb._restore_tick())  # passes the grace check, waits on the lock
+    await asyncio.sleep(0)
+    assert not tick.done()
+
+    release.set()
+    await asyncio.wait_for(revive, timeout=2.0)
+    await asyncio.wait_for(tick, timeout=2.0)
+
+    assert fake_mgr.calls == [("load", "img", "sdxl-turbo")]
+    assert arb.mode is GpuMode.IMG
+
+
+async def test_pinned_image_mode_is_held_against_the_tick_and_llm_demand(
+    fake_mgr: FakeManager, state_path: Path, comfyui_http: dict[str, Any], tmp_hal0_home: str
+) -> None:
+    _write_img_state(state_path, pinned=True)
+    fake_mgr.ready -= {"chat", "agent"}
+    arb = GpuArbiter(fake_mgr, state_path=state_path, restore_grace_s=0.0)
+    arb._quiet_since = time.monotonic() - 3600
+
+    await arb._restore_tick()
+    await arb.make_room_for_llm("chat")
+
+    assert fake_mgr.calls == [] and comfyui_http["free"] == 0
+    with pytest.raises(GpuImageMode):
+        arb.guard_dispatch("chat")
+    with pytest.raises(ArbiterPinned):
+        await arb.restore_llm()
+
+
+async def test_llm_demand_ends_the_grace_at_once(
+    fake_mgr: FakeManager, state_path: Path, comfyui_http: dict[str, Any]
+) -> None:
+    arb = GpuArbiter(fake_mgr, state_path=state_path, restore_grace_s=600.0)
+    async with arb.image_job():
+        await arb.ensure_img()
+    fake_mgr.calls.clear()
+
+    await arb.make_room_for_llm("chat")
+
+    assert fake_mgr.calls == [("load", "chat", None), ("load", "agent", None)]
+    assert arb.mode is GpuMode.LLM
+    arb.guard_dispatch("chat")  # no longer refused
+
+
+async def test_llm_demand_leaves_a_busy_comfyui_queue_and_non_llm_slots_alone(
+    fake_mgr: FakeManager, state_path: Path, comfyui_http: dict[str, Any], tmp_hal0_home: str
+) -> None:
+    _write_img_state(state_path)
+    fake_mgr.ready -= {"chat", "agent"}
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
 
     comfyui_http["queue"] = (1, 0)
-    arb._load_state()["last_img_activity"] = time.time() - 10_000
-    arb._persist()
-    await arb._idle_tick()
-    assert arb.mode is GpuMode.IMG
-    assert fake_mgr.calls == []
-    # busy queue re-stamped the activity → idle window restarted
-    assert _read_state(state_path)["last_img_activity"] > time.time() - 5
+    await arb.make_room_for_llm("chat")
+    comfyui_http["queue"] = "unknown"
+    await arb.make_room_for_llm("chat")
+    comfyui_http["queue"] = None
+    await arb.make_room_for_llm("npu")
+    await arb.make_room_for_llm("img")
 
-    comfyui_http["queue"] = (0, 0)
-    arb._load_state()["last_img_activity"] = time.time() - 10_000
-    arb._persist()
-    await arb._idle_tick()
+    assert fake_mgr.calls == [] and comfyui_http["free"] == 0
+    assert arb.mode is GpuMode.IMG
+
+
+async def test_llm_demand_does_not_wait_for_a_switch_into_image_mode(
+    fake_mgr: FakeManager,
+    state_path: Path,
+    comfyui_http: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    release = asyncio.Event()
+    real_unload = fake_mgr.unload
+
+    async def _slow_unload(name: str) -> None:
+        await release.wait()
+        await real_unload(name)
+
+    monkeypatch.setattr(fake_mgr, "unload", _slow_unload)
+    switch = asyncio.create_task(arb.ensure_img())
+    for _ in range(50):
+        if arb.status()["switching"]:
+            break
+        await asyncio.sleep(0)
+    assert arb.status()["switching"] is True
+
+    await asyncio.wait_for(arb.make_room_for_llm("chat"), timeout=1.0)  # returns, does not wait
+
+    release.set()
+    await switch
+    assert ("load", "chat", None) not in fake_mgr.calls
+    assert arb.status()["switching"] is False
+
+
+async def test_llm_demand_stops_waiting_at_its_budget_but_the_restore_finishes(
+    fake_mgr: FakeManager,
+    state_path: Path,
+    comfyui_http: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_hal0_home: str,
+) -> None:
+    """The request stops waiting after max_wait_s and the guard answers; the
+    restore itself is shielded and still ends image mode, so a cancelled or
+    timed-out request never leaves the LLM set half reloaded."""
+    _write_img_state(state_path)
+    fake_mgr.ready -= {"chat", "agent"}
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    release = asyncio.Event()
+    real_load = fake_mgr.load
+
+    async def _slow_load(name: str, model_id: str | None = None) -> None:
+        await release.wait()
+        await real_load(name, model_id)
+
+    monkeypatch.setattr(fake_mgr, "load", _slow_load)
+
+    await asyncio.wait_for(arb.make_room_for_llm("chat", max_wait_s=0.05), timeout=1.0)
+    assert arb.mode is GpuMode.IMG
+    with pytest.raises(GpuImageMode):
+        arb.guard_dispatch("chat")
+
+    release.set()
+    restore = arb._demand_restore
+    assert restore is not None
+    assert await asyncio.wait_for(restore, timeout=2.0) is True
+    assert fake_mgr.calls == [("load", "chat", None), ("load", "agent", None)]
+    assert arb.mode is GpuMode.LLM
+
+
+async def test_concurrent_llm_demands_share_one_restore(
+    fake_mgr: FakeManager,
+    state_path: Path,
+    comfyui_http: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_hal0_home: str,
+) -> None:
+    _write_img_state(state_path)
+    fake_mgr.ready -= {"chat", "agent"}
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    real_restore = arb._restore_if_quiet
+    restores = 0
+
+    async def _counting_restore(*, honour_grace: bool) -> bool:
+        nonlocal restores
+        restores += 1
+        await asyncio.sleep(0.01)  # both requests arrive while it runs
+        return await real_restore(honour_grace=honour_grace)
+
+    monkeypatch.setattr(arb, "_restore_if_quiet", _counting_restore)
+
+    await asyncio.gather(arb.make_room_for_llm("chat"), arb.make_room_for_llm("agent"))
+
+    assert restores == 1
+    assert fake_mgr.calls == [("load", "chat", None), ("load", "agent", None)]
+    assert arb.mode is GpuMode.LLM
+
+
+async def test_restore_with_a_failing_slot_still_ends_image_mode(
+    fake_mgr: FakeManager, state_path: Path, comfyui_http: dict[str, Any]
+) -> None:
+    _write_img_state(state_path)
+    fake_mgr.ready -= {"chat", "agent"}
+    fake_mgr.fail_loads = {"chat"}
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+
+    await arb.restore_llm()
+
+    assert ("load_failed", "chat", None) in fake_mgr.calls
+    assert ("load", "agent", None) in fake_mgr.calls
+    assert arb.mode is GpuMode.LLM
+    assert _read_state(state_path)["saved_llm_slots"] == []
+
+
+async def test_a_pin_set_in_llm_mode_does_not_pin_the_next_image_mode(
+    fake_mgr: FakeManager, state_path: Path, comfyui_http: dict[str, Any]
+) -> None:
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    arb.set_pin(True)
+    await arb.ensure_img()
+    assert arb.pinned is False
+    await arb.ensure_img(pin=True)  # already in image mode: an explicit pin still pins
+    assert arb.pinned is True
+
+
+async def test_restore_llm_when_idle_waits_for_in_flight_image_requests(
+    fake_mgr: FakeManager,
+    state_path: Path,
+    comfyui_http: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(arbiter_mod, "_QUEUE_IDLE_POLL_S", 0.01)
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    job = arb.image_job()
+    await job.__aenter__()
+    await arb.ensure_img()
+
+    with pytest.raises(ArbiterQueueBusy):
+        await arb.restore_llm_when_idle(max_wait_s=0.05)
+    assert arb.mode is GpuMode.IMG and comfyui_http["free"] == 0
+
+    await job.__aexit__(None, None, None)
+    await arb.restore_llm_when_idle(max_wait_s=1.0)
+    assert arb.mode is GpuMode.LLM
+
+
+async def test_restore_llm_when_idle_restores_once_the_image_request_ends(
+    fake_mgr: FakeManager,
+    state_path: Path,
+    comfyui_http: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The omni loop's restore waits for an open /v1 render instead of
+    refusing at once, then restores when it ends."""
+    monkeypatch.setattr(arbiter_mod, "_QUEUE_IDLE_POLL_S", 0.01)
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    job = arb.image_job()
+    await job.__aenter__()
+    await arb.ensure_img()
+
+    restore = asyncio.create_task(arb.restore_llm_when_idle(max_wait_s=2.0))
+    await asyncio.sleep(0.05)  # a few polls while the render runs
+    assert not restore.done()
+    assert comfyui_http["free"] == 0
+
+    await job.__aexit__(None, None, None)
+    await asyncio.wait_for(restore, timeout=2.0)
     assert arb.mode is GpuMode.LLM
     assert comfyui_http["free"] == 1
 
 
-async def test_idle_loop_survives_restore_exception(
-    fake_mgr: FakeManager, state_path: Path, caplog: pytest.LogCaptureFixture
+async def test_restore_tick_after_a_restart_in_image_mode_restores_after_one_grace(
+    fake_mgr: FakeManager, state_path: Path, comfyui_http: dict[str, Any]
 ) -> None:
-    """restore_llm raising must not kill the loop: the error is logged and
-    the restore succeeds on the next eligible tick."""
-    arb = await _img_mode_arbiter(fake_mgr, state_path)
-    fake_mgr.fail_loads = {"chat"}  # restore_llm raises mid-reload
+    _write_img_state(state_path)
+    fake_mgr.ready -= {"chat", "agent"}
+    arb = GpuArbiter(fake_mgr, state_path=state_path, restore_grace_s=10.0)
+
+    await arb._restore_tick()  # a fresh process: the first tick only starts the quiet clock
+    assert fake_mgr.calls == [] and arb.mode is GpuMode.IMG
+
+    arb._quiet_since -= 11
+    await arb._restore_tick()
+    assert fake_mgr.calls == [("load", "chat", None), ("load", "agent", None)]
+    assert arb.mode is GpuMode.LLM
+
+
+async def test_restore_tick_defers_while_the_img_slot_has_a_forwarded_request(
+    state_path: Path, comfyui_http: dict[str, Any]
+) -> None:
+    fake_mgr = FakeManager(in_flight={"img": 1})
+    _write_img_state(state_path)
+    fake_mgr.ready -= {"chat", "agent"}
+    arb = GpuArbiter(fake_mgr, state_path=state_path, restore_grace_s=0.0)
+    arb._quiet_since = time.monotonic() - 3600
+
+    await arb._restore_tick()
+    await arb._restore_tick()
+
+    assert fake_mgr.calls == [] and comfyui_http["free"] == 0
+    assert arb.mode is GpuMode.IMG
+
+
+async def test_status_reports_switching_and_image_jobs(
+    fake_mgr: FakeManager, state_path: Path
+) -> None:
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    assert arb.status() == {
+        "mode": "llm",
+        "pinned": False,
+        "saved_llm_slots": [],
+        "switching": False,
+        "image_jobs": 0,
+    }
+    async with arb.image_job():
+        assert arb.status()["image_jobs"] == 1
+        async with arb.image_job():
+            assert arb.status()["image_jobs"] == 2
+    assert arb.status()["image_jobs"] == 0
+
+
+async def test_restore_loop_survives_a_tick_exception(
+    fake_mgr: FakeManager,
+    state_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    ticks = 0
+
+    async def _tick() -> None:
+        nonlocal ticks
+        ticks += 1
+        if ticks == 1:
+            raise RuntimeError("tick failed")
+
+    monkeypatch.setattr(arb, "_restore_tick", _tick)
 
     with caplog.at_level(logging.WARNING, logger="hal0.slots.arbiter"):
-        task = asyncio.create_task(arb.run_idle_loop(interval_s=0.01))
+        task = asyncio.create_task(arb.run_restore_loop(interval_s=0.01))
         try:
-            await asyncio.sleep(0.2)
-            assert any("idle_loop_error" in rec.message for rec in caplog.records)
-            assert arb.mode is GpuMode.IMG  # failed restore left mode persisted
-            assert not task.done(), "loop must survive tick exceptions"
-
-            fake_mgr.fail_loads = set()
-            await asyncio.sleep(0.2)
-            assert arb.mode is GpuMode.LLM
-            assert ("load", "chat", None) in fake_mgr.calls
-            assert ("load", "agent", None) in fake_mgr.calls
+            for _ in range(200):
+                if ticks >= 3:
+                    break
+                await asyncio.sleep(0.01)
+            assert ticks >= 3
+            assert not task.done(), "the loop must survive a tick exception"
+            assert any("restore_loop_error" in rec.message for rec in caplog.records)
         finally:
             await _cancel_loop(task)
 
@@ -896,8 +1182,6 @@ def test_manager_owns_lazy_arbiter(tmp_hal0_home: str) -> None:
                 "port = 8188",
                 "[model]",
                 'default = "sdxl-turbo"',
-                "[image]",
-                "idle_restore_minutes = 7",
                 "",
             ]
         ),
@@ -909,91 +1193,14 @@ def test_manager_owns_lazy_arbiter(tmp_hal0_home: str) -> None:
     assert sm.arbiter is arb  # constructed once, cached
     # state path lives under the manager's var-lib root (HAL0_HOME-redirected)
     assert arb.state_path == Path(tmp_hal0_home) / "var-lib" / "hal0" / "gpu_arbiter.json"
-    # idle_restore_minutes read from the img slot's [image] section
-    assert arb.idle_restore_minutes == 7
 
 
 def test_manager_arbiter_defaults_without_img_slot(tmp_hal0_home: str) -> None:
     from hal0.slots.manager import SlotManager
 
     sm = SlotManager()
-    assert sm.arbiter.idle_restore_minutes == 60
-
-
-def test_arbiter_default_idle_window_is_60(fake_mgr: FakeManager, state_path: Path) -> None:
-    """Resident design default: an hour of UI time before auto-restore."""
-    assert GpuArbiter(fake_mgr, state_path=state_path).idle_restore_minutes == 60
-
-
-def _write_img_toml(tmp_hal0_home: str, idle_restore_minutes: str) -> None:
-    slots_dir = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
-    slots_dir.mkdir(parents=True, exist_ok=True)
-    (slots_dir / "img.toml").write_text(
-        "\n".join(
-            [
-                'name = "img"',
-                'type = "image"',
-                'provider = "comfyui"',
-                'device = "gpu-rocm"',
-                'runtime = "container"',
-                "port = 8188",
-                "[model]",
-                'default = "sdxl-turbo"',
-                "[image]",
-                f"idle_restore_minutes = {idle_restore_minutes}",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-
-def test_manager_arbiter_accepts_zero_window_from_toml(tmp_hal0_home: str) -> None:
-    """TOML ``[image].idle_restore_minutes = 0`` reaches the arbiter as 0
-    (manual-only restore, #599 schema) — NOT coerced to the default 60.
-    Negatives/garbage still fall back to 60."""
-    from hal0.slots.manager import SlotManager
-
-    _write_img_toml(tmp_hal0_home, "0")
-    assert SlotManager().arbiter.idle_restore_minutes == 0
-
-    # invalid values still fall back to 60 (fresh managers: arbiter is cached)
-    _write_img_toml(tmp_hal0_home, "-3")
-    assert SlotManager().arbiter.idle_restore_minutes == 60
-    _write_img_toml(tmp_hal0_home, "true")
-    assert SlotManager().arbiter.idle_restore_minutes == 60
-    _write_img_toml(tmp_hal0_home, '"soon"')
-    assert SlotManager().arbiter.idle_restore_minutes == 60
-
-
-async def test_zero_window_from_toml_never_auto_restores(tmp_hal0_home: str) -> None:
-    """End-to-end #599 pin: the TOML-sourced 0 window feeds an arbiter whose
-    idle loop never auto-restores (manual restore only)."""
-    from hal0.slots.manager import SlotManager
-
-    _write_img_toml(tmp_hal0_home, "0")
-    fake_mgr = FakeManager()
-    arb = GpuArbiter(
-        fake_mgr,
-        state_path=Path(tmp_hal0_home) / "gpu_arbiter.json",
-        idle_restore_minutes=SlotManager()._img_idle_restore_minutes(),
-    )
-    assert arb.idle_restore_minutes == 0
-    await arb.ensure_img()
-    # backdate activity far past ANY window so a buggy coercion-to-5 (or a
-    # 0-window treated as "always expired") would fire
-    arb._load_state()["last_img_activity"] = time.time() - 10_000
-    arb._persist()
-    fake_mgr.calls.clear()
-
-    task = asyncio.create_task(arb.run_idle_loop(interval_s=0.01))
-    try:
-        await asyncio.sleep(0.1)
-        assert fake_mgr.calls == []
-        assert arb.mode is GpuMode.IMG
-        assert not task.done()
-    finally:
-        await _cancel_loop(task)
+    assert sm.arbiter.mode is GpuMode.LLM
+    assert sm.arbiter.restore_grace_s == arbiter_mod._RESTORE_GRACE_S
 
 
 # ── img readiness poll after load (#714) ────────────────────────────────────
@@ -1247,7 +1454,7 @@ async def test_ensure_img_cold_starts_an_img_slot_that_is_down_in_img_mode(
 ) -> None:
     """#3048: the persisted mode says img but the slot is down (a crash, a manual
     unload). ensure_img must reload it instead of returning early."""
-    _write_img_state(state_path, last_activity=1.0)
+    _write_img_state(state_path)
     fake_mgr.ready -= {"chat", "agent"}  # the original switch unloaded them
     arb = GpuArbiter(fake_mgr, state_path=state_path)
 
@@ -1256,7 +1463,7 @@ async def test_ensure_img_cold_starts_an_img_slot_that_is_down_in_img_mode(
     assert fake_mgr.calls == [("load", "img", "sdxl-turbo")]
     assert arb.mode is GpuMode.IMG
     assert arb.saved_llm_slots == ("chat", "agent")
-    assert _read_state(state_path)["last_img_activity"] > 1.0
+    assert arb._quiet_since is not None
 
 
 async def test_ensure_img_in_img_mode_rolls_back_when_the_reload_fails(

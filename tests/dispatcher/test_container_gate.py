@@ -115,6 +115,8 @@ def _slot_manager_stub(
     """Build a SlotManager mock whose container_readiness_check is wired."""
     sm = MagicMock()
     sm.container_readiness_check = AsyncMock(return_value=(ready, reason))
+    # The dispatcher awaits the arbiter's LLM-demand step before its guard.
+    sm.arbiter.make_room_for_llm = AsyncMock(return_value=None)
     return sm
 
 

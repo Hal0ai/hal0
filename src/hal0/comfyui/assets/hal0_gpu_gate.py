@@ -16,6 +16,12 @@ stale copy — no image rebuild. ComfyUI imports it at startup; ``_install()`` a
 middleware to the PromptServer app (the same mechanism ComfyUI-Login uses).
 The container runs with host networking, so hal0-api is on loopback.
 
+hal0 reports ``arbiter.switching`` while it restores the LLM set or enters
+image mode; the hook waits it out, so a prompt never renders under LLM weights
+that are still loading or not yet unloaded. A running ComfyUI picks up this
+file when the img container restarts (the provider copies it when it builds
+the spec).
+
 Fail-open by design: if hal0-api is unreachable or the switch request fails,
 the hook allows the prompt — a broken hal0 must never brick standalone ComfyUI
 use. The pure decision logic (``should_prepare_image_mode``) is unit-tested in the hal0 repo
@@ -72,6 +78,20 @@ def should_prepare_image_mode(method: str, path: str, status: "dict | None") -> 
     return status.get("mode") == "inference"
 
 
+def _arbiter_switching(status: "dict | None") -> bool:
+    """True iff hal0 reports its GPU arbiter mid-switch (``arbiter.switching``).
+
+    hal0 holds the switch lock while it enters image mode (it persists the
+    generation mode before the LLM set is unloaded) and while it restores the
+    LLM set (the mode reads generation until the reload is done), so neither
+    mode is final until this clears.
+    """
+    if not isinstance(status, dict):
+        return False
+    arbiter = status.get("arbiter")
+    return isinstance(arbiter, dict) and bool(arbiter.get("switching"))
+
+
 def _fetch_status() -> "dict | None":
     """Blocking status fetch via urllib (run in a thread by the middleware).
 
@@ -112,20 +132,26 @@ def _post_switchover() -> bool:
 def prepare_image_mode() -> None:
     """Best-effort inference → generation handoff before forwarding /prompt.
 
-    Fail-open: exceptions and timeouts return without blocking the prompt.
+    Waits out a switch hal0 is already running before it decides, then asks
+    for image mode when hal0 reports inference and waits until the switch has
+    finished. Fail-open: exceptions and timeouts return without blocking the
+    prompt.
     """
+    deadline = time.monotonic() + max(0.0, _SWITCH_TIMEOUT_S)
     status = _fetch_status()
+    while _arbiter_switching(status) and time.monotonic() < deadline:
+        time.sleep(max(0.05, _SWITCH_POLL_S))
+        status = _fetch_status()
     if not should_prepare_image_mode("POST", "/prompt", status):
         return
     if not _post_switchover():
         return
 
-    deadline = time.monotonic() + max(0.0, _SWITCH_TIMEOUT_S)
     while time.monotonic() < deadline:
         status = _fetch_status()
         if not isinstance(status, dict):
             return
-        if status.get("mode") == "generation":
+        if status.get("mode") == "generation" and not _arbiter_switching(status):
             return
         sw = status.get("switchover")
         if isinstance(sw, dict) and sw.get("error"):

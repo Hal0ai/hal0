@@ -201,7 +201,8 @@ class _StubArbiter:
                 "mode": mode,
                 "pinned": False,
                 "saved_llm_slots": [],
-                "idle_restore_at": None,
+                "switching": False,
+                "image_jobs": 0,
             }
         )
 
@@ -354,6 +355,24 @@ def test_switchover_to_inference_refused_while_queue_busy(
     arb.restore_llm.assert_not_awaited()
 
 
+def test_switchover_to_inference_refused_while_an_image_request_is_in_flight(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A /v1/images/generations render holds an image job from before its
+    # /prompt reaches ComfyUI, so the queue alone can look empty mid-render.
+    monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
+    arb = _install_arbiter(client, mode="img")
+    arb.status.return_value = {**arb.status.return_value, "image_jobs": 1}
+    c, s, f = _patch(container="running", hermes=False, fetch=_fetch_idle)
+    with c, s, f:
+        r = client.post("/api/comfyui/switchover", json={"mode": "inference"})
+    assert r.status_code == 409
+    error = r.json()["error"]
+    assert error["code"] == "comfyui.busy"
+    assert error["details"]["image_jobs"] == 1
+    arb.restore_llm.assert_not_awaited()
+
+
 def test_switchover_post_migration_inference_uses_arbiter_truth(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -487,13 +506,14 @@ def test_pin_endpoint_rejects_non_bool_body(
 
 def test_status_carries_arbiter_block(client: TestClient) -> None:
     # /status folds arbiter.status() in under "arbiter" so the pane can render
-    # mode/pin/idle-restore without a second endpoint.
+    # mode/pin/switching/image jobs without a second endpoint.
     arb = _install_arbiter(client)
     arb.status.return_value = {
         "mode": "img",
         "pinned": True,
         "saved_llm_slots": ["primary", "utility"],
-        "idle_restore_at": None,
+        "switching": False,
+        "image_jobs": 0,
     }
     c, s, f = _patch(container="running", hermes=False, fetch=_fetch_idle)
     with c, s, f:
@@ -503,7 +523,8 @@ def test_status_carries_arbiter_block(client: TestClient) -> None:
         "mode": "img",
         "pinned": True,
         "saved_llm_slots": ["primary", "utility"],
-        "idle_restore_at": None,
+        "switching": False,
+        "image_jobs": 0,
     }
 
 
