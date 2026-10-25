@@ -828,10 +828,27 @@ _BROWSER_UA = (
     [("GET", "/api/comfyui/arbiter"), ("POST", "/api/comfyui/prompt-handoff")],
 )
 def test_headerless_call_from_curl_or_a_browser_is_nobody(
-    client: TestClient, method: str, path: str, user_agent: str
+    box_client: TestClient, method: str, path: str, user_agent: str
 ):
-    """An operator's curl, a browser tab: not an engine to restart."""
-    client.request(method, path, headers={"User-Agent": user_agent})
+    """An operator's curl, a browser tab, on the box itself: not an engine to restart.
+
+    From the box, so the peer test passes and the User-Agent is what decides (the same
+    call with the gate's own User-Agent is ``test_headerless_call_is_stale``).
+    """
+    box_client.request(method, path, headers={"User-Agent": user_agent})
+
+    assert _status(box_client)["gate"] == {"state": "unknown", "version_seen": None}
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [("GET", "/api/comfyui/arbiter"), ("POST", "/api/comfyui/prompt-handoff")],
+)
+def test_headerless_call_from_curl_on_another_machine_is_nobody(
+    client: TestClient, method: str, path: str
+):
+    """The default client's peer is not the box: nothing about it reads as the gate."""
+    client.request(method, path, headers={"User-Agent": "curl/8.5.0"})
 
     assert _status(client)["gate"] == {"state": "unknown", "version_seen": None}
 
@@ -896,10 +913,21 @@ def test_a_call_with_the_header_counts_from_any_peer(app, monkeypatch):
 
 @pytest.mark.parametrize("user_agent", ["curl/8.5.0", _BROWSER_UA])
 def test_a_browsers_status_poll_and_switchover_are_not_a_stale_gate(
-    client: TestClient, user_agent: str
+    box_client: TestClient, user_agent: str
 ):
-    """The dashboard polls /status and posts /switchover, both without the header."""
+    """The dashboard polls /status and posts /switchover, both without the header. From the
+    box itself (a dashboard opened on the machine), where the User-Agent is what decides."""
     headers = {"User-Agent": user_agent}
+    assert _status(box_client, headers)["gate"] == {"state": "unknown", "version_seen": None}
+    box_client.post("/api/comfyui/switchover", json={"mode": "generation"}, headers=headers)
+
+    assert _status(box_client, headers)["gate"] == {"state": "unknown", "version_seen": None}
+
+
+def test_a_dashboards_status_poll_and_switchover_from_another_machine_are_not_a_stale_gate(
+    client: TestClient,
+):
+    headers = {"User-Agent": _BROWSER_UA}
     assert _status(client, headers)["gate"] == {"state": "unknown", "version_seen": None}
     client.post("/api/comfyui/switchover", json={"mode": "generation"}, headers=headers)
 
