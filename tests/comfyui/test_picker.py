@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 
 from hal0.comfyui import inventory, paths, picker
-from hal0.comfyui.catalog import CATALOG, component_path
+from hal0.comfyui.catalog import CATALOG, component_path, weights_gib
 from hal0.config.schema import HardwareInfo
 
 _ROW_KEYS = {
@@ -107,7 +107,7 @@ def test_catalog_row_shape_matches_what_the_picker_emits_elsewhere() -> None:
     assert row["backend"] == "gpu-vulkan"
     assert row["provider"] == "comfyui"
     assert row["capabilities"] == ["image"]
-    assert row["size_gb"] == model.approx_gb
+    assert row["size_gb"] == weights_gib(model)  # GiB, like a user checkpoint row's size
     assert row["pullable"] is True
     assert row["display_name"] == model.label
     assert row["license"] == model.license

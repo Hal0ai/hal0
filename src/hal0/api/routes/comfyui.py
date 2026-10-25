@@ -49,30 +49,46 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, FastAPI, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
+from hal0.api import auth as auth_layer
+from hal0.api import memory_source
 from hal0.api._redact import redact_log_line
-from hal0.api.auth import GATE_SCOPE_KEY
+from hal0.api.auth import GATE_SCOPE_KEY, admin_gated, gate_path_refused_at
 from hal0.api.middleware.error_codes import Conflict, Forbidden, NotFound, UnprocessableEntity
 from hal0.api.routes.power import _probe_power
 from hal0.capabilities.catalog import COMFYUI_NO_ENGINE_REASON, comfyui_backends
 from hal0.comfyui import install as comfyui_install
 from hal0.comfyui import inventory
 from hal0.comfyui import paths as comfyui_paths
+from hal0.comfyui import progress as render_progress
 from hal0.comfyui.autoselect import auto_select_first_image_model, enabled_img_model
 from hal0.comfyui.catalog import (
+    BYTES_PER_GIB,
     CATALOG,
     ImageModel,
     get_model,
     install_state,
     load_template,
+    missing_gib,
     models_using,
+    weights_gib,
+)
+from hal0.comfyui.fit import assess, need_for
+from hal0.comfyui.gate_reason import clean_reason
+from hal0.comfyui.gate_version import (
+    GATE_USER_AGENT_PREFIX,
+    GATE_VERSION,
+    GATE_VERSION_HEADER,
 )
 from hal0.comfyui.picker import recommended_id
 from hal0.hardware import gpu_view
+from hal0.hardware.memory_budget import MemoryBudget
 from hal0.http_client import async_client
+from hal0.providers import comfyui as comfyui_provider
+from hal0.providers.comfyui_workflows import effective_size
 from hal0.registry.pull import PullJob, make_job
 from hal0.slots.naming import slot_container_name, slot_token_for, slot_unit_name
 from hal0.upstreams.huggingface import hf_token_from_env
@@ -129,6 +145,38 @@ _BG_TASKS: set[asyncio.Task[Any]] = set()
 _SWITCH_IDLE: dict[str, Any] = {"active": False, "target": None, "error": None}
 _switch: dict[str, Any] = dict(_SWITCH_IDLE)
 
+# The ComfyUI GPU gate (the ``hal0_gpu_gate`` node in the img container) tells hal0 two
+# things, and /status reports both: its version, on every request it makes
+# (``X-Hal0-Gate-Version``), and why it refused a prompt (``POST /gate-refusal``). Like
+# ``_switch`` this is module state: there is one engine, so one gate.
+#
+# ``_gate_seen``: the version header of the gate's latest call (``None`` for a call
+# with none) and when it came (epoch seconds); ``at`` is ``None`` until a call arrives.
+# ``_gate_refusal``: the latest refusal, ``{"at": epoch seconds, "reason": str}``.
+_GATE_SEEN_IDLE: dict[str, Any] = {"version": None, "at": None}
+_gate_seen: dict[str, Any] = dict(_GATE_SEEN_IDLE)
+_gate_refusal: dict[str, Any] | None = None
+
+# The version is a header any caller on a box without auth can set, so hal0 keeps a
+# bounded piece of it (the reason is bounded by ``clean_reason``).
+_GATE_VERSION_MAX = 32
+
+# Wall clock for the timestamps above (epoch seconds); tests drive it through this seam.
+_wall_clock = time.time
+
+# Failures the status and model routes absorb (an unreadable gate state, a model whose
+# catalog facts cannot be judged) are logged once per process, keyed by what failed: the
+# dashboard polls ``/status`` every few seconds, and a persistent fault is one fact.
+_warned: set[str] = set()
+
+
+def _warn_once(key: str, event: str, **fields: Any) -> None:
+    """Log ``event`` as a warning, with the exception being handled, the first time ``key`` fails."""
+    if key in _warned:
+        return
+    _warned.add(key)
+    log.warning(event, extra=fields, exc_info=True)
+
 
 def _comfyui_base_url() -> str:
     """Base URL of the operational ComfyUI container's HTTP API.
@@ -173,12 +221,144 @@ async def aclose_client() -> None:
 
 
 def _reset_state() -> None:
-    """Drop the shared client, switch tracker and engine-read cache. For test isolation only."""
-    global _client, _engine_cache
+    """Drop the shared client, switch tracker, engine-read cache and what the gate told hal0
+    (including the auth layer's marker of a refused version-less gate request).
+
+    For test isolation only.
+    """
+    global _client, _engine_cache, _gate_refusal
     _client = None
     _engine_cache = None
     _switch.clear()
     _switch.update(_SWITCH_IDLE)
+    _gate_seen.clear()
+    _gate_seen.update(_GATE_SEEN_IDLE)
+    _gate_refusal = None
+    _warned.clear()
+    auth_layer._gate_path_refused_at = None
+
+
+# ---------------------------------------------------------------------------
+# What the GPU gate tells hal0: its version, and why it refused a prompt
+# ---------------------------------------------------------------------------
+
+
+async def _gate_call(request: Request) -> None:
+    """Route dependency: remember the version the gate called with.
+
+    A call with the gate's version header is the gate's. A call without it is an old
+    gate's only when it looks like one: the gate's default HTTP client (a User-Agent of
+    ``Python-urllib/…``; v1.6.5's gate made ``GET /status`` and ``POST /switchover``
+    that way, and the first gates with the header's routes ``/arbiter`` and
+    ``/prompt-handoff``) calling from where the gate dials, the box itself (the peer
+    test the auth layer's marker uses). A browser, curl, another machine or any other
+    client without the header is nobody in particular: the dashboard polls ``/status``
+    and posts ``/switchover``. The User-Agent test is a heuristic (see
+    :func:`hal0.api.auth.gate_path_refused_at`).
+    """
+    version = request.headers.get(GATE_VERSION_HEADER)
+    if version is None and not (
+        request.headers.get("user-agent", "").startswith(GATE_USER_AGENT_PREFIX)
+        and auth_layer._gate_peer(request.scope)
+    ):
+        return
+    _gate_seen.update(
+        version=None if version is None else version[:_GATE_VERSION_MAX], at=_wall_clock()
+    )
+
+
+def record_gate_refusal(reason: str) -> None:
+    """Remember why the gate refused a prompt, for ``/status`` and ``/arbiter``.
+
+    The gate reports its own refusals (``POST /gate-refusal``); a refusal it cannot
+    report, because hal0 requires a credential it lacks, is recorded from the render
+    that ran into it (``/v1/images/generations``).
+    """
+    global _gate_refusal
+    _gate_refusal = {"at": _wall_clock(), "reason": clean_reason(reason)}
+    log.info("ComfyUI GPU gate refused a prompt: %r", _gate_refusal["reason"])
+
+
+def _record_gate_rejection(request: Request, status: int, message: str) -> None:
+    """Record a switch request hal0 rejected, when the gate made it (it carries the header)."""
+    if GATE_VERSION_HEADER in request.headers:
+        record_gate_refusal(f"hal0 refused the gate's switch request (HTTP {status}): {message}")
+
+
+def _gate_must_authenticate() -> bool:
+    """True iff hal0 would refuse the gate's requests without a credential.
+
+    The auth middleware's own rule (:func:`hal0.api.auth.admin_gated`: enforcement is on,
+    or the LAN rule for ADMIN routes applies to the request's peer), asked about the
+    peer the gate's requests come from, not the dashboard asking for ``/status``.
+    """
+    peer = comfyui_provider.gate_dial_host()
+    return admin_gated({"type": "http", "client": (peer, 0)})
+
+
+def _gate_refusal_of(resp: httpx.Response) -> str | None:
+    """The gate's reason when ``resp`` is the GPU gate's 503 for a prompt, else ``None``.
+
+    The same shape check as the provider's (:func:`hal0.providers.comfyui.gate_refusal_reason`),
+    for a ``/prompt`` hal0 posts without the provider (a quick-launched workflow).
+    """
+    try:
+        body = resp.json()
+    except ValueError:
+        return None
+    return comfyui_provider.gate_refusal_reason(resp.status_code, body)
+
+
+def _gate_state() -> str:
+    """``no_credential`` | ``stale`` | ``unknown`` | ``current``, in that order of precedence.
+
+    ``no_credential``: hal0 requires the gate to authenticate and the gate has no way to
+    (no token on disk, or it is given a host name and holds the token back from names).
+    Its calls are refused, so whatever it told hal0 earlier is no longer the news.
+
+    ``stale`` first for a gate the auth layer refused: on a box that enforces auth, an
+    engine running a gate older than the version header is turned away before it reaches
+    a route (:func:`hal0.api.auth.gate_path_refused_at`), so its call is never recorded
+    here. A refusal newer than the gate's latest recorded call, or with none, reads as
+    stale: restart the engine. The gate it is replaced by calls with the header and
+    clears it.
+
+    Otherwise by the gate's latest call: ``unknown`` when there has been none since
+    hal0-api started, ``current`` when it carried this hal0's gate version, and
+    ``stale`` for another version or none (an engine still running the gate it started
+    with: restart it).
+    """
+    if _gate_must_authenticate() and not comfyui_provider.gate_sends_credential():
+        return "no_credential"
+    refused_at = gate_path_refused_at()
+    seen_at = _gate_seen["at"]
+    if refused_at is not None and (seen_at is None or refused_at > seen_at):
+        return "stale"
+    if seen_at is None:
+        return "unknown"
+    return "current" if _gate_seen["version"] == GATE_VERSION else "stale"
+
+
+def _gate_block() -> dict[str, Any]:
+    return {"state": _gate_state(), "version_seen": _gate_seen["version"]}
+
+
+def _gate_block_or_unknown() -> dict[str, Any]:
+    """:func:`_gate_block`, or an unknown gate when its state cannot be read.
+
+    The state reads files (the gate's token, ``api.env``, the auth config), and ``/status``
+    is the page the dashboard polls: nothing here may turn it into a 500. The failure is
+    logged once.
+    """
+    try:
+        return _gate_block()
+    except Exception:
+        _warn_once("gate_block", "comfyui.gate_state_unavailable")
+        return {"state": "unknown", "version_seen": None}
+
+
+def _gate_refusal_view() -> dict[str, Any] | None:
+    return None if _gate_refusal is None else dict(_gate_refusal)
 
 
 async def _fetch_json(path: str) -> dict[str, Any] | None:
@@ -472,16 +652,19 @@ def _arbiter_status(arbiter: Any) -> dict[str, Any] | None:
     return status if isinstance(status, dict) else None
 
 
-@router.get("/status")
+@router.get("/status", dependencies=[Depends(_gate_call)])
 async def comfyui_status(request: Request) -> dict[str, Any]:
     """Aggregate systemd + ComfyUI HTTP into one engine-status object."""
     img_unit, img_container = await _img_artefacts(request)
-    container, hermes, stats, queue, files = await asyncio.gather(
+    # The gate block reads files (the token, api.env, the auth config): off the event loop,
+    # on every poll, so what the operator just changed shows at once.
+    container, hermes, stats, queue, files, gate = await asyncio.gather(
         _container_state(img_unit),
         _systemd_active(_HERMES_UNIT),
         _fetch_json("/system_stats"),
         _fetch_json("/queue"),
         _list_files_or_none(),
+        asyncio.to_thread(_gate_block_or_unknown),
     )
     reachable = stats is not None
     counts = _queue_counts(queue)
@@ -511,19 +694,28 @@ async def comfyui_status(request: Request) -> dict[str, Any]:
         "memory": _parse_memory(stats),
         "queue": counts,
         **telemetry,
-        "it_s": None,
-        "eta": None,
-        "step": None,
+        # The hal0-submitted render (/v1 and the Generate tab) ComfyUI is running: model,
+        # step n/N, node, elapsed. None when none is live. A render from the ComfyUI editor
+        # has no entry (its client id is not hal0's), so for those the pane shows
+        # queue-level state.
+        "progress": render_progress.current(),
         "inference": {"hermes": hermes},
         # Verified counts of the weight files on disk, never faked; None without a models
         # tree or when the scan failed.
         "inventory": None if files is None else inventory.status_counts(files),
         "switchover": dict(_switch),
         "arbiter": arbiter_block,
+        # The GPU gate in the img container (the hal0_gpu_gate node): whether it is the
+        # gate this hal0 ships (``current``), an older one (``stale``: restart the engine),
+        # not heard from since hal0-api started (``unknown``), or one that hal0 requires to
+        # authenticate and that has no credential (``no_credential``); and the latest
+        # prompt it refused, ``{"at": epoch seconds, "reason": str}``, else null.
+        "gate": gate,
+        "gate_refusal": _gate_refusal_view(),
     }
 
 
-@router.get("/arbiter")
+@router.get("/arbiter", dependencies=[Depends(_gate_call)])
 async def comfyui_arbiter(request: Request) -> dict[str, Any]:
     """The GPU arbiter's state alone, for the ``hal0_gpu_gate`` node.
 
@@ -531,13 +723,19 @@ async def comfyui_arbiter(request: Request) -> dict[str, Any]:
     included, with a 2 s budget, and refuses the prompt when hal0 does not
     answer. So it runs none of ``/status``'s probes (systemd, ComfyUI's HTTP
     API, the models scan): only ``mode`` (see :func:`api_mode`), the
-    ``arbiter`` block and the ``switchover`` tracker, in the same shape.
+    ``arbiter`` block, the ``switchover`` tracker and the gate's latest
+    ``gate_refusal``, in the same shape.
+
+    The call is noted as the gate's, by its ``X-Hal0-Gate-Version`` header or, without
+    one, by the gate's default HTTP client (see :func:`_gate_call`): that is what
+    ``/status``'s ``gate.state`` reads.
     """
     arbiter_block = _arbiter_status(_get_arbiter(request))
     return {
         "mode": api_mode(arbiter_block),
         "arbiter": arbiter_block,
         "switchover": dict(_switch),
+        "gate_refusal": _gate_refusal_view(),
     }
 
 
@@ -547,7 +745,7 @@ async def comfyui_arbiter(request: Request) -> dict[str, Any]:
 _HANDOFF_LOCK_WAIT_S = 1.5
 
 
-@router.post("/prompt-handoff")
+@router.post("/prompt-handoff", dependencies=[Depends(_gate_call)])
 async def comfyui_prompt_handoff(request: Request) -> JSONResponse:
     """The ``hal0_gpu_gate`` node announces an editor prompt in image mode.
 
@@ -567,6 +765,33 @@ async def comfyui_prompt_handoff(request: Request) -> JSONResponse:
     return JSONResponse(status_code=200, content={"held": bool(held)})
 
 
+class GateRefusalBody(BaseModel):
+    # ``reason`` accepts any JSON so a missing or non-string value routes to the handler's
+    # custom ``comfyui.invalid_gate_refusal`` 422 (as ``/pin`` does for its body) rather
+    # than a generic pydantic ``validation.error``.
+    model_config = ConfigDict(extra="ignore")
+    reason: Any = None
+
+
+@router.post("/gate-refusal", status_code=202, dependencies=[Depends(_gate_call)])
+async def comfyui_gate_refusal(body: GateRefusalBody | None = None) -> JSONResponse:
+    """The ``hal0_gpu_gate`` node reports a prompt it refused (best effort).
+
+    Body: ``{"reason": str}``, the text the editor was shown. hal0 keeps the latest, cut
+    to 500 characters, with the time it arrived: ``/status`` and ``/arbiter`` report it
+    as ``gate_refusal``. Nothing here acts on it. The route is the gate's own (the gate's
+    token admits it, see :mod:`hal0.api.auth`) and is not an MCP tool.
+    """
+    reason = body.reason if body is not None else None
+    if not isinstance(reason, str) or not reason.strip():
+        raise UnprocessableEntity(
+            "body must be {'reason': a non-empty string}",
+            code="comfyui.invalid_gate_refusal",
+        )
+    record_gate_refusal(reason.strip())
+    return JSONResponse(status_code=202, content={"status": "recorded"})
+
+
 async def _run_switch(arbiter: Any, mode: str, *, pin: bool = False, force: bool = False) -> None:
     """Drive the arbiter for ``mode``; record failure for /status to surface."""
     try:
@@ -581,13 +806,16 @@ async def _run_switch(arbiter: Any, mode: str, *, pin: bool = False, force: bool
         _switch["target"] = None
 
 
+_ARBITER_UNAVAILABLE_MESSAGE = "slot manager / GPU arbiter is not wired on this app"
+
+
 def _arbiter_unavailable() -> JSONResponse:
     return JSONResponse(
         status_code=503,
         content={
             "error": {
                 "code": "comfyui.arbiter_unavailable",
-                "message": "slot manager / GPU arbiter is not wired on this app",
+                "message": _ARBITER_UNAVAILABLE_MESSAGE,
             }
         },
     )
@@ -605,7 +833,7 @@ class SwitchoverBody(BaseModel):
     pin: bool = False
 
 
-@router.post("/switchover")
+@router.post("/switchover", dependencies=[Depends(_gate_call)])
 async def comfyui_switchover(
     request: Request, background_tasks: BackgroundTasks, body: SwitchoverBody | None = None
 ) -> JSONResponse:
@@ -625,21 +853,21 @@ async def comfyui_switchover(
     enqueueing a render.
 
     A request the ComfyUI GPU gate's own token admitted (#3058) may only ask
-    for generation, without ``force`` or ``pin``: 403 otherwise.
+    for generation, without ``force`` or ``pin``: 403 otherwise. A request that
+    carries the gate's version header and is rejected (that 403, a bad mode, no
+    arbiter) is recorded as the gate's latest refusal, for ``/status``.
     """
     if body is None:
         body = SwitchoverBody()
     mode = body.mode
     if request.scope.get(GATE_SCOPE_KEY) and (mode != "generation" or body.force or body.pin):
-        raise Forbidden(
-            "ComfyUI's GPU gate may only ask for image mode, without force or pin",
-            code="auth.forbidden",
-        )
+        message = "ComfyUI's GPU gate may only ask for image mode, without force or pin"
+        _record_gate_rejection(request, 403, message)
+        raise Forbidden(message, code="auth.forbidden")
     if mode not in _MODES:
-        raise UnprocessableEntity(
-            "body must be {'mode': 'generation' | 'inference'}",
-            code="comfyui.invalid_mode",
-        )
+        message = "body must be {'mode': 'generation' | 'inference'}"
+        _record_gate_rejection(request, 422, message)
+        raise UnprocessableEntity(message, code="comfyui.invalid_mode")
     # One switch at a time — racing systemctl calls is never right. Checked
     # before the noop probe so a mid-flight flip is reported as in-progress, not
     # as "already there" based on a half-transitioned snapshot.
@@ -658,6 +886,7 @@ async def comfyui_switchover(
     arbiter_st = _arbiter_status(arbiter)
     current = api_mode(arbiter_st)
     if arbiter_st is None or current is None:
+        _record_gate_rejection(request, 503, _ARBITER_UNAVAILABLE_MESSAGE)
         return _arbiter_unavailable()
     already = current == "generation" if mode == "generation" else arbiter_st.get("mode") == "llm"
     if already:
@@ -753,15 +982,27 @@ def _template_defaults(model: ImageModel) -> dict[str, Any]:
 
 
 def _model_row(
-    model: ImageModel, *, recommended: str, job: PullJob | None, root: Path
+    model: ImageModel,
+    *,
+    recommended: str,
+    job: PullJob | None,
+    root: Path,
+    budget: MemoryBudget | None,
 ) -> dict[str, Any]:
     """One catalog model with its install state, as ``GET /models`` lists it.
 
     ``missing`` names each absent weight file relative to the models root, like the
     paths ``DELETE /models/{id}`` reports. ``job`` is the model's latest install, if any.
-    ``root`` is the models tree, resolved once per request by the caller.
+    ``root`` is the models tree, resolved once per request by the caller. ``approx_gb``
+    and ``missing_gb`` are GiB, like every GB figure the memory budget reports (ADR-0039);
+    the catalog's own decimal GB never leaves it.
+
+    ``fit`` is the verdict at the model's native size against ``budget`` (collected once
+    per request by the caller), as :meth:`~hal0.comfyui.fit.Fit.as_dict`; ``None`` when
+    there is no budget or it cannot say.
     """
     state = install_state(model, root)
+    fit = _fit(model, None, budget)
     return {
         "id": model.id,
         "label": model.label,
@@ -773,13 +1014,61 @@ def _model_row(
         "sizes": list(model.sizes),
         "notes": model.notes,
         "defaults": _template_defaults(model),
-        "approx_gb": model.approx_gb,
-        "missing_gb": state.missing_gb,
+        "approx_gb": weights_gib(model),
+        "missing_gb": missing_gib(state),
         "state": state.state,
         "missing": [f"{c.kind.subdir}/{c.relpath}" for c in state.missing],
         "workflow": model.workflow_filename,
         "job": job.as_dict() if job is not None else None,
+        "fit": fit,
     }
+
+
+async def _collect_budget(app: FastAPI) -> MemoryBudget | None:
+    """This box's memory budget, or ``None`` when it cannot be collected.
+
+    ``collect_memory_budget`` has no outer guard, by design: an empty budget would read as
+    "no GPU". Here a failure is an unknown budget, so the fit is ``null`` and never
+    ``wont_fit``. The failure is logged once per request.
+    """
+    try:
+        return await memory_source.collect_memory_budget(app)
+    except Exception:
+        log.warning("comfyui.fit_budget_unavailable", exc_info=True)
+        return None
+
+
+def _fit(model: ImageModel, size: str | None, budget: MemoryBudget | None) -> dict[str, Any] | None:
+    """``model``'s fit at ``size`` (``None`` is native) as a dict; ``None`` when unknown.
+
+    A model whose catalog facts cannot be judged (a measured size that is not ``WxH``) is an
+    unknown fit, like an unknown budget: one bad entry must not fail ``GET /models`` or
+    ``hal0 comfyui models list``. The failure is logged once per model.
+    """
+    if budget is None:
+        return None
+    try:
+        fit = assess(need_for(model, size), budget)
+    except Exception:
+        _warn_once(f"fit:{model.id}", "comfyui.fit_failed", model_id=model.id)
+        return None
+    return fit.as_dict() if fit is not None else None
+
+
+def _store_info(root: Path) -> dict[str, Any]:
+    """``{"free_gb", "path"}`` for the models tree ``root``.
+
+    ``path`` is ``root`` itself. ``free_gb`` is the free space, in GiB to one decimal, of
+    the filesystem it lives on: ``root``'s nearest existing parent when the tree does not
+    exist yet (a fresh store), the same place the install's disk preflight measures.
+    ``None`` when the filesystem cannot be measured, never 0.
+    """
+    probe = comfyui_install._existing_ancestor(root)
+    try:
+        free_gb: float | None = round(shutil.disk_usage(probe).free / BYTES_PER_GIB, 1)
+    except OSError:
+        free_gb = None
+    return {"free_gb": free_gb, "path": str(root)}
 
 
 def _install_jobs(app: FastAPI) -> dict[str, PullJob]:
@@ -850,22 +1139,87 @@ def _blocking_install(model: ImageModel, jobs: dict[str, PullJob]) -> PullJob | 
 async def comfyui_models(request: Request) -> dict[str, Any]:
     """The image-model catalog with each model's install state and latest install job.
 
-    Returns ``{"models": [...], "engine": {"available": bool, "reason": str | None}}``,
-    the models in catalog order. Exactly one row is ``recommended``: the starter pick for
-    this box's memory pool. ``engine`` says whether this host can run the ComfyUI image at
-    all; the catalog is listed either way, so a box without the ROCm lane can still see it.
+    Returns ``{"models": [...], "engine": {"available": bool, "reason": str | None},
+    "store": {"free_gb": float | None, "path": str}}``, the models in catalog order. Exactly
+    one row is ``recommended``: the starter pick for this box's memory pool. ``engine`` says
+    whether this host can run the ComfyUI image at all; the catalog is listed either way, so
+    a box without the ROCm lane can still see it. ``store`` is the models tree and the free
+    space (GiB) of the filesystem under it; ``free_gb`` is ``null`` when that cannot be
+    measured.
+
+    Each row's ``fit`` is the model's verdict at its native size against this box's memory
+    budget, collected once per request: ``{"verdict": "fits" | "tight" | "wont_fit",
+    "reason", "need", "render_free_gb", "ram_free_gb"}``. It is ``null`` when the budget is
+    unknown (no GPU lane, nothing measured the pool, RAM unreadable, or the collector
+    failed); an unknown budget is never ``wont_fit``. See ``GET /models/{model_id}/fit`` for
+    other sizes.
+
     409 ``comfyui.models_dir_not_writable`` (``error.details.path``) when the models tree
     cannot be read by the hal0 user.
     """
     jobs = _install_jobs(request.app)
     recommended = recommended_id()
     root = comfyui_paths.models_root()
+    budget = await _collect_budget(request.app)
     with comfyui_install.readable_tree():
         models = [
-            _model_row(model, recommended=recommended, job=jobs.get(model.id), root=root)
+            _model_row(
+                model, recommended=recommended, job=jobs.get(model.id), root=root, budget=budget
+            )
             for model in CATALOG.values()
         ]
-    return {"models": models, "engine": _engine_availability()}
+        store = _store_info(root)
+    return {"models": models, "engine": _engine_availability(), "store": store}
+
+
+# The wire form of a size: two to four ASCII digits a side, lower-case ``x``. Matched whole
+# (``fullmatch``), so a trailing newline does not slip through ``$``.
+_FIT_SIZE = re.compile(r"[0-9]{2,4}x[0-9]{2,4}")
+
+
+@router.get("/models/{model_id}/fit")
+async def comfyui_model_fit(
+    model_id: str, request: Request, size: str | None = None
+) -> dict[str, Any]:
+    """The model's fit at ``size`` (``WxH``; native when omitted) against this box's memory.
+
+    Returns ``{"fit": {...} | null, "size": "WxH" | null}``. ``fit`` is the same object a
+    ``GET /models`` row carries, here for any size: a size the catalog measured is exact, any
+    other is estimated from the nearest larger measurement (``need.gpu_estimated``), and it
+    is ``null`` when the budget is unknown. ``size`` is the size that was judged: the one
+    ``POST /v1/images/generations`` would render for this ``size``, each side clamped to
+    64..2048 and floored to a multiple of 8 (:func:`effective_size`), so ``1030x1030``
+    answers for ``1024x1024`` and says so. It is the model's native size when ``size`` is
+    omitted, and ``null`` for a model with none. 404 ``comfyui.model_unknown`` for an id not
+    in the catalog, and 422 ``image.invalid_size`` (``error.details.size``) for a ``size``
+    that is not two to four digits, ``x``, two to four digits. The size is validated before
+    the budget is read.
+    """
+    model = _require_model(model_id)
+    if size is not None and _FIT_SIZE.fullmatch(size) is None:
+        raise UnprocessableEntity(
+            f"size must be WIDTHxHEIGHT in pixels, for example 1024x1024; got {size!r}",
+            code="image.invalid_size",
+            details={"size": size},
+        )
+    judged = _judged_size(model, size)
+    budget = await _collect_budget(request.app)
+    return {"fit": _fit(model, judged, budget), "size": judged}
+
+
+def _judged_size(model: ImageModel, size: str | None) -> str | None:
+    """The ``WxH`` a render of ``model`` at ``size`` is judged at, as ``/v1`` renders it.
+
+    ``size`` goes through the translator's own parse and clamp (:func:`effective_size`), so
+    the verdict is for the render that would run, not for a size the workflow would change.
+    ``None`` is the model's native size, clamped the same way; a model with no native size
+    has none to report.
+    """
+    if size is None:
+        if not model.sizes:
+            return None
+        size = model.sizes[0]
+    return effective_size(size)
 
 
 def _schedule_install(app: FastAPI, model: ImageModel, job: PullJob) -> None:
@@ -1335,7 +1689,9 @@ async def comfyui_workflow_launch(name: str) -> JSONResponse:
     Reads <name>.json from the primary workflows dir, falling back to the
     user/default/workflows path. Posts the API-format workflow JSON to
     ComfyUI's /prompt endpoint and returns 202 with the prompt_id.
-    404 when the workflow file does not exist.
+    404 when the workflow file does not exist. A prompt the GPU gate refuses (its
+    503) is recorded as the gate's latest refusal and answered as ``/v1`` answers it:
+    503 ``image.gate_refused`` with the gate's reason.
     """
     workflow_path = _find_workflow(name)
     if workflow_path is None:
@@ -1356,14 +1712,22 @@ async def comfyui_workflow_launch(name: str) -> JSONResponse:
             },
         )
     base = _comfyui_base_url()
+    refusal: str | None = None
     try:
         resp = await _get_client().post(
             f"{base}/prompt",
             json={"prompt": workflow_data},
         )
-        result = resp.json() if resp.status_code == 200 else {}
+        if resp.status_code == 200:
+            result = resp.json()
+        else:
+            result = {}
+            refusal = _gate_refusal_of(resp)
     except (httpx.HTTPError, ValueError):
         result = {}
+    if refusal is not None:
+        record_gate_refusal(refusal)
+        raise comfyui_provider.ImageGateRefused(refusal)
     prompt_id = result.get("prompt_id")
     return JSONResponse(
         status_code=202,

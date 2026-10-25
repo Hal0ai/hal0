@@ -19,12 +19,13 @@ runner = CliRunner()
 
 
 def _job(model_id: str, state: str, *, done: float = 0.0, total: float = 8.0, **extra: Any):
+    """A job row; ``done`` and ``total`` are in the 2**30-byte GB the CLI prints."""
     return {
         "id": f"job-{model_id}",
         "model_id": model_id,
         "state": state,
-        "bytes_downloaded": round(done * 1e9),
-        "bytes_total": round(total * 1e9),
+        "bytes_downloaded": round(done * 2**30),
+        "bytes_total": round(total * 2**30),
         "error": extra.pop("error", None),
         "error_code": extra.pop("error_code", None),
         **extra,
@@ -124,6 +125,7 @@ def test_cli_models_list_renders_table(api: FakeApi) -> None:
     result = _run("models", "list")
 
     assert result.exit_code == 0, result.output
+    assert "GB to download" in result.output and "GiB" not in result.output
     lines = {
         m: next(x for x in result.output.splitlines() if m in x)
         for m in ("sdxl-lightning", "sdxl-turbo", "qwen-image", "esrgan-4x")
@@ -553,21 +555,21 @@ def test_cli_files_groups_by_kind(api: FakeApi) -> None:
                 "kind": "checkpoint",
                 "subdir": "checkpoints",
                 "relpath": "sd_xl_turbo_1.0_fp16.safetensors",
-                "size_bytes": int(6.9e9),
+                "size_bytes": round(6.4 * 2**30),
                 "models": ["sdxl-turbo"],
             },
             {
                 "kind": "checkpoint",
                 "subdir": "checkpoints",
                 "relpath": "mine.safetensors",
-                "size_bytes": int(2e9),
+                "size_bytes": round(1.9 * 2**30),
                 "models": [],
             },
             {
                 "kind": "vae",
                 "subdir": "vae",
                 "relpath": "sdxl_vae.safetensors",
-                "size_bytes": int(0.3e9),
+                "size_bytes": round(0.3 * 2**30),
                 "models": ["sdxl-lightning", "sdxl-turbo"],
             },
         ],
@@ -582,7 +584,8 @@ def test_cli_files_groups_by_kind(api: FakeApi) -> None:
     assert out.index("sd_xl_turbo_1.0_fp16.safetensors") < out.index("mine.safetensors")
     assert out.index("mine.safetensors") < out.index("vae") < out.index("sdxl_vae.safetensors")
     owned = next(line for line in out.splitlines() if "sd_xl_turbo" in line)
-    assert "sdxl-turbo" in owned and "6.9" in owned
+    assert "sdxl-turbo" in owned and "6.4 GB" in owned  # 1024-based, like the models list
+    assert "1.9 GB" in next(line for line in out.splitlines() if "mine.safetensors" in line)
     shared = next(line for line in out.splitlines() if "sdxl_vae" in line)
     assert "sdxl-lightning" in shared and "sdxl-turbo" in shared
     assert api.calls == [("GET", "/api/comfyui/files")]

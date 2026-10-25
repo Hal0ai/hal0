@@ -42,6 +42,11 @@ dependencies = [
   "fastapi>=0.115,<0.157",
   "uvicorn[standard]>=0.32",
   "httpx>=0.28",
+  # hal0.providers.comfyui follows a render's step progress on ComfyUI's
+  # websocket. It was already installed through uvicorn[standard]; declared
+  # here because hal0 imports it directly now. 13.0 is the first release with
+  # the asyncio client (websockets.asyncio.client.connect) the listener uses.
+  "websockets>=13.0",
   "pydantic>=2.10",
   "pydantic-settings>=2.6",
   "typer>=0.15",

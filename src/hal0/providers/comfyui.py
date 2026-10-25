@@ -31,20 +31,25 @@ from __future__ import annotations
 
 import asyncio
 import importlib.resources
+import json
 import logging
 import os
 import re
+import reprlib
 import tempfile
 import time
+import urllib.parse
 import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import httpx
+from websockets.asyncio.client import connect as _websocket_connect
 
-from hal0.comfyui import gate_credential
+from hal0.comfyui import gate_credential, progress
 from hal0.comfyui import paths as comfyui_paths
+from hal0.comfyui.gate_reason import SOCKET_ID_MAX, SOCKET_LOG_MAX, clean_reason
 from hal0.config import paths as cfg_paths
 from hal0.errors import Hal0Error
 from hal0.http_client import async_client
@@ -83,6 +88,7 @@ _DEFAULT_PORT = 8188
 _GATE_STATUS_URL_ENV = "HAL0_COMFYUI_STATUS_URL"
 _GATE_SWITCHOVER_URL_ENV = "HAL0_COMFYUI_SWITCHOVER_URL"
 _GATE_HANDOFF_URL_ENV = "HAL0_COMFYUI_HANDOFF_URL"
+_GATE_REFUSAL_URL_ENV = "HAL0_COMFYUI_REFUSAL_URL"
 _GATE_FAIL_OPEN_ENV = "HAL0_COMFYUI_GATE_FAIL_OPEN"
 # The gate's own credential (#3058): its directory is mounted read-only here,
 # and the gate reads the token file named by this variable on every request.
@@ -106,6 +112,16 @@ _INFER_TIMEOUT = httpx.Timeout(connect=5.0, read=60.0, write=10.0, pool=10.0)
 # stuck and the operator needs to investigate.
 _HISTORY_POLL_TIMEOUT_S = 600.0
 _HISTORY_POLL_INTERVAL_S = 0.5
+# The progress websocket (see _follow_progress). How long ``infer`` waits for it to be
+# open before it submits anyway: a loopback handshake takes milliseconds, so this only
+# ever bounds a ComfyUI too busy to answer. Progress is a read-out, never worth a stall.
+_WS_READY_WAIT_S = 2.0
+# Give up on the handshake itself, and on the close handshake when ``infer`` is done.
+_WS_OPEN_TIMEOUT_S = 5.0
+_WS_CLOSE_TIMEOUT_S = 2.0
+# Preview frames are binary images and are ignored, but a frame over the library's 1 MiB
+# default would close the socket, and with it the progress read-out.
+_WS_MAX_FRAME_BYTES = 16 * 1024 * 1024
 
 
 # ── Typed errors ──────────────────────────────────────────────────────────────
@@ -123,6 +139,215 @@ class ComfyUIInferError(Hal0Error):
 
     code = "dispatch.upstream_failed"
     status = 502
+
+
+class ImageGateRefused(Hal0Error):
+    """ComfyUI's GPU gate refused the prompt hal0 submitted.
+
+    The gate (``hal0_gpu_gate``) answers ``/prompt`` with a 503 when hal0 did not
+    hand it the GPU. The message is the gate's reason. It is written inside the img
+    container, so it is passed through :func:`hal0.comfyui.gate_reason.clean_reason`
+    (encodable, at most 500 characters) before it reaches an envelope, a log or Sentry.
+    """
+
+    code = "image.gate_refused"
+    status = 503
+
+    def __init__(
+        self, message: str, details: dict[str, Any] | None = None, *, code: str | None = None
+    ) -> None:
+        super().__init__(clean_reason(message), details, code=code)
+
+
+#: ``error.type`` of the body the gate answers a refused prompt with
+#: (``refused_prompt_body`` in the ``hal0_gpu_gate`` asset, which a test runs this
+#: against). The shape identifies the gate; the words of its reason change.
+_GATE_REFUSAL_TYPE = "hal0_gpu_not_ready"
+_GATE_REFUSAL_DEFAULT = "ComfyUI's GPU gate did not accept the prompt"
+
+
+def gate_refusal_reason(status_code: int, body: Any) -> str | None:
+    """The gate's reason when a ``/prompt`` answer is its refusal, else ``None``.
+
+    A refusal is a 503 whose JSON body has the gate's shape: an ``error`` object
+    typed ``hal0_gpu_not_ready`` beside a ``node_errors`` object. The reason is the
+    body's ``details``, the text the gate was given, cleaned and cut to 500 characters
+    (:func:`hal0.comfyui.gate_reason.clean_reason`: the body comes from inside the container).
+    """
+    if status_code != 503 or not isinstance(body, dict):
+        return None
+    error = body.get("error")
+    if not isinstance(error, dict) or error.get("type") != _GATE_REFUSAL_TYPE:
+        return None
+    if not isinstance(body.get("node_errors"), dict):
+        return None
+    for key in ("details", "message"):
+        value = error.get(key)
+        if isinstance(value, str) and value:
+            return clean_reason(value)
+    return _GATE_REFUSAL_DEFAULT
+
+
+def _json_or_none(resp: httpx.Response) -> Any:
+    try:
+        return resp.json()
+    except ValueError:
+        return None
+
+
+# ── Step progress over ComfyUI's websocket ────────────────────────────────────
+
+
+def _ws_connect(url: str) -> Any:
+    """Open ComfyUI's websocket at ``url``; use as ``async with _ws_connect(url) as socket``.
+
+    The seam the tests replace, so no test dials out. Keepalive pings are off: ComfyUI can
+    starve its own event loop for longer than a ping timeout while it loads a checkpoint,
+    and that must not cost the progress read-out. The listener is cancelled when the
+    render ends, which is what closes the connection. Compression is off too: this is
+    loopback, and the frames that matter are a few dozen bytes.
+    """
+    return _websocket_connect(
+        url,
+        compression=None,
+        ping_interval=None,
+        open_timeout=_WS_OPEN_TIMEOUT_S,
+        close_timeout=_WS_CLOSE_TIMEOUT_S,
+        max_size=_WS_MAX_FRAME_BYTES,
+    )
+
+
+def _ws_url(base_url: str, client_id: str) -> str:
+    """``base_url`` (the one ``/prompt`` is posted to) with ``http`` swapped for ``ws``."""
+    return f"ws{base_url.removeprefix('http')}/ws?clientId={client_id}"
+
+
+def _as_count(value: object) -> int | None:
+    """``value`` if it is an integer (a JSON ``true`` is not one), else ``None``."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+class _ProgressRelay:
+    """Carries one render's websocket frames into :mod:`hal0.comfyui.progress`.
+
+    The socket is open before ``/prompt`` answers, so a frame can arrive before the prompt
+    id is known. Until :meth:`claim` supplies it, only the newest progress frame is kept,
+    and :meth:`claim` applies it. Every frame on the socket belongs to this render (ComfyUI
+    sends progress only to the ``client_id`` that submitted the prompt), but a frame that
+    names a different prompt is still ignored.
+    """
+
+    def __init__(self, model: str) -> None:
+        self.model = model
+        self.prompt_id: str | None = None
+        self._node: str | None = None
+        self._early: tuple[str | None, int, int, str | None] | None = None
+
+    def claim(self, prompt_id: str) -> None:
+        """ComfyUI accepted the prompt: start tracking it, with any frame heard already."""
+        self.prompt_id = prompt_id
+        progress.start(prompt_id, self.model)
+        early, self._early = self._early, None
+        if early is not None:
+            self._apply(*early)
+
+    def release(self) -> None:
+        """The render is over, however it ended."""
+        if self.prompt_id is not None:
+            progress.finish(self.prompt_id)
+
+    def feed(self, frame: str | bytes) -> None:
+        """Take one websocket frame. Raises ``ValueError`` for one that cannot be read.
+
+        Binary frames are previews and are ignored, as are message types other than
+        ``executing`` (which names the node) and ``progress``.
+        """
+        if not isinstance(frame, str):
+            return
+        message = json.loads(frame)
+        if not isinstance(message, dict):
+            raise ValueError(f"frame is {type(message).__name__}, not an object")
+        data = message.get("data")
+        kind = message.get("type")
+        if kind == "executing":
+            node = data.get("node") if isinstance(data, dict) else None
+            if node is not None:
+                self._node = clean_reason(node, SOCKET_ID_MAX)
+        elif kind == "progress":
+            if not isinstance(data, dict):
+                raise ValueError("progress frame has no data object")
+            step, total = _as_count(data.get("value")), _as_count(data.get("max"))
+            if step is None or total is None:
+                raise ValueError(
+                    "progress frame has no integer value/max: "
+                    f"value={reprlib.repr(data.get('value'))} max={reprlib.repr(data.get('max'))}"
+                )
+            node = data.get("node")
+            frame_prompt = data.get("prompt_id")
+            args = (
+                None if frame_prompt is None else str(frame_prompt),
+                step,
+                total,
+                clean_reason(node, SOCKET_ID_MAX) if node is not None else self._node,
+            )
+            if self.prompt_id is None:
+                self._early = args
+            else:
+                self._apply(*args)
+
+    def _apply(self, frame_prompt: str | None, step: int, total: int, node: str | None) -> None:
+        # The frame's prompt id is absent on ComfyUI builds that predate it.
+        if self.prompt_id is None or frame_prompt not in (None, self.prompt_id):
+            return
+        progress.update(self.prompt_id, step=step, total=total, node=node)
+
+
+async def _follow_progress(url: str, relay: _ProgressRelay, ready: asyncio.Event) -> None:
+    """Feed ``relay`` from ComfyUI's websocket at ``url`` until cancelled.
+
+    ``ready`` is set once the socket is open, or once it cannot be opened, so the caller
+    never waits on a listener that already failed. A connection that fails or a socket the
+    server closes mid-render logs one ``comfyui.progress_listener_failed`` warning and ends
+    the listener. A frame that cannot be read is skipped and the listener carries on; the
+    first such frame of a render logs one ``comfyui.progress_frame_skipped`` warning, the
+    rest are quiet. None of this is an error for the render, which finishes on ``/history``
+    alone. Cancelling the listener is silent.
+    """
+    skipped = False
+    try:
+        async with _ws_connect(url) as socket:
+            ready.set()
+            async for frame in socket:
+                try:
+                    relay.feed(frame)
+                except (ValueError, RecursionError) as exc:
+                    # One odd frame (a float step, a build whose shapes differ) is not a
+                    # reason to lose the read-out for the rest of the render.
+                    if not skipped:
+                        skipped = True
+                        log.warning(
+                            "comfyui.progress_frame_skipped",
+                            extra={"url": url, "reason": _socket_error_text(exc)},
+                        )
+        reason = "websocket closed by ComfyUI"
+    except Exception as exc:
+        reason = _socket_error_text(exc)
+    finally:
+        ready.set()
+    log.warning("comfyui.progress_listener_failed", extra={"url": url, "reason": reason})
+
+
+def _socket_error_text(exc: BaseException) -> str:
+    """``exc`` as one log-safe line: it can quote what ComfyUI sent, so it is cleaned and cut."""
+    return clean_reason(f"{type(exc).__name__}: {exc}", SOCKET_LOG_MAX)
+
+
+async def _wait_until_open(ready: asyncio.Event) -> None:
+    """Give the listener a moment to open its socket; carry on without it after that."""
+    try:
+        await asyncio.wait_for(ready.wait(), _WS_READY_WAIT_S)
+    except TimeoutError:
+        log.debug("comfyui.progress_listener_slow", extra={"wait_s": _WS_READY_WAIT_S})
 
 
 # ── Data-root provisioning ────────────────────────────────────────────────────
@@ -387,10 +612,34 @@ def gate_env() -> dict[str, str]:
         _GATE_STATUS_URL_ENV: f"{base}/api/comfyui/arbiter",
         _GATE_SWITCHOVER_URL_ENV: f"{base}/api/comfyui/switchover",
         _GATE_HANDOFF_URL_ENV: f"{base}/api/comfyui/prompt-handoff",
+        _GATE_REFUSAL_URL_ENV: f"{base}/api/comfyui/gate-refusal",
     }
     if _api_env_setting(_GATE_FAIL_OPEN_ENV).lower() in _TRUTHY:
         env[_GATE_FAIL_OPEN_ENV] = "1"
     return env
+
+
+def gate_dial_host() -> str:
+    """The host the img container's gate dials hal0-api at, as :func:`gate_env` writes it.
+
+    Loopback for a loopback or wildcard bind, the address itself for a specific
+    one (a host name stays a name). It is where the gate's requests come from, so
+    it is the peer the auth middleware judges them by.
+    """
+    return urllib.parse.urlsplit(_hal0_api_base()).hostname or "127.0.0.1"
+
+
+def gate_sends_credential() -> bool:
+    """True iff the gate would present its token on its next request.
+
+    The token is on disk, and the URLs :func:`gate_env` gives the gate name an
+    address: the gate holds the token back from a host name. An img container
+    started before hal0 minted the token has no mount and sends none either,
+    which hal0 cannot see from here (the gate's version header says that).
+    """
+    return gate_credential.credential_present() and gate_credential.names_an_address(
+        gate_env()[_GATE_STATUS_URL_ENV]
+    )
 
 
 def _gate_credential_mount() -> Mount | None:
@@ -695,13 +944,24 @@ class ComfyUIProvider(Provider):
           * ``_hal0_template``       — workflow template stem to render.
           * ``_hal0_ckpt_override``  — optional checkpoint filename, for the
             templates that let the caller choose one.
+          * ``_hal0_model``          — the id the route resolved the request's
+            ``model`` to (a catalog id or ``ckpt/<path>``). It only labels the
+            render in :mod:`hal0.comfyui.progress`; absent, the request's own
+            ``model`` (trimmed) is used, then the template stem.
 
         These are stripped from what we send to ComfyUI and are how the
         v1 route hands the resolved template down without making this
         provider re-look-up the catalog.
+
+        While the workflow runs, a websocket listener follows the render's step
+        progress into :mod:`hal0.comfyui.progress` (shown on
+        ``/api/comfyui/status``). It connects before the prompt is submitted, so no
+        early frame is missed, and is cancelled when this method leaves. It never
+        decides the outcome: the render succeeds or fails on ``/history`` alone.
         """
         template = body.pop("_hal0_template", None)
         ckpt_override = body.pop("_hal0_ckpt_override", None)
+        resolved_model = body.pop("_hal0_model", None)
         if ckpt_override is not None and not isinstance(ckpt_override, str):
             raise ComfyUIInferError(
                 "comfyui.infer: _hal0_ckpt_override must be a filename string",
@@ -725,11 +985,31 @@ class ComfyUIProvider(Provider):
         prompt_payload = {"prompt": graph, "client_id": client_id}
 
         base_url = f"http://127.0.0.1:{port}"
+        # ComfyUI sends a render's progress only to the client_id that submitted it, so the
+        # socket is opened first (under that id) and the prompt submitted after.
+        relay = _ProgressRelay(
+            resolved_model
+            if isinstance(resolved_model, str) and resolved_model
+            else str(body.get("model") or "").strip() or template
+        )
+        socket_ready = asyncio.Event()
+        listener = asyncio.create_task(
+            _follow_progress(_ws_url(base_url, client_id), relay, socket_ready),
+            name=f"comfyui-progress-{client_id[:8]}",
+        )
         try:
+            await _wait_until_open(socket_ready)
             async with async_client(timeout=_INFER_TIMEOUT) as client:
                 # 1. Submit workflow.
                 submit_resp = await client.post(f"{base_url}/prompt", json=prompt_payload)
                 if submit_resp.status_code != 200:
+                    # The GPU gate in front of ComfyUI refuses a prompt hal0 did not hand
+                    # the GPU to, with a 503 in its own shape: that is hal0's to report.
+                    refusal = gate_refusal_reason(
+                        submit_resp.status_code, _json_or_none(submit_resp)
+                    )
+                    if refusal is not None:
+                        raise ImageGateRefused(refusal, details={"port": port})
                     raise ComfyUIInferError(
                         f"comfyui POST /prompt returned HTTP {submit_resp.status_code}",
                         details={
@@ -745,9 +1025,13 @@ class ComfyUIProvider(Provider):
                         "comfyui POST /prompt returned no prompt_id",
                         details={"port": port, "response": submitted},
                     )
+                relay.claim(str(prompt_id))
 
                 # 2. Poll history for completion.
                 outputs = await self._await_history(client, base_url, str(prompt_id))
+                # ComfyUI is done with it: a newer render must not read as behind this one
+                # while the images download. The finally below still covers every failure.
+                relay.release()
 
                 # 3. Fetch output PNG bytes.
                 images: list[dict[str, Any]] = []
@@ -794,6 +1078,13 @@ class ComfyUIProvider(Provider):
                 f"comfyui transport error: {exc}",
                 details={"port": port},
             ) from exc
+        finally:
+            # However the render ended, it is no longer live. The tracker entry goes first
+            # (synchronously), then the listener is cancelled and awaited so no task
+            # outlives the request. gather() keeps a cancellation of infer itself intact.
+            relay.release()
+            listener.cancel()
+            await asyncio.gather(listener, return_exceptions=True)
 
     async def _await_history(
         self,
@@ -883,4 +1174,8 @@ __all__ = [
     "ComfyUIHealthError",
     "ComfyUIInferError",
     "ComfyUIProvider",
+    "ImageGateRefused",
+    "gate_dial_host",
+    "gate_refusal_reason",
+    "gate_sends_credential",
 ]

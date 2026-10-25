@@ -15,8 +15,10 @@ CT105 live verification. The module MUST import cleanly outside ComfyUI
 
 from __future__ import annotations
 
+import http.client
 import importlib.util
 import json
+import urllib.error
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +29,7 @@ _NODE_PATH = (
 )
 
 
-def _load_node(*, stub_announce: bool = True) -> Any:
+def _load_node(*, stub_announce: bool = True, stub_report: bool = True) -> Any:
     spec = importlib.util.spec_from_file_location("hal0_gpu_gate", _NODE_PATH)
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
@@ -36,6 +38,9 @@ def _load_node(*, stub_announce: bool = True) -> Any:
         # hal0 confirms the hand-off for a prompt let through in generation
         # mode, unless a test scripts the announce itself (no network).
         mod._announce_prompt = lambda: True
+    if stub_report:
+        # A refusal is reported to hal0-api; no test but the reporting ones may dial it.
+        mod._report_refusal = lambda _reason: None
     return mod
 
 
@@ -487,13 +492,22 @@ class _FakeHal0:
         # ``unredirected_hdrs``).
         self.auth: list[str | None] = []
         self.redirected_auth: list[str | None] = []
+        # The gate-version header, the body and the timeout of each request.
+        self.version: list[str | None] = []
+        self.bodies: list[bytes | None] = []
+        self.timeouts: list[float | None] = []
 
-    def __call__(self, req: Any, *_args: Any, **_kwargs: Any) -> Any:
+    def __call__(self, req: Any, *_args: Any, **kwargs: Any) -> Any:
         import io
         import urllib.error
 
         url = req if isinstance(req, str) else req.full_url
         self.calls.append(url.split("/api/comfyui/")[-1])
+        self.version.append(
+            None if isinstance(req, str) else dict(req.header_items()).get("X-hal0-gate-version")
+        )
+        self.bodies.append(None if isinstance(req, str) else req.data)
+        self.timeouts.append(kwargs.get("timeout"))
         self.auth.append(None if isinstance(req, str) else req.get_header("Authorization"))
         self.redirected_auth.append(
             None if isinstance(req, str) else req.headers.get("Authorization")
@@ -536,9 +550,9 @@ _LEGACY_INFERENCE = {
 }
 
 
-def _real_gate(monkeypatch, hal0: _FakeHal0) -> Any:
+def _real_gate(monkeypatch, hal0: _FakeHal0, *, report: bool = False) -> Any:
     monkeypatch.delenv("HAL0_COMFYUI_GATE_FAIL_OPEN", raising=False)
-    mod = _load_node(stub_announce=False)
+    mod = _load_node(stub_announce=False, stub_report=not report)
     monkeypatch.setattr(mod, "_urlopen", hal0)
     monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(mod, "_SWITCH_TIMEOUT_S", 0.5)  # a wrong turn fails fast
@@ -891,3 +905,206 @@ def test_a_refusal_after_sending_no_token_does_not_blame_the_token(monkeypatch, 
 
     assert "has no credential" in str(excinfo.value)
     assert hal0.auth == [None]
+
+
+# ---------------------------------------------------------------------------
+# The gate's version and its refusal report (image readiness API)
+
+_REFUSAL_PATH = "/api/comfyui/gate-refusal"
+
+
+def test_asset_gate_version_matches_package_constant() -> None:
+    """The asset cannot import hal0, so it repeats the package's literal: a regex over
+    the file finds it, and it is the constant hal0-api compares the header with."""
+    import re
+
+    from hal0.comfyui.gate_version import GATE_VERSION
+
+    found = re.findall(r'^GATE_VERSION = "([^"]*)"$', _NODE_PATH.read_text(), flags=re.MULTILINE)
+
+    assert found == ["2"]
+    assert found == [GATE_VERSION]
+    assert _load_node().GATE_VERSION == GATE_VERSION
+
+
+def test_the_gate_sends_its_version_on_each_of_its_requests(monkeypatch, tmp_path) -> None:
+    _with_token_file(monkeypatch, tmp_path)
+    hal0 = _FakeHal0(
+        {
+            "/arbiter": [_LEGACY_INFERENCE, _LEGACY_GENERATION],
+            "/switchover": [{"status": "switching"}],
+            "/prompt-handoff": [{"held": True}],
+        }
+    )
+    mod = _real_gate(monkeypatch, hal0, report=True)
+
+    mod.prepare_image_mode()
+
+    assert hal0.calls == ["arbiter", "switchover", "arbiter", "prompt-handoff"]
+    assert hal0.version == ["2"] * 4
+
+
+def test_the_version_is_not_a_secret_so_a_named_host_gets_it_too(monkeypatch, tmp_path) -> None:
+    """Only the token is held back from a host name (see _direct_host)."""
+    _with_token_file(monkeypatch, tmp_path)
+    monkeypatch.setenv(
+        "HAL0_COMFYUI_STATUS_URL", "http://hal0.example.lan:8080/api/comfyui/arbiter"
+    )
+    monkeypatch.setenv(
+        "HAL0_COMFYUI_HANDOFF_URL", "http://hal0.example.lan:8080/api/comfyui/prompt-handoff"
+    )
+    hal0 = _FakeHal0({"/arbiter": [_LEGACY_GENERATION], "/prompt-handoff": [{"held": True}]})
+    mod = _real_gate(monkeypatch, hal0, report=True)
+
+    mod.prepare_image_mode()
+
+    assert hal0.auth == [None, None]
+    assert hal0.version == ["2", "2"]
+
+
+def _refused_by_hal0(extra: dict[str, list[Any]] | None = None) -> _FakeHal0:
+    """A hal0 that is in inference mode and rejects the switch request."""
+    answers: dict[str, list[Any]] = {
+        "/arbiter": [_LEGACY_INFERENCE],
+        "/switchover": [500],
+        "/gate-refusal": [{"status": "recorded"}],
+    }
+    answers.update(extra or {})
+    return _FakeHal0(answers)
+
+
+def test_gate_reports_refusal_best_effort(monkeypatch, tmp_path) -> None:
+    """A prompt the gate refuses is reported to hal0 with the reason the editor is shown,
+    through the same request builder as every other gate request: token and version."""
+    _with_token_file(monkeypatch, tmp_path)
+    hal0 = _refused_by_hal0()
+    mod = _real_gate(monkeypatch, hal0, report=True)
+
+    with pytest.raises(mod.GpuGateClosed) as excinfo:
+        mod.prepare_image_mode()
+
+    assert hal0.calls == ["arbiter", "switchover", "gate-refusal"]
+    assert json.loads(hal0.bodies[-1] or b"") == {"reason": str(excinfo.value)}
+    assert "refused the switch" in str(excinfo.value)
+    assert hal0.auth[-1] == f"Bearer {_TOKEN}"
+    assert hal0.redirected_auth[-1] is None
+    assert hal0.version[-1] == "2"
+    assert hal0.timeouts[-1] == 2.0
+
+
+def test_the_refusal_url_defaults_to_loopback_and_follows_the_environment(monkeypatch) -> None:
+    monkeypatch.delenv("HAL0_COMFYUI_REFUSAL_URL", raising=False)
+    assert _load_node().HAL0_REFUSAL_URL == "http://127.0.0.1:8080/api/comfyui/gate-refusal"
+
+    monkeypatch.setenv(
+        "HAL0_COMFYUI_REFUSAL_URL", "http://192.0.2.10:9123/api/comfyui/gate-refusal"
+    )
+    hal0 = _refused_by_hal0()
+    mod = _real_gate(monkeypatch, hal0, report=True)
+    assert mod.HAL0_REFUSAL_URL == "http://192.0.2.10:9123/api/comfyui/gate-refusal"
+
+    with pytest.raises(mod.GpuGateClosed):
+        mod.prepare_image_mode()
+    assert hal0.calls[-1] == "gate-refusal"
+
+
+def test_the_refusal_report_holds_the_token_back_from_a_named_host(monkeypatch, tmp_path) -> None:
+    _with_token_file(monkeypatch, tmp_path)
+    monkeypatch.setenv(
+        "HAL0_COMFYUI_REFUSAL_URL", "http://hal0.example.lan:8080/api/comfyui/gate-refusal"
+    )
+    hal0 = _refused_by_hal0()
+    mod = _real_gate(monkeypatch, hal0, report=True)
+
+    with pytest.raises(mod.GpuGateClosed):
+        mod.prepare_image_mode()
+
+    assert hal0.calls[-1] == "gate-refusal"
+    assert hal0.auth[-1] is None
+    assert hal0.version[-1] == "2"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        401,
+        500,
+        TimeoutError("timed out"),
+        OSError("connection refused"),
+        urllib.error.URLError("no route"),
+        http.client.BadStatusLine("garbage"),
+        ValueError("garbled"),
+        RuntimeError("anything at all"),
+    ],
+)
+def test_gate_refusal_post_failure_is_swallowed(monkeypatch, failure: Any) -> None:
+    """Reporting is best effort: whatever goes wrong, the prompt is refused with the same
+    reason it would have been, and nothing else is raised."""
+    hal0 = _refused_by_hal0({"/gate-refusal": [failure]})
+    mod = _real_gate(monkeypatch, hal0, report=True)
+
+    with pytest.raises(mod.GpuGateClosed, match="refused the switch"):
+        mod.prepare_image_mode()
+
+    assert hal0.calls[-1] == "gate-refusal"  # it did try
+
+
+def test_a_long_reason_is_cut_before_it_is_sent(monkeypatch) -> None:
+    hal0 = _FakeHal0({"/gate-refusal": [{"status": "recorded"}]})
+    mod = _real_gate(monkeypatch, hal0, report=True)
+
+    mod._report_refusal("r" * 2000)
+
+    assert json.loads(hal0.bodies[-1] or b"") == {"reason": "r" * 500}
+
+
+def test_an_unreachable_hal0_is_not_reported(monkeypatch) -> None:
+    """With hal0 down there is nobody to tell, and the report would only delay the refusal."""
+    hal0 = _FakeHal0({"/arbiter": [OSError("connection refused")], "/gate-refusal": [{}]})
+    mod = _real_gate(monkeypatch, hal0, report=True)
+    monkeypatch.setattr(mod, "_UNREACHABLE_RETRY_S", 0.0)
+
+    with pytest.raises(mod.GpuGateClosed, match="unreachable"):
+        mod.prepare_image_mode()
+
+    assert "gate-refusal" not in hal0.calls
+
+
+def test_a_hal0_that_answers_401_is_told_what_the_gate_refused(monkeypatch) -> None:
+    """The report is attempted for an authentication refusal too (it needs the very
+    credential the gate lacks, so it usually fails: hal0 records those from the /v1 side)."""
+    hal0 = _FakeHal0({"/arbiter": [401], "/gate-refusal": [401]})
+    mod = _real_gate(monkeypatch, hal0, report=True)
+
+    with pytest.raises(mod.GpuGateClosed, match="HTTP 401") as excinfo:
+        mod.prepare_image_mode()
+
+    assert hal0.calls == ["arbiter", "gate-refusal"]
+    assert json.loads(hal0.bodies[-1] or b"") == {"reason": str(excinfo.value)}
+
+
+def test_a_prompt_the_gate_lets_through_is_not_reported(monkeypatch) -> None:
+    monkeypatch.setenv("HAL0_COMFYUI_GATE_FAIL_OPEN", "1")
+    hal0 = _FakeHal0({"/arbiter": [401], "/gate-refusal": [{}]})
+    mod = _load_node(stub_announce=False, stub_report=False)
+    monkeypatch.setattr(mod, "_urlopen", hal0)
+
+    mod.prepare_image_mode()  # fail-open on authentication: the prompt goes through
+
+    assert hal0.calls == ["arbiter"]
+
+
+def test_a_switch_that_hal0_never_finishes_is_reported(monkeypatch) -> None:
+    hal0 = _FakeHal0(
+        {
+            "/arbiter": [_LEGACY_INFERENCE],
+            "/switchover": [{"status": "switching"}],
+            "/gate-refusal": [{}],
+        }
+    )
+    mod = _real_gate(monkeypatch, hal0, report=True)
+
+    with pytest.raises(mod.GpuGateClosed, match="kept the GPU in inference mode"):
+        mod.prepare_image_mode()
+
+    assert hal0.calls[-1] == "gate-refusal"

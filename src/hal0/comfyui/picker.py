@@ -17,7 +17,13 @@ import logging
 from typing import Any
 
 from hal0.comfyui import inventory, paths
-from hal0.comfyui.catalog import CATALOG, ImageModel, install_state, recommended_model_id
+from hal0.comfyui.catalog import (
+    CATALOG,
+    ImageModel,
+    install_state,
+    recommended_model_id,
+    weights_gib,
+)
 from hal0.config.loader import load_hardware_info
 from hal0.config.schema import HardwareInfo
 from hal0.install.agent_model import pool_gb
@@ -77,7 +83,8 @@ def _models() -> list[dict[str, Any]]:
 
     The API-renderable catalog models in catalog order, then the user checkpoints in scan
     order under the ``api_id`` the inventory gave them. The id is never rebuilt from a file
-    name: ``a.safetensors`` and ``sub/a.safetensors`` are different models.
+    name: ``a.safetensors`` and ``sub/a.safetensors`` are different models. ``size_gb`` is
+    GiB in both kinds of row.
 
     Never raises for a models tree the service user cannot read: ``GET /api/capabilities``
     builds every capability's picker in one synchronous pass, so a raise here would be a 500
@@ -100,7 +107,7 @@ def _models() -> list[dict[str, Any]]:
     models: list[dict[str, Any]] = [
         {
             "id": m.id,
-            "size_gb": m.approx_gb,
+            "size_gb": weights_gib(m),
             "downloaded": downloaded(m),
             "pullable": True,
             "display_name": m.label,

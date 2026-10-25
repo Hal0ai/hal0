@@ -352,8 +352,10 @@ def test_plan_lists_image_models_with_their_download_size(capsys):
 
     out = capsys.readouterr().out
     assert "Image models" in out
+    assert "Download (GB)" in out
     sdxl = next(line for line in out.splitlines() if "sdxl-lightning" in line)
-    assert "7.6" in sdxl
+    assert "7.1" in sdxl  # the catalog's 7.6e9 bytes, shown as 7.1 GB
+    assert "7.6" not in sdxl
     esrgan = next(line for line in out.splitlines() if "esrgan-4x" in line)
     assert "0.1" in esrgan
 

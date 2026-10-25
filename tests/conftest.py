@@ -30,7 +30,11 @@ if not os.environ.get("HAL0_HOME") and not os.access("/etc/hal0/hal0.toml", os.R
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from hal0.api import create_app  # noqa: E402
+from hal0.api import create_app, memory_source  # noqa: E402
+from tests.fixtures.memory_budget import MemoryBudgetStub  # noqa: E402
+
+# The real collector, held before any test patches it (``real_memory_budget`` restores it).
+_real_collect_memory_budget = memory_source.collect_memory_budget
 
 # Keep the isolated root only for application import/collection. Tests that
 # assert default FHS paths must see HAL0_HOME unset; runtime fixtures provide
@@ -372,6 +376,37 @@ def _clear_image_present_cache():
     slot_view._image_present_cache.clear()
     yield
     slot_view._image_present_cache.clear()
+
+
+@pytest.fixture(autouse=True)
+def memory_budget(monkeypatch: pytest.MonkeyPatch) -> Iterator[MemoryBudgetStub]:
+    """Give every test a fixed memory budget, so none reads this machine's RAM, cgroup or GPU.
+
+    ``hal0.api.memory_source.collect_memory_budget`` is replaced by a stub (see
+    ``tests/fixtures/memory_budget.py``) that answers a box with no GPU lane: its fit is
+    unknown, so an image render is never refused on it. A test of a fit sets
+    ``memory_budget.result`` (a ``MemoryBudget``, or an exception to raise) and may read
+    ``memory_budget.apps``. The stub is checked against the collector's real signature, and a
+    call that does not match it fails the test at teardown even where the caller swallows
+    the error. A test that needs the real collector asks for ``real_memory_budget``.
+    """
+    stub = MemoryBudgetStub()
+    monkeypatch.setattr("hal0.api.memory_source.collect_memory_budget", stub)
+    yield stub
+    assert not stub.drift, (
+        f"collect_memory_budget was called with a signature it does not have: {stub.drift}"
+    )
+
+
+@pytest.fixture
+def real_memory_budget(memory_budget: MemoryBudgetStub, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Opt a test out of the ``memory_budget`` stub: the real collector answers again.
+
+    The test then owns what the collector reads (patch ``memory_source.read_ram``, set
+    ``app.state.hardware_stats``, and so on). Depending on ``memory_budget`` first makes this
+    patch land after the stub's, so it is undone before it.
+    """
+    monkeypatch.setattr("hal0.api.memory_source.collect_memory_budget", _real_collect_memory_budget)
 
 
 def _coverage_active(config: pytest.Config) -> bool:

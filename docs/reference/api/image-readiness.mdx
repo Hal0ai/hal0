@@ -1,0 +1,295 @@
+---
+title: Image readiness API reference
+description: "The fields that say whether an image render will fit and what the GPU is doing: fit verdicts on /api/comfyui/models, the /fit route and the /v1 preflight, arbiter phase fields, render progress, and the GPU gate's version and refusals — verified against src/hal0/comfyui/fit.py, src/hal0/api/routes/comfyui.py, src/hal0/api/routes/v1.py and src/hal0/slots/arbiter.py."
+sidebar:
+  order: 70
+---
+
+These are the fields and routes a client reads to answer two questions before and
+during an image render: will the model fit this box, and what is the GPU doing. They
+extend `GET /api/comfyui/models`, `GET /api/comfyui/status`, `GET /api/comfyui/arbiter`
+and `POST /v1/images/generations`. The routes under `/api/comfyui` are ADMIN, like the
+rest of the group in the [REST API index](/docs/reference/api/rest-api/). For how an
+operator uses them, see [Generate images](/docs/guides/generate-images/).
+
+Every "GB" figure on this page is bytes ÷ 2^30, rounded to one decimal, the unit of the
+[memory budget](/docs/reference/api/memory-budget/) ([ADR-0039](/docs/adr/0039-memory-figures-have-one-owner)).
+That includes the catalog sizes: `approx_gb` and `missing_gb` read 47.9 for Qwen-Image
+Lightning, where the catalog's own decimal (10^9 bytes) total reads 51.4.
+
+## Fit verdicts on the model list
+
+`GET /api/comfyui/models` gains a `fit` on every row and a top-level `store`. The
+verdicts are judged against the memory budget collected once per request, so they and
+the dashboard's memory screens read the same free figures.
+
+```json
+{
+  "models": [
+    {
+      "id": "qwen-image-lightning",
+      "approx_gb": 47.9,
+      "missing_gb": 47.9,
+      "fit": {
+        "verdict": "wont_fit",
+        "reason": "needs ~47.9 GB of RAM to load, 45.8 GB free (48.0 GB container limit)",
+        "need": {"gpu_gb": 47.9, "ram_gb": 47.9, "gpu_estimated": true, "ram_estimated": false},
+        "render_free_gb": 88.8,
+        "ram_free_gb": 45.8
+      }
+    }
+  ],
+  "engine": {"available": true, "reason": null},
+  "store": {"free_gb": 812.4, "path": "<model store>/comfyui/models"}
+}
+```
+
+The row keeps every field it had. `fit` is the model's verdict at its native size, the
+first entry of its `sizes`; a model with no sizes, such as an upscaler, is judged on its
+weight total.
+
+| Field | Meaning |
+|---|---|
+| `fit.verdict` | `fits`, `tight` or `wont_fit`. The worse of the GPU verdict and the RAM verdict. |
+| `fit.reason` | The sentence that explains the verdict, naming the budget that decided it (the GPU's when both are equally bad). `null` exactly when the verdict is `fits`; a `tight` verdict carries its sentence too. |
+| `fit.need.gpu_gb` | The pool the render takes above an idle engine at this size. |
+| `fit.need.ram_gb` | The RAM the model's load takes. |
+| `fit.need.gpu_estimated`, `fit.need.ram_estimated` | `true` when the figure is an estimate. |
+| `fit.render_free_gb` | The GPU figure the need was judged against: the memory budget's `render_free_gb`, the pool a render can use once image mode has unloaded this box's GPU slots. It does not subtract the image engine's own memory, because `fit.need.gpu_gb` is measured above an idle engine, so a back-to-back render is not refused for the weights the engine still holds. |
+| `fit.ram_free_gb` | The RAM figure the need was judged against: the memory budget's `ram.free_gb`, free under this box's RAM limit, which inside a container is the container's limit. |
+| `store.path` | The ComfyUI models folder: `<model store>/comfyui/models` unless `HAL0_COMFYUI_DATA_ROOT` moves it. |
+| `store.free_gb` | Free space on the filesystem under that folder (the nearest existing parent when the folder does not exist yet). `null` when it cannot be measured, never `0`. |
+
+How a verdict is reached:
+
+- The two budgets are different resources and are never summed. The GPU need is
+  compared with `render_free_gb` and the RAM need with `ram_free_gb`.
+- A need above the free figure is `wont_fit`, a need above 0.9 of it is `tight`,
+  anything else is `fits`. The comparison uses the rounded figures the response shows,
+  so `reason` cannot contradict the verdict.
+- The GPU need of a size the catalog measured is exact. Any other size is an estimate
+  that does not undershoot the measurements: the smallest measured size with at least as
+  many pixels, or the largest measurement scaled by pixel count. A model nobody measured
+  needs its weight total on the GPU, which is a lower bound.
+- The RAM need is the weight total, or the catalog's measured load when that is larger.
+  A measured load is a floor, the memory the kernel reported when it killed the load, so
+  it never lowers the need below the weights.
+- Both kinds of figure are lower bounds, so a `wont_fit` built on them stands. A `fits`
+  built on an estimate can still end in an out-of-memory error.
+
+`fit` is `null`, never `wont_fit`, when the budget cannot answer: the box has no GPU
+lane, no GPU pool reading, RAM that could not be read (a `limit_gb` of `0`), or the
+collector failed. A row is judged at its native size whatever its task, so the rows the
+API cannot render (`api_renderable: false`) carry a `fit` too.
+
+## `GET /api/comfyui/models/{model_id}/fit`
+
+The same verdict at another size.
+
+```sh
+curl 'http://localhost:8080/api/comfyui/models/sdxl-lightning/fit?size=1536x1536'
+```
+
+`size` is `WIDTHxHEIGHT` in pixels; leave it out for the model's native size. The answer
+is `{"fit": {...}, "size": "1024x1024"}`: `fit` is the object a model row carries, or
+`null` when the budget is unknown, and `size` is the size that was judged. That is the
+size `POST /v1/images/generations` would render for the one you asked about: each side is
+clamped to 64 to 2048 pixels and floored to a multiple of 8, so `1030x1030` is judged and
+reported as `1024x1024` (a size the catalog measured, so its need is exact) and `4096x4096`
+as `2048x2048`. Left out, `size` is the model's native size.
+
+| Status | Code | When |
+|---|---|---|
+| 404 | `comfyui.model_unknown` | `model_id` is not in the catalog. |
+| 422 | `image.invalid_size` | `size` is not two to four digits, a lower-case `x`, two to four digits. `error.details.size` echoes it. The size is checked before the budget is read. |
+
+## The `/v1/images/generations` preflight
+
+`POST /v1/images/generations` judges the render before it touches the GPU. A render the
+budget cannot hold is refused with 422 `image.wont_fit`, before the GPU arbiter unloads
+any slot to make room, so a refusal leaves every slot as it was.
+
+```json
+{
+  "error": {
+    "code": "image.wont_fit",
+    "message": "needs ~47.9 GB of RAM to load, 45.8 GB free (48.0 GB container limit)",
+    "details": {
+      "need": {"gpu_gb": 47.9, "ram_gb": 47.9, "gpu_estimated": true, "ram_estimated": false},
+      "render_free_gb": 88.8,
+      "ram_free_gb": 45.8,
+      "model": "qwen-image-lightning",
+      "size": "1328x1328"
+    }
+  }
+}
+```
+
+- The size judged is the size the render will use: the request's `size`, else the
+  `img` slot's `[image].default_size` when it is not empty, else the model's native
+  size, read the way the workflow reads it (each side clamped to 64..2048 and rounded
+  down to a multiple of 8). `error.details.size` is that size.
+- A catalog model is judged from its catalog facts. A `ckpt/<path>` checkpoint has none,
+  so it is judged from its file size, as both needs, estimated.
+- Only `wont_fit` refuses. `tight`, `fits` and an unknown budget let the render go on.
+  The check is advice the render never depends on: if anything in it fails, it logs one
+  `images.preflight_budget_unavailable` warning and lets the render go on.
+- `extra_body.hal0_skip_fit_check: true` (the JSON boolean) skips the check, the budget
+  read included. Use it for a box the budget misreads.
+
+## Request errors
+
+A `size` that is not a string is the client's mistake. `POST /v1/images/generations`
+answers 422 `image.invalid_size` before it resolves the model, reads the budget or
+touches the GPU, where it used to answer 500. `null` and `""` mean "no size". A string
+the workflow cannot read as `WxH` is not an error: the render falls back to its default
+size. `error.details.size_type` names the type that was sent as Python spells it (`int`, `float`,
+`bool`, `list`, `dict`), never its value.
+
+A client that disconnects while the GPU switches is answered with an empty 499 and
+nothing is submitted to ComfyUI, where the render used to go ahead for a client that was
+gone. The arbiter restores the GPU as usual.
+
+| Status | Code | Where | When |
+|---|---|---|---|
+| 422 | `image.wont_fit` | `POST /v1/images/generations` | The preflight above. |
+| 422 | `image.invalid_size` | `POST /v1/images/generations`, `GET /api/comfyui/models/{model_id}/fit` | `size` is not a string (`details.size_type`), or the `/fit` query is not `WxH` (`details.size`). |
+| 503 | `image.gate_refused` | `POST /v1/images/generations`, `POST /api/comfyui/workflows/{name}/launch` | ComfyUI's GPU gate refused the prompt hal0 submitted. `error.message` is the gate's reason. |
+| 422 | `comfyui.invalid_gate_refusal` | `POST /api/comfyui/gate-refusal` | The body is not `{"reason": <non-empty string>}`; a `reason` of only whitespace counts as empty. |
+
+## Arbiter phase fields
+
+The `arbiter` block of `GET /api/comfyui/status` and of `GET /api/comfyui/arbiter` keeps
+`mode`, `pinned`, `saved_llm_slots`, `switching` and `image_jobs`, and gains the fields
+below. Taking the snapshot awaits nothing and does no network or config I/O.
+
+| Field | Meaning |
+|---|---|
+| `phase` | What the GPU is doing. While a switch or a restore runs, its step: `draining` (waiting for requests on the LLM slots to finish), `unloading`, `starting_engine` (only when the image engine was down and is being started: a first boot, a crash or a restart; a switch with the engine already running has no such step) or `reloading`. In image mode with none running: `handoff` for about 3 seconds after every request for image mode (a `POST /api/comfyui/switchover` to `generation`, or a `/v1` image request, including one that finds the GPU already in image mode) and after the gate announces an editor prompt, so that the prompt can reach ComfyUI's queue, else `rendering` while a `/v1` image request is open, else `grace` once the quiet clock runs. `null` otherwise. |
+| `restore_at` | Epoch seconds when the restore of the LLM slots is due (the end of the grace period). Set only while `phase` is `grace`. |
+| `handoff_until` | Epoch seconds when the hand-off ends. Set only while `phase` is `handoff`. |
+| `drain_in_flight` | Requests still running on the slots being drained, while `phase` is `draining`; else `0`. |
+| `unload_set` | `list[str] \| null`. In image mode, the slots that were unloaded and come back. In LLM mode, the GPU LLM slots a switch would unload now (`[]` means known to be none). `null` is unknown: the slot configs have not been read since `hal0-api` started (the restore loop reads them once at startup, every switch and restore refreshes them), or the read failed. |
+| `llm_waiters` | `{count, oldest_s}`: LLM requests waiting for the GPU, and the age in seconds of the oldest (`null` without any). |
+
+Some cases read `phase: null` or an unexpected phase:
+
+- Image mode right after `hal0-api` restarts reads `null` until the restore loop's first
+  tick starts the quiet clock.
+- A pinned image mode with nothing rendering has no grace, because no automatic restore
+  will end it. It reads `phase: null` beside `pinned: true`.
+- A render in ComfyUI's own queue (the editor's) is invisible to the arbiter. It reads as
+  `grace`, with `restore_at` moving later each time the restore loop finds the queue busy.
+  Read `queue` on `/status` for those.
+- Image mode that persisted while a slot of its saved set is still loaded, and no switch
+  is running (a failed unload), reads `unloading`.
+
+For the first moments of a switch into image mode `phase` can still be `null` while
+`arbiter.switching` is already `true` (the top-level `mode` of `/status` reads `inference`
+through the whole switch). A client that wants "the GPU is changing hands" should key off
+`switching`, not off `phase` alone.
+
+## Render progress
+
+`GET /api/comfyui/status` gains `progress`, in place of the `it_s`, `eta` and `step`
+fields, which were always `null` and are gone.
+
+```json
+{
+  "progress": {
+    "model": "sdxl-lightning",
+    "step": 4,
+    "total": 8,
+    "node": "3",
+    "elapsed_s": 6.2,
+    "prompt_id": "b3a8c7e2-..."
+  }
+}
+```
+
+- `progress` is `null` when no render hal0 submitted is live.
+- It covers the renders hal0 submits itself, through `POST /v1/images/generations` (Open
+  WebUI and the omni loop use it too). A render from ComfyUI's editor has no entry, so
+  read `queue` for those.
+- `model` is the id the request resolved to. `step` and `total` are `null` until the
+  first progress frame arrives: the checkpoint load and the wait in ComfyUI's queue come
+  first. `node` is the graph node ComfyUI is executing. `elapsed_s` counts from the moment
+  ComfyUI accepted the prompt.
+- Several hal0 renders can be live at once, queued behind each other in ComfyUI. `progress`
+  is the one that stepped most recently, or, before any has stepped, the one that started
+  first, which ComfyUI runs first.
+- The progress comes from ComfyUI's websocket, opened before the prompt is submitted. It
+  is a read-out: if the socket cannot be opened or drops, the render still finishes, and
+  `progress` shows `step: null`, or stops advancing, until the render ends.
+
+## The GPU gate: version and refusals
+
+ComfyUI's `hal0_gpu_gate` node sends its version (the `X-Hal0-Gate-Version` header) on
+every request to `hal0-api`, and tells it why it refused a prompt.
+`GET /api/comfyui/status` reports both.
+
+```json
+{
+  "gate": {"state": "current", "version_seen": "2"},
+  "gate_refusal": {"at": 1792940000.5, "reason": "hal0 did not finish switching the GPU to image generation within 180s, so the prompt was not queued; queue it again"}
+}
+```
+
+`gate.state` is one of, in this order of precedence:
+
+| State | Meaning |
+|---|---|
+| `no_credential` | hal0 requires the gate to authenticate (auth enforcement on, or the rule for ADMIN routes on a LAN-bound box) and the gate cannot: there is no token on disk, or `HAL0_BIND_HOST` is a host name, which the gate does not send the token to. Its calls are refused, so whatever it reported earlier is out of date. See [ComfyUI's GPU gate credential](/docs/operate/auth#comfyuis-gpu-gate-credential). |
+| `stale` | The engine runs an older gate than this hal0 ships: restart it with `hal0 slot restart img`. The gate's latest call carried another version or none, or `hal0-api`'s auth layer turned away a version-less gate request after the gate's latest recorded call. |
+| `unknown` | The gate has not called since `hal0-api` started. The gate calls before each prompt it queues, so a box that has queued none since then reads `unknown`. |
+| `current` | The gate's latest call carried this hal0's gate version. |
+
+`version_seen` is the version header of that latest call (cut to 32 characters), or `null`
+for a call without one. A call counts as the gate's when it carries the header, or, for
+the older gates that sent none, when it comes from the box itself with the gate's default
+HTTP client (a User-Agent of `Python-urllib/...`). A browser or `curl` sends neither, and
+a header-less call from another machine is ignored, so the dashboard polling `/status`
+does not move the state. The second test is a heuristic.
+
+`gate_refusal` is the latest prompt the gate refused, `{"at", "reason"}`, or `null` when
+none has been reported since `hal0-api` started. `at` is epoch seconds. `reason` is the
+text the gate refused the prompt with (what the editor was shown) or, for a switch request
+that `hal0-api` rejected, hal0's own sentence (`hal0 refused the gate's switch request
+(HTTP 403): ...`), kept to 500 characters. `GET /api/comfyui/arbiter` carries
+`gate_refusal` too. The gate's text is written inside the `img` container: show a reason
+as text, never as HTML.
+
+A refusal is recorded from four places:
+
+- the gate's own report, `POST /api/comfyui/gate-refusal`;
+- a switch request that `hal0-api` rejected, when it carries the gate's version header: the
+  gate asking for more than image mode (403), a bad mode (422), or no arbiter (503);
+- a `/v1/images/generations` render the gate refused, which hal0 records from the render
+  because a gate without a credential cannot report on a box that requires one;
+- a workflow launched with `POST /api/comfyui/workflows/{name}/launch` that the gate
+  refused.
+
+Such a render or launch is answered 503 `image.gate_refused`.
+
+### `POST /api/comfyui/gate-refusal`
+
+The gate's report of a prompt it refused. It is internal: use `gate_refusal` on `/status`
+to read it, and do not post to it, because the report replaces the latest refusal the
+status shows. Body `{"reason": "<non-empty string>"}`. The answer is 202
+`{"status": "recorded"}`, or 422 `comfyui.invalid_gate_refusal` for a body that is not
+that, a `reason` of only whitespace included.
+
+The gate's own token admits this route, from the box itself only, and nothing else; it is
+one of the gate's four requests. It is not an MCP tool, and `comfyui_status` carries the
+same state. Nothing in `hal0-api` acts on a report.
+
+## Known limits
+
+- **A fit is a snapshot.** It reads the budget at the moment of the request. Another
+  guest on a shared GPU, or a slot that finishes loading, changes it.
+- **Few models are measured.** Most GPU needs are the weight total, a lower bound, and
+  say so with `need.gpu_estimated`.
+- **The preflight covers `/v1` only.** A prompt queued from ComfyUI's editor is not judged.
+- **`gate.state` changes only when the gate calls.** After `hal0 slot restart img` the
+  state keeps the old gate's reading until the new gate's first prompt, then reads
+  `current`. On a box that has queued nothing since `hal0-api` started it reads `unknown`.

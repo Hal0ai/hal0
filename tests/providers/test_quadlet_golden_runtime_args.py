@@ -47,6 +47,7 @@ Volume=<hal0_home>/var-lib/hal0/comfyui-gate:/opt/hal0-gate:ro
 Environment=HAL0_COMFYUI_STATUS_URL=http://127.0.0.1:8080/api/comfyui/arbiter
 Environment=HAL0_COMFYUI_SWITCHOVER_URL=http://127.0.0.1:8080/api/comfyui/switchover
 Environment=HAL0_COMFYUI_HANDOFF_URL=http://127.0.0.1:8080/api/comfyui/prompt-handoff
+Environment=HAL0_COMFYUI_REFUSAL_URL=http://127.0.0.1:8080/api/comfyui/gate-refusal
 Environment=HAL0_COMFYUI_GATE_TOKEN_FILE=/opt/hal0-gate/token
 PodmanArgs=--ipc=host
 Exec=bash -lc 'cd /opt/ComfyUI && exec python main.py --listen 127.0.0.1 --port 8188 --use-pytorch-cross-attention'

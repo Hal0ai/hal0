@@ -104,11 +104,12 @@ def _parse_size(size: str | None) -> tuple[int, int]:
     """Parse OpenAI-style ``"1024x1024"`` → ``(1024, 1024)``.
 
     Tolerates capital ``X``. Falls back to ``_DEFAULT_SIZE`` on anything
-    we can't parse — the alternative is a 422 for a typo deep in a graph,
-    which is bad operator UX.
+    we can't parse, a value that is not a string included — the alternative
+    is a 422 for a typo deep in a graph, which is bad operator UX. (The
+    ``/v1`` route rejects a non-string ``size`` before it gets here.)
     """
-    raw = (size or _DEFAULT_SIZE).lower().strip()
     try:
+        raw = (size or _DEFAULT_SIZE).lower().strip()
         w_str, h_str = raw.split("x", 1)
         w, h = int(w_str), int(h_str)
     except (ValueError, AttributeError):
@@ -119,6 +120,18 @@ def _parse_size(size: str | None) -> tuple[int, int]:
     w = max(64, min(w, 2048)) // 8 * 8
     h = max(64, min(h, 2048)) // 8 * 8
     return w, h
+
+
+def effective_size(size: Any) -> str:
+    """The ``"WxH"`` that :func:`build_workflow` renders for a request's ``size``.
+
+    The same parse and clamp the translator applies (:func:`_parse_size`): an unreadable or
+    missing size is the default, each side is clamped to 64..2048 and floored to a multiple
+    of 8. A caller that must judge the render before it runs (the fit preflight) reads it here
+    rather than repeating the arithmetic.
+    """
+    width, height = _parse_size(size)
+    return f"{width}x{height}"
 
 
 def _coerce_int(value: Any, default: int) -> int:
@@ -282,4 +295,5 @@ __all__ = [
     "WorkflowTemplateError",
     "WorkflowTemplateNotFound",
     "build_workflow",
+    "effective_size",
 ]

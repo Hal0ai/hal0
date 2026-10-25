@@ -55,7 +55,7 @@ The ComfyUI GPU gate's token (#3058)
 ------------------------------------
 The ``hal0_gpu_gate`` node in the img container is not an operator and never
 holds the admin key. :mod:`hal0.comfyui.gate_credential` mints it a token of
-its own, which admits exactly its three requests (:data:`_GATE_REQUESTS`), from
+its own, which admits exactly its four requests (:data:`_GATE_REQUESTS`), from
 the box itself only, when the ADMIN gate would refuse them, and marks the request with
 :data:`GATE_SCOPE_KEY` so the switch handler holds it to image mode. The token
 is not a tier: :func:`resolve_principal` never returns it, so it opens no
@@ -82,6 +82,8 @@ import hmac
 import ipaddress
 import json
 import os
+import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import parse_qs
@@ -90,6 +92,7 @@ import structlog
 
 from hal0.api import live_sockets
 from hal0.api.agents._auth import SESSION_COOKIE_NAME, verify_session_cookie
+from hal0.comfyui.gate_version import GATE_USER_AGENT_PREFIX, GATE_VERSION_HEADER
 from hal0.config.network import bind_host, is_loopback_bind
 from hal0.security.exposure import AuthClass, classify
 
@@ -432,7 +435,7 @@ def _origin_allowed(scope: dict[str, Any]) -> bool:
 # Posture-coupled ADMIN gate (#1822) — see the module docstring.
 
 
-def _is_loopback_peer(scope: dict[str, Any]) -> bool:
+def _is_loopback_peer(scope: Mapping[str, Any]) -> bool:
     """True iff the ASGI ``scope["client"]`` peer address is loopback.
 
     Missing client info (``None`` — some non-TCP test transports) is
@@ -493,13 +496,15 @@ def _envelope(code: str, message: str) -> dict[str, Any]:
 # The ComfyUI GPU gate's own credential (#3058)
 
 #: The only requests the ComfyUI GPU gate's token admits: its arbiter read,
-#: its prompt hand-off and its switch request, matched on the exact method and
-#: path. The token lives in :mod:`hal0.comfyui.gate_credential`.
+#: its prompt hand-off, its switch request and its report of a refused prompt,
+#: matched on the exact method and path. The token lives in
+#: :mod:`hal0.comfyui.gate_credential`.
 _GATE_REQUESTS: frozenset[tuple[str, str]] = frozenset(
     {
         ("GET", "/api/comfyui/arbiter"),
         ("POST", "/api/comfyui/prompt-handoff"),
         ("POST", "/api/comfyui/switchover"),
+        ("POST", "/api/comfyui/gate-refusal"),
     }
 )
 
@@ -509,7 +514,7 @@ _GATE_REQUESTS: frozenset[tuple[str, str]] = frozenset(
 GATE_SCOPE_KEY = "hal0.comfyui_gate"
 
 
-def _gate_peer(scope: dict[str, Any]) -> bool:
+def _gate_peer(scope: Mapping[str, Any]) -> bool:
     """True iff the request comes from where the gate dials: the box itself.
 
     The img container shares the host's network, so the gate reaches hal0-api
@@ -540,6 +545,58 @@ def _gate_admits(scope: dict[str, Any], method: str, path: str) -> bool:
     from hal0.comfyui import gate_credential
 
     return gate_credential.verify(authorization[7:].strip())
+
+
+#: When a request shaped like the ComfyUI gate's, from the box, without the gate's
+#: version header, was last refused (epoch seconds), else ``None``. Only a marker
+#: for ``GET /api/comfyui/status``: no decision here reads it.
+_gate_path_refused_at: float | None = None
+
+#: The requests whose refusal can mark an old gate: the gate's own, and the one v1.6.5's
+#: gate made instead of ``/arbiter`` (its status read). Admission never reads this set;
+#: it is :data:`_GATE_REQUESTS` alone.
+_GATE_MARK_REQUESTS: frozenset[tuple[str, str]] = _GATE_REQUESTS | {
+    ("GET", "/api/comfyui/status"),
+}
+
+
+def gate_path_refused_at() -> float | None:
+    """When the auth layer last refused a version-less gate request, else ``None``.
+
+    A gate that predates ``X-Hal0-Gate-Version`` (or the token) is refused here, on a
+    box that enforces auth, before it reaches a route that could record its call. The
+    marker is how ``/status`` still tells that engine to restart.
+    """
+    return _gate_path_refused_at
+
+
+def _note_unversioned_gate_refusal(scope: dict[str, Any], method: str, path: str) -> None:
+    """Set :data:`_gate_path_refused_at` for a refused request that looks like an old gate's.
+
+    Called only after the middleware has decided to refuse. It reads the request and
+    changes nothing about the refusal. All four must hold: one of the gate's
+    ``(method, path)`` pairs or its predecessor's status read
+    (:data:`_GATE_MARK_REQUESTS`, HTTP only), from where the gate dials
+    (:func:`_gate_peer`), none of the gate's version header, and the gate's default HTTP
+    client as its ``User-Agent``. For the gate's own pairs the first two are the checks
+    :func:`_gate_admits` has just run on this request.
+
+    The User-Agent test is a heuristic, scoped to those loopback gate paths: it keeps a
+    browser or ``curl`` on the box (an operator, a dashboard session that expired) from
+    marking an engine as old. Anything on the box can send that header, which costs
+    nothing worse than ``/status`` saying "restart the engine" until the next gate call.
+    """
+    global _gate_path_refused_at
+    if scope.get("type") != "http" or (method, path) not in _GATE_MARK_REQUESTS:
+        return
+    if not _gate_peer(scope):
+        return
+    headers = _headers_from_scope(scope)
+    if GATE_VERSION_HEADER.lower() in headers:
+        return
+    if not headers.get("user-agent", "").startswith(GATE_USER_AGENT_PREFIX):
+        return
+    _gate_path_refused_at = time.time()
 
 
 def _decide(auth_class: AuthClass, principal: AuthPrincipal) -> tuple[bool, int, str]:
@@ -733,6 +790,8 @@ class AuthEnforcementMiddleware:
             await self.app(scope, receive, send)
             return
 
+        _note_unversioned_gate_refusal(scope, method, path)
+
         log.info(
             "hal0.auth.denied",
             path=path,
@@ -772,6 +831,7 @@ __all__ = [
     "Tier",
     "admin_gated",
     "admin_sign_in_required",
+    "gate_path_refused_at",
     "has_admin_key",
     "require_auth_enabled",
     "resolve_principal",

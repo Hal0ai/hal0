@@ -120,7 +120,7 @@ The one endpoint that is not a passthrough — it drives `ComfyUIProvider.infer(
 directly (graph submit + history poll), translating the OpenAI-shape request into a
 ComfyUI workflow.
 
-Request (subset honored): `{"model": <id>, "prompt": <required>, "n"?, "size"?, "response_format"?: "url"|"b64_json"}`, plus a hal0 extension `extra_body: {seed?, steps?, cfg?, negative_prompt?}`.
+Request (subset honored): `{"model": <id>, "prompt": <required>, "n"?, "size"?, "response_format"?: "url"|"b64_json"}`, plus a hal0 extension `extra_body: {seed?, steps?, cfg?, negative_prompt?, hal0_skip_fit_check?}`.
 
 - Missing `prompt` → 422 `image.prompt_required`.
 - `model` resolves in this order:
@@ -133,11 +133,15 @@ Request (subset honored): `{"model": <id>, "prompt": <required>, "n"?, "size"?, 
 | Status | Code | When |
 |---|---|---|
 | 404 | `image.model_unknown` | Neither a catalog id nor a `ckpt/…` id that `GET /api/comfyui/files` lists as `api_id`, for example `Flux-2-Klein-9B-GGUF` or `sd-turbo`. `error.details.available` lists the ids that work now. |
-| 409 | `image.model_not_installed` | A renderable catalog model whose weights are not all on disk. `error.details` carries `install` (`POST /api/comfyui/models/<id>/install`) and `missing_gb`. |
+| 409 | `image.model_not_installed` | A renderable catalog model whose weights are not all on disk. `error.details` carries `install` (`POST /api/comfyui/models/<id>/install`) and `missing_gb`, the GB still to download (1 GB is 2^30 bytes, as in the memory budget). |
 | 422 | `image.model_not_renderable` | A video, edit or upscale catalog model. Open it in the ComfyUI editor, which the `img` slot serves on port 8188 and which needs a ROCm lane on the host. |
 | 422 | `image.model_required` | No `model` in the request and no model selected for `img`. |
+| 422 | `image.invalid_size` | `size` is present and is not a string (`null` and `""` mean no size). `error.details.size_type` names the type sent. A string that does not read as `WxH` is not an error: the render falls back to its default size. |
+| 422 | `image.wont_fit` | The model at the size the render will use does not fit this box's GPU pool or RAM, judged before the GPU arbiter unloads any slot. `error.details` carries `need`, `render_free_gb`, `ram_free_gb`, `model` and `size`. `extra_body.hal0_skip_fit_check: true` skips the check. See the [Image readiness API reference](/docs/reference/api/image-readiness/). |
+| 503 | `image.gate_refused` | ComfyUI's GPU gate refused the prompt hal0 submitted. `error.message` is the gate's reason. |
 
 - The GPU switch happens before dispatch; when the GPU is already in image mode but the `img` slot is down, the request starts it first. The request holds image mode until its render returns, and hal0 hands the GPU back to the LLM slots about 10 seconds later, or as soon as a request for one of them arrives.
+- A client that disconnects while the GPU switches is answered with an empty 499, and nothing is submitted to ComfyUI.
 - Open WebUI's image button is a client of this endpoint: it sends `model`, `prompt`, `n` and `response_format: "b64_json"`, and no `size` unless one is typed into it (see [Open WebUI](/docs/guides/open-webui/#image-generation)).
 
 Parameters the request leaves out are filled in this order:

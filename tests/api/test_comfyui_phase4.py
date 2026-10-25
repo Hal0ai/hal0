@@ -21,6 +21,8 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from hal0.comfyui import progress
+
 # ---------------------------------------------------------------------------
 # Module-state isolation (same pattern as test_comfyui_proxy.py)
 # ---------------------------------------------------------------------------
@@ -33,6 +35,13 @@ def _reset_comfyui_state():
     mod._reset_state()
     yield
     mod._reset_state()
+
+
+@pytest.fixture(autouse=True)
+def _reset_progress():
+    progress._reset()
+    yield
+    progress._reset()
 
 
 # ---------------------------------------------------------------------------
@@ -593,15 +602,75 @@ class TestStatusTelemetry:
         assert body["temp"] == 68.5
         assert body["clock"] == 2.7
 
-    def test_it_s_eta_step_exist_as_null(self, client: TestClient):
-        """it/s, eta, step require a future ComfyUI websocket subscription."""
+    def test_status_reports_progress_not_nulls(self, client: TestClient):
+        """A hal0-submitted render's step shows up as ``progress``; the old null keys are gone."""
+        progress.start("abc", "sdxl-lightning")
+        progress.update("abc", step=3, total=8, node="12")
         patches = self._patch_status(self._SYSTEM_STATS, self._QUEUE_BUSY)
         with patches[0], patches[1], patches[2], patches[3], patches[4]:
             body = client.get("/api/comfyui/status").json()
 
-        for field in ("it_s", "eta", "step"):
-            assert field in body
-            assert body[field] is None
+        assert body["progress"]["model"] == "sdxl-lightning"
+        assert (body["progress"]["step"], body["progress"]["total"]) == (3, 8)
+        assert body["progress"]["node"] == "12"
+        assert body["progress"]["prompt_id"] == "abc"
+        assert isinstance(body["progress"]["elapsed_s"], float)
+        for gone in ("it_s", "eta", "step"):
+            assert gone not in body
+
+    def test_status_progress_is_null_when_no_hal0_render_is_live(self, client: TestClient):
+        """Editor renders have no entry; the pane shows queue-level state for them."""
+        patches = self._patch_status(self._SYSTEM_STATS, self._QUEUE_BUSY)
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            body = client.get("/api/comfyui/status").json()
+
+        assert "progress" in body
+        assert body["progress"] is None
+        assert body["queue"]["running"] == 1
+
+    def test_status_survives_text_from_comfyuis_socket_it_cannot_encode(self, client: TestClient):
+        """A node named ``"\\ud800"`` is valid JSON on the socket and not valid UTF-8: stored
+        raw it made ``/status`` fail to encode (500), and a 10 kB one made it huge."""
+        from hal0.providers.comfyui import _ProgressRelay
+
+        relay = _ProgressRelay("sdxl-lightning")
+        relay.claim("p\ud800" + "i" * 10_000)
+        frame = {
+            "type": "progress",
+            "data": {"value": 1, "max": 4, "node": "n\ud800" + "x" * 10_000},
+        }
+        relay.feed(json.dumps(frame))
+        patches = self._patch_status(self._SYSTEM_STATS, self._QUEUE_BUSY)
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            response = client.get("/api/comfyui/status")
+
+        assert response.status_code == 200
+        shown = response.json()["progress"]
+        assert shown["node"] == "n?" + "x" * 62
+        assert shown["prompt_id"] == "p?" + "i" * 62
+        assert (shown["step"], shown["total"]) == (1, 4)
+
+    def test_status_reports_the_render_that_is_stepping(self, client: TestClient):
+        """Two hal0 renders queued: the older one is running, so it is the one reported."""
+        progress.start("running", "sd-1.5-pruned-emaonly")
+        progress.start("queued", "sdxl-lightning")
+        progress.update("running", step=4, total=20, node="3")
+        patches = self._patch_status(self._SYSTEM_STATS, self._QUEUE_BUSY)
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            body = client.get("/api/comfyui/status").json()
+
+        assert body["progress"]["prompt_id"] == "running"
+        assert body["progress"]["step"] == 4
+
+    def test_status_reports_the_oldest_render_before_any_has_stepped(self, client: TestClient):
+        progress.start("old", "sd-1.5-pruned-emaonly")
+        progress.start("new", "sdxl-lightning")
+        patches = self._patch_status(self._SYSTEM_STATS, self._QUEUE_BUSY)
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            body = client.get("/api/comfyui/status").json()
+
+        assert body["progress"]["prompt_id"] == "old"
+        assert body["progress"]["step"] is None
 
     def test_telemetry_probe_failure_is_fail_soft(self, client: TestClient):
         base = _BASE
@@ -627,3 +696,953 @@ class TestStatusTelemetry:
         assert body["util"] is None
         assert body["temp"] is None
         assert body["clock"] is None
+
+
+# ---------------------------------------------------------------------------
+# GET /api/comfyui/arbiter and /status: the arbiter's phase fields (image readiness API)
+# ---------------------------------------------------------------------------
+
+
+class _FakeSlots:
+    """The slice of SlotManager a real GpuArbiter's status() reads."""
+
+    def __init__(self, ready: set[str]) -> None:
+        self.ready = ready
+
+    def is_ready_for_dispatch(self, name: str) -> bool:
+        return name in self.ready
+
+    def in_flight_count(self, name: str) -> int:
+        return 0
+
+
+def test_arbiter_route_passes_new_fields(client: TestClient, tmp_path: Path):
+    """Both routes hand the arbiter's block over as is: a real arbiter, in the
+    grace after a render, answers with every field the GPU status line reads."""
+    import time
+
+    from hal0.slots.arbiter import GpuArbiter
+
+    state_path = tmp_path / "gpu_arbiter.json"
+    state_path.write_text(
+        json.dumps({"mode": "img", "pinned": False, "saved_llm_slots": ["chat", "agent"]}),
+        encoding="utf-8",
+    )
+    arbiter = GpuArbiter(_FakeSlots(set()), state_path=state_path)  # type: ignore[arg-type]
+    arbiter.set_pin(False)  # starts the quiet clock: image mode, nothing rendering
+    client.app.state.slot_manager = SimpleNamespace(arbiter=arbiter)
+
+    expected = {
+        "phase",
+        "restore_at",
+        "handoff_until",
+        "drain_in_flight",
+        "unload_set",
+        "llm_waiters",
+    }
+    direct = arbiter.status()
+    assert expected <= set(direct)
+
+    gate_body = client.get("/api/comfyui/arbiter").json()
+    assert gate_body["mode"] == "generation"
+    assert set(gate_body["arbiter"]) == set(direct)
+    block = gate_body["arbiter"]
+    assert block["phase"] == "grace"
+    assert block["handoff_until"] is None
+    assert time.time() < block["restore_at"] <= time.time() + 10.0
+    assert block["drain_in_flight"] == 0
+    assert block["unload_set"] == ["chat", "agent"]
+    assert block["llm_waiters"] == {"count": 0, "oldest_s": None}
+
+    async def _fetch(_path):
+        return None
+
+    with (
+        patch(f"{_BASE}._container_state", new_callable=AsyncMock, return_value="running"),
+        patch(f"{_BASE}._systemd_active", new_callable=AsyncMock, return_value=False),
+        patch(f"{_BASE}._fetch_json", new_callable=AsyncMock, side_effect=_fetch),
+        patch(f"{_BASE}.gpu_view.sample", return_value=SimpleNamespace(gpu_busy=0.0)),
+        patch(f"{_BASE}._probe_power", return_value={}),
+    ):
+        status_body = client.get("/api/comfyui/status").json()
+    assert set(status_body["arbiter"]) == set(direct)
+    assert status_body["arbiter"]["phase"] == "grace"
+    assert status_body["arbiter"]["unload_set"] == ["chat", "agent"]
+
+
+# ---------------------------------------------------------------------------
+# The gate's version and its refusals (image readiness API)
+# ---------------------------------------------------------------------------
+
+_VERSION = "X-Hal0-Gate-Version"
+
+
+def _status(client: TestClient, headers: dict[str, str] | None = None) -> dict:
+    """``GET /status`` with every probe it makes stubbed out."""
+
+    async def _fetch(_path):
+        return None
+
+    with (
+        patch(f"{_BASE}._container_state", new_callable=AsyncMock, return_value="running"),
+        patch(f"{_BASE}._systemd_active", new_callable=AsyncMock, return_value=False),
+        patch(f"{_BASE}._fetch_json", new_callable=AsyncMock, side_effect=_fetch),
+        patch(f"{_BASE}.gpu_view.sample", return_value=SimpleNamespace(gpu_busy=0.0)),
+        patch(f"{_BASE}._probe_power", return_value={}),
+    ):
+        response = client.get("/api/comfyui/status", headers=headers or {})
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_status_survives_a_gate_state_that_cannot_be_read(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    """The gate block reads files; whatever goes wrong there is an unknown gate, never a 500
+    on the page the dashboard polls. The failure is logged once, not on every poll."""
+
+    def broken() -> dict:
+        raise OSError("api.env is unreadable")
+
+    monkeypatch.setattr(f"{_BASE}._gate_block", broken)
+
+    with caplog.at_level("WARNING", logger=_BASE):
+        first = _status(client)
+        second = _status(client)
+
+    unknown = {"state": "unknown", "version_seen": None}
+    assert first["gate"] == unknown
+    assert second["gate"] == unknown
+    assert first["gate_refusal"] is None
+    assert len([m for m in caplog.messages if m == "comfyui.gate_state_unavailable"]) == 1
+
+
+def test_no_gate_call_is_unknown(client: TestClient):
+    """Nothing has called the gate's routes since hal0-api started."""
+    body = _status(client)
+
+    assert body["gate"] == {"state": "unknown", "version_seen": None}
+    assert body["gate_refusal"] is None
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [("GET", "/api/comfyui/arbiter"), ("POST", "/api/comfyui/prompt-handoff")],
+)
+def test_headerless_call_is_stale(box_client: TestClient, method: str, path: str):
+    """The gate-only routes were called by a gate that sends no version: an older one.
+    It is told by its client (the gate builds its requests with urllib) and its peer
+    (it calls from the box itself)."""
+    box_client.request(method, path, headers=_GATE_UA)
+
+    assert _status(box_client)["gate"] == {"state": "stale", "version_seen": None}
+
+
+_BROWSER_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/130.0.0.0 Safari/537.36"
+)
+
+
+@pytest.mark.parametrize("user_agent", ["curl/8.5.0", _BROWSER_UA, "testclient", ""])
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [("GET", "/api/comfyui/arbiter"), ("POST", "/api/comfyui/prompt-handoff")],
+)
+def test_headerless_call_from_curl_or_a_browser_is_nobody(
+    box_client: TestClient, method: str, path: str, user_agent: str
+):
+    """An operator's curl, a browser tab, on the box itself: not an engine to restart.
+
+    From the box, so the peer test passes and the User-Agent is what decides (the same
+    call with the gate's own User-Agent is ``test_headerless_call_is_stale``).
+    """
+    box_client.request(method, path, headers={"User-Agent": user_agent})
+
+    assert _status(box_client)["gate"] == {"state": "unknown", "version_seen": None}
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [("GET", "/api/comfyui/arbiter"), ("POST", "/api/comfyui/prompt-handoff")],
+)
+def test_headerless_call_from_curl_on_another_machine_is_nobody(
+    client: TestClient, method: str, path: str
+):
+    """The default client's peer is not the box: nothing about it reads as the gate."""
+    client.request(method, path, headers={"User-Agent": "curl/8.5.0"})
+
+    assert _status(client)["gate"] == {"state": "unknown", "version_seen": None}
+
+
+def test_v165_gate_status_read_is_stale(box_client: TestClient):
+    """The released v1.6.5 gate never calls /arbiter or /prompt-handoff: it reads
+    GET /status and posts /switchover, without the version header, through urllib."""
+    assert _status(box_client, _GATE_UA)["gate"] == {"state": "stale", "version_seen": None}
+    # Later dashboard polls do not undo it.
+    assert _status(box_client)["gate"]["state"] == "stale"
+
+
+def test_v165_gate_switchover_is_stale(box_client: TestClient):
+    box_client.post("/api/comfyui/switchover", json={"mode": "generation"}, headers=_GATE_UA)
+
+    assert _status(box_client)["gate"] == {"state": "stale", "version_seen": None}
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("GET", "/api/comfyui/status", None),
+        ("GET", "/api/comfyui/arbiter", None),
+        ("POST", "/api/comfyui/prompt-handoff", None),
+        ("POST", "/api/comfyui/switchover", {"mode": "generation"}),
+    ],
+)
+@pytest.mark.parametrize("peer", ["192.0.2.99", "testclient"])
+def test_a_headerless_urllib_call_from_another_machine_is_not_an_old_gate(
+    app, monkeypatch, peer: str, method: str, path: str, body
+):
+    """Auth is off. A urllib script on the LAN polling the gate's routes is not the engine
+    on this box: the gate dials from the box itself, as the auth layer's marker requires."""
+    monkeypatch.setenv("HAL0_REQUIRE_AUTH", "0")
+    monkeypatch.delenv("HAL0_ADMIN_KEY", raising=False)
+    monkeypatch.setenv("HAL0_BIND_HOST", "0.0.0.0")
+    with TestClient(app, client=(peer, 51000)) as remote:
+        remote.request(method, path, json=body, headers=_GATE_UA)
+
+        assert _status(remote)["gate"] == {"state": "unknown", "version_seen": None}
+
+
+def test_a_headerless_urllib_call_from_the_bind_address_is_an_old_gate(app, monkeypatch):
+    """Bound to one address, the gate dials that address: the same box."""
+    monkeypatch.setenv("HAL0_REQUIRE_AUTH", "0")
+    monkeypatch.delenv("HAL0_ADMIN_KEY", raising=False)
+    monkeypatch.setenv("HAL0_BIND_HOST", "192.0.2.10")
+    with TestClient(app, client=("192.0.2.10", 51000)) as on_the_box:
+        on_the_box.get("/api/comfyui/arbiter", headers=_GATE_UA)
+
+        assert _status(on_the_box)["gate"] == {"state": "stale", "version_seen": None}
+
+
+def test_a_call_with_the_header_counts_from_any_peer(app, monkeypatch):
+    """The peer test is for the header-less guess only; the header says what it is."""
+    monkeypatch.setenv("HAL0_REQUIRE_AUTH", "0")
+    with TestClient(app, client=("192.0.2.99", 51000)) as remote:
+        remote.get("/api/comfyui/arbiter", headers={_VERSION: "2"})
+
+        assert _status(remote)["gate"] == {"state": "current", "version_seen": "2"}
+
+
+@pytest.mark.parametrize("user_agent", ["curl/8.5.0", _BROWSER_UA])
+def test_a_browsers_status_poll_and_switchover_are_not_a_stale_gate(
+    box_client: TestClient, user_agent: str
+):
+    """The dashboard polls /status and posts /switchover, both without the header. From the
+    box itself (a dashboard opened on the machine), where the User-Agent is what decides."""
+    headers = {"User-Agent": user_agent}
+    assert _status(box_client, headers)["gate"] == {"state": "unknown", "version_seen": None}
+    box_client.post("/api/comfyui/switchover", json={"mode": "generation"}, headers=headers)
+
+    assert _status(box_client, headers)["gate"] == {"state": "unknown", "version_seen": None}
+
+
+def test_a_dashboards_status_poll_and_switchover_from_another_machine_are_not_a_stale_gate(
+    client: TestClient,
+):
+    headers = {"User-Agent": _BROWSER_UA}
+    assert _status(client, headers)["gate"] == {"state": "unknown", "version_seen": None}
+    client.post("/api/comfyui/switchover", json={"mode": "generation"}, headers=headers)
+
+    assert _status(client, headers)["gate"] == {"state": "unknown", "version_seen": None}
+
+
+def test_current_header_is_current(client: TestClient):
+    from hal0.comfyui.gate_version import GATE_VERSION
+
+    client.get("/api/comfyui/arbiter", headers={_VERSION: GATE_VERSION})
+
+    assert _status(client)["gate"] == {"state": "current", "version_seen": GATE_VERSION}
+
+
+def test_an_older_version_is_stale(client: TestClient):
+    client.get("/api/comfyui/arbiter", headers={_VERSION: "1"})
+
+    assert _status(client)["gate"] == {"state": "stale", "version_seen": "1"}
+
+
+def test_the_gates_latest_call_decides(box_client: TestClient):
+    """Restarting the engine swaps the gate: its first call replaces what hal0 saw."""
+    box_client.get("/api/comfyui/arbiter", headers=_GATE_UA)
+    assert _status(box_client)["gate"]["state"] == "stale"
+
+    box_client.get("/api/comfyui/arbiter", headers={**_GATE_UA, _VERSION: "2"})
+    assert _status(box_client)["gate"]["state"] == "current"
+
+    box_client.get("/api/comfyui/arbiter", headers=_GATE_UA)
+    assert _status(box_client)["gate"]["state"] == "stale"
+
+
+def test_a_headerless_switchover_is_the_dashboards_not_a_stale_gate(client: TestClient):
+    """The dashboard's Start button posts /switchover with no gate header."""
+    client.request("POST", "/api/comfyui/switchover", json={"mode": "generation"})
+    assert _status(client)["gate"] == {"state": "unknown", "version_seen": None}
+
+    client.post("/api/comfyui/switchover", json={"mode": "generation"}, headers={_VERSION: "2"})
+    assert _status(client)["gate"] == {"state": "current", "version_seen": "2"}
+
+
+def test_the_version_hal0_keeps_is_cut_to_a_sane_length(client: TestClient):
+    client.get("/api/comfyui/arbiter", headers={_VERSION: "9" * 300})
+
+    gate = _status(client)["gate"]
+    assert gate["state"] == "stale"
+    assert gate["version_seen"] == "9" * 32
+
+
+def test_gate_refusal_post_records_what_the_gate_said(client: TestClient, monkeypatch):
+    monkeypatch.setattr(f"{_BASE}._wall_clock", lambda: 1_760_000_000.5)
+
+    r = client.post(
+        "/api/comfyui/gate-refusal",
+        json={"reason": "hal0 kept the GPU in inference mode"},
+        headers={_VERSION: "2"},
+    )
+
+    assert r.status_code == 202
+    expected = {"at": 1_760_000_000.5, "reason": "hal0 kept the GPU in inference mode"}
+    body = _status(client)
+    assert body["gate_refusal"] == expected
+    assert body["gate"] == {"state": "current", "version_seen": "2"}
+    assert client.get("/api/comfyui/arbiter").json()["gate_refusal"] == expected
+
+
+def test_arbiter_has_no_refusal_until_the_gate_reports_one(client: TestClient):
+    assert client.get("/api/comfyui/arbiter").json()["gate_refusal"] is None
+
+
+def test_gate_refusal_reason_is_capped(client: TestClient):
+    """The reason comes from the gate; hal0 keeps 500 characters of it."""
+    client.post("/api/comfyui/gate-refusal", json={"reason": "r" * 600})
+
+    assert _status(client)["gate_refusal"]["reason"] == "r" * 500
+
+
+@pytest.mark.parametrize("body", [None, {}, {"reason": ""}, {"reason": "  "}, {"reason": 5}])
+def test_gate_refusal_needs_a_reason(client: TestClient, body):
+    r = client.post("/api/comfyui/gate-refusal", json=body)
+
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "comfyui.invalid_gate_refusal"
+    assert _status(client)["gate_refusal"] is None
+
+
+def test_the_latest_refusal_replaces_the_last(client: TestClient):
+    client.post("/api/comfyui/gate-refusal", json={"reason": "first"})
+    client.post("/api/comfyui/gate-refusal", json={"reason": "second"})
+
+    assert _status(client)["gate_refusal"]["reason"] == "second"
+
+
+def test_reset_state_forgets_the_gate(client: TestClient):
+    from hal0.api.routes import comfyui as mod
+
+    client.get("/api/comfyui/arbiter", headers={_VERSION: "2"})
+    client.post("/api/comfyui/gate-refusal", json={"reason": "x"})
+    assert mod._gate_seen["version"] == "2" and mod._gate_refusal is not None
+
+    mod._reset_state()
+
+    assert mod._gate_seen == {"version": None, "at": None}
+    assert mod._gate_refusal is None
+
+
+@pytest.mark.parametrize(
+    ("body", "status", "mentions"),
+    [
+        ({"mode": "nonsense"}, 422, "body must be"),
+        ({}, 422, "body must be"),
+    ],
+)
+def test_switchover_rejection_from_gate_records_refusal(
+    client: TestClient, body: dict, status: int, mentions: str
+):
+    """A switch request that hal0 rejects, from a caller that carries the gate header."""
+    r = client.post("/api/comfyui/switchover", json=body, headers={_VERSION: "2"})
+
+    assert r.status_code == status
+    refusal = _status(client)["gate_refusal"]
+    assert refusal is not None
+    assert mentions in refusal["reason"]
+    assert f"HTTP {status}" in refusal["reason"]
+
+
+def test_switchover_rejection_without_the_gate_header_is_not_a_gate_refusal(client: TestClient):
+    r = client.post("/api/comfyui/switchover", json={"mode": "nonsense"})
+
+    assert r.status_code == 422
+    assert _status(client)["gate_refusal"] is None
+
+
+def test_switchover_with_no_arbiter_from_the_gate_records_refusal(client: TestClient):
+    client.app.state.slot_manager = None
+
+    r = client.post("/api/comfyui/switchover", json={"mode": "generation"}, headers={_VERSION: "2"})
+
+    assert r.status_code == 503
+    refusal = _status(client)["gate_refusal"]
+    assert refusal is not None and "HTTP 503" in refusal["reason"]
+    assert "arbiter" in refusal["reason"]
+
+
+def test_a_switch_already_running_is_not_a_gate_refusal(client: TestClient):
+    """The gate counts a 409 as accepted and polls on."""
+    from hal0.api.routes import comfyui as mod
+
+    mod._switch.update(active=True, target="generation")
+
+    r = client.post("/api/comfyui/switchover", json={"mode": "generation"}, headers={_VERSION: "2"})
+
+    assert r.status_code == 409
+    assert _status(client)["gate_refusal"] is None
+
+
+def test_an_accepted_switch_from_the_gate_is_not_a_refusal(client: TestClient):
+    class _Arbiter:
+        def status(self):
+            return {"mode": "llm", "switching": False, "pinned": False}
+
+        async def ensure_img(self, *, pin=False):
+            return None
+
+    client.app.state.slot_manager = SimpleNamespace(arbiter=_Arbiter())
+
+    r = client.post("/api/comfyui/switchover", json={"mode": "generation"}, headers={_VERSION: "2"})
+
+    assert r.status_code == 202
+    assert _status(client)["gate_refusal"] is None
+
+
+# -- with auth enforced: the gate's token, and the credential the gate lacks ------------------
+
+_ADMIN = {"Authorization": "Bearer admin-key-for-tests"}
+
+
+@pytest.fixture
+def box_client(app):
+    """A client on the box itself: the only place the gate's token is admitted from."""
+    with TestClient(app, client=("127.0.0.1", 51000)) as c:
+        yield c
+
+
+@pytest.fixture
+def auth_enforced(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hal0.api import auth as auth_mod
+
+    monkeypatch.setenv("HAL0_REQUIRE_AUTH", "1")
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "admin-key-for-tests")
+    auth_mod._require_auth_cache = None
+
+
+def test_switchover_403_for_the_gates_token_records_refusal(
+    box_client: TestClient, auth_enforced: None
+):
+    """#3058: the gate's token may only ask for a plain switch into image mode."""
+    from hal0.comfyui import gate_credential
+
+    token = gate_credential.ensure_token()
+
+    r = box_client.post(
+        "/api/comfyui/switchover",
+        json={"mode": "inference"},
+        headers={"Authorization": f"Bearer {token}", _VERSION: "2"},
+    )
+
+    assert r.status_code == 403
+    refusal = _status(box_client, _ADMIN)["gate_refusal"]
+    assert refusal is not None
+    assert "HTTP 403" in refusal["reason"]
+    assert "may only ask for image mode" in refusal["reason"]
+
+
+def test_the_gate_token_reaches_the_refusal_route(box_client: TestClient, auth_enforced: None):
+    from hal0.comfyui import gate_credential
+
+    token = gate_credential.ensure_token()
+
+    refused = box_client.post("/api/comfyui/gate-refusal", json={"reason": "x"})
+    ok = box_client.post(
+        "/api/comfyui/gate-refusal",
+        json={"reason": "hal0 kept the GPU in inference mode"},
+        headers={"Authorization": f"Bearer {token}", _VERSION: "2"},
+    )
+
+    assert refused.status_code == 401
+    assert ok.status_code == 202
+    body = _status(box_client, _ADMIN)
+    assert body["gate_refusal"]["reason"] == "hal0 kept the GPU in inference mode"
+    assert body["gate"] == {"state": "current", "version_seen": "2"}
+
+
+def test_status_gate_no_credential_when_auth_required(client: TestClient, auth_enforced: None):
+    """Auth is enforced and the gate has no token to present: its first call is refused."""
+    from hal0.api.routes import comfyui as mod
+
+    assert _status(client, _ADMIN)["gate"] == {"state": "no_credential", "version_seen": None}
+
+    # It outranks everything the gate may have said before the token went missing.
+    mod._gate_seen.update(version="2", at=1.0)
+    assert _status(client, _ADMIN)["gate"] == {"state": "no_credential", "version_seen": "2"}
+    mod._gate_seen.update(version=None)
+    assert _status(client, _ADMIN)["gate"]["state"] == "no_credential"
+
+
+def test_status_gate_has_a_credential_once_the_token_exists(
+    client: TestClient, auth_enforced: None
+):
+    from hal0.comfyui import gate_credential
+
+    gate_credential.ensure_token()
+
+    assert _status(client, _ADMIN)["gate"] == {"state": "unknown", "version_seen": None}
+
+
+def test_status_gate_without_auth_needs_no_credential(client: TestClient, monkeypatch):
+    """On a box that enforces nothing the gate works with no token at all."""
+    from hal0.comfyui import gate_credential
+
+    monkeypatch.setenv("HAL0_REQUIRE_AUTH", "0")
+    assert not gate_credential.credential_present()
+
+    assert _status(client)["gate"]["state"] == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("bind", "token", "state"),
+    [
+        # One address, with an admin key: the gate dials that address, where the LAN rule applies.
+        ("192.0.2.10", False, "no_credential"),
+        ("192.0.2.10", True, "unknown"),
+        # A wildcard or loopback bind: the gate dials loopback, which the LAN rule exempts.
+        ("0.0.0.0", False, "unknown"),
+        ("::", False, "unknown"),
+        ("127.0.0.1", False, "unknown"),
+        # A host name: the gate holds its token back from a name, so a token on disk does not help.
+        ("hal0.example.lan", False, "no_credential"),
+        ("hal0.example.lan", True, "no_credential"),
+    ],
+)
+def test_status_gate_credential_on_a_box_bound_to_one_address(
+    client: TestClient, monkeypatch, bind: str, token: bool, state: str
+):
+    from hal0.comfyui import gate_credential
+
+    monkeypatch.setenv("HAL0_REQUIRE_AUTH", "0")
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "admin-key-for-tests")
+    monkeypatch.setenv("HAL0_BIND_HOST", bind)
+    if token:
+        gate_credential.ensure_token()
+
+    # The dashboard's own peer (LAN, non-loopback) must not change the answer.
+    assert _status(client, _ADMIN)["gate"]["state"] == state
+
+
+def test_status_gate_by_name_reports_no_credential_even_with_a_token(
+    client: TestClient, auth_enforced: None, monkeypatch
+):
+    """Auth is on, hal0-api is named by a host name, and the gate holds its token back
+    from names (the asset's ``_direct_host``): the token exists and cannot be used."""
+    from hal0.comfyui import gate_credential
+
+    gate_credential.ensure_token()
+    monkeypatch.setenv("HAL0_BIND_HOST", "hal0.example.lan")
+
+    assert _status(client, _ADMIN)["gate"]["state"] == "no_credential"
+
+
+# -- an old gate that auth turned away reads stale -----------------------------------------
+
+_REFUSED_401 = (
+    b'{"error": {"code": "auth.required", "message": "authentication required", "details": {}}}'
+)
+_REFUSED_403 = (
+    b'{"error": {"code": "auth.forbidden", "message": "insufficient scope", "details": {}}}'
+)
+# The gate builds its requests with urllib; the auth layer reads its default User-Agent.
+_GATE_UA = {"User-Agent": "Python-urllib/3.12"}
+
+
+def test_status_gate_stale_when_auth_refused_an_old_gate(
+    box_client: TestClient, auth_enforced: None
+):
+    """Auth is on, the engine runs a gate that sends no version header: it is turned away
+    before it reaches a route, so only the auth layer's marker says the engine needs a restart."""
+    from hal0.comfyui import gate_credential
+
+    token = gate_credential.ensure_token()
+    assert _status(box_client, _ADMIN)["gate"] == {"state": "unknown", "version_seen": None}
+
+    refused = box_client.get("/api/comfyui/arbiter", headers=_GATE_UA)
+
+    # The refusal is the one the middleware always gave: status, headers and bytes.
+    assert refused.status_code == 401
+    assert refused.content == _REFUSED_401
+    assert refused.headers["content-type"] == "application/json"
+    assert _status(box_client, _ADMIN)["gate"] == {"state": "stale", "version_seen": None}
+
+    # The restarted engine's gate calls with the header (and the token): current again.
+    ok = box_client.get(
+        "/api/comfyui/arbiter",
+        headers={**_GATE_UA, "Authorization": f"Bearer {token}", _VERSION: "2"},
+    )
+    assert ok.status_code == 200
+    assert _status(box_client, _ADMIN)["gate"] == {"state": "current", "version_seen": "2"}
+
+
+@pytest.mark.parametrize(
+    "user_agent",
+    [
+        "curl/8.5.0",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/130.0.0.0 Safari/537.36",
+    ],
+)
+def test_a_refused_curl_or_browser_on_the_box_is_not_an_old_gate(
+    box_client: TestClient, auth_enforced: None, user_agent: str
+):
+    """An operator's curl, or a dashboard session that expired, hits the same gate paths."""
+    from hal0.comfyui import gate_credential
+
+    gate_credential.ensure_token()
+
+    refused = box_client.get("/api/comfyui/arbiter", headers={"User-Agent": user_agent})
+
+    assert refused.status_code == 401
+    assert refused.content == _REFUSED_401  # the refusal is the same either way
+    assert _status(box_client, _ADMIN)["gate"] == {"state": "unknown", "version_seen": None}
+
+
+def test_status_gate_stale_for_an_old_gate_refused_with_403(
+    box_client: TestClient, auth_enforced: None, monkeypatch
+):
+    """A caller with the wrong tier (here the client key) is refused 403, not 401."""
+    from hal0.comfyui import gate_credential
+
+    gate_credential.ensure_token()
+    monkeypatch.setenv("HAL0_CLIENT_KEY", "client-key-for-tests")
+
+    refused = box_client.post(
+        "/api/comfyui/prompt-handoff",
+        headers={**_GATE_UA, "Authorization": "Bearer client-key-for-tests"},
+    )
+
+    assert refused.status_code == 403
+    assert refused.content == _REFUSED_403
+    assert _status(box_client, _ADMIN)["gate"]["state"] == "stale"
+
+
+def test_a_marker_older_than_the_gates_latest_call_is_history(auth_enforced: None):
+    """A call recorded after the refusal wins: the gate that made it is the one running."""
+    from hal0.api import auth as auth_mod
+    from hal0.api.routes import comfyui as mod
+    from hal0.comfyui import gate_credential
+
+    gate_credential.ensure_token()
+    auth_mod._gate_path_refused_at = 100.0
+
+    assert mod._gate_state() == "stale"  # refused, and nothing recorded since
+    mod._gate_seen.update(version="2", at=99.0)
+    assert mod._gate_state() == "stale"  # the call is older than the refusal
+    mod._gate_seen.update(version="2", at=100.0)
+    assert mod._gate_state() == "current"  # not newer than the call
+    mod._gate_seen.update(version="2", at=101.0)
+    assert mod._gate_state() == "current"
+    mod._gate_seen.update(version="1", at=101.0)
+    assert mod._gate_state() == "stale"  # an older version, on its own account
+
+
+def test_no_credential_outranks_an_old_gate_that_auth_refused(
+    box_client: TestClient, auth_enforced: None
+):
+    """No token on disk: the first thing to fix is the credential."""
+    assert box_client.get("/api/comfyui/arbiter", headers=_GATE_UA).status_code == 401
+
+    assert _status(box_client, _ADMIN)["gate"]["state"] == "no_credential"
+
+
+def test_a_refused_request_from_another_machine_is_not_an_old_gate(
+    client: TestClient, auth_enforced: None
+):
+    """The default test peer is not the box: nothing about the gate can be read from it."""
+    from hal0.comfyui import gate_credential
+
+    gate_credential.ensure_token()
+
+    assert client.get("/api/comfyui/arbiter", headers=_GATE_UA).status_code == 401
+
+    assert _status(client, _ADMIN)["gate"] == {"state": "unknown", "version_seen": None}
+
+
+def test_a_refused_request_that_is_not_the_gates_is_not_an_old_gate(
+    box_client: TestClient, auth_enforced: None
+):
+    from hal0.comfyui import gate_credential
+
+    gate_credential.ensure_token()
+
+    assert box_client.get("/api/comfyui/files", headers=_GATE_UA).status_code == 401
+    pin = box_client.post("/api/comfyui/pin", json={"pinned": False}, headers=_GATE_UA)
+    assert pin.status_code == 401
+
+    assert _status(box_client, _ADMIN)["gate"]["state"] == "unknown"
+
+
+def test_a_refused_gate_that_sends_the_header_is_not_an_old_gate(
+    box_client: TestClient, auth_enforced: None
+):
+    """A current gate whose token hal0 does not accept: not the restart this state asks for."""
+    from hal0.comfyui import gate_credential
+
+    gate_credential.ensure_token()
+
+    r = box_client.get(
+        "/api/comfyui/arbiter",
+        headers={**_GATE_UA, "Authorization": "Bearer nope", _VERSION: "2"},
+    )
+
+    assert r.status_code == 401
+    assert _status(box_client, _ADMIN)["gate"]["state"] == "unknown"
+
+
+def test_reset_state_forgets_the_refusal_marker(auth_enforced: None):
+    from hal0.api import auth as auth_mod
+    from hal0.api.routes import comfyui as mod
+
+    auth_mod._gate_path_refused_at = 123.0
+
+    mod._reset_state()
+
+    assert auth_mod.gate_path_refused_at() is None
+
+
+# -- a workflow launch the gate refuses is recorded like a /v1 render --------------------------
+
+
+def _launch_with_prompt_answer(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    status: int,
+    body: object,
+):
+    wf_dir = tmp_path / "comfyui" / "workflows"
+    wf_dir.mkdir(parents=True)
+    (wf_dir / "test_wf.json").write_text(json.dumps(_SAMPLE_WORKFLOW))
+    monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(tmp_path / "comfyui"))
+
+    async def fake_post(url, **kwargs):
+        resp = MagicMock()
+        resp.status_code = status
+        resp.json = Mock(return_value=body)
+        return resp
+
+    with patch(f"{_BASE}._get_client") as mock_client:
+        http = MagicMock()
+        http.post = AsyncMock(side_effect=fake_post)
+        mock_client.return_value = http
+        return client.post("/api/comfyui/workflows/test_wf/launch")
+
+
+def test_workflow_launch_refused_by_the_gate_is_a_503_and_is_recorded(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The gate answers /prompt with a 503 in its own shape when hal0 did not hand it the GPU.
+    The launch says so, as /v1 does, instead of answering 202 "queued"."""
+    from tests.fixtures.comfyui_gate import refused_prompt_body
+
+    reason = "hal0 kept the GPU in inference mode after 3 switch request(s)"
+
+    r = _launch_with_prompt_answer(
+        client, tmp_path, monkeypatch, status=503, body=refused_prompt_body(reason)
+    )
+
+    assert r.status_code == 503
+    error = r.json()["error"]
+    assert error["code"] == "image.gate_refused"
+    assert error["message"] == reason
+    assert _status(client)["gate_refusal"]["reason"] == reason
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (503, {"error": "busy"}),
+        (503, ["not", "a", "refusal"]),
+        (500, None),
+    ],
+)
+def test_workflow_launch_with_another_failure_records_nothing(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int, body: object
+):
+    r = _launch_with_prompt_answer(client, tmp_path, monkeypatch, status=status, body=body)
+
+    assert r.status_code == 202
+    assert _status(client)["gate_refusal"] is None
+
+
+def test_workflow_launch_that_succeeds_records_nothing(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    r = _launch_with_prompt_answer(
+        client, tmp_path, monkeypatch, status=200, body={"prompt_id": "abc"}
+    )
+
+    assert r.json()["prompt_id"] == "abc"
+    assert _status(client)["gate_refusal"] is None
+
+
+# -- the released v1.6.5 gate, refused by auth ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("GET", "/api/comfyui/status", None),
+        ("POST", "/api/comfyui/switchover", {"mode": "generation"}),
+    ],
+)
+def test_status_gate_stale_when_auth_refused_the_v165_gate(
+    box_client: TestClient, auth_enforced: None, method: str, path: str, body
+):
+    """v1.6.5's gate reads /status and posts /switchover, with no token and no version
+    header. On a box that enforces auth it is refused; /status still tells the operator."""
+    from hal0.comfyui import gate_credential
+
+    gate_credential.ensure_token()
+    assert _status(box_client, _ADMIN)["gate"]["state"] == "unknown"
+
+    refused = box_client.request(method, path, json=body, headers=_GATE_UA)
+
+    assert refused.status_code == 401
+    assert refused.content == _REFUSED_401  # the refusal is as it always was
+    assert _status(box_client, _ADMIN)["gate"] == {"state": "stale", "version_seen": None}
+
+
+@pytest.mark.parametrize("user_agent", ["curl/8.5.0", _BROWSER_UA])
+def test_a_refused_status_poll_from_a_browser_or_curl_is_not_a_stale_gate(
+    box_client: TestClient, auth_enforced: None, user_agent: str
+):
+    """The dashboard's own poll, signed out, is refused the same way."""
+    from hal0.comfyui import gate_credential
+
+    gate_credential.ensure_token()
+
+    refused = box_client.get("/api/comfyui/status", headers={"User-Agent": user_agent})
+
+    assert refused.status_code == 401
+    assert refused.content == _REFUSED_401
+    assert _status(box_client, _ADMIN)["gate"]["state"] == "unknown"
+
+
+def test_the_gate_token_still_does_not_open_status(box_client: TestClient, auth_enforced: None):
+    """/status is marked, not admitted: the allow-list is still the gate's four requests."""
+    from hal0.comfyui import gate_credential
+
+    token = gate_credential.ensure_token()
+
+    r = box_client.get(
+        "/api/comfyui/status", headers={**_GATE_UA, "Authorization": f"Bearer {token}"}
+    )
+
+    assert r.status_code == 401
+
+
+# -- what the gate says is untrusted text ---------------------------------------------------
+
+
+def _post_raw_reason(client: TestClient, raw_json_reason: str):
+    """POST a reason as JSON text, escapes and all: a client library would refuse to
+    encode a lone surrogate, the gate (json.dumps with ensure_ascii) does not."""
+    return client.post(
+        "/api/comfyui/gate-refusal",
+        content=f'{{"reason": "{raw_json_reason}"}}'.encode("ascii"),
+        headers={"Content-Type": "application/json"},
+    )
+
+
+def test_a_lone_surrogate_in_a_gate_refusal_does_not_break_arbiter_or_status(
+    client: TestClient,
+):
+    """The reason is valid JSON and not valid UTF-8. Kept as it came, it made every later
+    /arbiter answer a 500, which the gate reads as hal0 being unreachable."""
+    r = _post_raw_reason(client, "\\ud800 hi")
+
+    assert r.status_code == 202
+    arbiter = client.get("/api/comfyui/arbiter")
+    assert arbiter.status_code == 200
+    assert arbiter.json()["gate_refusal"]["reason"] == "? hi"
+    body = _status(client)
+    assert body["gate_refusal"]["reason"] == "? hi"
+    body["gate_refusal"]["reason"].encode("utf-8")  # encodable
+
+
+def test_a_gate_refusal_reason_is_capped_after_it_is_made_safe(client: TestClient):
+    _post_raw_reason(client, "\\ud800" + "r" * 600)
+
+    reason = _status(client)["gate_refusal"]["reason"]
+    assert reason == "?" + "r" * 499
+
+
+def test_record_gate_refusal_cleans_and_caps_what_it_keeps():
+    from hal0.api.routes import comfyui as mod
+
+    mod.record_gate_refusal("x\ud800y" + "z" * 1000)
+
+    assert mod._gate_refusal is not None
+    assert mod._gate_refusal["reason"] == "x?y" + "z" * 497
+
+
+def test_status_reads_the_gate_state_off_the_event_loop(client: TestClient, monkeypatch):
+    """It reads the token file, api.env and the auth config on every poll."""
+    import asyncio
+
+    from hal0.api.routes import comfyui as mod
+
+    on_a_loop: list[bool] = []
+    real = mod._gate_block
+
+    def _spy():
+        try:
+            asyncio.get_running_loop()
+            on_a_loop.append(True)
+        except RuntimeError:
+            on_a_loop.append(False)
+        return real()
+
+    monkeypatch.setattr(mod, "_gate_block", _spy)
+
+    assert _status(client)["gate"]["state"] == "unknown"
+    assert on_a_loop == [False]
+
+
+@pytest.mark.parametrize("surrogate_in", ["details", "message"])
+def test_workflow_launch_refused_with_a_lone_surrogate_is_a_clean_503(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, surrogate_in: str
+):
+    from tests.fixtures.comfyui_gate import refused_prompt_body
+
+    body = refused_prompt_body("placeholder")
+    if surrogate_in == "details":
+        body["error"]["details"] = "\ud800 refused " + "d" * 800
+    else:
+        body["error"]["details"] = ""
+        body["error"]["message"] = "\ud800 refused"
+
+    r = _launch_with_prompt_answer(client, tmp_path, monkeypatch, status=503, body=body)
+
+    assert r.status_code == 503
+    error = r.json()["error"]
+    assert error["code"] == "image.gate_refused"
+    assert error["message"].startswith("? refused")
+    assert len(error["message"]) <= 500
+    assert _status(client)["gate_refusal"]["reason"] == error["message"]

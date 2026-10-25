@@ -1216,12 +1216,13 @@ def models_for_capability(
 
     ``image`` entries also carry the model-level ``display_name``,
     ``license`` and ``recommended`` the image picker shows; the other
-    capabilities' entries do not::
+    capabilities' entries do not. An image entry's ``size_gb`` is GiB, like the
+    image-model API rows (``7.6`` decimal GB of SDXL Lightning reads ``7.1``)::
 
         {
             "id":           "sdxl-lightning",
             "capabilities": ["image"],
-            "size_gb":      7.6,
+            "size_gb":      7.1,
             "display_name": "SDXL Lightning (8-step)",
             "license":      "CreativeML-OpenRAIL++",
             "recommended":  True,

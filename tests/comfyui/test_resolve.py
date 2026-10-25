@@ -13,12 +13,19 @@ from pathlib import Path
 import pytest
 
 from hal0.comfyui import paths
-from hal0.comfyui.catalog import CATALOG, USER_CKPT_TEMPLATES, component_path, load_template
+from hal0.comfyui.catalog import (
+    CATALOG,
+    USER_CKPT_TEMPLATES,
+    component_path,
+    load_template,
+    weights_gib,
+)
 from hal0.comfyui.resolve import (
     ImageModelNotInstalled,
     ImageModelNotRenderable,
     ImageModelRequired,
     ImageModelUnknown,
+    ImageWontFit,
     ResolvedImageModel,
     renderable_ids,
     resolve_image_model,
@@ -96,8 +103,10 @@ def test_resolve_not_installed_409() -> None:
     assert (err.code, err.status) == ("image.model_not_installed", 409)
     assert err.details["model"] == "sdxl-turbo"
     assert err.details["install"] == "POST /api/comfyui/models/sdxl-turbo/install"
-    assert err.details["missing_gb"] == CATALOG["sdxl-turbo"].approx_gb
+    assert err.details["missing_gb"] == weights_gib(CATALOG["sdxl-turbo"])  # GiB, not decimal GB
+    assert err.details["missing_gb"] == 6.4  # 6.9e9 bytes
     assert "sdxl-turbo" in err.message
+    assert "6.4 GB still to download" in err.message
 
 
 def test_resolve_partial_install_is_not_installed() -> None:
@@ -111,8 +120,9 @@ def test_resolve_partial_install_is_not_installed() -> None:
     with pytest.raises(ImageModelNotInstalled) as exc:
         resolve_image_model("sdxl-lightning", selection_model=None)
 
+    # the LoRA and the VAE: 0.4 + 0.3 decimal GB is 0.7e9 bytes, 0.7 GiB (to one decimal)
     assert exc.value.details["missing_gb"] == round(
-        sum(c.approx_gb for c in model.components[1:]), 1
+        sum(c.approx_gb for c in model.components[1:]) * 1e9 / 2**30, 1
     )
 
 
@@ -152,6 +162,30 @@ def test_resolve_user_ckpt(key: str, arch: str, size: str) -> None:
     assert resolved.ckpt_override == "my_finetune.safetensors"
     template_defaults = load_template(USER_CKPT_TEMPLATES[arch])["_meta"]["defaults"]
     assert resolved.defaults == {**template_defaults, "size": size}
+
+
+def test_resolve_user_ckpt_carries_its_file_size() -> None:
+    """The scan's ``size_bytes`` rides along, so the fit preflight needs no second stat."""
+    _checkpoint("mine.safetensors", _SDXL_KEY)
+    on_disk = (paths.models_root() / "checkpoints" / "mine.safetensors").stat().st_size
+
+    resolved = resolve_image_model("ckpt/mine", selection_model=None)
+
+    assert resolved.size_bytes == on_disk > 0
+
+
+def test_resolve_catalog_model_has_no_file_size() -> None:
+    _install("sdxl-turbo")
+
+    assert resolve_image_model("sdxl-turbo", selection_model=None).size_bytes is None
+
+
+def test_image_wont_fit_is_a_422_with_a_stable_code() -> None:
+    error = ImageWontFit("needs 6.4 GB of GPU memory, 4.0 GB free for a render", {"model": "m"})
+
+    assert (error.status, error.code) == (422, "image.wont_fit")
+    assert error.message == "needs 6.4 GB of GPU memory, 4.0 GB free for a render"
+    assert error.details == {"model": "m"}
 
 
 def test_resolve_nested_user_ckpt() -> None:

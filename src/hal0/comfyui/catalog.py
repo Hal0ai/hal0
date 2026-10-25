@@ -35,6 +35,11 @@ from hal0.comfyui import paths
 
 # ── data model ──────────────────────────────────────────────────────────────
 
+# The catalog counts decimal GB (10^9 bytes); the memory budget, the API rows and every
+# message a person reads count GiB (2^30 bytes). :func:`weights_gib` and :func:`missing_gib`
+# are the one conversion for catalog sizes, and byte counts divide by this.
+BYTES_PER_GIB = 2**30
+
 
 class ComponentKind(StrEnum):
     """What a weight file is; decides which ComfyUI model subdirectory holds it."""
@@ -116,6 +121,12 @@ class ImageModel:
     ``file_substitutions`` maps a weight filename in the template to the filename
     this model loads instead; it is how a precision variant reuses its sibling's
     graph. It is exposed read-only and left out of the hash.
+
+    ``gpu_peak_gb`` and ``load_ram_gb`` are measured memory facts, never estimates: a
+    model nobody measured has an empty map and ``None``. They are in GiB, the unit the
+    memory budget uses (ADR-0039). ``approx_gb``, by contrast, is decimal GB (10^9
+    bytes), the unit the installer's byte totals are built from; :func:`weights_gib` is
+    the same weights in GiB, the figure every API row and message shows.
     """
 
     id: str
@@ -129,16 +140,37 @@ class ImageModel:
     license: str
     notes: str = ""
     file_substitutions: Mapping[str, str] = field(default_factory=dict, hash=False)
+    # How a ``gpu_peak_gb`` figure is measured, so the models nobody has measured yet can be
+    # measured the same way. The figure is the PEAK RISE of the device's GTT counter
+    # (``mem_info_gtt_used``) above an idle engine, at one rendered size (the key):
+    #   1. Unload this box's GPU LLM slots, so the GPU pool holds only the image engine.
+    #   2. Start ComfyUI with ``--disable-mmap``.
+    #   3. Read the counter with the engine up and nothing rendering. That is "idle".
+    #   4. Render one image at the size under test, reading the counter throughout, and take
+    #      the highest sample read during the render.
+    #   5. Record that sample minus idle, in GiB (bytes / 2**30), to one decimal.
+    # The counter is device-wide, so another guest on the same GPU moves it too: a figure
+    # counts only if nothing else was loading or rendering during the run. A size with no
+    # entry has not been measured; nothing here is an estimate.
+    gpu_peak_gb: Mapping[str, float] = field(default_factory=dict, hash=False)
+    # A measured LOWER bound of this box's RAM during the load, in GiB: the anonymous RSS the
+    # kernel reported when it OOM-killed the load. The load needed at least this much, so it
+    # is a floor and not the model's true need. ``None`` when nobody measured it.
+    load_ram_gb: float | None = None
 
     def __post_init__(self) -> None:
         # Copy then freeze: the caller's dict can no longer change the model.
         object.__setattr__(
             self, "file_substitutions", MappingProxyType(dict(self.file_substitutions))
         )
+        object.__setattr__(self, "gpu_peak_gb", MappingProxyType(dict(self.gpu_peak_gb)))
 
     @property
     def approx_gb(self) -> float:
-        """Total download size of every component."""
+        """Total download size of every component, in decimal GB (10^9 bytes).
+
+        For the size in GiB that API rows and messages show, use :func:`weights_gib`.
+        """
         return round(sum(c.approx_gb for c in self.components), 1)
 
     @property
@@ -149,7 +181,11 @@ class ImageModel:
 
 @dataclass(frozen=True)
 class InstallState:
-    """How much of a model is on disk, and what is still missing."""
+    """How much of a model is on disk, and what is still missing.
+
+    ``missing_gb`` is decimal GB, like :attr:`ImageModel.approx_gb`; :func:`missing_gib`
+    is the same bytes in GiB.
+    """
 
     state: Literal["none", "partial", "complete"]
     missing: tuple[Component, ...]
@@ -507,6 +543,7 @@ CATALOG: dict[str, ImageModel] = {
             est_seconds=10,
             license="CreativeML-OpenRAIL++",
             notes="SDXL base with ByteDance's 8-step Lightning LoRA and the fp16-fix VAE.",
+            gpu_peak_gb={"1024x1024": 15.9, "1536x1536": 28.7},
         ),
         ImageModel(
             id="sdxl-turbo",
@@ -545,6 +582,7 @@ CATALOG: dict[str, ImageModel] = {
             est_seconds=5,
             license="CreativeML-Open-RAIL-M",
             notes="Pruned EMA-only checkpoint; runs on small GPUs. Quality drops above 768.",
+            gpu_peak_gb={"512x512": 11.6},
         ),
         ImageModel(
             id="qwen-image-lightning",
@@ -557,6 +595,9 @@ CATALOG: dict[str, ImageModel] = {
             est_seconds=75,
             license="Apache-2.0",
             notes="Qwen-Image 2512 in bf16 with the 4-step Lightning LoRA.",
+            # anon-rss 47732248 KiB at the OOM kill on a 48 GiB guest (the kernel's "kB" is
+            # KiB: 47732248 / 1024 / 1024 = 45.5). A lower bound: the load needed more.
+            load_ram_gb=45.5,
         ),
         ImageModel(
             id="qwen-image",
@@ -766,6 +807,26 @@ def install_state(model: ImageModel, root: Path | None = None) -> InstallState:
     else:
         state = "partial"
     return InstallState(state, missing, round(sum(c.approx_gb for c in missing), 1))
+
+
+def _gib(decimal_gb: float) -> float:
+    """``decimal_gb`` decimal gigabytes (10^9 bytes) as GiB, to one decimal like the memory budget."""
+    return round(decimal_gb * 1e9 / BYTES_PER_GIB, 1)
+
+
+def weights_gib(model: ImageModel) -> float:
+    """The download size of every component of ``model`` in GiB, to one decimal.
+
+    The catalog's ``approx_gb`` is decimal GB, so this is smaller: Qwen-Image Lightning is
+    51.4 GB and reads 47.9 GiB. Computed from the component sum, not from the rounded
+    :attr:`ImageModel.approx_gb`, so the one rounding is the last step.
+    """
+    return _gib(sum(c.approx_gb for c in model.components))
+
+
+def missing_gib(state: InstallState) -> float:
+    """The components ``state`` reports missing, in GiB to one decimal (0 once all are on disk)."""
+    return _gib(sum(c.approx_gb for c in state.missing))
 
 
 def models_using(component: Component, root: Path | None = None) -> list[str]:

@@ -32,8 +32,9 @@ from hal0.comfyui.catalog import (
     install_route,
     install_state,
     load_template,
+    missing_gib,
 )
-from hal0.errors import Hal0Error
+from hal0.errors import Hal0Error, UnprocessableEntity
 
 _USER_CKPT_PREFIX = "ckpt/"
 _EDITOR_HINT = (
@@ -73,6 +74,17 @@ class ImageModelRequired(Hal0Error):
     status = 422
 
 
+class ImageWontFit(UnprocessableEntity):
+    """A render the memory budget cannot hold; refused before any GPU slot unloads.
+
+    The message is the fit verdict's own sentence. ``details`` carries the ``need``, the two
+    free figures it was judged against, the ``model`` and the effective ``size``.
+    """
+
+    code = "image.wont_fit"
+    status = 422
+
+
 @dataclass(frozen=True)
 class ResolvedImageModel:
     """What a request renders through.
@@ -82,12 +94,15 @@ class ResolvedImageModel:
     the checkpoint file (relative to ``checkpoints/``) a user-checkpoint template loads;
     it is ``None`` for a catalog model, whose template names its own weights. ``defaults``
     is the template's ``_meta.defaults`` plus ``size``, the model's native ``WxH``.
+    ``size_bytes`` is the checkpoint file's size, from the scan that found it; ``None`` for a
+    catalog model, whose sizes the catalog holds.
     """
 
     id: str
     template: str
     ckpt_override: str | None
     defaults: dict[str, Any]
+    size_bytes: int | None = None
 
 
 def _template_defaults(stem: str) -> dict[str, Any]:
@@ -150,10 +165,11 @@ def resolve_image_model(model_id: str | None, *, selection_model: str | None) ->
         state = install_state(model)
         if state.state != "complete":
             install = install_route(model.id)
+            still_to_download = missing_gib(state)  # GiB, like the models route's rows
             raise ImageModelNotInstalled(
-                f"image model {model.id!r} is not installed ({state.missing_gb} GB still to "
+                f"image model {model.id!r} is not installed ({still_to_download} GB still to "
                 f"download); install it with {install}",
-                details={"model": model.id, "install": install, "missing_gb": state.missing_gb},
+                details={"model": model.id, "install": install, "missing_gb": still_to_download},
             )
         return ResolvedImageModel(
             id=model.id,
@@ -174,6 +190,7 @@ def resolve_image_model(model_id: str | None, *, selection_model: str | None) ->
                         **_template_defaults(template),
                         "size": _USER_CKPT_SIZES[entry["arch"]],
                     },
+                    size_bytes=entry["size_bytes"],
                 )
 
     available = renderable_ids()
@@ -193,6 +210,7 @@ __all__ = [
     "ImageModelNotRenderable",
     "ImageModelRequired",
     "ImageModelUnknown",
+    "ImageWontFit",
     "ResolvedImageModel",
     "renderable_ids",
     "resolve_image_model",

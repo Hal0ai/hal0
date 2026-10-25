@@ -29,7 +29,7 @@ import json
 import re
 import time
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import structlog
@@ -42,6 +42,9 @@ from hal0.dispatcher.lane_pin import lane_slot_pin, preferred_slot, set_lane_pin
 from hal0.dispatcher.stream_usage import ensure_include_usage, strip_usage_only_chunk
 from hal0.memory.extraction_env import MEMORY_ALIAS
 from hal0.upstreams.filters import apply_filters
+
+if TYPE_CHECKING:
+    from hal0.comfyui.resolve import ResolvedImageModel
 
 log = structlog.get_logger("hal0-v1")
 
@@ -1785,6 +1788,81 @@ def _extract_port_from_upstream_url(url: str) -> int | None:
     return parsed.port
 
 
+#: How long :func:`_client_has_gone` waits on the request's next ASGI message.
+_DISCONNECT_PROBE_S = 0.05
+
+
+async def _client_has_gone(request: Request) -> bool:
+    """Whether the client has closed the connection, asked by listening for the message.
+
+    ``Request.is_disconnected()`` reads with an already-cancelled scope, which sees a
+    disconnect only if the server's ``receive`` answers without waiting. The auth
+    middleware's stream guard (``live_sockets.guard_http_stream``, used on every box that
+    requires auth) wraps ``receive`` with a wait that the cancelled scope interrupts, so the
+    disconnect is lost and the check always answers False there. Waiting a moment on the next
+    message works through that wrapper and without it: ``http.disconnect`` means the client is
+    gone, and a timeout means it is still there. ``wait_for`` cancels what it started when
+    the wait ends, so nothing is left running.
+    """
+    try:
+        message = await asyncio.wait_for(request.receive(), timeout=_DISCONNECT_PROBE_S)
+    except TimeoutError:
+        return False
+    return message.get("type") == "http.disconnect"
+
+
+async def _refuse_image_that_wont_fit(
+    request: Request, resolved: ResolvedImageModel, body: dict[str, Any]
+) -> None:
+    """Raise 422 ``image.wont_fit`` when the render cannot fit the memory budget.
+
+    Judged at the size the render will use: ``body["size"]`` after the slot and model
+    defaults, read through the translator's own parse and clamp. A catalog model is judged
+    from its catalog facts, a user checkpoint from its file size. Only a ``wont_fit``
+    verdict refuses; ``tight``, ``fits`` and an unknown budget (no GPU pool, unreadable RAM)
+    let the render go on, and a failure anywhere in here does too: the preflight is advice
+    the render never depends on, so it logs one warning and fails open.
+
+    ``extra_body.hal0_skip_fit_check: true`` skips the check, budget read included.
+    """
+    extra = body.get("extra_body")
+    if isinstance(extra, dict) and extra.get("hal0_skip_fit_check") is True:
+        return
+
+    from hal0.api import memory_source
+    from hal0.comfyui.catalog import get_model
+    from hal0.comfyui.fit import assess, need_for, need_for_checkpoint
+    from hal0.comfyui.resolve import ImageWontFit
+    from hal0.providers.comfyui_workflows import effective_size
+
+    try:
+        size = effective_size(body.get("size"))
+        model = get_model(resolved.id)
+        if model is not None:
+            need = need_for(model, size)
+        elif resolved.size_bytes is not None:
+            need = need_for_checkpoint(resolved.size_bytes)
+        else:
+            return
+        # The collector has no guard of its own (an empty budget would read as "no GPU").
+        fit = assess(need, await memory_source.collect_memory_budget(request.app))
+    except Exception:
+        log.warning("images.preflight_budget_unavailable", exc_info=True)
+        return
+    if fit is None or fit.verdict != "wont_fit" or fit.reason is None:
+        return
+    raise ImageWontFit(
+        fit.reason,
+        details={
+            "need": fit.as_dict()["need"],
+            "render_free_gb": fit.render_free_gb,
+            "ram_free_gb": fit.ram_free_gb,
+            "model": resolved.id,
+            "size": size,
+        },
+    )
+
+
 @router.post("/images/generations")
 async def images_generations(request: Request, dispatcher: DispatcherDep) -> Response:
     """OpenAI-compatible image generation.
@@ -1802,7 +1880,8 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
         }
 
     Optional ``extra_body`` (hal0 extension): ``seed``, ``steps``,
-    ``cfg``, ``negative_prompt``.
+    ``cfg``, ``negative_prompt``, and ``hal0_skip_fit_check`` (``true`` skips the memory
+    preflight, the budget read included).
 
     Returns the OpenAI shape::
 
@@ -1816,16 +1895,34 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
           "_hal0": {"model": ..., "template": ..., "meta": ... translator debug meta ...}
         }
 
-    Model resolution (:func:`hal0.comfyui.resolve.resolve_image_model`) raises
-    404 ``image.model_unknown``, 409 ``image.model_not_installed``, 422
-    ``image.model_not_renderable`` or 422 ``image.model_required``; a models tree the hal0 user
-    cannot read answers 409 ``comfyui.models_dir_not_writable``.
+    Errors, in the order they are met:
+
+    * 422 ``image.prompt_required`` for a body without a ``prompt``.
+    * 422 ``image.invalid_size`` for a ``size`` that is not a string (``null`` and ``""`` mean
+      "no size"); ``error.details.size_type`` names the type, the value is never echoed. A
+      string the translator cannot read is not an error: it falls back to its default size.
+    * Model resolution (:func:`hal0.comfyui.resolve.resolve_image_model`) raises
+      404 ``image.model_unknown``, 409 ``image.model_not_installed``, 422
+      ``image.model_not_renderable`` or 422 ``image.model_required``; a models tree the hal0
+      user cannot read answers 409 ``comfyui.models_dir_not_writable``.
+    * 422 ``image.wont_fit`` when the render cannot fit the memory budget (ADR-0039),
+      refused before the arbiter unloads a GPU slot. ``error.details`` carries ``need``,
+      ``render_free_gb``, ``ram_free_gb``, ``model`` and ``size``. An unknown budget never
+      refuses; ``extra_body.hal0_skip_fit_check: true`` skips the check.
+    * 503 ``image.gate_refused`` when ComfyUI's GPU gate refused the prompt (hal0 did not
+      hand it the GPU); ``error.message`` is the gate's reason, which is also recorded as
+      the gate's latest refusal on ``GET /api/comfyui/status``.
+
+    A client that disconnects (the dashboard's Cancel) while the GPU switches is answered with
+    an empty 499 and nothing is submitted to ComfyUI; the arbiter restores the GPU as usual.
     """
+    from hal0.api.routes.comfyui import record_gate_refusal
     from hal0.comfyui.install import readable_tree
     from hal0.comfyui.resolve import resolve_image_model
     from hal0.dispatcher.router import NoRouteFound, UpstreamUnavailable
-    from hal0.errors import Hal0Error
+    from hal0.errors import Hal0Error, UnprocessableEntity
     from hal0.providers import get_provider
+    from hal0.providers.comfyui import ImageGateRefused
 
     class _ImagePromptRequired(Hal0Error):
         code = "image.prompt_required"
@@ -1834,6 +1931,19 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
     body = await _read_json_body(request)
     if not body.get("prompt"):
         raise _ImagePromptRequired("body.prompt is required")
+    # `size` is a string or absent (null and "" mean "no size"). Anything else is the
+    # client's mistake, caught here before the GPU, the budget or the translator see it.
+    # An unreadable string is not: the translator falls back to its default size. The error
+    # names the type, never the value: `json.loads` accepts NaN and Infinity, which the
+    # error response cannot encode, and the validation handler does not echo payloads either.
+    size = body.get("size")
+    if size is not None and not isinstance(size, str):
+        raise UnprocessableEntity(
+            f"size must be a string WIDTHxHEIGHT in pixels, for example 1024x1024; "
+            f"got {type(size).__name__}",
+            code="image.invalid_size",
+            details={"size_type": type(size).__name__},
+        )
 
     # 1. Resolve the model first: a request that cannot render must fail before the GPU
     #    is arbitrated (a cold-start of the img container) on its behalf. The img
@@ -1848,7 +1958,44 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
             resolve_image_model, model_arg, selection_model=selection_model
         )
 
-    # 2. GPU arbitration (Phase D, spec §7) — BEFORE dispatch so the img
+    # 2. Seed #599 request defaults from the img slot's [image] section
+    #    (default_size / default_steps) before anything is judged or dispatched, so the
+    #    body the fit check and the dispatcher see already has the resolved defaults.
+    #    Size precedence: the request, then the slot's non-empty default_size, then the
+    #    model's native size (below, once the slot has had its say). This only reads the
+    #    slot configs; the GPU is not touched until the image job below.
+    manager = getattr(request.app.state, "slot_manager", None)
+    arbiter = manager.arbiter if manager is not None else None
+    if manager is not None:
+        from hal0.slots.arbiter import gpu_exclusive_group
+
+        cfgs = await manager.iter_configs()
+        img_cfg = next((c for c in cfgs if gpu_exclusive_group(c) == "img"), None)
+        img_section = (img_cfg or {}).get("image") or {}
+        if isinstance(img_section, dict):
+            default_size = img_section.get("default_size")
+            if not body.get("size") and isinstance(default_size, str) and default_size:
+                body["size"] = default_size
+            default_steps = img_section.get("default_steps")
+            if (
+                isinstance(default_steps, int)
+                and not isinstance(default_steps, bool)
+                and default_steps > 0
+            ):
+                extra = body.get("extra_body")
+                if not isinstance(extra, dict):
+                    extra = {}
+                    body["extra_body"] = extra
+                extra.setdefault("steps", default_steps)
+    if not body.get("size"):
+        body["size"] = resolved.defaults["size"]
+
+    # 3. Fit preflight (ADR-0039): a render the memory budget cannot hold is refused here,
+    #    before the arbiter unloads a single GPU slot to make room for it. Unknown is
+    #    never a refusal, and `extra_body.hal0_skip_fit_check: true` opts out.
+    await _refuse_image_that_wont_fit(request, resolved, body)
+
+    # 4. GPU arbitration (Phase D, spec §7) — BEFORE dispatch so the img
     #    upstream is registered before resolve_by_capability runs.  When the
     #    img slot is cold (the normal idle state after arbiter restore_llm),
     #    ensure_img() cold-starts the container which calls
@@ -1856,39 +2003,12 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
     #    selects slot "img" but no upstream exists yet and raises
     #    LegacyResolutionFailed → 404.  Fix for issue #725.
     #
-    #    Also seed #599 request defaults from the img slot's [image] section
-    #    (default_size / default_steps) here — before dispatch — so the body
-    #    the dispatcher sees already has the resolved defaults. Size precedence:
-    #    the request, then the slot's non-empty default_size, then the model's
-    #    native size (below, once the slot has had its say).
-    manager = getattr(request.app.state, "slot_manager", None)
-    arbiter = manager.arbiter if manager is not None else None
     # The render is image work from before the GPU switch until provider.infer
     # returns, so the arbiter never restores LLM mode under it; once it is done,
     # an LLM request or the restore loop hands the GPU back.
     async with arbiter.image_job() if arbiter is not None else contextlib.nullcontext():
         if manager is not None:
             from hal0.errors import NotFound
-            from hal0.slots.arbiter import gpu_exclusive_group
-
-            cfgs = await manager.iter_configs()
-            img_cfg = next((c for c in cfgs if gpu_exclusive_group(c) == "img"), None)
-            img_section = (img_cfg or {}).get("image") or {}
-            if isinstance(img_section, dict):
-                default_size = img_section.get("default_size")
-                if not body.get("size") and isinstance(default_size, str) and default_size:
-                    body["size"] = default_size
-                default_steps = img_section.get("default_steps")
-                if (
-                    isinstance(default_steps, int)
-                    and not isinstance(default_steps, bool)
-                    and default_steps > 0
-                ):
-                    extra = body.get("extra_body")
-                    if not isinstance(extra, dict):
-                        extra = {}
-                        body["extra_body"] = extra
-                    extra.setdefault("steps", default_steps)
 
             try:
                 await arbiter.ensure_img()
@@ -1897,16 +2017,14 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
                 # tests) — nothing to arbitrate; generation proceeds as-is.
                 if exc.code != "gpu.img_slot_missing":
                     raise
-        if not body.get("size"):
-            body["size"] = resolved.defaults["size"]
 
-        # 3. Resolve the slot the request should land on.  ensure_img() above
+        # 5. Resolve the slot the request should land on.  ensure_img() above
         #    guarantees the img upstream is registered, so resolve_by_capability
         #    Rule 4 (/images/ path) succeeds even on a cold slot, including after
         #    it crashed or was unloaded while the GPU stayed in image mode (#3048).
         call = await dispatcher.dispatch(request, body=body)
 
-        # 4. Discover the local slot's port from the resolved upstream.
+        # 6. Discover the local slot's port from the resolved upstream.
         upstream = request.app.state.upstreams.get(call.upstream_name)
         if upstream is None:
             raise NoRouteFound(
@@ -1921,25 +2039,45 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
                 details={"upstream": call.upstream_name, "url": upstream.url},
             )
 
-        # 5. Drive the ComfyUI provider directly. Inject the resolved template and
+        # 7. The last stop before ComfyUI is asked to render. The dashboard's Cancel aborts
+        #    this request, and the switch above can take long enough for that to happen
+        #    during it: a client that has gone gets nothing rendered. Returning from inside
+        #    the `async with` is a normal exit, so image_job() closes and the arbiter's
+        #    restore clock starts as for any finished job; the GPU goes back as usual.
+        #    499 is nginx's "client closed request"; the access log records it.
+        if await _client_has_gone(request):
+            log.info("images.client_gone_before_render", model=resolved.id)
+            return Response(status_code=499)
+
+        # 8. Drive the ComfyUI provider directly. Inject the resolved template and
         #    checkpoint override so the provider's translator knows what to render
         #    without resolving the model again. Always set from the resolution: a
         #    client's own copies of these keys are overwritten, so a client can
-        #    never choose the template or the checkpoint file.
+        #    never choose the template or the checkpoint file. `_hal0_model` is the id the
+        #    request resolved to (the client's `model` may be blank, an alias or untrimmed);
+        #    the provider uses it to name the render in /api/comfyui/status's progress.
         provider = get_provider("comfyui")
         body_with_meta = {
             **body,
             "_hal0_template": resolved.template,
             "_hal0_ckpt_override": resolved.ckpt_override,
+            "_hal0_model": resolved.id,
         }
-        result = await provider.infer(port, body_with_meta)
+        try:
+            result = await provider.infer(port, body_with_meta)
+        except ImageGateRefused as exc:
+            # ComfyUI's GPU gate refused this render. On a box that requires auth the gate
+            # may have no credential to report it with (the report is refused like its
+            # other requests), so hal0 records it from the render that ran into it.
+            record_gate_refusal(exc.message)
+            raise
 
     # Track most-recent-model for dashboard.
     last_used = getattr(request.app.state, "last_used_model", None)
     if last_used is not None and call.upstream_name:
         last_used[call.upstream_name] = resolved.id
 
-    # 6. Emit OpenAI-shaped response.
+    # 9. Emit OpenAI-shaped response.
     response_format = (body.get("response_format") or "url").lower().strip()
     images: list[dict[str, Any]] = []
     for img in result.get("images", []):

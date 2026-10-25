@@ -46,14 +46,19 @@ def _require_api() -> None:
         raise typer.Exit(1)
 
 
+#: Bytes in the "GB" this CLI prints: 2**30, the unit of the memory budget and of the API rows'
+#: ``approx_gb`` and ``missing_gb``. The word is "GB" everywhere; only the value is binary.
+_GIB = 2**30
+
+
 def _fmt_bytes(n: int | float | None) -> str:
-    """Decimal units, to match the catalog's GB figures."""
+    """1024-based sizes labelled GB/MB/KB, matching the API's ``approx_gb`` and ``missing_gb``."""
     n = float(n or 0)
-    if n >= 1e9:
-        return f"{n / 1e9:.1f} GB"
-    if n >= 1e6:
-        return f"{n / 1e6:.1f} MB"
-    return f"{n / 1e3:.1f} KB"
+    if n >= _GIB:
+        return f"{n / _GIB:.1f} GB"
+    if n >= 2**20:
+        return f"{n / 2**20:.1f} MB"
+    return f"{n / 2**10:.1f} KB"
 
 
 @models_app.command("list")
@@ -224,7 +229,7 @@ def _print_progress(model_id: str, job: dict[str, Any], last_step: dict[str, int
         return
     last_step[model_id] = step
     console.print(
-        f"  {model_id}: {pct}% ({done / 1e9:.1f}/{total / 1e9:.1f} GB)",
+        f"  {model_id}: {pct}% ({done / _GIB:.1f}/{total / _GIB:.1f} GB)",
         markup=False,
         highlight=False,
     )

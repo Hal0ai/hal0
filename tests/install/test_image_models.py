@@ -25,7 +25,7 @@ from hal0.capabilities import catalog as capability_catalog
 from hal0.comfyui import install as comfyui_install
 from hal0.comfyui import paths as comfyui_paths
 from hal0.comfyui import picker
-from hal0.comfyui.catalog import CATALOG, component_path
+from hal0.comfyui.catalog import CATALOG, component_path, weights_gib
 from hal0.config.schema import HardwareInfo
 from hal0.install import image_models
 from hal0.install.image_models import (
@@ -107,7 +107,7 @@ def test_offers_are_the_api_renderable_catalog_models_in_catalog_order() -> None
     first = offers[0]
     assert isinstance(first, ImageOffer)
     assert first.label == CATALOG[first.id].label
-    assert first.approx_gb == CATALOG[first.id].approx_gb
+    assert first.approx_gb == weights_gib(CATALOG[first.id])  # GiB, like the API rows
     assert first.est_seconds == CATALOG[first.id].est_seconds
     assert first.license == CATALOG[first.id].license
 
@@ -139,8 +139,16 @@ def test_missing_gb_counts_only_what_is_not_on_disk() -> None:
     _land("sdxl-lightning")
     by_id = {o.id: o for o in image_offers(_hw(64))}
     assert by_id["sdxl-lightning"].missing_gb == 0.0
-    assert by_id["sdxl-lightning"].approx_gb == CATALOG["sdxl-lightning"].approx_gb
-    assert by_id["sdxl-turbo"].missing_gb == CATALOG["sdxl-turbo"].approx_gb
+    assert by_id["sdxl-lightning"].approx_gb == weights_gib(CATALOG["sdxl-lightning"])
+    assert by_id["sdxl-turbo"].missing_gb == weights_gib(CATALOG["sdxl-turbo"])
+
+
+def test_offer_sizes_are_gib() -> None:
+    """The install-time offer quotes the same GiB figure ``GET /api/comfyui/models`` does."""
+    by_id = {o.id: o for o in image_offers(_hw(128))}
+    assert by_id["qwen-image-lightning"].approx_gb == 47.9  # 51.4 decimal GB
+    assert by_id["qwen-image-lightning"].missing_gb == 47.9  # nothing on disk
+    assert by_id["sdxl-lightning"].approx_gb == 7.1  # 7.6 decimal GB
 
 
 # ── --plan / --resolve ──────────────────────────────────────────────────────
@@ -167,7 +175,7 @@ def test_plan_prints_one_tab_separated_line_per_offer(
     sdxl = next(r for r in rows if r[0] == "sdxl-lightning")
     model = CATALOG["sdxl-lightning"]
     assert sdxl[1] == (
-        f"{model.label} — {model.approx_gb:.1f} GB download, ~{model.est_seconds}s per image"
+        f"{model.label} — {weights_gib(model):.1f} GB download, ~{model.est_seconds}s per image"
     )
     assert sdxl[2] == "1"  # 64 GB pool
     assert {r[2] for r in rows if r[0] != "sdxl-lightning"} == {"0"}

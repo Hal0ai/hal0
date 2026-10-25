@@ -128,13 +128,12 @@ def _render_plan_table(sel: Selections, *, strict: bool) -> bool:
         low = free_gib < MIN_FREE_GIB
         if low:
             console.print(
-                f"  [red]WARN[/red] only {free_gib:.1f} GiB free "
-                f"(< {MIN_FREE_GIB:.0f} GiB threshold)"
+                f"  [red]WARN[/red] only {free_gib:.1f} GB free (< {MIN_FREE_GIB:.0f} GB threshold)"
             )
             if strict:
                 has_error = True
         else:
-            console.print(f"  {free_gib:.1f} GiB free")
+            console.print(f"  {free_gib:.1f} GB free")
     console.print(f"[bold]NPU opt-in:[/bold] {sel.npu_opt_in}")
     console.print()
 
@@ -177,7 +176,7 @@ def _render_plan_table(sel: Selections, *, strict: bool) -> bool:
     console.print(ext_table)
 
     if sel.image_models:
-        from hal0.comfyui.catalog import get_model
+        from hal0.comfyui.catalog import get_model, weights_gib
 
         console.print("[bold]Image models[/bold]")
         image_table = Table()
@@ -185,7 +184,7 @@ def _render_plan_table(sel: Selections, *, strict: bool) -> bool:
         image_table.add_column("Download (GB)", justify="right")
         for model_id in sel.image_models:
             model = get_model(model_id)
-            image_table.add_row(model_id, f"{model.approx_gb:.1f}" if model else "?")
+            image_table.add_row(model_id, f"{weights_gib(model):.1f}" if model else "?")
         console.print(image_table)
 
     console.print()

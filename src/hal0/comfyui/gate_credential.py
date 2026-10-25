@@ -2,11 +2,12 @@
 
 The ``hal0_gpu_gate`` node inside the img container calls three hal0-api
 routes before a prompt runs: ``GET /api/comfyui/arbiter``,
-``POST /api/comfyui/prompt-handoff`` and ``POST /api/comfyui/switchover``.
+``POST /api/comfyui/prompt-handoff`` and ``POST /api/comfyui/switchover``,
+and reports a prompt it refused to ``POST /api/comfyui/gate-refusal``.
 They are ADMIN routes, so a box that enforces auth (``hal0 auth require on``),
 or one bound to a specific address with an admin key set, refuses the gate
 without a credential. The gate never gets the admin key. hal0 mints a token
-for it instead, and :mod:`hal0.api.auth` admits that token on those three
+for it instead, and :mod:`hal0.api.auth` admits that token on those four
 requests and nothing else; the switch handler also holds it to a plain switch
 into image mode.
 
@@ -24,10 +25,12 @@ NEVER log or echo the token.
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import os
 import re
 import secrets
 import stat
+import urllib.parse
 from pathlib import Path
 
 from hal0.config import paths
@@ -134,10 +137,32 @@ def credential_present() -> bool:
     return read_token() is not None
 
 
+def names_an_address(url: str) -> bool:
+    """True iff *url* names its host by IP address (or ``localhost``), not by a name.
+
+    The gate speaks plain HTTP and resolves a name on every request, so it sends
+    its token only to such a URL (``_direct_host`` in the ``hal0_gpu_gate``
+    asset, which cannot import hal0: a test holds the two together). A token on
+    disk is of no use to a gate that is given a host name.
+    """
+    try:
+        host = urllib.parse.urlsplit(url).hostname
+    except ValueError:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        ipaddress.ip_address(host or "")
+    except ValueError:
+        return False
+    return True
+
+
 __all__ = [
     "TOKEN_FILE_NAME",
     "credential_present",
     "ensure_token",
+    "names_an_address",
     "read_token",
     "token_dir",
     "token_path",
