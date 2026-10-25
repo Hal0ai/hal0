@@ -19,8 +19,8 @@
 // idle_restore_at}); it is null when the arbiter is unavailable (gate off /
 // older backend) and every consumer fails soft to the legacy display.
 
-import { useMutation, useQuery, type UseQueryResult } from '@tanstack/react-query'
-import { api, apiGet } from '../client'
+import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query'
+import { api, apiDelete, apiGet, type Hal0Error } from '../client'
 import { ENDPOINTS } from '../endpoints'
 
 export type ComfyuiEngineState = 'stopped' | 'starting' | 'running' | 'generating' | 'error'
@@ -197,6 +197,81 @@ export function useComfyuiWorkflowLaunch() {
         ENDPOINTS.comfyuiWorkflowLaunch(name),
         { method: 'POST' },
       ),
+  })
+}
+
+// ── Model files on disk (Models → Image) ─────────────────────────────────────
+//
+// GET /api/comfyui/files is the one scan of the ComfyUI models tree
+// (comfyui/inventory.py list_files): every weight file, with the catalog models
+// that load it. `kind` is the component kind for a catalog directory and the
+// directory's own name for one operators fill by hand (controlnet, embeddings…).
+// `relpath` is under `subdir` and may be nested. `arch` + `api_id` only appear
+// on an unowned checkpoint whose header sniffs as a known family. `symlink` is
+// true when the listed path is a link, which DELETE refuses.
+
+export interface ComfyuiFile {
+  kind: string
+  subdir: string
+  relpath: string
+  size_bytes: number
+  // Catalog model ids that load this file; empty = nobody owns it.
+  models: string[]
+  arch?: string | null
+  api_id?: string | null
+  symlink?: boolean
+}
+
+export interface ComfyuiFilesResponse {
+  root: string
+  files: ComfyuiFile[]
+}
+
+// The tree changes when an install lands or a file is deleted — both invalidate
+// this key — so a short staleTime only covers files an operator adds by hand.
+export function useComfyuiFiles() {
+  return useQuery({
+    queryKey: ['comfyui', 'files'],
+    queryFn: () => apiGet<ComfyuiFilesResponse>(ENDPOINTS.comfyuiFiles),
+    staleTime: 10_000,
+  })
+}
+
+// DELETE /api/comfyui/files/{subdir}/{relpath}. Refused with 409
+// `comfyui.file_catalog_owned` for a file a catalog model loads and 400
+// `comfyui.file_symlink` for a link — the error message says why. /status
+// carries the per-category counts, so it refreshes with the listing.
+export function useComfyuiFileDelete() {
+  const qc = useQueryClient()
+  return useMutation<{ deleted: string }, Hal0Error, { subdir: string; relpath: string }>({
+    mutationFn: ({ subdir, relpath }) =>
+      apiDelete<{ deleted: string }>(ENDPOINTS.comfyuiFile(subdir, relpath)),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['comfyui', 'files'] })
+      qc.invalidateQueries({ queryKey: ['comfyui', 'status'] })
+    },
+  })
+}
+
+// GET /api/comfyui/models — the image-model catalog. Only the fields the
+// dashboard reads today are typed (comfyui.py `_model_row` carries more).
+export interface ComfyuiCatalogModel {
+  id: string
+  label: string
+  task: string
+  state: 'none' | 'partial' | 'complete'
+}
+
+export interface ComfyuiModelsResponse {
+  models: ComfyuiCatalogModel[]
+  engine: { available: boolean; reason: string | null }
+}
+
+export function useComfyuiModels() {
+  return useQuery({
+    queryKey: ['comfyui', 'models'],
+    queryFn: () => apiGet<ComfyuiModelsResponse>(ENDPOINTS.comfyuiModels),
+    staleTime: 10_000,
   })
 }
 

@@ -26,6 +26,15 @@ export const ENDPOINTS = {
   comfyuiWorkflowLaunch: (name: string) => `/api/comfyui/workflows/${encodeURIComponent(name)}/launch`,
   // Latest output image proxy
   comfyuiPreview: '/api/comfyui/preview',
+  // The image-model catalog (ids, labels, install state).
+  comfyuiModels: '/api/comfyui/models',
+  // Every weight file under the ComfyUI models tree, with the catalog models
+  // that own it. DELETE removes one the catalog does not own; `relpath` can be
+  // nested (`styles/a.safetensors`), so each SEGMENT is encoded and the `/`
+  // separators stay — the route takes `{relpath:path}`.
+  comfyuiFiles: '/api/comfyui/files',
+  comfyuiFile: (subdir: string, relpath: string) =>
+    `/api/comfyui/files/${encodeURIComponent(subdir)}/${relpath.split('/').map(encodeURIComponent).join('/')}`,
 
   // GET /api/system-info (CLIENT) — hardware + features + per-RUNNER_IMAGES
   // backend state (installed | installable | unavailable). Feeds the Runtimes

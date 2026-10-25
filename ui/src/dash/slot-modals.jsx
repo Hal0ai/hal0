@@ -61,7 +61,7 @@ import { statusCopyForSlotState } from "./status-copy";
 import { SlotBreakerChip } from "./breaker-chip.jsx";
 import { ConversionBlockedChip, ConversionBlockedDetail } from "./conversion-blocked-chip.jsx";
 import { npuModalityOn, npuApplyBody } from "./npu-modality.js";
-import { slotModelRow, npuAnchorSlot, compatibleModels } from "./slots/slot-shared.js";
+import { slotModelRow, slotModelId, npuAnchorSlot, compatibleModels } from "./slots/slot-shared.js";
 
 // The slot edit drawer's own width, and therefore the offset the stacked model
 // drawer docks at so its right edge lands flush against this drawer's left one.
@@ -104,6 +104,14 @@ function stateChipClass(stateOrSlot) {
 // compatibleModels() — the one shared compatible-models filter for the slot
 // surfaces (edit drawer, swap popover; the card + NPU pickers use it too) —
 // lives in slots/slot-shared.js.
+
+// Image slots have no registry models to pick from: ComfyUI weight files are not
+// model-registry rows (GET /api/models lists none), so the list the drawer's Model
+// select and the swap popover build from useModels() would be empty. For an image
+// slot both show the current selection and a link to the AI Capabilities page's
+// Image panel instead.
+const IMAGE_SLOT_TYPE = "image";
+const IMAGE_CAPABILITIES_HREF = "#settings/capabilities";
 
 // A GPU/CPU lane → the device it drives (map_backend_to_device's FE mirror).
 // Module-level so the Lane pills share one source of truth.
@@ -1654,6 +1662,30 @@ function EditSlotDrawer({ open, slot, onClose }) {
           Save); container slots cold-restart to load, so we toast like the
           popover does. */}
 							{(() => {
+								if (slot.type === IMAGE_SLOT_TYPE) {
+									return (
+										<div className="form-row">
+											<div className="form-lbl">
+												<span>Model</span>
+												<FieldInfoIcon description="Image models are not in the model catalog. Image generation is configured under AI Capabilities → Image." />
+											</div>
+											<div className="form-ctl">
+												<div className="mono" data-testid="slot-image-model">
+													{slotModelId(slot) || "—"}
+												</div>
+												<div className="hint">
+													<a
+														data-testid="slot-image-model-link"
+														href={IMAGE_CAPABILITIES_HREF}
+														style={{ color: "var(--accent)" }}
+													>
+														AI Capabilities → Image
+													</a>
+												</div>
+											</div>
+										</div>
+									);
+								}
 								const isContainer = slot.runtime === "container";
 								// Swap fires its own immediate POST /slots/{name}/swap, independent
 								// of the batched Save; the control is gated (below) while a device
@@ -2765,10 +2797,14 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
 
 	const isContainer = slot.runtime === "container";
 	const ramFreeGb = hwQuery.data?.ram?.free ?? 0;
-	const compatible = compatibleModels(modelsQuery.data, {
-		type: slot.type,
-		slot,
-	});
+	const isImage = slot.type === IMAGE_SLOT_TYPE;
+	// No registry rows to offer an image slot (see IMAGE_SLOT_TYPE above).
+	const compatible = isImage
+		? []
+		: compatibleModels(modelsQuery.data, {
+				type: slot.type,
+				slot,
+			});
 
 	// N2: container swap = cold systemctl restart (not a hot in-place swap).
 	// Intercept onPick for container slots: toast the restart and fire the same
@@ -2819,6 +2855,22 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
 					</span>
 				)}
 			</div>
+			{isImage && (
+				<>
+					<div className="swap-pop-h mono" data-testid="swap-image-model">
+						Current · {slotModelId(slot) || "—"}
+					</div>
+					<a
+						className="swap-pop-h"
+						data-testid="swap-image-model-link"
+						href={IMAGE_CAPABILITIES_HREF}
+						style={{ display: "block", color: "var(--accent)", textDecoration: "none" }}
+						onClick={onClose}
+					>
+						AI Capabilities → Image →
+					</a>
+				</>
+			)}
 			{compatible.map((m) => {
 				const isCur = slot.model_id === m.id;
 				const fits = ramFreeGb > parseSizeGB(m.size);
@@ -2854,16 +2906,18 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
 					</div>
 				);
 			})}
-			<div
-				className="swap-pop-h"
-				style={{ cursor: "pointer", color: "var(--accent)" }}
-				onClick={() => {
-					onClose();
-					window.location.hash = "#models";
-				}}
-			>
-				+ Browse all models →
-			</div>
+			{!isImage && (
+				<div
+					className="swap-pop-h"
+					style={{ cursor: "pointer", color: "var(--accent)" }}
+					onClick={() => {
+						onClose();
+						window.location.hash = "#models";
+					}}
+				>
+					+ Browse all models →
+				</div>
+			)}
 			<ConfirmDialog
 				open={!!pendingPick}
 				onCancel={() => setPendingPick(null)}

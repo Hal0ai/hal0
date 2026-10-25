@@ -13,6 +13,8 @@ import { ENDPOINTS } from '@/api/endpoints'
 import { useSlots, useSlotSwap } from '@/api/hooks/useSlots'
 import { useMetaEnums } from '@/api/hooks/useMeta'
 import { isUpstreamModel } from '@/lib/normalizeApiModel'
+import { useComfyuiFiles } from '@/api/hooks/useComfyui'
+import { ImageFilesTab } from '@/dash/image/ImageFilesTab.jsx'
 import { draftVariantLabel, isDrafterModel } from '@/dash/spec-state.js'
 import { MODEL_SORT_FIELDS, sortModels, fmtAdded, isMtpModel, isMoeModel } from '@/dash/model-sort.js'
 
@@ -154,13 +156,6 @@ function ModelsView({ modelParam = null }) {
 
   const selected = modelList.find(m => m.id === selId) || modelList[0];
 
-  // ── isComfy helper ──────────────────────────────────────────────────
-  const isComfy = m =>
-    m.owned_by === "comfyui" ||
-    (Array.isArray(m.backends) && m.backends.includes("comfyui")) ||
-    !!m.comfyui_category ||
-    m.type === "image";
-
   // ── Combined filter (text + OR chips) ───────────────────────────────
   const fil = m => {
     if (!modelMatchesFilters(m, filterSel)) return false;
@@ -175,40 +170,25 @@ function ModelsView({ modelParam = null }) {
   const bySort = rows => sortModels(rows, sortField, sortDir);
 
   // ── Tab datasets ────────────────────────────────────────────────────
-  // Inference: installed + blessed + user.* (not upstream, not comfy)
-  const installed = modelList.filter(m => m.installed && !isComfy(m) && !isUpstreamModel(m) && fil(m));
-  const blessed = modelList.filter(m => !m.installed && m.ns === "blessed" && !isComfy(m) && !isUpstreamModel(m) && fil(m));
-  const userNs = modelList.filter(m => m.ns === "pulled" && !m.installed && !isUpstreamModel(m) && !isComfy(m) && fil(m));
+  // Inference: installed + blessed + user.* (not upstream)
+  const installed = modelList.filter(m => m.installed && !isUpstreamModel(m) && fil(m));
+  const blessed = modelList.filter(m => !m.installed && m.ns === "blessed" && !isUpstreamModel(m) && fil(m));
+  const userNs = modelList.filter(m => m.ns === "pulled" && !m.installed && !isUpstreamModel(m) && fil(m));
   const inferenceRows = [...bySort(installed), ...bySort(blessed), ...bySort(userNs)];
 
-  // Upstream: only isUpstreamModel, fil already excludes comfy+non-upstream
-  const upstreamAll = modelList.filter(m => isUpstreamModel(m) && !isComfy(m) && fil(m));
+  // Upstream: only isUpstreamModel
+  const upstreamAll = modelList.filter(m => isUpstreamModel(m) && fil(m));
   const upstreamRows = bySort(upstreamAll);
   const upstreamTotal = modelList.filter(m => isUpstreamModel(m)).length;
 
-  // Image: ComfyUI installed, text search only (no chip filters)
-  const comfySearch = m => {
-    if (!q.trim()) return true;
-    const needle = q.trim().toLowerCase();
-    const hay = `${m.longName || ""} ${m.name || ""} ${m.id || ""} ${m.repo || ""} ${m.comfyui_category || ""}`.toLowerCase();
-    return hay.includes(needle);
-  };
-  const comfyModels = modelList.filter(m => m.installed && isComfy(m) && comfySearch(m));
-  const comfyByCat = {};
-  for (const m of comfyModels) {
-    const cat = m.comfyui_category || "other";
-    (comfyByCat[cat] = comfyByCat[cat] || []).push(m);
-  }
-  const comfyCats = Object.keys(comfyByCat).sort();
-  // Flatten sorted for pagination
-  const comfyRows = [];
-  for (const cat of comfyCats) comfyRows.push(...bySort(comfyByCat[cat]));
-  const comfyTotal = modelList.filter(m => m.installed && isComfy(m)).length;
+  // Image: ComfyUI weight files are not registry rows — the tab is the file
+  // inventory (ImageFilesTab). react-query serves the same query from cache, so
+  // the tab count below costs no second request.
+  const imageFiles = useComfyuiFiles();
+  const imageTotal = imageFiles.data?.files.length ?? 0;
 
   // ── Pagination logic ────────────────────────────────────────────────
-  const activeRows = tab === "inference" ? inferenceRows
-    : tab === "upstream" ? upstreamRows
-    : comfyRows;
+  const activeRows = tab === "inference" ? inferenceRows : upstreamRows;
 
   const pageReset = usePageReset([tab, q, sortField, sortDir, filterSel]);
   useEffectM(() => { if (pageReset) setPage(1); }, [pageReset]);
@@ -243,8 +223,7 @@ function ModelsView({ modelParam = null }) {
 
   // ── Render ──────────────────────────────────────────────────────────
   const tabLabel = tab === "inference" ? `Inference Models${inferenceRows.length ? ` · ${inferenceRows.length}` : ""}`
-    : tab === "upstream" ? `Upstream Models${upstreamTotal ? ` · ${upstreamTotal}` : ""}`
-    : `Image / ComfyUI${comfyTotal ? ` · ${comfyTotal}` : ""}`;
+    : `Upstream Models${upstreamTotal ? ` · ${upstreamTotal}` : ""}`;
 
   return (
     <div className="view">
@@ -256,7 +235,7 @@ function ModelsView({ modelParam = null }) {
             second vh below the tab bar. */}
         <h1>{tab === "profiles" ? "Profiles" : "Models"}</h1>
         <span className="vh-spacer" />
-        {tab === "profiles" ? (
+        {tab === "profiles" || tab === "image" ? (
           null
         ) : (
           <>
@@ -306,7 +285,7 @@ function ModelsView({ modelParam = null }) {
           onClick={() => { window.location.hash = "#models/image"; }}
         >
           <span>Image / ComfyUI</span>
-          <span className="slot-tab-ct num">{comfyTotal}</span>
+          <span className="slot-tab-ct num">{imageTotal}</span>
         </button>
         <button
           role="tab"
@@ -329,6 +308,8 @@ function ModelsView({ modelParam = null }) {
 
       {tab === "profiles" ? (
         window.ProfilesView ? <window.ProfilesView /> : null
+      ) : tab === "image" ? (
+        <ImageFilesTab />
       ) : (
       <div className="models-layout" style={{marginTop: 18}}>
         {/* ── List (toolbar + rows) ── */}
@@ -341,22 +322,20 @@ function ModelsView({ modelParam = null }) {
               value={q}
               onChange={(e) => setQ(e.target.value)}
             />
-            {tab !== "image" && (
-              <div className="mdl-toolbar-grp">
-                <span className="lbl">filter</span>
-                {FILTER_CHIPS.map(c => (
-                  <button
-                    key={c.id}
-                    className={"mdl-chip" + (filterSel.includes(c.id) ? " on" : "")}
-                    data-testid={`mdl-filter-${c.id}`}
-                    onClick={() => setFilterSel(s => s.includes(c.id) ? s.filter(x => x !== c.id) : [...s, c.id])}
-                  >{c.label}</button>
-                ))}
-                {(filterSel.length > 0 || q.trim()) && (
-                  <button className="mdl-chip mdl-clear" onClick={() => { setFilterSel([]); setQ(""); }}>clear ✕</button>
-                )}
-              </div>
-            )}
+            <div className="mdl-toolbar-grp">
+              <span className="lbl">filter</span>
+              {FILTER_CHIPS.map(c => (
+                <button
+                  key={c.id}
+                  className={"mdl-chip" + (filterSel.includes(c.id) ? " on" : "")}
+                  data-testid={`mdl-filter-${c.id}`}
+                  onClick={() => setFilterSel(s => s.includes(c.id) ? s.filter(x => x !== c.id) : [...s, c.id])}
+                >{c.label}</button>
+              ))}
+              {(filterSel.length > 0 || q.trim()) && (
+                <button className="mdl-chip mdl-clear" onClick={() => { setFilterSel([]); setQ(""); }}>clear ✕</button>
+              )}
+            </div>
             <div className="mdl-toolbar-grp mdl-sort-grp">
               <select
                 className="input mono mdl-sort"
@@ -379,7 +358,7 @@ function ModelsView({ modelParam = null }) {
           <div className="mdl-list-h">
             <span>{tabLabel}</span>
             <span className="ct">· {activeRows.length} shown</span>
-            <span className="right mono">{modelList.length} total · {modelList.filter(m => m.installed).length} on disk · {upstreamTotal} upstream · {comfyTotal} image</span>
+            <span className="right mono">{modelList.length} total · {modelList.filter(m => m.installed).length} on disk · {upstreamTotal} upstream</span>
           </div>
 
           {/* Loading / error */}
@@ -407,10 +386,6 @@ function ModelsView({ modelParam = null }) {
                 ? <div key={item.key} className="mdl-section-label">{item.text}</div>
                 : <ModelRow key={item.model.id} model={item.model} selected={selId === item.model.id} onSelect={() => setSelId(item.model.id)} onEditModel={setRecipeModel} onDeleteModel={setDelModel} />
             )
-          ) : tab === "image" ? (
-            sliced.map(m => (
-              <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} onEditModel={setRecipeModel} onDeleteModel={setDelModel} />
-            ))
           ) : (
             /* upstream tab — flat paginated rows */
             sliced.map(m => (
