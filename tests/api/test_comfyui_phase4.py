@@ -795,6 +795,28 @@ def _status(client: TestClient, headers: dict[str, str] | None = None) -> dict:
     return response.json()
 
 
+def test_status_survives_a_gate_state_that_cannot_be_read(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    """The gate block reads files; whatever goes wrong there is an unknown gate, never a 500
+    on the page the dashboard polls. The failure is logged once, not on every poll."""
+
+    def broken() -> dict:
+        raise OSError("api.env is unreadable")
+
+    monkeypatch.setattr(f"{_BASE}._gate_block", broken)
+
+    with caplog.at_level("WARNING", logger=_BASE):
+        first = _status(client)
+        second = _status(client)
+
+    unknown = {"state": "unknown", "version_seen": None}
+    assert first["gate"] == unknown
+    assert second["gate"] == unknown
+    assert first["gate_refusal"] is None
+    assert len([m for m in caplog.messages if m == "comfyui.gate_state_unavailable"]) == 1
+
+
 def test_no_gate_call_is_unknown(client: TestClient):
     """Nothing has called the gate's routes since hal0-api started."""
     body = _status(client)

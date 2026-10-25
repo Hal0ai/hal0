@@ -164,6 +164,19 @@ _GATE_VERSION_MAX = 32
 # Wall clock for the timestamps above (epoch seconds); tests drive it through this seam.
 _wall_clock = time.time
 
+# Failures the status and model routes absorb (an unreadable gate state, a model whose
+# catalog facts cannot be judged) are logged once per process, keyed by what failed: the
+# dashboard polls ``/status`` every few seconds, and a persistent fault is one fact.
+_warned: set[str] = set()
+
+
+def _warn_once(key: str, event: str, **fields: Any) -> None:
+    """Log ``event`` as a warning, with the exception being handled, the first time ``key`` fails."""
+    if key in _warned:
+        return
+    _warned.add(key)
+    log.warning(event, extra=fields, exc_info=True)
+
 
 def _comfyui_base_url() -> str:
     """Base URL of the operational ComfyUI container's HTTP API.
@@ -221,6 +234,7 @@ def _reset_state() -> None:
     _gate_seen.clear()
     _gate_seen.update(_GATE_SEEN_IDLE)
     _gate_refusal = None
+    _warned.clear()
     auth_layer._gate_path_refused_at = None
 
 
@@ -327,6 +341,20 @@ def _gate_state() -> str:
 
 def _gate_block() -> dict[str, Any]:
     return {"state": _gate_state(), "version_seen": _gate_seen["version"]}
+
+
+def _gate_block_or_unknown() -> dict[str, Any]:
+    """:func:`_gate_block`, or an unknown gate when its state cannot be read.
+
+    The state reads files (the gate's token, ``api.env``, the auth config), and ``/status``
+    is the page the dashboard polls: nothing here may turn it into a 500. The failure is
+    logged once.
+    """
+    try:
+        return _gate_block()
+    except Exception:
+        _warn_once("gate_block", "comfyui.gate_state_unavailable")
+        return {"state": "unknown", "version_seen": None}
 
 
 def _gate_refusal_view() -> dict[str, Any] | None:
@@ -636,7 +664,7 @@ async def comfyui_status(request: Request) -> dict[str, Any]:
         _fetch_json("/system_stats"),
         _fetch_json("/queue"),
         _list_files_or_none(),
-        asyncio.to_thread(_gate_block),
+        asyncio.to_thread(_gate_block_or_unknown),
     )
     reachable = stats is not None
     counts = _queue_counts(queue)
@@ -1011,10 +1039,19 @@ async def _collect_budget(app: FastAPI) -> MemoryBudget | None:
 
 
 def _fit(model: ImageModel, size: str | None, budget: MemoryBudget | None) -> dict[str, Any] | None:
-    """``model``'s fit at ``size`` (``None`` is native) as a dict; ``None`` when unknown."""
+    """``model``'s fit at ``size`` (``None`` is native) as a dict; ``None`` when unknown.
+
+    A model whose catalog facts cannot be judged (a measured size that is not ``WxH``) is an
+    unknown fit, like an unknown budget: one bad entry must not fail ``GET /models`` or
+    ``hal0 comfyui models list``. The failure is logged once per model.
+    """
     if budget is None:
         return None
-    fit = assess(need_for(model, size), budget)
+    try:
+        fit = assess(need_for(model, size), budget)
+    except Exception:
+        _warn_once(f"fit:{model.id}", "comfyui.fit_failed", model_id=model.id)
+        return None
     return fit.as_dict() if fit is not None else None
 
 

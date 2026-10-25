@@ -507,6 +507,51 @@ def test_models_fit_is_null_when_the_budget_cannot_be_collected(
     assert "comfyui.fit_budget_unavailable" in caplog.messages
 
 
+def test_models_fit_is_null_for_a_model_whose_catalog_facts_are_malformed(
+    client: TestClient,
+    memory_budget: MemoryBudgetStub,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A catalog entry whose measured sizes are not ``WxH`` is an unknown fit, like an unknown
+    budget: the list and the other rows still answer, and the failure is logged once."""
+    import dataclasses
+
+    memory_budget.result = ROOMY_BOX
+    monkeypatch.setitem(
+        CATALOG, _SDXL, dataclasses.replace(CATALOG[_SDXL], gpu_peak_gb={"huge": 9.0})
+    )
+
+    with caplog.at_level("WARNING", logger=_BASE):
+        first = client.get("/api/comfyui/models")
+        second = client.get("/api/comfyui/models")
+
+    assert first.status_code == 200
+    rows = {m["id"]: m for m in first.json()["models"]}
+    assert rows[_SDXL]["fit"] is None
+    assert rows["qwen-image-lightning"]["fit"] is not None  # one bad row is not the list
+    assert second.status_code == 200
+    failures = [r for r in caplog.records if r.getMessage() == "comfyui.fit_failed"]
+    assert len(failures) == 1
+    assert failures[0].model_id == _SDXL  # type: ignore[attr-defined]
+
+
+def test_fit_route_is_null_for_a_model_whose_catalog_facts_are_malformed(
+    client: TestClient, memory_budget: MemoryBudgetStub, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import dataclasses
+
+    memory_budget.result = ROOMY_BOX
+    monkeypatch.setitem(
+        CATALOG, _SDXL, dataclasses.replace(CATALOG[_SDXL], gpu_peak_gb={"huge": 9.0})
+    )
+
+    resp = client.get(f"/api/comfyui/models/{_SDXL}/fit")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"fit": None, "size": CATALOG[_SDXL].sizes[0]}
+
+
 def test_models_store_measures_the_models_tree_or_its_nearest_parent(
     client: TestClient, store: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
