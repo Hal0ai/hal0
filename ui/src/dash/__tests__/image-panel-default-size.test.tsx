@@ -92,6 +92,12 @@ function customSize(host: HTMLElement): HTMLInputElement {
 function stepsInput(host: HTMLElement): HTMLInputElement {
   return byId<HTMLInputElement>(host, 'img-default-steps')
 }
+function sizeHint(host: HTMLElement): HTMLElement | null {
+  return host.querySelector('[data-testid="img-default-size-hint"]')
+}
+function sizeError(host: HTMLElement): HTMLElement | null {
+  return host.querySelector('[data-testid="img-default-size-error"]')
+}
 function stepsHint(host: HTMLElement): HTMLElement | null {
   return host.querySelector('[data-testid="img-default-steps-hint"]')
 }
@@ -216,7 +222,7 @@ describe('ImagePanel default size', () => {
     expect(editCalls[0].body.image.default_size).toBe('512x512')
   })
 
-  it.each(['1030x1030', '32x512', '4096x512', '1024', 'big', ''])(
+  it.each(['1030x1030', '32x512', '4096x512', '1024', 'big'])(
     'a custom size of %j is refused: Save is off and nothing is written',
     async (bad) => {
       configBox.current = { image: { default_size: '', default_steps: 0 } }
@@ -244,6 +250,123 @@ describe('ImagePanel default size', () => {
   })
 })
 
+describe('ImagePanel default size: a size saved under the old free-text field', () => {
+  // The panel used to take any text, so a slot can hold a size the new rule rejects (the
+  // server clamps it at render time). It opens as Custom with the value filled in, says what
+  // the engine renders, and does not stop the operator saving something else.
+  it('a legacy invalid size plus a steps change saves, the size untouched', async () => {
+    configBox.current = { image: { default_size: '1030x1030', default_steps: 0 } }
+    const host = mount()
+
+    expect(sizeSelect(host).value).toBe('custom')
+    expect(customSize(host).value).toBe('1030x1030')
+    expect(sizeHint(host)?.textContent).toBe('The engine renders this at 1024x1024.')
+    expect(sizeError(host)).toBeNull()
+
+    type(stepsInput(host), '30')
+    expect(saveButton(host).disabled).toBe(false)
+    await save(host)
+
+    expect(editCalls).toHaveLength(1)
+    expect(editCalls[0].body.image).toEqual({ default_size: '1030x1030', default_steps: 30 })
+  })
+
+  it('names the size the engine renders: sides floored to 8 and clamped to 64..2048', () => {
+    for (const [saved, rendered] of [
+      ['1030x1030', '1024x1024'],
+      ['70x5000', '64x2048'],
+      ['1024X768', '1024x768'], // the server accepts a capital X
+      ['big', '1024x1024'], // unreadable: the server's own default
+    ]) {
+      document.body.innerHTML = ''
+      configBox.current = { image: { default_size: saved, default_steps: 0 } }
+      const host = mount()
+      expect(sizeHint(host)?.textContent).toBe(`The engine renders this at ${rendered}.`)
+    }
+  })
+
+  it('shows no hint for a saved size the rule accepts', () => {
+    configBox.current = { image: { default_size: '640x640', default_steps: 0 } }
+    const host = mount()
+
+    expect(customSize(host).value).toBe('640x640')
+    expect(sizeHint(host)).toBeNull()
+    expect(sizeError(host)).toBeNull()
+  })
+
+  it('editing a legacy size into an invalid value disables Save', async () => {
+    configBox.current = { image: { default_size: '1030x1030', default_steps: 0 } }
+    const host = mount()
+
+    type(customSize(host), '1031x1031')
+    expect(saveButton(host).disabled).toBe(true)
+    expect(sizeError(host)).not.toBeNull()
+    expect(sizeHint(host)).toBeNull()
+    await save(host)
+    expect(editCalls).toHaveLength(0)
+
+    // Editing it back to what was saved leaves the size untouched, so Save is not held.
+    type(customSize(host), '1030x1030')
+    type(stepsInput(host), '12')
+    expect(saveButton(host).disabled).toBe(false)
+  })
+
+  it('editing a legacy size into a valid one saves that size', async () => {
+    configBox.current = { image: { default_size: '1030x1030', default_steps: 0 } }
+    const host = mount()
+
+    type(customSize(host), '1024x1024')
+    expect(sizeHint(host)).toBeNull()
+    await save(host)
+
+    expect(editCalls[0].body.image.default_size).toBe('1024x1024')
+  })
+})
+
+describe('ImagePanel default size: the Custom field stays open while it is edited', () => {
+  it('clearing a field that came from a saved size keeps it open and blocks Save', async () => {
+    configBox.current = { image: { default_size: '640x640', default_steps: 0 } }
+    const host = mount()
+
+    type(customSize(host), '')
+
+    expect(sizeSelect(host).value).toBe('custom')
+    expect(customSize(host).value).toBe('')
+    expect(saveButton(host).disabled).toBe(true)
+    await save(host)
+    expect(editCalls).toHaveLength(0)
+
+    type(customSize(host), '704x512')
+    await save(host)
+    expect(editCalls[0].body.image.default_size).toBe('704x512')
+  })
+
+  it('typing a listed size into the field keeps it open', async () => {
+    configBox.current = { image: { default_size: '640x640', default_steps: 0 } }
+    const host = mount()
+
+    type(customSize(host), '512x512')
+
+    expect(sizeSelect(host).value).toBe('custom')
+    expect(customSize(host).value).toBe('512x512')
+    await save(host)
+    expect(editCalls[0].body.image.default_size).toBe('512x512')
+  })
+
+  it('Custom picked and left empty saves the empty size, as Model native does', async () => {
+    configBox.current = { image: { default_size: '', default_steps: 0 } }
+    const host = mount()
+
+    pick(sizeSelect(host), 'custom')
+    expect(customSize(host).value).toBe('')
+    expect(sizeError(host)).toBeNull()
+    type(stepsInput(host), '12')
+    await save(host)
+
+    expect(editCalls[0].body.image).toEqual({ default_size: '', default_steps: 12 })
+  })
+})
+
 describe('ImagePanel default steps', () => {
   it('steps zero shows model default hint', () => {
     configBox.current = { image: { default_size: '', default_steps: 0 } }
@@ -257,6 +380,17 @@ describe('ImagePanel default steps', () => {
 
     type(stepsInput(host), '0')
     expect(stepsHint(host)?.textContent).toBe('model default')
+  })
+
+  it('a negative step count shows the hint, as it saves 0', async () => {
+    configBox.current = { image: { default_size: '', default_steps: 25 } }
+    const host = mount()
+
+    type(stepsInput(host), '-5')
+    expect(stepsHint(host)?.textContent).toBe('model default')
+    await save(host)
+
+    expect(editCalls[0].body.image.default_steps).toBe(0)
   })
 
   it('a set step count shows no hint', () => {

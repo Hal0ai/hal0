@@ -32,6 +32,14 @@ function validCustomSize(text) {
   return !!p && `${p.width}x${p.height}` === text && snapDim(p.width) === p.width && snapDim(p.height) === p.height
 }
 
+// What the engine renders for a saved size (`_parse_size` in providers/comfyui_workflows.py):
+// each side floored to a multiple of 8 within 64..2048, a capital X read as an x, and a size it
+// cannot read replaced by 1024x1024. Said beside a size saved before the rule above existed.
+function renderedSize(text) {
+  const m = /^\s*([+-]?\d+)\s*x\s*([+-]?\d+)\s*$/i.exec(text)
+  return m ? `${snapDim(Number(m[1]))}x${snapDim(Number(m[2]))}` : "1024x1024"
+}
+
 // The img catalog is empty only on a host with no ComfyUI engine (no ROCm lane): any
 // other host lists every catalog model, marked when its weights are not on disk. So an
 // empty catalog is not something installing a model or typing an id can fix — the
@@ -64,22 +72,30 @@ export function ImagePanel({ registry }) {
 
   const [size, setSize] = useState(DEF_SIZE)
   const [steps, setSteps] = useState(DEF_STEPS)
-  // "Custom…" picked from the select. A saved size outside the list is custom too, without a pick.
+  // The Custom field is open: "Custom…" was picked, or the saved size is not in the list. Held as
+  // state so the field stays open while it is edited (emptied, or given a listed size).
   const [customPicked, setCustomPicked] = useState(false)
 
   useEffect(() => {
     const img = imgCfgQuery.data?.image || {}
-    setSize(img.default_size != null ? String(img.default_size) : DEF_SIZE)
+    const loaded = img.default_size != null ? String(img.default_size) : DEF_SIZE
+    setSize(loaded)
     setSteps(img.default_steps != null ? String(img.default_steps) : DEF_STEPS)
-    setCustomPicked(false)
+    setCustomPicked(loaded !== DEF_SIZE && !SIZE_PRESETS.includes(loaded))
   }, [imgCfgQuery.data])
 
-  const customSize = customPicked || (size !== DEF_SIZE && !SIZE_PRESETS.includes(size))
+  const customSize = customPicked
   const sizeText = size.trim()
-  // The field only has a say while it is open; an unreadable size blocks the save rather than
-  // being written (the server would store it, and the size fit would then fail to read it).
-  const sizeInvalid = customSize && !validCustomSize(sizeText)
-  const stepsAreModelDefault = (parseInt(steps, 10) || 0) === 0
+  const sizeRuleBroken = customSize && sizeText !== "" && !validCustomSize(sizeText)
+  // Save is held only for a size the operator has edited into one the rule rejects (or emptied
+  // from a saved size): the field then names a size nothing would render as typed. A size saved
+  // before the rule existed and left alone does not hold the other settings back; it gets a
+  // note on what the engine renders instead.
+  const sizeEdited = size !== origSize
+  const sizeInvalid = customSize && sizeEdited && !validCustomSize(sizeText)
+  const sizeLegacy = sizeRuleBroken && !sizeEdited
+  // Saved as a non-negative int (ImageGenConfig.default_steps); the hint reads the same value.
+  const stepsValue = Math.max(0, parseInt(steps, 10) || 0)
 
   const pickSize = (value) => {
     if (value === CUSTOM) { setCustomPicked(true); return }
@@ -97,7 +113,7 @@ export function ImagePanel({ registry }) {
         // Coerce to ImageGenConfig field types (steps is a non-negative int).
         await editSlot.mutateAsync({ name: imgSlotName, body: { image: {
           default_size: sizeText,
-          default_steps: Math.max(0, parseInt(steps, 10) || 0),
+          default_steps: stepsValue,
         } } })
       }
       window.__hal0Toast && window.__hal0Toast("Image generation settings saved", "ok")
@@ -159,6 +175,11 @@ export function ImagePanel({ registry }) {
               {SIDE_RANGE.min}–{SIDE_RANGE.max} a side, a multiple of {SIDE_RANGE.multiple} (e.g. 1024x768)
             </span>
           )}
+          {sizeLegacy && (
+            <span data-testid="img-default-size-hint" className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>
+              The engine renders this at {renderedSize(sizeText)}.
+            </span>
+          )}
         </span>
       } />
       <SRow k="Default steps" sub="Sampler steps · 0 = use the model-class default"
@@ -166,7 +187,7 @@ export function ImagePanel({ registry }) {
         <span style={{display: "inline-flex", alignItems: "center", gap: 8}}>
           <input data-testid="img-default-steps" type="number" min={0} value={steps} onChange={e => setSteps(e.target.value)}
             placeholder={DEF_STEPS} disabled={!imgSlotName} className="mono" style={inputStyle(100)} />
-          {stepsAreModelDefault && (
+          {stepsValue === 0 && (
             <span data-testid="img-default-steps-hint" className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>model default</span>
           )}
         </span>
