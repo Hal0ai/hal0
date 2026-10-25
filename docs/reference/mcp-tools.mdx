@@ -36,7 +36,18 @@ Return shape for every admin tool is `dict[str, Any]`:
   read of a slot whose own lifecycle `status` is `"error"` returns normally with its
   payload.
 
-Path arguments (the `{placeholders}` in a tool's REST route) are checked before a gated call is queued and before an autonomous call runs, so you are never shown an approval card for an argument that would be refused. An empty value, `.`, `..`, a value containing `/` and a value with a control character come back as `{"status": "error", "error": {"code": "mcp.invalid_arg", ...}}`; a missing one is `mcp.missing_arg`. Every other value is percent-encoded as one URL segment, so `?`, `#`, `%`, spaces, `:` and non-ASCII reach the server exactly as the card shows them. The check runs again when an approved call executes. A tool that needs a Hugging Face `org/name` (such as `model_pull`) takes it as a body field (`hf_repo`), not in the path.
+Path arguments (the `{placeholders}` in a tool's REST route) are checked before a gated
+call is queued and before an autonomous call runs, so you are never shown an approval card
+for an argument that would be refused. A path argument must be a string, or an integer
+below 2^53 (JSON and the URL spell those the same way). Anything else (`null`, a boolean, a
+float, a list, an object), an empty value, `.`, `..`, a value containing `/`, and a value
+containing a control character or an invisible formatting character (zero-width space, a
+bidi override, a byte-order mark) comes back as
+`{"status": "error", "error": {"code": "mcp.invalid_arg", ...}}`. A missing one is
+`mcp.missing_arg`. Every other value is percent-encoded as one URL segment, so `?`, `#`,
+`%`, spaces, `:` and non-ASCII reach the server exactly as the card shows them. The check
+runs again when an approved call executes. A tool that needs a Hugging Face `org/name`
+(such as `model_pull`) takes it as a body field (`hf_repo`), not in the path.
 
 Tools fall into three gating tiers. Treat the frozensets in source
 (`AUTONOMOUS_READ_TOOLS`, `AUTONOMOUS_WRITE_TOOLS`, `GATED_TOOLS`) as ground truth if

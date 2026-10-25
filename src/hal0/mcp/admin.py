@@ -167,6 +167,7 @@ import functools
 import json
 import re
 import time
+import unicodedata
 from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -1728,29 +1729,49 @@ class PathArgError(ValueError):
     """A path argument that cannot be sent as one URL path segment."""
 
 
-def _path_arg_refusal(tool: str, key: str, value: str) -> str | None:
+#: Largest magnitude (exclusive) of an integer path argument: JSON clients
+#: (the approvals UI is JavaScript) hold integers exactly only up to 2**53.
+_MAX_EXACT_INT = 2**53
+
+
+def _path_arg_refusal(tool: str, key: str, value: Any) -> str | None:
     """Why ``value`` cannot travel as ONE URL path segment, or ``None`` if it can.
 
-    The approval card names the raw argument, so the call that runs after
+    The approval card shows the argument as JSON, so the call that runs after
     approval has to act on exactly that resource. A value is refused when no
-    URL can carry it faithfully: empty; ``.`` / ``..`` (httpx collapses dot
-    segments, so the call lands on a different route); ``/`` (it splices extra
-    segments into the route); a control character; or text that is not
-    encodable as UTF-8. Everything else is percent-encoded by
-    :func:`_format_url`.
+    URL can carry it faithfully, or when the card would spell it differently
+    from the URL:
+
+    - not a string (``null``, ``true``, ``1.0``, a list or object all render on
+      the card differently from ``str()``); the one exception is a non-bool
+      ``int`` below ``2**53``, which JSON and ``str()`` spell identically;
+    - empty, ``.`` or ``..`` (httpx collapses dot segments, so the call lands
+      on a different route), or containing ``/`` (it splices extra segments in);
+    - a control character (Unicode category ``Cc``: C0, DEL, C1) or an invisible
+      format character (``Cf``: zero-width, bidi override, BOM), which let a
+      card render as one name while the value is another;
+    - text that is not encodable as UTF-8 (a lone surrogate).
+
+    Everything else is percent-encoded by :func:`_format_url`.
 
     The one shared check: :func:`dispatch` runs it before a call is queued or
     executed, and :func:`_split_args` (so the approve-time executor) runs it
     again.
     """
-    if not value:
+    if isinstance(value, int) and not isinstance(value, bool):
+        if abs(value) < _MAX_EXACT_INT:
+            return None
+        reason = "must be a string or an integer below 2**53"
+    elif not isinstance(value, str):
+        reason = "must be a string"
+    elif not value:
         reason = "must not be empty"
     elif value in (".", ".."):
         reason = "must not be '.' or '..'"
     elif "/" in value:
         reason = "must not contain '/'"
-    elif any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
-        reason = "must not contain control characters"
+    elif any(unicodedata.category(ch) in ("Cc", "Cf") for ch in value):
+        reason = "must not contain control or invisible formatting characters"
     else:
         try:
             value.encode("utf-8")
@@ -1758,9 +1779,11 @@ def _path_arg_refusal(tool: str, key: str, value: str) -> str | None:
             reason = "must be valid Unicode text"
         else:
             return None
-    shown = value if len(value) <= 80 else value[:80] + "…"
-    message = f"tool {tool!r} arg {key!r} {reason} (got {shown!r})."
-    if "/" in value:
+    shown = repr(value)
+    if len(shown) > 80:
+        shown = shown[:80] + "…"
+    message = f"tool {tool!r} arg {key!r} {reason} (got {shown})."
+    if isinstance(value, str) and "/" in value:
         # A slash used to splice extra path segments into the REST URL and
         # mis-route (observed: model_pull with model_id='org/repo' → 405).
         message += (
@@ -1784,10 +1807,10 @@ def _split_args(tool: str, args: dict[str, Any]) -> tuple[dict[str, str], dict[s
     for key in path_keys:
         if key not in remainder:
             raise KeyError(f"tool {tool!r} requires arg {key!r}")
-        value = str(remainder.pop(key))
+        value = remainder.pop(key)
         if (refusal := _path_arg_refusal(tool, key, value)) is not None:
             raise PathArgError(refusal)
-        path_args[key] = value
+        path_args[key] = str(value)
     return path_args, remainder
 
 

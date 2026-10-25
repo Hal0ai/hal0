@@ -1666,9 +1666,35 @@ def test_max_slot_lifecycle_timeout_covers_every_bridge_tool() -> None:
 # URL path segment is refused before any card exists, and (b) every other value
 # reaches the server as the literal characters the card showed.
 
-#: Not representable as a single path segment: empty, dot-only (httpx collapses
-#: them), a '/', a control character, and a lone surrogate (not encodable).
-_UNSENDABLE_PATH_VALUES = ["..", ".", "", "a/b", "a\nb", "a\x00b", "a\x7fb", "\ud800"]
+#: Not representable as a single path segment, or not spelled the same on the
+#: approval card as in the URL: empty, dot-only (httpx collapses them), a '/', a
+#: control character (C0, DEL, C1), an invisible format character (zero-width,
+#: bidi, BOM), a lone surrogate (not encodable), and anything that is not a
+#: string (the card shows JSON, the URL would show ``str()``: ``None``, ``True``,
+#: ``1.0`` vs ``1``, a repr, and an int a JS client cannot hold exactly).
+_UNSENDABLE_PATH_VALUES: list[Any] = [
+    "..",
+    ".",
+    "",
+    "a/b",
+    "a\nb",
+    "a\x00b",
+    "a\x7fb",
+    "a\x85b",
+    "pri\u200bmary",
+    "a\u202eb",
+    "a\u2066b",
+    "\ufeffa",
+    "\ud800",
+    None,
+    True,
+    False,
+    1.0,
+    ["a"],
+    {"a": 1},
+    2**53,
+    -(2**53),
+]
 
 #: Valid but awkward: each one changes meaning if pasted into a URL raw.
 _AWKWARD_PATH_VALUES = ["a:b", "x y", "a%6Bb", "a?b", "a#b", "é", "100%", "a+b", "{x}"]
@@ -1694,6 +1720,24 @@ async def test_unsendable_path_arg_is_refused_before_approval_and_before_rest(
     assert result["error"]["code"] == "mcp.invalid_arg"
     assert queue.list_all() == [], "the operator must never see a card for a refused argument"
     assert mock_transport["calls"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [42, 0, -7, 2**53 - 1], ids=ascii)
+async def test_integer_path_arg_below_2_53_is_sent_as_its_decimal_spelling(
+    value: int, queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    """JSON and ``str()`` spell these identically, so card and URL agree."""
+    result = await admin.dispatch(
+        tool="slot_status",
+        args={"name": value},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert result == {"ok": "get"}
+    assert mock_transport["calls"][-1][:2] == ("GET", f"http://t/api/slots/{value}")
 
 
 @pytest.mark.asyncio
