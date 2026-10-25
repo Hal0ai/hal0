@@ -1029,6 +1029,9 @@ class ComfyUIProvider(Provider):
 
                 # 2. Poll history for completion.
                 outputs = await self._await_history(client, base_url, str(prompt_id))
+                # ComfyUI is done with it: a newer render must not read as behind this one
+                # while the images download. The finally below still covers every failure.
+                relay.release()
 
                 # 3. Fetch output PNG bytes.
                 images: list[dict[str, Any]] = []

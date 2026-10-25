@@ -902,6 +902,7 @@ async def _render(
     body: dict[str, Any] | None = None,
     on_submit: Callable[[], Awaitable[None]] | None = None,
     on_history: Callable[[], Awaitable[None]] | None = None,
+    on_view: Callable[[], Awaitable[None]] | None = None,
     history: dict[str, Any] | None = None,
     port: int = 8186,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -925,6 +926,8 @@ async def _render(
                 status_code=200, json_payload=history or _completed_history(prompt_id)
             )
         if "/view" in url:
+            if on_view is not None:
+                await on_view()
             return _mock_response(
                 status_code=200, content=_PNG, headers={"content-type": "image/png"}
             )
@@ -986,6 +989,20 @@ async def test_progress_clears_after_render(provider: ComfyUIProvider, fake_ws: 
     assert seen[0] is not None
     assert seen[0]["prompt_id"] == "abc123"
     assert progress.current() is None
+
+
+async def test_progress_clears_once_history_confirms_the_render(
+    provider: ComfyUIProvider, fake_ws: _FakeWS
+) -> None:
+    """A finished render is not reported as live while its images are being fetched."""
+    seen: list[dict[str, Any] | None] = []
+
+    async def _fetching() -> None:
+        seen.append(progress.current())
+
+    await _render(provider, fake_ws=fake_ws, on_view=_fetching)
+
+    assert seen == [None]
 
 
 async def test_progress_clears_when_the_render_fails(

@@ -10,8 +10,9 @@ it never gets an entry; the dashboard shows queue-level state for it instead.
 State is process-local and unlocked: the listener, ``infer`` and the ``/status`` handler
 all run on the one event loop, and none of the functions here awaits.
 
-An entry exists from the moment ComfyUI accepts the prompt until ``infer`` leaves, whether
-by returning or raising (``infer`` calls :func:`finish` in a ``finally``). ``step`` and
+An entry exists from the moment ComfyUI accepts the prompt until ``/history`` confirms the
+render, or until ``infer`` leaves early by raising (``infer`` also calls :func:`finish` in a
+``finally``). ``step`` and
 ``total`` are ``None`` until the first progress frame arrives (the checkpoint load and the
 queue wait come before it).
 
