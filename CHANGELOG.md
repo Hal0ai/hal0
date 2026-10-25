@@ -146,8 +146,6 @@ applying. Add those subsections to a version's section to surface them; see
 
 - **A `/v1/images/generations` request cancelled during the GPU switch no longer reaches ComfyUI.** The switch can take long enough for the client to give up, and the route went on to submit the render once it ended. A client that has gone now gets an empty 499 and nothing is submitted; the arbiter restores the GPU as usual.
 
-- **A gate refusal reason holding a lone surrogate can no longer break `GET /api/comfyui/arbiter` or `/status`.** The reason is text written inside the `img` container, and a lone surrogate (`"\ud800"`) is valid JSON that UTF-8 cannot encode, so a response carrying it would fail to encode and answer 500, which the gate reads as hal0 being unreachable. hal0 replaces anything that cannot be encoded with `?` and cuts a reason to 500 characters before it keeps it, logs it or sends it.
-
 ## [1.6.5] — 2026-10-24
 
 ### Highlights
