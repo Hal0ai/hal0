@@ -30,6 +30,7 @@ import { captureUiException } from '@/sentry'
 // Benchmarks page (#benchmarks): a real ES module, imported directly rather
 // than read off a `window.BenchmarksView` global.
 import Benchmarks from './Benchmarks'
+import { slotsSub } from './slots-route'
 
 const { useState: useStateA, useEffect: useEffectA } = React;
 
@@ -285,6 +286,7 @@ function App() {
             slots={HAL0_DATA.slots}
             slotVariant={tweaks.slotVariant}
             slotParam={param}
+            slotSub={slotsSub(param)}
             onGo={go}
           />
         );

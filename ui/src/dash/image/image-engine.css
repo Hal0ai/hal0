@@ -1,0 +1,182 @@
+/*
+ * The Image Gen pane's Engine tab (ImageEngineTab.jsx, EngineCard.jsx, EditorCard.jsx,
+ * EngineStatCards.jsx).
+ *
+ * The tab renders inside the pane's `.comfy-page` wrapper, so the `--comfy*` tokens are there;
+ * these rules use the plain dashboard tokens and take the blue accent from `--comfy` where it has
+ * one, as image.css does. Nothing here depends on the old pane's card classes.
+ */
+.ie {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+  align-items: start;
+  min-width: 0;
+}
+.ie-engine { grid-column: 1 / -1; }
+/* The queue and the device card stack beside the editor card. */
+.ie-col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+
+.ie-card { min-width: 0; border: 1px solid var(--line); border-radius: var(--rad-lg); background: var(--bg-1); }
+.ie-card-h {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line-soft);
+  border-radius: var(--rad-lg) var(--rad-lg) 0 0;
+  background: var(--bg);
+}
+.ie-card-b { display: flex; flex-direction: column; gap: 12px; padding: 14px 16px; min-width: 0; }
+.ie-title { font-family: var(--jbm); font-size: 13px; font-weight: 500; color: var(--fg); }
+.ie-sub { font-family: var(--jbm); font-size: 11px; color: var(--fg-4); }
+.ie-grow { flex: 1; }
+.ie-actions { display: inline-flex; flex-wrap: wrap; gap: 8px; }
+.ie-muted { margin: 0; font-family: var(--jbm); font-size: 11.5px; line-height: 1.5; color: var(--fg-4); }
+.ie-dim { color: var(--fg-4); }
+.mono { font-family: var(--jbm); }
+
+/* The state pill: the engine's own state, in the pane's colours. */
+.ie-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--rad-pill, 999px);
+  font-family: var(--jbm);
+  font-size: 11px;
+  color: var(--fg-3);
+}
+.ie-pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg-4); }
+.ie-pill[data-state='running'] { color: var(--ok); border-color: var(--ok-line); }
+.ie-pill[data-state='running'] .dot { background: var(--ok); }
+.ie-pill[data-state='generating'] { color: var(--comfy); border-color: var(--comfy-line); background: var(--comfy-soft); }
+.ie-pill[data-state='generating'] .dot { background: var(--comfy); }
+.ie-pill[data-state='starting'] { color: var(--warn); border-color: var(--warn-line); }
+.ie-pill[data-state='starting'] .dot { background: var(--warn); }
+.ie-pill[data-state='error'] { color: var(--err); border-color: var(--err-line); }
+.ie-pill[data-state='error'] .dot { background: var(--err); }
+
+/* Facts: a label and its value per row. */
+.ie-rows { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 18px; margin: 0; }
+.ie-row { display: contents; }
+.ie-row dt { font-family: var(--jbm); font-size: 11px; letter-spacing: 0.04em; color: var(--fg-4); }
+.ie-row dd { margin: 0; min-width: 0; font-family: var(--jbm); font-size: 12px; color: var(--fg-2); overflow-wrap: anywhere; }
+.ie-row code { font-family: var(--jbm); color: var(--fg); }
+.ie-tone.ok { color: var(--ok); }
+.ie-tone.warn { color: var(--warn); }
+.ie-tone.err { color: var(--err); }
+.ie-tone.muted { color: var(--fg-3); }
+
+/* A state the card explains: stopped, or not answering. */
+.ie-notice {
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: var(--rad);
+  background: var(--bg);
+  font-family: var(--jbm);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg-2);
+}
+.ie-notice.warn { border-color: var(--warn-line); background: var(--warn-soft); }
+.ie-notice b { font-weight: 500; color: var(--fg); }
+.ie-notice p { margin: 4px 0 0; color: var(--fg-3); }
+.ie-notice .ie-log { margin-top: 8px; }
+.ie-fail {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--err-line);
+  border-radius: var(--rad);
+  background: var(--err-soft);
+  font-family: var(--jbm);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--fg-2);
+  overflow-wrap: anywhere;
+}
+
+/* Log lines: the notice shows three, the modal a few hundred. */
+.ie-log,
+.ie-logs {
+  margin: 0;
+  overflow: auto;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--rad-sm);
+  background: var(--bg);
+  font-family: var(--jbm);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--fg-3);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ie-log { padding: 8px 10px; max-height: 96px; }
+.ie-logs { padding: 10px 12px; max-height: 60vh; }
+
+/* The editor card. */
+.ie-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.ie-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--comfy-line);
+  border-radius: var(--rad-pill, 999px);
+  background: var(--comfy-soft);
+  color: var(--comfy);
+  font-family: var(--jbm);
+  font-size: 11.5px;
+  text-decoration: none;
+}
+a.ie-chip:hover { border-color: var(--comfy); color: var(--comfy-hi, var(--comfy)); }
+.ie-chip .tag { font-size: 10px; color: var(--fg-4); }
+.ie-chip[aria-disabled='true'] { border-color: var(--line); background: transparent; color: var(--fg-4); cursor: not-allowed; }
+.ie-open { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.ie-open .btn { text-decoration: none; }
+.ie-open .btn:disabled { cursor: not-allowed; }
+.ie-offbox { font-family: var(--jbm); font-size: 11.5px; color: var(--warn); }
+.ie-tunnel-block { display: flex; flex-direction: column; gap: 6px; }
+.ie-tunnel { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.ie-tunnel code {
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--rad-sm);
+  background: var(--bg);
+  font-family: var(--jbm);
+  font-size: 11.5px;
+  color: var(--fg);
+  user-select: all;
+  overflow-wrap: anywhere;
+}
+
+/* The queue card. */
+.ie-prog { display: flex; flex-direction: column; gap: 8px; }
+.ie-prog-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; font-family: var(--jbm); font-size: 12px; color: var(--fg-2); }
+.ie-prog-row b { font-weight: 500; color: var(--fg); }
+.ie-bar { height: 8px; border-radius: 3px; background: var(--bg-3); overflow: hidden; }
+.ie-bar i { display: block; height: 100%; background: var(--comfy); transition: width 0.5s var(--ease, ease); }
+
+/* The GPU device card. */
+.ie-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 1px;
+  border: 1px solid var(--line);
+  border-radius: var(--rad);
+  background: var(--line);
+  overflow: hidden;
+}
+.ie-stat { display: flex; flex-direction: column; gap: 5px; padding: 11px 13px; background: var(--bg-1); }
+.ie-stat .k { font-family: var(--jbm); font-size: 9px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--fg-5); }
+.ie-stat .v { font-family: var(--jbm); font-size: 18px; font-weight: 500; letter-spacing: -0.02em; line-height: 1; color: var(--fg); }
+.ie-stat .u { margin-left: 3px; font-size: 10px; letter-spacing: 0; color: var(--fg-4); }

@@ -404,6 +404,19 @@ describe('ImageStatusLine', () => {
     expect(open).toHaveBeenCalledWith('http://box:8188', '_blank', 'noopener,noreferrer')
   })
 
+  it('shows no Open editor button on a page that is not on the box', () => {
+    // ComfyUI listens on the box's loopback: the link hal0 derives from a LAN host does not answer.
+    const happyDOM = (window as unknown as { happyDOM: { setURL: (u: string) => void } }).happyDOM
+    happyDOM.setURL('http://box:9120/')
+    try {
+      box.status = statusBody({ gate_refusal: { at: 1_700_000_000, reason: 'busy' } })
+      mount(<ImageStatusLine />)
+      expect(button('Open editor')).toBeUndefined()
+    } finally {
+      happyDOM.setURL('about:blank')
+    }
+  })
+
   it('shows the server message under the line when an action fails', async () => {
     box.fail = new Error('GPU is in image mode already')
     mount(<ImageStatusLine />)

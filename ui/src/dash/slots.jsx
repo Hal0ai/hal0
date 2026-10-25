@@ -19,7 +19,8 @@ import { useModels } from '@/api/hooks/useModels'
 import { useComfyui } from '@/api/hooks/useComfyui'
 import { RunnerImagesView } from '@/dash/runner-images.jsx'
 import { ActivityLog } from './activity-log.jsx'
-import { ComfyuiPane } from './comfyui-pane.jsx'
+import { ImageGenTabs } from './image/ImageGenTabs'
+import { slotsSub, slotsTab } from './slots-route'
 import { NpuOccupancyCard } from './npu-pane.jsx'
 import {
   InferencePane,
@@ -593,7 +594,7 @@ function SlotListRow({ slot, modelRow, onEdit }) {
 
 
 // ─── Slots view ───
-function SlotsView({ slotVariant, slotParam, onGo }) {
+function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
   const slotsQuery = useSlots();
   // Model registry, for the slot card's inline model-edit pencil. useModels()
   // shares the react-query cache key ['models'] with InferencePane's own call,
@@ -629,9 +630,12 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
   // generation engine pane). ComfyUI is one container engine, not per-model
   // slots, and is mutually exclusive with the LLM stack — so it gets its own
   // tab instead of a SlotCard in the Image group.
+  // The param is `<tab>[/<sub>]` (`image/generate`): the tab is the first segment, and the second
+  // is the Image Gen pane's sub-tab (`slotSub`, from main.jsx's parseRoute).
+  const paramTab = slotsTab(slotParam);
   const [tab, setTab] = useStateS(
-    slotParam === "endpoints" || slotParam === "runner-images" || slotParam === "stacks" || slotParam === "image"
-      ? slotParam
+    paramTab === "endpoints" || paramTab === "runner-images" || paramTab === "stacks" || paramTab === "image"
+      ? paramTab
       : "inference",
   );
   const comfyQuery = useComfyui({ active: tab === "image" });
@@ -688,9 +692,9 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
   // generation links to #slots/image). Bare #slots, #slots/inference and a
   // slot-name param (the edit drawer) all show Inference.
   React.useEffect(() => {
-    if (slotParam === "endpoints" || slotParam === "runner-images" || slotParam === "stacks" || slotParam === "image") setTab(slotParam);
+    if (paramTab === "endpoints" || paramTab === "runner-images" || paramTab === "stacks" || paramTab === "image") setTab(paramTab);
     else setTab("inference");
-  }, [slotParam]);
+  }, [paramTab]);
 
   // Listen for the N hotkey via global event (wired by main.jsx)
   React.useEffect(() => {
@@ -1066,7 +1070,7 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
       <div className="dash">
         <div className="dash-main">
           {tab === "image" ? (
-            <ComfyuiPane />
+            <ImageGenTabs sub={slotSub} />
           ) : (
             <>
               {/* Inference "engine" pane — a summary engine-shell (yellow accent)

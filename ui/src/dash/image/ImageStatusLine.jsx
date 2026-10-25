@@ -13,11 +13,11 @@ import './image-status-line.css'
 import { useArbiter, useComfyui, useComfyuiModels } from '@/api/hooks/useComfyui'
 import { useMemoryBudget } from '@/api/hooks/useStatsHardware'
 import { useSlots } from '@/api/hooks/useSlots'
-import { useConfigUrls } from '@/api/hooks/useConfigUrls'
 import { ConfirmDialog } from '@/dash/primitives.jsx'
 import { actionFacts, statusLine } from './status-line-pure'
 import { clockLabel, reloadSteps, renderPct, switchSteps } from './status-line-parts-pure'
 import { useDismissedRefusalAt, useStatusLineActions } from './useStatusLineActions'
+import { useEditorAccess } from './useEditorAccess'
 
 const LABEL = {
   hold: 'Hold image mode',
@@ -112,7 +112,8 @@ export function ImageStatusLine({ ownRun = false, onCancelOwnRun }) {
   const memory = useMemoryBudget().data
   const engineAvailable = useComfyuiModels().data?.engine?.available
   const slots = useSlots().data
-  const editorUrl = useConfigUrls().data?.comfyui
+  // The editor listens on the box's loopback: off the box there is no link to open (editor-reach.ts).
+  const editorUrl = useEditorAccess().url
   const dismissedAt = useDismissedRefusalAt()
 
   const env = arbiterQ.data
