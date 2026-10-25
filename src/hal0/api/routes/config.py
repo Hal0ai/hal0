@@ -144,6 +144,11 @@ def _host_without_port(host: str) -> str:
     return host.rsplit(":", 1)[0] if ":" in host else host
 
 
+def _comfyui_public_url() -> str:
+    """The URL the operator declared for ComfyUI (``HAL0_COMFYUI_PUBLIC_URL``), or ``""``."""
+    return os.environ.get("HAL0_COMFYUI_PUBLIC_URL", "").strip().rstrip("/")
+
+
 def _comfyui_link(request: Request) -> str:
     """Resolve the link the dashboard should use to open ComfyUI.
 
@@ -156,7 +161,7 @@ def _comfyui_link(request: Request) -> str:
     request host (the port-stripped forwarded host behind a proxy), which
     works LAN-direct.
     """
-    public = os.environ.get("HAL0_COMFYUI_PUBLIC_URL", "").strip().rstrip("/")
+    public = _comfyui_public_url()
     if public:
         return public
     if _behind_proxy(request):
@@ -180,7 +185,14 @@ async def get_urls(request: Request) -> dict[str, object]:
           "hermes":            "" | "https://hermes.<host>",
           "hermes_enabled":    true | false,
           "comfyui":           "http://<host>:8188" | "https://comfyui.<host>",
+          "comfyui_public":    true | false,
         }
+
+    ``comfyui_public`` is true only when ``HAL0_COMFYUI_PUBLIC_URL`` is set, that
+    is, when ``comfyui`` is a URL the operator declared. The ``http://<host>:8188``
+    default is only the request host plus ComfyUI's port, so it says nothing
+    about whether anything answers there from the caller's machine; the dashboard
+    uses the flag to tell the two apart.
 
     ``HAL0_OPENWEBUI_PUBLIC_URL`` (set in /etc/hal0/api.env) wins
     whenever it's defined — it's how a reverse-proxy deploy declares the
@@ -210,6 +222,7 @@ async def get_urls(request: Request) -> dict[str, object]:
     host = _resolve_host(request)
     enabled = await _openwebui_is_active()
     comfyui = _comfyui_link(request)
+    comfyui_public = bool(_comfyui_public_url())
 
     if public:
         if _behind_proxy(request):
@@ -225,6 +238,7 @@ async def get_urls(request: Request) -> dict[str, object]:
             "hermes": hermes,
             "hermes_enabled": bool(hermes),
             "comfyui": comfyui,
+            "comfyui_public": comfyui_public,
         }
 
     if _behind_proxy(request):
@@ -238,6 +252,7 @@ async def get_urls(request: Request) -> dict[str, object]:
             "hermes": hermes,
             "hermes_enabled": bool(hermes),
             "comfyui": comfyui,
+            "comfyui_public": comfyui_public,
         }
     return {
         "api": f"http://{host}:{_api_port()}",
@@ -246,6 +261,7 @@ async def get_urls(request: Request) -> dict[str, object]:
         "hermes": hermes,
         "hermes_enabled": bool(hermes),
         "comfyui": comfyui,
+        "comfyui_public": comfyui_public,
     }
 
 
