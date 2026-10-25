@@ -58,6 +58,8 @@ const referenceBox = () => ({
       { slot: 'primary', gb: 30.8, state: 'serving' },
     ],
     image_engine_gb: 6.6,
+    image_engine_slot: 'img',
+    image_engine_estimated: true,
     other_guests_gb: 0,
     attribution_excess_gb: 3.0,
     free_gb: BUDGET_FREE_GB,

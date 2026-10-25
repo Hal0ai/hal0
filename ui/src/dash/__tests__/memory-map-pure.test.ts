@@ -32,6 +32,9 @@ const referenceBox: MemoryBudgetJson = {
       { slot: 'utility', gb: 30.8, state: 'serving' },
     ],
     image_engine_gb: 6.6,
+    // ComfyUI is not answering here: the img slot's own row stands in.
+    image_engine_slot: 'img',
+    image_engine_estimated: true,
     other_guests_gb: 0,
     attribution_excess_gb: 3.0,
     free_gb: 72.6,
@@ -47,6 +50,8 @@ const cappedSecondGuest: MemoryBudgetJson = {
     used_gb: 43.4,
     this_box: [],
     image_engine_gb: 0,
+    image_engine_slot: 'img',
+    image_engine_estimated: false,
     other_guests_gb: 43.4,
     attribution_excess_gb: 0,
     free_gb: 72.6,
@@ -62,12 +67,15 @@ const discreteGpu: MemoryBudgetJson = {
     used_gb: 9.5,
     this_box: [{ slot: 'brain', gb: 9.0, state: 'ready' }],
     image_engine_gb: 0,
+    image_engine_slot: null,
+    image_engine_estimated: false,
     other_guests_gb: 0.5,
     attribution_excess_gb: 0,
     free_gb: 14.5,
   },
   ram: { limit_gb: 64, used_gb: 8, free_gb: 56, source: 'system' },
-  render_free_gb: 12,
+  // 24 pool - 0.5 other guests - 0 engine - 0 starting - 2 margin.
+  render_free_gb: 21.5,
 }
 
 const cpuOnly: MemoryBudgetJson = {
@@ -235,12 +243,50 @@ describe('buildMemoryMapModel', () => {
     expect(m.self.slots.map((s) => s.name)).toEqual(['brain', 'tts', 'utility'])
   })
 
-  it('an engine with no img slot entry still gets a segment', () => {
-    const m = buildMemoryMapModel(input({ slots: referenceSlots.filter((s) => s.name !== 'img') }))
+  it('an engine with no img slot named by the backend still gets a segment', () => {
+    const noImg: MemoryBudgetJson = {
+      ...referenceBox,
+      gpu: { ...referenceBox.gpu!, image_engine_slot: null },
+    }
+    // The slot list has an image slot, but the backend named none: the UI does
+    // not go looking for one.
+    const m = buildMemoryMapModel(input({ memory: noImg }))
     const img = m.self.slots.find((s) => s.isImageEngine)
     expect(img).toBeDefined()
     expect(img!.bytesGb).toBe(6.6)
     expect(img!.name).toBe('image engine')
+  })
+
+  it('the engine takes the name the backend gives it, whatever the slot list says', () => {
+    const named: MemoryBudgetJson = {
+      ...referenceBox,
+      gpu: { ...referenceBox.gpu!, image_engine_slot: 'render' },
+    }
+    // 'img' is the only image-typed slot in the list; the backend says 'render'.
+    const withRender = [...referenceSlots, slot('render', { type: 'image', model: 'flux' })]
+    const m = buildMemoryMapModel(input({ memory: named, slots: withRender }))
+    expect(m.self.slots.filter((s) => s.isImageEngine).map((s) => s.name)).toEqual(['render'])
+    // ...and it is joined to that slot's entry, not the one a guess would pick.
+    expect(m.self.slots.find((s) => s.isImageEngine)!.modelId).toBe('flux')
+    // a backend slot name with no matching entry in the list still draws
+    const unlisted = buildMemoryMapModel(input({ memory: named, slots: referenceSlots }))
+    expect(unlisted.self.slots.find((s) => s.isImageEngine)!.name).toBe('render')
+  })
+
+  it('marks the engine estimated only when the backend says so; slots always are', () => {
+    const measured: MemoryBudgetJson = {
+      ...referenceBox,
+      gpu: { ...referenceBox.gpu!, image_engine_estimated: false },
+    }
+    const engine = (memory: MemoryBudgetJson) =>
+      buildMemoryMapModel(input({ memory })).self.slots.find((s) => s.isImageEngine)!
+    expect(engine(referenceBox).estimated).toBe(true)
+    expect(engine(measured).estimated).toBe(false)
+    const slotsOnly = buildMemoryMapModel(input({ memory: measured })).self.slots.filter(
+      (s) => !s.isImageEngine,
+    )
+    expect(slotsOnly.length).toBeGreaterThan(0)
+    expect(slotsOnly.every((s) => s.estimated)).toBe(true)
   })
 
   it('ruler free never negative when attribution exceeds the counter', () => {
@@ -266,7 +312,9 @@ describe('buildMemoryMapModel', () => {
         attribution_excess_gb: 6.4,
         free_gb: 0,
       },
-      render_free_gb: 0,
+      // 40 pool - 0 other guests - 6.6 engine - 0 starting - 2 margin: the
+      // slots are unloaded for a render, so the overshoot does not touch it.
+      render_free_gb: 31.4,
     }
     const m = buildMemoryMapModel(input({ memory: overshoot }))
     const figures = [
@@ -290,6 +338,8 @@ describe('buildMemoryMapModel', () => {
         ...referenceBox.gpu!,
         this_box: [...referenceBox.gpu!.this_box, { slot: 'warm', gb: 12.3, state: 'starting' }],
       },
+      // 116 pool - 0 other guests - 6.6 engine - 12.3 starting - 2 margin.
+      render_free_gb: 95.1,
     }
     const m = buildMemoryMapModel(input({ memory: withStarting, slots: [...referenceSlots, slot('warm')] }))
     expect(m.self.slots.map((s) => s.name)).not.toContain('warm')
@@ -306,7 +356,7 @@ describe('buildMemoryMapModel', () => {
       image: 'ghcr.io/example/hal0-runner-standard:1',
       profile: 'agent',
       bytesGb: 2.8,
-      approx: false,
+      estimated: true,
     })
     expect(byName.tts).toMatchObject({ device: 'vulkan', modelId: 'kokoro', isContainer: false, image: null })
     // container_status alone marks a container slot, as it always has

@@ -49,8 +49,8 @@ const SLOT_PALETTE = [
   'var(--mem-slot-8)',
 ]
 
-/** Name given to the image-engine segment when the slot list has no img slot
- *  to take a name from (the engine can hold memory with its slot not listed). */
+/** Name given to the image-engine segment when the backend names no img slot
+ *  (`image_engine_slot` is null: the engine can hold memory with no slot). */
 const IMAGE_ENGINE_FALLBACK_NAME = 'image engine'
 
 /** Deterministic, render-stable colour for a slot: sort the names and index by
@@ -79,9 +79,11 @@ export interface MemoryMapSlot {
   color: string
   bytesGb: number
   modelId: string
-  /** Always false: the figure is the backend's attribution, not a split the
-   *  UI estimated. Kept for the legend, which still reads it. */
-  approx: boolean
+  /** True when the figure is an estimate rather than a reading: every slot's
+   *  attribution is one, and so is the image engine's when the backend says the
+   *  img slot's row stood in for ComfyUI's own reading
+   *  (`image_engine_estimated`). The tooltips say "(estimated)". */
+  estimated: boolean
   /** Container runtime fields, from the slot list. The legend shows the image
    *  tag or profile slug for container slots. */
   isContainer: boolean
@@ -221,21 +223,19 @@ function deviceFor(slot: Pick<Slot, 'device'> | undefined): SlotDevice {
   return 'cpu'
 }
 
-/** The slot that hosts the image engine: an image-type (or ComfyUI-profile)
- *  slot on a GPU device. A missing device is the backend's default, a GPU. */
-function isImageSlot(s: Slot): boolean {
-  if (String(s.type) !== 'image' && s.profile !== 'comfyui') return false
-  const dev = deviceFor(s)
-  return !s.device || dev === 'rocm' || dev === 'vulkan'
-}
-
 /** A `per_slot` row's resident footprint in MiB. */
 function rowMb(row: PerSlotRow | undefined): number {
   if (!row) return 0
   return num(row.mem_mb) || num(row.ram_mb) + num(row.vram_mb)
 }
 
-type Joined = { name: string; gb: number; fallbackDevice: SlotDevice; isImageEngine: boolean }
+type Joined = {
+  name: string
+  gb: number
+  fallbackDevice: SlotDevice
+  isImageEngine: boolean
+  estimated: boolean
+}
 
 function toSlotEntry(
   j: Joined,
@@ -250,7 +250,7 @@ function toSlotEntry(
     color: colors.get(j.name) as string,
     bytesGb: j.gb,
     modelId: slot?.model || perSlot[j.name]?.model_id || '',
-    approx: false,
+    estimated: j.estimated,
     // Container runtime fields — present when slot.runtime="container".
     // `image` is the full image tag; `profile` is the profile slug. The legend
     // uses them for container slots (the device chip is uninformative there:
@@ -372,15 +372,23 @@ export function buildMemoryMapModel(input: MemoryMapInput): MemoryMapModel {
     // its estimate too would count them twice.
     for (const r of g.this_box || []) {
       if (String(r.state || '').toLowerCase() === 'starting') continue
-      joined.push({ name: r.slot, gb: num(r.gb), fallbackDevice: 'rocm', isImageEngine: false })
-    }
-    if (num(g.image_engine_gb) > 0) {
-      const imgSlot = slots.find(isImageSlot)
       joined.push({
-        name: imgSlot?.name ?? IMAGE_ENGINE_FALLBACK_NAME,
+        name: r.slot,
+        gb: num(r.gb),
+        fallbackDevice: 'rocm',
+        isImageEngine: false,
+        estimated: true,
+      })
+    }
+    // The backend names the slot that hosts the engine; the UI does not guess
+    // it from the slot list.
+    if (num(g.image_engine_gb) > 0) {
+      joined.push({
+        name: g.image_engine_slot ?? IMAGE_ENGINE_FALLBACK_NAME,
         gb: num(g.image_engine_gb),
         fallbackDevice: 'rocm',
         isImageEngine: true,
+        estimated: !!g.image_engine_estimated,
       })
     }
   } else {
@@ -389,7 +397,13 @@ export function buildMemoryMapModel(input: MemoryMapInput): MemoryMapModel {
     for (const name of Object.keys(perSlot).sort()) {
       const row = perSlot[name]
       if (String(row?.state || '').toLowerCase() === 'starting') continue
-      joined.push({ name, gb: mbToGb(rowMb(row)), fallbackDevice: 'cpu', isImageEngine: false })
+      joined.push({
+        name,
+        gb: mbToGb(rowMb(row)),
+        fallbackDevice: 'cpu',
+        isImageEngine: false,
+        estimated: true,
+      })
     }
   }
   const colors = assignSlotColors(joined.map((j) => j.name))

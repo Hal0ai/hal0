@@ -383,6 +383,9 @@ function ThRuler({ slots }) {
   // can be larger than the free block's drawn width. With no GPU pool it is
   // this box's free RAM; with neither readable it is unknown.
   const free = gpu ? gpu.freeGb : ram ? ram.freeGb : null
+  // With neither a pool nor a RAM reading there is nothing to bound a new model
+  // by: the model's 0 is "unknown", not "0.0 GB — limited by ram".
+  const headroomKnown = !!gpu || !!ram
   // The free block's WIDTH is whatever the drawn segments leave (it is flex:1,
   // so never negative). The attribution can overshoot the pool outright; scale
   // the drawn segments down so they never run past 100% of the bar.
@@ -407,17 +410,16 @@ function ThRuler({ slots }) {
       const toks = serving && typeof live?.metrics?.toks === 'number' && live.metrics.toks > 0
         ? live.metrics.toks
         : null
-      // Per-slot figures are the backend's attribution, an estimate; the image
-      // engine's is the engine's own reading, under its own name.
+      // Per-slot figures are the backend's attribution, an estimate. The image
+      // engine shows under its own name, and is an estimate only when the
+      // backend says the img slot's row stood in for ComfyUI's reading.
       const label = s.isImageEngine ? 'image engine' : s.name
-      const tip = s.isImageEngine
-        ? `${label} · ${fmt1(s.bytesGb)} GB · ${ind ? ind.label : '—'}`
-        : `${label} · ${fmt1(s.bytesGb)} GB (estimated) · ${ind ? ind.label : '—'}`
+      const tip = `${label} · ${fmt1(s.bytesGb)} GB${s.estimated ? ' (estimated)' : ''} · ${ind ? ind.label : '—'}`
       return { ...s, serving, toks, label, tip }
     })
 
   // The image engine's segment has no slot page to go to when the engine holds
-  // memory but the slot list has no img slot (the model names it 'image engine').
+  // memory but the backend names no img slot (the model calls it 'image engine').
   const goSlot = (s) => {
     if (s.isImageEngine && !slotByName[s.name]) return
     window.location.hash = '#slots/' + s.name
@@ -429,8 +431,13 @@ function ThRuler({ slots }) {
         <span>memory · {pool.label}</span>
         <span>
           model <b>{fmt1(used)} GB</b> · free <b>{free != null ? `${fmt1(free)} GB` : '—'}</b> · headroom{' '}
-          <b className="ok">{fmt1(headroom.availableGb)} GB</b>{' '}
-          <span className="lim">— limited by {headroom.limitedBy}</span>
+          <b className="ok">{headroomKnown ? `${fmt1(headroom.availableGb)} GB` : '—'}</b>
+          {headroomKnown && (
+            <>
+              {' '}
+              <span className="lim">— limited by {headroom.limitedBy}</span>
+            </>
+          )}
         </span>
       </div>
       <div className="th-ruler-bar" ref={barRef}>

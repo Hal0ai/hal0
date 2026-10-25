@@ -38,7 +38,9 @@ import type { Page } from '@playwright/test'
 // slot names are the e2e seed's (data.jsx), so legend rows and ruler links
 // resolve against real slots; the figures are those of the unit fixtures in
 // src/dash/__tests__/memory-map-pure.test.ts. `this_box` excludes the img
-// slot: its memory is `image_engine_gb`.
+// slot: its memory is `image_engine_gb`, and the backend names the slot that
+// hosts the engine (`image_engine_slot`). ComfyUI is not answering on this box,
+// so the engine's figure is the img slot's own row: `image_engine_estimated`.
 const referenceBox = (thisBox?: Array<{ slot: string; gb: number; state: string }>) => ({
   gpu: {
     kind: 'shared',
@@ -50,6 +52,8 @@ const referenceBox = (thisBox?: Array<{ slot: string; gb: number; state: string 
       { slot: 'primary', gb: 30.8, state: 'serving' },
     ],
     image_engine_gb: 6.6,
+    image_engine_slot: 'img',
+    image_engine_estimated: true,
     other_guests_gb: 0,
     attribution_excess_gb: 3.0,
     free_gb: 72.6,
@@ -122,7 +126,8 @@ test.describe('Unified memory hero (dashboard)', () => {
     await expect(card.locator('.rd-mem-free')).toHaveText('free · 72.6 GB')
     await expect(card).not.toContainText('69.6')
     // The img slot's memory is the image engine's, shown under its own name;
-    // the per-slot figures are estimates and say so.
+    // the per-slot figures are estimates and say so, and so is the engine's
+    // while the img slot's row stands in for ComfyUI's own reading.
     const legend = card.locator('.rd-mem-legend')
     await expect(legend).toContainText('image engine 6.6G')
     await expect(legend).toContainText('primary 30.8G')
@@ -133,7 +138,7 @@ test.describe('Unified memory hero (dashboard)', () => {
     )
     await expect(card.locator('.rd-mem-seg[title^="image engine"]')).toHaveAttribute(
       'title',
-      /^image engine · 6\.6 GB · /,
+      /^image engine · 6\.6 GB \(estimated\) · /,
     )
     // Nothing else holds the pool: no striped block.
     await expect(card.locator('.rd-mem-seg-system')).toHaveCount(0)

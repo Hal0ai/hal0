@@ -2,8 +2,8 @@
 //
 // Distinct from useHardware (static probe): this hook polls the live
 // counters (gtt_used_mb, ram_used_mb, npu_status.model_mb, host.*) at
-// 2.5s — same cadence the backend was designed for. Used by the
-// MemoryMap component (sidebar + expanded variants).
+// 2.5s — same cadence the backend was designed for. Feeds the dashboard's
+// memory model (useMemoryMapModel).
 
 import { useQuery } from '@tanstack/react-query'
 import { apiGet } from '../client'
@@ -43,6 +43,13 @@ export interface MemoryBudgetGpuJson {
    *  is its own figure (`image_engine_gb`). */
   this_box: MemoryBudgetSlotShareJson[]
   image_engine_gb: number
+  /** The slot that hosts the image engine, named by the backend; null when the
+   *  box has no img slot. */
+  image_engine_slot: string | null
+  /** True when `image_engine_gb` is the img slot's own attribution standing in
+   *  for a ComfyUI reading that was missing (or not usable on this pool), so it
+   *  is an estimate, not a measurement. */
+  image_engine_estimated: boolean
   /** Pool usage that is neither this box's slots nor the image engine. */
   other_guests_gb: number
   /** How far the attributed footprints overshoot the live usage. Reported,

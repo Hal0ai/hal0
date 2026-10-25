@@ -431,11 +431,10 @@ export function MemoryHeroCard({ swap, onGo }) {
         fill: `color-mix(in srgb, ${s.color} 18%, transparent)`,
         serving,
         toks: serving ? live?.metrics?.toks : null,
-        // Per-slot figures are the backend's attribution, an estimate; the
-        // image engine's is the engine's own reading.
-        tooltip: s.isImageEngine
-          ? `image engine · ${fmtGb(s.bytesGb)} · ${ind ? ind.label : '—'}`
-          : `${s.name} · ${fmtGb(s.bytesGb)} (estimated) · ${ind ? ind.label : '—'}`,
+        // Per-slot figures are the backend's attribution, an estimate. The
+        // image engine is one only when the backend says the img slot's row
+        // stood in for ComfyUI's own reading.
+        tooltip: `${s.isImageEngine ? 'image engine' : s.name} · ${fmtGb(s.bytesGb)}${s.estimated ? ' (estimated)' : ''} · ${ind ? ind.label : '—'}`,
       }
     })
 
@@ -444,9 +443,13 @@ export function MemoryHeroCard({ swap, onGo }) {
   // usage held by neither this box's slots nor the image engine — "other
   // guests", straight from the budget; mixing RAM into a pool bar would
   // misstate it. With no GPU pool the bar is this box's RAM, so it is system +
-  // page cache ≈ RAM in use beyond what loaded models hold.
-  const stripedName = mm.gpu ? 'other guests' : 'system'
-  const stripedGb = mm.gpu
+  // page cache ≈ RAM in use beyond what loaded models hold. A configured
+  // Proxmox host makes the bar host-wide instead: the pool's other guests are
+  // already inside the host's "others" block below, so the pool block is not
+  // drawn there (it would count them twice).
+  const poolBar = !!mm.gpu && !pveConfigured
+  const stripedName = poolBar ? 'other guests' : 'system'
+  const stripedGb = poolBar
     ? mm.gpu.otherGuestsGb
     : ramUsedGb != null
       ? Math.max(0, round1(ramUsedGb - allocGb))
@@ -457,7 +460,7 @@ export function MemoryHeroCard({ swap, onGo }) {
       kind: 'system',
       gb: stripedGb,
       label: `${stripedName} · ${stripedGb.toFixed(1)}G`,
-      tooltip: `${mm.gpu ? 'other guests' : 'system + page cache'} · ${fmtGb(stripedGb)}`,
+      tooltip: `${poolBar ? 'other guests' : 'system + page cache'} · ${fmtGb(stripedGb)}`,
     })
   }
   if (pveConfigured && mm.host.othersGb > 0) {
@@ -476,7 +479,7 @@ export function MemoryHeroCard({ swap, onGo }) {
   // blocks. A configured Proxmox host makes the bar host-wide, where the
   // pool's free is not this bar's free, so the remainder stands. With no GPU
   // pool it is the remainder of the RAM bar.
-  const freeGb = mm.gpu && !pveConfigured
+  const freeGb = poolBar
     ? mm.gpu.freeGb
     : totalGb > 0 ? Math.max(0, round1(totalGb - usedGb)) : null
 

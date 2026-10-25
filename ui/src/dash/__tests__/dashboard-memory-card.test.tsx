@@ -29,6 +29,8 @@ const budget = (gpuOver: Record<string, unknown> | null = {}, ramOver: Record<st
             { slot: 'agent', gb: 12, state: 'serving' },
           ],
           image_engine_gb: 4.4,
+          image_engine_slot: 'img',
+          image_engine_estimated: false,
           other_guests_gb: 0,
           attribution_excess_gb: 3,
           free_gb: 72.6,
@@ -44,7 +46,7 @@ const SLOTS = [
   { name: 'img', type: 'image', device: 'gpu-rocm', model: 'm-img', state: 'serving' },
 ]
 
-const state: { memory: any } = { memory: budget() }
+const state: { memory: any; host: any } = { memory: budget(), host: undefined }
 
 // dashboard-redesign.jsx imports every hook the whole dashboard uses. The two
 // components under test need only the ones mocked for real below; the rest are
@@ -61,7 +63,10 @@ vi.mock('@/api/hooks/useHardware', () => ({
   hasNpuAccess: () => false,
 }))
 vi.mock('@/api/hooks/useStatsHardware', () => ({
-  useStatsHardware: () => ({ data: { memory: state.memory, per_slot: {} }, isLoading: false }),
+  useStatsHardware: () => ({
+    data: { memory: state.memory, per_slot: {}, host: state.host },
+    isLoading: false,
+  }),
   useMemoryBudget: () => ({ data: state.memory }),
 }))
 vi.mock('@/api/hooks/useProxmoxSettings', () => ({
@@ -81,8 +86,9 @@ vi.mock('../services-widget-pure', inert)
 
 const { HealthStrip, MemoryHeroCard } = await import('../dashboard-redesign.jsx')
 
-function render(memory: any): HTMLElement {
+function render(memory: any, pveHost?: any): HTMLElement {
   state.memory = memory
+  state.host = pveHost
   const host = document.createElement('div')
   document.body.appendChild(host)
   act(() => {
@@ -133,6 +139,18 @@ describe('dashboard memory card', () => {
     expect(titles.find((t) => t.startsWith('brain'))).toMatch(/^brain · 30\.0 GB \(estimated\) · /)
   })
 
+  it('calls the engine an estimate only when the backend says it is one', () => {
+    const engineTitle = (host: HTMLElement) =>
+      [...host.querySelectorAll('.rd-mem-seg[role="link"]')]
+        .map((e) => e.getAttribute('title') || '')
+        .find((t) => t.startsWith('image engine'))
+    expect(engineTitle(render(budget()))).toMatch(/^image engine · 4\.4 GB · /)
+    document.body.innerHTML = ''
+    expect(engineTitle(render(budget({ image_engine_estimated: true })))).toMatch(
+      /^image engine · 4\.4 GB \(estimated\) · /,
+    )
+  })
+
   it('stays RAM-based on a box without a GPU', () => {
     const host = render(budget(null))
     // the bar is this box's RAM: system + page cache = RAM in use beyond the models
@@ -140,6 +158,46 @@ describe('dashboard memory card', () => {
     expect(legend(host)).toContain('system 16.1G')
     expect(freeLabel(host)).toBe('free · 89.4 GB')
     expect(host.querySelector('.rd-card-note')?.textContent).toContain('106 GB pool')
+  })
+})
+
+describe('dashboard memory card on a Proxmox-configured GPU box', () => {
+  // Host: 128 GB DIMMs, 90 GB in use, 38 GB free. This box's occupants hold
+  // 30 + 12 + 4.4 = 46.4 GB of the pool, so the host's "others" are 43.6 GB:
+  // that already includes the other guests' GTT.
+  const host = {
+    configured: true,
+    ok: true,
+    host_mem_total_mb: 131072,
+    host_mem_used_mb: 92160,
+    host_mem_free_mb: 38912,
+  }
+  // Other guests hold 20 GB of this box's pool: drawn as their own block on
+  // the pool bar, but inside the host's "others" once the bar is host-wide.
+  const withOtherGuests = () =>
+    budget({ used_gb: 66.4, other_guests_gb: 20, attribution_excess_gb: 0, free_gb: 49.6 })
+
+  it('does not draw the pool\'s other guests on top of the host\'s others', () => {
+    const h = render(withOtherGuests(), host)
+    const blocks = [...h.querySelectorAll<HTMLElement>('.rd-mem-seg-system')]
+    expect(blocks.map((b) => b.getAttribute('title'))).toEqual([
+      'proxmox host (other tenants) · 43.6 GB',
+    ])
+    expect(legend(h)).not.toMatch(/other guests/)
+    expect(legend(h)).toContain('proxmox host 43.6G')
+  })
+
+  it('the free label is what the host-wide bar leaves, not the pool free', () => {
+    const h = render(withOtherGuests(), host)
+    // 128 total - (46.4 occupants + 43.6 host others) = 38.0, the host's free
+    expect(freeLabel(h)).toBe('free · 38.0 GB')
+    expect(h.querySelector('.rd-card-note')?.textContent).toContain('128 GB pool')
+  })
+
+  it('the same budget without a host is the pool bar, other guests drawn', () => {
+    const h = render(withOtherGuests())
+    expect(striped(h)!.getAttribute('title')).toBe('other guests · 20.0 GB')
+    expect(freeLabel(h)).toBe('free · 49.6 GB')
   })
 })
 

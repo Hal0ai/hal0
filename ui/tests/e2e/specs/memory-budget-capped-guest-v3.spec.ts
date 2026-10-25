@@ -35,6 +35,8 @@ const cappedSecondGuest = () => ({
     used_gb: 43.4,
     this_box: [],
     image_engine_gb: 0,
+    image_engine_slot: 'img',
+    image_engine_estimated: false,
     other_guests_gb: 43.4,
     attribution_excess_gb: 0,
     free_gb: 72.6,

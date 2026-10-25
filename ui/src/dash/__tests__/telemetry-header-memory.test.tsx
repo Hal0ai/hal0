@@ -25,6 +25,8 @@ const gpuBlock = (over: Record<string, unknown> = {}) => ({
     { slot: 'agent', gb: 12, state: 'serving' },
   ],
   image_engine_gb: 4.4,
+  image_engine_slot: 'img',
+  image_engine_estimated: false,
   other_guests_gb: 0,
   attribution_excess_gb: 3,
   free_gb: 72.6,
@@ -194,6 +196,35 @@ describe('memory ruler', () => {
     expect(brain).toMatch(/^brain · 30\.0 GB \(estimated\) · /)
   })
 
+  it('calls the engine segment an estimate only when the backend says it is one', () => {
+    const engineTitle = (host: HTMLElement) =>
+      [...ruler(host).querySelectorAll('.th-ruler-seg[role="link"]')]
+        .map((s) => s.getAttribute('title') || '')
+        .find((t) => t.startsWith('image engine'))
+    // ComfyUI's own reading: a measurement
+    expect(engineTitle(render(budget()))).toMatch(/^image engine · 4\.4 GB · /)
+    // the img slot's row standing in for it: an estimate
+    const estimated = render(budget({ gpu: gpuBlock({ image_engine_estimated: true }) }))
+    expect(engineTitle(estimated)).toMatch(/^image engine · 4\.4 GB \(estimated\) · /)
+  })
+
+  it('links the engine segment to the slot the backend names', () => {
+    const host = render(budget({ gpu: gpuBlock({ image_engine_slot: 'img' }) }))
+    const seg = [...ruler(host).querySelectorAll('.th-ruler-seg[role="link"]')].find((s) =>
+      (s.getAttribute('title') || '').startsWith('image engine'),
+    ) as HTMLElement
+    act(() => seg.click())
+    expect(window.location.hash).toBe('#slots/img')
+    // with no slot named there is no page to go to
+    window.location.hash = '#slots'
+    const noSlot = render(budget({ gpu: gpuBlock({ image_engine_slot: null }) }))
+    const orphan = [...ruler(noSlot).querySelectorAll('.th-ruler-seg[role="link"]')].find((s) =>
+      (s.getAttribute('title') || '').startsWith('image engine'),
+    ) as HTMLElement
+    act(() => orphan.click())
+    expect(window.location.hash).toBe('#slots')
+  })
+
   it('draws the segments inside the bar even when the attribution overshoots the pool', () => {
     // 30 + 12 + 4.4 = 46.4 GB attributed against a 20 GB pool that is full
     const host = render(
@@ -205,5 +236,36 @@ describe('memory ruler', () => {
     const free = r.querySelector('.th-ruler-free')?.textContent
     expect(free).toBe('free · 0.0 GB')
     expect(r.querySelector('.th-ruler-h')?.textContent).toContain('free 0.0 GB')
+  })
+})
+
+describe('memory ruler headroom', () => {
+  const header = (host: HTMLElement) => ruler(host).querySelector('.th-ruler-h')?.textContent ?? ''
+  /** The header from "headroom" on: the model figure before it may legitimately read 0.0 GB. */
+  const headroomText = (host: HTMLElement) => header(host).slice(header(host).indexOf('headroom'))
+
+  it('is the budget free less the safety margin, and says what limits it', () => {
+    expect(header(render(budget()))).toContain('headroom 70.6 GB — limited by pool')
+  })
+
+  it('is RAM-limited on a box with no GPU pool', () => {
+    expect(header(render(budget({ gpu: null, render_free_gb: null })))).toContain(
+      'headroom 87.4 GB — limited by ram',
+    )
+  })
+
+  it('shows a dash, and no "limited by", when neither a pool nor RAM could be read', () => {
+    const unreadable = budget({
+      gpu: null,
+      ram: ramBlock({ limit_gb: 0, used_gb: 0, free_gb: 0 }),
+      render_free_gb: null,
+    })
+    const host = render(unreadable)
+    expect(headroomText(host)).toBe('headroom —')
+    expect(ruler(host).querySelector('.th-ruler-h .lim')).toBeNull()
+  })
+
+  it('shows a dash before the memory block has arrived', () => {
+    expect(headroomText(render(undefined))).toBe('headroom —')
   })
 })

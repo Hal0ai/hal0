@@ -2,8 +2,8 @@
 //
 // The full-shape sibling of /api/stats/hardware's slim host block.
 // The stats endpoint runs through pve.project_slim() and strips
-// tenants[] + a few aggregate fields. The expanded MemoryMap variant
-// needs the full shape to show per-tenant memory rows.
+// tenants[] + a few aggregate fields. The dashboard's memory model
+// (useMemoryMapModel) needs the full shape for the per-tenant memory rows.
 //
 // Lower cadence (10s) because the data is the same on every poll
 // unless someone is rebooting tenants — the dashboard's 2.5s stats
