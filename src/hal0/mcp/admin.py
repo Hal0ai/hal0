@@ -3356,7 +3356,8 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "(gated). Args: subdir (path; a directory name from comfyui_files, e.g. checkpoints), "
         "relpath (path; the row's relpath, with each '/' written %2F: no other %-escape, '?' or "
         "'#' is accepted). Refused for a file a catalog model owns (409), a symlink (400), a "
-        "hidden or '..' path part (400) and a missing file (404)."
+        "hidden or '..' path part (400), a name that is not a weight file (400) and a "
+        "missing file (404)."
     ),
     "comfyui_job_cancel": (
         "Cancel an image model's in-flight install; files already downloaded stay. "

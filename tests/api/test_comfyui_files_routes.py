@@ -146,6 +146,30 @@ def test_delete_file_rejects_an_unknown_subdir(client: TestClient) -> None:
     assert mine.exists()
 
 
+@pytest.mark.parametrize("name", ["put_checkpoints_here", "extra.yaml", "notes.txt"])
+def test_delete_file_refuses_a_file_the_listing_does_not_show(
+    client: TestClient, name: str
+) -> None:
+    """Only weight files are listed, so only they can be deleted: the rest is 400, still on disk."""
+    other = _touch("checkpoints", name)
+    weight = _touch("checkpoints", "mine.gguf")
+    before = client.get("/api/comfyui/files").json()["files"]
+    assert [f["relpath"] for f in before] == ["mine.gguf"]
+
+    resp = _delete(client, "checkpoints", name)
+
+    assert resp.status_code == 400
+    error = resp.json()["error"]
+    assert error["code"] == "comfyui.file_path_invalid"
+    assert "weight file" in error["message"]
+    assert other.exists()
+    assert client.get("/api/comfyui/files").json()["files"] == before
+
+    assert _delete(client, "checkpoints", "mine.gguf").status_code == 200
+    assert not weight.exists()
+    assert other.exists()
+
+
 def test_delete_file_rejects_symlink(client: TestClient, tmp_path: Path) -> None:
     real = tmp_path / "elsewhere" / "real.safetensors"
     real.parent.mkdir()

@@ -35,6 +35,11 @@ def _touch(subdir: str, relpath: str, size: int = 4) -> Path:
     return path
 
 
+def _listed() -> set[tuple[str, str]]:
+    """``(subdir, relpath)`` of every row ``list_files`` reports."""
+    return {(f["subdir"], f["relpath"]) for f in inventory.list_files(sniff=False)}
+
+
 def test_delete_file_ok() -> None:
     mine = _touch("checkpoints", "mine.safetensors")
     other = _touch("checkpoints", "other.safetensors")
@@ -94,6 +99,74 @@ def test_delete_file_rejects_traversal(relpath: str) -> None:
     assert partial.exists()
     assert target.exists()
     assert outside.read_bytes() == b"keep"
+
+
+@pytest.mark.parametrize(
+    "relpath",
+    [
+        "put_checkpoints_here",  # the placeholder ComfyUI ships in every model directory
+        "extra.yaml",
+        "notes.txt",
+        "index.json",
+        "sd_xl_base_1.0.safetensors.part",
+        "sd_xl_base_1.0.safetensors.bak",
+        "sub/readme.md",
+        "safetensors",  # an extension is a suffix, not the whole name
+    ],
+)
+def test_delete_file_refuses_what_the_listing_cannot_show(relpath: str) -> None:
+    """Only weight files are listed, so only weight files can be deleted: nothing else goes."""
+    target = _touch("checkpoints", relpath)
+    weight = _touch("checkpoints", "mine.safetensors")
+
+    with pytest.raises(inventory.FilePathInvalid) as exc:
+        inventory.delete_file("checkpoints", relpath)
+
+    assert exc.value.code == "comfyui.file_path_invalid"
+    assert exc.value.status == 400
+    assert "weight file" in exc.value.message
+    assert exc.value.details == {"subdir": "checkpoints", "relpath": relpath}
+    assert target.exists()
+    assert weight.exists()
+    assert ("checkpoints", relpath) not in _listed()
+
+
+@pytest.mark.parametrize("ext", [*inventory._WEIGHT_EXTS, ".SAFETENSORS", ".Gguf"])
+def test_delete_file_deletes_every_weight_extension_the_listing_shows(ext: str) -> None:
+    mine = _touch("checkpoints", f"mine{ext}")
+    assert ("checkpoints", f"mine{ext}") in _listed()
+
+    inventory.delete_file("checkpoints", f"mine{ext}")
+
+    assert not mine.exists()
+
+
+def test_delete_file_accepts_exactly_the_files_the_listing_shows() -> None:
+    """One rule: whatever ``list_files`` reports is deletable, and nothing it hides is."""
+    names = [
+        "a.safetensors",
+        "b.ckpt",
+        "c.gguf",
+        "d.yaml",
+        "e.txt",
+        "put_checkpoints_here",
+        "f.safetensors.part",
+    ]
+    for name in names:
+        _touch("checkpoints", f"sub/{name}")
+    listed = {relpath for subdir, relpath in _listed() if subdir == "checkpoints"}
+
+    deleted = set()
+    for name in names:
+        try:
+            inventory.delete_file("checkpoints", f"sub/{name}")
+        except inventory.FilePathInvalid:
+            continue
+        deleted.add(f"sub/{name}")
+
+    assert deleted == listed == {"sub/a.safetensors", "sub/b.ckpt", "sub/c.gguf"}
+    left = {f.name for f in (paths.models_root() / "checkpoints" / "sub").iterdir()}
+    assert left == {"d.yaml", "e.txt", "put_checkpoints_here", "f.safetensors.part"}
 
 
 def test_delete_file_traversal_cannot_reach_a_sibling_subdir() -> None:
@@ -271,9 +344,19 @@ def test_delete_file_404_when_the_subdir_does_not_exist_yet() -> None:
 
 
 def test_delete_file_404_when_the_path_is_a_directory() -> None:
-    directory = _touch("checkpoints", "dir/inner.safetensors").parent
+    """A directory with a weight-file name passes the name rule, then is not a regular file."""
+    directory = _touch("checkpoints", "dir.safetensors/inner.safetensors").parent
 
     with pytest.raises(inventory.FileMissing):
+        inventory.delete_file("checkpoints", "dir.safetensors")
+
+    assert directory.is_dir()
+
+
+def test_delete_file_400_when_the_path_is_a_plain_named_directory() -> None:
+    directory = _touch("checkpoints", "dir/inner.safetensors").parent
+
+    with pytest.raises(inventory.FilePathInvalid):
         inventory.delete_file("checkpoints", "dir")
 
     assert directory.is_dir()

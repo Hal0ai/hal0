@@ -946,9 +946,10 @@ async def comfyui_file_delete(
     """Delete one weight file no catalog model loads; ``{"deleted": "<subdir>/<relpath>"}``.
 
     ``subdir`` and ``relpath`` are the row's fields from ``GET /files``, so a file the
-    listing shows without an owner can be deleted. 400 ``comfyui.file_path_invalid``
+    listing shows without an owner can be deleted, and no other. 400 ``comfyui.file_path_invalid``
     (``subdir`` is not a model directory, or ``relpath`` is absolute, climbs out with ``..``,
-    has a hidden part such as an install's ``.hf_stage_*`` partial, or leaves ``subdir``
+    has a hidden part such as an install's ``.hf_stage_*`` partial, does not end in a weight-file
+    extension (a ``.yaml``, ComfyUI's ``put_checkpoints_here``), or leaves ``subdir``
     through a symlinked directory), 400 ``comfyui.file_symlink`` (the file is a link: delete
     its target), 404 ``comfyui.file_not_found``, 409 ``comfyui.file_catalog_owned``
     (``error.details.models``: remove the model instead) and 403 ``comfyui.file_permission``.

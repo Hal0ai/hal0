@@ -18,8 +18,9 @@ leftover ``.hf_stage_*`` staging dirs live.
 
 :func:`delete_file` removes one file the catalog does not own, addressed by ``(subdir,
 relpath)`` as the listing reports them. It deletes only what the listing could show: a
-regular file inside a model subdirectory, reached without a symlink, with no hidden part in
-its path.
+regular file with a weight-file extension (``_WEIGHT_EXTS``) inside a model subdirectory,
+reached without a symlink, with no hidden part in its path. A ``.yaml``, a ``.json`` or ComfyUI's
+``put_checkpoints_here`` placeholder is never listed, so it is never deleted.
 """
 
 from __future__ import annotations
@@ -36,6 +37,16 @@ from hal0.errors import Hal0Error
 
 # Extensions of files worth listing; configs, indexes and partial downloads are not weights.
 _WEIGHT_EXTS = (".safetensors", ".ckpt", ".pt", ".pth", ".gguf", ".bin", ".sft")
+
+
+def _is_weight_name(name: str) -> bool:
+    """True for a file name the listing shows: not hidden, with a weight-file extension.
+
+    The one rule :func:`list_files` scans by and :func:`delete_file` enforces, so what the
+    listing can show and what a delete can reach never drift apart.
+    """
+    return not name.startswith(".") and name.lower().endswith(_WEIGHT_EXTS)
+
 
 # (kind, subdir) for every directory scanned. A catalog kind reports as its ComponentKind
 # value; a directory operators fill by hand (the rest of ``paths.SUBDIRS``) reports as its
@@ -149,7 +160,7 @@ def list_files(*, sniff: bool = True) -> list[dict[str, Any]]:
         for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
             dirnames[:] = [d for d in dirnames if not d.startswith(".")]
             for name in filenames:
-                if name.startswith(".") or not name.lower().endswith(_WEIGHT_EXTS):
+                if not _is_weight_name(name):
                     continue
                 path = Path(dirpath) / name
                 try:
@@ -198,9 +209,10 @@ def delete_file(subdir: str, relpath: str) -> None:
 
     * :class:`FilePathInvalid` (400): ``subdir`` is not a model directory; ``relpath`` is
       empty, absolute, or has an empty, ``.``, ``..`` or hidden part (a part starting with
-      ``.``, which is also where an install's ``.hf_stage_*`` partials live); the path
-      resolves outside ``subdir``; or it goes through a symlinked directory, which the
-      listing never enters.
+      ``.``, which is also where an install's ``.hf_stage_*`` partials live); the file name
+      has no weight-file extension, so the listing would not show it; the path resolves
+      outside ``subdir``; or it goes through a symlinked directory, which the listing never
+      enters.
     * :class:`FileIsSymlink` (400): the last component is a link. Checked with ``lstat``
       before anything is resolved, so a link is never judged by where it points.
     * :class:`FileMissing` (404): no regular file is there.
@@ -215,6 +227,12 @@ def delete_file(subdir: str, relpath: str) -> None:
     if "\0" in relpath or any(not part or part.startswith(".") for part in parts):
         raise _refuse_path(
             subdir, relpath, "the path must be relative, with no empty, '.', '..' or hidden part"
+        )
+    if not _is_weight_name(parts[-1]):
+        raise _refuse_path(
+            subdir,
+            relpath,
+            f"only weight files ({', '.join(_WEIGHT_EXTS)}) are listed, so only they can be deleted",
         )
     base = paths.models_root() / subdir
     target = base.joinpath(*parts)

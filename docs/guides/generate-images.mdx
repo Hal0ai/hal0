@@ -59,7 +59,7 @@ disk, grouped by kind. A file no catalog model loads, such as a checkpoint you
 copied in by hand, is deleted from the Models view's **Image / ComfyUI** tab or
 with `DELETE /api/comfyui/files/{subdir}/{relpath}` (MCP `comfyui_file_delete`);
 the call refuses a file a catalog model loads (409 `comfyui.file_catalog_owned`),
-a symlink and a hidden path part.
+a symlink, a hidden path part and any file that is not a weight file.
 
 hal0 writes a model's ComfyUI workflow when its install finishes. A model whose
 weights you copied into the models folder by hand reads as installed, so hal0
