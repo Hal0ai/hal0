@@ -228,42 +228,39 @@ function ThCellGpu() {
   )
 }
 
-// Cell 3 · CPU · MEMORY — sys-ram gauge + cpu util / temp digits.
+// Cell 3 · CPU · RAM — this box's RAM gauge + cpu util / temp digits.
 function ThCellCpuMem() {
   const hw = useHardware()
   const stats = useStatsHardware()
   const power = useStatsPower()
   const s = stats.data
-  // #1978 unified the dashboard's "unified memory" figures against the
-  // shared memory-map pool total (useMemoryMapModel) so the Slots-page map,
-  // the dashboard hero card, and the dashboard health strip could no
-  // longer diverge — but this cell lives in telemetry-header.jsx (a
-  // different file than that fix touched) and was missed: it still sized
-  // itself off ram_total_mb, showing the host's raw ~96 GB RAM total right
-  // next to ThRuler's memory-map band on this SAME page showing the
-  // GTT-aware ~116 GB pool total for what reads as "the same number".
-  // Same fix, same fallback order: prefer the live pool total on a
-  // GPU/unified box, fall back to RAM total everywhere else (non-UMA boxes,
-  // and test mocks with no memory-map model wired up).
+  // RAM is this box's own: used over its limit, both from the backend memory
+  // budget (ADR-0039) through the shared memory-map model. The limit is the
+  // container's when one caps it, else the machine's total. It is NOT the GPU
+  // pool, which can be larger than the RAM the box may use. `mm.ram` is null
+  // when the backend could not read RAM: the cell shows no figure then — never
+  // "0 / 0", never a division by the limit.
   const mm = useMemoryMapModel()
-  const poolTotalGb = mm.pool.kind === 'unified' ? mm.pool.totalGb || 0 : 0
+  const ram = mm.ram
 
-  const usedGb = s?.ram_used_mb != null ? s.ram_used_mb / 1024 : null
-  const totalGb = poolTotalGb || (s?.ram_total_mb != null ? s.ram_total_mb / 1024 : hw.data?.ram?.total || null)
-  const ramPct = usedGb != null && totalGb ? (usedGb / totalGb) * 100 : null
+  const usedGb = ram ? ram.usedGb : null
+  const ramPct = ram ? (ram.usedGb / ram.limitGb) * 100 : null
+  const limitGb = ram ? Math.round(ram.limitGb) : null
   const cpuUtil = typeof s?.cpu_util === 'number' ? s.cpu_util : null
   const cpuTemp = power.data?.cpu_temp_c ?? null
 
   return (
     <div className="th-cell">
-      <ThEyebrow dot="var(--dev-cpu)" label="CPU · Memory" sub={hw.data?.cpu || '—'} />
+      <ThEyebrow dot="var(--dev-cpu)" label="CPU · RAM" sub={hw.data?.cpu || '—'} />
       <div className="th-row">
         <SemiGauge
           pct={ramPct}
           stroke="var(--dev-cpu)"
           valueSmall
           value={usedGb != null ? fmt1(round1(usedGb)) : '—'}
-          caption={totalGb ? `/ ${Math.round(totalGb)} GB` : 'sys ram'}
+          caption={
+            limitGb == null ? 'RAM' : ram.source === 'container' ? `/ ${limitGb} GB limit` : `/ ${limitGb} GB`
+          }
         />
         <div className="th-digits c2">
           <div className="th-digit">
@@ -361,21 +358,36 @@ const SEG_LABEL_MIN_PX = 90
 
 // Memory rack ruler — full-width second row; replaces and absorbs the old
 // memory-map band. All attribution comes from useMemoryMapModel() verbatim
-// (pool cap, per-slot bytesGb + Okabe–Ito colors, headroom + limitedBy).
+// (the pool and its label, per-slot bytesGb + Okabe–Ito colors, other guests,
+// headroom + limitedBy), i.e. from the backend memory budget (ADR-0039).
 // Bar styling follows the #1061 memory hero: allocations live INSIDE the
 // bar as dim-tint segments with a solid top accent stripe, in-segment
 // labels only when ≥90 measured px (serving segments add the pulsing dot +
-// live tok/s), a 45° striped "system · KV + runtime" block for measured
-// GTT use beyond the named model weights, and click → slot. Widths stay
-// true to the GB scale (explicit % on border-box segments); the GB tick
+// live tok/s), a 45° striped "other guests" block for pool usage that is
+// neither this box's slots nor the image engine, and click → slot. Widths
+// stay true to the GB scale (explicit % on border-box segments); the GB tick
 // row keeps the ruler's scale readable.
 function ThRuler({ slots }) {
   const model = useMemoryMapModel()
-  const { pool, self, headroom } = model
+  const { pool, self, headroom, gpu, ram } = model
   const total = pool.totalGb || 0
   const used = self.modelUsedGb
-  const free = Math.max(0, round1(total - used))
-  const pct = (gb) => (total > 0 ? (gb / total) * 100 : 0)
+  // Pool usage held by neither this box's slots nor the image engine. Absent
+  // (0) with no GPU pool.
+  const otherGuestsGb = gpu ? gpu.otherGuestsGb : 0
+  // Header "free": the budget's own figure — the pool less the kernel's live
+  // usage, clamped at 0 by the backend. Do NOT re-derive it from the drawn
+  // segments: the per-slot attribution can overshoot the kernel counter, and
+  // that excess is reported, not drawn. With no GPU pool it is this box's free
+  // RAM; with neither readable it is unknown.
+  const free = gpu ? gpu.freeGb : ram ? ram.freeGb : null
+  // The drawn free block is whatever the drawn segments leave, never negative.
+  const barFree = Math.max(0, round1(total - used - otherGuestsGb))
+  // The attribution can also overshoot the pool outright; scale the drawn
+  // segments down so they never run past 100% of the bar.
+  const drawnGb = used + otherGuestsGb
+  const fit = total > 0 && drawnGb > total ? total / drawnGb : 1
+  const pct = (gb) => (total > 0 ? (gb / total) * 100 * fit : 0)
   const ticks = total > 0 ? [0, 0.25, 0.5, 0.75, 1].map((f) => Math.round(total * f)) : null
 
   const [barRef, barWidth] = useMeasuredWidth()
@@ -394,16 +406,20 @@ function ThRuler({ slots }) {
       const toks = serving && typeof live?.metrics?.toks === 'number' && live.metrics.toks > 0
         ? live.metrics.toks
         : null
-      return { ...s, serving, toks, indLabel: ind ? ind.label : '—' }
+      // Per-slot figures are the backend's attribution, an estimate; the image
+      // engine's is the engine's own reading, under its own name.
+      const label = s.isImageEngine ? 'image engine' : s.name
+      const tip = s.isImageEngine
+        ? `${label} · ${fmt1(s.bytesGb)} GB · ${ind ? ind.label : '—'}`
+        : `${label} · ${fmt1(s.bytesGb)} GB (estimated) · ${ind ? ind.label : '—'}`
+      return { ...s, serving, toks, label, tip }
     })
-  // System block — measured GTT in use beyond the named model weights
-  // (KV + runtime + buffers). Honest: only renders when gtt_used reports
-  // more than the models hold; never a fabricated split.
-  const systemGb = Math.max(0, round1((self.gttUsedGb || 0) - used))
-  const barFree = Math.max(0, round1(total - used - systemGb))
 
-  const goSlot = (name) => {
-    window.location.hash = '#slots/' + name
+  // The image engine's segment has no slot page to go to when the engine holds
+  // memory but the slot list has no img slot (the model names it 'image engine').
+  const goSlot = (s) => {
+    if (s.isImageEngine && !slotByName[s.name]) return
+    window.location.hash = '#slots/' + s.name
   }
 
   return (
@@ -411,7 +427,7 @@ function ThRuler({ slots }) {
       <div className="th-ruler-h">
         <span>memory · {pool.label}</span>
         <span>
-          model <b>{fmt1(used)} GB</b> · free <b>{fmt1(free)} GB</b> · headroom{' '}
+          model <b>{fmt1(used)} GB</b> · free <b>{free != null ? `${fmt1(free)} GB` : '—'}</b> · headroom{' '}
           <b className="ok">{fmt1(headroom.availableGb)} GB</b>{' '}
           <span className="lim">— limited by {headroom.limitedBy}</span>
         </span>
@@ -429,16 +445,16 @@ function ThRuler({ slots }) {
                 background: `color-mix(in srgb, ${s.color} 18%, transparent)`,
                 boxShadow: `inset 0 2px 0 ${s.color}`,
               }}
-              title={`${s.name} · ${fmt1(s.bytesGb)} GB · ${s.indLabel}`}
+              title={s.tip}
               role="link"
               tabIndex={0}
-              onClick={() => goSlot(s.name)}
-              onKeyDown={(e) => { if (e.key === 'Enter') goSlot(s.name) }}
+              onClick={() => goSlot(s)}
+              onKeyDown={(e) => { if (e.key === 'Enter') goSlot(s) }}
             >
               {showLabel && (
                 <>
                   <span className="nm" style={{ color: s.color }}>
-                    {s.name} · {s.bytesGb.toFixed(1)}G
+                    {s.label} · {s.bytesGb.toFixed(1)}G
                   </span>
                   {s.toks != null && (
                     <FieldInfoIcon description="<span className=&quot;dot serving th-ruler-dot&quot; />
@@ -449,14 +465,14 @@ function ThRuler({ slots }) {
             </div>
           )
         })}
-        {systemGb > 0 && (
+        {otherGuestsGb > 0 && (
           <div
             className="th-ruler-seg th-ruler-seg-system"
-            style={{ width: pct(systemGb) + '%' }}
-            title={`system · KV + runtime · ${fmt1(systemGb)} GB`}
+            style={{ width: pct(otherGuestsGb) + '%' }}
+            title={`other guests · ${fmt1(otherGuestsGb)} GB`}
           >
-            {(pct(systemGb) / 100) * barWidth >= SEG_LABEL_MIN_PX && (
-              <span className="nm">system · {systemGb.toFixed(1)}G</span>
+            {(pct(otherGuestsGb) / 100) * barWidth >= SEG_LABEL_MIN_PX && (
+              <span className="nm">other guests · {otherGuestsGb.toFixed(1)}G</span>
             )}
           </div>
         )}

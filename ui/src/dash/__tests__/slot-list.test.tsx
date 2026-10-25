@@ -34,7 +34,9 @@ const MODELS = [
 
 vi.mock('@/api/hooks/useSlots', () => ({ useSlots: () => ({ data: SLOTS, isLoading: false }) }))
 vi.mock('@/api/hooks/useModels', () => ({ useModels: () => ({ data: MODELS }) }))
-vi.mock('@/api/hooks/useStatsHardware', () => ({ useStatsHardware: () => ({ data: null }) }))
+// The footer's free RAM reads the memory budget (ADR-0039), not the raw counters.
+const MEMORY: { data: unknown } = { data: undefined }
+vi.mock('@/api/hooks/useStatsHardware', () => ({ useMemoryBudget: () => MEMORY }))
 vi.mock('@/lib/deviceMeta', () => ({ devKind: () => 'gpu' }))
 
 // slot-list.jsx reads React/DCard/StatusDot off the window globals at import.
@@ -73,5 +75,31 @@ describe('SlotList speculation bolt', () => {
   it('shows grey for embedded MTP heads and nothing without a drafter', () => {
     expect(bolt(host, 'mtp')!.classList.contains('off')).toBe(true)
     expect(bolt(host, 'plain')).toBeNull()
+  })
+})
+
+describe('SlotList footer', () => {
+  const footer = (memory: unknown) => {
+    MEMORY.data = memory
+    const el = document.createElement('div')
+    act(() => {
+      createRoot(el).render(<SlotList />)
+    })
+    return el.querySelector('.slist-foot')!.textContent
+  }
+
+  it('free ram comes from the memory budget', () => {
+    const ram = { limit_gb: 105.5, used_gb: 16.1, free_gb: 89.4, source: 'container' }
+    expect(footer({ gpu: null, ram, render_free_gb: null })).toBe(
+      '5 serving · scheduler steady · 89 GB free',
+    )
+  })
+
+  it('omits the free clause when the budget is absent or RAM was unread', () => {
+    expect(footer(undefined)).toBe('5 serving · scheduler steady')
+    const unread = { limit_gb: 0, used_gb: 0, free_gb: 0, source: 'system' }
+    expect(footer({ gpu: null, ram: unread, render_free_gb: null })).toBe(
+      '5 serving · scheduler steady',
+    )
   })
 })

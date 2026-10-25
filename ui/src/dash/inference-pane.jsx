@@ -1157,15 +1157,14 @@ export function InferencePane() {
     return k === 'rocm' || k === 'vulkan'
   }).length
 
-  // Free-memory headroom for the slots status line — MUST share the memory
-  // ruler's basis (telemetry-header.jsx ThRuler) so the two numbers on the
-  // same screen agree. `mm.self.modelUsedGb` is the reconciled per-slot sum
-  // (real mem_mb when the backend reports it) the ruler's "free" is derived
-  // from; `mm.self.gttUsedGb` is a raw host-wide GTT stat that (a) is zeroed
-  // outright on a box with no rocm-smi and (b) counts non-hal0 GPU users the
-  // ruler never counts — either way it disagreed with the ruler (#1900).
-  const gttCapGb = mm.pool?.totalGb || 0
-  const gttFreeGb = Math.max(0, Math.round(gttCapGb - (mm.self?.modelUsedGb || 0)))
+  // Free-memory figure for the slots status line — MUST be the same figure the
+  // memory ruler's header shows (telemetry-header.jsx ThRuler) so the two
+  // numbers on the same screen agree (#1900): the backend memory budget's free
+  // (ADR-0039) for the GPU pool, or this box's free RAM when there is no GPU
+  // pool. `mm.ram` is null when the backend could not read RAM, so the line
+  // omits the figure then (the pool total is 0 too).
+  const poolCapGb = mm.pool?.totalGb || 0
+  const poolFreeGb = Math.round(mm.gpu?.freeGb ?? mm.ram?.freeGb ?? 0)
 
   // Fire-and-forget lifecycle action (mirrors SlotsView/PR #781): fire the
   // mutation, toast immediately, and let the slots poll reflect the phase.
@@ -1317,7 +1316,7 @@ export function InferencePane() {
             )}
             <div className="body-status">
               {servingN} serving
-              {gttCapGb > 0 ? ` · ${gttFreeGb} GB free` : ''}
+              {poolCapGb > 0 ? ` · ${poolFreeGb} GB free` : ''}
             </div>
           </div>
 

@@ -16,6 +16,7 @@ import type { Slot } from '@/api/hooks/useSlots'
 import {
   assignSlotColors,
   buildMemoryMapModel,
+  gpuPoolLabel,
   SAFETY_MARGIN_GB,
   type MemoryMapInput,
 } from '../memory-map-pure'
@@ -424,5 +425,12 @@ describe('buildMemoryMapModel', () => {
     expect(m.self.npuModelGb).toBe(3)
     // The NPU is not in the GPU pool, so it is not one of the pool's occupants.
     expect(m.self.slots.map((s) => s.name)).not.toContain('npu0')
+  })
+})
+
+describe('gpuPoolLabel', () => {
+  it('names the pool for every screen that shows it', () => {
+    expect(gpuPoolLabel('shared')).toBe('GPU pool · shared')
+    expect(gpuPoolLabel('dedicated')).toBe('VRAM')
   })
 })

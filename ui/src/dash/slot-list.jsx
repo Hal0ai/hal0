@@ -16,7 +16,7 @@
 // Vite alias path — same as inference-pane.jsx).
 
 import { useSlots } from '@/api/hooks/useSlots'
-import { useStatsHardware } from '@/api/hooks/useStatsHardware'
+import { useMemoryBudget } from '@/api/hooks/useStatsHardware'
 import { useModels } from '@/api/hooks/useModels'
 import { SlotSpecBolt } from './fit-chip.jsx'
 import { slotModelRow } from './slots/slot-shared.js'
@@ -195,7 +195,7 @@ function SlotRow({ s, model, pinned, onTogglePin }) {
 // ── SlotList ──────────────────────────────────────────────────────────────────
 export function SlotList({ pinnedSet = new Set(), onTogglePin = () => {} }) {
   const slotsQ  = useSlots()
-  const hwQ     = useStatsHardware()
+  const memQ    = useMemoryBudget()
   const modelsQ = useModels()
 
   const slots   = slotsQ.data || []
@@ -208,11 +208,11 @@ export function SlotList({ pinnedSet = new Set(), onTogglePin = () => {} }) {
     return ind.cls === 'serving'
   }).length
 
-  // GB free from hardware stats — only include when the data is present.
-  const hw = hwQ.data
-  const gbFree = hw && typeof hw.ram_total_mb === 'number' && typeof hw.ram_used_mb === 'number'
-    ? Math.round((hw.ram_total_mb - hw.ram_used_mb) / 1024)
-    : null
+  // GB of RAM free on this box, from the backend memory budget (ADR-0039) —
+  // only included when the data is present. limit_gb 0 means the backend could
+  // not read RAM: that is "unknown", never "0 GB free".
+  const ram = memQ.data?.ram
+  const gbFree = ram && ram.limit_gb > 0 && Number.isFinite(ram.free_gb) ? Math.round(ram.free_gb) : null
 
   // Footer text — omit GB-free clause when we have no real source.
   const footerText = gbFree != null

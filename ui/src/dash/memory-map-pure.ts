@@ -197,6 +197,13 @@ export interface MemoryMapInput {
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
+/** The name of the GPU pool, for any screen that shows it. One owner for the
+ *  vocabulary: "GPU pool · shared" for a unified pool, "VRAM" for a discrete
+ *  card's. */
+export function gpuPoolLabel(kind: MemoryMapGpu['kind']): Exclude<PoolLabel, 'RAM'> {
+  return kind === 'shared' ? 'GPU pool · shared' : 'VRAM'
+}
+
 const round1 = (n: number): number => Math.round(n * 10) / 10
 
 const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
@@ -416,7 +423,7 @@ export function buildMemoryMapModel(input: MemoryMapInput): MemoryMapModel {
       ? {
           totalGb: gpu.totalGb,
           kind: gpu.kind === 'shared' ? 'unified' : 'dedicated',
-          label: gpu.kind === 'shared' ? 'GPU pool · shared' : 'VRAM',
+          label: gpuPoolLabel(gpu.kind),
           platformLabel,
         }
       : { totalGb: ram ? ram.limitGb : 0, kind: 'system', label: 'RAM', platformLabel },
