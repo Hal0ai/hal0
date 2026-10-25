@@ -139,8 +139,8 @@ A `size` that is not a string is the client's mistake. `POST /v1/images/generati
 answers 422 `image.invalid_size` before it resolves the model, reads the budget or
 touches the GPU, where it used to answer 500. `null` and `""` mean "no size". A string
 the workflow cannot read as `WxH` is not an error: the render falls back to its default
-size. `error.details.size_type` names the JSON type that was sent (`int`, `list`, ...),
-never its value.
+size. `error.details.size_type` names the type that was sent as Python spells it (`int`, `float`,
+`bool`, `list`, `dict`), never its value.
 
 A client that disconnects while the GPU switches is answered with an empty 499 and
 nothing is submitted to ComfyUI, where the render used to go ahead for a client that was
@@ -151,7 +151,7 @@ gone. The arbiter restores the GPU as usual.
 | 422 | `image.wont_fit` | `POST /v1/images/generations` | The preflight above. |
 | 422 | `image.invalid_size` | `POST /v1/images/generations`, `GET /api/comfyui/models/{model_id}/fit` | `size` is not a string (`details.size_type`), or the `/fit` query is not `WxH` (`details.size`). |
 | 503 | `image.gate_refused` | `POST /v1/images/generations`, `POST /api/comfyui/workflows/{name}/launch` | ComfyUI's GPU gate refused the prompt hal0 submitted. `error.message` is the gate's reason. |
-| 422 | `comfyui.invalid_gate_refusal` | `POST /api/comfyui/gate-refusal` | The body is not `{"reason": <non-empty string>}`. |
+| 422 | `comfyui.invalid_gate_refusal` | `POST /api/comfyui/gate-refusal` | The body is not `{"reason": <non-empty string>}`; a `reason` of only whitespace counts as empty. |
 
 ## Arbiter phase fields
 
@@ -161,9 +161,9 @@ below. Taking the snapshot awaits nothing and does no network or config I/O.
 
 | Field | Meaning |
 |---|---|
-| `phase` | What the GPU is doing. While a switch or a restore runs, its step: `draining` (waiting for requests on the LLM slots to finish), `unloading`, `starting_engine` or `reloading`. In image mode with none running: `handoff` while an editor prompt's 3-second hold lasts, else `rendering` while a `/v1` image request is open, else `grace` once the quiet clock runs. `null` otherwise. |
+| `phase` | What the GPU is doing. While a switch or a restore runs, its step: `draining` (waiting for requests on the LLM slots to finish), `unloading`, `starting_engine` or `reloading`. In image mode with none running: `handoff` for about 3 seconds after any switch into image mode (a `/v1` render's included) and after the gate announces an editor prompt, so that the prompt can reach ComfyUI's queue, else `rendering` while a `/v1` image request is open, else `grace` once the quiet clock runs. `null` otherwise. |
 | `restore_at` | Epoch seconds when the restore of the LLM slots is due (the end of the grace period). Set only while `phase` is `grace`. |
-| `handoff_until` | Epoch seconds when the editor hand-off ends. Set only while `phase` is `handoff`. |
+| `handoff_until` | Epoch seconds when the hand-off ends. Set only while `phase` is `handoff`. |
 | `drain_in_flight` | Requests still running on the slots being drained, while `phase` is `draining`; else `0`. |
 | `unload_set` | `list[str] \| null`. In image mode, the slots that were unloaded and come back. In LLM mode, the GPU LLM slots a switch would unload now (`[]` means known to be none). `null` is unknown: the slot configs have not been read since `hal0-api` started (the restore loop reads them once at startup, every switch and restore refreshes them), or the read failed. |
 | `llm_waiters` | `{count, oldest_s}`: LLM requests waiting for the GPU, and the age in seconds of the oldest (`null` without any). |
@@ -248,10 +248,12 @@ a header-less call from another machine is ignored, so the dashboard polling `/s
 does not move the state. The second test is a heuristic.
 
 `gate_refusal` is the latest prompt the gate refused, `{"at", "reason"}`, or `null` when
-none has been reported since `hal0-api` started. `at` is epoch seconds and `reason` is
-the text the editor was shown, kept to 500 characters. `GET /api/comfyui/arbiter` carries
-`gate_refusal` too. The reason is text written inside the `img` container: show it as
-text, never as HTML.
+none has been reported since `hal0-api` started. `at` is epoch seconds. `reason` is the
+text the gate refused the prompt with (what the editor was shown) or, for a switch request
+that `hal0-api` rejected, hal0's own sentence (`hal0 refused the gate's switch request
+(HTTP 403): ...`), kept to 500 characters. `GET /api/comfyui/arbiter` carries
+`gate_refusal` too. The gate's text is written inside the `img` container: show a reason
+as text, never as HTML.
 
 A refusal is recorded from four places:
 
@@ -271,7 +273,7 @@ The gate's report of a prompt it refused. It is internal: use `gate_refusal` on 
 to read it, and do not post to it, because the report replaces the latest refusal the
 status shows. Body `{"reason": "<non-empty string>"}`. The answer is 202
 `{"status": "recorded"}`, or 422 `comfyui.invalid_gate_refusal` for a body that is not
-that.
+that, a `reason` of only whitespace included.
 
 The gate's own token admits this route, from the box itself only, and nothing else; it is
 one of the gate's four requests. It is not an MCP tool, and `comfyui_status` carries the

@@ -264,7 +264,10 @@ GPU, but the older gate lets a prompt through when `hal0-api` is unreachable or
 after its own 120 seconds, and such a prompt can render next to the LLM slots.
 Restarting the slot loads the gate described here. Until you do, the older
 gate does not report why it refused a prompt, and `gate.state` on
-`/api/comfyui/status` reads `stale` once it has called.
+`/api/comfyui/status` reads `stale` once it has called, with one exception: on
+a box that requires authentication, hal0 mints the gate's token only when the
+`img` slot loads, so a box updated from v1.6.5 reads `no_credential`, which
+ranks above `stale`, until you restart the slot.
 
 ## The `[image]` slot config
 
