@@ -91,8 +91,8 @@ function _wiredHint(key, on, wired) {
         : 'No embed-capable slot is bound — document uploads will fail until one is (Capabilities → embed).'
     case 'images':
       return on
-        ? `The image button generates through slot "${wired.image_model}" via ComfyUI.`
-        : 'No ComfyUI slot is bound — the image button has nothing to generate against (Capabilities → img).'
+        ? `The image button renders "${wired.image_model}" through hal0's /v1 image endpoint.`
+        : 'No image model is ready — select an installed one for the img capability (Capabilities → img) and the image button renders through hal0.'
     case 'web_search':
       return 'No search provider is installed — the web-search toggle in Open WebUI has nothing to query.'
     case 'agents':

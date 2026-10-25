@@ -63,14 +63,7 @@ def _marker(path: Path) -> set[str]:
 
 def _overrides(*, embed: str | None = None) -> dict[str, str | None]:
     """The renderer's output for a box with only (optionally) an embed slot."""
-    return dynamic_env_overrides(
-        embed_model_id=embed,
-        image_model_id=None,
-        image_workflow_json=None,
-        image_workflow_nodes_json=None,
-        image_size=None,
-        search_provider=None,
-    )
+    return dynamic_env_overrides(embed_model_id=embed, image_model_id=None, search_provider=None)
 
 
 def _operator_edit(path: Path, extra: dict[str, str]) -> None:
@@ -273,12 +266,7 @@ def test_a_search_provider_claim_is_written_then_cleared_when_it_goes(tmp_path: 
     provider = {"engine": "searxng", "query_url": "http://searxng:8080/search?q=<query>"}
     target = tmp_path / "openwebui.env"
     with_provider = dynamic_env_overrides(
-        embed_model_id=None,
-        image_model_id=None,
-        image_workflow_json=None,
-        image_workflow_nodes_json=None,
-        image_size=None,
-        search_provider=provider,
+        embed_model_id=None, image_model_id=None, search_provider=provider
     )
     write_openwebui_env(target, overrides=with_provider, preserve_existing=True)
     assert _parse(target)["WEB_SEARCH_ENGINE"] == "searxng"
@@ -326,3 +314,48 @@ def test_header_is_deterministic_and_marker_is_sorted(tmp_path: Path) -> None:
     )
     listed = marker_line[len(_MANAGED_MARKER) :].strip().split(",")
     assert listed == sorted(listed)
+
+
+# ── a key hal0 wrote and no longer renders is dropped, not kept as a stale claim ──
+
+_OLD_IMAGE_FILE = (
+    "# hal0-managed: COMFYUI_BASE_URL,COMFYUI_WORKFLOW,COMFYUI_WORKFLOW_NODES,"
+    "ENABLE_IMAGE_GENERATION,IMAGE_GENERATION_ENGINE,IMAGE_GENERATION_MODEL,IMAGE_SIZE\n"
+    "COMFYUI_BASE_URL=http://host.docker.internal:8188\n"
+    'COMFYUI_WORKFLOW="{\\"3\\": {}}"\n'
+    'COMFYUI_WORKFLOW_NODES="[{\\"type\\": \\"prompt\\"}]"\n'
+    "ENABLE_IMAGE_GENERATION=True\nIMAGE_GENERATION_ENGINE=comfyui\n"
+    "IMAGE_GENERATION_MODEL=sdxl-turbo\nIMAGE_SIZE=512x512\n"
+    "COMFYUI_API_KEY=operator-set\n"
+)
+
+
+def test_keys_hal0_wrote_and_no_longer_renders_are_dropped(tmp_path: Path) -> None:
+    target = tmp_path / "openwebui.env"
+    target.write_text(_OLD_IMAGE_FILE, encoding="utf-8")
+    overrides = dynamic_env_overrides(
+        embed_model_id=None, image_model_id="sdxl-turbo", search_provider=None
+    )
+    write_openwebui_env(target, overrides=overrides, preserve_existing=True)
+    env = _parse(target)
+    assert not {"COMFYUI_BASE_URL", "COMFYUI_WORKFLOW", "COMFYUI_WORKFLOW_NODES"} & env.keys()
+    assert env["COMFYUI_API_KEY"] == "operator-set"  # never on hal0's managed line
+    assert env["IMAGE_GENERATION_ENGINE"] == "openai"
+    assert env["IMAGE_SIZE"] == ""
+    assert "COMFYUI_WORKFLOW" not in _marker(target)
+
+
+def test_the_installer_pass_drops_them_too(tmp_path: Path) -> None:
+    """install.sh's override-less render (env_writer.main) runs before the live one."""
+    target = tmp_path / "openwebui.env"
+    target.write_text(_OLD_IMAGE_FILE, encoding="utf-8")
+    write_openwebui_env(target, preserve_existing=True)
+    env = _parse(target)
+    assert not {"COMFYUI_BASE_URL", "COMFYUI_WORKFLOW", "COMFYUI_WORKFLOW_NODES"} & env.keys()
+    assert env["COMFYUI_API_KEY"] == "operator-set"
+    assert _marker(target) == {
+        "ENABLE_IMAGE_GENERATION",
+        "IMAGE_GENERATION_ENGINE",
+        "IMAGE_GENERATION_MODEL",
+        "IMAGE_SIZE",
+    }

@@ -64,20 +64,25 @@ backend to point at, never a claim OpenWebUI can't cash:
 
     RAG_EMBEDDING_ENGINE=openai              — an embed-capable slot is bound
     RAG_OPENAI_API_BASE_URL / _MODEL / _KEY
-    ENABLE_IMAGE_GENERATION=True             — a ComfyUI (img) slot is bound
-    IMAGE_GENERATION_ENGINE=comfyui
-    COMFYUI_BASE_URL / _MODEL / COMFYUI_WORKFLOW / _WORKFLOW_NODES
+    ENABLE_IMAGE_GENERATION=True             — the img selection resolves to a
+                                               model the API can render
+    IMAGE_GENERATION_ENGINE=openai
+    IMAGES_OPENAI_API_BASE_URL / _KEY / IMAGE_GENERATION_MODEL
+    IMAGE_SIZE=                              — empty: hal0's /v1 picks the size
     ENABLE_WEB_SEARCH=True                   — a search provider is installed
     WEB_SEARCH_ENGINE / SEARXNG_QUERY_URL / …
 
+Image generation goes through hal0's own ``/v1/images/generations`` like STT and
+TTS do, so size, step count and GPU arbitration are the ones any ``/v1`` client
+gets. Nothing is written for ComfyUI itself.
+
 :func:`dynamic_env_overrides` renders these as a pure function of already-
-resolved values (model ids, a baked ComfyUI workflow) — it never reads slot
-state itself, so it stays as import-light as the rest of this module. The
-live-truth resolver that gathers those values from ``capabilities.toml`` and
-the registry is :mod:`hal0.openwebui.wiring` (a separate module precisely so
-*that* import weight — ``hal0.capabilities``, ``hal0.registry``,
-``hal0.providers.comfyui_workflows`` — never lands on this module's cold
-``python -m`` path).
+resolved values (model ids) — it never reads slot state itself, so it stays as
+import-light as the rest of this module. The live-truth resolver that gathers
+those values from ``capabilities.toml`` and the registry is
+:mod:`hal0.openwebui.wiring` (a separate module precisely so *that* import
+weight — ``hal0.capabilities``, ``hal0.registry``, ``hal0.comfyui.resolve`` —
+never lands on this module's cold ``python -m`` path).
 
 Ownership (#2256). hal0 owns a dynamic key only while it has something to
 say about it. Every dynamic key is explicitly nulled when its gate is false,
@@ -95,7 +100,10 @@ a ``# hal0-managed: KEY,KEY`` line in the file header, and a line the operator
 wrote by hand — say a self-hosted SearXNG's ``WEB_SEARCH_ENGINE`` while no
 search provider ships — is not on that list, so the same ``None`` leaves it
 alone. The converse holds too: while hal0 does have a claim (an embed slot is
-bound) it overwrites a hand edit to those keys, and the header says so.
+bound) it overwrites a hand edit to those keys, and the header says so. A key
+on that line which this hal0 does not render at all any more (the
+``COMFYUI_*`` image keys an earlier release wrote) is dropped on the next
+render, with the claim: ``preserve_existing`` would otherwise carry it forever.
 """
 
 from __future__ import annotations
@@ -251,7 +259,14 @@ _CLIENT_KEY_TARGETS: tuple[tuple[str, str], ...] = (
     ("AUDIO_STT_OPENAI_API_KEY", "AUDIO_STT_OPENAI_API_BASE_URL"),
     ("AUDIO_TTS_OPENAI_API_KEY", "AUDIO_TTS_OPENAI_API_BASE_URL"),
     ("RAG_OPENAI_API_KEY", "RAG_OPENAI_API_BASE_URL"),
+    ("IMAGES_OPENAI_API_KEY", "IMAGES_OPENAI_API_BASE_URL"),
 )
+
+#: Client-key targets that belong to a dynamic block: the block's own render
+#: decides whether the key exists, so hal0 keeps them on its managed line when
+#: the client key goes and the placeholder comes back. The audio keys are plain
+#: shipped defaults again at that point.
+_BLOCK_OWNED_KEYS: frozenset[str] = frozenset({"RAG_OPENAI_API_KEY", "IMAGES_OPENAI_API_KEY"})
 
 
 def _client_key(target: Path) -> str | None:
@@ -323,16 +338,29 @@ _DYNAMIC_ENV_KEYS: tuple[str, ...] = (
     "RAG_EMBEDDING_MODEL",
     "ENABLE_IMAGE_GENERATION",
     "IMAGE_GENERATION_ENGINE",
-    "COMFYUI_BASE_URL",
-    "IMAGE_SIZE",
+    "IMAGES_OPENAI_API_BASE_URL",
+    "IMAGES_OPENAI_API_KEY",
     "IMAGE_GENERATION_MODEL",
-    "COMFYUI_WORKFLOW",
-    "COMFYUI_WORKFLOW_NODES",
+    "IMAGE_SIZE",
     "ENABLE_WEB_SEARCH",
     "ENABLE_SEARCH_QUERY_GENERATION",
     "WEB_SEARCH_ENGINE",
     "SEARXNG_QUERY_URL",
     "WEB_SEARCH_RESULT_COUNT",
+)
+
+#: Every key hal0 may put in the file: the shipped defaults, the bind host and
+#: trusted-header pair, the dynamic blocks and the client-key targets. A key on
+#: the ``# hal0-managed:`` line that is not in here is one an earlier hal0
+#: rendered and this one does not (see :func:`write_openwebui_env`).
+_HAL0_KEYS: frozenset[str] = frozenset(
+    {
+        *_DEFAULT_OPENWEBUI_ENV,
+        BIND_HOST_KEY,
+        "WEBUI_AUTH_TRUSTED_EMAIL_HEADER",
+        *_DYNAMIC_ENV_KEYS,
+        *(k for pair in _CLIENT_KEY_TARGETS for k in pair),
+    }
 )
 
 #: Prefix of the header line recording which keys hal0 itself wrote, as
@@ -425,30 +453,24 @@ def _rag_env_block(embed_model_id: str) -> dict[str, str]:
     }
 
 
-def _image_gen_env_block(
-    model_id: str, workflow_json: str, workflow_nodes_json: str, size: str
-) -> dict[str, str]:
-    """Image generation routed through the ComfyUI slot on the host.
+def _image_gen_env_block(model_id: str) -> dict[str, str]:
+    """Image generation routed through hal0's own ``/v1/images/generations``.
 
-    ComfyUI runs ``network_mode="host"`` (see
-    ``hal0.providers.comfyui.ComfyUIProvider.container_spec``), so from
-    inside the OpenWebUI container it is reached the same way hal0's own
-    ``/v1`` is: via the host gateway, not a compose-network service name.
-    ``workflow_json`` / ``workflow_nodes_json`` are pre-rendered by the
-    caller (see :mod:`hal0.openwebui.wiring`) from the SAME translator
-    hal0's own ``/v1/images/generations`` route uses, so the baked default
-    never drifts from what the slot actually runs. ``size`` is the resolved
-    model's native ``WxH`` (from the same resolution); it is only OpenWebUI's
-    default ``IMAGE_SIZE``, which the operator can change in OpenWebUI itself.
+    Open WebUI's ``openai`` image engine posts the model, prompt, ``n`` and
+    ``response_format`` there, so a render picks its template, step count and size
+    and arbitrates the GPU like any other ``/v1`` client; ComfyUI itself is never
+    reached from the container. ``IMAGE_SIZE`` is empty so that Open WebUI sends no
+    ``size`` and hal0 chooses (the img slot's default, then the model's native
+    size), and no ``IMAGE_STEPS`` is written for the same reason.
+    ``model_id`` is the resolved catalog id or ``ckpt/<path>``.
     """
     return {
         "ENABLE_IMAGE_GENERATION": "True",
-        "IMAGE_GENERATION_ENGINE": "comfyui",
-        "COMFYUI_BASE_URL": "http://host.docker.internal:8188",
-        "IMAGE_SIZE": size,
+        "IMAGE_GENERATION_ENGINE": "openai",
+        "IMAGES_OPENAI_API_BASE_URL": _HAL0_V1_URL,
+        "IMAGES_OPENAI_API_KEY": _PLACEHOLDER_KEY,
         "IMAGE_GENERATION_MODEL": model_id,
-        "COMFYUI_WORKFLOW": workflow_json,
-        "COMFYUI_WORKFLOW_NODES": workflow_nodes_json,
+        "IMAGE_SIZE": "",
     }
 
 
@@ -473,9 +495,6 @@ def dynamic_env_overrides(
     *,
     embed_model_id: str | None,
     image_model_id: str | None,
-    image_workflow_json: str | None,
-    image_workflow_nodes_json: str | None,
-    image_size: str | None,
     search_provider: dict[str, str] | None,
 ) -> dict[str, str | None]:
     """Render the RAG / image-gen / web-search blocks as a
@@ -488,20 +507,16 @@ def dynamic_env_overrides(
     deletes a capability's keys the moment it stops being true, rather than
     leaving them to survive as a stale claim under ``preserve_existing``.
 
-    ``image_model_id`` requires both workflow strings and ``image_size`` — a
-    caller that resolved a model id but failed to build its workflow (see
-    :func:`hal0.openwebui.wiring._owui_baked_workflow`) must pass ``None``
-    for all four rather than a half-built block.
+    ``image_model_id`` is the model the API can render
+    (:func:`hal0.openwebui.wiring._renderable_image_model`); a caller whose
+    selection does not resolve passes ``None`` rather than a block Open WebUI
+    cannot cash.
     """
     merged: dict[str, str | None] = dict.fromkeys(_DYNAMIC_ENV_KEYS, None)
     if embed_model_id:
         merged.update(_rag_env_block(embed_model_id))
-    if image_model_id and image_workflow_json and image_workflow_nodes_json and image_size:
-        merged.update(
-            _image_gen_env_block(
-                image_model_id, image_workflow_json, image_workflow_nodes_json, image_size
-            )
-        )
+    if image_model_id:
+        merged.update(_image_gen_env_block(image_model_id))
     if search_provider:
         merged.update(_web_search_env_block(search_provider))
     return merged
@@ -574,6 +589,8 @@ def write_openwebui_env(
                    the caller stating intent; a preserved value is merely an
                    absent one. A ``None`` override states no intent about an
                    operator's own value, so it does not displace it (#2256).
+                   A key recorded as hal0-managed that this hal0 no longer
+                   renders is dropped, whatever the overrides say.
 
     Returns:
         The path that was written, for the caller to log / verify.
@@ -598,6 +615,10 @@ def write_openwebui_env(
         managed = _read_managed_keys(target)
         previous_fingerprint = _read_client_key_fingerprint(target)
         env_vars.update(existing)
+        for key in managed - _HAL0_KEYS:
+            # hal0 wrote this key once and renders it no more: a stale claim (#2256).
+            env_vars.pop(key, None)
+        managed &= _HAL0_KEYS
     if overrides:
         for key, value in overrides.items():
             if value is not None:
@@ -661,9 +682,9 @@ def _apply_client_key(
                 managed.discard(key_var)
             else:
                 env_vars[key_var] = _PLACEHOLDER_KEY
-                # The RAG block owns its key's lifecycle; the audio keys are
-                # plain shipped defaults again.
-                if key_var != "RAG_OPENAI_API_KEY":
+                # The RAG and image blocks own their keys' lifecycle; the audio
+                # keys are plain shipped defaults again.
+                if key_var not in _BLOCK_OWNED_KEYS:
                     managed.discard(key_var)
 
 

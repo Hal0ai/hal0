@@ -763,6 +763,34 @@ def test_v1_images_b64_json_returns_inline_base64(
     assert body["data"][0]["b64_json"] == expected_b64
 
 
+def test_v1_images_answers_the_body_open_webui_sends(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The body Open WebUI v0.12.0 posts when its ``IMAGE_SIZE`` is empty
+    (``routers/images.py:638-655``): a model, a prompt, ``n`` and ``response_format``, no
+    ``size`` and no steps. hal0 picks the native size and the template's own step count, which
+    is what lets ``openwebui.env`` leave both settings empty."""
+    _install("sd-1.5-pruned-emaonly")
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+
+    r = client.post(
+        "/v1/images/generations",
+        json={
+            "model": "sd-1.5-pruned-emaonly",
+            "prompt": "a cat",
+            "n": 1,
+            "response_format": "b64_json",
+        },
+    )
+
+    assert r.status_code == 200, r.text
+    assert r.json()["data"][0]["b64_json"]
+    sent = mock_infer.call_args.args[1]
+    assert sent["size"] == "512x512"  # hal0 picked the native size; Open WebUI sent none
+    assert "steps" not in (sent.get("extra_body") or {})  # the template's own step count
+
+
 def test_v1_images_provider_error_surfaces(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
