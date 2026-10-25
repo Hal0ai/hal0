@@ -108,7 +108,7 @@ SERVICES: tuple[ServiceDef, ...] = (
     ServiceDef(
         id="comfyui",
         name="ComfyUI",
-        description="Image generation engine (img slot container, LAN :8188).",
+        description="Image generation engine (img slot container, loopback :8188).",
         unit="hal0-slot@img.service",
         port=8188,
         public_url_env="HAL0_COMFYUI_PUBLIC_URL",
@@ -118,7 +118,11 @@ SERVICES: tuple[ServiceDef, ...] = (
         # over), the only honest way to bring ComfyUI up (#1590). "restart"
         # stays the raw unit bounce the FirstRun repair button uses.
         actions=("start", "restart"),
-        mdns=True,
+        # No mDNS: the engine listens on the box's loopback (the host-net fence in
+        # providers/container.py), so an announced :8188 would lead other machines nowhere.
+        # ``port`` stays for the browser link, which opens on the box itself or through an SSH
+        # tunnel (the dashboard decides; see ui/src/dash/image/editor-reach.ts).
+        mdns=False,
         hints=("stop is GPU-arbiter managed — switch back to inference in the Image-Gen pane",),
         category="image",
         modalities=("image",),

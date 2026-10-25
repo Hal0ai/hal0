@@ -136,8 +136,12 @@ def test_resolve_video_422(model_id: str) -> None:
     assert (err.code, err.status) == ("image.model_not_renderable", 422)
     hint = err.details["hint"]
     assert err.details == {"model": model_id, "task": CATALOG[model_id].task, "hint": hint}
-    # Says what exists today: the editor the img slot serves on :8188, which needs a ROCm lane.
+    # Says what exists today: the editor on :8188, which needs a ROCm lane, and where it answers.
     assert "ComfyUI editor" in hint and "8188" in hint and "ROCm lane" in hint
+    # ComfyUI listens on the box's loopback (the host-net fence), so the hint says how to reach it
+    # and never suggests another machine can.
+    assert "loopback" in hint and "SSH tunnel" in hint
+    assert "LAN" not in hint
     assert "Image Gen" not in hint
     assert hint in err.message
 

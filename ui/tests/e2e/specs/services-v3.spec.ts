@@ -47,7 +47,7 @@ const SERVICES_PAYLOAD = {
     {
       id: 'comfyui',
       name: 'ComfyUI',
-      description: 'Image generation engine (img slot container, LAN :8188).',
+      description: 'Image generation engine (img slot container, loopback :8188).',
       managed: true,
       unit: 'hal0-slot@img.service',
       unit_state: {
@@ -63,7 +63,7 @@ const SERVICES_PAYLOAD = {
       mdns_url: null,
       loopback_port: null,
       actions: ['restart'],
-      mdns_capable: true,
+      mdns_capable: false,
       hints: ['start/stop is GPU-arbiter managed — use the Image-Gen pane switchover'],
     },
     {
@@ -248,7 +248,7 @@ test.describe('Services v3 (/services)', () => {
       posted = route.request().postDataJSON()
       return json(route, {
         ...SERVICES_PAYLOAD.mdns,
-        advertised: ['openwebui', 'comfyui'],
+        advertised: ['openwebui'],
         ok: true,
         message: null,
       })

@@ -354,19 +354,17 @@ def test_mdns_advertise_and_withdraw(svc_client: TestClient, tmp_path, monkeypat
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["ok"] is True
-        assert sorted(body["advertised"]) == ["comfyui", "openwebui"]
+        assert body["advertised"] == ["openwebui"]
 
         owui = (tmp_path / "hal0-addon-openwebui.service").read_text(encoding="utf-8")
         assert "<port>3001</port>" in owui
         assert "OpenWebUI on %h" in owui
-        comfy = (tmp_path / "hal0-addon-comfyui.service").read_text(encoding="utf-8")
-        assert "<port>8188</port>" in comfy
 
         status = svc_client.get("/api/services/mdns").json()
         assert status["available"] is True
         assert status["base_advertised"] is True
-        assert sorted(status["advertised"]) == ["comfyui", "openwebui"]
-        assert {a["id"] for a in status["advertisable"]} == {"comfyui", "openwebui"}
+        assert status["advertised"] == ["openwebui"]
+        assert {a["id"] for a in status["advertisable"]} == {"openwebui"}
 
         r = svc_client.post("/api/services/mdns", json={"advertise": False})
         assert r.status_code == 200
@@ -374,6 +372,66 @@ def test_mdns_advertise_and_withdraw(svc_client: TestClient, tmp_path, monkeypat
 
     assert base.read_text(encoding="utf-8") == "<!-- installer-owned -->"
     assert list(tmp_path.glob("hal0-addon-*.service")) == []
+
+
+def test_comfyui_is_never_advertised_over_mdns(
+    svc_client: TestClient, tmp_path, monkeypatch
+) -> None:
+    """ComfyUI listens on the box's loopback, so an announcement of ``:8188`` leads nowhere.
+
+    Another machine that resolves ``<host>.local`` and follows the announced port gets a refused
+    connection. The registry does not mark the service mDNS-capable, so Announce writes no file for
+    it, the discovery card does not list it, and its row carries no ``.local`` URL.
+    """
+    monkeypatch.setenv("HAL0_AVAHI_SERVICES_DIR", str(tmp_path))
+    comfy = service_by_id("comfyui")
+    assert comfy is not None
+    assert comfy.mdns is False
+
+    with patch(
+        "hal0.services.mdns.systemd.unit_is_active",
+        new_callable=AsyncMock,
+        return_value=True,
+    ):
+        advertised = svc_client.post("/api/services/mdns", json={"advertise": True}).json()
+        listing = svc_client.get("/api/services").json()
+        status = svc_client.get("/api/services/mdns").json()
+
+    assert "comfyui" not in advertised["advertised"]
+    assert not (tmp_path / "hal0-addon-comfyui.service").exists()
+    assert "comfyui" not in {a["id"] for a in status["advertisable"]}
+    row = next(s for s in listing["services"] if s["id"] == "comfyui")
+    assert row["mdns_capable"] is False
+    assert row["mdns_url"] is None
+
+
+def test_an_earlier_comfyui_announcement_goes_at_the_next_announce_or_withdraw(
+    svc_client: TestClient, tmp_path, monkeypatch
+) -> None:
+    """An earlier hal0 wrote ``hal0-addon-comfyui.service``; toggling the card removes it."""
+    monkeypatch.setenv("HAL0_AVAHI_SERVICES_DIR", str(tmp_path))
+    stale = tmp_path / "hal0-addon-comfyui.service"
+
+    with patch(
+        "hal0.services.mdns.systemd.unit_is_active",
+        new_callable=AsyncMock,
+        return_value=True,
+    ):
+        stale.write_text("<port>8188</port>", encoding="utf-8")
+        svc_client.post("/api/services/mdns", json={"advertise": True})
+        assert not stale.exists()
+
+        stale.write_text("<port>8188</port>", encoding="utf-8")
+        svc_client.post("/api/services/mdns", json={"advertise": False})
+        assert not stale.exists()
+
+
+def test_comfyui_registry_text_does_not_claim_lan_reach() -> None:
+    """The ComfyUI row's description says what is true: the engine listens on loopback."""
+    comfy = service_by_id("comfyui")
+    assert comfy is not None
+    assert "LAN" not in comfy.description
+    assert "loopback" in comfy.description
 
 
 def test_mdns_apply_requires_boolean(svc_client: TestClient) -> None:

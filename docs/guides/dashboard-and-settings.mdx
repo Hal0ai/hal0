@@ -114,10 +114,10 @@ follow.
 
 The **Discovery (mDNS)** card at the top shows whether `avahi-daemon` is
 active, the dashboard's own `<hostname>.local` announcement, and lets you
-advertise or withdraw the addon services (ComfyUI, OpenWebUI) as their own
-`<name>.local` entries. The installer writes the base `hal0.service` avahi
-file itself when avahi is present, alongside the same permission fix-up
-that lets the daemon (running as the unprivileged `hal0` user) write the
+advertise or withdraw the addon services (OpenWebUI; ComfyUI listens on
+loopback and is not announced) as their own `<name>.local` entries. The
+installer writes the base `hal0.service` avahi file itself when avahi is
+present, alongside the same permission fix-up that lets the daemon (running as the unprivileged `hal0` user) write the
 addon files — so both announcements come up out of the box, not just the
 addons.
 

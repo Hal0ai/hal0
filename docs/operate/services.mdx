@@ -289,7 +289,7 @@ owning unit, its probe strategy, and which lifecycle verbs it permits:
 | Service | Purpose | Unit | Allowed actions |
 |---|---|---|---|
 | OpenWebUI | Chat UI companion (podman container, LAN `:3001`) | `hal0-openwebui.service` | start, stop, restart, enable, disable |
-| ComfyUI | Image generation engine (runs as the seeded `img` slot container, LAN `:8188`) | `hal0-slot@img.service` | start, restart (no stop) |
+| ComfyUI | Image generation engine (runs as the seeded `img` slot container, loopback `:8188`) | `hal0-slot@img.service` | start, restart (no stop) |
 | Hermes | Bundled agent + its own dashboard (loopback `:9119`) | `hal0-agent@hermes.service` | start, stop, restart, enable, disable |
 | Hindsight | Memory engine — this is the same unit documented above | `hindsight-api.service` | start, stop, restart, enable, disable |
 
@@ -410,11 +410,13 @@ The DISCOVERY (mDNS) card above the service grid
 `:214-219`) toggles `POST /api/services/mdns` with
 `{"advertise": true|false}`. Turning it on writes one avahi service-group
 file — `/etc/avahi/services/hal0-addon-<id>.service` — per service that is
-both mDNS-capable and LAN-published; today that's OpenWebUI and ComfyUI
-only (Hermes and Hindsight are loopback-only and carry no LAN port, so
+both mDNS-capable and LAN-published; today that's OpenWebUI only (ComfyUI,
+Hermes and Hindsight listen on the box's loopback and carry no LAN port, so
 they're never mdns-capable). avahi-daemon inotify-watches that directory,
 so the announcement takes effect immediately — no reload, no unit restart.
-Turning it off removes every `hal0-addon-*.service` file.
+Turning it off removes every `hal0-addon-*.service` file. A ComfyUI
+announcement that an earlier hal0 wrote stays until you turn the toggle on
+or off again; either removes it.
 
 The toggle never touches `hal0.service`, the base dashboard announcement
 the installer writes separately — that's why "Dashboard announced as

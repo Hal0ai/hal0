@@ -52,9 +52,12 @@ def _validation_error_details(exc: ValidationError) -> dict[str, str]:
 # /etc/hal0/api.env; OpenWebUI's port is fixed at 3001 in the unit.
 _DEFAULT_API_PORT = 8080
 _OPENWEBUI_PORT = 3001
-# ComfyUI's own web UI binds :8188 on the runtime host (the img slot's
-# container publishes there). Like OpenWebUI it's browser-reachable on the
-# LAN, so it gets a host:port fallback; HAL0_COMFYUI_PUBLIC_URL overrides it.
+# ComfyUI's own web UI is :8188 on the runtime host's loopback (the img slot's
+# container shares the host network and binds 127.0.0.1; see the loopback fence
+# in providers/container.py), so unlike OpenWebUI it answers on the box itself or
+# through an SSH tunnel, not on the LAN. The ``http://<host>:8188`` fallback below
+# is the request host plus that port, and says nothing about whether it answers
+# from the caller's machine; HAL0_COMFYUI_PUBLIC_URL declares a URL that does.
 _COMFYUI_PORT = 8188
 
 _OPENWEBUI_UNIT = "hal0-openwebui.service"
@@ -158,8 +161,11 @@ def _comfyui_link(request: Request) -> str:
     an HTTPS dashboard opening the bare ``http://<host>:8188`` fallback is
     blocked by the browser as mixed content, so the workflow links appear
     dead. Without the env var we fall back to ``http://<host>:8188`` on the
-    request host (the port-stripped forwarded host behind a proxy), which
-    works LAN-direct.
+    request host (the port-stripped forwarded host behind a proxy). That link
+    works only where ComfyUI's loopback is: a browser on the box itself, or one
+    that tunnels port 8188 to it. ComfyUI does not listen on the LAN, so from
+    another machine the fallback is dead; ``comfyui_public`` in the response
+    lets the dashboard tell it from a declared URL.
     """
     public = _comfyui_public_url()
     if public:

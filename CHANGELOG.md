@@ -117,6 +117,8 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- **hal0 no longer announces ComfyUI over mDNS, and no longer calls it LAN-reachable.** ComfyUI listens on the box's loopback, so the `_http._tcp` announcement of `:8188` that Announce services wrote led other machines to a refused connection. The Discovery card announces Open WebUI only. An announcement an earlier hal0 wrote stays until you turn the toggle on or off again; either removes it. The services registry, the `error.details.hint` of the 422 for a video, edit or upscale model (it now says to open the editor on the box itself or through an SSH tunnel) and the docs say loopback.
+
 - **The image starter recommendation uses the guest's RAM limit, so a capped LXC guest is no longer offered a model it cannot load.** On a unified-memory host a guest limited to 48 GB still read the host's 128 GB pool and was offered `qwen-image-lightning` in the install-time offer, in `hal0 setup` and in `GET /api/comfyui/models`; the first render then OOM-killed the image engine. The pick now follows the smaller of the pool and the guest's RAM limit (`ram_mb` or `cgroup_max_mb`), with the same thresholds (#3057).
 
 - **`/api/comfyui/status` and `/logs` use the right container and unit name on a box with id-keyed slots.** Both looked for `hal0-slot@img.service` and the `hal0-slot-img` container, but a box migrated to id-keyed slots names them after the slot's id (for example `hal0-slot@10.service`), so a running engine reported as absent and the log tail read nothing (Refs #2302).

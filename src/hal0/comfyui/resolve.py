@@ -38,7 +38,8 @@ from hal0.errors import Hal0Error, UnprocessableEntity
 
 _USER_CKPT_PREFIX = "ckpt/"
 _EDITOR_HINT = (
-    "open it in the ComfyUI editor, which the img slot serves on port 8188 "
+    "open it in the ComfyUI editor, which listens on this box's loopback (port 8188; "
+    "reach it on the box itself or through an SSH tunnel) "
     "and which needs a ROCm lane on this host"
 )
 
