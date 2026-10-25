@@ -206,7 +206,7 @@ still disagree with the rest of the dashboard.
 
 - **The LLM feasibility verdict.** `POST /api/models/feasibility` and
   `gtt_feasibility_verdict` keep their own logic and their own fits, tight and
-  exceeds vocabulary. A follow-up issue tracks merging them with the budget's
+  exceeds vocabulary. Issue #3063 tracks merging them with the budget's
   fits, tight and won't fit.
 - **Coordinating guests.** One guest's arbiter cannot unload another guest's
   slots. The budget shows that memory as "other guests" and subtracts it from
