@@ -28,15 +28,37 @@ _PROVIDER = "comfyui"
 _CAPABILITY = "image"
 
 
-def recommended_for(hw: HardwareInfo) -> str:
-    """The catalog's starter pick for ``hw``'s memory pool.
+def image_pool_gb(hw: HardwareInfo) -> float | None:
+    """The memory, in GB, an image model can be loaded into on this box.
 
-    The one owner of the pick: the picker, ``GET /api/comfyui/models``, the install-time
-    offer and ``hal0 setup`` all call it. A pool that reads as zero is a box that was never
-    probed, so it is passed on as unknown (``None``), not as a tiny pool.
+    ``min(pool_gb(hw), limit)``, where ``limit`` is the smallest positive value of
+    ``hw.ram_mb`` and ``hw.cgroup_max_mb``. On a unified-memory host an LXC guest reads the
+    host's whole pool as ``unified_memory_mb`` while ``ram_mb`` (MemTotal through lxcfs) and
+    ``cgroup_max_mb`` carry the guest's limit. ComfyUI reads the weights into process memory,
+    which the guest's memory cgroup is charged for, so the limit bounds what loads
+    (#3057). The agent-model offer keeps :func:`pool_gb` as it is: GTT allocations are not
+    charged to the guest's cgroup.
+
+    A limit of zero or ``None`` is not known, not a zero-byte guest. ``None`` is returned
+    when the pool reads zero: a box that was never probed, not a tiny one.
     """
     pool = pool_gb(hw)
-    return recommended_model_id(pool if pool else None)
+    if not pool:
+        return None
+    limits = [mb for mb in (hw.ram_mb, hw.cgroup_max_mb) if mb]
+    return min(pool, min(limits) / 1024) if limits else pool
+
+
+def recommended_for(hw: HardwareInfo) -> str:
+    """The catalog's starter pick for the memory ``hw``'s guest can use.
+
+    The one owner of the pick: the picker, ``GET /api/comfyui/models``, the install-time
+    offer and ``hal0 setup`` all call it. It is the RAM rule of
+    :func:`hal0.comfyui.catalog.recommended_model_id` applied to :func:`image_pool_gb`, the
+    smaller of the memory pool and the guest's RAM limit. A pool that reads as zero is a box
+    that was never probed, so it is passed on as unknown (``None``), not as a tiny pool.
+    """
+    return recommended_model_id(image_pool_gb(hw))
 
 
 def recommended_id() -> str:

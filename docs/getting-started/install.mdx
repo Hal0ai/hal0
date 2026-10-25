@@ -109,7 +109,9 @@ not asked, and the installer says why. The menu lists the image models the API
 can render, each with the GB still to download and the time per image, and marks
 the one that suits the box's memory as `[recommended]`: Stable Diffusion 1.5
 below 16 GB, SDXL Lightning from 16 GB, Qwen-Image Lightning from 96 GB. The
-memory counted is the unified memory when the box has it, else system RAM.
+memory counted is the RAM the system sees (MemTotal, which inside an LXC guest
+is the guest's limit), or the container's memory cap when that is lower, because
+the image engine loads the weights into memory the guest is charged for.
 
 Answer with menu numbers, catalog ids or `recommended`, separated by commas or
 spaces, or press Enter to download nothing. A bad answer is asked again. The
