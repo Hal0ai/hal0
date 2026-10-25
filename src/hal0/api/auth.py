@@ -91,6 +91,7 @@ import structlog
 
 from hal0.api import live_sockets
 from hal0.api.agents._auth import SESSION_COOKIE_NAME, verify_session_cookie
+from hal0.comfyui.gate_version import GATE_USER_AGENT_PREFIX, GATE_VERSION_HEADER
 from hal0.config.network import bind_host, is_loopback_bind
 from hal0.security.exposure import AuthClass, classify
 
@@ -550,9 +551,12 @@ def _gate_admits(scope: dict[str, Any], method: str, path: str) -> bool:
 #: for ``GET /api/comfyui/status``: no decision here reads it.
 _gate_path_refused_at: float | None = None
 
-#: The gate builds its requests with ``urllib.request``, whose default User-Agent is
-#: ``Python-urllib/<major>.<minor>`` (a test sends a real gate request and reads it).
-_GATE_USER_AGENT_PREFIX = "Python-urllib/"
+#: The requests whose refusal can mark an old gate: the gate's own, and the one v1.6.5's
+#: gate made instead of ``/arbiter`` (its status read). Admission never reads this set;
+#: it is :data:`_GATE_REQUESTS` alone.
+_GATE_MARK_REQUESTS: frozenset[tuple[str, str]] = _GATE_REQUESTS | {
+    ("GET", "/api/comfyui/status"),
+}
 
 
 def gate_path_refused_at() -> float | None:
@@ -570,10 +574,11 @@ def _note_unversioned_gate_refusal(scope: dict[str, Any], method: str, path: str
 
     Called only after the middleware has decided to refuse. It reads the request and
     changes nothing about the refusal. All four must hold: one of the gate's
-    ``(method, path)`` pairs (HTTP only), from where the gate dials (:func:`_gate_peer`),
-    none of the gate's version header, and the gate's default HTTP client as its
-    ``User-Agent``. The first two are the checks :func:`_gate_admits` has just run on
-    this request.
+    ``(method, path)`` pairs or its predecessor's status read
+    (:data:`_GATE_MARK_REQUESTS`, HTTP only), from where the gate dials
+    (:func:`_gate_peer`), none of the gate's version header, and the gate's default HTTP
+    client as its ``User-Agent``. For the gate's own pairs the first two are the checks
+    :func:`_gate_admits` has just run on this request.
 
     The User-Agent test is a heuristic, scoped to those loopback gate paths: it keeps a
     browser or ``curl`` on the box (an operator, a dashboard session that expired) from
@@ -581,16 +586,14 @@ def _note_unversioned_gate_refusal(scope: dict[str, Any], method: str, path: str
     nothing worse than ``/status`` saying "restart the engine" until the next gate call.
     """
     global _gate_path_refused_at
-    if scope.get("type") != "http" or (method, path) not in _GATE_REQUESTS:
+    if scope.get("type") != "http" or (method, path) not in _GATE_MARK_REQUESTS:
         return
     if not _gate_peer(scope):
         return
-    from hal0.comfyui.gate_version import GATE_VERSION_HEADER
-
     headers = _headers_from_scope(scope)
     if GATE_VERSION_HEADER.lower() in headers:
         return
-    if not headers.get("user-agent", "").startswith(_GATE_USER_AGENT_PREFIX):
+    if not headers.get("user-agent", "").startswith(GATE_USER_AGENT_PREFIX):
         return
     _gate_path_refused_at = time.time()
 

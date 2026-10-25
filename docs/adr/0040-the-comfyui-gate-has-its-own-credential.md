@@ -9,6 +9,10 @@ It adds a credential to the KB-1 auth layer (`src/hal0/api/auth.py`) without
 adding a tier. ADR-0038 made the gate fail closed; this record gives it a way
 to stay guarded on a box that enforces auth.
 
+**Amended (2026-10-25, image readiness API).** The gate reports a prompt it
+refused to `POST /api/comfyui/gate-refusal`, so the token opens four requests,
+not three. Decisions 3 and 5 below read four.
+
 ## Context
 
 The `hal0_gpu_gate` custom node runs inside the `img` container. Before every
@@ -47,7 +51,9 @@ opens every route.
    `HAL0_COMFYUI_GATE_TOKEN_FILE`. The value never enters the unit file or the
    container's environment. The directory is mounted rather than the file, so
    a replaced token reaches a running container.
-3. **The token opens exactly the gate's three requests, from the box.** The
+3. **The token opens exactly the gate's four requests, from the box:**
+   `GET /api/comfyui/arbiter`, `POST /api/comfyui/prompt-handoff`,
+   `POST /api/comfyui/switchover` and `POST /api/comfyui/gate-refusal`. The
    enforcement middleware matches the exact method and path
    (`hal0.api.auth._GATE_REQUESTS`), HTTP only, after the normal decision
    refused the request, and only from loopback or the one address hal0-api
@@ -65,7 +71,7 @@ opens every route.
    credential, as before.
 5. **Replacing the token is deleting it.** The next `img` start mints a new
    one. Each mint also re-tightens the directory and replaces a token whose
-   file others could have read (a widened mode, another owner). Nothing rotates it on a schedule: its reach is the three requests
+   file others could have read (a widened mode, another owner). Nothing rotates it on a schedule: its reach is the four requests
    above, which the gate needs anyway.
 
 ## Consequences
@@ -84,6 +90,17 @@ opens every route.
   on a box that does not enforce auth. It cannot pin image mode, force a
   switch into LLM mode, reach any other route, or use the token from another
   machine.
+- Whoever holds the token can also post up to 500 characters to
+  `gate-refusal`, which `GET /api/comfyui/status` and `/arbiter` show to the
+  operator as the gate's latest refusal. hal0 replaces what cannot be encoded
+  and cuts the text, but it is not hal0's own words: the dashboard must render it
+  as plain text, never as markup.
+- The middleware keeps one marker, read only by `GET /api/comfyui/status`
+  (`hal0.api.auth.gate_path_refused_at`): when it refuses a request to one of
+  these paths (or to `GET /api/comfyui/status`) from the box, with no
+  `X-Hal0-Gate-Version` header and urllib's default `User-Agent`, it records the
+  time, so an engine still running an older gate reads `stale` on a box that
+  enforces auth. No decision depends on it and the refusal is unchanged.
 - After a rollback to 1.6.x, a box that enforces auth refuses image prompts:
   1.6.x does not know the token.
 - A new gate request needs its route added to `_GATE_REQUESTS`, with a test,

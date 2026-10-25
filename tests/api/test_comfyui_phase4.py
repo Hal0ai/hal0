@@ -786,10 +786,57 @@ def test_no_gate_call_is_unknown(client: TestClient):
     [("GET", "/api/comfyui/arbiter"), ("POST", "/api/comfyui/prompt-handoff")],
 )
 def test_headerless_call_is_stale(client: TestClient, method: str, path: str):
-    """The gate-only routes were called by a gate that sends no version: an older one."""
-    client.request(method, path)
+    """The gate-only routes were called by a gate that sends no version: an older one.
+    It is told by its client: the gate builds its requests with urllib."""
+    client.request(method, path, headers=_GATE_UA)
 
     assert _status(client)["gate"] == {"state": "stale", "version_seen": None}
+
+
+_BROWSER_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/130.0.0.0 Safari/537.36"
+)
+
+
+@pytest.mark.parametrize("user_agent", ["curl/8.5.0", _BROWSER_UA, "testclient", ""])
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [("GET", "/api/comfyui/arbiter"), ("POST", "/api/comfyui/prompt-handoff")],
+)
+def test_headerless_call_from_curl_or_a_browser_is_nobody(
+    client: TestClient, method: str, path: str, user_agent: str
+):
+    """An operator's curl, a browser tab: not an engine to restart."""
+    client.request(method, path, headers={"User-Agent": user_agent})
+
+    assert _status(client)["gate"] == {"state": "unknown", "version_seen": None}
+
+
+def test_v165_gate_status_read_is_stale(client: TestClient):
+    """The released v1.6.5 gate never calls /arbiter or /prompt-handoff: it reads
+    GET /status and posts /switchover, without the version header, through urllib."""
+    assert _status(client, _GATE_UA)["gate"] == {"state": "stale", "version_seen": None}
+    # Later dashboard polls do not undo it.
+    assert _status(client)["gate"]["state"] == "stale"
+
+
+def test_v165_gate_switchover_is_stale(client: TestClient):
+    client.post("/api/comfyui/switchover", json={"mode": "generation"}, headers=_GATE_UA)
+
+    assert _status(client)["gate"] == {"state": "stale", "version_seen": None}
+
+
+@pytest.mark.parametrize("user_agent", ["curl/8.5.0", _BROWSER_UA])
+def test_a_browsers_status_poll_and_switchover_are_not_a_stale_gate(
+    client: TestClient, user_agent: str
+):
+    """The dashboard polls /status and posts /switchover, both without the header."""
+    headers = {"User-Agent": user_agent}
+    assert _status(client, headers)["gate"] == {"state": "unknown", "version_seen": None}
+    client.post("/api/comfyui/switchover", json={"mode": "generation"}, headers=headers)
+
+    assert _status(client, headers)["gate"] == {"state": "unknown", "version_seen": None}
 
 
 def test_current_header_is_current(client: TestClient):
@@ -808,13 +855,13 @@ def test_an_older_version_is_stale(client: TestClient):
 
 def test_the_gates_latest_call_decides(client: TestClient):
     """Restarting the engine swaps the gate: its first call replaces what hal0 saw."""
-    client.get("/api/comfyui/arbiter")
+    client.get("/api/comfyui/arbiter", headers=_GATE_UA)
     assert _status(client)["gate"]["state"] == "stale"
 
-    client.get("/api/comfyui/arbiter", headers={_VERSION: "2"})
+    client.get("/api/comfyui/arbiter", headers={**_GATE_UA, _VERSION: "2"})
     assert _status(client)["gate"]["state"] == "current"
 
-    client.get("/api/comfyui/arbiter")
+    client.get("/api/comfyui/arbiter", headers=_GATE_UA)
     assert _status(client)["gate"]["state"] == "stale"
 
 
@@ -1335,3 +1382,150 @@ def test_workflow_launch_that_succeeds_records_nothing(
 
     assert r.json()["prompt_id"] == "abc"
     assert _status(client)["gate_refusal"] is None
+
+
+# -- the released v1.6.5 gate, refused by auth ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("GET", "/api/comfyui/status", None),
+        ("POST", "/api/comfyui/switchover", {"mode": "generation"}),
+    ],
+)
+def test_status_gate_stale_when_auth_refused_the_v165_gate(
+    box_client: TestClient, auth_enforced: None, method: str, path: str, body
+):
+    """v1.6.5's gate reads /status and posts /switchover, with no token and no version
+    header. On a box that enforces auth it is refused; /status still tells the operator."""
+    from hal0.comfyui import gate_credential
+
+    gate_credential.ensure_token()
+    assert _status(box_client, _ADMIN)["gate"]["state"] == "unknown"
+
+    refused = box_client.request(method, path, json=body, headers=_GATE_UA)
+
+    assert refused.status_code == 401
+    assert refused.content == _REFUSED_401  # the refusal is as it always was
+    assert _status(box_client, _ADMIN)["gate"] == {"state": "stale", "version_seen": None}
+
+
+@pytest.mark.parametrize("user_agent", ["curl/8.5.0", _BROWSER_UA])
+def test_a_refused_status_poll_from_a_browser_or_curl_is_not_a_stale_gate(
+    box_client: TestClient, auth_enforced: None, user_agent: str
+):
+    """The dashboard's own poll, signed out, is refused the same way."""
+    from hal0.comfyui import gate_credential
+
+    gate_credential.ensure_token()
+
+    refused = box_client.get("/api/comfyui/status", headers={"User-Agent": user_agent})
+
+    assert refused.status_code == 401
+    assert refused.content == _REFUSED_401
+    assert _status(box_client, _ADMIN)["gate"]["state"] == "unknown"
+
+
+def test_the_gate_token_still_does_not_open_status(box_client: TestClient, auth_enforced: None):
+    """/status is marked, not admitted: the allow-list is still the gate's four requests."""
+    from hal0.comfyui import gate_credential
+
+    token = gate_credential.ensure_token()
+
+    r = box_client.get(
+        "/api/comfyui/status", headers={**_GATE_UA, "Authorization": f"Bearer {token}"}
+    )
+
+    assert r.status_code == 401
+
+
+# -- what the gate says is untrusted text ---------------------------------------------------
+
+
+def _post_raw_reason(client: TestClient, raw_json_reason: str):
+    """POST a reason as JSON text, escapes and all: a client library would refuse to
+    encode a lone surrogate, the gate (json.dumps with ensure_ascii) does not."""
+    return client.post(
+        "/api/comfyui/gate-refusal",
+        content=f'{{"reason": "{raw_json_reason}"}}'.encode("ascii"),
+        headers={"Content-Type": "application/json"},
+    )
+
+
+def test_a_lone_surrogate_in_a_gate_refusal_does_not_break_arbiter_or_status(
+    client: TestClient,
+):
+    """The reason is valid JSON and not valid UTF-8. Kept as it came, it made every later
+    /arbiter answer a 500, which the gate reads as hal0 being unreachable."""
+    r = _post_raw_reason(client, "\\ud800 hi")
+
+    assert r.status_code == 202
+    arbiter = client.get("/api/comfyui/arbiter")
+    assert arbiter.status_code == 200
+    assert arbiter.json()["gate_refusal"]["reason"] == "? hi"
+    body = _status(client)
+    assert body["gate_refusal"]["reason"] == "? hi"
+    body["gate_refusal"]["reason"].encode("utf-8")  # encodable
+
+
+def test_a_gate_refusal_reason_is_capped_after_it_is_made_safe(client: TestClient):
+    _post_raw_reason(client, "\\ud800" + "r" * 600)
+
+    reason = _status(client)["gate_refusal"]["reason"]
+    assert reason == "?" + "r" * 499
+
+
+def test_record_gate_refusal_cleans_and_caps_what_it_keeps():
+    from hal0.api.routes import comfyui as mod
+
+    mod.record_gate_refusal("x\ud800y" + "z" * 1000)
+
+    assert mod._gate_refusal is not None
+    assert mod._gate_refusal["reason"] == "x?y" + "z" * 497
+
+
+def test_status_reads_the_gate_state_off_the_event_loop(client: TestClient, monkeypatch):
+    """It reads the token file, api.env and the auth config on every poll."""
+    import asyncio
+
+    from hal0.api.routes import comfyui as mod
+
+    on_a_loop: list[bool] = []
+    real = mod._gate_block
+
+    def _spy():
+        try:
+            asyncio.get_running_loop()
+            on_a_loop.append(True)
+        except RuntimeError:
+            on_a_loop.append(False)
+        return real()
+
+    monkeypatch.setattr(mod, "_gate_block", _spy)
+
+    assert _status(client)["gate"]["state"] == "unknown"
+    assert on_a_loop == [False]
+
+
+@pytest.mark.parametrize("surrogate_in", ["details", "message"])
+def test_workflow_launch_refused_with_a_lone_surrogate_is_a_clean_503(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, surrogate_in: str
+):
+    from tests.fixtures.comfyui_gate import refused_prompt_body
+
+    body = refused_prompt_body("placeholder")
+    if surrogate_in == "details":
+        body["error"]["details"] = "\ud800 refused " + "d" * 800
+    else:
+        body["error"]["details"] = ""
+        body["error"]["message"] = "\ud800 refused"
+
+    r = _launch_with_prompt_answer(client, tmp_path, monkeypatch, status=503, body=body)
+
+    assert r.status_code == 503
+    error = r.json()["error"]
+    assert error["code"] == "image.gate_refused"
+    assert error["message"].startswith("? refused")
+    assert len(error["message"]) <= 500
+    assert _status(client)["gate_refusal"]["reason"] == error["message"]

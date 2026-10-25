@@ -48,6 +48,7 @@ from websockets.asyncio.client import connect as _websocket_connect
 
 from hal0.comfyui import gate_credential, progress
 from hal0.comfyui import paths as comfyui_paths
+from hal0.comfyui.gate_reason import clean_reason
 from hal0.config import paths as cfg_paths
 from hal0.errors import Hal0Error
 from hal0.http_client import async_client
@@ -143,11 +144,18 @@ class ImageGateRefused(Hal0Error):
     """ComfyUI's GPU gate refused the prompt hal0 submitted.
 
     The gate (``hal0_gpu_gate``) answers ``/prompt`` with a 503 when hal0 did not
-    hand it the GPU. The message is the gate's reason, verbatim.
+    hand it the GPU. The message is the gate's reason. It is written inside the img
+    container, so it is passed through :func:`hal0.comfyui.gate_reason.clean_reason`
+    (encodable, at most 500 characters) before it reaches an envelope, a log or Sentry.
     """
 
     code = "image.gate_refused"
     status = 503
+
+    def __init__(
+        self, message: str, details: dict[str, Any] | None = None, *, code: str | None = None
+    ) -> None:
+        super().__init__(clean_reason(message), details, code=code)
 
 
 #: ``error.type`` of the body the gate answers a refused prompt with
@@ -162,7 +170,8 @@ def gate_refusal_reason(status_code: int, body: Any) -> str | None:
 
     A refusal is a 503 whose JSON body has the gate's shape: an ``error`` object
     typed ``hal0_gpu_not_ready`` beside a ``node_errors`` object. The reason is the
-    body's ``details``, the text the gate was given.
+    body's ``details``, the text the gate was given, cleaned and cut to 500 characters
+    (:func:`hal0.comfyui.gate_reason.clean_reason`: the body comes from inside the container).
     """
     if status_code != 503 or not isinstance(body, dict):
         return None
@@ -174,7 +183,7 @@ def gate_refusal_reason(status_code: int, body: Any) -> str | None:
     for key in ("details", "message"):
         value = error.get(key)
         if isinstance(value, str) and value:
-            return value
+            return clean_reason(value)
     return _GATE_REFUSAL_DEFAULT
 
 

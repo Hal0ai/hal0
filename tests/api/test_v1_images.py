@@ -927,6 +927,34 @@ def test_v1_records_gate_refusal_from_provider(
     assert gate_refusals._gate_refusal == recorded
 
 
+def test_v1_images_gate_refusal_with_a_lone_surrogate_is_a_clean_503(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, gate_refusals: Any
+) -> None:
+    """The gate's reason is untrusted text: an envelope that cannot be encoded would be a
+    500, and /status and /arbiter must keep answering after it is recorded."""
+    _install("sdxl-turbo")
+    _seed_img_upstream(client)
+
+    from hal0.providers import get_provider
+    from hal0.providers.comfyui import ImageGateRefused
+
+    async def _refused(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise ImageGateRefused("\ud800 refused " + "r" * 800)
+
+    monkeypatch.setattr(get_provider("comfyui"), "infer", _refused)
+
+    r = client.post("/v1/images/generations", json={"model": "sdxl-turbo", "prompt": "x"})
+
+    assert r.status_code == 503
+    error = r.json()["error"]
+    assert error["code"] == "image.gate_refused"
+    assert error["message"].startswith("? refused ")
+    assert len(error["message"]) == 500
+    arbiter = client.get("/api/comfyui/arbiter")
+    assert arbiter.status_code == 200
+    assert arbiter.json()["gate_refusal"]["reason"] == error["message"]
+
+
 def test_v1_images_an_ordinary_provider_error_is_not_a_gate_refusal(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, gate_refusals: Any
 ) -> None:

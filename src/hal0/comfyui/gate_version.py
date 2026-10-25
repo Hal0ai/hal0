@@ -16,8 +16,13 @@ from __future__ import annotations
 #: The header the gate stamps on each of its requests.
 GATE_VERSION_HEADER = "X-Hal0-Gate-Version"
 
+#: The gate builds its requests with ``urllib.request``, whose default User-Agent is
+#: ``Python-urllib/<major>.<minor>`` (a test sends a real gate request and reads it).
+#: hal0 reads it to tell an old gate's header-less call from a browser's or curl's.
+GATE_USER_AGENT_PREFIX = "Python-urllib/"
+
 #: The current gate. A gate released before the header existed sends none, and
 #: reads as stale like any other version that is not this one.
 GATE_VERSION = "2"
 
-__all__ = ["GATE_VERSION", "GATE_VERSION_HEADER"]
+__all__ = ["GATE_USER_AGENT_PREFIX", "GATE_VERSION", "GATE_VERSION_HEADER"]

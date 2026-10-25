@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from hal0.api import auth as auth_mod
 from hal0.comfyui import gate_credential
+from hal0.comfyui.gate_version import GATE_USER_AGENT_PREFIX
 
 _GATE_REQUESTS = [
     ("GET", "/api/comfyui/arbiter"),
@@ -401,7 +402,8 @@ def test_a_refusal_for_the_bind_address_is_marked(monkeypatch: pytest.MonkeyPatc
 @pytest.mark.parametrize(
     ("method", "path"),
     [
-        ("GET", "/api/comfyui/status"),
+        ("POST", "/api/comfyui/status"),
+        ("GET", "/api/comfyui/status/"),
         ("POST", "/api/comfyui/pin"),
         ("POST", "/api/comfyui/arbiter"),
         ("GET", "/api/comfyui/switchover"),
@@ -417,6 +419,38 @@ def test_a_refusal_of_anything_but_the_gates_requests_is_not_marked(method: str,
     status, _seen = _run(method, path, user_agent=_GATE_UA)
 
     assert status in (401, 403)
+    assert auth_mod.gate_path_refused_at() is None
+
+
+def test_a_refused_status_read_from_the_gates_client_is_marked() -> None:
+    """The released v1.6.5 gate never called /arbiter: it read GET /status and posted
+    /switchover. The status read is marked; admission is not widened by it."""
+    assert _run("GET", "/api/comfyui/status", user_agent=_GATE_UA)[0] == 401
+    assert auth_mod.gate_path_refused_at() is not None
+
+
+def test_marking_the_status_read_does_not_admit_it() -> None:
+    token = gate_credential.ensure_token()
+
+    status, seen = _run("GET", "/api/comfyui/status", bearer=token, user_agent=_GATE_UA)
+
+    assert status == 401
+    assert seen is None
+    assert ("GET", "/api/comfyui/status") not in auth_mod._GATE_REQUESTS
+
+
+@pytest.mark.parametrize("user_agent", ["curl/8.5.0", "Mozilla/5.0 (X11; Linux x86_64)", None])
+def test_a_refused_status_read_from_curl_or_a_browser_is_not_marked(
+    user_agent: str | None,
+) -> None:
+    """The dashboard's poll, signed out, is the same request."""
+    assert _run("GET", "/api/comfyui/status", user_agent=user_agent)[0] == 401
+    assert auth_mod.gate_path_refused_at() is None
+
+
+def test_a_refused_status_read_with_the_header_or_from_elsewhere_is_not_marked() -> None:
+    assert _run("GET", "/api/comfyui/status", version="2", user_agent=_GATE_UA)[0] == 401
+    assert _run("GET", "/api/comfyui/status", peer="192.0.2.99", user_agent=_GATE_UA)[0] == 401
     assert auth_mod.gate_path_refused_at() is None
 
 
@@ -501,4 +535,4 @@ def test_the_gate_really_sends_the_user_agent_the_auth_layer_looks_for() -> None
         thread.join(timeout=2.0)
 
     assert len(seen) == 1
-    assert seen[0].startswith(auth_mod._GATE_USER_AGENT_PREFIX)
+    assert seen[0].startswith(GATE_USER_AGENT_PREFIX)

@@ -236,7 +236,7 @@ With auth enforcement on (`hal0 auth require on` or `HAL0_REQUIRE_AUTH=1`),
 or on a box whose `HAL0_BIND_HOST` is a specific address and that has an
 admin key, the gate authenticates with a token of its own, never the admin
 key. hal0 mints it when the `img` slot first starts and mounts it read-only
-into the container; it opens the gate's three requests and nothing else (see
+into the container; it opens the gate's four requests and nothing else (see
 [ComfyUI's GPU gate credential](/docs/operate/auth#comfyuis-gpu-gate-credential)).
 An `img` container started before the update has no token, so on such a box it
 refuses every image prompt (the editor's, hal0's own `/v1` renders, Open

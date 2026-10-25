@@ -1184,3 +1184,57 @@ def test_the_gate_reason_the_provider_reads_is_the_one_the_node_writes() -> None
     assert body["error"]["details"] == "because"
     assert comfyui_mod.gate_refusal_reason(503, body) == "because"
     assert comfyui_mod.gate_refusal_reason(500, body) is None
+
+
+@pytest.mark.parametrize("field", ["details", "message"])
+async def test_a_lone_surrogate_in_the_gates_reason_is_replaced(
+    provider: ComfyUIProvider, field: str
+) -> None:
+    """The 503 body comes from inside the container. ``"\\ud800"`` is valid JSON and not
+    valid UTF-8; kept, it breaks every later envelope, log line and Sentry event."""
+    from hal0.providers.comfyui import ImageGateRefused
+
+    body = _refused_prompt("x")
+    body["error"]["details"] = "\ud800 refused" if field == "details" else ""
+    body["error"]["message"] = "\ud800 refused" if field == "message" else "constant"
+
+    with pytest.raises(ImageGateRefused) as exc:
+        await _submit_rejected(provider, _mock_response(status_code=503, json_payload=body))
+
+    assert exc.value.message == "? refused"
+    exc.value.message.encode("utf-8")
+
+
+async def test_an_overlong_gate_reason_is_cut_to_500_characters(provider: ComfyUIProvider) -> None:
+    from hal0.providers.comfyui import ImageGateRefused
+
+    body = _refused_prompt("g" * 2000)
+
+    with pytest.raises(ImageGateRefused) as exc:
+        await _submit_rejected(provider, _mock_response(status_code=503, json_payload=body))
+
+    assert exc.value.message == "g" * 500
+
+
+def test_image_gate_refused_cleans_whatever_it_is_built_with() -> None:
+    from hal0.providers.comfyui import ImageGateRefused
+
+    err = ImageGateRefused("a\ud800b" + "c" * 600, details={"port": 1})
+
+    assert err.message == "a?b" + "c" * 497
+    assert str(err) == err.message
+    assert err.details == {"port": 1}
+    assert (err.code, err.status) == ("image.gate_refused", 503)
+
+
+def test_clean_reason() -> None:
+    from hal0.comfyui.gate_reason import REASON_MAX, clean_reason
+
+    assert REASON_MAX == 500
+    assert clean_reason("plain") == "plain"
+    assert clean_reason("café ☃ \U0001f600") == "café ☃ \U0001f600"
+    assert clean_reason("\ud800") == "?"
+    assert clean_reason("\udfff\ud800") == "??"
+    assert clean_reason("r" * 501) == "r" * 500
+    assert clean_reason(42) == "42"
+    assert clean_reason("") == ""
