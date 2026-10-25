@@ -6,7 +6,8 @@
 // GET /api/comfyui/jobs (`useImageJobs`). Nothing here judges whether a model fits this box:
 // that verdict is the server's (`model.fit`).
 
-import { isImageJobActive, type ComfyuiCatalogModel, type Fit, type ImageJob } from '@/api/hooks/useComfyui'
+import { isImageJobActive } from '@/api/hooks/imageJobState'
+import type { ComfyuiCatalogModel, Fit, ImageJob } from '@/api/hooks/useComfyui'
 
 // The catalog's task keys in reading order, with the group header each gets. A task the
 // catalog grows later and this table does not know still shows, after these, under its key.

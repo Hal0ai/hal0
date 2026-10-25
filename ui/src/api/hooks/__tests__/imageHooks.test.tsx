@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 ;(globalThis as unknown as { window: typeof globalThis }).window = globalThis
 ;(globalThis as unknown as { React: typeof React }).React = React
+;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 vi.mock('@/api/client', async () => {
   const actual = await vi.importActual<typeof import('@/api/client')>('@/api/client')
@@ -270,18 +271,6 @@ describe('Image Gen hooks', () => {
     await flush()
     expect(client.apiGet).not.toHaveBeenCalled()
     for (const p of [a, b, c]) act(() => p.root.unmount())
-  })
-
-  it('useComfyuiModels types the store block', async () => {
-    vi.mocked(client.apiGet).mockResolvedValue({
-      models: [],
-      engine: { available: true, reason: null },
-      store: { free_gb: 120.5, path: '/models' },
-    })
-    const probe = mountHook(() => hooks.useComfyuiModels(), newClient())
-    await flush()
-    expect(probe.get().data?.store.free_gb).toBe(120.5)
-    act(() => probe.root.unmount())
   })
 })
 

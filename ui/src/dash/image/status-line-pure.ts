@@ -174,6 +174,18 @@ export function waitLine(
 
 const joinDetail = (...parts: Array<string | null | undefined>) => parts.filter(Boolean).join(' ')
 
+// Image mode paused some slots. `unload_set` is the saved set in image mode; empty or null means
+// none were paused (or none are known), and then the line says nothing about them.
+const hasPausedSlots = (arbiter: ArbiterState) => (arbiter.unload_set?.length ?? 0) > 0
+
+// What becomes of the paused slots: `whenUnpinned` for an image mode that ends on its own, and
+// for a pinned one the plain fact that it does not (a pin holds image mode against every
+// automatic restore, so there is no "about 10 s after the last image").
+function pausedNote(arbiter: ArbiterState, pinned: boolean, whenUnpinned: string): string | null {
+  if (!hasPausedSlots(arbiter)) return null
+  return pinned ? 'The paused GPU slots stay paused until you unpin image mode.' : whenUnpinned
+}
+
 function queueTotal(status: StatusLineInputs | null | undefined): number {
   return (status?.queue?.running ?? 0) + (status?.queue?.pending ?? 0)
 }
@@ -263,7 +275,10 @@ function workLine(
     return {
       tone: 'img',
       head: renderingHead(status),
-      detail: joinDetail('The paused GPU slots reload about 10 s after the last image.', waiting),
+      detail: joinDetail(
+        pausedNote(arbiter, pinned, 'The paused GPU slots reload about 10 s after the last image.'),
+        waiting,
+      ),
       actions: ['cancel_render', pinned ? 'unpin' : 'keep'],
     }
   }
@@ -350,7 +365,11 @@ export function statusLine(
     return {
       tone: 'pin',
       head: HEAD_PINNED,
-      detail: joinDetail('Held until you unpin it. The paused GPU slots stay paused.', waiting),
+      detail: joinDetail(
+        'Held until you unpin it.',
+        hasPausedSlots(arbiter) ? 'The paused GPU slots stay paused.' : null,
+        waiting,
+      ),
       actions: ['unpin', 'stop'],
     }
   }
@@ -360,7 +379,7 @@ export function statusLine(
     return {
       tone: 'img',
       head: `Image mode ends in ${left} s`,
-      detail: joinDetail('The paused GPU slots reload when it ends.', waiting),
+      detail: joinDetail(pausedNote(arbiter, false, 'The paused GPU slots reload when it ends.'), waiting),
       actions: ['keep'],
     }
   }
@@ -372,7 +391,10 @@ export function statusLine(
     return {
       tone: 'img',
       head: 'Image mode is on',
-      detail: joinDetail('The paused GPU slots reload once the last image is done.', waiting),
+      detail: joinDetail(
+        pausedNote(arbiter, false, 'The paused GPU slots reload once the last image is done.'),
+        waiting,
+      ),
       actions: ['keep'],
     }
   }

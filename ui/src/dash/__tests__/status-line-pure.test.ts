@@ -190,6 +190,47 @@ describe('statusLine', () => {
     ).toBe('Reloading GPU slots')
   })
 
+  it('does not promise a reload after the last image on a pinned box', () => {
+    // A pinned image mode never restores on its own: the slots stay paused until it is unpinned.
+    const pinnedRendering = envelope({ mode: 'img', pinned: true, phase: 'rendering', image_jobs: 1 })
+    const hal0 = statusLine(pinnedRendering, status({ progress: progress() }), memory(), OPTS)
+    expect(hal0?.detail).toBe('The paused GPU slots stay paused until you unpin image mode.')
+    const editor = statusLine(
+      envelope({ mode: 'img', pinned: true, phase: 'grace', restore_at: 1005 }),
+      status({ queue: { running: 1, pending: 0 } }),
+      memory(),
+      OPTS,
+    )
+    expect(editor?.head).toBe('Rendering · editor prompt · 1 queued')
+    expect(editor?.detail).not.toMatch(/10 s|reload/)
+    // Unpinned, the promise stands.
+    const unpinned = statusLine(envelope({ mode: 'img', phase: 'rendering', image_jobs: 1 }), status(), memory(), OPTS)
+    expect(unpinned?.detail).toBe('The paused GPU slots reload about 10 s after the last image.')
+  })
+
+  it('does not mention paused slots when image mode paused none', () => {
+    for (const unload_set of [[], null]) {
+      const states: Array<[string, Partial<ArbiterState>]> = [
+        ['rendering', { mode: 'img', phase: 'rendering', image_jobs: 1 }],
+        ['pinned rendering', { mode: 'img', pinned: true, phase: 'rendering', image_jobs: 1 }],
+        ['grace', { mode: 'img', phase: 'grace', restore_at: 1005 }],
+        ['pinned idle', { mode: 'img', pinned: true }],
+        ['image mode on', { mode: 'img', phase: null }],
+      ]
+      for (const [name, over] of states) {
+        const line = statusLine(envelope({ ...over, unload_set }), status(), memory(), OPTS)
+        expect(line, name).not.toBeNull()
+        expect(line?.detail, name).not.toMatch(/paused|reload|slots/i)
+      }
+    }
+    // The chat-wait line still shows when something waits.
+    const waiting = { count: 1, oldest_s: 3 }
+    expect(
+      statusLine(envelope({ mode: 'img', phase: 'rendering', unload_set: [], llm_waiters: waiting }), status(), memory(), OPTS)
+        ?.detail,
+    ).toBe('1 chat request waiting, longest 0:03 of 2:00.')
+  })
+
   it('statusLine pinned offers unpin and stop', () => {
     const line = statusLine(envelope({ mode: 'img', pinned: true }), status(), memory(), OPTS)
     expect(line).toMatchObject({ tone: 'pin', head: 'Image mode pinned', actions: ['unpin', 'stop'] })

@@ -33,6 +33,7 @@ import {
 } from '@tanstack/react-query'
 import { api, apiDelete, apiGet, apiPost, type Hal0Error } from '../client'
 import { ENDPOINTS } from '../endpoints'
+import { isImageJobActive } from './imageJobState'
 
 const STATUS_KEY = ['comfyui', 'status'] as const
 
@@ -406,9 +407,7 @@ export interface ImageJob {
   files: ImageJobFile[]
 }
 
-/** True while the job is still downloading (or waiting to). */
-export const isImageJobActive = (job: ImageJob | null | undefined): boolean =>
-  job?.state === 'queued' || job?.state === 'running'
+export { isImageJobActive }
 
 export type FitVerdict = 'fits' | 'tight' | 'wont_fit'
 

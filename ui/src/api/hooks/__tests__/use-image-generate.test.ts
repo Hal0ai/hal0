@@ -14,6 +14,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 ;(globalThis as unknown as { window: typeof globalThis }).window = globalThis
 ;(globalThis as unknown as { React: typeof React }).React = React
+;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 const { generateImage, useImageGenerate } = await import('@/api/hooks/useComfyui')
 const { Hal0Error } = await import('@/api/client')
@@ -91,6 +92,29 @@ describe('useImageGenerate', () => {
 
     finish(jsonResponse(OK_BODY))
     await expect(run).resolves.toMatchObject({ data: [{ url: '/api/images/cache/abc.png' }] })
+  })
+
+  it('passes no signal and starts no timer when the caller gives none', async () => {
+    vi.useFakeTimers()
+    const abortTimeout = vi.fn()
+    const realTimeout = AbortSignal.timeout
+    if (realTimeout) {
+      vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
+        abortTimeout(ms)
+        return realTimeout.call(AbortSignal, ms)
+      })
+    }
+    const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => jsonResponse(OK_BODY))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const run = generateImage({ model: 'sdxl', prompt: 'a cat' })
+    // Nothing has been scheduled for the request: no timeout of any length.
+    expect(vi.getTimerCount()).toBe(0)
+    await run
+
+    expect(fetchMock.mock.calls[0][1].signal).toBeUndefined()
+    expect(abortTimeout).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
   })
 
   it('ends the request only when the caller aborts it', async () => {
