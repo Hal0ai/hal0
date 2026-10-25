@@ -20,6 +20,14 @@ const folderOf = (f) => [f.subdir, ...f.relpath.split('/').slice(0, -1)].join('/
 
 const note = (msg, kind) => window.__hal0Toast && window.__hal0Toast(msg, kind)
 
+// What deletes a file a catalog model loads. Install and remove are CLI/REST only until the
+// dashboard grows a Models tab, so the note names the command. A file two models load is kept
+// by a plain remove (the other model still needs it): `--include-shared` deletes it anyway.
+const ownedNote = (ids) =>
+  ids.length === 1
+    ? `Remove the model to delete this file: hal0 comfyui models remove ${ids[0]}`
+    : `${ids.join(', ')} load this file. To delete it: hal0 comfyui models remove ${ids[0]} --include-shared (the others stop working).`
+
 export function ImageFilesTab() {
   const filesQuery = useComfyuiFiles()
   const modelsQuery = useComfyuiModels()
@@ -70,10 +78,9 @@ export function ImageFilesTab() {
       <div className="mdl-list" style={{ marginTop: 18 }}>
         <div style={{ padding: 24, textAlign: 'center', fontFamily: 'var(--jbm)', fontSize: 12, color: 'var(--fg-4)' }}>
           <div>No image model files on disk yet.</div>
-          <div style={{ marginTop: 6 }}>
-            <a data-testid="imgf-empty-link" href="#slots/image" style={{ color: 'var(--accent)' }}>
-              Install one from Image Gen →
-            </a>
+          <div data-testid="imgf-empty-hint" style={{ marginTop: 6 }}>
+            Install one with <code>hal0 comfyui models install &lt;id&gt;</code>
+            {' '}(<code>hal0 comfyui models list</code> shows the ids).
           </div>
         </div>
       </div>
@@ -166,7 +173,7 @@ export function ImageFilesTab() {
             </div>
             <div style={{ padding: '14px 16px', fontFamily: 'var(--jbm)', fontSize: 11.5, color: 'var(--fg-3)', lineHeight: 1.5 }}>
               {selected.models.length > 0 ? (
-                <span data-testid="imgf-owned-note">Remove the model from Image Gen → Models to delete this file.</span>
+                <span data-testid="imgf-owned-note">{ownedNote(selected.models)}</span>
               ) : selected.symlink ? (
                 <span data-testid="imgf-symlink-note">
                   This file is a link. hal0 does not delete through a link: delete its target instead.

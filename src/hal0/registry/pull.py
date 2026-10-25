@@ -138,15 +138,16 @@ class ImageAsset(Hal0Error):
     (``hal0.comfyui``). A path inside the tree (add-by-path, create) and a pull of
     a catalog id or of the ``image`` capability are refused with this error.
     ``details`` carries the offending ``path`` or ``model_id``. Every raise site
-    shares the default message, which says where image models are managed.
+    shares the default message, which says how image models are installed.
     """
 
     code = "model.image_asset"
     status = 422
 
     DEFAULT_MESSAGE = (
-        "image models are not held in the model registry; manage them under "
-        "Image Gen → Models or with `hal0 comfyui models install <id>`"
+        "image models are not held in the model registry; install them with "
+        "`hal0 comfyui models install <id>` (`hal0 comfyui models list` shows the ids) "
+        "or `POST /api/comfyui/models/<id>/install`"
     )
 
     def __init__(

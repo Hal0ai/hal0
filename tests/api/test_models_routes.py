@@ -1251,7 +1251,8 @@ def test_create_model_under_comfyui_tree_422(
     error = r.json()["error"]
     assert error["code"] == "model.image_asset"
     assert error["details"]["path"] == str(image)
-    assert "Image Gen" in error["message"]
+    assert "hal0 comfyui models install <id>" in error["message"]
+    assert "Image Gen" not in error["message"]
     assert not inspect_client.app.state.model_registry.has("an-sdxl")
 
 
@@ -1325,7 +1326,8 @@ def test_add_by_path_under_comfyui_422(
     error = r.json()["error"]
     assert error["code"] == "model.image_asset"
     assert error["details"]["path"] == str(image)
-    assert "Image Gen" in error["message"]
+    assert "hal0 comfyui models install <id>" in error["message"]
+    assert "Image Gen" not in error["message"]
     ids = {m["id"] for m in inspect_client.get("/api/models").json()["models"]}
     assert "sdxl" not in ids
 

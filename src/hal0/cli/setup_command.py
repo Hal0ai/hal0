@@ -189,7 +189,7 @@ def build_auto_selections(
         # apply_setup would skip. Same single npu_opt_in the picker + apply use.
         npu_opt_in=npu_healthy(hw) if npu_opt_in is None else npu_opt_in,
         # Pick-free like the slots unless the caller asked: otherwise image models are
-        # chosen later with `hal0 comfyui models install` or the dashboard. An answer
+        # chosen later with `hal0 comfyui models install`. An answer
         # file's gen.models and the guided flow's image question name them.
         image_models=image_models,
     )

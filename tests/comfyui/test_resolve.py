@@ -124,11 +124,12 @@ def test_resolve_video_422(model_id: str) -> None:
 
     err = exc.value
     assert (err.code, err.status) == ("image.model_not_renderable", 422)
-    assert err.details == {
-        "model": model_id,
-        "task": CATALOG[model_id].task,
-        "hint": "open it in the ComfyUI editor from Image Gen → Engine",
-    }
+    hint = err.details["hint"]
+    assert err.details == {"model": model_id, "task": CATALOG[model_id].task, "hint": hint}
+    # Says what exists today: the editor the img slot serves on :8188, which needs a ROCm lane.
+    assert "ComfyUI editor" in hint and "8188" in hint and "ROCm lane" in hint
+    assert "Image Gen" not in hint
+    assert hint in err.message
 
 
 def test_resolve_non_renderable_wins_over_not_installed() -> None:

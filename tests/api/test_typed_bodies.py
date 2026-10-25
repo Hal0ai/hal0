@@ -295,6 +295,43 @@ def test_swap_non_string_model_id_returns_clean_400_same_code(
     assert r.json()["error"]["code"] == "swap.missing_model"
 
 
+@pytest.mark.parametrize("route", ["swap", "load"])
+@pytest.mark.parametrize("image_id", ["sdxl-lightning", "ckpt/mine/custom"])
+def test_slot_swap_and_load_point_an_image_id_at_the_img_selection(
+    route: str,
+    image_id: str,
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    slots_client: TestClient,
+) -> None:
+    """An image model is never a registry row: the 404 keeps its code and names the real way."""
+    r = slots_client.post(f"/api/slots/chat/{route}", json={"model_id": image_id})
+    assert r.status_code == 404, r.text
+    error = r.json()["error"]
+    assert error["code"] == "model.not_found"
+    assert f"`hal0 capabilities set img img --model {image_id}`" in error["message"]
+    assert "not in the registry" not in error["message"]
+    assert error["details"] == {"model_id": image_id, "slot": "chat"}
+
+
+@pytest.mark.parametrize("route", ["swap", "load"])
+@pytest.mark.parametrize("model_id", ["no-such-model", "wan22-t2v"])
+def test_slot_swap_and_load_keep_the_registry_message_for_other_ids(
+    route: str,
+    model_id: str,
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    slots_client: TestClient,
+) -> None:
+    """An unknown id, and a catalog model the API cannot render, are not an ``img`` selection."""
+    r = slots_client.post(f"/api/slots/chat/{route}", json={"model_id": model_id})
+    assert r.status_code == 404, r.text
+    error = r.json()["error"]
+    assert error["code"] == "model.not_found"
+    assert "not in the registry and not an installed FLM model" in error["message"]
+    assert "capabilities set" not in error["message"]
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # slots.py — left-loose sites unchanged (SlotConfig config-write trio)
 # ══════════════════════════════════════════════════════════════════════════

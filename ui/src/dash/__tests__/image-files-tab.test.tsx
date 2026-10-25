@@ -159,7 +159,24 @@ describe('ImageFilesTab', () => {
     const { root } = mount()
     act(() => byId('imgf-row-checkpoints/flux-dev.safetensors')!.click())
     expect(byId('imgf-delete')).toBeNull()
-    expect(byId('imgf-owned-note')!.textContent).toContain('Remove the model from Image Gen → Models')
+    expect(byId('imgf-owned-note')!.textContent).toBe(
+      'Remove the model to delete this file: hal0 comfyui models remove flux-dev',
+    )
+    expect(document.body.textContent).not.toContain('Image Gen')
+    act(() => root.unmount())
+  })
+
+  it('names --include-shared for a file two catalog models load', () => {
+    filesBox.current = {
+      state: 'ok',
+      root: '/models/comfyui',
+      files: [{ ...CKPT_OWNED, models: ['flux-dev', 'flux-schnell'] }],
+    }
+    const { root } = mount()
+    expect(byId('imgf-delete')).toBeNull()
+    const text = byId('imgf-owned-note')!.textContent!
+    expect(text).toContain('hal0 comfyui models remove flux-dev --include-shared')
+    expect(text).toContain('flux-dev, flux-schnell')
     act(() => root.unmount())
   })
 
@@ -206,11 +223,14 @@ describe('ImageFilesTab', () => {
     act(() => root.unmount())
   })
 
-  it('links the empty state to the Image slot page', () => {
+  it('tells an empty inventory to install with the CLI, not to a dashboard place', () => {
     filesBox.current = { state: 'ok', root: '/models/comfyui', files: [] }
     const { root } = mount()
-    const link = byId('imgf-empty-link') as HTMLAnchorElement
-    expect(link.getAttribute('href')).toBe('#slots/image')
+    const hint = byId('imgf-empty-hint')!
+    expect(hint.textContent).toContain('hal0 comfyui models install <id>')
+    expect(hint.textContent).toContain('hal0 comfyui models list')
+    expect(document.body.textContent).not.toContain('Image Gen')
+    expect(document.querySelector('a')).toBeNull()
     act(() => root.unmount())
   })
 
@@ -218,13 +238,13 @@ describe('ImageFilesTab', () => {
     filesBox.current = { ...filesBox.current, state: 'pending' }
     const loading = mount()
     expect(document.body.textContent).toContain('Loading')
-    expect(byId('imgf-empty-link')).toBeNull()
+    expect(byId('imgf-empty-hint')).toBeNull()
     act(() => loading.root.unmount())
     document.body.innerHTML = ''
     filesBox.current = { ...filesBox.current, state: 'error' }
     const failed = mount()
     expect(document.body.textContent).toContain('files unreachable')
-    expect(byId('imgf-empty-link')).toBeNull()
+    expect(byId('imgf-empty-hint')).toBeNull()
     act(() => failed.root.unmount())
   })
 })

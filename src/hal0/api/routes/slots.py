@@ -1102,6 +1102,29 @@ def _bound_model_id(body: dict[str, Any]) -> str | None:
     return model if isinstance(model, str) and model else None
 
 
+def _model_not_resolvable(model_id: str, slot: str) -> Hal0Error:
+    """The 404 for a slot ``load``/``swap`` onto an id no slot can resolve.
+
+    An image model (a renderable catalog id or ``ckpt/<path>``) is never a registry row, so
+    the refusal points at the selection that does move the ``img`` slot onto it.
+    """
+    from hal0.comfyui.resolve import is_image_selection_id
+    from hal0.registry.store import ModelNotFound
+
+    details = {"model_id": model_id, "slot": slot}
+    if is_image_selection_id(model_id):
+        return ModelNotFound(
+            f"model {model_id!r} is an image model, not a registry model: select it with "
+            f"`hal0 capabilities set img img --model {model_id}` (slot {slot!r} not touched)",
+            details=details,
+        )
+    return ModelNotFound(
+        f"model {model_id!r} is not resolvable — not in the registry and "
+        f"not an installed FLM model (slot {slot!r} not touched)",
+        details=details,
+    )
+
+
 async def _guard_model_fits_slot(
     request: Request, name: str, cfg: dict[str, Any] | None, model_id: str | None
 ) -> None:
@@ -1366,13 +1389,7 @@ async def load_slot(name: str, request: Request) -> dict[str, object]:
         # is_resolvable reads the FLM catalog for ``-FLM`` ids; off the event
         # loop (#2334).
         if registry is not None and not await asyncio.to_thread(is_resolvable, model_id, registry):
-            from hal0.registry.store import ModelNotFound
-
-            raise ModelNotFound(
-                f"model {model_id!r} is not resolvable — not in the registry and "
-                f"not an installed FLM model (slot {name!r} not touched)",
-                details={"model_id": model_id, "slot": name},
-            )
+            raise _model_not_resolvable(model_id, name)
         await _guard_model_fits_slot(request, name, await _safe_config(sm, name), model_id)
     async with record_action(
         request,
@@ -1466,13 +1483,7 @@ async def swap_slot(name: str, request: Request) -> dict[str, object]:
     # is_resolvable reads the FLM catalog for ``-FLM`` ids; off the event
     # loop (#2334).
     if registry is not None and not await asyncio.to_thread(is_resolvable, model_id, registry):
-        from hal0.registry.store import ModelNotFound
-
-        raise ModelNotFound(
-            f"model {model_id!r} is not resolvable — not in the registry and "
-            f"not an installed FLM model (slot {name!r} not touched)",
-            details={"model_id": model_id, "slot": name},
-        )
+        raise _model_not_resolvable(model_id, name)
     await _guard_model_fits_slot(request, name, await _safe_config(sm, name), model_id)
     async with record_action(
         request,

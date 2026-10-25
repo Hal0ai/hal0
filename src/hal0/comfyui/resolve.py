@@ -36,7 +36,10 @@ from hal0.comfyui.catalog import (
 from hal0.errors import Hal0Error
 
 _USER_CKPT_PREFIX = "ckpt/"
-_EDITOR_HINT = "open it in the ComfyUI editor from Image Gen → Engine"
+_EDITOR_HINT = (
+    "open it in the ComfyUI editor, which the img slot serves on port 8188 "
+    "and which needs a ROCm lane on this host"
+)
 
 # Native size of a user checkpoint, by family. SDXL is trained at 1024, SD 1.5 at 512.
 _USER_CKPT_SIZES = {"sdxl": "1024x1024", "sd15": "512x512"}
@@ -106,6 +109,19 @@ def renderable_ids() -> list[str]:
     ]
     ids.extend(f["api_id"] for f in inventory.list_files() if "api_id" in f)
     return ids
+
+
+def is_image_selection_id(model_id: str) -> bool:
+    """True when ``model_id`` is one an ``img`` selection can name, installed or not.
+
+    An API-renderable catalog id or a ``ckpt/<path>`` id. These never are model-registry
+    rows, so a slot ``load`` or ``swap`` by id cannot find them; the image path picks the
+    model through the capability selection instead.
+    """
+    model = get_model(model_id)
+    if model is not None:
+        return model.api_renderable
+    return model_id.startswith(_USER_CKPT_PREFIX)
 
 
 def resolve_image_model(model_id: str | None, *, selection_model: str | None) -> ResolvedImageModel:

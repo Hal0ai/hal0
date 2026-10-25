@@ -33,8 +33,9 @@ def test_image_asset_default_message_points_at_the_catalog() -> None:
     err = ImageAsset()
     assert isinstance(err, Hal0Error)
     assert (err.code, err.status) == ("model.image_asset", 422)
-    assert "Image Gen" in err.message
     assert "hal0 comfyui models install <id>" in err.message
+    assert "POST /api/comfyui/models/<id>/install" in err.message
+    assert "Image Gen" not in err.message
 
 
 def test_image_asset_keeps_an_explicit_message_and_details() -> None:

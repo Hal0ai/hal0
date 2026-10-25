@@ -141,11 +141,12 @@ def _device_of(path: Path) -> int:
 def _staging_key(model: ImageModel) -> str:
     """The model half of the staging key the installer and the preflight both use.
 
-    The curated registry still lists some of the same ids (``sdxl-turbo``,
-    ``sd-1.5-pruned-emaonly``), and a registry pull stages under the bare id, so two
-    downloaders with that id and filename would share one ``.part`` and either could
-    discard or replace the other's. Image installs get their own namespace instead;
-    job ids and the API keep the catalog id. ``_sanitise_id`` leaves the prefix intact.
+    A registry pull stages under the bare model id, and the registry no longer holds
+    image models, but a partial an older registry pull of ``sdxl-turbo`` or
+    ``sd-1.5-pruned-emaonly`` left under that id may still be on disk. Sharing its name
+    and filename would share one ``.part``, and either downloader could discard or
+    replace the other's. Image installs get their own namespace instead; job ids and the
+    API keep the catalog id. ``_sanitise_id`` leaves the prefix intact.
     """
     return f"comfyui-{model.id}"
 

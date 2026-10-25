@@ -72,7 +72,10 @@ them up; one you stopped or skipped stays down.
 
 On a box with a ROCm lane, the first image model you install that the API can
 render becomes the `img` selection by itself when nothing is selected, and
-selecting it starts the `img` slot. To pick or change the model, use the
+selecting it starts the `img` slot. Install a model first with
+`hal0 comfyui models install <id>` (`hal0 comfyui models list` shows the ids):
+picking one that is not downloaded yet is refused with 409
+`capability.model_not_downloaded`. To pick or change the model, use the
 **Model** row of AI Capabilities → Image in the dashboard (it lists the catalog
 models the API can render, marking those not downloaded yet, and your own
 `ckpt/<path>` checkpoints), or point the `img` capability at one you installed:
