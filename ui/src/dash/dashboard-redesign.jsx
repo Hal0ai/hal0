@@ -254,7 +254,7 @@ function HeroStrip({ slots, heroTps, layout, swapMode, onToggleSwapMode, onToggl
 
 // ─── band 0 · health strip ───────────────────────────────────────────────────
 
-function HealthStrip({ slots, heroTps, attentionItems }) {
+export function HealthStrip({ slots, heroTps, attentionItems }) {
   // #1797(3): /api/hardware sees the DRM node whether or not THIS box can
   // actually drive it (LXC shares the host's /sys/class/drm read-only) — a
   // CPU-only container reports the host iGPU's util/temp as if it were its
@@ -388,7 +388,7 @@ function MemorySegment({ seg, barWidth, totalGb, onGo }) {
   )
 }
 
-function MemoryHeroCard({ swap, onGo }) {
+export function MemoryHeroCard({ swap, onGo }) {
   const mm = useMemoryMapModel()
   const hw = useHardware()
   const slotsQuery = useSlots()
@@ -440,15 +440,24 @@ function MemoryHeroCard({ swap, onGo }) {
     })
 
   const allocGb = allocSegs.reduce((acc, s) => acc + s.gb, 0)
-  // System + page cache ≈ host RAM in use beyond what loaded models hold.
-  const systemGb = ramUsedGb != null ? Math.max(0, round1(ramUsedGb - allocGb)) : null
+  // The striped block. On a GPU box the bar is the GPU pool, so it is the pool
+  // usage held by neither this box's slots nor the image engine — "other
+  // guests", straight from the budget; mixing RAM into a pool bar would
+  // misstate it. With no GPU pool the bar is this box's RAM, so it is system +
+  // page cache ≈ RAM in use beyond what loaded models hold.
+  const stripedName = mm.gpu ? 'other guests' : 'system'
+  const stripedGb = mm.gpu
+    ? mm.gpu.otherGuestsGb
+    : ramUsedGb != null
+      ? Math.max(0, round1(ramUsedGb - allocGb))
+      : null
   const segs = [...allocSegs]
-  if (systemGb != null && systemGb > 0) {
+  if (stripedGb != null && stripedGb > 0) {
     segs.push({
       kind: 'system',
-      gb: systemGb,
-      label: `system · ${systemGb.toFixed(1)}G`,
-      tooltip: `system + page cache · ${fmtGb(systemGb)}`,
+      gb: stripedGb,
+      label: `${stripedName} · ${stripedGb.toFixed(1)}G`,
+      tooltip: `${mm.gpu ? 'other guests' : 'system + page cache'} · ${fmtGb(stripedGb)}`,
     })
   }
   if (pveConfigured && mm.host.othersGb > 0) {
@@ -461,7 +470,15 @@ function MemoryHeroCard({ swap, onGo }) {
   }
 
   const usedGb = segs.reduce((acc, s) => acc + s.gb, 0)
-  const freeGb = totalGb > 0 ? Math.max(0, round1(totalGb - usedGb)) : null
+  // Free: on a GPU box the budget's own figure — the SAME number the top-bar
+  // ruler shows, so one screen never carries two. The attribution can
+  // overshoot the kernel counter, so it is not re-derived from the drawn
+  // blocks. A configured Proxmox host makes the bar host-wide, where the
+  // pool's free is not this bar's free, so the remainder stands. With no GPU
+  // pool it is the remainder of the RAM bar.
+  const freeGb = mm.gpu && !pveConfigured
+    ? mm.gpu.freeGb
+    : totalGb > 0 ? Math.max(0, round1(totalGb - usedGb)) : null
 
   const platform = hw.data?.platform_label || hw.data?.platform || ''
   const noteBits = [
@@ -492,9 +509,9 @@ function MemoryHeroCard({ swap, onGo }) {
             <i style={{ background: s.color }} />{s.label} {s.gb.toFixed(1)}G
           </span>
         ))}
-        {systemGb != null && systemGb > 0 && (
+        {stripedGb != null && stripedGb > 0 && (
           <span className="rd-mem-leg rd-mem-leg-system mono">
-            <i className="striped" />system {systemGb.toFixed(1)}G
+            <i className="striped" />{stripedName} {stripedGb.toFixed(1)}G
           </span>
         )}
         {pveConfigured && mm.host.othersGb > 0 && (

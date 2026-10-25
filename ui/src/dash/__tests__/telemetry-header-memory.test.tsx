@@ -150,6 +150,19 @@ describe('memory ruler', () => {
     expect(h).not.toContain('69.6')
   })
 
+  it('ruler free label equals budget free', () => {
+    // One screen, one free number: the header and the free block both read the
+    // budget's free (72.6), not the 69.6 the drawn segments leave over.
+    const r = ruler(render(budget()))
+    expect(r.querySelector('.th-ruler-free')?.textContent).toBe('free · 72.6 GB')
+    expect(r.querySelector('.th-ruler-h')?.textContent).toContain('free 72.6 GB')
+    expect(r.textContent).not.toContain('69.6')
+    // with no GPU pool both read this box's free RAM
+    const cpuOnly = ruler(render(budget({ gpu: null, render_free_gb: null })))
+    expect(cpuOnly.querySelector('.th-ruler-free')?.textContent).toBe('free · 89.4 GB')
+    expect(cpuOnly.querySelector('.th-ruler-h')?.textContent).toContain('free 89.4 GB')
+  })
+
   it('ruler striped block is other guests from the budget', () => {
     const host = render(
       budget({ gpu: gpuBlock({ used_gb: 60, other_guests_gb: 20, attribution_excess_gb: 0, free_gb: 56 }) }),

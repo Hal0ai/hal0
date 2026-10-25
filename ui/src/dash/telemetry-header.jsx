@@ -375,16 +375,17 @@ function ThRuler({ slots }) {
   // Pool usage held by neither this box's slots nor the image engine. Absent
   // (0) with no GPU pool.
   const otherGuestsGb = gpu ? gpu.otherGuestsGb : 0
-  // Header "free": the budget's own figure — the pool less the kernel's live
-  // usage, clamped at 0 by the backend. Do NOT re-derive it from the drawn
-  // segments: the per-slot attribution can overshoot the kernel counter, and
-  // that excess is reported, not drawn. With no GPU pool it is this box's free
-  // RAM; with neither readable it is unknown.
+  // "free": the budget's own figure — the pool less the kernel's live usage,
+  // clamped at 0 by the backend. EVERY free label on this ruler (the header and
+  // the free block) reads it, so one screen shows one free number. Do NOT
+  // re-derive it from the drawn segments: the per-slot attribution can overshoot
+  // the kernel counter, and that excess is reported, not drawn — so the label
+  // can be larger than the free block's drawn width. With no GPU pool it is
+  // this box's free RAM; with neither readable it is unknown.
   const free = gpu ? gpu.freeGb : ram ? ram.freeGb : null
-  // The drawn free block is whatever the drawn segments leave, never negative.
-  const barFree = Math.max(0, round1(total - used - otherGuestsGb))
-  // The attribution can also overshoot the pool outright; scale the drawn
-  // segments down so they never run past 100% of the bar.
+  // The free block's WIDTH is whatever the drawn segments leave (it is flex:1,
+  // so never negative). The attribution can overshoot the pool outright; scale
+  // the drawn segments down so they never run past 100% of the bar.
   const drawnGb = used + otherGuestsGb
   const fit = total > 0 && drawnGb > total ? total / drawnGb : 1
   const pct = (gb) => (total > 0 ? (gb / total) * 100 * fit : 0)
@@ -476,7 +477,7 @@ function ThRuler({ slots }) {
             )}
           </div>
         )}
-        <div className="th-ruler-free">free · {fmt1(barFree)} GB</div>
+        <div className="th-ruler-free">free · {free != null ? `${fmt1(free)} GB` : '—'}</div>
       </div>
       {ticks && (
         <div className="th-ruler-ticks">
