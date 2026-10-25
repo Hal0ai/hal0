@@ -680,33 +680,76 @@ async def test_listener_ignores_early_frames_that_turn_out_to_be_for_another_pro
     await asyncio.gather(task, return_exceptions=True)
 
 
-@pytest.mark.parametrize(
-    "bad_frame",
-    [
-        "this is not json",
-        "[1, 2, 3]",
-        json.dumps({"type": "progress", "data": "nope"}),
-        json.dumps({"type": "progress", "data": {"value": "2", "max": 4}}),
-        json.dumps({"type": "progress", "data": {"value": 2}}),
-        json.dumps({"type": "progress", "data": {"value": True, "max": 4}}),
-    ],
-)
-async def test_listener_bad_frame_logs_one_warning_and_stops(
+_BAD_FRAMES = [
+    "this is not json",
+    "[1, 2, 3]",
+    json.dumps({"type": "progress", "data": "nope"}),
+    json.dumps({"type": "progress", "data": {"value": "2", "max": 4}}),
+    json.dumps({"type": "progress", "data": {"value": 2}}),
+    json.dumps({"type": "progress", "data": {"value": True, "max": 4}}),
+    json.dumps({"type": "progress", "data": {"value": 2.5, "max": 4}}),
+    json.dumps({"type": "progress", "data": {"value": 2, "max": 4.0}}),
+    "[" * 100_000,  # nested deeper than the JSON parser follows
+]
+_FRAME_SKIPPED = "comfyui.progress_frame_skipped"
+
+
+def _skipped_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.getMessage() == _FRAME_SKIPPED]
+
+
+@pytest.mark.parametrize("bad_frame", _BAD_FRAMES)
+async def test_listener_skips_a_bad_frame_and_keeps_listening(
     fake_ws: _FakeWS,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     bad_frame: str,
 ) -> None:
+    """One frame the relay cannot read costs that frame, not the rest of the render's steps."""
     calls = _recording_update(monkeypatch)
     caplog.set_level(logging.WARNING, logger="hal0.providers.comfyui")
     fake_ws.push(bad_frame)
-    _progress_frame(fake_ws, 1, 4)  # never read: the listener stopped
+    _progress_frame(fake_ws, 1, 4)
     fake_ws.hang_up()
 
     await _follow()
 
-    assert calls == []
-    assert len(_listener_warnings(caplog)) == 1
+    assert calls == [("p1", 1, 4, "3")]
+    assert len(_skipped_warnings(caplog)) == 1
+
+
+async def test_listener_logs_only_the_first_bad_frame_of_a_render(
+    fake_ws: _FakeWS, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    calls = _recording_update(monkeypatch)
+    caplog.set_level(logging.WARNING, logger="hal0.providers.comfyui")
+    for _ in range(5):
+        fake_ws.push(json.dumps({"type": "progress", "data": {"value": 1.5, "max": 4}}))
+        _progress_frame(fake_ws, 2, 4)
+    fake_ws.hang_up()
+
+    await _follow()
+
+    assert len(calls) == 5  # every good frame in between was applied
+    skipped = _skipped_warnings(caplog)
+    assert len(skipped) == 1
+    assert len(skipped[0].reason) <= 200  # type: ignore[attr-defined]
+    assert "integer" in skipped[0].reason  # type: ignore[attr-defined]
+
+
+async def test_a_bad_frame_does_not_count_as_the_listener_failing(
+    fake_ws: _FakeWS, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The listener's failure warning is for losing the socket; a skipped frame has its own."""
+    caplog.set_level(logging.WARNING, logger="hal0.providers.comfyui")
+    fake_ws.push("not json")
+    fake_ws.hang_up()
+
+    await _follow()
+
+    assert len(_skipped_warnings(caplog)) == 1
+    closed = _listener_warnings(caplog)
+    assert [r.reason for r in closed] == ["websocket closed by ComfyUI"]  # type: ignore[attr-defined]
 
 
 async def test_listener_close_mid_render_logs_one_warning(
@@ -1013,6 +1056,81 @@ async def test_infer_relays_steps_while_it_waits_for_history(
     assert seen[0] is not None
     assert seen[0]["model"] == "sdxl-turbo"
     assert seen[0]["prompt_id"] == "abc123"
+
+
+async def test_infer_keeps_relaying_steps_after_a_bad_frame(
+    provider: ComfyUIProvider, fake_ws: _FakeWS, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING, logger="hal0.providers.comfyui")
+    seen: list[dict[str, Any] | None] = []
+
+    async def _mid_render() -> None:
+        _progress_frame(fake_ws, 1, 8, prompt_id="abc123", node="3")
+        fake_ws.push_json("progress", {"value": 1.5, "max": 8, "prompt_id": "abc123"})
+        _progress_frame(fake_ws, 3, 8, prompt_id="abc123", node="3")
+        await fake_ws.flush()
+        seen.append(progress.current())
+
+    await _render(provider, fake_ws=fake_ws, on_history=_mid_render)
+
+    assert seen[0] is not None
+    assert (seen[0]["step"], seen[0]["total"]) == (3, 8)
+    assert len(_skipped_warnings(caplog)) == 1
+
+
+@pytest.mark.parametrize(
+    ("scenario", "raises", "was_tracked"),
+    [
+        ("prompt_not_200", ComfyUIInferError, False),
+        ("no_prompt_id", ComfyUIInferError, False),
+        ("history_timeout", ComfyUIInferError, True),
+        ("gate_refusal", comfyui_mod.ImageGateRefused, False),
+    ],
+)
+async def test_infer_cleans_up_its_listener_and_tracker_on_every_exit(
+    provider: ComfyUIProvider,
+    fake_ws: _FakeWS,
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: str,
+    raises: type[Exception],
+    was_tracked: bool,
+) -> None:
+    """However the render ends, the listener is cancelled, its socket closed, the tracker
+    entry gone and no task left behind. The success, ComfyUI-error and cancelled exits have
+    their own tests; these are the early and the late failures."""
+    monkeypatch.setattr("hal0.providers.comfyui._HISTORY_POLL_TIMEOUT_S", 0.05)
+    monkeypatch.setattr("hal0.providers.comfyui._HISTORY_POLL_INTERVAL_S", 0.01)
+    tracked: list[bool] = []
+
+    async def _post(url: str, json: dict[str, Any]) -> httpx.Response:
+        fake_ws.events.append("submit")
+        if scenario == "prompt_not_200":
+            return _mock_response(status_code=500, text="boom")
+        if scenario == "no_prompt_id":
+            return _mock_response(status_code=200, json_payload={"number": 1})
+        if scenario == "gate_refusal":
+            return _mock_response(status_code=503, json_payload=_refused_prompt())
+        return _mock_response(status_code=200, json_payload={"prompt_id": "abc123", "number": 1})
+
+    async def _get(url: str, params: dict[str, Any] | None = None) -> httpx.Response:
+        tracked.append(progress.current() is not None)
+        return _mock_response(status_code=200, json_payload={})  # never registers
+
+    with patch("hal0.providers.comfyui.httpx.AsyncClient") as MockClient:
+        client = MockClient.return_value.__aenter__.return_value
+        client.post = _post
+        client.get = _get
+        with pytest.raises(raises):
+            await provider.infer(
+                8186,
+                {"model": "sdxl-turbo", "prompt": "a cat", "_hal0_template": "sdxl_turbo_simple"},
+            )
+
+    assert any(tracked) is was_tracked  # it was live while ComfyUI worked, or never started
+    assert progress.current() is None
+    assert fake_ws.cancelled
+    assert fake_ws.events == ["connect", "submit", "close"]
+    assert not [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
 
 
 async def test_infer_keeps_frames_that_beat_the_submit_response(

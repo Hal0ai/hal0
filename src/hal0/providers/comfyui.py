@@ -306,23 +306,40 @@ async def _follow_progress(url: str, relay: _ProgressRelay, ready: asyncio.Event
     """Feed ``relay`` from ComfyUI's websocket at ``url`` until cancelled.
 
     ``ready`` is set once the socket is open, or once it cannot be opened, so the caller
-    never waits on a listener that already failed. A connection that fails, a socket the
-    server closes mid-render and a frame that cannot be read each log one
-    ``comfyui.progress_listener_failed`` warning and end the listener; none of them is an
-    error for the render, which finishes on ``/history`` alone. Cancelling it is silent.
+    never waits on a listener that already failed. A connection that fails or a socket the
+    server closes mid-render logs one ``comfyui.progress_listener_failed`` warning and ends
+    the listener. A frame that cannot be read is skipped and the listener carries on; the
+    first such frame of a render logs one ``comfyui.progress_frame_skipped`` warning, the
+    rest are quiet. None of this is an error for the render, which finishes on ``/history``
+    alone. Cancelling the listener is silent.
     """
+    skipped = False
     try:
         async with _ws_connect(url) as socket:
             ready.set()
             async for frame in socket:
-                relay.feed(frame)
+                try:
+                    relay.feed(frame)
+                except (ValueError, RecursionError) as exc:
+                    # One odd frame (a float step, a build whose shapes differ) is not a
+                    # reason to lose the read-out for the rest of the render.
+                    if not skipped:
+                        skipped = True
+                        log.warning(
+                            "comfyui.progress_frame_skipped",
+                            extra={"url": url, "reason": _socket_error_text(exc)},
+                        )
         reason = "websocket closed by ComfyUI"
     except Exception as exc:
-        # The message can quote what ComfyUI sent; it is cleaned and cut for the log.
-        reason = clean_reason(f"{type(exc).__name__}: {exc}", SOCKET_LOG_MAX)
+        reason = _socket_error_text(exc)
     finally:
         ready.set()
     log.warning("comfyui.progress_listener_failed", extra={"url": url, "reason": reason})
+
+
+def _socket_error_text(exc: BaseException) -> str:
+    """``exc`` as one log-safe line: it can quote what ComfyUI sent, so it is cleaned and cut."""
+    return clean_reason(f"{type(exc).__name__}: {exc}", SOCKET_LOG_MAX)
 
 
 async def _wait_until_open(ready: asyncio.Event) -> None:
