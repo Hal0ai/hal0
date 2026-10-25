@@ -12,11 +12,15 @@
 from __future__ import annotations
 
 import json as json_module
+import re
 from typing import Any
 from unittest.mock import AsyncMock
+from urllib.parse import unquote
 
 import httpx
 import pytest
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from hal0.mcp import admin
 from hal0.mcp.approval_queue import ApprovalQueue
@@ -1653,3 +1657,198 @@ def test_max_slot_lifecycle_timeout_covers_every_bridge_tool() -> None:
     """The advertised worst case must really be the worst of the table."""
     assert admin.max_slot_lifecycle_timeout_s() == max(admin._SLOT_LIFECYCLE_TIMEOUT_S.values())
     assert admin.max_slot_lifecycle_timeout_s() == admin._SLOT_LIFECYCLE_TIMEOUT_S["stack_apply"]
+
+
+# ── Path-argument integrity (#3051) ─────────────────────────────────────────
+#
+# The approval card names the raw argument. The URL that runs after approval
+# must act on exactly that resource, so (a) a value that cannot travel as ONE
+# URL path segment is refused before any card exists, and (b) every other value
+# reaches the server as the literal characters the card showed.
+
+#: Not representable as a single path segment: empty, dot-only (httpx collapses
+#: them), a '/', a control character, and a lone surrogate (not encodable).
+_UNSENDABLE_PATH_VALUES = ["..", ".", "", "a/b", "a\nb", "a\x00b", "a\x7fb", "\ud800"]
+
+#: Valid but awkward: each one changes meaning if pasted into a URL raw.
+_AWKWARD_PATH_VALUES = ["a:b", "x y", "a%6Bb", "a?b", "a#b", "é", "100%", "a+b", "{x}"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "value", _UNSENDABLE_PATH_VALUES, ids=[ascii(v) for v in _UNSENDABLE_PATH_VALUES]
+)
+@pytest.mark.parametrize("tool", ["slot_delete", "slot_status"], ids=["gated", "ungated"])
+async def test_unsendable_path_arg_is_refused_before_approval_and_before_rest(
+    tool: str, value: str, queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    result = await admin.dispatch(
+        tool=tool,
+        args={"name": value},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert result["status"] == "error"
+    assert result["error"]["code"] == "mcp.invalid_arg"
+    assert queue.list_all() == [], "the operator must never see a card for a refused argument"
+    assert mock_transport["calls"] == []
+
+
+@pytest.mark.asyncio
+async def test_every_path_arg_of_a_multi_arg_tool_is_checked(
+    queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    assert admin._PATH_ARGS["capability_set"] == ("slot", "child")
+    result = await admin.dispatch(
+        tool="capability_set",
+        args={"slot": "primary", "child": ".."},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert result["error"]["code"] == "mcp.invalid_arg"
+    assert queue.list_all() == []
+    assert mock_transport["calls"] == []
+
+
+@pytest.mark.asyncio
+async def test_slash_refusal_keeps_the_model_pull_hint(
+    queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    result = await admin.dispatch(
+        tool="model_pull",
+        args={"model_id": "org/repo"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert result["error"]["code"] == "mcp.invalid_arg"
+    assert "hf_repo" in result["error"]["detail"]
+    assert queue.list_all() == []
+
+
+@pytest.mark.asyncio
+async def test_missing_path_arg_on_a_gated_tool_is_refused_before_approval(
+    queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    result = await admin.dispatch(
+        tool="slot_delete",
+        args={},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert result["error"]["code"] == "mcp.missing_arg"
+    assert queue.list_all() == []
+    assert mock_transport["calls"] == []
+
+
+@pytest.mark.asyncio
+async def test_approved_call_reaches_the_server_with_the_literal_argument(
+    queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    """A '?' or '%' in an accepted argument must not end or rewrite the path."""
+    for value, segment in (
+        ("junk?x", "junk%3Fx"),
+        ("%6Dy-model", "%256Dy-model"),
+        ("a:b", "a%3Ab"),
+    ):
+        pending = await admin.dispatch(
+            tool="model_delete",
+            args={"model_id": value},
+            client_id="pi",
+            bearer="t",
+            base_url="http://t",
+            approval_queue=queue,
+        )
+        assert pending["status"] == "pending_approval"
+        await queue.approve(pending["approval_id"])
+        method, url, *_ = mock_transport["calls"][-1]
+        assert (method, url) == ("DELETE", f"http://t/api/models/{segment}")
+
+
+@pytest.mark.asyncio
+async def test_execute_time_rechecks_args_that_changed_after_approval_was_queued(
+    queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    """The approve-time executor must not trust args it did not just validate."""
+    pending = await admin.dispatch(
+        tool="slot_delete",
+        args={"name": "primary"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    entry = queue.get(pending["approval_id"])
+    assert entry is not None
+    entry.args["name"] = ".."
+
+    resolved = await queue.approve(pending["approval_id"])
+
+    assert resolved["result"]["error"]["code"] == "mcp.invalid_arg"
+    assert mock_transport["calls"] == []
+
+
+def _templated_routes() -> list[tuple[str, str, str, tuple[str, ...]]]:
+    """(tool, method, template, path-arg names) for every route with path args."""
+    rows = [
+        (tool, *admin._REST_MAP[tool], names) for tool, names in sorted(admin._PATH_ARGS.items())
+    ]
+    assert len(rows) > 20, "route map not installed; the per-route checks would pass vacuously"
+    return rows
+
+
+def test_every_route_template_keeps_its_shape_through_real_httpx() -> None:
+    """No segment collapse, no truncation at '?'/'#', every value recoverable."""
+    for tool, _method, template, names in _templated_routes():
+        pattern = re.compile(
+            "^" + "([^/?#]+)".join(re.escape(part) for part in re.split(r"\{\w+\}", template)) + "$"
+        )
+        for value in _AWKWARD_PATH_VALUES:
+            sent = {name: f"{value}~{i}" for i, name in enumerate(names)}
+            parsed = httpx.URL(admin._format_url("http://hal0.test", template, sent))
+            where = f"{tool} {template} value={value!r}"
+            assert parsed.query == b"" and parsed.fragment == "", where
+            match = pattern.match(parsed.raw_path.decode("ascii"))
+            assert match is not None, f"{where}: raw path {parsed.raw_path!r} left the template"
+            assert [unquote(g) for g in match.groups()] == [sent[n] for n in names], where
+
+
+@pytest.mark.asyncio
+async def test_every_route_template_round_trips_through_starlette_routing() -> None:
+    """The server must hand the handler exactly the value the card showed.
+
+    Starlette's ``TestClient`` unquotes ``url.path`` a second time (it is
+    already decoded by httpx), which would turn ``%6D`` into ``m`` here and
+    not on a real server, so this drives the app through ``httpx.ASGITransport``
+    — a single decode, the same as uvicorn.
+    """
+    app = FastAPI()
+
+    async def _echo(request: Request) -> JSONResponse:
+        return JSONResponse(
+            {"route": request.scope["route"].path, "params": dict(request.path_params)}
+        )
+
+    rows = _templated_routes()
+    for method, template in sorted({(m, t) for _tool, m, t, _names in rows}):
+        app.add_api_route(template, _echo, methods=[method])
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://hal0.test"
+    ) as client:
+        for tool, method, template, names in rows:
+            for value in _AWKWARD_PATH_VALUES:
+                sent = {name: f"{value}~{i}" for i, name in enumerate(names)}
+                response = await client.request(
+                    method, admin._format_url("http://hal0.test", template, sent)
+                )
+                where = f"{tool} {template} value={value!r}"
+                assert response.status_code == 200, where
+                assert response.json() == {"route": template, "params": sent}, where

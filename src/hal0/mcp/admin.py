@@ -171,6 +171,7 @@ from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 import structlog
@@ -1723,12 +1724,59 @@ def tool_param_schema(tool: str) -> dict[str, Any]:
     }
 
 
+class PathArgError(ValueError):
+    """A path argument that cannot be sent as one URL path segment."""
+
+
+def _path_arg_refusal(tool: str, key: str, value: str) -> str | None:
+    """Why ``value`` cannot travel as ONE URL path segment, or ``None`` if it can.
+
+    The approval card names the raw argument, so the call that runs after
+    approval has to act on exactly that resource. A value is refused when no
+    URL can carry it faithfully: empty; ``.`` / ``..`` (httpx collapses dot
+    segments, so the call lands on a different route); ``/`` (it splices extra
+    segments into the route); a control character; or text that is not
+    encodable as UTF-8. Everything else is percent-encoded by
+    :func:`_format_url`.
+
+    The one shared check: :func:`dispatch` runs it before a call is queued or
+    executed, and :func:`_split_args` (so the approve-time executor) runs it
+    again.
+    """
+    if not value:
+        reason = "must not be empty"
+    elif value in (".", ".."):
+        reason = "must not be '.' or '..'"
+    elif "/" in value:
+        reason = "must not contain '/'"
+    elif any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+        reason = "must not contain control characters"
+    else:
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            reason = "must be valid Unicode text"
+        else:
+            return None
+    shown = value if len(value) <= 80 else value[:80] + "…"
+    message = f"tool {tool!r} arg {key!r} {reason} (got {shown!r})."
+    if "/" in value:
+        # A slash used to splice extra path segments into the REST URL and
+        # mis-route (observed: model_pull with model_id='org/repo' → 405).
+        message += (
+            " For model_pull, use a short local model_id and pass the HF repo "
+            "as hf_repo='org/name' + hf_filename in the body."
+        )
+    return message
+
+
 def _split_args(tool: str, args: dict[str, Any]) -> tuple[dict[str, str], dict[str, Any]]:
     """Separate path-substitution args from body/query args.
 
-    Returns ``(path_args, remainder)``. Missing path args raise
-    ``KeyError`` so the caller surfaces a 400-style error rather than
-    silently routing to a malformed URL.
+    Returns ``(path_args, remainder)``. A missing path arg raises ``KeyError``
+    and an unsendable one (:func:`_path_arg_refusal`) raises
+    :class:`PathArgError`, so the caller surfaces a 400-style error rather
+    than silently routing to a malformed or different URL.
     """
     path_keys = _PATH_ARGS.get(tool, ())
     path_args: dict[str, str] = {}
@@ -1737,21 +1785,29 @@ def _split_args(tool: str, args: dict[str, Any]) -> tuple[dict[str, str], dict[s
         if key not in remainder:
             raise KeyError(f"tool {tool!r} requires arg {key!r}")
         value = str(remainder.pop(key))
-        if "/" in value:
-            # A slash would splice extra path segments into the REST URL and
-            # mis-route (observed: model_pull with model_id='org/repo' → 405).
-            raise KeyError(
-                f"tool {tool!r} arg {key!r} must not contain '/' (got {value!r}). "
-                "For model_pull, use a short local model_id and pass the HF repo "
-                "as hf_repo='org/name' + hf_filename in the body."
-            )
+        if (refusal := _path_arg_refusal(tool, key, value)) is not None:
+            raise PathArgError(refusal)
         path_args[key] = value
     return path_args, remainder
 
 
+def _arg_error(exc: KeyError | PathArgError) -> dict[str, Any]:
+    """The tool-error envelope for a path argument that is missing or unsendable."""
+    code = "mcp.missing_arg" if isinstance(exc, KeyError) else "mcp.invalid_arg"
+    return {"status": "error", "error": {"code": code, "detail": str(exc)}}
+
+
 def _format_url(base_url: str, template: str, path_args: dict[str, str]) -> str:
-    """Substitute ``{name}`` placeholders in ``template`` from ``path_args``."""
-    return base_url.rstrip("/") + template.format(**path_args)
+    """Substitute ``{name}`` placeholders in ``template`` from ``path_args``.
+
+    Every value is percent-encoded as a single path segment, so ``?``, ``#``,
+    ``%``, spaces, ``:`` and non-ASCII reach the server as the literal
+    characters the approval card showed (the server decodes the path before
+    matching a route). Dot-only values are not encodable; :func:`_split_args`
+    has already refused them.
+    """
+    quoted = {name: quote(value, safe="") for name, value in path_args.items()}
+    return base_url.rstrip("/") + template.format(**quoted)
 
 
 #: HTTP methods ``_call_rest`` knows how to forward, mapped to the httpx
@@ -2102,7 +2158,9 @@ async def dispatch(
 
     Returns the tool's JSON result for autonomous calls or
     ``{"status": "pending_approval", "approval_id": "..."}`` for gated
-    ones.
+    ones. A missing or unsendable path argument (``mcp.missing_arg`` /
+    ``mcp.invalid_arg``) is refused up front, so a gated call with one is
+    never queued.
 
     ``memory_dispatcher`` is the in-process callable the memory server
     exposes for direct invocation (avoiding the HTTP round-trip for
@@ -2142,6 +2200,23 @@ async def dispatch(
                 },
             }
         gated = verdict == "gated"
+
+    # Refuse an unsendable path argument BEFORE a card exists or a call runs:
+    # the operator approves what the card names, so a value that cannot be sent
+    # faithfully must never reach the queue. ``_execute_tool`` re-checks at run
+    # time, so a queued entry is covered too.
+    try:
+        _split_args(tool, args)
+    except (KeyError, PathArgError) as exc:
+        refusal = _arg_error(exc)
+        _audit(
+            client_id=client_id,
+            tool=tool,
+            args=args,
+            gated=gated,
+            outcome=refusal["error"]["code"].removeprefix("mcp."),
+        )
+        return refusal
 
     if gated:
         # Build the bound executor that runs when the owner approves.
@@ -2225,11 +2300,8 @@ async def _execute_tool(
     method, template = _REST_MAP[tool]
     try:
         path_args, remainder = _split_args(tool, args)
-    except KeyError as exc:
-        return {
-            "status": "error",
-            "error": {"code": "mcp.missing_arg", "detail": str(exc)},
-        }
+    except (KeyError, PathArgError) as exc:
+        return _arg_error(exc)
     url = _format_url(base_url, template, path_args)
     payload: dict[str, Any] | None = remainder if remainder else None
     call: dict[str, Any] = {}
