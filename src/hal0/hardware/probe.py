@@ -31,6 +31,7 @@ import structlog
 from hal0.config import paths as _paths
 from hal0.config.schema import GPUInfo, HardwareInfo, NPUInfo
 from hal0.errors import Hal0Error
+from hal0.hardware.memory_budget import cgroup_limit_mb
 from hal0.providers._gpu import kfd_present as _kfd_present
 
 log = structlog.get_logger(__name__)
@@ -306,53 +307,22 @@ def _derive_unified_memory_mb(ram_mb: int, gpu: GPUInfo | None) -> int:
     return ram_mb
 
 
-# cgroup memory cap paths (issue #372). v2 unified hosts use memory.max;
-# v1 hybrid hosts expose memory.limit_in_bytes under /sys/fs/cgroup/memory/.
-# v2 is the canonical location on a unified host — we read it first and
-# only fall through to v1 when v2 is missing.
-_CGROUP_V2_MEMORY_MAX = Path("/sys/fs/cgroup/memory.max")
-_CGROUP_V1_MEMORY_LIMIT = Path("/sys/fs/cgroup/memory/memory.limit_in_bytes")
-# cgroup-v1's "infinite" sentinel. The kernel writes this when no limit is
-# configured; treat it the same as the v2 literal "max" — unlimited, ignore.
-_CGROUP_V1_INFINITE = 9_223_372_036_854_775_807
-
-
-def _read_cgroup_memory_max_mb() -> int | None:
+def _read_cgroup_memory_max_mb(root: Path = Path("/")) -> int | None:
     """Return the running cgroup's memory cap in MiB, or None when unlimited.
 
     The cgroup cap is a 3rd headroom candidate (issue #372): when below
-    min(pool, host) it becomes the binding constraint. On cgroup-v2 the
-    file holds a literal ``"max"`` (= unlimited) or a byte count; on
-    cgroup-v1 the byte count uses a 9223… sentinel for "unlimited".
+    min(pool, host) it becomes the binding constraint. The cap is the tightest
+    finite limit on the process's cgroup chain, not just the leaf's own file --
+    hal0-api runs in ``system.slice/hal0-api.service`` and its slice carries
+    the limit. ``max``, empty, unreadable, unparseable and "infinite" values
+    (the kernel's 9223… sentinel included) are no constraint; see
+    :func:`hal0.hardware.memory_budget.cgroup_limit_mb` for the walk.
 
-    Unreadable, unparseable, or "unlimited" → ``None`` (no constraint).
-    Never raises.
+    ``root`` is the filesystem root the walk reads under (tests pass a fake
+    ``/proc`` + ``/sys`` tree). Never raises.
     """
-    for path, sentinel_unlimited in (
-        (_CGROUP_V2_MEMORY_MAX, "max"),
-        (_CGROUP_V1_MEMORY_LIMIT, None),  # v1 uses the numeric sentinel
-    ):
-        txt = _read_text(path)
-        if txt is None:
-            continue  # missing file → try the next candidate
-        stripped = txt.strip()
-        if not stripped:
-            return None  # zero-byte file — treat as "no constraint"
-        if sentinel_unlimited is not None and stripped == sentinel_unlimited:
-            return None
-        try:
-            n = int(stripped)
-        except ValueError:
-            log.debug(
-                "hardware.probe.cgroup_memory_max_parse_fail",
-                path=str(path),
-                raw=stripped[:40],
-            )
-            return None
-        if n < 0 or n == _CGROUP_V1_INFINITE:
-            return None
-        return n // (1024 * 1024)
-    return None
+    limit = cgroup_limit_mb(root)
+    return None if limit is None else int(limit)
 
 
 # ── GPU detection ──────────────────────────────────────────────────────────────

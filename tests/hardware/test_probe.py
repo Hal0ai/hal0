@@ -846,85 +846,96 @@ def test_detect_lspci_fallback_handles_display_controller(
 
 # ── cgroup memory.max reader (#372) ──────────────────────────────────────────
 # The running LXC's cgroup memory cap is a candidate headroom constraint.
-# On cgroup-v2 /sys/fs/cgroup/memory.max holds a literal "max" (unlimited)
-# or an integer byte count. On cgroup-v1 the equivalent is
-# /sys/fs/cgroup/memory/memory.limit_in_bytes, with the "infinite" sentinel
-# 9223372036854775807. Both missing → None (no behavior change).
+# On cgroup-v2 memory.max holds a literal "max" (unlimited) or an integer byte
+# count; on cgroup-v1 the equivalent is memory/memory.limit_in_bytes, with the
+# "infinite" sentinel 9223372036854775807. Both missing → None (no behavior
+# change). The reader walks the process's cgroup chain (the real work lives in
+# hal0.hardware.memory_budget.cgroup_limit_mb), so these tests build a fake
+# /proc + /sys tree under tmp_path and hand it over as the root.
 
-_CGROUP_V2_PATH = "/sys/fs/cgroup/memory.max"
-_CGROUP_V1_PATH = "/sys/fs/cgroup/memory/memory.limit_in_bytes"
+_CGROUP_V2_PATH = "sys/fs/cgroup/memory.max"
+_CGROUP_V1_PATH = "sys/fs/cgroup/memory/memory.limit_in_bytes"
 
 
-def test_cgroup_v2_returns_mib(monkeypatch: pytest.MonkeyPatch) -> None:
+def _fake_root(tmp_path: Path, files: dict[str, str]) -> Path:
+    for rel, text in files.items():
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    return tmp_path
+
+
+def test_cgroup_v2_returns_mib(tmp_path: Path) -> None:
     # 16 GiB = 16 * 1024 * 1024 * 1024 = 17_179_869_184 bytes
     limit_bytes = 16 * 1024 * 1024 * 1024
-    table = {_CGROUP_V2_PATH: str(limit_bytes), _CGROUP_V1_PATH: None}
-    monkeypatch.setattr(probe_mod, "_read_text", lambda p: table.get(str(p)))
-    out = probe_mod._read_cgroup_memory_max_mb()
-    assert out == 16 * 1024
+    root = _fake_root(tmp_path, {_CGROUP_V2_PATH: str(limit_bytes)})
+    assert probe_mod._read_cgroup_memory_max_mb(root) == 16 * 1024
 
 
-def test_cgroup_v2_max_literal_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cgroup_v2_max_literal_returns_none(tmp_path: Path) -> None:
     """cgroup-v2 signals 'unlimited' with the literal string 'max'."""
-    table = {_CGROUP_V2_PATH: "max\n"}
-    monkeypatch.setattr(probe_mod, "_read_text", lambda p: table.get(str(p)))
-    assert probe_mod._read_cgroup_memory_max_mb() is None
+    root = _fake_root(tmp_path, {_CGROUP_V2_PATH: "max\n"})
+    assert probe_mod._read_cgroup_memory_max_mb(root) is None
 
 
-def test_cgroup_v1_returns_mib(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cgroup_v1_returns_mib(tmp_path: Path) -> None:
     # 8 GiB in bytes
     limit_bytes = 8 * 1024 * 1024 * 1024
-    table = {_CGROUP_V2_PATH: None, _CGROUP_V1_PATH: str(limit_bytes)}
-    monkeypatch.setattr(probe_mod, "_read_text", lambda p: table.get(str(p)))
-    out = probe_mod._read_cgroup_memory_max_mb()
-    assert out == 8 * 1024
+    root = _fake_root(tmp_path, {_CGROUP_V1_PATH: str(limit_bytes)})
+    assert probe_mod._read_cgroup_memory_max_mb(root) == 8 * 1024
 
 
-def test_cgroup_v1_infinite_sentinel_returns_none(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_cgroup_v1_infinite_sentinel_returns_none(tmp_path: Path) -> None:
     """cgroup-v1 reports the 'infinite' limit as 9223372036854775807."""
-    table = {
-        _CGROUP_V2_PATH: None,
-        _CGROUP_V1_PATH: "9223372036854775807\n",
-    }
-    monkeypatch.setattr(probe_mod, "_read_text", lambda p: table.get(str(p)))
-    assert probe_mod._read_cgroup_memory_max_mb() is None
+    root = _fake_root(tmp_path, {_CGROUP_V1_PATH: "9223372036854775807\n"})
+    assert probe_mod._read_cgroup_memory_max_mb(root) is None
 
 
-def test_cgroup_v2_takes_precedence_over_v1(monkeypatch: pytest.MonkeyPatch) -> None:
-    """If both files are present, trust v2 (it's the canonical location
-    on a cgroup-v2 unified host — v1 is just a compat shim)."""
-    v2_bytes = 4 * 1024 * 1024 * 1024
-    v1_bytes = 8 * 1024 * 1024 * 1024
-    table = {
-        _CGROUP_V2_PATH: str(v2_bytes),
-        _CGROUP_V1_PATH: str(v1_bytes),
-    }
-    monkeypatch.setattr(probe_mod, "_read_text", lambda p: table.get(str(p)))
-    out = probe_mod._read_cgroup_memory_max_mb()
-    assert out == 4 * 1024
+def test_cgroup_v2_takes_precedence_over_v1(tmp_path: Path) -> None:
+    """If both files are present, the tighter wins -- here v2's 4 GiB. (A real
+    host has one hierarchy or the other; the v1 file is a compat shim.)"""
+    root = _fake_root(
+        tmp_path,
+        {
+            _CGROUP_V2_PATH: str(4 * 1024 * 1024 * 1024),
+            _CGROUP_V1_PATH: str(8 * 1024 * 1024 * 1024),
+        },
+    )
+    assert probe_mod._read_cgroup_memory_max_mb(root) == 4 * 1024
 
 
-def test_cgroup_missing_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cgroup_missing_returns_none(tmp_path: Path) -> None:
     """No v2, no v1 → None (caller treats as 'no constraint')."""
-    monkeypatch.setattr(probe_mod, "_read_text", lambda _: None)
-    assert probe_mod._read_cgroup_memory_max_mb() is None
+    assert probe_mod._read_cgroup_memory_max_mb(tmp_path) is None
 
 
-def test_cgroup_garbage_value_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cgroup_garbage_value_returns_none(tmp_path: Path) -> None:
     """A file that exists but doesn't parse as an int must not crash."""
-    table = {_CGROUP_V2_PATH: "not a number\n"}
-    monkeypatch.setattr(probe_mod, "_read_text", lambda p: table.get(str(p)))
-    assert probe_mod._read_cgroup_memory_max_mb() is None
+    root = _fake_root(tmp_path, {_CGROUP_V2_PATH: "not a number\n"})
+    assert probe_mod._read_cgroup_memory_max_mb(root) is None
 
 
-def test_cgroup_empty_string_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cgroup_empty_string_returns_none(tmp_path: Path) -> None:
     """Empty content (zero-byte file, or read that landed mid-stream)
     must be treated as 'no constraint', not as 0 MiB."""
-    table = {_CGROUP_V2_PATH: ""}
-    monkeypatch.setattr(probe_mod, "_read_text", lambda p: table.get(str(p)))
-    assert probe_mod._read_cgroup_memory_max_mb() is None
+    root = _fake_root(tmp_path, {_CGROUP_V2_PATH: ""})
+    assert probe_mod._read_cgroup_memory_max_mb(root) is None
+
+
+def test_cgroup_max_mb_reads_the_chain(tmp_path: Path) -> None:
+    """hal0-api runs in system.slice/hal0-api.service: the leaf and the root say
+    "max" and only the slice above the service carries the cap. Reading the leaf
+    alone (the old behavior) reported 'unlimited' for the whole probe."""
+    root = _fake_root(
+        tmp_path,
+        {
+            "proc/self/cgroup": "0::/system.slice/hal0-api.service\n",
+            "sys/fs/cgroup/system.slice/hal0-api.service/memory.max": "max\n",
+            "sys/fs/cgroup/system.slice/memory.max": "21474836480\n",
+            "sys/fs/cgroup/memory.max": "max\n",
+        },
+    )
+    assert probe_mod._read_cgroup_memory_max_mb(root) == 20 * 1024
 
 
 def test_probe_populates_cgroup_max_mb(monkeypatch: pytest.MonkeyPatch) -> None:

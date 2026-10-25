@@ -19,9 +19,11 @@ summed together:
 * **This box's RAM** (:class:`RamBudget`), passed in by the caller, already
   resolved to the container cgroup limit or the system total.
 
-This module is pure -- no I/O, no clock, no logging. Callers gather the
-inputs (the GPU sample, ``build_per_slot`` rows, ComfyUI's memory view, the RAM
-reading) and hand them to :func:`build_memory_budget`.
+:func:`build_memory_budget` is pure -- no I/O, no clock, no logging. Callers
+gather the inputs (the GPU sample, ``build_per_slot`` rows, ComfyUI's memory
+view, the RAM reading) and hand them to it. The only I/O in this module is the
+RAM reading itself, :func:`read_ram` and :func:`cgroup_limit_mb`; both take a
+filesystem ``root`` so tests can build a fake ``/proc`` and ``/sys``.
 
 Units: "GB" here is MiB / 1024, and every GB field is rounded to one decimal
 when the dataclass is built. Derived values (``other_guests_gb``,
@@ -32,18 +34,28 @@ accumulates through the subtraction chain.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal
 
-from hal0.hardware.gpu_view import GPUMemorySample
+if TYPE_CHECKING:
+    # Annotation only. A runtime import would close a cycle: gpu_view imports
+    # probe, and probe's cgroup reader delegates to this module.
+    from hal0.hardware.gpu_view import GPUMemorySample
 
 # Headroom kept back from a render's budget for the driver, the compositor and
 # allocator slop. Subtracted once, from the pool, in ``render_free_gb``.
 RENDER_MARGIN_GB = 2.0
 
 _STARTING = "starting"
+
+# A cgroup limit at or above this is the kernel's spelling of "no limit": v1
+# reports 9223372036854771712 (LONG_MAX rounded to a page), and 2^60 bytes is an
+# exbibyte -- no box has that much memory to be limited to.
+_CGROUP_UNLIMITED_BYTES = 2**60
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,3 +211,130 @@ def build_memory_budget(
         free_gb=_gb(free_mb),
     )
     return MemoryBudget(gpu=gpu, ram=ram, render_free_gb=_gb(render_free_mb))
+
+
+def _read(path: Path) -> str | None:
+    """File text, or None when it cannot be read as text. Never raises."""
+    try:
+        return path.read_text()
+    except (OSError, ValueError):  # ValueError covers UnicodeDecodeError
+        return None
+
+
+def _cgroup_paths(root: Path) -> tuple[str | None, str | None]:
+    """The process's v2 and v1 memory cgroup paths from ``<root>/proc/self/cgroup``.
+
+    Lines read ``hierarchy-id:controllers:path``. The v2 line is ``0::<path>``;
+    a v1 line is the one whose comma-separated controller list has ``memory``.
+    A missing listing yields ``(None, None)``.
+    """
+    v2: str | None = None
+    v1: str | None = None
+    for line in (_read(root / "proc/self/cgroup") or "").splitlines():
+        parts = line.split(":", 2)
+        if len(parts) != 3:
+            continue
+        hierarchy, controllers, path = parts
+        if hierarchy == "0" and not controllers:
+            v2 = path
+        elif "memory" in controllers.split(","):
+            v1 = path
+    return v2, v1
+
+
+def _chain_limit_bytes(base: Path, cgroup_path: str, filename: str) -> int | None:
+    """The tightest finite limit in ``filename`` from ``base/<cgroup_path>`` up to ``base``.
+
+    ``max``, empty, unreadable, non-numeric, negative and >= 2^60 values are
+    skipped. ``.`` and ``..`` components are dropped, so a path read from
+    ``/proc`` can never point outside ``base``.
+    """
+    parts = [p for p in cgroup_path.split("/") if p not in ("", ".", "..")]
+    tightest: int | None = None
+    for depth in range(len(parts), -1, -1):
+        raw = _read(base.joinpath(*parts[:depth]) / filename)
+        if raw is None:
+            continue
+        text = raw.strip()
+        if not text or text == "max":
+            continue
+        try:
+            value = int(text)
+        except ValueError:
+            continue
+        if value < 0 or value >= _CGROUP_UNLIMITED_BYTES:
+            continue
+        tightest = value if tightest is None else min(tightest, value)
+    return tightest
+
+
+def cgroup_limit_mb(root: Path = Path("/")) -> float | None:
+    """The tightest finite cgroup memory limit on the process's chain, in MiB.
+
+    Walks from the process's own cgroup (``<root>/proc/self/cgroup``) up to
+    ``<root>/sys/fs/cgroup``, reading ``memory.max`` (v2) or
+    ``memory/memory.limit_in_bytes`` (v1) at every level; the smallest finite
+    value wins. ``None`` means nothing on the chain limits memory.
+
+    Reading the leaf alone is not enough: a service in ``system.slice`` has its
+    limit on the slice, not on itself. Inside an LXC guest every visible file
+    reads ``max`` (the guest limit sits above the namespace root), and the limit
+    shows up only in lxcfs's ``MemTotal`` -- see :func:`read_ram`.
+
+    With no cgroup listing, only the root-level files are read. Never raises.
+    """
+    v2_path, v1_path = _cgroup_paths(root)
+    if v2_path is None and v1_path is None:
+        v2_path = v1_path = "/"
+    base = root / "sys/fs/cgroup"
+    found = [
+        limit
+        for limit in (
+            _chain_limit_bytes(base, v2_path, "memory.max") if v2_path is not None else None,
+            _chain_limit_bytes(base / "memory", v1_path, "memory.limit_in_bytes")
+            if v1_path is not None
+            else None,
+        )
+        if limit is not None
+    ]
+    return min(found) / (1024.0 * 1024.0) if found else None
+
+
+def _meminfo_mb(root: Path) -> tuple[float, float]:
+    """``(MemTotal, MemAvailable)`` from ``<root>/proc/meminfo`` in MiB; zeros on failure."""
+    values = {"MemTotal": 0.0, "MemAvailable": 0.0}
+    for line in (_read(root / "proc/meminfo") or "").splitlines():
+        key, _, rest = line.partition(":")
+        if key in values:
+            with contextlib.suppress(IndexError, ValueError):
+                values[key] = float(rest.split()[0]) / 1024.0  # kB -> MiB
+    return values["MemTotal"], values["MemAvailable"]
+
+
+def read_ram(root: Path = Path("/")) -> RamBudget:
+    """This box's RAM, read live from ``root`` (``/`` in production).
+
+    ``used`` is ``MemTotal - MemAvailable``. ``limit`` is ``MemTotal`` unless a
+    cgroup on the process's chain (:func:`cgroup_limit_mb`) is tighter: that is
+    a systemd slice or a plain container. An LXC guest needs no cgroup, because
+    lxcfs already reports the guest limit as ``MemTotal``. ``free`` is
+    ``max(0, limit - used)``.
+
+    ``source`` is ``"container"`` when ``<root>/run/systemd/container`` exists
+    or the chain carried a finite limit, otherwise ``"system"``. A missing
+    ``/proc/meminfo`` reads as zeros. Never raises.
+    """
+    total_mb, available_mb = _meminfo_mb(root)
+    chain_mb = cgroup_limit_mb(root)
+    limit_mb = total_mb if chain_mb is None else min(total_mb, chain_mb)
+    used_mb = max(0.0, total_mb - available_mb)
+    try:
+        marked = (root / "run/systemd/container").exists()
+    except OSError:
+        marked = False
+    return RamBudget(
+        limit_gb=_gb(limit_mb),
+        used_gb=_gb(used_mb),
+        free_gb=_gb(max(0.0, limit_mb - used_mb)),
+        source="container" if marked or chain_mb is not None else "system",
+    )

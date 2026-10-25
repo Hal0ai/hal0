@@ -10,6 +10,7 @@ in MiB (what the sample and ``build_per_slot`` carry); expectations are in GB
 from __future__ import annotations
 
 import dataclasses
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -22,6 +23,8 @@ from hal0.hardware.memory_budget import (
     RamBudget,
     SlotShare,
     build_memory_budget,
+    cgroup_limit_mb,
+    read_ram,
 )
 
 RAM = RamBudget(limit_gb=64.0, used_gb=20.0, free_gb=44.0, source="container")
@@ -414,3 +417,181 @@ def test_dataclasses_are_frozen_and_slotted() -> None:
         assert not hasattr(obj, "__dict__")
         with pytest.raises(dataclasses.FrozenInstanceError):
             obj.total_gb = 1.0  # type: ignore[attr-defined]
+
+
+# ── Live RAM limit ───────────────────────────────────────────────────────────
+# ``read_ram`` / ``cgroup_limit_mb`` take a filesystem root, so each test builds
+# the files it needs under ``tmp_path`` -- /proc/meminfo, /proc/self/cgroup, the
+# cgroup tree and /run/systemd/container.
+
+_GIB = 1024**3
+_V2_LEAF = "system.slice/hal0-api.service"
+
+
+def _write(root: Path, rel: str, text: str) -> None:
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
+def _meminfo(root: Path, *, total_kb: int, available_kb: int) -> None:
+    _write(
+        root,
+        "proc/meminfo",
+        f"MemTotal:       {total_kb} kB\n"
+        "MemFree:         1234567 kB\n"
+        f"MemAvailable:   {available_kb} kB\n"
+        "Buffers:          123456 kB\n",
+    )
+
+
+def _v2_chain(root: Path, *, leaf: str = "max", slice_: str = "max", top: str = "max") -> None:
+    """A cgroup-v2 process in ``system.slice/hal0-api.service`` and its three limits."""
+    _write(root, "proc/self/cgroup", f"0::/{_V2_LEAF}\n")
+    _write(root, f"sys/fs/cgroup/{_V2_LEAF}/memory.max", f"{leaf}\n")
+    _write(root, "sys/fs/cgroup/system.slice/memory.max", f"{slice_}\n")
+    _write(root, "sys/fs/cgroup/memory.max", f"{top}\n")
+
+
+def test_lxc_guest_meminfo_is_the_limit(tmp_path: Path) -> None:
+    # Inside an LXC guest every visible memory.max reads "max": the guest's limit
+    # sits above the namespace root, and only lxcfs's MemTotal shows it.
+    _meminfo(tmp_path, total_kb=50331648, available_kb=48069259)
+    _v2_chain(tmp_path)
+    _write(tmp_path, "run/systemd/container", "lxc\n")
+
+    ram = read_ram(tmp_path)
+
+    assert ram == RamBudget(limit_gb=48.0, used_gb=2.2, free_gb=45.8, source="container")
+
+
+def test_slice_limit_below_meminfo_wins(tmp_path: Path) -> None:
+    _meminfo(tmp_path, total_kb=64 * 1024 * 1024, available_kb=57 * 1024 * 1024)
+    _v2_chain(tmp_path, slice_=str(20 * _GIB))
+
+    ram = read_ram(tmp_path)
+
+    assert ram.limit_gb == 20.0
+    assert ram.used_gb == 7.0
+    assert ram.free_gb == 13.0
+    # No container marker, but a finite limit up the chain is a container limit.
+    assert ram.source == "container"
+
+
+def test_bare_metal_reads_system(tmp_path: Path) -> None:
+    _meminfo(tmp_path, total_kb=64 * 1024 * 1024, available_kb=40 * 1024 * 1024)
+    _v2_chain(tmp_path)
+
+    ram = read_ram(tmp_path)
+
+    assert ram == RamBudget(limit_gb=64.0, used_gb=24.0, free_gb=40.0, source="system")
+
+
+def test_v1_sentinel_is_unlimited(tmp_path: Path) -> None:
+    _meminfo(tmp_path, total_kb=32 * 1024 * 1024, available_kb=30 * 1024 * 1024)
+    _write(tmp_path, "proc/self/cgroup", "11:memory:/user.slice\n3:cpu,cpuacct:/user.slice\n")
+    # The kernel's v1 "no limit" is a huge page-aligned number, not a literal.
+    _write(
+        tmp_path, "sys/fs/cgroup/memory/user.slice/memory.limit_in_bytes", "9223372036854771712\n"
+    )
+    _write(tmp_path, "sys/fs/cgroup/memory/memory.limit_in_bytes", "9223372036854775807\n")
+
+    assert cgroup_limit_mb(tmp_path) is None
+    ram = read_ram(tmp_path)
+    assert ram.limit_gb == 32.0
+    assert ram.source == "system"
+
+
+def test_v1_finite_limit_up_the_chain_wins(tmp_path: Path) -> None:
+    _meminfo(tmp_path, total_kb=32 * 1024 * 1024, available_kb=30 * 1024 * 1024)
+    _write(tmp_path, "proc/self/cgroup", "11:memory:/lxc/ct/app\n")
+    _write(
+        tmp_path, "sys/fs/cgroup/memory/lxc/ct/app/memory.limit_in_bytes", "9223372036854771712\n"
+    )
+    _write(tmp_path, "sys/fs/cgroup/memory/lxc/ct/memory.limit_in_bytes", str(8 * _GIB))
+    _write(tmp_path, "sys/fs/cgroup/memory/memory.limit_in_bytes", "9223372036854771712\n")
+
+    ram = read_ram(tmp_path)
+
+    assert ram.limit_gb == 8.0
+    assert ram.source == "container"
+
+
+def test_missing_meminfo_returns_zeros_not_raise(tmp_path: Path) -> None:
+    assert read_ram(tmp_path) == RamBudget(limit_gb=0.0, used_gb=0.0, free_gb=0.0, source="system")
+    assert read_ram(tmp_path / "does-not-exist").limit_gb == 0.0
+
+
+def test_malformed_meminfo_returns_zeros_not_raise(tmp_path: Path) -> None:
+    _write(tmp_path, "proc/meminfo", "MemTotal: lots kB\nMemAvailable:\n")
+
+    ram = read_ram(tmp_path)
+
+    assert (ram.limit_gb, ram.used_gb, ram.free_gb) == (0.0, 0.0, 0.0)
+
+
+def test_available_above_total_is_zero_used(tmp_path: Path) -> None:
+    _meminfo(tmp_path, total_kb=8 * 1024 * 1024, available_kb=9 * 1024 * 1024)
+
+    ram = read_ram(tmp_path)
+
+    assert (ram.limit_gb, ram.used_gb, ram.free_gb) == (8.0, 0.0, 8.0)
+
+
+def test_used_above_the_limit_leaves_no_free(tmp_path: Path) -> None:
+    # MemAvailable is system-wide, so a small slice limit can sit below `used`.
+    _meminfo(tmp_path, total_kb=64 * 1024 * 1024, available_kb=32 * 1024 * 1024)
+    _v2_chain(tmp_path, slice_=str(16 * _GIB))
+
+    ram = read_ram(tmp_path)
+
+    assert (ram.limit_gb, ram.used_gb, ram.free_gb) == (16.0, 32.0, 0.0)
+
+
+def test_tightest_limit_on_the_chain_wins(tmp_path: Path) -> None:
+    _v2_chain(tmp_path, leaf=str(30 * _GIB), slice_=str(20 * _GIB), top=str(40 * _GIB))
+
+    assert cgroup_limit_mb(tmp_path) == 20 * 1024.0
+
+
+def test_unusable_limit_files_are_ignored(tmp_path: Path) -> None:
+    _write(tmp_path, "proc/self/cgroup", f"0::/{_V2_LEAF}\n")
+    _write(tmp_path, f"sys/fs/cgroup/{_V2_LEAF}/memory.max", "")  # empty
+    _write(tmp_path, "sys/fs/cgroup/system.slice/memory.max", "not a number\n")
+    _write(tmp_path, "sys/fs/cgroup/memory.max", str(2**60))  # at the unlimited cut-off
+    # Unreadable: a directory where a v1 limit file should be.
+    (tmp_path / "sys/fs/cgroup/memory/memory.limit_in_bytes").mkdir(parents=True)
+
+    assert cgroup_limit_mb(tmp_path) is None
+
+
+def test_limit_just_below_the_cutoff_is_finite(tmp_path: Path) -> None:
+    _write(tmp_path, "sys/fs/cgroup/memory.max", str(2**60 - 4096))
+
+    assert cgroup_limit_mb(tmp_path) == (2**60 - 4096) / 1024**2
+
+
+def test_no_cgroup_listing_reads_only_the_root_files(tmp_path: Path) -> None:
+    _write(tmp_path, "sys/fs/cgroup/memory.max", str(4 * _GIB))
+    # Present, but nothing says the process lives there: not part of any chain.
+    _write(tmp_path, f"sys/fs/cgroup/{_V2_LEAF}/memory.max", str(1 * _GIB))
+
+    assert cgroup_limit_mb(tmp_path) == 4096.0
+
+
+def test_v1_root_file_is_read_without_a_cgroup_listing(tmp_path: Path) -> None:
+    _write(tmp_path, "sys/fs/cgroup/memory/memory.limit_in_bytes", str(8 * _GIB))
+
+    assert cgroup_limit_mb(tmp_path) == 8192.0
+
+
+def test_dotdot_in_the_cgroup_path_cannot_leave_the_cgroup_root(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    _write(root, "proc/self/cgroup", "0::/../../outside\n")
+    _write(root, "sys/outside/memory.max", str(1 * _GIB))  # what ../../outside would reach
+
+    assert cgroup_limit_mb(root) is None
+
+
+def test_cgroup_limit_never_raises_on_a_missing_root(tmp_path: Path) -> None:
+    assert cgroup_limit_mb(tmp_path / "nope") is None
