@@ -113,3 +113,88 @@ def test_apply_selections_writes_first_run_sentinel(
 
     state = client.get("/api/install/state")
     assert state.json()["first_run"] is False
+
+
+# ── image models: installed through the ComfyUI image catalog ─────────────────
+
+
+def test_installer_apply_starts_image_install_jobs(
+    isolated_app_client, tmp_hal0_home, monkeypatch, image_store
+):
+    """An ``img`` selection starts the same catalog install ``POST /api/comfyui/models/{id}/install``
+    does, and the response says so: the id and its job ride in ``image_installs``, not in
+    ``model_ids`` (those are for ``/api/models/{id}/pull/stream``)."""
+    from hal0.comfyui import install as comfyui_install
+    from hal0.registry.pull import PullJob
+
+    app, client = isolated_app_client
+    app.state.hardware_probe = _FakeProbe()
+    monkeypatch.setattr("hal0.install.profile_derive.rocm_lane_present", lambda *a, **k: True)
+
+    ran: list[str] = []
+    on_completes: list = []
+
+    async def _fake_run_install(job: PullJob, model, *, hf_token, client=None, on_complete=None):
+        ran.append(model.id)
+        on_completes.append(on_complete)
+        job.state = "completed"
+
+    monkeypatch.setattr(comfyui_install, "run_install", _fake_run_install)
+    comfyui_install.mark_removed("sdxl-lightning")  # an earlier removal of the model
+
+    payload = {
+        "storage_dir": tmp_hal0_home,
+        "slots": [
+            {
+                "capability": "img",
+                "slot_name": "img",
+                "port": 8188,
+                "model_id": "sdxl-lightning",
+            },
+        ],
+    }
+    r = client.post("/api/install/apply-selections", json=payload)
+
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["model_ids"] == []  # nothing for the registry pull stream
+    job = app.state.image_install_jobs["sdxl-lightning"]
+    assert data["image_installs"] == [{"model_id": "sdxl-lightning", "job_id": job.job_id}]
+    assert [s["slot"] for s in data["slots"]] == ["img"]
+    assert data["slots"][0]["pull_job_id"] is None
+    assert ran == ["sdxl-lightning"]
+    # It is the route's install, not a copy: asking for the model clears its removal record,
+    # and the follow-ups (workflows, auto-select, Open WebUI) run once it completes.
+    assert not comfyui_install.is_removed("sdxl-lightning")
+    assert on_completes[0].keywords["tree_lock"] is app.state.image_tree_lock
+    # The catalog's job list is where a client follows it.
+    jobs = client.get("/api/comfyui/jobs").json()["jobs"]
+    assert [j["model_id"] for j in jobs] == ["sdxl-lightning"]
+
+
+def test_installer_apply_skips_an_image_install_the_catalog_refuses(
+    isolated_app_client, tmp_hal0_home, monkeypatch, image_store
+):
+    """A refused catalog install (here: already running) is logged and skipped, never a 5xx."""
+    from hal0.registry.pull import make_job
+
+    app, client = isolated_app_client
+    app.state.hardware_probe = _FakeProbe()
+    monkeypatch.setattr("hal0.install.profile_derive.rocm_lane_present", lambda *a, **k: True)
+    running = make_job("sdxl-lightning")
+    running.state = "running"
+    app.state.image_install_jobs["sdxl-lightning"] = running
+
+    payload = {
+        "storage_dir": tmp_hal0_home,
+        "slots": [
+            {"capability": "img", "slot_name": "img", "port": 8188, "model_id": "sdxl-lightning"}
+        ],
+    }
+    r = client.post("/api/install/apply-selections", json=payload)
+
+    assert r.status_code == 200, r.text
+    assert r.json()["image_installs"] == [
+        {"model_id": "sdxl-lightning", "job_id": None, "skipped": "comfyui.install_running"}
+    ]
+    assert app.state.image_install_jobs["sdxl-lightning"] is running  # not replaced

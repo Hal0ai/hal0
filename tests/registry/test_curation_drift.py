@@ -4,7 +4,9 @@ These tests codify the contract that ``curated.py`` is the canonical
 definition of every model any other surface references:
 
 - every id in ``recommend._PRIMARY_TIERS`` must be a curated id, and
-- every ``model_name`` in the omni bundle manifests must be a curated id.
+- every ``model_name`` in the omni bundle manifests must be a curated id, except an
+  ``img`` entry, which must be an id of the ComfyUI image catalog (image models are not
+  in the registry).
 
 The second test is expected to FAIL until #500 reconciles the manifests
 against ``CURATED_MODELS`` (today the manifests reference legacy catalog
@@ -18,6 +20,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from hal0.comfyui.catalog import CATALOG
 from hal0.hardware.recommend import _PRIMARY_TIERS
 from hal0.registry.curated import CURATED_BY_ID
 
@@ -51,20 +54,19 @@ def test_primary_tiers_ids_are_curated() -> None:
     assert not missing, f"_PRIMARY_TIERS ids not defined in CURATED_MODELS: {missing}"
 
 
-# The two GGUF image ids the image catalog replaced (they left CURATED_MODELS with the
-# registry's image entries). The manifests still name them until the bundles move to
-# catalog ids; that change deletes this set and makes the check accept catalog ids.
-_PENDING_CATALOG_IDS = frozenset({"SD-Turbo-GGUF", "Flux-2-Klein-9B-GGUF"})
-
-
 def test_manifest_model_names_are_curated() -> None:
+    """An LLM member is a curated id; an image member (the ``img`` aux entry) is an image-catalog id."""
     refs = _manifest_model_refs()
+    image_ids = {
+        name for name, locs in refs.items() if any(loc.endswith(":aux/img") for loc in locs)
+    }
     missing = {
         name: locs
         for name, locs in refs.items()
-        if name not in CURATED_BY_ID and name not in _PENDING_CATALOG_IDS
+        if name not in (CATALOG if name in image_ids else CURATED_BY_ID)
     }
     detail = "\n".join(f"  {name}  ({', '.join(locs)})" for name, locs in sorted(missing.items()))
     assert not missing, (
-        "omni manifest model_names not defined in CURATED_MODELS (drift — #500):\n" + detail
+        "omni manifest model_names not defined in CURATED_MODELS (LLMs) or the image catalog "
+        "(img entries), drift — #500:\n" + detail
     )

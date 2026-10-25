@@ -36,28 +36,28 @@
       },
       {
         "slot": "img",
-        "model_name": "Flux-2-Klein-9B-GGUF",
-        "size_gb": 9.0,
+        "model_name": "qwen-image-lightning",
+        "size_gb": 51.4,
         "lru": true
       }
     ],
     "npu_trio_shown": true,
     "npu_trio_optin": false,
     "display_label": "hal0-Max",
-    "display_subtitle": "Top-of-line chat + coder + voice + Flux image, 100 GB+ Strix Halo",
+    "display_subtitle": "Top-of-line chat + coder + voice + image, 100 GB+ Strix Halo",
     "vendor": "hal0"
   },
   "omni": {
     "kind": "collection.omni",
     "name": "hal0-Max",
-    "description": "Max bundle: largest chat + coder (LRU), Kokoro voice, Flux 2 Klein.",
+    "description": "Max bundle: largest chat + coder (LRU), Kokoro voice, Qwen-Image Lightning.",
     "members": [
       { "model_name": "Qwen3.6-35B-A3B-MTP-GGUF" },
       { "model_name": "qwen3-coder-next" },
       { "model_name": "nomic-embed-text-v1.5-q8_0" },
       { "model_name": "bge-reranker-v2-m3-q4_k_m" },
       { "model_name": "kokoro-v1" },
-      { "model_name": "Flux-2-Klein-9B-GGUF" }
+      { "model_name": "qwen-image-lightning" }
     ]
   }
 }

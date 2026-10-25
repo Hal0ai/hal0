@@ -135,6 +135,39 @@ def test_apply_seeds_jobs_and_creates_slots(isolated_app_client, tmp_hal0_home, 
     assert "enabled" not in cfg
 
 
+def test_apply_tier_with_an_image_model_starts_its_catalog_install(
+    isolated_app_client, tmp_hal0_home, monkeypatch, image_store
+):
+    """hal0-Pro names ``sdxl-lightning`` for ``img``: a catalog id, so its install starts on
+    the image jobs (the registry pull stream knows nothing of it) and the response says so."""
+    from hal0.comfyui import install as comfyui_install
+
+    app, client = isolated_app_client
+    app.state.hardware_probe = _FakeProbe()
+
+    async def _fake_run_pull(job, **kw):
+        job.state = "completed"
+
+    async def _fake_run_install(job, model, *, hf_token, client=None, on_complete=None):
+        job.state = "completed"
+
+    monkeypatch.setattr("hal0.registry.pull.run_pull", _fake_run_pull)
+    monkeypatch.setattr(comfyui_install, "run_install", _fake_run_install)
+
+    r = client.post(
+        "/api/install/apply",
+        json={"tier": "hal0-Pro", "storage_dir": tmp_hal0_home, "npu_opt_in": False},
+    )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    job = app.state.image_install_jobs["sdxl-lightning"]
+    assert body["image_installs"] == [{"model_id": "sdxl-lightning", "job_id": job.job_id}]
+    assert "sdxl-lightning" not in body["model_ids"]
+    assert "Qwen3.6-27B-MTP-GGUF" in body["model_ids"]
+    assert "/api/comfyui/jobs" in body["next"]
+
+
 def test_apply_unknown_tier_400(isolated_app_client):
     _app, client = isolated_app_client
     r = client.post("/api/install/apply", json={"tier": "nope", "storage_dir": "/tmp"})

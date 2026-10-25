@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from hal0.bundles import tiers as bundle_tiers
+from hal0.comfyui.catalog import CATALOG, get_model
 
 
 def setup_function(_):
@@ -70,11 +71,11 @@ def test_hal0_pro_matches_plan_table():
     assert m.coder.size_gb == pytest.approx(18.6)
     assert m.coder.lru is True
     aux_models = {entry.model_name for entry in m.aux}
-    # +bge-reranker, +sd-turbo (plus carryover embed + kokoro:cpu — the
+    # +bge-reranker, +sdxl-lightning (plus carryover embed + kokoro:cpu — the
     # "+" notation in plan §8.2 inherits Default's aux). No whisper.cpp STT
     # model rides any tier (#2691).
     assert "bge-reranker-v2-m3-q4_k_m" in aux_models
-    assert "SD-Turbo-GGUF" in aux_models
+    assert "sdxl-lightning" in aux_models
     assert m.npu_trio_shown is True
     assert m.npu_trio_optin is False  # opt-in means user must tick the box
 
@@ -89,7 +90,7 @@ def test_hal0_max_matches_plan_table():
     assert m.coder.lru is True
     aux_models = {entry.model_name for entry in m.aux}
     assert not any("whisper" in name.lower() for name in aux_models)
-    assert "Flux-2-Klein-9B-GGUF" in aux_models
+    assert "qwen-image-lightning" in aux_models
     assert m.npu_trio_shown is True
 
 
@@ -99,9 +100,27 @@ def test_lmx_kit_matches_plan_table():
     assert m.primary is not None and m.primary.model_name == "Qwen3.6-35B-A3B-MTP-GGUF"
     assert m.coder is None  # vendor kit doesn't ship a coder
     aux_models = {entry.model_name for entry in m.aux}
-    assert aux_models == {"kokoro-v1", "Flux-2-Klein-9B-GGUF"}
+    assert aux_models == {"kokoro-v1", "qwen-image-lightning"}
     assert m.vendor == "amd"
     assert m.npu_trio_shown is False  # kit doesn't expose the toggle
+
+
+def test_bundle_img_members_are_catalog_ids():
+    """An image member is an image-catalog id (``hal0.comfyui.catalog``), not a registry id.
+
+    Both places a bundle names it, the ``aux`` entry and the ``omni.members`` list, carry
+    the same id, and the entry's ``size_gb`` is the catalog's ``approx_gb`` (one owner for
+    the size of an image model).
+    """
+    with_img = []
+    for manifest in bundle_tiers.load_all_bundles():
+        members = {m["model_name"] for m in manifest.omni["members"]}
+        for entry in (e for e in manifest.bundle.aux if e.slot == "img"):
+            with_img.append(manifest.bundle.name)
+            assert entry.model_name in CATALOG, (manifest.bundle.name, entry.model_name)
+            assert entry.size_gb == get_model(entry.model_name).approx_gb
+            assert entry.model_name in members, (manifest.bundle.name, entry.model_name)
+    assert with_img == ["hal0-Pro", "hal0-Max", "LMX-Omni-52B-Halo"]
 
 
 def test_list_bundle_summaries_matches_load_all_bundles():

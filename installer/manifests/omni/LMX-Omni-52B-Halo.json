@@ -19,8 +19,8 @@
       },
       {
         "slot": "img",
-        "model_name": "Flux-2-Klein-9B-GGUF",
-        "size_gb": 9.0,
+        "model_name": "qwen-image-lightning",
+        "size_gb": 51.4,
         "lru": false
       }
     ],
@@ -37,7 +37,7 @@
     "members": [
       { "model_name": "Qwen3.6-35B-A3B-MTP-GGUF" },
       { "model_name": "kokoro-v1" },
-      { "model_name": "Flux-2-Klein-9B-GGUF" }
+      { "model_name": "qwen-image-lightning" }
     ]
   }
 }
