@@ -142,7 +142,7 @@ async def test_create_with_tts_voice_defaults_and_tables_loads(tmp_hal0_home: st
             "type": "image",
             "provider": "comfyui",
             "profile": "comfyui",
-            "image": {"idle_restore_minutes": 5, "default_size": "512x512", "default_steps": 8},
+            "image": {"default_size": "512x512", "default_steps": 8},
         },
     )
     loaded = _load_everything()
@@ -331,10 +331,10 @@ async def test_update_config_npu_and_image_tables_load(tmp_hal0_home: str) -> No
         "img",
         {"name": "img", "port": 8188, "type": "image", "provider": "comfyui", "profile": "comfyui"},
     )
-    await sm.update_config("img", {"image": {"idle_restore_minutes": 3}})
+    await sm.update_config("img", {"image": {"default_steps": 3}})
     loaded = _load_everything()
     assert loaded["flm"].npu is not None and loaded["flm"].npu.asr is True
-    assert loaded["img"].image_gen.idle_restore_minutes == 3
+    assert loaded["img"].image_gen.default_steps == 3
 
 
 # ── NPU trio shadows ─────────────────────────────────────────────────────────
@@ -441,7 +441,7 @@ async def test_id_keying_migration_output_loads(tmp_hal0_home: str) -> None:
             "type": "image",
             "provider": "comfyui",
             "profile": "comfyui",
-            "image": {"idle_restore_minutes": 9},
+            "image": {"default_steps": 9},
         },
     )
     await sm.create(

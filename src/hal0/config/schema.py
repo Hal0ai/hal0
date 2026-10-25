@@ -166,23 +166,13 @@ class NpuConfig(BaseModel):
 class ImageGenConfig(BaseModel):
     """[image] table in a slot TOML — persisted image-gen settings (#599).
 
-    Carried by the img (ComfyUI) slot.  ``idle_restore_minutes`` feeds the
-    GpuArbiter's restore timer (Phase D spec §7): after the img slot has
-    had no jobs for this many minutes, the arbiter restores the LLM GPU
-    slots it stopped.  ``default_size``/``default_steps`` seed the image
-    generation request defaults surfaced in the dashboard.
+    Carried by the img (ComfyUI) slot.  ``default_size``/``default_steps`` seed
+    the image generation request defaults surfaced in the dashboard.  Image
+    mode needs no setting: it ends when generation stops (ADR-0038).
     """
 
     model_config = {"extra": "forbid"}
 
-    idle_restore_minutes: int = Field(
-        default=60,
-        ge=0,
-        description=(
-            "Minutes of img-slot job inactivity before the GpuArbiter "
-            "restores stopped LLM GPU slots.  0 = never auto-restore."
-        ),
-    )
     default_size: str = Field(
         default="",
         description=(
@@ -603,8 +593,8 @@ class SlotConfig(BaseModel):
         default_factory=ImageGenConfig,
         alias="image",
         description=(
-            "[image] table — image-gen settings (idle_restore_minutes, "
-            "default_size, default_steps). See ImageGenConfig (#599)."
+            "[image] table — image-gen settings (default_size, "
+            "default_steps). See ImageGenConfig (#599)."
         ),
     )
 

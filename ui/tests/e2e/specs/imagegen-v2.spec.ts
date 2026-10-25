@@ -24,7 +24,7 @@ function comfyV2Status(overrides: Record<string, any> = {}) {
     inference: { hermes: false },
     inventory: { checkpoints: 6, video: 4, loras: 11, vae: 3 },
     switchover: { active: false, target: null, error: null },
-    arbiter: { mode: 'img', pinned: false, saved_llm_slots: ['primary', 'agent'], idle_restore_at: null },
+    arbiter: { mode: 'img', pinned: false, saved_llm_slots: ['primary', 'agent'], switching: false, image_jobs: 0 },
     // V2 render-hero specific fields (mock)
     active_render: {
       name: 'wan2.2-i2v',

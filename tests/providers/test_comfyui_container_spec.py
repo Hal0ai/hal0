@@ -243,11 +243,11 @@ def test_image_section_dict_is_not_an_image_override(monkeypatch) -> None:
         "port": 8188,
         "profile": "comfyui",
         "provider": "comfyui",
-        "image": {"idle_restore_minutes": 5, "default_size": "1024x1024"},
+        "image": {"default_size": "1024x1024"},
     }
     ref = ComfyUIProvider().image_ref(cfg)
     assert isinstance(ref, str)
-    assert "idle_restore_minutes" not in ref
+    assert "1024x1024" not in ref
     assert "hal0ai/hal0-runner-comfyui" in ref  # the runner pin
 
 

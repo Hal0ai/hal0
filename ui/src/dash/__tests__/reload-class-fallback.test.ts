@@ -2,7 +2,7 @@
 // backend apply-plan registry can't classify (they aren't Hal0Config paths).
 // Lock the fallback classifications so a badge can never silently vanish.
 import { describe, expect, it } from 'vitest'
-import { reloadClassFor, SERVICE_HAL0_API, SERVICE_SLOTS } from '../settings/data/reloadClass.js'
+import { reloadClassFor, SERVICE_SLOTS } from '../settings/data/reloadClass.js'
 
 describe('RELOAD_CLASS_FALLBACK capability keys', () => {
   it.each([
@@ -13,13 +13,6 @@ describe('RELOAD_CLASS_FALLBACK capability keys', () => {
     'slot.image.default_steps',
   ])('%s is immediate (injected per-request)', (key) => {
     expect(reloadClassFor(key, {})).toEqual({ apply_class: 'immediate', services: [] })
-  })
-
-  it('slot.image.idle_restore_minutes needs a hal0-api restart', () => {
-    expect(reloadClassFor('slot.image.idle_restore_minutes', {})).toEqual({
-      apply_class: 'service-restart',
-      services: [SERVICE_HAL0_API],
-    })
   })
 
   it('npu keys stay service-restart on the slots service', () => {

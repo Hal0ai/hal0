@@ -1,8 +1,8 @@
 // Image generation — img.img capability slot (ComfyUI engine) + [image]
 // generation defaults on the img slot TOML (#599 ImageGenConfig). Ported from
 // ImageGenPage. default_size/default_steps are per-request fallbacks
-// (immediate); idle_restore_minutes feeds the GpuArbiter at construction
-// (service-restart hal0-api) — badges come from reloadClass.js fallback rows.
+// (immediate) — badges come from reloadClass.js fallback rows. Image mode has
+// no setting: it ends when generation stops (ADR-0038).
 // Workflows, queue, and inventory live on the ComfyUI pane, not here.
 import { useState, useEffect } from 'react'
 import { useSlots, useSlotEdit, useSlotConfig } from '@/api/hooks/useSlots'
@@ -16,7 +16,6 @@ import { statusChip, PanelHeader, PanelFooter, EnabledRow, ModelRow, selStyle, i
 // literal size back on any save would pin every model to it.
 const DEF_SIZE = ""
 const DEF_STEPS = "0"
-const DEF_IDLE = "60"
 
 // The img catalog is empty only on a host with no ComfyUI engine (no ROCm lane): any
 // other host lists every catalog model, marked when its weights are not on disk. So an
@@ -47,31 +46,27 @@ export function ImagePanel({ registry }) {
 
   const origSize = imgCfgImage.default_size != null ? String(imgCfgImage.default_size) : DEF_SIZE
   const origSteps = imgCfgImage.default_steps != null ? String(imgCfgImage.default_steps) : DEF_STEPS
-  const origIdle = imgCfgImage.idle_restore_minutes != null ? String(imgCfgImage.idle_restore_minutes) : DEF_IDLE
 
   const [size, setSize] = useState(DEF_SIZE)
   const [steps, setSteps] = useState(DEF_STEPS)
-  const [idle, setIdle] = useState(DEF_IDLE)
 
   useEffect(() => {
     const img = imgCfgQuery.data?.image || {}
     setSize(img.default_size != null ? String(img.default_size) : DEF_SIZE)
     setSteps(img.default_steps != null ? String(img.default_steps) : DEF_STEPS)
-    setIdle(img.idle_restore_minutes != null ? String(img.idle_restore_minutes) : DEF_IDLE)
   }, [imgCfgQuery.data])
 
-  const defaultsDirty = !!imgSlotName && (size !== origSize || steps !== origSteps || idle !== origIdle)
+  const defaultsDirty = !!imgSlotName && (size !== origSize || steps !== origSteps)
   const dirty = sel.dirty || defaultsDirty
 
   const doSave = async () => {
     try {
       await sel.save()
       if (defaultsDirty) {
-        // Coerce to ImageGenConfig field types (steps/idle non-negative ints).
+        // Coerce to ImageGenConfig field types (steps is a non-negative int).
         await editSlot.mutateAsync({ name: imgSlotName, body: { image: {
           default_size: size.trim(),
           default_steps: Math.max(0, parseInt(steps, 10) || 0),
-          idle_restore_minutes: Math.max(0, parseInt(idle, 10) || 0),
         } } })
       }
       window.__hal0Toast && window.__hal0Toast("Image generation settings saved", "ok")
@@ -80,7 +75,7 @@ export function ImagePanel({ registry }) {
     }
   }
 
-  const resetAll = () => { sel.reset(); setSize(origSize); setSteps(origSteps); setIdle(origIdle) }
+  const resetAll = () => { sel.reset(); setSize(origSize); setSteps(origSteps) }
 
   return (
     <div className="s-panel">
@@ -122,11 +117,6 @@ export function ImagePanel({ registry }) {
       <SRow k="Default steps" sub="Sampler steps · 0 = use the model-class default"
         actions={<ApplyBadge settingsKey="slot.image.default_steps" registry={registry} />} v={
         <input type="number" min={0} value={steps} onChange={e => setSteps(e.target.value)} placeholder={DEF_STEPS}
-          disabled={!imgSlotName} className="mono" style={inputStyle(100)} />
-      } />
-      <SRow k="Idle restore" sub="Minutes of img inactivity before the GPU arbiter restores LLM slots · 0 = manual only"
-        actions={<ApplyBadge settingsKey="slot.image.idle_restore_minutes" registry={registry} />} v={
-        <input type="number" min={0} value={idle} onChange={e => setIdle(e.target.value)} placeholder={DEF_IDLE}
           disabled={!imgSlotName} className="mono" style={inputStyle(100)} />
       } />
       {!imgSlotName && (

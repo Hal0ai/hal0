@@ -14,7 +14,7 @@ export const ENDPOINTS = {
   // Read-only aggregate of docker + systemd + ComfyUI HTTP.
   comfyuiStatus: '/api/comfyui/status',
   comfyuiSwitchover: '/api/comfyui/switchover',
-  // Pin image mode (disables the arbiter's idle auto-restore).
+  // Pin image mode (hold it until unpinned).
   comfyuiPin: '/api/comfyui/pin',
   // Render control
   comfyuiRenderCancel: '/api/comfyui/render/cancel',

@@ -122,7 +122,7 @@ def test_nested_slot_image_key_is_ignored() -> None:
 def test_image_gen_dict_does_not_break_resolution() -> None:
     """The [image] image-gen table (#599) shares no key with image_pin, so it
     can never be mis-read as a ref (the prior str(dict) overload is gone)."""
-    slot_cfg = {"image": {"idle_restore_minutes": 0, "default_steps": 30}, "binary": "cpu"}
+    slot_cfg = {"image": {"default_size": "512x512", "default_steps": 30}, "binary": "cpu"}
     assert _resolve_image_ref(slot_cfg, _profile()) == _cpu_image()
 
 

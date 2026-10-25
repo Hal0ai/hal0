@@ -36,7 +36,7 @@ def _img_cfg() -> dict[str, Any]:
         "runtime": "container",
         "profile": "comfyui",
         "port": 8188,
-        "image": {"idle_restore_minutes": 60, "default_size": "1024x1024"},
+        "image": {"default_size": "1024x1024"},
     }
 
 

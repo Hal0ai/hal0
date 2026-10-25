@@ -62,7 +62,7 @@ export const BANNER_CATALOG: ReadonlyArray<BannerEntry> = Object.freeze([
     kind: 'info',
     eyebrow: 'GPU · arbiter',
     heading: 'GPU: image mode',
-    body: 'LLM slots are stopped while image generation holds the GPU — they restore automatically after idle.',
+    body: 'LLM slots are stopped while image generation holds the GPU — they reload shortly after the last render finishes.',
     actions: [{ label: 'View slots', primary: true }],
   },
   // ── Slots view ──────────────────────────────────────────────────

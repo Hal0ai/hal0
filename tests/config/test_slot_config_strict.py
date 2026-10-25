@@ -239,12 +239,26 @@ def test_the_tables_are_declared_too() -> None:
             "model": {"default": "m"},
             "server": {"env": {"A": "b"}},
             "npu": {"asr": True},
-            "image": {"idle_restore_minutes": 5},
+            "image": {"default_steps": 4},
         }
     )
     assert cfg.server.env == {"A": "b"}
     assert cfg.npu is not None and cfg.npu.asr is True
-    assert cfg.image_gen.idle_restore_minutes == 5
+    assert cfg.image_gen.default_steps == 4
+
+
+def test_image_table_refuses_idle_restore_minutes() -> None:
+    """ADR-0038: image mode ends when generation stops, so ``[image]`` no
+    longer carries an idle window and refuses the key like any unknown one."""
+    with pytest.raises(ValidationError) as exc:
+        SlotConfig.model_validate(
+            {
+                "name": "x",
+                "port": 8081,
+                "image": {"idle_restore_minutes": 5},
+            }
+        )
+    assert "idle_restore_minutes" in str(exc.value)
 
 
 # ── the two on-disk shapes ───────────────────────────────────────────────────

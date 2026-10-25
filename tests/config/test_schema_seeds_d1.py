@@ -27,7 +27,8 @@ def test_seed_img_toml_validates() -> None:
     assert cfg.provider == "comfyui"
     assert cfg.port == 8188
     assert cfg.device == "gpu-rocm"
-    assert cfg.image_gen.idle_restore_minutes == 60  # #599 [image] section
+    assert (cfg.image_gen.default_size, cfg.image_gen.default_steps) == ("", 0)  # #599 [image]
+    assert "idle_restore_minutes" not in raw["image"]
 
 
 def test_seed_profiles_toml_materialises_no_seeds() -> None:
@@ -56,7 +57,7 @@ def test_port_range_admits_comfyui_stock_port() -> None:
 def test_image_gen_section_defaults() -> None:
     # An empty default_size is "the model's native size": the render path falls through to it.
     s = ImageGenConfig()
-    assert (s.idle_restore_minutes, s.default_size, s.default_steps) == (60, "", 0)
+    assert (s.default_size, s.default_steps) == ("", 0)
 
 
 def test_bare_string_image_is_refused() -> None:
@@ -83,13 +84,11 @@ def test_load_slot_config_populates_image_gen(tmp_path: Path) -> None:
         "port = 8188\n"
         "\n"
         "[image]\n"
-        "idle_restore_minutes = 9\n"
         'default_size = "512x512"\n'
         "default_steps = 12\n",
         encoding="utf-8",
     )
     cfg = load_slot_config("img", path=p)
-    assert cfg.image_gen.idle_restore_minutes == 9
     assert cfg.image_gen.default_size == "512x512"
     assert cfg.image_gen.default_steps == 12
 
@@ -97,14 +96,14 @@ def test_load_slot_config_populates_image_gen(tmp_path: Path) -> None:
 def test_save_load_round_trip_preserves_image_gen(tmp_path: Path) -> None:
     src = tmp_path / "img.toml"
     src.write_text(
-        '[slot]\nname = "img"\nport = 8188\n\n[image]\nidle_restore_minutes = 9\n',
+        '[slot]\nname = "img"\nport = 8188\n\n[image]\ndefault_steps = 9\n',
         encoding="utf-8",
     )
     cfg = load_slot_config("img", path=src)
     dst = tmp_path / "img-rt.toml"
     save_slot_config(cfg, path=dst)
     reloaded = load_slot_config("img", path=dst)
-    assert reloaded.image_gen.idle_restore_minutes == 9
+    assert reloaded.image_gen.default_steps == 9
     assert reloaded.image_gen == cfg.image_gen
 
 

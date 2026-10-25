@@ -1003,7 +1003,6 @@ async def test_update_config_preserves_sibling_table_keys(
                 "[model]",
                 'default = "qwen3-4b-q4_k_m"',
                 "[image]",
-                "idle_restore_minutes = 30",
                 'default_size = "512x512"',
                 "",
             ]
@@ -1014,11 +1013,7 @@ async def test_update_config_preserves_sibling_table_keys(
     await sm._transition("chat", _S.OFFLINE, force=True)
     await sm.update_config("chat", {"image": {"default_steps": 8}})
     on_disk = tomllib.loads((slot_root / "chat.toml").read_text(encoding="utf-8"))
-    assert on_disk["image"] == {
-        "idle_restore_minutes": 30,
-        "default_size": "512x512",
-        "default_steps": 8,
-    }
+    assert on_disk["image"] == {"default_size": "512x512", "default_steps": 8}
     # The model binding MUST survive an unrelated partial update.
     assert on_disk["model"] == {"default": "qwen3-4b-q4_k_m"}
 
@@ -1071,11 +1066,11 @@ async def test_update_config_refuses_tuning_keys(
         ),
         # A partial [image] update keeps the seeded sibling.
         (
-            ["[model]", 'default = "seed-model"', "[image]", "idle_restore_minutes = 30"],
+            ["[model]", 'default = "seed-model"', "[image]", 'default_size = "512x512"'],
             {"image": {"default_steps": 4}},
             {
                 "model": {"default": "seed-model"},
-                "image": {"idle_restore_minutes": 30, "default_steps": 4},
+                "image": {"default_size": "512x512", "default_steps": 4},
             },
         ),
         # An explicit None deletes the key (TOML has no null).

@@ -296,7 +296,7 @@ const HAL0_DATA = {
     inference: { hermes: true },
     inventory: { checkpoints: 3, diffusion: 2, loras: 8, vae: 2 },
     switchover: { active: false, target: null, error: null },
-    arbiter: { mode: "llm", pinned: false, saved_llm_slots: [], idle_restore_at: null },
+    arbiter: { mode: "llm", pinned: false, saved_llm_slots: [], switching: false, image_jobs: 0 },
   },
 
   downloads: [

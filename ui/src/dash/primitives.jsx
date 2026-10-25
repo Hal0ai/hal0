@@ -417,7 +417,7 @@ const BANNER_CATALOG = [
     id: "gpu-image-mode", scope: "global", kind: "info",
     eyebrow: "GPU · arbiter",
     heading: "GPU: image mode",
-    body: "LLM slots are stopped while image generation holds the GPU — they restore automatically after idle.",
+    body: "LLM slots are stopped while image generation holds the GPU — they reload shortly after the last render finishes.",
     actions: [
       { label: "View slots", primary: true, onClick: () => window.location.hash = "#slots" },
     ],
@@ -663,7 +663,7 @@ function GpuImageModeBanner() {
       kind="info"
       eyebrow="GPU · arbiter"
       heading="GPU: image mode"
-      body="LLM slots are stopped while image generation holds the GPU — they restore automatically after idle."
+      body="LLM slots are stopped while image generation holds the GPU — they reload shortly after the last render finishes."
       actions={
         <button className="btn sm" onClick={() => { window.location.hash = "#slots"; }}>
           View slots
