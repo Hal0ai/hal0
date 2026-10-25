@@ -120,16 +120,19 @@ token of its own:
   box itself: loopback, or the address `hal0-api` binds. It opens no other
   route, no WebSocket and no stream.
 - **When the gate has none.** A container started before the token existed,
-  such as one still running from before the update, sends no credential, and
-  the gate refuses every image prompt at once with a message that says so.
-  Run `hal0 slot restart img`. The gate also holds the token back when
+  such as one still running from before the update, sends no credential. On a
+  box that needs one (enforcement on, or the LAN rule above) the gate then
+  refuses every image prompt at once with a message that says so; run `hal0
+  slot restart img`. Elsewhere its requests pass without a credential, as
+  before. The gate also holds the token back when
   `HAL0_BIND_HOST` is a host name rather than an address (it speaks plain
   HTTP, and a name is resolved on every request), so set an address there.
 - **Replacing it.** Delete the token file, then run `hal0 slot restart img`;
   hal0 mints a new one.
 
 `HAL0_COMFYUI_GATE_FAIL_OPEN=1` still lets prompts through unguarded, as in
-v1.6.5, when hal0 refuses the gate. See
+v1.6.5, when hal0 refuses the gate's credential; a switch or prompt that hal0
+answered and refused stays refused. See
 [ComfyUI's editor and the GPU gate](/docs/guides/generate-images#comfyuis-editor-and-the-gpu-gate).
 
 ## ADMIN routes on a LAN-bound box
