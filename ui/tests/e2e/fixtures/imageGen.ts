@@ -16,6 +16,12 @@ import { json } from './apiMock'
 
 type Body = Record<string, any>
 
+// A 1x1 PNG.
+const PNG_1X1 = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+  'base64',
+)
+
 /** A fit that fits, as `GET /api/comfyui/models` and `/fit` carry it. */
 export const FITS = {
   verdict: 'fits',
@@ -132,6 +138,135 @@ export function memoryBudget(over: Body = {}): Body {
   }
 }
 
+/**
+ * The reference box: a 64 GB unified-memory machine with one chat slot (`brain`, 9.6 GB) loaded.
+ * A render can use 58.2 GB once image mode has unloaded `brain`, and RAM is the system's.
+ */
+export function referenceBoxMemory(): Body {
+  return {
+    gpu: {
+      kind: 'shared',
+      total_gb: 62.4,
+      used_gb: 11.8,
+      this_box: [{ slot: 'brain', gb: 9.6, state: 'serving' }],
+      image_engine_gb: 0,
+      image_engine_slot: 'img',
+      image_engine_estimated: false,
+      other_guests_gb: 2.2,
+      attribution_excess_gb: 0,
+      free_gb: 50.6,
+    },
+    ram: { limit_gb: 62.7, used_gb: 9.8, free_gb: 52.9, source: 'system' },
+    render_free_gb: 58.2,
+  }
+}
+
+/**
+ * The capped guest: a 48 GB container on a 116 GB shared pool whose other guests hold 43.4 GB of
+ * it (the box of memory-budget-capped-guest-v3). The GPU has room; RAM is what is short.
+ */
+export function cappedGuestMemory(): Body {
+  return {
+    gpu: {
+      kind: 'shared',
+      total_gb: 116,
+      used_gb: 43.4,
+      this_box: [],
+      image_engine_gb: 0,
+      image_engine_slot: 'img',
+      image_engine_estimated: false,
+      other_guests_gb: 43.4,
+      attribution_excess_gb: 0,
+      free_gb: 72.6,
+    },
+    ram: { limit_gb: 48, used_gb: 2.2, free_gb: 45.8, source: 'container' },
+    render_free_gb: 70.6,
+  }
+}
+
+/** An install job (`PullJob.as_dict()`): queued, nothing downloaded, until `over` says more. */
+export function imageJob(modelId: string, over: Body = {}): Body {
+  return {
+    id: `job-${modelId}`,
+    model_id: modelId,
+    state: 'queued',
+    bytes_downloaded: 0,
+    bytes_total: 0,
+    started_at: 1_761_400_000,
+    finished_at: null,
+    error: null,
+    error_code: null,
+    sha256: null,
+    path: null,
+    files: [],
+    ...over,
+  }
+}
+
+// The catalog's own rows (src/hal0/comfyui/catalog.py), in GiB the way `_model_row` reports them.
+// The id, label, licence, speed, sizes and sampler defaults are the catalog's. A row starts
+// uninstalled (`state: 'none'`, every file missing); `INSTALLED` turns it into an installed one,
+// and `fit` is the verdict the mock server gives on the box in question.
+
+/** What an installed row changes: every file is on disk. */
+export const INSTALLED = { state: 'complete', missing_gb: 0, missing: [] } as const
+
+/** SDXL Lightning (8-step): the starter pick for a box with 16..96 GB. 7.6 GB decimal is 7.1 GiB. */
+export function sdxlLightning(over: Body = {}): Body {
+  return catalogRow('sdxl-lightning', {
+    state: 'none',
+    label: 'SDXL Lightning (8-step)',
+    license: 'CreativeML-OpenRAIL++',
+    est_seconds: 10,
+    sizes: ['1024x1024', '1152x896', '896x1152', '1216x832', '832x1216', '1344x768', '768x1344'],
+    notes: "SDXL base with ByteDance's 8-step Lightning LoRA and the fp16-fix VAE.",
+    defaults: { steps: 8, cfg: 1 },
+    approx_gb: 7.1,
+    missing_gb: 7.1,
+    missing: ['checkpoints/sd_xl_base_1.0.safetensors'],
+    ...over,
+  })
+}
+
+/** Stable Diffusion 1.5: the starter pick below 16 GB. 4.3 GB decimal is 4.0 GiB. */
+export function sd15(over: Body = {}): Body {
+  return catalogRow('sd-1.5-pruned-emaonly', {
+    state: 'none',
+    label: 'Stable Diffusion 1.5',
+    license: 'CreativeML-Open-RAIL-M',
+    est_seconds: 5,
+    sizes: ['512x512', '512x768', '768x512'],
+    notes: 'Pruned EMA-only checkpoint; runs on small GPUs. Quality drops above 768.',
+    defaults: { steps: 20, cfg: 8 },
+    approx_gb: 4,
+    missing_gb: 4,
+    missing: ['checkpoints/v1-5-pruned-emaonly.safetensors'],
+    ...over,
+  })
+}
+
+/** Qwen-Image (4-step Lightning): 47.9 GiB of weights, loads through RAM (45.5 GiB measured floor). */
+export function qwenLightning(over: Body = {}): Body {
+  return catalogRow('qwen-image-lightning', {
+    state: 'none',
+    label: 'Qwen-Image (4-step Lightning)',
+    license: 'Apache-2.0',
+    est_seconds: 75,
+    sizes: ['1328x1328', '1664x928', '928x1664', '1472x1140', '1140x1472'],
+    notes: 'Qwen-Image 2512 in bf16 with the 4-step Lightning LoRA.',
+    defaults: { steps: 4, cfg: 1 },
+    approx_gb: 47.9,
+    missing_gb: 47.9,
+    missing: ['diffusion_models/qwen_image_2512_bf16.safetensors'],
+    ...over,
+  })
+}
+
+/** A fit the mock server judged, in the shape of `Fit.as_dict()` (src/hal0/comfyui/fit.py). */
+export function fitOf(verdict: 'fits' | 'tight' | 'wont_fit', fit: Body): Body {
+  return { verdict, reason: null, ...fit }
+}
+
 export interface ImageGenMock {
   status: Body | { __status: number }
   arbiter: Body
@@ -144,6 +279,10 @@ export interface ImageGenMock {
   memory: Body
   /** What `POST /v1/images/generations` does: answer, or hold the request for the test. */
   generate: (route: Route) => Promise<void> | void
+  /** The verdict `GET /models/{id}/fit` gives per model id; a model not listed fits (`FITS`). */
+  fits: Record<string, Body | null>
+  /** The job `POST /models/{id}/install` answers 202 with; the default is a queued one. */
+  install: (modelId: string) => Body
   /** Every POST/DELETE the pane sent: `[path, body]`. */
   posts: [string, any][]
 }
@@ -169,6 +308,8 @@ export function makeImageGenMock(over: Partial<ImageGenMock> = {}): ImageGenMock
     },
     memory: memoryBudget(),
     generate: (route) => json(route, { created: 0, data: [] }),
+    fits: {},
+    install: (modelId) => imageJob(modelId),
     posts: [],
     ...over,
   }
@@ -200,7 +341,9 @@ export async function routeImageGen(page: Page, mock: ImageGenMock) {
   await page.route('**/api/comfyui/models', (route) => json(route, mock.models))
   await page.route(/\/api\/comfyui\/models\/[^/]+\/fit/, (route) => {
     const url = new URL(route.request().url())
-    return json(route, { fit: FITS, size: url.searchParams.get('size') ?? '1024x1024' })
+    const id = decodeURIComponent(url.pathname.split('/').at(-2) ?? '')
+    const fit = id in mock.fits ? mock.fits[id] : FITS
+    return json(route, { fit, size: url.searchParams.get('size') ?? '1024x1024' })
   })
   await page.route('**/api/comfyui/jobs', (route) => json(route, { jobs: mock.jobs }))
   await page.route('**/api/comfyui/files', (route) => json(route, { root: '/models/comfyui', files: mock.files }))
@@ -209,6 +352,15 @@ export async function routeImageGen(page: Page, mock: ImageGenMock) {
   await page.route('**/api/config/urls', (route) => json(route, mock.urls))
   await page.route('**/api/stats/hardware', (route) => json(route, { memory: mock.memory }))
 
+  await page.route(/\/api\/comfyui\/models\/[^/]+\/install$/, (route) => {
+    const id = decodeURIComponent(new URL(route.request().url()).pathname.split('/').at(-2) ?? '')
+    return record(route, { job: mock.install(id) })
+  })
+  // A rendered image: the cache path `/v1/images/generations` answers with. One pixel is enough
+  // for the tile's <img> to load.
+  await page.route('**/api/images/cache/*.png', (route) =>
+    route.fulfill({ status: 200, contentType: 'image/png', body: PNG_1X1 }),
+  )
   await page.route('**/api/comfyui/restart', (route) => record(route, { status: 'restart_requested' }))
   await page.route('**/api/comfyui/render/cancel', (route) => record(route, { status: 'cancel_requested' }))
   await page.route('**/api/comfyui/switchover', (route) => record(route, { status: 'accepted' }))
