@@ -217,18 +217,31 @@ carries the reason, when:
 - hal0 still holds the GPU for the LLM slots after three switch requests;
 - the switch has not finished after 180 seconds;
 - hal0 is unreachable, or does not say which mode holds the GPU, for 5
-  seconds after the prompt is submitted.
+  seconds after the prompt is submitted;
+- hal0 answers 401 or 403, at once: it requires authentication, and the gate
+  has no credential (see the limitation below).
 
 Queue the prompt again once the reason is gone.
 
-To let prompts through while `hal0-api` is down, set
-`HAL0_COMFYUI_GATE_FAIL_OPEN=1` in `/etc/hal0/api.env`, restart `hal0-api`,
-then run `hal0 slot restart img`. hal0 writes the setting into the slot's
-unit when it loads the slot, so a bare `systemctl restart` of the unit does
-not pick it up. The setting covers only an unreachable hal0: a prompt that
-hal0 answered and refused stays refused. With `hal0-api` down, the GPU most
-likely still holds the LLM slots, so a prompt let through then renders next
-to them.
+To let prompts through while `hal0-api` is down or requires authentication,
+as the gate did in v1.6.5, set `HAL0_COMFYUI_GATE_FAIL_OPEN=1` in
+`/etc/hal0/api.env`, restart `hal0-api`, then run `hal0 slot restart img`.
+hal0 writes the setting into the slot's unit when it loads the slot, so a bare
+`systemctl restart` of the unit does not pick it up. The setting covers only
+those two cases: a prompt that hal0 answered and refused stays refused. A
+prompt it lets through is unguarded: with `hal0-api` down the GPU most likely
+still holds the LLM slots, so it renders next to them.
+
+<Aside type="caution" title="Known limitation: auth enforcement stops image generation">
+With auth enforcement on (`hal0 auth require on`, see
+[Authentication](/docs/operate/auth)), `hal0-api` refuses unauthenticated
+requests from loopback too, and the GPU gate has no credential for it yet (a
+gate credential is planned for 1.7). The gate then refuses every image prompt
+at once: the editor's, hal0's own `/v1` renders, Open WebUI's and the omni
+loop's. To keep generating images on such a box, set
+`HAL0_COMFYUI_GATE_FAIL_OPEN=1` as above; the gate then lets prompts through
+unguarded, as v1.6.5 did.
+</Aside>
 
 **After updating hal0, run `hal0 slot restart img` once.** A running `img`
 container keeps the gate it started with, and `hal0 update` does not restart

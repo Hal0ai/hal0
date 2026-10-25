@@ -99,6 +99,18 @@ To go back to open access: `hal0 auth require off`. On a box bound past
 loopback that still has an admin key, this does not re-open ADMIN-class
 routes to off-box callers — see the next section.
 
+<Aside type="caution" title="Known limitation: image generation with enforcement on">
+With enforcement on, ComfyUI's GPU gate node is refused too: it calls
+`/api/comfyui/*` from loopback with no credential, and a gate credential is
+planned for 1.7. Until then every image prompt is refused at once, including
+`/v1/images/generations` and Open WebUI's images, with a message that says
+hal0 requires authentication. To keep generating images, set
+`HAL0_COMFYUI_GATE_FAIL_OPEN=1` in `/etc/hal0/api.env`, restart `hal0-api`,
+then run `hal0 slot restart img`: the gate then lets prompts through
+unguarded, as it did in v1.6.5. See
+[ComfyUI's editor and the GPU gate](/docs/guides/generate-images#comfyuis-editor-and-the-gpu-gate).
+</Aside>
+
 ## ADMIN routes on a LAN-bound box
 
 Since v1.3.0, `require_auth = false` no longer waves every request through.

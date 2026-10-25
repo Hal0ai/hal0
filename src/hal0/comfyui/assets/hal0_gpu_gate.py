@@ -26,8 +26,8 @@ If hal0 reports inference again after the hook asked for image mode (an LLM
 request took the GPU back before the prompt reached ComfyUI's queue), the hook
 asks again, a bounded number of times.
 
-A prompt never renders on top of the loaded LLM set. The hook refuses it, and
-ComfyUI's editor shows its prompt-error dialog with hal0's reason, when:
+A prompt never renders on top of the loaded LLM set. The hook refuses it,
+answering the prompt with a 503 that carries hal0's reason, when:
 
   - hal0 rejects the switch request right after reporting inference;
   - hal0 keeps the GPU in inference mode after those requests;
@@ -35,9 +35,13 @@ ComfyUI's editor shows its prompt-error dialog with hal0's reason, when:
     switch by the deadline;
   - hal0 is unreachable (or reports no GPU mode) for ``_UNREACHABLE_RETRY_S``
     from the first read: with hal0-api down the GPU most likely holds the LLM
-    set, which is its resting state. ``HAL0_COMFYUI_GATE_FAIL_OPEN=1`` in the
-    container's environment lets prompts through in this case only (the img
-    slot passes it on from hal0-api's environment).
+    set, which is its resting state;
+  - hal0 answers 401 or 403 (``hal0 auth require on`` gates loopback too, and
+    the gate has no credential yet), at once, with its own reason.
+
+``HAL0_COMFYUI_GATE_FAIL_OPEN=1`` in the container's environment lets prompts
+through in the last two cases only, as v1.6.5 did (the img slot passes it on
+from hal0-api's environment).
 
 The decision logic (``prepare_image_mode``) is
 unit-tested in the hal0 repo (tests/comfyui/test_hal0_gpu_gate.py, and against
@@ -86,10 +90,11 @@ _SWITCH_POLL_S = _float_env("HAL0_COMFYUI_SWITCH_POLL_S", 0.5)
 #: How long an unreachable hal0 (no answer since this prompt arrived) is retried
 #: before the prompt is refused: long enough to ride out an api restart.
 _UNREACHABLE_RETRY_S = _float_env("HAL0_COMFYUI_UNREACHABLE_RETRY_S", 5.0)
-#: Let prompts through while hal0 is unreachable (the gate's earlier behaviour),
-#: for a ComfyUI that must keep working with hal0-api down. It never covers a
-#: hal0 that answered.
-_FAIL_OPEN_WHEN_UNREACHABLE = os.environ.get("HAL0_COMFYUI_GATE_FAIL_OPEN", "").strip().lower() in (
+#: Let prompts through while hal0 is unreachable, or while it requires
+#: authentication the gate has no credential for (the gate's v1.6.5
+#: behaviour), for a ComfyUI that must keep working then. It never covers a
+#: hal0 that answered and refused.
+_FAIL_OPEN = os.environ.get("HAL0_COMFYUI_GATE_FAIL_OPEN", "").strip().lower() in (
     "1",
     "true",
     "yes",
@@ -103,6 +108,27 @@ _SWITCH_MAX_POSTS = 3
 
 class GpuGateClosed(Exception):
     """hal0 did not hand the GPU to ComfyUI: the prompt must not run."""
+
+
+class _AuthRequired(Exception):
+    """hal0-api answered 401 or 403: it requires a credential the gate does not have."""
+
+    def __init__(self, code: int) -> None:
+        super().__init__(f"HTTP {code}")
+        self.code = code
+
+
+#: hal0-api's answers when it requires authentication (``hal0 auth require on``
+#: gates loopback too, and the gate sends no credential).
+_AUTH_CODES = (401, 403)
+
+
+def _auth_reason(code: int) -> str:
+    return (
+        f"hal0 requires authentication (HTTP {code}) and ComfyUI's GPU gate has no "
+        "credential for it yet, so the prompt was not queued. Set "
+        "HAL0_COMFYUI_GATE_FAIL_OPEN=1 to let prompts through unguarded, as v1.6.5 did"
+    )
 
 
 _UNREACHABLE_REASON = (
@@ -190,6 +216,10 @@ def _fetch_status() -> "dict | None":
         with urllib.request.urlopen(HAL0_STATUS_URL, timeout=_STATUS_TIMEOUT_S) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         return data if isinstance(data, dict) else None
+    except urllib.error.HTTPError as exc:
+        if exc.code in _AUTH_CODES:
+            raise _AuthRequired(exc.code) from exc
+        return None
     except _READ_ERRORS:
         return None
 
@@ -220,6 +250,8 @@ def _post_switchover() -> bool:
             _last_post_error.reason = f"HTTP {resp.status}"
             return False
     except urllib.error.HTTPError as exc:
+        if exc.code in _AUTH_CODES:
+            raise _AuthRequired(exc.code) from exc
         # 409 can mean a switch is already in flight. Poll status below.
         if exc.code == 409:
             return True
@@ -247,6 +279,10 @@ def _announce_prompt() -> "bool | None":
     try:
         with urllib.request.urlopen(req, timeout=_STATUS_TIMEOUT_S) as resp:
             data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code in _AUTH_CODES:
+            raise _AuthRequired(exc.code) from exc
+        return None
     except _READ_ERRORS:
         return None
     held = data.get("held") if isinstance(data, dict) else None
@@ -270,6 +306,20 @@ def _post_error() -> str:
 
 
 def prepare_image_mode() -> None:
+    """Hand the GPU to ComfyUI before forwarding /prompt (see :func:`_prepare`).
+
+    A 401 or 403 from hal0 refuses the prompt at once with its own reason, or,
+    with ``HAL0_COMFYUI_GATE_FAIL_OPEN``, lets it through as v1.6.5 did.
+    """
+    try:
+        _prepare()
+    except _AuthRequired as exc:
+        if _FAIL_OPEN:
+            return
+        raise GpuGateClosed(_auth_reason(exc.code)) from exc
+
+
+def _prepare() -> None:
     """Hand the GPU to ComfyUI before forwarding /prompt.
 
     Waits out a switch hal0 is already running, then asks for image mode when
@@ -301,7 +351,7 @@ def prepare_image_mode() -> None:
             # out, let the prompt through). After it answered, hal0 may be
             # mid-switch with the LLM set still loaded: keep polling.
             if not answered and time.monotonic() - started >= _UNREACHABLE_RETRY_S:
-                if _FAIL_OPEN_WHEN_UNREACHABLE:
+                if _FAIL_OPEN:
                     return
                 raise GpuGateClosed(_UNREACHABLE_REASON)
         else:
@@ -327,7 +377,7 @@ def prepare_image_mode() -> None:
                     next_post_poll = polls + 2**posts
         if time.monotonic() >= deadline:
             if not answered:
-                if _FAIL_OPEN_WHEN_UNREACHABLE:
+                if _FAIL_OPEN:
                     return
                 raise GpuGateClosed(_UNREACHABLE_REASON)
             if silent:

@@ -410,6 +410,66 @@ def test_a_bad_switch_answer_refuses_the_prompt_with_a_reason(monkeypatch) -> No
         mod.prepare_image_mode()
 
 
+def _auth_refused(mod: Any, code: int, calls: list[str]) -> Any:
+    import io
+    import urllib.error
+
+    def _urlopen(req: Any, *_args: Any, **_kwargs: Any) -> Any:
+        url = req if isinstance(req, str) else req.full_url
+        calls.append(url)
+        body = io.BytesIO(
+            b'{"error": {"code": "auth.required", "message": "authentication required"}}'
+        )
+        raise urllib.error.HTTPError(url, code, "Unauthorized", {}, body)
+
+    return _urlopen
+
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_hal0_requiring_authentication_refuses_at_once_with_its_own_reason(
+    monkeypatch, code: int
+) -> None:
+    """With ``hal0 auth require on`` loopback is not exempt, and the gate holds
+    no credential: say so at once, not "unreachable" after a 5 s retry."""
+    monkeypatch.delenv("HAL0_COMFYUI_GATE_FAIL_OPEN", raising=False)
+    mod = _load_node()
+    calls: list[str] = []
+    monkeypatch.setattr(mod.urllib.request, "urlopen", _auth_refused(mod, code, calls))
+    monkeypatch.setattr(mod.time, "sleep", lambda _seconds: pytest.fail("no retry loop"))
+
+    with pytest.raises(mod.GpuGateClosed, match="requires authentication") as exc:
+        mod.prepare_image_mode()
+    assert len(calls) == 1
+    assert "HAL0_COMFYUI_GATE_FAIL_OPEN=1" in str(exc.value)
+    assert "unreachable" not in str(exc.value)
+
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_a_switch_request_refused_for_authentication_names_it(monkeypatch, code: int) -> None:
+    monkeypatch.delenv("HAL0_COMFYUI_GATE_FAIL_OPEN", raising=False)
+    mod = _load_node()
+    calls: list[str] = []
+    monkeypatch.setattr(mod, "_fetch_status", lambda: {"mode": "inference"})
+    monkeypatch.setattr(mod.urllib.request, "urlopen", _auth_refused(mod, code, calls))
+    with pytest.raises(mod.GpuGateClosed, match="requires authentication"):
+        mod.prepare_image_mode()
+    assert calls == [mod.HAL0_SWITCHOVER_URL]
+
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_the_fail_open_switch_restores_the_old_pass_through_when_auth_is_required(
+    monkeypatch, code: int
+) -> None:
+    """The opt-out restores v1.6.5's behaviour, which let these prompts through."""
+    monkeypatch.setenv("HAL0_COMFYUI_GATE_FAIL_OPEN", "1")
+    mod = _load_node()
+    calls: list[str] = []
+    monkeypatch.setattr(mod.urllib.request, "urlopen", _auth_refused(mod, code, calls))
+    monkeypatch.setattr(mod.time, "sleep", lambda _seconds: pytest.fail("no retry loop"))
+    mod.prepare_image_mode()  # returns: the prompt goes through
+    assert len(calls) == 1
+
+
 def test_the_gate_reads_hal0s_cheap_arbiter_status_by_default(monkeypatch) -> None:
     """Not the full /status aggregate: its probes can outlast the read timeout."""
     monkeypatch.delenv("HAL0_COMFYUI_STATUS_URL", raising=False)
