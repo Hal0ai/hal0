@@ -4,6 +4,7 @@
 import { useUpdateState, useUpdateApply, useUpdateJob } from '@/api/hooks/useUpdates'
 import { useInstallState, bundleNameOr } from '@/api/hooks/useInstallState'
 import { useComfyui } from '@/api/hooks/useComfyui'
+import { imageModeBanner } from './gpu-image-mode-pure'
 
 const { useState: useStateP, useEffect: useEffectP, useRef: useRefP, useMemo: useMemoP, createContext: createContextP, useContext: useContextP } = React;
 
@@ -649,21 +650,22 @@ function FirstRunBanner() {
 // the real surface is this component, fed by the polled /api/comfyui/status
 // arbiter block. Self-shows while the GPU arbiter holds the iGPU for image
 // generation (arbiter.mode === "img"); fails soft (renders nothing) when the
-// arbiter block is null (gate off / older backend). Dismiss is per-episode:
-// it resets when the GPU returns to llm mode so the next switchover
-// re-surfaces the banner.
+// arbiter block is null (gate off / older backend). The copy says when a pin
+// holds image mode (imageModeBanner). Dismiss is per-episode: it resets when
+// the GPU returns to llm mode so the next switchover re-surfaces the banner.
 function GpuImageModeBanner() {
   const q = useComfyui();
   const [dismissed, setDismissed] = useStateP(false);
-  const isImg = q.data?.arbiter?.mode === "img";
+  const copy = imageModeBanner(q.data?.arbiter);
+  const isImg = copy !== null;
   useEffectP(() => { if (!isImg) setDismissed(false); }, [isImg]);
   if (!isImg || dismissed) return null;
   return (
     <Banner
       kind="info"
       eyebrow="GPU · arbiter"
-      heading="GPU: image mode"
-      body="LLM slots are stopped while image generation holds the GPU — they reload shortly after the last render finishes."
+      heading={copy.heading}
+      body={copy.body}
       actions={
         <button className="btn sm" onClick={() => { window.location.hash = "#slots"; }}>
           View slots
