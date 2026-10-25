@@ -4,7 +4,7 @@
 // `default_size`. An empty `default_size` means "the model's native size"
 // (SD 1.5 and SDXL Turbo are 512x512); the panel used to write the empty field
 // back as 1024x1024, which re-pinned every model to 1024 on an unrelated save
-// (an idle-restore edit, say). The empty field now round-trips as "".
+// (a steps edit, say). The empty field now round-trips as "".
 import React, { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -99,28 +99,27 @@ beforeEach(() => {
 describe('ImagePanel default size', () => {
   it('saving another default leaves an empty size empty (model native)', async () => {
     configBox.current = {
-      image: { default_size: '', default_steps: 0, idle_restore_minutes: 60 },
+      image: { default_size: '', default_steps: 0 },
     }
     const host = mount()
-    const [size, , idle] = inputs(host)
+    const [size, steps] = inputs(host)
 
     expect(size.value).toBe('')
     expect(size.placeholder).toBe('model native')
 
-    type(idle, '30')
+    type(steps, '30')
     await save(host)
 
     expect(editCalls).toHaveLength(1)
     expect(editCalls[0].body.image).toEqual({
       default_size: '',
-      default_steps: 0,
-      idle_restore_minutes: 30,
+      default_steps: 30,
     })
   })
 
   it('clearing the size field saves an empty size, not 1024x1024', async () => {
     configBox.current = {
-      image: { default_size: '768x768', default_steps: 0, idle_restore_minutes: 60 },
+      image: { default_size: '768x768', default_steps: 0 },
     }
     const host = mount()
     const [size] = inputs(host)
@@ -133,7 +132,7 @@ describe('ImagePanel default size', () => {
   })
 
   it('a size the operator typed is saved as typed', async () => {
-    configBox.current = { image: { default_size: '', default_steps: 0, idle_restore_minutes: 60 } }
+    configBox.current = { image: { default_size: '', default_steps: 0 } }
     const host = mount()
     const [size] = inputs(host)
 

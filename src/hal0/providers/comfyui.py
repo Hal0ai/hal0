@@ -33,6 +33,7 @@ import asyncio
 import importlib.resources
 import logging
 import os
+import re
 import tempfile
 import time
 import uuid
@@ -43,6 +44,7 @@ from typing import Any
 import httpx
 
 from hal0.comfyui import paths as comfyui_paths
+from hal0.config import paths as cfg_paths
 from hal0.errors import Hal0Error
 from hal0.http_client import async_client
 from hal0.install.perms import ensure_shared_dir
@@ -73,6 +75,18 @@ _DEFAULT_PROFILE_FLAGS = "--disable-mmap --bf16-vae --cache-none"
 
 # Default port — ComfyUI's stock listen port.
 _DEFAULT_PORT = 8188
+
+# The hal0_gpu_gate custom node's settings, read inside the container at import
+# (see hal0/comfyui/assets/hal0_gpu_gate.py): where hal0-api answers, and
+# whether to let prompts through while it is unreachable instead of refusing.
+_GATE_STATUS_URL_ENV = "HAL0_COMFYUI_STATUS_URL"
+_GATE_SWITCHOVER_URL_ENV = "HAL0_COMFYUI_SWITCHOVER_URL"
+_GATE_HANDOFF_URL_ENV = "HAL0_COMFYUI_HANDOFF_URL"
+_GATE_FAIL_OPEN_ENV = "HAL0_COMFYUI_GATE_FAIL_OPEN"
+_TRUTHY = ("1", "true", "yes", "on")
+_DEFAULT_API_PORT = 8080
+# A bind host that is safe to write into a unit file's Environment= line.
+_HOST_RE = re.compile(r"^[A-Za-z0-9.:%-]+$")
 
 
 # ── Timeouts ──────────────────────────────────────────────────────────────────
@@ -303,6 +317,77 @@ def _slot_backend(slot_cfg: dict[str, Any]) -> str:
     return str(slot_cfg.get("backend") or nested.get("backend") or "rocm")
 
 
+def _api_env_setting(key: str) -> str:
+    """hal0-api's setting *key*: its environment, else ``/etc/hal0/api.env``.
+
+    hal0-api has ``api.env`` in its environment (systemd ``EnvironmentFile=``),
+    but the installer and ``hal0 update`` re-render slot units from processes
+    that do not, so the file is read too. The last assignment wins, as in
+    systemd. Empty when neither sets it.
+    """
+    value = os.environ.get(key, "").strip()
+    if value:
+        return value
+    try:
+        text = cfg_paths.api_env().read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+    found = ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, _, val = line.partition("=")
+        if name.strip() != key:
+            continue
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+            val = val[1:-1]
+        found = val.strip()
+    return found
+
+
+def _hal0_api_base() -> str:
+    """hal0-api's base URL as seen from the img container (host networking).
+
+    Built from ``HAL0_PORT`` and ``HAL0_BIND_HOST``, the settings hal0-api's
+    unit binds with: loopback for a wildcard or loopback bind, the address
+    itself for a specific one.
+    """
+    try:
+        port = int(_api_env_setting("HAL0_PORT") or _DEFAULT_API_PORT)
+    except ValueError:
+        port = _DEFAULT_API_PORT
+    if not 0 < port < 65536:
+        port = _DEFAULT_API_PORT
+    host = _api_env_setting("HAL0_BIND_HOST")
+    if host in ("", "0.0.0.0", "127.0.0.1", "localhost") or not _HOST_RE.match(host):
+        host = "127.0.0.1"
+    elif host in ("::", "::1"):
+        host = "[::1]"
+    elif ":" in host:
+        host = f"[{host}]"
+    return f"http://{host}:{port}"
+
+
+def gate_env() -> dict[str, str]:
+    """The ComfyUI container's environment for the hal0_gpu_gate node.
+
+    Where hal0-api answers (its port is an installer option), and the
+    fail-open opt-out when the operator set it in ``api.env``. Only a
+    normalised ``1`` reaches the unit file, never the raw value.
+    """
+    base = _hal0_api_base()
+    env = {
+        _GATE_STATUS_URL_ENV: f"{base}/api/comfyui/arbiter",
+        _GATE_SWITCHOVER_URL_ENV: f"{base}/api/comfyui/switchover",
+        _GATE_HANDOFF_URL_ENV: f"{base}/api/comfyui/prompt-handoff",
+    }
+    if _api_env_setting(_GATE_FAIL_OPEN_ENV).lower() in _TRUTHY:
+        env[_GATE_FAIL_OPEN_ENV] = "1"
+    return env
+
+
 class ComfyUIProvider(Provider):
     """Provider for ComfyUI (Stable Diffusion family) image generation.
 
@@ -481,7 +566,7 @@ class ComfyUIProvider(Provider):
         return RuntimeLaunchPlan(
             image=self.image_ref(slot_cfg),
             command=command,
-            env={},
+            env=gate_env(),
             mounts=mounts,
             devices=resolve_gpu_device_paths(),
             cap_add=[],

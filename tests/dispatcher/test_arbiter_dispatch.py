@@ -3,10 +3,12 @@
 Covers:
 
   * Auto-switch: ``POST /v1/images/generations`` flips the GPU to image
-    mode (``ensure_img``) before driving the ComfyUI provider, and stamps
-    img activity at request start AND completion (long Wan video jobs must
-    keep the idle window open).
-  * 503 guard: LLM-group dispatch while ``mode == img`` is refused with a
+    mode (``ensure_img``) before driving the ComfyUI provider, and holds one
+    ``image_job()`` from before the switch until the render returns, so the
+    arbiter never restores LLM mode under it.
+  * Restore after each render: an LLM request that finds image mode with
+    nothing rendering ends it at once and is served.
+  * 503 guard: LLM-group dispatch while a render runs is refused with a
     structured ``gpu.image_mode`` envelope + ``Retry-After`` header — fired
     BEFORE the readiness check so the client never sees ``slot.loading``.
   * NPU/CPU isolation: non-llm-group slots dispatch normally in img mode.
@@ -28,8 +30,8 @@ test_serving_integration.py; app-level tests mirror tests/api/test_v1_images.py.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
-import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import ANY, AsyncMock
@@ -38,12 +40,41 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+import hal0.slots.arbiter as arbiter_mod
 from hal0.dispatcher.router import Dispatcher, UpstreamCall, UpstreamUnavailable
 from hal0.slots.arbiter import GpuArbiter, GpuImageMode, GpuMode
 from hal0.slots.state import SlotState
 from hal0.upstreams.registry import Upstream
 
 _DISPATCHABLE_STATES = frozenset({SlotState.READY, SlotState.SERVING, SlotState.IDLE})
+
+
+@pytest.fixture(autouse=True)
+def _no_handoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No editor hand-off after a switch: these tests chat right after a render."""
+    monkeypatch.setattr(arbiter_mod, "_GATE_HANDOFF_S", 0.0)
+
+
+@pytest.fixture(autouse=True)
+def comfyui_queue(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """ComfyUI seams the arbiter reads. By default ``/queue`` cannot be read, so an
+    LLM request in image mode is refused at once (a busy queue would make it wait
+    for the render), which is what the guard tests below pin. A test that wants an
+    idle ComfyUI sets ``rec["queue"] = (0, 0)``."""
+    rec: dict[str, Any] = {"queue": "unknown", "free": 0}
+
+    async def _queue() -> tuple[int, int]:
+        if rec["queue"] == "unknown":
+            raise arbiter_mod.ComfyUIQueueUnknown("scripted")
+        return rec["queue"]
+
+    async def _free() -> bool:
+        rec["free"] += 1
+        return True
+
+    monkeypatch.setattr(arbiter_mod, "_comfyui_queue_state", _queue)
+    monkeypatch.setattr(arbiter_mod, "_comfyui_free", _free)
+    return rec
 
 
 @pytest.fixture(autouse=True)
@@ -141,7 +172,6 @@ def _write_img_mode_state(state_path: Path, saved: list[str]) -> None:
                 "mode": "img",
                 "pinned": False,
                 "saved_llm_slots": saved,
-                "last_img_activity": time.time(),
             }
         ),
         encoding="utf-8",
@@ -235,12 +265,14 @@ _FAKE_INFER_RESULT = {
 }
 
 
-def _arbitrated_cfgs(image_section: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def _arbitrated_cfgs(
+    image_section: dict[str, Any] | None = None, *, llm_slot: str = "chat"
+) -> list[dict[str, Any]]:
     img: dict[str, Any] = {"name": "img", "device": "gpu-rocm", "profile": "comfyui", "port": 8186}
     if image_section is not None:
         img["image"] = image_section
     return [
-        {"name": "chat", "device": "gpu-rocm", "profile": "llama-rocm", "port": 8081},
+        {"name": llm_slot, "device": "gpu-rocm", "profile": "llama-rocm", "port": 8081},
         img,
     ]
 
@@ -250,15 +282,18 @@ def _wire_image_app(
     monkeypatch: pytest.MonkeyPatch,
     *,
     image_section: dict[str, Any] | None = None,
+    llm_slot: str = "chat",
 ) -> tuple[AsyncMock, AsyncMock, AsyncMock]:
     """Mock manager lifecycle + provider.infer; return (unload, load, infer)."""
     from hal0.providers import get_provider
 
     manager = client.app.state.slot_manager
     monkeypatch.setattr(
-        manager, "iter_configs", AsyncMock(return_value=_arbitrated_cfgs(image_section))
+        manager,
+        "iter_configs",
+        AsyncMock(return_value=_arbitrated_cfgs(image_section, llm_slot=llm_slot)),
     )
-    monkeypatch.setattr(manager, "is_ready_for_dispatch", lambda name: name == "chat")
+    monkeypatch.setattr(manager, "is_ready_for_dispatch", lambda name: name == llm_slot)
     unload = AsyncMock()
     # ensure_img polls state() for readiness after load (#714) — a mocked load
     # must therefore make the slot report READY, as a real load would.
@@ -298,26 +333,38 @@ def test_image_request_triggers_switch(
     infer.assert_awaited_once()
 
 
-def test_img_activity_touched_on_completion(
+def test_image_job_spans_the_switch_and_the_render(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str
 ) -> None:
-    """touch_img_activity fires at request START and again at COMPLETION."""
+    """The route holds one image job from before ensure_img until the render
+    returns: a restore can never slip in between the switch and the render."""
     _seed_img_upstream(client)
     _, _, infer = _wire_image_app(client, monkeypatch)
 
     manager = client.app.state.slot_manager
     arbiter = manager.arbiter
     events: list[str] = []
-    real_touch = arbiter.touch_img_activity
+    real_job = arbiter.image_job
+    real_ensure_img = arbiter.ensure_img
 
-    def _recording_touch() -> None:
-        events.append("touch")
-        real_touch()
+    @contextlib.asynccontextmanager
+    async def _recording_job() -> Any:
+        events.append("job_enter")
+        try:
+            async with real_job():
+                yield
+        finally:
+            events.append("job_exit")
 
-    monkeypatch.setattr(arbiter, "touch_img_activity", _recording_touch)
+    async def _recording_ensure_img(*a: Any, **kw: Any) -> None:
+        events.append("ensure_img")
+        await real_ensure_img(*a, **kw)
+
+    monkeypatch.setattr(arbiter, "image_job", _recording_job)
+    monkeypatch.setattr(arbiter, "ensure_img", _recording_ensure_img)
 
     async def _recording_infer(*a: Any, **kw: Any) -> dict[str, Any]:
-        events.append("infer")
+        events.append(f"infer jobs={arbiter.status()['image_jobs']}")
         return _FAKE_INFER_RESULT
 
     infer.side_effect = _recording_infer
@@ -327,7 +374,38 @@ def test_img_activity_touched_on_completion(
         json={"model": "sdxl-turbo", "prompt": "long wan video frame"},
     )
     assert r.status_code == 200, r.text
-    assert events == ["touch", "infer", "touch"], events
+    assert events == ["job_enter", "ensure_img", "infer jobs=1", "job_exit"], events
+    assert arbiter.status()["image_jobs"] == 0
+
+
+def test_chat_after_a_v1_render_is_not_refused_for_image_mode(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_hal0_home: str,
+    comfyui_queue: dict[str, Any],
+) -> None:
+    """Open WebUI's reply in the same turn as an image: the chat request that
+    follows the render ends image mode and is not refused with gpu.image_mode."""
+    comfyui_queue["queue"] = (0, 0)
+    _seed_img_upstream(client)
+    # ADR-0023: model "primary" falls through to the rule-9 `agent` anchor.
+    _seed_chat_upstream(client, "agent")
+    _, load, _ = _wire_image_app(client, monkeypatch, llm_slot="agent")
+    arbiter = client.app.state.slot_manager.arbiter
+
+    r = client.post("/v1/images/generations", json={"model": "sdxl-turbo", "prompt": "a cat"})
+    assert r.status_code == 200, r.text
+    assert arbiter.mode is GpuMode.IMG
+
+    r = client.post(
+        "/v1/chat/completions",
+        json={"model": "primary", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    # The upstream itself is unreachable, so the request may end in any error
+    # but the image-mode refusal.
+    assert r.json().get("error", {}).get("code") != "gpu.image_mode", r.text
+    assert arbiter.mode is GpuMode.LLM
+    load.assert_any_await("agent", None)  # the restore reloaded the saved set
 
 
 def test_image_defaults_filled_from_image_section(
@@ -399,6 +477,90 @@ def test_llm_request_in_img_mode_503_retry_after(client: TestClient, tmp_hal0_ho
     assert body["error"]["code"] == "gpu.image_mode"
     assert body["error"]["details"]["retry_after_s"] >= 15
     assert int(r.headers["Retry-After"]) >= 15
+
+
+@pytest.mark.asyncio
+async def test_llm_forward_right_after_a_render_restores_and_dispatches(
+    tmp_path: Path, comfyui_queue: dict[str, Any]
+) -> None:
+    """Restore after each render: an LLM request that finds the render done ends
+    image mode at once and is served, instead of a 503 for the idle window."""
+    sm = _ArbiterSlotManager(tmp_path)
+    _write_img_mode_state(tmp_path / "gpu_arbiter.json", saved=["primary"])
+    comfyui_queue["queue"] = (0, 0)
+    dispatcher = _make_dispatcher(
+        httpx.MockTransport(lambda req: httpx.Response(200, json={"ok": True})), sm
+    )
+    try:
+        resp = await dispatcher.forward(_slot_call("primary"))
+        assert resp.status_code == 200
+        assert sm.load_calls == [("primary", None)]
+        assert sm.arbiter.mode is GpuMode.LLM
+        assert comfyui_queue["free"] == 1
+    finally:
+        await dispatcher.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_chat_restored_for_on_the_route_keeps_the_gpu_until_it_dispatches(
+    tmp_path: Path, comfyui_queue: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The /v1 chat route asks for room before its own awaits (slot load,
+    upstream resolution) and takes its dispatch ticket later, in forward. A
+    render queued behind the restore must not switch in that gap: the chat is
+    served on the reloaded slot, and the render switches after it."""
+    sm = _ArbiterSlotManager(tmp_path)
+    sm.cfgs = _dr2_cfgs()
+    _write_img_mode_state(tmp_path / "gpu_arbiter.json", saved=["primary"])
+    comfyui_queue["queue"] = (0, 0)
+    arbiter = sm.arbiter
+    release = asyncio.Event()
+    events: list[str] = []
+    real_load, real_unload = sm.load, sm.unload
+
+    async def _gated_load(slot_name: str, model: Any = None) -> None:
+        await release.wait()
+        await real_load(slot_name, model)
+
+    async def _recording_unload(slot_name: str) -> None:
+        events.append(f"unload {slot_name}")
+        await real_unload(slot_name)
+
+    monkeypatch.setattr(sm, "load", _gated_load)
+    monkeypatch.setattr(sm, "unload", _recording_unload)
+
+    def _upstream(req: httpx.Request) -> httpx.Response:
+        events.append("chat served")
+        return httpx.Response(200, json={"ok": True})
+
+    dispatcher = _make_dispatcher(httpx.MockTransport(_upstream), sm)
+
+    async def _chat_route() -> int:
+        # _ensure_backend_for_model: the demand step and the guard ...
+        await arbiter.make_room_for_llm("primary")
+        arbiter.guard_dispatch("primary")
+        await asyncio.sleep(0.05)  # ... then the route's own awaits ...
+        resp = await dispatcher.forward(_slot_call("primary"))  # ... then the ticket
+        return resp.status_code
+
+    async def _render() -> None:
+        async with arbiter.image_job():
+            await arbiter.ensure_img()
+        events.append("render switched")
+
+    try:
+        chat = asyncio.create_task(_chat_route())
+        await asyncio.sleep(0.01)  # the demand restore holds the lock, reloading
+        render = asyncio.create_task(_render())
+        await asyncio.sleep(0.01)  # the render waits on the lock behind it
+        release.set()
+
+        assert await asyncio.wait_for(chat, timeout=2.0) == 200
+        await asyncio.wait_for(render, timeout=2.0)
+        assert events == ["chat served", "unload primary", "render switched"]
+        assert arbiter.mode is GpuMode.IMG
+    finally:
+        await dispatcher.aclose()
 
 
 @pytest.mark.asyncio

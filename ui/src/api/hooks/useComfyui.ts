@@ -16,7 +16,7 @@
 // non-empty queue needs `force: true` (the confirm dialog is that consent).
 //
 // `arbiter` is the arbiter-truth block ({mode img|llm, pinned, saved slots,
-// idle_restore_at}); it is null when the arbiter is unavailable (gate off /
+// switching, image_jobs}); it is null when the arbiter is unavailable (gate off /
 // older backend) and every consumer fails soft to the legacy display.
 
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query'
@@ -42,12 +42,14 @@ export interface ComfyuiSwitchover {
 
 // GPU-arbiter truth block. `mode` is the arbiter's own vocabulary
 // ('img' | 'llm', distinct from the legacy 'generation' | 'inference');
-// `idle_restore_at` is an epoch (seconds) or null when pinned / not armed.
+// `switching` is true while the arbiter holds its switch lock (a mode change or
+// a restore decision is running); `image_jobs` counts /v1/images renders in flight.
 export interface ComfyuiArbiter {
   mode: string
   pinned: boolean
   saved_llm_slots: string[]
-  idle_restore_at: number | null
+  switching: boolean
+  image_jobs: number
 }
 
 export interface ComfyuiStatus {
@@ -114,8 +116,8 @@ export interface SwitchoverBody {
   // Required to tear down a non-empty render queue (jobs are dropped). The
   // confirm dialog's warning is the consent that sets this.
   force?: boolean
-  // Optional: pin image mode as part of the switch (disables idle
-  // auto-restore until unpinned).
+  // Optional: pin image mode as part of the switch (hold image mode until
+  // unpinned).
   pin?: boolean
 }
 
@@ -128,7 +130,7 @@ export function useComfyuiSwitchover() {
   })
 }
 
-// Pin / unpin image mode (disables / re-arms the arbiter's idle auto-restore).
+// Pin / unpin image mode (hold it until unpinned / let it end after the last render).
 // Synchronous 200 {"pinned":bool} — the caller refetches /status to reflect
 // the new arbiter state. raw:true for the same failure handling as switchover.
 export function useComfyuiPin() {

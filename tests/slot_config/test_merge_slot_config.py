@@ -36,9 +36,9 @@ from hal0.slot_config import (
 def test_merge_one_level_deep_keeps_table_siblings() -> None:
     """A partial table update merges into the nested table instead of
     clobbering it — sibling keys survive."""
-    base = {"model": {"default": "m"}, "image": {"idle_restore_minutes": 30}, "idle_timeout_s": 1}
+    base = {"model": {"default": "m"}, "image": {"default_size": "512x512"}, "idle_timeout_s": 1}
     after = merge_slot_config(base, {"image": {"default_steps": 8}})
-    assert after["image"] == {"idle_restore_minutes": 30, "default_steps": 8}
+    assert after["image"] == {"default_size": "512x512", "default_steps": 8}
     assert after["model"] == {"default": "m"}
 
 

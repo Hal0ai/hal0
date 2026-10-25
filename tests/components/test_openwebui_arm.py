@@ -348,6 +348,25 @@ def test_reconcile_leaves_operator_search_config_alone_and_does_not_restart(tmp_
         assert f"{key}={value}" in text
 
 
+def test_reconcile_with_a_line_systemd_would_split_is_fail_soft(tmp_path) -> None:
+    """A CR inside a hand-written key would give systemd a second bind-host
+    assignment; the render is refused, the file stays as it was, and the
+    reconcile reports build_failed rather than raising or restarting."""
+    _installed_unit(tmp_path)
+    env_path = tmp_path / "etc" / "hal0" / "openwebui.env"
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    raw = b"HAL0_OWUI_BIND_HOST=127.0.0.1\nX\rHAL0_OWUI_BIND_HOST=0.0.0.0\n"
+    env_path.write_bytes(raw)
+    runner = _ok_runner()
+
+    res = openwebui_arm.reconcile_openwebui_env(runner=runner, is_hal0_user=lambda: False)
+
+    assert res["status"] == "build_failed"
+    assert "cannot be empty or contain" in res["error"]
+    assert env_path.read_bytes() == raw
+    assert _restart_calls(runner) == []
+
+
 def test_reconcile_openwebui_env_resolver_failure_is_fail_soft(tmp_path) -> None:
     _installed_unit(tmp_path)
     runner = _ok_runner()

@@ -216,9 +216,10 @@ class OmniRouter:
                 )
             except asyncio.CancelledError:
                 # The client went away mid-render. The GPU may already be in
-                # image mode with the caller unloaded; nobody else will put it
-                # back before the idle window expires, so restore from a
-                # detached task and let the cancellation through.
+                # image mode with the caller unloaded; the arbiter's restore
+                # loop would bring it back one grace later, but restore now
+                # from a detached task (its caller is next) and let the
+                # cancellation through.
                 if image_round:
                     self._restore_in_background(ctx)
                 raise

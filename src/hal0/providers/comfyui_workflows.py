@@ -97,19 +97,6 @@ def _load_template(stem: str) -> dict[str, Any]:
         raise WorkflowTemplateError(str(exc), details={"stem": stem}) from exc
 
 
-def template_params(stem: str) -> dict[str, str]:
-    """The template's ``_meta.params`` pointer map (parameter name → ``node:<id>.inputs.<field>``).
-
-    Lets a caller outside this translator (OpenWebUI's static
-    ``COMFYUI_WORKFLOW_NODES`` export — see :mod:`hal0.openwebui.wiring`)
-    discover which graph node backs each parameter without reaching into
-    :func:`build_workflow`'s private template loader. Empty dict when the
-    template has no ``params`` table.
-    """
-    params = (_load_template(stem).get("_meta") or {}).get("params")
-    return params if isinstance(params, dict) else {}
-
-
 # ── Body parsing ──────────────────────────────────────────────────────────────
 
 
@@ -295,5 +282,4 @@ __all__ = [
     "WorkflowTemplateError",
     "WorkflowTemplateNotFound",
     "build_workflow",
-    "template_params",
 ]

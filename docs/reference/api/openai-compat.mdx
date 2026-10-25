@@ -71,9 +71,10 @@ behaviors:
   under `hal0.omni.tool_results` and the reason under
   `hal0.omni.caller_slot_unavailable`, and lists every tool result this
   request produced across rounds. A request cancelled mid-render or
-  mid-restore starts the same queue-aware restore in the background; a pinned
-  image mode or a queue still busy past the budget leaves the caller
-  unavailable until the idle window or a manual switchover.
+  mid-restore starts the same queue-aware restore in the background; a queue
+  still busy past the budget leaves the caller unavailable until ComfyUI's queue
+  drains, when hal0 restores LLM mode on its own; a pinned image mode, until you
+  unpin it.
 - **`model` may be a chat-slot alias** — `agent`, `utility`, or any enabled LLM slot name
   — rewritten to the slot's configured model id before
   dispatch. A `<tag>-FLM` catalog id (e.g. `gemma4-it-e2b-FLM`) is further normalized
@@ -135,6 +136,9 @@ Request (subset honored): `{"model": <id>, "prompt": <required>, "n"?, "size"?, 
 | 409 | `image.model_not_installed` | A renderable catalog model whose weights are not all on disk. `error.details` carries `install` (`POST /api/comfyui/models/<id>/install`) and `missing_gb`. |
 | 422 | `image.model_not_renderable` | A video, edit or upscale catalog model. Open it in the ComfyUI editor, which the `img` slot serves on port 8188 and which needs a ROCm lane on the host. |
 | 422 | `image.model_required` | No `model` in the request and no model selected for `img`. |
+
+- The GPU switch happens before dispatch; when the GPU is already in image mode but the `img` slot is down, the request starts it first. The request holds image mode until its render returns, and hal0 hands the GPU back to the LLM slots about 10 seconds later, or as soon as a request for one of them arrives.
+- Open WebUI's image button is a client of this endpoint: it sends `model`, `prompt`, `n` and `response_format: "b64_json"`, and no `size` unless one is typed into it (see [Open WebUI](/docs/guides/open-webui/#image-generation)).
 
 Parameters the request leaves out are filled in this order:
 

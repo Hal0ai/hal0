@@ -18,6 +18,7 @@ this exercises:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import struct
 from pathlib import Path
@@ -502,12 +503,20 @@ def _slot_manager_with_image_section(image: dict[str, Any]) -> Any:
     class _Arbiter:
         def __init__(self) -> None:
             self.ensured = 0
+            self.jobs = 0
+            self.open_jobs = 0
 
         async def ensure_img(self) -> None:
             self.ensured += 1
 
-        def touch_img_activity(self) -> None:
-            pass
+        @contextlib.asynccontextmanager
+        async def image_job(self):
+            self.jobs += 1
+            self.open_jobs += 1
+            try:
+                yield
+            finally:
+                self.open_jobs -= 1
 
     class _Manager:
         arbiter = _Arbiter()
@@ -762,6 +771,34 @@ def test_v1_images_b64_json_returns_inline_base64(
     assert body["data"][0]["b64_json"] == expected_b64
 
 
+def test_v1_images_answers_the_body_open_webui_sends(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The body Open WebUI v0.12.0 posts when its ``IMAGE_SIZE`` is empty
+    (``routers/images.py:638-655``): a model, a prompt, ``n`` and ``response_format``, no
+    ``size`` and no steps. hal0 picks the native size and the template's own step count, which
+    is what lets ``openwebui.env`` leave both settings empty."""
+    _install("sd-1.5-pruned-emaonly")
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+
+    r = client.post(
+        "/v1/images/generations",
+        json={
+            "model": "sd-1.5-pruned-emaonly",
+            "prompt": "a cat",
+            "n": 1,
+            "response_format": "b64_json",
+        },
+    )
+
+    assert r.status_code == 200, r.text
+    assert r.json()["data"][0]["b64_json"]
+    sent = mock_infer.call_args.args[1]
+    assert sent["size"] == "512x512"  # hal0 picked the native size; Open WebUI sent none
+    assert "steps" not in (sent.get("extra_body") or {})  # the template's own step count
+
+
 def test_v1_images_provider_error_surfaces(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -807,6 +844,9 @@ def test_v1_images_cold_slot_ensure_img_before_dispatch(
     succeeds.  We simulate this by installing a fake slot_manager/arbiter whose
     ensure_img() side-effect registers the img upstream in app.state.upstreams,
     exactly as the real arbiter does via _register_container_upstream.
+
+    The same order also covers #3048: when the slot is down while the GPU is
+    already in image mode, ``ensure_img()`` is what brings it back before dispatch.
     """
     _install("sdxl-turbo")
     fake_png = b"\x89PNG\r\n\x1a\n" + b"c" * 64
@@ -835,6 +875,19 @@ def test_v1_images_cold_slot_ensure_img_before_dispatch(
     _PORT = 8186
 
     class _FakeArbiter:
+        def __init__(self) -> None:
+            self.jobs = 0
+            self.open_jobs = 0
+
+        @contextlib.asynccontextmanager
+        async def image_job(self):
+            self.jobs += 1
+            self.open_jobs += 1
+            try:
+                yield
+            finally:
+                self.open_jobs -= 1
+
         async def ensure_img(self) -> None:
             # Simulate _register_container_upstream: wire the img upstream
             # so that resolve_by_capability Rule 4 can find it.
@@ -847,9 +900,6 @@ def test_v1_images_cold_slot_ensure_img_before_dispatch(
                     auth_style="none",
                 )
             )
-
-        def touch_img_activity(self) -> None:
-            pass
 
     class _FakeSlotManager:
         arbiter = _FakeArbiter()
@@ -876,6 +926,49 @@ def test_v1_images_cold_slot_ensure_img_before_dispatch(
     )
     body = r.json()
     assert body["data"], "expected at least one image in the response"
+
+
+def test_v1_images_a_failed_dispatch_leaves_no_image_job_open(client: TestClient) -> None:
+    """#3048: a request that never reached the img slot must not hold image mode
+    (a retrying client used to pin the box in image mode)."""
+    _install("sdxl-turbo")
+    manager = _slot_manager_with_image_section({})  # ensure_img is a no-op; no upstream seeded
+    client.app.state.slot_manager = manager
+
+    r = client.post("/v1/images/generations", json={"model": "sdxl-turbo", "prompt": "x"})
+
+    assert r.status_code in (404, 502, 503)
+    assert r.json()["error"]["code"].startswith("dispatch.")
+    assert manager.arbiter.jobs == 1
+    assert manager.arbiter.open_jobs == 0
+
+
+def test_v1_images_a_render_runs_inside_one_image_job(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The arbiter counts the render as image work until provider.infer returns,
+    so it never restores LLM mode under it; the job closes with the render."""
+    _install("sdxl-turbo")
+    _seed_img_upstream(client)
+    payload = _mock_png_infer(monkeypatch).return_value
+    manager = _slot_manager_with_image_section({})
+    client.app.state.slot_manager = manager
+    open_during_render: list[int] = []
+
+    async def _infer(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        open_during_render.append(manager.arbiter.open_jobs)
+        return payload
+
+    from hal0.providers import get_provider
+
+    monkeypatch.setattr(get_provider("comfyui"), "infer", _infer)
+
+    r = client.post("/v1/images/generations", json={"model": "sdxl-turbo", "prompt": "x"})
+
+    assert r.status_code == 200, r.text
+    assert open_during_render == [1]
+    assert manager.arbiter.jobs == 1
+    assert manager.arbiter.open_jobs == 0
 
 
 # ─── image cache route ────────────────────────────────────────────────────────

@@ -18,7 +18,8 @@ second, divergent notion of "fits" or "evictable":
     :func:`hal0.slots.capacity.build_per_slot` uses as its baseline.
   - Free-memory probe: :meth:`SlotManager._probe_host_free_mb` (GTT-aware,
     §21.10) — the same probe the pressure sweeper reads.
-  - Eviction eligibility: :func:`hal0.slots.reaper.is_pinned` +
+  - Eviction eligibility: :func:`hal0.slots.reaper.is_pinned` + the
+    resident-ComfyUI exemption (``hal0.slots.reaper._resident_img``) +
     ``serving_count`` + state, ordered by
     :func:`hal0.slots.reaper.eviction_priority` (lower evicts first) — the
     EXACT rules :meth:`hal0.slots.reaper.SlotReaper.pressure_evict_once`
@@ -73,6 +74,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from hal0.slots.reaper import (
     _DEFAULT_EVICTION_PRIORITY,
+    _resident_img,
     _warn_lru_retired,
     eviction_priority,
     is_pinned,
@@ -325,7 +327,8 @@ async def _gather_candidates(host: PreloadEvictHost, *, exclude: str) -> list[Ca
 
     Eligibility mirrors :meth:`hal0.slots.reaper.SlotReaper.pressure_evict_once`
     exactly: resident state (READY/IDLE), not currently serving, not
-    pinned (:func:`is_pinned`). Every other resident slot is eligible,
+    pinned (:func:`is_pinned`), not the resident ComfyUI slot
+    (``hal0.slots.reaper._resident_img``). Every other resident slot is eligible,
     ordered by :func:`hal0.slots.reaper.eviction_priority` (lower evicts
     first); the retired ``lru = true`` TOML key is ignored and warned once
     per slot (:func:`hal0.slots.reaper._warn_lru_retired`). The slot
@@ -373,6 +376,8 @@ async def _gather_candidates(host: PreloadEvictHost, *, exclude: str) -> list[Ca
                 else:
                     if is_pinned(canonical, cfg):
                         eligible, reason = False, "pinned"
+                    elif _resident_img(cfg):
+                        eligible, reason = False, "resident_img"
                     else:
                         _warn_lru_retired(canonical, cfg)
                         priority = eviction_priority(cfg)

@@ -79,12 +79,7 @@ def test_env_var_wins_over_api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 def test_rag_key_follows_client_key_when_rag_block_active(tmp_path: Path) -> None:
     target = _with_api_env(tmp_path, f"HAL0_CLIENT_KEY={CLIENT_KEY}\n")
     overrides = dynamic_env_overrides(
-        embed_model_id="nomic-embed",
-        image_model_id=None,
-        image_workflow_json=None,
-        image_workflow_nodes_json=None,
-        image_size=None,
-        search_provider=None,
+        embed_model_id="nomic-embed", image_model_id=None, search_provider=None
     )
     write_openwebui_env(target, overrides=overrides, preserve_existing=True)
     assert _parse(target)["RAG_OPENAI_API_KEY"] == CLIENT_KEY
@@ -355,3 +350,63 @@ def test_unchanged_hal0_key_still_withdrawn_on_repoint(
     write_openwebui_env(target, preserve_existing=True)
     assert key_var not in _parse(target)
     assert key_var not in _managed(target)
+
+
+# ── the image block's key follows the client key like the RAG block's ───────
+
+
+def _image_overrides(model: str | None = "sdxl-turbo") -> dict[str, str | None]:
+    return dynamic_env_overrides(embed_model_id=None, image_model_id=model, search_provider=None)
+
+
+def test_image_key_follows_the_client_key(tmp_path: Path) -> None:
+    target = _with_api_env(tmp_path, f"HAL0_CLIENT_KEY={CLIENT_KEY}\n")
+    write_openwebui_env(target, overrides=_image_overrides(), preserve_existing=True)
+    assert _parse(target)["IMAGES_OPENAI_API_KEY"] == CLIENT_KEY
+    assert "IMAGES_OPENAI_API_KEY" in _managed(target)
+
+
+def test_image_key_falls_back_to_the_placeholder_and_stays_hal0s(tmp_path: Path) -> None:
+    target = _with_api_env(tmp_path, f"HAL0_CLIENT_KEY={CLIENT_KEY}\n")
+    write_openwebui_env(target, overrides=_image_overrides(), preserve_existing=True)
+    (tmp_path / "api.env").write_text("", encoding="utf-8")
+    write_openwebui_env(target, overrides=_image_overrides(), preserve_existing=True)
+    assert _parse(target)["IMAGES_OPENAI_API_KEY"] == "sk-hal0-local"
+    assert "IMAGES_OPENAI_API_KEY" in _managed(target)
+
+
+def test_image_key_goes_when_images_are_unwired(tmp_path: Path) -> None:
+    target = _with_api_env(tmp_path, f"HAL0_CLIENT_KEY={CLIENT_KEY}\n")
+    write_openwebui_env(target, overrides=_image_overrides(), preserve_existing=True)
+    write_openwebui_env(target, overrides=_image_overrides(None), preserve_existing=True)
+    env = _parse(target)
+    assert "IMAGES_OPENAI_API_KEY" not in env
+    assert "IMAGES_OPENAI_API_BASE_URL" not in env
+
+
+def test_image_key_stays_hal0s_through_an_installer_pass_and_goes_with_the_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The client key is removed and install.sh's override-less render
+    (``env_writer.main``) runs before the live one. It puts the placeholder back; the key
+    must stay on the managed line, or the next render that unwires images would take the
+    placeholder for an operator's own value and leave it in the file for good."""
+    from hal0.openwebui import env_writer
+
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    target = tmp_path / "etc" / "hal0" / "openwebui.env"
+    target.parent.mkdir(parents=True)
+    (target.parent / "api.env").write_text(f"HAL0_CLIENT_KEY={CLIENT_KEY}\n", encoding="utf-8")
+    write_openwebui_env(target, overrides=_image_overrides(), preserve_existing=True)
+    assert _parse(target)["IMAGES_OPENAI_API_KEY"] == CLIENT_KEY
+
+    (target.parent / "api.env").write_text("", encoding="utf-8")
+    env_writer.main()
+
+    assert _parse(target)["IMAGES_OPENAI_API_KEY"] == "sk-hal0-local"
+    assert "IMAGES_OPENAI_API_KEY" in _managed(target)
+
+    write_openwebui_env(target, overrides=_image_overrides(None), preserve_existing=True)
+    env = _parse(target)
+    assert "IMAGES_OPENAI_API_KEY" not in env
+    assert "IMAGES_OPENAI_API_BASE_URL" not in env

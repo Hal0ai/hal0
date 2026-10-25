@@ -104,6 +104,84 @@ def test_comfyui_spec_matches_live_deployment() -> None:
     assert spec.command[-1].endswith("--cache-none")
 
 
+def _gate_env(spec: Any) -> dict[str, str]:
+    return {k: v for k, v in spec.env.items() if k.startswith("HAL0_COMFYUI_")}
+
+
+@pytest.fixture
+def _api_env_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in ("HAL0_PORT", "HAL0_BIND_HOST", "HAL0_COMFYUI_GATE_FAIL_OPEN"):
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_comfyui_spec_points_the_gate_at_hal0_api_by_default(_api_env_unset: None) -> None:
+    """The gate reaches hal0-api through the unit's environment; with no
+    api.env settings that is loopback on the default port, and no opt-out."""
+    env = _gate_env(ComfyUIProvider().container_spec(_img_cfg(), {}))
+    assert env["HAL0_COMFYUI_STATUS_URL"] == "http://127.0.0.1:8080/api/comfyui/arbiter"
+    assert env["HAL0_COMFYUI_SWITCHOVER_URL"] == "http://127.0.0.1:8080/api/comfyui/switchover"
+    assert env["HAL0_COMFYUI_HANDOFF_URL"] == "http://127.0.0.1:8080/api/comfyui/prompt-handoff"
+    assert "HAL0_COMFYUI_GATE_FAIL_OPEN" not in env
+
+
+def test_comfyui_spec_points_the_gate_at_hal0_api_on_its_own_port(
+    monkeypatch: pytest.MonkeyPatch, _api_env_unset: None
+) -> None:
+    """HAL0_PORT is an installer option: a box whose API is not on 8080 must
+    not have its gate refuse every image as hal0-unreachable."""
+    monkeypatch.setenv("HAL0_PORT", "9123")
+    monkeypatch.setenv("HAL0_BIND_HOST", "0.0.0.0")
+    spec = ComfyUIProvider().container_spec(_img_cfg(), {})
+    env = _gate_env(spec)
+    assert env["HAL0_COMFYUI_STATUS_URL"] == "http://127.0.0.1:9123/api/comfyui/arbiter"
+    assert env["HAL0_COMFYUI_SWITCHOVER_URL"] == "http://127.0.0.1:9123/api/comfyui/switchover"
+    unit = _render_from_spec("img", spec)
+    assert "Environment=HAL0_COMFYUI_STATUS_URL=http://127.0.0.1:9123/api/comfyui/arbiter" in unit
+
+
+def test_comfyui_spec_dials_a_specific_bind_address(
+    monkeypatch: pytest.MonkeyPatch, _api_env_unset: None
+) -> None:
+    """hal0-api bound to one address does not answer on loopback."""
+    monkeypatch.setenv("HAL0_BIND_HOST", "192.0.2.10")
+    env = _gate_env(ComfyUIProvider().container_spec(_img_cfg(), {}))
+    assert env["HAL0_COMFYUI_STATUS_URL"] == "http://192.0.2.10:8080/api/comfyui/arbiter"
+    monkeypatch.setenv("HAL0_BIND_HOST", "::1")
+    env = _gate_env(ComfyUIProvider().container_spec(_img_cfg(), {}))
+    assert env["HAL0_COMFYUI_STATUS_URL"] == "http://[::1]:8080/api/comfyui/arbiter"
+
+
+def test_comfyui_spec_reads_the_gate_settings_from_api_env(
+    _api_env_unset: None, tmp_hal0_home: str
+) -> None:
+    """Every unit render path carries the settings, including the installer's
+    and hal0 update's re-render, which run without api.env in their
+    environment: the values come from the file hal0-api itself loads."""
+    api_env = Path(tmp_hal0_home) / "etc" / "hal0" / "api.env"
+    api_env.parent.mkdir(parents=True, exist_ok=True)
+    api_env.write_text(
+        '# hal0-api environment\nHAL0_PORT=9124\nHAL0_COMFYUI_GATE_FAIL_OPEN="yes"\n',
+        encoding="utf-8",
+    )
+    spec = ComfyUIProvider().container_spec(_img_cfg(), {})
+    env = _gate_env(spec)
+    assert env["HAL0_COMFYUI_STATUS_URL"] == "http://127.0.0.1:9124/api/comfyui/arbiter"
+    assert env["HAL0_COMFYUI_GATE_FAIL_OPEN"] == "1"
+    assert "Environment=HAL0_COMFYUI_GATE_FAIL_OPEN=1" in _render_from_spec("img", spec)
+
+
+def test_comfyui_spec_passes_the_gate_fail_open_switch_through(
+    monkeypatch: pytest.MonkeyPatch, _api_env_unset: None
+) -> None:
+    """The hal0_gpu_gate node reads HAL0_COMFYUI_GATE_FAIL_OPEN inside the
+    container; an operator sets it in hal0-api's environment (api.env) and the
+    img slot's next start hands it on."""
+    monkeypatch.setenv("HAL0_COMFYUI_GATE_FAIL_OPEN", "1")
+    spec = ComfyUIProvider().container_spec(_img_cfg(), {})
+    assert _gate_env(spec)["HAL0_COMFYUI_GATE_FAIL_OPEN"] == "1"
+    assert "Environment=HAL0_COMFYUI_GATE_FAIL_OPEN=1" in _render_from_spec("img", spec)
+
+
 def test_comfyui_argv_uses_opt_comfyui_workdir() -> None:
     spec = ComfyUIProvider().container_spec(_img_cfg(), {})
     assert spec.command[:2] == ["bash", "-lc"]
@@ -226,11 +304,11 @@ def test_image_section_dict_is_not_an_image_override(monkeypatch) -> None:
         "port": 8188,
         "profile": "comfyui",
         "provider": "comfyui",
-        "image": {"idle_restore_minutes": 5, "default_size": "1024x1024"},
+        "image": {"default_size": "1024x1024"},
     }
     ref = ComfyUIProvider().image_ref(cfg)
     assert isinstance(ref, str)
-    assert "idle_restore_minutes" not in ref
+    assert "1024x1024" not in ref
     assert "hal0ai/hal0-runner-comfyui" in ref  # the runner pin
 
 

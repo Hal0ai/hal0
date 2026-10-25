@@ -166,23 +166,13 @@ class NpuConfig(BaseModel):
 class ImageGenConfig(BaseModel):
     """[image] table in a slot TOML — persisted image-gen settings (#599).
 
-    Carried by the img (ComfyUI) slot.  ``idle_restore_minutes`` feeds the
-    GpuArbiter's restore timer (Phase D spec §7): after the img slot has
-    had no jobs for this many minutes, the arbiter restores the LLM GPU
-    slots it stopped.  ``default_size``/``default_steps`` seed the image
-    generation request defaults surfaced in the dashboard.
+    Carried by the img (ComfyUI) slot.  ``default_size``/``default_steps`` seed
+    the image generation request defaults surfaced in the dashboard.  Image
+    mode needs no setting: it ends when generation stops (ADR-0038).
     """
 
     model_config = {"extra": "forbid"}
 
-    idle_restore_minutes: int = Field(
-        default=60,
-        ge=0,
-        description=(
-            "Minutes of img-slot job inactivity before the GpuArbiter "
-            "restores stopped LLM GPU slots.  0 = never auto-restore."
-        ),
-    )
     default_size: str = Field(
         default="",
         description=(
@@ -301,6 +291,10 @@ REMOVED_SLOT_KEYS: dict[str, str] = {
     "backend": "replaced by 'device' (gpu-rocm, gpu-vulkan, gpu-cuda, cpu or npu)",
     "lru": (
         "retired — eviction order is 'priority' (0-100, lower first); use 'pinned' to exempt a slot"
+    ),
+    "[image].idle_restore_minutes": (
+        "retired — image mode now ends when image generation stops (ADR-0038); delete the "
+        "line, or run hal0 update, which takes it out"
     ),
 }
 
@@ -538,8 +532,9 @@ class SlotConfig(BaseModel):
             "Per-slot idle-TTL override (seconds) for hard eviction "
             "(SlotReaper.evict_timeout_for). 0 disables IDLE-TTL eviction "
             "for this slot only — pressure eviction and pre-load eviction "
-            "are separate paths, exempted only by `pinned`, not by this "
-            "value."
+            "are separate paths, exempted by `pinned`, not by this value. "
+            "The ComfyUI img-group slot is never unloaded by idle, pressure "
+            "or pre-load eviction, whatever this value says."
         ),
     )
     pinned: bool = Field(
@@ -602,8 +597,8 @@ class SlotConfig(BaseModel):
         default_factory=ImageGenConfig,
         alias="image",
         description=(
-            "[image] table — image-gen settings (idle_restore_minutes, "
-            "default_size, default_steps). See ImageGenConfig (#599)."
+            "[image] table — image-gen settings (default_size, "
+            "default_steps). See ImageGenConfig (#599)."
         ),
     )
 
@@ -1641,7 +1636,9 @@ class SlotsConfig(BaseModel):
             "when the slot's own TOML has no idle_timeout_s override. 0 "
             "disables IDLE-TTL eviction for slots using this default — "
             "pressure eviction and pre-load eviction are separate paths, "
-            "exempted only by `pinned`, not by this value."
+            "exempted by `pinned`, not by this value. The ComfyUI "
+            "img-group slot is never unloaded by idle, pressure or pre-load "
+            "eviction."
         ),
     )
     evict_pressure_mb: int = Field(
@@ -1654,8 +1651,9 @@ class SlotsConfig(BaseModel):
             "in priority order (lowest `priority` first, "
             "least-recently-used as the tie-break within a tier) until "
             "free RAM is back above the floor. 0 disables pressure "
-            "eviction. `pinned` is the only exemption — `idle_timeout_s = "
-            "0` on a slot does not exempt it from this path."
+            "eviction. `pinned` is the only per-slot exemption — "
+            "`idle_timeout_s = 0` on a slot does not exempt it from this "
+            "path. The ComfyUI img-group slot is never a candidate."
         ),
     )
     preload_evict_enabled: bool = Field(
@@ -1664,7 +1662,8 @@ class SlotsConfig(BaseModel):
             "Free memory SYNCHRONOUSLY before a load starts, when the "
             "incoming model's estimated footprint plus "
             "preload_evict_headroom_mb would not fit in projected free "
-            "memory. Evicts non-pinned resident slots in priority order "
+            "memory. Evicts non-pinned resident slots (never the ComfyUI "
+            "img-group slot) in priority order "
             "(lowest `priority` first, least-recently-used as the "
             "tie-break within a tier) — the same eligibility "
             "evict_pressure_mb uses — until it fits, or fails the load "

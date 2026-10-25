@@ -830,8 +830,11 @@ hal0 doctor profiles          # dangling profile ref? un-pulled image?
 Usual causes: the runner image hasn't been pulled yet (the first load blocks
 on a multi-GB pull — watch the journal), the model named in
 `/etc/hal0/slots/<name>.toml` isn't in the registry (`hal0 model list`), or
-the GPU is held by image mode (the dispatcher returns 503 while the `img`
-slot owns the GPU — stop image mode or wait for idle-restore).
+the GPU is held for `img`: the dispatcher returns 503 `gpu.image_mode` while a
+pin holds image mode (unpin it, or switch to inference with `force`), when
+ComfyUI's queue cannot be read, or after a request has waited 120 seconds for
+the GPU. Without a pin, image mode ends about 10 seconds after the last render,
+and a request for a GPU slot waits for that instead.
 
 **Something bound the port but nothing answers on it.** That is usually a
 stale netavark DNAT rule left by a container that died badly:

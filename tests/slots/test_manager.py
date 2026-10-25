@@ -1003,7 +1003,6 @@ async def test_update_config_preserves_sibling_table_keys(
                 "[model]",
                 'default = "qwen3-4b-q4_k_m"',
                 "[image]",
-                "idle_restore_minutes = 30",
                 'default_size = "512x512"',
                 "",
             ]
@@ -1014,11 +1013,7 @@ async def test_update_config_preserves_sibling_table_keys(
     await sm._transition("chat", _S.OFFLINE, force=True)
     await sm.update_config("chat", {"image": {"default_steps": 8}})
     on_disk = tomllib.loads((slot_root / "chat.toml").read_text(encoding="utf-8"))
-    assert on_disk["image"] == {
-        "idle_restore_minutes": 30,
-        "default_size": "512x512",
-        "default_steps": 8,
-    }
+    assert on_disk["image"] == {"default_size": "512x512", "default_steps": 8}
     # The model binding MUST survive an unrelated partial update.
     assert on_disk["model"] == {"default": "qwen3-4b-q4_k_m"}
 
@@ -1071,11 +1066,11 @@ async def test_update_config_refuses_tuning_keys(
         ),
         # A partial [image] update keeps the seeded sibling.
         (
-            ["[model]", 'default = "seed-model"', "[image]", "idle_restore_minutes = 30"],
+            ["[model]", 'default = "seed-model"', "[image]", 'default_size = "512x512"'],
             {"image": {"default_steps": 4}},
             {
                 "model": {"default": "seed-model"},
-                "image": {"idle_restore_minutes": 30, "default_steps": 4},
+                "image": {"default_size": "512x512", "default_steps": 4},
             },
         ),
         # An explicit None deletes the key (TOML has no null).
@@ -1118,76 +1113,6 @@ async def test_update_config_table_merge_matches_shared_helper(
     for table, value in expected.items():
         assert on_disk[table] == value
         assert on_disk[table] == helper_after[table]
-
-
-# ── #599 follow-up: [image].idle_restore_minutes hot-reload into the arbiter ──
-
-
-def _write_img_slot(root: Path, *, idle_restore_minutes: int, port: int = 8188) -> None:
-    """Write an img-group (ComfyUI) slot TOML carrying [image].idle_restore_minutes."""
-    (root / "img.toml").write_text(
-        "\n".join(
-            [
-                'name = "img"',
-                f"port = {port}",
-                'type = "image"',
-                'provider = "comfyui"',
-                'device = "gpu-rocm"',
-                'runtime = "container"',
-                'profile = "comfyui"',
-                "[model]",
-                'default = "sdxl-turbo"',
-                "[image]",
-                f"idle_restore_minutes = {idle_restore_minutes}",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-
-async def test_update_config_hot_reloads_arbiter_idle_restore(slot_root: Path) -> None:
-    """Editing [image].idle_restore_minutes pushes the new value into the
-    already-constructed GpuArbiter without an api restart (the value used to
-    be read only once at lazy construction)."""
-    _write_img_slot(slot_root, idle_restore_minutes=60)
-    sm = SlotManager()
-    # Touch the property so the arbiter is lazily constructed and caches 60.
-    assert sm.arbiter.idle_restore_minutes == 60
-
-    from hal0.slots.state import SlotState as _S
-
-    await sm._transition("img", _S.OFFLINE, force=True)
-    await sm.update_config("img", {"image": {"idle_restore_minutes": 15}})
-
-    # Live arbiter reflects the new window immediately.
-    assert sm.arbiter.idle_restore_minutes == 15
-
-
-async def test_update_config_hot_reload_accepts_zero_manual_only(slot_root: Path) -> None:
-    """0 is valid (#599 manual-only restore) and must propagate, not fall back."""
-    _write_img_slot(slot_root, idle_restore_minutes=60)
-    sm = SlotManager()
-    assert sm.arbiter.idle_restore_minutes == 60
-
-    from hal0.slots.state import SlotState as _S
-
-    await sm._transition("img", _S.OFFLINE, force=True)
-    await sm.update_config("img", {"image": {"idle_restore_minutes": 0}})
-    assert sm.arbiter.idle_restore_minutes == 0
-
-
-async def test_update_config_non_image_edit_leaves_arbiter_untouched(slot_root: Path) -> None:
-    """A write that doesn't touch [image] must not perturb the arbiter window."""
-    _write_img_slot(slot_root, idle_restore_minutes=45)
-    sm = SlotManager()
-    assert sm.arbiter.idle_restore_minutes == 45
-
-    from hal0.slots.state import SlotState as _S
-
-    await sm._transition("img", _S.OFFLINE, force=True)
-    await sm.update_config("img", {"model": {"default": "sd-1.5"}})
-    assert sm.arbiter.idle_restore_minutes == 45
 
 
 class TestListDegradesOnUnreadableSlot:

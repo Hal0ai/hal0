@@ -25,7 +25,7 @@ in the background behind a 202; the ``switchover`` block on /status tracks the
 transition. The API no longer shells out to any ComfyUI control scripts — the
 podman ``hal0-slot@<token>`` unit is the sole owner of the container lifecycle
 (the standalone ``comfy-*.sh`` docker scripts were retired in #984).
-``POST /api/comfyui/pin`` toggles the arbiter's manual pin (blocks idle-restore).
+``POST /api/comfyui/pin`` toggles the arbiter's manual pin (holds image mode).
 
 The image-model routes (ADR-0037) sit beside the engine ones: ``/models`` is the
 catalog with each model's install state, ``/models/{id}/install`` and
@@ -348,22 +348,38 @@ def _get_arbiter(request: Request) -> Any | None:
     return getattr(manager, "arbiter", None)
 
 
-# Arbiter GPU mode → the API's dashboard mode vocabulary.
-_ARBITER_TO_API_MODE = {"img": "generation", "llm": "inference"}
+def api_mode(arbiter_status: Any) -> str | None:
+    """The API's mode ("generation" | "inference") for an arbiter snapshot, or None.
 
-
-def _arbiter_api_mode(arbiter: Any) -> str | None:
-    """Arbiter-truth current mode ("generation"|"inference"), or None.
-
-    None means "no arbiter / arbiter broken" — the mode is then unknown (the
-    resident img unit stays up in inference mode, so it cannot stand in).
+    "generation" only once image mode is entered and no switch or restore is
+    running. The arbiter writes ``mode=img`` before a switch drains and unloads
+    the LLM set, and keeps it while a restore reloads that set, so the
+    persisted mode alone would announce the GPU as ComfyUI's while LLM weights
+    still hold it. The ``hal0_gpu_gate`` node released up to v1.6.5, which an
+    upgraded img container keeps running until it restarts, reads only this
+    field: "inference" makes it ask for the switch and wait for "generation".
+    None means "no arbiter answer": the mode is unknown (the resident img unit
+    stays up in inference mode, so it cannot stand in).
     """
+    if not isinstance(arbiter_status, dict):
+        return None
+    mode = arbiter_status.get("mode")
+    if mode == "llm":
+        return "inference"
+    if mode == "img":
+        return "inference" if arbiter_status.get("switching") else "generation"
+    return None
+
+
+def _arbiter_status(arbiter: Any) -> dict[str, Any] | None:
+    """``arbiter.status()``, or None when there is no arbiter or it cannot answer."""
     if arbiter is None:
         return None
     try:
-        return _ARBITER_TO_API_MODE.get(arbiter.status().get("mode"))
+        status = arbiter.status()
     except Exception:
         return None
+    return status if isinstance(status, dict) else None
 
 
 @router.get("/status")
@@ -390,14 +406,10 @@ async def comfyui_status(request: Request) -> dict[str, Any]:
             arbiter_block = arbiter.status()
     except Exception:
         arbiter_block = None
-    # Mode: the arbiter is the only source of truth (img → generation, llm →
-    # inference). The resident img unit stays up in inference mode too, so its
-    # state is NOT mode evidence: with no arbiter answer the mode is ``None``.
-    mode = (
-        _ARBITER_TO_API_MODE.get(arbiter_block.get("mode"))
-        if isinstance(arbiter_block, dict)
-        else None
-    )
+    # Mode: the arbiter is the only source of truth (see api_mode). The
+    # resident img unit stays up in inference mode too, so its state is NOT
+    # mode evidence: with no arbiter answer the mode is ``None``.
+    mode = api_mode(arbiter_block)
     return {
         "mode": mode,
         "reachable": reachable,
@@ -419,6 +431,50 @@ async def comfyui_status(request: Request) -> dict[str, Any]:
         "switchover": dict(_switch),
         "arbiter": arbiter_block,
     }
+
+
+@router.get("/arbiter")
+async def comfyui_arbiter(request: Request) -> dict[str, Any]:
+    """The GPU arbiter's state alone, for the ``hal0_gpu_gate`` node.
+
+    The gate reads this before every prompt, hal0's own ``/v1`` renders
+    included, with a 2 s budget, and refuses the prompt when hal0 does not
+    answer. So it runs none of ``/status``'s probes (systemd, ComfyUI's HTTP
+    API, the models scan): only ``mode`` (see :func:`api_mode`), the
+    ``arbiter`` block and the ``switchover`` tracker, in the same shape.
+    """
+    arbiter_block = _arbiter_status(_get_arbiter(request))
+    return {
+        "mode": api_mode(arbiter_block),
+        "arbiter": arbiter_block,
+        "switchover": dict(_switch),
+    }
+
+
+#: How long the prompt hand-off waits for the switch lock: under the gate's 2 s
+#: request timeout, so a busy lock answers "not held" (the gate re-reads the
+#: status) instead of timing the request out.
+_HANDOFF_LOCK_WAIT_S = 1.5
+
+
+@router.post("/prompt-handoff")
+async def comfyui_prompt_handoff(request: Request) -> JSONResponse:
+    """The ``hal0_gpu_gate`` node announces an editor prompt in image mode.
+
+    Answers ``{"held": true}`` once the arbiter holds the GPU for the prompt
+    until ComfyUI's queue can show it (:meth:`GpuArbiter.hold_for_prompt`),
+    and ``{"held": false}`` when the GPU is not ComfyUI's (the gate then asks
+    for the switch) or a switch or restore holds the lock right now (the gate
+    re-reads the status).
+    """
+    arbiter = _get_arbiter(request)
+    if arbiter is None:
+        return _arbiter_unavailable()
+    try:
+        held = await asyncio.wait_for(arbiter.hold_for_prompt(), _HANDOFF_LOCK_WAIT_S)
+    except TimeoutError:
+        held = False
+    return JSONResponse(status_code=200, content={"held": bool(held)})
 
 
 async def _run_switch(arbiter: Any, mode: str, *, pin: bool = False, force: bool = False) -> None:
@@ -466,7 +522,8 @@ async def comfyui_switchover(
     """Flip the iGPU between LLM inference and ComfyUI generation.
 
     Body: ``{"mode": "generation" | "inference", "force": bool, "pin": bool}``
-    (``pin`` only matters for generation: hold image mode against idle-restore).
+    (``pin`` only matters for generation: hold image mode until unpinned;
+    without it, image mode ends ``_RESTORE_GRACE_S`` after the last render).
     Refuses while a switch is in flight (409), no-ops when already in the
     target mode (200), and refuses to drop a busy render queue without
     ``force`` (409). Otherwise answers 202 and drives the GpuArbiter in the
@@ -496,26 +553,34 @@ async def comfyui_switchover(
     # Idempotency: the arbiter is the source of truth for the current mode
     # (D7). The img unit stays up in inference mode, so it cannot tell the
     # modes apart: when the arbiter cannot answer, refuse rather than guess.
+    # Generation is already done only once no switch or restore is running
+    # (api_mode); inference is done once the persisted mode is llm, so a Stop
+    # issued mid-switch into image mode is not swallowed.
     arbiter = _get_arbiter(request)
-    current = _arbiter_api_mode(arbiter)
-    if current is None:
+    arbiter_st = _arbiter_status(arbiter)
+    current = api_mode(arbiter_st)
+    if arbiter_st is None or current is None:
         return _arbiter_unavailable()
-    if current == mode:
+    already = current == "generation" if mode == "generation" else arbiter_st.get("mode") == "llm"
+    if already:
         return JSONResponse(status_code=200, content={"status": "noop", "mode": mode})
     # Mid-render guard: switching to inference frees ComfyUI's models from GPU
     # memory, killing any running/pending renders (the container itself stays
-    # up). Refuse unless the caller forces it — the dashboard confirm dialog
-    # states the blast radius and passes force on user confirm.
+    # up). A /v1 image request counts too: it holds an image job from before
+    # its prompt reaches ComfyUI's queue. Refuse unless the caller forces it —
+    # the dashboard confirm dialog states the blast radius and passes force on
+    # user confirm.
     force = body.force
     if mode == "inference" and not force:
         counts = _queue_counts(await _fetch_json("/queue"))
-        busy = counts["running"] + counts["pending"]
+        image_jobs = int((arbiter.status() or {}).get("image_jobs") or 0)
+        busy = counts["running"] + counts["pending"] + image_jobs
         if busy:
             raise Conflict(
                 f"{busy} render job(s) running or queued would be dropped; "
                 "retry with {'force': true} to switch anyway.",
                 code="comfyui.busy",
-                details={"queue": counts},
+                details={"queue": counts, "image_jobs": image_jobs},
             )
     pin = body.pin
     # Dispatch in the background and answer 202 immediately — the drain/reload
@@ -536,10 +601,13 @@ class SetPinnedBody(BaseModel):
 
 @router.post("/pin")
 async def comfyui_pin(request: Request, body: SetPinnedBody | None = None) -> JSONResponse:
-    """Toggle the arbiter's manual pin (holds image mode against idle-restore).
+    """Toggle the arbiter's manual pin.
 
-    Body: ``{"pinned": bool}``. Pinning disables idle auto-restore while image
-    mode is active.
+    Body: ``{"pinned": bool}``. A pin holds image mode until unpinned or a
+    forced switch to inference. Pinning needs image mode: the next switch into
+    image mode takes its pin from its own request (``switchover`` with
+    ``pin``), so a pin set in LLM mode would never hold and is refused with
+    409 ``comfyui.not_image_mode``. Unpinning always succeeds.
     """
     pinned = body.pinned if body is not None else None
     if not isinstance(pinned, bool):
@@ -550,6 +618,16 @@ async def comfyui_pin(request: Request, body: SetPinnedBody | None = None) -> JS
     arbiter = _get_arbiter(request)
     if arbiter is None:
         return _arbiter_unavailable()
+    if pinned:
+        arbiter_st = _arbiter_status(arbiter)
+        if arbiter_st is None:
+            return _arbiter_unavailable()
+        if arbiter_st.get("mode") != "img":
+            raise Conflict(
+                "image mode is not active, so there is nothing to pin; switch with "
+                "{'mode': 'generation', 'pin': true} to enter image mode pinned",
+                code="comfyui.not_image_mode",
+            )
     arbiter.set_pin(pinned)
     return JSONResponse(status_code=200, content={"pinned": pinned})
 

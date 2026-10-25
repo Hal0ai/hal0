@@ -2059,6 +2059,14 @@ def run_post_activation_migrations(
         # Non-fatal: an affected slot keeps refusing to load (the #1923
         # preflight guard) until the operator manually relabels its device.
 
+    try:
+        strip_retired_image_keys(job_id=job_id)
+    except Exception as exc:
+        log.warning("updater.image_keys_strip_failed", job_id=job_id, error=str(exc))
+        # Non-fatal: the img slot still loads (the slot manager reads raw TOML),
+        # but a file that still carries the key fails hal0 doctor's slot
+        # validation until the operator deletes the line.
+
     # ── Kokoro store bundle (#2739, ADR-0030): from 1.4.0 the tts slot
     # launches only from the pulled kokoro-v1 bundle, so an upgraded box that
     # uses kokoro gets it fetched once here instead of losing speech until a
@@ -2816,6 +2824,84 @@ def relabel_stale_vulkan_slots(
                 ),
             )
     return relabeled
+
+
+_IMAGE_TABLE_RE = re.compile(r"^\s*\[\s*image\s*\]\s*(#.*)?$")
+_ANY_TABLE_RE = re.compile(r"^\s*\[")
+_IDLE_RESTORE_KEY_RE = re.compile(r"^\s*idle_restore_minutes\s*=")
+
+
+def strip_retired_image_keys(*, job_id: str | None = None) -> int:
+    """Take ``idle_restore_minutes`` out of every slot TOML's ``[image]`` table.
+
+    ADR-0038: image mode ends when generation stops, so nothing reads the key
+    and ``ImageGenConfig`` refuses it. The line is removed in place, so the
+    file's comments survive. A shape the line edit cannot handle (an inline
+    ``image = {…}`` table, a dotted ``image.idle_restore_minutes`` key) is
+    re-serialised without the key, which drops its comments. Idempotent. A file
+    that cannot be read or written is logged and skipped. Returns the number of
+    files changed.
+    """
+    import tomllib
+
+    import tomli_w
+
+    from hal0.config.migrations.runner_system import _replace_file
+    from hal0.config.paths import slots_config_dir
+
+    changed = 0
+    slots_dir = slots_config_dir()
+    for toml_path in sorted(slots_dir.glob("*.toml")) if slots_dir.is_dir() else []:
+        slot_name = toml_path.stem
+        try:
+            text = toml_path.read_text(encoding="utf-8")
+            raw = tomllib.loads(text)
+        except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+            log.warning("updater.image_keys_slot_unreadable", slot=slot_name, error=str(exc))
+            continue
+        image = raw.get("image")
+        if not isinstance(image, dict) or "idle_restore_minutes" not in image:
+            continue
+        expected = {
+            **raw,
+            "image": {k: v for k, v in image.items() if k != "idle_restore_minutes"},
+        }
+
+        in_image = False
+        dropped = False
+        kept: list[str] = []
+        for line in text.splitlines(keepends=True):
+            if _IMAGE_TABLE_RE.match(line):
+                in_image = True
+            elif _ANY_TABLE_RE.match(line):
+                in_image = False
+            elif in_image and not dropped and _IDLE_RESTORE_KEY_RE.match(line):
+                dropped = True
+                continue
+            kept.append(line)
+        edited = "".join(kept)
+
+        comments_kept = False
+        if edited != text:
+            try:
+                comments_kept = tomllib.loads(edited) == expected
+            except tomllib.TOMLDecodeError:
+                comments_kept = False
+        try:
+            data = edited if comments_kept else tomli_w.dumps(expected)
+            _replace_file(toml_path, data.encode("utf-8"))
+        except Exception as exc:
+            log.warning("updater.image_keys_write_failed", slot=slot_name, error=str(exc))
+            continue
+        changed += 1
+        log.info(
+            "updater.image_idle_restore_stripped",
+            job_id=job_id,
+            slot=slot_name,
+            value=image["idle_restore_minutes"],
+            comments_kept=comments_kept,
+        )
+    return changed
 
 
 def rerender_slot_units(*, job_id: str | None = None) -> int:
@@ -3611,6 +3697,9 @@ _MIGRATION_RESULT_KEY = "hal0_migration_result"
 _NON_FATAL_MIGRATION_FAILURE_EVENTS: tuple[str, ...] = (
     "updater.registry_toml_retire_failed",
     "updater.vulkan_migration_failed",
+    "updater.image_keys_strip_failed",
+    "updater.image_keys_write_failed",
+    "updater.image_keys_slot_unreadable",
     "updater.retired_skills_prune_failed",
     "updater.memory_engine_upgrade_failed",
     "updater.components_converge_failed",

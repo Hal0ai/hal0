@@ -103,11 +103,26 @@ def test_id_keyed_loader_names_the_key_too(tmp_path: Path) -> None:
 @pytest.mark.parametrize("key", sorted(REMOVED_SLOT_KEYS))
 def test_a_removed_key_names_its_replacement(tmp_path: Path, key: str) -> None:
     value = '"vulkan"' if key == "backend" else "true"
-    path = _write(tmp_path, _BASE + f"{key} = {value}\n")
+    if key.startswith("["):  # a key inside a table, e.g. "[image].idle_restore_minutes"
+        table, _, name = key[1:].partition("].")
+        path = _write(tmp_path, _BASE + f"[{table}]\n{name} = 60\n")
+    else:
+        path = _write(tmp_path, _BASE + f"{key} = {value}\n")
     with pytest.raises(ConfigParseError) as exc:
         load_slot_config("brain", path=path)
     assert f"'{key}'" in str(exc.value)
     assert REMOVED_SLOT_KEYS[key] in str(exc.value)
+
+
+def test_the_retired_idle_restore_key_names_the_fix(tmp_path: Path) -> None:
+    """An img slot file hal0 update could not rewrite: hal0 doctor's message
+    says what to do with the key, not only that it is unknown."""
+    path = _write(tmp_path, _BASE + "[image]\nidle_restore_minutes = 60\n", name="img")
+    with pytest.raises(ConfigParseError) as exc:
+        load_slot_config("img", path=path)
+    message = str(exc.value)
+    assert "'[image].idle_restore_minutes'" in message
+    assert "delete" in message and "hal0 update" in message
 
 
 def test_a_bare_image_ref_points_at_image_pin(tmp_path: Path) -> None:
@@ -239,12 +254,26 @@ def test_the_tables_are_declared_too() -> None:
             "model": {"default": "m"},
             "server": {"env": {"A": "b"}},
             "npu": {"asr": True},
-            "image": {"idle_restore_minutes": 5},
+            "image": {"default_steps": 4},
         }
     )
     assert cfg.server.env == {"A": "b"}
     assert cfg.npu is not None and cfg.npu.asr is True
-    assert cfg.image_gen.idle_restore_minutes == 5
+    assert cfg.image_gen.default_steps == 4
+
+
+def test_image_table_refuses_idle_restore_minutes() -> None:
+    """ADR-0038: image mode ends when generation stops, so ``[image]`` no
+    longer carries an idle window and refuses the key like any unknown one."""
+    with pytest.raises(ValidationError) as exc:
+        SlotConfig.model_validate(
+            {
+                "name": "x",
+                "port": 8081,
+                "image": {"idle_restore_minutes": 5},
+            }
+        )
+    assert "idle_restore_minutes" in str(exc.value)
 
 
 # ── the two on-disk shapes ───────────────────────────────────────────────────

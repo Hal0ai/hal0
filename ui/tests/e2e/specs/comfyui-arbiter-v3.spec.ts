@@ -43,7 +43,8 @@ function comfyV2Status(overrides: Record<string, any> = {}) {
       mode: 'img',
       pinned: false,
       saved_llm_slots: ['primary', 'agent'],
-      idle_restore_at: null,
+      switching: false,
+      image_jobs: 0,
     },
     // V2 render-hero extension fields (not in base /status spec but accepted
     // by transformComfyuiStatus when present — same shape as mock fixture)
@@ -254,7 +255,7 @@ test.describe('ComfyUI V2 live-wired pane (Task 5.2)', () => {
         mode: 'inference',
         reachable: false,
         engine: 'stopped',
-        arbiter: { mode: 'llm', pinned: false, saved_llm_slots: [], idle_restore_at: null },
+        arbiter: { mode: 'llm', pinned: false, saved_llm_slots: [], switching: false, image_jobs: 0 },
       }),
     )
     await gotoImageTab(page)

@@ -58,14 +58,9 @@ export const RELOAD_CLASS_FALLBACK = {
   'slot.tts.default_speed': { apply_class: 'immediate' },
   'slot.tts.default_response_format': { apply_class: 'immediate' },
 
-  // ── [image] generation defaults — size/steps are per-request fallbacks;
-  //    idle_restore_minutes is read once at GpuArbiter construction
-  //    (slots/arbiter.py:249, wired slots/manager.py:3022 — the lazy
-  //    SlotManager.arbiter property), so it needs the API service bounced.
-  //    ──────────────────────────────────────────────────────────────────────
+  // ── [image] generation defaults: size/steps are per-request fallbacks ──
   'slot.image.default_size': { apply_class: 'immediate' },
   'slot.image.default_steps': { apply_class: 'immediate' },
-  'slot.image.idle_restore_minutes': { apply_class: 'service-restart', services: [SERVICE_HAL0_API] },
 
   // ── per-model file facts (`/api/models/{id}`, top-level on the model) ──
   // A model's stored file facts (chat template / jinja / MTP heads) are baked

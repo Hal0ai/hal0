@@ -13,9 +13,9 @@ Every style listed here has a branch in UpstreamRegistry.auth_headers();
 "google_query" was listed here for releases without one (#1513). Keep the
 two in lock-step — tests/security/test_upstream_auth_contract.py asserts it.
 
-API keys are NEVER written to TOML.  They live in the slot env file managed
-by hal0.config.env.write_env_atomic; the key's env var name is stored in
-the TOML as auth_value_env.
+API keys are NEVER written to TOML.  They live in the process environment
+(``/etc/hal0/api.env``); the key's env var name is stored in the TOML as
+auth_value_env.
 
 Port target: haloai lib/integrations.py.
 See PLAN.md §3 (module port plan — "provider catalog").

@@ -22,6 +22,7 @@ calls, mirroring the patched status seams.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -201,7 +202,8 @@ class _StubArbiter:
                 "mode": mode,
                 "pinned": False,
                 "saved_llm_slots": [],
-                "idle_restore_at": None,
+                "switching": False,
+                "image_jobs": 0,
             }
         )
 
@@ -354,6 +356,24 @@ def test_switchover_to_inference_refused_while_queue_busy(
     arb.restore_llm.assert_not_awaited()
 
 
+def test_switchover_to_inference_refused_while_an_image_request_is_in_flight(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A /v1/images/generations render holds an image job from before its
+    # /prompt reaches ComfyUI, so the queue alone can look empty mid-render.
+    monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
+    arb = _install_arbiter(client, mode="img")
+    arb.status.return_value = {**arb.status.return_value, "image_jobs": 1}
+    c, s, f = _patch(container="running", hermes=False, fetch=_fetch_idle)
+    with c, s, f:
+        r = client.post("/api/comfyui/switchover", json={"mode": "inference"})
+    assert r.status_code == 409
+    error = r.json()["error"]
+    assert error["code"] == "comfyui.busy"
+    assert error["details"]["image_jobs"] == 1
+    arb.restore_llm.assert_not_awaited()
+
+
 def test_switchover_post_migration_inference_uses_arbiter_truth(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -462,8 +482,8 @@ def test_switchover_arbiter_error_recorded(
 
 
 def test_pin_endpoint_toggles(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    # Plain set_pin passthrough that reflects the new value back.
-    arb = _install_arbiter(client)
+    # Plain set_pin passthrough that reflects the new value back (image mode).
+    arb = _install_arbiter(client, mode="img")
     r = client.post("/api/comfyui/pin", json={"pinned": True})
     assert r.status_code == 200
     assert r.json() == {"pinned": True}
@@ -473,6 +493,20 @@ def test_pin_endpoint_toggles(client: TestClient, monkeypatch: pytest.MonkeyPatc
     assert r.status_code == 200
     assert r.json() == {"pinned": False}
     arb.set_pin.assert_called_with(False)
+
+
+def test_pin_in_llm_mode_is_refused_rather_than_reported_as_held(client: TestClient) -> None:
+    """The next switch into image mode takes its pin from its own request, so a
+    pin set in LLM mode would never hold: answer 409 instead of pinned:true."""
+    arb = _install_arbiter(client, mode="llm")
+    r = client.post("/api/comfyui/pin", json={"pinned": True})
+    assert r.status_code == 409, r.text
+    assert r.json()["error"]["code"] == "comfyui.not_image_mode"
+    arb.set_pin.assert_not_called()
+
+    r = client.post("/api/comfyui/pin", json={"pinned": False})  # unpinning is always fine
+    assert r.status_code == 200 and r.json() == {"pinned": False}
+    arb.set_pin.assert_called_once_with(False)
 
 
 def test_pin_endpoint_rejects_non_bool_body(
@@ -485,15 +519,103 @@ def test_pin_endpoint_rejects_non_bool_body(
     arb.set_pin.assert_not_called()
 
 
+def test_status_reports_generation_only_once_a_switch_has_finished(client: TestClient) -> None:
+    """hal0 writes mode=img before a switch's drain and unloads, and keeps it
+    through a restore's reloads. A gate that reads only ``mode`` (the one an
+    upgraded img container still runs) must not see generation until the GPU
+    is really ComfyUI's."""
+    arb = _install_arbiter(client, mode="img")
+    c, s, f = _patch(container="running", hermes=False, fetch=_fetch_idle)
+    with c, s, f:
+        arb.status.return_value = {**arb.status.return_value, "switching": True}
+        assert client.get("/api/comfyui/status").json()["mode"] == "inference"
+        arb.status.return_value = {**arb.status.return_value, "switching": False}
+        assert client.get("/api/comfyui/status").json()["mode"] == "generation"
+
+
+def test_switchover_to_generation_mid_switch_is_not_a_noop(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A gate that posts while hal0 is still switching or restoring gets a real
+    switch request queued behind it, not a 200 that says it is already done."""
+    monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
+    arb = _install_arbiter(client, mode="img")
+    arb.status.return_value = {**arb.status.return_value, "switching": True}
+    c, s, f = _patch(container="running", hermes=False, fetch=_fetch_idle)
+    with c, s, f:
+        r = client.post("/api/comfyui/switchover", json={"mode": "generation"})
+    assert r.status_code == 202, r.text
+    arb.ensure_img.assert_awaited_once()
+
+
+def test_switchover_to_inference_mid_switch_is_not_swallowed(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A manual Stop during a switch into image mode still restores the LLM set."""
+    monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
+    arb = _install_arbiter(client, mode="img")
+    arb.status.return_value = {**arb.status.return_value, "switching": True}
+    c, s, f = _patch(container="running", hermes=False, fetch=_fetch_idle)
+    with c, s, f:
+        r = client.post("/api/comfyui/switchover", json={"mode": "inference"})
+    assert r.status_code == 202, r.text
+    arb.restore_llm.assert_awaited_once()
+
+
+def test_arbiter_route_answers_the_gate_without_the_status_probes(client: TestClient) -> None:
+    """The GPU gate reads this before every prompt, including hal0's own /v1
+    renders: it must not wait on systemd, ComfyUI's HTTP API or the models scan
+    the full status aggregates, or a slow probe reads as an unreachable hal0."""
+    arb = _install_arbiter(client, mode="img")
+    arb.status.return_value = {**arb.status.return_value, "switching": False}
+
+    async def _never(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("the gate's status read must not run the status probes")
+
+    base = "hal0.api.routes.comfyui"
+    with (
+        patch(f"{base}._fetch_json", side_effect=_never),
+        patch(f"{base}._container_state", side_effect=_never),
+        patch(f"{base}._systemd_active", side_effect=_never),
+        patch(f"{base}._list_files_or_none", side_effect=_never),
+        patch(f"{base}._gpu_telemetry", side_effect=_never),
+    ):
+        r = client.get("/api/comfyui/arbiter")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["mode"] == "generation"
+    assert body["arbiter"]["mode"] == "img"
+    assert body["switchover"]["active"] is False
+
+
+def test_arbiter_route_reports_inference_while_switching(client: TestClient) -> None:
+    arb = _install_arbiter(client, mode="img")
+    arb.status.return_value = {**arb.status.return_value, "switching": True}
+    assert client.get("/api/comfyui/arbiter").json()["mode"] == "inference"
+
+
+def test_prompt_handoff_route_holds_the_gpu_for_an_editor_prompt(client: TestClient) -> None:
+    arb = _install_arbiter(client, mode="img")
+    arb.hold_for_prompt = AsyncMock(return_value=True)
+    r = client.post("/api/comfyui/prompt-handoff")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"held": True}
+    arb.hold_for_prompt.assert_awaited_once()
+
+    arb.hold_for_prompt = AsyncMock(return_value=False)
+    assert client.post("/api/comfyui/prompt-handoff").json() == {"held": False}
+
+
 def test_status_carries_arbiter_block(client: TestClient) -> None:
     # /status folds arbiter.status() in under "arbiter" so the pane can render
-    # mode/pin/idle-restore without a second endpoint.
+    # mode/pin/switching/image jobs without a second endpoint.
     arb = _install_arbiter(client)
     arb.status.return_value = {
         "mode": "img",
         "pinned": True,
         "saved_llm_slots": ["primary", "utility"],
-        "idle_restore_at": None,
+        "switching": False,
+        "image_jobs": 0,
     }
     c, s, f = _patch(container="running", hermes=False, fetch=_fetch_idle)
     with c, s, f:
@@ -503,7 +625,8 @@ def test_status_carries_arbiter_block(client: TestClient) -> None:
         "mode": "img",
         "pinned": True,
         "saved_llm_slots": ["primary", "utility"],
-        "idle_restore_at": None,
+        "switching": False,
+        "image_jobs": 0,
     }
 
 

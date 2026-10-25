@@ -1,7 +1,7 @@
 """Live-truth resolver for OpenWebUI's dynamic env blocks and wired chips.
 
-Reads the actually-bound capability state — an embed-capable slot, a
-ComfyUI (img) slot, a search provider — and turns it into the overrides
+Reads the actually-bound capability state — an embed-capable slot, the img
+selection, a search provider — and turns it into the overrides
 :func:`hal0.openwebui.env_writer.write_openwebui_env` merges on top of its
 defaults. A block with nothing bound comes back as ``None`` per key, which the
 writer reads as "no claim": it clears only keys hal0 wrote itself, never an
@@ -12,9 +12,8 @@ exposes for the dashboard's wired chips (one classifier on the server — the UI
 never re-derives "is documents/images wired").
 
 Deliberately a separate module from :mod:`hal0.openwebui.env_writer`: this
-one imports ``hal0.capabilities``, ``hal0.registry`` and
-``hal0.providers.comfyui_workflows`` freely, which is fine because its only
-callers already run inside the full app
+one imports ``hal0.capabilities`` and ``hal0.comfyui.resolve`` freely, which is
+fine because its only callers already run inside the full app
 (:func:`hal0.components.openwebui_arm.converge_openwebui`, the services
 route) — never the installer's cold ``python -m hal0.openwebui.env_writer``
 (see that module's docstring for why it avoids this import weight).
@@ -22,38 +21,11 @@ route) — never the installer's cold ``python -m hal0.openwebui.env_writer``
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from typing import Any
 
 from hal0.capabilities.config import CapabilityConfig, load_capabilities_config
 from hal0.openwebui.env_writer import dynamic_env_overrides
-
-#: filename_prefix / placeholder prompt baked into the static workflow OWUI
-#: ships with — real requests always overwrite both (see
-#: hal0.providers.comfyui_workflows.build_workflow's node-pointer patching,
-#: which is exactly what COMFYUI_WORKFLOW_NODES tells OWUI to do at request
-#: time).
-_OWUI_REQUEST_TAG = "openwebui"
-_OWUI_PLACEHOLDER_PROMPT = "a placeholder prompt"
-
-#: OWUI's own COMFYUI_WORKFLOW_NODES vocabulary (type, substitution key) →
-#: the translator template's _meta.params pointer key that names the same
-#: node. Generic across every shipped template (sdxl_turbo_simple,
-#: sd15_simple, …) because it walks the template's own pointer map rather
-#: than hardcoding node ids — a new template needs no changes here.
-#:
-#: There is deliberately no ``model`` row. OWUI writes its configured model id
-#: into that node, and the id (``sd-1.5-pruned-emaonly``, ``ckpt/<path>``) is
-#: never a checkpoint filename; the baked graph already carries the checkpoint.
-_OWUI_NODE_TYPES: tuple[tuple[str, str, str], ...] = (
-    ("prompt", "positive_prompt", "text"),
-    ("width", "width", "width"),
-    ("height", "height", "height"),
-    ("steps", "steps", "steps"),
-    ("seed", "seed", "seed"),
-    ("n", "batch_size", "batch_size"),
-)
 
 
 def _selection(cfg: CapabilityConfig, slot: str, child: str) -> Any:
@@ -94,7 +66,7 @@ def openwebui_wiring_status(
     real bound backend: an *enabled* capability selection with a non-empty
     model, never merely a slot file existing on disk. Images go one step
     further: the model must also resolve to something the API can render
-    (installed, renderable — :func:`_owui_baked_workflow`), because that is
+    (installed, renderable — :func:`_renderable_image_model`), because that is
     the condition under which the image env block is written at all. The chip
     and the env block read the same result, so the dashboard never claims an
     image button Open WebUI does not have; ``image_model`` is the model the
@@ -104,108 +76,56 @@ def openwebui_wiring_status(
     live upstream registry, so callers outside the API process (the env
     writer) omit it and get ``[]``.
     """
-    return _wiring(upstreams, model_cache)[0]
-
-
-def _wiring(
-    upstreams: Any | None, model_cache: Mapping[str, list[str]] | None
-) -> tuple[dict[str, Any], tuple[str, str, str] | None]:
-    """The status dict plus the baked image workflow it was derived from.
-
-    The workflow is resolved once here and handed to
-    :func:`resolve_dynamic_env_overrides`, so the chip and the env block can
-    never disagree about whether images are wired.
-    """
     cfg = load_capabilities_config()
     embed_sel = _selection(cfg, "embed", "embed")
     img_sel = _selection(cfg, "img", "img")
     embed_model = embed_sel.model.strip() if embed_sel is not None and embed_sel.enabled else ""
-    image_model = img_sel.model.strip() if img_sel is not None and img_sel.enabled else ""
-    baked = _owui_baked_workflow(image_model) if image_model else None
-    status = {
+    selected_image = img_sel.model.strip() if img_sel is not None and img_sel.enabled else ""
+    image_model = _renderable_image_model(selected_image) if selected_image else None
+    return {
         "chat": True,
         "voice": True,
         "documents": bool(embed_model),
-        "images": baked is not None,
+        "images": image_model is not None,
         "web_search": False,
         "embed_model": embed_model or None,
-        "image_model": image_model if baked is not None else None,
+        "image_model": image_model,
         "agents": _agent_model_ids(upstreams, model_cache),
     }
-    return status, baked
 
 
-def _owui_baked_workflow(model_id: str) -> tuple[str, str, str] | None:
-    """Build the static ``COMFYUI_WORKFLOW`` / ``COMFYUI_WORKFLOW_NODES``
-    pair OWUI needs, plus the ``IMAGE_SIZE`` default (the model's native
-    ``WxH``), from the SAME resolution and translator hal0's own
-    ``/v1/images/generations`` route uses
-    (:func:`hal0.comfyui.resolve.resolve_image_model`,
-    :mod:`hal0.providers.comfyui_workflows`) — so the baked default never
-    drifts from what the img slot actually runs. Never bakes ODS's
-    SDXL-Lightning graph; it renders the workflow template of the operator's
-    real bound model instead, at that model's native size.
+def _renderable_image_model(model_id: str) -> str | None:
+    """The id hal0's ``/v1/images/generations`` answers *model_id* under, or ``None``.
 
-    Returns ``None`` when the model does not resolve (unknown, not installed,
-    or not API-renderable) or its workflow can't be built — the caller must
-    then treat images as not wired rather than claim a broken default.
+    Resolves through the SAME :func:`hal0.comfyui.resolve.resolve_image_model` the
+    route uses, so Open WebUI is only pointed at a model that renders: a catalog id
+    or a user checkpoint's ``ckpt/<path>``. ``None`` when the model is unknown, not
+    installed or not API-renderable, when the models tree cannot be read, or when
+    the id holds a line break or NUL, which ``openwebui.env`` cannot carry.
     """
-    from hal0.comfyui.catalog import parse_pointer
     from hal0.comfyui.resolve import resolve_image_model
     from hal0.errors import Hal0Error
-    from hal0.providers.comfyui_workflows import build_workflow, template_params
 
     try:
         resolved = resolve_image_model(model_id, selection_model=None)
-        graph, _debug_meta = build_workflow(
-            body={"prompt": _OWUI_PLACEHOLDER_PROMPT, "size": resolved.defaults["size"]},
-            template=resolved.template,
-            ckpt_override=resolved.ckpt_override,
-            request_tag=_OWUI_REQUEST_TAG,
-        )
-        params = template_params(resolved.template)
-    except Hal0Error:
-        # Covers the resolution errors and WorkflowTemplateError, which share the base.
+    except (Hal0Error, OSError):
+        # A Hal0Error covers the resolution errors; an OSError is a models tree the
+        # hal0 user cannot read. Either way images are unwired and the RAG and
+        # web-search blocks are unaffected.
         return None
-
-    nodes: list[dict[str, Any]] = []
-    for owui_type, param_key, field in _OWUI_NODE_TYPES:
-        pointer = params.get(param_key)
-        if not isinstance(pointer, str):
-            continue
-        try:
-            node_id, _ = parse_pointer(pointer)
-        except ValueError:
-            continue
-        nodes.append({"type": owui_type, "key": field, "node_ids": [node_id]})
-
-    return (
-        json.dumps(graph, separators=(",", ":")),
-        json.dumps(nodes, separators=(",", ":")),
-        resolved.defaults["size"],
-    )
+    if any(c in resolved.id for c in "\n\r\0"):
+        return None
+    return resolved.id
 
 
 def resolve_dynamic_env_overrides() -> dict[str, str | None]:
     """Live capability state → the overrides dict
     :func:`~hal0.openwebui.env_writer.write_openwebui_env` merges in.
     """
-    status, baked = _wiring(None, None)
-    image_workflow_json: str | None = None
-    image_nodes_json: str | None = None
-    image_size: str | None = None
-    if baked is not None:
-        image_workflow_json, image_nodes_json, image_size = baked
-    # An image model that does not resolve has no baked workflow and the status
-    # reports ``image_model`` None for it: never claim a capability we can't
-    # back with a working workflow.
-
+    status = openwebui_wiring_status()
     return dynamic_env_overrides(
         embed_model_id=status["embed_model"],
         image_model_id=status["image_model"],
-        image_workflow_json=image_workflow_json,
-        image_workflow_nodes_json=image_nodes_json,
-        image_size=image_size,
         search_provider=_search_provider_lookup(),
     )
 

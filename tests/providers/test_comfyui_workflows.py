@@ -25,7 +25,6 @@ from hal0.providers.comfyui_workflows import (
     WorkflowTemplateError,
     WorkflowTemplateNotFound,
     build_workflow,
-    template_params,
 )
 
 _TURBO = "sdxl_turbo_simple"
@@ -37,29 +36,9 @@ def _template_of(model_id: str) -> str:
     return model.template
 
 
-# ─── template params ──────────────────────────────────────────────────────────
-
-
-def test_template_params_returns_the_pointer_map() -> None:
-    params = template_params(_TURBO)
-    assert params["positive_prompt"] == "node:6.inputs.text"
-    assert params["negative_prompt"] == "node:7.inputs.text"
-    assert params["filename_prefix"] == "node:9.inputs.filename_prefix"
-
-
-def test_template_params_unknown_template_raises_not_found() -> None:
-    with pytest.raises(WorkflowTemplateNotFound):
-        template_params("no-such-template")
-
-
 def test_build_unknown_template_raises_not_found() -> None:
     with pytest.raises(WorkflowTemplateNotFound):
         build_workflow(body=_baseline_body(), template="no-such-template", request_tag="t1")
-
-
-def test_template_params_empty_without_a_params_table() -> None:
-    # The editor-only video templates ship no _meta.
-    assert template_params("LTX2-T2V-BF16") == {}
 
 
 # ─── build_workflow happy paths ───────────────────────────────────────────────

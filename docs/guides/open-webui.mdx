@@ -58,24 +58,49 @@ models](/docs/guides/choose-models) for picking an embed model.
 
 ## Image generation
 
-The image button in the chat composer generates through hal0's ComfyUI
-slot once it's enabled:
+The image button in the chat composer generates through hal0's own
+`/v1/images/generations`, the endpoint any OpenAI client uses, so a render
+goes through the same model resolution, template, step count, size default
+and GPU switch, including the `img` slot's `[image].default_size` and
+`default_steps` (see [Generate images](/docs/guides/generate-images) for the
+underlying capability). Pick the model in hal0:
 
 ```sh
 hal0 capabilities set img img --model <your-image-model>
 ```
 
-hal0 bakes a static `COMFYUI_WORKFLOW` (and its matching
-`COMFYUI_WORKFLOW_NODES` substitution map) from the **same** translator
-`/v1/images/generations` itself uses, keyed to whichever checkpoint your
-`img` slot is actually bound to — never a generic pasted-in workflow for a
-checkpoint hal0 doesn't ship. Open WebUI's default image size is that model's
-native size, which you can still change in Open WebUI. Image settings are
-written only while the bound model is installed and renders through the API.
-Rebinding the `img` slot to a different model re-bakes the workflow on the next
-convergence pass, and installing or removing an image model re-renders it
-straight away (see [Generate images](/docs/guides/generate-images) for the
-underlying capability).
+hal0 sets Open WebUI's image engine to OpenAI, with its base URL at hal0's
+`/v1`, the box client key (the same key chat and voice use, so it keeps
+working with auth on), the model selected for `img`, and an empty image size
+so that hal0 picks the size. Image settings are written only while the
+selected model is installed and the API can render it. Changing the `img`
+selection, installing an image model or removing one re-renders them, and a
+running Open WebUI restarts to pick them up.
+
+Open WebUI's image settings page lists OpenAI's model names, which hal0 does
+not serve, so choose the model in hal0 rather than there. A change made on
+that page lasts only until Open WebUI restarts, because hal0 turns off Open
+WebUI's persistent config. Open WebUI no longer connects to ComfyUI; ComfyUI's
+editor stays on the dashboard's Image Gen tab.
+
+Each image render from Open WebUI puts the GPU in image mode for as long as
+the image takes. A chat request for a GPU slot that arrives during the render
+waits for the render to finish and for hal0 to reload the chat models (up to
+120 seconds in all) instead of being refused, so Open WebUI's reply in the same
+turn, right after the image, arrives later than usual by the time the chat
+model takes to load. hal0 answers `503 gpu.image_mode` with `Retry-After: 15`
+only when image mode is pinned, when ComfyUI's queue cannot be read, or when
+the 120 seconds run out. When the last render is done, hal0 frees ComfyUI's
+models and reloads the GPU slots it unloaded about 10 seconds later, or at once
+when a chat request is waiting. If you pinned image mode (see
+[Generate images](/docs/guides/generate-images)), it holds until you unpin it
+or force a switch back to inference, and chat on GPU slots is refused until
+then. Chat on NPU and CPU slots is not affected.
+
+Every render passes ComfyUI's GPU gate node (see
+[Generate images](/docs/guides/generate-images#comfyuis-editor-and-the-gpu-gate)).
+After updating hal0, run `hal0 slot restart img` once, so the running ComfyUI
+container loads the current gate.
 
 ## Talking to Hermes
 

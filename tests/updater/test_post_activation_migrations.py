@@ -26,6 +26,7 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
         "config_migrations": [],
         "registry_toml": [],
         "vulkan_migration": [],
+        "image_keys": [],
         "hermes_venv": [],
         "converge_components": [],
     }
@@ -50,6 +51,10 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
 
     def _vulkan_migration(*, job_id=None, rocm_lane=None, amd_host=None):
         calls["vulkan_migration"].append(job_id)
+        return 0
+
+    def _image_keys(*, job_id=None):
+        calls["image_keys"].append(job_id)
         return 0
 
     def _hermes_venv(*, job_id=None, install=True, venv=None, restart_gateway=True):
@@ -79,6 +84,7 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
     monkeypatch.setattr("hal0.updater.updater._maybe_run_config_migrations", _config_migrations)
     monkeypatch.setattr("hal0.registry.toml_retirement.retire_registry_toml", _registry_toml)
     monkeypatch.setattr("hal0.updater.updater.relabel_stale_vulkan_slots", _vulkan_migration)
+    monkeypatch.setattr("hal0.updater.updater.strip_retired_image_keys", _image_keys)
     monkeypatch.setattr("hal0.updater.updater.repair_hermes_mcp_client", _hermes_venv)
     monkeypatch.setattr("hal0.components.runner.converge_components", _converge_components)
     return calls
@@ -182,6 +188,7 @@ def test_runs_every_pass(_stub_every_pass: dict[str, list[Any]]) -> None:
     assert _stub_every_pass["config_migrations"] == [(1, "j1")]
     assert _stub_every_pass["registry_toml"] == ["j1"]
     assert _stub_every_pass["vulkan_migration"] == ["j1"]
+    assert _stub_every_pass["image_keys"] == ["j1"]
     assert _stub_every_pass["hermes_venv"] == [("j1", True)]
     assert _stub_every_pass["converge_components"] == [
         {

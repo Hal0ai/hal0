@@ -275,6 +275,16 @@ def _render_notes(notes: dict | None) -> None:
 _MIGRATION_PASS_LABELS: dict[str, str] = {
     "updater.registry_toml_retire_failed": "registry.toml retirement (see hal0 doctor all)",
     "updater.vulkan_migration_failed": "gpu-vulkan slot relabel",
+    "updater.image_keys_strip_failed": (
+        "img slot cleanup (delete idle_restore_minutes from [image] in the img slot TOML)"
+    ),
+    "updater.image_keys_write_failed": (
+        "img slot cleanup could not rewrite a slot TOML "
+        "(delete idle_restore_minutes from its [image] table by hand)"
+    ),
+    "updater.image_keys_slot_unreadable": (
+        "img slot cleanup could not read a slot TOML (see hal0 doctor all)"
+    ),
     "updater.memory_engine_upgrade_failed": "memory engine upgrade",
     "updater.components_converge_failed": "component convergence",
     "updater.retired_skills_prune_failed": "retired bundled-skill cleanup",
