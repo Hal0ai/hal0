@@ -47,8 +47,8 @@ if TYPE_CHECKING:
     from hal0.hardware.gpu_view import GPUMemorySample
 
 # Headroom kept back from a render's budget for the driver, the compositor and
-# allocator slop. Subtracted once, from the pool, in ``render_free_gb``. It also covers
-# the idle engine's own context, which the catalog's measured need leaves out.
+# allocator slop. Subtracted once, from the pool, in ``render_free_gb``. The idle image
+# engine's own footprint can exceed it (#3071).
 RENDER_MARGIN_GB = 2.0
 
 _STARTING = "starting"
@@ -190,8 +190,9 @@ def build_memory_budget(
     is room for the render. Subtracting it as well counted a warm engine's
     weights twice and refused renders that succeed. The engine still counts as
     attributed (``other_guests_gb`` is ``used - resident - engine``), so it is
-    never booked as another guest. The idle engine's own context, which the
-    measured need leaves out, is well under :data:`RENDER_MARGIN_GB`.
+    never booked as another guest. The idle engine's own footprint is in neither
+    the need nor the room, and can exceed :data:`RENDER_MARGIN_GB`, so the room
+    reads high by the difference while the engine is idle or down (#3071).
     """
     if not gpu_capable or sample is None:
         return MemoryBudget(gpu=None, ram=ram, render_free_gb=None)

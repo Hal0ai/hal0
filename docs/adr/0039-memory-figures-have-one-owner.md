@@ -190,8 +190,13 @@ The pool's usage is the kernel counter. The budget splits it by who holds it.
     last render included, is room for the render. Subtracting it as well counted
     a warm engine's weights in the need and again in the room, and refused
     renders that succeed. The engine still counts as attributed, so
-    `other_guests_gb` never absorbs it, and its own context, which the
-    measurement leaves out, is well under the margin.
+    `other_guests_gb` never absorbs it.
+  - The idle engine's own footprint is in neither the need nor the room. On a
+    Strix Halo guest (ComfyUI 0.28, ROCm 7.13) ComfyUI read about 4.4 GiB after
+    `POST /free`, above the 2 GB margin, so while the engine is idle or down
+    `render_free_gb` reads up to about 2.4 GiB high. The preflight fails open,
+    so this costs a refusal it does not make, never one it makes wrongly
+    (#3071).
   - It subtracts slots in the `starting` state, at their estimated footprint,
     because a slot still loading when image mode starts finishes onto the pool
     (#3056). Those slots are listed in `this_box`, but they are not counted as
@@ -307,7 +312,8 @@ still disagree with the rest of the dashboard.
     on shared hardware that the figure rises with a render and ignores other
     processes. If it took in another process's memory, `render_free_gb` would
     read too high by that amount, because decision 4 counts the engine's
-    figure as room.
+    figure as room. On one Strix Halo guest it did not: ComfyUI read about
+    4.4 GiB while the device-wide counter read about 43 GiB.
   - On a discrete card the image engine figure is always the img slot's
     estimate, and `image_engine_estimated` says so. The card's `used_gb` and
     `free_gb` still come from the kernel counter; only the split of the usage
