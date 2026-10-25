@@ -4,34 +4,72 @@
  * Dashboard-redesign: the compact MemoryMap sidebar widget on /#dashboard
  * was superseded by the full-width UNIFIED MEMORY hero (dashboard-redesign
  * .rd-mem-*): slot allocations render as colored blocks INSIDE the pool
- * bar, with a striped system block and a free remainder. The attribution
- * model is unchanged — useMemoryMapModel() (mem_mb contract, per-slot
- * Okabe–Ito colors) feeds both the retired sidebar and the new hero — so
- * the semantic guards carry over:
- *   - per-slot mem_mb attribution renders non-zero blocks + legend rows
+ * bar, with a striped "other guests" block and a free remainder.
+ *
+ * Every memory figure on these screens comes from the backend memory budget
+ * (ADR-0039): /api/stats/hardware `memory`, read through useMemoryMapModel().
+ * The raw counters the mock also carries (ram_total_mb, ram_used_mb,
+ * gtt_used_mb) are deliberately DIFFERENT from the budget's figures, so a
+ * screen that fell back to them would fail here. The semantic guards:
+ *   - the budget's per-slot rows render non-zero blocks + legend rows, each
+ *     under its own name; the image engine is named as such
  *   - co-resident slots keep DISTINCT stable colours (never one device hue)
- *   - container slots with mem_mb attribute like any other slot (#660)
+ *   - container slots attribute like any other slot (#660)
+ *   - the free label is the budget's `free_gb`, not the pool total minus the
+ *     drawn blocks (the attribution can overshoot the kernel's live counter)
+ *   - the health strip and the top bar show this box's RAM over its limit,
+ *     not over the GPU pool
  *   - no Proxmox nudge on the dashboard surface (expanded-variant only)
  *
  * The old sidebar-only guards (GTT-pool header label, headroom-line
- * removal) retired with the sidebar: the hero deliberately frames the FULL
- * unified pool (RAM total; host DIMM total in Proxmox mode) per the
- * redesign handoff, and never had a headroom line. isSlotLive/limitedBy
- * logic remains covered by slot-live-equivalence-v3.spec.ts and the
- * useMemoryMapModel consumers.
+ * removal) retired with the sidebar. isSlotLive/limitedBy logic remains
+ * covered by slot-live-equivalence-v3.spec.ts and the useMemoryMapModel
+ * consumers. A box where the pool is shared with a capped guest is covered
+ * by memory-budget-capped-guest-v3.spec.ts.
  */
 import { test, expect, json } from '../fixtures/apiMock'
 import type { Page } from '@playwright/test'
 
+// The reference box, as /api/stats/hardware serves it under `memory`
+// (MemoryBudget.as_dict()): a shared 116 GB pool, 43.4 GB of it in use by the
+// kernel's own count. This box's slots are attributed 39.8 GB and the image
+// engine 6.6 GB — 46.4 GB in all, 3.0 GB more than the counter — so the
+// budget's free (72.6) is larger than the 69.6 the drawn blocks leave. The
+// slot names are the e2e seed's (data.jsx), so legend rows and ruler links
+// resolve against real slots; the figures are those of the unit fixtures in
+// src/dash/__tests__/memory-map-pure.test.ts. `this_box` excludes the img
+// slot: its memory is `image_engine_gb`.
+const referenceBox = (thisBox?: Array<{ slot: string; gb: number; state: string }>) => ({
+  gpu: {
+    kind: 'shared',
+    total_gb: 116,
+    used_gb: 43.4,
+    this_box: thisBox ?? [
+      { slot: 'embed', gb: 2.8, state: 'ready' },
+      { slot: 'tts', gb: 6.2, state: 'ready' },
+      { slot: 'primary', gb: 30.8, state: 'serving' },
+    ],
+    image_engine_gb: 6.6,
+    other_guests_gb: 0,
+    attribution_excess_gb: 3.0,
+    free_gb: 72.6,
+  },
+  ram: { limit_gb: 105.5, used_gb: 16.1, free_gb: 89.4, source: 'container' },
+  render_free_gb: 107.4,
+})
+
 function mockStatsHardware(page: Page, host: object, overrides: object = {}) {
   return page.route('**/api/stats/hardware', (route) =>
     json(route, {
+      // Raw counters the dashboard no longer reads for memory figures; they
+      // disagree with `memory` on purpose (40000 MB = 39.1 GB, not 16.1).
       ram_total_mb: 96000,
       ram_used_mb: 40000,
       ram_available_mb: 56000,
       gtt_used_mb: 6200,
       vram_used_mb: 0,
       npu_status: { ok: true, model_mb: 1100 },
+      memory: referenceBox(),
       host,
       ...overrides,
     }),
@@ -44,8 +82,8 @@ test.describe('Unified memory hero (dashboard)', () => {
     await page.goto('/#dashboard')
     const card = page.locator('.rd-mem-card')
     await expect(card).toBeVisible()
-    // Pool bar with at least one attributed slot block (default mock slots
-    // carry mem_mb) plus the free remainder.
+    // Pool bar with at least one attributed slot block (the budget's per-slot
+    // rows) plus the free remainder.
     const bar = card.locator('.rd-mem-bar')
     await expect(bar).toBeVisible()
     await expect(bar.locator('.rd-mem-seg')).not.toHaveCount(0)
@@ -70,7 +108,38 @@ test.describe('Unified memory hero (dashboard)', () => {
     expect(c0).not.toBe(c1)
   })
 
-  test('container slot mem_mb attributed as a block in the pool bar (#660)', async ({ page }) => {
+  test('free is the budget free, the image engine is named, and the blocks are the budget rows', async ({
+    page,
+  }) => {
+    // 30.8 + 6.2 + 2.8 slot GB + the 6.6 GB image engine = 46.4 GB drawn, but
+    // the kernel's own count is 43.4 GB, so the budget's free is 72.6 — not the
+    // 69.6 (116 - 46.4) the drawn blocks leave. One screen, one free number:
+    // the card's label is the budget's, the same figure the top bar shows.
+    await mockStatsHardware(page, { configured: false, detected: false })
+    await page.goto('/#dashboard')
+    const card = page.locator('.rd-mem-card')
+    await expect(card).toBeVisible()
+    await expect(card.locator('.rd-mem-free')).toHaveText('free · 72.6 GB')
+    await expect(card).not.toContainText('69.6')
+    // The img slot's memory is the image engine's, shown under its own name;
+    // the per-slot figures are estimates and say so.
+    const legend = card.locator('.rd-mem-legend')
+    await expect(legend).toContainText('image engine 6.6G')
+    await expect(legend).toContainText('primary 30.8G')
+    await expect(legend).toContainText('tts 6.2G')
+    await expect(card.locator('.rd-mem-seg[title^="primary"]')).toHaveAttribute(
+      'title',
+      /^primary · 30\.8 GB \(estimated\) · /,
+    )
+    await expect(card.locator('.rd-mem-seg[title^="image engine"]')).toHaveAttribute(
+      'title',
+      /^image engine · 6\.6 GB · /,
+    )
+    // Nothing else holds the pool: no striped block.
+    await expect(card.locator('.rd-mem-seg-system')).toHaveCount(0)
+  })
+
+  test('container slot attributed as a block in the pool bar (#660)', async ({ page }) => {
     // With VITE_MOCK_HAL0=1 the mock shim reads HAL0_DATA directly;
     // inject the container slot via addInitScript before data.jsx runs.
     const containerSlot = {
@@ -96,18 +165,20 @@ test.describe('Unified memory hero (dashboard)', () => {
         configurable: true,
       })
     }, containerSlot)
-    await mockStatsHardware(page, { configured: false, detected: false })
+    // The attribution is the budget's: the container slot is a row of
+    // `this_box`, 22.4 GB, like any other slot.
+    await mockStatsHardware(page, { configured: false, detected: false }, {
+      memory: referenceBox([{ slot: 'primary-container', gb: 22.4, state: 'serving' }]),
+    })
     await page.goto('/#dashboard')
     const card = page.locator('.rd-mem-card')
     await expect(card).toBeVisible()
     // The 22.4 GB container slot must register in the legend with its name…
-    await expect(card.locator('.rd-mem-legend')).toContainText('primary-container')
+    await expect(card.locator('.rd-mem-legend')).toContainText('primary-container 22.4G')
     // …and attribute as a non-zero block in the bar, alongside the free
-    // remainder. (With mem_mb present the model attributes ONLY measured
-    // slots — un-measured mock slots correctly drop to zero, not a guess.)
-    const segs = card.locator('.rd-mem-bar .rd-mem-seg:not(.rd-mem-seg-system)')
-    const count = await segs.count()
-    expect(count).toBeGreaterThanOrEqual(1)
+    // remainder. (The model attributes ONLY the budget's rows — the mock
+    // slots' own mem_mb is not read, and a slot the budget omits is not drawn.)
+    await expect(card.locator('.rd-mem-bar .rd-mem-seg[title^="primary-container"]')).toHaveCount(1)
     await expect(card.locator('.rd-mem-free')).toContainText('free')
   })
 
@@ -127,41 +198,49 @@ test.describe('Unified memory hero (dashboard)', () => {
     await expect(page.locator('.memmap-pve-nudge')).toHaveCount(0)
   })
 
-  test('health strip mirrors the unified-memory used/total reading', async ({ page }) => {
-    // The 5-cell health strip's "unified memory" cell reads ram_used against
-    // the shared memory-map pool total (the SAME figure the Slots-page map
-    // renders) — never the container's ram_total_mb, which diverged from the
-    // pool whenever the operator raised the GTT ceiling.
+  test('health strip shows RAM used over the RAM limit, not over the GPU pool', async ({ page }) => {
+    // The 5-cell health strip's RAM cell reads the budget's RAM block: used
+    // over the container's limit. It used to divide RAM used by the GPU pool
+    // ("unified memory", 39.1/128 GB), which misstated a box whose RAM is capped
+    // below the pool, and it read the raw ram_used_mb counter.
     await mockStatsHardware(page, { configured: false, detected: false })
     await page.goto('/#dashboard')
-    const cell = page.locator('.rd-health-cell', { hasText: 'unified memory' })
+    const cell = page
+      .locator('.rd-health-cell')
+      .filter({ has: page.locator('.rd-health-k', { hasText: /^RAM$/ }) })
     await expect(cell).toBeVisible()
-    // 40000 MB used → 39.1; mock pool = unified_memory_mb 131072 → /128 GB
-    // (the mocked stats carry no gpu_vram_total_mb, so the probe fallback
-    // supplies the pool cap — same path memory-map's own header uses).
-    await expect(cell.locator('.rd-health-v')).toContainText('39.1')
-    await expect(cell.locator('.rd-health-v')).toContainText('/128 GB')
+    // 16.1 GB used of the 105.5 GB container limit, shown as 106.
+    await expect(cell.locator('.rd-health-v')).toHaveText('16.1/106 GB')
+    await expect(cell.locator('.rd-health-v')).toHaveAttribute('title', 'container limit')
+    // Not the raw 40000 MB counter (39.1 GB), not the 116 GB pool.
+    await expect(cell).not.toContainText('39.1')
+    await expect(cell).not.toContainText('/116')
+    await expect(page.locator('.rd-health-k', { hasText: 'unified memory' })).toHaveCount(0)
   })
 
   // Live screenshot feedback (2026-08-22): the operator spotted the
-  // Slots-page header's own "CPU · Memory" gauge cell (telemetry-
-  // header.jsx's ThCellCpuMem, a DIFFERENT file than #1978 touched)
-  // still reading the raw ram_total_mb (~94 GB) right next to ThRuler's
-  // memory-map band on the SAME page correctly showing the ~128 GB pool
-  // total — the exact class of divergence #1978 fixed for the dashboard's
-  // three other "memory" figures, just missed here.
-  test('Slots-page "CPU · Memory" gauge also reads the shared pool total, not raw ram_total_mb', async ({
+  // Slots-page header's own CPU memory gauge cell (telemetry-header.jsx's
+  // ThCellCpuMem, a DIFFERENT file than #1978 touched) still reading the raw
+  // ram_total_mb (~94 GB) right next to ThRuler's memory-map band on the SAME
+  // page showing the pool total — the class of divergence #1978 fixed for the
+  // dashboard's three other "memory" figures, just missed here. The cell is now
+  // "CPU · RAM": this box's RAM from the budget, over the RAM limit — neither
+  // the raw counter nor the GPU pool.
+  test('Slots-page "CPU · RAM" gauge reads the budget RAM over its limit, not raw ram_total_mb or the pool', async ({
     page,
   }) => {
     await mockStatsHardware(page, { configured: false, detected: false })
     await page.goto('/#slots')
     const hero = page.getByTestId('telemetry-header')
-    const cell = hero.locator('.th-cell', { hasText: 'CPU · Memory' })
+    const cell = hero.locator('.th-cell', { hasText: 'CPU · RAM' })
     await expect(cell).toBeVisible()
-    // Same 40000 MB used / unified_memory_mb 131072 probe mock as the
-    // health-strip test above — same pool, same expected reading.
-    await expect(cell).toContainText('39.1')
-    await expect(cell).toContainText('/ 128 GB')
+    await expect(cell.locator('.th-gauge-v')).toHaveText('16.1')
+    // The 105.5 GB limit is the container's, so the caption says so.
+    await expect(cell.locator('.th-gauge-cap')).toHaveText('/ 106 GB limit')
+    await expect(cell).not.toContainText('39.1')
     await expect(cell).not.toContainText('/ 94 GB')
+    await expect(cell).not.toContainText('/ 116 GB')
+    await expect(cell).not.toContainText('/ 128 GB')
+    await expect(hero.locator('.th-cell', { hasText: 'CPU · Memory' })).toHaveCount(0)
   })
 })
