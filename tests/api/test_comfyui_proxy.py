@@ -22,6 +22,7 @@ calls, mirroring the patched status seams.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -545,6 +546,38 @@ def test_switchover_to_inference_mid_switch_is_not_swallowed(
         r = client.post("/api/comfyui/switchover", json={"mode": "inference"})
     assert r.status_code == 202, r.text
     arb.restore_llm.assert_awaited_once()
+
+
+def test_arbiter_route_answers_the_gate_without_the_status_probes(client: TestClient) -> None:
+    """The GPU gate reads this before every prompt, including hal0's own /v1
+    renders: it must not wait on systemd, ComfyUI's HTTP API or the models scan
+    the full status aggregates, or a slow probe reads as an unreachable hal0."""
+    arb = _install_arbiter(client, mode="img")
+    arb.status.return_value = {**arb.status.return_value, "switching": False}
+
+    async def _never(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("the gate's status read must not run the status probes")
+
+    base = "hal0.api.routes.comfyui"
+    with (
+        patch(f"{base}._fetch_json", side_effect=_never),
+        patch(f"{base}._container_state", side_effect=_never),
+        patch(f"{base}._systemd_active", side_effect=_never),
+        patch(f"{base}._list_files_or_none", side_effect=_never),
+        patch(f"{base}._gpu_telemetry", side_effect=_never),
+    ):
+        r = client.get("/api/comfyui/arbiter")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["mode"] == "generation"
+    assert body["arbiter"]["mode"] == "img"
+    assert body["switchover"]["active"] is False
+
+
+def test_arbiter_route_reports_inference_while_switching(client: TestClient) -> None:
+    arb = _install_arbiter(client, mode="img")
+    arb.status.return_value = {**arb.status.return_value, "switching": True}
+    assert client.get("/api/comfyui/arbiter").json()["mode"] == "inference"
 
 
 def test_status_carries_arbiter_block(client: TestClient) -> None:

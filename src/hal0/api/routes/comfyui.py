@@ -433,6 +433,24 @@ async def comfyui_status(request: Request) -> dict[str, Any]:
     }
 
 
+@router.get("/arbiter")
+async def comfyui_arbiter(request: Request) -> dict[str, Any]:
+    """The GPU arbiter's state alone, for the ``hal0_gpu_gate`` node.
+
+    The gate reads this before every prompt, hal0's own ``/v1`` renders
+    included, with a 2 s budget, and refuses the prompt when hal0 does not
+    answer. So it runs none of ``/status``'s probes (systemd, ComfyUI's HTTP
+    API, the models scan): only ``mode`` (see :func:`api_mode`), the
+    ``arbiter`` block and the ``switchover`` tracker, in the same shape.
+    """
+    arbiter_block = _arbiter_status(_get_arbiter(request))
+    return {
+        "mode": api_mode(arbiter_block),
+        "arbiter": arbiter_block,
+        "switchover": dict(_switch),
+    }
+
+
 async def _run_switch(arbiter: Any, mode: str, *, pin: bool = False, force: bool = False) -> None:
     """Drive the arbiter for ``mode``; record failure for /status to surface."""
     try:

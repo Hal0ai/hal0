@@ -43,6 +43,8 @@ Volume=<data_root>/input:/opt/ComfyUI/input
 Volume=<data_root>/user:/opt/ComfyUI/user
 Volume=<data_root>/custom_nodes:/opt/ComfyUI/custom_nodes
 Volume=<data_root>/extra_model_paths.yaml:/opt/ComfyUI/extra_model_paths.yaml:ro
+Environment=HAL0_COMFYUI_STATUS_URL=http://127.0.0.1:8080/api/comfyui/arbiter
+Environment=HAL0_COMFYUI_SWITCHOVER_URL=http://127.0.0.1:8080/api/comfyui/switchover
 PodmanArgs=--ipc=host
 Exec=bash -lc 'cd /opt/ComfyUI && exec python main.py --listen 127.0.0.1 --port 8188 --use-pytorch-cross-attention'
 
@@ -111,6 +113,9 @@ def comfyui_unit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> str:
         ComfyUIProvider, "_profile_flags", lambda self, slot_cfg: "--use-pytorch-cross-attention"
     )
     monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(tmp_path))
+    # The gate's URLs come from hal0-api's port and bind host: pin the defaults.
+    for key in ("HAL0_PORT", "HAL0_BIND_HOST", "HAL0_COMFYUI_GATE_FAIL_OPEN"):
+        monkeypatch.delenv(key, raising=False)
     slot_cfg: dict[str, Any] = {
         "name": "img",
         "type": "image",

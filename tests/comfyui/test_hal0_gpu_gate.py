@@ -326,6 +326,13 @@ def test_hal0_going_silent_after_the_switch_request_refuses_at_the_deadline(
         mod.prepare_image_mode()
 
 
+def test_the_gate_reads_hal0s_cheap_arbiter_status_by_default(monkeypatch) -> None:
+    """Not the full /status aggregate: its probes can outlast the read timeout."""
+    monkeypatch.delenv("HAL0_COMFYUI_STATUS_URL", raising=False)
+    mod = _load_node()
+    assert mod.HAL0_STATUS_URL == "http://127.0.0.1:8080/api/comfyui/arbiter"
+
+
 def test_the_gate_deadline_outlasts_the_chat_wait_and_the_drain(monkeypatch) -> None:
     """A prompt that arrives during a long LLM generation must not be refused
     just before the switch it asked for finishes."""

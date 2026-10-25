@@ -52,10 +52,11 @@ import time
 import urllib.error
 import urllib.request
 
-#: hal0-api status aggregator; its top-level ``mode`` is arbiter-truth
-#: ("generation" | "inference").
+#: hal0-api's arbiter-only status (``mode``, ``arbiter``, ``switchover``), cheap
+#: to answer: the full ``/status`` aggregate runs probes that can outlast the
+#: read budget. The img slot sets these URLs from hal0-api's own port.
 HAL0_STATUS_URL = os.environ.get(
-    "HAL0_COMFYUI_STATUS_URL", "http://127.0.0.1:8080/api/comfyui/status"
+    "HAL0_COMFYUI_STATUS_URL", "http://127.0.0.1:8080/api/comfyui/arbiter"
 )
 HAL0_SWITCHOVER_URL = os.environ.get(
     "HAL0_COMFYUI_SWITCHOVER_URL", "http://127.0.0.1:8080/api/comfyui/switchover"
