@@ -307,6 +307,26 @@ def test_sample_without_a_total_for_its_kind_has_no_gpu_block(
     assert budget.render_free_gb is None
 
 
+@pytest.mark.parametrize(
+    "sample",
+    [
+        _shared_sample(gtt_used_mb=None),
+        _dedicated_sample(vram_used_mb=None),
+    ],
+    ids=["shared-no-gtt-used", "dedicated-no-vram-used"],
+)
+def test_missing_used_counter_has_no_gpu_block(sample: GPUMemorySample) -> None:
+    """A known total with no ``used`` reading must not read as 0 used.
+
+    That would publish a headroom figure nothing measured.
+    """
+    budget = _reference_budget(sample=sample)
+
+    assert budget.gpu is None
+    assert budget.render_free_gb is None
+    assert budget.ram is RAM
+
+
 def test_shared_pool_ignores_the_vram_carveout() -> None:
     """On UMA the 512 MiB VRAM carve-out must not leak into the figures."""
     gpu = _gpu(_reference_budget())

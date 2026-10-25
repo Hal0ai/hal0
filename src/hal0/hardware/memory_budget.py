@@ -143,8 +143,9 @@ def build_memory_budget(
     present -- even at 0) is ``None``.
 
     ``gpu`` and ``render_free_gb`` are ``None`` when the box has no GPU lane, no
-    sample was read, or the sample carries no total for its pool. A missing
-    ``used`` reading with a known total is treated as 0 used.
+    sample was read, or the sample lacks the total or the used counter for its
+    pool. A missing counter is never read as 0: that would publish a headroom
+    figure nothing measured.
 
     ``this_box`` lists the other GPU slots that hold a row, ordered by slot name.
     A slot still ``"starting"`` is listed, but it is not yet a resident
@@ -159,7 +160,7 @@ def build_memory_budget(
     shared = sample.is_uma
     total_mb = sample.gtt_total_mb if shared else sample.vram_total_mb
     used_raw = sample.gtt_used_mb if shared else sample.vram_used_mb
-    if total_mb is None:
+    if total_mb is None or used_raw is None:
         return MemoryBudget(gpu=None, ram=ram, render_free_gb=None)
     used_mb = _mb(used_raw)
 
