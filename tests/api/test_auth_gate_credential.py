@@ -136,13 +136,35 @@ def test_the_lan_admin_gate_admits_the_gate_token(monkeypatch: pytest.MonkeyPatc
     """Auth off, hal0-api bound to one LAN address with an admin key: the gate's
     requests arrive from that address, so the LAN rule for ADMIN routes applies."""
     monkeypatch.setenv("HAL0_REQUIRE_AUTH", "0")
-    monkeypatch.setattr(auth_mod, "is_loopback_bind", lambda: False)
+    monkeypatch.setenv("HAL0_BIND_HOST", "192.0.2.10")
     token = gate_credential.ensure_token()
 
     assert _run("GET", "/api/comfyui/arbiter", peer="192.0.2.10")[0] == 401
     status, seen = _run("GET", "/api/comfyui/arbiter", bearer=token, peer="192.0.2.10")
     assert status == 200
     assert seen is not None and seen[auth_mod.GATE_SCOPE_KEY] is True
+
+
+@pytest.mark.parametrize("bind_host", ["0.0.0.0", "192.0.2.10", "127.0.0.1"])
+def test_the_gate_token_is_refused_from_another_machine(
+    monkeypatch: pytest.MonkeyPatch, bind_host: str
+) -> None:
+    """The gate dials hal0-api from the box itself (host networking): loopback,
+    or the one address hal0-api binds. A token carried off the box opens nothing."""
+    monkeypatch.setenv("HAL0_BIND_HOST", bind_host)
+    token = gate_credential.ensure_token()
+
+    status, seen = _run("GET", "/api/comfyui/arbiter", bearer=token, peer="192.0.2.99")
+
+    assert status == 401
+    assert seen is None
+
+
+@pytest.mark.parametrize("peer", ["127.0.0.1", "::1"])
+def test_the_gate_token_is_admitted_from_loopback(peer: str) -> None:
+    token = gate_credential.ensure_token()
+
+    assert _run("GET", "/api/comfyui/arbiter", bearer=token, peer=peer)[0] == 200
 
 
 def test_an_admin_request_is_not_marked_as_the_gates() -> None:
@@ -156,7 +178,8 @@ def test_an_admin_request_is_not_marked_as_the_gates() -> None:
 
 @pytest.fixture
 def client(app: Any) -> Any:
-    with TestClient(app) as c:
+    """The gate's requests come from the box itself."""
+    with TestClient(app, client=("127.0.0.1", 51000)) as c:
         yield c
 
 

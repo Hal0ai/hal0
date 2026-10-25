@@ -27,6 +27,7 @@ import hmac
 import os
 import re
 import secrets
+import stat
 from pathlib import Path
 
 from hal0.config import paths
@@ -92,18 +93,29 @@ def read_token() -> str | None:
     return token if _TOKEN_RE.fullmatch(token) else None
 
 
+def _private(owner: tuple[int, int]) -> bool:
+    """True iff the token file is a regular file only ``owner`` can read."""
+    try:
+        st = os.lstat(token_path())
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and not st.st_mode & 0o077 and st.st_uid == owner[0]
+
+
 def ensure_token() -> str:
     """The gate token, minted and written first when there is no usable one.
 
+    The directory is re-tightened on every call. A token others could have
+    read (its mode widened, or another owner) is replaced, not kept.
     Raises :class:`OSError` when the directory or file cannot be written.
     """
-    current = read_token()
-    if current is not None:
-        return current
     owner = _owner()
     # The state root exists on an installed box; a HAL0_HOME sandbox may not have it yet.
     paths.var_lib().mkdir(parents=True, exist_ok=True)
     nofollow.ensure_dir(token_dir(), mode=0o700, owner=owner, create=True, expect="adopt")
+    current = read_token()
+    if current is not None and _private(owner):
+        return current
     token = secrets.token_urlsafe(32)
     nofollow.write_file(token_path(), token + "\n", mode=0o600, owner=owner, create_dirs=False)
     return token

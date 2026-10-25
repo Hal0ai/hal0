@@ -847,3 +847,47 @@ def test_the_gates_requests_ignore_proxies_and_redirects(monkeypatch) -> None:
     req = urllib.request.Request("http://127.0.0.1:8080/api/comfyui/arbiter")
     for handler in redirects:
         assert handler.redirect_request(req, None, 302, "Found", {}, "http://x.invalid/") is None
+
+
+@pytest.mark.parametrize(
+    ("base", "sent"),
+    [
+        ("http://127.0.0.1:8080", True),
+        ("http://[::1]:8080", True),
+        ("http://localhost:8080", True),
+        ("http://192.0.2.10:8080", True),
+        ("http://hal0.example.lan:8080", False),
+        ("http://hal0.local:8080", False),
+    ],
+)
+def test_the_gate_sends_its_token_only_to_an_address_not_a_name(
+    monkeypatch, tmp_path, base: str, sent: bool
+) -> None:
+    """A name is resolved on every request, and a spoofed answer would collect
+    the token over plain HTTP; hal0 writes an address (or loopback) there."""
+    _with_token_file(monkeypatch, tmp_path)
+    monkeypatch.setenv("HAL0_COMFYUI_STATUS_URL", f"{base}/api/comfyui/arbiter")
+    monkeypatch.setenv("HAL0_COMFYUI_HANDOFF_URL", f"{base}/api/comfyui/prompt-handoff")
+    hal0 = _FakeHal0({"/arbiter": [_LEGACY_GENERATION], "/prompt-handoff": [{"held": True}]})
+    mod = _real_gate(monkeypatch, hal0)
+
+    mod.prepare_image_mode()
+
+    assert hal0.auth == ([f"Bearer {_TOKEN}"] * 2 if sent else [None, None])
+
+
+def test_a_refusal_after_sending_no_token_does_not_blame_the_token(monkeypatch, tmp_path) -> None:
+    """hal0 named by a host name: the token is held back, so the refusal says
+    the gate has no credential rather than that hal0 rejected it."""
+    _with_token_file(monkeypatch, tmp_path)
+    monkeypatch.setenv(
+        "HAL0_COMFYUI_STATUS_URL", "http://hal0.example.lan:8080/api/comfyui/arbiter"
+    )
+    hal0 = _FakeHal0({"/arbiter": [401]})
+    mod = _real_gate(monkeypatch, hal0)
+
+    with pytest.raises(mod.GpuGateClosed) as excinfo:
+        mod.prepare_image_mode()
+
+    assert "has no credential" in str(excinfo.value)
+    assert hal0.auth == [None]

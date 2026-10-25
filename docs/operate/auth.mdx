@@ -116,12 +116,15 @@ token of its own:
 - **What it opens.** Only the gate's three requests: `GET
   /api/comfyui/arbiter`, `POST /api/comfyui/prompt-handoff`, and `POST
   /api/comfyui/switchover` asking for image mode without `force` or `pin`
-  (anything else on that route gets `403 auth.forbidden`). It opens no other
+  (anything else on that route gets `403 auth.forbidden`), and only from the
+  box itself: loopback, or the address `hal0-api` binds. It opens no other
   route, no WebSocket and no stream.
 - **When the gate has none.** A container started before the token existed,
   such as one still running from before the update, sends no credential, and
   the gate refuses every image prompt at once with a message that says so.
-  Run `hal0 slot restart img`.
+  Run `hal0 slot restart img`. The gate also holds the token back when
+  `HAL0_BIND_HOST` is a host name rather than an address (it speaks plain
+  HTTP, and a name is resolved on every request), so set an address there.
 - **Replacing it.** Delete the token file, then run `hal0 slot restart img`;
   hal0 mints a new one.
 

@@ -47,20 +47,25 @@ opens every route.
    `HAL0_COMFYUI_GATE_TOKEN_FILE`. The value never enters the unit file or the
    container's environment. The directory is mounted rather than the file, so
    a replaced token reaches a running container.
-3. **The token opens exactly the gate's three requests.** The enforcement
-   middleware matches the exact method and path
+3. **The token opens exactly the gate's three requests, from the box.** The
+   enforcement middleware matches the exact method and path
    (`hal0.api.auth._GATE_REQUESTS`), HTTP only, after the normal decision
-   refused the request. It is not a tier: `resolve_principal` never returns
+   refused the request, and only from loopback or the one address hal0-api
+   binds: the container shares the host's network, so that is where the gate
+   dials from, and a token carried off the box opens nothing. It is not a tier: `resolve_principal` never returns
    it, so it opens no other route, no WebSocket and no stream. A request it
    admitted carries `GATE_SCOPE_KEY` on its ASGI scope, and the switch handler
    holds such a request to `mode: generation` without `force` or `pin`
    (`403 auth.forbidden` otherwise), which is all the gate ever asks for.
 4. **The gate reads the token on every request and sends it to hal0-api
    only.** It is an unredirected `Authorization: Bearer` header, sent through
-   an opener with no proxy and no redirects. Without a usable token the gate
-   sends no credential, as before.
+   an opener with no proxy and no redirects, and only to a URL that names an
+   address or `localhost`: the gate speaks plain HTTP, and a host name is
+   resolved on every request. Without a usable token the gate sends no
+   credential, as before.
 5. **Replacing the token is deleting it.** The next `img` start mints a new
-   one. Nothing rotates it on a schedule: its reach is the three requests
+   one. Each mint also re-tightens the directory and replaces a token whose
+   file others could have read (a widened mode, another owner). Nothing rotates it on a schedule: its reach is the three requests
    above, which the gate needs anyway.
 
 ## Consequences
@@ -72,10 +77,13 @@ opens every route.
   one `hal0 slot restart img`, the same restart ADR-0038 already asks for
   after an update.
 - Code running inside ComfyUI can read the token. It can then read the
-  arbiter's state, hold the GPU for a prompt for about 3 seconds, and ask for
-  image mode, which unloads the LLM slots: what the gate itself does. It
-  cannot pin image mode, force a switch into LLM mode, or reach any other
-  route.
+  arbiter's state, ask for image mode (which unloads the LLM slots), and
+  announce prompts: each announce holds image mode for about 3 seconds, so
+  announcing without end keeps it, as a queue that never empties would. That
+  is what the gate itself can do, and what any local process could do before
+  on a box that does not enforce auth. It cannot pin image mode, force a
+  switch into LLM mode, reach any other route, or use the token from another
+  machine.
 - After a rollback to 1.6.x, a box that enforces auth refuses image prompts:
   1.6.x does not know the token.
 - A new gate request needs its route added to `_GATE_REQUESTS`, with a test,

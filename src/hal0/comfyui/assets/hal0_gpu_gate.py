@@ -64,12 +64,14 @@ exercised by a live check on a test box.
 """
 
 import http.client
+import ipaddress
 import json
 import os
 import re
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 #: hal0-api's arbiter-only status (``mode``, ``arbiter``, ``switchover``), cheap
@@ -172,7 +174,7 @@ _AUTH_CODES = (401, 403)
 def _auth_reason(code: int) -> str:
     who = (
         "hal0 did not accept ComfyUI's GPU gate credential"
-        if _read_token()
+        if _read_token() and _direct_host(HAL0_STATUS_URL)
         else "hal0 requires authentication and ComfyUI's GPU gate has no credential"
     )
     return (
@@ -269,11 +271,31 @@ def _read_token() -> "str | None":
     return token if _TOKEN_RE.fullmatch(token) else None
 
 
+def _direct_host(url: str) -> bool:
+    """True iff *url* names hal0-api by address (or ``localhost``), not by a name.
+
+    The gate speaks plain HTTP, and a name is resolved on every request: a
+    spoofed answer would collect the token. hal0 writes loopback or the
+    address hal0-api binds into the gate's URLs.
+    """
+    try:
+        host = urllib.parse.urlsplit(url).hostname
+    except ValueError:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        ipaddress.ip_address(host or "")
+    except ValueError:
+        return False
+    return True
+
+
 def _hal0_request(url: str, body: "bytes | None" = None) -> urllib.request.Request:
     """A request to hal0-api carrying the gate's token, a POST when *body* is set.
 
-    The token is an unredirected header: urllib copies ``headers`` to a
-    redirect's URL, never ``unredirected_hdrs``.
+    The token is an unredirected header (urllib copies ``headers`` to a
+    redirect's URL, never ``unredirected_hdrs``), sent only to an address.
     """
     if body is None:
         req = urllib.request.Request(url)
@@ -282,7 +304,7 @@ def _hal0_request(url: str, body: "bytes | None" = None) -> urllib.request.Reque
             url, data=body, headers={"Content-Type": "application/json"}, method="POST"
         )
     token = _read_token()
-    if token:
+    if token and _direct_host(url):
         req.add_unredirected_header("Authorization", f"Bearer {token}")
     return req
 

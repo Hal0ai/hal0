@@ -55,8 +55,8 @@ The ComfyUI GPU gate's token (#3058)
 ------------------------------------
 The ``hal0_gpu_gate`` node in the img container is not an operator and never
 holds the admin key. :mod:`hal0.comfyui.gate_credential` mints it a token of
-its own, which admits exactly its three requests (:data:`_GATE_REQUESTS`) when
-the ADMIN gate would refuse them, and marks the request with
+its own, which admits exactly its three requests (:data:`_GATE_REQUESTS`), from
+the box itself only, when the ADMIN gate would refuse them, and marks the request with
 :data:`GATE_SCOPE_KEY` so the switch handler holds it to image mode. The token
 is not a tier: :func:`resolve_principal` never returns it, so it opens no
 other route, no WebSocket and no stream.
@@ -90,7 +90,7 @@ import structlog
 
 from hal0.api import live_sockets
 from hal0.api.agents._auth import SESSION_COOKIE_NAME, verify_session_cookie
-from hal0.config.network import is_loopback_bind
+from hal0.config.network import bind_host, is_loopback_bind
 from hal0.security.exposure import AuthClass, classify
 
 log = structlog.get_logger(__name__)
@@ -509,9 +509,30 @@ _GATE_REQUESTS: frozenset[tuple[str, str]] = frozenset(
 GATE_SCOPE_KEY = "hal0.comfyui_gate"
 
 
+def _gate_peer(scope: dict[str, Any]) -> bool:
+    """True iff the request comes from where the gate dials: the box itself.
+
+    The img container shares the host's network, so the gate reaches hal0-api
+    on loopback, or on the one address hal0-api binds (a request from the box
+    to its own address arrives from that address). A token carried off the box
+    is refused from anywhere else.
+    """
+    if _is_loopback_peer(scope):
+        return True
+    client = scope.get("client")
+    if not client:
+        return False
+    try:
+        return ipaddress.ip_address(client[0]) == ipaddress.ip_address(bind_host())
+    except ValueError:
+        return False
+
+
 def _gate_admits(scope: dict[str, Any], method: str, path: str) -> bool:
-    """True iff this is one of the gate's requests carrying the gate's token."""
+    """True iff this is one of the gate's requests, from the box, carrying its token."""
     if scope.get("type") != "http" or (method, path) not in _GATE_REQUESTS:
+        return False
+    if not _gate_peer(scope):
         return False
     authorization = _headers_from_scope(scope).get("authorization", "")
     if authorization[:7].lower() != "bearer ":

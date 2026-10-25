@@ -74,3 +74,24 @@ def test_a_replaced_token_is_picked_up_without_a_restart() -> None:
     assert new != old
     assert gate_credential.verify(new) is True
     assert gate_credential.verify(old) is False
+
+
+@pytest.mark.parametrize("loose", [0o644, 0o640, 0o604])
+def test_a_token_readable_by_others_is_replaced(loose: int) -> None:
+    """A restore or a hand-made file can widen the token's mode; it may have
+    been read, so the next mint replaces it rather than tightening it."""
+    old = gate_credential.ensure_token()
+    os.chmod(gate_credential.token_path(), loose)
+
+    new = gate_credential.ensure_token()
+
+    assert new != old
+    assert stat.S_IMODE(os.stat(gate_credential.token_path()).st_mode) == 0o600
+
+
+def test_a_widened_token_directory_is_tightened() -> None:
+    token = gate_credential.ensure_token()
+    os.chmod(gate_credential.token_dir(), 0o755)
+
+    assert gate_credential.ensure_token() == token
+    assert stat.S_IMODE(os.stat(gate_credential.token_dir()).st_mode) == 0o700
