@@ -228,6 +228,20 @@ _GATED_CASES: list[tuple[str, dict[str, Any], str, str, dict[str, Any] | None]] 
         "http://t/api/comfyui/models/sdxl-lightning",
         None,
     ),
+    (
+        "comfyui_file_delete",
+        {"subdir": "checkpoints", "relpath": "mine.safetensors"},
+        "DELETE",
+        "http://t/api/comfyui/files/checkpoints/mine.safetensors",
+        None,
+    ),
+    (
+        "comfyui_file_delete",
+        {"subdir": "loras", "relpath": "styles%2Fmine.safetensors"},
+        "DELETE",
+        "http://t/api/comfyui/files/loras/styles%2Fmine.safetensors",
+        None,
+    ),
     ("comfyui_render_cancel", {}, "POST", "http://t/api/comfyui/render/cancel", None),
     ("comfyui_restart", {}, "POST", "http://t/api/comfyui/restart", None),
     (
@@ -290,7 +304,7 @@ _GATED_CASES: list[tuple[str, dict[str, Any], str, str, dict[str, Any] | None]] 
 @pytest.mark.parametrize(
     "tool,args,expected_method,expected_url,expected_payload",
     _GATED_CASES,
-    ids=[c[0] for c in _GATED_CASES],
+    ids=[f"{c[0]}-{i}" for i, c in enumerate(_GATED_CASES)],
 )
 async def test_gated_platform_tools_enqueue_then_forward_on_approve(
     queue: ApprovalQueue,
@@ -321,6 +335,41 @@ async def test_gated_platform_tools_enqueue_then_forward_on_approve(
     if expected_payload is not None:
         assert payload == expected_payload
     assert headers["Authorization"] == "Bearer t"
+
+
+# ── comfyui_file_delete: a nested relpath rides as %2F, a raw slash fails closed ──
+
+
+@pytest.mark.asyncio
+async def test_comfyui_file_delete_refuses_a_raw_slash_in_relpath(
+    queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    """``_split_args`` keeps a '/' out of every path arg, so a nested file is named ``a%2Fb``."""
+    queued = await admin.dispatch(
+        tool="comfyui_file_delete",
+        args={"subdir": "loras", "relpath": "styles/mine.safetensors"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+
+    approved = await queue.approve(queued["approval_id"])
+
+    assert approved["result"]["error"]["code"] == "mcp.missing_arg"
+    assert mock_transport["calls"] == []
+
+
+def test_comfyui_file_delete_is_wired_like_the_model_remove_it_sits_beside() -> None:
+    assert "comfyui_file_delete" in admin.GATED_TOOLS
+    assert admin.TOOL_NAME_ALIASES["DELETE:/api/comfyui/files/{subdir}/{relpath}"] == (
+        "comfyui_file_delete",
+    )
+    assert admin._ANNOTATIONS["comfyui_file_delete"].destructiveHint is True
+    description = admin.TOOL_DESCRIPTIONS["comfyui_file_delete"]
+    assert "%2F" in description
+    assert "catalog" in description
+    assert admin.tool_param_schema("comfyui_file_delete")["required"] == ["subdir", "relpath"]
 
 
 # ── comfyui_job_cancel: an autonomous write, like model_pull_cancel ──────────

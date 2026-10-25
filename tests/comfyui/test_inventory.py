@@ -54,6 +54,7 @@ def test_list_files_reports_kind_subdir_relpath_size_and_owners() -> None:
             "relpath": "sd_xl_base_1.0.safetensors",
             "size_bytes": 7,
             "models": ["sdxl-lightning"],
+            "symlink": False,
         }
     ]
 

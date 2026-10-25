@@ -1108,6 +1108,7 @@ def test_files_lists_kinds_and_owners(client: TestClient) -> None:
         "relpath": "my_finetune.safetensors",
         "size_bytes": 11,
         "models": [],
+        "symlink": False,
     }
     assert files["checkpoints/sd_xl_base_1.0.safetensors"]["models"] == [_SDXL]
     assert files["loras/sdxl_lightning_8step_lora.safetensors"]["kind"] == "lora"

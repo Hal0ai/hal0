@@ -88,6 +88,15 @@ def is_under_models_root(path: Path) -> bool:
     return path.resolve().is_relative_to(models_root().resolve())
 
 
+def is_under_subdir(subdir: str, path: Path) -> bool:
+    """True when ``path`` resolves to ``models_root()/subdir`` or something inside it.
+
+    The same rule as :func:`is_under_models_root`, narrowed to one model subdirectory:
+    both sides are resolved first and the comparison is by path components.
+    """
+    return path.resolve().is_relative_to((models_root() / subdir).resolve())
+
+
 def is_under_data_root(path: Path) -> bool:
     """True when ``path`` resolves to ``data_root()`` or something inside it.
 

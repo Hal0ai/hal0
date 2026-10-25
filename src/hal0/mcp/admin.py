@@ -666,14 +666,16 @@ GATED_TOOLS: frozenset[str] = frozenset(
         # Services — start/stop/restart a systemd unit; destructive-adjacent.
         "service_action",
         # ComfyUI — mode flips, image-model installs and removals, render cancel,
-        # container restart, prompt submission. comfyui_model_remove deletes weight
-        # files, so it sits with the other destructive tools. comfyui_logs joins
+        # container restart, prompt submission. comfyui_model_remove and
+        # comfyui_file_delete delete weight files, so they sit with the other
+        # destructive tools. comfyui_logs joins
         # logs_tail/slot_logs under the MED-1 journald-secret precedent (redacted
         # the same way).
         "comfyui_switchover",
         "comfyui_pin",
         "comfyui_model_install",
         "comfyui_model_remove",
+        "comfyui_file_delete",
         "comfyui_render_cancel",
         "comfyui_restart",
         "comfyui_workflow_launch",
@@ -845,6 +847,7 @@ TOOL_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "POST:/api/comfyui/pin": ("comfyui_pin",),
     "POST:/api/comfyui/models/{model_id}/install": ("comfyui_model_install",),
     "DELETE:/api/comfyui/models/{model_id}": ("comfyui_model_remove",),
+    "DELETE:/api/comfyui/files/{subdir}/{relpath}": ("comfyui_file_delete",),
     "POST:/api/comfyui/jobs/{model_id}/cancel": ("comfyui_job_cancel",),
     "POST:/api/comfyui/render/cancel": ("comfyui_render_cancel",),
     "POST:/api/comfyui/restart": ("comfyui_restart",),
@@ -2864,6 +2867,10 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     "comfyui_model_remove": ToolAnnotations(
         readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
     ),
+    # Deletes one weight file outright; a repeat finds nothing and reports 404.
+    "comfyui_file_delete": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
+    ),
     "comfyui_job_cancel": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
@@ -3269,6 +3276,13 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "loads stay unless include_shared=true, which deletes them too and reports those "
         "models as affected (gated). Args: model_id (path), include_shared (optional). "
         "Refused while its install runs."
+    ),
+    "comfyui_file_delete": (
+        "Delete one weight file under the ComfyUI models tree that no catalog model loads "
+        "(gated). Args: subdir (path; a directory name from comfyui_files, e.g. checkpoints), "
+        "relpath (path; the row's relpath, with each '/' written %2F). Refused for a file a "
+        "catalog model owns (409), a symlink (400), a hidden or '..' path part (400) and a "
+        "missing file (404)."
     ),
     "comfyui_job_cancel": (
         "Cancel an image model's in-flight install; files already downloaded stay. "

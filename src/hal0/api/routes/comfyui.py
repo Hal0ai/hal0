@@ -59,7 +59,7 @@ from hal0.capabilities.catalog import COMFYUI_NO_ENGINE_REASON, comfyui_backends
 from hal0.comfyui import install as comfyui_install
 from hal0.comfyui import inventory
 from hal0.comfyui import paths as comfyui_paths
-from hal0.comfyui.autoselect import auto_select_first_image_model
+from hal0.comfyui.autoselect import auto_select_first_image_model, enabled_img_model
 from hal0.comfyui.catalog import (
     CATALOG,
     ImageModel,
@@ -908,9 +908,60 @@ async def comfyui_job_cancel(model_id: str, request: Request) -> JSONResponse:
 
 @router.get("/files")
 async def comfyui_files() -> dict[str, Any]:
-    """Every weight file under the models tree, with the catalog models that own it."""
+    """Every weight file under the models tree, with the catalog models that own it.
+
+    Each row also says whether the listed path is a ``symlink``, which the delete route
+    refuses.
+    """
     files = await asyncio.to_thread(inventory.list_files)
     return {"root": str(comfyui_paths.models_root()), "files": files}
+
+
+async def _was_the_selected_checkpoint(request: Request, subdir: str, relpath: str) -> bool:
+    """True when the deleted ``subdir/relpath`` is, or may be, the file behind the ``img`` selection.
+
+    Only a checkpoint the operator dropped in carries a ``ckpt/<path>`` id
+    (:func:`~hal0.comfyui.inventory.ckpt_api_id`), and the selection does not change when
+    its file goes. Call it after a delete succeeded, so ``relpath`` is a valid file path. A
+    selection that cannot be read may have been this file, so it counts: the re-render this
+    gates is a no-op when nothing changed.
+    """
+    if subdir != comfyui_paths.SUBDIRS["checkpoints"]:
+        return False
+    orchestrator = getattr(request.app.state, "capability_orchestrator", None)
+    if orchestrator is None:
+        return False
+    try:
+        selected = await enabled_img_model(orchestrator)
+    except Exception:
+        log.warning("comfyui.file_delete_selection_unreadable", exc_info=True)
+        return True
+    return selected == inventory.ckpt_api_id(relpath)
+
+
+@router.delete("/files/{subdir}/{relpath:path}")
+async def comfyui_file_delete(
+    subdir: str, relpath: str, request: Request, background_tasks: BackgroundTasks
+) -> dict[str, Any]:
+    """Delete one weight file no catalog model loads; ``{"deleted": "<subdir>/<relpath>"}``.
+
+    ``subdir`` and ``relpath`` are the row's fields from ``GET /files``, so a file the
+    listing shows without an owner can be deleted. 400 ``comfyui.file_path_invalid``
+    (``subdir`` is not a model directory, or ``relpath`` is absolute, climbs out with ``..``,
+    has a hidden part such as an install's ``.hf_stage_*`` partial, or leaves ``subdir``
+    through a symlinked directory), 400 ``comfyui.file_symlink`` (the file is a link: delete
+    its target), 404 ``comfyui.file_not_found``, 409 ``comfyui.file_catalog_owned``
+    (``error.details.models``: remove the model instead) and 403 ``comfyui.file_permission``.
+
+    Deleting the checkpoint behind the ``img`` selection (a ``ckpt/<path>`` id) re-renders
+    Open WebUI's image-generation env, as removing a catalog model does, so it is no longer
+    wired to a model that is gone. No lock with the installs is needed: an install only writes
+    catalog files, which this route never deletes, and its partials are hidden.
+    """
+    await asyncio.to_thread(inventory.delete_file, subdir, relpath)
+    if await _was_the_selected_checkpoint(request, subdir, relpath):
+        background_tasks.add_task(_rewire_open_webui, inventory.ckpt_api_id(relpath))
+    return {"deleted": f"{subdir}/{relpath}"}
 
 
 def _user_workflows_dir() -> str:
