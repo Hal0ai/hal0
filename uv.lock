@@ -930,6 +930,7 @@ dependencies = [
     { name = "typer" },
     { name = "uv" },
     { name = "uvicorn", extra = ["standard"] },
+    { name = "websockets" },
 ]
 
 [package.optional-dependencies]
@@ -981,6 +982,7 @@ requires-dist = [
     { name = "typer", specifier = ">=0.15" },
     { name = "uv", specifier = ">=0.13.4,<0.13.5" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
+    { name = "websockets", specifier = ">=13.0" },
 ]
 provides-extras = ["dev", "sentry", "bench-guidellm"]
 

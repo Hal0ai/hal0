@@ -62,6 +62,7 @@ from hal0.capabilities.catalog import COMFYUI_NO_ENGINE_REASON, comfyui_backends
 from hal0.comfyui import install as comfyui_install
 from hal0.comfyui import inventory
 from hal0.comfyui import paths as comfyui_paths
+from hal0.comfyui import progress as render_progress
 from hal0.comfyui.autoselect import auto_select_first_image_model, enabled_img_model
 from hal0.comfyui.catalog import (
     BYTES_PER_GIB,
@@ -517,9 +518,10 @@ async def comfyui_status(request: Request) -> dict[str, Any]:
         "memory": _parse_memory(stats),
         "queue": counts,
         **telemetry,
-        "it_s": None,
-        "eta": None,
-        "step": None,
+        # The newest render hal0 submitted (/v1 and the Generate tab): model, step n/N, node,
+        # elapsed. None when none is live. A render from the ComfyUI editor has no entry (its
+        # client id is not hal0's), so for those the pane shows queue-level state.
+        "progress": render_progress.current(),
         "inference": {"hermes": hermes},
         # Verified counts of the weight files on disk, never faked; None without a models
         # tree or when the scan failed.

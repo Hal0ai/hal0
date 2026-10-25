@@ -21,6 +21,8 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from hal0.comfyui import progress
+
 # ---------------------------------------------------------------------------
 # Module-state isolation (same pattern as test_comfyui_proxy.py)
 # ---------------------------------------------------------------------------
@@ -33,6 +35,13 @@ def _reset_comfyui_state():
     mod._reset_state()
     yield
     mod._reset_state()
+
+
+@pytest.fixture(autouse=True)
+def _reset_progress():
+    progress._reset()
+    yield
+    progress._reset()
 
 
 # ---------------------------------------------------------------------------
@@ -593,15 +602,41 @@ class TestStatusTelemetry:
         assert body["temp"] == 68.5
         assert body["clock"] == 2.7
 
-    def test_it_s_eta_step_exist_as_null(self, client: TestClient):
-        """it/s, eta, step require a future ComfyUI websocket subscription."""
+    def test_status_reports_progress_not_nulls(self, client: TestClient):
+        """A hal0-submitted render's step shows up as ``progress``; the old null keys are gone."""
+        progress.start("abc", "sdxl-lightning")
+        progress.update("abc", step=3, total=8, node="12")
         patches = self._patch_status(self._SYSTEM_STATS, self._QUEUE_BUSY)
         with patches[0], patches[1], patches[2], patches[3], patches[4]:
             body = client.get("/api/comfyui/status").json()
 
-        for field in ("it_s", "eta", "step"):
-            assert field in body
-            assert body[field] is None
+        assert body["progress"]["model"] == "sdxl-lightning"
+        assert (body["progress"]["step"], body["progress"]["total"]) == (3, 8)
+        assert body["progress"]["node"] == "12"
+        assert body["progress"]["prompt_id"] == "abc"
+        assert isinstance(body["progress"]["elapsed_s"], float)
+        for gone in ("it_s", "eta", "step"):
+            assert gone not in body
+
+    def test_status_progress_is_null_when_no_hal0_render_is_live(self, client: TestClient):
+        """Editor renders have no entry; the pane shows queue-level state for them."""
+        patches = self._patch_status(self._SYSTEM_STATS, self._QUEUE_BUSY)
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            body = client.get("/api/comfyui/status").json()
+
+        assert "progress" in body
+        assert body["progress"] is None
+        assert body["queue"]["running"] == 1
+
+    def test_status_reports_the_newest_live_render(self, client: TestClient):
+        progress.start("old", "sd-1.5-pruned-emaonly")
+        progress.start("new", "sdxl-lightning")
+        patches = self._patch_status(self._SYSTEM_STATS, self._QUEUE_BUSY)
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            body = client.get("/api/comfyui/status").json()
+
+        assert body["progress"]["prompt_id"] == "new"
+        assert body["progress"]["step"] is None
 
     def test_telemetry_probe_failure_is_fail_soft(self, client: TestClient):
         base = _BASE

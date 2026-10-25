@@ -2025,12 +2025,15 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
         #    checkpoint override so the provider's translator knows what to render
         #    without resolving the model again. Always set from the resolution: a
         #    client's own copies of these keys are overwritten, so a client can
-        #    never choose the template or the checkpoint file.
+        #    never choose the template or the checkpoint file. `_hal0_model` is the id the
+        #    request resolved to (the client's `model` may be blank, an alias or untrimmed);
+        #    the provider uses it to name the render in /api/comfyui/status's progress.
         provider = get_provider("comfyui")
         body_with_meta = {
             **body,
             "_hal0_template": resolved.template,
             "_hal0_ckpt_override": resolved.ckpt_override,
+            "_hal0_model": resolved.id,
         }
         result = await provider.infer(port, body_with_meta)
 

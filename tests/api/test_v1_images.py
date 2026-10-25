@@ -263,6 +263,29 @@ def test_v1_images_client_cannot_choose_the_checkpoint(
     assert sent["_hal0_ckpt_override"] is None
 
 
+def test_v1_images_hands_the_resolved_model_id_to_the_provider(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The progress read-out names the model that rendered, as resolved, not as typed."""
+    _install("sd-1.5-pruned-emaonly")
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+
+    r = client.post(
+        "/v1/images/generations",
+        json={
+            "model": "  sd-1.5-pruned-emaonly ",
+            "prompt": "anything",
+            "_hal0_model": "someone-elses",
+        },
+    )
+
+    assert r.status_code == 200, r.text
+    sent = mock_infer.call_args.args[1]
+    assert sent["_hal0_model"] == "sd-1.5-pruned-emaonly"
+
+
 def test_v1_images_user_checkpoint_renders_through_the_generic_template(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

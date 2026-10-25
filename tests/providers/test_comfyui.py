@@ -8,15 +8,23 @@ toolbox image itself is built and published out of band (Hal0ai/hal0-runner-imag
 
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
+from collections.abc import Awaitable, Callable, Iterator
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
 
+from hal0.comfyui import progress
+from hal0.providers import comfyui as comfyui_mod
 from hal0.providers.comfyui import (
     ComfyUIInferError,
     ComfyUIProvider,
+    _follow_progress,
+    _ProgressRelay,
 )
 from hal0.runners import RUNNER_IMAGES
 
@@ -445,3 +453,601 @@ async def test_infer_surfaces_workflow_error(provider: ComfyUIProvider) -> None:
                 },
             )
     assert exc.value.code == "dispatch.upstream_failed"
+
+
+# ─── step progress over ComfyUI's websocket ───────────────────────────────────
+
+_LISTENER_FAILED = "comfyui.progress_listener_failed"
+_CLOSE = object()
+
+
+class _FakeWS:
+    """Stands in for ``hal0.providers.comfyui._ws_connect`` and the socket it opens.
+
+    Frames are queued with :meth:`push`; the socket yields them in order and then
+    stays open, like a ComfyUI that has nothing more to say, until :meth:`hang_up`.
+    ``connect_error`` makes the connect fail, ``connect_hangs`` makes the handshake
+    never finish. ``events`` records the order of connect, close and (in the infer
+    tests) submit, ``urls`` what was dialled and ``cancelled`` whether the listener
+    was cancelled while waiting for a frame.
+    """
+
+    def __init__(self) -> None:
+        self.queue: asyncio.Queue[object] = asyncio.Queue()
+        self.connect_error: Exception | None = None
+        self.connect_hangs = False
+        self.urls: list[str] = []
+        self.events: list[str] = []
+        self.cancelled = False
+
+    def push(self, frame: str | bytes) -> None:
+        self.queue.put_nowait(frame)
+
+    def push_json(self, kind: str, data: dict[str, Any]) -> None:
+        self.push(json.dumps({"type": kind, "data": data}))
+
+    def hang_up(self) -> None:
+        self.queue.put_nowait(_CLOSE)
+
+    async def flush(self) -> None:
+        """Let the listener task consume everything queued so far."""
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+    # the connector: ``async with _ws_connect(url) as socket``
+    def __call__(self, url: str) -> _FakeWS:
+        self.urls.append(url)
+        return self
+
+    async def __aenter__(self) -> _FakeWS:
+        if self.connect_hangs:
+            await asyncio.Event().wait()
+        if self.connect_error is not None:
+            raise self.connect_error
+        self.events.append("connect")
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        self.events.append("close")
+        return False
+
+    # the socket: ``async for frame in socket``
+    def __aiter__(self) -> Any:
+        return self._frames()
+
+    async def _frames(self) -> Any:
+        while True:
+            try:
+                item = await self.queue.get()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+            if item is _CLOSE:
+                return
+            yield item
+
+
+@pytest.fixture(autouse=True)
+def fake_ws(monkeypatch: pytest.MonkeyPatch) -> Iterator[_FakeWS]:
+    """Every test in this module runs without a network: an idle socket by default."""
+    progress._reset()
+    fake = _FakeWS()
+    monkeypatch.setattr("hal0.providers.comfyui._ws_connect", fake)
+    yield fake
+    progress._reset()
+
+
+def _listener_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.getMessage() == _LISTENER_FAILED]
+
+
+def _recording_update(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, int, int, str | None]]:
+    """Record every ``progress.update`` the listener makes, still applying it."""
+    calls: list[tuple[str, int, int, str | None]] = []
+    real = progress.update
+
+    def _spy(prompt_id: str, *, step: int, total: int, node: str | None) -> None:
+        calls.append((prompt_id, step, total, node))
+        real(prompt_id, step=step, total=total, node=node)
+
+    monkeypatch.setattr(progress, "update", _spy)
+    return calls
+
+
+def _progress_frame(
+    ws: _FakeWS,
+    value: int,
+    total: int,
+    *,
+    prompt_id: str | None = "p1",
+    node: str | None = "3",
+) -> None:
+    data: dict[str, Any] = {"value": value, "max": total}
+    if prompt_id is not None:
+        data["prompt_id"] = prompt_id
+    if node is not None:
+        data["node"] = node
+    ws.push_json("progress", data)
+
+
+async def _follow(
+    ws_url: str = "ws://127.0.0.1:8186/ws?clientId=c1",
+) -> tuple[_ProgressRelay, bool]:
+    """Run the listener over what the fake socket holds; returns the relay and ``ready``."""
+    relay = _ProgressRelay("sdxl-turbo")
+    relay.claim("p1")
+    ready = asyncio.Event()
+    await asyncio.wait_for(_follow_progress(ws_url, relay, ready), timeout=5)
+    return relay, ready.is_set()
+
+
+async def test_listener_maps_progress_messages(
+    fake_ws: _FakeWS, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two progress frames become two tracker updates; everything else is ignored."""
+    calls = _recording_update(monkeypatch)
+    fake_ws.push_json("status", {"status": {"exec_info": {"queue_remaining": 1}}})
+    fake_ws.push_json("execution_start", {"prompt_id": "p1"})
+    fake_ws.push(b"\x00\x00\x00\x01\xff\xd8preview-jpeg")
+    fake_ws.push_json("executing", {"node": "3", "prompt_id": "p1"})
+    _progress_frame(fake_ws, 1, 4)
+    _progress_frame(fake_ws, 2, 4)
+    fake_ws.push_json("executed", {"node": "9", "prompt_id": "p1", "output": {}})
+    fake_ws.hang_up()
+
+    await _follow()
+
+    assert calls == [("p1", 1, 4, "3"), ("p1", 2, 4, "3")]
+    assert progress.current() == {
+        "model": "sdxl-turbo",
+        "step": 2,
+        "total": 4,
+        "node": "3",
+        "elapsed_s": pytest.approx(0.0, abs=1.0),
+        "prompt_id": "p1",
+    }
+
+
+async def test_listener_uses_the_executing_node_when_progress_names_none(
+    fake_ws: _FakeWS, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _recording_update(monkeypatch)
+    fake_ws.push_json("executing", {"node": "17", "prompt_id": "p1"})
+    _progress_frame(fake_ws, 3, 8, node=None)
+    fake_ws.push_json("executing", {"node": None, "prompt_id": "p1"})
+    _progress_frame(fake_ws, 4, 8, node=None)
+    fake_ws.hang_up()
+
+    await _follow()
+
+    # A finished prompt's ``executing`` (node null) does not erase the last node.
+    assert calls == [("p1", 3, 8, "17"), ("p1", 4, 8, "17")]
+
+
+async def test_listener_ignores_frames_for_another_prompt(
+    fake_ws: _FakeWS, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _recording_update(monkeypatch)
+    _progress_frame(fake_ws, 9, 9, prompt_id="someone-elses")
+    _progress_frame(fake_ws, 1, 4, prompt_id="p1")
+    _progress_frame(fake_ws, 2, 4, prompt_id=None)  # older ComfyUI: no prompt_id on the frame
+    fake_ws.hang_up()
+
+    await _follow()
+
+    assert calls == [("p1", 1, 4, "3"), ("p1", 2, 4, "3")]
+
+
+async def test_listener_keeps_frames_that_arrive_before_the_prompt_id_is_known(
+    fake_ws: _FakeWS,
+) -> None:
+    """The socket is open before /prompt answers, so the first frames can beat the prompt id."""
+    relay = _ProgressRelay("sdxl-turbo")
+    ready = asyncio.Event()
+    task = asyncio.create_task(_follow_progress("ws://x/ws?clientId=c", relay, ready))
+    await ready.wait()
+    _progress_frame(fake_ws, 1, 4, prompt_id="p1")
+    _progress_frame(fake_ws, 2, 4, prompt_id="p1")
+    await fake_ws.flush()
+    assert progress.current() is None  # nothing to attach the frames to yet
+
+    relay.claim("p1")
+
+    current = progress.current()
+    assert current is not None
+    assert (current["step"], current["total"], current["node"]) == (2, 4, "3")
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_listener_ignores_early_frames_that_turn_out_to_be_for_another_prompt(
+    fake_ws: _FakeWS,
+) -> None:
+    relay = _ProgressRelay("sdxl-turbo")
+    ready = asyncio.Event()
+    task = asyncio.create_task(_follow_progress("ws://x/ws?clientId=c", relay, ready))
+    await ready.wait()
+    _progress_frame(fake_ws, 5, 9, prompt_id="someone-elses")
+    await fake_ws.flush()
+
+    relay.claim("p1")
+
+    current = progress.current()
+    assert current is not None
+    assert (current["step"], current["total"]) == (None, None)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize(
+    "bad_frame",
+    [
+        "this is not json",
+        "[1, 2, 3]",
+        json.dumps({"type": "progress", "data": "nope"}),
+        json.dumps({"type": "progress", "data": {"value": "2", "max": 4}}),
+        json.dumps({"type": "progress", "data": {"value": 2}}),
+        json.dumps({"type": "progress", "data": {"value": True, "max": 4}}),
+    ],
+)
+async def test_listener_bad_frame_logs_one_warning_and_stops(
+    fake_ws: _FakeWS,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    bad_frame: str,
+) -> None:
+    calls = _recording_update(monkeypatch)
+    caplog.set_level(logging.WARNING, logger="hal0.providers.comfyui")
+    fake_ws.push(bad_frame)
+    _progress_frame(fake_ws, 1, 4)  # never read: the listener stopped
+    fake_ws.hang_up()
+
+    await _follow()
+
+    assert calls == []
+    assert len(_listener_warnings(caplog)) == 1
+
+
+async def test_listener_close_mid_render_logs_one_warning(
+    fake_ws: _FakeWS, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING, logger="hal0.providers.comfyui")
+    _progress_frame(fake_ws, 1, 4)
+    fake_ws.hang_up()  # ComfyUI closes the socket while the render is still going
+
+    await _follow()
+
+    warnings = _listener_warnings(caplog)
+    assert len(warnings) == 1
+    assert "closed" in warnings[0].reason  # type: ignore[attr-defined]
+    # What arrived before the close is kept.
+    current = progress.current()
+    assert current is not None
+    assert current["step"] == 1
+
+
+async def test_listener_connection_failure_logs_one_warning_and_signals_ready(
+    fake_ws: _FakeWS, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING, logger="hal0.providers.comfyui")
+    fake_ws.connect_error = ConnectionRefusedError("refused")
+
+    _relay, ready = await _follow()
+
+    assert ready  # a failed connect must not leave infer waiting for it
+    warnings = _listener_warnings(caplog)
+    assert len(warnings) == 1
+    assert "ConnectionRefusedError" in warnings[0].reason  # type: ignore[attr-defined]
+
+
+async def test_listener_cancellation_is_silent(
+    fake_ws: _FakeWS, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING, logger="hal0.providers.comfyui")
+    relay = _ProgressRelay("m")
+    ready = asyncio.Event()
+    task = asyncio.create_task(_follow_progress("ws://x/ws?clientId=c", relay, ready))
+    await ready.wait()
+
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert task.cancelled()
+    assert fake_ws.cancelled
+    assert fake_ws.events == ["connect", "close"]
+    assert _listener_warnings(caplog) == []
+
+
+# ─── infer + progress ─────────────────────────────────────────────────────────
+
+_PNG = b"\x89PNG\r\n\x1a\n" + b"x" * 64
+
+
+def _completed_history(prompt_id: str) -> dict[str, Any]:
+    return {
+        prompt_id: {
+            "status": {"status_str": "success", "completed": True, "messages": []},
+            "outputs": {
+                "9": {
+                    "images": [
+                        {"filename": "hal0-test_00001_.png", "subfolder": "", "type": "output"}
+                    ]
+                }
+            },
+        }
+    }
+
+
+async def _render(
+    provider: ComfyUIProvider,
+    *,
+    fake_ws: _FakeWS | None = None,
+    prompt_id: str = "abc123",
+    body: dict[str, Any] | None = None,
+    on_submit: Callable[[], Awaitable[None]] | None = None,
+    on_history: Callable[[], Awaitable[None]] | None = None,
+    history: dict[str, Any] | None = None,
+    port: int = 8186,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Run ``infer`` against a mocked ComfyUI HTTP API. Returns (result, submitted /prompt body)."""
+    submitted: dict[str, Any] = {}
+
+    async def _post(url: str, json: dict[str, Any]) -> httpx.Response:
+        assert url.endswith("/prompt")
+        submitted.update(json)
+        if fake_ws is not None:
+            fake_ws.events.append("submit")
+        if on_submit is not None:
+            await on_submit()
+        return _mock_response(status_code=200, json_payload={"prompt_id": prompt_id, "number": 1})
+
+    async def _get(url: str, params: dict[str, Any] | None = None) -> httpx.Response:
+        if "/history/" in url:
+            if on_history is not None:
+                await on_history()
+            return _mock_response(
+                status_code=200, json_payload=history or _completed_history(prompt_id)
+            )
+        if "/view" in url:
+            return _mock_response(
+                status_code=200, content=_PNG, headers={"content-type": "image/png"}
+            )
+        raise AssertionError(f"unexpected GET {url}")
+
+    request_body = {
+        "model": "sdxl-turbo",
+        "prompt": "a cat in a hat",
+        "size": "1024x1024",
+        "_hal0_template": "sdxl_turbo_simple",
+        **(body or {}),
+    }
+    with patch("hal0.providers.comfyui.httpx.AsyncClient") as MockClient:
+        client = MockClient.return_value.__aenter__.return_value
+        client.post = _post
+        client.get = _get
+        result = await provider.infer(port, request_body)
+    return result, submitted
+
+
+async def test_ws_failure_does_not_fail_render(
+    provider: ComfyUIProvider, fake_ws: _FakeWS, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A refused websocket costs the progress read-out, never the picture."""
+    caplog.set_level(logging.WARNING, logger="hal0.providers.comfyui")
+    fake_ws.connect_error = ConnectionRefusedError("connection refused")
+
+    result, _ = await _render(provider, fake_ws=fake_ws)
+
+    assert [img["png"] for img in result["images"]] == [_PNG]
+    assert len(_listener_warnings(caplog)) == 1
+    assert progress.current() is None
+
+
+async def test_render_survives_a_websocket_that_closes_mid_render(
+    provider: ComfyUIProvider, fake_ws: _FakeWS, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING, logger="hal0.providers.comfyui")
+
+    async def _hang_up() -> None:
+        fake_ws.hang_up()
+        await fake_ws.flush()
+
+    result, _ = await _render(provider, fake_ws=fake_ws, on_history=_hang_up)
+
+    assert len(result["images"]) == 1
+    assert len(_listener_warnings(caplog)) == 1
+    assert progress.current() is None
+
+
+async def test_progress_clears_after_render(provider: ComfyUIProvider, fake_ws: _FakeWS) -> None:
+    seen: list[dict[str, Any] | None] = []
+
+    async def _mid_render() -> None:
+        seen.append(progress.current())
+
+    await _render(provider, fake_ws=fake_ws, on_history=_mid_render)
+
+    assert seen[0] is not None
+    assert seen[0]["prompt_id"] == "abc123"
+    assert progress.current() is None
+
+
+async def test_progress_clears_when_the_render_fails(
+    provider: ComfyUIProvider, fake_ws: _FakeWS
+) -> None:
+    failed = {
+        "abc123": {
+            "status": {
+                "status_str": "error",
+                "completed": False,
+                "messages": [["execution_error", {"exception_message": "boom"}]],
+            },
+            "outputs": {},
+        }
+    }
+    seen: list[dict[str, Any] | None] = []
+
+    async def _mid_render() -> None:
+        seen.append(progress.current())
+
+    with pytest.raises(ComfyUIInferError):
+        await _render(provider, fake_ws=fake_ws, history=failed, on_history=_mid_render)
+
+    assert seen[0] is not None  # it was live while ComfyUI worked
+    assert progress.current() is None
+    assert fake_ws.events[-1] == "close"
+
+
+async def test_progress_clears_when_infer_is_cancelled(
+    provider: ComfyUIProvider, fake_ws: _FakeWS
+) -> None:
+    started = asyncio.Event()
+
+    async def _stall() -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(_render(provider, fake_ws=fake_ws, on_history=_stall))
+    await started.wait()
+    assert progress.current() is not None
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert progress.current() is None
+    assert fake_ws.cancelled
+    assert fake_ws.events[-1] == "close"
+
+
+async def test_infer_relays_steps_while_it_waits_for_history(
+    provider: ComfyUIProvider, fake_ws: _FakeWS
+) -> None:
+    seen: list[dict[str, Any] | None] = []
+
+    async def _mid_render() -> None:
+        fake_ws.push_json("executing", {"node": "3", "prompt_id": "abc123"})
+        _progress_frame(fake_ws, 2, 8, prompt_id="abc123", node="3")
+        await fake_ws.flush()
+        seen.append(progress.current())
+        _progress_frame(fake_ws, 3, 8, prompt_id="abc123", node="3")
+        await fake_ws.flush()
+        seen.append(progress.current())
+
+    await _render(provider, fake_ws=fake_ws, on_history=_mid_render)
+
+    assert [(s["step"], s["total"], s["node"]) for s in seen if s] == [(2, 8, "3"), (3, 8, "3")]
+    assert seen[0] is not None
+    assert seen[0]["model"] == "sdxl-turbo"
+    assert seen[0]["prompt_id"] == "abc123"
+
+
+async def test_infer_keeps_frames_that_beat_the_submit_response(
+    provider: ComfyUIProvider, fake_ws: _FakeWS
+) -> None:
+    """Connect-first is what lets the first frames land: they may precede /prompt's answer."""
+    seen: list[dict[str, Any] | None] = []
+
+    async def _during_submit() -> None:
+        _progress_frame(fake_ws, 1, 4, prompt_id="abc123", node="3")
+        await fake_ws.flush()
+
+    async def _mid_render() -> None:
+        seen.append(progress.current())
+
+    await _render(provider, fake_ws=fake_ws, on_submit=_during_submit, on_history=_mid_render)
+
+    assert seen[0] is not None
+    assert (seen[0]["step"], seen[0]["total"]) == (1, 4)
+
+
+async def test_infer_connects_before_it_submits(
+    provider: ComfyUIProvider, fake_ws: _FakeWS
+) -> None:
+    await _render(provider, fake_ws=fake_ws)
+
+    assert fake_ws.events == ["connect", "submit", "close"]
+
+
+async def test_infer_does_not_wait_forever_for_a_hung_handshake(
+    provider: ComfyUIProvider, fake_ws: _FakeWS, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("hal0.providers.comfyui._WS_READY_WAIT_S", 0.05)
+    fake_ws.connect_hangs = True
+
+    result, _ = await asyncio.wait_for(_render(provider, fake_ws=fake_ws), timeout=5)
+
+    assert len(result["images"]) == 1
+    assert fake_ws.events == ["submit"]
+    assert not [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+
+
+async def test_infer_leaves_no_listener_task_behind(
+    provider: ComfyUIProvider, fake_ws: _FakeWS
+) -> None:
+    await _render(provider, fake_ws=fake_ws)
+
+    assert fake_ws.cancelled
+    assert not [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+
+
+async def test_infer_listens_on_the_providers_own_host_and_the_requests_client_id(
+    provider: ComfyUIProvider, fake_ws: _FakeWS
+) -> None:
+    _, submitted = await _render(provider, fake_ws=fake_ws, port=8199)
+
+    assert fake_ws.urls == [f"ws://127.0.0.1:8199/ws?clientId={submitted['client_id']}"]
+
+
+async def test_each_request_listens_under_its_own_client_id(
+    provider: ComfyUIProvider, fake_ws: _FakeWS
+) -> None:
+    _, first = await _render(provider, fake_ws=fake_ws)
+    _, second = await _render(provider, fake_ws=fake_ws)
+
+    assert first["client_id"] != second["client_id"]
+    assert len({u.split("clientId=")[1] for u in fake_ws.urls}) == 2
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        # The route hands down the resolved id; it wins over whatever the client typed.
+        ({"_hal0_model": "sdxl-lightning", "model": " SDXL-L "}, "sdxl-lightning"),
+        ({"_hal0_model": "ckpt/anime/waifu"}, "ckpt/anime/waifu"),
+        # No resolved id (a caller other than the route): the request's own model, trimmed.
+        ({"model": "  sd-1.5-pruned-emaonly "}, "sd-1.5-pruned-emaonly"),
+        # Neither: the workflow template, never an empty label.
+        ({"model": ""}, "sdxl_turbo_simple"),
+        ({"_hal0_model": 7, "model": ""}, "sdxl_turbo_simple"),
+    ],
+)
+async def test_progress_names_the_model_the_render_used(
+    provider: ComfyUIProvider, fake_ws: _FakeWS, body: dict[str, Any], expected: str
+) -> None:
+    seen: list[dict[str, Any] | None] = []
+
+    async def _mid_render() -> None:
+        seen.append(progress.current())
+
+    await _render(provider, fake_ws=fake_ws, body=body, on_history=_mid_render)
+
+    assert seen[0] is not None
+    assert seen[0]["model"] == expected
+
+
+async def test_hal0_model_never_reaches_the_workflow_builder(
+    provider: ComfyUIProvider, fake_ws: _FakeWS
+) -> None:
+    seen_bodies: list[dict[str, Any]] = []
+    real_build = comfyui_mod.build_workflow
+
+    def _spy(*, body: dict[str, Any], **kwargs: Any) -> Any:
+        seen_bodies.append(dict(body))
+        return real_build(body=body, **kwargs)
+
+    with patch("hal0.providers.comfyui.build_workflow", _spy):
+        await _render(provider, fake_ws=fake_ws, body={"_hal0_model": "sdxl-lightning"})
+
+    assert seen_bodies
+    assert not any(k.startswith("_hal0_") for k in seen_bodies[0])
