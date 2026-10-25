@@ -1169,7 +1169,6 @@
 /* Service row */
 .svc-row { border-bottom: 1px solid var(--line-soft); }
 .svc-row:last-child { border-bottom: none; }
-.svc-row-expanded .svc-row-main { border-bottom: 1px solid var(--line-soft); }
 .svc-row-main {
   display: flex;
   align-items: center;
@@ -1232,36 +1231,10 @@
   transition: background 0.12s, color 0.12s;
 }
 .svc-btn:hover { background: var(--bg-3); color: var(--fg-2); }
-.svc-btn.active, .svc-expand-btn.active { background: var(--bg-3); border-color: var(--line-strong); color: var(--fg-2); }
-
-/* ── ComfyUI job queue drawer ─────────────────────────────────────────────── */
-.svc-comfy-drawer {
-  padding: 8px 0 8px 38px;
-  display: flex; flex-direction: column; gap: 5px;
-  font-family: var(--jbm); font-size: 10px;
-}
-.svc-comfy-offline,
-.svc-comfy-loading,
-.svc-comfy-empty { color: var(--fg-5); font-style: italic; }
-.svc-comfy-offline { display: flex; align-items: center; gap: 5px; }
-
-/* Per-job row */
-.svc-job { display: flex; align-items: center; gap: 6px; padding: 3px 0; }
-.svc-job-name { color: var(--fg-3); flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.svc-job-pct { color: var(--fg-4); font-size: 9px; flex-shrink: 0; width: 30px; text-align: right; }
-.svc-job-track { width: 60px; height: 3px; background: var(--bg-4); border-radius: 2px; flex-shrink: 0; overflow: hidden; }
-.svc-job-fill { height: 100%; background: var(--info, #7FB8FF); border-radius: 2px; transition: width 0.3s; }
-.svc-job-node { color: var(--fg-5); font-size: 9px; max-width: 80px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.svc-job-status { font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em; flex-shrink: 0; }
-.svc-job-status.running { color: var(--ok, #6FCF97); }
-.svc-job-status.queued  { color: var(--fg-5); }
-.svc-job-status.done    { color: var(--info, #7FB8FF); }
-
-/* Done-job dot — blue (--info; --comfy is blue for ComfyUI, per LANDMINE note) */
-.sdot.svc-done {
-  background: var(--info, #7FB8FF);
-  box-shadow: none;
-}
+.svc-btn.active { background: var(--bg-3); border-color: var(--line-strong); color: var(--fg-2); }
+/* ComfyUI's link off the box (image/ComfyEditorLink.jsx): there, and not clickable. */
+.svc-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.svc-btn:disabled:hover { background: transparent; color: var(--fg-4); }
 
 /* ─── opt-in cards (W6) ─────────────────────────────────────────────────── */
 

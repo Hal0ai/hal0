@@ -11,7 +11,7 @@
  *
  * Motion/sunken/radius tokens the design assumes but dashboard.css lacks
  * (--dur*, --ease, --bg-sunken, --rad-xs, --rad-pill) are declared on .conn,
- * mirroring the comfyui-pane.css / engine-panes.css pattern. */
+ * mirroring the engine-panes.css pattern. */
 
 .conn {
   --dur: 0.18s;

@@ -568,17 +568,19 @@ class TestStatusTelemetry:
             patch(f"{base}._probe_power", return_value=power),
         )
 
-    def test_status_memory_fields_present(self, client: TestClient):
+    def test_status_has_no_memory_block(self, client: TestClient):
+        """The memory figures have one owner: ``memory`` of GET /api/stats/hardware (ADR-0039).
+
+        ``/status`` used to fold ComfyUI's ``/system_stats`` into a GTT + RAM block of its own. It
+        no longer answers one, whatever ``/system_stats`` says.
+        """
         patches = self._patch_status(self._SYSTEM_STATS, self._QUEUE_IDLE)
         with patches[0], patches[1], patches[2], patches[3], patches[4]:
             body = client.get("/api/comfyui/status").json()
 
-        mem = body["memory"]
-        assert mem is not None
-        assert "gtt_used_gb" in mem
-        assert "gtt_ceil_gb" in mem
-        assert "ram_used_gb" in mem
-        assert "ram_ceil_gb" in mem
+        assert "memory" not in body
+        # The live read still works: ComfyUI answered, so the engine is reachable.
+        assert body["reachable"] is True
 
     def test_util_is_none_or_zero_when_no_running_job(self, client: TestClient):
         """gpu_busy_percent is forced-high artifact — util must be 0/None when idle."""

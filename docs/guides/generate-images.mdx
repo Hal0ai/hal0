@@ -110,7 +110,6 @@ Key fields:
 - `reachable` — whether ComfyUI's HTTP API answers.
 - `container` — the `img` slot container's state (`running` / `exited` /
   `absent`).
-- `memory` — GTT and RAM gauges from ComfyUI's `/system_stats`.
 - `queue` — `{running, pending}` job counts.
 - `switchover` — the in-flight switch tracker (`active`, `target`,
   `error`).
@@ -127,6 +126,10 @@ Key fields:
 - `gate`, `gate_refusal` — whether the engine runs the current GPU gate, and
   the latest prompt the gate refused (see
   [ComfyUI's editor and the GPU gate](#comfyuis-editor-and-the-gpu-gate)).
+
+The status carries no memory figures. Read the `memory` block of
+`GET /api/stats/hardware` ([Memory budget API
+reference](/docs/reference/api/memory-budget/)) for the GPU pool and RAM.
 
 Every probe degrades to a safe default: a dead engine surfaces as
 `stopped`, never a 500.

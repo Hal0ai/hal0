@@ -1,7 +1,7 @@
 /* hal0 dashboard — Services page (#services)
    Page-scoped styles (svcp- prefix). Reuses the global service atoms from
-   overhaul.css (.sdot, .svc-pill, .svc-icon-tile, .svc-btn, .svc-pending,
-   .svc-comfy-drawer) and matches the slot-card design system: same card
+   overhaul.css (.sdot, .svc-pill, .svc-icon-tile, .svc-btn, .svc-pending)
+   and matches the slot-card design system: same card
    container (bg-1 / line / rad-lg), same JetBrains Mono label rhythm, same
    ok/warn/err token vocabulary — no generic rgba fallbacks, no opacity
    dimming where a foreground tier token exists. */

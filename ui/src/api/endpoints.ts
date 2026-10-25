@@ -23,8 +23,6 @@ export const ENDPOINTS = {
   // List launchable workflow .json files discovered on disk (operator-dropped
   // files in the bind-mounted workflows dir show up here without a rebuild).
   comfyuiWorkflows: '/api/comfyui/workflows',
-  // Latest output image proxy
-  comfyuiPreview: '/api/comfyui/preview',
   // The GPU arbiter's state alone: {mode, arbiter, switchover, gate_refusal}. Light enough
   // for the 1 s poll the status line needs; /status carries the rest.
   comfyuiArbiter: '/api/comfyui/arbiter',
@@ -476,14 +474,6 @@ export const ENDPOINTS = {
   servicesMdns: '/api/services/mdns',
   logsUnit: (unit: string, n = 120) =>
     `/api/logs?unit=${encodeURIComponent(unit)}&n=${n}`,
-
-  // ── ComfyUI native queue + history (proxy-reachable via :8188) ──
-  // These are NOT under /api — ComfyUI's own HTTP server at :8188 is
-  // reachable directly from the browser (same LAN). Build the base URL
-  // with comfyNativeBase() helper in the consuming component.
-  // comfyNativeQueue and comfyNativeHistory are path suffixes only:
-  comfyNativeQueue: '/queue',
-  comfyNativeHistory: '/history',
 
   // ── Dashboard layout persistence (§2c, DashLayout store) ────────
   // GET → 200 DashLayout | 200 {} (no saved layout yet)

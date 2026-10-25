@@ -1,10 +1,11 @@
 // hal0 v3 dashboard — ComfyUI generation-engine hooks.
 //
-// /api/comfyui/status is a read-only aggregate (docker container state +
+// /api/comfyui/status is a read-only aggregate (the img slot's container state +
 // systemd state of the LLM stack + ComfyUI's own /system_stats + /queue). The
 // pane on the slots-page Image-Gen tab polls it; renders take minutes so a
-// 4s cadence is plenty to track queue depth + memory pressure without hammering
-// the cpp-httplib server behind :8188.
+// 4s cadence is plenty to track queue depth without hammering the cpp-httplib
+// server behind :8188. It carries no memory figures: those are the `memory` block
+// of /api/stats/hardware (useStatsHardware).
 //
 // The switchover (inference ⇄ generation) flips the single iGPU between the LLM
 // stack and ComfyUI via the API's GPU arbiter (Phase D): switching to
@@ -39,14 +40,6 @@ const STATUS_KEY = ['comfyui', 'status'] as const
 
 export type ComfyuiEngineState = 'stopped' | 'starting' | 'running' | 'generating' | 'error'
 export type ComfyuiMode = 'generation' | 'inference'
-
-export interface ComfyuiMemory {
-  gtt_used_gb: number | null
-  gtt_ceil_gb: number
-  ram_used_gb: number | null
-  ram_ceil_gb: number
-  pressure: boolean
-}
 
 export interface ComfyuiSwitchover {
   active: boolean
@@ -130,9 +123,6 @@ export interface ComfyuiStatus {
   engine: ComfyuiEngineState
   container: { name: string; state: string }
   endpoint: string | null
-  // Still served, but on its way out (the Engine tab task deletes it server-side): the
-  // memory figures are the `memory` block of /api/stats/hardware.
-  memory: ComfyuiMemory | null
   // Counts only: ComfyUI's queue has no per-job detail here.
   queue: { running: number; pending: number }
   util: number | null
@@ -147,30 +137,7 @@ export interface ComfyuiStatus {
   gate_refusal: GateRefusal | null
 }
 
-// Neutral default so the pane renders a coherent "stopped/inference" shell on
-// first paint and whenever the backend is briefly unreachable — never undefined
-// field access.
-export const COMFYUI_FALLBACK: ComfyuiStatus = {
-  mode: 'inference',
-  reachable: false,
-  engine: 'stopped',
-  container: { name: 'comfyui', state: 'absent' },
-  endpoint: null,
-  memory: null,
-  queue: { running: 0, pending: 0 },
-  util: 0,
-  temp: null,
-  clock: null,
-  progress: null,
-  inference: { hermes: false },
-  inventory: null,
-  switchover: { active: false, target: null, error: null },
-  arbiter: null,
-  gate: null,
-  gate_refusal: null,
-}
-
-// Active (Image-Gen tab open): 4s, fast enough to track queue + pressure.
+// Active (Image-Gen tab open): 4s, fast enough to track the queue.
 // Idle (other tab): 20s — keeps the tab's live dot honest without spending a
 // docker inspect + 2× systemctl + 2× HTTP probe every few seconds; per-tab
 // polling can starve an embedded HTTP server, so this is the cheap guard.
@@ -685,120 +652,4 @@ export function useImageGenerate() {
   return useMutation<ImageGenerateResponse, Hal0Error, ImageGenerateVars>({
     mutationFn: generateImage,
   })
-}
-
-// ── V2 pane data transform ───────────────────────────────────────────────────
-//
-// The server /status payload has queue counts, memory, and device telemetry.
-// Per-job detail (name, kind, node, progress) is not fully surfaced yet; it/s,
-// ETA, and step are explicit nulls until a ComfyUI websocket subscription lands.
-// The component renders placeholders for absent fields — never crashes on
-// undefined.
-//
-// active_render and queue_jobs are optional extensions that may be injected
-// by the window.__comfyuiV2MockOverride seam or a future richer backend.
-
-export interface ComfyuiV2Run {
-  name: string
-  kind: string
-  pct: number
-  eta: string
-  node: string
-  step: number
-  total: number
-  its: number
-  loaded: string
-}
-
-export interface ComfyuiV2QueueJob {
-  name: string
-  kind: string
-}
-
-export interface ComfyuiV2PaneData {
-  engine: {
-    name: string
-    endpoint: string
-    image: string
-    restart: string
-  }
-  run: ComfyuiV2Run | null
-  queue: ComfyuiV2QueueJob[]
-  gtt: { used: number; ceil: number }
-  ram: { used: number; ceil: number }
-  stats: { util: number; temp: number; clk: number; its: number }
-  // Per-category weight-file counts on the model share (comfyui/inventory.py
-  // status_counts — VERIFIED, never faked). null when the share root is
-  // absent (dev box / fresh install) — the pane must hide the models block
-  // rather than render zeros it can't stand behind.
-  inventory: Record<string, number> | null
-}
-
-// Transform a live /status payload (+ optional V2 extension fields) into the
-// component's data shape. All absent numeric fields get safe defaults so the
-// pane renders coherently even when ComfyUI isn't running.
-export function transformComfyuiStatus(
-  status: ComfyuiStatus & {
-    active_render?: ComfyuiV2Run | null
-    queue_jobs?: ComfyuiV2QueueJob[]
-  },
-): ComfyuiV2PaneData {
-  const mem = status.memory
-  const hasRun = (status.queue?.running ?? 0) > 0
-
-  // active_render is the rich per-job detail block — only present in the mock
-  // or a future richer backend. Fall back to a placeholder skeleton when the
-  // render count says something is running but the detail is absent.
-  let run: ComfyuiV2Run | null = null
-  if (status.active_render !== undefined) {
-    run = status.active_render ?? null
-  } else if (hasRun) {
-    run = {
-      name: 'rendering…',
-      kind: '—',
-      pct: 0,
-      eta: '—',
-      node: '—',
-      step: 1,
-      total: 1,
-      its: 0,
-      loaded: '—',
-    }
-  }
-
-  // queue_jobs mirrors pending job list detail. Falls back to placeholder rows
-  // equal to the pending count when detail is absent.
-  let queue: ComfyuiV2QueueJob[]
-  if (status.queue_jobs !== undefined) {
-    queue = status.queue_jobs
-  } else {
-    const pending = status.queue?.pending ?? 0
-    queue = Array.from({ length: pending }, (_, i) => ({ name: `job ${i + 1}`, kind: '—' }))
-  }
-
-  return {
-    engine: {
-      name: 'ComfyUI',
-      endpoint: status.endpoint ?? ':8188',
-      image: status.container?.name ?? 'comfyui',
-      restart: 'no',
-    },
-    run,
-    queue,
-    gtt: {
-      used: mem?.gtt_used_gb ?? 0,
-      ceil: mem?.gtt_ceil_gb ?? 80,
-    },
-    ram: {
-      used: mem?.ram_used_gb ?? 0,
-      ceil: mem?.ram_ceil_gb ?? 96,
-    },
-    stats: {
-      util: status.util ?? 0,
-      temp: status.temp ?? 0,
-      clk: status.clock ?? 0,
-      its: 0,
-    },
-    inventory: status.inventory ?? null,
-  }
 }

@@ -7,12 +7,10 @@
 // ComfyUI does not open a workflow from a link, so every chip opens the editor and the workflow is
 // picked in its Workflows sidebar.
 import { useComfyuiModels, useComfyuiWorkflows } from '@/api/hooks/useComfyui'
-import { copyTextToClipboard } from '@/lib/clipboard'
 import { OFF_BOX_NOTE } from './editor-reach'
 import { EDITOR_NOTE, WORKFLOW_HINT, workflowChips } from './engine-pure'
+import { TunnelCommand } from './TunnelCommand'
 import { useEditorAccess } from './useEditorAccess'
-
-const note = (msg, kind) => window.__hal0Toast && window.__hal0Toast(msg, kind)
 
 const OPEN_LABEL = 'Open ComfyUI editor ↗'
 
@@ -47,13 +45,6 @@ export function EditorCard() {
   const access = useEditorAccess()
   const chips = workflowChips(models?.models, workflows)
   const url = access.onBox ? access.url : null
-
-  // The page that needs the command is off the box, often plain http on a LAN, where there is no
-  // navigator.clipboard: the shared helper falls back to execCommand and answers what happened.
-  const copy = async () => {
-    if (await copyTextToClipboard(access.tunnel)) note('Command copied', 'ok')
-    else note('Could not copy: select the command and copy it by hand', 'err')
-  }
 
   return (
     <section className="ie-card" data-testid="editor-card" aria-label="ComfyUI editor">
@@ -97,17 +88,7 @@ export function EditorCard() {
           )}
         </div>
 
-        {!access.onBox && (
-          <div className="ie-tunnel-block">
-            <div className="ie-tunnel">
-              <code data-testid="editor-tunnel">{access.tunnel}</code>
-              <button type="button" className="btn ghost sm" data-testid="editor-tunnel-copy" onClick={copy}>
-                Copy
-              </button>
-            </div>
-            <p className="ie-muted">Run it on your own machine, then open http://127.0.0.1:8188 there.</p>
-          </div>
-        )}
+        {!access.onBox && <TunnelCommand tunnel={access.tunnel} testid="editor" />}
 
         <p className="ie-muted" data-testid="editor-note">
           {EDITOR_NOTE}

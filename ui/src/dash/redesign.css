@@ -342,6 +342,8 @@
 .rd-svc-name { font-size: 11px; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rd-svc-open { margin-left: auto; font-size: 10px; color: var(--fg-4); flex: none; }
 .rd-svc-open:hover { color: var(--accent); }
+/* ComfyUI off the box: the arrow is there, and says why it does nothing. */
+.rd-svc-open-off, .rd-svc-open-off:hover { color: var(--fg-5); cursor: not-allowed; }
 .rd-svc-sub {
   font-size: 9.5px;
   color: var(--fg-4);

@@ -1,7 +1,7 @@
 // hal0 dashboard — Inference "engine" pane (slots-page Inference tab).
 //
 // The yellow-accented counterpart to the ComfyUI generation-engine pane
-// (comfyui-pane.jsx). Where ComfyUI models ONE containerized generation
+// (image/ImageGenTabs.jsx). Where ComfyUI models ONE containerized generation
 // engine, this pane is a summary engine-shell over the iGPU/CPU slot stack,
 // implementing the P2 *card* direction from the design handoff
 // (design_handoff_inference_slots/P2-inference-pane.html): ALL pane slots
@@ -1148,7 +1148,7 @@ export function InferencePane() {
   const [modelEditRow, setModelEditRow] = useStateI(null)
 
   // The Inference rollup is the iGPU/CPU slot stack. Image generation is its
-  // own pane (ComfyuiPane); NPU/FLM slots are cordoned off to the NPU · FLM
+  // own pane (ImageGenTabs); NPU/FLM slots are cordoned off to the NPU · FLM
   // stack pane below — they appear here only as the sec-label FLM count.
   const allSlots = slotsQuery.data || []
   // Cold start: no cached data yet. Render neutral skeletons instead of the

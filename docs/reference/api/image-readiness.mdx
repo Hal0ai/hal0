@@ -224,6 +224,10 @@ fields, which were always `null` and are gone.
   is a read-out: if the socket cannot be opened or drops, the render still finishes, and
   `progress` shows `step: null`, or stops advancing, until the render ends.
 
+`GET /api/comfyui/status` no longer carries `memory`, the GPU and RAM gauges it used to fold
+from ComfyUI's `/system_stats`. The memory figures are the `memory` block of
+`GET /api/stats/hardware`, the budget's one owner ([ADR-0039](/docs/adr/0039-memory-figures-have-one-owner)).
+
 ## The GPU gate: version and refusals
 
 ComfyUI's `hal0_gpu_gate` node sends its version (the `X-Hal0-Gate-Version` header) on

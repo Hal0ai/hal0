@@ -872,13 +872,15 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
     );
   }
 
-  // Sub-tabs (Endpoints / Runner Images / Stacks) are slot-independent
-  // surfaces — they must stay reachable even while /api/slots is loading or
-  // has resolved empty (a fresh box with no slots is exactly when you want to
-  // apply a Stack or pull a runner image). Only the slot-centric
-  // Inference/Image tabs fall through to the loading skeleton / empty state
-  // below.
-  const onSubTab = tab === "endpoints" || tab === "runner-images" || tab === "stacks";
+  // Sub-tabs (Endpoints / Runner Images / Stacks) and the Image Gen pane are
+  // slot-independent surfaces — they must stay reachable even while
+  // /api/slots is loading or has resolved empty (a fresh box with no slots is
+  // exactly when you want to apply a Stack, pull a runner image or install the
+  // first image model; the Image Gen pane reads the image catalog and the
+  // engine, not the slot list). Only the Inference tab falls through to the
+  // loading skeleton / empty state below.
+  const onSubTab =
+    tab === "endpoints" || tab === "runner-images" || tab === "stacks" || tab === "image";
 
   // Loading skeleton — shown while /api/slots is still resolving so no
   // fake/stub slot cards flash before real data arrives.

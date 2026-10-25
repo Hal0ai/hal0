@@ -1,7 +1,7 @@
 /* hal0 v3 dashboard — ActivityLog sidebar pane.
  *
  * Plain global `.act-*` classes (imported from main.tsx, mirroring the
- * comfyui-pane.css / engine-panes.css side-effect pattern). Reuses the
+ * engine-panes.css side-effect pattern). Reuses the
  * dashboard.css severity vars (--ok/--warn/--err/--accent/--fg-*) and the
  * `.side-card` shell. Bounded scroll body + sticky filter bar at the top.
  */

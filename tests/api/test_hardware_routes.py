@@ -1131,10 +1131,12 @@ async def test_engine_read_is_none_on_any_failure(
     assert await comfyui_mod._fetch_engine_stats() is None
 
 
-def test_status_memory_and_engine_read_share_one_parse() -> None:
+def test_device_used_bytes_is_the_parse_behind_engine_used_mb() -> None:
+    """``vram_total - vram_free`` of the first device, the one parse ``engine_used_mb`` reads.
+
+    ``/status`` no longer parses it for a memory block of its own (its figures are the budget's).
+    """
     stats = _system_stats(used_gib=54)
 
-    status_used_gb = comfyui_mod._parse_memory(stats)["gtt_used_gb"]  # type: ignore[index]
-
-    assert status_used_gb == 54.0
     assert comfyui_mod._device_used_bytes(stats) == 54 * _GIB
+    assert not hasattr(comfyui_mod, "_parse_memory")

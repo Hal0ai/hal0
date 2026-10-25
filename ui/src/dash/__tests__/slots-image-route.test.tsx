@@ -19,10 +19,15 @@ for (const name of ['CreateSlotModal', 'EditSlotDrawer', 'SlotLogsDrawer', 'Mode
 
 type Json = Record<string, unknown>
 
+// What `/api/slots` answers: one slot by default, or none (a box with no slots yet), or not at
+// all yet (loading). With none, SlotsView shows its empty state on the slot-centric tabs.
+const box = vi.hoisted(() => ({
+  slots: [{ name: 'brain', kind: 'local', type: 'chat', state: 'running' }] as unknown[] | undefined,
+  isLoading: false,
+}))
 vi.mock('@/api/hooks/useSlots', async (importOriginal) => ({
   ...(await importOriginal<Json>()),
-  // One slot: with none, SlotsView shows its empty state instead of the tabs.
-  useSlots: () => ({ data: [{ name: 'brain', kind: 'local', type: 'chat', state: 'running' }], isLoading: false }),
+  useSlots: () => ({ data: box.slots, isLoading: box.isLoading }),
 }))
 vi.mock('@/api/hooks/useModels', async (importOriginal) => ({
   ...(await importOriginal<Json>()),
@@ -55,6 +60,8 @@ let root: Root
 const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
 
 beforeEach(() => {
+  box.slots = [{ name: 'brain', kind: 'local', type: 'chat', state: 'running' }]
+  box.isLoading = false
   host = document.createElement('div')
   document.body.appendChild(host)
   root = createRoot(host)
@@ -103,6 +110,39 @@ describe('slotSub reaches the Image Gen pane', () => {
     renderRoute('endpoints')
     expect(imageTab().getAttribute('aria-selected')).toBe('false')
     expect(pane()).toBeNull()
+  })
+
+  describe('on a box with no slots', () => {
+    // The first-run state: the image catalog is where a box with no slots starts, so the pane must
+    // be reachable, as Endpoints, Runner Images and Stacks are.
+    it('still shows the Image Gen pane, not "No slots configured"', () => {
+      box.slots = []
+      renderRoute('image')
+      expect(pane()).not.toBeNull()
+      expect(imageTab().getAttribute('aria-selected')).toBe('true')
+      expect(host.textContent).not.toContain('No slots configured')
+    })
+
+    it('hands a deep link through to the pane too', () => {
+      box.slots = []
+      renderRoute('image/models')
+      expect(pane()!.getAttribute('data-sub')).toBe('models')
+    })
+
+    it('shows the pane, not the loading skeleton, while /api/slots loads', () => {
+      box.slots = undefined
+      box.isLoading = true
+      renderRoute('image')
+      expect(pane()).not.toBeNull()
+      expect(host.textContent).not.toContain('Loading slots')
+    })
+
+    it('keeps "No slots configured" on the Inference tab', () => {
+      box.slots = []
+      renderRoute('inference')
+      expect(host.textContent).toContain('No slots configured')
+      expect(pane()).toBeNull()
+    })
   })
 
   it("main.jsx hands the route's second segment to SlotsView", () => {

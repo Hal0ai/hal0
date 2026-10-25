@@ -218,8 +218,8 @@ describe('engine card', () => {
   })
 
   it('engine tab has no memory gauges', () => {
-    // The memory block still rides on /status until it is deleted server-side; the tab never
-    // draws it. Memory is the top bar ruler's and the fit meters'.
+    // /status no longer carries a memory block, but a hal0 that has not updated yet still sends one:
+    // the tab never draws it. Memory is the top bar ruler's and the fit meters'.
     box.status = statusBody({
       memory: { gtt_used_gb: 54, gtt_ceil_gb: 80, ram_used_gb: 61, ram_ceil_gb: 96, pressure: false },
     })

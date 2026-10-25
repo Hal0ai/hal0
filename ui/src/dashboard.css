@@ -58,8 +58,8 @@
   --dev-img:      #3c6597;  /* ComfyUI image-gen tag (decoupled from --comfy accent) */
 
   /* ComfyUI "generation engine" accent — its own blue the way the NPU stack
-     owns purple. Mirrored in comfyui-pane.css (scoped to .comfy-pane); kept
-     here so the slots-page Image-Gen tab can glow the same hue. */
+     owns purple. The slots-page Image-Gen pane (dash/image/*.css) draws with
+     these; .infer-pane and .npu-pane re-scope them to their own accents. */
   --comfy:        #5ea4f9;
   --comfy-hi:     #8cc0ff;
   --comfy-soft:   rgba(94, 164, 249, 0.10);

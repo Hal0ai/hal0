@@ -97,12 +97,14 @@ services exist. Each card shows:
   deliberate stop (grey, "stopped — starts on demand") from a crash (red,
   "crashed — systemd unit failed");
 - the systemd unit, browser URL (when one exists — Hermes and Hindsight are
-  loopback-only), and mDNS `.local` URL when advertised;
+  loopback-only; so is ComfyUI, whose link opens from a page on the box itself
+  and, anywhere else, is disabled beside an SSH tunnel command), and mDNS
+  `.local` URL when advertised;
 - lifecycle buttons (Restart/Start/Stop) limited to the verbs that service
   actually permits — ComfyUI exposes Start/Restart only, since a raw
   `systemctl start` would bypass the GPU-arbiter switchover that hands the
   iGPU back from inference mode;
-- a journald logs drawer, and, for ComfyUI, an inline live job queue.
+- a journald logs drawer.
 
 A service the backend has no real probe for (nothing in the current
 catalog, but a future extension-provided service could arrive this way)

@@ -27,6 +27,8 @@ import { useRequestsRollup } from '@/api/hooks/useRequestsRollup'
 import { useServices } from '@/api/hooks/useServices'
 import { servicesForWidget } from './services-widget-pure'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
+import { OFF_BOX_NOTE } from './image/editor-reach'
+import { useEditorAccess } from './image/useEditorAccess'
 import { useActivityRecent } from '@/api/hooks/useActivity'
 import { useApprovalList } from '@/api/hooks/useAgents'
 import { useSlotDrift, useRestartDriftedSlots } from '@/api/hooks/useUpdates'
@@ -889,9 +891,13 @@ function RDActivityCard({ swap }) {
 
 const SERVICE_ORDER = ['openwebui', 'comfyui', 'hermes', 'n8n']
 
-function RDServicesCard({ swap, onGo }) {
+export function RDServicesCard({ swap, onGo }) {
   const svc = useServices()
   const ordered = servicesForWidget(svc, SERVICE_ORDER)
+  // ComfyUI listens on the box's loopback only (image/editor-reach.ts has the rule): its arrow
+  // opens the editor from a page on the box and is disabled anywhere else. A service's own `url`
+  // is the API's view of it, so ComfyUI's link is the editor access's, never the row's.
+  const editor = useEditorAccess()
 
   return (
     <RDCard title="Services" swap={swap} className="rd-fill" flush>
@@ -904,7 +910,9 @@ function RDServicesCard({ swap, onGo }) {
           {ordered.map((s) => {
             const disabled = s.unit_state?.unit_file_state === 'disabled' || (!s.up && !s.managed)
             const dotCls = s.up ? 'ready' : disabled ? 'empty' : 'offline'
-            const openable = s.up && s.url
+            const isComfy = s.id === 'comfyui'
+            const openUrl = isComfy ? editor.url : s.url
+            const openable = s.up && (isComfy || s.url)
             return (
               <div
                 key={s.id}
@@ -918,13 +926,22 @@ function RDServicesCard({ swap, onGo }) {
                 <div className="rd-svc-top">
                   <span className={'dot ' + dotCls} style={{ width: 6, height: 6 }} />
                   <span className="rd-svc-name mono" style={disabled ? { color: 'var(--fg-3)' } : undefined}>{s.id}</span>
-                  {openable && (
+                  {openable && (isComfy && !editor.onBox ? (
+                    <span
+                      className="rd-svc-open rd-svc-open-off mono"
+                      data-testid="rd-svc-open-comfyui"
+                      title={OFF_BOX_NOTE}
+                      aria-disabled="true"
+                      onClick={(e) => e.stopPropagation()}
+                    >↗</span>
+                  ) : (
                     <span
                       className="rd-svc-open mono"
+                      data-testid={`rd-svc-open-${s.id}`}
                       title={`Open ${s.name}`}
-                      onClick={(e) => { e.stopPropagation(); window.open(s.url, '_blank', 'noopener') }}
+                      onClick={(e) => { e.stopPropagation(); window.open(openUrl, '_blank', 'noopener') }}
                     >↗</span>
-                  )}
+                  ))}
                 </div>
                 <div className="rd-svc-sub mono num" style={disabled ? { color: 'var(--fg-5)' } : undefined}>
                   {disabled ? 'disabled' : (s.detail || '—')}

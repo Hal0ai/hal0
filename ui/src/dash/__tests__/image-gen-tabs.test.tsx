@@ -433,3 +433,12 @@ describe('style order', () => {
     expect(slotsSrc).toMatch(/from '\.\/image\/ImageGenTabs(\.jsx)?'/)
   })
 })
+
+describe('the --comfy tokens', () => {
+  // The old pane's stylesheet re-declared them under `.comfy-page`. It is gone: dashboard.css
+  // defines them on :root, which is all the pane draws with. The e2e spec imagegen-tabs-v3 reads
+  // them back off the mounted root in a browser, since vitest does not load CSS.
+  it('no longer come from a sheet of the deleted pane', () => {
+    expect(mainSrc).not.toMatch(/comfyui-pane/)
+  })
+})
