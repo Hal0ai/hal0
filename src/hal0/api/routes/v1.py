@@ -1857,7 +1857,8 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
         }
 
     Optional ``extra_body`` (hal0 extension): ``seed``, ``steps``,
-    ``cfg``, ``negative_prompt``.
+    ``cfg``, ``negative_prompt``, and ``hal0_skip_fit_check`` (``true`` skips the memory
+    preflight, the budget read included).
 
     Returns the OpenAI shape::
 
@@ -1871,10 +1872,20 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
           "_hal0": {"model": ..., "template": ..., "meta": ... translator debug meta ...}
         }
 
-    Model resolution (:func:`hal0.comfyui.resolve.resolve_image_model`) raises
-    404 ``image.model_unknown``, 409 ``image.model_not_installed``, 422
-    ``image.model_not_renderable`` or 422 ``image.model_required``; a models tree the hal0 user
-    cannot read answers 409 ``comfyui.models_dir_not_writable``.
+    Errors, in the order they are met:
+
+    * 422 ``image.prompt_required`` for a body without a ``prompt``.
+    * 422 ``image.invalid_size`` for a ``size`` that is not a string (``null`` and ``""`` mean
+      "no size"); ``error.details.size_type`` names the type, the value is never echoed. A
+      string the translator cannot read is not an error: it falls back to its default size.
+    * Model resolution (:func:`hal0.comfyui.resolve.resolve_image_model`) raises
+      404 ``image.model_unknown``, 409 ``image.model_not_installed``, 422
+      ``image.model_not_renderable`` or 422 ``image.model_required``; a models tree the hal0
+      user cannot read answers 409 ``comfyui.models_dir_not_writable``.
+    * 422 ``image.wont_fit`` when the render cannot fit the memory budget (ADR-0039),
+      refused before the arbiter unloads a GPU slot. ``error.details`` carries ``need``,
+      ``render_free_gb``, ``ram_free_gb``, ``model`` and ``size``. An unknown budget never
+      refuses; ``extra_body.hal0_skip_fit_check: true`` skips the check.
     """
     from hal0.comfyui.install import readable_tree
     from hal0.comfyui.resolve import resolve_image_model
@@ -1891,14 +1902,16 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
         raise _ImagePromptRequired("body.prompt is required")
     # `size` is a string or absent (null and "" mean "no size"). Anything else is the
     # client's mistake, caught here before the GPU, the budget or the translator see it.
-    # An unreadable string is not: the translator falls back to its default size.
+    # An unreadable string is not: the translator falls back to its default size. The error
+    # names the type, never the value: `json.loads` accepts NaN and Infinity, which the
+    # error response cannot encode, and the validation handler does not echo payloads either.
     size = body.get("size")
     if size is not None and not isinstance(size, str):
         raise UnprocessableEntity(
             f"size must be a string WIDTHxHEIGHT in pixels, for example 1024x1024; "
             f"got {type(size).__name__}",
             code="image.invalid_size",
-            details={"size": size},
+            details={"size_type": type(size).__name__},
         )
 
     # 1. Resolve the model first: a request that cannot render must fail before the GPU

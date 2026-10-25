@@ -1169,12 +1169,45 @@ def test_v1_images_non_string_size_is_a_client_error_not_a_500(
     assert r.status_code == 422, r.text
     error = r.json()["error"]
     assert error["code"] == "image.invalid_size"
-    assert error["details"] == {"size": size}
+    assert error["details"] == {"size_type": type(size).__name__}  # the type, never the value
     assert "1024x1024" in error["message"]
     assert memory_budget.apps == []  # the preflight never saw it
     manager.arbiter.ensure_img.assert_not_awaited()
     assert manager.arbiter.jobs == 0
     mock_infer.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("literal", "type_name"),
+    [
+        ("NaN", "float"),
+        ("Infinity", "float"),
+        ("-Infinity", "float"),
+        ("[NaN]", "list"),
+        ('{"width": NaN}', "dict"),
+    ],
+)
+def test_v1_images_non_finite_size_is_a_422_that_does_not_echo_the_value(
+    client: TestClient, literal: str, type_name: str
+) -> None:
+    """``json.loads`` accepts ``NaN`` and ``Infinity``, but the response encoder refuses them.
+
+    Echoing the caller's ``size`` back in ``error.details`` made the error handler itself fail
+    ("Out of range float values are not JSON compliant"): a 500 for a client mistake. Like the
+    validation handler, the error names the type and not the payload.
+    """
+    r = client.post(
+        "/v1/images/generations",
+        content=f'{{"prompt":"x","size":{literal}}}'.encode(),
+        headers={"content-type": "application/json"},
+    )
+
+    assert r.status_code == 422, r.text
+    error = r.json()["error"]
+    assert error["code"] == "image.invalid_size"
+    assert error["details"] == {"size_type": type_name}
+    assert "NaN" not in r.text
+    assert "Infinity" not in r.text
 
 
 @pytest.mark.parametrize("size", [None, ""], ids=["null", "empty"])
