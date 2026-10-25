@@ -279,8 +279,8 @@ def _gate_must_authenticate() -> bool:
     return admin_gated({"type": "http", "client": (peer, 0)})
 
 
-def _record_refused_prompt(resp: httpx.Response) -> None:
-    """Record ``resp`` as the gate's latest refusal when it is the GPU gate's 503 for a prompt.
+def _gate_refusal_of(resp: httpx.Response) -> str | None:
+    """The gate's reason when ``resp`` is the GPU gate's 503 for a prompt, else ``None``.
 
     The same shape check as the provider's (:func:`hal0.providers.comfyui.gate_refusal_reason`),
     for a ``/prompt`` hal0 posts without the provider (a quick-launched workflow).
@@ -288,10 +288,8 @@ def _record_refused_prompt(resp: httpx.Response) -> None:
     try:
         body = resp.json()
     except ValueError:
-        return
-    reason = comfyui_provider.gate_refusal_reason(resp.status_code, body)
-    if reason is not None:
-        record_gate_refusal(reason)
+        return None
+    return comfyui_provider.gate_refusal_reason(resp.status_code, body)
 
 
 def _gate_state() -> str:
@@ -1627,8 +1625,8 @@ async def comfyui_workflow_launch(name: str) -> JSONResponse:
     user/default/workflows path. Posts the API-format workflow JSON to
     ComfyUI's /prompt endpoint and returns 202 with the prompt_id.
     404 when the workflow file does not exist. A prompt the GPU gate refuses (its
-    503) is recorded as the gate's latest refusal, as for ``/v1``; the answer is
-    still 202, with a null ``prompt_id``.
+    503) is recorded as the gate's latest refusal and answered as ``/v1`` answers it:
+    503 ``image.gate_refused`` with the gate's reason.
     """
     workflow_path = _find_workflow(name)
     if workflow_path is None:
@@ -1649,6 +1647,7 @@ async def comfyui_workflow_launch(name: str) -> JSONResponse:
             },
         )
     base = _comfyui_base_url()
+    refusal: str | None = None
     try:
         resp = await _get_client().post(
             f"{base}/prompt",
@@ -1658,9 +1657,12 @@ async def comfyui_workflow_launch(name: str) -> JSONResponse:
             result = resp.json()
         else:
             result = {}
-            _record_refused_prompt(resp)
+            refusal = _gate_refusal_of(resp)
     except (httpx.HTTPError, ValueError):
         result = {}
+    if refusal is not None:
+        record_gate_refusal(refusal)
+        raise comfyui_provider.ImageGateRefused(refusal)
     prompt_id = result.get("prompt_id")
     return JSONResponse(
         status_code=202,

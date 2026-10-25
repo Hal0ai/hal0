@@ -550,6 +550,10 @@ def _gate_admits(scope: dict[str, Any], method: str, path: str) -> bool:
 #: for ``GET /api/comfyui/status``: no decision here reads it.
 _gate_path_refused_at: float | None = None
 
+#: The gate builds its requests with ``urllib.request``, whose default User-Agent is
+#: ``Python-urllib/<major>.<minor>`` (a test sends a real gate request and reads it).
+_GATE_USER_AGENT_PREFIX = "Python-urllib/"
+
 
 def gate_path_refused_at() -> float | None:
     """When the auth layer last refused a version-less gate request, else ``None``.
@@ -565,10 +569,16 @@ def _note_unversioned_gate_refusal(scope: dict[str, Any], method: str, path: str
     """Set :data:`_gate_path_refused_at` for a refused request that looks like an old gate's.
 
     Called only after the middleware has decided to refuse. It reads the request and
-    changes nothing about the refusal. All three must hold: one of the gate's
+    changes nothing about the refusal. All four must hold: one of the gate's
     ``(method, path)`` pairs (HTTP only), from where the gate dials (:func:`_gate_peer`),
-    and none of the gate's version header. The two checks before the header are the ones
-    :func:`_gate_admits` has just run on this request.
+    none of the gate's version header, and the gate's default HTTP client as its
+    ``User-Agent``. The first two are the checks :func:`_gate_admits` has just run on
+    this request.
+
+    The User-Agent test is a heuristic, scoped to those loopback gate paths: it keeps a
+    browser or ``curl`` on the box (an operator, a dashboard session that expired) from
+    marking an engine as old. Anything on the box can send that header, which costs
+    nothing worse than ``/status`` saying "restart the engine" until the next gate call.
     """
     global _gate_path_refused_at
     if scope.get("type") != "http" or (method, path) not in _GATE_REQUESTS:
@@ -577,7 +587,10 @@ def _note_unversioned_gate_refusal(scope: dict[str, Any], method: str, path: str
         return
     from hal0.comfyui.gate_version import GATE_VERSION_HEADER
 
-    if GATE_VERSION_HEADER.lower() in _headers_from_scope(scope):
+    headers = _headers_from_scope(scope)
+    if GATE_VERSION_HEADER.lower() in headers:
+        return
+    if not headers.get("user-agent", "").startswith(_GATE_USER_AGENT_PREFIX):
         return
     _gate_path_refused_at = time.time()
 

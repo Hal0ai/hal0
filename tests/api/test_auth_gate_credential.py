@@ -47,6 +47,7 @@ def _run(
     scope_type: str = "http",
     peer: str = "127.0.0.1",
     version: str | None = None,
+    user_agent: str | None = None,
 ) -> tuple[int | None, dict[str, Any] | None]:
     """Drive the middleware with one request: (status sent, scope the app saw)."""
     seen: dict[str, Any] = {}
@@ -59,6 +60,8 @@ def _run(
     headers = [(b"authorization", f"Bearer {bearer}".encode())] if bearer is not None else []
     if version is not None:
         headers.append((b"x-hal0-gate-version", version.encode()))
+    if user_agent is not None:
+        headers.append((b"user-agent", user_agent.encode()))
     scope: dict[str, Any] = {
         "type": scope_type,
         "method": method,
@@ -318,6 +321,10 @@ def test_what_the_status_route_says_is_what_the_middleware_does_to_the_gate(
 # A refused request that looks like an old gate's leaves a marker (and changes nothing else)
 
 
+#: The User-Agent of the gate's requests: urllib's default.
+_GATE_UA = "Python-urllib/3.12"
+
+
 def _noted_between(before: float, after: float) -> bool:
     noted = auth_mod.gate_path_refused_at()
     return noted is not None and before <= noted <= after
@@ -335,7 +342,7 @@ def test_a_refused_gate_request_without_the_version_header_is_marked(
     gate_credential.ensure_token()
     before = time.time()
 
-    status, seen = _run(method, path, bearer=bearer)
+    status, seen = _run(method, path, bearer=bearer, user_agent=_GATE_UA)
 
     assert status == 401
     assert seen is None
@@ -349,7 +356,7 @@ def test_a_refused_gate_request_with_the_version_header_is_not_marked(
     """A gate that sends the header is current; its refusal is not an old gate's."""
     gate_credential.ensure_token()
 
-    status, _seen = _run(method, path, bearer="not-the-token", version="2")
+    status, _seen = _run(method, path, bearer="not-the-token", version="2", user_agent=_GATE_UA)
 
     assert status == 401
     assert auth_mod.gate_path_refused_at() is None
@@ -360,7 +367,7 @@ def test_an_admitted_gate_request_is_not_marked(method: str, path: str) -> None:
     """An old gate that does hold the token is let in: nothing was refused."""
     token = gate_credential.ensure_token()
 
-    assert _run(method, path, bearer=token)[0] == 200
+    assert _run(method, path, bearer=token, user_agent=_GATE_UA)[0] == 200
     assert auth_mod.gate_path_refused_at() is None
 
 
@@ -371,14 +378,14 @@ def test_a_refusal_for_another_machine_is_not_marked(
     """Only a request from where the gate dials (the box itself) can be the gate's."""
     monkeypatch.setenv("HAL0_BIND_HOST", bind_host)
 
-    assert _run("GET", "/api/comfyui/arbiter", peer="192.0.2.99")[0] == 401
-    assert _run("GET", "/api/comfyui/arbiter", peer="testclient")[0] == 401
+    assert _run("GET", "/api/comfyui/arbiter", peer="192.0.2.99", user_agent=_GATE_UA)[0] == 401
+    assert _run("GET", "/api/comfyui/arbiter", peer="testclient", user_agent=_GATE_UA)[0] == 401
     assert auth_mod.gate_path_refused_at() is None
 
 
 @pytest.mark.parametrize("peer", ["127.0.0.1", "::1"])
 def test_a_refusal_for_loopback_is_marked(peer: str) -> None:
-    assert _run("GET", "/api/comfyui/arbiter", peer=peer)[0] == 401
+    assert _run("GET", "/api/comfyui/arbiter", peer=peer, user_agent=_GATE_UA)[0] == 401
     assert auth_mod.gate_path_refused_at() is not None
 
 
@@ -387,7 +394,7 @@ def test_a_refusal_for_the_bind_address_is_marked(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setenv("HAL0_REQUIRE_AUTH", "0")
     monkeypatch.setenv("HAL0_BIND_HOST", "192.0.2.10")
 
-    assert _run("GET", "/api/comfyui/arbiter", peer="192.0.2.10")[0] == 401
+    assert _run("GET", "/api/comfyui/arbiter", peer="192.0.2.10", user_agent=_GATE_UA)[0] == 401
     assert auth_mod.gate_path_refused_at() is not None
 
 
@@ -407,14 +414,14 @@ def test_a_refusal_for_the_bind_address_is_marked(monkeypatch: pytest.MonkeyPatc
     ],
 )
 def test_a_refusal_of_anything_but_the_gates_requests_is_not_marked(method: str, path: str) -> None:
-    status, _seen = _run(method, path)
+    status, _seen = _run(method, path, user_agent=_GATE_UA)
 
     assert status in (401, 403)
     assert auth_mod.gate_path_refused_at() is None
 
 
 def test_a_refused_websocket_is_not_marked() -> None:
-    status, _seen = _run("GET", "/api/comfyui/arbiter", scope_type="websocket")
+    status, _seen = _run("GET", "/api/comfyui/arbiter", scope_type="websocket", user_agent=_GATE_UA)
 
     assert status == 4403
     assert auth_mod.gate_path_refused_at() is None
@@ -424,5 +431,74 @@ def test_without_enforcement_nothing_is_refused_or_marked(monkeypatch: pytest.Mo
     monkeypatch.setenv("HAL0_REQUIRE_AUTH", "0")
     monkeypatch.delenv("HAL0_ADMIN_KEY", raising=False)
 
-    assert _run("GET", "/api/comfyui/arbiter")[0] == 200
+    assert _run("GET", "/api/comfyui/arbiter", user_agent=_GATE_UA)[0] == 200
     assert auth_mod.gate_path_refused_at() is None
+
+
+@pytest.mark.parametrize(
+    "user_agent",
+    [
+        "curl/8.5.0",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/130.0.0.0 Safari/537.36",
+        "python-requests/2.32.3",
+        "python-urllib3/2.2.3",
+        "Python-urllib3/2.2.3",
+        "Python-urllib",
+        "",
+        None,
+    ],
+)
+def test_a_refusal_for_a_client_that_is_not_the_gates_is_not_marked(user_agent: str | None) -> None:
+    """Heuristic: the gate's requests come from urllib. A browser or curl on the box
+    (an operator, a dashboard session that expired) does not mark the engine as old."""
+    status, _seen = _run("GET", "/api/comfyui/arbiter", user_agent=user_agent)
+
+    assert status == 401
+    assert auth_mod.gate_path_refused_at() is None
+
+
+@pytest.mark.parametrize(
+    "user_agent", ["Python-urllib/3.12", "Python-urllib/3.13", "Python-urllib/2.7"]
+)
+def test_a_refusal_for_urllibs_default_client_is_marked(user_agent: str) -> None:
+    assert _run("GET", "/api/comfyui/arbiter", user_agent=user_agent)[0] == 401
+    assert auth_mod.gate_path_refused_at() is not None
+
+
+def test_the_gate_really_sends_the_user_agent_the_auth_layer_looks_for() -> None:
+    """The heuristic rests on one fact: a request built by the gate's own opener, which
+    adds no User-Agent of its own, goes out as ``Python-urllib/<major>.<minor>``."""
+    import http.server
+    import threading
+
+    from tests.fixtures.comfyui_gate import load_gate_asset
+
+    seen: list[str] = []
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            seen.append(self.headers.get("User-Agent", ""))
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *_args: Any) -> None:
+            return None
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        gate = load_gate_asset()
+        url = f"http://127.0.0.1:{server.server_address[1]}/api/comfyui/arbiter"
+        with gate._urlopen(gate._hal0_request(url), timeout=2.0):
+            pass
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    assert len(seen) == 1
+    assert seen[0].startswith(auth_mod._GATE_USER_AGENT_PREFIX)

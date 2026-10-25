@@ -1103,6 +1103,8 @@ _REFUSED_401 = (
 _REFUSED_403 = (
     b'{"error": {"code": "auth.forbidden", "message": "insufficient scope", "details": {}}}'
 )
+# The gate builds its requests with urllib; the auth layer reads its default User-Agent.
+_GATE_UA = {"User-Agent": "Python-urllib/3.12"}
 
 
 def test_status_gate_stale_when_auth_refused_an_old_gate(
@@ -1115,7 +1117,7 @@ def test_status_gate_stale_when_auth_refused_an_old_gate(
     token = gate_credential.ensure_token()
     assert _status(box_client, _ADMIN)["gate"] == {"state": "unknown", "version_seen": None}
 
-    refused = box_client.get("/api/comfyui/arbiter")
+    refused = box_client.get("/api/comfyui/arbiter", headers=_GATE_UA)
 
     # The refusal is the one the middleware always gave: status, headers and bytes.
     assert refused.status_code == 401
@@ -1125,10 +1127,34 @@ def test_status_gate_stale_when_auth_refused_an_old_gate(
 
     # The restarted engine's gate calls with the header (and the token): current again.
     ok = box_client.get(
-        "/api/comfyui/arbiter", headers={"Authorization": f"Bearer {token}", _VERSION: "2"}
+        "/api/comfyui/arbiter",
+        headers={**_GATE_UA, "Authorization": f"Bearer {token}", _VERSION: "2"},
     )
     assert ok.status_code == 200
     assert _status(box_client, _ADMIN)["gate"] == {"state": "current", "version_seen": "2"}
+
+
+@pytest.mark.parametrize(
+    "user_agent",
+    [
+        "curl/8.5.0",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/130.0.0.0 Safari/537.36",
+    ],
+)
+def test_a_refused_curl_or_browser_on_the_box_is_not_an_old_gate(
+    box_client: TestClient, auth_enforced: None, user_agent: str
+):
+    """An operator's curl, or a dashboard session that expired, hits the same gate paths."""
+    from hal0.comfyui import gate_credential
+
+    gate_credential.ensure_token()
+
+    refused = box_client.get("/api/comfyui/arbiter", headers={"User-Agent": user_agent})
+
+    assert refused.status_code == 401
+    assert refused.content == _REFUSED_401  # the refusal is the same either way
+    assert _status(box_client, _ADMIN)["gate"] == {"state": "unknown", "version_seen": None}
 
 
 def test_status_gate_stale_for_an_old_gate_refused_with_403(
@@ -1141,7 +1167,8 @@ def test_status_gate_stale_for_an_old_gate_refused_with_403(
     monkeypatch.setenv("HAL0_CLIENT_KEY", "client-key-for-tests")
 
     refused = box_client.post(
-        "/api/comfyui/prompt-handoff", headers={"Authorization": "Bearer client-key-for-tests"}
+        "/api/comfyui/prompt-handoff",
+        headers={**_GATE_UA, "Authorization": "Bearer client-key-for-tests"},
     )
 
     assert refused.status_code == 403
@@ -1173,7 +1200,7 @@ def test_no_credential_outranks_an_old_gate_that_auth_refused(
     box_client: TestClient, auth_enforced: None
 ):
     """No token on disk: the first thing to fix is the credential."""
-    assert box_client.get("/api/comfyui/arbiter").status_code == 401
+    assert box_client.get("/api/comfyui/arbiter", headers=_GATE_UA).status_code == 401
 
     assert _status(box_client, _ADMIN)["gate"]["state"] == "no_credential"
 
@@ -1186,7 +1213,7 @@ def test_a_refused_request_from_another_machine_is_not_an_old_gate(
 
     gate_credential.ensure_token()
 
-    assert client.get("/api/comfyui/arbiter").status_code == 401
+    assert client.get("/api/comfyui/arbiter", headers=_GATE_UA).status_code == 401
 
     assert _status(client, _ADMIN)["gate"] == {"state": "unknown", "version_seen": None}
 
@@ -1198,8 +1225,9 @@ def test_a_refused_request_that_is_not_the_gates_is_not_an_old_gate(
 
     gate_credential.ensure_token()
 
-    assert box_client.get("/api/comfyui/files").status_code == 401
-    assert box_client.post("/api/comfyui/pin", json={"pinned": False}).status_code == 401
+    assert box_client.get("/api/comfyui/files", headers=_GATE_UA).status_code == 401
+    pin = box_client.post("/api/comfyui/pin", json={"pinned": False}, headers=_GATE_UA)
+    assert pin.status_code == 401
 
     assert _status(box_client, _ADMIN)["gate"]["state"] == "unknown"
 
@@ -1213,7 +1241,8 @@ def test_a_refused_gate_that_sends_the_header_is_not_an_old_gate(
     gate_credential.ensure_token()
 
     r = box_client.get(
-        "/api/comfyui/arbiter", headers={"Authorization": "Bearer nope", _VERSION: "2"}
+        "/api/comfyui/arbiter",
+        headers={**_GATE_UA, "Authorization": "Bearer nope", _VERSION: "2"},
     )
 
     assert r.status_code == 401
@@ -1260,10 +1289,11 @@ def _launch_with_prompt_answer(
         return client.post("/api/comfyui/workflows/test_wf/launch")
 
 
-def test_workflow_launch_records_a_gate_refusal(
+def test_workflow_launch_refused_by_the_gate_is_a_503_and_is_recorded(
     client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """The gate answers /prompt with a 503 in its own shape when hal0 did not hand it the GPU."""
+    """The gate answers /prompt with a 503 in its own shape when hal0 did not hand it the GPU.
+    The launch says so, as /v1 does, instead of answering 202 "queued"."""
     from tests.fixtures.comfyui_gate import refused_prompt_body
 
     reason = "hal0 kept the GPU in inference mode after 3 switch request(s)"
@@ -1272,9 +1302,10 @@ def test_workflow_launch_records_a_gate_refusal(
         client, tmp_path, monkeypatch, status=503, body=refused_prompt_body(reason)
     )
 
-    # The answer is as it was for any /prompt failure: accepted, with no prompt id.
-    assert r.status_code == 202
-    assert r.json() == {"status": "queued", "prompt_id": None}
+    assert r.status_code == 503
+    error = r.json()["error"]
+    assert error["code"] == "image.gate_refused"
+    assert error["message"] == reason
     assert _status(client)["gate_refusal"]["reason"] == reason
 
 
