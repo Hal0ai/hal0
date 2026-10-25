@@ -479,7 +479,7 @@ class GpuArbiter:
 
         Reads the group cache, in config order. The switch calls it right after
         refreshing the cache from ``iter_configs()``; :meth:`status` calls it
-        without I/O, only once the cache has been filled from the slot configs
+        without awaiting, only once the cache has been filled from the slot configs
         (``_groups_known``: a lookup by the dispatch guard fills in single
         slots, not the set), so it answers as the last refresh left it.
         """
@@ -555,7 +555,8 @@ class GpuArbiter:
                 )
         restored: list[str] = []
         failed: list[str] = []
-        self._phase = "reloading"  # cleared by ensure_img, whose cold start called us
+        # Cleared by ensure_img's finally: this rollback runs inside its cold start.
+        self._phase = "reloading"
         for slot in llm_slots:
             try:
                 await self._manager.load(slot, None)
@@ -1326,18 +1327,23 @@ class GpuArbiter:
 
         ``switching`` is true while a switch or a restore holds the lock;
         ``image_jobs`` counts the open ``/v1`` image requests. The rest is for
-        the dashboard's GPU status line, all from memory, no I/O:
+        the dashboard's GPU status line. It awaits nothing and does no network
+        or config I/O; the only file access is a stat per never-started slot,
+        when ``is_ready_for_dispatch`` finds no state record for it:
 
           - ``phase``: what the GPU is doing. A switch or restore in progress
             reports its step (``draining``, ``unloading``, ``starting_engine``,
             ``reloading``). In image mode with none running: ``handoff`` while
             the editor hand-off lasts, else ``rendering`` while a ``/v1``
             image request is open, else ``grace`` once the quiet clock runs.
-            ``None`` otherwise: in LLM mode, and in image mode after an api
+            ``None`` otherwise: in LLM mode; in image mode after an api
             restart until the restore loop's first tick starts the quiet
-            clock. A render in ComfyUI's own queue (the editor's) is not
-            visible here: it reads as ``grace`` with ``restore_at`` slipping
-            forward each time the restore loop finds the queue busy.
+            clock; and in a pinned image mode with nothing rendering, which no
+            automatic restore will end, so it has no grace (``pinned`` is the
+            field that says why). A render in ComfyUI's own queue (the
+            editor's) is not visible here: it reads as ``grace`` with
+            ``restore_at`` slipping forward each time the restore loop finds
+            the queue busy.
           - ``restore_at`` and ``handoff_until``: epoch seconds, set only
             while ``phase`` is ``grace`` / ``handoff`` respectively.
           - ``drain_in_flight``: requests still in flight on the slots being
@@ -1388,7 +1394,10 @@ class GpuArbiter:
                 phase = "handoff"
             elif self._image_jobs > 0:
                 phase = "rendering"
-            elif self._quiet_since is not None:
+            elif self._quiet_since is not None and not st["pinned"]:
+                # A pin holds image mode against every automatic restore, so a
+                # pinned, idle image mode has no grace and no restore_at: it
+                # reads phase None beside pinned=true.
                 phase = "grace"
 
         starts = list(self._demand_wait_starts.values())

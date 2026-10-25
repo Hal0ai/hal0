@@ -1299,7 +1299,8 @@ async def test_phase_starting_engine_during_the_img_cold_start(
 async def test_phase_handoff_then_grace_with_restore_at(
     fake_mgr: FakeManager, state_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(arbiter_mod, "_GATE_HANDOFF_S", 0.3)
+    # Long enough that a loaded CI runner still reads the status inside it.
+    monkeypatch.setattr(arbiter_mod, "_GATE_HANDOFF_S", 1.0)
     arb = GpuArbiter(fake_mgr, state_path=state_path)
     started = time.time()
     await arb.ensure_img()
@@ -1308,16 +1309,47 @@ async def test_phase_handoff_then_grace_with_restore_at(
     st = arb.status()
     assert st["phase"] == "handoff"
     assert st["restore_at"] is None
-    # Epoch seconds: the hand-off opens when the switch ends and lasts 0.3 s.
-    assert started + 0.3 - 0.05 <= st["handoff_until"] <= ended + 0.3 + 0.05
+    # Epoch seconds: the hand-off opens when the switch ends and lasts 1 s. The
+    # band is +-1 s around that, so scheduler jitter cannot fail the assertion.
+    assert started + 1.0 - 1.0 <= st["handoff_until"] <= ended + 1.0 + 1.0
     async with arb.image_job():  # the hand-off outranks a render
         assert arb.status()["phase"] == "handoff"
 
-    await asyncio.sleep(0.4)
+    await asyncio.sleep(max(0.0, st["handoff_until"] - time.time()) + 0.1)
     st = arb.status()
     assert st["phase"] == "grace"
     assert st["handoff_until"] is None
-    # The grace ends restore_grace_s (10 s) after the last render ended.
+    # The grace ends restore_grace_s (10 s) after the quiet clock started, when
+    # the switch ended; the hand-off ran inside it (+-1 s band, as above).
+    assert started + 10.0 - 1.0 <= st["restore_at"] <= ended + 10.0 + 1.0
+
+
+async def test_phase_pinned_image_mode_is_not_in_grace(
+    fake_mgr: FakeManager, state_path: Path
+) -> None:
+    """A pin holds image mode against every automatic restore, so no restore is
+    coming: the status says "pinned" and carries no deadline, rather than a
+    restore_at that slips into the past and stays there."""
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    await arb.ensure_img(pin=True)  # the switch ends with the quiet clock running
+
+    st = arb.status()
+    assert st["pinned"] is True
+    assert st["phase"] is None
+    assert st["restore_at"] is None
+    await arb._restore_tick()  # the loop leaves a pinned mode alone, however long
+    arb._quiet_since -= 3600
+    st = arb.status()
+    assert st["phase"] is None and st["restore_at"] is None
+
+    async with arb.image_job():  # a render still reads as a render
+        assert arb.status()["phase"] == "rendering"
+    assert arb.status()["phase"] is None  # and is not followed by a grace
+
+    arb.set_pin(False)  # unpinned: the restore is coming one grace from now
+    st = arb.status()
+    assert st["pinned"] is False
+    assert st["phase"] == "grace"
     assert time.time() + 9.0 < st["restore_at"] <= time.time() + 10.0
 
 
