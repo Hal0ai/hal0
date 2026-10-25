@@ -8,6 +8,7 @@ value systemd reads from the file (``HAL0_OWUI_BIND_HOST``) to the first line.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,23 @@ def test_a_line_break_or_nul_is_refused_and_nothing_is_written(tmp_path: Path, b
     target.write_text("KEEP=1\n", encoding="utf-8")
     with pytest.raises(ValueError, match="'A' cannot contain a line break or NUL"):
         write_env_atomic(target, {"A": bad})
+    assert target.read_text(encoding="utf-8") == "KEEP=1\n"
+    assert list(tmp_path.iterdir()) == [target]  # no orphaned tmpfile
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["", "A=B", "=A", "A\nB", "A\rB", "A\0B", "X\rHAL0_OWUI_BIND_HOST", "HAL0_OWUI_BIND_HOST\r"],
+)
+def test_a_key_that_cannot_be_one_name_is_refused_and_nothing_is_written(
+    tmp_path: Path, bad: str
+) -> None:
+    """A CR in a key reads to podman as part of the name but to systemd as a line
+    break, so what follows it becomes an assignment of its own."""
+    target = tmp_path / "x.env"
+    target.write_text("KEEP=1\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=re.escape(f"env key {bad!r} cannot be empty or contain")):
+        write_env_atomic(target, {bad: "v", "ZZZ": "1"})
     assert target.read_text(encoding="utf-8") == "KEEP=1\n"
     assert list(tmp_path.iterdir()) == [target]  # no orphaned tmpfile
 

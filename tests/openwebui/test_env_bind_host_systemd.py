@@ -321,3 +321,39 @@ def test_the_writer_and_the_primitive_name_the_same_bind_host_key() -> None:
     """env_writer cannot import the primitive's package on its cold path, so it
     carries its own copy of the name; the primitive orders and validates by it."""
     assert env_primitive.BIND_HOST_KEY == BIND_HOST_KEY == "HAL0_OWUI_BIND_HOST"
+
+
+# ── a CR hands systemd a second, later bind-host assignment ──────────────────
+
+#: An operator file whose second line podman reads as one variable, named
+#: ``X\rHAL0_OWUI_BIND_HOST``, but systemd reads as ``X`` (dropped) followed by a
+#: second ``HAL0_OWUI_BIND_HOST=0.0.0.0``. systemd keeps the later assignment.
+_SPLIT_BY_CR = [
+    pytest.param(
+        b"HAL0_OWUI_BIND_HOST=127.0.0.1\nX\rHAL0_OWUI_BIND_HOST=0.0.0.0\n",
+        id="cr-in-key",
+    ),
+    pytest.param(
+        b"HAL0_OWUI_BIND_HOST=127.0.0.1\nX=1\rHAL0_OWUI_BIND_HOST=0.0.0.0\n",
+        id="cr-in-value",
+    ),
+]
+
+
+@pytest.mark.parametrize("raw", _SPLIT_BY_CR)
+def test_the_cr_hazard_is_real_systemd_keeps_the_later_assignment(raw: bytes) -> None:
+    """Control: without a guard, the file reads loopback to podman and to a
+    reader of the first line, but systemd publishes on every interface."""
+    text = raw.decode("utf-8")
+    assert parse_podman_env(text)[BIND_HOST_KEY] == "127.0.0.1"
+    assert parse_systemd_env(text)[BIND_HOST_KEY] == "0.0.0.0"
+
+
+@pytest.mark.parametrize("raw", _SPLIT_BY_CR)
+def test_a_preserved_line_that_systemd_would_split_is_refused(tmp_path: Path, raw: bytes) -> None:
+    target = tmp_path / "openwebui.env"
+    target.write_bytes(raw)
+    with pytest.raises(ValueError, match=r"line break|cannot be empty or contain"):
+        write_openwebui_env(target, preserve_existing=True)
+    assert target.read_bytes() == raw  # untouched
+    assert list(tmp_path.iterdir()) == [target]  # no tmpfile left behind
