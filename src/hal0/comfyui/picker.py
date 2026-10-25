@@ -45,7 +45,7 @@ def image_pool_gb(hw: HardwareInfo) -> float | None:
     pool = pool_gb(hw)
     if not pool:
         return None
-    limits = [mb for mb in (hw.ram_mb, hw.cgroup_max_mb) if mb and mb > 0]
+    limits = [mb for mb in (hw.ram_mb, hw.cgroup_max_mb) if mb]
     return min(pool, min(limits) / 1024) if limits else pool
 
 
