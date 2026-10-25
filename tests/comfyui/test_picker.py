@@ -413,3 +413,40 @@ def test_catalog_rows_come_before_user_checkpoints() -> None:
     ids = [r["id"] for r in picker.image_picker_rows(["gpu-vulkan"])]
 
     assert ids == [*_renderable_catalog_ids(), "ckpt/mine"]
+
+
+@pytest.mark.parametrize(
+    "hardware",
+    [
+        HardwareInfo(unified_memory_mb=128 * 1024),
+        HardwareInfo(unified_memory_mb=128 * 1024, ram_mb=48 * 1024),
+        HardwareInfo(unified_memory_mb=128 * 1024, ram_mb=100 * 1024, cgroup_max_mb=64 * 1024),
+        HardwareInfo(unified_memory_mb=64 * 1024, ram_mb=0, cgroup_max_mb=0),
+        HardwareInfo(ram_mb=8 * 1024),
+        HardwareInfo(unified_memory_mb=108032),
+        HardwareInfo(),
+    ],
+    ids=["gpu", "ram", "cgroup", "unknown-limits", "no-unified", "fraction", "unprobed"],
+)
+def test_recommendation_cites_the_pool_the_pick_used(hardware: HardwareInfo) -> None:
+    rec = picker.recommendation_for(hardware)
+    pool = picker.image_pool_gb(hardware)
+
+    if pool is None:
+        assert rec is None
+        return
+    assert rec is not None
+    assert rec["id"] == picker.recommended_for(hardware)
+    assert rec["pool_gb"] == round(pool, 1)
+    assert rec["limited_by"] in {"ram", "gpu"}
+
+
+def test_recommendation_is_none_for_an_unreadable_hardware_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unreadable() -> HardwareInfo:
+        raise RuntimeError("hardware.json is unreadable")
+
+    monkeypatch.setattr(picker, "load_hardware_info", unreadable)
+
+    assert picker.recommendation() is None

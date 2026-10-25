@@ -83,7 +83,7 @@ from hal0.comfyui.gate_version import (
     GATE_VERSION,
     GATE_VERSION_HEADER,
 )
-from hal0.comfyui.picker import recommended_id
+from hal0.comfyui.picker import recommendation, recommended_id
 from hal0.hardware import gpu_view
 from hal0.hardware.memory_budget import MemoryBudget
 from hal0.http_client import async_client
@@ -1140,8 +1140,13 @@ async def comfyui_models(request: Request) -> dict[str, Any]:
     """The image-model catalog with each model's install state and latest install job.
 
     Returns ``{"models": [...], "engine": {"available": bool, "reason": str | None},
-    "store": {"free_gb": float | None, "path": str}}``, the models in catalog order. Exactly
-    one row is ``recommended``: the starter pick for this box's memory pool. ``engine`` says
+    "store": {"free_gb": float | None, "path": str},
+    "recommendation": {"id", "pool_gb", "limited_by"} | None}``, the models in catalog order.
+    Exactly one row is ``recommended``: the starter pick for this box's memory pool.
+    ``recommendation`` says what the pick was chosen from: ``pool_gb`` is the figure
+    ``picker.image_pool_gb`` used and ``limited_by`` is ``"ram"`` when the RAM limit set it
+    and ``"gpu"`` when the GPU pool did; it is ``null`` when the pool is unknown (a box that
+    was never probed). ``engine`` says
     whether this host can run the ComfyUI image at all; the catalog is listed either way, so
     a box without the ROCm lane can still see it. ``store`` is the models tree and the free
     space (GiB) of the filesystem under it; ``free_gb`` is ``null`` when that cannot be
@@ -1158,7 +1163,10 @@ async def comfyui_models(request: Request) -> dict[str, Any]:
     cannot be read by the hal0 user.
     """
     jobs = _install_jobs(request.app)
-    recommended = recommended_id()
+    # One read of the hardware file names both the pick and the figure it came from, so the
+    # row marked `recommended` and `recommendation.id` cannot differ.
+    pick = recommendation()
+    recommended = pick["id"] if pick else recommended_id()
     root = comfyui_paths.models_root()
     budget = await _collect_budget(request.app)
     with comfyui_install.readable_tree():
@@ -1169,7 +1177,12 @@ async def comfyui_models(request: Request) -> dict[str, Any]:
             for model in CATALOG.values()
         ]
         store = _store_info(root)
-    return {"models": models, "engine": _engine_availability(), "store": store}
+    return {
+        "models": models,
+        "engine": _engine_availability(),
+        "store": store,
+        "recommendation": pick,
+    }
 
 
 # The wire form of a size: two to four ASCII digits a side, lower-case ``x``. Matched whole

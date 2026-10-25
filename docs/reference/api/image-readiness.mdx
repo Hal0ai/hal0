@@ -19,7 +19,7 @@ Lightning, where the catalog's own decimal (10^9 bytes) total reads 51.4.
 
 ## Fit verdicts on the model list
 
-`GET /api/comfyui/models` gains a `fit` on every row and a top-level `store`. The
+`GET /api/comfyui/models` gains a `fit` on every row and a top-level `store` and `recommendation`. The
 verdicts are judged against the memory budget collected once per request, so they and
 the dashboard's memory screens read the same free figures.
 
@@ -40,7 +40,8 @@ the dashboard's memory screens read the same free figures.
     }
   ],
   "engine": {"available": true, "reason": null},
-  "store": {"free_gb": 812.4, "path": "<model store>/comfyui/models"}
+  "store": {"free_gb": 812.4, "path": "<model store>/comfyui/models"},
+  "recommendation": {"id": "sdxl-lightning", "pool_gb": 48.0, "limited_by": "ram"}
 }
 ```
 
@@ -57,6 +58,7 @@ weight total.
 | `fit.need.gpu_estimated`, `fit.need.ram_estimated` | `true` when the figure is an estimate. |
 | `fit.render_free_gb` | The GPU figure the need was judged against: the memory budget's `render_free_gb`, the pool a render can use once image mode has unloaded this box's GPU slots. It does not subtract the image engine's own memory, because `fit.need.gpu_gb` is measured above an idle engine, so a back-to-back render is not refused for the weights the engine still holds. |
 | `fit.ram_free_gb` | The RAM figure the need was judged against: the memory budget's `ram.free_gb`, free under this box's RAM limit, which inside a container is the container's limit. |
+| `recommendation` | `{"id", "pool_gb", "limited_by"}`, or `null` when the pool is unknown (a box that was never probed). The model marked `recommended` and the figure it was chosen from: `pool_gb` is the memory an image model can load into, the smaller of the GPU pool and this box's RAM limit, and `limited_by` is `"ram"` when the RAM limit (or, with no unified memory, system RAM) set it and `"gpu"` when the GPU pool did. |
 | `store.path` | The ComfyUI models folder: `<model store>/comfyui/models` unless `HAL0_COMFYUI_DATA_ROOT` moves it. |
 | `store.free_gb` | Free space on the filesystem under that folder (the nearest existing parent when the folder does not exist yet). `null` when it cannot be measured, never `0`. |
 
