@@ -16,10 +16,13 @@ every test in this package, so no fake app is needed here).
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
+from fastapi.testclient import TestClient
 
 from hal0.mcp import admin
 from hal0.mcp.approval_queue import ApprovalQueue
@@ -358,6 +361,160 @@ async def test_comfyui_file_delete_refuses_a_raw_slash_in_relpath(
 
     assert approved["result"]["error"]["code"] == "mcp.missing_arg"
     assert mock_transport["calls"] == []
+
+
+# The URL carries path args unquoted and the server percent-decodes them, so an approval card
+# showing ``%6Bine.safetensors`` would delete ``kine.safetensors``. The tool therefore accepts
+# only ``%2F`` / ``%2f`` as an escape and no URL delimiter, and says so before any approval.
+_UNSAFE_FILE_DELETE_ARGS: list[tuple[str, str, str]] = [
+    ("checkpoints", "%6Bine.safetensors", "escape"),
+    ("checkpoints", "%6bine.safetensors", "lowercase escape"),
+    ("checkpoints", "styles%2Fa%6B.safetensors", "escape beside a valid %2F"),
+    ("checkpoints", "%2e%2e%2fx", "encoded dot dot"),
+    ("checkpoints", "a%252Fb.safetensors", "double encoding"),
+    ("checkpoints", "100%.safetensors", "bare percent"),
+    ("checkpoints", "a%zz.safetensors", "percent without hex digits"),
+    ("checkpoints", "a%2.safetensors", "truncated escape"),
+    ("checkpoints", "junk.safetensors?x", "query delimiter"),
+    ("checkpoints", "junk.safetensors#x", "fragment delimiter"),
+    ("checkpoints", "?x/junk.safetensors", "leading query delimiter"),
+    ("chec%6Bpoints", "mine.safetensors", "escape in subdir"),
+    ("checkpoints?x", "mine.safetensors", "delimiter in subdir"),
+    ("checkpoints#x", "mine.safetensors", "fragment in subdir"),
+    ("checkpoints", 5, "non-string relpath"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("subdir", "relpath", "why"),
+    _UNSAFE_FILE_DELETE_ARGS,
+    ids=[c[2] for c in _UNSAFE_FILE_DELETE_ARGS],
+)
+async def test_comfyui_file_delete_refuses_args_the_url_would_rewrite_before_any_approval(
+    queue: ApprovalQueue,
+    mock_transport: dict[str, Any],
+    subdir: str,
+    relpath: str,
+    why: str,
+) -> None:
+    result = await admin.dispatch(
+        tool="comfyui_file_delete",
+        args={"subdir": subdir, "relpath": relpath},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+
+    assert result["status"] == "error"
+    assert result["error"]["code"] == "mcp.invalid_arg"
+    assert queue.list_all() == []  # the operator is never asked to approve it
+    assert mock_transport["calls"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("subdir", "relpath", "why"),
+    _UNSAFE_FILE_DELETE_ARGS,
+    ids=[c[2] for c in _UNSAFE_FILE_DELETE_ARGS],
+)
+async def test_comfyui_file_delete_executor_refuses_the_same_args(
+    mock_transport: dict[str, Any], subdir: str, relpath: str, why: str
+) -> None:
+    """The check also guards the point the REST call is made, whoever calls it."""
+    result = await admin._execute_tool(
+        tool="comfyui_file_delete",
+        args={"subdir": subdir, "relpath": relpath},
+        bearer="t",
+        base_url="http://t",
+        memory_dispatcher=None,
+    )
+
+    assert result["status"] == "error"
+    assert result["error"]["code"] == "mcp.invalid_arg"
+    assert mock_transport["calls"] == []
+
+
+@pytest.mark.asyncio
+async def test_approving_an_escaped_relpath_never_reaches_rest(
+    queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    """The review's case: ``%6Bine.safetensors`` approved must not delete ``kine.safetensors``."""
+    queued = await queue.enqueue(
+        tool="comfyui_file_delete",
+        args={"subdir": "checkpoints", "relpath": "%6Bine.safetensors"},
+        client_id="pi",
+        executor=lambda approved: admin._execute_tool(
+            tool="comfyui_file_delete",
+            args=approved,
+            bearer="t",
+            base_url="http://t",
+            memory_dispatcher=None,
+        ),
+    )
+
+    approved = await queue.approve(queued)
+
+    assert approved["result"]["error"]["code"] == "mcp.invalid_arg"
+    assert mock_transport["calls"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("slash", ["%2F", "%2f"])
+async def test_comfyui_file_delete_accepts_an_encoded_slash_in_either_case(
+    queue: ApprovalQueue, mock_transport: dict[str, Any], slash: str
+) -> None:
+    result = await admin.dispatch(
+        tool="comfyui_file_delete",
+        args={"subdir": "loras", "relpath": f"styles{slash}a.safetensors"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert result["status"] == "pending_approval"
+
+    await queue.approve(result["approval_id"])
+
+    method, url, _, _ = mock_transport["calls"][-1]
+    assert (method, url) == (
+        "DELETE",
+        f"http://t/api/comfyui/files/loras/styles{slash}a.safetensors",
+    )
+
+
+def test_comfyui_file_delete_encoded_slash_reaches_the_route_as_a_slash(
+    client: TestClient,
+    mock_transport: dict[str, Any],
+    queue: ApprovalQueue,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What the tool sends is what the route deletes: ``styles%2Fa`` is ``styles/a``."""
+    monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(tmp_path / "comfyui-data"))
+    nested = tmp_path / "comfyui-data" / "models" / "loras" / "styles" / "a.safetensors"
+    nested.parent.mkdir(parents=True)
+    nested.write_bytes(b"x")
+
+    async def approve() -> str:
+        result = await admin.dispatch(
+            tool="comfyui_file_delete",
+            args={"subdir": "loras", "relpath": "styles%2Fa.safetensors"},
+            client_id="pi",
+            bearer="t",
+            base_url="http://t",
+            approval_queue=queue,
+        )
+        await queue.approve(result["approval_id"])
+        return str(mock_transport["calls"][-1][1])
+
+    url = asyncio.run(approve())
+
+    resp = client.delete(url.removeprefix("http://t"))
+    assert resp.status_code == 200
+    assert resp.json() == {"deleted": "loras/styles/a.safetensors"}
+    assert not nested.exists()
 
 
 def test_comfyui_file_delete_is_wired_like_the_model_remove_it_sits_beside() -> None:

@@ -226,7 +226,7 @@ The tune lives on the profile. `slot_create` and `slot_edit` take a `profile` na
 | `comfyui_pin` | `POST /api/comfyui/pin` |
 | `comfyui_model_install` | `POST /api/comfyui/models/{model_id}/install` |
 | `comfyui_model_remove` | `DELETE /api/comfyui/models/{model_id}` — deletes the model's weight files and workflow; files other installed models load stay unless `include_shared=true`, which deletes them too and reports those models as affected |
-| `comfyui_file_delete` | `DELETE /api/comfyui/files/{subdir}/{relpath}` — deletes one weight file no catalog model loads; write each `/` of a nested `relpath` as `%2F`; refuses catalog-owned files, symlinks and hidden or `..` path parts |
+| `comfyui_file_delete` | `DELETE /api/comfyui/files/{subdir}/{relpath}` — deletes one weight file no catalog model loads; write each `/` of a nested `relpath` as `%2F` (no other `%` escape, `?` or `#` is accepted); refuses catalog-owned files, symlinks and hidden or `..` path parts |
 | `comfyui_render_cancel` | `POST /api/comfyui/render/cancel` |
 | `comfyui_restart` | `POST /api/comfyui/restart` |
 | `comfyui_workflow_launch` | `POST /api/comfyui/workflows/{name}/launch` |

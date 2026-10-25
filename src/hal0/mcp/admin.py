@@ -1835,6 +1835,53 @@ def _format_url(base_url: str, template: str, path_args: dict[str, str]) -> str:
     return base_url.rstrip("/") + template.format(**quoted)
 
 
+_ENCODED_SLASH = re.compile(r"%2f", re.IGNORECASE)
+
+
+def _unsafe_file_delete_arg(args: dict[str, Any]) -> str | None:
+    """Why ``comfyui_file_delete``'s args cannot go into its URL as they are, or ``None``.
+
+    :func:`_format_url` pastes path args in unquoted and the server percent-decodes them, so
+    the ``relpath`` an operator approves must be the file that is deleted. ``%6Bine`` would
+    delete ``kine``, and ``junk.safetensors?x`` or ``...#x`` would delete ``junk.safetensors``,
+    on an approval card that names neither. The tool's files are ones the operator added by
+    hand and cannot re-download, so it takes no escape but ``%2F`` / ``%2f`` (the one way to
+    name a ``/``, which :func:`_split_args` keeps out of a path arg), in ``relpath`` only, and
+    no ``?`` or ``#``. A missing arg is left for :func:`_split_args` to report.
+    """
+    for key in ("subdir", "relpath"):
+        if key not in args:
+            continue
+        value = args[key]
+        if not isinstance(value, str):
+            return f"{key} must be a string"
+        if "?" in value or "#" in value:
+            return f"{key} must not contain '?' or '#' (got {value!r})"
+        rest = _ENCODED_SLASH.sub("", value) if key == "relpath" else value
+        if "%" in rest:
+            allowed = "only %2F, for a '/'" if key == "relpath" else "no '%' escape"
+            return f"{key} takes {allowed}: any other '%' would change the file it names"
+    return None
+
+
+# Pre-approval argument checks, by tool: each returns why the args are refused, or ``None``.
+# Run by :func:`dispatch` before a call is queued for approval and again by
+# :func:`_execute_tool` before its REST call, so the operator is never asked to approve an
+# argument that will be refused.
+_ARG_CHECKS: dict[str, Callable[[dict[str, Any]], str | None]] = {
+    "comfyui_file_delete": _unsafe_file_delete_arg,
+}
+
+
+def _invalid_arg(tool: str, args: dict[str, Any]) -> dict[str, Any] | None:
+    """The ``mcp.invalid_arg`` error envelope for ``tool``'s refused ``args``, else ``None``."""
+    check = _ARG_CHECKS.get(tool)
+    reason = check(args) if check is not None else None
+    if reason is None:
+        return None
+    return {"status": "error", "error": {"code": "mcp.invalid_arg", "detail": reason}}
+
+
 #: HTTP methods ``_call_rest`` knows how to forward, mapped to the httpx
 #: kwarg that carries the payload (``params`` for query-string verbs,
 #: ``json`` for body verbs). ``_validate_catalog`` checks every
@@ -2243,6 +2290,11 @@ async def dispatch(
         )
         return refusal
 
+    refused = _invalid_arg(tool, args)
+    if refused is not None:  # before the queue: the operator is not asked to approve it
+        _audit(client_id=client_id, tool=tool, args=args, gated=gated, outcome="invalid_arg")
+        return refused
+
     if gated:
         # Build the bound executor that runs when the owner approves.
         async def _executor(approved_args: dict[str, Any]) -> dict[str, Any]:
@@ -2321,6 +2373,10 @@ async def _execute_tool(
                 "error": {"code": "mcp.memory_unconfigured", "tool": tool},
             }
         return {"status": "error", "error": {"code": "mcp.unmapped_tool", "tool": tool}}
+
+    refused = _invalid_arg(tool, args)
+    if refused is not None:
+        return refused
 
     method, template = _REST_MAP[tool]
     try:
@@ -3280,9 +3336,9 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "comfyui_file_delete": (
         "Delete one weight file under the ComfyUI models tree that no catalog model loads "
         "(gated). Args: subdir (path; a directory name from comfyui_files, e.g. checkpoints), "
-        "relpath (path; the row's relpath, with each '/' written %2F). Refused for a file a "
-        "catalog model owns (409), a symlink (400), a hidden or '..' path part (400) and a "
-        "missing file (404)."
+        "relpath (path; the row's relpath, with each '/' written %2F: no other %-escape, '?' or "
+        "'#' is accepted). Refused for a file a catalog model owns (409), a symlink (400), a "
+        "hidden or '..' path part (400) and a missing file (404)."
     ),
     "comfyui_job_cancel": (
         "Cancel an image model's in-flight install; files already downloaded stay. "
