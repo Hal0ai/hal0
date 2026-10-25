@@ -2,8 +2,9 @@
 //
 // Spec: docs/superpowers/specs/2026-05-28-memory-map-redesign-design.md
 //
-// All attribution math lives in useMemoryMapModel(); the MemoryMap
-// component is a pure renderer (added in Task 6). The same component
+// The model lives in memory-map-pure.ts (buildMemoryMapModel), a pure
+// function of the backend memory budget; useMemoryMapModel() below only feeds
+// it. The MemoryMap component is a pure renderer. The same component
 // drives the compact sidebar widget and the full-width hardware-page
 // section via the `variant` prop.
 
@@ -11,288 +12,37 @@ import { useSlots } from '@/api/hooks/useSlots'
 import { useHardware } from '@/api/hooks/useHardware'
 import { useStatsHardware } from '@/api/hooks/useStatsHardware'
 import { useProxmoxSettings } from '@/api/hooks/useProxmoxSettings'
-import { isSlotLive } from './slot-status.js'
-const SAFETY_MARGIN_GB = 2
-const MB_PER_GB = 1024
-
-// Categorical per-slot palette (CSS custom props defined in dashboard.css).
-// Each loaded model slot gets its OWN stable colour so co-resident models
-// are distinguishable in the bar + legend — device colour alone collapses
-// several GPU slots into a single hue.
-const SLOT_PALETTE = [
-  'var(--mem-slot-1)',
-  'var(--mem-slot-2)',
-  'var(--mem-slot-3)',
-  'var(--mem-slot-4)',
-  'var(--mem-slot-5)',
-  'var(--mem-slot-6)',
-  'var(--mem-slot-7)',
-  'var(--mem-slot-8)',
-]
-
-// Deterministic, render-stable colour for a slot: sort live slot names and
-// index by position into the palette. A given slot name always maps to the
-// same colour within a render set, and the swatch matches its bar segment.
-function assignSlotColors(slotNames) {
-  const sorted = [...slotNames].sort()
-  const map = new Map()
-  sorted.forEach((name, i) => {
-    map.set(name, SLOT_PALETTE[i % SLOT_PALETTE.length])
-  })
-  return map
-}
+import { buildMemoryMapModel } from './memory-map-pure'
 
 const round1 = (n) => Math.round(n * 10) / 10
 
-function mbToGb(mb) {
-  if (mb == null || Number.isNaN(mb)) return 0
-  return round1(mb / MB_PER_GB)
-}
-
-function deviceFor(slot) {
-  const d = (slot.device || '').toLowerCase()
-  if (d === 'npu') return 'npu'
-  if (d === 'cpu') return 'cpu'
-  if (d === 'gpu-vulkan' || d === 'vulkan') return 'vulkan'
-  if (d === 'gpu-rocm' || d === 'rocm' || d.startsWith('gpu')) return 'rocm'
-  return 'cpu'
-}
-
-// True iff at least one live slot carries the BE-METRICS `mem_mb`
-// contract field. When present we attribute REAL per-slot resident
-// model + KV memory; when wholly absent (backend not yet deployed) we
-// fall back to the legacy GTT-split / NPU-divide attribution so the map
-// keeps rendering instead of crashing.
-function hasMemMb(liveSlots) {
-  return liveSlots.some(
-    (s) => typeof s.mem_mb === 'number' && Number.isFinite(s.mem_mb),
-  )
-}
-
-// Preferred path: each slot gets its OWN reported resident memory
-// (model weights + KV cache). No equal-splitting, no host RAM folding —
-// just the real bytes the loaded model holds, per slot, as its own
-// colored segment.
-function attributeByMemMb({ liveSlots }) {
-  return liveSlots.map((s) => {
-    const device = deviceFor(s)
-    const mb = typeof s.mem_mb === 'number' && Number.isFinite(s.mem_mb) ? s.mem_mb : 0
-    return { slot: s, device, bytesGb: mbToGb(mb), approx: false }
-  })
-}
-
-// Legacy fallback (used ONLY when no slot reports mem_mb). Divides the
-// live GTT pool across GPU slots by a fake equal weight and splits NPU
-// model memory evenly. Marked `approx` because the per-slot figure is
-// estimated, not measured.
-function attributeFallback({ liveSlots, gttUsedGb, npuModelGb }) {
-  const npuLive = liveSlots.filter((s) => deviceFor(s) === 'npu')
-  const gpuLive = liveSlots.filter((s) => {
-    const d = deviceFor(s)
-    return d === 'rocm' || d === 'vulkan'
-  })
-
-  const gpuTotalWeight = gpuLive.reduce(
-    (acc, s) => acc + (s.metrics?.mem || 1),
-    0,
-  ) || gpuLive.length || 1
-
-  return liveSlots.map((s) => {
-    const device = deviceFor(s)
-    if (device === 'npu') {
-      const share = npuLive.length > 0 ? npuModelGb / npuLive.length : 0
-      return { slot: s, device, bytesGb: round1(share), approx: npuLive.length > 1 }
-    }
-    if (device === 'rocm' || device === 'vulkan') {
-      const weight = s.metrics?.mem || 1
-      const share = gpuTotalWeight > 0 ? gttUsedGb * (weight / gpuTotalWeight) : 0
-      return { slot: s, device, bytesGb: round1(share), approx: gpuLive.length > 1 }
-    }
-    // cpu
-    return { slot: s, device, bytesGb: round1(s.metrics?.mem || 0), approx: false }
-  })
-}
-
+// A thin hook over buildMemoryMapModel (memory-map-pure.ts). Every memory
+// figure — pool total, per-slot attribution, other guests, the RAM limit —
+// comes from the backend's `memory` block on /api/stats/hardware (ADR-0039);
+// the pure function reshapes it and the hook only feeds it.
 export function useMemoryMapModel() {
   const hw = useHardware()
   const stats = useStatsHardware()
   const slotsQ = useSlots()
   const pveSettings = useProxmoxSettings()
-  const slots = slotsQ.data || []
-
-  // Pool total = the real ceiling for GPU model loads. On UMA (Strix Halo)
-  // that is the GTT cap (ttm.pages_limit, ~80 GiB — live as
-  // stats.gpu_vram_total_mb), NOT the full unified RAM (128 GiB): models can't
-  // actually allocate past the GTT window, so headroom must be measured
-  // against it. Prefer the live GTT cap; fall back to the static unified/ram
-  // probe when the live value is unavailable (keeps non-UMA + test mocks sane).
   const rawHw = hw.data || {}
-  // #1797(3): the GTT/unified-memory pool is a HOST resource — /api/hardware
-  // sees the host's DRM node (LXC shares the kernel's /sys/class/drm) even
-  // when this container has no real GPU compute access, so an unqualified
-  // "unified" memoryKind on a CPU-only box reported the host's ~116GB GTT
-  // ceiling as this box's own pool. `computeCapable` (rocm-smi presence) and
-  // `vulkanCapable` (a render node under /dev/dri) are the two probe fields
-  // backed by an actual capability check — gate the GPU-pool framing on
-  // EITHER (a box can be Vulkan-only with no ROCm stack, per #1900) and fall
-  // back to plain system RAM only when NEITHER reports a real GPU.
-  const hasGpu = !!(rawHw.computeCapable || rawHw.vulkanCapable)
-  const ramTotalGb = rawHw.ram?.total ?? 0
-  const gttCapGb = hasGpu ? mbToGb(stats.data?.gpu_vram_total_mb || stats.data?.gtt_total_mb || 0) : 0
-  const unifiedFromProbe = hasGpu ? mbToGb(rawHw.unified_memory_mb || 0) : 0
-  const unifiedGb =
-    gttCapGb ||
-    unifiedFromProbe ||
-    ramTotalGb ||
-    mbToGb(stats.data?.ram_total_mb || 0)
-  const platformLabel = rawHw.platform_label || rawHw.platform || ''
-  const memoryKind = hasGpu && rawHw.memoryKind === 'unified' ? 'unified' : 'system'
-  // On UMA the pool ceiling is the GTT cap, not the whole unified RAM
-  // (see unifiedGb above). Don't render the raw 'unified' kind — it reads
-  // as "unified 80GB" and misleads. Label it as the GPU/GTT pool instead.
-  const poolLabel = memoryKind === 'unified' ? 'GPU pool (GTT)' : 'system'
 
-  const ramUsedGb = mbToGb(stats.data?.ram_used_mb || 0)
-  const gttUsedGb = hasGpu
-    ? mbToGb(stats.data?.gtt_used_mb ?? stats.data?.vram_used_mb ?? 0)
-    : 0
-  const npuModelGb = hasGpu ? mbToGb(stats.data?.npu_status?.model_mb || 0) : 0
-
-  // N1 (slot-status unifier): isSlotLive() handles both enriched (container)
-  // and container (container_status + container_health) runtimes. Replaces
-  // the old static LIVE_STATES set membership test.
-  const liveSlots = slots.filter((s) => isSlotLive(s))
-
-  // Prefer the BE-METRICS `mem_mb` contract (real per-slot resident
-  // model + KV memory). Fall back to the legacy GTT-split / NPU-divide
-  // attribution only when NO slot reports mem_mb, so the map never
-  // crashes against a pre-deploy backend.
-  const usingMemMb = hasMemMb(liveSlots)
-  const attributed = usingMemMb
-    ? attributeByMemMb({ liveSlots })
-    : attributeFallback({ liveSlots, gttUsedGb, npuModelGb })
-
-  // Model memory = sum of each loaded model's resident bytes. This is the
-  // figure the map's primary "used" reflects — NOT host system RAM.
-  const modelUsedGb = round1(
-    attributed.reduce((acc, a) => acc + (a.bytesGb || 0), 0),
-  )
-
-  // Host-pressure share for the Proxmox block only. With real per-slot
-  // mem_mb we report the measured model footprint; in the legacy fallback
-  // we keep the old ram+gtt+npu sum so the host bar stays populated.
-  const selfShareGb = usingMemMb
-    ? modelUsedGb
-    : round1(ramUsedGb + gttUsedGb + npuModelGb)
-
-  // ── Host block ──
-  // Stats endpoint host: { configured, [detected], [hint], ok?, host_mem_*, ... }
-  // Settings endpoint full: { status: { tenants[], host_cpu_count, ... } }
-  // Cadence note: stats refresh at 2.5s, settings at 10s. selfShareGb
-  // (from stats) and tenants[] (from settings) can be briefly out of
-  // sync (<7.5s window) — accepted because tenant allocations change
-  // slowly. Don't unify the cadences; the slim/full split is by design.
-  const statsHost = stats.data?.host || { configured: false }
-  const settingsStatus = pveSettings.data?.status
-  let host
-  if (statsHost.configured && statsHost.ok !== false) {
-    const hostTotalGb = mbToGb(statsHost.host_mem_total_mb || 0)
-    const hostUsedGb = mbToGb(statsHost.host_mem_used_mb || 0)
-    const hostFreeGb = mbToGb(statsHost.host_mem_free_mb || 0)
-    const othersGb = Math.max(0, round1(hostUsedGb - selfShareGb))
-    // Tenants come from the FULL-shape /api/settings/proxmox response,
-    // not the slim stats response (project_slim strips tenants[]).
-    // Filter out the LXC running hal0 itself — it's already represented
-    // as 'this hal0 LXC' via selfShareGb. The static probe exposes our
-    // hostname; tenants whose `name` matches are dropped.
-    const selfHostname = (rawHw.name || '').toLowerCase().trim()
-    const tenants = (settingsStatus?.tenants || [])
-      .filter((t) => !selfHostname || (t.name || '').toLowerCase().trim() !== selfHostname)
-      .map((t) => ({
-        vmid: t.vmid,
-        name: t.name,
-        type: t.type,
-        memGb: mbToGb(t.mem_mb || 0),
-        maxGb: mbToGb(t.maxmem_mb || 0),
-      }))
-    host = {
-      mode: 'configured',
-      totalGb: hostTotalGb,
-      usedGb: hostUsedGb,
-      freeGb: hostFreeGb,
-      selfShareGb,
-      othersGb,
-      tenants,
-    }
-  } else if (statsHost.detected) {
-    host = {
-      mode: 'detected_unconfigured',
-      hint: statsHost.hint || 'Configure Proxmox to see host pressure.',
-    }
-  } else {
-    host = { mode: 'off' }
-  }
-
-  // ── Headroom ──
-  // Pool free = unified cap minus model memory actually held. Host free
-  // can be the tighter constraint when running on Proxmox. The running
-  // LXC's cgroup memory cap is a third candidate (issue #372): when
-  // BELOW the current min(pool, host) it becomes the binding constraint.
-  // When unlimited / unreadable, cgroup_max_mb is null and the cgroup
-  // branch is a no-op.
-  const poolHeadroom = unifiedGb - modelUsedGb
-  let limitedBy = 'pool'
-  let candidate = poolHeadroom
-  if (host.mode === 'configured' && host.freeGb < candidate) {
-    candidate = host.freeGb
-    limitedBy = 'host'
-  }
-  // cgroup branch: treat the running cgroup's memory.max as a third
-  // ceiling. Subtract the same modelUsedGb the pool already accounts
-  // for — the cgroup cap is a hard absolute, not a "free" figure.
-  const cgroupMaxMb = rawHw.cgroup_max_mb
-  if (cgroupMaxMb && Number.isFinite(cgroupMaxMb)) {
-    const cgroupFreeGb = mbToGb(cgroupMaxMb) - modelUsedGb
-    if (cgroupFreeGb < candidate) {
-      candidate = cgroupFreeGb
-      limitedBy = 'cgroup'
-    }
-  }
-  const availableGb = Math.max(0, round1(candidate - SAFETY_MARGIN_GB))
+  const model = buildMemoryMapModel({
+    memory: stats.data?.memory,
+    perSlot: stats.data?.per_slot || {},
+    slots: slotsQ.data || [],
+    statsHost: stats.data?.host,
+    // Tenants come from the FULL-shape /api/settings/proxmox response, not the
+    // slim stats response (project_slim strips tenants[]).
+    pveTenants: pveSettings.data?.status?.tenants || [],
+    selfHostname: rawHw.name || '',
+    platformLabel: rawHw.platform_label || rawHw.platform || '',
+  })
 
   return {
-    pool: { totalGb: unifiedGb, kind: memoryKind, label: poolLabel, platformLabel },
-    host,
-    self: {
-      // Model memory the map renders against the pool. `modelUsedGb` is
-      // the headline "used" figure; host system RAM lives in `host` only.
-      modelUsedGb,
-      selfShareGb,
-      // Retained for the host bar (selfShareGb) + legacy diagnostics.
-      ramUsedGb,
-      gttUsedGb,
-      npuModelGb,
-      slots: (() => {
-        const colorMap = assignSlotColors(attributed.map((a) => a.slot.name))
-        return attributed.map((a) => ({
-          name: a.slot.name,
-          device: a.device,
-          color: colorMap.get(a.slot.name),
-          bytesGb: a.bytesGb,
-          modelId: a.slot.model || '',
-          approx: a.approx,
-          // Container runtime fields — present when slot.runtime="container".
-          // `image` is the full image tag; `profile` is the profile slug.
-          // Used by the legend to show context relevant for container slots
-          // (device chip is uninformative for containers — all are "rocm").
-          isContainer: a.slot.runtime === 'container' || a.slot.container_status != null,
-          image: a.slot.image || null,
-          profile: a.slot.profile || null,
-        }))
-      })(),
-    },
-    headroom: { availableGb, limitedBy },
-    loading: hw.isLoading || stats.isLoading || slotsQ.isLoading || pveSettings.isLoading,
+    ...model,
+    loading:
+      model.loading || hw.isLoading || stats.isLoading || slotsQ.isLoading || pveSettings.isLoading,
   }
 }
 
