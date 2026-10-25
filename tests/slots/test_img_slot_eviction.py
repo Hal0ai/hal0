@@ -59,14 +59,8 @@ async def _img_manager(
     return sm
 
 
-@pytest.mark.parametrize("down_by", ["manual-unload", "crash"])
-async def test_img_slot_unloaded_or_crashed_in_image_mode_is_reloaded_by_ensure_img(
-    slot_root: Path,
-    container_stub: FakeContainerProvider,
-    monkeypatch: pytest.MonkeyPatch,
-    down_by: str,
-) -> None:
-    sm = await _img_manager(slot_root, container_stub)
+def _enter_image_mode(sm: SlotManager) -> None:
+    """Put the GPU arbiter in image mode, as a crashed-then-restarted api finds it."""
     sm.arbiter.state_path.parent.mkdir(parents=True, exist_ok=True)
     sm.arbiter.state_path.write_text(
         json.dumps(
@@ -79,6 +73,18 @@ async def test_img_slot_unloaded_or_crashed_in_image_mode_is_reloaded_by_ensure_
         ),
         encoding="utf-8",
     )
+    assert sm.arbiter.mode is GpuMode.IMG
+
+
+@pytest.mark.parametrize("down_by", ["manual-unload", "crash"])
+async def test_img_slot_unloaded_or_crashed_in_image_mode_is_reloaded_by_ensure_img(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+    down_by: str,
+) -> None:
+    sm = await _img_manager(slot_root, container_stub)
+    _enter_image_mode(sm)
     if down_by == "manual-unload":
         await sm.unload("img")  # terminate() deregisters the upstream; state OFFLINE
     else:
@@ -145,12 +151,7 @@ async def test_an_explicit_idle_timeout_does_not_make_the_img_slot_evictable(
 async def test_pressure_sweep_skips_the_img_slot(
     slot_root: Path, container_stub: FakeContainerProvider, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Under pressure the sweep frees the ordinary idle slot and never img.
-
-    In image mode the arbiter has already unloaded the GPU llm set, so what the
-    sweep can still reclaim there is the idle CPU/NPU slots. That, and not
-    unloading img, is the accepted outcome: img holds next to no GTT while idle.
-    """
+    """Under pressure the sweep frees an ordinary idle slot and never img."""
     sm = await _img_manager(slot_root, container_stub, evict_pressure_mb=1024)
     await _ready_chat_and_age_both(sm, container_stub, "img")
     monkeypatch.setattr(sm, "_probe_host_free_mb", lambda: 0.0)  # always under the floor
@@ -160,6 +161,45 @@ async def test_pressure_sweep_skips_the_img_slot(
     assert sm.is_ready_for_dispatch("img")
     assert sm.state("chat") == SlotState.OFFLINE
     assert [c.get("name") for c in container_stub.unload_calls] == ["chat"]
+
+
+@pytest.mark.parametrize("device", ["cpu", "npu"])
+async def test_pressure_sweep_in_image_mode_evicts_an_idle_cpu_or_npu_slot_not_img(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+    device: str,
+) -> None:
+    """In image mode the arbiter has unloaded the GPU llm set, so the idle slots
+    the sweep can still reclaim are the CPU/NPU ones. Freeing those and leaving
+    img up is the accepted outcome: idle, img holds next to no GTT."""
+    (slot_root / "side.toml").write_text(
+        "\n".join(
+            [
+                'name = "side"',
+                "port = 8090",
+                f'device = "{device}"',
+                'provider = "llama-server"',
+                "[model]",
+                'default = "qwen3-4b-q4_k_m"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    sm = await _img_manager(slot_root, container_stub, evict_pressure_mb=1024)
+    _enter_image_mode(sm)
+    container_stub.active.add("side")
+    await sm._transition("side", SlotState.READY, force=True)
+    for name in ("side", "img"):
+        sm._last_used[sm._key(name)] = time.time() - 600
+    monkeypatch.setattr(sm, "_probe_host_free_mb", lambda: 0.0)  # always under the floor
+
+    await sm._pressure_evict_once()
+
+    assert sm.state("side") == SlotState.OFFLINE
+    assert sm.is_ready_for_dispatch("img")
+    assert [c.get("name") for c in container_stub.unload_calls] == ["side"]
 
 
 @pytest.mark.parametrize("name", ["img", "comfy"])
