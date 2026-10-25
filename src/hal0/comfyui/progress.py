@@ -14,10 +14,15 @@ An entry exists from the moment ComfyUI accepts the prompt until ``infer`` leave
 by returning or raising (``infer`` calls :func:`finish` in a ``finally``). ``step`` and
 ``total`` are ``None`` until the first progress frame arrives (the checkpoint load and the
 queue wait come before it).
+
+Several hal0 renders can be live at once, queued behind each other in ComfyUI. Its queue is
+FIFO, so the one running is the one that has stepped most recently, or, before any has
+stepped, the one that started first. :func:`current` reports that one.
 """
 
 from __future__ import annotations
 
+import itertools
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -36,10 +41,13 @@ class _Render:
     step: int | None = None
     total: int | None = None
     node: str | None = None
+    # Position of this render's latest ``update`` in the order of all updates; 0 = never.
+    updated: int = 0
 
 
-# Insertion order is start order (``start`` re-inserts), so the last value is the newest.
+# Insertion order is start order (``start`` re-inserts), so the first value started first.
 _renders: dict[str, _Render] = {}
+_update_seq = itertools.count(1)
 
 
 def start(prompt_id: str, model: str) -> None:
@@ -60,6 +68,7 @@ def update(prompt_id: str, *, step: int, total: int, node: str | None) -> None:
         return
     render.step = step
     render.total = total
+    render.updated = next(_update_seq)
     if node is not None:
         render.node = node
 
@@ -70,13 +79,18 @@ def finish(prompt_id: str) -> None:
 
 
 def current() -> dict[str, Any] | None:
-    """The newest live render, by start time, or ``None`` when no hal0 render is live.
+    """The hal0 render ComfyUI is running, or ``None`` when no hal0 render is live.
+
+    ComfyUI runs its queue first in, first out, and a render queued behind another has not
+    stepped. So this is the live render that last received an :func:`update`; and while none
+    has, the one that started first, which runs first.
 
     ``elapsed_s`` runs from :func:`start` on a monotonic clock, rounded to one decimal.
     """
     if not _renders:
         return None
-    render = next(reversed(_renders.values()))
+    stepping = [r for r in _renders.values() if r.updated]
+    render = max(stepping, key=lambda r: r.updated) if stepping else next(iter(_renders.values()))
     return {
         "model": render.model,
         "step": render.step,

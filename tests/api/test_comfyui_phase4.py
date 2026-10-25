@@ -628,14 +628,26 @@ class TestStatusTelemetry:
         assert body["progress"] is None
         assert body["queue"]["running"] == 1
 
-    def test_status_reports_the_newest_live_render(self, client: TestClient):
+    def test_status_reports_the_render_that_is_stepping(self, client: TestClient):
+        """Two hal0 renders queued: the older one is running, so it is the one reported."""
+        progress.start("running", "sd-1.5-pruned-emaonly")
+        progress.start("queued", "sdxl-lightning")
+        progress.update("running", step=4, total=20, node="3")
+        patches = self._patch_status(self._SYSTEM_STATS, self._QUEUE_BUSY)
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            body = client.get("/api/comfyui/status").json()
+
+        assert body["progress"]["prompt_id"] == "running"
+        assert body["progress"]["step"] == 4
+
+    def test_status_reports_the_oldest_render_before_any_has_stepped(self, client: TestClient):
         progress.start("old", "sd-1.5-pruned-emaonly")
         progress.start("new", "sdxl-lightning")
         patches = self._patch_status(self._SYSTEM_STATS, self._QUEUE_BUSY)
         with patches[0], patches[1], patches[2], patches[3], patches[4]:
             body = client.get("/api/comfyui/status").json()
 
-        assert body["progress"]["prompt_id"] == "new"
+        assert body["progress"]["prompt_id"] == "old"
         assert body["progress"]["step"] is None
 
     def test_telemetry_probe_failure_is_fail_soft(self, client: TestClient):

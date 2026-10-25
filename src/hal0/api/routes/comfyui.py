@@ -518,9 +518,10 @@ async def comfyui_status(request: Request) -> dict[str, Any]:
         "memory": _parse_memory(stats),
         "queue": counts,
         **telemetry,
-        # The newest render hal0 submitted (/v1 and the Generate tab): model, step n/N, node,
-        # elapsed. None when none is live. A render from the ComfyUI editor has no entry (its
-        # client id is not hal0's), so for those the pane shows queue-level state.
+        # The hal0-submitted render (/v1 and the Generate tab) ComfyUI is running: model,
+        # step n/N, node, elapsed. None when none is live. A render from the ComfyUI editor
+        # has no entry (its client id is not hal0's), so for those the pane shows
+        # queue-level state.
         "progress": render_progress.current(),
         "inference": {"hermes": hermes},
         # Verified counts of the weight files on disk, never faked; None without a models

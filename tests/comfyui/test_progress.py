@@ -38,32 +38,97 @@ def test_progress_tracks_latest_render(clock: _Clock) -> None:
     progress.start("p-new", "sd-1.5-pruned-emaonly")
     clock.now += 2.26
 
-    progress.update("p-new", step=3, total=20, node="12")
-    progress.update("p-old", step=7, total=8, node="9")
+    # Nothing has stepped yet. ComfyUI's queue is FIFO, so the oldest render runs first.
+    first = progress.current()
+    assert first is not None
+    assert first["prompt_id"] == "p-old"
 
-    # The newest live render is reported, with its own step, never the older one's.
+    progress.update("p-old", step=3, total=20, node="12")
+
     assert progress.current() == {
-        "model": "sd-1.5-pruned-emaonly",
+        "model": "sdxl-lightning",
         "step": 3,
         "total": 20,
         "node": "12",
-        "elapsed_s": 2.3,
-        "prompt_id": "p-new",
+        "elapsed_s": 7.3,
+        "prompt_id": "p-old",
     }
 
     # A later frame replaces the earlier one.
-    progress.update("p-new", step=4, total=20, node="12")
+    progress.update("p-old", step=4, total=20, node="12")
     current = progress.current()
     assert current is not None
     assert (current["step"], current["total"]) == (4, 20)
 
-    # When the newest render ends, the one still running is reported.
-    progress.finish("p-new")
-    older = progress.current()
-    assert older is not None
-    assert older["prompt_id"] == "p-old"
-    assert (older["step"], older["total"], older["node"]) == (7, 8, "9")
-    assert older["elapsed_s"] == 7.3
+    # When it ends, the render that was waiting is reported, with no step yet.
+    progress.finish("p-old")
+    waiting = progress.current()
+    assert waiting is not None
+    assert waiting["prompt_id"] == "p-new"
+    assert (waiting["step"], waiting["total"], waiting["node"]) == (None, None, None)
+    assert waiting["elapsed_s"] == 2.3
+
+    # Once it steps, it is the one reported.
+    progress.update("p-new", step=1, total=8, node="9")
+    stepping = progress.current()
+    assert stepping is not None
+    assert (stepping["prompt_id"], stepping["step"], stepping["total"]) == ("p-new", 1, 8)
+
+
+def test_current_prefers_the_render_that_is_stepping(clock: _Clock) -> None:
+    """The older render is the one running; the newer one is queued behind it."""
+    progress.start("running", "sdxl-lightning")
+    clock.now += 1
+    progress.start("queued", "sd-1.5-pruned-emaonly")
+    progress.update("running", step=5, total=8, node="3")
+
+    current = progress.current()
+
+    assert current is not None
+    assert current["prompt_id"] == "running"
+    assert (current["step"], current["total"]) == (5, 8)
+
+
+def test_current_with_no_progress_yet_is_the_oldest_render(clock: _Clock) -> None:
+    progress.start("first", "m1")
+    clock.now += 1
+    progress.start("second", "m2")
+    clock.now += 1
+    progress.start("third", "m3")
+
+    current = progress.current()
+
+    assert current is not None
+    assert current["prompt_id"] == "first"
+
+
+def test_current_follows_the_most_recent_update(clock: _Clock) -> None:
+    """When more than one render has stepped, the one that last received a frame is reported."""
+    progress.start("a", "m1")
+    progress.start("b", "m2")
+    progress.update("a", step=8, total=8, node="3")
+    progress.update("b", step=1, total=8, node="3")
+
+    current = progress.current()
+    assert current is not None
+    assert current["prompt_id"] == "b"
+
+    progress.update("a", step=9, total=9, node="3")
+    current = progress.current()
+    assert current is not None
+    assert current["prompt_id"] == "a"
+
+
+def test_an_update_to_an_unknown_render_does_not_change_which_is_reported() -> None:
+    progress.start("a", "m1")
+    progress.start("b", "m2")
+    progress.update("a", step=1, total=8, node="3")
+
+    progress.update("gone", step=2, total=8, node="3")
+
+    current = progress.current()
+    assert current is not None
+    assert current["prompt_id"] == "a"
 
 
 def test_a_render_with_no_frame_yet_has_no_step(clock: _Clock) -> None:
@@ -137,13 +202,19 @@ def test_a_missing_node_keeps_the_last_known_one() -> None:
     assert current["node"] == "3"
 
 
-def test_restarting_a_prompt_id_makes_it_the_newest(clock: _Clock) -> None:
+def test_restarting_a_prompt_id_sends_it_to_the_back_of_the_queue(clock: _Clock) -> None:
     progress.start("a", "m1")
     progress.start("b", "m2")
+    progress.update("a", step=3, total=8, node="3")
     clock.now += 1
     progress.start("a", "m1")
 
+    # The restarted entry has no step yet and is now younger than "b".
     current = progress.current()
     assert current is not None
-    assert current["prompt_id"] == "a"
-    assert current["elapsed_s"] == 0.0
+    assert current["prompt_id"] == "b"
+
+    progress.update("a", step=1, total=8, node="3")
+    current = progress.current()
+    assert current is not None
+    assert (current["prompt_id"], current["step"], current["elapsed_s"]) == ("a", 1, 0.0)
