@@ -347,7 +347,9 @@ async def _start_image_installs(app: FastAPI, model_ids: list[str]) -> list[dict
     ``/api/comfyui/jobs`` (not ``/api/models/{id}/pull/stream``). A row is
     ``{"model_id", "job_id"}``, or ``{"model_id", "job_id": None, "skipped": <code>}`` when
     the catalog refuses (already installing or installed, disk short, models tree not
-    writable): that is logged and never fails the apply, the slots are already created.
+    writable) or the start itself breaks (``comfyui.install_start_failed``, for an error that is
+    not the catalog's, such as an I/O error from a network-backed store): that is logged and
+    never fails the apply: the slots and the sentinel are written and the LLM pulls queued.
     """
     rows: list[dict[str, Any]] = []
     for model_id in model_ids:
@@ -359,6 +361,14 @@ async def _start_image_installs(app: FastAPI, model_ids: list[str]) -> list[dict
                 extra={"model_id": model_id, "code": exc.code, "error": str(exc)},
             )
             rows.append({"model_id": model_id, "job_id": None, "skipped": exc.code})
+        except Exception as exc:
+            log.exception(
+                "installer.image_install_failed",
+                extra={"model_id": model_id, "error": str(exc)},
+            )
+            rows.append(
+                {"model_id": model_id, "job_id": None, "skipped": "comfyui.install_start_failed"}
+            )
         else:
             rows.append({"model_id": model_id, "job_id": job.job_id})
     return rows
