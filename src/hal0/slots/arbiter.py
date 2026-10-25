@@ -359,6 +359,11 @@ class GpuImgNotReady(Hal0Error):
     status = 503
 
 
+def _monotonic_to_epoch(t: float) -> float:
+    """Wall-clock epoch seconds for a ``time.monotonic()`` reading."""
+    return time.time() - time.monotonic() + t
+
+
 class GpuArbiter:
     """Owns the llm ⇄ img exclusive-GPU switch for one :class:`SlotManager`."""
 
@@ -378,7 +383,10 @@ class GpuArbiter:
         self._state: dict[str, Any] | None = None
         # name → group, refreshed from iter_configs() on every switch; lets
         # the sync guard answer without I/O for slots seen this process.
+        # ``_groups_known`` is set by the first full refresh: before it, the
+        # cache holds only the slots the guard happened to look up.
         self._group_cache: dict[str, str | None] = {}
+        self._groups_known: bool = False
         # In-memory only (a restart has no render in flight). /v1 image
         # requests open now (image_job); the monotonic time image work last
         # ended, None while it runs or before this process has seen image mode;
@@ -396,6 +404,16 @@ class GpuArbiter:
         self._handoff_until: float | None = None
         self._demand_waiters: dict[asyncio.Task[bool], int] = {}
         self._demand_leases: dict[object, float] = {}
+        # What the switch or the restore holding the lock is doing right now
+        # ("draining" | "unloading" | "starting_engine" | "reloading"), for
+        # status(); None between steps and once it ends. In memory only: a
+        # restart has no switch in flight. The phases of image mode itself
+        # (hand-off, render, grace) are derived in status() from the fields
+        # above.
+        self._phase: str | None = None
+        # Monotonic time each waiting LLM request began to wait (one entry per
+        # make_room_for_llm call), for status().
+        self._demand_wait_starts: dict[object, float] = {}
 
     # ── persisted state ──────────────────────────────────────────────────────
 
@@ -454,6 +472,24 @@ class GpuArbiter:
 
     def _refresh_group_cache(self, cfgs: list[dict[str, Any]]) -> None:
         self._group_cache = {str(c.get("name") or ""): gpu_exclusive_group(c) for c in cfgs}
+        self._groups_known = True
+
+    def _llm_slots_to_unload(self) -> list[str]:
+        """The llm-group slots a switch into image mode unloads: those ready for dispatch.
+
+        Reads the group cache, in config order. The switch calls it right after
+        refreshing the cache from ``iter_configs()``; :meth:`status` calls it
+        without I/O, so it answers from the cache as the last switch or restore
+        left it, and from nothing before the first one (a lookup by the
+        dispatch guard fills in single slots, not the set).
+        """
+        if not self._groups_known:
+            return []
+        return [
+            name
+            for name, group in self._group_cache.items()
+            if group == "llm" and self._manager.is_ready_for_dispatch(name)
+        ]
 
     def _slot_group(self, name: str) -> str | None:
         """Sync group lookup for the dispatch guard.
@@ -521,6 +557,7 @@ class GpuArbiter:
                 )
         restored: list[str] = []
         failed: list[str] = []
+        self._phase = "reloading"  # cleared by ensure_img, whose cold start called us
         for slot in llm_slots:
             try:
                 await self._manager.load(slot, None)
@@ -575,6 +612,7 @@ class GpuArbiter:
                 await self._ensure_img_locked(pin=pin)
             finally:
                 self._entering_img = False
+                self._phase = None
                 now = time.monotonic()
                 self._quiet_since = now
                 if self.mode is GpuMode.IMG:
@@ -607,12 +645,7 @@ class GpuArbiter:
                 details={"hint": "seed the img (ComfyUI) slot first"},
                 code="gpu.img_slot_missing",
             )
-        llm_slots = [
-            str(c.get("name") or "")
-            for c in cfgs
-            if gpu_exclusive_group(c) == "llm"
-            and self._manager.is_ready_for_dispatch(str(c.get("name") or ""))
-        ]
+        llm_slots = self._llm_slots_to_unload()
 
         # Persist BEFORE unloads begin (crash-recovery ordering): a
         # restart from here on knows the saved set and the target mode.
@@ -623,6 +656,7 @@ class GpuArbiter:
 
         # Drain in-flight llm requests, bounded — proceed on timeout
         # (manual pin is the escape hatch per spec §7).
+        self._phase = "draining"
         deadline = time.monotonic() + _DRAIN_TIMEOUT_S
         while any(self._manager.in_flight_count(s) for s in llm_slots):
             if time.monotonic() >= deadline:
@@ -637,6 +671,7 @@ class GpuArbiter:
                 break
             await asyncio.sleep(_DRAIN_POLL_S)
 
+        self._phase = "unloading"
         for slot in llm_slots:
             await self._manager.unload(slot)
 
@@ -687,6 +722,7 @@ class GpuArbiter:
         model_default = (
             str(model_section.get("default") or "") if isinstance(model_section, dict) else ""
         )
+        self._phase = "starting_engine"
         try:
             await self._manager.load(img_name, model_default or None)
         except Exception:
@@ -776,34 +812,40 @@ class GpuArbiter:
         chat. ``mode=llm`` is persisted last: a crash mid-restore leaves image
         mode on disk, and the restore loop retries it after the restart.
         """
-        cfgs = await self._manager.iter_configs()
-        self._refresh_group_cache(cfgs)
-        saved = list(st["saved_llm_slots"])
+        # Covers the /free call too: the LLM set is already on its way back, and
+        # the status must not read as a render or a grace meanwhile.
+        self._phase = "reloading"
+        try:
+            cfgs = await self._manager.iter_configs()
+            self._refresh_group_cache(cfgs)
+            saved = list(st["saved_llm_slots"])
 
-        # Best-effort: an unreachable ComfyUI holds no GPU memory, so a
-        # failed /free never blocks the restore.
-        if not await _comfyui_free():
-            log.warning("gpu_arbiter.comfyui_free_failed")
-        restored: list[str] = []
-        failed: list[str] = []
-        for slot in saved:
-            try:
-                await self._manager.load(slot, None)
-                restored.append(slot)
-            except Exception as exc:  # best-effort, like the rollback
-                failed.append(slot)
-                log.warning(
-                    "gpu_arbiter.restore_load_failed",
-                    extra={"slot": slot, "error": str(exc)},
-                )
+            # Best-effort: an unreachable ComfyUI holds no GPU memory, so a
+            # failed /free never blocks the restore.
+            if not await _comfyui_free():
+                log.warning("gpu_arbiter.comfyui_free_failed")
+            restored: list[str] = []
+            failed: list[str] = []
+            for slot in saved:
+                try:
+                    await self._manager.load(slot, None)
+                    restored.append(slot)
+                except Exception as exc:  # best-effort, like the rollback
+                    failed.append(slot)
+                    log.warning(
+                        "gpu_arbiter.restore_load_failed",
+                        extra={"slot": slot, "error": str(exc)},
+                    )
 
-        st["mode"] = GpuMode.LLM.value
-        st["saved_llm_slots"] = []
-        st["pinned"] = False
-        self._persist()
-        self._quiet_since = None
-        self._handoff_until = None
-        log.info("gpu_arbiter.llm_mode", extra={"restored": restored, "failed": failed})
+            st["mode"] = GpuMode.LLM.value
+            st["saved_llm_slots"] = []
+            st["pinned"] = False
+            self._persist()
+            self._quiet_since = None
+            self._handoff_until = None
+            log.info("gpu_arbiter.llm_mode", extra={"restored": restored, "failed": failed})
+        finally:
+            self._phase = None
 
     async def restore_llm_when_idle(
         self, *, force: bool = False, max_wait_s: float = _QUEUE_IDLE_MAX_WAIT_S
@@ -1063,6 +1105,8 @@ class GpuArbiter:
             task.add_done_callback(_log_demand_restore_failure)
             self._demand_restore = task
         self._demand_waiters[task] = self._demand_waiters.get(task, 0) + 1
+        waiter = object()
+        self._demand_wait_starts[waiter] = time.monotonic()
         try:
             await asyncio.wait_for(asyncio.shield(task), max_wait_s)
         except TimeoutError:
@@ -1074,6 +1118,7 @@ class GpuArbiter:
             pass
         finally:
             self._leave_demand_wait(task)
+            self._demand_wait_starts.pop(waiter, None)
         # Same step as the wake-up, no await in between: hold off a queued
         # switch until this request has its dispatch ticket.
         if self._load_state()["mode"] == GpuMode.LLM.value:
@@ -1264,15 +1309,92 @@ class GpuArbiter:
         """Snapshot for the API.
 
         ``switching`` is true while a switch or a restore holds the lock;
-        ``image_jobs`` counts the open ``/v1`` image requests.
+        ``image_jobs`` counts the open ``/v1`` image requests. The rest is for
+        the dashboard's GPU status line, all from memory, no I/O:
+
+          - ``phase``: what the GPU is doing. A switch or restore in progress
+            reports its step (``draining``, ``unloading``, ``starting_engine``,
+            ``reloading``). In image mode with none running: ``handoff`` while
+            the editor hand-off lasts, else ``rendering`` while a ``/v1``
+            image request is open, else ``grace`` once the quiet clock runs.
+            ``None`` otherwise: in LLM mode, and in image mode after an api
+            restart until the restore loop's first tick starts the quiet
+            clock. A render in ComfyUI's own queue (the editor's) is not
+            visible here: it reads as ``grace`` with ``restore_at`` slipping
+            forward each time the restore loop finds the queue busy.
+          - ``restore_at`` and ``handoff_until``: epoch seconds, set only
+            while ``phase`` is ``grace`` / ``handoff`` respectively.
+          - ``drain_in_flight``: requests still in flight on the slots being
+            drained, while ``phase`` is ``draining``; else 0.
+          - ``unload_set``: in image mode the saved set (what is unloaded and
+            comes back). In LLM mode the llm-group slots ready for dispatch,
+            i.e. what a switch would unload now. The group cache that answer
+            reads is filled by switches (the slot configs need an async read),
+            so it is ``[]`` until this process has switched or restored once,
+            and is as of that last switch after it.
+          - ``llm_waiters``: LLM requests waiting for the GPU, and the age in
+            seconds of the oldest (``None`` without any).
         """
         st = self._load_state()
+        in_img = st["mode"] == GpuMode.IMG.value
+        saved = list(st["saved_llm_slots"])
+        now = time.monotonic()
+
+        unload_set = saved if in_img else []
+        drain_in_flight = 0
+        still_loaded = False
+        # The gate node reads this before every prompt and refuses the prompt when
+        # the whole block is missing: a slot read must not take the block down.
+        try:
+            if not in_img:
+                unload_set = self._llm_slots_to_unload()
+            elif self._phase is None:
+                # #3059: a failed unload leaves image mode persisted with a
+                # saved-set slot still loaded on the GPU. Nothing is unloading
+                # then, but the hand-off, render and grace below would all be
+                # false; "unloading" is the nearest honest answer until the
+                # switch rolls back instead of leaving that state behind.
+                still_loaded = any(self._manager.is_ready_for_dispatch(s) for s in saved)
+            elif self._phase == "draining":
+                drain_in_flight = sum(self._manager.in_flight_count(s) for s in saved)
+        except Exception:
+            log.debug("gpu_arbiter.status_slot_read_failed", exc_info=True)
+
+        phase = self._phase
+        if phase is None and in_img:
+            if still_loaded:
+                phase = "unloading"
+            elif self._handoff_until is not None and now < self._handoff_until:
+                phase = "handoff"
+            elif self._image_jobs > 0:
+                phase = "rendering"
+            elif self._quiet_since is not None:
+                phase = "grace"
+
+        starts = list(self._demand_wait_starts.values())
         return {
             "mode": st["mode"],
             "pinned": bool(st["pinned"]),
-            "saved_llm_slots": list(st["saved_llm_slots"]),
+            "saved_llm_slots": saved,
             "switching": self._switch_lock.locked(),
             "image_jobs": self._image_jobs,
+            "phase": phase,
+            "restore_at": (
+                _monotonic_to_epoch(self._quiet_since + self.restore_grace_s)
+                if phase == "grace" and self._quiet_since is not None
+                else None
+            ),
+            "handoff_until": (
+                _monotonic_to_epoch(self._handoff_until)
+                if phase == "handoff" and self._handoff_until is not None
+                else None
+            ),
+            "drain_in_flight": drain_in_flight,
+            "unload_set": unload_set,
+            "llm_waiters": {
+                "count": len(starts),
+                "oldest_s": round(max(0.0, now - min(starts)), 1) if starts else None,
+            },
         }
 
 

@@ -627,3 +627,75 @@ class TestStatusTelemetry:
         assert body["util"] is None
         assert body["temp"] is None
         assert body["clock"] is None
+
+
+# ---------------------------------------------------------------------------
+# GET /api/comfyui/arbiter and /status: the arbiter's phase fields (image readiness API)
+# ---------------------------------------------------------------------------
+
+
+class _FakeSlots:
+    """The slice of SlotManager a real GpuArbiter's status() reads."""
+
+    def __init__(self, ready: set[str]) -> None:
+        self.ready = ready
+
+    def is_ready_for_dispatch(self, name: str) -> bool:
+        return name in self.ready
+
+    def in_flight_count(self, name: str) -> int:
+        return 0
+
+
+def test_arbiter_route_passes_new_fields(client: TestClient, tmp_path: Path):
+    """Both routes hand the arbiter's block over as is: a real arbiter, in the
+    grace after a render, answers with every field the GPU status line reads."""
+    import time
+
+    from hal0.slots.arbiter import GpuArbiter
+
+    state_path = tmp_path / "gpu_arbiter.json"
+    state_path.write_text(
+        json.dumps({"mode": "img", "pinned": False, "saved_llm_slots": ["chat", "agent"]}),
+        encoding="utf-8",
+    )
+    arbiter = GpuArbiter(_FakeSlots(set()), state_path=state_path)  # type: ignore[arg-type]
+    arbiter.set_pin(False)  # starts the quiet clock: image mode, nothing rendering
+    client.app.state.slot_manager = SimpleNamespace(arbiter=arbiter)
+
+    expected = {
+        "phase",
+        "restore_at",
+        "handoff_until",
+        "drain_in_flight",
+        "unload_set",
+        "llm_waiters",
+    }
+    direct = arbiter.status()
+    assert expected <= set(direct)
+
+    gate_body = client.get("/api/comfyui/arbiter").json()
+    assert gate_body["mode"] == "generation"
+    assert set(gate_body["arbiter"]) == set(direct)
+    block = gate_body["arbiter"]
+    assert block["phase"] == "grace"
+    assert block["handoff_until"] is None
+    assert time.time() < block["restore_at"] <= time.time() + 10.0
+    assert block["drain_in_flight"] == 0
+    assert block["unload_set"] == ["chat", "agent"]
+    assert block["llm_waiters"] == {"count": 0, "oldest_s": None}
+
+    async def _fetch(_path):
+        return None
+
+    with (
+        patch(f"{_BASE}._container_state", new_callable=AsyncMock, return_value="running"),
+        patch(f"{_BASE}._systemd_active", new_callable=AsyncMock, return_value=False),
+        patch(f"{_BASE}._fetch_json", new_callable=AsyncMock, side_effect=_fetch),
+        patch(f"{_BASE}.gpu_view.sample", return_value=SimpleNamespace(gpu_busy=0.0)),
+        patch(f"{_BASE}._probe_power", return_value={}),
+    ):
+        status_body = client.get("/api/comfyui/status").json()
+    assert set(status_body["arbiter"]) == set(direct)
+    assert status_body["arbiter"]["phase"] == "grace"
+    assert status_body["arbiter"]["unload_set"] == ["chat", "agent"]

@@ -1207,12 +1207,258 @@ async def test_status_reports_switching_and_image_jobs(
         "saved_llm_slots": [],
         "switching": False,
         "image_jobs": 0,
+        "phase": None,
+        "restore_at": None,
+        "handoff_until": None,
+        "drain_in_flight": 0,
+        "unload_set": [],
+        "llm_waiters": {"count": 0, "oldest_s": None},
     }
     async with arb.image_job():
         assert arb.status()["image_jobs"] == 1
         async with arb.image_job():
             assert arb.status()["image_jobs"] == 2
     assert arb.status()["image_jobs"] == 0
+
+
+# ── phase, timers, unload set and waiters (the dashboard's GPU status line) ──
+
+
+async def test_phase_draining_while_waiting_for_inflight_chat(
+    fake_mgr: FakeManager, state_path: Path
+) -> None:
+    fake_mgr.in_flight = {"chat": 2, "agent": 1}
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    task = asyncio.create_task(arb.ensure_img())
+    await asyncio.sleep(0.05)
+
+    st = arb.status()
+    assert st["phase"] == "draining"
+    assert st["drain_in_flight"] == 3
+    assert st["unload_set"] == ["chat", "agent"]
+    assert st["switching"] is True
+    assert ("unload", "chat") not in fake_mgr.calls
+
+    fake_mgr.in_flight = {}  # the chats finished
+    await asyncio.wait_for(task, timeout=2.0)
+    st = arb.status()
+    assert st["phase"] != "draining"
+    assert st["drain_in_flight"] == 0
+
+
+async def test_phase_unloading_while_the_llm_slots_unload(
+    fake_mgr: FakeManager, state_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gate = asyncio.Event()
+    real_unload = fake_mgr.unload
+
+    async def _gated_unload(name: str) -> None:
+        await gate.wait()
+        await real_unload(name)
+
+    monkeypatch.setattr(fake_mgr, "unload", _gated_unload)
+    fake_mgr.ready.add("img")  # resident ComfyUI: no engine start
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    task = asyncio.create_task(arb.ensure_img())
+    await asyncio.sleep(0.05)
+
+    st = arb.status()
+    assert st["phase"] == "unloading"
+    assert st["drain_in_flight"] == 0
+    assert st["unload_set"] == ["chat", "agent"]
+
+    gate.set()
+    await asyncio.wait_for(task, timeout=2.0)
+    assert arb.status()["phase"] != "unloading"
+
+
+async def test_phase_starting_engine_during_the_img_cold_start(
+    fake_mgr: FakeManager, state_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gate = asyncio.Event()
+    real_load = fake_mgr.load
+
+    async def _gated_load(name: str, model_id: str | None = None) -> None:
+        if name == "img":
+            await gate.wait()
+        await real_load(name, model_id)
+
+    monkeypatch.setattr(fake_mgr, "load", _gated_load)
+    arb = GpuArbiter(fake_mgr, state_path=state_path)  # img is down: cold start
+    task = asyncio.create_task(arb.ensure_img())
+    await asyncio.sleep(0.05)
+
+    assert arb.status()["phase"] == "starting_engine"
+    assert ("unload", "chat") in fake_mgr.calls  # the unloads are behind it
+
+    gate.set()
+    await asyncio.wait_for(task, timeout=2.0)
+    assert arb.status()["phase"] != "starting_engine"
+
+
+async def test_phase_handoff_then_grace_with_restore_at(
+    fake_mgr: FakeManager, state_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(arbiter_mod, "_GATE_HANDOFF_S", 0.3)
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    started = time.time()
+    await arb.ensure_img()
+    ended = time.time()
+
+    st = arb.status()
+    assert st["phase"] == "handoff"
+    assert st["restore_at"] is None
+    # Epoch seconds: the hand-off opens when the switch ends and lasts 0.3 s.
+    assert started + 0.3 - 0.05 <= st["handoff_until"] <= ended + 0.3 + 0.05
+    async with arb.image_job():  # the hand-off outranks a render
+        assert arb.status()["phase"] == "handoff"
+
+    await asyncio.sleep(0.4)
+    st = arb.status()
+    assert st["phase"] == "grace"
+    assert st["handoff_until"] is None
+    # The grace ends restore_grace_s (10 s) after the last render ended.
+    assert time.time() + 9.0 < st["restore_at"] <= time.time() + 10.0
+
+
+async def test_phase_rendering_while_image_job_open(
+    fake_mgr: FakeManager, state_path: Path
+) -> None:
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    await arb.ensure_img()  # no hand-off in these tests (_no_handoff)
+    async with arb.image_job():
+        st = arb.status()
+        assert st["phase"] == "rendering"
+        assert st["restore_at"] is None
+        assert st["handoff_until"] is None
+    assert arb.status()["phase"] == "grace"
+
+
+async def test_phase_reloading_during_restore(fake_mgr: FakeManager, state_path: Path) -> None:
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    await arb.ensure_img()
+    gate = asyncio.Event()
+    real_load = fake_mgr.load
+
+    async def _gated_load(name: str, model_id: str | None = None) -> None:
+        await gate.wait()
+        await real_load(name, model_id)
+
+    fake_mgr.load = _gated_load  # type: ignore[method-assign]
+    task = asyncio.create_task(arb.restore_llm(force=True))
+    await asyncio.sleep(0.05)
+
+    st = arb.status()
+    assert st["phase"] == "reloading"
+    assert st["mode"] == "img"  # mode=llm is persisted last
+    assert st["restore_at"] is None
+    assert st["unload_set"] == ["chat", "agent"]  # the saved set coming back
+
+    gate.set()
+    await asyncio.wait_for(task, timeout=2.0)
+    st = arb.status()
+    assert st["phase"] is None
+    assert st["mode"] == "llm"
+
+
+async def test_phase_is_none_in_llm_mode(fake_mgr: FakeManager, state_path: Path) -> None:
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    assert arb.status()["phase"] is None
+    arb._quiet_since = time.monotonic()  # a stale clock does not make a grace in LLM mode
+    assert arb.status()["phase"] is None
+    assert arb.status()["restore_at"] is None
+
+
+async def test_phase_is_unloading_while_a_saved_slot_is_still_loaded(
+    fake_mgr: FakeManager, state_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3059: a failed unload leaves image mode persisted with an LLM slot still
+    loaded. The status must not announce a hand-off, a render or a grace then."""
+    monkeypatch.setattr(arbiter_mod, "_GATE_HANDOFF_S", 0.3)
+    real_unload = fake_mgr.unload
+
+    async def _failing_unload(name: str) -> None:
+        if name == "agent":
+            raise RuntimeError("terminate timeout")
+        await real_unload(name)
+
+    monkeypatch.setattr(fake_mgr, "unload", _failing_unload)
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    with pytest.raises(RuntimeError, match="terminate timeout"):
+        await arb.ensure_img()
+
+    assert arb.mode is GpuMode.IMG
+    assert fake_mgr.is_ready_for_dispatch("agent")  # still on the GPU
+    assert arb.status()["phase"] == "unloading"  # not "handoff"
+    assert arb.status()["handoff_until"] is None
+    async with arb.image_job():
+        assert arb.status()["phase"] == "unloading"  # not "rendering"
+    await asyncio.sleep(0.4)
+    assert arb.status()["phase"] == "unloading"  # not "grace"
+    assert arb.status()["restore_at"] is None
+
+    fake_mgr.ready.discard("agent")  # the slot is gone from the GPU
+    assert arb.status()["phase"] == "grace"
+
+
+async def test_unload_set_lists_ready_llm_slots_in_llm_mode(
+    fake_mgr: FakeManager, state_path: Path
+) -> None:
+    fake_mgr.ready.add("img")  # resident ComfyUI
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    # The groups are known only after a switch has read the slot configs, and a
+    # sync status() cannot read them: nothing is listed before that.
+    assert arb.status()["unload_set"] == []
+
+    await arb.ensure_img()
+    assert arb.status()["unload_set"] == ["chat", "agent"]  # image mode: the saved set
+    await arb.restore_llm(force=True)
+    assert arb.mode is GpuMode.LLM
+
+    # LLM mode: what a switch would unload, i.e. the ready llm-group slots (not
+    # the NPU, TTS or img slots) in config order.
+    assert arb.status()["unload_set"] == ["chat", "agent"]
+    fake_mgr.ready.discard("agent")
+    assert arb.status()["unload_set"] == ["chat"]
+    fake_mgr.ready.discard("chat")
+    assert arb.status()["unload_set"] == []
+
+
+async def test_unload_set_ignores_a_partly_warmed_group_cache(
+    fake_mgr: FakeManager, state_path: Path
+) -> None:
+    """A dispatch guard caches the group of the slots it sees; that is not the
+    set of slots a switch would unload."""
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    arb._group_cache["chat"] = "llm"
+    assert arb.status()["unload_set"] == []
+
+
+async def test_llm_waiters_counts_and_ages(fake_mgr: FakeManager, state_path: Path) -> None:
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    await arb.ensure_img()
+    assert arb.status()["llm_waiters"] == {"count": 0, "oldest_s": None}
+
+    async with arb.image_job():  # image work keeps the LLM requests waiting
+        first = asyncio.create_task(arb.make_room_for_llm("chat"))
+        await asyncio.sleep(0.25)
+        second = asyncio.create_task(arb.make_room_for_llm("agent"))
+        await asyncio.sleep(0.05)
+
+        both = arb.status()["llm_waiters"]
+        assert both["count"] == 2
+        assert both["oldest_s"] is not None and both["oldest_s"] >= 0.2
+        assert both["oldest_s"] == round(both["oldest_s"], 1)
+
+        first.cancel()  # the oldest gives up: the age is the other one's
+        await asyncio.gather(first, return_exceptions=True)
+        one = arb.status()["llm_waiters"]
+        assert one["count"] == 1
+        assert one["oldest_s"] is not None and one["oldest_s"] < both["oldest_s"]
+
+    await asyncio.wait_for(second, timeout=3.0)  # the render ended: restored, served
+    assert arb.mode is GpuMode.LLM
+    assert arb.status()["llm_waiters"] == {"count": 0, "oldest_s": None}
 
 
 async def test_restore_loop_survives_a_tick_exception(
