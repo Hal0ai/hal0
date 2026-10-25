@@ -91,8 +91,12 @@ curl 'http://localhost:8080/api/comfyui/models/sdxl-lightning/fit?size=1536x1536
 ```
 
 `size` is `WIDTHxHEIGHT` in pixels; leave it out for the model's native size. The answer
-is `{"fit": {...}}` with the object a model row carries, or `{"fit": null}` when the
-budget is unknown. The size is judged as given, with no clamping.
+is `{"fit": {...}, "size": "1024x1024"}`: `fit` is the object a model row carries, or
+`null` when the budget is unknown, and `size` is the size that was judged. That is the
+size `POST /v1/images/generations` would render for the one you asked about: each side is
+clamped to 64 to 2048 pixels and floored to a multiple of 8, so `1030x1030` is judged and
+reported as `1024x1024` (a size the catalog measured, so its need is exact) and `4096x4096`
+as `2048x2048`. Left out, `size` is the model's native size.
 
 | Status | Code | When |
 |---|---|---|

@@ -557,7 +557,7 @@ def test_fit_route_answers_for_a_size(client: TestClient, memory_budget: MemoryB
     custom = client.get(f"/api/comfyui/models/{_SDXL}/fit", params={"size": "1152x896"})
 
     assert custom.status_code == 200
-    assert set(custom.json()) == {"fit"}
+    assert set(custom.json()) == {"fit", "size"}
     fit = custom.json()["fit"]
     assert fit["verdict"] == "fits"
     # Between no measurement and the 1024x1024 one: the larger size covers it, flagged estimated.
@@ -584,6 +584,51 @@ def test_fit_route_without_a_size_is_the_native_size(
     assert fit["need"]["gpu_estimated"] is False
 
 
+def test_fit_route_judges_the_size_the_render_uses(
+    client: TestClient, memory_budget: MemoryBudgetStub
+) -> None:
+    """``/v1`` renders the clamped size (each side 64..2048, floored to a multiple of 8), so
+    ``/fit`` judges that size and says which: a 1030x1030 request is a 1024x1024 render, a
+    measured size, so its need is exact."""
+    memory_budget.result = ROOMY_BOX
+
+    odd = client.get(f"/api/comfyui/models/{_SDXL}/fit", params={"size": "1030x1030"}).json()
+
+    assert odd["size"] == "1024x1024"
+    assert odd["fit"]["need"]["gpu_gb"] == 15.9
+    assert odd["fit"]["need"]["gpu_estimated"] is False
+
+    huge = client.get(f"/api/comfyui/models/{_SDXL}/fit", params={"size": "4096x4096"}).json()
+
+    assert huge["size"] == "2048x2048"
+    assert huge["fit"]["need"]["gpu_gb"] == 51.0  # the same need as an asked-for 2048x2048
+    assert huge["fit"]["need"]["gpu_estimated"] is True
+
+    tiny = client.get(f"/api/comfyui/models/{_SDXL}/fit", params={"size": "10x10"}).json()
+    assert tiny["size"] == "64x64"
+
+
+@pytest.mark.parametrize("size", ["1152x896", "512x512", "2048x2048"])
+def test_fit_route_leaves_a_size_the_render_keeps_as_it_was(
+    client: TestClient, memory_budget: MemoryBudgetStub, size: str
+) -> None:
+    memory_budget.result = ROOMY_BOX
+
+    body = client.get(f"/api/comfyui/models/{_SDXL}/fit", params={"size": size}).json()
+
+    assert body["size"] == size
+
+
+def test_fit_route_without_a_size_says_the_native_size(
+    client: TestClient, memory_budget: MemoryBudgetStub
+) -> None:
+    memory_budget.result = ROOMY_BOX
+
+    body = client.get(f"/api/comfyui/models/{_SDXL}/fit").json()
+
+    assert body["size"] == CATALOG[_SDXL].sizes[0]
+
+
 def test_fit_route_refuses_what_wont_fit_in_words(
     client: TestClient, memory_budget: MemoryBudgetStub
 ) -> None:
@@ -606,7 +651,7 @@ def test_fit_route_is_null_without_a_budget(
     resp = client.get(f"/api/comfyui/models/{_SDXL}/fit")
 
     assert resp.status_code == 200
-    assert resp.json() == {"fit": None}
+    assert resp.json() == {"fit": None, "size": CATALOG[_SDXL].sizes[0]}
 
 
 def test_fit_route_unknown_model_is_404(

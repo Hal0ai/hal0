@@ -88,6 +88,7 @@ from hal0.hardware import gpu_view
 from hal0.hardware.memory_budget import MemoryBudget
 from hal0.http_client import async_client
 from hal0.providers import comfyui as comfyui_provider
+from hal0.providers.comfyui_workflows import effective_size
 from hal0.registry.pull import PullJob, make_job
 from hal0.slots.naming import slot_container_name, slot_token_for, slot_unit_name
 from hal0.upstreams.huggingface import hf_token_from_env
@@ -1145,12 +1146,17 @@ async def comfyui_model_fit(
 ) -> dict[str, Any]:
     """The model's fit at ``size`` (``WxH``; native when omitted) against this box's memory.
 
-    Returns ``{"fit": {...} | null}``, the same object a ``GET /models`` row carries, here
-    for any size: a size the catalog measured is exact, any other is estimated from the
-    nearest larger measurement (``need.gpu_estimated``). ``fit`` is ``null`` when the budget
-    is unknown. 404 ``comfyui.model_unknown`` for an id not in the catalog, and 422
-    ``image.invalid_size`` (``error.details.size``) for a ``size`` that is not two to four
-    digits, ``x``, two to four digits. The size is validated before the budget is read.
+    Returns ``{"fit": {...} | null, "size": "WxH" | null}``. ``fit`` is the same object a
+    ``GET /models`` row carries, here for any size: a size the catalog measured is exact, any
+    other is estimated from the nearest larger measurement (``need.gpu_estimated``), and it
+    is ``null`` when the budget is unknown. ``size`` is the size that was judged: the one
+    ``POST /v1/images/generations`` would render for this ``size``, each side clamped to
+    64..2048 and floored to a multiple of 8 (:func:`effective_size`), so ``1030x1030``
+    answers for ``1024x1024`` and says so. It is the model's native size when ``size`` is
+    omitted, and ``null`` for a model with none. 404 ``comfyui.model_unknown`` for an id not
+    in the catalog, and 422 ``image.invalid_size`` (``error.details.size``) for a ``size``
+    that is not two to four digits, ``x``, two to four digits. The size is validated before
+    the budget is read.
     """
     model = _require_model(model_id)
     if size is not None and _FIT_SIZE.fullmatch(size) is None:
@@ -1159,8 +1165,24 @@ async def comfyui_model_fit(
             code="image.invalid_size",
             details={"size": size},
         )
+    judged = _judged_size(model, size)
     budget = await _collect_budget(request.app)
-    return {"fit": _fit(model, size, budget)}
+    return {"fit": _fit(model, judged, budget), "size": judged}
+
+
+def _judged_size(model: ImageModel, size: str | None) -> str | None:
+    """The ``WxH`` a render of ``model`` at ``size`` is judged at, as ``/v1`` renders it.
+
+    ``size`` goes through the translator's own parse and clamp (:func:`effective_size`), so
+    the verdict is for the render that would run, not for a size the workflow would change.
+    ``None`` is the model's native size, clamped the same way; a model with no native size
+    has none to report.
+    """
+    if size is None:
+        if not model.sizes:
+            return None
+        size = model.sizes[0]
+    return effective_size(size)
 
 
 def _schedule_install(app: FastAPI, model: ImageModel, job: PullJob) -> None:
