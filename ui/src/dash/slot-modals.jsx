@@ -109,7 +109,7 @@ function stateChipClass(stateOrSlot) {
 // model-registry rows (GET /api/models lists none), so the list the drawer's Model
 // select and the swap popover build from useModels() would be empty. For an image
 // slot both show the current selection and a link to the AI Capabilities page's
-// Image panel instead.
+// Image panel, where the model is picked (settings/pages/capabilities/ImagePanel.jsx).
 const IMAGE_SLOT_TYPE = "image";
 const IMAGE_CAPABILITIES_HREF = "#settings/capabilities";
 
@@ -1667,7 +1667,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 										<div className="form-row">
 											<div className="form-lbl">
 												<span>Model</span>
-												<FieldInfoIcon description="Image models are not in the model catalog. Image generation is configured under AI Capabilities → Image." />
+												<FieldInfoIcon description="Image models are not in the model catalog. Pick the image model under AI Capabilities → Image." />
 											</div>
 											<div className="form-ctl">
 												<div className="mono" data-testid="slot-image-model">
@@ -2867,7 +2867,7 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
 						style={{ display: "block", color: "var(--accent)", textDecoration: "none" }}
 						onClick={onClose}
 					>
-						AI Capabilities → Image →
+						Pick the model in AI Capabilities → Image →
 					</a>
 				</>
 			)}

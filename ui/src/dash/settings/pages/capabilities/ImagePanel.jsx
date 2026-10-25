@@ -9,7 +9,7 @@ import { useSlots, useSlotEdit, useSlotConfig } from '@/api/hooks/useSlots'
 import { SRow } from '../../shared/SRow.jsx'
 import { ApplyBadge } from '../../shared/ApplyBadge.jsx'
 import { useCapabilitySelection } from './useCapabilitySelection.js'
-import { statusChip, PanelHeader, PanelFooter, EnabledRow, selStyle, inputStyle } from './shared.jsx'
+import { statusChip, PanelHeader, PanelFooter, EnabledRow, ModelRow, selStyle, inputStyle } from './shared.jsx'
 
 // Empty = the model's native size (SD 1.5 / SDXL Turbo are 512x512). Writing a
 // literal size back on any save would pin every model to it.
@@ -75,12 +75,20 @@ export function ImagePanel({ registry }) {
           <option value="comfyui">comfyui</option>
         </select>
       } />
-      {/* No Model row here on purpose: ComfyUI workflows select their own
-          checkpoint per generation, so an img-slot model pick would be dead
-          config. Inventory and workflows live on the ComfyUI pane. */}
-      <SRow k="Checkpoint" sub="selected per-workflow by ComfyUI — manage models and workflows on the ComfyUI pane" v={
-        <a href="#slots/image" className="mono" style={{fontSize: 11, color: "var(--accent)"}}>ComfyUI pane →</a>
-      } />
+      {/* The img selection is what /v1/images defaults and Open WebUI's image model
+          follow, and the one place the dashboard picks it: the slot drawer and swap
+          popover link here for an image slot. Rows are the API's image picker rows
+          (catalog models + the operator's own ckpt/<path> checkpoints). Inventory
+          and workflows live on the ComfyUI pane. */}
+      <ModelRow items={sel.catalogItems} value={sel.model} onChange={sel.setModel}
+        placeholder="model id"
+        emptyHint="no image models listed — install one from Image Gen" />
+      {sel.catalogItems.length === 0 && (
+        <div className="s-row" style={{padding: "6px 12px"}}>
+          <a data-testid="img-model-empty-link" href="#slots/image" className="mono"
+            style={{fontSize: 11, color: "var(--accent)"}}>Install an image model from Image Gen →</a>
+        </div>
+      )}
 
       <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
         <div className="k">

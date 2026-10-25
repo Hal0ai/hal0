@@ -6,6 +6,15 @@ export function rowId(m) {
   return m.id || m.model_id || m
 }
 
+// What a catalog picker row reads as in a <select>: the display name first when the
+// row carries one (the image picker's rows do, the other capabilities' do not), then
+// the id the selection saves. A display name that is the id is not repeated.
+export function rowLabel(m) {
+  const id = rowId(m)
+  const name = m?.display_name
+  return name && name !== id ? `${name} (${id})` : id
+}
+
 // #1470: resolve the provider for the model id currently being edited.
 // Prefer the catalog row (covers an unsaved local change); fall back to the
 // persisted selection's provider only while the local id still matches what's
