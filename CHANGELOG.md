@@ -223,7 +223,7 @@ applying. Add those subsections to a version's section to surface them; see
 
 - **`openwebui.env` is written in the format podman's `--env-file` reads.** hal0 quoted values for systemd, but podman keeps the quotes, so any value that was empty or held a space, a quote, `$` or `#` reached Open WebUI quoted, and `COMFYUI_WORKFLOW_NODES` arrived as a string that made Open WebUI's image settings answer 500. Values are now written as they are, and a value with a line break is refused. A value you set by hand that an older hal0 wrote in quotes keeps its quotes; remove them by hand. ([#3045](https://github.com/Hal0ai/hal0/issues/3045))
 
-- **Open WebUI no longer dials ComfyUI on an address the slot does not listen on.** ComfyUI's port is published on loopback by default, which the Open WebUI container cannot reach, so every image request from Open WebUI was refused. Open WebUI now reaches images through hal0's `/v1`, the address it already uses for chat. ([#3046](https://github.com/Hal0ai/hal0/issues/3046))
+- **Open WebUI no longer dials ComfyUI on an address the slot does not listen on.** ComfyUI listens on loopback only, which the Open WebUI container cannot reach, so every image request from Open WebUI was refused. Open WebUI now reaches images through hal0's `/v1`, the address it already uses for chat. ([#3046](https://github.com/Hal0ai/hal0/issues/3046))
 
 - **Open WebUI renders SDXL-Lightning and other fixed-step models at their own step count.** hal0 never set `IMAGE_STEPS`, so Open WebUI wrote its default of 50 into the workflow. Open WebUI's OpenAI engine sends no step count, so hal0 uses the slot's `default_steps` or the model's own, as for any `/v1` client. ([#3047](https://github.com/Hal0ai/hal0/issues/3047))
 

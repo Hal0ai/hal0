@@ -538,9 +538,9 @@ class SlotConfig(BaseModel):
             "Per-slot idle-TTL override (seconds) for hard eviction "
             "(SlotReaper.evict_timeout_for). 0 disables IDLE-TTL eviction "
             "for this slot only — pressure eviction and pre-load eviction "
-            "are separate paths, exempted only by `pinned`, not by this "
-            "value. The ComfyUI img-group slot is never unloaded by idle or "
-            "pressure eviction, whatever this value says."
+            "are separate paths, exempted by `pinned`, not by this value. "
+            "The ComfyUI img-group slot is never unloaded by idle, pressure "
+            "or pre-load eviction, whatever this value says."
         ),
     )
     pinned: bool = Field(
@@ -1642,8 +1642,9 @@ class SlotsConfig(BaseModel):
             "when the slot's own TOML has no idle_timeout_s override. 0 "
             "disables IDLE-TTL eviction for slots using this default — "
             "pressure eviction and pre-load eviction are separate paths, "
-            "exempted only by `pinned`, not by this value. The ComfyUI "
-            "img-group slot is never unloaded by idle or pressure eviction."
+            "exempted by `pinned`, not by this value. The ComfyUI "
+            "img-group slot is never unloaded by idle, pressure or pre-load "
+            "eviction."
         ),
     )
     evict_pressure_mb: int = Field(
