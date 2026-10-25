@@ -53,6 +53,7 @@ from fastapi import APIRouter, BackgroundTasks, FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
+from hal0.api import memory_source
 from hal0.api._redact import redact_log_line
 from hal0.api.auth import GATE_SCOPE_KEY
 from hal0.api.middleware.error_codes import Conflict, Forbidden, NotFound, UnprocessableEntity
@@ -63,6 +64,7 @@ from hal0.comfyui import inventory
 from hal0.comfyui import paths as comfyui_paths
 from hal0.comfyui.autoselect import auto_select_first_image_model, enabled_img_model
 from hal0.comfyui.catalog import (
+    BYTES_PER_GIB,
     CATALOG,
     ImageModel,
     get_model,
@@ -72,8 +74,10 @@ from hal0.comfyui.catalog import (
     models_using,
     weights_gib,
 )
+from hal0.comfyui.fit import assess, need_for
 from hal0.comfyui.picker import recommended_id
 from hal0.hardware import gpu_view
+from hal0.hardware.memory_budget import MemoryBudget
 from hal0.http_client import async_client
 from hal0.registry.pull import PullJob, make_job
 from hal0.slots.naming import slot_container_name, slot_token_for, slot_unit_name
@@ -755,7 +759,12 @@ def _template_defaults(model: ImageModel) -> dict[str, Any]:
 
 
 def _model_row(
-    model: ImageModel, *, recommended: str, job: PullJob | None, root: Path
+    model: ImageModel,
+    *,
+    recommended: str,
+    job: PullJob | None,
+    root: Path,
+    budget: MemoryBudget | None,
 ) -> dict[str, Any]:
     """One catalog model with its install state, as ``GET /models`` lists it.
 
@@ -764,8 +773,13 @@ def _model_row(
     ``root`` is the models tree, resolved once per request by the caller. ``approx_gb``
     and ``missing_gb`` are GiB, like every GB figure the memory budget reports (ADR-0039);
     the catalog's own decimal GB never leaves it.
+
+    ``fit`` is the verdict at the model's native size against ``budget`` (collected once
+    per request by the caller), as :meth:`~hal0.comfyui.fit.Fit.as_dict`; ``None`` when
+    there is no budget or it cannot say.
     """
     state = install_state(model, root)
+    fit = _fit(model, None, budget)
     return {
         "id": model.id,
         "label": model.label,
@@ -783,7 +797,46 @@ def _model_row(
         "missing": [f"{c.kind.subdir}/{c.relpath}" for c in state.missing],
         "workflow": model.workflow_filename,
         "job": job.as_dict() if job is not None else None,
+        "fit": fit,
     }
+
+
+async def _collect_budget(app: FastAPI) -> MemoryBudget | None:
+    """This box's memory budget, or ``None`` when it cannot be collected.
+
+    ``collect_memory_budget`` has no outer guard, by design: an empty budget would read as
+    "no GPU". Here a failure is an unknown budget, so the fit is ``null`` and never
+    ``wont_fit``. The failure is logged once per request.
+    """
+    try:
+        return await memory_source.collect_memory_budget(app)
+    except Exception:
+        log.warning("comfyui.fit_budget_unavailable", exc_info=True)
+        return None
+
+
+def _fit(model: ImageModel, size: str | None, budget: MemoryBudget | None) -> dict[str, Any] | None:
+    """``model``'s fit at ``size`` (``None`` is native) as a dict; ``None`` when unknown."""
+    if budget is None:
+        return None
+    fit = assess(need_for(model, size), budget)
+    return fit.as_dict() if fit is not None else None
+
+
+def _store_info(root: Path) -> dict[str, Any]:
+    """``{"free_gb", "path"}`` for the models tree ``root``.
+
+    ``path`` is ``root`` itself. ``free_gb`` is the free space, in GiB to one decimal, of
+    the filesystem it lives on: ``root``'s nearest existing parent when the tree does not
+    exist yet (a fresh store), the same place the install's disk preflight measures.
+    ``None`` when the filesystem cannot be measured, never 0.
+    """
+    probe = comfyui_install._existing_ancestor(root)
+    try:
+        free_gb: float | None = round(shutil.disk_usage(probe).free / BYTES_PER_GIB, 1)
+    except OSError:
+        free_gb = None
+    return {"free_gb": free_gb, "path": str(root)}
 
 
 def _install_jobs(app: FastAPI) -> dict[str, PullJob]:
@@ -854,22 +907,66 @@ def _blocking_install(model: ImageModel, jobs: dict[str, PullJob]) -> PullJob | 
 async def comfyui_models(request: Request) -> dict[str, Any]:
     """The image-model catalog with each model's install state and latest install job.
 
-    Returns ``{"models": [...], "engine": {"available": bool, "reason": str | None}}``,
-    the models in catalog order. Exactly one row is ``recommended``: the starter pick for
-    this box's memory pool. ``engine`` says whether this host can run the ComfyUI image at
-    all; the catalog is listed either way, so a box without the ROCm lane can still see it.
+    Returns ``{"models": [...], "engine": {"available": bool, "reason": str | None},
+    "store": {"free_gb": float | None, "path": str}}``, the models in catalog order. Exactly
+    one row is ``recommended``: the starter pick for this box's memory pool. ``engine`` says
+    whether this host can run the ComfyUI image at all; the catalog is listed either way, so
+    a box without the ROCm lane can still see it. ``store`` is the models tree and the free
+    space (GiB) of the filesystem under it; ``free_gb`` is ``null`` when that cannot be
+    measured.
+
+    Each row's ``fit`` is the model's verdict at its native size against this box's memory
+    budget, collected once per request: ``{"verdict": "fits" | "tight" | "wont_fit",
+    "reason", "need", "render_free_gb", "ram_free_gb"}``. It is ``null`` when the budget is
+    unknown (no GPU lane, nothing measured the pool, RAM unreadable, or the collector
+    failed); an unknown budget is never ``wont_fit``. See ``GET /models/{model_id}/fit`` for
+    other sizes.
+
     409 ``comfyui.models_dir_not_writable`` (``error.details.path``) when the models tree
     cannot be read by the hal0 user.
     """
     jobs = _install_jobs(request.app)
     recommended = recommended_id()
     root = comfyui_paths.models_root()
+    budget = await _collect_budget(request.app)
     with comfyui_install.readable_tree():
         models = [
-            _model_row(model, recommended=recommended, job=jobs.get(model.id), root=root)
+            _model_row(
+                model, recommended=recommended, job=jobs.get(model.id), root=root, budget=budget
+            )
             for model in CATALOG.values()
         ]
-    return {"models": models, "engine": _engine_availability()}
+        store = _store_info(root)
+    return {"models": models, "engine": _engine_availability(), "store": store}
+
+
+# The wire form of a size: two to four ASCII digits a side, lower-case ``x``. Matched whole
+# (``fullmatch``), so a trailing newline does not slip through ``$``.
+_FIT_SIZE = re.compile(r"[0-9]{2,4}x[0-9]{2,4}")
+
+
+@router.get("/models/{model_id}/fit")
+async def comfyui_model_fit(
+    model_id: str, request: Request, size: str | None = None
+) -> dict[str, Any]:
+    """The model's fit at ``size`` (``WxH``; native when omitted) against this box's memory.
+
+    Returns ``{"fit": {...} | null}``, the same object a ``GET /models`` row carries, here
+    for any size: a size the catalog measured is exact, any other is estimated from the
+    nearest larger measurement (``need.gpu_estimated``). ``fit`` is ``null`` when the budget
+    is unknown. 404 ``comfyui.model_unknown`` for an id not in the catalog, and 422
+    ``image.invalid_size`` (``error.details.size``) for a ``size`` that is not two to four
+    digits, ``x``, two to four digits. The size is validated before the budget is read.
+    """
+    model = _require_model(model_id)
+    if size is not None and _FIT_SIZE.fullmatch(size) is None:
+        raise UnprocessableEntity(
+            f"size must be WIDTHxHEIGHT in pixels, for example 1024x1024; got {size!r}",
+            code="image.invalid_size",
+            details={"size": size},
+        )
+    budget = await _collect_budget(request.app)
+    return {"fit": _fit(model, size, budget)}
 
 
 def _schedule_install(app: FastAPI, model: ImageModel, job: PullJob) -> None:

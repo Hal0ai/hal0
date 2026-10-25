@@ -26,7 +26,9 @@ from hal0.api import create_app
 from hal0.comfyui import install as comfyui_install
 from hal0.comfyui import inventory, paths
 from hal0.comfyui.catalog import CATALOG, ImageModel, install_state, missing_gib, weights_gib
+from hal0.comfyui.fit import assess, need_for
 from hal0.config.schema import HardwareInfo
+from hal0.hardware.memory_budget import GpuBudget, MemoryBudget, RamBudget
 from hal0.registry.pull import PullJob, _tmp_dir
 
 _BASE = "hal0.api.routes.comfyui"
@@ -61,6 +63,71 @@ def plenty_of_disk(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         comfyui_install.shutil, "disk_usage", lambda path: _Usage(10**16, 0, 10**16)
     )
+
+
+def _gpu_budget(*, ram: RamBudget, render_free_gb: float, other_guests_gb: float) -> MemoryBudget:
+    """A shared 116 GB pool with no slot of this box on it, ``other_guests_gb`` held by others."""
+    gpu = GpuBudget(
+        kind="shared",
+        total_gb=116.0,
+        used_gb=other_guests_gb,
+        this_box=(),
+        image_engine_gb=0.0,
+        image_engine_slot=None,
+        image_engine_estimated=False,
+        other_guests_gb=other_guests_gb,
+        attribution_excess_gb=0.0,
+        free_gb=round(116.0 - other_guests_gb, 1),
+    )
+    return MemoryBudget(gpu=gpu, ram=ram, render_free_gb=render_free_gb)
+
+
+# Plan 4a's two reference boxes. The roomy one fits every renderable model; on the capped
+# guest the GPU pool has room for Qwen-Image (116 - 43.4 - 2 = 70.6 GB) and RAM does not.
+ROOMY_BOX = _gpu_budget(
+    ram=RamBudget(limit_gb=105.5, used_gb=16.1, free_gb=89.4, source="container"),
+    render_free_gb=107.4,
+    other_guests_gb=0.0,
+)
+CAPPED_GUEST = _gpu_budget(
+    ram=RamBudget(limit_gb=48.0, used_gb=2.2, free_gb=45.8, source="container"),
+    render_free_gb=70.6,
+    other_guests_gb=43.4,
+)
+NO_GPU_BUDGET = MemoryBudget(
+    gpu=None,
+    ram=RamBudget(limit_gb=48.0, used_gb=2.2, free_gb=45.8, source="container"),
+    render_free_gb=None,
+)
+
+
+class _Budget:
+    """Stands in for ``memory_source.collect_memory_budget`` and records each call."""
+
+    def __init__(self) -> None:
+        self.result: MemoryBudget | Exception = NO_GPU_BUDGET
+        self.apps: list[Any] = []
+
+    async def __call__(
+        self, app: Any, *, per_slot: Any = None, gpu_capable: bool | None = None
+    ) -> MemoryBudget:
+        self.apps.append(app)
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
+@pytest.fixture(autouse=True)
+def memory_budget(monkeypatch: pytest.MonkeyPatch) -> _Budget:
+    """Give every route here a fixed memory budget, so none reads the machine's GPU or RAM.
+
+    The default is a box with no GPU lane, whose fit is unknown. A test of the fit sets
+    ``memory_budget.result``. The collector itself is covered by
+    ``tests/hardware/test_memory_budget.py``.
+    """
+    budget = _Budget()
+    monkeypatch.setattr("hal0.api.memory_source.collect_memory_budget", budget)
+    return budget
 
 
 @pytest.fixture(autouse=True)
@@ -227,7 +294,7 @@ def test_models_lists_catalog_with_state(client: TestClient) -> None:
     body = client.get("/api/comfyui/models").json()
 
     assert [m["id"] for m in body["models"]] == list(CATALOG)
-    assert set(body) == {"models", "engine"}
+    assert set(body) == {"models", "engine", "store"}
     by_id = {m["id"]: m for m in body["models"]}
 
     sdxl = by_id[_SDXL]
@@ -378,6 +445,247 @@ def test_models_route_reports_engine_available(
 
     assert body["engine"] == {"available": True, "reason": None}
     assert [m["id"] for m in body["models"]] == list(CATALOG)
+
+
+# ── GET /models: fit and store ──────────────────────────────────────────────
+
+
+def test_models_rows_carry_fit_and_store(
+    client: TestClient, memory_budget: _Budget, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    memory_budget.result = CAPPED_GUEST
+    probed: list[Path] = []
+
+    def disk_usage(path: Path) -> _Usage:
+        probed.append(path)
+        return _Usage(10**13, 0, 100 * 2**30)
+
+    monkeypatch.setattr(comfyui_install.shutil, "disk_usage", disk_usage)
+
+    resp = client.get("/api/comfyui/models")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    # One budget per request, however many rows.
+    assert memory_budget.apps == [client.app]
+    assert body["store"] == {"free_gb": 100.0, "path": str(paths.models_root())}
+    assert len(probed) == 1
+
+    by_id = {m["id"]: m for m in body["models"]}
+    for model in CATALOG.values():
+        expected = assess(need_for(model, None), CAPPED_GUEST)
+        assert expected is not None
+        assert by_id[model.id]["fit"] == expected.as_dict(), model.id
+    sdxl = by_id[_SDXL]["fit"]
+    assert sdxl["verdict"] == "fits"
+    assert sdxl["reason"] is None
+    assert sdxl["need"] == {
+        "gpu_gb": 15.9,
+        "ram_gb": 7.1,
+        "gpu_estimated": False,
+        "ram_estimated": True,
+    }
+    qwen = by_id["qwen-image-lightning"]["fit"]
+    assert qwen["verdict"] == "wont_fit"
+    assert qwen["reason"] == "needs ~47.9 GB of RAM to load, 45.8 GB free (48.0 GB container limit)"
+    assert qwen["render_free_gb"] == 70.6
+    assert qwen["ram_free_gb"] == 45.8
+
+
+def test_models_fit_is_judged_at_the_native_size(
+    client: TestClient, memory_budget: _Budget
+) -> None:
+    memory_budget.result = ROOMY_BOX
+
+    by_id = {m["id"]: m for m in client.get("/api/comfyui/models").json()["models"]}
+
+    # SD 1.5 is measured at its native 512x512; SDXL Lightning at 1024x1024.
+    assert by_id["sd-1.5-pruned-emaonly"]["fit"]["need"]["gpu_gb"] == 11.6
+    assert by_id[_SDXL]["fit"]["need"]["gpu_gb"] == 15.9
+    assert all(m["fit"]["verdict"] == "fits" for m in by_id.values())
+
+
+def test_models_fit_is_null_without_a_gpu_budget(
+    client: TestClient, memory_budget: _Budget
+) -> None:
+    memory_budget.result = NO_GPU_BUDGET
+
+    resp = client.get("/api/comfyui/models")
+
+    assert resp.status_code == 200
+    models = resp.json()["models"]
+    assert [m["id"] for m in models] == list(CATALOG)
+    assert all(m["fit"] is None for m in models)
+
+
+def test_models_fit_is_null_when_the_budget_cannot_be_collected(
+    client: TestClient, memory_budget: _Budget, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A collector that raises is an unknown budget: the list answers 200 and never refuses."""
+    memory_budget.result = RuntimeError("stats singleton is gone")
+
+    with caplog.at_level("WARNING", logger=_BASE):
+        resp = client.get("/api/comfyui/models")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [m["id"] for m in body["models"]] == list(CATALOG)
+    assert all(m["fit"] is None for m in body["models"])
+    assert "store" in body
+    assert "comfyui.fit_budget_unavailable" in caplog.messages
+
+
+def test_models_store_measures_the_models_tree_or_its_nearest_parent(
+    client: TestClient, store: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    probed: list[Path] = []
+
+    def disk_usage(path: Path) -> _Usage:
+        probed.append(Path(path))
+        return _Usage(10**13, 0, 10 * 2**30)
+
+    monkeypatch.setattr(comfyui_install.shutil, "disk_usage", disk_usage)
+    # A fresh store: the store directory is there, the ComfyUI tree under it is not yet.
+    assert store.is_dir()
+    assert not paths.models_root().exists()
+
+    first = client.get("/api/comfyui/models").json()["store"]
+
+    # The reported path is the models tree; the filesystem measured is its nearest parent.
+    assert first == {"free_gb": 10.0, "path": str(paths.models_root())}
+    assert probed == [store]
+
+    paths.models_root().mkdir(parents=True)
+    probed.clear()
+    client.get("/api/comfyui/models")
+
+    assert probed == [paths.models_root()]
+
+
+def test_models_store_free_is_null_when_the_disk_cannot_be_measured(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(path: Path) -> _Usage:
+        raise OSError("stale file handle")
+
+    monkeypatch.setattr(comfyui_install.shutil, "disk_usage", broken)
+
+    resp = client.get("/api/comfyui/models")
+
+    assert resp.status_code == 200
+    assert resp.json()["store"] == {"free_gb": None, "path": str(paths.models_root())}
+
+
+# ── GET /models/{id}/fit ────────────────────────────────────────────────────
+
+
+def test_fit_route_answers_for_a_size(client: TestClient, memory_budget: _Budget) -> None:
+    memory_budget.result = ROOMY_BOX
+
+    custom = client.get(f"/api/comfyui/models/{_SDXL}/fit", params={"size": "1152x896"})
+
+    assert custom.status_code == 200
+    assert set(custom.json()) == {"fit"}
+    fit = custom.json()["fit"]
+    assert fit["verdict"] == "fits"
+    # Between no measurement and the 1024x1024 one: the larger size covers it, flagged estimated.
+    assert fit["need"]["gpu_gb"] == 15.9
+    assert fit["need"]["gpu_estimated"] is True
+
+    above = client.get(f"/api/comfyui/models/{_SDXL}/fit", params={"size": "2048x2048"}).json()
+    assert above["fit"]["need"]["gpu_gb"] == 51.0
+    assert above["fit"]["need"]["gpu_estimated"] is True
+
+    assert memory_budget.apps == [client.app, client.app]
+
+
+def test_fit_route_without_a_size_is_the_native_size(
+    client: TestClient, memory_budget: _Budget
+) -> None:
+    memory_budget.result = ROOMY_BOX
+
+    fit = client.get(f"/api/comfyui/models/{_SDXL}/fit").json()["fit"]
+
+    expected = assess(need_for(CATALOG[_SDXL], None), ROOMY_BOX)
+    assert expected is not None
+    assert fit == expected.as_dict()
+    assert fit["need"]["gpu_estimated"] is False
+
+
+def test_fit_route_refuses_what_wont_fit_in_words(
+    client: TestClient, memory_budget: _Budget
+) -> None:
+    memory_budget.result = CAPPED_GUEST
+
+    fit = client.get("/api/comfyui/models/qwen-image-lightning/fit").json()["fit"]
+
+    assert fit["verdict"] == "wont_fit"
+    assert fit["reason"] == "needs ~47.9 GB of RAM to load, 45.8 GB free (48.0 GB container limit)"
+
+
+@pytest.mark.parametrize(
+    "budget", [NO_GPU_BUDGET, RuntimeError("no stats")], ids=["no-gpu", "raises"]
+)
+def test_fit_route_is_null_without_a_budget(
+    client: TestClient, memory_budget: _Budget, budget: MemoryBudget | Exception
+) -> None:
+    memory_budget.result = budget
+
+    resp = client.get(f"/api/comfyui/models/{_SDXL}/fit")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"fit": None}
+
+
+def test_fit_route_unknown_model_is_404(client: TestClient, memory_budget: _Budget) -> None:
+    resp = client.get("/api/comfyui/models/no-such-model/fit")
+
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "comfyui.model_unknown"
+    assert resp.json()["error"]["details"] == {"model_id": "no-such-model"}
+    assert memory_budget.apps == []
+
+
+@pytest.mark.parametrize(
+    "size",
+    [
+        "bad",
+        "",
+        "1024",
+        "1024x",
+        "x1024",
+        "7x7",  # one digit a side
+        "12345x1024",  # five digits
+        "1024x1024x2",
+        "1024 x1024",
+        "-1024x1024",
+        "1024X1024",  # the wire form is lower-case, as in the models rows
+        "1e3x1e3",
+        "\u0661\u0660\u0662\u0664x\u0661\u0660\u0662\u0664",  # non-ASCII digits
+        "1024x1024\n",
+    ],
+)
+def test_fit_route_rejects_bad_size(client: TestClient, memory_budget: _Budget, size: str) -> None:
+    resp = client.get(f"/api/comfyui/models/{_SDXL}/fit", params={"size": size})
+
+    assert resp.status_code == 422
+    error = resp.json()["error"]
+    assert error["code"] == "image.invalid_size"
+    assert error["details"] == {"size": size}
+    # Refused before any budget is read.
+    assert memory_budget.apps == []
+
+
+@pytest.mark.parametrize("size", ["64x64", "9999x9999", "0512x0512"])
+def test_fit_route_accepts_any_two_to_four_digit_size(
+    client: TestClient, memory_budget: _Budget, size: str
+) -> None:
+    memory_budget.result = ROOMY_BOX
+
+    resp = client.get(f"/api/comfyui/models/{_SDXL}/fit", params={"size": size})
+
+    assert resp.status_code == 200
+    assert resp.json()["fit"] is not None
 
 
 # ── GET /status ─────────────────────────────────────────────────────────────
