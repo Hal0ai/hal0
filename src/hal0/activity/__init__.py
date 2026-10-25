@@ -30,8 +30,8 @@ import io
 import json
 import sqlite3
 import time
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -181,13 +181,26 @@ class AuditStore:
         self.max_rows = max_rows
 
     # ── connection ────────────────────────────────────────────────────────
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """Open one connection for the ``with`` body, then commit and close it.
+
+        ``sqlite3.Connection`` as a context manager only commits (or rolls
+        back); it never closes. An unclosed connection sits in a reference cycle
+        (its statement cache), so it lingers until the cyclic GC runs and then
+        logs ``ResourceWarning: unclosed database``. Close it here, after the
+        commit/rollback, whatever the body does.
+        """
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.db_path, timeout=5.0)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        return conn
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def init_schema(self) -> None:
         """Create the table + indexes if absent. Idempotent; first-boot safe."""
