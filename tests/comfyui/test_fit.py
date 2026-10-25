@@ -58,7 +58,7 @@ def _row(vram_mb: float) -> dict[str, Any]:
 
 @pytest.fixture
 def reference_box() -> MemoryBudget:
-    """This box's four slots on the shared pool: 107.4 GB free for a render, 89.4 GB of RAM."""
+    """This box's four slots on the shared pool: 114.0 GB free for a render, 89.4 GB of RAM."""
     return build_memory_budget(
         sample=_sample(gtt_used_mb=44441.6),
         gpu_capable=True,
@@ -273,7 +273,7 @@ def test_qwen_fits_on_reference_box(reference_box: MemoryBudget) -> None:
 
 
 def test_sdxl_fits_on_reference_box(reference_box: MemoryBudget) -> None:
-    assert reference_box.render_free_gb == 107.4
+    assert reference_box.render_free_gb == 114.0
 
     fit = assess(need_for(SDXL, None), reference_box)
 
@@ -281,9 +281,48 @@ def test_sdxl_fits_on_reference_box(reference_box: MemoryBudget) -> None:
         verdict="fits",
         reason=None,
         need=Need(gpu_gb=15.9, ram_gb=7.1, gpu_estimated=False, ram_estimated=True),
-        render_free_gb=107.4,
+        render_free_gb=114.0,
         ram_free_gb=89.4,
     )
+
+
+def test_sdxl_fits_beside_a_warm_engine_on_a_24_gib_pool() -> None:
+    """A back-to-back render: the engine still holds 8 GiB from the last one.
+
+    The 15.9 GB need is measured above an idle engine and the engine renders inside its own
+    allocation, so that 8 GiB is room, not a cost. Built through ``build_memory_budget`` so
+    the test pins the pairing of the need with the budget's room figure: the budget used to
+    subtract the engine (24 - 8 - 2 = 14 GB), which refused a render that succeeds.
+    """
+    budget = build_memory_budget(
+        sample=GPUMemorySample(
+            vendor="amd",
+            is_uma=True,
+            vram_total_mb=512.0,
+            gtt_total_mb=24576.0,
+            total_mb=24576.0,
+            vram_used_mb=100.0,
+            gtt_used_mb=8192.0,
+            used_mb=8192.0,
+            gpu_busy=0.1,
+            util_is_forced_high=False,
+        ),
+        gpu_capable=True,
+        per_slot={"img": _row(8192.0)},
+        gpu_slots=frozenset({"img"}),
+        img_slot="img",
+        image_engine_mb=8192.0,
+        ram=REFERENCE_RAM,
+    )
+    assert budget.render_free_gb == 22.0
+
+    fit = assess(need_for(SDXL, "1024x1024"), budget)
+
+    assert fit is not None
+    assert fit.need.gpu_gb == 15.9
+    assert fit.verdict == "fits"
+    assert fit.reason is None
+    assert fit.render_free_gb == 22.0
 
 
 def test_sdxl_fits_on_capped_guest(capped_guest: MemoryBudget) -> None:

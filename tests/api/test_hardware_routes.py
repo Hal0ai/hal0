@@ -827,8 +827,8 @@ class TestStatsHardwareMemory:
         assert [(s["slot"], s["state"]) for s in memory["gpu"]["this_box"]] == [("brain", "ready")]
         assert memory["ram"]["source"] == "container"
         assert memory["ram"]["limit_gb"] == 64.0
-        # 80 pool - 0 other guests - 3 engine - 0 starting - 2 margin.
-        assert memory["render_free_gb"] == 75.0
+        # 80 pool - 0 other guests - 0 starting - 2 margin: the 3 GB engine is room, not a cost.
+        assert memory["render_free_gb"] == 78.0
 
     def test_per_slot_keeps_its_shape_beside_the_budget(
         self, memory_box: types.SimpleNamespace

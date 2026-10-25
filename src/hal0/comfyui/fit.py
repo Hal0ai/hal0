@@ -18,12 +18,13 @@ resources. The verdict is the worse of the two, and ``reason`` names the one tha
 What the figures mean:
 
 * **GPU need** is the pool a render takes *above an idle engine* at one size, the same
-  increment ``render_free_gb`` leaves room for (the budget already subtracts the idle
-  engine, other guests, slots still loading and a 2 GB margin). Measured sizes are exact.
-  Any other size is an estimate that never undershoots the measurements: the smallest
-  measured size at least as large, or the largest measurement scaled by pixel count.
-  A model nobody measured needs its weight total, which is a lower bound (SD 1.5 weighs
-  4.0 GB and was measured at 11.6).
+  increment ``render_free_gb`` leaves room for (the budget subtracts other guests, slots
+  still loading and a 2 GB margin, and not the engine: it renders inside its own
+  allocation, so a model it still holds from the last render is room, not a second cost).
+  Measured sizes are exact. Any other size is an estimate that never undershoots the
+  measurements: the smallest measured size at least as large, or the largest measurement
+  scaled by pixel count. A model nobody measured needs its weight total, which is a lower
+  bound (SD 1.5 weighs 4.0 GB and was measured at 11.6).
 * **RAM need** is what the load takes. A measured ``load_ram_gb`` is a *floor* (the
   anonymous RSS the kernel reported when it killed the load), so it never lowers the need
   below the weight total. Without one the need is the weight total, estimated.

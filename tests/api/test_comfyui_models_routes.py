@@ -87,7 +87,7 @@ def _gpu_budget(*, ram: RamBudget, render_free_gb: float, other_guests_gb: float
 # guest the GPU pool has room for Qwen-Image (116 - 43.4 - 2 = 70.6 GB) and RAM does not.
 ROOMY_BOX = _gpu_budget(
     ram=RamBudget(limit_gb=105.5, used_gb=16.1, free_gb=89.4, source="container"),
-    render_free_gb=107.4,
+    render_free_gb=114.0,
     other_guests_gb=0.0,
 )
 CAPPED_GUEST = _gpu_budget(

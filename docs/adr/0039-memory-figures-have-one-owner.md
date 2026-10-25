@@ -14,6 +14,11 @@ It does not amend an earlier record. It applies the rule ADR-0029 states for
 config, one owner per fact, to memory figures. ADR-0037 gave image models a
 catalog; this record gives the memory they are measured against one source.
 
+**Amended (2026-10-25, image readiness API).** `render_free_gb` no longer
+subtracts the image engine. The fit check judges a catalog need that is measured
+above an idle engine, so subtracting the engine's own memory as well counted a
+warm engine's weights twice. Decision 4 has the formula and the reason.
+
 ## Context
 
 At one moment on the reference box, five figures that all read as "memory"
@@ -156,8 +161,9 @@ The pool's usage is the kernel counter. The budget splits it by who holds it.
   - ComfyUI's figure is not used on a dedicated card. `torch.cuda.mem_get_info`
     is device-wide there: the figure already holds every other slot's weights
     and any other process's memory, so taking it as the engine's share would
-    count them twice and understate `render_free_gb` by the size of the slots
-    that image mode is about to unload.
+    count them twice: `attribution_excess_gb` would read the size of the slots,
+    and `other_guests_gb` would collapse to 0, so `render_free_gb` would read too
+    high by whatever other guests hold.
   - It is not used when ComfyUI runs on the CPU either: its `vram_*` fields
     then describe system RAM, and `engine_used_mb` returns `None`.
 - **Other guests.** `other_guests_gb` is the counter minus this box:
@@ -173,10 +179,19 @@ The pool's usage is the kernel counter. The budget splits it by who holds it.
 
 - `free_gb` is `max(0, total - used)`.
 - `render_free_gb` is what a render can use once image mode has unloaded this
-  box's GPU slots: `max(0, total - other_guests - image_engine - starting
-  slots - RENDER_MARGIN_GB)`.
+  box's GPU slots: `max(0, total - other_guests - starting slots -
+  RENDER_MARGIN_GB)`.
   - It leaves out resident GPU slots because every GPU LLM slot unloads for a
     render (`docs/concepts/slots.mdx`, "The GPU arbiter").
+  - It does not subtract the image engine. The catalog's `gpu_peak_gb` is the
+    rise above an idle engine, and the render runs inside the engine's own
+    allocation: it reuses a resident model, or frees its cached one before
+    loading another. So the engine's memory, a model still resident from the
+    last render included, is room for the render. Subtracting it as well counted
+    a warm engine's weights in the need and again in the room, and refused
+    renders that succeed. The engine still counts as attributed, so
+    `other_guests_gb` never absorbs it, and its own context, which the
+    measurement leaves out, is well under the margin.
   - It subtracts slots in the `starting` state, at their estimated footprint,
     because a slot still loading when image mode starts finishes onto the pool
     (#3056). Those slots are listed in `this_box`, but they are not counted as
@@ -290,7 +305,9 @@ still disagree with the rest of the dashboard.
   - On a shared pool the image engine figure is ComfyUI's own view of its
     device, and hal0 counts it as the engine's share. It has not been confirmed
     on shared hardware that the figure rises with a render and ignores other
-    processes.
+    processes. If it took in another process's memory, `render_free_gb` would
+    read too high by that amount, because decision 4 counts the engine's
+    figure as room.
   - On a discrete card the image engine figure is always the img slot's
     estimate, and `image_engine_estimated` says so. The card's `used_gb` and
     `free_gb` still come from the kernel counter; only the split of the usage

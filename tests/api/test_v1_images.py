@@ -36,7 +36,8 @@ from structlog.testing import capture_logs
 from hal0.comfyui import paths
 from hal0.comfyui.catalog import CATALOG, component_path, weights_gib
 from hal0.comfyui.fit import Need, assess, need_for
-from hal0.hardware.memory_budget import GpuBudget, MemoryBudget, RamBudget
+from hal0.hardware.gpu_view import GPUMemorySample
+from hal0.hardware.memory_budget import GpuBudget, MemoryBudget, RamBudget, build_memory_budget
 from hal0.upstreams.registry import Upstream
 from tests.fixtures.memory_budget import MemoryBudgetStub
 
@@ -1782,6 +1783,58 @@ def test_v1_images_preflight_only_wont_fit_refuses(
 
     assert r.status_code == 200, r.text
     mock_infer.assert_awaited_once()
+
+
+def test_v1_images_preflight_renders_beside_a_warm_engine(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, memory_budget: MemoryBudgetStub
+) -> None:
+    """A back-to-back render is not refused for the weights the engine still holds.
+
+    SDXL Lightning needs 15.9 GB above an idle engine. With 8 GiB still resident on a 24 GiB
+    pool the budget used to leave 24 - 8 - 2 = 14 GB (a 422 ``image.wont_fit`` for a render
+    that succeeds); the engine renders inside its own allocation, so it leaves 22 GB. The
+    budget is built by ``build_memory_budget`` so the preflight sees the real pairing.
+    """
+    _install("sdxl-lightning")
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+    memory_budget.result = build_memory_budget(
+        sample=GPUMemorySample(
+            vendor="amd",
+            is_uma=True,
+            vram_total_mb=512.0,
+            gtt_total_mb=24576.0,
+            total_mb=24576.0,
+            vram_used_mb=100.0,
+            gtt_used_mb=8192.0,
+            used_mb=8192.0,
+            gpu_busy=0.1,
+            util_is_forced_high=False,
+        ),
+        gpu_capable=True,
+        per_slot={
+            "img": {
+                "vram_mb": 8192.0,
+                "ram_mb": 0.0,
+                "mem_mb": 8192.0,
+                "state": "ready",
+                "model_id": "sdxl-lightning",
+            }
+        },
+        gpu_slots=frozenset({"img"}),
+        img_slot="img",
+        image_engine_mb=8192.0,
+        ram=RamBudget(limit_gb=64.0, used_gb=20.0, free_gb=44.0, source="container"),
+    )
+
+    r = client.post("/v1/images/generations", json=_fit_request("sdxl-lightning"))
+
+    assert r.status_code == 200, r.text
+    mock_infer.assert_awaited_once()
+    assert memory_budget.result.render_free_gb == 22.0
+    fit = assess(need_for(CATALOG["sdxl-lightning"], "1024x1024"), memory_budget.result)
+    assert fit is not None
+    assert (fit.need.gpu_gb, fit.verdict) == (15.9, "fits")
 
 
 def test_v1_images_preflight_runs_for_the_img_selection_model(

@@ -55,7 +55,7 @@ weight total.
 | `fit.need.gpu_gb` | The pool the render takes above an idle engine at this size. |
 | `fit.need.ram_gb` | The RAM the model's load takes. |
 | `fit.need.gpu_estimated`, `fit.need.ram_estimated` | `true` when the figure is an estimate. |
-| `fit.render_free_gb` | The GPU figure the need was judged against: the memory budget's `render_free_gb`, the pool a render can use once image mode has unloaded this box's GPU slots. |
+| `fit.render_free_gb` | The GPU figure the need was judged against: the memory budget's `render_free_gb`, the pool a render can use once image mode has unloaded this box's GPU slots. It does not subtract the image engine's own memory, because `fit.need.gpu_gb` is measured above an idle engine, so a back-to-back render is not refused for the weights the engine still holds. |
 | `fit.ram_free_gb` | The RAM figure the need was judged against: the memory budget's `ram.free_gb`, free under this box's RAM limit, which inside a container is the container's limit. |
 | `store.path` | The ComfyUI models folder: `<model store>/comfyui/models` unless `HAL0_COMFYUI_DATA_ROOT` moves it. |
 | `store.free_gb` | Free space on the filesystem under that folder (the nearest existing parent when the folder does not exist yet). `null` when it cannot be measured, never `0`. |

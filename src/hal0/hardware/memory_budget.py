@@ -47,7 +47,8 @@ if TYPE_CHECKING:
     from hal0.hardware.gpu_view import GPUMemorySample
 
 # Headroom kept back from a render's budget for the driver, the compositor and
-# allocator slop. Subtracted once, from the pool, in ``render_free_gb``.
+# allocator slop. Subtracted once, from the pool, in ``render_free_gb``. It also covers
+# the idle engine's own context, which the catalog's measured need leaves out.
 RENDER_MARGIN_GB = 2.0
 
 _STARTING = "starting"
@@ -111,7 +112,10 @@ class MemoryBudget:
     """The whole budget: the GPU pool (``None`` without a GPU lane) and RAM.
 
     ``render_free_gb`` is how much pool a render can use once image mode has
-    unloaded this box's resident GPU slots; ``None`` exactly when ``gpu`` is.
+    unloaded this box's resident GPU slots; ``None`` exactly when ``gpu`` is. It is
+    ``max(0, total - other guests - starting slots - RENDER_MARGIN_GB)``: the image
+    engine's own allocation is room for its render, not a cost against it (see
+    :func:`build_memory_budget`).
     """
 
     gpu: GpuBudget | None
@@ -177,6 +181,17 @@ def build_memory_budget(
     ``other_guests`` rather than as an overshoot) and subtracted from
     ``render_free_gb`` instead, because it finishes loading onto the pool
     (#3056).
+
+    ``render_free_gb`` does not subtract the image engine. The catalog's
+    ``gpu_peak_gb`` is measured as the rise above an idle engine and includes
+    loading the weights, and the render runs inside the engine's own allocation:
+    it reuses a resident model, or frees its cached one before loading another.
+    So the engine's memory (a model still resident from the last render included)
+    is room for the render. Subtracting it as well counted a warm engine's
+    weights twice and refused renders that succeed. The engine still counts as
+    attributed (``other_guests_gb`` is ``used - resident - engine``), so it is
+    never booked as another guest. The idle engine's own context, which the
+    measured need leaves out, is well under :data:`RENDER_MARGIN_GB`.
     """
     if not gpu_capable or sample is None:
         return MemoryBudget(gpu=None, ram=ram, render_free_gb=None)
@@ -212,9 +227,10 @@ def build_memory_budget(
     other_guests_mb = max(0.0, used_mb - resident_mb - engine_mb)
     excess_mb = max(0.0, resident_mb + engine_mb - used_mb)
     free_mb = max(0.0, total_mb - used_mb)
+    # The engine is not subtracted: it renders inside its own allocation (see the docstring).
     render_free_mb = max(
         0.0,
-        total_mb - other_guests_mb - engine_mb - starting_mb - RENDER_MARGIN_GB * 1024.0,
+        total_mb - other_guests_mb - starting_mb - RENDER_MARGIN_GB * 1024.0,
     )
 
     gpu = GpuBudget(

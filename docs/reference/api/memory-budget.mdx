@@ -54,7 +54,7 @@ Every GB value is MiB ÷ 1024, rounded to one decimal.
 | `ram.limit_gb` | This box's RAM limit: the smaller of `MemTotal` and the tightest finite `memory.max` (cgroup v2) or `memory.limit_in_bytes` (v1) on the process's cgroup chain, from its own cgroup up to the root. Inside an LXC guest `MemTotal` already carries the guest's limit. Read live on every call. |
 | `ram.used_gb`, `ram.free_gb` | `used` is `MemTotal − MemAvailable`, so reclaimable page cache is not counted. It is system-wide, so under a cap below `MemTotal` it can exceed `limit_gb`. `free` is `max(0, limit − used)`. |
 | `ram.source` | `container` when `/run/systemd/container` exists or a finite cgroup limit was found on the chain, otherwise `system`. |
-| `render_free_gb` | The pool a render can use once image mode has unloaded this box's GPU slots: `max(0, total − other guests − image engine − starting slots − 2.0)`. The `2.0` GB is a fixed margin for the driver and allocator. |
+| `render_free_gb` | The pool a render can use once image mode has unloaded this box's GPU slots: `max(0, total − other guests − starting slots − 2.0)`. The image engine is not subtracted: a model's GPU need is measured above an idle engine, and the engine renders inside its own allocation, so the memory it holds (a model still resident from the last render included) is room for the render, not a cost against it. The `2.0` GB is a fixed margin for the driver, the allocator and the idle engine's own context. |
 
 ## Null and zero rules
 

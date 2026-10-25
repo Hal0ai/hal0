@@ -130,7 +130,8 @@ def test_shared_pool_reference_box() -> None:
     assert gpu.free_gb == 72.6
     # The image slot is the engine here (no ComfyUI view): 6758.4 MiB = 6.6 GB.
     assert gpu.image_engine_gb == 6.6
-    assert budget.render_free_gb == 107.4  # 116 - 0 - 6.6 - 2
+    # 116 - 0 - 2: the 6.6 GB engine is room for its render, not a cost against it.
+    assert budget.render_free_gb == 114.0
 
 
 def test_this_box_lists_the_other_gpu_slots_with_their_state() -> None:
@@ -171,7 +172,47 @@ def test_image_engine_view_wins_over_slot_attribution() -> None:
     assert gpu.other_guests_gb == 0
     # 39.8 + 4.4 - 43.4 = 0.8 over-attributed.
     assert gpu.attribution_excess_gb == 0.8
-    assert budget.render_free_gb == 109.6  # 116 - 0 - 4.4 - 2
+    assert budget.render_free_gb == 114.0  # 116 - 0 - 2: the engine's figure is not subtracted
+
+
+def _warm_engine_budget(*, engine_mb: float, guest_mb: float = 0.0) -> MemoryBudget:
+    """A 24 GiB shared pool: the image engine holds ``engine_mb``, another guest ``guest_mb``."""
+    return _reference_budget(
+        sample=_shared_sample(gtt_total_mb=24576.0, gtt_used_mb=engine_mb + guest_mb),
+        per_slot={"img": _row(engine_mb)},
+        gpu_slots=frozenset({"img"}),
+        image_engine_mb=engine_mb,
+    )
+
+
+def test_a_warm_engine_is_room_for_its_render_not_a_cost() -> None:
+    """The catalog's need is measured above an idle engine, and the engine renders inside its
+    own allocation, so its memory (a model still resident from the last render included) is
+    room for the render. Subtracting it too counted the resident weights twice.
+    """
+    budget = _warm_engine_budget(engine_mb=8192.0)
+    gpu = _gpu(budget)
+
+    assert gpu.image_engine_gb == 8.0
+    assert gpu.other_guests_gb == 0  # the engine's memory is never booked as another guest
+    assert budget.render_free_gb == 22.0  # 24 - 0 - 0 - 2, not 24 - 0 - 8 - 2 = 14
+
+
+def test_render_free_is_the_same_for_an_idle_and_a_warm_engine() -> None:
+    idle = _warm_engine_budget(engine_mb=1024.0, guest_mb=4096.0)
+    warm = _warm_engine_budget(engine_mb=8192.0, guest_mb=4096.0)
+
+    assert _gpu(idle).image_engine_gb == 1.0
+    assert _gpu(warm).image_engine_gb == 8.0
+    assert idle.render_free_gb == warm.render_free_gb == 18.0
+
+
+def test_another_guests_memory_is_still_subtracted_beside_a_warm_engine() -> None:
+    budget = _warm_engine_budget(engine_mb=8192.0, guest_mb=4096.0)
+    gpu = _gpu(budget)
+
+    assert gpu.other_guests_gb == 4.0
+    assert budget.render_free_gb == 18.0  # 24 - 4 - 0 - 2
 
 
 def test_image_engine_zero_from_the_view_is_not_a_missing_view() -> None:
@@ -212,7 +253,8 @@ def test_dedicated_card_ignores_comfyuis_device_wide_reading() -> None:
 
     24 GB card, 15 GB in use: 14 GB is the brain slot and 1 GB is someone else's. ComfyUI,
     idle, still reports 15 GB (everything on the card). Taking that as the engine would
-    book the brain's 14 GB twice and leave a render 7 GB short.
+    book the brain's 14 GB twice and hide the other guest's 1 GB, so a render would be
+    offered 22 GB where 21 is free.
     """
     rows = {"brain": _row(14336.0)}
     budget = build_memory_budget(
@@ -230,7 +272,7 @@ def test_dedicated_card_ignores_comfyuis_device_wide_reading() -> None:
     assert gpu.image_engine_gb == 0  # no img row to borrow: the engine is not resident
     assert gpu.other_guests_gb == 1.0
     assert gpu.attribution_excess_gb == 0
-    assert budget.render_free_gb == 21.0  # 24 - 1 - 0 - 2, not 24 - 1 - 15 - 2 = 6
+    assert budget.render_free_gb == 21.0  # 24 - 1 - 2, not 24 - 0 - 2 = 22 with the guest hidden
 
 
 def test_dedicated_card_takes_the_img_slots_row_for_the_engine() -> None:
@@ -249,7 +291,8 @@ def test_dedicated_card_takes_the_img_slots_row_for_the_engine() -> None:
     assert gpu.image_engine_gb == 4.0
     assert gpu.image_engine_estimated is True
     assert gpu.other_guests_gb == 1.0  # 19 used - 14 brain - 4 engine
-    assert budget.render_free_gb == 17.0  # 24 - 1 - 4 - 2: the 14 GB brain is unloaded first
+    # 24 - 1 - 2: the 14 GB brain is unloaded first, and the 4 GB engine is room.
+    assert budget.render_free_gb == 21.0
 
 
 def test_image_slot_without_a_row_and_no_view_is_zero() -> None:
@@ -497,7 +540,7 @@ def test_as_dict_shape() -> None:
         "free_gb": 44.0,
         "source": "container",
     }
-    assert d["render_free_gb"] == 107.4
+    assert d["render_free_gb"] == 114.0
     # The engine is named by the backend, and flagged when it is the img slot's
     # own estimate (this reference box has no ComfyUI reading).
     assert d["gpu"]["image_engine_slot"] == "img"
