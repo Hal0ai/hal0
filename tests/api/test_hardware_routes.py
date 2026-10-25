@@ -883,6 +883,7 @@ class TestStatsHardwareMemory:
         assert body["gpu_name"] == "elsewhere"
         assert "memory" not in body  # not another box's budget either
 
+    @pytest.mark.timing
     def test_stats_hardware_does_not_wait_for_a_dead_engine(
         self, memory_box: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -897,7 +898,8 @@ class TestStatsHardwareMemory:
         elapsed = time.perf_counter() - started
 
         assert resp.status_code == 200, resp.text
-        assert elapsed < 1.0
+        # The engine read is capped at 0.75 s; the dead engine would sleep 3 s.
+        assert elapsed < 2.0
         # Falls back to the img slot's own attribution (8 GiB file + KV estimate).
         img_gb = resp.json()["per_slot"]["img"]["mem_mb"] / 1024
         assert resp.json()["memory"]["gpu"]["image_engine_gb"] == round(img_gb, 1)

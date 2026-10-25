@@ -524,8 +524,11 @@ def test_dataclasses_are_frozen_and_slotted() -> None:
 
     for obj in (gpu, _reference_budget(), RAM, gpu.this_box[0]):
         assert not hasattr(obj, "__dict__")
+        # Assign a real field: on CPython 3.12 a frozen+slots dataclass raises a bare
+        # TypeError (not FrozenInstanceError) for a name that is not one of its fields.
+        field = dataclasses.fields(obj)[0].name
         with pytest.raises(dataclasses.FrozenInstanceError):
-            obj.total_gb = 1.0  # type: ignore[attr-defined]
+            setattr(obj, field, None)
 
 
 # ── Live RAM limit ───────────────────────────────────────────────────────────
