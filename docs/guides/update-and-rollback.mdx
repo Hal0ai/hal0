@@ -275,6 +275,21 @@ The first `hal0 update` to 1.6.0 changes how Hermes is installed. One step is ne
 - **The agent chat proxy is removed.** `/api/agents/{id}/events`, `/submit` and `/session/*` return 404.
 - **Key rotation now ends open sockets and streams** (WebSocket close code `4401`, SSE `event: revoked`).
 
+## Upgrading to 1.7.0
+
+- **Run `hal0 slot restart img` once after the update.** ComfyUI loads its
+  GPU gate node (`hal0_gpu_gate`) when the `img` container starts, and
+  `hal0 update` does not restart slots. Until you restart it, the running
+  container keeps the gate from the release before, which lets a prompt
+  through when `hal0-api` is unreachable and after its own 120 seconds, and
+  such a prompt can render next to the LLM slots. See
+  [ComfyUI's editor and the GPU gate](/docs/guides/generate-images#comfyuis-editor-and-the-gpu-gate).
+- **With auth enforcement on, image generation stops until you opt out.** The
+  new gate has no credential for an auth-enforced `hal0-api` yet, so with
+  `hal0 auth require on` it refuses every image prompt. Set
+  `HAL0_COMFYUI_GATE_FAIL_OPEN=1` in `/etc/hal0/api.env`, restart `hal0-api`,
+  then run `hal0 slot restart img` to keep the v1.6.5 behaviour, unguarded.
+
 ## Upgrading from an older release
 
 Upgrades start at **1.4.0** (from 1.6.0; 1.3.0 before that). Every release
@@ -391,6 +406,25 @@ slot files or any other config: that is config state, deliberately decoupled
 from the code tree. The one exception is the profile-centric conversion below.
 
 Rolling back from 1.6.0 to 1.5.x leaves Hermes running on the release 1.6.0 built, and leaves the Hermes build failing until you update again. 1.6.0 records a Python 3.14 interpreter in `/etc/hal0/hermes-python.env`, and 1.5.x accepts only 3.12, so its Hermes converge stops with `Hermes Python must be exactly 3.12: <path> reports 3.14`. The 1.5.x MCP probe also fails against the mcp 2.0 client in the new venv, so every `hal0 update` on 1.5.x reports the Hermes venv as broken and `hal0 agent reprovision hermes` and `hal0 agent reprovision hermes` fail at `mcp_wire`. Do not edit `hermes-python.env` to point 1.5.x at a 3.12 interpreter: 1.5's builder then replaces the release symlink at `/var/lib/hal0/venvs/hermes` with a 0.19.0 venv and leaves a stray `/var/lib/hal0/venvs/hermes.rollback-<pid>` behind. Update back to 1.6.0 instead, which clears these errors.
+
+Rolling back from 1.7.0 to 1.6.x needs the GPU gate put back by hand. 1.7.0
+copies its `hal0_gpu_gate.py` into ComfyUI's `custom_nodes` directory, and 1.6.x
+never replaces it (only its installer wrote that file). The 1.7.0 gate reads
+`GET /api/comfyui/arbiter`, which 1.6.x answers with 404, so it refuses every
+image prompt as hal0-unreachable, and restarting `img` alone loads the same
+file again. After the rollback, copy the 1.6.x gate back over it and restart
+the slot:
+
+```sh
+sudo cp /usr/lib/hal0/current/installer/comfyui/custom_nodes/hal0_gpu_gate.py \
+  <comfyui data root>/custom_nodes/hal0_gpu_gate.py
+hal0 slot restart img
+```
+
+The ComfyUI data root is `HAL0_COMFYUI_DATA_ROOT` when set, else `comfyui/`
+under the model store. The `img` slot's unit names it in its `custom_nodes`
+mount: `grep custom_nodes /etc/containers/systemd/hal0-slot@*.container`.
+Updating to 1.7.0 again replaces the file with the 1.7.0 gate.
 
 ### Rolling back past the profile-centric conversion
 
