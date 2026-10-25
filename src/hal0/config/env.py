@@ -31,8 +31,11 @@ loopback.  Two things close that, and neither is enough alone:
   sees a name twice the later assignment wins.  A name or value holding ``\\r``
   would let the text after it read to systemd as a second
   ``HAL0_OWUI_BIND_HOST=`` below the first, while podman still sees one
-  variable.  So a value with a line break or NUL, and a name that is empty or
-  holds a line break, NUL or ``=``, are refused.
+  variable.  A blank at either end of a name does the same: systemd trims it
+  to the bind host, podman keeps a trailing one in the name (and a leading one
+  would slip a second bind-host line past the host check).  So a value with a
+  line break or NUL, and a name that is empty, holds a line break, NUL or
+  ``=``, or starts or ends with a space or tab, are refused.
 
 The first-line placement and the host check apply only to a dict that has the
 bind host: a file without it carries nothing to hide, and the unit's own
@@ -130,8 +133,9 @@ def write_env_atomic(
                  the rename fails for a filesystem reason.
         TypeError: If path is not str or Path, or values in env_dict are
                    not strings.
-        ValueError: If a value contains a line break or NUL, a key is empty or
-                    contains a line break, NUL or ``=``, or the value of
+        ValueError: If a value contains a line break or NUL, a key is empty,
+                    contains a line break, NUL or ``=``, or starts or ends
+                    with a space or tab, or the value of
                     ``HAL0_OWUI_BIND_HOST`` is not a plain IP address or
                     hostname.  Raised while the lines are built, before the
                     tmpfile exists, so the file at *path* is left untouched.
@@ -147,8 +151,11 @@ def write_env_atomic(
         value = env_dict[key]
         if not isinstance(value, str):
             raise TypeError(f"env value for {key!r} must be str, got {type(value).__name__}")
-        if not key or any(c in key for c in "\n\r\0="):
-            raise ValueError(f"env key {key!r} cannot be empty or contain a line break, NUL or '='")
+        if not key or any(c in key for c in "\n\r\0=") or key != key.strip(" \t"):
+            raise ValueError(
+                f"env key {key!r} cannot be empty or contain a line break, NUL or '=', "
+                "or start or end with a blank"
+            )
         if any(c in value for c in "\n\r\0"):
             raise ValueError(f"env value for {key!r} cannot contain a line break or NUL")
         if key == BIND_HOST_KEY and not _is_plain_host(value):

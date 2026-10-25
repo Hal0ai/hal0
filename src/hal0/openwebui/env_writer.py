@@ -600,9 +600,11 @@ def write_openwebui_env(
                    denied, parent directory missing and uncreatable).
         TypeError: If an override value is not a string.
         ValueError: If a value, preserved or overridden, holds a line break or
-                   NUL, or ``HAL0_OWUI_BIND_HOST`` is not a plain IP address
-                   or hostname. Nothing is written, so a file already there
-                   is left as it was.
+                   NUL, a key is empty or holds a line break, NUL or ``=`` or
+                   starts or ends with a space or tab, or
+                   ``HAL0_OWUI_BIND_HOST`` is not a plain IP address or
+                   hostname. Nothing is written, so a file already there is
+                   left as it was.
     """
     target: Path = Path(path) if path is not None else _default_path()
 

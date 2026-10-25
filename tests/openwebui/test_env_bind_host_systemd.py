@@ -349,6 +349,57 @@ def test_the_cr_hazard_is_real_systemd_keeps_the_later_assignment(raw: bytes) ->
     assert parse_systemd_env(text)[BIND_HOST_KEY] == "0.0.0.0"
 
 
+#: A blank at the end of a name is the same split without a line break: systemd
+#: trims trailing blanks from a name (KEY above), podman keeps them, so
+#: ``HAL0_OWUI_BIND_HOST `` is a second variable to podman but the bind host
+#: again to systemd, and the later line wins.
+_TRAILING_PADDED_BIND_HOST_KEYS = ["HAL0_OWUI_BIND_HOST ", "HAL0_OWUI_BIND_HOST\t"]
+_PADDED_BIND_HOST_KEYS = [*_TRAILING_PADDED_BIND_HOST_KEYS, " HAL0_OWUI_BIND_HOST"]
+
+
+@pytest.mark.parametrize("padded", _TRAILING_PADDED_BIND_HOST_KEYS)
+def test_the_trailing_blank_hazard_is_real_systemd_keeps_the_later_assignment(padded: str) -> None:
+    """Control for ``test_a_padded_bind_host_key_is_refused_by_the_primitive``:
+    this is the file the primitive would write without its key guard."""
+    text = f"{BIND_HOST_KEY}=127.0.0.1\n{padded}=0.0.0.0\n"
+    assert parse_podman_env(text)[BIND_HOST_KEY] == "127.0.0.1"
+    assert parse_systemd_env(text)[BIND_HOST_KEY] == "0.0.0.0"
+
+
+def test_a_leading_blank_key_is_the_bind_host_again_to_both_parsers() -> None:
+    """Control: podman trims the whole line's leading blanks, so a leading-blank
+    name is the bind host to both readers and the later line wins in both.  The
+    host check only ever saw the first line's value, so the later one would
+    reach ``podman -p`` unchecked."""
+    text = f"{BIND_HOST_KEY}=127.0.0.1\n {BIND_HOST_KEY}=0.0.0.0\n"
+    assert parse_podman_env(text)[BIND_HOST_KEY] == "0.0.0.0"
+    assert parse_systemd_env(text)[BIND_HOST_KEY] == "0.0.0.0"
+
+
+@pytest.mark.parametrize("padded", _PADDED_BIND_HOST_KEYS)
+def test_a_padded_bind_host_key_is_refused_by_the_primitive(tmp_path: Path, padded: str) -> None:
+    """The primitive is what makes the bind-host line the one systemd reads, so
+    it must not write a name that systemd trims down to the bind host."""
+    target = tmp_path / "x.env"
+    with pytest.raises(ValueError, match="env key"):
+        env_primitive.write_env_atomic(target, {BIND_HOST_KEY: "127.0.0.1", padded: "0.0.0.0"})
+    assert list(tmp_path.iterdir()) == []  # nothing written, not even a tmpfile
+
+
+def test_a_preserved_file_with_padded_keys_still_renders_with_trimmed_keys(tmp_path: Path) -> None:
+    """The reader trims blanks around a key, so a hand-padded name reaches the
+    primitive trimmed and the key guard never trips on a preserved file."""
+    target = tmp_path / "openwebui.env"
+    target.write_bytes(b"HAL0_OWUI_BIND_HOST\t=127.0.0.1\n  WEBUI_NAME \t=kept\n")
+    write_openwebui_env(target, preserve_existing=True)
+    text = target.read_text(encoding="utf-8")
+    assert parse_podman_env(text)[BIND_HOST_KEY] == "127.0.0.1"
+    assert parse_systemd_env(text)[BIND_HOST_KEY] == "127.0.0.1"
+    assert parse_podman_env(text)["WEBUI_NAME"] == "kept"
+    assert "HAL0_OWUI_BIND_HOST\t" not in text
+    assert text.count("HAL0_OWUI_BIND_HOST=") == 1
+
+
 @pytest.mark.parametrize("raw", _SPLIT_BY_CR)
 def test_a_preserved_line_that_systemd_would_split_is_refused(tmp_path: Path, raw: bytes) -> None:
     target = tmp_path / "openwebui.env"

@@ -40,13 +40,29 @@ def test_a_line_break_or_nul_is_refused_and_nothing_is_written(tmp_path: Path, b
 
 @pytest.mark.parametrize(
     "bad",
-    ["", "A=B", "=A", "A\nB", "A\rB", "A\0B", "X\rHAL0_OWUI_BIND_HOST", "HAL0_OWUI_BIND_HOST\r"],
+    [
+        "",
+        "A=B",
+        "=A",
+        "A\nB",
+        "A\rB",
+        "A\0B",
+        "X\rHAL0_OWUI_BIND_HOST",
+        "HAL0_OWUI_BIND_HOST\r",
+        "HAL0_OWUI_BIND_HOST ",
+        " HAL0_OWUI_BIND_HOST",
+        "HAL0_OWUI_BIND_HOST\t",
+        "\tA",
+        "A ",
+    ],
 )
 def test_a_key_that_cannot_be_one_name_is_refused_and_nothing_is_written(
     tmp_path: Path, bad: str
 ) -> None:
     """A CR in a key reads to podman as part of the name but to systemd as a line
-    break, so what follows it becomes an assignment of its own."""
+    break, so what follows it becomes an assignment of its own.  A blank at either
+    end of a key is the same split: podman keeps ``HAL0_OWUI_BIND_HOST `` as a
+    name of its own, systemd trims it to the bind host and the later line wins."""
     target = tmp_path / "x.env"
     target.write_text("KEEP=1\n", encoding="utf-8")
     with pytest.raises(ValueError, match=re.escape(f"env key {bad!r} cannot be empty or contain")):
