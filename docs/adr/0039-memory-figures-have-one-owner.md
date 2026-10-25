@@ -33,10 +33,11 @@ disagreed.
   `useComfyui.ts`). The pool's real cap on the reference box is 116 GiB.
 - **A limit on no screen.** On a second guest on the same GPU with a 48 GiB
   container limit, the dashboard's headroom promised 114 GB, and Qwen-Image was
-  OOM-killed at 47.7 GB. The limit that killed it appeared nowhere. The probe's
-  `cgroup_max_mb` read only the leaf cgroup's `memory.max`. Inside an LXC guest
-  that file says `max`. For a service in a systemd slice it says `max` as well,
-  because the limit sits on the slice above the service.
+  OOM-killed with an `anon-rss` of 45.5 GB (47732248 KiB). The limit that
+  killed it appeared nowhere. The probe's `cgroup_max_mb` read only the leaf
+  cgroup's `memory.max`. Inside an LXC guest that file says `max`. For a
+  service in a systemd slice it says `max` as well, because the limit sits on
+  the slice above the service.
 - **A stale snapshot.** The install-time hardware probe is a snapshot. It
   recorded 96 GB on a guest whose live limit is 105.5 GB.
 

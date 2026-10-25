@@ -72,6 +72,16 @@ Every GB value is MiB ÷ 1024, rounded to one decimal.
 The response keeps every key it had before. `per_slot` keeps its shape and still
 omits slots that are starting.
 
+## Other readers
+
+The image fit verdicts read the same budget. Each `fit` on `GET /api/comfyui/models`,
+`GET /api/comfyui/models/{model_id}/fit` and the preflight of `POST /v1/images/generations`
+collect it with the same function that builds this block and judge a model's need against
+`render_free_gb` and `ram.free_gb`, so a verdict and the memory screens cannot disagree
+about what is free. A verdict is `null`, never "won't fit", when `gpu` and `render_free_gb`
+are `null` or `ram.limit_gb` is `0`. See the
+[Image readiness API reference](/docs/reference/api/image-readiness/).
+
 ## Known limits
 
 - **A discrete card's image engine is an estimate.** ComfyUI reports

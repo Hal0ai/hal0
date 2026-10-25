@@ -116,8 +116,17 @@ Key fields:
   `error`).
 - `arbiter` — the GPU arbiter's own block: `mode` (`img` or `llm`),
   `pinned`, `saved_llm_slots` (the slots it will reload), `switching` (true
-  while it holds its switch lock) and `image_jobs` (the `/v1/images/generations`
-  requests in flight). `null` when the arbiter cannot report.
+  while it holds its switch lock), `image_jobs` (the `/v1/images/generations`
+  requests in flight) and `phase`, what the GPU is doing right now:
+  `draining`, `unloading`, `starting_engine` or `reloading` during a switch or
+  restore, and `handoff`, `rendering` or `grace` in image mode, else `null`.
+  The whole block is `null` when the arbiter cannot report.
+- `progress` — the step of the render hal0 submitted that ComfyUI is running:
+  `model`, `step` out of `total`, `node` and `elapsed_s`; `null` when none is
+  live. A render queued from ComfyUI's editor has no entry; read `queue` for it.
+- `gate`, `gate_refusal` — whether the engine runs the current GPU gate, and
+  the latest prompt the gate refused (see
+  [ComfyUI's editor and the GPU gate](#comfyuis-editor-and-the-gpu-gate)).
 
 Every probe degrades to a safe default: a dead engine surfaces as
 `stopped`, never a 500.
@@ -221,7 +230,13 @@ carries the reason, when:
 - hal0 answers 401 or 403, at once: the gate's credential is missing or no
   longer current (see below).
 
-Queue the prompt again once the reason is gone.
+Queue the prompt again once the reason is gone. The node also tells hal0 why it
+refused, and `GET /api/comfyui/status` reports the latest as `gate_refusal`
+(`at` and `reason`). Its `gate.state` says whether the engine runs the current
+gate: `current`; `stale`, an older gate, so run `hal0 slot restart img`;
+`unknown`, because the gate has not called since `hal0-api` started; or
+`no_credential`, because hal0 requires the gate to authenticate and it has no
+token it can send.
 
 To let prompts through while `hal0-api` is down or refuses the gate's
 credential, as the gate did in v1.6.5, set `HAL0_COMFYUI_GATE_FAIL_OPEN=1` in
@@ -247,7 +262,9 @@ container keeps the gate it started with, and `hal0 update` does not restart
 slots. hal0 keeps that older gate waiting while it switches or restores the
 GPU, but the older gate lets a prompt through when `hal0-api` is unreachable or
 after its own 120 seconds, and such a prompt can render next to the LLM slots.
-Restarting the slot loads the gate described here.
+Restarting the slot loads the gate described here. Until you do, the older
+gate does not report why it refused a prompt, and `gate.state` on
+`/api/comfyui/status` reads `stale` once it has called.
 
 ## The `[image]` slot config
 
@@ -305,8 +322,11 @@ catalog model or a `ckpt/<path>` checkpoint; leave it out to use the model
 selected for `img`. Any other id returns **404** (`image.model_unknown`, with
 the ids that work), a catalog model that is not installed **409**
 (`image.model_not_installed`, naming the install call), and a video, edit or
-upscale model **422** (`image.model_not_renderable`). A hal0 extension
-`extra_body` accepts `seed`, `steps`, `cfg`, and `negative_prompt`. See
+upscale model **422** (`image.model_not_renderable`). A `size` that is not
+a string gets **422** (`image.invalid_size`), and a render the box cannot hold
+gets **422** (`image.wont_fit`; see [Will it fit?](#will-it-fit)). A hal0
+extension `extra_body` accepts `seed`, `steps`, `cfg`, `negative_prompt` and
+`hal0_skip_fit_check`. See
 [OpenAI-compatible API reference](/docs/reference/api/openai-compat/) for the
 resolution order and how `size` and `steps` default.
 
@@ -329,6 +349,51 @@ To cancel an in-flight or queued render:
 ```sh
 curl -X POST http://localhost:8080/api/comfyui/render/cancel
 ```
+
+## Will it fit?
+
+Image models are large, and a render draws on two budgets that are different
+resources: the GPU pool and this box's RAM. hal0 judges each catalog model
+against both, with the same figures the memory screens show
+([Memory budget API reference](/docs/reference/api/memory-budget/)), and says
+so before it unloads anything.
+
+`GET /api/comfyui/models` gives every model a `fit` at its native size, and
+`GET /api/comfyui/models/{model_id}/fit?size=1536x1536` gives the verdict at
+another size:
+
+- `fits` — the model fits both budgets.
+- `tight` — it fits, but the need is above 90% of what is free in one of them.
+- `wont_fit` — the need is above what is free. `reason` says which budget:
+  "needs ~47.9 GB of RAM to load, 45.8 GB free (48.0 GB container limit)".
+- `null` — hal0 cannot tell, because the box has no GPU pool reading or its
+  RAM cannot be read. Unknown is never `wont_fit`.
+
+The two budgets are never added together. The GPU budget is the pool a render can use
+once image mode has unloaded this box's GPU slots; the RAM budget is what is
+free under this box's RAM limit, which inside a container is the container's
+limit. That second budget is why a model can fail on a large GPU: Qwen-Image
+Lightning needs about 48 GB of RAM to load, so a guest limited to 48 GB reads
+`wont_fit` however large its GPU pool is.
+
+`POST /v1/images/generations` checks the same verdict at the size it will
+render and refuses a `wont_fit` render with **422** `image.wont_fit` before
+any slot is unloaded: the LLM slots stay loaded and nothing about the GPU
+changes. `error.details` carries the figures. If the box misreads its own
+memory, skip the check for one request:
+
+```json
+{
+  "model": "qwen-image-lightning",
+  "prompt": "a cat in a hat",
+  "extra_body": { "hal0_skip_fit_check": true }
+}
+```
+
+A `fits` built on an estimated figure (`need.gpu_estimated`,
+`need.ram_estimated`) can still run out of memory, which then fails the render
+as it did before. The fields are in the
+[Image readiness API reference](/docs/reference/api/image-readiness/).
 
 ## Quick-launch workflows
 

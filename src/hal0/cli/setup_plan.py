@@ -128,13 +128,12 @@ def _render_plan_table(sel: Selections, *, strict: bool) -> bool:
         low = free_gib < MIN_FREE_GIB
         if low:
             console.print(
-                f"  [red]WARN[/red] only {free_gib:.1f} GiB free "
-                f"(< {MIN_FREE_GIB:.0f} GiB threshold)"
+                f"  [red]WARN[/red] only {free_gib:.1f} GB free (< {MIN_FREE_GIB:.0f} GB threshold)"
             )
             if strict:
                 has_error = True
         else:
-            console.print(f"  {free_gib:.1f} GiB free")
+            console.print(f"  {free_gib:.1f} GB free")
     console.print(f"[bold]NPU opt-in:[/bold] {sel.npu_opt_in}")
     console.print()
 
