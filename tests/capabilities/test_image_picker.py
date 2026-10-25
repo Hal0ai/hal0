@@ -22,7 +22,7 @@ from hal0.capabilities import catalog
 from hal0.capabilities.orchestrator import CapabilityOrchestrator
 from hal0.capabilities.profile_fit import profile_name_for_fit
 from hal0.comfyui import autoselect, inventory, paths
-from hal0.comfyui.catalog import CATALOG, component_path
+from hal0.comfyui.catalog import CATALOG, component_path, weights_gib
 from hal0.errors import BadRequest, Conflict, NotFound
 from hal0.providers._gpu import (
     GpuPreflightError,
@@ -192,7 +192,7 @@ def test_image_picker_rows_pass_the_display_fields_through(
     lightning = rows["sdxl-lightning"]
     assert lightning["display_name"] == CATALOG["sdxl-lightning"].label
     assert lightning["license"] == CATALOG["sdxl-lightning"].license
-    assert lightning["size_gb"] == CATALOG["sdxl-lightning"].approx_gb
+    assert lightning["size_gb"] == weights_gib(CATALOG["sdxl-lightning"])
     assert sum(1 for r in rows.values() if r["recommended"]) == 1
 
 

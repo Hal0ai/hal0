@@ -434,7 +434,7 @@ def _ask_image_models(hw: HardwareInfo, *, console: Console) -> tuple[str, ...]:
             str(number),
             offer.id,
             escape(offer.label),
-            "on disk" if offer.missing_gb == 0 else f"{offer.missing_gb:.1f} GB",
+            "on disk" if offer.missing_gb == 0 else f"{offer.missing_gb:.1f} GiB",
             f"~{offer.est_seconds}s",
             "[green]recommended[/green]" if offer.recommended else "",
         )

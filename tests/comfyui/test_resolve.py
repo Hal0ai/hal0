@@ -13,7 +13,13 @@ from pathlib import Path
 import pytest
 
 from hal0.comfyui import paths
-from hal0.comfyui.catalog import CATALOG, USER_CKPT_TEMPLATES, component_path, load_template
+from hal0.comfyui.catalog import (
+    CATALOG,
+    USER_CKPT_TEMPLATES,
+    component_path,
+    load_template,
+    weights_gib,
+)
 from hal0.comfyui.resolve import (
     ImageModelNotInstalled,
     ImageModelNotRenderable,
@@ -96,8 +102,10 @@ def test_resolve_not_installed_409() -> None:
     assert (err.code, err.status) == ("image.model_not_installed", 409)
     assert err.details["model"] == "sdxl-turbo"
     assert err.details["install"] == "POST /api/comfyui/models/sdxl-turbo/install"
-    assert err.details["missing_gb"] == CATALOG["sdxl-turbo"].approx_gb
+    assert err.details["missing_gb"] == weights_gib(CATALOG["sdxl-turbo"])  # GiB, not decimal GB
+    assert err.details["missing_gb"] == 6.4  # 6.9e9 bytes
     assert "sdxl-turbo" in err.message
+    assert "6.4 GiB still to download" in err.message
 
 
 def test_resolve_partial_install_is_not_installed() -> None:
@@ -111,8 +119,9 @@ def test_resolve_partial_install_is_not_installed() -> None:
     with pytest.raises(ImageModelNotInstalled) as exc:
         resolve_image_model("sdxl-lightning", selection_model=None)
 
+    # the LoRA and the VAE: 0.4 + 0.3 decimal GB is 0.7e9 bytes, 0.7 GiB (to one decimal)
     assert exc.value.details["missing_gb"] == round(
-        sum(c.approx_gb for c in model.components[1:]), 1
+        sum(c.approx_gb for c in model.components[1:]) * 1e9 / 2**30, 1
     )
 
 

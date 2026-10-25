@@ -51,6 +51,8 @@ from hal0.comfyui.catalog import (
     ImageModel,
     get_model,
     install_state,
+    missing_gib,
+    weights_gib,
 )
 from hal0.comfyui.picker import recommended_for
 from hal0.config.schema import HardwareInfo
@@ -64,7 +66,11 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ImageOffer:
-    """One model on offer. ``missing_gb`` is what is still to download (0 once it is all on disk)."""
+    """One model on offer. ``missing_gb`` is what is still to download (0 once it is all on disk).
+
+    Both sizes are GiB, as in the image-model API rows, so the menu and
+    ``hal0 comfyui models list`` quote one figure for one download.
+    """
 
     id: str
     label: str
@@ -90,8 +96,8 @@ def image_offers(hw: HardwareInfo) -> list[ImageOffer]:
         ImageOffer(
             id=model.id,
             label=model.label,
-            approx_gb=model.approx_gb,
-            missing_gb=install_state(model, root).missing_gb,
+            approx_gb=weights_gib(model),
+            missing_gb=missing_gib(install_state(model, root)),
             est_seconds=model.est_seconds,
             recommended=model.id == recommended,
             license=model.license,
@@ -109,9 +115,7 @@ def no_offer_reason(hw: HardwareInfo) -> str | None:
 def offer_text(offer: ImageOffer) -> str:
     """The one-line description of ``offer`` that ``--plan`` prints and the menu shows."""
     done = " (already downloaded)" if offer.missing_gb == 0 else ""
-    return (
-        f"{offer.label} — {offer.missing_gb:.1f} GB download, ~{offer.est_seconds}s per image{done}"
-    )
+    return f"{offer.label} — {offer.missing_gb:.1f} GiB download, ~{offer.est_seconds}s per image{done}"
 
 
 _SEPARATORS = re.compile(r"[,\s]+")

@@ -68,7 +68,9 @@ from hal0.comfyui.catalog import (
     get_model,
     install_state,
     load_template,
+    missing_gib,
     models_using,
+    weights_gib,
 )
 from hal0.comfyui.picker import recommended_id
 from hal0.hardware import gpu_view
@@ -759,7 +761,9 @@ def _model_row(
 
     ``missing`` names each absent weight file relative to the models root, like the
     paths ``DELETE /models/{id}`` reports. ``job`` is the model's latest install, if any.
-    ``root`` is the models tree, resolved once per request by the caller.
+    ``root`` is the models tree, resolved once per request by the caller. ``approx_gb``
+    and ``missing_gb`` are GiB, like every GB figure the memory budget reports (ADR-0039);
+    the catalog's own decimal GB never leaves it.
     """
     state = install_state(model, root)
     return {
@@ -773,8 +777,8 @@ def _model_row(
         "sizes": list(model.sizes),
         "notes": model.notes,
         "defaults": _template_defaults(model),
-        "approx_gb": model.approx_gb,
-        "missing_gb": state.missing_gb,
+        "approx_gb": weights_gib(model),
+        "missing_gb": missing_gib(state),
         "state": state.state,
         "missing": [f"{c.kind.subdir}/{c.relpath}" for c in state.missing],
         "workflow": model.workflow_filename,

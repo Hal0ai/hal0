@@ -29,7 +29,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from hal0.comfyui import paths
-from hal0.comfyui.catalog import CATALOG, component_path
+from hal0.comfyui.catalog import CATALOG, component_path, weights_gib
 from hal0.upstreams.registry import Upstream
 
 
@@ -376,7 +376,7 @@ def test_v1_images_409_when_the_model_is_not_installed(
     error = r.json()["error"]
     assert error["code"] == "image.model_not_installed"
     assert error["details"]["install"] == "POST /api/comfyui/models/sdxl-turbo/install"
-    assert error["details"]["missing_gb"] == CATALOG["sdxl-turbo"].approx_gb
+    assert error["details"]["missing_gb"] == weights_gib(CATALOG["sdxl-turbo"])  # GiB
     mock_infer.assert_not_called()
 
 

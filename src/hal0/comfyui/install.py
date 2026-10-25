@@ -34,6 +34,7 @@ import httpx
 
 from hal0.comfyui import paths
 from hal0.comfyui.catalog import (
+    BYTES_PER_GIB,
     CATALOG,
     Component,
     ImageModel,
@@ -184,6 +185,9 @@ def preflight_disk(model: ImageModel) -> None:
     both. ``details["path"]`` is the directory measured, ``details["required_bytes"]`` what
     is still to fetch and ``details["staged_bytes"]`` what was taken off. A filesystem that
     cannot be measured is skipped, as the downloader's own per-file check does.
+
+    The check compares bytes; only the message's figures are rounded, and they are GiB, as
+    the API rows are.
     """
     required = staged = 0
     for component in install_state(model).missing:
@@ -198,12 +202,12 @@ def preflight_disk(model: ImageModel) -> None:
     except OSError:
         return
     if required > free:
-        need = f"{round(required / 1e9, 2):g} GB"
+        need = f"{round(required / BYTES_PER_GIB, 2):g} GiB"
         if staged:
-            need += f" more ({round(staged / 1e9, 2):g} GB already staged)"
+            need += f" more ({round(staged / BYTES_PER_GIB, 2):g} GiB already staged)"
         raise InstallInsufficientDisk(
             f"insufficient disk for {model.label}: need about {need}, "
-            f"{free / 1e9:.1f} GB free at {probe}",
+            f"{free / BYTES_PER_GIB:.1f} GiB free at {probe}",
             details={
                 "required_bytes": required,
                 "free_bytes": free,
@@ -618,7 +622,8 @@ async def _report_progress(job: PullJob, say: Callable[[str], None]) -> None:
             try:
                 say(
                     f"  {job.model_id}: {pct}% "
-                    f"({job.bytes_downloaded / 1e9:.1f}/{job.bytes_total / 1e9:.1f} GB)"
+                    f"({job.bytes_downloaded / BYTES_PER_GIB:.1f}"
+                    f"/{job.bytes_total / BYTES_PER_GIB:.1f} GiB)"
                 )
             except Exception:
                 log.exception(
@@ -634,7 +639,7 @@ async def install_each(
 
     An unknown id or a model that will not fit on disk is reported through ``say`` and comes
     back ``failed``; the rest still run. Each model's lines are a start line,
-    ``  <id>: <pct>% (<done>/<total> GB)`` at most every :data:`_PROGRESS_INTERVAL_S` while it
+    ``  <id>: <pct>% (<done>/<total> GiB)`` at most every :data:`_PROGRESS_INTERVAL_S` while it
     downloads, and an end line. Used by the setup paths
     (:func:`hal0.install.image_models.provision_image_models`), which run it on their own
     event loop.

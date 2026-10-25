@@ -177,15 +177,15 @@ def _render_plan_table(sel: Selections, *, strict: bool) -> bool:
     console.print(ext_table)
 
     if sel.image_models:
-        from hal0.comfyui.catalog import get_model
+        from hal0.comfyui.catalog import get_model, weights_gib
 
         console.print("[bold]Image models[/bold]")
         image_table = Table()
         image_table.add_column("Model")
-        image_table.add_column("Download (GB)", justify="right")
+        image_table.add_column("Download (GiB)", justify="right")
         for model_id in sel.image_models:
             model = get_model(model_id)
-            image_table.add_row(model_id, f"{model.approx_gb:.1f}" if model else "?")
+            image_table.add_row(model_id, f"{weights_gib(model):.1f}" if model else "?")
         console.print(image_table)
 
     console.print()

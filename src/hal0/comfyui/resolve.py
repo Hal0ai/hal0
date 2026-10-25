@@ -32,6 +32,7 @@ from hal0.comfyui.catalog import (
     install_route,
     install_state,
     load_template,
+    missing_gib,
 )
 from hal0.errors import Hal0Error
 
@@ -150,10 +151,11 @@ def resolve_image_model(model_id: str | None, *, selection_model: str | None) ->
         state = install_state(model)
         if state.state != "complete":
             install = install_route(model.id)
+            still_to_download = missing_gib(state)  # GiB, like the models route's rows
             raise ImageModelNotInstalled(
-                f"image model {model.id!r} is not installed ({state.missing_gb} GB still to "
+                f"image model {model.id!r} is not installed ({still_to_download} GiB still to "
                 f"download); install it with {install}",
-                details={"model": model.id, "install": install, "missing_gb": state.missing_gb},
+                details={"model": model.id, "install": install, "missing_gb": still_to_download},
             )
         return ResolvedImageModel(
             id=model.id,

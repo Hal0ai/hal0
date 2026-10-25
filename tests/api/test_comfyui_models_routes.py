@@ -25,7 +25,7 @@ from fastapi.testclient import TestClient
 from hal0.api import create_app
 from hal0.comfyui import install as comfyui_install
 from hal0.comfyui import inventory, paths
-from hal0.comfyui.catalog import CATALOG, ImageModel, install_state
+from hal0.comfyui.catalog import CATALOG, ImageModel, install_state, missing_gib, weights_gib
 from hal0.config.schema import HardwareInfo
 from hal0.registry.pull import PullJob, _tmp_dir
 
@@ -238,13 +238,13 @@ def test_models_lists_catalog_with_state(client: TestClient) -> None:
     assert sdxl["license"] == model.license
     assert sdxl["est_seconds"] == model.est_seconds
     assert sdxl["sizes"] == list(model.sizes)
-    assert sdxl["approx_gb"] == model.approx_gb
+    assert sdxl["approx_gb"] == weights_gib(model)
     assert sdxl["state"] == "partial"
     assert sdxl["missing"] == [
         "loras/sdxl_lightning_8step_lora.safetensors",
         "vae/sdxl_vae_fp16_fix.safetensors",
     ]
-    assert sdxl["missing_gb"] == install_state(model).missing_gb
+    assert sdxl["missing_gb"] == missing_gib(install_state(model))
     assert sdxl["workflow"] == "sdxl-lightning.json"
     assert sdxl["job"] is None
 
@@ -252,6 +252,24 @@ def test_models_lists_catalog_with_state(client: TestClient) -> None:
     assert by_id["esrgan-4x"]["missing"] == []
     assert by_id["esrgan-4x"]["missing_gb"] == 0
     assert by_id["qwen-image"]["state"] == "none"
+
+
+def test_models_rows_report_gib(client: TestClient) -> None:
+    """Every GB figure in a row is GiB, so it reads against the memory budget (ADR-0039)."""
+    _land(CATALOG["qwen-image-lightning"], only=1)  # the 40.9 GB diffusion model
+    by_id = {m["id"]: m for m in client.get("/api/comfyui/models").json()["models"]}
+
+    qwen = by_id["qwen-image-lightning"]
+    # the catalog stays decimal GB; only the row converts
+    assert CATALOG["qwen-image-lightning"].approx_gb == pytest.approx(51.4)
+    assert qwen["approx_gb"] == 47.9  # the same bytes in GiB
+    assert qwen["missing_gb"] == 9.8  # 10.5e9 bytes still to download
+    edit = by_id["qwen-image-edit"]  # shares no file with what was landed
+    assert edit["state"] == "none"
+    assert edit["approx_gb"] == 47.1  # 50.6e9 bytes
+    assert edit["missing_gb"] == 47.1  # all of it
+    for model_id, row in by_id.items():
+        assert row["approx_gb"] == weights_gib(CATALOG[model_id]), model_id
 
 
 def test_models_rows_carry_the_templates_default_parameters(client: TestClient) -> None:

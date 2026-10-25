@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from importlib import resources
 from pathlib import Path
@@ -20,11 +21,13 @@ from hal0.comfyui.catalog import (
     install_route,
     install_state,
     load_template,
+    missing_gib,
     models_using,
     recommended_model_id,
     render_template,
     template_weight_refs,
     weight_refs,
+    weights_gib,
 )
 
 EXPECTED_IDS = [
@@ -289,6 +292,78 @@ def test_approx_gb_is_the_component_sum() -> None:
     model = CATALOG["sdxl-lightning"]
     assert model.approx_gb == round(sum(c.approx_gb for c in model.components), 1)
     assert model.approx_gb == pytest.approx(7.6)
+
+
+def test_weights_gib_converts_decimal() -> None:
+    """The catalog's ``approx_gb`` is decimal GB; ``weights_gib`` is the same bytes in GiB."""
+    qwen = CATALOG["qwen-image-lightning"]
+    assert qwen.approx_gb == pytest.approx(51.4)  # 40.9 + 9.4 + 0.3 + 0.8, decimal GB
+    assert weights_gib(qwen) == 47.9  # 51.4e9 / 2**30
+    assert weights_gib(CATALOG["sdxl-lightning"]) == 7.1  # 7.6e9 / 2**30, not 7.6
+    for model in CATALOG.values():
+        assert weights_gib(model) == round(model.approx_gb * 1e9 / 2**30, 1)
+        assert weights_gib(model) <= model.approx_gb  # a GiB is the larger unit
+
+
+def test_missing_gib_converts_the_components_still_to_download(models_root: Path) -> None:
+    model = CATALOG["qwen-image-lightning"]
+    assert missing_gib(install_state(model)) == weights_gib(model)  # nothing on disk
+
+    _touch(model.components[0])  # the 40.9 GB diffusion model
+    partial = install_state(model)
+    assert partial.missing_gb == 10.5  # decimal GB: 9.4 + 0.3 + 0.8
+    assert missing_gib(partial) == 9.8  # 10.5e9 / 2**30
+
+    for component in model.components[1:]:
+        _touch(component)
+    assert missing_gib(install_state(model)) == 0
+
+
+_MEASURED_GPU_PEAK = {
+    "sd-1.5-pruned-emaonly": {"512x512": 11.6},
+    "sdxl-lightning": {"1024x1024": 15.9, "1536x1536": 28.7},
+}
+
+
+def test_measured_facts_present() -> None:
+    """The 2026-10-24 bench: peak GPU-pool rise per rendered size, and one load-time RAM floor."""
+    for model_id, peaks in _MEASURED_GPU_PEAK.items():
+        assert dict(CATALOG[model_id].gpu_peak_gb) == peaks, model_id
+    assert CATALOG["qwen-image-lightning"].load_ram_gb == 47.7  # anon-rss at the OOM kill
+    # A measurement is at a size the box actually rendered, and a rise above idle is positive.
+    for model in CATALOG.values():
+        for size, peak in model.gpu_peak_gb.items():
+            assert re.fullmatch(r"[1-9]\d*x[1-9]\d*", size), (model.id, size)
+            assert peak > 0, (model.id, size)
+        assert model.load_ram_gb is None or model.load_ram_gb > 0, model.id
+
+
+def test_unmeasured_models_carry_no_facts() -> None:
+    """Nothing is estimated: a model nobody measured says so with an empty map and ``None``."""
+    turbo = CATALOG["sdxl-turbo"]
+    assert dict(turbo.gpu_peak_gb) == {}
+    assert turbo.load_ram_gb is None
+
+
+def test_gpu_peak_gb_is_read_only_and_copies_the_caller_dict() -> None:
+    with pytest.raises(TypeError):
+        CATALOG["sdxl-lightning"].gpu_peak_gb["1024x1024"] = 1.0  # type: ignore[index]
+    source = {"512x512": 11.6}
+    model = ImageModel(
+        id="t",
+        label="T",
+        task="txt2img",
+        components=(),
+        template="sd15_simple",
+        api_renderable=False,
+        sizes=(),
+        est_seconds=1,
+        license="x",
+        gpu_peak_gb=source,
+    )
+    source["768x768"] = 20.0
+    assert dict(model.gpu_peak_gb) == {"512x512": 11.6}
+    assert hash(CATALOG["sdxl-lightning"]) == hash(CATALOG["sdxl-lightning"])  # the map is unhashed
 
 
 def test_models_are_frozen_and_hashable() -> None:
