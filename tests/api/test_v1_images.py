@@ -888,6 +888,65 @@ def test_v1_images_provider_error_surfaces(
     assert r.json()["error"]["code"] == "dispatch.upstream_failed"
 
 
+@pytest.fixture
+def gate_refusals() -> Any:
+    """The comfyui routes module with no gate refusal recorded, before and after."""
+    from hal0.api.routes import comfyui as comfyui_routes
+
+    comfyui_routes._reset_state()
+    yield comfyui_routes
+    comfyui_routes._reset_state()
+
+
+def test_v1_records_gate_refusal_from_provider(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, gate_refusals: Any
+) -> None:
+    """ComfyUI's GPU gate refused the prompt (it answers 503 with its reason). hal0 sees that
+    only here, since the gate's own report needs the credential it may be missing: the route
+    records it for ``/api/comfyui/status``, and the caller gets the reason as a 503."""
+    _install("sdxl-turbo")
+    _seed_img_upstream(client)
+
+    from hal0.providers import get_provider
+    from hal0.providers.comfyui import ImageGateRefused
+
+    reason = "hal0 requires authentication and ComfyUI's GPU gate has no credential (HTTP 401)"
+
+    async def _refused(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise ImageGateRefused(reason, details={"port": 8186})
+
+    monkeypatch.setattr(get_provider("comfyui"), "infer", _refused)
+
+    r = client.post("/v1/images/generations", json={"model": "sdxl-turbo", "prompt": "x"})
+
+    assert r.status_code == 503
+    assert r.json()["error"]["code"] == "image.gate_refused"
+    assert r.json()["error"]["message"] == reason
+    recorded = client.get("/api/comfyui/arbiter").json()["gate_refusal"]
+    assert recorded is not None and recorded["reason"] == reason
+    assert gate_refusals._gate_refusal == recorded
+
+
+def test_v1_images_an_ordinary_provider_error_is_not_a_gate_refusal(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, gate_refusals: Any
+) -> None:
+    _install("sdxl-turbo")
+    _seed_img_upstream(client)
+
+    from hal0.providers import get_provider
+    from hal0.providers.comfyui import ComfyUIInferError
+
+    async def _raises(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise ComfyUIInferError("comfyui POST /prompt returned HTTP 503")
+
+    monkeypatch.setattr(get_provider("comfyui"), "infer", _raises)
+
+    r = client.post("/v1/images/generations", json={"model": "sdxl-turbo", "prompt": "x"})
+
+    assert r.status_code == 502
+    assert gate_refusals._gate_refusal is None
+
+
 # ─── cold-slot dispatch path (issue #725) ────────────────────────────────────
 
 

@@ -1886,15 +1886,20 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
       refused before the arbiter unloads a GPU slot. ``error.details`` carries ``need``,
       ``render_free_gb``, ``ram_free_gb``, ``model`` and ``size``. An unknown budget never
       refuses; ``extra_body.hal0_skip_fit_check: true`` skips the check.
+    * 503 ``image.gate_refused`` when ComfyUI's GPU gate refused the prompt (hal0 did not
+      hand it the GPU); ``error.message`` is the gate's reason, which is also recorded as
+      the gate's latest refusal on ``GET /api/comfyui/status``.
 
     A client that disconnects (the dashboard's Cancel) while the GPU switches is answered with
     an empty 499 and nothing is submitted to ComfyUI; the arbiter restores the GPU as usual.
     """
+    from hal0.api.routes.comfyui import record_gate_refusal
     from hal0.comfyui.install import readable_tree
     from hal0.comfyui.resolve import resolve_image_model
     from hal0.dispatcher.router import NoRouteFound, UpstreamUnavailable
     from hal0.errors import Hal0Error, UnprocessableEntity
     from hal0.providers import get_provider
+    from hal0.providers.comfyui import ImageGateRefused
 
     class _ImagePromptRequired(Hal0Error):
         code = "image.prompt_required"
@@ -2035,7 +2040,14 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
             "_hal0_ckpt_override": resolved.ckpt_override,
             "_hal0_model": resolved.id,
         }
-        result = await provider.infer(port, body_with_meta)
+        try:
+            result = await provider.infer(port, body_with_meta)
+        except ImageGateRefused as exc:
+            # ComfyUI's GPU gate refused this render. On a box that requires auth the gate
+            # may have no credential to report it with (the report is refused like its
+            # other requests), so hal0 records it from the render that ran into it.
+            record_gate_refusal(exc.message)
+            raise
 
     # Track most-recent-model for dashboard.
     last_used = getattr(request.app.state, "last_used_model", None)

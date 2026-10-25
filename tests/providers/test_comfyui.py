@@ -1051,3 +1051,145 @@ async def test_hal0_model_never_reaches_the_workflow_builder(
 
     assert seen_bodies
     assert not any(k.startswith("_hal0_") for k in seen_bodies[0])
+
+
+# ─── the GPU gate's refusal of a prompt ───────────────────────────────────────
+
+_GATE_REASON = (
+    "hal0 requires authentication and ComfyUI's GPU gate has no credential (HTTP 401), so the "
+    "prompt was not queued. Run `hal0 slot restart img` to give the gate its current credential"
+)
+
+
+def _refused_prompt(reason: str = _GATE_REASON) -> dict[str, Any]:
+    """The body the hal0_gpu_gate node answers ``/prompt`` with, built by the node itself."""
+    import importlib.util
+    from pathlib import Path
+
+    path = (
+        Path(comfyui_mod.__file__).resolve().parents[1] / "comfyui" / "assets" / "hal0_gpu_gate.py"
+    )
+    spec = importlib.util.spec_from_file_location("hal0_gpu_gate_for_provider_test", path)
+    assert spec is not None and spec.loader is not None
+    node = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(node)
+    return node.refused_prompt_body(reason)
+
+
+async def _submit_rejected(provider: ComfyUIProvider, response: MagicMock) -> Any:
+    async def _fake_post(url: str, json: dict[str, Any]) -> httpx.Response:
+        assert url.endswith("/prompt")
+        return response
+
+    with patch("hal0.providers.comfyui.httpx.AsyncClient") as MockClient:
+        client = MockClient.return_value.__aenter__.return_value
+        client.post = _fake_post
+        return await provider.infer(
+            8186, {"model": "sdxl-turbo", "prompt": "a cat", "_hal0_template": "sdxl_turbo_simple"}
+        )
+
+
+async def test_provider_maps_gate_refusal_503_to_image_gate_refused(
+    provider: ComfyUIProvider,
+) -> None:
+    """The gate's 503 is told apart from any other failed submit by the shape of its body
+    (``refused_prompt_body``), and its reason reaches the caller verbatim."""
+    from hal0.errors import Hal0Error
+    from hal0.providers.comfyui import ImageGateRefused
+
+    response = _mock_response(status_code=503, json_payload=_refused_prompt())
+
+    with pytest.raises(ImageGateRefused) as exc:
+        await _submit_rejected(provider, response)
+
+    assert isinstance(exc.value, Hal0Error)
+    assert exc.value.code == "image.gate_refused"
+    assert exc.value.status == 503
+    assert exc.value.message == _GATE_REASON
+
+
+async def test_the_gate_refusal_mapping_follows_the_body_shape_not_the_text(
+    provider: ComfyUIProvider,
+) -> None:
+    from hal0.providers.comfyui import ImageGateRefused
+
+    reason = "something the gate has never said before"
+    with pytest.raises(ImageGateRefused) as exc:
+        await _submit_rejected(
+            provider, _mock_response(status_code=503, json_payload=_refused_prompt(reason))
+        )
+    assert exc.value.message == reason
+
+    # The words alone are not the gate: a 503 from anything else stays an upstream failure.
+    lookalike = {"error": {"message": _GATE_REASON}}
+    with pytest.raises(ComfyUIInferError) as plain:
+        await _submit_rejected(provider, _mock_response(status_code=503, json_payload=lookalike))
+    assert plain.value.code == "dispatch.upstream_failed"
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        _mock_response(status_code=500, json_payload=_refused_prompt()),
+        _mock_response(status_code=502, json_payload=_refused_prompt()),
+        _mock_response(status_code=503, json_payload=None),
+        _mock_response(status_code=503, json_payload=["not", "an", "object"]),
+        _mock_response(status_code=503, json_payload={"error": "overloaded"}),
+        _mock_response(status_code=503, json_payload={"error": {"type": "other"}}),
+        _mock_response(status_code=503, json_payload={"error": {"type": "hal0_gpu_not_ready"}}),
+    ],
+    ids=[
+        "500",
+        "502",
+        "no-body",
+        "list-body",
+        "string-error",
+        "other-type",
+        "no-node-errors",
+    ],
+)
+async def test_any_other_failed_submit_stays_an_upstream_failure(
+    provider: ComfyUIProvider, response: MagicMock
+) -> None:
+    with pytest.raises(ComfyUIInferError) as exc:
+        await _submit_rejected(provider, response)
+
+    assert exc.value.code == "dispatch.upstream_failed"
+    assert exc.value.status == 502
+    assert f"HTTP {response.status_code}" in exc.value.message
+
+
+async def test_a_gate_refusal_without_a_reason_still_maps(provider: ComfyUIProvider) -> None:
+    from hal0.providers.comfyui import ImageGateRefused
+
+    body = {"error": {"type": "hal0_gpu_not_ready"}, "node_errors": {}}
+
+    with pytest.raises(ImageGateRefused) as exc:
+        await _submit_rejected(provider, _mock_response(status_code=503, json_payload=body))
+
+    assert exc.value.message  # a fixed line, never empty
+
+
+async def test_a_503_that_is_not_json_stays_an_upstream_failure(
+    provider: ComfyUIProvider,
+) -> None:
+    response = _mock_response(status_code=503, text="<html>busy</html>")
+
+    def _not_json() -> Any:
+        raise ValueError("not json")
+
+    response.json = _not_json
+
+    with pytest.raises(ComfyUIInferError):
+        await _submit_rejected(provider, response)
+
+
+def test_the_gate_reason_the_provider_reads_is_the_one_the_node_writes() -> None:
+    """Contract with the asset: ``refused_prompt_body`` puts the reason under
+    ``error.details`` and marks the body ``hal0_gpu_not_ready``."""
+    body = _refused_prompt("because")
+
+    assert body["error"]["type"] == "hal0_gpu_not_ready"
+    assert body["error"]["details"] == "because"
+    assert comfyui_mod.gate_refusal_reason(503, body) == "because"
+    assert comfyui_mod.gate_refusal_reason(500, body) is None

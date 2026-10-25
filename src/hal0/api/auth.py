@@ -55,7 +55,7 @@ The ComfyUI GPU gate's token (#3058)
 ------------------------------------
 The ``hal0_gpu_gate`` node in the img container is not an operator and never
 holds the admin key. :mod:`hal0.comfyui.gate_credential` mints it a token of
-its own, which admits exactly its three requests (:data:`_GATE_REQUESTS`), from
+its own, which admits exactly its four requests (:data:`_GATE_REQUESTS`), from
 the box itself only, when the ADMIN gate would refuse them, and marks the request with
 :data:`GATE_SCOPE_KEY` so the switch handler holds it to image mode. The token
 is not a tier: :func:`resolve_principal` never returns it, so it opens no
@@ -493,13 +493,15 @@ def _envelope(code: str, message: str) -> dict[str, Any]:
 # The ComfyUI GPU gate's own credential (#3058)
 
 #: The only requests the ComfyUI GPU gate's token admits: its arbiter read,
-#: its prompt hand-off and its switch request, matched on the exact method and
-#: path. The token lives in :mod:`hal0.comfyui.gate_credential`.
+#: its prompt hand-off, its switch request and its report of a refused prompt,
+#: matched on the exact method and path. The token lives in
+#: :mod:`hal0.comfyui.gate_credential`.
 _GATE_REQUESTS: frozenset[tuple[str, str]] = frozenset(
     {
         ("GET", "/api/comfyui/arbiter"),
         ("POST", "/api/comfyui/prompt-handoff"),
         ("POST", "/api/comfyui/switchover"),
+        ("POST", "/api/comfyui/gate-refusal"),
     }
 )
 

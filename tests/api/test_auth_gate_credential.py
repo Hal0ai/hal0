@@ -1,9 +1,9 @@
 """The ComfyUI GPU gate's credential at the auth layer (#3058).
 
-The gate's token admits its three requests (the arbiter read, the prompt
-hand-off, the switch request) on a box that enforces auth, and nothing else:
-no other route, no other method, no WebSocket. The switch handler holds a
-request it admitted to a plain switch into image mode.
+The gate's token admits its four requests (the arbiter read, the prompt
+hand-off, the switch request, the refusal report) on a box that enforces auth,
+and nothing else: no other route, no other method, no WebSocket. The switch
+handler holds a request it admitted to a plain switch into image mode.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ _GATE_REQUESTS = [
     ("GET", "/api/comfyui/arbiter"),
     ("POST", "/api/comfyui/prompt-handoff"),
     ("POST", "/api/comfyui/switchover"),
+    ("POST", "/api/comfyui/gate-refusal"),
 ]
 
 
@@ -101,6 +102,9 @@ def test_without_the_token_the_gates_requests_stay_refused(method: str, path: st
         ("GET", "/api/comfyui/arbiter/"),
         ("GET", "//api/comfyui/arbiter"),
         ("POST", "/api/comfyui/switchover/../pin"),
+        ("GET", "/api/comfyui/gate-refusal"),
+        ("PUT", "/api/comfyui/gate-refusal"),
+        ("POST", "/api/comfyui/gate-refusal/"),
         ("GET", "/api/settings"),
         ("POST", "/v1/images/generations"),
     ],
@@ -167,6 +171,12 @@ def test_the_gate_token_is_admitted_from_loopback(peer: str) -> None:
     assert _run("GET", "/api/comfyui/arbiter", bearer=token, peer=peer)[0] == 200
 
 
+def test_the_allow_list_is_exactly_the_gates_requests() -> None:
+    """A new gate request needs its route added with a test, in the change that adds it
+    (ADR-0040): this list and the allow-list move together."""
+    assert set(_GATE_REQUESTS) == set(auth_mod._GATE_REQUESTS)
+
+
 def test_an_admin_request_is_not_marked_as_the_gates() -> None:
     gate_credential.ensure_token()
 
@@ -228,3 +238,67 @@ def test_an_admin_may_still_switch_to_inference(client: Any) -> None:
     )
 
     assert resp.status_code not in (401, 403)
+
+
+# ---------------------------------------------------------------------------
+# Does hal0 require the gate to authenticate? (the enforcement middleware's own rule)
+
+
+@pytest.mark.parametrize(
+    ("require", "admin_key", "bind", "required"),
+    [
+        # Enforcement on: loopback is not exempt.
+        ("1", True, "127.0.0.1", True),
+        ("1", False, "127.0.0.1", True),
+        ("1", True, "0.0.0.0", True),
+        # Enforcement off, no admin key: nothing stands in the way.
+        ("0", False, "192.0.2.10", False),
+        ("0", False, "0.0.0.0", False),
+        # Enforcement off, an admin key, loopback or wildcard bind: the gate dials loopback.
+        ("0", True, "127.0.0.1", False),
+        ("0", True, "localhost", False),
+        ("0", True, "::1", False),
+        ("0", True, "0.0.0.0", False),
+        ("0", True, "::", False),
+        # Enforcement off, an admin key, one address: the gate dials that address (the LAN rule).
+        ("0", True, "192.0.2.10", True),
+        ("0", True, "2001:db8::10", True),
+        ("0", True, "hal0.example.lan", True),
+    ],
+)
+def test_the_gate_must_authenticate_when_the_middleware_would_ask_it_to(
+    monkeypatch: pytest.MonkeyPatch, require: str, admin_key: bool, bind: str, required: bool
+) -> None:
+    from hal0.api.routes import comfyui as comfyui_routes
+
+    monkeypatch.setenv("HAL0_REQUIRE_AUTH", require)
+    monkeypatch.setenv("HAL0_BIND_HOST", bind)
+    if not admin_key:
+        monkeypatch.delenv("HAL0_ADMIN_KEY", raising=False)
+
+    assert comfyui_routes._gate_must_authenticate() is required
+
+
+@pytest.mark.parametrize(
+    ("bind", "gate_peer"),
+    [
+        ("127.0.0.1", "127.0.0.1"),
+        ("0.0.0.0", "127.0.0.1"),
+        ("192.0.2.10", "192.0.2.10"),
+        # A name resolves to an address of the box, never to loopback.
+        ("hal0.example.lan", "192.0.2.10"),
+    ],
+)
+def test_what_the_status_route_says_is_what_the_middleware_does_to_the_gate(
+    monkeypatch: pytest.MonkeyPatch, bind: str, gate_peer: str
+) -> None:
+    """The gate's own request is refused (401) without a credential exactly when
+    ``/status`` says the gate must authenticate."""
+    from hal0.api.routes import comfyui as comfyui_routes
+
+    monkeypatch.setenv("HAL0_REQUIRE_AUTH", "0")
+    monkeypatch.setenv("HAL0_BIND_HOST", bind)
+
+    status, _seen = _run("GET", "/api/comfyui/arbiter", peer=gate_peer)
+
+    assert (status == 401) is comfyui_routes._gate_must_authenticate()

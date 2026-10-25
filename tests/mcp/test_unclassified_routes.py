@@ -65,3 +65,19 @@ def test_tools_list_exposes_exactly_the_classified_catalog() -> None:
     for name in admin.TOOL_DESCRIPTIONS:
         advertised = by_name[name].inputSchema["properties"]["args"]
         assert advertised == admin.tool_param_schema(name), name
+
+
+def test_the_comfyui_gates_own_routes_are_not_mcp_tools() -> None:
+    """The hal0_gpu_gate node calls these from inside the img container; an agent has no use
+    for them (the arbiter's state is on comfyui_status), so they stay unaliased: hidden, not
+    tools. gate-refusal in particular writes what the dashboard shows as the gate's last word."""
+    create_app()
+    internal = {
+        "GET:/api/comfyui/arbiter",
+        "POST:/api/comfyui/prompt-handoff",
+        "POST:/api/comfyui/gate-refusal",
+    }
+
+    assert internal.isdisjoint(admin.TOOL_NAME_ALIASES)
+    assert internal <= set(admin._UNCLASSIFIED_ROUTES)  # live routes, deny-by-default
+    assert not any("gate_refusal" in name for name in admin.TOOL_DESCRIPTIONS)

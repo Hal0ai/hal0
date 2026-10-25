@@ -37,6 +37,7 @@ import os
 import re
 import tempfile
 import time
+import urllib.parse
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -85,6 +86,7 @@ _DEFAULT_PORT = 8188
 _GATE_STATUS_URL_ENV = "HAL0_COMFYUI_STATUS_URL"
 _GATE_SWITCHOVER_URL_ENV = "HAL0_COMFYUI_SWITCHOVER_URL"
 _GATE_HANDOFF_URL_ENV = "HAL0_COMFYUI_HANDOFF_URL"
+_GATE_REFUSAL_URL_ENV = "HAL0_COMFYUI_REFUSAL_URL"
 _GATE_FAIL_OPEN_ENV = "HAL0_COMFYUI_GATE_FAIL_OPEN"
 # The gate's own credential (#3058): its directory is mounted read-only here,
 # and the gate reads the token file named by this variable on every request.
@@ -135,6 +137,52 @@ class ComfyUIInferError(Hal0Error):
 
     code = "dispatch.upstream_failed"
     status = 502
+
+
+class ImageGateRefused(Hal0Error):
+    """ComfyUI's GPU gate refused the prompt hal0 submitted.
+
+    The gate (``hal0_gpu_gate``) answers ``/prompt`` with a 503 when hal0 did not
+    hand it the GPU. The message is the gate's reason, verbatim.
+    """
+
+    code = "image.gate_refused"
+    status = 503
+
+
+#: ``error.type`` of the body the gate answers a refused prompt with
+#: (``refused_prompt_body`` in the ``hal0_gpu_gate`` asset, which a test runs this
+#: against). The shape identifies the gate; the words of its reason change.
+_GATE_REFUSAL_TYPE = "hal0_gpu_not_ready"
+_GATE_REFUSAL_DEFAULT = "ComfyUI's GPU gate did not accept the prompt"
+
+
+def gate_refusal_reason(status_code: int, body: Any) -> str | None:
+    """The gate's reason when a ``/prompt`` answer is its refusal, else ``None``.
+
+    A refusal is a 503 whose JSON body has the gate's shape: an ``error`` object
+    typed ``hal0_gpu_not_ready`` beside a ``node_errors`` object. The reason is the
+    body's ``details``, the text the gate was given.
+    """
+    if status_code != 503 or not isinstance(body, dict):
+        return None
+    error = body.get("error")
+    if not isinstance(error, dict) or error.get("type") != _GATE_REFUSAL_TYPE:
+        return None
+    if not isinstance(body.get("node_errors"), dict):
+        return None
+    for key in ("details", "message"):
+        value = error.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return _GATE_REFUSAL_DEFAULT
+
+
+def _json_or_none(resp: httpx.Response) -> Any:
+    try:
+        return resp.json()
+    except ValueError:
+        return None
 
 
 # ── Step progress over ComfyUI's websocket ────────────────────────────────────
@@ -533,10 +581,34 @@ def gate_env() -> dict[str, str]:
         _GATE_STATUS_URL_ENV: f"{base}/api/comfyui/arbiter",
         _GATE_SWITCHOVER_URL_ENV: f"{base}/api/comfyui/switchover",
         _GATE_HANDOFF_URL_ENV: f"{base}/api/comfyui/prompt-handoff",
+        _GATE_REFUSAL_URL_ENV: f"{base}/api/comfyui/gate-refusal",
     }
     if _api_env_setting(_GATE_FAIL_OPEN_ENV).lower() in _TRUTHY:
         env[_GATE_FAIL_OPEN_ENV] = "1"
     return env
+
+
+def gate_dial_host() -> str:
+    """The host the img container's gate dials hal0-api at, as :func:`gate_env` writes it.
+
+    Loopback for a loopback or wildcard bind, the address itself for a specific
+    one (a host name stays a name). It is where the gate's requests come from, so
+    it is the peer the auth middleware judges them by.
+    """
+    return urllib.parse.urlsplit(_hal0_api_base()).hostname or "127.0.0.1"
+
+
+def gate_sends_credential() -> bool:
+    """True iff the gate would present its token on its next request.
+
+    The token is on disk, and the URLs :func:`gate_env` gives the gate name an
+    address: the gate holds the token back from a host name. An img container
+    started before hal0 minted the token has no mount and sends none either,
+    which hal0 cannot see from here (the gate's version header says that).
+    """
+    return gate_credential.credential_present() and gate_credential.names_an_address(
+        gate_env()[_GATE_STATUS_URL_ENV]
+    )
 
 
 def _gate_credential_mount() -> Mount | None:
@@ -900,6 +972,13 @@ class ComfyUIProvider(Provider):
                 # 1. Submit workflow.
                 submit_resp = await client.post(f"{base_url}/prompt", json=prompt_payload)
                 if submit_resp.status_code != 200:
+                    # The GPU gate in front of ComfyUI refuses a prompt hal0 did not hand
+                    # the GPU to, with a 503 in its own shape: that is hal0's to report.
+                    refusal = gate_refusal_reason(
+                        submit_resp.status_code, _json_or_none(submit_resp)
+                    )
+                    if refusal is not None:
+                        raise ImageGateRefused(refusal, details={"port": port})
                     raise ComfyUIInferError(
                         f"comfyui POST /prompt returned HTTP {submit_resp.status_code}",
                         details={
@@ -1061,4 +1140,8 @@ __all__ = [
     "ComfyUIHealthError",
     "ComfyUIInferError",
     "ComfyUIProvider",
+    "ImageGateRefused",
+    "gate_dial_host",
+    "gate_refusal_reason",
+    "gate_sends_credential",
 ]

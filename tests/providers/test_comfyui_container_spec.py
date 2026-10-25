@@ -121,6 +121,7 @@ def test_comfyui_spec_points_the_gate_at_hal0_api_by_default(_api_env_unset: Non
     assert env["HAL0_COMFYUI_STATUS_URL"] == "http://127.0.0.1:8080/api/comfyui/arbiter"
     assert env["HAL0_COMFYUI_SWITCHOVER_URL"] == "http://127.0.0.1:8080/api/comfyui/switchover"
     assert env["HAL0_COMFYUI_HANDOFF_URL"] == "http://127.0.0.1:8080/api/comfyui/prompt-handoff"
+    assert env["HAL0_COMFYUI_REFUSAL_URL"] == "http://127.0.0.1:8080/api/comfyui/gate-refusal"
     assert "HAL0_COMFYUI_GATE_FAIL_OPEN" not in env
 
 
@@ -135,6 +136,7 @@ def test_comfyui_spec_points_the_gate_at_hal0_api_on_its_own_port(
     env = _gate_env(spec)
     assert env["HAL0_COMFYUI_STATUS_URL"] == "http://127.0.0.1:9123/api/comfyui/arbiter"
     assert env["HAL0_COMFYUI_SWITCHOVER_URL"] == "http://127.0.0.1:9123/api/comfyui/switchover"
+    assert env["HAL0_COMFYUI_REFUSAL_URL"] == "http://127.0.0.1:9123/api/comfyui/gate-refusal"
     unit = _render_from_spec("img", spec)
     assert "Environment=HAL0_COMFYUI_STATUS_URL=http://127.0.0.1:9123/api/comfyui/arbiter" in unit
 
@@ -146,6 +148,7 @@ def test_comfyui_spec_dials_a_specific_bind_address(
     monkeypatch.setenv("HAL0_BIND_HOST", "192.0.2.10")
     env = _gate_env(ComfyUIProvider().container_spec(_img_cfg(), {}))
     assert env["HAL0_COMFYUI_STATUS_URL"] == "http://192.0.2.10:8080/api/comfyui/arbiter"
+    assert env["HAL0_COMFYUI_REFUSAL_URL"] == "http://192.0.2.10:8080/api/comfyui/gate-refusal"
     monkeypatch.setenv("HAL0_BIND_HOST", "::1")
     env = _gate_env(ComfyUIProvider().container_spec(_img_cfg(), {}))
     assert env["HAL0_COMFYUI_STATUS_URL"] == "http://[::1]:8080/api/comfyui/arbiter"
@@ -404,3 +407,101 @@ async def test_comfyui_wait_ready_uses_system_stats_probe(
     monkeypatch.setattr("hal0.providers.container._HEALTH_TIMEOUT_S", 0.05)
     with pytest.raises(TimeoutError):
         await provider.wait_ready(8188)
+
+
+@pytest.mark.parametrize(
+    ("bind", "token", "presents"),
+    [
+        (None, False, False),
+        (None, True, True),
+        ("0.0.0.0", True, True),
+        ("192.0.2.10", True, True),
+        ("::1", True, True),
+        ("localhost", True, True),
+        # The gate holds its token back from a host name, so a token on disk is of no use.
+        ("hal0.example.lan", True, False),
+        ("hal0.example.lan", False, False),
+    ],
+)
+def test_the_gate_presents_its_token_only_when_it_is_given_an_address_to_dial(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_hal0_home: str,
+    _api_env_unset: None,
+    bind: str | None,
+    token: bool,
+    presents: bool,
+) -> None:
+    """What ``/status.gate`` reads: the token exists and the URLs hal0 writes into
+    the unit let the gate use it."""
+    from hal0.comfyui import gate_credential
+    from hal0.providers.comfyui import gate_sends_credential
+
+    if bind is not None:
+        monkeypatch.setenv("HAL0_BIND_HOST", bind)
+    if token:
+        gate_credential.ensure_token()
+
+    assert gate_sends_credential() is presents
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:8080/api/comfyui/arbiter",
+        "http://[::1]:8080/api/comfyui/arbiter",
+        "http://localhost:8080/api/comfyui/arbiter",
+        "http://192.0.2.10:8080/x",
+        "http://hal0.example.lan:8080/x",
+        "http://hal0.local/x",
+        "http://127.0.0.1.nip.io:8080/x",
+        "http://localhost.example:8080/x",
+        "http://[::1/x",
+        "not a url",
+        "",
+    ],
+)
+def test_the_provider_and_the_gate_agree_on_which_urls_get_the_token(url: str) -> None:
+    """The gate (``_direct_host``) and hal0's reading of it (``names_an_address``) are two
+    copies of one rule; a drift would make ``/status.gate`` say the wrong thing."""
+    import importlib.util
+
+    from hal0.comfyui import gate_credential
+
+    path = Path(__file__).resolve().parents[2] / "src/hal0/comfyui/assets/hal0_gpu_gate.py"
+    spec = importlib.util.spec_from_file_location("hal0_gpu_gate_for_spec_test", path)
+    assert spec is not None and spec.loader is not None
+    node = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(node)
+
+    assert gate_credential.names_an_address(url) is node._direct_host(url)
+
+
+@pytest.mark.parametrize(
+    ("bind", "dialed"),
+    [
+        (None, "127.0.0.1"),
+        ("127.0.0.1", "127.0.0.1"),
+        ("localhost", "127.0.0.1"),
+        ("0.0.0.0", "127.0.0.1"),
+        ("::", "::1"),
+        ("::1", "::1"),
+        ("192.0.2.10", "192.0.2.10"),
+        ("2001:db8::10", "2001:db8::10"),
+        ("hal0.example.lan", "hal0.example.lan"),
+        ("bad host;rm", "127.0.0.1"),
+    ],
+)
+def test_gate_dial_host_is_the_host_of_the_urls_the_gate_is_given(
+    monkeypatch: pytest.MonkeyPatch, _api_env_unset: None, bind: str | None, dialed: str
+) -> None:
+    """The auth middleware judges the gate's requests by the peer they come from,
+    which is the host :func:`gate_env` writes into the unit."""
+    from urllib.parse import urlsplit
+
+    from hal0.providers.comfyui import gate_dial_host, gate_env
+
+    if bind is not None:
+        monkeypatch.setenv("HAL0_BIND_HOST", bind)
+
+    assert gate_dial_host() == dialed
+    assert urlsplit(gate_env()["HAL0_COMFYUI_STATUS_URL"]).hostname == dialed

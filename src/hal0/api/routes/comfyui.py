@@ -49,13 +49,13 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, FastAPI, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from hal0.api import memory_source
 from hal0.api._redact import redact_log_line
-from hal0.api.auth import GATE_SCOPE_KEY
+from hal0.api.auth import GATE_SCOPE_KEY, admin_gated
 from hal0.api.middleware.error_codes import Conflict, Forbidden, NotFound, UnprocessableEntity
 from hal0.api.routes.power import _probe_power
 from hal0.capabilities.catalog import COMFYUI_NO_ENGINE_REASON, comfyui_backends
@@ -76,10 +76,12 @@ from hal0.comfyui.catalog import (
     weights_gib,
 )
 from hal0.comfyui.fit import assess, need_for
+from hal0.comfyui.gate_version import GATE_VERSION, GATE_VERSION_HEADER
 from hal0.comfyui.picker import recommended_id
 from hal0.hardware import gpu_view
 from hal0.hardware.memory_budget import MemoryBudget
 from hal0.http_client import async_client
+from hal0.providers import comfyui as comfyui_provider
 from hal0.registry.pull import PullJob, make_job
 from hal0.slots.naming import slot_container_name, slot_token_for, slot_unit_name
 from hal0.upstreams.huggingface import hf_token_from_env
@@ -136,6 +138,26 @@ _BG_TASKS: set[asyncio.Task[Any]] = set()
 _SWITCH_IDLE: dict[str, Any] = {"active": False, "target": None, "error": None}
 _switch: dict[str, Any] = dict(_SWITCH_IDLE)
 
+# The ComfyUI GPU gate (the ``hal0_gpu_gate`` node in the img container) tells hal0 two
+# things, and /status reports both: its version, on every request it makes
+# (``X-Hal0-Gate-Version``), and why it refused a prompt (``POST /gate-refusal``). Like
+# ``_switch`` this is module state: there is one engine, so one gate.
+#
+# ``_gate_seen``: the version header of the gate's latest call (``None`` for a call
+# with none) and when it came (epoch seconds); ``at`` is ``None`` until a call arrives.
+# ``_gate_refusal``: the latest refusal, ``{"at": epoch seconds, "reason": str}``.
+_GATE_SEEN_IDLE: dict[str, Any] = {"version": None, "at": None}
+_gate_seen: dict[str, Any] = dict(_GATE_SEEN_IDLE)
+_gate_refusal: dict[str, Any] | None = None
+
+# The reason comes from the gate, so hal0 keeps a bounded piece of it; so it does of the
+# version, which is a header any caller on a box without auth can set.
+_GATE_REASON_MAX = 500
+_GATE_VERSION_MAX = 32
+
+# Wall clock for the timestamps above (epoch seconds); tests drive it through this seam.
+_wall_clock = time.time
+
 
 def _comfyui_base_url() -> str:
     """Base URL of the operational ComfyUI container's HTTP API.
@@ -180,12 +202,104 @@ async def aclose_client() -> None:
 
 
 def _reset_state() -> None:
-    """Drop the shared client, switch tracker and engine-read cache. For test isolation only."""
-    global _client, _engine_cache
+    """Drop the shared client, switch tracker, engine-read cache and what the gate told hal0.
+
+    For test isolation only.
+    """
+    global _client, _engine_cache, _gate_refusal
     _client = None
     _engine_cache = None
     _switch.clear()
     _switch.update(_SWITCH_IDLE)
+    _gate_seen.clear()
+    _gate_seen.update(_GATE_SEEN_IDLE)
+    _gate_refusal = None
+
+
+# ---------------------------------------------------------------------------
+# What the GPU gate tells hal0: its version, and why it refused a prompt
+# ---------------------------------------------------------------------------
+
+
+def _note_gate_call(request: Request, *, headerless_is_gate: bool) -> None:
+    """Remember the version the gate called with (``None`` when it sent no header).
+
+    Only the gate's own routes (``/arbiter``, ``/prompt-handoff``) are certain to be
+    the gate's when they carry no header: that is a gate older than the header. The
+    dashboard posts ``/switchover`` too, without one, so a headerless call there is
+    nobody in particular.
+    """
+    version = request.headers.get(GATE_VERSION_HEADER)
+    if version is None and not headerless_is_gate:
+        return
+    _gate_seen.update(
+        version=None if version is None else version[:_GATE_VERSION_MAX], at=_wall_clock()
+    )
+
+
+async def _gate_only_call(request: Request) -> None:
+    """Route dependency: the call is the gate's, header or not."""
+    _note_gate_call(request, headerless_is_gate=True)
+
+
+async def _maybe_gate_call(request: Request) -> None:
+    """Route dependency: the call is the gate's if it carries the gate's header."""
+    _note_gate_call(request, headerless_is_gate=False)
+
+
+def record_gate_refusal(reason: str) -> None:
+    """Remember why the gate refused a prompt, for ``/status`` and ``/arbiter``.
+
+    The gate reports its own refusals (``POST /gate-refusal``); a refusal it cannot
+    report, because hal0 requires a credential it lacks, is recorded from the render
+    that ran into it (``/v1/images/generations``).
+    """
+    global _gate_refusal
+    _gate_refusal = {"at": _wall_clock(), "reason": reason[:_GATE_REASON_MAX]}
+    log.info("ComfyUI GPU gate refused a prompt: %r", _gate_refusal["reason"])
+
+
+def _record_gate_rejection(request: Request, status: int, message: str) -> None:
+    """Record a switch request hal0 rejected, when the gate made it (it carries the header)."""
+    if GATE_VERSION_HEADER in request.headers:
+        record_gate_refusal(f"hal0 refused the gate's switch request (HTTP {status}): {message}")
+
+
+def _gate_must_authenticate() -> bool:
+    """True iff hal0 would refuse the gate's requests without a credential.
+
+    The auth middleware's own rule (:func:`hal0.api.auth.admin_gated`: enforcement is on,
+    or the LAN rule for ADMIN routes applies to the request's peer), asked about the
+    peer the gate's requests come from, not the dashboard asking for ``/status``.
+    """
+    peer = comfyui_provider.gate_dial_host()
+    return admin_gated({"type": "http", "client": (peer, 0)})
+
+
+def _gate_state() -> str:
+    """``no_credential`` | ``unknown`` | ``stale`` | ``current``, in that order of precedence.
+
+    ``no_credential``: hal0 requires the gate to authenticate and the gate has no way to
+    (no token on disk, or it is given a host name and holds the token back from names).
+    Its calls are refused, so whatever it told hal0 earlier is no longer the news.
+    Otherwise by the gate's latest call: ``unknown`` when there has been none since
+    hal0-api started, ``current`` when it carried this hal0's gate version, and
+    ``stale`` for another version or none (an engine still running the gate it started
+    with: restart it).
+    """
+    if _gate_must_authenticate() and not comfyui_provider.gate_sends_credential():
+        return "no_credential"
+    if _gate_seen["at"] is None:
+        return "unknown"
+    return "current" if _gate_seen["version"] == GATE_VERSION else "stale"
+
+
+def _gate_block() -> dict[str, Any]:
+    return {"state": _gate_state(), "version_seen": _gate_seen["version"]}
+
+
+def _gate_refusal_view() -> dict[str, Any] | None:
+    return None if _gate_refusal is None else dict(_gate_refusal)
 
 
 async def _fetch_json(path: str) -> dict[str, Any] | None:
@@ -529,10 +643,17 @@ async def comfyui_status(request: Request) -> dict[str, Any]:
         "inventory": None if files is None else inventory.status_counts(files),
         "switchover": dict(_switch),
         "arbiter": arbiter_block,
+        # The GPU gate in the img container (the hal0_gpu_gate node): whether it is the
+        # gate this hal0 ships (``current``), an older one (``stale``: restart the engine),
+        # not heard from since hal0-api started (``unknown``), or one that hal0 requires to
+        # authenticate and that has no credential (``no_credential``); and the latest
+        # prompt it refused, ``{"at": epoch seconds, "reason": str}``, else null.
+        "gate": _gate_block(),
+        "gate_refusal": _gate_refusal_view(),
     }
 
 
-@router.get("/arbiter")
+@router.get("/arbiter", dependencies=[Depends(_gate_only_call)])
 async def comfyui_arbiter(request: Request) -> dict[str, Any]:
     """The GPU arbiter's state alone, for the ``hal0_gpu_gate`` node.
 
@@ -540,13 +661,18 @@ async def comfyui_arbiter(request: Request) -> dict[str, Any]:
     included, with a 2 s budget, and refuses the prompt when hal0 does not
     answer. So it runs none of ``/status``'s probes (systemd, ComfyUI's HTTP
     API, the models scan): only ``mode`` (see :func:`api_mode`), the
-    ``arbiter`` block and the ``switchover`` tracker, in the same shape.
+    ``arbiter`` block, the ``switchover`` tracker and the gate's latest
+    ``gate_refusal``, in the same shape.
+
+    The call is noted as the gate's (its ``X-Hal0-Gate-Version`` header, or the lack of
+    one, is what ``/status``'s ``gate.state`` reads).
     """
     arbiter_block = _arbiter_status(_get_arbiter(request))
     return {
         "mode": api_mode(arbiter_block),
         "arbiter": arbiter_block,
         "switchover": dict(_switch),
+        "gate_refusal": _gate_refusal_view(),
     }
 
 
@@ -556,7 +682,7 @@ async def comfyui_arbiter(request: Request) -> dict[str, Any]:
 _HANDOFF_LOCK_WAIT_S = 1.5
 
 
-@router.post("/prompt-handoff")
+@router.post("/prompt-handoff", dependencies=[Depends(_gate_only_call)])
 async def comfyui_prompt_handoff(request: Request) -> JSONResponse:
     """The ``hal0_gpu_gate`` node announces an editor prompt in image mode.
 
@@ -576,6 +702,33 @@ async def comfyui_prompt_handoff(request: Request) -> JSONResponse:
     return JSONResponse(status_code=200, content={"held": bool(held)})
 
 
+class GateRefusalBody(BaseModel):
+    # ``reason`` accepts any JSON so a missing or non-string value routes to the handler's
+    # custom ``comfyui.invalid_gate_refusal`` 422 (as ``/pin`` does for its body) rather
+    # than a generic pydantic ``validation.error``.
+    model_config = ConfigDict(extra="ignore")
+    reason: Any = None
+
+
+@router.post("/gate-refusal", status_code=202, dependencies=[Depends(_maybe_gate_call)])
+async def comfyui_gate_refusal(body: GateRefusalBody | None = None) -> JSONResponse:
+    """The ``hal0_gpu_gate`` node reports a prompt it refused (best effort).
+
+    Body: ``{"reason": str}``, the text the editor was shown. hal0 keeps the latest, cut
+    to 500 characters, with the time it arrived: ``/status`` and ``/arbiter`` report it
+    as ``gate_refusal``. Nothing here acts on it. The route is the gate's own (the gate's
+    token admits it, see :mod:`hal0.api.auth`) and is not an MCP tool.
+    """
+    reason = body.reason if body is not None else None
+    if not isinstance(reason, str) or not reason.strip():
+        raise UnprocessableEntity(
+            "body must be {'reason': a non-empty string}",
+            code="comfyui.invalid_gate_refusal",
+        )
+    record_gate_refusal(reason.strip())
+    return JSONResponse(status_code=202, content={"status": "recorded"})
+
+
 async def _run_switch(arbiter: Any, mode: str, *, pin: bool = False, force: bool = False) -> None:
     """Drive the arbiter for ``mode``; record failure for /status to surface."""
     try:
@@ -590,13 +743,16 @@ async def _run_switch(arbiter: Any, mode: str, *, pin: bool = False, force: bool
         _switch["target"] = None
 
 
+_ARBITER_UNAVAILABLE_MESSAGE = "slot manager / GPU arbiter is not wired on this app"
+
+
 def _arbiter_unavailable() -> JSONResponse:
     return JSONResponse(
         status_code=503,
         content={
             "error": {
                 "code": "comfyui.arbiter_unavailable",
-                "message": "slot manager / GPU arbiter is not wired on this app",
+                "message": _ARBITER_UNAVAILABLE_MESSAGE,
             }
         },
     )
@@ -614,7 +770,7 @@ class SwitchoverBody(BaseModel):
     pin: bool = False
 
 
-@router.post("/switchover")
+@router.post("/switchover", dependencies=[Depends(_maybe_gate_call)])
 async def comfyui_switchover(
     request: Request, background_tasks: BackgroundTasks, body: SwitchoverBody | None = None
 ) -> JSONResponse:
@@ -634,21 +790,21 @@ async def comfyui_switchover(
     enqueueing a render.
 
     A request the ComfyUI GPU gate's own token admitted (#3058) may only ask
-    for generation, without ``force`` or ``pin``: 403 otherwise.
+    for generation, without ``force`` or ``pin``: 403 otherwise. A request that
+    carries the gate's version header and is rejected (that 403, a bad mode, no
+    arbiter) is recorded as the gate's latest refusal, for ``/status``.
     """
     if body is None:
         body = SwitchoverBody()
     mode = body.mode
     if request.scope.get(GATE_SCOPE_KEY) and (mode != "generation" or body.force or body.pin):
-        raise Forbidden(
-            "ComfyUI's GPU gate may only ask for image mode, without force or pin",
-            code="auth.forbidden",
-        )
+        message = "ComfyUI's GPU gate may only ask for image mode, without force or pin"
+        _record_gate_rejection(request, 403, message)
+        raise Forbidden(message, code="auth.forbidden")
     if mode not in _MODES:
-        raise UnprocessableEntity(
-            "body must be {'mode': 'generation' | 'inference'}",
-            code="comfyui.invalid_mode",
-        )
+        message = "body must be {'mode': 'generation' | 'inference'}"
+        _record_gate_rejection(request, 422, message)
+        raise UnprocessableEntity(message, code="comfyui.invalid_mode")
     # One switch at a time — racing systemctl calls is never right. Checked
     # before the noop probe so a mid-flight flip is reported as in-progress, not
     # as "already there" based on a half-transitioned snapshot.
@@ -667,6 +823,7 @@ async def comfyui_switchover(
     arbiter_st = _arbiter_status(arbiter)
     current = api_mode(arbiter_st)
     if arbiter_st is None or current is None:
+        _record_gate_rejection(request, 503, _ARBITER_UNAVAILABLE_MESSAGE)
         return _arbiter_unavailable()
     already = current == "generation" if mode == "generation" else arbiter_st.get("mode") == "llm"
     if already:

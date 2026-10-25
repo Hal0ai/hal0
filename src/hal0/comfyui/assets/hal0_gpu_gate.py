@@ -19,9 +19,16 @@ the one address it binds).
 
 hal0-api's gate routes are ADMIN routes. The gate presents a token of its own
 (``HAL0_COMFYUI_GATE_TOKEN_FILE``, a file in a directory the img slot mounts
-read-only, read on every request), which hal0-api admits on the gate's three
+read-only, read on every request), which hal0-api admits on the gate's own
 requests and nothing else, so a box that enforces auth keeps its guard. It
 never holds the admin key.
+
+Every request carries the gate's version (``X-Hal0-Gate-Version``), so hal0 can
+tell an engine still running an older gate: a running ComfyUI keeps the gate it
+started with until the img container restarts. When the hook refuses a prompt
+it also tells hal0 why (``POST /api/comfyui/gate-refusal``), so the dashboard
+can show it. That report is best effort (2 s, every error swallowed) and is
+skipped when hal0 is unreachable, since there is nobody to tell.
 
 hal0 reports ``arbiter.switching`` while it restores the LLM set or enters
 image mode; the hook waits it out, so a prompt never renders under LLM weights
@@ -87,8 +94,16 @@ HAL0_SWITCHOVER_URL = os.environ.get(
 HAL0_HANDOFF_URL = os.environ.get(
     "HAL0_COMFYUI_HANDOFF_URL", "http://127.0.0.1:8080/api/comfyui/prompt-handoff"
 )
+#: Where the hook tells hal0 why it refused a prompt (best effort).
+HAL0_REFUSAL_URL = os.environ.get(
+    "HAL0_COMFYUI_REFUSAL_URL", "http://127.0.0.1:8080/api/comfyui/gate-refusal"
+)
+#: The gate's version, sent as ``X-Hal0-Gate-Version`` on every request. The same
+#: literal as ``hal0.comfyui.gate_version.GATE_VERSION``, which this file cannot
+#: import; a test holds the two together.
+GATE_VERSION = "2"
 #: The gate's own credential (#3058): a file in a directory the img slot mounts
-#: read-only. hal0-api admits this token on the gate's three requests and
+#: read-only. hal0-api admits this token on the gate's own requests and
 #: nothing else. Read on every request, so a replaced token needs no restart;
 #: unset or unusable, the gate sends no credential, as before.
 HAL0_GATE_TOKEN_FILE = os.environ.get("HAL0_COMFYUI_GATE_TOKEN_FILE", "")
@@ -152,6 +167,10 @@ _SWITCH_MAX_POSTS = 3
 
 class GpuGateClosed(Exception):
     """hal0 did not hand the GPU to ComfyUI: the prompt must not run."""
+
+
+class _HalUnreachable(GpuGateClosed):
+    """hal0 did not answer (or said nothing about the GPU): there is nobody to report to."""
 
 
 class _NotFound(Exception):
@@ -292,10 +311,11 @@ def _direct_host(url: str) -> bool:
 
 
 def _hal0_request(url: str, body: "bytes | None" = None) -> urllib.request.Request:
-    """A request to hal0-api carrying the gate's token, a POST when *body* is set.
+    """A request to hal0-api carrying the gate's version and token, a POST when *body* is set.
 
-    The token is an unredirected header (urllib copies ``headers`` to a
-    redirect's URL, never ``unredirected_hdrs``), sent only to an address.
+    The version is an ordinary header: it says nothing worth hiding. The token
+    is an unredirected header (urllib copies ``headers`` to a redirect's URL,
+    never ``unredirected_hdrs``), sent only to an address.
     """
     if body is None:
         req = urllib.request.Request(url)
@@ -303,6 +323,7 @@ def _hal0_request(url: str, body: "bytes | None" = None) -> urllib.request.Reque
         req = urllib.request.Request(
             url, data=body, headers={"Content-Type": "application/json"}, method="POST"
         )
+    req.add_header("X-Hal0-Gate-Version", GATE_VERSION)
     token = _read_token()
     if token and _direct_host(url):
         req.add_unredirected_header("Authorization", f"Bearer {token}")
@@ -442,18 +463,46 @@ def _post_error() -> str:
     return getattr(_last_post_error, "reason", None) or "no reason given"
 
 
+#: The longest reason sent to hal0 (hal0 cuts what it keeps to the same length).
+_REFUSAL_REASON_MAX = 500
+
+
+def _report_refusal(reason: str) -> None:
+    """Tell hal0 why a prompt was refused, for the dashboard. Best effort.
+
+    A 2 s budget and no error escapes: the prompt is refused the same way
+    whether or not hal0 hears why. On a box that enforces auth and a gate
+    without a credential this is refused too, and hal0 records the refusal
+    itself from the render it failed.
+    """
+    try:
+        body = json.dumps({"reason": reason[:_REFUSAL_REASON_MAX]}).encode("utf-8")
+        with _urlopen(_hal0_request(HAL0_REFUSAL_URL, body), timeout=_STATUS_TIMEOUT_S):
+            pass
+    except Exception:
+        return
+
+
 def prepare_image_mode() -> None:
     """Hand the GPU to ComfyUI before forwarding /prompt (see :func:`_prepare`).
 
     A 401 or 403 from hal0 refuses the prompt at once with its own reason, or,
-    with ``HAL0_COMFYUI_GATE_FAIL_OPEN``, lets it through as v1.6.5 did.
+    with ``HAL0_COMFYUI_GATE_FAIL_OPEN``, lets it through as v1.6.5 did. Every
+    refusal but an unreachable hal0's is reported to hal0 (:func:`_report_refusal`).
     """
     try:
         _prepare()
     except _AuthRequired as exc:
         if _FAIL_OPEN:
             return
-        raise GpuGateClosed(_auth_reason(exc.code)) from exc
+        reason = _auth_reason(exc.code)
+        _report_refusal(reason)
+        raise GpuGateClosed(reason) from exc
+    except _HalUnreachable:
+        raise
+    except GpuGateClosed as exc:
+        _report_refusal(str(exc))
+        raise
 
 
 def _prepare() -> None:
@@ -490,7 +539,7 @@ def _prepare() -> None:
             if not answered and time.monotonic() - started >= _UNREACHABLE_RETRY_S:
                 if _FAIL_OPEN:
                     return
-                raise GpuGateClosed(_UNREACHABLE_REASON)
+                raise _HalUnreachable(_UNREACHABLE_REASON)
         else:
             answered = True
             if not (_arbiter_switching(status) or _switchover_active(status)):
@@ -516,7 +565,7 @@ def _prepare() -> None:
             if not answered:
                 if _FAIL_OPEN:
                     return
-                raise GpuGateClosed(_UNREACHABLE_REASON)
+                raise _HalUnreachable(_UNREACHABLE_REASON)
             if silent:
                 raise GpuGateClosed(
                     "hal0 stopped answering while it switched the GPU to image "

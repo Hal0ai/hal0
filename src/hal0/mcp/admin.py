@@ -855,6 +855,12 @@ TOOL_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     # comfyui_preview (GET /api/comfyui/preview) deliberately NOT aliased — it
     # proxies raw image bytes (a PNG Response), not JSON; _call_rest assumes a
     # JSON body and would hand the agent mangled/undecodable "text".
+    # The hal0_gpu_gate node's own routes (GET /api/comfyui/arbiter, POST
+    # /api/comfyui/prompt-handoff, POST /api/comfyui/gate-refusal) are deliberately NOT
+    # aliased either: the node calls them from inside the img container, comfyui_status
+    # already carries the same state (arbiter, gate, gate_refusal), and gate-refusal
+    # writes the gate's last word that the dashboard shows. Hidden by the deny-by-default
+    # rule above; tests/mcp/test_unclassified_routes.py pins it.
     # ── Updater / doctor / health / features / metrics — READS ONLY. The
     # apply/commit/rollback/prepare/restart-slots/channel-PUT routes stay
     # unaliased (see EXCLUDED_TOOLS["updater_apply"]). ───────────────────────
