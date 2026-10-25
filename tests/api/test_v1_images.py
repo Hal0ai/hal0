@@ -1175,6 +1175,50 @@ def test_v1_images_preflight_assesses_the_size_that_renders(
     manager.arbiter.ensure_img.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    "size",
+    [1024, 1024.5, True, 0, False, ["1024x1024"], [], {"width": 1024}, {}],
+    ids=["int", "float", "true", "zero", "false", "list", "empty-list", "object", "empty-object"],
+)
+def test_v1_images_non_string_size_is_a_client_error_not_a_500(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, memory_budget: _Budget, size: Any
+) -> None:
+    """``size`` is a string or absent. Anything else is a 422 before the model is resolved,
+    the budget is read or the GPU is touched (the translator used to raise on it: a 500)."""
+    _install("sdxl-turbo")
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+    manager = _SwitchingManager()
+    client.app.state.slot_manager = manager
+    memory_budget.result = _budget(render_free_gb=1.0)
+
+    r = client.post("/v1/images/generations", json=_fit_request("sdxl-turbo", size=size))
+
+    assert r.status_code == 422, r.text
+    error = r.json()["error"]
+    assert error["code"] == "image.invalid_size"
+    assert error["details"] == {"size": size}
+    assert "1024x1024" in error["message"]
+    assert memory_budget.apps == []  # the preflight never saw it
+    manager.arbiter.ensure_img.assert_not_awaited()
+    assert manager.arbiter.jobs == 0
+    mock_infer.assert_not_called()
+
+
+@pytest.mark.parametrize("size", [None, ""], ids=["null", "empty"])
+def test_v1_images_null_or_empty_size_means_the_default_size(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, size: Any
+) -> None:
+    _install("sd-1.5-pruned-emaonly")
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+
+    r = client.post("/v1/images/generations", json=_fit_request("sd-1.5-pruned-emaonly", size=size))
+
+    assert r.status_code == 200, r.text
+    assert mock_infer.call_args.args[1]["size"] == "512x512"
+
+
 def test_v1_images_preflight_size_matches_what_the_translator_renders(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, memory_budget: _Budget
 ) -> None:

@@ -104,11 +104,12 @@ def _parse_size(size: str | None) -> tuple[int, int]:
     """Parse OpenAI-style ``"1024x1024"`` → ``(1024, 1024)``.
 
     Tolerates capital ``X``. Falls back to ``_DEFAULT_SIZE`` on anything
-    we can't parse — the alternative is a 422 for a typo deep in a graph,
-    which is bad operator UX.
+    we can't parse, a value that is not a string included — the alternative
+    is a 422 for a typo deep in a graph, which is bad operator UX. (The
+    ``/v1`` route rejects a non-string ``size`` before it gets here.)
     """
-    raw = (size or _DEFAULT_SIZE).lower().strip()
     try:
+        raw = (size or _DEFAULT_SIZE).lower().strip()
         w_str, h_str = raw.split("x", 1)
         w, h = int(w_str), int(h_str)
     except (ValueError, AttributeError):

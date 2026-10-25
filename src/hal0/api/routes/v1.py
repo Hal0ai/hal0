@@ -1879,7 +1879,7 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
     from hal0.comfyui.install import readable_tree
     from hal0.comfyui.resolve import resolve_image_model
     from hal0.dispatcher.router import NoRouteFound, UpstreamUnavailable
-    from hal0.errors import Hal0Error
+    from hal0.errors import Hal0Error, UnprocessableEntity
     from hal0.providers import get_provider
 
     class _ImagePromptRequired(Hal0Error):
@@ -1889,6 +1889,17 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
     body = await _read_json_body(request)
     if not body.get("prompt"):
         raise _ImagePromptRequired("body.prompt is required")
+    # `size` is a string or absent (null and "" mean "no size"). Anything else is the
+    # client's mistake, caught here before the GPU, the budget or the translator see it.
+    # An unreadable string is not: the translator falls back to its default size.
+    size = body.get("size")
+    if size is not None and not isinstance(size, str):
+        raise UnprocessableEntity(
+            f"size must be a string WIDTHxHEIGHT in pixels, for example 1024x1024; "
+            f"got {type(size).__name__}",
+            code="image.invalid_size",
+            details={"size": size},
+        )
 
     # 1. Resolve the model first: a request that cannot render must fail before the GPU
     #    is arbitrated (a cold-start of the img container) on its behalf. The img

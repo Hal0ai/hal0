@@ -101,11 +101,13 @@ def test_build_workflow_clamps_size_to_safe_range() -> None:
         ("1024", "1024x1024"),
         ("", "1024x1024"),
         (None, "1024x1024"),
+        # Not a string at all: the default, never an error.
+        (1024, "1024x1024"),
+        (["640x480"], "1024x1024"),
+        ({"w": 64}, "1024x1024"),
     ],
 )
-def test_effective_size_is_the_size_build_workflow_renders(
-    size: str | None, effective: str
-) -> None:
+def test_effective_size_is_the_size_build_workflow_renders(size: Any, effective: str) -> None:
     """The fit preflight judges ``effective_size``, so it must be the translator's own answer."""
     assert effective_size(size) == effective
     _, meta = build_workflow(
