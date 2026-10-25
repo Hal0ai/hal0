@@ -121,7 +121,7 @@ token of its own:
   route, no WebSocket and no stream.
 - **When the gate has none.** A container started before the token existed,
   such as one still running from before the update, sends no credential. On a
-  box that needs one (enforcement on, or the LAN rule above) the gate then
+  box that needs one (enforcement on, or the LAN rule in the next section) the gate then
   refuses every image prompt at once with a message that says so; run `hal0
   slot restart img`. Elsewhere its requests pass without a credential, as
   before. The gate also holds the token back when
