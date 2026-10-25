@@ -1043,7 +1043,12 @@ class Dispatcher:
             # sits before the guard, so the guard → enter_dispatch pair below
             # stays await-free (DR-2).
             await self._make_room_for_llm(call)
-            self._guard_gpu_image_mode(call)
+            try:
+                self._guard_gpu_image_mode(call)
+            finally:
+                # Same synchronous step as the ticket below: a switch waiting
+                # on this request's demand lease sees the ticket next.
+                self._release_demand_lease()
             # DR-2: take a dispatch ticket SYNCHRONOUSLY here — right after the
             # guard, BEFORE the first await below — so the arbiter's drain sees
             # any request that has passed the image-mode guard even in the
@@ -1087,6 +1092,7 @@ class Dispatcher:
             finally:
                 if exit_dispatch is not None:
                     exit_dispatch(effective_slot)
+        self._release_demand_lease()  # not a slot upstream: nothing to hold the GPU for
         return await self._forward_plain(call)
 
     async def _make_room_for_llm(self, call: UpstreamCall) -> None:
@@ -1106,6 +1112,19 @@ class Dispatcher:
         if make_room is None:
             return
         await make_room(call.slot_name or call.container_slot_name)
+
+    def _release_demand_lease(self) -> None:
+        """Release the demand lease the request holds, if any.
+
+        :meth:`GpuArbiter.make_room_for_llm` leaves a request it waited for
+        with a lease that holds off a queued switch into image mode until the
+        request has its dispatch ticket. Stand-ins without
+        ``release_demand_lease`` opt out via the ``getattr``.
+        """
+        arbiter = getattr(self._slot_manager, "arbiter", None)
+        release = getattr(arbiter, "release_demand_lease", None)
+        if release is not None:
+            release()
 
     def _guard_gpu_image_mode(self, call: UpstreamCall) -> None:
         """Refuse llm-group dispatch while the GPU is in exclusive image mode.

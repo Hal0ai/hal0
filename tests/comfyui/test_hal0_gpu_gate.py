@@ -19,6 +19,8 @@ import importlib.util
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 _NODE_PATH = (
     Path(__file__).resolve().parents[2] / "src" / "hal0" / "comfyui" / "assets" / "hal0_gpu_gate.py"
 )
@@ -132,6 +134,114 @@ def test_prepare_image_mode_returns_once_the_switch_has_finished(monkeypatch) ->
     mod.prepare_image_mode()
     assert calls == ["switch"]
     assert next(statuses, None) is None
+
+
+def test_prepare_image_mode_asks_again_when_hal0_is_back_in_inference(monkeypatch) -> None:
+    """An LLM request reclaimed the GPU after the first switch, before the prompt
+    reached ComfyUI's queue: the hook asks for image mode again instead of
+    letting the prompt render under the LLM set."""
+    mod = _load_node()
+    statuses = iter(
+        [
+            {"mode": "inference", "arbiter": {"switching": False}},
+            {"mode": "generation", "arbiter": {"switching": True}},
+            {"mode": "inference", "arbiter": {"switching": False}},
+            {"mode": "generation", "arbiter": {"switching": False}},
+        ]
+    )
+    calls: list[str] = []
+
+    monkeypatch.setattr(mod, "_fetch_status", lambda: next(statuses))
+    monkeypatch.setattr(mod, "_post_switchover", lambda: calls.append("switch") or True)
+    monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
+
+    mod.prepare_image_mode()
+    assert calls == ["switch", "switch"]
+    assert next(statuses, None) is None
+
+
+def test_prepare_image_mode_waits_while_hal0_runs_the_switch_it_accepted(monkeypatch) -> None:
+    """Between the switchover's 202 and the arbiter taking its lock, hal0 still
+    reports inference with the switchover active: that is not a reason to ask again."""
+    mod = _load_node()
+    statuses = iter(
+        [
+            {"mode": "inference", "arbiter": {"switching": False}},
+            *[
+                {
+                    "mode": "inference",
+                    "arbiter": {"switching": False},
+                    "switchover": {"active": True},
+                }
+            ]
+            * 4,
+            {"mode": "generation", "arbiter": {"switching": False}},
+        ]
+    )
+    calls: list[str] = []
+
+    monkeypatch.setattr(mod, "_fetch_status", lambda: next(statuses))
+    monkeypatch.setattr(mod, "_post_switchover", lambda: calls.append("switch") or True)
+    monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
+
+    mod.prepare_image_mode()
+    assert calls == ["switch"]
+
+
+def test_prepare_image_mode_fails_closed_when_hal0_keeps_the_gpu_in_inference(
+    monkeypatch,
+) -> None:
+    """hal0 answers but never reaches image mode: the prompt must not render
+    under the LLM set. The hook asks a bounded number of times, then refuses."""
+    mod = _load_node()
+    calls: list[str] = []
+
+    monkeypatch.setattr(mod, "_fetch_status", lambda: {"mode": "inference"})
+    monkeypatch.setattr(mod, "_post_switchover", lambda: calls.append("switch") or True)
+    monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(mod.GpuGateClosed, match="inference"):
+        mod.prepare_image_mode()
+    assert calls == ["switch"] * mod._SWITCH_MAX_POSTS
+
+
+def test_prepare_image_mode_fails_closed_when_the_switch_outlives_the_deadline(
+    monkeypatch,
+) -> None:
+    mod = _load_node()
+    monkeypatch.setattr(mod, "_SWITCH_TIMEOUT_S", 0.0)
+    monkeypatch.setattr(
+        mod, "_fetch_status", lambda: {"mode": "generation", "arbiter": {"switching": True}}
+    )
+    monkeypatch.setattr(mod, "_post_switchover", lambda: pytest.fail("no switch to ask for"))
+    monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(mod.GpuGateClosed, match="did not finish"):
+        mod.prepare_image_mode()
+
+
+def test_prepare_image_mode_fails_open_when_hal0_is_unreachable(monkeypatch) -> None:
+    mod = _load_node()
+    monkeypatch.setattr(mod, "_fetch_status", lambda: None)
+    monkeypatch.setattr(mod, "_post_switchover", lambda: pytest.fail("hal0 is unreachable"))
+
+    mod.prepare_image_mode()  # returns: standalone ComfyUI keeps working
+
+
+def test_a_refused_prompt_answers_in_comfyuis_prompt_error_shape() -> None:
+    """ComfyUI's editor turns a non-200 /prompt answer of this shape into its
+    prompt error dialog, showing ``message: details``."""
+    mod = _load_node()
+    body = mod.refused_prompt_body("hal0 kept the GPU in inference mode")
+    assert body == {
+        "error": {
+            "type": "hal0_gpu_not_ready",
+            "message": "hal0 did not hand the GPU to ComfyUI",
+            "details": "hal0 kept the GPU in inference mode",
+            "extra_info": {},
+        },
+        "node_errors": {},
+    }
 
 
 def test_prepare_image_mode_fails_open_when_switchover_fails(monkeypatch) -> None:

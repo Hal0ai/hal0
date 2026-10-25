@@ -1163,6 +1163,309 @@ async def test_restore_loop_survives_a_tick_exception(
             await _cancel_loop(task)
 
 
+# ── the editor hand-off and the gate node (real gate logic) ──────────────────
+
+_GATE_PATH = (
+    Path(__file__).resolve().parents[2] / "src" / "hal0" / "comfyui" / "assets" / "hal0_gpu_gate.py"
+)
+
+
+def _load_gate() -> Any:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("hal0_gpu_gate_under_test", _GATE_PATH)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class _EditorPrompt:
+    """One editor prompt through the real ``hal0_gpu_gate`` hook, wired to ``arb``.
+
+    The hook runs in a worker thread, as it does inside ComfyUI. Its status
+    fetch reports ``arb.status()`` the way ``GET /api/comfyui/status`` does
+    (mode, the arbiter block, and the switchover tracker), and its switchover
+    post starts ``ensure_img`` in the background, like the route's 202. When
+    the hook lets the prompt through, ComfyUI queues it.
+    """
+
+    def __init__(self, arb: GpuArbiter, comfyui_http: dict[str, Any]) -> None:
+        self.gate = _load_gate()
+        self.gate._SWITCH_POLL_S = 0.05
+        self.gate._SWITCH_TIMEOUT_S = 2.0
+        self.gate._fetch_status = self._fetch_status
+        self.gate._post_switchover = self._post_switchover
+        self.arb = arb
+        self.comfyui_http = comfyui_http
+        self.loop = asyncio.get_running_loop()
+        self.posts = 0
+        self.switch_active = False
+        self.mode_when_queued: GpuMode | None = None
+        self.refused: Exception | None = None
+
+    def _on_loop(self, fn: Any) -> Any:
+        async def _call() -> Any:
+            return fn()
+
+        return asyncio.run_coroutine_threadsafe(_call(), self.loop).result(timeout=5)
+
+    def _fetch_status(self) -> dict[str, Any]:
+        st = self._on_loop(self.arb.status)
+        return {
+            "mode": {"img": "generation", "llm": "inference"}[st["mode"]],
+            "arbiter": st,
+            "switchover": {"active": self.switch_active, "error": None},
+        }
+
+    def _post_switchover(self) -> bool:
+        self.posts += 1
+        self.switch_active = True
+
+        async def _switch() -> None:
+            try:
+                await self.arb.ensure_img()
+            finally:
+                self.switch_active = False
+
+        asyncio.run_coroutine_threadsafe(_switch(), self.loop)
+        return True
+
+    def _submit(self) -> None:
+        try:
+            self.gate.prepare_image_mode()
+        except Exception as exc:  # the hook refused the prompt
+            self.refused = exc
+            return
+        self.mode_when_queued = self._on_loop(lambda: self.arb.mode)
+        self.comfyui_http["queue"] = (0, 1)  # ComfyUI queued the prompt
+
+    def submit(self) -> asyncio.Future[None]:
+        return self.loop.run_in_executor(None, self._submit)
+
+    async def wait_for_the_switch(self) -> None:
+        for _ in range(1000):
+            if self.posts and self.arb.mode is GpuMode.IMG and not self.arb.status()["switching"]:
+                return
+            await asyncio.sleep(0.005)
+        raise AssertionError("the gate's switch never finished")
+
+
+async def _llm_request(arb: GpuArbiter, slot: str) -> str:
+    """What the dispatcher does for an LLM request: the demand step, then the
+    guard, then (in the same step as its ticket) the lease release."""
+    await arb.make_room_for_llm(slot)
+    try:
+        arb.guard_dispatch(slot)
+    except GpuImageMode:
+        return "503 gpu.image_mode"
+    finally:
+        getattr(arb, "release_demand_lease", lambda: None)()
+    return "dispatched"
+
+
+@pytest.fixture
+def slow_unload(fake_mgr: FakeManager, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A real unload takes seconds; the gate polls meanwhile."""
+    real_unload = fake_mgr.unload
+
+    async def _slow_unload(name: str) -> None:
+        await asyncio.sleep(0.05)
+        await real_unload(name)
+
+    monkeypatch.setattr(fake_mgr, "unload", _slow_unload)
+
+
+async def test_llm_demand_right_after_an_editor_switch_leaves_the_gpu_to_the_prompt(
+    fake_mgr: FakeManager,
+    state_path: Path,
+    comfyui_http: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    slow_unload: None,
+) -> None:
+    """An editor prompt asks for image mode through the gate. An LLM request
+    that lands in the gate's poll gap, after the switch and before the prompt
+    reaches ComfyUI's queue, must not restore the LLM set under the prompt:
+    it waits out the hand-off, then sees the queued prompt and is refused."""
+    # Longer than this test gate's 0.05 s poll, as 3 s is longer than the real
+    # gate's 0.5 s poll plus its 2 s status fetch.
+    monkeypatch.setattr(arbiter_mod, "_GATE_HANDOFF_S", 1.0, raising=False)
+    fake_mgr.ready.add("img")  # resident ComfyUI
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    prompt = _EditorPrompt(arb, comfyui_http)
+
+    queued = prompt.submit()
+    await prompt.wait_for_the_switch()
+    # e.g. an agent's chat request, in the gate's poll gap
+    assert await _llm_request(arb, "chat") == "503 gpu.image_mode"
+    await asyncio.wait_for(queued, timeout=5)
+
+    assert prompt.refused is None
+    assert prompt.mode_when_queued is GpuMode.IMG
+    assert prompt.posts == 1
+    assert comfyui_http["free"] == 0
+    assert ("load", "chat", None) not in fake_mgr.calls
+    assert arb.mode is GpuMode.IMG
+
+
+async def test_llm_demand_after_a_switch_whose_prompt_never_comes_restores_after_the_handoff(
+    fake_mgr: FakeManager,
+    state_path: Path,
+    comfyui_http: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A manual switch (or a prompt the gate let through that never queued):
+    the LLM request waits out the hand-off instead of a 503, then restores."""
+    monkeypatch.setattr(arbiter_mod, "_GATE_HANDOFF_S", 0.2, raising=False)
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    await arb.ensure_img()  # no image job: a gate or manual switch
+    fake_mgr.calls.clear()
+
+    await arb._restore_tick()
+    arb._quiet_since = time.monotonic() - 3600  # even past the grace ...
+    await arb._restore_tick()  # ... the tick leaves the hand-off alone
+    assert fake_mgr.calls == []
+
+    started = time.monotonic()
+    assert await _llm_request(arb, "chat") == "dispatched"
+    assert time.monotonic() - started >= 0.1  # it waited for the hand-off
+    assert fake_mgr.calls == [("load", "chat", None), ("load", "agent", None)]
+    assert arb.mode is GpuMode.LLM
+
+
+async def test_the_gate_asks_again_when_a_restore_beats_its_prompt(
+    fake_mgr: FakeManager,
+    state_path: Path,
+    comfyui_http: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    slow_unload: None,
+) -> None:
+    """Defence in depth: when the LLM set is restored before the prompt lands
+    (here with no hand-off, as an explicit restore would), the gate sees
+    inference after its switch and asks again instead of letting the prompt
+    render under the LLM weights."""
+    monkeypatch.setattr(arbiter_mod, "_GATE_HANDOFF_S", 0.0, raising=False)
+    fake_mgr.ready.add("img")
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    prompt = _EditorPrompt(arb, comfyui_http)
+
+    queued = prompt.submit()
+    await prompt.wait_for_the_switch()
+    assert await _llm_request(arb, "chat") == "dispatched"  # the restore beat the prompt
+    await asyncio.wait_for(queued, timeout=5)
+
+    assert prompt.refused is None
+    assert prompt.posts == 2
+    assert prompt.mode_when_queued is GpuMode.IMG
+
+
+# ── a chat served by a demand restore against a render queued behind it ──────
+
+
+async def test_a_chat_served_by_a_demand_restore_dispatches_before_a_queued_render_switches(
+    fake_mgr: FakeManager,
+    state_path: Path,
+    comfyui_http: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_hal0_home: str,
+) -> None:
+    """The chat waited for the reload it asked for. A /v1 render queued on the
+    switch lock behind that restore must not persist image mode before the
+    chat reaches its dispatch ticket; the render switches once the chat ran."""
+    _write_img_state(state_path)
+    fake_mgr.ready -= {"chat", "agent"}
+    fake_mgr.ready.add("img")
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    release = asyncio.Event()
+    real_load = fake_mgr.load
+    events: list[str] = []
+
+    async def _gated_load(name: str, model_id: str | None = None) -> None:
+        await release.wait()
+        await real_load(name, model_id)
+
+    monkeypatch.setattr(fake_mgr, "load", _gated_load)
+    fake_mgr.on_unload = lambda name: events.append(f"unload {name}")
+
+    async def _chat() -> str:
+        # What Dispatcher.forward does: the demand step, the guard, the ticket.
+        await arb.make_room_for_llm("chat")
+        try:
+            arb.guard_dispatch("chat")
+        except GpuImageMode:
+            return "503 gpu.image_mode"
+        fake_mgr.enter_dispatch("chat")
+        getattr(arb, "release_demand_lease", lambda: None)()
+        try:
+            await asyncio.sleep(0.05)  # the request runs on the slot
+            events.append("chat served")
+        finally:
+            fake_mgr.exit_dispatch("chat")
+        return "served"
+
+    async def _render() -> None:
+        async with arb.image_job():
+            await arb.ensure_img()
+        events.append("render switched")
+
+    chat = asyncio.create_task(_chat())
+    await asyncio.sleep(0.01)  # the demand restore holds the lock, reloading
+    render = asyncio.create_task(_render())
+    await asyncio.sleep(0.01)  # the render waits on the lock behind it
+    release.set()
+
+    assert await asyncio.wait_for(chat, timeout=2.0) == "served"
+    await asyncio.wait_for(render, timeout=2.0)
+    assert events == ["chat served", "unload chat", "unload agent", "render switched"]
+    assert arb.mode is GpuMode.IMG
+
+
+async def test_a_switch_ahead_of_a_demand_restore_does_not_wait_for_its_waiters(
+    fake_mgr: FakeManager,
+    state_path: Path,
+    comfyui_http: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_hal0_home: str,
+) -> None:
+    """A switch that reaches the lock before a demand restore must not wait for
+    that restore's waiters: the restore cannot run until the switch ends. The
+    switch goes ahead; the demand restore then runs after it (here no prompt
+    follows the manual switch, so it hands the GPU back)."""
+    monkeypatch.setattr(arbiter_mod, "_GATE_HANDOFF_S", 0.0, raising=False)
+    _write_img_state(state_path)
+    fake_mgr.ready -= {"chat", "agent"}
+    fake_mgr.ready.add("img")
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    release = asyncio.Event()
+    real_load = fake_mgr.load
+
+    async def _gated_load(name: str, model_id: str | None = None) -> None:
+        await release.wait()
+        await real_load(name, model_id)
+
+    monkeypatch.setattr(fake_mgr, "load", _gated_load)
+
+    restore = asyncio.create_task(arb.restore_llm())  # an explicit restore holds the lock
+    await asyncio.sleep(0.01)
+    switch = asyncio.create_task(arb.ensure_img())  # a manual switch queues first ...
+    await asyncio.sleep(0.01)
+    chat = asyncio.create_task(_llm_request(arb, "chat"))  # ... a demand restore second
+    await asyncio.sleep(0.01)
+    release.set()
+
+    await asyncio.wait_for(restore, timeout=1.0)
+    await asyncio.wait_for(switch, timeout=1.0)  # not held up by the chat's wait
+    assert await asyncio.wait_for(chat, timeout=1.0) == "dispatched"
+    assert fake_mgr.calls == [
+        ("load", "chat", None),  # the explicit restore
+        ("load", "agent", None),
+        ("unload", "chat"),  # the manual switch, ahead of the demand restore
+        ("unload", "agent"),
+        ("load", "chat", None),  # the demand restore, after the switch
+        ("load", "agent", None),
+    ]
+
+
 # ── manager wiring ───────────────────────────────────────────────────────────
 
 

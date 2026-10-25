@@ -493,6 +493,68 @@ async def test_llm_forward_right_after_a_render_restores_and_dispatches(
 
 
 @pytest.mark.asyncio
+async def test_a_chat_restored_for_on_the_route_keeps_the_gpu_until_it_dispatches(
+    tmp_path: Path, comfyui_queue: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The /v1 chat route asks for room before its own awaits (slot load,
+    upstream resolution) and takes its dispatch ticket later, in forward. A
+    render queued behind the restore must not switch in that gap: the chat is
+    served on the reloaded slot, and the render switches after it."""
+    sm = _ArbiterSlotManager(tmp_path)
+    sm.cfgs = _dr2_cfgs()
+    _write_img_mode_state(tmp_path / "gpu_arbiter.json", saved=["primary"])
+    comfyui_queue["queue"] = (0, 0)
+    arbiter = sm.arbiter
+    release = asyncio.Event()
+    events: list[str] = []
+    real_load, real_unload = sm.load, sm.unload
+
+    async def _gated_load(slot_name: str, model: Any = None) -> None:
+        await release.wait()
+        await real_load(slot_name, model)
+
+    async def _recording_unload(slot_name: str) -> None:
+        events.append(f"unload {slot_name}")
+        await real_unload(slot_name)
+
+    monkeypatch.setattr(sm, "load", _gated_load)
+    monkeypatch.setattr(sm, "unload", _recording_unload)
+
+    def _upstream(req: httpx.Request) -> httpx.Response:
+        events.append("chat served")
+        return httpx.Response(200, json={"ok": True})
+
+    dispatcher = _make_dispatcher(httpx.MockTransport(_upstream), sm)
+
+    async def _chat_route() -> int:
+        # _ensure_backend_for_model: the demand step and the guard ...
+        await arbiter.make_room_for_llm("primary")
+        arbiter.guard_dispatch("primary")
+        await asyncio.sleep(0.05)  # ... then the route's own awaits ...
+        resp = await dispatcher.forward(_slot_call("primary"))  # ... then the ticket
+        return resp.status_code
+
+    async def _render() -> None:
+        async with arbiter.image_job():
+            await arbiter.ensure_img()
+        events.append("render switched")
+
+    try:
+        chat = asyncio.create_task(_chat_route())
+        await asyncio.sleep(0.01)  # the demand restore holds the lock, reloading
+        render = asyncio.create_task(_render())
+        await asyncio.sleep(0.01)  # the render waits on the lock behind it
+        release.set()
+
+        assert await asyncio.wait_for(chat, timeout=2.0) == 200
+        await asyncio.wait_for(render, timeout=2.0)
+        assert events == ["chat served", "unload primary", "render switched"]
+        assert arbiter.mode is GpuMode.IMG
+    finally:
+        await dispatcher.aclose()
+
+
+@pytest.mark.asyncio
 async def test_npu_and_cpu_slots_unaffected_in_img_mode(tmp_path: Path) -> None:
     """Non-llm-group slots (tts/npu/cpu) dispatch normally while mode==img."""
     sm = _ArbiterSlotManager(tmp_path)
