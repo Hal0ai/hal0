@@ -76,10 +76,6 @@ applying. Add those subsections to a version's section to surface them; see
 
 - **`GET /api/comfyui/status` reports the step progress of the render hal0 submitted.** `progress` is `{model, step, total, node, elapsed_s, prompt_id}`, or `null` when no such render is live: `step` and `total` are `null` until ComfyUI's first progress frame, `node` is the graph node it is executing, and with several renders queued it is the one that stepped most recently. hal0 follows the render on ComfyUI's websocket (the `websockets` package, now a declared dependency, `>=13.0`) while it polls for the result; a socket that cannot open or drops costs only the read-out, never the render. A render queued from ComfyUI's editor has no entry; read `queue` for it.
 
-### Removed
-
-- **`it_s`, `eta` and `step` are gone from `GET /api/comfyui/status`.** The keys were always `null`; `progress` replaces them (see Changed).
-
 ### Changed
 
 - **`/api/comfyui/status` `inventory.loras` now counts LoRAs in subdirectories, and a failed scan hides the counts.** The old count read only the top level of `loras/`, so Wan's LoRAs, which live in a directory of their own, were missed; every category now comes from one recursive scan of the models tree. When that scan fails, `inventory` is null instead of a row of zeros.

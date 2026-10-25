@@ -165,7 +165,7 @@ below. Taking the snapshot awaits nothing and does no network or config I/O.
 
 | Field | Meaning |
 |---|---|
-| `phase` | What the GPU is doing. While a switch or a restore runs, its step: `draining` (waiting for requests on the LLM slots to finish), `unloading`, `starting_engine` or `reloading`. In image mode with none running: `handoff` for about 3 seconds after any switch into image mode (a `/v1` render's included) and after the gate announces an editor prompt, so that the prompt can reach ComfyUI's queue, else `rendering` while a `/v1` image request is open, else `grace` once the quiet clock runs. `null` otherwise. |
+| `phase` | What the GPU is doing. While a switch or a restore runs, its step: `draining` (waiting for requests on the LLM slots to finish), `unloading`, `starting_engine` (only when the image engine was down and is being started: a first boot, a crash or a restart; a switch with the engine already running has no such step) or `reloading`. In image mode with none running: `handoff` for about 3 seconds after every `/v1` image request has asked for image mode (one that finds the GPU already in image mode reopens the hand-off too, not only one that switches it) and after the gate announces an editor prompt, so that the prompt can reach ComfyUI's queue, else `rendering` while a `/v1` image request is open, else `grace` once the quiet clock runs. `null` otherwise. |
 | `restore_at` | Epoch seconds when the restore of the LLM slots is due (the end of the grace period). Set only while `phase` is `grace`. |
 | `handoff_until` | Epoch seconds when the hand-off ends. Set only while `phase` is `handoff`. |
 | `drain_in_flight` | Requests still running on the slots being drained, while `phase` is `draining`; else `0`. |

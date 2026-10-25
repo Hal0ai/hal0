@@ -192,7 +192,8 @@ seconds after the switch when nothing renders. To keep image mode, pin it.
 - **hal0 never restores under a render.** While a render runs or waits in
   ComfyUI's queue, the reload waits. Switching to `inference` by hand while
   one runs needs `force`, which drops it.
-- **A hand-off follows each switch into image mode.** For about 3 seconds
+- **A hand-off follows each request for image mode.** For about 3 seconds
+  (a render sent to `/v1` on a GPU already in image mode starts one too)
   hal0 does not restore, so a prompt sent from ComfyUI's editor can reach
   ComfyUI's queue, where hal0 sees it.
 - **A pin lasts until you end it.** `POST /api/comfyui/pin` with
