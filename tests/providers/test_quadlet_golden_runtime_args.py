@@ -43,9 +43,11 @@ Volume=<data_root>/input:/opt/ComfyUI/input
 Volume=<data_root>/user:/opt/ComfyUI/user
 Volume=<data_root>/custom_nodes:/opt/ComfyUI/custom_nodes
 Volume=<data_root>/extra_model_paths.yaml:/opt/ComfyUI/extra_model_paths.yaml:ro
+Volume=<hal0_home>/var-lib/hal0/comfyui-gate:/opt/hal0-gate:ro
 Environment=HAL0_COMFYUI_STATUS_URL=http://127.0.0.1:8080/api/comfyui/arbiter
 Environment=HAL0_COMFYUI_SWITCHOVER_URL=http://127.0.0.1:8080/api/comfyui/switchover
 Environment=HAL0_COMFYUI_HANDOFF_URL=http://127.0.0.1:8080/api/comfyui/prompt-handoff
+Environment=HAL0_COMFYUI_GATE_TOKEN_FILE=/opt/hal0-gate/token
 PodmanArgs=--ipc=host
 Exec=bash -lc 'cd /opt/ComfyUI && exec python main.py --listen 127.0.0.1 --port 8188 --use-pytorch-cross-attention'
 
@@ -114,6 +116,8 @@ def comfyui_unit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> str:
         ComfyUIProvider, "_profile_flags", lambda self, slot_cfg: "--use-pytorch-cross-attention"
     )
     monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(tmp_path))
+    # The gate's token directory sits under the state root (#3058).
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path / "home"))
     # The gate's URLs come from hal0-api's port and bind host: pin the defaults.
     for key in ("HAL0_PORT", "HAL0_BIND_HOST", "HAL0_COMFYUI_GATE_FAIL_OPEN"):
         monkeypatch.delenv(key, raising=False)
@@ -130,7 +134,11 @@ def comfyui_unit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> str:
         "model": {"default": "sdxl-turbo"},
     }
     spec = ComfyUIProvider().container_spec(slot_cfg, {})
-    return _render_quadlet_from_plan("img", spec).replace(str(tmp_path), "<data_root>")
+    return (
+        _render_quadlet_from_plan("img", spec)
+        .replace(str(tmp_path / "home"), "<hal0_home>")
+        .replace(str(tmp_path), "<data_root>")
+    )
 
 
 @pytest.fixture

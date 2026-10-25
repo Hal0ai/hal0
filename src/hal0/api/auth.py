@@ -51,6 +51,16 @@ per-caller outcome on ``GET /api/auth/status`` so the dashboard can ask
 for the key at the front door instead of rendering pages whose reads all
 401.
 
+The ComfyUI GPU gate's token (#3058)
+------------------------------------
+The ``hal0_gpu_gate`` node in the img container is not an operator and never
+holds the admin key. :mod:`hal0.comfyui.gate_credential` mints it a token of
+its own, which admits exactly its three requests (:data:`_GATE_REQUESTS`), from
+the box itself only, when the ADMIN gate would refuse them, and marks the request with
+:data:`GATE_SCOPE_KEY` so the switch handler holds it to image mode. The token
+is not a tier: :func:`resolve_principal` never returns it, so it opens no
+other route, no WebSocket and no stream.
+
 The browser session cookie is **reused, not reimplemented**: minting and
 verification both delegate to :mod:`hal0.api.agents._auth` (one
 HMAC-SHA256 cookie scheme), so
@@ -80,7 +90,7 @@ import structlog
 
 from hal0.api import live_sockets
 from hal0.api.agents._auth import SESSION_COOKIE_NAME, verify_session_cookie
-from hal0.config.network import is_loopback_bind
+from hal0.config.network import bind_host, is_loopback_bind
 from hal0.security.exposure import AuthClass, classify
 
 log = structlog.get_logger(__name__)
@@ -479,6 +489,59 @@ def _envelope(code: str, message: str) -> dict[str, Any]:
     return {"error": {"code": code, "message": message, "details": {}}}
 
 
+# ---------------------------------------------------------------------------
+# The ComfyUI GPU gate's own credential (#3058)
+
+#: The only requests the ComfyUI GPU gate's token admits: its arbiter read,
+#: its prompt hand-off and its switch request, matched on the exact method and
+#: path. The token lives in :mod:`hal0.comfyui.gate_credential`.
+_GATE_REQUESTS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("GET", "/api/comfyui/arbiter"),
+        ("POST", "/api/comfyui/prompt-handoff"),
+        ("POST", "/api/comfyui/switchover"),
+    }
+)
+
+#: Set to ``True`` on the ASGI scope of a request the gate's token admitted.
+#: The switch handler reads it to hold such a request to a plain switch into
+#: image mode (no inference, no ``force``, no ``pin``).
+GATE_SCOPE_KEY = "hal0.comfyui_gate"
+
+
+def _gate_peer(scope: dict[str, Any]) -> bool:
+    """True iff the request comes from where the gate dials: the box itself.
+
+    The img container shares the host's network, so the gate reaches hal0-api
+    on loopback, or on the one address hal0-api binds (a request from the box
+    to its own address arrives from that address). A token carried off the box
+    is refused from anywhere else.
+    """
+    if _is_loopback_peer(scope):
+        return True
+    client = scope.get("client")
+    if not client:
+        return False
+    try:
+        return ipaddress.ip_address(client[0]) == ipaddress.ip_address(bind_host())
+    except ValueError:
+        return False
+
+
+def _gate_admits(scope: dict[str, Any], method: str, path: str) -> bool:
+    """True iff this is one of the gate's requests, from the box, carrying its token."""
+    if scope.get("type") != "http" or (method, path) not in _GATE_REQUESTS:
+        return False
+    if not _gate_peer(scope):
+        return False
+    authorization = _headers_from_scope(scope).get("authorization", "")
+    if authorization[:7].lower() != "bearer ":
+        return False
+    from hal0.comfyui import gate_credential
+
+    return gate_credential.verify(authorization[7:].strip())
+
+
 def _decide(auth_class: AuthClass, principal: AuthPrincipal) -> tuple[bool, int, str]:
     """Return ``(allowed, status_if_denied, error_code_if_denied)``."""
     if auth_class is AuthClass.OPEN:
@@ -665,6 +728,11 @@ class AuthEnforcementMiddleware:
             )
             return
 
+        if _gate_admits(scope, method, path):
+            scope[GATE_SCOPE_KEY] = True
+            await self.app(scope, receive, send)
+            return
+
         log.info(
             "hal0.auth.denied",
             path=path,
@@ -698,6 +766,7 @@ class AuthEnforcementMiddleware:
 
 __all__ = [
     "ANON",
+    "GATE_SCOPE_KEY",
     "AuthEnforcementMiddleware",
     "AuthPrincipal",
     "Tier",

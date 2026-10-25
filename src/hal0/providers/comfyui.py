@@ -43,6 +43,7 @@ from typing import Any
 
 import httpx
 
+from hal0.comfyui import gate_credential
 from hal0.comfyui import paths as comfyui_paths
 from hal0.config import paths as cfg_paths
 from hal0.errors import Hal0Error
@@ -83,6 +84,10 @@ _GATE_STATUS_URL_ENV = "HAL0_COMFYUI_STATUS_URL"
 _GATE_SWITCHOVER_URL_ENV = "HAL0_COMFYUI_SWITCHOVER_URL"
 _GATE_HANDOFF_URL_ENV = "HAL0_COMFYUI_HANDOFF_URL"
 _GATE_FAIL_OPEN_ENV = "HAL0_COMFYUI_GATE_FAIL_OPEN"
+# The gate's own credential (#3058): its directory is mounted read-only here,
+# and the gate reads the token file named by this variable on every request.
+_GATE_TOKEN_FILE_ENV = "HAL0_COMFYUI_GATE_TOKEN_FILE"
+_GATE_TOKEN_MOUNT = "/opt/hal0-gate"
 _TRUTHY = ("1", "true", "yes", "on")
 _DEFAULT_API_PORT = 8080
 # A bind host that is safe to write into a unit file's Environment= line.
@@ -388,6 +393,25 @@ def gate_env() -> dict[str, str]:
     return env
 
 
+def _gate_credential_mount() -> Mount | None:
+    """The read-only mount carrying the gate's token, minted on first use.
+
+    ``None`` when the token cannot be written: the gate then runs without a
+    credential, as before #3058, which works wherever hal0-api does not
+    enforce auth on its requests. The token itself never enters the unit.
+    """
+    try:
+        gate_credential.ensure_token()
+    except OSError as exc:
+        log.warning(
+            "ComfyUI's GPU gate gets no credential: cannot write %s (%s)",
+            gate_credential.token_dir(),
+            exc,
+        )
+        return None
+    return Mount(str(gate_credential.token_dir()), _GATE_TOKEN_MOUNT, read_only=True)
+
+
 class ComfyUIProvider(Provider):
     """Provider for ComfyUI (Stable Diffusion family) image generation.
 
@@ -559,6 +583,12 @@ class ComfyUIProvider(Provider):
             ),
         ]
 
+        env = gate_env()
+        gate_mount = _gate_credential_mount()
+        if gate_mount is not None:
+            mounts.append(gate_mount)
+            env[_GATE_TOKEN_FILE_ENV] = f"{_GATE_TOKEN_MOUNT}/{gate_credential.TOKEN_FILE_NAME}"
+
         # Numeric GIDs for the host's render+video groups (see _gpu.py
         # and llama_server's notes on stock-ubuntu /etc/group).
         group_add: list[str] = [str(gid) for gid in resolve_gpu_group_ids()]
@@ -566,7 +596,7 @@ class ComfyUIProvider(Provider):
         return RuntimeLaunchPlan(
             image=self.image_ref(slot_cfg),
             command=command,
-            env=gate_env(),
+            env=env,
             mounts=mounts,
             devices=resolve_gpu_device_paths(),
             cap_add=[],
