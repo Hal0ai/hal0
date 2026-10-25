@@ -206,6 +206,23 @@ test.describe('Settings ▸ Network (#2382)', () => {
     await expect(origins).toHaveValue('http://a.lan:8080\nhttp://c.lan:8080')
   })
 
+  test('an edit typed before the settings arrive is kept, not overwritten by the load', async ({ page }) => {
+    let release!: () => void
+    const loaded = new Promise<void>((resolve) => { release = resolve })
+    await page.route('**/api/settings', async (r) => {
+      await loaded
+      return json(r, { security: {}, network: { public_url: null, extra_origins: [] } })
+    })
+
+    await page.goto('/#settings/network')
+    const origins = page.getByTestId('network-extra-origins')
+    await origins.fill('http://typed.lan:8080')
+    release()
+    await page.waitForResponse((r) => r.url().endsWith('/api/settings'))
+    await expect(page.getByTestId('network-save')).toBeEnabled()
+    await expect(origins).toHaveValue('http://typed.lan:8080')
+  })
+
   test('a refused origin shows the server reason', async ({ page }) => {
     await page.route('**/api/settings', (r) => json(r, { security: {}, network: { public_url: null, extra_origins: [] } }))
     await page.route('**/api/settings/network', (r) =>
