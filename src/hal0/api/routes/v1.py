@@ -1788,6 +1788,29 @@ def _extract_port_from_upstream_url(url: str) -> int | None:
     return parsed.port
 
 
+#: How long :func:`_client_has_gone` waits on the request's next ASGI message.
+_DISCONNECT_PROBE_S = 0.05
+
+
+async def _client_has_gone(request: Request) -> bool:
+    """Whether the client has closed the connection, asked by listening for the message.
+
+    ``Request.is_disconnected()`` reads with an already-cancelled scope, which sees a
+    disconnect only if the server's ``receive`` answers without waiting. The auth
+    middleware's stream guard (``live_sockets.guard_http_stream``, used on every box that
+    requires auth) wraps ``receive`` with a wait that the cancelled scope interrupts, so the
+    disconnect is lost and the check always answers False there. Waiting a moment on the next
+    message works through that wrapper and without it: ``http.disconnect`` means the client is
+    gone, and a timeout means it is still there. ``wait_for`` cancels what it started when
+    the wait ends, so nothing is left running.
+    """
+    try:
+        message = await asyncio.wait_for(request.receive(), timeout=_DISCONNECT_PROBE_S)
+    except TimeoutError:
+        return False
+    return message.get("type") == "http.disconnect"
+
+
 async def _refuse_image_that_wont_fit(
     request: Request, resolved: ResolvedImageModel, body: dict[str, Any]
 ) -> None:
@@ -2022,7 +2045,7 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
         #    the `async with` is a normal exit, so image_job() closes and the arbiter's
         #    restore clock starts as for any finished job; the GPU goes back as usual.
         #    499 is nginx's "client closed request"; the access log records it.
-        if await request.is_disconnected():
+        if await _client_has_gone(request):
             log.info("images.client_gone_before_render", model=resolved.id)
             return Response(status_code=499)
 

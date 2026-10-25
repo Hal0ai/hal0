@@ -419,17 +419,19 @@ def test_a_request_cancelled_during_the_switch_leaves_the_gpu_to_the_restore(
     next LLM request restores the GPU exactly as it does after a finished render."""
     from starlette.requests import Request
 
+    from hal0.api.routes import v1
+
     comfyui_queue["queue"] = (0, 0)
     _seed_img_upstream(client)
     _seed_chat_upstream(client, "agent")
     unload, load, infer = _wire_image_app(client, monkeypatch, llm_slot="agent")
     arbiter = client.app.state.slot_manager.arbiter
 
-    async def _is_disconnected(self: Request) -> bool:
+    async def _client_has_gone(request: Request) -> bool:
         # The image request's client is gone once the switch has landed, not before it.
-        return self.url.path == "/v1/images/generations" and arbiter.mode is GpuMode.IMG
+        return request.url.path == "/v1/images/generations" and arbiter.mode is GpuMode.IMG
 
-    monkeypatch.setattr(Request, "is_disconnected", _is_disconnected)
+    monkeypatch.setattr(v1, "_client_has_gone", _client_has_gone)
 
     r = client.post("/v1/images/generations", json={"model": "sdxl-turbo", "prompt": "a cat"})
 

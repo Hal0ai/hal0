@@ -1327,18 +1327,19 @@ def test_v1_images_non_finite_size_is_a_422_that_does_not_echo_the_value(
 def _client_leaves_when_the_switch_lands(
     monkeypatch: pytest.MonkeyPatch, manager: _SwitchingManager
 ) -> list[bool]:
-    """The dashboard's Cancel arrives while the GPU switches: ``is_disconnected`` is true
-    from the moment ``ensure_img`` has returned. Returns every answer it gave."""
-    from starlette.requests import Request
+    """The dashboard's Cancel arrives while the GPU switches: the route's disconnect check
+    (``_client_has_gone``) answers true from the moment ``ensure_img`` has returned. Returns
+    every answer it gave. (The real mechanism is exercised by the ``real_asgi`` tests.)"""
+    from hal0.api.routes import v1
 
     answers: list[bool] = []
 
-    async def is_disconnected(self: Request) -> bool:
+    async def client_has_gone(_request: Any) -> bool:
         gone = manager.arbiter.ensure_img.await_count > 0
         answers.append(gone)
         return gone
 
-    monkeypatch.setattr(Request, "is_disconnected", is_disconnected)
+    monkeypatch.setattr(v1, "_client_has_gone", client_has_gone)
     return answers
 
 
@@ -1366,18 +1367,16 @@ def test_v1_images_disconnected_request_never_submits(
     assert manager.arbiter.open_jobs == 0  # the job exited normally: the restore can run
 
 
-def test_v1_images_a_real_asgi_disconnect_during_the_switch_reaches_the_route(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Nothing patched on ``Request``: the ASGI server's ``http.disconnect`` message, sent
-    while ``ensure_img`` runs, comes out of ``request.is_disconnected()`` in the route, through
-    the app's whole middleware stack. (TestClient cannot disconnect, so the app is driven
-    directly with its own ``receive``.)"""
-    _install("sdxl-turbo")
-    _seed_img_upstream(client)
-    mock_infer = _mock_png_infer(monkeypatch)
-    manager = _SwitchingManager()
-    client.app.state.slot_manager = manager
+def _drive_with_a_real_disconnect(
+    client: TestClient, manager: _SwitchingManager, *, headers: list[tuple[bytes, bytes]] = ()
+) -> list[dict[str, Any]]:
+    """POST an image request straight into the app and have the client go away mid-switch.
+
+    Nothing is patched on ``Request``: ``receive`` hands over the body, then blocks until the
+    switch (``ensure_img``) is under way and returns the ASGI server's ``http.disconnect``.
+    TestClient cannot disconnect, so the app is driven directly with its own ``receive``.
+    Returns every message the app sent.
+    """
     body = json.dumps(_fit_request("sdxl-turbo")).encode()
 
     async def drive() -> list[dict[str, Any]]:
@@ -1421,6 +1420,7 @@ def test_v1_images_a_real_asgi_disconnect_during_the_switch_reaches_the_route(
                 (b"content-type", b"application/json"),
                 (b"content-length", str(len(body)).encode()),
                 (b"host", b"testserver"),
+                *headers,
             ],
             "client": ("127.0.0.1", 50000),
             "server": ("testserver", 80),
@@ -1431,11 +1431,103 @@ def test_v1_images_a_real_asgi_disconnect_during_the_switch_reaches_the_route(
         await canceller
         return sent
 
-    sent = client.portal.call(drive)
+    return client.portal.call(drive)
+
+
+def test_v1_images_a_real_asgi_disconnect_during_the_switch_reaches_the_route(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ASGI server's ``http.disconnect`` message, sent while ``ensure_img`` runs, reaches
+    the route through the app's whole middleware stack (auth off: no stream guard in between)."""
+    _install("sdxl-turbo")
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+    manager = _SwitchingManager()
+    client.app.state.slot_manager = manager
+
+    sent = _drive_with_a_real_disconnect(client, manager)
 
     assert [m["status"] for m in sent if m["type"] == "http.response.start"] == [499]
     mock_infer.assert_not_called()
     assert manager.arbiter.open_jobs == 0
+
+
+def test_v1_images_a_real_asgi_disconnect_reaches_the_route_when_auth_is_required(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With auth required, ``/v1/images/generations`` runs under the auth middleware's stream
+    guard (``guard_http_stream``), whose ``receive`` drops a disconnect that ``is_disconnected()``
+    probes for with a cancelled scope: the route never saw the client leave and rendered anyway.
+    The route listens for the message itself, so Cancel during the switch works on these boxes."""
+    from hal0.api import auth as auth_mod
+
+    monkeypatch.setenv("HAL0_REQUIRE_AUTH", "1")
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "admin-key-for-tests")
+    auth_mod._require_auth_cache = None
+    _install("sdxl-turbo")
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+    manager = _SwitchingManager()
+    client.app.state.slot_manager = manager
+
+    sent = _drive_with_a_real_disconnect(
+        client, manager, headers=[(b"authorization", b"Bearer admin-key-for-tests")]
+    )
+
+    assert [m["status"] for m in sent if m["type"] == "http.response.start"] == [499]
+    mock_infer.assert_not_called()
+    assert manager.arbiter.open_jobs == 0
+
+
+@pytest.mark.parametrize("guarded", [False, True], ids=["plain", "stream-guard"])
+@pytest.mark.parametrize("gone", [True, False], ids=["gone", "connected"])
+def test_client_has_gone_hears_a_disconnect_and_leaves_no_task_behind(
+    guarded: bool, gone: bool
+) -> None:
+    """The disconnect check answers from the next ASGI message: ``http.disconnect`` is a client
+    that left, a quiet connection is a client still there, and it holds for the auth middleware's
+    stream guard too. Whatever the answer, no task is left running."""
+    from starlette.requests import Request
+
+    from hal0.api.live_sockets import guard_http_stream
+    from hal0.api.routes import v1
+
+    async def run() -> tuple[bool, int]:
+        pending_messages = [{"type": "http.request", "body": b"{}", "more_body": False}]
+        never = asyncio.Event()
+        answers: list[bool] = []
+
+        async def receive() -> dict[str, Any]:
+            if pending_messages:
+                return pending_messages.pop(0)
+            if not gone:
+                await never.wait()
+            return {"type": "http.disconnect"}
+
+        async def app(scope: Any, rcv: Any, send: Any) -> None:
+            request = Request(scope, rcv)
+            await request.body()
+            answers.append(await v1._client_has_gone(request))
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b""})
+
+        async def send(_message: Any) -> None:
+            return None
+
+        scope = {"type": "http", "method": "POST", "path": "/v1/images/generations", "headers": []}
+        if guarded:
+            await guard_http_stream(app, scope, receive, send, lambda: True)
+        else:
+            await app(scope, receive, send)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        others = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        return answers[0], len(others)
+
+    answer, leftover = asyncio.run(run())
+
+    assert answer is gone
+    assert leftover == 0
 
 
 def test_v1_images_disconnected_request_is_logged_once(
@@ -1462,7 +1554,7 @@ def test_v1_images_connected_request_renders_after_the_switch(
 ) -> None:
     """The disconnect check is asked after the switch and, with the client still there,
     changes nothing: the render goes ahead."""
-    from starlette.requests import Request
+    from hal0.api.routes import v1
 
     _install("sdxl-turbo")
     _seed_img_upstream(client)
@@ -1471,11 +1563,11 @@ def test_v1_images_connected_request_renders_after_the_switch(
     client.app.state.slot_manager = manager
     answers: list[tuple[bool, bool]] = []
 
-    async def is_disconnected(self: Request) -> bool:
+    async def client_has_gone(_request: Any) -> bool:
         answers.append((manager.arbiter.ensure_img.await_count > 0, mock_infer.call_count > 0))
         return False
 
-    monkeypatch.setattr(Request, "is_disconnected", is_disconnected)
+    monkeypatch.setattr(v1, "_client_has_gone", client_has_gone)
 
     r = client.post("/v1/images/generations", json=_fit_request("sdxl-turbo"))
 
@@ -1490,17 +1582,17 @@ def test_v1_images_disconnected_request_without_an_arbiter_never_submits(
 ) -> None:
     """No slot manager (a manually registered upstream): there is no switch to wait for, and a
     client that has already gone still renders nothing."""
-    from starlette.requests import Request
+    from hal0.api.routes import v1
 
     _install("sdxl-turbo")
     _seed_img_upstream(client)
     mock_infer = _mock_png_infer(monkeypatch)
     client.app.state.slot_manager = None
 
-    async def is_disconnected(self: Request) -> bool:
+    async def client_has_gone(_request: Any) -> bool:
         return True
 
-    monkeypatch.setattr(Request, "is_disconnected", is_disconnected)
+    monkeypatch.setattr(v1, "_client_has_gone", client_has_gone)
 
     r = client.post("/v1/images/generations", json=_fit_request("sdxl-turbo"))
 
