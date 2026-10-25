@@ -1,9 +1,9 @@
 """Settings (config) endpoints (mounted under /api/settings).
 
 Typed read/write of ``/etc/hal0/hal0.toml`` (or the HAL0_HOME-rooted
-override). All writes go through ``hal0.config.loader.hal0_config_txn``
-which uses the same tempfile+fsync+os.replace pattern as
-``write_env_atomic`` — never a partial-write.
+override). All writes go through ``hal0.config.loader.hal0_config_txn``,
+which writes a tempfile, fsyncs it and os.replace()s it into place — never a
+partial-write.
 
 Endpoints:
     GET  /api/settings              — current parsed Hal0Config as a dict.

@@ -8,7 +8,8 @@ only) and by the OpenWebUI component's converge arm
 convergence pass, which additionally renders the RAG/image-gen/web-search
 blocks from live capability state via :mod:`hal0.openwebui.wiring`.
 
-Uses the same atomic write primitive as slot env files (hal0.config.env).
+Uses the atomic write primitive hal0.config.env.write_env_atomic, which writes
+values verbatim in podman's --env-file format.
 
 New module (no haloai equivalent).
 See PLAN.md §8 (OpenWebUI integration) and §5 Tier 1 (atomic writes).

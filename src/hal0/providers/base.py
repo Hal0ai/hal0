@@ -214,11 +214,12 @@ class Provider(ABC):
         slot_cfg: dict[str, Any],
         model_info: dict[str, Any],
     ) -> dict[str, str]:
-        """Compute the EnvironmentFile contents for a slot.
+        """Compute the HAL0_* settings for a slot.
 
-        Returns a mapping of HAL0_* variable names to string values.
-        Caller (SlotManager.spawn) writes the file atomically via
-        hal0.config.env.write_env_atomic (PLAN.md §5 Tier 1).
+        Returns a mapping of HAL0_* variable names to string values (port,
+        model path, ...). The provider's launch-plan builder reads them to
+        assemble the container's command and mounts; they are not written to
+        an env file.
 
         Args:
             slot_cfg:   Raw slot TOML dict (or SlotConfig model as dict).

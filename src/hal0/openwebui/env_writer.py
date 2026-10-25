@@ -8,8 +8,10 @@ functions with the RAG/image-gen/web-search overrides from
 hal0.openwebui.wiring (see the "Dynamic wiring" section below). There is
 still no settings route that calls this directly.
 
-Uses hal0.config.env.write_env_atomic() — the same atomic write primitive
-used for slot env files (PLAN.md §5 Tier 1).
+Uses hal0.config.env.write_env_atomic(), the atomic write primitive
+(PLAN.md §5 Tier 1). The file is read by podman's ``--env-file``, so values are
+written verbatim, unquoted (#3045), and HAL0_OWUI_BIND_HOST, the one value
+systemd also reads, comes first and must be a plain IP address or hostname.
 
 Prewired variables (PLAN.md §8):
     OPENAI_API_BASE_URLS=http://127.0.0.1:8080/v1
@@ -508,26 +510,32 @@ def dynamic_env_overrides(
 def _read_existing_env(target: Path) -> dict[str, str]:
     """Parse an existing env file into ``{key: value}``; ``{}`` if absent.
 
-    Deliberately permissive — this reads an operator-edited file, so a line
-    it cannot parse is skipped rather than raising. The quoting matches
-    :func:`hal0.config.env._quote_value`, whose output this round-trips.
+    Reads the file the way ``podman run --env-file`` does, since that is what
+    Open WebUI is handed: split on ``\\n``, drop a trailing ``\\r``, trim
+    leading blanks, skip empty and ``#`` lines, and split on the first ``=``
+    keeping the value verbatim. No unquoting happens. A value an older hal0
+    quoted is therefore read with its quotes, which is exactly what podman has
+    been handing Open WebUI; hal0's own keys are overwritten or dropped when
+    the file is rendered, so nothing converts them.
+
+    Deliberately permissive otherwise: this reads an operator-edited file, so a
+    line it cannot parse is skipped rather than raising. Two departures from
+    podman: a line with no ``=`` is skipped (podman would import the host
+    variable of that name), and blanks around a key are trimmed.
     """
     try:
-        text = target.read_text(encoding="utf-8")
+        text = target.read_bytes().decode("utf-8")
     except (FileNotFoundError, NotADirectoryError):
         return {}
     out: dict[str, str] = {}
-    for raw in text.splitlines():
-        line = raw.strip()
+    for raw in text.split("\n"):
+        line = raw.removesuffix("\r").lstrip(" \t")
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
         key = key.strip()
         if not key:
             continue
-        value = value.strip()
-        if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
-            value = value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
         out[key] = value
     return out
 
@@ -574,6 +582,10 @@ def write_openwebui_env(
         OSError:   If the file cannot be written (disk full, permission
                    denied, parent directory missing and uncreatable).
         TypeError: If an override value is not a string.
+        ValueError: If a value, preserved or overridden, holds a line break or
+                   NUL, or ``HAL0_OWUI_BIND_HOST`` is not a plain IP address
+                   or hostname. Nothing is written, so a file already there
+                   is left as it was.
     """
     target: Path = Path(path) if path is not None else _default_path()
 
