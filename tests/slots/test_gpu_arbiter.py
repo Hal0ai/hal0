@@ -1277,11 +1277,24 @@ async def test_ensure_img_in_img_mode_rolls_back_when_the_reload_fails(
 
 
 async def test_concurrent_requests_cold_start_a_down_img_slot_once(
-    fake_mgr: FakeManager, state_path: Path
+    fake_mgr: FakeManager, state_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _write_img_state(state_path)
     fake_mgr.ready -= {"chat", "agent"}
     arb = GpuArbiter(fake_mgr, state_path=state_path)
+
+    # FakeManager.load never suspends, so without a yield the first ensure_img
+    # runs to completion before the second one starts and the switch lock is
+    # never contended. Yield inside load (before the slot turns ready) so the
+    # second request reaches the down-slot check while the first is mid-load:
+    # only the lock keeps it from loading the slot a second time.
+    real_load = fake_mgr.load
+
+    async def _yielding_load(name: str, model_id: str | None = None) -> None:
+        await asyncio.sleep(0)
+        await real_load(name, model_id)
+
+    monkeypatch.setattr(fake_mgr, "load", _yielding_load)
 
     await asyncio.gather(arb.ensure_img(), arb.ensure_img())
 
