@@ -46,8 +46,8 @@ from hal0-api's environment).
 After a rollback to an older hal0 (1.6.x), which has no ``/api/comfyui/arbiter``
 or ``/api/comfyui/prompt-handoff``, the hook reads ``/api/comfyui/status``
 instead and lets a prompt in generation mode through without the hand-off, as
-the 1.6.x gate did. It learns that from the first 404 and keeps it for the
-life of the process.
+the 1.6.x gate did for a healthy hal0. It remembers the older hal0 once
+``/status`` has answered like one, and announces every prompt.
 
 The decision logic (``prepare_image_mode``) is
 unit-tested in the hal0 repo (tests/comfyui/test_hal0_gpu_gate.py, and against
@@ -92,9 +92,11 @@ def _legacy_status_url(url: str) -> str:
 #: everything else keeps its own meaning (unreachable, auth, refused).
 HAL0_LEGACY_STATUS_URL = _legacy_status_url(HAL0_STATUS_URL)
 
-#: What this gate process has learned about its hal0: set on the first 404
-#: and kept for the life of the process (ComfyUI loads the gate once).
-_legacy = {"status": False, "handoff": False}
+#: Set once ``/arbiter`` answered 404 and ``/status`` then answered like a hal0
+#: (a GPU mode of generation or inference), and kept for the life of the
+#: process (ComfyUI loads the gate once): later reads skip the ``/arbiter``
+#: probe. A 404 that ``/status`` cannot back up is not remembered.
+_legacy = {"status": False}
 _STATUS_TIMEOUT_S = 2.0
 
 
@@ -171,8 +173,8 @@ _UNREACHABLE_REASON = (
 def refused_prompt_body(reason: str) -> dict:
     """The ``/prompt`` answer for a refused prompt, in ComfyUI's prompt-error shape.
 
-    ComfyUI's editor turns a non-200 answer of this shape into its prompt-error
-    dialog and shows ``message: details``.
+    The hook answers the prompt with a 503 that carries this body, so the
+    reason reaches whoever submitted it.
     """
     return {
         "error": {
@@ -247,11 +249,14 @@ def _fetch_status() -> "dict | None":
         try:
             return _read_status(HAL0_STATUS_URL)
         except _NotFound:
-            _legacy["status"] = True
+            pass
     try:
-        return _read_status(HAL0_LEGACY_STATUS_URL)
+        data = _read_status(HAL0_LEGACY_STATUS_URL)
     except _NotFound:
         return None
+    if isinstance(data, dict) and data.get("mode") in ("generation", "inference"):
+        _legacy["status"] = True
+    return data
 
 
 def _read_status(url: str) -> "dict | None":
@@ -319,10 +324,9 @@ def _announce_prompt() -> "bool | None":
     held. False: the GPU is not ComfyUI's any more (a restore beat the
     prompt) or hal0 is mid-switch; the hook re-reads the status. None: no
     usable answer. An older hal0 without the route (404) has no hand-off, so
-    the prompt counts as held, as the 1.6.x gate would let it through.
+    this prompt counts as held, as the 1.6.x gate would let it through; the
+    next prompt is announced again.
     """
-    if _legacy["handoff"]:
-        return True
     req = urllib.request.Request(
         HAL0_HANDOFF_URL,
         data=b"{}",
@@ -336,7 +340,6 @@ def _announce_prompt() -> "bool | None":
         if exc.code in _AUTH_CODES:
             raise _AuthRequired(exc.code) from exc
         if exc.code == 404:
-            _legacy["handoff"] = True
             return True
         return None
     except _READ_ERRORS:

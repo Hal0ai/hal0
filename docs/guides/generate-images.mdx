@@ -233,10 +233,13 @@ prompt it lets through is unguarded: with `hal0-api` down the GPU most likely
 still holds the LLM slots, so it renders next to them.
 
 <Aside type="caution" title="Known limitation: auth enforcement stops image generation">
-With auth enforcement on (`hal0 auth require on`, see
+With auth enforcement on (`hal0 auth require on` or `HAL0_REQUIRE_AUTH=1`, see
 [Authentication](/docs/operate/auth)), `hal0-api` refuses unauthenticated
-requests from loopback too, and the GPU gate has no credential for it yet (a
-gate credential is planned for 1.7). The gate then refuses every image prompt
+requests from loopback too. A box whose `HAL0_BIND_HOST` is a specific address
+and that has an admin key refuses them as well, even with enforcement off: the
+gate then dials that address, so its requests are not from loopback and the
+rule for ADMIN routes on a LAN-bound box applies. The GPU gate has no
+credential for either yet (a gate credential is planned for 1.7). The gate then refuses every image prompt
 at once: the editor's, hal0's own `/v1` renders, Open WebUI's and the omni
 loop's. To keep generating images on such a box, set
 `HAL0_COMFYUI_GATE_FAIL_OPEN=1` as above; the gate then lets prompts through

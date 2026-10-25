@@ -102,7 +102,10 @@ routes to off-box callers — see the next section.
 <Aside type="caution" title="Known limitation: image generation with enforcement on">
 With enforcement on, ComfyUI's GPU gate node is refused too: it calls
 `/api/comfyui/*` from loopback with no credential, and a gate credential is
-planned for 1.7. Until then every image prompt is refused at once, including
+planned for 1.7. The same happens with enforcement off on a box whose
+`HAL0_BIND_HOST` is a specific address and that has an admin key: the gate
+then calls that address, not loopback, so the ADMIN rule in the next section
+applies to it. Until then every image prompt is refused at once, including
 `/v1/images/generations` and Open WebUI's images, with a message that says
 hal0 requires authentication. To keep generating images, set
 `HAL0_COMFYUI_GATE_FAIL_OPEN=1` in `/etc/hal0/api.env`, restart `hal0-api`,

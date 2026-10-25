@@ -546,8 +546,8 @@ def test_after_a_rollback_the_gate_reads_the_older_hal0s_status_route(monkeypatc
     assert hal0.calls == ["arbiter", "status", "prompt-handoff"]
 
     hal0.calls.clear()
-    mod.prepare_image_mode()  # the older hal0 is remembered: no second probe
-    assert hal0.calls == ["status"]
+    mod.prepare_image_mode()  # the older hal0 is remembered: no second /arbiter probe
+    assert hal0.calls == ["status", "prompt-handoff"]
 
 
 def test_an_older_hal0_in_inference_mode_still_gets_its_switch(monkeypatch) -> None:
@@ -585,6 +585,68 @@ def test_an_unreachable_hal0_is_not_mistaken_for_an_older_one(monkeypatch) -> No
     with pytest.raises(mod.GpuGateClosed, match="unreachable"):
         mod.prepare_image_mode()
     assert set(hal0.calls) == {"arbiter"}
+
+
+@pytest.mark.parametrize(
+    "legacy_answer",
+    [404, {"detail": "Not Found"}],
+    ids=["status-404", "not-hal0-shaped"],
+)
+def test_a_404_that_status_cannot_back_up_is_not_remembered(monkeypatch, legacy_answer) -> None:
+    """Something other than an older hal0 answers on the dialled address (a
+    mistyped URL, another server on the port): no latch, the prompt is refused
+    as unreachable, and the next prompt probes /arbiter again."""
+    hal0 = _FakeHal0({"/arbiter": [404], "/status": [legacy_answer]})
+    mod = _real_gate(monkeypatch, hal0)
+    monkeypatch.setattr(mod, "_UNREACHABLE_RETRY_S", 0.0)
+    with pytest.raises(mod.GpuGateClosed, match="unreachable"):
+        mod.prepare_image_mode()
+    assert hal0.calls[:2] == ["arbiter", "status"]
+
+    hal0.calls.clear()
+    with pytest.raises(mod.GpuGateClosed, match="unreachable"):
+        mod.prepare_image_mode()
+    assert hal0.calls[0] == "arbiter"
+
+
+def test_a_404_on_the_hand_off_counts_for_that_prompt_only(monkeypatch) -> None:
+    """Every prompt is announced: a hand-off route that answers later is used."""
+    hal0 = _FakeHal0(
+        {
+            "/arbiter": [{"mode": "generation", "arbiter": {"switching": False}}],
+            "/prompt-handoff": [404, {"held": True}],
+        }
+    )
+    mod = _real_gate(monkeypatch, hal0)
+    mod.prepare_image_mode()
+    mod.prepare_image_mode()
+    assert hal0.calls == ["arbiter", "prompt-handoff", "arbiter", "prompt-handoff"]
+
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_an_announce_refused_for_authentication_refuses_at_once(monkeypatch, code: int) -> None:
+    hal0 = _FakeHal0(
+        {
+            "/arbiter": [{"mode": "generation", "arbiter": {"switching": False}}],
+            "/prompt-handoff": [code],
+        }
+    )
+    mod = _real_gate(monkeypatch, hal0)
+    with pytest.raises(mod.GpuGateClosed, match="requires authentication"):
+        mod.prepare_image_mode()
+    assert hal0.calls == ["arbiter", "prompt-handoff"]
+
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_the_fail_open_switch_covers_a_switch_request_refused_for_authentication(
+    monkeypatch, code: int
+) -> None:
+    monkeypatch.setenv("HAL0_COMFYUI_GATE_FAIL_OPEN", "1")
+    hal0 = _FakeHal0({"/arbiter": [{"mode": "inference"}], "/switchover": [code]})
+    mod = _load_node(stub_announce=False)
+    monkeypatch.setattr(mod.urllib.request, "urlopen", hal0)
+    mod.prepare_image_mode()  # returns: unguarded, as v1.6.5 did
+    assert hal0.calls == ["arbiter", "switchover"]
 
 
 def test_a_current_hal0_without_the_hand_off_route_counts_the_prompt_held(monkeypatch) -> None:

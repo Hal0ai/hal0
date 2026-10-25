@@ -409,11 +409,14 @@ Rolling back from 1.6.0 to 1.5.x leaves Hermes running on the release 1.6.0 buil
 
 Rolling back from 1.7.0 to 1.6.x needs no step for image generation: the
 1.7.0 GPU gate left in ComfyUI's `custom_nodes` directory reads 1.6.x's
-`/api/comfyui/status` when `/api/comfyui/arbiter` is missing and lets prompts
-through as the 1.6.x gate did. One exception: on a box whose `hal0-api` is not
-on port 8080, or that has auth enforcement on, the gate refuses image prompts
-once `img` restarts under 1.6.x, because 1.6.x's unit no longer passes it the
-port or `HAL0_COMFYUI_GATE_FAIL_OPEN`.
+`/api/comfyui/status` when `/api/comfyui/arbiter` is missing, and waits for
+and asks for image mode as the 1.6.x gate did while that hal0 answers. Unlike
+the 1.6.x gate, it still refuses a prompt when hal0 is silent or slow to
+answer, where 1.6.x let it through. One exception: once `img` restarts under
+1.6.x, the gate refuses image prompts on a box whose `hal0-api` does not answer
+on `127.0.0.1:8080` (another port, or `HAL0_BIND_HOST` set to a specific
+address) or that enforces auth, because 1.6.x's unit no longer passes the gate
+hal0's address or `HAL0_COMFYUI_GATE_FAIL_OPEN`.
 
 ### Rolling back past the profile-centric conversion
 
