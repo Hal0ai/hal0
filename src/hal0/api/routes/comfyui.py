@@ -53,9 +53,10 @@ from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
+from hal0.api import auth as auth_layer
 from hal0.api import memory_source
 from hal0.api._redact import redact_log_line
-from hal0.api.auth import GATE_SCOPE_KEY, admin_gated
+from hal0.api.auth import GATE_SCOPE_KEY, admin_gated, gate_path_refused_at
 from hal0.api.middleware.error_codes import Conflict, Forbidden, NotFound, UnprocessableEntity
 from hal0.api.routes.power import _probe_power
 from hal0.capabilities.catalog import COMFYUI_NO_ENGINE_REASON, comfyui_backends
@@ -202,7 +203,8 @@ async def aclose_client() -> None:
 
 
 def _reset_state() -> None:
-    """Drop the shared client, switch tracker, engine-read cache and what the gate told hal0.
+    """Drop the shared client, switch tracker, engine-read cache and what the gate told hal0
+    (including the auth layer's marker of a refused version-less gate request).
 
     For test isolation only.
     """
@@ -214,6 +216,7 @@ def _reset_state() -> None:
     _gate_seen.clear()
     _gate_seen.update(_GATE_SEEN_IDLE)
     _gate_refusal = None
+    auth_layer._gate_path_refused_at = None
 
 
 # ---------------------------------------------------------------------------
@@ -276,12 +279,35 @@ def _gate_must_authenticate() -> bool:
     return admin_gated({"type": "http", "client": (peer, 0)})
 
 
+def _record_refused_prompt(resp: httpx.Response) -> None:
+    """Record ``resp`` as the gate's latest refusal when it is the GPU gate's 503 for a prompt.
+
+    The same shape check as the provider's (:func:`hal0.providers.comfyui.gate_refusal_reason`),
+    for a ``/prompt`` hal0 posts without the provider (a quick-launched workflow).
+    """
+    try:
+        body = resp.json()
+    except ValueError:
+        return
+    reason = comfyui_provider.gate_refusal_reason(resp.status_code, body)
+    if reason is not None:
+        record_gate_refusal(reason)
+
+
 def _gate_state() -> str:
-    """``no_credential`` | ``unknown`` | ``stale`` | ``current``, in that order of precedence.
+    """``no_credential`` | ``stale`` | ``unknown`` | ``current``, in that order of precedence.
 
     ``no_credential``: hal0 requires the gate to authenticate and the gate has no way to
     (no token on disk, or it is given a host name and holds the token back from names).
     Its calls are refused, so whatever it told hal0 earlier is no longer the news.
+
+    ``stale`` first for a gate the auth layer refused: on a box that enforces auth, an
+    engine running a gate older than the version header is turned away before it reaches
+    a route (:func:`hal0.api.auth.gate_path_refused_at`), so its call is never recorded
+    here. A refusal newer than the gate's latest recorded call, or with none, reads as
+    stale: restart the engine. The gate it is replaced by calls with the header and
+    clears it.
+
     Otherwise by the gate's latest call: ``unknown`` when there has been none since
     hal0-api started, ``current`` when it carried this hal0's gate version, and
     ``stale`` for another version or none (an engine still running the gate it started
@@ -289,7 +315,11 @@ def _gate_state() -> str:
     """
     if _gate_must_authenticate() and not comfyui_provider.gate_sends_credential():
         return "no_credential"
-    if _gate_seen["at"] is None:
+    refused_at = gate_path_refused_at()
+    seen_at = _gate_seen["at"]
+    if refused_at is not None and (seen_at is None or refused_at > seen_at):
+        return "stale"
+    if seen_at is None:
         return "unknown"
     return "current" if _gate_seen["version"] == GATE_VERSION else "stale"
 
@@ -1596,7 +1626,9 @@ async def comfyui_workflow_launch(name: str) -> JSONResponse:
     Reads <name>.json from the primary workflows dir, falling back to the
     user/default/workflows path. Posts the API-format workflow JSON to
     ComfyUI's /prompt endpoint and returns 202 with the prompt_id.
-    404 when the workflow file does not exist.
+    404 when the workflow file does not exist. A prompt the GPU gate refuses (its
+    503) is recorded as the gate's latest refusal, as for ``/v1``; the answer is
+    still 202, with a null ``prompt_id``.
     """
     workflow_path = _find_workflow(name)
     if workflow_path is None:
@@ -1622,7 +1654,11 @@ async def comfyui_workflow_launch(name: str) -> JSONResponse:
             f"{base}/prompt",
             json={"prompt": workflow_data},
         )
-        result = resp.json() if resp.status_code == 200 else {}
+        if resp.status_code == 200:
+            result = resp.json()
+        else:
+            result = {}
+            _record_refused_prompt(resp)
     except (httpx.HTTPError, ValueError):
         result = {}
     prompt_id = result.get("prompt_id")

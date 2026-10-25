@@ -82,6 +82,7 @@ import hmac
 import ipaddress
 import json
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import parse_qs
@@ -544,6 +545,43 @@ def _gate_admits(scope: dict[str, Any], method: str, path: str) -> bool:
     return gate_credential.verify(authorization[7:].strip())
 
 
+#: When a request shaped like the ComfyUI gate's, from the box, without the gate's
+#: version header, was last refused (epoch seconds), else ``None``. Only a marker
+#: for ``GET /api/comfyui/status``: no decision here reads it.
+_gate_path_refused_at: float | None = None
+
+
+def gate_path_refused_at() -> float | None:
+    """When the auth layer last refused a version-less gate request, else ``None``.
+
+    A gate that predates ``X-Hal0-Gate-Version`` (or the token) is refused here, on a
+    box that enforces auth, before it reaches a route that could record its call. The
+    marker is how ``/status`` still tells that engine to restart.
+    """
+    return _gate_path_refused_at
+
+
+def _note_unversioned_gate_refusal(scope: dict[str, Any], method: str, path: str) -> None:
+    """Set :data:`_gate_path_refused_at` for a refused request that looks like an old gate's.
+
+    Called only after the middleware has decided to refuse. It reads the request and
+    changes nothing about the refusal. All three must hold: one of the gate's
+    ``(method, path)`` pairs (HTTP only), from where the gate dials (:func:`_gate_peer`),
+    and none of the gate's version header. The two checks before the header are the ones
+    :func:`_gate_admits` has just run on this request.
+    """
+    global _gate_path_refused_at
+    if scope.get("type") != "http" or (method, path) not in _GATE_REQUESTS:
+        return
+    if not _gate_peer(scope):
+        return
+    from hal0.comfyui.gate_version import GATE_VERSION_HEADER
+
+    if GATE_VERSION_HEADER.lower() in _headers_from_scope(scope):
+        return
+    _gate_path_refused_at = time.time()
+
+
 def _decide(auth_class: AuthClass, principal: AuthPrincipal) -> tuple[bool, int, str]:
     """Return ``(allowed, status_if_denied, error_code_if_denied)``."""
     if auth_class is AuthClass.OPEN:
@@ -735,6 +773,8 @@ class AuthEnforcementMiddleware:
             await self.app(scope, receive, send)
             return
 
+        _note_unversioned_gate_refusal(scope, method, path)
+
         log.info(
             "hal0.auth.denied",
             path=path,
@@ -774,6 +814,7 @@ __all__ = [
     "Tier",
     "admin_gated",
     "admin_sign_in_required",
+    "gate_path_refused_at",
     "has_admin_key",
     "require_auth_enabled",
     "resolve_principal",

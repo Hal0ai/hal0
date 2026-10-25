@@ -27,6 +27,7 @@ from hal0.providers.comfyui import (
     _ProgressRelay,
 )
 from hal0.runners import RUNNER_IMAGES
+from tests.fixtures.comfyui_gate import refused_prompt_body
 
 
 @pytest.fixture
@@ -1063,17 +1064,7 @@ _GATE_REASON = (
 
 def _refused_prompt(reason: str = _GATE_REASON) -> dict[str, Any]:
     """The body the hal0_gpu_gate node answers ``/prompt`` with, built by the node itself."""
-    import importlib.util
-    from pathlib import Path
-
-    path = (
-        Path(comfyui_mod.__file__).resolve().parents[1] / "comfyui" / "assets" / "hal0_gpu_gate.py"
-    )
-    spec = importlib.util.spec_from_file_location("hal0_gpu_gate_for_provider_test", path)
-    assert spec is not None and spec.loader is not None
-    node = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(node)
-    return node.refused_prompt_body(reason)
+    return refused_prompt_body(reason)
 
 
 async def _submit_rejected(provider: ComfyUIProvider, response: MagicMock) -> Any:

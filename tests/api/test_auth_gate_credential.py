@@ -32,6 +32,13 @@ def _enforced(monkeypatch: pytest.MonkeyPatch) -> None:
     auth_mod._require_auth_cache = None
 
 
+@pytest.fixture(autouse=True)
+def _no_refusal_marker() -> Any:
+    auth_mod._gate_path_refused_at = None
+    yield
+    auth_mod._gate_path_refused_at = None
+
+
 def _run(
     method: str,
     path: str,
@@ -39,6 +46,7 @@ def _run(
     bearer: str | None = None,
     scope_type: str = "http",
     peer: str = "127.0.0.1",
+    version: str | None = None,
 ) -> tuple[int | None, dict[str, Any] | None]:
     """Drive the middleware with one request: (status sent, scope the app saw)."""
     seen: dict[str, Any] = {}
@@ -49,6 +57,8 @@ def _run(
         await send({"type": "http.response.body", "body": b"{}"})
 
     headers = [(b"authorization", f"Bearer {bearer}".encode())] if bearer is not None else []
+    if version is not None:
+        headers.append((b"x-hal0-gate-version", version.encode()))
     scope: dict[str, Any] = {
         "type": scope_type,
         "method": method,
@@ -302,3 +312,117 @@ def test_what_the_status_route_says_is_what_the_middleware_does_to_the_gate(
     status, _seen = _run("GET", "/api/comfyui/arbiter", peer=gate_peer)
 
     assert (status == 401) is comfyui_routes._gate_must_authenticate()
+
+
+# ---------------------------------------------------------------------------
+# A refused request that looks like an old gate's leaves a marker (and changes nothing else)
+
+
+def _noted_between(before: float, after: float) -> bool:
+    noted = auth_mod.gate_path_refused_at()
+    return noted is not None and before <= noted <= after
+
+
+@pytest.mark.parametrize(("method", "path"), _GATE_REQUESTS)
+@pytest.mark.parametrize("bearer", [None, "not-the-token"])
+def test_a_refused_gate_request_without_the_version_header_is_marked(
+    method: str, path: str, bearer: str | None
+) -> None:
+    """An engine running a gate older than the version header is turned away here, before
+    any route could record its call; the marker is how /status still hears of it."""
+    import time
+
+    gate_credential.ensure_token()
+    before = time.time()
+
+    status, seen = _run(method, path, bearer=bearer)
+
+    assert status == 401
+    assert seen is None
+    assert _noted_between(before, time.time())
+
+
+@pytest.mark.parametrize(("method", "path"), _GATE_REQUESTS)
+def test_a_refused_gate_request_with_the_version_header_is_not_marked(
+    method: str, path: str
+) -> None:
+    """A gate that sends the header is current; its refusal is not an old gate's."""
+    gate_credential.ensure_token()
+
+    status, _seen = _run(method, path, bearer="not-the-token", version="2")
+
+    assert status == 401
+    assert auth_mod.gate_path_refused_at() is None
+
+
+@pytest.mark.parametrize(("method", "path"), _GATE_REQUESTS)
+def test_an_admitted_gate_request_is_not_marked(method: str, path: str) -> None:
+    """An old gate that does hold the token is let in: nothing was refused."""
+    token = gate_credential.ensure_token()
+
+    assert _run(method, path, bearer=token)[0] == 200
+    assert auth_mod.gate_path_refused_at() is None
+
+
+@pytest.mark.parametrize("bind_host", ["0.0.0.0", "192.0.2.10", "127.0.0.1"])
+def test_a_refusal_for_another_machine_is_not_marked(
+    monkeypatch: pytest.MonkeyPatch, bind_host: str
+) -> None:
+    """Only a request from where the gate dials (the box itself) can be the gate's."""
+    monkeypatch.setenv("HAL0_BIND_HOST", bind_host)
+
+    assert _run("GET", "/api/comfyui/arbiter", peer="192.0.2.99")[0] == 401
+    assert _run("GET", "/api/comfyui/arbiter", peer="testclient")[0] == 401
+    assert auth_mod.gate_path_refused_at() is None
+
+
+@pytest.mark.parametrize("peer", ["127.0.0.1", "::1"])
+def test_a_refusal_for_loopback_is_marked(peer: str) -> None:
+    assert _run("GET", "/api/comfyui/arbiter", peer=peer)[0] == 401
+    assert auth_mod.gate_path_refused_at() is not None
+
+
+def test_a_refusal_for_the_bind_address_is_marked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bound to one address with an admin key (auth off): the gate dials that address."""
+    monkeypatch.setenv("HAL0_REQUIRE_AUTH", "0")
+    monkeypatch.setenv("HAL0_BIND_HOST", "192.0.2.10")
+
+    assert _run("GET", "/api/comfyui/arbiter", peer="192.0.2.10")[0] == 401
+    assert auth_mod.gate_path_refused_at() is not None
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("GET", "/api/comfyui/status"),
+        ("POST", "/api/comfyui/pin"),
+        ("POST", "/api/comfyui/arbiter"),
+        ("GET", "/api/comfyui/switchover"),
+        ("GET", "/api/comfyui/gate-refusal"),
+        ("GET", "/api/comfyui/arbiter/"),
+        ("POST", "/api/comfyui/gate-refusal/"),
+        ("POST", "/api/comfyui/switchover/../pin"),
+        ("GET", "/api/settings"),
+        ("POST", "/v1/images/generations"),
+    ],
+)
+def test_a_refusal_of_anything_but_the_gates_requests_is_not_marked(method: str, path: str) -> None:
+    status, _seen = _run(method, path)
+
+    assert status in (401, 403)
+    assert auth_mod.gate_path_refused_at() is None
+
+
+def test_a_refused_websocket_is_not_marked() -> None:
+    status, _seen = _run("GET", "/api/comfyui/arbiter", scope_type="websocket")
+
+    assert status == 4403
+    assert auth_mod.gate_path_refused_at() is None
+
+
+def test_without_enforcement_nothing_is_refused_or_marked(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HAL0_REQUIRE_AUTH", "0")
+    monkeypatch.delenv("HAL0_ADMIN_KEY", raising=False)
+
+    assert _run("GET", "/api/comfyui/arbiter")[0] == 200
+    assert auth_mod.gate_path_refused_at() is None
