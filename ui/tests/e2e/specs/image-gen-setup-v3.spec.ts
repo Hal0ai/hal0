@@ -479,3 +479,35 @@ test.describe('Image Gen setup: a pinned box', () => {
     await expect(page.getByTestId('image-status-action-keep')).toBeVisible()
   })
 })
+
+// ── hold ─────────────────────────────────────────────────────────────────────
+
+test.describe('Image Gen setup: holding image mode', () => {
+  test('Hold asks first, and a confirmed Hold posts {mode: "generation", pin: true}', async ({ page }) => {
+    const mock = makeImageGenMock({ memory: referenceBoxMemory() })
+    await routeImageGen(page, mock)
+    await gotoImageGen(page)
+    await expect(head(page)).toHaveText('GPU · chat mode')
+
+    // A pin refuses GPU chat until someone unpins: the button asks before it sends anything.
+    const hold = page.getByTestId('image-status-action-hold')
+    await expect(hold).toHaveText('Hold image mode')
+    await hold.click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog.getByRole('heading', { name: 'Hold image mode?' })).toBeVisible()
+    await expect(dialog).toContainText(
+      'GPU chat requests (Open WebUI, agents, the API) are refused until you unpin. The paused GPU slots stay paused.',
+    )
+    expect(mock.posts, 'nothing was sent before the answer').toEqual([])
+
+    // Declining sends nothing either.
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+    await expect(dialog).toHaveCount(0)
+    expect(mock.posts, 'a declined Hold sent nothing').toEqual([])
+
+    await hold.click()
+    await dialog.getByRole('button', { name: 'Hold image mode', exact: true }).click()
+    await expect.poll(() => mock.posts).toEqual([['/api/comfyui/switchover', { mode: 'generation', pin: true }]])
+    await expect(dialog).toHaveCount(0)
+  })
+})

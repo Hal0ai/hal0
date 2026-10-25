@@ -50,7 +50,7 @@ function useTick(active) {
 export function ForceStopConfirm({ confirm }) {
   return (
     <ConfirmDialog
-      open={confirm.open}
+      open={confirm.open && confirm.kind === 'stop'}
       destructive
       onCancel={confirm.decline}
       onConfirm={confirm.accept}
@@ -58,6 +58,34 @@ export function ForceStopConfirm({ confirm }) {
       message="A render is running. Stopping now cancels it, drops any prompts queued behind it and reloads the paused GPU slots."
       footerNote="The render in progress is lost."
       confirmLabel="Stop and cancel render"
+    />
+  )
+}
+
+// What Hold and Keep ask. A pin stops GPU chat (503 `gpu.image_mode`) until someone unpins, which
+// neither button's name nor the line beside it says.
+const PIN_CONFIRM = {
+  hold: { title: 'Hold image mode?', confirmLabel: 'Hold image mode' },
+  keep: { title: 'Keep image mode on?', confirmLabel: 'Keep image mode on' },
+}
+const PIN_CONFIRM_BODY =
+  'GPU chat requests (Open WebUI, agents, the API) are refused until you unpin. The paused GPU slots stay paused.'
+
+/**
+ * The confirm that asks before Hold or Keep pins image mode. Mount one wherever
+ * `useStatusLineActions().run('hold' | 'keep')` can be called.
+ * @param {{ confirm: { open: boolean, kind: string | null, accept: () => void, decline: () => void } }} props
+ */
+export function PinConfirm({ confirm }) {
+  const copy = PIN_CONFIRM[confirm.kind]
+  return (
+    <ConfirmDialog
+      open={confirm.open && copy != null}
+      onCancel={confirm.decline}
+      onConfirm={confirm.accept}
+      title={copy?.title ?? ''}
+      message={PIN_CONFIRM_BODY}
+      confirmLabel={copy?.confirmLabel ?? 'Confirm'}
     />
   )
 }
@@ -196,6 +224,7 @@ export function ImageStatusLine({ ownRun = false, onCancelOwnRun }) {
         </div>
       )}
       <ForceStopConfirm confirm={actions.confirm} />
+      <PinConfirm confirm={actions.confirm} />
     </div>
   )
 }

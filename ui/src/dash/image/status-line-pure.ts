@@ -17,6 +17,8 @@ export type StatusTone = 'ok' | 'warn' | 'img' | 'pin' | 'err'
 //   hold           switchover {mode: "generation", pin: true} (chat mode only: in image mode the
 //                  server answers a no-op and ignores the pin)
 //   keep           POST /pin {pinned: true}
+//   (hold and keep both ask first: a pin refuses GPU chat until someone unpins, and the line
+//   beside the button says nothing of that)
 //   unpin          POST /pin {pinned: false}
 //   stop           POST /pin {pinned: false} first when pinned, then switchover {mode:
 //                  "inference"}; `force: true` only after a confirm, and only while a render runs

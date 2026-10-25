@@ -2,8 +2,8 @@
 // is the same code as the line's: the calls, the unpin-first order and the force confirm live
 // here once.
 //
-//   hold           switchover {mode: "generation", pin: true}
-//   keep           POST /pin {pinned: true}
+//   hold           switchover {mode: "generation", pin: true}, after the pin confirm
+//   keep           POST /pin {pinned: true}, after the pin confirm
 //   unpin          POST /pin {pinned: false}
 //   stop           POST /pin {pinned: false} first when `ctx.pinned`, then switchover {mode:
 //                  "inference"}; `force: true` only after the confirm, and only while
@@ -14,9 +14,13 @@
 //   open_editor    `ctx.editorUrl` in a new tab
 //   dismiss        remembers `ctx.refusalAt` (localStorage; the session when storage is blocked)
 //
-// The confirm is a dialog, so the hook cannot draw it: `confirm` carries its state and
-// `<ForceStopConfirm confirm={confirm} />` (ImageStatusLine.jsx) draws it. Whoever calls
-// `run('stop', ...)` mounts one.
+// Three actions ask first, because each can cost something the line next to the button does not
+// say: `stop` while a render runs (it drops the render), and `hold` and `keep` (a pin refuses GPU
+// chat until someone unpins). A declined confirm sends nothing. The confirm is a dialog, so the
+// hook cannot draw it: `confirm` carries its state (`kind` says which question) and
+// `<ForceStopConfirm confirm={confirm} />` and `<PinConfirm confirm={confirm} />`
+// (ImageStatusLine.jsx) draw them. Whoever calls `run('stop', ...)` mounts the first, whoever
+// calls `run('hold' | 'keep')` the second.
 
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
@@ -40,9 +44,14 @@ export interface StatusActionCtx {
   onCancel?: () => void
 }
 
-/** The force confirm's state, for `<ForceStopConfirm>`. */
-export interface ForceConfirm {
+/** Which question the confirm asks. */
+export type ConfirmKind = 'stop' | 'hold' | 'keep'
+
+/** The confirm's state, for `<ForceStopConfirm>` and `<PinConfirm>`. */
+export interface ActionConfirm {
   open: boolean
+  /** The action waiting for an answer; null while nothing is asked. */
+  kind: ConfirmKind | null
   accept: () => void
   decline: () => void
 }
@@ -136,19 +145,19 @@ export function useStatusLineActions({ resetKey = null }: { resetKey?: unknown }
     keyRef.current = resetKey
   }, [resetKey])
   const error = failure && Object.is(failure.key, resetKey) ? failure.message : null
-  const [confirmOpen, setConfirmOpen] = useState(false)
+  const [asking, setAsking] = useState<ConfirmKind | null>(null)
   const answer = useRef<((ok: boolean) => void) | null>(null)
   const running = useRef(false)
 
-  const askForce = () =>
+  const ask = (kind: ConfirmKind) =>
     new Promise<boolean>((resolve) => {
       answer.current = resolve
-      setConfirmOpen(true)
+      setAsking(kind)
     })
   const settle = (ok: boolean) => {
     const resolve = answer.current
     answer.current = null
-    setConfirmOpen(false)
+    setAsking(null)
     resolve?.(ok)
   }
 
@@ -161,9 +170,12 @@ export function useStatusLineActions({ resetKey = null }: { resetKey?: unknown }
     try {
       switch (action) {
         case 'hold':
+          // A pin refuses GPU chat until someone unpins: ask before anything is sent.
+          if (!(await ask('hold'))) return
           await switchover.mutateAsync({ mode: 'generation', pin: true })
           break
         case 'keep':
+          if (!(await ask('keep'))) return
           await pin.mutateAsync({ pinned: true })
           break
         case 'unpin':
@@ -172,7 +184,7 @@ export function useStatusLineActions({ resetKey = null }: { resetKey?: unknown }
         case 'stop': {
           // Ask first: a declined confirm leaves the pin alone too.
           const force = ctx.renderRunning === true
-          if (force && !(await askForce())) return
+          if (force && !(await ask('stop'))) return
           if (ctx.pinned) await pin.mutateAsync({ pinned: false })
           await switchover.mutateAsync(force ? { mode: 'inference', force: true } : { mode: 'inference' })
           break
@@ -207,8 +219,9 @@ export function useStatusLineActions({ resetKey = null }: { resetKey?: unknown }
     }
   }
 
-  const confirm: ForceConfirm = {
-    open: confirmOpen,
+  const confirm: ActionConfirm = {
+    open: asking != null,
+    kind: asking,
     accept: () => settle(true),
     decline: () => settle(false),
   }

@@ -171,6 +171,18 @@ const button = (label: string, within: ParentNode = document) =>
     | HTMLButtonElement
     | undefined
 
+// The confirm dialog: its buttons live in the foot, the line's own buttons are outside it.
+const foot = (label: string) => {
+  const modalFoot = document.querySelector('.modal-foot')
+  return modalFoot ? button(label, modalFoot) : undefined
+}
+const dialogTitle = () => document.querySelector('.modal-shell h2')?.textContent
+const dialogBody = () => document.querySelector('.modal-body')?.textContent
+
+// A pin refuses GPU chat until someone unpins, so Hold and Keep ask first (fixed copy).
+const PIN_BODY =
+  'GPU chat requests (Open WebUI, agents, the API) are refused until you unpin. The paused GPU slots stay paused.'
+
 async function click(el: Element | null | undefined) {
   expect(el, 'element to click').toBeTruthy()
   await act(async () => {
@@ -240,18 +252,50 @@ describe('ImageStatusLine', () => {
     expect(Array.from(line.querySelectorAll('button')).map((b) => b.textContent)).toEqual(['Hold image mode'])
   })
 
-  it('hold calls switchover with pin', async () => {
+  it('hold asks first, and a confirmed hold calls switchover with pin', async () => {
     mount(<ImageStatusLine />)
     await click(button('Hold image mode'))
+    // Nothing is sent before the answer.
+    expect(calls).toEqual([])
+    expect(dialogTitle()).toBe('Hold image mode?')
+    expect(dialogBody()).toBe(PIN_BODY)
+    expect(foot('Cancel')).toBeTruthy()
+    await click(foot('Hold image mode'))
     expect(calls).toEqual([['switchover', { mode: 'generation', pin: true }]])
+    expect(document.querySelector('.modal-shell')).toBeNull()
   })
 
-  it('keep pins the image mode that is on', async () => {
+  it('a declined hold sends nothing', async () => {
+    mount(<ImageStatusLine />)
+    await click(button('Hold image mode'))
+    await click(foot('Cancel'))
+    expect(calls).toEqual([])
+    expect(document.querySelector('.modal-shell')).toBeNull()
+    // Nothing is left pending: the button is there to try again.
+    expect(button('Hold image mode')!.disabled).toBe(false)
+  })
+
+  it('keep asks first, and a confirmed keep pins the image mode that is on', async () => {
     box.arbiter = envelope({ mode: 'img', phase: 'grace', restore_at: Date.now() / 1000 + 8 })
     mount(<ImageStatusLine />)
     expect(byId('image-status-head')!.textContent).toMatch(/^Image mode ends in \d+ s$/)
     await click(button('Keep image mode'))
+    expect(calls).toEqual([])
+    expect(dialogTitle()).toBe('Keep image mode on?')
+    expect(dialogBody()).toBe(PIN_BODY)
+    expect(foot('Cancel')).toBeTruthy()
+    await click(foot('Keep image mode on'))
     expect(calls).toEqual([['pin', { pinned: true }]])
+    expect(document.querySelector('.modal-shell')).toBeNull()
+  })
+
+  it('a declined keep sends nothing', async () => {
+    box.arbiter = envelope({ mode: 'img', phase: 'grace', restore_at: Date.now() / 1000 + 8 })
+    mount(<ImageStatusLine />)
+    await click(button('Keep image mode'))
+    await click(foot('Cancel'))
+    expect(calls).toEqual([])
+    expect(document.querySelector('.modal-shell')).toBeNull()
   })
 
   it('counts the grace down between polls', () => {
@@ -440,6 +484,7 @@ describe('ImageStatusLine', () => {
     box.fail = new Error('GPU is in image mode already')
     mount(<ImageStatusLine />)
     await click(button('Hold image mode'))
+    await click(foot('Hold image mode'))
     expect(document.querySelector('[role="alert"]')!.textContent).toBe('GPU is in image mode already')
     // The buttons come back so it can be tried again.
     expect(button('Hold image mode')!.disabled).toBe(false)
@@ -449,6 +494,7 @@ describe('ImageStatusLine', () => {
     box.fail = new Error('The GPU is busy')
     const host = mount(<ImageStatusLine />)
     await click(button('Hold image mode'))
+    await click(foot('Hold image mode'))
     expect(document.querySelector('[role="alert"]')!.textContent).toBe('The GPU is busy')
 
     // The poll lands: a render has started. The old alert is about a state that is gone.
@@ -466,6 +512,7 @@ describe('ImageStatusLine', () => {
     box.fail = new Error('The pin was refused')
     mount(<ImageStatusLine />)
     await click(button('Keep image mode'))
+    await click(foot('Keep image mode on'))
     expect(document.querySelector('[role="alert"]')!.textContent).toBe('The pin was refused')
     act(() => {
       vi.advanceTimersByTime(3000)
@@ -507,8 +554,6 @@ describe('stop while a render runs', () => {
       </>
     )
   }
-
-  const foot = (label: string) => button(label, document.querySelector('.modal-foot') ?? document)
 
   it('stop asks before forcing while a render runs', async () => {
     mount(<Stop ctx={{ pinned: true, renderRunning: true }} />)
