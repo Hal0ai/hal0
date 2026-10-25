@@ -20,6 +20,7 @@ this exercises:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import os
@@ -1208,6 +1209,193 @@ def test_v1_images_non_finite_size_is_a_422_that_does_not_echo_the_value(
     assert error["details"] == {"size_type": type_name}
     assert "NaN" not in r.text
     assert "Infinity" not in r.text
+
+
+# ─── a request cancelled during the GPU switch renders nothing ──────────────────────────────
+
+
+def _client_leaves_when_the_switch_lands(
+    monkeypatch: pytest.MonkeyPatch, manager: _SwitchingManager
+) -> list[bool]:
+    """The dashboard's Cancel arrives while the GPU switches: ``is_disconnected`` is true
+    from the moment ``ensure_img`` has returned. Returns every answer it gave."""
+    from starlette.requests import Request
+
+    answers: list[bool] = []
+
+    async def is_disconnected(self: Request) -> bool:
+        gone = manager.arbiter.ensure_img.await_count > 0
+        answers.append(gone)
+        return gone
+
+    monkeypatch.setattr(Request, "is_disconnected", is_disconnected)
+    return answers
+
+
+def test_v1_images_disconnected_request_never_submits(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A client that went away during the switch gets nothing rendered: ComfyUI is never
+    asked, and the image job closes so the arbiter's restore clock starts."""
+    _install("sdxl-turbo")
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+    manager = _SwitchingManager()
+    client.app.state.slot_manager = manager
+    answers = _client_leaves_when_the_switch_lands(monkeypatch, manager)
+
+    r = client.post("/v1/images/generations", json=_fit_request("sdxl-turbo"))
+
+    assert r.status_code == 499
+    assert r.content == b""  # nobody is listening
+    assert True in answers  # asked after the switch, not before it
+    manager.arbiter.ensure_img.assert_awaited_once()  # the switch itself is not undone here
+    manager.unload.assert_awaited_once_with("brain")
+    mock_infer.assert_not_called()
+    assert manager.arbiter.jobs == 1
+    assert manager.arbiter.open_jobs == 0  # the job exited normally: the restore can run
+
+
+def test_v1_images_a_real_asgi_disconnect_during_the_switch_reaches_the_route(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing patched on ``Request``: the ASGI server's ``http.disconnect`` message, sent
+    while ``ensure_img`` runs, comes out of ``request.is_disconnected()`` in the route, through
+    the app's whole middleware stack. (TestClient cannot disconnect, so the app is driven
+    directly with its own ``receive``.)"""
+    _install("sdxl-turbo")
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+    manager = _SwitchingManager()
+    client.app.state.slot_manager = manager
+    body = json.dumps(_fit_request("sdxl-turbo")).encode()
+
+    async def drive() -> list[dict[str, Any]]:
+        switching = asyncio.Event()
+        client_gone = asyncio.Event()
+        sent: list[dict[str, Any]] = []
+        body_sent = False
+
+        async def slow_switch(*_args: Any, **_kwargs: Any) -> None:
+            switching.set()
+            await client_gone.wait()  # the switch outlasts the client
+
+        manager.arbiter.ensure_img = AsyncMock(side_effect=slow_switch)
+
+        async def receive() -> dict[str, Any]:
+            nonlocal body_sent
+            if not body_sent:
+                body_sent = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            await client_gone.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message: dict[str, Any]) -> None:
+            sent.append(message)
+
+        async def cancel_during_the_switch() -> None:
+            await switching.wait()
+            client_gone.set()
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "path": "/v1/images/generations",
+            "raw_path": b"/v1/images/generations",
+            "query_string": b"",
+            "root_path": "",
+            "scheme": "http",
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+                (b"host", b"testserver"),
+            ],
+            "client": ("127.0.0.1", 50000),
+            "server": ("testserver", 80),
+            "state": {},
+        }
+        canceller = asyncio.create_task(cancel_during_the_switch())
+        await asyncio.wait_for(client.app(scope, receive, send), timeout=20)
+        await canceller
+        return sent
+
+    sent = client.portal.call(drive)
+
+    assert [m["status"] for m in sent if m["type"] == "http.response.start"] == [499]
+    mock_infer.assert_not_called()
+    assert manager.arbiter.open_jobs == 0
+
+
+def test_v1_images_disconnected_request_is_logged_once(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install("sdxl-turbo")
+    _seed_img_upstream(client)
+    _mock_png_infer(monkeypatch)
+    manager = _SwitchingManager()
+    client.app.state.slot_manager = manager
+    _client_leaves_when_the_switch_lands(monkeypatch, manager)
+
+    with capture_logs() as logs:
+        client.post("/v1/images/generations", json=_fit_request("sdxl-turbo"))
+
+    cancelled = [e for e in logs if e["event"] == "images.client_gone_before_render"]
+    assert len(cancelled) == 1
+    assert cancelled[0]["model"] == "sdxl-turbo"
+    assert cancelled[0]["log_level"] == "info"
+
+
+def test_v1_images_connected_request_renders_after_the_switch(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The disconnect check is asked after the switch and, with the client still there,
+    changes nothing: the render goes ahead."""
+    from starlette.requests import Request
+
+    _install("sdxl-turbo")
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+    manager = _SwitchingManager()
+    client.app.state.slot_manager = manager
+    answers: list[tuple[bool, bool]] = []
+
+    async def is_disconnected(self: Request) -> bool:
+        answers.append((manager.arbiter.ensure_img.await_count > 0, mock_infer.call_count > 0))
+        return False
+
+    monkeypatch.setattr(Request, "is_disconnected", is_disconnected)
+
+    r = client.post("/v1/images/generations", json=_fit_request("sdxl-turbo"))
+
+    assert r.status_code == 200, r.text
+    assert answers == [(True, False)]  # once, after the switch, before the submit
+    mock_infer.assert_awaited_once()
+    assert manager.arbiter.open_jobs == 0
+
+
+def test_v1_images_disconnected_request_without_an_arbiter_never_submits(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No slot manager (a manually registered upstream): there is no switch to wait for, and a
+    client that has already gone still renders nothing."""
+    from starlette.requests import Request
+
+    _install("sdxl-turbo")
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+    client.app.state.slot_manager = None
+
+    async def is_disconnected(self: Request) -> bool:
+        return True
+
+    monkeypatch.setattr(Request, "is_disconnected", is_disconnected)
+
+    r = client.post("/v1/images/generations", json=_fit_request("sdxl-turbo"))
+
+    assert r.status_code == 499
+    mock_infer.assert_not_called()
 
 
 @pytest.mark.parametrize("size", [None, ""], ids=["null", "empty"])

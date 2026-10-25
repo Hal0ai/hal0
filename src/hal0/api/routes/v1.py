@@ -1886,6 +1886,9 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
       refused before the arbiter unloads a GPU slot. ``error.details`` carries ``need``,
       ``render_free_gb``, ``ram_free_gb``, ``model`` and ``size``. An unknown budget never
       refuses; ``extra_body.hal0_skip_fit_check: true`` skips the check.
+
+    A client that disconnects (the dashboard's Cancel) while the GPU switches is answered with
+    an empty 499 and nothing is submitted to ComfyUI; the arbiter restores the GPU as usual.
     """
     from hal0.comfyui.install import readable_tree
     from hal0.comfyui.resolve import resolve_image_model
@@ -2008,7 +2011,17 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
                 details={"upstream": call.upstream_name, "url": upstream.url},
             )
 
-        # 7. Drive the ComfyUI provider directly. Inject the resolved template and
+        # 7. The last stop before ComfyUI is asked to render. The dashboard's Cancel aborts
+        #    this request, and the switch above can take long enough for that to happen
+        #    during it: a client that has gone gets nothing rendered. Returning from inside
+        #    the `async with` is a normal exit, so image_job() closes and the arbiter's
+        #    restore clock starts as for any finished job; the GPU goes back as usual.
+        #    499 is nginx's "client closed request"; the access log records it.
+        if await request.is_disconnected():
+            log.info("images.client_gone_before_render", model=resolved.id)
+            return Response(status_code=499)
+
+        # 8. Drive the ComfyUI provider directly. Inject the resolved template and
         #    checkpoint override so the provider's translator knows what to render
         #    without resolving the model again. Always set from the resolution: a
         #    client's own copies of these keys are overwritten, so a client can
@@ -2026,7 +2039,7 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
     if last_used is not None and call.upstream_name:
         last_used[call.upstream_name] = resolved.id
 
-    # 8. Emit OpenAI-shaped response.
+    # 9. Emit OpenAI-shaped response.
     response_format = (body.get("response_format") or "url").lower().strip()
     images: list[dict[str, Any]] = []
     for img in result.get("images", []):

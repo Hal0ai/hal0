@@ -408,6 +408,48 @@ def test_chat_after_a_v1_render_is_not_refused_for_image_mode(
     load.assert_any_await("agent", None)  # the restore reloaded the saved set
 
 
+def test_a_request_cancelled_during_the_switch_leaves_the_gpu_to_the_restore(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_hal0_home: str,
+    comfyui_queue: dict[str, Any],
+) -> None:
+    """The dashboard's Cancel aborts the request while the GPU switches: nothing is
+    submitted to ComfyUI, the image job still closes (so the quiet clock starts), and the
+    next LLM request restores the GPU exactly as it does after a finished render."""
+    from starlette.requests import Request
+
+    comfyui_queue["queue"] = (0, 0)
+    _seed_img_upstream(client)
+    _seed_chat_upstream(client, "agent")
+    unload, load, infer = _wire_image_app(client, monkeypatch, llm_slot="agent")
+    arbiter = client.app.state.slot_manager.arbiter
+
+    async def _is_disconnected(self: Request) -> bool:
+        # The image request's client is gone once the switch has landed, not before it.
+        return self.url.path == "/v1/images/generations" and arbiter.mode is GpuMode.IMG
+
+    monkeypatch.setattr(Request, "is_disconnected", _is_disconnected)
+
+    r = client.post("/v1/images/generations", json={"model": "sdxl-turbo", "prompt": "a cat"})
+
+    assert r.status_code == 499
+    unload.assert_awaited_once_with("agent")
+    load.assert_awaited_once_with("img", ANY)  # the switch ran to its end
+    infer.assert_not_awaited()
+    assert arbiter.status()["image_jobs"] == 0
+    assert arbiter._quiet_since is not None  # the job closed normally: the restore clock runs
+    assert arbiter.mode is GpuMode.IMG  # restored by the next LLM request or the loop
+
+    r = client.post(
+        "/v1/chat/completions",
+        json={"model": "primary", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert r.json().get("error", {}).get("code") != "gpu.image_mode", r.text
+    assert arbiter.mode is GpuMode.LLM
+    load.assert_any_await("agent", None)
+
+
 def test_image_defaults_filled_from_image_section(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str
 ) -> None:
