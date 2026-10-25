@@ -83,11 +83,15 @@ that page lasts only until Open WebUI restarts, because hal0 turns off Open
 WebUI's persistent config. Open WebUI no longer connects to ComfyUI; ComfyUI's
 editor stays on the dashboard's Image Gen tab.
 
-An image render puts the GPU in image mode. While it is in image mode, hal0
-does not serve chat from GPU slots (it answers `503 gpu.image_mode`), so
-chat in Open WebUI on those models has to wait until `idle_restore_minutes`
-(default `60`) have passed with no image activity, or until you switch back
-to inference (see [Generate images](/docs/guides/generate-images)).
+Each image render from Open WebUI puts the GPU in image mode. While it is in
+image mode, hal0 does not serve chat from GPU slots (it answers
+`503 gpu.image_mode`). If Open WebUI asks for a chat reply in the same turn,
+right after the image, hal0 refuses that too. Chat in Open WebUI on those
+models works again after `idle_restore_minutes` (default `60`) have passed
+with no image activity (never, while that value is `0` or image mode is
+pinned), or when you switch back to inference (see
+[Generate images](/docs/guides/generate-images)). Chat on NPU and CPU slots is
+not affected.
 
 ## Talking to Hermes
 
