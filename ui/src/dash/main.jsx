@@ -346,7 +346,7 @@ function App() {
             <FirstRunBanner />
             <UpdateBanner />
             {/* Phase D8: self-renders while the GPU arbiter reports image
-                mode (/api/comfyui/status arbiter.mode === "img"). */}
+                mode (/api/comfyui/arbiter arbiter.mode === "img"). */}
             <GpuImageModeBanner />
             <BannerStack scope="global" route={route} />
           </div>

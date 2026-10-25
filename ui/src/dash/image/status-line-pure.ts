@@ -67,16 +67,19 @@ export interface StatusLineOpts {
 
 // ── copy ─────────────────────────────────────────────────────────────────────
 
-const HEAD_CHAT = 'GPU · chat mode'
-const HEAD_SWITCHING = 'Switching to image mode'
-const HEAD_HANDOFF = 'Image mode · hand-off'
-const HEAD_RELOADING = 'Reloading GPU slots'
-const HEAD_PINNED = 'Image mode pinned'
+// The headlines. Exported for the surfaces that show the same state in a smaller form (the
+// banner, the step chips): the copy lives here once.
+export const HEAD_CHAT = 'GPU · chat mode'
+export const HEAD_SWITCHING = 'Switching to image mode'
+export const HEAD_HANDOFF = 'Image mode · hand-off'
+export const HEAD_RELOADING = 'Reloading GPU slots'
+export const HEAD_PINNED = 'Image mode pinned'
+export const HEAD_RENDERING = 'Rendering'
 const HEAD_STALE = 'The image engine runs an older GPU gate'
 const HEAD_NO_CREDENTIAL =
   "Image generation is blocked: hal0 requires sign-in and ComfyUI's GPU gate has no credential for it yet"
 
-const COST_RELOAD = 'They reload about 10 s after the last image.'
+export const COST_RELOAD = 'They reload about 10 s after the last image.'
 const COST_NO_SLOTS = 'No GPU slots to pause on this box.'
 const COST_IMAGE_ON = 'Image mode is still on, so this one starts at once.'
 // The chat-wait cap: `_LLM_DEMAND_WAIT_S` in src/hal0/slots/arbiter.py.
@@ -114,7 +117,10 @@ function mmss(seconds: number): string {
 // ── arbiter phases ───────────────────────────────────────────────────────────
 
 // The steps of a switch to image mode, as `arbiter.phase` names them.
-const SWITCH_PHASES: ReadonlySet<string> = new Set(['draining', 'unloading', 'starting_engine'])
+export const SWITCH_PHASES: ReadonlySet<string> = new Set(['draining', 'unloading', 'starting_engine'])
+
+// Whether a slot's state means it is back (loaded and able to answer).
+export const slotIsBack = (state: string): boolean => ['ready', 'serving', 'idle'].includes(state)
 
 // Whether the GPU is in image mode and not being switched or restored: the state in which a
 // new image starts at once.
@@ -186,7 +192,7 @@ function pausedNote(arbiter: ArbiterState, pinned: boolean, whenUnpinned: string
   return pinned ? 'The paused GPU slots stay paused until you unpin image mode.' : whenUnpinned
 }
 
-function queueTotal(status: StatusLineInputs | null | undefined): number {
+function queueTotal(status: Partial<StatusLineInputs> | null | undefined): number {
   return (status?.queue?.running ?? 0) + (status?.queue?.pending ?? 0)
 }
 
@@ -194,7 +200,7 @@ function queueTotal(status: StatusLineInputs | null | undefined): number {
 // different moments).
 function latestRefusal(
   env: ArbiterEnvelope | null | undefined,
-  status: StatusLineInputs | null | undefined,
+  status: Partial<StatusLineInputs> | null | undefined,
 ): GateRefusal | null {
   const a = env?.gate_refusal ?? null
   const b = status?.gate_refusal ?? null
@@ -202,24 +208,46 @@ function latestRefusal(
   return a ?? b
 }
 
+// What an action needs to know about the box, read the way the line reads it so a button and the
+// line it sits on never disagree.
+export interface ActionFacts {
+  // Image mode is held by a pin.
+  pinned: boolean
+  // A render is running: the arbiter's rendering phase, or a busy ComfyUI queue (the editor's
+  // renders show only there). Stopping image mode then drops it, which needs a confirm.
+  renderRunning: boolean
+  // `at` of the latest gate refusal, the key a dismissal is remembered by.
+  refusalAt: number | null
+}
+
+export function actionFacts(
+  env: ArbiterEnvelope | null | undefined,
+  status: Partial<StatusLineInputs> | null | undefined,
+): ActionFacts {
+  const arbiter = env?.arbiter ?? null
+  return {
+    pinned: arbiter?.pinned === true && arbiter.mode === 'img',
+    renderRunning: arbiter?.phase === 'rendering' || queueTotal(status) > 0,
+    refusalAt: latestRefusal(env, status)?.at ?? null,
+  }
+}
+
 function renderingHead(status: StatusLineInputs | null | undefined): string {
   const progress = status?.progress
   if (progress) {
     return progress.step != null && progress.total != null
-      ? `Rendering · ${progress.model} · step ${progress.step}/${progress.total}`
-      : `Rendering · ${progress.model}`
+      ? `${HEAD_RENDERING} · ${progress.model} · step ${progress.step}/${progress.total}`
+      : `${HEAD_RENDERING} · ${progress.model}`
   }
   // A render from the ComfyUI editor has no progress entry: only the queue shows it.
   const queued = queueTotal(status)
-  return queued > 0 ? `Rendering · editor prompt · ${queued} queued` : 'Rendering'
+  return queued > 0 ? `${HEAD_RENDERING} · editor prompt · ${queued} queued` : HEAD_RENDERING
 }
 
 function reloadingHead(arbiter: ArbiterState, opts: StatusLineOpts): string {
   const set = arbiter.unload_set ?? []
   if (!opts.slots || set.length === 0) return HEAD_RELOADING
-  const ready = new Set(
-    opts.slots.filter((s) => ['ready', 'serving', 'idle'].includes(s.state)).map((s) => s.name),
-  )
+  const ready = new Set(opts.slots.filter((s) => slotIsBack(s.state)).map((s) => s.name))
   const back = set.filter((name) => ready.has(name)).length
   return `${HEAD_RELOADING} · ${back} of ${set.length} ready`
 }
