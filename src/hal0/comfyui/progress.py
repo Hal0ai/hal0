@@ -27,6 +27,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from hal0.comfyui.gate_reason import SOCKET_ID_MAX, clean_reason
+
 
 def _now() -> float:
     """The clock ``elapsed_s`` is measured on. Monotonic; a seam for tests."""
@@ -97,7 +99,9 @@ def current() -> dict[str, Any] | None:
         "total": render.total,
         "node": render.node,
         "elapsed_s": round(_now() - render.started, 1),
-        "prompt_id": render.prompt_id,
+        # ComfyUI named it. The raw id is what the render is tracked and polled by; what is
+        # reported is made safe for the status JSON.
+        "prompt_id": clean_reason(render.prompt_id, SOCKET_ID_MAX),
     }
 
 

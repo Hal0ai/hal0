@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import re
+import reprlib
 import tempfile
 import time
 import urllib.parse
@@ -48,7 +49,7 @@ from websockets.asyncio.client import connect as _websocket_connect
 
 from hal0.comfyui import gate_credential, progress
 from hal0.comfyui import paths as comfyui_paths
-from hal0.comfyui.gate_reason import clean_reason
+from hal0.comfyui.gate_reason import SOCKET_ID_MAX, SOCKET_LOG_MAX, clean_reason
 from hal0.config import paths as cfg_paths
 from hal0.errors import Hal0Error
 from hal0.http_client import async_client
@@ -271,20 +272,23 @@ class _ProgressRelay:
         if kind == "executing":
             node = data.get("node") if isinstance(data, dict) else None
             if node is not None:
-                self._node = str(node)
+                self._node = clean_reason(node, SOCKET_ID_MAX)
         elif kind == "progress":
             if not isinstance(data, dict):
                 raise ValueError("progress frame has no data object")
             step, total = _as_count(data.get("value")), _as_count(data.get("max"))
             if step is None or total is None:
-                raise ValueError(f"progress frame has no integer value/max: {data!r}")
+                raise ValueError(
+                    "progress frame has no integer value/max: "
+                    f"value={reprlib.repr(data.get('value'))} max={reprlib.repr(data.get('max'))}"
+                )
             node = data.get("node")
             frame_prompt = data.get("prompt_id")
             args = (
                 None if frame_prompt is None else str(frame_prompt),
                 step,
                 total,
-                str(node) if node is not None else self._node,
+                clean_reason(node, SOCKET_ID_MAX) if node is not None else self._node,
             )
             if self.prompt_id is None:
                 self._early = args
@@ -314,7 +318,8 @@ async def _follow_progress(url: str, relay: _ProgressRelay, ready: asyncio.Event
                 relay.feed(frame)
         reason = "websocket closed by ComfyUI"
     except Exception as exc:
-        reason = f"{type(exc).__name__}: {exc}"
+        # The message can quote what ComfyUI sent; it is cleaned and cut for the log.
+        reason = clean_reason(f"{type(exc).__name__}: {exc}", SOCKET_LOG_MAX)
     finally:
         ready.set()
     log.warning("comfyui.progress_listener_failed", extra={"url": url, "reason": reason})

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 
 import pytest
@@ -218,3 +219,20 @@ def test_restarting_a_prompt_id_sends_it_to_the_back_of_the_queue(clock: _Clock)
     current = progress.current()
     assert current is not None
     assert (current["prompt_id"], current["step"], current["elapsed_s"]) == ("a", 1, 0.0)
+
+
+def test_current_reports_a_prompt_id_that_can_be_encoded_and_is_short() -> None:
+    """ComfyUI names the prompt. A lone surrogate or a huge id must not reach ``/status``;
+    the tracker still follows the render by the id it was given."""
+    raw = "p\ud800" + "x" * 10_000
+    progress.start(raw, "sdxl-lightning")
+    progress.update(raw, step=2, total=4, node="3")
+
+    current = progress.current()
+
+    assert current is not None
+    assert current["prompt_id"] == "p?" + "x" * 62
+    assert current["step"] == 2  # the update found its render by the raw id
+    json.dumps(current, ensure_ascii=False).encode("utf-8")
+    progress.finish(raw)
+    assert progress.current() is None

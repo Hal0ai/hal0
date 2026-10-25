@@ -759,6 +759,78 @@ async def test_listener_cancellation_is_silent(
     assert _listener_warnings(caplog) == []
 
 
+@pytest.mark.parametrize("kind", ["executing", "progress"])
+async def test_listener_cleans_a_node_name_it_cannot_encode(fake_ws: _FakeWS, kind: str) -> None:
+    """The node is text from ComfyUI's socket and ends up on ``/status``. A lone surrogate is
+    valid JSON but cannot be encoded as UTF-8, which made the status JSON fail."""
+    if kind == "executing":
+        fake_ws.push_json("executing", {"node": "a\ud800b", "prompt_id": "p1"})
+        _progress_frame(fake_ws, 1, 4, node=None)
+    else:
+        _progress_frame(fake_ws, 1, 4, node="a\ud800b")
+    fake_ws.hang_up()
+
+    await _follow()
+
+    current = progress.current()
+    assert current is not None
+    assert current["node"] == "a?b"
+    json.dumps(current, ensure_ascii=False).encode("utf-8")  # what /status sends
+
+
+@pytest.mark.parametrize("kind", ["executing", "progress"])
+async def test_listener_caps_a_node_name_at_64_characters(fake_ws: _FakeWS, kind: str) -> None:
+    if kind == "executing":
+        fake_ws.push_json("executing", {"node": "n" * 10_000, "prompt_id": "p1"})
+        _progress_frame(fake_ws, 1, 4, node=None)
+    else:
+        _progress_frame(fake_ws, 1, 4, node="n" * 10_000)
+    fake_ws.hang_up()
+
+    await _follow()
+
+    current = progress.current()
+    assert current is not None
+    assert current["node"] == "n" * 64
+
+
+async def test_a_node_that_arrives_before_the_prompt_id_is_cleaned_too(fake_ws: _FakeWS) -> None:
+    relay = _ProgressRelay("sdxl-turbo")
+    relay.feed(json.dumps({"type": "progress", "data": {"value": 1, "max": 4, "node": "\ud800"}}))
+
+    relay.claim("p1")
+
+    current = progress.current()
+    assert current is not None
+    assert current["node"] == "?"
+
+
+def test_a_progress_frame_error_does_not_repeat_the_frame_it_was_given() -> None:
+    """The message is logged; it must not carry a frame of any size."""
+    relay = _ProgressRelay("sdxl-turbo")
+    frame = json.dumps({"type": "progress", "data": {"value": "v" * 1_000_000, "max": 4}})
+
+    with pytest.raises(ValueError) as caught:
+        relay.feed(frame)
+
+    assert len(str(caught.value)) <= 200
+
+
+async def test_the_listeners_warning_is_capped_at_200_characters(
+    fake_ws: _FakeWS, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING, logger="hal0.providers.comfyui")
+    fake_ws.connect_error = ConnectionRefusedError("r\ud800" + "x" * 10_000)
+
+    await _follow()
+
+    warnings = _listener_warnings(caplog)
+    assert len(warnings) == 1
+    reason = warnings[0].reason  # type: ignore[attr-defined]
+    assert len(reason) == 200
+    assert reason.startswith("ConnectionRefusedError: r?xx")
+
+
 # ─── infer + progress ─────────────────────────────────────────────────────────
 
 _PNG = b"\x89PNG\r\n\x1a\n" + b"x" * 64

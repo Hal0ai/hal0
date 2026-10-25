@@ -628,6 +628,28 @@ class TestStatusTelemetry:
         assert body["progress"] is None
         assert body["queue"]["running"] == 1
 
+    def test_status_survives_text_from_comfyuis_socket_it_cannot_encode(self, client: TestClient):
+        """A node named ``"\\ud800"`` is valid JSON on the socket and not valid UTF-8: stored
+        raw it made ``/status`` fail to encode (500), and a 10 kB one made it huge."""
+        from hal0.providers.comfyui import _ProgressRelay
+
+        relay = _ProgressRelay("sdxl-lightning")
+        relay.claim("p\ud800" + "i" * 10_000)
+        frame = {
+            "type": "progress",
+            "data": {"value": 1, "max": 4, "node": "n\ud800" + "x" * 10_000},
+        }
+        relay.feed(json.dumps(frame))
+        patches = self._patch_status(self._SYSTEM_STATS, self._QUEUE_BUSY)
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            response = client.get("/api/comfyui/status")
+
+        assert response.status_code == 200
+        shown = response.json()["progress"]
+        assert shown["node"] == "n?" + "x" * 62
+        assert shown["prompt_id"] == "p?" + "i" * 62
+        assert (shown["step"], shown["total"]) == (1, 4)
+
     def test_status_reports_the_render_that_is_stepping(self, client: TestClient):
         """Two hal0 renders queued: the older one is running, so it is the one reported."""
         progress.start("running", "sd-1.5-pruned-emaonly")
