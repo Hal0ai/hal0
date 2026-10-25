@@ -824,6 +824,9 @@ There is no second loader process to keep in sync (the Lemonade
 `server_models.json` / `user_models.json` / `extra.*` split was removed
 with the runtime, #687). Every slot's `--model` path is a registry-backed
 file under the model store `/mnt/ai-models`.
+Image models are the exception: the ComfyUI image catalog
+(`hal0.comfyui.catalog`, ADR-0037) owns them, and the registry neither scans
+nor lists ComfyUI's models tree.
 
 The registry tags each row with a namespace bucket (`ns`) the dashboard
 renders as a badge:

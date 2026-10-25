@@ -55,7 +55,11 @@ stays and is listed with the models that hold it, unless you pass
 included; a file
 that cannot be deleted stops the removal with 409 `comfyui.remove_failed`, which
 lists what had already gone), and `hal0 comfyui files` lists the weight files on
-disk, grouped by kind.
+disk, grouped by kind. A file no catalog model loads, such as a checkpoint you
+copied in by hand, is deleted from the Models view's **Image / ComfyUI** tab or
+with `DELETE /api/comfyui/files/{subdir}/{relpath}` (MCP `comfyui_file_delete`);
+the call refuses a file a catalog model loads (409 `comfyui.file_catalog_owned`),
+a symlink and a hidden path part.
 
 hal0 writes a model's ComfyUI workflow when its install finishes. A model whose
 weights you copied into the models folder by hand reads as installed, so hal0
@@ -68,8 +72,10 @@ them up; one you stopped or skipped stays down.
 
 On a box with a ROCm lane, the first image model you install that the API can
 render becomes the `img` selection by itself when nothing is selected, and
-selecting it starts the `img` slot. To pick or change the model, point the
-`img` capability at one you installed:
+selecting it starts the `img` slot. To pick or change the model, use the
+**Model** row of AI Capabilities → Image in the dashboard (it lists the catalog
+models the API can render, marking those not downloaded yet, and your own
+`ckpt/<path>` checkpoints), or point the `img` capability at one you installed:
 
 ```sh
 hal0 capabilities set img img --model sdxl-lightning
