@@ -460,12 +460,24 @@ export interface ComfyuiCatalogModel {
   fit: Fit | null
 }
 
+/** What the starter pick was chosen from (`recommendation()` in `hal0.comfyui.picker`):
+ *  `pool_gb` is the figure the picker used (GiB, one decimal), the smaller of the GPU pool and
+ *  this box's RAM limit, and `limited_by` says which of the two set it. */
+export interface ComfyuiRecommendation {
+  id: string
+  pool_gb: number
+  limited_by: 'ram' | 'gpu'
+}
+
 export interface ComfyuiModelsResponse {
   models: ComfyuiCatalogModel[]
   // `available` is false on a host with no ROCm lane; the catalog lists either way.
   engine: { available: boolean; reason: string | null }
   // The models tree and the free space (GiB) of the filesystem under it; null when unmeasured.
   store: { free_gb: number | null; path: string }
+  // The model marked `recommended` and the figure it was chosen from; null when the box's pool
+  // is unknown (never probed), in which case there is no figure to cite.
+  recommendation: ComfyuiRecommendation | null
 }
 
 export function useComfyuiModels() {

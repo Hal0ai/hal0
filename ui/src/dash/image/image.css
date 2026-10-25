@@ -1,0 +1,198 @@
+/*
+ * The Image Gen pane's Models tab (ImageModelsPanel.jsx) and the fit meter it shares with the
+ * Generate tab (FitMeter.jsx).
+ *
+ * The panel renders inside the pane's `.comfy-page` wrapper, so the `--comfy*` tokens are
+ * there, but these rules use the plain dashboard tokens (--bg-1, --line, --fg-*, --accent...)
+ * and take the blue accent from `--comfy` where it has one. The fit meter's bars are the top
+ * bar's memory ruler's own classes (`th-ruler-*`, overhaul.css); only the dashed need ghost and
+ * a shorter bar for a card are new here.
+ */
+
+/* ── Fit meter ─────────────────────────────────────────────────────────────── */
+.fm { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.fm-row { min-width: 0; }
+.fm .th-ruler-h { margin-bottom: 4px; font-size: 10.5px; }
+/* A card holds two bars, so they are shorter than the ruler's 52 px. */
+.fm-bar { height: 16px; }
+/* The need, as a dashed ghost inside the track: not a placed allocation, so it does not click,
+   hover or animate like the ruler's segments. */
+.fm-need {
+  padding: 0;
+  cursor: default;
+  border: 1px dashed var(--comfy, var(--accent));
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--comfy, var(--accent)) 14%, transparent);
+  transition: width 0.3s var(--ease, ease);
+}
+.fm-need:hover { filter: none; }
+.fm-verdict { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+/* The dashboard's chips are lower-case; the verdict and the badges are read as written
+   ("Fits · 31.6 GB to spare", "Won't fit"), so units keep their case. */
+.fm-verdict .chip,
+.imp-badges .chip { text-transform: none; }
+.fm-judged { font-family: var(--jbm); font-size: 10.5px; color: var(--fg-4); }
+.fm-reason { font-family: var(--jbm); font-size: 11px; line-height: 1.45; color: var(--fg-3); }
+
+/* ── Panel ─────────────────────────────────────────────────────────────────── */
+.imp { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+.imp-note {
+  padding: 10px 14px;
+  border: 1px solid var(--warn-line);
+  border-left-width: 3px;
+  border-radius: var(--rad);
+  background: var(--warn-soft);
+  font-family: var(--jbm);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg-2);
+}
+.imp-bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+.imp-filters { display: inline-flex; gap: 6px; }
+.imp-filter {
+  height: 26px;
+  padding: 0 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--rad-pill, 999px);
+  background: transparent;
+  color: var(--fg-3);
+  font-family: var(--jbm);
+  font-size: 11px;
+  cursor: pointer;
+}
+.imp-filter:hover { border-color: var(--fg-3); color: var(--fg); }
+.imp-filter[aria-pressed='true'] {
+  color: var(--comfy, var(--accent));
+  border-color: var(--comfy-line, var(--accent-line));
+  background: var(--comfy-soft, var(--accent-soft));
+}
+.imp-store { font-family: var(--jbm); font-size: 11px; color: var(--fg-4); }
+
+.imp-group-h {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 10px;
+  font-family: var(--jbm);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--fg-2);
+}
+.imp-group-h .ct { color: var(--fg-5); font-weight: 400; }
+.imp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+.imp-more { margin-top: 10px; }
+.imp-empty { padding: 28px; text-align: center; font-family: var(--jbm); font-size: 12px; color: var(--fg-4); }
+
+/* ── Card ──────────────────────────────────────────────────────────────────── */
+.imp-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--rad-lg);
+  background: var(--bg-1);
+}
+.imp-card[data-complete='true'] { border-color: var(--comfy-line, var(--line)); }
+.imp-card-h { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.imp-name { font-family: var(--jbm); font-size: 13.5px; font-weight: 500; color: var(--fg); overflow-wrap: anywhere; }
+.imp-badges { display: flex; flex-wrap: wrap; gap: 5px; }
+.imp-meta { font-family: var(--jbm); font-size: 11px; color: var(--fg-4); }
+.imp-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: auto; }
+.imp-actions .grow { flex: 1; }
+
+/* Download progress */
+.imp-prog { display: flex; flex-direction: column; gap: 5px; }
+.imp-prog-bar { height: 6px; border-radius: 3px; overflow: hidden; background: var(--bg-sunken, var(--bg-3)); }
+.imp-prog-bar > i {
+  display: block;
+  height: 100%;
+  background: var(--comfy, var(--accent));
+  transition: width 0.5s var(--ease, ease);
+}
+.imp-prog-t { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; font-family: var(--jbm); font-size: 10.5px; color: var(--fg-3); font-feature-settings: 'tnum' 1; }
+
+/* Errors, inline on the card */
+.imp-err {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  font-family: var(--jbm);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--err);
+  overflow-wrap: anywhere;
+}
+
+/* Suggestion on a card that will not fit */
+.imp-suggest { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-family: var(--jbm); font-size: 11px; color: var(--fg-3); }
+
+/* ── First run ─────────────────────────────────────────────────────────────── */
+.imp-first {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px 20px;
+  border: 1px solid var(--comfy-line, var(--accent-line));
+  border-radius: var(--rad-lg);
+  background: linear-gradient(135deg, var(--comfy-soft, var(--accent-soft)), transparent 65%), var(--bg-1);
+}
+.imp-first h2 { margin: 0; font-family: var(--jbm); font-size: 16px; font-weight: 500; color: var(--fg); }
+.imp-first-lead { margin: 0; font-family: var(--jbm); font-size: 12px; color: var(--fg-3); }
+.imp-first-big {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 18px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--rad-lg);
+  background: var(--bg);
+}
+@media (max-width: 720px) { .imp-first-big { grid-template-columns: 1fr; } }
+.imp-first-big .imp-name { font-size: 16px; }
+.imp-first-reason { font-family: var(--jbm); font-size: 12px; color: var(--fg-3); }
+.imp-first-small { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+.imp-first-small .imp-card { padding: 12px 14px; }
+.imp-first-foot { display: flex; align-items: center; gap: 10px; }
+
+/* ── Unreadable tree ───────────────────────────────────────────────────────── */
+.imp-fix {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 760px;
+  padding: 18px 20px;
+  border: 1px solid var(--err-line);
+  border-left-width: 3px;
+  border-radius: var(--rad-lg);
+  background: var(--bg-1);
+}
+.imp-fix h2 { margin: 0; font-family: var(--jbm); font-size: 14px; font-weight: 500; color: var(--fg); }
+.imp-fix p { margin: 0; font-family: var(--jbm); font-size: 12px; line-height: 1.55; color: var(--fg-2); overflow-wrap: anywhere; }
+.imp-fix pre {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--rad);
+  background: var(--bg-sunken, var(--bg-3));
+  font-family: var(--jbm);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--fg);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.imp-fix-actions { display: flex; gap: 8px; }
+
+/* ── Remove confirm ────────────────────────────────────────────────────────── */
+.imp-rm h4 { margin: 14px 0 6px; font-family: var(--jbm); font-size: 11px; font-weight: 500; letter-spacing: 0.05em; color: var(--fg-3); }
+.imp-rm h4:first-child { margin-top: 0; }
+.imp-rm ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+.imp-rm li { display: flex; justify-content: space-between; gap: 12px; font-family: var(--jbm); font-size: 11.5px; color: var(--fg-2); overflow-wrap: anywhere; }
+.imp-rm li .sz { flex-shrink: 0; color: var(--fg-4); font-feature-settings: 'tnum' 1; }
+.imp-rm .none { font-family: var(--jbm); font-size: 11.5px; color: var(--fg-4); }
+.imp-rm .err { margin-top: 12px; font-family: var(--jbm); font-size: 11.5px; color: var(--err); }

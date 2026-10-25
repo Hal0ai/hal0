@@ -20,13 +20,14 @@ const folderOf = (f) => [f.subdir, ...f.relpath.split('/').slice(0, -1)].join('/
 
 const note = (msg, kind) => window.__hal0Toast && window.__hal0Toast(msg, kind)
 
-// What deletes a file a catalog model loads. Install and remove are CLI/REST only until the
-// dashboard grows a Models tab, so the note names the command. A file two models load is kept
-// by a plain remove (the other model still needs it): `--include-shared` deletes it anyway.
+// What deletes a file a catalog model loads: removing the model, from its card on the Image Gen
+// pane's Models tab or with the CLI. A file two models load is kept by a plain remove (the
+// other model still needs it); only the CLI's `--include-shared` deletes it anyway, so the note
+// names that command for it.
 const ownedNote = (ids) =>
   ids.length === 1
-    ? `Remove the model to delete this file: hal0 comfyui models remove ${ids[0]}`
-    : `${ids.join(', ')} load this file. To delete it: hal0 comfyui models remove ${ids[0]} --include-shared (the others stop working).`
+    ? `Remove the model to delete this file: use Remove on its card in the Image Gen pane's Models tab, or run hal0 comfyui models remove ${ids[0]}`
+    : `${ids.join(', ')} load this file, so removing one of them keeps it for the others. To delete it anyway: hal0 comfyui models remove ${ids[0]} --include-shared (the others stop working).`
 
 export function ImageFilesTab() {
   const filesQuery = useComfyuiFiles()

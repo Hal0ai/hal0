@@ -159,10 +159,10 @@ describe('ImageFilesTab', () => {
     const { root } = mount()
     act(() => byId('imgf-row-checkpoints/flux-dev.safetensors')!.click())
     expect(byId('imgf-delete')).toBeNull()
+    // Install and remove are on the Models tab now; the CLI stays as the other way.
     expect(byId('imgf-owned-note')!.textContent).toBe(
-      'Remove the model to delete this file: hal0 comfyui models remove flux-dev',
+      "Remove the model to delete this file: use Remove on its card in the Image Gen pane's Models tab, or run hal0 comfyui models remove flux-dev",
     )
-    expect(document.body.textContent).not.toContain('Image Gen')
     act(() => root.unmount())
   })
 
@@ -177,6 +177,8 @@ describe('ImageFilesTab', () => {
     const text = byId('imgf-owned-note')!.textContent!
     expect(text).toContain('hal0 comfyui models remove flux-dev --include-shared')
     expect(text).toContain('flux-dev, flux-schnell')
+    // A plain remove from the dashboard keeps the shared file; only the CLI flag deletes it.
+    expect(text).toContain('removing one of them keeps it for the others')
     act(() => root.unmount())
   })
 
