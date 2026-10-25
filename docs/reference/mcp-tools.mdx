@@ -49,6 +49,12 @@ bidi override, a byte-order mark) comes back as
 runs again when an approved call executes. A tool that needs a Hugging Face `org/name`
 (such as `model_pull`) takes it as a body field (`hf_repo`), not in the path.
 
+The one exception to the `/` rule is a path argument whose route declares it `{name:path}`:
+today only `comfyui_file_delete`'s `relpath`. It may contain `/` between valid segments
+(`styles/a.safetensors`); each segment is held to the rules above on its own, so a leading,
+trailing or doubled `/` and a `.` or `..` segment are refused, and each segment is
+percent-encoded separately.
+
 Tools fall into three gating tiers. Treat the frozensets in source
 (`AUTONOMOUS_READ_TOOLS`, `AUTONOMOUS_WRITE_TOOLS`, `GATED_TOOLS`) as ground truth if
 this table drifts.
@@ -226,7 +232,7 @@ The tune lives on the profile. `slot_create` and `slot_edit` take a `profile` na
 | `comfyui_pin` | `POST /api/comfyui/pin` |
 | `comfyui_model_install` | `POST /api/comfyui/models/{model_id}/install` |
 | `comfyui_model_remove` | `DELETE /api/comfyui/models/{model_id}` — deletes the model's weight files and workflow; files other installed models load stay unless `include_shared=true`, which deletes them too and reports those models as affected |
-| `comfyui_file_delete` | `DELETE /api/comfyui/files/{subdir}/{relpath}` — deletes one weight file no catalog model loads; write each `/` of a nested `relpath` as `%2F` (no other `%` escape, `?` or `#` is accepted); refuses catalog-owned files, symlinks, hidden or `..` path parts and anything that is not a weight file |
+| `comfyui_file_delete` | `DELETE /api/comfyui/files/{subdir}/{relpath}` — deletes one weight file no catalog model loads; `relpath` is the row's path as listed, with a plain `/` between folders (`styles/a.safetensors`); an empty, `.` or `..` part is refused before approval, and the route refuses catalog-owned files, symlinks, hidden or `..` path parts and anything that is not a weight file |
 | `comfyui_render_cancel` | `POST /api/comfyui/render/cancel` |
 | `comfyui_restart` | `POST /api/comfyui/restart` |
 | `comfyui_workflow_launch` | `POST /api/comfyui/workflows/{name}/launch` |

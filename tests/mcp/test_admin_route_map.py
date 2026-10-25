@@ -9,6 +9,7 @@ assertions use the real installed map (conftest fixture).
 
 from __future__ import annotations
 
+import pytest
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 
@@ -130,3 +131,112 @@ def test_normalize_strips_path_converters() -> None:
     assert admin._normalize_path("/v1/models/{model_id:path}") == "/v1/models/{model_id}"
     assert admin._normalize_path("/api/x/{name:path}/launch") == "/api/x/{name}/launch"
     assert admin._normalize_path("/api/slots/{name}") == "/api/slots/{name}"
+
+
+# ── ``:path`` converters: the one thing that lets a path argument hold '/' ───
+
+
+def _converter_app(*, guard_first: bool = False) -> FastAPI:
+    app = FastAPI()
+
+    def _plain_launch() -> None:
+        @app.post("/api/launch/{name}/go")
+        def _launch(name: str) -> dict:
+            return {}
+
+    def _guard_launch() -> None:
+        @app.post("/api/launch/{name:path}/go")
+        def _guard(name: str) -> dict:
+            return {}
+
+    @app.delete("/api/files/{root}/{rel:path}")
+    def _delete(root: str, rel: str) -> dict:
+        return {}
+
+    @app.get("/api/numbered/{n:int}")
+    def _numbered(n: int) -> dict:
+        return {}
+
+    if guard_first:
+        _guard_launch()
+        _plain_launch()
+    else:
+        _plain_launch()
+        _guard_launch()
+    return app
+
+
+def test_build_keeps_the_path_converter_on_the_template_but_not_in_the_route_id() -> None:
+    route_map, path_args = admin.build_admin_route_map(_converter_app())
+
+    # The route_id stays the bare form TOOL_NAME_ALIASES is written in; the template says
+    # which argument may hold '/'. The path-arg NAMES never carry the converter.
+    assert route_map["DELETE:/api/files/{root}/{rel}"] == (
+        "DELETE",
+        "/api/files/{root}/{rel:path}",
+    )
+    assert path_args["DELETE:/api/files/{root}/{rel}"] == ("root", "rel")
+    # Only ``:path`` is kept: ``:int`` and the like still read as a plain segment.
+    assert route_map["GET:/api/numbered/{n}"] == ("GET", "/api/numbered/{n}")
+
+
+@pytest.mark.parametrize("guard_first", [False, True], ids=["plain-first", "guard-first"])
+def test_a_route_id_shared_with_a_plain_route_never_gets_the_path_converter(
+    guard_first: bool,
+) -> None:
+    """Two live routes can share one normalized id (a guard route beside the real one).
+
+    The argument may hold '/' only if EVERY route of that id declares it ``:path``, whatever
+    order they were registered in: the real route is the one the call must be safe against.
+    """
+    route_map, path_args = admin.build_admin_route_map(_converter_app(guard_first=guard_first))
+
+    assert route_map["POST:/api/launch/{name}/go"] == ("POST", "/api/launch/{name}/go")
+    assert path_args["POST:/api/launch/{name}/go"] == ("name",)
+
+
+def test_the_installed_map_reads_the_path_converter_back_out_of_the_live_route() -> None:
+    rid = "DELETE:/api/comfyui/files/{subdir}/{relpath}"
+    # The scaffolding keeps what the live route declares; the tool-level view stays bare.
+    assert admin._ROUTE_MAP[rid] == ("DELETE", "/api/comfyui/files/{subdir}/{relpath:path}")
+    assert admin._REST_MAP["comfyui_file_delete"] == (
+        "DELETE",
+        "/api/comfyui/files/{subdir}/{relpath}",
+    )
+    assert admin._PATH_ARGS["comfyui_file_delete"] == ("subdir", "relpath")
+    assert admin._slash_path_args("comfyui_file_delete") == {"relpath"}
+    assert admin._slash_path_args("comfyui_workflow_launch") == frozenset()
+    assert admin._slash_path_args("not_a_tool") == frozenset()
+
+
+def test_reinstalling_a_prebuilt_map_keeps_the_path_converter() -> None:
+    """``set_admin_route_map(route_map, path_args)`` (the spec §4.3 form) carries it too."""
+    route_map, path_args = dict(admin._ROUTE_MAP), dict(admin._ROUTE_PATH_ARGS)
+    admin._SLASH_ARGS.clear()
+
+    admin.set_admin_route_map(route_map, path_args)
+
+    assert admin._slash_path_args("comfyui_file_delete") == {"relpath"}
+
+
+def test_only_a_path_converter_argument_accepts_a_slash(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(admin._SLASH_ARGS, "tool_x", frozenset({"b"}))
+
+    assert admin._path_arg_refusal("tool_x", "b", "p/q.bin") is None
+    assert admin._path_arg_refusal("tool_x", "a", "p/q.bin") is not None
+    # Even a ``:path`` argument is checked segment by segment.
+    for bad in ("p//q", "/p", "p/", "p/../q", "p/./q", "", "..", "p/\x00/q", 1.5, None):
+        assert admin._path_arg_refusal("tool_x", "b", bad) is not None, bad
+
+
+def test_format_url_encodes_each_segment_of_a_path_converter_argument() -> None:
+    template = "/api/x/{a}/{b}"
+
+    url = admin._format_url(
+        "http://t/",
+        template,
+        {"a": "q/r?s", "b": "p q/é/100%/x#y"},
+        slash_args=frozenset({"b"}),
+    )
+
+    assert url == "http://t/api/x/q%2Fr%3Fs/p%20q/%C3%A9/100%25/x%23y"

@@ -179,7 +179,6 @@ import structlog
 from mcp.types import CallToolResult, TextContent
 
 from hal0.api._redact import redact_log_line as _redact_log_line
-from hal0.comfyui import paths as comfyui_paths
 from hal0.mcp.approval_queue import ApprovalQueue
 from hal0.mcp.memory import _ANNOTATIONS as _MEMORY_TOOL_ANNOTATIONS
 from hal0.mcp.probes import PROBE_TOOLS, dispatch_probe
@@ -927,9 +926,9 @@ TOOL_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "POST:/api/runner-images/sync": ("runner_image_sync",),
     # runner_image_pull / pull/status / pull/cancel / detail (all keyed by
     # {image_id:path}) are not aliased: they were written when catalogue ids
-    # were GHCR repo paths, which _split_args refuses (it rejects any path-arg
-    # value containing "/"). Ids are runner keys now (ADR-0028), so wiring
-    # them is possible; not done in this pass.
+    # were GHCR repo paths, which _split_args refuses (it rejects "/" in any
+    # path-arg value unless the route declares it {name:path}). Ids are runner
+    # keys now (ADR-0028), so wiring them is possible; not done in this pass.
     "GET:/api/backends": ("backend_list",),
     "GET:/api/backends/{backend_id}": ("backend_detail",),
     "POST:/api/backends/npu/load": ("npu_backend_load",),
@@ -979,8 +978,30 @@ def _normalize_path(path: str) -> str:
     route_id keys use the bare ``{placeholder}`` form so they match the
     hand-authored ``TOOL_NAME_ALIASES``; live routes occasionally carry a
     ``:path`` / ``:int`` converter (e.g. ``/v1/models/{model_id:path}``).
+    The one converter that matters to a caller, ``:path``, is not lost: see
+    :func:`_mark_path_converters`.
     """
     return re.sub(r"{(\w+):[^}]+}", r"{\1}", path)
+
+
+#: ``{name:path}``: a placeholder whose route lets the value span several ``/`` segments.
+_PATH_CONVERTED = re.compile(r"{(\w+):path}")
+
+
+def _mark_path_converters(path: str, names: frozenset[str]) -> str:
+    """Put ``:path`` back on the ``names`` placeholders of a normalized path template.
+
+    The route map's template is where the live route says which of its path arguments may
+    hold ``/``, so :func:`build_admin_route_map` keeps ``{rel:path}`` there (and only
+    ``:path``: ``:int`` and the rest still read as a plain segment). The route_id and the
+    tool-level view in :data:`_REST_MAP` stay bare; :func:`_reconstruct_slash_args` reads the
+    marks back out.
+    """
+    return re.sub(
+        r"{(\w+)}",
+        lambda m: f"{{{m.group(1)}:path}}" if m.group(1) in names else m.group(0),
+        path,
+    )
 
 
 def _is_spa_catchall(raw_path: str) -> bool:
@@ -1075,6 +1096,11 @@ def build_admin_route_map(
     :data:`TOOL_NAME_ALIASES` is ALWAYS kept, so an over-broad exclude can
     never silently drop a live, classified tool.
 
+    The route_id and ``route_path_args`` use the bare ``{name}`` form; the
+    ``path`` in ``route_map`` keeps ``{name:path}`` for a placeholder that every
+    live route of that id declares ``:path`` (:func:`_mark_path_converters`), so a
+    prebuilt map handed to :func:`set_admin_route_map` carries it too.
+
     Route discovery goes through :func:`_iter_leaf_routes`, which descends
     through FastAPI's ``include_router`` wrappers — see its docstring for why a
     flat walk silently cost us the entire MCP surface.
@@ -1082,6 +1108,11 @@ def build_admin_route_map(
     routes = getattr(app, "routes", app)
     route_map: dict[str, tuple[str, str]] = {}
     route_path_args: dict[str, tuple[str, ...]] = {}
+    # route_id -> the placeholders that EVERY live route of that id declares ``:path``.
+    # Two routes can share a normalized id (a guard route beside the real one), so the
+    # converter is kept only when all of them agree: a plain route's argument stays one
+    # segment, whichever route was registered last.
+    path_converted: dict[str, frozenset[str]] = {}
     for route in _iter_leaf_routes(routes):
         raw_path = getattr(route, "path", None)
         methods = getattr(route, "methods", None)
@@ -1089,11 +1120,13 @@ def build_admin_route_map(
             continue
         path = _normalize_path(raw_path)
         placeholders = _placeholders(path)
+        converted = frozenset(_PATH_CONVERTED.findall(raw_path))
         for method in methods:
             verb = method.upper()
             if verb not in _SUPPORTED_VERBS:
                 continue
             route_id = f"{verb}:{path}"
+            path_converted[route_id] = path_converted.get(route_id, converted) & converted
             if route_id not in TOOL_NAME_ALIASES:
                 if _is_spa_catchall(raw_path):
                     continue
@@ -1104,6 +1137,9 @@ def build_admin_route_map(
             route_map[route_id] = (verb, path)
             if placeholders:
                 route_path_args[route_id] = placeholders
+    for route_id, (verb, path) in list(route_map.items()):
+        if path_converted.get(route_id):
+            route_map[route_id] = (verb, _mark_path_converters(path, path_converted[route_id]))
     return route_map, route_path_args
 
 
@@ -1124,6 +1160,8 @@ _ROUTE_PATH_ARGS: dict[str, tuple[str, ...]] = {}
 _REST_MAP: dict[str, tuple[str, str]] = {}
 #: tool_name -> path-arg names (alias-resolved).
 _PATH_ARGS: dict[str, tuple[str, ...]] = {}
+#: tool_name -> the path args its route declares ``{name:path}`` (they may hold ``/``).
+_SLASH_ARGS: dict[str, frozenset[str]] = {}
 #: generated route_ids with no TOOL_NAME_ALIASES entry (Gap-1 CI report):
 #: hidden from tools/list, never fatal.
 _UNCLASSIFIED_ROUTES: list[str] = []
@@ -1141,10 +1179,22 @@ def _reconstruct_tool_map(
         if target is None:
             continue  # missing live route — _validate_catalog raises on this
         for tool_name in tool_names:
-            rest[tool_name] = target
+            rest[tool_name] = (target[0], _normalize_path(target[1]))
             if route_id in route_path_args:
                 path_args[tool_name] = route_path_args[route_id]
     return rest, path_args
+
+
+def _reconstruct_slash_args(route_map: dict[str, tuple[str, str]]) -> dict[str, frozenset[str]]:
+    """Tool name -> the path args its route declares ``{name:path}`` (may hold ``/``)."""
+    slash: dict[str, frozenset[str]] = {}
+    for route_id, tool_names in TOOL_NAME_ALIASES.items():
+        target = route_map.get(route_id)
+        if target is None or not (names := frozenset(_PATH_CONVERTED.findall(target[1]))):
+            continue
+        for tool_name in tool_names:
+            slash[tool_name] = names
+    return slash
 
 
 def _apply_route_map(
@@ -1161,6 +1211,8 @@ def _apply_route_map(
     ):
         stash.clear()
         stash.update(fresh)
+    _SLASH_ARGS.clear()
+    _SLASH_ARGS.update(_reconstruct_slash_args(route_map))
     _UNCLASSIFIED_ROUTES[:] = sorted(set(route_map) - set(TOOL_NAME_ALIASES))
     _validate_catalog()
 
@@ -1736,6 +1788,9 @@ class PathArgError(ValueError):
 #: (the approvals UI is JavaScript) hold integers exactly only up to 2**53.
 _MAX_EXACT_INT = 2**53
 
+#: Why a single-segment path argument holding ``/`` is refused.
+_SLASH_REASON = "must not contain '/'"
+
 
 def _path_arg_refusal(tool: str, key: str, value: Any) -> str | None:
     """Why ``value`` cannot travel as ONE URL path segment, or ``None`` if it can.
@@ -1755,7 +1810,14 @@ def _path_arg_refusal(tool: str, key: str, value: Any) -> str | None:
       card render as one name while the value is another;
     - text that is not encodable as UTF-8 (a lone surrogate).
 
-    Everything else is percent-encoded by :func:`_format_url`.
+    The one exception to the ``/`` rule is an argument whose route declares it
+    ``{name:path}`` (:func:`_slash_path_args`; today only ``comfyui_file_delete``'s
+    ``relpath``). It is a relative path, so it may hold ``/`` BETWEEN segments, and every
+    segment must pass the rules above on its own: no empty segment (a leading, trailing or
+    doubled ``/``), no ``.`` or ``..``, no control or invisible character.
+
+    Everything else is percent-encoded by :func:`_format_url`, a ``:path`` argument one
+    segment at a time.
 
     The one shared check: :func:`dispatch` runs it before a call is queued or
     executed, and :func:`_split_args` (so the approve-time executor) runs it
@@ -1767,26 +1829,16 @@ def _path_arg_refusal(tool: str, key: str, value: Any) -> str | None:
         reason = "must be a string or an integer below 2**53"
     elif not isinstance(value, str):
         reason = "must be a string"
-    elif not value:
-        reason = "must not be empty"
-    elif value in (".", ".."):
-        reason = "must not be '.' or '..'"
-    elif "/" in value:
-        reason = "must not contain '/'"
-    elif any(unicodedata.category(ch) in ("Cc", "Cf") for ch in value):
-        reason = "must not contain control or invisible formatting characters"
     else:
-        try:
-            value.encode("utf-8")
-        except UnicodeEncodeError:
-            reason = "must be valid Unicode text"
-        else:
+        refusal = _path_text_refusal(value, multi=key in _slash_path_args(tool))
+        if refusal is None:
             return None
+        reason = refusal
     shown = repr(value)
     if len(shown) > 80:
         shown = shown[:80] + "…"
     message = f"tool {tool!r} arg {key!r} {reason} (got {shown})."
-    if isinstance(value, str) and "/" in value:
+    if reason == _SLASH_REASON:
         # A slash used to splice extra path segments into the REST URL and
         # mis-route (observed: model_pull with model_id='org/repo' → 405).
         message += (
@@ -1794,6 +1846,40 @@ def _path_arg_refusal(tool: str, key: str, value: Any) -> str | None:
             "as hf_repo='org/name' + hf_filename in the body."
         )
     return message
+
+
+def _path_text_refusal(value: str, *, multi: bool) -> str | None:
+    """Why the string ``value`` is not sendable, or ``None``; see :func:`_path_arg_refusal`.
+
+    ``multi`` is a ``:path`` argument: ``value`` is several ``/``-separated segments, each
+    held to the single-segment rules. Otherwise ``value`` is one segment and a ``/`` in it
+    is refused.
+    """
+    segments = value.split("/") if multi else [value]
+    one = len(segments) == 1
+    for segment in segments:
+        if not segment:
+            return "must not be empty" if one else "must not have an empty segment"
+        if segment in (".", ".."):
+            return "must not be '.' or '..'" if one else "must not have a '.' or '..' segment"
+        if "/" in segment:
+            return _SLASH_REASON
+        if any(unicodedata.category(ch) in ("Cc", "Cf") for ch in segment):
+            return "must not contain control or invisible formatting characters"
+        try:
+            segment.encode("utf-8")
+        except UnicodeEncodeError:
+            return "must be valid Unicode text"
+    return None
+
+
+def _slash_path_args(tool: str) -> frozenset[str]:
+    """The path arguments of ``tool`` whose route declares ``{name:path}``: they may hold ``/``.
+
+    Read from the live route's template, the same source :data:`_PATH_ARGS` is built from
+    (:func:`_reconstruct_slash_args`), so a tool without an installed route allows none.
+    """
+    return _SLASH_ARGS.get(tool, frozenset())
 
 
 def _split_args(tool: str, args: dict[str, Any]) -> tuple[dict[str, str], dict[str, Any]]:
@@ -1823,81 +1909,32 @@ def _arg_error(exc: KeyError | PathArgError) -> dict[str, Any]:
     return {"status": "error", "error": {"code": code, "detail": str(exc)}}
 
 
-def _format_url(base_url: str, template: str, path_args: dict[str, str]) -> str:
+def _format_url(
+    base_url: str,
+    template: str,
+    path_args: dict[str, str],
+    *,
+    slash_args: frozenset[str] = frozenset(),
+) -> str:
     """Substitute ``{name}`` placeholders in ``template`` from ``path_args``.
 
     Every value is percent-encoded as a single path segment, so ``?``, ``#``,
     ``%``, spaces, ``:`` and non-ASCII reach the server as the literal
     characters the approval card showed (the server decodes the path before
-    matching a route). Dot-only values are not encodable; :func:`_split_args`
-    has already refused them.
+    matching a route). A ``slash_args`` value (:func:`_slash_path_args`) is split
+    on ``/`` and each segment encoded on its own, joined by the ``/`` it came
+    with. Dot-only segments are not encodable; :func:`_split_args` has already
+    refused them.
     """
-    quoted = {name: quote(value, safe="") for name, value in path_args.items()}
+    quoted = {
+        name: (
+            "/".join(quote(part, safe="") for part in value.split("/"))
+            if name in slash_args
+            else quote(value, safe="")
+        )
+        for name, value in path_args.items()
+    }
     return base_url.rstrip("/") + template.format(**quoted)
-
-
-_ENCODED_SLASH = re.compile(r"%2f", re.IGNORECASE)
-
-
-def _unsafe_file_delete_arg(args: dict[str, Any]) -> str | None:
-    """Why ``comfyui_file_delete``'s args cannot go into its URL as they are, or ``None``.
-
-    :func:`_format_url` pastes path args in unquoted, then httpx collapses ``.`` and ``..``
-    segments and the server percent-decodes what is left. So the file an operator approved
-    can differ from the one deleted: ``%6Bine`` would delete ``kine``, ``junk.safetensors?x``
-    or ``...#x`` would delete ``junk.safetensors``, and ``subdir=".."`` with
-    ``relpath="models%2Fsd15"`` would call the model-remove route. The files this tool
-    removes are ones the operator added by hand and cannot re-download, so it refuses
-    whatever the route would refuse, and whatever the URL would rewrite:
-
-    * ``subdir`` must be one of :data:`~hal0.comfyui.paths.SUBDIRS`'s directory names;
-    * ``relpath`` takes no ``?`` or ``#`` and no escape but ``%2F`` / ``%2f`` (the one way to
-      name a ``/``, which :func:`_split_args` keeps out of a path arg), and none of the
-      segments between those has to be empty or start with ``.``: the rule of
-      :func:`~hal0.comfyui.inventory.delete_file`.
-
-    A missing arg is left for :func:`_split_args` to report.
-    """
-    if "subdir" in args:
-        subdir = args["subdir"]
-        if not isinstance(subdir, str):
-            return "subdir must be a string"
-        if subdir not in comfyui_paths.SUBDIRS.values():
-            names = ", ".join(sorted(set(comfyui_paths.SUBDIRS.values())))
-            return f"subdir must be one of {names} (got {subdir!r})"
-    if "relpath" in args:
-        relpath = args["relpath"]
-        if not isinstance(relpath, str):
-            return "relpath must be a string"
-        if "?" in relpath or "#" in relpath:
-            return f"relpath must not contain '?' or '#' (got {relpath!r})"
-        segments = _ENCODED_SLASH.split(relpath)
-        if any("%" in segment for segment in segments):
-            return "relpath takes only %2F, for a '/': any other '%' would change the file it names"
-        if any(not segment or segment.startswith(".") for segment in segments):
-            return (
-                "relpath must have no empty segment and none starting with '.' "
-                f"(got {relpath!r}); write each '/' as %2F"
-            )
-    return None
-
-
-# Pre-approval argument checks, by tool: each returns why the args are refused, or ``None``.
-# Run by :func:`dispatch` before a call is queued for approval and again by
-# :func:`_execute_tool` before its REST call, so the operator is never asked to approve an
-# argument that will be refused.
-_ARG_CHECKS: dict[str, Callable[[dict[str, Any]], str | None]] = {
-    "comfyui_file_delete": _unsafe_file_delete_arg,
-}
-
-
-def _invalid_arg(tool: str, args: dict[str, Any]) -> dict[str, Any] | None:
-    """The ``mcp.invalid_arg`` error envelope for ``tool``'s refused ``args``, else ``None``."""
-    check = _ARG_CHECKS.get(tool)
-    reason = check(args) if check is not None else None
-    if reason is None:
-        return None
-    return {"status": "error", "error": {"code": "mcp.invalid_arg", "detail": reason}}
 
 
 #: HTTP methods ``_call_rest`` knows how to forward, mapped to the httpx
@@ -2308,11 +2345,6 @@ async def dispatch(
         )
         return refusal
 
-    refused = _invalid_arg(tool, args)
-    if refused is not None:  # before the queue: the operator is not asked to approve it
-        _audit(client_id=client_id, tool=tool, args=args, gated=gated, outcome="invalid_arg")
-        return refused
-
     if gated:
         # Build the bound executor that runs when the owner approves.
         async def _executor(approved_args: dict[str, Any]) -> dict[str, Any]:
@@ -2392,16 +2424,12 @@ async def _execute_tool(
             }
         return {"status": "error", "error": {"code": "mcp.unmapped_tool", "tool": tool}}
 
-    refused = _invalid_arg(tool, args)
-    if refused is not None:
-        return refused
-
     method, template = _REST_MAP[tool]
     try:
         path_args, remainder = _split_args(tool, args)
     except (KeyError, PathArgError) as exc:
         return _arg_error(exc)
-    url = _format_url(base_url, template, path_args)
+    url = _format_url(base_url, template, path_args, slash_args=_slash_path_args(tool))
     payload: dict[str, Any] | None = remainder if remainder else None
     call: dict[str, Any] = {}
     if tool in _SLOT_LIFECYCLE_TIMEOUT_S:
@@ -3354,10 +3382,10 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "comfyui_file_delete": (
         "Delete one weight file under the ComfyUI models tree that no catalog model loads "
         "(gated). Args: subdir (path; a directory name from comfyui_files, e.g. checkpoints), "
-        "relpath (path; the row's relpath, with each '/' written %2F: no other %-escape, '?' or "
-        "'#' is accepted). Refused for a file a catalog model owns (409), a symlink (400), a "
-        "hidden or '..' path part (400), a name that is not a weight file (400) and a "
-        "missing file (404)."
+        "relpath (path; the row's relpath as listed, e.g. styles/a.safetensors: '/' separates "
+        "its folders, and an empty, '.' or '..' part is refused up front). Refused for a file "
+        "a catalog model owns (409), a symlink (400), a hidden or '..' path part (400), a "
+        "name that is not a weight file (400) and a missing file (404)."
     ),
     "comfyui_job_cancel": (
         "Cancel an image model's in-flight install; files already downloaded stay. "
