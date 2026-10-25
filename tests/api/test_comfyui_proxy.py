@@ -580,6 +580,18 @@ def test_arbiter_route_reports_inference_while_switching(client: TestClient) -> 
     assert client.get("/api/comfyui/arbiter").json()["mode"] == "inference"
 
 
+def test_prompt_handoff_route_holds_the_gpu_for_an_editor_prompt(client: TestClient) -> None:
+    arb = _install_arbiter(client, mode="img")
+    arb.hold_for_prompt = AsyncMock(return_value=True)
+    r = client.post("/api/comfyui/prompt-handoff")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"held": True}
+    arb.hold_for_prompt.assert_awaited_once()
+
+    arb.hold_for_prompt = AsyncMock(return_value=False)
+    assert client.post("/api/comfyui/prompt-handoff").json() == {"held": False}
+
+
 def test_status_carries_arbiter_block(client: TestClient) -> None:
     # /status folds arbiter.status() in under "arbiter" so the pane can render
     # mode/pin/switching/image jobs without a second endpoint.

@@ -81,6 +81,7 @@ _DEFAULT_PORT = 8188
 # whether to let prompts through while it is unreachable instead of refusing.
 _GATE_STATUS_URL_ENV = "HAL0_COMFYUI_STATUS_URL"
 _GATE_SWITCHOVER_URL_ENV = "HAL0_COMFYUI_SWITCHOVER_URL"
+_GATE_HANDOFF_URL_ENV = "HAL0_COMFYUI_HANDOFF_URL"
 _GATE_FAIL_OPEN_ENV = "HAL0_COMFYUI_GATE_FAIL_OPEN"
 _TRUTHY = ("1", "true", "yes", "on")
 _DEFAULT_API_PORT = 8080
@@ -380,6 +381,7 @@ def gate_env() -> dict[str, str]:
     env = {
         _GATE_STATUS_URL_ENV: f"{base}/api/comfyui/arbiter",
         _GATE_SWITCHOVER_URL_ENV: f"{base}/api/comfyui/switchover",
+        _GATE_HANDOFF_URL_ENV: f"{base}/api/comfyui/prompt-handoff",
     }
     if _api_env_setting(_GATE_FAIL_OPEN_ENV).lower() in _TRUTHY:
         env[_GATE_FAIL_OPEN_ENV] = "1"

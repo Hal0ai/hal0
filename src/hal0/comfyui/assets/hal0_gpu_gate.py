@@ -61,6 +61,10 @@ HAL0_STATUS_URL = os.environ.get(
 HAL0_SWITCHOVER_URL = os.environ.get(
     "HAL0_COMFYUI_SWITCHOVER_URL", "http://127.0.0.1:8080/api/comfyui/switchover"
 )
+#: Where the hook announces a prompt it lets through in generation mode.
+HAL0_HANDOFF_URL = os.environ.get(
+    "HAL0_COMFYUI_HANDOFF_URL", "http://127.0.0.1:8080/api/comfyui/prompt-handoff"
+)
 _STATUS_TIMEOUT_S = 2.0
 
 
@@ -219,6 +223,29 @@ def _post_switchover() -> bool:
         return False
 
 
+def _announce_prompt() -> "bool | None":
+    """Tell hal0 this prompt is about to be queued in generation mode.
+
+    hal0 then holds the GPU for it until ComfyUI's queue can show it. True:
+    held. False: the GPU is not ComfyUI's any more (a restore beat the
+    prompt) or hal0 is mid-switch; the hook re-reads the status. None: no
+    usable answer.
+    """
+    req = urllib.request.Request(
+        HAL0_HANDOFF_URL,
+        data=b"{}",
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=_STATUS_TIMEOUT_S) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+    held = data.get("held") if isinstance(data, dict) else None
+    return held if isinstance(held, bool) else None
+
+
 def _http_error_message(exc: "urllib.error.HTTPError") -> str:
     """hal0's error message from the response body, else the HTTP reason."""
     try:
@@ -245,21 +272,23 @@ def prepare_image_mode() -> None:
     ``_SWITCH_MAX_POSTS`` times in all.
 
     Returns to let the prompt through once hal0 reports generation mode with
-    no switch running (or, with ``HAL0_COMFYUI_GATE_FAIL_OPEN``, while hal0 is
-    unreachable). Otherwise raises :class:`GpuGateClosed`; see the module
-    docstring for the cases.
+    no switch running and confirms it holds the GPU for the prompt (or, with
+    ``HAL0_COMFYUI_GATE_FAIL_OPEN``, while hal0 is unreachable). Otherwise
+    raises :class:`GpuGateClosed`; see the module docstring for the cases.
     """
     started = time.monotonic()
     deadline = started + max(0.0, _SWITCH_TIMEOUT_S)
     poll_s = max(0.05, _SWITCH_POLL_S)
     answered = False  # hal0 has reported a GPU mode for this prompt
+    silent = False  # the last read, or the last announce, got no answer
     posts = 0
     polls = 0
     next_post_poll = 0
     while True:
         status = _fetch_status()
         mode = status.get("mode") if isinstance(status, dict) else None
-        if mode not in ("generation", "inference"):
+        silent = mode not in ("generation", "inference")
+        if silent:
             # No answer, or none about the GPU. Before hal0 has answered, this
             # is an unreachable hal0: retry briefly, then refuse (or, opted
             # out, let the prompt through). After it answered, hal0 may be
@@ -272,10 +301,15 @@ def prepare_image_mode() -> None:
             answered = True
             if not (_arbiter_switching(status) or _switchover_active(status)):
                 if mode == "generation":
-                    return
-                if posts >= _SWITCH_MAX_POSTS:
+                    # Announce the prompt: hal0 holds the GPU for it until
+                    # ComfyUI's queue shows it, so no restore frees it first.
+                    held = _announce_prompt()
+                    if held:
+                        return
+                    silent = held is None  # False: re-read the status
+                elif posts >= _SWITCH_MAX_POSTS:
                     raise GpuGateClosed(_inference_reason(status, posts))
-                if polls >= next_post_poll:
+                elif polls >= next_post_poll:
                     if not _post_switchover():
                         raise GpuGateClosed(
                             "hal0 reports the GPU in inference mode and refused the switch "
@@ -289,7 +323,7 @@ def prepare_image_mode() -> None:
                 if _FAIL_OPEN_WHEN_UNREACHABLE:
                     return
                 raise GpuGateClosed(_UNREACHABLE_REASON)
-            if mode not in ("generation", "inference"):
+            if silent:
                 raise GpuGateClosed(
                     "hal0 stopped answering while it switched the GPU to image "
                     "generation, so the prompt was not queued; queue it again"

@@ -1292,6 +1292,7 @@ class _EditorPrompt:
         *,
         gate_path: Path = _GATE_PATH,
         fake_mgr: FakeManager | None = None,
+        queue_after: Any = None,
     ) -> None:
         self.gate = _load_gate(gate_path)
         self.gate._SWITCH_POLL_S = 0.05
@@ -1311,6 +1312,10 @@ class _EditorPrompt:
         self.switching_when_queued: bool | None = None
         self.llm_loaded_when_queued: set[str] | None = None
         self.refused: Exception | None = None
+        # ComfyUI validates a prompt before it shows in /queue: a test can hold
+        # that step (a threading.Event) to land a restore decision inside it.
+        self.queue_after = queue_after
+        self.let_through = asyncio.Event()
 
     def _on_loop(self, fn: Any) -> Any:
         async def _call() -> Any:
@@ -1356,6 +1361,9 @@ class _EditorPrompt:
             self.llm_loaded_when_queued = self._on_loop(
                 lambda: self.fake_mgr.ready & {"chat", "agent"}
             )
+        self.loop.call_soon_threadsafe(self.let_through.set)
+        if self.queue_after is not None:
+            assert self.queue_after.wait(timeout=5)
         self.comfyui_http["queue"] = (0, 1)  # ComfyUI queued the prompt
 
     def submit(self) -> asyncio.Future[None]:
@@ -1456,6 +1464,127 @@ async def test_an_editor_prompt_during_a_switch_into_image_mode_waits_for_the_un
     assert prompt.refused is None
     assert prompt.mode_when_queued is GpuMode.IMG
     assert prompt.llm_loaded_when_queued == set()
+
+
+async def test_a_prompt_the_gate_lets_through_in_image_mode_is_held_for(
+    fake_mgr: FakeManager,
+    state_path: Path,
+    comfyui_http: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_hal0_home: str,
+) -> None:
+    """In image mode the gate lets a prompt through with no switch. Before it
+    does, it tells hal0, which holds the GPU for the hand-off: a restore
+    decision (here the one a waiting chat makes about once a second) that
+    reads /queue before ComfyUI has queued the prompt must not free it."""
+    import threading
+
+    monkeypatch.setattr(arbiter_mod, "_GATE_HANDOFF_S", 0.5)
+    _write_img_state(state_path)
+    fake_mgr.ready -= {"chat", "agent"}
+    fake_mgr.ready.add("img")
+    comfyui_http["queue"] = (0, 0)  # the previous render has finished
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    queued = threading.Event()
+    prompt = _EditorPrompt(arb, comfyui_http, fake_mgr=fake_mgr, queue_after=queued)
+
+    submitted = prompt.submit()
+    await asyncio.wait_for(prompt.let_through.wait(), timeout=5)
+    assert prompt.posts == 0  # generation mode: no switch asked for
+    # ComfyUI is still validating the prompt; /queue does not show it yet.
+    assert await arb._restore_if_quiet(honour_grace=False) is False
+    assert comfyui_http["free"] == 0 and arb.mode is GpuMode.IMG
+    queued.set()
+    await asyncio.wait_for(submitted, timeout=5)
+    assert prompt.refused is None and prompt.announces == 1
+
+
+async def test_hold_for_prompt_answers_whether_the_gpu_is_comfyuis(
+    fake_mgr: FakeManager, state_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(arbiter_mod, "_GATE_HANDOFF_S", 0.5)
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    assert await arb.hold_for_prompt() is False  # LLM mode: the gate must ask to switch
+    assert arb._handoff_remaining() == 0
+
+    _write_img_state(state_path, pinned=True)
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    assert await arb.hold_for_prompt() is True
+    assert arb._handoff_remaining() > 0.4
+
+
+async def test_a_hold_behind_a_restore_already_deciding_reports_the_gpu_gone(
+    fake_mgr: FakeManager,
+    state_path: Path,
+    comfyui_http: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_hal0_home: str,
+) -> None:
+    """A restore decision past its /queue read holds the lock and finishes
+    first; the gate's hold then answers False, so the gate switches instead of
+    letting the prompt run under the reloaded LLM set."""
+    monkeypatch.setattr(arbiter_mod, "_GATE_HANDOFF_S", 0.5)
+    _write_img_state(state_path)
+    fake_mgr.ready -= {"chat", "agent"}
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    read_started = asyncio.Event()
+    finish_read = asyncio.Event()
+
+    async def _slow_queue_read() -> tuple[int, int]:
+        read_started.set()
+        await finish_read.wait()
+        return (0, 0)
+
+    monkeypatch.setattr(arbiter_mod, "_comfyui_queue_state", _slow_queue_read)
+    decision = asyncio.create_task(arb._restore_if_quiet(honour_grace=False))
+    await asyncio.wait_for(read_started.wait(), timeout=1.0)
+    hold = asyncio.create_task(arb.hold_for_prompt())  # the gate announces now
+    await asyncio.sleep(0.01)
+    finish_read.set()
+
+    assert await asyncio.wait_for(decision, timeout=1.0) is True
+    assert await asyncio.wait_for(hold, timeout=1.0) is False
+    assert arb.mode is GpuMode.LLM
+
+
+async def test_restore_llm_when_idle_rechecks_the_queue_under_the_lock(
+    fake_mgr: FakeManager,
+    state_path: Path,
+    comfyui_http: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Omni's restore read /queue, then restored without looking again: a
+    prompt that landed in between was freed. It now ends in the same locked
+    decision as every other restore."""
+    monkeypatch.setattr(arbiter_mod, "_QUEUE_IDLE_POLL_S", 0.01)
+    _write_img_state(state_path)
+    fake_mgr.ready -= {"chat", "agent"}
+    comfyui_http["queue"] = [(0, 0), (0, 1)]  # a prompt lands right after the first read
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+
+    with pytest.raises(ArbiterQueueBusy):
+        await arb.restore_llm_when_idle(max_wait_s=0.1)
+    assert comfyui_http["free"] == 0 and arb.mode is GpuMode.IMG
+
+
+async def test_restore_llm_when_idle_waits_for_a_prompt_the_gate_announced(
+    fake_mgr: FakeManager,
+    state_path: Path,
+    comfyui_http: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(arbiter_mod, "_GATE_HANDOFF_S", 0.3)
+    monkeypatch.setattr(arbiter_mod, "_QUEUE_IDLE_POLL_S", 0.01)
+    _write_img_state(state_path)
+    fake_mgr.ready -= {"chat", "agent"}
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    assert await arb.hold_for_prompt() is True
+
+    with pytest.raises(ArbiterQueueBusy):
+        await arb.restore_llm_when_idle(max_wait_s=0.1)
+    assert comfyui_http["free"] == 0
+    await arb.restore_llm_when_idle(max_wait_s=1.0)  # the prompt never came
+    assert arb.mode is GpuMode.LLM
 
 
 async def _llm_request(arb: GpuArbiter, slot: str) -> str:

@@ -120,6 +120,7 @@ def test_comfyui_spec_points_the_gate_at_hal0_api_by_default(_api_env_unset: Non
     env = _gate_env(ComfyUIProvider().container_spec(_img_cfg(), {}))
     assert env["HAL0_COMFYUI_STATUS_URL"] == "http://127.0.0.1:8080/api/comfyui/arbiter"
     assert env["HAL0_COMFYUI_SWITCHOVER_URL"] == "http://127.0.0.1:8080/api/comfyui/switchover"
+    assert env["HAL0_COMFYUI_HANDOFF_URL"] == "http://127.0.0.1:8080/api/comfyui/prompt-handoff"
     assert "HAL0_COMFYUI_GATE_FAIL_OPEN" not in env
 
 

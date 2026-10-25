@@ -451,6 +451,32 @@ async def comfyui_arbiter(request: Request) -> dict[str, Any]:
     }
 
 
+#: How long the prompt hand-off waits for the switch lock: under the gate's 2 s
+#: request timeout, so a busy lock answers "not held" (the gate re-reads the
+#: status) instead of timing the request out.
+_HANDOFF_LOCK_WAIT_S = 1.5
+
+
+@router.post("/prompt-handoff")
+async def comfyui_prompt_handoff(request: Request) -> JSONResponse:
+    """The ``hal0_gpu_gate`` node announces an editor prompt in image mode.
+
+    Answers ``{"held": true}`` once the arbiter holds the GPU for the prompt
+    until ComfyUI's queue can show it (:meth:`GpuArbiter.hold_for_prompt`),
+    and ``{"held": false}`` when the GPU is not ComfyUI's (the gate then asks
+    for the switch) or a switch or restore holds the lock right now (the gate
+    re-reads the status).
+    """
+    arbiter = _get_arbiter(request)
+    if arbiter is None:
+        return _arbiter_unavailable()
+    try:
+        held = await asyncio.wait_for(arbiter.hold_for_prompt(), _HANDOFF_LOCK_WAIT_S)
+    except TimeoutError:
+        held = False
+    return JSONResponse(status_code=200, content={"held": bool(held)})
+
+
 async def _run_switch(arbiter: Any, mode: str, *, pin: bool = False, force: bool = False) -> None:
     """Drive the arbiter for ``mode``; record failure for /status to surface."""
     try:

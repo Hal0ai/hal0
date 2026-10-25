@@ -45,6 +45,7 @@ Volume=<data_root>/custom_nodes:/opt/ComfyUI/custom_nodes
 Volume=<data_root>/extra_model_paths.yaml:/opt/ComfyUI/extra_model_paths.yaml:ro
 Environment=HAL0_COMFYUI_STATUS_URL=http://127.0.0.1:8080/api/comfyui/arbiter
 Environment=HAL0_COMFYUI_SWITCHOVER_URL=http://127.0.0.1:8080/api/comfyui/switchover
+Environment=HAL0_COMFYUI_HANDOFF_URL=http://127.0.0.1:8080/api/comfyui/prompt-handoff
 PodmanArgs=--ipc=host
 Exec=bash -lc 'cd /opt/ComfyUI && exec python main.py --listen 127.0.0.1 --port 8188 --use-pytorch-cross-attention'
 

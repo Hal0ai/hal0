@@ -69,7 +69,8 @@ Concurrency model (single asyncio event loop):
     an editor prompt that asked for it through the gate node is still on its
     way to ComfyUI's queue, so the automatic restores (the restore loop, LLM
     demand, and omni's ``restore_llm_when_idle``) leave the GPU alone until it
-    can be seen there. ``restore_llm`` does not wait for it (a manual switch
+    can be seen there. A prompt the gate lets through in image mode with no
+    switch opens the same hand-off first (``hold_for_prompt``, under the lock). ``restore_llm`` does not wait for it (a manual switch
     to inference is the operator's call); the gate asks again if a restore
     beats its prompt.
   - An LLM request that finds image work in progress waits for it to end, in
@@ -812,10 +813,12 @@ class GpuArbiter:
         ``restore_llm`` frees ComfyUI's models and reloads the LLM set; called
         while a render is still active — another request's, or one a cancelled
         caller abandoned on the queue — it would drop that render. This waits
-        until the editor hand-off after the last switch is over, hal0 has no
-        image work in flight (an open :meth:`image_job` or a request forwarded
-        to the img slot), and ``GET /queue`` reports nothing running or
-        pending, then restores. A refused connection counts as idle
+        until the editor hand-off after the last switch (or the last prompt the
+        gate announced) is over, hal0 has no image work in flight (an open
+        :meth:`image_job` or a request forwarded to the img slot), and
+        ``GET /queue`` reports nothing running or pending, then restores
+        through the same locked decision as every automatic restore, which
+        reads the queue and the hand-off again (``force`` restores at once). A refused connection counts as idle
         (nothing listening holds no GPU memory, the same stance
         ``restore_llm`` takes for ``/free``); any other failed read is NOT
         evidence the render stopped and counts as busy. Raises
@@ -858,10 +861,31 @@ class GpuArbiter:
                     reason = f"ComfyUI queue could not be read ({exc})"
                 else:
                     if counts is None or sum(counts) == 0:
-                        break
-                    reason = (
-                        f"ComfyUI still has {counts[0]} running and {counts[1]} pending render(s)"
-                    )
+                        if force:
+                            await self.restore_llm(force=True)
+                            return
+                        # The read above was outside the lock: a prompt may have
+                        # landed since. Restore through the locked decision,
+                        # which reads the queue and the hand-off again.
+                        outcome = await self._restore_decision(honour_grace=False)
+                        if outcome in ("restored", "not_image_mode"):
+                            return
+                        if outcome == "pinned":
+                            raise ArbiterPinned(
+                                "GPU image mode is pinned; pass force=true to restore LLM slots",
+                                details={"pinned": True},
+                            )
+                        counts = None
+                        reason = (
+                            "ComfyUI queue could not be read"
+                            if outcome == "unreadable"
+                            else "image work started again before the restore"
+                        )
+                    else:
+                        reason = (
+                            f"ComfyUI still has {counts[0]} running and {counts[1]} "
+                            "pending render(s)"
+                        )
             if time.monotonic() >= deadline:
                 raise ArbiterQueueBusy(
                     f"{reason} after {max_wait_s:.0f}s; LLM mode was not restored",
@@ -871,7 +895,6 @@ class GpuArbiter:
                     },
                 )
             await asyncio.sleep(_QUEUE_IDLE_POLL_S)
-        await self.restore_llm(force=force)
 
     # ── image work and the restore decision ─────────────────────────────────
 
@@ -919,6 +942,27 @@ class GpuArbiter:
         if self._handoff_until is None:
             return 0.0
         return max(0.0, self._handoff_until - time.monotonic())
+
+    async def hold_for_prompt(self) -> bool:
+        """Hold the GPU for an editor prompt the gate is about to let through.
+
+        The ``hal0_gpu_gate`` node calls this (``POST
+        /api/comfyui/prompt-handoff``) when it finds image mode with no switch
+        running, right before ComfyUI validates and queues the prompt; until
+        then ``/queue`` cannot show it. Under the switch lock: in image mode,
+        open the editor hand-off and return True, so no restore decision frees
+        ComfyUI under the prompt (a decision already past its queue read holds
+        the lock, so it finishes first). False when the mode is not image mode
+        any more (a restore beat the prompt): the gate then asks for the
+        switch.
+        """
+        async with self._switch_lock:
+            if self.mode is not GpuMode.IMG:
+                return False
+            until = time.monotonic() + _GATE_HANDOFF_S
+            if self._handoff_until is None or self._handoff_until < until:
+                self._handoff_until = until
+            return True
 
     def _grace_passed(self) -> bool:
         return (

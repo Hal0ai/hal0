@@ -31,6 +31,9 @@ def _load_node() -> Any:
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    # hal0 confirms the hand-off for a prompt let through in generation mode,
+    # unless a test scripts the announce itself (no test reaches the network).
+    mod._announce_prompt = lambda: True
     return mod
 
 
@@ -322,6 +325,55 @@ def test_hal0_going_silent_after_the_switch_request_refuses_at_the_deadline(
     monkeypatch.setattr(mod, "_fetch_status", lambda: next(statuses, None))
     monkeypatch.setattr(mod, "_post_switchover", lambda: True)
 
+    with pytest.raises(mod.GpuGateClosed, match="stopped answering"):
+        mod.prepare_image_mode()
+
+
+def test_the_gate_announces_a_prompt_it_lets_through_in_generation_mode(monkeypatch) -> None:
+    """With no switch to ask for, the gate still tells hal0 the prompt is on its
+    way, so hal0 holds the GPU until ComfyUI's queue shows it."""
+    mod = _load_node()
+    calls: list[str] = []
+    monkeypatch.setattr(
+        mod, "_fetch_status", lambda: {"mode": "generation", "arbiter": {"switching": False}}
+    )
+    monkeypatch.setattr(mod, "_post_switchover", lambda: pytest.fail("no switch to ask for"))
+    monkeypatch.setattr(mod, "_announce_prompt", lambda: calls.append("announce") or True)
+    mod.prepare_image_mode()
+    assert calls == ["announce"]
+
+
+def test_the_gate_switches_when_hal0_has_left_image_mode_by_the_announce(monkeypatch) -> None:
+    """A restore finished just before the announce: hal0 answers it is not
+    holding the GPU, and the gate asks for the switch instead."""
+    mod = _load_node()
+    statuses = iter(
+        [
+            {"mode": "generation", "arbiter": {"switching": False}},
+            {"mode": "inference", "arbiter": {"switching": False}},
+            {"mode": "generation", "arbiter": {"switching": False}},
+        ]
+    )
+    announces = iter([False, True])
+    calls: list[str] = []
+    monkeypatch.setattr(mod, "_fetch_status", lambda: next(statuses))
+    monkeypatch.setattr(mod, "_post_switchover", lambda: calls.append("switch") or True)
+    monkeypatch.setattr(
+        mod, "_announce_prompt", lambda: calls.append("announce") or next(announces)
+    )
+    monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
+    mod.prepare_image_mode()
+    assert calls == ["announce", "switch", "announce"]
+
+
+def test_the_gate_refuses_when_hal0_never_confirms_the_hold(monkeypatch) -> None:
+    mod = _load_node()
+    monkeypatch.setattr(mod, "_SWITCH_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(mod, "_SWITCH_POLL_S", 0.05)
+    monkeypatch.setattr(
+        mod, "_fetch_status", lambda: {"mode": "generation", "arbiter": {"switching": False}}
+    )
+    monkeypatch.setattr(mod, "_announce_prompt", lambda: None)  # no answer
     with pytest.raises(mod.GpuGateClosed, match="stopped answering"):
         mod.prepare_image_mode()
 
