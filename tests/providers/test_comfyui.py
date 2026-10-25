@@ -34,6 +34,18 @@ def _pin_model_store(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HAL0_MODEL_STORE", "/mnt/ai-models")
 
 
+@pytest.fixture(autouse=True)
+def _no_data_root_provisioning(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Building a spec must not touch the literal paths these tests assert on.
+
+    ``container_spec`` provisions the data root; against ``/mnt/ai-models``
+    that would create directories and write files on any box where it is
+    writable. Provisioning itself is tested against ``tmp_path`` in
+    test_comfyui_provisioning.py.
+    """
+    monkeypatch.setattr("hal0.providers.comfyui.provision_data_root", lambda: None)
+
+
 @pytest.fixture
 def slot_cfg() -> dict[str, Any]:
     return {"port": 8186, "device": "gpu-rocm", "_paths": {}}

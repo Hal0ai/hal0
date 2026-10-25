@@ -68,6 +68,7 @@ import sys
 from pathlib import Path
 
 from hal0.config.schema import HardwareInfo
+from hal0.upstreams.huggingface import hf_token_from_env
 
 log = logging.getLogger(__name__)
 
@@ -475,7 +476,7 @@ def main(argv: list[str] | None = None) -> int:
         return check_binding(argv)
     logging.basicConfig(level=logging.WARNING, format="  %(message)s")
     override = (os.environ.get("HAL0_BRAIN_MODEL") or "").strip() or None
-    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or None
+    hf_token = hf_token_from_env()
     chosen = BRAIN_MODEL_DEFAULT
     try:
         from hal0.cli.setup_command import _build_offline_deps

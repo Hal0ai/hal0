@@ -64,10 +64,19 @@ class HFUpstreamError(Hal0Error):
     status = 502
 
 
+def hf_token_from_env() -> str | None:
+    """The Hugging Face access token in the environment, or ``None``.
+
+    ``HF_TOKEN`` wins, with ``HUGGING_FACE_HUB_TOKEN`` as the fallback. An empty value
+    counts as unset. This is the one place that reads either name.
+    """
+    return os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or None
+
+
 def _hf_headers() -> dict[str, str]:
-    """Shared request headers, forwarding ``HF_TOKEN``/``HUGGING_FACE_HUB_TOKEN`` when set."""
+    """Shared request headers, forwarding the Hugging Face token when one is set."""
     headers: dict[str, str] = {"Accept": "application/json"}
-    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    hf_token = hf_token_from_env()
     if hf_token:
         headers["Authorization"] = f"Bearer {hf_token}"
     return headers

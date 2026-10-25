@@ -71,7 +71,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import os
 import time
 from collections.abc import Coroutine
 from pathlib import Path
@@ -93,6 +92,7 @@ from hal0.registry.pull import (
     run_flm_pull,
     run_pull,
 )
+from hal0.upstreams.huggingface import hf_token_from_env
 
 
 def load_persisted(model_id: str, registry: Any | None = None) -> dict[str, Any] | None:
@@ -809,7 +809,7 @@ async def enqueue(
             data={"model_id": model_id, "hf_repo": hf_repo, "hf_file": hf_file},
         )
 
-    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    hf_token = hf_token_from_env()
     registry = request.app.state.model_registry
     # P3: route the download into the capability-grouped store layout when the
     # capability is resolvable (body → registry → curated); None → flat fallback.
@@ -887,7 +887,7 @@ async def enqueue_update(
             data={"model_id": model_id, "hf_repo": hf_repo, "hf_file": hf_file, "update": True},
         )
 
-    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    hf_token = hf_token_from_env()
     schedule_pull_task(
         request.app.state,
         model_id,

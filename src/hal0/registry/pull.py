@@ -35,6 +35,7 @@ from typing import Any, NamedTuple
 
 import httpx
 
+from hal0.comfyui import paths as comfyui_paths
 from hal0.config import paths, store
 from hal0.db import repository
 from hal0.db.connection import connect, tx
@@ -266,20 +267,18 @@ def _final_path(model_id: str, filename: str) -> Path:
 
 
 def _comfyui_models_dir(subdir: str) -> Path:
-    """ComfyUI checkpoints/loras/vae directory under the model store.
+    """ComfyUI checkpoints/loras/vae directory under ``comfyui.paths.models_root()``.
 
-    ComfyUI models live under the configurable model-store root
-    (default /mnt/ai-models) at /comfyui/models/<subdir>, aligned
-    with the slot's bind-mount path into the container. This ensures
-    ComfyUI's own CheckpointLoaderSimple / LoraLoader / etc. find
-    models when --base-directory points at the root.
+    The models root is the one the slot bind-mounts into the container, so
+    ComfyUI's own CheckpointLoaderSimple / LoraLoader / etc. find what a pull
+    writes here.
 
     The subdir name is sanitised the same way model ids are so a curated
     entry can't escape the comfyui tree by setting
     ``comfyui_subdir="../../etc/passwd"``.
     """
     cleaned = _SANITISE_RE.sub("-", subdir).strip("-.") or "checkpoints"
-    return Path(paths.model_store_root()) / "comfyui" / "models" / cleaned
+    return comfyui_paths.models_root() / cleaned
 
 
 def _final_path_for_entry(
@@ -885,6 +884,7 @@ async def _download_one(
     base_done: int,
     base_total: int,
     revision: str = "main",
+    staging_key: str | None = None,
 ) -> str:
     """Stream ONE file of a pull to ``final``; return its hex SHA-256.
 
@@ -895,6 +895,11 @@ async def _download_one(
     install. Aggregate job progress is maintained as ``base_done + <this
     file's bytes>`` so ``job.bytes_downloaded`` is monotonic across the
     file boundary of a multi-file pull.
+
+    ``staging_key`` replaces ``job.model_id`` as the model half of the staging key (and
+    nothing else). A caller whose job id is also a registry pull's model id (the image
+    installer, for ids the curated registry shares) passes its own namespace so the two
+    never share a ``.part``; left out, the key is ``job.model_id``.
 
     Staging cleanup contract (mirrors the historic single-file behaviour):
       * user cancel        → discard partial + sidecar, raise ``_PullCancelled``
@@ -925,7 +930,9 @@ async def _download_one(
     # In-process pulls are deduped by model_pull_jobs (routes/models.pull_model),
     # so the only unguarded case is two SEPARATE processes pulling the identical
     # id at once (rare — not an expected flow); resumability is worth that edge.
-    part, sidecar = _staging_paths(job.model_id, rec.hf_filename)
+    part, sidecar = _staging_paths(
+        job.model_id if staging_key is None else staging_key, rec.hf_filename
+    )
 
     hasher = hashlib.sha256()
     last_emit = time.monotonic()

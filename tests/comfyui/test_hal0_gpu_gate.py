@@ -1,10 +1,11 @@
 """hal0_gpu_gate — the ComfyUI custom node that prepares image mode before
 job submission while the iGPU is in inference (llm) mode.
 
-The node ships in ``installer/comfyui/custom_nodes/hal0_gpu_gate.py`` and is
-host-mounted into the resident ComfyUI container's ``custom_nodes`` dir, so
-the web UI stays fully usable (editor, /object_info, workflow save/load)
-while only ``POST /prompt`` triggers a best-effort arbiter handoff.
+The node ships as the package asset ``src/hal0/comfyui/assets/hal0_gpu_gate.py``
+and the provider syncs it into the host-mounted ``custom_nodes`` dir of the
+resident ComfyUI container, so the web UI stays fully usable (editor,
+/object_info, workflow save/load) while only ``POST /prompt`` triggers a
+best-effort arbiter handoff.
 
 Only the pure decision logic is unit-tested here — the aiohttp middleware /
 PromptServer wiring needs a live ComfyUI process and is exercised in the
@@ -19,11 +20,7 @@ from pathlib import Path
 from typing import Any
 
 _NODE_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "installer"
-    / "comfyui"
-    / "custom_nodes"
-    / "hal0_gpu_gate.py"
+    Path(__file__).resolve().parents[2] / "src" / "hal0" / "comfyui" / "assets" / "hal0_gpu_gate.py"
 )
 
 
@@ -42,14 +39,12 @@ def test_node_file_exists_and_imports_outside_comfyui() -> None:
     assert mod.NODE_CLASS_MAPPINGS == {}
 
 
-def test_prompt_post_in_inference_mode_prepares_but_does_not_block() -> None:
+def test_prompt_post_in_inference_mode_prepares_image_mode() -> None:
     mod = _load_node()
     status = {"mode": "inference"}
     assert mod.should_prepare_image_mode("POST", "/prompt", status) is True
     # The frontend posts to /api/prompt on recent ComfyUI versions.
     assert mod.should_prepare_image_mode("POST", "/api/prompt", status) is True
-    # The old 403 gate is gone; the middleware prepares image mode and forwards.
-    assert mod.should_block("POST", "/prompt", status) is False
 
 
 def test_allows_prompt_post_in_generation_mode() -> None:

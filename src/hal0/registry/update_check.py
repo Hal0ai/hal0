@@ -21,13 +21,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from pathlib import PurePosixPath
 from typing import Any
 
 import httpx
 
 from hal0.registry.fileset import SHARD_RE
+from hal0.upstreams.huggingface import hf_token_from_env
 
 log = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ async def fetch_remote_lfs_shas(
     sha256 the pull recorded.
     """
     headers = {"Accept": "application/json", "User-Agent": "hal0/update-check"}
-    token = hf_token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    token = hf_token or hf_token_from_env()
     if token:
         headers["Authorization"] = f"Bearer {token}"
 

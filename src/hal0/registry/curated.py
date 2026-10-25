@@ -790,12 +790,7 @@ CURATED_MODELS: list[CuratedModel] = [
         context_length=0,
         recommended_slot="img",
         tags=["image", "upscale", "esrgan"],
-        notes=(
-            "Direct download via get_esrgan.sh (installer/comfyui/scripts/). "
-            "The .pth is fetched from the GitHub release "
-            "v0.1.0 — not a standard HF safetensors pull. "
-            "Lands in ComfyUI upscale_models/ directory."
-        ),
+        notes="Lands in the ComfyUI upscale_models/ directory.",
         capability="image",
         model_class="image",
         comfyui_subdir="upscale_models",
