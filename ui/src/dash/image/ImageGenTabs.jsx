@@ -2,10 +2,10 @@
 // Engine sub-tabs.
 //
 // Which tab opens: the route's sub-tab (`#slots/image/<sub>`, `sub`) when it names one; else
-// Models when no renderable model is installed and no download runs (nothing to generate with
-// yet), else Generate. The default is chosen once, when the catalog and the jobs have answered,
-// and a later change of either does not move the viewer. A tab change rewrites the URL with
-// replaceState, so Back does not fill with tabs.
+// Models when no renderable model is installed (nothing to generate with yet, and a download that
+// is running shows on the tab's label), else Generate. The default is chosen once, when the
+// catalog has answered, and a later change of it does not move the viewer. A tab change rewrites
+// the URL with replaceState, so Back does not fill with tabs.
 //
 // All three panels stay mounted and the inactive ones are hidden. A Generate run lives for
 // minutes and leaving the tab does not end it: the panel stays to report it (`onRunChange`) and
@@ -38,14 +38,10 @@ function subFromHash() {
   return m ? validTab(m[1]) : null
 }
 
-// What opens when the URL names no tab. null while the answer is not in: the catalog decides if
-// anything is installed, and only a catalog without one waits for the jobs (a running download is
-// the other reason to open Generate).
-function defaultTab(modelsQ, jobsQ) {
+// What opens when the URL names no tab. null while the catalog has not answered.
+function defaultTab(modelsQ) {
   if (modelsQ.data === undefined && !modelsQ.isError) return null
-  if (renderableInstalled(modelsQ.data?.models ?? []).length > 0) return 'generate'
-  if (jobsQ.data === undefined && !jobsQ.isError) return null
-  return (jobsQ.data ?? []).some(isImageJobActive) ? 'generate' : 'models'
+  return renderableInstalled(modelsQ.data?.models ?? []).length > 0 ? 'generate' : 'models'
 }
 
 /**
@@ -57,7 +53,7 @@ export function ImageGenTabs({ sub }) {
   const jobsQ = useImageJobs()
   const access = useEditorAccess()
 
-  const fallback = defaultTab(modelsQ, jobsQ)
+  const fallback = defaultTab(modelsQ)
   const [tab, setTab] = useState(() => validTab(sub) ?? fallback)
   useEffect(() => {
     if (tab == null && fallback) setTab(fallback)

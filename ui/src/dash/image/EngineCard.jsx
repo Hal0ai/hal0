@@ -110,7 +110,11 @@ function UnreachableNotice({ active }) {
     <div className="ie-notice warn" data-testid="engine-unreachable">
       <b>{UNREACHABLE_HEAD}</b>
       <p>The container is running, but ComfyUI is not answering on its port.</p>
-      {logs.data === undefined ? (
+      {logs.isError ? (
+        <div className="ie-muted" data-testid="engine-unreachable-error">
+          The log could not be read{logs.error?.message ? `: ${logs.error.message}` : '.'}
+        </div>
+      ) : logs.data === undefined ? (
         <div className="ie-muted">Reading the log…</div>
       ) : lines.length === 0 ? (
         <div className="ie-muted">No log lines.</div>
@@ -165,7 +169,8 @@ export function EngineCard({ status, env, visible = true }) {
           <button type="button" className="btn ghost sm" data-testid="engine-logs" onClick={() => setLogsOpen(true)}>
             Logs
           </button>
-          {arbiter?.mode === 'img' && (
+          {/* Not mid-switch: the switch holds the arbiter's lock, and a stop sent now is refused. */}
+          {arbiter?.mode === 'img' && !arbiter.switching && (
             <button
               type="button"
               className="btn sm"

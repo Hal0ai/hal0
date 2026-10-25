@@ -27,6 +27,8 @@ const { box, calls } = vi.hoisted(() => ({
     logs: undefined as { lines: string[] } | undefined,
     logsTail: undefined as { lines: string[] } | undefined,
     logsError: undefined as Error | undefined,
+    // The 3-line read failing.
+    logsTailError: undefined as Error | undefined,
     fail: undefined as Error | undefined,
   },
   calls: [] as [string, unknown][],
@@ -52,8 +54,8 @@ vi.mock('@/api/hooks/useComfyui', async (importOriginal) => ({
     return {
       data: short ? box.logsTail : box.logs,
       isFetching: false,
-      isError: !short && !!box.logsError,
-      error: short ? null : (box.logsError ?? null),
+      isError: short ? !!box.logsTailError : !!box.logsError,
+      error: (short ? box.logsTailError : box.logsError) ?? null,
       refetch: async () => {
         calls.push(['logs-refetch', tail])
         return { data: short ? box.logsTail : box.logs }
@@ -160,10 +162,11 @@ beforeEach(() => {
   box.arbiter = envelope()
   box.models = catalog([row('sdxl-lightning'), row('qwen-image', { state: 'none' })])
   box.workflows = []
-  box.urls = { comfyui: 'http://localhost:8188' }
+  box.urls = { comfyui: 'http://localhost:8188', comfyui_public: false }
   box.logs = { lines: ['2026-10-25T10:00:00+0000 comfy start', '2026-10-25T10:00:01+0000 comfy ready'] }
   box.logsTail = { lines: [] }
   box.logsError = undefined
+  box.logsTailError = undefined
   box.fail = undefined
   calls.length = 0
   host = document.createElement('div')
@@ -174,6 +177,11 @@ afterEach(() => {
   act(() => root.unmount())
   host.remove()
   vi.restoreAllMocks()
+  // What the copy tests put on the page's globals.
+  const w = window as unknown as Record<string, unknown>
+  delete w.__hal0Toast
+  Reflect.deleteProperty(navigator, 'clipboard')
+  Reflect.deleteProperty(document, 'execCommand')
 })
 
 // ── the engine card ──────────────────────────────────────────────────────────
@@ -279,6 +287,19 @@ describe('engine states', () => {
     expect(text('engine-unreachable-log')).toBe('c\nd\ne')
   })
 
+  it('says the log could not be read when the tail fetch fails, instead of staying on Reading', async () => {
+    box.status = statusBody({ engine: 'starting', reachable: false })
+    box.logsTail = undefined
+    box.logsTailError = new Error('journal unreadable')
+    mount()
+    await flush()
+    expect(text('engine-unreachable')).toContain("ComfyUI isn't answering")
+    expect(text('engine-unreachable-error')).toContain('The log could not be read')
+    expect(text('engine-unreachable-error')).toContain('journal unreadable')
+    expect(text('engine-unreachable')).not.toContain('Reading the log')
+    expect(byId('engine-unreachable-log')).toBeNull()
+  })
+
   it('says so when the journal has nothing to show', async () => {
     box.status = statusBody({ engine: 'starting', reachable: false })
     box.logsTail = { lines: [] }
@@ -329,6 +350,19 @@ describe('engine buttons', () => {
       ['pin', { pinned: false }],
       ['switchover', { mode: 'inference' }],
     ])
+  })
+
+  it('hides Stop image mode while a switch is running', async () => {
+    box.arbiter = envelope({ mode: 'img', switching: true, phase: 'unloading' })
+    mount()
+    expect(byId('engine-stop')).toBeNull()
+    // Restart and Logs are still there.
+    expect(byId('engine-restart')).not.toBeNull()
+    expect(byId('engine-logs')).not.toBeNull()
+
+    box.arbiter = envelope({ mode: 'img', switching: false })
+    mount()
+    expect(byId('engine-stop')).not.toBeNull()
   })
 
   it('Stop image mode asks before dropping a running render, then forces', async () => {
@@ -419,7 +453,7 @@ describe('editor card', () => {
 
   it('editor button disabled off-box without proxy shows tunnel command', async () => {
     visit('hal0.local')
-    box.urls = { comfyui: 'http://hal0.local:8188' }
+    box.urls = { comfyui: 'http://hal0.local:8188', comfyui_public: false }
     box.workflows = [{ name: 'my-upscale', source: 'user' }]
     mount()
     const open = byId('editor-open')!
@@ -443,9 +477,64 @@ describe('editor card', () => {
     expect(write).toHaveBeenCalledWith('ssh -L 8188:127.0.0.1:8188 <user>@hal0.local')
   })
 
+  it('a LAN page whose /api/config/urls says nothing about a public URL is off the box', () => {
+    visit('hal0.local')
+    box.urls = { comfyui: 'http://hal0.local:8188' }
+    mount()
+    expect((byId('editor-open') as HTMLButtonElement).disabled).toBe(true)
+    expect(byId('editor-offbox')).not.toBeNull()
+  })
+
+  it('copies the tunnel command on a plain-http page, where navigator.clipboard does not exist', async () => {
+    // A dashboard served over http on a LAN is not a secure context: no async clipboard API. The
+    // command copies through the legacy path, and the toast says what happened.
+    visit('hal0.local')
+    box.urls = { comfyui: 'http://hal0.local:8188', comfyui_public: false }
+    Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true })
+    const exec = vi.fn((_command: string) => true)
+    Object.defineProperty(document, 'execCommand', { value: exec, configurable: true })
+    const toast = vi.fn()
+    ;(window as unknown as { __hal0Toast: unknown }).__hal0Toast = toast
+    let copied = ''
+    const original = document.body.appendChild.bind(document.body)
+    vi.spyOn(document.body, 'appendChild').mockImplementation(((node: Node) => {
+      if (node instanceof HTMLTextAreaElement) copied = node.value
+      return original(node)
+    }) as typeof document.body.appendChild)
+
+    mount()
+    await click(byId('editor-tunnel-copy')!)
+    expect(exec).toHaveBeenCalledWith('copy')
+    expect(copied).toBe('ssh -L 8188:127.0.0.1:8188 <user>@hal0.local')
+    expect(toast).toHaveBeenCalledWith('Command copied', 'ok')
+  })
+
+  it('says so when the command could not be copied at all', async () => {
+    visit('hal0.local')
+    box.urls = { comfyui: 'http://hal0.local:8188', comfyui_public: false }
+    Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true })
+    Object.defineProperty(document, 'execCommand', { value: () => false, configurable: true })
+    const toast = vi.fn()
+    ;(window as unknown as { __hal0Toast: unknown }).__hal0Toast = toast
+    mount()
+    await click(byId('editor-tunnel-copy')!)
+    expect(toast).toHaveBeenCalledTimes(1)
+    expect(toast.mock.calls[0][1]).toBe('err')
+    expect(String(toast.mock.calls[0][0])).toMatch(/copy it by hand/)
+  })
+
+  it('the server flag decides, not the shape of the link', () => {
+    // A link on another host is not a declared public URL unless the server says it is.
+    visit('hal0.example.com')
+    box.urls = { comfyui: 'https://comfyui.example.com', comfyui_public: false }
+    mount()
+    expect((byId('editor-open') as HTMLButtonElement).disabled).toBe(true)
+    expect(byId('editor-offbox')).not.toBeNull()
+  })
+
   it('a public URL the operator declared still opens, from any host', () => {
     visit('hal0.example.com')
-    box.urls = { comfyui: 'https://comfyui.example.com' }
+    box.urls = { comfyui: 'https://comfyui.example.com', comfyui_public: true }
     mount()
     const open = byId('editor-open') as HTMLAnchorElement
     expect(open.tagName).toBe('A')
@@ -484,6 +573,13 @@ describe('queue card', () => {
     expect(text('queue-summary')).toBe('1 running · 0 waiting')
     expect(byId('queue-progress')).toBeNull()
     expect(byId('queue-empty')).toBeNull()
+  })
+
+  it('copes with partial counts', () => {
+    box.status = statusBody({ queue: {} })
+    mount()
+    expect(text('queue-summary')).toBe('0 running · 0 waiting')
+    expect(host.textContent).not.toContain('undefined')
   })
 
   it('says what shows here when nothing is queued', () => {

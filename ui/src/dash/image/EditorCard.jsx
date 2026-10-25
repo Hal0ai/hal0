@@ -7,6 +7,7 @@
 // ComfyUI does not open a workflow from a link, so every chip opens the editor and the workflow is
 // picked in its Workflows sidebar.
 import { useComfyuiModels, useComfyuiWorkflows } from '@/api/hooks/useComfyui'
+import { copyTextToClipboard } from '@/lib/clipboard'
 import { OFF_BOX_NOTE } from './editor-reach'
 import { EDITOR_NOTE, WORKFLOW_HINT, workflowChips } from './engine-pure'
 import { useEditorAccess } from './useEditorAccess'
@@ -47,13 +48,11 @@ export function EditorCard() {
   const chips = workflowChips(models?.models, workflows)
   const url = access.onBox ? access.url : null
 
+  // The page that needs the command is off the box, often plain http on a LAN, where there is no
+  // navigator.clipboard: the shared helper falls back to execCommand and answers what happened.
   const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(access.tunnel)
-      note('Command copied', 'ok')
-    } catch {
-      note('Could not copy: select the command and copy it by hand', 'err')
-    }
+    if (await copyTextToClipboard(access.tunnel)) note('Command copied', 'ok')
+    else note('Could not copy: select the command and copy it by hand', 'err')
   }
 
   return (

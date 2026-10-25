@@ -395,20 +395,39 @@ describe('ImageStatusLine', () => {
     expect(calls).toEqual([['restart', undefined]])
   })
 
-  it('open editor opens the editor link from the config urls in a new tab', async () => {
+  it('open editor opens the declared editor URL from the config urls in a new tab', async () => {
+    box.urls = { comfyui: 'https://comfyui.box', comfyui_public: true }
     box.status = statusBody({ gate_refusal: { at: 1_700_000_000, reason: 'busy' } })
     const open = vi.fn(() => null)
     vi.stubGlobal('open', open)
     mount(<ImageStatusLine />)
     await click(button('Open editor'))
-    expect(open).toHaveBeenCalledWith('http://box:8188', '_blank', 'noopener,noreferrer')
+    expect(open).toHaveBeenCalledWith('https://comfyui.box', '_blank', 'noopener,noreferrer')
+  })
+
+  it('open editor opens the editor on a page that is on the box', async () => {
+    const happyDOM = (window as unknown as { happyDOM: { setURL: (u: string) => void } }).happyDOM
+    happyDOM.setURL('http://localhost:9120/')
+    try {
+      box.urls = { comfyui: 'http://localhost:8188', comfyui_public: false }
+      box.status = statusBody({ gate_refusal: { at: 1_700_000_000, reason: 'busy' } })
+      const open = vi.fn(() => null)
+      vi.stubGlobal('open', open)
+      mount(<ImageStatusLine />)
+      await click(button('Open editor'))
+      expect(open).toHaveBeenCalledWith('http://localhost:8188', '_blank', 'noopener,noreferrer')
+    } finally {
+      happyDOM.setURL('about:blank')
+    }
   })
 
   it('shows no Open editor button on a page that is not on the box', () => {
-    // ComfyUI listens on the box's loopback: the link hal0 derives from a LAN host does not answer.
+    // ComfyUI listens on the box's loopback: the link hal0 derives from a LAN host does not answer,
+    // and the server says it is not a declared URL (`comfyui_public` false).
     const happyDOM = (window as unknown as { happyDOM: { setURL: (u: string) => void } }).happyDOM
     happyDOM.setURL('http://box:9120/')
     try {
+      box.urls = { comfyui: 'http://box:8188', comfyui_public: false }
       box.status = statusBody({ gate_refusal: { at: 1_700_000_000, reason: 'busy' } })
       mount(<ImageStatusLine />)
       expect(button('Open editor')).toBeUndefined()

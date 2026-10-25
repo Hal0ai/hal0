@@ -21,7 +21,6 @@ const { box } = vi.hoisted(() => ({
     models: undefined as Json | undefined,
     modelsError: false,
     jobs: undefined as Json[] | undefined,
-    jobsError: false,
     access: { onBox: true, url: 'http://localhost:8188', tunnel: 'ssh -L 8188:127.0.0.1:8188 <user>@box' },
     cancel: undefined as unknown as () => void,
     mounts: { generate: 0, models: 0, engine: 0 },
@@ -33,7 +32,7 @@ const { box } = vi.hoisted(() => ({
 vi.mock('@/api/hooks/useComfyui', async (importOriginal) => ({
   ...(await importOriginal<Json>()),
   useComfyuiModels: () => ({ data: box.models, isError: box.modelsError }),
-  useImageJobs: () => ({ data: box.jobs, isError: box.jobsError }),
+  useImageJobs: () => ({ data: box.jobs }),
 }))
 vi.mock('../image/useEditorAccess', () => ({ useEditorAccess: () => box.access }))
 
@@ -165,7 +164,6 @@ beforeEach(() => {
   box.models = catalog([row('sdxl-lightning')])
   box.modelsError = false
   box.jobs = []
-  box.jobsError = false
   box.access = { onBox: true, url: 'http://localhost:8188', tunnel: 'ssh -L 8188:127.0.0.1:8188 <user>@box' }
   box.cancel = vi.fn()
   box.mounts = { generate: 0, models: 0, engine: 0 }
@@ -239,26 +237,27 @@ describe('which tab opens first', () => {
     expect(selected()).toEqual(['generate'])
   })
 
-  it('a running download with nothing installed opens Generate (the ruling: Models only when no job runs)', () => {
+  it('a running download with nothing installed still opens Models', () => {
+    // The spec: Models is the default whenever no renderable model is installed, whether or not
+    // a download runs. The tab label says one does.
     box.models = catalog([row('sdxl-lightning', { state: 'none' })])
     box.jobs = [job('sdxl-lightning', 'running')]
     mount()
-    expect(selected()).toEqual(['generate'])
-  })
-
-  it('a finished download does not count as running', () => {
-    box.models = catalog([row('sdxl-lightning', { state: 'none' })])
-    box.jobs = [job('sdxl-lightning', 'completed'), job('qwen-image', 'failed')]
-    mount()
     expect(selected()).toEqual(['models'])
+    expect(tabEl('models').textContent).toBe('Models · 1 downloading')
   })
 
-  it('falls back to the catalog alone when the jobs list cannot be read', () => {
+  it('the jobs list does not decide the default, so it does not hold it back either', () => {
     box.models = catalog([row('sdxl-lightning', { state: 'none' })])
     box.jobs = undefined
-    box.jobsError = true
     mount()
     expect(selected()).toEqual(['models'])
+    act(() => root.unmount())
+    root = createRoot(host)
+    box.models = catalog([row('sdxl-lightning')])
+    box.jobs = [job('qwen-image', 'running')]
+    mount()
+    expect(selected()).toEqual(['generate'])
   })
 
   it('the root carries comfy-page, the scope of the --comfy tokens', () => {

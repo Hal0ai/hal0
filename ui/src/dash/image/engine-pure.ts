@@ -99,11 +99,11 @@ export function gateRow(gate: ComfyuiGate | null | undefined): GateRow | null {
 
 // ── the queue and device cards ───────────────────────────────────────────────
 
+// A count the body left out reads as none: the line never says "undefined".
 export function queueSummary(queue: { running: number; pending: number }): { line: string; empty: boolean } {
-  return {
-    line: `${queue.running} running · ${queue.pending} waiting`,
-    empty: queue.running + queue.pending === 0,
-  }
+  const running = queue.running ?? 0
+  const pending = queue.pending ?? 0
+  return { line: `${running} running · ${pending} waiting`, empty: running + pending === 0 }
 }
 
 /** ComfyUI is running a prompt (hal0's or the editor's). */

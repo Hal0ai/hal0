@@ -14,11 +14,13 @@ export interface EditorAccess {
 }
 
 export function useEditorAccess(): EditorAccess {
-  const link = useConfigUrls().data?.comfyui || null
+  const urls = useConfigUrls().data
+  const link = urls?.comfyui || null
   const host = typeof window === 'undefined' ? '' : window.location.hostname
-  const onBox = isOnBox(host, link)
-  // Without a link only a loopback page is on the box (isOnBox), and it knows where its own
-  // editor is before /api/config/urls answers.
+  const onBox = isOnBox(host, urls?.comfyui_public)
+  // Before /api/config/urls answers, a page on the box still knows where its own editor is. (An
+  // off-box page gets no link until the answer says it was declared; that brief state reads as
+  // off the box.)
   const url = onBox ? (link ?? `http://${host}:${EDITOR_PORT}`) : null
   return { onBox, url, tunnel: tunnelCommand(host) }
 }

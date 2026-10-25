@@ -17,35 +17,36 @@ describe('isLoopbackHost', () => {
 })
 
 describe('isOnBox', () => {
-  it('a loopback page is on the box, whatever link the server gave', () => {
-    expect(isOnBox('localhost', 'http://localhost:8188')).toBe(true)
-    expect(isOnBox('127.0.0.1', 'http://127.0.0.1:8188')).toBe(true)
-    expect(isOnBox('[::1]', 'http://[::1]:8188')).toBe(true)
-    expect(isOnBox('localhost', null)).toBe(true)
+  it('a loopback page is on the box, whatever the server says about the link', () => {
+    expect(isOnBox('localhost', false)).toBe(true)
+    expect(isOnBox('127.0.0.1', false)).toBe(true)
+    expect(isOnBox('[::1]', false)).toBe(true)
+    expect(isOnBox('LOCALHOST', true)).toBe(true)
   })
 
-  it('a LAN page with the link hal0 derives from its own host is not on the box', () => {
+  it('a LAN page is not on the box: the link hal0 derives from its host does not answer there', () => {
     // GET /api/config/urls answers http://<request host>:8188 unless HAL0_COMFYUI_PUBLIC_URL is
-    // set, and ComfyUI binds loopback only (container.py _loopback_fence_command): the link's
-    // host is the page's host, and it does not answer from there.
-    expect(isOnBox('10.0.1.142', 'http://10.0.1.142:8188')).toBe(false)
-    expect(isOnBox('hal0.local', 'http://hal0.local:8188')).toBe(false)
-    expect(isOnBox('HAL0.local', 'http://hal0.local:8188')).toBe(false)
-    expect(isOnBox('hal0.example.com', 'http://hal0.example.com:8188/')).toBe(false)
-    expect(isOnBox('[fd00::1]', 'http://[fd00::1]:8188')).toBe(false)
+    // set, and ComfyUI binds loopback only (container.py _loopback_fence_command). The server
+    // says which it is: `comfyui_public` is false for the derived one.
+    expect(isOnBox('10.0.1.142', false)).toBe(false)
+    expect(isOnBox('hal0.local', false)).toBe(false)
+    expect(isOnBox('hal0.example.com', false)).toBe(false)
+    expect(isOnBox('[fd00::1]', false)).toBe(false)
   })
 
   it('a public URL the operator declared is reachable from where they declared it for', () => {
-    expect(isOnBox('hal0.example.com', 'https://comfyui.example.com')).toBe(true)
-    expect(isOnBox('10.0.1.142', 'http://10.0.1.142:8189')).toBe(true)
-    expect(isOnBox('hal0.example.com', 'https://hal0.example.com/comfyui')).toBe(true)
+    expect(isOnBox('hal0.example.com', true)).toBe(true)
+    expect(isOnBox('10.0.1.142', true)).toBe(true)
   })
 
-  it('no link, or one that is not a URL, is not on the box', () => {
-    expect(isOnBox('hal0.local', null)).toBe(false)
+  it('a server that does not say (an older hal0, a body without the flag) is not on the box', () => {
     expect(isOnBox('hal0.local', undefined)).toBe(false)
-    expect(isOnBox('hal0.local', '')).toBe(false)
-    expect(isOnBox('hal0.local', 'not a url')).toBe(false)
+    expect(isOnBox('hal0.local', null)).toBe(false)
+  })
+
+  it('only a literal true declares a URL', () => {
+    expect(isOnBox('hal0.local', 'true' as unknown as boolean)).toBe(false)
+    expect(isOnBox('hal0.local', 1 as unknown as boolean)).toBe(false)
   })
 })
 

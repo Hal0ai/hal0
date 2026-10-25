@@ -32,7 +32,7 @@ export function QueueCard({ status }) {
                 </span>
               ) : null}
               {progress.node ? <span className="ie-dim">{progress.node}</span> : null}
-              <span className="ie-dim mono">{clockLabel(progress.elapsed_s)}</span>
+              <span className="ie-dim">{clockLabel(progress.elapsed_s)}</span>
             </div>
             {pct != null && (
               <div

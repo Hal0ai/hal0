@@ -5,11 +5,12 @@
 // that links to the editor asks this one question: the Engine tab's editor card, the Models tab's
 // "Open in ComfyUI", the status line's "Open editor" and the Services page.
 //
-// `GET /api/config/urls` (`comfyui`) is `http://<the host the dashboard was reached on>:8188`
-// unless the operator declared HAL0_COMFYUI_PUBLIC_URL (a reverse proxy in front of the editor).
-// So the link's host is the page's host on a stock install, and says nothing about whether the
-// port answers from where the page is. It answers on the box and, for a public URL the operator
-// declared, wherever they declared it for.
+// `GET /api/config/urls` answers `comfyui`, the editor link, and `comfyui_public`. The link is
+// `http://<the host the dashboard was reached on>:8188` unless the operator declared
+// HAL0_COMFYUI_PUBLIC_URL (a reverse proxy in front of the editor); the flag is true only for
+// that declared URL. The derived link says nothing about whether the port answers from where the
+// page is, so the flag, not the link, is what tells the two apart. A declared URL answers wherever
+// the operator declared it for.
 
 /** ComfyUI's port, on the box's loopback. */
 export const EDITOR_PORT = 8188
@@ -27,29 +28,16 @@ export function isLoopbackHost(hostname: string): boolean {
 }
 
 /**
- * Whether the editor link `editorUrl` (`/api/config/urls` `comfyui`) works from a page served at
- * `pageHostname`.
+ * Whether the ComfyUI editor can be opened from a page served at `pageHostname`.
+ * `comfyuiPublic` is `/api/config/urls` `comfyui_public`.
  *
  * - A loopback page is on the box.
- * - A link that is not the one hal0 derives from the page's own host (`http://<page host>:8188`)
- *   was declared by the operator, as a public URL, and is reachable from where it was declared.
- * - The derived link is not reachable from any other machine; no link is nothing to open.
+ * - A public URL the operator declared is reachable from where it was declared.
+ * - Anything else is not: the link hal0 derives from the page's own host does not answer from
+ *   another machine. A server that does not send the flag (an older hal0) counts as not declared.
  */
-export function isOnBox(pageHostname: string, editorUrl: string | null | undefined): boolean {
-  if (isLoopbackHost(pageHostname)) return true
-  if (!editorUrl) return false
-  let link: URL
-  try {
-    link = new URL(editorUrl)
-  } catch {
-    return false
-  }
-  const derived =
-    link.protocol === 'http:' &&
-    bare(link.hostname) === bare(pageHostname) &&
-    link.port === String(EDITOR_PORT) &&
-    (link.pathname === '/' || link.pathname === '')
-  return !derived
+export function isOnBox(pageHostname: string, comfyuiPublic: boolean | null | undefined): boolean {
+  return isLoopbackHost(pageHostname) || comfyuiPublic === true
 }
 
 /** The command that forwards the editor's port to this machine. `<user>` is the operator's. */

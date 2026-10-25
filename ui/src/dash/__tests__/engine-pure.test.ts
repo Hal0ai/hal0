@@ -126,4 +126,11 @@ describe('queueSummary', () => {
     expect(queueSummary({ running: 1, pending: 2 })).toEqual({ line: '1 running · 2 waiting', empty: false })
     expect(queueSummary({ running: 0, pending: 0 })).toEqual({ line: '0 running · 0 waiting', empty: true })
   })
+
+  it('reads a count the body left out as none, never as "undefined"', () => {
+    const partial = (q: object) => queueSummary(q as { running: number; pending: number })
+    expect(partial({})).toEqual({ line: '0 running · 0 waiting', empty: true })
+    expect(partial({ running: 1 })).toEqual({ line: '1 running · 0 waiting', empty: false })
+    expect(partial({ pending: 2 })).toEqual({ line: '0 running · 2 waiting', empty: false })
+  })
 })

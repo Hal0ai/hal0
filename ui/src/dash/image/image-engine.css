@@ -8,7 +8,7 @@
  */
 .ie {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
   gap: 16px;
   align-items: start;
   min-width: 0;
@@ -35,7 +35,6 @@
 .ie-actions { display: inline-flex; flex-wrap: wrap; gap: 8px; }
 .ie-muted { margin: 0; font-family: var(--jbm); font-size: 11.5px; line-height: 1.5; color: var(--fg-4); }
 .ie-dim { color: var(--fg-4); }
-.mono { font-family: var(--jbm); }
 
 /* The state pill: the engine's own state, in the pane's colours. */
 .ie-pill {
