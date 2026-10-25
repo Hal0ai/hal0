@@ -182,6 +182,53 @@ def test_comfyui_spec_passes_the_gate_fail_open_switch_through(
     assert "Environment=HAL0_COMFYUI_GATE_FAIL_OPEN=1" in _render_from_spec("img", spec)
 
 
+def test_comfyui_spec_mounts_the_gates_credential_read_only() -> None:
+    """The gate's token (#3058) reaches the container as a read-only directory
+    mount, never as an environment value the unit file would carry."""
+    from hal0.comfyui import gate_credential
+
+    spec = ComfyUIProvider().container_spec(_img_cfg(), {})
+
+    token = gate_credential.read_token()
+    assert token is not None
+    gate_mounts = [m for m in spec.mounts if m.source == str(gate_credential.token_dir())]
+    assert len(gate_mounts) == 1
+    assert gate_mounts[0].target == "/opt/hal0-gate"
+    assert gate_mounts[0].read_only is True
+    assert _gate_env(spec)["HAL0_COMFYUI_GATE_TOKEN_FILE"] == "/opt/hal0-gate/token"
+    unit = _render_from_spec("img", spec)
+    assert token not in unit
+    assert token not in repr(spec.env)
+
+
+def test_comfyui_spec_keeps_the_gates_token_across_renders() -> None:
+    from hal0.comfyui import gate_credential
+
+    ComfyUIProvider().container_spec(_img_cfg(), {})
+    first = gate_credential.read_token()
+    ComfyUIProvider().container_spec(_img_cfg(), {})
+
+    assert gate_credential.read_token() == first
+
+
+def test_comfyui_spec_without_a_writable_credential_still_launches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A token that cannot be written leaves the gate without a credential (as
+    before #3058), not the img slot without a container."""
+    from hal0.comfyui import gate_credential
+
+    def _unwritable() -> str:
+        raise PermissionError("read-only state root")
+
+    monkeypatch.setattr(gate_credential, "ensure_token", _unwritable)
+
+    spec = ComfyUIProvider().container_spec(_img_cfg(), {})
+
+    assert all(m.target != "/opt/hal0-gate" for m in spec.mounts)
+    assert "HAL0_COMFYUI_GATE_TOKEN_FILE" not in spec.env
+
+
 def test_comfyui_argv_uses_opt_comfyui_workdir() -> None:
     spec = ComfyUIProvider().container_spec(_img_cfg(), {})
     assert spec.command[:2] == ["bash", "-lc"]

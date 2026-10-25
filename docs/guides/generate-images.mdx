@@ -218,13 +218,13 @@ carries the reason, when:
 - the switch has not finished after 180 seconds;
 - hal0 is unreachable, or does not say which mode holds the GPU, for 5
   seconds after the prompt is submitted;
-- hal0 answers 401 or 403, at once: it requires authentication, and the gate
-  has no credential (see the limitation below).
+- hal0 answers 401 or 403, at once: the gate's credential is missing or no
+  longer current (see below).
 
 Queue the prompt again once the reason is gone.
 
-To let prompts through while `hal0-api` is down or requires authentication,
-as the gate did in v1.6.5, set `HAL0_COMFYUI_GATE_FAIL_OPEN=1` in
+To let prompts through while `hal0-api` is down or refuses the gate's
+credential, as the gate did in v1.6.5, set `HAL0_COMFYUI_GATE_FAIL_OPEN=1` in
 `/etc/hal0/api.env`, restart `hal0-api`, then run `hal0 slot restart img`.
 hal0 writes the setting into the slot's unit when it loads the slot, so a bare
 `systemctl restart` of the unit does not pick it up. The setting covers only
@@ -232,19 +232,15 @@ those two cases: a prompt that hal0 answered and refused stays refused. A
 prompt it lets through is unguarded: with `hal0-api` down the GPU most likely
 still holds the LLM slots, so it renders next to them.
 
-<Aside type="caution" title="Known limitation: auth enforcement stops image generation">
-With auth enforcement on (`hal0 auth require on` or `HAL0_REQUIRE_AUTH=1`, see
-[Authentication](/docs/operate/auth)), `hal0-api` refuses unauthenticated
-requests from loopback too. A box whose `HAL0_BIND_HOST` is a specific address
-and that has an admin key refuses them as well, even with enforcement off: the
-gate then dials that address, so its requests are not from loopback and the
-rule for ADMIN routes on a LAN-bound box applies. The GPU gate has no
-credential for either yet (a gate credential is planned for 1.7). The gate then refuses every image prompt
-at once: the editor's, hal0's own `/v1` renders, Open WebUI's and the omni
-loop's. To keep generating images on such a box, set
-`HAL0_COMFYUI_GATE_FAIL_OPEN=1` as above; the gate then lets prompts through
-unguarded, as v1.6.5 did.
-</Aside>
+With auth enforcement on (`hal0 auth require on` or `HAL0_REQUIRE_AUTH=1`),
+or on a box whose `HAL0_BIND_HOST` is a specific address and that has an
+admin key, the gate authenticates with a token of its own, never the admin
+key. hal0 mints it when the `img` slot first starts and mounts it read-only
+into the container; it opens the gate's three requests and nothing else (see
+[ComfyUI's GPU gate credential](/docs/operate/auth#comfyuis-gpu-gate-credential)).
+An `img` container started before the update has no token, so on such a box it
+refuses every image prompt (the editor's, hal0's own `/v1` renders, Open
+WebUI's and the omni loop's) until you run `hal0 slot restart img`.
 
 **After updating hal0, run `hal0 slot restart img` once.** A running `img`
 container keeps the gate it started with, and `hal0 update` does not restart

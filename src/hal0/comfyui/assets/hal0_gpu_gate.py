@@ -14,7 +14,14 @@ host-mounted ``custom_nodes`` dir (``hal0.comfyui.paths.custom_nodes_dir()``)
 the first time it builds the container spec after hal0-api starts, replacing a
 stale copy — no image rebuild. ComfyUI imports it at startup; ``_install()`` appends an aiohttp
 middleware to the PromptServer app (the same mechanism ComfyUI-Login uses).
-The container runs with host networking, so hal0-api is on loopback.
+The container runs with host networking, so hal0-api is on loopback (or on
+the one address it binds).
+
+hal0-api's gate routes are ADMIN routes. The gate presents a token of its own
+(``HAL0_COMFYUI_GATE_TOKEN_FILE``, a file in a directory the img slot mounts
+read-only, read on every request), which hal0-api admits on the gate's three
+requests and nothing else, so a box that enforces auth keeps its guard. It
+never holds the admin key.
 
 hal0 reports ``arbiter.switching`` while it restores the LLM set or enters
 image mode; the hook waits it out, so a prompt never renders under LLM weights
@@ -36,8 +43,9 @@ answering the prompt with a 503 that carries hal0's reason, when:
   - hal0 is unreachable (or reports no GPU mode) for ``_UNREACHABLE_RETRY_S``
     from the first read: with hal0-api down the GPU most likely holds the LLM
     set, which is its resting state;
-  - hal0 answers 401 or 403 (``hal0 auth require on`` gates loopback too, and
-    the gate has no credential yet), at once, with its own reason.
+  - hal0 answers 401 or 403 (the gate's credential is missing or stale: a
+    container started before hal0 minted it, or one whose token hal0 no longer
+    holds), at once, with its own reason.
 
 ``HAL0_COMFYUI_GATE_FAIL_OPEN=1`` in the container's environment lets prompts
 through in the last two cases only, as v1.6.5 did (the img slot passes it on
@@ -58,6 +66,7 @@ exercised by a live check on a test box.
 import http.client
 import json
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -76,6 +85,12 @@ HAL0_SWITCHOVER_URL = os.environ.get(
 HAL0_HANDOFF_URL = os.environ.get(
     "HAL0_COMFYUI_HANDOFF_URL", "http://127.0.0.1:8080/api/comfyui/prompt-handoff"
 )
+#: The gate's own credential (#3058): a file in a directory the img slot mounts
+#: read-only. hal0-api admits this token on the gate's three requests and
+#: nothing else. Read on every request, so a replaced token needs no restart;
+#: unset or unusable, the gate sends no credential, as before.
+HAL0_GATE_TOKEN_FILE = os.environ.get("HAL0_COMFYUI_GATE_TOKEN_FILE", "")
+_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{43}")
 
 
 def _legacy_status_url(url: str) -> str:
@@ -155,10 +170,15 @@ _AUTH_CODES = (401, 403)
 
 
 def _auth_reason(code: int) -> str:
+    who = (
+        "hal0 did not accept ComfyUI's GPU gate credential"
+        if _read_token()
+        else "hal0 requires authentication and ComfyUI's GPU gate has no credential"
+    )
     return (
-        f"hal0 requires authentication (HTTP {code}) and ComfyUI's GPU gate has no "
-        "credential for it yet, so the prompt was not queued. Set "
-        "HAL0_COMFYUI_GATE_FAIL_OPEN=1 to let prompts through unguarded, as v1.6.5 did"
+        f"{who} (HTTP {code}), so the prompt was not queued. Run `hal0 slot restart img` "
+        "to give the gate its current credential, or set HAL0_COMFYUI_GATE_FAIL_OPEN=1 "
+        "to let prompts through unguarded, as v1.6.5 did"
     )
 
 
@@ -237,6 +257,52 @@ def _switchover_active(status: "dict | None") -> bool:
 _READ_ERRORS = (urllib.error.URLError, OSError, ValueError, http.client.HTTPException)
 
 
+def _read_token() -> "str | None":
+    """The gate's token, or None when there is no usable one."""
+    if not HAL0_GATE_TOKEN_FILE:
+        return None
+    try:
+        with open(HAL0_GATE_TOKEN_FILE, encoding="ascii") as fh:
+            token = fh.read(256).strip()
+    except (OSError, ValueError):
+        return None
+    return token if _TOKEN_RE.fullmatch(token) else None
+
+
+def _hal0_request(url: str, body: "bytes | None" = None) -> urllib.request.Request:
+    """A request to hal0-api carrying the gate's token, a POST when *body* is set.
+
+    The token is an unredirected header: urllib copies ``headers`` to a
+    redirect's URL, never ``unredirected_hdrs``.
+    """
+    if body is None:
+        req = urllib.request.Request(url)
+    else:
+        req = urllib.request.Request(
+            url, data=body, headers={"Content-Type": "application/json"}, method="POST"
+        )
+    token = _read_token()
+    if token:
+        req.add_unredirected_header("Authorization", f"Bearer {token}")
+    return req
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """hal0-api's gate routes never redirect: a 3xx is answered as an HTTP error."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+#: hal0-api is reached directly: no proxy from the container's environment
+#: (the token would cross it), no redirects.
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+
+
+def _urlopen(req: urllib.request.Request, timeout: float):
+    return _OPENER.open(req, timeout=timeout)
+
+
 def _fetch_status() -> "dict | None":
     """Blocking status fetch via urllib (run in a thread by the middleware).
 
@@ -266,7 +332,7 @@ def _read_status(url: str) -> "dict | None":
     403, the two answers the hook treats as their own cases.
     """
     try:
-        with urllib.request.urlopen(url, timeout=_STATUS_TIMEOUT_S) as resp:
+        with _urlopen(_hal0_request(url), timeout=_STATUS_TIMEOUT_S) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         return data if isinstance(data, dict) else None
     except urllib.error.HTTPError as exc:
@@ -292,14 +358,9 @@ def _post_switchover() -> bool:
     """
     _last_post_error.reason = None
     body = json.dumps({"mode": "generation"}).encode("utf-8")
-    req = urllib.request.Request(
-        HAL0_SWITCHOVER_URL,
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+    req = _hal0_request(HAL0_SWITCHOVER_URL, body)
     try:
-        with urllib.request.urlopen(req, timeout=_STATUS_TIMEOUT_S) as resp:
+        with _urlopen(req, timeout=_STATUS_TIMEOUT_S) as resp:
             if resp.status in (200, 202):
                 return True
             _last_post_error.reason = f"HTTP {resp.status}"
@@ -327,14 +388,9 @@ def _announce_prompt() -> "bool | None":
     this prompt counts as held, as the 1.6.x gate would let it through; the
     next prompt is announced again.
     """
-    req = urllib.request.Request(
-        HAL0_HANDOFF_URL,
-        data=b"{}",
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+    req = _hal0_request(HAL0_HANDOFF_URL, b"{}")
     try:
-        with urllib.request.urlopen(req, timeout=_STATUS_TIMEOUT_S) as resp:
+        with _urlopen(req, timeout=_STATUS_TIMEOUT_S) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         if exc.code in _AUTH_CODES:

@@ -390,7 +390,7 @@ def test_an_http_protocol_error_is_a_failed_read_not_a_crash(monkeypatch) -> Non
     def _broken(*_args, **_kwargs):
         raise http.client.IncompleteRead(b"")
 
-    monkeypatch.setattr(mod.urllib.request, "urlopen", _broken)
+    monkeypatch.setattr(mod, "_urlopen", _broken)
     assert mod._fetch_status() is None
     assert mod._post_switchover() is False
     assert "IncompleteRead" in mod._post_error()
@@ -406,7 +406,7 @@ def test_a_bad_switch_answer_refuses_the_prompt_with_a_reason(monkeypatch) -> No
         raise http.client.BadStatusLine("garbage")
 
     monkeypatch.setattr(mod, "_fetch_status", lambda: {"mode": "inference"})
-    monkeypatch.setattr(mod.urllib.request, "urlopen", _bad_status_line)
+    monkeypatch.setattr(mod, "_urlopen", _bad_status_line)
     with pytest.raises(mod.GpuGateClosed, match="refused the switch"):
         mod.prepare_image_mode()
 
@@ -435,7 +435,7 @@ def test_hal0_requiring_authentication_refuses_at_once_with_its_own_reason(
     monkeypatch.delenv("HAL0_COMFYUI_GATE_FAIL_OPEN", raising=False)
     mod = _load_node()
     calls: list[str] = []
-    monkeypatch.setattr(mod.urllib.request, "urlopen", _auth_refused(mod, code, calls))
+    monkeypatch.setattr(mod, "_urlopen", _auth_refused(mod, code, calls))
     monkeypatch.setattr(mod.time, "sleep", lambda _seconds: pytest.fail("no retry loop"))
 
     with pytest.raises(mod.GpuGateClosed, match="requires authentication") as exc:
@@ -451,7 +451,7 @@ def test_a_switch_request_refused_for_authentication_names_it(monkeypatch, code:
     mod = _load_node()
     calls: list[str] = []
     monkeypatch.setattr(mod, "_fetch_status", lambda: {"mode": "inference"})
-    monkeypatch.setattr(mod.urllib.request, "urlopen", _auth_refused(mod, code, calls))
+    monkeypatch.setattr(mod, "_urlopen", _auth_refused(mod, code, calls))
     with pytest.raises(mod.GpuGateClosed, match="requires authentication"):
         mod.prepare_image_mode()
     assert calls == [mod.HAL0_SWITCHOVER_URL]
@@ -465,7 +465,7 @@ def test_the_fail_open_switch_restores_the_old_pass_through_when_auth_is_require
     monkeypatch.setenv("HAL0_COMFYUI_GATE_FAIL_OPEN", "1")
     mod = _load_node()
     calls: list[str] = []
-    monkeypatch.setattr(mod.urllib.request, "urlopen", _auth_refused(mod, code, calls))
+    monkeypatch.setattr(mod, "_urlopen", _auth_refused(mod, code, calls))
     monkeypatch.setattr(mod.time, "sleep", lambda _seconds: pytest.fail("no retry loop"))
     mod.prepare_image_mode()  # returns: the prompt goes through
     assert len(calls) == 1
@@ -482,6 +482,11 @@ class _FakeHal0:
     def __init__(self, answers: dict[str, list[Any]]) -> None:
         self.answers = answers
         self.calls: list[str] = []
+        # The Authorization header each request carried, and the copy a
+        # redirect would forward (urllib copies ``headers``, never
+        # ``unredirected_hdrs``).
+        self.auth: list[str | None] = []
+        self.redirected_auth: list[str | None] = []
 
     def __call__(self, req: Any, *_args: Any, **_kwargs: Any) -> Any:
         import io
@@ -489,6 +494,10 @@ class _FakeHal0:
 
         url = req if isinstance(req, str) else req.full_url
         self.calls.append(url.split("/api/comfyui/")[-1])
+        self.auth.append(None if isinstance(req, str) else req.get_header("Authorization"))
+        self.redirected_auth.append(
+            None if isinstance(req, str) else req.headers.get("Authorization")
+        )
         for suffix, queue in self.answers.items():
             if url.endswith(suffix):
                 answer = queue.pop(0) if len(queue) > 1 else queue[0]
@@ -530,7 +539,7 @@ _LEGACY_INFERENCE = {
 def _real_gate(monkeypatch, hal0: _FakeHal0) -> Any:
     monkeypatch.delenv("HAL0_COMFYUI_GATE_FAIL_OPEN", raising=False)
     mod = _load_node(stub_announce=False)
-    monkeypatch.setattr(mod.urllib.request, "urlopen", hal0)
+    monkeypatch.setattr(mod, "_urlopen", hal0)
     monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(mod, "_SWITCH_TIMEOUT_S", 0.5)  # a wrong turn fails fast
     return mod
@@ -644,7 +653,7 @@ def test_the_fail_open_switch_covers_a_switch_request_refused_for_authentication
     monkeypatch.setenv("HAL0_COMFYUI_GATE_FAIL_OPEN", "1")
     hal0 = _FakeHal0({"/arbiter": [{"mode": "inference"}], "/switchover": [code]})
     mod = _load_node(stub_announce=False)
-    monkeypatch.setattr(mod.urllib.request, "urlopen", hal0)
+    monkeypatch.setattr(mod, "_urlopen", hal0)
     mod.prepare_image_mode()  # returns: unguarded, as v1.6.5 did
     assert hal0.calls == ["arbiter", "switchover"]
 
@@ -719,8 +728,122 @@ def test_a_rejected_switch_request_carries_hal0s_reason(monkeypatch) -> None:
         raise urllib.error.HTTPError(mod.HAL0_SWITCHOVER_URL, 500, "Server Error", {}, body)
 
     monkeypatch.setattr(mod, "_fetch_status", lambda: {"mode": "inference"})
-    monkeypatch.setattr(mod.urllib.request, "urlopen", _rejected)
+    monkeypatch.setattr(mod, "_urlopen", _rejected)
 
     with pytest.raises(mod.GpuGateClosed, match="HTTP 500") as exc:
         mod.prepare_image_mode()
     assert "2 render job(s) queued" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# The gate's own credential (#3058)
+
+_TOKEN = "T" * 40 + "a_-"
+
+
+def _with_token_file(monkeypatch, tmp_path, content: str | None = _TOKEN + "\n") -> None:
+    path = tmp_path / "token"
+    if content is not None:
+        path.write_text(content)
+    monkeypatch.setenv("HAL0_COMFYUI_GATE_TOKEN_FILE", str(path))
+
+
+def test_the_gate_sends_its_token_on_each_of_its_requests(monkeypatch, tmp_path) -> None:
+    _with_token_file(monkeypatch, tmp_path)
+    hal0 = _FakeHal0(
+        {
+            "/arbiter": [_LEGACY_INFERENCE, _LEGACY_GENERATION],
+            "/switchover": [{"status": "switching"}],
+            "/prompt-handoff": [{"held": True}],
+        }
+    )
+    mod = _real_gate(monkeypatch, hal0)
+
+    mod.prepare_image_mode()
+
+    assert hal0.calls == ["arbiter", "switchover", "arbiter", "prompt-handoff"]
+    assert hal0.auth == [f"Bearer {_TOKEN}"] * 4
+    # Unredirected: a redirect never carries the token to another URL.
+    assert hal0.redirected_auth == [None] * 4
+
+
+def test_the_gate_reads_its_token_on_every_request(monkeypatch, tmp_path) -> None:
+    """A replaced token reaches a running ComfyUI without a restart."""
+    _with_token_file(monkeypatch, tmp_path)
+    hal0 = _FakeHal0({"/arbiter": [_LEGACY_GENERATION], "/prompt-handoff": [{"held": True}]})
+    mod = _real_gate(monkeypatch, hal0)
+    mod.prepare_image_mode()
+    (tmp_path / "token").write_text("N" * 43 + "\n")
+
+    mod.prepare_image_mode()
+
+    assert hal0.auth[-1] == "Bearer " + "N" * 43
+
+
+@pytest.mark.parametrize(
+    "content",
+    [None, "", "short", _TOKEN + "\r\nX-Evil: 1", "bad token with spaces and more chars!!"],
+)
+def test_without_a_usable_token_the_gate_sends_no_credential(
+    monkeypatch, tmp_path, content: str | None
+) -> None:
+    _with_token_file(monkeypatch, tmp_path, content)
+    hal0 = _FakeHal0({"/arbiter": [_LEGACY_GENERATION], "/prompt-handoff": [{"held": True}]})
+    mod = _real_gate(monkeypatch, hal0)
+
+    mod.prepare_image_mode()
+
+    assert hal0.auth == [None, None]
+
+
+def test_the_gate_sends_no_credential_without_a_token_file_setting(monkeypatch) -> None:
+    monkeypatch.delenv("HAL0_COMFYUI_GATE_TOKEN_FILE", raising=False)
+    hal0 = _FakeHal0({"/arbiter": [_LEGACY_GENERATION], "/prompt-handoff": [{"held": True}]})
+    mod = _real_gate(monkeypatch, hal0)
+
+    mod.prepare_image_mode()
+
+    assert hal0.auth == [None, None]
+
+
+@pytest.mark.parametrize("has_token", [True, False])
+def test_an_auth_refusal_says_how_to_give_the_gate_its_credential(
+    monkeypatch, tmp_path, has_token: bool
+) -> None:
+    _with_token_file(monkeypatch, tmp_path, _TOKEN if has_token else None)
+    hal0 = _FakeHal0({"/arbiter": [401]})
+    mod = _real_gate(monkeypatch, hal0)
+
+    with pytest.raises(mod.GpuGateClosed) as excinfo:
+        mod.prepare_image_mode()
+
+    reason = str(excinfo.value)
+    assert "HTTP 401" in reason
+    assert "hal0 slot restart img" in reason
+    assert "HAL0_COMFYUI_GATE_FAIL_OPEN=1" in reason
+    assert _TOKEN not in reason
+    assert ("did not accept" in reason) is has_token
+
+
+def test_the_gates_requests_ignore_proxies_and_redirects(monkeypatch) -> None:
+    """The token goes to hal0-api only: never through a proxy from the
+    container's environment, never to a URL a redirect names."""
+    import urllib.request
+
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid:3128")
+    mod = _load_node()
+
+    def _proxied(opener: Any) -> bool:
+        return any(
+            isinstance(h, urllib.request.ProxyHandler) and h.proxies for h in opener.handlers
+        )
+
+    assert _proxied(urllib.request.build_opener())  # the default opener would use it
+    assert not _proxied(mod._OPENER)
+    redirects = [
+        h for h in mod._OPENER.handlers if isinstance(h, urllib.request.HTTPRedirectHandler)
+    ]
+    assert redirects
+    req = urllib.request.Request("http://127.0.0.1:8080/api/comfyui/arbiter")
+    for handler in redirects:
+        assert handler.redirect_request(req, None, 302, "Found", {}, "http://x.invalid/") is None

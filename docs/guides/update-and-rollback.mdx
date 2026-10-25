@@ -284,11 +284,12 @@ The first `hal0 update` to 1.6.0 changes how Hermes is installed. One step is ne
   through when `hal0-api` is unreachable and after its own 120 seconds, and
   such a prompt can render next to the LLM slots. See
   [ComfyUI's editor and the GPU gate](/docs/guides/generate-images#comfyuis-editor-and-the-gpu-gate).
-- **With auth enforcement on, image generation stops until you opt out.** The
-  new gate has no credential for an auth-enforced `hal0-api` yet, so with
-  `hal0 auth require on` it refuses every image prompt. Set
-  `HAL0_COMFYUI_GATE_FAIL_OPEN=1` in `/etc/hal0/api.env`, restart `hal0-api`,
-  then run `hal0 slot restart img` to keep the v1.6.5 behaviour, unguarded.
+- **With auth enforcement on, the same restart gives the gate its
+  credential.** The new gate authenticates with a token of its own, which hal0
+  mounts into the container when `img` starts. Until you run `hal0 slot
+  restart img`, a box with `hal0 auth require on` (or a specific
+  `HAL0_BIND_HOST` and an admin key) refuses every image prompt. See
+  [ComfyUI's GPU gate credential](/docs/operate/auth#comfyuis-gpu-gate-credential).
 
 ## Upgrading from an older release
 
@@ -412,11 +413,12 @@ Rolling back from 1.7.0 to 1.6.x needs no step for image generation: the
 `/api/comfyui/status` when `/api/comfyui/arbiter` is missing, and waits for
 and asks for image mode as the 1.6.x gate did while that hal0 answers. Unlike
 the 1.6.x gate, it still refuses a prompt when hal0 is silent or slow to
-answer, where 1.6.x let it through. One exception: once `img` restarts under
-1.6.x, the gate refuses image prompts on a box whose `hal0-api` does not answer
-on `127.0.0.1:8080` (another port, or `HAL0_BIND_HOST` set to a specific
-address) or that enforces auth, because 1.6.x's unit no longer passes the gate
-hal0's address or `HAL0_COMFYUI_GATE_FAIL_OPEN`.
+answer, where 1.6.x let it through. Two exceptions. On a box that enforces auth, the
+gate refuses image prompts, because 1.6.x does not know the gate's token. And
+once `img` restarts under 1.6.x, the gate refuses image prompts on a box whose
+`hal0-api` does not answer on `127.0.0.1:8080` (another port, or
+`HAL0_BIND_HOST` set to a specific address), because 1.6.x's unit no longer
+passes the gate hal0's address or `HAL0_COMFYUI_GATE_FAIL_OPEN`.
 
 ### Rolling back past the profile-centric conversion
 

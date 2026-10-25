@@ -99,20 +99,35 @@ To go back to open access: `hal0 auth require off`. On a box bound past
 loopback that still has an admin key, this does not re-open ADMIN-class
 routes to off-box callers — see the next section.
 
-<Aside type="caution" title="Known limitation: image generation with enforcement on">
-With enforcement on, ComfyUI's GPU gate node is refused too: it calls
-`/api/comfyui/*` from loopback with no credential, and a gate credential is
-planned for 1.7. The same happens with enforcement off on a box whose
-`HAL0_BIND_HOST` is a specific address and that has an admin key: the gate
-then calls that address, not loopback, so the ADMIN rule in the next section
-applies to it. Until then every image prompt is refused at once, including
-`/v1/images/generations` and Open WebUI's images, with a message that says
-hal0 requires authentication. To keep generating images, set
-`HAL0_COMFYUI_GATE_FAIL_OPEN=1` in `/etc/hal0/api.env`, restart `hal0-api`,
-then run `hal0 slot restart img`: the gate then lets prompts through
-unguarded, as it did in v1.6.5. See
+### ComfyUI's GPU gate credential
+
+ComfyUI's GPU gate node calls three ADMIN routes before every image prompt,
+so with enforcement on it needs a credential. So does a box with enforcement
+off whose `HAL0_BIND_HOST` is a specific address and that has an admin key:
+the gate then calls that address, not loopback, and the ADMIN rule in the next
+section applies to it. The gate never holds the admin key. hal0 mints it a
+token of its own:
+
+- **Where it lives.** `/var/lib/hal0/comfyui-gate/token`, mode `0600` in a
+  `0700` directory, both owned by the service user. hal0 writes it the first
+  time the `img` slot starts and mounts the directory read-only into the
+  ComfyUI container. The token is never in the unit file or the container's
+  environment.
+- **What it opens.** Only the gate's three requests: `GET
+  /api/comfyui/arbiter`, `POST /api/comfyui/prompt-handoff`, and `POST
+  /api/comfyui/switchover` asking for image mode without `force` or `pin`
+  (anything else on that route gets `403 auth.forbidden`). It opens no other
+  route, no WebSocket and no stream.
+- **When the gate has none.** A container started before the token existed,
+  such as one still running from before the update, sends no credential, and
+  the gate refuses every image prompt at once with a message that says so.
+  Run `hal0 slot restart img`.
+- **Replacing it.** Delete the token file, then run `hal0 slot restart img`;
+  hal0 mints a new one.
+
+`HAL0_COMFYUI_GATE_FAIL_OPEN=1` still lets prompts through unguarded, as in
+v1.6.5, when hal0 refuses the gate. See
 [ComfyUI's editor and the GPU gate](/docs/guides/generate-images#comfyuis-editor-and-the-gpu-gate).
-</Aside>
 
 ## ADMIN routes on a LAN-bound box
 

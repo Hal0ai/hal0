@@ -54,7 +54,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from hal0.api._redact import redact_log_line
-from hal0.api.middleware.error_codes import Conflict, NotFound, UnprocessableEntity
+from hal0.api.auth import GATE_SCOPE_KEY
+from hal0.api.middleware.error_codes import Conflict, Forbidden, NotFound, UnprocessableEntity
 from hal0.api.routes.power import _probe_power
 from hal0.capabilities.catalog import COMFYUI_NO_ENGINE_REASON, comfyui_backends
 from hal0.comfyui import install as comfyui_install
@@ -622,10 +623,18 @@ async def comfyui_switchover(
     The endpoint is always available when the SlotManager/GpuArbiter is wired:
     ComfyUI prompt submission can call it as the implicit handoff before
     enqueueing a render.
+
+    A request the ComfyUI GPU gate's own token admitted (#3058) may only ask
+    for generation, without ``force`` or ``pin``: 403 otherwise.
     """
     if body is None:
         body = SwitchoverBody()
     mode = body.mode
+    if request.scope.get(GATE_SCOPE_KEY) and (mode != "generation" or body.force or body.pin):
+        raise Forbidden(
+            "ComfyUI's GPU gate may only ask for image mode, without force or pin",
+            code="auth.forbidden",
+        )
     if mode not in _MODES:
         raise UnprocessableEntity(
             "body must be {'mode': 'generation' | 'inference'}",
