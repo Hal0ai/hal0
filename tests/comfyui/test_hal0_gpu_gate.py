@@ -16,6 +16,7 @@ CT105 live verification. The module MUST import cleanly outside ComfyUI
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 from typing import Any
 
@@ -468,6 +469,134 @@ def test_the_fail_open_switch_restores_the_old_pass_through_when_auth_is_require
     monkeypatch.setattr(mod.time, "sleep", lambda _seconds: pytest.fail("no retry loop"))
     mod.prepare_image_mode()  # returns: the prompt goes through
     assert len(calls) == 1
+
+
+class _FakeHal0:
+    """A urlopen stand-in answering by path, the way hal0-api does.
+
+    ``answers`` maps a path suffix to a list of answers consumed one per call
+    (the last one sticks): a dict is a 200 JSON body, an int an HTTP error
+    with that status, an exception instance is raised.
+    """
+
+    def __init__(self, answers: dict[str, list[Any]]) -> None:
+        self.answers = answers
+        self.calls: list[str] = []
+
+    def __call__(self, req: Any, *_args: Any, **_kwargs: Any) -> Any:
+        import io
+        import urllib.error
+
+        url = req if isinstance(req, str) else req.full_url
+        self.calls.append(url.split("/api/comfyui/")[-1])
+        for suffix, queue in self.answers.items():
+            if url.endswith(suffix):
+                answer = queue.pop(0) if len(queue) > 1 else queue[0]
+                break
+        else:
+            raise AssertionError(f"unexpected request to {url}")
+        if isinstance(answer, BaseException):
+            raise answer
+        if isinstance(answer, int):
+            raise urllib.error.HTTPError(url, answer, "error", {}, io.BytesIO(b"{}"))
+
+        class _Resp:
+            status = 200
+
+            def read(self) -> bytes:
+                return json.dumps(answer).encode("utf-8")
+
+            def __enter__(self) -> Any:
+                return self
+
+            def __exit__(self, *_exc: Any) -> None:
+                return None
+
+        return _Resp()
+
+
+_LEGACY_GENERATION = {
+    "mode": "generation",
+    "arbiter": {"mode": "img", "pinned": False, "saved_llm_slots": []},
+    "switchover": {"active": False, "target": None, "error": None},
+}
+_LEGACY_INFERENCE = {
+    "mode": "inference",
+    "arbiter": {"mode": "llm", "pinned": False, "saved_llm_slots": []},
+    "switchover": {"active": False, "target": None, "error": None},
+}
+
+
+def _real_gate(monkeypatch, hal0: _FakeHal0) -> Any:
+    monkeypatch.delenv("HAL0_COMFYUI_GATE_FAIL_OPEN", raising=False)
+    mod = _load_node(stub_announce=False)
+    monkeypatch.setattr(mod.urllib.request, "urlopen", hal0)
+    monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(mod, "_SWITCH_TIMEOUT_S", 0.5)  # a wrong turn fails fast
+    return mod
+
+
+def test_after_a_rollback_the_gate_reads_the_older_hal0s_status_route(monkeypatch) -> None:
+    """An older hal0 (1.6.x) has neither /arbiter nor /prompt-handoff: the gate
+    reads /status, as the 1.6.x gate did, and counts the prompt as held."""
+    hal0 = _FakeHal0({"/arbiter": [404], "/status": [_LEGACY_GENERATION], "/prompt-handoff": [404]})
+    mod = _real_gate(monkeypatch, hal0)
+
+    mod.prepare_image_mode()  # returns: the prompt goes through
+    assert hal0.calls == ["arbiter", "status", "prompt-handoff"]
+
+    hal0.calls.clear()
+    mod.prepare_image_mode()  # the older hal0 is remembered: no second probe
+    assert hal0.calls == ["status"]
+
+
+def test_an_older_hal0_in_inference_mode_still_gets_its_switch(monkeypatch) -> None:
+    hal0 = _FakeHal0(
+        {
+            "/arbiter": [404],
+            "/status": [_LEGACY_INFERENCE, _LEGACY_GENERATION],
+            "/switchover": [{"status": "switching", "mode": "generation"}],
+            "/prompt-handoff": [404],
+        }
+    )
+    mod = _real_gate(monkeypatch, hal0)
+    mod.prepare_image_mode()
+    assert hal0.calls == ["arbiter", "status", "switchover", "status", "prompt-handoff"]
+
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_an_older_hal0_that_requires_authentication_is_still_refused(
+    monkeypatch, code: int
+) -> None:
+    hal0 = _FakeHal0({"/arbiter": [404], "/status": [code]})
+    mod = _real_gate(monkeypatch, hal0)
+    with pytest.raises(mod.GpuGateClosed, match="requires authentication"):
+        mod.prepare_image_mode()
+
+
+def test_an_unreachable_hal0_is_not_mistaken_for_an_older_one(monkeypatch) -> None:
+    """Only a 404 means "older hal0"; a refused connection stays unreachable."""
+    import urllib.error
+
+    refused = urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
+    hal0 = _FakeHal0({"/arbiter": [refused]})
+    mod = _real_gate(monkeypatch, hal0)
+    monkeypatch.setattr(mod, "_UNREACHABLE_RETRY_S", 0.0)
+    with pytest.raises(mod.GpuGateClosed, match="unreachable"):
+        mod.prepare_image_mode()
+    assert set(hal0.calls) == {"arbiter"}
+
+
+def test_a_current_hal0_without_the_hand_off_route_counts_the_prompt_held(monkeypatch) -> None:
+    hal0 = _FakeHal0(
+        {
+            "/arbiter": [{"mode": "generation", "arbiter": {"switching": False}}],
+            "/prompt-handoff": [404],
+        }
+    )
+    mod = _real_gate(monkeypatch, hal0)
+    mod.prepare_image_mode()
+    assert hal0.calls == ["arbiter", "prompt-handoff"]
 
 
 def test_the_gate_reads_hal0s_cheap_arbiter_status_by_default(monkeypatch) -> None:

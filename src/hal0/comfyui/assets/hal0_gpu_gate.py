@@ -43,6 +43,12 @@ answering the prompt with a 503 that carries hal0's reason, when:
 through in the last two cases only, as v1.6.5 did (the img slot passes it on
 from hal0-api's environment).
 
+After a rollback to an older hal0 (1.6.x), which has no ``/api/comfyui/arbiter``
+or ``/api/comfyui/prompt-handoff``, the hook reads ``/api/comfyui/status``
+instead and lets a prompt in generation mode through without the hand-off, as
+the 1.6.x gate did. It learns that from the first 404 and keeps it for the
+life of the process.
+
 The decision logic (``prepare_image_mode``) is
 unit-tested in the hal0 repo (tests/comfyui/test_hal0_gpu_gate.py, and against
 the real arbiter in tests/slots/test_gpu_arbiter.py); the aiohttp wiring is
@@ -70,6 +76,25 @@ HAL0_SWITCHOVER_URL = os.environ.get(
 HAL0_HANDOFF_URL = os.environ.get(
     "HAL0_COMFYUI_HANDOFF_URL", "http://127.0.0.1:8080/api/comfyui/prompt-handoff"
 )
+
+
+def _legacy_status_url(url: str) -> str:
+    """The full ``/status`` route next to the ``/arbiter`` one *url* names."""
+    if url.endswith("/arbiter"):
+        return url[: -len("/arbiter")] + "/status"
+    return url
+
+
+#: An older hal0 (1.6.x, after a rollback) has neither ``/arbiter`` nor
+#: ``/prompt-handoff``. The hook then reads ``/status`` the way the 1.6.x gate
+#: did (its top-level ``mode``) and counts an announced prompt as held, since
+#: that hal0 has no hand-off. A 404 is the only answer that means "older hal0";
+#: everything else keeps its own meaning (unreachable, auth, refused).
+HAL0_LEGACY_STATUS_URL = _legacy_status_url(HAL0_STATUS_URL)
+
+#: What this gate process has learned about its hal0: set on the first 404
+#: and kept for the life of the process (ComfyUI loads the gate once).
+_legacy = {"status": False, "handoff": False}
 _STATUS_TIMEOUT_S = 2.0
 
 
@@ -108,6 +133,10 @@ _SWITCH_MAX_POSTS = 3
 
 class GpuGateClosed(Exception):
     """hal0 did not hand the GPU to ComfyUI: the prompt must not run."""
+
+
+class _NotFound(Exception):
+    """hal0-api answered 404: a route this gate expects is missing (an older hal0)."""
 
 
 class _AuthRequired(Exception):
@@ -209,16 +238,37 @@ _READ_ERRORS = (urllib.error.URLError, OSError, ValueError, http.client.HTTPExce
 def _fetch_status() -> "dict | None":
     """Blocking status fetch via urllib (run in a thread by the middleware).
 
+    Reads hal0's arbiter-only ``/arbiter`` route, or, once it has answered 404
+    (an older hal0), the full ``/status`` route for the rest of the process.
     stdlib-only on purpose: custom nodes can't assume extra deps in the
     ComfyUI venv.
     """
+    if not _legacy["status"]:
+        try:
+            return _read_status(HAL0_STATUS_URL)
+        except _NotFound:
+            _legacy["status"] = True
     try:
-        with urllib.request.urlopen(HAL0_STATUS_URL, timeout=_STATUS_TIMEOUT_S) as resp:
+        return _read_status(HAL0_LEGACY_STATUS_URL)
+    except _NotFound:
+        return None
+
+
+def _read_status(url: str) -> "dict | None":
+    """One status read: the JSON object, or None for any failed exchange.
+
+    Raises :class:`_NotFound` on a 404 and :class:`_AuthRequired` on a 401 or
+    403, the two answers the hook treats as their own cases.
+    """
+    try:
+        with urllib.request.urlopen(url, timeout=_STATUS_TIMEOUT_S) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         return data if isinstance(data, dict) else None
     except urllib.error.HTTPError as exc:
         if exc.code in _AUTH_CODES:
             raise _AuthRequired(exc.code) from exc
+        if exc.code == 404:
+            raise _NotFound(url) from exc
         return None
     except _READ_ERRORS:
         return None
@@ -268,8 +318,11 @@ def _announce_prompt() -> "bool | None":
     hal0 then holds the GPU for it until ComfyUI's queue can show it. True:
     held. False: the GPU is not ComfyUI's any more (a restore beat the
     prompt) or hal0 is mid-switch; the hook re-reads the status. None: no
-    usable answer.
+    usable answer. An older hal0 without the route (404) has no hand-off, so
+    the prompt counts as held, as the 1.6.x gate would let it through.
     """
+    if _legacy["handoff"]:
+        return True
     req = urllib.request.Request(
         HAL0_HANDOFF_URL,
         data=b"{}",
@@ -282,6 +335,9 @@ def _announce_prompt() -> "bool | None":
     except urllib.error.HTTPError as exc:
         if exc.code in _AUTH_CODES:
             raise _AuthRequired(exc.code) from exc
+        if exc.code == 404:
+            _legacy["handoff"] = True
+            return True
         return None
     except _READ_ERRORS:
         return None
