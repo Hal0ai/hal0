@@ -31,6 +31,14 @@ export function kindLabel(kind: string): string {
   return words ? words.charAt(0).toUpperCase() + words.slice(1) : kind
 }
 
+// How many files a GET /api/comfyui/files body lists, for the Models → Image tab
+// count. Anything that is not a `{files: [...]}` body (the request failed or is still
+// pending, or a proxy answered `{}`) counts as none: a label must not take the page
+// down with it.
+export function imageFileCount(data: { files?: unknown } | null | undefined): number {
+  return Array.isArray(data?.files) ? data.files.length : 0
+}
+
 export interface FileGroup {
   kind: string
   label: string

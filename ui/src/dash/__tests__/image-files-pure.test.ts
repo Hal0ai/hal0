@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { ComfyuiFile } from '@/api/hooks/useComfyui'
 
-import { groupFilesByKind, kindLabel } from '../image/image-files-pure'
+import { groupFilesByKind, imageFileCount, kindLabel } from '../image/image-files-pure'
 
 function file(kind: string, relpath: string, extra: Partial<ComfyuiFile> = {}): ComfyuiFile {
   return { kind, subdir: kind, relpath, size_bytes: 1, models: [], ...extra }
@@ -71,5 +71,25 @@ describe('kindLabel', () => {
   it('falls back to a readable name for a directory the catalog does not know', () => {
     expect(kindLabel('style_models')).toBe('Style models')
     expect(kindLabel('controlnet')).toBe('Controlnet')
+  })
+})
+
+describe('imageFileCount', () => {
+  it('counts the files a listing carries', () => {
+    expect(imageFileCount({ files: [file('vae', 'a.safetensors'), file('lora', 'b.safetensors')] })).toBe(2)
+    expect(imageFileCount({ files: [] })).toBe(0)
+  })
+
+  // The Models page renders this count on every visit, so a request that has not
+  // answered, failed, or came back as `{}` (a catch-all or an older proxy) must read
+  // as none instead of throwing and blanking the page.
+  it.each([
+    ['pending or failed', undefined],
+    ['null', null],
+    ['an empty object', {}],
+    ['files null', { files: null }],
+    ['files an object', { files: {} }],
+  ])('reads %s as none', (_label, body) => {
+    expect(imageFileCount(body as { files?: unknown } | null | undefined)).toBe(0)
   })
 })

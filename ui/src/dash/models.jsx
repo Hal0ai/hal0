@@ -15,6 +15,7 @@ import { useMetaEnums } from '@/api/hooks/useMeta'
 import { isUpstreamModel } from '@/lib/normalizeApiModel'
 import { useComfyuiFiles } from '@/api/hooks/useComfyui'
 import { ImageFilesTab } from '@/dash/image/ImageFilesTab.jsx'
+import { imageFileCount } from '@/dash/image/image-files-pure'
 import { draftVariantLabel, isDrafterModel } from '@/dash/spec-state.js'
 import { MODEL_SORT_FIELDS, sortModels, fmtAdded, isMtpModel, isMoeModel } from '@/dash/model-sort.js'
 
@@ -184,8 +185,10 @@ function ModelsView({ modelParam = null }) {
   // Image: ComfyUI weight files are not registry rows — the tab is the file
   // inventory (ImageFilesTab). react-query serves the same query from cache, so
   // the tab count below costs no second request.
+  // The count is a label, not worth the page: a failed, still-pending or malformed
+  // listing (a body with no `files`) reads as 0 here, and the tab shows the failure.
   const imageFiles = useComfyuiFiles();
-  const imageTotal = imageFiles.data?.files.length ?? 0;
+  const imageTotal = imageFileCount(imageFiles.data);
 
   // ── Pagination logic ────────────────────────────────────────────────
   const activeRows = tab === "inference" ? inferenceRows : upstreamRows;
