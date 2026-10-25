@@ -482,8 +482,8 @@ def test_switchover_arbiter_error_recorded(
 
 
 def test_pin_endpoint_toggles(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    # Plain set_pin passthrough that reflects the new value back.
-    arb = _install_arbiter(client)
+    # Plain set_pin passthrough that reflects the new value back (image mode).
+    arb = _install_arbiter(client, mode="img")
     r = client.post("/api/comfyui/pin", json={"pinned": True})
     assert r.status_code == 200
     assert r.json() == {"pinned": True}
@@ -493,6 +493,20 @@ def test_pin_endpoint_toggles(client: TestClient, monkeypatch: pytest.MonkeyPatc
     assert r.status_code == 200
     assert r.json() == {"pinned": False}
     arb.set_pin.assert_called_with(False)
+
+
+def test_pin_in_llm_mode_is_refused_rather_than_reported_as_held(client: TestClient) -> None:
+    """The next switch into image mode takes its pin from its own request, so a
+    pin set in LLM mode would never hold: answer 409 instead of pinned:true."""
+    arb = _install_arbiter(client, mode="llm")
+    r = client.post("/api/comfyui/pin", json={"pinned": True})
+    assert r.status_code == 409, r.text
+    assert r.json()["error"]["code"] == "comfyui.not_image_mode"
+    arb.set_pin.assert_not_called()
+
+    r = client.post("/api/comfyui/pin", json={"pinned": False})  # unpinning is always fine
+    assert r.status_code == 200 and r.json() == {"pinned": False}
+    arb.set_pin.assert_called_once_with(False)
 
 
 def test_pin_endpoint_rejects_non_bool_body(

@@ -1505,7 +1505,7 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
             },
             "pin": {
                 "type": "boolean",
-                "description": "Pin generation mode so idle auto-restore-to-inference won't fire",
+                "description": "Hold generation mode until unpinned (without it, image mode ends about 10 s after the last render)",
             },
         },
         "required": ["mode"],
@@ -1514,7 +1514,7 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
         "properties": {
             "pinned": {
                 "type": "boolean",
-                "description": "true blocks idle auto-restore off generation mode",
+                "description": "true holds generation mode until unpinned (refused in inference mode)",
             },
         },
         "required": ["pinned"],
@@ -3368,7 +3368,10 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Flip the iGPU between LLM inference and ComfyUI generation via the GPU arbiter (gated). "
         "Args: mode='generation'|'inference', optional force, pin."
     ),
-    "comfyui_pin": "Toggle the arbiter's manual pin (blocks idle auto-restore off generation mode) (gated).",
+    "comfyui_pin": (
+        "Toggle the arbiter's manual pin, which holds generation mode until unpinned "
+        "(gated; pinning is refused in inference mode)."
+    ),
     "comfyui_model_install": (
         "Download an image model's missing weight files in the background (gated). "
         "Args: model_id (path). Follow progress with comfyui_jobs."

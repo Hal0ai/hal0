@@ -604,7 +604,10 @@ async def comfyui_pin(request: Request, body: SetPinnedBody | None = None) -> JS
     """Toggle the arbiter's manual pin.
 
     Body: ``{"pinned": bool}``. A pin holds image mode until unpinned or a
-    forced switch to inference.
+    forced switch to inference. Pinning needs image mode: the next switch into
+    image mode takes its pin from its own request (``switchover`` with
+    ``pin``), so a pin set in LLM mode would never hold and is refused with
+    409 ``comfyui.not_image_mode``. Unpinning always succeeds.
     """
     pinned = body.pinned if body is not None else None
     if not isinstance(pinned, bool):
@@ -615,6 +618,16 @@ async def comfyui_pin(request: Request, body: SetPinnedBody | None = None) -> JS
     arbiter = _get_arbiter(request)
     if arbiter is None:
         return _arbiter_unavailable()
+    if pinned:
+        arbiter_st = _arbiter_status(arbiter)
+        if arbiter_st is None:
+            return _arbiter_unavailable()
+        if arbiter_st.get("mode") != "img":
+            raise Conflict(
+                "image mode is not active, so there is nothing to pin; switch with "
+                "{'mode': 'generation', 'pin': true} to enter image mode pinned",
+                code="comfyui.not_image_mode",
+            )
     arbiter.set_pin(pinned)
     return JSONResponse(status_code=200, content={"pinned": pinned})
 
