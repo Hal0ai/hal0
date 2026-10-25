@@ -1,21 +1,11 @@
 // What the status line component draws besides its headline and detail: the step chips of a
 // switch and of a reload, the render's progress figures, and the note on a paused slot card.
 // Pure, so the rules are tested without rendering (__tests__/status-line-parts-pure.test.ts).
-// The copy that has a fixed wording (the headlines, the wait line) is status-line-pure.ts's.
+// The copy that has a fixed wording (the headlines, the wait line) is status-line-pure.ts's, and
+// so is the line's `kind`, which says which of these parts a line gets.
 
 import type { ArbiterState, ComfyuiProgress } from '@/api/hooks/useComfyui'
-import { HEAD_RELOADING, HEAD_RENDERING, HEAD_SWITCHING, slotIsBack, waitLine } from './status-line-pure'
-
-// Which kind of work a headline announces, for the parts that hang off it. Read off the headline
-// because the headline is the one place that has already decided (precedence and all).
-export type LineKind = 'switching' | 'rendering' | 'reloading' | 'other'
-
-export function lineKind(head: string): LineKind {
-  if (head === HEAD_SWITCHING) return 'switching'
-  if (head.startsWith(HEAD_RENDERING)) return 'rendering'
-  if (head.startsWith(HEAD_RELOADING)) return 'reloading'
-  return 'other'
-}
+import { slotIsBack, waitLine } from './status-line-pure'
 
 export type StepState = 'done' | 'active' | 'todo'
 

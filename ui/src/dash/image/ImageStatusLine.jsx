@@ -16,8 +16,8 @@ import { useSlots } from '@/api/hooks/useSlots'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
 import { ConfirmDialog } from '@/dash/primitives.jsx'
 import { actionFacts, statusLine } from './status-line-pure'
-import { clockLabel, lineKind, reloadSteps, renderPct, switchSteps } from './status-line-parts-pure'
-import { useStatusLineActions } from './useStatusLineActions'
+import { clockLabel, reloadSteps, renderPct, switchSteps } from './status-line-parts-pure'
+import { useDismissedRefusalAt, useStatusLineActions } from './useStatusLineActions'
 
 const LABEL = {
   hold: 'Hold image mode',
@@ -113,7 +113,7 @@ export function ImageStatusLine({ ownRun = false, onCancelOwnRun }) {
   const engineAvailable = useComfyuiModels().data?.engine?.available
   const slots = useSlots().data
   const editorUrl = useConfigUrls().data?.comfyui
-  const actions = useStatusLineActions()
+  const dismissedAt = useDismissedRefusalAt()
 
   const env = arbiterQ.data
   const status = statusQ.data
@@ -123,14 +123,17 @@ export function ImageStatusLine({ ownRun = false, onCancelOwnRun }) {
   const nowS = Date.now() / 1000
   const view = statusLine(env, status, memory, {
     slots,
-    dismissedAt: actions.dismissedAt,
+    dismissedAt,
     now: nowS,
     engineAvailable,
     ownRun,
   })
+  // A failed action's message goes when the line's state changes (the kind), not when its text
+  // does: the headline counts seconds and steps.
+  const actions = useStatusLineActions({ resetKey: view?.kind ?? null })
   if (!view) return null
 
-  const kind = lineKind(view.head)
+  const { kind } = view
   const progress = status?.progress ?? null
   // `elapsed_s` is as of the last poll; carry it on from there.
   const elapsedS = progress

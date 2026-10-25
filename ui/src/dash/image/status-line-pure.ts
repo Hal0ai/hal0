@@ -36,7 +36,24 @@ export type StatusAction =
   | 'dismiss'
   | 'restart_engine'
 
+// The state the line is in. It is the same for the whole of a state, whatever the headline's
+// text does inside it (a countdown, a step counter, the time of a refusal): consumers key on it,
+// never on the copy. A pinned box that is working has the kind of its work, not `pinned`.
+export type StatusLineKind =
+  | 'blocked' // the GPU gate has no credential
+  | 'switching'
+  | 'handoff'
+  | 'rendering'
+  | 'reloading'
+  | 'refused' // the gate refused a prompt
+  | 'stale' // the engine runs an older gate
+  | 'pinned' // image mode held, idle
+  | 'grace'
+  | 'img_on' // image mode with no phase and no pin
+  | 'chat'
+
 export interface StatusLineView {
+  kind: StatusLineKind
   tone: StatusTone
   head: string
   // Plain text for a text node. A gate refusal's reason is cleaned by the server but is still
@@ -286,6 +303,7 @@ function workLine(
   // "inference" through it, so it is a switch even with no phase.
   if ((phase && SWITCH_PHASES.has(phase)) || (arbiter.switching && phase == null)) {
     return {
+      kind: 'switching',
       tone: 'img',
       head: HEAD_SWITCHING,
       detail: joinDetail(switchingDetail(arbiter), waiting),
@@ -301,6 +319,7 @@ function workLine(
     (phase === 'grace' || phase === 'handoff' || phase == null)
   if (phase === 'rendering' || queueRender) {
     return {
+      kind: 'rendering',
       tone: 'img',
       head: renderingHead(status),
       detail: joinDetail(
@@ -313,6 +332,7 @@ function workLine(
 
   if (phase === 'handoff') {
     return {
+      kind: 'handoff',
       tone: 'img',
       head: HEAD_HANDOFF,
       detail: joinDetail('A ComfyUI editor prompt is taking the GPU.', waiting),
@@ -322,6 +342,7 @@ function workLine(
 
   if (phase === 'reloading') {
     return {
+      kind: 'reloading',
       tone: 'img',
       head: reloadingHead(arbiter, opts),
       detail: joinDetail('Chat comes back as each slot loads.', waiting),
@@ -353,7 +374,7 @@ export function statusLine(
 
   const gate = status?.gate?.state
   if (gate === 'no_credential') {
-    return { tone: 'err', head: HEAD_NO_CREDENTIAL, detail: DETAIL_NO_CREDENTIAL, actions: [] }
+    return { kind: 'blocked', tone: 'err', head: HEAD_NO_CREDENTIAL, detail: DETAIL_NO_CREDENTIAL, actions: [] }
   }
 
   const arbiter = env?.arbiter ?? null
@@ -370,6 +391,7 @@ export function statusLine(
     // Not "editor prompt": hal0 also records refusals from /v1 and from switch requests, and
     // the record has no source.
     return {
+      kind: 'refused',
       tone: 'warn',
       head: `GPU gate refused a prompt · ${clock(refusal.at)}`,
       detail: refusal.reason,
@@ -379,6 +401,7 @@ export function statusLine(
 
   if (gate === 'stale') {
     return {
+      kind: 'stale',
       tone: 'warn',
       head: HEAD_STALE,
       detail: 'Restart the engine to load the current gate.',
@@ -391,6 +414,7 @@ export function statusLine(
 
   if (pinned) {
     return {
+      kind: 'pinned',
       tone: 'pin',
       head: HEAD_PINNED,
       detail: joinDetail(
@@ -405,6 +429,7 @@ export function statusLine(
   if (arbiter.phase === 'grace') {
     const left = Math.max(0, Math.ceil((arbiter.restore_at ?? opts.now) - opts.now))
     return {
+      kind: 'grace',
       tone: 'img',
       head: `Image mode ends in ${left} s`,
       detail: joinDetail(pausedNote(arbiter, false, 'The paused GPU slots reload when it ends.'), waiting),
@@ -417,6 +442,7 @@ export function statusLine(
   // nothing (the server ignores the pin when image mode is already on).
   if (arbiter.mode === 'img') {
     return {
+      kind: 'img_on',
       tone: 'img',
       head: 'Image mode is on',
       detail: joinDetail(
@@ -428,6 +454,7 @@ export function statusLine(
   }
 
   return {
+    kind: 'chat',
     tone: 'ok',
     head: HEAD_CHAT,
     detail: costLine(arbiter.unload_set, memory, arbiter).join(' '),

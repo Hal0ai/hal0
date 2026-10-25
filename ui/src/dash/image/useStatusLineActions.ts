@@ -18,7 +18,7 @@
 // `<ForceStopConfirm confirm={confirm} />` (ImageStatusLine.jsx) draws it. Whoever calls
 // `run('stop', ...)` mounts one.
 
-import { useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   useComfyuiPin,
@@ -54,17 +54,22 @@ export interface ForceConfirm {
 // data throw, and the line must render (and dismiss for the session) without it.
 const DISMISS_KEY = 'hal0.imageGen.gateRefusalDismissedAt'
 
+// What this tab dismissed while storage would not take the write. Read alongside the stored
+// value: storage can read fine and still refuse a write (quota, a locked-down profile).
 let sessionDismissedAt: number | null = null
 const listeners = new Set<() => void>()
 
 function readDismissedAt(): number | null {
+  let stored: number | null = null
   try {
     const raw = window.localStorage.getItem(DISMISS_KEY)
     const at = raw == null ? NaN : Number(raw)
-    return Number.isFinite(at) ? at : null
+    stored = Number.isFinite(at) ? at : null
   } catch {
-    return sessionDismissedAt
+    /* storage blocked: the session value is all there is */
   }
+  if (sessionDismissedAt == null) return stored
+  return stored == null ? sessionDismissedAt : Math.max(stored, sessionDismissedAt)
 }
 
 function writeDismissedAt(at: number): void {
@@ -89,6 +94,17 @@ function subscribeDismissed(notify: () => void): () => void {
   }
 }
 
+/** Forget the dismissal: the next refusal (and the last one, if it is still the latest) shows. */
+export function clearDismissedRefusal(): void {
+  sessionDismissedAt = null
+  try {
+    window.localStorage.removeItem(DISMISS_KEY)
+  } catch {
+    /* storage blocked: nothing stored to remove */
+  }
+  listeners.forEach((notify) => notify())
+}
+
 /** `at` of the refusal the viewer last dismissed, or null. */
 export function useDismissedRefusalAt(): number | null {
   return useSyncExternalStore(subscribeDismissed, readDismissedAt, () => null)
@@ -98,16 +114,28 @@ export function useDismissedRefusalAt(): number | null {
 
 const message = (e: unknown) => (e instanceof Error && e.message ? e.message : String(e))
 
-export function useStatusLineActions() {
+/**
+ * `resetKey`: the state the buttons belong to (the line passes its `kind`). A failure message is
+ * shown only while the key it failed under is still the current one, so it is gone once the box
+ * has moved on, and stays while the same state merely counts on. Leave it out to keep a message
+ * until the next action.
+ */
+export function useStatusLineActions({ resetKey = null }: { resetKey?: unknown } = {}) {
   const qc = useQueryClient()
   const switchover = useComfyuiSwitchover()
   const pin = useComfyuiPin()
   const renderCancel = useComfyuiRenderCancel()
   const restart = useComfyuiRestart()
-  const dismissedAt = useDismissedRefusalAt()
 
   const [pending, setPending] = useState<StatusAction | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const [failure, setFailure] = useState<{ message: string; key: unknown } | null>(null)
+  // The key at the moment a failure lands, not at the click: a failure that arrives after the
+  // state moved on belongs to the state it arrives in.
+  const keyRef = useRef(resetKey)
+  useEffect(() => {
+    keyRef.current = resetKey
+  }, [resetKey])
+  const error = failure && Object.is(failure.key, resetKey) ? failure.message : null
   const [confirmOpen, setConfirmOpen] = useState(false)
   const answer = useRef<((ok: boolean) => void) | null>(null)
   const running = useRef(false)
@@ -129,7 +157,7 @@ export function useStatusLineActions() {
     if (running.current) return
     running.current = true
     setPending(action)
-    setError(null)
+    setFailure(null)
     try {
       switch (action) {
         case 'hold':
@@ -169,7 +197,7 @@ export function useStatusLineActions() {
       void qc.invalidateQueries({ queryKey: ['comfyui', 'arbiter'] })
       void qc.invalidateQueries({ queryKey: ['comfyui', 'status'] })
     } catch (e) {
-      setError(message(e))
+      setFailure({ message: message(e), key: keyRef.current })
       // A half-done stop (unpinned, switch refused) changed the box too.
       void qc.invalidateQueries({ queryKey: ['comfyui', 'arbiter'] })
       void qc.invalidateQueries({ queryKey: ['comfyui', 'status'] })
@@ -185,5 +213,5 @@ export function useStatusLineActions() {
     decline: () => settle(false),
   }
 
-  return { run, pending, error, confirm, dismissedAt }
+  return { run, pending, error, confirm }
 }

@@ -25,6 +25,11 @@ const { box, calls } = vi.hoisted(() => ({
     slots: [] as unknown[],
     urls: undefined as unknown,
     fail: undefined as Error | undefined,
+    // The unpin: held until `pinGate` resolves, and/or failing with `pinFail`.
+    pinGate: undefined as Promise<void> | undefined,
+    pinFail: undefined as Error | undefined,
+    // When /status last answered (ms); the line carries the render time on from there.
+    statusUpdatedAt: undefined as number | undefined,
   },
   calls: [] as [string, unknown][],
 }))
@@ -38,10 +43,18 @@ const record = (name: string) => async (body?: unknown) => {
 vi.mock('@/api/hooks/useComfyui', async (importOriginal) => ({
   ...(await importOriginal<Json>()),
   useArbiter: () => ({ data: box.arbiter }),
-  useComfyui: () => ({ data: box.status, dataUpdatedAt: Date.now() }),
+  useComfyui: () => ({ data: box.status, dataUpdatedAt: box.statusUpdatedAt ?? Date.now() }),
   useComfyuiModels: () => ({ data: box.models }),
   useComfyuiSwitchover: () => ({ mutateAsync: record('switchover') }),
-  useComfyuiPin: () => ({ mutateAsync: record('pin') }),
+  useComfyuiPin: () => ({
+    mutateAsync: async (body?: unknown) => {
+      calls.push(['pin', body])
+      await box.pinGate
+      if (box.pinFail) throw box.pinFail
+      if (box.fail) throw box.fail
+      return {}
+    },
+  }),
   useComfyuiRenderCancel: () => ({ mutateAsync: record('render-cancel') }),
   useComfyuiRestart: () => ({ mutateAsync: record('restart') }),
 }))
@@ -69,7 +82,7 @@ vi.mock('@/api/hooks/useRuntimes', async (importOriginal) => ({
 }))
 
 const { ImageStatusLine, ForceStopConfirm } = await import('../image/ImageStatusLine.jsx')
-const { useStatusLineActions } = await import('../image/useStatusLineActions')
+const { useStatusLineActions, clearDismissedRefusal } = await import('../image/useStatusLineActions')
 const { GpuImageModeBanner } = await import('../primitives.jsx')
 const { SlotCards, MiniCards } = await import('../inference-pane.jsx')
 
@@ -132,18 +145,25 @@ const memoryBody = (gpu: Json | null = {}) => ({
 // ── harness ──────────────────────────────────────────────────────────────────
 
 const roots: { root: Root; host: HTMLElement }[] = []
+const renderers = new Map<HTMLElement, (el: React.ReactElement) => void>()
 
 function mount(el: React.ReactElement) {
   const host = document.createElement('div')
   document.body.appendChild(host)
   const root = createRoot(host)
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  act(() => {
-    root.render(<QueryClientProvider client={client}>{el}</QueryClientProvider>)
-  })
+  const render = (next: React.ReactElement) =>
+    act(() => {
+      root.render(<QueryClientProvider client={client}>{next}</QueryClientProvider>)
+    })
+  render(el)
   roots.push({ root, host })
+  renderers.set(host, render)
   return host
 }
+
+// Render again into a mounted host with whatever the mocks hold now (a poll landing).
+const rerender = (host: HTMLElement, el: React.ReactElement) => renderers.get(host)!(el)
 
 const byId = (testid: string) => document.querySelector(`[data-testid="${testid}"]`) as HTMLElement | null
 const button = (label: string, within: ParentNode = document) =>
@@ -160,6 +180,22 @@ async function click(el: Element | null | undefined) {
 
 const DISMISS_KEY = 'hal0.imageGen.gateRefusalDismissedAt'
 
+// Storage that reads from the real one and fails where the test says. `vi.spyOn` on
+// Storage.prototype did not stay put across tests here (a throwing getItem outlived its test),
+// so the whole object is stubbed, and `vi.unstubAllGlobals()` puts the real one back.
+function stubStorage(over: Partial<Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>>) {
+  const real = window.localStorage
+  vi.stubGlobal('localStorage', {
+    getItem: (k: string) => real.getItem(k),
+    setItem: (k: string, v: string) => real.setItem(k, v),
+    removeItem: (k: string) => real.removeItem(k),
+    ...over,
+  })
+}
+const blocked = () => {
+  throw new Error('storage blocked')
+}
+
 beforeEach(() => {
   box.arbiter = envelope()
   box.status = statusBody()
@@ -168,7 +204,11 @@ beforeEach(() => {
   box.slots = []
   box.urls = { comfyui: 'http://box:8188' }
   box.fail = undefined
+  box.pinGate = undefined
+  box.pinFail = undefined
+  box.statusUpdatedAt = undefined
   calls.length = 0
+  clearDismissedRefusal()
   try {
     window.localStorage.clear()
   } catch {
@@ -183,7 +223,7 @@ afterEach(() => {
   }
   document.body.innerHTML = ''
   vi.useRealTimers()
-  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
 })
 
 // ── the line ─────────────────────────────────────────────────────────────────
@@ -214,7 +254,7 @@ describe('ImageStatusLine', () => {
     expect(calls).toEqual([['pin', { pinned: true }]])
   })
 
-  it('counts the grace down and the render time up between polls', () => {
+  it('counts the grace down between polls', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date(2026, 9, 25, 12, 0, 0))
     const t = Date.now() / 1000
@@ -225,6 +265,25 @@ describe('ImageStatusLine', () => {
       vi.advanceTimersByTime(3000)
     })
     expect(byId('image-status-head')!.textContent).toBe('Image mode ends in 5 s')
+  })
+
+  it('carries the render time on from the last poll', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2026, 9, 25, 12, 0, 0))
+    // /status answered now, with the render at 72 s.
+    box.statusUpdatedAt = Date.now()
+    box.arbiter = envelope({ mode: 'img', phase: 'rendering' })
+    box.status = statusBody({
+      queue: { running: 1, pending: 0 },
+      progress: { model: 'flux-dev', step: 5, total: 20, node: '9', elapsed_s: 72, prompt_id: 'p' },
+    })
+    mount(<ImageStatusLine />)
+    expect(byId('image-status-elapsed')!.textContent).toBe('1:12')
+    act(() => {
+      vi.advanceTimersByTime(3000)
+    })
+    // No new poll: the figure moved on by the three seconds that passed.
+    expect(byId('image-status-elapsed')!.textContent).toBe('1:15')
   })
 
   it('unpin calls pin false', async () => {
@@ -244,6 +303,17 @@ describe('ImageStatusLine', () => {
       ['switchover', { mode: 'inference' }],
     ])
     expect(document.querySelector('.modal-shell')).toBeNull()
+  })
+
+  it('does not switch back when the unpin fails, and shows the server message', async () => {
+    box.arbiter = envelope({ mode: 'img', pinned: true })
+    box.pinFail = new Error('The pin could not be removed')
+    mount(<ImageStatusLine />)
+    await click(button('Stop image mode'))
+    expect(calls).toEqual([['pin', { pinned: false }]])
+    expect(document.querySelector('[role="alert"]')!.textContent).toBe('The pin could not be removed')
+    // Nothing is left pending: the buttons are there to try again.
+    expect(button('Stop image mode')!.disabled).toBe(false)
   })
 
   it('cancel render calls render/cancel', async () => {
@@ -327,7 +397,8 @@ describe('ImageStatusLine', () => {
 
   it('open editor opens the editor link from the config urls in a new tab', async () => {
     box.status = statusBody({ gate_refusal: { at: 1_700_000_000, reason: 'busy' } })
-    const open = vi.spyOn(window, 'open').mockReturnValue(null)
+    const open = vi.fn(() => null)
+    vi.stubGlobal('open', open)
     mount(<ImageStatusLine />)
     await click(button('Open editor'))
     expect(open).toHaveBeenCalledWith('http://box:8188', '_blank', 'noopener,noreferrer')
@@ -340,6 +411,36 @@ describe('ImageStatusLine', () => {
     expect(document.querySelector('[role="alert"]')!.textContent).toBe('GPU is in image mode already')
     // The buttons come back so it can be tried again.
     expect(button('Hold image mode')!.disabled).toBe(false)
+  })
+
+  it('drops a failed action\'s message once the box is in another state', async () => {
+    box.fail = new Error('The GPU is busy')
+    const host = mount(<ImageStatusLine />)
+    await click(button('Hold image mode'))
+    expect(document.querySelector('[role="alert"]')!.textContent).toBe('The GPU is busy')
+
+    // The poll lands: a render has started. The old alert is about a state that is gone.
+    box.arbiter = envelope({ mode: 'img', phase: 'rendering' })
+    box.status = statusBody({ queue: { running: 1, pending: 0 } })
+    rerender(host, <ImageStatusLine />)
+    expect(byId('image-status-head')!.textContent).toBe('Rendering · editor prompt · 1 queued')
+    expect(document.querySelector('[role="alert"]')).toBeNull()
+  })
+
+  it('keeps a failed action\'s message while the same state counts on', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2026, 9, 25, 12, 0, 0))
+    box.arbiter = envelope({ mode: 'img', phase: 'grace', restore_at: Date.now() / 1000 + 8 })
+    box.fail = new Error('The pin was refused')
+    mount(<ImageStatusLine />)
+    await click(button('Keep image mode'))
+    expect(document.querySelector('[role="alert"]')!.textContent).toBe('The pin was refused')
+    act(() => {
+      vi.advanceTimersByTime(3000)
+    })
+    // The headline moved (8 s to 5 s); the state did not.
+    expect(byId('image-status-head')!.textContent).toBe('Image mode ends in 5 s')
+    expect(document.querySelector('[role="alert"]')!.textContent).toBe('The pin was refused')
   })
 
   it('status line hidden without gpu', () => {
@@ -391,6 +492,29 @@ describe('stop while a render runs', () => {
     expect(document.querySelector('.modal-shell')).toBeNull()
   })
 
+  it('sends the switchover only after the unpin has resolved', async () => {
+    let release!: () => void
+    box.pinGate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    mount(<Stop ctx={{ pinned: true, renderRunning: true }} />)
+    await click(byId('stop'))
+    await click(foot('Stop and cancel render'))
+    expect(calls).toEqual([['pin', { pinned: false }]])
+    // Time passes and the unpin is still out: the switchover waits for it.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    })
+    expect(calls).toEqual([['pin', { pinned: false }]])
+    await act(async () => {
+      release()
+    })
+    expect(calls).toEqual([
+      ['pin', { pinned: false }],
+      ['switchover', { mode: 'inference', force: true }],
+    ])
+  })
+
   it('leaves everything as it was when the confirm is declined', async () => {
     mount(<Stop ctx={{ pinned: true, renderRunning: true }} />)
     await click(byId('stop'))
@@ -436,17 +560,29 @@ describe('gate refusal', () => {
   })
 
   it('renders, and dismisses for the session, without usable storage', async () => {
-    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
-      throw new Error('storage blocked')
-    })
-    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
-      throw new Error('storage blocked')
-    })
+    stubStorage({ getItem: blocked, setItem: blocked, removeItem: blocked })
     box.status = statusBody({ gate_refusal: { at: AT + 600, reason: 'busy' } })
     mount(<ImageStatusLine />)
     expect(byId('image-status-head')!.textContent).toBe('GPU gate refused a prompt · 14:15')
     await click(button('Dismiss'))
     expect(byId('image-status-head')!.textContent).toBe('GPU · chat mode')
+  })
+
+  it('dismisses for the session when storage reads fine but cannot write', async () => {
+    stubStorage({ setItem: blocked })
+    box.status = statusBody({ gate_refusal: { at: AT + 1800, reason: 'busy' } })
+    mount(<ImageStatusLine />)
+    expect(byId('image-status-head')!.textContent).toBe('GPU gate refused a prompt · 14:35')
+    await click(button('Dismiss'))
+    // Nothing was stored, and it must not come straight back.
+    expect(window.localStorage.getItem(DISMISS_KEY)).toBeNull()
+    expect(byId('image-status-head')!.textContent).toBe('GPU · chat mode')
+
+    // A newer refusal still shows.
+    box.status = statusBody({ gate_refusal: { at: AT + 1860, reason: 'again' } })
+    mount(<ImageStatusLine />)
+    const heads = Array.from(document.querySelectorAll('[data-testid="image-status-head"]')).map((el) => el.textContent)
+    expect(heads).toContain('GPU gate refused a prompt · 14:36')
   })
 
   it('has no Dismiss for the missing credential', () => {

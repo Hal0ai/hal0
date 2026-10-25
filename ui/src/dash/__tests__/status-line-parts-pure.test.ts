@@ -2,10 +2,9 @@
 // progress figures, the paused slot card's note and the facts an action needs. Pure.
 import { describe, expect, it } from 'vitest'
 import type { ArbiterEnvelope, ArbiterState } from '@/api/hooks/useComfyui'
-import { actionFacts, statusLine } from '../image/status-line-pure'
+import { actionFacts } from '../image/status-line-pure'
 import {
   clockLabel,
-  lineKind,
   reloadSteps,
   renderPct,
   slotPause,
@@ -37,19 +36,6 @@ function envelope(over: Partial<ArbiterState> = {}, refusal: ArbiterEnvelope['ga
     gate_refusal: refusal,
   }
 }
-
-describe('lineKind', () => {
-  it('names the headline the step chips and the progress bar hang off', () => {
-    const memory = { gpu: {} } as never
-    const kind = (env: ArbiterEnvelope, status = {}) =>
-      lineKind(statusLine(env, status as never, memory, { now: 0 })!.head)
-    expect(kind(envelope({ phase: 'draining' }))).toBe('switching')
-    expect(kind(envelope({ phase: 'rendering' }))).toBe('rendering')
-    expect(kind(envelope({ phase: 'reloading' }))).toBe('reloading')
-    expect(kind(envelope({ phase: 'grace', restore_at: 10 }))).toBe('other')
-    expect(kind(envelope({ mode: 'llm' }))).toBe('other')
-  })
-})
 
 describe('switchSteps', () => {
   it('marks the steps before the running phase done and the ones after it to do', () => {

@@ -434,3 +434,57 @@ describe('waitLine', () => {
     expect(waitLine({ count: 2, oldest_s: null })).toBe('2 chat requests waiting.')
   })
 })
+
+// `kind` names the state the line is in, so a consumer (the step chips, the progress bar, the
+// stale-error reset) never has to read it back out of the headline's text. It is the same for the
+// whole of a state: a countdown or a step counter changes the headline, not the kind.
+describe('statusLine kind', () => {
+  const kind = (env: ArbiterEnvelope, st: StatusLineInputs = status(), opts = OPTS) =>
+    statusLine(env, st, memory(), opts)?.kind
+
+  it('names every state', () => {
+    const noCredential = status({ gate: { state: 'no_credential', version_seen: null } as ComfyuiGate })
+    expect(kind(envelope(), noCredential)).toBe('blocked')
+
+    for (const phase of ['draining', 'unloading', 'starting_engine']) {
+      expect(kind(envelope({ mode: 'img', phase, switching: true }))).toBe('switching')
+    }
+    expect(kind(envelope({ mode: 'img', phase: null, switching: true }))).toBe('switching')
+
+    expect(kind(envelope({ mode: 'img', phase: 'rendering' }))).toBe('rendering')
+    // An editor render is only a queue count.
+    const busy = status({ queue: { running: 1, pending: 0 } })
+    expect(kind(envelope({ mode: 'img', phase: 'grace', restore_at: 1005 }), busy)).toBe('rendering')
+
+    expect(kind(envelope({ mode: 'img', phase: 'handoff', handoff_until: 1004 }))).toBe('handoff')
+    expect(kind(envelope({ mode: 'img', phase: 'reloading' }))).toBe('reloading')
+
+    expect(kind(envelope({}, { at: 900, reason: 'busy' }))).toBe('refused')
+    expect(kind(envelope(), status({ gate: { state: 'stale', version_seen: '0' } as ComfyuiGate }))).toBe('stale')
+
+    expect(kind(envelope({ mode: 'img', pinned: true }))).toBe('pinned')
+    expect(kind(envelope({ mode: 'img', phase: 'grace', restore_at: 1005 }))).toBe('grace')
+    expect(kind(envelope({ mode: 'img', phase: null }))).toBe('img_on')
+    expect(kind(envelope({ mode: 'llm' }))).toBe('chat')
+  })
+
+  it('is the work, not the pin, on a pinned box that is working', () => {
+    expect(kind(envelope({ mode: 'img', pinned: true, phase: 'rendering' }))).toBe('rendering')
+  })
+
+  it('stays put while the headline text moves', () => {
+    const grace = (restore_at: number) => envelope({ mode: 'img', phase: 'grace', restore_at })
+    const a = statusLine(grace(1008), status(), memory(), OPTS)
+    const b = statusLine(grace(1008), status(), memory(), { ...OPTS, now: 1003 })
+    expect(a?.head).not.toBe(b?.head)
+    expect(a?.kind).toBe('grace')
+    expect(b?.kind).toBe('grace')
+
+    const rendering = envelope({ mode: 'img', phase: 'rendering' })
+    const step3 = statusLine(rendering, status({ progress: progress({ step: 3 }) }), memory(), OPTS)
+    const step4 = statusLine(rendering, status({ progress: progress({ step: 4 }) }), memory(), OPTS)
+    expect(step3?.head).not.toBe(step4?.head)
+    expect(step3?.kind).toBe('rendering')
+    expect(step4?.kind).toBe('rendering')
+  })
+})
