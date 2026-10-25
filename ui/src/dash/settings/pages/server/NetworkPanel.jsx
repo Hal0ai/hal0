@@ -8,7 +8,7 @@
 // back a stale copy. The origin gates read [network] live
 // (api/agents/_auth.allowed_origins), so a save applies on the next
 // request. The CLI equivalent is `hal0 network`.
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useSettingsClient } from '../../data/settingsClient.js'
 import { useSettingsNetworkEdit } from '@/api/hooks/useSettings'
 import {
@@ -30,12 +30,22 @@ export function NetworkPanel() {
   const live = settings.data || null
   const [form, setForm] = useState(() => networkFormFromSettings(live))
   const [error, setError] = useState(null)
+  // True once the operator has typed since the form was last seeded.
+  const edited = useRef(false)
 
   // Re-seed from the server whenever the live config changes (initial load,
-  // a save, another tab's save) — the form never holds a stale baseline.
+  // another tab's save, a refetch), unless the operator has unsaved edits: a
+  // late load or a background refetch must not wipe what they typed. A save
+  // or Reset seeds the form again. Save sends a diff against the live list,
+  // so keeping the edit never writes a stale copy back.
   useEffect(() => {
-    setForm(networkFormFromSettings(live))
+    if (!edited.current) setForm(networkFormFromSettings(live))
   }, [live])
+
+  const editForm = (patch) => {
+    edited.current = true
+    setForm((f) => ({ ...f, ...patch }))
+  }
 
   const dirty = live ? networkFormDirty(form, live) : false
 
@@ -44,7 +54,9 @@ export function NetworkPanel() {
     const body = networkEditBody(form, live)
     if (!body) return
     try {
-      await edit.mutateAsync(body)
+      const next = await edit.mutateAsync(body)
+      edited.current = false
+      setForm(networkFormFromSettings(next))
       window.__hal0Toast && window.__hal0Toast('Network origins saved — applies on the next request', 'ok')
     } catch (e) {
       setError(networkSaveError(e))
@@ -65,7 +77,7 @@ export function NetworkPanel() {
             data-testid="network-public-url"
             value={form.publicUrl}
             placeholder="https://hal0.example.com"
-            onChange={(e) => setForm((f) => ({ ...f, publicUrl: e.target.value }))}
+            onChange={(e) => editForm({ publicUrl: e.target.value })}
             style={inputStyle}
           />
         </div>
@@ -80,7 +92,7 @@ export function NetworkPanel() {
             rows={3}
             value={form.origins}
             placeholder="http://box.lan:8080"
-            onChange={(e) => setForm((f) => ({ ...f, origins: e.target.value }))}
+            onChange={(e) => editForm({ origins: e.target.value })}
             style={{ ...inputStyle, resize: 'vertical' }}
           />
         </div>
@@ -97,7 +109,7 @@ export function NetworkPanel() {
             <button
               className="btn ghost sm"
               disabled={!dirty || edit.isPending}
-              onClick={() => { setError(null); setForm(networkFormFromSettings(live)) }}
+              onClick={() => { setError(null); edited.current = false; setForm(networkFormFromSettings(live)) }}
             >
               Reset
             </button>
