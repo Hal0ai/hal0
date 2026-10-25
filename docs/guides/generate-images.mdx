@@ -20,7 +20,9 @@ reloaded.
 
 <Aside type="caution">
 Switching the iGPU to generation **stops the LLM stack** (chat bots and
-memory extraction go dark) for as long as generation holds the GPU.
+memory extraction go dark) for as long as generation holds the GPU: while a
+render runs and for about 10 seconds after the last one, or until you unpin a
+pinned image mode. See [How long image mode lasts](#how-long-image-mode-lasts).
 </Aside>
 
 ![The hal0 Image-Gen tab showing engine state, GPU memory gauges, and queue counts](/screenshots/image-gen-comfyui.png)
@@ -112,6 +114,10 @@ Key fields:
 - `queue` — `{running, pending}` job counts.
 - `switchover` — the in-flight switch tracker (`active`, `target`,
   `error`).
+- `arbiter` — the GPU arbiter's own block: `mode` (`img` or `llm`),
+  `pinned`, `saved_llm_slots` (the slots it will reload), `switching` (true
+  while it holds its switch lock) and `image_jobs` (the `/v1/images/generations`
+  requests in flight). `null` when the arbiter cannot report.
 
 Every probe degrades to a safe default: a dead engine surfaces as
 `stopped`, never a 500.
@@ -142,7 +148,7 @@ Body fields:
 |---------|--------|-------|
 | `mode`  | string | `generation` or `inference` (required). |
 | `force` | bool   | Switching to `inference` drops any running/pending render. Without `force`, a busy queue is refused with **409**. |
-| `pin`   | bool   | `generation` only — hold image mode against the arbiter's idle-restore. |
+| `pin`   | bool   | `generation` only — hold image mode until you unpin it (`POST /api/comfyui/pin` with `{"pinned": false}`) or switch to `inference` with `force`. Without a pin, image mode ends about 10 seconds after the last render, as it does for every image request. |
 
 Responses: **202** (`switching`, poll `/status`), **200** (`noop`,
 already in the target mode), **409** (switch already in flight, or a busy
@@ -156,16 +162,76 @@ curl -X POST http://localhost:8080/api/comfyui/pin \
   -d '{"pinned": true}'
 ```
 
+## How long image mode lasts
+
+Image mode lasts only while image work runs: a `/v1/images/generations`
+request, from before the switch until its render returns, or a render in
+ComfyUI's queue from its editor. About 10 seconds after the last render, hal0
+frees ComfyUI's models (`POST /free`) and reloads the LLM slots it had
+unloaded. This holds however image mode began: a switch to `generation`
+without `pin`, such as the dashboard's Start button, also ends about 10
+seconds after the switch when nothing renders. To keep image mode, pin it.
+
+- **A chat request ends the wait.** A request for a GPU LLM slot that arrives
+  while image mode is on waits for the render to finish and for the saved
+  slots to reload, up to 120 seconds in all, and is then served. It gets
+  `503 gpu.image_mode` (with `Retry-After: 15`) only when image mode is
+  pinned, when ComfyUI's queue cannot be read, or when the 120 seconds run
+  out. Requests for NPU and CPU slots are never affected.
+- **hal0 never restores under a render.** While a render runs or waits in
+  ComfyUI's queue, the reload waits. Switching to `inference` by hand while
+  one runs needs `force`, which drops it.
+- **A hand-off follows each switch into image mode.** For about 3 seconds
+  hal0 does not restore, so a prompt sent from ComfyUI's editor can reach
+  ComfyUI's queue, where hal0 sees it.
+- **A pin lasts until you end it.** `POST /api/comfyui/pin` with
+  `{"pinned": false}` unpins it, and a switch to `inference` with `force`
+  ends image mode and clears the pin. A pin set while the GPU serves LLMs
+  does not carry into the next image mode: pass `pin` on the switchover that
+  enters it.
+- **A ComfyUI queue that never drains holds image mode.** hal0 restores LLM
+  mode only while ComfyUI's queue shows nothing running or pending, so a
+  wedged job keeps the GPU in image mode until you switch to `inference` with
+  `force`.
+
+### ComfyUI's editor and the GPU gate
+
+Prompts from ComfyUI's own editor do not pass through hal0, so ComfyUI loads
+a custom node, `hal0_gpu_gate`, that asks hal0 for image mode before each
+prompt is queued. The prompt waits while hal0 switches the GPU, up to 180
+seconds (the switch itself waits for running chat requests to finish). The
+editor refuses the prompt, shows the reason in its prompt-error dialog and
+queues nothing when:
+
+- hal0 rejects the switch request;
+- hal0 stops answering while it switches the GPU;
+- hal0 is unreachable, or does not say which mode holds the GPU, for 5
+  seconds after the prompt is submitted.
+
+Queue the prompt again once the reason is gone.
+
+To let prompts through while `hal0-api` is down, set
+`HAL0_COMFYUI_GATE_FAIL_OPEN=1` in `/etc/hal0/api.env`, restart `hal0-api`,
+then run `hal0 slot restart img`. hal0 writes the setting into the slot's
+unit when it loads the slot, so a bare `systemctl restart` of the unit does
+not pick it up. The setting covers only an unreachable hal0: a prompt that
+hal0 answered and refused stays refused. With `hal0-api` down, the GPU most
+likely still holds the LLM slots, so a prompt let through then renders next
+to them.
+
+A running `img` container keeps the gate it started with. The gate described
+here loads when the container next starts.
+
 ## The `[image]` slot config
 
-The `img` slot's `[image]` table carries `idle_restore_minutes` (default
-`60` — how long ComfyUI can sit idle before the GPU arbiter restores LLM
-slots, hot-reloadable with no `hal0-api` restart), `default_size`
+The `img` slot's `[image]` table carries `default_size`
 (`""` by default, meaning the model's native size, such as `1024x1024` for SDXL
-and `512x512` for SD 1.5), and `default_steps` (`0` means the workflow's own
+and `512x512` for SD 1.5) and `default_steps` (`0` means the workflow's own
 step count). A request's own `size`, or `steps` in `extra_body`, wins. Set
 these from the dashboard's Settings → Image-gen panel or edit the slot's TOML
-directly — see [Edit configuration](/docs/guides/configure).
+directly — see [Edit configuration](/docs/guides/configure). Image mode has no
+setting: it ends when generation stops (see
+[How long image mode lasts](#how-long-image-mode-lasts)).
 
 Once ComfyUI is up, hal0 leaves its container running: idle-timeout,
 memory-pressure and pre-load eviction never unload the `img` slot, whatever
@@ -201,9 +267,13 @@ curl -X POST http://localhost:8080/v1/images/generations \
 ```
 
 The route flips the GPU to image mode before dispatching, so a single
-call also performs the switchover when needed. It also starts the `img` slot
-when image mode finds it down, for example after it crashed or was unloaded by
-hand. `model` is an installed
+call also performs the switchover when needed. The request holds image mode
+until its render returns. hal0 then hands the GPU back to the LLM slots about
+10 seconds later, or as soon as a request for one of them arrives. A request
+for a GPU LLM slot that arrives during the render waits for the render and the
+reload (up to 120 seconds) instead of being refused. The route also starts the
+`img` slot when image mode finds it down, for example after it crashed or was
+unloaded by hand. `model` is an installed
 catalog model or a `ckpt/<path>` checkpoint; leave it out to use the model
 selected for `img`. Any other id returns **404** (`image.model_unknown`, with
 the ids that work), a catalog model that is not installed **409**

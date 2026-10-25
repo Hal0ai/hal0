@@ -280,16 +280,22 @@ an **llm** group (GPU chat/embedding slots) and an **img** group (the ComfyUI
 image-generation slot) — and only one group may hold the GPU's memory at a time.
 NPU and CPU slots are never arbitrated; they don't contend for the iGPU.
 
-When the GPU is in image mode, the arbiter refuses to dispatch to an llm-group
-slot: that request gets a structured `gpu.image_mode` 503 (with a `Retry-After`)
-instead of silently failing. The image container itself stays resident — what's
-exclusive is the GPU **memory**, not the container — so switching modes is fast.
-After the image slot has had no jobs for its configured idle window
-(`idle_restore_minutes`, 60 by default; `0` means manual-only), the arbiter
-frees the diffusion models and restores the LLM slots it had stopped. If the
-image slot still has an in-flight generation job when the idle window elapses,
-the restore defers rather than unloading it mid-render — a long video render
-simply pushes the LLM restore back until it finishes.
+When the GPU is in image mode, the arbiter does not dispatch to an llm-group
+slot at once. A request for one waits for the image work to end and for the
+reload, up to 120 seconds in all. Only when image mode is pinned, ComfyUI's queue
+cannot be read, or the wait runs out does the request get a structured
+`gpu.image_mode` 503 (with a `Retry-After`) instead of failing silently.
+
+Image mode lasts only while image generation runs: a `/v1/images/generations`
+request from before the switch until its render returns (Open WebUI and the omni
+loop use it too), or a render in ComfyUI's queue from its editor. The image
+container itself stays resident — what's exclusive is the GPU **memory**, not the
+container. About ten seconds after the last render, the arbiter frees the diffusion
+models and reloads the LLM slots it had stopped; an LLM request that arrives
+sooner starts that reload at once and waits for it rather than getting the 503.
+A render is never cut short: while one is running or queued, the reload waits.
+Pinning image mode (`POST /api/comfyui/pin`, or `pin` on the switchover) holds it
+until you unpin it.
 
 <Aside type="caution">
 The single NPU LLM anchor is exclusive too, but for a different reason: the AMD
