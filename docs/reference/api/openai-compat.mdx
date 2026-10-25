@@ -136,6 +136,9 @@ Request (subset honored): `{"model": <id>, "prompt": <required>, "n"?, "size"?, 
 | 422 | `image.model_not_renderable` | A video, edit or upscale catalog model. Open it in the ComfyUI editor, which the `img` slot serves on port 8188 and which needs a ROCm lane on the host. |
 | 422 | `image.model_required` | No `model` in the request and no model selected for `img`. |
 
+- The GPU switch happens before dispatch; when the GPU is already in image mode but the `img` slot is down, the request starts it first.
+- Open WebUI's image button is a client of this endpoint: it sends `model`, `prompt`, `n` and `response_format: "b64_json"`, and no `size` unless one is typed into it (see [Open WebUI](/docs/guides/open-webui/#image-generation)).
+
 Parameters the request leaves out are filled in this order:
 
 - `size`: the body, then the `img` slot's `[image].default_size` when it is not empty, then the model's native size (`1024x1024` for SDXL and `ckpt/` SDXL checkpoints, `512x512` for SD 1.5 and SDXL Turbo, `1328x1328` for Qwen-Image).

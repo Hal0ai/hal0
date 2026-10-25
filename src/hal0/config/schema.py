@@ -539,7 +539,8 @@ class SlotConfig(BaseModel):
             "(SlotReaper.evict_timeout_for). 0 disables IDLE-TTL eviction "
             "for this slot only — pressure eviction and pre-load eviction "
             "are separate paths, exempted only by `pinned`, not by this "
-            "value."
+            "value. The ComfyUI img-group slot is never unloaded by idle or "
+            "pressure eviction, whatever this value says."
         ),
     )
     pinned: bool = Field(
@@ -1641,7 +1642,8 @@ class SlotsConfig(BaseModel):
             "when the slot's own TOML has no idle_timeout_s override. 0 "
             "disables IDLE-TTL eviction for slots using this default — "
             "pressure eviction and pre-load eviction are separate paths, "
-            "exempted only by `pinned`, not by this value."
+            "exempted only by `pinned`, not by this value. The ComfyUI "
+            "img-group slot is never unloaded by idle or pressure eviction."
         ),
     )
     evict_pressure_mb: int = Field(
@@ -1654,8 +1656,9 @@ class SlotsConfig(BaseModel):
             "in priority order (lowest `priority` first, "
             "least-recently-used as the tie-break within a tier) until "
             "free RAM is back above the floor. 0 disables pressure "
-            "eviction. `pinned` is the only exemption — `idle_timeout_s = "
-            "0` on a slot does not exempt it from this path."
+            "eviction. `pinned` is the only per-slot exemption — "
+            "`idle_timeout_s = 0` on a slot does not exempt it from this "
+            "path. The ComfyUI img-group slot is never a candidate."
         ),
     )
     preload_evict_enabled: bool = Field(
@@ -1664,7 +1667,8 @@ class SlotsConfig(BaseModel):
             "Free memory SYNCHRONOUSLY before a load starts, when the "
             "incoming model's estimated footprint plus "
             "preload_evict_headroom_mb would not fit in projected free "
-            "memory. Evicts non-pinned resident slots in priority order "
+            "memory. Evicts non-pinned resident slots (never the ComfyUI "
+            "img-group slot) in priority order "
             "(lowest `priority` first, least-recently-used as the "
             "tie-break within a tier) — the same eligibility "
             "evict_pressure_mb uses — until it fits, or fails the load "

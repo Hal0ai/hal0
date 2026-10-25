@@ -167,6 +167,12 @@ step count). A request's own `size`, or `steps` in `extra_body`, wins. Set
 these from the dashboard's Settings → Image-gen panel or edit the slot's TOML
 directly — see [Edit configuration](/docs/guides/configure).
 
+Once ComfyUI is up, hal0 leaves its container running: idle-timeout,
+memory-pressure and pre-load eviction never unload the `img` slot, whatever
+its `idle_timeout_s` says, so a ComfyUI editor session is never cut off. Idle,
+ComfyUI holds next to no GPU memory, and switching back to inference frees its
+models. `hal0 slot unload img` still stops it by hand.
+
 ### Which container image the `img` slot runs
 
 The `img` slot resolves its image in this order: `image_pin` (top-level or
@@ -195,7 +201,9 @@ curl -X POST http://localhost:8080/v1/images/generations \
 ```
 
 The route flips the GPU to image mode before dispatching, so a single
-call also performs the switchover when needed. `model` is an installed
+call also performs the switchover when needed. It also starts the `img` slot
+when image mode finds it down, for example after it crashed or was unloaded by
+hand. `model` is an installed
 catalog model or a `ckpt/<path>` checkpoint; leave it out to use the model
 selected for `img`. Any other id returns **404** (`image.model_unknown`, with
 the ids that work), a catalog model that is not installed **409**
