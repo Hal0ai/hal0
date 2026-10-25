@@ -1,0 +1,90 @@
+---
+title: Memory budget API reference
+description: "The memory block on GET /api/stats/hardware — the GPU pool, this box's RAM and the render-free figure the dashboard's memory screens render — verified against src/hal0/hardware/memory_budget.py, src/hal0/api/memory_source.py and src/hal0/api/routes/hardware.py."
+sidebar:
+  order: 60
+---
+
+`GET /api/stats/hardware` (CLIENT) carries a `memory` block next to the probe and
+live counters it already returned. It is the one place the dashboard's memory
+figures come from ([ADR-0039](/docs/adr/0039-memory-figures-have-one-owner)): the
+Slots page's telemetry bar and memory ruler, the Overview cards and Settings →
+Overview all render it and read no counter of their own for the pool, RAM or who
+holds what. It holds two budgets, the GPU pool
+and this box's RAM, which are different resources and are never summed. The
+dashboard polls the route every 2.5 s. The rest of the route is indexed in the
+[REST API index](/docs/reference/api/rest-api/).
+
+## Response shape
+
+```json
+{
+  "memory": {
+    "gpu": {
+      "kind": "shared",
+      "total_gb": 116.0,
+      "used_gb": 43.4,
+      "this_box": [{"slot": "agent", "gb": 18.2, "state": "ready"}],
+      "image_engine_gb": 0.0,
+      "image_engine_slot": "img",
+      "image_engine_estimated": false,
+      "other_guests_gb": 25.2,
+      "attribution_excess_gb": 0.0,
+      "free_gb": 72.6
+    },
+    "ram": {"limit_gb": 48.0, "used_gb": 16.1, "free_gb": 31.9, "source": "container"},
+    "render_free_gb": 88.8
+  }
+}
+```
+
+Every GB value is MiB ÷ 1024, rounded to one decimal.
+
+| Field | Meaning |
+|---|---|
+| `gpu.kind` | `shared` when the GPU uses unified memory, where the pool is GTT shared with the host and with every other guest on the GPU; `dedicated` for a discrete card, where it is VRAM. |
+| `gpu.total_gb`, `gpu.used_gb` | The pool's total and live usage from the kernel's counters (`gtt_*` when shared, `vram_*` when dedicated). `used_gb` is device-wide, so a second guest's memory is in it. |
+| `gpu.this_box` | The other GPU slots on this box that have a row, ordered by slot name: `slot`, `gb` (hal0's estimate of its footprint, not a reading) and `state`. A slot still `starting` is listed but is not counted as resident. |
+| `gpu.image_engine_gb` | The image engine's share. On a `shared` pool, ComfyUI's own reading of its device when it answers (even `0`), otherwise the `img` slot's estimate. On a `dedicated` card, always the `img` slot's estimate: ComfyUI's reading covers the whole card, so it is neither used nor requested. The `img` slot is not repeated in `this_box`. |
+| `gpu.image_engine_slot` | The name of the slot that hosts the image engine, or `null` when the box has no `img` slot. It is the first slot, in config order, that the GPU arbiter puts in the `img` group, so a client never has to work it out from the slot list. |
+| `gpu.image_engine_estimated` | `true` when `image_engine_gb` is the `img` slot's estimate standing in for ComfyUI's reading: ComfyUI did not answer in time, or the pool is `dedicated`. `false` when ComfyUI's reading was used, and when there is no `img` slot row to borrow. The dashboard's tooltips say "(estimated)" when it is `true`. |
+| `gpu.other_guests_gb` | `max(0, used − resident slots − image engine)`: what the pool holds that nothing on this box accounts for, such as a second guest on the same GPU. |
+| `gpu.attribution_excess_gb` | The opposite remainder, `max(0, resident slots + image engine − used)`. Slot figures are estimates and can exceed the counter. A value above `0` means the split may be hiding a guest, and `other_guests_gb` and `render_free_gb` then depend on the estimates. |
+| `gpu.free_gb` | `max(0, total − used)`. |
+| `ram.limit_gb` | This box's RAM limit: the smaller of `MemTotal` and the tightest finite `memory.max` (cgroup v2) or `memory.limit_in_bytes` (v1) on the process's cgroup chain, from its own cgroup up to the root. Inside an LXC guest `MemTotal` already carries the guest's limit. Read live on every call. |
+| `ram.used_gb`, `ram.free_gb` | `used` is `MemTotal − MemAvailable`, so reclaimable page cache is not counted. It is system-wide, so under a cap below `MemTotal` it can exceed `limit_gb`. `free` is `max(0, limit − used)`. |
+| `ram.source` | `container` when `/run/systemd/container` exists or a finite cgroup limit was found on the chain, otherwise `system`. |
+| `render_free_gb` | The pool a render can use once image mode has unloaded this box's GPU slots: `max(0, total − other guests − image engine − starting slots − 2.0)`. The `2.0` GB is a fixed margin for the driver and allocator. |
+
+## Null and zero rules
+
+- `gpu` is `null` when the box has no GPU lane, no GPU sample could be read, or the
+  sample lacks the total or the used counter for its pool. A missing counter is
+  never read as `0`, because that would publish a headroom nothing measured.
+- `render_free_gb` is `null` exactly when `gpu` is.
+- `ram` is always present. If `/proc/meminfo` cannot be read, `limit_gb`,
+  `used_gb` and `free_gb` are all `0.0`; clients should treat a `limit_gb` of `0`
+  as "unknown", not as a box with no memory.
+- `memory` is always this process's own budget. It replaces a `memory` key an
+  upstream payload carried. If building it fails, the route logs it, leaves the
+  key out and still answers 200, so a client must tolerate a missing `memory`.
+
+The response keeps every key it had before. `per_slot` keeps its shape and still
+omits slots that are starting.
+
+## Known limits
+
+- **A discrete card's image engine is an estimate.** ComfyUI reports
+  `vram_total − vram_free` for its device. On a discrete card that is the whole
+  card, so it already contains every other slot's weights and any other process's
+  memory. Taking it as the engine's share would count them twice, so on a
+  `dedicated` pool the engine's share is the `img` slot's estimate and
+  `image_engine_estimated` is `true`. The pool's `used_gb` and `free_gb` are
+  unaffected: they come from the kernel's counter.
+- **ComfyUI on the CPU reports nothing usable.** When ComfyUI's first device is
+  the CPU, its `vram_*` fields describe system RAM, not the GPU pool, so hal0
+  ignores them and falls back to the `img` slot's estimate.
+- **Slot figures are estimates.** Each `this_box` row is the model file plus a
+  KV-cache estimate, not a reading, and a slot row without a `vram_mb` reads as
+  `0.0`.
+- **`ram.used_gb` is system-wide.** `MemAvailable` is not scoped to a cgroup.

@@ -101,6 +101,11 @@ def _read_meminfo() -> tuple[float, float]:
 # PULLING/STARTING haven't loaded; OFFLINE/UNLOADING/ERROR don't hold weights.
 _RESIDENT_STATES = frozenset({"warming", "ready", "serving", "idle"})
 
+# A slot that is about to load: not resident yet, but it will be, and anything
+# deciding what still fits has to leave room for it. Opt-in via
+# ``build_per_slot(include_starting=True)``.
+_STARTING_STATE = "starting"
+
 # Default context window assumed when neither the model nor the slot config
 # pins one.  Sourced from the launch path (see the _CTX_DENSE_CAP import
 # above): an unpinned slot actually launches at min(native, _CTX_DENSE_CAP)
@@ -497,6 +502,7 @@ async def build_per_slot(
     registry: Any | None = None,
     flm_catalog: dict[str, dict[str, Any]] | None = None,
     gpu_capable: bool | None = None,
+    include_starting: bool = False,
 ) -> dict[str, dict[str, Any]]:
     """Build the ``per_slot`` memory map for loaded slots.
 
@@ -531,6 +537,15 @@ async def build_per_slot(
     (still keyed, so the slot shows as loaded-but-unsized rather than
     vanishing).
 
+    ``include_starting`` (default off) also returns the slots whose state is
+    ``"starting"``, with ``state: "starting"``. They are about to load, so a
+    caller sizing what still fits (the memory budget, ADR-0039) must count
+    them; they are not resident yet, so the live figure is not theirs to
+    report. Their footprint is path 3, the file-size estimate, and the cgroup
+    probe is skipped: a container that is still coming up reports a small
+    cgroup, and the estimate is what it will hold. The other non-resident
+    states stay omitted.
+
     ``flm_catalog`` (``{tag: entry}``) may be supplied by the caller to
     avoid re-probing FLM; when omitted it is built lazily on first NPU
     slot encountered.
@@ -551,9 +566,10 @@ async def build_per_slot(
     if gpu_capable is None:
         gpu_capable = _host_has_capable_gpu()
     out: dict[str, dict[str, Any]] = {}
+    counted_states = _RESIDENT_STATES | {_STARTING_STATE} if include_starting else _RESIDENT_STATES
     for s in slots:
         state = str(getattr(s, "state", "") or "").lower()
-        if state not in _RESIDENT_STATES:
+        if state not in counted_states:
             continue
         model_id = getattr(s, "model_id", None)
         if not model_id:
@@ -623,10 +639,15 @@ async def build_per_slot(
         # :func:`_artefact_token`: a set ``slot_id`` is not that signal,
         # because ``fold_identity()`` stamps one on every boot without
         # renaming anything.
-        artefact_token = _artefact_token(s)
-        cgroup_bytes = await _container_cgroup_mem_bytes(artefact_token)
-        cgroup_mb = round(cgroup_bytes / (1024.0 * 1024.0), 1)
-        resident_mb = max(cgroup_mb, estimate_mb)
+        if state == _STARTING_STATE:
+            # Still coming up (include_starting): the container's cgroup is far
+            # below what it is about to hold, so the estimate is the footprint.
+            resident_mb = estimate_mb
+        else:
+            artefact_token = _artefact_token(s)
+            cgroup_bytes = await _container_cgroup_mem_bytes(artefact_token)
+            cgroup_mb = round(cgroup_bytes / (1024.0 * 1024.0), 1)
+            resident_mb = max(cgroup_mb, estimate_mb)
 
         # ── VRAM vs. RAM attribution (#1796, #1839) ─────────────────────
         # ``backend`` here is the normalized effective-backend token from

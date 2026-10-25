@@ -150,10 +150,12 @@ test.describe('dashboard redesign — fixed bands', () => {
   test('renders every band with the locked slots card and no grid-edit chrome', async ({ page }) => {
     await gotoDashboard(page, [servingSlot(), readySlot()])
 
-    // Health strip: exactly 5 cells, labelled per the design.
+    // Health strip: exactly 5 cells, labelled per the design. The memory cell
+    // is this box's RAM over its limit (ADR-0039), not the GPU pool, so it is
+    // labelled "RAM"; the pool is the memory card's below.
     await expect(page.locator('.rd-health-cell')).toHaveCount(5)
     await expect(page.locator('.rd-health-k')).toHaveText([
-      'slots', 'throughput', 'unified memory', 'igpu', 'needs attention',
+      'slots', 'throughput', 'RAM', 'igpu', 'needs attention',
     ])
 
     // Unified memory hero + band A (3 cells) + band C (3 cells).

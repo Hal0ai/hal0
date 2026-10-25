@@ -85,7 +85,7 @@ silently paper over.
 | `/api/runner-images` | CLIENT (list/detail) / ADMIN (sync/pull) | Runner Image catalogue — sync from `images.json`, pull-job orchestration, tag removal and restart-affected-slots for GHCR-hosted runner images. |
 | `/api/ports` | CLIENT (GET) / ADMIN (else) | Port allocation view. |
 | `/api/hardware` | CLIENT (GET) / ADMIN (`/probe`) | Hardware probe read + on-demand re-probe. |
-| `/api/stats/hardware` | CLIENT | Live hardware probe/stats. See [Hardware matrix](/docs/reference/hardware-matrix/). |
+| `/api/stats/hardware` | CLIENT | Live hardware probe/stats, and the `memory` block the dashboard's pool, RAM and per-owner memory figures are rendered from. See the [Memory budget API reference](/docs/reference/api/memory-budget/) and the [Hardware matrix](/docs/reference/hardware-matrix/). |
 | `/api/stats` (`/slots`, `/requests`, `/throughput/history`, `/power`) | CLIENT (GET) / ADMIN (else) | Dispatcher rollups, throughput history, power stats. |
 | `/api/status` | CLIENT | Version/build summary. Includes `build_sha`, the short git SHA of the tree the running process started from — `null` on a release (non-git) install. |
 | `/api/health`, `/api/health/system` | OPEN | Shallow + deep liveness probes hit by the installer/systemd watchdog before any credential exists. |

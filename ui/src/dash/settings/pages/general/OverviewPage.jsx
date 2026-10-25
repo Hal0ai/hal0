@@ -9,13 +9,15 @@
 // per-slot metrics stay read-only reference links.
 //   - useHealthSystem()   → GET /api/health/system   (overall status + per-check map)
 //   - useServicesHealth() → GET /api/services/health (per-service up/down, fail-soft)
-//   - useStatsHardware()  → GET /api/stats/hardware  (live RAM/GPU/NPU/CPU counters)
+//   - useStatsHardware()  → GET /api/stats/hardware  (live GPU/NPU/CPU counters)
+//   - useMemoryBudget()   → the `memory` block of that response (this box's RAM
+//                           and the GPU pool, ADR-0039)
 //   - useStatsPower()     → GET /api/stats/power     (GPU power/clock + CPU temp, fail-soft)
 //   - useRequestsRollup() → GET /api/stats/requests  (dispatcher /v1 rollup)
 import { useState, useEffect } from 'react'
 import { useHealthSystem, failingChecks } from '@/api/hooks/useRuntime'
 import { useHardware, hasGpuAccess, hasNpuAccess } from '@/api/hooks/useHardware'
-import { useStatsHardware } from '@/api/hooks/useStatsHardware'
+import { useStatsHardware, useMemoryBudget } from '@/api/hooks/useStatsHardware'
 import { useStatsPower } from '@/api/hooks/useStatsPower'
 import { useUpdateState } from '@/api/hooks/useUpdates'
 import { useRequestsRollup } from '@/api/hooks/useRequestsRollup'
@@ -24,12 +26,18 @@ import { useSettingsClient } from '../../data/settingsClient.js'
 import { ApplyBadge } from '../../shared/ApplyBadge.jsx'
 import { SRow } from '../../shared/SRow.jsx'
 import { formatGpuUtil } from '@/lib/gpuUtil'
+import { gpuPoolLabel } from '@/dash/memory-map-pure'
 
 function _mb(mb) {
   const n = Number(mb)
   if (!n || n <= 0) return '—'
   if (n < 1024) return `${Math.round(n)} MB`
   return `${(n / 1024).toFixed(1)} GB`
+}
+
+// A GB figure from the memory budget (already MiB / 1024, one decimal).
+function _gb(gb) {
+  return `${Number(gb).toFixed(1)} GB`
 }
 
 export function _pct(v) {
@@ -97,10 +105,16 @@ function ServicesPanel() {
   )
 }
 
-function HardwarePanel() {
+export function HardwarePanel() {
   const stats = useStatsHardware()
+  const budget = useMemoryBudget()
   const hw = useHardware()
   const H = stats.data
+  // This box's RAM and the GPU pool come from the memory budget (ADR-0039).
+  // limit_gb 0 means the backend could not read RAM: show no figure then,
+  // never "0 / 0".
+  const ram = budget.data?.ram?.limit_gb > 0 ? budget.data.ram : null
+  const gpu = budget.data?.gpu ?? null
   // #1797(3): /api/stats/hardware sees the host's DRM/XDNA nodes whether or
   // not this box (an LXC sharing the host kernel) actually has GPU compute
   // access — a CPU-only container was rendering the host's GPU/NPU numbers
@@ -119,12 +133,24 @@ function HardwarePanel() {
       {stats.isError && <div className="err">{stats.error?.message || 'Failed to read /api/stats/hardware'}</div>}
       {H && (
         <>
-          <SRow k="RAM" sub="Host memory in use" mono v={<span style={{ color: 'var(--fg-2)' }}>{_mb(H.ram_used_mb)} / {_mb(H.ram_total_mb)}</span>} />
+          <SRow
+            k="RAM"
+            sub={ram?.source === 'container' ? 'This box · container limit' : 'This box'}
+            mono
+            v={<span style={{ color: 'var(--fg-2)' }}>{ram ? `${_gb(ram.used_gb)} / ${_gb(ram.limit_gb)}` : '—'}</span>}
+          />
           <SRow k="CPU utilization" sub="Host CPU load" mono v={_pct(H.cpu_util)} />
           {hasGpu ? (
             <>
               <SRow k="GPU utilization" sub="Compute load on the primary accelerator" mono v={formatGpuUtil(H)} />
-              <SRow k="GPU VRAM" sub="Dedicated/GTT memory in use" mono v={<span style={{ color: 'var(--fg-3)' }}>{_mb(H.gpu_vram_used_mb ?? H.gtt_used_mb)} / {_mb(H.gpu_vram_total_mb)}</span>} />
+              {gpu && (
+                <SRow
+                  k={gpuPoolLabel(gpu.kind)}
+                  sub="In use across every guest on this pool"
+                  mono
+                  v={<span style={{ color: 'var(--fg-3)' }}>{_gb(gpu.used_gb)} / {_gb(gpu.total_gb)}</span>}
+                />
+              )}
             </>
           ) : (
             <SRow k="GPU" sub="No GPU compute access on this box" mono v={<span style={{ color: 'var(--fg-4)' }}>—</span>} />

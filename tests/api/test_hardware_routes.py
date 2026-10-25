@@ -11,10 +11,14 @@ import asyncio
 import threading
 import time
 import types
+from typing import Any
+from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+import hal0.api.routes.comfyui as comfyui_mod
 import hal0.api.routes.hardware as hw_mod
 import hal0.hardware.pve as pve_mod
 from hal0.api.routes.hardware import (
@@ -25,6 +29,7 @@ from hal0.api.routes.hardware import (
 )
 from hal0.config.schema import GPUInfo, HardwareInfo, NPUInfo
 from hal0.hardware.gpu_view import GPUMemorySample
+from hal0.hardware.memory_budget import RamBudget
 
 
 def _uma_sample(**overrides: object) -> GPUMemorySample:
@@ -238,8 +243,7 @@ def test_flatten_cgroup_max_mb_none_when_unlimited() -> None:
         platform="lxc",
     ).model_dump(mode="python")
     flat = _flatten_for_ui(info)
-    # When unlimited/unreadable, the field is absent (or None) — the UI
-    # falls back to pool/host as if cgroup weren't a constraint.
+    # When unlimited/unreadable, the field is absent (or None): no cap.
     assert flat.get("cgroup_max_mb") in (None,)
 
 
@@ -701,3 +705,433 @@ def test_flatten_non_uma_gtt_occupancy_is_none() -> None:
     assert _flatten_for_ui(info, _discrete_sample())["gtt_free_mb"] is None
     assert _flatten_for_ui(info)["gtt_used_mb"] is None
     assert _flatten_for_ui(info)["gtt_free_mb"] is None
+
+
+# ── memory: one budget, built here, served to the dashboard (ADR-0039) ───────
+
+_GIB = 1024**3
+_RAM = RamBudget(limit_gb=64.0, used_gb=20.0, free_gb=44.0, source="container")
+
+
+class _Manager:
+    """``app.state.slot_manager`` stand-in: ``list()`` plus raw configs."""
+
+    def __init__(self, slots: list[Any], configs: list[dict[str, Any]]) -> None:
+        self._slots = slots
+        self._configs = configs
+
+    async def list(self) -> list[Any]:
+        return list(self._slots)
+
+    async def iter_configs(self) -> list[dict[str, Any]]:
+        return list(self._configs)
+
+
+class _Registry:
+    """Every model is ``size_gib`` GiB on disk."""
+
+    def __init__(self, size_gib: int) -> None:
+        self._size = size_gib * _GIB
+
+    def get(self, model_id: str) -> types.SimpleNamespace:
+        return types.SimpleNamespace(size_bytes=self._size)
+
+
+def _slot(name: str, state: str = "ready") -> types.SimpleNamespace:
+    return types.SimpleNamespace(
+        name=name,
+        state=state,
+        model_id=f"{name}-model",
+        backend="rocm",
+        slot_id=None,
+        metadata={"provider": "llama-server", "backend": "rocm"},
+    )
+
+
+_BRAIN_CFG = {"name": "brain", "device": "gpu-rocm"}
+_IMG_CFG = {"name": "img", "device": "gpu-rocm", "provider": "comfyui", "type": "image"}
+
+
+def _system_stats(used_gib: int, total_gib: int = 80) -> dict[str, Any]:
+    return {
+        "devices": [
+            {"vram_total": total_gib * _GIB, "vram_free": (total_gib - used_gib) * _GIB},
+        ]
+    }
+
+
+class _NoComfyUI:
+    """A ComfyUI client that never connects (the real one dials ``COMFYUI_BASE_URL``)."""
+
+    async def get(self, url: str, **kwargs: Any) -> httpx.Response:
+        raise httpx.ConnectError("no ComfyUI in unit tests")
+
+
+@pytest.fixture(autouse=True)
+def _no_live_comfyui(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """No test in this module may reach a live ComfyUI, or read its engine cache.
+
+    ``/api/stats/hardware`` asks ComfyUI for its memory on a shared GPU pool with an img
+    slot. A test that wants an answer patches ``_fetch_engine_stats`` (the ``memory_box``
+    fixture does) or ``_get_client`` itself; either wins over this stand-in.
+    """
+    comfyui_mod._reset_state()
+    monkeypatch.setattr(comfyui_mod, "_get_client", lambda: _NoComfyUI())
+    yield
+    comfyui_mod._reset_state()
+
+
+@pytest.fixture
+def memory_box(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> types.SimpleNamespace:
+    """A GPU box with a brain slot and an img slot, ComfyUI not answering.
+
+    ``box.engine`` is what ComfyUI's ``/system_stats`` returns (``None`` = down);
+    ``box.engine_calls`` counts the reads that reached the engine.
+    """
+    box = types.SimpleNamespace(client=client, engine=None, engine_calls=0)
+
+    async def fake_fetch() -> dict[str, Any] | None:
+        box.engine_calls += 1
+        return box.engine
+
+    comfyui_mod._reset_state()
+    monkeypatch.setattr(comfyui_mod, "_fetch_engine_stats", fake_fetch)
+    monkeypatch.setattr("hal0.api.memory_source.read_ram", lambda: _RAM)
+    monkeypatch.setattr("hal0.slots.capacity._host_has_capable_gpu", lambda: True)
+    monkeypatch.setattr(
+        "hal0.slots.capacity._container_cgroup_mem_bytes", AsyncMock(return_value=0)
+    )
+    client.app.state.hardware_stats = _GpuStatsStub()  # 80 GiB pool, 2 GiB used
+    client.app.state.model_registry = _Registry(size_gib=8)
+    client.app.state.slot_manager = _Manager([_slot("brain"), _slot("img")], [_BRAIN_CFG, _IMG_CFG])
+    yield box
+    comfyui_mod._reset_state()
+
+
+class TestStatsHardwareMemory:
+    def test_stats_hardware_has_memory_block(self, memory_box: types.SimpleNamespace) -> None:
+        memory_box.engine = _system_stats(used_gib=3)
+
+        resp = memory_box.client.get("/api/stats/hardware")
+
+        assert resp.status_code == 200, resp.text
+        memory = resp.json()["memory"]
+        assert memory["gpu"]["total_gb"] == 80.0
+        assert memory["gpu"]["kind"] == "shared"
+        assert memory["gpu"]["image_engine_gb"] == 3.0  # ComfyUI's own figure
+        assert memory["gpu"]["image_engine_slot"] == "img"
+        assert memory["gpu"]["image_engine_estimated"] is False
+        assert [(s["slot"], s["state"]) for s in memory["gpu"]["this_box"]] == [("brain", "ready")]
+        assert memory["ram"]["source"] == "container"
+        assert memory["ram"]["limit_gb"] == 64.0
+        # 80 pool - 0 other guests - 3 engine - 0 starting - 2 margin.
+        assert memory["render_free_gb"] == 75.0
+
+    def test_per_slot_keeps_its_shape_beside_the_budget(
+        self, memory_box: types.SimpleNamespace
+    ) -> None:
+        body = memory_box.client.get("/api/stats/hardware").json()
+
+        assert set(body["per_slot"]) == {"brain", "img"}
+        assert body["per_slot"]["brain"]["mem_mb"] >= 8192.0
+
+    def test_a_starting_slot_is_in_the_budget_but_not_in_per_slot(
+        self, memory_box: types.SimpleNamespace
+    ) -> None:
+        memory_box.client.app.state.slot_manager = _Manager(
+            [_slot("brain", state="starting"), _slot("img")], [_BRAIN_CFG, _IMG_CFG]
+        )
+
+        body = memory_box.client.get("/api/stats/hardware").json()
+
+        assert [(s["slot"], s["state"]) for s in body["memory"]["gpu"]["this_box"]] == [
+            ("brain", "starting")
+        ]
+        assert "brain" not in body["per_slot"]  # the public per_slot map is resident-only
+
+    def test_memory_block_is_always_local(
+        self, memory_box: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def upstreams(request: object, path: str) -> dict[str, Any]:
+            return {"remote": {"gpu_name": "elsewhere", "memory": {"stale": True}}}
+
+        monkeypatch.setattr(hw_mod, "_proxy_upstream_endpoint", upstreams)
+
+        body = memory_box.client.get("/api/stats/hardware").json()
+
+        assert body["gpu_name"] == "elsewhere"  # the upstream merge still happened
+        assert "stale" not in body["memory"]
+        assert body["memory"]["gpu"]["total_gb"] == 80.0
+        assert body["memory"]["ram"]["source"] == "container"
+
+    def test_a_failing_collector_leaves_memory_out_not_a_500(
+        self, memory_box: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def upstreams(request: object, path: str) -> dict[str, Any]:
+            return {"remote": {"gpu_name": "elsewhere", "memory": {"stale": True}}}
+
+        async def broken(*_a: object, **_k: object) -> object:
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(hw_mod, "_proxy_upstream_endpoint", upstreams)
+        monkeypatch.setattr("hal0.api.memory_source.collect_memory_budget", broken)
+
+        resp = memory_box.client.get("/api/stats/hardware")
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["gpu_name"] == "elsewhere"
+        assert "memory" not in body  # not another box's budget either
+
+    @pytest.mark.timing
+    def test_stats_hardware_does_not_wait_for_a_dead_engine(
+        self, memory_box: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def never_answers() -> dict[str, Any] | None:
+            await asyncio.sleep(3)
+            return _system_stats(used_gib=70)
+
+        monkeypatch.setattr(comfyui_mod, "_fetch_engine_stats", never_answers)
+
+        started = time.perf_counter()
+        resp = memory_box.client.get("/api/stats/hardware")
+        elapsed = time.perf_counter() - started
+
+        assert resp.status_code == 200, resp.text
+        # The engine read is capped at 0.75 s; the dead engine would sleep 3 s.
+        assert elapsed < 2.0
+        # Falls back to the img slot's own attribution (8 GiB file + KV estimate).
+        img_gb = resp.json()["per_slot"]["img"]["mem_mb"] / 1024
+        assert resp.json()["memory"]["gpu"]["image_engine_gb"] == round(img_gb, 1)
+        assert resp.json()["memory"]["gpu"]["image_engine_estimated"] is True
+
+    def test_no_gpu_lane_means_no_gpu_block_and_no_engine_read(
+        self, memory_box: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("hal0.slots.capacity._host_has_capable_gpu", lambda: False)
+
+        memory = memory_box.client.get("/api/stats/hardware").json()["memory"]
+
+        assert memory["gpu"] is None
+        assert memory["render_free_gb"] is None
+        assert memory["ram"]["limit_gb"] == 64.0
+        assert memory_box.engine_calls == 0
+
+    def test_a_discrete_card_never_takes_comfyuis_device_wide_figure(
+        self, memory_box: types.SimpleNamespace
+    ) -> None:
+        """On a discrete card ComfyUI's ``vram_total - vram_free`` is the whole device
+        (every slot's weights, other processes). It is neither read nor believed."""
+        stats = _GpuStatsStub()
+        stats.gpu_sample = _discrete_sample  # type: ignore[method-assign]
+        memory_box.client.app.state.hardware_stats = stats
+        memory_box.engine = _system_stats(used_gib=20, total_gib=24)  # device-wide
+
+        body = memory_box.client.get("/api/stats/hardware").json()
+
+        gpu = body["memory"]["gpu"]
+        assert gpu["kind"] == "dedicated"
+        assert memory_box.engine_calls == 0  # not even asked
+        # The img slot's own row is the engine's figure, and it says so.
+        assert gpu["image_engine_gb"] == round(body["per_slot"]["img"]["vram_mb"] / 1024, 1)
+        assert gpu["image_engine_gb"] != 20.0
+        assert gpu["image_engine_estimated"] is True
+
+    def test_the_gpu_capability_is_probed_once_per_request_off_the_loop(
+        self, memory_box: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``build_per_slot`` and the collector both need it; neither probes again."""
+        probes: list[str] = []
+
+        def probe() -> bool:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                probes.append("worker thread")
+            else:
+                probes.append("event loop")
+            return True
+
+        monkeypatch.setattr("hal0.slots.capacity._host_has_capable_gpu", probe)
+
+        resp = memory_box.client.get("/api/stats/hardware")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["memory"]["gpu"] is not None
+        assert probes == ["worker thread"]
+
+
+# ── engine_used_mb: ComfyUI's own GPU usage, cached and fail-soft ────────────
+
+
+@pytest.fixture
+def engine_clock(monkeypatch: pytest.MonkeyPatch) -> types.SimpleNamespace:
+    clock = types.SimpleNamespace(now=1000.0, calls=0, stats=None)
+
+    async def fake_fetch() -> dict[str, Any] | None:
+        clock.calls += 1
+        return clock.stats
+
+    comfyui_mod._reset_state()
+    monkeypatch.setattr(comfyui_mod, "_now", lambda: clock.now)
+    monkeypatch.setattr(comfyui_mod, "_fetch_engine_stats", fake_fetch)
+    yield clock
+    comfyui_mod._reset_state()
+
+
+async def test_engine_used_mb_parses_system_stats(engine_clock: types.SimpleNamespace) -> None:
+    engine_clock.stats = _system_stats(used_gib=54)
+
+    assert await comfyui_mod.engine_used_mb() == 54 * 1024.0
+
+
+@pytest.mark.parametrize(
+    "stats",
+    [
+        None,  # ComfyUI down
+        {},
+        {"devices": []},
+        {"devices": ["not-a-device"]},
+        {"devices": [{"vram_total": 80 * _GIB}]},  # no vram_free
+        {"devices": [{"vram_total": "80", "vram_free": "26"}]},
+        {"devices": [{"vram_total": 10 * _GIB, "vram_free": 20 * _GIB}]},  # free > total
+    ],
+)
+async def test_engine_used_mb_is_none_without_a_usable_device_read(
+    engine_clock: types.SimpleNamespace, stats: Any
+) -> None:
+    engine_clock.stats = stats
+
+    assert await comfyui_mod.engine_used_mb() is None
+
+
+@pytest.mark.parametrize("device_type", ["cpu", "CPU"])
+async def test_engine_used_mb_is_none_when_comfyui_runs_on_the_cpu(
+    engine_clock: types.SimpleNamespace, device_type: str
+) -> None:
+    """On the CPU ``vram_*`` describe system RAM: not the GPU pool, never the engine's share."""
+    engine_clock.stats = {
+        "devices": [{"type": device_type, "vram_total": 64 * _GIB, "vram_free": 20 * _GIB}]
+    }
+
+    assert await comfyui_mod.engine_used_mb() is None
+
+
+async def test_engine_used_mb_reads_a_gpu_device(engine_clock: types.SimpleNamespace) -> None:
+    engine_clock.stats = {
+        "devices": [{"type": "cuda", "vram_total": 24 * _GIB, "vram_free": 20 * _GIB}]
+    }
+
+    assert await comfyui_mod.engine_used_mb() == 4 * 1024.0
+
+
+async def test_engine_used_mb_caches_for_5s(engine_clock: types.SimpleNamespace) -> None:
+    engine_clock.stats = _system_stats(used_gib=10)
+    assert await comfyui_mod.engine_used_mb() == 10 * 1024.0
+
+    engine_clock.stats = _system_stats(used_gib=20)
+    engine_clock.now += 4.9
+    assert await comfyui_mod.engine_used_mb() == 10 * 1024.0  # still the cached read
+    assert engine_clock.calls == 1
+
+    engine_clock.now += 0.2
+    assert await comfyui_mod.engine_used_mb() == 20 * 1024.0  # expired: read again
+    assert engine_clock.calls == 2
+
+
+async def test_engine_used_mb_caches_a_failed_read_too(
+    engine_clock: types.SimpleNamespace,
+) -> None:
+    engine_clock.stats = None
+    assert await comfyui_mod.engine_used_mb() is None
+    assert await comfyui_mod.engine_used_mb() is None
+
+    assert engine_clock.calls == 1  # a dead engine costs one attempt per 5 s, not per poll
+
+
+async def test_engine_used_mb_caches_a_cancelled_read(
+    monkeypatch: pytest.MonkeyPatch, engine_clock: types.SimpleNamespace
+) -> None:
+    """The caller's ``wait_for`` cancels a slow read; the next poll must not wait again."""
+    calls = 0
+
+    async def slow() -> dict[str, Any] | None:
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(3)
+        return _system_stats(used_gib=1)
+
+    monkeypatch.setattr(comfyui_mod, "_fetch_engine_stats", slow)
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(comfyui_mod.engine_used_mb(), 0.05)
+
+    assert await comfyui_mod.engine_used_mb() is None
+    assert calls == 1
+
+
+async def test_reset_state_drops_the_engine_cache(engine_clock: types.SimpleNamespace) -> None:
+    engine_clock.stats = _system_stats(used_gib=10)
+    await comfyui_mod.engine_used_mb()
+
+    comfyui_mod._reset_state()
+    await comfyui_mod.engine_used_mb()
+
+    assert engine_clock.calls == 2
+
+
+async def test_engine_read_uses_short_timeouts_without_touching_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    class FakeClient:
+        async def get(self, url: str, **kwargs: Any) -> httpx.Response:
+            seen.update(kwargs, url=url)
+            return httpx.Response(200, json=_system_stats(used_gib=1))
+
+    comfyui_mod._reset_state()
+    monkeypatch.setattr(comfyui_mod, "_get_client", lambda: FakeClient())
+    monkeypatch.setenv("COMFYUI_BASE_URL", "http://engine.invalid:8188")
+
+    stats = await comfyui_mod._fetch_engine_stats()
+
+    assert stats == _system_stats(used_gib=1)
+    assert seen["url"] == "http://engine.invalid:8188/system_stats"
+    assert seen["timeout"].connect == 0.25
+    assert seen["timeout"].read == 0.5
+    # /status keeps its own, longer budget.
+    assert comfyui_mod._DEFAULT_TIMEOUT.connect == 1.5
+    assert comfyui_mod._DEFAULT_TIMEOUT.read == 4.0
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        httpx.Response(503, json={}),
+        httpx.Response(200, content=b"not json"),
+        httpx.Response(200, json=["a", "list"]),
+        httpx.ConnectTimeout("slow"),
+        httpx.ConnectError("refused"),
+    ],
+)
+async def test_engine_read_is_none_on_any_failure(
+    monkeypatch: pytest.MonkeyPatch, outcome: object
+) -> None:
+    class FakeClient:
+        async def get(self, url: str, **kwargs: Any) -> httpx.Response:
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome  # type: ignore[return-value]
+
+    monkeypatch.setattr(comfyui_mod, "_get_client", lambda: FakeClient())
+
+    assert await comfyui_mod._fetch_engine_stats() is None
+
+
+def test_status_memory_and_engine_read_share_one_parse() -> None:
+    stats = _system_stats(used_gib=54)
+
+    status_used_gb = comfyui_mod._parse_memory(stats)["gtt_used_gb"]  # type: ignore[index]
+
+    assert status_used_gb == 54.0
+    assert comfyui_mod._device_used_bytes(stats) == 54 * _GIB

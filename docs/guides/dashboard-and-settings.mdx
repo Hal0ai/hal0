@@ -10,8 +10,9 @@ import { Aside } from '@astrojs/starlight/components';
 The dashboard has two layers: a shell that's on screen no matter what page
 you're looking at, and the pages themselves. This guide maps the shell —
 the command palette, the notifications bell, the Agent Chat launcher, the
-sidebar, and the footer — and then walks every page under **Settings**, so
-nothing in the operator surface is a surprise.
+sidebar, and the footer — then explains the memory figures the dashboard
+shows, and walks every page under **Settings**, so nothing in the operator
+surface is a surprise.
 
 ## The chrome
 
@@ -134,6 +135,62 @@ toggled. Collapsed, it shows two LED-pip groups plus a toggle:
 Expanded, it becomes a two-tab pane: **journal** (the live event stream,
 filterable by source and searchable) and **downloads** (active/queued/
 completed/failed model pulls with cancel, retry, and clear controls).
+
+## Memory figures
+
+The Slots page opens with a telemetry bar, the Overview page carries a health
+strip and a **Unified memory** card, and **Settings ▸ Overview** has a live
+hardware panel. They all take their pool, RAM and per-owner figures from one
+place, the `memory` block of `GET /api/stats/hardware`, so two screens cannot
+show two answers. The block holds two budgets that are never added together,
+because they are different resources:
+
+- **GPU pool · shared** is what the GPU loads models into on a unified-memory
+  machine: a pool shared with the host and with every other guest on the same
+  GPU. The ruler under the telemetry bar is titled "memory · GPU pool · shared",
+  and its total and usage are the kernel's own live counters. On a discrete card
+  the pool is **VRAM** and the ruler is titled "memory · VRAM". When the box has
+  no usable GPU, or the kernel's counters for the pool cannot be read, there is
+  no pool figure: the ruler is titled "memory · RAM" and measures this box's RAM
+  instead.
+- **RAM (this box)** is the memory this machine may use. The "CPU · RAM" cell
+  shows RAM in use over this box's RAM limit, and the Overview health strip's
+  "RAM" cell and the "RAM" row in Settings ▸ Overview show the same figure.
+  When hal0 runs in a container or under a cgroup limit, the cell reads
+  "/ N GB limit" and the other two say "container limit"; on a plain machine it
+  reads "/ N GB", the machine's total. hal0 reads the limit on every refresh,
+  from the machine's total and from every cgroup limit between the service and
+  the root, and takes the smallest, so a cap on a systemd slice or an LXC guest
+  counts. RAM in use
+  leaves out reclaimable page cache. It is system-wide, so under a cap below the
+  machine's total it can read above the limit. If hal0 cannot read RAM, these
+  cells show "—" and no figure. hal0 treats GPU pool memory as not charged to a
+  container's RAM limit, so unloading GPU slots frees little RAM.
+
+The ruler splits the pool's usage by who holds it. Each of this box's GPU slots
+is a segment named for the slot, sized by hal0's estimate of the memory it
+holds (the tooltip says "estimated"). **image engine** is the memory ComfyUI
+reports for its own device on a unified pool, or the `img` slot's estimate when
+ComfyUI does not answer; on a discrete card it is always the `img` slot's
+estimate, because ComfyUI's reading covers the whole card. The tooltip says
+"estimated" whenever it is the estimate. **other guests** is the striped block for whatever the pool holds that
+nothing on this box accounts for, such as a second guest on the same GPU, and it
+appears only when that is more than zero. On a box with no GPU pool, the
+**Unified memory** card shows "system" in that place instead: RAM in use beyond
+what loaded models hold. Estimates can add up to more than the counter. The
+total always comes from the counter, so the ruler scales its segments to fit
+the bar, the API reports the difference as `attribution_excess_gb`, and a real
+second guest can hide inside the overshoot.
+
+"free" is the pool's total less its usage. "headroom" is what is free in the
+resource that binds, less a 2 GB safety margin: the pool, this box's RAM when
+there is no pool, or the Proxmox host when one is configured and has less free.
+"limited by" names which one bound it.
+
+For the field list behind these figures, see the
+[Memory budget API reference](/docs/reference/api/memory-budget/);
+the design is recorded in
+[ADR-0039](/docs/adr/0039-memory-figures-have-one-owner).
 
 ## Settings
 

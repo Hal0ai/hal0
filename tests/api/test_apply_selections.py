@@ -9,7 +9,10 @@ is hermetic — assert orchestration, not network).
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
+
+from fastapi import FastAPI
 
 from hal0.config.schema import GPUInfo, HardwareInfo, NPUInfo
 
@@ -34,6 +37,19 @@ def _gpu_hardware() -> HardwareInfo:
 class _FakeProbe:
     def probe(self):
         return _gpu_hardware()
+
+
+def _wait_for_image_install(app: FastAPI, model_id: str, timeout: float = 5.0) -> None:
+    """Wait for the detached install the route scheduled to finish.
+
+    ``_schedule_install`` starts it with ``asyncio.create_task`` on the app loop and
+    returns first, so under ``TestClient`` it runs on the loop thread concurrently with
+    the test. The finished task untracks itself from ``app.state.image_install_tasks``.
+    """
+    deadline = time.monotonic() + timeout
+    while model_id in app.state.image_install_tasks:
+        assert time.monotonic() < deadline, f"the {model_id} install never finished"
+        time.sleep(0.01)
 
 
 def test_apply_selections_creates_only_selected_slots(
@@ -162,6 +178,7 @@ def test_installer_apply_starts_image_install_jobs(
     assert data["image_installs"] == [{"model_id": "sdxl-lightning", "job_id": job.job_id}]
     assert [s["slot"] for s in data["slots"]] == ["img"]
     assert data["slots"][0]["pull_job_id"] is None
+    _wait_for_image_install(app, "sdxl-lightning")
     assert ran == ["sdxl-lightning"]
     # It is the route's install, not a copy: asking for the model clears its removal record,
     # and the follow-ups (workflows, auto-select, Open WebUI) run once it completes.

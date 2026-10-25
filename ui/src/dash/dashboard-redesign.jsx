@@ -254,7 +254,7 @@ function HeroStrip({ slots, heroTps, layout, swapMode, onToggleSwapMode, onToggl
 
 // ─── band 0 · health strip ───────────────────────────────────────────────────
 
-function HealthStrip({ slots, heroTps, attentionItems }) {
+export function HealthStrip({ slots, heroTps, attentionItems }) {
   // #1797(3): /api/hardware sees the DRM node whether or not THIS box can
   // actually drive it (LXC shares the host's /sys/class/drm read-only) — a
   // CPU-only container reports the host iGPU's util/temp as if it were its
@@ -274,8 +274,9 @@ function HealthStrip({ slots, heroTps, attentionItems }) {
   ].filter(Boolean).join(' · ')
   const stats = useStatsHardware()
   const st = stats.data
-  // Shared memory-map model — the same pool total the Slots-page map and
-  // the memory hero card render, so the three figures can never diverge.
+  // Shared memory-map model, fed by the backend memory budget (ADR-0039) —
+  // the same figures the top bar, the Slots-page map and the memory hero card
+  // render, so they can never diverge.
   const mm = useMemoryMapModel()
 
   const readyCount = slots.filter((s) => {
@@ -283,9 +284,9 @@ function HealthStrip({ slots, heroTps, attentionItems }) {
     return cls === 'serving' || cls === 'stale'
   }).length
 
-  const ramUsedGb = st?.ram_used_mb != null ? mbToGb(st.ram_used_mb) : null
-  const ramTotalGb = st?.ram_total_mb != null ? mbToGb(st.ram_total_mb) : null
-  const memTotalGb = (mm.pool.kind === 'unified' ? mm.pool.totalGb : 0) || ramTotalGb
+  // This box's RAM, used over its limit (the container's when one caps it).
+  // null when the backend could not read RAM: no figure then, never "0/0 GB".
+  const ram = mm.ram
   const gpuUtil = gpuUtilReading(st)
   const gpuPct = gpuUtil.pct
   const gpuTemp = typeof st?.gpu_temp_c === 'number' ? Math.round(st.gpu_temp_c) : null
@@ -305,10 +306,10 @@ function HealthStrip({ slots, heroTps, attentionItems }) {
         </div>
       </div>
       <div className="rd-health-cell">
-        <div className="rd-health-k mono">unified memory</div>
-        <div className="rd-health-v mono num">
-          {ramUsedGb != null && memTotalGb != null && memTotalGb > 0
-            ? <>{ramUsedGb.toFixed(1)}<span className="dim2">/{Math.round(memTotalGb)} GB</span></>
+        <div className="rd-health-k mono">RAM</div>
+        <div className="rd-health-v mono num" title={ram?.source === 'container' ? 'container limit' : undefined}>
+          {ram
+            ? <>{ram.usedGb.toFixed(1)}<span className="dim2">/{Math.round(ram.limitGb)} GB</span></>
             : '—'}
         </div>
       </div>
@@ -356,6 +357,10 @@ function MemorySegment({ seg, barWidth, totalGb, onGo }) {
     )
   }
 
+  const go = () => {
+    if (seg.canGo) onGo('slots/' + seg.name)
+  }
+
   return (
     <div
       className="rd-mem-seg"
@@ -363,13 +368,13 @@ function MemorySegment({ seg, barWidth, totalGb, onGo }) {
       title={seg.tooltip}
       role="link"
       tabIndex={0}
-      onClick={() => onGo('slots/' + seg.name)}
-      onKeyDown={(e) => { if (e.key === 'Enter') onGo('slots/' + seg.name) }}
+      onClick={go}
+      onKeyDown={(e) => { if (e.key === 'Enter') go() }}
     >
       {showLabel && (
         <>
           <span className="rd-mem-seg-name mono" style={{ color: seg.color }}>
-            {seg.name} · {seg.gb.toFixed(1)}G
+            {seg.label} · {seg.gb.toFixed(1)}G
           </span>
           {seg.serving && (
             <span className="rd-mem-seg-sub mono num">
@@ -383,9 +388,8 @@ function MemorySegment({ seg, barWidth, totalGb, onGo }) {
   )
 }
 
-function MemoryHeroCard({ swap, onGo }) {
+export function MemoryHeroCard({ swap, onGo }) {
   const mm = useMemoryMapModel()
-  const stats = useStatsHardware()
   const hw = useHardware()
   const slotsQuery = useSlots()
   const slots = slotsQuery.data ?? []
@@ -398,18 +402,12 @@ function MemoryHeroCard({ swap, onGo }) {
   const [barRef, barWidth] = useMeasuredWidth()
 
   const pveConfigured = mm.host.mode === 'configured'
-  const ramTotalGb =
-    (stats.data?.ram_total_mb != null ? mbToGb(stats.data.ram_total_mb) : 0) ||
-    hw.data?.ram?.total || 0
-  // On a UMA/GPU box the pool ceiling is the shared memory-map model's GTT
-  // cap (live ttm.pages_limit) — the SAME total the Slots-page map renders.
-  // This card used to size the bar off ram_total_mb, so raising the GTT
-  // ceiling showed 116 GB on the Slots page and a stale 96 GB here.
-  const poolGb = mm.pool.kind === 'unified' ? (mm.pool.totalGb || 0) : 0
-  const totalGb = pveConfigured
-    ? (mm.host.totalGb || poolGb || ramTotalGb)
-    : (poolGb || ramTotalGb)
-  const ramUsedGb = stats.data?.ram_used_mb != null ? mbToGb(stats.data.ram_used_mb) : null
+  // The bar's total is the memory-map model's pool: the GPU pool's live total
+  // (the SAME figure the Slots-page map and the top-bar ruler render), or this
+  // box's RAM limit with no GPU pool. A configured Proxmox host swaps in the
+  // host DIMM total. The system block below is this box's own RAM in use.
+  const totalGb = pveConfigured ? (mm.host.totalGb || mm.pool.totalGb) : mm.pool.totalGb
+  const ramUsedGb = mm.ram ? mm.ram.usedGb : null
 
   // Per-slot allocations (BE-METRICS mem_mb, via the shared memory-map
   // model — same colors as the Slots-page map so the two never diverge).
@@ -422,6 +420,10 @@ function MemoryHeroCard({ swap, onGo }) {
       return {
         kind: 'slot',
         name: s.name,
+        // The image engine's memory is shown under its own name, not the img
+        // slot's; with no img slot listed there is no page to link to.
+        label: s.isImageEngine ? 'image engine' : s.name,
+        canGo: !s.isImageEngine || !!live,
         gb: s.bytesGb,
         // s.color is a var(--mem-slot-N) Okabe–Ito token (shared with the
         // Slots-page memory map). Fill = same hue at ~18% alpha.
@@ -429,20 +431,36 @@ function MemoryHeroCard({ swap, onGo }) {
         fill: `color-mix(in srgb, ${s.color} 18%, transparent)`,
         serving,
         toks: serving ? live?.metrics?.toks : null,
-        tooltip: `${s.name} · ${fmtGb(s.bytesGb)} · ${ind ? ind.label : '—'}`,
+        // Per-slot figures are the backend's attribution, an estimate. The
+        // image engine is one only when the backend says the img slot's row
+        // stood in for ComfyUI's own reading.
+        tooltip: `${s.isImageEngine ? 'image engine' : s.name} · ${fmtGb(s.bytesGb)}${s.estimated ? ' (estimated)' : ''} · ${ind ? ind.label : '—'}`,
       }
     })
 
   const allocGb = allocSegs.reduce((acc, s) => acc + s.gb, 0)
-  // System + page cache ≈ host RAM in use beyond what loaded models hold.
-  const systemGb = ramUsedGb != null ? Math.max(0, round1(ramUsedGb - allocGb)) : null
+  // The striped block. On a GPU box the bar is the GPU pool, so it is the pool
+  // usage held by neither this box's slots nor the image engine — "other
+  // guests", straight from the budget; mixing RAM into a pool bar would
+  // misstate it. With no GPU pool the bar is this box's RAM, so it is system +
+  // page cache ≈ RAM in use beyond what loaded models hold. A configured
+  // Proxmox host makes the bar host-wide instead: the pool's other guests are
+  // already inside the host's "others" block below, so the pool block is not
+  // drawn there (it would count them twice).
+  const poolBar = !!mm.gpu && !pveConfigured
+  const stripedName = poolBar ? 'other guests' : 'system'
+  const stripedGb = poolBar
+    ? mm.gpu.otherGuestsGb
+    : ramUsedGb != null
+      ? Math.max(0, round1(ramUsedGb - allocGb))
+      : null
   const segs = [...allocSegs]
-  if (systemGb != null && systemGb > 0) {
+  if (stripedGb != null && stripedGb > 0) {
     segs.push({
       kind: 'system',
-      gb: systemGb,
-      label: `system · ${systemGb.toFixed(1)}G`,
-      tooltip: `system + page cache · ${fmtGb(systemGb)}`,
+      gb: stripedGb,
+      label: `${stripedName} · ${stripedGb.toFixed(1)}G`,
+      tooltip: `${poolBar ? 'other guests' : 'system + page cache'} · ${fmtGb(stripedGb)}`,
     })
   }
   if (pveConfigured && mm.host.othersGb > 0) {
@@ -455,7 +473,15 @@ function MemoryHeroCard({ swap, onGo }) {
   }
 
   const usedGb = segs.reduce((acc, s) => acc + s.gb, 0)
-  const freeGb = totalGb > 0 ? Math.max(0, round1(totalGb - usedGb)) : null
+  // Free: on a GPU box the budget's own figure — the SAME number the top-bar
+  // ruler shows, so one screen never carries two. The attribution can
+  // overshoot the kernel counter, so it is not re-derived from the drawn
+  // blocks. A configured Proxmox host makes the bar host-wide, where the
+  // pool's free is not this bar's free, so the remainder stands. With no GPU
+  // pool it is the remainder of the RAM bar.
+  const freeGb = poolBar
+    ? mm.gpu.freeGb
+    : totalGb > 0 ? Math.max(0, round1(totalGb - usedGb)) : null
 
   const platform = hw.data?.platform_label || hw.data?.platform || ''
   const noteBits = [
@@ -483,12 +509,12 @@ function MemoryHeroCard({ swap, onGo }) {
       <div className="rd-mem-legend">
         {allocSegs.map((s) => (
           <span key={s.name} className="rd-mem-leg mono">
-            <i style={{ background: s.color }} />{s.name} {s.gb.toFixed(1)}G
+            <i style={{ background: s.color }} />{s.label} {s.gb.toFixed(1)}G
           </span>
         ))}
-        {systemGb != null && systemGb > 0 && (
+        {stripedGb != null && stripedGb > 0 && (
           <span className="rd-mem-leg rd-mem-leg-system mono">
-            <i className="striped" />system {systemGb.toFixed(1)}G
+            <i className="striped" />{stripedName} {stripedGb.toFixed(1)}G
           </span>
         )}
         {pveConfigured && mm.host.othersGb > 0 && (

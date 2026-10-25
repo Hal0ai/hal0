@@ -137,13 +137,17 @@ far larger than a typical discrete GPU's VRAM would allow.
 
 This shapes how hal0 reports memory. It does **not** add system RAM to GPU VRAM,
 because on a unified-memory APU that would double-count — the GPU's memory *is*
-host RAM shared via GTT. Instead the probe derives a single
-**unified-memory pool** figure and surfaces that as the headroom you actually
-have. (hal0 detects the unified-memory shape by recognising the tiny VRAM
+host RAM shared via GTT. Instead the dashboard shows one **GPU pool** — the GTT
+pool, read live from the kernel — and, beside it, this box's own RAM as a
+separate figure; the two are never summed. Headroom is the pool's free memory
+less a 2 GB safety margin. (hal0 detects the unified-memory shape by recognising the tiny VRAM
 carve-out alongside a large GTT pool; on a discrete GPU it reports VRAM and RAM
-separately.) When running inside a container or VM with a memory cap, hal0 also
-reads the cgroup limit and treats it as a third constraint, so the reported
-headroom reflects what you can really use.
+separately.) When running inside a container or VM with a memory cap, the RAM
+figure is measured against that limit — the smaller of the machine's total and
+any cgroup limit on the way up — but the cap does not bound the pool or the
+headroom: hal0 treats GPU pool memory as not charged to a container's RAM
+limit. See [Memory figures](/docs/guides/dashboard-and-settings/#memory-figures)
+in the dashboard guide.
 
 Because one pool is shared, two GPU workloads can't both hold their weights at
 once. That's exactly why the GPU arbiter exists (see the GPU arbiter
