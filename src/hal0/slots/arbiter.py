@@ -479,12 +479,10 @@ class GpuArbiter:
 
         Reads the group cache, in config order. The switch calls it right after
         refreshing the cache from ``iter_configs()``; :meth:`status` calls it
-        without I/O, so it answers from the cache as the last switch or restore
-        left it, and from nothing before the first one (a lookup by the
-        dispatch guard fills in single slots, not the set).
+        without I/O, only once the cache has been filled from the slot configs
+        (``_groups_known``: a lookup by the dispatch guard fills in single
+        slots, not the set), so it answers as the last refresh left it.
         """
-        if not self._groups_known:
-            return []
         return [
             name
             for name, group in self._group_cache.items()
@@ -1219,10 +1217,27 @@ class GpuArbiter:
 
     # ── restore loop ─────────────────────────────────────────────────────────
 
+    async def _warm_group_cache(self) -> None:
+        """Fill the group cache from the slot configs, once, best-effort.
+
+        :meth:`status` can answer ``unload_set`` in LLM mode only from a cache
+        a switch filled, so without this it stays unknown after every api
+        restart until the first render. A failure is logged and leaves the
+        cache cold (``unload_set`` stays ``None``); it never ends the loop.
+        """
+        try:
+            self._refresh_group_cache(await self._manager.iter_configs())
+        except Exception as exc:
+            log.warning(
+                "gpu_arbiter.group_cache_warm_failed",
+                extra={"error": str(exc), "error_type": type(exc).__name__},
+            )
+
     async def run_restore_loop(self, *, interval_s: float = _RESTORE_TICK_S) -> None:
         """Background loop handing the GPU back to the LLM set after image work.
 
-        Runs forever, one :meth:`_restore_tick` per ``interval_s``. It is the
+        Warms the group cache once (:meth:`_warm_group_cache`), then runs
+        forever, one :meth:`_restore_tick` per ``interval_s``. It is the
         only restore trigger for renders queued in ComfyUI's editor, and it
         heals an api restart in image mode (the first tick starts the quiet
         clock).
@@ -1231,6 +1246,7 @@ class GpuArbiter:
         the loop keeps running; ``CancelledError`` propagates so the lifespan
         can shut the task down cleanly.
         """
+        await self._warm_group_cache()
         while True:
             await asyncio.sleep(interval_s)
             try:
@@ -1326,12 +1342,15 @@ class GpuArbiter:
             while ``phase`` is ``grace`` / ``handoff`` respectively.
           - ``drain_in_flight``: requests still in flight on the slots being
             drained, while ``phase`` is ``draining``; else 0.
-          - ``unload_set``: in image mode the saved set (what is unloaded and
-            comes back). In LLM mode the llm-group slots ready for dispatch,
-            i.e. what a switch would unload now. The group cache that answer
-            reads is filled by switches (the slot configs need an async read),
-            so it is ``[]`` until this process has switched or restored once,
-            and is as of that last switch after it.
+          - ``unload_set``: ``list[str] | None``. In image mode the saved set
+            (what is unloaded and comes back). In LLM mode the llm-group slots
+            ready for dispatch, i.e. what a switch would unload now; ``[]``
+            means none, known. That answer reads the group cache, which needs
+            an async read of the slot configs to fill: the restore loop does it
+            once as it starts, and every switch and restore refreshes it. Until
+            one has, in LLM mode the set is unknown and reads ``None``, never
+            ``[]``; so does a slot read that failed. After that it is as of the
+            last refresh: slots added or reconfigured since are not seen.
           - ``llm_waiters``: LLM requests waiting for the GPU, and the age in
             seconds of the oldest (``None`` without any).
         """
@@ -1340,14 +1359,15 @@ class GpuArbiter:
         saved = list(st["saved_llm_slots"])
         now = time.monotonic()
 
-        unload_set = saved if in_img else []
+        unload_set: list[str] | None = saved if in_img else None
         drain_in_flight = 0
         still_loaded = False
         # The gate node reads this before every prompt and refuses the prompt when
         # the whole block is missing: a slot read must not take the block down.
         try:
             if not in_img:
-                unload_set = self._llm_slots_to_unload()
+                if self._groups_known:
+                    unload_set = self._llm_slots_to_unload()
             elif self._phase is None:
                 # #3059: a failed unload leaves image mode persisted with a
                 # saved-set slot still loaded on the GPU. Nothing is unloading

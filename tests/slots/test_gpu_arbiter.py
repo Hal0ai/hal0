@@ -1211,7 +1211,7 @@ async def test_status_reports_switching_and_image_jobs(
         "restore_at": None,
         "handoff_until": None,
         "drain_in_flight": 0,
-        "unload_set": [],
+        "unload_set": None,  # LLM mode, slot groups not read yet: unknown, not empty
         "llm_waiters": {"count": 0, "oldest_s": None},
     }
     async with arb.image_job():
@@ -1407,8 +1407,8 @@ async def test_unload_set_lists_ready_llm_slots_in_llm_mode(
     fake_mgr.ready.add("img")  # resident ComfyUI
     arb = GpuArbiter(fake_mgr, state_path=state_path)
     # The groups are known only after a switch has read the slot configs, and a
-    # sync status() cannot read them: nothing is listed before that.
-    assert arb.status()["unload_set"] == []
+    # sync status() cannot read them: the set is unknown (None), not empty.
+    assert arb.status()["unload_set"] is None
 
     await arb.ensure_img()
     assert arb.status()["unload_set"] == ["chat", "agent"]  # image mode: the saved set
@@ -1431,7 +1431,96 @@ async def test_unload_set_ignores_a_partly_warmed_group_cache(
     set of slots a switch would unload."""
     arb = GpuArbiter(fake_mgr, state_path=state_path)
     arb._group_cache["chat"] = "llm"
+    assert arb.status()["unload_set"] is None
+
+
+async def test_unload_set_is_none_when_cold(
+    fake_mgr: FakeManager, state_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unknown reads None and "known: nothing to unload" reads []: the dashboard
+    must not say there are no GPU slots to pause when it has not looked yet."""
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    assert arb.status()["unload_set"] is None  # LLM mode, nothing has read the configs
+
+    fake_mgr.ready.clear()  # nothing loaded: now it is known, and empty
+    await arb._warm_group_cache()
     assert arb.status()["unload_set"] == []
+
+    fake_mgr.ready.update({"chat", "agent"})
+    assert arb.status()["unload_set"] == ["chat", "agent"]
+
+    def _broken(_name: str) -> bool:
+        raise RuntimeError("slot manager cannot answer")
+
+    monkeypatch.setattr(fake_mgr, "is_ready_for_dispatch", _broken)
+    assert arb.status()["unload_set"] is None  # a read that failed is unknown too
+
+
+async def test_unload_set_is_known_in_image_mode_before_any_switch(
+    fake_mgr: FakeManager, state_path: Path
+) -> None:
+    """Image mode reads the saved set off the state file: no cache involved."""
+    state_path.write_text(
+        json.dumps({"mode": "img", "pinned": False, "saved_llm_slots": ["chat", "agent"]}),
+        encoding="utf-8",
+    )
+    assert GpuArbiter(fake_mgr, state_path=state_path).status()["unload_set"] == [
+        "chat",
+        "agent",
+    ]
+
+
+async def test_restore_loop_warms_group_cache(fake_mgr: FakeManager, state_path: Path) -> None:
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    assert arb.status()["unload_set"] is None
+
+    # A long interval: the warm-up happens before the first tick, not on it.
+    task = asyncio.create_task(arb.run_restore_loop(interval_s=3600))
+    await asyncio.sleep(0.05)
+    try:
+        assert arb.status()["unload_set"] == ["chat", "agent"]
+        assert fake_mgr.calls == []  # reading the configs loads and unloads nothing
+    finally:
+        await _cancel_loop(task)
+
+
+async def test_restore_loop_survives_a_failed_cache_warm(
+    fake_mgr: FakeManager,
+    state_path: Path,
+    comfyui_http: dict[str, Any],
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arb = GpuArbiter(fake_mgr, state_path=state_path, restore_grace_s=10.0)
+    async with arb.image_job():
+        await arb.ensure_img()
+    arb._quiet_since -= 11  # the grace has passed: the first tick restores
+
+    real_iter = fake_mgr.iter_configs
+    reads = 0
+
+    async def _iter_failing_once() -> list[dict[str, Any]]:
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            raise RuntimeError("config store not ready")
+        return await real_iter()
+
+    monkeypatch.setattr(fake_mgr, "iter_configs", _iter_failing_once)
+    caplog.set_level(logging.WARNING, logger="hal0.slots.arbiter")
+    task = asyncio.create_task(arb.run_restore_loop(interval_s=0.01))
+    try:
+        for _ in range(200):  # the loop ticks on and restores
+            if arb.mode is GpuMode.LLM:
+                break
+            await asyncio.sleep(0.01)
+        assert arb.mode is GpuMode.LLM
+        assert not task.done()
+    finally:
+        await _cancel_loop(task)
+
+    assert [r for r in caplog.records if r.message == "gpu_arbiter.group_cache_warm_failed"]
+    assert reads >= 2
 
 
 async def test_llm_waiters_counts_and_ages(fake_mgr: FakeManager, state_path: Path) -> None:
