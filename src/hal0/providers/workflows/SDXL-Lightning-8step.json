@@ -1,4 +1,25 @@
 {
+    "_meta": {
+        "description": "SDXL base with the 8-step Lightning LoRA and the fp16-fix VAE, Euler + sgm_uniform at cfg 1.",
+        "params": {
+            "positive_prompt": "node:6.inputs.text",
+            "negative_prompt": "node:7.inputs.text",
+            "width": "node:5.inputs.width",
+            "height": "node:5.inputs.height",
+            "batch_size": "node:5.inputs.batch_size",
+            "seed": "node:3.inputs.seed",
+            "steps": "node:3.inputs.steps",
+            "cfg": "node:3.inputs.cfg",
+            "filename_prefix": "node:9.inputs.filename_prefix"
+        },
+        "defaults": {
+            "steps": 8,
+            "cfg": 1.0,
+            "sampler_name": "euler",
+            "scheduler": "sgm_uniform",
+            "denoise": 1.0
+        }
+    },
     "4": {
         "inputs": {
             "ckpt_name": "sd_xl_base_1.0.safetensors"

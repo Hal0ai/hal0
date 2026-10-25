@@ -2889,6 +2889,100 @@ else
     fi
 fi
 
+# ── starter image models — OPT-IN, RAM-aware, default SKIP ──────────────────
+# Image generation works the moment a catalog model is on disk and selected, but
+# the models are large, so — like the agent anchor above — this is ASKED, never
+# assumed:
+#
+#   * the menu is the catalog models the API can render, with the one that suits
+#     this box's memory marked [recommended]; any of them can be picked instead;
+#   * the default answer is NONE (bare Enter skips);
+#   * it sits behind `_interactive`, so `curl | bash`, a tty-less ssh install and
+#     HAL0_NONINTERACTIVE=1 all skip WITHOUT BLOCKING;
+#   * a failed download warns and the install continues.
+#
+# Every menu line, size included, comes from
+# `python -m hal0.install.image_models --plan`, and every answer is validated by
+# `--resolve`: bash never hardcodes a figure or parses the grammar itself.
+#
+# HAL0_IMAGE_MODELS opts in unattended: `recommended`, or catalog ids / menu
+# numbers separated by commas or spaces. `none` or `0` forces the skip even on a
+# terminal. --no-start skips the step: it starts the img slot. The first model
+# that lands becomes the image-generation model, and
+# Open WebUI's environment is re-rendered for it (a running Open WebUI restarts;
+# a skipped or stopped one stays down).
+_img_plan=""
+_img_answer=""
+_img_ids=""
+_img_rc=0
+_img_n=0
+_img_list=()
+
+if [[ "${DEV_MODE}" -eq 1 ]]; then
+    :  # dev mode writes nothing to the system store — no offer, no notice
+elif [[ "${HAL0_SKIP_SETUP:-0}" == "1" || "${HAL0_IMAGE_MODELS:-}" == "none" || "${HAL0_IMAGE_MODELS:-}" == "0" ]]; then
+    info "Skipping the starter image models (HAL0_SKIP_SETUP/HAL0_IMAGE_MODELS set to skip)."
+elif [[ "${NO_START}" -eq 1 ]]; then
+    # The step starts the img slot (and pulls ComfyUI's runtime) once a model lands,
+    # which --no-start promises not to do: skip the whole step, not just the start.
+    info "Skipping the starter image models (--no-start). Install one later with 'hal0 comfyui models install <id>' or from the dashboard."
+else
+    # `|| true`: a plan that cannot be computed is simply no offer. Never fatal.
+    _img_plan="$("${VENV_DIR}/bin/python" -m hal0.install.image_models --plan 2>/dev/null || true)"
+    if [[ -z "${_img_plan}" ]]; then
+        info "Starter image models are not offered (the plan could not be computed on this box)."
+    elif [[ "${_img_plan}" == none$'\t'* ]]; then
+        info "Starter image models are not offered: ${_img_plan#none$'\t'}"
+    elif [[ -n "${HAL0_IMAGE_MODELS:-}" ]]; then
+        info "Image models via HAL0_IMAGE_MODELS=${HAL0_IMAGE_MODELS}"
+        if ! _img_ids="$("${VENV_DIR}/bin/python" -m hal0.install.image_models --resolve "${HAL0_IMAGE_MODELS}")"; then
+            warn "HAL0_IMAGE_MODELS=${HAL0_IMAGE_MODELS} did not resolve to any image model (see above) — none downloaded"
+            _img_ids=""
+        fi
+    elif _interactive; then
+        printf '\n' >/dev/tty 2>/dev/null || true
+        info "Optional: download a starter image model so the img slot can generate images. The recommended pick suits this box's memory."
+        while IFS=$'\t' read -r _img_id _img_desc _img_rec; do
+            _img_n=$((_img_n + 1))
+            if [[ "${_img_rec}" == "1" ]]; then
+                info "  ${_img_n}) ${_img_id}: ${_img_desc} [recommended]"
+            else
+                info "  ${_img_n}) ${_img_id}: ${_img_desc}"
+            fi
+        done <<< "${_img_plan}"
+        while :; do
+            _tty_read _img_answer "Image models to download (numbers, 'recommended', or Enter to skip)" ""
+            if [[ -z "${_img_answer}" ]]; then
+                break
+            fi
+            # --resolve exits 2 for an answer it cannot resolve (ask again) and 1 for
+            # an internal failure (asking again would not help: skip the step).
+            _img_rc=0
+            _img_ids="$("${VENV_DIR}/bin/python" -m hal0.install.image_models --resolve "${_img_answer}")" || _img_rc=$?
+            if [[ "${_img_rc}" -eq 0 ]]; then
+                break
+            elif [[ "${_img_rc}" -eq 2 ]]; then
+                warn "Not a valid choice (see above) — try again, or press Enter to skip."
+            else
+                warn "The image model step failed (see above) — skipping it; install a model later with 'hal0 comfyui models install <id>' or from the dashboard"
+                _img_ids=""
+                break
+            fi
+        done
+    else
+        info "Non-interactive install — no image model downloaded (set HAL0_IMAGE_MODELS=recommended to opt in)."
+    fi
+
+    if [[ -n "${_img_ids}" ]]; then
+        read -r -a _img_list <<< "${_img_ids}"
+        if HF_TOKEN="${HF_TOKEN_VAL}" "${VENV_DIR}/bin/python" -m hal0.install.image_models "${_img_list[@]}"; then
+            :
+        else
+            warn "an image model download did not complete — the install continues; retry later with 'hal0 comfyui models install <id>' or from the dashboard"
+        fi
+    fi
+fi
+
 # ── NPU prerequisites (FastFlowLM) ─────────────────────────────────────────
 # The npu container slot runs FLM inside the hal0-toolbox-flm image, but a
 # HOST FLM install is still required for the device-sanity probe

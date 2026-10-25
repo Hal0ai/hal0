@@ -28,12 +28,15 @@ memory extraction go dark) for as long as generation holds the GPU.
 
 ## Enable the img capability
 
-Install an image model first. `hal0 comfyui models list` shows the catalog,
-what each model still has to download, and the pick recommended for this box:
+Install an image model first. On a box that can run ComfyUI the installer
+offers a starter model and picks the one that suits the box's memory (see
+[Starter image model](/docs/getting-started/install/#starter-image-model));
+skip it and install later. `hal0 comfyui models list` shows the catalog, what
+each model still has to download, and the pick recommended for this box:
 
 ```sh
 hal0 comfyui models list
-hal0 comfyui models install sdxl-turbo
+hal0 comfyui models install sdxl-lightning
 ```
 
 `install` follows each download until it finishes, one model at a time when you
@@ -42,7 +45,8 @@ install fails, is cancelled or is refused; the same install is
 `POST /api/comfyui/models/{model_id}/install`. An install is refused up front
 (409 `comfyui.models_dir_not_writable`) when a directory it must write into is
 not writable by the hal0 user, so a permissions problem shows before the
-download starts, not after it. `list` marks the pick
+download starts, not after it; the same 409 is returned when the models tree
+cannot be read by the hal0 user. `list` marks the pick
 recommended for this box with `*` and shows the state of each model (`none`,
 `partial`, `complete`, or `installing`). `hal0 comfyui models remove <id>`
 deletes a model's weights and workflow (a file another installed model uses
@@ -53,17 +57,32 @@ that cannot be deleted stops the removal with 409 `comfyui.remove_failed`, which
 lists what had already gone), and `hal0 comfyui files` lists the weight files on
 disk, grouped by kind.
 
-Then point the `img` capability at the model you installed:
+hal0 writes a model's ComfyUI workflow when its install finishes. A model whose
+weights you copied into the models folder by hand reads as installed, so hal0
+writes its workflow when the API starts. A removal is remembered: a model you
+removed whose files stay on disk (another model still uses them) does not get
+its workflow back at the next start, and installing it again restores it. After
+an install or a removal hal0 re-renders Open WebUI's image settings, so the
+image button follows the models you have. A running Open WebUI restarts to pick
+them up; one you stopped or skipped stays down.
+
+On a box with a ROCm lane, the first image model you install that the API can
+render becomes the `img` selection by itself when nothing is selected, and
+selecting it starts the `img` slot. To pick or change the model, point the
+`img` capability at one you installed:
 
 ```sh
-hal0 capabilities set img img --model sdxl-turbo
+hal0 capabilities set img img --model sdxl-lightning
 ```
 
 This is the same pattern as every other capability — set the child
 (`img`) under its parent (`img`), pointing at an installed image model.
-`/v1/images/generations` renders `sdxl-turbo` today; the other catalog models
-run from the workflows in ComfyUI's editor for now, and `/v1` support for them
-is coming in the next release.
+Every installed catalog model the API can render works through
+`/v1/images/generations`: `sdxl-turbo`, `sd-1.5-pruned-emaonly`,
+`sdxl-lightning`, `qwen-image-lightning` and `qwen-image`. So do your own SDXL
+and SD 1.5 checkpoints, addressed as `ckpt/<path>`: put the file under the
+ComfyUI `checkpoints/` folder and `GET /api/comfyui/files` lists its id as
+`api_id`. Video, edit and upscale models stay in ComfyUI's editor.
 
 ## Read the generation-engine status
 
@@ -133,11 +152,11 @@ curl -X POST http://localhost:8080/api/comfyui/pin \
 The `img` slot's `[image]` table carries `idle_restore_minutes` (default
 `60` — how long ComfyUI can sit idle before the GPU arbiter restores LLM
 slots, hot-reloadable with no `hal0-api` restart), `default_size`
-(`"1024x1024"` for a slot that does not set it; the shipped `img` seed sets `""`,
-which is meant to mean the model's native size — until the render path honours
-that, an empty value falls back to `1024x1024`), and `default_steps`. Set these from the
-dashboard's Settings → Image-gen panel or edit the slot's TOML directly —
-see [Edit configuration](/docs/guides/configure).
+(`""` by default, meaning the model's native size, such as `1024x1024` for SDXL
+and `512x512` for SD 1.5), and `default_steps` (`0` means the workflow's own
+step count). A request's own `size`, or `steps` in `extra_body`, wins. Set
+these from the dashboard's Settings → Image-gen panel or edit the slot's TOML
+directly — see [Edit configuration](/docs/guides/configure).
 
 ### Which container image the `img` slot runs
 
@@ -158,7 +177,7 @@ want the resolved default.
 curl -X POST http://localhost:8080/v1/images/generations \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "sdxl-turbo",
+    "model": "sdxl-lightning",
     "prompt": "a cat in a hat, studio lighting",
     "n": 1,
     "size": "1024x1024",
@@ -167,10 +186,15 @@ curl -X POST http://localhost:8080/v1/images/generations \
 ```
 
 The route flips the GPU to image mode before dispatching, so a single
-call also performs the switchover when needed. `model` must be in the
-curated image catalogue — an off-catalogue model returns **404**
-(`image.model_not_curated`). A hal0 extension `extra_body` accepts
-`seed`, `steps`, `cfg`, and `negative_prompt`.
+call also performs the switchover when needed. `model` is an installed
+catalog model or a `ckpt/<path>` checkpoint; leave it out to use the model
+selected for `img`. Any other id returns **404** (`image.model_unknown`, with
+the ids that work), a catalog model that is not installed **409**
+(`image.model_not_installed`, naming the install call), and a video, edit or
+upscale model **422** (`image.model_not_renderable`). A hal0 extension
+`extra_body` accepts `seed`, `steps`, `cfg`, and `negative_prompt`. See
+[OpenAI-compatible API reference](/docs/reference/api/openai-compat/) for the
+resolution order and how `size` and `steps` default.
 
 The response is the OpenAI image shape:
 

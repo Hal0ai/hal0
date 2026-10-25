@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from hal0.cli import setup_command
 from hal0.cli.setup_command import _api_reachable, app, build_auto_selections
 from hal0.config.schema import GPUInfo, HardwareInfo, NPUInfo
 from hal0.install.extensions import ExtensionOutcome
@@ -114,8 +115,17 @@ def test_auto_selections_no_existing_seeds_all_default():
 
 
 def test_auto_selections_install_no_image_models():
-    """The auto and guided paths scaffold ComfyUI but never name image models."""
+    """`--auto` scaffolds ComfyUI but never names image models: nobody was asked."""
     assert build_auto_selections(_hw(96), storage_dir="/var/lib/hal0/models").image_models == ()
+
+
+def test_auto_selections_carry_the_image_models_an_operator_chose():
+    sel = build_auto_selections(
+        _hw(96),
+        storage_dir="/var/lib/hal0/models",
+        image_models=("sdxl-lightning", "sd-1.5-pruned-emaonly"),
+    )
+    assert sel.image_models == ("sdxl-lightning", "sd-1.5-pruned-emaonly")
 
 
 class _FakeProbe:
@@ -134,7 +144,7 @@ def headless(monkeypatch: pytest.MonkeyPatch) -> dict[str, list]:
     async def fake_run_auto(sel, hw, *, no_pull=False):
         calls["applied"] = [sel.image_models, no_pull]
 
-    def fake_install_models_blocking(model_ids, *, hf_token, on_line=None):
+    def fake_provision_offline(model_ids, *, hf_token, on_line):
         calls["install"].append((tuple(model_ids), hf_token, on_line))
         return [(model_id, calls.get("state", "completed")) for model_id in model_ids]
 
@@ -144,9 +154,7 @@ def headless(monkeypatch: pytest.MonkeyPatch) -> dict[str, list]:
 
     monkeypatch.setattr("hal0.cli.setup_command.HardwareProbe", _FakeProbe)
     monkeypatch.setattr("hal0.cli.setup_command._run_auto", fake_run_auto)
-    monkeypatch.setattr(
-        "hal0.comfyui.install.install_models_blocking", fake_install_models_blocking
-    )
+    monkeypatch.setattr("hal0.install.image_models.provision_offline", fake_provision_offline)
     monkeypatch.setattr("hal0.upstreams.huggingface.hf_token_from_env", lambda: "hf_from_env")
     monkeypatch.setattr("hal0.install.extensions.install_extension", fake_install_extension)
     return calls
@@ -182,7 +190,8 @@ def test_setup_headless_installs_image_models(headless, tmp_path):
     assert model_ids == ("sdxl-lightning", "esrgan-4x")
     assert hf_token == "hf_from_env"
     assert callable(on_line)
-    assert headless["extension"] == ["comfyui"]  # something landed: bring the img slot up
+    # `provision_image_models` owns starting the img slot; the setup path never enables it.
+    assert headless["extension"] == []
 
 
 def test_setup_headless_skips_image_models_under_no_pull(headless, tmp_path):
@@ -226,6 +235,108 @@ def test_setup_headless_without_models_skips_the_installer(headless, tmp_path):
     assert headless["install"] == []
 
 
+def test_setup_headless_installs_selects_and_starts_the_slot_once(monkeypatch, tmp_path):
+    """The headless chain, unstubbed below `provision_offline`, in the order it must run.
+
+    Download, then a normal apply (which writes the img unit and starts the slot); the
+    operator reads what is happening and what came of it on the way. Nothing else starts or
+    enables the unit: `provision_image_models` owns the start, and `systemctl enable` cannot
+    enable a Quadlet-generated unit anyway (it only printed a spurious warning).
+    """
+    events: list[str] = []
+
+    class Orchestrator:
+        async def get_state(self):
+            return {"selections": {}}
+
+        async def apply(self, slot, child, partial, *, if_unselected=False):
+            events.append(f"apply {slot}/{child} {partial['model']}")
+            return {"status": "ready"}
+
+    async def build_orchestrator():
+        return Orchestrator()
+
+    async def installed(model_ids, hf_token, say):
+        events.append("install " + ",".join(model_ids))
+        say("sdxl-lightning: installing")
+        return [(model_id, "completed") for model_id in model_ids]
+
+    def install_extension(ext_id):
+        events.append(f"extension {ext_id}")
+        return ExtensionOutcome(ext_id=ext_id, installed=True)
+
+    async def fake_run_auto(sel, hw, *, no_pull=False):
+        events.append("apply_setup")
+
+    monkeypatch.setattr("hal0.cli.setup_command.HardwareProbe", _FakeProbe)
+    monkeypatch.setattr("hal0.cli.setup_command._run_auto", fake_run_auto)
+    monkeypatch.setattr("hal0.capabilities.catalog.comfyui_backends", lambda: ["gpu-vulkan"])
+    monkeypatch.setattr("hal0.comfyui.install.install_each", installed)
+    monkeypatch.setattr("hal0.install.image_models._build_offline_orchestrator", build_orchestrator)
+    monkeypatch.setattr(
+        "hal0.components.openwebui_arm.reconcile_openwebui_env", lambda: events.append("owui") or {}
+    )
+    monkeypatch.setattr("hal0.install.extensions.install_extension", install_extension)
+    answers = _answers_file(tmp_path, "{ mode: scaffold_and_download, models: [sdxl-lightning] }")
+
+    result = CliRunner().invoke(app, ["--answers", answers])
+
+    assert result.exit_code == 0, result.output
+    assert events == [
+        "apply_setup",
+        "install sdxl-lightning",
+        "apply img/img sdxl-lightning",
+        "owui",
+    ]
+    assert "could not enable" not in result.output
+    lines = result.output.splitlines()
+    starting = next(i for i, line in enumerate(lines) if "this starts the image engine" in line)
+    assert "downloads the ComfyUI runtime" in lines[starting]
+    after = [line for line in lines[starting + 1 :] if "is the default image model" in line]
+    assert after[0].endswith("is the default image model; the image engine is ready")
+
+
+def test_setup_headless_with_a_selection_in_place_starts_nothing(monkeypatch, tmp_path):
+    """A kept selection means nothing is started: not by the auto-select, not by the setup path."""
+    events: list[str] = []
+
+    class Orchestrator:
+        async def get_state(self):
+            selection = {"enabled": True, "model": "sdxl-turbo"}
+            return {"selections": {"img": {"img": selection}}}
+
+        async def apply(self, slot, child, partial, *, if_unselected=False):
+            events.append(f"apply {slot}/{child}")
+            return {"status": "ready"}
+
+    async def build_orchestrator():
+        return Orchestrator()
+
+    async def installed(model_ids, hf_token, say):
+        return [(model_id, "completed") for model_id in model_ids]
+
+    async def fake_run_auto(sel, hw, *, no_pull=False):
+        events.append("apply_setup")
+
+    monkeypatch.setattr("hal0.cli.setup_command.HardwareProbe", _FakeProbe)
+    monkeypatch.setattr("hal0.cli.setup_command._run_auto", fake_run_auto)
+    monkeypatch.setattr("hal0.capabilities.catalog.comfyui_backends", lambda: ["gpu-vulkan"])
+    monkeypatch.setattr("hal0.comfyui.install.install_each", installed)
+    monkeypatch.setattr("hal0.install.image_models._build_offline_orchestrator", build_orchestrator)
+    monkeypatch.setattr("hal0.components.openwebui_arm.reconcile_openwebui_env", lambda: {})
+    monkeypatch.setattr(
+        "hal0.install.extensions.install_extension",
+        lambda ext_id: events.append(f"extension {ext_id}") or ExtensionOutcome(ext_id=ext_id),
+    )
+    answers = _answers_file(tmp_path, "{ mode: scaffold_and_download, models: [sdxl-lightning] }")
+
+    result = CliRunner().invoke(app, ["--answers", answers])
+
+    assert result.exit_code == 0, result.output
+    assert events == ["apply_setup"]
+    assert "keeping sdxl-turbo as the default image model" in result.output
+
+
 def test_plan_lists_image_models_with_their_download_size(capsys):
     from hal0.cli.setup_plan import _render_plan_table
     from hal0.install.orchestrate import Selections
@@ -256,3 +367,126 @@ def test_plan_without_image_models_prints_no_image_table(capsys):
     )
 
     assert "Image models" not in capsys.readouterr().out
+
+
+# ── the guided flow's image-model prompt ─────────────────────────────────────
+
+
+@pytest.fixture
+def guided(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
+    """`run_interactive` with every side effect stubbed; returns what it asked and did.
+
+    `seen["answers"]` is the list of answers handed to the image-model prompt in order;
+    once it is empty the prompt gets its own default, as an operator pressing Enter does.
+    """
+    seen: dict = {"asked": [], "defaults": {}, "events": [], "installed": [], "answers": []}
+
+    def fake_prompt(question, default, *, console):
+        seen["asked"].append(question)
+        seen["defaults"][question] = default
+        if question.startswith("Image models") and seen["answers"]:
+            return seen["answers"].pop(0)
+        return default
+
+    def fake_confirm(question, default, *, console):
+        return False if "verification" in question else default
+
+    async def fake_run_auto(sel, hw, *, no_pull=False):
+        seen["events"].append("apply")
+        seen["selection"] = sel
+
+    def fake_install_image_models(model_ids):
+        seen["events"].append("install")
+        seen["installed"].append(tuple(model_ids))
+
+    monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(tmp_path / "comfyui"))
+    monkeypatch.setattr("hal0.capabilities.catalog.comfyui_backends", lambda: ["gpu-vulkan"])
+    monkeypatch.setattr(setup_command, "_prompt", fake_prompt)
+    monkeypatch.setattr(setup_command, "_confirm", fake_confirm)
+    monkeypatch.setattr(setup_command, "_run_auto", fake_run_auto)
+    monkeypatch.setattr(setup_command, "_existing_slot_names", lambda: frozenset())
+    monkeypatch.setattr(setup_command, "_install_image_models", fake_install_image_models)
+    return seen
+
+
+def _guided(tmp_path: Path, pool_gb: int = 96) -> None:
+    setup_command.run_interactive(_hw(pool_gb), storage_dir=str(tmp_path))
+
+
+def test_run_interactive_prompts_for_image_models(guided, tmp_path, capsys):
+    guided["answers"] = ["recommended"]
+
+    _guided(tmp_path)
+
+    image_prompts = [q for q in guided["asked"] if q.startswith("Image models")]
+    assert len(image_prompts) == 1
+    out = capsys.readouterr().out
+    assert "qwen-image-lightning" in out  # the 96 GB pick, listed in the table
+    assert "recommended" in out
+    assert guided["installed"] == [("qwen-image-lightning",)]
+    assert guided["selection"].image_models == ("qwen-image-lightning",)
+    assert guided["events"] == ["apply", "install"]  # downloads follow the slot apply
+
+
+def test_run_interactive_asks_after_the_scaffold_question(monkeypatch, guided, tmp_path):
+    order: list[str] = []
+    real_confirm = setup_command._confirm
+
+    def tracking_confirm(question, default, *, console):
+        order.append(question)
+        return real_confirm(question, default, console=console)
+
+    def tracking_prompt(question, default, *, console):
+        order.append(question)
+        return default
+
+    monkeypatch.setattr(setup_command, "_confirm", tracking_confirm)
+    monkeypatch.setattr(setup_command, "_prompt", tracking_prompt)
+
+    _guided(tmp_path)
+
+    kinds = [
+        "scaffold" if "Scaffold" in q else "images" if q.startswith("Image models") else "other"
+        for q in order
+    ]
+    assert kinds.index("images") == kinds.index("scaffold") + 1
+    assert "verification" in order[-1]  # the report question stays last
+
+
+def test_run_interactive_image_prompt_defaults_to_skip(guided, tmp_path):
+    _guided(tmp_path)  # Enter at every prompt
+
+    question = next(q for q in guided["asked"] if q.startswith("Image models"))
+    assert guided["defaults"][question] == "none"
+    assert guided["installed"] == []
+    assert guided["selection"].image_models == ()
+
+
+def test_run_interactive_reprompts_on_an_invalid_image_answer(guided, tmp_path, capsys):
+    guided["answers"] = ["bogus", "1"]
+
+    _guided(tmp_path)
+
+    assert len([q for q in guided["asked"] if q.startswith("Image models")]) == 2
+    assert "bogus" in capsys.readouterr().out  # said why, before asking again
+    assert guided["installed"] == [("sdxl-lightning",)]  # offer 1, catalog order
+
+
+def test_run_interactive_accepts_several_models(guided, tmp_path):
+    guided["answers"] = ["1,3"]
+
+    _guided(tmp_path)
+
+    assert guided["installed"] == [("sdxl-lightning", "sd-1.5-pruned-emaonly")]
+
+
+def test_run_interactive_offers_no_image_models_without_a_rocm_lane(
+    guided, tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr("hal0.capabilities.catalog.comfyui_backends", lambda: [])
+
+    _guided(tmp_path)
+
+    assert not any(q.startswith("Image models") for q in guided["asked"])
+    assert "no ROCm lane on this host" in capsys.readouterr().out
+    assert guided["installed"] == []

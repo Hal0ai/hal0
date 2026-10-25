@@ -5,7 +5,7 @@ Two layers:
   * ``hal0.openwebui.env_writer.dynamic_env_overrides`` — pure rendering,
     already-resolved inputs in, an overrides dict out.
   * ``hal0.openwebui.wiring`` — the live-truth resolver: reads
-    ``capabilities.toml`` and the curated registry, builds the baked
+    ``capabilities.toml`` and the ComfyUI models tree, builds the baked
     ComfyUI workflow, and calls the renderer above.
 
 The matrix the brief asks for: no embed slot / embed slot / comfyui
@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from hal0.comfyui import paths
+from hal0.comfyui.catalog import CATALOG, component_path
 from hal0.openwebui.env_writer import _DYNAMIC_ENV_KEYS, dynamic_env_overrides
 
 
@@ -26,6 +28,24 @@ def _write_capabilities_toml(home: str, body: str) -> None:
     etc = Path(home) / "etc" / "hal0"
     etc.mkdir(parents=True, exist_ok=True)
     (etc / "capabilities.toml").write_text(body, encoding="utf-8")
+
+
+@pytest.fixture(autouse=True)
+def _comfyui_data_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The ComfyUI models tree under ``tmp_path``: the baked workflow needs the model installed."""
+    root = tmp_path / "comfyui-data"
+    monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(root))
+    assert paths.models_root().is_relative_to(tmp_path)
+    return root
+
+
+def _install(model_id: str) -> None:
+    """Put every component file of catalog model ``model_id`` where an install would."""
+    root = paths.models_root()
+    for component in CATALOG[model_id].components:
+        path = component_path(component, root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x")
 
 
 # ── dynamic_env_overrides (pure renderer) ───────────────────────────────────
@@ -40,6 +60,7 @@ def test_no_gates_nulls_every_dynamic_key() -> None:
         image_model_id=None,
         image_workflow_json=None,
         image_workflow_nodes_json=None,
+        image_size=None,
         search_provider=None,
     )
     assert set(overrides) == set(_DYNAMIC_ENV_KEYS)
@@ -52,6 +73,7 @@ def test_embed_only_renders_rag_block_and_nulls_the_rest() -> None:
         image_model_id=None,
         image_workflow_json=None,
         image_workflow_nodes_json=None,
+        image_size=None,
         search_provider=None,
     )
     assert overrides["RAG_EMBEDDING_ENGINE"] == "openai"
@@ -67,6 +89,7 @@ def test_image_only_renders_comfyui_block_and_nulls_rag() -> None:
         image_model_id="sdxl-turbo",
         image_workflow_json='{"3": {}}',
         image_workflow_nodes_json="[]",
+        image_size="512x512",
         search_provider=None,
     )
     assert overrides["ENABLE_IMAGE_GENERATION"] == "True"
@@ -75,6 +98,8 @@ def test_image_only_renders_comfyui_block_and_nulls_rag() -> None:
     assert overrides["IMAGE_GENERATION_MODEL"] == "sdxl-turbo"
     assert overrides["COMFYUI_WORKFLOW"] == '{"3": {}}'
     assert overrides["COMFYUI_WORKFLOW_NODES"] == "[]"
+    # OWUI's default IMAGE_SIZE is whatever the caller resolved, not a constant.
+    assert overrides["IMAGE_SIZE"] == "512x512"
     assert overrides["RAG_EMBEDDING_ENGINE"] is None
 
 
@@ -87,10 +112,26 @@ def test_image_model_without_both_workflow_strings_is_not_rendered() -> None:
         image_model_id="sdxl-turbo",
         image_workflow_json=None,
         image_workflow_nodes_json=None,
+        image_size=None,
         search_provider=None,
     )
     assert overrides["ENABLE_IMAGE_GENERATION"] is None
     assert overrides["COMFYUI_WORKFLOW"] is None
+
+
+def test_image_model_without_a_size_is_not_rendered() -> None:
+    """The size is part of the resolved block: without it the block is not half-rendered
+    with a made-up IMAGE_SIZE."""
+    overrides = dynamic_env_overrides(
+        embed_model_id=None,
+        image_model_id="sdxl-turbo",
+        image_workflow_json='{"3": {}}',
+        image_workflow_nodes_json="[]",
+        image_size=None,
+        search_provider=None,
+    )
+    assert overrides["ENABLE_IMAGE_GENERATION"] is None
+    assert overrides["IMAGE_SIZE"] is None
 
 
 def test_both_embed_and_image_render_together() -> None:
@@ -99,6 +140,7 @@ def test_both_embed_and_image_render_together() -> None:
         image_model_id="sdxl-turbo",
         image_workflow_json='{"3": {}}',
         image_workflow_nodes_json="[]",
+        image_size="512x512",
         search_provider=None,
     )
     assert overrides["RAG_EMBEDDING_MODEL"] == "nomic-embed-text-v1.5"
@@ -111,6 +153,7 @@ def test_search_provider_renders_web_search_block() -> None:
         image_model_id=None,
         image_workflow_json=None,
         image_workflow_nodes_json=None,
+        image_size=None,
         search_provider={"engine": "searxng", "query_url": "http://searxng:8080/search?q=<query>"},
     )
     assert overrides["ENABLE_WEB_SEARCH"] == "True"
@@ -182,6 +225,7 @@ def test_wiring_status_matrix(
 ) -> None:
     from hal0.openwebui.wiring import openwebui_wiring_status
 
+    _install("sdxl-turbo")  # the images chip needs the selected model installed and renderable
     _write_capabilities_toml(tmp_hal0_home, toml_body)
     status = openwebui_wiring_status()
     # Chat/voice are unconditional (env_writer's static defaults).
@@ -190,6 +234,39 @@ def test_wiring_status_matrix(
     assert status["documents"] is expect_documents
     assert status["images"] is expect_images
     assert status["web_search"] is False  # no provider seam wired up yet
+
+
+@pytest.mark.parametrize(
+    ("model_id", "install", "wired"),
+    [
+        ("sdxl-turbo", True, True),
+        ("sdxl-turbo", False, False),  # selected, never downloaded (or removed since)
+        ("wan22-t2v", False, False),  # a catalog model the API cannot render
+        ("ckpt/absent", False, False),  # no such user checkpoint
+        ("my-custom-checkpoint.safetensors", False, False),  # not an id at all
+    ],
+    ids=["installed", "not-installed", "not-renderable", "absent-checkpoint", "not-an-id"],
+)
+def test_images_chip_is_lit_exactly_when_the_env_block_is_written(
+    tmp_hal0_home: str, model_id: str, install: bool, wired: bool
+) -> None:
+    """One owner: the Services chip and OWUI's image env block read the same resolution.
+
+    A selection that does not resolve to an installed, API-renderable model writes no image
+    settings, so the dashboard must not say the image button is wired.
+    """
+    from hal0.openwebui.wiring import openwebui_wiring_status, resolve_dynamic_env_overrides
+
+    if install:
+        _install(model_id)
+    _write_capabilities_toml(tmp_hal0_home, _img_selection(model_id))
+
+    status = openwebui_wiring_status()
+    overrides = resolve_dynamic_env_overrides()
+
+    assert (overrides["ENABLE_IMAGE_GENERATION"] == "True") is wired
+    assert status["images"] is wired
+    assert status["image_model"] == (model_id if wired else None)
 
 
 def test_wiring_status_agents_empty_without_registry(tmp_hal0_home: str) -> None:
@@ -254,45 +331,164 @@ def test_wiring_embed_slot_renders_rag_overrides(tmp_hal0_home: str) -> None:
 
 def test_wiring_comfyui_slot_bakes_the_real_translator_workflow(tmp_hal0_home: str) -> None:
     """The baked COMFYUI_WORKFLOW must match hal0's own translator output for
-    the SAME curated model — never a pasted-in literal (e.g. ODS's SDXL
+    the SAME catalog model — never a pasted-in literal (e.g. ODS's SDXL
     Lightning graph), and never a checkpoint hal0 doesn't actually ship."""
     from hal0.openwebui.wiring import resolve_dynamic_env_overrides
     from hal0.providers.comfyui_workflows import build_workflow
-    from hal0.registry.curated import get_curated
 
+    _install("sdxl-turbo")
     _write_capabilities_toml(tmp_hal0_home, _IMG_ONLY)
     overrides = resolve_dynamic_env_overrides()
 
-    curated = get_curated("sdxl-turbo")
-    assert curated is not None
+    model = CATALOG["sdxl-turbo"]
+    ckpt_file = model.components[0].relpath
     # A fixed seed so this build is byte-comparable to wiring's own call —
     # build_workflow() draws a random seed per call otherwise.
     expected_graph, _meta = build_workflow(
-        body={"prompt": "a placeholder prompt", "extra_body": {"seed": 0}},
-        model_class=curated.model_class,
-        ckpt_filename=curated.hf_file,
+        body={
+            "prompt": "a placeholder prompt",
+            "size": model.sizes[0],
+            "extra_body": {"seed": 0},
+        },
+        template=model.template,
         request_tag="openwebui",
     )
     got_graph = json.loads(overrides["COMFYUI_WORKFLOW"])
     got_graph["3"]["inputs"]["seed"] = 0
     assert got_graph == expected_graph
     # The checkpoint filename baked into the graph is the one hal0 actually
-    # ships for this curated id — sdxl-turbo, not ODS's Lightning checkpoint.
-    assert got_graph["4"]["inputs"]["ckpt_name"] == curated.hf_file
-    assert curated.hf_file != "sdxl_lightning_4step.safetensors"
+    # ships for this catalog id — sdxl-turbo, not ODS's Lightning checkpoint.
+    assert got_graph["4"]["inputs"]["ckpt_name"] == ckpt_file
+    assert ckpt_file != "sdxl_lightning_4step.safetensors"
+
+    assert overrides["IMAGE_SIZE"] == model.sizes[0] == "512x512"
 
     nodes = json.loads(overrides["COMFYUI_WORKFLOW_NODES"])
     node_types = {n["type"] for n in nodes}
-    assert {"prompt", "model", "width", "height", "steps", "seed", "n"} <= node_types
+    assert {"prompt", "width", "height", "steps", "seed", "n"} <= node_types
     prompt_node = next(n for n in nodes if n["type"] == "prompt")
     assert prompt_node["node_ids"] == ["6"]
-    model_node = next(n for n in nodes if n["type"] == "model")
-    assert model_node["node_ids"] == ["4"]
+    # OWUI writes its configured model id (a catalog id, never a checkpoint filename) into
+    # a "model" node, so it is never given one: the baked graph already carries the checkpoint.
+    assert "model" not in node_types
+
+
+def test_owui_baked_workflow_uses_catalog_template(tmp_hal0_home: str) -> None:
+    """The baked graph is the resolved model's own template, at its native size, and the node
+    map comes from that template's pointers."""
+    from hal0.comfyui.catalog import load_template, parse_pointer
+    from hal0.openwebui.wiring import _owui_baked_workflow
+
+    _install("sd-1.5-pruned-emaonly")
+
+    built = _owui_baked_workflow("sd-1.5-pruned-emaonly")
+
+    assert built is not None
+    graph = json.loads(built[0])
+    nodes = json.loads(built[1])
+    assert built[2] == "512x512"
+    params = load_template("sd15_simple")["_meta"]["params"]
+    # The sd15 template is the one rendered, at 512x512 rather than the translator's 1024 default.
+    width_node, width_field = parse_pointer(params["width"])
+    assert graph[width_node]["inputs"][width_field] == 512
+    ckpt_node, ckpt_field = parse_pointer(params["ckpt_name"])
+    assert graph[ckpt_node]["inputs"][ckpt_field] == "v1-5-pruned-emaonly.safetensors"
+    by_type = {n["type"]: n for n in nodes}
+    assert by_type["prompt"] == {
+        "type": "prompt",
+        "key": "text",
+        "node_ids": [parse_pointer(params["positive_prompt"])[0]],
+    }
+    assert "model" not in by_type
+
+
+def test_owui_baked_workflow_bakes_a_user_checkpoint_override(tmp_hal0_home: str) -> None:
+    """A ``ckpt/<path>`` selection bakes the operator's file into the generic template."""
+    import struct
+
+    from hal0.comfyui.catalog import load_template, parse_pointer
+    from hal0.openwebui.wiring import _owui_baked_workflow
+
+    raw = json.dumps(
+        {"conditioner.embedders.1.x": {"dtype": "F16", "shape": [1], "data_offsets": [0, 2]}}
+    ).encode("utf-8")
+    ckpt = paths.models_root() / "checkpoints" / "sub" / "mine.safetensors"
+    ckpt.parent.mkdir(parents=True)
+    ckpt.write_bytes(struct.pack("<Q", len(raw)) + raw + b"\x00\x00")
+
+    built = _owui_baked_workflow("ckpt/sub/mine")
+
+    assert built is not None
+    graph = json.loads(built[0])
+    node_id, field = parse_pointer(load_template("sdxl_simple")["_meta"]["params"]["ckpt_name"])
+    assert graph[node_id]["inputs"][field] == "sub/mine.safetensors"
+    # The OWUI "model" node stays out for a user checkpoint too.
+    assert "model" not in {n["type"] for n in json.loads(built[1])}
+
+
+def _img_selection(model: str) -> str:
+    return f"""
+schema_version = 2
+[selections.img.img]
+device = "gpu-vulkan"
+provider = "comfyui"
+model = "{model}"
+enabled = true
+"""
+
+
+def test_wiring_image_size_is_the_catalog_models_native_size(tmp_hal0_home: str) -> None:
+    """OWUI's default IMAGE_SIZE follows the resolved model: SD 1.5 is 512, not a hardcoded 1024."""
+    from hal0.openwebui.wiring import resolve_dynamic_env_overrides
+
+    _install("sd-1.5-pruned-emaonly")
+    _write_capabilities_toml(tmp_hal0_home, _img_selection("sd-1.5-pruned-emaonly"))
+
+    assert resolve_dynamic_env_overrides()["IMAGE_SIZE"] == "512x512"
+
+
+def test_wiring_image_size_is_a_user_sdxl_checkpoints_native_size(tmp_hal0_home: str) -> None:
+    import struct
+
+    from hal0.openwebui.wiring import resolve_dynamic_env_overrides
+
+    raw = json.dumps(
+        {"conditioner.embedders.1.x": {"dtype": "F16", "shape": [1], "data_offsets": [0, 2]}}
+    ).encode("utf-8")
+    ckpt = paths.models_root() / "checkpoints" / "mine.safetensors"
+    ckpt.parent.mkdir(parents=True)
+    ckpt.write_bytes(struct.pack("<Q", len(raw)) + raw + b"\x00\x00")
+    _write_capabilities_toml(tmp_hal0_home, _img_selection("ckpt/mine"))
+
+    overrides = resolve_dynamic_env_overrides()
+
+    assert overrides["ENABLE_IMAGE_GENERATION"] == "True"
+    assert overrides["IMAGE_GENERATION_MODEL"] == "ckpt/mine"
+    assert overrides["IMAGE_SIZE"] == "1024x1024"
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "sdxl-turbo",  # a catalog model that is not installed
+        "wan22-t2v",  # not API-renderable
+        "ckpt/absent",  # no such user checkpoint
+        "my-custom-checkpoint.safetensors",  # not an id at all
+        "",
+    ],
+)
+def test_owui_baked_workflow_is_none_when_the_model_does_not_resolve(
+    tmp_hal0_home: str, model_id: str
+) -> None:
+    from hal0.openwebui.wiring import _owui_baked_workflow
+
+    assert _owui_baked_workflow(model_id) is None
 
 
 def test_wiring_both_slots_renders_both_blocks(tmp_hal0_home: str) -> None:
     from hal0.openwebui.wiring import resolve_dynamic_env_overrides
 
+    _install("sdxl-turbo")
     _write_capabilities_toml(tmp_hal0_home, _BOTH)
     overrides = resolve_dynamic_env_overrides()
     assert overrides["RAG_EMBEDDING_MODEL"] == "nomic-embed-text-v1.5"
@@ -300,13 +496,11 @@ def test_wiring_both_slots_renders_both_blocks(tmp_hal0_home: str) -> None:
     assert overrides["ENABLE_IMAGE_GENERATION"] == "True"
 
 
-def test_wiring_non_curated_image_model_falls_back_to_raw_id_as_checkpoint(
+def test_wiring_image_model_that_does_not_resolve_is_not_wired(
     tmp_hal0_home: str,
 ) -> None:
-    """An operator-pulled model with no curated registry entry still gets a
-    workflow — the raw model id is used as the checkpoint filename and the
-    template falls back to the generic sdxl_turbo_simple graph (same
-    fallback build_workflow already gives an unknown model_class)."""
+    """A model that resolves to nothing renderable has no workflow to bake,
+    so images stay unwired rather than claim a default that cannot render."""
     from hal0.openwebui.wiring import resolve_dynamic_env_overrides
 
     _write_capabilities_toml(
@@ -321,6 +515,5 @@ enabled = true
 """,
     )
     overrides = resolve_dynamic_env_overrides()
-    assert overrides["ENABLE_IMAGE_GENERATION"] == "True"
-    graph = json.loads(overrides["COMFYUI_WORKFLOW"])
-    assert graph["4"]["inputs"]["ckpt_name"] == "my-custom-checkpoint.safetensors"
+    assert overrides["ENABLE_IMAGE_GENERATION"] is None
+    assert overrides["COMFYUI_WORKFLOW"] is None

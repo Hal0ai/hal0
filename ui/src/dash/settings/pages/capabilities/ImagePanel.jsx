@@ -11,7 +11,9 @@ import { ApplyBadge } from '../../shared/ApplyBadge.jsx'
 import { useCapabilitySelection } from './useCapabilitySelection.js'
 import { statusChip, PanelHeader, PanelFooter, EnabledRow, selStyle, inputStyle } from './shared.jsx'
 
-const DEF_SIZE = "1024x1024"
+// Empty = the model's native size (SD 1.5 / SDXL Turbo are 512x512). Writing a
+// literal size back on any save would pin every model to it.
+const DEF_SIZE = ""
 const DEF_STEPS = "0"
 const DEF_IDLE = "60"
 
@@ -50,7 +52,7 @@ export function ImagePanel({ registry }) {
       if (defaultsDirty) {
         // Coerce to ImageGenConfig field types (steps/idle non-negative ints).
         await editSlot.mutateAsync({ name: imgSlotName, body: { image: {
-          default_size: size.trim() || DEF_SIZE,
+          default_size: size.trim(),
           default_steps: Math.max(0, parseInt(steps, 10) || 0),
           idle_restore_minutes: Math.max(0, parseInt(idle, 10) || 0),
         } } })
@@ -91,9 +93,9 @@ export function ImagePanel({ registry }) {
             : <span className="chip mono" style={{fontSize: 10, padding: "1px 6px", color: "var(--fg-4)"}}>no img slot</span>}
         </div>
       </div>
-      <SRow k="Default size" sub="Output resolution as WxH (e.g. 1024x1024)"
+      <SRow k="Default size" sub="Output resolution as WxH (e.g. 1024x1024) · empty = the model's native size"
         actions={<ApplyBadge settingsKey="slot.image.default_size" registry={registry} />} v={
-        <input value={size} onChange={e => setSize(e.target.value)} placeholder={DEF_SIZE}
+        <input value={size} onChange={e => setSize(e.target.value)} placeholder="model native"
           disabled={!imgSlotName} className="mono" style={inputStyle(140)} />
       } />
       <SRow k="Default steps" sub="Sampler steps · 0 = use the model-class default"

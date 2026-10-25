@@ -171,6 +171,11 @@ _CRASH_LOOP_PARK_AFTER = 5
 _CRASH_LOOP_PARK_MAX_S = 3600.0
 
 
+def _is_comfyui_cfg(cfg: SlotConfig | dict[str, Any]) -> bool:
+    """True for a ComfyUI slot, whose model is a catalog image model and not a registry entry."""
+    return _cfg_provider(cfg) == "comfyui"
+
+
 def _crash_loop_remaining_s(failures: int, last_failure: float) -> float:
     """Seconds until the breaker permits the next spawn attempt (0 = now).
 
@@ -1873,8 +1878,11 @@ class SlotManager:
                 # state so dashboards can show "downloading model"
                 # separately from "container starting".  If the model is
                 # already on disk (or no pull hook is wired), skip
-                # straight to STARTING — both edges are legal.
-                if resolved_model and self._needs_pull(resolved_model):
+                # straight to STARTING — both edges are legal. A ComfyUI
+                # slot never pulls: its model is a catalog image model the
+                # LLM registry does not know, installed through
+                # ``POST /api/comfyui/models/<id>/install``.
+                if resolved_model and not _is_comfyui_cfg(cfg) and self._needs_pull(resolved_model):
                     await self._transition(
                         slot_name,
                         SlotState.PULLING,

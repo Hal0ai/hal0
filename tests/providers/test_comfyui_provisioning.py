@@ -153,19 +153,43 @@ def test_provision_is_idempotent(data_root: Path) -> None:
     assert len(first) == 2  # the model-paths file and the GPU-gate node
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permission bits")
+def _deny_writes_in(monkeypatch: pytest.MonkeyPatch, *directories: Path) -> None:
+    """Make creating a directory, or a file in one, under ``directories`` fail with EACCES.
+
+    A real ``chmod`` does nothing to root, which is who runs this suite in some containers,
+    so the permission failure is injected at the two calls the provisioner makes instead:
+    ``ensure_shared_dir`` for a directory and ``tempfile.mkstemp`` for the staged node.
+    """
+
+    def denied(path: Path) -> OSError:
+        return PermissionError(13, "Permission denied", str(path))
+
+    real_ensure = comfyui_provider.ensure_shared_dir
+    real_mkstemp = comfyui_provider.tempfile.mkstemp
+
+    def ensure(path: Path, *args: Any, **kwargs: Any) -> Any:
+        if any(Path(path).is_relative_to(d) for d in directories):
+            raise denied(path)
+        return real_ensure(path, *args, **kwargs)
+
+    def mkstemp(*args: Any, dir: Any = None, **kwargs: Any) -> Any:
+        if dir is not None and any(Path(dir).is_relative_to(d) for d in directories):
+            raise denied(dir)
+        return real_mkstemp(*args, dir=dir, **kwargs)
+
+    monkeypatch.setattr(comfyui_provider, "ensure_shared_dir", ensure)
+    monkeypatch.setattr(comfyui_provider.tempfile, "mkstemp", mkstemp)
+
+
 def test_provision_survives_readonly_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     locked = tmp_path / "locked"
     locked.mkdir()
-    locked.chmod(0o500)
     monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(locked / "comfyui"))
-    try:
-        with caplog.at_level(logging.WARNING, logger="hal0.providers.comfyui"):
-            provision_data_root()  # best-effort: logs, never raises
-    finally:
-        locked.chmod(0o700)
+    _deny_writes_in(monkeypatch, locked)
+    with caplog.at_level(logging.WARNING, logger="hal0.providers.comfyui"):
+        provision_data_root()  # best-effort: logs, never raises
     assert "comfyui.data_root_provision_failed" in caplog.text
     assert not (locked / "comfyui").exists()
 
@@ -256,21 +280,17 @@ def test_provision_recreates_missing_dirs_on_every_render(data_root: Path) -> No
     assert (data_root / "output").is_dir()
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permission bits")
 def test_provision_permission_warning_logged_once(
-    data_root: Path, caplog: pytest.LogCaptureFixture
+    data_root: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A read-only ``custom_nodes`` warns once, with the remedy, not on every render (I1)."""
     nodes = comfyui_paths.custom_nodes_dir()
     nodes.mkdir(parents=True)
     (nodes / _NODE).write_bytes(b"# installed as root, an older release's node\n")
-    nodes.chmod(0o555)
-    try:
-        with caplog.at_level(logging.WARNING, logger="hal0.providers.comfyui"):
-            provision_data_root()
-            provision_data_root()
-    finally:
-        nodes.chmod(0o755)
+    _deny_writes_in(monkeypatch, nodes)
+    with caplog.at_level(logging.WARNING, logger="hal0.providers.comfyui"):
+        provision_data_root()
+        provision_data_root()
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1, warnings
     assert f"cannot update {nodes / _NODE}" in warnings[0]
@@ -280,17 +300,16 @@ def test_provision_permission_warning_logged_once(
     assert [p.name for p in nodes.iterdir()] == [_NODE]
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permission bits")
-def test_provision_heals_once_the_node_dir_becomes_writable(data_root: Path) -> None:
+def test_provision_heals_once_the_node_dir_becomes_writable(
+    data_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A failed sync is retried (silently) on later renders; success is then memoised."""
     nodes = comfyui_paths.custom_nodes_dir()
     nodes.mkdir(parents=True)
-    nodes.chmod(0o555)
-    try:
+    with monkeypatch.context() as denied:  # the directory is writable again once this exits
+        _deny_writes_in(denied, nodes)
         provision_data_root()
         assert not (nodes / _NODE).exists()
-    finally:
-        nodes.chmod(0o755)
     provision_data_root()
     assert (nodes / _NODE).read_bytes() == _asset_bytes()
 

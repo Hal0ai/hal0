@@ -11,7 +11,7 @@ implements ONLY the subset of the schema that maps to
 about, not applied — their workstreams wire them in later per the
 field→destination map (§5). The download side of ``gen.mode:
 scaffold_and_download`` is applied by ``hal0 setup --answers`` itself
-(:func:`gen_download_requested`, then ``install_models_blocking``).
+(:func:`gen_download_requested`, then ``hal0.install.image_models.provision_image_models``).
 
 ``auto`` values resolve through the SAME resolvers ``build_auto_selections``
 uses (``suggest_models``, ``derive_device``/``derive_profile`` via

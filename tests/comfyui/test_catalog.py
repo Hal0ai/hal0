@@ -11,10 +11,13 @@ import pytest
 from hal0.comfyui import paths as comfyui_paths
 from hal0.comfyui.catalog import (
     CATALOG,
+    USER_CKPT_TEMPLATES,
     Component,
     ComponentKind,
     ImageModel,
     get_model,
+    install_path,
+    install_route,
     install_state,
     load_template,
     models_using,
@@ -95,6 +98,23 @@ def test_get_model() -> None:
     assert get_model("no-such-model") is None
 
 
+def test_install_route_names_the_install_call_for_messages_and_details() -> None:
+    assert install_path("sdxl-lightning") == "/api/comfyui/models/sdxl-lightning/install"
+    assert install_route("sdxl-lightning") == "POST /api/comfyui/models/sdxl-lightning/install"
+
+
+def test_install_path_is_the_route_the_api_serves() -> None:
+    """The one string the resolver, the capability gate and the CLI all name must be a route."""
+    from hal0.api.routes.comfyui import router
+
+    served = {
+        (method, f"/api/comfyui{route.path}")
+        for route in router.routes
+        for method in getattr(route, "methods", ())
+    }
+    assert ("POST", install_path("{model_id}")) in served
+
+
 def test_api_renderable_set() -> None:
     renderable = {m.id for m in CATALOG.values() if m.api_renderable}
     assert renderable == {
@@ -121,6 +141,15 @@ def test_renderable_models_declare_wxh_sizes(model: ImageModel) -> None:
         width, _, height = size.partition("x")
         assert width.isdigit()
         assert height.isdigit()
+
+
+@pytest.mark.parametrize("model", CATALOG.values(), ids=lambda m: m.id)
+def test_id_and_label_are_safe_in_a_tab_separated_menu(model: ImageModel) -> None:
+    """`hal0.install.image_models --plan` prints `id<TAB>label — …<TAB>flag` lines for install.sh."""
+    for text in (model.id, model.label):
+        assert "\t" not in text
+        assert "\n" not in text
+        assert "\r" not in text
 
 
 # ── recommendation ──────────────────────────────────────────────────────────
@@ -204,9 +233,10 @@ def test_lightning_loras_match_their_base_model() -> None:
 
 
 def test_every_shipped_template_belongs_to_a_model() -> None:
+    """A template is a model's, or a generic one for a caller-supplied checkpoint."""
     package = resources.files("hal0.providers.workflows")
     shipped = {p.name.removesuffix(".json") for p in package.iterdir() if p.name.endswith(".json")}
-    assert shipped == {m.template for m in CATALOG.values()}
+    assert shipped == {m.template for m in CATALOG.values()} | set(USER_CKPT_TEMPLATES.values())
 
 
 def test_workflow_filenames_unique() -> None:
@@ -350,7 +380,7 @@ def test_models_using(models_root: Path) -> None:
 
 def test_load_template_keeps_meta() -> None:
     template = load_template("sdxl_turbo_simple")
-    assert template["_meta"]["model_class"] == "sdxl-turbo"
+    assert template["_meta"]["params"]["positive_prompt"] == "node:6.inputs.text"
     assert template["4"]["class_type"] == "CheckpointLoaderSimple"
 
 

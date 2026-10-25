@@ -56,8 +56,8 @@ class Selections:
     slots: list[SlotSelection]
     extensions: dict[str, bool]  # extension id -> enabled
     npu_opt_in: bool = False
-    # Image-catalog ids (hal0.comfyui.catalog) a headless run installs. Not part of
-    # apply_setup: the downloads run after it, from hal0.cli.setup_command.
+    # Image-catalog ids (hal0.comfyui.catalog) a headless or guided run installs. Not
+    # part of apply_setup: the downloads run after it, from hal0.cli.setup_command.
     image_models: tuple[str, ...] = ()
 
 

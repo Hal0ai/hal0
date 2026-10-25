@@ -46,6 +46,19 @@ from hal0.upstreams.registry import Upstream
 _DISPATCHABLE_STATES = frozenset({SlotState.READY, SlotState.SERVING, SlotState.IDLE})
 
 
+@pytest.fixture(autouse=True)
+def _sdxl_turbo_installed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The image tests post ``sdxl-turbo``, which only renders once its weights are on disk."""
+    from hal0.comfyui import paths
+    from hal0.comfyui.catalog import CATALOG, component_path
+
+    monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(tmp_path / "comfyui-data"))
+    for component in CATALOG["sdxl-turbo"].components:
+        path = component_path(component, paths.models_root())
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x")
+
+
 # ── dispatcher-level harness (mirrors test_serving_integration.py) ──────────
 
 

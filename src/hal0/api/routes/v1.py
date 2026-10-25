@@ -22,6 +22,7 @@ upstream protocol.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
 import json
@@ -1741,55 +1742,22 @@ def _seed_tts_defaults(tts_cfg: dict[str, Any], body: dict[str, Any]) -> None:
 # ── /v1/images/generations (ComfyUI provider, hal0-managed translation) ────
 
 
-def _is_comfyui_checkpoint_renderable(curated: Any) -> bool:
-    """True iff ``curated`` is safe to drive through the ComfyUI translator.
+async def _img_selection_model(request: Request) -> str | None:
+    """The model bound to the img capability, or ``None`` when none is bound and enabled.
 
-    #1470: the old gate was a bare ``curated.capability != "image"`` check.
-    Six curated entries carry capability="image", but two of them are not
-    ComfyUI checkpoint files: ``esrgan-4x`` is a RealESRGAN ``.pth`` upscaler
-    (``comfyui_subdir="upscale_models"``) and ``sdxl-lightning`` is a LoRA
-    that needs the SDXL base checkpoint already loaded — its own notes say
-    so. Both used to pass the old gate because ``template_for_model_class``
-    deliberately falls back to ``sdxl_turbo_simple`` for any unrecognised
-    ``model_class`` (so a curated id never 404s just for lacking a
-    dedicated template) — so the LoRA/.pth got silently pinned in as the
-    workflow *checkpoint*, producing a ComfyUI node failure or garbage
-    output instead of a clean 4xx.
-
-    Require BOTH: the entry is staged as an actual checkpoint file
-    (``comfyui_subdir == "checkpoints"``) AND its ``model_class`` resolves
-    to a real, explicitly-declared template — not the "unknown class"
-    default. Curated entries that intentionally reuse a template as a
-    documented soft-fallback (e.g. ``flux-klein`` → sdxl_turbo_simple, see
-    ``comfyui_workflows.MODEL_CLASS_TO_TEMPLATE``) still pass, since that's
-    a deliberate choice, not an accident of the two placeholder classes
-    (``"image"``, or an untagged class) that ``sdxl-lightning``/``esrgan-4x``
-    fall through on.
+    Read from the capability orchestrator's state (``selections.img.img``), the same truth
+    the dashboard shows. Only asked for when a request names no model; an orchestrator that
+    is missing or cannot answer is "nothing selected", which the caller reports as a 422.
     """
-    from hal0.providers.comfyui_workflows import MODEL_CLASS_TO_TEMPLATE
+    orchestrator = getattr(request.app.state, "capability_orchestrator", None)
+    if orchestrator is None:
+        return None
+    from hal0.comfyui.autoselect import enabled_img_model
 
-    if (curated.comfyui_subdir or "") != "checkpoints":
-        return False
-    model_class = (curated.model_class or "").lower()
-    return model_class in MODEL_CLASS_TO_TEMPLATE
-
-
-def _comfyui_renderable_builtin_ids() -> list[str]:
-    """Curated ids the ``/v1/images/generations`` gate actually accepts.
-
-    #1470: the 404 copy used to hardcode "sdxl-turbo, sd-1.5-pruned-
-    emaonly" — accurate the day it was written, but two names baked into a
-    string drift the moment the curated table gains or loses an entry.
-    Derive the list from the same predicate the gate itself uses so the
-    two can never disagree.
-    """
-    from hal0.registry.curated import CURATED_MODELS
-
-    return [
-        m.id
-        for m in CURATED_MODELS
-        if m.capability == "image" and _is_comfyui_checkpoint_renderable(m)
-    ]
+    try:
+        return await enabled_img_model(orchestrator)
+    except Exception:  # defensive: a probe failure must not turn a missing model into a 500
+        return None
 
 
 def _extract_port_from_upstream_url(url: str) -> int | None:
@@ -1814,10 +1782,12 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
     Body shape (subset honoured)::
 
         {
-          "model":           "sdxl-turbo",        # required; curated id
+          "model":           "sdxl-turbo",        # installed catalog id or "ckpt/<path>";
+                                                  # empty = the img capability's model
           "prompt":          "a cat in a hat",    # required
           "n":               1,                   # optional, batch_size
-          "size":            "1024x1024",         # optional, WxH
+          "size":            "1024x1024",         # optional, WxH; default = the img slot's
+                                                  # default_size, else the model's native size
           "response_format": "url" | "b64_json"   # optional, default "url"
         }
 
@@ -1833,27 +1803,42 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
             // OR
             {"b64_json": "<base64-encoded PNG>"}        // response_format=b64_json
           ],
-          "_hal0": {... debug meta from the workflow translator ...}
+          "_hal0": {"model": ..., "template": ..., "meta": ... translator debug meta ...}
         }
+
+    Model resolution (:func:`hal0.comfyui.resolve.resolve_image_model`) raises
+    404 ``image.model_unknown``, 409 ``image.model_not_installed``, 422
+    ``image.model_not_renderable`` or 422 ``image.model_required``; a models tree the hal0 user
+    cannot read answers 409 ``comfyui.models_dir_not_writable``.
     """
+    from hal0.comfyui.install import readable_tree
+    from hal0.comfyui.resolve import resolve_image_model
     from hal0.dispatcher.router import NoRouteFound, UpstreamUnavailable
     from hal0.errors import Hal0Error
     from hal0.providers import get_provider
-    from hal0.registry.curated import get_curated
 
     class _ImagePromptRequired(Hal0Error):
         code = "image.prompt_required"
         status = 422
 
-    class _ImageModelNotCurated(Hal0Error):
-        code = "image.model_not_curated"
-        status = 404
-
     body = await _read_json_body(request)
     if not body.get("prompt"):
         raise _ImagePromptRequired("body.prompt is required")
 
-    # 1. GPU arbitration (Phase D, spec §7) — BEFORE dispatch so the img
+    # 1. Resolve the model first: a request that cannot render must fail before the GPU
+    #    is arbitrated (a cold-start of the img container) on its behalf. The img
+    #    selection is only a fallback for a request that names no model.
+    raw_model = body.get("model")
+    model_arg = None if raw_model is None else str(raw_model)
+    selection_model = None if (model_arg or "").strip() else await _img_selection_model(request)
+    # Resolution scans the models tree (disk reads), so it runs off the event loop. A tree
+    # the hal0 user cannot traverse is the same 409 the models routes answer, not a 500.
+    with readable_tree():
+        resolved = await asyncio.to_thread(
+            resolve_image_model, model_arg, selection_model=selection_model
+        )
+
+    # 2. GPU arbitration (Phase D, spec §7) — BEFORE dispatch so the img
     #    upstream is registered before resolve_by_capability runs.  When the
     #    img slot is cold (the normal idle state after arbiter restore_llm),
     #    ensure_img() cold-starts the container which calls
@@ -1863,7 +1848,9 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
     #
     #    Also seed #599 request defaults from the img slot's [image] section
     #    (default_size / default_steps) here — before dispatch — so the body
-    #    the dispatcher sees already has the resolved defaults.
+    #    the dispatcher sees already has the resolved defaults. Size precedence:
+    #    the request, then the slot's non-empty default_size, then the model's
+    #    native size (below, once the slot has had its say).
     manager = getattr(request.app.state, "slot_manager", None)
     arbiter = manager.arbiter if manager is not None else None
     if manager is not None:
@@ -1897,28 +1884,13 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
             if exc.code != "gpu.img_slot_missing":
                 raise
         arbiter.touch_img_activity()
+    if not body.get("size"):
+        body["size"] = resolved.defaults["size"]
 
-    # 2. Resolve the slot the request should land on.  ensure_img() above
+    # 3. Resolve the slot the request should land on.  ensure_img() above
     #    guarantees the img upstream is registered, so resolve_by_capability
     #    Rule 4 (/images/ path) succeeds even on a cold slot.
     call = await dispatcher.dispatch(request, body=body)
-
-    # 3. Find the curated metadata for the requested model id so we know
-    #    which workflow template + checkpoint filename to pin into the
-    #    workflow.
-    requested = (body.get("model") or "").strip() or "sdxl-turbo"
-    curated = get_curated(requested)
-    if (
-        curated is None
-        or curated.capability != "image"
-        or not _is_comfyui_checkpoint_renderable(curated)
-    ):
-        builtins = ", ".join(_comfyui_renderable_builtin_ids())
-        raise _ImageModelNotCurated(
-            f"model {requested!r} is not a ComfyUI-renderable curated image-gen "
-            f"model; current built-ins: {builtins}",
-            details={"model": requested},
-        )
 
     # 4. Discover the local slot's port from the resolved upstream.
     upstream = request.app.state.upstreams.get(call.upstream_name)
@@ -1935,14 +1907,16 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
             details={"upstream": call.upstream_name, "url": upstream.url},
         )
 
-    # 5. Drive the ComfyUI provider directly. Inject the curated metadata
-    #    into the body so the provider's translator knows what to render
-    #    without re-looking-up the registry.
+    # 5. Drive the ComfyUI provider directly. Inject the resolved template and
+    #    checkpoint override so the provider's translator knows what to render
+    #    without resolving the model again. Always set from the resolution: a
+    #    client's own copies of these keys are overwritten, so a client can
+    #    never choose the template or the checkpoint file.
     provider = get_provider("comfyui")
     body_with_meta = {
         **body,
-        "_hal0_model_class": curated.model_class or "sdxl-turbo",
-        "_hal0_ckpt_filename": curated.hf_file,
+        "_hal0_template": resolved.template,
+        "_hal0_ckpt_override": resolved.ckpt_override,
     }
     result = await provider.infer(port, body_with_meta)
     if arbiter is not None:
@@ -1952,7 +1926,7 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
     # Track most-recent-model for dashboard.
     last_used = getattr(request.app.state, "last_used_model", None)
     if last_used is not None and call.upstream_name:
-        last_used[call.upstream_name] = requested
+        last_used[call.upstream_name] = resolved.id
 
     # 6. Emit OpenAI-shaped response.
     response_format = (body.get("response_format") or "url").lower().strip()
@@ -1974,7 +1948,8 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
             "meta": result.get("meta", {}),
             "prompt_id": result.get("prompt_id", ""),
             "upstream": call.upstream_name,
-            "model": requested,
+            "model": resolved.id,
+            "template": resolved.template,
         },
     }
     return Response(

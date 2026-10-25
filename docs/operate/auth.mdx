@@ -92,7 +92,7 @@ agents (Hermes, pi) read the box key from `/etc/hal0/api.env`. A client key
 does not turn enforcement on and does not count as an admin key for the
 LAN rule below. On a box installed before client keys existed, mint one with
 `hal0 auth rotate client`: hal0 re-renders Open WebUI's env and restarts it
-only if the rendered file changed.
+only if the rendered file changed and Open WebUI is running.
 </Aside>
 
 To go back to open access: `hal0 auth require off`. On a box bound past

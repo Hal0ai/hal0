@@ -22,6 +22,7 @@ and rename the weight files at render time (:attr:`ImageModel.file_substitutions
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -158,6 +159,40 @@ class InstallState:
 # ── templates ───────────────────────────────────────────────────────────────
 
 _WEIGHT_SUFFIXES = (".safetensors", ".pth", ".ckpt", ".pt", ".gguf")
+
+# The pointer contract of an API-renderable template. ``_meta.params`` maps a parameter name
+# to ``node:<id>.inputs.<field>``, the graph input that parameter patches, so the generation
+# route sets prompts, sizes and seeds without knowing which model a graph belongs to.
+# ``_meta.defaults`` holds the graph's own ``steps`` and ``cfg`` for requests that omit them.
+REQUIRED_PARAMS = (
+    "positive_prompt",
+    "width",
+    "height",
+    "seed",
+    "steps",
+    "cfg",
+    "filename_prefix",
+)
+OPTIONAL_PARAMS = ("negative_prompt", "batch_size", "ckpt_name")
+
+# Templates that load a caller-chosen checkpoint (``ckpt_name`` is patched), by model family.
+USER_CKPT_TEMPLATES: Mapping[str, str] = MappingProxyType(
+    {"sdxl": "sdxl_simple", "sd15": "sd15_simple"}
+)
+
+
+_POINTER = re.compile(r"node:(?P<node>\w+)\.inputs\.(?P<field>\w+)")
+
+
+def parse_pointer(pointer: str) -> tuple[str, str]:
+    """``(node id, input field)`` of a ``node:<id>.inputs.<field>`` pointer.
+
+    Raises :class:`ValueError` when ``pointer`` is not in that grammar.
+    """
+    match = _POINTER.fullmatch(pointer)
+    if match is None:
+        raise ValueError(f"malformed pointer {pointer!r}: expected node:<id>.inputs.<field>")
+    return match["node"], match["field"]
 
 
 def load_template(stem: str) -> dict[str, Any]:
@@ -688,11 +723,21 @@ def get_model(model_id: str) -> ImageModel | None:
     return CATALOG.get(model_id)
 
 
+def install_path(model_id: str) -> str:
+    """The API path that installs ``model_id`` (``POST``), for a client to call."""
+    return f"/api/comfyui/models/{model_id}/install"
+
+
+def install_route(model_id: str) -> str:
+    """The install call as an error message or ``details`` names it: ``POST <path>``."""
+    return f"POST {install_path(model_id)}"
+
+
 def recommended_model_id(pool_gb: float | None) -> str:
     """The starter model that suits a memory pool of ``pool_gb`` gigabytes.
 
     The pool is unified memory when the box has it, else system RAM, as
-    :func:`hal0.install.agent_model._pool_gb` computes it. ``None`` means the pool is
+    :func:`hal0.install.agent_model.pool_gb` computes it. ``None`` means the pool is
     unknown (the hardware file is unreadable, or the box was never probed): the middle
     pick, which any box that can run ComfyUI at all can take. Every other catalog model
     stays installable; this only picks the one to highlight.

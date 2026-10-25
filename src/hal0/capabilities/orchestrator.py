@@ -37,7 +37,11 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from hal0.capabilities.catalog import models_for_capability
+from hal0.capabilities.catalog import (
+    comfyui_row_backend,
+    comfyui_selection_device,
+    models_for_capability,
+)
 from hal0.capabilities.config import (
     CapabilityConfig,
     CapabilitySelection,
@@ -46,6 +50,7 @@ from hal0.capabilities.config import (
     save_capabilities_config,
 )
 from hal0.capabilities.profile_fit import profile_name_for_fit
+from hal0.comfyui.catalog import install_route
 from hal0.config import paths
 from hal0.config.loader import load_slot_config, write_toml_atomic
 from hal0.config.locking import file_lock
@@ -451,6 +456,8 @@ class CapabilityOrchestrator:
         slot: str,
         child: str,
         partial: dict[str, Any],
+        *,
+        if_unselected: bool = False,
     ) -> dict[str, Any]:
         """Merge a partial selection update and reconcile slot lifecycle.
 
@@ -458,6 +465,13 @@ class CapabilityOrchestrator:
         ``selections`` block of ``get_state()`` exposes. Wraps any
         underlying SlotManager / config error as :class:`CapabilityApplyFailed`
         so the HTTP layer renders a 503 envelope.
+
+        ``if_unselected`` makes the apply conditional, for a caller that only wants
+        to fill an empty selection (the auto-select after an image install). The
+        check is made under the same capabilities.toml lock that commits the
+        change, so a selection made by another writer after the caller last read it
+        is never replaced: when one is enabled with a model, nothing is written or
+        started and the result is that selection with ``"kept": True``.
         """
         if slot not in LEGAL_SLOTS:
             raise BadRequest(
@@ -510,6 +524,12 @@ class CapabilityOrchestrator:
                 code="capability.invalid_selection",
                 details={"slot": slot, "child": child, "partial": partial},
             ) from exc
+
+        # The two spellings of the ComfyUI lane (the picker row's gpu-vulkan and the
+        # seed's gpu-rocm) persist as one device, so applying the row's own backend
+        # never rewrites the ROCm-only slot to a Vulkan one.
+        if _CHILD_TO_CAPABILITY.get((slot, child)) == "image":
+            merged = merged.model_copy(update={"device": comfyui_selection_device(merged.device)})
 
         # voice.stt is a device-keyed engine switch with engines on cpu
         # (moonshine) and npu (FLM whisper) ONLY — hal0 ships no GPU STT
@@ -622,9 +642,23 @@ class CapabilityOrchestrator:
         # CLI/API writer cannot interleave its RMW and drop this change (the
         # committed ChangeSet is computed under the lock).
         try:
-            self._store.apply_and_commit(
-                SlotSelection(slot=slot, child=child, slot_name=slot_name, selection=merged)
-            )
+            # ``transaction()`` is re-entrant, so the conditional re-check below and
+            # ``apply_and_commit`` share ONE critical section (no await inside it).
+            with self._store.transaction():
+                if if_unselected:
+                    current = self._selection_with_defaults(self._load(), slot, child)
+                    if current.enabled and current.model.strip():
+                        return {
+                            "device": current.device,
+                            "provider": current.provider,
+                            "model": current.model,
+                            "enabled": current.enabled,
+                            "slot": slot_name,
+                            "kept": True,
+                        }
+                self._store.apply_and_commit(
+                    SlotSelection(slot=slot, child=child, slot_name=slot_name, selection=merged)
+                )
         except Exception as exc:
             raise CapabilityApplyFailed(
                 f"failed to persist capability change: {exc}",
@@ -806,14 +840,24 @@ class CapabilityOrchestrator:
         Empty ``backend_id`` skips the pair check — backend is allowed
         to be unset transiently while the user is still mid-selection;
         the slot lifecycle won't start until a backend lands anyway.
+
+        ``img`` is validated against the image catalog alone: modes 1 and 2
+        read its rows, mode 3 raises the same ``capability.model_not_downloaded``
+        naming ``POST /api/comfyui/models/<id>/install`` instead of the pull
+        route, and the registry fallback and the LLM model-fit check are skipped.
         """
         capability = _CHILD_TO_CAPABILITY.get((slot, child))
         if capability is None:
             return
+        # An image selection is validated against the image catalog alone: its
+        # rows are ComfyUI models and the operator's checkpoints, never LLM
+        # registry entries, so the registry fallback, the llama-server pull
+        # remediation and the LLM model-fit check below do not apply to it.
+        is_image = capability == "image"
         rows = models_for_capability(capability, registry=self._registry)
         match = next((row for row in rows if row["id"] == model_id), None)
         if match is None:
-            if self._registry is not None and self._registry.has(model_id):
+            if not is_image and self._registry is not None and self._registry.has(model_id):
                 if require_downloaded and backend_id != "npu":
                     self._require_registry_weights_present(slot, child, model_id, backend_id)
                 return
@@ -824,8 +868,11 @@ class CapabilityOrchestrator:
             )
         if not backend_id:
             return
+        # The row this device reads: an image selection's ``gpu-rocm`` (the seeded
+        # slot's device) is the picker's one ComfyUI GPU row.
+        row_backend = comfyui_row_backend(backend_id) if is_image else backend_id
         legal_backends = [b["id"] for b in match.get("backends", [])]
-        if backend_id not in legal_backends:
+        if row_backend not in legal_backends:
             raise BadRequest(
                 f"backend {backend_id!r} cannot serve model {model_id!r} for {slot}.{child}",
                 code="capability.illegal_backend_model_pair",
@@ -839,7 +886,7 @@ class CapabilityOrchestrator:
             )
         if require_downloaded and backend_id != "npu":
             backend_row = next(
-                (b for b in match.get("backends", []) if b.get("id") == backend_id),
+                (b for b in match.get("backends", []) if b.get("id") == row_backend),
                 None,
             )
             if backend_row is not None and backend_row.get("downloaded", True) is False:
@@ -849,7 +896,10 @@ class CapabilityOrchestrator:
                     model_id,
                     backend_id,
                     pullable=bool(backend_row.get("pullable")),
+                    install=install_route(model_id) if is_image else None,
                 )
+        if is_image:
+            return
         slot_type = _CAPABILITY_TO_SLOT_TYPE.get(capability)
         if slot_type is None:
             return
@@ -930,6 +980,7 @@ class CapabilityOrchestrator:
         backend_id: str,
         *,
         pullable: bool,
+        install: str | None = None,
     ) -> None:
         """Raise the typed 409 for an enabled selection with absent weights.
 
@@ -938,12 +989,20 @@ class CapabilityOrchestrator:
         before any container is spawned, naming the pull remediation,
         instead of launching llama-server with the bare model id and
         blocking through the crash-loop dwell.
+
+        ``install`` is the remediation for an image model, which is not a
+        registry pull: the catalog install route, ``POST
+        /api/comfyui/models/<id>/install``. It replaces the pull remediation,
+        is echoed in ``details["install"]``, and reports ``pullable: False`` so
+        a client does not reach for the registry pull endpoint.
         """
-        remediation = (
-            f"POST /api/models/{model_id}/pull, then re-apply once the pull completes"
-            if pullable
-            else "stage the weights on disk and register them, then re-apply"
-        )
+        if install is not None:
+            pullable = False
+            remediation = f"{install}, then re-apply once the install completes"
+        elif pullable:
+            remediation = f"POST /api/models/{model_id}/pull, then re-apply once the pull completes"
+        else:
+            remediation = "stage the weights on disk and register them, then re-apply"
         details: dict[str, Any] = {
             "slot": slot,
             "child": child,
@@ -953,7 +1012,9 @@ class CapabilityOrchestrator:
             "pullable": pullable,
             "remediation": remediation,
         }
-        if pullable:
+        if install is not None:
+            details["install"] = install
+        elif pullable:
             details["pull_endpoint"] = f"/api/models/{model_id}/pull"
         raise Conflict(
             f"weights for model {model_id!r} are not downloaded — {remediation}",

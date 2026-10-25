@@ -119,11 +119,27 @@ The one endpoint that is not a passthrough — it drives `ComfyUIProvider.infer(
 directly (graph submit + history poll), translating the OpenAI-shape request into a
 ComfyUI workflow.
 
-Request (subset honored): `{"model": <curated id>, "prompt": <required>, "n"?, "size"?, "response_format"?: "url"|"b64_json"}`, plus a hal0 extension `extra_body: {seed?, steps?, cfg?, negative_prompt?}`.
+Request (subset honored): `{"model": <id>, "prompt": <required>, "n"?, "size"?, "response_format"?: "url"|"b64_json"}`, plus a hal0 extension `extra_body: {seed?, steps?, cfg?, negative_prompt?}`.
 
 - Missing `prompt` → 422 `image.prompt_required`.
-- `model` must be one of the curated image models (e.g. `sdxl-turbo`,
-  `sd-1.5-pruned-emaonly`) → 404 `image.model_not_curated` otherwise.
+- `model` resolves in this order:
+  1. An installed (`complete`) catalog model the API can render: `sdxl-turbo`, `sd-1.5-pruned-emaonly`, `sdxl-lightning`, `qwen-image-lightning` or `qwen-image`.
+  2. `ckpt/<path>`, a checkpoint you put in the ComfyUI `checkpoints/` folder whose safetensors header sniffs as SDXL or SD 1.5. `<path>` is the file's path under `checkpoints/` without `.safetensors`: `ckpt/a` for `a.safetensors`, `ckpt/sub/a` for `sub/a.safetensors`. Flux, GGUF and unrecognised checkpoints get no id, and neither does a checkpoint a catalog model loads (for example the file `sdxl-turbo` installs): use that model's catalog id. `GET /api/comfyui/files` lists each id as `api_id`.
+  3. An empty or missing `model` takes the model selected for the `img` capability and resolves that through 1 and 2.
+
+  The request only picks a model by name; it cannot name a file path or choose the template.
+
+| Status | Code | When |
+|---|---|---|
+| 404 | `image.model_unknown` | Neither a catalog id nor a `ckpt/…` id that `GET /api/comfyui/files` lists as `api_id`, for example `Flux-2-Klein-9B-GGUF` or `sd-turbo`. `error.details.available` lists the ids that work now. |
+| 409 | `image.model_not_installed` | A renderable catalog model whose weights are not all on disk. `error.details` carries `install` (`POST /api/comfyui/models/<id>/install`) and `missing_gb`. |
+| 422 | `image.model_not_renderable` | A video, edit or upscale catalog model. Open it in the ComfyUI editor from Image Gen → Engine. |
+| 422 | `image.model_required` | No `model` in the request and no model selected for `img`. |
+
+Parameters the request leaves out are filled in this order:
+
+- `size`: the body, then the `img` slot's `[image].default_size` when it is not empty, then the model's native size (`1024x1024` for SDXL and `ckpt/` SDXL checkpoints, `512x512` for SD 1.5 and SDXL Turbo, `1328x1328` for Qwen-Image).
+- `steps`: `extra_body.steps`, then the slot's `[image].default_steps` when it is above `0`, then the workflow template's own default.
 
 Response:
 
@@ -131,12 +147,19 @@ Response:
 {
   "created": 1234567890,
   "data": [{ "url": "/api/images/cache/<uuid>.png" }],
-  "_hal0": { "meta": { "...": "..." }, "prompt_id": "...", "upstream": "...", "model": "..." }
+  "_hal0": {
+    "meta": { "...": "..." },
+    "prompt_id": "...",
+    "upstream": "...",
+    "model": "sdxl-lightning",
+    "template": "SDXL-Lightning-8step"
+  }
 }
 ```
 
 The `_hal0` block is a hal0-specific extra field, not part of the OpenAI response
-shape.
+shape. `model` is the id the request resolved to and `template` the ComfyUI workflow it
+rendered through.
 
 ## Response deviations
 
