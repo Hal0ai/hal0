@@ -148,7 +148,9 @@ no flag or context fields; those are the profile's.
 
 The `img` slot is the exception: image models are not registry rows, so its
 drawer shows the selected image model and a link to AI Capabilities → Image,
-where the model is picked, instead of a model picker.
+where the model is picked, instead of a model picker. The Image Gen tab's
+Models sub-tab picks it too (**Set as default**), and installs and removes
+image models; see [Generate images](/docs/guides/generate-images).
 
 Binding a model that is a fork-only quantization (ROCmFPX-family, IU4 or
 ActiveFPX) is refused rather than left to crash-loop: launching the slot

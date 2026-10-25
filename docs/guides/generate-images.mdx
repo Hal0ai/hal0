@@ -1,67 +1,124 @@
 ---
 title: Generate images
-description: Run Stable-Diffusion-family image generation on hal0 with ComfyUI — enable the img capability, read engine status, switch the iGPU between inference and generation, and call /v1/images/generations.
+description: Run image generation on hal0 with ComfyUI — install a model, see whether it fits the box, generate from the Image Gen tab, /v1/images/generations or Open WebUI, and know what a render does to chat.
 sidebar:
   order: 70
 ---
 
 import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components';
 
-hal0 generates images through **ComfyUI**, a node-graph Stable-Diffusion
-runtime, running as one containerized generation engine tuned for the AMD
-iGPU. Image generation is one of the four capability slots — `embed`,
-`voice`, `img`, `vision` — alongside chat.
+## What hal0 runs
 
-Because there is exactly one iGPU, image generation is **mutually
-exclusive** with the LLM stack: only one of them can hold GPU memory at a
-time. hal0 models this as a switchover driven by the GPU arbiter — the
-ComfyUI container stays resident, only its model memory is freed and
-reloaded.
+hal0 generates images through **ComfyUI**, a node-graph Stable-Diffusion
+runtime. It runs as one container in the `img` slot (the
+`hal0-slot@img.service` unit), one engine for every image model, tuned for the
+AMD iGPU. ComfyUI listens on the box's loopback (`127.0.0.1:8188`), so you
+generate through hal0, from the dashboard, `/v1/images/generations` or Open
+WebUI, and open ComfyUI's own editor on the box itself or through an SSH tunnel
+(see [Workflows and the ComfyUI editor](#workflows-and-the-comfyui-editor)).
+
+Because there is exactly one iGPU, the LLM slots and ComfyUI cannot both hold
+their weights in its memory. The GPU arbiter keeps the GPU in one of two modes:
+chat mode, or **image mode**, where ComfyUI holds the GPU and the GPU LLM slots
+are paused. Image mode lasts only while image work runs
+([ADR-0038](/docs/adr/0038-image-mode-lasts-only-while-an-image-renders)): a
+`/v1/images/generations` request from before the switch until its render
+returns, or a render in ComfyUI's queue from its editor. About 10 seconds after
+the last render, hal0 frees ComfyUI's models and reloads the slots it paused.
+NPU and CPU slots are never affected.
 
 <Aside type="caution">
 Switching the iGPU to generation **stops the LLM stack** (chat bots and
 memory extraction go dark) for as long as generation holds the GPU: while a
 render runs and for about 10 seconds after the last one, or until you unpin a
-pinned image mode. See [How long image mode lasts](#how-long-image-mode-lasts).
+pinned image mode. See [How long image mode lasts](/docs/guides/image-mode-and-gpu-gate#how-long-image-mode-lasts).
 </Aside>
 
-![The hal0 Image-Gen tab showing engine state, GPU memory gauges, and queue counts](/screenshots/image-gen-comfyui.png)
-*The Image-Gen tab: engine state, GPU memory gauges, queue, and switchover controls.*
+The dashboard's **Slots → Image Gen** tab has three sub-tabs under a GPU status
+line:
 
-## Enable the img capability
+- **Generate** — prompt, model, size, the fit check and the results.
+- **Models** — the image-model catalog: install, remove, and what fits.
+- **Engine** — the ComfyUI container (its state, `listens on loopback`, the GPU
+  gate as `current`, `stale`, `unknown` or `no credential`, **Restart engine**,
+  **Logs** and **Stop image mode**), the editor link, the queue as
+  `n running · n waiting` with hal0's own render beside it, and the GPU device's
+  temperature and clock.
 
-Install an image model first. On a box that can run ComfyUI the installer
-offers a starter model and picks the one that suits the box's memory (see
-[Starter image model](/docs/getting-started/install/#starter-image-model));
-skip it and install later. `hal0 comfyui models list` shows the catalog, what
-each model still has to download, and the pick recommended for this box:
+![The hal0 Image Gen tab on the Slots page](/screenshots/image-gen-comfyui.png)
+*The Image Gen tab on the Slots page.*
+
+## Install a model
+
+Image models are a ComfyUI catalog
+([ADR-0037](/docs/adr/0037-image-models-are-a-comfyui-catalog)), not rows in the
+LLM model registry: you install them here or with `hal0 comfyui`, not with
+`hal0 model pull`. On a box that can run ComfyUI, the installer offers a
+starter model that suits the box's memory (see
+[Starter image model](/docs/getting-started/install/#starter-image-model)); skip
+it and install later.
+
+### From the dashboard
+
+Open **Slots → Image Gen → Models**. The pane opens on this tab by itself, when
+the URL names no tab, while no model the API can render is installed. Its label
+reads `Models · N downloading` while an install runs.
+
+- Models are grouped by task: Text → Image, Image edit, Text → Video,
+  Image → Video and Upscale. A card shows the licence, the download size, the
+  time per image (or clip) and badges: `Recommended`, `Default`, `Editor only`
+  (the API cannot render it; run it in the ComfyUI editor), `Large` (30 GB or
+  more) and `Non-commercial` (the licence id contains `NC`).
+- The button follows the model's state: `Install`; `Install · N GB to download`
+  for a model with some files already on disk; `Cancel` with a progress bar, the
+  speed and the time left while it downloads; `Remove` once it is installed.
+  Remove asks first and lists the files it deletes and the files it keeps
+  because another installed model loads them. A full-precision variant (`-fp16`,
+  `-bf16`) that is not installed waits behind **More**.
+- An installed model the API can render also has **Set as default** (the `img`
+  selection) and **Generate** (opens the Generate tab on that model). An
+  installed editor-only model has **Open in ComfyUI**.
+- **All**, **Fits this box** and **Installed** filter the list, and the strip
+  above it shows the free space under the model store.
+
+While nothing renderable is installed and no install runs, the tab leads with
+**Set up image generation**: the recommended model as one button,
+`Install recommended — <label> (~N GB)`, with why it was chosen and two lighter
+alternatives. The reason reads `chosen from N GB of RAM (container limit)`, or
+`(system)` on a box with no container limit, or `chosen from N GB of GPU memory`
+when the GPU pool set the pick. N is the memory an image model can load into,
+the smaller of the GPU pool and this box's RAM limit; the server reports it as
+`recommendation` on `GET /api/comfyui/models`
+([Image readiness API reference](/docs/reference/api/image-readiness/)).
+
+### From the command line
 
 ```sh
 hal0 comfyui models list
 hal0 comfyui models install sdxl-lightning
 ```
 
-`install` follows each download until it finishes, one model at a time when you
-name several. It treats an already-installed model as done and exits 1 if an
-install fails, is cancelled or is refused; the same install is
-`POST /api/comfyui/models/{model_id}/install`. An install is refused up front
-(409 `comfyui.models_dir_not_writable`) when a directory it must write into is
-not writable by the hal0 user, so a permissions problem shows before the
-download starts, not after it; the same 409 is returned when the models tree
-cannot be read by the hal0 user. `list` marks the pick
-recommended for this box with `*` and shows the state of each model (`none`,
-`partial`, `complete`, or `installing`). `hal0 comfyui models remove <id>`
-deletes a model's weights and workflow (a file another installed model uses
-stays and is listed with the models that hold it, unless you pass
-`--include-shared`, which deletes it and names the models it uninstalls, workflows
-included; a file
-that cannot be deleted stops the removal with 409 `comfyui.remove_failed`, which
-lists what had already gone), and `hal0 comfyui files` lists the weight files on
-disk, grouped by kind. A file no catalog model loads, such as a checkpoint you
-copied in by hand, is deleted from the Models view's **Image / ComfyUI** tab or
-with `DELETE /api/comfyui/files/{subdir}/{relpath}` (MCP `comfyui_file_delete`);
-the call refuses a file a catalog model loads (409 `comfyui.file_catalog_owned`),
-a symlink, a hidden path part and any file that is not a weight file.
+- `list` shows the catalog, what each model still has to download and the pick
+  recommended for this box (`*`), and the state of each model (`none`,
+  `partial`, `complete` or `installing`).
+- `install` follows each download until it finishes, one model at a time when
+  you name several. It treats an already-installed model as done and exits 1 if
+  an install fails, is cancelled or is refused. The same install is
+  `POST /api/comfyui/models/{model_id}/install`, which answers 202 with the job
+  to follow on `GET /api/comfyui/jobs`; `POST /api/comfyui/jobs/{model_id}/cancel`
+  stops it.
+- `hal0 comfyui models remove <id>` deletes a model's weights and workflow. A
+  file another installed model uses stays and is listed with the models that
+  hold it, unless you pass `--include-shared`, which deletes it and names the
+  models it uninstalls, workflows included. A file that cannot be deleted stops
+  the removal with 409 `comfyui.remove_failed`, which lists what had already
+  gone.
+- `hal0 comfyui files` lists the weight files on disk, grouped by kind.
+
+An install is refused up front (409 `comfyui.models_dir_not_writable`) when a
+directory it must write into is not writable by the hal0 user, so a permissions
+problem shows before the download starts, not after it; the same 409 is
+returned when the models tree cannot be read by the hal0 user.
 
 hal0 writes a model's ComfyUI workflow when its install finishes. A model whose
 weights you copied into the models folder by hand reads as installed, so hal0
@@ -74,307 +131,64 @@ them up; one you stopped or skipped stays down.
 
 On a box with a ROCm lane, the first image model you install that the API can
 render becomes the `img` selection by itself when nothing is selected, and
-selecting it starts the `img` slot. Install a model first with
-`hal0 comfyui models install <id>` (`hal0 comfyui models list` shows the ids):
-picking one that is not downloaded yet is refused with 409
-`capability.model_not_downloaded`. To pick or change the model, use the
-**Model** row of AI Capabilities → Image in the dashboard (it lists the catalog
-models the API can render, marking those not downloaded yet, and your own
-`ckpt/<path>` checkpoints), or point the `img` capability at one you installed:
+selecting it starts the `img` slot. A selection you made is left alone.
 
-```sh
-hal0 capabilities set img img --model sdxl-lightning
-```
+### What a model is made of
 
-This is the same pattern as every other capability — set the child
-(`img`) under its parent (`img`), pointing at an installed image model.
-Every installed catalog model the API can render works through
-`/v1/images/generations`: `sdxl-turbo`, `sd-1.5-pruned-emaonly`,
-`sdxl-lightning`, `qwen-image-lightning` and `qwen-image`. So do your own SDXL
-and SD 1.5 checkpoints, addressed as `ckpt/<path>`: put the file under the
-ComfyUI `checkpoints/` folder and `GET /api/comfyui/files` lists its id as
-`api_id`. Video, edit and upscale models stay in ComfyUI's editor.
+A model is a set of weight files, each of one component type. Each type lands in
+its own folder under `<model store>/comfyui/models` (`models/` under
+`HAL0_COMFYUI_DATA_ROOT` when you set it), and **Models → Image / ComfyUI**
+groups the files on disk the same way, each marked with the catalog models that
+load it or as unmanaged.
 
-## Read the generation-engine status
+| Component | Folder | Loaded by, for example |
+|---|---|---|
+| Checkpoint | `checkpoints` | SDXL Lightning, SDXL Turbo, Stable Diffusion 1.5, LTX-2 |
+| Diffusion model | `diffusion_models` | Qwen-Image, Wan 2.2, HunyuanVideo 1.5 |
+| Text encoder | `text_encoders` | Qwen-Image, LTX-2, Wan 2.2 |
+| VAE | `vae` | SDXL Lightning, Qwen-Image |
+| LoRA | `loras` | SDXL Lightning, Qwen-Image Lightning, Wan 2.2 |
+| Upscaler | `upscale_models` | ESRGAN 4x |
+| CLIP vision | `clip_vision` | HunyuanVideo 1.5 Image to Video |
+| Latent upscaler | `latent_upscale_models` | LTX-2 |
 
-```sh
-curl http://localhost:8080/api/comfyui/status
-```
+A file two models load is stored once: Qwen-Image and Qwen-Image Lightning share
+their diffusion model, text encoder and VAE, so installing the second fetches
+only what is still missing. Video, image-edit and upscale models install the
+same way, but the API renders only text-to-image: those run in the ComfyUI
+editor. The files you can delete by hand are the ones no catalog model loads,
+such as a checkpoint you copied in: delete one from **Models → Image / ComfyUI**,
+or with `DELETE /api/comfyui/files/{subdir}/{relpath}` (MCP
+`comfyui_file_delete`). The call refuses a file a catalog model loads (409
+`comfyui.file_catalog_owned`), a symlink, a hidden path part and any file that
+is not a weight file.
 
-Key fields:
-
-- `mode` — `generation` (ComfyUI owns the iGPU) or `inference` (the LLM
-  stack owns it). The GPU arbiter is the source of truth.
-- `engine` — `running`, `generating` (a render is in flight), `starting`
-  (container up, port not bound yet), or `stopped`.
-- `reachable` — whether ComfyUI's HTTP API answers.
-- `container` — the `img` slot container's state (`running` / `exited` /
-  `absent`).
-- `queue` — `{running, pending}` job counts.
-- `switchover` — the in-flight switch tracker (`active`, `target`,
-  `error`).
-- `arbiter` — the GPU arbiter's own block: `mode` (`img` or `llm`),
-  `pinned`, `saved_llm_slots` (the slots it will reload), `switching` (true
-  while it holds its switch lock), `image_jobs` (the `/v1/images/generations`
-  requests in flight) and `phase`, what the GPU is doing right now:
-  `draining`, `unloading`, `starting_engine` or `reloading` during a switch or
-  restore, and `handoff`, `rendering` or `grace` in image mode, else `null`.
-  The whole block is `null` when the arbiter cannot report.
-- `progress` — the step of the render hal0 submitted that ComfyUI is running:
-  `model`, `step` out of `total`, `node` and `elapsed_s`; `null` when none is
-  live. A render queued from ComfyUI's editor has no entry; read `queue` for it.
-- `gate`, `gate_refusal` — whether the engine runs the current GPU gate, and
-  the latest prompt the gate refused (see
-  [ComfyUI's editor and the GPU gate](#comfyuis-editor-and-the-gpu-gate)).
-
-The status carries no memory figures. Read the `memory` block of
-`GET /api/stats/hardware` ([Memory budget API
-reference](/docs/reference/api/memory-budget/)) for the GPU pool and RAM.
-
-Every probe degrades to a safe default: a dead engine surfaces as
-`stopped`, never a 500.
-
-## Switch the iGPU between modes
-
-The `img` slot runs as the `hal0-slot@img.service` systemd unit. To hand
-the iGPU to ComfyUI (drains and unloads the LLM GPU slots, then ensures
-the resident container is up):
-
-```sh
-curl -X POST http://localhost:8080/api/comfyui/switchover \
-  -H 'Content-Type: application/json' \
-  -d '{"mode": "generation"}'
-```
-
-To hand it back to inference:
-
-```sh
-curl -X POST http://localhost:8080/api/comfyui/switchover \
-  -H 'Content-Type: application/json' \
-  -d '{"mode": "inference"}'
-```
-
-Body fields:
-
-| Field   | Type   | Notes |
-|---------|--------|-------|
-| `mode`  | string | `generation` or `inference` (required). |
-| `force` | bool   | Switching to `inference` drops any running/pending render. Without `force`, a busy queue is refused with **409**. |
-| `pin`   | bool   | `generation` only — hold image mode until you unpin it (`POST /api/comfyui/pin` with `{"pinned": false}`) or switch to `inference` with `force`. Without a pin, image mode ends about 10 seconds after the last render, as it does for every image request. |
-
-Responses: **202** (`switching`, poll `/status`), **200** (`noop`,
-already in the target mode), **409** (switch already in flight, or a busy
-queue without `force`), **503**
-(`comfyui.arbiter_unavailable` — the GPU arbiter isn't wired on this
-host; requires a configured `img` slot). Pin or unpin while image mode is
-on (pinning while the GPU serves LLMs answers **409**
-`comfyui.not_image_mode`; pass `pin` on the switchover instead):
-
-```sh
-curl -X POST http://localhost:8080/api/comfyui/pin \
-  -H 'Content-Type: application/json' \
-  -d '{"pinned": true}'
-```
-
-## How long image mode lasts
-
-Image mode lasts only while image work runs: a `/v1/images/generations`
-request, from before the switch until its render returns, or a render in
-ComfyUI's queue from its editor. About 10 seconds after the last render, hal0
-frees ComfyUI's models (`POST /free`) and reloads the LLM slots it had
-unloaded. This holds however image mode began: a switch to `generation`
-without `pin`, such as the dashboard's Start button, also ends about 10
-seconds after the switch when nothing renders. To keep image mode, pin it.
-
-- **A chat request ends the wait.** A request for a GPU LLM slot that arrives
-  while image mode is on waits for the render to finish and for the saved
-  slots to reload, up to 120 seconds in all, and is then served. It gets
-  `503 gpu.image_mode` (with `Retry-After: 15`) only when image mode is
-  pinned, when ComfyUI's queue cannot be read, or when the 120 seconds run
-  out. Requests for NPU and CPU slots are never affected.
-- **hal0 never restores under a render.** While a render runs or waits in
-  ComfyUI's queue, the reload waits. Switching to `inference` by hand while
-  one runs needs `force`, which drops it.
-- **A hand-off follows each request for image mode.** For about 3 seconds
-  (a render sent to `/v1` on a GPU already in image mode starts one too)
-  hal0 does not restore, so a prompt sent from ComfyUI's editor can reach
-  ComfyUI's queue, where hal0 sees it.
-- **A pin lasts until you end it.** `POST /api/comfyui/pin` with
-  `{"pinned": false}` unpins it, and a switch to `inference` with `force`
-  ends image mode and clears the pin. Pinning needs image mode: pass `pin` on
-  the switchover that enters it, because `{"pinned": true}` while the GPU
-  serves LLMs answers 409 `comfyui.not_image_mode`.
-- **A ComfyUI queue that never drains holds image mode.** hal0 restores LLM
-  mode only while ComfyUI's queue shows nothing running or pending, so a
-  wedged job keeps the GPU in image mode until you switch to `inference` with
-  `force`.
-
-### ComfyUI's editor and the GPU gate
-
-Prompts from ComfyUI's own editor do not pass through hal0, so ComfyUI loads
-a custom node, `hal0_gpu_gate`, that asks hal0 for image mode before each
-prompt is queued. hal0's own `/v1` renders pass through it too. The node
-reaches `hal0-api` on the port and address it binds (`HAL0_PORT` and
-`HAL0_BIND_HOST` in `/etc/hal0/api.env`), which hal0 writes into the `img`
-slot's unit. The prompt waits while hal0 switches the GPU, up to 180 seconds
-(the switch itself waits for running chat requests to finish). When the GPU
-is already in image mode, the node first tells hal0 the prompt is coming, and
-hal0 holds image mode for it for about 3 seconds, until ComfyUI's queue shows
-it.
-
-The node refuses the prompt and queues nothing, answering it with a 503 that
-carries the reason, when:
-
-- hal0 rejects the switch request;
-- hal0 stops answering while it switches the GPU;
-- hal0 still holds the GPU for the LLM slots after three switch requests;
-- the switch has not finished after 180 seconds;
-- hal0 is unreachable, or does not say which mode holds the GPU, for 5
-  seconds after the prompt is submitted;
-- hal0 answers 401 or 403, at once: the gate's credential is missing or no
-  longer current (see below).
-
-Queue the prompt again once the reason is gone. The node also tells hal0 why it
-refused, and `GET /api/comfyui/status` reports the latest as `gate_refusal`
-(`at` and `reason`). Its `gate.state` says whether the engine runs the current
-gate: `current`; `stale`, an older gate, so run `hal0 slot restart img`;
-`unknown`, because the gate has not called since `hal0-api` started; or
-`no_credential`, because hal0 requires the gate to authenticate and it has no
-token it can send.
-
-To let prompts through while `hal0-api` is down or refuses the gate's
-credential, as the gate did in v1.6.5, set `HAL0_COMFYUI_GATE_FAIL_OPEN=1` in
-`/etc/hal0/api.env`, restart `hal0-api`, then run `hal0 slot restart img`.
-hal0 writes the setting into the slot's unit when it loads the slot, so a bare
-`systemctl restart` of the unit does not pick it up. The setting covers only
-those two cases: a prompt that hal0 answered and refused stays refused. A
-prompt it lets through is unguarded: with `hal0-api` down the GPU most likely
-still holds the LLM slots, so it renders next to them.
-
-With auth enforcement on (`hal0 auth require on` or `HAL0_REQUIRE_AUTH=1`),
-or on a box whose `HAL0_BIND_HOST` is a specific address and that has an
-admin key, the gate authenticates with a token of its own, never the admin
-key. hal0 mints it when the `img` slot first starts and mounts it read-only
-into the container; it opens the gate's four requests and nothing else (see
-[ComfyUI's GPU gate credential](/docs/operate/auth#comfyuis-gpu-gate-credential)).
-An `img` container started before the update has no token, so on such a box it
-refuses every image prompt (the editor's, hal0's own `/v1` renders, Open
-WebUI's and the omni loop's) until you run `hal0 slot restart img`.
-
-**After updating hal0, run `hal0 slot restart img` once.** A running `img`
-container keeps the gate it started with, and `hal0 update` does not restart
-slots. hal0 keeps that older gate waiting while it switches or restores the
-GPU, but the older gate lets a prompt through when `hal0-api` is unreachable or
-after its own 120 seconds, and such a prompt can render next to the LLM slots.
-Restarting the slot loads the gate described here. Until you do, the older
-gate does not report why it refused a prompt, and `gate.state` on
-`/api/comfyui/status` reads `stale` once it has called, with one exception: on
-a box that requires authentication, hal0 mints the gate's token only when the
-`img` slot loads, so a box updated from v1.6.5 reads `no_credential`, which
-ranks above `stale`, until you restart the slot.
-
-## The `[image]` slot config
-
-The `img` slot's `[image]` table carries `default_size`
-(`""` by default, meaning the model's native size, such as `1024x1024` for SDXL
-and `512x512` for SD 1.5) and `default_steps` (`0` means the workflow's own
-step count). A request's own `size`, or `steps` in `extra_body`, wins. Set
-these from the dashboard's Settings → Image-gen panel or edit the slot's TOML
-directly — see [Edit configuration](/docs/guides/configure). Image mode has no
-setting: it ends when generation stops (see
-[How long image mode lasts](#how-long-image-mode-lasts)).
-
-Once ComfyUI is up, hal0 leaves its container running: idle-timeout,
-memory-pressure and pre-load eviction never unload the `img` slot, whatever
-its `idle_timeout_s` says, so a ComfyUI editor session is never cut off. Idle,
-ComfyUI holds next to no GPU memory, and switching back to inference frees its
-models. `hal0 slot unload img` still stops it by hand.
-
-### Which container image the `img` slot runs
-
-The `img` slot resolves its image in this order: `image_pin` (top-level or
-`[slot]`-nested, honored verbatim), then `[slots].default_images.comfyui` in
-`hal0.toml` (the operator's choice of launch image for ComfyUI, set from the
-Runner Images page — see
-[Manage runner images](/docs/guides/manage-runner-images)), then the
-`comfyui` runner's resolved image (`HAL0_RUNNER_IMAGE_COMFYUI`, then the
-`manifest.json` pin for `comfyui`). A bare `image` string left in an older
-`img` slot file is moved to `image_pin` by the profile-centric conversion that
-`hal0 update` runs. Clear `image_pin` in `/etc/hal0/slots/img.toml` if you
-want the resolved default.
-
-## Generate an image
-
-```sh
-curl -X POST http://localhost:8080/v1/images/generations \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "sdxl-lightning",
-    "prompt": "a cat in a hat, studio lighting",
-    "n": 1,
-    "size": "1024x1024",
-    "response_format": "url"
-  }'
-```
-
-The route flips the GPU to image mode before dispatching, so a single
-call also performs the switchover when needed. The request holds image mode
-until its render returns. hal0 then hands the GPU back to the LLM slots about
-10 seconds later, or as soon as a request for one of them arrives. A request
-for a GPU LLM slot that arrives during the render waits for the render and the
-reload (up to 120 seconds) instead of being refused. The route also starts the
-`img` slot when image mode finds it down, for example after it crashed or was
-unloaded by hand. `model` is an installed
-catalog model or a `ckpt/<path>` checkpoint; leave it out to use the model
-selected for `img`. Any other id returns **404** (`image.model_unknown`, with
-the ids that work), a catalog model that is not installed **409**
-(`image.model_not_installed`, naming the install call), and a video, edit or
-upscale model **422** (`image.model_not_renderable`). A `size` that is not
-a string gets **422** (`image.invalid_size`), and a render the box cannot hold
-gets **422** (`image.wont_fit`; see [Will it fit?](#will-it-fit)). A hal0
-extension `extra_body` accepts `seed`, `steps`, `cfg`, `negative_prompt` and
-`hal0_skip_fit_check`. See
-[OpenAI-compatible API reference](/docs/reference/api/openai-compat/) for the
-resolution order and how `size` and `steps` default.
-
-The response is the OpenAI image shape:
-
-```json
-{
-  "created": 1716000000,
-  "data": [
-    { "url": "/api/images/cache/<uuid>.png" }
-  ]
-}
-```
-
-With `response_format: "b64_json"` each `data` entry carries a base64 PNG
-instead of a `url`.
-
-To cancel an in-flight or queued render:
-
-```sh
-curl -X POST http://localhost:8080/api/comfyui/render/cancel
-```
-
-## Will it fit?
+### Will it fit?
 
 Image models are large, and a render draws on two budgets that are different
 resources: the GPU pool and this box's RAM. hal0 judges each catalog model
 against both, with the same figures the memory screens show
 ([Memory budget API reference](/docs/reference/api/memory-budget/)), and says
-so before it unloads anything.
+so before it unloads anything. The dashboard shows the verdict as a **fit
+meter**: two bars, the GPU pool and RAM · this box, each with a dashed segment
+for what the model needs (`est.` when the figure is an estimate) against what is
+free, and a chip beside them: `Fits · N GB to spare`, `Tight` or `Won't fit`,
+with the server's reason; the verdict is always the server's. The Generate tab
+draws the same meter for the model and size you picked, and shows `judged at WxH`
+when the server clamped the size you asked for. A model the box cannot hold
+offers one that fits in its place.
 
 `GET /api/comfyui/models` gives every model a `fit` at its native size, and
 `GET /api/comfyui/models/{model_id}/fit?size=1536x1536` gives the verdict at
-another size:
+another size, with the size it judged:
 
 - `fits` — the model fits both budgets.
 - `tight` — it fits, but the need is above 90% of what is free in one of them.
 - `wont_fit` — the need is above what is free. `reason` says which budget:
   "needs ~47.9 GB of RAM to load, 45.8 GB free (48.0 GB container limit)".
 - `null` — hal0 cannot tell, because the box has no GPU pool reading or its
-  RAM cannot be read. Unknown is never `wont_fit`.
+  RAM cannot be read. Unknown is never `wont_fit`, and the dashboard shows no
+  chip then.
 
 The two budgets are never added together. The GPU budget is the pool a render can use
 once image mode has unloaded this box's GPU slots; the RAM budget is what is
@@ -402,19 +216,336 @@ A `fits` built on an estimated figure (`need.gpu_estimated`,
 as it did before. The fields are in the
 [Image readiness API reference](/docs/reference/api/image-readiness/).
 
-## Quick-launch workflows
+## Generate
 
-The Image-Gen tab ships a **workflow quick-launch strip** — curated chips
-that deep-link straight into ComfyUI's own UI. Any workflow JSON dropped
-into the bind-mounted workflows directory shows up as a "custom" entry:
+### From the dashboard
+
+**Slots → Image Gen → Generate** has a prompt (Ctrl or Cmd+Enter generates), a
+**Model** select, **Size** chips and a **More options** section.
+
+- **Model** lists the model selected for `img` first, then every installed
+  catalog model the API can render, then your own checkpoints as
+  `<file> (your checkpoint, sdxl)` (see
+  [Your own checkpoints](#your-own-checkpoints)). Its last row, disabled, reads
+  `Video, edit and upscale run in the ComfyUI editor`.
+- **Size** offers the model's own sizes and **Custom**: each side from 64 to
+  2048, floored to a multiple of 8, as the server does. The size and the steps
+  start from the img slot's [`[image]` defaults](#the-image-settings), then the
+  model's own.
+- **More options** are a negative prompt, **Steps** (1–100), **CFG** (0–20, in
+  steps of 0.5), **Images** (1–4) and **Seed**. **Random** draws a seed in the
+  browser, so the result's **Reuse seed** can repeat the image; **Locked** takes
+  the one you type or roll.
+- The fit meter sits under the form. The button is disabled, with the server's
+  reason, when the verdict is `Won't fit` or the host has no image engine.
+- Under the button, a cost line says what the image costs chat (see
+  [What a render does to chat](#what-a-render-does-to-chat)).
+
+A run shows its steps: `Chat reply finishing`, `Unload N GPU slots`,
+`Engine ready`, `Load model`, `Render k/N` and `Save`, with a progress bar, the
+elapsed time and **Cancel**. Before the prompt is queued, Cancel aborts the
+request; once it is queued, Cancel also calls `POST /api/comfyui/render/cancel`.
+Leaving the tab does not end a run; the status line keeps the controls. A render
+can take minutes, and each card in the Models tab shows its estimate as
+`~N s per image`.
+
+The results grid keeps the last 12 images of this browser tab, newest first,
+each with **Open**, **Download** and **Reuse seed**. A run that fails shows the
+server's message under the button and keeps your prompt and options; a model that
+is not installed (409) adds an **Open Models** button.
+
+### Over the API
+
+```sh
+curl -X POST http://localhost:8080/v1/images/generations \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "sdxl-lightning",
+    "prompt": "a cat in a hat, studio lighting",
+    "n": 1,
+    "size": "1024x1024",
+    "response_format": "url"
+  }'
+```
+
+The route flips the GPU to image mode before dispatching, so a single
+call also performs the switchover when needed, and it starts the `img` slot when
+image mode finds it down, for example after it crashed or was unloaded by hand.
+The request holds image mode until its render returns (see
+[What a render does to chat](#what-a-render-does-to-chat)). `model` is an
+installed catalog model or a `ckpt/<path>` checkpoint; leave it out to use the
+model selected for `img`. Any other id returns **404** (`image.model_unknown`,
+with the ids that work), a catalog model that is not installed **409**
+(`image.model_not_installed`, naming the install call), and a video, edit or
+upscale model **422** (`image.model_not_renderable`). A `size` that is not
+a string gets **422** (`image.invalid_size`), and a render the box cannot hold
+gets **422** (`image.wont_fit`; see [Will it fit?](#will-it-fit)). A hal0
+extension `extra_body` accepts `seed`, `steps`, `cfg`, `negative_prompt` and
+`hal0_skip_fit_check`. See
+[OpenAI-compatible API reference](/docs/reference/api/openai-compat/) for the
+resolution order and how `size` and `steps` default.
+
+The response is the OpenAI image shape:
+
+```json
+{
+  "created": 1716000000,
+  "data": [
+    { "url": "/api/images/cache/<uuid>.png" }
+  ]
+}
+```
+
+With `response_format: "b64_json"` each `data` entry carries a base64 PNG
+instead of a `url`. To cancel an in-flight or queued render:
+
+```sh
+curl -X POST http://localhost:8080/api/comfyui/render/cancel
+```
+
+### From Open WebUI
+
+Open WebUI's image button renders through the same `/v1/images/generations`, so
+it gets the same template, size, steps and GPU switch. Pick its model in hal0,
+not in Open WebUI: **Set as default** on the Models tab, or
+
+```sh
+hal0 capabilities set img img --model sdxl-lightning
+```
+
+The same pick is the **Model** row of AI Capabilities → Image in the dashboard,
+which lists the catalog models the API can render (marking those not downloaded
+yet) and your own `ckpt/<path>` checkpoints. Picking one that is not downloaded
+is refused with 409 `capability.model_not_downloaded`. See
+[Open WebUI](/docs/guides/open-webui/#image-generation).
+
+## What a render does to chat
+
+The **GPU status line** at the head of the Image Gen tab says what the GPU is
+doing, what the next image costs chat and which buttons fit. It reads the GPU
+arbiter's phase and ComfyUI's queue, so it also shows a render queued from the
+editor. It is hidden on a box with no GPU pool reading or no ROCm lane. While
+the GPU is in image mode, a banner on every dashboard page gives the same state
+in one line and links to the Engine tab.
+
+| Headline | When | Buttons |
+|---|---|---|
+| `GPU · chat mode` | The LLM slots hold the GPU. | Hold image mode |
+| `Switching to image mode` | Chat replies finish, the GPU slots unload, the engine starts (three step chips). | Cancel, only for a Generate run started in this browser |
+| `Image mode · hand-off` | A prompt from the ComfyUI editor is taking the GPU (about 3 seconds). | Keep image mode |
+| `Rendering · <model> · step n/N` | A render runs, with a progress bar and the elapsed time. `Rendering · <model>` before the first step, `Rendering` with no progress, `Rendering · editor prompt · k queued` for a render only ComfyUI's queue shows. | Cancel render, Keep image mode |
+| `Image mode ends in N s` | The wait after the last image. | Keep image mode |
+| `Reloading GPU slots · k of n ready` | The paused slots are loading again, one chip each. | none |
+| `Image mode pinned` | Image mode is held until you unpin it. | Unpin, Stop image mode |
+| `Image mode is on` | Image mode with no phase and no pin, for example just after `hal0-api` restarted. | Keep image mode |
+
+A pinned box that is working shows the work, with **Unpin** among its buttons.
+**Keep image mode** pins; **Hold image mode** switches to image mode with a pin.
+**Cancel render** is `POST /api/comfyui/render/cancel`, which also clears
+prompts queued from the editor. **Stop image mode** unpins first when the box is
+pinned, then switches to `inference`; when a render is running it asks first,
+because stopping drops that render and the prompts queued behind it.
+
+Three more states are about the GPU gate (see
+[ComfyUI's editor and the GPU gate](/docs/guides/image-mode-and-gpu-gate#comfyuis-editor-and-the-gpu-gate)). The
+blocked line comes first; the refusal and the stale gate wait behind any work in
+progress:
+
+| Headline | Meaning | Buttons |
+|---|---|---|
+| `GPU gate refused a prompt · hh:mm` | The latest refusal; its reason is shown as text. | Open editor (on the box only), Dismiss |
+| `The image engine runs an older GPU gate` | The engine started before an update. | Restart engine |
+| `Image generation is blocked: hal0 requires sign-in and ComfyUI's GPU gate has no credential for it yet` | Never dismissible. | none |
+
+**The cost.** In chat mode the line, and the cost line under the Generate
+button, read `Pauses a, b and c (N GB). They reload about 10 s after the last
+image.`, where N sums those slots' GPU memory; `No GPU slots to pause on this
+box.`; or nothing while hal0 does not yet know which slots it would pause. In
+image mode it reads `Image mode is still on, so this one starts at once.` When a
+switch waits for chat replies, it adds `n chat reply is finishing first.`
+(`replies are` for more than one).
+
+**The wait.** A request for a GPU LLM slot that arrives while image mode is on
+waits for the render and the reload, up to 120 seconds, and is then served. The
+line counts them: `n chat requests waiting, longest m:ss of 2:00.`
+
+**The reload.** The paused slots come back about 10 seconds after the last
+render. Their cards on **Slots → Inference** carry a `paused · image mode` chip
+with the note `Reloads about 10 s after the last image.`, `Stays paused until
+image mode is unpinned.` or `Reloading now.`
+
+The fields behind the line (`GET /api/comfyui/status` and `/arbiter`), the
+switchover and pin calls, how long image mode lasts and what the GPU gate
+refuses are in [Image mode and the GPU gate](/docs/guides/image-mode-and-gpu-gate).
+
+## Your own checkpoints
+
+An SDXL or SD 1.5 checkpoint you put in the ComfyUI `checkpoints/` folder (under
+`<model store>/comfyui/models`) renders through the API without a catalog entry.
+hal0 reads the safetensors header; a file that reads as SDXL or SD 1.5 gets an
+id, `ckpt/<path>`, the file's path under `checkpoints/` without
+`.safetensors`: `GET /api/comfyui/files` lists it as `api_id`. Flux, GGUF and
+unrecognised checkpoints get no id, and neither does a checkpoint a catalog
+model loads.
+
+In the Generate tab's **Model** select the checkpoint reads
+`<file> (your checkpoint, sdxl)` or `(your checkpoint, sd15)`, with its file
+size, and the size chips offer the family's native size, `1024x1024` for SDXL
+and `512x512` for SD 1.5, besides **Custom**. A checkpoint has no catalog row,
+so the dashboard has no fit meter for it and says
+`Fit is checked when you generate.` The `/v1` preflight still judges it, by the
+file's size, and a render that cannot fit answers 422 `image.wont_fit`, shown
+under the button.
+
+## Workflows and the ComfyUI editor
+
+ComfyUI's own editor is where video, image-edit and upscale models run, and
+where you build a workflow of your own. The **Engine** tab's editor card lists a
+chip for each installed model's workflow, plus a `custom` chip for each workflow
+that no catalog model owns, from the workflows folder
+(`<model store>/comfyui/workflows`, where you can drop a `<name>.json`) or
+ComfyUI's own saved workflows. A chip opens the editor, not the workflow:
+ComfyUI cannot open a workflow from a link, so pick it in the editor's Workflows
+sidebar. The API lists the same names, and queues one:
 
 ```sh
 curl http://localhost:8080/api/comfyui/workflows
 curl -X POST http://localhost:8080/api/comfyui/workflows/my-workflow/launch
 ```
 
+`launch` posts the API-format workflow file to ComfyUI as a prompt, so the GPU
+gate treats it like an editor prompt; it answers 404 for a name that is not a
+file and 503 `image.gate_refused` when the gate refuses the prompt.
+
+### Reaching the editor
+
+ComfyUI listens on the box's loopback only, so it is not on your LAN at
+`:8188`. The Engine tab's **Open ComfyUI editor ↗** works as follows:
+
+- **On the box itself**, with the dashboard open at `localhost`, `127.0.0.1` or
+  `[::1]`, the button opens the editor.
+- **From any other machine** the button is disabled and reads
+  `Only reachable on the box itself`, and the card shows a copyable command:
+
+  ```sh
+  ssh -L 8188:127.0.0.1:8188 <user>@<hal0 host>
+  ```
+
+  Run it on your own machine, then open `http://127.0.0.1:8188` there. The
+  Services page, its board card and the Overview Services widget follow the same
+  rule.
+- **Behind a proxy you run.** Set `HAL0_COMFYUI_PUBLIC_URL` in
+  `/etc/hal0/api.env` to a URL you have made reachable yourself, for example a
+  reverse proxy with its own hostname. `GET /api/config/urls` then reports
+  `comfyui_public: true` with that URL as `comfyui`, and the button opens it
+  from anywhere. hal0 does not proxy or sign in to that URL for you; secure it
+  where you made it.
+
+Reaching the editor through hal0 itself, behind the dashboard's sign-in, is not
+available; [#3049](https://github.com/Hal0ai/hal0/issues/3049) tracks it.
+
+A prompt you queue in the editor goes through the GPU gate, a custom node that
+asks hal0 for image mode first and refuses the prompt when hal0 cannot hand over
+the GPU. How it works, and the one-time `hal0 slot restart img` after an update,
+are in [ComfyUI's editor and the GPU gate](/docs/guides/image-mode-and-gpu-gate#comfyuis-editor-and-the-gpu-gate).
+
+## The `[image]` settings
+
+The `img` slot's `[image]` table carries `default_size`
+(`""` by default, meaning the model's native size, such as `1024x1024` for SDXL
+and `512x512` for SD 1.5) and `default_steps` (`0` means the workflow's own
+step count). A request's own `size`, or `steps` in `extra_body`, wins. Set
+these from **Settings → AI Capabilities → Image generation**, or edit the
+slot's TOML directly (see [Edit configuration](/docs/guides/configure)).
+
+The panel's **Default size** is a select: `Model native` (the empty value),
+`512x512`, `768x768`, `1024x1024`, `1328x1328`, or `Custom…` with a `WxH` field.
+A custom size is saved as typed, so it has to be a size the server renders as
+is: lower-case `x`, each side 64 to 2048 and a multiple of 8. A size saved
+earlier that the rule rejects opens as Custom with a note on the size the engine
+renders instead (it floors each side), and does not block saving other fields.
+**Default steps** is a whole number, `0` for the model's default. Both apply to
+the next request without a restart.
+
+Image mode has no setting: it ends when generation stops (see
+[How long image mode lasts](/docs/guides/image-mode-and-gpu-gate#how-long-image-mode-lasts)).
+
+Once ComfyUI is up, hal0 leaves its container running: idle-timeout,
+memory-pressure and pre-load eviction never unload the `img` slot, whatever
+its `idle_timeout_s` says, so a ComfyUI editor session is never cut off. Idle,
+ComfyUI holds next to no GPU memory, and switching back to inference frees its
+models. `hal0 slot unload img` still stops it by hand.
+
+### Which container image the `img` slot runs
+
+The `img` slot resolves its image in this order: `image_pin` (top-level or
+`[slot]`-nested, honored verbatim), then `[slots].default_images.comfyui` in
+`hal0.toml` (the operator's choice of launch image for ComfyUI, set from the
+Runner Images page — see
+[Manage runner images](/docs/guides/manage-runner-images)), then the
+`comfyui` runner's resolved image (`HAL0_RUNNER_IMAGE_COMFYUI`, then the
+`manifest.json` pin for `comfyui`). A bare `image` string left in an older
+`img` slot file is moved to `image_pin` by the profile-centric conversion that
+`hal0 update` runs. Clear `image_pin` in `/etc/hal0/slots/img.toml` if you
+want the resolved default.
+
+## Troubleshooting
+
+**Install fails with 507 `comfyui.insufficient_disk`.** The filesystem under the
+model store cannot hold what is still to download. The message gives the GB
+needed, less what is already staged, and the GB free. Free space or move the
+model store (Settings → Storage), then install again: the staged bytes resume.
+
+**The Models tab says `The image model folder is not readable`, or an install
+answers 409 `comfyui.models_dir_not_writable`.** The hal0 user cannot read or
+write the models tree. The tab shows two commands to run on the host,
+`sudo chgrp -R <hal0 group> <path>` and `sudo chmod -R 2775 <path>`; then
+**Retry**.
+
+**Install is disabled and the tab says `Image generation is unavailable on this
+host`.** The host has no ROCm lane (ComfyUI needs `/dev/kfd` and a render node),
+so `GET /api/comfyui/models` reports `engine.available: false` with that
+reason. The catalog is still listed, with no fit chips and no status line.
+
+**Generate answers 409 `image.model_not_installed`.** The model's weights are not
+all on disk. The dashboard shows the message with **Open Models**; the API's
+`error.details` carries `model`, the `install` call and `missing_gb`.
+
+**Generate answers 422 `image.wont_fit`, or the button reads `Won't fit`.** The
+model at that size needs more GPU pool or RAM than this box has free; the reason
+names the budget. Nothing was unloaded. Pick a smaller size or a model that fits
+(the card offers one), or free memory. See [Will it fit?](#will-it-fit).
+
+**A prompt is refused by the GPU gate.** The status line reads
+`GPU gate refused a prompt · hh:mm` with the reason, `/v1` answers 503
+`image.gate_refused` and `GET /api/comfyui/status` carries it as
+`gate_refusal`. Queue the prompt again once the reason is gone; **Dismiss**
+hides the line until the next refusal. See
+[ComfyUI's editor and the GPU gate](/docs/guides/image-mode-and-gpu-gate#comfyuis-editor-and-the-gpu-gate).
+
+**After an update, the line reads `The image engine runs an older GPU gate`, or
+says image generation is blocked.** Run `hal0 slot restart img` once, or press
+**Restart engine** on the Engine tab. A running `img` container keeps the gate it
+started with.
+
+**The Engine tab reads `ComfyUI is stopped` or `ComfyUI isn't answering`.**
+Stopped is fine: the next render starts the engine, and a cold start can take up
+to 2 minutes. If the container is up and ComfyUI does not answer, the card shows
+the last lines of its log; **Logs** has the last 200.
+
+**The editor button is disabled.** The page is not on the box. Use the `ssh -L`
+command the card shows (see [Reaching the editor](#reaching-the-editor)).
+
+**`hal0-addon-comfyui` still shows up in mDNS after an update.** Earlier hal0
+announced ComfyUI's `:8188` over mDNS, though only the box's loopback answers
+there. hal0 no longer does, but an announcement already written stays until you
+toggle the Discovery card on the Services page once; either direction removes
+it. Turn it back on if you want Open WebUI announced.
+
 ## See also
 
+- [Image mode and the GPU gate](/docs/guides/image-mode-and-gpu-gate) — the engine status, switching and
+  pinning by hand, and the gate.
 - [Manage slots](/docs/guides/manage-slots) — the `img` slot lifecycle.
 - [Edit configuration](/docs/guides/configure) — the `[image]` table.
 - [Logs and activity](/docs/guides/logs-and-activity) — tail `hal0-slot@img`.

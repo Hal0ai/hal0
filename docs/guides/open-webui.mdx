@@ -93,12 +93,12 @@ only when image mode is pinned, when ComfyUI's queue cannot be read, or when
 the 120 seconds run out. When the last render is done, hal0 frees ComfyUI's
 models and reloads the GPU slots it unloaded about 10 seconds later, or at once
 when a chat request is waiting. If you pinned image mode (see
-[Generate images](/docs/guides/generate-images)), it holds until you unpin it
+[Image mode and the GPU gate](/docs/guides/image-mode-and-gpu-gate#how-long-image-mode-lasts)), it holds until you unpin it
 or force a switch back to inference, and chat on GPU slots is refused until
 then. Chat on NPU and CPU slots is not affected.
 
 Every render passes ComfyUI's GPU gate node (see
-[Generate images](/docs/guides/generate-images#comfyuis-editor-and-the-gpu-gate)).
+[Image mode and the GPU gate](/docs/guides/image-mode-and-gpu-gate#comfyuis-editor-and-the-gpu-gate)).
 After updating hal0, run `hal0 slot restart img` once, so the running ComfyUI
 container loads the current gate.
 
