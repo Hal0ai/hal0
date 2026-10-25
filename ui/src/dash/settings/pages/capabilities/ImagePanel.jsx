@@ -7,6 +7,8 @@
 import { useState, useEffect } from 'react'
 import { useSlots, useSlotEdit, useSlotConfig } from '@/api/hooks/useSlots'
 import { useComfyuiModels } from '@/api/hooks/useComfyui'
+import { SIDE_RANGE, snapDim } from '@/dash/image/generate-pure'
+import { parseSize } from '@/dash/image/image-models-pure'
 import { SRow } from '../../shared/SRow.jsx'
 import { ApplyBadge } from '../../shared/ApplyBadge.jsx'
 import { useCapabilitySelection } from './useCapabilitySelection.js'
@@ -16,6 +18,19 @@ import { statusChip, PanelHeader, PanelFooter, EnabledRow, ModelRow, selStyle, i
 // literal size back on any save would pin every model to it.
 const DEF_SIZE = ""
 const DEF_STEPS = "0"
+
+// The sizes the select lists besides "Model native" (the sizes the catalog's models render at).
+// Anything else the slot holds opens as "Custom…" with that size in the field.
+const SIZE_PRESETS = ["512x512", "768x768", "1024x1024", "1328x1328"]
+const CUSTOM = "custom"
+
+// A custom size is saved exactly as typed, so it must be a size the server renders as is: a
+// lower-case WxH with each side 64..2048 and a multiple of 8 (the server clamps and floors
+// anything else, which would leave the field naming a size nothing renders).
+function validCustomSize(text) {
+  const p = parseSize(text)
+  return !!p && `${p.width}x${p.height}` === text && snapDim(p.width) === p.width && snapDim(p.height) === p.height
+}
 
 // The img catalog is empty only on a host with no ComfyUI engine (no ROCm lane): any
 // other host lists every catalog model, marked when its weights are not on disk. So an
@@ -49,12 +64,28 @@ export function ImagePanel({ registry }) {
 
   const [size, setSize] = useState(DEF_SIZE)
   const [steps, setSteps] = useState(DEF_STEPS)
+  // "Custom…" picked from the select. A saved size outside the list is custom too, without a pick.
+  const [customPicked, setCustomPicked] = useState(false)
 
   useEffect(() => {
     const img = imgCfgQuery.data?.image || {}
     setSize(img.default_size != null ? String(img.default_size) : DEF_SIZE)
     setSteps(img.default_steps != null ? String(img.default_steps) : DEF_STEPS)
+    setCustomPicked(false)
   }, [imgCfgQuery.data])
+
+  const customSize = customPicked || (size !== DEF_SIZE && !SIZE_PRESETS.includes(size))
+  const sizeText = size.trim()
+  // The field only has a say while it is open; an unreadable size blocks the save rather than
+  // being written (the server would store it, and the size fit would then fail to read it).
+  const sizeInvalid = customSize && !validCustomSize(sizeText)
+  const stepsAreModelDefault = (parseInt(steps, 10) || 0) === 0
+
+  const pickSize = (value) => {
+    if (value === CUSTOM) { setCustomPicked(true); return }
+    setCustomPicked(false)
+    setSize(value)
+  }
 
   const defaultsDirty = !!imgSlotName && (size !== origSize || steps !== origSteps)
   const dirty = sel.dirty || defaultsDirty
@@ -65,7 +96,7 @@ export function ImagePanel({ registry }) {
       if (defaultsDirty) {
         // Coerce to ImageGenConfig field types (steps is a non-negative int).
         await editSlot.mutateAsync({ name: imgSlotName, body: { image: {
-          default_size: size.trim(),
+          default_size: sizeText,
           default_steps: Math.max(0, parseInt(steps, 10) || 0),
         } } })
       }
@@ -75,7 +106,7 @@ export function ImagePanel({ registry }) {
     }
   }
 
-  const resetAll = () => { sel.reset(); setSize(origSize); setSteps(origSteps) }
+  const resetAll = () => { sel.reset(); setSize(origSize); setSteps(origSteps); setCustomPicked(false) }
 
   return (
     <div className="s-panel">
@@ -109,15 +140,36 @@ export function ImagePanel({ registry }) {
             : <span className="chip mono" style={{fontSize: 10, padding: "1px 6px", color: "var(--fg-4)"}}>no img slot</span>}
         </div>
       </div>
-      <SRow k="Default size" sub="Output resolution as WxH (e.g. 1024x1024) · empty = the model's native size"
+      <SRow k="Default size" sub="Output resolution · Model native uses the model's own size (SD 1.5 and SDXL Turbo are 512x512)"
         actions={<ApplyBadge settingsKey="slot.image.default_size" registry={registry} />} v={
-        <input value={size} onChange={e => setSize(e.target.value)} placeholder="model native"
-          disabled={!imgSlotName} className="mono" style={inputStyle(140)} />
+        <span style={{display: "inline-flex", alignItems: "center", gap: 8, flexWrap: "wrap"}}>
+          <select data-testid="img-default-size" value={customSize ? CUSTOM : size} onChange={e => pickSize(e.target.value)}
+            disabled={!imgSlotName} style={selStyle}>
+            <option value="">Model native</option>
+            {SIZE_PRESETS.map(s => <option key={s} value={s}>{s}</option>)}
+            <option value={CUSTOM}>Custom…</option>
+          </select>
+          {customSize && (
+            <input data-testid="img-default-size-custom" value={size} onChange={e => setSize(e.target.value)}
+              placeholder="WxH" aria-label="Custom default size, width x height" aria-invalid={sizeInvalid}
+              disabled={!imgSlotName} className="mono" style={inputStyle(110)} />
+          )}
+          {sizeInvalid && sizeText !== "" && (
+            <span data-testid="img-default-size-error" className="mono" style={{fontSize: 11, color: "var(--err)"}}>
+              {SIDE_RANGE.min}–{SIDE_RANGE.max} a side, a multiple of {SIDE_RANGE.multiple} (e.g. 1024x768)
+            </span>
+          )}
+        </span>
       } />
       <SRow k="Default steps" sub="Sampler steps · 0 = use the model-class default"
         actions={<ApplyBadge settingsKey="slot.image.default_steps" registry={registry} />} v={
-        <input type="number" min={0} value={steps} onChange={e => setSteps(e.target.value)} placeholder={DEF_STEPS}
-          disabled={!imgSlotName} className="mono" style={inputStyle(100)} />
+        <span style={{display: "inline-flex", alignItems: "center", gap: 8}}>
+          <input data-testid="img-default-steps" type="number" min={0} value={steps} onChange={e => setSteps(e.target.value)}
+            placeholder={DEF_STEPS} disabled={!imgSlotName} className="mono" style={inputStyle(100)} />
+          {stepsAreModelDefault && (
+            <span data-testid="img-default-steps-hint" className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>model default</span>
+          )}
+        </span>
       } />
       {!imgSlotName && (
         <div className="s-row" style={{padding: "6px 12px"}}>
@@ -125,7 +177,7 @@ export function ImagePanel({ registry }) {
         </div>
       )}
       <PanelFooter dirty={dirty} onReset={resetAll} onSave={doSave} probe={sel.capsQuery}
-        disabled={!dirty || sel.loading || sel.errored || sel.applyCapability.isPending || editSlot.isPending}
+        disabled={!dirty || sizeInvalid || sel.loading || sel.errored || sel.applyCapability.isPending || editSlot.isPending}
         saving={sel.applyCapability.isPending || editSlot.isPending} label="Save image generation" />
     </div>
   )
