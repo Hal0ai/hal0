@@ -383,3 +383,105 @@ async def test_secret_values_are_redacted_in_before_after(store: AuditStore) -> 
     )
     row = store.query()[0]
     assert "supersecret" not in (row["after"] or "")
+
+
+# ── connection lifetime ──────────────────────────────────────────────────────
+
+
+class _TrackedConnection(sqlite3.Connection):
+    """A real connection that remembers whether ``close()`` was called.
+
+    Probing a closed connection from the test thread would trip SQLite's
+    same-thread check first (the store runs its writes in ``asyncio.to_thread``).
+    """
+
+    closed = False
+
+    def close(self) -> None:
+        self.closed = True
+        super().close()
+
+
+@pytest.fixture()
+def opened_connections(monkeypatch: pytest.MonkeyPatch) -> list[_TrackedConnection]:
+    """Every connection ``hal0.activity`` opens, in order."""
+    opened: list[_TrackedConnection] = []
+    real_connect = sqlite3.connect
+
+    def spy(*args: object, **kwargs: object) -> _TrackedConnection:
+        conn = real_connect(*args, factory=_TrackedConnection, **kwargs)
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr("hal0.activity.sqlite3.connect", spy)
+    return opened
+
+
+def _assert_all_closed(conns: list[_TrackedConnection]) -> None:
+    assert conns, "the operation never opened a connection: the spy is not wired"
+    assert [c.closed for c in conns] == [True] * len(conns)
+
+
+@pytest.mark.asyncio
+async def test_every_store_operation_closes_its_connection(
+    tmp_path: Path, opened_connections: list[_TrackedConnection]
+) -> None:
+    """``with sqlite3.connect(...)`` commits but does not close, and an unclosed
+    connection is only reclaimed by the cyclic GC (it logs ``ResourceWarning: unclosed
+    database``), so each operation must close the connection it opened."""
+    s = AuditStore(tmp_path / "activity.db", retention_days=30, max_rows=1)
+
+    s.init_schema()
+    await s.record(
+        kind="action",
+        category="slot",
+        action="slot.load",
+        target="chat",
+        actor="dashboard",
+        severity="ok",
+        outcome="ok",
+        message="loaded chat",
+    )
+    await s.record(
+        kind="action",
+        category="slot",
+        action="slot.load",
+        target="coder",
+        actor="dashboard",
+        severity="ok",
+        outcome="ok",
+        message="loaded coder",
+    )
+    assert len(s.query()) == 2
+    assert s.export(fmt="json")
+    assert await s.prune() == 1  # max_rows=1 trims the older row
+
+    # init_schema + 2 inserts + query + export + prune
+    assert len(opened_connections) == 6
+    _assert_all_closed(opened_connections)
+
+
+def test_connection_closes_when_the_body_raises(
+    tmp_path: Path, opened_connections: list[_TrackedConnection]
+) -> None:
+    s = AuditStore(tmp_path / "activity.db")
+    s.init_schema()
+    with pytest.raises(RuntimeError, match="boom"), s._connect():
+        raise RuntimeError("boom")
+    _assert_all_closed(opened_connections)
+
+
+def test_uncommitted_write_rolls_back_when_the_body_raises(tmp_path: Path) -> None:
+    """Closing must not weaken the commit/rollback contract ``with conn:`` gave."""
+    s = AuditStore(tmp_path / "activity.db")
+    s.init_schema()
+    insert = "INSERT INTO audit (ts, kind, category, action, severity) VALUES ('t', 'action', 'c', 'a', 'ok')"
+
+    with pytest.raises(RuntimeError, match="boom"), s._connect() as conn:
+        conn.execute(insert)
+        raise RuntimeError("boom")
+    assert s.query() == []
+
+    with s._connect() as conn:
+        conn.execute(insert)
+    assert len(s.query()) == 1  # a clean exit commits
