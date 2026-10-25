@@ -243,8 +243,7 @@ def test_flatten_cgroup_max_mb_none_when_unlimited() -> None:
         platform="lxc",
     ).model_dump(mode="python")
     flat = _flatten_for_ui(info)
-    # When unlimited/unreadable, the field is absent (or None) — the UI
-    # falls back to pool/host as if cgroup weren't a constraint.
+    # When unlimited/unreadable, the field is absent (or None): no cap.
     assert flat.get("cgroup_max_mb") in (None,)
 
 
@@ -761,6 +760,27 @@ def _system_stats(used_gib: int, total_gib: int = 80) -> dict[str, Any]:
     }
 
 
+class _NoComfyUI:
+    """A ComfyUI client that never connects (the real one dials ``COMFYUI_BASE_URL``)."""
+
+    async def get(self, url: str, **kwargs: Any) -> httpx.Response:
+        raise httpx.ConnectError("no ComfyUI in unit tests")
+
+
+@pytest.fixture(autouse=True)
+def _no_live_comfyui(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """No test in this module may reach a live ComfyUI, or read its engine cache.
+
+    ``/api/stats/hardware`` asks ComfyUI for its memory on a shared GPU pool with an img
+    slot. A test that wants an answer patches ``_fetch_engine_stats`` (the ``memory_box``
+    fixture does) or ``_get_client`` itself; either wins over this stand-in.
+    """
+    comfyui_mod._reset_state()
+    monkeypatch.setattr(comfyui_mod, "_get_client", lambda: _NoComfyUI())
+    yield
+    comfyui_mod._reset_state()
+
+
 @pytest.fixture
 def memory_box(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> types.SimpleNamespace:
     """A GPU box with a brain slot and an img slot, ComfyUI not answering.
@@ -799,6 +819,8 @@ class TestStatsHardwareMemory:
         assert memory["gpu"]["total_gb"] == 80.0
         assert memory["gpu"]["kind"] == "shared"
         assert memory["gpu"]["image_engine_gb"] == 3.0  # ComfyUI's own figure
+        assert memory["gpu"]["image_engine_slot"] == "img"
+        assert memory["gpu"]["image_engine_estimated"] is False
         assert [(s["slot"], s["state"]) for s in memory["gpu"]["this_box"]] == [("brain", "ready")]
         assert memory["ram"]["source"] == "container"
         assert memory["ram"]["limit_gb"] == 64.0
@@ -879,6 +901,7 @@ class TestStatsHardwareMemory:
         # Falls back to the img slot's own attribution (8 GiB file + KV estimate).
         img_gb = resp.json()["per_slot"]["img"]["mem_mb"] / 1024
         assert resp.json()["memory"]["gpu"]["image_engine_gb"] == round(img_gb, 1)
+        assert resp.json()["memory"]["gpu"]["image_engine_estimated"] is True
 
     def test_no_gpu_lane_means_no_gpu_block_and_no_engine_read(
         self, memory_box: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch
@@ -891,6 +914,49 @@ class TestStatsHardwareMemory:
         assert memory["render_free_gb"] is None
         assert memory["ram"]["limit_gb"] == 64.0
         assert memory_box.engine_calls == 0
+
+    def test_a_discrete_card_never_takes_comfyuis_device_wide_figure(
+        self, memory_box: types.SimpleNamespace
+    ) -> None:
+        """On a discrete card ComfyUI's ``vram_total - vram_free`` is the whole device
+        (every slot's weights, other processes). It is neither read nor believed."""
+        stats = _GpuStatsStub()
+        stats.gpu_sample = _discrete_sample  # type: ignore[method-assign]
+        memory_box.client.app.state.hardware_stats = stats
+        memory_box.engine = _system_stats(used_gib=20, total_gib=24)  # device-wide
+
+        body = memory_box.client.get("/api/stats/hardware").json()
+
+        gpu = body["memory"]["gpu"]
+        assert gpu["kind"] == "dedicated"
+        assert memory_box.engine_calls == 0  # not even asked
+        # The img slot's own row is the engine's figure, and it says so.
+        assert gpu["image_engine_gb"] == round(body["per_slot"]["img"]["vram_mb"] / 1024, 1)
+        assert gpu["image_engine_gb"] != 20.0
+        assert gpu["image_engine_estimated"] is True
+
+    def test_the_gpu_capability_is_probed_once_per_request_off_the_loop(
+        self, memory_box: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``build_per_slot`` and the collector both need it; neither probes again."""
+        probes: list[str] = []
+
+        def probe() -> bool:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                probes.append("worker thread")
+            else:
+                probes.append("event loop")
+            return True
+
+        monkeypatch.setattr("hal0.slots.capacity._host_has_capable_gpu", probe)
+
+        resp = memory_box.client.get("/api/stats/hardware")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["memory"]["gpu"] is not None
+        assert probes == ["worker thread"]
 
 
 # ── engine_used_mb: ComfyUI's own GPU usage, cached and fail-soft ────────────
@@ -935,6 +1001,26 @@ async def test_engine_used_mb_is_none_without_a_usable_device_read(
     engine_clock.stats = stats
 
     assert await comfyui_mod.engine_used_mb() is None
+
+
+@pytest.mark.parametrize("device_type", ["cpu", "CPU"])
+async def test_engine_used_mb_is_none_when_comfyui_runs_on_the_cpu(
+    engine_clock: types.SimpleNamespace, device_type: str
+) -> None:
+    """On the CPU ``vram_*`` describe system RAM: not the GPU pool, never the engine's share."""
+    engine_clock.stats = {
+        "devices": [{"type": device_type, "vram_total": 64 * _GIB, "vram_free": 20 * _GIB}]
+    }
+
+    assert await comfyui_mod.engine_used_mb() is None
+
+
+async def test_engine_used_mb_reads_a_gpu_device(engine_clock: types.SimpleNamespace) -> None:
+    engine_clock.stats = {
+        "devices": [{"type": "cuda", "vram_total": 24 * _GIB, "vram_free": 20 * _GIB}]
+    }
+
+    assert await comfyui_mod.engine_used_mb() == 4 * 1024.0
 
 
 async def test_engine_used_mb_caches_for_5s(engine_clock: types.SimpleNamespace) -> None:

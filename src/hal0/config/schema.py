@@ -1539,14 +1539,18 @@ class HardwareInfo(BaseModel):
         default=None,
         ge=0,
         description=(
-            "Running cgroup memory cap in MiB (issue #372). Read at probe "
-            "time from /sys/fs/cgroup/memory.max (cgroup-v2) or the v1 "
-            "fallback /sys/fs/cgroup/memory/memory.limit_in_bytes. None "
-            "when the cgroup is unlimited (literal 'max' on v2, the "
-            "9223372036854775807 sentinel on v1) or the file is unreadable. "
-            "The dashboard treats this as a 3rd headroom candidate: when "
-            "BELOW min(pool, host) it becomes the binding constraint and "
-            "limitedBy is reported as 'cgroup'."
+            "Running cgroup memory cap in MiB (issue #372): the tightest "
+            "finite limit on the probing process's cgroup chain, read at "
+            "probe time from memory.max (cgroup-v2) or memory/"
+            "memory.limit_in_bytes (v1) at every level up to the cgroup "
+            "root. None when nothing on the chain limits memory (literal "
+            "'max' on v2, the 9223372036854771712 sentinel on v1) or the "
+            "files are unreadable. Install-time pool sizing and the image "
+            "model picker read it as an upper bound. The dashboard does "
+            "not: its RAM limit comes from the live memory budget "
+            "(hal0.hardware.memory_budget.read_ram), and its headroom is the "
+            "GPU pool's (or, without one, RAM's) free memory less a 2 GB "
+            "margin."
         ),
     )
     probed_at: str = Field(

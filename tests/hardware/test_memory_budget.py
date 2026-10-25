@@ -181,6 +181,77 @@ def test_image_engine_zero_from_the_view_is_not_a_missing_view() -> None:
     assert gpu.image_engine_gb == 0
 
 
+def test_the_engine_is_named_and_marked_estimated_by_the_budget() -> None:
+    """The backend says which slot hosts the engine and whether its figure is a guess."""
+    by_slot = _gpu(_reference_budget())
+    by_view = _gpu(_reference_budget(image_engine_mb=4505.6))
+
+    assert (by_slot.image_engine_slot, by_slot.image_engine_estimated) == ("img", True)
+    assert (by_view.image_engine_slot, by_view.image_engine_estimated) == ("img", False)
+
+
+def test_no_img_slot_means_no_engine_name_and_nothing_estimated() -> None:
+    gpu = _gpu(_reference_budget(img_slot=None, gpu_slots=frozenset(REFERENCE_ROWS)))
+
+    assert gpu.image_engine_slot is None
+    assert gpu.image_engine_estimated is False
+
+
+def test_img_slot_without_a_row_is_named_but_not_estimated() -> None:
+    """Nothing stood in for the engine: no ComfyUI reading and no row to borrow."""
+    rows = {k: v for k, v in REFERENCE_ROWS.items() if k != "img"}
+    gpu = _gpu(_reference_budget(per_slot=rows))
+
+    assert gpu.image_engine_slot == "img"
+    assert gpu.image_engine_gb == 0
+    assert gpu.image_engine_estimated is False
+
+
+def test_dedicated_card_ignores_comfyuis_device_wide_reading() -> None:
+    """On a discrete card ComfyUI's ``vram_total - vram_free`` is the whole device.
+
+    24 GB card, 15 GB in use: 14 GB is the brain slot and 1 GB is someone else's. ComfyUI,
+    idle, still reports 15 GB (everything on the card). Taking that as the engine would
+    book the brain's 14 GB twice and leave a render 7 GB short.
+    """
+    rows = {"brain": _row(14336.0)}
+    budget = build_memory_budget(
+        sample=_dedicated_sample(vram_total_mb=24576.0, vram_used_mb=15360.0),
+        gpu_capable=True,
+        per_slot=rows,
+        gpu_slots=frozenset({"brain", "img"}),
+        img_slot="img",
+        image_engine_mb=15360.0,  # the device-wide figure
+        ram=RAM,
+    )
+    gpu = _gpu(budget)
+
+    assert gpu.kind == "dedicated"
+    assert gpu.image_engine_gb == 0  # no img row to borrow: the engine is not resident
+    assert gpu.other_guests_gb == 1.0
+    assert gpu.attribution_excess_gb == 0
+    assert budget.render_free_gb == 21.0  # 24 - 1 - 0 - 2, not 24 - 1 - 15 - 2 = 6
+
+
+def test_dedicated_card_takes_the_img_slots_row_for_the_engine() -> None:
+    rows = {"brain": _row(14336.0), "img": _row(4096.0)}
+    budget = build_memory_budget(
+        sample=_dedicated_sample(vram_total_mb=24576.0, vram_used_mb=19456.0),
+        gpu_capable=True,
+        per_slot=rows,
+        gpu_slots=frozenset(rows),
+        img_slot="img",
+        image_engine_mb=19456.0,  # device-wide, ignored
+        ram=RAM,
+    )
+    gpu = _gpu(budget)
+
+    assert gpu.image_engine_gb == 4.0
+    assert gpu.image_engine_estimated is True
+    assert gpu.other_guests_gb == 1.0  # 19 used - 14 brain - 4 engine
+    assert budget.render_free_gb == 17.0  # 24 - 1 - 4 - 2: the 14 GB brain is unloaded first
+
+
 def test_image_slot_without_a_row_and_no_view_is_zero() -> None:
     rows = {k: v for k, v in REFERENCE_ROWS.items() if k != "img"}
     gpu = _gpu(_reference_budget(per_slot=rows))
@@ -343,6 +414,34 @@ def test_shared_pool_ignores_the_vram_carveout() -> None:
     assert gpu.total_gb == 116.0  # not 0.5, not max-pooled
 
 
+@pytest.mark.parametrize(
+    ("sample", "kind", "total_gb", "used_gb"),
+    [
+        # ``total_mb`` / ``used_mb`` are the max-pooled counters across both
+        # pools; they must never stand in for the pool's own.
+        (
+            dataclasses.replace(_shared_sample(), total_mb=200000.0, used_mb=90000.0),
+            "shared",
+            116.0,
+            43.4,
+        ),
+        (
+            dataclasses.replace(_dedicated_sample(), total_mb=200000.0, used_mb=90000.0),
+            "dedicated",
+            24.0,
+            8.0,
+        ),
+    ],
+    ids=["shared", "dedicated"],
+)
+def test_pool_comes_from_its_own_counters_not_the_max_pooled_ones(
+    sample: GPUMemorySample, kind: str, total_gb: float, used_gb: float
+) -> None:
+    gpu = _gpu(_reference_budget(sample=sample, per_slot={}, gpu_slots=frozenset()))
+
+    assert (gpu.kind, gpu.total_gb, gpu.used_gb) == (kind, total_gb, used_gb)
+
+
 def test_non_gpu_slots_are_not_in_the_pool() -> None:
     rows = {**REFERENCE_ROWS, "npu": _row(8192.0, model_id="flm-model")}
     gpu = _gpu(_reference_budget(per_slot=rows))  # gpu_slots excludes "npu"
@@ -399,6 +498,10 @@ def test_as_dict_shape() -> None:
         "source": "container",
     }
     assert d["render_free_gb"] == 107.4
+    # The engine is named by the backend, and flagged when it is the img slot's
+    # own estimate (this reference box has no ComfyUI reading).
+    assert d["gpu"]["image_engine_slot"] == "img"
+    assert d["gpu"]["image_engine_estimated"] is True
 
 
 def test_as_dict_is_json_native() -> None:
@@ -751,6 +854,7 @@ async def test_collect_derives_gpu_slots_and_the_img_slot_from_the_configs(
     assert [s.slot for s in gpu.this_box] == ["brain", "fallback"]
     # The img slot's row stands in for the engine while ComfyUI does not answer.
     assert gpu.image_engine_gb == 4.0
+    assert (gpu.image_engine_slot, gpu.image_engine_estimated) == ("img", True)
 
 
 async def test_collect_prefers_comfyuis_own_figure_over_the_img_row(
@@ -821,6 +925,59 @@ async def test_collect_skips_the_engine_when_there_is_no_gpu_pool(
 
     assert budget.gpu is None
     assert collector_env.engine_calls == 0
+
+
+async def test_collect_skips_the_engine_when_there_is_no_img_slot(
+    collector_env: SimpleNamespace,
+) -> None:
+    """With no img slot there is nothing to attribute ComfyUI's figure to."""
+    configs = [{"name": "brain", "device": "gpu-rocm"}]
+
+    budget = await collect_memory_budget(
+        _app(
+            hardware_stats=_Stats(_shared_sample()),
+            slot_manager=_Manager([_slot("brain")], configs),
+            model_registry=_Registry(size_gib=4),
+        )
+    )
+
+    assert collector_env.engine_calls == 0
+    assert _gpu(budget).image_engine_slot is None
+
+
+async def test_collect_skips_the_engine_on_a_dedicated_card(
+    collector_env: SimpleNamespace,
+) -> None:
+    """ComfyUI's figure is device-wide on a discrete card; the budget never uses it."""
+    configs = [{"name": "img", "device": "gpu-rocm", "provider": "comfyui", "type": "image"}]
+    collector_env.engine_mb = 99999.0
+
+    budget = await collect_memory_budget(
+        _app(
+            hardware_stats=_Stats(_dedicated_sample()),
+            slot_manager=_Manager([_slot("img")], configs),
+            model_registry=_Registry(size_gib=6),
+        )
+    )
+
+    assert collector_env.engine_calls == 0
+    assert _gpu(budget).image_engine_gb == 6.0  # the img row
+
+
+async def test_collect_takes_the_capability_the_caller_already_resolved(
+    collector_env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def must_not_probe() -> bool:
+        raise AssertionError("the GPU capability was probed again")
+
+    monkeypatch.setattr("hal0.slots.capacity._host_has_capable_gpu", must_not_probe)
+    app = _app(hardware_stats=_Stats(_shared_sample()))
+
+    capable = await collect_memory_budget(app, gpu_capable=True)
+    incapable = await collect_memory_budget(app, gpu_capable=False)
+
+    assert capable.gpu is not None
+    assert incapable.gpu is None
 
 
 async def test_collect_does_not_wait_for_a_hung_engine(

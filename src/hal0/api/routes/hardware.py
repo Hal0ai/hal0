@@ -162,10 +162,11 @@ def _flatten_for_ui(info: dict[str, Any], gpu: GPUMemorySample | None = None) ->
         "platform": platform,
         "platform_label": _platform_label(platform, primary_gpu),
         "memory_kind": memory_kind,
-        # cgroup memory cap (issue #372). The dashboard treats this as a
-        # 3rd headroom candidate: when BELOW min(pool, host) it becomes
-        # the binding constraint and limitedBy is reported as 'cgroup'.
-        # ``None`` means "unlimited" — cgroup doesn't constrain headroom.
+        # cgroup memory cap (issue #372), as probed. ``None`` means nothing
+        # on the cgroup chain limits memory. The dashboard does not read it:
+        # its RAM limit and headroom come from the ``memory`` budget that
+        # ``/api/stats/hardware`` serves (ADR-0039), built from the live
+        # ``memory_budget.read_ram``.
         "cgroup_max_mb": info.get("cgroup_max_mb"),
     }
 
@@ -573,7 +574,7 @@ async def _local_live_stats(request: Request) -> dict[str, Any]:
 
 
 async def _per_slot_memory(
-    request: Request, *, include_starting: bool = False
+    request: Request, *, include_starting: bool = False, gpu_capable: bool | None = None
 ) -> dict[str, dict[str, Any]]:
     """Per-loaded-slot resident memory map for the dashboard memory bar.
 
@@ -582,6 +583,8 @@ async def _per_slot_memory(
     slot whose weights are resident (model file size + KV-cache estimate).
     ``include_starting`` also returns the slots that are about to load, with
     ``state: "starting"`` (the memory budget counts them; the public map does not).
+    ``gpu_capable`` is the caller's already-resolved GPU check, so it is not run
+    again here (it is resolved by ``build_per_slot`` when ``None``).
     Returns ``{}`` when no slot manager is wired or no slot is loaded so
     the caller can omit the block cleanly.
     """
@@ -598,7 +601,9 @@ async def _per_slot_memory(
     from hal0.slots.capacity import build_per_slot
 
     try:
-        return await build_per_slot(slots, registry=registry, include_starting=include_starting)
+        return await build_per_slot(
+            slots, registry=registry, gpu_capable=gpu_capable, include_starting=include_starting
+        )
     except Exception:
         return {}
 
@@ -696,8 +701,13 @@ async def stats_hardware(request: Request) -> dict[str, Any]:
     # reads ``per_slot[<slot>].mem_mb``. Empty when no slot is loaded.
     #
     # One ``build_per_slot`` pass feeds both: the budget also counts the slots
-    # that are still starting, the public map does not.
-    rows = await _per_slot_memory(request, include_starting=True)
+    # that are still starting, the public map does not. The GPU capability check
+    # reads the hardware cache and can fall back to a live probe, so it runs once
+    # here, off the event loop, and both the rows and the budget take its answer.
+    from hal0.slots import capacity
+
+    gpu_capable = await asyncio.to_thread(capacity._host_has_capable_gpu)
+    rows = await _per_slot_memory(request, include_starting=True, gpu_capable=gpu_capable)
     primary["per_slot"] = {
         name: row for name, row in rows.items() if row.get("state") != "starting"
     }
@@ -707,7 +717,9 @@ async def stats_hardware(request: Request) -> dict[str, Any]:
     # payload carried for ``memory`` rather than merging with it; when it cannot
     # be built the key is left out (never another box's budget, never a 500).
     try:
-        budget = await memory_source.collect_memory_budget(request.app, per_slot=rows)
+        budget = await memory_source.collect_memory_budget(
+            request.app, per_slot=rows, gpu_capable=gpu_capable
+        )
         primary["memory"] = budget.as_dict()
     except Exception:
         log.warning("hardware.memory_budget_failed", exc_info=True)

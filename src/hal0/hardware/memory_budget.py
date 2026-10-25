@@ -86,6 +86,12 @@ class GpuBudget:
     ``other_guests_gb`` (the unattributed remainder: other guests sharing the
     pool). ``attribution_excess_gb`` is the opposite remainder -- how far the
     attributed footprints overshoot the live usage (estimates, not readings).
+
+    ``image_engine_slot`` names the slot that hosts the image engine (``None``
+    when the box has no img slot), so no consumer has to guess it from the slot
+    list. ``image_engine_estimated`` is true when the engine's figure is that
+    slot's own attribution standing in for a ComfyUI reading that was missing,
+    or not usable on this pool.
     """
 
     kind: Literal["shared", "dedicated"]
@@ -93,6 +99,8 @@ class GpuBudget:
     used_gb: float
     this_box: tuple[SlotShare, ...]
     image_engine_gb: float
+    image_engine_slot: str | None
+    image_engine_estimated: bool
     other_guests_gb: float
     attribution_excess_gb: float
     free_gb: float
@@ -150,9 +158,13 @@ def build_memory_budget(
     ``per_slot`` is ``build_per_slot`` output (``{slot: {"vram_mb", "ram_mb",
     "mem_mb", "state", "model_id"}}``); a row without ``vram_mb`` counts as 0.
     ``gpu_slots`` names the slots that draw on the GPU pool -- an NPU slot's row
-    is ignored. ``img_slot`` is the image-engine slot; its row stands in for the
-    engine only when ``image_engine_mb`` (ComfyUI's own view, which wins when
-    present -- even at 0) is ``None``.
+    is ignored. ``img_slot`` is the image-engine slot. ``image_engine_mb`` is
+    ComfyUI's own view of its usage; on a shared pool it wins when present (even
+    at 0), and the img slot's row stands in for it only when it is ``None``.
+    On a dedicated card ComfyUI's view is ignored: ``vram_total - vram_free`` is
+    device-wide there, so it already contains every other slot's weights and the
+    other guests' memory, and taking it as the engine would book them twice.
+    The img slot's row is the engine's figure on a dedicated card, always.
 
     ``gpu`` and ``render_free_gb`` are ``None`` when the box has no GPU lane, no
     sample was read, or the sample lacks the total or the used counter for its
@@ -183,11 +195,16 @@ def build_memory_budget(
             continue
         shares.append((name, _mb(row.get("vram_mb")), _state(row)))
 
-    if image_engine_mb is not None:
+    img_row = per_slot.get(img_slot) if img_slot is not None else None
+    if shared and image_engine_mb is not None:
         engine_mb = _mb(image_engine_mb)
+        engine_estimated = False
+    elif img_row is not None:
+        engine_mb = _mb(img_row.get("vram_mb"))
+        engine_estimated = True
     else:
-        img_row = per_slot.get(img_slot) if img_slot is not None else None
-        engine_mb = _mb(img_row.get("vram_mb")) if img_row is not None else 0.0
+        engine_mb = 0.0
+        engine_estimated = False
 
     resident_mb = sum(mb for _, mb, state in shares if state != _STARTING)
     starting_mb = sum(mb for _, mb, state in shares if state == _STARTING)
@@ -206,6 +223,8 @@ def build_memory_budget(
         used_gb=_gb(used_mb),
         this_box=tuple(SlotShare(slot=n, gb=_gb(mb), state=st) for n, mb, st in shares),
         image_engine_gb=_gb(engine_mb),
+        image_engine_slot=img_slot,
+        image_engine_estimated=engine_estimated,
         other_guests_gb=_gb(other_guests_mb),
         attribution_excess_gb=_gb(excess_mb),
         free_gb=_gb(free_mb),

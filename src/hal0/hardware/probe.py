@@ -310,13 +310,14 @@ def _derive_unified_memory_mb(ram_mb: int, gpu: GPUInfo | None) -> int:
 def _read_cgroup_memory_max_mb(root: Path = Path("/")) -> int | None:
     """Return the running cgroup's memory cap in MiB, or None when unlimited.
 
-    The cgroup cap is a 3rd headroom candidate (issue #372): when below
-    min(pool, host) it becomes the binding constraint. The cap is the tightest
-    finite limit on the process's cgroup chain, not just the leaf's own file --
-    hal0-api runs in ``system.slice/hal0-api.service`` and its slice carries
-    the limit. ``max``, empty, unreadable, unparseable and "infinite" values
-    (the kernel's 9223… sentinel included) are no constraint; see
-    :func:`hal0.hardware.memory_budget.cgroup_limit_mb` for the walk.
+    The cap (issue #372) is the tightest finite limit on the process's cgroup
+    chain, not just the leaf's own file -- hal0-api runs in
+    ``system.slice/hal0-api.service`` and its slice carries the limit. ``max``,
+    empty, unreadable, unparseable and "infinite" values (the kernel's 9223…
+    sentinel included) are no constraint; see
+    :func:`hal0.hardware.memory_budget.cgroup_limit_mb` for the walk. The
+    dashboard's RAM figure does not read this stored value; the memory budget
+    reads the limit live (:func:`hal0.hardware.memory_budget.read_ram`).
 
     ``root`` is the filesystem root the walk reads under (tests pass a fake
     ``/proc`` + ``/sys`` tree). Never raises.

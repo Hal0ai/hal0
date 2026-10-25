@@ -219,7 +219,9 @@ async def engine_used_mb() -> float | None:
     """ComfyUI's own GPU usage in MiB (``vram_total - vram_free``), or None.
 
     The memory budget's measured figure for the image engine (ADR-0039); callers
-    fall back to the img slot's attribution on None. Cached for
+    fall back to the img slot's attribution on None. None too when ComfyUI runs on
+    the CPU: its ``vram_*`` fields then describe system RAM, which is not the GPU
+    pool and must never be read as the engine's share of it. Cached for
     :data:`_ENGINE_TTL_S`, failures included, and bounded by
     :data:`_ENGINE_TIMEOUT`, so the dashboard's 2.5 s poll costs ComfyUI at most
     one short read per TTL. A read cancelled by the caller's own deadline is
@@ -231,7 +233,8 @@ async def engine_used_mb() -> float | None:
         return cached[1]
     used_mb: float | None = None
     try:
-        used_bytes = _device_used_bytes(await _fetch_engine_stats())
+        stats = await _fetch_engine_stats()
+        used_bytes = None if _runs_on_cpu(stats) else _device_used_bytes(stats)
         if used_bytes is not None:
             used_mb = used_bytes / (1024.0 * 1024.0)
     finally:
@@ -296,6 +299,12 @@ def _first_device(stats: dict[str, Any] | None) -> dict[str, Any] | None:
     if isinstance(devices, list) and devices and isinstance(devices[0], dict):
         return devices[0]
     return None
+
+
+def _runs_on_cpu(stats: dict[str, Any] | None) -> bool:
+    """True when the first device ComfyUI reports is the CPU (``type == "cpu"``)."""
+    dev = _first_device(stats)
+    return dev is not None and str(dev.get("type") or "").lower() == "cpu"
 
 
 def _device_used_bytes(stats: dict[str, Any] | None) -> float | None:
