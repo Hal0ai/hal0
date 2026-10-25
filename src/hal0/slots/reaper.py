@@ -36,6 +36,14 @@
     :class:`hal0.slots.manager.SlotManager` (``is_pinned`` + the
     ``delete``/``unload`` route guards) since it gates the API surface,
     not the background loop.
+  - **Resident ComfyUI slot.** The img-group slot (the ComfyUI container,
+    found by :func:`hal0.slots.arbiter.gpu_exclusive_group`, never by name) is
+    never evicted by either sweep. The GPU arbiter keeps it resident
+    (``arbiter.py`` module docstring): idle, it holds next to no GTT;
+    ``restore_llm`` frees its models with ``POST /free``; and editor prompts
+    reach the arbiter through the ``hal0_gpu_gate`` node. ``idle_timeout_s``
+    and ``priority`` do not apply to it. :func:`_resident_img` is the shared
+    predicate, and :mod:`hal0.slots.preload_evict` applies it too.
   - **Per-modality budget** (``max_loaded_models`` per slot type,
     LRU-evict the oldest over budget) — evaluated and DEFERRED: it needs a
     new config surface (a per-type cap alongside the existing global
@@ -102,6 +110,23 @@ def is_pinned(canonical_name: str, cfg: dict[str, Any] | None) -> bool:
     if cfg is not None and cfg.get("pinned") is not None:
         return bool(cfg["pinned"])
     return canonical_name in _PINNED_BY_DEFAULT
+
+
+def _resident_img(cfg: dict[str, Any] | None) -> bool:
+    """True when the raw slot config *cfg* is the resident ComfyUI (img-group) slot.
+
+    The GPU arbiter keeps that container up once it is started, so automatic
+    eviction (the idle TTL, the pressure sweep and pre-load eviction) never
+    takes it. Matched by :func:`hal0.slots.arbiter.gpu_exclusive_group`, not
+    by slot name, so a ComfyUI slot named anything is covered. It is separate
+    from :func:`is_pinned` on purpose: ``pinned`` also backs the manual
+    unload/delete 409 guard, and an operator must still be able to take img
+    down by hand. Imported lazily, like the rest of this module's
+    cross-package imports.
+    """
+    from hal0.slots.arbiter import gpu_exclusive_group
+
+    return gpu_exclusive_group(cfg or {}) == "img"
 
 
 _DEFAULT_EVICTION_PRIORITY: int = 50
@@ -307,6 +332,8 @@ class SlotReaper:
         """Resolve the idle TTL after which a slot is hard-evicted (#902).
 
         Returns ``None`` when the slot is pinned (never TTL-evicted):
+          * it is the resident ComfyUI slot (:func:`_resident_img`), whatever
+            its ``idle_timeout_s`` says,
           * an explicit ``idle_timeout_s = 0`` in the slot's TOML,
           * :func:`is_pinned` (default-pinned anchor OR
             ``SlotConfig.pinned = true``) with no explicit per-slot
@@ -324,6 +351,10 @@ class SlotReaper:
             cfg = await host._load_slot_config(canonical)
         except (SlotConfigError, SlotNotFound):
             cfg = {}
+        # Ahead of the idle_timeout_s read: an explicit per-slot TTL must not
+        # re-enable eviction of the resident ComfyUI container.
+        if _resident_img(cfg):
+            return None
         raw = cfg.get("idle_timeout_s")
         if isinstance(raw, bool):  # bool is an int subclass — never a TTL
             raw = None
@@ -377,11 +408,12 @@ class SlotReaper:
         Stage 2 (hard, #902): a slot idle past its resolved per-slot TTL
         (:meth:`evict_timeout_for`) is **unloaded**, freeing host RAM —
         the only way to reclaim it, since llama-server allocates KV
-        statically at ``ctx_size``. ``idle_timeout_s = 0`` (or a pinned
-        slot) is never evicted. A slot mid-request (``serving_count > 0``)
-        is never touched; the dispatcher reloads an evicted slot
-        transparently on its next request (wake-on-request), so eviction
-        is safe.
+        statically at ``ctx_size``. ``idle_timeout_s = 0``, a pinned slot
+        and the resident ComfyUI slot (the img-group slot, found by
+        ``gpu_exclusive_group``, not by name) are never evicted. A slot
+        mid-request (``serving_count > 0``) is never touched; the
+        dispatcher reloads an evicted slot transparently on its next
+        request (wake-on-request), so eviction is safe.
         """
         host = self._host
         now = time.time()
@@ -445,6 +477,11 @@ class SlotReaper:
             anchor and other default-pinned names, or any slot with
             ``SlotConfig.pinned = true``) is never evicted by pressure,
             regardless of its priority.
+          - The resident ComfyUI slot (the img-group slot, found by
+            ``gpu_exclusive_group``, not by name) is never evicted: the GPU
+            arbiter keeps it up, and idle it holds next to no GTT. In image
+            mode the arbiter has already unloaded the GPU llm set, so the
+            sweep reclaims the idle CPU/NPU slots instead.
           - Every other resident slot is a candidate. The retired ``lru =
             true`` opt-in no longer gates eligibility — the key is
             ignored (:func:`_warn_lru_retired` logs it once per slot).
@@ -481,7 +518,7 @@ class SlotReaper:
                 cfg = await host._load_slot_config(slot_name)
             except (SlotConfigError, SlotNotFound):
                 continue
-            if is_pinned(canonical, cfg):
+            if is_pinned(canonical, cfg) or _resident_img(cfg):
                 continue
             _warn_lru_retired(canonical, cfg)
             candidates.append((eviction_priority(cfg), ts, slot_name))

@@ -1,6 +1,6 @@
 """DR-1 regression: idle-EVICTED capability slots must wake on request.
 
-The idle sweeper unloads embed/rerank/tts/img slots to OFFLINE and
+The idle sweeper unloads embed/rerank/tts slots to OFFLINE and
 DEREGISTERS their container upstream. A follow-up capability request then
 404s inside ``resolve_by_capability`` (surfaced as ``NoRouteFound``) long
 before it can reach the dispatcher's container readiness gate — so that gate
