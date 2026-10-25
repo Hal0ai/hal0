@@ -186,6 +186,89 @@ def test_recommended_for_is_the_one_owner_of_the_starter_pick(
     assert picker.recommended_for(hardware) == expected
 
 
+# ── a guest capped below the host's memory pool (#3057) ─────────────────────
+#
+# On a unified-memory host an LXC guest still reads the host's pool as `unified_memory_mb`,
+# while `ram_mb` (MemTotal through lxcfs) and `cgroup_max_mb` carry the guest's limit. ComfyUI
+# loads the weights into process memory, which the guest's memory cgroup is charged for, so the
+# starter pick follows the smaller of the two.
+
+
+@pytest.mark.parametrize(
+    ("hardware", "expected"),
+    [
+        # 128 GiB host, guest limited to 48 GiB: Qwen-Image (51 GB) would be OOM-killed.
+        (HardwareInfo(unified_memory_mb=128 * 1024, ram_mb=48 * 1024), "sdxl-lightning"),
+        # A guest with 96 GiB still holds the big model.
+        (HardwareInfo(unified_memory_mb=128 * 1024, ram_mb=96 * 1024), "qwen-image-lightning"),
+        # The cgroup cap wins when it is below MemTotal.
+        (
+            HardwareInfo(unified_memory_mb=128 * 1024, ram_mb=128 * 1024, cgroup_max_mb=40 * 1024),
+            "sdxl-lightning",
+        ),
+        # ... and is ignored when it is above the pool.
+        (
+            HardwareInfo(unified_memory_mb=128 * 1024, ram_mb=128 * 1024, cgroup_max_mb=256 * 1024),
+            "qwen-image-lightning",
+        ),
+        # `ram_mb` 0 is "no limit known", not a zero-byte guest.
+        (HardwareInfo(unified_memory_mb=128 * 1024, ram_mb=0), "qwen-image-lightning"),
+        (
+            HardwareInfo(unified_memory_mb=128 * 1024, ram_mb=0, cgroup_max_mb=0),
+            "qwen-image-lightning",
+        ),
+        # No unified memory: the limit and the pool are the same RAM.
+        (HardwareInfo(ram_mb=8 * 1024), "sd-1.5-pruned-emaonly"),
+        # A cap that leaves under 16 GiB is a small box whatever the host has.
+        (HardwareInfo(unified_memory_mb=128 * 1024, ram_mb=12 * 1024), "sd-1.5-pruned-emaonly"),
+    ],
+    ids=[
+        "capped-48gb-guest",
+        "96gb-guest",
+        "cgroup-below-ram",
+        "cgroup-above-pool",
+        "ram-unprobed",
+        "ram-and-cgroup-zero",
+        "no-unified-memory",
+        "12gb-guest",
+    ],
+)
+def test_recommended_for_ranks_by_what_the_guest_can_use(
+    hardware: HardwareInfo, expected: str
+) -> None:
+    assert picker.recommended_for(hardware) == expected
+
+
+@pytest.mark.parametrize(
+    ("hardware", "expected"),
+    [
+        (HardwareInfo(unified_memory_mb=128 * 1024, ram_mb=48 * 1024), 48.0),
+        (HardwareInfo(unified_memory_mb=128 * 1024, ram_mb=0), 128.0),
+        (
+            HardwareInfo(unified_memory_mb=128 * 1024, ram_mb=96 * 1024, cgroup_max_mb=40 * 1024),
+            40.0,
+        ),
+        (HardwareInfo(ram_mb=8 * 1024), 8.0),
+        (HardwareInfo(), None),
+        (HardwareInfo(cgroup_max_mb=40 * 1024), None),
+    ],
+    ids=["ram-limit", "no-limit-known", "cgroup-limit", "ram-only", "unprobed", "cgroup-only"],
+)
+def test_image_pool_gb_is_the_smaller_of_the_pool_and_the_limit(
+    hardware: HardwareInfo, expected: float | None
+) -> None:
+    assert picker.image_pool_gb(hardware) == expected
+
+
+def test_the_agent_ladder_still_sees_the_host_pool() -> None:
+    """Only the image pick follows the guest's limit: GTT is not charged to its cgroup."""
+    from hal0.install.agent_model import pool_gb
+
+    hardware = HardwareInfo(unified_memory_mb=128 * 1024, ram_mb=48 * 1024)
+
+    assert pool_gb(hardware) == 128.0
+
+
 # ── a models tree the service user cannot read ──────────────────────────────
 #
 # `GET /api/capabilities` builds the picker synchronously for every capability, so a raise here

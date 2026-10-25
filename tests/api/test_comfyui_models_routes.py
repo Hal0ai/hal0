@@ -280,11 +280,22 @@ def test_models_row_carries_its_last_job(client: TestClient, installs: _Installs
         (HardwareInfo(unified_memory_mb=128 * 1024), "qwen-image-lightning"),
         (HardwareInfo(unified_memory_mb=64 * 1024), "sdxl-lightning"),
         (HardwareInfo(ram_mb=8 * 1024), "sd-1.5-pruned-emaonly"),  # no unified memory: RAM
-        (HardwareInfo(unified_memory_mb=96 * 1024, ram_mb=8 * 1024), "qwen-image-lightning"),
+        (HardwareInfo(unified_memory_mb=96 * 1024, ram_mb=96 * 1024), "qwen-image-lightning"),
+        # A guest capped below the host's pool is ranked by what it can use (#3057): the
+        # probe reads the host's 128 GiB as unified memory and the guest's limit as ram_mb.
+        (HardwareInfo(unified_memory_mb=128 * 1024, ram_mb=48 * 1024), "sdxl-lightning"),
         (HardwareInfo(), "sdxl-lightning"),  # never probed: nothing to size a pool from
         (RuntimeError("hardware.json is unreadable"), "sdxl-lightning"),
     ],
-    ids=["128gb", "64gb", "8gb-ram", "unified-wins-over-ram", "unprobed", "unreadable"],
+    ids=[
+        "128gb",
+        "64gb",
+        "8gb-ram",
+        "unified-and-ram-agree",
+        "capped-guest",
+        "unprobed",
+        "unreadable",
+    ],
 )
 def test_models_marks_recommended_by_pool(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, hardware: Any, expected: str

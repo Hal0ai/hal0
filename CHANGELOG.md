@@ -84,6 +84,8 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- **The image starter recommendation uses the guest's RAM limit, so a capped LXC guest is no longer offered a model it cannot load.** On a unified-memory host a guest limited to 48 GiB still read the host's 128 GiB pool and was offered `qwen-image-lightning` in the install-time offer, in `hal0 setup` and in `GET /api/comfyui/models`; the first render then OOM-killed the image engine. The pick now follows the smaller of the pool and the guest's RAM limit (`ram_mb` or `cgroup_max_mb`), with the same thresholds (#3057).
+
 - **`/api/comfyui/status` and `/logs` use the right container and unit name on a box with id-keyed slots.** Both looked for `hal0-slot@img.service` and the `hal0-slot-img` container, but a box migrated to id-keyed slots names them after the slot's id (for example `hal0-slot@10.service`), so a running engine reported as absent and the log tail read nothing (Refs #2302).
 
 - **The ComfyUI provider no longer launches with an empty `extra_model_paths.yaml`.** It wrote an empty file whenever the installer's copy was missing, and an empty file hides every model from ComfyUI. It now writes the canonical file when the existing one is absent or blank, and leaves a file the operator filled in alone.

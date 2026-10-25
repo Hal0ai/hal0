@@ -736,8 +736,9 @@ def install_route(model_id: str) -> str:
 def recommended_model_id(pool_gb: float | None) -> str:
     """The starter model that suits a memory pool of ``pool_gb`` gigabytes.
 
-    The pool is unified memory when the box has it, else system RAM, as
-    :func:`hal0.install.agent_model.pool_gb` computes it. ``None`` means the pool is
+    The pool is the memory the box can load a model into, as
+    :func:`hal0.comfyui.picker.image_pool_gb` computes it: the unified memory when the box
+    has it, else system RAM, capped at the guest's RAM limit. ``None`` means the pool is
     unknown (the hardware file is unreadable, or the box was never probed): the middle
     pick, which any box that can run ComfyUI at all can take. Every other catalog model
     stays installable; this only picks the one to highlight.
