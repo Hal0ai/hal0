@@ -595,7 +595,9 @@ CATALOG: dict[str, ImageModel] = {
             est_seconds=75,
             license="Apache-2.0",
             notes="Qwen-Image 2512 in bf16 with the 4-step Lightning LoRA.",
-            load_ram_gb=47.7,
+            # anon-rss 47732248 KiB at the OOM kill on a 48 GiB guest (the kernel's "kB" is
+            # KiB: 47732248 / 1024 / 1024 = 45.5). A lower bound: the load needed more.
+            load_ram_gb=45.5,
         ),
         ImageModel(
             id="qwen-image",

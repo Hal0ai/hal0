@@ -133,7 +133,7 @@ Request (subset honored): `{"model": <id>, "prompt": <required>, "n"?, "size"?, 
 | Status | Code | When |
 |---|---|---|
 | 404 | `image.model_unknown` | Neither a catalog id nor a `ckpt/…` id that `GET /api/comfyui/files` lists as `api_id`, for example `Flux-2-Klein-9B-GGUF` or `sd-turbo`. `error.details.available` lists the ids that work now. |
-| 409 | `image.model_not_installed` | A renderable catalog model whose weights are not all on disk. `error.details` carries `install` (`POST /api/comfyui/models/<id>/install`) and `missing_gb`, the GiB still to download. |
+| 409 | `image.model_not_installed` | A renderable catalog model whose weights are not all on disk. `error.details` carries `install` (`POST /api/comfyui/models/<id>/install`) and `missing_gb`, the GB still to download (1 GB is 2^30 bytes, as in the memory budget). |
 | 422 | `image.model_not_renderable` | A video, edit or upscale catalog model. Open it in the ComfyUI editor, which the `img` slot serves on port 8188 and which needs a ROCm lane on the host. |
 | 422 | `image.model_required` | No `model` in the request and no model selected for `img`. |
 

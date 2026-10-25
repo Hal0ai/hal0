@@ -68,7 +68,7 @@ log = logging.getLogger(__name__)
 class ImageOffer:
     """One model on offer. ``missing_gb`` is what is still to download (0 once it is all on disk).
 
-    Both sizes are GiB, as in the image-model API rows, so the menu and
+    Both sizes are the API rows' GB (2**30 bytes), so the menu and
     ``hal0 comfyui models list`` quote one figure for one download.
     """
 
@@ -115,7 +115,9 @@ def no_offer_reason(hw: HardwareInfo) -> str | None:
 def offer_text(offer: ImageOffer) -> str:
     """The one-line description of ``offer`` that ``--plan`` prints and the menu shows."""
     done = " (already downloaded)" if offer.missing_gb == 0 else ""
-    return f"{offer.label} — {offer.missing_gb:.1f} GiB download, ~{offer.est_seconds}s per image{done}"
+    return (
+        f"{offer.label} — {offer.missing_gb:.1f} GB download, ~{offer.est_seconds}s per image{done}"
+    )
 
 
 _SEPARATORS = re.compile(r"[,\s]+")

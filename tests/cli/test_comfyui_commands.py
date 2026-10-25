@@ -19,7 +19,7 @@ runner = CliRunner()
 
 
 def _job(model_id: str, state: str, *, done: float = 0.0, total: float = 8.0, **extra: Any):
-    """A job row; ``done`` and ``total`` are in GiB, the unit the CLI prints sizes in."""
+    """A job row; ``done`` and ``total`` are in the 2**30-byte GB the CLI prints."""
     return {
         "id": f"job-{model_id}",
         "model_id": model_id,
@@ -125,7 +125,7 @@ def test_cli_models_list_renders_table(api: FakeApi) -> None:
     result = _run("models", "list")
 
     assert result.exit_code == 0, result.output
-    assert "GiB to download" in result.output  # the API row's missing_gb is GiB
+    assert "GB to download" in result.output and "GiB" not in result.output
     lines = {
         m: next(x for x in result.output.splitlines() if m in x)
         for m in ("sdxl-lightning", "sdxl-turbo", "qwen-image", "esrgan-4x")
@@ -191,8 +191,8 @@ def test_cli_install_polls_until_completed(api: FakeApi) -> None:
     assert result.exit_code == 0, result.output
     assert api.calls[0] == ("POST", "/api/comfyui/models/sdxl-lightning/install")
     assert api.polls() == 3  # it kept polling until the job was terminal
-    assert "sdxl-lightning: 25% (1.9/7.6 GiB)" in result.output
-    assert "sdxl-lightning: 75% (5.7/7.6 GiB)" in result.output
+    assert "sdxl-lightning: 25% (1.9/7.6 GB)" in result.output
+    assert "sdxl-lightning: 75% (5.7/7.6 GB)" in result.output
     assert "installed" in result.output
 
 
@@ -584,8 +584,8 @@ def test_cli_files_groups_by_kind(api: FakeApi) -> None:
     assert out.index("sd_xl_turbo_1.0_fp16.safetensors") < out.index("mine.safetensors")
     assert out.index("mine.safetensors") < out.index("vae") < out.index("sdxl_vae.safetensors")
     owned = next(line for line in out.splitlines() if "sd_xl_turbo" in line)
-    assert "sdxl-turbo" in owned and "6.4 GiB" in owned  # binary units, like the models list
-    assert "1.9 GiB" in next(line for line in out.splitlines() if "mine.safetensors" in line)
+    assert "sdxl-turbo" in owned and "6.4 GB" in owned  # 1024-based, like the models list
+    assert "1.9 GB" in next(line for line in out.splitlines() if "mine.safetensors" in line)
     shared = next(line for line in out.splitlines() if "sdxl_vae" in line)
     assert "sdxl-lightning" in shared and "sdxl-turbo" in shared
     assert api.calls == [("GET", "/api/comfyui/files")]

@@ -329,7 +329,9 @@ def test_measured_facts_present() -> None:
     """The 2026-10-24 bench: peak GPU-pool rise per rendered size, and one load-time RAM floor."""
     for model_id, peaks in _MEASURED_GPU_PEAK.items():
         assert dict(CATALOG[model_id].gpu_peak_gb) == peaks, model_id
-    assert CATALOG["qwen-image-lightning"].load_ram_gb == 47.7  # anon-rss at the OOM kill
+    # anon-rss 47732248 KiB at the OOM kill: the kernel's "kB" is KiB, so 45.5 GiB, not 47.7
+    assert CATALOG["qwen-image-lightning"].load_ram_gb == 45.5
+    assert CATALOG["qwen-image-lightning"].load_ram_gb == round(47732248 / 1024 / 1024, 1)
     # A measurement is at a size the box actually rendered, and a rise above idle is positive.
     for model in CATALOG.values():
         for size, peak in model.gpu_peak_gb.items():

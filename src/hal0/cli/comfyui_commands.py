@@ -46,18 +46,19 @@ def _require_api() -> None:
         raise typer.Exit(1)
 
 
-#: Bytes in a GiB. Every size this CLI prints is binary, to match the GiB the API rows carry.
+#: Bytes in the "GB" this CLI prints: 2**30, the unit of the memory budget and of the API rows'
+#: ``approx_gb`` and ``missing_gb``. The word is "GB" everywhere; only the value is binary.
 _GIB = 2**30
 
 
 def _fmt_bytes(n: int | float | None) -> str:
-    """Binary units, to match the GiB the API's ``approx_gb`` and ``missing_gb`` report."""
+    """1024-based sizes labelled GB/MB/KB, matching the API's ``approx_gb`` and ``missing_gb``."""
     n = float(n or 0)
     if n >= _GIB:
-        return f"{n / _GIB:.1f} GiB"
+        return f"{n / _GIB:.1f} GB"
     if n >= 2**20:
-        return f"{n / 2**20:.1f} MiB"
-    return f"{n / 2**10:.1f} KiB"
+        return f"{n / 2**20:.1f} MB"
+    return f"{n / 2**10:.1f} KB"
 
 
 @models_app.command("list")
@@ -87,7 +88,7 @@ def models_list(
     table.add_column("ID", style="bold")
     table.add_column("Task")
     table.add_column("State")
-    table.add_column("GiB to download", justify="right")
+    table.add_column("GB to download", justify="right")
     for m in models:
         job = m.get("job") or {}
         state = "installing" if job.get("state") in _ACTIVE else m.get("state", "—")
@@ -117,7 +118,7 @@ def models_install(
     Starts a model's install as a background job on the daemon, polls
     ``/api/comfyui/jobs`` every 500 ms and prints progress until that job is
     terminal, then moves to the next model. They never run side by side: models
-    share files, and two 40 GiB downloads at once help nobody. A model that is
+    share files, and two 40 GB downloads at once help nobody. A model that is
     already installed counts as done; one whose install is already running is
     followed. A failed, cancelled or refused model (unknown id, no disk space)
     does not stop the ones after it. Exits 1 if any did not install. Ctrl-C stops
@@ -217,7 +218,7 @@ def _exit_interrupted(not_started: Sequence[str] = ()) -> NoReturn:
 
 
 def _print_progress(model_id: str, job: dict[str, Any], last_step: dict[str, int]) -> None:
-    """One ``<id>: <pct>% (<done>/<total> GiB)`` line each time ``job`` crosses a step."""
+    """One ``<id>: <pct>% (<done>/<total> GB)`` line each time ``job`` crosses a step."""
     done = int(job.get("bytes_downloaded") or 0)
     total = int(job.get("bytes_total") or 0)
     if job.get("state") != "running" or total <= 0:
@@ -228,7 +229,7 @@ def _print_progress(model_id: str, job: dict[str, Any], last_step: dict[str, int
         return
     last_step[model_id] = step
     console.print(
-        f"  {model_id}: {pct}% ({done / _GIB:.1f}/{total / _GIB:.1f} GiB)",
+        f"  {model_id}: {pct}% ({done / _GIB:.1f}/{total / _GIB:.1f} GB)",
         markup=False,
         highlight=False,
     )

@@ -105,7 +105,7 @@ def test_resolve_not_installed_409() -> None:
     assert err.details["missing_gb"] == weights_gib(CATALOG["sdxl-turbo"])  # GiB, not decimal GB
     assert err.details["missing_gb"] == 6.4  # 6.9e9 bytes
     assert "sdxl-turbo" in err.message
-    assert "6.4 GiB still to download" in err.message
+    assert "6.4 GB still to download" in err.message
 
 
 def test_resolve_partial_install_is_not_installed() -> None:

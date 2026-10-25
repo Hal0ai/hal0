@@ -1319,17 +1319,17 @@ def test_preflight_disk_raises_507(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_insufficient_disk_message_uses_gib(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every figure in the message is GiB, as the API rows are; the check itself stays bytes."""
-    model = CATALOG["sdxl-lightning"]  # 7.6 decimal GB of weights, 7.08 GiB
+    """The message's figures are 2**30-byte GB, as the API rows' are; the check itself stays bytes."""
+    model = CATALOG["sdxl-lightning"]  # 7.6e9 bytes of weights, 7.08 in 2**30-byte GB
     _free_space(monkeypatch, lambda path: 2 * 2**30)
 
     with pytest.raises(install.InstallInsufficientDisk) as excinfo:
         install.preflight_disk(model)
 
     message = excinfo.value.message
-    assert "need about 7.08 GiB" in message
-    assert "2.0 GiB free at" in message
-    assert " GB" not in message
+    assert "need about 7.08 GB" in message  # 7.6e9 bytes, not "7.6 GB"
+    assert "2.0 GB free at" in message
+    assert "GiB" not in message  # one unit word
     assert excinfo.value.details["required_bytes"] == 7_600_000_000
     assert excinfo.value.details["free_bytes"] == 2 * 2**30
 
@@ -1344,8 +1344,8 @@ def test_insufficient_disk_message_names_the_staged_remainder_in_gib(
     with pytest.raises(install.InstallInsufficientDisk) as excinfo:
         install.preflight_disk(model)
 
-    assert "need about 0.37 GiB more (0.56 GiB already staged)" in excinfo.value.message
-    assert "0.3 GiB free at" in excinfo.value.message  # 300 MB is 0.28 GiB, one decimal
+    assert "need about 0.37 GB more (0.56 GB already staged)" in excinfo.value.message
+    assert "0.3 GB free at" in excinfo.value.message  # 300e6 bytes is 0.28, one decimal
 
 
 def test_preflight_disk_passes_when_there_is_room(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1399,7 +1399,7 @@ def test_preflight_subtracts_resumable_partial(monkeypatch: pytest.MonkeyPatch) 
     with pytest.raises(install.InstallInsufficientDisk) as excinfo:
         install.preflight_disk(model)
     assert excinfo.value.details["required_bytes"] == 400_000_000  # what is left, not the total
-    assert "about 0.37 GiB" in excinfo.value.message  # the remainder, 400 MB, in GiB
+    assert "about 0.37 GB" in excinfo.value.message  # the remainder, 400e6 bytes
 
 
 def test_preflight_required_bytes_is_the_unrounded_sum_of_the_missing_components(
@@ -1414,7 +1414,7 @@ def test_preflight_required_bytes_is_the_unrounded_sum_of_the_missing_components
     with pytest.raises(install.InstallInsufficientDisk) as excinfo:
         install.preflight_disk(model)
     assert excinfo.value.details["required_bytes"] == 80_000_000
-    assert "about 0.07 GiB" in excinfo.value.message  # 80 MB
+    assert "about 0.07 GB" in excinfo.value.message  # 80e6 bytes
 
 
 def test_preflight_ignores_partial_without_sidecar(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1427,7 +1427,7 @@ def test_preflight_ignores_partial_without_sidecar(monkeypatch: pytest.MonkeyPat
         install.preflight_disk(model)
 
     assert excinfo.value.details["required_bytes"] == 1_000_000_000
-    assert "about 0.93 GiB" in excinfo.value.message  # 1 GB
+    assert "about 0.93 GB" in excinfo.value.message  # 1e9 bytes
 
 
 def test_preflight_ignores_a_registry_pull_partial_of_the_same_model(
@@ -1555,7 +1555,7 @@ def test_install_each_emits_throttled_progress(
 
     assert results == [("sdxl-turbo", "completed")]
     progress = [
-        line for line in lines if re.fullmatch(r"  sdxl-turbo: \d+% \(\d+\.\d/8\.0 GiB\)", line)
+        line for line in lines if re.fullmatch(r"  sdxl-turbo: \d+% \(\d+\.\d/8\.0 GB\)", line)
     ]
     assert progress, lines
     assert len(progress) <= elapsed / interval  # never faster than one line per interval

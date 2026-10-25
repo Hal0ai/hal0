@@ -175,7 +175,7 @@ def test_plan_prints_one_tab_separated_line_per_offer(
     sdxl = next(r for r in rows if r[0] == "sdxl-lightning")
     model = CATALOG["sdxl-lightning"]
     assert sdxl[1] == (
-        f"{model.label} — {weights_gib(model):.1f} GiB download, ~{model.est_seconds}s per image"
+        f"{model.label} — {weights_gib(model):.1f} GB download, ~{model.est_seconds}s per image"
     )
     assert sdxl[2] == "1"  # 64 GB pool
     assert {r[2] for r in rows if r[0] != "sdxl-lightning"} == {"0"}
@@ -187,7 +187,7 @@ def test_offer_line_says_already_downloaded(
     _land("sdxl-lightning")
     rows = {r[0]: r[1] for r in _plan(capsys)}
     assert rows["sdxl-lightning"].endswith(" (already downloaded)")
-    assert " 0.0 GiB download" in rows["sdxl-lightning"]
+    assert " 0.0 GB download" in rows["sdxl-lightning"]
     assert "already downloaded" not in rows["sdxl-turbo"]
 
 

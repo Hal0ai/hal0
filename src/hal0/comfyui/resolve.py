@@ -153,7 +153,7 @@ def resolve_image_model(model_id: str | None, *, selection_model: str | None) ->
             install = install_route(model.id)
             still_to_download = missing_gib(state)  # GiB, like the models route's rows
             raise ImageModelNotInstalled(
-                f"image model {model.id!r} is not installed ({still_to_download} GiB still to "
+                f"image model {model.id!r} is not installed ({still_to_download} GB still to "
                 f"download); install it with {install}",
                 details={"model": model.id, "install": install, "missing_gb": still_to_download},
             )

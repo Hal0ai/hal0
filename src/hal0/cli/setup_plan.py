@@ -182,7 +182,7 @@ def _render_plan_table(sel: Selections, *, strict: bool) -> bool:
         console.print("[bold]Image models[/bold]")
         image_table = Table()
         image_table.add_column("Model")
-        image_table.add_column("Download (GiB)", justify="right")
+        image_table.add_column("Download (GB)", justify="right")
         for model_id in sel.image_models:
             model = get_model(model_id)
             image_table.add_row(model_id, f"{weights_gib(model):.1f}" if model else "?")
