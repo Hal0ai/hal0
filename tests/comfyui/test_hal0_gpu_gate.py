@@ -26,14 +26,15 @@ _NODE_PATH = (
 )
 
 
-def _load_node() -> Any:
+def _load_node(*, stub_announce: bool = True) -> Any:
     spec = importlib.util.spec_from_file_location("hal0_gpu_gate", _NODE_PATH)
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    # hal0 confirms the hand-off for a prompt let through in generation mode,
-    # unless a test scripts the announce itself (no test reaches the network).
-    mod._announce_prompt = lambda: True
+    if stub_announce:
+        # hal0 confirms the hand-off for a prompt let through in generation
+        # mode, unless a test scripts the announce itself (no network).
+        mod._announce_prompt = lambda: True
     return mod
 
 
@@ -375,6 +376,37 @@ def test_the_gate_refuses_when_hal0_never_confirms_the_hold(monkeypatch) -> None
     )
     monkeypatch.setattr(mod, "_announce_prompt", lambda: None)  # no answer
     with pytest.raises(mod.GpuGateClosed, match="stopped answering"):
+        mod.prepare_image_mode()
+
+
+def test_an_http_protocol_error_is_a_failed_read_not_a_crash(monkeypatch) -> None:
+    """IncompleteRead and BadStatusLine are not OSErrors: they used to escape to
+    aiohttp as a 500 with nothing queued and no reason."""
+    import http.client
+
+    mod = _load_node(stub_announce=False)
+
+    def _broken(*_args, **_kwargs):
+        raise http.client.IncompleteRead(b"")
+
+    monkeypatch.setattr(mod.urllib.request, "urlopen", _broken)
+    assert mod._fetch_status() is None
+    assert mod._post_switchover() is False
+    assert "IncompleteRead" in mod._post_error()
+    assert mod._announce_prompt() is None
+
+
+def test_a_bad_switch_answer_refuses_the_prompt_with_a_reason(monkeypatch) -> None:
+    import http.client
+
+    mod = _load_node()
+
+    def _bad_status_line(*_args, **_kwargs):
+        raise http.client.BadStatusLine("garbage")
+
+    monkeypatch.setattr(mod, "_fetch_status", lambda: {"mode": "inference"})
+    monkeypatch.setattr(mod.urllib.request, "urlopen", _bad_status_line)
+    with pytest.raises(mod.GpuGateClosed, match="refused the switch"):
         mod.prepare_image_mode()
 
 

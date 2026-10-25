@@ -45,6 +45,7 @@ the real arbiter in tests/slots/test_gpu_arbiter.py); the aiohttp wiring is
 exercised by a live check on a test box.
 """
 
+import http.client
 import json
 import os
 import threading
@@ -173,6 +174,12 @@ def _switchover_active(status: "dict | None") -> bool:
     return isinstance(switchover, dict) and bool(switchover.get("active"))
 
 
+#: Failed exchanges with hal0-api: connection errors and timeouts (OSError,
+#: URLError), a garbled body (ValueError), and HTTP protocol errors such as
+#: IncompleteRead or BadStatusLine, which are not OSErrors.
+_READ_ERRORS = (urllib.error.URLError, OSError, ValueError, http.client.HTTPException)
+
+
 def _fetch_status() -> "dict | None":
     """Blocking status fetch via urllib (run in a thread by the middleware).
 
@@ -183,7 +190,7 @@ def _fetch_status() -> "dict | None":
         with urllib.request.urlopen(HAL0_STATUS_URL, timeout=_STATUS_TIMEOUT_S) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         return data if isinstance(data, dict) else None
-    except (urllib.error.URLError, OSError, ValueError):
+    except _READ_ERRORS:
         return None
 
 
@@ -218,8 +225,8 @@ def _post_switchover() -> bool:
             return True
         _last_post_error.reason = f"HTTP {exc.code}: {_http_error_message(exc)}"
         return False
-    except (urllib.error.URLError, OSError, ValueError) as exc:
-        _last_post_error.reason = str(getattr(exc, "reason", exc))
+    except _READ_ERRORS as exc:
+        _last_post_error.reason = f"{type(exc).__name__}: {getattr(exc, 'reason', None) or exc}"
         return False
 
 
@@ -240,7 +247,7 @@ def _announce_prompt() -> "bool | None":
     try:
         with urllib.request.urlopen(req, timeout=_STATUS_TIMEOUT_S) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, OSError, ValueError):
+    except _READ_ERRORS:
         return None
     held = data.get("held") if isinstance(data, dict) else None
     return held if isinstance(held, bool) else None
