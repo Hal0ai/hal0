@@ -169,18 +169,32 @@ The pool's usage is the kernel counter. The budget splits it by who holds it.
   once, from unrounded MiB values, so rounding error does not accumulate through
   the subtractions.
 
-One behaviour is deliberately conservative. While a slot is starting, the bytes
-it has already loaded are in the counter but not in the resident sum, so they
-count as "other guests" and are also subtracted from free-for-a-render through
-the slot's estimated footprint. The figure errs low, never high, and only until
-the slot is resident.
+Two behaviours of the split are worth stating exactly.
+
+- **A starting slot only lowers the figure.** While a slot is starting, the
+  bytes it has already loaded are in the counter but not in the resident sum,
+  so they count as "other guests". The same bytes are subtracted from
+  free-for-a-render a second time, through the slot's estimated footprint. This
+  can make `render_free_gb` lower than the truth and `other_guests_gb` higher
+  than the truth. It cannot make either error the other way, and it ends when
+  the slot is resident.
+- **Estimates above the counter can hide a guest.** `other_guests_gb` clamps at
+  0 when resident slots plus the image engine are estimated above the counter,
+  which is when `attribution_excess_gb` is above 0. The estimates may be high,
+  and a real second guest's memory can be absorbed into them. Then
+  `other_guests_gb` reads too low and `render_free_gb` reads too high. The
+  counter is a measurement and the split is not, so a reported excess means the
+  split may be hiding a guest.
 
 ### 5. No fixed ceilings
 
 Every ceiling in the budget is read live: the pool's cap from the kernel
 counter, the RAM limit from `MemTotal` and the cgroup chain. The only constant
-is the render margin. When a reading is missing, the field is absent (`gpu` is
-null), and no constant stands in for it.
+is the render margin. For the GPU pool, a missing reading leaves the field
+absent (`gpu` is null), and no constant stands in for it. RAM has no absent
+state: `read_ram` always returns a `RamBudget`, and a `/proc/meminfo` that
+cannot be read gives 0.0 GB for the limit, used and free. No constant stands in
+there either.
 
 The 80 and 96 GB constants are not part of the budget, and nothing in it reads
 them. They still back the Image Gen pane's own gauge, the `memory` key on
@@ -220,6 +234,12 @@ still disagree with the rest of the dashboard.
   Rejected. The counter is a measurement and the per-slot figures are
   estimates. Scaling would invent per-slot numbers, and overflow would draw
   memory the box does not have.
+- **Redesign the memory bar, the top-bar cells and the ruler to carry the new
+  figures.** Rejected. The operator ruled that their styling and design stay as
+  they are, and that only their data and label text change. No markup structure,
+  CSS or visual element is added. This is why the top bar's GPU cell does not
+  gain a pool figure, as the design first proposed: the ruler names and carries
+  the pool.
 - **Add the pool and RAM into one figure.** Rejected. They are different
   resources with different limits, and a sum answers neither question.
 
@@ -231,6 +251,9 @@ still disagree with the rest of the dashboard.
 - The memory ruler's total is the kernel counter, it names its pool, and its
   segments are this box's slots, the image engine and other guests. The slot
   figures are estimates and the UI says so.
+- The memory bar, the top-bar cells, the ruler and the dashboard memory cards
+  keep their markup and styling, and change only their numbers and label text.
+  The top bar's GPU cell shows no pool figure.
 - `GET /api/stats/hardware` gains a `memory` key and keeps its other keys. A
   client that ignores `memory` is unaffected.
 - The image fit check and the `/v1` preflight that follow call
@@ -250,6 +273,10 @@ still disagree with the rest of the dashboard.
     as the engine's share. It has not been confirmed on shared hardware that
     the figure rises with a render and ignores other processes.
   - A slot row without a `vram_mb` reads as 0.0 GB in `this_box`.
+  - While `attribution_excess_gb` is above 0, `other_guests_gb` and
+    `render_free_gb` depend on the per-slot estimates, as decision 4 says.
+  - An unreadable `/proc/meminfo` shows as a RAM limit of 0.0 GB, not as a
+    missing field.
 - The Image Gen pane's gauge and its 80 and 96 GB constants stay until the
   pane's rework, as decision 5 says.
 
