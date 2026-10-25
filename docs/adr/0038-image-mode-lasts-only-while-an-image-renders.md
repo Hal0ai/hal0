@@ -33,8 +33,9 @@ it, and the operator decided that image mode should end when the render does.
    - a render in ComfyUI's queue, read strictly from `/queue`, because the
      editor's prompts never pass through hal0.
 2. **The LLM set reloads 10 seconds after the last image work.** A loop that
-   ticks every 2 seconds decides, so the GPU comes back within 12 seconds.
-   Back-to-back renders share one image mode.
+   ticks every 2 seconds decides, so the restore starts within 12 seconds; the
+   reload itself then takes as long as the models take to load. Back-to-back
+   renders share one image mode while no LLM request waits.
 3. **An LLM request ends the grace and waits, up to 120 seconds.** A request
    for a GPU LLM slot that arrives while image mode is on starts the restore
    at once, or waits for the render that is running first, and is served after
@@ -47,19 +48,27 @@ it, and the operator decided that image mode should end when the render does.
    the GPU again.
 5. **A pin holds.** It holds against the loop and against LLM demand until the
    operator unpins it or forces a switch to inference. It is taken from the
-   call that enters image mode: a pin set in LLM mode is not carried into the
-   next switch.
+   call that enters image mode, so pinning in LLM mode is refused (409) rather
+   than recorded for a switch that would not honour it.
 6. **Every GPU LLM slot unloads for a render.** There is no memory-budgeted
    mode in which some LLM slots stay loaded.
 7. **An editor prompt gets time to reach the queue, and is refused when hal0
    cannot hand it the GPU.** After any switch into image mode the automatic
    restores leave the GPU alone for 3 seconds, so a prompt the gate node asked
    image mode for can reach ComfyUI's queue, where the restore decision sees
-   it. The `hal0_gpu_gate` node waits while hal0 is switching, asks again if an
-   LLM request took the GPU back, and refuses the prompt, queuing nothing,
-   when hal0 rejects the switch, stops answering mid-switch, or stays
-   unreachable for 5 seconds. `HAL0_COMFYUI_GATE_FAIL_OPEN=1` lets prompts
-   through while hal0 is unreachable, and only then.
+   it. A prompt the gate lets through in image mode, with no switch, opens the
+   same hand-off first, under the switch lock (`hold_for_prompt`), so a restore
+   decision either finishes before it (and the gate then asks for the switch)
+   or sees it. The `hal0_gpu_gate` node waits while hal0 is switching, asks
+   again if an LLM request took the GPU back, and refuses the prompt, queuing
+   nothing, when hal0 rejects the switch, stops answering mid-switch, still
+   holds the GPU for the LLM slots after three switch requests, has not
+   finished within 180 seconds, or stays unreachable for 5 seconds.
+   `HAL0_COMFYUI_GATE_FAIL_OPEN=1` lets prompts through while hal0 is
+   unreachable, and only then. The node reads a cheap arbiter-only status
+   (`GET /api/comfyui/arbiter`) on the port `hal0-api` binds, and the status
+   reports `generation` only once a switch has finished, which also keeps the
+   gate released up to v1.6.5 waiting while hal0 switches or restores.
 8. **`[image].idle_restore_minutes` is removed.** A constant of 10 seconds needs
    no setting. `ImageGenConfig` refuses the key, and a pass in the
    post-activation chain removes it from existing slot files. `hal0 update`
@@ -71,7 +80,9 @@ it, and the operator decided that image mode should end when the render does.
 ## Consequences
 
 - Each render, or each burst of renders less than 10 seconds apart, costs one
-  unload and one reload of the LLM set.
+  unload and one reload of the LLM set, unless an LLM request is waiting: that
+  request restores between renders, so a sequential burst then costs one cycle
+  per render.
 - The first chat after a render waits for the whole saved set to reload. The
   mode flips back to LLM only after the last slot is ready, because crash
   recovery relies on that order.
@@ -79,7 +90,11 @@ it, and the operator decided that image mode should end when the render does.
   reload each way, unless they pin image mode.
 - The gate node waits for a switch that can take as long as the drain (up to
   120 seconds), so its own limit is 180 seconds. A box picks up a new gate
-  node when its img container restarts.
+  node only when its img container restarts, and `hal0 update` does not
+  restart slots, so the release notes tell operators to run
+  `hal0 slot restart img` once. Until then the older gate is kept waiting by
+  the status rule above while hal0 answers, but still fails open when it does
+  not.
 - A ComfyUI queue that never drains keeps image mode, because the restore
   decision treats a busy queue as image work. A forced switch to inference
   ends it.
@@ -110,7 +125,9 @@ it, and the operator decided that image mode should end when the render does.
 - `src/hal0/api/routes/v1.py` (`images_generations`),
   `src/hal0/dispatcher/router.py` (`Dispatcher.forward`).
 - `src/hal0/comfyui/assets/hal0_gpu_gate.py` (`prepare_image_mode`),
-  `src/hal0/providers/comfyui.py` (the opt-out passthrough).
+  `src/hal0/providers/comfyui.py` (`gate_env`: the gate's URLs and the
+  opt-out), `src/hal0/api/routes/comfyui.py` (`api_mode`, `/arbiter`,
+  `/prompt-handoff`), `GpuArbiter.hold_for_prompt`.
 - `src/hal0/updater/updater.py` (`strip_retired_image_keys`),
   `src/hal0/config/schema.py` (`ImageGenConfig`).
 - ADR-0037 (image models are a ComfyUI-owned catalog).

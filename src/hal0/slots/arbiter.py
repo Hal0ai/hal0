@@ -127,8 +127,8 @@ _RETRY_AFTER_FLOOR_S = 15
 #: editor prompt at most ~2.5 s after the switch), so back-to-back renders share
 #: one image mode instead of reloading the LLM set between them.
 _RESTORE_GRACE_S = 10.0
-#: Restore-loop tick: the GPU returns at most grace + tick (12 s) after the last
-#: render when no LLM request asks sooner; an idle tick does no I/O.
+#: Restore-loop tick: the restore starts at most grace + tick (12 s) after the
+#: last render when no LLM request asks sooner; an idle tick does no I/O.
 _RESTORE_TICK_S = 2.0
 #: How long an LLM request waits for the restore it triggered: reloading the
 #: saved set waits for each slot to reach READY, like the drain and img-readiness

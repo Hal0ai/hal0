@@ -154,7 +154,9 @@ Responses: **202** (`switching`, poll `/status`), **200** (`noop`,
 already in the target mode), **409** (switch already in flight, or a busy
 queue without `force`), **503**
 (`comfyui.arbiter_unavailable` — the GPU arbiter isn't wired on this
-host; requires a configured `img` slot). Pin or unpin independently:
+host; requires a configured `img` slot). Pin or unpin while image mode is
+on (pinning while the GPU serves LLMs answers **409**
+`comfyui.not_image_mode`; pass `pin` on the switchover instead):
 
 ```sh
 curl -X POST http://localhost:8080/api/comfyui/pin \
@@ -186,9 +188,9 @@ seconds after the switch when nothing renders. To keep image mode, pin it.
   ComfyUI's queue, where hal0 sees it.
 - **A pin lasts until you end it.** `POST /api/comfyui/pin` with
   `{"pinned": false}` unpins it, and a switch to `inference` with `force`
-  ends image mode and clears the pin. A pin set while the GPU serves LLMs
-  does not carry into the next image mode: pass `pin` on the switchover that
-  enters it.
+  ends image mode and clears the pin. Pinning needs image mode: pass `pin` on
+  the switchover that enters it, because `{"pinned": true}` while the GPU
+  serves LLMs answers 409 `comfyui.not_image_mode`.
 - **A ComfyUI queue that never drains holds image mode.** hal0 restores LLM
   mode only while ComfyUI's queue shows nothing running or pending, so a
   wedged job keeps the GPU in image mode until you switch to `inference` with
@@ -198,13 +200,22 @@ seconds after the switch when nothing renders. To keep image mode, pin it.
 
 Prompts from ComfyUI's own editor do not pass through hal0, so ComfyUI loads
 a custom node, `hal0_gpu_gate`, that asks hal0 for image mode before each
-prompt is queued. The prompt waits while hal0 switches the GPU, up to 180
-seconds (the switch itself waits for running chat requests to finish). The
-editor refuses the prompt, shows the reason in its prompt-error dialog and
-queues nothing when:
+prompt is queued. hal0's own `/v1` renders pass through it too. The node
+reaches `hal0-api` on the port and address it binds (`HAL0_PORT` and
+`HAL0_BIND_HOST` in `/etc/hal0/api.env`), which hal0 writes into the `img`
+slot's unit. The prompt waits while hal0 switches the GPU, up to 180 seconds
+(the switch itself waits for running chat requests to finish). When the GPU
+is already in image mode, the node first tells hal0 the prompt is coming, and
+hal0 holds image mode for it for about 3 seconds, until ComfyUI's queue shows
+it.
+
+The node refuses the prompt and queues nothing, answering it with a 503 that
+carries the reason, when:
 
 - hal0 rejects the switch request;
 - hal0 stops answering while it switches the GPU;
+- hal0 still holds the GPU for the LLM slots after three switch requests;
+- the switch has not finished after 180 seconds;
 - hal0 is unreachable, or does not say which mode holds the GPU, for 5
   seconds after the prompt is submitted.
 
@@ -219,8 +230,12 @@ hal0 answered and refused stays refused. With `hal0-api` down, the GPU most
 likely still holds the LLM slots, so a prompt let through then renders next
 to them.
 
-A running `img` container keeps the gate it started with. The gate described
-here loads when the container next starts.
+**After updating hal0, run `hal0 slot restart img` once.** A running `img`
+container keeps the gate it started with, and `hal0 update` does not restart
+slots. hal0 keeps that older gate waiting while it switches or restores the
+GPU, but the older gate lets a prompt through when `hal0-api` is unreachable or
+after its own 120 seconds, and such a prompt can render next to the LLM slots.
+Restarting the slot loads the gate described here.
 
 ## The `[image]` slot config
 
