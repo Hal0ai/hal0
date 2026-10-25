@@ -504,6 +504,49 @@ def test_pin_endpoint_rejects_non_bool_body(
     arb.set_pin.assert_not_called()
 
 
+def test_status_reports_generation_only_once_a_switch_has_finished(client: TestClient) -> None:
+    """hal0 writes mode=img before a switch's drain and unloads, and keeps it
+    through a restore's reloads. A gate that reads only ``mode`` (the one an
+    upgraded img container still runs) must not see generation until the GPU
+    is really ComfyUI's."""
+    arb = _install_arbiter(client, mode="img")
+    c, s, f = _patch(container="running", hermes=False, fetch=_fetch_idle)
+    with c, s, f:
+        arb.status.return_value = {**arb.status.return_value, "switching": True}
+        assert client.get("/api/comfyui/status").json()["mode"] == "inference"
+        arb.status.return_value = {**arb.status.return_value, "switching": False}
+        assert client.get("/api/comfyui/status").json()["mode"] == "generation"
+
+
+def test_switchover_to_generation_mid_switch_is_not_a_noop(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A gate that posts while hal0 is still switching or restoring gets a real
+    switch request queued behind it, not a 200 that says it is already done."""
+    monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
+    arb = _install_arbiter(client, mode="img")
+    arb.status.return_value = {**arb.status.return_value, "switching": True}
+    c, s, f = _patch(container="running", hermes=False, fetch=_fetch_idle)
+    with c, s, f:
+        r = client.post("/api/comfyui/switchover", json={"mode": "generation"})
+    assert r.status_code == 202, r.text
+    arb.ensure_img.assert_awaited_once()
+
+
+def test_switchover_to_inference_mid_switch_is_not_swallowed(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A manual Stop during a switch into image mode still restores the LLM set."""
+    monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
+    arb = _install_arbiter(client, mode="img")
+    arb.status.return_value = {**arb.status.return_value, "switching": True}
+    c, s, f = _patch(container="running", hermes=False, fetch=_fetch_idle)
+    with c, s, f:
+        r = client.post("/api/comfyui/switchover", json={"mode": "inference"})
+    assert r.status_code == 202, r.text
+    arb.restore_llm.assert_awaited_once()
+
+
 def test_status_carries_arbiter_block(client: TestClient) -> None:
     # /status folds arbiter.status() in under "arbiter" so the pane can render
     # mode/pin/switching/image jobs without a second endpoint.

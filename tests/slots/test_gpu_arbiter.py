@@ -1251,16 +1251,28 @@ async def test_restore_loop_survives_a_tick_exception(
 _GATE_PATH = (
     Path(__file__).resolve().parents[2] / "src" / "hal0" / "comfyui" / "assets" / "hal0_gpu_gate.py"
 )
+#: The gate an upgraded box keeps running until its img container restarts.
+_RELEASED_GATE_PATH = Path(__file__).resolve().parents[1] / "comfyui" / "released_gate_v1_6.py"
 
 
-def _load_gate() -> Any:
+def _load_gate(path: Path = _GATE_PATH) -> Any:
     import importlib.util
 
-    spec = importlib.util.spec_from_file_location("hal0_gpu_gate_under_test", _GATE_PATH)
+    spec = importlib.util.spec_from_file_location(f"hal0_gpu_gate_under_test_{path.stem}", path)
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def _gate_status_mode(arbiter_status: dict[str, Any]) -> str | None:
+    """The top-level ``mode`` hal0-api reports to a gate, from the route's own rule."""
+    from hal0.api.routes import comfyui as comfyui_routes
+
+    rule = getattr(comfyui_routes, "api_mode", None)
+    if rule is not None:
+        return rule(arbiter_status)
+    return {"img": "generation", "llm": "inference"}.get(arbiter_status.get("mode"))
 
 
 class _EditorPrompt:
@@ -1273,18 +1285,31 @@ class _EditorPrompt:
     the hook lets the prompt through, ComfyUI queues it.
     """
 
-    def __init__(self, arb: GpuArbiter, comfyui_http: dict[str, Any]) -> None:
-        self.gate = _load_gate()
+    def __init__(
+        self,
+        arb: GpuArbiter,
+        comfyui_http: dict[str, Any],
+        *,
+        gate_path: Path = _GATE_PATH,
+        fake_mgr: FakeManager | None = None,
+    ) -> None:
+        self.gate = _load_gate(gate_path)
         self.gate._SWITCH_POLL_S = 0.05
         self.gate._SWITCH_TIMEOUT_S = 2.0
         self.gate._fetch_status = self._fetch_status
         self.gate._post_switchover = self._post_switchover
+        if hasattr(self.gate, "_announce_prompt"):
+            self.gate._announce_prompt = self._announce_prompt
         self.arb = arb
+        self.fake_mgr = fake_mgr
         self.comfyui_http = comfyui_http
         self.loop = asyncio.get_running_loop()
         self.posts = 0
+        self.announces = 0
         self.switch_active = False
         self.mode_when_queued: GpuMode | None = None
+        self.switching_when_queued: bool | None = None
+        self.llm_loaded_when_queued: set[str] | None = None
         self.refused: Exception | None = None
 
     def _on_loop(self, fn: Any) -> Any:
@@ -1296,10 +1321,15 @@ class _EditorPrompt:
     def _fetch_status(self) -> dict[str, Any]:
         st = self._on_loop(self.arb.status)
         return {
-            "mode": {"img": "generation", "llm": "inference"}[st["mode"]],
+            "mode": _gate_status_mode(st),
             "arbiter": st,
             "switchover": {"active": self.switch_active, "error": None},
         }
+
+    def _announce_prompt(self) -> bool | None:
+        self.announces += 1
+        hold = self.arb.hold_for_prompt()
+        return asyncio.run_coroutine_threadsafe(hold, self.loop).result(timeout=5)
 
     def _post_switchover(self) -> bool:
         self.posts += 1
@@ -1321,6 +1351,11 @@ class _EditorPrompt:
             self.refused = exc
             return
         self.mode_when_queued = self._on_loop(lambda: self.arb.mode)
+        self.switching_when_queued = self._on_loop(lambda: self.arb.status()["switching"])
+        if self.fake_mgr is not None:
+            self.llm_loaded_when_queued = self._on_loop(
+                lambda: self.fake_mgr.ready & {"chat", "agent"}
+            )
         self.comfyui_http["queue"] = (0, 1)  # ComfyUI queued the prompt
 
     def submit(self) -> asyncio.Future[None]:
@@ -1332,6 +1367,95 @@ class _EditorPrompt:
                 return
             await asyncio.sleep(0.005)
         raise AssertionError("the gate's switch never finished")
+
+
+_BOTH_GATES = pytest.mark.parametrize(
+    "gate_path", [_RELEASED_GATE_PATH, _GATE_PATH], ids=["released-gate", "new-gate"]
+)
+
+
+@_BOTH_GATES
+async def test_an_editor_prompt_during_a_restore_waits_for_image_mode(
+    gate_path: Path,
+    fake_mgr: FakeManager,
+    state_path: Path,
+    comfyui_http: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_hal0_home: str,
+) -> None:
+    """hal0 keeps the mode at img until a restore's reloads finish. The gate an
+    upgraded box still runs reads only the top-level mode, so the status must
+    not say generation until the GPU is really ComfyUI's again."""
+    _write_img_state(state_path)
+    fake_mgr.ready -= {"chat", "agent"}
+    fake_mgr.ready.add("img")
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    release = asyncio.Event()
+    real_load = fake_mgr.load
+
+    async def _slow_load(name: str, model_id: str | None = None) -> None:
+        await release.wait()
+        await real_load(name, model_id)
+
+    monkeypatch.setattr(fake_mgr, "load", _slow_load)
+    restore = asyncio.create_task(arb.restore_llm())  # e.g. the restore loop's
+    for _ in range(50):
+        if arb.status()["switching"]:
+            break
+        await asyncio.sleep(0)
+    assert arb.status()["switching"] is True
+
+    prompt = _EditorPrompt(arb, comfyui_http, gate_path=gate_path, fake_mgr=fake_mgr)
+    queued = prompt.submit()
+    await asyncio.sleep(0.2)  # the gate polls while the LLM set reloads
+    assert prompt.mode_when_queued is None, "the prompt was let through mid-restore"
+
+    release.set()
+    await asyncio.wait_for(restore, timeout=2.0)
+    await asyncio.wait_for(queued, timeout=5.0)
+    assert prompt.refused is None
+    assert prompt.mode_when_queued is GpuMode.IMG
+    assert prompt.switching_when_queued is False
+    assert prompt.llm_loaded_when_queued == set()
+
+
+@_BOTH_GATES
+async def test_an_editor_prompt_during_a_switch_into_image_mode_waits_for_the_unloads(
+    gate_path: Path,
+    fake_mgr: FakeManager,
+    state_path: Path,
+    comfyui_http: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ensure_img writes mode=img before it drains and unloads the LLM set."""
+    fake_mgr.ready.add("img")
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    release = asyncio.Event()
+    real_unload = fake_mgr.unload
+
+    async def _slow_unload(name: str) -> None:
+        await release.wait()
+        await real_unload(name)
+
+    monkeypatch.setattr(fake_mgr, "unload", _slow_unload)
+    switch = asyncio.create_task(arb.ensure_img())  # e.g. a /v1 render's switch
+    for _ in range(50):
+        if arb.status()["switching"]:
+            break
+        await asyncio.sleep(0)
+    assert arb.mode is GpuMode.IMG and arb.status()["switching"] is True
+
+    prompt = _EditorPrompt(arb, comfyui_http, gate_path=gate_path, fake_mgr=fake_mgr)
+    queued = prompt.submit()
+    await asyncio.sleep(0.2)
+    assert prompt.mode_when_queued is None, "the prompt was let through before the unloads"
+
+    release.set()
+    await asyncio.wait_for(switch, timeout=2.0)
+    await asyncio.wait_for(queued, timeout=5.0)
+    assert prompt.refused is None
+    assert prompt.mode_when_queued is GpuMode.IMG
+    assert prompt.llm_loaded_when_queued == set()
 
 
 async def _llm_request(arb: GpuArbiter, slot: str) -> str:

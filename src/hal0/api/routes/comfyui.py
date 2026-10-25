@@ -348,22 +348,38 @@ def _get_arbiter(request: Request) -> Any | None:
     return getattr(manager, "arbiter", None)
 
 
-# Arbiter GPU mode → the API's dashboard mode vocabulary.
-_ARBITER_TO_API_MODE = {"img": "generation", "llm": "inference"}
+def api_mode(arbiter_status: Any) -> str | None:
+    """The API's mode ("generation" | "inference") for an arbiter snapshot, or None.
 
-
-def _arbiter_api_mode(arbiter: Any) -> str | None:
-    """Arbiter-truth current mode ("generation"|"inference"), or None.
-
-    None means "no arbiter / arbiter broken" — the mode is then unknown (the
-    resident img unit stays up in inference mode, so it cannot stand in).
+    "generation" only once image mode is entered and no switch or restore is
+    running. The arbiter writes ``mode=img`` before a switch drains and unloads
+    the LLM set, and keeps it while a restore reloads that set, so the
+    persisted mode alone would announce the GPU as ComfyUI's while LLM weights
+    still hold it. The ``hal0_gpu_gate`` node released up to v1.6.5, which an
+    upgraded img container keeps running until it restarts, reads only this
+    field: "inference" makes it ask for the switch and wait for "generation".
+    None means "no arbiter answer": the mode is unknown (the resident img unit
+    stays up in inference mode, so it cannot stand in).
     """
+    if not isinstance(arbiter_status, dict):
+        return None
+    mode = arbiter_status.get("mode")
+    if mode == "llm":
+        return "inference"
+    if mode == "img":
+        return "inference" if arbiter_status.get("switching") else "generation"
+    return None
+
+
+def _arbiter_status(arbiter: Any) -> dict[str, Any] | None:
+    """``arbiter.status()``, or None when there is no arbiter or it cannot answer."""
     if arbiter is None:
         return None
     try:
-        return _ARBITER_TO_API_MODE.get(arbiter.status().get("mode"))
+        status = arbiter.status()
     except Exception:
         return None
+    return status if isinstance(status, dict) else None
 
 
 @router.get("/status")
@@ -390,14 +406,10 @@ async def comfyui_status(request: Request) -> dict[str, Any]:
             arbiter_block = arbiter.status()
     except Exception:
         arbiter_block = None
-    # Mode: the arbiter is the only source of truth (img → generation, llm →
-    # inference). The resident img unit stays up in inference mode too, so its
-    # state is NOT mode evidence: with no arbiter answer the mode is ``None``.
-    mode = (
-        _ARBITER_TO_API_MODE.get(arbiter_block.get("mode"))
-        if isinstance(arbiter_block, dict)
-        else None
-    )
+    # Mode: the arbiter is the only source of truth (see api_mode). The
+    # resident img unit stays up in inference mode too, so its state is NOT
+    # mode evidence: with no arbiter answer the mode is ``None``.
+    mode = api_mode(arbiter_block)
     return {
         "mode": mode,
         "reachable": reachable,
@@ -497,11 +509,16 @@ async def comfyui_switchover(
     # Idempotency: the arbiter is the source of truth for the current mode
     # (D7). The img unit stays up in inference mode, so it cannot tell the
     # modes apart: when the arbiter cannot answer, refuse rather than guess.
+    # Generation is already done only once no switch or restore is running
+    # (api_mode); inference is done once the persisted mode is llm, so a Stop
+    # issued mid-switch into image mode is not swallowed.
     arbiter = _get_arbiter(request)
-    current = _arbiter_api_mode(arbiter)
-    if current is None:
+    arbiter_st = _arbiter_status(arbiter)
+    current = api_mode(arbiter_st)
+    if arbiter_st is None or current is None:
         return _arbiter_unavailable()
-    if current == mode:
+    already = current == "generation" if mode == "generation" else arbiter_st.get("mode") == "llm"
+    if already:
         return JSONResponse(status_code=200, content={"status": "noop", "mode": mode})
     # Mid-render guard: switching to inference frees ComfyUI's models from GPU
     # memory, killing any running/pending renders (the container itself stays
