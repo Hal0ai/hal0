@@ -940,7 +940,6 @@ def _auto_resume_interrupted_pulls(app: FastAPI) -> None:
     """
     from pathlib import Path
 
-    from hal0.registry.curated import get_curated
     from hal0.registry.pull import list_persisted_jobs, make_job, persist_pull_job
 
     registry = app.state.model_registry
@@ -967,8 +966,6 @@ def _auto_resume_interrupted_pulls(app: FastAPI) -> None:
 
         caps = list(getattr(entry, "capabilities", None) or [])
         capability = caps[0] if caps else None
-        curated = get_curated(model_id)
-        comfyui_subdir = (getattr(curated, "comfyui_subdir", "") or "").strip() or None
 
         job = make_job(model_id)
         jobs[model_id] = job
@@ -988,7 +985,6 @@ def _auto_resume_interrupted_pulls(app: FastAPI) -> None:
                 hf_token=hf_token,
                 event_bus=event_bus,
                 capability=capability,
-                comfyui_subdir=comfyui_subdir,
             ),
         )
         log.info("model.pull_auto_resumed", model_id=model_id, hf_repo=hf_repo, hf_file=hf_file)

@@ -663,18 +663,6 @@ def _backend_variants(entry: Any) -> list[str]:
             if isinstance(b, str) and b and b not in raw:
                 raw.append(b)
 
-    # ── Defaults by entry shape ───────────────────────────────────────────
-    # Curated image entries (the FirstRun image picks) carry no ``backend``
-    # field — :class:`CuratedModel` has no such attribute. Treat the
-    # presence of ``comfyui_subdir`` or ``capability == "image"`` as a
-    # signal to route through ComfyUI, which fan-outs to gpu-vulkan + cpu
-    # via the provider-runtime branch below.
-    if not raw:
-        comfy_subdir = getattr(entry, "comfyui_subdir", "") or ""
-        cap_str = getattr(entry, "capability", "") or ""
-        if comfy_subdir or cap_str == "image":
-            raw.append("comfyui")
-
     # An untagged row (backends=[], no .backend, no comfy signal) whose
     # resolved engine is llama-server — explicit provider="llama-server",
     # OR provider absent/None (derive_model_provider's total default) — has

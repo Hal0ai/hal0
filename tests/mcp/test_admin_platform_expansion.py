@@ -16,11 +16,18 @@ every test in this package, so no fake app is needed here).
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
 from typing import Any
+from urllib.parse import quote, unquote
 
 import httpx
 import pytest
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from fastapi.testclient import TestClient
 
+from hal0.comfyui import paths as comfyui_paths
 from hal0.mcp import admin
 from hal0.mcp.approval_queue import ApprovalQueue
 
@@ -228,6 +235,20 @@ _GATED_CASES: list[tuple[str, dict[str, Any], str, str, dict[str, Any] | None]] 
         "http://t/api/comfyui/models/sdxl-lightning",
         None,
     ),
+    (
+        "comfyui_file_delete",
+        {"subdir": "checkpoints", "relpath": "mine.safetensors"},
+        "DELETE",
+        "http://t/api/comfyui/files/checkpoints/mine.safetensors",
+        None,
+    ),
+    (
+        "comfyui_file_delete",
+        {"subdir": "loras", "relpath": "styles/mine.safetensors"},
+        "DELETE",
+        "http://t/api/comfyui/files/loras/styles/mine.safetensors",
+        None,
+    ),
     ("comfyui_render_cancel", {}, "POST", "http://t/api/comfyui/render/cancel", None),
     ("comfyui_restart", {}, "POST", "http://t/api/comfyui/restart", None),
     (
@@ -290,7 +311,7 @@ _GATED_CASES: list[tuple[str, dict[str, Any], str, str, dict[str, Any] | None]] 
 @pytest.mark.parametrize(
     "tool,args,expected_method,expected_url,expected_payload",
     _GATED_CASES,
-    ids=[c[0] for c in _GATED_CASES],
+    ids=[f"{c[0]}-{i}" for i, c in enumerate(_GATED_CASES)],
 )
 async def test_gated_platform_tools_enqueue_then_forward_on_approve(
     queue: ApprovalQueue,
@@ -321,6 +342,349 @@ async def test_gated_platform_tools_enqueue_then_forward_on_approve(
     if expected_payload is not None:
         assert payload == expected_payload
     assert headers["Authorization"] == "Bearer t"
+
+
+# ── comfyui_file_delete: a nested relpath rides as raw '/' through the shared :path rule ──
+#
+# The route declares ``{relpath:path}``, so the shared path-argument check lets ``relpath`` hold
+# ``/`` between valid segments (each one held to the per-value rules) and ``_format_url`` encodes
+# every segment on its own. Every other path argument still refuses ``/``.
+
+_FILES_URL = "http://t/api/comfyui/files"
+
+
+def _quoted_segments(relpath: str) -> str:
+    return "/".join(quote(segment, safe="") for segment in relpath.split("/"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "relpath",
+    [
+        "mine.safetensors",
+        "styles/mine.safetensors",
+        "a/b/c/mine.safetensors",
+        "my styles/é.safetensors",
+    ],
+)
+async def test_comfyui_file_delete_sends_a_nested_relpath_one_segment_at_a_time(
+    queue: ApprovalQueue, mock_transport: dict[str, Any], relpath: str
+) -> None:
+    result = await admin.dispatch(
+        tool="comfyui_file_delete",
+        args={"subdir": "loras", "relpath": relpath},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert result["status"] == "pending_approval"
+    assert mock_transport["calls"] == []
+
+    await queue.approve(result["approval_id"])
+
+    method, url, _, _ = mock_transport["calls"][-1]
+    assert (method, url) == ("DELETE", f"{_FILES_URL}/loras/{_quoted_segments(relpath)}")
+
+
+# Awkward but valid: each segment is encoded on its own, so ``?``, ``#`` and ``%`` reach the
+# server as the characters the approval card shows, and the ``/`` between segments stays one.
+_AWKWARD_RELPATHS: list[tuple[str, str]] = [
+    ("junk?x/a.safetensors", "junk%3Fx/a.safetensors"),
+    ("styles/a#b.safetensors", "styles/a%23b.safetensors"),
+    ("styles/%6Bine.safetensors", "styles/%256Bine.safetensors"),
+    ("100%/a%2Fb.safetensors", "100%25/a%252Fb.safetensors"),
+    ("a b/c:d/{x}.safetensors", "a%20b/c%3Ad/%7Bx%7D.safetensors"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("relpath", "sent"), _AWKWARD_RELPATHS, ids=[c[0] for c in _AWKWARD_RELPATHS]
+)
+async def test_comfyui_file_delete_reaches_the_server_with_the_literal_relpath(
+    queue: ApprovalQueue, mock_transport: dict[str, Any], relpath: str, sent: str
+) -> None:
+    result = await admin.dispatch(
+        tool="comfyui_file_delete",
+        args={"subdir": "checkpoints", "relpath": relpath},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert result["status"] == "pending_approval"
+
+    await queue.approve(result["approval_id"])
+
+    assert mock_transport["calls"][-1][:2] == ("DELETE", f"{_FILES_URL}/checkpoints/{sent}")
+
+
+def test_comfyui_file_delete_relpath_keeps_every_segment_in_a_real_httpx_url() -> None:
+    """httpx collapses dot segments; an accepted relpath must not be able to move the call."""
+    hazard = httpx.URL("http://t/api/comfyui/files/loras/a/../x").raw_path
+    assert hazard == b"/api/comfyui/files/loras/x"  # why '.' and '..' segments are refused
+
+    method, template = admin._REST_MAP["comfyui_file_delete"]
+    slash_args = admin._slash_path_args("comfyui_file_delete")
+    assert method == "DELETE"
+    assert slash_args == {"relpath"}
+    relpaths = [
+        "mine.safetensors",
+        "styles/mine.safetensors",
+        "a/b/c/d/mine.safetensors",
+        *(raw for raw, _ in _AWKWARD_RELPATHS),
+    ]
+    for subdir in sorted(set(comfyui_paths.SUBDIRS.values())):
+        for relpath in relpaths:
+            assert admin._path_arg_refusal("comfyui_file_delete", "relpath", relpath) is None
+            url = admin._format_url(
+                "http://t",
+                template,
+                {"subdir": subdir, "relpath": relpath},
+                slash_args=slash_args,
+            )
+            parsed = httpx.URL(url)
+            raw_path = parsed.raw_path.decode()
+            # Each segment encoded, every '/' kept, nothing collapsed or merged.
+            assert raw_path == f"/api/comfyui/files/{subdir}/{_quoted_segments(relpath)}"
+            assert parsed.query == b"" and parsed.fragment == ""
+            tail = raw_path.removeprefix(f"/api/comfyui/files/{subdir}/")
+            assert [unquote(part) for part in tail.split("/")] == relpath.split("/")
+
+
+def test_comfyui_file_delete_relpath_round_trips_through_starlette_routing() -> None:
+    """The server hands the route the nested relpath exactly as it was typed.
+
+    Driven through ``httpx.ASGITransport`` (a single percent-decode, as uvicorn does), on the
+    live route's own path (``{relpath:path}``), so a ``%`` or ``?`` in a segment is not decoded
+    twice or cut short.
+    """
+    method, template = admin._REST_MAP["comfyui_file_delete"]
+    live_path = admin._ROUTE_MAP["DELETE:/api/comfyui/files/{subdir}/{relpath}"][1]
+    assert live_path == "/api/comfyui/files/{subdir}/{relpath:path}"
+    app = FastAPI()
+
+    async def _echo(request: Request) -> JSONResponse:
+        return JSONResponse({"params": dict(request.path_params)})
+
+    app.add_api_route(live_path, _echo, methods=[method])
+
+    async def fetch() -> dict[str, dict[str, str]]:
+        seen: dict[str, dict[str, str]] = {}
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://hal0.test"
+        ) as http:
+            for relpath in (
+                "styles/a.safetensors",
+                "a/b/c.safetensors",
+                *(raw for raw, _ in _AWKWARD_RELPATHS),
+            ):
+                url = admin._format_url(
+                    "http://hal0.test",
+                    template,
+                    {"subdir": "loras", "relpath": relpath},
+                    slash_args=admin._slash_path_args("comfyui_file_delete"),
+                )
+                response = await http.request(method, url)
+                assert response.status_code == 200, url
+                seen[relpath] = response.json()["params"]
+        return seen
+
+    for relpath, params in asyncio.run(fetch()).items():
+        assert params == {"subdir": "loras", "relpath": relpath}
+
+
+def test_comfyui_file_delete_nested_relpath_reaches_the_route_as_a_slash(
+    client: TestClient,
+    mock_transport: dict[str, Any],
+    queue: ApprovalQueue,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What the tool sends is what the route deletes: ``styles/a`` is ``styles/a``."""
+    monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(tmp_path / "comfyui-data"))
+    nested = tmp_path / "comfyui-data" / "models" / "loras" / "styles" / "a.safetensors"
+    nested.parent.mkdir(parents=True)
+    nested.write_bytes(b"x")
+
+    async def approve() -> str:
+        result = await admin.dispatch(
+            tool="comfyui_file_delete",
+            args={"subdir": "loras", "relpath": "styles/a.safetensors"},
+            client_id="pi",
+            bearer="t",
+            base_url="http://t",
+            approval_queue=queue,
+        )
+        await queue.approve(result["approval_id"])
+        return str(mock_transport["calls"][-1][1])
+
+    url = asyncio.run(approve())
+
+    resp = client.delete(url.removeprefix("http://t"))
+    assert resp.status_code == 200
+    assert resp.json() == {"deleted": "loras/styles/a.safetensors"}
+    assert not nested.exists()
+
+
+# A ``:path`` argument is still held to the per-value rules, segment by segment: the refusal
+# comes before any approval card exists and before any REST call.
+_UNSENDABLE_RELPATHS: list[tuple[Any, str]] = [
+    ("..", "dot dot"),
+    (".", "dot"),
+    ("", "empty"),
+    ("../x.safetensors", "leading dot dot segment"),
+    ("a/../b.safetensors", "dot dot segment between"),
+    ("a/..", "trailing dot dot segment"),
+    ("./a.safetensors", "leading dot segment"),
+    ("a/./b.safetensors", "dot segment between"),
+    ("a//b.safetensors", "empty segment between slashes"),
+    ("/a.safetensors", "leading slash"),
+    ("a/", "trailing slash"),
+    ("/", "only a slash"),
+    ("a/b\x00c/d.safetensors", "NUL in a segment"),
+    ("a/b\nc/d.safetensors", "newline in a segment"),
+    ("a/\x85/d.safetensors", "C1 control segment"),
+    ("a/pri​mary/d.safetensors", "zero-width space in a segment"),
+    ("a/‮/d.safetensors", "bidi override segment"),
+    ("a/\ud800/d.safetensors", "lone surrogate in a segment"),
+    (None, "null"),
+    (True, "boolean"),
+    (1.0, "float"),
+    (["a", "b"], "list"),
+    (2**53, "integer beyond 2**53"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("relpath", "why"), _UNSENDABLE_RELPATHS, ids=[c[1] for c in _UNSENDABLE_RELPATHS]
+)
+async def test_comfyui_file_delete_refuses_an_unsendable_relpath_before_any_approval(
+    queue: ApprovalQueue, mock_transport: dict[str, Any], relpath: Any, why: str
+) -> None:
+    result = await admin.dispatch(
+        tool="comfyui_file_delete",
+        args={"subdir": "checkpoints", "relpath": relpath},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+
+    assert result["status"] == "error"
+    assert result["error"]["code"] == "mcp.invalid_arg"
+    assert queue.list_all() == []  # the operator is never asked to approve it
+    assert mock_transport["calls"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("relpath", "why"), _UNSENDABLE_RELPATHS, ids=[c[1] for c in _UNSENDABLE_RELPATHS]
+)
+async def test_comfyui_file_delete_executor_refuses_the_same_relpaths(
+    mock_transport: dict[str, Any], relpath: Any, why: str
+) -> None:
+    """The check also guards the point the REST call is made, whoever calls it."""
+    result = await admin._execute_tool(
+        tool="comfyui_file_delete",
+        args={"subdir": "checkpoints", "relpath": relpath},
+        bearer="t",
+        base_url="http://t",
+        memory_dispatcher=None,
+    )
+
+    assert result["status"] == "error"
+    assert result["error"]["code"] == "mcp.invalid_arg"
+    assert mock_transport["calls"] == []
+
+
+@pytest.mark.asyncio
+async def test_approving_a_relpath_edited_into_a_dot_dot_segment_never_reaches_rest(
+    queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    result = await admin.dispatch(
+        tool="comfyui_file_delete",
+        args={"subdir": "loras", "relpath": "styles/a.safetensors"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    entry = queue.get(result["approval_id"])
+    assert entry is not None
+    entry.args["relpath"] = "styles/../../x.safetensors"
+
+    approved = await queue.approve(result["approval_id"])
+
+    assert approved["result"]["error"]["code"] == "mcp.invalid_arg"
+    assert mock_transport["calls"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("subdir", "relpath", "why"),
+    [
+        ("checkpoints/sub", "x.safetensors", "slash in subdir"),
+        ("..", "x.safetensors", "dot dot subdir"),
+        (".", "x.safetensors", "dot subdir"),
+        ("", "x.safetensors", "empty subdir"),
+    ],
+)
+async def test_comfyui_file_delete_subdir_still_refuses_a_slash(
+    queue: ApprovalQueue, mock_transport: dict[str, Any], subdir: str, relpath: str, why: str
+) -> None:
+    result = await admin.dispatch(
+        tool="comfyui_file_delete",
+        args={"subdir": subdir, "relpath": relpath},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+
+    assert result["error"]["code"] == "mcp.invalid_arg"
+    assert queue.list_all() == []
+    assert mock_transport["calls"] == []
+
+
+def test_only_comfyui_file_delete_relpath_may_hold_a_slash() -> None:
+    """Across the whole catalog, '/' is accepted by exactly one path argument.
+
+    ``comfyui_workflow_launch`` is the near miss: a second route (the guard that answers a
+    malformed workflow name with 404) shares its route id and declares ``{name:path}``, but the
+    launch route itself declares a plain ``{name}``, so ``name`` keeps refusing '/'.
+    """
+    accepts_slash = sorted(
+        (tool, key)
+        for tool, names in admin._PATH_ARGS.items()
+        for key in names
+        if admin._path_arg_refusal(tool, key, "a/b") is None
+    )
+
+    assert accepts_slash == [("comfyui_file_delete", "relpath")]
+    assert admin._path_arg_refusal("comfyui_workflow_launch", "name", "a/b") is not None
+    assert admin._path_arg_refusal("comfyui_file_delete", "subdir", "a/b") is not None
+
+
+def test_comfyui_file_delete_is_wired_like_the_model_remove_it_sits_beside() -> None:
+    assert "comfyui_file_delete" in admin.GATED_TOOLS
+    assert admin.TOOL_NAME_ALIASES["DELETE:/api/comfyui/files/{subdir}/{relpath}"] == (
+        "comfyui_file_delete",
+    )
+    assert admin._ANNOTATIONS["comfyui_file_delete"].destructiveHint is True
+    description = admin.TOOL_DESCRIPTIONS["comfyui_file_delete"]
+    assert "%2F" not in description
+    assert "'/'" in description
+    assert "catalog" in description
+    assert admin.tool_param_schema("comfyui_file_delete")["required"] == ["subdir", "relpath"]
+
+
+def test_comfyui_file_delete_has_one_argument_check_the_shared_one() -> None:
+    """The per-tool validator and its %2F convention are gone: one owner for argument checks."""
+    for name in ("_unsafe_file_delete_arg", "_invalid_arg", "_ARG_CHECKS", "_ENCODED_SLASH"):
+        assert not hasattr(admin, name), name
 
 
 # ── comfyui_job_cancel: an autonomous write, like model_pull_cancel ──────────

@@ -76,10 +76,10 @@ def test_curated_row_names_the_files_the_runner_globs() -> None:
 
 def test_non_gguf_capability_pull_keeps_its_upstream_name(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(pull, "_pull_root", lambda: tmp_path)
-    dest = pull._final_path_for_entry("kokoro-v1", _ONNX, None, "tts")
+    dest = pull._final_path_for_entry("kokoro-v1", _ONNX, "tts")
     assert dest == tmp_path / "tts" / "kokoro-v1" / _ONNX
     # GGUF still lands as the canonical model.gguf.
-    gguf = pull._final_path_for_entry("m", "dir/Q4.gguf", None, "chat")
+    gguf = pull._final_path_for_entry("m", "dir/Q4.gguf", "chat")
     assert gguf.name == "model.gguf"
 
 

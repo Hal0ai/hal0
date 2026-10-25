@@ -25,7 +25,8 @@ from hal0.config.loader import load_hal0_config
 from hal0.model_meta import derive_model_provider
 from hal0.registry import pull_jobs as _pull_jobs
 from hal0.registry.curated import CURATED_MODELS
-from hal0.registry.pull import PullInvalidSource
+from hal0.registry.discover import is_comfyui_asset
+from hal0.registry.pull import ImageAsset, PullInvalidSource
 from hal0.registry.update_check import (
     evaluate_model_update,
     fetch_remote_lfs_shas,
@@ -72,7 +73,6 @@ _FLM_DISPATCH_TYPE = _svc.FLM_DISPATCH_TYPE
 _MODALITY_TO_SLOT_TYPE = _svc.MODALITY_TO_SLOT_TYPE
 _is_alias = _svc.is_alias
 _dispatch_type = _svc.dispatch_type
-_comfyui_category = _svc.comfyui_category
 _model_to_dict = _svc.model_to_dict
 _lazy_quant = _svc.lazy_quant
 _pull_entry = _svc.pull_entry
@@ -309,7 +309,8 @@ async def scan_models(request: Request) -> dict[str, Any]:
       ``tokenizer_repo`` / ``mtp`` / ``jinja``; a ``defaults`` table skips
       the row as ``model.defaults_removed``); otherwise we fall back to the
       detection output for that path. User overrides always win — that's
-      the whole point of the preview round-trip.
+      the whole point of the preview round-trip. A row whose path is in
+      ComfyUI's model tree is skipped (``image_asset``); the rest still commit.
 
     Returns ``{added, skipped, scanned_roots}`` in both modes (plus
     ``pruned`` / ``missing_referenced`` / ``reconciled`` /
@@ -381,6 +382,17 @@ async def add_model_from_path(request: Request) -> dict[str, Any]:
     return await _svc.add_from_path(body, registry=registry, event_bus=event_bus)
 
 
+def _refuse_comfyui_path(body: dict[str, Any]) -> None:
+    """Refuse a write body whose ``path`` is in ComfyUI's models tree.
+
+    The tree belongs to the image catalog, never to a registry row: create and
+    update both answer 422 ``model.image_asset``.
+    """
+    raw_path = body.get("path")
+    if isinstance(raw_path, str) and is_comfyui_asset(Path(raw_path).expanduser()):
+        raise ImageAsset(details={"path": raw_path})
+
+
 @router.post("", status_code=201)
 async def create_model(request: Request) -> dict[str, Any]:
     """Register a new model in the local ModelRegistry.
@@ -409,6 +421,7 @@ async def create_model(request: Request) -> dict[str, Any]:
         raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
     if not isinstance(body, dict):
         raise BadRequest("body must be a JSON object")
+    _refuse_comfyui_path(body)
     # Pop ``source`` before validation — it's an event-only tag, not a
     # Model field. Default to "manual" for hand-registered single files.
     source = body.pop("source", "manual")
@@ -807,6 +820,8 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
         missing, is not a drafter, or does not fit this model.
       * ``422 model.draft_kind_readonly`` — the body carries ``draft_kind``;
         it is classified from the file.
+      * ``422 model.image_asset`` — ``path`` is inside ComfyUI's models tree,
+        which the image catalog owns.
       * ``404 model.not_found`` — ``model_id`` not registered.
     """
     registry = request.app.state.model_registry
@@ -816,6 +831,7 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
         raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
     if not isinstance(body, dict):
         raise BadRequest("body must be a JSON object")
+    _refuse_comfyui_path(body)
 
     # Task 3: ``backends`` is retired as an editable/authoritative surface —
     # ``provider`` (screened below) is the write path now. A client-sent

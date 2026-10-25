@@ -72,6 +72,25 @@ def test_preview_returns_detection_rows_without_registering(
     assert listing["models"] == []
 
 
+def test_preview_drops_comfyui_files(
+    preview_client: tuple[TestClient, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A directory preview never lists ComfyUI's model tree."""
+    client, root = preview_client
+    data = root / "comfyui"
+    monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(data))
+    image = data / "models" / "checkpoints" / "sdxl-turbo.safetensors"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"\x00" * 64)
+    (root / "qwen3-4b-q4_k_m.gguf").write_bytes(b"\x00" * 64)
+
+    r = client.post("/api/models/scan/preview", json={"paths": [str(root)], "recursive": True})
+
+    assert r.status_code == 200, r.text
+    names = {Path(row["path"]).name for row in r.json()["preview"]}
+    assert names == {"qwen3-4b-q4_k_m.gguf"}
+
+
 def test_preview_walks_recursive_when_flag_set(
     preview_client: tuple[TestClient, Path],
 ) -> None:

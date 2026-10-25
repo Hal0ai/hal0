@@ -16,11 +16,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hal0.capabilities import catalog as capability_catalog
+from hal0.comfyui.catalog import get_model as get_image_model
 from hal0.config import paths
 from hal0.config.schema import HardwareInfo
 from hal0.install.profile_derive import derive_device, derive_profile
 from hal0.registry.curated import get_curated
 from hal0.registry.pull import get_job, make_job
+from hal0.slots.state import SlotNotFound
 
 log = logging.getLogger(__name__)
 
@@ -110,6 +113,11 @@ class SetupResult:
     extensions: list[ExtensionOutcome]
     model_ids: list[str]
     pulls: list[PullPlan] = field(default_factory=list)
+    # Image-catalog ids (hal0.comfyui.catalog) the caller starts a catalog install for, with
+    # ``hal0.api.routes.comfyui.start_image_install``. They are not in ``model_ids`` or
+    # ``pulls``: an image model is not a registry model, and its job runs on
+    # ``/api/comfyui/jobs``, not ``/api/models/{id}/pull/stream``.
+    image_installs: list[str] = field(default_factory=list)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -552,6 +560,28 @@ def _install_extensions(extensions: dict) -> list[ExtensionOutcome]:
     return outs
 
 
+async def _create_img_slot(
+    slot_manager, rec: SlotOutcome, s: SlotSelection, *, device: str, profile: str
+) -> None:
+    """Create the ``img`` slot model-less, or leave the one already there; failure goes in ``rec.error``.
+
+    The installer seeds ``img`` on every box, so an existing slot is the normal case, not a
+    failure: ``rec.created`` stays False, no error is recorded, and the caller still queues
+    the model's install.
+    """
+    cfg = _build_slot_cfg(
+        slot=s.slot_name, model_id="", device=device, profile=profile, port=s.port
+    )
+    try:
+        try:
+            await slot_manager.get_config(s.slot_name)
+        except SlotNotFound:
+            await slot_manager.create(s.slot_name, cfg)
+            rec.created = True
+    except Exception as exc:  # best-effort
+        rec.error = str(exc)
+
+
 # ── Core orchestration ─────────────────────────────────────────────────────────
 
 
@@ -572,6 +602,7 @@ async def apply_setup(
     slot_outcomes: list[SlotOutcome] = []
     model_ids: list[str] = []
     pulls: list[PullPlan] = []
+    image_installs: list[str] = []
     # WS-E (#1108): map model_id → the plan WE created this run, so two slots
     # sharing one model_id (e.g. chat + coder on the same pick) both get
     # activated off the single pull rather than the second slot being stranded
@@ -613,6 +644,22 @@ async def apply_setup(
                 rec.created = True
             except Exception as exc:  # best-effort
                 rec.error = str(exc)
+            slot_outcomes.append(rec)
+            continue
+
+        # An image model is in the ComfyUI image catalog, not the registry, so this branch
+        # must run before ``get_curated``. The slot is born model-less like every other; the
+        # install is the caller's (``SetupResult.image_installs``), and an unknown id is
+        # reported rather than routed upstream.
+        if s.capability == "img":
+            if not capability_catalog.comfyui_backends():
+                rec.skipped = "image_engine_unavailable"
+            elif get_image_model(s.model_id) is None:
+                rec.skipped = "image_model_unknown"
+            else:
+                await _create_img_slot(slot_manager, rec, s, device=device, profile=profile)
+                if rec.error is None and s.model_id not in image_installs:
+                    image_installs.append(s.model_id)
             slot_outcomes.append(rec)
             continue
 
@@ -679,7 +726,6 @@ async def apply_setup(
                     hf_file=curated.hf_file,
                     registry=registry,
                     hf_token=hf_token,
-                    comfyui_subdir=curated.comfyui_subdir or None,
                     capability=s.capability,
                 ),
                 slot_names=[s.slot_name],
@@ -700,4 +746,5 @@ async def apply_setup(
         extensions=ext_outcomes,
         model_ids=model_ids,
         pulls=pulls,
+        image_installs=image_installs,
     )

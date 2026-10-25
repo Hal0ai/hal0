@@ -41,6 +41,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from hal0.comfyui.paths import is_under_data_root
 from hal0.config import store
 from hal0.config.store import assert_under_store
 from hal0.db import repository
@@ -349,6 +350,11 @@ def reconcile_store_tree(conn=None, *, dry_run: bool = True, max_files: int = 10
         every other dot-directory) is pruned from the walk, and dot-files
         (``.part``/``.part.json``, hardlink-/pointer-tmp) are skipped.
       * Symlinks (the ``by-id`` pointer tree) are never followed or reaped.
+      * The ComfyUI data root is never walked. It follows the store, and its
+        models, workflows, user data, custom nodes and ``extra_model_paths.yaml``
+        have no ``store_blob`` / ``model_file`` row, so every file there would
+        look like bare bytes. A data root that is the store root or contains it
+        leaves nothing to walk, so the pass reaps nothing.
       * Every unlink still passes through :func:`assert_under_store` (fail-fast).
       * The walk is bounded by ``max_files``; hitting the cap logs + records an
         error and stops rather than scanning an unbounded tree.
@@ -363,6 +369,12 @@ def reconcile_store_tree(conn=None, *, dry_run: bool = True, max_files: int = 10
     root = store.store_root().resolve()
     if not root.is_dir():
         return report
+    if is_under_data_root(root):
+        # The store sits inside ComfyUI's data root (the root is the store, or a
+        # folder above it), so everything the walk could reach is ComfyUI's:
+        # pruning subdirectories below would still leave the files directly in
+        # ``root`` (e.g. ``extra_model_paths.yaml``) reapable.
+        return report
 
     tracked = _tracked_store_paths(conn)
     by_id = store.by_id_dir().resolve()
@@ -370,10 +382,16 @@ def reconcile_store_tree(conn=None, *, dry_run: bool = True, max_files: int = 10
 
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         here = Path(dirpath)
-        # Prune dot-dirs (``.tmp`` staging + any hidden dir) and the by-id
-        # pointer dir so the walk never visits in-flight partials or symlinks.
+        # Prune dot-dirs (``.tmp`` staging + any hidden dir), the by-id pointer
+        # dir and the ComfyUI data root (matched by resolved path, so a
+        # relocated root is skipped too) so the walk never visits in-flight
+        # partials, symlinks or ComfyUI's untracked files.
         dirnames[:] = [
-            d for d in dirnames if not d.startswith(".") and (here / d).resolve() != by_id
+            d
+            for d in dirnames
+            if not d.startswith(".")
+            and (here / d).resolve() != by_id
+            and not is_under_data_root(here / d)
         ]
         for name in filenames:
             if name.startswith("."):

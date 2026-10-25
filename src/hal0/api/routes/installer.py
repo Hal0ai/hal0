@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 import shutil
 import subprocess
@@ -38,9 +39,10 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Request
+from fastapi import APIRouter, BackgroundTasks, FastAPI, Request
 
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
+from hal0.api.routes.comfyui import start_image_install
 from hal0.bundles import tiers as bundle_tiers
 from hal0.config import paths
 from hal0.hardware.probe import HardwareProbe
@@ -58,6 +60,7 @@ from hal0.upstreams.huggingface import hf_token_from_env
 # network; the first-run wizard runs without any credential.
 
 router = APIRouter()
+log = logging.getLogger(__name__)
 
 
 class PickDefaultError(Hal0Error):
@@ -337,6 +340,40 @@ def _bundle_to_selections(bundle, overrides, npu_opt_in, *, storage_dir):
     )
 
 
+async def _start_image_installs(app: FastAPI, model_ids: list[str]) -> list[dict[str, Any]]:
+    """Start the catalog install of each ``img`` selection; one row per id, in order.
+
+    Same job ``POST /api/comfyui/models/{id}/install`` starts, so it runs on
+    ``/api/comfyui/jobs`` (not ``/api/models/{id}/pull/stream``). A row is
+    ``{"model_id", "job_id"}``, or ``{"model_id", "job_id": None, "skipped": <code>}`` when
+    the catalog refuses (already installing or installed, disk short, models tree not
+    writable) or the start itself breaks (``comfyui.install_start_failed``, for an error that is
+    not the catalog's, such as an I/O error from a network-backed store): that is logged and
+    never fails the apply: the slots and the sentinel are written and the LLM pulls queued.
+    """
+    rows: list[dict[str, Any]] = []
+    for model_id in model_ids:
+        try:
+            job = await start_image_install(app, model_id)
+        except Hal0Error as exc:
+            log.warning(
+                "installer.image_install_skipped",
+                extra={"model_id": model_id, "code": exc.code, "error": str(exc)},
+            )
+            rows.append({"model_id": model_id, "job_id": None, "skipped": exc.code})
+        except Exception as exc:
+            log.exception(
+                "installer.image_install_failed",
+                extra={"model_id": model_id, "error": str(exc)},
+            )
+            rows.append(
+                {"model_id": model_id, "job_id": None, "skipped": "comfyui.install_start_failed"}
+            )
+        else:
+            rows.append({"model_id": model_id, "job_id": job.job_id})
+    return rows
+
+
 async def _apply_selections_core(
     selections: Selections,
     *,
@@ -348,7 +385,9 @@ async def _apply_selections_core(
     ``/apply`` (tier manifest) and ``/apply-selections`` (raw selections) both
     reduce to a :class:`~hal0.install.orchestrate.Selections` and funnel
     through here — one slot-provisioning path, no duplicated logic between
-    the two routes.
+    the two routes. Returns ``(result, image_installs)``: the setup result, and the
+    started image-model installs (:func:`_start_image_installs`), which the registry
+    pulls in ``result.pulls`` do not cover.
 
     Writes the first-run sentinel on success (``write_sentinel=True``) so an
     API-driven install (UI wizard *or* ``hal0 setup --answers`` over a live
@@ -375,7 +414,8 @@ async def _apply_selections_core(
     slot_manager = request.app.state.slot_manager
     for plan in result.pulls:
         background.add_task(run_pull_and_activate, plan, slot_manager=slot_manager)
-    return result
+    image_installs = await _start_image_installs(request.app, result.image_installs)
+    return result, image_installs
 
 
 @router.post("/apply")
@@ -393,7 +433,9 @@ async def install_apply(request: Request, background: BackgroundTasks) -> dict[s
     :func:`_apply_selections_core` that ``/apply-selections`` uses — one
     shared provisioning path (WS-I, issue #1101). Best-effort, non-aborting
     per row. The UI reattaches per model via the existing
-    ``/api/models/{id}/pull/stream`` SSE.
+    ``/api/models/{id}/pull/stream`` SSE. The response's ``image_installs`` lists the
+    ``img`` selections' installs (``{"model_id", "job_id"}``): image models are not registry
+    models, so those jobs are followed on ``/api/comfyui/jobs``.
     """
     try:
         body = await request.json()
@@ -418,13 +460,19 @@ async def install_apply(request: Request, background: BackgroundTasks) -> dict[s
         npu_opt_in,
         storage_dir=body.get("storage_dir") or "",
     )
-    result = await _apply_selections_core(selections, request=request, background=background)
+    result, image_installs = await _apply_selections_core(
+        selections, request=request, background=background
+    )
 
     return {
         "tier": canonical,
         "model_ids": result.model_ids,
+        "image_installs": image_installs,
         "slots": [vars(s) for s in result.slots],
-        "next": "reattach /api/models/{id}/pull/stream per model_id",
+        "next": (
+            "reattach /api/models/{id}/pull/stream per model_id; "
+            "follow image_installs on /api/comfyui/jobs"
+        ),
     }
 
 
@@ -461,8 +509,14 @@ async def install_apply_selections(request: Request, background: BackgroundTasks
         extensions=body.get("extensions") or {},
         npu_opt_in=bool(body.get("npu_opt_in", False)),
     )
-    result = await _apply_selections_core(selections, request=request, background=background)
-    return {"model_ids": result.model_ids, "slots": [vars(s) for s in result.slots]}
+    result, image_installs = await _apply_selections_core(
+        selections, request=request, background=background
+    )
+    return {
+        "model_ids": result.model_ids,
+        "image_installs": image_installs,
+        "slots": [vars(s) for s in result.slots],
+    }
 
 
 # ── Slot model-default update ─────────────────────────────────────────────────

@@ -155,17 +155,9 @@ export const META_ENUMS_FALLBACK: MetaEnums = Object.freeze({
     'light',
     'medium',
     'rerank',
-    'image',
-    'sdxl',
-    'sd-1.5',
-    'lora',
-    'upscale',
-    'esrgan',
-    'research-only',
     'stt',
     'transcription',
     'tts',
-    'edit',
   ],
   // hal0.model_meta.RUNTIME_FAMILIES (src/hal0/model_meta/__init__.py) — this
   // fallback had drifted (llamacpp/whispercpp/sdcpp are not members; the

@@ -1,11 +1,26 @@
 import { describe, expect, it } from 'vitest'
-import { resolveProvider, rowId, rowNeedsPull } from '../settings/pages/capabilities/selection-pure.js'
+import { resolveProvider, rowId, rowLabel, rowNeedsPull } from '../settings/pages/capabilities/selection-pure.js'
 
 describe('rowId', () => {
   it('prefers id, then model_id, then the bare value', () => {
     expect(rowId({ id: 'a', model_id: 'b' })).toBe('a')
     expect(rowId({ model_id: 'b' })).toBe('b')
     expect(rowId('bare')).toBe('bare')
+  })
+})
+
+describe('rowLabel', () => {
+  it('is the id for a row with no display name (every capability but image)', () => {
+    expect(rowLabel({ id: 'qwen3-embedding-0-6b-q8-0' })).toBe('qwen3-embedding-0-6b-q8-0')
+    expect(rowLabel('bare')).toBe('bare')
+  })
+  it('puts the display name before the id when the row carries one (image picker rows)', () => {
+    expect(rowLabel({ id: 'sdxl-lightning', display_name: 'SDXL Lightning (8-step)' })).toBe(
+      'SDXL Lightning (8-step) (sdxl-lightning)',
+    )
+  })
+  it('does not repeat a display name that is the id', () => {
+    expect(rowLabel({ id: 'x', display_name: 'x' })).toBe('x')
   })
 })
 

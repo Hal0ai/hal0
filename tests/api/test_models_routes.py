@@ -1211,26 +1211,125 @@ def test_update_model_ignores_backends_writes(
     assert after == before  # tag writes are dead
 
 
-def test_list_models_self_heals_provider_for_mistagged_comfyui_row(
-    inspect_client: TestClient,
+def test_models_listing_has_no_comfyui_category(
+    inspect_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str
 ) -> None:
-    """The ComfyUI path-derived repair heuristic (models_service.list_all)
-    self-heals ``backends`` for a row an older pull mis-tagged — Task 3 also
-    stamps ``provider`` alongside that self-heal, not just the tag."""
-    inspect_client.post(
-        "/api/models",
-        json={
-            "id": "old-sdxl",
-            "path": "/var/lib/hal0/comfyui/models/checkpoints/sdxl.safetensors",
-            "capabilities": ["chat"],
-            "backends": [],
-        },
+    """A row whose bytes sit in the ComfyUI tree is listed as it was stored: the
+    registry no longer path-derives ``owned_by``, ``comfyui_category``, a
+    ``comfyui`` backend or a ``comfyui`` provider (the image catalog owns them)."""
+    data = Path(tmp_hal0_home) / "comfyui"
+    monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(data))
+    # A direct insert: ``POST /api/models`` refuses a path in the ComfyUI tree, but a
+    # row written before that rule (or by hand) can still sit in the registry.
+    inspect_client.app.state.model_registry.add(
+        Model(
+            id="old-sdxl",
+            path=str(data / "models" / "checkpoints" / "sdxl.safetensors"),
+            capabilities=["chat"],
+            backends=[],
+        )
     )
     rows = {m["id"]: m for m in inspect_client.get("/api/models").json()["models"]}
     row = rows["old-sdxl"]
-    assert row["owned_by"] == "comfyui"
-    assert "comfyui" in row["backends"]
-    assert row["provider"] == "comfyui"
+    assert "comfyui_category" not in row
+    assert row["owned_by"] != "comfyui"
+    assert "comfyui" not in row["backends"]
+    assert row["provider"] != "comfyui"
+
+
+def test_create_model_under_comfyui_tree_422(
+    inspect_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str
+) -> None:
+    """``POST /api/models`` refuses a ``path`` in the ComfyUI tree and registers nothing."""
+    data = Path(tmp_hal0_home) / "comfy"
+    monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(data))
+    image = data / "models" / "checkpoints" / "sdxl.safetensors"
+
+    r = inspect_client.post("/api/models", json={"id": "an-sdxl", "path": str(image)})
+
+    assert r.status_code == 422, r.text
+    error = r.json()["error"]
+    assert error["code"] == "model.image_asset"
+    assert error["details"]["path"] == str(image)
+    assert "hal0 comfyui models install <id>" in error["message"]
+    assert "Image Gen" not in error["message"]
+    assert not inspect_client.app.state.model_registry.has("an-sdxl")
+
+
+def test_create_model_outside_comfyui_tree_still_registers(
+    inspect_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str
+) -> None:
+    """The refusal is the ComfyUI tree only: a sibling directory is an ordinary path."""
+    data = Path(tmp_hal0_home) / "comfy"
+    monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(data))
+    sibling = Path(tmp_hal0_home) / "comfy-models" / "chat.gguf"
+    sibling.parent.mkdir(parents=True)
+    sibling.write_bytes(b"\x00" * 8)
+
+    r = inspect_client.post("/api/models", json={"id": "chat-row", "path": str(sibling)})
+
+    assert r.status_code == 201, r.text
+
+
+def test_update_model_path_under_comfyui_tree_422(
+    inspect_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str
+) -> None:
+    """``PUT /api/models/{id}`` refuses a new ``path`` in the ComfyUI tree and keeps the old one."""
+    data = Path(tmp_hal0_home) / "comfy"
+    monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(data))
+    original = Path(tmp_hal0_home) / "chat.gguf"
+    original.write_bytes(b"\x00" * 8)
+    inspect_client.post("/api/models", json={"id": "chat-row", "path": str(original)})
+    image = data / "models" / "checkpoints" / "sdxl.safetensors"
+
+    r = inspect_client.put("/api/models/chat-row", json={"path": str(image)})
+
+    assert r.status_code == 422, r.text
+    error = r.json()["error"]
+    assert error["code"] == "model.image_asset"
+    assert error["details"]["path"] == str(image)
+    assert inspect_client.get("/api/models/chat-row").json()["path"] == str(original)
+
+
+def test_update_model_path_outside_comfyui_tree_still_succeeds(
+    inspect_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str
+) -> None:
+    """The refusal is the ComfyUI tree only: a sibling directory is an ordinary path."""
+    data = Path(tmp_hal0_home) / "comfy"
+    monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(data))
+    original = Path(tmp_hal0_home) / "chat.gguf"
+    original.write_bytes(b"\x00" * 8)
+    inspect_client.post("/api/models", json={"id": "chat-row", "path": str(original)})
+    sibling = Path(tmp_hal0_home) / "comfy-models" / "chat.gguf"
+    sibling.parent.mkdir(parents=True)
+    sibling.write_bytes(b"\x00" * 8)
+
+    r = inspect_client.put("/api/models/chat-row", json={"path": str(sibling)})
+
+    assert r.status_code == 200, r.text
+    assert inspect_client.get("/api/models/chat-row").json()["path"] == str(sibling)
+
+
+def test_add_by_path_under_comfyui_422(
+    inspect_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str
+) -> None:
+    """add-from-path refuses a file in the ComfyUI tree and registers nothing."""
+    data = Path(tmp_hal0_home) / "comfy"
+    monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(data))
+    image = data / "models" / "checkpoints" / "sdxl.safetensors"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"\x00" * 8)
+
+    r = inspect_client.post("/api/models/add-from-path", json={"path": str(image)})
+
+    assert r.status_code == 422, r.text
+    error = r.json()["error"]
+    assert error["code"] == "model.image_asset"
+    assert error["details"]["path"] == str(image)
+    assert "hal0 comfyui models install <id>" in error["message"]
+    assert "Image Gen" not in error["message"]
+    ids = {m["id"] for m in inspect_client.get("/api/models").json()["models"]}
+    assert "sdxl" not in ids
 
 
 # ── screen_model_write: the model-facts screen (pure) ─────────────────────────

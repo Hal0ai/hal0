@@ -35,7 +35,7 @@ from typing import Any, NamedTuple
 
 import httpx
 
-from hal0.comfyui import paths as comfyui_paths
+from hal0.comfyui import catalog as comfyui_catalog
 from hal0.config import paths, store
 from hal0.db import repository
 from hal0.db.connection import connect, tx
@@ -129,6 +129,55 @@ class PullChecksumMismatch(PullError):
 
     code = "pull.checksum_mismatch"
     status = 502  # upstream handed us bytes that don't match its own manifest
+
+
+class ImageAsset(Hal0Error):
+    """The path or model is an image-gen asset, which the LLM registry never holds.
+
+    ComfyUI's models tree and its model ids belong to the image catalog
+    (``hal0.comfyui``). A path inside the tree (add-by-path, create) and a pull of
+    a catalog id or of the ``image`` capability are refused with this error.
+    ``details`` carries the offending ``path`` or ``model_id``. Every raise site
+    shares the default message, which says how image models are installed.
+    """
+
+    code = "model.image_asset"
+    status = 422
+
+    DEFAULT_MESSAGE = (
+        "image models are not held in the model registry; install them with "
+        "`hal0 comfyui models install <id>` (`hal0 comfyui models list` shows the ids) "
+        "or `POST /api/comfyui/models/<id>/install`"
+    )
+
+    def __init__(
+        self,
+        message: str | None = None,
+        details: dict[str, Any] | None = None,
+        *,
+        code: str | None = None,
+    ) -> None:
+        super().__init__(message or self.DEFAULT_MESSAGE, details, code=code)
+
+
+#: Capability spellings that mean image generation: model rows say ``image``,
+#: slots and the capability catalog say ``img``.
+_IMAGE_CAPABILITIES = frozenset({"image", "img"})
+
+
+def refuse_image_asset(model_id: str, capability: str | None = None) -> None:
+    """Raise :class:`ImageAsset` when a pull names an image model.
+
+    An image model is a ComfyUI catalog id, or any model pulled with the
+    ``image`` capability. Neither is an LLM-registry pull: the image catalog
+    installs them (``hal0 comfyui models install``), so refuse before a row is
+    seeded or a byte is fetched.
+    """
+    if (
+        comfyui_catalog.get_model(model_id) is not None
+        or (capability or "").strip().lower() in _IMAGE_CAPABILITIES
+    ):
+        raise ImageAsset(details={"model_id": model_id})
 
 
 class _PullCancelled(Exception):
@@ -266,32 +315,12 @@ def _final_path(model_id: str, filename: str) -> Path:
     return _pull_root() / _sanitise_id(model_id) / filename
 
 
-def _comfyui_models_dir(subdir: str) -> Path:
-    """ComfyUI checkpoints/loras/vae directory under ``comfyui.paths.models_root()``.
-
-    The models root is the one the slot bind-mounts into the container, so
-    ComfyUI's own CheckpointLoaderSimple / LoraLoader / etc. find what a pull
-    writes here.
-
-    The subdir name is sanitised the same way model ids are so a curated
-    entry can't escape the comfyui tree by setting
-    ``comfyui_subdir="../../etc/passwd"``.
-    """
-    cleaned = _SANITISE_RE.sub("-", subdir).strip("-.") or "checkpoints"
-    return comfyui_paths.models_root() / cleaned
-
-
 def _final_path_for_entry(
     model_id: str,
     filename: str,
-    comfyui_subdir: str | None,
     capability: str | None = None,
 ) -> Path:
-    """Pick the final on-disk path based on whether this is a ComfyUI asset.
-
-    Image-gen entries (``comfyui_subdir`` set) land under
-    ``/var/lib/hal0/comfyui/models/<subdir>/<filename>`` so ComfyUI's
-    own model loaders pick them up without a per-id rename.
+    """Pick the final on-disk path for a pulled model.
 
     When ``capability`` is set (the FirstRun v2 install engine, design D2),
     the model lands in a capability-grouped tree. A GGUF gets one canonical
@@ -304,8 +333,6 @@ def _final_path_for_entry(
     Everything else uses the default ``/var/lib/hal0/models/<id>/<filename>``
     layout (back-compat for the standalone ``/api/models/{id}/pull`` path).
     """
-    if comfyui_subdir:
-        return _comfyui_models_dir(comfyui_subdir) / filename
     if capability:
         # Same directory as :func:`hal0.config.store.capability_model_dir`,
         # which is where the kokoro provider launches the bundle from.
@@ -1294,7 +1321,6 @@ async def run_pull(
     registry: ModelRegistry,
     hf_token: str | None = None,
     client: httpx.AsyncClient | None = None,
-    comfyui_subdir: str | None = None,
     capability: str | None = None,
     mmproj_file: str | None = None,
     draft_file: str | None = None,
@@ -1325,12 +1351,13 @@ async def run_pull(
     chunk read checks the flag, deletes the current partial, transitions
     to ``cancelled``, and returns.
 
+    Image models are refused: a ComfyUI catalog ``job.model_id`` or an ``image``
+    ``capability`` fails the job with ``model.image_asset`` before any download
+    (:func:`refuse_image_asset`).
+
     Args:
-        comfyui_subdir: When set (e.g. ``"checkpoints"``), the file lands
-            under ``/var/lib/hal0/comfyui/models/<subdir>/<filename>``
-            instead of the default ``/var/lib/hal0/models/<id>/<filename>``.
-            Curated image-gen entries set this so ComfyUI's own model
-            loaders find the file at the path their workflow nodes expect.
+        capability: When set, the model lands in the capability-grouped store
+            tree (:func:`_final_path_for_entry`).
         mmproj_file: Optional multimodal-projector filename within the same
             HF repo (the Add-by-HF modal's vision pick, or a curated
             entry's ``mmproj_file``). Downloaded after the main file.
@@ -1344,8 +1371,8 @@ async def run_pull(
             registry row's existing ``path`` so a re-pull replaces the
             installed bytes in place — never relocating an older
             flat-layout model into the capability-grouped tree and
-            orphaning the previous file. When set, ``capability`` /
-            ``comfyui_subdir`` routing is bypassed for the main file.
+            orphaning the previous file. When set, ``capability``
+            routing is bypassed for the main file.
         extra_files: Further files from the same HF repo that the engine
             needs beside the main file (kokoro's ``voices-v1.0.bin``),
             installed into the main file's directory under their upstream
@@ -1404,6 +1431,7 @@ async def run_pull(
         )
 
     try:
+        refuse_image_asset(job.model_id, capability)
         # ── Main model file (every part of a split one) ───────────────────
         if dest_override:
             final = Path(dest_override)
@@ -1412,7 +1440,7 @@ async def run_pull(
             if final.name == _CANONICAL_GGUF_NAME and not _is_gguf(hf_file):
                 final = final.parent / _canonical_name(hf_file)
         else:
-            final = _final_path_for_entry(job.model_id, hf_file, comfyui_subdir, capability)
+            final = _final_path_for_entry(job.model_id, hf_file, capability)
         model_finals = _shard_dests(final, len(model_recs)) if shard_names else [final]
         final = model_finals[0]
         revision = "main"
@@ -1516,8 +1544,7 @@ async def run_pull(
             )
             sidecar_finals.append(sc_final)
 
-        if not comfyui_subdir:
-            _remove_mislabeled_canonical(final, hf_file)
+        _remove_mislabeled_canonical(final, hf_file)
 
         # A delete cancels the job and waits for it (ADR-0026): if the cancel
         # landed after the last chunk, or the model was deleted after this job
@@ -1539,7 +1566,6 @@ async def run_pull(
             hf_repo=hf_repo,
             hf_filename=hf_file,
             capability=capability,
-            comfyui_subdir=comfyui_subdir,
             mmproj=str(mmproj_final) if mmproj_final is not None else None,
             shards=[str(p) for p in model_finals] if shard_names else None,
             draft=str(draft_final) if draft_final is not None else None,
@@ -1681,7 +1707,6 @@ def _register_pulled(
     hf_repo: str,
     hf_filename: str,
     capability: str | None = None,
-    comfyui_subdir: str | None = None,
     mmproj: str | None = None,
     shards: list[str] | None = None,
     draft: str | None = None,
@@ -1691,13 +1716,10 @@ def _register_pulled(
 ) -> None:
     """Upsert the registry entry after a successful pull.
 
-    ``capability``/``comfyui_subdir`` are the pull layer's resolved routing
-    (see :func:`hal0.api.routes.models._resolve_pull_capability`). For a brand-
-    new entry (the curated wizard does NOT pre-seed a row) they decide the
-    initial tagging: an image-gen pull into the ComfyUI tree must land as
-    ``capabilities=["image"]`` / ``backends=["comfyui"]`` — NOT the old
-    hardcoded ``["chat"]``, which mis-filed every fresh image checkpoint under
-    the dashboard's llm bucket and drew it into the chat fallback pool.
+    ``capability`` is the pull layer's resolved routing (see
+    :func:`hal0.registry.pull_jobs.resolve_pull_capability`). For a brand-new
+    entry (the curated wizard does NOT pre-seed a row) it decides the initial
+    ``capabilities`` tag; without one the row is a chat model.
 
     ``mmproj`` (WS-11) is the absolute path of a co-downloaded multimodal
     projector sidecar. Set directly so vision works right after the pull —
@@ -1841,13 +1863,11 @@ def _register_pulled(
     try:
         existing = registry.get(model_id)
     except ModelNotFound:
-        is_comfyui = bool(comfyui_subdir)
         cap = (capability or "").strip()
-        caps = [cap] if cap else (["image"] if is_comfyui else ["chat"])
-        # #2192: comfyui already special-cased its own backend; every other
-        # kind detect() classified (moonshine/kokoro/flm/llama's vulkan-rocm-
-        # cuda-cpu quartet/…) was dropped on the floor before this fix.
-        backends = ["comfyui"] if is_comfyui else detected_backends
+        caps = [cap] if cap else ["chat"]
+        # #2192: every kind detect() classified (moonshine/kokoro/flm/llama's
+        # vulkan-rocm-cuda-cpu quartet/…) is stamped on the new row.
+        backends = detected_backends
         # #1773: default tokenizer_repo from hf_repo when the pull
         # path already knows the source HF repo (the ONLY linkage a chat
         # cell's GuideLLM tokenizer resolution can trust without new pull
@@ -1905,7 +1925,7 @@ def _register_pulled(
         merged_meta.pop("context_length_detected", None)
     updates["metadata"] = merged_meta
     # #2192: same "fill only if unset" rule as tokenizer_repo below — backfill
-    # an empty backends list (the pre-fix state every non-comfyui pulled row
+    # an empty backends list (the pre-fix state every pulled row
     # has) with this pull's detection, but never clobber an operator's own
     # edit (registry PATCH surface) or an already-tagged row.
     if detected_backends and not existing.backends:

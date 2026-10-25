@@ -10,10 +10,10 @@ from hal0.registry import pull
 def test_final_path_grouped_by_capability(tmp_path, monkeypatch):
     monkeypatch.setattr(pull, "_pull_root", lambda: tmp_path)
     # No capability → legacy flat layout (back-compat).
-    flat = pull._final_path_for_entry("qwen3.6-27b", "Q4.gguf", None, None)
+    flat = pull._final_path_for_entry("qwen3.6-27b", "Q4.gguf", None)
     assert flat == tmp_path / "qwen3.6-27b" / "Q4.gguf"
     # Capability set → grouped + canonical model.gguf filename.
-    grouped = pull._final_path_for_entry("qwen3.6-27b", "Q4.gguf", None, "chat")
+    grouped = pull._final_path_for_entry("qwen3.6-27b", "Q4.gguf", "chat")
     assert grouped == tmp_path / "chat" / "qwen3.6-27b" / "model.gguf"
 
 

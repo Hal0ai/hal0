@@ -57,8 +57,8 @@ def test_gpu_rocm_badge_absent_without_kfd_or_rocm_smi() -> None:
 
 
 def _image_entry() -> Any:
-    """Shaped like a curated image-capability row (no explicit .provider)."""
-    return types.SimpleNamespace(capability="image", comfyui_subdir="checkpoints")
+    """A row tagged ``backend="comfyui"`` (no explicit .provider)."""
+    return types.SimpleNamespace(backend="comfyui")
 
 
 def test_comfyui_row_suppressed_when_kfd_absent_on_amd_host() -> None:

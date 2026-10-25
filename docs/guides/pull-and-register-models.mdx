@@ -261,6 +261,14 @@ pull answer 422 `models.unsupported_quant`; a scan skips the file with reason
 example a `Q4_K_M` or `UD-Q4_K_XL` file).
 </Aside>
 
+<Aside type="note" title="ComfyUI image files are refused">
+The registry holds no image models. `hal0 model add` of a file inside ComfyUI's
+models folder answers 422 `model.image_asset`, a scan does not register such
+files, and a pull of an image catalog id answers the same 422. Install image
+models with `hal0 comfyui models install <id>` instead — see
+[Generate images](/docs/guides/generate-images).
+</Aside>
+
 <Aside type="note" title="Moonshine streaming bundles are refused">
 The Moonshine runner loads `encoder_model.ort` and `decoder_model_merged.ort`
 (the `tiny-en` and `base-en` ids). The streaming layout (`encoder.ort`,

@@ -113,6 +113,17 @@ export async function installDefaultMocks(page: Page, state: MockState) {
   await page.route('**/api/models', (route) =>
     json(route, { models: state.models, count: state.models.length }),
   )
+  // ComfyUI image models are not `/api/models` rows. The Models page reads the weight
+  // files on disk (`{root, files}`) on every visit for its Image tab count, and the
+  // AI Capabilities image panel reads the catalog (`{models, engine}`). Without these
+  // the `/api/` catch-all answers `{}` for both. The defaults are an engine with
+  // nothing installed; a spec that wants rows routes its own body over these.
+  await page.route('**/api/comfyui/files', (route) =>
+    json(route, { root: '/models/comfyui', files: [] }),
+  )
+  await page.route('**/api/comfyui/models', (route) =>
+    json(route, { models: [], engine: { available: true, reason: null } }),
+  )
   await page.route('**/api/slots', (route) => json(route, { slots: state.slots }))
   await page.route('**/api/slots/metrics', (route) => json(route, {}))
   await page.route('**/api/backends', (route) => json(route, { backends: state.backends }))

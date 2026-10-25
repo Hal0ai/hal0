@@ -135,3 +135,46 @@ def test_is_under_models_root_never_matches_substrings(store: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.touch()
         assert not comfyui_paths.is_under_models_root(path), path
+
+
+def test_is_under_data_root_covers_every_comfyui_directory(store: Path) -> None:
+    data = comfyui_paths.data_root()
+    for inside in (
+        data,
+        comfyui_paths.models_root() / "vae" / "ae.safetensors",
+        comfyui_paths.workflows_dir() / "flow.json",
+        comfyui_paths.user_dir() / "default" / "settings.json",
+        comfyui_paths.custom_nodes_dir() / "node" / "__init__.py",
+        comfyui_paths.extra_model_paths_file(),
+    ):
+        assert comfyui_paths.is_under_data_root(inside), inside
+
+
+def test_is_under_data_root_rejects_unrelated_paths(store: Path, tmp_path: Path) -> None:
+    comfyui_paths.data_root().mkdir(parents=True)
+    assert not comfyui_paths.is_under_data_root(tmp_path / "elsewhere" / "a.gguf")
+    assert not comfyui_paths.is_under_data_root(store / "models--org--repo" / "a.gguf")
+    # by path components, never by string prefix
+    assert not comfyui_paths.is_under_data_root(store / "comfyui-backup" / "a.bin")
+    assert not comfyui_paths.is_under_data_root(Path("/"))
+
+
+def test_is_under_data_root_resolves_symlinks(store: Path, tmp_path: Path) -> None:
+    data = comfyui_paths.data_root()
+    data.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = outside / "data-link"
+    link.symlink_to(data)
+    assert comfyui_paths.is_under_data_root(link / "workflows" / "w.json")
+    # ".." segments are resolved before the comparison.
+    assert not comfyui_paths.is_under_data_root(data / ".." / "stray.gguf")
+
+
+def test_is_under_data_root_treats_an_unresolvable_path_as_outside(
+    store: Path, tmp_path: Path
+) -> None:
+    comfyui_paths.data_root().mkdir(parents=True)
+    loop = tmp_path / "loop"
+    loop.symlink_to(loop)
+    assert comfyui_paths.is_under_data_root(loop / "a.bin") is False

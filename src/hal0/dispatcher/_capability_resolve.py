@@ -72,12 +72,6 @@ _IMAGE_PATHS = ("/images/generations", "/images/edits", "/images/variations")
 # so that "qwen3.5:embed" still routes to the NPU rather than to embed.
 _EMBED_NAME_HINTS = ("embed", "rerank")
 
-# Model id prefixes that pin to the image-gen slot. Curated catalogue uses
-# these prefixes (sdxl-turbo, sd-1.5-..., flux-*). Anything matching
-# these in the bare-model lookup goes to the `img` slot before slot-name
-# resolution kicks in.
-_IMAGE_NAME_PREFIXES = ("sdxl", "sd-1.5", "sd15", "flux")
-
 # Capability slots that can never serve a chat/completions-shaped request,
 # mapped to the request-path fragments they DO serve.  Keyed by the slot role
 # name (the ``slot_name`` behind the resolved upstream — same for local
@@ -143,14 +137,16 @@ def resolve_by_capability(  # TIER1
          slot (kokoro; model-id unreliable).
       4. ``/images/...`` in path → ``img`` slot (ComfyUI).
 
-    Path-pinned candidates (rules 1-4, plus the rule-6 model-prefix pin)
-    accept either a local ``kind="slot"`` upstream or a container-backed
-    ``kind="remote"`` upstream whose ``slot_name`` matches the candidate
-    (container slots register as remotes via
-    ``SlotManager._register_container_upstream``, #656).  All other rules
+    Path-pinned candidates (rules 1-4) accept either a local ``kind="slot"``
+    upstream or a container-backed ``kind="remote"`` upstream whose
+    ``slot_name`` matches the candidate (container slots register as remotes
+    via ``SlotManager._register_container_upstream``, #656).  All other rules
     require ``kind="slot"``.
       5. Model id contains ``:`` (FLM tag-style) → ``npu`` slot.
-      6. Model id starts with ``sdxl``/``sd-1.5``/``sd15``/``flux`` → ``img`` slot.
+      6. (Unused. Image model ids have no name rule: the image catalog owns
+         them and ``img`` is reached by the rule-4 path pin. The numbering
+         skips 6 because ADRs and release-validation notes cite rules 7 and 9
+         by number.)
       7. Model id contains ``embed`` or ``rerank`` substring → ``embed`` slot.
          (If no embed slot is registered this fails resolution below and the
          dispatcher surfaces the documented clean 404; if one IS registered,
@@ -218,14 +214,6 @@ def resolve_by_capability(  # TIER1
             # Rule 5 — FLM tag format "name:tag" routes to NPU.
             if ":" in model:
                 candidate = "flm"
-            # Rule 6 — image-gen model id prefix pin (sdxl-/sd-1.5-/flux-).
-            # path_pinned here means "deterministically pinned": the curated
-            # sdxl-/sd-1.5-/flux- prefixes are exact catalogue prefixes, the
-            # same trust level as a path pin — so the container-backed img
-            # remote must qualify here too (Phase D).
-            elif any(m.startswith(prefix) for prefix in _IMAGE_NAME_PREFIXES):
-                candidate = "img"
-                path_pinned = True
             # Rule 7 — name-substring pin (embed/rerank → embed slot).
             #
             # Deliberately still *routes* rather than raising: when no embed

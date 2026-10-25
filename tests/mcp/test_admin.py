@@ -262,8 +262,10 @@ def test_destructive_tools_match_gated_destructive_set() -> None:
         # destructive, same tier as memory_delete's bulk path.
         "memory_mental_model_delete",
         "memory_directive_delete",
-        # Image-model removal deletes the weight files outright.
+        # Image-model removal deletes the weight files outright; so does deleting
+        # one file of the ComfyUI models tree.
         "comfyui_model_remove",
+        "comfyui_file_delete",
     }
     destructive_per_annotation = {
         name for name, ann in admin._ANNOTATIONS.items() if ann.destructiveHint

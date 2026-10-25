@@ -6,16 +6,33 @@
 // Workflows, queue, and inventory live on the ComfyUI pane, not here.
 import { useState, useEffect } from 'react'
 import { useSlots, useSlotEdit, useSlotConfig } from '@/api/hooks/useSlots'
+import { useComfyuiModels } from '@/api/hooks/useComfyui'
 import { SRow } from '../../shared/SRow.jsx'
 import { ApplyBadge } from '../../shared/ApplyBadge.jsx'
 import { useCapabilitySelection } from './useCapabilitySelection.js'
-import { statusChip, PanelHeader, PanelFooter, EnabledRow, selStyle, inputStyle } from './shared.jsx'
+import { statusChip, PanelHeader, PanelFooter, EnabledRow, ModelRow, selStyle, inputStyle } from './shared.jsx'
 
 // Empty = the model's native size (SD 1.5 / SDXL Turbo are 512x512). Writing a
 // literal size back on any save would pin every model to it.
 const DEF_SIZE = ""
 const DEF_STEPS = "0"
 const DEF_IDLE = "60"
+
+// The img catalog is empty only on a host with no ComfyUI engine (no ROCm lane): any
+// other host lists every catalog model, marked when its weights are not on disk. So an
+// empty catalog is not something installing a model or typing an id can fix — the
+// server refuses an id it does not advertise — and the row says why, read-only. Its own
+// component so the engine query runs only in that state.
+function NoEngineRow() {
+  const reason = useComfyuiModels().data?.engine?.reason
+  return (
+    <SRow k="Model" v={
+      <span data-testid="img-model-no-engine" className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>
+        {reason ? `No ComfyUI image engine: ${reason}` : "No ComfyUI image engine on this host"}
+      </span>
+    } />
+  )
+}
 
 export function ImagePanel({ registry }) {
   const sel = useCapabilitySelection('img', 'img', { withProvider: true })
@@ -75,12 +92,16 @@ export function ImagePanel({ registry }) {
           <option value="comfyui">comfyui</option>
         </select>
       } />
-      {/* No Model row here on purpose: ComfyUI workflows select their own
-          checkpoint per generation, so an img-slot model pick would be dead
-          config. Inventory and workflows live on the ComfyUI pane. */}
-      <SRow k="Checkpoint" sub="selected per-workflow by ComfyUI — manage models and workflows on the ComfyUI pane" v={
-        <a href="#slots/image" className="mono" style={{fontSize: 11, color: "var(--accent)"}}>ComfyUI pane →</a>
-      } />
+      {/* The img selection is what /v1/images defaults and Open WebUI's image model
+          follow, and the one place the dashboard picks it: the slot drawer and swap
+          popover link here for an image slot. Rows are the API's image picker rows
+          (catalog models + the operator's own ckpt/<path> checkpoints). Inventory
+          and workflows live on the ComfyUI pane. */}
+      {sel.catalogItems.length > 0
+        ? <ModelRow items={sel.catalogItems} value={sel.model} onChange={sel.setModel} />
+        // Nothing while the capabilities load (the catalog is [] until they do) or when
+        // the probe failed: the footer already says so and Save is gated.
+        : !sel.loading && !sel.errored && <NoEngineRow />}
 
       <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
         <div className="k">

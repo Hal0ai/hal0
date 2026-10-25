@@ -322,8 +322,6 @@ const HAL0_DATA = {
     { id: "whisper-large-v3", longName: "whisper-large-v3", repo: "openai/whisper-large-v3", params: "1.5B", size: "3.0 GB", labels: ["transcription"], type: "transcription", device: "cpu", ns: "blessed", installed: false, runtime: "whispercpp" },
     { id: "whisper-base", longName: "whisper-base", repo: "openai/whisper-base", params: "74M", size: "150 MB", labels: ["transcription"], type: "transcription", device: "cpu", ns: "blessed", installed: true, runtime: "whispercpp" },
     { id: "kokoro-v1", longName: "kokoro-v1", repo: "hexgrad/Kokoro-82M", params: "82M", size: "400 MB", labels: ["tts"], type: "tts", device: "cpu", ns: "blessed", installed: true, runtime: "kokoro" },
-    { id: "sd-turbo", longName: "sd-turbo", repo: "stabilityai/sd-turbo", params: "1.2B", size: "1.2 GB", labels: ["image"], type: "image", device: "rocm", ns: "blessed", installed: true, runtime: "sdcpp" },
-    { id: "flux-2-klein-9b", longName: "Flux-2-Klein-9B", repo: "black-forest-labs/flux-2-klein-9b", params: "9B", size: "12 GB", labels: ["image", "edit"], type: "image", device: "rocm", ns: "blessed", installed: false, runtime: "sdcpp" },
     { id: "user.phi-4-mini", longName: "user.Phi-4-Mini", repo: "microsoft/Phi-4-mini-instruct-GGUF", params: "3.8B", size: "2.3 GB", labels: ["chat", "tool-calling"], type: "llm", device: "rocm", ns: "pulled", installed: true, runtime: "llamacpp" },
     { id: "user.bert-base", longName: "user.bert-base", repo: "google-bert/bert-base-uncased", params: "110M", size: "440 MB", labels: ["embeddings"], type: "embedding", device: "cpu", ns: "pulled", installed: true, runtime: "llamacpp" },
   ],

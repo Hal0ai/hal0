@@ -37,6 +37,11 @@ vi.mock('../settings/pages/capabilities/useCapabilitySelection.js', () => ({
     applyCapability: { isPending: false },
     provider: 'comfyui',
     setProvider: () => {},
+    // The Model row reads these; a non-empty catalog renders a <select>, so the
+    // text inputs this file indexes stay the three generation defaults.
+    catalogItems: [{ id: 'sdxl-lightning' }],
+    model: 'sdxl-lightning',
+    setModel: () => {},
     enabled: true,
     setEnabled: () => {},
     status: 'ready',

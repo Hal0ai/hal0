@@ -197,21 +197,6 @@ def set_model_type_default(
     }
 
 
-def comfyui_category(path: Any) -> str | None:
-    """ComfyUI models subdir for a path under ``.../comfyui/models/<subdir>/``.
-
-    Returns the subdir (``checkpoints`` / ``loras`` / ``vae`` / ``upscale_models``
-    / …) that the dashboard's dedicated image-gen surface groups by, or ``None``
-    for a non-ComfyUI path. Path-derived so a row mis-tagged by an older pull
-    (``capabilities=["chat"]``, ``backends=[]``) is still recognised as ComfyUI
-    without a data migration.
-    """
-    if not isinstance(path, str) or "/comfyui/models/" not in path:
-        return None
-    seg = path.split("/comfyui/models/", 1)[1].split("/", 1)[0].strip()
-    return seg or None
-
-
 # ── row serialisation (pure) ──────────────────────────────────────────────────
 
 
@@ -393,6 +378,7 @@ async def commit_scan_rows(
     provider (Task 3) instead of leaving it for lazy derivation.
     """
     from hal0.errors import Hal0Error
+    from hal0.registry.discover import is_comfyui_asset
     from hal0.registry.model import MODEL_FACT_FIELDS, Model
     from hal0.registry.store import ModelAlreadyExists
 
@@ -411,6 +397,11 @@ async def commit_scan_rows(
             resolved = path.resolve() if path.exists() else path
         except OSError:
             resolved = path
+
+        # ComfyUI's tree belongs to the image catalog: skip the row, keep the batch.
+        if is_comfyui_asset(path):
+            skipped.append({"path": str(resolved), "reason": "image_asset"})
+            continue
 
         # #1838: see add_from_path's matching comment — pass the operator-
         # typed name so a HF hub-cache symlink's resolved sha-named blob
@@ -1652,34 +1643,6 @@ async def list_all(
         dumped["type"] = dispatch_type(
             dumped.get("id", ""), capabilities=dumped.get("capabilities")
         )
-        # ComfyUI discriminator + category for the dashboard's dedicated
-        # image-gen surface. Path-derived so it self-heals rows an older pull
-        # mis-tagged (capabilities=["chat"], backends=[]) with no migration:
-        # any model whose bytes live under the ComfyUI models tree — or that
-        # already carries the comfyui backend — is owned_by "comfyui" and
-        # advertises its subdir as ``comfyui_category``. The UI groups the
-        # image-gen surface on this, not on the (possibly stale) capability.
-        _cat = comfyui_category(dumped.get("path"))
-        _bes = list(dumped.get("backends") or [])
-        if _cat is not None or "comfyui" in _bes:
-            dumped["owned_by"] = "comfyui"
-            if "comfyui" not in _bes:
-                _bes.append("comfyui")
-                dumped["backends"] = _bes
-            if _cat is not None:
-                dumped["comfyui_category"] = _cat
-            # Task 3: force ``provider`` alongside the self-healed tag — this
-            # whole branch already treats the ON-DISK PATH as more
-            # authoritative than whatever the row's own ``backends`` says
-            # (it force-appends "comfyui" unconditionally, above), so
-            # ``provider`` gets the same treatment rather than only filling
-            # a falsy value. Otherwise a row created with a comfyui path but
-            # ``backends=[]`` and no explicit provider — via the create-model
-            # write path, which now stamps ``derive_model_provider([]) ==
-            # "llama-server"`` at write time (see create_model) — would read
-            # back "llama-server" forever, since a truthy stored value would
-            # never again look like "needs healing".
-            dumped["provider"] = derive_model_provider(_bes)
         data.append(dumped)
         seen.add(entry.id)
         by_id[entry.id] = dumped
@@ -1902,6 +1865,8 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
       * ``BadRequest`` ``model.path_relative`` — path not absolute.
       * ``BadRequest`` ``model.path_missing`` — file absent / unreadable.
       * ``BadRequest`` ``model.unsupported_format`` — extension not allowed.
+      * ``ImageAsset`` (422) ``model.image_asset`` — the file sits in
+        ComfyUI's model tree, which the image catalog owns.
       * ``UnprocessableEntity`` ``models.unsupported_quant`` — a fork-only
         quant (ROCmFPX family, IU4, ActiveFPX) no hal0 runner can load.
       * ``UnprocessableEntity`` ``models.unsupported_moonshine_layout`` — a
@@ -1912,8 +1877,9 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
     """
     from hal0.config.loader import load_hal0_config
     from hal0.errors import BadRequest
-    from hal0.registry.discover import _normalise_id
+    from hal0.registry.discover import _normalise_id, is_comfyui_asset
     from hal0.registry.model import Model
+    from hal0.registry.pull import ImageAsset
 
     raw_path = body.get("path")
     if not isinstance(raw_path, str) or not raw_path.strip():
@@ -1935,6 +1901,9 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
         resolved = path.resolve()
     except OSError:
         resolved = path
+
+    if is_comfyui_asset(path):
+        raise ImageAsset(details={"path": str(path)})
 
     from hal0.registry.detect import (
         unsupported_moonshine_layout,

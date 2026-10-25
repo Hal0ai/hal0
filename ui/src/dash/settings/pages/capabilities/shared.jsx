@@ -4,7 +4,7 @@
 // FieldInfoIcon is a window global (dash/primitives.jsx) — used unimported,
 // same as every settings page.
 import { SRow } from '../../shared/SRow.jsx'
-import { rowId, rowNeedsPull } from './selection-pure.js'
+import { rowId, rowLabel, rowNeedsPull } from './selection-pure.js'
 
 export const selStyle = { fontFamily: "var(--jbm)", fontSize: 11, background: "var(--bg-2)", color: "var(--fg)", border: "1px solid var(--line)", borderRadius: 4, padding: "3px 6px" }
 export const inputStyle = (width) => ({ ...selStyle, width })
@@ -74,7 +74,7 @@ export function ModelRow({ items, value, onChange, placeholder, emptyHint }) {
           // #2026: pullable-but-absent rows carry the ⬇ marker the catalog
           // documents — picking one 409s until the weights are pulled.
           <option key={rowId(m)} value={rowId(m)}>
-            {rowId(m)}{rowNeedsPull(m) ? " · ⬇ not downloaded" : ""}
+            {rowLabel(m)}{rowNeedsPull(m) ? " · ⬇ not downloaded" : ""}
           </option>
         ))}
       </select>

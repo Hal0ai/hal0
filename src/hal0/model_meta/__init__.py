@@ -315,9 +315,8 @@ MODEL_BACKENDS: tuple[str, ...] = (
 #: edit pane's retired type toggles — chips removed, tags inert), then
 #: provenance, then the descriptive tags the curated catalogue seeds
 #: (registry/curated.py). Tags remain freeform on ``Model.tags`` — this tuple
-#: is the *curated* superset, not a validation whitelist.
-#: tests/model_meta/test_curated_model_tags.py pins this against the curated
-#: catalogue so a new seed tag can't silently drift out of the enums payload.
+#: is the *curated* superset, not a validation whitelist. Image-gen tags are
+#: not here: the ComfyUI image catalog owns image models, not ``Model.tags``.
 CURATED_MODEL_TAGS: tuple[str, ...] = (
     # DESCRIPTIVE ONLY — the curated "type" chips are retired from the model
     # editors and NOTHING routes on these tags. Behaviour is owned by typed
@@ -356,17 +355,9 @@ CURATED_MODEL_TAGS: tuple[str, ...] = (
     "light",
     "medium",
     "rerank",
-    "image",
-    "sdxl",
-    "sd-1.5",
-    "lora",
-    "upscale",
-    "esrgan",
-    "research-only",
     "stt",
     "transcription",
     "tts",
-    "edit",
 )
 
 

@@ -22,19 +22,18 @@ def test_catalogue_has_named_picks() -> None:
 def test_catalogue_entries_have_hf_coordinates() -> None:
     """Every entry must carry hf_repo + hf_file (the pull layer's input).
 
-    Allowed file extensions: .gguf for chat (llama.cpp), .safetensors /
-    .ckpt for image-gen (ComfyUI). Anything else trips this so a typo
-    doesn't make it into a release.
+    Allowed file extension: .gguf (llama.cpp). Anything else trips this so
+    a typo doesn't make it into a release.
 
     ``bundle_only`` entries (#500) are exempt from the extension check:
     they are bundled-stock models loaded via their own recipe
-    (kokoro/sd-cpp) rather than hal0's hf pull layer, so they
+    (kokoro) rather than hal0's hf pull layer, so they
     legitimately carry .bin / .onnx coordinates. hf_repo/hf_file are still
     required (informational), but the extension allowlist does not apply.
     """
     # .bin is kept in the allowlist for bundled-stock weights; no curated
     # row ships whisper.cpp ggml weights any more (#2691).
-    allowed_suffixes = (".gguf", ".safetensors", ".ckpt", ".bin")
+    allowed_suffixes = (".gguf", ".bin")
     for m in CURATED_MODELS:
         if m.tags and "npu" in m.tags:
             # NPU models are served via FLM, not GGUF — no hf_repo pull. But
@@ -112,3 +111,19 @@ def test_memory_pipeline_default_embed_model_is_pullable() -> None:
     )
     assert model.hf_repo and model.hf_file
     assert model.capability == "embed"
+
+
+def test_curated_has_no_image_entries() -> None:
+    """Image models live in the ComfyUI catalog, never in the LLM curated table."""
+    assert [m.id for m in CURATED_MODELS if "image" in (m.capability or "")] == []
+    assert [m.id for m in CURATED_MODELS if m.recommended_slot == "img"] == []
+    assert "model_class" not in CuratedModel.model_fields
+    assert "comfyui_subdir" not in CuratedModel.model_fields
+
+
+def test_curated_chat_entries_keep_chat_capability() -> None:
+    """The chat picks default ``capability='chat'``."""
+    chat_picks = [m for m in CURATED_MODELS if m.recommended_slot == "chat"]
+    assert chat_picks, "no curated entry recommends the chat slot"
+    for m in chat_picks:
+        assert m.capability == "chat", m.id

@@ -1,6 +1,6 @@
 ---
 title: Choose models
-description: hal0's curated catalogue of recommended chat, embed, rerank, and image models, what a model row records (facts about its file) versus what a profile tunes, and how to edit a model from the dashboard's row menu.
+description: hal0's curated catalogue of recommended chat, embed, and rerank models, where image models live instead, what a model row records (facts about its file) versus what a profile tunes, and how to edit a model from the dashboard's row menu.
 sidebar:
   order: 30
 ---
@@ -46,18 +46,30 @@ whole slot lifecycle (pull → load → serve) in seconds before you commit
 to downloading a much larger pick.
 </Aside>
 
-## Embed, rerank, and image picks
+## Embed and rerank picks
 
 Embed/rerank picks are llama.cpp-compatible GGUFs that run on
 `gpu-vulkan` / `gpu-rocm` / `gpu-cuda` / `cpu`; assign them to an
 `embedding` or `reranking` slot (`--type reranking` at
 `hal0 slot create` time — see [Manage slots](/docs/guides/manage-slots)).
 
-Image picks route through ComfyUI and land in its own models tree rather
-than the per-id model directory — see
-[Generate images](/docs/guides/generate-images) for that surface. Image
-picks span the licensing spectrum on purpose (research-only through
-fully permissive) — read the license before using output commercially.
+## Image models
+
+Image models are not in this catalogue or the model registry. They have a
+catalog of their own, owned by ComfyUI, and land in its models folder. List
+it with `hal0 comfyui models list` and install a pick with
+`hal0 comfyui models install <id>` — see
+[Generate images](/docs/guides/generate-images). A pull of an image id answers
+422 `model.image_asset` with that command in its message, and so does adding
+a file from ComfyUI's models folder with `hal0 model add`. Image models span
+the licensing spectrum on purpose (research-only through fully permissive) —
+read the license before using output commercially.
+
+The Models view's **Image / ComfyUI** tab lists the weight files in that
+folder, grouped by what each one is (checkpoints, diffusion models, text
+encoders, VAE and so on). A file no catalog model loads, and that is not a
+symlink, has a Delete button there; to delete a catalog model's files, remove
+the model with `hal0 comfyui models remove <id>`.
 
 ## Filter and sort the catalog
 

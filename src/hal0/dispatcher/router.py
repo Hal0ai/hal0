@@ -209,9 +209,8 @@ _UPSTREAM_PATH_REWRITES: dict[str, str] = {
 
 
 # NOTE: the capability/path routing constants (``_EMBED_PATHS``,
-# ``_RERANK_PATHS``, ``_TTS_PATHS``, ``_IMAGE_PATHS``, ``_EMBED_NAME_HINTS``,
-# ``_IMAGE_NAME_PREFIXES``) and the ``resolve_by_capability`` step (Step 4) they
-# feed now live in ``hal0.dispatcher._capability_resolve`` (finding DR-12).
+# ``_RERANK_PATHS``, ``_TTS_PATHS``, ``_IMAGE_PATHS``, ``_EMBED_NAME_HINTS``)
+# and the ``resolve_by_capability`` step (Step 4) they feed now live in ``hal0.dispatcher._capability_resolve`` (finding DR-12).
 # ``resolve_by_capability`` and ``LegacyResolutionFailed`` are imported above and
 # re-exported here (see ``__all__``) so existing call sites and importers are
 # unaffected.

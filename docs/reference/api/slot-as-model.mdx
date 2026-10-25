@@ -59,8 +59,7 @@ to capability inference from the request path and model-name hints, in this orde
    `/images/variations` → `img` — note the last two paths aren't actually implemented
    endpoints, but their strings are still recognized here as routing hints).
 2. Model-name substring hints (`embed`, `rerank`).
-3. Image-model-id prefixes (`sdxl`, `sd-1.5`, `sd15`, `flux`).
-4. Direct `SLOT_ALIASES` lookup — the slot-name-as-model fallback.
+3. Direct `SLOT_ALIASES` lookup — the slot-name-as-model fallback.
 
 See [Providers, profiles & devices](/docs/reference/providers-profiles-devices/) for
 how a slot's `device`/`provider` fields relate to which capability it can serve, and

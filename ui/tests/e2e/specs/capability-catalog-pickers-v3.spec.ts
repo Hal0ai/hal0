@@ -34,10 +34,9 @@ function capabilityRow(device: string, provider: string, model: string | null, s
 
 // Scopes a `Model` row (`.s-row` with `.k span` text "Model") to the panel
 // whose own title (`.s-panel`'s `.k span`) matches `title` — the AI
-// Capabilities page renders four Model rows (TTS, STT, Embed, Rerank;
-// Image deliberately has none — ComfyUI workflows pick their own
-// checkpoint), so a bare index into a page-wide `.s-row` collection is no
-// longer stable; scope by panel instead. Each test builds its own bound
+// Capabilities page renders five Model rows (TTS, STT, Embed, Rerank, Image),
+// so a bare index into a page-wide `.s-row` collection is not stable; scope
+// by panel instead. Each test builds its own bound
 // `panelModelRow` from its `page` fixture, mirroring how the neighbouring
 // panel locators (e.g. `ttsPanel` in voice-page-provider-copy-v3) are
 // built fresh per test.
@@ -125,17 +124,70 @@ test.describe('Capability catalog pickers (#1454)', () => {
     await expect(ttsRow).not.toContainText('no installed TTS models')
   })
 
-  test('Image-gen panel has no Model row — checkpoint choice belongs to ComfyUI workflows', async ({ page }) => {
-    await page.route('**/api/capabilities', (route) => json(route, CAPS_MOCK))
+  // The img selection is what /v1/images defaults and Open WebUI's image model
+  // follow, and this panel is the one place the dashboard picks it (the slot drawer
+  // and the swap popover link here for an image slot). `catalogs.img.img` rows are
+  // the image picker rows GET /api/capabilities serves: ComfyUI catalog models, each
+  // with a `display_name`, marked when its weights are not on disk.
+  test('Image-gen panel Model row lists the image catalog, naming each model and marking one not on disk', async ({ page }) => {
+    await page.route('**/api/capabilities', (route) => json(route, {
+      ...CAPS_MOCK,
+      catalogs: {
+        ...CAPS_MOCK.catalogs,
+        img: {
+          img: [
+            { id: 'sdxl-lightning', display_name: 'SDXL Lightning (8-step)', capabilities: ['image'], size_gb: 7.6, backends: [{ id: 'gpu-vulkan', provider: 'comfyui', downloaded: true, pullable: true }] },
+            { id: 'qwen-image', display_name: 'Qwen-Image', capabilities: ['image'], size_gb: 40, backends: [{ id: 'gpu-vulkan', provider: 'comfyui', downloaded: false, pullable: true }] },
+          ],
+        },
+      },
+    }))
     await page.goto('/#settings/capabilities')
     await expect(page.locator('.settings-content h2').first()).toHaveText('AI Capabilities')
 
     const panel = page.locator('.s-panel').filter({ has: page.locator('.k span', { hasText: /^Image generation$/ }) })
-    // Engine select must still render before we assert the Model row away
-    // (guards against a blank-panel false pass).
+    // The engine select still renders beside the Model row.
     await expect(panel.locator('select option', { hasText: 'comfyui' })).toHaveCount(1)
-    await expect(makePanelModelRow(page)(/^Image generation$/)).toHaveCount(0)
-    await expect(panel.locator('a[href="#slots/image"]')).toHaveCount(1)
+    const modelRow = makePanelModelRow(page)(/^Image generation$/)
+    await expect(modelRow).toHaveCount(1)
+    const select = modelRow.locator('select')
+    await expect(select).toBeVisible()
+    await expect(select.locator('option', { hasText: 'SDXL Lightning (8-step) (sdxl-lightning)' })).toHaveCount(1)
+    // A model whose weights are absent is still pickable but says so.
+    await expect(select.locator('option', { hasText: 'Qwen-Image (qwen-image) · ⬇ not downloaded' })).toHaveCount(1)
+    await expect(modelRow.getByTestId('img-model-no-engine')).toHaveCount(0)
+  })
+
+  // An empty img catalog means no ComfyUI engine on the host (no ROCm lane): the
+  // server refuses an id it does not advertise, so a free-text box or an install
+  // could not fix it. The row says why, read-only, using the engine's own reason.
+  test('Image-gen panel with an empty catalog shows a read-only "No ComfyUI image engine" line with the reason', async ({ page }) => {
+    await page.route('**/api/capabilities', (route) => json(route, {
+      ...CAPS_MOCK,
+      catalogs: { ...CAPS_MOCK.catalogs, img: { img: [] } },
+    }))
+    await page.route('**/api/comfyui/models', (route) =>
+      json(route, { models: [], engine: { available: false, reason: 'no ROCm lane on this host' } }))
+    await page.goto('/#settings/capabilities')
+    await expect(page.locator('.settings-content h2').first()).toHaveText('AI Capabilities')
+
+    const modelRow = makePanelModelRow(page)(/^Image generation$/)
+    await expect(modelRow).toHaveCount(1)
+    await expect(modelRow.getByTestId('img-model-no-engine')).toHaveText('No ComfyUI image engine: no ROCm lane on this host')
+    // Read-only: neither a picker nor a free-text id to type into.
+    await expect(modelRow.locator('select, input')).toHaveCount(0)
+  })
+
+  test('Image-gen panel with an empty catalog and no engine reason still says there is no engine', async ({ page }) => {
+    await page.route('**/api/capabilities', (route) => json(route, {
+      ...CAPS_MOCK,
+      catalogs: { ...CAPS_MOCK.catalogs, img: { img: [] } },
+    }))
+    await page.goto('/#settings/capabilities')
+    await expect(page.locator('.settings-content h2').first()).toHaveText('AI Capabilities')
+
+    await expect(makePanelModelRow(page)(/^Image generation$/).getByTestId('img-model-no-engine'))
+      .toHaveText('No ComfyUI image engine on this host')
   })
 
   test('Voice page: empty catalog still shows the honest "no installed" hint (not a false negative)', async ({ page }) => {

@@ -824,6 +824,9 @@ There is no second loader process to keep in sync (the Lemonade
 `server_models.json` / `user_models.json` / `extra.*` split was removed
 with the runtime, #687). Every slot's `--model` path is a registry-backed
 file under the model store `/mnt/ai-models`.
+Image models are the exception: the ComfyUI image catalog
+(`hal0.comfyui.catalog`, ADR-0037) owns them, and the registry neither scans
+nor lists ComfyUI's models tree.
 
 The registry tags each row with a namespace bucket (`ns`) the dashboard
 renders as a badge:
@@ -914,9 +917,9 @@ a per-tier concept, not a default-install concept.
 |---|---|---|---|---|---|
 | `hal0-Lite` | 16 GB | qwen3.5-0.8b | — | — | — (not shown) |
 | `hal0-Default` | 32 GB | qwen3.5-9b | — | nomic-v1.5, kokoro:cpu | — (not shown) |
-| `hal0-Pro` | 64 GB | Qwen3.6-27B-MTP | Qwen3-Coder-30B-A3B | + bge-reranker-v2-m3, sd-turbo | shown, **opt-in** |
-| `hal0-Max` | 100 GB Strix Halo | Qwen3.6-35B-A3B-MTP | Qwen3-Coder-Next-80B-A3B | + flux-2-klein-9b | shown, **opt-in** |
-| `LMX-Omni-52B-Halo` | 100 GB Strix Halo | Qwen3.6-35B-A3B-MTP | — | kokoro-v1, Flux-2-Klein-9B | — |
+| `hal0-Pro` | 64 GB | Qwen3.6-27B-MTP | Qwen3-Coder-30B-A3B | + bge-reranker-v2-m3, sdxl-lightning | shown, **opt-in** |
+| `hal0-Max` | 100 GB Strix Halo | Qwen3.6-35B-A3B-MTP | Qwen3-Coder-Next-80B-A3B | + qwen-image-lightning | shown, **opt-in** |
+| `LMX-Omni-52B-Halo` | 100 GB Strix Halo | Qwen3.6-35B-A3B-MTP | — | kokoro-v1, qwen-image-lightning | — |
 
 Notes:
 - `hal0-Max` was originally proposed as `hal0-Halo` but renamed to avoid

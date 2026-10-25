@@ -261,6 +261,23 @@ class TestDeleteModelFiles:
         assert dest_b.exists()  # surviving referent (and the bytes) live on
 
 
+def _make_comfyui_tree(data_root: Path) -> list[Path]:
+    """A ComfyUI data root holding files no registry row tracks: model weights,
+    a workflow, user data, a custom node and ``extra_model_paths.yaml``."""
+    files = [
+        data_root / "models" / "checkpoints" / "sd-turbo.safetensors",
+        data_root / "models" / "vae" / "ae.safetensors",
+        data_root / "workflows" / "flow.json",
+        data_root / "user" / "default" / "settings.json",
+        data_root / "custom_nodes" / "node" / "__init__.py",
+        data_root / "extra_model_paths.yaml",
+    ]
+    for path in files:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"comfy")
+    return files
+
+
 class TestReconcileStoreTree:
     """#9: fs-walk reconcile — reap bare bytes (on disk, tracked by NO
     store_blob AND no model_file row) while retaining every tracked file and
@@ -319,6 +336,93 @@ class TestReconcileStoreTree:
         assert blob_file.exists()  # store_blob-tracked retained
         assert tok.exists()  # model_file-only (non-LFS) retained
         assert partial.exists()  # in-flight .tmp partial skipped
+
+    def test_never_reaps_the_comfyui_tree(self, db_path: Path, tmp_path: Path, monkeypatch) -> None:
+        """ComfyUI's data root follows the store and holds files no ``store_blob``
+        / ``model_file`` row tracks (models, workflows, user data, custom nodes,
+        ``extra_model_paths.yaml``), so the walk must skip it entirely: nothing
+        under it is reaped or counted as an orphan, while an untracked file
+        elsewhere in the store is still reaped."""
+        monkeypatch.setenv("HAL0_MODEL_STORE", str(tmp_path))
+        monkeypatch.delenv("HAL0_COMFYUI_DATA_ROOT", raising=False)
+        comfy_files = _make_comfyui_tree(tmp_path / "comfyui")
+        snap = tmp_path / "models--org--repo" / "snapshots" / "rev"
+        snap.mkdir(parents=True)
+        bare = snap / "leftover.gguf"
+        bare.write_bytes(b"orphaned")
+        # A sibling that only shares the name prefix is not the ComfyUI tree.
+        sibling = tmp_path / "comfyui-notes" / "a.bin"
+        sibling.parent.mkdir()
+        sibling.write_bytes(b"orphaned")
+
+        with connect(db_path) as conn:
+            migrate(conn)
+            report = gc.reconcile_store_tree(conn, dry_run=False)
+
+        assert report.orphans_found == 2  # no ComfyUI file is counted
+        assert report.orphans_deleted == 2
+        assert report.errors == []
+        assert not bare.exists()
+        assert not sibling.exists()
+        for path in comfy_files:
+            assert path.read_bytes() == b"comfy", path
+
+    def test_never_reaps_a_relocated_comfyui_tree(
+        self, db_path: Path, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The tree is recognised by its resolved path, not its name: a data
+        root reached through a symlink is skipped where the walk finds it."""
+        store = tmp_path / "store"
+        store.mkdir()
+        monkeypatch.setenv("HAL0_MODEL_STORE", str(store))
+        relocated = store / "images-box"
+        comfy_files = _make_comfyui_tree(relocated)
+        link = tmp_path / "comfy-link"
+        link.symlink_to(relocated)
+        monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(link))
+        bare = store / "stray.gguf"
+        bare.write_bytes(b"orphaned")
+
+        with connect(db_path) as conn:
+            migrate(conn)
+            report = gc.reconcile_store_tree(conn, dry_run=False)
+
+        assert report.orphans_found == 1
+        assert not bare.exists()
+        for path in comfy_files:
+            assert path.read_bytes() == b"comfy", path
+
+    @pytest.mark.parametrize("data_root_level", ["store_root", "above_store_root"])
+    def test_walks_nothing_when_the_store_is_inside_the_comfyui_data_root(
+        self, db_path: Path, tmp_path: Path, monkeypatch, data_root_level: str
+    ) -> None:
+        """When ``HAL0_COMFYUI_DATA_ROOT`` is the store root or a folder above
+        it, the whole store is ComfyUI's tree: pruning subdirectories is not
+        enough, because the files directly in the walk root (e.g.
+        ``extra_model_paths.yaml``) would still be reaped."""
+        store = tmp_path / "outer" / "store"
+        store.mkdir(parents=True)
+        monkeypatch.setenv("HAL0_MODEL_STORE", str(store))
+        data_root = store if data_root_level == "store_root" else store.parent
+        monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(data_root))
+        untracked = [
+            store / "extra_model_paths.yaml",
+            store / "workflows" / "f.json",
+            store / "models--org--repo" / "snapshots" / "rev" / "leftover.gguf",
+        ]
+        for path in untracked:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"untracked")
+
+        with connect(db_path) as conn:
+            migrate(conn)
+            report = gc.reconcile_store_tree(conn, dry_run=False)
+
+        assert report.orphans_found == 0
+        assert report.orphans_deleted == 0
+        assert report.errors == []
+        for path in untracked:
+            assert path.read_bytes() == b"untracked", path
 
     def test_dry_run_reports_without_unlinking(
         self, db_path: Path, tmp_path: Path, monkeypatch

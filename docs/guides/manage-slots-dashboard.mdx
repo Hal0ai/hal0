@@ -146,6 +146,10 @@ stay visible while you adjust the model. It's disabled when no model is bound
 yet, or when the bound id doesn't resolve to a registry row. The drawer has
 no flag or context fields; those are the profile's.
 
+The `img` slot is the exception: image models are not registry rows, so its
+drawer shows the selected image model and a link to AI Capabilities → Image,
+where the model is picked, instead of a model picker.
+
 Binding a model that is a fork-only quantization (ROCmFPX-family, IU4 or
 ActiveFPX) is refused rather than left to crash-loop: launching the slot
 answers 422 `slot.unsupported_quant`, and adding or pulling such a file

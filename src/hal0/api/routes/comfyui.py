@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, Request
+from fastapi import APIRouter, BackgroundTasks, FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
@@ -59,7 +59,7 @@ from hal0.capabilities.catalog import COMFYUI_NO_ENGINE_REASON, comfyui_backends
 from hal0.comfyui import install as comfyui_install
 from hal0.comfyui import inventory
 from hal0.comfyui import paths as comfyui_paths
-from hal0.comfyui.autoselect import auto_select_first_image_model
+from hal0.comfyui.autoselect import auto_select_first_image_model, enabled_img_model
 from hal0.comfyui.catalog import (
     CATALOG,
     ImageModel,
@@ -606,12 +606,12 @@ def _model_row(
     }
 
 
-def _install_jobs(request: Request) -> dict[str, PullJob]:
-    jobs: dict[str, PullJob] = request.app.state.image_install_jobs
+def _install_jobs(app: FastAPI) -> dict[str, PullJob]:
+    jobs: dict[str, PullJob] = app.state.image_install_jobs
     return jobs
 
 
-def _tree_lock(request: Request) -> asyncio.Lock:
+def _tree_lock(app: FastAPI) -> asyncio.Lock:
     """Serialises the install route's check-then-start with a removal running in a worker thread.
 
     An install must not start (and skip a file as present) while the files it would skip are
@@ -619,7 +619,7 @@ def _tree_lock(request: Request) -> asyncio.Lock:
     ``asyncio.Lock`` binds to the first event loop that contends on it, and a module-level one
     outlives the app (and its loop) in anything that builds more than one.
     """
-    lock: asyncio.Lock = request.app.state.image_tree_lock
+    lock: asyncio.Lock = app.state.image_tree_lock
     return lock
 
 
@@ -681,7 +681,7 @@ async def comfyui_models(request: Request) -> dict[str, Any]:
     409 ``comfyui.models_dir_not_writable`` (``error.details.path``) when the models tree
     cannot be read by the hal0 user.
     """
-    jobs = _install_jobs(request)
+    jobs = _install_jobs(request.app)
     recommended = recommended_id()
     root = comfyui_paths.models_root()
     with comfyui_install.readable_tree():
@@ -692,7 +692,7 @@ async def comfyui_models(request: Request) -> dict[str, Any]:
     return {"models": models, "engine": _engine_availability()}
 
 
-def _schedule_install(request: Request, model: ImageModel, job: PullJob) -> None:
+def _schedule_install(app: FastAPI, model: ImageModel, job: PullJob) -> None:
     """Run the install as a detached task tracked for shutdown, never a BackgroundTask.
 
     Same reasoning as ``hal0.registry.pull_jobs.schedule_pull_task`` (#1225): a
@@ -702,15 +702,15 @@ def _schedule_install(request: Request, model: ImageModel, job: PullJob) -> None
     """
     on_complete = functools.partial(
         _after_install,
-        orchestrator=getattr(request.app.state, "capability_orchestrator", None),
-        tree_lock=_tree_lock(request),
+        orchestrator=getattr(app.state, "capability_orchestrator", None),
+        tree_lock=_tree_lock(app),
     )
     task = asyncio.create_task(
         comfyui_install.run_install(
             job, model, hf_token=hf_token_from_env(), on_complete=on_complete
         )
     )
-    tasks: dict[str, asyncio.Task[None]] = request.app.state.image_install_tasks
+    tasks: dict[str, asyncio.Task[None]] = app.state.image_install_tasks
     tasks[model.id] = task
 
     def _untrack(finished: asyncio.Task[None], _model_id: str = model.id) -> None:
@@ -773,28 +773,17 @@ async def _after_install(model: ImageModel, *, orchestrator: Any, tree_lock: asy
         await asyncio.to_thread(_rewire_open_webui, model.id)
 
 
-@router.post("/models/{model_id}/install", status_code=202)
-async def comfyui_model_install(model_id: str, request: Request) -> JSONResponse:
-    """Start downloading what the model is missing; 202 with the new install job.
+async def start_image_install(app: FastAPI, model_id: str) -> PullJob:
+    """Start downloading what the model is missing and return the new install job.
 
-    Refused before any job exists with 404 ``comfyui.model_unknown``, 409
-    ``comfyui.install_running`` (its job rides in ``error.details.job``), 409
-    ``comfyui.model_installed`` (every weight is on disk and its workflow is provisioned),
-    409 ``comfyui.staging_cross_device`` (download staging and models tree on two
-    filesystems), 409 ``comfyui.models_dir_not_writable`` (a destination directory the
-    hal0 user cannot write, or a models tree it cannot read; ``error.details.path``) and 507
-    ``comfyui.insufficient_disk``.
-    The job then runs in the background; follow it on ``GET /jobs``. A finished job stays
-    listed until the next install of the model replaces it.
-
-    A model whose weights are all on disk but whose workflow is not (another model loading
-    the same files completed it, or the weights were put there by hand) is not refused:
-    the job downloads nothing and writes the workflow, the only thing the launcher lists.
-    The download guards (one filesystem, writable destinations, free space) are skipped then.
+    The one place an image install starts: ``POST /models/{model_id}/install`` calls it
+    (its docstring lists every refusal this raises, before any job exists), and so does the
+    installer for the ``img`` selections of ``POST /api/install/apply`` and
+    ``/apply-selections``. The job runs in the background on ``app.state.image_install_jobs``.
     """
     model = _require_model(model_id)
-    jobs = _install_jobs(request)
-    async with _tree_lock(request):  # waits only while a removal is running
+    jobs = _install_jobs(app)
+    async with _tree_lock(app):  # waits only while a removal is running
         existing = jobs.get(model_id)
         if existing is not None and existing.state in _ACTIVE_JOB_STATES:
             raise _install_running(model, existing)
@@ -814,7 +803,30 @@ async def comfyui_model_install(model_id: str, request: Request) -> JSONResponse
         comfyui_install.clear_removed(model.id)  # asking for it is the operator changing their mind
         job = make_job(model_id)
         jobs[model_id] = job
-        _schedule_install(request, model, job)
+        _schedule_install(app, model, job)
+    return job
+
+
+@router.post("/models/{model_id}/install", status_code=202)
+async def comfyui_model_install(model_id: str, request: Request) -> JSONResponse:
+    """Start downloading what the model is missing; 202 with the new install job.
+
+    Refused before any job exists with 404 ``comfyui.model_unknown``, 409
+    ``comfyui.install_running`` (its job rides in ``error.details.job``), 409
+    ``comfyui.model_installed`` (every weight is on disk and its workflow is provisioned),
+    409 ``comfyui.staging_cross_device`` (download staging and models tree on two
+    filesystems), 409 ``comfyui.models_dir_not_writable`` (a destination directory the
+    hal0 user cannot write, or a models tree it cannot read; ``error.details.path``) and 507
+    ``comfyui.insufficient_disk``.
+    The job then runs in the background; follow it on ``GET /jobs``. A finished job stays
+    listed until the next install of the model replaces it.
+
+    A model whose weights are all on disk but whose workflow is not (another model loading
+    the same files completed it, or the weights were put there by hand) is not refused:
+    the job downloads nothing and writes the workflow, the only thing the launcher lists.
+    The download guards (one filesystem, writable destinations, free space) are skipped then.
+    """
+    job = await start_image_install(request.app, model_id)
     return JSONResponse(status_code=202, content={"job": job.as_dict()})
 
 
@@ -849,8 +861,8 @@ async def comfyui_model_remove(
     """
     model = _require_model(model_id)
     try:
-        async with _tree_lock(request):
-            job = _blocking_install(model, _install_jobs(request))
+        async with _tree_lock(request.app):
+            job = _blocking_install(model, _install_jobs(request.app))
             if job is not None:
                 raise _install_running(CATALOG[job.model_id], job, removing=model)
             # The delete runs off the event loop (hundreds of unlinks on a slow store); the
@@ -871,7 +883,7 @@ async def comfyui_model_remove(
 @router.get("/jobs")
 async def comfyui_jobs(request: Request) -> dict[str, Any]:
     """The latest install job of every model that has had one, finished or not."""
-    return {"jobs": [job.as_dict() for job in _install_jobs(request).values()]}
+    return {"jobs": [job.as_dict() for job in _install_jobs(request.app).values()]}
 
 
 @router.post("/jobs/{model_id}/cancel", status_code=202)
@@ -882,7 +894,7 @@ async def comfyui_job_cancel(model_id: str, request: Request) -> JSONResponse:
     that already finished is returned unchanged. 404 ``comfyui.job_not_found`` when
     the model has no job.
     """
-    job = _install_jobs(request).get(model_id)
+    job = _install_jobs(request.app).get(model_id)
     if job is None:
         raise NotFound(
             f"no install job for {model_id!r}",
@@ -896,9 +908,61 @@ async def comfyui_job_cancel(model_id: str, request: Request) -> JSONResponse:
 
 @router.get("/files")
 async def comfyui_files() -> dict[str, Any]:
-    """Every weight file under the models tree, with the catalog models that own it."""
+    """Every weight file under the models tree, with the catalog models that own it.
+
+    Each row also says whether the listed path is a ``symlink``, which the delete route
+    refuses.
+    """
     files = await asyncio.to_thread(inventory.list_files)
     return {"root": str(comfyui_paths.models_root()), "files": files}
+
+
+async def _was_the_selected_checkpoint(request: Request, subdir: str, relpath: str) -> bool:
+    """True when the deleted ``subdir/relpath`` is, or may be, the file behind the ``img`` selection.
+
+    Only a checkpoint the operator dropped in carries a ``ckpt/<path>`` id
+    (:func:`~hal0.comfyui.inventory.ckpt_api_id`), and the selection does not change when
+    its file goes. Call it after a delete succeeded, so ``relpath`` is a valid file path. A
+    selection that cannot be read may have been this file, so it counts: the re-render this
+    gates is a no-op when nothing changed.
+    """
+    if subdir != comfyui_paths.SUBDIRS["checkpoints"]:
+        return False
+    orchestrator = getattr(request.app.state, "capability_orchestrator", None)
+    if orchestrator is None:
+        return False
+    try:
+        selected = await enabled_img_model(orchestrator)
+    except Exception:
+        log.warning("comfyui.file_delete_selection_unreadable", exc_info=True)
+        return True
+    return selected == inventory.ckpt_api_id(relpath)
+
+
+@router.delete("/files/{subdir}/{relpath:path}")
+async def comfyui_file_delete(
+    subdir: str, relpath: str, request: Request, background_tasks: BackgroundTasks
+) -> dict[str, Any]:
+    """Delete one weight file no catalog model loads; ``{"deleted": "<subdir>/<relpath>"}``.
+
+    ``subdir`` and ``relpath`` are the row's fields from ``GET /files``, so a file the
+    listing shows without an owner can be deleted, and no other. 400 ``comfyui.file_path_invalid``
+    (``subdir`` is not a model directory, or ``relpath`` is absolute, climbs out with ``..``,
+    has a hidden part such as an install's ``.hf_stage_*`` partial, does not end in a weight-file
+    extension (a ``.yaml``, ComfyUI's ``put_checkpoints_here``), or leaves ``subdir``
+    through a symlinked directory), 400 ``comfyui.file_symlink`` (the file is a link: delete
+    its target), 404 ``comfyui.file_not_found``, 409 ``comfyui.file_catalog_owned``
+    (``error.details.models``: remove the model instead) and 403 ``comfyui.file_permission``.
+
+    Deleting the checkpoint behind the ``img`` selection (a ``ckpt/<path>`` id) re-renders
+    Open WebUI's image-generation env, as removing a catalog model does, so it is no longer
+    wired to a model that is gone. No lock with the installs is needed: an install only writes
+    catalog files, which this route never deletes, and its partials are hidden.
+    """
+    await asyncio.to_thread(inventory.delete_file, subdir, relpath)
+    if await _was_the_selected_checkpoint(request, subdir, relpath):
+        background_tasks.add_task(_rewire_open_webui, inventory.ckpt_api_id(relpath))
+    return {"deleted": f"{subdir}/{relpath}"}
 
 
 def _user_workflows_dir() -> str:

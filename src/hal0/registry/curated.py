@@ -19,7 +19,7 @@ without touching the curated list.
 # the upstream weight shapes do not fit the single-file pull layer
 # (registry/pull.py streams one ``hf_repo/resolve/main/<file>`` URL and the
 # curated schema validation in tests/registry/test_curated.py restricts
-# ``hf_file`` to ``.gguf``/``.safetensors``/``.ckpt``):
+# ``hf_file`` to ``.gguf``):
 #
 #   * Moonshine ships a multi-file ONNX bundle (``.ort`` files + tokenizer).
 #   * Whisper.cpp GGUF mirrors exist, but hal0's STT runtime is the Moonshine
@@ -47,9 +47,8 @@ class CuratedModel(BaseModel):
     license badge. The ``hf_repo`` / ``hf_file`` pair is what gets piped
     into ``POST /api/models/{id}/pull`` to actually download the bytes.
 
-    Image-gen models (``recommended_slot="img"``, set ``model_class`` and
-    ``comfyui_subdir``) are pulled into ComfyUI's models tree instead of
-    the default per-id directory — see :func:`hal0.registry.pull.run_pull`.
+    Image-gen models are not here: the ComfyUI image catalog
+    (``hal0.comfyui.catalog``) owns them.
     """
 
     model_config = {"populate_by_name": True, "str_strip_whitespace": True}
@@ -57,7 +56,7 @@ class CuratedModel(BaseModel):
     id: str = Field(..., description="Stable id used as the registry key, e.g. 'qwen3-4b'.")
     display_name: str = Field(..., description="Human-readable name for the card.")
     description: str = Field(..., description="One-line value prop.")
-    family: str = Field(..., description="Model family — 'qwen', 'llama', 'phi', 'sdxl', etc.")
+    family: str = Field(..., description="Model family — 'qwen', 'llama', 'phi', etc.")
     size_gb: float = Field(..., description="Approximate on-disk size of the model file(s), in GB.")
     vram_gb_min: float = Field(
         ...,
@@ -103,7 +102,7 @@ class CuratedModel(BaseModel):
     )
     context_length: int = Field(
         default=0,
-        description=("Native context window in tokens. Zero/omitted for image-gen entries."),
+        description="Native context window in tokens. Zero/omitted when the entry has none.",
     )
     chat_template: str = Field(
         default="",
@@ -132,7 +131,7 @@ class CuratedModel(BaseModel):
     )
     recommended_slot: str = Field(
         default="chat",
-        description="Default slot to assign the model to. 'chat' for chat, 'img' for image-gen.",
+        description="Default slot to assign the model to, e.g. 'chat', 'embed' or 'tts'.",
     )
     tags: list[str] = Field(
         default_factory=list,
@@ -145,8 +144,8 @@ class CuratedModel(BaseModel):
     capability: str = Field(
         default="chat",
         description=(
-            "Primary capability — 'chat' (default), 'embed', 'asr', 'tts', 'image'. "
-            "The pull layer routes 'image' into the ComfyUI models tree."
+            "Primary capability — 'chat' (default), 'embed', 'rerank', 'asr' or 'tts'. "
+            "Image models are not curated: the ComfyUI image catalog owns them."
         ),
     )
     architecture: str | None = Field(
@@ -164,26 +163,8 @@ class CuratedModel(BaseModel):
         description=(
             "Runtime backend tag the capability catalog fans out from. "
             "'llamacpp' for GGUF chat/embed/rerank picks (catalog fans "
-            "out to gpu-vulkan/gpu-rocm/cpu); empty for image picks (the "
-            "catalog routes them to ComfyUI via ``comfyui_subdir``). The "
-            "field has no effect on the pull layer — pulls always go "
-            "through hf_repo + hf_file."
-        ),
-    )
-    model_class: str = Field(
-        default="",
-        description=(
-            "Image-gen model class discriminator, e.g. 'sdxl-turbo' or "
-            "'sd-1.5'. Selects which ComfyUI workflow template to render. "
-            "Empty for non-image entries."
-        ),
-    )
-    comfyui_subdir: str = Field(
-        default="",
-        description=(
-            "Subdirectory under ComfyUI's models/ tree where this file should "
-            "land. Common values: 'checkpoints' (whole-model safetensors), "
-            "'loras', 'vae'. Empty means use the default per-id models tree."
+            "out to gpu-vulkan/gpu-rocm/cpu). The field has no effect on "
+            "the pull layer — pulls always go through hf_repo + hf_file."
         ),
     )
     bundle_only: bool = Field(
@@ -191,7 +172,7 @@ class CuratedModel(BaseModel):
         description=(
             "When True, this entry exists only to give the omni bundle "
             "manifests a canonical, loadable id to reference (e.g. a "
-            "stock-catalogue STT/TTS/image model). It is excluded from the "
+            "stock-catalogue STT/TTS model). It is excluded from the "
             "FirstRun wizard's 'good defaults' cards and the capability "
             "dropdowns so adding it does not change what the wizard "
             "surfaces — it still resolves for bundle apply + drift checks. "
@@ -690,112 +671,6 @@ CURATED_MODELS: list[CuratedModel] = [
     # Intentionally empty — see the module docstring TODO. Kokoro's
     # two-file bundle is pulled through ``extra_files`` (kokoro-v1, below);
     # moonshine's multi-file ONNX bundle stays operator-staged (ADR-0001).
-    # ── Image-gen models (recommended_slot="img", routed through ComfyUI) ────
-    #
-    # Curated picks intentionally span the licensing spectrum:
-    #   - SDXL Turbo : SAI Non-Commercial Research Community (research only).
-    #   - SD 1.5     : CreativeML Open RAIL-M (research + commercial w/ caveats).
-    # The picker UI must surface these license badges so users pick consciously.
-    CuratedModel(
-        id="sdxl-turbo",
-        display_name="SDXL Turbo",
-        description=(
-            "Stability AI's distilled 1-4 step SDXL. Real-time-ish image gen on "
-            "Strix Halo. Research-only license."
-        ),
-        family="sdxl",
-        size_gb=6.5,
-        vram_gb_min=8.0,
-        license="SAI-NC-Research-Community",
-        license_url=("https://huggingface.co/stabilityai/sdxl-turbo/blob/main/LICENSE.TXT"),
-        hf_repo="stabilityai/sdxl-turbo",
-        hf_file="sd_xl_turbo_1.0_fp16.safetensors",
-        context_length=0,
-        recommended_slot="img",
-        tags=["image", "sdxl", "fast", "research-only"],
-        notes=(
-            "Single-file FP16 checkpoint. Use the sdxl_turbo_simple workflow "
-            "with 4 steps + cfg≈1.0; that's what produces sharp output at this "
-            "step count."
-        ),
-        capability="image",
-        model_class="sdxl-turbo",
-        comfyui_subdir="checkpoints",
-    ),
-    CuratedModel(
-        id="sd-1.5-pruned-emaonly",
-        display_name="Stable Diffusion 1.5",
-        description=(
-            "RunwayML's classic SD 1.5 (pruned, EMA-only). Tiny by today's "
-            "standards, runs on a potato. CreativeML Open RAIL-M."
-        ),
-        family="sd",
-        size_gb=4.3,
-        vram_gb_min=4.0,
-        license="CreativeML-Open-RAIL-M",
-        license_url=("https://huggingface.co/runwayml/stable-diffusion-v1-5/blob/main/LICENSE"),
-        hf_repo="runwayml/stable-diffusion-v1-5",
-        hf_file="v1-5-pruned-emaonly.safetensors",
-        context_length=0,
-        recommended_slot="img",
-        tags=["image", "sd-1.5", "low-vram"],
-        notes=(
-            "Use the sd15_simple workflow (20 steps, Euler, cfg 7). Native "
-            "512x512 - quality drops above 768."
-        ),
-        capability="image",
-        model_class="sd-1.5",
-        comfyui_subdir="checkpoints",
-    ),
-    CuratedModel(
-        id="sdxl-lightning",
-        display_name="SDXL Lightning (8-step)",
-        description=(
-            "ByteDance's SDXL + Lightning LoRA distillation. 8-step fast txt2img "
-            "at full 1024x1024 SDXL quality on Strix Halo. CreativeML Open RAIL++"
-        ),
-        family="sdxl",
-        size_gb=6.8,
-        vram_gb_min=8.0,
-        license="CreativeML-OpenRAIL++",
-        license_url="https://huggingface.co/ByteDance/SDXL-Lightning/blob/main/LICENSE.md",
-        hf_repo="ByteDance/SDXL-Lightning",
-        hf_file="sdxl_lightning_8step_lora.safetensors",
-        context_length=0,
-        recommended_slot="img",
-        tags=["image", "sdxl", "fast", "lora"],
-        notes=(
-            "Requires the SDXL base checkpoint (stabilityai/stable-diffusion-xl-base-1.0) "
-            "already present in ComfyUI checkpoints/. Use the sdxl_lightning workflow "
-            "with 8 steps, cfg≈1.0, and the Lightning LoRA loaded at strength 1.0."
-        ),
-        capability="image",
-        model_class="image",
-        comfyui_subdir="checkpoints",
-    ),
-    CuratedModel(
-        id="esrgan-4x",
-        display_name="Real-ESRGAN 4x",
-        description=(
-            "xinntao's RealESRGAN x4plus upscaler. 4x upscale for post-processing "
-            "any ComfyUI output. Runs on CPU or GPU."
-        ),
-        family="esrgan",
-        size_gb=0.064,
-        vram_gb_min=0.5,
-        license="BSD-3-Clause",
-        license_url="https://github.com/xinntao/Real-ESRGAN/blob/master/LICENSE",
-        hf_repo="xinntao/Real-ESRGAN",
-        hf_file="RealESRGAN_x4plus.pth",
-        context_length=0,
-        recommended_slot="img",
-        tags=["image", "upscale", "esrgan"],
-        notes="Lands in the ComfyUI upscale_models/ directory.",
-        capability="image",
-        model_class="image",
-        comfyui_subdir="upscale_models",
-        bundle_only=True,
-    ),
     # ── Bundle-only canonical defs (#500) ────────────────────────────────
     # These give the omni bundle manifests a single, loadable id to
     # reference. Ids match the legacy stock ``server_models.json`` keys
@@ -884,44 +759,6 @@ CURATED_MODELS: list[CuratedModel] = [
         notes="Stock catalogue key (kokoro recipe: ONNX model + voices pack).",
         capability="tts",
         backend="kokoro",
-        bundle_only=True,
-    ),
-    CuratedModel(
-        id="SD-Turbo-GGUF",
-        display_name="SD-Turbo (GGUF)",
-        description="Fast 4-step image gen — Pro-tier image slot.",
-        family="sd",
-        size_gb=2.02,
-        vram_gb_min=3.0,
-        license="SAI-NC-Community",
-        license_url="https://huggingface.co/stabilityai/sd-turbo/blob/main/LICENSE.md",
-        hf_repo="Green-Sky/SD-Turbo-GGUF",
-        hf_file="sd_turbo-f16-q8_0.gguf",
-        recommended_slot="img",
-        tags=["image"],
-        notes="Stock catalogue key (sd-cpp recipe). 4 steps, cfg 1.0, 512x512.",
-        capability="image",
-        model_class="sd-turbo",
-        comfyui_subdir="checkpoints",
-        bundle_only=True,
-    ),
-    CuratedModel(
-        id="Flux-2-Klein-9B-GGUF",
-        display_name="FLUX.2 Klein 9B (GGUF)",
-        description="FLUX.2 Klein image+edit — Max/LMX-tier image slot.",
-        family="flux",
-        size_gb=19.0,
-        vram_gb_min=22.0,
-        license="FLUX.2-Klein",
-        license_url="https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF",
-        hf_repo="unsloth/FLUX.2-klein-9B-GGUF",
-        hf_file="flux-2-klein-9b-Q8_0.gguf",
-        recommended_slot="img",
-        tags=["image", "edit"],
-        notes="Stock catalogue key (sd-cpp recipe, multi-file: main + Qwen3-8B text encoder + vae).",
-        capability="image",
-        model_class="flux-klein",
-        comfyui_subdir="checkpoints",
         bundle_only=True,
     ),
 ]
