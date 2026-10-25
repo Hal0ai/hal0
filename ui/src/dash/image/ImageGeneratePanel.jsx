@@ -52,6 +52,7 @@ const note = (msg, kind) => window.__hal0Toast && window.__hal0Toast(msg, kind)
 // The last row of the model select: what the select does not list, and where it runs.
 const FOOTER_ID = '__editor-footer'
 const FOOTER = 'Video, edit and upscale run in the ComfyUI editor'
+const SEED_MISSING = 'Enter a seed or switch to Random.'
 
 const EMPTY = Object.freeze({})
 // Re-render once a second while a run is on screen, for its elapsed time.
@@ -66,8 +67,10 @@ function useTick(active) {
 
 function RunStrip({ steps, pct, elapsedS, onCancel }) {
   return (
-    <div className="gen-run" data-testid="gen-run" role="status" aria-live="polite">
-      <ol className="gen-steps">
+    <div className="gen-run" data-testid="gen-run">
+      {/* Only the steps are announced. The elapsed time below ticks every second and the bar
+          moves with every poll: neither belongs in a live region. */}
+      <ol className="gen-steps" aria-live="polite" data-testid="gen-steps">
         {steps.map((s, i) => (
           // A fixed list of six: the label changes with the step count, the place does not.
           <li key={i} className={`gen-step ${s.state}`} data-testid="gen-step" data-state={s.state}>
@@ -102,12 +105,15 @@ function RunStrip({ steps, pct, elapsedS, onCancel }) {
 /**
  * @param {object} props
  * @param {string} [props.initialModelId]   a model the Models tab's Generate action preselects
+ * @param {number} [props.pickSeq]
+ *   bumped on every such Generate click: the same model asked for again re-applies, even after the
+ *   viewer has picked another one here
  * @param {(modelId?: string) => void} [props.onOpenModels]
  *   switch to the Models tab: from the empty state, and from the 409 "not installed" link
  * @param {(run: { running: boolean, cancel: () => void } | null) => void} [props.onRunChange]
  *   a run of this browser started (with the function that cancels it) or ended (null)
  */
-export function ImageGeneratePanel({ initialModelId, onOpenModels, onRunChange }) {
+export function ImageGeneratePanel({ initialModelId, pickSeq, onOpenModels, onRunChange }) {
   const id = useId()
   const modelsQuery = useComfyuiModels()
   const filesQuery = useComfyuiFiles()
@@ -135,10 +141,12 @@ export function ImageGeneratePanel({ initialModelId, onOpenModels, onRunChange }
     [catalog?.models, filesQuery.data?.files, defaultId],
   )
   const [picked, setPicked] = useState(null)
-  // The Models tab's Generate action: a new request to open on a model.
+  // The Models tab's Generate action: a request to open on a model. It applies whenever the model
+  // or the sequence number changes, so asking again for the model already asked for (after the
+  // viewer picked another here) is a new request too.
   useEffect(() => {
     if (initialModelId) setPicked(initialModelId)
-  }, [initialModelId])
+  }, [initialModelId, pickSeq])
   const modelId = pickChoice(choices, picked, initialModelId, defaultId)
   const choice = choices.find((c) => c.id === modelId) ?? null
   const isCheckpoint = choice?.kind === 'checkpoint'
@@ -191,12 +199,16 @@ export function ImageGeneratePanel({ initialModelId, onOpenModels, onRunChange }
   const cost = costLine(arbiter?.unload_set, memory, arbiter)
   const grace = arbiter?.phase === 'grace'
 
-  // Why it cannot run, in the server's words. An empty prompt only disables the button.
+  // Why it cannot run: the server's words for the host and the fit, ours for a locked seed that
+  // has been cleared (it would otherwise fall through to a random one, against what the viewer
+  // asked for). An empty prompt only disables the button.
   const blocked = !engineAvailable
     ? catalog?.engine?.reason || 'Image generation is unavailable on this host.'
     : fit?.verdict === 'wont_fit'
       ? fit.reason || "Won't fit"
-      : null
+      : seedLocked && seedValue == null
+        ? SEED_MISSING
+        : null
   const canRun = !running && !blocked && form != null && prompt.trim() !== ''
 
   const submit = () => {
@@ -531,7 +543,9 @@ export function ImageGeneratePanel({ initialModelId, onOpenModels, onRunChange }
               )}
             </div>
           )}
-          {cost.length > 0 && (
+          {/* What the next image costs is a question for before it starts: mid-run the box is
+              already in image mode and the line would say so as if it were news. */}
+          {!running && cost.length > 0 && (
             <div className="gen-cost" data-testid="gen-cost">
               {cost.join(' ')}
             </div>

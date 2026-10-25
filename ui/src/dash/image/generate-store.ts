@@ -165,6 +165,10 @@ function toError(e: unknown): GenerateError {
   }
 }
 
+// A 200 that carried no usable image (an empty `data`, or only urls that are not ours to show):
+// the run did not fail, but there is nothing to look at, and saying nothing would read as a hang.
+const NO_IMAGE: GenerateError = { message: 'No image came back.', code: null, status: null, details: {} }
+
 function resultsFrom(res: ImageGenerateResponse | null, vars: Omit<ImageGenerateVars, 'signal'>): GenerateResult[] {
   const meta = res?._hal0?.meta
   const seed = typeof meta?.seed === 'number' ? meta.seed : null
@@ -198,7 +202,8 @@ export async function startRun(
     // No timeout of ours: a render can take minutes (Qwen-Image at 20 steps, about six). Only
     // the signal ends the request early.
     const res = await generateImage({ ...vars, signal: controller.signal })
-    patch = { results: [...resultsFrom(res, vars), ...state.results].slice(0, MAX_RESULTS) }
+    const made = resultsFrom(res, vars)
+    patch = made.length > 0 ? { results: [...made, ...state.results].slice(0, MAX_RESULTS) } : { error: NO_IMAGE }
   } catch (e) {
     if (!isCancellation(e, controller)) patch = { error: toError(e) }
   }

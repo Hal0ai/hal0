@@ -288,6 +288,7 @@ function openRun() {
 const mounted: { root: Root; host: HTMLElement }[] = []
 const props = {
   initialModelId: undefined as string | undefined,
+  pickSeq: undefined as number | undefined,
   onOpenModels: vi.fn(),
   onRunChange: vi.fn(),
 }
@@ -295,6 +296,7 @@ const tree = () => (
   <div className="comfy-page">
     <ImageGeneratePanel
       initialModelId={props.initialModelId}
+      pickSeq={props.pickSeq}
       onOpenModels={props.onOpenModels}
       onRunChange={props.onRunChange}
     />
@@ -402,6 +404,7 @@ beforeEach(() => {
   box.cancelFail = undefined
   calls.length = 0
   props.initialModelId = undefined
+  props.pickSeq = undefined
   props.onOpenModels.mockReset()
   props.onRunChange.mockReset()
   resetGenerateStore()
@@ -477,6 +480,35 @@ describe('ImageGeneratePanel: the form', () => {
     await click(byId('gen-more'))
     expect(field('gen-steps').value).toBe('20')
     expect(field('gen-cfg').value).toBe('2.5')
+    expect(byId('gen-size-1328x1328')?.getAttribute('aria-pressed')).toBe('true')
+  })
+
+  it('opens on a model asked for after it has mounted', async () => {
+    const view = mount()
+    expect(text(byId('gen-model'))).toContain('SDXL Lightning (8-step)')
+    props.initialModelId = 'qwen-image'
+    view.rerender()
+    expect(text(byId('gen-model'))).toContain('Qwen-Image (20-step)')
+    expect(byId('gen-size-1328x1328')?.getAttribute('aria-pressed')).toBe('true')
+  })
+
+  it('opens again on the same model when it is asked for again, after another was picked', async () => {
+    props.initialModelId = 'qwen-image'
+    props.pickSeq = 1
+    const view = mount()
+    expect(text(byId('gen-model'))).toContain('Qwen-Image (20-step)')
+
+    // The viewer picks another model here...
+    await pickModel('sdxl-lightning')
+    expect(text(byId('gen-model'))).toContain('SDXL Lightning (8-step)')
+    // ...and a render of the same props changes nothing: it is not a new request.
+    view.rerender()
+    expect(text(byId('gen-model'))).toContain('SDXL Lightning (8-step)')
+
+    // Generate on the Models tab again: same model, next sequence number.
+    props.pickSeq = 2
+    view.rerender()
+    expect(text(byId('gen-model'))).toContain('Qwen-Image (20-step)')
     expect(byId('gen-size-1328x1328')?.getAttribute('aria-pressed')).toBe('true')
   })
 
@@ -578,6 +610,38 @@ describe('ImageGeneratePanel: the form', () => {
     expect(field('gen-seed').value).toBe('')
     await click(submit())
     expect(generated()[4].seed).toBe(2 ** 29)
+  })
+
+  it('will not run with a locked seed that has been cleared, and says what to do', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    mount()
+    type(prompt(), 'a cat')
+    await click(byId('gen-more'))
+    await click(byId('gen-seed-locked'))
+    expect(submit().disabled).toBe(false)
+
+    type(field('gen-seed'), '')
+    expect(field('gen-seed').disabled).toBe(false)
+    expect(submit().disabled).toBe(true)
+    expect(text(byId('gen-blocked'))).toBe('Enter a seed or switch to Random.')
+    // Ctrl+Enter does not get round it.
+    await act(async () => {
+      prompt().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }))
+    })
+    expect(generated()).toHaveLength(0)
+
+    // A seed typed in, or switching back to Random, lets it run.
+    type(field('gen-seed'), '7')
+    expect(submit().disabled).toBe(false)
+    expect(byId('gen-blocked')).toBeNull()
+    type(field('gen-seed'), '')
+    expect(submit().disabled).toBe(true)
+    await click(byId('gen-seed-random'))
+    expect(submit().disabled).toBe(false)
+    expect(byId('gen-blocked')).toBeNull()
+    await click(submit())
+    expect(generated()).toHaveLength(1)
+    expect(generated()[0].seed).toBe(2 ** 31)
   })
 
   it('locking starts from a rolled seed, and a seed too big for a browser is held to what it holds', async () => {
@@ -887,6 +951,14 @@ describe('ImageGeneratePanel: a run', () => {
     // The strip replaces the button.
     expect(byId('gen-submit')).toBeNull()
     expect(byId('gen-run')).toBeTruthy()
+    // The cost of the next image is not news mid-run: the line goes until the run is over.
+    expect(byId('gen-cost')).toBeNull()
+    // Only the step labels are a live region; the ticking timer and the bar are not in one.
+    expect(byId('gen-steps')?.getAttribute('aria-live')).toBe('polite')
+    expect(byId('gen-elapsed')?.closest('[aria-live]')).toBeNull()
+    expect(byId('gen-progress')?.closest('[aria-live]')).toBeNull()
+    expect(byId('gen-run')?.hasAttribute('aria-live')).toBe(false)
+    expect(byId('gen-run')?.hasAttribute('role')).toBe(false)
     const steps = allById('gen-step')
     expect(steps.map((s) => s.textContent)).toEqual([
       'Chat reply finishing',
@@ -928,9 +1000,14 @@ describe('ImageGeneratePanel: a run', () => {
     ])
     expect(byId('gen-progress')?.getAttribute('aria-valuenow')).toBe('25')
 
+    // Mid-run the box is in image mode: still no cost line.
+    expect(byId('gen-cost')).toBeNull()
+
     await settle(() => run.resolve!(result()))
     expect(byId('gen-run')).toBeNull()
     expect(calls.filter(([n]) => n === 'status-hook').at(-1)![1]).toMatchObject({ busy: false })
+    // Done: the next image's cost is back.
+    expect(byId('gen-cost')).toBeTruthy()
   })
 
   it('reports the run to its parent, with a cancel that follows the same rule', async () => {
@@ -980,9 +1057,10 @@ describe('ImageGeneratePanel: a run', () => {
       await click(button('Cancel'))
       expect(run.vars!.signal!.aborted, `abort in ${phase}`).toBe(true)
       expect(calls.some(([n]) => n === 'render-cancel'), `no render/cancel in ${phase}`).toBe(false)
-      // A cancel is not an error.
+      // A cancel is not an error, and the form is as it was left.
       expect(byId('gen-error')).toBeNull()
       expect(byId('gen-run')).toBeNull()
+      expect(prompt().value, `prompt kept after cancel in ${phase}`).toBe('a cat')
       expect(submit().disabled).toBe(false)
       view.unmount()
     }
@@ -1013,6 +1091,7 @@ describe('ImageGeneratePanel: a run', () => {
       ).toHaveLength(1)
       expect(byId('gen-error')).toBeNull()
       expect(byId('gen-run')).toBeNull()
+      expect(prompt().value, `prompt kept after cancel in ${phase}/${prog ? 'progress' : 'none'}`).toBe('a cat')
       view.unmount()
     }
   })
@@ -1160,6 +1239,48 @@ describe('ImageGeneratePanel: errors', () => {
     await pickModel('qwen-image')
     expect(byId('gen-error')).toBeNull()
     expect(prompt().value).toBe('a cat in a hat')
+  })
+
+  it('says so when a 200 comes back with no image in it', async () => {
+    const empty = { created: 1, data: [], _hal0: result()._hal0 }
+    const unsafe = {
+      created: 1,
+      // Not ours to show: another origin, a script, and a non-string.
+      data: [{ url: '//evil.example/x.png' }, { url: 'javascript:alert(1)' }, { b64_json: 'AAAA' }, {}],
+      _hal0: result()._hal0,
+    }
+    for (const body of [empty, unsafe, null, { created: 1 }]) {
+      resetGenerateStore()
+      box.generate = async () => body
+      const view = mount()
+      await generate()
+      expect(text(byId('gen-error'))).toBe('No image came back.')
+      expect(allById('gen-tile')).toHaveLength(0)
+      expect(byId('gen-run')).toBeNull()
+      expect(submit().disabled).toBe(false)
+      expect(prompt().value).toBe('a cat in a hat')
+      // Not a 409: no link to the Models tab.
+      expect(byId('gen-error-models')).toBeNull()
+      view.unmount()
+    }
+
+    // The next run starts clean and can succeed.
+    box.generate = async () => result()
+    const view = mount()
+    await generate()
+    expect(byId('gen-error')).toBeNull()
+    expect(allById('gen-tile')).toHaveLength(1)
+    view.unmount()
+  })
+
+  it('shows the images that did come back, and no error, when only some are dropped', async () => {
+    const body = result({ n: 2 })
+    body.data.push({ url: '//evil.example/x.png' })
+    box.generate = async () => body
+    mount()
+    await generate()
+    expect(byId('gen-error')).toBeNull()
+    expect(allById('gen-tile')).toHaveLength(2)
   })
 
   it('links a 409 to the Models tab without a model when the details name none', async () => {
