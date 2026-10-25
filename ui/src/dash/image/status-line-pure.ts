@@ -99,6 +99,10 @@ const HEAD_NO_CREDENTIAL =
 export const COST_RELOAD = 'They reload about 10 s after the last image.'
 const COST_NO_SLOTS = 'No GPU slots to pause on this box.'
 const COST_IMAGE_ON = 'Image mode is still on, so this one starts at once.'
+// The hand-off is the ~3 s the arbiter holds image mode open after every switch, so a prompt can
+// reach ComfyUI's queue (arbiter.py `ensure_img`). Whose prompt it is, the arbiter does not say:
+// hal0's own renders get it too, so the line must not blame the editor. Also the banner's copy.
+export const DETAIL_HANDOFF = "Holding image mode while a prompt reaches ComfyUI's queue."
 // The chat-wait cap: `_LLM_DEMAND_WAIT_S` in src/hal0/slots/arbiter.py.
 const WAIT_CAP = '2:00'
 
@@ -317,7 +321,11 @@ function workLine(
     arbiter.mode === 'img' &&
     queueTotal(status) > 0 &&
     (phase === 'grace' || phase === 'handoff' || phase == null)
-  if (phase === 'rendering' || queueRender) {
+  // The hand-off opens after every `ensure_img` and `status()` ranks it above `rendering`, so a
+  // hand-off with a /v1 job open is hal0's own render (a Generate, Open WebUI, Hold's first
+  // image), not an editor prompt: it reads as the render it is.
+  const ownRender = phase === 'handoff' && arbiter.image_jobs > 0
+  if (phase === 'rendering' || queueRender || ownRender) {
     return {
       kind: 'rendering',
       tone: 'img',
@@ -335,7 +343,7 @@ function workLine(
       kind: 'handoff',
       tone: 'img',
       head: HEAD_HANDOFF,
-      detail: joinDetail('A ComfyUI editor prompt is taking the GPU.', waiting),
+      detail: joinDetail(DETAIL_HANDOFF, waiting),
       actions: pinned ? ['unpin'] : ['keep'],
     }
   }

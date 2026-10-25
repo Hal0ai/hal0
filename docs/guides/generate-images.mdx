@@ -332,7 +332,7 @@ in one line and links to the Engine tab.
 |---|---|---|
 | `GPU · chat mode` | The LLM slots hold the GPU. | Hold image mode |
 | `Switching to image mode` | Chat replies finish, the GPU slots unload, the engine starts (three step chips). | Cancel, only for a Generate run started in this browser |
-| `Image mode · hand-off` | A prompt from the ComfyUI editor is taking the GPU (about 3 seconds). | Keep image mode |
+| `Image mode · hand-off` | Holding image mode while a prompt reaches ComfyUI's queue (about 3 seconds after a switch). A render hal0 started, from the dashboard or Open WebUI, reads `Rendering` instead. | Keep image mode |
 | `Rendering · <model> · step n/N` | A render runs, with a progress bar and the elapsed time. `Rendering · <model>` before the first step, `Rendering` with no progress, `Rendering · editor prompt · k queued` for a render only ComfyUI's queue shows. | Cancel render, Keep image mode |
 | `Image mode ends in N s` | The wait after the last image. | Keep image mode |
 | `Reloading GPU slots · k of n ready` | The paused slots are loading again, one chip each. | none |

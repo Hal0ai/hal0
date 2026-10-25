@@ -126,6 +126,10 @@ function referenceBox(over: Partial<ImageGenMock> = {}): ImageGenMock {
 // (`st["mode"] = "img"` is persisted before the drain starts; arbiter.py `ensure_img`.)
 const IMAGE_MODE = { mode: 'img', saved_llm_slots: ['brain'], unload_set: ['brain'] } as const
 
+// A dashboard Generate holds a /v1 job open from before its switch starts until the render is
+// returned (arbiter.py `image_job`: the count goes up before the first await of the switch).
+const OWN_JOB = { image_jobs: 1 } as const
+
 const nowS = () => Date.now() / 1000
 
 /** Put the box in one state: the arbiter's block as `/arbiter` and `/status` both carry it. */
@@ -275,7 +279,7 @@ test.describe('Image Gen setup: first run, install, generate', () => {
     })
 
     await test.step('draining: one chat reply finishes first', async () => {
-      setBox(mock, { ...IMAGE_MODE, switching: true, phase: 'draining', drain_in_flight: 1 }, { engine: 'stopped' })
+      setBox(mock, { ...IMAGE_MODE, switching: true, phase: 'draining', drain_in_flight: 1, ...OWN_JOB }, { engine: 'stopped' })
       await expect(head(page)).toHaveText('Switching to image mode', POLL)
       await expect(detail(page)).toHaveText('Waiting for 1 chat reply to finish.')
       await expect(chipNow(page)).toHaveText('Chat replies')
@@ -283,27 +287,31 @@ test.describe('Image Gen setup: first run, install, generate', () => {
     })
 
     await test.step('unloading: the chat slot is released', async () => {
-      setBox(mock, { ...IMAGE_MODE, switching: true, phase: 'unloading' }, { engine: 'stopped' })
+      setBox(mock, { ...IMAGE_MODE, switching: true, phase: 'unloading', ...OWN_JOB }, { engine: 'stopped' })
       await expect(detail(page)).toHaveText('Unloading brain to free the GPU.', POLL)
       await expect(chipNow(page)).toHaveText('Unload slots')
       await expect(stripNow(page)).toHaveText('Unload 1 GPU slot')
     })
 
     await test.step('starting_engine: the image engine comes up', async () => {
-      setBox(mock, { ...IMAGE_MODE, switching: true, phase: 'starting_engine' }, { engine: 'starting' })
+      setBox(mock, { ...IMAGE_MODE, switching: true, phase: 'starting_engine', ...OWN_JOB }, { engine: 'starting' })
       await expect(detail(page)).toHaveText('Starting the image engine.', POLL)
       await expect(chipNow(page)).toHaveText('Start engine')
       await expect(stripNow(page)).toHaveText('Engine ready')
     })
 
-    await test.step('handoff: the prompt is going to ComfyUI', async () => {
-      setBox(mock, { ...IMAGE_MODE, phase: 'handoff', handoff_until: nowS() + 30 }, { engine: 'running' })
-      await expect(head(page)).toHaveText('Image mode · hand-off', POLL)
+    await test.step("handoff: hal0's own prompt is going to ComfyUI, and the line says it is rendering", async () => {
+      // The arbiter opens its hand-off after every switch and ranks it above `rendering`; with
+      // the /v1 job open the line reads it as the render it is, never as an editor prompt.
+      setBox(mock, { ...IMAGE_MODE, phase: 'handoff', handoff_until: nowS() + 30, ...OWN_JOB }, { engine: 'running' })
+      await expect(head(page)).toHaveText('Rendering', POLL)
+      await expect(detail(page)).not.toContainText('editor')
+      await expect(page.getByTestId('image-status-action-cancel_render')).toBeVisible()
       await expect(stripNow(page)).toHaveText('Load model')
     })
 
     await test.step('rendering: the model loads, then steps 1 to 8', async () => {
-      const busy = { ...IMAGE_MODE, phase: 'rendering', image_jobs: 1 }
+      const busy = { ...IMAGE_MODE, phase: 'rendering', ...OWN_JOB }
       setBox(mock, busy, rendering(null))
       await expect(head(page)).toHaveText(`Rendering · ${MODEL}`, POLL)
       await expect(stripNow(page)).toHaveText('Load model')

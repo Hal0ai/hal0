@@ -9,6 +9,7 @@
 // arbiter and keeps pushing the countdown forward.
 
 import {
+  DETAIL_HANDOFF,
   HEAD_HANDOFF,
   HEAD_PINNED,
   HEAD_RELOADING,
@@ -23,6 +24,7 @@ export type ArbiterBlock =
       mode?: string | null
       pinned?: boolean | null
       switching?: boolean | null
+      image_jobs?: number | null
       phase?: string | null
       unload_set?: string[] | null
       llm_waiters?: { count: number; oldest_s: number | null } | null
@@ -58,11 +60,12 @@ export function imageModeBanner(arbiter: ArbiterBlock): ImageModeBannerCopy | nu
     return line(HEAD_RELOADING, 'Chat comes back as each slot loads.')
   }
   // Work in progress is what the headline says, pinned or not (a pin only changes how long the
-  // slots stay stopped).
-  if (phase === 'handoff') {
-    return line(HEAD_HANDOFF, 'A ComfyUI editor prompt is taking the GPU.')
+  // slots stay stopped). A hand-off with a /v1 job open is hal0's own render, as in the status
+  // line (the arbiter opens the hand-off after every switch).
+  if (phase === 'handoff' && (arbiter.image_jobs ?? 0) <= 0) {
+    return line(HEAD_HANDOFF, DETAIL_HANDOFF)
   }
-  if (phase === 'rendering') {
+  if (phase === 'rendering' || phase === 'handoff') {
     const until = arbiter.pinned ? 'until you unpin image mode' : 'until the last image is done'
     return line(HEAD_RENDERING, paused ? `LLM slots stay stopped ${until}.` : 'Image generation holds the GPU.')
   }

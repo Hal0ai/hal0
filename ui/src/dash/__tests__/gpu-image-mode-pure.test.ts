@@ -43,6 +43,16 @@ describe('imageModeBanner', () => {
     expect(imageModeBanner(img({ phase: 'reloading' }))?.heading).toBe('Reloading GPU slots')
   })
 
+  it('words a plain hand-off without blaming the editor, and reads one with a /v1 job open as rendering', () => {
+    const plain = imageModeBanner(img({ phase: 'handoff', image_jobs: 0 }))
+    expect(plain?.heading).toBe('Image mode · hand-off')
+    expect(plain?.body).toBe("Holding image mode while a prompt reaches ComfyUI's queue.")
+    // The arbiter opens the hand-off after every switch, hal0's own renders included.
+    const own = imageModeBanner(img({ phase: 'handoff', image_jobs: 1 }))
+    expect(own?.heading).toBe('Rendering')
+    expect(own?.body).not.toMatch(/editor/i)
+  })
+
   it('shows the work on a pinned box too, and says the pin keeps the slots stopped', () => {
     const copy = imageModeBanner(img({ pinned: true, phase: 'rendering' }))
     expect(copy?.heading).toBe('Rendering')

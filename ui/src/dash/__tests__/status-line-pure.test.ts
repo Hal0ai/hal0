@@ -126,9 +126,33 @@ describe('statusLine', () => {
     expect(statusLine(switching, status(), memory(), { ...OPTS, ownRun: true })?.actions).toEqual(['cancel'])
   })
 
-  it('shows the hand-off while the editor hand-off lasts, and offers keep', () => {
+  it('shows the hand-off while a prompt reaches ComfyUI, with detail that blames no one', () => {
     const line = statusLine(envelope({ mode: 'img', phase: 'handoff', handoff_until: 1004 }), status(), memory(), OPTS)
-    expect(line).toMatchObject({ tone: 'img', head: 'Image mode · hand-off', actions: ['keep'] })
+    expect(line).toMatchObject({
+      kind: 'handoff',
+      tone: 'img',
+      head: 'Image mode · hand-off',
+      detail: "Holding image mode while a prompt reaches ComfyUI's queue.",
+      actions: ['keep'],
+    })
+    expect(line?.detail).not.toMatch(/editor/i)
+  })
+
+  // The arbiter opens ~3 s of hand-off after every ensure_img (arbiter.py), and status() ranks
+  // `handoff` above `rendering`: with a /v1 job open it is hal0's own render, not an editor prompt.
+  it('reads a hand-off with a /v1 job open as rendering, by the rendering ladder', () => {
+    const handoff = (over: Partial<ArbiterState> = {}) =>
+      envelope({ mode: 'img', phase: 'handoff', handoff_until: 1004, image_jobs: 1, ...over })
+    let line = statusLine(handoff(), status(), memory(), OPTS)
+    expect(line).toMatchObject({ kind: 'rendering', tone: 'img', head: 'Rendering', actions: ['cancel_render', 'keep'] })
+    expect(line?.detail).not.toMatch(/editor/i)
+    // Its own progress entry reads the way a render's does.
+    line = statusLine(handoff(), status({ progress: progress() }), memory(), OPTS)
+    expect(line?.head).toBe('Rendering · flux-dev · step 7/20')
+    // A pinned box can unpin, as for any work.
+    expect(statusLine(handoff({ pinned: true }), status(), memory(), OPTS)?.actions).toEqual(['cancel_render', 'unpin'])
+    // No job open: still a plain hand-off.
+    expect(statusLine(handoff({ image_jobs: 0 }), status(), memory(), OPTS)?.kind).toBe('handoff')
   })
 
   it('statusLine rendering uses progress step for hal0 renders and queue count for editor renders', () => {
