@@ -50,8 +50,10 @@ const FILTERS = [
 // The models folder cannot be read by the hal0 user: the server's message, and the two commands
 // that fix it, copyable. The panel is replaced, not annotated: there is no catalog to show.
 function Unreadable({ error, onRetry }) {
-  const path = error.details?.path || 'the ComfyUI models folder'
-  const commands = fixCommands(path).join('\n')
+  // The commands name the path the server says it could not read. Without one there is nothing
+  // honest to put in them, so the message and Retry stand alone.
+  const path = typeof error.details?.path === 'string' ? error.details.path : ''
+  const commands = path ? fixCommands(path).join('\n') : ''
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(commands)
@@ -65,12 +67,18 @@ function Unreadable({ error, onRetry }) {
       <div className="imp-fix" data-testid="imp-unreadable" role="alert">
         <h2>The image model folder is not readable</h2>
         <p>{error.message}</p>
-        <p>Run these on the host, then retry:</p>
-        <pre data-testid="imp-fix-commands">{commands}</pre>
+        {commands && (
+          <>
+            <p>Run these on the host, then retry:</p>
+            <pre data-testid="imp-fix-commands">{commands}</pre>
+          </>
+        )}
         <div className="imp-fix-actions">
-          <button className="btn ghost sm" onClick={copy}>
-            Copy commands
-          </button>
+          {commands && (
+            <button className="btn ghost sm" onClick={copy}>
+              Copy commands
+            </button>
+          )}
           <button className="btn sm" onClick={onRetry}>
             Retry
           </button>
@@ -98,7 +106,7 @@ function LoadError({ error, onRetry }) {
 
 // What removing a model deletes and what stays, from the file listing. The server has the last
 // word (it keeps a file another complete model loads); this shows the same rule beforehand.
-function RemoveBody({ plan, filesKnown, error }) {
+function RemoveBody({ plan, filesKnown, filesLoading, error }) {
   return (
     <div className="imp-rm">
       <h4>Deleted</h4>
@@ -126,7 +134,8 @@ function RemoveBody({ plan, filesKnown, error }) {
           </ul>
         </>
       )}
-      {!filesKnown && (
+      {filesLoading && <p className="none">Reading the file list…</p>}
+      {!filesKnown && !filesLoading && (
         <p className="none">
           The file list could not be read, so this cannot show which files stay. The server keeps any file
           another installed model uses.
@@ -149,7 +158,9 @@ function RemoveBody({ plan, filesKnown, error }) {
 export function ImageModelsPanel({ onGenerate, onOpenEditor }) {
   const modelsQuery = useComfyuiModels()
   const jobsQuery = useImageJobs()
-  const filesQuery = useComfyuiFiles()
+  // The scan walks the tree and sniffs headers: it runs only while a removal is being confirmed.
+  const [removing, setRemoving] = useState(null)
+  const filesQuery = useComfyuiFiles({ enabled: !!removing })
   const install = useImageModelInstall()
   const remove = useImageModelRemove()
   const cancel = useImageJobCancel()
@@ -159,7 +170,6 @@ export function ImageModelsPanel({ onGenerate, onOpenEditor }) {
   const [filter, setFilter] = useState('all')
   const [expanded, setExpanded] = useState({})
   const [installErrors, setInstallErrors] = useState({})
-  const [removing, setRemoving] = useState(null)
   const [removeError, setRemoveError] = useState(null)
   const listRef = useRef(null)
 
@@ -355,9 +365,18 @@ export function ImageModelsPanel({ onGenerate, onOpenEditor }) {
         destructive
         onCancel={() => setRemoving(null)}
         onConfirm={confirmRemove}
-        confirmDisabled={remove.isPending}
+        confirmDisabled={remove.isPending || filesQuery.isLoading}
         title={`Remove ${removing?.label ?? ''}?`}
-        message={plan ? <RemoveBody plan={plan} filesKnown={!!filesQuery.data} error={removeError} /> : null}
+        message={
+          plan ? (
+            <RemoveBody
+              plan={plan}
+              filesKnown={!!filesQuery.data}
+              filesLoading={filesQuery.isLoading}
+              error={removeError}
+            />
+          ) : null
+        }
         confirmLabel="Remove model"
       />
     </div>

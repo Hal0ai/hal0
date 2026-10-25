@@ -8,7 +8,7 @@ import './image.css'
 import { isImageJobActive } from '@/api/hooks/imageJobState'
 import { FitMeter } from './FitMeter'
 import { jobProgress, stateAction } from './image-models-pure'
-import { fmtEta, gibOf, modelBadges, perUnit } from './models-panel-pure'
+import { fmtEta, gbLabel, gibOf, modelBadges, perUnit } from './models-panel-pure'
 
 const BADGE_TONE = {
   Recommended: 'amber',
@@ -29,6 +29,14 @@ export function Badges({ labels }) {
       ))}
     </div>
   )
+}
+
+// What the suggestion button says. An installed model is used (it opens on Generate); one that
+// is not installed is installed, and the button says so and how much it still has to fetch
+// (`missing_gb`, or the model's whole size when the row carries no missing figure).
+function suggestionLabel(alt) {
+  if (alt.state === 'complete') return `Use ${alt.label}`
+  return `Install ${alt.label} · ${gbLabel(alt.missing_gb ?? alt.approx_gb)} GB to download`
 }
 
 // "0.9 / 3.7 GB" (GiB, the unit of `approx_gb`), then the speed and time left once two polls
@@ -124,11 +132,9 @@ export function ImageModelCard({
       {alternative && (
         <div className="imp-suggest" data-testid={`imp-suggest-${model.id}`}>
           <button className="btn sm" onClick={() => actions.onUseAlternative(alternative)}>
-            Use {alternative.label}
+            {suggestionLabel(alternative)}
           </button>
-          <span>
-            {alternative.state === 'complete' ? 'installed' : `downloads ~${alternative.approx_gb} GB first`}
-          </span>
+          {alternative.state === 'complete' && <span>installed</span>}
         </div>
       )}
 

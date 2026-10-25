@@ -161,3 +161,6 @@ export function fmtEta(seconds: number): string {
 
 // GiB to one decimal, the unit of every GB figure the API reports (ADR-0039); `bytes` are raw.
 export const gibOf = (bytes: number): string => String(Number((bytes / 1024 ** 3).toFixed(1)))
+
+// A GB figure the server already rounded to one decimal, without a trailing ".0": 6.9, 12.
+export const gbLabel = (gb: number): string => String(Number(gb.toFixed(1)))

@@ -350,11 +350,15 @@ export interface ComfyuiFilesResponse {
 
 // The tree changes when an install lands or a file is deleted — both invalidate
 // this key — so a short staleTime only covers files an operator adds by hand.
-export function useComfyuiFiles() {
+// The scan walks the whole models tree and sniffs checkpoint headers, so a caller that needs it
+// only now and then passes `enabled: false` until it does (the Models tab, for its remove
+// confirmation).
+export function useComfyuiFiles(opts: { enabled?: boolean } = {}) {
   return useQuery({
     queryKey: ['comfyui', 'files'],
     queryFn: () => apiGet<ComfyuiFilesResponse>(ENDPOINTS.comfyuiFiles),
     staleTime: 10_000,
+    enabled: opts.enabled !== false,
   })
 }
 

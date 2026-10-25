@@ -6,6 +6,7 @@ import {
   fixCommands,
   fmtEta,
   firstRunPicks,
+  gbLabel,
   isFullPrecision,
   isNonCommercial,
   modelBadges,
@@ -256,5 +257,14 @@ describe('fmtEta', () => {
     expect(fmtEta(61)).toBe('1 min 1 s')
     expect(fmtEta(600)).toBe('10 min')
     expect(fmtEta(3 * 3600 + 120)).toBe('3 h 2 min')
+  })
+})
+
+describe('gbLabel', () => {
+  it('drops a trailing .0 and keeps one decimal', () => {
+    expect(gbLabel(6.9)).toBe('6.9')
+    expect(gbLabel(12)).toBe('12')
+    expect(gbLabel(2.5)).toBe('2.5')
+    expect(gbLabel(47.94)).toBe('47.9')
   })
 })

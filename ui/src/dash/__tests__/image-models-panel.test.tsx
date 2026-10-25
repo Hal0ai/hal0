@@ -25,6 +25,8 @@ const { box, calls } = vi.hoisted(() => ({
     jobs: undefined as Json[] | undefined,
     jobsAt: 1_000_000 as number,
     files: undefined as Json | undefined,
+    // 'loading' = the scan is running, 'error' = it failed; anything else answers box.files.
+    filesState: 'ok' as 'ok' | 'loading' | 'error',
     memory: undefined as Json | undefined,
     selection: {} as Json,
     installFail: undefined as Error | undefined,
@@ -45,7 +47,15 @@ vi.mock('@/api/hooks/useComfyui', async (importOriginal) => ({
     },
   }),
   useImageJobs: () => ({ data: box.jobs, dataUpdatedAt: box.jobsAt }),
-  useComfyuiFiles: () => ({ data: box.files }),
+  useComfyuiFiles: (opts?: { enabled?: boolean }) => {
+    calls.push(['files-hook', opts?.enabled])
+    const on = opts?.enabled !== false
+    return {
+      data: on && box.filesState === 'ok' ? box.files : undefined,
+      isLoading: on && box.filesState === 'loading',
+      isError: on && box.filesState === 'error',
+    }
+  },
   useImageModelInstall: () => ({
     isPending: false,
     mutateAsync: async (id: string) => {
@@ -270,6 +280,7 @@ beforeEach(() => {
   box.jobs = []
   box.jobsAt = 1_000_000
   box.files = { root: '/srv/models/comfyui/models', files: [] }
+  box.filesState = 'ok'
   box.memory = ramBudget('container')
   box.selection = {}
   box.installFail = undefined
@@ -563,6 +574,42 @@ describe('ImageModelsPanel', () => {
     expect(byId('imp-remove-delete')).toBeNull() // closed
   })
 
+  describe('the file listing', () => {
+    const lastFilesEnabled = () => [...calls].reverse().find(([name]) => name === 'files-hook')?.[1]
+
+    it('is not read until a removal is being confirmed', async () => {
+      box.models = catalog([lightning()])
+      mount()
+      expect(lastFilesEnabled()).toBe(false)
+
+      await click(button('Remove', card('sdxl-lightning')))
+      expect(lastFilesEnabled()).toBe(true)
+
+      await click(button('Cancel'))
+      expect(lastFilesEnabled()).toBe(false)
+    })
+
+    it('holds the confirm while the files are being read', async () => {
+      box.models = catalog([lightning()])
+      box.filesState = 'loading'
+      mount()
+
+      await click(button('Remove', card('sdxl-lightning')))
+      expect(text()).toContain('Reading the file list')
+      expect((button('Remove model') as HTMLButtonElement).disabled).toBe(true)
+    })
+
+    it('says the list is unavailable when the read fails, and still lets the removal go ahead', async () => {
+      box.models = catalog([lightning()])
+      box.filesState = 'error'
+      mount()
+
+      await click(button('Remove', card('sdxl-lightning')))
+      expect(text()).toContain('The file list could not be read')
+      expect((button('Remove model') as HTMLButtonElement).disabled).toBe(false)
+    })
+  })
+
   it('keeps the remove confirm open and shows the server message when the removal fails', async () => {
     box.models = catalog([lightning()])
     box.removeFail = new ApiError('could not delete vae/x.safetensors', 'comfyui.remove_failed', 409)
@@ -713,6 +760,20 @@ describe('ImageModelsPanel', () => {
     expect(calls).toContainEqual(['models-refetch', null])
   })
 
+  it('shows the message and Retry, but no commands, when the server names no path', async () => {
+    box.models = undefined
+    box.modelsError = new ApiError('the models folder is not readable', 'comfyui.models_dir_not_writable', 409)
+    mount()
+
+    expect(text(byId('imp-unreadable')!)).toContain('the models folder is not readable')
+    // No command is built from a made-up path, and nothing offers to copy one.
+    expect(byId('imp-fix-commands')).toBeNull()
+    expect(text()).not.toContain('sudo')
+    expect(button('Copy commands')).toBeUndefined()
+    await click(button('Retry'))
+    expect(calls).toContainEqual(['models-refetch', null])
+  })
+
   it('shows another load failure as a message with Retry', async () => {
     box.models = undefined
     box.modelsError = new ApiError('the API is down', 'system.unknown', 502)
@@ -755,13 +816,31 @@ describe('ImageModelsPanel', () => {
     expect(props.onGenerate).toHaveBeenCalledWith('sdxl-lightning')
   })
 
-  it('installs the suggested model first when it is not installed yet', async () => {
+  it('names the download on the suggestion when the model is not installed, and installs it', async () => {
     box.models = catalog([lightning({ state: 'none', missing_gb: 6.9 }), turbo(), qwen()])
     mount()
 
-    await click(button('Use SDXL Lightning (8-step)', card('qwen-image')))
+    // Not "Use": the button says what it will do and how much it fetches.
+    const suggest = byId('imp-suggest-qwen-image')!
+    expect(button(/^Use /, suggest)).toBeUndefined()
+    const install = button('Install SDXL Lightning (8-step) · 6.9 GB to download', suggest)
+    expect(install).toBeTruthy()
+
+    await click(install)
     expect(calls).toContainEqual(['install', 'sdxl-lightning'])
     expect(props.onGenerate).not.toHaveBeenCalled()
+  })
+
+  it('reads the GB still to fetch for a partly installed suggestion, and the full size without it', () => {
+    box.models = catalog([lightning({ state: 'partial', missing_gb: 2.5 }), turbo(), qwen()])
+    mount()
+    expect(button('Install SDXL Lightning (8-step) · 2.5 GB to download', byId('imp-suggest-qwen-image')!)).toBeTruthy()
+    document.body.innerHTML = ''
+
+    // No missing figure: the model's own size.
+    box.models = catalog([lightning({ state: 'none', missing_gb: null, approx_gb: 6.9 }), turbo(), qwen()])
+    mount()
+    expect(button('Install SDXL Lightning (8-step) · 6.9 GB to download', byId('imp-suggest-qwen-image')!)).toBeTruthy()
   })
 
   it('suggests the largest renderable model that fits when the recommended one does not', () => {
@@ -773,9 +852,9 @@ describe('ImageModelsPanel', () => {
     ])
     mount()
 
-    expect(button('Use SDXL Turbo', card('qwen-image'))).toBeTruthy()
+    expect(button('Install SDXL Turbo · 6.5 GB to download', card('qwen-image'))).toBeTruthy()
     // The recommended model suggests the largest one that fits, not itself.
-    expect(button('Use SDXL Turbo', card('sdxl-lightning'))).toBeTruthy()
+    expect(button('Install SDXL Turbo · 6.5 GB to download', card('sdxl-lightning'))).toBeTruthy()
   })
 
   it('shows the loading state before the catalog answers', () => {

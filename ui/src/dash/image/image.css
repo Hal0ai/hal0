@@ -129,6 +129,8 @@
 
 /* Suggestion on a card that will not fit */
 .imp-suggest { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-family: var(--jbm); font-size: 11px; color: var(--fg-3); }
+/* "Install {label} · {n} GB to download" is longer than a card is wide: let it wrap. */
+.imp-suggest .btn { height: auto; min-height: 26px; max-width: 100%; white-space: normal; text-align: left; line-height: 1.35; }
 
 /* ── First run ─────────────────────────────────────────────────────────────── */
 .imp-first {

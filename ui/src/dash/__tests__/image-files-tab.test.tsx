@@ -160,8 +160,10 @@ describe('ImageFilesTab', () => {
     act(() => byId('imgf-row-checkpoints/flux-dev.safetensors')!.click())
     expect(byId('imgf-delete')).toBeNull()
     // Install and remove are on the Models tab now; the CLI stays as the other way.
+    // True for an owner that is complete and for one that is only partly installed (whose card
+    // offers Install, not Remove): the CLI removes either, the Models tab once it is complete.
     expect(byId('imgf-owned-note')!.textContent).toBe(
-      "Remove the model to delete this file: use Remove on its card in the Image Gen pane's Models tab, or run hal0 comfyui models remove flux-dev",
+      "Remove the model to delete this file: run hal0 comfyui models remove flux-dev (the Image Gen pane's Models tab offers Remove once the model is fully installed).",
     )
     act(() => root.unmount())
   })
@@ -177,8 +179,10 @@ describe('ImageFilesTab', () => {
     const text = byId('imgf-owned-note')!.textContent!
     expect(text).toContain('hal0 comfyui models remove flux-dev --include-shared')
     expect(text).toContain('flux-dev, flux-schnell')
-    // A plain remove from the dashboard keeps the shared file; only the CLI flag deletes it.
-    expect(text).toContain('removing one of them keeps it for the others')
+    // The server keeps a shared file only while another model that loads it is complete (a
+    // partly installed one holds nothing back), and only the CLI flag deletes it regardless.
+    expect(text).toContain('keeps it while another of them is fully installed')
+    expect(text).not.toContain('keeps it for the others')
     act(() => root.unmount())
   })
 
@@ -225,13 +229,14 @@ describe('ImageFilesTab', () => {
     act(() => root.unmount())
   })
 
-  it('tells an empty inventory to install with the CLI, not to a dashboard place', () => {
+  it('tells an empty inventory to install from the Models tab or with the CLI', () => {
     filesBox.current = { state: 'ok', root: '/models/comfyui', files: [] }
     const { root } = mount()
     const hint = byId('imgf-empty-hint')!
+    // Install is on the Image Gen pane's Models tab now; the CLI is the other way.
+    expect(hint.textContent).toContain("Image Gen pane's Models tab")
     expect(hint.textContent).toContain('hal0 comfyui models install <id>')
     expect(hint.textContent).toContain('hal0 comfyui models list')
-    expect(document.body.textContent).not.toContain('Image Gen')
     expect(document.querySelector('a')).toBeNull()
     act(() => root.unmount())
   })

@@ -20,14 +20,15 @@ const folderOf = (f) => [f.subdir, ...f.relpath.split('/').slice(0, -1)].join('/
 
 const note = (msg, kind) => window.__hal0Toast && window.__hal0Toast(msg, kind)
 
-// What deletes a file a catalog model loads: removing the model, from its card on the Image Gen
-// pane's Models tab or with the CLI. A file two models load is kept by a plain remove (the
-// other model still needs it); only the CLI's `--include-shared` deletes it anyway, so the note
-// names that command for it.
+// What deletes a file a catalog model loads: removing the model. The CLI removes it in any
+// state; the Image Gen pane's Models tab offers Remove only once the model is fully installed (a
+// partly installed one shows Install there). The server keeps a file two models load only while
+// another of them is complete (a partly installed one holds nothing back); only the CLI's
+// `--include-shared` deletes it regardless, so the note names that command for it.
 const ownedNote = (ids) =>
   ids.length === 1
-    ? `Remove the model to delete this file: use Remove on its card in the Image Gen pane's Models tab, or run hal0 comfyui models remove ${ids[0]}`
-    : `${ids.join(', ')} load this file, so removing one of them keeps it for the others. To delete it anyway: hal0 comfyui models remove ${ids[0]} --include-shared (the others stop working).`
+    ? `Remove the model to delete this file: run hal0 comfyui models remove ${ids[0]} (the Image Gen pane's Models tab offers Remove once the model is fully installed).`
+    : `${ids.join(', ')} load this file. Removing one of them keeps it while another of them is fully installed. To delete it anyway: hal0 comfyui models remove ${ids[0]} --include-shared (the others stop working).`
 
 export function ImageFilesTab() {
   const filesQuery = useComfyuiFiles()
@@ -80,7 +81,8 @@ export function ImageFilesTab() {
         <div style={{ padding: 24, textAlign: 'center', fontFamily: 'var(--jbm)', fontSize: 12, color: 'var(--fg-4)' }}>
           <div>No image model files on disk yet.</div>
           <div data-testid="imgf-empty-hint" style={{ marginTop: 6 }}>
-            Install one with <code>hal0 comfyui models install &lt;id&gt;</code>
+            Install one from the Image Gen pane's Models tab, or with{' '}
+            <code>hal0 comfyui models install &lt;id&gt;</code>
             {' '}(<code>hal0 comfyui models list</code> shows the ids).
           </div>
         </div>
