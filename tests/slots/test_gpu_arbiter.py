@@ -185,6 +185,13 @@ def _fast_drain(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_handoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No editor hand-off after a switch unless a test sets its own: most tests
+    switch and restore back to back, and 3 s of real waiting each adds up."""
+    monkeypatch.setattr(arbiter_mod, "_GATE_HANDOFF_S", 0.0)
+
+
+@pytest.fixture(autouse=True)
 def comfyui_http(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Stub the arbiter's ComfyUI HTTP seams (resident-container design).
 
@@ -795,7 +802,7 @@ async def test_a_render_in_flight_is_never_restored_under(
         fake_mgr.calls.clear()
         arb._quiet_since = time.monotonic() - 3600
         await arb._restore_tick()
-        await arb.make_room_for_llm("chat")
+        await arb.make_room_for_llm("chat", max_wait_s=0.05)  # waits, then gives up
         with pytest.raises(ArbiterQueueBusy):
             await arb.restore_llm()
         with pytest.raises(GpuImageMode):
@@ -873,7 +880,7 @@ async def test_pinned_image_mode_is_held_against_the_tick_and_llm_demand(
     arb._quiet_since = time.monotonic() - 3600
 
     await arb._restore_tick()
-    await arb.make_room_for_llm("chat")
+    await asyncio.wait_for(arb.make_room_for_llm("chat"), timeout=1.0)  # at once: no wait
 
     assert fake_mgr.calls == [] and comfyui_http["free"] == 0
     with pytest.raises(GpuImageMode):
@@ -897,53 +904,129 @@ async def test_llm_demand_ends_the_grace_at_once(
     arb.guard_dispatch("chat")  # no longer refused
 
 
-async def test_llm_demand_leaves_a_busy_comfyui_queue_and_non_llm_slots_alone(
+async def test_llm_demand_answers_at_once_for_an_unreadable_queue_and_non_llm_slots(
     fake_mgr: FakeManager, state_path: Path, comfyui_http: dict[str, Any], tmp_hal0_home: str
 ) -> None:
+    """A failed /queue read is not evidence the render stopped, and is no
+    render to wait for either: the guard answers 503 at once."""
     _write_img_state(state_path)
     fake_mgr.ready -= {"chat", "agent"}
     arb = GpuArbiter(fake_mgr, state_path=state_path)
 
-    comfyui_http["queue"] = (1, 0)
-    await arb.make_room_for_llm("chat")
     comfyui_http["queue"] = "unknown"
-    await arb.make_room_for_llm("chat")
+    await asyncio.wait_for(arb.make_room_for_llm("chat"), timeout=1.0)
     comfyui_http["queue"] = None
-    await arb.make_room_for_llm("npu")
-    await arb.make_room_for_llm("img")
+    await asyncio.wait_for(arb.make_room_for_llm("npu"), timeout=1.0)
+    await asyncio.wait_for(arb.make_room_for_llm("img"), timeout=1.0)
 
     assert fake_mgr.calls == [] and comfyui_http["free"] == 0
     assert arb.mode is GpuMode.IMG
 
 
-async def test_llm_demand_does_not_wait_for_a_switch_into_image_mode(
+async def test_a_chat_during_a_v1_render_waits_without_holding_up_the_render(
     fake_mgr: FakeManager,
     state_path: Path,
     comfyui_http: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The chat arrives while a /v1 render is switching the GPU. It waits instead
+    of a 503; the switch and the render go ahead meanwhile, and the chat is
+    served once the render has ended and the LLM set is back."""
     arb = GpuArbiter(fake_mgr, state_path=state_path)
-    release = asyncio.Event()
+    unload_gate = asyncio.Event()
+    render_done = asyncio.Event()
+    events: list[str] = []
     real_unload = fake_mgr.unload
 
     async def _slow_unload(name: str) -> None:
-        await release.wait()
+        await unload_gate.wait()
         await real_unload(name)
 
     monkeypatch.setattr(fake_mgr, "unload", _slow_unload)
-    switch = asyncio.create_task(arb.ensure_img())
+
+    async def _render() -> None:
+        async with arb.image_job():
+            await arb.ensure_img()
+            events.append("render running")
+            await render_done.wait()
+
+    render = asyncio.create_task(_render())
     for _ in range(50):
         if arb.status()["switching"]:
             break
         await asyncio.sleep(0)
     assert arb.status()["switching"] is True
 
-    await asyncio.wait_for(arb.make_room_for_llm("chat"), timeout=1.0)  # returns, does not wait
+    chat = asyncio.create_task(_llm_request(arb, "chat"))  # arrives mid-switch
+    await asyncio.sleep(0.05)
+    assert not chat.done()  # it waits rather than taking a 503
 
-    release.set()
-    await switch
+    unload_gate.set()
+    for _ in range(100):
+        if events:
+            break
+        await asyncio.sleep(0.01)
+    assert events == ["render running"]  # the waiting chat did not hold the switch up
+    await asyncio.sleep(0.1)
+    assert not chat.done()  # still waiting: the render is running
     assert ("load", "chat", None) not in fake_mgr.calls
-    assert arb.status()["switching"] is False
+
+    render_done.set()
+    assert await asyncio.wait_for(chat, timeout=2.0) == "dispatched"
+    await render
+    assert fake_mgr.calls[-2:] == [("load", "chat", None), ("load", "agent", None)]
+    assert arb.mode is GpuMode.LLM
+
+
+async def test_a_chat_during_an_editor_render_waits_for_the_queue_then_is_served(
+    fake_mgr: FakeManager,
+    state_path: Path,
+    comfyui_http: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_hal0_home: str,
+) -> None:
+    """A render queued in ComfyUI's editor shows only in /queue: the chat waits
+    for the queue to drain, then the LLM set comes back and it is served."""
+    monkeypatch.setattr(arbiter_mod, "_DEMAND_RECHECK_S", 0.02, raising=False)
+    _write_img_state(state_path)
+    fake_mgr.ready -= {"chat", "agent"}
+    comfyui_http["queue"] = (1, 0)
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+
+    chat = asyncio.create_task(_llm_request(arb, "chat"))
+    await asyncio.sleep(0.15)
+    assert not chat.done()  # waiting on the editor render, not a 503
+    assert fake_mgr.calls == [] and comfyui_http["free"] == 0
+
+    comfyui_http["queue"] = (0, 0)  # the render finished
+    assert await asyncio.wait_for(chat, timeout=2.0) == "dispatched"
+    assert fake_mgr.calls == [("load", "chat", None), ("load", "agent", None)]
+    assert comfyui_http["free"] == 1
+
+
+async def test_a_chat_waiting_on_a_render_gives_up_at_its_cap(
+    fake_mgr: FakeManager,
+    state_path: Path,
+    comfyui_http: dict[str, Any],
+    tmp_hal0_home: str,
+) -> None:
+    """The cap still ends the wait with the guard's 503, and once nobody waits
+    the restore it started stands down: the render's end is the restore loop's
+    business again, one grace later."""
+    _write_img_state(state_path)
+    fake_mgr.ready -= {"chat", "agent"}
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+
+    async with arb.image_job():  # a render that outlasts the chat's patience
+        started = time.monotonic()
+        await arb.make_room_for_llm("chat", max_wait_s=0.1)
+        assert time.monotonic() - started >= 0.09  # it waited
+        with pytest.raises(GpuImageMode):
+            arb.guard_dispatch("chat")
+    await asyncio.sleep(0.2)  # the render ended after the chat gave up
+
+    assert fake_mgr.calls == [] and comfyui_http["free"] == 0
+    assert arb.mode is GpuMode.IMG
 
 
 async def test_llm_demand_stops_waiting_at_its_budget_but_the_restore_finishes(
@@ -991,16 +1074,16 @@ async def test_concurrent_llm_demands_share_one_restore(
     _write_img_state(state_path)
     fake_mgr.ready -= {"chat", "agent"}
     arb = GpuArbiter(fake_mgr, state_path=state_path)
-    real_restore = arb._restore_if_quiet
+    real_restore = arb._restore_on_demand
     restores = 0
 
-    async def _counting_restore(*, honour_grace: bool) -> bool:
+    async def _counting_restore() -> bool:
         nonlocal restores
         restores += 1
         await asyncio.sleep(0.01)  # both requests arrive while it runs
-        return await real_restore(honour_grace=honour_grace)
+        return await real_restore()
 
-    monkeypatch.setattr(arb, "_restore_if_quiet", _counting_restore)
+    monkeypatch.setattr(arb, "_restore_on_demand", _counting_restore)
 
     await asyncio.gather(arb.make_room_for_llm("chat"), arb.make_room_for_llm("agent"))
 
@@ -1286,7 +1369,8 @@ async def test_llm_demand_right_after_an_editor_switch_leaves_the_gpu_to_the_pro
     """An editor prompt asks for image mode through the gate. An LLM request
     that lands in the gate's poll gap, after the switch and before the prompt
     reaches ComfyUI's queue, must not restore the LLM set under the prompt:
-    it waits out the hand-off, then sees the queued prompt and is refused."""
+    it waits out the hand-off, sees the queued prompt, and waits for the render
+    to finish before the LLM set comes back."""
     # Longer than this test gate's 0.05 s poll, as 3 s is longer than the real
     # gate's 0.5 s poll plus its 2 s status fetch.
     monkeypatch.setattr(arbiter_mod, "_GATE_HANDOFF_S", 1.0, raising=False)
@@ -1297,15 +1381,21 @@ async def test_llm_demand_right_after_an_editor_switch_leaves_the_gpu_to_the_pro
     queued = prompt.submit()
     await prompt.wait_for_the_switch()
     # e.g. an agent's chat request, in the gate's poll gap
-    assert await _llm_request(arb, "chat") == "503 gpu.image_mode"
+    chat = asyncio.create_task(_llm_request(arb, "chat"))
     await asyncio.wait_for(queued, timeout=5)
 
     assert prompt.refused is None
     assert prompt.mode_when_queued is GpuMode.IMG
     assert prompt.posts == 1
+    await asyncio.sleep(1.2)  # past the hand-off: the chat sees the queued prompt
+    assert not chat.done()  # and waits for it, rather than restoring under it
     assert comfyui_http["free"] == 0
     assert ("load", "chat", None) not in fake_mgr.calls
     assert arb.mode is GpuMode.IMG
+
+    comfyui_http["queue"] = (0, 0)  # the editor render finished
+    assert await asyncio.wait_for(chat, timeout=3) == "dispatched"
+    assert arb.mode is GpuMode.LLM
 
 
 async def test_llm_demand_after_a_switch_whose_prompt_never_comes_restores_after_the_handoff(
@@ -1330,6 +1420,49 @@ async def test_llm_demand_after_a_switch_whose_prompt_never_comes_restores_after
     assert await _llm_request(arb, "chat") == "dispatched"
     assert time.monotonic() - started >= 0.1  # it waited for the hand-off
     assert fake_mgr.calls == [("load", "chat", None), ("load", "agent", None)]
+    assert arb.mode is GpuMode.LLM
+
+
+async def test_the_handoff_opens_after_a_v1_switch_too(
+    fake_mgr: FakeManager,
+    state_path: Path,
+    comfyui_http: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A /v1 render that fails right after its switch closes its job inside the
+    gate's poll gap. An editor prompt that asked for the same switch may still
+    be on its way, so the hand-off holds after every switch."""
+    monkeypatch.setattr(arbiter_mod, "_GATE_HANDOFF_S", 0.3)
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    async with arb.image_job():
+        await arb.ensure_img()
+    # the render failed at once; its job is closed
+    fake_mgr.calls.clear()
+
+    started = time.monotonic()
+    assert await _llm_request(arb, "chat") == "dispatched"
+    assert time.monotonic() - started >= 0.25  # it waited out the hand-off
+    assert fake_mgr.calls == [("load", "chat", None), ("load", "agent", None)]
+
+
+async def test_restore_llm_when_idle_waits_out_the_handoff(
+    fake_mgr: FakeManager,
+    state_path: Path,
+    comfyui_http: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Omni's restore runs on its own, so it waits for the hand-off too instead
+    of relying on the gate to ask again."""
+    monkeypatch.setattr(arbiter_mod, "_GATE_HANDOFF_S", 0.3)
+    monkeypatch.setattr(arbiter_mod, "_QUEUE_IDLE_POLL_S", 0.01)
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    await arb.ensure_img()  # a gate or manual switch
+
+    with pytest.raises(ArbiterQueueBusy, match="ComfyUI"):
+        await arb.restore_llm_when_idle(max_wait_s=0.1)
+    assert arb.mode is GpuMode.IMG and comfyui_http["free"] == 0
+
+    await arb.restore_llm_when_idle(max_wait_s=1.0)
     assert arb.mode is GpuMode.LLM
 
 

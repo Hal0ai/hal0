@@ -752,9 +752,9 @@ async def _ensure_backend_for_model(request: Request, body: dict[str, Any]) -> N
     # swallowed by the best-effort block below — the guard is the outcome.
     arbiter = getattr(slot_manager, "arbiter", None)
     if arbiter is not None:
-        # An LLM request that finds image mode idle ends it and waits for the
-        # reload instead of a 503; while a render runs it returns at once and
-        # the guard answers.
+        # An LLM request in image mode waits for any render to end, then for
+        # the reload, instead of a 503; when pinned it returns at once and the
+        # guard answers.
         make_room = getattr(arbiter, "make_room_for_llm", None)
         if make_room is not None:
             await make_room(slot_name)

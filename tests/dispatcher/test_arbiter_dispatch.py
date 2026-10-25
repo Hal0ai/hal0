@@ -50,13 +50,22 @@ _DISPATCHABLE_STATES = frozenset({SlotState.READY, SlotState.SERVING, SlotState.
 
 
 @pytest.fixture(autouse=True)
+def _no_handoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No editor hand-off after a switch: these tests chat right after a render."""
+    monkeypatch.setattr(arbiter_mod, "_GATE_HANDOFF_S", 0.0)
+
+
+@pytest.fixture(autouse=True)
 def comfyui_queue(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """ComfyUI seams the arbiter reads. By default a render is running, so an LLM
-    request in image mode is refused, which is what the guard tests below pin. A test
-    that wants an idle ComfyUI sets ``rec["queue"] = (0, 0)``."""
-    rec: dict[str, Any] = {"queue": (1, 0), "free": 0}
+    """ComfyUI seams the arbiter reads. By default ``/queue`` cannot be read, so an
+    LLM request in image mode is refused at once (a busy queue would make it wait
+    for the render), which is what the guard tests below pin. A test that wants an
+    idle ComfyUI sets ``rec["queue"] = (0, 0)``."""
+    rec: dict[str, Any] = {"queue": "unknown", "free": 0}
 
     async def _queue() -> tuple[int, int]:
+        if rec["queue"] == "unknown":
+            raise arbiter_mod.ComfyUIQueueUnknown("scripted")
         return rec["queue"]
 
     async def _free() -> bool:

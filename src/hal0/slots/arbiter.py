@@ -65,12 +65,18 @@ Concurrency model (single asyncio event loop):
   - ``_restore_if_quiet`` runs its checks under the lock and re-checks the
     image-job counter after each of its awaits, so a request that arrives
     while it reads ComfyUI's queue cancels the restore.
-  - A switch no ``/v1`` image request asked for (the gate node's, or a manual
-    one) opens a short hand-off (``_GATE_HANDOFF_S``): the prompt that asked
-    for it is still on its way to ComfyUI's queue, so the automatic restores
-    leave the GPU alone until it can be seen there. Explicit restores
-    (``restore_llm``, ``restore_llm_when_idle``) do not wait for it; the gate
-    asks again if one of them beats its prompt.
+  - Every switch into image mode opens a short hand-off (``_GATE_HANDOFF_S``):
+    an editor prompt that asked for it through the gate node is still on its
+    way to ComfyUI's queue, so the automatic restores (the restore loop, LLM
+    demand, and omni's ``restore_llm_when_idle``) leave the GPU alone until it
+    can be seen there. ``restore_llm`` does not wait for it (a manual switch
+    to inference is the operator's call); the gate asks again if a restore
+    beats its prompt.
+  - An LLM request that finds image work in progress waits for it to end, in
+    one demand restore that every such request shares, and is served after the
+    reload; only a pin, an unreadable ComfyUI queue, or its own 120 s cap end
+    the wait with the guard's 503. The waiting happens outside the switch lock
+    and holds no dispatch ticket, so it never holds up the render it waits on.
   - An LLM request a demand restore served leaves ``make_room_for_llm`` with a
     request-scoped lease. A switch queued behind that restore waits, before it
     persists image mode, until the request has its dispatch ticket, so the
@@ -127,13 +133,14 @@ _RESTORE_TICK_S = 2.0
 #: saved set waits for each slot to reach READY, like the drain and img-readiness
 #: budgets.
 _LLM_DEMAND_WAIT_S = 120.0
-#: After a switch to image mode that no /v1 image request asked for (the
-#: hal0_gpu_gate node on behalf of an editor prompt, or a manual switch), the
-#: prompt is still on its way to ComfyUI's queue, where no restore check can see
-#: it. The automatic restores leave the GPU alone this long: the gate polls
-#: hal0's status every _SWITCH_POLL_S = 0.5 s (comfyui/assets/hal0_gpu_gate.py:66),
-#: a status fetch may take up to _STATUS_TIMEOUT_S = 2.0 s (:55), and ComfyUI then
-#: validates and queues the prompt (the last 0.5 s).
+#: After a switch into image mode, an editor prompt that asked for it through the
+#: hal0_gpu_gate node is still on its way to ComfyUI's queue, where no restore
+#: check can see it (a /v1 render that holds a job may fail inside that gap, so
+#: every switch counts). The automatic restores leave the GPU alone this long:
+#: the gate polls hal0's status every _SWITCH_POLL_S = 0.5 s
+#: (comfyui/assets/hal0_gpu_gate.py:79), a status fetch may take up to
+#: _STATUS_TIMEOUT_S = 2.0 s (:63), and ComfyUI then validates and queues the
+#: prompt (the last 0.5 s).
 _GATE_HANDOFF_S = 3.0
 #: How long an LLM request a demand restore served keeps a switch into image
 #: mode, queued behind that restore, waiting for it to take its dispatch ticket.
@@ -143,6 +150,12 @@ _GATE_HANDOFF_S = 3.0
 _DEMAND_LEASE_S = 5.0
 #: Poll interval while a switch waits for those requests.
 _DEMAND_YIELD_S = 0.01
+#: How often an LLM request waiting on image work checks hal0's own state (the
+#: hand-off, open /v1 jobs, a running switch): in-memory, no I/O.
+_DEMAND_POLL_S = 0.05
+#: How often it re-asks ComfyUI's queue (and the img slot's in-flight count)
+#: while those show a render: one localhost read under the switch lock.
+_DEMAND_RECHECK_S = 1.0
 
 #: Readiness poll budget after img slot load() returns — containers go
 #: STARTING → WARMING → READY asynchronously; load() only waits for systemd
@@ -376,7 +389,7 @@ class GpuArbiter:
         self._demand_restore: asyncio.Task[bool] | None = None
         # The monotonic time until which the automatic restores leave the GPU
         # to an editor prompt on its way to ComfyUI (_GATE_HANDOFF_S); the LLM
-        # requests waiting on each demand restore; and the leases of requests a
+        # requests waiting on each demand task; and the leases of requests a
         # demand restore served that have not taken their dispatch ticket yet
         # (token → monotonic expiry).
         self._handoff_until: float | None = None
@@ -554,8 +567,8 @@ class GpuArbiter:
         next render into a permanent image mode.
         """
         async with self._switch_lock:
-            # LLM demand returns at once while this runs (it would otherwise
-            # wait out the switch and then undo it).
+            # LLM demand waits (outside the lock) while this runs, rather than
+            # restoring the moment the switch ends.
             self._entering_img = True
             try:
                 await self._ensure_img_locked(pin=pin)
@@ -563,9 +576,10 @@ class GpuArbiter:
                 self._entering_img = False
                 now = time.monotonic()
                 self._quiet_since = now
-                if not self._image_jobs and self.mode is GpuMode.IMG:
-                    # No /v1 request asked for this switch: the editor prompt
-                    # that did is still on its way to ComfyUI's queue.
+                if self.mode is GpuMode.IMG:
+                    # An editor prompt that asked for this switch may still be
+                    # on its way to ComfyUI's queue (and a /v1 job open now may
+                    # fail before it does).
                     self._handoff_until = now + _GATE_HANDOFF_S
 
     async def _ensure_img_locked(self, *, pin: bool) -> None:
@@ -798,9 +812,10 @@ class GpuArbiter:
         ``restore_llm`` frees ComfyUI's models and reloads the LLM set; called
         while a render is still active — another request's, or one a cancelled
         caller abandoned on the queue — it would drop that render. This waits
-        until hal0 has no image work in flight (an open :meth:`image_job` or a
-        request forwarded to the img slot) and ``GET /queue`` reports nothing
-        running or pending, then restores. A refused connection counts as idle
+        until the editor hand-off after the last switch is over, hal0 has no
+        image work in flight (an open :meth:`image_job` or a request forwarded
+        to the img slot), and ``GET /queue`` reports nothing running or
+        pending, then restores. A refused connection counts as idle
         (nothing listening holds no GPU memory, the same stance
         ``restore_llm`` takes for ``/free``); any other failed read is NOT
         evidence the render stopped and counts as busy. Raises
@@ -824,7 +839,10 @@ class GpuArbiter:
         deadline = time.monotonic() + max_wait_s
         while True:
             counts: tuple[int, int] | None
-            if await self._hal0_image_work():
+            if self._handoff_remaining() > 0:
+                counts = None
+                reason = "a prompt that asked for image mode may be on its way to ComfyUI's queue"
+            elif await self._hal0_image_work():
                 # hal0's own render: no need to ask ComfyUI.
                 counts = None
                 reason = (
@@ -909,55 +927,72 @@ class GpuArbiter:
         )
 
     async def _restore_if_quiet(self, *, honour_grace: bool) -> bool:
-        """Restore the saved LLM set when no image work is left; True if it did.
+        """Restore the saved LLM set when no image work is left; True if it did."""
+        return await self._restore_decision(honour_grace=honour_grace) == "restored"
 
-        The one restore decision behind the restore loop (``honour_grace``)
-        and LLM demand (no grace). Under the switch lock, in order: the mode
-        is image and not pinned; the editor hand-off is over; the grace has
-        passed (when honoured); hal0 has no image work in flight; ComfyUI's
-        strict queue read shows nothing running or pending (a refused
-        connection counts as idle; a busy or unreadable queue restarts the
-        quiet clock); and no image request opened, and no pin was set, during
-        those awaits. The hand-off cannot reopen during them: only a switch
-        sets it, and the switch needs the lock.
+    async def _restore_decision(
+        self, *, honour_grace: bool
+    ) -> Literal["restored", "not_image_mode", "pinned", "grace", "busy", "unreadable"]:
+        """The one restore decision, and why it did not restore.
+
+        Behind the restore loop (``honour_grace``) and LLM demand (no grace).
+        Under the switch lock, in order: the mode is image and not pinned; the
+        editor hand-off is over; the grace has passed (when honoured); hal0
+        has no image work in flight; ComfyUI's strict queue read shows nothing
+        running or pending (a refused connection counts as idle; a busy or
+        unreadable queue restarts the quiet clock); and no image request
+        opened, and no pin was set, during those awaits. The hand-off cannot
+        reopen during them: only a switch sets it, and the switch needs the
+        lock. ``"busy"`` means image work is in progress (LLM demand waits it
+        out); ``"unreadable"`` means the queue could not be read.
         """
         async with self._switch_lock:
             st = self._load_state()
-            if st["mode"] != GpuMode.IMG.value or st["pinned"]:
-                return False
+            if st["mode"] != GpuMode.IMG.value:
+                return "not_image_mode"
+            if st["pinned"]:
+                return "pinned"
             if self._handoff_remaining() > 0:
-                return False
+                return "busy"
             if honour_grace and not self._grace_passed():
-                return False
+                return "grace"
             if await self._hal0_image_work():
-                return False
+                return "busy"
             try:
                 counts = await _comfyui_queue_state()
             except ComfyUIQueueUnknown:
                 self._quiet_since = time.monotonic()
-                return False
+                return "unreadable"
             if counts is not None and sum(counts) > 0:
                 self._quiet_since = time.monotonic()
-                return False
-            if self._image_jobs or st["pinned"]:
-                return False
+                return "busy"
+            if self._image_jobs:
+                return "busy"
+            if st["pinned"]:
+                return "pinned"
             await self._restore_llm_locked(st)
-            return True
+            return "restored"
 
     async def make_room_for_llm(
         self, slot_name: str, *, max_wait_s: float = _LLM_DEMAND_WAIT_S
     ) -> None:
         """End an idle image mode for an LLM request, and wait for the reload.
 
-        Awaited right before each LLM dispatch guard. When nothing is
-        rendering it restores the saved LLM set now, skipping the grace, and
-        the request waits for the reload (at most ``max_wait_s``) instead of
-        getting a 503. Right after a switch no image request asked for, the
-        restore first waits out the editor hand-off (:data:`_GATE_HANDOFF_S`),
-        so the prompt that asked for the switch reaches ComfyUI's queue and
-        the restore sees it. The restore is shared by every request that
-        arrives while it runs and shielded from them, so a request that times
-        out or goes away never leaves the set half reloaded.
+        Awaited right before each LLM dispatch guard. The request waits, at
+        most ``max_wait_s`` in all, instead of getting a 503:
+
+          - while image work is in progress: the editor hand-off after a
+            switch (:data:`_GATE_HANDOFF_S`, so an editor prompt reaches
+            ComfyUI's queue and is seen there), an open ``/v1`` image job, a
+            switch into image mode, a request in flight to the img slot, or a
+            render in ComfyUI's queue;
+          - then for the restore of the saved LLM set, which skips the grace.
+
+        The waiting and the restore run in one task that every such request
+        shares, shielded from them, so a request that times out or goes away
+        never leaves the set half reloaded; the task stands down once nobody
+        waits on it. It waits outside the switch lock and holds no dispatch
+        ticket, so it never holds up the render it waits for.
 
         When the restore handed the GPU back, the request leaves with a demand
         lease, taken in the same step it wakes in: a switch into image mode
@@ -967,16 +1002,14 @@ class GpuArbiter:
         of.
 
         Returns at once, leaving the answer to the guard, in LLM mode, when
-        pinned, while an image request is open or a switch into image mode
-        holds the lock, and for a slot outside the llm group. Never raises
-        (except for its own cancellation): a timeout logs
+        pinned, and for a slot outside the llm group; returns as soon as the
+        mode is pinned or ComfyUI's queue cannot be read. Never raises (except
+        for its own cancellation): a timeout logs
         ``gpu_arbiter.llm_demand_wait_timeout``, and a failed restore is
         logged once by the task's done-callback.
         """
         st = self._load_state()
         if st["mode"] != GpuMode.IMG.value or st["pinned"]:
-            return
-        if self._image_jobs or self._entering_img:
             return
         if self._slot_group(self._resolve_alias(slot_name)) != "llm":
             return
@@ -1003,10 +1036,35 @@ class GpuArbiter:
             self._grant_demand_lease()
 
     async def _restore_on_demand(self) -> bool:
-        """LLM demand's restore: wait out the editor hand-off, then decide."""
-        while (remaining := self._handoff_remaining()) > 0:
-            await asyncio.sleep(remaining)
-        return await self._restore_if_quiet(honour_grace=False)
+        """LLM demand's shared task: wait out image work, then restore.
+
+        True once it restored. False, and the waiting requests get the guard's
+        answer, when the mode is pinned or is no longer image mode, when
+        ComfyUI's queue cannot be read, or when no request waits on it any
+        more (the restore loop then hands the GPU back one grace after the
+        render, as without LLM demand).
+        """
+        me = asyncio.current_task()
+        recheck_at = 0.0
+        while self._demand_waiters.get(me, 0) > 0:  # type: ignore[arg-type]
+            st = self._load_state()
+            if st["mode"] != GpuMode.IMG.value or st["pinned"]:
+                return False
+            if (
+                self._handoff_remaining() > 0
+                or self._image_jobs
+                or self._entering_img
+                or time.monotonic() < recheck_at
+            ):
+                await asyncio.sleep(_DEMAND_POLL_S)
+                continue
+            outcome = await self._restore_decision(honour_grace=False)
+            if outcome == "restored":
+                return True
+            if outcome != "busy":
+                return False
+            recheck_at = time.monotonic() + _DEMAND_RECHECK_S
+        return False
 
     def _leave_demand_wait(self, task: asyncio.Task[bool]) -> None:
         left = self._demand_waiters.get(task, 0) - 1
@@ -1120,8 +1178,8 @@ class GpuArbiter:
 
           - img mode + llm-group slot → :class:`GpuImageMode` (the arbiter
             unloaded the slot to hand the GPU to ComfyUI; an LLM request
-            reaches this only while a render runs, the mode is pinned, or the
-            restore it asked for did not finish in time);
+            reaches this only when the mode is pinned, ComfyUI's queue cannot
+            be read, or its wait for the GPU ran out);
           - llm mode + img-group slot → :class:`GpuInferenceMode` (the
             resident ComfyUI container is READY but must not grab GTT under
             the loaded LLM weights — flip the switch first).

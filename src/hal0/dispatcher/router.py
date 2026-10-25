@@ -1098,11 +1098,11 @@ class Dispatcher:
     async def _make_room_for_llm(self, call: UpstreamCall) -> None:
         """Let an llm-group request end an idle image mode before the guard.
 
-        Delegates to :meth:`GpuArbiter.make_room_for_llm`: when nothing is
-        rendering it restores the saved LLM set and waits for the reload, so
-        the guard below lets the request through instead of a 503; while a
-        render runs, when pinned, or for any other slot it returns at once.
-        In LLM mode it returns without suspending.
+        Delegates to :meth:`GpuArbiter.make_room_for_llm`: it waits for any
+        render in progress to end, restores the saved LLM set and waits for
+        the reload, so the guard below lets the request through instead of a
+        503. When pinned, or for any other slot, it returns at once; in LLM
+        mode it returns without suspending.
 
         Stand-ins without ``make_room_for_llm`` opt out via the ``getattr``,
         like :meth:`_guard_gpu_image_mode`.
