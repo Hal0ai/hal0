@@ -76,6 +76,10 @@ comes back.
   another box's.
 - `per_slot` on the same response keeps its shape and still omits slots that
   are starting. The route builds the per-slot rows once and gives them to both.
+- The GPU capability check (`capacity._host_has_capable_gpu`) reads the hardware
+  cache and can fall back to a live probe. The route runs it once per request,
+  off the event loop, and hands the answer to `build_per_slot` and to
+  `collect_memory_budget(gpu_capable=)`; neither runs it again.
 
 A screen may subtract a margin from a budget figure or take the smaller of two
 (the Slots headroom does both today). It reads no counter, file or ceiling of
@@ -85,8 +89,9 @@ The dashboard polls this route every 2.5 s, so the budget must never wait on
 ComfyUI. `comfyui.engine_used_mb` caches its answer for 5 s, failures and
 cancelled reads included, and uses a 0.25 s connect and 0.5 s read timeout.
 `collect_memory_budget` also wraps it in a 0.75 s `asyncio.wait_for`, and skips
-it when there is no GPU pool to attribute it to. Past the bound, the img slot's
-own attribution stands in.
+it unless the budget will use the answer: a shared GPU pool with an img slot to
+attribute it to (decision 3 says why a discrete card does not). Past the bound,
+the img slot's own attribution stands in.
 
 ### 2. Two budgets, never summed
 
@@ -137,11 +142,23 @@ The pool's usage is the kernel counter. The budget splits it by who holds it.
 - **This box.** `this_box` lists every other GPU slot (a device starting with
   `gpu`) that has a row, ordered by slot name, at the footprint
   `slots/capacity.py` `build_per_slot` estimates for it.
-- **The image engine.** `image_engine_gb` is ComfyUI's own figure, `vram_total -
-  vram_free` on the first device of its `/system_stats`, when present, even at
-  0. Otherwise it is the img slot's attributed footprint. The img slot is the
-  one `gpu_exclusive_group` puts in the `img` group, and it is not listed in
-  `this_box`, so the engine is never counted twice.
+- **The image engine.** On a shared pool, `image_engine_gb` is ComfyUI's own
+  figure, `vram_total - vram_free` on the first device of its `/system_stats`,
+  when present, even at 0. Otherwise, and always on a dedicated card, it is the
+  img slot's attributed footprint. The img slot is the first one
+  `gpu_exclusive_group` puts in the `img` group, and it is not listed in
+  `this_box`, so the engine is never counted twice. The budget names that slot
+  (`image_engine_slot`, `null` with no img slot) and says when the figure is the
+  slot's estimate rather than ComfyUI's reading (`image_engine_estimated`), so a
+  screen neither guesses the slot nor decides for itself what to call an
+  estimate.
+  - ComfyUI's figure is not used on a dedicated card. `torch.cuda.mem_get_info`
+    is device-wide there: the figure already holds every other slot's weights
+    and any other process's memory, so taking it as the engine's share would
+    count them twice and understate `render_free_gb` by the size of the slots
+    that image mode is about to unload.
+  - It is not used when ComfyUI runs on the CPU either: its `vram_*` fields
+    then describe system RAM, and `engine_used_mb` returns `None`.
 - **Other guests.** `other_guests_gb` is the counter minus this box:
   `max(0, used - resident slots - image engine)`. It is whatever the pool
   holds that no slot here accounts for, such as a second guest on the same GPU.
@@ -269,9 +286,14 @@ still disagree with the rest of the dashboard.
   - `used` RAM is system-wide, because `MemAvailable` is not scoped to a
     cgroup. Under a slice limit below `MemTotal`, `used` can exceed `limit`, and
     `free` floors at 0.
-  - The image engine figure is ComfyUI's own view of its device. hal0 counts it
-    as the engine's share. It has not been confirmed on shared hardware that
-    the figure rises with a render and ignores other processes.
+  - On a shared pool the image engine figure is ComfyUI's own view of its
+    device, and hal0 counts it as the engine's share. It has not been confirmed
+    on shared hardware that the figure rises with a render and ignores other
+    processes.
+  - On a discrete card the image engine figure is always the img slot's
+    estimate, and `image_engine_estimated` says so. The card's `used_gb` and
+    `free_gb` still come from the kernel counter; only the split of the usage
+    between the engine and other guests rests on the estimate.
   - A slot row without a `vram_mb` reads as 0.0 GB in `this_box`.
   - While `attribution_excess_gb` is above 0, `other_guests_gb` and
     `render_free_gb` depend on the per-slot estimates, as decision 4 says.

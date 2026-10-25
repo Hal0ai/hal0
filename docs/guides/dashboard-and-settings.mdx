@@ -170,8 +170,10 @@ because they are different resources:
 The ruler splits the pool's usage by who holds it. Each of this box's GPU slots
 is a segment named for the slot, sized by hal0's estimate of the memory it
 holds (the tooltip says "estimated"). **image engine** is the memory ComfyUI
-reports for its own device, or the `img` slot's estimate when ComfyUI does not
-answer. **other guests** is the striped block for whatever the pool holds that
+reports for its own device on a unified pool, or the `img` slot's estimate when
+ComfyUI does not answer; on a discrete card it is always the `img` slot's
+estimate, because ComfyUI's reading covers the whole card. The tooltip says
+"estimated" whenever it is the estimate. **other guests** is the striped block for whatever the pool holds that
 nothing on this box accounts for, such as a second guest on the same GPU, and it
 appears only when that is more than zero. On a box with no GPU pool, the
 **Unified memory** card shows "system" in that place instead: RAM in use beyond
@@ -186,7 +188,7 @@ there is no pool, or the Proxmox host when one is configured and has less free.
 "limited by" names which one bound it.
 
 For the field list behind these figures, see the
-[REST API reference](/docs/reference/api/rest-api/#memory-budget-get-apistatshardware);
+[Memory budget API reference](/docs/reference/api/memory-budget/);
 the design is recorded in
 [ADR-0039](/docs/adr/0039-memory-figures-have-one-owner).
 
