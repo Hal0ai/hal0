@@ -104,6 +104,23 @@ def test_comfyui_spec_matches_live_deployment() -> None:
     assert spec.command[-1].endswith("--cache-none")
 
 
+def test_comfyui_spec_carries_no_env_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HAL0_COMFYUI_GATE_FAIL_OPEN", raising=False)
+    assert ComfyUIProvider().container_spec(_img_cfg(), {}).env == {}
+
+
+def test_comfyui_spec_passes_the_gate_fail_open_switch_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hal0_gpu_gate node reads HAL0_COMFYUI_GATE_FAIL_OPEN inside the
+    container; an operator sets it in hal0-api's environment (api.env) and the
+    img slot's next start hands it on."""
+    monkeypatch.setenv("HAL0_COMFYUI_GATE_FAIL_OPEN", "1")
+    spec = ComfyUIProvider().container_spec(_img_cfg(), {})
+    assert spec.env == {"HAL0_COMFYUI_GATE_FAIL_OPEN": "1"}
+    assert "Environment=HAL0_COMFYUI_GATE_FAIL_OPEN=1" in _render_from_spec("img", spec)
+
+
 def test_comfyui_argv_uses_opt_comfyui_workdir() -> None:
     spec = ComfyUIProvider().container_spec(_img_cfg(), {})
     assert spec.command[:2] == ["bash", "-lc"]

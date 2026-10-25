@@ -54,8 +54,8 @@ def test_allows_prompt_post_in_generation_mode() -> None:
     assert mod.should_prepare_image_mode("POST", "/prompt", {"mode": "generation"}) is False
 
 
-def test_fails_open_when_hal0_api_unreachable() -> None:
-    """hal0-api down → status unknown → never brick standalone ComfyUI use."""
+def test_never_asks_for_a_switch_without_a_known_mode() -> None:
+    """No status, or one without the arbiter's mode: there is nothing to switch from."""
     mod = _load_node()
     assert mod.should_prepare_image_mode("POST", "/prompt", None) is False
     assert mod.should_prepare_image_mode("POST", "/prompt", {"unexpected": "shape"}) is False
@@ -220,12 +220,122 @@ def test_prepare_image_mode_fails_closed_when_the_switch_outlives_the_deadline(
         mod.prepare_image_mode()
 
 
-def test_prepare_image_mode_fails_open_when_hal0_is_unreachable(monkeypatch) -> None:
+def test_prepare_image_mode_refuses_when_hal0_stays_unreachable(monkeypatch) -> None:
+    """With hal0-api down the GPU most likely holds the LLM set (LLM mode is the
+    resting state), so after a short retry the prompt is refused."""
     mod = _load_node()
-    monkeypatch.setattr(mod, "_fetch_status", lambda: None)
+    monkeypatch.setattr(mod, "_UNREACHABLE_RETRY_S", 0.2, raising=False)
+    monkeypatch.setattr(mod, "_SWITCH_POLL_S", 0.05)
+    reads: list[int] = []
+    monkeypatch.setattr(mod, "_fetch_status", lambda: reads.append(1))
     monkeypatch.setattr(mod, "_post_switchover", lambda: pytest.fail("hal0 is unreachable"))
 
-    mod.prepare_image_mode()  # returns: standalone ComfyUI keeps working
+    with pytest.raises(mod.GpuGateClosed, match="unreachable"):
+        mod.prepare_image_mode()
+    assert len(reads) > 1  # it retried before refusing
+
+
+def test_prepare_image_mode_refuses_when_hal0_reports_no_gpu_mode(monkeypatch) -> None:
+    """hal0 answers but its arbiter does not (the mode is null): it cannot say
+    what holds the GPU either."""
+    mod = _load_node()
+    monkeypatch.setattr(mod, "_UNREACHABLE_RETRY_S", 0.0, raising=False)
+    monkeypatch.setattr(mod, "_fetch_status", lambda: {"mode": None, "arbiter": None})
+    monkeypatch.setattr(mod, "_post_switchover", lambda: pytest.fail("no mode to switch from"))
+    monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(mod.GpuGateClosed, match="unreachable"):
+        mod.prepare_image_mode()
+
+
+def test_prepare_image_mode_rides_out_a_short_hal0_outage(monkeypatch) -> None:
+    """An api restart: the first reads fail, then hal0 answers and the switch runs."""
+    mod = _load_node()
+    statuses = iter(
+        [
+            None,
+            None,
+            {"mode": "inference", "arbiter": {"switching": False}},
+            {"mode": "generation", "arbiter": {"switching": False}},
+        ]
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(mod, "_fetch_status", lambda: next(statuses))
+    monkeypatch.setattr(mod, "_post_switchover", lambda: calls.append("switch") or True)
+    monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
+
+    mod.prepare_image_mode()
+    assert calls == ["switch"]
+
+
+def test_the_fail_open_switch_lets_prompts_through_while_hal0_is_unreachable(
+    monkeypatch,
+) -> None:
+    """HAL0_COMFYUI_GATE_FAIL_OPEN=1 restores the pass-through for a ComfyUI
+    that must keep working while hal0 is down. It covers only an unreachable
+    hal0, never one that answered."""
+    monkeypatch.setenv("HAL0_COMFYUI_GATE_FAIL_OPEN", "1")
+    mod = _load_node()
+    monkeypatch.setattr(mod, "_UNREACHABLE_RETRY_S", 0.0, raising=False)
+    monkeypatch.setattr(mod, "_fetch_status", lambda: None)
+    monkeypatch.setattr(mod, "_post_switchover", lambda: pytest.fail("hal0 is unreachable"))
+    monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
+    mod.prepare_image_mode()  # returns: the prompt goes through
+
+    monkeypatch.setattr(mod, "_fetch_status", lambda: {"mode": "inference"})
+    monkeypatch.setattr(mod, "_post_switchover", lambda: False)
+    with pytest.raises(mod.GpuGateClosed):
+        mod.prepare_image_mode()  # hal0 answered and refused: still refused
+
+
+def test_a_failed_status_read_during_the_switch_does_not_let_the_prompt_through(
+    monkeypatch,
+) -> None:
+    """One slow status read (the route's own probes can take 2 s) while the LLM
+    set is still unloading used to let the prompt render on top of it."""
+    mod = _load_node()
+    statuses = iter(
+        [
+            {"mode": "inference", "arbiter": {"switching": False}},
+            None,
+            {"mode": "generation", "arbiter": {"switching": True}},
+            {"mode": "generation", "arbiter": {"switching": False}},
+        ]
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(mod, "_fetch_status", lambda: next(statuses))
+    monkeypatch.setattr(mod, "_post_switchover", lambda: calls.append("switch") or True)
+    monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
+
+    mod.prepare_image_mode()
+    assert calls == ["switch"]
+    assert next(statuses, None) is None  # it waited for the switch to finish
+
+
+def test_hal0_going_silent_after_the_switch_request_refuses_at_the_deadline(
+    monkeypatch,
+) -> None:
+    mod = _load_node()
+    monkeypatch.setattr(mod, "_SWITCH_TIMEOUT_S", 0.3)
+    monkeypatch.setattr(mod, "_SWITCH_POLL_S", 0.05)
+    statuses = iter([{"mode": "inference", "arbiter": {"switching": False}}])
+    monkeypatch.setattr(mod, "_fetch_status", lambda: next(statuses, None))
+    monkeypatch.setattr(mod, "_post_switchover", lambda: True)
+
+    with pytest.raises(mod.GpuGateClosed, match="stopped answering"):
+        mod.prepare_image_mode()
+
+
+def test_the_gate_deadline_outlasts_the_chat_wait_and_the_drain(monkeypatch) -> None:
+    """A prompt that arrives during a long LLM generation must not be refused
+    just before the switch it asked for finishes."""
+    import hal0.slots.arbiter as arbiter_mod
+
+    monkeypatch.delenv("HAL0_COMFYUI_SWITCH_TIMEOUT_S", raising=False)
+    mod = _load_node()
+    assert mod._SWITCH_TIMEOUT_S >= 180.0
+    assert mod._SWITCH_TIMEOUT_S > arbiter_mod._DRAIN_TIMEOUT_S
+    assert mod._SWITCH_TIMEOUT_S > arbiter_mod._LLM_DEMAND_WAIT_S
 
 
 def test_a_refused_prompt_answers_in_comfyuis_prompt_error_shape() -> None:
@@ -244,8 +354,31 @@ def test_a_refused_prompt_answers_in_comfyuis_prompt_error_shape() -> None:
     }
 
 
-def test_prepare_image_mode_fails_open_when_switchover_fails(monkeypatch) -> None:
+def test_prepare_image_mode_refuses_when_hal0_rejects_the_switch_request(monkeypatch) -> None:
+    """hal0 just said the LLM set holds the GPU: letting the prompt through
+    would render on top of it."""
     mod = _load_node()
     monkeypatch.setattr(mod, "_fetch_status", lambda: {"mode": "inference"})
     monkeypatch.setattr(mod, "_post_switchover", lambda: False)
-    mod.prepare_image_mode()
+    with pytest.raises(mod.GpuGateClosed, match="refused the switch"):
+        mod.prepare_image_mode()
+
+
+def test_a_rejected_switch_request_carries_hal0s_reason(monkeypatch) -> None:
+    import io
+    import urllib.error
+
+    mod = _load_node()
+
+    def _rejected(*_args, **_kwargs):
+        body = io.BytesIO(
+            b'{"error": {"code": "comfyui.busy", "message": "2 render job(s) queued"}}'
+        )
+        raise urllib.error.HTTPError(mod.HAL0_SWITCHOVER_URL, 500, "Server Error", {}, body)
+
+    monkeypatch.setattr(mod, "_fetch_status", lambda: {"mode": "inference"})
+    monkeypatch.setattr(mod.urllib.request, "urlopen", _rejected)
+
+    with pytest.raises(mod.GpuGateClosed, match="HTTP 500") as exc:
+        mod.prepare_image_mode()
+    assert "2 render job(s) queued" in str(exc.value)

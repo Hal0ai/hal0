@@ -72,6 +72,10 @@ _GPU_GATE_NODE = "hal0_gpu_gate.py"
 _DEFAULT_PROFILE_FLAGS = "--disable-mmap --bf16-vae --cache-none"
 
 # Default port — ComfyUI's stock listen port.
+#: Read by the hal0_gpu_gate custom node inside the container (see
+#: hal0/comfyui/assets/hal0_gpu_gate.py): let prompts through while hal0-api is
+#: unreachable instead of refusing them.
+_GATE_FAIL_OPEN_ENV = "HAL0_COMFYUI_GATE_FAIL_OPEN"
 _DEFAULT_PORT = 8188
 
 
@@ -478,10 +482,18 @@ class ComfyUIProvider(Provider):
         # and llama_server's notes on stock-ubuntu /etc/group).
         group_add: list[str] = [str(gid) for gid in resolve_gpu_group_ids()]
 
+        # The hal0_gpu_gate node refuses prompts while hal0-api is unreachable;
+        # an operator who wants them through sets this in hal0-api's environment
+        # (api.env) and the container gets it at its next start.
+        # Only a normalised "1" reaches the unit file, never the raw value.
+        container_env: dict[str, str] = {}
+        if os.environ.get(_GATE_FAIL_OPEN_ENV, "").strip().lower() in ("1", "true", "yes", "on"):
+            container_env[_GATE_FAIL_OPEN_ENV] = "1"
+
         return RuntimeLaunchPlan(
             image=self.image_ref(slot_cfg),
             command=command,
-            env={},
+            env=container_env,
             mounts=mounts,
             devices=resolve_gpu_device_paths(),
             cap_add=[],

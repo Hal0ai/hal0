@@ -24,15 +24,22 @@ the spec).
 
 If hal0 reports inference again after the hook asked for image mode (an LLM
 request took the GPU back before the prompt reached ComfyUI's queue), the hook
-asks again, a bounded number of times. When hal0 answers but has not handed
-the GPU to ComfyUI by the deadline, or keeps it in inference mode after those
-requests, the hook refuses the prompt: ComfyUI's editor shows its prompt-error
-dialog with hal0's reason, and the user queues the prompt again. A prompt never
-renders on top of the loaded LLM set.
+asks again, a bounded number of times.
 
-Fail-open otherwise: if hal0-api is unreachable, reports no arbiter, or rejects
-the switch request, the hook allows the prompt — a broken hal0 must never brick
-standalone ComfyUI use. The decision logic (``prepare_image_mode``) is
+A prompt never renders on top of the loaded LLM set. The hook refuses it, and
+ComfyUI's editor shows its prompt-error dialog with hal0's reason, when:
+
+  - hal0 rejects the switch request right after reporting inference;
+  - hal0 keeps the GPU in inference mode after those requests;
+  - hal0 stops answering after the switch request, or has not finished the
+    switch by the deadline;
+  - hal0 is unreachable (or reports no GPU mode) for ``_UNREACHABLE_RETRY_S``
+    from the first read: with hal0-api down the GPU most likely holds the LLM
+    set, which is its resting state. ``HAL0_COMFYUI_GATE_FAIL_OPEN=1`` in the
+    container's environment lets prompts through in this case only (the img
+    slot passes it on from hal0-api's environment).
+
+The decision logic (``prepare_image_mode``) is
 unit-tested in the hal0 repo (tests/comfyui/test_hal0_gpu_gate.py, and against
 the real arbiter in tests/slots/test_gpu_arbiter.py); the aiohttp wiring is
 exercised by a live check on a test box.
@@ -40,6 +47,7 @@ exercised by a live check on a test box.
 
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -62,8 +70,25 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
-_SWITCH_TIMEOUT_S = _float_env("HAL0_COMFYUI_SWITCH_TIMEOUT_S", 120.0)
+#: How long one prompt waits for hal0 to hand over the GPU before it is refused.
+#: Longer than the arbiter's drain (_DRAIN_TIMEOUT_S = 120 s, waiting for running
+#: LLM requests) plus the unloads, and longer than an LLM request's own wait for
+#: the GPU (_LLM_DEMAND_WAIT_S = 120 s), so a prompt that arrives during a long
+#: generation is not refused just before its switch finishes.
+_SWITCH_TIMEOUT_S = _float_env("HAL0_COMFYUI_SWITCH_TIMEOUT_S", 180.0)
 _SWITCH_POLL_S = _float_env("HAL0_COMFYUI_SWITCH_POLL_S", 0.5)
+#: How long an unreachable hal0 (no answer since this prompt arrived) is retried
+#: before the prompt is refused: long enough to ride out an api restart.
+_UNREACHABLE_RETRY_S = _float_env("HAL0_COMFYUI_UNREACHABLE_RETRY_S", 5.0)
+#: Let prompts through while hal0 is unreachable (the gate's earlier behaviour),
+#: for a ComfyUI that must keep working with hal0-api down. It never covers a
+#: hal0 that answered.
+_FAIL_OPEN_WHEN_UNREACHABLE = os.environ.get("HAL0_COMFYUI_GATE_FAIL_OPEN", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 #: Switch requests per prompt. A request after the first only follows a status
 #: that shows inference with no switch running, and waits twice as many polls
 #: as the one before it.
@@ -71,7 +96,15 @@ _SWITCH_MAX_POSTS = 3
 
 
 class GpuGateClosed(Exception):
-    """hal0 answered but did not hand the GPU to ComfyUI: the prompt must not run."""
+    """hal0 did not hand the GPU to ComfyUI: the prompt must not run."""
+
+
+_UNREACHABLE_REASON = (
+    "hal0 is unreachable (or did not say which mode holds the GPU), so ComfyUI "
+    "cannot be sure the GPU is free of the LLM set; the prompt was not queued. "
+    "Queue it again once hal0-api is up, or set HAL0_COMFYUI_GATE_FAIL_OPEN=1 to "
+    "let prompts through while hal0 is down"
+)
 
 
 def refused_prompt_body(reason: str) -> dict:
@@ -103,8 +136,8 @@ def _is_prompt_submit(method: str, path: str) -> bool:
 def should_prepare_image_mode(method: str, path: str, status: "dict | None") -> bool:
     """True iff this prompt submit should ask hal0 to enter image mode.
 
-    ``status`` is hal0-api's /api/comfyui/status JSON (or None when
-    unreachable / unparseable → fail-open).
+    ``status`` is hal0-api's /api/comfyui/status JSON, or None when it could
+    not be read; only a status that reports inference asks for a switch.
     """
     if not _is_prompt_submit(method, path):
         return False
@@ -149,12 +182,18 @@ def _fetch_status() -> "dict | None":
         return None
 
 
+#: Why this thread's last switch request failed (the middleware runs each
+#: prompt's hook in its own worker thread).
+_last_post_error = threading.local()
+
+
 def _post_switchover() -> bool:
     """Ask hal0-api to enter generation mode; True means accepted/noop.
 
-    stdlib-only on purpose: custom nodes can't assume extra deps in the
-    ComfyUI venv.
+    On False, :func:`_post_error` says why. stdlib-only on purpose: custom
+    nodes can't assume extra deps in the ComfyUI venv.
     """
+    _last_post_error.reason = None
     body = json.dumps({"mode": "generation"}).encode("utf-8")
     req = urllib.request.Request(
         HAL0_SWITCHOVER_URL,
@@ -164,12 +203,35 @@ def _post_switchover() -> bool:
     )
     try:
         with urllib.request.urlopen(req, timeout=_STATUS_TIMEOUT_S) as resp:
-            return resp.status in (200, 202)
+            if resp.status in (200, 202):
+                return True
+            _last_post_error.reason = f"HTTP {resp.status}"
+            return False
     except urllib.error.HTTPError as exc:
         # 409 can mean a switch is already in flight. Poll status below.
-        return exc.code == 409
-    except (urllib.error.URLError, OSError, ValueError):
+        if exc.code == 409:
+            return True
+        _last_post_error.reason = f"HTTP {exc.code}: {_http_error_message(exc)}"
         return False
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        _last_post_error.reason = str(getattr(exc, "reason", exc))
+        return False
+
+
+def _http_error_message(exc: "urllib.error.HTTPError") -> str:
+    """hal0's error message from the response body, else the HTTP reason."""
+    try:
+        data = json.loads(exc.read(4096).decode("utf-8"))
+        message = data["error"]["message"]
+        if isinstance(message, str) and message:
+            return message
+    except Exception:
+        pass
+    return str(exc.reason)
+
+
+def _post_error() -> str:
+    return getattr(_last_post_error, "reason", None) or "no reason given"
 
 
 def prepare_image_mode() -> None:
@@ -181,33 +243,56 @@ def prepare_image_mode() -> None:
     before the prompt reached the queue), it asks again, at most
     ``_SWITCH_MAX_POSTS`` times in all.
 
-    Returns to let the prompt through: in generation mode, or failing open
-    when hal0 is unreachable, reports no arbiter, or rejects a switch request.
-    Raises :class:`GpuGateClosed` when hal0 answers but keeps the GPU in
-    inference mode after those requests, or has not finished by the deadline.
+    Returns to let the prompt through once hal0 reports generation mode with
+    no switch running (or, with ``HAL0_COMFYUI_GATE_FAIL_OPEN``, while hal0 is
+    unreachable). Otherwise raises :class:`GpuGateClosed`; see the module
+    docstring for the cases.
     """
-    deadline = time.monotonic() + max(0.0, _SWITCH_TIMEOUT_S)
+    started = time.monotonic()
+    deadline = started + max(0.0, _SWITCH_TIMEOUT_S)
     poll_s = max(0.05, _SWITCH_POLL_S)
+    answered = False  # hal0 has reported a GPU mode for this prompt
     posts = 0
     polls = 0
     next_post_poll = 0
     while True:
         status = _fetch_status()
-        if not isinstance(status, dict):
-            return  # hal0 unreachable: fail open
-        if not (_arbiter_switching(status) or _switchover_active(status)):
-            if status.get("mode") == "generation":
-                return
-            if not should_prepare_image_mode("POST", "/prompt", status):
-                return  # no arbiter answer, so no known mode: fail open
-            if posts >= _SWITCH_MAX_POSTS:
-                raise GpuGateClosed(_inference_reason(status, posts))
-            if polls >= next_post_poll:
-                if not _post_switchover():
-                    return  # hal0 rejected the request: fail open
-                posts += 1
-                next_post_poll = polls + 2**posts
+        mode = status.get("mode") if isinstance(status, dict) else None
+        if mode not in ("generation", "inference"):
+            # No answer, or none about the GPU. Before hal0 has answered, this
+            # is an unreachable hal0: retry briefly, then refuse (or, opted
+            # out, let the prompt through). After it answered, hal0 may be
+            # mid-switch with the LLM set still loaded: keep polling.
+            if not answered and time.monotonic() - started >= _UNREACHABLE_RETRY_S:
+                if _FAIL_OPEN_WHEN_UNREACHABLE:
+                    return
+                raise GpuGateClosed(_UNREACHABLE_REASON)
+        else:
+            answered = True
+            if not (_arbiter_switching(status) or _switchover_active(status)):
+                if mode == "generation":
+                    return
+                if posts >= _SWITCH_MAX_POSTS:
+                    raise GpuGateClosed(_inference_reason(status, posts))
+                if polls >= next_post_poll:
+                    if not _post_switchover():
+                        raise GpuGateClosed(
+                            "hal0 reports the GPU in inference mode and refused the switch "
+                            f"to image generation ({_post_error()}), so the prompt was not "
+                            "queued; queue it again"
+                        )
+                    posts += 1
+                    next_post_poll = polls + 2**posts
         if time.monotonic() >= deadline:
+            if not answered:
+                if _FAIL_OPEN_WHEN_UNREACHABLE:
+                    return
+                raise GpuGateClosed(_UNREACHABLE_REASON)
+            if mode not in ("generation", "inference"):
+                raise GpuGateClosed(
+                    "hal0 stopped answering while it switched the GPU to image "
+                    "generation, so the prompt was not queued; queue it again"
+                )
             raise GpuGateClosed(
                 f"hal0 did not finish switching the GPU to image generation within "
                 f"{_SWITCH_TIMEOUT_S:.0f}s, so the prompt was not queued; queue it again"
