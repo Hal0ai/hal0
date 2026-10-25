@@ -785,12 +785,13 @@ def test_no_gate_call_is_unknown(client: TestClient):
     ("method", "path"),
     [("GET", "/api/comfyui/arbiter"), ("POST", "/api/comfyui/prompt-handoff")],
 )
-def test_headerless_call_is_stale(client: TestClient, method: str, path: str):
+def test_headerless_call_is_stale(box_client: TestClient, method: str, path: str):
     """The gate-only routes were called by a gate that sends no version: an older one.
-    It is told by its client: the gate builds its requests with urllib."""
-    client.request(method, path, headers=_GATE_UA)
+    It is told by its client (the gate builds its requests with urllib) and its peer
+    (it calls from the box itself)."""
+    box_client.request(method, path, headers=_GATE_UA)
 
-    assert _status(client)["gate"] == {"state": "stale", "version_seen": None}
+    assert _status(box_client)["gate"] == {"state": "stale", "version_seen": None}
 
 
 _BROWSER_UA = (
@@ -813,18 +814,62 @@ def test_headerless_call_from_curl_or_a_browser_is_nobody(
     assert _status(client)["gate"] == {"state": "unknown", "version_seen": None}
 
 
-def test_v165_gate_status_read_is_stale(client: TestClient):
+def test_v165_gate_status_read_is_stale(box_client: TestClient):
     """The released v1.6.5 gate never calls /arbiter or /prompt-handoff: it reads
     GET /status and posts /switchover, without the version header, through urllib."""
-    assert _status(client, _GATE_UA)["gate"] == {"state": "stale", "version_seen": None}
+    assert _status(box_client, _GATE_UA)["gate"] == {"state": "stale", "version_seen": None}
     # Later dashboard polls do not undo it.
-    assert _status(client)["gate"]["state"] == "stale"
+    assert _status(box_client)["gate"]["state"] == "stale"
 
 
-def test_v165_gate_switchover_is_stale(client: TestClient):
-    client.post("/api/comfyui/switchover", json={"mode": "generation"}, headers=_GATE_UA)
+def test_v165_gate_switchover_is_stale(box_client: TestClient):
+    box_client.post("/api/comfyui/switchover", json={"mode": "generation"}, headers=_GATE_UA)
 
-    assert _status(client)["gate"] == {"state": "stale", "version_seen": None}
+    assert _status(box_client)["gate"] == {"state": "stale", "version_seen": None}
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("GET", "/api/comfyui/status", None),
+        ("GET", "/api/comfyui/arbiter", None),
+        ("POST", "/api/comfyui/prompt-handoff", None),
+        ("POST", "/api/comfyui/switchover", {"mode": "generation"}),
+    ],
+)
+@pytest.mark.parametrize("peer", ["192.0.2.99", "testclient"])
+def test_a_headerless_urllib_call_from_another_machine_is_not_an_old_gate(
+    app, monkeypatch, peer: str, method: str, path: str, body
+):
+    """Auth is off. A urllib script on the LAN polling the gate's routes is not the engine
+    on this box: the gate dials from the box itself, as the auth layer's marker requires."""
+    monkeypatch.setenv("HAL0_REQUIRE_AUTH", "0")
+    monkeypatch.delenv("HAL0_ADMIN_KEY", raising=False)
+    monkeypatch.setenv("HAL0_BIND_HOST", "0.0.0.0")
+    with TestClient(app, client=(peer, 51000)) as remote:
+        remote.request(method, path, json=body, headers=_GATE_UA)
+
+        assert _status(remote)["gate"] == {"state": "unknown", "version_seen": None}
+
+
+def test_a_headerless_urllib_call_from_the_bind_address_is_an_old_gate(app, monkeypatch):
+    """Bound to one address, the gate dials that address: the same box."""
+    monkeypatch.setenv("HAL0_REQUIRE_AUTH", "0")
+    monkeypatch.delenv("HAL0_ADMIN_KEY", raising=False)
+    monkeypatch.setenv("HAL0_BIND_HOST", "192.0.2.10")
+    with TestClient(app, client=("192.0.2.10", 51000)) as on_the_box:
+        on_the_box.get("/api/comfyui/arbiter", headers=_GATE_UA)
+
+        assert _status(on_the_box)["gate"] == {"state": "stale", "version_seen": None}
+
+
+def test_a_call_with_the_header_counts_from_any_peer(app, monkeypatch):
+    """The peer test is for the header-less guess only; the header says what it is."""
+    monkeypatch.setenv("HAL0_REQUIRE_AUTH", "0")
+    with TestClient(app, client=("192.0.2.99", 51000)) as remote:
+        remote.get("/api/comfyui/arbiter", headers={_VERSION: "2"})
+
+        assert _status(remote)["gate"] == {"state": "current", "version_seen": "2"}
 
 
 @pytest.mark.parametrize("user_agent", ["curl/8.5.0", _BROWSER_UA])
@@ -853,16 +898,16 @@ def test_an_older_version_is_stale(client: TestClient):
     assert _status(client)["gate"] == {"state": "stale", "version_seen": "1"}
 
 
-def test_the_gates_latest_call_decides(client: TestClient):
+def test_the_gates_latest_call_decides(box_client: TestClient):
     """Restarting the engine swaps the gate: its first call replaces what hal0 saw."""
-    client.get("/api/comfyui/arbiter", headers=_GATE_UA)
-    assert _status(client)["gate"]["state"] == "stale"
+    box_client.get("/api/comfyui/arbiter", headers=_GATE_UA)
+    assert _status(box_client)["gate"]["state"] == "stale"
 
-    client.get("/api/comfyui/arbiter", headers={**_GATE_UA, _VERSION: "2"})
-    assert _status(client)["gate"]["state"] == "current"
+    box_client.get("/api/comfyui/arbiter", headers={**_GATE_UA, _VERSION: "2"})
+    assert _status(box_client)["gate"]["state"] == "current"
 
-    client.get("/api/comfyui/arbiter", headers=_GATE_UA)
-    assert _status(client)["gate"]["state"] == "stale"
+    box_client.get("/api/comfyui/arbiter", headers=_GATE_UA)
+    assert _status(box_client)["gate"]["state"] == "stale"
 
 
 def test_a_headerless_switchover_is_the_dashboards_not_a_stale_gate(client: TestClient):

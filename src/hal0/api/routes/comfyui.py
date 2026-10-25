@@ -235,13 +235,16 @@ async def _gate_call(request: Request) -> None:
     gate's only when it looks like one: the gate's default HTTP client (a User-Agent of
     ``Python-urllib/…``; v1.6.5's gate made ``GET /status`` and ``POST /switchover``
     that way, and the first gates with the header's routes ``/arbiter`` and
-    ``/prompt-handoff``). A browser, curl or any other client without the header is
-    nobody in particular: the dashboard polls ``/status`` and posts ``/switchover``.
-    The User-Agent test is a heuristic (see :func:`hal0.api.auth.gate_path_refused_at`).
+    ``/prompt-handoff``) calling from where the gate dials, the box itself (the peer
+    test the auth layer's marker uses). A browser, curl, another machine or any other
+    client without the header is nobody in particular: the dashboard polls ``/status``
+    and posts ``/switchover``. The User-Agent test is a heuristic (see
+    :func:`hal0.api.auth.gate_path_refused_at`).
     """
     version = request.headers.get(GATE_VERSION_HEADER)
-    if version is None and not request.headers.get("user-agent", "").startswith(
-        GATE_USER_AGENT_PREFIX
+    if version is None and not (
+        request.headers.get("user-agent", "").startswith(GATE_USER_AGENT_PREFIX)
+        and auth_layer._gate_peer(request.scope)
     ):
         return
     _gate_seen.update(
