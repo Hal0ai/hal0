@@ -43,6 +43,7 @@ import logging
 import os
 import re
 import shutil
+import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -104,7 +105,19 @@ _WORKFLOW_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=1.5, read=4.0, write=2.0, pool=2.0)
 _POOL_LIMITS = httpx.Limits(max_connections=4, max_keepalive_connections=2)
 
+# The memory budget polls ComfyUI from /api/stats/hardware, which the dashboard hits every
+# 2.5 s: that read must give up far sooner than the pane's ``_DEFAULT_TIMEOUT`` and be
+# cached, so a dead or wedged engine never makes the poll wait.
+_ENGINE_TIMEOUT = httpx.Timeout(connect=0.25, read=0.5, write=0.5, pool=0.5)
+_ENGINE_TTL_S = 5.0
+
 _client: httpx.AsyncClient | None = None
+
+# ``(read at, MB or None)`` of the last ``engine_used_mb`` read; a failed read is cached too.
+_engine_cache: tuple[float, float | None] | None = None
+
+# Clock seam for the cache above; tests drive the TTL through it.
+_now = time.monotonic
 
 # Keep strong refs to fire-and-forget tasks so they aren't GC'd mid-flight (RUF006).
 _BG_TASKS: set[asyncio.Task[Any]] = set()
@@ -159,9 +172,10 @@ async def aclose_client() -> None:
 
 
 def _reset_state() -> None:
-    """Drop the shared client + switch tracker. For test isolation only."""
-    global _client
+    """Drop the shared client, switch tracker and engine-read cache. For test isolation only."""
+    global _client, _engine_cache
     _client = None
+    _engine_cache = None
     _switch.clear()
     _switch.update(_SWITCH_IDLE)
 
@@ -181,6 +195,48 @@ async def _fetch_json(path: str) -> dict[str, Any] | None:
         return data if isinstance(data, dict) else None
     except (httpx.HTTPError, ValueError):
         return None
+
+
+async def _fetch_engine_stats() -> dict[str, Any] | None:
+    """GET ComfyUI's /system_stats with the budget's short timeouts, or None.
+
+    Same fail-soft contract as :func:`_fetch_json`, but a per-request timeout
+    (:data:`_ENGINE_TIMEOUT`) instead of the shared client's, which ``/status``
+    keeps using unchanged.
+    """
+    url = f"{_comfyui_base_url()}/system_stats"
+    try:
+        resp = await _get_client().get(url, timeout=_ENGINE_TIMEOUT)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        return data if isinstance(data, dict) else None
+    except (httpx.HTTPError, ValueError):
+        return None
+
+
+async def engine_used_mb() -> float | None:
+    """ComfyUI's own GPU usage in MiB (``vram_total - vram_free``), or None.
+
+    The memory budget's measured figure for the image engine (ADR-0039); callers
+    fall back to the img slot's attribution on None. Cached for
+    :data:`_ENGINE_TTL_S`, failures included, and bounded by
+    :data:`_ENGINE_TIMEOUT`, so the dashboard's 2.5 s poll costs ComfyUI at most
+    one short read per TTL. A read cancelled by the caller's own deadline is
+    cached as a failure too, so the next poll does not wait the same deadline out.
+    """
+    global _engine_cache
+    cached = _engine_cache
+    if cached is not None and _now() - cached[0] < _ENGINE_TTL_S:
+        return cached[1]
+    used_mb: float | None = None
+    try:
+        used_bytes = _device_used_bytes(await _fetch_engine_stats())
+        if used_bytes is not None:
+            used_mb = used_bytes / (1024.0 * 1024.0)
+    finally:
+        _engine_cache = (_now(), used_mb)
+    return used_mb
 
 
 async def _list_files_or_none() -> list[dict[str, Any]] | None:
@@ -234,6 +290,32 @@ def _bytes_to_gb(value: Any) -> float | None:
     return round(value / 1024**3, 1)
 
 
+def _first_device(stats: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The first device ComfyUI's /system_stats reports, or None."""
+    devices = stats.get("devices") if stats else None
+    if isinstance(devices, list) and devices and isinstance(devices[0], dict):
+        return devices[0]
+    return None
+
+
+def _device_used_bytes(stats: dict[str, Any] | None) -> float | None:
+    """The first device's ``vram_total - vram_free`` in bytes, or None.
+
+    None when there is no device, either figure is missing or not a number, or
+    free exceeds total. The one parse behind both the pane's GTT gauge and
+    :func:`engine_used_mb`.
+    """
+    dev = _first_device(stats)
+    if dev is None:
+        return None
+    total = dev.get("vram_total")
+    free = dev.get("vram_free")
+    if not isinstance(total, (int, float)) or not isinstance(free, (int, float)):
+        return None
+    used = total - free
+    return used if used >= 0 else None
+
+
 def _parse_memory(stats: dict[str, Any] | None) -> dict[str, Any] | None:
     """Fold ComfyUI's /system_stats into the pane's GTT + RAM gauges.
 
@@ -243,14 +325,12 @@ def _parse_memory(stats: dict[str, Any] | None) -> dict[str, Any] | None:
     if not stats:
         return None
     gtt_used = gtt_ceil = None
-    devices = stats.get("devices")
-    if isinstance(devices, list) and devices and isinstance(devices[0], dict):
-        dev = devices[0]
-        total = dev.get("vram_total")
-        free = dev.get("vram_free")
-        gtt_ceil = _bytes_to_gb(total) or _GTT_CEIL_GB
-        if isinstance(total, (int, float)) and isinstance(free, (int, float)):
-            gtt_used = _bytes_to_gb(total - free)
+    dev = _first_device(stats)
+    if dev is not None:
+        gtt_ceil = _bytes_to_gb(dev.get("vram_total")) or _GTT_CEIL_GB
+        used = _device_used_bytes(stats)
+        if used is not None:
+            gtt_used = _bytes_to_gb(used)
     ram_used = None
     ram_ceil = None
     system = stats.get("system")

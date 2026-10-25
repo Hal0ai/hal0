@@ -9,12 +9,18 @@ in MiB (what the sample and ``build_per_slot`` carry); expectations are in GB
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
+import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from hal0.api import memory_source
+from hal0.api.memory_source import collect_memory_budget
 from hal0.hardware.gpu_view import GPUMemorySample
 from hal0.hardware.memory_budget import (
     RENDER_MARGIN_GB,
@@ -595,3 +601,264 @@ def test_dotdot_in_the_cgroup_path_cannot_leave_the_cgroup_root(tmp_path: Path) 
 
 def test_cgroup_limit_never_raises_on_a_missing_root(tmp_path: Path) -> None:
     assert cgroup_limit_mb(tmp_path / "nope") is None
+
+
+# ── The collector: gather the live inputs, hand them to build_memory_budget ──────
+
+
+class _Stats:
+    """``app.state.hardware_stats`` stand-in; records the thread it was read on."""
+
+    def __init__(self, sample: GPUMemorySample | None) -> None:
+        self.sample = sample
+        self.thread: int | None = None
+
+    def gpu_sample(self) -> GPUMemorySample | None:
+        self.thread = threading.get_ident()
+        return self.sample
+
+
+class _Manager:
+    """``app.state.slot_manager`` stand-in: ``list()`` and ``iter_configs()``."""
+
+    def __init__(self, slots: list[Any], configs: list[dict[str, Any]]) -> None:
+        self._slots = slots
+        self._configs = configs
+
+    async def list(self) -> list[Any]:
+        return list(self._slots)
+
+    async def iter_configs(self) -> list[dict[str, Any]]:
+        return list(self._configs)
+
+
+def _slot(name: str, state: str = "ready", model_id: str | None = "m") -> SimpleNamespace:
+    return SimpleNamespace(
+        name=name,
+        state=state,
+        model_id=model_id,
+        backend="rocm",
+        slot_id=None,
+        metadata={"provider": "llama-server", "backend": "rocm"},
+    )
+
+
+class _Registry:
+    """Every model is ``size_gib`` GiB on disk."""
+
+    def __init__(self, size_gib: int = 4) -> None:
+        self._size = size_gib * 1024**3
+
+    def get(self, model_id: str) -> SimpleNamespace:
+        return SimpleNamespace(size_bytes=self._size)
+
+
+def _app(**state: Any) -> SimpleNamespace:
+    return SimpleNamespace(state=SimpleNamespace(**state))
+
+
+@pytest.fixture
+def collector_env(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """Pin everything the collector reads outside ``app.state``: a GPU box with
+    a fixed RAM reading, no cgroup probe, and a ComfyUI that does not answer."""
+    from unittest.mock import AsyncMock
+
+    env = SimpleNamespace(ram_thread=None, engine_calls=0, engine_mb=None)
+
+    def fake_read_ram() -> RamBudget:
+        env.ram_thread = threading.get_ident()
+        return RAM
+
+    async def fake_engine() -> float | None:
+        env.engine_calls += 1
+        return env.engine_mb
+
+    monkeypatch.setattr(memory_source, "read_ram", fake_read_ram)
+    monkeypatch.setattr("hal0.slots.capacity._host_has_capable_gpu", lambda: True)
+    monkeypatch.setattr(
+        "hal0.slots.capacity._container_cgroup_mem_bytes", AsyncMock(return_value=0)
+    )
+    monkeypatch.setattr("hal0.api.routes.comfyui.engine_used_mb", fake_engine)
+    return env
+
+
+async def test_collect_with_nothing_wired_still_returns_a_budget(
+    collector_env: SimpleNamespace,
+) -> None:
+    budget = await collect_memory_budget(_app())
+
+    assert budget.gpu is None
+    assert budget.render_free_gb is None
+    assert budget.ram == RAM
+
+
+async def test_collect_without_a_slot_manager_has_an_empty_pool_attribution(
+    collector_env: SimpleNamespace,
+) -> None:
+    budget = await collect_memory_budget(_app(hardware_stats=_Stats(_shared_sample())))
+
+    gpu = _gpu(budget)
+    assert gpu.this_box == ()
+    assert gpu.other_guests_gb == gpu.used_gb  # nothing to attribute it to
+
+
+async def test_collect_survives_a_broken_slot_manager(collector_env: SimpleNamespace) -> None:
+    class Broken:
+        async def list(self) -> list[Any]:
+            raise RuntimeError("boom")
+
+        async def iter_configs(self) -> list[dict[str, Any]]:
+            raise RuntimeError("boom")
+
+    budget = await collect_memory_budget(
+        _app(hardware_stats=_Stats(_shared_sample()), slot_manager=Broken())
+    )
+
+    assert _gpu(budget).this_box == ()
+
+
+async def test_collect_survives_a_failing_gpu_sample(collector_env: SimpleNamespace) -> None:
+    class Failing:
+        def gpu_sample(self) -> GPUMemorySample:
+            raise OSError("sysfs gone")
+
+    budget = await collect_memory_budget(_app(hardware_stats=Failing()))
+
+    assert budget.gpu is None
+    assert budget.ram == RAM
+
+
+async def test_collect_derives_gpu_slots_and_the_img_slot_from_the_configs(
+    collector_env: SimpleNamespace,
+) -> None:
+    configs = [
+        {"name": "brain", "device": "gpu-vulkan"},
+        {"name": "fallback"},  # no device: gpu_exclusive_group defaults it to gpu-rocm
+        {"name": "npu-chat", "device": "npu"},
+        {"name": "utility", "device": "cpu"},
+        {"name": "img", "device": "gpu-rocm", "provider": "comfyui", "type": "image"},
+    ]
+    slots = [_slot(c["name"]) for c in configs]
+    budget = await collect_memory_budget(
+        _app(
+            hardware_stats=_Stats(_shared_sample()),
+            slot_manager=_Manager(slots, configs),
+            model_registry=_Registry(size_gib=4),
+        )
+    )
+
+    gpu = _gpu(budget)
+    assert [s.slot for s in gpu.this_box] == ["brain", "fallback"]
+    # The img slot's row stands in for the engine while ComfyUI does not answer.
+    assert gpu.image_engine_gb == 4.0
+
+
+async def test_collect_prefers_comfyuis_own_figure_over_the_img_row(
+    collector_env: SimpleNamespace,
+) -> None:
+    collector_env.engine_mb = 1024.0
+    configs = [{"name": "img", "device": "gpu-rocm", "provider": "comfyui", "type": "image"}]
+    budget = await collect_memory_budget(
+        _app(
+            hardware_stats=_Stats(_shared_sample()),
+            slot_manager=_Manager([_slot("img")], configs),
+            model_registry=_Registry(size_gib=6),
+        )
+    )
+
+    assert _gpu(budget).image_engine_gb == 1.0
+
+
+async def test_collect_lists_a_starting_gpu_slot(collector_env: SimpleNamespace) -> None:
+    configs = [{"name": "brain", "device": "gpu-rocm"}]
+    budget = await collect_memory_budget(
+        _app(
+            hardware_stats=_Stats(_shared_sample()),
+            slot_manager=_Manager([_slot("brain", state="starting")], configs),
+            model_registry=_Registry(size_gib=8),
+        )
+    )
+
+    (share,) = _gpu(budget).this_box
+    assert (share.slot, share.state) == ("brain", "starting")
+    assert share.gb == 8.0
+
+
+async def test_collect_reuses_rows_the_caller_already_built(
+    collector_env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def must_not_run(*_a: Any, **_k: Any) -> dict[str, Any]:
+        raise AssertionError("build_per_slot ran although rows were passed in")
+
+    monkeypatch.setattr("hal0.slots.capacity.build_per_slot", must_not_run)
+    manager = _Manager([], [{"name": "brain", "device": "gpu-rocm"}])
+    budget = await collect_memory_budget(
+        _app(hardware_stats=_Stats(_shared_sample()), slot_manager=manager),
+        per_slot={"brain": _row(2048.0)},
+    )
+
+    (share,) = _gpu(budget).this_box
+    assert (share.slot, share.gb) == ("brain", 2.0)
+
+
+async def test_collect_reads_ram_and_the_gpu_sample_off_the_loop(
+    collector_env: SimpleNamespace,
+) -> None:
+    stats = _Stats(_shared_sample())
+    await collect_memory_budget(_app(hardware_stats=stats))
+
+    loop_thread = threading.get_ident()
+    assert collector_env.ram_thread not in (None, loop_thread)
+    assert stats.thread not in (None, loop_thread)
+
+
+async def test_collect_skips_the_engine_when_there_is_no_gpu_pool(
+    collector_env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("hal0.slots.capacity._host_has_capable_gpu", lambda: False)
+
+    budget = await collect_memory_budget(_app(hardware_stats=_Stats(_shared_sample())))
+
+    assert budget.gpu is None
+    assert collector_env.engine_calls == 0
+
+
+async def test_collect_does_not_wait_for_a_hung_engine(
+    collector_env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def hung() -> float | None:
+        await asyncio.sleep(3)
+        return 99999.0
+
+    monkeypatch.setattr("hal0.api.routes.comfyui.engine_used_mb", hung)
+    configs = [{"name": "img", "device": "gpu-rocm", "provider": "comfyui", "type": "image"}]
+    app = _app(
+        hardware_stats=_Stats(_shared_sample()),
+        slot_manager=_Manager([_slot("img")], configs),
+        model_registry=_Registry(size_gib=6),
+    )
+
+    started = time.perf_counter()
+    budget = await collect_memory_budget(app)
+
+    assert time.perf_counter() - started < 1.5
+    assert _gpu(budget).image_engine_gb == 6.0  # the img row, not the hung read
+
+
+async def test_collect_survives_a_raising_engine_read(
+    collector_env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def boom() -> float | None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("hal0.api.routes.comfyui.engine_used_mb", boom)
+    configs = [{"name": "img", "device": "gpu-rocm", "provider": "comfyui", "type": "image"}]
+    budget = await collect_memory_budget(
+        _app(
+            hardware_stats=_Stats(_shared_sample()),
+            slot_manager=_Manager([_slot("img")], configs),
+            model_registry=_Registry(size_gib=6),
+        )
+    )
+
+    assert _gpu(budget).image_engine_gb == 6.0

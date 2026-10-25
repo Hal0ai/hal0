@@ -220,6 +220,98 @@ class TestBuildPerSlotGpuCapabilityGating:
         assert row["vram_mb"] == row["mem_mb"] > 0.0
 
 
+# ── build_per_slot: slots that are still starting (#3056) ─────────────────
+
+
+class TestBuildPerSlotIncludeStarting:
+    """A slot that is ``starting`` holds no weights yet but is about to: the
+    memory budget needs its footprint to leave room for it. Opt-in, so every
+    other caller keeps the resident-only map."""
+
+    @staticmethod
+    def _registry(size_gib: int = 4) -> MagicMock:
+        model = MagicMock()
+        model.size_bytes = size_gib * 1024 * 1024 * 1024
+        model.model_dump = lambda: {}
+        registry = MagicMock()
+        registry.get = MagicMock(return_value=model)
+        return registry
+
+    @pytest.mark.asyncio
+    async def test_build_per_slot_includes_starting_when_asked(self):
+        slot = _make_slot("brain", state="starting", backend="vulkan")
+
+        with patch(
+            "hal0.slots.capacity._container_cgroup_mem_bytes",
+            new_callable=AsyncMock,
+            return_value=0,
+        ):
+            default = await build_per_slot([slot], registry=self._registry(), gpu_capable=True)
+            asked = await build_per_slot(
+                [slot], registry=self._registry(), gpu_capable=True, include_starting=True
+            )
+
+        assert default == {}  # unchanged for every existing caller
+        row = asked["brain"]
+        assert row["state"] == "starting"
+        assert row["model_id"] == "mymodel"
+        assert row["mem_mb"] >= 4096.0  # at least the model file
+        assert row["vram_mb"] == row["mem_mb"]
+        assert row["ram_mb"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_starting_row_uses_the_file_size_estimate_not_the_cgroup(self):
+        """A container that is still loading reports a cgroup far below what it
+        is about to hold; the estimate is the footprint, and the probe is not run."""
+        slot = _make_slot("brain", state="starting", backend="vulkan")
+        probe = AsyncMock(return_value=100 * 1024 * 1024 * 1024)
+
+        with patch("hal0.slots.capacity._container_cgroup_mem_bytes", probe):
+            result = await build_per_slot(
+                [slot], registry=self._registry(), gpu_capable=True, include_starting=True
+            )
+
+        probe.assert_not_called()
+        assert result["brain"]["mem_mb"] < 100 * 1024
+
+    @pytest.mark.asyncio
+    async def test_resident_rows_are_unchanged_when_starting_is_included(self):
+        ready = _make_slot("brain", state="ready", backend="vulkan")
+        starting = _make_slot("coder", state="starting", backend="vulkan")
+
+        with patch(
+            "hal0.slots.capacity._container_cgroup_mem_bytes",
+            new_callable=AsyncMock,
+            return_value=7 * 1024 * 1024 * 1024,
+        ):
+            result = await build_per_slot(
+                [ready, starting],
+                registry=self._registry(),
+                gpu_capable=True,
+                include_starting=True,
+            )
+
+        assert result["brain"]["state"] == "ready"
+        assert result["brain"]["mem_mb"] == 7 * 1024.0  # cgroup still wins for a resident slot
+        assert result["coder"]["state"] == "starting"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("state", ["offline", "pulling", "unloading", "error"])
+    async def test_other_non_resident_states_stay_out(self, state):
+        slot = _make_slot("brain", state=state, backend="vulkan")
+
+        with patch(
+            "hal0.slots.capacity._container_cgroup_mem_bytes",
+            new_callable=AsyncMock,
+            return_value=0,
+        ):
+            result = await build_per_slot(
+                [slot], registry=self._registry(), gpu_capable=True, include_starting=True
+            )
+
+        assert result == {}
+
+
 # ── build_per_slot: artefact-token cgroup probe (id-keying review) ───────
 
 
