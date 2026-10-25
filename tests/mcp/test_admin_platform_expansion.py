@@ -24,6 +24,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from hal0.comfyui import paths as comfyui_paths
 from hal0.mcp import admin
 from hal0.mcp.approval_queue import ApprovalQueue
 
@@ -382,6 +383,23 @@ _UNSAFE_FILE_DELETE_ARGS: list[tuple[str, str, str]] = [
     ("checkpoints?x", "mine.safetensors", "delimiter in subdir"),
     ("checkpoints#x", "mine.safetensors", "fragment in subdir"),
     ("checkpoints", 5, "non-string relpath"),
+    # httpx collapses '.' and '..' path segments, so these would send the call to another route.
+    ("..", "models%2Fsd15", "dot dot subdir redirects to model remove"),
+    ("..", "x", "dot dot subdir"),
+    ("checkpoints", "..", "dot dot relpath"),
+    (".", "x.safetensors", "dot subdir"),
+    ("checkpoints", ".", "dot relpath"),
+    # The route refuses these segments; the validator never passes what the route would refuse.
+    ("checkpoints", "a%2F..%2Fb", "dot dot segment after an encoded slash"),
+    ("checkpoints", "%2Fa", "leading encoded slash"),
+    ("checkpoints", "a%2F", "trailing encoded slash"),
+    ("checkpoints", "a%2f%2fb.safetensors", "empty segment between encoded slashes"),
+    ("checkpoints", ".hidden.safetensors", "hidden file"),
+    ("checkpoints", "a%2F.hf_stage_x%2Fp.safetensors", "hidden directory segment"),
+    ("nope", "x.safetensors", "unknown subdir"),
+    ("", "x.safetensors", "empty subdir"),
+    ("checkpoints", "", "empty relpath"),
+    ("checkpoints/sub", "x.safetensors", "slash in subdir"),
 ]
 
 
@@ -515,6 +533,21 @@ def test_comfyui_file_delete_encoded_slash_reaches_the_route_as_a_slash(
     assert resp.status_code == 200
     assert resp.json() == {"deleted": "loras/styles/a.safetensors"}
     assert not nested.exists()
+
+
+def test_comfyui_file_delete_accepted_args_keep_their_place_in_a_real_httpx_url() -> None:
+    """httpx collapses dot segments; an accepted arg must not be able to move the call."""
+    hazard = httpx.URL("http://t/api/comfyui/files/../x").raw_path
+    assert hazard == b"/api/comfyui/x"  # why '.' and '..' are refused
+
+    template = "/api/comfyui/files/{subdir}/{relpath}"
+    for subdir in sorted(set(comfyui_paths.SUBDIRS.values())):
+        for relpath in ("mine.safetensors", "styles%2Fa.safetensors", "styles%2fa.b.safetensors"):
+            args = {"subdir": subdir, "relpath": relpath}
+            assert admin._invalid_arg("comfyui_file_delete", args) is None
+            url = admin._format_url("http://t", template, args)
+            raw_path = httpx.URL(url).raw_path.decode()
+            assert raw_path == f"/api/comfyui/files/{subdir}/{relpath}"
 
 
 def test_comfyui_file_delete_is_wired_like_the_model_remove_it_sits_beside() -> None:

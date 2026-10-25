@@ -179,6 +179,7 @@ import structlog
 from mcp.types import CallToolResult, TextContent
 
 from hal0.api._redact import redact_log_line as _redact_log_line
+from hal0.comfyui import paths as comfyui_paths
 from hal0.mcp.approval_queue import ApprovalQueue
 from hal0.mcp.memory import _ANNOTATIONS as _MEMORY_TOOL_ANNOTATIONS
 from hal0.mcp.probes import PROBE_TOOLS, dispatch_probe
@@ -1841,26 +1842,43 @@ _ENCODED_SLASH = re.compile(r"%2f", re.IGNORECASE)
 def _unsafe_file_delete_arg(args: dict[str, Any]) -> str | None:
     """Why ``comfyui_file_delete``'s args cannot go into its URL as they are, or ``None``.
 
-    :func:`_format_url` pastes path args in unquoted and the server percent-decodes them, so
-    the ``relpath`` an operator approves must be the file that is deleted. ``%6Bine`` would
-    delete ``kine``, and ``junk.safetensors?x`` or ``...#x`` would delete ``junk.safetensors``,
-    on an approval card that names neither. The tool's files are ones the operator added by
-    hand and cannot re-download, so it takes no escape but ``%2F`` / ``%2f`` (the one way to
-    name a ``/``, which :func:`_split_args` keeps out of a path arg), in ``relpath`` only, and
-    no ``?`` or ``#``. A missing arg is left for :func:`_split_args` to report.
+    :func:`_format_url` pastes path args in unquoted, then httpx collapses ``.`` and ``..``
+    segments and the server percent-decodes what is left. So the file an operator approved
+    can differ from the one deleted: ``%6Bine`` would delete ``kine``, ``junk.safetensors?x``
+    or ``...#x`` would delete ``junk.safetensors``, and ``subdir=".."`` with
+    ``relpath="models%2Fsd15"`` would call the model-remove route. The files this tool
+    removes are ones the operator added by hand and cannot re-download, so it refuses
+    whatever the route would refuse, and whatever the URL would rewrite:
+
+    * ``subdir`` must be one of :data:`~hal0.comfyui.paths.SUBDIRS`'s directory names;
+    * ``relpath`` takes no ``?`` or ``#`` and no escape but ``%2F`` / ``%2f`` (the one way to
+      name a ``/``, which :func:`_split_args` keeps out of a path arg), and none of the
+      segments between those has to be empty or start with ``.``: the rule of
+      :func:`~hal0.comfyui.inventory.delete_file`.
+
+    A missing arg is left for :func:`_split_args` to report.
     """
-    for key in ("subdir", "relpath"):
-        if key not in args:
-            continue
-        value = args[key]
-        if not isinstance(value, str):
-            return f"{key} must be a string"
-        if "?" in value or "#" in value:
-            return f"{key} must not contain '?' or '#' (got {value!r})"
-        rest = _ENCODED_SLASH.sub("", value) if key == "relpath" else value
-        if "%" in rest:
-            allowed = "only %2F, for a '/'" if key == "relpath" else "no '%' escape"
-            return f"{key} takes {allowed}: any other '%' would change the file it names"
+    if "subdir" in args:
+        subdir = args["subdir"]
+        if not isinstance(subdir, str):
+            return "subdir must be a string"
+        if subdir not in comfyui_paths.SUBDIRS.values():
+            names = ", ".join(sorted(set(comfyui_paths.SUBDIRS.values())))
+            return f"subdir must be one of {names} (got {subdir!r})"
+    if "relpath" in args:
+        relpath = args["relpath"]
+        if not isinstance(relpath, str):
+            return "relpath must be a string"
+        if "?" in relpath or "#" in relpath:
+            return f"relpath must not contain '?' or '#' (got {relpath!r})"
+        segments = _ENCODED_SLASH.split(relpath)
+        if any("%" in segment for segment in segments):
+            return "relpath takes only %2F, for a '/': any other '%' would change the file it names"
+        if any(not segment or segment.startswith(".") for segment in segments):
+            return (
+                "relpath must have no empty segment and none starting with '.' "
+                f"(got {relpath!r}); write each '/' as %2F"
+            )
     return None
 
 
