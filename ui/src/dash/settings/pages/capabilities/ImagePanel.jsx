@@ -6,6 +6,7 @@
 // Workflows, queue, and inventory live on the ComfyUI pane, not here.
 import { useState, useEffect } from 'react'
 import { useSlots, useSlotEdit, useSlotConfig } from '@/api/hooks/useSlots'
+import { useComfyuiModels } from '@/api/hooks/useComfyui'
 import { SRow } from '../../shared/SRow.jsx'
 import { ApplyBadge } from '../../shared/ApplyBadge.jsx'
 import { useCapabilitySelection } from './useCapabilitySelection.js'
@@ -16,6 +17,22 @@ import { statusChip, PanelHeader, PanelFooter, EnabledRow, ModelRow, selStyle, i
 const DEF_SIZE = ""
 const DEF_STEPS = "0"
 const DEF_IDLE = "60"
+
+// The img catalog is empty only on a host with no ComfyUI engine (no ROCm lane): any
+// other host lists every catalog model, marked when its weights are not on disk. So an
+// empty catalog is not something installing a model or typing an id can fix — the
+// server refuses an id it does not advertise — and the row says why, read-only. Its own
+// component so the engine query runs only in that state.
+function NoEngineRow() {
+  const reason = useComfyuiModels().data?.engine?.reason
+  return (
+    <SRow k="Model" v={
+      <span data-testid="img-model-no-engine" className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>
+        {reason ? `No ComfyUI image engine: ${reason}` : "No ComfyUI image engine on this host"}
+      </span>
+    } />
+  )
+}
 
 export function ImagePanel({ registry }) {
   const sel = useCapabilitySelection('img', 'img', { withProvider: true })
@@ -80,15 +97,11 @@ export function ImagePanel({ registry }) {
           popover link here for an image slot. Rows are the API's image picker rows
           (catalog models + the operator's own ckpt/<path> checkpoints). Inventory
           and workflows live on the ComfyUI pane. */}
-      <ModelRow items={sel.catalogItems} value={sel.model} onChange={sel.setModel}
-        placeholder="model id"
-        emptyHint="no image models listed — install one from Image Gen" />
-      {sel.catalogItems.length === 0 && (
-        <div className="s-row" style={{padding: "6px 12px"}}>
-          <a data-testid="img-model-empty-link" href="#slots/image" className="mono"
-            style={{fontSize: 11, color: "var(--accent)"}}>Install an image model from Image Gen →</a>
-        </div>
-      )}
+      {sel.catalogItems.length > 0
+        ? <ModelRow items={sel.catalogItems} value={sel.model} onChange={sel.setModel} />
+        // Nothing while the capabilities load (the catalog is [] until they do) or when
+        // the probe failed: the footer already says so and Save is gated.
+        : !sel.loading && !sel.errored && <NoEngineRow />}
 
       <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
         <div className="k">

@@ -7,8 +7,8 @@
 // (catalog models plus the operator's own `ckpt/<path>` checkpoints), marks a model
 // whose weights are not on disk, and saves the pick as `model`.
 //
-// The real useCapabilitySelection runs; only the capabilities query/mutation and the
-// slot hooks are mocked at the module boundary.
+// The real useCapabilitySelection runs; only the capabilities query/mutation, the
+// image-engine query and the slot hooks are mocked at the module boundary.
 import React, { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -19,9 +19,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 // FieldInfoIcon is a dash/primitives.jsx window global, used unimported by the panel.
 ;(globalThis as unknown as { FieldInfoIcon: () => null }).FieldInfoIcon = () => null
 
-const { applyCalls, capsBox } = vi.hoisted(() => ({
+const { applyCalls, capsBox, capsState, engineBox } = vi.hoisted(() => ({
   applyCalls: [] as { slot: string; child: string; body: Record<string, unknown> }[],
   capsBox: { current: undefined as Record<string, unknown> | undefined },
+  // The capabilities query's state: `loading` has no data yet, `error` is a failed probe.
+  capsState: { current: 'ok' as 'ok' | 'loading' | 'error' },
+  // GET /api/comfyui/models' `engine` block; undefined = that query has not answered.
+  engineBox: { current: undefined as { available: boolean; reason: string | null } | undefined },
 }))
 
 vi.mock('@/api/hooks/useSlots', () => ({
@@ -31,13 +35,22 @@ vi.mock('@/api/hooks/useSlots', () => ({
 }))
 
 vi.mock('@/api/hooks/useCapabilities', () => ({
-  useCapabilities: () => ({ data: capsBox.current, isLoading: false, isError: false, refetch: () => {} }),
+  useCapabilities: () => ({
+    data: capsState.current === 'ok' ? capsBox.current : undefined,
+    isLoading: capsState.current === 'loading',
+    isError: capsState.current === 'error',
+    refetch: () => {},
+  }),
   useCapabilityApply: () => ({
     isPending: false,
     mutateAsync: async (args: { slot: string; child: string; body: Record<string, unknown> }) => {
       applyCalls.push(args)
     },
   }),
+}))
+
+vi.mock('@/api/hooks/useComfyui', () => ({
+  useComfyuiModels: () => ({ data: engineBox.current ? { models: [], engine: engineBox.current } : undefined }),
 }))
 
 const { ImagePanel } = await import('../settings/pages/capabilities/ImagePanel.jsx')
@@ -106,8 +119,16 @@ function saveButton(host: HTMLElement): HTMLButtonElement {
   ) as HTMLButtonElement
 }
 
+// Any text-entry input the panel offers for a model id (the three generation defaults
+// are the only other inputs, and none of them has this placeholder).
+const modelIdInput = (host: HTMLElement) => host.querySelector('input[placeholder="model id"]')
+
+const NO_ENGINE = 'no ROCm lane on this host (ComfyUI needs /dev/kfd and a render node)'
+
 beforeEach(() => {
   applyCalls.length = 0
+  capsState.current = 'ok'
+  engineBox.current = undefined
   document.body.innerHTML = ''
 })
 
@@ -125,6 +146,7 @@ describe('ImagePanel Model row', () => {
     ])
     // The old "selected per-workflow" pointer is gone: this row is where it is picked.
     expect(host.textContent).not.toContain('selected per-workflow')
+    expect(host.querySelector('[data-testid="img-model-no-engine"]')).toBeNull()
   })
 
   it('saves the picked model in the capability apply body', async () => {
@@ -148,17 +170,49 @@ describe('ImagePanel Model row', () => {
     })
   })
 
-  it('with no catalog rows falls back to a free-text id and links to the Image slot page', () => {
-    capsBox.current = caps([], null)
+  it('has no model row of its own and no empty-state while the capabilities load', () => {
+    capsState.current = 'loading'
     const host = mount()
     expect(modelSelect(host)).toBeNull()
-    const link = host.querySelector('[data-testid="img-model-empty-link"]') as HTMLAnchorElement
-    expect(link.getAttribute('href')).toBe('#slots/image')
+    expect(modelIdInput(host)).toBeNull()
+    expect(host.querySelector('[data-testid="img-model-no-engine"]')).toBeNull()
   })
 
-  it('shows no empty-state link while the catalog has rows', () => {
-    capsBox.current = caps(CATALOG, null)
+  it('shows nothing in place of the row when the capabilities probe failed', () => {
+    capsState.current = 'error'
     const host = mount()
-    expect(host.querySelector('[data-testid="img-model-empty-link"]')).toBeNull()
+    expect(modelSelect(host)).toBeNull()
+    expect(modelIdInput(host)).toBeNull()
+    expect(host.querySelector('[data-testid="img-model-no-engine"]')).toBeNull()
+  })
+
+  it('explains an empty catalog read-only, with the server reason: no input, no install link', () => {
+    capsBox.current = caps([], null)
+    engineBox.current = { available: false, reason: NO_ENGINE }
+    const host = mount()
+    const row = host.querySelector('[data-testid="img-model-no-engine"]')!
+    expect(row.textContent).toBe(`No ComfyUI image engine: ${NO_ENGINE}`)
+    expect(modelSelect(host)).toBeNull()
+    expect(modelIdInput(host)).toBeNull()
+    expect(host.querySelector('a[href="#slots/image"]')).toBeNull()
+  })
+
+  it('falls back to a fixed sentence when the engine query has no reason yet', () => {
+    capsBox.current = caps([], null)
+    const host = mount()
+    expect(host.querySelector('[data-testid="img-model-no-engine"]')!.textContent).toBe(
+      'No ComfyUI image engine on this host',
+    )
+  })
+
+  it('cannot save an arbitrary id from the empty state: the model is whatever was saved', async () => {
+    capsBox.current = caps([], 'sdxl-lightning')
+    engineBox.current = { available: false, reason: NO_ENGINE }
+    const host = mount()
+    const enabled = host.querySelector('input[type="checkbox"]') as HTMLInputElement
+    act(() => enabled.click())
+    await act(async () => saveButton(host).click())
+    expect(applyCalls).toHaveLength(1)
+    expect(applyCalls[0]!.body.model).toBe('sdxl-lightning')
   })
 })
