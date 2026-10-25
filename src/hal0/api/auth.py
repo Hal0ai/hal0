@@ -83,6 +83,7 @@ import ipaddress
 import json
 import os
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import parse_qs
@@ -434,7 +435,7 @@ def _origin_allowed(scope: dict[str, Any]) -> bool:
 # Posture-coupled ADMIN gate (#1822) — see the module docstring.
 
 
-def _is_loopback_peer(scope: dict[str, Any]) -> bool:
+def _is_loopback_peer(scope: Mapping[str, Any]) -> bool:
     """True iff the ASGI ``scope["client"]`` peer address is loopback.
 
     Missing client info (``None`` — some non-TCP test transports) is
@@ -513,7 +514,7 @@ _GATE_REQUESTS: frozenset[tuple[str, str]] = frozenset(
 GATE_SCOPE_KEY = "hal0.comfyui_gate"
 
 
-def _gate_peer(scope: dict[str, Any]) -> bool:
+def _gate_peer(scope: Mapping[str, Any]) -> bool:
     """True iff the request comes from where the gate dials: the box itself.
 
     The img container shares the host's network, so the gate reaches hal0-api
