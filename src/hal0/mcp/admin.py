@@ -956,14 +956,17 @@ TOOL_NAME_ALIASES: dict[str, tuple[str, ...]] = {
 _SUPPORTED_VERBS: frozenset[str] = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"})
 
 # Path prefixes never walked for tool generation: the MCP mounts, the
-# OpenAPI/doc surfaces, and the dashboard-plugin static server. (The SPA
-# catch-all is matched structurally by :func:`_is_spa_catchall`.)
+# OpenAPI/doc surfaces, the dashboard-plugin static server, and ComfyUI's
+# editor relay (a browser surface; the image routes under /api/comfyui are the
+# tools). (The SPA catch-all is matched structurally by :func:`_is_spa_catchall`.)
 _SKIP_PATH_PREFIXES: tuple[str, ...] = (
     "/mcp",
     "/docs",
     "/redoc",
     "/openapi.json",
     "/dashboard-plugins",
+    "/comfyui",
+    "/extensions",
 )
 
 # Gap-2 path-SUFFIX markers for streaming/SSE/WS tails. Applied ONLY to

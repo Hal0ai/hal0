@@ -161,16 +161,16 @@ def test_urls_hermes_advertised_even_behind_proxy(
     assert body["hermes_enabled"] is True, body
 
 
-def test_urls_comfyui_lan_direct_default_port_8188(client: TestClient) -> None:
-    """ComfyUI's own web UI is advertised at the request host on :8188.
+def test_urls_comfyui_is_the_editor_proxy(client: TestClient) -> None:
+    """ComfyUI listens on loopback only; hal0 serves its editor at ``/comfyui/`` (#3049).
 
-    The dashboard is served from :8080; ComfyUI's frontend lives on the
-    runtime host's :8188, so a LAN-direct hit derives ``http://<host>:8188``.
+    The proxy itself is covered in ``test_comfyui_editor_proxy.py``.
     """
     resp = client.get("/api/config/urls", headers={"host": "hal0-test.lan:8080"})
     assert resp.status_code == 200
     body = resp.json()
-    assert body["comfyui"] == "http://hal0-test.lan:8188", body
+    assert body["comfyui"] == "/comfyui/", body
+    assert body["comfyui_proxy"] is True, body
 
 
 def test_urls_comfyui_public_url_env_wins(
@@ -179,10 +179,9 @@ def test_urls_comfyui_public_url_env_wins(
 ) -> None:
     """HAL0_COMFYUI_PUBLIC_URL is the canonical override.
 
-    This is how a reverse-proxy deploy points the ComfyUI link at a clean
-    HTTPS hostname (e.g. ``https://comfyui.example.com``) instead of the
-    mixed-content ``http://<host>:8188`` that a browser on an HTTPS
-    dashboard would block.
+    An operator who publishes ComfyUI on a hostname of its own (e.g.
+    ``https://comfyui.example.com``) points the link there instead of hal0's
+    ``/comfyui/`` editor proxy.
     """
     monkeypatch.setenv("HAL0_COMFYUI_PUBLIC_URL", "https://comfyui.example.com/")
     resp = client.get(
@@ -198,12 +197,8 @@ def test_urls_comfyui_public_url_env_wins(
     assert body["comfyui"] == "https://comfyui.example.com", body
 
 
-def test_urls_comfyui_behind_proxy_without_env_uses_port_8188(client: TestClient) -> None:
-    """Proxy deploys without the env var still get a host:8188 link.
-
-    The port-stripped forwarded host keeps the link reachable on the LAN
-    even before an operator declares a dedicated ComfyUI subdomain.
-    """
+def test_urls_comfyui_behind_proxy_is_still_the_editor_path(client: TestClient) -> None:
+    """A path on the dashboard's own origin: no host guessing, no mixed content."""
     resp = client.get(
         "/api/config/urls",
         headers={
@@ -213,4 +208,4 @@ def test_urls_comfyui_behind_proxy_without_env_uses_port_8188(client: TestClient
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["comfyui"] == "http://hal0.example.com:8188", body
+    assert body["comfyui"] == "/comfyui/", body

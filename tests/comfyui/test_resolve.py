@@ -136,8 +136,8 @@ def test_resolve_video_422(model_id: str) -> None:
     assert (err.code, err.status) == ("image.model_not_renderable", 422)
     hint = err.details["hint"]
     assert err.details == {"model": model_id, "task": CATALOG[model_id].task, "hint": hint}
-    # Says what exists today: the editor the img slot serves on :8188, which needs a ROCm lane.
-    assert "ComfyUI editor" in hint and "8188" in hint and "ROCm lane" in hint
+    # Says what exists today: the editor hal0 serves at /comfyui/, which needs a ROCm lane.
+    assert "ComfyUI editor" in hint and "/comfyui/" in hint and "ROCm lane" in hint
     assert "Image Gen" not in hint
     assert hint in err.message
 

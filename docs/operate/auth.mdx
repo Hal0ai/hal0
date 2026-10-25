@@ -411,6 +411,13 @@ or a router-assigned `box.lan`, allow its origin with
 `403 auth.origin_forbidden`, and the API log records the refused origin
 under `hal0.auth.origin_rejected`.
 
+ComfyUI's editor at `/comfyui/` is stricter. hal0 rewrites `Origin` to
+ComfyUI's own before relaying, so it checks `Origin` itself on every request
+and WebSocket upgrade there, whatever the method and **even with auth off**.
+Browsers send `Origin` on the editor's script loads too, so a name outside
+the allowlist gets `403 auth.origin_forbidden` for the whole editor until
+you allow it.
+
 ## Route classification
 
 Every route falls into one of four classes — **open** (no auth), **bootstrap**

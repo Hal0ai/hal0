@@ -23,6 +23,7 @@ from pydantic import ValidationError
 
 from hal0.api._redact import redact_config
 from hal0.api.middleware.error_codes import Hal0Error
+from hal0.api.routes.comfyui_proxy import EDITOR_PATH as _COMFYUI_EDITOR_PATH
 from hal0.config.loader import hal0_config_txn, load_hal0_config
 from hal0.config.schema import ModelsConfig
 from hal0.registry.discover import scan_and_register
@@ -52,10 +53,6 @@ def _validation_error_details(exc: ValidationError) -> dict[str, str]:
 # /etc/hal0/api.env; OpenWebUI's port is fixed at 3001 in the unit.
 _DEFAULT_API_PORT = 8080
 _OPENWEBUI_PORT = 3001
-# ComfyUI's own web UI binds :8188 on the runtime host (the img slot's
-# container publishes there). Like OpenWebUI it's browser-reachable on the
-# LAN, so it gets a host:port fallback; HAL0_COMFYUI_PUBLIC_URL overrides it.
-_COMFYUI_PORT = 8188
 
 _OPENWEBUI_UNIT = "hal0-openwebui.service"
 
@@ -144,26 +141,19 @@ def _host_without_port(host: str) -> str:
     return host.rsplit(":", 1)[0] if ":" in host else host
 
 
-def _comfyui_link(request: Request) -> str:
-    """Resolve the link the dashboard should use to open ComfyUI.
+def _comfyui_link() -> str:
+    """Resolve the link the dashboard should use to open ComfyUI's editor.
 
-    ``HAL0_COMFYUI_PUBLIC_URL`` (set in /etc/hal0/api.env) wins when
-    defined — it's how a reverse-proxy deploy declares a clean HTTPS
-    hostname (e.g. ``https://comfyui.example.com``). That matters because
-    an HTTPS dashboard opening the bare ``http://<host>:8188`` fallback is
-    blocked by the browser as mixed content, so the workflow links appear
-    dead. Without the env var we fall back to ``http://<host>:8188`` on the
-    request host (the port-stripped forwarded host behind a proxy), which
-    works LAN-direct.
+    ComfyUI listens on loopback only, so ``http://<host>:8188`` reaches it
+    from nowhere but the box itself. hal0 serves the editor on its own
+    origin instead, at ``/comfyui/`` (:mod:`hal0.api.routes.comfyui_proxy`,
+    admin tier, #3049): a path on the dashboard's own origin, so it works the
+    same LAN-direct, behind a reverse proxy and over HTTPS.
+    ``HAL0_COMFYUI_PUBLIC_URL`` (set in /etc/hal0/api.env) still wins when
+    defined, for an operator who publishes ComfyUI on a hostname of its own.
     """
     public = os.environ.get("HAL0_COMFYUI_PUBLIC_URL", "").strip().rstrip("/")
-    if public:
-        return public
-    if _behind_proxy(request):
-        host = request.headers.get("x-forwarded-host") or _resolve_host(request)
-    else:
-        host = _resolve_host(request)
-    return f"http://{_host_without_port(host)}:{_COMFYUI_PORT}"
+    return public or _COMFYUI_EDITOR_PATH
 
 
 @router.get("/urls")
@@ -179,7 +169,8 @@ async def get_urls(request: Request) -> dict[str, object]:
           "openwebui_enabled": true | false,
           "hermes":            "" | "https://hermes.<host>",
           "hermes_enabled":    true | false,
-          "comfyui":           "http://<host>:8188" | "https://comfyui.<host>",
+          "comfyui":           "/comfyui/" | "https://comfyui.<host>",
+          "comfyui_proxy":     true,
         }
 
     ``HAL0_OPENWEBUI_PUBLIC_URL`` (set in /etc/hal0/api.env) wins
@@ -204,12 +195,17 @@ async def get_urls(request: Request) -> dict[str, object]:
     proxy, e.g. ``https://hermes.example.com``). On a stock install the
     key is ``""`` / ``hermes_enabled = false`` so the dashboard renders the
     hermes health row without a dead-end link.
+
+    ComfyUI's editor is served by hal0 itself at ``/comfyui/``
+    (``comfyui_proxy: true``), so ``comfyui`` is that path unless
+    ``HAL0_COMFYUI_PUBLIC_URL`` names another address (see
+    :func:`_comfyui_link`).
     """
     public = os.environ.get("HAL0_OPENWEBUI_PUBLIC_URL", "").strip().rstrip("/")
     hermes = os.environ.get("HAL0_HERMES_PUBLIC_URL", "").strip().rstrip("/")
     host = _resolve_host(request)
     enabled = await _openwebui_is_active()
-    comfyui = _comfyui_link(request)
+    comfyui = _comfyui_link()
 
     if public:
         if _behind_proxy(request):
@@ -225,6 +221,7 @@ async def get_urls(request: Request) -> dict[str, object]:
             "hermes": hermes,
             "hermes_enabled": bool(hermes),
             "comfyui": comfyui,
+            "comfyui_proxy": True,
         }
 
     if _behind_proxy(request):
@@ -238,6 +235,7 @@ async def get_urls(request: Request) -> dict[str, object]:
             "hermes": hermes,
             "hermes_enabled": bool(hermes),
             "comfyui": comfyui,
+            "comfyui_proxy": True,
         }
     return {
         "api": f"http://{host}:{_api_port()}",
@@ -246,6 +244,7 @@ async def get_urls(request: Request) -> dict[str, object]:
         "hermes": hermes,
         "hermes_enabled": bool(hermes),
         "comfyui": comfyui,
+        "comfyui_proxy": True,
     }
 
 

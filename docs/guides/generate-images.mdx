@@ -208,9 +208,30 @@ seconds after the switch when nothing renders. To keep image mode, pin it.
 
 ### ComfyUI's editor and the GPU gate
 
-Prompts from ComfyUI's own editor do not pass through hal0, so ComfyUI loads
+ComfyUI listens on loopback only. hal0 serves its editor on the dashboard's
+own origin at `/comfyui/` (for example `http://hal0.local:8080/comfyui/`),
+to the same callers as any other admin route (see
+[Authentication](/docs/operate/auth/)). hal0 relays the
+editor's requests unread, so its prompts reach ComfyUI's queue without hal0
+rendering them, and ComfyUI loads
 a custom node, `hal0_gpu_gate`, that asks hal0 for image mode before each
-prompt is queued. hal0's own `/v1` renders pass through it too. The node
+prompt is queued.
+
+The relay (`/comfyui/<path>`, streamed both ways, and `WS /comfyui/ws`)
+always goes to `COMFYUI_BASE_URL` (loopback `:8188`). ComfyUI never receives
+hal0's session cookie, `Authorization`, `X-API-Key`, `X-hal0-*`,
+`X-Forwarded-*` or `?api_key=`, and its `Set-Cookie` and `Access-Control-*`
+headers are dropped. Because hal0 rewrites `Origin` to ComfyUI's own, it
+refuses a request or WebSocket upgrade from an origin it does not allow
+(`403 auth.origin_forbidden`, close `4403`) even with auth off (see
+[Origin protection](/docs/operate/auth/#origin-protection)).
+`GET /api/config/urls` reports `comfyui_proxy: true` and `comfyui:
+"/comfyui/"` unless `HAL0_COMFYUI_PUBLIC_URL` is set. `GET /extensions/<path>`
+redirects to `/comfyui/extensions/<path>`, where node help pages find their
+images. Errors: 400 `comfyui.editor_path_invalid` (a `.` or `..` segment, a
+control character or a raw byte outside ASCII), 413
+`comfyui.editor_body_too_large` (over 512 MiB), 502
+`comfyui.editor_unreachable` and 504 `comfyui.editor_timeout`. hal0's own `/v1` renders pass through it too. The node
 reaches `hal0-api` on the port and address it binds (`HAL0_PORT` and
 `HAL0_BIND_HOST` in `/etc/hal0/api.env`), which hal0 writes into the `img`
 slot's unit. The prompt waits while hal0 switches the GPU, up to 180 seconds

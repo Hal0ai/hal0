@@ -312,6 +312,12 @@ RULES: tuple[_Rule, ...] = (
     _Rule("doctor verdict feed (GET)", _exact("/api/doctor"), AuthClass.ADMIN, _GET),
     # ── ADMIN: everything mutating / config / secret ────────────────────
     _Rule("comfyui", _prefix("/api/comfyui"), AuthClass.ADMIN, None),
+    # ComfyUI's editor through hal0 (#3049, routes/comfyui_proxy.py): its pages, API and
+    # websocket. ADMIN, not the static-SPA OPEN catch-all below that would otherwise take
+    # every GET here: the editor queues any workflow on the GPU and installs custom nodes.
+    # /extensions is ComfyUI's static namespace, redirected under /comfyui.
+    _Rule("comfyui editor proxy", _prefix("/comfyui"), AuthClass.ADMIN, None),
+    _Rule("comfyui editor extension files", _prefix("/extensions"), AuthClass.ADMIN, None),
     _Rule("services", _prefix("/api/services"), AuthClass.ADMIN, None),
     _Rule("settings", _prefix("/api/settings"), AuthClass.ADMIN, None),
     _Rule("secrets", _prefix("/api/secrets"), AuthClass.ADMIN, None),

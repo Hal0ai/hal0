@@ -76,6 +76,7 @@ from hal0.api.routes import (
 )
 from hal0.api.routes import (
     comfyui,
+    comfyui_proxy,
     dashboard_layout,
     doctor,
     hardware,
@@ -2692,6 +2693,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await _bounded_shutdown_step("dispatcher", ctx.dispatcher.aclose)()
         with contextlib.suppress(Exception):
             await comfyui.aclose_client()
+        with contextlib.suppress(Exception):
+            await comfyui_proxy.aclose_client()
         log.info("hal0.api.shutdown")
 
 
@@ -2777,6 +2780,10 @@ def create_app() -> FastAPI:
     # Read-only ComfyUI "generation engine" status for the slots-page Image-Gen
     # tab (docker + systemd + ComfyUI HTTP), plus arbiter switchover controls.
     app.include_router(comfyui.router, prefix="/api/comfyui", tags=["comfyui"])
+    # ComfyUI's own editor on hal0's origin (#3049): /comfyui/ relays to the loopback-only
+    # engine for admin-tier callers. Absolute paths; registered before _mount_dashboard so
+    # the SPA fallback does not shadow them.
+    app.include_router(comfyui_proxy.router, tags=["comfyui"])
     # hardware.router is registered BEFORE models.router: it owns the
     # literal path GET /api/models/health (OBS-1 §21.3), which must match
     # before models.router's GET /api/models/{model_id} catch-all — routes

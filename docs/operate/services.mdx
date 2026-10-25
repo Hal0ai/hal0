@@ -289,7 +289,7 @@ owning unit, its probe strategy, and which lifecycle verbs it permits:
 | Service | Purpose | Unit | Allowed actions |
 |---|---|---|---|
 | OpenWebUI | Chat UI companion (podman container, LAN `:3001`) | `hal0-openwebui.service` | start, stop, restart, enable, disable |
-| ComfyUI | Image generation engine (runs as the seeded `img` slot container, LAN `:8188`) | `hal0-slot@img.service` | start, restart (no stop) |
+| ComfyUI | Image generation engine (runs as the seeded `img` slot container on loopback `:8188`; its editor is at `/comfyui/` on hal0's origin) | `hal0-slot@img.service` | start, restart (no stop) |
 | Hermes | Bundled agent + its own dashboard (loopback `:9119`) | `hal0-agent@hermes.service` | start, stop, restart, enable, disable |
 | Hindsight | Memory engine — this is the same unit documented above | `hindsight-api.service` | start, stop, restart, enable, disable |
 
