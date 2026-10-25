@@ -423,7 +423,7 @@ def test_slot_model_family_distinguishes_slot_from_model() -> None:
 
 
 def test_path_arg_with_slash_rejected_with_hint() -> None:
-    with pytest.raises(KeyError) as exc:
+    with pytest.raises(admin.PathArgError) as exc:
         admin._split_args("model_pull", {"model_id": "org/repo"})
     assert "hf_repo" in str(exc.value)
 
@@ -439,5 +439,6 @@ def test_slash_guard_surfaces_as_typed_error_via_chat(tmp_path, monkeypatch) -> 
     events = _run(_collect(request))
     result = next(e for e in events if e["type"] == "tool_result")
     assert result["result"]["status"] == "error"
+    assert result["result"]["error"]["code"] == "mcp.invalid_arg"
     assert "hf_repo" in json.dumps(result["result"])
     assert rest.calls == []  # never reached the REST hop

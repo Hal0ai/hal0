@@ -30,6 +30,10 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Security
+
+- **An approved admin MCP call now acts on exactly the resource its approval card names.** The gated tools that take a path argument (`slot_delete`, `model_delete`, `upstream_delete`, `stack_apply` and the rest) pasted that argument into the REST URL raw. After you approved, `..` climbed out of the tool's route onto a sibling route, a `?` or `#` cut the path short (`junk?x` deleted `junk`), and a `%6D` escape was decoded by the server (`%6Dy-model` acted on `my-model`), so a prompt-injected agent could get an approval for a card that did not name what the call changed. Path arguments are now sent literally: each one is percent-encoded as a single URL segment, so `?`, `#`, `%`, spaces, `:` and non-ASCII reach the server as typed. A path argument must now be a string (or an integer below 2^53): `null`, booleans, floats, lists and objects are refused, as are an empty value, `.`, `..`, a value containing `/`, and a value with a control or invisible formatting character (a zero-width space or a bidi override can make a card read as one name while the value is another). They are refused with `mcp.invalid_arg` before any approval card exists (and again if the call is run), instead of after you approved. A missing path argument on a gated tool now returns `mcp.missing_arg` the same way, with no card. ([#3051](https://github.com/Hal0ai/hal0/issues/3051))
+
 ## [1.6.5] — 2026-10-24
 
 ### Highlights
