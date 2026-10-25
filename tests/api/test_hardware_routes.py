@@ -782,11 +782,14 @@ def _no_live_comfyui(monkeypatch: pytest.MonkeyPatch) -> Any:
 
 
 @pytest.fixture
-def memory_box(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> types.SimpleNamespace:
+def memory_box(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, real_memory_budget: None
+) -> types.SimpleNamespace:
     """A GPU box with a brain slot and an img slot, ComfyUI not answering.
 
     ``box.engine`` is what ComfyUI's ``/system_stats`` returns (``None`` = down);
-    ``box.engine_calls`` counts the reads that reached the engine.
+    ``box.engine_calls`` counts the reads that reached the engine. These tests are about the
+    real collector's output, so they opt out of the suite-wide ``memory_budget`` stub.
     """
     box = types.SimpleNamespace(client=client, engine=None, engine_calls=0)
 

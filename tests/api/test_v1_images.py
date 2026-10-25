@@ -37,6 +37,7 @@ from hal0.comfyui.catalog import CATALOG, component_path, weights_gib
 from hal0.comfyui.fit import Need, assess, need_for
 from hal0.hardware.memory_budget import GpuBudget, MemoryBudget, RamBudget
 from hal0.upstreams.registry import Upstream
+from tests.fixtures.memory_budget import MemoryBudgetStub
 
 
 @pytest.fixture(autouse=True)
@@ -78,35 +79,6 @@ def _budget(
         source="container",
     )
     return MemoryBudget(gpu=gpu, ram=ram, render_free_gb=render_free_gb)
-
-
-class _Budget:
-    """Stands in for ``memory_source.collect_memory_budget`` and records each call."""
-
-    def __init__(self) -> None:
-        self.result: MemoryBudget | Exception = _budget(render_free_gb=None)
-        self.apps: list[Any] = []
-
-    async def __call__(
-        self, app: Any, *, per_slot: Any = None, gpu_capable: bool | None = None
-    ) -> MemoryBudget:
-        self.apps.append(app)
-        if isinstance(self.result, Exception):
-            raise self.result
-        return self.result
-
-
-@pytest.fixture(autouse=True)
-def memory_budget(monkeypatch: pytest.MonkeyPatch) -> _Budget:
-    """Give every render here a fixed memory budget, so none reads the machine's GPU or RAM.
-
-    The default is a box with no GPU lane, whose fit is unknown and never refuses. A test of
-    the preflight sets ``memory_budget.result``. The collector itself is covered by
-    ``tests/hardware/test_memory_budget.py``.
-    """
-    budget = _Budget()
-    monkeypatch.setattr("hal0.api.memory_source.collect_memory_budget", budget)
-    return budget
 
 
 def _install(*model_ids: str) -> None:
@@ -1078,7 +1050,7 @@ def _fit_request(model: str, **extra: Any) -> dict[str, Any]:
 
 
 def test_v1_images_preflight_refuses_before_any_switch(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, memory_budget: _Budget
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, memory_budget: MemoryBudgetStub
 ) -> None:
     """A render that cannot fit is a 422 before the arbiter switches: no slot unloads, no image job."""
     _install("sdxl-turbo")
@@ -1108,7 +1080,7 @@ def test_v1_images_preflight_refuses_before_any_switch(
 
 
 def test_v1_images_preflight_message_is_the_fit_reason_verbatim(
-    client: TestClient, memory_budget: _Budget
+    client: TestClient, memory_budget: MemoryBudgetStub
 ) -> None:
     """The 422 says what ``assess`` says, whichever resource decided it (here RAM)."""
     _install("sd-1.5-pruned-emaonly")
@@ -1146,7 +1118,7 @@ def test_v1_images_preflight_message_is_the_fit_reason_verbatim(
 )
 def test_v1_images_preflight_assesses_the_size_that_renders(
     client: TestClient,
-    memory_budget: _Budget,
+    memory_budget: MemoryBudgetStub,
     image_section: dict[str, Any],
     body_extra: dict[str, Any],
     effective: str,
@@ -1181,7 +1153,7 @@ def test_v1_images_preflight_assesses_the_size_that_renders(
     ids=["int", "float", "true", "zero", "false", "list", "empty-list", "object", "empty-object"],
 )
 def test_v1_images_non_string_size_is_a_client_error_not_a_500(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, memory_budget: _Budget, size: Any
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, memory_budget: MemoryBudgetStub, size: Any
 ) -> None:
     """``size`` is a string or absent. Anything else is a 422 before the model is resolved,
     the budget is read or the GPU is touched (the translator used to raise on it: a 500)."""
@@ -1220,7 +1192,7 @@ def test_v1_images_null_or_empty_size_means_the_default_size(
 
 
 def test_v1_images_preflight_size_matches_what_the_translator_renders(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, memory_budget: _Budget
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, memory_budget: MemoryBudgetStub
 ) -> None:
     """A fitting render: the size the preflight judged is the size build_workflow renders."""
     from hal0.providers.comfyui_workflows import build_workflow
@@ -1243,7 +1215,7 @@ def test_v1_images_preflight_size_matches_what_the_translator_renders(
 
 
 def test_v1_images_preflight_skip_flag_renders(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, memory_budget: _Budget
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, memory_budget: MemoryBudgetStub
 ) -> None:
     """``extra_body.hal0_skip_fit_check: true`` renders a request the budget would refuse."""
     _install("sdxl-turbo")
@@ -1267,7 +1239,7 @@ def test_v1_images_preflight_skip_flag_renders(
 
 @pytest.mark.parametrize("flag", [False, "true", 1, "yes", None, []])
 def test_v1_images_preflight_only_a_true_flag_skips(
-    client: TestClient, memory_budget: _Budget, flag: Any
+    client: TestClient, memory_budget: MemoryBudgetStub, flag: Any
 ) -> None:
     _install("sdxl-turbo")
     _seed_img_upstream(client)
@@ -1283,7 +1255,7 @@ def test_v1_images_preflight_only_a_true_flag_skips(
 
 
 def test_v1_images_preflight_ignores_an_extra_body_that_is_not_a_mapping(
-    client: TestClient, memory_budget: _Budget
+    client: TestClient, memory_budget: MemoryBudgetStub
 ) -> None:
     _install("sdxl-turbo")
     _seed_img_upstream(client)
@@ -1306,7 +1278,7 @@ def test_v1_images_preflight_ignores_an_extra_body_that_is_not_a_mapping(
 def test_v1_images_preflight_skips_on_unknown_budget(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
-    memory_budget: _Budget,
+    memory_budget: MemoryBudgetStub,
     unknown: MemoryBudget,
 ) -> None:
     """Unknown is not "won't fit": a budget that cannot answer lets the render proceed."""
@@ -1325,7 +1297,7 @@ def test_v1_images_preflight_skips_on_unknown_budget(
 
 
 def test_v1_images_preflight_fails_open_when_the_collector_raises(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, memory_budget: _Budget
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, memory_budget: MemoryBudgetStub
 ) -> None:
     """A collector failure is one warning and the render goes ahead (the collector has no guard)."""
     _install("sdxl-turbo")
@@ -1345,7 +1317,7 @@ def test_v1_images_preflight_fails_open_when_the_collector_raises(
 
 
 def test_v1_images_preflight_fails_open_when_the_fit_computation_raises(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, memory_budget: _Budget
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, memory_budget: MemoryBudgetStub
 ) -> None:
     """Anything in the fit computation, not only the collector, is fail-open."""
     _install("sdxl-turbo")
@@ -1368,7 +1340,10 @@ def test_v1_images_preflight_fails_open_when_the_fit_computation_raises(
 
 @pytest.mark.parametrize("headroom", [1.05, 4.0], ids=["tight", "fits"])
 def test_v1_images_preflight_only_wont_fit_refuses(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, memory_budget: _Budget, headroom: float
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    memory_budget: MemoryBudgetStub,
+    headroom: float,
 ) -> None:
     """A tight fit (need above 0.9 of the free pool) still renders."""
     _install("sdxl-turbo")
@@ -1387,7 +1362,7 @@ def test_v1_images_preflight_only_wont_fit_refuses(
 
 
 def test_v1_images_preflight_runs_for_the_img_selection_model(
-    client: TestClient, memory_budget: _Budget
+    client: TestClient, memory_budget: MemoryBudgetStub
 ) -> None:
     """A request that names no model is judged as the model the img capability selected."""
     _install("sdxl-turbo")
@@ -1403,7 +1378,7 @@ def test_v1_images_preflight_runs_for_the_img_selection_model(
 
 
 def test_v1_images_resolution_errors_come_before_the_preflight(
-    client: TestClient, memory_budget: _Budget
+    client: TestClient, memory_budget: MemoryBudgetStub
 ) -> None:
     """An unknown or uninstalled model is its own error, and no budget is read for it."""
     _seed_img_upstream(client)
@@ -1424,7 +1399,7 @@ def _sized_user_checkpoint(relpath: str, gib: int, key: str = "conditioner.embed
 
 
 def test_v1_images_user_checkpoint_uses_weights_estimate(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, memory_budget: _Budget
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, memory_budget: MemoryBudgetStub
 ) -> None:
     """``ckpt/<stem>`` is judged from its file size in GiB, as an estimate on both sides."""
     _sized_user_checkpoint("anime/waifu.safetensors", 12)
@@ -1463,7 +1438,7 @@ def test_v1_images_user_checkpoint_uses_weights_estimate(
 
 
 def test_v1_images_user_checkpoint_can_be_refused_by_ram(
-    client: TestClient, memory_budget: _Budget
+    client: TestClient, memory_budget: MemoryBudgetStub
 ) -> None:
     _sized_user_checkpoint("big.safetensors", 12)
     _seed_img_upstream(client)
@@ -1479,7 +1454,7 @@ def test_v1_images_user_checkpoint_can_be_refused_by_ram(
 
 
 def test_v1_images_user_checkpoint_skip_flag_renders(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, memory_budget: _Budget
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, memory_budget: MemoryBudgetStub
 ) -> None:
     _sized_user_checkpoint("big.safetensors", 12)
     _seed_img_upstream(client)

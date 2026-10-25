@@ -30,6 +30,7 @@ from hal0.comfyui.fit import assess, need_for
 from hal0.config.schema import HardwareInfo
 from hal0.hardware.memory_budget import GpuBudget, MemoryBudget, RamBudget
 from hal0.registry.pull import PullJob, _tmp_dir
+from tests.fixtures.memory_budget import MemoryBudgetStub
 
 _BASE = "hal0.api.routes.comfyui"
 _SDXL = "sdxl-lightning"
@@ -99,35 +100,6 @@ NO_GPU_BUDGET = MemoryBudget(
     ram=RamBudget(limit_gb=48.0, used_gb=2.2, free_gb=45.8, source="container"),
     render_free_gb=None,
 )
-
-
-class _Budget:
-    """Stands in for ``memory_source.collect_memory_budget`` and records each call."""
-
-    def __init__(self) -> None:
-        self.result: MemoryBudget | Exception = NO_GPU_BUDGET
-        self.apps: list[Any] = []
-
-    async def __call__(
-        self, app: Any, *, per_slot: Any = None, gpu_capable: bool | None = None
-    ) -> MemoryBudget:
-        self.apps.append(app)
-        if isinstance(self.result, Exception):
-            raise self.result
-        return self.result
-
-
-@pytest.fixture(autouse=True)
-def memory_budget(monkeypatch: pytest.MonkeyPatch) -> _Budget:
-    """Give every route here a fixed memory budget, so none reads the machine's GPU or RAM.
-
-    The default is a box with no GPU lane, whose fit is unknown. A test of the fit sets
-    ``memory_budget.result``. The collector itself is covered by
-    ``tests/hardware/test_memory_budget.py``.
-    """
-    budget = _Budget()
-    monkeypatch.setattr("hal0.api.memory_source.collect_memory_budget", budget)
-    return budget
 
 
 @pytest.fixture(autouse=True)
@@ -451,7 +423,7 @@ def test_models_route_reports_engine_available(
 
 
 def test_models_rows_carry_fit_and_store(
-    client: TestClient, memory_budget: _Budget, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, memory_budget: MemoryBudgetStub, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     memory_budget.result = CAPPED_GUEST
     probed: list[Path] = []
@@ -493,7 +465,7 @@ def test_models_rows_carry_fit_and_store(
 
 
 def test_models_fit_is_judged_at_the_native_size(
-    client: TestClient, memory_budget: _Budget
+    client: TestClient, memory_budget: MemoryBudgetStub
 ) -> None:
     memory_budget.result = ROOMY_BOX
 
@@ -506,7 +478,7 @@ def test_models_fit_is_judged_at_the_native_size(
 
 
 def test_models_fit_is_null_without_a_gpu_budget(
-    client: TestClient, memory_budget: _Budget
+    client: TestClient, memory_budget: MemoryBudgetStub
 ) -> None:
     memory_budget.result = NO_GPU_BUDGET
 
@@ -519,7 +491,7 @@ def test_models_fit_is_null_without_a_gpu_budget(
 
 
 def test_models_fit_is_null_when_the_budget_cannot_be_collected(
-    client: TestClient, memory_budget: _Budget, caplog: pytest.LogCaptureFixture
+    client: TestClient, memory_budget: MemoryBudgetStub, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A collector that raises is an unknown budget: the list answers 200 and never refuses."""
     memory_budget.result = RuntimeError("stats singleton is gone")
@@ -579,7 +551,7 @@ def test_models_store_free_is_null_when_the_disk_cannot_be_measured(
 # ── GET /models/{id}/fit ────────────────────────────────────────────────────
 
 
-def test_fit_route_answers_for_a_size(client: TestClient, memory_budget: _Budget) -> None:
+def test_fit_route_answers_for_a_size(client: TestClient, memory_budget: MemoryBudgetStub) -> None:
     memory_budget.result = ROOMY_BOX
 
     custom = client.get(f"/api/comfyui/models/{_SDXL}/fit", params={"size": "1152x896"})
@@ -600,7 +572,7 @@ def test_fit_route_answers_for_a_size(client: TestClient, memory_budget: _Budget
 
 
 def test_fit_route_without_a_size_is_the_native_size(
-    client: TestClient, memory_budget: _Budget
+    client: TestClient, memory_budget: MemoryBudgetStub
 ) -> None:
     memory_budget.result = ROOMY_BOX
 
@@ -613,7 +585,7 @@ def test_fit_route_without_a_size_is_the_native_size(
 
 
 def test_fit_route_refuses_what_wont_fit_in_words(
-    client: TestClient, memory_budget: _Budget
+    client: TestClient, memory_budget: MemoryBudgetStub
 ) -> None:
     memory_budget.result = CAPPED_GUEST
 
@@ -627,7 +599,7 @@ def test_fit_route_refuses_what_wont_fit_in_words(
     "budget", [NO_GPU_BUDGET, RuntimeError("no stats")], ids=["no-gpu", "raises"]
 )
 def test_fit_route_is_null_without_a_budget(
-    client: TestClient, memory_budget: _Budget, budget: MemoryBudget | Exception
+    client: TestClient, memory_budget: MemoryBudgetStub, budget: MemoryBudget | Exception
 ) -> None:
     memory_budget.result = budget
 
@@ -637,7 +609,9 @@ def test_fit_route_is_null_without_a_budget(
     assert resp.json() == {"fit": None}
 
 
-def test_fit_route_unknown_model_is_404(client: TestClient, memory_budget: _Budget) -> None:
+def test_fit_route_unknown_model_is_404(
+    client: TestClient, memory_budget: MemoryBudgetStub
+) -> None:
     resp = client.get("/api/comfyui/models/no-such-model/fit")
 
     assert resp.status_code == 404
@@ -665,7 +639,9 @@ def test_fit_route_unknown_model_is_404(client: TestClient, memory_budget: _Budg
         "1024x1024\n",
     ],
 )
-def test_fit_route_rejects_bad_size(client: TestClient, memory_budget: _Budget, size: str) -> None:
+def test_fit_route_rejects_bad_size(
+    client: TestClient, memory_budget: MemoryBudgetStub, size: str
+) -> None:
     resp = client.get(f"/api/comfyui/models/{_SDXL}/fit", params={"size": size})
 
     assert resp.status_code == 422
@@ -678,7 +654,7 @@ def test_fit_route_rejects_bad_size(client: TestClient, memory_budget: _Budget, 
 
 @pytest.mark.parametrize("size", ["64x64", "9999x9999", "0512x0512"])
 def test_fit_route_accepts_any_two_to_four_digit_size(
-    client: TestClient, memory_budget: _Budget, size: str
+    client: TestClient, memory_budget: MemoryBudgetStub, size: str
 ) -> None:
     memory_budget.result = ROOMY_BOX
 
