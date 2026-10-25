@@ -121,6 +121,18 @@ def _parse_size(size: str | None) -> tuple[int, int]:
     return w, h
 
 
+def effective_size(size: Any) -> str:
+    """The ``"WxH"`` that :func:`build_workflow` renders for a request's ``size``.
+
+    The same parse and clamp the translator applies (:func:`_parse_size`): an unreadable or
+    missing size is the default, each side is clamped to 64..2048 and floored to a multiple
+    of 8. A caller that must judge the render before it runs (the fit preflight) reads it here
+    rather than repeating the arithmetic.
+    """
+    width, height = _parse_size(size)
+    return f"{width}x{height}"
+
+
 def _coerce_int(value: Any, default: int) -> int:
     try:
         return int(value)
@@ -282,4 +294,5 @@ __all__ = [
     "WorkflowTemplateError",
     "WorkflowTemplateNotFound",
     "build_workflow",
+    "effective_size",
 ]

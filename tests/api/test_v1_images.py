@@ -14,12 +14,15 @@ this exercises:
   * Cache-miss + path-traversal attempt 404 cleanly.
   * Cold-slot path (issue #725): ensure_img() runs before dispatch so the
     img upstream is registered before resolve_by_capability runs.
+  * Fit preflight (ADR-0039): a render that cannot fit the memory budget is refused with
+    422 ``image.wont_fit`` before any GPU slot unloads; an unknown budget never refuses.
 """
 
 from __future__ import annotations
 
 import contextlib
 import json
+import os
 import struct
 from pathlib import Path
 from typing import Any
@@ -27,9 +30,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
+from structlog.testing import capture_logs
 
 from hal0.comfyui import paths
 from hal0.comfyui.catalog import CATALOG, component_path, weights_gib
+from hal0.comfyui.fit import Need, assess, need_for
+from hal0.hardware.memory_budget import GpuBudget, MemoryBudget, RamBudget
 from hal0.upstreams.registry import Upstream
 
 
@@ -40,6 +46,67 @@ def comfyui_data_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(root))
     assert paths.models_root().is_relative_to(tmp_path)
     return root
+
+
+def _budget(
+    *,
+    render_free_gb: float | None,
+    ram_free_gb: float = 100.0,
+    ram_limit_gb: float = 128.0,
+) -> MemoryBudget:
+    """A memory budget with ``render_free_gb`` free for a render; ``None`` is a box with no GPU lane."""
+    gpu = (
+        None
+        if render_free_gb is None
+        else GpuBudget(
+            kind="shared",
+            total_gb=116.0,
+            used_gb=0.0,
+            this_box=(),
+            image_engine_gb=0.0,
+            image_engine_slot=None,
+            image_engine_estimated=False,
+            other_guests_gb=0.0,
+            attribution_excess_gb=0.0,
+            free_gb=116.0,
+        )
+    )
+    ram = RamBudget(
+        limit_gb=ram_limit_gb,
+        used_gb=round(ram_limit_gb - ram_free_gb, 1),
+        free_gb=ram_free_gb,
+        source="container",
+    )
+    return MemoryBudget(gpu=gpu, ram=ram, render_free_gb=render_free_gb)
+
+
+class _Budget:
+    """Stands in for ``memory_source.collect_memory_budget`` and records each call."""
+
+    def __init__(self) -> None:
+        self.result: MemoryBudget | Exception = _budget(render_free_gb=None)
+        self.apps: list[Any] = []
+
+    async def __call__(
+        self, app: Any, *, per_slot: Any = None, gpu_capable: bool | None = None
+    ) -> MemoryBudget:
+        self.apps.append(app)
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
+@pytest.fixture(autouse=True)
+def memory_budget(monkeypatch: pytest.MonkeyPatch) -> _Budget:
+    """Give every render here a fixed memory budget, so none reads the machine's GPU or RAM.
+
+    The default is a box with no GPU lane, whose fit is unknown and never refuses. A test of
+    the preflight sets ``memory_budget.result``. The collector itself is covered by
+    ``tests/hardware/test_memory_budget.py``.
+    """
+    budget = _Budget()
+    monkeypatch.setattr("hal0.api.memory_source.collect_memory_budget", budget)
+    return budget
 
 
 def _install(*model_ids: str) -> None:
@@ -969,6 +1036,418 @@ def test_v1_images_a_render_runs_inside_one_image_job(
     assert open_during_render == [1]
     assert manager.arbiter.jobs == 1
     assert manager.arbiter.open_jobs == 0
+
+
+# ─── fit preflight (ADR-0039): refuse a render that cannot fit, before any GPU switch ──────
+
+
+class _SwitchingManager:
+    """A slot manager whose ``ensure_img`` unloads a GPU slot, as the real arbiter's does."""
+
+    def __init__(self, image: dict[str, Any] | None = None) -> None:
+        self.image = image or {}
+        self.unload = AsyncMock()
+        self.arbiter = _SwitchingArbiter(self)
+
+    async def iter_configs(self) -> list[dict[str, Any]]:
+        return [{"name": "img", "provider": "comfyui", "enabled": True, "image": self.image}]
+
+
+class _SwitchingArbiter:
+    def __init__(self, manager: _SwitchingManager) -> None:
+        self.jobs = 0
+        self.open_jobs = 0
+
+        async def switch(*_args: Any, **_kwargs: Any) -> None:
+            await manager.unload("brain")
+
+        self.ensure_img = AsyncMock(side_effect=switch)
+
+    @contextlib.asynccontextmanager
+    async def image_job(self):
+        self.jobs += 1
+        self.open_jobs += 1
+        try:
+            yield
+        finally:
+            self.open_jobs -= 1
+
+
+def _fit_request(model: str, **extra: Any) -> dict[str, Any]:
+    return {"model": model, "prompt": "x", **extra}
+
+
+def test_v1_images_preflight_refuses_before_any_switch(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, memory_budget: _Budget
+) -> None:
+    """A render that cannot fit is a 422 before the arbiter switches: no slot unloads, no image job."""
+    _install("sdxl-turbo")
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+    manager = _SwitchingManager()
+    client.app.state.slot_manager = manager
+    memory_budget.result = _budget(render_free_gb=4.0)
+
+    r = client.post("/v1/images/generations", json=_fit_request("sdxl-turbo"))
+
+    assert r.status_code == 422, r.text
+    error = r.json()["error"]
+    assert error["code"] == "image.wont_fit"
+    assert error["message"] == "needs 6.4 GB of GPU memory, 4.0 GB free for a render"
+    assert error["details"] == {
+        "need": {"gpu_gb": 6.4, "ram_gb": 6.4, "gpu_estimated": True, "ram_estimated": True},
+        "render_free_gb": 4.0,
+        "ram_free_gb": 100.0,
+        "model": "sdxl-turbo",
+        "size": "512x512",
+    }
+    manager.arbiter.ensure_img.assert_not_awaited()
+    manager.unload.assert_not_awaited()
+    assert manager.arbiter.jobs == 0
+    mock_infer.assert_not_called()
+
+
+def test_v1_images_preflight_message_is_the_fit_reason_verbatim(
+    client: TestClient, memory_budget: _Budget
+) -> None:
+    """The 422 says what ``assess`` says, whichever resource decided it (here RAM)."""
+    _install("sd-1.5-pruned-emaonly")
+    _seed_img_upstream(client)
+    memory_budget.result = _budget(render_free_gb=100.0, ram_free_gb=3.0, ram_limit_gb=48.0)
+    expected = assess(need_for(CATALOG["sd-1.5-pruned-emaonly"], "512x512"), memory_budget.result)
+
+    r = client.post("/v1/images/generations", json=_fit_request("sd-1.5-pruned-emaonly"))
+
+    assert r.status_code == 422, r.text
+    assert expected is not None
+    assert expected.reason == "needs ~4.0 GB of RAM to load, 3.0 GB free (48.0 GB container limit)"
+    assert r.json()["error"]["message"] == expected.reason
+    assert r.json()["error"]["details"]["ram_free_gb"] == 3.0
+
+
+@pytest.mark.parametrize(
+    ("image_section", "body_extra", "effective"),
+    [
+        # The request's size, as the translator reads it.
+        ({}, {"size": "768x768"}, "768x768"),
+        # Rounded down to a multiple of 8 and clamped to 64..2048, like build_workflow.
+        ({}, {"size": "1001x1003"}, "1000x1000"),
+        ({}, {"size": "5000x20"}, "2048x64"),
+        ({}, {"size": "1024X768"}, "1024x768"),
+        # Unreadable: the translator falls back to its default size.
+        ({}, {"size": "banana"}, "1024x1024"),
+        # Omitted: the slot's default_size, else the model's native size.
+        ({"default_size": "768x768"}, {}, "768x768"),
+        ({"default_size": ""}, {}, "512x512"),
+        ({}, {}, "512x512"),
+        # The request beats the slot.
+        ({"default_size": "768x768"}, {"size": "640x640"}, "640x640"),
+    ],
+)
+def test_v1_images_preflight_assesses_the_size_that_renders(
+    client: TestClient,
+    memory_budget: _Budget,
+    image_section: dict[str, Any],
+    body_extra: dict[str, Any],
+    effective: str,
+) -> None:
+    """The size judged is the one the render will use: SD 1.5's need grows with the pixels."""
+    _install("sd-1.5-pruned-emaonly")
+    _seed_img_upstream(client)
+    manager = _SwitchingManager(image_section)
+    client.app.state.slot_manager = manager
+    memory_budget.result = _budget(render_free_gb=5.0)
+
+    r = client.post(
+        "/v1/images/generations", json=_fit_request("sd-1.5-pruned-emaonly", **body_extra)
+    )
+
+    assert r.status_code == 422, r.text
+    details = r.json()["error"]["details"]
+    assert details["size"] == effective
+    expected = need_for(CATALOG["sd-1.5-pruned-emaonly"], effective)
+    assert details["need"] == {
+        "gpu_gb": expected.gpu_gb,
+        "ram_gb": expected.ram_gb,
+        "gpu_estimated": expected.gpu_estimated,
+        "ram_estimated": expected.ram_estimated,
+    }
+    manager.arbiter.ensure_img.assert_not_awaited()
+
+
+def test_v1_images_preflight_size_matches_what_the_translator_renders(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, memory_budget: _Budget
+) -> None:
+    """A fitting render: the size the preflight judged is the size build_workflow renders."""
+    from hal0.providers.comfyui_workflows import build_workflow
+
+    _install("sd-1.5-pruned-emaonly")
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+    memory_budget.result = _budget(render_free_gb=300.0)
+
+    r = client.post(
+        "/v1/images/generations", json=_fit_request("sd-1.5-pruned-emaonly", size="5000x1001")
+    )
+
+    assert r.status_code == 200, r.text
+    sent = mock_infer.call_args.args[1]
+    _graph, meta = build_workflow(
+        body=sent, template=sent["_hal0_template"], request_tag="t", ckpt_override=None
+    )
+    assert (meta["width"], meta["height"]) == (2048, 1000)
+
+
+def test_v1_images_preflight_skip_flag_renders(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, memory_budget: _Budget
+) -> None:
+    """``extra_body.hal0_skip_fit_check: true`` renders a request the budget would refuse."""
+    _install("sdxl-turbo")
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+    manager = _SwitchingManager()
+    client.app.state.slot_manager = manager
+    memory_budget.result = _budget(render_free_gb=1.0)
+
+    r = client.post(
+        "/v1/images/generations",
+        json=_fit_request("sdxl-turbo", extra_body={"hal0_skip_fit_check": True, "steps": 2}),
+    )
+
+    assert r.status_code == 200, r.text
+    mock_infer.assert_awaited_once()
+    assert mock_infer.call_args.args[1]["extra_body"]["steps"] == 2
+    manager.arbiter.ensure_img.assert_awaited_once()
+    assert memory_budget.apps == []  # a skipped check does not even read the budget
+
+
+@pytest.mark.parametrize("flag", [False, "true", 1, "yes", None, []])
+def test_v1_images_preflight_only_a_true_flag_skips(
+    client: TestClient, memory_budget: _Budget, flag: Any
+) -> None:
+    _install("sdxl-turbo")
+    _seed_img_upstream(client)
+    memory_budget.result = _budget(render_free_gb=1.0)
+
+    r = client.post(
+        "/v1/images/generations",
+        json=_fit_request("sdxl-turbo", extra_body={"hal0_skip_fit_check": flag}),
+    )
+
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "image.wont_fit"
+
+
+def test_v1_images_preflight_ignores_an_extra_body_that_is_not_a_mapping(
+    client: TestClient, memory_budget: _Budget
+) -> None:
+    _install("sdxl-turbo")
+    _seed_img_upstream(client)
+    memory_budget.result = _budget(render_free_gb=1.0)
+
+    r = client.post("/v1/images/generations", json=_fit_request("sdxl-turbo", extra_body="skip"))
+
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "image.wont_fit"
+
+
+@pytest.mark.parametrize(
+    "unknown",
+    [
+        _budget(render_free_gb=None),  # no GPU lane
+        _budget(render_free_gb=1.0, ram_free_gb=0.0, ram_limit_gb=0.0),  # RAM unreadable
+    ],
+    ids=["no-gpu-pool", "ram-unreadable"],
+)
+def test_v1_images_preflight_skips_on_unknown_budget(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    memory_budget: _Budget,
+    unknown: MemoryBudget,
+) -> None:
+    """Unknown is not "won't fit": a budget that cannot answer lets the render proceed."""
+    _install("sdxl-turbo")
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+    memory_budget.result = unknown
+
+    with capture_logs() as logs:
+        r = client.post("/v1/images/generations", json=_fit_request("sdxl-turbo"))
+
+    assert r.status_code == 200, r.text
+    mock_infer.assert_awaited_once()
+    assert memory_budget.apps  # the budget was asked
+    assert not [e for e in logs if e["event"] == "images.preflight_budget_unavailable"]
+
+
+def test_v1_images_preflight_fails_open_when_the_collector_raises(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, memory_budget: _Budget
+) -> None:
+    """A collector failure is one warning and the render goes ahead (the collector has no guard)."""
+    _install("sdxl-turbo")
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+    memory_budget.result = RuntimeError("nvidia-smi hung")
+
+    with capture_logs() as logs:
+        r = client.post("/v1/images/generations", json=_fit_request("sdxl-turbo"))
+
+    assert r.status_code == 200, r.text
+    mock_infer.assert_awaited_once()
+    warnings = [e for e in logs if e["event"] == "images.preflight_budget_unavailable"]
+    assert len(warnings) == 1
+    assert warnings[0]["log_level"] == "warning"
+    assert warnings[0]["exc_info"] is True
+
+
+def test_v1_images_preflight_fails_open_when_the_fit_computation_raises(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, memory_budget: _Budget
+) -> None:
+    """Anything in the fit computation, not only the collector, is fail-open."""
+    _install("sdxl-turbo")
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+    memory_budget.result = _budget(render_free_gb=1.0)
+
+    def broken(*_args: Any, **_kwargs: Any) -> Need:
+        raise ValueError("not a WxH size: 'weird'")
+
+    monkeypatch.setattr("hal0.comfyui.fit.need_for", broken)
+
+    with capture_logs() as logs:
+        r = client.post("/v1/images/generations", json=_fit_request("sdxl-turbo"))
+
+    assert r.status_code == 200, r.text
+    mock_infer.assert_awaited_once()
+    assert len([e for e in logs if e["event"] == "images.preflight_budget_unavailable"]) == 1
+
+
+@pytest.mark.parametrize("headroom", [1.05, 4.0], ids=["tight", "fits"])
+def test_v1_images_preflight_only_wont_fit_refuses(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, memory_budget: _Budget, headroom: float
+) -> None:
+    """A tight fit (need above 0.9 of the free pool) still renders."""
+    _install("sdxl-turbo")
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+    need = need_for(CATALOG["sdxl-turbo"], "512x512")
+    memory_budget.result = _budget(render_free_gb=round(need.gpu_gb * headroom, 1))
+    fit = assess(need, memory_budget.result)
+    assert fit is not None
+    assert fit.verdict == ("tight" if headroom < 2 else "fits")
+
+    r = client.post("/v1/images/generations", json=_fit_request("sdxl-turbo"))
+
+    assert r.status_code == 200, r.text
+    mock_infer.assert_awaited_once()
+
+
+def test_v1_images_preflight_runs_for_the_img_selection_model(
+    client: TestClient, memory_budget: _Budget
+) -> None:
+    """A request that names no model is judged as the model the img capability selected."""
+    _install("sdxl-turbo")
+    _seed_img_upstream(client)
+    client.app.state.capability_orchestrator = _FakeOrchestrator("sdxl-turbo")
+    memory_budget.result = _budget(render_free_gb=1.0)
+
+    r = client.post("/v1/images/generations", json={"prompt": "x"})
+
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "image.wont_fit"
+    assert r.json()["error"]["details"]["model"] == "sdxl-turbo"
+
+
+def test_v1_images_resolution_errors_come_before_the_preflight(
+    client: TestClient, memory_budget: _Budget
+) -> None:
+    """An unknown or uninstalled model is its own error, and no budget is read for it."""
+    _seed_img_upstream(client)
+    memory_budget.result = _budget(render_free_gb=0.1)
+
+    for model, status in (("nope", 404), ("sdxl-turbo", 409), ("wan22-t2v", 422)):
+        r = client.post("/v1/images/generations", json=_fit_request(model))
+        assert r.status_code == status, r.text
+        assert r.json()["error"]["code"] != "image.wont_fit"
+
+    assert memory_budget.apps == []
+
+
+def _sized_user_checkpoint(relpath: str, gib: int, key: str = "conditioner.embedders.1.x") -> None:
+    """A user checkpoint of ``gib`` GiB on disk (a sparse file: only its header is written)."""
+    _user_checkpoint(relpath, key)
+    os.truncate(paths.models_root() / "checkpoints" / relpath, gib * 2**30)
+
+
+def test_v1_images_user_checkpoint_uses_weights_estimate(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, memory_budget: _Budget
+) -> None:
+    """``ckpt/<stem>`` is judged from its file size in GiB, as an estimate on both sides."""
+    _sized_user_checkpoint("anime/waifu.safetensors", 12)
+    _seed_img_upstream(client)
+    mock_infer = _mock_png_infer(monkeypatch)
+    manager = _SwitchingManager()
+    client.app.state.slot_manager = manager
+    memory_budget.result = _budget(render_free_gb=10.0)
+
+    r = client.post("/v1/images/generations", json=_fit_request("ckpt/anime/waifu"))
+
+    assert r.status_code == 422, r.text
+    error = r.json()["error"]
+    assert error["code"] == "image.wont_fit"
+    assert error["message"] == "needs 12.0 GB of GPU memory, 10.0 GB free for a render"
+    assert error["details"] == {
+        "need": {"gpu_gb": 12.0, "ram_gb": 12.0, "gpu_estimated": True, "ram_estimated": True},
+        "render_free_gb": 10.0,
+        "ram_free_gb": 100.0,
+        "model": "ckpt/anime/waifu",
+        "size": "1024x1024",
+    }
+    manager.arbiter.ensure_img.assert_not_awaited()
+    manager.unload.assert_not_awaited()
+    mock_infer.assert_not_called()
+
+    # The same file fits a bigger pool, and a smaller checkpoint fits this one.
+    memory_budget.result = _budget(render_free_gb=40.0)
+    assert (
+        client.post("/v1/images/generations", json=_fit_request("ckpt/anime/waifu")).status_code
+        == 200
+    )
+    _sized_user_checkpoint("small.safetensors", 4)
+    memory_budget.result = _budget(render_free_gb=10.0)
+    assert client.post("/v1/images/generations", json=_fit_request("ckpt/small")).status_code == 200
+
+
+def test_v1_images_user_checkpoint_can_be_refused_by_ram(
+    client: TestClient, memory_budget: _Budget
+) -> None:
+    _sized_user_checkpoint("big.safetensors", 12)
+    _seed_img_upstream(client)
+    memory_budget.result = _budget(render_free_gb=100.0, ram_free_gb=5.0, ram_limit_gb=48.0)
+
+    r = client.post("/v1/images/generations", json=_fit_request("ckpt/big"))
+
+    assert r.status_code == 422, r.text
+    assert (
+        r.json()["error"]["message"]
+        == "needs ~12.0 GB of RAM to load, 5.0 GB free (48.0 GB container limit)"
+    )
+
+
+def test_v1_images_user_checkpoint_skip_flag_renders(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, memory_budget: _Budget
+) -> None:
+    _sized_user_checkpoint("big.safetensors", 12)
+    _seed_img_upstream(client)
+    _mock_png_infer(monkeypatch)
+    memory_budget.result = _budget(render_free_gb=1.0)
+
+    r = client.post(
+        "/v1/images/generations",
+        json=_fit_request("ckpt/big", extra_body={"hal0_skip_fit_check": True}),
+    )
+
+    assert r.status_code == 200, r.text
 
 
 # ─── image cache route ────────────────────────────────────────────────────────

@@ -25,6 +25,7 @@ from hal0.providers.comfyui_workflows import (
     WorkflowTemplateError,
     WorkflowTemplateNotFound,
     build_workflow,
+    effective_size,
 )
 
 _TURBO = "sdxl_turbo_simple"
@@ -85,6 +86,32 @@ def test_build_workflow_clamps_size_to_safe_range() -> None:
     _, meta = build_workflow(body=body, template=_TURBO, request_tag="t1")
     assert meta["width"] <= 2048
     assert meta["height"] <= 2048
+
+
+@pytest.mark.parametrize(
+    ("size", "effective"),
+    [
+        ("768x768", "768x768"),
+        ("1001x1003", "1000x1000"),  # floored to a multiple of 8
+        ("5000x20", "2048x64"),  # clamped to 64..2048
+        ("999999x999999", "2048x2048"),
+        ("1024X768", "1024x768"),  # a capital X
+        (" 640x480 ", "640x480"),
+        ("banana", "1024x1024"),  # unreadable: the default
+        ("1024", "1024x1024"),
+        ("", "1024x1024"),
+        (None, "1024x1024"),
+    ],
+)
+def test_effective_size_is_the_size_build_workflow_renders(
+    size: str | None, effective: str
+) -> None:
+    """The fit preflight judges ``effective_size``, so it must be the translator's own answer."""
+    assert effective_size(size) == effective
+    _, meta = build_workflow(
+        body={**_baseline_body(), "size": size}, template=_TURBO, request_tag="t1"
+    )
+    assert f"{meta['width']}x{meta['height']}" == effective
 
 
 def test_build_workflow_seed_override() -> None:

@@ -29,7 +29,7 @@ import json
 import re
 import time
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import structlog
@@ -42,6 +42,9 @@ from hal0.dispatcher.lane_pin import lane_slot_pin, preferred_slot, set_lane_pin
 from hal0.dispatcher.stream_usage import ensure_include_usage, strip_usage_only_chunk
 from hal0.memory.extraction_env import MEMORY_ALIAS
 from hal0.upstreams.filters import apply_filters
+
+if TYPE_CHECKING:
+    from hal0.comfyui.resolve import ResolvedImageModel
 
 log = structlog.get_logger("hal0-v1")
 
@@ -1785,6 +1788,58 @@ def _extract_port_from_upstream_url(url: str) -> int | None:
     return parsed.port
 
 
+async def _refuse_image_that_wont_fit(
+    request: Request, resolved: ResolvedImageModel, body: dict[str, Any]
+) -> None:
+    """Raise 422 ``image.wont_fit`` when the render cannot fit the memory budget.
+
+    Judged at the size the render will use: ``body["size"]`` after the slot and model
+    defaults, read through the translator's own parse and clamp. A catalog model is judged
+    from its catalog facts, a user checkpoint from its file size. Only a ``wont_fit``
+    verdict refuses; ``tight``, ``fits`` and an unknown budget (no GPU pool, unreadable RAM)
+    let the render go on, and a failure anywhere in here does too: the preflight is advice
+    the render never depends on, so it logs one warning and fails open.
+
+    ``extra_body.hal0_skip_fit_check: true`` skips the check, budget read included.
+    """
+    extra = body.get("extra_body")
+    if isinstance(extra, dict) and extra.get("hal0_skip_fit_check") is True:
+        return
+
+    from hal0.api import memory_source
+    from hal0.comfyui.catalog import get_model
+    from hal0.comfyui.fit import assess, need_for, need_for_checkpoint
+    from hal0.comfyui.resolve import ImageWontFit
+    from hal0.providers.comfyui_workflows import effective_size
+
+    try:
+        size = effective_size(body.get("size"))
+        model = get_model(resolved.id)
+        if model is not None:
+            need = need_for(model, size)
+        elif resolved.size_bytes is not None:
+            need = need_for_checkpoint(resolved.size_bytes)
+        else:
+            return
+        # The collector has no guard of its own (an empty budget would read as "no GPU").
+        fit = assess(need, await memory_source.collect_memory_budget(request.app))
+    except Exception:
+        log.warning("images.preflight_budget_unavailable", exc_info=True)
+        return
+    if fit is None or fit.verdict != "wont_fit" or fit.reason is None:
+        return
+    raise ImageWontFit(
+        fit.reason,
+        details={
+            "need": fit.as_dict()["need"],
+            "render_free_gb": fit.render_free_gb,
+            "ram_free_gb": fit.ram_free_gb,
+            "model": resolved.id,
+            "size": size,
+        },
+    )
+
+
 @router.post("/images/generations")
 async def images_generations(request: Request, dispatcher: DispatcherDep) -> Response:
     """OpenAI-compatible image generation.
@@ -1848,7 +1903,44 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
             resolve_image_model, model_arg, selection_model=selection_model
         )
 
-    # 2. GPU arbitration (Phase D, spec §7) — BEFORE dispatch so the img
+    # 2. Seed #599 request defaults from the img slot's [image] section
+    #    (default_size / default_steps) before anything is judged or dispatched, so the
+    #    body the fit check and the dispatcher see already has the resolved defaults.
+    #    Size precedence: the request, then the slot's non-empty default_size, then the
+    #    model's native size (below, once the slot has had its say). This only reads the
+    #    slot configs; the GPU is not touched until the image job below.
+    manager = getattr(request.app.state, "slot_manager", None)
+    arbiter = manager.arbiter if manager is not None else None
+    if manager is not None:
+        from hal0.slots.arbiter import gpu_exclusive_group
+
+        cfgs = await manager.iter_configs()
+        img_cfg = next((c for c in cfgs if gpu_exclusive_group(c) == "img"), None)
+        img_section = (img_cfg or {}).get("image") or {}
+        if isinstance(img_section, dict):
+            default_size = img_section.get("default_size")
+            if not body.get("size") and isinstance(default_size, str) and default_size:
+                body["size"] = default_size
+            default_steps = img_section.get("default_steps")
+            if (
+                isinstance(default_steps, int)
+                and not isinstance(default_steps, bool)
+                and default_steps > 0
+            ):
+                extra = body.get("extra_body")
+                if not isinstance(extra, dict):
+                    extra = {}
+                    body["extra_body"] = extra
+                extra.setdefault("steps", default_steps)
+    if not body.get("size"):
+        body["size"] = resolved.defaults["size"]
+
+    # 3. Fit preflight (ADR-0039): a render the memory budget cannot hold is refused here,
+    #    before the arbiter unloads a single GPU slot to make room for it. Unknown is
+    #    never a refusal, and `extra_body.hal0_skip_fit_check: true` opts out.
+    await _refuse_image_that_wont_fit(request, resolved, body)
+
+    # 4. GPU arbitration (Phase D, spec §7) — BEFORE dispatch so the img
     #    upstream is registered before resolve_by_capability runs.  When the
     #    img slot is cold (the normal idle state after arbiter restore_llm),
     #    ensure_img() cold-starts the container which calls
@@ -1856,39 +1948,12 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
     #    selects slot "img" but no upstream exists yet and raises
     #    LegacyResolutionFailed → 404.  Fix for issue #725.
     #
-    #    Also seed #599 request defaults from the img slot's [image] section
-    #    (default_size / default_steps) here — before dispatch — so the body
-    #    the dispatcher sees already has the resolved defaults. Size precedence:
-    #    the request, then the slot's non-empty default_size, then the model's
-    #    native size (below, once the slot has had its say).
-    manager = getattr(request.app.state, "slot_manager", None)
-    arbiter = manager.arbiter if manager is not None else None
     # The render is image work from before the GPU switch until provider.infer
     # returns, so the arbiter never restores LLM mode under it; once it is done,
     # an LLM request or the restore loop hands the GPU back.
     async with arbiter.image_job() if arbiter is not None else contextlib.nullcontext():
         if manager is not None:
             from hal0.errors import NotFound
-            from hal0.slots.arbiter import gpu_exclusive_group
-
-            cfgs = await manager.iter_configs()
-            img_cfg = next((c for c in cfgs if gpu_exclusive_group(c) == "img"), None)
-            img_section = (img_cfg or {}).get("image") or {}
-            if isinstance(img_section, dict):
-                default_size = img_section.get("default_size")
-                if not body.get("size") and isinstance(default_size, str) and default_size:
-                    body["size"] = default_size
-                default_steps = img_section.get("default_steps")
-                if (
-                    isinstance(default_steps, int)
-                    and not isinstance(default_steps, bool)
-                    and default_steps > 0
-                ):
-                    extra = body.get("extra_body")
-                    if not isinstance(extra, dict):
-                        extra = {}
-                        body["extra_body"] = extra
-                    extra.setdefault("steps", default_steps)
 
             try:
                 await arbiter.ensure_img()
@@ -1897,16 +1962,14 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
                 # tests) — nothing to arbitrate; generation proceeds as-is.
                 if exc.code != "gpu.img_slot_missing":
                     raise
-        if not body.get("size"):
-            body["size"] = resolved.defaults["size"]
 
-        # 3. Resolve the slot the request should land on.  ensure_img() above
+        # 5. Resolve the slot the request should land on.  ensure_img() above
         #    guarantees the img upstream is registered, so resolve_by_capability
         #    Rule 4 (/images/ path) succeeds even on a cold slot, including after
         #    it crashed or was unloaded while the GPU stayed in image mode (#3048).
         call = await dispatcher.dispatch(request, body=body)
 
-        # 4. Discover the local slot's port from the resolved upstream.
+        # 6. Discover the local slot's port from the resolved upstream.
         upstream = request.app.state.upstreams.get(call.upstream_name)
         if upstream is None:
             raise NoRouteFound(
@@ -1921,7 +1984,7 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
                 details={"upstream": call.upstream_name, "url": upstream.url},
             )
 
-        # 5. Drive the ComfyUI provider directly. Inject the resolved template and
+        # 7. Drive the ComfyUI provider directly. Inject the resolved template and
         #    checkpoint override so the provider's translator knows what to render
         #    without resolving the model again. Always set from the resolution: a
         #    client's own copies of these keys are overwritten, so a client can
@@ -1939,7 +2002,7 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
     if last_used is not None and call.upstream_name:
         last_used[call.upstream_name] = resolved.id
 
-    # 6. Emit OpenAI-shaped response.
+    # 8. Emit OpenAI-shaped response.
     response_format = (body.get("response_format") or "url").lower().strip()
     images: list[dict[str, Any]] = []
     for img in result.get("images", []):

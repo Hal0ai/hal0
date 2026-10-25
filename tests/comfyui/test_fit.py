@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 
 from hal0.comfyui.catalog import CATALOG, ImageModel, weights_gib
-from hal0.comfyui.fit import Fit, Need, assess, need_for
+from hal0.comfyui.fit import Fit, Need, assess, need_for, need_for_checkpoint
 from hal0.hardware.gpu_view import GPUMemorySample
 from hal0.hardware.memory_budget import MemoryBudget, RamBudget, build_memory_budget
 
@@ -217,6 +217,35 @@ def test_measured_ram_need_above_the_weights_wins() -> None:
 
 def test_ram_need_does_not_depend_on_the_size() -> None:
     assert need_for(QWEN, "1664x928").ram_gb == need_for(QWEN, None).ram_gb
+
+
+# ── need_for_checkpoint: a user checkpoint has only its file size ───────────
+
+
+def test_checkpoint_need_is_its_size_in_gib_on_both_sides_and_estimated() -> None:
+    need = need_for_checkpoint(int(6.5 * 2**30))
+    assert need == Need(gpu_gb=6.5, ram_gb=6.5, gpu_estimated=True, ram_estimated=True)
+
+
+@pytest.mark.parametrize(
+    ("size_bytes", "gb"),
+    [
+        (6_938_078_208, 6.5),  # a real SDXL base: 6.46 GiB, 6.9 decimal GB
+        (2**30 + 2**30 // 20 - 1, 1.0),  # one decimal, rounded
+        (2**30 + 2**30 // 20 + 1, 1.1),
+        (0, 0.0),
+    ],
+)
+def test_checkpoint_need_reads_gib_not_decimal_gb(size_bytes: int, gb: float) -> None:
+    need = need_for_checkpoint(size_bytes)
+    assert need.gpu_gb == need.ram_gb == gb
+
+
+def test_a_checkpoint_need_is_judged_like_any_other(capped_guest: MemoryBudget) -> None:
+    fit = assess(need_for_checkpoint(60 * 2**30), capped_guest)
+    assert fit is not None
+    assert fit.verdict == "wont_fit"
+    assert fit.reason == "needs ~60.0 GB of RAM to load, 45.8 GB free (48.0 GB container limit)"
 
 
 # ── assess: the verdict ─────────────────────────────────────────────────────

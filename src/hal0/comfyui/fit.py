@@ -28,6 +28,9 @@ What the figures mean:
   anonymous RSS the kernel reported when it killed the load), so it never lowers the need
   below the weight total. Without one the need is the weight total, estimated.
 
+A user checkpoint (``ckpt/<stem>``) has no catalog facts: :func:`need_for_checkpoint` reads its
+file size as both needs, estimated.
+
 Both kinds of figure are lower bounds, so a refusal built on them stands; a "fits" built on an
 estimate keeps the normal out-of-memory error path.
 """
@@ -39,7 +42,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Final, Literal
 
-from hal0.comfyui.catalog import ImageModel, weights_gib
+from hal0.comfyui.catalog import BYTES_PER_GIB, ImageModel, weights_gib
 from hal0.hardware.memory_budget import MemoryBudget, RamBudget
 
 Verdict = Literal["fits", "tight", "wont_fit"]
@@ -146,6 +149,18 @@ def need_for(model: ImageModel, size: str | None) -> Need:
     return Need(
         gpu_gb=gpu_gb, ram_gb=ram_gb, gpu_estimated=gpu_estimated, ram_estimated=ram_estimated
     )
+
+
+def need_for_checkpoint(size_bytes: int) -> Need:
+    """What rendering a user checkpoint needs, from its file's size.
+
+    The catalog knows nothing about a file the operator dropped into ``checkpoints/``, so
+    both needs are its size in GB (GiB, one decimal), and both are estimates. The weights
+    are a lower bound of the load and of the render (SD 1.5 weighs 4.0 GB and was measured
+    at 11.6), so a refusal built on this need stands.
+    """
+    gib = round(size_bytes / BYTES_PER_GIB, 1)
+    return Need(gpu_gb=gib, ram_gb=gib, gpu_estimated=True, ram_estimated=True)
 
 
 def _judge(need_gb: float, free_gb: float) -> Verdict:

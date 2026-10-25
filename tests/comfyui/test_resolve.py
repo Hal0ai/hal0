@@ -25,6 +25,7 @@ from hal0.comfyui.resolve import (
     ImageModelNotRenderable,
     ImageModelRequired,
     ImageModelUnknown,
+    ImageWontFit,
     ResolvedImageModel,
     renderable_ids,
     resolve_image_model,
@@ -161,6 +162,30 @@ def test_resolve_user_ckpt(key: str, arch: str, size: str) -> None:
     assert resolved.ckpt_override == "my_finetune.safetensors"
     template_defaults = load_template(USER_CKPT_TEMPLATES[arch])["_meta"]["defaults"]
     assert resolved.defaults == {**template_defaults, "size": size}
+
+
+def test_resolve_user_ckpt_carries_its_file_size() -> None:
+    """The scan's ``size_bytes`` rides along, so the fit preflight needs no second stat."""
+    _checkpoint("mine.safetensors", _SDXL_KEY)
+    on_disk = (paths.models_root() / "checkpoints" / "mine.safetensors").stat().st_size
+
+    resolved = resolve_image_model("ckpt/mine", selection_model=None)
+
+    assert resolved.size_bytes == on_disk > 0
+
+
+def test_resolve_catalog_model_has_no_file_size() -> None:
+    _install("sdxl-turbo")
+
+    assert resolve_image_model("sdxl-turbo", selection_model=None).size_bytes is None
+
+
+def test_image_wont_fit_is_a_422_with_a_stable_code() -> None:
+    error = ImageWontFit("needs 6.4 GB of GPU memory, 4.0 GB free for a render", {"model": "m"})
+
+    assert (error.status, error.code) == (422, "image.wont_fit")
+    assert error.message == "needs 6.4 GB of GPU memory, 4.0 GB free for a render"
+    assert error.details == {"model": "m"}
 
 
 def test_resolve_nested_user_ckpt() -> None:
