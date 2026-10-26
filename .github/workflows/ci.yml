@@ -59,13 +59,15 @@ jobs:
         # to chase (astral-sh/setup-uv@v8 didn't resolve and bricked the job).
         run: pip install uv
       - name: Install
-        # --frozen: fail instead of silently re-resolving if uv.lock drifts
-        # from pyproject.toml, so CI installs the exact pinned versions —
-        # the same ones a local `uv sync` venv gets. Fixes CI pip-installing
-        # newer floating deps (FastAPI/Pydantic) that local venvs never see.
+        # --locked: fail if uv.lock has drifted from pyproject.toml, so CI
+        # installs the exact pinned versions — the same ones a local
+        # `uv sync` venv gets. (--frozen does NOT check: it installs from
+        # the lock as-is and ignores pyproject.toml drift, #3043.) Fixes CI
+        # pip-installing newer floating deps (FastAPI/Pydantic) that local
+        # venvs never see.
         # --python pins the venv to the matrix interpreter setup-python laid
         # down, so uv can't silently pick a different system python.
-        run: uv sync --frozen --extra dev --python "$(which python)"
+        run: uv sync --locked --extra dev --python "$(which python)"
       - name: Lint
         run: uv run ruff check src tests
       - name: Format check

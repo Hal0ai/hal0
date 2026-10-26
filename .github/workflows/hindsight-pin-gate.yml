@@ -117,8 +117,8 @@ jobs:
       - name: Install uv
         run: pip install uv
       - name: Install
-        # Same --frozen/--python posture as ci.yml's python job.
-        run: uv sync --frozen --extra dev --python "$(which python)"
+        # Same --locked/--python posture as ci.yml's python job.
+        run: uv sync --locked --extra dev --python "$(which python)"
       - name: upgrade / rollback / contract gate
         env:
           HAL0_ENGINE_GATE: "1"
