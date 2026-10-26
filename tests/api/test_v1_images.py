@@ -891,6 +891,52 @@ def test_v1_images_provider_error_surfaces(
     assert r.json()["error"]["code"] == "dispatch.upstream_failed"
 
 
+def test_v1_images_a_prompt_id_with_a_lone_surrogate_is_a_502_envelope(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ComfyUI answers ``/prompt`` with ``{"prompt_id": "\\ud800"}`` and then fails /history:
+    valid JSON, not valid UTF-8. The caller gets the envelope, not a bare 500 (#3069)."""
+    from unittest.mock import MagicMock, patch
+
+    import httpx
+
+    from hal0.comfyui import progress
+
+    _install("sdxl-turbo")
+    _seed_img_upstream(client)
+    progress._reset()
+
+    async def _idle_listener(url: str, relay: Any, ready: Any) -> None:
+        ready.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("hal0.providers.comfyui._follow_progress", _idle_listener)
+
+    def _resp(status: int, payload: Any) -> MagicMock:
+        resp = MagicMock(spec=httpx.Response)
+        resp.status_code = status
+        resp.json = lambda: payload
+        resp.text = ""
+        return resp
+
+    async def _post(url: str, json: dict[str, Any]) -> MagicMock:
+        return _resp(200, {"prompt_id": "\ud800"})
+
+    async def _get(url: str, params: dict[str, Any] | None = None) -> MagicMock:
+        return _resp(500, None)
+
+    with patch("hal0.providers.comfyui.httpx.AsyncClient") as MockClient:
+        http = MockClient.return_value.__aenter__.return_value
+        http.post = _post
+        http.get = _get
+        r = client.post("/v1/images/generations", json={"model": "sdxl-turbo", "prompt": "x"})
+
+    assert r.status_code == 502
+    error = r.json()["error"]
+    assert error["code"] == "dispatch.upstream_failed"
+    assert error["details"]["prompt_id"] == "?"
+
+
 @pytest.fixture
 def gate_refusals() -> Any:
     """The comfyui routes module with no gate refusal recorded, before and after."""

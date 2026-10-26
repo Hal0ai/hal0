@@ -189,6 +189,21 @@ def gate_refusal_reason(status_code: int, body: Any) -> str | None:
     return _GATE_REFUSAL_DEFAULT
 
 
+def _clean_json(value: Any) -> Any:
+    """``value`` with every string in it passed through :func:`clean_reason`.
+
+    ComfyUI's JSON can carry a lone surrogate (``"\\ud800"``) that the error envelope and
+    the ``hal0.error`` log cannot encode, so anything copied into ``details`` goes through here.
+    """
+    if isinstance(value, str):
+        return clean_reason(value)
+    if isinstance(value, dict):
+        return {clean_reason(k): _clean_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_clean_json(v) for v in value]
+    return value
+
+
 def _json_or_none(resp: httpx.Response) -> Any:
     try:
         return resp.json()
@@ -1041,7 +1056,7 @@ class ComfyUIProvider(Provider):
                 if not prompt_id:
                     raise ComfyUIInferError(
                         "comfyui POST /prompt returned no prompt_id",
-                        details={"port": port, "response": submitted},
+                        details={"port": port, "response": _clean_json(submitted)},
                     )
                 relay.claim(str(prompt_id))
 
@@ -1081,7 +1096,11 @@ class ComfyUIProvider(Provider):
                 if not images:
                     raise ComfyUIInferError(
                         "comfyui completed the workflow but produced no images",
-                        details={"port": port, "prompt_id": prompt_id, "outputs": outputs},
+                        details={
+                            "port": port,
+                            "prompt_id": clean_reason(prompt_id, SOCKET_ID_MAX),
+                            "outputs": _clean_json(outputs),
+                        },
                     )
                 return {"images": images, "meta": debug_meta, "prompt_id": prompt_id}
         except ComfyUIInferError:
@@ -1119,6 +1138,8 @@ class ComfyUIProvider(Provider):
         timeout.
         """
         deadline = time.monotonic() + _HISTORY_POLL_TIMEOUT_S
+        # The raw id polls /history; this copy is what errors and logs repeat.
+        shown_id = clean_reason(prompt_id, SOCKET_ID_MAX)
         url = f"{base_url}/history/{prompt_id}"
         last_status: str = ""
         while time.monotonic() < deadline:
@@ -1128,23 +1149,23 @@ class ComfyUIProvider(Provider):
                 # non-200 here means ComfyUI itself fell over.
                 raise ComfyUIInferError(
                     f"comfyui GET /history returned HTTP {resp.status_code}",
-                    details={"prompt_id": prompt_id, "status_code": resp.status_code},
+                    details={"prompt_id": shown_id, "status_code": resp.status_code},
                 )
                 # (no fallthrough; raise above)
             history = resp.json()
             entry = history.get(prompt_id) if isinstance(history, dict) else None
             if isinstance(entry, dict):
                 status = entry.get("status") or {}
-                last_status = str(status.get("status_str", "") or "")
+                last_status = clean_reason(status.get("status_str", "") or "", SOCKET_ID_MAX)
                 completed = bool(status.get("completed", False))
                 if last_status == "error":
                     messages = status.get("messages") or []
                     raise ComfyUIInferError(
                         "comfyui workflow execution failed",
                         details={
-                            "prompt_id": prompt_id,
+                            "prompt_id": shown_id,
                             "status_str": last_status,
-                            "messages": messages,
+                            "messages": _clean_json(messages),
                         },
                     )
                 if completed:
@@ -1152,14 +1173,14 @@ class ComfyUIProvider(Provider):
                     if not isinstance(outputs, dict):
                         raise ComfyUIInferError(
                             "comfyui history entry has malformed outputs",
-                            details={"prompt_id": prompt_id, "outputs": outputs},
+                            details={"prompt_id": shown_id, "outputs": _clean_json(outputs)},
                         )
                     return outputs
             await asyncio.sleep(_HISTORY_POLL_INTERVAL_S)
         raise ComfyUIInferError(
-            f"comfyui workflow {prompt_id} did not complete within "
+            f"comfyui workflow {shown_id} did not complete within "
             f"{int(_HISTORY_POLL_TIMEOUT_S)}s (last status={last_status!r})",
-            details={"prompt_id": prompt_id, "timeout_s": _HISTORY_POLL_TIMEOUT_S},
+            details={"prompt_id": shown_id, "timeout_s": _HISTORY_POLL_TIMEOUT_S},
         )
 
     async def _fetch_view(

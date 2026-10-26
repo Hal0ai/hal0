@@ -456,6 +456,83 @@ async def test_infer_surfaces_workflow_error(provider: ComfyUIProvider) -> None:
     assert exc.value.code == "dispatch.upstream_failed"
 
 
+async def _infer_with(
+    provider: ComfyUIProvider,
+    post: Any,
+    get: Any,
+) -> ComfyUIInferError:
+    with patch("hal0.providers.comfyui.httpx.AsyncClient") as MockClient:
+        client = MockClient.return_value.__aenter__.return_value
+        client.post = post
+        client.get = get
+        with pytest.raises(ComfyUIInferError) as exc:
+            await provider.infer(8186, {"prompt": "x", "_hal0_template": "sdxl_turbo_simple"})
+    return exc.value
+
+
+@pytest.mark.asyncio
+async def test_infer_cleans_a_prompt_id_it_cannot_encode(provider: ComfyUIProvider) -> None:
+    """A prompt_id of ``"\\ud800"`` is valid JSON and not valid UTF-8: the error that
+    repeats it must still encode (a bare 500 otherwise, #3069)."""
+
+    async def _post(url: str, json: dict[str, Any]) -> httpx.Response:
+        return _mock_response(status_code=200, json_payload={"prompt_id": "\ud800"})
+
+    async def _get(url: str, params: dict[str, Any] | None = None) -> httpx.Response:
+        return _mock_response(status_code=500)
+
+    err = await _infer_with(provider, _post, _get)
+
+    assert err.code == "dispatch.upstream_failed"
+    assert err.details["prompt_id"] == "?"
+    json.dumps(err.details, ensure_ascii=False).encode("utf-8")
+
+
+@pytest.mark.asyncio
+async def test_infer_cleans_a_submit_response_it_cannot_encode(provider: ComfyUIProvider) -> None:
+    async def _post(url: str, json: dict[str, Any]) -> httpx.Response:
+        return _mock_response(
+            status_code=200, json_payload={"x\ud800": ["\ud800"], "prompt_id": ""}
+        )
+
+    async def _get(url: str, params: dict[str, Any] | None = None) -> httpx.Response:
+        raise AssertionError("no history poll without a prompt_id")
+
+    err = await _infer_with(provider, _post, _get)
+
+    assert err.details["response"] == {"x?": ["?"], "prompt_id": ""}
+    json.dumps(err.details, ensure_ascii=False).encode("utf-8")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["error", "no_images", "malformed"])
+async def test_infer_cleans_history_text_it_cannot_encode(
+    provider: ComfyUIProvider, kind: str
+) -> None:
+    """Whatever /history sends back that lands in an error's details is encodable."""
+    status: dict[str, Any] = {"status_str": "success", "completed": True}
+    outputs: Any = {"9\ud800": {"note": "\ud800"}}
+    if kind == "error":
+        status = {"status_str": "error", "messages": [["execution_error", {"m": "\ud800"}]]}
+        outputs = {}
+    elif kind == "malformed":
+        outputs = ["\ud800"]
+
+    async def _post(url: str, json: dict[str, Any]) -> httpx.Response:
+        return _mock_response(status_code=200, json_payload={"prompt_id": "p1"})
+
+    async def _get(url: str, params: dict[str, Any] | None = None) -> httpx.Response:
+        return _mock_response(
+            status_code=200, json_payload={"p1": {"status": status, "outputs": outputs}}
+        )
+
+    err = await _infer_with(provider, _post, _get)
+
+    assert err.code == "dispatch.upstream_failed"
+    json.dumps(err.details, ensure_ascii=False).encode("utf-8")
+    assert "\ud800" not in json.dumps(err.details, ensure_ascii=False)
+
+
 # ─── step progress over ComfyUI's websocket ───────────────────────────────────
 
 _LISTENER_FAILED = "comfyui.progress_listener_failed"
