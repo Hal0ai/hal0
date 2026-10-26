@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.resources
+import inspect
 import json
 import logging
 import os
@@ -198,6 +199,19 @@ def _json_or_none(resp: httpx.Response) -> Any:
 # ── Step progress over ComfyUI's websocket ────────────────────────────────────
 
 
+def _no_proxy_kwargs(connect: Callable[..., Any]) -> dict[str, Any]:
+    """``{"proxy": None}`` when ``connect`` accepts ``proxy``, else ``{}``.
+
+    websockets 15 reads HTTP(S)_PROXY/ALL_PROXY from the environment unless told not to,
+    which would send this loopback socket through a proxy (#3074). 13 and 14 have no
+    proxy support and no ``proxy`` argument.
+    """
+    return {"proxy": None} if "proxy" in inspect.signature(connect).parameters else {}
+
+
+_WS_NO_PROXY: dict[str, Any] = _no_proxy_kwargs(_websocket_connect)
+
+
 def _ws_connect(url: str) -> Any:
     """Open ComfyUI's websocket at ``url``; use as ``async with _ws_connect(url) as socket``.
 
@@ -214,6 +228,7 @@ def _ws_connect(url: str) -> Any:
         open_timeout=_WS_OPEN_TIMEOUT_S,
         close_timeout=_WS_CLOSE_TIMEOUT_S,
         max_size=_WS_MAX_FRAME_BYTES,
+        **_WS_NO_PROXY,
     )
 
 

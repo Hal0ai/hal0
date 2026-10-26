@@ -528,6 +528,9 @@ class _FakeWS:
             yield item
 
 
+_REAL_WS_CONNECT = comfyui_mod._ws_connect  # the autouse fixture below replaces the attribute
+
+
 @pytest.fixture(autouse=True)
 def fake_ws(monkeypatch: pytest.MonkeyPatch) -> Iterator[_FakeWS]:
     """Every test in this module runs without a network: an idle socket by default."""
@@ -1445,3 +1448,46 @@ def test_clean_reason() -> None:
     assert clean_reason("r" * 501) == "r" * 500
     assert clean_reason(42) == "42"
     assert clean_reason("") == ""
+
+
+# ── websocket loopback must bypass proxy env (#3074) ──────────────────────────
+
+
+def test_ws_connect_passes_proxy_none_when_supported(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+    real_ws_connect = _REAL_WS_CONNECT
+
+    def fake_connect(url: str, *, proxy: object = True, **kwargs: Any) -> str:
+        seen.update(kwargs, proxy=proxy)
+        return "conn"
+
+    monkeypatch.setattr(comfyui_mod, "_websocket_connect", fake_connect)
+    monkeypatch.setattr(comfyui_mod, "_WS_NO_PROXY", comfyui_mod._no_proxy_kwargs(fake_connect))
+    assert real_ws_connect("ws://127.0.0.1:8188/ws") == "conn"
+    assert seen["proxy"] is None
+
+
+def test_ws_connect_omits_proxy_when_unsupported(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+    real_ws_connect = _REAL_WS_CONNECT
+
+    def fake_connect(url: str, **kwargs: Any) -> str:  # websockets 13/14: no proxy kw
+        seen.update(kwargs)
+        return "conn"
+
+    def strict_connect(
+        url: str,
+        *,
+        compression: Any = None,
+        ping_interval: Any = None,
+        open_timeout: Any = None,
+        close_timeout: Any = None,
+        max_size: Any = None,
+    ) -> str:
+        return "conn"
+
+    assert comfyui_mod._no_proxy_kwargs(strict_connect) == {}
+    monkeypatch.setattr(comfyui_mod, "_websocket_connect", fake_connect)
+    monkeypatch.setattr(comfyui_mod, "_WS_NO_PROXY", {})
+    real_ws_connect("ws://127.0.0.1:8188/ws")
+    assert "proxy" not in seen
