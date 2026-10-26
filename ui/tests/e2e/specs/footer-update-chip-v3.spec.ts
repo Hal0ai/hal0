@@ -11,7 +11,7 @@
  *      current === available), the chip is hidden.
  *   2. When `useUpdateState()` returns `{current, available}` mismatch,
  *      the chip renders with the live `${available}` string.
- *   3. The literal "v0.2.2" no longer appears in chrome.jsx — proven
+ *   3. The literal "v0.2.2" no longer appears in dock/Dock.jsx — proven
  *      by source-grepping the file directly (the bundle itself still
  *      carries the string from the BANNER_CATALOG prototype entry,
  *      which Phase 2 owns and is intentionally out of #325's scope).
@@ -84,20 +84,20 @@ test.describe('Footer update chip (#325)', () => {
 })
 
 test.describe('Footer update chip — source hygiene (#325)', () => {
-  test('chrome.jsx no longer hardcodes "v0.2.2"', async () => {
+  test('dock/Dock.jsx no longer hardcodes "v0.2.2"', async () => {
     // The Footer used to render `<span className="v">hal0 v0.2.2 available</span>`
     // as a literal — the chip's bug-of-record. After #325 the chip
     // composes its text from `useUpdateState()` at render time, so the
     // string "v0.2.2" should be gone from the file. Note: a single
     // explanatory comment line in main.jsx still references the old
     // string and is intentionally allowed (the comment justifies the
-    // change). This spec scopes the assertion to chrome.jsx, which is
+    // change). This spec scopes the assertion to dock/Dock.jsx, which is
     // the Footer component's own home.
     const fs = await import('fs')
     const path = await import('path')
     const { fileURLToPath } = await import('url')
     const here = path.dirname(fileURLToPath(import.meta.url))
-    const chromePath = path.resolve(here, '../../..', 'src/dash/chrome.jsx')
+    const chromePath = path.resolve(here, '../../..', 'src/dash/dock/Dock.jsx')
     const body = fs.readFileSync(chromePath, 'utf8')
     // Allow the explanatory comment in the Footer's docblock that
     // explicitly cites the old "v0.2.2 available" string as the bug

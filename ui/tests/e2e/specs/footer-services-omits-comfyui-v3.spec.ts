@@ -3,7 +3,7 @@
  *
  * The footer's `services` LED group (`[data-testid="foot-health-services"]`)
  * used to be a hardcoded three-member array (hal0, hermes, openwebui) in
- * src/dash/chrome.jsx — `comfyui` was never a member. On a box where ComfyUI
+ * src/dash/dock/Dock.jsx — `comfyui` was never a member. On a box where ComfyUI
  * is a real running service, ComfyUI going down left the always-visible
  * footer reporting an unqualified green "services 3 / 3 ready": the three
  * rendered pips were individually truthful, but the group as a whole omitted

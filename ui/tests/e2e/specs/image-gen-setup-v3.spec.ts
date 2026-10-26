@@ -162,12 +162,25 @@ function rendering(step: number | null): Body {
 
 // ── page helpers ─────────────────────────────────────────────────────────────
 
-const head = (page: Page) => page.getByTestId('image-status-head')
-const detail = (page: Page) => page.getByTestId('image-status-detail')
+// The status line moved into the dock: its headline and detail are the collapsed row's GPU
+// segment, which every page draws, and its phase chips are the dock's GPU tab.
+const head = (page: Page) => page.getByTestId('gpu-status-head')
+const detail = (page: Page) => page.getByTestId('gpu-status-detail')
+/** A button of the segment. (The GPU tab, when open, draws the same testids.) */
+const segAction = (page: Page, action: string) =>
+  page.getByTestId('dock-gpu-segment').getByTestId(`gpu-status-action-${action}`)
+/** Expand the dock onto its GPU tab (the tab is there once the segment is). */
+async function openGpuTab(page: Page) {
+  await expect(page.getByTestId('dock-gpu-segment')).toBeVisible()
+  await page.getByTestId('dock-toggle').click()
+  await page.getByTestId('dock-tab-gpu').click()
+  await expect(page.getByTestId('dock-gpu')).toBeVisible()
+}
 /** The phase strip's current step, on the Generate tab while a run is in flight. */
 const stripNow = (page: Page) => page.locator('[data-testid="gen-step"][data-state="now"]')
-/** The status line's switch chip that is running now. */
-const chipNow = (page: Page) => page.locator('[data-testid="image-status-step"][data-state="active"]')
+/** The GPU tab's switch chip that is running now. */
+const chipNow = (page: Page) =>
+  page.getByTestId('dock-gpu').locator('[data-testid="image-status-step"][data-state="active"]')
 
 test.describe('Image Gen setup: first run, install, generate', () => {
   // The render walk waits on the pane's own polls (5 s for the first, then 1-2 s each) across
@@ -290,6 +303,7 @@ test.describe('Image Gen setup: first run, install, generate', () => {
     })
 
     await test.step('draining: one chat reply finishes first', async () => {
+      await openGpuTab(page)
       setBox(mock, { ...IMAGE_MODE, switching: true, phase: 'draining', drain_in_flight: 1, ...OWN_JOB }, { engine: 'stopped' })
       await expect(head(page)).toHaveText('Switching to image mode', POLL)
       await expect(detail(page)).toHaveText('Waiting for 1 chat reply to finish.')
@@ -316,7 +330,7 @@ test.describe('Image Gen setup: first run, install, generate', () => {
       setBox(mock, { ...IMAGE_MODE, phase: 'handoff', handoff_until: nowS() + 30, ...OWN_JOB }, { engine: 'running' })
       await expect(head(page)).toHaveText('Rendering', POLL)
       await expect(detail(page)).not.toContainText('editor')
-      await expect(page.getByTestId('image-status-action-cancel_render')).toBeVisible()
+      await expect(segAction(page, 'cancel_render')).toBeVisible()
       await expect(stripNow(page)).toHaveText('Load model')
     })
 
@@ -326,7 +340,7 @@ test.describe('Image Gen setup: first run, install, generate', () => {
       await expect(head(page)).toHaveText(`Rendering · ${MODEL}`, POLL)
       await expect(stripNow(page)).toHaveText('Load model')
       await expect(page.getByTestId('gen-progress')).toHaveAttribute('data-indeterminate', 'true')
-      await expect(page.getByTestId('image-status-action-cancel_render')).toBeVisible()
+      await expect(segAction(page, 'cancel_render')).toBeVisible()
 
       // 1/8 .. 8/8 as percentages, rounded the way the bar rounds them.
       const pct = [13, 25, 38, 50, 63, 75, 88, 100]
@@ -478,9 +492,9 @@ test.describe('Image Gen setup: a pinned box', () => {
     await expect(detail(page)).toHaveText(
       'Held until you unpin it. The paused GPU slots stay paused. 2 chat requests waiting, longest 0:37 of 2:00.',
     )
-    await expect(page.getByTestId('image-status-line')).toHaveAttribute('data-tone', 'pin')
-    await expect(page.getByTestId('image-status-action-stop')).toHaveText('Stop image mode')
-    const unpin = page.getByTestId('image-status-action-unpin')
+    await expect(page.getByTestId('dock-gpu-segment')).toHaveClass(/\bgpu-seg-pin\b/)
+    await expect(segAction(page, 'stop')).toHaveText('Stop image mode')
+    const unpin = segAction(page, 'unpin')
     await expect(unpin).toHaveText('Unpin')
     expect(mock.posts, 'nothing was sent before Unpin was pressed').toEqual([])
 
@@ -490,8 +504,8 @@ test.describe('Image Gen setup: a pinned box', () => {
     await expect.poll(() => mock.posts).toEqual([['/api/comfyui/pin', { pinned: false }]])
     // The line leaves "pinned" at once (the click asks for the new state) and counts the grace.
     await expect(head(page)).toHaveText(/^Image mode ends in \d+ s$/)
-    await expect(page.getByTestId('image-status-action-unpin')).toHaveCount(0)
-    await expect(page.getByTestId('image-status-action-keep')).toBeVisible()
+    await expect(segAction(page, 'unpin')).toHaveCount(0)
+    await expect(segAction(page, 'keep')).toBeVisible()
   })
 })
 
@@ -505,7 +519,7 @@ test.describe('Image Gen setup: holding image mode', () => {
     await expect(head(page)).toHaveText('GPU · chat mode')
 
     // A pin refuses GPU chat until someone unpins: the button asks before it sends anything.
-    const hold = page.getByTestId('image-status-action-hold')
+    const hold = segAction(page, 'hold')
     await expect(hold).toHaveText('Hold image mode')
     await hold.click()
     const dialog = page.getByRole('dialog')
@@ -527,10 +541,10 @@ test.describe('Image Gen setup: holding image mode', () => {
   })
 })
 
-// ── the global banner ────────────────────────────────────────────────────────
+// ── the banner ───────────────────────────────────────────────────────────────
 
-test.describe('Image Gen setup: the global image-mode banner', () => {
-  test('is not drawn on the Image Gen pane, where the status line says the same, and is on other pages', async ({
+test.describe('Image Gen setup: no image-mode banner', () => {
+  test('the dock says what the old image-mode banner said, on every page, and no banner is drawn', async ({
     page,
   }) => {
     const mock = makeImageGenMock({ memory: referenceBoxMemory() })
@@ -540,8 +554,8 @@ test.describe('Image Gen setup: the global image-mode banner', () => {
 
     await gotoImageGen(page)
     await expect(head(page)).toHaveText('Image mode pinned')
-    // The arbiter has answered (the line is drawn from it) and the banner is still not there, on
-    // any of the pane's tabs.
+    // The arbiter has answered (the segment is drawn from it) and there is no banner, on any of
+    // the pane's tabs.
     await expect(banner).toHaveCount(0)
     for (const sub of ['generate', 'models', 'engine'] as const) {
       await gotoImageGen(page, sub)
@@ -549,8 +563,22 @@ test.describe('Image Gen setup: the global image-mode banner', () => {
       await expect(banner).toHaveCount(0)
     }
 
-    // Anywhere else in the dashboard the banner is the only word of it.
+    // Anywhere else in the dashboard it is the dock's segment alone that says it.
     await page.goto('/#services')
-    await expect(banner).toHaveCount(1, POLL)
+    await expect(head(page)).toHaveText('Image mode pinned', POLL)
+    await expect(banner).toHaveCount(0)
+  })
+
+  test('a blocked gate (no credential) is the one GPU banner, on every page', async ({ page }) => {
+    const mock = makeImageGenMock({
+      status: imageStatus({ gate: { state: 'no_credential', version_seen: null } }),
+    })
+    await routeImageGen(page, mock)
+    const blocked = page.getByTestId('gpu-gate-blocked-banner')
+
+    await page.goto('/#services')
+    await expect(blocked).toBeVisible(POLL)
+    await gotoImageGen(page)
+    await expect(blocked).toBeVisible()
   })
 })
