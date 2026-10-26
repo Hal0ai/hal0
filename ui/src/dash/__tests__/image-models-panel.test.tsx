@@ -1139,7 +1139,7 @@ describe('FitMeter', () => {
     expect(bare.textContent).not.toContain('judged at')
   })
 
-  it('labels the GPU figure as free for a render, and RAM as plain free', () => {
+  it('labels both figures as free for a render', () => {
     const host = render(
       <FitMeter
         fit={
@@ -1156,8 +1156,7 @@ describe('FitMeter', () => {
     const gpu = text(host.querySelector('[data-testid="fit-bar-gpu-x"]')!)
     const ram = text(host.querySelector('[data-testid="fit-bar-ram-x"]')!)
     expect(gpu).toContain('58.2 GB free for a render')
-    expect(ram).toContain('52.9 GB free')
-    expect(ram).not.toContain('for a render')
+    expect(ram).toContain('52.9 GB free for a render')
   })
 
   it('says the verdict is for one image when asked to', () => {

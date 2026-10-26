@@ -24,6 +24,16 @@ warm engine's weights twice. Decision 4 has the formula and the reason.
 decision 5 said the pane's rework would do. Decision 5, the consequence that keeps the
 gauge and the table in Context describe the state before that.
 
+**Amended (2026-10-26, #3072).** The budget gains `render_ram_free_gb`, the RAM a
+render's load can use once image mode has unloaded this box's slots. The two
+budgets are still never summed. On a bare-metal unified-memory host, though, the
+pool is system RAM: GTT the LLM slots hold lowers `MemAvailable`, and the unload
+gives it back. So on a shared pool whose RAM reading is the host's own
+(`ram.source` `system`), the slots' pool figures, capped at the pool used outside
+the image engine, are credited to RAM. In a container nothing is credited, because
+an LXC guest's RAM is not charged for GTT. `ram.source` now also reads `container`
+when lxcfs is mounted over `/proc/meminfo`.
+
 ## Context
 
 At one moment on the reference box, five figures that all read as "memory"

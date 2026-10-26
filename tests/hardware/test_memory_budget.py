@@ -541,6 +541,7 @@ def test_as_dict_shape() -> None:
         "source": "container",
     }
     assert d["render_free_gb"] == 114.0
+    assert d["render_ram_free_gb"] == 44.0
     # The engine is named by the backend, and flagged when it is the img slot's
     # own estimate (this reference box has no ComfyUI reading).
     assert d["gpu"]["image_engine_slot"] == "img"
@@ -559,7 +560,8 @@ def test_as_dict_without_a_gpu_lane() -> None:
 
     assert d["gpu"] is None
     assert d["render_free_gb"] is None
-    assert set(d) == {"gpu", "ram", "render_free_gb"}
+    assert d["render_ram_free_gb"] == 44.0
+    assert set(d) == {"gpu", "ram", "render_free_gb", "render_ram_free_gb"}
 
 
 def test_dataclasses_are_frozen_and_slotted() -> None:
@@ -572,6 +574,93 @@ def test_dataclasses_are_frozen_and_slotted() -> None:
         field = dataclasses.fields(obj)[0].name
         with pytest.raises(dataclasses.FrozenInstanceError):
             setattr(obj, field, None)
+
+
+# ── RAM free for a render (#3072) ────────────────────────────────────────────
+# On a bare-metal unified-memory host the GTT pages the LLM slots hold come out
+# of system RAM, so ``MemAvailable`` is low by everything they hold, and image
+# mode's unload gives it back. Only there is it credited.
+
+BARE_METAL_RAM = RamBudget(limit_gb=128.0, used_gb=60.0, free_gb=68.0, source="system")
+
+
+def test_a_container_gets_no_credit_for_the_slots() -> None:
+    # An LXC guest: GTT is not charged to its RAM reading, so the slots' pool
+    # footprint is not RAM the switch would return to it.
+    budget = _reference_budget()
+
+    assert budget.ram.source == "container"
+    assert budget.render_ram_free_gb == budget.ram.free_gb == 44.0
+
+
+def test_bare_metal_shared_pool_credits_what_the_slots_hold_in_the_pool() -> None:
+    # used 58.6 GB, engine 6.6 GB: 52.0 GB of the pool is outside the engine, more
+    # than the 39.8 GB the three slots hold, so all of theirs is credited.
+    budget = _reference_budget(ram=BARE_METAL_RAM, sample=_shared_sample(gtt_used_mb=60000.0))
+
+    assert budget.render_ram_free_gb == 107.8  # 68.0 + 39.8
+    assert budget.ram == BARE_METAL_RAM  # the reading itself is untouched
+
+
+def test_the_credit_is_capped_at_the_pool_used_outside_the_engine() -> None:
+    # The slots' 39.8 GB is an attribution (cgroup or file-size estimate). The
+    # reference pool holds 43.4 GB, 6.6 GB of it the engine: no more than 36.8 GB
+    # can come back, whatever the estimates say.
+    budget = _reference_budget(ram=BARE_METAL_RAM)
+
+    assert budget.render_ram_free_gb == 104.8  # 68.0 + 36.8
+
+
+def test_the_credit_uses_comfyuis_own_figure_for_the_engine() -> None:
+    budget = _reference_budget(ram=BARE_METAL_RAM, image_engine_mb=1024.0)
+
+    # 43.4 - 1.0 = 42.4 GB outside the engine: the slots' 39.8 GB all comes back.
+    assert budget.render_ram_free_gb == 107.8
+
+
+def test_the_credit_never_lifts_ram_past_its_limit() -> None:
+    ram = RamBudget(limit_gb=64.0, used_gb=30.0, free_gb=34.0, source="system")
+
+    budget = _reference_budget(ram=ram, sample=_shared_sample(gtt_used_mb=60000.0))
+
+    assert budget.render_ram_free_gb == 64.0
+
+
+def test_a_starting_slot_is_not_credited() -> None:
+    # It holds nothing yet; the switch does not unload it (#3056).
+    rows = {**REFERENCE_ROWS, "agent": _row(20480.0, state="starting")}
+    budget = _reference_budget(
+        ram=BARE_METAL_RAM,
+        per_slot=rows,
+        gpu_slots=REFERENCE_GPU_SLOTS | {"agent"},
+        sample=_shared_sample(gtt_used_mb=60000.0),
+    )
+
+    assert budget.render_ram_free_gb == 107.8  # agent's 20 GB is not in it
+
+
+def test_image_mode_has_nothing_left_to_credit() -> None:
+    # The LLM slots are already unloaded: only the engine holds the pool.
+    budget = _reference_budget(
+        ram=BARE_METAL_RAM,
+        per_slot={"img": REFERENCE_ROWS["img"]},
+        sample=_shared_sample(gtt_used_mb=6758.4),
+    )
+
+    assert budget.render_ram_free_gb == 68.0
+
+
+def test_a_dedicated_card_credits_nothing() -> None:
+    # VRAM is not system RAM: unloading a slot from it frees no RAM.
+    budget = _reference_budget(ram=BARE_METAL_RAM, sample=_dedicated_sample())
+
+    assert budget.render_ram_free_gb == 68.0
+
+
+def test_no_gpu_lane_reads_the_ram_as_it_is() -> None:
+    budget = _reference_budget(ram=BARE_METAL_RAM, gpu_capable=False)
+
+    assert budget.render_ram_free_gb == 68.0
 
 
 # ── Live RAM limit ───────────────────────────────────────────────────────────
@@ -618,6 +707,33 @@ def test_lxc_guest_meminfo_is_the_limit(tmp_path: Path) -> None:
     ram = read_ram(tmp_path)
 
     assert ram == RamBudget(limit_gb=48.0, used_gb=2.2, free_gb=45.8, source="container")
+
+
+def test_lxcfs_meminfo_is_a_container_without_the_marker(tmp_path: Path) -> None:
+    # lxcfs mounted over /proc/meminfo means MemTotal is a guest's limit, not
+    # the host's RAM, even when systemd left no /run/systemd/container.
+    _meminfo(tmp_path, total_kb=50331648, available_kb=48069259)
+    _v2_chain(tmp_path)
+    _write(
+        tmp_path,
+        "proc/self/mounts",
+        "proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\n"
+        "lxcfs /proc/meminfo fuse.lxcfs rw,nosuid,nodev,relatime,user_id=0,group_id=0 0 0\n",
+    )
+
+    assert read_ram(tmp_path).source == "container"
+
+
+def test_a_mount_elsewhere_in_proc_is_not_a_container(tmp_path: Path) -> None:
+    _meminfo(tmp_path, total_kb=64 * 1024 * 1024, available_kb=40 * 1024 * 1024)
+    _v2_chain(tmp_path)
+    _write(
+        tmp_path,
+        "proc/self/mounts",
+        "proc /proc proc rw 0 0\nbinfmt_misc /proc/sys/fs/binfmt_misc binfmt_misc rw 0 0\n",
+    )
+
+    assert read_ram(tmp_path).source == "system"
 
 
 def test_slice_limit_below_meminfo_wins(tmp_path: Path) -> None:

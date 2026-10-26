@@ -79,6 +79,10 @@ export interface MemoryBudgetJson {
   /** Pool a render can use once image mode has unloaded this box's resident
    *  GPU slots. null exactly when `gpu` is. */
   render_free_gb: number | null
+  /** RAM a render's load can use once image mode has unloaded those slots:
+   *  `ram.free_gb`, plus the pool memory they hold on a bare-metal shared pool
+   *  (the only place it is charged to RAM), never past `ram.limit_gb`. */
+  render_ram_free_gb: number
 }
 
 /** One row of `per_slot` (`hal0.slots.capacity.build_per_slot`): resident

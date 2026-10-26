@@ -400,6 +400,57 @@ def test_ram_reason_labels_a_system_limit() -> None:
     assert fit.reason == "needs ~47.9 GB of RAM to load, 14.0 GB free (64.0 GB system)"
 
 
+def _bare_metal_box(ram: RamBudget, *, slots_mb: float = 87040.0) -> MemoryBudget:
+    """A bare-metal unified-memory host: one LLM slot holds ``slots_mb`` of the pool, the
+    idle engine 4.4 GB, and RAM is the host's own reading (#3072)."""
+    engine_mb = 4505.6
+    return build_memory_budget(
+        sample=_sample(gtt_used_mb=slots_mb + engine_mb),
+        gpu_capable=True,
+        per_slot={"agent": _row(slots_mb), "img": _row(engine_mb)},
+        gpu_slots=frozenset({"agent", "img"}),
+        img_slot="img",
+        image_engine_mb=engine_mb,
+        ram=ram,
+    )
+
+
+def test_bare_metal_qwen_fits_once_image_mode_unloads_the_llm_slots() -> None:
+    # The host's MemAvailable is low by the 85 GB of GTT the slot holds; the switch frees it.
+    ram = RamBudget(limit_gb=125.0, used_gb=95.0, free_gb=30.0, source="system")
+
+    fit = assess(need_for(QWEN, None), _bare_metal_box(ram))
+
+    assert fit is not None
+    assert fit.verdict == "fits"
+    assert fit.ram_free_gb == 115.0  # 30.0 + 85.0
+
+
+def test_the_same_slots_in_a_container_still_refuse_qwen() -> None:
+    # In an LXC guest GTT is not charged to the guest's RAM: unloading frees none of it.
+    ram = RamBudget(limit_gb=125.0, used_gb=95.0, free_gb=30.0, source="container")
+
+    fit = assess(need_for(QWEN, None), _bare_metal_box(ram))
+
+    assert fit is not None
+    assert fit.verdict == "wont_fit"
+    assert fit.ram_free_gb == 30.0
+    assert fit.reason == "needs ~47.9 GB of RAM to load, 30.0 GB free (125.0 GB container limit)"
+
+
+def test_ram_reason_says_when_the_free_figure_counts_the_paused_slots() -> None:
+    ram = RamBudget(limit_gb=64.0, used_gb=60.0, free_gb=4.0, source="system")
+
+    fit = assess(need_for(QWEN, None), _bare_metal_box(ram, slots_mb=20480.0))
+
+    assert fit is not None
+    assert fit.verdict == "wont_fit"
+    assert fit.ram_free_gb == 24.0
+    assert fit.reason == (
+        "needs ~47.9 GB of RAM to load, 24.0 GB free with the chat slots paused (64.0 GB system)"
+    )
+
+
 def test_the_worst_dimension_decides_and_the_gpu_is_named_first() -> None:
     ram = RamBudget(limit_gb=64.0, used_gb=60.0, free_gb=4.0, source="container")
 

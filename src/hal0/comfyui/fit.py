@@ -77,7 +77,8 @@ class Fit:
 
     ``reason`` is the sentence the dashboard and the 422 show; it is ``None`` exactly when
     the verdict is ``"fits"``. ``render_free_gb`` and ``ram_free_gb`` are the two figures the
-    need was judged against.
+    need was judged against: the budget's ``render_free_gb`` and ``render_ram_free_gb``, both
+    what a render can use once image mode has unloaded this box's slots.
     """
 
     verdict: Verdict
@@ -176,10 +177,13 @@ def _gpu_reason(need_gb: float, render_free_gb: float) -> str:
     return f"needs {need_gb:.1f} GB of GPU memory, {render_free_gb:.1f} GB free for a render"
 
 
-def _ram_reason(need_gb: float, ram: RamBudget) -> str:
+def _ram_reason(need_gb: float, ram: RamBudget, free_gb: float) -> str:
     limit = "container limit" if ram.source == "container" else "system"
+    # Above the reading only when the unload's credit is in it (#3072): say so, or the
+    # sentence contradicts what the box itself reports as free.
+    credited = " with the chat slots paused" if free_gb > ram.free_gb else ""
     return (
-        f"needs ~{need_gb:.1f} GB of RAM to load, {ram.free_gb:.1f} GB free "
+        f"needs ~{need_gb:.1f} GB of RAM to load, {free_gb:.1f} GB free{credited} "
         f"({ram.limit_gb:.1f} GB {limit})"
     )
 
@@ -193,7 +197,8 @@ def assess(need: Need, budget: MemoryBudget) -> Fit | None:
     not refuse a render on ``None``.
 
     The GPU is judged against ``render_free_gb`` (the pool a render can use once image mode
-    has unloaded this box's slots) and RAM against ``ram.free_gb``. A need above the free
+    has unloaded this box's slots) and RAM against ``render_ram_free_gb`` (the RAM free then,
+    which counts the unload only on a bare-metal shared pool). A need above the free
     figure is ``"wont_fit"``, one above 0.9 of it is ``"tight"``, otherwise ``"fits"``. The
     worse of the two decides, and ``reason`` is the sentence for that one (the GPU's when the
     two are equal). A tight verdict carries its sentence too, so the UI can say why.
@@ -203,10 +208,11 @@ def assess(need: Need, budget: MemoryBudget) -> Fit | None:
     if budget.gpu is None or render_free_gb is None or ram.limit_gb == 0:
         return None
 
+    ram_free_gb = budget.render_ram_free_gb
     gpu_verdict = _judge(need.gpu_gb, render_free_gb)
-    ram_verdict = _judge(need.ram_gb, ram.free_gb)
+    ram_verdict = _judge(need.ram_gb, ram_free_gb)
     if _SEVERITY[ram_verdict] > _SEVERITY[gpu_verdict]:
-        verdict, reason = ram_verdict, _ram_reason(need.ram_gb, ram)
+        verdict, reason = ram_verdict, _ram_reason(need.ram_gb, ram, ram_free_gb)
     else:
         verdict, reason = gpu_verdict, _gpu_reason(need.gpu_gb, render_free_gb)
     return Fit(
@@ -214,5 +220,5 @@ def assess(need: Need, budget: MemoryBudget) -> Fit | None:
         reason=None if verdict == "fits" else reason,
         need=need,
         render_free_gb=render_free_gb,
-        ram_free_gb=ram.free_gb,
+        ram_free_gb=ram_free_gb,
     )

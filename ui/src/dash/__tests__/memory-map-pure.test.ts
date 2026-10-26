@@ -41,6 +41,7 @@ const referenceBox: MemoryBudgetJson = {
   },
   ram: { limit_gb: 105.5, used_gb: 16.1, free_gb: 89.4, source: 'container' },
   render_free_gb: 107.4,
+  render_ram_free_gb: 89.4,
 }
 
 const cappedSecondGuest: MemoryBudgetJson = {
@@ -58,6 +59,7 @@ const cappedSecondGuest: MemoryBudgetJson = {
   },
   ram: { limit_gb: 48, used_gb: 2.2, free_gb: 45.8, source: 'container' },
   render_free_gb: 70.6,
+  render_ram_free_gb: 45.8,
 }
 
 const discreteGpu: MemoryBudgetJson = {
@@ -76,12 +78,14 @@ const discreteGpu: MemoryBudgetJson = {
   ram: { limit_gb: 64, used_gb: 8, free_gb: 56, source: 'system' },
   // 24 pool - 0.5 other guests - 0 engine - 0 starting - 2 margin.
   render_free_gb: 21.5,
+  render_ram_free_gb: 56,
 }
 
 const cpuOnly: MemoryBudgetJson = {
   gpu: null,
   ram: { limit_gb: 32, used_gb: 10, free_gb: 22, source: 'system' },
   render_free_gb: null,
+  render_ram_free_gb: 22,
 }
 
 function slot(name: string, extra: Record<string, unknown> = {}): Slot {

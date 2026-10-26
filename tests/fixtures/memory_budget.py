@@ -21,6 +21,7 @@ NO_GPU_BUDGET = MemoryBudget(
     gpu=None,
     ram=RamBudget(limit_gb=128.0, used_gb=28.0, free_gb=100.0, source="container"),
     render_free_gb=None,
+    render_ram_free_gb=100.0,
 )
 
 

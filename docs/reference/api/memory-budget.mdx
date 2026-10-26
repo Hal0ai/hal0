@@ -33,7 +33,8 @@ dashboard polls the route every 2.5 s. The rest of the route is indexed in the
       "free_gb": 72.6
     },
     "ram": {"limit_gb": 48.0, "used_gb": 16.1, "free_gb": 31.9, "source": "container"},
-    "render_free_gb": 88.8
+    "render_free_gb": 88.8,
+    "render_ram_free_gb": 31.9
   }
 }
 ```
@@ -53,8 +54,9 @@ Every GB value is MiB ÷ 1024, rounded to one decimal.
 | `gpu.free_gb` | `max(0, total − used)`. |
 | `ram.limit_gb` | This box's RAM limit: the smaller of `MemTotal` and the tightest finite `memory.max` (cgroup v2) or `memory.limit_in_bytes` (v1) on the process's cgroup chain, from its own cgroup up to the root. Inside an LXC guest `MemTotal` already carries the guest's limit. Read live on every call. |
 | `ram.used_gb`, `ram.free_gb` | `used` is `MemTotal − MemAvailable`, so reclaimable page cache is not counted. It is system-wide, so under a cap below `MemTotal` it can exceed `limit_gb`. `free` is `max(0, limit − used)`. |
-| `ram.source` | `container` when `/run/systemd/container` exists or a finite cgroup limit was found on the chain, otherwise `system`. |
+| `ram.source` | `container` when `/run/systemd/container` exists, something (lxcfs in an LXC guest) is mounted over `/proc/meminfo`, or a finite cgroup limit was found on the chain, otherwise `system`. `system` means the reading is the host's own RAM. |
 | `render_free_gb` | The pool a render can use once image mode has unloaded this box's GPU slots: `max(0, total − other guests − starting slots − 2.0)`. The image engine is not subtracted: a model's GPU need is measured above an idle engine, and the engine renders inside its own allocation, so the memory it holds (a model still resident from the last render included) is room for the render, not a cost against it. The `2.0` GB is a fixed margin for the driver and the allocator. The idle engine's own footprint is not subtracted either, so while the engine is idle or down this can read a little high (#3071). |
+| `render_ram_free_gb` | The RAM a render's load can use once image mode has unloaded those slots: `ram.free_gb` plus the RAM the unload gives back, never above `ram.limit_gb`. Something is given back only on a `shared` pool with `ram.source` `system`, a bare-metal unified-memory host, where the GTT the slots hold comes out of system RAM and lowers `MemAvailable`. The credit is the slots' pool figures, capped at the pool used outside the image engine; slots still `starting` are not credited. In a container, including an LXC guest, nothing is credited and this equals `ram.free_gb`: the guest's RAM is not charged for GTT. |
 
 ## Null and zero rules
 
@@ -62,6 +64,7 @@ Every GB value is MiB ÷ 1024, rounded to one decimal.
   sample lacks the total or the used counter for its pool. A missing counter is
   never read as `0`, because that would publish a headroom nothing measured.
 - `render_free_gb` is `null` exactly when `gpu` is.
+- `render_ram_free_gb` is never `null`. Without a pool reading it equals `ram.free_gb`.
 - `ram` is always present. If `/proc/meminfo` cannot be read, `limit_gb`,
   `used_gb` and `free_gb` are all `0.0`; clients should treat a `limit_gb` of `0`
   as "unknown", not as a box with no memory.
@@ -77,7 +80,7 @@ omits slots that are starting.
 The image fit verdicts read the same budget. Each `fit` on `GET /api/comfyui/models`,
 `GET /api/comfyui/models/{model_id}/fit` and the preflight of `POST /v1/images/generations`
 collect it with the same function that builds this block and judge a model's need against
-`render_free_gb` and `ram.free_gb`, so a verdict and the memory screens cannot disagree
+`render_free_gb` and `render_ram_free_gb`, so a verdict and the memory screens cannot disagree
 about what is free. A verdict is `null`, never "won't fit", when `gpu` and `render_free_gb`
 are `null` or `ram.limit_gb` is `0`. See the
 [Image readiness API reference](/docs/reference/api/image-readiness/).

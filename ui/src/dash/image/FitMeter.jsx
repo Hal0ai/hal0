@@ -1,6 +1,8 @@
 // The fit meter: two bars, the GPU pool and RAM · this box, each with a dashed ghost of what the
-// model needs, and the server's verdict beside them. The GPU figure is `render_free_gb`, what a
-// render can use once image mode has paused the chat slots, so it reads "free for a render".
+// model needs, and the server's verdict beside them. Both figures (`render_free_gb`,
+// `ram_free_gb`) are what a render can use once image mode has paused the chat slots, so both
+// read "free for a render". On a bare-metal unified-memory host the RAM figure counts the memory
+// the paused slots give back, and can be above what the box reports free right now (#3072).
 //
 // The Models cards and the Generate tab's fit panel both draw it. The verdict is always the
 // server's (`fit.verdict`, `fit.reason`); the UI never judges a fit. What it computes is display
@@ -87,7 +89,7 @@ export function FitMeter({ fit, engineAvailable, size, requestedSize, perImage =
         need={fit.need.ram_gb}
         estimated={fit.need.ram_estimated}
         free={fit.ram_free_gb}
-        freeLabel="free"
+        freeLabel="free for a render"
         suffix={suffix}
       />
       <div className="fm-verdict">
