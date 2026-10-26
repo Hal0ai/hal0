@@ -895,7 +895,7 @@ daemon, so the same code path runs whether you update from the shell or the
 dashboard. After a successful apply the daemon try-restarts `hal0-api`
 itself.
 
-**`hal0 <version> supports upgrades from >=1.4.0; this box is on <older>`**
+**`hal0 <version> supports upgrades from >=<floor>; this box is on <older>`**
 (`system.update_upgrade_path_unsupported`) — the box is below the upgrade
 floor. See [Upgrading from an older release](#upgrading-from-an-older-release).
 
@@ -937,12 +937,14 @@ One made with `sudo` is owned by root, so archive it with `sudo tar czf`, or
 
 ## Upgrading from an older release
 
-Upgrades start at **1.4.0**. `hal0 update` on an older box stops before it
-downloads anything, and re-running the installer over an older install stops
-before it changes anything. A box on 1.3.x takes one hop: `hal0 update
---target 1.5.0`, then `hal0 update` again. A box older than 1.3.0 first steps
-through 1.3.0 by running its installer in place, which keeps `/etc/hal0` and
-`/var/lib/hal0`, then takes the same hop:
+Upgrades to 1.7.0 start at **1.4.0**; the releases after 1.7.0 start at
+**1.5.0**. `hal0 update` on an older box stops before it downloads anything,
+and re-running the installer over an older install stops before it changes
+anything. A box on 1.4.x updates to 1.7.0 first (`hal0 update --target
+1.7.0`), then updates again. A box on 1.3.x takes one hop through 1.5.0:
+`hal0 update --target 1.5.0`, then `hal0 update` again. A box older than
+1.3.0 first steps through 1.3.0 by running its installer in place, which
+keeps `/etc/hal0` and `/var/lib/hal0`, then takes the same hop:
 
 ```sh
 curl -fsSL https://hal0.dev/install.sh \

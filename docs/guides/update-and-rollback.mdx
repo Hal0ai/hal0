@@ -311,17 +311,25 @@ The first `hal0 update` to 1.6.0 changes how Hermes is installed. One step is ne
 
 ## Upgrading from an older release
 
-Upgrades start at **1.4.0** (from 1.6.0; 1.3.0 before that). Every release
-manifest declares the window it upgrades from (`upgrade_from: ">=1.4.0"`),
-and both upgrade paths enforce it:
+Upgrades start at **1.5.0** in the releases after 1.7.0 (1.4.0 from 1.6.0
+through 1.7.0; 1.3.0 before that). Every release manifest declares the window
+it upgrades from (`upgrade_from: ">=1.5.0"`), and both upgrade paths enforce
+it:
 
 - `hal0 update` on an older box stops before it downloads anything, with
   `system.update_upgrade_path_unsupported` and both versions named.
 - Re-running the installer over an older install stops before it changes
   anything.
 
-A nightly counts as a prerelease of its base version, so a `1.4.0` nightly is
-below the floor and a `1.5.0` nightly is inside it.
+A nightly counts as a prerelease of its base version, so a `1.5.0` nightly is
+below the floor and a `1.6.0` nightly is inside it.
+
+From a 1.4.x box, step through 1.7.0 first:
+
+```sh
+hal0 update --target 1.7.0 -y
+hal0 update -y
+```
 
 From a 1.3.x box, step through 1.5.0 first:
 

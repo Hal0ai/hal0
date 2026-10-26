@@ -94,6 +94,9 @@ def _run(
         "0.9.8",
         "1.0.0-nightly.20260801120000",
         "1.4.0-nightly.20261011035008",
+        "1.4.0",
+        "1.4.1",
+        "1.5.0-nightly.20261019194027",
     ],
 )
 def test_rerun_below_the_shipped_floor_is_refused(tmp_path: Path, installed: str) -> None:
@@ -101,12 +104,12 @@ def test_rerun_below_the_shipped_floor_is_refused(tmp_path: Path, installed: str
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert "FLOOR_PASSED" not in proc.stdout
     assert f"hal0 {installed} is installed" in proc.stderr
-    assert "upgrades only from >=1.4.0" in proc.stderr
-    assert "Upgrade to 1.4.0 first or reinstall" in proc.stderr
-    assert "releases/download/v1.4.0/stable.json" in proc.stderr
+    assert "upgrades only from >=1.5.0" in proc.stderr
+    assert "Upgrade to 1.5.0 first or reinstall" in proc.stderr
+    assert "releases/download/v1.5.0/stable.json" in proc.stderr
 
 
-@pytest.mark.parametrize("installed", ["1.4.0", "1.4.1", "1.5.0", "1.5.0-nightly.20261019194027"])
+@pytest.mark.parametrize("installed", ["1.5.0", "1.5.1", "1.7.0", "1.7.0-nightly.20261026172124"])
 def test_rerun_inside_the_window_proceeds(tmp_path: Path, installed: str) -> None:
     proc = _run(tmp_path, installed)
     assert proc.returncode == 0, proc.stdout + proc.stderr

@@ -36,12 +36,12 @@ def _manifest(upgrade_from: str = "") -> ReleaseManifest:
     return ReleaseManifest.model_validate(
         {
             "_schema": "hal0.releases.v1",
-            "version": "1.4.0",
+            "version": "1.8.0",
             "channel": "stable",
             "release_kind": "stable",
             "upgrade_from": upgrade_from,
-            "url": "https://example.invalid/hal0-1.4.0.tar.gz",
-            "bundle_url": "https://example.invalid/hal0-1.4.0.tar.gz.bundle",
+            "url": "https://example.invalid/hal0-1.8.0.tar.gz",
+            "bundle_url": "https://example.invalid/hal0-1.8.0.tar.gz.bundle",
             "digest_sha256": "0" * 64,
             "signer_identity": "^https://github.com/hal0ai/hal0/.*$",
         }
@@ -56,11 +56,12 @@ def _shipped_floor() -> str:
 # ── the shipped floor ─────────────────────────────────────────────────────────
 
 
-def test_shipped_manifest_declares_the_1_4_floor() -> None:
-    """The floor is a deliberate operator decision: from v1.6.0 upgrades start at
-    1.4.0, so the 1.3.x updater's post-swap shim could be deleted. A 1.3.x box
-    hops through 1.5.0 (`hal0 update --target 1.5.0`) first."""
-    assert _shipped_floor() == ">=1.4.0"
+def test_shipped_manifest_declares_the_1_5_floor() -> None:
+    """The floor is a deliberate operator decision: after v1.7.0 upgrades start
+    at 1.5.0, so the ADR-0029 profile-centric conversion chain that 1.4.0
+    shipped can be deleted. A 1.4.x box hops through 1.7.0
+    (`hal0 update --target 1.7.0`) first, a 1.3.x box through 1.5.0."""
+    assert _shipped_floor() == ">=1.5.0"
 
 
 def test_release_workflow_copies_the_floor_into_every_channel_manifest() -> None:
@@ -72,7 +73,7 @@ def test_release_workflow_copies_the_floor_into_every_channel_manifest() -> None
 
 @pytest.mark.parametrize(
     "installed",
-    ["1.4.0", "1.4.1", "1.5.0", "1.5.0-rc.1", "1.5.0rc1", "1.5.0-nightly.20261011035008"],
+    ["1.5.0", "1.5.1", "1.6.5", "1.7.0", "1.7.0-rc.1", "1.7.0rc1", "1.7.0-nightly.20261026172124"],
 )
 def test_releases_inside_the_window_are_admitted(installed: str) -> None:
     _enforce_upgrade_floor(_manifest(_shipped_floor()), current=installed)
@@ -87,19 +88,22 @@ def test_releases_inside_the_window_are_admitted(installed: str) -> None:
         "1.2.0",
         "1.3.0",
         "1.3.1",
-        "1.4.0-rc.1",
+        "1.4.0",
+        "1.4.1",
+        "1.5.0-rc.1",
+        "1.5.0-nightly.20261019194027",
         "1.0.0-nightly.20260801120000",
         "1.0.0-nightly.20260801",
     ],
 )
-def test_below_the_1_4_floor_is_refused(installed: str) -> None:
+def test_below_the_1_5_floor_is_refused(installed: str) -> None:
     with pytest.raises(UpdateUpgradePathUnsupported) as ei:
         _enforce_upgrade_floor(_manifest(_shipped_floor()), current=installed)
     assert ei.value.details["installed_version"] == installed
-    assert ei.value.details["upgrade_from"] == ">=1.4.0"
-    assert ei.value.details["target_version"] == "1.4.0"
+    assert ei.value.details["upgrade_from"] == ">=1.5.0"
+    assert ei.value.details["target_version"] == "1.8.0"
     assert installed in str(ei.value)
-    assert ">=1.4.0" in str(ei.value)
+    assert ">=1.5.0" in str(ei.value)
     assert "reinstall" in ei.value.details["hint"]
 
 
@@ -126,7 +130,7 @@ def test_prepare_refuses_a_1_2_box_before_downloading(
     with pytest.raises(UpdateUpgradePathUnsupported) as ei:
         asyncio.run(Updater(channel="stable").prepare())
     assert ei.value.details["installed_version"] == "1.2.0"
-    assert ei.value.details["upgrade_from"] == ">=1.4.0"
+    assert ei.value.details["upgrade_from"] == ">=1.5.0"
 
 
 def test_nightly_maps_onto_a_dev_release_of_its_base() -> None:

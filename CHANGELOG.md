@@ -30,6 +30,10 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Breaking
+
+- **Upgrades start at 1.5.0.** `manifest.json` declares `upgrade_from = ">=1.5.0"`, so `hal0 update` on a 1.4.x box stops before it downloads anything, with `system.update_upgrade_path_unsupported` naming both versions, and re-running the installer over a 1.4.x install stops before it changes anything. Update a 1.4.x box to 1.7.0 first (`hal0 update --target 1.7.0`), then update again; a 1.3.x box still hops through 1.5.0 (`hal0 update --target 1.5.0`). A 1.5.0 nightly counts as a prerelease of 1.5.0, so it is below the floor too. The floor moves so the profile-centric conversion that 1.4.0 shipped (ADR-0029) can be deleted.
+
 ## [1.7.0] — 2026-10-26
 
 ### Highlights
