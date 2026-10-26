@@ -1940,6 +1940,35 @@ def test_check_hermes_api_upstreams_gateway_disabled_warns(tmp_path) -> None:
     assert calls == []
 
 
+@pytest.mark.parametrize(
+    ("state", "remedy"),
+    [
+        ("disabled", "sudo systemctl enable --now hermes-gateway.service"),
+        (
+            "masked",
+            "sudo systemctl unmask hermes-gateway.service && sudo hal0 agent install hermes",
+        ),
+        (
+            "masked-runtime",
+            "sudo systemctl unmask --runtime hermes-gateway.service && sudo hal0 agent install hermes",
+        ),
+    ],
+)
+def test_check_hermes_api_upstreams_off_remedy_follows_unit_state(tmp_path, state, remedy) -> None:
+    """#3030: a masked gateway has no unit file to enable; doctor prints the same
+    remedy as `hal0 agent install hermes`."""
+    c = da.check_hermes_api_upstreams(
+        home=_hermes_home(tmp_path),
+        probe=lambda url: 0,
+        upstreams_payload=[],
+        gateway_expected=lambda: False,
+        gateway_state=lambda: state,
+    )
+    assert c.status == "warn" and f"to run it: {remedy}" in c.detail
+    if state != "disabled":
+        assert "enable --now" not in c.detail
+
+
 def test_check_hermes_api_upstreams_enabled_but_unreachable_fails(tmp_path) -> None:
     """An enabled gateway that does not answer is an outage, not an off switch."""
     home = _hermes_home(tmp_path)

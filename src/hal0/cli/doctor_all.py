@@ -1775,6 +1775,12 @@ def _gateway_expected() -> bool:
     return gateway_in_use()
 
 
+def _gateway_state() -> str:
+    from hal0.cli.agent_commands import _gateway_enable_state
+
+    return _gateway_enable_state("hermes-gateway.service")
+
+
 def check_hermes_api_upstreams(
     *,
     home: Path | None = None,
@@ -1783,6 +1789,7 @@ def check_hermes_api_upstreams(
     upstreams_payload: Any = None,
     slots_payload: Any = None,
     gateway_expected: Callable[[], bool] | None = None,
+    gateway_state: Callable[[], str] | None = None,
 ) -> Check:
     """Each served Hermes profile's API path: key, authenticated ``/v1/models``, upstream.
 
@@ -1820,12 +1827,20 @@ def check_hermes_api_upstreams(
         # broken API path, so say what is not checked and how to turn it on
         # instead of a FAIL per profile. An enabled gateway that does not
         # answer is an outage and keeps failing below.
+        # A masked gateway has no unit file to enable, so the remedy follows
+        # the unit state, the same one `hal0 agent install hermes` prints (#3030).
+        from hal0.cli.agent_commands import gateway_turn_on_command
+
+        state = (gateway_state if gateway_state is not None else _gateway_state)()
+        turn_on = gateway_turn_on_command("hermes-gateway.service", state)
+        # Doctor runs as the operator, so every root step needs its own sudo.
+        turn_on = "sudo " + turn_on
         return Check(
             key,
             label,
             _WARN,
             f"Hermes gateway is disabled and not running ({base}/health unreachable), so the "
-            "API path is not checked; to run it: sudo systemctl enable --now hermes-gateway" + tail,
+            f"API path is not checked; to run it: {turn_on}" + tail,
         )
     served = ha.served_profiles(root, probe=probe)
     registered = _upstream_names(upstreams_payload)
