@@ -80,7 +80,9 @@ def _budget(
         free_gb=ram_free_gb,
         source="container",
     )
-    return MemoryBudget(gpu=gpu, ram=ram, render_free_gb=render_free_gb)
+    return MemoryBudget(
+        gpu=gpu, ram=ram, render_free_gb=render_free_gb, render_ram_free_gb=ram_free_gb
+    )
 
 
 def _install(*model_ids: str) -> None:

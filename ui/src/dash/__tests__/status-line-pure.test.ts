@@ -69,6 +69,7 @@ function memory(over: Partial<MemoryBudgetJson> = {}): MemoryBudgetJson {
     },
     ram: { limit_gb: 64, used_gb: 20, free_gb: 44, source: 'container' },
     render_free_gb: 50,
+    render_ram_free_gb: 44,
     ...over,
   }
 }

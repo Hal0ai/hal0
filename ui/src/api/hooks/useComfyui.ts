@@ -426,7 +426,9 @@ export interface FitNeed {
 
 /** The server's verdict on one render against this box's memory (`Fit.as_dict()`). `reason` is
  *  null exactly when the verdict is `fits`. The two `*_free_gb` figures are what the need was
- *  judged against. The UI shows the verdict as given and never judges a fit itself. */
+ *  judged against: the memory budget's `render_free_gb` and `render_ram_free_gb`, what a render
+ *  can use once image mode has paused the chat slots. The UI shows the verdict as given and never
+ *  judges a fit itself. */
 export interface Fit {
   verdict: FitVerdict
   reason: string | null

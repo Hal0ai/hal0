@@ -19,6 +19,11 @@ summed together:
 * **This box's RAM** (:class:`RamBudget`), passed in by the caller, already
   resolved to the container cgroup limit or the system total.
 
+The two meet in one place: ``render_ram_free_gb``, the RAM a render's load can use
+once image mode has unloaded this box's slots. On a bare-metal unified-memory host
+the GTT those slots hold comes out of system RAM, so the switch gives it back; that
+credit is the only figure that reads one budget into the other (#3072).
+
 :func:`build_memory_budget` is pure -- no I/O, no clock, no logging. Callers
 gather the inputs (the GPU sample, ``build_per_slot`` rows, ComfyUI's memory
 view, the RAM reading) and hand them to it. The only I/O in this module is the
@@ -116,11 +121,18 @@ class MemoryBudget:
     ``max(0, total - other guests - starting slots - RENDER_MARGIN_GB)``: the image
     engine's own allocation is room for its render, not a cost against it (see
     :func:`build_memory_budget`).
+
+    ``render_ram_free_gb`` is the RAM a render's load can use once image mode has
+    unloaded those slots: ``ram.free_gb`` plus what the unload gives back to the
+    RAM reading, never past ``ram.limit_gb``. The credit is non-zero only on a
+    shared pool read through the host's own RAM (see :func:`build_memory_budget`);
+    everywhere else this equals ``ram.free_gb``.
     """
 
     gpu: GpuBudget | None
     ram: RamBudget
     render_free_gb: float | None
+    render_ram_free_gb: float
 
     def as_dict(self) -> dict[str, Any]:
         """JSON-native form; keys are the dataclass field names, nested too."""
@@ -193,15 +205,26 @@ def build_memory_budget(
     never booked as another guest. The idle engine's own footprint is in neither
     the need nor the room, and can exceed :data:`RENDER_MARGIN_GB`, so the room
     reads high by the difference while the engine is idle or down (#3071).
+
+    ``render_ram_free_gb`` credits RAM for the same unload, and only where the
+    pool is charged to the RAM reading: a shared pool with ``ram.source ==
+    "system"``, the host's own ``/proc/meminfo``. GTT pages come out of system
+    RAM there, so ``MemAvailable`` is low by everything the slots hold in the
+    pool. The credit is the resident slots' pool attribution, capped at the pool
+    used outside the image engine, because the attribution can be an estimate
+    and no more can come back than the pool holds. A starting slot is not
+    credited: the switch does not unload it. Nothing is credited in a container:
+    an LXC guest's GTT is not charged to its RAM, and a slot's own cgroup charge
+    there includes page cache the reading already counts as available (#3072).
     """
     if not gpu_capable or sample is None:
-        return MemoryBudget(gpu=None, ram=ram, render_free_gb=None)
+        return _without_a_pool(ram)
 
     shared = sample.is_uma
     total_mb = sample.gtt_total_mb if shared else sample.vram_total_mb
     used_raw = sample.gtt_used_mb if shared else sample.vram_used_mb
     if total_mb is None or used_raw is None:
-        return MemoryBudget(gpu=None, ram=ram, render_free_gb=None)
+        return _without_a_pool(ram)
     used_mb = _mb(used_raw)
 
     shares: list[tuple[str, float, str]] = []
@@ -233,6 +256,10 @@ def build_memory_budget(
         0.0,
         total_mb - other_guests_mb - starting_mb - RENDER_MARGIN_GB * 1024.0,
     )
+    # The unload gives RAM back only where the pool is charged to it (see the docstring).
+    credit_mb = 0.0
+    if shared and ram.source == "system":
+        credit_mb = min(resident_mb, max(0.0, used_mb - engine_mb))
 
     gpu = GpuBudget(
         kind="shared" if shared else "dedicated",
@@ -246,7 +273,17 @@ def build_memory_budget(
         attribution_excess_gb=_gb(excess_mb),
         free_gb=_gb(free_mb),
     )
-    return MemoryBudget(gpu=gpu, ram=ram, render_free_gb=_gb(render_free_mb))
+    return MemoryBudget(
+        gpu=gpu,
+        ram=ram,
+        render_free_gb=_gb(render_free_mb),
+        render_ram_free_gb=round(min(ram.limit_gb, ram.free_gb + credit_mb / 1024.0), 1),
+    )
+
+
+def _without_a_pool(ram: RamBudget) -> MemoryBudget:
+    """The budget of a box whose pool was not read: RAM as it is, nothing to credit."""
+    return MemoryBudget(gpu=None, ram=ram, render_free_gb=None, render_ram_free_gb=ram.free_gb)
 
 
 def _read(path: Path) -> str | None:
@@ -347,6 +384,19 @@ def _meminfo_mb(root: Path) -> tuple[float, float]:
     return values["MemTotal"], values["MemAvailable"]
 
 
+def _meminfo_is_mounted_over(root: Path) -> bool:
+    """True when something is mounted on ``/proc/meminfo`` in ``<root>/proc/self/mounts``.
+
+    That is lxcfs in an LXC guest: its ``MemTotal`` is the guest's limit, not the
+    host's RAM. A missing listing reads as no mount.
+    """
+    for line in (_read(root / "proc/self/mounts") or "").splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[1] == "/proc/meminfo":
+            return True
+    return False
+
+
 def read_ram(root: Path = Path("/")) -> RamBudget:
     """This box's RAM, read live from ``root`` (``/`` in production).
 
@@ -356,9 +406,11 @@ def read_ram(root: Path = Path("/")) -> RamBudget:
     lxcfs already reports the guest limit as ``MemTotal``. ``free`` is
     ``max(0, limit - used)``.
 
-    ``source`` is ``"container"`` when ``<root>/run/systemd/container`` exists
-    or the chain carried a finite limit, otherwise ``"system"``. A missing
-    ``/proc/meminfo`` reads as zeros. Never raises.
+    ``source`` is ``"container"`` when ``<root>/run/systemd/container`` exists,
+    something (lxcfs) is mounted over ``/proc/meminfo``, or the chain carried a
+    finite limit, otherwise ``"system"``. ``"system"`` therefore means the
+    reading is the host's own RAM, which the memory budget relies on to credit
+    unloaded GTT (#3072). A missing ``/proc/meminfo`` reads as zeros. Never raises.
     """
     total_mb, available_mb = _meminfo_mb(root)
     chain_mb = cgroup_limit_mb(root)
@@ -368,6 +420,7 @@ def read_ram(root: Path = Path("/")) -> RamBudget:
         marked = (root / "run/systemd/container").exists()
     except OSError:
         marked = False
+    marked = marked or _meminfo_is_mounted_over(root)
     return RamBudget(
         limit_gb=_gb(limit_mb),
         used_gb=_gb(used_mb),

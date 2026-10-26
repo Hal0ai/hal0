@@ -80,7 +80,9 @@ def _gpu_budget(*, ram: RamBudget, render_free_gb: float, other_guests_gb: float
         attribution_excess_gb=0.0,
         free_gb=round(116.0 - other_guests_gb, 1),
     )
-    return MemoryBudget(gpu=gpu, ram=ram, render_free_gb=render_free_gb)
+    return MemoryBudget(
+        gpu=gpu, ram=ram, render_free_gb=render_free_gb, render_ram_free_gb=ram.free_gb
+    )
 
 
 # Plan 4a's two reference boxes. The roomy one fits every renderable model; on the capped
@@ -99,6 +101,7 @@ NO_GPU_BUDGET = MemoryBudget(
     gpu=None,
     ram=RamBudget(limit_gb=48.0, used_gb=2.2, free_gb=45.8, source="container"),
     render_free_gb=None,
+    render_ram_free_gb=45.8,
 )
 
 
