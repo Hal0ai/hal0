@@ -1179,7 +1179,7 @@ if [[ "${MODELS_DIR}" != "/var/lib/hal0/models" ]]; then
         # Plain fcntl on purpose: this is system python3, which cannot import
         # hal0 (the venv does not exist yet at this point).
         mkdir -p "${ETC_DIR}"
-        python3 - "${HAL0_TOML}" "${MODELS_DIR}" <<'PYEOF'
+        python3 -I - "${HAL0_TOML}" "${MODELS_DIR}" <<'PYEOF'
 import fcntl, os, pathlib, re, stat, sys, tempfile
 path = pathlib.Path(sys.argv[1])
 new_root = sys.argv[2]
@@ -1297,7 +1297,7 @@ fi
 ui_step "Python environment" "~30-90s"
 
 if [[ ! -d "${VENV_DIR}" ]]; then
-    "${PY}" -m venv "${VENV_DIR}"
+    "${PY}" -I -m venv "${VENV_DIR}"
     info "created venv at ${VENV_DIR}"
 fi
 PIP="${VENV_DIR}/bin/pip"
@@ -1534,7 +1534,7 @@ API_ENV="${ETC_DIR}/api.env"
 # URL out of the block so `hal0 network public-url clear` really revokes it.
 if [[ -n "${HAL0_PUBLIC_URL:-}" ]]; then
     PUBLIC_URL_MSG="$(
-        "${VENV_DIR}/bin/python" -c 'import sys; from hal0.install.network import persist_public_url_main; raise SystemExit(persist_public_url_main(sys.argv[1:]))' "${HAL0_TOML}" 2>/dev/null
+        "${VENV_DIR}/bin/python" -I -c 'import sys; from hal0.install.network import persist_public_url_main; raise SystemExit(persist_public_url_main(sys.argv[1:]))' "${HAL0_TOML}" 2>/dev/null
     )" || PUBLIC_URL_MSG=""
     if [[ -n "${PUBLIC_URL_MSG}" ]]; then
         info "${PUBLIC_URL_MSG}"
@@ -1544,7 +1544,7 @@ NETWORK_ENV_LINES="$(
     HAL0_BIND_HOST="${API_BIND_HOST}" \
     HAL0_PORT="${HAL0_PORT}" \
     HAL0_LAN_IPS="$(hostname -I 2>/dev/null || true)" \
-    "${VENV_DIR}/bin/python" -c 'import sys; from hal0.install.network import main; raise SystemExit(main(sys.argv[1:]))' "${HAL0_TOML}" 2>/dev/null
+    "${VENV_DIR}/bin/python" -I -c 'import sys; from hal0.install.network import main; raise SystemExit(main(sys.argv[1:]))' "${HAL0_TOML}" 2>/dev/null
 )" || NETWORK_ENV_LINES="HAL0_BIND_HOST=${API_BIND_HOST}"
 if [[ -z "${NETWORK_ENV_LINES}" ]]; then
     NETWORK_ENV_LINES="HAL0_BIND_HOST=${API_BIND_HOST}"
@@ -1647,7 +1647,7 @@ fi
 _mint_api_env_key() {
     local name="$1" value
     grep -qE "^${name}=.+" "${API_ENV}" 2>/dev/null && return 1
-    value="$("${VENV_DIR}/bin/python" -c \
+    value="$("${VENV_DIR}/bin/python" -I -c \
         'from hal0.service_identity import generate_service_key; print(generate_service_key())' \
         2>/dev/null || true)"
     [[ -n "${value}" ]] || return 2
@@ -1886,7 +1886,7 @@ fi
 if HAL0_HOME="${HAL0_HOME_FOR_OWUI}" \
     HAL0_BIND_HOST="${API_BIND_HOST}" \
     HAL0_OWUI_TRUSTED_EMAIL_HEADER="${HAL0_OWUI_TRUSTED_EMAIL_HEADER:-}" \
-    "${VENV_DIR}/bin/python" -c \
+    "${VENV_DIR}/bin/python" -I -c \
     'from hal0.openwebui.env_writer import main; main()'; then
     info "wrote ${ETC_DIR}/openwebui.env (bind ${API_BIND_HOST}:3001)"
 else
@@ -2014,7 +2014,7 @@ if [[ -f "${GPU_PERMS_UNIT_SRC}" ]]; then
     # converged after a reboot. Same treatment the bench units get; done in
     # Python, not sed, so a prefix containing sed metacharacters is safe.
     if [[ "${VENV_DIR}" != "/usr/lib/hal0/venv" ]]; then
-        "${PY}" - "${GPU_PERMS_UNIT_DST}" "${VENV_DIR}" <<'PYEOF'
+        "${PY}" -I - "${GPU_PERMS_UNIT_DST}" "${VENV_DIR}" <<'PYEOF'
 import sys
 from pathlib import Path
 
@@ -2295,7 +2295,7 @@ if [[ -f "${AGENT_UNIT_SRC}" ]]; then
             _bench_write+=("${_bench_unit}")
         done
         if [[ ${#_bench_write[@]} -gt 0 && ( "${VENV_DIR}" != "/usr/lib/hal0/venv" || "${BENCH_STATE_DIR}" != "/var/lib/hal0-bench" ) ]]; then
-            "${PY}" - "${UNIT_DIR}" "${VENV_DIR}" "${BENCH_STATE_DIR}" "${_bench_write[@]}" <<'PYEOF'
+            "${PY}" -I - "${UNIT_DIR}" "${VENV_DIR}" "${BENCH_STATE_DIR}" "${_bench_write[@]}" <<'PYEOF'
 import sys
 from pathlib import Path
 
@@ -2562,7 +2562,7 @@ fi
 # profile.
 if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 ]] && command -v podman >/dev/null 2>&1 \
     && [[ -x "${VENV_DIR}/bin/python" ]]; then
-    if "${VENV_DIR}/bin/python" -m hal0.agents.containers_apparmor; then
+    if "${VENV_DIR}/bin/python" -I -m hal0.agents.containers_apparmor; then
         :
     else
         warn "podman apparmor preflight could not resolve the profile-load failure — slots may not start; see the detail above"
@@ -2712,7 +2712,7 @@ done
 # derivation keeps the shipped labels (the load-time refusal is loud and
 # names its remedy) and never fails the install.
 if (( ${#SEEDED_NEW_SLOTS[@]} > 0 )); then
-    if ! "${VENV_DIR}/bin/python" -m hal0.install.static_seeds \
+    if ! "${VENV_DIR}/bin/python" -I -m hal0.install.static_seeds \
             --slots-dir "${ETC_DIR}/slots" "${SEEDED_NEW_SLOTS[@]}"; then
         warn "seed device derivation failed — freshly seeded slots keep their shipped device labels;"
         warn "  on a box without /dev/kfd fix per slot with: hal0 slot edit <slot> --hardware vulkan (or cpu)"
@@ -2793,7 +2793,7 @@ elif [[ "${HAL0_SKIP_BRAIN_MODEL:-0}" == "1" || "${HAL0_SKIP_SETUP:-0}" == "1" ]
     info "Skipping the brain model pull (HAL0_SKIP_BRAIN_MODEL/HAL0_SKIP_SETUP set)."
 else
     HF_TOKEN="${HF_TOKEN_VAL}" HAL0_BRAIN_MODEL="${HAL0_BRAIN_MODEL:-}" \
-        "${VENV_DIR}/bin/python" -m hal0.install.brain_model \
+        "${VENV_DIR}/bin/python" -I -m hal0.install.brain_model \
         || warn "brain model pull did not complete — the brain slot stays model-less and the install continues; retry later with 'hal0 model pull <id>' or from the dashboard"
 fi
 
@@ -2842,7 +2842,7 @@ elif [[ "${HAL0_SKIP_SETUP:-0}" == "1" || "${HAL0_PULL_AGENT_MODEL:-}" == "0" ]]
 else
     # `|| true`: a plan that cannot be computed is simply no offer. Never fatal.
     _agent_plan="$(HAL0_AGENT_MODEL="${HAL0_AGENT_MODEL:-}" \
-        "${VENV_DIR}/bin/python" -m hal0.install.agent_model --plan 2>/dev/null || true)"
+        "${VENV_DIR}/bin/python" -I -m hal0.install.agent_model --plan 2>/dev/null || true)"
     _agent_plan="${_agent_plan%%$'\n'*}"
     if [[ -z "${_agent_plan}" || "${_agent_plan}" != *$'\t'* ]]; then
         # Floor comes from the curated ladder itself (`--floor` reads the
@@ -2850,7 +2850,7 @@ else
         # this notice can't drift from `_smallest_rung_gb()` the way a bash
         # literal would. `|| true` + regex guard: a broken venv still prints
         # a sane fallback instead of aborting under `set -euo pipefail`.
-        _agent_floor="$("${VENV_DIR}/bin/python" -m hal0.install.agent_model --floor 2>/dev/null || true)"
+        _agent_floor="$("${VENV_DIR}/bin/python" -I -m hal0.install.agent_model --floor 2>/dev/null || true)"
         [[ "${_agent_floor}" =~ ^[0-9]+$ ]] || _agent_floor=15
         info "No agent model fits this box (a ROCm/Vulkan device and ~${_agent_floor} GB of pool are the floor) — not offering one."
     else
@@ -2876,7 +2876,7 @@ else
 
     if [[ "${_agent_wanted}" -eq 1 ]]; then
         if HF_TOKEN="${HF_TOKEN_VAL}" HAL0_AGENT_MODEL="${_agent_id}" \
-            "${VENV_DIR}/bin/python" -m hal0.install.agent_model; then
+            "${VENV_DIR}/bin/python" -I -m hal0.install.agent_model; then
             :
         else
             warn "agent model pull did not complete — the agent slot stays model-less and the install continues"
@@ -2928,14 +2928,14 @@ elif [[ "${NO_START}" -eq 1 ]]; then
     info "Skipping the starter image models (--no-start). Install one later with 'hal0 comfyui models install <id>' or from the dashboard."
 else
     # `|| true`: a plan that cannot be computed is simply no offer. Never fatal.
-    _img_plan="$("${VENV_DIR}/bin/python" -m hal0.install.image_models --plan 2>/dev/null || true)"
+    _img_plan="$("${VENV_DIR}/bin/python" -I -m hal0.install.image_models --plan 2>/dev/null || true)"
     if [[ -z "${_img_plan}" ]]; then
         info "Starter image models are not offered (the plan could not be computed on this box)."
     elif [[ "${_img_plan}" == none$'\t'* ]]; then
         info "Starter image models are not offered: ${_img_plan#none$'\t'}"
     elif [[ -n "${HAL0_IMAGE_MODELS:-}" ]]; then
         info "Image models via HAL0_IMAGE_MODELS=${HAL0_IMAGE_MODELS}"
-        if ! _img_ids="$("${VENV_DIR}/bin/python" -m hal0.install.image_models --resolve "${HAL0_IMAGE_MODELS}")"; then
+        if ! _img_ids="$("${VENV_DIR}/bin/python" -I -m hal0.install.image_models --resolve "${HAL0_IMAGE_MODELS}")"; then
             warn "HAL0_IMAGE_MODELS=${HAL0_IMAGE_MODELS} did not resolve to any image model (see above) — none downloaded"
             _img_ids=""
         fi
@@ -2958,7 +2958,7 @@ else
             # --resolve exits 2 for an answer it cannot resolve (ask again) and 1 for
             # an internal failure (asking again would not help: skip the step).
             _img_rc=0
-            _img_ids="$("${VENV_DIR}/bin/python" -m hal0.install.image_models --resolve "${_img_answer}")" || _img_rc=$?
+            _img_ids="$("${VENV_DIR}/bin/python" -I -m hal0.install.image_models --resolve "${_img_answer}")" || _img_rc=$?
             if [[ "${_img_rc}" -eq 0 ]]; then
                 break
             elif [[ "${_img_rc}" -eq 2 ]]; then
@@ -2975,7 +2975,7 @@ else
 
     if [[ -n "${_img_ids}" ]]; then
         read -r -a _img_list <<< "${_img_ids}"
-        if HF_TOKEN="${HF_TOKEN_VAL}" "${VENV_DIR}/bin/python" -m hal0.install.image_models "${_img_list[@]}"; then
+        if HF_TOKEN="${HF_TOKEN_VAL}" "${VENV_DIR}/bin/python" -I -m hal0.install.image_models "${_img_list[@]}"; then
             :
         else
             warn "an image model download did not complete — the install continues; retry later with 'hal0 comfyui models install <id>' or from the dashboard"
@@ -3247,7 +3247,7 @@ fi
 hal0_migration_step() {
     # $1 = human label for the warning; python source arrives on stdin.
     local label="$1"
-    if "${VENV_DIR}/bin/python" -; then
+    if "${VENV_DIR}/bin/python" -I -; then
         return 0
     fi
     warn "${label}: migration step failed — continuing with the install"
@@ -3507,7 +3507,7 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
         # cp -rf never removes a skill an older release shipped and this one
         # dropped; prune the explicit retired list (hal0.agents.bundled_skills),
         # never an operator's own skill.
-        "${VENV_DIR}/bin/python" -m hal0.agents.bundled_skills \
+        "${VENV_DIR}/bin/python" -I -m hal0.agents.bundled_skills \
             --ship-root "${SKILLS_SHIP}" --mirror-root "${AGENT_SKILLS_MIRROR}" \
             --shipped-from "${SKILLS_SRC}" \
             || warn "could not prune retired bundled skills — they stay until the next install"
@@ -3628,7 +3628,7 @@ smoke_structured_output() {
         SMOKE_STRUCTURED_NOTE="could not read the slot list (GET /api/slots failed)"
         return 2
     fi
-    target="$(printf '%s' "${slots_json}" | "${PY}" -c 'import json, sys
+    target="$(printf '%s' "${slots_json}" | "${PY}" -I -c 'import json, sys
 try:
     slots = json.load(sys.stdin)
     bound = [
@@ -3687,7 +3687,7 @@ print(verdict + " " + str(slot.get("name")).split()[0] + " " + state)' 2>/dev/nu
     fi
     # The assertion: the CONTENT of the reply parses as JSON — an HTTP 200
     # carrying prose ("Paris") is exactly the failure this probe exists for.
-    printf '%s' "${resp}" | "${PY}" -c 'import json, sys
+    printf '%s' "${resp}" | "${PY}" -I -c 'import json, sys
 try:
     reply = json.load(sys.stdin)
     json.loads(reply["choices"][0]["message"]["content"])
@@ -3716,7 +3716,7 @@ smoke_memory_engine_version() {
     [[ -f "${HINDSIGHT_UNIT_DST:-/etc/systemd/system/hindsight-api.service}" ]] || return 0
     local resp
     resp="$(curl -fsS -m 10 "http://127.0.0.1:9177/version" 2>/dev/null)" || return 1
-    printf '%s' "${resp}" | "${PY}" -c 'import json, sys
+    printf '%s' "${resp}" | "${PY}" -I -c 'import json, sys
 try:
     sys.exit(0 if json.load(sys.stdin).get("api_version") == sys.argv[1] else 1)
 except Exception:
@@ -3757,7 +3757,7 @@ run_post_install_smoke() {
         # install from inside a diagnostic.
         _brain_hint=""
         if [[ -n "${VENV_DIR:-}" && -x "${VENV_DIR}/bin/python" ]]; then
-            _brain_hint="$("${VENV_DIR}/bin/python" -m hal0.install.brain_model --check-binding 2>/dev/null || true)"
+            _brain_hint="$("${VENV_DIR}/bin/python" -I -m hal0.install.brain_model --check-binding 2>/dev/null || true)"
         fi
         if [[ -n "${_brain_hint}" ]]; then
             warn "  ${_brain_hint}"
@@ -3841,7 +3841,7 @@ else
             # resolve_hindsight_python (preflight): HINDSIGHT_PY is a Python
             # 3.11-3.14. Default to ${PY} if the resolver didn't run.
             hs_py="${HINDSIGHT_PY:-${PY}}"
-            "${hs_py}" -m venv "${HS_DIR}/.venv"
+            "${hs_py}" -I -m venv "${HS_DIR}/.venv"
             hs_pip="${HS_DIR}/.venv/bin/pip"
             "${hs_pip}" install --upgrade pip wheel -q 2>/dev/null || true
 
@@ -3851,12 +3851,12 @@ else
             # Failure is not fatal for the whole installer: warn, drop the
             # half-built venv so the next run retries cleanly, and let the
             # `-x hindsight-api` guard below skip the unit/health steps.
-            hs_pyver="$("${HS_DIR}/.venv/bin/python" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || echo '?')"
+            hs_pyver="$("${HS_DIR}/.venv/bin/python" -I -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || echo '?')"
             if ! "${hs_pip}" install "hindsight-api==${HINDSIGHT_PIN}" -q; then
                 warn "hindsight-api==${HINDSIGHT_PIN} failed to install on Python ${hs_pyver} — memory engine will be unavailable"
                 warn "  set HAL0_HINDSIGHT_PYTHON=/path/to/python3.X (3.11-3.14) and re-run, or set HAL0_SKIP_HINDSIGHT=1"
                 rm -rf "${HS_DIR}/.venv"
-            elif ! "${HS_DIR}/.venv/bin/python" -c 'import hindsight_api' 2>/dev/null; then
+            elif ! "${HS_DIR}/.venv/bin/python" -I -c 'import hindsight_api' 2>/dev/null; then
                 warn "hindsight-api==${HINDSIGHT_PIN} installed but 'import hindsight_api' fails on Python ${hs_pyver} — memory engine will be unavailable"
                 warn "  set HAL0_HINDSIGHT_PYTHON=/path/to/python3.X (3.11-3.14) and re-run, or set HAL0_SKIP_HINDSIGHT=1"
                 rm -rf "${HS_DIR}/.venv"
@@ -3866,7 +3866,7 @@ else
             # pass's job (see the block comment above) — just report where it
             # landed so a failed pass is visible right here, not only in the
             # migration-step output further up.
-            hs_have="$("${HS_DIR}/.venv/bin/python" -c 'import importlib.metadata as m; print(m.version("hindsight-api"))' 2>/dev/null || echo '?')"
+            hs_have="$("${HS_DIR}/.venv/bin/python" -I -c 'import importlib.metadata as m; print(m.version("hindsight-api"))' 2>/dev/null || echo '?')"
             if [[ "${hs_have}" == "${HINDSIGHT_PIN}" ]]; then
                 info "hindsight-api ${hs_have} already at pin — venv up to date"
             else
@@ -4115,7 +4115,7 @@ else
     # masked nor running.
     if [[ -x "${VENV_DIR}/bin/python" && "${_gateway_was_active}" -eq 0 ]] \
         && [[ "${_gateway_state}" != enabled* && "${_gateway_state}" != masked* ]]; then
-        _eff="$("${VENV_DIR}/bin/python" -m hal0.agents.hermes_gateway_regen state 2>/dev/null || true)"
+        _eff="$("${VENV_DIR}/bin/python" -I -m hal0.agents.hermes_gateway_regen state 2>/dev/null || true)"
         if [[ -n "${_eff}" && "${_eff%% *}" != "not-found" && "${_eff%% *}" != "unknown" ]]; then
             _gateway_state="${_eff%% *}"
             [[ "${_eff##* }" == "1" ]] && _gateway_was_active=1
@@ -4215,7 +4215,7 @@ else
             # keeps the mask and stops and removes the suffixed unit, so the
             # mask means off (#2950).
             _gw_rc=0
-            "${VENV_DIR}/bin/python" -m hal0.agents.hermes_gateway_regen migrate || _gw_rc=$?
+            "${VENV_DIR}/bin/python" -I -m hal0.agents.hermes_gateway_regen migrate || _gw_rc=$?
             gateway_install_note "${_gw_rc}" \
                 "suffixed hermes-gateway unit not moved off — re-run '${HAL0_BIN} agent install hermes'"
             # The mask leaves no gateway unit file to enable: after the
@@ -4225,14 +4225,14 @@ else
                 "${HAL0_BIN} agent install hermes"
         else
             _gw_rc=0
-            "${VENV_DIR}/bin/python" -m hal0.agents.hermes_gateway_regen install || _gw_rc=$?
+            "${VENV_DIR}/bin/python" -I -m hal0.agents.hermes_gateway_regen install || _gw_rc=$?
             gateway_install_note "${_gw_rc}" \
                 "hermes-gateway unit not installed — Telegram/Discord bridge unavailable; continuing"
             # ADR-0032 decision 12: the unit must name only stable paths under
             # /var/lib/hal0/hermes/current/. The template already does; the
             # normaliser stays as the backstop for a unit left from an earlier
             # run. A unit that still names a release is left disabled.
-            if ! "${VENV_DIR}/bin/python" -m hal0.agents.hermes_gateway_unit; then
+            if ! "${VENV_DIR}/bin/python" -I -m hal0.agents.hermes_gateway_unit; then
                 warn "hermes-gateway unit still names a release path — leaving the gateway disabled; re-run '${HAL0_BIN} agent install hermes'"
                 if ! unit_state_off "${_gateway_state}"; then
                     systemctl disable --now hermes-gateway.service >/dev/null 2>&1 || true
@@ -4459,7 +4459,7 @@ if [[ -n "${SUMMARY_JSON_PATH}" ]]; then
     _summary_hw_class_label="unknown"
     if [[ -f /etc/hal0/hardware.json ]]; then
         read -r _summary_hw_class_id _summary_hw_class_label < <(
-            "${PY}" - <<'PYEOF' 2>/dev/null || printf 'unknown unknown\n'
+            "${PY}" -I - <<'PYEOF' 2>/dev/null || printf 'unknown unknown\n'
 import json
 try:
     data = json.load(open("/etc/hal0/hardware.json"))
@@ -4496,7 +4496,7 @@ PYEOF
     done
     export HAL0_STEP_DURATIONS_BLOB="${_summary_steps_blob}"
 
-    "${PY}" - \
+    "${PY}" -I - \
         "${SUMMARY_JSON_PATH}" \
         "$(_ui_read_version)" \
         "${DEV_MODE}" "${NO_START}" \

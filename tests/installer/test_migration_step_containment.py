@@ -110,7 +110,7 @@ def test_bare_heredoc_would_have_aborted(tmp_path: Path) -> None:
 def test_no_bare_python_heredoc_survives_in_the_migration_phase() -> None:
     """Guard against a future edit reintroducing an uncontained call.
 
-    Scoped to *stdin* invocations — ``"${VENV_DIR}/bin/python" -`` with nothing
+    Scoped to *stdin* invocations — ``"${VENV_DIR}/bin/python" -I -`` with nothing
     after the dash. ``-c`` and ``-m`` forms are a different shape and are
     separately contained (``|| fallback`` at the network-env read, ``if …; then``
     at the openwebui env write); this test is about the heredoc-fed migration
@@ -119,11 +119,11 @@ def test_no_bare_python_heredoc_survives_in_the_migration_phase() -> None:
     import re
 
     text = INSTALL_SH.read_text(encoding="utf-8")
-    stdin_call = re.compile(r'"\$\{VENV_DIR\}/bin/python"\s+-(?![\w-])')
+    stdin_call = re.compile(r'"\$\{VENV_DIR\}/bin/python"\s+-I\s+-(?![\w-])')
     bare = [line for line in text.splitlines() if stdin_call.search(line)]
     # The single legitimate occurrence is the one inside the helper's body.
     assert len(bare) == 1, bare
-    assert bare[0].strip().startswith('if "${VENV_DIR}/bin/python" -')
+    assert bare[0].strip().startswith('if "${VENV_DIR}/bin/python" -I -')
     # …and it really is inside hal0_migration_step, not merely the only one.
     helper = _extract_function("hal0_migration_step")
     assert bare[0] in helper

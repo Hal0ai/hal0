@@ -282,9 +282,9 @@ def agent_block(install_sh_text: str) -> str:
 def test_agent_pull_is_never_unconditional(agent_block: str) -> None:
     """The brain pull is unconditional (~1-2 GB). This one is 15-31 GB, so it
     must be reached only through an explicit yes or an explicit env opt-in."""
-    assert "-m hal0.install.agent_model --plan" in agent_block, "the offer half is gone"
+    assert "-I -m hal0.install.agent_model --plan" in agent_block, "the offer half is gone"
     # The pull half must be guarded by the consent flag, not run inline.
-    pull_idx = agent_block.index('"${VENV_DIR}/bin/python" -m hal0.install.agent_model;')
+    pull_idx = agent_block.index('"${VENV_DIR}/bin/python" -I -m hal0.install.agent_model;')
     guard_idx = agent_block.index('if [[ "${_agent_wanted}" -eq 1 ]]; then')
     assert guard_idx < pull_idx, "the agent pull is not behind the consent flag"
 

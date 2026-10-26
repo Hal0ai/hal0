@@ -50,6 +50,7 @@ def _write_fake_python(path: Path, version: str) -> None:
     snippets preflight.sh feeds an interpreter."""
     major, minor = version.split(".")
     body = f"""#!/usr/bin/env bash
+[[ "$1" == "-I" ]] && shift  # preflight starts python isolated (#3010)
 if [[ "$1" == "-c" ]]; then
     case "$2" in
         *'sys.version_info[:2]'*) echo "{major}.{minor}" ;;

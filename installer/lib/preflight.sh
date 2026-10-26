@@ -202,7 +202,7 @@ preflight_python() {
         return 1
     fi
     local ver
-    if ! ver="$("${py}" -c 'import sys; print(".".join(map(str, sys.version_info[:2])))' 2>/dev/null)"; then
+    if ! ver="$("${py}" -I -c 'import sys; print(".".join(map(str, sys.version_info[:2])))' 2>/dev/null)"; then
         err "could not read Python version from ${py}"
         return 1
     fi
@@ -296,7 +296,7 @@ HINDSIGHT_PY_MIN_MINOR=11
 HINDSIGHT_PY_MAX_MINOR=14
 
 # Echo the 3.x minor (e.g. "14") of an interpreter; nothing + non-zero on error.
-_py_minor() { "${1}" -c 'import sys; print(sys.version_info[1])' 2>/dev/null; }
+_py_minor() { "${1}" -I -c 'import sys; print(sys.version_info[1])' 2>/dev/null; }
 
 # Is $1 an interpreter whose (3.x) minor is inside the Hindsight-supported band?
 _py_hindsight_ok() {
@@ -361,7 +361,7 @@ resolve_hindsight_python() {
 
     if _py_hindsight_ok "${def}"; then
         HINDSIGHT_PY="${def}"
-        info "hindsight python: ${def} ($("${def}" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null))"
+        info "hindsight python: ${def} ($("${def}" -I -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null))"
         return 0
     fi
 
@@ -416,7 +416,7 @@ preflight_arch() {
 # venv step fails with an opaque "ensurepip is not available".
 preflight_venv() {
     local py="${HAL0_PY:-${HAL0_PYTHON:-python3}}"
-    if "${py}" -c 'import ensurepip, venv' >/dev/null 2>&1; then
+    if "${py}" -I -c 'import ensurepip, venv' >/dev/null 2>&1; then
         info "python venv: available"
         return 0
     fi
@@ -454,7 +454,7 @@ preflight_venv() {
             alpine) apk add python3 py3-pip || ok=0 ;;
             *) ok=0 ;;
         esac
-        if [[ "${ok}" -eq 1 ]] && "${py}" -c 'import ensurepip, venv' >/dev/null 2>&1; then
+        if [[ "${ok}" -eq 1 ]] && "${py}" -I -c 'import ensurepip, venv' >/dev/null 2>&1; then
             info "python venv: available"
             return 0
         fi
@@ -621,7 +621,7 @@ _apparmor_unconfined_remediate() {
     # HAL0_CONTAINER_SMOKE_IMAGE, if set in the environment, is inherited by
     # this subprocess automatically — the script reads the same var name.
     local out
-    out="$("${py}" "${script}" 2>&1)" || true
+    out="$("${py}" -I "${script}" 2>&1)" || true
     printf '%s\n' "${out}" | sed 's/^/  /'
     _container_run_smoke_test "${rt}"
 }
@@ -1247,7 +1247,7 @@ _hal0_runner_pin_state() {
     fi
     [[ -r "${manifest}" ]] || return 1
     local py="${HAL0_PY:-${HAL0_PYTHON:-python3}}"
-    "${py}" - "${manifest}" "${key}" <<'PY' 2>/dev/null
+    "${py}" -I - "${manifest}" "${key}" <<'PY' 2>/dev/null
 import json, sys
 path, key = sys.argv[1], sys.argv[2]
 row = json.load(open(path, encoding="utf-8"))["runners"][key]
@@ -1937,7 +1937,7 @@ persist_bootstrap_channel() {
         return 0
     fi
     local out
-    if out="$(python3 - "${toml}" "${channel}" <<'PYEOF'
+    if out="$(python3 -I - "${toml}" "${channel}" <<'PYEOF'
 import fcntl, os, pathlib, re, stat, sys, tempfile, tomllib
 path = pathlib.Path(sys.argv[1])
 channel = sys.argv[2]
