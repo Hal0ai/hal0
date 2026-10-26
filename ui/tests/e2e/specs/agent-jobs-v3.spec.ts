@@ -144,7 +144,14 @@ async function mockShell(page: Page) {
 /** Flip by clicking the header strip — empty on both faces, so the click
  *  reaches the card and never a control. */
 async function flip(page: Page) {
-  await page.getByTestId('agent-card-hermes').click({ position: { x: 170, y: 24 } })
+  const hermes = page.getByTestId('agent-card-hermes')
+  await hermes.click({ position: { x: 170, y: 24 } })
+  // The flip is a 600 ms WAAPI rotation; a click that lands mid-rotation can
+  // miss its button and reach the card root, which flips the card back. Wait
+  // for the tween to finish before returning.
+  await hermes
+    .locator('.fcard-inner')
+    .evaluate((el) => Promise.all(el.getAnimations().map((a) => a.finished)).then(() => undefined))
 }
 
 async function openHermes(page: Page) {
