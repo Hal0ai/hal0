@@ -1,9 +1,8 @@
 /**
  * memory-map-v3 — the dashboard's memory surface.
  *
- * Dashboard-redesign: the compact MemoryMap sidebar widget on /#dashboard
- * was superseded by the full-width UNIFIED MEMORY hero (dashboard-redesign
- * .rd-mem-*): slot allocations render as colored blocks INSIDE the pool
+ * The dashboard's memory surface is the full-width UNIFIED MEMORY hero
+ * (dashboard-redesign .rd-mem-*): slot allocations render as colored blocks INSIDE the pool
  * bar, with a striped "other guests" block and a free remainder.
  *
  * Every memory figure on these screens comes from the backend memory budget
@@ -21,8 +20,7 @@
  *     not over the GPU pool
  *   - no Proxmox nudge on the dashboard surface (expanded-variant only)
  *
- * The old sidebar-only guards (GTT-pool header label, headroom-line
- * removal) retired with the sidebar. isSlotLive/limitedBy logic remains
+ * isSlotLive/limitedBy logic remains
  * covered by slot-live-equivalence-v3.spec.ts and the useMemoryMapModel
  * consumers. A box where the pool is shared with a capped guest is covered
  * by memory-budget-capped-guest-v3.spec.ts.

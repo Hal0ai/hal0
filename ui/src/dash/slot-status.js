@@ -3,7 +3,7 @@
 // Single source of truth for the status vocabulary shared across:
 //   • slotIndicator (slots.jsx)    → {cls, label, tooltip}
 //   • stateChipClass (slot-modals.jsx) → "chip ok|warn|err|"
-//   • isSlotLive (memory-map.jsx)  → isLive boolean
+//   • isSlotLive (below)          → isLive boolean
 //   • phase logic (slots.jsx)      → off|running|transitional button selector
 //
 // Phase vocabulary:
