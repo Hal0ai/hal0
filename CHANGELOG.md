@@ -30,6 +30,10 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Breaking
+
+- **Upgrades start at 1.5.0.** `manifest.json` declares `upgrade_from = ">=1.5.0"`, so `hal0 update` on a 1.4.x box stops before it downloads anything, with `system.update_upgrade_path_unsupported` naming both versions, and re-running the installer over a 1.4.x install stops before it changes anything. A 1.3.x or 1.4.x box steps through 1.5.0 by running its installer in place, the command the installer prints when it refuses (`curl -fsSL https://hal0.dev/install.sh | sudo env HAL0_RELEASES_URL=https://github.com/hal0ai/hal0/releases/download/v1.5.0/stable.json bash`), then updates again. `hal0 update --target` cannot make that hop: it pins only the version the channel serves now. The upgrade guide's `--target 1.5.0` hop for 1.3.x boxes failed for the same reason once the channel moved past 1.5.0, and is replaced. A 1.5.0 nightly counts as a prerelease of 1.5.0, so it is below the floor too. The floor moves so the profile-centric conversion that 1.4.0 shipped (ADR-0029) can be deleted.
+
 ## [1.7.0] — 2026-10-26
 
 ### Highlights
