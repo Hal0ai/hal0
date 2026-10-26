@@ -12,6 +12,7 @@ import contextlib
 import hashlib
 import json
 import os
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -1091,6 +1092,73 @@ async def test_run_pull_resumes_from_partial_with_range(tmp_hal0_home: str) -> N
     # Staging cleaned up on success.
     assert not part.exists()
     assert not sidecar.exists()
+
+
+@pytest.mark.asyncio
+async def test_resume_rehash_runs_off_event_loop(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3031: re-hashing the on-disk prefix on resume must not block the loop."""
+    import hal0.registry.pull as pull_mod
+
+    total = _CHUNK_BYTES * 3
+    body = _payload(total)
+    registry = ModelRegistry()
+
+    job1 = make_job("rehash-off-loop")
+    client1 = httpx.AsyncClient(
+        transport=_fail_midstream(body, _CHUNK_BYTES, httpx.ReadError("dropped"))
+    )
+    try:
+        await run_pull(
+            job1,
+            hf_repo="Org/Rehash-GGUF",
+            hf_file="rehash.gguf",
+            registry=registry,
+            client=client1,
+        )
+    finally:
+        await client1.aclose()
+    assert job1.state == "failed"
+
+    loop_thread = threading.get_ident()
+    calls: list[int] = []
+    real = pull_mod._rehash_prefix
+
+    def spy(part: Path, hasher: Any) -> int:
+        calls.append(threading.get_ident())
+        return real(part, hasher)
+
+    monkeypatch.setattr(pull_mod, "_rehash_prefix", spy)
+
+    async def resume_handler(req: httpx.Request) -> httpx.Response:
+        remainder = body[_CHUNK_BYTES:]
+        return httpx.Response(
+            206,
+            headers={
+                "Content-Length": str(len(remainder)),
+                "Content-Range": f"bytes {_CHUNK_BYTES}-{total - 1}/{total}",
+            },
+            content=remainder,
+        )
+
+    job2 = make_job("rehash-off-loop")
+    client2 = httpx.AsyncClient(transport=httpx.MockTransport(resume_handler))
+    try:
+        await run_pull(
+            job2,
+            hf_repo="Org/Rehash-GGUF",
+            hf_file="rehash.gguf",
+            registry=registry,
+            client=client2,
+        )
+    finally:
+        await client2.aclose()
+
+    assert job2.state == "completed", f"got {job2.state}: {job2.error}"
+    assert calls, "resume path must re-hash the on-disk prefix"
+    assert all(t != loop_thread for t in calls), "prefix re-hash ran on the event loop"
+    assert job2.sha256 == hashlib.sha256(body).hexdigest()
 
 
 @pytest.mark.asyncio
