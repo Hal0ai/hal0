@@ -197,7 +197,10 @@ function App() {
     ts: fmtApprovalTs(e.enqueued_at),
     agent: e.client_id || "hermes",
     tool: e.tool,
-    arg: e.args ? JSON.stringify(e.args).slice(0, 120) : "—",
+    // Untruncated: ApprovalArgs shows the target args first and the full JSON
+    // on demand, so a long first body field cannot hide the target (#3052).
+    args: e.args ?? {},
+    targetArgs: e.target_args ?? [],
   }));
 
   useEffectA(() => {

@@ -299,3 +299,44 @@ async def test_dedup_pointer_cleared_after_resolution() -> None:
     )
     assert first != second
     assert q.list_pending()[0]["id"] == second
+
+
+# ── target_args (#3052) ────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_entry_names_the_caller_supplied_target_args_present_in_args() -> None:
+    """The entry lists the args that pick the resource, so the card shows them first."""
+    q = ApprovalQueue()
+    await q.enqueue(
+        tool="slot_rename",
+        args={"new_name": "x" * 200, "name": "agent"},
+        client_id="pi",
+        executor=_noop_executor,
+        target_args=("name", "absent"),
+    )
+    assert q.list_pending()[0]["target_args"] == ["name"]
+
+
+@pytest.mark.asyncio
+async def test_entry_target_args_fall_back_to_the_primary_target_arg() -> None:
+    q = ApprovalQueue()
+    await q.enqueue(
+        tool="memory_delete",
+        args={"reason": "y" * 200, "ids": ["a", "b"]},
+        client_id="pi",
+        executor=_noop_executor,
+    )
+    assert q.list_pending()[0]["target_args"] == ["ids"]
+
+
+@pytest.mark.asyncio
+async def test_entry_target_args_empty_for_an_unmapped_tool() -> None:
+    q = ApprovalQueue()
+    await q.enqueue(
+        tool="stack_load",
+        args={"stack": "s"},
+        client_id="pi",
+        executor=_noop_executor,
+    )
+    assert q.list_pending()[0]["target_args"] == []

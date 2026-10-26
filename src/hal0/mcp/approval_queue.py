@@ -41,7 +41,7 @@ import hashlib
 import json
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -108,6 +108,21 @@ def _primary_target(tool: str, args: dict[str, Any]) -> str:
     return str(value) if value is not None else ""
 
 
+def _target_args(tool: str, args: dict[str, Any], named: Iterable[str]) -> list[str]:
+    """The arg names that pick the resource a call acts on, in display order.
+
+    ``named`` comes from the caller (the admin server passes the tool's URL
+    path args); the tool's :data:`_PRIMARY_TARGET_ARG` is added after them.
+    Only names present in ``args`` are kept. The approval cards render these
+    first and in full, because the agent controls the order of ``args`` and a
+    long body field placed first would otherwise push the target off a
+    truncated preview (#3052).
+    """
+    primary = _PRIMARY_TARGET_ARG.get(tool)
+    candidates = [*named, *([primary] if primary else [])]
+    return [k for k in dict.fromkeys(candidates) if k in args]
+
+
 @dataclass
 class ApprovalEntry:
     """A single gated tool invocation awaiting owner action."""
@@ -119,6 +134,7 @@ class ApprovalEntry:
     enqueued_at: float
     state: ApprovalState = "pending"
     hit_count: int = 1
+    target_args: list[str] = field(default_factory=list)
     decided_at: float | None = None
     result: Any = None
     error: str | None = None
@@ -134,6 +150,7 @@ class ApprovalEntry:
             "id": self.id,
             "tool": self.tool,
             "args": self.args,
+            "target_args": list(self.target_args),
             "client_id": self.client_id,
             "enqueued_at": self.enqueued_at,
             "state": self.state,
@@ -180,8 +197,13 @@ class ApprovalQueue:
         args: dict[str, Any],
         client_id: str,
         executor: Callable[[dict[str, Any]], Awaitable[Any]],
+        target_args: Iterable[str] = (),
     ) -> str:
         """Queue a gated tool call. Returns the approval id.
+
+        ``target_args`` names the args that select the resource (for an admin
+        tool, its URL path args); the entry carries them, plus the tool's
+        primary target arg, as ``target_args`` for the approval cards.
 
         If an existing pending entry shares the same dedup key, its
         ``hit_count`` bumps and the existing id is returned — no new
@@ -211,6 +233,7 @@ class ApprovalQueue:
                 id=approval_id,
                 tool=tool,
                 args=dict(args),
+                target_args=_target_args(tool, args, target_args),
                 client_id=client_id,
                 enqueued_at=time.time(),
                 _executor=executor,

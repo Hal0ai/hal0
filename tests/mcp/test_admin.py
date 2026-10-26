@@ -1227,6 +1227,22 @@ async def test_system_info_is_autonomous_read(
 
 
 @pytest.mark.asyncio
+async def test_gated_entry_names_the_path_args_even_after_a_long_body_field(
+    queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    """#3052: the approval card renders ``target_args`` first, whatever the agent's key order."""
+    await admin.dispatch(
+        tool="slot_rename",
+        args={"new_name": "n" * 300, "name": "agent"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert queue.list_pending()[0]["target_args"] == ["name"]
+
+
+@pytest.mark.asyncio
 async def test_bench_queue_delete_is_gated(
     queue: ApprovalQueue, mock_transport: dict[str, Any]
 ) -> None:

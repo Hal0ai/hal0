@@ -84,6 +84,8 @@ export interface ApprovalEntry {
   id: string
   tool: string
   args: Record<string, unknown>
+  /** Arg names that pick the resource (path args first), rendered first on the cards. */
+  target_args?: string[]
   client_id?: string
   /** Epoch seconds (float) from ApprovalEntry.as_dict() — NOT an ISO string. */
   enqueued_at?: number

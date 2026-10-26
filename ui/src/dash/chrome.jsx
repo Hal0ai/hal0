@@ -7,6 +7,7 @@
 import { useRuntimeRollup, useHealthSystem, failingChecks } from '@/api/hooks/useRuntime'
 import { useLogsStream } from '@/api/hooks/useLogs'
 import { useSlots } from '@/api/hooks/useSlots'
+import { ApprovalArgs } from './approval-args.jsx'
 import { useModels, usePullsList, useClearPullJob, fmtSpeed, fmtEta, pullFileLabel } from '@/api/hooks/useModels'
 import { apiPost } from '@/api/client'
 import { ENDPOINTS } from '@/api/endpoints'
@@ -1167,10 +1168,7 @@ function ApprovalModal({ open, onClose, items, onApprove, onDeny }) {
                 <span className="tool mono"><b>{a.tool}</b></span>
               </div>
               <div className="approval-body mono">
-                <div className="arg-row">
-                  <span className="k">argument</span>
-                  <span className="v">{a.arg}</span>
-                </div>
+                <ApprovalArgs args={a.args} targetArgs={a.targetArgs} />
               </div>
               <div className="approval-actions">
                 <button className="btn danger sm" onClick={() => onDeny && onDeny(a.id)}>Deny</button>
@@ -1228,9 +1226,6 @@ const modalStyles = `
 .approval-h .sep { color: var(--fg-4); }
 .approval-h .tool b { color: var(--fg); font-weight: 500; }
 .approval-body { padding: 12px 14px; display: flex; flex-direction: column; gap: 5px; font-size: 11.5px; }
-.approval-body .arg-row { display: grid; grid-template-columns: 100px 1fr; gap: 12px; }
-.approval-body .arg-row .k { color: var(--fg-4); }
-.approval-body .arg-row .v { color: var(--fg-2); }
 .approval-actions { padding: 10px 14px; border-top: 1px solid var(--line-soft); background: var(--bg); display: flex; gap: 6px; justify-content: flex-end; }
 `;
 
