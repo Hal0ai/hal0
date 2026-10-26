@@ -32,7 +32,7 @@ export function useGpuStatus({ active }) {
   const memory = useMemoryBudget().data
   const engineAvailable = useComfyuiModels().data?.engine?.available
   const slots = useSlots().data
-  // The editor listens on the box's loopback: off the box there is no link to open (editor-reach.ts).
+  // Where the editor cannot be opened from this page there is no link to open (editor-reach.ts).
   const editorUrl = useEditorAccess().url
   const dismissedAt = useDismissedRefusalAt()
 
