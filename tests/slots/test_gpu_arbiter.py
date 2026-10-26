@@ -1402,35 +1402,152 @@ async def test_phase_is_none_in_llm_mode(fake_mgr: FakeManager, state_path: Path
 
 
 async def test_phase_is_unloading_while_a_saved_slot_is_still_loaded(
-    fake_mgr: FakeManager, state_path: Path, monkeypatch: pytest.MonkeyPatch
+    fake_mgr: FakeManager, state_path: Path
 ) -> None:
-    """#3059: a failed unload leaves image mode persisted with an LLM slot still
-    loaded. The status must not announce a hand-off, a render or a grace then."""
-    monkeypatch.setattr(arbiter_mod, "_GATE_HANDOFF_S", 0.3)
-    real_unload = fake_mgr.unload
-
-    async def _failing_unload(name: str) -> None:
-        if name == "agent":
-            raise RuntimeError("terminate timeout")
-        await real_unload(name)
-
-    monkeypatch.setattr(fake_mgr, "unload", _failing_unload)
+    """#3059: an api restart in the middle of a switch leaves image mode persisted with
+    a saved-set slot still loaded until something reconciles it. The status must not
+    announce a render then."""
+    state_path.write_text(
+        json.dumps({"mode": "img", "pinned": False, "saved_llm_slots": ["agent"]}),
+        encoding="utf-8",
+    )
     arb = GpuArbiter(fake_mgr, state_path=state_path)
-    with pytest.raises(RuntimeError, match="terminate timeout"):
-        await arb.ensure_img()
 
     assert arb.mode is GpuMode.IMG
     assert fake_mgr.is_ready_for_dispatch("agent")  # still on the GPU
-    assert arb.status()["phase"] == "unloading"  # not "handoff"
-    assert arb.status()["handoff_until"] is None
+    assert arb.status()["phase"] == "unloading"
     async with arb.image_job():
         assert arb.status()["phase"] == "unloading"  # not "rendering"
-    await asyncio.sleep(0.4)
-    assert arb.status()["phase"] == "unloading"  # not "grace"
-    assert arb.status()["restore_at"] is None
 
     fake_mgr.ready.discard("agent")  # the slot is gone from the GPU
-    assert arb.status()["phase"] == "grace"
+    assert arb.status()["phase"] == "grace"  # the job's end started the quiet clock
+
+
+def _fail_unload(fake_mgr: FakeManager, monkeypatch: pytest.MonkeyPatch, slot: str) -> None:
+    """Make ``slot``'s unload raise the way a stop that outlived its budget does."""
+    real_unload = fake_mgr.unload
+
+    async def _unload(name: str) -> None:
+        if name == slot:
+            fake_mgr.calls.append(("unload_failed", name))
+            raise RuntimeError("terminate timeout")
+        await real_unload(name)
+
+    monkeypatch.setattr(fake_mgr, "unload", _unload)
+
+
+async def test_a_failed_unload_rolls_the_switch_back_to_llm_mode(
+    fake_mgr: FakeManager, state_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3059: image mode is never left recorded with an LLM slot still on the GPU."""
+    _fail_unload(fake_mgr, monkeypatch, "agent")
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+
+    with pytest.raises(RuntimeError, match="terminate timeout"):
+        await arb.ensure_img(pin=True)
+
+    assert arb.mode is GpuMode.LLM
+    assert _read_state(state_path) == {"mode": "llm", "pinned": False, "saved_llm_slots": []}
+    # chat was unloaded before agent failed, so it comes back; agent never left; the
+    # engine was never started.
+    assert fake_mgr.calls == [
+        ("unload", "chat"),
+        ("unload_failed", "agent"),
+        ("load", "chat", None),
+    ]
+    assert fake_mgr.is_ready_for_dispatch("chat")
+    assert arb.status()["phase"] is None
+    assert arb.status()["switching"] is False
+
+
+async def test_a_failed_first_unload_reloads_nothing(
+    fake_mgr: FakeManager, state_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fail_unload(fake_mgr, monkeypatch, "chat")
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+
+    with pytest.raises(RuntimeError, match="terminate timeout"):
+        await arb.ensure_img()
+
+    assert arb.mode is GpuMode.LLM
+    # agent, after chat in the unload order, was never touched and is still loaded.
+    assert fake_mgr.calls == [("unload_failed", "chat")]
+    assert fake_mgr.is_ready_for_dispatch("agent")
+
+
+async def test_the_next_switch_after_a_failed_unload_tries_again(
+    fake_mgr: FakeManager, state_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_unload = fake_mgr.unload
+    _fail_unload(fake_mgr, monkeypatch, "agent")
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    with pytest.raises(RuntimeError):
+        await arb.ensure_img()
+
+    monkeypatch.setattr(fake_mgr, "unload", real_unload)  # the stop works this time
+    await arb.ensure_img()
+
+    assert arb.mode is GpuMode.IMG
+    assert _read_state(state_path)["saved_llm_slots"] == ["chat", "agent"]
+    assert not fake_mgr.is_ready_for_dispatch("chat")
+    assert not fake_mgr.is_ready_for_dispatch("agent")
+
+
+async def test_a_failed_unload_is_logged_as_a_rolled_back_switch(
+    fake_mgr: FakeManager,
+    state_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _fail_unload(fake_mgr, monkeypatch, "agent")
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+
+    with caplog.at_level(logging.WARNING), pytest.raises(RuntimeError):
+        await arb.ensure_img()
+
+    messages = [rec.message for rec in caplog.records]
+    assert any("unload_failed_rolled_back" in m for m in messages)
+    assert not any("img_load_failed_rolled_back" in m for m in messages)
+
+
+async def test_a_switch_after_a_restart_mid_switch_unloads_what_is_still_loaded(
+    fake_mgr: FakeManager, state_path: Path
+) -> None:
+    """#3059: the restart left image mode recorded with agent still loaded. The next
+    switch (a render arriving) unloads it before the engine is revived."""
+    state_path.write_text(
+        json.dumps({"mode": "img", "pinned": False, "saved_llm_slots": ["chat", "agent"]}),
+        encoding="utf-8",
+    )
+    fake_mgr.ready = {"agent", "npu", "tts"}  # chat was unloaded before the restart
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+
+    await arb.ensure_img()
+
+    assert fake_mgr.calls == [("unload", "agent"), ("load", "img", "sdxl-turbo")]
+    assert arb.mode is GpuMode.IMG
+    assert _read_state(state_path)["saved_llm_slots"] == ["chat", "agent"]
+    assert arb.status()["phase"] != "unloading"
+
+
+async def test_a_failed_unload_after_a_restart_mid_switch_rolls_back(
+    fake_mgr: FakeManager, state_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_path.write_text(
+        json.dumps({"mode": "img", "pinned": True, "saved_llm_slots": ["chat", "agent"]}),
+        encoding="utf-8",
+    )
+    fake_mgr.ready = {"agent", "npu", "tts"}
+    _fail_unload(fake_mgr, monkeypatch, "agent")
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+
+    with pytest.raises(RuntimeError, match="terminate timeout"):
+        await arb.ensure_img()
+
+    assert arb.mode is GpuMode.LLM
+    assert _read_state(state_path) == {"mode": "llm", "pinned": False, "saved_llm_slots": []}
+    # chat comes back; agent never left; the engine is not revived.
+    assert fake_mgr.calls == [("unload_failed", "agent"), ("load", "chat", None)]
 
 
 async def test_unload_set_lists_ready_llm_slots_in_llm_mode(

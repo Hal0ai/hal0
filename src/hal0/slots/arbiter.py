@@ -531,14 +531,19 @@ class GpuArbiter:
     # ── switches ─────────────────────────────────────────────────────────────
 
     async def _rollback_to_llm(
-        self, llm_slots: list[str], img_name: str, *, unload_img: bool = False
+        self,
+        llm_slots: list[str],
+        img_name: str,
+        *,
+        unload_img: bool = False,
+        event: str = "gpu_arbiter.img_load_failed_rolled_back",
     ) -> None:
         """Best-effort rollback: reload saved LLM set, persist mode=llm.
 
-        Shared by the load()-raises path (D5) and the readiness-timeout path
-        (#714). Always clears mode=img and saved_llm_slots regardless of
-        whether individual slot reloads succeed — the guard must never be
-        left wedged.
+        Shared by the load()-raises path (D5), the readiness-timeout path
+        (#714) and a failed unload (#3059, which passes its own ``event``).
+        Always clears mode=img and saved_llm_slots regardless of whether
+        individual slot reloads succeed — the guard must never be left wedged.
 
         ``unload_img=True`` triggers a best-effort ``unload(img_name)`` first
         (used by the readiness-timeout path where the container may be
@@ -575,13 +580,41 @@ class GpuArbiter:
         st["pinned"] = False
         self._persist()
         log.warning(
-            "gpu_arbiter.img_load_failed_rolled_back",
+            event,
             extra={
                 "img_slot": img_name,
                 "restored": restored,
                 "failed": failed,
             },
         )
+
+    async def _unload_for_img(self, slots: list[str], saved: list[str], img_name: str) -> None:
+        """Unload ``slots`` for image mode; a failure rolls the switch back (#3059).
+
+        Image mode is persisted before the unloads, so a slot whose unload raises
+        (a stop that outlived its budget, #2738) would otherwise stay on the GPU
+        while the mode says image and ComfyUI renders beside it. On the first
+        failure the saved set's slots that are no longer loaded are reloaded, the
+        mode goes back to LLM (dropping the pin), and the error is re-raised. The
+        slot that failed is left to the slot layer: its stop may still be running.
+        Slots after it in ``slots`` were never touched and are still loaded.
+        """
+        self._phase = "unloading"
+        for slot in slots:
+            try:
+                await self._manager.unload(slot)
+            except Exception as exc:
+                log.warning(
+                    "gpu_arbiter.unload_failed",
+                    extra={"slot": slot, "img_slot": img_name, "error": str(exc)},
+                )
+                reload = [
+                    s for s in saved if s != slot and not self._manager.is_ready_for_dispatch(s)
+                ]
+                await self._rollback_to_llm(
+                    reload, img_name, event="gpu_arbiter.unload_failed_rolled_back"
+                )
+                raise
 
     async def ensure_img(self, *, pin: bool = False) -> None:
         """Flip the GPU to exclusive image mode.
@@ -594,9 +627,13 @@ class GpuArbiter:
         can't eat the restore grace and a restore queued behind the switch
         waits a full grace.
 
-        Already in image mode, nothing is flipped, but the img slot is still
-        checked and cold-started when it is down (#3048), since a crash or a
-        manual unload can stop it without telling the arbiter. If that reload
+        A failed unload rolls the switch back to LLM mode and re-raises (#3059):
+        image mode is never left recorded with an LLM slot on the GPU.
+
+        Already in image mode, nothing is flipped, but a saved-set slot still
+        loaded (an api restart mid-switch) is unloaded first (#3059), and the img
+        slot is checked and cold-started when it is down (#3048), since a crash
+        or a manual unload can stop it without telling the arbiter. If either
         fails, the usual rollback to LLM mode applies, and it drops a pin.
 
         A pin is taken from this call only: one set while the GPU was in LLM
@@ -627,6 +664,7 @@ class GpuArbiter:
             if pin and not st["pinned"]:
                 st["pinned"] = True
                 self._persist()
+            await self._finish_unloads(st)
             await self._revive_img(st)
             return
 
@@ -670,11 +708,9 @@ class GpuArbiter:
                 break
             await asyncio.sleep(_DRAIN_POLL_S)
 
-        self._phase = "unloading"
-        for slot in llm_slots:
-            await self._manager.unload(slot)
-
         img_name = str(img_cfg.get("name") or "img")
+        await self._unload_for_img(llm_slots, llm_slots, img_name)
+
         # Resident container: when the img slot is already dispatchable
         # the switch is just the llm unloads above — no load, no poll.
         if self._manager.state(img_name) not in _DISPATCHABLE:
@@ -684,6 +720,27 @@ class GpuArbiter:
             "gpu_arbiter.img_mode",
             extra={"saved_llm_slots": llm_slots, "img_slot": img_name},
         )
+
+    async def _finish_unloads(self, st: dict[str, Any]) -> None:
+        """Unload saved-set slots still loaded in image mode (#3059).
+
+        An api restart in the middle of a switch leaves image mode persisted with
+        the unloads unfinished. Called by ``ensure_img`` with the switch lock held,
+        before the engine is revived, so the next render never starts beside one.
+        A failed unload rolls back to LLM mode, as in a switch.
+        """
+        saved = list(st["saved_llm_slots"])
+        loaded = [s for s in saved if self._manager.is_ready_for_dispatch(s)]
+        if not loaded:
+            return
+        cfgs = await self._manager.iter_configs()
+        img_cfg = next((c for c in cfgs if gpu_exclusive_group(c) == "img"), None)
+        img_name = str(img_cfg.get("name") or "img") if img_cfg is not None else "img"
+        log.warning(
+            "gpu_arbiter.saved_slots_still_loaded",
+            extra={"slots": loaded, "img_slot": img_name},
+        )
+        await self._unload_for_img(loaded, saved, img_name)
 
     async def _revive_img(self, st: dict[str, Any]) -> None:
         """Cold-start the img slot when image mode finds it down (#3048).
@@ -1375,11 +1432,12 @@ class GpuArbiter:
                 if self._groups_known:
                     unload_set = self._llm_slots_to_unload()
             elif self._phase is None:
-                # #3059: a failed unload leaves image mode persisted with a
-                # saved-set slot still loaded on the GPU. Nothing is unloading
-                # then, but the hand-off, render and grace below would all be
-                # false; "unloading" is the nearest honest answer until the
-                # switch rolls back instead of leaving that state behind.
+                # #3059: an api restart in the middle of a switch leaves image
+                # mode persisted with a saved-set slot still loaded on the GPU,
+                # until the next switch finishes the unload (or rolls back) or
+                # the restore loop restores. The hand-off, render and grace
+                # below would all be false then; "unloading" is the nearest
+                # honest answer.
                 still_loaded = any(self._manager.is_ready_for_dispatch(s) for s in saved)
             elif self._phase == "draining":
                 drain_in_flight = sum(self._manager.in_flight_count(s) for s in saved)

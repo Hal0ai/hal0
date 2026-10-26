@@ -184,7 +184,9 @@ Some cases read `phase: null` or an unexpected phase:
   `grace`, with `restore_at` moving later each time the restore loop finds the queue busy.
   Read `queue` on `/status` for those.
 - Image mode that persisted while a slot of its saved set is still loaded, and no switch
-  is running (a failed unload), reads `unloading`.
+  is running, reads `unloading`. That happens only after an api restart in the middle of
+  a switch: the next switch finishes the unload before the engine renders, and a failed
+  unload during a switch rolls back to LLM mode instead of leaving image mode behind.
 
 For the first moments of a switch into image mode `phase` can still be `null` while
 `arbiter.switching` is already `true` (the top-level `mode` of `/status` reads `inference`
