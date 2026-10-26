@@ -64,7 +64,7 @@ export function clampSeed(seed: number): number | null {
 }
 
 /** A fresh seed for the dice and for a "Random" run. The panel draws its own rather than leaving
- *  it to the server: the server draws up to 2**63, and `_hal0.meta.seed` would reach the browser
+ *  it to the server: older servers drew up to 2**63, and `_hal0.meta.seed` would reach the browser
  *  rounded (see `isReusableSeed`), so "Reuse seed" could never repeat that image. */
 export function rollSeed(): number {
   return Math.floor(Math.random() * 2 ** 32)

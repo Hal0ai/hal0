@@ -134,6 +134,13 @@ def test_build_workflow_random_seed_when_unspecified() -> None:
     assert len(seeds) >= 7
 
 
+def test_build_workflow_random_seed_is_js_safe() -> None:
+    """A drawn seed stays an exact integer in a JavaScript client (#3073)."""
+    for _ in range(64):
+        _, meta = build_workflow(body=_baseline_body(), template=_TURBO, request_tag="t1")
+        assert 0 <= meta["seed"] <= 2**53 - 1
+
+
 def test_build_workflow_steps_and_cfg_overrides() -> None:
     body = {**_baseline_body(), "extra_body": {"steps": 8, "cfg": 2.5}}
     graph, _ = build_workflow(body=body, template=_TURBO, request_tag="t1")
