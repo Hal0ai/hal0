@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -2224,10 +2225,24 @@ async def test_the_gate_asks_again_when_a_restore_beats_its_prompt(
     fake_mgr.ready.add("img")
     arb = GpuArbiter(fake_mgr, state_path=state_path)
     prompt = _EditorPrompt(arb, comfyui_http)
+    # Hold the gate's polls once it has asked for the switch, so the restore
+    # lands before the gate can see image mode. Unheld, a loaded runner lets the
+    # gate poll first and queue its prompt, and the chat then waits out the
+    # demand budget behind a render that never ends here.
+    restored = threading.Event()
+    fetch = prompt.gate._fetch_status
+
+    def _fetch_after_the_restore() -> dict[str, Any]:
+        if prompt.posts:
+            assert restored.wait(timeout=5)
+        return fetch()
+
+    prompt.gate._fetch_status = _fetch_after_the_restore
 
     queued = prompt.submit()
     await prompt.wait_for_the_switch()
     assert await _llm_request(arb, "chat") == "dispatched"  # the restore beat the prompt
+    restored.set()
     await asyncio.wait_for(queued, timeout=5)
 
     assert prompt.refused is None
