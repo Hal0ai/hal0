@@ -13,7 +13,7 @@ import { useArbiter, useComfyui, useComfyuiModels } from '@/api/hooks/useComfyui
 import { useMemoryBudget } from '@/api/hooks/useStatsHardware'
 import { useSlots } from '@/api/hooks/useSlots'
 import { ConfirmDialog } from '@/dash/primitives.jsx'
-import { actionFacts, statusLine } from './status-line-pure'
+import { KIND_ANNOUNCEMENT, actionFacts, statusLine } from './status-line-pure'
 import { clockLabel, reloadSteps, renderPct, switchSteps } from './status-line-parts-pure'
 import { useDismissedRefusalAt, useStatusLineActions } from './useStatusLineActions'
 import { useEditorAccess } from './useEditorAccess'
@@ -194,8 +194,12 @@ export function ImageStatusLine({ ownRun = false, onCancelOwnRun }) {
     >
       <span className="isl-dot" aria-hidden="true" />
       <div className="isl-main">
-        {/* The one live region of the line: the detail and the buttons change with every poll. */}
-        <div className="isl-head" data-testid="image-status-head" aria-live="polite">
+        {/* The headline counts seconds and steps: announcing it would read out every tick. The
+            line's one live region is this hidden phrase, which changes with the kind only. */}
+        <span className="sr-only" aria-live="polite" data-testid="image-status-live">
+          {KIND_ANNOUNCEMENT[kind]}
+        </span>
+        <div className="isl-head" data-testid="image-status-head">
           {view.head}
         </div>
         {view.detail && (

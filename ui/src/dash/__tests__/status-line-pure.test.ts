@@ -8,7 +8,7 @@ import type {
   GateRefusal,
 } from '@/api/hooks/useComfyui'
 import type { MemoryBudgetJson } from '@/api/hooks/useStatsHardware'
-import { costLine, statusLine, waitLine, type StatusLineInputs } from '../image/status-line-pure'
+import { actionFacts, costLine, statusLine, waitLine, type StatusLineInputs } from '../image/status-line-pure'
 
 function arbiter(over: Partial<ArbiterState> = {}): ArbiterState {
   return {
@@ -385,6 +385,28 @@ describe('statusLine', () => {
     const waiting = { count: 2, oldest_s: 75.4 }
     const line = statusLine(envelope({ mode: 'img', pinned: true, llm_waiters: waiting }), status(), memory(), OPTS)
     expect(line?.detail).toContain('2 chat requests waiting, longest 1:15 of 2:00.')
+  })
+})
+
+// What a button needs to know about the box, read the way the line reads it.
+describe('actionFacts', () => {
+  const facts = (over: Partial<ArbiterState>, st: StatusLineInputs = status()) =>
+    actionFacts(envelope({ mode: 'img', ...over }), st)
+
+  it('says a render runs in the rendering phase or with a busy ComfyUI queue', () => {
+    expect(facts({ phase: 'rendering', image_jobs: 1 }).renderRunning).toBe(true)
+    expect(facts({ phase: 'grace', restore_at: 1005 }, status({ queue: { running: 0, pending: 1 } })).renderRunning).toBe(true)
+    expect(facts({ phase: 'grace', restore_at: 1005 }).renderRunning).toBe(false)
+    expect(actionFacts(envelope({ mode: 'llm' }), status()).renderRunning).toBe(false)
+  })
+
+  // The arbiter ranks the ~3 s hand-off above `rendering`, so the first seconds of every hal0
+  // render read phase `handoff` with a /v1 job open: stopping then drops that render too.
+  it('says a render runs while a /v1 job is open, whatever phase the arbiter reports', () => {
+    expect(facts({ phase: 'handoff', handoff_until: 1004, image_jobs: 1 }).renderRunning).toBe(true)
+    expect(facts({ phase: null, image_jobs: 2 }).renderRunning).toBe(true)
+    // A plain hand-off, with no job open, is not a render.
+    expect(facts({ phase: 'handoff', handoff_until: 1004, image_jobs: 0 }).renderRunning).toBe(false)
   })
 })
 

@@ -252,16 +252,54 @@ describe('ImageStatusLine', () => {
     expect(Array.from(line.querySelectorAll('button')).map((b) => b.textContent)).toEqual(['Hold image mode'])
   })
 
-  // Only the headline is announced. The detail and the buttons change with every poll and a
-  // screen reader would read each of them out as well.
-  it('announces the headline politely, and nothing else on the line', () => {
+  // The headline counts seconds and steps, and a screen reader would read out every change. The
+  // one live region is a visually hidden phrase that changes only with the line's kind.
+  it('announces the kind of state politely, in the one live region of the line', () => {
     mount(<ImageStatusLine />)
     const line = byId('image-status-line')!
-    const live = Array.from(line.querySelectorAll('[aria-live]'))
-    expect(live).toEqual([byId('image-status-head')])
-    expect(byId('image-status-head')!.getAttribute('aria-live')).toBe('polite')
-    expect(line.getAttribute('aria-live')).toBeNull()
+    const live = byId('image-status-live')!
+    expect(Array.from(line.querySelectorAll('[aria-live]'))).toEqual([live])
+    expect(live.getAttribute('aria-live')).toBe('polite')
+    expect(live.classList.contains('sr-only')).toBe(true)
+    expect(live.textContent).toBe('Chat mode')
+    // Not the visible headline, the detail, or the line itself.
+    expect(byId('image-status-head')!.getAttribute('aria-live')).toBeNull()
     expect(byId('image-status-detail')!.getAttribute('aria-live')).toBeNull()
+    expect(line.getAttribute('aria-live')).toBeNull()
+  })
+
+  it('does not re-announce a countdown tick or a step, only a change of kind', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2026, 9, 25, 12, 0, 0))
+    box.arbiter = envelope({ mode: 'img', phase: 'grace', restore_at: Date.now() / 1000 + 8 })
+    const host = mount(<ImageStatusLine />)
+    expect(byId('image-status-head')!.textContent).toBe('Image mode ends in 8 s')
+    expect(byId('image-status-live')!.textContent).toBe('Image mode, grace period')
+    const node = byId('image-status-live')!.firstChild
+    act(() => {
+      vi.advanceTimersByTime(3000)
+    })
+    // The headline moved; the live region did not (same text node, untouched).
+    expect(byId('image-status-head')!.textContent).toBe('Image mode ends in 5 s')
+    expect(byId('image-status-live')!.textContent).toBe('Image mode, grace period')
+    expect(byId('image-status-live')!.firstChild).toBe(node)
+
+    // A render with steps: the step counter moves, the announcement stays "Rendering".
+    box.arbiter = envelope({ mode: 'img', phase: 'rendering' })
+    box.status = statusBody({
+      queue: { running: 1, pending: 0 },
+      progress: { model: 'flux-dev', step: 1, total: 20, node: '9', elapsed_s: 3, prompt_id: 'p' },
+    })
+    rerender(host, <ImageStatusLine />)
+    expect(byId('image-status-live')!.textContent).toBe('Rendering')
+    const rendering = byId('image-status-live')!.firstChild
+    box.status = statusBody({
+      queue: { running: 1, pending: 0 },
+      progress: { model: 'flux-dev', step: 2, total: 20, node: '9', elapsed_s: 4, prompt_id: 'p' },
+    })
+    rerender(host, <ImageStatusLine />)
+    expect(byId('image-status-head')!.textContent).toBe('Rendering · flux-dev · step 2/20')
+    expect(byId('image-status-live')!.firstChild).toBe(rendering)
   })
 
   it('hold asks first, and a confirmed hold calls switchover with pin', async () => {

@@ -400,6 +400,27 @@ describe('engine buttons', () => {
     await click(confirm)
     expect(calls.filter((c) => c[0] === 'switchover')).toEqual([['switchover', { mode: 'inference', force: true }]])
   })
+
+  // The ~3 s hand-off after a switch reads above `rendering` in the arbiter's phase, so the first
+  // seconds of a hal0 render have phase `handoff` and an empty ComfyUI queue: a /v1 job is open.
+  it('Stop image mode asks during the hand-off of a hal0 render, which has a /v1 job open', async () => {
+    box.arbiter = envelope({ mode: 'img', phase: 'handoff', handoff_until: Date.now() / 1000 + 3, image_jobs: 1 })
+    mount()
+    await click(byId('engine-stop')!)
+    expect(calls.some((c) => c[0] === 'switchover')).toBe(false)
+    const confirm = Array.from(document.querySelectorAll('button')).find((b) => b.textContent === 'Stop and cancel render')!
+    expect(confirm).toBeTruthy()
+    await click(confirm)
+    expect(calls.filter((c) => c[0] === 'switchover')).toEqual([['switchover', { mode: 'inference', force: true }]])
+  })
+
+  it('Stop image mode does not ask during a plain hand-off', async () => {
+    box.arbiter = envelope({ mode: 'img', phase: 'handoff', handoff_until: Date.now() / 1000 + 3, image_jobs: 0 })
+    mount()
+    await click(byId('engine-stop')!)
+    expect(document.querySelector('.modal-shell')).toBeNull()
+    expect(calls.filter((c) => c[0] === 'switchover')).toEqual([['switchover', { mode: 'inference' }]])
+  })
 })
 
 describe('logs', () => {

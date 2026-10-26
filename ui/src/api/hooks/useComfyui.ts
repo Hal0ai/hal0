@@ -202,18 +202,25 @@ function cachedQueueBusy(qc: QueryClient): boolean {
 /** The `/arbiter` envelope as the hook returns it: the wire body plus `skewMs`. */
 export interface ArbiterReading extends ArbiterEnvelope {
   /** The browser's clock less the server's, in ms, read off the response's `Date` header when the
-   *  answer came in (0 when the header is missing or unreadable). `restore_at` and
-   *  `handoff_until` are on the server's clock: `Date.now() - skewMs` is the server's now. Not
-   *  part of the wire body. */
+   *  answer came in (0 when the header is missing or unreadable, or the skew is under 2 s, which
+   *  is noise). `restore_at` and `handoff_until` are on the server's clock: `Date.now() - skewMs`
+   *  is the server's now. Not part of the wire body. */
   skewMs: number
 }
 
+// The `Date` header has whole-second resolution and the answer took a moment to arrive, so a
+// skew below this is noise: it reads as 0, which also keeps `data` equal from poll to poll on
+// clocks that agree.
+const SKEW_NOISE_MS = 2_000
+
 /** The skew of the browser's clock (`now`) against the server's, from a response `Date` header.
- *  0 when there is no header to read. */
+ *  0 when there is no header to read, or when the skew is under 2 s (noise). */
 export function clockSkewMs(dateHeader: string | null | undefined, now: number = Date.now()): number {
   if (!dateHeader) return 0
   const serverMs = Date.parse(dateHeader)
-  return Number.isFinite(serverMs) ? now - serverMs : 0
+  if (!Number.isFinite(serverMs)) return 0
+  const skew = now - serverMs
+  return Math.abs(skew) < SKEW_NOISE_MS ? 0 : skew
 }
 
 /** `GET /api/comfyui/arbiter`: the whole envelope (`data.arbiter` is the `ArbiterState`) and the

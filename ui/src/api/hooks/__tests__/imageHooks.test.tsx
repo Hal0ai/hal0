@@ -176,6 +176,39 @@ describe('Image Gen hooks', () => {
       act(() => junk.root.unmount())
     })
 
+    // The Date header has whole-second resolution and the answer took a moment to arrive, so a
+    // skew of a second or so is noise: it reads as 0 and `data` stays equal from poll to poll on
+    // clocks that agree.
+    it('treats a skew under 2 s as no skew, and keeps a real one', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] })
+      vi.setSystemTime(new Date('2026-10-25T12:00:00.800Z'))
+      vi.stubGlobal('fetch', respond({ Date: 'Sun, 25 Oct 2026 12:00:00 GMT' }))
+      const probe = mountHook(() => hooks.useArbiter(), newClient())
+      await flush()
+      expect(probe.get().data?.skewMs).toBe(0)
+      act(() => probe.root.unmount())
+
+      vi.setSystemTime(new Date('2026-10-25T12:00:30Z'))
+      const real = mountHook(() => hooks.useArbiter(), newClient())
+      await flush()
+      expect(real.get().data?.skewMs).toBe(30_000)
+      act(() => real.root.unmount())
+    })
+
+    it('clockSkewMs: the noise floor is 2 s, either way round', () => {
+      const now = Date.parse('2026-10-25T12:00:00Z')
+      const at = (ms: number) => new Date(now - ms).toUTCString()
+      // `toUTCString` drops the milliseconds, so build the header from whole seconds.
+      expect(hooks.clockSkewMs(at(0), now)).toBe(0)
+      expect(hooks.clockSkewMs(at(1_000), now)).toBe(0)
+      expect(hooks.clockSkewMs(at(-1_000), now)).toBe(0)
+      expect(hooks.clockSkewMs(at(2_000), now)).toBe(2_000)
+      expect(hooks.clockSkewMs(at(-2_000), now)).toBe(-2_000)
+      expect(hooks.clockSkewMs(at(30_000), now)).toBe(30_000)
+      // 800 ms of latency on a synced clock.
+      expect(hooks.clockSkewMs(at(0), now + 800)).toBe(0)
+    })
+
     it('clockSkewMs: now less the server clock, or 0 when there is none to read', () => {
       const now = Date.parse('2026-10-25T12:00:05Z')
       expect(hooks.clockSkewMs('Sun, 25 Oct 2026 12:00:00 GMT', now)).toBe(5_000)

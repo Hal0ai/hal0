@@ -54,6 +54,22 @@ export type StatusLineKind =
   | 'img_on' // image mode with no phase and no pin
   | 'chat'
 
+// What a screen reader is told when the line changes state: one short phrase per kind, in the
+// line's one live region. The visible headline counts seconds and steps, and is never announced.
+export const KIND_ANNOUNCEMENT: Readonly<Record<StatusLineKind, string>> = {
+  blocked: 'Image generation blocked',
+  switching: 'Switching to image mode',
+  handoff: 'Image mode, hand-off',
+  rendering: 'Rendering',
+  reloading: 'Reloading GPU slots',
+  refused: 'GPU gate refused a prompt',
+  stale: 'Image engine runs an older GPU gate',
+  pinned: 'Image mode pinned',
+  grace: 'Image mode, grace period',
+  img_on: 'Image mode on',
+  chat: 'Chat mode',
+}
+
 export interface StatusLineView {
   kind: StatusLineKind
   tone: StatusTone
@@ -236,8 +252,10 @@ function latestRefusal(
 export interface ActionFacts {
   // Image mode is held by a pin.
   pinned: boolean
-  // A render is running: the arbiter's rendering phase, or a busy ComfyUI queue (the editor's
-  // renders show only there). Stopping image mode then drops it, which needs a confirm.
+  // A render is running: the arbiter's rendering phase, a /v1 job open (the arbiter ranks the
+  // ~3 s hand-off above `rendering`, so a hal0 render's first seconds read `handoff`), or a busy
+  // ComfyUI queue (the editor's renders show only there). Stopping image mode then drops it,
+  // which needs a confirm.
   renderRunning: boolean
   // `at` of the latest gate refusal, the key a dismissal is remembered by.
   refusalAt: number | null
@@ -250,7 +268,8 @@ export function actionFacts(
   const arbiter = env?.arbiter ?? null
   return {
     pinned: arbiter?.pinned === true && arbiter.mode === 'img',
-    renderRunning: arbiter?.phase === 'rendering' || queueTotal(status) > 0,
+    renderRunning:
+      arbiter?.phase === 'rendering' || (arbiter?.image_jobs ?? 0) > 0 || queueTotal(status) > 0,
     refusalAt: latestRefusal(env, status)?.at ?? null,
   }
 }
@@ -293,7 +312,7 @@ function switchingDetail(arbiter: ArbiterState): string {
 }
 
 // Work in progress, which a viewer needs to see ahead of anything that blocks nothing: a
-// switch, the editor hand-off, a render, a reload. null when the GPU is not doing any.
+// switch, the hand-off, a render, a reload. null when the GPU is not doing any.
 function workLine(
   arbiter: ArbiterState,
   status: StatusLineInputs | null | undefined,
