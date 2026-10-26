@@ -199,3 +199,88 @@
 .isl-step.active { color: var(--isl-c); border-color: var(--isl-c); }
 .isl-step.done   { color: var(--fg-2); border-color: var(--line-strong); }
 .isl-step.done::before { content: '✓ '; color: var(--ok); }
+
+/* ─── Events pane and ticker ───
+   The journal and the activity trail as one timeline. Tokens only. */
+.dock-x .foot-pane-h { flex-wrap: wrap; row-gap: 6px; }
+.foot-pane-right { display: inline-flex; align-items: center; gap: 10px; margin-left: auto; }
+.foot-pane-slot {
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm, 4px);
+  background: var(--bg);
+  color: var(--fg-2);
+  font-size: 11px;
+}
+.foot-pane-slot:focus { border-color: var(--accent-line); outline: none; }
+.foot-pane-empty { padding: 24px; text-align: center; color: var(--fg-4); font-family: var(--jbm); font-size: 11.5px; }
+.foot-pane-clear { color: var(--accent); cursor: pointer; }
+
+/* Pane rows: stripe · ts · stream tag · source · level · message. */
+.dock-x .foot-line { grid-template-columns: 3px 92px 16px 88px 44px minmax(0, 1fr); }
+.foot-line.clickable { cursor: pointer; }
+.foot-line.clickable:focus-visible { outline: 2px solid var(--accent-line, var(--accent)); outline-offset: -2px; }
+.foot-line .ev-k {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--fg-4);
+  background: var(--bg-3);
+}
+.foot-line .ev-k.a { color: var(--accent); background: var(--accent-soft); }
+.foot-line .actor { margin-left: 8px; color: var(--fg-4); font-size: 10px; }
+.foot-line-detail {
+  margin: 0 16px 4px 126px;
+  padding: 6px 10px;
+  border-left: 2px solid var(--line-strong);
+  background: var(--bg-2);
+  color: var(--fg-3);
+  font-size: 11px;
+}
+.foot-line-detail .err { color: var(--err); }
+.foot-line-detail pre {
+  margin: 4px 0 0;
+  max-height: 120px;
+  overflow: auto;
+  color: var(--fg-2);
+  font-family: var(--jbm);
+  font-size: 10.5px;
+}
+
+/* The ticker: two rows of 22px under the chips row, newest last. Hidden while the dock is open
+   (`.footer.expanded .foot-journal`). */
+.foot-journal.dock-ticker {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-end;
+  height: calc(22px * 2);
+  padding: 0;
+  overflow: hidden;
+}
+.dock-ticker .foot-line {
+  grid-template-columns: 92px 16px 88px 44px minmax(0, 1fr);
+  align-items: center;
+  height: 22px;
+  padding: 0 16px;
+  flex: none;
+}
+
+/* Unseen badge on the dock toggle. */
+.foot-toggle .badge {
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+}

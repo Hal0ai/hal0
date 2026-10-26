@@ -9,7 +9,11 @@ import {
   filterEvents,
   journalToEvents,
   mergeFeeds,
+  actorLabel,
   segmentActions,
+  sevOf,
+  shortTime,
+  slotOfEvent,
   sourceGroup,
   sourceGroups,
 } from '@/dash/dock/dock-pure'
@@ -151,3 +155,38 @@ describe('dock-pure', () => {
     expect(exportFilters(DOCK_FILTERS_DEFAULT)).toEqual({})
   })
 })
+
+describe('slotOfEvent and the moved activity helpers', () => {
+  it('reads a journal line slot from the slot field, then from a slot: source', () => {
+    const [a, b, c] = journalToEvents([
+      entry({ id: 1, source: 'hal0', slot: 'brain' }),
+      entry({ id: 2, source: 'slot:coder' }),
+      entry({ id: 3, source: 'model:x' }),
+    ])
+    expect(slotOfEvent(a)).toBe('brain')
+    expect(slotOfEvent(b)).toBe('coder')
+    expect(slotOfEvent(c)).toBeNull()
+  })
+
+  it('reads an activity action slot from the target up to the first slash', () => {
+    const [a, b, c] = activityToEvents([
+      rec({ id: 1, target: 'brain' }),
+      rec({ id: 2, target: 'brain/config' }),
+      rec({ id: 3, target: null }),
+    ])
+    expect(slotOfEvent(a)).toBe('brain')
+    expect(slotOfEvent(b)).toBe('brain')
+    expect(slotOfEvent(c)).toBeNull()
+  })
+
+  it('sevOf normalises, shortTime falls back, actorLabel names mcp agents', () => {
+    expect(sevOf(rec({ severity: 'warn' }))).toBe('warn')
+    expect(sevOf({ severity: 'weird' } as unknown as ActivityRecord)).toBe('info')
+    expect(shortTime('')).toBe('')
+    expect(shortTime('not a time at all, long')).toBe('not a time at all, long'.slice(11, 19))
+    expect(actorLabel('mcp:hermes')).toBe('hermes (mcp)')
+    expect(actorLabel('dashboard')).toBe('dashboard')
+    expect(actorLabel('')).toBe('system')
+  })
+})
+

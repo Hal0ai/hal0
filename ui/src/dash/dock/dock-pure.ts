@@ -65,6 +65,44 @@ export function activityToEvents(records: readonly ActivityRecord[]): DockEvent[
     }))
 }
 
+/** The slot an event is about, or null. A journal line: its `slot` field, else the name after a
+ *  `slot:` source. An activity action: its target up to the first `/`. */
+export function slotOfEvent(e: DockEvent): string | null {
+  if (e.record) {
+    const target = e.record.target
+    if (!target) return null
+    const i = target.indexOf('/')
+    return (i >= 0 ? target.slice(0, i) : target) || null
+  }
+  if (e.slot) return e.slot
+  return e.source.startsWith('slot:') ? e.source.slice('slot:'.length) || null : null
+}
+
+/** Normalise an activity record's severity into one of the four row classes. */
+export function sevOf(rec: { severity?: string | null }): DockLevel {
+  const s = String(rec.severity || '').toLowerCase()
+  if (s === 'ok' || s === 'warn' || s === 'error' || s === 'info') return s
+  return 'info'
+}
+
+/** Short HH:MM:SS from an ISO/epoch ts; falls back to the raw string. */
+export function shortTime(ts: string | null | undefined): string {
+  if (!ts) return ''
+  const d = new Date(ts)
+  if (!Number.isNaN(d.getTime())) {
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  }
+  // Already-short or non-parseable: show the tail.
+  return ts.length > 8 ? ts.slice(11, 19) || ts : ts
+}
+
+/** Compact actor label: "mcp:hermes" is "hermes (mcp)", an empty actor is "system". */
+export function actorLabel(actor: string | null | undefined): string {
+  if (!actor) return 'system'
+  if (actor.startsWith('mcp:')) return `${actor.slice(4)} (mcp)`
+  return actor
+}
+
 /** Ascending by time. Equal times keep input order, journal events before activity events. */
 export function mergeFeeds(journal: readonly JournalEntry[], activity: readonly ActivityRecord[]): DockEvent[] {
   return [...journalToEvents(journal), ...activityToEvents(activity)].sort((a, b) => a.t - b.t)

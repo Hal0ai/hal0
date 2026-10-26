@@ -476,8 +476,8 @@ function AgentsOverview() {
     // LogsView (extras.jsx) reads no hash parameters, so there is no unit
     // filter to pass; the journal pane there tails hal0's own stream.
     openLogs: () => { window.location.hash = "#logs"; },
-    // The Activity surface is the ActivityLog pane on the Slots page.
-    openActivity: () => { window.location.hash = "#slots"; },
+    // The Activity surface is the dock's Events tab; the dock listens for this event.
+    openActivity: () => { window.dispatchEvent(new CustomEvent("hal0:open-events")); },
     // The approval queue modal is owned by App (main.jsx) and opened by event.
     openApprovals: () => { window.dispatchEvent(new CustomEvent("hal0:open-approvals")); },
     copy,

@@ -2,9 +2,10 @@
 // pips, update chip, live journal + downloads panes). Moved verbatim from
 // chrome.jsx's `Footer`; later tasks grow it into the status dock.
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { useRuntimeRollup, useHealthSystem, failingChecks } from '@/api/hooks/useRuntime'
 import { useLogsStream } from '@/api/hooks/useLogs'
+import { useActivityStream } from '@/api/hooks/useActivity'
 import { useSlots } from '@/api/hooks/useSlots'
 import { usePullsList, useClearPullJob, fmtSpeed, fmtEta, pullFileLabel } from '@/api/hooks/useModels'
 import { apiPost } from '@/api/client'
@@ -19,22 +20,20 @@ import { ForceStopConfirm, PinConfirm } from './gpu-parts.jsx'
 import { useGpuStatus } from './useGpuStatus'
 import { GpuSegment } from './GpuSegment.jsx'
 import { GpuPane } from './GpuPane.jsx'
-import { _srcGroup, _srcHue, _shortTs, _svcPip, highlightFoot } from '../chrome.jsx'
+import { EventsPane, EventRow } from './EventsPane.jsx'
+import { DOCK_FILTERS_DEFAULT, TICKER_ROWS, mergeFeeds, slotOfEvent } from './dock-pure'
+import { _svcPip } from '../chrome.jsx'
 
 // ─── Dock (the global status footer) ───
-// Phase 3 of #322: the journal pane reads `useLogsStream` against
-// /api/journal/stream (no more HAL0_DATA.journal fallback) and the
-// update chip reads `useUpdateState` directly (no more `updateAvailable`
-// prop threaded from main.jsx — the chip is self-driven).
+// The events pane and the collapsed ticker read the journal (`useLogsStream`, /api/journal/stream)
+// and the activity trail (`useActivityStream`) merged into one timeline; the update chip reads
+// `useUpdateState` directly (self-driven).
 export function Dock({ route, param, expanded = false, onToggle }) {
   // Runtime rollup gives live status + slot readiness counts.
-  // useLogsStream subscribes to /api/journal/stream when the pane is
-  // expanded (saves opening an SSE we don't render).
   const L = useRuntimeRollup();
   const health = useHealthSystem();
   const serviceHealth = useServicesHealth();
-  const [paneSrc, setPaneSrc] = useState("merged");
-  const [paneQ, setPaneQ] = useState("");
+  const [filters, setFilters] = useState(DOCK_FILTERS_DEFAULT);
   const [footerTab, setFooterTab] = useState("journal");
   // The GPU state, computed once for the collapsed segment (and, later, the pane). /status polls
   // at its active cadence on the Image Gen route or while a run of this browser is in flight.
@@ -66,36 +65,56 @@ export function Dock({ route, param, expanded = false, onToggle }) {
     // The notification bell's "Open downloads pane →" row reuses the same
     // expand-and-switch behaviour.
     window.addEventListener("hal0:open-downloads", onPullStarted);
+    // The agent cards' "Activity" link opens the events tab.
+    const onOpenEvents = () => {
+      setFooterTab("journal");
+      if (!expanded && onToggle) onToggle();
+    };
+    window.addEventListener("hal0:open-events", onOpenEvents);
     return () => {
       window.removeEventListener("hal0:pull-started", onPullStarted);
       window.removeEventListener("hal0:open-downloads", onPullStarted);
+      window.removeEventListener("hal0:open-events", onOpenEvents);
     };
   }, [expanded, onToggle]);
   const { jobs, hasActive } = usePullsList({ enabled: expanded && footerTab === "downloads" });
   const clearJob = useClearPullJob();
-  // Stream the full (merged) event feed and filter by source group
-  // CLIENT-SIDE. This keeps every source chip available regardless of the
-  // active filter (deriving chips from a server-narrowed ring would drop
-  // the other groups) and makes switching instant — no SSE reconnect.
-  const live = useLogsStream({ follow: expanded });
-
-  // The ring is the SOLE source of truth — no HAL0_DATA fallback. When
-  // empty (cold load before SSE replays or a genuinely quiet system)
-  // the body renders an empty-state placeholder below.
-  const ringSorted = [...(live.ring || [])].sort((a, b) =>
-    (a.ts || '').localeCompare(b.ts || ''),
+  // Both streams stay open while the dock is mounted: the ticker and the unseen badge need them
+  // collapsed. Filters apply client-side (instant, and every chip stays available).
+  const live = useLogsStream({ follow: true });
+  const activity = useActivityStream({ follow: true, kind: 'action', limit: 200 });
+  const events = useMemo(
+    () => mergeFeeds(live.ring || [], activity.records || []),
+    [live.ring, activity.records],
   );
 
-  // Distinct source groups present in the ring → the chip set. `merged` is
-  // always first (no filter); the rest come from real event sources.
-  const srcGroups = ["merged", ...[...new Set(ringSorted.map((e) => _srcGroup(e.source)))].sort()];
+  // Unseen: rows appended while the dock is collapsed. The seen set is re-taken while expanded,
+  // on the first non-empty feed (the backfill is not news) and when the ring shrinks (a reset).
+  // Ids, not a count: a ring at its cap keeps its length while new rows roll in.
+  const seenRef = useRef(null);
+  if (seenRef.current === null) {
+    if (events.length > 0) seenRef.current = { ids: new Set(events.map((e) => e.id)), size: events.length };
+  } else if (expanded || events.length < seenRef.current.size) {
+    seenRef.current = { ids: new Set(events.map((e) => e.id)), size: events.length };
+  }
+  const unseen = seenRef.current
+    ? events.reduce((n, e) => (seenRef.current.ids.has(e.id) ? n : n + 1), 0)
+    : 0;
 
-  // Source chip filters by group (`slot` matches every `slot:*`); search is
-  // client-only against `entry.msg` for instant feedback while typing.
-  const filtered = ringSorted.filter((e) => {
-    if (paneSrc !== 'merged' && _srcGroup(e.source) !== paneSrc) return false;
-    return !(paneQ && (!e.msg || !e.msg.toLowerCase().includes(paneQ.toLowerCase())));
-  });
+  // hal0:slot-event — once per event appended after the first non-empty feed, for events about a slot.
+  const slotSeenRef = useRef(null);
+  useEffect(() => {
+    if (slotSeenRef.current === null && events.length === 0) return;
+    const prev = slotSeenRef.current;
+    if (prev) {
+      for (const e of events) {
+        if (prev.has(e.id)) continue;
+        const slot = slotOfEvent(e);
+        if (slot) window.dispatchEvent(new CustomEvent("hal0:slot-event", { detail: { slot } }));
+      }
+    }
+    slotSeenRef.current = new Set(events.map((e) => e.id));
+  }, [events]);
 
   // Update chip — self-driven from useUpdateState.
   const updates = useUpdateState();
@@ -159,7 +178,9 @@ export function Dock({ route, param, expanded = false, onToggle }) {
   // count already says how many of the total are up. Pip colours mirror the
   // slot-card indicator dot exactly (slotIndicatorFromPhase: serving green
   // pulse · ready yellow · warming amber pulse · error red).
-  const configuredSlots = (useSlots().data || []).filter((s) => !!(s.model || s.model_default));
+  const allSlots = useSlots().data || [];
+  const slotNames = allSlots.map((s) => s.name).filter(Boolean);
+  const configuredSlots = allSlots.filter((s) => !!(s.model || s.model_default));
   const slotPips = configuredSlots
     .map((s) => ({ slot: s, ind: slotIndicatorFromPhase(s) }))
     .filter(({ ind }) => ind.cls !== 'offline');
@@ -185,54 +206,7 @@ export function Dock({ route, param, expanded = false, onToggle }) {
           {footerTab === "gpu" && gpu.view ? (
             <GpuPane gpu={gpu} actions={gpuActions} />
           ) : footerTab !== "downloads" ? (
-        <div className="foot-pane">
-          <div className="foot-pane-h mono">
-            <span>Live journal</span>
-            <span className="ct">· {filtered.length} / {ringSorted.length}</span>
-            <div className="foot-pane-filter mono">
-              {srcGroups.map((k) => (
-                <button
-                  key={k}
-                  onClick={() => setPaneSrc(k)}
-                  className={"foot-pane-chip" + (paneSrc === k ? " on" : "")}
-                >{k}</button>
-              ))}
-            </div>
-            <input
-              className="foot-pane-search mono"
-              value={paneQ}
-              onChange={e => setPaneQ(e.target.value)}
-              placeholder="search…"
-            />
-            <span style={{display: "inline-flex", gap: 10, marginLeft: "auto"}}>
-              <span style={{color: live.disconnected ? "var(--warn)" : "var(--ok)", display: "inline-flex", alignItems: "center", gap: 5}}>
-                <span className={"dot" + (live.disconnected ? "" : " ready")} />
-                {live.disconnected ? "reconnecting…" : "follow tail"}
-              </span>
-              <a href="#logs" className="foot-pane-link">Open full logs →</a>
-            </span>
-          </div>
-          <div className="foot-pane-body">
-            {ringSorted.length === 0 ? (
-              <div className="foot-pane-empty" style={{padding: 24, textAlign: "center", color: "var(--fg-4)", fontFamily: "var(--jbm)", fontSize: 11.5}}>
-                No events yet
-              </div>
-            ) : filtered.length === 0 ? (
-              <div style={{padding: 24, textAlign: "center", color: "var(--fg-4)", fontFamily: "var(--jbm)", fontSize: 11.5}}>
-                No journal entries match. <span style={{color: "var(--accent)", cursor: "pointer"}} onClick={() => { setPaneSrc("merged"); setPaneQ(""); }}>Clear filters</span>
-              </div>
-            ) : filtered.map((e, i) => (
-              <div key={e.id ?? i} className={"foot-line " + e.level} style={{"--src": _srcHue(e.source)}}>
-                <span className="stripe" />
-                <span className="ts">{_shortTs(e.ts)}</span>
-                <span className={"src " + e.source}><span className="d" />{e.source}</span>
-                <span className="lvl">{e.level}</span>
-                <span className="msg">{paneQ ? highlightFoot(e.msg, paneQ) : e.msg}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      
+            <EventsPane events={events} filters={filters} onFilters={setFilters} slotNames={slotNames} disconnected={live.disconnected} />
           ) : (
             <div className="foot-downloads">
               {jobs.length === 0 ? (
@@ -360,22 +334,16 @@ export function Dock({ route, param, expanded = false, onToggle }) {
         <button className="foot-toggle" data-testid="dock-toggle" onClick={onToggle} aria-expanded={expanded} aria-label="Toggle dock">
           <span style={{transform: expanded ? "rotate(180deg)" : "rotate(0)", transition: "transform 0.18s ease", display: "inline-block"}}>⌃</span>
           <span>dock</span>
+          {unseen > 0 && !expanded && (
+            <span className="badge" data-testid="dock-unseen" aria-label={`${unseen} new events`}>+{unseen}</span>
+          )}
         </button>
       </div>
-      {/*
-        Always-visible footer journal ribbon: a thin tail of the most
-        recent entries. Pulls from the same SSE ring; renders nothing
-        before the first frame arrives so we never hardcode mock copy.
-      */}
-      {ringSorted.length > 0 && (
-        <div className="foot-journal mono" aria-label="recent journal">
-          {ringSorted.slice(-6).map((e, i) => (
-            <span key={e.id ?? i} className={"ent " + e.level} style={{"--src": _srcHue(e.source)}}>
-              <span className="d" />
-              <span className="src">{e.source}</span>
-              <span className="ts">{_shortTs(e.ts)}</span>
-              <span className="msg">{e.msg}</span>
-            </span>
+      {/* The ticker: the newest TICKER_ROWS merged rows, newest last. Hidden while expanded. */}
+      {events.length > 0 && (
+        <div className="foot-journal dock-ticker mono" data-testid="dock-ticker" aria-label="recent events">
+          {events.slice(-TICKER_ROWS).map((e) => (
+            <EventRow key={e.id} e={e} testid="dock-ticker-row" />
           ))}
         </div>
       )}
