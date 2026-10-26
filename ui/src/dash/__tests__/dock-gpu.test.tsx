@@ -291,6 +291,8 @@ describe('the dock GPU segment', () => {
     expect(live.getAttribute('aria-live')).toBe('polite')
     expect(live.classList.contains('sr-only')).toBe(true)
     expect(live.textContent).toBe('Image mode pinned')
+    // A button's children are presentational: the live region must not sit inside one.
+    expect(live.closest('button')).toBeNull()
     expect(byId('gpu-status-head')!.getAttribute('aria-live')).toBeNull()
     expect(seg().getAttribute('aria-live')).toBeNull()
   })
@@ -367,6 +369,7 @@ describe('the dock GPU segment', () => {
     await click(foot('Hold image mode'))
     const detail = byId('gpu-status-detail')!
     expect(detail.getAttribute('role')).toBe('alert')
+    expect(detail.closest('button')).toBeNull()
     expect(detail.classList.contains('err')).toBe(true)
     expect(detail.textContent).toBe('GPU is in image mode already')
     // The buttons come back so it can be tried again.

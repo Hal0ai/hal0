@@ -30,15 +30,24 @@ export function GpuSegment({ gpu, actions, onOpen }) {
     >
       <span className="rule" aria-hidden="true" />
       <span className="dot" aria-hidden="true" />
-      <button type="button" className="txt" data-testid="gpu-status-open" onClick={onOpen}>
-        {/* The headline counts seconds and steps: announcing it would read out every tick. The
-            segment's one live region is this hidden phrase, which changes with the kind only. */}
-        <span className="sr-only" aria-live="polite" data-testid="gpu-status-live">
-          {KIND_ANNOUNCEMENT[view.kind]}
-        </span>
-        <span className="head" data-testid="gpu-status-head">
-          {view.head}
-        </span>
+      {/* The segment's one live region is this hidden phrase, which changes with the kind only: the
+          headline counts seconds and steps, and announcing it would read out every tick. It and the
+          error alert sit outside the open button, since a button's children are presentational. */}
+      <span className="sr-only" aria-live="polite" data-testid="gpu-status-live">
+        {KIND_ANNOUNCEMENT[view.kind]}
+      </span>
+      <div className="txt">
+        <button
+          type="button"
+          className="head"
+          title="Open GPU tab"
+          data-testid="gpu-status-open"
+          onClick={onOpen}
+        >
+          <span className="head-text" data-testid="gpu-status-head">
+            {view.head}
+          </span>
+        </button>
         {actions.error ? (
           <span className="det err" role="alert" data-testid="gpu-status-detail">
             {actions.error}
@@ -50,7 +59,7 @@ export function GpuSegment({ gpu, actions, onOpen }) {
             </span>
           )
         )}
-      </button>
+      </div>
       {pct != null && (
         <span className="mini" aria-hidden="true">
           <i style={{ width: `${pct}%` }} />
