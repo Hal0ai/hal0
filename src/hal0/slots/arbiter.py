@@ -167,6 +167,15 @@ _READY_POLL_S = 0.5
 #: Slot states that can take a dispatch / mean "the img container is up".
 #: Aliases the canonical set (DR-8) — do not re-declare the literal here.
 _DISPATCHABLE: frozenset[SlotState] = DISPATCHABLE_STATES
+#: States of a load in progress, or of one that stopped short (parked in WARMING).
+#: A slot in one of them is on its way onto the GPU, or already holds memory there.
+_LOADING: frozenset[SlotState] = frozenset(
+    {SlotState.PULLING, SlotState.STARTING, SlotState.WARMING}
+)
+#: How long a switch into image mode waits for an LLM slot's load in progress to
+#: finish before it gives up and stays in LLM mode (#3056). A cold load of a large
+#: model takes about a minute; a pull takes as long as the download.
+_LOAD_WAIT_S = 120.0
 #: Terminal states that abort the readiness poll immediately.
 _TERMINAL: frozenset[SlotState] = frozenset({SlotState.ERROR, SlotState.OFFLINE})
 
@@ -346,6 +355,17 @@ _QUEUE_IDLE_POLL_S = 2.0
 _QUEUE_IDLE_MAX_WAIT_S = 600.0
 
 
+class GpuSlotStillLoading(Hal0Error):
+    """An LLM slot was still loading when the switch into image mode stopped waiting.
+
+    The switch waits up to ``_LOAD_WAIT_S`` for a load in progress, then rolls back
+    to LLM mode rather than let the slot finish loading beside ComfyUI (#3056).
+    """
+
+    code = "gpu.slot_still_loading"
+    status = 503
+
+
 class GpuImgNotReady(Hal0Error):
     """Image slot did not become ready within the readiness timeout.
 
@@ -475,7 +495,10 @@ class GpuArbiter:
         self._groups_known = True
 
     def _llm_slots_to_unload(self) -> list[str]:
-        """The llm-group slots a switch into image mode unloads: those ready for dispatch.
+        """The llm-group slots a switch into image mode unloads: those on the GPU.
+
+        On the GPU is ready for dispatch, or in a loading state (#3056): a slot still
+        loading finishes onto the GPU, and one parked in WARMING holds memory there.
 
         Reads the group cache, in config order. The switch calls it right after
         refreshing the cache from ``iter_configs()``; :meth:`status` calls it
@@ -486,8 +509,20 @@ class GpuArbiter:
         return [
             name
             for name, group in self._group_cache.items()
-            if group == "llm" and self._manager.is_ready_for_dispatch(name)
+            if group == "llm" and self._on_gpu(name)
         ]
+
+    def _on_gpu(self, name: str) -> bool:
+        """Ready for dispatch, or in a loading state (see :data:`_LOADING`)."""
+        return self._manager.is_ready_for_dispatch(name) or self._manager.state(name) in _LOADING
+
+    def _reload_after_abort(self, saved: list[str], skip: list[str]) -> list[str]:
+        """The saved-set slots an aborted switch reloads: those it took off the GPU.
+
+        Slots still on the GPU (never unloaded, or still loading) and the ``skip``
+        slots (whose unload failed or whose load outlasted the wait) are left alone.
+        """
+        return [s for s in saved if s not in skip and not self._on_gpu(s)]
 
     def _slot_group(self, name: str) -> str | None:
         """Sync group lookup for the dispatch guard.
@@ -608,13 +643,48 @@ class GpuArbiter:
                     "gpu_arbiter.unload_failed",
                     extra={"slot": slot, "img_slot": img_name, "error": str(exc)},
                 )
-                reload = [
-                    s for s in saved if s != slot and not self._manager.is_ready_for_dispatch(s)
-                ]
                 await self._rollback_to_llm(
-                    reload, img_name, event="gpu_arbiter.unload_failed_rolled_back"
+                    self._reload_after_abort(saved, [slot]),
+                    img_name,
+                    event="gpu_arbiter.unload_failed_rolled_back",
                 )
                 raise
+
+    async def _await_loads(self, slots: list[str], saved: list[str], img_name: str) -> None:
+        """Wait for loads in progress on ``slots`` to finish, then return (#3056).
+
+        ``SlotManager.unload`` takes the slot's lock, which a load holds until it
+        ends, so a slot still loading cannot be unloaded mid-load: the switch waits
+        for it here, up to ``_LOAD_WAIT_S``. A slot in a loading state that is not
+        busy is a load that stopped short (parked in WARMING); there is nothing to
+        wait for and it is unloaded with the rest. Past the bound the switch rolls
+        back to LLM mode and raises :class:`GpuSlotStillLoading`; the load carries
+        on in LLM mode.
+        """
+        self._phase = "unloading"
+        deadline = time.monotonic() + _LOAD_WAIT_S
+        while True:
+            loading = [
+                s for s in slots if self._manager.state(s) in _LOADING and self._manager.is_busy(s)
+            ]
+            if not loading:
+                return
+            if time.monotonic() >= deadline:
+                log.warning(
+                    "gpu_arbiter.load_wait_timeout",
+                    extra={"slots": loading, "timeout_s": _LOAD_WAIT_S},
+                )
+                await self._rollback_to_llm(
+                    self._reload_after_abort(saved, loading),
+                    img_name,
+                    event="gpu_arbiter.load_wait_rolled_back",
+                )
+                raise GpuSlotStillLoading(
+                    f"LLM slot(s) {', '.join(loading)} still loading after "
+                    f"{_LOAD_WAIT_S:.0f}s; the GPU stays in LLM mode",
+                    details={"slots": loading, "timeout_s": _LOAD_WAIT_S},
+                )
+            await asyncio.sleep(_DRAIN_POLL_S)
 
     async def ensure_img(self, *, pin: bool = False) -> None:
         """Flip the GPU to exclusive image mode.
@@ -709,6 +779,7 @@ class GpuArbiter:
             await asyncio.sleep(_DRAIN_POLL_S)
 
         img_name = str(img_cfg.get("name") or "img")
+        await self._await_loads(llm_slots, llm_slots, img_name)
         await self._unload_for_img(llm_slots, llm_slots, img_name)
 
         # Resident container: when the img slot is already dispatchable
@@ -730,7 +801,7 @@ class GpuArbiter:
         A failed unload rolls back to LLM mode, as in a switch.
         """
         saved = list(st["saved_llm_slots"])
-        loaded = [s for s in saved if self._manager.is_ready_for_dispatch(s)]
+        loaded = [s for s in saved if self._on_gpu(s)]
         if not loaded:
             return
         cfgs = await self._manager.iter_configs()
@@ -740,6 +811,7 @@ class GpuArbiter:
             "gpu_arbiter.saved_slots_still_loaded",
             extra={"slots": loaded, "img_slot": img_name},
         )
+        await self._await_loads(loaded, saved, img_name)
         await self._unload_for_img(loaded, saved, img_name)
 
     async def _revive_img(self, st: dict[str, Any]) -> None:
@@ -1407,7 +1479,8 @@ class GpuArbiter:
             drained, while ``phase`` is ``draining``; else 0.
           - ``unload_set``: ``list[str] | None``. In image mode the saved set
             (what is unloaded and comes back). In LLM mode the llm-group slots
-            ready for dispatch, i.e. what a switch would unload now; ``[]``
+            on the GPU (ready, or still loading: #3056), i.e. what a switch
+            would unload now; ``[]``
             means none, known. That answer reads the group cache, which needs
             an async read of the slot configs to fill: the restore loop does it
             once as it starts, and every switch and restore refreshes it. Until

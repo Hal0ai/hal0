@@ -55,6 +55,12 @@ Every probe degrades to a safe default: a dead engine surfaces as
 
 ## Switch the iGPU between modes
 
+An LLM slot that is still loading when the switch starts is waited for, up to
+120 seconds, and then unloaded with the rest, so it never finishes loading
+beside ComfyUI. If its load takes longer, the GPU stays in LLM mode and the
+request fails with 503 `gpu.slot_still_loading`. A failed unload also leaves
+the GPU in LLM mode, with the error of the unload.
+
 The `img` slot runs as the `hal0-slot@img.service` systemd unit. To hand
 the iGPU to ComfyUI (drains and unloads the LLM GPU slots, then ensures
 the resident container is up):
