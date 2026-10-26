@@ -2,7 +2,8 @@
 
 Assertions:
   (a) "comfyui" is in EXTENSIONS (by id).
-  (b) install_extension("comfyui") enables the slot-managed img unit.
+  (b) install_extension("comfyui") runs no subprocess (#3038): the img slot is
+      Quadlet-generated, so no systemctl enable and no unasked start.
 """
 
 from __future__ import annotations
@@ -24,8 +25,8 @@ def test_comfyui_extension_metadata():
     assert ext.default_enabled is True
 
 
-def test_install_extension_comfyui_enables_img_slot(monkeypatch):
-    """install_extension('comfyui') must use the slot-owned img runtime."""
+def test_install_extension_comfyui_starts_nothing(monkeypatch):
+    """install_extension('comfyui') must not touch the img unit (#3038)."""
     import hal0.install.extensions as exts
 
     called = []
@@ -34,8 +35,9 @@ def test_install_extension_comfyui_enables_img_slot(monkeypatch):
         called.append(cmd)
 
     monkeypatch.setattr(exts, "_run", _fake_run)
+    monkeypatch.setattr(exts, "_run_ok", lambda cmd: called.append(cmd) or True)
 
     result = exts.install_extension("comfyui")
-    assert result.installed is True or result.skipped is None
-    assert called, "install_extension('comfyui') made no subprocess call"
-    assert called[0] == ["systemctl", "enable", "--now", "hal0-slot@img.service"]
+    assert result.installed is True
+    assert result.error is None
+    assert called == []
