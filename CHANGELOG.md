@@ -34,6 +34,28 @@ applying. Add those subsections to a version's section to surface them; see
 
 - **Upgrades start at 1.5.0.** `manifest.json` declares `upgrade_from = ">=1.5.0"`, so `hal0 update` on a 1.4.x box stops before it downloads anything, with `system.update_upgrade_path_unsupported` naming both versions, and re-running the installer over a 1.4.x install stops before it changes anything. A 1.3.x or 1.4.x box steps through 1.5.0 by running its installer in place, the command the installer prints when it refuses (`curl -fsSL https://hal0.dev/install.sh | sudo env HAL0_RELEASES_URL=https://github.com/hal0ai/hal0/releases/download/v1.5.0/stable.json bash`), then updates again. `hal0 update --target` cannot make that hop: it pins only the version the channel serves now. The upgrade guide's `--target 1.5.0` hop for 1.3.x boxes failed for the same reason once the channel moved past 1.5.0, and is replaced. A 1.5.0 nightly counts as a prerelease of 1.5.0, so it is below the floor too. The floor moves so the profile-centric conversion that 1.4.0 shipped (ADR-0029) can be deleted.
 
+### Fixed
+
+- `hal0 update`, `hal0 update component openwebui` and the dashboard Retry button no longer start an Open WebUI you stopped when they upgrade its image. The new image is pinned and takes effect the next time you start it. (#3039)
+- Loading an image slot no longer fails with the LLM registry when the registry is unavailable; ComfyUI reads its weights from its own tree. (#3040)
+- Guided `hal0 setup` no longer prints a false warning for the ComfyUI extension or starts the image slot unasked; it leaves the Quadlet-generated image unit alone. (#3038)
+- Resuming a large model download no longer freezes the API while the partial file is re-hashed; the hashing now runs off the event loop. (#3031)
+- `hal0 update` no longer says "no slots need restart" when slots will restart on their next load; the drift check runs before hal0-api restarts onto the new release, so the message now says so. (#3044)
+- The Services page no longer stalls the API while it checks whether Open WebUI's image button is wired; the check reads your checkpoint files, so it now runs off the request loop. (#3041)
+- **Image-model downloads name the current Hugging Face repos.** Six catalog sources (the Qwen-Image, Qwen-Image-Edit, HunyuanVideo 1.5, Wan 2.1, Wan 2.2 and Stable Diffusion 1.5 repos) pointed at names Hugging Face has since renamed and only reached the files through a redirect. They now use the canonical names, with the same files and checksums. (#3042)
+- **A random image seed is one a browser holds exactly.** `/v1/images/generations` without `extra_body.seed` drew up to 2**63, and a JavaScript client rounded the `_hal0.meta.seed` it got back, so reusing it rendered a different image. The draw is now below 2**53. (#3073)
+- **An image render that fails on text ComfyUI sent back no longer answers a bare 500.** When ComfyUI returned a lone surrogate such as `"\ud800"` in the `prompt_id` or the `/history` outputs, the error repeated it unchanged and could not be sent; the caller now gets the usual `502 dispatch.upstream_failed` error with the text cleaned. (#3069)
+- ComfyUI render progress now shows on boxes where an HTTP proxy is set in the environment. (#3074)
+- **`hal0 doctor` names a gateway remedy that works when `hermes-gateway` is masked.** The "Hermes gateway is disabled and not running" row now says `sudo systemctl unmask hermes-gateway.service && sudo hal0 agent install hermes` (`unmask --runtime` for a runtime mask), the same as `hal0 agent install hermes`, instead of an `enable --now` that fails. (#3030)
+- On a box that requires sign-in, a streaming route now notices when its client disconnects. The auth stream guard used to drop the disconnect, so `request.is_disconnected()` never turned true behind it. (#3068)
+- The image starter recommendation no longer picks a model the box's own memory check refuses on 16–18 GB machines. (#3076)
+
+### Security
+
+- **Approval cards show which resource a gated call acts on.** The dashboard's approvals modal and Approvals card cut a gated MCP call's arguments off at 120 characters in the agent's own key order, so a long argument placed first could hide the `model_id`, `name` or `slot` the call deletes, unloads or edits. Each approval now carries `target_args`, the arguments that pick the resource; the cards show those first and in full, every other argument on its own row, and the complete argument JSON one click away. (#3052)
+- `hal0-agentenv secret-keys` opens the agent secrets vault through the same no-follow descriptor walk as the vault writers, so the hal0 account can no longer redirect it with a symlink to list the key names of a root-only file. (#3014)
+- The installer now starts every Python helper in isolated mode, so running it as root from a directory a service account can write no longer imports modules planted there. (#3010)
+
 ## [1.7.0] — 2026-10-26
 
 ### Highlights
