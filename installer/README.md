@@ -82,7 +82,8 @@ journalctl -fu hal0-slot@chat         # one slot
 The image-generation slot (`img`, ComfyUI) runs in **exclusive GPU
 mode**: the GPU arbiter (`/var/lib/hal0/gpu_arbiter.json`) stops LLM
 GPU slots while an image renders and restores them about 10 seconds after
-the last render (ADR-0038). See `docs/guides/image-mode-and-gpu-gate.mdx`
+the last render (ADR-0038). See
+[`docs/guides/image-mode-and-gpu-gate.mdx`](../docs/guides/image-mode-and-gpu-gate.mdx)
 for the full ops guide.
 
 Pinned FLM and container image versions are tracked per release; run

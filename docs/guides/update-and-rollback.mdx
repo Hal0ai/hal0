@@ -289,8 +289,9 @@ The first `hal0 update` to 1.6.0 changes how Hermes is installed. One step is ne
   mounts into the container when `img` starts. Until you run `hal0 slot
   restart img`, the 1.6.x gate the container still runs cannot authenticate
   on a box with `hal0 auth require on` (or a specific `HAL0_BIND_HOST` and an
-  admin key), so it lets every editor prompt through without asking hal0 for
-  the GPU. See
+  admin key). hal0 refuses its status request, and the 1.6.x gate then lets
+  the prompt through without a GPU switch, so every editor prompt can render
+  next to the LLM slots. See
   [ComfyUI's GPU gate credential](/docs/operate/auth#comfyuis-gpu-gate-credential).
 - **Image models come from the image catalog.** `hal0 comfyui models list`
   shows each catalog model's install state, the GB it still has to download
