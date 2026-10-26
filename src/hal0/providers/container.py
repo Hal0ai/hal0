@@ -1441,7 +1441,7 @@ def _has_tuning_keys(slot_cfg: Mapping[str, Any]) -> bool:
     return bool(slot_tuning_keys(slot_cfg))
 
 
-# HAL0-SUNSET: v1.7.0 — the blocked-slot pin (this function, _pinned_segments,
+# HAL0-SUNSET: v1.8.0 — the blocked-slot pin (this function, _pinned_segments,
 # _placement_only and their launch/preview branches) goes with the
 # profile-centric conversion (config.migrations.profile_centric_apply).
 def blocked_slot_pin(slot_cfg: Mapping[str, Any]) -> dict[str, Any] | None:

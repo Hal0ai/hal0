@@ -30,7 +30,7 @@ file is copied to ``<file>.bak-<UTC stamp>`` beside it first, so a rollback to
 1.4.x (which would quarantine every profile carrying ``speculation``) can put it
 back.
 
-HAL0-SUNSET: v1.7.0 — goes with the profile-centric conversion chain.
+HAL0-SUNSET: v1.8.0 — goes with the profile-centric conversion chain.
 """
 
 from __future__ import annotations

@@ -67,7 +67,7 @@ from hal0.config.migrations.runner_system import (
 )
 from hal0.errors import Hal0Error
 
-# HAL0-SUNSET: v1.7.0 — the whole profile-centric conversion (this module, the
+# HAL0-SUNSET: v1.8.0 — the whole profile-centric conversion (this module, the
 # planner, the frozen resolver, migration 012's holding table) and the
 # blocked-slot pin it leaves (providers.container.blocked_slot_pin and its
 # launch branch) go together once the upgrade floor is past the release that
