@@ -233,6 +233,13 @@ describe('the dock events pane', () => {
     expect(msgs()[2]).toContain('edited brain')
     // The actor label rides on the activity row.
     expect(rows()[2].querySelector('.actor')!.textContent).toContain('hermes (mcp)')
+    // The source is a data attribute, never a class: an activity category such as `slot` must not
+    // pick up the slot card's global `.slot` rules (CT150 live check, 2026-10-26).
+    for (const r of rows()) {
+      const src = r.querySelector('.src') as HTMLElement
+      expect(src.className).toBe('src')
+      expect(src.dataset.source).toBeTruthy()
+    }
     // The all chip replaced merged.
     expect(chip('all')).toBeTruthy()
     expect(chip('merged')).toBeUndefined()

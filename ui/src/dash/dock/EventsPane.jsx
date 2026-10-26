@@ -30,7 +30,9 @@ export function EventRow({ e, q = '', stripe = false, open = false, onClick, tes
       {stripe && <span className="stripe" />}
       <span className="ts">{_shortTs(e.ts)}</span>
       <span className={'ev-k ' + e.stream} title={e.stream === 'a' ? 'activity' : 'journal'}>{e.stream === 'a' ? 'A' : 'J'}</span>
-      <span className={'src ' + e.source}><span className="d" />{e.source}</span>
+      {/* The source is data, not a class: an activity category such as `slot` would otherwise pick up
+          the slot card's global `.slot` rules and draw the cell as a card (seen on CT150). */}
+      <span className="src" data-source={e.source}><span className="d" />{e.source}</span>
       <span className="lvl">{e.level}</span>
       <span className="msg">
         {text}
