@@ -488,6 +488,20 @@ describe('the dock GPU tab', () => {
     )
   })
 
+  it('once the slots are paused, no resident row matches: no "frees 0 GB", and the paused slots are named', async () => {
+    box.arbiter = envelope({ mode: 'img', phase: 'rendering', unload_set: ['brain', 'coder'] })
+    box.status = statusBody({ engine: 'running' })
+    // Image mode has paused brain and coder, so the budget no longer lists them.
+    box.memory = memoryBody({ this_box: [], used_gb: 10, free_gb: 86 })
+    mount(open())
+    await click(byId('dock-tab-gpu'))
+    expect(factRow('gpu pool').textContent).toBe('86 GB free of 96')
+    expect(byId('dock-gpu')!.querySelector('.gp-cost')!.textContent).toBe(
+      'Image mode paused brain and coder. They reload about 10 s after the last image unless pinned.',
+    )
+    expect(byId('dock-gpu')!.textContent).not.toContain('frees 0')
+  })
+
   it('gpu facts list the slots, paused ones hollow while image mode is on', async () => {
     box.arbiter = envelope({ mode: 'img', phase: 'rendering' })
     box.slots = [

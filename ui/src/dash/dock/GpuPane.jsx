@@ -11,7 +11,7 @@ import { useState } from 'react'
 import { LABEL, RenderRun, Steps } from './gpu-parts.jsx'
 import { LogsModal, PILL } from '@/dash/image/EngineCard.jsx'
 import { gateRow, queueSummary } from '@/dash/image/engine-pure'
-import { costLine } from '@/dash/image/status-line-pure'
+import { costLine, nameList } from '@/dash/image/status-line-pure'
 import { useGenerateState } from '@/dash/image/generate-store'
 import { slotIndicatorFromPhase } from '@/dash/slot-status.js'
 
@@ -37,13 +37,17 @@ export function GpuPane({ gpu, actions }) {
   const unloadSet = arbiter?.unload_set ?? null
   const pool = memory?.gpu ?? null
 
-  // What image mode frees: the GB of the slots it paused, as the memory budget has them.
-  const freedGb = (pool?.this_box ?? [])
-    .filter((row) => unloadSet?.includes(row.slot))
-    .reduce((sum, row) => sum + row.gb, 0)
-  const cost = imageMode
-    ? `Image mode frees ${fmtGb(freedGb)} GB of the GPU pool. Paused slots reload about 10 s after the last image unless pinned.`
-    : costLine(unloadSet, memory, arbiter).join(' ')
+  // What image mode frees: the GB of the slots it paused that the memory budget still lists.
+  // `this_box` holds resident slots only, so once they are paused no row matches: say they are
+  // paused instead of "frees 0 GB".
+  const freedRows = (pool?.this_box ?? []).filter((row) => unloadSet?.includes(row.slot))
+  const freedGb = freedRows.reduce((sum, row) => sum + row.gb, 0)
+  const showFreed = freedRows.length > 0
+  const cost = !imageMode
+    ? costLine(unloadSet, memory, arbiter).join(' ')
+    : showFreed
+      ? `Image mode frees ${fmtGb(freedGb)} GB of the GPU pool. Paused slots reload about 10 s after the last image unless pinned.`
+      : `Image mode paused ${nameList(unloadSet ?? [])}. They reload about 10 s after the last image unless pinned.`
 
   // A button that could only do nothing is not shown.
   const buttons = view.actions.filter(
@@ -95,7 +99,7 @@ export function GpuPane({ gpu, actions }) {
     [
       'gpu pool',
       pool
-        ? `${fmtGb(pool.total_gb - pool.used_gb)} GB free of ${pool.total_gb}${imageMode ? ` · ${fmtGb(freedGb)} GB freed` : ''}`
+        ? `${fmtGb(pool.total_gb - pool.used_gb)} GB free of ${pool.total_gb}${imageMode && showFreed ? ` · ${fmtGb(freedGb)} GB freed` : ''}`
         : '—',
     ],
   ]

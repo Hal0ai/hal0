@@ -1,6 +1,7 @@
-// hal0 dashboard — the dock: the global status footer (runtime / service
-// pips, update chip, live journal + downloads panes). Moved verbatim from
-// chrome.jsx's `Footer`; later tasks grow it into the status dock.
+// hal0 dashboard — the dock: the one global status and event surface. A collapsed bar (GPU
+// segment, slot and service pips, update chip, unseen-events badge) over a two-row ticker of the
+// newest events; expanded, it holds the events pane (journal + activity trail merged), the GPU
+// pane and the downloads pane.
 
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { useRuntimeRollup, useHealthSystem, failingChecks } from '@/api/hooks/useRuntime'
@@ -22,6 +23,7 @@ import { GpuSegment } from './GpuSegment.jsx'
 import { GpuPane } from './GpuPane.jsx'
 import { EventsPane, EventRow } from './EventsPane.jsx'
 import { DOCK_FILTERS_DEFAULT, TICKER_ROWS, mergeFeeds, newRows, slotOfEvent } from './dock-pure'
+import { useDocumentVisible } from './useDocumentVisible'
 import { _svcPip } from '../chrome.jsx'
 
 // ─── Dock (the global status footer) ───
@@ -79,10 +81,13 @@ export function Dock({ route, param, expanded = false, onToggle }) {
   }, [expanded, onToggle]);
   const { jobs, hasActive } = usePullsList({ enabled: expanded && footerTab === "downloads" });
   const clearJob = useClearPullJob();
-  // Both streams stay open while the dock is mounted: the ticker and the unseen badge need them
-  // collapsed. Filters apply client-side (instant, and every chip stays available).
-  const live = useLogsStream({ follow: true });
-  const activity = useActivityStream({ follow: true, kind: 'action', limit: 200 });
+  // Both streams stay open while the dock is mounted and the tab is visible: the ticker and the
+  // unseen badge need them collapsed. A hidden tab closes both (HTTP/1.1 allows six connections
+  // per host); each hook keeps its ring across the close, and the reopen's replay dedups. Filters
+  // apply client-side (instant, and every chip stays available).
+  const visible = useDocumentVisible();
+  const live = useLogsStream({ follow: visible });
+  const activity = useActivityStream({ follow: visible, kind: 'action', limit: 200 });
   const events = useMemo(
     () => mergeFeeds(live.ring || [], activity.records || []),
     [live.ring, activity.records],
@@ -336,7 +341,7 @@ export function Dock({ route, param, expanded = false, onToggle }) {
             <span className="bullet">●</span> <b>hal0 {hal0Channel.available}</b> available
           </span>
         )}
-        <button className="foot-toggle" data-testid="dock-toggle" onClick={onToggle} aria-expanded={expanded} aria-label="Toggle dock">
+        <button className="foot-toggle" data-testid="dock-toggle" onClick={onToggle} aria-expanded={expanded} aria-label={unseen > 0 && !expanded ? `Toggle dock, ${unseen} unseen events` : "Toggle dock"}>
           <span style={{transform: expanded ? "rotate(180deg)" : "rotate(0)", transition: "transform 0.18s ease", display: "inline-block"}}>⌃</span>
           <span>dock</span>
           {unseen > 0 && !expanded && (

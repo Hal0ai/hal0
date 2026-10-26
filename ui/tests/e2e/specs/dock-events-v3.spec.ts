@@ -234,6 +234,14 @@ test.describe('Dock events tab', () => {
     await emitSse(page, JOURNAL, journalEntry(1))
     await expect(page.locator('[data-testid="dock-event-row"]')).toHaveCount(3)
     expect(await scrollWidth()).toBeLessThanOrEqual(390)
+    // Collapsed again: the ticker rows drop source and level, so the message is not squeezed to a
+    // few characters.
+    await page.getByTestId('dock-toggle').click()
+    await expect(page.getByTestId('dock-expanded')).toHaveCount(0)
+    const tickerMsg = await page.locator('[data-testid="dock-ticker-row"] .msg').first().boundingBox()
+    expect(tickerMsg!.width).toBeGreaterThanOrEqual(200)
+    await expect(page.locator('[data-testid="dock-ticker-row"] .src').first()).toBeHidden()
+    expect(await scrollWidth()).toBeLessThanOrEqual(390)
   })
 
   test('unseen badge counts rows pushed while collapsed', async ({ page }) => {

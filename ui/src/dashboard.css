@@ -125,7 +125,8 @@
   --topbar-h:    52px;
   --sidebar-w:   232px;
   --sidebar-w-collapsed: 56px;
-  --footer-h:    52px;
+  /* The collapsed dock: the status row (46px) and the two ticker rows (2 x 22px). */
+  --footer-h:    90px;
 }
 
 * { box-sizing: border-box; }

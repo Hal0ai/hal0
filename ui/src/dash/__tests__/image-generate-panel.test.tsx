@@ -17,6 +17,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 type Json = Record<string, unknown>
 type GenVars = Json & { signal?: AbortSignal }
 
+// The shared query client, for the mocks below (they run inside hoisted factories).
+const { held } = vi.hoisted(() => ({ held: { qc: null as import('@tanstack/react-query').QueryClient | null } }))
+const cache = () => held.qc!
+
 const { box, calls } = vi.hoisted(() => ({
   box: {
     models: undefined as Json | undefined,
@@ -54,9 +58,15 @@ vi.mock('@/api/hooks/useComfyui', async (importOriginal) => ({
     error: box.modelsError ?? null,
   }),
   useComfyuiFiles: () => ({ data: box.files }),
-  useArbiter: () => ({ data: box.arbiter }),
+  // The store's Cancel reads the phase and progress off the query cache, so the mocked hooks
+  // seed it with what they answer, as the real ones would.
+  useArbiter: () => {
+    if (box.arbiter) cache().setQueryData(['comfyui', 'arbiter'], box.arbiter)
+    return { data: box.arbiter }
+  },
   useComfyui: (opts?: unknown) => {
     calls.push(['status-hook', opts])
+    if (box.status) cache().setQueryData(['comfyui', 'status'], box.status)
     return { data: box.status }
   },
   // The real hook is disabled for a `ckpt/` id and answers nothing.
@@ -71,13 +81,11 @@ vi.mock('@/api/hooks/useComfyui', async (importOriginal) => ({
     const judged = box.judgedAs[size] ?? size
     return { data: { fit: hit, size: judged }, isLoading: false, isPlaceholderData: false }
   },
-  useComfyuiRenderCancel: () => ({
-    mutateAsync: async () => {
-      calls.push(['render-cancel', null])
-      if (box.cancelFail) throw box.cancelFail
-      return { status: 'ok' }
-    },
-  }),
+  postRenderCancel: async () => {
+    calls.push(['render-cancel', null])
+    if (box.cancelFail) throw box.cancelFail
+    return { status: 'ok' }
+  },
   generateImage: (vars: GenVars) => {
     calls.push(['generate', vars])
     return (box.generate ?? (async () => result()))(vars)
@@ -102,6 +110,9 @@ vi.mock('@/api/hooks/useStatsHardware', async (importOriginal) => ({
 
 const { ImageGeneratePanel } = await import('../image/ImageGeneratePanel.jsx')
 const { resetGenerateStore } = await import('../image/generate-store')
+const { queryClient } = await import('@/lib/queryClient')
+held.qc = queryClient
+const { useImageRunStore } = await import('@/stores/useImageRunStore')
 
 // ── fixtures ─────────────────────────────────────────────────────────────────
 
@@ -300,7 +311,6 @@ const props = {
   initialModelId: undefined as string | undefined,
   pickSeq: undefined as number | undefined,
   onOpenModels: vi.fn(),
-  onRunChange: vi.fn(),
 }
 const tree = () => (
   <div className="comfy-page">
@@ -308,7 +318,6 @@ const tree = () => (
       initialModelId={props.initialModelId}
       pickSeq={props.pickSeq}
       onOpenModels={props.onOpenModels}
-      onRunChange={props.onRunChange}
     />
   </div>
 )
@@ -418,7 +427,8 @@ beforeEach(() => {
   props.initialModelId = undefined
   props.pickSeq = undefined
   props.onOpenModels.mockReset()
-  props.onRunChange.mockReset()
+  queryClient.clear()
+  useImageRunStore.setState({ run: null })
   resetGenerateStore()
   window.sessionStorage.clear()
 })
@@ -1093,32 +1103,33 @@ describe('ImageGeneratePanel: a run', () => {
     expect(byId('gen-cost')).toBeTruthy()
   })
 
-  it('reports the run to its parent, with a cancel that follows the same rule', async () => {
+  it('reports the run to the dock store: running while it is in flight, null once it ends', async () => {
     const run = openRun()
     mount()
-    expect(props.onRunChange).not.toHaveBeenCalled()
+    expect(useImageRunStore.getState().run).toBeNull()
     type(prompt(), 'a cat')
     await click(submit())
-
-    expect(props.onRunChange).toHaveBeenCalledTimes(1)
-    const reported = props.onRunChange.mock.calls[0][0]
-    expect(reported).toEqual({ running: true, cancel: expect.any(Function) })
+    expect(useImageRunStore.getState().run).toEqual({ running: true, cancel: expect.any(Function) })
 
     await settle(() => run.resolve!(result()))
-    expect(props.onRunChange).toHaveBeenLastCalledWith(null)
-    expect(props.onRunChange).toHaveBeenCalledTimes(2)
+    expect(useImageRunStore.getState().run).toBeNull()
   })
 
-  it('does not re-report an unchanged run when the parent hands in a new callback', async () => {
-    openRun()
-    const view = mount()
+  it('a refused request and an abort also clear the dock store', async () => {
+    box.generate = async () => {
+      throw new ApiError('nope', 'image.gate_refused', 503)
+    }
+    mount()
     type(prompt(), 'a cat')
     await click(submit())
-    expect(props.onRunChange).toHaveBeenCalledTimes(1)
-    props.onRunChange.mockClear()
-    view.rerender()
-    view.rerender()
-    expect(props.onRunChange).not.toHaveBeenCalled()
+    expect(useImageRunStore.getState().run).toBeNull()
+
+    const run = openRun()
+    await click(submit())
+    expect(useImageRunStore.getState().run?.running).toBe(true)
+    await click(button('Cancel'))
+    expect(run.vars!.signal!.aborted).toBe(true)
+    expect(useImageRunStore.getState().run).toBeNull()
   })
 
   it('cancel aborts before queue, calls render/cancel after', async () => {
@@ -1185,7 +1196,7 @@ describe('ImageGeneratePanel: a run', () => {
     const view = mount()
     type(prompt(), 'a cat')
     await click(submit())
-    const { cancel } = props.onRunChange.mock.calls[0][0]
+    const { cancel } = useImageRunStore.getState().run!
 
     // The line's Cancel only exists while switching, but the function must not assume it: the
     // render may have been queued since the line last drew.
@@ -1217,27 +1228,44 @@ describe('ImageGeneratePanel: a run', () => {
     }
   })
 
-  it('lets a run finish after the panel is gone, and keeps what it made', async () => {
+  it('lets a run finish after the panel is gone, keeps what it made, and keeps it cancellable', async () => {
     const run = openRun()
     const view = mount()
     type(prompt(), 'a cat')
     await click(submit())
     view.unmount()
 
-    // Leaving the tab does not cancel the render, and tells the parent there is nothing to cancel
-    // from here.
+    // Leaving the tab does not cancel the render, and the dock still has its Cancel.
     expect(run.vars!.signal!.aborted).toBe(false)
-    expect(props.onRunChange).toHaveBeenLastCalledWith(null)
+    expect(useImageRunStore.getState().run).toEqual({ running: true, cancel: expect.any(Function) })
 
     // Coming back while it runs shows the run, not a button that would start a second one.
-    mount()
+    const back = mount()
     expect(byId('gen-run')).toBeTruthy()
     expect(byId('gen-submit')).toBeNull()
-    expect(props.onRunChange).toHaveBeenLastCalledWith({ running: true, cancel: expect.any(Function) })
+    expect(useImageRunStore.getState().run?.running).toBe(true)
 
     await settle(() => run.resolve!(result()))
     expect(allById('gen-tile')).toHaveLength(1)
     expect(byId('gen-run')).toBeNull()
+    expect(useImageRunStore.getState().run).toBeNull()
+    back.unmount()
+  })
+
+  it('the dock store cancels a queued render with the panel gone', async () => {
+    const run = openRun()
+    box.arbiter = envelope({ mode: 'img', phase: 'rendering' })
+    box.status = statusBody({ progress: progress({ step: 2, total: 8 }) })
+    const view = mount()
+    type(prompt(), 'a cat')
+    await click(submit())
+    view.unmount()
+
+    await act(async () => {
+      useImageRunStore.getState().run!.cancel()
+    })
+    expect(run.vars!.signal!.aborted).toBe(true)
+    expect(calls.filter(([n]) => n === 'render-cancel')).toHaveLength(1)
   })
 })
 
@@ -1292,7 +1320,7 @@ describe('ImageGeneratePanel: errors', () => {
     // The button is back, and the run is over.
     expect(byId('gen-run')).toBeNull()
     expect(submit().disabled).toBe(false)
-    expect(props.onRunChange).toHaveBeenLastCalledWith(null)
+    expect(useImageRunStore.getState().run).toBeNull()
     // The install route in the details is a route, never a link.
     expect(document.querySelector('a[href*="install"]')).toBeNull()
 

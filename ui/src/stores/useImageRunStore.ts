@@ -1,9 +1,10 @@
 // hal0 dashboard — the Image Gen run of this browser.
 //
-// The Generate panel reports "this browser's own run" upward while it runs: `{ running, cancel }`,
-// and `null` once it ends. It lives here, not in the pane's local state, so a surface outside the
-// Image Gen pane (the status dock) can show that run and offer its Cancel. `setRun` is stable for
-// the store's lifetime, so it can be handed to the panel as `onRunChange` without re-rendering it.
+// The Generate store (`dash/image/generate-store.ts`) reports "this browser's own run" here while
+// it runs: `{ running, cancel }`, and `null` once it ends (success, error or abort). The run is
+// reported by the store that owns it, not by the Generate panel, so it survives the panel
+// unmounting, and a surface outside the Image Gen pane (the status dock) can show that run and
+// offer its Cancel.
 
 import { create } from 'zustand'
 

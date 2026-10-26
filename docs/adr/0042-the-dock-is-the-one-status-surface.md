@@ -50,8 +50,9 @@ only existed on the Slots page.
    lives in the dock. The first-run, update and demo banners are unrelated and
    unchanged.
 3. **GPU-mode actions live only in the dock.** Hold, keep, unpin, stop and
-   cancel are the segment's buttons (at most two) and the GPU tab's (all of
-   them). The words, the precedence and the choice of buttons stay
+   cancel are the segment's buttons (at most two) and the GPU tab's (every
+   action that applies: **Open editor** needs an editor link, and **Cancel**
+   needs a run started in this browser). The words, the precedence and the choice of buttons stay
    `statusLine()`'s (`status-line-pure.ts`): the dock is a new renderer for
    the same view model. Engine actions, **Restart engine** and **Logs**, are
    also on the Engine tab, beside the engine's facts. The GPU tab offers
@@ -82,11 +83,12 @@ only existed on the Slots page.
   `Stop image mode` button, and the Slots page's `ActivityLog`. Their tests go
   with them. The pure tests for `statusLine()` stay.
 - Both streams, the journal's and the activity trail's, are open for as long
-  as the dock is mounted, which is every page: the ticker and the `+N` unseen
-  badge on the toggle need live rows while the dock is collapsed. The
-  journal's stream used to open only when the pane did. Each browser tab
-  holds two server-sent-event connections, and the activity backfill is
-  capped by `limit`.
+  as the dock is mounted and the browser tab is visible. The dock is on every
+  page, and the ticker and the `+N` unseen badge on the toggle need live rows
+  while it is collapsed. The journal's stream used to open only when the pane
+  did. A visible tab holds two server-sent-event connections (a hidden tab
+  closes both, because hal0 serves HTTP/1.1 and a browser allows six
+  connections per host), and the activity backfill is capped by `limit`.
 - The dock's `/status` poll runs at its active cadence only on the Image Gen
   route or while a Generate run of this browser is in flight; elsewhere it
   idles. The arbiter poll that fed the old banner is the same one.

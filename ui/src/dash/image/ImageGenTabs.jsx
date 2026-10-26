@@ -8,8 +8,8 @@
 // the URL with replaceState, so Back does not fill with tabs.
 //
 // All three panels stay mounted and the inactive ones are hidden. A Generate run lives for
-// minutes and leaving the tab does not end it: the panel stays to report it (`onRunChange`) and
-// to cancel it, which the status line offers for as long as it runs (`ownRun`).
+// minutes and leaving the tab does not end it: the Generate store owns the run and reports it to
+// `useImageRunStore`, where the status dock offers its Cancel for as long as it runs (`ownRun`).
 //
 // The root carries `.comfy-page`. It is only a marker: it scopes no rule (dashboard.css defines the
 // `--comfy*` tokens on :root).
@@ -17,7 +17,6 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import './image-tabs.css'
 import { isImageJobActive } from '@/api/hooks/imageJobState'
 import { useComfyuiModels, useImageJobs } from '@/api/hooks/useComfyui'
-import { useImageRunStore } from '@/stores/useImageRunStore'
 import { ImageEngineTab } from './ImageEngineTab'
 import { ImageGeneratePanel } from './ImageGeneratePanel'
 import { ImageModelsPanel } from './ImageModelsPanel'
@@ -170,7 +169,6 @@ export function ImageGenTabs({ sub }) {
           initialModelId={pick.modelId}
           pickSeq={pick.seq}
           onOpenModels={openModels}
-          onRunChange={useImageRunStore.getState().setRun}
         />
       </div>
       <div

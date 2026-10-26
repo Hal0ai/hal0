@@ -137,7 +137,7 @@ const pad2 = (n: number) => String(n).padStart(2, '0')
 const fmtGb = (gb: number) => String(Number(gb.toFixed(1)))
 
 // a / a and b / a, b and c
-function nameList(names: readonly string[]): string {
+export function nameList(names: readonly string[]): string {
   if (names.length <= 1) return names.join('')
   return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
 }

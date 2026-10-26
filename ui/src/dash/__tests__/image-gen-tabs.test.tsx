@@ -23,7 +23,6 @@ const { box } = vi.hoisted(() => ({
     modelsError: false,
     jobs: undefined as Json[] | undefined,
     access: { onBox: true, url: 'http://localhost:8188', tunnel: 'ssh -L 8188:127.0.0.1:8188 <user>@box' },
-    cancel: undefined as unknown as () => void,
     mounts: { generate: 0, models: 0, engine: 0 },
     unmounts: { generate: 0, models: 0, engine: 0 },
     engineVisible: undefined as boolean | undefined,
@@ -44,7 +43,6 @@ vi.mock('../image/ImageGeneratePanel.jsx', async () => {
       initialModelId?: string
       pickSeq?: number
       onOpenModels: (id?: string) => void
-      onRunChange: (run: { running: boolean; cancel: () => void } | null) => void
     }) => {
       R.useEffect(() => {
         box.mounts.generate++
@@ -59,11 +57,6 @@ vi.mock('../image/ImageGeneratePanel.jsx', async () => {
           'data-initial': p.initialModelId ?? '',
           'data-seq': String(p.pickSeq ?? 0),
         },
-        R.createElement('button', {
-          'data-testid': 'stub-run-start',
-          onClick: () => p.onRunChange({ running: true, cancel: box.cancel }),
-        }),
-        R.createElement('button', { 'data-testid': 'stub-run-end', onClick: () => p.onRunChange(null) }),
         R.createElement('button', {
           'data-testid': 'stub-open-models',
           onClick: () => p.onOpenModels('qwen-image'),
@@ -163,7 +156,6 @@ beforeEach(() => {
   box.modelsError = false
   box.jobs = []
   box.access = { onBox: true, url: 'http://localhost:8188', tunnel: 'ssh -L 8188:127.0.0.1:8188 <user>@box' }
-  box.cancel = vi.fn()
   box.mounts = { generate: 0, models: 0, engine: 0 }
   box.unmounts = { generate: 0, models: 0, engine: 0 }
   box.engineVisible = undefined
@@ -369,24 +361,13 @@ describe('hidden tabs', () => {
 // ── wiring between the panels ────────────────────────────────────────────────
 
 describe('wiring', () => {
-  it('generate run lives in the store across a tab switch', () => {
+  it('the Generate panel stays mounted across a tab switch', () => {
     mount()
-    expect(useImageRunStore.getState().run).toBeNull()
-
-    click(byId('stub-run-start')!)
-    expect(useImageRunStore.getState().run?.running).toBe(true)
-
-    // Leave Generate: the panel stays mounted, so its run is still in the store to cancel.
     click(tabEl('models'))
     click(tabEl('engine'))
+    click(tabEl('generate'))
+    expect(box.mounts.generate).toBe(1)
     expect(box.unmounts.generate).toBe(0)
-    expect(useImageRunStore.getState().run?.running).toBe(true)
-    useImageRunStore.getState().run?.cancel()
-    expect(box.cancel).toHaveBeenCalledTimes(1)
-
-    // The run ends: nothing left to cancel.
-    click(byId('stub-run-end')!)
-    expect(useImageRunStore.getState().run).toBeNull()
   })
 
   it('models generate action selects the model in Generate', () => {

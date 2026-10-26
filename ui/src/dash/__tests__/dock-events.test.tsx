@@ -23,16 +23,25 @@ const { box } = vi.hoisted(() => ({
     records: [] as unknown[],
     disconnected: false,
     slots: [] as unknown[],
+    /** The `follow` option of every call to the two stream hooks, latest last. */
+    logsFollow: [] as unknown[],
+    activityFollow: [] as unknown[],
   },
 }))
 
 vi.mock('@/api/hooks/useLogs', async (importOriginal) => ({
   ...(await importOriginal<Json>()),
-  useLogsStream: () => ({ ring: box.ring, disconnected: box.disconnected, degraded: false }),
+  useLogsStream: (opts: { follow?: boolean } = {}) => (
+    box.logsFollow.push(opts.follow),
+    { ring: box.ring, disconnected: box.disconnected, degraded: false }
+  ),
 }))
 vi.mock('@/api/hooks/useActivity', async (importOriginal) => ({
   ...(await importOriginal<Json>()),
-  useActivityStream: () => ({ records: box.records, disconnected: false, epoch: null }),
+  useActivityStream: (opts: { follow?: boolean } = {}) => (
+    box.activityFollow.push(opts.follow),
+    { records: box.records, disconnected: false, epoch: null }
+  ),
 }))
 vi.mock('@/api/hooks/useSlots', () => ({
   useSlots: () => ({ data: box.slots, isLoading: false }),
@@ -186,6 +195,8 @@ beforeEach(() => {
   box.ring = []
   box.records = []
   box.disconnected = false
+  box.logsFollow = []
+  box.activityFollow = []
   box.slots = [
     { name: 'brain', model: 'm1' },
     { name: 'coder', model: 'm2' },
@@ -383,6 +394,39 @@ describe('the dock events pane', () => {
       expect(seen).toEqual(['coder'])
     } finally {
       window.removeEventListener('hal0:slot-event', on)
+    }
+  })
+
+  it('a hidden tab closes both streams; the reopen keeps the rows and counts nothing as new', async () => {
+    const setVisibility = async (state: 'hidden' | 'visible') => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state })
+      await act(async () => {
+        document.dispatchEvent(new Event('visibilitychange'))
+      })
+    }
+    box.ring = [jr({ id: 1 }), jr({ id: 2, ts: '2026-10-26T15:00:02Z' })]
+    box.records = [ar({ id: 1, ts: '2026-10-26T15:00:03Z' })]
+    const host = mount(dock(false))
+    try {
+      expect(box.logsFollow.at(-1)).toBe(true)
+      expect(box.activityFollow.at(-1)).toBe(true)
+      await setVisibility('hidden')
+      expect(box.logsFollow.at(-1)).toBe(false)
+      expect(box.activityFollow.at(-1)).toBe(false)
+      await setVisibility('visible')
+      expect(box.logsFollow.at(-1)).toBe(true)
+      expect(box.activityFollow.at(-1)).toBe(true)
+      // The replay on reopen is deduped by the hooks: same rows, no badge.
+      rerender(host, dock(false))
+      expect(byId('dock-unseen')).toBeNull()
+      // A row that arrived after the reopen is still news.
+      box.ring = [...box.ring, jr({ id: 3, ts: '2026-10-26T15:00:09Z' })]
+      rerender(host, dock(false))
+      expect(byId('dock-unseen')!.textContent).toBe('+1')
+      expect(byId('dock-toggle')!.getAttribute('aria-label')).toBe('Toggle dock, 1 unseen events')
+    } finally {
+      // @ts-expect-error restore the prototype getter
+      delete document.visibilityState
     }
   })
 

@@ -276,10 +276,19 @@ export function useComfyuiPin() {
 }
 
 // Cancel current + queued renders (best-effort, 202).
+export const postRenderCancel = () => api<{ status: string }>(ENDPOINTS.comfyuiRenderCancel, { method: 'POST' })
+
 export function useComfyuiRenderCancel() {
-  return useMutation({
-    mutationFn: () => api<{ status: string }>(ENDPOINTS.comfyuiRenderCancel, { method: 'POST' }),
-  })
+  return useMutation({ mutationFn: postRenderCancel })
+}
+
+/** Whether the render is in ComfyUI's queue yet, read off the cached /arbiter and /status answers
+ *  (no hook: the Generate store asks it after the panel that started the run may be gone). Queued
+ *  means the hand-off or rendering phase, or hal0's render has progress. */
+export function renderIsQueued(qc: QueryClient): boolean {
+  const phase = qc.getQueryData<ArbiterReading>(['comfyui', 'arbiter'])?.arbiter?.phase ?? null
+  const progress = qc.getQueryData<ComfyuiStatus>(STATUS_KEY)?.progress ?? null
+  return phase === 'handoff' || phase === 'rendering' || progress != null
 }
 
 // Restart ComfyUI container (202, fire-and-forget).

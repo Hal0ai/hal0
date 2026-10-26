@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { entryKey } from '@/api/hooks/logRing.js'
 import type { ActivityRecord } from '@/api/hooks/useActivity'
 import type { JournalEntry } from '@/api/hooks/useLogs'
 import {
@@ -56,19 +57,29 @@ const activity: ActivityRecord[] = [
   rec({ id: 21, ts: '2026-10-26T15:00:05Z', category: 'system', target: null, severity: 'warn', message: 'system.restart' }),
 ]
 const events = mergeFeeds(journal, activity)
+// A journal fixture's event id: keyed by content, not by the server's row id.
+const jid = (i: number) => `j:${entryKey(journal[i])}`
 
 describe('dock-pure', () => {
   it('exposes the ticker row count', () => {
     expect(TICKER_ROWS).toBe(2)
   })
 
-  it('journal events keep id, source fallback and level', () => {
-    const out = journalToEvents([
-      entry({ id: 5, source: '', level: 'warn', msg: 'x' }),
-      { ...entry({ ts: '2026-10-26T15:00:09Z' }), id: undefined as unknown as number },
+  it('journal events keep source fallback and level, keyed by content', () => {
+    const out = journalToEvents([entry({ id: 5, source: '', level: 'warn', msg: 'x' })])
+    expect(out[0]).toMatchObject({ source: 'hal0', level: 'warn', stream: 'j', record: null })
+    expect(out[0].id).toBe('j:2026-10-26T15:00:00Z||x')
+  })
+
+  it('journal ids restart after an API restart: same id with different content gets a different event id', () => {
+    const [a, b, a2] = journalToEvents([
+      entry({ id: 1, ts: '2026-10-26T15:00:00Z', msg: 'before restart' }),
+      entry({ id: 1, ts: '2026-10-26T15:09:00Z', msg: 'after restart' }),
+      entry({ id: 7, ts: '2026-10-26T15:00:00Z', msg: 'before restart' }),
     ])
-    expect(out[0]).toMatchObject({ id: 'j:5', source: 'hal0', level: 'warn', stream: 'j', record: null })
-    expect(out[1].id).toBe('j:2026-10-26T15:00:09Z#1')
+    expect(a.id).not.toBe(b.id)
+    // Identical content is the same event, whatever id the server assigned.
+    expect(a.id).toBe(a2.id)
   })
 
   it('activity events are only kind=action', () => {
@@ -114,18 +125,18 @@ describe('dock-pure', () => {
   })
 
   it('filters by exact severity', () => {
-    expect(filterEvents(events, { ...DOCK_FILTERS_DEFAULT, severity: 'warn' }).map((e) => e.id)).toEqual(['j:11', 'a:21'])
+    expect(filterEvents(events, { ...DOCK_FILTERS_DEFAULT, severity: 'warn' }).map((e) => e.id)).toEqual([jid(1), 'a:21'])
     expect(filterEvents(events, { ...DOCK_FILTERS_DEFAULT, severity: 'ok' }).map((e) => e.id)).toEqual(['a:20'])
   })
 
   it('filters by source group', () => {
-    expect(filterEvents(events, { ...DOCK_FILTERS_DEFAULT, source: 'slot' }).map((e) => e.id)).toEqual(['j:10', 'j:13', 'a:20'])
-    expect(filterEvents(events, { ...DOCK_FILTERS_DEFAULT, source: 'comfyui' }).map((e) => e.id)).toEqual(['j:11'])
+    expect(filterEvents(events, { ...DOCK_FILTERS_DEFAULT, source: 'slot' }).map((e) => e.id)).toEqual([jid(0), jid(3), 'a:20'])
+    expect(filterEvents(events, { ...DOCK_FILTERS_DEFAULT, source: 'comfyui' }).map((e) => e.id)).toEqual([jid(1)])
   })
 
   it('filters by slot across both streams', () => {
-    expect(filterEvents(events, { ...DOCK_FILTERS_DEFAULT, slot: 'brain' }).map((e) => e.id)).toEqual(['j:10', 'a:20'])
-    expect(filterEvents(events, { ...DOCK_FILTERS_DEFAULT, slot: 'img' }).map((e) => e.id)).toEqual(['j:13'])
+    expect(filterEvents(events, { ...DOCK_FILTERS_DEFAULT, slot: 'brain' }).map((e) => e.id)).toEqual([jid(0), 'a:20'])
+    expect(filterEvents(events, { ...DOCK_FILTERS_DEFAULT, slot: 'img' }).map((e) => e.id)).toEqual([jid(3)])
   })
 
   it('slot filter matches a slot field without a slot: source', () => {
@@ -134,8 +145,8 @@ describe('dock-pure', () => {
   })
 
   it('search is case-insensitive over msg and source; empty matches all', () => {
-    expect(filterEvents(events, { ...DOCK_FILTERS_DEFAULT, q: 'BOOM' }).map((e) => e.id)).toEqual(['j:12'])
-    expect(filterEvents(events, { ...DOCK_FILTERS_DEFAULT, q: 'comfy' }).map((e) => e.id)).toEqual(['j:11'])
+    expect(filterEvents(events, { ...DOCK_FILTERS_DEFAULT, q: 'BOOM' }).map((e) => e.id)).toEqual([jid(2)])
+    expect(filterEvents(events, { ...DOCK_FILTERS_DEFAULT, q: 'comfy' }).map((e) => e.id)).toEqual([jid(1)])
     expect(filterEvents(events, { ...DOCK_FILTERS_DEFAULT, q: '' })).toHaveLength(6)
   })
 
@@ -193,12 +204,12 @@ describe('slotOfEvent and the moved activity helpers', () => {
 
 
 describe('newRows', () => {
-  const evs = mergeFeeds([entry({ id: 1 }), entry({ id: 2 })], [rec({ id: 1 })])
+  const evs = mergeFeeds([entry({ id: 1, msg: 'one' }), entry({ id: 2, msg: 'two' })], [rec({ id: 1 })])
   it('skips a stream that has not delivered its first batch', () => {
-    expect(newRows(evs, new Set(), { j: true, a: false }).map((e) => e.id)).toEqual(['j:1', 'j:2'])
+    expect(newRows(evs, new Set(), { j: true, a: false }).map((e) => e.id)).toEqual([evs[0].id, evs[1].id])
     expect(newRows(evs, new Set(), { j: false, a: false })).toEqual([])
   })
   it('skips seen ids', () => {
-    expect(newRows(evs, new Set(['j:1', 'a:1']), { j: true, a: true }).map((e) => e.id)).toEqual(['j:2'])
+    expect(newRows(evs, new Set([evs[0].id, 'a:1']), { j: true, a: true }).map((e) => e.id)).toEqual([evs[1].id])
   })
 })

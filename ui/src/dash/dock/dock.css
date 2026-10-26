@@ -273,6 +273,15 @@
   flex: none;
 }
 
+/* After the base rows above, so the narrower templates win at equal specificity. */
+@media (max-width: 640px) {
+  /* Event rows drop source and level, so the message keeps the width: ts · tag · message. */
+  .dock-ticker .foot-line .src, .dock-ticker .foot-line .lvl,
+  .dock-x .foot-line .src, .dock-x .foot-line .lvl { display: none; }
+  .dock-ticker .foot-line { grid-template-columns: 64px 16px minmax(0, 1fr); }
+  .dock-x .foot-line { grid-template-columns: 3px 64px 16px minmax(0, 1fr); }
+}
+
 /* Unseen badge on the dock toggle. */
 .foot-toggle .badge {
   margin-left: 6px;

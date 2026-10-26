@@ -9,6 +9,7 @@
 import type { ActivityFilters, ActivityRecord } from '@/api/hooks/useActivity'
 import type { JournalEntry } from '@/api/hooks/useLogs'
 import type { StatusAction } from '@/dash/image/status-line-pure'
+import { entryKey } from '@/api/hooks/logRing.js'
 
 export type DockStream = 'j' | 'a'
 export type DockLevel = 'ok' | 'info' | 'warn' | 'error'
@@ -37,8 +38,10 @@ function parseTs(ts: string | null | undefined): number {
 }
 
 export function journalToEvents(ring: readonly JournalEntry[]): DockEvent[] {
-  return ring.map((entry, index) => ({
-    id: `j:${entry.id ?? `${entry.ts}#${index}`}`,
+  // Keyed by content (the signature the ring dedups on), not `entry.id`: journal ids restart at 1
+  // after an API restart, so a replayed row would collide with a row already in the ring.
+  return ring.map((entry) => ({
+    id: `j:${entryKey(entry)}`,
     ts: entry.ts,
     t: parseTs(entry.ts),
     stream: 'j' as const,

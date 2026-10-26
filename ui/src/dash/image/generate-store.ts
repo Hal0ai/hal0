@@ -8,11 +8,19 @@
 // results are mirrored to sessionStorage so a reload of the tab keeps them too; every storage
 // access is guarded, since private windows and blocked site data throw.
 //
-// The panel owns the form and the cancel routing (it knows the arbiter's phase); this module owns
-// the request.
+// The panel owns the form; this module owns the request and its Cancel (`cancelRun`), and reports
+// the run to `useImageRunStore` so the status dock can show it and cancel it with the panel gone.
 
 import { useSyncExternalStore } from 'react'
-import { generateImage, type ImageGenerateResponse, type ImageGenerateVars } from '@/api/hooks/useComfyui'
+import {
+  generateImage,
+  postRenderCancel,
+  renderIsQueued,
+  type ImageGenerateResponse,
+  type ImageGenerateVars,
+} from '@/api/hooks/useComfyui'
+import { queryClient } from '@/lib/queryClient'
+import { useImageRunStore } from '@/stores/useImageRunStore'
 
 /** One finished image. `seed` is `_hal0.meta.seed`, the seed the render used. */
 export interface GenerateResult {
@@ -122,6 +130,33 @@ export function abortRun(): void {
   state.run?.controller.abort()
 }
 
+/**
+ * Cancel the run of this browser. Which call stops it depends on whether the prompt is in
+ * ComfyUI's queue yet:
+ *  - Not yet (the switch phases, or nothing): abort the /v1 request. The server drops the render
+ *    after the switch, answers an empty 499, and the GPU restores as usual.
+ *  - Queued (hand-off, rendering, or hal0's render has progress): ComfyUI is running it, and
+ *    hanging up would not stop it: /render/cancel does, and the request is aborted as well.
+ * The phase and progress are read when it is called, off the query cache, so it is right whichever
+ * surface calls it and whether or not the panel is mounted.
+ */
+export function cancelRun(): void {
+  if (!state.run) return
+  if (renderIsQueued(queryClient)) {
+    // Through the mutation cache, so a refused (401) cancel opens the same auth challenge as any
+    // other mutation.
+    queryClient
+      .getMutationCache()
+      .build(queryClient, { mutationFn: postRenderCancel })
+      .execute(undefined)
+      .catch((e: { message?: string } | null) => {
+        const toast = (window as unknown as { __hal0Toast?: (msg: string, kind: string) => void }).__hal0Toast
+        toast?.(`Could not cancel the render — ${e?.message || 'see logs'}`, 'err')
+      })
+  }
+  abortRun()
+}
+
 /** Drop the error on screen (the viewer moved on to another model). */
 export function dismissError(): void {
   if (state.error) update({ error: null })
@@ -132,6 +167,7 @@ export function resetGenerateStore(): void {
   epoch += 1
   state.run?.controller.abort()
   state = { results: [], run: null, error: null }
+  useImageRunStore.getState().setRun(null)
   try {
     window.sessionStorage.removeItem(STORAGE_KEY)
   } catch {
@@ -198,6 +234,8 @@ export async function startRun(
     run: { controller, startedAt: Date.now(), graceAtStart: opts.graceAtStart === true },
     error: null,
   })
+  // The dock reads the run from here, so it outlives the panel.
+  useImageRunStore.getState().setRun({ running: true, cancel: cancelRun })
   let patch: Partial<GenerateState> = {}
   try {
     // No timeout of ours: a render can take minutes (Qwen-Image at 20 steps, about six). Only
@@ -208,5 +246,8 @@ export async function startRun(
   } catch (e) {
     if (!isCancellation(e, controller)) patch = { error: toError(e) }
   }
-  if (current()) update({ ...patch, run: null })
+  if (current()) {
+    update({ ...patch, run: null })
+    useImageRunStore.getState().setRun(null)
+  }
 }
