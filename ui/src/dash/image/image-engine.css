@@ -13,7 +13,7 @@
   min-width: 0;
 }
 .ie-engine { grid-column: 1 / -1; }
-/* The queue and the device card stack beside the editor card. */
+/* The queue card sits beside the editor card. */
 .ie-col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 
 .ie-card { min-width: 0; border: 1px solid var(--line); border-radius: var(--rad-lg); background: var(--bg-1); }
@@ -163,18 +163,3 @@ a.ie-chip:hover { border-color: var(--comfy); color: var(--comfy-hi, var(--comfy
 .ie-prog-row b { font-weight: 500; color: var(--fg); }
 .ie-bar { height: 8px; border-radius: 3px; background: var(--bg-3); overflow: hidden; }
 .ie-bar i { display: block; height: 100%; background: var(--comfy); transition: width 0.5s var(--ease, ease); }
-
-/* The GPU device card. */
-.ie-stats {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
-  gap: 1px;
-  border: 1px solid var(--line);
-  border-radius: var(--rad);
-  background: var(--line);
-  overflow: hidden;
-}
-.ie-stat { display: flex; flex-direction: column; gap: 5px; padding: 11px 13px; background: var(--bg-1); }
-.ie-stat .k { font-family: var(--jbm); font-size: 9px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--fg-5); }
-.ie-stat .v { font-family: var(--jbm); font-size: 18px; font-weight: 500; letter-spacing: -0.02em; line-height: 1; color: var(--fg); }
-.ie-stat .u { margin-left: 3px; font-size: 10px; letter-spacing: 0; color: var(--fg-4); }

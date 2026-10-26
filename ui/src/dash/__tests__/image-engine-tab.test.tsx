@@ -1,8 +1,8 @@
 // @vitest-environment happy-dom
 //
-// The Image Gen pane's Engine tab: the engine card (state, container, gate, restart, logs, stop),
-// the editor card (workflow chips, the editor link and its off-box state), the queue card and
-// the GPU device card. The hooks are mocked at the module boundary, as dock-gpu.test.tsx
+// The Image Gen pane's Engine tab: the engine card (state, container, gate, restart, logs),
+// the editor card (workflow chips, the editor link and its off-box state) and the queue card.
+// The hooks are mocked at the module boundary, as dock-gpu.test.tsx
 // does; the page's host comes from the real location, so the on-box rule runs for real.
 import React, { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -375,64 +375,13 @@ describe('engine buttons', () => {
     expect(byId('engine-error')!.textContent).toContain('podman said no')
   })
 
-  it('Stop image mode shows only while image mode is on, and is the status line stop', async () => {
-    mount()
-    expect(byId('engine-stop')).toBeNull()
-
+  it('engine card has no stop button', async () => {
+    // The dock owns stop now: the Engine tab keeps Restart and Logs only.
     box.arbiter = envelope({ mode: 'img', pinned: true })
     mount()
-    await click(byId('engine-stop')!)
-    // Pinned: unpin first, then hand the GPU back. No render runs, so no force and no confirm.
-    expect(calls.filter((c) => c[0] === 'pin' || c[0] === 'switchover')).toEqual([
-      ['pin', { pinned: false }],
-      ['switchover', { mode: 'inference' }],
-    ])
-  })
-
-  it('hides Stop image mode while a switch is running', async () => {
-    box.arbiter = envelope({ mode: 'img', switching: true, phase: 'unloading' })
-    mount()
     expect(byId('engine-stop')).toBeNull()
-    // Restart and Logs are still there.
     expect(byId('engine-restart')).not.toBeNull()
     expect(byId('engine-logs')).not.toBeNull()
-
-    box.arbiter = envelope({ mode: 'img', switching: false })
-    mount()
-    expect(byId('engine-stop')).not.toBeNull()
-  })
-
-  it('Stop image mode asks before dropping a running render, then forces', async () => {
-    box.arbiter = envelope({ mode: 'img', phase: 'rendering' })
-    box.status = statusBody({ queue: { running: 1, pending: 0 } })
-    mount()
-    await click(byId('engine-stop')!)
-    expect(calls.some((c) => c[0] === 'switchover')).toBe(false)
-    const confirm = Array.from(document.querySelectorAll('button')).find((b) => b.textContent === 'Stop and cancel render')!
-    expect(confirm).toBeTruthy()
-    await click(confirm)
-    expect(calls.filter((c) => c[0] === 'switchover')).toEqual([['switchover', { mode: 'inference', force: true }]])
-  })
-
-  // The ~3 s hand-off after a switch reads above `rendering` in the arbiter's phase, so the first
-  // seconds of a hal0 render have phase `handoff` and an empty ComfyUI queue: a /v1 job is open.
-  it('Stop image mode asks during the hand-off of a hal0 render, which has a /v1 job open', async () => {
-    box.arbiter = envelope({ mode: 'img', phase: 'handoff', handoff_until: Date.now() / 1000 + 3, image_jobs: 1 })
-    mount()
-    await click(byId('engine-stop')!)
-    expect(calls.some((c) => c[0] === 'switchover')).toBe(false)
-    const confirm = Array.from(document.querySelectorAll('button')).find((b) => b.textContent === 'Stop and cancel render')!
-    expect(confirm).toBeTruthy()
-    await click(confirm)
-    expect(calls.filter((c) => c[0] === 'switchover')).toEqual([['switchover', { mode: 'inference', force: true }]])
-  })
-
-  it('Stop image mode does not ask during a plain hand-off', async () => {
-    box.arbiter = envelope({ mode: 'img', phase: 'handoff', handoff_until: Date.now() / 1000 + 3, image_jobs: 0 })
-    mount()
-    await click(byId('engine-stop')!)
-    expect(document.querySelector('.modal-shell')).toBeNull()
-    expect(calls.filter((c) => c[0] === 'switchover')).toEqual([['switchover', { mode: 'inference' }]])
   })
 })
 
@@ -645,27 +594,5 @@ describe('queue card', () => {
     expect(text('queue-empty')).toBe(
       'Nothing queued. Renders from Generate, Open WebUI, the API and the editor all show here.',
     )
-  })
-})
-
-// ── the GPU device card ──────────────────────────────────────────────────────
-
-describe('GPU device card', () => {
-  it('reads temperature and clock, and utilisation only while rendering', () => {
-    mount()
-    expect(text('device-temp')).toContain('61.5')
-    expect(text('device-clock')).toContain('2.7')
-    expect(byId('device-util')).toBeNull()
-
-    box.status = statusBody({ util: 97, queue: { running: 1, pending: 0 } })
-    mount()
-    expect(text('device-util')).toContain('97')
-  })
-
-  it('shows a dash for a reading the box could not take, never a zero', () => {
-    box.status = statusBody({ temp: null, clock: null })
-    mount()
-    expect(text('device-temp')).toContain('—')
-    expect(text('device-clock')).toContain('—')
   })
 })

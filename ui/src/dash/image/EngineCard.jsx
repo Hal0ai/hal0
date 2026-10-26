@@ -1,10 +1,9 @@
 // The Engine tab's engine card: what the ComfyUI engine is doing, where it runs and listens (the
 // LAN by default, or the box's loopback under [network].comfyui_listen = "loopback"), the
-
-// state of its GPU gate, and the buttons that act on it (Restart engine, Logs, Stop image mode).
+// state of its GPU gate, and the buttons that act on it (Restart engine, Logs).
 //
-// Restart and Stop are the status line's own actions (useStatusLineActions): the calls, the
-// unpin-first order and the confirm before a running render is dropped live there once.
+// Restart is the status line's own action (useStatusLineActions). Stopping image mode and the
+// confirm before a running render is dropped live in the status dock.
 import { useEffect, useRef, useState } from 'react'
 import { useComfyuiLogs } from '@/api/hooks/useComfyui'
 import { Modal } from '@/dash/primitives.jsx'
@@ -18,8 +17,6 @@ import {
   engineNotice,
   gateRow,
 } from './engine-pure'
-import { ForceStopConfirm } from '../dock/gpu-parts.jsx'
-import { actionFacts } from './status-line-pure'
 import { useStatusLineActions } from './useStatusLineActions'
 
 // Lines in the Logs modal, and in the notice under an engine that does not answer.
@@ -27,7 +24,7 @@ const LOG_TAIL = 200
 const NOTICE_LINES = 3
 const NOTICE_REFRESH_MS = 5_000
 
-const PILL = {
+export const PILL = {
   running: 'running',
   generating: 'generating',
   starting: 'starting…',
@@ -159,7 +156,6 @@ export function EngineCard({ status, env, visible = true }) {
 
   const arbiter = env?.arbiter ?? null
   const actions = useStatusLineActions({ resetKey: `${status?.engine ?? ''}|${arbiter?.mode ?? ''}` })
-  const ctx = actionFacts(env, status)
   const busy = actions.pending != null
 
   const notice = engineNotice(status)
@@ -191,18 +187,6 @@ export function EngineCard({ status, env, visible = true }) {
           <button type="button" className="btn ghost sm" data-testid="engine-logs" onClick={() => setLogsOpen(true)}>
             Logs
           </button>
-          {/* Not mid-switch: the switch holds the arbiter's lock, and a stop sent now is refused. */}
-          {arbiter?.mode === 'img' && !arbiter.switching && (
-            <button
-              type="button"
-              className="btn sm"
-              data-testid="engine-stop"
-              disabled={busy}
-              onClick={() => void actions.run('stop', ctx)}
-            >
-              Stop image mode
-            </button>
-          )}
         </div>
       </header>
 
@@ -279,7 +263,6 @@ export function EngineCard({ status, env, visible = true }) {
       </div>
 
       <LogsModal open={logsOpen} onClose={() => setLogsOpen(false)} container={status?.container?.name} />
-      <ForceStopConfirm confirm={actions.confirm} />
     </section>
   )
 }

@@ -9,20 +9,11 @@
 // It draws with the plain dashboard tokens, not the `--comfy*` accent.
 import { useState } from 'react'
 import { LABEL, RenderRun, Steps } from './gpu-parts.jsx'
-import { LogsModal } from '@/dash/image/EngineCard.jsx'
+import { LogsModal, PILL } from '@/dash/image/EngineCard.jsx'
 import { gateRow, queueSummary } from '@/dash/image/engine-pure'
 import { costLine } from '@/dash/image/status-line-pure'
 import { useGenerateState } from '@/dash/image/generate-store'
 import { slotIndicatorFromPhase } from '@/dash/slot-status.js'
-
-// The engine pill's words, as the Engine tab's card says them.
-const ENGINE_WORD = {
-  running: 'running',
-  generating: 'generating',
-  starting: 'starting…',
-  stopped: 'stopped',
-  error: 'error',
-}
 
 const fmtGb = (gb) => String(Number(gb.toFixed(1)))
 
@@ -86,7 +77,7 @@ export function GpuPane({ gpu, actions }) {
     ['phase', arbiter?.phase ?? '—'],
     [
       'engine',
-      status ? `${ENGINE_WORD[status.engine] ?? status.engine ?? '—'}${gate ? ` · gate ${gate.version_seen ?? gate.state}` : ''}` : '—',
+      status ? `${PILL[status.engine] ?? status.engine ?? '—'}${gate ? ` · gate ${gate.version_seen ?? gate.state}` : ''}` : '—',
       gateTone,
       gateInfo?.hint,
     ],
