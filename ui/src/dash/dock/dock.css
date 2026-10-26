@@ -1,0 +1,3 @@
+/* hal0 dashboard — dock layout. The footer's own styles (.footer, .foot-*)
+   stay in dashboard.css; rules here are the dock's additions. */
+.dock-row { display: flex; align-items: stretch; }

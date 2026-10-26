@@ -30,6 +30,7 @@ import { captureUiException } from '@/sentry'
 // Benchmarks page (#benchmarks): a real ES module, imported directly rather
 // than read off a `window.BenchmarksView` global.
 import Benchmarks from './Benchmarks'
+import { Dock } from './dock/Dock.jsx'
 import { isImageGenRoute, slotsSub } from './slots-route'
 
 const { useState: useStateA, useEffect: useEffectA } = React;
@@ -359,7 +360,7 @@ function App() {
           <ViewErrorBoundary key={route}>{renderView()}</ViewErrorBoundary>
         </div>
         {/*
-          Phase 3 of #322: Footer is self-driven. The update chip reads
+          Phase 3 of #322: the dock (was Footer) is self-driven. The update chip reads
           `useUpdateState()` directly (no more hardcoded "v0.2.2 available"),
           and the journal pane streams /api/journal/stream. The legacy
           `updateAvailable` prop linkage to the BannerStack dismiss state
@@ -367,7 +368,9 @@ function App() {
           dismiss memory and the chip is allowed to keep nagging until
           a new release is installed.
         */}
-        <Footer
+        <Dock
+          route={route}
+          param={param}
           expanded={footerOpen}
           onToggle={() => setFooterOpen(o => !o)}
         />

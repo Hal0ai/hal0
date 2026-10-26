@@ -54,6 +54,7 @@ import './dash/memory-overhaul.css'
 // the memory-overhaul.css shell.
 import './dash/memory-v2.css'
 import './dash/activity-log.css'
+import './dash/dock/dock.css'
 import './dash/overhaul.css'
 import './dash/redesign.css'
 
