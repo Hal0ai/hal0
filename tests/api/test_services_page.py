@@ -16,6 +16,7 @@ Covers the registry-driven routes in ``hal0.api.routes.services`` plus the
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import subprocess
 from unittest.mock import AsyncMock, patch
@@ -214,6 +215,32 @@ def test_openwebui_wired_degrades_to_none_on_resolver_failure(svc_client: TestCl
     assert r.status_code == 200, r.text
     by_id = _services_by_id(r.json())
     assert by_id["openwebui"]["wired"] is None
+
+
+def test_openwebui_wired_resolves_off_the_event_loop(svc_client: TestClient) -> None:
+    """The classifier may read checkpoint headers from disk (#3041), so the
+    route must call it in a worker thread, never on the event loop."""
+    on_loop: list[bool] = []
+
+    def _classify(**_: object) -> dict[str, object]:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            on_loop.append(False)
+        else:
+            on_loop.append(True)
+        return {"chat": True, "agents": []}
+
+    with contextlib.ExitStack() as stack:
+        for p in _stub_all_down():
+            stack.enter_context(p)
+        stack.enter_context(
+            patch("hal0.openwebui.wiring.openwebui_wiring_status", side_effect=_classify)
+        )
+        r = svc_client.get("/api/services")
+
+    assert r.status_code == 200, r.text
+    assert on_loop == [False]
 
 
 # ── 2. registry invariants ────────────────────────────────────────────────────
