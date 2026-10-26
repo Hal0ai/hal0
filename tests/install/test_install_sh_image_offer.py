@@ -203,7 +203,7 @@ def _run_block(
 
 def _installing(*ids: str) -> str:
     """The line the stub logs for `python -m hal0.install.image_models <ids>` with the token."""
-    return f"installing -m hal0.install.image_models {' '.join(ids)} with HF_TOKEN=hf_secret"
+    return f"installing -I -m hal0.install.image_models {' '.join(ids)} with HF_TOKEN=hf_secret"
 
 
 def test_headless_without_the_variable_downloads_nothing(tmp_path: Path, image_block: str) -> None:

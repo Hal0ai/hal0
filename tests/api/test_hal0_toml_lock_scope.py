@@ -423,7 +423,7 @@ def _installer_writer_source() -> str:
     """
     install_sh = Path(__file__).resolve().parents[2] / "installer" / "install.sh"
     match = re.search(
-        r"python3 - \"\$\{HAL0_TOML\}\" \"\$\{MODELS_DIR\}\" <<'PYEOF'\n(.*?)\nPYEOF",
+        r"python3 -I - \"\$\{HAL0_TOML\}\" \"\$\{MODELS_DIR\}\" <<'PYEOF'\n(.*?)\nPYEOF",
         install_sh.read_text(encoding="utf-8"),
         re.S,
     )
@@ -470,7 +470,7 @@ def test_installer_shell_writer_replaces_hal0_toml_atomically(tmp_path: Path) ->
     install_sh = Path(__file__).resolve().parents[2] / "installer" / "install.sh"
     text = install_sh.read_text(encoding="utf-8")
     match = re.search(
-        r"python3 - \"\$\{HAL0_TOML\}\" \"\$\{MODELS_DIR\}\" <<'PYEOF'\n(.*?)\nPYEOF",
+        r"python3 -I - \"\$\{HAL0_TOML\}\" \"\$\{MODELS_DIR\}\" <<'PYEOF'\n(.*?)\nPYEOF",
         text,
         re.S,
     )
@@ -510,7 +510,7 @@ def test_installer_shell_writer_seeds_a_config_without_a_models_table(tmp_path: 
     """
     install_sh = Path(__file__).resolve().parents[2] / "installer" / "install.sh"
     match = re.search(
-        r"python3 - \"\$\{HAL0_TOML\}\" \"\$\{MODELS_DIR\}\" <<'PYEOF'\n(.*?)\nPYEOF",
+        r"python3 -I - \"\$\{HAL0_TOML\}\" \"\$\{MODELS_DIR\}\" <<'PYEOF'\n(.*?)\nPYEOF",
         install_sh.read_text(encoding="utf-8"),
         re.S,
     )
@@ -728,7 +728,7 @@ def test_installer_lock_open_sets_mode_explicitly() -> None:
     """
     install_sh = Path(__file__).resolve().parents[2] / "installer" / "install.sh"
     match = re.search(
-        r"python3 - \"\$\{HAL0_TOML\}\" \"\$\{MODELS_DIR\}\" <<'PYEOF'\n(.*?)\nPYEOF",
+        r"python3 -I - \"\$\{HAL0_TOML\}\" \"\$\{MODELS_DIR\}\" <<'PYEOF'\n(.*?)\nPYEOF",
         install_sh.read_text(encoding="utf-8"),
         re.S,
     )

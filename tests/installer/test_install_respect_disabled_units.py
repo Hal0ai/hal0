@@ -119,11 +119,11 @@ exit 0
 # release path.
 HAL0_PYTHON = r"""#!/bin/bash
 echo "python $*" >> "$CALLS"
-if [[ "$*" == "-m hal0.agents.hermes_gateway_regen state" ]]; then
+if [[ "$*" == "-I -m hal0.agents.hermes_gateway_regen state" ]]; then
     echo "${EFFECTIVE_GATEWAY_STATE:-not-found 0}"
     exit 0
 fi
-if [[ "$*" == "-m hal0.agents.hermes_gateway_regen install" ]]; then
+if [[ "$*" == "-I -m hal0.agents.hermes_gateway_regen install" ]]; then
     echo "[Unit]" > "$UNIT_DIR/hermes-gateway.service"
     systemctl daemon-reload
     exit "${GATEWAY_INSTALL_RC:-0}"
@@ -319,7 +319,7 @@ def test_gateway_disabled_template_install_never_starts_it(tmp_path: Path) -> No
     (box.unit_dir / "hermes-gateway.service").write_text("[Unit]\n")
     res = box.run(HERMES_BLOCK)
     assert res.returncode == 0, res.stderr
-    assert "python -m hal0.agents.hermes_gateway_regen install" in box.log()
+    assert "python -I -m hal0.agents.hermes_gateway_regen install" in box.log()
     assert not [c for c in box.log() if c.startswith(("start", "enable hermes-gateway"))]
     assert box.state_of("hermes-gateway.service") == "disabled"
     assert "hermes-gateway.service is disabled; left as is" in res.stdout
@@ -373,9 +373,9 @@ def test_template_install_is_followed_by_the_normaliser_before_enable(tmp_path: 
     assert res.returncode == 0, res.stderr
     log = box.log()
     gen = next(
-        i for i, c in enumerate(log) if c == "python -m hal0.agents.hermes_gateway_regen install"
+        i for i, c in enumerate(log) if c == "python -I -m hal0.agents.hermes_gateway_regen install"
     )
-    norm = next(i for i, c in enumerate(log) if c == "python -m hal0.agents.hermes_gateway_unit")
+    norm = next(i for i, c in enumerate(log) if c == "python -I -m hal0.agents.hermes_gateway_unit")
     enable = next(i for i, c in enumerate(log) if c == "enable --now hermes-gateway.service")
     assert gen < norm < enable
     assert box.state_of("hermes-gateway.service") == "enabled"
@@ -432,7 +432,7 @@ def test_a_disabled_suffixed_unit_keeps_a_rerun_from_turning_the_gateway_on(
     box.provisioned()
     res = box.run(HERMES_BLOCK)
     assert res.returncode == 0, res.stderr
-    assert "python -m hal0.agents.hermes_gateway_regen state" in box.log()
+    assert "python -I -m hal0.agents.hermes_gateway_regen state" in box.log()
     assert "enable --now hermes-gateway.service" not in box.log()
     assert "hermes-gateway.service is disabled; left as is" in res.stdout
 
@@ -460,7 +460,7 @@ def test_an_interrupted_move_reads_the_suffixed_units_state(tmp_path: Path, monk
     (box.unit_dir / "hermes-gateway.service").write_text("[Unit]\n")
     res = box.run(HERMES_BLOCK)
     assert res.returncode == 0, res.stderr
-    assert "python -m hal0.agents.hermes_gateway_regen state" in box.log()
+    assert "python -I -m hal0.agents.hermes_gateway_regen state" in box.log()
     assert "disable --now hermes-gateway.service" not in box.log()
     assert "enable --now hermes-gateway.service" in box.log()
 
@@ -473,7 +473,7 @@ def test_an_enabled_canonical_unit_is_not_second_guessed(tmp_path: Path, monkeyp
     (box.unit_dir / "hermes-gateway.service").write_text("[Unit]\n")
     res = box.run(HERMES_BLOCK)
     assert res.returncode == 0, res.stderr
-    assert "python -m hal0.agents.hermes_gateway_regen state" not in box.log()
+    assert "python -I -m hal0.agents.hermes_gateway_regen state" not in box.log()
     assert box.state_of("hermes-gateway.service") == "enabled"
 
 
@@ -486,8 +486,8 @@ def test_a_masked_gateway_still_moves_a_suffixed_unit_off(tmp_path: Path) -> Non
     link = box.mask("hermes-gateway.service")
     res = box.run(HERMES_BLOCK)
     assert res.returncode == 0, res.stderr
-    assert "python -m hal0.agents.hermes_gateway_regen migrate" in box.log()
-    assert "python -m hal0.agents.hermes_gateway_regen install" not in box.log()
+    assert "python -I -m hal0.agents.hermes_gateway_regen migrate" in box.log()
+    assert "python -I -m hal0.agents.hermes_gateway_regen install" not in box.log()
     assert link.is_symlink() and os.readlink(link) == "/dev/null"
 
 
@@ -532,8 +532,8 @@ def test_a_runtime_mask_runs_the_move_and_writes_no_unit(tmp_path: Path) -> None
     res = box.run(HERMES_BLOCK)
     assert res.returncode == 0, res.stderr
     log = box.log()
-    assert "python -m hal0.agents.hermes_gateway_regen migrate" in log
-    assert "python -m hal0.agents.hermes_gateway_regen install" not in log
+    assert "python -I -m hal0.agents.hermes_gateway_regen migrate" in log
+    assert "python -I -m hal0.agents.hermes_gateway_regen install" not in log
     assert not (box.unit_dir / "hermes-gateway.service").exists()
     assert not [
         c for c in log if "hermes-gateway" in c and c.startswith(("enable", "disable", "start"))

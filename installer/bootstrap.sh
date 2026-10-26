@@ -390,7 +390,7 @@ resolve_release_manifest_url() {
 }
 
 release_manifest_bundle_url() {
-    python3 - "$1" <<'PY'
+    python3 -I - "$1" <<'PY'
 import sys
 from urllib.parse import urlsplit, urlunsplit
 

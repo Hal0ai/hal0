@@ -33,6 +33,7 @@ def _fake_python(path: Path, version: str) -> None:
     major, minor = version.split(".")
     path.write_text(
         "#!/bin/bash\n"
+        '[[ "$1" == "-I" ]] && shift\n'
         'if [[ "$1" == "-c" ]]; then\n'
         '  case "$2" in\n'
         f"    *'sys.version_info[:2]'*) echo '{major}.{minor}' ;;\n"

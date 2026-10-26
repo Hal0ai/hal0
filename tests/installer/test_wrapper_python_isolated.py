@@ -1,10 +1,16 @@
-"""#3007 — root-run wrappers must start Python in isolated mode.
+"""#3007/#3010 — root-run installer scripts must start Python in isolated mode.
 
 sudo keeps the caller's working directory. ``python -c`` and ``python -``
 put that directory first on ``sys.path``, so a root interpreter started from
 a wrapper without ``-I`` imports whatever module the caller planted there.
 Every wrapper under ``installer/wrappers/`` that the ``hal0`` account can run
 through sudo is in scope, so the scan covers the whole directory.
+
+#3010 extends the same rule to the scripts an operator runs as root from
+whatever directory they happen to be in: ``installer/*.sh`` and
+``installer/lib/*.sh``. ``-I`` implies ``-E`` and ``-s``, so none of those
+Python snippets may rely on ``PYTHONPATH``/``PYTHONHOME`` or the user site
+(they take everything through argv and stdin).
 """
 
 from __future__ import annotations
@@ -17,7 +23,8 @@ from pathlib import Path
 
 import pytest
 
-WRAPPERS = Path(__file__).resolve().parents[2] / "installer" / "wrappers"
+INSTALLER = Path(__file__).resolve().parents[2] / "installer"
+WRAPPERS = INSTALLER / "wrappers"
 BENCHCTL = WRAPPERS / "hal0-benchctl"
 
 # An interpreter in command position: a bare or path-qualified python /
@@ -25,15 +32,19 @@ BENCHCTL = WRAPPERS / "hal0-benchctl"
 _INTERP = re.compile(
     r"""(?<![\w./-])
         (?P<interp>
-            (?:/[\w./-]*/)?python(?:3(?:\.\d+)?)?
-          | "?\$\{?(?:py|PY|python|PYTHON)\}?"?
+            "?(?:\$\{?\w+\}?)?(?:/[\w./-]*/)?python(?:3(?:\.\d+)?)?"?
+          | "?\$\{[0-9]\}"?
+          | "?\$\{?(?:\w*py|\w*PY|\w*python|\w*PYTHON|def)\}?"?
         )
-        \s+(?P<arg>\S+)
+        (?=\s+(?P<arg>\S+))
     """,
     re.VERBOSE,
 )
-# What may precede a command: line start, a separator, `$(`, or a keyword.
-_COMMAND_POS = re.compile(r"(?:^|[;&|(]|\$\(|\b(?:exec|then|do|else|if|!)\s)\s*$")
+# What may precede a command: line start, a separator, `$(`, a keyword, or
+# `NAME=value` environment assignments.
+_COMMAND_POS = re.compile(
+    r"(?:^|[;&|({]|\$\(|\b(?:exec|then|do|else|if)\s|!\s)\s*(?:\w+=(?:\"\$\{\w+\}\"|\"[^\"$]*\"|[^\s\"'$(\\]*)\s+)*$"
+)
 
 
 def _unisolated(text: str) -> list[tuple[int, str]]:
@@ -74,9 +85,19 @@ def test_scanner_flags_unisolated_starts() -> None:
             '[[ -n "$py" && -x "$py" ]] || continue',
             "if out=$(python3 -c 'x'); then :; fi",
             "  for py in /usr/lib/hal0/venv/bin/python3 /usr/bin/python3; do",
+            '"${VENV_DIR}/bin/python" -m hal0.install.x',
+            'HF_TOKEN="${T}" "${VENV_DIR}/bin/python" -m hal0.install.x',
+            'ver="$("${hs_py}" -c "x")"',
+            '"${VENV_DIR}/bin/python" -I -m hal0.install.x',
+            'if "${PY}" - "$a" <<PY; then',
+            'printf x | "${PY}" -c "x"',
+            'log "using python for the thing"',
+            'if ! "${VENV_DIR}/bin/python" -m hal0.agents.x; then',
+            'if ! "${VENV_DIR}/bin/python" -I -m hal0.agents.x; then',
+            '_py_minor() { "${1}" -c "x"; }',
         ]
     )
-    assert [n for n, _ in _unisolated(sample)] == [1, 2, 3, 4, 9]
+    assert [n for n, _ in _unisolated(sample)] == [1, 2, 3, 4, 9, 11, 12, 13, 15, 16, 18, 20]
 
 
 def test_every_wrapper_starts_python_isolated() -> None:
@@ -92,6 +113,20 @@ def test_every_wrapper_starts_python_isolated() -> None:
     # Guard against a scanner that silently matches nothing: agentenv (2),
     # benchctl (2) and hal0-update (5+) all start python today.
     assert total >= 9
+
+
+def test_installer_scripts_start_python_isolated() -> None:
+    """#3010: the root-run installer scripts, not just the sudo wrappers."""
+    paths = sorted([*INSTALLER.glob("*.sh"), *(INSTALLER / "lib").glob("*.sh")])
+    assert INSTALLER / "install.sh" in paths
+    offenders = []
+    total = 0
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        total += _starts(text)
+        offenders += [f"{path.relative_to(INSTALLER)}:{n}: {line}" for n, line in _unisolated(text)]
+    assert not offenders, "installer starts python without -I:\n" + "\n".join(offenders)
+    assert total >= 30  # guard against a scanner that matches nothing
 
 
 @pytest.mark.parametrize("name", ["hal0-agentenv", "hal0-benchctl", "hal0-update"])
