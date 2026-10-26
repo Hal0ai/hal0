@@ -1,8 +1,9 @@
 // The copyable SSH command that forwards the ComfyUI editor's port to the viewer's machine, for a
 // page that is not on the box (editor-reach.ts has the rule and the command).
 //
-// ComfyUI listens on the box's loopback only. One block for every surface that has to say so: the
-// Engine tab's editor card and the Services page.
+// Shown while ComfyUI is fenced to the box's loopback ([network].comfyui_listen = "loopback"). One
+// block for every surface that has to say so: the Engine tab's editor card and the Services page.
+
 import './image-engine.css'
 import { copyTextToClipboard } from '@/lib/clipboard'
 import { EDITOR_PORT } from './editor-reach'

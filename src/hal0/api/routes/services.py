@@ -48,7 +48,13 @@ from hal0.api.routes.services_health import (
 from hal0.errors import BadRequest, NotFound
 from hal0.services import mdns
 from hal0.services import systemd as svc_systemd
-from hal0.services.registry import SERVICES, ServiceDef, service_by_id
+from hal0.services.registry import (
+    SERVICES,
+    ServiceDef,
+    is_mdns_capable,
+    mdns_services,
+    service_by_id,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -71,11 +77,13 @@ def _browser_url(request: Request, sdef: ServiceDef) -> str | None:
     Public-URL env wins; otherwise a service with a ``port`` falls back to
     ``http://<request-host>:<port>``. Loopback-only services (hermes,
     hindsight) have no ``port`` and no fallback — link only when the env is
-    set. ComfyUI is loopback-only too but keeps ``port=8188``: its derived
-    link answers only on the box itself (or through an SSH tunnel), so the
-    dashboard decides whether to open it (``ui/src/dash/image/editor-reach.ts``)
-    and ``GET /api/config/urls`` reports ``comfyui_public`` for a declared URL.
+    set. ComfyUI's ``port=8188`` answers on the LAN by default and, under
+    ``[network].comfyui_listen = "loopback"``, on the box itself only (or
+    through an SSH tunnel); the dashboard decides whether to open the derived
+    link (``ui/src/dash/image/editor-reach.ts``) from ``comfyui_lan`` and
+    ``comfyui_public`` in ``GET /api/config/urls``.
     """
+
     public = _public_url(sdef)
     if public:
         return public
@@ -91,12 +99,14 @@ def _browser_url(request: Request, sdef: ServiceDef) -> str | None:
 def _mdns_url(sdef: ServiceDef, hostname: str, advertised: list[str]) -> str | None:
     """``http://<host>.local:<port>`` when this service is being advertised.
 
-    Only for a service that is mDNS-capable: ``advertised`` lists the avahi files on disk, so a
-    leftover announcement of a service hal0 no longer announces (ComfyUI's, from an earlier
-    release) must not hand the page a URL that nothing answers.
+    Only for a service that is mDNS-capable right now: ``advertised`` lists the avahi files on
+    disk, so a leftover announcement of a service that no longer binds the LAN (ComfyUI's, after
+    ``[network].comfyui_listen`` was set to ``loopback``) must not hand the page a URL that nothing
+    answers.
     """
-    if not sdef.mdns or sdef.port is None or sdef.id not in advertised:
+    if not is_mdns_capable(sdef) or sdef.port is None or sdef.id not in advertised:
         return None
+
     return f"http://{hostname}:{sdef.port}"
 
 
@@ -211,7 +221,7 @@ async def list_services(request: Request) -> dict[str, Any]:
                 "mdns_url": _mdns_url(sdef, hostname, advertised),
                 "loopback_port": sdef.loopback_port,
                 "actions": list(sdef.actions),
-                "mdns_capable": sdef.mdns,
+                "mdns_capable": is_mdns_capable(sdef),
                 "hints": list(sdef.hints),
                 "wired": await _openwebui_wired(request) if sdef.id == "openwebui" else None,
             }
@@ -305,9 +315,8 @@ async def service_action(
 async def mdns_status() -> dict[str, Any]:
     """avahi/mDNS discovery status + which addon services we advertise."""
     disco = await mdns.status()
-    disco["advertisable"] = [
-        {"id": s.id, "name": s.name, "port": s.port} for s in SERVICES if s.mdns
-    ]
+    disco["advertisable"] = [{"id": s.id, "name": s.name, "port": s.port} for s in mdns_services()]
+
     return disco
 
 
@@ -334,7 +343,8 @@ async def mdns_apply(request: Request) -> dict[str, Any]:
         target="avahi",
     ) as rec:
         if advertise:
-            entries = [(s.id, s.name, s.port) for s in SERVICES if s.mdns and s.port]
+            entries = [(s.id, s.name, s.port) for s in mdns_services() if s.port]
+
             result = mdns.advertise(entries)
         else:
             result = mdns.withdraw()

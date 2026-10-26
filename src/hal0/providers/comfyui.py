@@ -51,6 +51,7 @@ from websockets.asyncio.client import connect as _websocket_connect
 from hal0.comfyui import gate_credential, progress
 from hal0.comfyui import paths as comfyui_paths
 from hal0.comfyui.gate_reason import SOCKET_ID_MAX, SOCKET_LOG_MAX, clean_reason
+from hal0.comfyui.reach import editor_on_lan
 from hal0.config import paths as cfg_paths
 from hal0.errors import Hal0Error
 from hal0.http_client import async_client
@@ -830,10 +831,14 @@ class ComfyUIProvider(Provider):
             shmsize when running in the host IPC Namespace"), unlike docker,
             which silently ignored it (live CT105, Phase D).
           * host networking — the LXC is the host. The command below says
-            ``--listen 0.0.0.0``, but the container provider flips every
-            host-net bind to loopback (``_loopback_fence_command``), so the web
-            UI answers on the box's 127.0.0.1:8188 only: on the box itself or
-            through an SSH tunnel, not on the LAN.
+            ``--listen 0.0.0.0``. With ``[network].comfyui_listen = "lan"``
+            (the default) the plan carries ``lan_bind=True`` and the renderer
+            leaves that bind alone, so the web UI answers on the LAN at
+            ``<host>:8188`` (ADR-0041). With ``"loopback"`` the container
+            provider flips it like every other host-net slot
+            (``_loopback_fence_command``) and the UI answers on the box's
+            127.0.0.1:8188 only: on the box itself or through an SSH tunnel.
+
           * devices from :func:`resolve_gpu_device_paths` — explicit nodes,
             podman doesn't recurse /dev/dri (same fix class as #674).
         """
@@ -886,6 +891,8 @@ class ComfyUIProvider(Provider):
             group_add=group_add,
             port=port,
             network_mode="host",
+            # The editor's reach, from [network].comfyui_listen (see above).
+            lan_bind=editor_on_lan(),
             # Host /dev/shm for Wan/Hunyuan video (see the docstring above).
             ipc="host",
         )

@@ -1,13 +1,14 @@
 // The ComfyUI editor link on the Services surfaces (the Services page, the Services board card and
-// the Overview widget), under the one rule the Image Gen pane uses: ComfyUI listens on the box's
-// loopback only, so the link opens from a page on the box (or a public URL the operator declared)
-// and from nowhere else. Off the box the button is disabled and the page says why and gives the SSH
-// command. `useEditorAccess` (editor-reach.ts has the rule) answers all of it; this file only draws
-// it, so no surface keeps a rule of its own.
+// the Overview widget), under the one rule the Image Gen pane uses: the link opens from any page
+// while ComfyUI binds the LAN (the default), and otherwise from a page on the box or a public URL
+// the operator declared, and from nowhere else. Where it cannot open, the button is disabled and
+// the page says why and gives the SSH command. `useEditorAccess` (editor-reach.ts has the rule)
+// answers all of it; this file only draws it, so no surface keeps a rule of its own.
 //
 // The link is `useEditorAccess().url`, the one `GET /api/config/urls` derives for the browser. A
-// service row's own `url` is the API's view of ComfyUI (its loopback address, or the host the
-// request named) and says nothing about whether this page can open it.
+// service row's own `url` is the API's view of ComfyUI (the host the request named) and says
+// nothing about whether this page can open it.
+
 import './image-engine.css'
 import { OFF_BOX_NOTE } from './editor-reach'
 import { TunnelCommand } from './TunnelCommand'

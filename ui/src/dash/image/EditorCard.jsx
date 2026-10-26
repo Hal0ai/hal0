@@ -1,9 +1,11 @@
 // The Engine tab's editor card: the ComfyUI editor, and the workflows it has for the installed
 // models (plus the operator's own files).
 //
-// ComfyUI listens on the box's loopback only, so its editor opens from a page on the box and, from
-// anywhere else, through an SSH tunnel (editor-reach.ts has the rule). Off the box the button and
-// the chips are disabled, and the card says so and gives the command. A chip is not a deep link:
+// ComfyUI binds the LAN by default, so its editor opens from any page; fenced to the box's loopback
+// ([network].comfyui_listen = "loopback") it opens from a page on the box and, from anywhere else,
+// through an SSH tunnel (editor-reach.ts has the rule). Where it cannot open, the button and the
+// chips are disabled, and the card says so and gives the command. A chip is not a deep link:
+
 // ComfyUI does not open a workflow from a link, so every chip opens the editor and the workflow is
 // picked in its Workflows sidebar.
 import { useComfyuiModels, useComfyuiWorkflows } from '@/api/hooks/useComfyui'

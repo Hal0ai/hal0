@@ -137,7 +137,11 @@ def test_rerun_without_env_keeps_public_url_origin(
     etc = box / "etc" / "hal0"
     first = _run_installer_network_step(box, {"HAL0_PUBLIC_URL": PROXY_URL + "/"})
     assert "persisted HAL0_PUBLIC_URL" in first.stdout
-    assert _network(etc / "hal0.toml") == {"public_url": PROXY_URL, "extra_origins": []}
+    assert _network(etc / "hal0.toml") == {
+        "public_url": PROXY_URL,
+        "extra_origins": [],
+        "comfyui_listen": "lan",
+    }
     assert (etc / "hal0.toml").stat().st_mode & 0o777 == 0o644  # mode kept across the write
     # Persisted, so it is not copied into the block: hal0-api adds it at runtime.
     assert _allowed_origins(etc / "api.env").count(PROXY_ORIGIN) == 0
@@ -154,7 +158,11 @@ def test_rerun_without_env_keeps_public_url_origin(
     env_list = _allowed_origins(etc / "api.env")
     assert env_list.count("http://192.0.2.20:8080") == 1
     assert "HF_TOKEN=keep-me" in (etc / "api.env").read_text(encoding="utf-8")
-    assert _network(etc / "hal0.toml") == {"public_url": PROXY_URL, "extra_origins": [EXTRA]}
+    assert _network(etc / "hal0.toml") == {
+        "public_url": PROXY_URL,
+        "extra_origins": [EXTRA],
+        "comfyui_listen": "lan",
+    }
     origins = _runtime_origins(box, env_list, monkeypatch)
     assert origins.count(PROXY_ORIGIN) == 1
     assert origins.count(EXTRA) == 1

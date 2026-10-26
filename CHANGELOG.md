@@ -32,6 +32,8 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Breaking
 
+- **ComfyUI's editor is on the LAN again, and announced over mDNS.** `http://<host>:8188` opens ComfyUI's web UI from any machine on the network, and the Discovery (mDNS) card on the Services page announces it as `http://<host>.local:8188` beside Open WebUI, the way hal0 did before the host-net loopback fence. The new `comfyui_listen` key of `[network]` in `hal0.toml` is the switch: `"lan"` (the default) or `"loopback"`, which fences `:8188` to the box like every other slot and keeps the SSH-tunnel and `HAL0_COMFYUI_PUBLIC_URL` paths. ComfyUI has no sign-in of its own, so `"lan"` is for a network you trust. The dashboard follows the live mode: `GET /api/config/urls` adds `comfyui_lan`, the editor button opens from anywhere while it is true, and the Engine tab's Network row reads `listens on the LAN` or `listens on loopback`. Every other slot still renders a loopback bind under host networking ([ADR-0041](docs/adr/0041-the-comfyui-editor-answers-on-the-lan.md), #3049).
+
 - **Upgrades start at 1.5.0.** `manifest.json` declares `upgrade_from = ">=1.5.0"`, so `hal0 update` on a 1.4.x box stops before it downloads anything, with `system.update_upgrade_path_unsupported` naming both versions, and re-running the installer over a 1.4.x install stops before it changes anything. A 1.3.x or 1.4.x box steps through 1.5.0 by running its installer in place, the command the installer prints when it refuses (`curl -fsSL https://hal0.dev/install.sh | sudo env HAL0_RELEASES_URL=https://github.com/hal0ai/hal0/releases/download/v1.5.0/stable.json bash`), then updates again. `hal0 update --target` cannot make that hop: it pins only the version the channel serves now. The upgrade guide's `--target 1.5.0` hop for 1.3.x boxes failed for the same reason once the channel moved past 1.5.0, and is replaced. A 1.5.0 nightly counts as a prerelease of 1.5.0, so it is below the floor too. The floor moves so the profile-centric conversion that 1.4.0 shipped (ADR-0029) can be deleted.
 
 ### Fixed
@@ -55,6 +57,10 @@ applying. Add those subsections to a version's section to surface them; see
 - **Approval cards show which resource a gated call acts on.** The dashboard's approvals modal and Approvals card cut a gated MCP call's arguments off at 120 characters in the agent's own key order, so a long argument placed first could hide the `model_id`, `name` or `slot` the call deletes, unloads or edits. Each approval now carries `target_args`, the arguments that pick the resource; the cards show those first and in full, every other argument on its own row, and the complete argument JSON one click away. (#3052)
 - `hal0-agentenv secret-keys` opens the agent secrets vault through the same no-follow descriptor walk as the vault writers, so the hal0 account can no longer redirect it with a symlink to list the key names of a root-only file. (#3014)
 - The installer now starts every Python helper in isolated mode, so running it as root from a directory a service account can write no longer imports modules planted there. (#3010)
+### Migrations
+
+- **Restart the image engine once for the LAN editor.** A running `img` container keeps the loopback bind it started with, so after this update `http://<host>:8188` is still refused from other machines until you run `hal0 slot restart img` once (or press **Restart engine** on the Engine tab). Then turn the Discovery (mDNS) card on the Services page on, or off and on, if you want `http://<host>.local:8188` announced. To keep the old posture instead, set `comfyui_listen = "loopback"` under `[network]` in `/etc/hal0/hal0.toml` before the restart.
+
 
 ## [1.7.0] — 2026-10-26
 

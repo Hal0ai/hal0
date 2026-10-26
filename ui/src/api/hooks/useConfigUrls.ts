@@ -21,14 +21,19 @@ export interface ConfigUrls {
   openwebui_enabled: boolean
   hermes: string
   hermes_enabled: boolean
-  // ComfyUI's own web UI. Defaults to http://<host>:8188 (the request host and ComfyUI's port;
-  // it listens on loopback, so that answers on the box only); a reverse-proxy deploy sets
-  // HAL0_COMFYUI_PUBLIC_URL to a clean HTTPS hostname so the link isn't blocked as mixed content.
+  // ComfyUI's own web UI. Defaults to http://<host>:8188 (the request host and ComfyUI's port);
+  // a reverse-proxy deploy sets HAL0_COMFYUI_PUBLIC_URL to a clean HTTPS hostname so the link
+  // isn't blocked as mixed content.
   comfyui: string
   // True only when `comfyui` is the URL the operator declared (HAL0_COMFYUI_PUBLIC_URL), which
-  // answers wherever they declared it for. False for the derived http://<host>:8188, which
-  // answers on the box itself only: ComfyUI listens on loopback. Absent from an older hal0.
+  // answers wherever they declared it for. False for the derived http://<host>:8188. Absent from
+  // an older hal0.
   comfyui_public?: boolean
+  // True while ComfyUI binds the LAN ([network].comfyui_listen = "lan", the default), so the
+  // derived http://<host>:8188 answers from other machines too. False under "loopback", where it
+  // answers on the box itself only. Absent from an older hal0 (which was always loopback).
+  comfyui_lan?: boolean
+
 }
 
 export function useConfigUrls() {

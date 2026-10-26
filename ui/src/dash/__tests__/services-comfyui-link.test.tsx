@@ -208,9 +208,22 @@ describe('Services page ComfyUI link', () => {
     expect(host.textContent).not.toContain('http://hal0.lan:8188')
   })
 
+  it('opens the derived link from any page while ComfyUI binds the LAN (ADR-0041)', () => {
+    visit('hal0.lan')
+    box.urls = { comfyui: 'http://hal0.lan:8188', comfyui_public: false, comfyui_lan: true }
+    mount(React.createElement(ServicesView))
+    const open = byId('svcp-open-comfyui') as HTMLButtonElement
+    expect(open.disabled).toBe(false)
+    click(open)
+    expect(opened).toEqual([['http://hal0.lan:8188', '_blank', 'noopener']])
+    expect(byId('svcp-comfyui-offbox')).toBeNull()
+    expect(byId('svcp-comfyui-tunnel')).toBeNull()
+  })
+
   it('opens a public URL the operator declared, from any page', () => {
     visit('hal0.lan')
     box.urls = { comfyui: 'https://comfy.example.test', comfyui_public: true }
+
     mount(React.createElement(ServicesView))
     const open = byId('svcp-open-comfyui') as HTMLButtonElement
     expect(open.disabled).toBe(false)

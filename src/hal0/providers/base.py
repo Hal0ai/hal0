@@ -164,6 +164,15 @@ class RuntimeLaunchPlan:
     network_mode: str = "host"
     """Docker network mode.  "host" is the default for slot containers."""
 
+    lan_bind: bool = False
+    """Keep the templated ``0.0.0.0`` bind under host networking.
+
+    The renderer flips every host-net plan's bind to loopback
+    (:func:`hal0.providers.container._loopback_fence_command`) because a raw
+    slot port has no auth. Only a provider whose port is MEANT for the LAN
+    sets this: ComfyUI's web UI when ``[network].comfyui_listen`` is ``lan``
+    (ADR-0041). Bridge-mode plans never consult it."""
+
     ipc: str = ""
     """IPC namespace mode (``podman run --ipc``), e.g. ``"host"``.  Empty keeps
     podman's private namespace."""

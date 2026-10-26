@@ -381,7 +381,8 @@ def test_mdns_advertise_and_withdraw(svc_client: TestClient, tmp_path, monkeypat
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["ok"] is True
-        assert body["advertised"] == ["openwebui"]
+        # Both LAN-published addons by default: Open WebUI and ComfyUI's editor (ADR-0041).
+        assert sorted(body["advertised"]) == ["comfyui", "openwebui"]
 
         owui = (tmp_path / "hal0-addon-openwebui.service").read_text(encoding="utf-8")
         assert "<port>3001</port>" in owui
@@ -390,8 +391,8 @@ def test_mdns_advertise_and_withdraw(svc_client: TestClient, tmp_path, monkeypat
         status = svc_client.get("/api/services/mdns").json()
         assert status["available"] is True
         assert status["base_advertised"] is True
-        assert status["advertised"] == ["openwebui"]
-        assert {a["id"] for a in status["advertisable"]} == {"openwebui"}
+        assert sorted(status["advertised"]) == ["comfyui", "openwebui"]
+        assert {a["id"] for a in status["advertisable"]} == {"comfyui", "openwebui"}
 
         r = svc_client.post("/api/services/mdns", json={"advertise": False})
         assert r.status_code == 200
@@ -401,67 +402,92 @@ def test_mdns_advertise_and_withdraw(svc_client: TestClient, tmp_path, monkeypat
     assert list(tmp_path.glob("hal0-addon-*.service")) == []
 
 
-def test_comfyui_is_never_advertised_over_mdns(
+def test_comfyui_is_advertised_over_mdns_while_it_binds_the_lan(
     svc_client: TestClient, tmp_path, monkeypatch
 ) -> None:
-    """ComfyUI listens on the box's loopback, so an announcement of ``:8188`` leads nowhere.
+    """``[network].comfyui_listen = "lan"`` (the default): Announce advertises ComfyUI's ``:8188``.
 
-    Another machine that resolves ``<host>.local`` and follows the announced port gets a refused
-    connection. The registry does not mark the service mDNS-capable, so Announce writes no file for
-    it, the discovery card does not list it, and its row carries no ``.local`` URL.
+    ADR-0041. The editor binds the LAN, so another machine that resolves ``<host>.local`` and
+    follows the announced port reaches it. Announce writes the file, the discovery card lists the
+    service, and its row carries the ``.local`` URL like Open WebUI's.
     """
     monkeypatch.setenv("HAL0_AVAHI_SERVICES_DIR", str(tmp_path))
     comfy = service_by_id("comfyui")
     assert comfy is not None
-    assert comfy.mdns is False
+    assert comfy.mdns is True
 
-    with patch(
-        "hal0.services.mdns.systemd.unit_is_active",
-        new_callable=AsyncMock,
-        return_value=True,
+    with (
+        patch("hal0.comfyui.reach.comfyui_listen", return_value="lan"),
+        patch(
+            "hal0.services.mdns.systemd.unit_is_active",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
     ):
         advertised = svc_client.post("/api/services/mdns", json={"advertise": True}).json()
         listing = svc_client.get("/api/services").json()
         status = svc_client.get("/api/services/mdns").json()
 
-    assert "comfyui" not in advertised["advertised"]
-    assert not (tmp_path / "hal0-addon-comfyui.service").exists()
-    assert "comfyui" not in {a["id"] for a in status["advertisable"]}
+    assert set(advertised["advertised"]) == {"comfyui", "openwebui"}
+    comfy_file = (tmp_path / "hal0-addon-comfyui.service").read_text(encoding="utf-8")
+    assert "<port>8188</port>" in comfy_file
+    assert "ComfyUI on %h" in comfy_file
+    assert {a["id"] for a in status["advertisable"]} == {"comfyui", "openwebui"}
     row = next(s for s in listing["services"] if s["id"] == "comfyui")
-    assert row["mdns_capable"] is False
-    assert row["mdns_url"] is None
+    assert row["mdns_capable"] is True
+    assert row["mdns_url"] == f"http://{status['hostname']}:8188"
 
 
-def test_an_earlier_comfyui_announcement_goes_at_the_next_announce_or_withdraw(
+def test_comfyui_is_not_advertised_over_mdns_while_fenced_to_loopback(
     svc_client: TestClient, tmp_path, monkeypatch
 ) -> None:
-    """An earlier hal0 wrote ``hal0-addon-comfyui.service``; toggling the card removes it."""
+    """``[network].comfyui_listen = "loopback"``: an announcement of ``:8188`` would lead nowhere.
+
+    The host-net fence keeps the editor on 127.0.0.1, so Announce writes no file for it, the
+    discovery card does not list it, and its row carries no ``.local`` URL. A file an earlier
+    Announce wrote while it was on the LAN goes at the next Announce or Withdraw.
+    """
     monkeypatch.setenv("HAL0_AVAHI_SERVICES_DIR", str(tmp_path))
     stale = tmp_path / "hal0-addon-comfyui.service"
+    stale.write_text("<port>8188</port>", encoding="utf-8")
 
-    with patch(
-        "hal0.services.mdns.systemd.unit_is_active",
-        new_callable=AsyncMock,
-        return_value=True,
+    with (
+        patch("hal0.comfyui.reach.comfyui_listen", return_value="loopback"),
+        patch(
+            "hal0.services.mdns.systemd.unit_is_active",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
     ):
-        stale.write_text("<port>8188</port>", encoding="utf-8")
-        svc_client.post("/api/services/mdns", json={"advertise": True})
+        advertised = svc_client.post("/api/services/mdns", json={"advertise": True}).json()
         assert not stale.exists()
+        listing = svc_client.get("/api/services").json()
+        status = svc_client.get("/api/services/mdns").json()
 
         stale.write_text("<port>8188</port>", encoding="utf-8")
         svc_client.post("/api/services/mdns", json={"advertise": False})
         assert not stale.exists()
 
+    assert advertised["advertised"] == ["openwebui"]
+    assert {a["id"] for a in status["advertisable"]} == {"openwebui"}
+    row = next(s for s in listing["services"] if s["id"] == "comfyui")
+    assert row["mdns_capable"] is False
+    assert row["mdns_url"] is None
 
-def test_a_leftover_comfyui_announcement_never_reaches_the_row(svc_client: TestClient) -> None:
-    """An advert an earlier hal0 left behind must not give the ComfyUI row a dead ``:8188`` URL.
+
+def test_a_leftover_comfyui_announcement_never_reaches_the_row_while_fenced(
+    svc_client: TestClient, monkeypatch
+) -> None:
+    """An advert left from LAN mode must not give a fenced ComfyUI row a dead ``:8188`` URL.
 
     ``mdns.status()`` lists what is on disk, so a leftover ``hal0-addon-comfyui.service`` shows
-    ``comfyui`` as advertised until the next Announce or Withdraw removes it. The service is not
-    mDNS-capable, so its row has no ``.local`` URL whatever is advertised; the services that are
-    capable keep theirs.
+    ``comfyui`` as advertised until the next Announce or Withdraw removes it. Under ``loopback``
+    the service is not mDNS-capable, so its row has no ``.local`` URL whatever is advertised; the
+    services that are capable keep theirs.
     """
+    monkeypatch.setattr("hal0.comfyui.reach.comfyui_listen", lambda: "loopback")
     stubs = _stub_all_down()
+
     # Replace the "nothing advertised" status the stubs pin with one that lists the leftover.
     stubs[-1] = patch(
         f"{_ROUTE}.mdns.status",
@@ -484,25 +510,53 @@ def test_a_leftover_comfyui_announcement_never_reaches_the_row(svc_client: TestC
     assert by_id["openwebui"]["mdns_url"] == "http://testhost.local:3001"
 
 
-def test_mdns_url_needs_an_mdns_capable_service() -> None:
-    """``_mdns_url`` is None for a service that is not mDNS-capable, advertised or not."""
+def test_mdns_url_needs_an_mdns_capable_service(monkeypatch) -> None:
+    """``_mdns_url`` is None for a service that is not mDNS-capable right now, advertised or not."""
     from hal0.api.routes.services import _mdns_url
 
     comfy = service_by_id("comfyui")
     owui = service_by_id("openwebui")
-    assert comfy is not None and owui is not None
-    assert comfy.port is not None and comfy.mdns is False
+    hermes = service_by_id("hermes")
+    assert comfy is not None and owui is not None and hermes is not None
+    assert comfy.port is not None and comfy.mdns is True
+
+    monkeypatch.setattr("hal0.comfyui.reach.comfyui_listen", lambda: "lan")
+    assert _mdns_url(comfy, "testhost.local", ["comfyui"]) == "http://testhost.local:8188"
+    assert _mdns_url(comfy, "testhost.local", ["openwebui"]) is None
+    monkeypatch.setattr("hal0.comfyui.reach.comfyui_listen", lambda: "loopback")
     assert _mdns_url(comfy, "testhost.local", ["comfyui"]) is None
+
     assert _mdns_url(owui, "testhost.local", ["comfyui"]) is None
     assert _mdns_url(owui, "testhost.local", ["openwebui"]) == "http://testhost.local:3001"
+    assert _mdns_url(hermes, "testhost.local", ["hermes"]) is None
 
 
-def test_comfyui_registry_text_does_not_claim_lan_reach() -> None:
-    """The ComfyUI row's description says what is true: the engine listens on loopback."""
+def test_is_mdns_capable_follows_the_comfyui_listen_knob(monkeypatch) -> None:
+    """``is_mdns_capable`` is the registry's live answer; only ComfyUI's depends on config."""
+    from hal0.services.registry import is_mdns_capable, mdns_services
+
+    comfy = service_by_id("comfyui")
+    owui = service_by_id("openwebui")
+    hermes = service_by_id("hermes")
+    assert comfy is not None and owui is not None and hermes is not None
+
+    monkeypatch.setattr("hal0.comfyui.reach.comfyui_listen", lambda: "lan")
+    assert is_mdns_capable(comfy) is True
+    assert [s.id for s in mdns_services()] == ["openwebui", "comfyui"]
+    monkeypatch.setattr("hal0.comfyui.reach.comfyui_listen", lambda: "loopback")
+    assert is_mdns_capable(comfy) is False
+    assert [s.id for s in mdns_services()] == ["openwebui"]
+    # Unchanged either way.
+    assert is_mdns_capable(owui) is True
+    assert is_mdns_capable(hermes) is False  # no port, loopback-only
+
+
+def test_comfyui_registry_text_says_lan_by_default() -> None:
+    """The ComfyUI row's description says what is true by default: the editor is on the LAN."""
     comfy = service_by_id("comfyui")
     assert comfy is not None
-    assert "LAN" not in comfy.description
-    assert "loopback" in comfy.description
+    assert "LAN" in comfy.description
+    assert "loopback" not in comfy.description
 
 
 def test_mdns_apply_requires_boolean(svc_client: TestClient) -> None:

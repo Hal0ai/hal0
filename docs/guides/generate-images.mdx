@@ -12,10 +12,10 @@ import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components
 hal0 generates images through **ComfyUI**, a node-graph Stable-Diffusion
 runtime. It runs as one container in the `img` slot (the
 `hal0-slot@img.service` unit), one engine for every image model, tuned for the
-AMD iGPU. ComfyUI listens on the box's loopback (`127.0.0.1:8188`), so you
-generate through hal0, from the dashboard, `/v1/images/generations` or Open
-WebUI, and open ComfyUI's own editor on the box itself or through an SSH tunnel
-(see [Workflows and the ComfyUI editor](#workflows-and-the-comfyui-editor)).
+AMD iGPU. You generate through hal0 (the dashboard, `/v1/images/generations` or
+Open WebUI) and open ComfyUI's own editor at `http://<host>:8188` from your
+network by default (see [Reaching the editor](#reaching-the-editor)).
+
 
 Because there is exactly one iGPU, the LLM slots and ComfyUI cannot both hold
 their weights in its memory. The GPU arbiter keeps the GPU in one of two modes:
@@ -39,7 +39,9 @@ line:
 
 - **Generate** — prompt, model, size, the fit check and the results.
 - **Models** — the image-model catalog: install, remove, and what fits.
-- **Engine** — the ComfyUI container (its state, `listens on loopback`, the GPU
+- **Engine** — the ComfyUI container (its state, `listens on the LAN` or
+  `listens on loopback`, the GPU
+
   gate as `current`, `stale`, `unknown` or `no credential`, **Restart engine**,
   **Logs** and **Stop image mode**), the editor link, the queue as
   `n running · n waiting` with hal0's own render beside it, and the GPU device's
@@ -423,30 +425,25 @@ file and 503 `image.gate_refused` when the gate refuses the prompt.
 
 ### Reaching the editor
 
-ComfyUI listens on the box's loopback only, so it is not on your LAN at
-`:8188`. The Engine tab's **Open ComfyUI editor ↗** works as follows:
+`comfyui_listen` under `[network]` in `/etc/hal0/hal0.toml` says where ComfyUI's
+web UI answers ([ADR-0041](/docs/adr/0041-the-comfyui-editor-answers-on-the-lan));
+the editor buttons follow it, and `GET /api/config/urls` reports it as `comfyui_lan`.
 
-- **On the box itself**, with the dashboard open at `localhost`, `127.0.0.1` or
-  `[::1]`, the button opens the editor.
-- **From any other machine** the button is disabled and reads
-  `Only reachable on the box itself`, and the card shows a copyable command:
+- **`"lan"` (the default).** `http://<host>:8188` answers from any machine on
+  your network; the Discovery (mDNS) card on the Services page announces it as
+  `http://<host>.local:8188`. ComfyUI has no sign-in of its own, so keep this
+  for a network you trust.
+- **`"loopback"`.** The port is fenced to the box like every other slot. The
+  button works only from a page at `localhost`, `127.0.0.1` or `[::1]`;
+  elsewhere it is disabled (`Only reachable on the box itself`) and the card
+  gives `ssh -L 8188:127.0.0.1:8188 <user>@<hal0 host>` to run on your own
+  machine, then open `http://127.0.0.1:8188` there.
+- **Behind a proxy you run**, in either mode: set `HAL0_COMFYUI_PUBLIC_URL` in
+  `/etc/hal0/api.env` to a URL you made reachable yourself (`comfyui_public`
+  is then true). hal0 does not proxy or sign in to it for you.
 
-  ```sh
-  ssh -L 8188:127.0.0.1:8188 <user>@<hal0 host>
-  ```
-
-  Run it on your own machine, then open `http://127.0.0.1:8188` there. The
-  Services page, its board card and the Overview Services widget follow the same
-  rule.
-- **Behind a proxy you run.** Set `HAL0_COMFYUI_PUBLIC_URL` in
-  `/etc/hal0/api.env` to a URL you have made reachable yourself, for example a
-  reverse proxy with its own hostname. `GET /api/config/urls` then reports
-  `comfyui_public: true` with that URL as `comfyui`, and the button opens it
-  from anywhere. hal0 does not proxy or sign in to that URL for you; secure it
-  where you made it.
-
-Reaching the editor through hal0 itself, behind the dashboard's sign-in, is not
-available; [#3049](https://github.com/Hal0ai/hal0/issues/3049) tracks it.
+A change applies at the next `hal0 slot restart img`. A path through hal0's own
+sign-in is not available ([#3049](https://github.com/Hal0ai/hal0/issues/3049)).
 
 A prompt you queue in the editor goes through the GPU gate, a custom node that
 asks hal0 for image mode first and refuses the prompt when hal0 cannot hand over
@@ -537,14 +534,14 @@ Stopped is fine: the next render starts the engine, and a cold start can take up
 to 2 minutes. If the container is up and ComfyUI does not answer, the card shows
 the last lines of its log; **Logs** has the last 200.
 
-**The editor button is disabled.** The page is not on the box. Use the `ssh -L`
-command the card shows (see [Reaching the editor](#reaching-the-editor)).
+**The editor button is disabled.** ComfyUI is fenced (`comfyui_listen =
+"loopback"`) and the page is not on the box; see [Reaching the editor](#reaching-the-editor).
 
-**`hal0-addon-comfyui` still shows up in mDNS after an update.** Earlier hal0
-announced ComfyUI's `:8188` over mDNS, though only the box's loopback answers
-there. hal0 no longer does, but an announcement already written stays until you
-toggle the Discovery card on the Services page once; either direction removes
-it. Turn it back on if you want Open WebUI announced.
+**`http://<host>:8188` is refused after an update.** The `img` container keeps
+its old bind; run `hal0 slot restart img` once.
+
+**`hal0-addon-comfyui` is still announced under `"loopback"`.** Toggle the
+Discovery card on the Services page once; either direction removes it.
 
 ## See also
 

@@ -187,15 +187,28 @@ afterEach(() => {
 // ── the engine card ──────────────────────────────────────────────────────────
 
 describe('engine card', () => {
-  it('states the engine, the Quadlet container, that it listens on loopback, and the editor route', () => {
+  it('states the engine, the Quadlet container, that it listens on loopback when fenced, and the editor route', () => {
+    box.urls = { comfyui: 'http://localhost:8188', comfyui_public: false, comfyui_lan: false }
     mount()
     expect(text('engine-row-state')).toContain('running')
     expect(text('engine-row-container')).toContain('Quadlet')
     expect(text('engine-row-container')).toContain('hal0-slot-img')
     expect(text('engine-row-listen')).toContain('listens on loopback')
     expect(text('engine-row-editor')).toContain('127.0.0.1:8188')
+    expect(text('engine-row-editor')).toContain('SSH tunnel')
     expect(byId('engine-pill')!.getAttribute('data-state')).toBe('running')
   })
+
+  it('says the engine listens on the LAN, and where, while ComfyUI binds it (ADR-0041)', () => {
+    visit('hal0.local')
+    box.urls = { comfyui: 'http://hal0.local:8188', comfyui_public: false, comfyui_lan: true }
+    mount()
+    expect(text('engine-row-listen')).toContain('listens on the LAN')
+    expect(text('engine-row-editor')).toContain('hal0.local:8188')
+    expect(text('engine-row-editor')).toContain('from any machine on your network')
+    expect(text('engine-row-editor')).not.toContain('SSH tunnel')
+  })
+
 
   it.each([
     ['current', 'current'],

@@ -109,7 +109,11 @@ SERVICE_HAL0_API: str = "hal0-api"
 #                                            live off hal0.toml, cached on the
 #                                            file's mtime, inode and size,
 #                                            #2382).
+#   * ``[network].comfyui_listen``          → service-restart[slots] (baked
+#                                            into the img slot's rendered
+#                                            bind, ADR-0041).
 #   * ``[slots].network_mode``              → service-restart[slots] (same
+
 #                                            "baked into the rendered
 #                                            quadlet unit" pattern as
 #                                            publish_host — existing slot
@@ -258,6 +262,11 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     # (#2382).
     "network.public_url": {"apply_class": "immediate", "services": []},
     "network.extra_origins": {"apply_class": "immediate", "services": []},
+    # comfyui_listen is baked into the img slot's rendered Exec= bind (the
+    # host-net fence leaves ``--listen 0.0.0.0`` alone only when the plan says
+    # lan_bind, ADR-0041), so the slot must restart to observe it. The mDNS
+    # eligibility and /api/config/urls read it live.
+    "network.comfyui_listen": {"apply_class": "service-restart", "services": [SERVICE_SLOTS]},
     # [slots] — network_mode is baked into each slot's rendered quadlet
     # unit the same way publish_host is; preload_evict_* are SlotManager
     # constructor args fixed at create_app time.

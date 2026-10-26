@@ -138,11 +138,12 @@ def test_resolve_video_422(model_id: str) -> None:
     assert err.details == {"model": model_id, "task": CATALOG[model_id].task, "hint": hint}
     # Says what exists today: the editor on :8188, which needs a ROCm lane, and where it answers.
     assert "ComfyUI editor" in hint and "8188" in hint and "ROCm lane" in hint
-    # ComfyUI listens on the box's loopback (the host-net fence), so the hint says how to reach it
-    # and never suggests another machine can.
-    assert "loopback" in hint and "SSH tunnel" in hint
-    assert "LAN" not in hint
+    # Where the editor answers depends on [network].comfyui_listen (ADR-0041), so the hint names
+    # the port and the dashboard link that knows, and not a bind it cannot see.
+    assert "Engine tab" in hint
+    assert "loopback" not in hint and "SSH tunnel" not in hint and "LAN" not in hint
     assert "Image Gen" not in hint
+
     assert hint in err.message
 
 

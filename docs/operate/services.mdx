@@ -289,7 +289,8 @@ owning unit, its probe strategy, and which lifecycle verbs it permits:
 | Service | Purpose | Unit | Allowed actions |
 |---|---|---|---|
 | OpenWebUI | Chat UI companion (podman container, LAN `:3001`) | `hal0-openwebui.service` | start, stop, restart, enable, disable |
-| ComfyUI | Image generation engine (runs as the seeded `img` slot container, loopback `:8188`) | `hal0-slot@img.service` | start, restart (no stop) |
+| ComfyUI | Image generation engine (runs as the seeded `img` slot container, LAN `:8188` by default; `[network].comfyui_listen = "loopback"` fences it to the box) | `hal0-slot@img.service` | start, restart (no stop) |
+
 | Hermes | Bundled agent + its own dashboard (loopback `:9119`) | `hal0-agent@hermes.service` | start, stop, restart, enable, disable |
 | Hindsight | Memory engine — this is the same unit documented above | `hindsight-api.service` | start, stop, restart, enable, disable |
 
@@ -410,14 +411,20 @@ The DISCOVERY (mDNS) card above the service grid
 `:214-219`) toggles `POST /api/services/mdns` with
 `{"advertise": true|false}`. Turning it on writes one avahi service-group
 file — `/etc/avahi/services/hal0-addon-<id>.service` — per service that is
-both mDNS-capable and LAN-published; today that's OpenWebUI only (ComfyUI,
-Hermes and Hindsight listen on the box's loopback, so they're never
-mdns-capable; ComfyUI keeps `:8188` for its link, which answers only on the
-box itself or through an SSH tunnel). avahi-daemon inotify-watches that directory,
-so the announcement takes effect immediately — no reload, no unit restart.
-Turning it off removes every `hal0-addon-*.service` file. A ComfyUI
-announcement that an earlier hal0 wrote stays until you turn the toggle on
-or off again; either removes it.
+both mDNS-capable and LAN-published: OpenWebUI (`:3001`) and, by default,
+ComfyUI's editor (`:8188`), so other machines reach them at
+`http://<host>.local:<port>`. Hermes and Hindsight listen on the box's
+loopback, so they're never mdns-capable. ComfyUI's LAN publication is the
+`[network].comfyui_listen` key in `hal0.toml` ([ADR-0041](/docs/adr/0041-the-comfyui-editor-answers-on-the-lan)):
+`"lan"` (the default) binds the LAN and makes it advertisable; `"loopback"`
+fences `:8188` to the box, and the card then neither lists nor announces it
+(its link answers only on the box itself or through an SSH tunnel). A change
+applies at the next `hal0 slot restart img`. avahi-daemon inotify-watches that
+directory, so the announcement takes effect immediately — no reload, no unit
+restart. Turning it off removes every `hal0-addon-*.service` file. A ComfyUI
+announcement written while it was on the LAN stays after you switch to
+`"loopback"` until you turn the toggle on or off again; either removes it.
+
 
 The toggle never touches `hal0.service`, the base dashboard announcement
 the installer writes separately — that's why "Dashboard announced as
