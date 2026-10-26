@@ -104,7 +104,7 @@ jobs:
 
       - name: Install
         if: steps.gate.outputs.skip != 'true'
-        run: uv sync --frozen --extra dev --python "$(which python)"
+        run: uv sync --locked --extra dev --python "$(which python)"
 
       # Pre-flight gate: a doc that fails to transform aborts here, before
       # anything is planned or written to the forum.
