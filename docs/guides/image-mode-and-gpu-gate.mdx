@@ -24,8 +24,8 @@ Key fields:
 - `engine` — `running`, `generating` (a render is in flight), `starting`
   (container up, port not bound yet), or `stopped`.
 - `reachable` — whether ComfyUI's HTTP API answers.
-- `container` — the `img` slot container's state (`running` / `exited` /
-  `absent`).
+- `container` — the `img` slot container's state (`running` or `absent`: the
+  slot's unit is active, or it is not).
 - `queue` — `{running, pending}` job counts.
 - `switchover` — the in-flight switch tracker (`active`, `target`,
   `error`).

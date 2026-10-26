@@ -457,8 +457,8 @@ are in [ComfyUI's editor and the GPU gate](/docs/guides/image-mode-and-gpu-gate#
 
 The `img` slot's `[image]` table carries `default_size`
 (`""` by default, meaning the model's native size, such as `1024x1024` for SDXL
-and `512x512` for SD 1.5) and `default_steps` (`0` means the workflow's own
-step count). A request's own `size`, or `steps` in `extra_body`, wins. Set
+and `512x512` for SD 1.5) and `default_steps` (`0` means the model-class
+default). A request's own `size`, or `steps` in `extra_body`, wins. Set
 these from **Settings → AI Capabilities → Image generation**, or edit the
 slot's TOML directly (see [Edit configuration](/docs/guides/configure)).
 

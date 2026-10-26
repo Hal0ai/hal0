@@ -67,9 +67,13 @@ def _public_url(sdef: ServiceDef) -> str | None:
 def _browser_url(request: Request, sdef: ServiceDef) -> str | None:
     """Browser-reachable URL for a service, mirroring config.py semantics.
 
-    Public-URL env wins; otherwise LAN-published services fall back to
+    Public-URL env wins; otherwise a service with a ``port`` falls back to
     ``http://<request-host>:<port>``. Loopback-only services (hermes,
-    hindsight) have no fallback — link only when the env is set.
+    hindsight) have no ``port`` and no fallback — link only when the env is
+    set. ComfyUI is loopback-only too but keeps ``port=8188``: its derived
+    link answers only on the box itself (or through an SSH tunnel), so the
+    dashboard decides whether to open it (``ui/src/dash/image/editor-reach.ts``)
+    and ``GET /api/config/urls`` reports ``comfyui_public`` for a declared URL.
     """
     public = _public_url(sdef)
     if public:
@@ -84,8 +88,13 @@ def _browser_url(request: Request, sdef: ServiceDef) -> str | None:
 
 
 def _mdns_url(sdef: ServiceDef, hostname: str, advertised: list[str]) -> str | None:
-    """``http://<host>.local:<port>`` when this service is being advertised."""
-    if sdef.port is None or sdef.id not in advertised:
+    """``http://<host>.local:<port>`` when this service is being advertised.
+
+    Only for a service that is mDNS-capable: ``advertised`` lists the avahi files on disk, so a
+    leftover announcement of a service hal0 no longer announces (ComfyUI's, from an earlier
+    release) must not hand the page a URL that nothing answers.
+    """
+    if not sdef.mdns or sdef.port is None or sdef.id not in advertised:
         return None
     return f"http://{hostname}:{sdef.port}"
 

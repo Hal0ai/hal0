@@ -426,6 +426,50 @@ def test_an_earlier_comfyui_announcement_goes_at_the_next_announce_or_withdraw(
         assert not stale.exists()
 
 
+def test_a_leftover_comfyui_announcement_never_reaches_the_row(svc_client: TestClient) -> None:
+    """An advert an earlier hal0 left behind must not give the ComfyUI row a dead ``:8188`` URL.
+
+    ``mdns.status()`` lists what is on disk, so a leftover ``hal0-addon-comfyui.service`` shows
+    ``comfyui`` as advertised until the next Announce or Withdraw removes it. The service is not
+    mDNS-capable, so its row has no ``.local`` URL whatever is advertised; the services that are
+    capable keep theirs.
+    """
+    stubs = _stub_all_down()
+    # Replace the "nothing advertised" status the stubs pin with one that lists the leftover.
+    stubs[-1] = patch(
+        f"{_ROUTE}.mdns.status",
+        new_callable=AsyncMock,
+        return_value={
+            "available": True,
+            "hostname": "testhost.local",
+            "base_advertised": True,
+            "advertised": ["comfyui", "openwebui"],
+        },
+    )
+    with contextlib.ExitStack() as stack:
+        for p in stubs:
+            stack.enter_context(p)
+        r = svc_client.get("/api/services")
+
+    assert r.status_code == 200, r.text
+    by_id = _services_by_id(r.json())
+    assert by_id["comfyui"]["mdns_url"] is None
+    assert by_id["openwebui"]["mdns_url"] == "http://testhost.local:3001"
+
+
+def test_mdns_url_needs_an_mdns_capable_service() -> None:
+    """``_mdns_url`` is None for a service that is not mDNS-capable, advertised or not."""
+    from hal0.api.routes.services import _mdns_url
+
+    comfy = service_by_id("comfyui")
+    owui = service_by_id("openwebui")
+    assert comfy is not None and owui is not None
+    assert comfy.port is not None and comfy.mdns is False
+    assert _mdns_url(comfy, "testhost.local", ["comfyui"]) is None
+    assert _mdns_url(owui, "testhost.local", ["comfyui"]) is None
+    assert _mdns_url(owui, "testhost.local", ["openwebui"]) == "http://testhost.local:3001"
+
+
 def test_comfyui_registry_text_does_not_claim_lan_reach() -> None:
     """The ComfyUI row's description says what is true: the engine listens on loopback."""
     comfy = service_by_id("comfyui")

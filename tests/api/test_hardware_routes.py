@@ -1131,7 +1131,7 @@ async def test_engine_read_is_none_on_any_failure(
     assert await comfyui_mod._fetch_engine_stats() is None
 
 
-def test_device_used_bytes_is_the_parse_behind_engine_used_mb() -> None:
+def test_device_used_bytes_is_vram_total_less_vram_free_and_parse_memory_is_gone() -> None:
     """``vram_total - vram_free`` of the first device, the one parse ``engine_used_mb`` reads.
 
     ``/status`` no longer parses it for a memory block of its own (its figures are the budget's).

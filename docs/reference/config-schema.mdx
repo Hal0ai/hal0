@@ -391,7 +391,7 @@ other tune live on the slot's profile (ADR-0029); a write carrying one is reject
 | Key | Type | Default | Constraints |
 |---|---|---|---|
 | `default_size` | str | `""` | — (format `WxH`; empty means the model's native size) |
-| `default_steps` | int | `0` | `>= 0`; `0` means the workflow template's own default |
+| `default_steps` | int | `0` | `>= 0`; `0` means the model-class default |
 
 A `/v1/images/generations` request that sets no `size` or `steps` gets these when they are set,
 and the model's own defaults otherwise.

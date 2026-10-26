@@ -411,8 +411,9 @@ The DISCOVERY (mDNS) card above the service grid
 `{"advertise": true|false}`. Turning it on writes one avahi service-group
 file — `/etc/avahi/services/hal0-addon-<id>.service` — per service that is
 both mDNS-capable and LAN-published; today that's OpenWebUI only (ComfyUI,
-Hermes and Hindsight listen on the box's loopback and carry no LAN port, so
-they're never mdns-capable). avahi-daemon inotify-watches that directory,
+Hermes and Hindsight listen on the box's loopback, so they're never
+mdns-capable; ComfyUI keeps `:8188` for its link, which answers only on the
+box itself or through an SSH tunnel). avahi-daemon inotify-watches that directory,
 so the announcement takes effect immediately — no reload, no unit restart.
 Turning it off removes every `hal0-addon-*.service` file. A ComfyUI
 announcement that an earlier hal0 wrote stays until you turn the toggle on
