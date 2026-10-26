@@ -294,3 +294,22 @@ def test_fallback_local_model_returns_none_when_only_default_missing(tmp_hal0_ho
     # No candidates at all (nothing local) → still None, default-lookup path
     # doesn't change the empty case.
     assert fallback_local_model("chat", "ghost-id") is None
+
+
+def test_comfyui_slot_skips_registry_when_registry_is_down(tmp_hal0_home, monkeypatch):
+    # A ComfyUI slot's model is a catalog image model read from ComfyUI's own
+    # tree, never the LLM registry. A registry outage must not fail its load.
+    from hal0.slots import manager as manager_mod
+
+    def _down(_model_id: str) -> bool:
+        raise manager_mod.RegistryUnavailableError("registry down")
+
+    monkeypatch.setattr("hal0.registry.fallback.default_model_cache_check", _down)
+    cfg = {
+        "name": "img",
+        "type": "img",
+        "device": "gpu-rocm",
+        "provider": "comfyui",
+        "model": {"default": "sdxl-base"},
+    }
+    assert _mgr()._resolve_servable_model("sdxl-base", cfg) == "sdxl-base"

@@ -3465,7 +3465,13 @@ class SlotManager:
         (``self._resolve_servable_model(...)``) and test
         (``SlotManager._resolve_servable_model``) keeps working unchanged.
         See that function's docstring for the full contract.
+
+        A ComfyUI slot is exempt: its model is a catalog image model ComfyUI
+        reads from its own tree, so the LLM registry (and its outages) is
+        irrelevant to it — the same carve-out as the pull gate in ``load``.
         """
+        if _is_comfyui_cfg(cfg):
+            return model_id
         return _registry_fallback.resolve_servable_model(model_id, cfg)
 
     @staticmethod
