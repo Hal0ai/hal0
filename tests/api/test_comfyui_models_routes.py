@@ -497,6 +497,28 @@ def test_models_route_reports_engine_available(
 # ── GET /models: fit and store ──────────────────────────────────────────────
 
 
+def test_models_recommends_a_model_that_fits_a_small_box(
+    client: TestClient, memory_budget: MemoryBudgetStub, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3076: 17 GB passes the RAM rule's sdxl-lightning, whose 15.9 GB need exceeds 15 GB free."""
+    monkeypatch.setattr(
+        "hal0.comfyui.picker.load_hardware_info",
+        lambda: HardwareInfo(unified_memory_mb=17 * 1024),
+    )
+    memory_budget.result = _gpu_budget(
+        ram=RamBudget(limit_gb=17.0, used_gb=0.0, free_gb=17.0, source="system"),
+        render_free_gb=15.0,
+        other_guests_gb=0.0,
+    )
+
+    body = client.get("/api/comfyui/models").json()
+
+    assert body["recommendation"]["id"] == "sd-1.5-pruned-emaonly"
+    marked = [m for m in body["models"] if m["recommended"]]
+    assert [m["id"] for m in marked] == ["sd-1.5-pruned-emaonly"]
+    assert marked[0]["fit"]["verdict"] != "wont_fit"
+
+
 def test_models_rows_carry_fit_and_store(
     client: TestClient, memory_budget: MemoryBudgetStub, monkeypatch: pytest.MonkeyPatch
 ) -> None:

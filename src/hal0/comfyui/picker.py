@@ -24,14 +24,20 @@ from hal0.comfyui.catalog import (
     recommended_model_id,
     weights_gib,
 )
+from hal0.comfyui.fit import assess, need_for
 from hal0.config.loader import load_hardware_info
 from hal0.config.schema import HardwareInfo
+from hal0.hardware.memory_budget import MemoryBudget
 from hal0.install.agent_model import pool_gb
 
 log = logging.getLogger(__name__)
 
 _PROVIDER = "comfyui"
 _CAPABILITY = "image"
+
+# The starter picks, largest first: the models :func:`~hal0.comfyui.catalog.recommended_model_id`
+# can return. A live budget walks down this list from the RAM rule's pick.
+_STARTER_LADDER = ("qwen-image-lightning", "sdxl-lightning", "sd-1.5-pruned-emaonly")
 
 
 def _image_pool(hw: HardwareInfo) -> tuple[float, Literal["ram", "gpu"]] | None:
@@ -71,7 +77,31 @@ def image_pool_gb(hw: HardwareInfo) -> float | None:
     return picked[0] if picked else None
 
 
-def recommended_for(hw: HardwareInfo) -> str:
+def _fitting(rule_pick: str, budget: MemoryBudget | None) -> str:
+    """``rule_pick``, or the largest smaller starter whose native-size fit is not ``wont_fit``.
+
+    The verdict is :func:`hal0.comfyui.fit.assess` against ``budget``, the same one the model
+    card and ``/v1/images/generations`` use, so the pick can never be a model the box then
+    refuses (#3076). An unknown budget (``assess`` returns ``None``, or the catalog facts
+    cannot be read) keeps the RAM rule's pick.
+    When even the smallest starter does not fit, the smallest is still the pick: it is the
+    closest the box gets, and the card says why it is tight.
+    """
+    if budget is None or rule_pick not in _STARTER_LADDER:
+        return rule_pick
+    for model_id in _STARTER_LADDER[_STARTER_LADDER.index(rule_pick) :]:
+        try:
+            fit = assess(need_for(CATALOG[model_id], None), budget)
+        except ValueError:  # malformed catalog facts are an unknown fit, as on the model rows
+            return rule_pick
+        if fit is None:
+            return rule_pick
+        if fit.verdict != "wont_fit":
+            return model_id
+    return _STARTER_LADDER[-1]
+
+
+def recommended_for(hw: HardwareInfo, budget: MemoryBudget | None = None) -> str:
     """The catalog's starter pick for the memory ``hw``'s guest can use.
 
     The one owner of the pick: the picker, ``GET /api/comfyui/models``, the install-time
@@ -79,22 +109,29 @@ def recommended_for(hw: HardwareInfo) -> str:
     :func:`hal0.comfyui.catalog.recommended_model_id` applied to :func:`image_pool_gb`, the
     smaller of the memory pool and the guest's RAM limit. A pool that reads as zero is a box
     that was never probed, so it is passed on as unknown (``None``), not as a tiny pool.
+
+    With a live ``budget`` (the caller collected it, as for ``GET /api/comfyui/models``) the
+    RAM rule's pick is then held to the fit check: a model that reads ``wont_fit`` at its
+    native size is stepped down from (:func:`_fitting`). Without one (``hal0 setup`` runs
+    before the service) the RAM rule stands.
     """
-    return recommended_model_id(image_pool_gb(hw))
+    return _fitting(recommended_model_id(image_pool_gb(hw)), budget)
 
 
-def recommended_id() -> str:
+def recommended_id(budget: MemoryBudget | None = None) -> str:
     """:func:`recommended_for` this box, read per call: it is one small JSON file.
 
     A hardware file that cannot be read is an unknown pool too.
     """
     try:
-        return recommended_for(load_hardware_info())
+        return recommended_for(load_hardware_info(), budget)
     except Exception:  # an unreadable hardware.json must not take the picker down
-        return recommended_model_id(None)
+        return _fitting(recommended_model_id(None), budget)
 
 
-def recommendation_for(hw: HardwareInfo) -> dict[str, Any] | None:
+def recommendation_for(
+    hw: HardwareInfo, budget: MemoryBudget | None = None
+) -> dict[str, Any] | None:
     """The starter pick with the figure it was chosen from, for ``GET /api/comfyui/models``.
 
     ``{"id", "pool_gb", "limited_by"}``: ``id`` is :func:`recommended_for` ``hw``, ``pool_gb``
@@ -108,16 +145,16 @@ def recommendation_for(hw: HardwareInfo) -> dict[str, Any] | None:
         return None
     pool, limited_by = picked
     return {
-        "id": recommended_model_id(pool),
+        "id": _fitting(recommended_model_id(pool), budget),
         "pool_gb": round(pool, 1),
         "limited_by": limited_by,
     }
 
 
-def recommendation() -> dict[str, Any] | None:
+def recommendation(budget: MemoryBudget | None = None) -> dict[str, Any] | None:
     """:func:`recommendation_for` this box, read per call; ``None`` for an unreadable hardware file."""
     try:
-        return recommendation_for(load_hardware_info())
+        return recommendation_for(load_hardware_info(), budget)
     except Exception:  # an unreadable hardware.json must not take the catalog down
         return None
 

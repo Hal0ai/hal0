@@ -1116,10 +1116,11 @@ async def comfyui_models(request: Request) -> dict[str, Any]:
     jobs = _install_jobs(request.app)
     # One read of the hardware file names both the pick and the figure it came from, so the
     # row marked `recommended` and `recommendation.id` cannot differ.
-    pick = recommendation()
-    recommended = pick["id"] if pick else recommended_id()
-    root = comfyui_paths.models_root()
+    # The pick is held to the same budget the rows' fit verdicts use (#3076).
     budget = await _collect_budget(request.app)
+    pick = recommendation(budget)
+    recommended = pick["id"] if pick else recommended_id(budget)
+    root = comfyui_paths.models_root()
     with comfyui_install.readable_tree():
         models = [
             _model_row(
