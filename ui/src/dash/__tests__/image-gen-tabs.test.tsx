@@ -89,7 +89,13 @@ vi.mock('../image/ImageGeneratePanel.jsx', async () => {
 vi.mock('../image/ImageModelsPanel.jsx', async () => {
   const R = await import('react')
   return {
-    ImageModelsPanel: (p: { onGenerate: (id: string) => void; onOpenEditor: (id: string) => void }) => {
+    ImageModelsPanel: (p: {
+      onGenerate: (id: string) => void
+      onOpenEditor: (id: string) => void
+      visible?: boolean
+      focusModelId?: string
+      focusSeq?: number
+    }) => {
       R.useEffect(() => {
         box.mounts.models++
         return () => {
@@ -98,7 +104,12 @@ vi.mock('../image/ImageModelsPanel.jsx', async () => {
       }, [])
       return R.createElement(
         'div',
-        { 'data-testid': 'stub-models' },
+        {
+          'data-testid': 'stub-models',
+          'data-visible': String(p.visible),
+          'data-focus': p.focusModelId ?? '',
+          'data-focus-seq': String(p.focusSeq ?? 0),
+        },
         R.createElement('button', { 'data-testid': 'stub-models-generate', onClick: () => p.onGenerate('wan22-t2v') }),
         R.createElement('button', { 'data-testid': 'stub-models-editor', onClick: () => p.onOpenEditor('ltx2-t2v') }),
       )
@@ -260,7 +271,9 @@ describe('which tab opens first', () => {
     expect(selected()).toEqual(['generate'])
   })
 
-  it('the root carries comfy-page, the scope of the --comfy tokens', () => {
+  // `.comfy-page` scopes no rule any more (dashboard.css defines the --comfy tokens on :root);
+  // it stays on the root as a marker.
+  it('the root carries the comfy-page marker class', () => {
     mount()
     expect(byId('image-gen-pane')!.classList.contains('comfy-page')).toBe(true)
     expect(byId('stub-status')).not.toBeNull()
@@ -335,6 +348,15 @@ describe('hidden tabs', () => {
     expect(box.engineVisible).toBe(true)
   })
 
+  it('the models tab is told when it is the one showing (it re-reads the catalog only then)', () => {
+    mount({ sub: 'models' })
+    expect(byId('stub-models')!.getAttribute('data-visible')).toBe('true')
+    click(tabEl('generate'))
+    expect(byId('stub-models')!.getAttribute('data-visible')).toBe('false')
+    click(tabEl('models'))
+    expect(byId('stub-models')!.getAttribute('data-visible')).toBe('true')
+  })
+
   it('the tab strip is a tablist the keyboard can walk', () => {
     mount()
     const strip = host.querySelector('[role="tablist"]') as HTMLElement
@@ -397,6 +419,22 @@ describe('wiring', () => {
     mount()
     click(byId('stub-open-models')!)
     expect(selected()).toEqual(['models'])
+  })
+
+  // The 409 "not installed" link names the model the render needs: the Models tab gets it to
+  // scroll to and focus. A new request is a new sequence number, so the same model asked for
+  // again is focused again.
+  it("Generate's Open Models passes the missing model to the Models tab", () => {
+    mount()
+    expect(byId('stub-models')!.getAttribute('data-focus')).toBe('')
+    click(byId('stub-open-models')!)
+    expect(byId('stub-models')!.getAttribute('data-focus')).toBe('qwen-image')
+    expect(byId('stub-models')!.getAttribute('data-focus-seq')).toBe('1')
+
+    click(tabEl('generate'))
+    click(byId('stub-open-models')!)
+    expect(byId('stub-models')!.getAttribute('data-focus')).toBe('qwen-image')
+    expect(byId('stub-models')!.getAttribute('data-focus-seq')).toBe('2')
   })
 
   it('open in ComfyUI opens the editor in a new tab when the page is on the box', () => {

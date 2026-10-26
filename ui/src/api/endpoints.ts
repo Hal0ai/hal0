@@ -11,7 +11,7 @@ export const ENDPOINTS = {
   slots: '/api/slots',
 
   // ── ComfyUI generation engine (slots-page Image-Gen tab) ─────────
-  // Read-only aggregate of docker + systemd + ComfyUI HTTP.
+  // Read-only aggregate of the container (Quadlet) + systemd + ComfyUI HTTP.
   comfyuiStatus: '/api/comfyui/status',
   comfyuiSwitchover: '/api/comfyui/switchover',
   // Pin image mode (hold it until unpinned).

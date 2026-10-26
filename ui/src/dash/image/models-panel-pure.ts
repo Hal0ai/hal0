@@ -61,21 +61,41 @@ export function recommendationReason(
 }
 
 export interface FirstRunPicks {
+  // The catalog's starter pick.
   recommended: ComfyuiCatalogModel
+  // The model that leads the block, under the big install button. It is `recommended`, unless the
+  // server says that one won't fit this box and another renderable model does: then the largest
+  // of those leads, and `recommended` is the first of `others`. (The picker and the fit check can
+  // disagree: #3076.)
+  lead: ComfyuiCatalogModel
+  // The lighter cards: two, the smallest other renderable models. When `recommended` was passed
+  // over it comes first, and one smaller model follows it.
   others: ComfyuiCatalogModel[]
 }
 
-// The first-run block: the recommended renderable model, and the two smallest other renderable
-// ones as lighter alternatives. null when the catalog names no recommended renderable model.
+// The first-run block: the recommended renderable model leads, with the two smallest other
+// renderable ones as lighter alternatives. null when the catalog names no recommended renderable
+// model.
 export function firstRunPicks(models: readonly ComfyuiCatalogModel[]): FirstRunPicks | null {
   const renderable = models.filter((m) => m.api_renderable)
   const recommended = renderable.find((m) => m.recommended)
   if (!recommended) return null
-  const others = renderable
-    .filter((m) => m.id !== recommended.id)
+  const lead =
+    recommended.fit?.verdict === 'wont_fit' ? (suggestAlternative(recommended, models) ?? recommended) : recommended
+  const smallest = renderable
+    .filter((m) => m.id !== lead.id && m.id !== recommended.id)
     .sort((a, b) => a.approx_gb - b.approx_gb)
-    .slice(0, 2)
-  return { recommended, others }
+  return {
+    recommended,
+    lead,
+    others: lead === recommended ? smallest.slice(0, 2) : [recommended, ...smallest].slice(0, 2),
+  }
+}
+
+// The GB an install fetches: what is still missing for a model part-way installed, else the whole
+// model. (The files already on disk, or shared with an installed model, are not fetched again.)
+export function downloadGb(model: Pick<ComfyuiCatalogModel, 'state' | 'approx_gb' | 'missing_gb'>): number {
+  return model.state === 'partial' && model.missing_gb > 0 ? model.missing_gb : model.approx_gb
 }
 
 // What a card whose verdict is "won't fit" offers instead: the recommended model, or the

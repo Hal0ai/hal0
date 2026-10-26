@@ -84,7 +84,8 @@ reads `Models · N downloading` while an install runs.
 While nothing renderable is installed and no install runs, the tab leads with
 **Set up image generation**: the recommended model as one button,
 `Install recommended — <label> (~N GB)`, with why it was chosen and two lighter
-alternatives. The reason reads `chosen from N GB of RAM (container limit)`, or
+alternatives; if the server says that model won't fit this box, the largest one
+that does leads instead. The reason reads `chosen from N GB of RAM (container limit)`, or
 `(system)` on a box with no container limit, or `chosen from N GB of GPU memory`
 when the GPU pool set the pick. N is the memory an image model can load into,
 the smaller of the GPU pool and this box's RAM limit; the server reports it as
@@ -172,10 +173,11 @@ against both, with the same figures the memory screens show
 so before it unloads anything. The dashboard shows the verdict as a **fit
 meter**: two bars, the GPU pool and RAM · this box, each with a dashed segment
 for what the model needs (`est.` when the figure is an estimate) against what is
-free, and a chip beside them: `Fits · N GB to spare`, `Tight` or `Won't fit`,
-with the server's reason; the verdict is always the server's. The Generate tab
-draws the same meter for the model and size you picked, and shows `judged at WxH`
-when the server clamped the size you asked for. A model the box cannot hold
+free (the GPU bar's figure reads "free for a render"), and a chip beside them:
+`Fits · N GB to spare`, `Tight` or `Won't fit`, with the server's reason; the
+verdict is always the server's. The Generate tab draws the same meter for the
+model and size you picked, and shows `judged at WxH` when the server clamped the
+size you asked for, and `judged for one image` when you ask for more than one. A model the box cannot hold
 offers one that fits in its place.
 
 `GET /api/comfyui/models` gives every model a `fit` at its native size, and

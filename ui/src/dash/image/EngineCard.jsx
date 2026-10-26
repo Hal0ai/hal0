@@ -106,22 +106,36 @@ function UnreachableNotice({ active }) {
     return () => clearInterval(id)
   }, [active, refetch])
   const lines = (logs.data?.lines ?? []).slice(-NOTICE_LINES)
+  const failure = logs.error?.message ? `: ${logs.error.message}` : '.'
   return (
     <div className="ie-notice warn" data-testid="engine-unreachable">
       <b>{UNREACHABLE_HEAD}</b>
       <p>The container is running, but ComfyUI is not answering on its port.</p>
-      {logs.isError ? (
-        <div className="ie-muted" data-testid="engine-unreachable-error">
-          The log could not be read{logs.error?.message ? `: ${logs.error.message}` : '.'}
-        </div>
-      ) : logs.data === undefined ? (
-        <div className="ie-muted">Reading the log…</div>
-      ) : lines.length === 0 ? (
-        <div className="ie-muted">No log lines.</div>
+      {/* A refresh that fails after lines were read keeps them (react-query holds the last data);
+          only a log that was never read gets the failure in place of lines. */}
+      {logs.data === undefined ? (
+        logs.isError ? (
+          <div className="ie-muted" data-testid="engine-unreachable-error">
+            The log could not be read{failure}
+          </div>
+        ) : (
+          <div className="ie-muted">Reading the log…</div>
+        )
       ) : (
-        <pre className="ie-log" data-testid="engine-unreachable-log">
-          {lines.join('\n')}
-        </pre>
+        <>
+          {lines.length === 0 ? (
+            <div className="ie-muted">No log lines.</div>
+          ) : (
+            <pre className="ie-log" data-testid="engine-unreachable-log">
+              {lines.join('\n')}
+            </pre>
+          )}
+          {logs.isError && (
+            <div className="ie-muted" data-testid="engine-unreachable-stale">
+              Could not refresh the log{failure}
+            </div>
+          )}
+        </>
       )}
     </div>
   )

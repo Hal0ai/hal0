@@ -26,6 +26,7 @@
 // install jobs, the per-size fit check, and the /v1 generate call.
 
 import {
+  keepPreviousData,
   useMutation,
   useQuery,
   useQueryClient,
@@ -139,7 +140,7 @@ export interface ComfyuiStatus {
 
 // Active (Image-Gen tab open): 4s, fast enough to track the queue.
 // Idle (other tab): 20s — keeps the tab's live dot honest without spending a
-// docker inspect + 2× systemctl + 2× HTTP probe every few seconds; per-tab
+// container (Quadlet) check + 2× systemctl + 2× HTTP probe every few seconds; per-tab
 // polling can starve an embedded HTTP server, so this is the cheap guard.
 // Busy (pane open and the GPU is doing something, or a Generate run is in flight): 2s, so the
 // status line's step count and the queue move while a render runs. /status is the heavy route,
@@ -198,12 +199,38 @@ function cachedQueueBusy(qc: QueryClient): boolean {
   return queueBusy(state.data.queue)
 }
 
-/** `GET /api/comfyui/arbiter`: the whole envelope (`data.arbiter` is the `ArbiterState`). */
-export function useArbiter(): UseQueryResult<ArbiterEnvelope> {
+/** The `/arbiter` envelope as the hook returns it: the wire body plus `skewMs`. */
+export interface ArbiterReading extends ArbiterEnvelope {
+  /** The browser's clock less the server's, in ms, read off the response's `Date` header when the
+   *  answer came in (0 when the header is missing or unreadable). `restore_at` and
+   *  `handoff_until` are on the server's clock: `Date.now() - skewMs` is the server's now. Not
+   *  part of the wire body. */
+  skewMs: number
+}
+
+/** The skew of the browser's clock (`now`) against the server's, from a response `Date` header.
+ *  0 when there is no header to read. */
+export function clockSkewMs(dateHeader: string | null | undefined, now: number = Date.now()): number {
+  if (!dateHeader) return 0
+  const serverMs = Date.parse(dateHeader)
+  return Number.isFinite(serverMs) ? now - serverMs : 0
+}
+
+/** `GET /api/comfyui/arbiter`: the whole envelope (`data.arbiter` is the `ArbiterState`) and the
+ *  clock skew (`data.skewMs`). */
+export function useArbiter(): UseQueryResult<ArbiterReading> {
   const qc = useQueryClient()
-  return useQuery({
+  return useQuery<ArbiterReading>({
     queryKey: ['comfyui', 'arbiter'],
-    queryFn: () => apiGet<ArbiterEnvelope>(ENDPOINTS.comfyuiArbiter),
+    queryFn: async () => {
+      let skewMs = 0
+      const env = await api<ArbiterEnvelope>(ENDPOINTS.comfyuiArbiter, {
+        onResponse: (res) => {
+          skewMs = clockSkewMs(res.headers?.get('Date'))
+        },
+      })
+      return { ...env, skewMs }
+    },
     refetchInterval: (query) => arbiterPollMs(query.state.data, cachedQueueBusy(qc)),
   })
 }
@@ -451,11 +478,18 @@ export interface ComfyuiModelsResponse {
   recommendation: ComfyuiRecommendation | null
 }
 
-export function useComfyuiModels() {
+// Each row carries the server's fit verdict, which moves with what the box has free. The Models
+// tab re-reads the catalog while it shows so the cards track the live budget, the way Generate's
+// /fit does (FIT_POLL_MS).
+const MODELS_POLL_MS = 15_000
+
+/** `GET /api/comfyui/models`. `poll`: re-read about every 15 s (the Models tab is showing). */
+export function useComfyuiModels(opts: { poll?: boolean } = {}) {
   return useQuery({
     queryKey: ['comfyui', 'models'],
     queryFn: () => apiGet<ComfyuiModelsResponse>(ENDPOINTS.comfyuiModels),
     staleTime: 10_000,
+    refetchInterval: opts.poll ? MODELS_POLL_MS : false,
   })
 }
 
@@ -575,6 +609,10 @@ const isUserCheckpoint = (id: string) => id.startsWith('ckpt/')
 // The verdict depends on what the box has free right now, so it is re-read now and then.
 const FIT_POLL_MS = 10_000
 
+/** The verdict for a model at a size. When the model or the size changes, the last verdict stays
+ *  as `data` with `isPlaceholderData` true until the new one lands (no flash of "Checking fit"
+ *  while a size is typed); a caller must not treat that placeholder as the current verdict. A
+ *  user checkpoint has no verdict and never inherits one. */
 export function useModelFit(id: string | null | undefined, size: string | null | undefined) {
   const enabled = !!id && !isUserCheckpoint(id)
   return useQuery<ModelFitResponse>({
@@ -583,6 +621,7 @@ export function useModelFit(id: string | null | undefined, size: string | null |
     enabled,
     staleTime: 5_000,
     refetchInterval: enabled ? FIT_POLL_MS : false,
+    placeholderData: enabled ? keepPreviousData : undefined,
   })
 }
 

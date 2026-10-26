@@ -11,7 +11,8 @@
 // minutes and leaving the tab does not end it: the panel stays to report it (`onRunChange`) and
 // to cancel it, which the status line offers for as long as it runs (`ownRun`).
 //
-// Renders the pane's `.comfy-page` wrapper, the scope of the `--comfy*` tokens the panels use.
+// The root carries `.comfy-page`. It is only a marker: it scopes no rule (dashboard.css defines the
+// `--comfy*` tokens on :root).
 import { useCallback, useEffect, useRef, useState } from 'react'
 import './image-tabs.css'
 import { isImageJobActive } from '@/api/hooks/imageJobState'
@@ -95,9 +96,16 @@ export function ImageGenTabs({ sub }) {
     },
     [select],
   )
-  // The 409 "not installed" link passes the missing model's id; the Models tab lists it with the
-  // rest and has no card to focus.
-  const openModels = useCallback(() => select('models'), [select])
+  // The 409 "not installed" link passes the missing model's id: the Models tab scrolls to its card
+  // and focuses it. The counter makes the same model asked for again a new request.
+  const [focus, setFocus] = useState({ modelId: undefined, seq: 0 })
+  const openModels = useCallback(
+    (modelId) => {
+      setFocus((f) => ({ modelId, seq: f.seq + 1 }))
+      select('models')
+    },
+    [select],
+  )
   // On the box the editor opens; anywhere else the Engine tab says why it cannot, and how to.
   const openEditor = useCallback(() => {
     if (access.onBox && access.url) window.open(access.url, '_blank', 'noopener,noreferrer')
@@ -177,7 +185,13 @@ export function ImageGenTabs({ sub }) {
         aria-labelledby="igt-tab-models"
         hidden={tab !== 'models'}
       >
-        <ImageModelsPanel onGenerate={generateWith} onOpenEditor={openEditor} />
+        <ImageModelsPanel
+          onGenerate={generateWith}
+          onOpenEditor={openEditor}
+          visible={tab === 'models'}
+          focusModelId={focus.modelId}
+          focusSeq={focus.seq}
+        />
       </div>
       <div
         role="tabpanel"

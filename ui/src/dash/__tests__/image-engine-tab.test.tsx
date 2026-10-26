@@ -300,6 +300,30 @@ describe('engine states', () => {
     expect(byId('engine-unreachable-log')).toBeNull()
   })
 
+  // A refetch that fails after lines were fetched must not blank them: the notice exists to show
+  // why the engine is stuck, and the last lines read are still that.
+  it('keeps the lines already fetched when a refresh fails, with a note that it could not refresh', async () => {
+    box.status = statusBody({ engine: 'starting', reachable: false })
+    box.logsTail = { lines: ['line one', 'line two', 'line three'] }
+    box.logsTailError = new Error('journal unreadable')
+    mount()
+    await flush()
+    expect(text('engine-unreachable-log')).toBe('line one\nline two\nline three')
+    expect(text('engine-unreachable-stale')).toContain('Could not refresh the log')
+    expect(text('engine-unreachable-stale')).toContain('journal unreadable')
+    // Not the message for a log that was never read.
+    expect(byId('engine-unreachable-error')).toBeNull()
+    expect(text('engine-unreachable')).not.toContain('The log could not be read')
+  })
+
+  it('has no refresh note while the refreshes work', async () => {
+    box.status = statusBody({ engine: 'starting', reachable: false })
+    box.logsTail = { lines: ['line one'] }
+    mount()
+    await flush()
+    expect(byId('engine-unreachable-stale')).toBeNull()
+  })
+
   it('says so when the journal has nothing to show', async () => {
     box.status = statusBody({ engine: 'starting', reachable: false })
     box.logsTail = { lines: [] }

@@ -37,7 +37,9 @@ const { box, calls } = vi.hoisted(() => ({
 
 vi.mock('@/api/hooks/useComfyui', async (importOriginal) => ({
   ...(await importOriginal<Json>()),
-  useComfyuiModels: () => ({
+  useComfyuiModels: (opts?: unknown) => {
+    calls.push(['models-hook', opts])
+    return {
     data: box.models,
     isPending: !box.models && !box.modelsError,
     isError: !!box.modelsError,
@@ -45,7 +47,8 @@ vi.mock('@/api/hooks/useComfyui', async (importOriginal) => ({
     refetch: () => {
       calls.push(['models-refetch', null])
     },
-  }),
+    }
+  },
   useImageJobs: () => ({ data: box.jobs, dataUpdatedAt: box.jobsAt }),
   useComfyuiFiles: (opts?: { enabled?: boolean }) => {
     calls.push(['files-hook', opts?.enabled])
@@ -234,10 +237,22 @@ class ApiError extends Error {
 // ── harness ──────────────────────────────────────────────────────────────────
 
 const mounted: { root: Root; host: HTMLElement }[] = []
-const props = { onGenerate: vi.fn(), onOpenEditor: vi.fn() }
+const props = {
+  onGenerate: vi.fn(),
+  onOpenEditor: vi.fn(),
+  visible: undefined as boolean | undefined,
+  focusModelId: undefined as string | undefined,
+  focusSeq: undefined as number | undefined,
+}
 const tree = () => (
   <div className="comfy-page">
-    <ImageModelsPanel onGenerate={props.onGenerate} onOpenEditor={props.onOpenEditor} />
+    <ImageModelsPanel
+      onGenerate={props.onGenerate}
+      onOpenEditor={props.onOpenEditor}
+      visible={props.visible}
+      focusModelId={props.focusModelId}
+      focusSeq={props.focusSeq}
+    />
   </div>
 )
 
@@ -288,6 +303,9 @@ beforeEach(() => {
   calls.length = 0
   props.onGenerate.mockReset()
   props.onOpenEditor.mockReset()
+  props.visible = undefined
+  props.focusModelId = undefined
+  props.focusSeq = undefined
 })
 
 afterEach(() => {
@@ -717,6 +735,69 @@ describe('ImageModelsPanel', () => {
       expect(button(/^Install recommended/)).toBeTruthy()
     })
 
+    // The picker and the fit check can disagree (#3076). A recommended model the server says won't
+    // fit must not lead the block under an "Install recommended" button.
+    it("leads with the largest model that fits when the recommended one won't fit", async () => {
+      box.models = fresh({
+        models: [
+          row({ recommended: true, fit: fit('wont_fit') }),
+          turbo(),
+          sd15({ fit: fit('fits') }),
+          qwen(),
+          ltx(),
+        ],
+      })
+      mount()
+
+      expect(byId('imp-first-run-recommended')).toBeNull()
+      const lead = byId('imp-first-run-alternative')!
+      expect(text(lead)).toContain('SDXL Turbo')
+      // The button does not call it recommended, and the reason is the recommended model's own.
+      expect(button(/^Install recommended/)).toBeUndefined()
+      expect(text(lead)).not.toContain('chosen from')
+      expect(text(byId('imp-first-run')!)).toContain('does not fit this box')
+      expect(byId('fit-chip-fr-sdxl-turbo')).not.toBeNull()
+
+      // The recommended model is a small card with the server's reason; then the smallest other.
+      const small = Array.from(byId('imp-first-run')!.querySelectorAll('[data-testid^="imp-first-run-small-"]'))
+      expect(small.map((e) => e.getAttribute('data-testid'))).toEqual([
+        'imp-first-run-small-sdxl-lightning',
+        'imp-first-run-small-sd-1.5-pruned-emaonly',
+      ])
+      expect(text(small[0])).toContain('Recommended')
+      expect(text(byId('imp-first-run-wont-fit')!)).toBe(`Won't fit · ${REASON}`)
+
+      await click(button('Install SDXL Turbo (~6.5 GB)', lead))
+      expect(calls).toContainEqual(['install', 'sdxl-turbo'])
+      expect(calls).not.toContainEqual(['install', 'sdxl-lightning'])
+    })
+
+    it("keeps the recommended model in the lead when it won't fit and nothing else does", () => {
+      box.models = fresh({
+        models: [row({ recommended: true, fit: fit('wont_fit') }), turbo({ fit: fit('wont_fit') }), qwen()],
+      })
+      mount()
+      expect(byId('imp-first-run-alternative')).toBeNull()
+      expect(text(byId('imp-first-run-recommended')!)).toContain('SDXL Lightning (8-step)')
+      expect(button(/^Install recommended/)).toBeTruthy()
+    })
+
+    it('names the GB still to fetch on the button for a partly installed recommended model', () => {
+      box.models = fresh({
+        models: [row({ recommended: true, state: 'partial', approx_gb: 6.9, missing_gb: 2.5 }), turbo(), sd15()],
+      })
+      mount()
+      // Not the whole 6.9 GB: the files already on disk are not fetched again.
+      expect(button('Install recommended — SDXL Lightning (8-step) (~2.5 GB)')).toBeTruthy()
+      expect(button(/~6\.9 GB/)).toBeUndefined()
+    })
+
+    it('names the whole size on the button when nothing is on disk', () => {
+      box.models = fresh()
+      mount()
+      expect(button('Install recommended — SDXL Lightning (8-step) (~6.9 GB)')).toBeTruthy()
+    })
+
     it('is not shown once a renderable model is installed', () => {
       box.models = catalog([lightning(), turbo()])
       mount()
@@ -758,6 +839,53 @@ describe('ImageModelsPanel', () => {
 
     await click(button('Retry'))
     expect(calls).toContainEqual(['models-refetch', null])
+  })
+
+  describe('Copy commands', () => {
+    const unreadable = () => {
+      box.models = undefined
+      box.modelsError = new ApiError('the models folder is not readable', 'comfyui.models_dir_not_writable', 409, {
+        path: '/srv/models/comfyui/models',
+      })
+    }
+    afterEach(() => {
+      vi.unstubAllGlobals()
+      delete (window as unknown as { __hal0Toast?: unknown }).__hal0Toast
+    })
+
+    // hal0 is mostly served over plain http on a LAN, where there is no navigator.clipboard.
+    it('copies on a plain-http page, where navigator.clipboard is undefined', async () => {
+      unreadable()
+      const toast = vi.fn()
+      ;(window as unknown as { __hal0Toast: unknown }).__hal0Toast = toast
+      Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true })
+      const exec = vi.fn(() => true)
+      ;(document as unknown as { execCommand: unknown }).execCommand = exec
+      mount()
+
+      await click(button('Copy commands'))
+      expect(exec).toHaveBeenCalledWith('copy')
+      expect(toast).toHaveBeenCalledWith('Commands copied', 'ok')
+    })
+
+    it('uses the clipboard when there is one, and says so when nothing could copy', async () => {
+      unreadable()
+      const toast = vi.fn()
+      ;(window as unknown as { __hal0Toast: unknown }).__hal0Toast = toast
+      const writeText = vi.fn(async () => {})
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+      mount()
+      await click(button('Copy commands'))
+      expect(writeText).toHaveBeenCalledWith(
+        'sudo chgrp -R <hal0 group> /srv/models/comfyui/models\nsudo chmod -R 2775 /srv/models/comfyui/models',
+      )
+      expect(toast).toHaveBeenLastCalledWith('Commands copied', 'ok')
+
+      Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true })
+      ;(document as unknown as { execCommand: unknown }).execCommand = vi.fn(() => false)
+      await click(button('Copy commands'))
+      expect(toast).toHaveBeenLastCalledWith('Could not copy: select the commands and copy them by hand', 'err')
+    })
   })
 
   it('shows the message and Retry, but no commands, when the server names no path', async () => {
@@ -831,6 +959,27 @@ describe('ImageModelsPanel', () => {
     expect(props.onGenerate).not.toHaveBeenCalled()
   })
 
+  it('shows the suggestion disabled as Installing while its target downloads', async () => {
+    box.models = catalog([lightning({ state: 'none', missing_gb: 6.9 }), turbo(), qwen()])
+    box.jobs = [job({ model_id: 'sdxl-lightning', state: 'running' })]
+    mount()
+
+    const suggest = byId('imp-suggest-qwen-image')!
+    // Not a second Install for a download that is already running.
+    expect(button(/^Install /, suggest)).toBeUndefined()
+    const busy = button('Installing SDXL Lightning (8-step)…', suggest)
+    expect(busy).toBeTruthy()
+    expect(busy!.disabled).toBe(true)
+    await click(busy)
+    expect(calls).not.toContainEqual(['install', 'sdxl-lightning'])
+
+    // The job ends: the suggestion offers what it did before.
+    box.jobs = [job({ model_id: 'sdxl-lightning', state: 'failed' })]
+    document.body.innerHTML = ''
+    mount()
+    expect(button('Install SDXL Lightning (8-step) · 6.9 GB to download', byId('imp-suggest-qwen-image')!)).toBeTruthy()
+  })
+
   it('reads the GB still to fetch for a partly installed suggestion, and the full size without it', () => {
     box.models = catalog([lightning({ state: 'partial', missing_gb: 2.5 }), turbo(), qwen()])
     mount()
@@ -861,6 +1010,99 @@ describe('ImageModelsPanel', () => {
     box.models = undefined
     mount()
     expect(text()).toContain('Loading models')
+  })
+
+  // The verdicts ride on the catalog, and they move with what the box has free: the catalog is
+  // re-read while this tab is the one showing.
+  it('re-reads the catalog while it is showing, and not while another tab is', () => {
+    mount()
+    expect(calls.filter(([n]) => n === 'models-hook').map(([, o]) => o)).toEqual([{ poll: true }])
+    document.body.innerHTML = ''
+    calls.length = 0
+    props.visible = false
+    mount()
+    expect(calls.filter(([n]) => n === 'models-hook').map(([, o]) => o)).toEqual([{ poll: false }])
+  })
+
+  describe('focusing a model', () => {
+    let scrolled: Element[]
+    beforeEach(() => {
+      scrolled = []
+      ;(Element.prototype as unknown as { scrollIntoView: unknown }).scrollIntoView = function (this: Element) {
+        scrolled.push(this)
+      }
+    })
+    afterEach(() => {
+      delete (Element.prototype as unknown as { scrollIntoView?: unknown }).scrollIntoView
+    })
+
+    // The 409 "not installed" link on the Generate tab names the model it wants.
+    it('scrolls the asked-for card into view and focuses it', () => {
+      props.focusModelId = 'qwen-image'
+      props.focusSeq = 1
+      mount()
+      expect(document.activeElement).toBe(card('qwen-image'))
+      expect(scrolled).toEqual([card('qwen-image')])
+    })
+
+    it('opens the More group of a full-precision variant that waits behind it', () => {
+      box.models = catalog([lightning(), ltx(), ltxBf16()])
+      const { rerender } = mount()
+      expect(card('ltx2-t2v-bf16')).toBeNull()
+      props.focusModelId = 'ltx2-t2v-bf16'
+      props.focusSeq = 1
+      rerender()
+      expect(document.activeElement).toBe(card('ltx2-t2v-bf16'))
+    })
+
+    it('clears a filter that hides the card', async () => {
+      const { rerender } = mount()
+      await click(button('Installed'))
+      expect(card('qwen-image')).toBeNull()
+      props.focusModelId = 'qwen-image'
+      props.focusSeq = 1
+      rerender()
+      expect(document.activeElement).toBe(card('qwen-image'))
+    })
+
+    it('does it again for a new request, even for the model asked for before', () => {
+      props.focusModelId = 'qwen-image'
+      props.focusSeq = 1
+      const { rerender } = mount()
+      ;(document.activeElement as HTMLElement).blur()
+      expect(document.activeElement).not.toBe(card('qwen-image'))
+
+      props.focusSeq = 2
+      rerender()
+      expect(document.activeElement).toBe(card('qwen-image'))
+
+      props.focusModelId = 'sdxl-turbo'
+      props.focusSeq = 3
+      rerender()
+      expect(document.activeElement).toBe(card('sdxl-turbo'))
+    })
+
+    it('waits for the catalog to arrive', () => {
+      box.models = undefined
+      props.focusModelId = 'qwen-image'
+      props.focusSeq = 1
+      const { rerender } = mount()
+      expect(document.activeElement).toBe(document.body)
+      box.models = catalog([lightning(), turbo(), qwen()])
+      rerender()
+      expect(document.activeElement).toBe(card('qwen-image'))
+    })
+
+    it('does nothing when the model is not in the catalog, and nothing without a request', () => {
+      props.focusModelId = 'no-such-model'
+      props.focusSeq = 1
+      mount()
+      expect(scrolled).toEqual([])
+      document.body.innerHTML = ''
+      props.focusModelId = undefined
+      mount()
+      expect(scrolled).toEqual([])
+    })
   })
 })
 
@@ -895,6 +1137,34 @@ describe('FitMeter', () => {
     expect(same.textContent).not.toContain('judged at')
     const bare = render(<FitMeter fit={fit('fits') as never} engineAvailable size="1024x1024" />)
     expect(bare.textContent).not.toContain('judged at')
+  })
+
+  it('labels the GPU figure as free for a render, and RAM as plain free', () => {
+    const host = render(
+      <FitMeter
+        fit={
+          fit('fits', {
+            need: { gpu_gb: 10.2, ram_gb: 12.4, gpu_estimated: false, ram_estimated: false },
+            render_free_gb: 58.2,
+            ram_free_gb: 52.9,
+          }) as never
+        }
+        engineAvailable
+        id="x"
+      />,
+    )
+    const gpu = text(host.querySelector('[data-testid="fit-bar-gpu-x"]')!)
+    const ram = text(host.querySelector('[data-testid="fit-bar-ram-x"]')!)
+    expect(gpu).toContain('58.2 GB free for a render')
+    expect(ram).toContain('52.9 GB free')
+    expect(ram).not.toContain('for a render')
+  })
+
+  it('says the verdict is for one image when asked to', () => {
+    const on = render(<FitMeter fit={fit('fits') as never} engineAvailable perImage />)
+    expect(on.textContent).toContain('judged for one image')
+    const off = render(<FitMeter fit={fit('fits') as never} engineAvailable />)
+    expect(off.textContent).not.toContain('judged for one image')
   })
 
   it('draws the need as a share of what is free, capped at the whole bar', () => {

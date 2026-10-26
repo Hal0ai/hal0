@@ -7,9 +7,10 @@
 // meters'. The cards are EngineCard.jsx, EditorCard.jsx and EngineStatCards.jsx; the facts and the
 // fixed words are engine-pure.ts.
 //
-// Mounted by ImageGenTabs inside the pane's `.comfy-page` wrapper (the `--comfy*` tokens). It
-// stays mounted while another tab shows, so `visible` slows its /status poll to the idle cadence
-// and keeps it from reading the log.
+// Mounted by ImageGenTabs, which keeps it mounted while another tab shows. `visible` stops the
+// engine card reading the log while hidden, and puts this tab's own /status observer on the idle
+// cadence. It does not slow /status itself: the status line above the tabs observes the same query
+// at the active cadence (4 s, 2 s while busy) whatever tab shows.
 import './image-engine.css'
 import { useArbiter, useComfyui } from '@/api/hooks/useComfyui'
 import { EditorCard } from './EditorCard'

@@ -17,3 +17,9 @@ export function slotsSub(param: string | null | undefined): string | null {
   if (!param) return null
   return param.split('/')[1] || null
 }
+
+/** Whether a route is the Image Gen pane (`#slots/image[/<sub>]`). The pane's own GPU status line
+ *  says what the global image-mode banner would, so the banner is not shown there. */
+export function isImageGenRoute(route: string | null | undefined, param: string | null | undefined): boolean {
+  return route === 'slots' && slotsTab(param) === 'image'
+}

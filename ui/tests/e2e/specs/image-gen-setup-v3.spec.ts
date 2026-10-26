@@ -511,3 +511,31 @@ test.describe('Image Gen setup: holding image mode', () => {
     await expect(dialog).toHaveCount(0)
   })
 })
+
+// ── the global banner ────────────────────────────────────────────────────────
+
+test.describe('Image Gen setup: the global image-mode banner', () => {
+  test('is not drawn on the Image Gen pane, where the status line says the same, and is on other pages', async ({
+    page,
+  }) => {
+    const mock = makeImageGenMock({ memory: referenceBoxMemory() })
+    setBox(mock, { ...IMAGE_MODE, pinned: true })
+    await routeImageGen(page, mock)
+    const banner = page.locator('.view-banners .banner-heading', { hasText: 'Image mode pinned' })
+
+    await gotoImageGen(page)
+    await expect(head(page)).toHaveText('Image mode pinned')
+    // The arbiter has answered (the line is drawn from it) and the banner is still not there, on
+    // any of the pane's tabs.
+    await expect(banner).toHaveCount(0)
+    for (const sub of ['generate', 'models', 'engine'] as const) {
+      await gotoImageGen(page, sub)
+      await expect(page.getByTestId(`igt-tab-${sub}`)).toHaveAttribute('aria-selected', 'true')
+      await expect(banner).toHaveCount(0)
+    }
+
+    // Anywhere else in the dashboard the banner is the only word of it.
+    await page.goto('/#services')
+    await expect(banner).toHaveCount(1, POLL)
+  })
+})

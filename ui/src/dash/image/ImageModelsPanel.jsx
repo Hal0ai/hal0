@@ -7,10 +7,12 @@
 // judges a fit. The pure parts (grouping, filters, badges, the removal plan, the first-run
 // picks) are image-models-pure.ts and models-panel-pure.ts.
 //
-// Mounted by ImageGenTabs inside the pane's `.comfy-page` wrapper (the `--comfy*` tokens).
+// Mounted by ImageGenTabs, which keeps it mounted while another tab shows (`visible` says which).
 // `onGenerate(modelId)` switches to the Generate tab with that model; `onOpenEditor(modelId)`
-// opens the ComfyUI editor for an editor-only model.
-import { useMemo, useRef, useState } from 'react'
+// opens the ComfyUI editor for an editor-only model. `focusModelId` asks for a model's card to be
+// scrolled to and focused (the Generate tab's "not installed" link); `focusSeq` makes a repeat
+// request a new one.
+import { useEffect, useMemo, useRef, useState } from 'react'
 import './image.css'
 import { isImageJobActive } from '@/api/hooks/imageJobState'
 import {
@@ -23,6 +25,7 @@ import {
 } from '@/api/hooks/useComfyui'
 import { fmtBytes } from '@/api/hooks/useModels'
 import { useMemoryBudget } from '@/api/hooks/useStatsHardware'
+import { copyTextToClipboard } from '@/lib/clipboard'
 import { ConfirmDialog } from '@/dash/primitives.jsx'
 import { useCapabilitySelection } from '@/dash/settings/pages/capabilities/useCapabilitySelection.js'
 import { groupByTask, renderableInstalled } from './image-models-pure'
@@ -54,13 +57,10 @@ function Unreadable({ error, onRetry }) {
   // honest to put in them, so the message and Retry stand alone.
   const path = typeof error.details?.path === 'string' ? error.details.path : ''
   const commands = path ? fixCommands(path).join('\n') : ''
+  // hal0 is often served over plain http on a LAN, where there is no navigator.clipboard.
   const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(commands)
-      note('Commands copied', 'ok')
-    } catch {
-      note('Could not copy: select the commands and copy them by hand', 'err')
-    }
+    if (await copyTextToClipboard(commands)) note('Commands copied', 'ok')
+    else note('Could not copy: select the commands and copy them by hand', 'err')
   }
   return (
     <div className="imp" data-testid="imp-panel">
@@ -154,9 +154,13 @@ function RemoveBody({ plan, filesKnown, filesLoading, error }) {
  * @param {object} props
  * @param {(modelId: string) => void} props.onGenerate   open the Generate tab with this model
  * @param {(modelId: string) => void} props.onOpenEditor open the ComfyUI editor for this model
+ * @param {boolean} [props.visible]  this tab is the one showing: the catalog is re-read only then
+ * @param {string} [props.focusModelId]  scroll to this model's card and focus it
+ * @param {number} [props.focusSeq]      bumped on every such request, so a repeat is a new one
  */
-export function ImageModelsPanel({ onGenerate, onOpenEditor }) {
-  const modelsQuery = useComfyuiModels()
+export function ImageModelsPanel({ onGenerate, onOpenEditor, visible = true, focusModelId, focusSeq = 0 }) {
+  // The verdict on every card moves with what the box has free: re-read it while the tab shows.
+  const modelsQuery = useComfyuiModels({ poll: visible })
   const jobsQuery = useImageJobs()
   // The scan walks the tree and sniffs headers: it runs only while a removal is being confirmed.
   const [removing, setRemoving] = useState(null)
@@ -172,6 +176,7 @@ export function ImageModelsPanel({ onGenerate, onOpenEditor }) {
   const [installErrors, setInstallErrors] = useState({})
   const [removeError, setRemoveError] = useState(null)
   const listRef = useRef(null)
+  const rootRef = useRef(null)
 
   const jobs = jobsQuery.data
   const rates = useJobRates(jobs, jobsQuery.dataUpdatedAt || 0)
@@ -179,6 +184,34 @@ export function ImageModelsPanel({ onGenerate, onOpenEditor }) {
 
   const data = modelsQuery.data
   const models = data?.models
+
+  // ── focusing a model ───────────────────────────────────────────────────────
+
+  // A request names a model; it is met once its card is on screen. A filter that hides the card is
+  // cleared and a group folded behind "More" is opened first, and a catalog that has not arrived
+  // yet is waited for. A model the catalog does not list is let go.
+  const [wanted, setWanted] = useState(null)
+  useEffect(() => {
+    setWanted(focusModelId ? { id: focusModelId, seq: focusSeq } : null)
+  }, [focusModelId, focusSeq])
+  const wantedModel = wanted && models ? models.find((m) => m.id === wanted.id) : null
+  useEffect(() => {
+    if (!wanted || !models) return
+    if (!wantedModel) {
+      setWanted(null)
+      return
+    }
+    const card = rootRef.current?.querySelector(`[data-testid="imp-card-${CSS.escape(wanted.id)}"]`)
+    if (!card) {
+      // Hidden by the filter or folded away: show it, and come back when it has rendered.
+      setFilter('all')
+      setExpanded((prev) => (prev[wantedModel.task] ? prev : { ...prev, [wantedModel.task]: true }))
+      return
+    }
+    card.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
+    card.focus({ preventScroll: true })
+    setWanted(null)
+  })
   const defaultId = sel.selection?.enabled && sel.selection?.model ? sel.selection.model : null
 
   // An unreadable tree replaces the panel whatever it showed before: the catalog it holds is
@@ -268,7 +301,7 @@ export function ImageModelsPanel({ onGenerate, onOpenEditor }) {
       ? recommendationReason(recommendation, memory.data?.ram?.source)
       : null
   const firstRunError = picks
-    ? [picks.recommended, ...picks.others].map((m) => installErrors[m.id]).find(Boolean) || null
+    ? [picks.lead, ...picks.others].map((m) => installErrors[m.id]).find(Boolean) || null
     : null
 
   const groups = groupByTask(models.filter((m) => passesFilter(m, filter, available)))
@@ -280,7 +313,7 @@ export function ImageModelsPanel({ onGenerate, onOpenEditor }) {
   const free = data.store?.free_gb
 
   return (
-    <div className="imp" data-testid="imp-panel">
+    <div className="imp" data-testid="imp-panel" ref={rootRef}>
       {!available && (
         <div className="imp-note" role="status" data-testid="imp-engine-note">
           Image generation is unavailable on this host{data.engine?.reason ? `: ${data.engine.reason}` : '.'}
@@ -332,20 +365,24 @@ export function ImageModelsPanel({ onGenerate, onOpenEditor }) {
               <span className="ct">· {group.models.length}</span>
             </h3>
             <div className="imp-grid">
-              {shown.map((m) => (
-                <ImageModelCard
-                  key={m.id}
-                  model={m}
-                  job={jobFor(m)}
-                  rate={rates[m.id]}
-                  engineAvailable={available}
-                  isDefault={defaultId === m.id}
-                  alternative={available && m.fit?.verdict === 'wont_fit' ? suggestAlternative(m, models) : null}
-                  installError={installErrors[m.id]}
-                  actions={actions}
-                  settingDefault={sel.applyCapability.isPending}
-                />
-              ))}
+              {shown.map((m) => {
+                const alternative = available && m.fit?.verdict === 'wont_fit' ? suggestAlternative(m, models) : null
+                return (
+                  <ImageModelCard
+                    key={m.id}
+                    model={m}
+                    job={jobFor(m)}
+                    rate={rates[m.id]}
+                    engineAvailable={available}
+                    isDefault={defaultId === m.id}
+                    alternative={alternative}
+                    alternativeJob={alternative ? jobFor(alternative) : null}
+                    installError={installErrors[m.id]}
+                    actions={actions}
+                    settingDefault={sel.applyCapability.isPending}
+                  />
+                )
+              })}
             </div>
             {hidden.length > 0 && (
               <button

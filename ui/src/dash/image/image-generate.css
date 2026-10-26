@@ -1,8 +1,7 @@
 /*
  * The Image Gen pane's Generate tab (ImageGeneratePanel.jsx).
  *
- * The panel renders inside the pane's `.comfy-page` wrapper, so the `--comfy*` tokens are there;
- * these rules use the plain dashboard tokens and take the blue accent from `--comfy` where it has
+ * These rules use the plain dashboard tokens and take the blue accent from `--comfy` where it has
  * one, as image.css does. The fit meter is image.css's; the form controls are the dashboard's own
  * (`.input`, `.btn`, `.chip`, the RichSelect).
  */
@@ -81,6 +80,8 @@
 .gen-fit { min-width: 0; }
 .gen-fit:empty { display: none; }
 .gen-fit-note { font-family: var(--jbm); font-size: 11.5px; color: var(--fg-3); }
+/* The last verdict, kept up while the next one is read: dimmed, so it does not read as the answer. */
+.gen-fit[data-stale='true'] .fm { opacity: 0.5; }
 
 /* The button, its reason and the cost line */
 .gen-go { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; min-width: 0; }

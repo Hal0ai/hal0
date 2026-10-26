@@ -32,6 +32,12 @@ const { box, calls } = vi.hoisted(() => ({
     fitBySize: {} as Record<string, Json | null>,
     // The size the server says it judged, when it is not the one asked (it clamps and floors).
     judgedAs: {} as Record<string, string>,
+    // Where the /fit query for the current model and size is: 'ready' (its verdict is in),
+    // 'first' (asked, nothing to show yet) or 'stale' (the last model/size's verdict is on screen
+    // as a placeholder, `staleFit`). The real hook is disabled for a `ckpt/` id and answers none
+    // of these; the mock answers them for a checkpoint too, to pin that the panel never waits.
+    fitState: 'ready' as 'ready' | 'first' | 'stale',
+    staleFit: null as Json | null,
     // What generateImage does with a request. Set per test.
     generate: undefined as ((vars: GenVars) => Promise<unknown>) | undefined,
     cancelFail: undefined as Error | undefined,
@@ -56,10 +62,14 @@ vi.mock('@/api/hooks/useComfyui', async (importOriginal) => ({
   // The real hook is disabled for a `ckpt/` id and answers nothing.
   useModelFit: (id: string, size: string) => {
     calls.push(['fit', [id, size]])
-    if (!id || id.startsWith('ckpt/')) return { data: undefined, isLoading: false }
+    if (box.fitState === 'first') return { data: undefined, isLoading: true, isPlaceholderData: false }
+    if (box.fitState === 'stale') {
+      return { data: { fit: box.staleFit, size: '1024x1024' }, isLoading: false, isPlaceholderData: true }
+    }
+    if (!id || id.startsWith('ckpt/')) return { data: undefined, isLoading: false, isPlaceholderData: false }
     const hit = size in box.fitBySize ? box.fitBySize[size] : fit('fits')
     const judged = box.judgedAs[size] ?? size
-    return { data: { fit: hit, size: judged }, isLoading: false }
+    return { data: { fit: hit, size: judged }, isLoading: false, isPlaceholderData: false }
   },
   useComfyuiRenderCancel: () => ({
     mutateAsync: async () => {
@@ -400,6 +410,8 @@ beforeEach(() => {
   box.memory = memoryBody()
   box.fitBySize = {}
   box.judgedAs = {}
+  box.fitState = 'ready'
+  box.staleFit = null
   box.generate = undefined
   box.cancelFail = undefined
   calls.length = 0
@@ -738,6 +750,77 @@ describe('ImageGeneratePanel: fit and the cost line', () => {
     await click(byId('gen-size-1344x768'))
     expect(submit().disabled).toBe(false)
     expect(byId('gen-blocked')).toBeNull()
+  })
+
+  describe('while the verdict for the current model and size is loading', () => {
+    it('holds Generate on the first look, saying so', () => {
+      box.fitState = 'first'
+      const { rerender } = mount()
+      type(prompt(), 'a cat')
+      expect(submit().disabled).toBe(true)
+      expect(text(byId('gen-fit-loading'))).toBe('Checking fit…')
+
+      box.fitState = 'ready'
+      rerender()
+      expect(submit().disabled).toBe(false)
+      expect(byId('gen-fit-loading')).toBeNull()
+    })
+
+    // The last verdict stays on screen while the next one is read (no flash), but it is another
+    // model's or size's: it neither lets a render through nor stops one.
+    it('holds Generate while the last verdict is only a placeholder, and does not act on it', () => {
+      box.fitState = 'stale'
+      box.staleFit = fit('fits')
+      const { rerender } = mount()
+      type(prompt(), 'a cat')
+      expect(submit().disabled).toBe(true)
+      expect(text(byId('gen-fit-loading'))).toBe('Checking fit…')
+      // The old meter is still there, marked as out of date.
+      expect(byId('fit-meter-gen')).not.toBeNull()
+      expect(byId('gen-fit')?.getAttribute('data-stale')).toBe('true')
+
+      // A placeholder that says "won't fit" blocks nothing by its own sentence either.
+      box.staleFit = fit('wont_fit')
+      rerender()
+      expect(submit().disabled).toBe(true)
+      expect(byId('gen-blocked')).toBeNull()
+
+      box.fitState = 'ready'
+      rerender()
+      expect(submit().disabled).toBe(false)
+      expect(byId('gen-fit')?.getAttribute('data-stale')).toBeNull()
+    })
+
+    it('never holds a user checkpoint, which has no /fit', async () => {
+      box.files = { root: '/m', files: [ckptFile()] }
+      const { rerender } = mount()
+      await pickModel('ckpt/sdxl/my-model')
+      type(prompt(), 'a cat')
+      expect(submit().disabled).toBe(false)
+      for (const state of ['first', 'stale'] as const) {
+        box.fitState = state
+        box.staleFit = fit('wont_fit')
+        rerender()
+        expect(submit().disabled, state).toBe(false)
+        expect(text(byId('gen-fit-skipped'))).toBe('Fit is checked when you generate.')
+        expect(byId('gen-blocked')).toBeNull()
+      }
+    })
+  })
+
+  it('says the verdict is for one image when more than one is asked for', async () => {
+    mount()
+    await click(byId('gen-more'))
+    expect(text(byId('gen-fit'))).not.toContain('judged for one image')
+    type(field('gen-n'), '3')
+    expect(text(byId('gen-fit'))).toContain('judged for one image')
+    type(field('gen-n'), '1')
+    expect(text(byId('gen-fit'))).not.toContain('judged for one image')
+    // Nothing to qualify when there is no verdict.
+    box.fitBySize = { '1024x1024': null }
+    type(field('gen-n'), '4')
+    expect(byId('fit-meter-gen')).toBeNull()
+    expect(text(byId('gen-fit'))).not.toContain('judged for one image')
   })
 
   it('shows no verdict, and blocks nothing, when the box budget is unknown', () => {

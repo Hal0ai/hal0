@@ -2,8 +2,7 @@
  * The GPU status line (ImageStatusLine.jsx). Board A: a coloured left rule and dot, the headline
  * and detail, the actions on the right.
  *
- * Plain dashboard tokens only: the line is mounted inside the Image Gen pane (`.comfy-page`) and
- * is reused outside it, where the `--comfy*` tokens do not exist.
+ * Plain dashboard tokens only, never the `--comfy*` accent.
  */
 .isl {
   --isl-c: var(--fg-4);

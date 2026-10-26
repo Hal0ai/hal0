@@ -2,15 +2,18 @@
  * The Image Gen pane's frame (ImageGenTabs.jsx): the status line, the Generate | Models | Engine
  * sub-tabs and their panels.
  *
- * The root carries `.comfy-page`, so the `--comfy*` tokens exist for everything inside. The rules
- * use the plain dashboard tokens and take the blue accent from `--comfy`.
+ * The root carries `.comfy-page`, which is only a marker: it scopes no rule (dashboard.css defines
+ * the `--comfy*` tokens on :root). The rules use the plain dashboard tokens and take the blue
+ * accent from `--comfy`.
  */
 .igt { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 
 .igt-tabs {
   display: flex;
   gap: 4px;
-  border-bottom: 1px solid var(--line);
+  /* The 1px rule under the strip is an inset shadow, not a border: a tab paints over it, so the
+     active tab's 2px underline covers the rule instead of sitting on top of a border below it. */
+  box-shadow: inset 0 -1px 0 var(--line);
   /* Three tabs and a long Models label ("Models · 2 downloading") can outrun a phone: scroll, not
      wrap, so the underline stays one row. */
   overflow-x: auto;

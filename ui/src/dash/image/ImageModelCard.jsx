@@ -3,7 +3,7 @@
 //
 // Everything arrives as props from ImageModelsPanel, which owns the data and the mutations. The
 // install-lifecycle button (Install, Cancel or Remove) is `stateAction`'s; the verdict is the
-// server's, drawn by FitMeter. The panel renders inside the pane's `.comfy-page` wrapper.
+// server's, drawn by FitMeter.
 import './image.css'
 import { isImageJobActive } from '@/api/hooks/imageJobState'
 import { FitMeter } from './FitMeter'
@@ -81,6 +81,8 @@ function Progress({ id, job, rate }) {
  * @param {boolean} props.isDefault   the img capability's selected model
  * @param {import('@/api/hooks/useComfyui').ComfyuiCatalogModel | null} props.alternative
  *   what to offer in place of this model when the server says it won't fit
+ * @param {import('@/api/hooks/useComfyui').ImageJob | null} [props.alternativeJob]
+ *   the alternative's freshest install job: while it runs the suggestion cannot be pressed again
  * @param {string | undefined} props.installError   the server's message for a refused install
  * @param {{
  *   onInstall: (m: object) => void, onCancel: (m: object) => void, onRemove: (m: object) => void,
@@ -96,6 +98,7 @@ export function ImageModelCard({
   engineAvailable,
   isDefault,
   alternative,
+  alternativeJob = null,
   installError,
   actions,
   settingDefault = false,
@@ -116,10 +119,13 @@ export function ImageModelCard({
   ].filter(Boolean)
 
   return (
+    // tabIndex -1: not in the tab order, but focusable by script (the Generate tab's "not
+    // installed" link focuses the card of the model it names).
     <article
       className="imp-card"
       data-testid={`imp-card-${model.id}`}
       data-complete={complete ? 'true' : 'false'}
+      tabIndex={-1}
     >
       <div className="imp-card-h">
         <span className="imp-name">{model.label}</span>
@@ -131,9 +137,16 @@ export function ImageModelCard({
 
       {alternative && (
         <div className="imp-suggest" data-testid={`imp-suggest-${model.id}`}>
-          <button className="btn sm" onClick={() => actions.onUseAlternative(alternative)}>
-            {suggestionLabel(alternative)}
-          </button>
+          {isImageJobActive(alternativeJob) && alternative.state !== 'complete' ? (
+            // Its download is running (started here or on its own card): not a second Install.
+            <button className="btn sm" disabled>
+              Installing {alternative.label}…
+            </button>
+          ) : (
+            <button className="btn sm" onClick={() => actions.onUseAlternative(alternative)}>
+              {suggestionLabel(alternative)}
+            </button>
+          )}
           {alternative.state === 'complete' && <span>installed</span>}
         </div>
       )}

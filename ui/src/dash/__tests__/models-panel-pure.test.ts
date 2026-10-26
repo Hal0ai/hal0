@@ -3,6 +3,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ComfyuiCatalogModel, Fit } from '@/api/hooks/useComfyui'
 import {
+  downloadGb,
   fixCommands,
   fmtEta,
   firstRunPicks,
@@ -169,6 +170,59 @@ describe('firstRunPicks', () => {
   it('is null without a recommended renderable model', () => {
     expect(firstRunPicks([model({ id: 'a' })])).toBeNull()
     expect(firstRunPicks([model({ id: 'a', recommended: true, api_renderable: false })])).toBeNull()
+  })
+
+  it('leads with the recommended model when it fits (or has no verdict)', () => {
+    for (const verdict of ['fits', 'tight'] as const) {
+      const picks = firstRunPicks([
+        model({ id: 'rec', recommended: true, fit: fit(verdict) }),
+        model({ id: 'small', approx_gb: 4 }),
+      ])
+      expect(picks?.lead.id).toBe('rec')
+    }
+    expect(firstRunPicks([model({ id: 'rec', recommended: true, fit: null })])?.lead.id).toBe('rec')
+  })
+
+  // The picker and the fit check can disagree (#3076): a recommended model the server says won't
+  // fit must not lead the block with an install button.
+  it("leads with the largest renderable model that fits when the recommended one won't", () => {
+    const models = [
+      model({ id: 'rec', recommended: true, approx_gb: 48, fit: fit('wont_fit') }),
+      model({ id: 'tiny', approx_gb: 4 }),
+      model({ id: 'big', approx_gb: 12 }),
+      model({ id: 'huge', approx_gb: 30, fit: fit('wont_fit') }),
+      model({ id: 'video', api_renderable: false, approx_gb: 2 }),
+    ]
+    const picks = firstRunPicks(models)
+    expect(picks?.recommended.id).toBe('rec')
+    expect(picks?.lead.id).toBe('big')
+    // The recommended model stays as a small card, first, then the smallest other one.
+    expect(picks?.others.map((m) => m.id)).toEqual(['rec', 'tiny'])
+  })
+
+  it("keeps the recommended model in the lead when nothing else fits", () => {
+    const picks = firstRunPicks([
+      model({ id: 'rec', recommended: true, fit: fit('wont_fit') }),
+      model({ id: 'other', approx_gb: 8, fit: fit('wont_fit') }),
+      model({ id: 'unknown', approx_gb: 5, fit: null }),
+    ])
+    // An unknown verdict is not a verdict that it fits.
+    expect(picks?.lead.id).toBe('rec')
+    expect(picks?.others.map((m) => m.id)).toEqual(['unknown', 'other'])
+  })
+})
+
+describe('downloadGb', () => {
+  it('is the whole size for a model with nothing on disk', () => {
+    expect(downloadGb(model({ state: 'none', approx_gb: 7.1, missing_gb: 7.1 }))).toBe(7.1)
+  })
+
+  it('is what is still missing for a partly installed model', () => {
+    expect(downloadGb(model({ state: 'partial', approx_gb: 7.1, missing_gb: 2.4 }))).toBe(2.4)
+  })
+
+  it('falls back to the whole size when a partial model reports nothing missing', () => {
+    expect(downloadGb(model({ state: 'partial', approx_gb: 7.1, missing_gb: 0 }))).toBe(7.1)
   })
 })
 

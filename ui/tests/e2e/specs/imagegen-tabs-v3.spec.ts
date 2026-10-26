@@ -45,6 +45,31 @@ test.describe('Image Gen pane: tabs', () => {
     expect(await page.evaluate(() => history.length)).toBe(entries)
   })
 
+  // The strip's 1px rule runs under every tab, and the active tab's 2px underline covers it. A rule
+  // drawn as a border below the tabs would leave the underline stacked on top of it, 1px higher.
+  test("the active tab's underline overlaps the strip's 1px rule", async ({ page }) => {
+    await routeImageGen(page, makeImageGenMock())
+    await gotoImageGen(page, 'generate')
+
+    const geo = await page.evaluate(() => {
+      const strip = document.querySelector('.igt-tabs') as HTMLElement
+      const tab = document.querySelector('.igt-tab.on') as HTMLElement
+      const inactive = document.querySelector('.igt-tab:not(.on)') as HTMLElement
+      return {
+        stripBottom: strip.getBoundingClientRect().bottom,
+        tabBottom: tab.getBoundingClientRect().bottom,
+        inactiveBottom: inactive.getBoundingClientRect().bottom,
+        stripBorder: getComputedStyle(strip).borderBottomWidth,
+        underline: getComputedStyle(tab).borderBottomWidth,
+      }
+    })
+    expect(geo.underline).toBe('2px')
+    // Nothing sits between the tab and the strip's edge: the rule is behind the tab, not under it.
+    expect(geo.stripBorder).toBe('0px')
+    expect(geo.tabBottom).toBeCloseTo(geo.stripBottom, 1)
+    expect(geo.inactiveBottom).toBeCloseTo(geo.stripBottom, 1)
+  })
+
   test('the sidebar and the Slots tab mark Image Gen on a sub-tab route', async ({ page }) => {
     await routeImageGen(page, makeImageGenMock())
     await gotoImageGen(page, 'generate')

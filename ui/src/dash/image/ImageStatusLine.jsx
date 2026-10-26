@@ -6,8 +6,7 @@
 // progress figures and slot-card note are status-line-parts-pure.ts's; what a button calls is
 // useStatusLineActions.ts's. This file merges the responses and draws.
 //
-// It sits outside the pane's `.comfy-page` scope as often as inside it (the Engine tab, tests),
-// so it uses the plain dashboard tokens, never the `--comfy*` ones.
+// It draws with the plain dashboard tokens, not the `--comfy*` accent.
 import { useEffect, useReducer } from 'react'
 import './image-status-line.css'
 import { useArbiter, useComfyui, useComfyuiModels } from '@/api/hooks/useComfyui'
@@ -150,10 +149,14 @@ export function ImageStatusLine({ ownRun = false, onCancelOwnRun }) {
   useTick(env?.arbiter?.phase === 'grace' || facts.renderRunning)
 
   const nowS = Date.now() / 1000
+  // `restore_at` is on the server's clock and the browser's can be off: the countdown is taken on
+  // the server's (`skewMs` is read off each /arbiter answer's Date header, 0 when it has none).
+  // The render time below stays on the browser's clock, both ends of it being the browser's.
+  const skewS = (env?.skewMs ?? 0) / 1000
   const view = statusLine(env, status, memory, {
     slots,
     dismissedAt,
-    now: nowS,
+    now: nowS - skewS,
     engineAvailable,
     ownRun,
   })
@@ -191,7 +194,8 @@ export function ImageStatusLine({ ownRun = false, onCancelOwnRun }) {
     >
       <span className="isl-dot" aria-hidden="true" />
       <div className="isl-main">
-        <div className="isl-head" data-testid="image-status-head">
+        {/* The one live region of the line: the detail and the buttons change with every poll. */}
+        <div className="isl-head" data-testid="image-status-head" aria-live="polite">
           {view.head}
         </div>
         {view.detail && (

@@ -2,8 +2,7 @@
  * The Image Gen pane's Engine tab (ImageEngineTab.jsx, EngineCard.jsx, EditorCard.jsx,
  * EngineStatCards.jsx).
  *
- * The tab renders inside the pane's `.comfy-page` wrapper, so the `--comfy*` tokens are there;
- * these rules use the plain dashboard tokens and take the blue accent from `--comfy` where it has
+ * These rules use the plain dashboard tokens and take the blue accent from `--comfy` where it has
  * one, as image.css does. Nothing here depends on the old pane's card classes.
  */
 .ie {

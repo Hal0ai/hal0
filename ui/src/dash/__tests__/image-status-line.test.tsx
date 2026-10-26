@@ -252,6 +252,18 @@ describe('ImageStatusLine', () => {
     expect(Array.from(line.querySelectorAll('button')).map((b) => b.textContent)).toEqual(['Hold image mode'])
   })
 
+  // Only the headline is announced. The detail and the buttons change with every poll and a
+  // screen reader would read each of them out as well.
+  it('announces the headline politely, and nothing else on the line', () => {
+    mount(<ImageStatusLine />)
+    const line = byId('image-status-line')!
+    const live = Array.from(line.querySelectorAll('[aria-live]'))
+    expect(live).toEqual([byId('image-status-head')])
+    expect(byId('image-status-head')!.getAttribute('aria-live')).toBe('polite')
+    expect(line.getAttribute('aria-live')).toBeNull()
+    expect(byId('image-status-detail')!.getAttribute('aria-live')).toBeNull()
+  })
+
   it('hold asks first, and a confirmed hold calls switchover with pin', async () => {
     mount(<ImageStatusLine />)
     await click(button('Hold image mode'))
@@ -309,6 +321,39 @@ describe('ImageStatusLine', () => {
       vi.advanceTimersByTime(3000)
     })
     expect(byId('image-status-head')!.textContent).toBe('Image mode ends in 5 s')
+  })
+
+  // `restore_at` is on the server's clock. The hook keeps the browser's skew against it
+  // (`skewMs`, from the response's Date header); the countdown is taken on the server's clock.
+  it('counts the grace down on the server clock when the browser clock is ahead', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2026, 9, 25, 12, 0, 30))
+    // The server says 8 s left; the browser is 30 s ahead, so restore_at is 22 s in its past.
+    const serverNow = Date.now() / 1000 - 30
+    box.arbiter = { ...envelope({ mode: 'img', phase: 'grace', restore_at: serverNow + 8 }), skewMs: 30_000 }
+    mount(<ImageStatusLine />)
+    expect(byId('image-status-head')!.textContent).toBe('Image mode ends in 8 s')
+    act(() => {
+      vi.advanceTimersByTime(3000)
+    })
+    expect(byId('image-status-head')!.textContent).toBe('Image mode ends in 5 s')
+  })
+
+  it('counts the grace down on the server clock when the browser clock is behind', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2026, 9, 25, 12, 0, 0))
+    const serverNow = Date.now() / 1000 + 45
+    box.arbiter = { ...envelope({ mode: 'img', phase: 'grace', restore_at: serverNow + 8 }), skewMs: -45_000 }
+    mount(<ImageStatusLine />)
+    expect(byId('image-status-head')!.textContent).toBe('Image mode ends in 8 s')
+  })
+
+  it('takes the skew as 0 when the answer carries none', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2026, 9, 25, 12, 0, 0))
+    box.arbiter = envelope({ mode: 'img', phase: 'grace', restore_at: Date.now() / 1000 + 8 })
+    mount(<ImageStatusLine />)
+    expect(byId('image-status-head')!.textContent).toBe('Image mode ends in 8 s')
   })
 
   it('carries the render time on from the last poll', () => {

@@ -9,7 +9,7 @@
 // generate-pure.ts; the request and the results are generate-store.ts, which outlive this panel
 // (a render takes minutes, and leaving the tab does not cancel it).
 //
-// Mounted by ImageGenTabs inside the pane's `.comfy-page` wrapper (the `--comfy*` tokens).
+// Mounted by ImageGenTabs, which keeps it mounted while another tab shows.
 import { useCallback, useEffect, useId, useMemo, useReducer, useRef, useState } from 'react'
 import './image.css'
 import './image-generate.css'
@@ -194,8 +194,14 @@ export function ImageGeneratePanel({ initialModelId, pickSeq, onOpenModels, onRu
 
   // Not asked for a user checkpoint: the route 404s for it (the hook skips it too).
   const fitQuery = useModelFit(modelId, size || null)
-  const fit = fitQuery.data?.fit ?? null
-  const fitLoading = !isCheckpoint && fitQuery.isLoading && !fitQuery.data
+  const fit = isCheckpoint ? null : (fitQuery.data?.fit ?? null)
+  // The verdict for this model and size is not in yet: nothing at all to show (the first look), or
+  // the last model's or size's verdict is on screen as a placeholder (`keepPreviousData`). Either
+  // way it is not this render's verdict: Generate waits for it, and the placeholder decides
+  // nothing. A user checkpoint has no /fit and is never waited for: the /v1 preflight judges it.
+  const fitFirstLook = !isCheckpoint && fitQuery.isLoading && !fitQuery.data
+  const fitStale = !isCheckpoint && fitQuery.isPlaceholderData === true
+  const fitPending = fitFirstLook || fitStale
   const cost = costLine(arbiter?.unload_set, memory, arbiter)
   const grace = arbiter?.phase === 'grace'
 
@@ -204,12 +210,12 @@ export function ImageGeneratePanel({ initialModelId, pickSeq, onOpenModels, onRu
   // asked for). An empty prompt only disables the button.
   const blocked = !engineAvailable
     ? catalog?.engine?.reason || 'Image generation is unavailable on this host.'
-    : fit?.verdict === 'wont_fit'
+    : !fitStale && fit?.verdict === 'wont_fit'
       ? fit.reason || "Won't fit"
       : seedLocked && seedValue == null
         ? SEED_MISSING
         : null
-  const canRun = !running && !blocked && form != null && prompt.trim() !== ''
+  const canRun = !running && !blocked && !fitPending && form != null && prompt.trim() !== ''
 
   const submit = () => {
     if (!canRun) return
@@ -502,23 +508,32 @@ export function ImageGeneratePanel({ initialModelId, pickSeq, onOpenModels, onRu
           />
         )}
 
-        <div className="gen-fit" data-testid="gen-fit">
+        <div className="gen-fit" data-testid="gen-fit" data-stale={fitStale ? 'true' : undefined}>
           {isCheckpoint ? (
             <div className="gen-fit-note" data-testid="gen-fit-skipped">
               Fit is checked when you generate.
             </div>
-          ) : fitLoading && engineAvailable ? (
+          ) : fitFirstLook && engineAvailable ? (
             <div className="gen-fit-note" data-testid="gen-fit-loading">
               Checking fit…
             </div>
           ) : (
-            <FitMeter
-              fit={fit}
-              engineAvailable={engineAvailable}
-              size={fitQuery.data?.size ?? undefined}
-              requestedSize={size}
-              id="gen"
-            />
+            <>
+              {/* The last verdict stays up, dimmed, while the next is read: no flash. */}
+              <FitMeter
+                fit={fit}
+                engineAvailable={engineAvailable}
+                size={fitQuery.data?.size ?? undefined}
+                requestedSize={size}
+                perImage={form.n > 1}
+                id="gen"
+              />
+              {fitStale && engineAvailable && (
+                <div className="gen-fit-note" data-testid="gen-fit-loading">
+                  Checking fit…
+                </div>
+              )}
+            </>
           )}
         </div>
 

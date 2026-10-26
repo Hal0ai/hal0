@@ -69,6 +69,12 @@ export interface ApiOptions extends Omit<RequestInit, 'body'> {
    * Used by SSE attachments + raw download helpers.
    */
   raw?: boolean
+  /**
+   * Called with the raw `Response` before the body is read, for a caller that needs a header the
+   * parsed JSON does not carry (the arbiter hook reads `Date`). Not called when the request
+   * itself fails.
+   */
+  onResponse?: (res: Response) => void
 }
 
 function serialiseBody(body: ApiOptions['body']): BodyInit | undefined {
@@ -87,7 +93,7 @@ function serialiseBody(body: ApiOptions['body']): BodyInit | undefined {
  * exported for the SSE / WS helpers and for tests.
  */
 export async function api<T = unknown>(path: string, options: ApiOptions = {}): Promise<T> {
-  const { raw, body, headers, ...rest } = options
+  const { raw, body, headers, onResponse, ...rest } = options
   const fetcher = raw ? fetch : mockFetch
   const init: RequestInit = {
     ...rest,
@@ -99,6 +105,7 @@ export async function api<T = unknown>(path: string, options: ApiOptions = {}): 
     },
   }
   const res = await fetcher(path, init)
+  onResponse?.(res)
 
   if (!res.ok) {
     throw await readErrorEnvelope(res)

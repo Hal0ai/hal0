@@ -112,19 +112,78 @@ describe('Image Gen hooks', () => {
     document.body.innerHTML = ''
   })
 
-  it('useArbiter returns the whole envelope', async () => {
+  describe('useArbiter', () => {
     const envelope = {
       mode: 'generation',
       arbiter: arbiterBlock({ mode: 'img', phase: 'grace', restore_at: 5 }),
       switchover: { active: false, target: null, error: null },
       gate_refusal: null,
     }
-    vi.mocked(client.apiGet).mockResolvedValue(envelope)
-    const probe = mountHook(() => hooks.useArbiter(), newClient())
-    await flush()
-    expect(client.apiGet).toHaveBeenCalledWith('/api/comfyui/arbiter')
-    expect(probe.get().data).toEqual(envelope)
-    act(() => probe.root.unmount())
+    const respond = (headers: Record<string, string> = {}) =>
+      vi.fn(async () => new Response(JSON.stringify(envelope), { status: 200, headers }))
+
+    afterEach(() => {
+      vi.unstubAllGlobals()
+      vi.useRealTimers()
+    })
+
+    it('returns the whole envelope', async () => {
+      const fetchMock = respond()
+      vi.stubGlobal('fetch', fetchMock)
+      const probe = mountHook(() => hooks.useArbiter(), newClient())
+      await flush()
+      expect(fetchMock).toHaveBeenCalledWith('/api/comfyui/arbiter', expect.anything())
+      expect(probe.get().data).toMatchObject(envelope)
+      act(() => probe.root.unmount())
+    })
+
+    // The grace countdown is `restore_at` (the server's clock) less the browser's now: a browser
+    // whose clock is off would count the wrong number of seconds. The response's Date header is the
+    // server's clock, so the skew is read off it with each answer and kept with the data.
+    it('keeps the skew of the browser clock against the response Date header', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] })
+      vi.setSystemTime(new Date('2026-10-25T12:00:30Z'))
+      vi.stubGlobal('fetch', respond({ Date: 'Sun, 25 Oct 2026 12:00:00 GMT' }))
+      const probe = mountHook(() => hooks.useArbiter(), newClient())
+      await flush()
+      // The browser is 30 s ahead of the server.
+      expect(probe.get().data?.skewMs).toBe(30_000)
+      act(() => probe.root.unmount())
+    })
+
+    it('reads a browser clock that is behind as a negative skew', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] })
+      vi.setSystemTime(new Date('2026-10-25T11:59:15Z'))
+      vi.stubGlobal('fetch', respond({ Date: 'Sun, 25 Oct 2026 12:00:00 GMT' }))
+      const probe = mountHook(() => hooks.useArbiter(), newClient())
+      await flush()
+      expect(probe.get().data?.skewMs).toBe(-45_000)
+      act(() => probe.root.unmount())
+    })
+
+    it('treats a missing or unreadable Date header as no skew', async () => {
+      vi.stubGlobal('fetch', respond())
+      const missing = mountHook(() => hooks.useArbiter(), newClient())
+      await flush()
+      expect(missing.get().data?.skewMs).toBe(0)
+      act(() => missing.root.unmount())
+
+      vi.stubGlobal('fetch', respond({ Date: 'not a date' }))
+      const junk = mountHook(() => hooks.useArbiter(), newClient())
+      await flush()
+      expect(junk.get().data?.skewMs).toBe(0)
+      expect(junk.get().data?.arbiter?.phase).toBe('grace')
+      act(() => junk.root.unmount())
+    })
+
+    it('clockSkewMs: now less the server clock, or 0 when there is none to read', () => {
+      const now = Date.parse('2026-10-25T12:00:05Z')
+      expect(hooks.clockSkewMs('Sun, 25 Oct 2026 12:00:00 GMT', now)).toBe(5_000)
+      expect(hooks.clockSkewMs(null, now)).toBe(0)
+      expect(hooks.clockSkewMs(undefined, now)).toBe(0)
+      expect(hooks.clockSkewMs('', now)).toBe(0)
+      expect(hooks.clockSkewMs('garbage', now)).toBe(0)
+    })
   })
 
   it('useImageJobs unwraps the list', async () => {
@@ -260,6 +319,105 @@ describe('Image Gen hooks', () => {
     expect(client.apiGet).toHaveBeenCalledWith('/api/comfyui/models/sdxl/fit?size=1030x1030')
     expect(probe.get().data).toEqual(answer)
     act(() => probe.root.unmount())
+  })
+
+  // A hook that is drawn again with other arguments, as a panel does when its model or size changes.
+  function mountWith<T>(useHook: (arg: string) => T, qc: QueryClient) {
+    let latest!: T
+    let arg = ''
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const root = createRoot(host)
+    const Probe = () => {
+      latest = useHook(arg)
+      return null
+    }
+    return {
+      root,
+      get: () => latest,
+      draw: (next: string) => {
+        arg = next
+        act(() => {
+          root.render(React.createElement(QueryClientProvider, { client: qc }, React.createElement(Probe)))
+        })
+      },
+    }
+  }
+
+  // The size is part of the key: while the new size is judged, the last verdict stays on screen as
+  // a placeholder, flagged so the panel can hold Generate until the verdict is the current one's.
+  it('useModelFit keeps the last verdict as a placeholder while the next size is judged', async () => {
+    const fitAt = (size: string) => ({
+      fit: {
+        verdict: 'fits',
+        reason: null,
+        need: { gpu_gb: 10, ram_gb: 8, gpu_estimated: false, ram_estimated: false },
+        render_free_gb: 40,
+        ram_free_gb: 30,
+      },
+      size,
+    })
+    let release!: (v: unknown) => void
+    vi.mocked(client.apiGet).mockImplementation((path: string) =>
+      path.endsWith('size=1024x1024')
+        ? Promise.resolve(fitAt('1024x1024'))
+        : new Promise((resolve) => {
+            release = resolve
+          }),
+    )
+    const probe = mountWith((size) => hooks.useModelFit('sdxl', size), newClient())
+    probe.draw('1024x1024')
+    await flush()
+    expect(probe.get().data?.size).toBe('1024x1024')
+    expect(probe.get().isPlaceholderData).toBe(false)
+
+    probe.draw('1344x768')
+    await flush()
+    expect(probe.get().isPlaceholderData).toBe(true)
+    expect(probe.get().data?.size).toBe('1024x1024')
+
+    await act(async () => {
+      release(fitAt('1344x768'))
+    })
+    await flush()
+    expect(probe.get().isPlaceholderData).toBe(false)
+    expect(probe.get().data?.size).toBe('1344x768')
+    act(() => probe.root.unmount())
+  })
+
+  it('useModelFit shows no placeholder for a user checkpoint (its previous model is not its verdict)', async () => {
+    vi.mocked(client.apiGet).mockResolvedValue({ fit: null, size: '1024x1024' })
+    const probe = mountWith((id) => hooks.useModelFit(id, '1024x1024'), newClient())
+    probe.draw('sdxl')
+    await flush()
+    expect(probe.get().data).toBeDefined()
+    probe.draw('ckpt/styles/mine')
+    await flush()
+    expect(probe.get().data).toBeUndefined()
+    expect(probe.get().isPlaceholderData).toBe(false)
+    act(() => probe.root.unmount())
+  })
+
+  // The verdict depends on what the box has free now, and the Models cards read it off the
+  // catalog: the Models tab re-reads the catalog while it shows, so the cards track the live
+  // budget the way Generate's /fit does.
+  it('useComfyuiModels polls every 15 s while asked to, and not otherwise', async () => {
+    vi.mocked(client.apiGet).mockResolvedValue({ models: [] })
+    const qc = newClient()
+    const on = mountHook(() => hooks.useComfyuiModels({ poll: true }), qc)
+    await flush()
+    const interval = () =>
+      qc.getQueryCache().find({ queryKey: ['comfyui', 'models'] })?.observers.map((o) => o.options.refetchInterval)
+    expect(interval()).toEqual([15_000])
+    act(() => on.root.unmount())
+
+    const qc2 = newClient()
+    const off = mountHook(() => hooks.useComfyuiModels(), qc2)
+    await flush()
+    expect(
+      qc2.getQueryCache().find({ queryKey: ['comfyui', 'models'] })?.observers.map((o) => o.options.refetchInterval),
+    ).toEqual([false])
+    act(() => off.root.unmount())
   })
 
   it('useModelFit asks nothing for a user checkpoint or without a model', async () => {

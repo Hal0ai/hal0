@@ -2,9 +2,9 @@
  * The Image Gen pane's Models tab (ImageModelsPanel.jsx) and the fit meter it shares with the
  * Generate tab (FitMeter.jsx).
  *
- * The panel renders inside the pane's `.comfy-page` wrapper, so the `--comfy*` tokens are
- * there, but these rules use the plain dashboard tokens (--bg-1, --line, --fg-*, --accent...)
- * and take the blue accent from `--comfy` where it has one. The fit meter's bars are the top
+ * These rules use the plain dashboard tokens (--bg-1, --line, --fg-*, --accent...) and take the
+ * blue accent from `--comfy` where it has one (dashboard.css defines the `--comfy*` tokens on
+ * :root; `.comfy-page` on the pane's root is only a marker). The fit meter's bars are the top
  * bar's memory ruler's own classes (`th-ruler-*`, overhaul.css); only the dashed need ghost and
  * a shorter bar for a card are new here.
  */
@@ -96,6 +96,8 @@
   background: var(--bg-1);
 }
 .imp-card[data-complete='true'] { border-color: var(--comfy-line, var(--line)); }
+/* Focused by script (the "not installed" link on the Generate tab): show where it landed. */
+.imp-card:focus-visible { outline: 2px solid var(--comfy-line, var(--line-strong)); outline-offset: 2px; }
 .imp-card-h { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .imp-name { font-family: var(--jbm); font-size: 13.5px; font-weight: 500; color: var(--fg); overflow-wrap: anywhere; }
 .imp-badges { display: flex; flex-wrap: wrap; gap: 5px; }
@@ -156,6 +158,7 @@
 @media (max-width: 720px) { .imp-first-big { grid-template-columns: 1fr; } }
 .imp-first-big .imp-name { font-size: 16px; }
 .imp-first-reason { font-family: var(--jbm); font-size: 12px; color: var(--fg-3); }
+.imp-first-wont { font-family: var(--jbm); font-size: 11.5px; line-height: 1.45; color: var(--warn); overflow-wrap: anywhere; }
 .imp-first-small { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
 .imp-first-small .imp-card { padding: 12px 14px; }
 .imp-first-foot { display: flex; align-items: center; gap: 10px; }

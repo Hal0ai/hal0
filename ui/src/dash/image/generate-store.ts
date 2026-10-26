@@ -1,9 +1,10 @@
 // The Generate tab's session state: the run in flight, its error and the last 12 results.
 //
-// It lives at module level, not in the panel, because the panel is not always mounted: switching
-// to the Models tab unmounts it, and a render takes minutes. A run is not cancelled by leaving
-// the tab (the render goes on in ComfyUI whatever the browser does), so the request, its outcome
-// and the results all outlive the panel and the panel reads them back when it returns. The
+// It lives at module level, not in the panel, because the panel does not always stay mounted: the
+// tabs only hide it, but leaving the Slots page unmounts the whole pane, and a render takes
+// minutes. A run is not cancelled by leaving (the render goes on in ComfyUI whatever the browser
+// does), so the request, its outcome and the results all outlive the panel and the panel reads
+// them back when it returns. The
 // results are mirrored to sessionStorage so a reload of the tab keeps them too; every storage
 // access is guarded, since private windows and blocked site data throw.
 //
