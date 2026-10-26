@@ -175,6 +175,14 @@ const face = (page: Page, id: string) => page.getByTestId(`agent-phase-${id}`)
  *  on the back, so the click reaches the card and never a control. */
 async function flip(page: Page, id: string) {
   await card(page, id).click({ position: { x: 170, y: 24 } })
+  // The flip is a 600 ms WAAPI rotation. The console's buttons are only
+  // actionable once it lands: Playwright's stability check can pass on a frame
+  // mid-rotation when the runner is starved, and a click that then misses the
+  // button reaches the card root, whose onClick flips the card straight back
+  // (no request, no toast). Wait for the tween to finish before returning.
+  await card(page, id)
+    .locator('.fcard-inner')
+    .evaluate((el) => Promise.all(el.getAnimations().map((a) => a.finished)).then(() => undefined))
 }
 
 async function openAgents(page: Page) {
