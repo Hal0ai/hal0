@@ -11,7 +11,7 @@ export const ENDPOINTS = {
   slots: '/api/slots',
 
   // ── ComfyUI generation engine (slots-page Image-Gen tab) ─────────
-  // Read-only aggregate of docker + systemd + ComfyUI HTTP.
+  // Read-only aggregate of the container (Quadlet) + systemd + ComfyUI HTTP.
   comfyuiStatus: '/api/comfyui/status',
   comfyuiSwitchover: '/api/comfyui/switchover',
   // Pin image mode (hold it until unpinned).
@@ -23,11 +23,23 @@ export const ENDPOINTS = {
   // List launchable workflow .json files discovered on disk (operator-dropped
   // files in the bind-mounted workflows dir show up here without a rebuild).
   comfyuiWorkflows: '/api/comfyui/workflows',
-  comfyuiWorkflowLaunch: (name: string) => `/api/comfyui/workflows/${encodeURIComponent(name)}/launch`,
-  // Latest output image proxy
-  comfyuiPreview: '/api/comfyui/preview',
+  // The GPU arbiter's state alone: {mode, arbiter, switchover, gate_refusal}. Light enough
+  // for the 1 s poll the status line needs; /status carries the rest.
+  comfyuiArbiter: '/api/comfyui/arbiter',
   // The image-model catalog (ids, labels, install state).
   comfyuiModels: '/api/comfyui/models',
+  // One catalog model: DELETE removes it; /install (POST) downloads what it is missing; /fit
+  // (GET) judges it against this box's memory at a size (native when `size` is omitted).
+  // Catalog ids are plain slugs; `ckpt/...` ids are user checkpoints and have no such routes.
+  comfyuiModel: (id: string) => `/api/comfyui/models/${encodeURIComponent(id)}`,
+  comfyuiModelInstall: (id: string) => `/api/comfyui/models/${encodeURIComponent(id)}/install`,
+  comfyuiModelFit: (id: string, size?: string | null) =>
+    `/api/comfyui/models/${encodeURIComponent(id)}/fit${size ? `?size=${encodeURIComponent(size)}` : ''}`,
+  // The latest install job of every model that has had one. Cancel is keyed by the MODEL id.
+  comfyuiJobs: '/api/comfyui/jobs',
+  comfyuiJobCancel: (modelId: string) => `/api/comfyui/jobs/${encodeURIComponent(modelId)}/cancel`,
+  // OpenAI-shaped image generation (the Generate tab, Open WebUI and the API share it).
+  v1ImagesGenerations: '/v1/images/generations',
   // Every weight file under the ComfyUI models tree, with the catalog models
   // that own it. DELETE removes one the catalog does not own; `relpath` can be
   // nested (`styles/a.safetensors`), so each SEGMENT is encoded and the `/`
@@ -462,14 +474,6 @@ export const ENDPOINTS = {
   servicesMdns: '/api/services/mdns',
   logsUnit: (unit: string, n = 120) =>
     `/api/logs?unit=${encodeURIComponent(unit)}&n=${n}`,
-
-  // ── ComfyUI native queue + history (proxy-reachable via :8188) ──
-  // These are NOT under /api — ComfyUI's own HTTP server at :8188 is
-  // reachable directly from the browser (same LAN). Build the base URL
-  // with comfyNativeBase() helper in the consuming component.
-  // comfyNativeQueue and comfyNativeHistory are path suffixes only:
-  comfyNativeQueue: '/queue',
-  comfyNativeHistory: '/history',
 
   // ── Dashboard layout persistence (§2c, DashLayout store) ────────
   // GET → 200 DashLayout | 200 {} (no saved layout yet)

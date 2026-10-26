@@ -4,30 +4,22 @@
 // Sources:
 //   - useServicesHealth → GET /api/services/health (§2d, fail soft on 404)
 //   - useComfyui → GET /api/comfyui/status (already exists, reachable)
-//   - ComfyUI native /queue + /history fetched directly at http://${host}:8188
-//     (same approach as comfyui-pane.jsx comfyHref() — not proxied by Vite)
 //
-// ComfyUI row expands inline to live job queue drawer.
+// ComfyUI's editor link follows the Image Gen pane's rule (image/ComfyEditorLink.jsx): ComfyUI
+// listens on the box's loopback only, so the button opens it on the box and is disabled elsewhere.
+// The browser never calls ComfyUI itself, and there is no placeholder status: before
+// /api/comfyui/status answers, the card shows what the services health gave it.
 // Gate: if useServicesHealth pending (404) → "source pending" body but still
-//       render ComfyUI live-queue if comfyui/status reachable.
+//       render the ComfyUI row if comfyui/status reachable.
 //
 // Window-global: Object.assign(window, {ServicesCard})
 
 import { useServicesHealth } from '@/api/hooks/useServicesHealth'
 import { statusCopyForServiceState } from './status-copy'
-import { useComfyui, COMFYUI_FALLBACK } from '@/api/hooks/useComfyui'
+import { useComfyui } from '@/api/hooks/useComfyui'
 import { useComponents } from '@/api/hooks/useComponents'
 import { pendingCount } from './components-pure'
-import { ENDPOINTS } from '@/api/endpoints'
-
-const { useState, useEffect, useRef, useCallback } = React
-
-// ── ComfyUI native base URL (mirrors comfyui-pane.jsx comfyHref) ─────────────
-function comfyNativeBase() {
-  const host =
-    typeof window !== 'undefined' && window.location ? window.location.hostname : '127.0.0.1'
-  return `http://${host}:8188`
-}
+import { EditorOpenButton } from './image/ComfyEditorLink'
 
 // ── Inline SVG icons (16×16, 1.5px stroke — hal0 thin-line family) ───────────
 function Ic({ d, children, size = 14, fill = 'none', sw = 1.5 }) {
@@ -50,8 +42,6 @@ function Ic({ d, children, size = 14, fill = 'none', sw = 1.5 }) {
 
 const Icons = {
   ext:    <Ic d="M6 3H3v10h10v-3M9 3h4v4M9 9l4-4" />,
-  chev:   <Ic d="M4 6l4 4 4-4" />,
-  chevUp: <Ic d="M4 10l4-4 4 4" />,
   // Service identity glyphs
   comfy: (
     <Ic>
@@ -111,143 +101,11 @@ function StatusPill({ up, state, detail }) {
   )
 }
 
-// ── ComfyUI live job queue drawer ─────────────────────────────────────────────
-// Polls ComfyUI native /queue + /history at 2s while mounted.
-// Gate: if unreachable → "comfyui offline", no fake jobs.
-function ComfyJobQueue({ comfyReachable }) {
-  const [queueData, setQueueData] = useState(null) // null = loading/unknown
-  const [offline, setOffline] = useState(false)
-  const intervalRef = useRef(null)
-
-  const poll = useCallback(async () => {
-    if (!comfyReachable) {
-      setOffline(true)
-      setQueueData(null)
-      return
-    }
-    const base = comfyNativeBase()
-    try {
-      const [qRes, hRes] = await Promise.all([
-        fetch(`${base}${ENDPOINTS.comfyNativeQueue}`, { signal: AbortSignal.timeout(3000) }),
-        fetch(`${base}${ENDPOINTS.comfyNativeHistory}?max_items=10`, { signal: AbortSignal.timeout(3000) }),
-      ])
-      if (!qRes.ok) { setOffline(true); setQueueData(null); return }
-      const q = await qRes.json()
-      const h = hRes.ok ? await hRes.json() : {}
-      setOffline(false)
-      setQueueData({ queue: q, history: h })
-    } catch {
-      setOffline(true)
-      setQueueData(null)
-    }
-  }, [comfyReachable])
-
-  useEffect(() => {
-    poll()
-    intervalRef.current = setInterval(poll, 2000)
-    return () => clearInterval(intervalRef.current)
-  }, [poll])
-
-  if (offline) {
-    return (
-      <div className="svc-comfy-drawer svc-comfy-offline">
-        <span className="sdot offline" style={{ width: 6, height: 6 }} />
-        comfyui offline
-      </div>
-    )
-  }
-
-  if (!queueData) {
-    return (
-      <div className="svc-comfy-drawer svc-comfy-loading">
-        loading queue…
-      </div>
-    )
-  }
-
-  // Parse ComfyUI native /queue shape:
-  // { queue_running: [[promptId, execId, {...}, {extra}, [outputs]], ...],
-  //   queue_pending: [[promptId, execId, {...}, ...], ...] }
-  const running = queueData.queue?.queue_running ?? []
-  const pending = queueData.queue?.queue_pending ?? []
-  const history = queueData.history ?? {}
-
-  // Build job list: running first, then pending, then recent history
-  const runningJobs = running.map((entry) => ({
-    id: entry[1] ?? entry[0],
-    promptId: entry[0],
-    status: 'running',
-    // ComfyUI /queue doesn't expose progress % or current node in the queue endpoint
-    // (that's WS-only). Show what we have.
-    workflow: entry[3]?.extra_pnginfo?.workflow?.name ?? `job ${String(entry[1] ?? '').slice(0, 8)}`,
-    progress: null,
-    currentNode: null,
-  }))
-  const pendingJobs = pending.map((entry) => ({
-    id: entry[1] ?? entry[0],
-    promptId: entry[0],
-    status: 'queued',
-    workflow: entry[3]?.extra_pnginfo?.workflow?.name ?? `job ${String(entry[1] ?? '').slice(0, 8)}`,
-    progress: null,
-    currentNode: null,
-  }))
-  // Recent history items (done jobs)
-  const historyJobs = Object.entries(history)
-    .slice(0, 5)
-    .map(([id, h]) => ({
-      id,
-      promptId: id,
-      status: h?.status?.status_str === 'success' ? 'done' : 'done',
-      workflow: `job ${id.slice(0, 8)}`,
-      progress: 100,
-      currentNode: null,
-    }))
-
-  const allJobs = [...runningJobs, ...pendingJobs, ...historyJobs]
-
-  if (allJobs.length === 0) {
-    return (
-      <div className="svc-comfy-drawer svc-comfy-empty">
-        queue empty · idle
-      </div>
-    )
-  }
-
-  return (
-    <div className="svc-comfy-drawer">
-      {allJobs.map((job) => (
-        <div key={job.id} className={'svc-job' + (job.status === 'running' ? ' svc-job-running' : '')}>
-          <span
-            className={'sdot ' + (
-              job.status === 'running' ? 'serving' :
-              job.status === 'done' ? 'svc-done' :
-              'offline'
-            )}
-            style={{ width: 6, height: 6, flexShrink: 0 }}
-          />
-          <span className="svc-job-name">{job.workflow}</span>
-          {job.progress != null && (
-            <>
-              <span className="svc-job-pct">{job.progress}%</span>
-              <span className="svc-job-track">
-                <span className="svc-job-fill" style={{ width: `${job.progress}%` }} />
-              </span>
-            </>
-          )}
-          {job.currentNode && (
-            <span className="svc-job-node">{job.currentNode}</span>
-          )}
-          <span className={'svc-job-status ' + job.status}>{job.status}</span>
-        </div>
-      ))}
-    </div>
-  )
-}
-
 // ── Service row ───────────────────────────────────────────────────────────────
-function ServiceRow({ svc, isComfy, comfyReachable, expanded, onToggle }) {
+function ServiceRow({ svc }) {
+  const isComfy = svc.id === 'comfyui'
   return (
-    <div className={'svc-row' + (isComfy && expanded ? ' svc-row-expanded' : '')}>
+    <div className="svc-row">
       <div className="svc-row-main">
         {/* Icon tile */}
         <span className="svc-icon-tile">
@@ -273,7 +131,10 @@ function ServiceRow({ svc, isComfy, comfyReachable, expanded, onToggle }) {
 
         {/* Buttons */}
         <span className="svc-actions">
-          {svc.url && (
+          {isComfy ? (
+            // Not `svc.url`: the health probe's address is the API's view of ComfyUI.
+            <EditorOpenButton testid="svc-open-comfyui">{Icons.ext}</EditorOpenButton>
+          ) : svc.url && (
             <button
               className="svc-btn"
               onClick={() => window.open(svc.url, '_blank', 'noopener')}
@@ -282,23 +143,8 @@ function ServiceRow({ svc, isComfy, comfyReachable, expanded, onToggle }) {
               {Icons.ext}
             </button>
           )}
-          {isComfy && (
-            <button
-              className={'svc-btn svc-expand-btn' + (expanded ? ' active' : '')}
-              onClick={onToggle}
-              title={expanded ? 'Collapse queue' : 'Expand queue'}
-              aria-expanded={expanded}
-            >
-              {expanded ? Icons.chevUp : Icons.chev}
-            </button>
-          )}
         </span>
       </div>
-
-      {/* ComfyUI inline queue drawer */}
-      {isComfy && expanded && (
-        <ComfyJobQueue comfyReachable={comfyReachable} />
-      )}
     </div>
   )
 }
@@ -307,10 +153,9 @@ function ServiceRow({ svc, isComfy, comfyReachable, expanded, onToggle }) {
 export function ServicesCard() {
   const { services, pending } = useServicesHealth()
   const comfyQ = useComfyui({ active: false })
-  const comfySt = comfyQ.data ?? COMFYUI_FALLBACK
-  const comfyReachable = comfySt.reachable
-
-  const [comfyExpanded, setComfyExpanded] = useState(false)
+  // No placeholder status: until /api/comfyui/status answers there is no ComfyUI row of our own.
+  const comfySt = comfyQ.data
+  const comfyReachable = comfySt?.reachable === true
 
   // Task 12: "N updates pending" badge — fail-soft (older daemon without
   // GET /api/updates/components → componentRows null → pendingCount 0, no
@@ -338,21 +183,22 @@ export function ServicesCard() {
   }
 
   // When services health is pending but ComfyUI is reachable, synthesize a
-  // ComfyUI row from /api/comfyui/status data so the queue drawer works today.
+  // ComfyUI row from /api/comfyui/status data.
   let rows = services
   const hasComfyFromHealth = services.some((s) => s.id === 'comfyui')
 
   if (!hasComfyFromHealth && comfyReachable) {
     // Synthesize from comfyui/status
+    const jobs = (comfySt.queue?.running ?? 0) + (comfySt.queue?.pending ?? 0)
     const synth = {
       id: 'comfyui',
       name: 'ComfyUI',
       up: comfySt.engine !== 'stopped' && comfySt.engine !== 'error',
       detail: `generation engine · ${comfySt.mode ?? "mode unknown"}`,
-      url: `http://${typeof window !== 'undefined' ? window.location.hostname : '127.0.0.1'}:8188`,
+      url: null,
       stat:
-        comfySt.queue.running + comfySt.queue.pending > 0
-          ? { label: 'jobs', value: String(comfySt.queue.running + comfySt.queue.pending) }
+        jobs > 0
+          ? { label: 'jobs', value: String(jobs) }
           : { label: 'mode', value: comfySt.mode ?? 'unknown' },
     }
     rows = [synth, ...rows]
@@ -369,23 +215,12 @@ export function ServicesCard() {
   return (
     <DCard title="SERVICES" right={pendingBadge}>
       <div className="svc-list">
-        {rows.map((svc) => {
-          const isComfy = svc.id === 'comfyui'
-          return (
-            <ServiceRow
-              key={svc.id}
-              svc={svc}
-              isComfy={isComfy}
-              comfyReachable={comfyReachable}
-              expanded={isComfy && comfyExpanded}
-              onToggle={isComfy ? () => setComfyExpanded((v) => !v) : undefined}
-            />
-          )
-        })}
+        {rows.map((svc) => (
+          <ServiceRow key={svc.id} svc={svc} />
+        ))}
       </div>
     </DCard>
   )
 }
 
-// ComfyJobQueue is shared with the dedicated Services page (services.jsx).
-Object.assign(window, { ServicesCard, ComfyJobQueue })
+Object.assign(window, { ServicesCard })

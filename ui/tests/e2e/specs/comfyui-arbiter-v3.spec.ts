@@ -1,379 +1,357 @@
 /**
- * comfyui-arbiter-v3 — V2 live-wired pane integration tests (Task 5.2).
+ * comfyui-arbiter-v3 — the Image Gen pane's live wiring: what `/api/comfyui/status` and
+ * `/api/comfyui/arbiter` put on the status line and the Engine tab, and which POSTs its buttons
+ * send.
  *
- * Replaces the removed V1 switchover/pin UI tests. Tests the V2 pane's
- * live API binding: page.route mocks /api/comfyui/* responses and asserts
- * that status fields render into hero/queue/telemetry and that control
- * buttons fire the correct POST endpoints.
+ * Replaces the specs of the old "render hero" pane (its GTT and RAM gauges, the fake `it/s` and
+ * frame counters, the queue drawer and its Restart, the hard-coded workflow strip and the model
+ * inventory pills were deleted with it; a spec for a deleted control is not kept). What it
+ * pinned that is still true is here against the new pane: the render and queue bind from the
+ * status, Cancel render, Restart and Stop post to their endpoints, a stopped or unreachable
+ * engine says so, an idle queue is in-flow and clickable, and a failing poll shows no
+ * fabricated engine.
  *
- * Convention (mirrors profiles-crud-v3.spec.ts):
- *   - VITE_MOCK_HAL0=1 build; /api/comfyui/* is NOT in MOCK_ALLOWLIST
- *   - page.route intercepts all comfyui routes
- *   - The V2 pane is on .comfy-v2-pane (slots page Image Gen tab)
+ * Convention (as before): VITE_MOCK_HAL0=1 build, `/api/comfyui/*` is not in MOCK_ALLOWLIST, so
+ * `page.route` drives it; fixtures/imageGen.ts builds the bodies and records the writes.
  */
+import { test, expect } from '../fixtures/apiMock'
+import {
+  arbiterEnvelope,
+  arbiterState,
+  catalog,
+  catalogRow,
+  gotoImageGen,
+  imageStatus,
+  makeImageGenMock,
+  memoryBudget,
+  routeImageGen,
+} from '../fixtures/imageGen'
 
-import { test, expect, json } from '../fixtures/apiMock'
-
-// Full /api/comfyui/status shape with V2 extension fields
-function comfyV2Status(overrides: Record<string, any> = {}) {
-  return {
-    mode: 'generation',
-    reachable: true,
-    engine: 'generating',
-    container: { name: 'comfyui', state: 'running' },
-    endpoint: ':8188',
-    memory: {
-      gtt_used_gb: 54,
-      gtt_ceil_gb: 80,
-      ram_used_gb: 61,
-      ram_ceil_gb: 96,
-      pressure: false,
-    },
-    queue: { running: 1, pending: 2 },
-    util: 63,
-    temp: 68.5,
-    clock: 2.7,
-    it_s: null,
-    eta: null,
-    step: null,
-    inference: { hermes: false },
-    inventory: { checkpoints: 6, video: 4, loras: 11, vae: 3 },
-    switchover: { active: false, target: null, error: null },
-    arbiter: {
-      mode: 'img',
-      pinned: false,
-      saved_llm_slots: ['primary', 'agent'],
-      switching: false,
-      image_jobs: 0,
-    },
-    // V2 render-hero extension fields (not in base /status spec but accepted
-    // by transformComfyuiStatus when present — same shape as mock fixture)
-    active_render: {
-      name: 'wan2.2-i2v',
-      kind: '480p · 81 frames',
-      pct: 72,
-      eta: '~38s',
-      node: 'KSampler (low-noise)',
-      step: 3,
-      total: 4,
-      its: 1.9,
-      loaded: 'wan-hi + wan-lo · umt5-xxl · wan-vae · 2 loras',
-    },
-    queue_jobs: [
-      { name: 'qwen-image', kind: 'txt2img · 1328²' },
-      { name: 'sdxl', kind: 'upscale 4×' },
-    ],
-    ...overrides,
-  }
-}
-
-// Idle-engine variant — no active render, no pending jobs
-function comfyV2Idle() {
-  return comfyV2Status({
-    engine: 'running',
-    queue: { running: 0, pending: 0 },
-    util: 0,
-    active_render: null,
-    queue_jobs: [],
+// Image mode on, a hal0 render at step 3 of 8, and two prompts waiting behind it.
+const RENDER = { model: 'sdxl-lightning', step: 3, total: 8, node: '3', elapsed_s: 6.2, prompt_id: 'p1' }
+const rendering = () =>
+  makeImageGenMock({
+    status: imageStatus({
+      mode: 'generation',
+      engine: 'generating',
+      queue: { running: 1, pending: 2 },
+      util: 63,
+      progress: RENDER,
+      arbiter: arbiterState({ mode: 'img', phase: 'rendering', image_jobs: 1 }),
+    }),
+    arbiter: arbiterEnvelope({ mode: 'img', phase: 'rendering', image_jobs: 1 }, { mode: 'generation' }),
   })
-}
-
-async function gotoImageTab(page: any) {
-  await page.goto('/#slots')
-  await page.waitForSelector('.slot-tab.comfy', { timeout: 10_000 })
-  await page.click('.slot-tab.comfy')
-  // V2 pane root has class .comfy-v2-pane
-  await page.waitForSelector('.comfy-v2-pane', { timeout: 10_000 })
-}
-
-// Queue rows live in the collapsed lower half — open the expander first.
-async function openQueue(page: any) {
-  await page.click('.comfy-v2-pane .queue-expander')
-  await page.waitForSelector('.comfy-v2-pane .queue-assets-row', { timeout: 5_000 })
-}
-
-test.describe('ComfyUI V2 live-wired pane (Task 5.2)', () => {
-
-  // ── 1. status renders into hero ──────────────────────────────────────────
-
-  test('status: generating state renders job name + progress in hero', async ({ page }) => {
-    await page.route('**/api/comfyui/status', (route: any) => json(route, comfyV2Status()))
-    await gotoImageTab(page)
-
-    const pane = page.locator('.comfy-v2-pane')
-    await expect(pane).toContainText('wan2.2-i2v')
-    await expect(pane.locator('.gbar').first()).toBeVisible()
-    await expect(pane).toContainText('~38s')
-    await expect(pane).toContainText('it/s')
+// Image mode on and nothing to do: the grace window before chat comes back.
+const idleImageMode = () =>
+  makeImageGenMock({
+    status: imageStatus({ mode: 'generation', arbiter: arbiterState({ mode: 'img', phase: 'grace' }) }),
+    arbiter: arbiterEnvelope({ mode: 'img', phase: 'grace' }, { mode: 'generation' }),
   })
 
-  // ── 2. status renders into queue ─────────────────────────────────────────
+test.describe('Image Gen live wiring: status line', () => {
+  test('a render in progress shows its model and step', async ({ page }) => {
+    await routeImageGen(page, rendering())
+    await gotoImageGen(page, 'engine')
 
-  test('status: queue rows bind — 1 running + 2 pending', async ({ page }) => {
-    await page.route('**/api/comfyui/status', (route: any) => json(route, comfyV2Status()))
-    await gotoImageTab(page)
-    await openQueue(page)
-
-    const pane = page.locator('.comfy-v2-pane')
-    await expect(pane.locator('.qcard.row.running')).toBeVisible()
-    await expect(pane.locator('.qcard.row.running .ldot.generating')).toBeVisible()
-
-    const pending = pane.locator('.qcard.row.pending')
-    await expect(pending).toHaveCount(2)
-    await expect(pending.nth(0)).toContainText('qwen-image')
-    await expect(pending.nth(1)).toContainText('sdxl')
+    await expect(page.getByTestId('image-status-head')).toHaveText('Rendering · sdxl-lightning · step 3/8')
   })
 
-  // ── 3. status renders into telemetry gauges ──────────────────────────────
+  test('Cancel render posts /render/cancel', async ({ page }) => {
+    const mock = rendering()
+    await routeImageGen(page, mock)
+    await gotoImageGen(page, 'engine')
 
-  test('status: GTT gauge shows memory values from /status memory block', async ({ page }) => {
-    await page.route('**/api/comfyui/status', (route: any) => json(route, comfyV2Status()))
-    await gotoImageTab(page)
-
-    const pane = page.locator('.comfy-v2-pane')
-    const gauge = pane.locator('.gauge').first()
-    await expect(gauge).toBeVisible()
-    await expect(gauge).toContainText('gtt')
-    // gtt_used_gb: 54 should appear in sub label
-    await expect(gauge).toContainText('54')
+    await page.getByTestId('image-status-action-cancel_render').click()
+    await expect.poll(() => mock.posts.map(([path]) => path)).toContain('/api/comfyui/render/cancel')
   })
 
-  test('status: device telemetry shows util, temp, and clock from /status', async ({ page }) => {
-    await page.route('**/api/comfyui/status', (route: any) => json(route, comfyV2Status()))
-    await gotoImageTab(page)
+  test('with no status line (no GPU budget) the pane still renders', async ({ page }) => {
+    // The line is hidden while the memory budget has no GPU pool; nothing else depends on it.
+    await routeImageGen(page, makeImageGenMock({ memory: memoryBudget({ gpu: null, render_free_gb: null }) }))
+    await gotoImageGen(page, 'engine')
 
-    const pane = page.locator('.comfy-v2-pane')
-    await expect(pane).toContainText('63%')
-    await expect(pane).toContainText('68.5°C')
-    await expect(pane).toContainText('2.7GHz')
+    await expect(page.getByTestId('image-status-line')).toHaveCount(0)
+    await expect(page.getByTestId('engine-card')).toBeVisible()
+  })
+})
+
+test.describe('Image Gen live wiring: Engine tab', () => {
+  test('the queue card binds the running and waiting counts and the render in progress', async ({ page }) => {
+    await routeImageGen(page, rendering())
+    await gotoImageGen(page, 'engine')
+
+    await expect(page.getByTestId('queue-summary')).toHaveText('1 running · 2 waiting')
+    const progress = page.getByTestId('queue-progress')
+    await expect(progress).toContainText('sdxl-lightning')
+    await expect(progress).toContainText('step 3/8')
+    await expect(page.getByTestId('queue-empty')).toHaveCount(0)
   })
 
-  // ── 4. Cancel render fires POST /api/comfyui/render/cancel ───────────────
+  test('an idle queue says nothing is queued, in-flow, and leaves the editor button clickable', async ({ page }) => {
+    await routeImageGen(page, makeImageGenMock())
+    await gotoImageGen(page, 'engine')
 
-  test('Cancel render button fires POST /render/cancel', async ({ page }) => {
-    const posts: string[] = []
-    await page.route('**/api/comfyui/status', (route: any) => json(route, comfyV2Status()))
-    await page.route('**/api/comfyui/render/cancel', (route: any) => {
-      posts.push(route.request().method())
-      return json(route, { status: 'cancel_requested' }, 202)
-    })
-
-    await gotoImageTab(page)
-
-    const cancelBtn = page.locator('.comfy-v2-pane button', { hasText: 'Cancel render' }).first()
-    await expect(cancelBtn).toBeVisible()
-    await cancelBtn.click()
-
-    await expect.poll(() => posts.length, { timeout: 5_000 }).toBeGreaterThan(0)
-    expect(posts[0]).toBe('POST')
+    const empty = page.getByTestId('queue-empty')
+    await expect(empty).toBeVisible()
+    await expect(empty).toHaveText(
+      'Nothing queued. Renders from Generate, Open WebUI, the API and the editor all show here.',
+    )
+    // The PR #845 lockup: an absolutely positioned empty state ate every click below it.
+    const position = await empty.evaluate((el: Element) => getComputedStyle(el).position)
+    expect(position).toBe('static')
+    const open = page.getByTestId('editor-open')
+    await expect(open).toBeEnabled()
+    await open.click({ trial: true })
   })
 
-  // ── 5. Workflow chip is a link that opens ComfyUI ────────────────────────
-  // The tags open ComfyUI's editor (matching the "opens in ComfyUI ↗" label).
-  // True per-workflow auto-open via URL is blocked upstream
-  // (comfyanonymous/ComfyUI#9858); the ?workflow=<file> param is a
-  // forward-compatible breadcrumb that current ComfyUI ignores.
-  test('workflow chip is an anchor that opens ComfyUI in a new tab', async ({ page }) => {
-    await page.route('**/api/comfyui/status', (route: any) => json(route, comfyV2Status()))
+  test('the device card shows temperature and clock, and utilisation only while rendering', async ({ page }) => {
+    await routeImageGen(page, rendering())
+    await gotoImageGen(page, 'engine')
 
-    await gotoImageTab(page)
-    await openQueue(page)
-
-    const chips = page.locator('.comfy-v2-pane .flow')
-    await expect(chips).toHaveCount(6)
-
-    const first = chips.first()
-    // Renders as a link, opens in a new tab.
-    expect((await first.evaluate((el: Element) => el.tagName)).toLowerCase()).toBe('a')
-    await expect(first).toHaveAttribute('target', '_blank')
-    // Points at ComfyUI (:8188) and carries the curated workflow breadcrumb.
-    const href = await first.getAttribute('href')
-    expect(href).toContain(':8188')
-    expect(href).toContain('workflow=')
+    await expect(page.getByTestId('device-util')).toContainText('63')
+    await expect(page.getByTestId('device-temp')).toContainText('68.5')
+    await expect(page.getByTestId('device-clock')).toContainText('2.7')
   })
 
-  // ── 6. Restart button fires POST /api/comfyui/restart ────────────────────
-  // Container controls moved from the footer into the card header (#1209).
+  test('idle, the device card has no utilisation figure', async ({ page }) => {
+    await routeImageGen(page, makeImageGenMock({ status: imageStatus({ util: 97 }) }))
+    await gotoImageGen(page, 'engine')
 
-  test('header Restart button fires POST /restart', async ({ page }) => {
-    const posts: string[] = []
-    await page.route('**/api/comfyui/status', (route: any) => json(route, comfyV2Status()))
-    await page.route('**/api/comfyui/restart', (route: any) => {
-      posts.push(route.request().method())
-      return json(route, { status: 'restart_requested' }, 202)
-    })
-
-    await gotoImageTab(page)
-
-    const restartBtn = page.locator('.comfy-v2-pane .wcard-h .sctrl.restart')
-    await expect(restartBtn).toBeVisible()
-    await restartBtn.click()
-
-    await expect.poll(() => posts.length, { timeout: 5_000 }).toBeGreaterThan(0)
-    expect(posts[0]).toBe('POST')
+    await expect(page.getByTestId('device-temp')).toContainText('68.5')
+    await expect(page.getByTestId('device-util')).toHaveCount(0)
   })
 
-  test('running engine shows the Stop control + a state-typed pill; Stop drives switchover then img unload', async ({ page }) => {
-    const switches: any[] = []
-    const unloads: string[] = []
-    await page.route('**/api/comfyui/status', (route: any) => json(route, comfyV2Idle()))
-    await page.route('**/api/comfyui/switchover', async (route: any) => {
-      switches.push(JSON.parse(route.request().postData() || '{}'))
-      return json(route, { status: 'accepted' }, 202)
-    })
-    await page.route('**/api/slots/img/unload', (route: any) => {
-      unloads.push(route.request().method())
-      return json(route, {})
-    })
+  test('the engine card states the engine, its Quadlet container, loopback and the editor route', async ({
+    page,
+  }) => {
+    await routeImageGen(page, makeImageGenMock())
+    await gotoImageGen(page, 'engine')
 
-    await gotoImageTab(page)
-
-    // Running indicator: pill carries the live engine state.
-    const pill = page.getByTestId('comfy-engine-pill')
-    await expect(pill).toBeVisible()
-    await expect(pill).toHaveAttribute('data-state', 'running')
-    await expect(pill).toContainText('running')
-
-    // Stop is offered while the engine is up; Start is not.
-    const stopBtn = page.getByTestId('comfy-stop')
-    await expect(stopBtn).toBeVisible()
-    await expect(page.getByTestId('comfy-start')).toHaveCount(0)
-
-    await stopBtn.click()
-    await expect.poll(() => switches.length, { timeout: 5_000 }).toBeGreaterThan(0)
-    expect(switches[0]).toMatchObject({ mode: 'inference' })
-    // The switchover leaves the container up by design — Stop follows with a
-    // real img slot unload so the engine actually goes down.
-    await expect.poll(() => unloads.length, { timeout: 5_000 }).toBeGreaterThan(0)
-    expect(unloads[0]).toBe('POST')
+    await expect(page.getByTestId('engine-pill')).toHaveAttribute('data-state', 'running')
+    await expect(page.getByTestId('engine-row-container')).toContainText('Quadlet')
+    await expect(page.getByTestId('engine-row-container')).toContainText('hal0-slot-img')
+    await expect(page.getByTestId('engine-row-listen')).toContainText('listens on loopback')
+    await expect(page.getByTestId('engine-row-editor')).toContainText('127.0.0.1:8188')
+    await expect(page.getByTestId('engine-row-gate')).toHaveAttribute('data-gate-state', 'current')
   })
 
-  test('stopped engine shows Start (no Stop) and a neutral stopped pill', async ({ page }) => {
-    await page.route('**/api/comfyui/status', (route: any) =>
-      json(route, {
-        ...comfyV2Idle(),
-        mode: 'inference',
-        reachable: false,
-        engine: 'stopped',
-        arbiter: { mode: 'llm', pinned: false, saved_llm_slots: [], switching: false, image_jobs: 0 },
+  test('Restart engine posts /restart', async ({ page }) => {
+    const mock = makeImageGenMock()
+    await routeImageGen(page, mock)
+    await gotoImageGen(page, 'engine')
+
+    await page.getByTestId('engine-restart').click()
+    await expect.poll(() => mock.posts.map(([path]) => path)).toContain('/api/comfyui/restart')
+  })
+
+  test('Logs open the container log in a modal, and Esc closes it', async ({ page }) => {
+    await routeImageGen(page, makeImageGenMock())
+    await gotoImageGen(page, 'engine')
+
+    await page.getByTestId('engine-logs').click()
+    await expect(page.getByTestId('engine-logs-pre')).toContainText('comfy ready')
+    await page.keyboard.press('Escape')
+    await expect(page.getByTestId('engine-logs-pre')).toHaveCount(0)
+  })
+
+  test('Stop image mode asks the arbiter to go back to inference', async ({ page }) => {
+    const mock = idleImageMode()
+    await routeImageGen(page, mock)
+    await gotoImageGen(page, 'engine')
+
+    await page.getByTestId('engine-stop').click()
+    await expect.poll(() => mock.posts.length).toBeGreaterThan(0)
+    expect(mock.posts[0]).toEqual(['/api/comfyui/switchover', { mode: 'inference' }])
+  })
+
+  test('Stop image mode while a render runs asks first, and forces only after a yes', async ({ page }) => {
+    const mock = rendering()
+    await routeImageGen(page, mock)
+    await gotoImageGen(page, 'engine')
+
+    await page.getByTestId('engine-stop').click()
+    await page.getByRole('button', { name: 'Stop and cancel render' }).waitFor()
+    expect(mock.posts).toEqual([])
+    await page.getByRole('button', { name: 'Stop and cancel render' }).click()
+    await expect.poll(() => mock.posts.length).toBeGreaterThan(0)
+    expect(mock.posts[0]).toEqual(['/api/comfyui/switchover', { mode: 'inference', force: true }])
+  })
+
+  test('a stopped engine says Generate still works, and offers no Stop', async ({ page }) => {
+    await routeImageGen(
+      page,
+      makeImageGenMock({
+        status: imageStatus({
+          engine: 'stopped',
+          reachable: false,
+          container: { name: 'hal0-slot-img', state: 'absent' },
+        }),
       }),
     )
-    await gotoImageTab(page)
+    await gotoImageGen(page, 'engine')
 
-    const pill = page.getByTestId('comfy-engine-pill')
-    await expect(pill).toHaveAttribute('data-state', 'stopped')
-    await expect(pill).toContainText('stopped')
-    await expect(page.getByTestId('comfy-start')).toBeVisible()
-    await expect(page.getByTestId('comfy-stop')).toHaveCount(0)
+    await expect(page.getByTestId('engine-pill')).toHaveAttribute('data-state', 'stopped')
+    await expect(page.getByTestId('engine-stopped')).toContainText('ComfyUI is stopped')
+    await expect(page.getByTestId('engine-stopped')).toContainText('Generate still works')
+    await expect(page.getByTestId('engine-stop')).toHaveCount(0)
   })
 
-  // ── 7. Idle state: empty queue renders in-flow (no overlay lockup) ────────
-
-  test('idle: empty-queue state renders in-flow, no click-blocking overlay', async ({ page }) => {
-    await page.route('**/api/comfyui/status', (route: any) => json(route, comfyV2Idle()))
-    await gotoImageTab(page)
-    await openQueue(page)
-
-    const pane = page.locator('.comfy-v2-pane')
-    await expect(pane.locator('.queue-empty-state')).toBeVisible()
-
-    // Open ComfyUI button must be clickable (would fail if overlay intercepts)
-    const openBtn = pane.locator('button, a', { hasText: 'Open ComfyUI' }).first()
-    await expect(openBtn).toBeVisible()
-    await expect(openBtn).toBeEnabled()
-    await openBtn.click({ trial: true })
-  })
-
-  // ── 8. Graceful degrade: absent active_render uses placeholder skeleton ───
-
-  test('degrade: no active_render field → placeholder skeleton renders without crash', async ({ page }) => {
-    // Status says 1 running but no active_render detail
-    const statusNoDetail = comfyV2Status({ active_render: undefined, queue_jobs: undefined })
-    delete statusNoDetail.active_render
-    delete statusNoDetail.queue_jobs
-
-    await page.route('**/api/comfyui/status', (route: any) => json(route, statusNoDetail))
-    await gotoImageTab(page)
-
-    const pane = page.locator('.comfy-v2-pane')
-    // Pane must not crash — the card header should be visible
-    await expect(pane.locator('.wcard-h')).toBeVisible()
-    // running row is shown (1 running) — in the collapsed lower half
-    await openQueue(page)
-    await expect(pane.locator('.qcard.row.running')).toBeVisible()
-  })
-
-  // ── 9. Models block: real backend inventory, never fabricated (#1455) ────
-  //
-  // The pane used to mount <ModelsBlock /> with no props, so a hardcoded
-  // INV_DEFAULT/MODELS_DEFAULT (6 checkpoints, 11 loras, 'Wan 2.2 ·
-  // Qwen-Image · HunyuanVideo 1.5 · LTX-2') rendered unconditionally,
-  // ignoring the /status `inventory` field the backend actually verifies
-  // (src/hal0/api/routes/comfyui.py _model_inventory). This pins the block
-  // rendering the live counts by category.
-
-  test('models block renders the backend verified inventory counts, not the fabricated defaults', async ({ page }) => {
-    await page.route('**/api/comfyui/status', (route: any) => json(route, comfyV2Status({
-      // Deliberately distinct from the old hardcoded 6/4/11/3 so a
-      // still-fabricated render is caught, and matches the live-box example
-      // from #1455's evidence (checkpoints:2, diffusion:7, loras:4, vae:5,
-      // controlnet:4, upscale:2, text_encoders:6).
-      inventory: { checkpoints: 2, diffusion: 7, loras: 4, vae: 5, controlnet: 4, upscale: 2, text_encoders: 6 },
-    })))
-    await gotoImageTab(page)
-
-    const pane = page.locator('.comfy-v2-pane')
-    const inv = pane.locator('.activity-extras .inv')
-    await expect(inv).toBeVisible()
-    await expect(inv).toContainText('2')
-    await expect(inv).toContainText('checkpoints')
-    await expect(inv).toContainText('7')
-    await expect(inv).toContainText('text encoders')
-    // The old fabricated pill counts/family string must never render.
-    await expect(inv).not.toContainText('11')
-    await expect(pane).not.toContainText('Wan 2.2 · Qwen-Image')
-  })
-
-  test('models block is hidden entirely when the backend reports inventory: null (fresh install)', async ({ page }) => {
-    await page.route('**/api/comfyui/status', (route: any) => json(route, comfyV2Status({ inventory: null })))
-    await gotoImageTab(page)
-
-    const pane = page.locator('.comfy-v2-pane')
-    await expect(pane.locator('.activity-extras .inv')).toHaveCount(0)
-  })
-
-  test('no fabricated system-ram sparkline or non-functional "manager" note remain', async ({ page }) => {
-    await page.route('**/api/comfyui/status', (route: any) => json(route, comfyV2Status()))
-    await gotoImageTab(page)
-
-    const pane = page.locator('.comfy-v2-pane')
-    // SPARK_DEFAULT-backed BarSpark had no real per-tick RAM history behind
-    // it — the backend exposes only a point-in-time ram used/ceil, no
-    // timeseries, so the bars were pure decoration.
-    await expect(pane.locator('.ram-metric .cspark')).toHaveCount(0)
-    // The "manager ↗" note on the models block header linked to nothing real.
-    await expect(pane).not.toContainText('manager ↗')
-  })
-
-  // Regression guard for the OTHER door the fabricated inventory came
-  // through. ComfyuiPane falls back to transformComfyuiStatus(COMFYUI_FALLBACK)
-  // whenever `liveStatus` is falsy — which includes every /status poll error,
-  // not just first paint (#1470 replaced the old COMFYUI_V2_MOCK fallback,
-  // a fictional 72%-render/fake-queue mock, with this neutral stopped shell;
-  // COMFYUI_V2_MOCK now renders only via the window.__comfyuiV2MockOverride
-  // e2e seam). COMFYUI_FALLBACK.inventory is null, so a real backend hiccup
-  // must not surface fabricated model counts either.
-  test('a failing /status poll falls back to the neutral shell WITHOUT fabricating inventory', async ({ page }) => {
-    await page.route('**/api/comfyui/status', (route: any) =>
-      route.fulfill({ status: 500, contentType: 'application/json', body: '{}' }),
+  test("a container that is up but not answering says so and shows the last log lines", async ({ page }) => {
+    await routeImageGen(
+      page,
+      makeImageGenMock({
+        status: imageStatus({ engine: 'starting', reachable: false }),
+        logs: ['loading checkpoint', 'importing custom nodes', 'bind failed'],
+      }),
     )
-    await gotoImageTab(page)
+    await gotoImageGen(page, 'engine')
 
-    const pane = page.locator('.comfy-v2-pane')
-    // The pane still renders (fail-soft on the static mock)…
-    await expect(pane).toBeVisible()
-    // …but claims nothing about what models are installed.
-    await expect(pane.locator('.activity-extras .inv')).toHaveCount(0)
-    await expect(pane).not.toContainText('checkpoints')
+    const notice = page.getByTestId('engine-unreachable')
+    await expect(notice).toContainText("ComfyUI isn't answering")
+    await expect(page.getByTestId('engine-unreachable-log')).toContainText('bind failed')
+  })
+})
+
+test.describe('Image Gen live wiring: editor card', () => {
+  test('the workflow chips are the installed models plus the operator’s own files', async ({ page }) => {
+    await routeImageGen(
+      page,
+      makeImageGenMock({
+        models: catalog([
+          catalogRow('sdxl-lightning'),
+          catalogRow('wan22-t2v', { task: 'txt2video', api_renderable: false }),
+          catalogRow('qwen-image', { state: 'none' }),
+        ]),
+        // `GET /workflows` names are the file stems. `sdxl-lightning` belongs to an installed
+        // model, `qwen-image` to one that is not installed (a half install left its file), and
+        // `my-upscale` is the operator's own.
+        workflows: [
+          { name: 'sdxl-lightning', source: 'primary' },
+          { name: 'qwen-image', source: 'primary' },
+          { name: 'my-upscale', source: 'user' },
+        ],
+      }),
+    )
+    await gotoImageGen(page, 'engine')
+
+    const chips = page.getByTestId('editor-chip')
+    await expect(chips).toHaveCount(3)
+    const order = await chips.evaluateAll((els: Element[]) => els.map((e) => e.getAttribute('data-workflow')))
+    expect(order).toEqual(['sdxl-lightning', 'wan22-t2v', 'my-upscale'])
+    await expect(page.locator('[data-workflow="qwen-image"]')).toHaveCount(0)
+    await expect(page.locator('[data-workflow="my-upscale"]')).toHaveAttribute('data-custom', 'true')
+  })
+
+  test('on the box, a chip and the button are links that open the editor in a new tab', async ({ page }) => {
+    await routeImageGen(page, makeImageGenMock())
+    await gotoImageGen(page, 'engine')
+
+    const chip = page.getByTestId('editor-chip').first()
+    expect((await chip.evaluate((el: Element) => el.tagName)).toLowerCase()).toBe('a')
+    await expect(chip).toHaveAttribute('target', '_blank')
+    await expect(chip).toHaveAttribute('href', 'http://localhost:8188')
+    await expect(page.getByTestId('editor-open')).toHaveAttribute('href', 'http://localhost:8188')
+    await expect(page.getByTestId('editor-offbox')).toHaveCount(0)
+  })
+
+  test('a workflow link does not pretend to open a workflow', async ({ page }) => {
+    // ComfyUI cannot open a workflow from a link (comfyanonymous/ComfyUI#9858): every chip opens the
+    // editor, and the card says where the workflow is.
+    await routeImageGen(page, makeImageGenMock())
+    await gotoImageGen(page, 'engine')
+
+    await expect(page.getByTestId('editor-workflow-hint')).toContainText('Workflows')
+    const href = await page.getByTestId('editor-chip').first().getAttribute('href')
+    expect(href).not.toContain('workflow=')
+  })
+})
+
+test.describe('Image Gen live wiring: no placeholder values', () => {
+  test('a status body with most fields missing still renders the tab', async ({ page }) => {
+    await routeImageGen(page, makeImageGenMock({ status: { engine: 'running', reachable: true } }))
+    await gotoImageGen(page, 'engine')
+
+    await expect(page.getByTestId('engine-card')).toBeVisible()
+    await expect(page.getByTestId('engine-pill')).toHaveAttribute('data-state', 'running')
+  })
+
+  test('a failing status poll shows a loading line, not a made-up engine', async ({ page }) => {
+    await routeImageGen(page, makeImageGenMock({ status: { __status: 500 } }))
+    await gotoImageGen(page, 'engine')
+
+    await expect(page.getByTestId('engine-loading')).toBeVisible()
+    await expect(page.getByTestId('engine-pill')).toHaveCount(0)
+    await expect(page.getByTestId('engine-row-state')).toHaveCount(0)
+    // Nor does it claim what is installed, or what runs.
+    await expect(page.getByTestId('image-gen-pane')).not.toContainText('checkpoints')
+  })
+
+  test('there are no memory gauges, even if an older hal0 still sends a memory block', async ({ page }) => {
+    await routeImageGen(
+      page,
+      makeImageGenMock({
+        status: imageStatus({
+          memory: { gtt_used_gb: 54, gtt_ceil_gb: 80, ram_used_gb: 61, ram_ceil_gb: 96, pressure: false },
+        }),
+      }),
+    )
+    await gotoImageGen(page, 'engine')
+
+    const tab = page.getByTestId('engine-tab')
+    await expect(tab).toBeVisible()
+    await expect(tab).not.toContainText(/gtt|system ram/i)
+    await expect(tab.locator('.gauge, [role="meter"]')).toHaveCount(0)
+  })
+})
+
+test.describe('Services page ComfyUI row', () => {
+  // The old Services queue drawer fetched ComfyUI's /queue and /history from the browser at :8188,
+  // which an off-box page cannot reach. The row keeps its status and its link, and nothing else.
+  test('has no queue drawer and never calls ComfyUI from the page', async ({ page }) => {
+    const direct: string[] = []
+    page.on('request', (req) => {
+      if (/:8188\//.test(req.url())) direct.push(req.url())
+    })
+    await routeImageGen(page, makeImageGenMock())
+    await page.route('**/api/services', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          services: [
+            {
+              id: 'comfyui',
+              name: 'ComfyUI',
+              description: 'Image generation engine (img slot container, loopback :8188).',
+              managed: true,
+              unit: 'hal0-slot@img.service',
+              unit_state: { active_state: 'active', sub_state: 'running', unit_file_state: 'enabled', since: null },
+              up: true,
+              detail: 'running — 0 job(s) active',
+              stat: null,
+              url: 'http://localhost:8188',
+              mdns_url: null,
+              loopback_port: null,
+              actions: ['restart'],
+              mdns_capable: false,
+              hints: [],
+            },
+          ],
+          mdns: { available: false, hostname: 'hal0.local', base_advertised: false, advertised: [] },
+        }),
+      }),
+    )
+    await page.goto('/#services')
+
+    const card = page.getByTestId('svcp-card-comfyui')
+    await expect(card).toBeVisible()
+    // On the box (the e2e page is served from localhost) the link works.
+    await expect(page.getByTestId('svcp-open-comfyui')).toBeEnabled()
+    await expect(page.getByTestId('svcp-queue-comfyui')).toHaveCount(0)
+    await expect(card).not.toContainText('Queue')
+    // The drawer asked ComfyUI for its queue once the card was up: let the network go idle, so a
+    // request that followed the render has been made, then read the list.
+    await page.waitForLoadState('networkidle')
+    expect(direct).toEqual([])
   })
 })

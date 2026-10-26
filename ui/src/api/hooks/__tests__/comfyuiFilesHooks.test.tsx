@@ -80,6 +80,37 @@ describe('ComfyUI file hooks', () => {
     act(() => probe.root.unmount())
   })
 
+  it('useComfyuiFiles({ enabled: false }) reads nothing until it is enabled', async () => {
+    vi.mocked(client.apiGet).mockResolvedValue({ root: '/m', files: [] })
+    const qc = newClient()
+    let enabled = false
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const root = createRoot(host)
+    let latest!: ReturnType<typeof useComfyuiFiles>
+    function Probe() {
+      latest = useComfyuiFiles({ enabled })
+      return null
+    }
+    const render = () =>
+      act(() => {
+        root.render(React.createElement(QueryClientProvider, { client: qc }, React.createElement(Probe)))
+      })
+
+    render()
+    await flush()
+    // The scan walks the tree and sniffs headers: an off query must not touch the route.
+    expect(client.apiGet).not.toHaveBeenCalled()
+    expect(latest.data).toBeUndefined()
+
+    enabled = true
+    render()
+    await flush()
+    expect(client.apiGet).toHaveBeenCalledWith('/api/comfyui/files')
+    expect(latest.data?.files).toEqual([])
+    act(() => root.unmount())
+  })
+
   it('useComfyuiModels reads the catalog route', async () => {
     vi.mocked(client.apiGet).mockResolvedValue({ models: [{ id: 'flux-dev', label: 'FLUX.1 dev' }], engine: {} })
     const probe = mountHook(() => useComfyuiModels(), newClient())

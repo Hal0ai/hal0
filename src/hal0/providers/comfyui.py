@@ -799,8 +799,11 @@ class ComfyUIProvider(Provider):
             No ``--shm-size``: podman exits 125 on that combo ("cannot set
             shmsize when running in the host IPC Namespace"), unlike docker,
             which silently ignored it (live CT105, Phase D).
-          * host networking — the LXC is the host; the ComfyUI web UI must
-            stay LAN-reachable on :8188 (pre-migration behavior).
+          * host networking — the LXC is the host. The command below says
+            ``--listen 0.0.0.0``, but the container provider flips every
+            host-net bind to loopback (``_loopback_fence_command``), so the web
+            UI answers on the box's 127.0.0.1:8188 only: on the box itself or
+            through an SSH tunnel, not on the LAN.
           * devices from :func:`resolve_gpu_device_paths` — explicit nodes,
             podman doesn't recurse /dev/dri (same fix class as #674).
         """

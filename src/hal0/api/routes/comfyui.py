@@ -9,8 +9,11 @@ renders that engine pane from ``GET /api/comfyui/status``, which folds together:
     container that runs ComfyUI: running / absent),
   - **systemd** state of the Hermes agent (``hal0-agent@hermes``) so the pane
     can show which mode currently owns the GPU, and
-  - **ComfyUI's own HTTP API** (``/system_stats`` for GTT/RAM, ``/queue`` for the
+  - **ComfyUI's own HTTP API** (``/system_stats`` for reachability, ``/queue`` for the
     running + pending job counts).
+
+It carries no memory figures: those are the ``memory`` block of ``GET /api/stats/hardware``
+(ADR-0039), the one owner.
 
 Every source degrades to a safe default — the pane polls this every few seconds
 and a dead container must surface as "stopped", never a 500.
@@ -83,7 +86,7 @@ from hal0.comfyui.gate_version import (
     GATE_VERSION,
     GATE_VERSION_HEADER,
 )
-from hal0.comfyui.picker import recommended_id
+from hal0.comfyui.picker import recommendation, recommended_id
 from hal0.hardware import gpu_view
 from hal0.hardware.memory_budget import MemoryBudget
 from hal0.http_client import async_client
@@ -95,13 +98,6 @@ from hal0.upstreams.huggingface import hf_token_from_env
 
 router = APIRouter()
 log = logging.getLogger(__name__)
-
-# iGPU memory ceilings on the Strix Halo target (GB). The host addresses ~80 GB
-# of the 96 GB unified pool from the GPU, with zero swap — so memory pressure is
-# the real constraint, surfaced when GTT crosses half the ceiling.
-_GTT_CEIL_GB = 80
-_RAM_CEIL_GB = 96
-_PRESSURE_GB = 50
 
 _HERMES_UNIT = "hal0-agent@hermes.service"
 # The seeded name of the image slot; its unit and container are named after the slot's
@@ -468,12 +464,6 @@ async def _systemd_active(unit: str) -> bool:
     return out.decode("utf-8", "replace").strip() == "active"
 
 
-def _bytes_to_gb(value: Any) -> float | None:
-    if not isinstance(value, (int, float)) or value < 0:
-        return None
-    return round(value / 1024**3, 1)
-
-
 def _first_device(stats: dict[str, Any] | None) -> dict[str, Any] | None:
     """The first device ComfyUI's /system_stats reports, or None."""
     devices = stats.get("devices") if stats else None
@@ -492,8 +482,7 @@ def _device_used_bytes(stats: dict[str, Any] | None) -> float | None:
     """The first device's ``vram_total - vram_free`` in bytes, or None.
 
     None when there is no device, either figure is missing or not a number, or
-    free exceeds total. The one parse behind both the pane's GTT gauge and
-    :func:`engine_used_mb`.
+    free exceeds total. The one parse behind :func:`engine_used_mb`.
     """
     dev = _first_device(stats)
     if dev is None:
@@ -504,43 +493,6 @@ def _device_used_bytes(stats: dict[str, Any] | None) -> float | None:
         return None
     used = total - free
     return used if used >= 0 else None
-
-
-def _parse_memory(stats: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Fold ComfyUI's /system_stats into the pane's GTT + RAM gauges.
-
-    GTT comes from the first reported device's vram_total/vram_free; RAM from the
-    system block. Any missing field becomes ``None`` rather than a guessed value.
-    """
-    if not stats:
-        return None
-    gtt_used = gtt_ceil = None
-    dev = _first_device(stats)
-    if dev is not None:
-        gtt_ceil = _bytes_to_gb(dev.get("vram_total")) or _GTT_CEIL_GB
-        used = _device_used_bytes(stats)
-        if used is not None:
-            gtt_used = _bytes_to_gb(used)
-    ram_used = None
-    ram_ceil = None
-    system = stats.get("system")
-    if isinstance(system, dict):
-        rtotal = system.get("ram_total")
-        rfree = system.get("ram_free")
-        ram_ceil = _bytes_to_gb(rtotal)
-        if isinstance(rtotal, (int, float)) and isinstance(rfree, (int, float)):
-            ram_used = _bytes_to_gb(rtotal - rfree)
-    pressure = gtt_used is not None and gtt_used >= _PRESSURE_GB
-    return {
-        "gtt_used_gb": gtt_used,
-        "gtt_ceil_gb": int(gtt_ceil) if gtt_ceil else _GTT_CEIL_GB,
-        "ram_used_gb": ram_used,
-        # Derive from the device's reported ram_total (the Strix box reports
-        # ~128 GB, not the brief's 96) — fall back to the nominal ceiling only
-        # when the field is absent, so the gauge never shows used > ceil.
-        "ram_ceil_gb": int(ram_ceil) if ram_ceil else _RAM_CEIL_GB,
-        "pressure": pressure,
-    }
 
 
 def _queue_counts(queue: dict[str, Any] | None) -> dict[str, int]:
@@ -691,7 +643,6 @@ async def comfyui_status(request: Request) -> dict[str, Any]:
         # Resident container: the web UI is usable whenever ComfyUI answers,
         # regardless of which mode owns the GPU memory.
         "endpoint": ":8188" if (reachable or mode == "generation") else None,
-        "memory": _parse_memory(stats),
         "queue": counts,
         **telemetry,
         # The hal0-submitted render (/v1 and the Generate tab) ComfyUI is running: model,
@@ -1140,8 +1091,13 @@ async def comfyui_models(request: Request) -> dict[str, Any]:
     """The image-model catalog with each model's install state and latest install job.
 
     Returns ``{"models": [...], "engine": {"available": bool, "reason": str | None},
-    "store": {"free_gb": float | None, "path": str}}``, the models in catalog order. Exactly
-    one row is ``recommended``: the starter pick for this box's memory pool. ``engine`` says
+    "store": {"free_gb": float | None, "path": str},
+    "recommendation": {"id", "pool_gb", "limited_by"} | None}``, the models in catalog order.
+    Exactly one row is ``recommended``: the starter pick for this box's memory pool.
+    ``recommendation`` says what the pick was chosen from: ``pool_gb`` is the figure
+    ``picker.image_pool_gb`` used and ``limited_by`` is ``"ram"`` when the RAM limit set it
+    and ``"gpu"`` when the GPU pool did; it is ``null`` when the pool is unknown (a box that
+    was never probed). ``engine`` says
     whether this host can run the ComfyUI image at all; the catalog is listed either way, so
     a box without the ROCm lane can still see it. ``store`` is the models tree and the free
     space (GiB) of the filesystem under it; ``free_gb`` is ``null`` when that cannot be
@@ -1158,7 +1114,10 @@ async def comfyui_models(request: Request) -> dict[str, Any]:
     cannot be read by the hal0 user.
     """
     jobs = _install_jobs(request.app)
-    recommended = recommended_id()
+    # One read of the hardware file names both the pick and the figure it came from, so the
+    # row marked `recommended` and `recommendation.id` cannot differ.
+    pick = recommendation()
+    recommended = pick["id"] if pick else recommended_id()
     root = comfyui_paths.models_root()
     budget = await _collect_budget(request.app)
     with comfyui_install.readable_tree():
@@ -1169,7 +1128,12 @@ async def comfyui_models(request: Request) -> dict[str, Any]:
             for model in CATALOG.values()
         ]
         store = _store_info(root)
-    return {"models": models, "engine": _engine_availability(), "store": store}
+    return {
+        "models": models,
+        "engine": _engine_availability(),
+        "store": store,
+        "recommendation": pick,
+    }
 
 
 # The wire form of a size: two to four ASCII digits a side, lower-case ``x``. Matched whole

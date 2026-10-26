@@ -13,10 +13,11 @@
 // for the verbs the backend advertises in `actions`.
 
 import { useServices, useServiceAction, useMdnsAdvertise, useUnitLogs } from '@/api/hooks/useServices'
-import { useComfyui, COMFYUI_FALLBACK } from '@/api/hooks/useComfyui'
 import { useComponents, useComponentConverge } from '@/api/hooks/useComponents'
 import { useUpdateJob } from '@/api/hooks/useUpdates'
 import { componentForService, componentCell, RETRYABLE_STATUSES } from './components-pure'
+import { EditorOffBox, EditorOpenButton } from './image/ComfyEditorLink'
+import { useEditorAccess } from './image/useEditorAccess'
 
 const { useState, useEffect, useRef } = React
 
@@ -263,13 +264,16 @@ function ActionButtons({ svc, onAction, busy }) {
 }
 
 // ── One service card ──────────────────────────────────────────────────────────
-function ServiceCard({ svc, onAction, busyId, actionMsg, comfyReachable, component }) {
+function ServiceCard({ svc, onAction, busyId, actionMsg, component }) {
   const [logsOpen, setLogsOpen] = useState(false)
-  const [queueOpen, setQueueOpen] = useState(false)
   const busy = busyId === svc.id
   const uptime = svc.up ? uptimeFrom(svc.unit_state?.since) : null
   const isComfy = svc.id === 'comfyui'
-  const CJQ = typeof ComfyJobQueue === 'function' ? ComfyJobQueue : null
+  // ComfyUI listens on the box's loopback only: its link, like the Image Gen pane's, opens from a
+  // page on the box and says how to reach it from anywhere else. Every other service links as the
+  // API gave it.
+  const editor = useEditorAccess()
+  const comfyOffBox = isComfy && !editor.onBox
 
   return (
     <div className={'svcp-card' + (svc.up ? ' svcp-card-up' : '')} data-testid={`svcp-card-${svc.id}`}>
@@ -280,7 +284,9 @@ function ServiceCard({ svc, onAction, busyId, actionMsg, comfyReachable, compone
           <StatePill svc={svc} />
           {uptime && <span className="svcp-uptime mono">{uptime}</span>}
         </span>
-        {svc.url && (
+        {isComfy ? (
+          <EditorOpenButton testid="svcp-open-comfyui">{SIcons.ext}</EditorOpenButton>
+        ) : svc.url && (
           <button className="svc-btn" title={`Open ${svc.name}`}
             data-testid={`svcp-open-${svc.id}`}
             onClick={() => window.open(svc.url, '_blank', 'noopener')}>
@@ -296,11 +302,13 @@ function ServiceCard({ svc, onAction, busyId, actionMsg, comfyReachable, compone
 
       <div className="svcp-meta mono">
         {svc.unit && <span className="svcp-meta-row">unit <b>{svc.unit}</b> · {svc.unit_state?.active_state ?? 'unknown'}{svc.unit_state?.unit_file_state && svc.unit_state.unit_file_state !== 'unknown' ? ` · ${svc.unit_state.unit_file_state}` : ''}</span>}
-        {svc.url && <span className="svcp-meta-row">url <b>{svc.url}</b></span>}
+        {svc.url && !comfyOffBox && <span className="svcp-meta-row">url <b>{svc.url}</b></span>}
         {svc.mdns_url && <span className="svcp-meta-row">mdns <b>{svc.mdns_url}</b></span>}
         {!svc.url && svc.loopback_port && <span className="svcp-meta-row">bind <b>127.0.0.1:{svc.loopback_port}</b> (loopback-only)</span>}
         {!svc.managed && <span className="svcp-meta-row svcp-unmanaged">external — not managed by hal0</span>}
       </div>
+
+      {comfyOffBox && <EditorOffBox testid="svcp-comfyui" />}
 
       {svc.hints.length > 0 && (
         <div className="svcp-hints">{svc.hints.map((h, i) => <span key={i}>ⓘ {h}</span>)}</div>
@@ -315,20 +323,12 @@ function ServiceCard({ svc, onAction, busyId, actionMsg, comfyReachable, compone
             {SIcons.logs} Logs {logsOpen ? SIcons.chevUp : SIcons.chev}
           </button>
         )}
-        {isComfy && CJQ && (
-          <button className={'btn ghost sm svcp-act' + (queueOpen ? ' on' : '')}
-            data-testid="svcp-queue-comfyui"
-            onClick={() => setQueueOpen(v => !v)}>
-            Queue {queueOpen ? SIcons.chevUp : SIcons.chev}
-          </button>
-        )}
         {busy && <span className="svcp-busy mono">working…</span>}
       </div>
       {actionMsg && busyId === null && actionMsg.id === svc.id && (
         <div className={'svcp-result' + (actionMsg.ok ? '' : ' err')}>{actionMsg.text}</div>
       )}
 
-      {isComfy && queueOpen && CJQ && <CJQ comfyReachable={comfyReachable} />}
       {svc.unit && <LogsDrawer unit={svc.unit} open={logsOpen} />}
     </div>
   )
@@ -433,8 +433,6 @@ function RunnerImagesCard({ component }) {
 function ServicesView() {
   const { services, mdns, pending } = useServices()
   const actionMut = useServiceAction()
-  const comfyQ = useComfyui({ active: false })
-  const comfyReachable = (comfyQ.data ?? COMFYUI_FALLBACK).reachable
   const [actionMsg, setActionMsg] = useState(null)
 
   // Task 12: fail-soft — an older daemon without GET /api/updates/components
@@ -475,7 +473,6 @@ function ServicesView() {
             {services.map(svc => (
               <ServiceCard key={svc.id} svc={svc}
                 onAction={onAction} busyId={busyId} actionMsg={actionMsg}
-                comfyReachable={comfyReachable}
                 component={componentForService(componentRows, svc.id)} />
             ))}
           </div>

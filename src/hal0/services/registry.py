@@ -49,8 +49,11 @@ class ServiceDef:
     description: str
     #: Owning systemd unit; None = unmanaged/external (no lifecycle actions).
     unit: str | None = None
-    #: LAN-published port for the host:port URL fallback; None when the
-    #: service binds loopback-only (or isn't deployed by hal0 at all).
+    #: Port for the ``http://<request-host>:<port>`` link fallback and, with
+    #: ``mdns``, the mDNS announcement. A LAN-published service answers there
+    #: from other machines. ComfyUI keeps ``port=8188`` though it is
+    #: loopback-only: its link answers only on the box itself (or through an
+    #: SSH tunnel). None when hal0 has no port to link (hermes, hindsight).
     port: int | None = None
     #: Env var carrying an operator-declared public URL (reverse proxy).
     public_url_env: str | None = None
@@ -108,7 +111,7 @@ SERVICES: tuple[ServiceDef, ...] = (
     ServiceDef(
         id="comfyui",
         name="ComfyUI",
-        description="Image generation engine (img slot container, LAN :8188).",
+        description="Image generation engine (img slot container, loopback :8188).",
         unit="hal0-slot@img.service",
         port=8188,
         public_url_env="HAL0_COMFYUI_PUBLIC_URL",
@@ -118,7 +121,11 @@ SERVICES: tuple[ServiceDef, ...] = (
         # over), the only honest way to bring ComfyUI up (#1590). "restart"
         # stays the raw unit bounce the FirstRun repair button uses.
         actions=("start", "restart"),
-        mdns=True,
+        # No mDNS: the engine listens on the box's loopback (the host-net fence in
+        # providers/container.py), so an announced :8188 would lead other machines nowhere.
+        # ``port`` stays for the browser link, which opens on the box itself or through an SSH
+        # tunnel (the dashboard decides; see ui/src/dash/image/editor-reach.ts).
+        mdns=False,
         hints=("stop is GPU-arbiter managed — switch back to inference in the Image-Gen pane",),
         category="image",
         modalities=("image",),

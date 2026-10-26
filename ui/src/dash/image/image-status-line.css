@@ -1,0 +1,74 @@
+/*
+ * The GPU status line (ImageStatusLine.jsx). Board A: a coloured left rule and dot, the headline
+ * and detail, the actions on the right.
+ *
+ * Plain dashboard tokens only, never the `--comfy*` accent.
+ */
+.isl {
+  --isl-c: var(--fg-4);
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--isl-c);
+  border-radius: var(--rad);
+  background: var(--bg-1);
+  color: var(--fg);
+}
+.isl-ok   { --isl-c: var(--ok); }
+.isl-img  { --isl-c: var(--info); }
+.isl-pin  { --isl-c: var(--accent); }
+.isl-warn { --isl-c: var(--warn); }
+.isl-err  { --isl-c: var(--err); }
+
+.isl-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--isl-c);
+}
+.isl-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.isl-head { font-family: var(--jbm); font-size: 13px; font-weight: 500; line-height: 1.35; }
+.isl-detail {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg-3);
+  /* A refusal reason is text from another container: let a long token wrap, not widen the line. */
+  overflow-wrap: anywhere;
+}
+.isl-error { font-size: 12px; color: var(--err); overflow-wrap: anywhere; }
+
+.isl-actions { flex-shrink: 0; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+
+.isl-run { display: flex; align-items: center; gap: 10px; margin-top: 2px; }
+.isl-bar {
+  flex: 1;
+  max-width: 320px;
+  height: 4px;
+  border-radius: var(--rad-pill);
+  background: var(--bg-4);
+  overflow: hidden;
+}
+.isl-bar > i { display: block; height: 100%; background: var(--isl-c); }
+.isl-elapsed { font-size: 11px; color: var(--fg-3); }
+
+.isl-steps { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 0; padding: 0; list-style: none; }
+.isl-step {
+  padding: 1px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--rad-pill);
+  font-family: var(--jbm);
+  font-size: 10.5px;
+  color: var(--fg-4);
+}
+.isl-step.active { color: var(--isl-c); border-color: var(--isl-c); }
+.isl-step.done   { color: var(--fg-2); border-color: var(--line-strong); }
+.isl-step.done::before { content: '✓ '; color: var(--ok); }
+
+@media (max-width: 640px) {
+  .isl { flex-wrap: wrap; }
+  .isl-actions { width: 100%; justify-content: flex-start; }
+}

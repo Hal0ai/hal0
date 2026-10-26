@@ -1,18 +1,19 @@
 /* hal0 dashboard — Inference + NPU "engine" panes (slots-page Inference tab).
  *
  * Option A (recon-blueprint §A5): a single scoped stylesheet for BOTH panes,
- * mirroring the proven comfyui-pane.css pattern. row.css is NOT global in the
- * live build — comfyui-pane.css re-scopes every generic .engine/.epill/.qcaret
- * class under .comfy-pane, so the design refs' assumption that those classes
- * are global is FALSE here. We therefore re-declare the shell rules scoped to
+ * mirroring the scoped-stylesheet pattern the ComfyUI pane used (that pane is
+ * gone; the Image Gen pane has its own sheets under image/). row.css is NOT
+ * global in the live build, so the design refs' assumption that the generic
+ * .engine/.epill/.qcaret classes are global is FALSE here. We therefore
+ * re-declare the shell rules scoped to
  * .infer-pane / .npu-pane (comma selectors), and recolour by swapping --comfy
- * inside each scope. Zero risk to the ComfyUI pane.
+ * inside each scope. Zero risk to the Image Gen pane.
  *
  *   .infer-pane → sodium-yellow accent (#E5B84F)
  *   .npu-pane   → purple accent (var(--dev-npu))
  *
  * The motion/sunken tokens the design assumes but dashboard.css lacks
- * (--dur*, --ease) are declared in both scopes, as comfyui-pane.css does. */
+ * (--dur*, --ease) are declared in both scopes. */
 
 /* ─── Accent scopes ─────────────────────────────────────────────────── */
 .infer-pane {

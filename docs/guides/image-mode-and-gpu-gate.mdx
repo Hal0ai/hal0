@@ -1,0 +1,193 @@
+---
+title: Image mode and the GPU gate
+description: How the GPU hands over between chat and image generation — the engine status, switching and pinning image mode by hand, how long image mode lasts, and what ComfyUI's GPU gate refuses.
+sidebar:
+  order: 71
+---
+
+This is the second half of the image-generation guide. [Generate images](/docs/guides/generate-images/)
+covers installing models and generating from the dashboard, the API and Open
+WebUI. This page covers the GPU switch behind it: what the engine reports, how to
+switch or pin the GPU by hand, how long image mode lasts, and the GPU gate that
+guards every prompt ComfyUI queues.
+
+## Read the generation-engine status
+
+```sh
+curl http://localhost:8080/api/comfyui/status
+```
+
+Key fields:
+
+- `mode` — `generation` (ComfyUI owns the iGPU) or `inference` (the LLM
+  stack owns it). The GPU arbiter is the source of truth.
+- `engine` — `running`, `generating` (a render is in flight), `starting`
+  (container up, port not bound yet), or `stopped`.
+- `reachable` — whether ComfyUI's HTTP API answers.
+- `container` — the `img` slot container's state (`running` or `absent`: the
+  slot's unit is active, or it is not).
+- `queue` — `{running, pending}` job counts.
+- `switchover` — the in-flight switch tracker (`active`, `target`,
+  `error`).
+- `arbiter` — the GPU arbiter's own block: `mode` (`img` or `llm`),
+  `pinned`, `saved_llm_slots` (the slots it will reload), `switching` (true
+  while it holds its switch lock), `image_jobs` (the `/v1/images/generations`
+  requests in flight) and `phase`, what the GPU is doing right now:
+  `draining`, `unloading`, `starting_engine` or `reloading` during a switch or
+  restore, and `handoff`, `rendering` or `grace` in image mode, else `null`.
+  The whole block is `null` when the arbiter cannot report.
+- `progress` — the step of the render hal0 submitted that ComfyUI is running:
+  `model`, `step` out of `total`, `node` and `elapsed_s`; `null` when none is
+  live. A render queued from ComfyUI's editor has no entry; read `queue` for it.
+- `gate`, `gate_refusal` — whether the engine runs the current GPU gate, and
+  the latest prompt the gate refused (see
+  [ComfyUI's editor and the GPU gate](#comfyuis-editor-and-the-gpu-gate)).
+
+The status carries no memory figures. Read the `memory` block of
+`GET /api/stats/hardware` ([Memory budget API
+reference](/docs/reference/api/memory-budget/)) for the GPU pool and RAM.
+`GET /api/comfyui/arbiter` returns only the arbiter's side of it (`mode`,
+`arbiter`, `switchover` and `gate_refusal`), which the dashboard polls every
+second while anything moves.
+
+Every probe degrades to a safe default: a dead engine surfaces as
+`stopped`, never a 500.
+
+## Switch the iGPU between modes
+
+The `img` slot runs as the `hal0-slot@img.service` systemd unit. To hand
+the iGPU to ComfyUI (drains and unloads the LLM GPU slots, then ensures
+the resident container is up):
+
+```sh
+curl -X POST http://localhost:8080/api/comfyui/switchover \
+  -H 'Content-Type: application/json' \
+  -d '{"mode": "generation"}'
+```
+
+To hand it back to inference:
+
+```sh
+curl -X POST http://localhost:8080/api/comfyui/switchover \
+  -H 'Content-Type: application/json' \
+  -d '{"mode": "inference"}'
+```
+
+Body fields:
+
+| Field   | Type   | Notes |
+|---------|--------|-------|
+| `mode`  | string | `generation` or `inference` (required). |
+| `force` | bool   | Switching to `inference` drops any running/pending render. Without `force`, a busy queue is refused with **409**. |
+| `pin`   | bool   | `generation` only — hold image mode until you unpin it (`POST /api/comfyui/pin` with `{"pinned": false}`) or switch to `inference` with `force`. Without a pin, image mode ends about 10 seconds after the last render, as it does for every image request. |
+
+Responses: **202** (`switching`, poll `/status`), **200** (`noop`,
+already in the target mode), **409** (switch already in flight, or a busy
+queue without `force`), **503**
+(`comfyui.arbiter_unavailable` — the GPU arbiter isn't wired on this
+host; requires a configured `img` slot). Pin or unpin while image mode is
+on (pinning while the GPU serves LLMs answers **409**
+`comfyui.not_image_mode`; pass `pin` on the switchover instead):
+
+```sh
+curl -X POST http://localhost:8080/api/comfyui/pin \
+  -H 'Content-Type: application/json' \
+  -d '{"pinned": true}'
+```
+
+## How long image mode lasts
+
+Image mode lasts only while image work runs: a `/v1/images/generations`
+request, from before the switch until its render returns, or a render in
+ComfyUI's queue from its editor. About 10 seconds after the last render, hal0
+frees ComfyUI's models (`POST /free`) and reloads the LLM slots it had
+unloaded. This holds however image mode began: a switch to `generation`
+without `pin`, such as the Start button on the Services page's ComfyUI card, also ends about 10
+seconds after the switch when nothing renders. To keep image mode, pin it.
+
+- **A chat request ends the wait.** A request for a GPU LLM slot that arrives
+  while image mode is on waits for the render to finish and for the saved
+  slots to reload, up to 120 seconds in all, and is then served. It gets
+  `503 gpu.image_mode` (with `Retry-After: 15`) only when image mode is
+  pinned, when ComfyUI's queue cannot be read, or when the 120 seconds run
+  out. Requests for NPU and CPU slots are never affected.
+- **hal0 never restores under a render.** While a render runs or waits in
+  ComfyUI's queue, the reload waits. Switching to `inference` by hand while
+  one runs needs `force`, which drops it.
+- **A hand-off follows each request for image mode.** For about 3 seconds
+  (a render sent to `/v1` on a GPU already in image mode starts one too)
+  hal0 does not restore, so a prompt sent from ComfyUI's editor can reach
+  ComfyUI's queue, where hal0 sees it.
+- **A pin lasts until you end it.** `POST /api/comfyui/pin` with
+  `{"pinned": false}` unpins it, and a switch to `inference` with `force`
+  ends image mode and clears the pin. Pinning needs image mode: pass `pin` on
+  the switchover that enters it, because `{"pinned": true}` while the GPU
+  serves LLMs answers 409 `comfyui.not_image_mode`.
+- **A ComfyUI queue that never drains holds image mode.** hal0 restores LLM
+  mode only while ComfyUI's queue shows nothing running or pending, so a
+  wedged job keeps the GPU in image mode until you switch to `inference` with
+  `force`.
+
+## ComfyUI's editor and the GPU gate
+
+Prompts from ComfyUI's own editor do not pass through hal0, so ComfyUI loads
+a custom node, `hal0_gpu_gate`, that asks hal0 for image mode before each
+prompt is queued. hal0's own `/v1` renders pass through it too. The node
+reaches `hal0-api` on the port and address it binds (`HAL0_PORT` and
+`HAL0_BIND_HOST` in `/etc/hal0/api.env`), which hal0 writes into the `img`
+slot's unit. The prompt waits while hal0 switches the GPU, up to 180 seconds
+(the switch itself waits for running chat requests to finish). When the GPU
+is already in image mode, the node first tells hal0 the prompt is coming, and
+hal0 holds image mode for it for about 3 seconds, until ComfyUI's queue shows
+it.
+
+The node refuses the prompt and queues nothing, answering it with a 503 that
+carries the reason, when:
+
+- hal0 rejects the switch request;
+- hal0 stops answering while it switches the GPU;
+- hal0 still holds the GPU for the LLM slots after three switch requests;
+- the switch has not finished after 180 seconds;
+- hal0 is unreachable, or does not say which mode holds the GPU, for 5
+  seconds after the prompt is submitted;
+- hal0 answers 401 or 403, at once: the gate's credential is missing or no
+  longer current (see below).
+
+Queue the prompt again once the reason is gone. The node also tells hal0 why it
+refused, and `GET /api/comfyui/status` reports the latest as `gate_refusal`
+(`at` and `reason`). Its `gate.state` says whether the engine runs the current
+gate: `current`; `stale`, an older gate, so run `hal0 slot restart img`;
+`unknown`, because the gate has not called since `hal0-api` started; or
+`no_credential`, because hal0 requires the gate to authenticate and it has no
+token it can send.
+
+To let prompts through while `hal0-api` is down or refuses the gate's
+credential, as the gate did in v1.6.5, set `HAL0_COMFYUI_GATE_FAIL_OPEN=1` in
+`/etc/hal0/api.env`, restart `hal0-api`, then run `hal0 slot restart img`.
+hal0 writes the setting into the slot's unit when it loads the slot, so a bare
+`systemctl restart` of the unit does not pick it up. The setting covers only
+those two cases: a prompt that hal0 answered and refused stays refused. A
+prompt it lets through is unguarded: with `hal0-api` down the GPU most likely
+still holds the LLM slots, so it renders next to them.
+
+With auth enforcement on (`hal0 auth require on` or `HAL0_REQUIRE_AUTH=1`),
+or on a box whose `HAL0_BIND_HOST` is a specific address and that has an
+admin key, the gate authenticates with a token of its own, never the admin
+key. hal0 mints it when the `img` slot first starts and mounts it read-only
+into the container; it opens the gate's four requests and nothing else (see
+[ComfyUI's GPU gate credential](/docs/operate/auth#comfyuis-gpu-gate-credential)).
+An `img` container started before the update has no token, so on such a box it
+refuses every image prompt (the editor's, hal0's own `/v1` renders, Open WebUI's
+and the omni loop's) until you run `hal0 slot restart img`.
+
+**After updating hal0, run `hal0 slot restart img` once.** A running `img`
+container keeps the gate it started with, and `hal0 update` does not restart
+slots. hal0 keeps that older gate waiting while it switches or restores the
+GPU, but the older gate lets a prompt through when `hal0-api` is unreachable or
+after its own 120 seconds, and such a prompt can render next to the LLM slots.
+Restarting the slot loads the gate described here. Until you do, the older
+gate does not report why it refused a prompt, and `gate.state` on
+`/api/comfyui/status` reads `stale` once it has called, with one exception: on
+a box that requires authentication, hal0 mints the gate's token only when the
+`img` slot loads, so a box updated from v1.6.5 reads `no_credential`, which
+ranks above `stale`, until you restart the slot.

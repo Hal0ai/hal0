@@ -58,8 +58,8 @@
   --dev-img:      #3c6597;  /* ComfyUI image-gen tag (decoupled from --comfy accent) */
 
   /* ComfyUI "generation engine" accent — its own blue the way the NPU stack
-     owns purple. Mirrored in comfyui-pane.css (scoped to .comfy-pane); kept
-     here so the slots-page Image-Gen tab can glow the same hue. */
+     owns purple. The slots-page Image-Gen pane (dash/image/*.css) draws with
+     these; .infer-pane and .npu-pane re-scope them to their own accents. */
   --comfy:        #5ea4f9;
   --comfy-hi:     #8cc0ff;
   --comfy-soft:   rgba(94, 164, 249, 0.10);
@@ -3310,6 +3310,16 @@ select.npu-sel {
   cursor: pointer;
 }
 .banner-dismiss:hover { color: var(--fg); background: rgba(255, 255, 255, 0.05); }
+/* One-line form: heading, body and actions side by side, wrapping only when the width runs out
+   (GpuImageModeBanner). */
+.banner-compact { align-items: center; padding: 8px 14px; }
+.banner-compact .banner-content {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 12px;
+}
+.banner-compact .banner-actions { margin-top: 0; margin-left: auto; }
 
 /* ─── Dropdown menu ────────────────────────────────────────────── */
 .hal0-menu {

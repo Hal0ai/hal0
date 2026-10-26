@@ -101,7 +101,7 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash
 <table>
 <tr>
 <td width="33%"><a href="https://hal0.dev/docs/guides/pull-and-register-models/"><img src="https://hal0.dev/screenshots/models-registry.png" alt="Model registry" width="100%"></a><br><sub><b>Model registry</b> — catalogue with quant chips and pull status.</sub></td>
-<td width="33%"><a href="https://hal0.dev/docs/guides/generate-images/"><img src="https://hal0.dev/screenshots/image-gen-comfyui.png" alt="Image generation" width="100%"></a><br><sub><b>Image generation</b> — ComfyUI queue and GPU gauges.</sub></td>
+<td width="33%"><a href="https://hal0.dev/docs/guides/generate-images/"><img src="https://hal0.dev/screenshots/image-gen-comfyui.png" alt="Image generation" width="100%"></a><br><sub><b>Image generation</b> — install image models, see what fits the box, and generate.</sub></td>
 <td width="33%"><a href="https://hal0.dev/docs/guides/enable-memory/"><img src="https://hal0.dev/screenshots/memory-graph.png" alt="Memory graph" width="100%"></a><br><sub><b>Memory</b> — Hindsight facts and graph extraction.</sub></td>
 </tr>
 <tr>
@@ -428,9 +428,11 @@ content-addressed, host-redacted archive you can attach anywhere, and
   Journal panel streams per-slot container logs from journald. Live
   telemetry — Power & Thermal (GPU clock/temp/power) and per-slot throughput
   — is on by default. The slots page splits into Inference | Image Gen tabs;
-  the Image-Gen tab operates the ComfyUI container (live GTT/RAM gauges,
-  queue depth, model inventory) with a gated inference ⇄ generation iGPU
-  switchover behind a blast-radius confirm.
+  the Image-Gen tab has Generate, Models and Engine sub-tabs under a GPU status
+  line: it generates, installs image models with a fit meter for this box,
+  shows what a render costs chat, and operates the ComfyUI container, with
+  Hold image mode to pin the iGPU for generation and a confirm before Stop
+  image mode drops a running render.
 - **AI Capabilities page** — one settings surface for TTS, STT, embeddings,
   reranking, image generation and the NPU, with per-panel probe-failure
   surfacing instead of a silent grey Save.

@@ -19,6 +19,11 @@ subtracts the image engine. The fit check judges a catalog need that is measured
 above an idle engine, so subtracting the engine's own memory as well counted a
 warm engine's weights twice. Decision 4 has the formula and the reason.
 
+**Amended (2026-10-25, Image Gen pane).** The pane's own gauge, the `memory` key on
+`GET /api/comfyui/status` and the 80 and 96 GB constants behind them are deleted, as
+decision 5 said the pane's rework would do. Decision 5, the consequence that keeps the
+gauge and the table in Context describe the state before that.
+
 ## Context
 
 At one moment on the reference box, five figures that all read as "memory"
@@ -333,8 +338,8 @@ still disagree with the rest of the dashboard.
 - `src/hal0/hardware/memory_budget.py` (`build_memory_budget`, `read_ram`,
   `cgroup_limit_mb`, `RENDER_MARGIN_GB`), `src/hal0/api/memory_source.py`
   (`collect_memory_budget`), `src/hal0/api/routes/hardware.py`
-  (`stats_hardware`), `src/hal0/api/routes/comfyui.py` (`engine_used_mb`,
-  `_parse_memory`), `src/hal0/hardware/gpu_view.py` (`GPUMemorySample`),
+  (`stats_hardware`), `src/hal0/api/routes/comfyui.py` (`engine_used_mb`),
+  `src/hal0/hardware/gpu_view.py` (`GPUMemorySample`),
   `src/hal0/hardware/probe.py` (`_read_cgroup_memory_max_mb`),
   `src/hal0/slots/capacity.py` (`build_per_slot`, `include_starting`),
   `src/hal0/slots/arbiter.py` (`gpu_exclusive_group`).

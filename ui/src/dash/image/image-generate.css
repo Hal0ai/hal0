@@ -1,0 +1,175 @@
+/*
+ * The Image Gen pane's Generate tab (ImageGeneratePanel.jsx).
+ *
+ * These rules use the plain dashboard tokens and take the blue accent from `--comfy` where it has
+ * one, as image.css does. The fit meter is image.css's; the form controls are the dashboard's own
+ * (`.input`, `.btn`, `.chip`, the RichSelect).
+ */
+.gen { display: flex; flex-direction: column; gap: 22px; min-width: 0; }
+.gen-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+  max-width: 880px;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--rad-lg);
+  background: var(--bg-1);
+}
+.gen-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.gen-label { font-family: var(--jbm); font-size: 11px; letter-spacing: 0.04em; color: var(--fg-3); }
+.gen-label .hint { margin-left: 6px; color: var(--fg-5); letter-spacing: 0; }
+.gen-prompt { resize: vertical; min-height: 84px; line-height: 1.5; }
+
+/* Size chips: a pill per size, like the Models tab's filters. */
+.gen-sizes { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.gen-chip {
+  height: 26px;
+  padding: 0 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--rad-pill, 999px);
+  background: transparent;
+  color: var(--fg-3);
+  font-family: var(--jbm);
+  font-size: 11px;
+  cursor: pointer;
+}
+.gen-chip:hover { border-color: var(--fg-3); color: var(--fg); }
+.gen-chip[aria-pressed='true'] {
+  color: var(--comfy, var(--accent));
+  border-color: var(--comfy-line, var(--accent-line));
+  background: var(--comfy-soft, var(--accent-soft));
+}
+.gen-custom { display: inline-flex; align-items: center; gap: 6px; font-family: var(--jbm); font-size: 11px; color: var(--fg-4); }
+.gen-custom .input { width: 76px; padding: 4px 8px; text-align: right; }
+
+/* More options */
+.gen-more {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--fg-3);
+  font-family: var(--jbm);
+  font-size: 11px;
+  cursor: pointer;
+}
+.gen-more:hover { color: var(--fg); }
+.gen-more::before { content: '▸ '; }
+.gen-more[aria-expanded='true']::before { content: '▾ '; }
+.gen-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 14px 18px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--rad);
+  background: var(--bg);
+}
+.gen-options .wide { grid-column: 1 / -1; }
+.gen-seed { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.gen-seed .input { flex: 1 1 120px; min-width: 0; }
+.gen-seg { display: inline-flex; }
+.gen-seg .gen-chip { border-radius: 0; }
+.gen-seg .gen-chip:first-child { border-radius: var(--rad-pill, 999px) 0 0 var(--rad-pill, 999px); }
+.gen-seg .gen-chip:last-child { border-radius: 0 var(--rad-pill, 999px) var(--rad-pill, 999px) 0; margin-left: -1px; }
+.gen-dice { width: 26px; padding: 0; justify-content: center; }
+
+/* Fit */
+.gen-fit { min-width: 0; }
+.gen-fit:empty { display: none; }
+.gen-fit-note { font-family: var(--jbm); font-size: 11.5px; color: var(--fg-3); }
+/* The last verdict, kept up while the next one is read: dimmed, so it does not read as the answer. */
+.gen-fit[data-stale='true'] .fm { opacity: 0.5; }
+
+/* The button, its reason and the cost line */
+.gen-go { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; min-width: 0; }
+.gen-go-row { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.gen-blocked { font-family: var(--jbm); font-size: 11.5px; line-height: 1.45; color: var(--err); overflow-wrap: anywhere; }
+.gen-cost { font-family: var(--jbm); font-size: 11.5px; line-height: 1.5; color: var(--fg-3); }
+
+/* A run: the phase strip replaces the button */
+.gen-run { display: flex; flex-direction: column; gap: 10px; align-self: stretch; min-width: 0; }
+.gen-steps { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.gen-step {
+  padding: 2px 9px;
+  border: 1px solid var(--line-strong, var(--line));
+  border-radius: var(--rad-pill, 999px);
+  font-family: var(--jbm);
+  font-size: 10.5px;
+  color: var(--fg-4);
+}
+.gen-step.now { color: var(--comfy, var(--accent)); border-color: var(--comfy, var(--accent)); }
+.gen-step.done { color: var(--fg-2); }
+.gen-step.done::before { content: '✓ '; color: var(--ok); }
+.gen-run-bar { display: flex; align-items: center; gap: 12px; }
+.gen-bar {
+  flex: 1;
+  max-width: 360px;
+  height: 4px;
+  border-radius: var(--rad-pill, 999px);
+  background: var(--bg-4, var(--bg-3));
+  overflow: hidden;
+}
+.gen-bar > i { display: block; height: 100%; background: var(--comfy, var(--accent)); transition: width 0.4s var(--ease, ease); }
+/* No step count yet (the switch, the model load): a bar that moves, not one stuck at zero. */
+.gen-bar[data-indeterminate='true'] > i { width: 30%; animation: gen-slide 1.4s ease-in-out infinite alternate; }
+@keyframes gen-slide { from { margin-left: 0; } to { margin-left: 70%; } }
+@media (prefers-reduced-motion: reduce) { .gen-bar[data-indeterminate='true'] > i { animation: none; width: 100%; opacity: 0.35; } }
+.gen-elapsed { font-size: 11px; color: var(--fg-3); font-feature-settings: 'tnum' 1; }
+
+/* Errors, inline: the server's sentence, the form untouched */
+.gen-error {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--err-line);
+  border-left-width: 3px;
+  border-radius: var(--rad);
+  background: var(--err-soft);
+  font-family: var(--jbm);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
+/* Results */
+.gen-results-h { margin: 0 0 10px; font-family: var(--jbm); font-size: 12px; font-weight: 500; letter-spacing: 0.04em; color: var(--fg-2); }
+.gen-results-h .ct { color: var(--fg-5); font-weight: 400; }
+.gen-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; }
+.gen-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--rad-lg);
+  background: var(--bg-1);
+}
+.gen-tile img { display: block; width: 100%; height: auto; border-radius: var(--rad); background: var(--bg-sunken, var(--bg-3)); }
+.gen-tile figcaption { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.gen-tile-meta { font-family: var(--jbm); font-size: 10.5px; color: var(--fg-4); overflow-wrap: anywhere; }
+.gen-tile-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.gen-tile-actions a.btn { text-decoration: none; }
+
+/* Empty and loading */
+.gen-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  max-width: 560px;
+  padding: 18px 20px;
+  border: 1px solid var(--comfy-line, var(--accent-line));
+  border-radius: var(--rad-lg);
+  background: var(--bg-1);
+}
+.gen-empty h2 { margin: 0; font-family: var(--jbm); font-size: 15px; font-weight: 500; color: var(--fg); }
+.gen-empty p { margin: 0; font-family: var(--jbm); font-size: 12px; line-height: 1.55; color: var(--fg-3); }
+.gen-loading { padding: 28px; text-align: center; font-family: var(--jbm); font-size: 12px; color: var(--fg-4); }

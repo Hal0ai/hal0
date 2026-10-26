@@ -266,7 +266,7 @@ def test_models_lists_catalog_with_state(client: TestClient) -> None:
     body = client.get("/api/comfyui/models").json()
 
     assert [m["id"] for m in body["models"]] == list(CATALOG)
-    assert set(body) == {"models", "engine", "store"}
+    assert set(body) == {"models", "engine", "store", "recommendation"}
     by_id = {m["id"]: m for m in body["models"]}
 
     sdxl = by_id[_SDXL]
@@ -367,6 +367,78 @@ def test_models_marks_recommended_by_pool(
     models = client.get("/api/comfyui/models").json()["models"]
 
     assert [m["id"] for m in models if m["recommended"]] == [expected]
+
+
+@pytest.mark.parametrize(
+    ("hardware", "expected"),
+    [
+        # The pool is the unified memory and no RAM limit is smaller: the GPU pool decided.
+        (
+            HardwareInfo(unified_memory_mb=128 * 1024),
+            {"id": "qwen-image-lightning", "pool_gb": 128.0, "limited_by": "gpu"},
+        ),
+        # A guest capped below the host's pool: the RAM limit decided (#3057), and the figure
+        # is the one `image_pool_gb` used, not the pool.
+        (
+            HardwareInfo(unified_memory_mb=128 * 1024, ram_mb=48 * 1024),
+            {"id": "sdxl-lightning", "pool_gb": 48.0, "limited_by": "ram"},
+        ),
+        # The cgroup limit is the smaller of the two RAM limits.
+        (
+            HardwareInfo(unified_memory_mb=128 * 1024, ram_mb=100 * 1024, cgroup_max_mb=64 * 1024),
+            {"id": "sdxl-lightning", "pool_gb": 64.0, "limited_by": "ram"},
+        ),
+        # A zero or missing limit is not known, not a zero-byte guest.
+        (
+            HardwareInfo(unified_memory_mb=64 * 1024, ram_mb=0, cgroup_max_mb=None),
+            {"id": "sdxl-lightning", "pool_gb": 64.0, "limited_by": "gpu"},
+        ),
+        # A RAM limit equal to the pool is not "smaller": the GPU pool stays the reason.
+        (
+            HardwareInfo(unified_memory_mb=96 * 1024, ram_mb=96 * 1024),
+            {"id": "qwen-image-lightning", "pool_gb": 96.0, "limited_by": "gpu"},
+        ),
+        # No unified memory: the pool is system RAM, so RAM is the reason, not a GPU pool.
+        (
+            HardwareInfo(ram_mb=8 * 1024),
+            {"id": "sd-1.5-pruned-emaonly", "pool_gb": 8.0, "limited_by": "ram"},
+        ),
+        # One decimal, like every GB figure the API reports (ADR-0039).
+        (
+            HardwareInfo(unified_memory_mb=108032),
+            {"id": "qwen-image-lightning", "pool_gb": 105.5, "limited_by": "gpu"},
+        ),
+        (HardwareInfo(), None),  # never probed: no pool, so no reason to give
+        (RuntimeError("hardware.json is unreadable"), None),
+    ],
+    ids=[
+        "gpu-pool",
+        "ram-limit",
+        "cgroup-limit",
+        "unknown-limit",
+        "limit-equals-pool",
+        "no-unified-memory",
+        "one-decimal",
+        "unprobed",
+        "unreadable",
+    ],
+)
+def test_models_carries_the_recommendation_with_its_pool(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, hardware: Any, expected: Any
+) -> None:
+    def load() -> HardwareInfo:
+        if isinstance(hardware, Exception):
+            raise hardware
+        return hardware
+
+    monkeypatch.setattr("hal0.comfyui.picker.load_hardware_info", load)
+
+    body = client.get("/api/comfyui/models").json()
+
+    assert body["recommendation"] == expected
+    if expected is not None:
+        # The reason names the model the row marks `recommended`: one read, one pick.
+        assert [m["id"] for m in body["models"] if m["recommended"]] == [expected["id"]]
 
 
 _NO_ROCM_REASON = "no ROCm lane on this host (ComfyUI needs /dev/kfd and a render node)"

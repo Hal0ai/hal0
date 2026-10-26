@@ -46,7 +46,6 @@ import '@fontsource/jetbrains-mono/600.css'
 //    `hal0 v2 dashboard.html`. Each module installs its components on
 //    `window` via `Object.assign(window, …)`.
 import './dashboard.css'
-import './dash/comfyui-pane.css'
 import './dash/engine-panes.css'
 import './dash/npu.css'
 import './dash/memory-overhaul.css'
@@ -108,8 +107,7 @@ import './dash/profiles.jsx'
 import './dash/stacks.css'
 import './dash/stacks.jsx'
 // Services page (#services): companion-service management — status +
-// lifecycle + mDNS. Registers window.ServicesView. Must load after
-// services-card.jsx (reuses its ComfyJobQueue window global).
+// lifecycle + mDNS. Registers window.ServicesView.
 import './dash/services.css'
 import './dash/services.jsx'
 // Settings (#settings): P3-ui split (phase 1) replaced the window-globals

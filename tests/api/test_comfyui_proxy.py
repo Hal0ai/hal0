@@ -90,13 +90,8 @@ def test_status_generating_when_container_running_and_queue_busy(client: TestCli
     assert body["container"]["state"] == "running"
     assert body["engine"] == "generating"
     assert body["queue"] == {"running": 1, "pending": 2}
-    # 80 total - 26 free = 54 GB used on the iGPU; pressure trips >= 50.
-    assert body["memory"]["gtt_used_gb"] == pytest.approx(54.0, abs=0.5)
-    assert body["memory"]["gtt_ceil_gb"] == 80
-    assert body["memory"]["pressure"] is True
-    # RAM ceiling is DERIVED from ram_total (128 GB here), not hardcoded to 96.
-    assert body["memory"]["ram_used_gb"] == pytest.approx(82.0, abs=0.5)
-    assert body["memory"]["ram_ceil_gb"] == 128
+    # The memory figures are GET /api/stats/hardware's, not this route's.
+    assert "memory" not in body
 
 
 def test_status_running_idle_when_container_up_but_queue_empty(client: TestClient) -> None:
@@ -117,7 +112,7 @@ def test_status_starting_when_container_running_but_http_unreachable(client: Tes
     body = r.json()
     assert body["reachable"] is False
     assert body["engine"] == "starting"
-    assert body["memory"] is None
+    assert "memory" not in body
 
 
 def test_status_engine_running_when_reachable_but_container_probe_blind(

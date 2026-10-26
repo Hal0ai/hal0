@@ -83,6 +83,19 @@ zone pinned to the bottom of the sidebar with quick external launchers:
 **OpenWebUI**, and **Hermes Dash** — the latter two only appear when the
 backend reports them reachable.
 
+### Slots: the Image Gen tab
+
+The Slots page splits into **Inference** and **Image Gen** tabs, beside
+Endpoints, Runner Images and Stacks. Image Gen is the ComfyUI engine's pane: a
+GPU status line (what the GPU is doing, what an image costs chat, and the
+buttons that fit) over three sub-tabs, **Generate**, **Models** and **Engine**,
+at `#slots/image/generate`, `#slots/image/models` and `#slots/image/engine`. The
+pane draws no memory gauges of its own: a model's fit meter reads the same
+memory budget as the figures below. Installing models, generating and reading
+the status line are in [Generate images](/docs/guides/generate-images); while
+the GPU is in image mode, a banner on every page links to the Engine tab, and
+the paused slots' cards on the Inference tab carry a `paused · image mode` chip.
+
 ### Services
 
 The **Services** page is the management surface for hal0's companion
@@ -97,12 +110,14 @@ services exist. Each card shows:
   deliberate stop (grey, "stopped — starts on demand") from a crash (red,
   "crashed — systemd unit failed");
 - the systemd unit, browser URL (when one exists — Hermes and Hindsight are
-  loopback-only), and mDNS `.local` URL when advertised;
+  loopback-only; so is ComfyUI, whose link opens from a page on the box itself
+  and, anywhere else, is disabled beside an SSH tunnel command), and mDNS
+  `.local` URL when advertised;
 - lifecycle buttons (Restart/Start/Stop) limited to the verbs that service
   actually permits — ComfyUI exposes Start/Restart only, since a raw
   `systemctl start` would bypass the GPU-arbiter switchover that hands the
   iGPU back from inference mode;
-- a journald logs drawer, and, for ComfyUI, an inline live job queue.
+- a journald logs drawer.
 
 A service the backend has no real probe for (nothing in the current
 catalog, but a future extension-provided service could arrive this way)
@@ -112,10 +127,10 @@ follow.
 
 The **Discovery (mDNS)** card at the top shows whether `avahi-daemon` is
 active, the dashboard's own `<hostname>.local` announcement, and lets you
-advertise or withdraw the addon services (ComfyUI, OpenWebUI) as their own
-`<name>.local` entries. The installer writes the base `hal0.service` avahi
-file itself when avahi is present, alongside the same permission fix-up
-that lets the daemon (running as the unprivileged `hal0` user) write the
+advertise or withdraw the addon services (OpenWebUI; ComfyUI listens on
+loopback and is not announced) as their own `<name>.local` entries. The
+installer writes the base `hal0.service` avahi file itself when avahi is
+present, alongside the same permission fix-up that lets the daemon (running as the unprivileged `hal0` user) write the
 addon files — so both announcements come up out of the box, not just the
 addons.
 
@@ -228,7 +243,8 @@ one line and a link here rather than a repeat.
   see [Choose models](/docs/guides/choose-models) for the catalogue and
   the per-model file facts (Model Defaults edits the chat template only; tunes
   live on profiles), and
-  [Generate images](/docs/guides/generate-images) /
+  [Generate images](/docs/guides/generate-images) (the Image panel also sets
+  the default image size and steps) /
   [Speech to text and text to speech](/docs/guides/voice-stt-tts) for
   the capability slots.
 

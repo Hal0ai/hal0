@@ -28,13 +28,12 @@
 | Slot capacity | `GET /api/slots/capacity` | 5s | `{per_slot: {slot: {vram_mb, ram_mb, mem_mb, state, model_id}}}` |
 | Memory + hw | `GET /api/stats/hardware` | 5s | `{ram_total_mb, ram_used_mb, unified_memory_mb, gtt_total_mb, gtt_used_mb, gpu_util, per_slot{...}, npu_status{ok, model_mb}}` |
 | Hardware probe | `GET /api/hardware` | static | host/cpu/gpu/npu/ram identity |
-| ComfyUI | `GET /api/comfyui/status` | 3s | `{reachable, engine, mode, running_jobs, pending_jobs, memory{...}, hermes_unit_status, arbiter_block}` |
-| ComfyUI queue | ComfyUI native `/queue`,`/history` (already proxy-reachable) | 2s while expanded | native ComfyUI shape |
+| ComfyUI | `GET /api/comfyui/status` | 2-20s | `{mode, reachable, engine, container{name, state}, queue{running, pending}, util, temp, clock, progress, arbiter, gate, gate_refusal}` (no memory block: that is `/api/stats/hardware`) |
 | Approvals | `GET /api/agent/approvals` + SSE `GET /api/agent/approvals/events` | SSE | `{approvals:[{id, agent, tool, args, client_id, enqueued_at, state}]}` |
 | Chat stream | `POST /v1/chat/completions` `{model:"<slot-name>", messages, stream:true}` | — | OpenAI SSE frames |
 
 **Existing FE primitives to REUSE (do not rebuild):** `slot-status.js → slotIndicatorFromPhase()`,
-`memory-map.jsx → MemoryMap/useMemoryMapModel`, `inference-pane.jsx`, `comfyui-pane.jsx`,
+`memory-map.jsx → MemoryMap/useMemoryMapModel`, `inference-pane.jsx`,
 `command-palette.jsx`, `primitives.jsx` (Modal/Drawer/ConfirmDialog/Banner/Menu/PillToggle).
 **Build NEW:** `DCard` shell primitive; the masonry grid + edit mode.
 

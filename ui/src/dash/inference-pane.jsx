@@ -1,7 +1,7 @@
 // hal0 dashboard — Inference "engine" pane (slots-page Inference tab).
 //
 // The yellow-accented counterpart to the ComfyUI generation-engine pane
-// (comfyui-pane.jsx). Where ComfyUI models ONE containerized generation
+// (image/ImageGenTabs.jsx). Where ComfyUI models ONE containerized generation
 // engine, this pane is a summary engine-shell over the iGPU/CPU slot stack,
 // implementing the P2 *card* direction from the design handoff
 // (design_handoff_inference_slots/P2-inference-pane.html): ALL pane slots
@@ -36,6 +36,7 @@ import {
   useSlotEdit,
 } from '@/api/hooks/useSlots'
 import { useModels } from '@/api/hooks/useModels'
+import { useArbiter } from '@/api/hooks/useComfyui'
 import { useModelsFeasibility } from '@/api/hooks/useModelsFeasibility'
 import { useProfiles } from '@/api/hooks/useProfiles'
 import { useSystemInfo } from '@/api/hooks/useRuntimes'
@@ -48,6 +49,8 @@ import { useMemoryMapModel } from './memory-map'
 import { slotIndicatorFromPhase, isSlotLive, imageStatusChip } from './slot-status.js'
 import { SlotBreakerChip } from './breaker-chip.jsx'
 import { ConversionBlockedChip } from './conversion-blocked-chip.jsx'
+import { SlotPausedChip, SlotPauseNote } from './image/SlotPause.jsx'
+import { slotPause } from './image/status-line-parts-pure'
 import { slotModelRow } from './slots/slot-shared.js'
 import { useCardReorder } from './slots/card-order.js'
 import { RichSelect } from './rich-select.jsx'
@@ -796,12 +799,15 @@ export function slotCtrlPhase(slot) {
 //   onPickProfile — called with the picked profile name. The card writes
 //               NOTHING itself: the caller owns the apply confirm, which has to
 //               live outside `.scard` (see ProfileApplyConfirm).
+//   pause     — `slotPause(...)`'s answer for this card (image mode paused the
+//               slot), or omitted: draws the "paused · image mode" chip and the
+//               note under the profile row.
 //   grip / dragging / dropProps — drag-to-reorder wiring (see slots/card-order).
 //               Omit `grip` and the card carries no handle at all, which is how
 //               every non-reorderable caller renders it.
 export function SlotScard({
   s, ind, full, modelNode, controls, phase, onEdit, onEditModel, modelName,
-  profiles, backends, onPickProfile,
+  profiles, backends, onPickProfile, pause = /** @type {any} */ (null),
   grip, dragging, dropProps,
 }) {
   const dot = dotCls(ind)
@@ -894,6 +900,7 @@ export function SlotScard({
             onPickProfile={onPickProfile}
           />
         </div>
+        <SlotPauseNote name={s.name} pause={pause} />
         {full && (
           <div className="scard-meta">
             <div className="m">
@@ -916,6 +923,7 @@ export function SlotScard({
           {/* #2038: breaker first — when the slot is deliberately refusing
               loads, that is the most actionable thing on the card. */}
           <SlotBreakerChip s={s} />
+          <SlotPausedChip name={s.name} pause={pause} />
           <ConversionBlockedChip s={s} />
           <BackendMismatch s={s} onEdit={onEdit} />
           <SlotImageUnknownChip s={s} />
@@ -935,7 +943,10 @@ export function SlotScard({
 // The headline (full/compact) card grid. Exported for the picker tests, which
 // drive the real card→pane wiring (the profile confirm lives HERE, one per
 // list) rather than a card in isolation.
-export function SlotCards({ rows, full, models, allSlots, busyName, handlers, loading, modelRows }) {
+//   arbiter — the `arbiter` block of /api/comfyui/arbiter, read ONCE by the pane
+//             (not per card): which cards image mode has paused. Omit it and no
+//             card claims to be paused.
+export function SlotCards({ rows, full, models, allSlots, busyName, handlers, loading, modelRows, arbiter = /** @type {any} */ (null) }) {
   // Operator-arranged order + drag wiring. Called before the early returns so
   // the hook order is stable across the loading/empty/populated renders.
   const reorder = useCardReorder('inference.chat', rows)
@@ -1014,6 +1025,7 @@ export function SlotCards({ rows, full, models, allSlots, busyName, handlers, lo
             profiles={profiles}
             backends={backends}
             onPickProfile={(profile) => setPendingProfile({ s, profile })}
+            pause={slotPause(arbiter, s.name, slotCtrlPhase(s) === 'off')}
             grip={<CardGrip name={s.name} grip={reorder.gripProps(s.name)} />}
             dragging={reorder.dragName === s.name}
             dropProps={reorder.dropProps(s.name)}
@@ -1037,7 +1049,7 @@ export function SlotCards({ rows, full, models, allSlots, busyName, handlers, lo
 // Utility tier — compact mini cards for the support slots (embed / rerank /
 // voice). No meta row, no model picker: just the dot + name + port header and
 // a minimal model + Start/Stop/Restart control cluster (SlotControls compact).
-function MiniCard({ s, ind, busy, handlers, grip, dragging, dropProps }) {
+function MiniCard({ s, ind, busy, handlers, arbiter = /** @type {any} */ (null), grip, dragging, dropProps }) {
   const dot = dotCls(ind)
   const ph = slotCtrlPhase(s)
   return (
@@ -1052,6 +1064,10 @@ function MiniCard({ s, ind, busy, handlers, grip, dragging, dropProps }) {
         <span className="snm">{s.name}</span>
         <span className="sport">{s.port ? ':' + s.port : ''}</span>
         <ConversionBlockedChip s={s} />
+        {/* A GPU embed / rerank / voice slot is in the llm group too: image
+            mode pauses it with the chat slots, and a dim card should say why.
+            The note and the wait line stay on the headline cards. */}
+        <SlotPausedChip name={s.name} pause={slotPause(arbiter, s.name, ph === 'off')} />
         {/* #1939 follow-up: the utility tier runs the same container images
             as the headline tier, so it can hit the same unreadable image
             store. Rendering the chip only on SlotScard made the seam failure
@@ -1080,7 +1096,7 @@ function MiniCard({ s, ind, busy, handlers, grip, dragging, dropProps }) {
   )
 }
 
-function MiniCards({ rows, busyName, handlers }) {
+export function MiniCards({ rows, busyName, handlers, arbiter = /** @type {any} */ (null) }) {
   // Utility tier arranges independently of the headline tier — its own scope
   // key. Hook first: `rows` can be empty on the very first render.
   const reorder = useCardReorder('inference.util', rows)
@@ -1094,6 +1110,7 @@ function MiniCards({ rows, busyName, handlers }) {
           ind={ind}
           busy={busyName === s.name}
           handlers={handlers}
+          arbiter={arbiter}
           grip={<CardGrip name={s.name} grip={reorder.gripProps(s.name)} />}
           dragging={reorder.dragName === s.name}
           dropProps={reorder.dropProps(s.name)}
@@ -1109,6 +1126,8 @@ function MiniCards({ rows, busyName, handlers }) {
 
 export function InferencePane() {
   const slotsQuery = useSlots()
+  // Which cards image mode has paused. The same light poll the banner and the status line share.
+  const arbiter = useArbiter().data?.arbiter ?? null
   const modelsQuery = useModels()
   const mm = useMemoryMapModel()
   const restartMut = useSlotRestart()
@@ -1129,7 +1148,7 @@ export function InferencePane() {
   const [modelEditRow, setModelEditRow] = useStateI(null)
 
   // The Inference rollup is the iGPU/CPU slot stack. Image generation is its
-  // own pane (ComfyuiPane); NPU/FLM slots are cordoned off to the NPU · FLM
+  // own pane (ImageGenTabs); NPU/FLM slots are cordoned off to the NPU · FLM
   // stack pane below — they appear here only as the sec-label FLM count.
   const allSlots = slotsQuery.data || []
   // Cold start: no cached data yet. Render neutral skeletons instead of the
@@ -1297,6 +1316,7 @@ export function InferencePane() {
                 modelRows={modelRowFor}
                 busyName={busyName}
                 handlers={handlers}
+                arbiter={arbiter}
               />
             </div>
             {utilRows.length > 0 && (
@@ -1311,6 +1331,7 @@ export function InferencePane() {
                   rows={utilRows}
                   busyName={busyName}
                   handlers={handlers}
+                  arbiter={arbiter}
                 />
               </div>
             )}

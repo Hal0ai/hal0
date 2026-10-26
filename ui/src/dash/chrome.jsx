@@ -19,9 +19,10 @@ import { useConfigUrls } from '@/api/hooks/useConfigUrls'
 import { useNotifications, hal0Notify, dismissNotifMessage, NOTIF_KIND_HUE } from './notifications.jsx'
 import { SessionChip } from './auth/SessionChip.jsx'
 import { NAV_GROUPS as SETTINGS_NAV_GROUPS, VALID_IDS as SETTINGS_IDS } from './settings/SettingsNav.jsx'
+import { slotsTab } from './slots-route'
 
-// Slots params that select a non-default tab; any other param (a slot name)
-// stays on Inference.
+// Slots tabs that are not the default; any other param (a slot name) stays on Inference. A param is
+// `<tab>[/<sub>]` (`image/generate`): the tab is its first segment (slots-route.ts).
 const SLOT_SUB_TABS = ["image", "endpoints", "runner-images", "stacks"]
 
 const { useState: useStateC, useEffect: useEffectC, useRef: useRefC } = React;
@@ -503,7 +504,7 @@ function useNavItems() {
       // Inference is the default tab: it also owns bare #slots and the
       // #slots/<slot-name> edit-drawer deep-links.
       { id: "slots/inference",     label: "Inference",
-        match: (route, param) => route === "slots" && !SLOT_SUB_TABS.includes(param) },
+        match: (route, param) => route === "slots" && !SLOT_SUB_TABS.includes(slotsTab(param)) },
       { id: "slots/image",         label: "Image Gen" },
       { id: "slots/endpoints",     label: "Endpoints" },
       { id: "slots/runner-images", label: "Runner Images" },
@@ -562,7 +563,9 @@ function useNavItems() {
 // sub-path. The Agent parent groups the agent/memory/mcp routes.
 function _navActive(route, param, id, match) {
   if (match) return match(route, param);
-  const cur = route + (param ? "/" + param : "");
+  // A Slots param is `<tab>[/<sub>]`; the sub-tab never changes which sidebar row is active.
+  const tab = route === "slots" ? slotsTab(param) : param;
+  const cur = route + (tab ? "/" + tab : "");
   if (cur === id) return true;
   if (id === route) return true;
   if (id === "agent" && (route === "agent" || route === "memory" || route === "mcp")) return true;

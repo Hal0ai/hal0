@@ -214,3 +214,45 @@ def test_urls_comfyui_behind_proxy_without_env_uses_port_8188(client: TestClient
     assert resp.status_code == 200
     body = resp.json()
     assert body["comfyui"] == "http://hal0.example.com:8188", body
+
+
+_PROXY_HEADERS = {"x-forwarded-host": "hal0.example.com", "x-forwarded-proto": "https"}
+
+
+def test_urls_comfyui_public_false_without_env(monkeypatch, client: TestClient) -> None:
+    """``comfyui_public`` is false while the link is only the one derived from the request host.
+
+    ComfyUI listens on the box's loopback, so that derived link does not answer from another
+    machine. The flag is how the dashboard tells it from a URL the operator declared.
+    """
+    monkeypatch.delenv("HAL0_COMFYUI_PUBLIC_URL", raising=False)
+    monkeypatch.delenv("HAL0_OPENWEBUI_PUBLIC_URL", raising=False)
+    for headers in ({"host": "hal0-test.lan:8080"}, _PROXY_HEADERS):
+        body = client.get("/api/config/urls", headers=headers).json()
+        assert body["comfyui_public"] is False, body
+
+
+def test_urls_comfyui_public_true_when_env_set(monkeypatch, client: TestClient) -> None:
+    """HAL0_COMFYUI_PUBLIC_URL set means the link is the operator's, in every response shape."""
+    monkeypatch.setenv("HAL0_COMFYUI_PUBLIC_URL", "https://comfyui.example.com")
+    monkeypatch.delenv("HAL0_OPENWEBUI_PUBLIC_URL", raising=False)
+    for headers in ({"host": "hal0-test.lan:8080"}, _PROXY_HEADERS):
+        body = client.get("/api/config/urls", headers=headers).json()
+        assert body["comfyui"] == "https://comfyui.example.com", body
+        assert body["comfyui_public"] is True, body
+
+    # The OpenWebUI public-URL branch builds its own payload.
+    monkeypatch.setenv("HAL0_OPENWEBUI_PUBLIC_URL", "https://chat.example.com")
+    for headers in ({"host": "hal0-test.lan:8080"}, _PROXY_HEADERS):
+        body = client.get("/api/config/urls", headers=headers).json()
+        assert body["comfyui_public"] is True, body
+
+
+def test_urls_comfyui_public_false_for_a_blank_env(monkeypatch, client: TestClient) -> None:
+    """A blank value (or a lone slash, which the link trims to nothing) declares no URL."""
+    monkeypatch.delenv("HAL0_OPENWEBUI_PUBLIC_URL", raising=False)
+    for value in ("", "   ", " / "):
+        monkeypatch.setenv("HAL0_COMFYUI_PUBLIC_URL", value)
+        body = client.get("/api/config/urls", headers={"host": "hal0-test.lan:8080"}).json()
+        assert body["comfyui"] == "http://hal0-test.lan:8188", body
+        assert body["comfyui_public"] is False, body

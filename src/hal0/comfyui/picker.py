@@ -14,7 +14,7 @@ model and backend id; which backends the host can serve is the caller's decision
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from hal0.comfyui import inventory, paths
 from hal0.comfyui.catalog import (
@@ -34,6 +34,25 @@ _PROVIDER = "comfyui"
 _CAPABILITY = "image"
 
 
+def _image_pool(hw: HardwareInfo) -> tuple[float, Literal["ram", "gpu"]] | None:
+    """The image pool in GB and what limited it, or ``None`` when the pool reads zero.
+
+    The one place the pool is worked out, so :func:`image_pool_gb` and the recommendation
+    reason cannot disagree. The pool is ``pool_gb(hw)`` unless the smallest positive value of
+    ``hw.ram_mb`` and ``hw.cgroup_max_mb`` is smaller, and that RAM limit is then what
+    limited it (``"ram"``). Otherwise the pool itself is the figure: the box's unified
+    GPU memory (``"gpu"``), or its system RAM when it has no unified memory (``"ram"``,
+    because that is what the pool is made of).
+    """
+    pool = pool_gb(hw)
+    if not pool:
+        return None
+    limits = [mb for mb in (hw.ram_mb, hw.cgroup_max_mb) if mb]
+    if limits and min(limits) / 1024 < pool:
+        return min(limits) / 1024, "ram"
+    return pool, "gpu" if hw.unified_memory_mb else "ram"
+
+
 def image_pool_gb(hw: HardwareInfo) -> float | None:
     """The memory, in GB, an image model can be loaded into on this box.
 
@@ -48,11 +67,8 @@ def image_pool_gb(hw: HardwareInfo) -> float | None:
     A limit of zero or ``None`` is not known, not a zero-byte guest. ``None`` is returned
     when the pool reads zero: a box that was never probed, not a tiny one.
     """
-    pool = pool_gb(hw)
-    if not pool:
-        return None
-    limits = [mb for mb in (hw.ram_mb, hw.cgroup_max_mb) if mb]
-    return min(pool, min(limits) / 1024) if limits else pool
+    picked = _image_pool(hw)
+    return picked[0] if picked else None
 
 
 def recommended_for(hw: HardwareInfo) -> str:
@@ -76,6 +92,34 @@ def recommended_id() -> str:
         return recommended_for(load_hardware_info())
     except Exception:  # an unreadable hardware.json must not take the picker down
         return recommended_model_id(None)
+
+
+def recommendation_for(hw: HardwareInfo) -> dict[str, Any] | None:
+    """The starter pick with the figure it was chosen from, for ``GET /api/comfyui/models``.
+
+    ``{"id", "pool_gb", "limited_by"}``: ``id`` is :func:`recommended_for` ``hw``, ``pool_gb``
+    is :func:`image_pool_gb` to one decimal, and ``limited_by`` says whether the RAM limit
+    (``"ram"``) or the GPU pool (``"gpu"``) set it, so the dashboard can say why this model.
+    ``None`` when the pool is unknown (a box that was never probed): there is no figure to
+    cite, though :func:`recommended_for` still names a model.
+    """
+    picked = _image_pool(hw)
+    if picked is None:
+        return None
+    pool, limited_by = picked
+    return {
+        "id": recommended_model_id(pool),
+        "pool_gb": round(pool, 1),
+        "limited_by": limited_by,
+    }
+
+
+def recommendation() -> dict[str, Any] | None:
+    """:func:`recommendation_for` this box, read per call; ``None`` for an unreadable hardware file."""
+    try:
+        return recommendation_for(load_hardware_info())
+    except Exception:  # an unreadable hardware.json must not take the catalog down
+        return None
 
 
 def _models() -> list[dict[str, Any]]:
@@ -167,4 +211,4 @@ def image_picker_rows(backend_ids: list[str]) -> list[dict[str, Any]]:
     ]
 
 
-__all__ = ["image_picker_rows", "recommended_id"]
+__all__ = ["image_picker_rows", "recommendation", "recommended_id"]

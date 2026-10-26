@@ -3,8 +3,8 @@
 
 import { useUpdateState, useUpdateApply, useUpdateJob } from '@/api/hooks/useUpdates'
 import { useInstallState, bundleNameOr } from '@/api/hooks/useInstallState'
-import { useComfyui } from '@/api/hooks/useComfyui'
-import { imageModeBanner } from './gpu-image-mode-pure'
+import { useArbiter } from '@/api/hooks/useComfyui'
+import { imageModeBanner, IMAGE_MODE_BANNER_HREF } from './gpu-image-mode-pure'
 
 const { useState: useStateP, useEffect: useEffectP, useRef: useRefP, useMemo: useMemoP, createContext: createContextP, useContext: useContextP } = React;
 
@@ -308,9 +308,10 @@ export function ConfirmDialog({ open, onCancel, onConfirm, title, message, confi
 
 // ─── Banner ───────────────────────────────────────────────────────────────
 // Reusable shell: icon + heading + body + actions + dismiss × · amber/red tones.
-export function Banner({ kind = "warn", heading, body, actions, onDismiss, eyebrow }) {
+// `compact` lays the heading, body and actions out on one line (wrapping when it must).
+export function Banner({ kind = "warn", heading, body, actions, onDismiss, eyebrow, compact = false }) {
   return (
-    <div className={"banner banner-" + kind} role={kind === "err" ? "alert" : "status"}>
+    <div className={"banner banner-" + kind + (compact ? " banner-compact" : "")} role={kind === "err" ? "alert" : "status"}>
       <div className="banner-ic">
         {kind === "err" ? Icons.warn : kind === "info" ? Icons.bell : Icons.warn}
       </div>
@@ -413,8 +414,8 @@ const BANNER_CATALOG = [
     ],
   },
   {
-    // Live surface is <GpuImageModeBanner> (reads the /api/comfyui/status
-    // arbiter block); this entry keeps the Tweaks-panel demo toggle working.
+    // Live surface is <GpuImageModeBanner> (reads the /api/comfyui/arbiter
+    // envelope); this entry keeps the Tweaks-panel demo toggle working.
     id: "gpu-image-mode", scope: "global", kind: "info",
     eyebrow: "GPU · arbiter",
     heading: "GPU: image mode",
@@ -647,14 +648,16 @@ function FirstRunBanner() {
 // ─── GpuImageModeBanner — live-data wrapper around <Banner> ─────────────
 // Phase D8: mirrors the UpdateBanner pattern — the catalog entry of the
 // same id ("gpu-image-mode") stays around for the Tweaks demo toggle, but
-// the real surface is this component, fed by the polled /api/comfyui/status
-// arbiter block. Self-shows while the GPU arbiter holds the iGPU for image
-// generation (arbiter.mode === "img"); fails soft (renders nothing) when the
+// the real surface is this component, fed by the polled /api/comfyui/arbiter
+// envelope (the light route the Image Gen status line polls). It is that line's
+// one-line form: it shows while the GPU arbiter holds the iGPU for image
+// generation (arbiter.mode === "img"), says what the GPU is doing with the same
+// headlines, and links to the Engine tab. Fails soft (renders nothing) when the
 // arbiter block is null (gate off / older backend). The copy says when a pin
 // holds image mode (imageModeBanner). Dismiss is per-episode: it resets when
 // the GPU returns to llm mode so the next switchover re-surfaces the banner.
-function GpuImageModeBanner() {
-  const q = useComfyui();
+export function GpuImageModeBanner() {
+  const q = useArbiter();
   const [dismissed, setDismissed] = useStateP(false);
   const copy = imageModeBanner(q.data?.arbiter);
   const isImg = copy !== null;
@@ -663,13 +666,13 @@ function GpuImageModeBanner() {
   return (
     <Banner
       kind="info"
-      eyebrow="GPU · arbiter"
+      compact
       heading={copy.heading}
       body={copy.body}
       actions={
-        <button className="btn sm" onClick={() => { window.location.hash = "#slots"; }}>
-          View slots
-        </button>
+        <a className="btn sm" href={IMAGE_MODE_BANNER_HREF}>
+          Open Image Gen
+        </a>
       }
       onDismiss={() => setDismissed(true)}
     />
@@ -1119,7 +1122,7 @@ function ImportDialog({
 
 Object.assign(window, { Modal, Drawer, DrawerDock, ConfirmDialog, Banner, BannerStack, BannerProvider, useBanners, BANNER_CATALOG, Menu, UpdateBanner, GpuImageModeBanner, FirstRunBanner, FieldGroup, FieldInfoIcon, PillToggle, NAME_RE, toast, useFocusTrap, FormRow, useForm, FormDrawer, ImportDialog });
 
-// Real ESM export for the newer `dash/auth/*` modules (AuthChallengeDrawer),
-// which import Drawer directly rather than reading the window-globals shim
-// the legacy dash/*.jsx prototype files above rely on.
-export { Drawer };
+// Real ESM export for the newer `dash/auth/*` and `dash/image/*` modules (AuthChallengeDrawer,
+// the Engine tab's log modal), which import Drawer and Modal directly rather than reading the
+// window-globals shim the legacy dash/*.jsx prototype files above rely on.
+export { Drawer, Modal };

@@ -283,7 +283,7 @@ The first `hal0 update` to 1.6.0 changes how Hermes is installed. One step is ne
   container keeps the gate from the release before, which lets a prompt
   through when `hal0-api` is unreachable and after its own 120 seconds, and
   such a prompt can render next to the LLM slots. See
-  [ComfyUI's editor and the GPU gate](/docs/guides/generate-images#comfyuis-editor-and-the-gpu-gate).
+  [ComfyUI's editor and the GPU gate](/docs/guides/image-mode-and-gpu-gate#comfyuis-editor-and-the-gpu-gate).
 - **With auth enforcement on, the same restart gives the gate its
   credential.** The new gate authenticates with a token of its own, which hal0
   mounts into the container when `img` starts. Until you run `hal0 slot
