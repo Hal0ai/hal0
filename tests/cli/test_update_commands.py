@@ -1552,6 +1552,16 @@ _RENDER_SLOT = {
 }
 
 
+def test_drift_banner_clean_does_not_promise_no_restart(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#3044: the probe ran on the pre-restart API, so zero drift is not a promise."""
+    uc._print_drift_banner({"count": 0, "slots": []})
+    out = " ".join(capsys.readouterr().out.split())
+    assert "no slots need restart" not in out
+    assert "next load" in out
+
+
 def test_drift_banner_shows_render_error(capsys: pytest.CaptureFixture[str]) -> None:
     uc._print_drift_banner({"count": 1, "slots": [_RENDER_SLOT]})
     out = capsys.readouterr().out

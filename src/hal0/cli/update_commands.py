@@ -522,7 +522,15 @@ def _print_drift_banner(
         )
     count = int(drift.get("count") or 0)
     if count == 0:
-        console.print("[dim]no slots need restart.[/dim]")
+        # This probe ran against hal0-api BEFORE it restarted onto the new
+        # release (the job is "applied" before the bounce), so zero drift only
+        # means the old code saw none. The new render is compared on each
+        # slot's next load, which restarts a slot whose launch config changed
+        # (#3044).
+        console.print(
+            "[dim]no slot drift seen yet. A slot whose launch config changed in this "
+            "release restarts on its next load.[/dim]"
+        )
         return
     slots = drift.get("slots") or []
     names = ", ".join(_slot_names(slots))
