@@ -182,9 +182,10 @@ admin key, the gate authenticates with a token of its own, never the admin
 key. hal0 mints it when the `img` slot first starts and mounts it read-only
 into the container; it opens the gate's four requests and nothing else (see
 [ComfyUI's GPU gate credential](/docs/operate/auth#comfyuis-gpu-gate-credential)).
-An `img` container started before the update has no token, so on such a box it
-refuses every image prompt (the editor's, hal0's own `/v1` renders, Open WebUI's
-and the omni loop's) until you run `hal0 slot restart img`.
+An `img` container started before the update has no token and still runs the
+1.6.x gate, which lets every prompt through when hal0 refuses it, so on such a
+box an editor prompt can render next to the LLM slots until you run
+`hal0 slot restart img`.
 
 **After updating hal0, run `hal0 slot restart img` once.** A running `img`
 container keeps the gate it started with, and `hal0 update` does not restart
