@@ -124,9 +124,11 @@ token of its own:
   route, no WebSocket and no stream.
 - **When the gate has none.** A container started before the token existed,
   such as one still running from before the update, sends no credential. On a
-  box that needs one (enforcement on, or the LAN rule in the next section) the gate then
-  refuses every image prompt at once with a message that says so; run `hal0
-  slot restart img`. Elsewhere its requests pass without a credential, as
+  box that needs one (enforcement on, or the LAN rule in the next section), the
+  1.6.x gate such a container runs lets every prompt through unguarded, and a
+  1.7 gate started without its token refuses every image prompt at once with a
+  message that says so (unless `HAL0_COMFYUI_GATE_FAIL_OPEN=1` lets it through,
+  see below); either way, run `hal0 slot restart img`. Elsewhere its requests pass without a credential, as
   before. The gate also holds the token back when
   `HAL0_BIND_HOST` is a host name rather than an address (it speaks plain
   HTTP, and a name is resolved on every request), so set an address there.

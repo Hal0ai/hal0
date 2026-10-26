@@ -287,9 +287,27 @@ The first `hal0 update` to 1.6.0 changes how Hermes is installed. One step is ne
 - **With auth enforcement on, the same restart gives the gate its
   credential.** The new gate authenticates with a token of its own, which hal0
   mounts into the container when `img` starts. Until you run `hal0 slot
-  restart img`, a box with `hal0 auth require on` (or a specific
-  `HAL0_BIND_HOST` and an admin key) refuses every image prompt. See
+  restart img`, the 1.6.x gate the container still runs cannot authenticate
+  on a box with `hal0 auth require on` (or a specific `HAL0_BIND_HOST` and an
+  admin key). hal0 refuses its status request, and the 1.6.x gate then lets
+  the prompt through without a GPU switch, so every editor prompt can render
+  next to the LLM slots. See
   [ComfyUI's GPU gate credential](/docs/operate/auth#comfyuis-gpu-gate-credential).
+- **Image models come from the image catalog.** `hal0 comfyui models list`
+  shows each catalog model's install state, the GB it still has to download
+  and the pick recommended for this box, and
+  `hal0 comfyui models install <id>` installs one. `hal0 comfyui
+  orchestrate-models` and the image ids in `hal0 model pull` are gone, and the
+  GGUF image models `SD-Turbo-GGUF` and `Flux-2-Klein-9B-GGUF` cannot be
+  installed again. See [Generate images](/docs/guides/generate-images).
+- **Image mode no longer holds after the last render.** The update removes
+  `[image].idle_restore_minutes` from slot files; the GPU returns to the LLM
+  slots about ten seconds after the last render. Pin image mode to hold it for
+  ComfyUI's editor. See
+  [Image mode and the GPU gate](/docs/guides/image-mode-and-gpu-gate).
+- **Toggle the Discovery card once** on the Services page if the box announced
+  services on an earlier version. That removes ComfyUI's old mDNS
+  announcement, which hal0 no longer writes and does not delete by itself.
 
 ## Upgrading from an older release
 

@@ -30,6 +30,44 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-10-26
+
+### Highlights
+
+- **Image models have a catalog of their own.** `hal0 comfyui models
+  list|install|remove`, the dashboard and `/api/comfyui/models`, `/jobs` and
+  `/files` install catalog models with resumable, sha256-checked downloads,
+  and the installer offers a starter model sized to the box's RAM
+  (`HAL0_IMAGE_MODELS` answers it unattended). Image models leave the LLM
+  registry, and `/v1/images/generations` renders every installed catalog
+  model the API can render plus your own SDXL and SD 1.5 checkpoints.
+  (#3032, #3037, #3054, #3061)
+- **Open WebUI generates images through hal0's `/v1`.** Its image engine
+  moves to OpenAI, pointed at `/v1/images/generations` with the box's client
+  key, so its images get the same model, defaults and GPU switch as any other
+  client, and the four defects that broke Open WebUI images are gone. (#3062)
+- **Image mode lasts only while an image renders.** Every GPU LLM slot
+  unloads for a render and reloads about 10 seconds after the last one, and
+  `[image].idle_restore_minutes` is gone. A chat that arrives mid-render
+  waits, a slot still loading is waited for and unloaded before ComfyUI runs,
+  and a failed unload rolls the switch back instead of leaving an LLM beside
+  ComfyUI. (#3062, #3080, #3082)
+- **A fit check before you install or render.** Every catalog model carries a
+  memory fit against the GPU pool and RAM, judged at the size you pick, and a
+  render that cannot fit is refused with 422 `image.wont_fit` before any slot
+  unloads. Memory figures come from one owner (ADR-0039), which reads a
+  capped LXC guest's RAM limit, shows other guests on a shared GPU and
+  credits what image mode frees on bare-metal unified memory. (#3064, #3070,
+  #3079)
+- **A new Image Gen tab: Generate, Models and Engine.** A GPU status line says
+  what the GPU is doing and what a render costs chat, the Generate tab follows
+  the switch phase by phase and the render step by step, fit meters sit on
+  every model card, and Hold image mode pins the GPU behind a confirm.
+  (#3078)
+- **ComfyUI's GPU gate authenticates with a token of its own,** never the
+  admin key, so image generation keeps working with `hal0 auth require on`.
+  Run `hal0 slot restart img` once after updating. (#3067, ADR-0040)
+
 ### Breaking
 
 - **`hal0 comfyui orchestrate-models` is gone: use `hal0 comfyui models install <id>...`.** There is no alias, and the command exits with the CLI's unknown-command error. `hal0 comfyui models list` shows the image-model catalog with each model's install state, the GB it still has to download and the pick recommended for this box (`--json` for scripts); `models install` installs the models one at a time, following each download to the end, and exits 1 if any fails; `models remove <id>` and `hal0 comfyui files` remove a model and list the weight files on disk. `--dry-run` and `--log-dir` are gone with the command. The vendored `get_*.sh` download scripts under `installer/comfyui/` are deleted: downloads run in hal0, with resume and a sha256 check.

@@ -97,7 +97,7 @@ MODEL_COLUMNS: tuple[str, ...] = (
 #: facts ``chat_template``/``mtp``/``jinja`` keep their columns; ``mtp``/``jinja``
 #: are tri-state (NULL/0/1 -> None/False/True).
 #
-# HAL0-SUNSET: v1.7.0 — the table still has the tuning columns (profile,
+# HAL0-SUNSET: v1.8.0 — the table still has the tuning columns (profile,
 # extra_args, n_gpu_layers, context_size, rope_freq_base, preferred_runner)
 # and ``extra`` may still hold ``_enable_thinking``/``_vision``. Nothing here
 # reads or writes them; they stay so a rollback to a release before ADR-0029
