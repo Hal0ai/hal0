@@ -1,4 +1,4 @@
-# ADR-0041: The dock is the console's one status surface
+# ADR-0042: The dock is the console's one status surface
 
 ## Status
 
@@ -42,12 +42,13 @@ only existed on the Slots page.
    pane with three tabs, **events**, **gpu** and **downloads**. Expanded, it
    sits in the page's flow (`min(300px, 45vh)`) and pushes the page up. It
    never covers it. It is part of the phone layout.
-2. **A banner at the top of a page is reserved for an error that blocks a
-   feature.** Today that is one: ComfyUI's GPU gate has no credential for
+2. **A GPU-state top banner is reserved for an error that blocks image
+   generation.** Today that is one: ComfyUI's GPU gate has no credential for
    hal0's sign-in (`gate.state === 'no_credential'`), so image generation is
    refused until someone fixes it (`GpuGateBlockedBanner`). It has no dismiss
    and no button. Every other GPU state, including a refusal or a stale gate,
-   lives in the dock.
+   lives in the dock. The first-run, update and demo banners are unrelated and
+   unchanged.
 3. **GPU-mode actions live only in the dock.** Hold, keep, unpin, stop and
    cancel are the segment's buttons (at most two) and the GPU tab's (all of
    them). The words, the precedence and the choice of buttons stay
@@ -65,7 +66,7 @@ only existed on the Slots page.
    and `limit=200`, so the ring never holds the rows it would not show. The
    filters (stream, severity, source, slot, search) apply on the browser, so
    toggling one never reopens a stream. **Export** downloads the activity
-   trail with the current filters; journal lines are not exported and are on
+   trail with the severity, source and slot filters; journal lines are not exported and are on
    the Logs page.
 5. **The Inference tab's side column is the slot rail, and the Image Gen tab
    has none.** The rail lists every slot grouped by device, counts the
@@ -93,8 +94,8 @@ only existed on the Slots page.
   confirm dialog and one error. The segment holds the dock's one `aria-live`
   region; the GPU tab adds none, or a screen reader would hear the state
   twice.
-- A page deep-linked to `#slots` keeps working. The agent card's "open
-  activity" link now opens the dock on the events tab (`hal0:open-events`)
+- A page deep-linked to `#slots` keeps working. The agent card's **Tool
+  activity** button now opens the dock on the events tab (`hal0:open-events`)
   instead of navigating to the Slots page.
 - A reader who used to find activity under the Slots page finds it under the
   dock on every page, merged with the journal. The docs say so

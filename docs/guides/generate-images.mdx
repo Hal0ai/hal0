@@ -324,9 +324,9 @@ is refused with 409 `capability.model_not_downloaded`. See
 
 The dock's **GPU segment**, at the bottom of every page (and its **gpu** tab),
 says what the GPU is doing, what the next image costs chat and which buttons
-fit. It reads the GPU arbiter's phase and ComfyUI's queue, so it also shows a
-render queued from the editor, and is hidden on a box with no GPU pool reading
-or no ROCm lane. The segment shows at most two buttons; the tab shows them all.
+fit. It reads the GPU arbiter's phase and ComfyUI's queue, so it also shows
+editor-queued renders, and is hidden on a box with no GPU pool reading
+or no ROCm lane. The segment shows at most two buttons; the tab, every action that applies.
 
 | Headline | When | Buttons |
 |---|---|---|
@@ -349,9 +349,8 @@ pinned, then switches to `inference`; when a render is running it asks first,
 because stopping drops that render and the prompts queued behind it. The
 **gpu** tab offers it whenever image mode is on, the segment only while pinned.
 
-Three more states are about the GPU gate. The blocked state comes first (it is
-also the one banner left at the top of every page); the refusal and the stale
-gate wait behind any work in progress:
+Three more states are about the GPU gate. The blocked state comes first (also the one GPU banner at the top of every page); the
+refusal and the stale gate wait behind any work in progress:
 
 | Headline | Meaning | Buttons |
 |---|---|---|
