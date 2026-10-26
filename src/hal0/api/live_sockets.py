@@ -388,6 +388,11 @@ async def guard_http_stream(
     body_done = False
     listening = 0  # receive() calls waiting for a disconnect right now
     disconnect_delivered = False
+    # The one read of the server's ``receive`` after the body, shared by
+    # every caller and kept across a caller's cancellation; and whether the
+    # client has left, so each later call says so without asking again.
+    pending: asyncio.Future[Message] | None = None
+    client_gone = False
     dropped = 0
     event_stream = False
     started = False
@@ -397,9 +402,11 @@ async def guard_http_stream(
         return revoked is not None and revoked.is_set()
 
     async def guarded_receive() -> Message:
-        nonlocal body_done, listening, disconnect_delivered
+        nonlocal body_done, listening, disconnect_delivered, pending, client_gone
         if stopped():
             disconnect_delivered = True
+            return {"type": "http.disconnect"}
+        if client_gone:
             return {"type": "http.disconnect"}
         if not body_done:
             # The request body is read before any response streams; only a
@@ -408,21 +415,31 @@ async def guard_http_stream(
             if message.get("type") != "http.request" or not message.get("more_body", False):
                 body_done = True
             return message
-        incoming = asyncio.ensure_future(receive())
-        waiter = asyncio.ensure_future(stop.wait())
-        listening += 1
-        try:
-            await asyncio.wait({incoming, waiter}, return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            listening -= 1
-            waiter.cancel()
-            if not incoming.done():
-                incoming.cancel()
-        if incoming.done() and not incoming.cancelled() and not stopped():
-            return incoming.result()
+        # The read of the server is not cancelled when this call is.
+        # ``request.is_disconnected()`` calls in an already-cancelled scope:
+        # cancelling the read with it threw away a disconnect the server
+        # answered meanwhile, so the check never turned true here (#3068).
+        # Kept, the read's answer is waiting for the next call instead.
+        if pending is None:
+            pending = asyncio.ensure_future(receive())
+        incoming = pending
+        if not incoming.done():
+            waiter = asyncio.ensure_future(stop.wait())
+            listening += 1
+            try:
+                await asyncio.wait({incoming, waiter}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                listening -= 1
+                waiter.cancel()
         if stopped():
             disconnect_delivered = True
-        return {"type": "http.disconnect"}
+            return {"type": "http.disconnect"}
+        if pending is incoming:
+            pending = None
+        message = incoming.result()
+        if message.get("type") == "http.disconnect":
+            client_gone = True
+        return message
 
     async def guarded_send(message: Message) -> None:
         nonlocal started, finished, event_stream, dropped
@@ -474,6 +491,10 @@ async def guard_http_stream(
             watcher.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await watcher
+        if pending is not None:
+            pending.cancel()  # a read nobody is waiting for any more
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await pending
         stack.close()
     if stopped() and started and not finished:
         finished = True

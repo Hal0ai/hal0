@@ -1796,12 +1796,12 @@ async def _client_has_gone(request: Request) -> bool:
     """Whether the client has closed the connection, asked by listening for the message.
 
     ``Request.is_disconnected()`` reads with an already-cancelled scope, which sees a
-    disconnect only if the server's ``receive`` answers without waiting. The auth
+    disconnect only if the server's ``receive`` answers without waiting, so through the auth
     middleware's stream guard (``live_sockets.guard_http_stream``, used on every box that
-    requires auth) wraps ``receive`` with a wait that the cancelled scope interrupts, so the
-    disconnect is lost and the check always answers False there. Waiting a moment on the next
-    message works through that wrapper and without it: ``http.disconnect`` means the client is
-    gone, and a timeout means it is still there. ``wait_for`` cancels what it started when
+    requires auth) it sees one only on the poll after the server's answer (and before #3068
+    never did). Waiting a moment on the next message answers on the first call, through that
+    wrapper and without it: ``http.disconnect`` means the client is gone, and a timeout means
+    it is still there. ``wait_for`` cancels what it started when
     the wait ends, so nothing is left running.
     """
     try:

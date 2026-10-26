@@ -552,6 +552,154 @@ def test_guard_leaves_a_plain_response_alone() -> None:
 
 
 # ---------------------------------------------------------------------------
+# ``request.is_disconnected()`` through the guard (#3068).
+#
+# Starlette's check reads ``receive`` under an already-cancelled scope, so it
+# only sees a message the server can hand over without waiting. The guard's
+# wait used to throw away a disconnect that arrived during that cancelled
+# read, so the check never turned true on boxes that require auth.
+
+_SPEC_2_3 = {"type": "http", "path": "/x", "asgi": {"version": "3.0", "spec_version": "2.3"}}
+
+
+def _client() -> tuple[asyncio.Queue[dict], Any]:
+    """A server ``receive`` that hands over queued messages, like uvicorn's."""
+    inbox: asyncio.Queue[dict] = asyncio.Queue()
+    inbox.put_nowait({"type": "http.request", "body": b"", "more_body": False})
+    return inbox, inbox.get
+
+
+async def _sink(message: dict) -> None:
+    return None
+
+
+def test_is_disconnected_turns_true_through_the_guard() -> None:
+    """A delivered ``http.disconnect`` reaches a route polling ``is_disconnected()``."""
+    from starlette.requests import Request
+
+    async def run(guarded: bool) -> list[bool]:
+        inbox, receive = _client()
+        seen: list[bool] = []
+
+        async def polling(scope: Any, receive: Any, send: Any) -> None:
+            request = Request(scope, receive)
+            await request.body()
+            for _ in range(5):
+                seen.append(await request.is_disconnected())
+                await asyncio.sleep(0)
+            inbox.put_nowait({"type": "http.disconnect"})
+            for _ in range(5):
+                seen.append(await request.is_disconnected())
+                await asyncio.sleep(0)
+
+        if guarded:
+            await live_sockets.guard_http_stream(
+                polling, dict(_SPEC_2_3), receive, _sink, lambda: True
+            )
+        else:
+            await polling(dict(_SPEC_2_3), receive, _sink)
+        return seen
+
+    for guarded in (False, True):
+        seen = asyncio.run(run(guarded))
+        assert not any(seen[:5]), f"guarded={guarded}: disconnected before the client left"
+        assert seen[-1], f"guarded={guarded}: is_disconnected() never turned true"
+
+
+def test_disconnect_is_not_lost_to_a_cancelled_read() -> None:
+    """The guard keeps one read of the server open and re-delivers what it got.
+
+    A cancelled ``receive()`` must not consume the message it was waiting
+    for, and once the client has left every later ``receive()`` says so.
+    """
+
+    async def run() -> list[dict]:
+        inbox, receive = _client()
+        got: list[dict] = []
+
+        async def app(scope: Any, receive: Any, send: Any) -> None:
+            got.append(await receive())  # the body
+            read = asyncio.ensure_future(receive())
+            await asyncio.sleep(0)
+            inbox.put_nowait({"type": "http.disconnect"})
+            await asyncio.sleep(0)
+            read.cancel()  # cancelled after the server answered
+            with contextlib.suppress(asyncio.CancelledError):
+                await read
+            got.append(await asyncio.wait_for(receive(), _DEADLINE_S))
+            got.append(await asyncio.wait_for(receive(), _DEADLINE_S))
+
+        await live_sockets.guard_http_stream(app, dict(_SPEC_2_3), receive, _sink, lambda: True)
+        return got
+
+    got = asyncio.run(run())
+    assert [m["type"] for m in got] == ["http.request", "http.disconnect", "http.disconnect"]
+
+
+def test_revocation_wakes_starlette_listener_while_route_polls() -> None:
+    """Revocation still ends a ``StreamingResponse`` whose route polls ``is_disconnected()``.
+
+    Under ASGI spec 2.3 Starlette listens for the disconnect in a task of its
+    own while the generator polls; both read through the guard at once. The
+    revocation must wake the listener, which ends the response and closes
+    the generator, and the client never left.
+    """
+    from starlette.requests import Request
+    from starlette.responses import StreamingResponse as StarletteStreaming
+
+    closed = False
+    polls: list[bool] = []
+
+    async def app(scope: Any, receive: Any, send: Any) -> None:
+        request = Request(scope, receive)
+
+        async def gen() -> Any:
+            nonlocal closed
+            try:
+                while True:
+                    polls.append(await request.is_disconnected())
+                    yield "data: x\n\n"
+                    await asyncio.sleep(0.01)
+            finally:
+                closed = True
+
+        response = StarletteStreaming(gen(), media_type="text/event-stream")
+        await response(scope, receive, send)
+
+    async def run() -> tuple[list[dict], set]:
+        _, receive = _client()
+        sent: list[dict] = []
+        allowed = True
+
+        async def send(message: dict) -> None:
+            sent.append(message)
+
+        async def rotate() -> None:
+            nonlocal allowed
+            while sum(1 for m in sent if m.get("more_body")) < 3:
+                await asyncio.sleep(0.005)
+            allowed = False
+            live_sockets.revalidate()
+
+        rotation = asyncio.ensure_future(rotate())
+        before = asyncio.all_tasks()
+        await asyncio.wait_for(
+            live_sockets.guard_http_stream(app, dict(_SPEC_2_3), receive, send, lambda: allowed),
+            _DEADLINE_S,
+        )
+        await rotation
+        leftover = {t for t in asyncio.all_tasks() - before if not t.done()}
+        return sent, leftover
+
+    sent, leftover = asyncio.run(run())
+    _assert_revoked_end(sent)
+    assert closed
+    assert polls and not any(polls)
+    assert not leftover
+    assert live_sockets.open_count() == 0
+
+
+# ---------------------------------------------------------------------------
 # A real ``/v1`` ``stream: true`` relay through the dispatcher.
 
 

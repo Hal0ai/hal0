@@ -1505,9 +1505,10 @@ def test_v1_images_a_real_asgi_disconnect_reaches_the_route_when_auth_is_require
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """With auth required, ``/v1/images/generations`` runs under the auth middleware's stream
-    guard (``guard_http_stream``), whose ``receive`` drops a disconnect that ``is_disconnected()``
-    probes for with a cancelled scope: the route never saw the client leave and rendered anyway.
-    The route listens for the message itself, so Cancel during the switch works on these boxes."""
+    guard (``guard_http_stream``), whose ``receive`` used to drop a disconnect that
+    ``is_disconnected()`` probes for with a cancelled scope (#3068): the route never saw the client
+    leave and rendered anyway. The route listens for the message itself, so Cancel during the
+    switch works on these boxes."""
     from hal0.api import auth as auth_mod
 
     monkeypatch.setenv("HAL0_REQUIRE_AUTH", "1")
