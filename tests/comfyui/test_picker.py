@@ -19,6 +19,7 @@ import pytest
 from hal0.comfyui import inventory, paths, picker
 from hal0.comfyui.catalog import CATALOG, component_path, weights_gib
 from hal0.config.schema import HardwareInfo
+from hal0.hardware.memory_budget import MemoryBudget, RamBudget
 
 _ROW_KEYS = {
     "id",
@@ -450,3 +451,68 @@ def test_recommendation_is_none_for_an_unreadable_hardware_file(
     monkeypatch.setattr(picker, "load_hardware_info", unreadable)
 
     assert picker.recommendation() is None
+
+
+# ── the pick is held to the fit check (#3076) ───────────────────────────────
+
+
+def _budget(pool_gb: float, *, gpu: bool = True) -> MemoryBudget:
+    """A box whose whole pool is free: ``render_free_gb`` is the pool minus the 2 GB margin."""
+    ram = RamBudget(limit_gb=pool_gb, used_gb=0.0, free_gb=pool_gb, source="system")
+    if not gpu:
+        return MemoryBudget(gpu=None, ram=ram, render_free_gb=None, render_ram_free_gb=pool_gb)
+    from hal0.hardware.memory_budget import GpuBudget
+
+    return MemoryBudget(
+        gpu=GpuBudget(
+            kind="shared",
+            total_gb=pool_gb,
+            used_gb=0.0,
+            this_box=(),
+            image_engine_gb=0.0,
+            image_engine_slot=None,
+            image_engine_estimated=False,
+            other_guests_gb=0.0,
+            attribution_excess_gb=0.0,
+            free_gb=pool_gb,
+        ),
+        ram=ram,
+        render_free_gb=round(pool_gb - 2.0, 1),
+        render_ram_free_gb=pool_gb,
+    )
+
+
+@pytest.mark.parametrize(
+    ("pool_gb", "expected"),
+    [
+        # sdxl-lightning needs 15.9 GB of GPU pool; the room is the pool minus 2 GB.
+        (16.0, "sd-1.5-pruned-emaonly"),
+        (17.8, "sd-1.5-pruned-emaonly"),
+        (17.9, "sdxl-lightning"),
+        (18.0, "sdxl-lightning"),
+        (64.0, "sdxl-lightning"),
+        (128.0, "qwen-image-lightning"),
+    ],
+)
+def test_recommended_for_never_picks_a_model_the_fit_check_refuses(
+    pool_gb: float, expected: str
+) -> None:
+    hardware = HardwareInfo(unified_memory_mb=int(pool_gb * 1024))
+
+    assert picker.recommended_for(hardware, _budget(pool_gb)) == expected
+    rec = picker.recommendation_for(hardware, _budget(pool_gb))
+    assert rec is not None
+    assert rec["id"] == expected
+
+
+def test_recommended_for_keeps_the_ram_rule_when_the_budget_is_unknown() -> None:
+    hardware = HardwareInfo(unified_memory_mb=17 * 1024)
+
+    assert picker.recommended_for(hardware) == "sdxl-lightning"
+    assert picker.recommended_for(hardware, _budget(17.0, gpu=False)) == "sdxl-lightning"
+
+
+def test_recommended_for_falls_back_to_the_smallest_when_nothing_fits() -> None:
+    hardware = HardwareInfo(unified_memory_mb=8 * 1024)
+
+    assert picker.recommended_for(hardware, _budget(8.0)) == "sd-1.5-pruned-emaonly"
