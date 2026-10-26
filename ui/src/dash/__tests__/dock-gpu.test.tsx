@@ -848,3 +848,176 @@ describe('the blocked-gate banner', () => {
     expect(document.querySelectorAll('[data-testid="gpu-gate-blocked-banner"]')).toHaveLength(0)
   })
 })
+
+// ── the status-line cases, restored against the dock ─────────────────────────
+//
+// These were pinned on the Image Gen pane's status line before the dock took the GPU state over.
+// The behaviours they cover (announcements, confirms, unpin failure, the cancel, the step chips,
+// the editor link) are live in the segment and the GPU tab, so each is kept with its own fixture.
+
+describe('the dock GPU segment, restored status-line cases', () => {
+  const tabbed = async (host?: HTMLElement) => {
+    const h = host ?? mount(open())
+    await click(byId('dock-tab-gpu'))
+    return h
+  }
+  const stepChips = () =>
+    Array.from(document.querySelectorAll('[data-testid="image-status-step"]')).map(
+      (el) => `${el.textContent}:${(el as HTMLElement).dataset.state}`,
+    )
+
+  // The headline counts seconds and steps, and a screen reader would read out every change. The
+  // one live region is a visually hidden phrase that changes only with the line's kind.
+  it('does not re-announce a countdown tick or a step, only a change of kind', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2026, 9, 25, 12, 0, 0))
+    box.arbiter = envelope({ mode: 'img', phase: 'grace', restore_at: Date.now() / 1000 + 8 })
+    const host = mount(dock())
+    expect(byId('gpu-status-head')!.textContent).toBe('Image mode ends in 8 s')
+    expect(byId('gpu-status-live')!.textContent).toBe('Image mode, grace period')
+    const node = byId('gpu-status-live')!.firstChild
+    act(() => {
+      vi.advanceTimersByTime(3000)
+    })
+    // The headline moved; the live region did not (same text node, untouched).
+    expect(byId('gpu-status-head')!.textContent).toBe('Image mode ends in 5 s')
+    expect(byId('gpu-status-live')!.textContent).toBe('Image mode, grace period')
+    expect(byId('gpu-status-live')!.firstChild).toBe(node)
+
+    // A render with steps: the step counter moves, the announcement stays "Rendering".
+    box.arbiter = envelope({ mode: 'img', phase: 'rendering' })
+    box.status = statusBody({
+      queue: { running: 1, pending: 0 },
+      progress: { model: 'flux-dev', step: 1, total: 20, node: '9', elapsed_s: 3, prompt_id: 'p' },
+    })
+    rerender(host, dock())
+    expect(byId('gpu-status-live')!.textContent).toBe('Rendering')
+    const rendering = byId('gpu-status-live')!.firstChild
+    box.status = statusBody({
+      queue: { running: 1, pending: 0 },
+      progress: { model: 'flux-dev', step: 2, total: 20, node: '9', elapsed_s: 4, prompt_id: 'p' },
+    })
+    rerender(host, dock())
+    expect(byId('gpu-status-head')!.textContent).toBe('Rendering · flux-dev · step 2/20')
+    expect(byId('gpu-status-live')!.firstChild).toBe(rendering)
+  })
+
+  it('a declined hold sends nothing', async () => {
+    mount(dock())
+    await click(button('Hold image mode', seg()))
+    await click(foot('Cancel'))
+    expect(calls).toEqual([])
+    expect(document.querySelector('.modal-shell')).toBeNull()
+    // Nothing is left pending: the button is there to try again.
+    expect(button('Hold image mode', seg())!.disabled).toBe(false)
+  })
+
+  it('keep asks first, and a confirmed keep pins the image mode that is on', async () => {
+    box.arbiter = envelope({ mode: 'img', phase: 'grace', restore_at: Date.now() / 1000 + 8 })
+    mount(dock())
+    expect(byId('gpu-status-head')!.textContent).toMatch(/^Image mode ends in \d+ s$/)
+    await click(button('Keep image mode', seg()))
+    expect(calls).toEqual([])
+    expect(dialogTitle()).toBe('Keep image mode on?')
+    expect(dialogBody()).toBe(PIN_BODY)
+    expect(foot('Cancel')).toBeTruthy()
+    await click(foot('Keep image mode on'))
+    expect(calls).toEqual([['pin', { pinned: true }]])
+    expect(document.querySelector('.modal-shell')).toBeNull()
+  })
+
+  it('a declined keep sends nothing', async () => {
+    box.arbiter = envelope({ mode: 'img', phase: 'grace', restore_at: Date.now() / 1000 + 8 })
+    mount(dock())
+    await click(button('Keep image mode', seg()))
+    await click(foot('Cancel'))
+    expect(calls).toEqual([])
+    expect(document.querySelector('.modal-shell')).toBeNull()
+  })
+
+  it('unpin calls pin false', async () => {
+    box.arbiter = envelope({ mode: 'img', pinned: true })
+    mount(dock())
+    expect(byId('gpu-status-head')!.textContent).toBe('Image mode pinned')
+    await click(button('Unpin', seg()))
+    expect(calls).toEqual([['pin', { pinned: false }]])
+  })
+
+  it('does not switch back when the unpin fails, and shows the server message', async () => {
+    box.arbiter = envelope({ mode: 'img', pinned: true })
+    box.pinFail = new Error('The pin could not be removed')
+    mount(dock())
+    await click(button('Stop image mode', seg()))
+    expect(calls).toEqual([['pin', { pinned: false }]])
+    expect(document.querySelector('[role="alert"]')!.textContent).toBe('The pin could not be removed')
+    // Nothing is left pending: the buttons are there to try again.
+    expect(button('Stop image mode', seg())!.disabled).toBe(false)
+  })
+
+  it('cancel render calls render/cancel', async () => {
+    box.arbiter = envelope({ mode: 'img', phase: 'rendering' })
+    box.status = statusBody({
+      queue: { running: 1, pending: 0 },
+      progress: { model: 'flux-dev', step: 5, total: 20, node: '9', elapsed_s: 12.4, prompt_id: 'p' },
+    })
+    mount(dock())
+    expect(byId('gpu-status-head')!.textContent).toBe('Rendering · flux-dev · step 5/20')
+    await click(button('Cancel render', seg()))
+    expect(calls).toEqual([['render-cancel', undefined]])
+  })
+
+  it('draws no progress bar for an editor render', async () => {
+    box.arbiter = envelope({ mode: 'img', phase: 'grace', restore_at: Date.now() / 1000 + 5 })
+    box.status = statusBody({ queue: { running: 1, pending: 1 } })
+    mount(open())
+    expect(byId('gpu-status-head')!.textContent).toBe('Rendering · editor prompt · 2 queued')
+    // Collapsed row and GPU tab alike: no bar anywhere.
+    expect(seg().querySelector('.mini')).toBeNull()
+    await click(byId('dock-tab-gpu'))
+    expect(document.querySelector('[role="progressbar"]')).toBeNull()
+  })
+
+  it('shows the switch steps while the GPU is being handed over', async () => {
+    box.arbiter = envelope({ mode: 'img', phase: 'unloading' })
+    await tabbed()
+    expect(byId('gpu-status-head')!.textContent).toBe('Switching to image mode')
+    expect(stepChips()).toEqual(['Chat replies:done', 'Unload slots:active', 'Start engine:todo'])
+  })
+
+  it('shows how many of the paused slots are back while they reload', async () => {
+    box.arbiter = envelope({ mode: 'img', phase: 'reloading', unload_set: ['brain', 'coder'] })
+    box.slots = [
+      { name: 'brain', state: 'ready' },
+      { name: 'coder', state: 'warming' },
+    ]
+    await tabbed()
+    expect(byId('gpu-status-head')!.textContent).toBe('Reloading GPU slots · 1 of 2 ready')
+    expect(stepChips()).toEqual(['brain:done', 'coder:active'])
+  })
+
+  it('open editor opens the declared editor URL from the config urls in a new tab', async () => {
+    box.urls = { comfyui: 'https://comfyui.box', comfyui_public: true }
+    box.status = statusBody({ gate_refusal: { at: 1_700_000_000, reason: 'busy' } })
+    const openWindow = vi.fn(() => null)
+    vi.stubGlobal('open', openWindow)
+    mount(dock())
+    await click(button('Open editor', seg()))
+    expect(openWindow).toHaveBeenCalledWith('https://comfyui.box', '_blank', 'noopener,noreferrer')
+  })
+
+  it('open editor opens the editor on a page that is on the box', async () => {
+    const happyDOM = (window as unknown as { happyDOM: { setURL: (u: string) => void } }).happyDOM
+    happyDOM.setURL('http://localhost:9120/')
+    try {
+      box.urls = { comfyui: 'http://localhost:8188', comfyui_public: false }
+      box.status = statusBody({ gate_refusal: { at: 1_700_000_000, reason: 'busy' } })
+      const openWindow = vi.fn(() => null)
+      vi.stubGlobal('open', openWindow)
+      mount(dock())
+      await click(button('Open editor', seg()))
+      expect(openWindow).toHaveBeenCalledWith('http://localhost:8188', '_blank', 'noopener,noreferrer')
+    } finally {
+      happyDOM.setURL('about:blank')
+    }
+  })
+})
