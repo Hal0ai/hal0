@@ -324,7 +324,7 @@ _SDXL_VAE = _hf(
 
 # Qwen-Image and Qwen-Image-Edit share the text encoder and VAE; HunyuanVideo
 # 1.5 loads the same text encoder, so it points at the same source.
-_QWEN_REPO = "Comfy-Org/Qwen-Image_ComfyUI"
+_QWEN_REPO = "Comfy-Org/Qwen-Image"
 _QWEN_TEXT_ENCODER = _hf(
     _TEXT,
     "qwen_2.5_vl_7b_fp8_scaled.safetensors",
@@ -356,7 +356,7 @@ _QWEN_EDIT = _hf(
     _UNET,
     "qwen_image_edit_2511_bf16.safetensors",
     40.9,
-    "Comfy-Org/Qwen-Image-Edit_ComfyUI",
+    "Comfy-Org/Qwen-Image-Edit",
     "split_files/diffusion_models/qwen_image_edit_2511_bf16.safetensors",
 )
 _QWEN_EDIT_LORA = _hf(
@@ -388,7 +388,7 @@ _LTX2_DISTILLED_LORA = _hf(
 _LTX2_FP8_RENAMES = {"ltx-2-19b-dev.safetensors": "ltx-2-19b-dev-fp8.safetensors"}
 
 # HunyuanVideo 1.5: the 4-step LoRA is the T2V one for both graphs.
-_HUNYUAN_REPO = "Comfy-Org/HunyuanVideo_1.5_repackaged"
+_HUNYUAN_REPO = "Comfy-Org/Hunyuan-Video-1.5"
 _HUNYUAN_BYT5 = _hf(
     _TEXT,
     "byt5_small_glyphxl_fp16.safetensors",
@@ -425,7 +425,7 @@ def _hunyuan_unet(task: Literal["t2v", "i2v"]) -> Component:
 
 # Wan 2.2 14B: a high-noise and a low-noise diffusion model per task, each in fp8
 # (scaled) and fp16. The fp8 text encoder comes from the Wan 2.1 repo.
-_WAN22_REPO = "Comfy-Org/Wan_2.2_ComfyUI_Repackaged"
+_WAN22_REPO = "Comfy-Org/Wan-2.2"
 _WAN_LORA_REPO = "lightx2v/Wan2.2-Lightning"
 _WAN_VAE = _hf(
     _VAE,
@@ -438,7 +438,7 @@ _WAN_UMT5_FP8 = _hf(
     _TEXT,
     "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
     6.7,
-    "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+    "Comfy-Org/Wan-2.1",
     "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
 )
 _WAN_UMT5_FP16 = _hf(
@@ -573,7 +573,7 @@ CATALOG: dict[str, ImageModel] = {
                     _CKPT,
                     "v1-5-pruned-emaonly.safetensors",
                     4.3,
-                    "runwayml/stable-diffusion-v1-5",
+                    "stable-diffusion-v1-5/stable-diffusion-v1-5",
                 ),
             ),
             template="sd15_simple",

@@ -531,3 +531,29 @@ def test_render_template_returns_a_fresh_copy() -> None:
     first = render_template(model)
     first["4"]["inputs"]["ckpt_name"] = "mutated.safetensors"
     assert render_template(model)["4"]["inputs"]["ckpt_name"] == "v1-5-pruned-emaonly.safetensors"
+
+
+# Hugging Face renamed these repos and 307-redirects the old names (#3042). The
+# catalog must name the canonical repo so an install does not depend on the redirect.
+_RENAMED_HF_REPOS = (
+    "Comfy-Org/HunyuanVideo_1.5_repackaged",
+    "Comfy-Org/Qwen-Image-Edit_ComfyUI",
+    "Comfy-Org/Qwen-Image_ComfyUI",
+    "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+    "Comfy-Org/Wan_2.2_ComfyUI_Repackaged",
+    "runwayml/stable-diffusion-v1-5",
+)
+_CANONICAL_HF_REPOS = {
+    "Comfy-Org/Hunyuan-Video-1.5",
+    "Comfy-Org/Qwen-Image-Edit",
+    "Comfy-Org/Qwen-Image",
+    "Comfy-Org/Wan-2.1",
+    "Comfy-Org/Wan-2.2",
+    "stable-diffusion-v1-5/stable-diffusion-v1-5",
+}
+
+
+def test_catalog_names_canonical_hf_repos_not_renamed_ones() -> None:
+    repos = {c.hf_repo for m in CATALOG.values() for c in m.components if c.hf_repo}
+    assert not repos & set(_RENAMED_HF_REPOS)
+    assert repos >= _CANONICAL_HF_REPOS
