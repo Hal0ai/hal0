@@ -100,4 +100,9 @@ are `null` or `ram.limit_gb` is `0`. See the
 - **Slot figures are estimates.** Each `this_box` row is the model file plus a
   KV-cache estimate, not a reading, and a slot row without a `vram_mb` reads as
   `0.0`.
+- **The bare-metal RAM credit rests on those estimates.** `render_ram_free_gb`
+  credits the slots' figures, capped at the pool used outside the image engine.
+  That cap is device-wide, so when another process on the host also holds pool
+  memory and a slot's estimate overstates its share, the credit reads high by the
+  difference (#3081).
 - **`ram.used_gb` is system-wide.** `MemAvailable` is not scoped to a cgroup.
