@@ -16,7 +16,8 @@
 # slot-unit + systemctl ops.
 #
 # The one read, `secret-keys`, prints which vault keys are set (names only,
-# never values).
+# never values). It opens the vault through the same descriptor walk as the
+# writers (#3014).
 #
 # This script is the entire privileged surface for agent env writes. The agent
 # regex below is a security requirement: it rejects path traversal (../), shell
@@ -33,11 +34,11 @@ cmd="${1:-}"; agent="${2:-}"
 # would be imported by this root interpreter (#3007). Every path below is
 # absolute.
 cd /
-secrets="/var/lib/hal0/secrets/agents/${agent}.env"
 
-# One writer for all three write verbs (#2975). /var/lib/hal0 and /etc/hal0
-# are hal0-owned, so the hal0 account can rename secrets/ or agents/ and put a
-# symlink, or a tree it owns, in its place. `install -d`, `mktemp` and `mv` by
+# One writer for all three write verbs (#2975), and the reader for the one
+# read verb (#3014). /var/lib/hal0 and /etc/hal0 are hal0-owned, so the hal0
+# account can rename secrets/ or agents/ and put a symlink, or a tree it owns,
+# in its place. `install -d`, `mktemp` and `mv` by
 # pathname would then follow it as root. This walks every directory from /
 # by descriptor, opening each entry O_NOFOLLOW once inside a directory anyone
 # but root can write, creates the root-owned dirs with mkdirat, refuses a
@@ -46,7 +47,8 @@ secrets="/var/lib/hal0/secrets/agents/${agent}.env"
 # `python3 -I`: sudo keeps the caller's cwd, which plain `-c` puts first on
 # sys.path, so a planted secrets.py there would run as root.
 #   argv: verb  base  'dir dir…'  dir_mode  file_mode  name
-#   verb: merge (stdin = KEY=VALUE updates) or replace (stdin = full body)
+#   verb: merge (stdin = KEY=VALUE updates), replace (stdin = full body), or
+#         keys (read only: print the names of the vault keys that are set)
 read -r -d '' _SAFE_WRITE <<'PY' || true
 import errno, os, secrets, stat, sys
 
@@ -54,6 +56,9 @@ verb, base, managed, dir_mode, file_mode, name = sys.argv[1:7]
 dir_mode, file_mode = int(dir_mode, 8), int(file_mode, 8)
 D = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
 TRUSTED = {0, os.geteuid()}
+# `keys` only reads: it creates nothing, re-owns and re-modes nothing, and
+# answers a missing directory or file with no output.
+READ_ONLY = verb == "keys"
 
 
 def die(msg):
@@ -87,7 +92,11 @@ try:
     for comp, is_managed in steps:
         walked += "/" + comp
         try:
-            nfd = step(fd, comp, create=is_managed)
+            nfd = step(fd, comp, create=is_managed and not READ_ONLY)
+        except FileNotFoundError:
+            if READ_ONLY:
+                sys.exit(0)
+            raise
         except OSError as exc:
             if exc.errno in (errno.ELOOP, errno.ENOTDIR):
                 die(f"{walked}: a symlink or not a directory")
@@ -102,12 +111,53 @@ try:
             st = os.fstat(fd)
             if st.st_uid != os.geteuid() or st.st_mode & 0o022:
                 die(f"{walked}: not a root-only directory (sudo hal0 doctor perms --fix repairs one)")
+            if READ_ONLY:
+                continue
             if os.geteuid() == 0:
                 os.fchown(fd, 0, 0)
             os.fchmod(fd, dir_mode)
 except SystemExit:
     os.close(fd)
     raise
+
+
+def open_leaf(errors="strict"):
+    """The file in the walked directory, O_NOFOLLOW, as a text stream, or None."""
+    try:
+        rfd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=fd)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            die(f"{walked}/{name}: a symlink")
+        raise
+    f = os.fdopen(rfd, encoding="utf-8", errors=errors)
+    if not stat.S_ISREG(os.fstat(rfd).st_mode):
+        f.close()
+        die(f"{walked}/{name}: not a regular file")
+    return f
+
+
+if READ_ONLY:
+    # Names of the keys that are set, one per line, never a value. A key whose
+    # value is empty or a false flag (0, false, no, off) is not printed.
+    f = open_leaf(errors="replace")
+    if f is None:
+        sys.exit(0)
+    names = []
+    with f:
+        for line in f:
+            s = line.strip()
+            if s.startswith("export "):
+                s = s[7:].strip()
+            if not s or s.startswith("#") or "=" not in s:
+                continue
+            k, v = s.split("=", 1)
+            k, v = k.strip(), v.strip().strip("\"'")
+            if k.replace("_", "").isalnum() and v and v.lower() not in ("0", "false", "no", "off"):
+                names.append(k)
+    sys.stdout.write("".join(n + "\n" for n in names))
+    sys.exit(0)
 
 body = sys.stdin.read()
 if verb == "merge":
@@ -119,18 +169,9 @@ if verb == "merge":
         k, v = s.split("=", 1)
         updates[k.strip()] = v
     existing = []
-    try:
-        rfd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=fd)
-    except FileNotFoundError:
-        rfd = None
-    except OSError as exc:
-        if exc.errno == errno.ELOOP:
-            die(f"{walked}/{name}: a symlink")
-        raise
-    if rfd is not None:
-        with os.fdopen(rfd, encoding="utf-8") as f:
-            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
-                die(f"{walked}/{name}: not a regular file")
+    f = open_leaf()
+    if f is not None:
+        with f:
             existing = f.read().splitlines()
     seen, out = set(), []
     for line in existing:
@@ -187,23 +228,10 @@ case "$cmd" in
     # needs its SDK in the Hermes release), from hal0-api running as hal0,
     # which cannot read the 0600 vault. A key whose value is empty or a false
     # flag (0, false, no, off) is not printed. No vault: no output, exit 0.
-    [[ -f "$secrets" ]] || exit 0
-    python3 -I -c '
-import sys
-names = []
-with open(sys.argv[1], encoding="utf-8", errors="replace") as f:
-    for line in f:
-        s = line.strip()
-        if s.startswith("export "):
-            s = s[7:].strip()
-        if not s or s.startswith("#") or "=" not in s:
-            continue
-        k, v = s.split("=", 1)
-        k, v = k.strip(), v.strip().strip("\"\x27")
-        if k.replace("_", "").isalnum() and v and v.lower() not in ("0", "false", "no", "off"):
-            names.append(k)
-sys.stdout.write("".join(n + "\n" for n in names))
-' "$secrets"
+    # The vault is opened through the descriptor walk above, never by pathname:
+    # a symlinked secrets/, secrets/agents or vault file, or a directory root
+    # does not own alone, is refused with exit 3 (#3014). The modes are unused.
+    python3 -I -c "$_SAFE_WRITE" keys /var/lib/hal0 "secrets agents" 0700 0600 "${agent}.env" </dev/null
     ;;
   write-driver-env)
     # stdin = full driver-env body (hal0 API/MCP URLs, plus HAL0_MCP_TOKEN

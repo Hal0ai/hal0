@@ -184,3 +184,155 @@ def test_every_python_call_is_isolated() -> None:
     assert calls
     for ln in calls:
         assert "python3 -I " in ln, ln
+
+
+# ── secret-keys: the read verb walks the same way (#3014) ────────────────────
+
+
+def _keys(base: Path):
+    return _run(base, "keys", "secrets agents", "hermes.env", "")
+
+
+def _vault(base: Path, body: str) -> Path:
+    agents = base / "secrets" / "agents"
+    agents.mkdir(parents=True)
+    for d in (base / "secrets", agents):
+        d.chmod(0o700)
+    vault = agents / "hermes.env"
+    vault.write_text(body, encoding="utf-8")
+    vault.chmod(0o600)
+    return vault
+
+
+def test_keys_prints_set_names_and_never_a_value(base: Path) -> None:
+    _vault(
+        base,
+        "# operator note\n"
+        "TELEGRAM_BOT_TOKEN=123:supersecret\n"
+        "export DISCORD_BOT_TOKEN='discordsecret'\n"
+        "EMPTY=\n"
+        "WEBHOOK_ENABLED=false\n"
+        'API_SERVER_KEY="apikeysecret"\n'
+        "bad key=1\n",
+    )
+    proc = _keys(base)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.splitlines() == ["TELEGRAM_BOT_TOKEN", "DISCORD_BOT_TOKEN", "API_SERVER_KEY"]
+    assert "secret" not in proc.stdout.lower()
+
+
+def test_keys_never_creates_or_remodes(base: Path) -> None:
+    # No vault (fresh box): no output, exit 0, and the read verb births nothing.
+    proc = _keys(base)
+    assert (proc.returncode, proc.stdout) == (0, ""), proc.stderr
+    assert list(base.iterdir()) == []
+    (base / "secrets" / "agents").mkdir(parents=True)
+    for d in (base / "secrets", base / "secrets" / "agents"):
+        d.chmod(0o700)
+    proc = _keys(base)
+    assert (proc.returncode, proc.stdout) == (0, ""), proc.stderr
+    assert list((base / "secrets" / "agents").iterdir()) == []
+
+
+def _root_only_victim(tmp_path: Path) -> Path:
+    victim = tmp_path / "root-only"
+    (victim / "agents").mkdir(parents=True)
+    (victim / "agents" / "hermes.env").write_text("ROOT_ONLY_NAME=value\n")
+    return victim
+
+
+def test_keys_refuses_symlinked_secrets_dir(base: Path, tmp_path: Path) -> None:
+    victim = _root_only_victim(tmp_path)
+    (base / "secrets").symlink_to(victim)
+    proc = _keys(base)
+    assert proc.returncode == 3
+    assert "symlink" in proc.stderr
+    assert "ROOT_ONLY_NAME" not in proc.stdout
+
+
+# Only root can place an entry inside a root-only secrets/, so the hal0
+# account reaches secrets/agents by renaming secrets/ away and putting a tree of
+# its own there, with agents a symlink. On a real host that tree carries the
+# hal0 uid; the suite is not root, so this reports it under a foreign one.
+_FOREIGN_UID_PRELUDE = """
+import os
+_real_fstat = os.fstat
+_ino = os.stat(os.environ["ATTACKER_DIR"]).st_ino
+def _fstat(fd):
+    st = _real_fstat(fd)
+    if st.st_ino == _ino:
+        st = os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, 4242, 4242, *tuple(st)[6:10]))
+    return st
+os.fstat = _fstat
+"""
+
+
+def test_keys_refuses_symlinked_agents_dir(base: Path, tmp_path: Path) -> None:
+    victim = _root_only_victim(tmp_path)
+    attacker = base / "secrets"
+    attacker.mkdir()
+    attacker.chmod(0o700)
+    (attacker / "agents").symlink_to(victim / "agents")
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            _FOREIGN_UID_PRELUDE + _program(),
+            "keys",
+            str(base),
+            "secrets agents",
+            "0700",
+            "0600",
+            "hermes.env",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        env={"ATTACKER_DIR": str(attacker), "PATH": "/usr/bin:/bin"},
+    )
+    assert proc.returncode == 3, proc.stderr
+    assert "not a root-only directory" in proc.stderr
+    assert "ROOT_ONLY_NAME" not in proc.stdout
+
+
+def test_keys_refuses_symlinked_vault(base: Path, tmp_path: Path) -> None:
+    victim = _root_only_victim(tmp_path)
+    vault = _vault(base, "")
+    vault.unlink()
+    vault.symlink_to(victim / "agents" / "hermes.env")
+    proc = _keys(base)
+    assert proc.returncode == 3
+    assert "symlink" in proc.stderr
+    assert "ROOT_ONLY_NAME" not in proc.stdout
+
+
+def test_keys_refuses_a_vault_dir_root_does_not_own_alone(base: Path) -> None:
+    vault = _vault(base, "NAME=value\n")
+    vault.parent.chmod(0o2775)
+    proc = _keys(base)
+    assert proc.returncode == 3
+    assert "not a root-only directory" in proc.stderr
+    assert proc.stdout == ""
+    assert stat.S_IMODE(vault.parent.stat().st_mode) == 0o2775  # a read never re-modes
+
+
+def test_keys_refuses_a_fifo_vault_without_blocking(base: Path) -> None:
+    import os
+
+    vault = _vault(base, "")
+    vault.unlink()
+    os.mkfifo(vault)
+    proc = _keys(base)
+    assert proc.returncode == 3
+    assert "not a regular file" in proc.stderr
+
+
+def test_secret_keys_verb_reads_through_the_walker() -> None:
+    body = WRAPPER.read_text(encoding="utf-8")
+    arm = body[body.index("  secret-keys)") :]
+    arm = arm[: arm.index(";;")]
+    code = "\n".join(ln for ln in arm.splitlines() if not ln.strip().startswith("#"))
+    assert '"$_SAFE_WRITE" keys /var/lib/hal0 "secrets agents"' in code
+    for unsafe in ("[[ -f", "open(sys.argv", '"$secrets"'):
+        assert unsafe not in code, unsafe
