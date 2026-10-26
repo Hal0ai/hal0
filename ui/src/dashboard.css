@@ -2548,6 +2548,7 @@ select.npu-sel {
      abs-fill — an inset-0 child of a content-sized parent would collapse
      to nothing. Back to in-flow. */
   .dash-side.dash-side-fill > * { position: static; inset: auto; }
+  .dash-side.dash-side-fill .slot-rail { max-height: 50vh; overflow: auto; }
   .models-layout { grid-template-columns: 1fr; }
   .models-sidebar { position: static; max-height: none; overflow-y: visible; }
 }

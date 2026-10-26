@@ -56,6 +56,7 @@ import './dash/memory-v2.css'
 import './dash/dock/dock.css'
 import './dash/overhaul.css'
 import './dash/redesign.css'
+import './dash/slot-rail.css'
 
 import './dash/data.jsx'
 import './dash/tweaks-panel.jsx'

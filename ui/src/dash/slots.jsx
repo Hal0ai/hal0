@@ -35,6 +35,7 @@ import { statusCopyForSlotState } from './status-copy'
 import { prettyProfile } from './profile-names.js'
 import { slotModelRow } from './slots/slot-shared.js'
 import { SlotSpecBolt } from './fit-chip.jsx'
+import { SlotRail } from './slot-rail.jsx';
 
 const { useState: useStateS, useRef, useEffect } = React;
 
@@ -1086,7 +1087,11 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
             </>
           )}
         </div>
-        {tab !== "image" && <div className="dash-side dash-side-fill" />}
+        {tab !== "image" && (
+          <div className="dash-side dash-side-fill">
+            <SlotRail onNew={() => setCreateOpen(true)} />
+          </div>
+        )}
       </div>
       )}
 

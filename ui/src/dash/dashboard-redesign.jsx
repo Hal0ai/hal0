@@ -747,7 +747,7 @@ function RDRequestsCard({ swap }) {
 
 // ─── band B · slots (locked) ─────────────────────────────────────────────────
 
-function slotMemLabel(slot) {
+export function slotMemLabel(slot) {
   if (slot.coresident && !(typeof slot.mem_mb === 'number' && slot.mem_mb > 0)) return 'shared'
   if (typeof slot.mem_mb === 'number' && slot.mem_mb > 0) return `${mbToGb(slot.mem_mb).toFixed(1)} GB`
   return '—'

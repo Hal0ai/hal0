@@ -1,0 +1,162 @@
+/* The slot rail beside the Inference pane (slot-rail.jsx). Tokens only. The status dots are the
+   shared .sdot classes (overhaul.css); the device chips are the shared .chip.dev-* (dashboard.css).
+   Rail root fills the abs-positioned .dash-side-fill track: header and footer stay put, the body
+   scrolls. */
+.slot-rail {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  min-height: 0;
+}
+
+.slot-rail .rail-h {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line-soft);
+  flex: none;
+}
+.slot-rail .rail-h .eyebrow {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--fg-4);
+}
+.slot-rail .rail-count {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--fg-3);
+}
+.slot-rail .rail-count b { color: var(--ok); font-weight: 600; }
+
+.slot-rail .rail-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.slot-rail .rail-grp {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px 4px;
+  position: sticky;
+  top: 0;
+  background: var(--bg-1);
+  z-index: 1;
+}
+.slot-rail .rail-grp .gdot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--gc, var(--fg-4));
+  flex: none;
+}
+.slot-rail .rail-grp .gl { font-size: 10px; letter-spacing: 0.06em; color: var(--fg-3); text-transform: uppercase; }
+.slot-rail .rail-grp .gc { margin-left: auto; font-size: 10px; color: var(--fg-4); }
+
+/* One slot: dot | name + chip | state on the first line, model | memory under them. */
+.slot-rail .srow {
+  position: relative;
+  display: grid;
+  grid-template-columns: 12px 1fr auto;
+  grid-template-rows: auto auto;
+  column-gap: 8px;
+  row-gap: 2px;
+  align-items: center;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--line-soft);
+  cursor: pointer;
+  transition: background 0.12s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.slot-rail .srow:hover { background: var(--bg-2); }
+.slot-rail .srow:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.slot-rail .srow .sdot { grid-column: 1; grid-row: 1; }
+.slot-rail .srow .nm {
+  grid-column: 2;
+  grid-row: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.slot-rail .srow .name {
+  font-family: var(--jbm);
+  font-size: 12.5px;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.slot-rail .srow .st { grid-column: 3; grid-row: 1; font-size: 11px; color: var(--fg-3); text-align: right; }
+.slot-rail .srow .st.live { color: var(--accent); }
+.slot-rail .srow .st.paused { color: var(--info); }
+.slot-rail .srow .st.warn { color: var(--warn); }
+.slot-rail .srow .st.err { color: var(--err); }
+.slot-rail .srow .mdl {
+  grid-column: 2;
+  grid-row: 2;
+  font-size: 11px;
+  color: var(--fg-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.slot-rail .srow .mem { grid-column: 3; grid-row: 2; font-size: 10.5px; color: var(--fg-4); text-align: right; }
+.slot-rail .srow.off .name { color: var(--fg-3); }
+.slot-rail .srow.off .chip { opacity: 0.6; }
+.slot-rail .srow.off .st { color: var(--fg-4); }
+
+/* NPU rows pulse in the NPU hue while serving. */
+.slot-rail .srow .sdot.npu.serving { background: var(--dev-npu); box-shadow: 0 0 8px var(--dev-npu); }
+/* Paused for image mode: a hollow ring, no pulse. */
+.sdot.paused { background: transparent; border: 1.5px solid var(--info); box-shadow: none; animation: none; }
+
+.slot-rail .rail-f {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--line-soft);
+  font-size: 10.5px;
+  color: var(--fg-4);
+  flex: none;
+}
+.slot-rail .rail-f .paused-note { color: var(--info); }
+
+/* ─── flash: a slot the dock just reported on, or the pane card a row jumped to ─── */
+@keyframes rail-flash {
+  from { background: var(--ok-soft); }
+  to { background: transparent; }
+}
+@keyframes rail-flash-dot {
+  from { transform: translateY(-50%) scale(1); opacity: 0.9; }
+  to { transform: translateY(-50%) scale(3); opacity: 0; }
+}
+.slot-rail .srow.flash,
+[data-testid^="infer-slot-"].flash {
+  animation: rail-flash 1.6s ease-out 1;
+}
+.slot-rail .srow.flash::after,
+[data-testid^="infer-slot-"].flash::after {
+  content: "";
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+  pointer-events: none;
+  animation: rail-flash-dot 1.6s ease-out 1 forwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .slot-rail .srow.flash,
+  [data-testid^="infer-slot-"].flash { animation: none; background: var(--ok-soft); }
+  .slot-rail .srow.flash::after,
+  [data-testid^="infer-slot-"].flash::after { animation: none; opacity: 0.9; }
+}
