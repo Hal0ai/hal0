@@ -181,9 +181,11 @@ async def test_logs_tail_dispatch_redacts_before_returning(
 
     real_enqueue = queue.enqueue
 
-    async def _capture_executor(*, tool, args, client_id, executor):
+    async def _capture_executor(*, tool, args, client_id, executor, **kwargs):
         bound_executor["fn"] = executor
-        return await real_enqueue(tool=tool, args=args, client_id=client_id, executor=executor)
+        return await real_enqueue(
+            tool=tool, args=args, client_id=client_id, executor=executor, **kwargs
+        )
 
     queue.enqueue = _capture_executor  # type: ignore[assignment]
 
