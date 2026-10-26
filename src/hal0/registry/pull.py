@@ -1044,8 +1044,9 @@ async def _download_one(
                     rec.bytes_total = total
                     job.bytes_total = base_total + total
                     # Re-hash the on-disk prefix so the final SHA-256 is exact
-                    # (stdlib hashlib can't restore a checkpoint).
-                    hashed = _rehash_prefix(part, hasher)
+                    # (stdlib hashlib can't restore a checkpoint). Off the event
+                    # loop: a 20-40 GB prefix takes tens of seconds to hash.
+                    hashed = await asyncio.to_thread(_rehash_prefix, part, hasher)
                     if hashed != resume_from:
                         raise PullError(
                             f"resume prefix changed for {job.model_id}: expected "
