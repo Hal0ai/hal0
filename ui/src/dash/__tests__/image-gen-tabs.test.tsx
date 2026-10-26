@@ -9,6 +9,7 @@ import React, { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import mainSrc from '../../main.tsx?raw'
+import { useImageRunStore } from '../../stores/useImageRunStore'
 import slotsSrc from '../slots.jsx?raw'
 
 ;(globalThis as unknown as { React: typeof React }).React = React
@@ -180,6 +181,7 @@ beforeEach(() => {
   box.mounts = { generate: 0, models: 0, engine: 0 }
   box.unmounts = { generate: 0, models: 0, engine: 0 }
   box.engineVisible = undefined
+  useImageRunStore.setState({ run: null })
   host = document.createElement('div')
   document.body.appendChild(host)
   root = createRoot(host)
@@ -187,6 +189,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount())
   host.remove()
+  useImageRunStore.setState({ run: null })
   vi.restoreAllMocks()
 })
 
@@ -383,9 +386,11 @@ describe('wiring', () => {
     mount()
     expect(byId('stub-status-cancel')).toBeNull()
     expect(byId('stub-status')!.getAttribute('data-own-run')).toBe('false')
+    expect(useImageRunStore.getState().run).toBeNull()
 
     click(byId('stub-run-start')!)
     expect(byId('stub-status')!.getAttribute('data-own-run')).toBe('true')
+    expect(useImageRunStore.getState().run?.running).toBe(true)
 
     // Leave Generate: the panel stays mounted, so its run is still the status line's to cancel.
     click(tabEl('models'))
@@ -398,6 +403,7 @@ describe('wiring', () => {
     click(byId('stub-run-end')!)
     expect(byId('stub-status-cancel')).toBeNull()
     expect(byId('stub-status')!.getAttribute('data-own-run')).toBe('false')
+    expect(useImageRunStore.getState().run).toBeNull()
   })
 
   it('models generate action selects the model in Generate', () => {

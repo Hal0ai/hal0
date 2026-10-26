@@ -17,6 +17,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import './image-tabs.css'
 import { isImageJobActive } from '@/api/hooks/imageJobState'
 import { useComfyuiModels, useImageJobs } from '@/api/hooks/useComfyui'
+import { useImageRunStore } from '@/stores/useImageRunStore'
 import { ImageEngineTab } from './ImageEngineTab'
 import { ImageGeneratePanel } from './ImageGeneratePanel'
 import { ImageModelsPanel } from './ImageModelsPanel'
@@ -84,7 +85,7 @@ export function ImageGenTabs({ sub }) {
   }, [])
 
   // The Generate panel's run of this browser, while it runs: its Cancel is the status line's.
-  const [ownRun, setOwnRun] = useState(null)
+  const run = useImageRunStore((s) => s.run)
 
   // Models → Generate: the model asked for, and a counter so the same model asked for again is a
   // new request.
@@ -130,7 +131,7 @@ export function ImageGenTabs({ sub }) {
 
   return (
     <div className="comfy-page igt" data-testid="image-gen-pane">
-      <ImageStatusLine ownRun={ownRun?.running === true} onCancelOwnRun={ownRun?.cancel} />
+      <ImageStatusLine ownRun={run?.running === true} onCancelOwnRun={run?.cancel} />
 
       <div className="igt-tabs" role="tablist" aria-label="Image Gen">
         {TABS.map((t) => {
@@ -175,7 +176,7 @@ export function ImageGenTabs({ sub }) {
           initialModelId={pick.modelId}
           pickSeq={pick.seq}
           onOpenModels={openModels}
-          onRunChange={setOwnRun}
+          onRunChange={useImageRunStore.getState().setRun}
         />
       </div>
       <div
