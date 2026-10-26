@@ -62,11 +62,9 @@ import './dash/tweaks-panel.jsx'
 import './dash/chrome.jsx'
 import './dash/primitives.jsx'
 import './dash/cards-shell.jsx'
-// Board card modules — each registers a window global (SlotList,
-// ThroughputCard2, UtilizationCard, QuickChatCard, ServicesCard, PowerCard,
+// Board card modules — each registers a window global (ThroughputCard2, UtilizationCard, QuickChatCard, ServicesCard, PowerCard,
 // SlotTrackCard, …). MUST load after cards-shell (they use DCard/StatusDot);
 // the redesign view offers slottrack/power/quickchat as swap-in widgets.
-import './dash/slot-list.jsx'
 import './dash/metric-cards.jsx'
 import './dash/quickchat-card.jsx'
 import './dash/services-card.jsx'

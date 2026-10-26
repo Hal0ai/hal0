@@ -1634,66 +1634,6 @@ a { color: inherit; text-decoration: none; }
 }
 .side-card-b { padding: 14px 16px; }
 
-/* memory map */
-.memmap { font-family: var(--jbm); }
-.memmap-h { display: flex; justify-content: space-between; font-size: 11px; color: var(--fg-3); margin-bottom: 8px; }
-.memmap-h b { color: var(--fg); font-weight: 500; }
-.memmap-bar {
-  display: flex;
-  height: 8px;
-  border-radius: 2px;
-  overflow: hidden;
-  background: var(--bg-3);
-}
-.memmap-bar i { display: block; height: 100%; }
-.memmap-legend { display: flex; flex-direction: column; gap: 5px; margin-top: 10px; font-size: 11px; }
-.memmap-legend .ln { display: flex; align-items: center; gap: 8px; }
-.memmap-legend .sw { width: 8px; height: 8px; border-radius: 2px; }
-.memmap-legend .name { color: var(--fg-2); flex: 1; }
-.memmap-legend .sz { color: var(--fg-4); }
-
-/* PVE-detected-unconfigured nudge band — Memory map sidebar + expanded.
-   Lives below the bar with an amber border-top. */
-.memmap-pve-nudge {
-  color: var(--warn);
-  border-top: 1px solid rgba(255, 180, 60, 0.22);
-  padding: 6px 8px;
-  margin-top: 6px;
-  font-size: 11px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-.memmap-pve-nudge a {
-  color: var(--warn);
-}
-
-/* Subtle text — memory-map secondary labels, headroom rationale, etc.
-   Scoped to .memmap to avoid surprising other consumers that use the
-   bare `.dim` class compound (e.g., .sb-row.dim, .foot-chip .v.dim). */
-.memmap .dim,
-.memmap-expanded .dim {
-  color: var(--fg-4);
-}
-
-.memmap-legend-sub {
-  margin-left: 6px;
-}
-
-/* memory map: host-pressure section (expanded variant only) — clearly
-   separated from the model-memory map so the two aren't conflated. */
-.memmap-host-section {
-  margin-top: 16px;
-  padding-top: 14px;
-  border-top: 1px solid var(--bg-4);
-}
-.memmap-host-section > .memmap-h:first-child {
-  color: var(--fg-4);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-size: 10px;
-}
-
 /* loading skeletons — replace stub-on-load placeholders with a neutral
    shimmer so no fake data ever flashes before the real hooks resolve. */
 .slot-skeleton {

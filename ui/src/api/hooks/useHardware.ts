@@ -123,7 +123,7 @@ export function normalizeHardware(raw: any): Hardware {
 // #2674: a box can drive its GPU through ROCm (computeCapable) or only
 // through Vulkan (a render node passed through, no /dev/kfd). Either way a
 // serving slot is on the GPU, so GPU rows gate on both — the same predicate
-// memory-map.jsx uses. A CPU-only LXC (#1797) has neither, so the host-leak
+// the dashboard (dashboard-redesign.jsx) uses. A CPU-only LXC (#1797) has neither, so the host-leak
 // guard still holds.
 export function hasGpuAccess(hw: Hardware | undefined | null): boolean {
   return !!(hw?.computeCapable || hw?.vulkanCapable)
