@@ -9,6 +9,7 @@ import {
   filterEvents,
   journalToEvents,
   mergeFeeds,
+  newRows,
   actorLabel,
   segmentActions,
   sevOf,
@@ -190,3 +191,14 @@ describe('slotOfEvent and the moved activity helpers', () => {
   })
 })
 
+
+describe('newRows', () => {
+  const evs = mergeFeeds([entry({ id: 1 }), entry({ id: 2 })], [rec({ id: 1 })])
+  it('skips a stream that has not delivered its first batch', () => {
+    expect(newRows(evs, new Set(), { j: true, a: false }).map((e) => e.id)).toEqual(['j:1', 'j:2'])
+    expect(newRows(evs, new Set(), { j: false, a: false })).toEqual([])
+  })
+  it('skips seen ids', () => {
+    expect(newRows(evs, new Set(['j:1', 'a:1']), { j: true, a: true }).map((e) => e.id)).toEqual(['j:2'])
+  })
+})

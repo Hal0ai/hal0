@@ -321,18 +321,66 @@ describe('the dock events pane', () => {
 
   it('dispatches hal0:slot-event for a slot journal line and a slot-targeted action', () => {
     box.ring = [jr({ id: 1, source: 'slot:old', ts: '2026-10-26T15:00:00Z' })]
+    box.records = [ar({ id: 1, target: 'older', ts: '2026-10-26T15:00:01Z' })]
     const seen: string[] = []
     const on = (e: Event) => seen.push((e as CustomEvent).detail.slot)
     window.addEventListener('hal0:slot-event', on)
     try {
       const host = mount(dock(false))
-      expect(seen).toEqual([]) // the backfill is skipped
+      expect(seen).toEqual([]) // both backfills are skipped
       box.ring = [...box.ring, jr({ id: 2, source: 'slot:brain', ts: '2026-10-26T15:00:10Z' }), jr({ id: 3, source: 'hal0', ts: '2026-10-26T15:00:11Z' })]
-      box.records = [ar({ id: 5, target: 'coder/config', ts: '2026-10-26T15:00:12Z' })]
+      box.records = [ar({ id: 5, target: 'coder/config', ts: '2026-10-26T15:00:12Z' }), ...box.records]
       rerender(host, dock(false))
       expect(seen).toEqual(['brain', 'coder'])
       rerender(host, dock(false))
       expect(seen).toEqual(['brain', 'coder']) // once per event
+    } finally {
+      window.removeEventListener('hal0:slot-event', on)
+    }
+  })
+
+  it('backfill from the slower stream is not unseen and dispatches no slot events', () => {
+    box.ring = [jr({ id: 1, ts: '2026-10-26T15:00:00Z' })]
+    const seen: string[] = []
+    const on = (e: Event) => seen.push((e as CustomEvent).detail.slot)
+    window.addEventListener('hal0:slot-event', on)
+    try {
+      const host = mount(dock(false))
+      box.records = [
+        ar({ id: 3, target: 'brain', ts: '2026-10-26T15:00:03Z' }),
+        ar({ id: 2, target: 'coder', ts: '2026-10-26T15:00:02Z' }),
+        ar({ id: 1, target: null, ts: '2026-10-26T15:00:01Z' }),
+      ]
+      rerender(host, dock(false))
+      expect(byId('dock-unseen')).toBeNull()
+      expect(seen).toEqual([])
+      box.records = [ar({ id: 4, target: 'brain', ts: '2026-10-26T15:00:04Z' }), ...box.records]
+      rerender(host, dock(false))
+      expect(byId('dock-unseen')!.textContent).toBe('+1')
+      expect(seen).toEqual(['brain'])
+    } finally {
+      window.removeEventListener('hal0:slot-event', on)
+    }
+  })
+
+  it('backfill from the journal arriving after the activity trail is not unseen either', () => {
+    box.records = [ar({ id: 1, target: 'brain', ts: '2026-10-26T15:00:01Z' })]
+    const seen: string[] = []
+    const on = (e: Event) => seen.push((e as CustomEvent).detail.slot)
+    window.addEventListener('hal0:slot-event', on)
+    try {
+      const host = mount(dock(false))
+      box.ring = [
+        jr({ id: 1, source: 'slot:brain', ts: '2026-10-26T15:00:02Z' }),
+        jr({ id: 2, source: 'slot:coder', ts: '2026-10-26T15:00:03Z' }),
+      ]
+      rerender(host, dock(false))
+      expect(byId('dock-unseen')).toBeNull()
+      expect(seen).toEqual([])
+      box.ring = [...box.ring, jr({ id: 3, source: 'slot:coder', ts: '2026-10-26T15:00:04Z' })]
+      rerender(host, dock(false))
+      expect(byId('dock-unseen')!.textContent).toBe('+1')
+      expect(seen).toEqual(['coder'])
     } finally {
       window.removeEventListener('hal0:slot-event', on)
     }

@@ -108,6 +108,16 @@ export function mergeFeeds(journal: readonly JournalEntry[], activity: readonly 
   return [...journalToEvents(journal), ...activityToEvents(activity)].sort((a, b) => a.t - b.t)
 }
 
+/** Which streams have already delivered a batch. A stream's first batch is its backfill. */
+export type DockReady = Record<DockStream, boolean>
+
+/** The events that are news: not yet seen, and from a stream that had already delivered its first
+ *  batch. The journal and the activity trail are separate connections, so whichever backfills
+ *  second must not read as new. */
+export function newRows(events: readonly DockEvent[], seen: ReadonlySet<string>, ready: DockReady): DockEvent[] {
+  return events.filter((e) => ready[e.stream] && !seen.has(e.id))
+}
+
 export interface DockFilters {
   stream: 'all' | DockStream
   severity: 'all' | DockLevel

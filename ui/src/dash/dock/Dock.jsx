@@ -21,7 +21,7 @@ import { useGpuStatus } from './useGpuStatus'
 import { GpuSegment } from './GpuSegment.jsx'
 import { GpuPane } from './GpuPane.jsx'
 import { EventsPane, EventRow } from './EventsPane.jsx'
-import { DOCK_FILTERS_DEFAULT, TICKER_ROWS, mergeFeeds, slotOfEvent } from './dock-pure'
+import { DOCK_FILTERS_DEFAULT, TICKER_ROWS, mergeFeeds, newRows, slotOfEvent } from './dock-pure'
 import { _svcPip } from '../chrome.jsx'
 
 // ─── Dock (the global status footer) ───
@@ -88,33 +88,38 @@ export function Dock({ route, param, expanded = false, onToggle }) {
     [live.ring, activity.records],
   );
 
-  // Unseen: rows appended while the dock is collapsed. The seen set is re-taken while expanded,
-  // on the first non-empty feed (the backfill is not news) and when the ring shrinks (a reset).
-  // Ids, not a count: a ring at its cap keeps its length while new rows roll in.
-  const seenRef = useRef(null);
-  if (seenRef.current === null) {
-    if (events.length > 0) seenRef.current = { ids: new Set(events.map((e) => e.id)), size: events.length };
-  } else if (expanded || events.length < seenRef.current.size) {
-    seenRef.current = { ids: new Set(events.map((e) => e.id)), size: events.length };
-  }
-  const unseen = seenRef.current
-    ? events.reduce((n, e) => (seenRef.current.ids.has(e.id) ? n : n + 1), 0)
-    : 0;
-
-  // hal0:slot-event — once per event appended after the first non-empty feed, for events about a slot.
-  const slotSeenRef = useRef(null);
+  // News is counted per stream. The journal and the activity trail are two connections: whichever
+  // delivers its first batch second would otherwise read as new. A stream's first batch is its
+  // backfill (`ready` flips in the effect below, after the render that first holds rows), and only
+  // rows from a stream that was already ready on the previous render count.
+  const journalLen = (live.ring || []).length;
+  const activityLen = (activity.records || []).length;
+  const readyRef = useRef({ j: false, a: false });
+  // Unseen: rows appended while the dock is collapsed. The seen set is re-taken while expanded and
+  // when the ring shrinks (a reset). Ids, not a count: a ring at its cap keeps its length while
+  // new rows roll in.
+  const seenRef = useRef({ ids: new Set(), size: 0 });
+  const shrunk = events.length < seenRef.current.size;
+  const unseen = expanded || shrunk ? 0 : newRows(events, seenRef.current.ids, readyRef.current).length;
+  // hal0:slot-event goes out once per new row about a slot, with its own all-ids dedupe.
+  const slotSeenRef = useRef(new Set());
   useEffect(() => {
-    if (slotSeenRef.current === null && events.length === 0) return;
-    const prev = slotSeenRef.current;
-    if (prev) {
-      for (const e of events) {
-        if (prev.has(e.id)) continue;
-        const slot = slotOfEvent(e);
-        if (slot) window.dispatchEvent(new CustomEvent("hal0:slot-event", { detail: { slot } }));
-      }
+    for (const e of newRows(events, slotSeenRef.current, readyRef.current)) {
+      const slot = slotOfEvent(e);
+      if (slot) window.dispatchEvent(new CustomEvent("hal0:slot-event", { detail: { slot } }));
     }
     slotSeenRef.current = new Set(events.map((e) => e.id));
-  }, [events]);
+    const prev = seenRef.current;
+    if (expanded || events.length < prev.size) {
+      seenRef.current = { ids: new Set(events.map((e) => e.id)), size: events.length };
+    } else {
+      // Backfill (rows of a stream not yet ready) is never news; fresh rows stay unseen.
+      const ids = new Set(prev.ids);
+      for (const e of events) if (!readyRef.current[e.stream]) ids.add(e.id);
+      seenRef.current = { ids, size: events.length };
+    }
+    readyRef.current = { j: journalLen > 0, a: activityLen > 0 };
+  }, [events, expanded, journalLen, activityLen]);
 
   // Update chip — self-driven from useUpdateState.
   const updates = useUpdateState();
