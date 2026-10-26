@@ -70,10 +70,11 @@ def _restart_openwebui(
     succeeded (a process failure never raises — callers treat this as a
     best-effort signal, same posture as the rest of the arm).
 
-    ``verb`` is ``"restart"`` (starts a stopped unit — an image upgrade the
-    operator asked for) or ``"try-restart"`` (restarts only a unit that is
-    already active — every env-only reconcile, so an Open WebUI the operator
-    skipped or stopped is never started as a side effect)."""
+    ``verb`` is ``"restart"`` (starts a stopped unit) or ``"try-restart"``
+    (restarts only a unit that is already active). Every caller in this
+    module passes ``"try-restart"``, so an Open WebUI the operator skipped
+    or stopped is never started as a side effect of an env reconcile or an
+    image upgrade; a stopped unit picks up the new pin on its next start."""
     restart_argv = (
         ["sudo", "-n", SEAM_BIN, f"svc-{verb}", "openwebui"]
         if is_hal0_user()
@@ -377,7 +378,9 @@ def converge_openwebui(
     # env-triggered restart would just be wasted churn here).
     env_changed, env_error = _render_dynamic_env(job_id)
 
-    restarted = _restart_openwebui(runner, is_hal0_user)
+    # try-restart: a unit the operator stopped stays down. The repin and env
+    # are already on disk, so its next manual start runs the new image.
+    restarted = _restart_openwebui(runner, is_hal0_user, verb="try-restart")
     if not restarted:
         log.warning(
             "components.owui_restart_failed",

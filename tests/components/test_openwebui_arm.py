@@ -306,9 +306,9 @@ def test_converge_env_only_pass_never_starts_an_inactive_unit(tmp_path) -> None:
     assert systemd.active is False
 
 
-def test_converge_image_repin_still_restarts_unconditionally(tmp_path) -> None:
-    """An image upgrade is the operator asking for the new image: ``restart``
-    stays (the reviewer's C1 ruling keeps it)."""
+def test_converge_image_repin_never_starts_an_inactive_unit(tmp_path) -> None:
+    """An image upgrade repins the unit but must not start an Open WebUI the
+    operator stopped (#3039): ``try-restart``, never ``restart``."""
     unit = _unit(tmp_path)
     systemd = _FakeSystemd(active=False)
 
@@ -317,8 +317,25 @@ def test_converge_image_repin_still_restarts_unconditionally(tmp_path) -> None:
     )
 
     assert res["status"] == "upgraded"
-    assert ["systemctl", "restart", "hal0-openwebui.service"] in systemd.argvs
-    assert systemd.active is True
+    assert NEW in unit.read_text(encoding="utf-8")
+    assert ["systemctl", "try-restart", "hal0-openwebui.service"] in systemd.argvs
+    assert ["systemctl", "restart", "hal0-openwebui.service"] not in systemd.argvs
+    assert systemd.active is False
+
+
+def test_converge_image_repin_try_restarts_an_active_unit_via_seam(tmp_path) -> None:
+    from hal0.system.seam import SEAM_BIN
+
+    unit = _unit(tmp_path)
+    systemd = _FakeSystemd(active=True)
+
+    res = openwebui_arm.converge_openwebui(
+        unit_path=unit, runner=systemd, is_hal0_user=lambda: True
+    )
+
+    assert res["status"] == "upgraded"
+    assert ["sudo", "-n", SEAM_BIN, "svc-try-restart", "openwebui"] in systemd.argvs
+    assert not any("svc-restart" in a for a in systemd.argvs)
 
 
 def test_reconcile_leaves_operator_search_config_alone_and_does_not_restart(tmp_path) -> None:
