@@ -324,27 +324,30 @@ it:
 A nightly counts as a prerelease of its base version, so a `1.5.0` nightly is
 below the floor and a `1.6.0` nightly is inside it.
 
-From a 1.4.x box, step through 1.7.0 first:
+From a 1.3.x or 1.4.x box, step through 1.5.0 with its installer, which
+upgrades in place and keeps `/etc/hal0` and `/var/lib/hal0`, then update
+again. This is the command the installer prints when it refuses a box below
+the floor:
 
 ```sh
-hal0 update --target 1.7.0 -y
+curl -fsSL https://hal0.dev/install.sh \
+  | sudo env HAL0_RELEASES_URL=https://github.com/hal0ai/hal0/releases/download/v1.5.0/stable.json bash
 hal0 update -y
 ```
 
-From a 1.3.x box, step through 1.5.0 first:
+`hal0 update --target` cannot make this hop. It is an exact pin against the
+manifest the channel serves now, so once the channel has moved past a release,
+`--target` with that release's version fails with `UpdateManifestInvalid`
+before it downloads anything.
 
-```sh
-hal0 update --target 1.5.0 -y
-hal0 update -y
-```
-
-From 1.2.x or older, step through 1.3.0 with its installer, which upgrades in
-place and keeps `/etc/hal0` and `/var/lib/hal0`, then follow the 1.3.x path:
+From 1.2.x or older, step through 1.3.0 the same way first, then follow the
+1.3.x path:
 
 ```sh
 curl -fsSL https://hal0.dev/install.sh \
   | sudo env HAL0_RELEASES_URL=https://github.com/hal0ai/hal0/releases/download/v1.3.0/stable.json bash
-hal0 update --target 1.5.0 -y
+curl -fsSL https://hal0.dev/install.sh \
+  | sudo env HAL0_RELEASES_URL=https://github.com/hal0ai/hal0/releases/download/v1.5.0/stable.json bash
 hal0 update -y
 ```
 
