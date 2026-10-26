@@ -138,6 +138,7 @@ Request (subset honored): `{"model": <id>, "prompt": <required>, "n"?, "size"?, 
 | 422 | `image.model_required` | No `model` in the request and no model selected for `img`. |
 | 422 | `image.invalid_size` | `size` is present and is not a string (`null` and `""` mean no size). `error.details.size_type` names the type sent. A string that does not read as `WxH` is not an error: the render falls back to its default size. |
 | 422 | `image.wont_fit` | The model at the size the render will use does not fit this box's GPU pool or RAM, judged before the GPU arbiter unloads any slot. `error.details` carries `need`, `render_free_gb`, `ram_free_gb`, `model` and `size`. `extra_body.hal0_skip_fit_check: true` skips the check. See the [Image readiness API reference](/docs/reference/api/image-readiness/). |
+| 503 | `gpu.slot_still_loading` | An LLM GPU slot was still loading when the switch into image mode started, and its load did not finish within 120 seconds. The GPU stays in LLM mode; `error.details.slots` names the slots. Retry once the load is done. |
 | 503 | `image.gate_refused` | ComfyUI's GPU gate refused the prompt hal0 submitted. `error.message` is the gate's reason. |
 
 - The GPU switch happens before dispatch; when the GPU is already in image mode but the `img` slot is down, the request starts it first. The request holds image mode until its render returns, and hal0 hands the GPU back to the LLM slots about 10 seconds later, or as soon as a request for one of them arrives.

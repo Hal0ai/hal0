@@ -147,3 +147,25 @@ def test_is_ready_for_dispatch_offline_unknown_slot(tmp_hal0_home: str) -> None:
     """Unknown slot → OFFLINE → not ready."""
     sm = _manager(tmp_hal0_home)
     assert sm.is_ready_for_dispatch("nonexistent") is False
+
+
+# ── is_busy() (#3056) ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_is_busy_while_the_slot_lock_is_held(tmp_hal0_home: str) -> None:
+    """A load, unload or restart holds the slot's lock for its whole run."""
+    sm = _manager(tmp_hal0_home)
+    assert sm.is_busy("chat") is False
+
+    async with sm._lock("chat"):
+        assert sm.is_busy("chat") is True
+        assert sm.is_busy("agent") is False
+
+    assert sm.is_busy("chat") is False
+
+
+def test_is_busy_does_not_create_a_lock(tmp_hal0_home: str) -> None:
+    sm = _manager(tmp_hal0_home)
+    assert sm.is_busy("never-touched") is False
+    assert sm._locks == {}

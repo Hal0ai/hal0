@@ -171,7 +171,7 @@ below. Taking the snapshot awaits nothing and does no network or config I/O.
 | `restore_at` | Epoch seconds when the restore of the LLM slots is due (the end of the grace period). Set only while `phase` is `grace`. |
 | `handoff_until` | Epoch seconds when the hand-off ends. Set only while `phase` is `handoff`. |
 | `drain_in_flight` | Requests still running on the slots being drained, while `phase` is `draining`; else `0`. |
-| `unload_set` | `list[str] \| null`. In image mode, the slots that were unloaded and come back. In LLM mode, the GPU LLM slots a switch would unload now (`[]` means known to be none). `null` is unknown: the slot configs have not been read since `hal0-api` started (the restore loop reads them once at startup, every switch and restore refreshes them), or the read failed. |
+| `unload_set` | `list[str] \| null`. In image mode, the slots that were unloaded and come back. In LLM mode, the GPU LLM slots a switch would unload now, including one still loading (`[]` means known to be none). `null` is unknown: the slot configs have not been read since `hal0-api` started (the restore loop reads them once at startup, every switch and restore refreshes them), or the read failed. |
 | `llm_waiters` | `{count, oldest_s}`: LLM requests waiting for the GPU, and the age in seconds of the oldest (`null` without any). |
 
 Some cases read `phase: null` or an unexpected phase:

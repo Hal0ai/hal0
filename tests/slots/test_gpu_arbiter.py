@@ -32,6 +32,7 @@ from hal0.slots.arbiter import (
     GpuImageMode,
     GpuInferenceMode,
     GpuMode,
+    GpuSlotStillLoading,
     gpu_exclusive_group,
 )
 
@@ -114,12 +115,17 @@ class FakeManager:
         # poll (last entry sticks). When set for a slot, load() does NOT
         # auto-add to ready — the caller drives state via the sequence.
         self.slot_states: dict[str, Any] = dict(slot_states or {})
+        # Slots whose lock a load (or other lifecycle op) holds right now.
+        self.busy: set[str] = set()
 
     async def iter_configs(self) -> list[dict[str, Any]]:
         return [dict(c) for c in self.configs]
 
     def is_ready_for_dispatch(self, name: str) -> bool:
         return name in self.ready
+
+    def is_busy(self, name: str) -> bool:
+        return name in self.busy
 
     def state(self, name: str) -> str:
         if name in self.slot_states:
@@ -2679,3 +2685,111 @@ async def test_concurrent_requests_cold_start_a_down_img_slot_once(
     await asyncio.gather(arb.ensure_img(), arb.ensure_img())
 
     assert fake_mgr.calls.count(("load", "img", "sdxl-turbo")) == 1
+
+
+# ── slots still loading when the switch starts (#3056) ─────────────────────
+
+
+def _loading(fake_mgr: FakeManager, slot: str, state: str = "starting") -> None:
+    """``slot`` is mid-load: not dispatchable, and its lock held by the load."""
+    fake_mgr.ready.discard(slot)
+    fake_mgr.slot_states[slot] = state
+    fake_mgr.busy.add(slot)
+
+
+def _finish_load(fake_mgr: FakeManager, slot: str) -> None:
+    fake_mgr.slot_states.pop(slot, None)
+    fake_mgr.busy.discard(slot)
+    fake_mgr.ready.add(slot)
+
+
+@pytest.mark.parametrize("state", ["pulling", "starting", "warming"])
+async def test_a_slot_still_loading_is_waited_for_then_unloaded_and_saved(
+    fake_mgr: FakeManager, state_path: Path, state: str
+) -> None:
+    _loading(fake_mgr, "agent", state)
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+
+    task = asyncio.create_task(arb.ensure_img())
+    await asyncio.sleep(0.05)
+    assert not task.done()  # the switch waits for the load
+    assert arb.status()["phase"] == "unloading"
+    assert _read_state(state_path)["saved_llm_slots"] == ["chat", "agent"]
+    assert fake_mgr.calls == []
+
+    _finish_load(fake_mgr, "agent")
+    await task
+
+    assert fake_mgr.calls == [
+        ("unload", "chat"),
+        ("unload", "agent"),
+        ("load", "img", "sdxl-turbo"),
+    ]
+    assert arb.mode is GpuMode.IMG
+    assert not fake_mgr.is_ready_for_dispatch("agent")
+
+
+async def test_a_slot_parked_in_warming_is_unloaded_without_waiting(
+    fake_mgr: FakeManager, state_path: Path
+) -> None:
+    """A load whose health wait timed out leaves the slot in WARMING with its
+    container up and no load running: nothing to wait for, but it is on the GPU."""
+    _loading(fake_mgr, "agent", "warming")
+    fake_mgr.busy.discard("agent")
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+
+    await asyncio.wait_for(arb.ensure_img(), timeout=1.0)
+
+    assert ("unload", "agent") in fake_mgr.calls
+    assert _read_state(state_path)["saved_llm_slots"] == ["chat", "agent"]
+
+
+async def test_a_load_that_outlasts_the_wait_rolls_the_switch_back(
+    fake_mgr: FakeManager, state_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(arbiter_mod, "_LOAD_WAIT_S", 0.05)
+    _loading(fake_mgr, "agent")
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+
+    with pytest.raises(GpuSlotStillLoading) as excinfo:
+        await arb.ensure_img(pin=True)
+
+    assert excinfo.value.code == "gpu.slot_still_loading"
+    assert excinfo.value.status == 503
+    assert excinfo.value.details["slots"] == ["agent"]
+    assert arb.mode is GpuMode.LLM
+    assert _read_state(state_path) == {"mode": "llm", "pinned": False, "saved_llm_slots": []}
+    # Nothing was unloaded yet, so nothing is reloaded; the load carries on in LLM mode.
+    assert fake_mgr.calls == []
+    assert fake_mgr.is_ready_for_dispatch("chat")
+
+
+async def test_unload_set_names_a_slot_still_loading_in_llm_mode(
+    fake_mgr: FakeManager, state_path: Path
+) -> None:
+    _loading(fake_mgr, "agent")
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    task = asyncio.create_task(arb.run_restore_loop(interval_s=3600))
+    await asyncio.sleep(0.05)
+    try:
+        assert arb.status()["unload_set"] == ["chat", "agent"]
+    finally:
+        await _cancel_loop(task)
+
+
+async def test_a_switch_after_a_restart_unloads_a_saved_slot_left_in_warming(
+    fake_mgr: FakeManager, state_path: Path
+) -> None:
+    """After an api restart, a slot's state file can still say WARMING with its
+    container up. The next switch unloads it with the rest (#3059)."""
+    state_path.write_text(
+        json.dumps({"mode": "img", "pinned": False, "saved_llm_slots": ["chat", "agent"]}),
+        encoding="utf-8",
+    )
+    fake_mgr.ready = {"npu", "tts"}
+    fake_mgr.slot_states["agent"] = "warming"
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+
+    await arb.ensure_img()
+
+    assert fake_mgr.calls == [("unload", "agent"), ("load", "img", "sdxl-turbo")]

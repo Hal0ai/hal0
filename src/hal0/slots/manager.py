@@ -1276,6 +1276,18 @@ class SlotManager:
         """
         return self.state(name) in self._DISPATCHABLE_STATES
 
+    def is_busy(self, name: str) -> bool:
+        """Return ``True`` while a load, unload, restart or swap holds *name*'s lock.
+
+        Each of those holds the slot's lock for its whole run, so a slot in
+        PULLING, STARTING or WARMING that is not busy is the residue of a load
+        that ended without converging (#1791), not a load still in progress. The
+        GPU arbiter waits for a busy slot's load before it unloads it (#3056).
+        Never creates a lock.
+        """
+        lock = self._locks.get(self._key(self._resolve_alias(name)))
+        return lock is not None and lock.locked()
+
     # ── state machine ────────────────────────────────────────────────────────
 
     def _current_state(self, name: str) -> SlotState:
