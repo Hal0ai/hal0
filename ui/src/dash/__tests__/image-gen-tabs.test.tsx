@@ -1,9 +1,9 @@
 // @vitest-environment happy-dom
 //
-// The Image Gen pane's frame (ImageGenTabs): the status line on top, the Generate | Models |
-// Engine sub-tabs, which one opens first, the deep link, and the wiring between the panels. The
-// panels and the status line are stubbed at the module boundary: they have their own tests
-// (image-generate-panel, image-models-panel, image-status-line, image-engine-tab), so what is
+// The Image Gen pane's frame (ImageGenTabs): the Generate | Models | Engine sub-tabs, which one
+// opens first, the deep link, and the wiring between the panels. The GPU state is not drawn here
+// (it lives in the dock). The panels are stubbed at the module boundary: they have their own tests
+// (image-generate-panel, image-models-panel, image-engine-tab), so what is
 // pinned here is what the frame hands them and does with what they report.
 import React, { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -36,20 +36,6 @@ vi.mock('@/api/hooks/useComfyui', async (importOriginal) => ({
   useImageJobs: () => ({ data: box.jobs }),
 }))
 vi.mock('../image/useEditorAccess', () => ({ useEditorAccess: () => box.access }))
-
-vi.mock('../image/ImageStatusLine.jsx', async () => {
-  const R = await import('react')
-  return {
-    ImageStatusLine: (p: { ownRun?: boolean; onCancelOwnRun?: () => void }) =>
-      R.createElement(
-        'div',
-        { 'data-testid': 'stub-status', 'data-own-run': String(!!p.ownRun) },
-        p.onCancelOwnRun
-          ? R.createElement('button', { 'data-testid': 'stub-status-cancel', onClick: p.onCancelOwnRun }, 'Cancel')
-          : null,
-      ),
-  }
-})
 
 vi.mock('../image/ImageGeneratePanel.jsx', async () => {
   const R = await import('react')
@@ -279,7 +265,8 @@ describe('which tab opens first', () => {
   it('the root carries the comfy-page marker class', () => {
     mount()
     expect(byId('image-gen-pane')!.classList.contains('comfy-page')).toBe(true)
-    expect(byId('stub-status')).not.toBeNull()
+    // The pane draws no GPU status line: the dock carries that state on every page.
+    expect(document.querySelectorAll('[data-testid="image-status-line"]')).toHaveLength(0)
   })
 })
 
@@ -382,27 +369,23 @@ describe('hidden tabs', () => {
 // ── wiring between the panels ────────────────────────────────────────────────
 
 describe('wiring', () => {
-  it('generate run stays cancellable from the status line after a tab switch', () => {
+  it('generate run lives in the store across a tab switch', () => {
     mount()
-    expect(byId('stub-status-cancel')).toBeNull()
-    expect(byId('stub-status')!.getAttribute('data-own-run')).toBe('false')
     expect(useImageRunStore.getState().run).toBeNull()
 
     click(byId('stub-run-start')!)
-    expect(byId('stub-status')!.getAttribute('data-own-run')).toBe('true')
     expect(useImageRunStore.getState().run?.running).toBe(true)
 
-    // Leave Generate: the panel stays mounted, so its run is still the status line's to cancel.
+    // Leave Generate: the panel stays mounted, so its run is still in the store to cancel.
     click(tabEl('models'))
     click(tabEl('engine'))
     expect(box.unmounts.generate).toBe(0)
-    click(byId('stub-status-cancel')!)
+    expect(useImageRunStore.getState().run?.running).toBe(true)
+    useImageRunStore.getState().run?.cancel()
     expect(box.cancel).toHaveBeenCalledTimes(1)
 
     // The run ends: nothing left to cancel.
     click(byId('stub-run-end')!)
-    expect(byId('stub-status-cancel')).toBeNull()
-    expect(byId('stub-status')!.getAttribute('data-own-run')).toBe('false')
     expect(useImageRunStore.getState().run).toBeNull()
   })
 

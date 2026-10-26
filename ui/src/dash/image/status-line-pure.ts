@@ -111,7 +111,7 @@ export const HEAD_RELOADING = 'Reloading GPU slots'
 export const HEAD_PINNED = 'Image mode pinned'
 export const HEAD_RENDERING = 'Rendering'
 const HEAD_STALE = 'The image engine runs an older GPU gate'
-const HEAD_NO_CREDENTIAL =
+export const HEAD_NO_CREDENTIAL =
   "Image generation is blocked: hal0 requires sign-in and ComfyUI's GPU gate has no credential for it yet"
 
 export const COST_RELOAD = 'They reload about 10 s after the last image.'
@@ -127,7 +127,7 @@ const WAIT_CAP = '2:00'
 // ADR-0040 and docs/operate/auth.mdx ("ComfyUI's GPU gate credential") have the fix. The
 // opt-out is named because the docs name it, not because it is the answer: it also drops the
 // guard against rendering next to the LLM slots.
-const DETAIL_NO_CREDENTIAL =
+export const DETAIL_NO_CREDENTIAL =
   'See ADR-0040 and the GPU gate section of operate/auth for the fix. ' +
   "HAL0_COMFYUI_GATE_FAIL_OPEN=1 opts out of the gate's check, and it also drops the guard against rendering next to the LLM slots."
 

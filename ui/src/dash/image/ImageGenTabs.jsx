@@ -21,7 +21,6 @@ import { useImageRunStore } from '@/stores/useImageRunStore'
 import { ImageEngineTab } from './ImageEngineTab'
 import { ImageGeneratePanel } from './ImageGeneratePanel'
 import { ImageModelsPanel } from './ImageModelsPanel'
-import { ImageStatusLine } from './ImageStatusLine'
 import { renderableInstalled } from './image-models-pure'
 import { useEditorAccess } from './useEditorAccess'
 
@@ -84,9 +83,6 @@ export function ImageGenTabs({ sub }) {
     }
   }, [])
 
-  // The Generate panel's run of this browser, while it runs: its Cancel is the status line's.
-  const run = useImageRunStore((s) => s.run)
-
   // Models → Generate: the model asked for, and a counter so the same model asked for again is a
   // new request.
   const [pick, setPick] = useState({ modelId: undefined, seq: 0 })
@@ -131,8 +127,6 @@ export function ImageGenTabs({ sub }) {
 
   return (
     <div className="comfy-page igt" data-testid="image-gen-pane">
-      <ImageStatusLine ownRun={run?.running === true} onCancelOwnRun={run?.cancel} />
-
       <div className="igt-tabs" role="tablist" aria-label="Image Gen">
         {TABS.map((t) => {
           const on = tab === t.id

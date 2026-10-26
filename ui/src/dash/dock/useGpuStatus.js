@@ -1,7 +1,7 @@
-// The GPU state the status dock draws: what the Image Gen pane's status line shows, computed once.
+// The GPU state the status dock draws, computed once.
 //
-// Lifted from ImageStatusLine's body (same hooks, same server-clock skew, same one-second tick,
-// same render-time carry-on); the line stays until the pane drops it. The words and the choice of
+// The one place the GPU state is computed for the dock (the server-clock skew, the one-second
+// tick, the render-time carry-on). The words and the choice of
 // buttons are status-line-pure's; what a button calls is useStatusLineActions's. `active` is
 // whether /status polls at its active cadence: on the Image Gen route, or while a run of this
 // browser is in flight (the dock is mounted everywhere, so it does not poll fast otherwise).
@@ -13,7 +13,7 @@ import { actionFacts, statusLine } from '@/dash/image/status-line-pure'
 import { reloadSteps, switchSteps } from '@/dash/image/status-line-parts-pure'
 import { useDismissedRefusalAt } from '@/dash/image/useStatusLineActions'
 import { useEditorAccess } from '@/dash/image/useEditorAccess'
-import { useTick } from '@/dash/image/ImageStatusLine.jsx'
+import { useTick } from './gpu-parts.jsx'
 
 /**
  * @param {{ active: boolean }} opts

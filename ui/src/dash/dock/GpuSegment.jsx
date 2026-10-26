@@ -5,7 +5,7 @@
 // It draws with the plain dashboard tokens, not the `--comfy*` accent.
 import { KIND_ANNOUNCEMENT } from '@/dash/image/status-line-pure'
 import { renderPct } from '@/dash/image/status-line-parts-pure'
-import { LABEL } from '@/dash/image/ImageStatusLine.jsx'
+import { LABEL } from './gpu-parts.jsx'
 import { segmentActions } from './dock-pure'
 
 /**

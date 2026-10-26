@@ -171,3 +171,31 @@
 @media (prefers-reduced-motion: reduce) {
   .gp-slot .pip { animation: none; }
 }
+
+/* ─── Render progress and step chips (gpu-parts.jsx: RenderRun, Steps) ───
+   They draw in the GPU tab, in the image-mode tone: the chips and the bar take --isl-c. */
+.gp { --isl-c: var(--info); }
+.isl-run { display: flex; align-items: center; gap: 10px; margin-top: 2px; }
+.isl-bar {
+  flex: 1;
+  max-width: 320px;
+  height: 4px;
+  border-radius: var(--rad-pill);
+  background: var(--bg-4);
+  overflow: hidden;
+}
+.isl-bar > i { display: block; height: 100%; background: var(--isl-c); }
+.isl-elapsed { font-size: 11px; color: var(--fg-3); }
+
+.isl-steps { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 0; padding: 0; list-style: none; }
+.isl-step {
+  padding: 1px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--rad-pill);
+  font-family: var(--jbm);
+  font-size: 10.5px;
+  color: var(--fg-4);
+}
+.isl-step.active { color: var(--isl-c); border-color: var(--isl-c); }
+.isl-step.done   { color: var(--fg-2); border-color: var(--line-strong); }
+.isl-step.done::before { content: '✓ '; color: var(--ok); }

@@ -31,7 +31,8 @@ import { captureUiException } from '@/sentry'
 // than read off a `window.BenchmarksView` global.
 import Benchmarks from './Benchmarks'
 import { Dock } from './dock/Dock.jsx'
-import { isImageGenRoute, slotsSub } from './slots-route'
+import { GpuGateBlockedBanner } from './dock/GpuGateBlockedBanner.jsx'
+import { slotsSub } from './slots-route'
 
 const { useState: useStateA, useEffect: useEffectA } = React;
 
@@ -351,10 +352,9 @@ function App() {
                 configured). Dismiss is per-session; no auto-route. */}
             <FirstRunBanner />
             <UpdateBanner />
-            {/* Phase D8: self-renders while the GPU arbiter reports image
-                mode (/api/comfyui/arbiter arbiter.mode === "img"). Not on the
-                Image Gen pane: its own status line says the same, in full. */}
-            {!isImageGenRoute(route, param) && <GpuImageModeBanner />}
+            {/* Self-renders only while ComfyUI's GPU gate has no credential and image
+                generation is blocked, on every page. Every other GPU state lives in the dock. */}
+            <GpuGateBlockedBanner />
             <BannerStack scope="global" route={route} />
           </div>
           <ViewErrorBoundary key={route}>{renderView()}</ViewErrorBoundary>

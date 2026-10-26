@@ -18,7 +18,7 @@ import {
   engineNotice,
   gateRow,
 } from './engine-pure'
-import { ForceStopConfirm } from './ImageStatusLine'
+import { ForceStopConfirm } from '../dock/gpu-parts.jsx'
 import { actionFacts } from './status-line-pure'
 import { useStatusLineActions } from './useStatusLineActions'
 

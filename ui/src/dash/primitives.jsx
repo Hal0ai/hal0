@@ -3,8 +3,6 @@
 
 import { useUpdateState, useUpdateApply, useUpdateJob } from '@/api/hooks/useUpdates'
 import { useInstallState, bundleNameOr } from '@/api/hooks/useInstallState'
-import { useArbiter } from '@/api/hooks/useComfyui'
-import { imageModeBanner, IMAGE_MODE_BANNER_HREF } from './gpu-image-mode-pure'
 
 const { useState: useStateP, useEffect: useEffectP, useRef: useRefP, useMemo: useMemoP, createContext: createContextP, useContext: useContextP } = React;
 
@@ -413,17 +411,6 @@ const BANNER_CATALOG = [
       { label: "Remind me later" },
     ],
   },
-  {
-    // Live surface is <GpuImageModeBanner> (reads the /api/comfyui/arbiter
-    // envelope); this entry keeps the Tweaks-panel demo toggle working.
-    id: "gpu-image-mode", scope: "global", kind: "info",
-    eyebrow: "GPU · arbiter",
-    heading: "GPU: image mode",
-    body: "LLM slots are stopped while image generation holds the GPU — they reload shortly after the last render finishes.",
-    actions: [
-      { label: "View slots", primary: true, onClick: () => window.location.hash = "#slots" },
-    ],
-  },
   // Slots view
   {
     id: "npu-swap", scope: "slots", kind: "warn",
@@ -640,40 +627,6 @@ function FirstRunBanner() {
       eyebrow="Setup · first run"
       heading="No models configured yet"
       body={<span>Run <span className="mono">hal0 setup</span> in your terminal to add models, apps, and agents.</span>}
-      onDismiss={() => setDismissed(true)}
-    />
-  );
-}
-
-// ─── GpuImageModeBanner — live-data wrapper around <Banner> ─────────────
-// Phase D8: mirrors the UpdateBanner pattern — the catalog entry of the
-// same id ("gpu-image-mode") stays around for the Tweaks demo toggle, but
-// the real surface is this component, fed by the polled /api/comfyui/arbiter
-// envelope (the light route the Image Gen status line polls). It is that line's
-// one-line form: it shows while the GPU arbiter holds the iGPU for image
-// generation (arbiter.mode === "img"), says what the GPU is doing with the same
-// headlines, and links to the Engine tab. Fails soft (renders nothing) when the
-// arbiter block is null (gate off / older backend). The copy says when a pin
-// holds image mode (imageModeBanner). Dismiss is per-episode: it resets when
-// the GPU returns to llm mode so the next switchover re-surfaces the banner.
-export function GpuImageModeBanner() {
-  const q = useArbiter();
-  const [dismissed, setDismissed] = useStateP(false);
-  const copy = imageModeBanner(q.data?.arbiter);
-  const isImg = copy !== null;
-  useEffectP(() => { if (!isImg) setDismissed(false); }, [isImg]);
-  if (!isImg || dismissed) return null;
-  return (
-    <Banner
-      kind="info"
-      compact
-      heading={copy.heading}
-      body={copy.body}
-      actions={
-        <a className="btn sm" href={IMAGE_MODE_BANNER_HREF}>
-          Open Image Gen
-        </a>
-      }
       onDismiss={() => setDismissed(true)}
     />
   );
@@ -1120,7 +1073,7 @@ function ImportDialog({
   );
 }
 
-Object.assign(window, { Modal, Drawer, DrawerDock, ConfirmDialog, Banner, BannerStack, BannerProvider, useBanners, BANNER_CATALOG, Menu, UpdateBanner, GpuImageModeBanner, FirstRunBanner, FieldGroup, FieldInfoIcon, PillToggle, NAME_RE, toast, useFocusTrap, FormRow, useForm, FormDrawer, ImportDialog });
+Object.assign(window, { Modal, Drawer, DrawerDock, ConfirmDialog, Banner, BannerStack, BannerProvider, useBanners, BANNER_CATALOG, Menu, UpdateBanner, FirstRunBanner, FieldGroup, FieldInfoIcon, PillToggle, NAME_RE, toast, useFocusTrap, FormRow, useForm, FormDrawer, ImportDialog });
 
 // Real ESM export for the newer `dash/auth/*` and `dash/image/*` modules (AuthChallengeDrawer,
 // the Engine tab's log modal), which import Drawer and Modal directly rather than reading the

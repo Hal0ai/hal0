@@ -8,7 +8,7 @@
 //
 // It draws with the plain dashboard tokens, not the `--comfy*` accent.
 import { useState } from 'react'
-import { LABEL, RenderRun, Steps } from '@/dash/image/ImageStatusLine.jsx'
+import { LABEL, RenderRun, Steps } from './gpu-parts.jsx'
 import { LogsModal } from '@/dash/image/EngineCard.jsx'
 import { gateRow, queueSummary } from '@/dash/image/engine-pure'
 import { costLine } from '@/dash/image/status-line-pure'

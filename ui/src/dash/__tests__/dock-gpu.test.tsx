@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 //
 // The GPU segment of the status dock (useGpuStatus + GpuSegment inside Dock). The hooks are mocked
-// at the module boundary, the way image-status-line.test.tsx mocks them: what is pinned here is
+// at the module boundary, the way image-files-tab.test.tsx mocks its own: what is pinned here is
 // what the collapsed row shows, what each button calls and what the segment hides, not the
 // polling (imageHooks.test.tsx has that).
 import React, { act } from 'react'
@@ -104,7 +104,9 @@ vi.mock('@/api/hooks/useRuntimes', async (importOriginal) => ({
 }))
 
 const { Dock } = await import('../dock/Dock.jsx')
-const { clearDismissedRefusal } = await import('../image/useStatusLineActions')
+const { GpuGateBlockedBanner } = await import('../dock/GpuGateBlockedBanner.jsx')
+const { clearDismissedRefusal, useStatusLineActions } = await import('../image/useStatusLineActions')
+const { ForceStopConfirm } = await import('../dock/gpu-parts.jsx')
 const { useImageRunStore } = await import('@/stores/useImageRunStore')
 const { resetGenerateStore } = await import('../image/generate-store')
 
@@ -571,5 +573,278 @@ describe('the dock GPU tab', () => {
     mount(open())
     await click(byId('dock-tab-gpu'))
     expect(factRow('last image · this browser').textContent).toMatch(/^\d\d:\d\d:\d\d · flux-dev · 1024x768$/)
+  })
+})
+
+// ── the clocks ───────────────────────────────────────────────────────────────
+
+describe('the dock GPU clocks', () => {
+  const head = () => byId('gpu-status-head')!.textContent
+
+  it('counts the grace down between polls', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2026, 9, 25, 12, 0, 0))
+    const t = Date.now() / 1000
+    box.arbiter = envelope({ mode: 'img', phase: 'grace', restore_at: t + 8 })
+    mount(dock())
+    expect(head()).toBe('Image mode ends in 8 s')
+    act(() => {
+      vi.advanceTimersByTime(3000)
+    })
+    expect(head()).toBe('Image mode ends in 5 s')
+  })
+
+  // `restore_at` is on the server's clock. The hook keeps the browser's skew against it
+  // (`skewMs`, from the response's Date header); the countdown is taken on the server's clock.
+  it('counts the grace down on the server clock when the browser clock is ahead', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2026, 9, 25, 12, 0, 30))
+    // The server says 8 s left; the browser is 30 s ahead, so restore_at is 22 s in its past.
+    const serverNow = Date.now() / 1000 - 30
+    box.arbiter = { ...envelope({ mode: 'img', phase: 'grace', restore_at: serverNow + 8 }), skewMs: 30_000 }
+    mount(dock())
+    expect(head()).toBe('Image mode ends in 8 s')
+    act(() => {
+      vi.advanceTimersByTime(3000)
+    })
+    expect(head()).toBe('Image mode ends in 5 s')
+  })
+
+  it('counts the grace down on the server clock when the browser clock is behind', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2026, 9, 25, 12, 0, 0))
+    const serverNow = Date.now() / 1000 + 45
+    box.arbiter = { ...envelope({ mode: 'img', phase: 'grace', restore_at: serverNow + 8 }), skewMs: -45_000 }
+    mount(dock())
+    expect(head()).toBe('Image mode ends in 8 s')
+  })
+
+  it('takes the skew as 0 when the answer carries none', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2026, 9, 25, 12, 0, 0))
+    box.arbiter = envelope({ mode: 'img', phase: 'grace', restore_at: Date.now() / 1000 + 8 })
+    mount(dock())
+    expect(head()).toBe('Image mode ends in 8 s')
+  })
+
+  it('carries the render time on from the last poll', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2026, 9, 25, 12, 0, 0))
+    // /status answered now, with the render at 72 s.
+    box.statusUpdatedAt = Date.now()
+    box.arbiter = envelope({ mode: 'img', phase: 'rendering' })
+    box.status = statusBody({
+      queue: { running: 1, pending: 0 },
+      progress: { model: 'flux-dev', step: 5, total: 20, node: '9', elapsed_s: 72, prompt_id: 'p' },
+    })
+    mount(open())
+    act(() => {
+      byId('dock-tab-gpu')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(byId('image-status-elapsed')!.textContent).toBe('1:12')
+    act(() => {
+      vi.advanceTimersByTime(3000)
+    })
+    // No new poll: the figure moved on by the three seconds that passed.
+    expect(byId('image-status-elapsed')!.textContent).toBe('1:15')
+  })
+})
+
+describe('the dock GPU segment, shown and hidden', () => {
+  it('is hidden without a gpu', () => {
+    box.memory = memoryBody(null)
+    mount(dock())
+    expect(document.querySelectorAll('[data-testid="dock-gpu-segment"]')).toHaveLength(0)
+  })
+
+  it('is shown while the model list has not loaded yet', () => {
+    box.models = undefined
+    mount(dock())
+    expect(byId('dock-gpu-segment')).not.toBeNull()
+  })
+})
+
+describe('a failed action in the dock', () => {
+  it("drops the message once the box is in another state", async () => {
+    box.fail = new Error('The GPU is busy')
+    const host = mount(dock())
+    await click(button('Hold image mode', seg()))
+    await click(foot('Hold image mode'))
+    expect(document.querySelector('[role="alert"]')!.textContent).toBe('The GPU is busy')
+
+    // The poll lands: a render has started. The old alert is about a state that is gone.
+    box.arbiter = envelope({ mode: 'img', phase: 'rendering' })
+    box.status = statusBody({ queue: { running: 1, pending: 0 } })
+    rerender(host, dock())
+    expect(byId('gpu-status-head')!.textContent).toBe('Rendering · editor prompt · 1 queued')
+    expect(document.querySelector('[role="alert"]')).toBeNull()
+  })
+
+  it("keeps the message while the same state counts on", async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2026, 9, 25, 12, 0, 0))
+    box.arbiter = envelope({ mode: 'img', phase: 'grace', restore_at: Date.now() / 1000 + 8 })
+    box.fail = new Error('The pin was refused')
+    mount(dock())
+    await click(byId('gpu-status-action-keep'))
+    await click(foot('Keep image mode on'))
+    expect(document.querySelector('[role="alert"]')!.textContent).toBe('The pin was refused')
+    act(() => {
+      vi.advanceTimersByTime(3000)
+    })
+    // The headline moved (8 s to 5 s); the state did not.
+    expect(byId('gpu-status-head')!.textContent).toBe('Image mode ends in 5 s')
+    expect(document.querySelector('[role="alert"]')!.textContent).toBe('The pin was refused')
+  })
+})
+
+describe('stop while a render runs', () => {
+  function Stop({ ctx }: { ctx: Json }) {
+    const actions = useStatusLineActions()
+    return (
+      <>
+        <button data-testid="stop" onClick={() => void actions.run('stop', ctx)}>
+          go
+        </button>
+        <ForceStopConfirm confirm={actions.confirm} />
+      </>
+    )
+  }
+
+  it('stop asks before forcing while a render runs', async () => {
+    mount(<Stop ctx={{ pinned: true, renderRunning: true }} />)
+    await click(byId('stop'))
+    // Nothing is sent before the answer, not even the unpin.
+    expect(calls).toEqual([])
+    expect(document.querySelector('.modal-shell')!.textContent).toMatch(/render/i)
+    await click(foot('Stop and cancel render'))
+    expect(calls).toEqual([
+      ['pin', { pinned: false }],
+      ['switchover', { mode: 'inference', force: true }],
+    ])
+    expect(document.querySelector('.modal-shell')).toBeNull()
+  })
+
+  it('sends the switchover only after the unpin has resolved', async () => {
+    let release!: () => void
+    box.pinGate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    mount(<Stop ctx={{ pinned: true, renderRunning: true }} />)
+    await click(byId('stop'))
+    await click(foot('Stop and cancel render'))
+    expect(calls).toEqual([['pin', { pinned: false }]])
+    // Time passes and the unpin is still out: the switchover waits for it.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    })
+    expect(calls).toEqual([['pin', { pinned: false }]])
+    await act(async () => {
+      release()
+    })
+    expect(calls).toEqual([
+      ['pin', { pinned: false }],
+      ['switchover', { mode: 'inference', force: true }],
+    ])
+  })
+
+  it('leaves everything as it was when the confirm is declined', async () => {
+    mount(<Stop ctx={{ pinned: true, renderRunning: true }} />)
+    await click(byId('stop'))
+    await click(foot('Cancel'))
+    expect(calls).toEqual([])
+    expect(document.querySelector('.modal-shell')).toBeNull()
+  })
+
+  it('does not ask, or force, when no render runs', async () => {
+    mount(<Stop ctx={{ pinned: false, renderRunning: false }} />)
+    await click(byId('stop'))
+    expect(document.querySelector('.modal-shell')).toBeNull()
+    expect(calls).toEqual([['switchover', { mode: 'inference' }]])
+  })
+})
+
+describe('gate refusal in the dock', () => {
+  const AT = new Date(2026, 9, 25, 14, 5).getTime() / 1000
+  const heads = () => Array.from(document.querySelectorAll('[data-testid="gpu-status-head"]')).map((el) => el.textContent)
+
+  it('dismiss hides a gate refusal and remembers it by timestamp', async () => {
+    box.status = statusBody({ gate_refusal: { at: AT, reason: 'ComfyUI queue is not hal0 <b>owned</b>' } })
+    mount(dock())
+    expect(byId('gpu-status-head')!.textContent).toBe('GPU gate refused a prompt · 14:05')
+    // The reason is text from another container: it stays text.
+    expect(byId('gpu-status-detail')!.textContent).toBe('ComfyUI queue is not hal0 <b>owned</b>')
+    expect(byId('gpu-status-detail')!.querySelector('b')).toBeNull()
+
+    await click(byId('gpu-status-action-dismiss'))
+    expect(byId('gpu-status-head')!.textContent).toBe('GPU · chat mode')
+    expect(window.localStorage.getItem(DISMISS_KEY)).toBe(String(AT))
+  })
+
+  it('stays dismissed after a remount, and shows a newer refusal again', async () => {
+    window.localStorage.setItem(DISMISS_KEY, String(AT))
+    box.status = statusBody({ gate_refusal: { at: AT, reason: 'old' } })
+    mount(dock())
+    expect(byId('gpu-status-head')!.textContent).toBe('GPU · chat mode')
+
+    box.status = statusBody({ gate_refusal: { at: AT + 60, reason: 'new' } })
+    mount(dock())
+    expect(heads()).toContain('GPU gate refused a prompt · 14:06')
+  })
+
+  it('renders, and dismisses for the session, without usable storage', async () => {
+    stubStorage({ getItem: blocked, setItem: blocked, removeItem: blocked })
+    box.status = statusBody({ gate_refusal: { at: AT + 600, reason: 'busy' } })
+    mount(dock())
+    expect(byId('gpu-status-head')!.textContent).toBe('GPU gate refused a prompt · 14:15')
+    await click(byId('gpu-status-action-dismiss'))
+    expect(byId('gpu-status-head')!.textContent).toBe('GPU · chat mode')
+  })
+
+  it('dismisses for the session when storage reads fine but cannot write', async () => {
+    stubStorage({ setItem: blocked })
+    box.status = statusBody({ gate_refusal: { at: AT + 1800, reason: 'busy' } })
+    mount(dock())
+    expect(byId('gpu-status-head')!.textContent).toBe('GPU gate refused a prompt · 14:35')
+    await click(byId('gpu-status-action-dismiss'))
+    // Nothing was stored, and it must not come straight back.
+    expect(window.localStorage.getItem(DISMISS_KEY)).toBeNull()
+    expect(byId('gpu-status-head')!.textContent).toBe('GPU · chat mode')
+
+    // A newer refusal still shows.
+    box.status = statusBody({ gate_refusal: { at: AT + 1860, reason: 'again' } })
+    mount(dock())
+    expect(heads()).toContain('GPU gate refused a prompt · 14:36')
+  })
+
+  it('has no Dismiss for the missing credential', () => {
+    box.status = statusBody({ gate: { state: 'no_credential', version_seen: null }, gate_refusal: { at: AT + 1200, reason: 'x' } })
+    mount(dock())
+    expect(seg().classList.contains('gpu-seg-err')).toBe(true)
+    expect(byId('gpu-status-action-dismiss')).toBeNull()
+  })
+})
+
+// ── the blocked-gate banner ──────────────────────────────────────────────────
+
+describe('the blocked-gate banner', () => {
+  it('blocked gate shows the top banner on every page and no dismiss', () => {
+    box.status = statusBody({ gate: { state: 'no_credential', version_seen: null } })
+    mount(<GpuGateBlockedBanner />)
+    const banner = byId('gpu-gate-blocked-banner')!
+    expect(banner).not.toBeNull()
+    expect(banner.querySelector('[role="alert"]')).not.toBeNull()
+    expect(banner.querySelectorAll('button')).toHaveLength(0)
+  })
+
+  it('no banner in chat or image mode', () => {
+    box.arbiter = envelope({ mode: 'img', pinned: true })
+    const host = mount(<GpuGateBlockedBanner />)
+    expect(document.querySelectorAll('[data-testid="gpu-gate-blocked-banner"]')).toHaveLength(0)
+    expect(host.textContent).toBe('')
+
+    box.arbiter = envelope()
+    rerender(host, <GpuGateBlockedBanner />)
+    expect(document.querySelectorAll('[data-testid="gpu-gate-blocked-banner"]')).toHaveLength(0)
   })
 })

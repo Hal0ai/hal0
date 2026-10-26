@@ -2,7 +2,7 @@
 //
 // The Image Gen Models tab: the catalog by task, each card's fit meter and install lifecycle,
 // the filters, the remove confirm, set-as-default and the first-run setup block. The hooks are
-// mocked at the module boundary (as image-files-tab.test.tsx and image-status-line.test.tsx do),
+// mocked at the module boundary (as image-files-tab.test.tsx and dock-gpu.test.tsx do),
 // so what is pinned is what the panel shows and what each button calls, not the polling.
 //
 // The panel renders inside the pane's `.comfy-page` wrapper (Task 6 provides it), so the tests

@@ -2,7 +2,7 @@
 //
 // The Image Gen pane's Engine tab: the engine card (state, container, gate, restart, logs, stop),
 // the editor card (workflow chips, the editor link and its off-box state), the queue card and
-// the GPU device card. The hooks are mocked at the module boundary, as image-status-line.test.tsx
+// the GPU device card. The hooks are mocked at the module boundary, as dock-gpu.test.tsx
 // does; the page's host comes from the real location, so the on-box rule runs for real.
 import React, { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
