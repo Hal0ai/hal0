@@ -127,7 +127,7 @@ only existed on the Slots page.
 
 ## References
 
-- PR (this change); ADR-0038 (image mode lasts only while an image renders);
+- #3110 (this change); ADR-0038 (image mode lasts only while an image renders);
   ADR-0040 (the gate's own credential).
 - `ui/src/dash/dock/Dock.jsx` (`dock`, `dock-toggle`, `dock-tab-events`,
   `dock-tab-gpu`, `dock-tab-downloads`, the streams and the `hal0:open-events`
