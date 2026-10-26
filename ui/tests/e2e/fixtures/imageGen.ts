@@ -94,6 +94,17 @@ export function arbiterEnvelope(arbiter: Body = {}, over: Body = {}): Body {
   }
 }
 
+/**
+ * The API's mode for an arbiter block, as the server reports it in `/status` `mode` and the
+ * `/arbiter` envelope (`api_mode`, src/hal0/api/routes/comfyui.py): `generation` only once image
+ * mode is entered and no switch or restore is running, so `inference` while a switch runs.
+ */
+export function apiMode(arbiter: Body): 'generation' | 'inference' | null {
+  if (arbiter.mode === 'llm') return 'inference'
+  if (arbiter.mode === 'img') return arbiter.switching ? 'inference' : 'generation'
+  return null
+}
+
 /** `GET /api/comfyui/status` with the engine up and idle. */
 export function imageStatus(over: Body = {}): Body {
   return {
@@ -223,7 +234,12 @@ export function sdxlLightning(over: Body = {}): Body {
     defaults: { steps: 8, cfg: 1 },
     approx_gb: 7.1,
     missing_gb: 7.1,
-    missing: ['checkpoints/sd_xl_base_1.0.safetensors'],
+    // Every component file: `<subdir>/<relpath>` of each (catalog.py).
+    missing: [
+      'checkpoints/sd_xl_base_1.0.safetensors',
+      'loras/sdxl_lightning_8step_lora.safetensors',
+      'vae/sdxl_vae_fp16_fix.safetensors',
+    ],
     ...over,
   })
 }
@@ -237,7 +253,7 @@ export function sd15(over: Body = {}): Body {
     est_seconds: 5,
     sizes: ['512x512', '512x768', '768x512'],
     notes: 'Pruned EMA-only checkpoint; runs on small GPUs. Quality drops above 768.',
-    defaults: { steps: 20, cfg: 8 },
+    defaults: { steps: 20, cfg: 7.0 },
     approx_gb: 4,
     missing_gb: 4,
     missing: ['checkpoints/v1-5-pruned-emaonly.safetensors'],
@@ -257,7 +273,12 @@ export function qwenLightning(over: Body = {}): Body {
     defaults: { steps: 4, cfg: 1 },
     approx_gb: 47.9,
     missing_gb: 47.9,
-    missing: ['diffusion_models/qwen_image_2512_bf16.safetensors'],
+    missing: [
+      'diffusion_models/qwen_image_2512_bf16.safetensors',
+      'text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors',
+      'vae/qwen_image_vae.safetensors',
+      'loras/Qwen-Image-2512-Lightning-4steps-V1.0-bf16.safetensors',
+    ],
     ...over,
   })
 }

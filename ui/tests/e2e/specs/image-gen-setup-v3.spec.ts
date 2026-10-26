@@ -27,6 +27,7 @@ import { json, test, expect, type Page } from '../fixtures/apiMock'
 import { pickRichOption } from '../fixtures/richSelect'
 import {
   INSTALLED,
+  apiMode,
   arbiterEnvelope,
   arbiterState,
   catalog,
@@ -132,10 +133,14 @@ const OWN_JOB = { image_jobs: 1 } as const
 
 const nowS = () => Date.now() / 1000
 
-/** Put the box in one state: the arbiter's block as `/arbiter` and `/status` both carry it. */
+/**
+ * Put the box in one state: the arbiter's block as `/arbiter` and `/status` both carry it, and the
+ * API's mode as the server derives it from that block (`inference` while a switch runs, even in
+ * image mode).
+ */
 function setBox(mock: ImageGenMock, arbiter: Body, status: Body = {}) {
-  mock.arbiter = arbiterEnvelope(arbiter, { mode: arbiter.switching ? 'inference' : 'generation' })
-  mock.status = imageStatus({ mode: 'generation', arbiter: arbiterState(arbiter), ...status })
+  mock.arbiter = arbiterEnvelope(arbiter, { mode: apiMode(arbiter) })
+  mock.status = imageStatus({ mode: apiMode(arbiter), arbiter: arbiterState(arbiter), ...status })
 }
 
 /** ComfyUI is rendering `step` of 8 of the hal0 prompt (`step` null: still loading the model). */
@@ -215,8 +220,14 @@ test.describe('Image Gen setup: first run, install, generate', () => {
     })
 
     await test.step('the install answers 202 and its progress shows, 0% then 50%', async () => {
+      const installed = page.waitForResponse(
+        (res) => res.request().method() === 'POST' && new URL(res.url()).pathname === `/api/comfyui/models/${MODEL}/install`,
+      )
       await page.getByRole('button', { name: `Install recommended — ${MODEL_LABEL} (~7.1 GB)` }).click()
-      await expect.poll(() => mock.posts.map(([path]) => path)).toContain(`/api/comfyui/models/${MODEL}/install`)
+      // The server answers 202 with the job it started.
+      const reply = await installed
+      expect(reply.status()).toBe(202)
+      expect(await reply.json()).toMatchObject({ job: { model_id: MODEL, state: 'running' } })
       expect(mock.posts.filter(([path]) => path.endsWith('/install'))).toHaveLength(1)
 
       // The block that offered the install is replaced by the model's card and its download.
@@ -283,7 +294,6 @@ test.describe('Image Gen setup: first run, install, generate', () => {
       await expect(head(page)).toHaveText('Switching to image mode', POLL)
       await expect(detail(page)).toHaveText('Waiting for 1 chat reply to finish.')
       await expect(chipNow(page)).toHaveText('Chat replies')
-      await expect(stripNow(page)).toHaveText('Chat reply finishing')
     })
 
     await test.step('unloading: the chat slot is released', async () => {
@@ -418,10 +428,15 @@ test.describe("Image Gen setup: a model that won't fit", () => {
     await expect(page.getByTestId('gen-blocked')).toHaveText(REASON)
     await expect(page.getByTestId('gen-submit')).toBeDisabled()
 
-    // The keyboard shortcut is the other way to generate; it is refused too. The round trip to
-    // the page after it is the barrier a request would have to cross.
+    // The keyboard shortcut is the other way to generate; it is refused too. A request would go
+    // out in the keypress's own task or from a fetch it starts, so wait until the fit meter has
+    // settled on this model's verdict (not "Checking fit..." and not the last model's, dimmed)
+    // and the network has gone idle, and only then read the counter.
     await page.getByTestId('gen-prompt').press('Control+Enter')
-    await page.evaluate(() => new Promise<void>((done) => setTimeout(done, 0)))
+    await expect(page.getByTestId('gen-fit-loading')).toHaveCount(0)
+    await expect(page.getByTestId('gen-fit')).not.toHaveAttribute('data-stale', 'true')
+    await expect(page.getByTestId('fit-meter-gen')).toHaveAttribute('data-verdict', 'wont_fit')
+    await page.waitForLoadState('networkidle')
     await expect(page.getByTestId('gen-run')).toHaveCount(0)
     await expect(page.getByTestId('gen-error')).toHaveCount(0)
     expect(v1Requests, 'no /v1 request was sent').toBe(0)

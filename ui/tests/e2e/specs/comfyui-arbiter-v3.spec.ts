@@ -349,7 +349,9 @@ test.describe('Services page ComfyUI row', () => {
     await expect(page.getByTestId('svcp-open-comfyui')).toBeEnabled()
     await expect(page.getByTestId('svcp-queue-comfyui')).toHaveCount(0)
     await expect(card).not.toContainText('Queue')
-    await page.waitForTimeout(500)
+    // The drawer asked ComfyUI for its queue once the card was up: let the network go idle, so a
+    // request that followed the render has been made, then read the list.
+    await page.waitForLoadState('networkidle')
     expect(direct).toEqual([])
   })
 })
