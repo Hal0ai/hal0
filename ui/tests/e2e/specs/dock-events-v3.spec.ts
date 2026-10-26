@@ -220,11 +220,6 @@ test.describe('Dock events tab', () => {
   })
 
   test('dock fits a 390 px viewport without horizontal scroll', async ({ page }) => {
-    // BLOCKED on a product defect, not a locator: src/dashboard.css `@media (max-width: 720px)`
-    // still carries `.footer { display: none; }` (since #235), which hides the whole dock on a
-    // phone and makes dock.css's own ≤ 640 px layout dead code. With the rule overridden this
-    // test passes (the dock fits, collapsed and expanded). Drop the fixme once the rule is gone.
-    test.fixme(true, 'dashboard.css hides .footer at <= 720px, so the dock is not on a phone')
     await page.setViewportSize({ width: 390, height: 800 })
     await page.goto('/#slots')
     await expect(page.getByTestId('dock')).toBeVisible()

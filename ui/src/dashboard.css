@@ -2613,8 +2613,7 @@ select.npu-sel {
   .settings-layout { grid-template-columns: 1fr; }
   .settings-nav { position: static; flex-direction: row; flex-wrap: wrap; overflow-x: auto; }
   .topbar { padding: 0 12px; gap: 10px; }
-  .footer { display: none; }
-  .app { grid-template-columns: 1fr; grid-template-rows: var(--topbar-h) 1fr; grid-template-areas: "topbar" "main"; }
+  .app { grid-template-columns: 1fr; grid-template-rows: var(--topbar-h) 1fr min-content; grid-template-areas: "topbar" "main" "footer"; }
   .log-row {
     grid-template-columns: 74px 52px 44px minmax(0, 1fr);
     grid-template-rows: auto auto;

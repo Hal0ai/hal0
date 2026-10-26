@@ -188,6 +188,22 @@ test.describe('Image Gen live wiring: Engine tab', () => {
     ])
   })
 
+  test('Stop image mode from an unpinned render asks first, and forces only after a yes', async ({ page }) => {
+    // Image mode is on and rendering, not pinned: the status line has no Stop, the GPU tab does.
+    const mock = rendering()
+    await routeImageGen(page, mock)
+    await gotoImageGen(page, 'engine')
+
+    const pane = await openGpuTab(page)
+    await expect(page.getByTestId('dock-gpu-segment').getByTestId('gpu-status-action-stop')).toHaveCount(0)
+    await pane.getByTestId('gpu-status-action-stop').click()
+    await page.getByRole('button', { name: 'Stop and cancel render' }).waitFor()
+    expect(mock.posts).toEqual([])
+    await page.getByRole('button', { name: 'Stop and cancel render' }).click()
+    await expect.poll(() => mock.posts.length).toBeGreaterThan(0)
+    expect(mock.posts).toEqual([['/api/comfyui/switchover', { mode: 'inference', force: true }]])
+  })
+
   test('a stopped engine says Generate still works, and offers no Stop', async ({ page }) => {
     await routeImageGen(
       page,

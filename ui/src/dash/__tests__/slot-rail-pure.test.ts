@@ -28,6 +28,7 @@ const row: RailRow = {
   toks: null,
   mem: '—',
   up: true,
+  configured: true,
 }
 
 describe('railGroup', () => {
@@ -106,10 +107,15 @@ describe('railCounts', () => {
         slot('c', 'gpu-vulkan', 'stopped'),
         slot('d', 'npu', 'warming'),
         slot('e', 'cpu', 'error'),
+        // Listed, but no model bound: not counted, as in the dock's slots fraction.
+        slot('f', 'gpu-vulkan', 'stopped', { model: '' }),
       ],
       [],
       false,
     )
+    expect(rows).toHaveLength(6)
+    expect(rows.find((r) => r.name === 'f')!.configured).toBe(false)
+    expect(rows.find((r) => r.name === 'a')!.configured).toBe(true)
     const c = railCounts(rows)
     expect(c.ready).toBe(2)
     expect(c.total).toBe(5)

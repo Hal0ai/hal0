@@ -120,6 +120,8 @@ describe('SlotRail', () => {
     box.memory = { gpu: null, render_free_gb: null }
     await mount()
     expect(row('agent').querySelector('.mdl')!.textContent).toBe('no model configured')
+    // Listed, but not counted: one configured slot, none ready.
+    expect(q('[data-testid="slot-rail-count"]')!.textContent).toBe('0 / 1 ready')
     expect(row('brain').querySelector('.sdot')!.classList.contains('paused')).toBe(true)
     expect(row('brain').querySelector('.st')!.textContent).toBe('paused')
     const foot = q('[data-testid="slot-rail-footer"]')!.textContent!

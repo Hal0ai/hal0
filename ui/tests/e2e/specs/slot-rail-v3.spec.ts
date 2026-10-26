@@ -4,20 +4,11 @@
  * dock's slots pip, and a row flash when the dock reports an event about a slot. The Image Gen
  * route has no sidebar at all.
  *
- * `/api/slots` is served from `window.HAL0_DATA.slots` in the forced-mock build, so the roster is
- * seeded there (`seedSlots`). The rail lists EVERY slot; the dock's slots pip counts the slots
- * with a model bound (useRuntimeRollup). They agree only when every slot has a model, so the
- * seed binds one to each.
+ * The default seed (`window.HAL0_DATA.slots`, from src/dash/data.jsx) is used as is. The rail LISTS every slot but counts the ones
+ * with a model bound, the same rule as the dock's slots fraction (useRuntimeRollup), so the two
+ * agree whether or not a slot is model-less.
  */
-const SLOTS = (MOCK_DATA.slots as any[]).filter((s) => !s._synthetic && (s.model || s.model_default))
-const NAMES = SLOTS.map((s) => s.name)
-
-test.beforeEach(async ({ page }) => {
-  await seedSlots(page, SLOTS)
-})
-
-import { test, expect, seedSlots } from '../fixtures/apiMock'
-import { MOCK_DATA } from '../fixtures/mock-data'
+import { test, expect } from '../fixtures/apiMock'
 
 const fraction = (text: string | null) => {
   const m = /(\d+)\s*\/\s*(\d+)\s*ready/.exec(text ?? '')
@@ -32,7 +23,10 @@ test.describe('Slot rail (#slots/inference)', () => {
     await expect(page.getByTestId('slot-rail-new')).toBeVisible()
     await expect(page.getByTestId('slot-rail-footer')).toBeVisible()
 
-    const names = NAMES
+    // Every seeded slot (the synthetic composite is not a lifecycle slot), model-bound or not.
+    const names: string[] = await page.evaluate(() =>
+      ((window as any).HAL0_DATA.slots as any[]).filter((s) => !s._synthetic).map((s) => s.name),
+    )
     expect(names.length).toBeGreaterThan(0)
     const rows = rail.getByTestId('slot-rail-row')
     await expect(rows).toHaveCount(names.length)
@@ -62,7 +56,7 @@ test.describe('Slot rail (#slots/inference)', () => {
 
   test('hal0:slot-event flashes the row', async ({ page }) => {
     await page.goto('/#slots/inference')
-    const name = NAMES[0]
+    const name = (await page.locator('[data-testid="slot-rail-row"]').first().getAttribute('data-slot'))!
     const row = page.locator(`[data-testid="slot-rail-row"][data-slot="${name}"]`)
     await expect(row).toBeVisible()
     await expect(row).not.toHaveClass(/\bflash\b/)

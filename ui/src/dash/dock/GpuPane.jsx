@@ -49,8 +49,13 @@ export function GpuPane({ gpu, actions }) {
   const buttons = view.actions.filter(
     (a) => !(a === 'open_editor' && !gpu.editorUrl) && !(a === 'cancel' && !gpu.ctx.onCancel),
   )
-  const extras = ['restart_engine', 'open_editor'].filter(
-    (a) => !view.actions.includes(a) && !(a === 'open_editor' && !gpu.editorUrl),
+  // Stop image mode: the status line offers it only while pinned, but image mode in any other
+  // state (grace, hand-off, rendering) has no other way out, so the tab adds it.
+  const extras = ['stop', 'restart_engine', 'open_editor'].filter(
+    (a) =>
+      !view.actions.includes(a) &&
+      !(a === 'open_editor' && !gpu.editorUrl) &&
+      !(a === 'stop' && !imageMode),
   )
   const actionButton = (a, cls) => (
     <button
@@ -108,6 +113,7 @@ export function GpuPane({ gpu, actions }) {
         <div className="gp-acts">
           {buttons.map((a, i) => actionButton(a, i === 0 ? primary(a) : `ghost ${primary(a)}`.trim()))}
           <span className="gp-sep" aria-hidden="true" />
+          {extras.includes('stop') && actionButton('stop', 'warn')}
           {extras.includes('restart_engine') && actionButton('restart_engine', 'ghost')}
           <button
             type="button"

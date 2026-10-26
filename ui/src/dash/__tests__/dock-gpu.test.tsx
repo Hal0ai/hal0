@@ -437,6 +437,35 @@ describe('the dock GPU tab', () => {
     }
   })
 
+  it('gpu tab offers Stop image mode whenever image mode is on', async () => {
+    // Rendering, not pinned: the status line has no Stop here, the tab adds one.
+    box.arbiter = envelope({ mode: 'img', phase: 'rendering', image_jobs: 1 })
+    mount(open())
+    await click(byId('dock-tab-gpu'))
+    const pane = byId('dock-gpu')!
+    const ids = Array.from(pane.querySelectorAll('.gp-acts button')).map((b) => b.getAttribute('data-testid'))
+    expect(ids).toContain('gpu-status-action-stop')
+    // After the separator, before restart.
+    expect(ids.indexOf('gpu-status-action-stop')).toBeLessThan(ids.indexOf('gpu-status-action-restart_engine'))
+    expect(ids.filter((id) => id === 'gpu-status-action-stop')).toHaveLength(1)
+    expect(byId('gpu-status-action-stop')!.className).toBe('btn sm warn')
+    // The collapsed segment stays as the status line has it.
+    expect(seg().querySelector('[data-testid="gpu-status-action-stop"]')).toBeNull()
+
+    // A render is running: Stop asks before forcing.
+    await click(byId('gpu-status-action-stop'))
+    expect(calls).toEqual([])
+    expect(document.querySelector('.modal-shell')!.textContent).toMatch(/render/i)
+    await click(foot('Stop and cancel render'))
+    expect(calls).toEqual([['switchover', { mode: 'inference', force: true }]])
+  })
+
+  it('gpu tab does not add Stop in chat mode', async () => {
+    mount(open())
+    await click(byId('dock-tab-gpu'))
+    expect(byId('dock-gpu')!.querySelector('[data-testid="gpu-status-action-stop"]')).toBeNull()
+  })
+
   it('gpu facts read mode, phase, gate and waiting chat', async () => {
     box.arbiter = envelope({ mode: 'img', pinned: true, phase: 'rendering', llm_waiters: { count: 2, oldest_s: 4 } })
     box.status = statusBody({ engine: 'running', gate: { state: 'stale', version_seen: '0' } })

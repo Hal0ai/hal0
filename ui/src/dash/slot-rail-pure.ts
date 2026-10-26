@@ -41,6 +41,8 @@ export interface RailRow {
   toks: number | null
   mem: string
   up: boolean
+  /** A model is bound (or defaulted). The counts leave the rest out, as the dock's rollup does. */
+  configured: boolean
 }
 
 // Serving first, then what is on its way up, then what the arbiter parked, then idle-but-loaded,
@@ -77,6 +79,7 @@ export function railRows(
       toks,
       mem: up ? memLabel(slot) : NO_MEM,
       up,
+      configured: !!(slot.model || slot.modelDefault),
     }
     return { row, index }
   })
@@ -90,7 +93,9 @@ export function railRows(
   return rows.map((r) => r.row)
 }
 
-/** `ready` is serving plus stale (loaded and healthy); `byGroup` counts the same rows as `up`. */
+/** `ready` is serving plus stale (loaded and healthy); `byGroup` counts the same rows as `up`. `total`
+ *  (and each group's) counts configured rows only, the dock's slots fraction; an unconfigured slot
+ *  is listed but never up. */
 export function railCounts(rows: readonly RailRow[]): {
   ready: number
   total: number
@@ -103,14 +108,18 @@ export function railCounts(rows: readonly RailRow[]): {
     cpu: { up: 0, total: 0 },
   }
   let ready = 0
+  let total = 0
   for (const r of rows) {
-    byGroup[r.group].total += 1
+    if (r.configured) {
+      byGroup[r.group].total += 1
+      total += 1
+    }
     if (r.up) {
       byGroup[r.group].up += 1
       ready += 1
     }
   }
-  return { ready, total: rows.length, byGroup }
+  return { ready, total, byGroup }
 }
 
 /** The text and tone of a row's state cell: `42 tok/s` while serving with a figure, the indicator's
