@@ -975,10 +975,14 @@ def test_overview_refresh_after_a_timeout_builds_the_real_thing(
     client_ready, monkeypatch, probe_calls
 ):
     real_gather = overview_route._gather_hermes
+    real_timeout = overview_route._BUILD_TIMEOUT_S
     _hang_gather(monkeypatch, [])
     assert client_ready.get("/api/agents/hermes/overview").json()["partial"] is True
 
+    # The real build gets the real budget: left at the hang's 0.05 s, a loaded
+    # runner times it out too and answers partial.
     monkeypatch.setattr(overview_route, "_gather_hermes", real_gather)
+    monkeypatch.setattr(overview_route, "_BUILD_TIMEOUT_S", real_timeout)
     body = client_ready.get("/api/agents/hermes/overview?refresh=1").json()
 
     assert "partial" not in body and body["phase"] == "ready"
