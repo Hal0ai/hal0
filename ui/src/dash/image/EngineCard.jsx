@@ -52,7 +52,7 @@ function useLatest(value) {
   return ref
 }
 
-function LogsModal({ open, onClose, container }) {
+export function LogsModal({ open, onClose, container }) {
   const logs = useComfyuiLogs(LOG_TAIL)
   const refetch = useLatest(logs.refetch)
   useEffect(() => {

@@ -18,6 +18,7 @@ import { useStatusLineActions } from '../image/useStatusLineActions'
 import { ForceStopConfirm, PinConfirm } from '../image/ImageStatusLine.jsx'
 import { useGpuStatus } from './useGpuStatus'
 import { GpuSegment } from './GpuSegment.jsx'
+import { GpuPane } from './GpuPane.jsx'
 import { _srcGroup, _srcHue, _shortTs, _svcPip, highlightFoot } from '../chrome.jsx'
 
 // ─── Dock (the global status footer) ───
@@ -50,6 +51,11 @@ export function Dock({ route, param, expanded = false, onToggle }) {
   useEffect(() => {
     if (!expanded) setFooterTab("journal");
   }, [expanded]);
+  // The GPU tab is hidden while there is nothing to show; an open one falls back to the events.
+  const gpuTabVisible = gpu.view != null;
+  useEffect(() => {
+    if (!gpuTabVisible && footerTab === "gpu") setFooterTab("journal");
+  }, [gpuTabVisible, footerTab]);
   // Auto-expand and switch to downloads on pull-started
   useEffect(() => {
     const onPullStarted = () => {
@@ -167,10 +173,18 @@ export function Dock({ route, param, expanded = false, onToggle }) {
       {expanded && (
         <>
           <div className="foot-tabs">
-            <button className={"foot-tab" + (footerTab === "journal" ? " active" : "")} onClick={() => setFooterTab("journal")}>journal</button>
-            <button className={"foot-tab" + (footerTab === "downloads" ? " active" : "")} onClick={() => setFooterTab("downloads")}>downloads</button>
+            <button className={"foot-tab" + (footerTab === "journal" ? " active" : "")} data-testid="dock-tab-events" onClick={() => setFooterTab("journal")}>events</button>
+            {gpu.view && (
+              <button className={"foot-tab" + (footerTab === "gpu" ? " active" : "")} data-testid="dock-tab-gpu" onClick={() => setFooterTab("gpu")}>
+                <span className={"dotc tone-" + gpu.view.tone} aria-hidden="true" />
+                gpu
+              </button>
+            )}
+            <button className={"foot-tab" + (footerTab === "downloads" ? " active" : "")} data-testid="dock-tab-downloads" onClick={() => setFooterTab("downloads")}>downloads</button>
           </div>
-          {footerTab !== "downloads" ? (
+          {footerTab === "gpu" && gpu.view ? (
+            <GpuPane gpu={gpu} actions={gpuActions} />
+          ) : footerTab !== "downloads" ? (
         <div className="foot-pane">
           <div className="foot-pane-h mono">
             <span>Live journal</span>

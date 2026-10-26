@@ -91,3 +91,74 @@
   .gpu-seg { flex: 1 1 100%; max-width: none; min-height: 46px; padding-left: 0; }
   .gpu-seg .acts { display: none; }
 }
+
+/* ─── GPU tab (the expanded dock's second pane) ───
+   Two columns: the line, its buttons and the cost on the left, the facts on the right. Tokens only. */
+.footer.expanded .foot-pane,
+.footer.expanded .gp,
+.footer.expanded .foot-downloads { height: min(300px, 45vh); max-height: none; }
+.gp {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  font-family: var(--jbm);
+}
+.gp-main,
+.gp-facts { min-width: 0; padding: 14px 18px; }
+.gp-facts { border-left: 1px solid var(--line); }
+.gp-main { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.gp-head { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--fg); }
+.gp-det { font-size: 11.5px; color: var(--fg-3); }
+.gp-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.gp-acts .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+.gp-acts .btn.warn { color: var(--warn); border-color: var(--warn); }
+.gp-sep { width: 1px; height: 16px; margin: 0 4px; background: var(--line-strong); }
+.gp-error { font-size: 11.5px; color: var(--err); }
+.gp-cost { font-size: 11px; color: var(--fg-4); }
+
+.gp-facts dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 7px 16px;
+  margin: 0;
+  align-items: baseline;
+}
+.gp-facts dt {
+  font-family: var(--jbm);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-4);
+}
+.gp-facts dd { margin: 0; min-width: 0; font-size: 11.5px; color: var(--fg); overflow-wrap: anywhere; }
+.gp-facts dd.warn { color: var(--warn); }
+.gp-facts dd.err { color: var(--err); }
+
+/* Slot pips: the footer's look, with a hollow one for a slot image mode has paused. */
+.gp-slot { display: inline-flex; align-items: center; gap: 5px; margin-right: 12px; }
+.gp-slot .pip { width: 7px; height: 7px; border-radius: 50%; background: var(--bg-4); border: 1px solid var(--line-strong); }
+.gp-slot .pip.serving { background: var(--ok); border-color: transparent; box-shadow: 0 0 6px var(--ok); }
+.gp-slot .pip.stale { background: var(--warn); border-color: transparent; box-shadow: 0 0 6px rgba(232, 185, 78, 0.45); }
+.gp-slot .pip.warming { background: var(--warn); border-color: transparent; box-shadow: 0 0 6px var(--warn); }
+.gp-slot .pip.error { background: var(--err); border-color: transparent; box-shadow: 0 0 6px var(--err); }
+.gp-slot .pip.offline { background: var(--bg-4); border-color: var(--line-strong); }
+.gp-slot .pip.paused { background: transparent; border-color: var(--info); }
+
+/* The tone dot: the GPU tab's own label and the pane's headline. */
+.dotc { display: inline-block; flex-shrink: 0; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: var(--fg-4); }
+.gp-head .dotc { margin-right: 0; width: 8px; height: 8px; }
+.dotc.tone-ok   { background: var(--ok); }
+.dotc.tone-img  { background: var(--info); }
+.dotc.tone-pin  { background: var(--accent); }
+.dotc.tone-warn { background: var(--warn); }
+.dotc.tone-err  { background: var(--err); }
+
+@media (max-width: 900px) {
+  .gp { grid-template-columns: minmax(0, 1fr); }
+  .gp-facts { border-left: 0; border-top: 1px solid var(--line); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .gp-slot .pip { animation: none; }
+}

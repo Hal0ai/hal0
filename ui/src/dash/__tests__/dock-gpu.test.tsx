@@ -106,6 +106,7 @@ vi.mock('@/api/hooks/useRuntimes', async (importOriginal) => ({
 const { Dock } = await import('../dock/Dock.jsx')
 const { clearDismissedRefusal } = await import('../image/useStatusLineActions')
 const { useImageRunStore } = await import('@/stores/useImageRunStore')
+const { resetGenerateStore } = await import('../image/generate-store')
 
 // ── fixtures ─────────────────────────────────────────────────────────────────
 
@@ -242,6 +243,7 @@ beforeEach(() => {
   box.statusUpdatedAt = undefined
   calls.length = 0
   useImageRunStore.setState({ run: null })
+  resetGenerateStore()
   clearDismissedRefusal()
   try {
     window.localStorage.clear()
@@ -390,5 +392,162 @@ describe('the dock GPU segment', () => {
     await click(button('Cancel', seg()))
     expect(cancel).toHaveBeenCalledTimes(1)
     expect(calls).toEqual([])
+  })
+})
+
+// ── the GPU tab ──────────────────────────────────────────────────────────────
+
+const open = () => <Dock route="slots" param="image" expanded={true} onToggle={() => {}} />
+const facts = () => byId('gpu-facts')!
+const factRow = (label: string) => {
+  const dt = Array.from(facts().querySelectorAll('dt')).find((el) => el.textContent === label)
+  expect(dt, `fact row ${label}`).toBeTruthy()
+  return dt!.nextElementSibling as HTMLElement
+}
+
+describe('the dock GPU tab', () => {
+  it('gpu tab shows all actions plus restart, logs and editor', async () => {
+    box.urls = { comfyui: 'https://comfyui.box', comfyui_public: true }
+    mount(open())
+    // The tab strip: events, gpu (with a tone dot), downloads.
+    expect(byId('dock-tab-events')!.textContent).toBe('events')
+    expect(byId('dock-tab-downloads')!.textContent).toBe('downloads')
+    expect(byId('dock-tab-gpu')!.querySelector('.dotc.tone-ok')).not.toBeNull()
+    await click(byId('dock-tab-gpu'))
+    {
+      const pane = byId('dock-gpu')!
+      expect(pane.classList.contains('gp')).toBe(true)
+      const ids = Array.from(pane.querySelectorAll('.gp-acts button')).map((b) => b.getAttribute('data-testid'))
+      expect(ids).toEqual([
+        'gpu-status-action-hold',
+        'gpu-status-action-restart_engine',
+        'gpu-status-logs',
+        'gpu-status-action-open_editor',
+      ])
+      expect(byId('gpu-status-action-hold')!.className).toBe('btn sm primary')
+      expect(pane.querySelector('.gp-sep')).not.toBeNull()
+      // The pane adds no live region: the segment's is the only one.
+      expect(Array.from(byId('dock')!.querySelectorAll('[aria-live]'))).toHaveLength(1)
+    }
+  })
+
+  it('gpu facts read mode, phase, gate and waiting chat', async () => {
+    box.arbiter = envelope({ mode: 'img', pinned: true, phase: 'rendering', llm_waiters: { count: 2, oldest_s: 4 } })
+    box.status = statusBody({ engine: 'running', gate: { state: 'stale', version_seen: '0' } })
+    mount(open())
+    await click(byId('dock-tab-gpu'))
+    const text = facts().textContent!
+    expect(text).toContain('image · pinned')
+    expect(text).toContain('2 requests')
+    expect(factRow('mode').textContent).toBe('image · pinned')
+    expect(factRow('phase').textContent).toBe('rendering')
+    expect(factRow('engine').textContent).toBe('running · gate 0')
+    expect(factRow('engine').classList.contains('warn')).toBe(true)
+    expect(factRow('chat waiting').textContent).toBe('2 requests · cap 2:00')
+    expect(factRow('chat waiting').classList.contains('warn')).toBe(true)
+    expect(factRow('queue').textContent).toBe('0 running · 0 waiting')
+    // brain 20.2 + coder 9.1 freed from the 96 GB pool (40 used).
+    expect(factRow('gpu pool').textContent).toBe('56 GB free of 96 · 29.3 GB freed')
+    expect(byId('dock-gpu')!.querySelector('.gp-cost')!.textContent).toBe(
+      'Image mode frees 29.3 GB of the GPU pool. Paused slots reload about 10 s after the last image unless pinned.',
+    )
+  })
+
+  it('gpu facts list the slots, paused ones hollow while image mode is on', async () => {
+    box.arbiter = envelope({ mode: 'img', phase: 'rendering' })
+    box.slots = [
+      { name: 'brain', model: 'm1', state: 'ready' },
+      { name: 'coder', model: 'm2', state: 'ready' },
+      { name: 'spare', model: 'm3', state: 'ready' },
+      { name: 'empty' },
+    ]
+    mount(open())
+    await click(byId('dock-tab-gpu'))
+    const slots = Array.from(factRow('slots').querySelectorAll('.gp-slot'))
+    expect(slots.map((el) => el.textContent)).toEqual(['brain', 'coder', 'spare'])
+    expect(slots.map((el) => el.querySelector('.pip')!.className)).toEqual(['pip paused', 'pip paused', 'pip stale'])
+  })
+
+  it('hides the gpu tab when there is nothing to show', () => {
+    box.memory = memoryBody(null)
+    box.models = { models: [], engine: { available: false, reason: 'No ROCm lane' }, store: { free_gb: 1, path: '/m' } }
+    mount(open())
+    expect(document.querySelectorAll('[data-testid="dock-tab-gpu"]')).toHaveLength(0)
+    expect(byId('dock-tab-events')).not.toBeNull()
+  })
+
+  it('restart engine calls restart', async () => {
+    box.status = statusBody({ gate: { state: 'stale', version_seen: '0' } })
+    mount(open())
+    await click(byId('dock-tab-gpu'))
+    await click(byId('gpu-status-action-restart_engine'))
+    expect(calls).toEqual([['restart', undefined]])
+    // The stale gate is also the headline's own first action: the extras do not repeat it.
+    expect(byId('dock-gpu')!.querySelectorAll('[data-testid="gpu-status-action-restart_engine"]')).toHaveLength(1)
+  })
+
+  it('draws the render progress bar and the elapsed time', async () => {
+    box.arbiter = envelope({ mode: 'img', phase: 'rendering' })
+    box.status = statusBody({
+      queue: { running: 1, pending: 0 },
+      progress: { model: 'flux-dev', step: 5, total: 20, node: '9', elapsed_s: 72, prompt_id: 'p' },
+    })
+    mount(open())
+    await click(byId('dock-tab-gpu'))
+    const pane = byId('dock-gpu')!
+    const bar = pane.querySelector('[role="progressbar"]') as HTMLElement
+    expect(bar.getAttribute('aria-valuenow')).toBe('25')
+    expect(byId('image-status-elapsed')!.textContent).toMatch(/^1:1[2-4]$/)
+  })
+
+  it('shows a failed action in the pane as an alert', async () => {
+    box.fail = new Error('Restart refused')
+    box.status = statusBody({ gate: { state: 'stale', version_seen: '0' } })
+    mount(open())
+    await click(byId('dock-tab-gpu'))
+    await click(byId('gpu-status-action-restart_engine'))
+    const err = byId('dock-gpu')!.querySelector('.gp-error')!
+    expect(err.getAttribute('role')).toBe('alert')
+    expect(err.textContent).toBe('Restart refused')
+  })
+
+  it('clicking the segment opens the dock on the gpu tab', async () => {
+    const onToggle = vi.fn()
+    const host = mount(<Dock route="slots" param="image" expanded={false} onToggle={onToggle} />)
+    await click(byId('gpu-status-open'))
+    expect(onToggle).toHaveBeenCalledTimes(1)
+    rerender(host, <Dock route="slots" param="image" expanded={true} onToggle={onToggle} />)
+    expect(byId('dock-gpu')).not.toBeNull()
+    expect(byId('dock-tab-gpu')!.classList.contains('active')).toBe(true)
+  })
+
+  it('falls back to the events tab when the gpu view goes away', async () => {
+    const host = mount(open())
+    await click(byId('dock-tab-gpu'))
+    expect(byId('dock-gpu')).not.toBeNull()
+    box.models = { models: [], engine: { available: false, reason: 'gone' }, store: { free_gb: 1, path: '/m' } }
+    rerender(host, open())
+    expect(byId('dock-gpu')).toBeNull()
+    expect(byId('dock-tab-events')!.classList.contains('active')).toBe(true)
+    expect(document.querySelector('.foot-pane')).not.toBeNull()
+  })
+
+  it('last image row reads — without a render in this browser', async () => {
+    mount(open())
+    await click(byId('dock-tab-gpu'))
+    expect(factRow('last image · this browser').textContent).toBe('—')
+  })
+
+  it("last image row reads this browser's newest result", async () => {
+    const generate = await import('@/api/hooks/useComfyui')
+    vi.spyOn(generate, 'generateImage').mockResolvedValue({
+      data: [{ url: '/api/images/cache/a.png' }],
+      _hal0: { model: 'flux-dev', meta: { seed: 7, width: 1024, height: 768 } },
+    } as never)
+    const { startRun } = await import('../image/generate-store')
+    await startRun({ prompt: 'a fox', model: 'flux-dev', size: '1024x768' } as never)
+    mount(open())
+    await click(byId('dock-tab-gpu'))
+    expect(factRow('last image · this browser').textContent).toMatch(/^\d\d:\d\d:\d\d · flux-dev · 1024x768$/)
   })
 })
