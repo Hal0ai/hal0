@@ -205,7 +205,9 @@ def test_upgrade_from_config_without_network_section(tmp_path: Path) -> None:
     assert raw["network"] == {
         "public_url": "https://hal0.example.com",
         "extra_origins": ["http://box.lan:8080"],
+        "comfyui_listen": "lan",
     }
+
     assert raw["telemetry"]["channel"] == "preview"
     reloaded = load_hal0_config(target)
     assert reloaded.network.extra_origins == ["http://box.lan:8080"]
@@ -219,3 +221,56 @@ def test_unset_public_url_not_written(tmp_path: Path) -> None:
     raw = tomllib.loads(target.read_text(encoding="utf-8"))
     assert "public_url" not in raw.get("network", {})
     assert load_hal0_config(target).network.public_url is None
+
+
+# ── comfyui_listen (ADR-0041) ─────────────────────────────────────────────
+
+
+def test_comfyui_listen_defaults_to_lan() -> None:
+    """A box with no ``[network]`` table, or one without the key, puts the editor on the LAN."""
+    assert NetworkConfig().comfyui_listen == "lan"
+    assert Hal0Config().network.comfyui_listen == "lan"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("lan", "lan"), ("loopback", "loopback"), (" LAN ", "lan"), ("Loopback", "loopback")],
+)
+def test_comfyui_listen_accepts_the_two_modes(raw: str, expected: str) -> None:
+    assert NetworkConfig(comfyui_listen=raw).comfyui_listen == expected
+
+
+@pytest.mark.parametrize("raw", ["", "0.0.0.0", "127.0.0.1", "yes", 1, None])
+def test_comfyui_listen_rejects_anything_else(raw: object) -> None:
+    with pytest.raises(pydantic.ValidationError, match="comfyui_listen"):
+        NetworkConfig(comfyui_listen=raw)  # type: ignore[arg-type]
+
+
+def test_comfyui_listen_round_trips_through_hal0_toml(tmp_path: Path) -> None:
+    path = tmp_path / "hal0.toml"
+    path.write_text('[network]\ncomfyui_listen = "loopback"\n', encoding="utf-8")
+    cfg = load_hal0_config(path)
+    assert cfg.network.comfyui_listen == "loopback"
+    save_hal0_config(cfg, path)
+    assert (
+        tomllib.loads(path.read_text(encoding="utf-8"))["network"]["comfyui_listen"] == "loopback"
+    )
+
+
+def test_reach_reads_the_knob_and_fails_soft_to_lan(monkeypatch) -> None:
+    """``hal0.comfyui.reach`` is the one reader; a config that cannot load means LAN, the default."""
+    from hal0.comfyui import reach
+
+    monkeypatch.setattr(
+        "hal0.config.loader.load_hal0_config",
+        lambda *a, **k: Hal0Config(network=NetworkConfig(comfyui_listen="loopback")),
+    )
+    assert reach.comfyui_listen() == "loopback"
+    assert reach.editor_on_lan() is False
+
+    def boom(*a, **k):
+        raise OSError("no config")
+
+    monkeypatch.setattr("hal0.config.loader.load_hal0_config", boom)
+    assert reach.comfyui_listen() == "lan"
+    assert reach.editor_on_lan() is True

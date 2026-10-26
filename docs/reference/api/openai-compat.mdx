@@ -134,7 +134,8 @@ Request (subset honored): `{"model": <id>, "prompt": <required>, "n"?, "size"?, 
 |---|---|---|
 | 404 | `image.model_unknown` | Neither a catalog id nor a `ckpt/…` id that `GET /api/comfyui/files` lists as `api_id`, for example `Flux-2-Klein-9B-GGUF` or `sd-turbo`. `error.details.available` lists the ids that work now. |
 | 409 | `image.model_not_installed` | A renderable catalog model whose weights are not all on disk. `error.details` carries `install` (`POST /api/comfyui/models/<id>/install`) and `missing_gb`, the GB still to download (1 GB is 2^30 bytes, as in the memory budget). |
-| 422 | `image.model_not_renderable` | A video, edit or upscale catalog model. Open it in the ComfyUI editor, which listens on the box's loopback (port 8188; reach it on the box itself or through an SSH tunnel) and which needs a ROCm lane on the host. |
+| 422 | `image.model_not_renderable` | A video, edit or upscale catalog model. Open it in the ComfyUI editor (port 8188 on the box; the dashboard's Engine tab links it), which needs a ROCm lane on the host. |
+
 | 422 | `image.model_required` | No `model` in the request and no model selected for `img`. |
 | 422 | `image.invalid_size` | `size` is present and is not a string (`null` and `""` mean no size). `error.details.size_type` names the type sent. A string that does not read as `WxH` is not an error: the render falls back to its default size. |
 | 422 | `image.wont_fit` | The model at the size the render will use does not fit this box's GPU pool or RAM, judged before the GPU arbiter unloads any slot. `error.details` carries `need`, `render_free_gb`, `ram_free_gb`, `model` and `size`. `extra_body.hal0_skip_fit_check: true` skips the check. See the [Image readiness API reference](/docs/reference/api/image-readiness/). |

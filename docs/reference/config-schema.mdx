@@ -231,13 +231,17 @@ disable rerouting, say so out loud: `off`, `none` or `disabled`.
 
 `extra="forbid"`. Browser origins added on top of the installer-managed
 `HAL0_ALLOWED_ORIGINS` for the REST and WebSocket origin checks, read live on
-the next request. The bind host, port and hostname stay in `api.env`. See
-[Allow the public URL](/docs/operate/auth#allow-the-public-url).
+the next request, plus where ComfyUI's web UI answers. The bind host, port and
+hostname stay in `api.env`. See
+[Allow the public URL](/docs/operate/auth#allow-the-public-url) and
+[Reaching the editor](/docs/guides/generate-images#reaching-the-editor).
+
 
 | Key | Type | Default | Constraints |
 |---|---|---|---|
 | `public_url` | str \| null | `null` (no reverse proxy) | absolute `http`/`https` URL; no user info, query or fragment; stored with a lower-case host, no default port and no trailing slash. An empty string means unset. The host is a DNS name (punycode for an internationalised name), an IPv4 address or a bracketed IPv6 address; the path may hold only letters, digits and `. _ ~ / % -`. Its origin joins the allowlist |
 | `extra_origins` | list[str] | `[]` | each `scheme://host[:port]` with `http`/`https` and no path, query or fragment; the host follows the `public_url` rules; stored without a trailing slash or default port, deduplicated. `hal0 network origins add\|remove` and the Settings page edit it in place on the server (`POST /api/settings/network`) |
+| `comfyui_listen` | `"lan"` \| `"loopback"` | `"lan"` | where ComfyUI's web UI (the `img` slot, `:8188`) answers. `"lan"` binds the LAN so other machines reach `http://<host>:8188` and the Discovery (mDNS) card can announce it; ComfyUI has no sign-in of its own. `"loopback"` fences the port to `127.0.0.1` like every other slot (the box itself, an SSH tunnel, or `HAL0_COMFYUI_PUBLIC_URL`). Case-insensitive, trimmed. Applies at the next `hal0 slot restart img` ([ADR-0041](/docs/adr/0041-the-comfyui-editor-answers-on-the-lan)) |
 
 ### `[realtime]`
 

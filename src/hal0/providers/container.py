@@ -527,8 +527,10 @@ def _loopback_fence_command(command: list[str]) -> list[str]:
     Both the split-token and embedded-in-a-shell-string forms (and the inline
     ``--host=0.0.0.0`` form) are rewritten. hal0-api, sharing the CT netns,
     still reaches the slot at ``127.0.0.1:<port>`` — dispatch is unchanged.
-    Bridge-mode plans never call this.
+    Bridge-mode plans never call this, and neither does a plan with
+    ``lan_bind=True`` (ComfyUI's editor on the LAN, ADR-0041).
     """
+
     out: list[str] = []
     i = 0
     n = len(command)
@@ -885,14 +887,18 @@ def _render_quadlet_from_plan(
     if plan.command:
         # host-net LAN fence (coupled to Network=host above): with no
         # PublishPort to pin the port to loopback, the process bind IS the
-        # fence — flip 0.0.0.0 → 127.0.0.1 for EVERY backend so a host-net plan
-        # can never render a 0.0.0.0 bind. Bridge mode keeps 0.0.0.0 (the
-        # 127.0.0.1 PublishPort pins it). See podman-unprivileged-findings.md.
+        # fence — flip 0.0.0.0 → 127.0.0.1 for every backend so a host-net plan
+        # never renders a 0.0.0.0 bind by accident. Bridge mode keeps 0.0.0.0
+        # (the 127.0.0.1 PublishPort pins it). See podman-unprivileged-findings.md.
+        # The one deliberate exception is a plan that asks for the LAN
+        # (``plan.lan_bind``): ComfyUI's web UI under ``[network].comfyui_listen
+        # = "lan"`` (ADR-0041). Every LLM/TTS/STT slot leaves it False.
         command = (
             _loopback_fence_command(plan.command)
-            if effective_network_mode == "host"
+            if effective_network_mode == "host" and not plan.lan_bind
             else plan.command
         )
+
         lines.append("Exec=" + " ".join(shlex.quote(t) for t in command))
 
     # Restart=always lets systemd own crash recovery (the old hand-rendered

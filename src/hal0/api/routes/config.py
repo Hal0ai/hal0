@@ -23,6 +23,7 @@ from pydantic import ValidationError
 
 from hal0.api._redact import redact_config
 from hal0.api.middleware.error_codes import Hal0Error
+from hal0.comfyui.reach import editor_on_lan
 from hal0.config.loader import hal0_config_txn, load_hal0_config
 from hal0.config.schema import ModelsConfig
 from hal0.registry.discover import scan_and_register
@@ -52,13 +53,15 @@ def _validation_error_details(exc: ValidationError) -> dict[str, str]:
 # /etc/hal0/api.env; OpenWebUI's port is fixed at 3001 in the unit.
 _DEFAULT_API_PORT = 8080
 _OPENWEBUI_PORT = 3001
-# ComfyUI's own web UI is :8188 on the runtime host's loopback (the img slot's
-# container shares the host network and binds 127.0.0.1; see the loopback fence
-# in providers/container.py), so unlike OpenWebUI it answers on the box itself or
-# through an SSH tunnel, not on the LAN. The ``http://<host>:8188`` fallback below
-# is the request host plus that port, and says nothing about whether it answers
-# from the caller's machine; HAL0_COMFYUI_PUBLIC_URL declares a URL that does.
+# ComfyUI's own web UI is :8188 on the runtime host. The img slot's container
+# shares the host network; it binds the LAN under [network].comfyui_listen =
+# "lan" (the default, ADR-0041) and 127.0.0.1 under "loopback" (the fence in
+# providers/container.py). The ``http://<host>:8188`` fallback below is the
+# request host plus that port: it answers from other machines in the first case
+# and on the box itself alone in the second (``comfyui_lan`` tells the dashboard
+# which); HAL0_COMFYUI_PUBLIC_URL declares a URL that answers regardless.
 _COMFYUI_PORT = 8188
+
 
 _OPENWEBUI_UNIT = "hal0-openwebui.service"
 
@@ -162,11 +165,13 @@ def _comfyui_link(request: Request) -> str:
     blocked by the browser as mixed content, so the workflow links appear
     dead. Without the env var we fall back to ``http://<host>:8188`` on the
     request host (the port-stripped forwarded host behind a proxy). That link
-    works only where ComfyUI's loopback is: a browser on the box itself, or one
-    that tunnels port 8188 to it. ComfyUI does not listen on the LAN, so from
-    another machine the fallback is dead; ``comfyui_public`` in the response
-    lets the dashboard tell it from a declared URL.
+    answers from other machines while ComfyUI binds the LAN
+    (``[network].comfyui_listen = "lan"``, the default; ``comfyui_lan`` in the
+    response). Under ``"loopback"`` it works only where ComfyUI's loopback is:
+    a browser on the box itself, or one that tunnels port 8188 to it; the
+    dashboard then opens only a declared URL (``comfyui_public``).
     """
+
     public = _comfyui_public_url()
     if public:
         return public
@@ -192,13 +197,17 @@ async def get_urls(request: Request) -> dict[str, object]:
           "hermes_enabled":    true | false,
           "comfyui":           "http://<host>:8188" | "https://comfyui.<host>",
           "comfyui_public":    true | false,
+          "comfyui_lan":       true | false,
         }
 
     ``comfyui_public`` is true only when ``HAL0_COMFYUI_PUBLIC_URL`` is set, that
-    is, when ``comfyui`` is a URL the operator declared. The ``http://<host>:8188``
-    default is only the request host plus ComfyUI's port, so it says nothing
-    about whether anything answers there from the caller's machine; the dashboard
-    uses the flag to tell the two apart.
+    is, when ``comfyui`` is a URL the operator declared. ``comfyui_lan`` is true
+    while ComfyUI's web UI binds the LAN (``[network].comfyui_listen = "lan"``,
+    the default), so the ``http://<host>:8188`` fallback answers from other
+    machines. Under ``"loopback"`` that fallback is only the request host plus
+    ComfyUI's port and answers on the box itself alone; the dashboard uses the
+    two flags to decide whether to open the link (ADR-0041).
+
 
     ``HAL0_OPENWEBUI_PUBLIC_URL`` (set in /etc/hal0/api.env) wins
     whenever it's defined — it's how a reverse-proxy deploy declares the
@@ -229,6 +238,7 @@ async def get_urls(request: Request) -> dict[str, object]:
     enabled = await _openwebui_is_active()
     comfyui = _comfyui_link(request)
     comfyui_public = bool(_comfyui_public_url())
+    comfyui_lan = editor_on_lan()
 
     if public:
         if _behind_proxy(request):
@@ -245,6 +255,7 @@ async def get_urls(request: Request) -> dict[str, object]:
             "hermes_enabled": bool(hermes),
             "comfyui": comfyui,
             "comfyui_public": comfyui_public,
+            "comfyui_lan": comfyui_lan,
         }
 
     if _behind_proxy(request):
@@ -259,6 +270,7 @@ async def get_urls(request: Request) -> dict[str, object]:
             "hermes_enabled": bool(hermes),
             "comfyui": comfyui,
             "comfyui_public": comfyui_public,
+            "comfyui_lan": comfyui_lan,
         }
     return {
         "api": f"http://{host}:{_api_port()}",
@@ -268,6 +280,7 @@ async def get_urls(request: Request) -> dict[str, object]:
         "hermes_enabled": bool(hermes),
         "comfyui": comfyui,
         "comfyui_public": comfyui_public,
+        "comfyui_lan": comfyui_lan,
     }
 
 

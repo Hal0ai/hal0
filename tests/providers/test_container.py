@@ -1926,6 +1926,34 @@ class TestHostNetLoopbackFence:
         assert "0.0.0.0" not in unit
         assert "--listen 127.0.0.1" in _exec_line(unit)
 
+    # ── ADR-0041: a plan that asks for the LAN keeps its bind under host net ─
+    def test_lan_bind_plan_keeps_zero_bind_under_host_net(self) -> None:
+        """``lan_bind=True`` is the one deliberate exception: ComfyUI's editor
+        under ``[network].comfyui_listen = "lan"`` renders ``--listen 0.0.0.0``
+        on a host-net plan so other machines reach ``<host>:8188``."""
+        payload = "cd /opt/ComfyUI && exec python main.py --listen 0.0.0.0 --port 8188 -fa"
+        plan = RuntimeLaunchPlan(
+            image="comfy:latest",
+            command=["bash", "-lc", payload],
+            port=8188,
+            network_mode="host",
+            lan_bind=True,
+        )
+        unit = _render_quadlet_from_plan("img", plan)
+        assert "Network=host" in unit.splitlines()
+        assert "--listen 0.0.0.0" in _exec_line(unit)
+        assert "127.0.0.1" not in _exec_line(unit)
+        # Still host net: no PublishPort line to widen by mistake.
+        assert not any(ln.startswith("PublishPort=") for ln in unit.splitlines())
+
+    def test_lan_bind_defaults_false_so_every_other_slot_stays_fenced(self) -> None:
+        """No provider but ComfyUI sets ``lan_bind``; the default keeps the invariant."""
+        assert RuntimeLaunchPlan(image="i", command=[]).lan_bind is False
+        plan = self._llama_plan(network_mode="host")
+        assert plan.lan_bind is False
+        unit = _render_quadlet_from_plan("slot", plan)
+        assert "0.0.0.0" not in unit
+
 
 class TestLoopbackFenceCommand:
     """Unit coverage for the fence helper across every bind-flag shape."""

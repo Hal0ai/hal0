@@ -219,12 +219,33 @@ def test_urls_comfyui_behind_proxy_without_env_uses_port_8188(client: TestClient
 _PROXY_HEADERS = {"x-forwarded-host": "hal0.example.com", "x-forwarded-proto": "https"}
 
 
+def test_urls_comfyui_lan_follows_the_listen_knob(monkeypatch, client: TestClient) -> None:
+    """``comfyui_lan`` says whether the derived ``http://<host>:8188`` answers off the box.
+
+    ADR-0041: it is true under ``[network].comfyui_listen = "lan"`` (the default) and false under
+    ``"loopback"``, in every response shape, and independent of ``comfyui_public``.
+    """
+    monkeypatch.delenv("HAL0_COMFYUI_PUBLIC_URL", raising=False)
+    monkeypatch.delenv("HAL0_OPENWEBUI_PUBLIC_URL", raising=False)
+    for mode, expected in (("lan", True), ("loopback", False)):
+        monkeypatch.setattr("hal0.comfyui.reach.comfyui_listen", lambda m=mode: m)
+        for headers in ({"host": "hal0-test.lan:8080"}, _PROXY_HEADERS):
+            body = client.get("/api/config/urls", headers=headers).json()
+            assert body["comfyui_lan"] is expected, (mode, body)
+            assert body["comfyui_public"] is False, body
+        monkeypatch.setenv("HAL0_OPENWEBUI_PUBLIC_URL", "https://chat.example.com")
+        body = client.get("/api/config/urls", headers={"host": "hal0-test.lan:8080"}).json()
+        assert body["comfyui_lan"] is expected, (mode, body)
+        monkeypatch.delenv("HAL0_OPENWEBUI_PUBLIC_URL", raising=False)
+
+
 def test_urls_comfyui_public_false_without_env(monkeypatch, client: TestClient) -> None:
     """``comfyui_public`` is false while the link is only the one derived from the request host.
 
-    ComfyUI listens on the box's loopback, so that derived link does not answer from another
+    Under ``[network].comfyui_listen = "loopback"`` that derived link does not answer from another
     machine. The flag is how the dashboard tells it from a URL the operator declared.
     """
+
     monkeypatch.delenv("HAL0_COMFYUI_PUBLIC_URL", raising=False)
     monkeypatch.delenv("HAL0_OPENWEBUI_PUBLIC_URL", raising=False)
     for headers in ({"host": "hal0-test.lan:8080"}, _PROXY_HEADERS):

@@ -1,4 +1,6 @@
-// The Engine tab's engine card: what the ComfyUI engine is doing, where it runs and listens, the
+// The Engine tab's engine card: what the ComfyUI engine is doing, where it runs and listens (the
+// LAN by default, or the box's loopback under [network].comfyui_listen = "loopback"), the
+
 // state of its GPU gate, and the buttons that act on it (Restart engine, Logs, Stop image mode).
 //
 // Restart and Stop are the status line's own actions (useStatusLineActions): the calls, the
@@ -7,6 +9,8 @@ import { useEffect, useRef, useState } from 'react'
 import { useComfyuiLogs } from '@/api/hooks/useComfyui'
 import { Modal } from '@/dash/primitives.jsx'
 import { EDITOR_PORT } from './editor-reach'
+import { useEditorAccess } from './useEditorAccess'
+
 import {
   STOPPED_BODY,
   STOPPED_HEAD,
@@ -149,6 +153,10 @@ function UnreachableNotice({ active }) {
  */
 export function EngineCard({ status, env, visible = true }) {
   const [logsOpen, setLogsOpen] = useState(false)
+  // Where the editor answers: the LAN ([network].comfyui_listen = "lan") or the box's loopback.
+  const access = useEditorAccess()
+  const pageHost = typeof window === 'undefined' ? '' : window.location.hostname
+
   const arbiter = env?.arbiter ?? null
   const actions = useStatusLineActions({ resetKey: `${status?.engine ?? ''}|${arbiter?.mode ?? ''}` })
   const ctx = actionFacts(env, status)
@@ -223,15 +231,25 @@ export function EngineCard({ status, env, visible = true }) {
               )}
               <div className="ie-row" data-testid="engine-row-listen">
                 <dt>Network</dt>
-                <dd>listens on loopback</dd>
+                <dd>{access.lan ? 'listens on the LAN' : 'listens on loopback'}</dd>
               </div>
               <div className="ie-row" data-testid="engine-row-editor">
                 <dt>Editor</dt>
                 <dd>
-                  <code>127.0.0.1:{EDITOR_PORT}</code>
-                  <span className="ie-dim"> · on the box itself, or through an SSH tunnel</span>
+                  {access.lan ? (
+                    <>
+                      <code>{pageHost}:{EDITOR_PORT}</code>
+                      <span className="ie-dim"> · from any machine on your network</span>
+                    </>
+                  ) : (
+                    <>
+                      <code>127.0.0.1:{EDITOR_PORT}</code>
+                      <span className="ie-dim"> · on the box itself, or through an SSH tunnel</span>
+                    </>
+                  )}
                 </dd>
               </div>
+
               {gate && (
                 <div className="ie-row" data-testid="engine-row-gate" data-gate-state={status.gate.state}>
                   <dt>GPU gate</dt>

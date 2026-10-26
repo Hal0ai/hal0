@@ -110,9 +110,11 @@ services exist. Each card shows:
   deliberate stop (grey, "stopped — starts on demand") from a crash (red,
   "crashed — systemd unit failed");
 - the systemd unit, browser URL (when one exists — Hermes and Hindsight are
-  loopback-only; so is ComfyUI, whose link opens from a page on the box itself
-  and, anywhere else, is disabled beside an SSH tunnel command), and mDNS
+  loopback-only; ComfyUI's link opens from anywhere while it binds the LAN, the
+  default, and under `[network].comfyui_listen = "loopback"` only from a page on
+  the box itself, disabled anywhere else beside an SSH tunnel command), and mDNS
   `.local` URL when advertised;
+
 - lifecycle buttons (Restart/Start/Stop) limited to the verbs that service
   actually permits — ComfyUI exposes Start/Restart only, since a raw
   `systemctl start` would bypass the GPU-arbiter switchover that hands the

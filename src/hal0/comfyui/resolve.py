@@ -38,10 +38,10 @@ from hal0.errors import Hal0Error, UnprocessableEntity
 
 _USER_CKPT_PREFIX = "ckpt/"
 _EDITOR_HINT = (
-    "open it in the ComfyUI editor, which listens on this box's loopback (port 8188; "
-    "reach it on the box itself or through an SSH tunnel) "
-    "and which needs a ROCm lane on this host"
+    "open it in the ComfyUI editor (port 8188 on this box; the dashboard's Engine tab links it), "
+    "which needs a ROCm lane on this host"
 )
+
 
 # Native size of a user checkpoint, by family. SDXL is trained at 1024, SD 1.5 at 512.
 _USER_CKPT_SIZES = {"sdxl": "1024x1024", "sd15": "512x512"}

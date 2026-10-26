@@ -3247,9 +3247,35 @@ class NetworkConfig(BaseModel):
         ),
     )
 
+    comfyui_listen: Literal["lan", "loopback"] = Field(
+        default="lan",
+        description=(
+            "Where ComfyUI's own web UI (the img slot, port 8188) answers. "
+            "``lan`` (the default) binds the LAN so other machines reach the "
+            "editor at http://<host>:8188 or http://<host>.local:8188 — the "
+            "Discovery (mDNS) card can announce it like Open WebUI. ComfyUI "
+            "has no sign-in of its own: anyone on the network can queue "
+            "workflows and read what it rendered. ``loopback`` fences the "
+            "port to 127.0.0.1 like every other slot (the box itself, an SSH "
+            "tunnel, or a reverse proxy you run with HAL0_COMFYUI_PUBLIC_URL). "
+            "Applies at the next `hal0 slot restart img`."
+        ),
+    )
+
+    @field_validator("comfyui_listen", mode="before")
+    @classmethod
+    def _check_comfyui_listen(cls, value: object) -> str:
+        if not isinstance(value, str):
+            raise ValueError("comfyui_listen must be 'lan' or 'loopback'")
+        mode = value.strip().lower()
+        if mode not in ("lan", "loopback"):
+            raise ValueError(f"comfyui_listen {value.strip()!r} must be 'lan' or 'loopback'")
+        return mode
+
     @field_validator("public_url", mode="before")
     @classmethod
     def _check_public_url(cls, value: object) -> str | None:
+
         if value is None:
             return None
         if not isinstance(value, str):

@@ -51,9 +51,11 @@ class ServiceDef:
     unit: str | None = None
     #: Port for the ``http://<request-host>:<port>`` link fallback and, with
     #: ``mdns``, the mDNS announcement. A LAN-published service answers there
-    #: from other machines. ComfyUI keeps ``port=8188`` though it is
-    #: loopback-only: its link answers only on the box itself (or through an
-    #: SSH tunnel). None when hal0 has no port to link (hermes, hindsight).
+    #: from other machines. ComfyUI's ``port=8188`` answers on the LAN by
+    #: default and on the box's loopback only under
+    #: ``[network].comfyui_listen = "loopback"`` (see :func:`is_mdns_capable`).
+    #: None when hal0 has no port to link (hermes, hindsight).
+
     port: int | None = None
     #: Env var carrying an operator-declared public URL (reverse proxy).
     public_url_env: str | None = None
@@ -72,8 +74,11 @@ class ServiceDef:
     #: LIFECYCLE_ACTIONS). Empty = read-only.
     actions: tuple[str, ...] = ()
     #: Advertise via avahi/mDNS when the operator enables addon
-    #: advertisement. Only meaningful for LAN-published ports.
+    #: advertisement. Only meaningful for LAN-published ports; routes ask
+    #: :func:`is_mdns_capable`, which also knows the one service whose LAN
+    #: publication is a config knob (ComfyUI).
     mdns: bool = False
+
     #: Loopback bind port, informational only (shown in the UI so operators
     #: know where a loopback-only service lives).
     loopback_port: int | None = None
@@ -111,7 +116,7 @@ SERVICES: tuple[ServiceDef, ...] = (
     ServiceDef(
         id="comfyui",
         name="ComfyUI",
-        description="Image generation engine (img slot container, loopback :8188).",
+        description="Image generation engine (img slot container, LAN :8188 by default).",
         unit="hal0-slot@img.service",
         port=8188,
         public_url_env="HAL0_COMFYUI_PUBLIC_URL",
@@ -121,11 +126,13 @@ SERVICES: tuple[ServiceDef, ...] = (
         # over), the only honest way to bring ComfyUI up (#1590). "restart"
         # stays the raw unit bounce the FirstRun repair button uses.
         actions=("start", "restart"),
-        # No mDNS: the engine listens on the box's loopback (the host-net fence in
-        # providers/container.py), so an announced :8188 would lead other machines nowhere.
-        # ``port`` stays for the browser link, which opens on the box itself or through an SSH
-        # tunnel (the dashboard decides; see ui/src/dash/image/editor-reach.ts).
-        mdns=False,
+        # mDNS-capable while the editor binds the LAN ([network].comfyui_listen = "lan", the
+        # default, ADR-0041). With "loopback" the host-net fence in providers/container.py keeps
+        # :8188 on 127.0.0.1 and :func:`is_mdns_capable` says no, so Announce writes no file
+        # that would send other machines to a refused connection; the browser link then opens
+        # on the box itself or through an SSH tunnel (the dashboard decides; see
+        # ui/src/dash/image/editor-reach.ts).
+        mdns=True,
         hints=("stop is GPU-arbiter managed — switch back to inference in the Image-Gen pane",),
         category="image",
         modalities=("image",),
@@ -162,4 +169,34 @@ def service_by_id(service_id: str) -> ServiceDef | None:
     return None
 
 
-__all__ = ["LIFECYCLE_ACTIONS", "SERVICES", "ServiceDef", "service_by_id"]
+def is_mdns_capable(sdef: ServiceDef) -> bool:
+    """Whether Announce may write an avahi file for *sdef* right now.
+
+    ``mdns`` on the definition says the service CAN be LAN-published; this says
+    it IS. The two differ for ComfyUI alone: its editor binds the LAN under
+    ``[network].comfyui_listen = "lan"`` (the default) and the box's loopback
+    under ``"loopback"`` (ADR-0041), and an announced port nothing answers on
+    would send other machines to a refused connection.
+    """
+    if not sdef.mdns or sdef.port is None:
+        return False
+    if sdef.id == "comfyui":
+        from hal0.comfyui.reach import editor_on_lan
+
+        return editor_on_lan()
+    return True
+
+
+def mdns_services() -> list[ServiceDef]:
+    """The services Announce advertises right now (see :func:`is_mdns_capable`)."""
+    return [s for s in SERVICES if is_mdns_capable(s)]
+
+
+__all__ = [
+    "LIFECYCLE_ACTIONS",
+    "SERVICES",
+    "ServiceDef",
+    "is_mdns_capable",
+    "mdns_services",
+    "service_by_id",
+]

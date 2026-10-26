@@ -50,7 +50,7 @@ Environment=HAL0_COMFYUI_HANDOFF_URL=http://127.0.0.1:8080/api/comfyui/prompt-ha
 Environment=HAL0_COMFYUI_REFUSAL_URL=http://127.0.0.1:8080/api/comfyui/gate-refusal
 Environment=HAL0_COMFYUI_GATE_TOKEN_FILE=/opt/hal0-gate/token
 PodmanArgs=--ipc=host
-Exec=bash -lc 'cd /opt/ComfyUI && exec python main.py --listen 127.0.0.1 --port 8188 --use-pytorch-cross-attention'
+Exec=bash -lc 'cd /opt/ComfyUI && exec python main.py --listen 0.0.0.0 --port 8188 --use-pytorch-cross-attention'
 
 [Service]
 Restart=always
@@ -165,6 +165,8 @@ def flm_unit(monkeypatch: pytest.MonkeyPatch) -> str:
 
 
 def test_comfyui_unit_is_byte_identical(comfyui_unit: str) -> None:
+    # ``--listen 0.0.0.0`` on a host-net unit is ComfyUI's editor on the LAN, the
+    # ``[network].comfyui_listen`` default (ADR-0041); every other slot's bind is fenced.
     assert comfyui_unit == _COMFYUI_GOLDEN
 
 
