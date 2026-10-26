@@ -173,3 +173,10 @@
 .gen-empty h2 { margin: 0; font-family: var(--jbm); font-size: 15px; font-weight: 500; color: var(--fg); }
 .gen-empty p { margin: 0; font-family: var(--jbm); font-size: 12px; line-height: 1.55; color: var(--fg-3); }
 .gen-loading { padding: 28px; text-align: center; font-family: var(--jbm); font-size: 12px; color: var(--fg-4); }
+
+/* Two columns once the pane has the width: the form keeps its 880 px cap on the left, the results
+   stay beside it on the right. Under 1100 px the column stacks as before. */
+@media (min-width: 1100px) {
+  .gen { display: grid; grid-template-columns: minmax(0, 880px) minmax(320px, 1fr); gap: 22px; align-items: start; }
+  .gen > .gen-results { position: sticky; top: 12px; min-width: 0; }
+}
