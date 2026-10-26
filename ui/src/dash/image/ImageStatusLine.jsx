@@ -18,7 +18,7 @@ import { clockLabel, reloadSteps, renderPct, switchSteps } from './status-line-p
 import { useDismissedRefusalAt, useStatusLineActions } from './useStatusLineActions'
 import { useEditorAccess } from './useEditorAccess'
 
-const LABEL = {
+export const LABEL = {
   hold: 'Hold image mode',
   cancel: 'Cancel',
   cancel_render: 'Cancel render',
@@ -32,7 +32,7 @@ const LABEL = {
 
 // Re-render once a second while a clock is on screen (the grace countdown, the render's elapsed
 // time); the polls alone move every one to five seconds.
-function useTick(active) {
+export function useTick(active) {
   const [, bump] = useReducer((n) => n + 1, 0)
   useEffect(() => {
     if (!active) return undefined
@@ -89,7 +89,7 @@ export function PinConfirm({ confirm }) {
   )
 }
 
-function Steps({ steps }) {
+export function Steps({ steps }) {
   if (steps.length === 0) return null
   return (
     <ol className="isl-steps">
@@ -102,7 +102,7 @@ function Steps({ steps }) {
   )
 }
 
-function RenderRun({ progress, elapsedS }) {
+export function RenderRun({ progress, elapsedS }) {
   const pct = renderPct(progress)
   return (
     <div className="isl-run">

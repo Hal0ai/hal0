@@ -12,6 +12,12 @@ import { ENDPOINTS } from '@/api/endpoints'
 import { useUpdateState } from '@/api/hooks/useUpdates'
 import { useServicesHealth } from '@/api/hooks/useServicesHealth'
 import { slotIndicatorFromPhase } from '../slot-status.js'
+import { isImageGenRoute } from '../slots-route'
+import { useImageRunStore } from '@/stores/useImageRunStore'
+import { useStatusLineActions } from '../image/useStatusLineActions'
+import { ForceStopConfirm, PinConfirm } from '../image/ImageStatusLine.jsx'
+import { useGpuStatus } from './useGpuStatus'
+import { GpuSegment } from './GpuSegment.jsx'
 import { _srcGroup, _srcHue, _shortTs, _svcPip, highlightFoot } from '../chrome.jsx'
 
 // ─── Dock (the global status footer) ───
@@ -29,6 +35,17 @@ export function Dock({ route, param, expanded = false, onToggle }) {
   const [paneSrc, setPaneSrc] = useState("merged");
   const [paneQ, setPaneQ] = useState("");
   const [footerTab, setFooterTab] = useState("journal");
+  // The GPU state, computed once for the collapsed segment (and, later, the pane). /status polls
+  // at its active cadence on the Image Gen route or while a run of this browser is in flight.
+  const imageRunning = useImageRunStore((s) => s.run?.running === true);
+  const gpu = useGpuStatus({ active: isImageGenRoute(route, param) || imageRunning });
+  // A failed action's message goes when the line's state changes (the kind), not when its text
+  // does: the headline counts seconds and steps.
+  const gpuActions = useStatusLineActions({ resetKey: gpu.view?.kind ?? null });
+  const openGpu = () => {
+    setFooterTab("gpu");
+    if (!expanded && onToggle) onToggle();
+  };
   // Reset to journal when pane collapses
   useEffect(() => {
     if (!expanded) setFooterTab("journal");
@@ -153,7 +170,7 @@ export function Dock({ route, param, expanded = false, onToggle }) {
             <button className={"foot-tab" + (footerTab === "journal" ? " active" : "")} onClick={() => setFooterTab("journal")}>journal</button>
             <button className={"foot-tab" + (footerTab === "downloads" ? " active" : "")} onClick={() => setFooterTab("downloads")}>downloads</button>
           </div>
-          {footerTab === "journal" ? (
+          {footerTab !== "downloads" ? (
         <div className="foot-pane">
           <div className="foot-pane-h mono">
             <span>Live journal</span>
@@ -274,7 +291,10 @@ export function Dock({ route, param, expanded = false, onToggle }) {
           )}
         </>
       )}
-      <div className="foot-chips">
+      <ForceStopConfirm confirm={gpuActions.confirm} />
+      <PinConfirm confirm={gpuActions.confirm} />
+      <div className="foot-chips dock-row">
+        <GpuSegment gpu={gpu} actions={gpuActions} onOpen={openGpu} />
         {/* slots — one LED pip per ACTIVE slot (stopped slots hidden) + ready
             count; pip colours mirror the slot-card indicator dots */}
         <div className="foot-health" data-testid="foot-health-runtimes" title={runtimeTitle}>
