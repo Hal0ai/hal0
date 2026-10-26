@@ -13,9 +13,10 @@ import { segmentActions } from './dock-pure'
  *   gpu: ReturnType<typeof import('./useGpuStatus').useGpuStatus>,
  *   actions: ReturnType<typeof import('@/dash/image/useStatusLineActions').useStatusLineActions>,
  *   onOpen: () => void,
+ *   expanded?: boolean,
  * }} props
  */
-export function GpuSegment({ gpu, actions, onOpen }) {
+export function GpuSegment({ gpu, actions, onOpen, expanded = false }) {
   const { view } = gpu
   if (!view) return null
   const pct = view.kind === 'rendering' ? renderPct(gpu.progress) : null
@@ -32,7 +33,8 @@ export function GpuSegment({ gpu, actions, onOpen }) {
       <span className="dot" aria-hidden="true" />
       {/* The segment's one live region is this hidden phrase, which changes with the kind only: the
           headline counts seconds and steps, and announcing it would read out every tick. It and the
-          error alert sit outside the open button, since a button's children are presentational. */}
+          error alert sit outside the open button, since a button's children are presentational. The error
+          is an alert only while the dock is collapsed: expanded, the GPU pane announces it. */}
       <span className="sr-only" aria-live="polite" data-testid="gpu-status-live">
         {KIND_ANNOUNCEMENT[view.kind]}
       </span>
@@ -49,7 +51,11 @@ export function GpuSegment({ gpu, actions, onOpen }) {
           </span>
         </button>
         {actions.error ? (
-          <span className="det err" role="alert" data-testid="gpu-status-detail">
+          <span
+            className="det err"
+            role={expanded ? undefined : 'alert'}
+            data-testid="gpu-status-detail"
+          >
             {actions.error}
           </span>
         ) : (

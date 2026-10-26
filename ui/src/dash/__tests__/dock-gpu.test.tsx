@@ -376,6 +376,10 @@ describe('the dock GPU segment', () => {
     expect(detail.textContent).toBe('GPU is in image mode already')
     // The buttons come back so it can be tried again.
     expect(button('Hold image mode', seg())!.disabled).toBe(false)
+    // One alert in the dock, and it is the segment's detail.
+    const alerts = document.querySelectorAll('[data-testid="dock"] [role="alert"]')
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0]).toBe(detail)
   })
 
   it('offers Cancel on a switch only to the run that started it', async () => {
@@ -509,6 +513,24 @@ describe('the dock GPU tab', () => {
     const err = byId('dock-gpu')!.querySelector('.gp-error')!
     expect(err.getAttribute('role')).toBe('alert')
     expect(err.textContent).toBe('Restart refused')
+    // Expanded, the segment keeps the text but leaves the announcing to the pane.
+    const alerts = document.querySelectorAll('[data-testid="dock"] [role="alert"]')
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0]).toBe(err)
+    expect(byId('gpu-status-detail')!.textContent).toBe('Restart refused')
+  })
+
+  it('holds the tabs and the active pane in one in-flow container', async () => {
+    mount(open())
+    const box_ = byId('dock-expanded')!
+    expect(box_.classList.contains('dock-x')).toBe(true)
+    expect(box_.querySelector('.foot-tabs')).not.toBeNull()
+    expect(box_.querySelector('.foot-pane')).not.toBeNull()
+    await click(byId('dock-tab-gpu'))
+    expect(document.querySelector('[data-testid="dock-expanded"] [data-testid="dock-gpu"]')).not.toBeNull()
+    expect(box_.querySelector('.foot-pane')).toBeNull()
+    await click(byId('dock-tab-downloads'))
+    expect(box_.querySelector('.foot-downloads')).not.toBeNull()
   })
 
   it('clicking the segment opens the dock on the gpu tab', async () => {

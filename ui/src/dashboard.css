@@ -697,14 +697,7 @@ a { color: inherit; text-decoration: none; }
   border-top: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
   overflow: hidden;
-  height: 320px;
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 100%;
   animation: foot-pane-in 0.22s cubic-bezier(0.22, 1, 0.36, 1);
-  box-shadow: 0 -12px 32px -8px rgba(0, 0, 0, 0.6);
-  z-index: 50;
 }
 @keyframes foot-pane-in {
   from { transform: translateY(20%); opacity: 0; }

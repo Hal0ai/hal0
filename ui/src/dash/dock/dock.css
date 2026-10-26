@@ -94,9 +94,18 @@
 
 /* ─── GPU tab (the expanded dock's second pane) ───
    Two columns: the line, its buttons and the cost on the left, the facts on the right. Tokens only. */
-.footer.expanded .foot-pane,
-.footer.expanded .gp,
-.footer.expanded .foot-downloads { height: min(300px, 45vh); max-height: none; }
+/* The expanded dock: tabs and one pane in a single in-flow box that pushes the page up. */
+.dock-x {
+  display: flex;
+  flex-direction: column;
+  height: min(300px, 45vh);
+  min-height: 0;
+  border-bottom: 1px solid var(--line);
+}
+.dock-x > .foot-tabs { flex: none; }
+.dock-x > .foot-pane,
+.dock-x > .gp,
+.dock-x > .foot-downloads { flex: 1; min-height: 0; height: auto; max-height: none; }
 .gp {
   display: grid;
   grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);

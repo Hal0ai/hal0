@@ -171,7 +171,7 @@ export function Dock({ route, param, expanded = false, onToggle }) {
   return (
     <div className={"footer" + (expanded ? " expanded" : "")} data-testid="dock">
       {expanded && (
-        <>
+        <div className="dock-x" data-testid="dock-expanded">
           <div className="foot-tabs">
             <button className={"foot-tab" + (footerTab === "journal" ? " active" : "")} data-testid="dock-tab-events" onClick={() => setFooterTab("journal")}>events</button>
             {gpu.view && (
@@ -303,12 +303,12 @@ export function Dock({ route, param, expanded = false, onToggle }) {
               )}
             </div>
           )}
-        </>
+        </div>
       )}
       <ForceStopConfirm confirm={gpuActions.confirm} />
       <PinConfirm confirm={gpuActions.confirm} />
       <div className="foot-chips dock-row">
-        <GpuSegment gpu={gpu} actions={gpuActions} onOpen={openGpu} />
+        <GpuSegment gpu={gpu} actions={gpuActions} onOpen={openGpu} expanded={expanded} />
         {/* slots — one LED pip per ACTIVE slot (stopped slots hidden) + ready
             count; pip colours mirror the slot-card indicator dots */}
         <div className="foot-health" data-testid="foot-health-runtimes" title={runtimeTitle}>
