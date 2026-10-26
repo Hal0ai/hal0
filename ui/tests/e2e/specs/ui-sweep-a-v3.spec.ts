@@ -293,10 +293,11 @@ test.describe('ApprovalModal live wiring', () => {
     await expect(page.locator('.approval-card')).toBeVisible({ timeout: FIVE_S })
 
     await expect(page.locator('.approval-card', { hasText: 'Deny + remember' })).toHaveCount(0)
-    await expect(page.locator('.approval-card .arg-row .k', { hasText: 'capability' })).toHaveCount(0)
-    await expect(page.locator('.approval-card .arg-row .k', { hasText: 'policy' })).toHaveCount(0)
-    // The one row backed by real data survives.
-    await expect(page.locator('.approval-card .arg-row .k', { hasText: 'argument' })).toBeVisible()
+    await expect(page.locator('.approval-card .apx-k', { hasText: 'capability' })).toHaveCount(0)
+    await expect(page.locator('.approval-card .apx-k', { hasText: 'policy' })).toHaveCount(0)
+    // Only the real arguments render, one row each (#3052).
+    await expect(page.locator('.approval-card .apx-row')).toHaveCount(1)
+    await expect(page.locator('.approval-card .apx-row .apx-k', { hasText: 'path' })).toBeVisible()
   })
 
   test('footer does not point at a non-existent auto-approve-rules surface', async ({ page }) => {

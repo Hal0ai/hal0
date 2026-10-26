@@ -2367,6 +2367,7 @@ async def dispatch(
             args=args,
             client_id=client_id,
             executor=_executor,
+            target_args=_PATH_ARGS.get(tool, ()),
         )
         _audit(client_id=client_id, tool=tool, args=args, gated=True, outcome="enqueued")
         return {

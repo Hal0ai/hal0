@@ -17,6 +17,7 @@
 import { useStatsPower } from '@/api/hooks/useStatsPower'
 import { useThroughputHistory } from '@/api/hooks/useThroughputHistory'
 import { useSlots } from '@/api/hooks/useSlots'
+import { ApprovalArgs } from './approval-args.jsx'
 
 // React globals installed by globals-install before this module evaluates.
 const { useState, useCallback } = React;
@@ -222,15 +223,6 @@ function ApprovalsCardInner({ useApprovalList, useApproveApproval, useDenyApprov
         <div className="ap-rows">
           {approvals.map((entry) => {
             const agentName = entry.client_id || 'hermes'
-            // args: JSON.stringify, capped at 120 chars
-            let argsStr = ''
-            try {
-              argsStr = JSON.stringify(entry.args ?? {})
-              if (argsStr.length > 120) argsStr = argsStr.slice(0, 117) + '...'
-            } catch {
-              argsStr = '[unparseable]'
-            }
-
             const onApprove = () => approveMut?.mutate(entry.id)
             const onDeny    = () => denyMut?.mutate(entry.id)
 
@@ -241,7 +233,10 @@ function ApprovalsCardInner({ useApprovalList, useApproveApproval, useDenyApprov
                   {/* NO risk chip — ApprovalEntry has no risk field */}
                   <span className="ap-tool mono">{entry.tool}</span>
                 </div>
-                <div className="ap-args mono">{argsStr}</div>
+                {/* Target args first, full JSON expandable — never truncated (#3052). */}
+                <div className="ap-args">
+                  <ApprovalArgs args={entry.args} targetArgs={entry.target_args} />
+                </div>
                 <div className="ap-actions">
                   <button
                     className="ap-btn ap-btn-deny"

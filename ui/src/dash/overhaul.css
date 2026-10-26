@@ -1339,10 +1339,18 @@
 .ap-args {
   font-size: 9px;
   color: var(--fg-4);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  min-width: 0;
 }
+/* Approval argument block (approval-args.jsx), shared by .ap-args above and
+   the approvals modal. Target args wrap in full; other args may ellipsize
+   because the full JSON sits in the <details> below them (#3052). */
+.apx { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.apx-row { display: grid; grid-template-columns: minmax(64px, max-content) minmax(0, 1fr); gap: 10px; }
+.apx-k { color: var(--fg-4); }
+.apx-v { color: var(--fg-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.apx-row.target .apx-v { color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; }
+.apx-full summary { cursor: pointer; color: var(--fg-4); }
+.apx-full pre { margin: 4px 0 0; max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; color: var(--fg-2); }
 .ap-actions {
   display: flex;
   gap: 5px;
