@@ -231,10 +231,11 @@ def build_workflow(
 
     width, height = _parse_size(body.get("size"))
     batch_size = max(1, min(_coerce_int(body.get("n"), 1), 8))
-    # 64-bit randomness range mirrors the ComfyUI UI (which uses Python
-    # int range up to 2**64 - 1). secrets.randbelow() is cryptographically
-    # solid and does not touch the global random state.
-    seed = _coerce_int(extra.get("seed"), secrets.randbelow(2**63 - 1))
+    # Drawn below 2**53 so the seed survives a JavaScript client: it comes back
+    # in ``_hal0.meta.seed`` and a JSON.parse above 2**53 - 1 rounds it, so
+    # "same seed" would render a different image. secrets.randbelow() does not
+    # touch the global random state.
+    seed = _coerce_int(extra.get("seed"), secrets.randbelow(2**53))
     steps = _coerce_int(extra.get("steps"), int(_default(stem, defaults, "steps")))
     cfg = _coerce_number(extra.get("cfg"), _default(stem, defaults, "cfg"))
     negative_prompt = (extra.get("negative_prompt") or "").strip()
