@@ -28,6 +28,7 @@ verb subset lives in ``hal0.services.registry`` (e.g. ComfyUI only exposes
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from typing import Any
@@ -99,17 +100,22 @@ def _mdns_url(sdef: ServiceDef, hostname: str, advertised: list[str]) -> str | N
     return f"http://{hostname}:{sdef.port}"
 
 
-def _openwebui_wired(request: Request) -> dict[str, Any] | None:
+async def _openwebui_wired(request: Request) -> dict[str, Any] | None:
     """OpenWebUI's wired-chip truth, from the SAME classifier that renders
     its env file (:mod:`hal0.openwebui.wiring`) — never re-derived here.
     Fail-soft: a broken resolver must not turn the whole Services page into
     a 500 over one card's chips.
+
+    The classifier resolves the selected image model, which can walk the
+    ComfyUI models tree and read checkpoint headers (possibly on a network
+    share), so it runs in a worker thread, not on the event loop (#3041).
     """
     try:
         from hal0.openwebui.wiring import openwebui_wiring_status
 
         state = request.app.state
-        return openwebui_wiring_status(
+        return await asyncio.to_thread(
+            openwebui_wiring_status,
             upstreams=getattr(state, "upstreams", None),
             model_cache=getattr(state, "upstream_models", None),
         )
@@ -207,7 +213,7 @@ async def list_services(request: Request) -> dict[str, Any]:
                 "actions": list(sdef.actions),
                 "mdns_capable": sdef.mdns,
                 "hints": list(sdef.hints),
-                "wired": _openwebui_wired(request) if sdef.id == "openwebui" else None,
+                "wired": await _openwebui_wired(request) if sdef.id == "openwebui" else None,
             }
         )
     return {"services": services, "mdns": disco}
