@@ -97,6 +97,16 @@ export async function installDefaultMocks(page: Page, state: MockState) {
   await page.route(/^https?:\/\/[^/]+\/api\//, (route) => json(route, {}))
   await page.route(/^https?:\/\/[^/]+\/v1\//, (route) => json(route, {}))
 
+  // The dock opens the journal and the activity SSE on every page. An EventSource refuses the
+  // catch-all's JSON ("MIME type ... is not text/event-stream") and logs a console error, so
+  // both answer as an empty event stream. Specs that drive them use sseHarness (it replaces
+  // EventSource) or register their own route after this.
+  for (const stream of ['**/api/journal/stream*', '**/api/activity/stream*']) {
+    await page.route(stream, (route) =>
+      route.fulfill({ status: 200, contentType: 'text/event-stream', body: ': ok\n\n' }),
+    )
+  }
+
   await page.route('**/api/status', (route) =>
     json(route, {
       version: '0.4.0',

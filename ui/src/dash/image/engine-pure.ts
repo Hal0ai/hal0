@@ -97,7 +97,7 @@ export function gateRow(gate: ComfyuiGate | null | undefined): GateRow | null {
   return gate ? (GATE_ROWS[gate.state] ?? null) : null
 }
 
-// ── the queue and device cards ───────────────────────────────────────────────
+// ── the queue card ───────────────────────────────────────────────────────────
 
 // A count the body left out reads as none: the line never says "undefined".
 export function queueSummary(queue: { running: number; pending: number }): { line: string; empty: boolean } {
@@ -109,15 +109,4 @@ export function queueSummary(queue: { running: number; pending: number }): { lin
 /** ComfyUI is running a prompt (hal0's or the editor's). */
 export function isRendering(s: Pick<ComfyuiStatus, 'queue'>): boolean {
   return (s.queue?.running ?? 0) > 0
-}
-
-/**
- * The device card's readings. Utilisation is read only while a render runs: the backend reports
- * it that way (the busy counter reads high at idle on the target GPU), so out of a render it is
- * not a reading. A figure the box could not take stays null.
- */
-export function deviceCells(
-  s: Pick<ComfyuiStatus, 'temp' | 'clock' | 'util' | 'queue'>,
-): { temp: number | null; clock: number | null; util: number | null } {
-  return { temp: s.temp ?? null, clock: s.clock ?? null, util: isRendering(s) ? (s.util ?? null) : null }
 }

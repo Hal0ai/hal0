@@ -15,7 +15,7 @@ import './image-engine.css'
 import { useArbiter, useComfyui } from '@/api/hooks/useComfyui'
 import { EditorCard } from './EditorCard'
 import { EngineCard } from './EngineCard'
-import { DeviceCard, QueueCard } from './EngineStatCards'
+import { QueueCard } from './EngineStatCards'
 
 /**
  * @param {object} props
@@ -30,7 +30,6 @@ export function ImageEngineTab({ visible = true }) {
       <EditorCard />
       <div className="ie-col">
         <QueueCard status={status} />
-        <DeviceCard status={status} />
       </div>
     </div>
   )

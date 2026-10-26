@@ -19,7 +19,7 @@
 // chat until someone unpins). A declined confirm sends nothing. The confirm is a dialog, so the
 // hook cannot draw it: `confirm` carries its state (`kind` says which question) and
 // `<ForceStopConfirm confirm={confirm} />` and `<PinConfirm confirm={confirm} />`
-// (ImageStatusLine.jsx) draw them. Whoever calls `run('stop', ...)` mounts the first, whoever
+// (dock/gpu-parts.jsx) draw them. Whoever calls `run('stop', ...)` mounts the first, whoever
 // calls `run('hold' | 'keep')` the second.
 
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'

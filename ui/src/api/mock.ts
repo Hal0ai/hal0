@@ -49,7 +49,7 @@ export function isMockForced() {
 // paying that round-trip lazily on e.g. the page's first `/api/slots`
 // request pushes the response past React's initial commit, so a
 // query-driven loading/populated branch switch (SlotsView) observably
-// remounts children (ActivityLog) that a caller — or a Playwright locator
+// remounts children that a caller — or a Playwright locator
 // that already resolved a "visible" element — was holding onto. Warming
 // here collapses the fetch into app bootstrap so the first real call
 // resolves against an already-settled (or already in-flight) promise.

@@ -1,7 +1,11 @@
 /**
- * footer-journal-pane-v3 — issue #325 (epic #322 Phase 3).
+ * footer-journal-pane-v3 — issue #325 (epic #322 Phase 3), retargeted to the status dock.
  *
- * Footer's expand pane now streams /api/journal/stream and renders the
+ * The footer is the dock now: its toggle is `dock-toggle`, and the expanded pane opens on the
+ * events tab, which merges the journal (stream `j`) with the activity trail (stream `a`). These
+ * specs pin the journal half, so rows are selected as `dock-event-row[data-stream="j"]`.
+ *
+ * Footer's expand pane streams /api/journal/stream and renders the
  * SSE ring directly — no more HAL0_DATA.journal silent fallback. Specs
  * pin:
  *
@@ -23,8 +27,18 @@
  *      block. Other unrelated 14:02 demo timestamps (mcp-modals, agent
  *      approvals) are explicitly out of #325's scope.
  */
+import type { Page } from '@playwright/test'
 import { test, expect } from '../fixtures/apiMock'
 import { installSseHarness, emitSse, waitForSse } from '../fixtures/sseHarness'
+
+const JOURNAL_ROW = '[data-testid="dock-event-row"][data-stream="j"]'
+
+/** Expand the dock and select its events tab. */
+async function openEvents(page: Page) {
+  await page.getByTestId('dock-toggle').click()
+  await page.getByTestId('dock-tab-events').click()
+  await expect(page.getByTestId('dock-events')).toBeVisible()
+}
 
 const HAL0_ENTRY = {
   id: 1,
@@ -58,14 +72,15 @@ test.describe('Footer journal pane (#325)', () => {
     await expect(page.locator('.footer')).toBeVisible()
     // foot-pane only renders when expanded; should be absent on cold load.
     await expect(page.locator('.foot-pane')).toHaveCount(0)
+    await expect(page.getByTestId('dock-expanded')).toHaveCount(0)
     // Toggle button is the entry point.
-    await expect(page.locator('.foot-toggle')).toBeVisible()
+    await expect(page.getByTestId('dock-toggle')).toBeVisible()
   })
 
   test('expanding pane opens SSE and renders pushed events', async ({ page }) => {
     await page.goto('/')
-    await page.locator('.foot-toggle').click()
-    await expect(page.locator('.foot-pane')).toBeVisible()
+    await openEvents(page)
+    await expect(page.getByTestId('dock-events')).toBeVisible()
 
     // SSE connects on expansion (debounced ~200ms).
     await waitForSse(page, '/api/journal/stream', 6_000)
@@ -74,22 +89,22 @@ test.describe('Footer journal pane (#325)', () => {
     await emitSse(page, '/api/journal/stream', HAL0_ENTRY)
     await emitSse(page, '/api/journal/stream', CONTAINER_ENTRY)
 
-    const body = page.locator('.foot-pane-body')
-    await expect(body.locator('.foot-line .msg', { hasText: HAL0_ENTRY.msg })).toBeVisible()
-    await expect(body.locator('.foot-line .msg', { hasText: CONTAINER_ENTRY.msg })).toBeVisible()
+    const body = page.getByTestId('dock-events').locator('.foot-pane-body')
+    await expect(body.locator(`${JOURNAL_ROW} .msg`, { hasText: HAL0_ENTRY.msg })).toBeVisible()
+    await expect(body.locator(`${JOURNAL_ROW} .msg`, { hasText: CONTAINER_ENTRY.msg })).toBeVisible()
   })
 
   test('source chip filters visible rows client-side (no per-source SSE rebuild)', async ({ page }) => {
     await page.goto('/')
-    await page.locator('.foot-toggle').click()
+    await openEvents(page)
     await waitForSse(page, '/api/journal/stream', 6_000)
     await emitSse(page, '/api/journal/stream', HAL0_ENTRY)
     await emitSse(page, '/api/journal/stream', CONTAINER_ENTRY)
 
     // Pre-condition: both render.
-    const body = page.locator('.foot-pane-body')
-    await expect(body.locator('.foot-line', { hasText: HAL0_ENTRY.msg })).toBeVisible()
-    await expect(body.locator('.foot-line', { hasText: CONTAINER_ENTRY.msg })).toBeVisible()
+    const body = page.getByTestId('dock-events').locator('.foot-pane-body')
+    await expect(body.locator(JOURNAL_ROW, { hasText: HAL0_ENTRY.msg })).toBeVisible()
+    await expect(body.locator(JOURNAL_ROW, { hasText: CONTAINER_ENTRY.msg })).toBeVisible()
 
     // Chips are derived from the live ring's real sources; a `hal0` chip
     // appears once a hal0-source entry lands. Clicking it filters by source
@@ -97,13 +112,13 @@ test.describe('Footer journal pane (#325)', () => {
     await page.locator('.foot-pane-chip', { hasText: 'hal0' }).click()
 
     // Residual container entry is hidden immediately; the hal0 entry stays.
-    await expect(body.locator('.foot-line', { hasText: CONTAINER_ENTRY.msg })).toHaveCount(0)
-    await expect(body.locator('.foot-line', { hasText: HAL0_ENTRY.msg })).toBeVisible()
+    await expect(body.locator(JOURNAL_ROW, { hasText: CONTAINER_ENTRY.msg })).toHaveCount(0)
+    await expect(body.locator(JOURNAL_ROW, { hasText: HAL0_ENTRY.msg })).toBeVisible()
 
     // A further hal0 entry arrives on the SAME (merged) stream — no reconnect.
     const HAL0_AFTER = { ...HAL0_ENTRY, id: 4, msg: 'slot:agent ready' }
     await emitSse(page, '/api/journal/stream', HAL0_AFTER)
-    await expect(body.locator('.foot-line .msg', { hasText: 'slot:agent ready' })).toBeVisible()
+    await expect(body.locator(`${JOURNAL_ROW} .msg`, { hasText: 'slot:agent ready' })).toBeVisible()
 
     // The footer never opens a per-source SSE — it streams merged and filters
     // client-side, so every source chip stays available regardless of filter.
@@ -115,38 +130,38 @@ test.describe('Footer journal pane (#325)', () => {
 
   test('search input filters the in-memory ring case-insensitively', async ({ page }) => {
     await page.goto('/')
-    await page.locator('.foot-toggle').click()
+    await openEvents(page)
     await waitForSse(page, '/api/journal/stream', 6_000)
     await emitSse(page, '/api/journal/stream', HAL0_ENTRY)
     await emitSse(page, '/api/journal/stream', CONTAINER_ENTRY)
     await emitSse(page, '/api/journal/stream', ERROR_ENTRY)
 
-    const body = page.locator('.foot-pane-body')
+    const body = page.getByTestId('dock-events').locator('.foot-pane-body')
     // Pre-condition: all three render.
-    await expect(body.locator('.foot-line')).toHaveCount(3)
+    await expect(body.locator(JOURNAL_ROW)).toHaveCount(3)
 
     // Type "error" — only ERROR_ENTRY's msg matches.
     await page.locator('.foot-pane-search').fill('error')
-    await expect(body.locator('.foot-line')).toHaveCount(1)
-    await expect(body.locator('.foot-line', { hasText: ERROR_ENTRY.msg })).toBeVisible()
+    await expect(body.locator(JOURNAL_ROW)).toHaveCount(1)
+    await expect(body.locator(JOURNAL_ROW, { hasText: ERROR_ENTRY.msg })).toBeVisible()
 
     // Case-insensitive: "ERROR" lands on the same row.
     await page.locator('.foot-pane-search').fill('ERROR')
-    await expect(body.locator('.foot-line')).toHaveCount(1)
+    await expect(body.locator(JOURNAL_ROW)).toHaveCount(1)
 
     // Clearing the search restores the full ring.
     await page.locator('.foot-pane-search').fill('')
-    await expect(body.locator('.foot-line')).toHaveCount(3)
+    await expect(body.locator(JOURNAL_ROW)).toHaveCount(3)
   })
 
   test('empty SSE renders "No events yet", never the old mock prose', async ({ page }) => {
     await page.goto('/')
-    await page.locator('.foot-toggle').click()
+    await openEvents(page)
     await waitForSse(page, '/api/journal/stream', 6_000)
     // Deliberately push nothing. Give the SSE a moment to settle.
     await page.waitForTimeout(500)
 
-    const body = page.locator('.foot-pane-body')
+    const body = page.getByTestId('dock-events').locator('.foot-pane-body')
     await expect(body.locator('.foot-pane-empty')).toBeVisible()
     await expect(body.locator('.foot-pane-empty')).toContainText('No events yet')
 

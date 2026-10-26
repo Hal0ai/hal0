@@ -1,6 +1,6 @@
-// hal0 v3 dashboard — activity-log hook (durable structured audit trail).
+// hal0 v3 dashboard — activity trail hook (durable structured audit trail).
 //
-// Backs the sidebar ActivityLog pane on the Slots page. Mirrors the
+// Backs the dock's events pane and ticker. Mirrors the
 // `useLogs` journal hook in shape, against the `/api/activity` surface:
 //   - GET  /api/activity         — historical backfill (one-shot, paged)
 //   - SSE  /api/activity/stream   — durable backfill then live tail
@@ -52,10 +52,8 @@ const SSE_RECONNECT_DEBOUNCE_MS = 200
 /** Coalesce a burst of SSE frames (the connect backfill) into one render. */
 const FRAME_FLUSH_MS = 50
 
-// Module-level ring cache keyed by filter set. The ActivityLog sidebar is
-// mounted inside several early-return branches of SlotsView (loading / empty
-// / populated) and inside the tab switch, so it UNMOUNTS on every state or
-// sub-tab transition. Without this cache each remount reset the ring to []
+// Module-level ring cache keyed by filter set. The dock can unmount and
+// remount (and the same filter set can be opened by more than one consumer). Without this cache each remount reset the ring to []
 // and forced a fresh SSE backfill — the pane visibly "forgot" recent
 // activity. Seeding useState from (and writing through to) this cache makes
 // the ring survive remounts and even navigating away and back.
@@ -217,9 +215,8 @@ export function useActivityStream(opts: UseActivityStreamOptions = {}): Activity
   //
   // Without it EVERY connect() asked the backend for `since=0`, i.e. a full
   // durable backfill (up to the server's 1000-row cap) streamed one SSE frame
-  // at a time. ActivityLog is mounted in several mutually-exclusive branches
-  // of SlotsView (loading skeleton / empty / populated), so a normal page load
-  // unmounts and remounts it as soon as /api/slots resolves — two full
+  // at a time. A consumer that remounts (the old Slots-page sidebar did, on a normal
+  // page load as soon as /api/slots resolved) ran two full
   // replays back-to-back, which is exactly the "activity log floods on load
   // then settles" symptom. The id-dedup below made the second replay a no-op
   // *semantically*, but only after every one of its frames had been pushed

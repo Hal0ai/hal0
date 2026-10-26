@@ -8,8 +8,8 @@
 // the URL with replaceState, so Back does not fill with tabs.
 //
 // All three panels stay mounted and the inactive ones are hidden. A Generate run lives for
-// minutes and leaving the tab does not end it: the panel stays to report it (`onRunChange`) and
-// to cancel it, which the status line offers for as long as it runs (`ownRun`).
+// minutes and leaving the tab does not end it: the Generate store owns the run and reports it to
+// `useImageRunStore`, where the status dock offers its Cancel for as long as it runs (`ownRun`).
 //
 // The root carries `.comfy-page`. It is only a marker: it scopes no rule (dashboard.css defines the
 // `--comfy*` tokens on :root).
@@ -20,7 +20,6 @@ import { useComfyuiModels, useImageJobs } from '@/api/hooks/useComfyui'
 import { ImageEngineTab } from './ImageEngineTab'
 import { ImageGeneratePanel } from './ImageGeneratePanel'
 import { ImageModelsPanel } from './ImageModelsPanel'
-import { ImageStatusLine } from './ImageStatusLine'
 import { renderableInstalled } from './image-models-pure'
 import { useEditorAccess } from './useEditorAccess'
 
@@ -83,9 +82,6 @@ export function ImageGenTabs({ sub }) {
     }
   }, [])
 
-  // The Generate panel's run of this browser, while it runs: its Cancel is the status line's.
-  const [ownRun, setOwnRun] = useState(null)
-
   // Models → Generate: the model asked for, and a counter so the same model asked for again is a
   // new request.
   const [pick, setPick] = useState({ modelId: undefined, seq: 0 })
@@ -130,8 +126,6 @@ export function ImageGenTabs({ sub }) {
 
   return (
     <div className="comfy-page igt" data-testid="image-gen-pane">
-      <ImageStatusLine ownRun={ownRun?.running === true} onCancelOwnRun={ownRun?.cancel} />
-
       <div className="igt-tabs" role="tablist" aria-label="Image Gen">
         {TABS.map((t) => {
           const on = tab === t.id
@@ -175,7 +169,6 @@ export function ImageGenTabs({ sub }) {
           initialModelId={pick.modelId}
           pickSeq={pick.seq}
           onOpenModels={openModels}
-          onRunChange={setOwnRun}
         />
       </div>
       <div

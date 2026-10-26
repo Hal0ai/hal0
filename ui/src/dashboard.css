@@ -125,7 +125,8 @@
   --topbar-h:    52px;
   --sidebar-w:   232px;
   --sidebar-w-collapsed: 56px;
-  --footer-h:    52px;
+  /* The collapsed dock: the status row (46px) and the two ticker rows (2 x 22px). */
+  --footer-h:    90px;
 }
 
 * { box-sizing: border-box; }
@@ -697,14 +698,7 @@ a { color: inherit; text-decoration: none; }
   border-top: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
   overflow: hidden;
-  height: 320px;
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 100%;
   animation: foot-pane-in 0.22s cubic-bezier(0.22, 1, 0.36, 1);
-  box-shadow: 0 -12px 32px -8px rgba(0, 0, 0, 0.6);
-  z-index: 50;
 }
 @keyframes foot-pane-in {
   from { transform: translateY(20%); opacity: 0; }
@@ -1391,9 +1385,10 @@ a { color: inherit; text-decoration: none; }
   gap: 20px;
   align-items: start;
 }
+.dash.dash-solo { grid-template-columns: 1fr; }
 .dash-main { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .dash-side { display: flex; flex-direction: column; gap: 16px; position: sticky; top: 12px; }
-/* Full-bleed side column (slots page): the ActivityLog spans the same
+/* Full-bleed side column (slots page): its content spans the same
    vertical extent as the stacked main-column panes (InferencePane +
    NpuOccupancyCard) instead of capping itself short. `align-self: stretch`
    fills the grid track (`position` no longer sticky — a stretched,
@@ -2552,10 +2547,9 @@ select.npu-sel {
   .dash-side > * { flex: 1; min-width: 260px; }
   /* Single-column: the side stacks under main, so there is no track to
      abs-fill — an inset-0 child of a content-sized parent would collapse
-     to nothing. Back to in-flow, with a viewport cap so the uncapped
-     activity feed can't stretch the column instead. */
+     to nothing. Back to in-flow. */
   .dash-side.dash-side-fill > * { position: static; inset: auto; }
-  .dash-side.dash-side-fill .act-card { max-height: 70vh; }
+  .dash-side.dash-side-fill .slot-rail { max-height: 50vh; overflow: auto; }
   .models-layout { grid-template-columns: 1fr; }
   .models-sidebar { position: static; max-height: none; overflow-y: visible; }
 }
@@ -2620,8 +2614,7 @@ select.npu-sel {
   .settings-layout { grid-template-columns: 1fr; }
   .settings-nav { position: static; flex-direction: row; flex-wrap: wrap; overflow-x: auto; }
   .topbar { padding: 0 12px; gap: 10px; }
-  .footer { display: none; }
-  .app { grid-template-columns: 1fr; grid-template-rows: var(--topbar-h) 1fr; grid-template-areas: "topbar" "main"; }
+  .app { grid-template-columns: 1fr; grid-template-rows: var(--topbar-h) 1fr min-content; grid-template-areas: "topbar" "main" "footer"; }
   .log-row {
     grid-template-columns: 74px 52px 44px minmax(0, 1fr);
     grid-template-rows: auto auto;
@@ -3251,7 +3244,7 @@ select.npu-sel {
 }
 .banner-dismiss:hover { color: var(--fg); background: rgba(255, 255, 255, 0.05); }
 /* One-line form: heading, body and actions side by side, wrapping only when the width runs out
-   (GpuImageModeBanner). */
+   (the blocked-gate banner). */
 .banner-compact { align-items: center; padding: 8px 14px; }
 .banner-compact .banner-content {
   flex-direction: row;

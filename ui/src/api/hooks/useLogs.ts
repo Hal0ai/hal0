@@ -54,6 +54,10 @@ const RING_MAX = 2000
 /** Debounce SSE reconnect on rapid filter chip toggling. */
 const SSE_RECONNECT_DEBOUNCE_MS = 200
 
+/** Frames buffer for this long, then land through one setState (mirrors useActivity's
+ *  FRAME_FLUSH_MS): a 50-line backfill is one render, not one per frame. */
+const FRAME_FLUSH_MS = 50
+
 /** ``merged``/``hal0``/``all`` = no source filter; any other value (e.g.
  *  ``system``, ``slot`` prefix, ``slot:npu``) narrows to that subsystem. */
 export type JournalSource = string
@@ -163,15 +167,39 @@ export function useLogsStream(opts: UseLogsStreamOptions = {}) {
   /** Increments on every reconnect; used to backoff on repeated errors. */
   const errorCountRef = useRef(0)
 
+  const pendingRef = useRef<JournalEntry[]>([])
+  const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Land the buffered frames through ONE setRing. appendEntry dedups by content signature so
+  // re-opening the pane (which reconnects the SSE and replays the tail) never double-renders a
+  // line; it returns `prev` unchanged for a duplicate, so an all-duplicate batch re-renders nothing.
+  const flush = () => {
+    if (flushTimerRef.current != null) {
+      clearTimeout(flushTimerRef.current)
+      flushTimerRef.current = null
+    }
+    const batch = pendingRef.current
+    pendingRef.current = []
+    if (!batch.length) return
+    setRing((prev) => {
+      let next = prev
+      for (const entry of batch) next = appendEntry(next, entry, RING_MAX)
+      return next
+    })
+  }
+
   const push = (entry: JournalEntry) => {
-    // appendEntry dedups by content signature so re-opening the pane (which
-    // reconnects the SSE and replays the tail) never double-renders a line.
-    setRing((prev) => appendEntry(prev, entry, RING_MAX))
+    pendingRef.current.push(entry)
+    if (flushTimerRef.current == null) {
+      flushTimerRef.current = setTimeout(flush, FRAME_FLUSH_MS)
+    }
   }
 
   useEffect(() => {
     if (!follow) {
-      // Close any open stream when follow flips off.
+      // Close any open stream when follow flips off. The ring stays: reopening replays the tail,
+      // which appendEntry dedups. Frames already buffered still land.
+      flush()
       if (esRef.current) {
         esRef.current.close()
         esRef.current = null
@@ -230,6 +258,7 @@ export function useLogsStream(opts: UseLogsStreamOptions = {}) {
       cancelled = true
       clearTimeout(debounceTimer)
       if (backoffTimer) clearTimeout(backoffTimer)
+      flush()
       if (esRef.current) {
         esRef.current.close()
         esRef.current = null

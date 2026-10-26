@@ -10,7 +10,8 @@ import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components
 hal0 gives you three log/activity surfaces, each with a different
 lifetime and a different CLI verb: per-slot runtime logs, per-agent
 provisioning logs, the API's own systemd journal, and — separately from
-all of those — the durable Activity/Audit log. The dashboard also rolls
+all of those — the durable Activity/Audit log, which you read in the
+dashboard's dock, merged with the journal. The dashboard also rolls
 request traffic up live:
 
 ![The dashboard Requests widget — per-endpoint request volume with p50 / p95 latency over the last 60 seconds](/screenshots/requests-latency-widget.png)
@@ -100,7 +101,13 @@ system state change — each with a `before`/`after` snapshot and a
 success/failure `outcome`.
 
 There's no `hal0 activity` CLI verb — this is a dashboard/API-only
-surface:
+surface. In the dashboard, read it in the dock's **events** tab, on every page:
+the trail's `action` records (a user action, with its actor and before/after)
+appear there tagged `A`, merged with the journal's lines tagged `J`. The
+structural `event` records duplicate the journal and are not shown in the dock;
+they stay in the export and the API. **Export** in the events tab's header
+downloads the trail with the severity, source and slot filters; the journal's own lines are on
+the Logs page. From a shell:
 
 ```sh
 curl 'http://localhost:8080/api/activity?limit=200'
@@ -144,7 +151,7 @@ See [Run agents](/docs/guides/run-agents).
 ## See also
 
 - [Manage slots](/docs/guides/manage-slots) — the slot lifecycle whose
-  transitions show up in the activity log.
+  transitions show up in the dock's events tab.
 - [Edit configuration](/docs/guides/configure) — config changes are
   audited.
 - [Security](/docs/concepts/security) — the LAN-open posture and what is

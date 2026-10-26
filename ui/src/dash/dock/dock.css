@@ -1,0 +1,295 @@
+/* hal0 dashboard — dock layout. The footer's own styles (.footer, .foot-*)
+   stay in dashboard.css; rules here are the dock's additions. */
+.dock-row { display: flex; align-items: stretch; }
+
+/* ─── GPU segment (the collapsed row's first block) ───
+   Plain dashboard tokens only, never the --comfy* accent. The row keeps the footer's centring. */
+.foot-chips.dock-row { align-items: center; }
+.gpu-seg {
+  --gpu-c: var(--fg-4);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 1 auto;
+  max-width: 46%;
+  min-width: 0;
+  height: 100%;
+  padding: 0 14px 0 0;
+  color: var(--fg);
+}
+.gpu-seg-ok   { --gpu-c: var(--ok); }
+.gpu-seg-img  { --gpu-c: var(--info); }
+.gpu-seg-pin  { --gpu-c: var(--accent); }
+.gpu-seg-warn { --gpu-c: var(--warn); }
+.gpu-seg-err  { --gpu-c: var(--err); }
+.gpu-seg .rule {
+  flex-shrink: 0;
+  align-self: stretch;
+  width: 3px;
+  margin: 8px 0;
+  border-radius: 2px;
+  background: var(--gpu-c);
+}
+.gpu-seg .dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--gpu-c);
+}
+.gpu-seg .txt {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  min-width: 0;
+  max-width: 100%;
+}
+.gpu-seg .head {
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.gpu-seg .head:focus-visible { outline: 2px solid var(--accent-line, var(--accent)); outline-offset: 2px; }
+.gpu-seg .head-text {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--jbm);
+  font-size: 12px;
+  color: var(--fg);
+}
+.gpu-seg .det {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--fg-3);
+}
+.gpu-seg .det.err { color: var(--err); }
+.gpu-seg .mini {
+  flex: 0 0 48px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-4);
+  overflow: hidden;
+}
+.gpu-seg .mini > i { display: block; height: 100%; background: var(--gpu-c); }
+.gpu-seg .acts { display: inline-flex; flex-shrink: 0; gap: 6px; }
+
+@media (max-width: 640px) {
+  /* The segment takes a row of its own; the pips and the toggle wrap beneath it. */
+  .foot-chips.dock-row { flex-wrap: wrap; height: auto; }
+  .foot-chips.dock-row > .foot-health { min-height: 46px; }
+  .gpu-seg { flex: 1 1 100%; max-width: none; min-height: 46px; padding-left: 0; }
+  .gpu-seg .acts { display: none; }
+}
+
+/* ─── GPU tab (the expanded dock's second pane) ───
+   Two columns: the line, its buttons and the cost on the left, the facts on the right. Tokens only. */
+/* The expanded dock: tabs and one pane in a single in-flow box that pushes the page up. */
+.dock-x {
+  display: flex;
+  flex-direction: column;
+  height: min(300px, 45vh);
+  min-height: 0;
+  border-bottom: 1px solid var(--line);
+}
+.dock-x > .foot-tabs { flex: none; }
+.dock-x > .foot-pane,
+.dock-x > .gp,
+.dock-x > .foot-downloads { flex: 1; min-height: 0; height: auto; max-height: none; }
+.gp {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  font-family: var(--jbm);
+}
+.gp-main,
+.gp-facts { min-width: 0; padding: 14px 18px; }
+.gp-facts { border-left: 1px solid var(--line); }
+.gp-main { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.gp-head { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--fg); }
+.gp-det { font-size: 11.5px; color: var(--fg-3); }
+.gp-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.gp-acts .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+.gp-acts .btn.warn { color: var(--warn); border-color: var(--warn); }
+.gp-sep { width: 1px; height: 16px; margin: 0 4px; background: var(--line-strong); }
+.gp-error { font-size: 11.5px; color: var(--err); }
+.gp-cost { font-size: 11px; color: var(--fg-4); }
+
+.gp-facts dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 7px 16px;
+  margin: 0;
+  align-items: baseline;
+}
+.gp-facts dt {
+  font-family: var(--jbm);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-4);
+}
+.gp-facts dd { margin: 0; min-width: 0; font-size: 11.5px; color: var(--fg); overflow-wrap: anywhere; }
+.gp-facts dd.warn { color: var(--warn); }
+.gp-facts dd.err { color: var(--err); }
+
+/* Slot pips: the footer's look, with a hollow one for a slot image mode has paused. */
+.gp-slot { display: inline-flex; align-items: center; gap: 5px; margin-right: 12px; }
+.gp-slot .pip { width: 7px; height: 7px; border-radius: 50%; background: var(--bg-4); border: 1px solid var(--line-strong); }
+.gp-slot .pip.serving { background: var(--ok); border-color: transparent; box-shadow: 0 0 6px var(--ok); }
+.gp-slot .pip.stale { background: var(--warn); border-color: transparent; box-shadow: 0 0 6px rgba(232, 185, 78, 0.45); }
+.gp-slot .pip.warming { background: var(--warn); border-color: transparent; box-shadow: 0 0 6px var(--warn); }
+.gp-slot .pip.error { background: var(--err); border-color: transparent; box-shadow: 0 0 6px var(--err); }
+.gp-slot .pip.offline { background: var(--bg-4); border-color: var(--line-strong); }
+.gp-slot .pip.paused { background: transparent; border-color: var(--info); }
+
+/* The tone dot: the GPU tab's own label and the pane's headline. */
+.dotc { display: inline-block; flex-shrink: 0; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: var(--fg-4); }
+.gp-head .dotc { margin-right: 0; width: 8px; height: 8px; }
+.dotc.tone-ok   { background: var(--ok); }
+.dotc.tone-img  { background: var(--info); }
+.dotc.tone-pin  { background: var(--accent); }
+.dotc.tone-warn { background: var(--warn); }
+.dotc.tone-err  { background: var(--err); }
+
+@media (max-width: 900px) {
+  .gp { grid-template-columns: minmax(0, 1fr); }
+  .gp-facts { border-left: 0; border-top: 1px solid var(--line); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .gp-slot .pip { animation: none; }
+}
+
+/* ─── Render progress and step chips (gpu-parts.jsx: RenderRun, Steps) ───
+   They draw in the GPU tab, in the image-mode tone: the chips and the bar take --isl-c. */
+.gp { --isl-c: var(--info); }
+.isl-run { display: flex; align-items: center; gap: 10px; margin-top: 2px; }
+.isl-bar {
+  flex: 1;
+  max-width: 320px;
+  height: 4px;
+  border-radius: var(--rad-pill);
+  background: var(--bg-4);
+  overflow: hidden;
+}
+.isl-bar > i { display: block; height: 100%; background: var(--isl-c); }
+.isl-elapsed { font-size: 11px; color: var(--fg-3); }
+
+.isl-steps { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 0; padding: 0; list-style: none; }
+.isl-step {
+  padding: 1px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--rad-pill);
+  font-family: var(--jbm);
+  font-size: 10.5px;
+  color: var(--fg-4);
+}
+.isl-step.active { color: var(--isl-c); border-color: var(--isl-c); }
+.isl-step.done   { color: var(--fg-2); border-color: var(--line-strong); }
+.isl-step.done::before { content: '✓ '; color: var(--ok); }
+
+/* ─── Events pane and ticker ───
+   The journal and the activity trail as one timeline. Tokens only. */
+.dock-x .foot-pane-h { flex-wrap: wrap; row-gap: 6px; }
+.foot-pane-right { display: inline-flex; align-items: center; gap: 10px; margin-left: auto; }
+.foot-pane-slot {
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm, 4px);
+  background: var(--bg);
+  color: var(--fg-2);
+  font-size: 11px;
+}
+.foot-pane-slot:focus { border-color: var(--accent-line); outline: none; }
+.foot-pane-empty { padding: 24px; text-align: center; color: var(--fg-4); font-family: var(--jbm); font-size: 11.5px; }
+.foot-pane-clear { color: var(--accent); cursor: pointer; }
+
+/* Pane rows: stripe · ts · stream tag · source · level · message. */
+.dock-x .foot-line { grid-template-columns: 3px 92px 16px 88px 44px minmax(0, 1fr); }
+.foot-line.clickable { cursor: pointer; }
+.foot-line.clickable:focus-visible { outline: 2px solid var(--accent-line, var(--accent)); outline-offset: -2px; }
+.foot-line .ev-k {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--fg-4);
+  background: var(--bg-3);
+}
+.foot-line .ev-k.a { color: var(--accent); background: var(--accent-soft); }
+.foot-line .actor { margin-left: 8px; color: var(--fg-4); font-size: 10px; }
+.foot-line-detail {
+  margin: 0 16px 4px 126px;
+  padding: 6px 10px;
+  border-left: 2px solid var(--line-strong);
+  background: var(--bg-2);
+  color: var(--fg-3);
+  font-size: 11px;
+}
+.foot-line-detail .err { color: var(--err); }
+.foot-line-detail pre {
+  margin: 4px 0 0;
+  max-height: 120px;
+  overflow: auto;
+  color: var(--fg-2);
+  font-family: var(--jbm);
+  font-size: 10.5px;
+}
+
+/* The ticker: two rows of 22px under the chips row, newest last. Hidden while the dock is open
+   (`.footer.expanded .foot-journal`). */
+.foot-journal.dock-ticker {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-end;
+  height: calc(22px * 2);
+  padding: 0;
+  overflow: hidden;
+}
+.dock-ticker .foot-line {
+  grid-template-columns: 92px 16px 88px 44px minmax(0, 1fr);
+  align-items: center;
+  height: 22px;
+  padding: 0 16px;
+  flex: none;
+}
+
+/* After the base rows above, so the narrower templates win at equal specificity. */
+@media (max-width: 640px) {
+  /* Event rows drop source and level, so the message keeps the width: ts · tag · message. */
+  .dock-ticker .foot-line .src, .dock-ticker .foot-line .lvl,
+  .dock-x .foot-line .src, .dock-x .foot-line .lvl { display: none; }
+  .dock-ticker .foot-line { grid-template-columns: 64px 16px minmax(0, 1fr); }
+  .dock-x .foot-line { grid-template-columns: 3px 64px 16px minmax(0, 1fr); }
+}
+
+/* Unseen badge on the dock toggle. */
+.foot-toggle .badge {
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+}

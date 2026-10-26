@@ -53,9 +53,10 @@ import './dash/memory-overhaul.css'
 // styles for the new units/tags/curate surface Phase C builds on top of
 // the memory-overhaul.css shell.
 import './dash/memory-v2.css'
-import './dash/activity-log.css'
+import './dash/dock/dock.css'
 import './dash/overhaul.css'
 import './dash/redesign.css'
+import './dash/slot-rail.css'
 
 import './dash/data.jsx'
 import './dash/tweaks-panel.jsx'

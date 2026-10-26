@@ -30,7 +30,9 @@ import { captureUiException } from '@/sentry'
 // Benchmarks page (#benchmarks): a real ES module, imported directly rather
 // than read off a `window.BenchmarksView` global.
 import Benchmarks from './Benchmarks'
-import { isImageGenRoute, slotsSub } from './slots-route'
+import { Dock } from './dock/Dock.jsx'
+import { GpuGateBlockedBanner } from './dock/GpuGateBlockedBanner.jsx'
+import { slotsSub } from './slots-route'
 
 const { useState: useStateA, useEffect: useEffectA } = React;
 
@@ -350,16 +352,15 @@ function App() {
                 configured). Dismiss is per-session; no auto-route. */}
             <FirstRunBanner />
             <UpdateBanner />
-            {/* Phase D8: self-renders while the GPU arbiter reports image
-                mode (/api/comfyui/arbiter arbiter.mode === "img"). Not on the
-                Image Gen pane: its own status line says the same, in full. */}
-            {!isImageGenRoute(route, param) && <GpuImageModeBanner />}
+            {/* Self-renders only while ComfyUI's GPU gate has no credential and image
+                generation is blocked, on every page. Every other GPU state lives in the dock. */}
+            <GpuGateBlockedBanner />
             <BannerStack scope="global" route={route} />
           </div>
           <ViewErrorBoundary key={route}>{renderView()}</ViewErrorBoundary>
         </div>
         {/*
-          Phase 3 of #322: Footer is self-driven. The update chip reads
+          Phase 3 of #322: the dock (was Footer) is self-driven. The update chip reads
           `useUpdateState()` directly (no more hardcoded "v0.2.2 available"),
           and the journal pane streams /api/journal/stream. The legacy
           `updateAvailable` prop linkage to the BannerStack dismiss state
@@ -367,7 +368,9 @@ function App() {
           dismiss memory and the chip is allowed to keep nagging until
           a new release is installed.
         */}
-        <Footer
+        <Dock
+          route={route}
+          param={param}
           expanded={footerOpen}
           onToggle={() => setFooterOpen(o => !o)}
         />

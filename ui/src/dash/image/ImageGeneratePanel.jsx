@@ -18,7 +18,6 @@ import {
   useComfyui,
   useComfyuiFiles,
   useComfyuiModels,
-  useComfyuiRenderCancel,
   useModelFit,
 } from '@/api/hooks/useComfyui'
 import { useCapabilities } from '@/api/hooks/useCapabilities'
@@ -42,7 +41,7 @@ import {
   stripArbiter,
   toRequest,
 } from './generate-pure'
-import { abortRun, dismissError, startRun, useGenerateState } from './generate-store'
+import { cancelRun, dismissError, startRun, useGenerateState } from './generate-store'
 import { parseSize } from './image-models-pure'
 import { clockLabel, renderPct } from './status-line-parts-pure'
 import { costLine } from './status-line-pure'
@@ -110,17 +109,14 @@ function RunStrip({ steps, pct, elapsedS, onCancel }) {
  *   viewer has picked another one here
  * @param {(modelId?: string) => void} [props.onOpenModels]
  *   switch to the Models tab: from the empty state, and from the 409 "not installed" link
- * @param {(run: { running: boolean, cancel: () => void } | null) => void} [props.onRunChange]
- *   a run of this browser started (with the function that cancels it) or ended (null)
  */
-export function ImageGeneratePanel({ initialModelId, pickSeq, onOpenModels, onRunChange }) {
+export function ImageGeneratePanel({ initialModelId, pickSeq, onOpenModels }) {
   const id = useId()
   const modelsQuery = useComfyuiModels()
   const filesQuery = useComfyuiFiles()
   const caps = useCapabilities().data
   const slots = useSlots().data
   const memory = useMemoryBudget().data
-  const renderCancel = useComfyuiRenderCancel()
   const gen = useGenerateState()
   const { run, results, error } = gen
   const running = run != null
@@ -224,54 +220,11 @@ export function ImageGeneratePanel({ initialModelId, pickSeq, onOpenModels, onRu
     void startRun(toRequest({ ...form, seed: form.seed ?? rollSeed() }), { graceAtStart: grace })
   }
 
-  // ── a run: cancel and report ───────────────────────────────────────────────
+  // ── a run: cancel ──────────────────────────────────────────────────────────
 
-  // The latest of what cancel needs. `cancel` is handed to the parent once, so it reads these
-  // when it is called, not when it was made.
-  const latest = useRef({ phase: null, progress: null, renderCancel })
-  useEffect(() => {
-    latest.current = { phase: arbiter?.phase ?? null, progress: status?.progress ?? null, renderCancel }
-  })
-  // Which call cancels depends on whether the prompt is in ComfyUI's queue yet.
-  //  - Not yet (the switch phases, or nothing): abort the /v1 request. The server drops the
-  //    render after the switch, answers an empty 499, and the GPU restores as usual.
-  //  - Queued (hand-off, rendering, or hal0's render has progress): ComfyUI is running it, and
-  //    hanging up would not stop it: /render/cancel does, and the request is aborted as well.
-  const cancel = useCallback(() => {
-    const { phase, progress, renderCancel: cancelRender } = latest.current
-    const queued = phase === 'handoff' || phase === 'rendering' || progress != null
-    if (queued) {
-      cancelRender
-        .mutateAsync()
-        .catch((e) => note(`Could not cancel the render — ${e?.message || 'see logs'}`, 'err'))
-    }
-    abortRun()
-  }, [])
-
-  const onRunChangeRef = useRef(onRunChange)
-  useEffect(() => {
-    onRunChangeRef.current = onRunChange
-  })
-  const reported = useRef(false)
-  useEffect(() => {
-    if (running) {
-      reported.current = true
-      onRunChangeRef.current?.({ running: true, cancel })
-    } else if (reported.current) {
-      reported.current = false
-      onRunChangeRef.current?.(null)
-    }
-  }, [running, cancel])
-  // Leaving the tab does not end the run, but this panel can no longer cancel it.
-  useEffect(
-    () => () => {
-      if (reported.current) {
-        reported.current = false
-        onRunChangeRef.current?.(null)
-      }
-    },
-    [],
-  )
+  // The store owns the run's Cancel and reports the run to the dock, so leaving this tab does not
+  // end either. The panel's own button calls the same function.
+  const cancel = cancelRun
 
   // ── loading, failing, nothing installed ────────────────────────────────────
 

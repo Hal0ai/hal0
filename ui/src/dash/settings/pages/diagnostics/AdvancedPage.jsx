@@ -1,4 +1,4 @@
-// DIAGNOSTICS ▸ Advanced — low-level dispatcher + activity-log tuning, plus
+// DIAGNOSTICS ▸ Advanced — low-level dispatcher + activity trail tuning, plus
 // the hal0-api restart control. Extracted verbatim from settings.jsx
 // AdvancedSection (P3-ui split phase 1). The `id` stays "advanced"
 // (unchanged) so #settings/advanced deep links keep working.

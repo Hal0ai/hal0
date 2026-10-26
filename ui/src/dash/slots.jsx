@@ -18,7 +18,6 @@ import {
 import { useModels } from '@/api/hooks/useModels'
 import { useComfyui } from '@/api/hooks/useComfyui'
 import { RunnerImagesView } from '@/dash/runner-images.jsx'
-import { ActivityLog } from './activity-log.jsx'
 import { ImageGenTabs } from './image/ImageGenTabs'
 import { slotsSub, slotsTab } from './slots-route'
 import { NpuOccupancyCard } from './npu-pane.jsx'
@@ -36,6 +35,7 @@ import { statusCopyForSlotState } from './status-copy'
 import { prettyProfile } from './profile-names.js'
 import { slotModelRow } from './slots/slot-shared.js'
 import { SlotSpecBolt } from './fit-chip.jsx'
+import { SlotRail } from './slot-rail.jsx';
 
 const { useState: useStateS, useRef, useEffect } = React;
 
@@ -831,7 +831,7 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
           <button className="btn" onClick={() => setCreateOpen(true)}>{Icons.plus} New slot</button>
         </div>
 
-        <div className="dash">
+        <div className="dash dash-solo">
           <div className="dash-main">
             {["chat", "embed", "voice", "img"].map(g => {
               const cards = seededByGroup[g];
@@ -856,9 +856,6 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
                 </section>
               );
             })}
-          </div>
-          <div className="dash-side dash-side-fill">
-            <ActivityLog />
           </div>
         </div>
 
@@ -893,16 +890,13 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
           <span className="vh-spacer" />
           <span className="hint mono dim">Loading slots…</span>
         </div>
-        <div className="dash">
+        <div className="dash dash-solo">
           <div className="dash-main">
             <div className="slots-grid" aria-busy="true">
               {[0, 1, 2, 3].map((i) => (
                 <div key={i} className="slot slot-skeleton" aria-hidden="true" />
               ))}
             </div>
-          </div>
-          <div className="dash-side dash-side-fill">
-            <ActivityLog />
           </div>
         </div>
       </div>
@@ -920,7 +914,7 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
           <span className="vh-spacer" />
           <button className="btn" onClick={() => setCreateOpen(true)}>{Icons.plus} New slot</button>
         </div>
-        <div className="dash">
+        <div className="dash dash-solo">
           <div className="dash-main">
             <div className="dash-empty">
               <h2 className="mono">No slots configured</h2>
@@ -929,9 +923,6 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
                 <button className="btn lg" onClick={() => setCreateOpen(true)}>{Icons.plus} New slot</button>
               </div>
             </div>
-          </div>
-          <div className="dash-side dash-side-fill">
-            <ActivityLog />
           </div>
         </div>
         <CreateSlotModal
@@ -1069,7 +1060,7 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
       ) : tab === "stacks" ? (
         window.StacksView ? <window.StacksView /> : null
       ) : (
-      <div className="dash">
+      <div className={"dash" + (tab === "image" ? " dash-solo" : "")}>
         <div className="dash-main">
           {tab === "image" ? (
             <ImageGenTabs sub={slotSub} />
@@ -1096,9 +1087,11 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
             </>
           )}
         </div>
-        <div className="dash-side dash-side-fill">
-          <ActivityLog />
-        </div>
+        {tab !== "image" && (
+          <div className="dash-side dash-side-fill">
+            <SlotRail onNew={() => setCreateOpen(true)} />
+          </div>
+        )}
       </div>
       )}
 

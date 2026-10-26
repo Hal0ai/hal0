@@ -38,7 +38,6 @@ vi.mock('@/api/hooks/useComfyui', async (importOriginal) => ({
   useComfyui: () => ({ data: undefined }),
 }))
 vi.mock('../telemetry-header.jsx', () => ({ TelemetryHeader: () => null }))
-vi.mock('../activity-log.jsx', () => ({ ActivityLog: () => null }))
 vi.mock('../inference-pane.jsx', async (importOriginal) => ({
   ...(await importOriginal<Json>()),
   InferencePane: () => null,

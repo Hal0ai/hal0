@@ -55,16 +55,6 @@ export const BANNER_CATALOG: ReadonlyArray<BannerEntry> = Object.freeze([
       { label: 'Remind me later' },
     ],
   },
-  {
-    // Phase D8 — live surface is primitives.jsx <GpuImageModeBanner>.
-    id: 'gpu-image-mode',
-    scope: 'global',
-    kind: 'info',
-    eyebrow: 'GPU · arbiter',
-    heading: 'GPU: image mode',
-    body: 'LLM slots are stopped while image generation holds the GPU — they reload shortly after the last render finishes.',
-    actions: [{ label: 'View slots', primary: true }],
-  },
   // ── Slots view ──────────────────────────────────────────────────
   {
     id: 'npu-swap',

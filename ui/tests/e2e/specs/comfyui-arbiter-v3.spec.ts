@@ -1,7 +1,8 @@
 /**
  * comfyui-arbiter-v3 — the Image Gen pane's live wiring: what `/api/comfyui/status` and
- * `/api/comfyui/arbiter` put on the status line and the Engine tab, and which POSTs its buttons
- * send.
+ * `/api/comfyui/arbiter` put on the dock's GPU segment and tab and on the Engine tab, and which
+ * POSTs their buttons send. (The pane's own status line, its device card and the Engine tab's Stop
+ * moved to the dock; Stop image mode is the GPU tab's `gpu-status-action-stop`.)
  *
  * Replaces the specs of the old "render hero" pane (its GTT and RAM gauges, the fake `it/s` and
  * frame counters, the queue drawer and its Restart, the hard-coded workflow strip and the model
@@ -14,6 +15,7 @@
  * Convention (as before): VITE_MOCK_HAL0=1 build, `/api/comfyui/*` is not in MOCK_ALLOWLIST, so
  * `page.route` drives it; fixtures/imageGen.ts builds the bodies and records the writes.
  */
+import type { Page } from '@playwright/test'
 import { test, expect } from '../fixtures/apiMock'
 import {
   arbiterEnvelope,
@@ -41,19 +43,21 @@ const rendering = () =>
     }),
     arbiter: arbiterEnvelope({ mode: 'img', phase: 'rendering', image_jobs: 1 }, { mode: 'generation' }),
   })
-// Image mode on and nothing to do: the grace window before chat comes back.
-const idleImageMode = () =>
-  makeImageGenMock({
-    status: imageStatus({ mode: 'generation', arbiter: arbiterState({ mode: 'img', phase: 'grace' }) }),
-    arbiter: arbiterEnvelope({ mode: 'img', phase: 'grace' }, { mode: 'generation' }),
-  })
+/** Expand the dock onto its GPU tab, and return the pane (the segment keeps the same testids). */
+async function openGpuTab(page: Page) {
+  await page.getByTestId('dock-toggle').click()
+  await page.getByTestId('dock-tab-gpu').click()
+  const pane = page.getByTestId('dock-gpu')
+  await expect(pane).toBeVisible()
+  return pane
+}
 
-test.describe('Image Gen live wiring: status line', () => {
+test.describe('Image Gen live wiring: dock GPU status', () => {
   test('a render in progress shows its model and step', async ({ page }) => {
     await routeImageGen(page, rendering())
     await gotoImageGen(page, 'engine')
 
-    await expect(page.getByTestId('image-status-head')).toHaveText('Rendering · sdxl-lightning · step 3/8')
+    await expect(page.getByTestId('gpu-status-head')).toHaveText('Rendering · sdxl-lightning · step 3/8')
   })
 
   test('Cancel render posts /render/cancel', async ({ page }) => {
@@ -61,16 +65,17 @@ test.describe('Image Gen live wiring: status line', () => {
     await routeImageGen(page, mock)
     await gotoImageGen(page, 'engine')
 
-    await page.getByTestId('image-status-action-cancel_render').click()
+    const pane = await openGpuTab(page)
+    await pane.getByTestId('gpu-status-action-cancel_render').click()
     await expect.poll(() => mock.posts.map(([path]) => path)).toContain('/api/comfyui/render/cancel')
   })
 
-  test('with no status line (no GPU budget) the pane still renders', async ({ page }) => {
-    // The line is hidden while the memory budget has no GPU pool; nothing else depends on it.
+  test('with no GPU segment (no GPU budget) the pane still renders', async ({ page }) => {
+    // The segment is hidden while the memory budget has no GPU pool; nothing else depends on it.
     await routeImageGen(page, makeImageGenMock({ memory: memoryBudget({ gpu: null, render_free_gb: null }) }))
     await gotoImageGen(page, 'engine')
 
-    await expect(page.getByTestId('image-status-line')).toHaveCount(0)
+    await expect(page.getByTestId('dock-gpu-segment')).toHaveCount(0)
     await expect(page.getByTestId('engine-card')).toBeVisible()
   })
 })
@@ -102,23 +107,6 @@ test.describe('Image Gen live wiring: Engine tab', () => {
     const open = page.getByTestId('editor-open')
     await expect(open).toBeEnabled()
     await open.click({ trial: true })
-  })
-
-  test('the device card shows temperature and clock, and utilisation only while rendering', async ({ page }) => {
-    await routeImageGen(page, rendering())
-    await gotoImageGen(page, 'engine')
-
-    await expect(page.getByTestId('device-util')).toContainText('63')
-    await expect(page.getByTestId('device-temp')).toContainText('68.5')
-    await expect(page.getByTestId('device-clock')).toContainText('2.7')
-  })
-
-  test('idle, the device card has no utilisation figure', async ({ page }) => {
-    await routeImageGen(page, makeImageGenMock({ status: imageStatus({ util: 97 }) }))
-    await gotoImageGen(page, 'engine')
-
-    await expect(page.getByTestId('device-temp')).toContainText('68.5')
-    await expect(page.getByTestId('device-util')).toHaveCount(0)
   })
 
   test('the engine card states the engine, its Quadlet container, loopback and the editor route', async ({
@@ -154,27 +142,66 @@ test.describe('Image Gen live wiring: Engine tab', () => {
     await expect(page.getByTestId('engine-logs-pre')).toHaveCount(0)
   })
 
-  test('Stop image mode asks the arbiter to go back to inference', async ({ page }) => {
-    const mock = idleImageMode()
+  // Stop image mode lives on the dock's GPU tab, and the status line offers it only while image
+  // mode is pinned (status-line-pure.ts): an unpinned image mode ends by itself after its grace.
+  // The Engine tab has no Stop button.
+  test('Stop image mode (pinned) unpins, then asks the arbiter to go back to inference', async ({ page }) => {
+    const mock = makeImageGenMock({
+      status: imageStatus({ mode: 'generation', arbiter: arbiterState({ mode: 'img', phase: 'idle', pinned: true }) }),
+      arbiter: arbiterEnvelope({ mode: 'img', phase: 'idle', pinned: true }, { mode: 'generation' }),
+    })
     await routeImageGen(page, mock)
     await gotoImageGen(page, 'engine')
 
-    await page.getByTestId('engine-stop').click()
-    await expect.poll(() => mock.posts.length).toBeGreaterThan(0)
-    expect(mock.posts[0]).toEqual(['/api/comfyui/switchover', { mode: 'inference' }])
+    await expect(page.getByTestId('engine-stop')).toHaveCount(0)
+    const pane = await openGpuTab(page)
+    await pane.getByTestId('gpu-status-action-stop').click()
+    await expect.poll(() => mock.posts.length).toBeGreaterThan(1)
+    expect(mock.posts).toEqual([
+      ['/api/comfyui/pin', { pinned: false }],
+      ['/api/comfyui/switchover', { mode: 'inference' }],
+    ])
   })
 
   test('Stop image mode while a render runs asks first, and forces only after a yes', async ({ page }) => {
+    // Pinned, with a prompt in ComfyUI's queue that the arbiter does not see (the editor's).
+    const mock = makeImageGenMock({
+      status: imageStatus({
+        mode: 'generation',
+        queue: { running: 1, pending: 0 },
+        arbiter: arbiterState({ mode: 'img', phase: 'idle', pinned: true }),
+      }),
+      arbiter: arbiterEnvelope({ mode: 'img', phase: 'idle', pinned: true }, { mode: 'generation' }),
+    })
+    await routeImageGen(page, mock)
+    await gotoImageGen(page, 'engine')
+
+    const pane = await openGpuTab(page)
+    await pane.getByTestId('gpu-status-action-stop').click()
+    await page.getByRole('button', { name: 'Stop and cancel render' }).waitFor()
+    expect(mock.posts).toEqual([])
+    await page.getByRole('button', { name: 'Stop and cancel render' }).click()
+    await expect.poll(() => mock.posts.length).toBeGreaterThan(1)
+    expect(mock.posts).toEqual([
+      ['/api/comfyui/pin', { pinned: false }],
+      ['/api/comfyui/switchover', { mode: 'inference', force: true }],
+    ])
+  })
+
+  test('Stop image mode from an unpinned render asks first, and forces only after a yes', async ({ page }) => {
+    // Image mode is on and rendering, not pinned: the status line has no Stop, the GPU tab does.
     const mock = rendering()
     await routeImageGen(page, mock)
     await gotoImageGen(page, 'engine')
 
-    await page.getByTestId('engine-stop').click()
+    const pane = await openGpuTab(page)
+    await expect(page.getByTestId('dock-gpu-segment').getByTestId('gpu-status-action-stop')).toHaveCount(0)
+    await pane.getByTestId('gpu-status-action-stop').click()
     await page.getByRole('button', { name: 'Stop and cancel render' }).waitFor()
     expect(mock.posts).toEqual([])
     await page.getByRole('button', { name: 'Stop and cancel render' }).click()
     await expect.poll(() => mock.posts.length).toBeGreaterThan(0)
-    expect(mock.posts[0]).toEqual(['/api/comfyui/switchover', { mode: 'inference', force: true }])
+    expect(mock.posts).toEqual([['/api/comfyui/switchover', { mode: 'inference', force: true }]])
   })
 
   test('a stopped engine says Generate still works, and offers no Stop', async ({ page }) => {

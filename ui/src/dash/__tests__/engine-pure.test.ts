@@ -1,9 +1,8 @@
 // The Engine tab's facts: which workflows the editor card lists, which notice the engine card
-// shows, the gate row, the device readings and the queue line. Pure.
+// shows, the gate row and the queue line. Pure.
 import { describe, expect, it } from 'vitest'
 import type { ComfyuiCatalogModel, ComfyuiStatus } from '@/api/hooks/useComfyui'
 import {
-  deviceCells,
   engineNotice,
   gateRow,
   queueSummary,
@@ -95,29 +94,6 @@ describe('gateRow', () => {
   it('has a row only when the backend reported a gate', () => {
     expect(gateRow(null)).toBeNull()
     expect(gateRow(undefined)).toBeNull()
-  })
-})
-
-describe('deviceCells', () => {
-  it('reads temperature and clock any time, utilisation only while rendering', () => {
-    expect(deviceCells({ temp: 61.5, clock: 2.7, util: 0, queue: { running: 0, pending: 0 } })).toEqual({
-      temp: 61.5,
-      clock: 2.7,
-      util: null,
-    })
-    expect(deviceCells({ temp: 71, clock: 2.9, util: 97, queue: { running: 1, pending: 0 } })).toEqual({
-      temp: 71,
-      clock: 2.9,
-      util: 97,
-    })
-  })
-
-  it('keeps an unreadable figure null, never zero', () => {
-    expect(deviceCells({ temp: null, clock: null, util: null, queue: { running: 1, pending: 0 } })).toEqual({
-      temp: null,
-      clock: null,
-      util: null,
-    })
   })
 })
 
