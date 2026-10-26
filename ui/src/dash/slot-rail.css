@@ -129,24 +129,35 @@
 .slot-rail .rail-f .paused-note { color: var(--info); }
 
 /* ─── flash: a slot the dock just reported on, or the pane card a row jumped to ─── */
+/* Rail rows have no background of their own, so they fade a tint. The pane targets (Inference
+   cards, NPU model rows) have solid backgrounds, so they get an inset ring + glow overlay. */
 @keyframes rail-flash {
   from { background: var(--ok-soft); }
   to { background: transparent; }
+}
+@keyframes rail-flash-ring {
+  from { box-shadow: inset 0 0 0 2px var(--ok), 0 0 0 0 var(--ok-glow); }
+  to { box-shadow: inset 0 0 0 2px transparent, 0 0 0 10px transparent; }
 }
 @keyframes rail-flash-dot {
   from { transform: translateY(-50%) scale(1); opacity: 0.9; }
   to { transform: translateY(-50%) scale(3); opacity: 0; }
 }
-.slot-rail .srow.flash,
-[data-testid^="infer-slot-"].flash {
+.slot-rail .srow.flash {
   animation: rail-flash 1.6s ease-out 1;
 }
+[data-testid^="infer-slot-"].flash,
+[data-testid^="npu-model-"].flash {
+  animation: rail-flash-ring 1.6s ease-out 1;
+}
 .slot-rail .srow.flash::after,
-[data-testid^="infer-slot-"].flash::after {
+[data-testid^="infer-slot-"].flash::after,
+[data-testid^="npu-model-"].flash::after {
   content: "";
   position: absolute;
   right: 8px;
   top: 50%;
+  transform: translateY(-50%);
   width: 6px;
   height: 6px;
   border-radius: 50%;
@@ -155,8 +166,10 @@
   animation: rail-flash-dot 1.6s ease-out 1 forwards;
 }
 @media (prefers-reduced-motion: reduce) {
-  .slot-rail .srow.flash,
-  [data-testid^="infer-slot-"].flash { animation: none; background: var(--ok-soft); }
+  .slot-rail .srow.flash { animation: none; background: var(--ok-soft); }
+  [data-testid^="infer-slot-"].flash,
+  [data-testid^="npu-model-"].flash { animation: none; box-shadow: inset 0 0 0 2px var(--ok); }
   .slot-rail .srow.flash::after,
-  [data-testid^="infer-slot-"].flash::after { animation: none; opacity: 0.9; }
+  [data-testid^="infer-slot-"].flash::after,
+  [data-testid^="npu-model-"].flash::after { animation: none; opacity: 0.9; }
 }

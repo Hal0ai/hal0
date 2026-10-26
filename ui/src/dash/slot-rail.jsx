@@ -71,8 +71,12 @@ export function SlotRail({ onNew }) {
     }
   }, [])
 
+  // GPU/CPU slots are cards in the Inference pane; NPU slots are model rows in the NPU card.
   const goToCard = (name) => {
-    const card = document.querySelector(`[data-testid="infer-slot-${cssEscape(name)}"]`)
+    const n = cssEscape(name)
+    const card =
+      document.querySelector(`[data-testid="infer-slot-${n}"]`) ??
+      document.querySelector(`[data-testid="npu-model-${n}"]`)
     if (!card) return
     card.scrollIntoView({ block: 'nearest' })
     flash(card, 'card:' + name)

@@ -177,6 +177,38 @@ describe('SlotRail', () => {
     expect(card.classList.contains('flash')).toBe(false)
   })
 
+  it("clicking an npu row scrolls the NPU card's model row into view", async () => {
+    vi.useFakeTimers()
+    const target = document.createElement('div')
+    target.setAttribute('data-testid', 'npu-model-flm')
+    target.scrollIntoView = vi.fn()
+    document.body.appendChild(target)
+    await mount()
+    await act(async () => {
+      row('flm').click()
+    })
+    expect(target.scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' })
+    expect(target.classList.contains('flash')).toBe(true)
+    await act(async () => {
+      vi.advanceTimersByTime(1700)
+    })
+    expect(target.classList.contains('flash')).toBe(false)
+  })
+
+  it('a row with no card target is a no-op', async () => {
+    await mount()
+    await act(async () => {
+      row('flm').click()
+    })
+    await act(async () => {
+      row('brain').click()
+    })
+    const flashing = Array.from(document.querySelectorAll('.flash')).filter(
+      (el) => !el.closest('[data-testid="slot-rail"]'),
+    )
+    expect(flashing).toEqual([])
+  })
+
   it('Enter on a row does the same as a click', async () => {
     const card = document.createElement('div')
     card.setAttribute('data-testid', 'infer-slot-agent')
