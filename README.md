@@ -459,11 +459,15 @@ content-addressed, host-redacted archive you can attach anywhere, and
   Journal panel streams per-slot container logs from journald. Live
   telemetry — Power & Thermal (GPU clock/temp/power) and per-slot throughput
   — is on by default. The slots page splits into Inference | Image Gen tabs;
-  the Image-Gen tab has Generate, Models and Engine sub-tabs under a GPU status
-  line: it generates, installs image models with a fit meter for this box,
-  shows what a render costs chat, and operates the ComfyUI container, with
-  Hold image mode to pin the iGPU for generation and a confirm before Stop
-  image mode drops a running render.
+  the Image-Gen tab has Generate, Models and Engine sub-tabs: it generates,
+  installs image models with a fit meter for this box, shows what a render
+  costs chat, and operates the ComfyUI container. Hold image mode pins the
+  iGPU for generation, with a confirm before Stop image mode drops a running
+  render; those controls are in the dock.
+- **The dock** — one status strip on every page: GPU/image-mode state and
+  controls, slot and service health, downloads, and the live journal +
+  activity feed
+- **Slot rail** — every slot's state beside the Inference pane
 - **AI Capabilities page** — one settings surface for TTS, STT, embeddings,
   reranking, image generation and the NPU, with per-panel probe-failure
   surfacing instead of a silent grey Save.
@@ -1123,8 +1127,9 @@ running on your box. Full version at
 - **Memory engine on any model (1.6)** — the Hindsight engine runs on a local slot or an upstream model through the `hal0/memory` virtual id, switched without a restart
 - **Image-model catalog (1.7)** — image models install, fit-check and
   render from their own catalog, separate from the LLM registry
-- **Image Gen workspace (1.7)** — Generate, Models and Engine tabs under a
-  GPU status line; image mode lasts only while an image renders
+- **Image Gen workspace (1.7)** — Generate, Models and Engine tabs; the GPU's
+  state and controls live in the dock at the bottom of every page (1.7.1);
+  image mode lasts only while an image renders
 
 ### Soon
 

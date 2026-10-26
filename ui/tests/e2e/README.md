@@ -14,6 +14,29 @@ there are no PNG baselines to update. A visual contract is pinned by reading
 the value the browser resolves (e.g. `getComputedStyle(el).color`) and
 asserting it.
 
+## Running in the Playwright container
+
+When the host has no browsers installed, run the suite in Microsoft's Playwright
+image:
+
+- The image tag must match `@playwright/test` in `ui/package.json`:
+  `mcr.microsoft.com/playwright:v<version>-noble`. A mismatched browser build
+  fails to launch.
+- Run as the host user with a writable home, so the container neither writes
+  root-owned files into `ui/` nor fails on a read-only `HOME`:
+  `-u $(id -u):$(id -g) -e HOME=/tmp`.
+- Mount `ui/` and run `npx playwright test --reporter=line` from it.
+
+```bash
+docker run --rm --network host -u "$(id -u):$(id -g)" -e HOME=/tmp \
+  -v "$PWD":/work -w /work \
+  mcr.microsoft.com/playwright:v1.64.1-noble \
+  npx playwright test --reporter=line
+```
+
+Run it from `ui/`; the tag above matches `@playwright/test` 1.64.1, so change
+both together.
+
 ## Retinting the unified warm color (`warm-color-tones.spec.ts`)
 
 Every warming-state indicator (slot dots, infer/NPU epills, connections dot)

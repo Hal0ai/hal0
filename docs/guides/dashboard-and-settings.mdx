@@ -1,6 +1,6 @@
 ---
 title: Find your way around the dashboard
-description: The dashboard's persistent chrome — command palette, notifications bell, Agent Chat drawer, sidebar, and footer — and a map of every page under Settings, including what the Storage model-store migration actually does.
+description: The dashboard's persistent chrome — command palette, notifications bell, Agent Chat drawer, sidebar, and dock — and a map of every page under Settings, including what the Storage model-store migration actually does.
 sidebar:
   order: 5
 ---
@@ -10,7 +10,7 @@ import { Aside } from '@astrojs/starlight/components';
 The dashboard has two layers: a shell that's on screen no matter what page
 you're looking at, and the pages themselves. This guide maps the shell —
 the command palette, the notifications bell, the Agent Chat launcher, the
-sidebar, and the footer — then explains the memory figures the dashboard
+sidebar, and the dock — then explains the memory figures the dashboard
 shows, and walks every page under **Settings**, so nothing in the operator
 surface is a surprise.
 
@@ -86,22 +86,23 @@ backend reports them reachable.
 ### Slots: the Image Gen tab
 
 The Slots page splits into **Inference** and **Image Gen** tabs, beside
-Endpoints, Runner Images and Stacks. Image Gen is the ComfyUI engine's pane: a
-GPU status line (what the GPU is doing, what an image costs chat, and the
-buttons that fit) over three sub-tabs, **Generate**, **Models** and **Engine**,
+Endpoints, Runner Images and Stacks. Image Gen is the ComfyUI engine's pane,
+three sub-tabs directly under the tabs, **Generate**, **Models** and **Engine**,
 at `#slots/image/generate`, `#slots/image/models` and `#slots/image/engine`. The
 pane draws no memory gauges of its own: a model's fit meter reads the same
 memory budget as the figures below. Installing models, generating and reading
-the status line are in [Generate images](/docs/guides/generate-images); while
-the GPU is in image mode, a banner on every page links to the Engine tab, and
-the paused slots' cards on the Inference tab carry a `paused · image mode` chip.
+the GPU's state are in [Generate images](/docs/guides/generate-images). What the
+GPU is doing, what an image costs chat and the buttons that fit live in the
+dock on every page (see [The dock](#the-dock)); the paused slots' cards on the
+Inference tab keep their `paused · image mode` chip, and the
+[slot rail](#slot-rail) beside the Inference pane shows them hollow-blue.
 
 ### Services
 
 The **Services** page is the management surface for hal0's companion
 processes — OpenWebUI, ComfyUI, Hermes, and Hindsight — all four sourced
 from one server-side catalog (`hal0.services.registry.SERVICES`), so the
-page and the footer's services pip group can never disagree about which
+page and the dock's services pip group can never disagree about which
 services exist. Each card shows:
 
 - a real up/down state (never a placeholder) — ComfyUI via its own
@@ -124,7 +125,7 @@ services exist. Each card shows:
 A service the backend has no real probe for (nothing in the current
 catalog, but a future extension-provided service could arrive this way)
 reports honestly as unmonitored rather than a fabricated "up" — the same
-rule the Overview card's services pip group and the footer's ready count
+rule the Overview card's services pip group and the dock's ready count
 follow.
 
 The **Discovery (mDNS)** card at the top shows whether `avahi-daemon` is
@@ -136,22 +137,51 @@ present, alongside the same permission fix-up that lets the daemon (running as t
 addon files — so both announcements come up out of the box, not just the
 addons.
 
-### Footer
+### The dock
 
-The footer is always visible as a thin strip and expands into a pane when
-toggled. Collapsed, it shows two LED-pip groups plus a toggle:
+The dock is the console's one status surface, at the bottom of every page. It
+pushes the page up when it opens and never covers it. Always visible, one row
+shows:
 
+- the **GPU segment** — a headline and a one-line detail from the GPU arbiter
+  (`GPU · chat mode`, `Rendering · <model> · step n/N`, …) and up to two
+  buttons for what fits right now (Hold, Keep, Unpin, Stop image mode, Cancel,
+  Restart engine, Dismiss). Click the headline for the **gpu** tab. A box with
+  no GPU pool reading or no image engine shows no segment,
 - a **slots** group — one pip per active slot (colored by state) and a
   ready count,
 - a **services** group — one pip per backing service and a ready count
   (a single warn-toned "services unknown" pip appears if the health
   check itself hasn't answered, rather than falsely reporting all-green),
 - an update chip when a new hal0 release is available,
-- a trailing tail of the most recent journal lines.
+- the **dock** toggle, with a `+N` badge for the events that arrived while it
+  was closed.
 
-Expanded, it becomes a two-tab pane: **journal** (the live event stream,
-filterable by source and searchable) and **downloads** (active/queued/
-completed/failed model pulls with cancel, retry, and clear controls).
+Under the row, a two-row ticker shows the newest events, newest at the bottom.
+The toggle expands the dock into three tabs:
+
+- **events** — journal lines (tagged `J`) merged with activity actions (tagged
+  `A`) in one timeline, newest last. Filter by stream (all, journal,
+  activity), severity, source and slot, or search. Click an activity row for
+  its action, target, outcome and before/after. **Export** downloads the
+  activity trail with the current filters; journal lines are on the
+  [Logs page](/docs/guides/logs-and-activity).
+- **gpu** — the full status with its step chips and render progress, every
+  button including **Restart engine**, **Logs** and **Open editor**, and a
+  grid of facts: mode, phase, engine and gate, queue, chat waiting, GPU pool,
+  slots, and the last image made in this browser.
+- **downloads** — active, queued, completed and failed model pulls with
+  cancel, retry and clear controls.
+
+### Slot rail
+
+On the **Inference** tab, the right column is the slot rail: every slot,
+grouped by device (GPU · vulkan, GPU · rocm, NPU, CPU), with its state dot,
+device chip, tok/s or state, model and loaded GB. The header reads `N / M
+ready`, the same fraction as the dock's slots group, and the rail's footer shows the
+GB loaded and the pool's free GB. A row flashes when an event for that slot
+lands in the dock's feed; click a row to jump to its card. The Image Gen tab
+has no side column, so its pane takes the full width.
 
 ## Memory figures
 

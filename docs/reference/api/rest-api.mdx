@@ -53,7 +53,7 @@ default posture.
 <Aside type="note">
 `src/hal0/api/routes/events.py`, `activity.py`, and `journal.py` each carry a
 module docstring claiming "no auth dependency" / "no auth gate" for first-run UX
-reasons (the footer/journal/activity panels must render before any credential
+reasons (the dock's events pane must render before any credential
 exists). `exposure.py`'s own module docstring names eight routes not spelled out
 in either explicit OPEN/CLIENT bucket list — `/api/status`, JSON `/api/metrics`,
 `/api/features`, `/api/logs`, `/api/events`, `/api/activity`, `/api/journal`, and
@@ -111,8 +111,8 @@ silently paper over.
 | `/api/board` | ADMIN | Operator Board — task/board CRUD, links, dispatch, and `WS /api/board/events`. Frozen FE↔BE contract (`ui/CONTRACTS.md` §4). |
 | `/api/brain` | ADMIN | `POST /api/brain/chat` (SSE) — the primary hal0-brain platform-steward chat surface. Drives the full admin tool surface (slot mutations, model pulls, board writes), hence ADMIN. |
 | `/api/updates` | ADMIN | Self-update: release-manifest check, prepare/commit/apply/rollback, channel get/set, post-update slot-drift report + restart. A commit job's `convergence.post_activation_migrations` carries `conversion_blockers` (target, reason) for anything the profile-centric conversion left unconverted; rollback to a release before the conversion restores the conversion backups first and reports them as `profile_conversion_restored`. Job state is also kept under `/var/lib/hal0/update-jobs/`: a job read back from there after a hal0-api restart that is still `queued` or `running` was killed with the old process and reads `failed` with `error_code: "api_restarted"` and an `error` that says what was interrupted ("hal0-api restarted during the repair; the live release is unchanged" for a Hermes repair, "... during the build; ..." for a Hermes converge, the one atomic builder, and "hal0-api restarted before this job finished; check `hal0 update status` before retrying" for any other job); a finished job reads as it was. |
-| `/api/events` | ADMIN | Dashboard footer event feed — backfill + `GET /api/events/stream` (SSE). See the auth-tier note above. |
-| `/api/activity` | ADMIN | Durable audit surface (SQLite-backed) — the slots-page ActivityLog's source of truth, with `/export` (csv/json) and `/stream` (SSE). See the auth-tier note above. |
+| `/api/events` | ADMIN | Dashboard dock event feed — backfill + `GET /api/events/stream` (SSE). See the auth-tier note above. |
+| `/api/activity` | ADMIN | Durable audit surface (SQLite-backed) — the source of truth for the dock's activity rows (`kind=action`), with `/export` (csv/json) and `/stream` (SSE). See the auth-tier note above. |
 | `/api/journal` | ADMIN | Unified journal panel — flattens `/api/events` into one envelope for the dashboard journal view. See the auth-tier note above. |
 | `/api/images` | ADMIN | Cache for PNGs written by `POST /v1/images/generations`. ADMIN because a cached-image URL could otherwise leak a prompt via filename. |
 | `/api/agents` | ADMIN | Bundled-agent lifecycle (install/uninstall/list/status), personas, service restart, Hermes gateway restart and Hermes repair (see the [Agents API reference](/docs/reference/api/agents/)), memory stats, and Hermes command approvals (`GET`/`PUT /api/agents/hermes/command-approvals`). The command-approvals `PUT` also refuses a request whose `X-hal0-Agent` header names an agent. `POST /api/agents/hermes/reconcile-upstreams` re-registers the Hermes profiles as upstreams on demand (it runs the profile API-key sweep first) and returns `{ok: true, ...report}`; 404 `agent.not_installed` when Hermes is not installed. hal0-api also reconciles every 120 s and after an agent install or uninstall. The agent chat proxy is gone: `/api/agents/{id}/events`, `/submit` and `/session/handshake\|create\|resume\|history` return 404. `GET /api/agents/{name}/overview` is the state behind the Hermes and Pi cards (see the [Agents API reference](/docs/reference/api/agents/)). |
@@ -210,7 +210,7 @@ by anyone who can reach the API):
   systemd `EnvironmentFile`: an injected line separator could otherwise smuggle a
   second `KEY=value` pair into the file on round-trip.
 
-Every set/delete emits a structured `hal0.audit` log line and a footer journal event
+Every set/delete emits a structured `hal0.audit` log line and a journal event (shown in the dock)
 carrying the secret **name** only, never the value.
 
 ## Proxmox integration (`/api/settings/proxmox`)

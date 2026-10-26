@@ -34,21 +34,18 @@ render runs and for about 10 seconds after the last one, or until you unpin a
 pinned image mode. See [How long image mode lasts](/docs/guides/image-mode-and-gpu-gate#how-long-image-mode-lasts).
 </Aside>
 
-The dashboard's **Slots → Image Gen** tab has three sub-tabs under a GPU status
-line:
+The dashboard's **Slots → Image Gen** tab has three sub-tabs:
 
 - **Generate** — prompt, model, size, the fit check and the results.
 - **Models** — the image-model catalog: install, remove, and what fits.
 - **Engine** — the ComfyUI container (its state, `listens on the LAN` or
-  `listens on loopback`, the GPU
-
-  gate as `current`, `stale`, `unknown` or `no credential`, **Restart engine**,
-  **Logs** and **Stop image mode**), the editor link, the queue as
-  `n running · n waiting` with hal0's own render beside it, and the GPU device's
-  temperature and clock.
+  `listens on loopback`, the GPU gate as `current`, `stale`, `unknown` or
+  `no credential`, **Restart engine** and **Logs**), the editor link, and the
+  queue as `n running · n waiting` with hal0's own render beside it. GPU clock
+  and temperature are in the Slots page's telemetry bar.
 
 ![The hal0 Image Gen tab on the Slots page](/screenshots/image-gen-comfyui.png)
-*The Image Gen tab on the Slots page.*
+*The Image Gen tab on the Slots page (predates the dock, which now holds the GPU status line).*
 
 ## Install a model
 
@@ -249,7 +246,7 @@ A run shows its steps: `Chat reply finishing`, `Unload N GPU slots`,
 `Engine ready`, `Load model`, `Render k/N` and `Save`, with a progress bar, the
 elapsed time and **Cancel**. Before the prompt is queued, Cancel aborts the
 request; once it is queued, Cancel also calls `POST /api/comfyui/render/cancel`.
-Leaving the tab does not end a run; the status line keeps the controls. A render
+Leaving the tab does not end a run; the dock keeps the controls. A render
 can take minutes, and each card in the Models tab shows its estimate as
 `~N s per image`.
 
@@ -325,12 +322,11 @@ is refused with 409 `capability.model_not_downloaded`. See
 
 ## What a render does to chat
 
-The **GPU status line** at the head of the Image Gen tab says what the GPU is
-doing, what the next image costs chat and which buttons fit. It reads the GPU
-arbiter's phase and ComfyUI's queue, so it also shows a render queued from the
-editor. It is hidden on a box with no GPU pool reading or no ROCm lane. While
-the GPU is in image mode, a banner on every other dashboard page gives the same
-state in one line and links to the Engine tab.
+The dock's **GPU segment**, at the bottom of every page (and its **gpu** tab),
+says what the GPU is doing, what the next image costs chat and which buttons
+fit. It reads the GPU arbiter's phase and ComfyUI's queue, so it also shows a
+render queued from the editor, and is hidden on a box with no GPU pool reading
+or no ROCm lane. The segment shows at most two buttons; the tab shows them all.
 
 | Headline | When | Buttons |
 |---|---|---|
@@ -350,12 +346,12 @@ with `503 gpu.image_mode` until you unpin, and the paused GPU slots stay paused.
 **Cancel render** is `POST /api/comfyui/render/cancel`, which also clears
 prompts queued from the editor. **Stop image mode** unpins first when the box is
 pinned, then switches to `inference`; when a render is running it asks first,
-because stopping drops that render and the prompts queued behind it.
+because stopping drops that render and the prompts queued behind it. The
+**gpu** tab offers it whenever image mode is on, the segment only while pinned.
 
-Three more states are about the GPU gate (see
-[ComfyUI's editor and the GPU gate](/docs/guides/image-mode-and-gpu-gate#comfyuis-editor-and-the-gpu-gate)). The
-blocked line comes first; the refusal and the stale gate wait behind any work in
-progress:
+Three more states are about the GPU gate. The blocked state comes first (it is
+also the one banner left at the top of every page); the refusal and the stale
+gate wait behind any work in progress:
 
 | Headline | Meaning | Buttons |
 |---|---|---|
@@ -380,7 +376,7 @@ render. Their cards on **Slots → Inference** carry a `paused · image mode` ch
 with the note `Reloads about 10 s after the last image.`, `Stays paused until
 image mode is unpinned.` or `Reloading now.`
 
-The fields behind the line (`GET /api/comfyui/status` and `/arbiter`), the
+The fields behind the segment (`GET /api/comfyui/status` and `/arbiter`), the
 switchover and pin calls, how long image mode lasts and what the GPU gate
 refuses are in [Image mode and the GPU gate](/docs/guides/image-mode-and-gpu-gate).
 
@@ -506,7 +502,7 @@ write the models tree. The tab shows two commands to run on the host,
 **Install is disabled and the tab says `Image generation is unavailable on this
 host`.** The host has no ROCm lane (ComfyUI needs `/dev/kfd` and a render node),
 so `GET /api/comfyui/models` reports `engine.available: false` with that
-reason. The catalog is still listed, with no fit chips and no status line.
+reason. The catalog is still listed, with no fit chips and no GPU segment.
 
 **Generate answers 409 `image.model_not_installed`.** The model's weights are not
 all on disk. The dashboard shows the message with **Open Models**; the API's
@@ -517,14 +513,14 @@ model at that size needs more GPU pool or RAM than this box has free; the reason
 names the budget. Nothing was unloaded. Pick a smaller size or a model that fits
 (the card offers one), or free memory. See [Will it fit?](#will-it-fit).
 
-**A prompt is refused by the GPU gate.** The status line reads
+**A prompt is refused by the GPU gate.** The dock's GPU segment reads
 `GPU gate refused a prompt · hh:mm` with the reason, `/v1` answers 503
 `image.gate_refused` and `GET /api/comfyui/status` carries it as
 `gate_refusal`. Queue the prompt again once the reason is gone; **Dismiss**
 hides the line until the next refusal. See
 [ComfyUI's editor and the GPU gate](/docs/guides/image-mode-and-gpu-gate#comfyuis-editor-and-the-gpu-gate).
 
-**After an update, the line reads `The image engine runs an older GPU gate`, or
+**After an update, the GPU segment reads `The image engine runs an older GPU gate`, or
 says image generation is blocked.** Run `hal0 slot restart img` once, or press
 **Restart engine** on the Engine tab. A running `img` container keeps the gate it
 started with.
