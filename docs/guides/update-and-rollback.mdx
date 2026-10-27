@@ -292,6 +292,15 @@ The first `hal0 update` to 1.6.0 changes how Hermes is installed. One step is ne
   Engine tab keeps Restart engine and Logs, and the Slots page's Activity
   sidebar became the dock's **events** tab. See
   [The dock](/docs/guides/dashboard-and-settings#the-dock).
+- **ComfyUI drops to the `hal0` account.** The same `hal0 slot restart img`
+  switches the running container from root to the hal0 identity. If the
+  ComfyUI data root (`/var/lib/hal0/models/comfyui` by default) was laid down
+  by hand under another account or on a share, make its `output`, `input`,
+  `user` and `custom_nodes` directories writable by `hal0` first, as root:
+  `chgrp -R <hal0 group> <dir> && chmod -R g+ws <dir>`. A data root hal0
+  created is already `hal0:hal0 2775`. Until then a render fails at
+  `SaveImage` with `Permission denied`, and `hal0-api`'s journal logs
+  `comfyui.data_dir_not_writable` with the command.
 
 ## Upgrading to 1.7.0
 

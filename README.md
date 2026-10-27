@@ -51,8 +51,9 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash
 > **What 1.7.1 brings:** the dock, one status strip on every page for the
 > GPU's state and controls, slot and service health, downloads and a live
 > journal + activity feed; a slot rail beside the Inference pane; ComfyUI's
-> editor on the LAN again; an upgrade floor of 1.5.0; and twenty fixes from
-> the 1.7 fix wave. See [What's new](#whats-new) and
+> editor on the LAN again, and ComfyUI running as the `hal0` account inside
+> its container instead of root; an upgrade floor of 1.5.0; and twenty fixes
+> from the 1.7 fix wave. See [What's new](#whats-new) and
 > [Upgrading to 1.7.1](#upgrading-to-171).
 
 > **⚡ The installer is the whole setup.** There is no separate first-run
@@ -248,6 +249,12 @@ from zero.
   for that slot lands.
 - **ComfyUI's editor on the LAN**, `http://<host>:8188`, announced over mDNS;
   `[network].comfyui_listen = "loopback"` fences it again. ADR-0041.
+- **ComfyUI runs as the `hal0` account inside the `img` container**, not as
+  root: the slot's unit carries `User=<hal0 uid>:<gid>` and the sudo wrapper
+  accepts exactly that identity, so a custom node or workflow writes the data
+  root as `hal0` and an escape lands on `hal0`, not uid 0. The models mount
+  moved to `/opt/hal0-models`; a data root hal0 created needs nothing, one laid
+  down under another account needs a one-time `chgrp`/`chmod` (#3066).
 - **Upgrades start at 1.5.0.** A 1.3.x or 1.4.x box runs the 1.5.0
   installer in place first; `hal0 update` prints the command and stops.
 - **Fixes from the 1.7 fix wave**: image downloads from the current Hugging
@@ -1008,6 +1015,15 @@ later. Before you take it:
   mode live in the dock's GPU segment and **gpu** tab on every page; the
   Engine tab keeps Restart engine and Logs. The Activity sidebar's records
   are in the dock's **events** tab.
+- **ComfyUI drops to the `hal0` account.** The same `hal0 slot restart img`
+  switches the running container to the hal0 identity. If the ComfyUI data
+  root (`/var/lib/hal0/models/comfyui` by default) was laid down by hand under
+  another account or on a share, make its `output`, `input`, `user` and
+  `custom_nodes` directories writable by `hal0` first, as root:
+  `chgrp -R <hal0 group> <dir> && chmod -R g+ws <dir>`. A data root hal0
+  created is already `hal0:hal0 2775`; until the fix, a render fails at
+  `SaveImage` with `Permission denied` and `hal0-api` logs
+  `comfyui.data_dir_not_writable` with the command.
 
 ### Upgrading to 1.7.0
 

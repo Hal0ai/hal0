@@ -40,6 +40,7 @@ applying. Add those subsections to a version's section to surface them; see
 - **Upgrades start at 1.5.0.** A 1.3.x or 1.4.x box steps through 1.5.0 first; `hal0 update` says so and stops before downloading.
 - **Twenty fixes from the 1.7 fix wave**, among them: a random image seed that a browser holds exactly, image downloads from the current Hugging Face repos, `hal0 update` no longer claiming no slots need a restart, Open WebUI left stopped when its image upgrades, and approval cards that show which resource a gated call acts on.
 - **Faster pull-request checks.** A UI-only or docs-only change skips the Python matrix, and the Playwright suite runs as four shards.
+- **ComfyUI runs as the `hal0` account inside the `img` container**, not as root; the sudo wrapper accepts that one identity only. A data root laid down by hand under another account needs a one-time `chgrp`/`chmod` (see Breaking), and the engine restarts once (#3066).
 
 ### Breaking
 
