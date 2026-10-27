@@ -30,6 +30,17 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+## [1.7.1] — 2026-10-27
+
+### Highlights
+
+- **The dock.** The console's status strip is now one surface for everything live: the GPU's state and its controls (hold, keep, unpin, stop, restart), slot and service health, downloads, and a feed that merges the journal with the activity trail, with a two-row ticker and an unseen badge while collapsed. It works on phones too. The Image Gen pane's status line, the top image-mode banner, the Engine tab's device card and the Activity sidebar are gone (ADR-0042).
+- **The slot rail.** Beside the Inference pane, every slot grouped by device with its state, tok/s, model and loaded memory; a row flashes when something happens to that slot.
+- **ComfyUI's editor answers on the LAN again** at `http://<host>:8188`, announced over mDNS, with `[network].comfyui_listen = "loopback"` to fence it (ADR-0041).
+- **Upgrades start at 1.5.0.** A 1.3.x or 1.4.x box steps through 1.5.0 first; `hal0 update` says so and stops before downloading.
+- **Twenty fixes from the 1.7 fix wave**, among them: a random image seed that a browser holds exactly, image downloads from the current Hugging Face repos, `hal0 update` no longer claiming no slots need a restart, Open WebUI left stopped when its image upgrades, and approval cards that show which resource a gated call acts on.
+- **Faster pull-request checks.** A UI-only or docs-only change skips the Python matrix, and the Playwright suite runs as four shards.
+
 ### Breaking
 
 - **ComfyUI's editor is on the LAN again, and announced over mDNS.** `http://<host>:8188` opens ComfyUI's web UI from any machine on the network, and the Discovery (mDNS) card on the Services page announces it as `http://<host>.local:8188` beside Open WebUI, the way hal0 did before the host-net loopback fence. The new `comfyui_listen` key of `[network]` in `hal0.toml` is the switch: `"lan"` (the default) or `"loopback"`, which fences `:8188` to the box like every other slot and keeps the SSH-tunnel and `HAL0_COMFYUI_PUBLIC_URL` paths. ComfyUI has no sign-in of its own, so `"lan"` is for a network you trust. The dashboard follows the live mode: `GET /api/config/urls` adds `comfyui_lan`, the editor button opens from anywhere while it is true, and the Engine tab's Network row reads `listens on the LAN` or `listens on loopback`. Every other slot still renders a loopback bind under host networking ([ADR-0041](docs/adr/0041-the-comfyui-editor-answers-on-the-lan.md), #3049).

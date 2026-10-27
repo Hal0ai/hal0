@@ -31,7 +31,7 @@ process to babysit.
 curl -fsSL https://hal0.dev/install.sh | sudo bash
 ```
 
-> **v1.7.0 is the current stable release** (2026-10-26). It rebuilds image
+> **v1.7.1 is the current stable release** (2026-10-26). It rebuilds image
 > generation around a catalog of image models, with no config-schema
 > migration and an ordinary `hal0 update` from any 1.4.x or later box; a 1.3.x
 > box hops through 1.5.0 first. Run `hal0 slot restart img` once after the
@@ -48,12 +48,12 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash
 > read [Upgrading from an older release](#upgrading-from-an-older-release)
 > first.
 
-> **What 1.7.0 brings:** image models installed from a catalog, with a fit
-> check against this box's memory before any download or render; Open WebUI
-> images through hal0's `/v1`; image mode that lasts only while an image
-> renders; and an Image Gen tab with Generate, Models and Engine under a GPU
-> status line. See [What's new](#whats-new) and
-> [Upgrading to 1.7.0](#upgrading-to-170).
+> **What 1.7.1 brings:** the dock, one status strip on every page for the
+> GPU's state and controls, slot and service health, downloads and a live
+> journal + activity feed; a slot rail beside the Inference pane; ComfyUI's
+> editor on the LAN again; an upgrade floor of 1.5.0; and twenty fixes from
+> the 1.7 fix wave. See [What's new](#whats-new) and
+> [Upgrading to 1.7.1](#upgrading-to-171).
 
 > **⚡ The installer is the whole setup.** There is no separate first-run
 > wizard afterwards. `install.sh` asks where models should live, optionally
@@ -229,6 +229,35 @@ pull, and an interrupted pull resumes via HTTP `Range` instead of restarting
 from zero.
 
 ## What's new
+
+### Shipped in 1.7.1
+
+- **The dock.** The console footer is now the dock: a GPU segment with the
+  arbiter's headline, detail and the buttons that fit (click it for the
+  **gpu** tab with every action and a facts grid), the slots and services
+  pips, the update chip, a two-row ticker and a `+N` badge for events that
+  arrived while it was closed. Expanded, the **events** tab merges journal
+  lines with activity actions behind stream, severity, source, slot and
+  search filters, with an export of the activity trail. The Image Gen pane's
+  GPU status line, the top image-mode banner, the Engine tab's GPU device
+  card and the Slots page's Activity sidebar are gone; the dock works on
+  phones. ADR-0042.
+- **The slot rail.** On the Inference tab, every slot grouped by device with
+  its state dot, device chip, tok/s or state, model and loaded memory; an
+  `N / M ready` count that matches the dock's; a row flashes when an event
+  for that slot lands.
+- **ComfyUI's editor on the LAN**, `http://<host>:8188`, announced over mDNS;
+  `[network].comfyui_listen = "loopback"` fences it again. ADR-0041.
+- **Upgrades start at 1.5.0.** A 1.3.x or 1.4.x box runs the 1.5.0
+  installer in place first; `hal0 update` prints the command and stops.
+- **Fixes from the 1.7 fix wave**: image downloads from the current Hugging
+  Face repos; a random image seed a browser holds exactly; render progress
+  behind an HTTP proxy; a clean 502 when ComfyUI sends back text that cannot
+  be serialised; `hal0 update` no longer claims no slots need a restart; a
+  stopped Open WebUI stays stopped when its image upgrades; the Services page
+  and resumed downloads no longer stall the API; approval cards show which
+  resource a gated call acts on; `hal0 doctor` names a gateway remedy that
+  works when the unit is masked.
 
 ### Shipped in 1.7.0
 
@@ -961,6 +990,24 @@ is `.../download/v1.3.0/stable.json`), then takes the 1.5.0 hop.
 Or reinstall from scratch with `sudo bash installer/uninstall.sh --purge`,
 which deletes `/etc/hal0` and `/var/lib/hal0`, models included, followed by
 the normal one-liner.
+
+### Upgrading to 1.7.1
+
+1.7.1 follows the same `hal0 update` path from any 1.x box at 1.5.0 or
+later. Before you take it:
+
+- **A 1.3.x or 1.4.x box steps through 1.5.0 first.** `hal0 update` stops
+  before it downloads anything and prints the installer command for 1.5.0;
+  run that, then update again.
+- **Run `hal0 slot restart img` once for the LAN editor.** The running
+  ComfyUI container keeps the loopback bind it started with, so
+  `http://<host>:8188` is refused from other machines until the engine
+  restarts. If you want the editor fenced to the box, set
+  `[network].comfyui_listen = "loopback"` in `/etc/hal0/hal0.toml` first.
+- **The GPU's controls moved to the dock.** Hold, keep, unpin and stop image
+  mode live in the dock's GPU segment and **gpu** tab on every page; the
+  Engine tab keeps Restart engine and Logs. The Activity sidebar's records
+  are in the dock's **events** tab.
 
 ### Upgrading to 1.7.0
 
