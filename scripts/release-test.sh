@@ -248,8 +248,11 @@ remote_slot_create() {
 LAST_LOAD_OUTPUT=""
 remote_slot_load() {
     # remote_slot_load <slot> [load args…]  → exit status of `hal0 slot load`
-    local out
-    if out="$(ssh_exec "${REMOTE_HAL0_BIN} slot load $*" 2>&1)"; then
+    local out args
+    # The script's IFS is newline+tab, so "$*" would join the load args with
+    # newlines and ssh would run each as its own command line.
+    args="$(printf '%s ' "$@")"
+    if out="$(ssh_exec "${REMOTE_HAL0_BIN} slot load ${args% }" 2>&1)"; then
         LOADED_SLOTS+=("$1")
         return 0
     fi
