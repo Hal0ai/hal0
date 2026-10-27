@@ -20,6 +20,42 @@ permissions:
   contents: read
 
 jobs:
+  # Fast lane for pull requests: decide which heavy jobs the diff actually
+  # needs. A docs-only or ui-only PR skips the two ~8-minute Python matrix
+  # jobs; their required status checks still report (a job skipped by its
+  # own `if:` counts as passing for branch protection, a workflow skipped by
+  # a `paths:` filter does not). The filter errs toward running: anything
+  # outside `ui/`, `docs/` and prose files runs the full suite. Pushes to
+  # main never skip (the nightly gate reads that run).
+  changes:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    timeout-minutes: 5
+    outputs:
+      python: ${{ steps.classify.outputs.python }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Classify the diff
+        id: classify
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          FILES="$(git diff --name-only "${BASE}" "${HEAD}")"
+          echo "changed files:"; printf '  %s\n' ${FILES:-"(none)"}
+          # Paths that cannot affect the Python package or its tests.
+          LIGHT='^(ui/|docs/|screenshots/|\.github/ISSUE_TEMPLATE/|\.github/PULL_REQUEST_TEMPLATE\.md$|[^/]+\.md$|[^/]+\.mdx$|LICENSE$|CODEOWNERS$)'
+          PY=false
+          while IFS= read -r f; do
+            [[ -z "$f" ]] && continue
+            if ! [[ "$f" =~ $LIGHT ]]; then PY=true; fi
+          done <<< "${FILES}"
+          echo "python=${PY}" >> "$GITHUB_OUTPUT"
+          echo "::notice::python jobs needed: ${PY}"
+
   # Rework de-scar guardrail (stdlib-only, fast): overdue HAL0-SUNSET shims +
   # scar-marker ratchet. Every de-scar PR keeps this green (baseline only falls).
   sunset:
@@ -34,6 +70,11 @@ jobs:
 
   python:
     runs-on: ubuntu-latest
+    needs: [changes]
+    # Skipped on a PR whose diff cannot touch the package (see `changes`);
+    # `!cancelled()` lets the condition run even though `changes` itself is
+    # skipped on pushes to main, where every job always runs.
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.python == 'true') }}
     # The ~13k-test suite runs across 4 xdist workers (#2341); serially it had
     # grown to ~30 min quiet and 38-45+ min under --cov on 3.12, which hit
     # this cap. The bound exists because an infra stall (a 41-minute apt-get
