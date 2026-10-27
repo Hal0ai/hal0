@@ -13,14 +13,6 @@ name: Nightly
 # docs/superpowers/specs/2026-06-14-nightly-channel-design.md.
 
 on:
-  # Cut as soon as main is green: CI's own run on the merge commit is the
-  # greenness gate below, so a completed CI run on main is the earliest
-  # moment a nightly can be tagged. The change gate keeps same-commit re-runs
-  # from tagging twice, and the `nightly` concurrency group serialises them.
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
-    branches: [main]
   schedule:
     # 06:00 UTC = 02:00 America/New_York during EDT (drifts to 01:00 EST in
     # winter; GitHub cron is UTC and does not observe DST). The exact minute
@@ -46,9 +38,6 @@ jobs:
   tag:
     name: Gate + tag nightly
     runs-on: ubuntu-latest
-    # A CI run that failed, or one for a non-main branch (workflow_run fires
-    # for the workflow, the branches filter is advisory), never tags.
-    if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
     timeout-minutes: 10
     outputs:
       skip: ${{ steps.green.outputs.skip == 'true' || steps.change.outputs.skip == 'true' }}
