@@ -497,7 +497,7 @@ def _check_writable_mount_sources() -> None:
 
 
 def _migrate_models_mount(text: str) -> str | None:
-    """``text`` with a legacy hal0 ``base_path`` moved to the current mount, else None.
+    """``text`` with an earlier hal0 ``base_path`` moved to the current mount, else None.
 
     Only the one ``base_path`` line changes; every other line (an operator's
     extra model types, comments) is kept byte for byte. A ``base_path`` hal0
