@@ -110,7 +110,10 @@ _AMDGPU_MODULE_DIR = "/sys/module/amdgpu"
 #: uid the slot containers are launched as. hal0's ``hal0-slot@.service`` units
 #: carry no ``User=``, so podman runs rootful and the container process opens
 #: ``/dev/kfd`` as root — regardless of which user ``hal0-api`` itself runs as.
-#: See :func:`kfd_present` for why that distinction is load-bearing.
+#: See :func:`kfd_present` for why that distinction is load-bearing. The one
+#: exception is the img slot, whose plan pins ``User=`` to the hal0 account
+#: (#3066); :func:`hal0.providers.container.ContainerProvider` hands the guard
+#: that plan's uid instead of this default.
 SLOT_RUNNER_UID = 0
 
 #: :func:`kfd_status` verdicts.

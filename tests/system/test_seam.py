@@ -510,3 +510,28 @@ def test_running_hal0_bin_falls_back_to_path_then_the_bare_name(
     assert seam_mod.running_hal0_bin() == "/usr/bin/hal0"
     monkeypatch.setattr(seam_mod.shutil, "which", lambda _n: None)
     assert seam_mod.running_hal0_bin() == "hal0"
+
+
+# ── hal0_service_account (#3066) ──────────────────────────────────────────────
+
+
+def test_hal0_service_account_is_none_without_the_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _missing(name: str) -> None:
+        raise KeyError(name)
+
+    monkeypatch.setattr(seam_mod.pwd, "getpwnam", _missing)
+    assert seam_mod.hal0_service_account() is None
+
+
+def test_hal0_service_account_carries_sorted_supplementary_groups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Primary gid excluded, the rest sorted — the img plan merges them into
+    ``--group-add`` after the GPU groups, so the order must be stable."""
+    pw = MagicMock(pw_uid=996, pw_gid=989)
+    monkeypatch.setattr(seam_mod.pwd, "getpwnam", lambda name: pw)
+    monkeypatch.setattr(seam_mod.os, "getgrouplist", lambda name, gid: [2000, 989, 44, 993, 44])
+    account = seam_mod.hal0_service_account()
+    assert account == seam_mod.ServiceAccount(996, 989, (44, 993, 2000))

@@ -18,6 +18,7 @@ import pytest
 
 from hal0.providers.comfyui import ComfyUIProvider, provision_data_root
 from hal0.providers.container import _render_quadlet_from_plan, _spec_provider_for
+from hal0.system.seam import ServiceAccount
 
 _GPU_NODES = ["/dev/kfd", "/dev/dri/card1", "/dev/dri/renderD128"]
 
@@ -62,6 +63,15 @@ def _pin_model_store(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _hal0_account(monkeypatch: pytest.MonkeyPatch) -> ServiceAccount:
+    """Pin the hal0 account (#3066) — dev/CI boxes have none, lab boxes differ."""
+    account = ServiceAccount(996, 989, (44, 993, 2000))
+    monkeypatch.setattr("hal0.providers.comfyui.hal0_service_account", lambda: account)
+    monkeypatch.setattr("hal0.providers.comfyui.resolve_gpu_group_ids", lambda: [44, 993])
+    return account
+
+
+@pytest.fixture(autouse=True)
 def _no_data_root_provisioning(monkeypatch: pytest.MonkeyPatch) -> None:
     """Building a spec must not touch the literal paths these tests assert on.
 
@@ -83,7 +93,7 @@ def test_comfyui_spec_matches_live_deployment() -> None:
     assert spec.devices == _GPU_NODES
     # Data mounts mirror docker inspect on CT105 (first-class Mount objects).
     pairs = {(m.source, m.target) for m in spec.mounts}
-    assert ("/mnt/ai-models/comfyui/models", "/root/comfy-models") in pairs
+    assert ("/mnt/ai-models/comfyui/models", "/opt/hal0-models") in pairs
     for sub in ("output", "input", "user", "custom_nodes"):
         assert (f"/mnt/ai-models/comfyui/{sub}", f"/opt/ComfyUI/{sub}") in pairs
     assert any("extra_model_paths.yaml" in m.source for m in spec.mounts)
@@ -102,6 +112,40 @@ def test_comfyui_spec_matches_live_deployment() -> None:
     assert spec.port == 8188
     # Profile flags flow into the bash -lc payload.
     assert spec.command[-1].endswith("--cache-none")
+
+
+# ── #3066: ComfyUI runs as the hal0 account, not root ─────────────────────────
+
+
+def test_comfyui_spec_runs_as_the_hal0_account(_hal0_account: ServiceAccount) -> None:
+    spec = ComfyUIProvider().container_spec(_img_cfg(), {})
+    assert spec.user == "996:989"
+    unit = _render_from_spec("img", spec)
+    assert "\nUser=996:989\n" in unit
+    # Every host group hal0 belongs to rides along, GPU groups first, no dupes.
+    assert spec.group_add == ["44", "993", "2000"]
+
+
+def test_comfyui_spec_gives_the_account_a_writable_home_and_temp() -> None:
+    """The image's /root is 0550 root and /opt/ComfyUI/temp is root-owned, so
+    a non-root ComfyUI needs both pointed somewhere it can write."""
+    spec = ComfyUIProvider().container_spec(_img_cfg(), {})
+    pairs = {(m.source, m.target) for m in spec.mounts}
+    assert ("/mnt/ai-models/comfyui/home", "/home/hal0") in pairs
+    assert spec.env["HOME"] == "/home/hal0"
+    assert spec.env["USER"] == "hal0" and spec.env["LOGNAME"] == "hal0"
+    assert "--temp-directory /tmp " in spec.command[-1]
+    assert not any(m.target.startswith("/root/") for m in spec.mounts)
+
+
+def test_comfyui_spec_keeps_the_images_identity_without_a_hal0_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("hal0.providers.comfyui.hal0_service_account", lambda: None)
+    spec = ComfyUIProvider().container_spec(_img_cfg(), {})
+    assert spec.user == ""
+    assert "User=" not in _render_from_spec("img", spec)
+    assert spec.group_add == ["44", "993"]
 
 
 def _gate_env(spec: Any) -> dict[str, str]:
@@ -261,7 +305,7 @@ def test_comfyui_data_root_env_override(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", "/srv/comfy-data")
     spec = ComfyUIProvider().container_spec(_img_cfg(), {})
     pairs = {(m.source, m.target) for m in spec.mounts}
-    assert ("/srv/comfy-data/models", "/root/comfy-models") in pairs
+    assert ("/srv/comfy-data/models", "/opt/hal0-models") in pairs
     assert ("/srv/comfy-data/output", "/opt/ComfyUI/output") in pairs
     assert not any(m.source.startswith("/mnt/ai-models/comfyui") for m in spec.mounts)
 

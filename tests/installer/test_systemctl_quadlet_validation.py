@@ -26,6 +26,7 @@ allow-list would reject fails here instead of on a production host.
 
 from __future__ import annotations
 
+import pwd
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -166,7 +167,7 @@ _PLANS: dict[str, tuple[RuntimeLaunchPlan, dict[str, Any]]] = {
         RuntimeLaunchPlan(
             image="ghcr.io/hal0ai/hal0-comfyui:v1",
             command=["python", "main.py", "--listen", "0.0.0.0", "--port", "8188"],
-            mounts=[Mount("/var/lib/hal0/comfyui/models", "/root/comfy-models")],
+            mounts=[Mount("/var/lib/hal0/comfyui/models", "/opt/hal0-models")],
             devices=["nvidia.com/gpu=all"],
             port=8188,
             network_mode="host",
@@ -237,6 +238,51 @@ def test_podman_args_allows_only_the_rendered_compat_flags() -> None:
         "--security-opt seccomp=unconfined --security-opt label=disable\n"
     )
     _accepts(body, "chat")
+
+
+def _hal0_account_ids() -> str | None:
+    try:
+        pw = pwd.getpwnam("hal0")
+    except KeyError:
+        return None
+    return f"{pw.pw_uid}:{pw.pw_gid}"
+
+
+def test_user_other_than_the_hal0_account_is_refused() -> None:
+    """#3066: the wrapper reads hal0's uid:gid on the root side and accepts
+    exactly that. Any other numeric pair — root, or a real but different
+    account — dies, whether or not this box has a hal0 account."""
+    for value in ("0:0", "1:1", "65534:65534", "4294967295:0"):
+        err = _rejects(f"{_HEAD}User={value}\n", "chat")
+        assert "User=" in err or "User:" in err
+
+
+@pytest.mark.skipif(_hal0_account_ids() is None, reason="needs a hal0 service account")
+def test_user_pinned_to_the_hal0_account_is_accepted() -> None:
+    """On an installed box the rendered img unit (User=<hal0 uid>:<gid>) must
+    pass the seam, or the slot never loads."""
+    _accepts(f"{_HEAD}User={_hal0_account_ids()}\n", "chat")
+
+
+@pytest.mark.skipif(_hal0_account_ids() is not None, reason="box has a hal0 account")
+def test_user_is_refused_outright_without_a_hal0_account() -> None:
+    err = _rejects(f"{_HEAD}User=1000:1000\n", "chat")
+    assert "hal0 account" in err
+
+
+def test_renderer_emits_user_as_a_native_container_key() -> None:
+    """The plan's ``user`` lands as ``[Container] User=`` (what the arm above
+    pins), never inside PodmanArgs= where the pin could not see it."""
+    plan = RuntimeLaunchPlan(
+        image="ghcr.io/hal0ai/hal0-comfyui:v1",
+        command=["python", "main.py"],
+        port=8188,
+        network_mode="host",
+        user="996:989",
+    )
+    unit = _render_quadlet_from_plan("img", plan)
+    assert "\nUser=996:989\n" in unit
+    assert "--user" not in unit
 
 
 def test_restart_prevent_exit_status_list_is_accepted() -> None:
@@ -381,6 +427,13 @@ ESCALATIONS = {
     "service-successexitstatus-range": f"{_HEAD}\n[Service]\nSuccessExitStatus=0-255\n",
     "service-successexitstatus-too-wide": f"{_HEAD}\n[Service]\nSuccessExitStatus=1430\n",
     "service-workingdirectory": f"{_HEAD}\n[Service]\nWorkingDirectory=/root\n",
+    # #3066: [Container] User= exists for the img slot to DROP to the hal0
+    # account. Root, a name, a bare uid and a [Service]-side User= are refused.
+    "container-user-root": f"{_HEAD}User=0:0\n",
+    "container-user-name": f"{_HEAD}User=hal0\n",
+    "container-user-bare-uid": f"{_HEAD}User=996\n",
+    "container-user-negative": f"{_HEAD}User=-1:-1\n",
+    "service-user": f"{_HEAD}\n[Service]\nUser=hal0\n",
     "service-environmentfile": f"{_HEAD}\n[Service]\nEnvironmentFile=/tmp/evil.env\n",
     "service-permissionsstartonly": f"{_HEAD}\n[Service]\nPermissionsStartOnly=true\n",
 }

@@ -43,7 +43,12 @@ runs as. Two consequences follow, and neither is hypothetical:
   are issued to the *user* `hal0`, which the agent also is. Slots run under
   rootful podman, so anything that can author a slot's `[Container]` spec can
   `Volume=`-mount arbitrary host paths — `installer/wrappers/hal0-systemctl`'s
-  own "HONEST BOUNDARY" comment block has said so since #1740.
+  own "HONEST BOUNDARY" comment block has said so since #1740. The process
+  *inside* the `img` container is the `hal0` account rather than root since
+  #3066 (`[Container] User=`, which the wrapper accepts for that one value
+  only), so a ComfyUI custom node or workflow that escapes lands on `hal0`;
+  that is a smaller blast radius for a bug, not a boundary — `hal0` is
+  root-equivalent by the paragraph above.
 
   One honest qualifier: `hal0-agent@.service` sets `NoNewPrivileges=yes`, so a
   process *inside the agent unit* cannot invoke those setuid `sudo` wrappers

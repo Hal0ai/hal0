@@ -203,7 +203,7 @@ def test_container_spec_mounts_persistent_data_dirs(
     # The data root holds models/, custom_nodes/, output/, input/, user/
     # — losing it on a `docker rm` would discard 6+ GB of weights.
     pairs = {(m.source, m.target) for m in spec.mounts}
-    assert ("/mnt/ai-models/comfyui/models", "/root/comfy-models") in pairs
+    assert ("/mnt/ai-models/comfyui/models", "/opt/hal0-models") in pairs
     assert ("/mnt/ai-models/comfyui/custom_nodes", "/opt/ComfyUI/custom_nodes") in pairs
 
 

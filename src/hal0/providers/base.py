@@ -158,6 +158,12 @@ class RuntimeLaunchPlan:
     group_add: list[str] = field(default_factory=list)
     """Supplementary group names or GIDs."""
 
+    user: str = ""
+    """``uid:gid`` the container process runs as (Quadlet ``User=``). Empty
+    keeps the image's own identity — root for every runner image hal0 ships.
+    The seam (``installer/wrappers/hal0-systemctl``) accepts exactly one value:
+    the ``hal0`` service account's own ids (#3066)."""
+
     port: int = 0
     """Host port the container listens on (127.0.0.1 only)."""
 
