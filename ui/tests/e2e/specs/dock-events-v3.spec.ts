@@ -219,7 +219,25 @@ test.describe('Dock events tab', () => {
     expect(box.scroll).toBeGreaterThan(box.body)
   })
 
-  test('dock fits a 390 px viewport without horizontal scroll', async ({ page }) => {
+  test('event rows stay one line: the message cell is not a chat bubble', async ({ page }) => {
+  await page.goto('/#slots')
+  await waitForSse(page, JOURNAL, 6_000)
+  await waitForSse(page, ACTIVITY, 6_000)
+  await emitSse(page, JOURNAL, journalEntry(1))
+  await emitSse(page, ACTIVITY, frame(rec({ id: 1, action: 'slot.unload', target: 'brain', actor: 'dashboard', message: 'unloaded brain' })))
+  await page.getByTestId('dock-toggle').click()
+  await page.getByTestId('dock-tab-events').click()
+  const row = actionRows(page).first()
+  await expect(row).toBeVisible()
+  const msg = row.locator('.msg')
+  await expect(msg).toHaveCSS('display', 'block')
+  // dashboard.css's chat-bubble `.msg` caps width at 80% and stacks children; the row's message
+  // must not inherit it, so the actor label sits beside the text and the row stays one line.
+  expect(await msg.evaluate((el) => getComputedStyle(el).maxWidth)).toBe('none')
+  expect(await row.evaluate((el) => el.getBoundingClientRect().height)).toBeLessThan(32)
+})
+
+test('dock fits a 390 px viewport without horizontal scroll', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 800 })
     await page.goto('/#slots')
     await expect(page.getByTestId('dock')).toBeVisible()
