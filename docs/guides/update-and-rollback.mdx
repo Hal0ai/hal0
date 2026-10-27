@@ -275,6 +275,33 @@ The first `hal0 update` to 1.6.0 changes how Hermes is installed. One step is ne
 - **The agent chat proxy is removed.** `/api/agents/{id}/events`, `/submit` and `/session/*` return 404.
 - **Key rotation now ends open sockets and streams** (WebSocket close code `4401`, SSE `event: revoked`).
 
+## Upgrading to 1.7.1
+
+- **The upgrade floor is 1.5.0.** `hal0 update` on a 1.3.x or 1.4.x box
+  stops before it downloads anything and prints the installer command that
+  steps the box through 1.5.0; run that, then update again. See
+  [Upgrading from an older release](#upgrading-from-an-older-release).
+- **Run `hal0 slot restart img` once for the LAN editor.** The running
+  ComfyUI container keeps the loopback bind it started with, so
+  `http://<host>:8188` stays refused from other machines until the engine
+  restarts. To keep the editor fenced to the box, set
+  `[network].comfyui_listen = "loopback"` in `/etc/hal0/hal0.toml` before the
+  restart. See [Reaching the editor](/docs/guides/generate-images#reaching-the-editor).
+- **The GPU's controls are in the dock.** Hold, keep, unpin and stop image
+  mode live in the dock's GPU segment and **gpu** tab on every page; the
+  Engine tab keeps Restart engine and Logs, and the Slots page's Activity
+  sidebar became the dock's **events** tab. See
+  [The dock](/docs/guides/dashboard-and-settings#the-dock).
+- **ComfyUI drops to the `hal0` account.** The same `hal0 slot restart img`
+  switches the running container from root to the hal0 identity. If the
+  ComfyUI data root (`/var/lib/hal0/models/comfyui` by default) was laid down
+  by hand under another account or on a share, make its `output`, `input`,
+  `user` and `custom_nodes` directories writable by `hal0` first, as root:
+  `chgrp -R <hal0 group> <dir> && chmod -R g+ws <dir>`. A data root hal0
+  created is already `hal0:hal0 2775`. Until then a render fails at
+  `SaveImage` with `Permission denied`, and `hal0-api`'s journal logs
+  `comfyui.data_dir_not_writable` with the command.
+
 ## Upgrading to 1.7.0
 
 - **Run `hal0 slot restart img` once after the update.** ComfyUI loads its
