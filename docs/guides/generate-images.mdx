@@ -12,9 +12,11 @@ import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components
 hal0 generates images through **ComfyUI**, a node-graph Stable-Diffusion
 runtime. It runs as one container in the `img` slot (the
 `hal0-slot@img.service` unit), one engine for every image model, tuned for the
-AMD iGPU. You generate through hal0 (the dashboard, `/v1/images/generations` or
-Open WebUI) and open ComfyUI's own editor at `http://<host>:8188` from your
-network by default (see [Reaching the editor](#reaching-the-editor)).
+AMD iGPU. Inside the container ComfyUI runs as the `hal0` account, the owner
+of the data root it mounts, not as root. You generate through hal0 (the
+dashboard, `/v1/images/generations` or Open WebUI) and open ComfyUI's own
+editor at `http://<host>:8188` from your network by default (see
+[Reaching the editor](#reaching-the-editor)).
 
 
 Because there is exactly one iGPU, the LLM slots and ComfyUI cannot both hold
@@ -523,6 +525,15 @@ hides the line until the next refusal. See
 says image generation is blocked.** Run `hal0 slot restart img` once, or press
 **Restart engine** on the Engine tab. A running `img` container keeps the gate it
 started with.
+
+**A render fails at `SaveImage` with `Permission denied`, or `hal0-api`'s journal
+logs `comfyui.data_dir_not_writable`.** ComfyUI runs as the `hal0` account, and
+one of the data root's `output`, `input`, `user`, `custom_nodes` or `home`
+directories is not writable by it: a data root laid down by hand under another
+account, or on a share. As root, once:
+`chgrp -R <hal0 group> <dir> && chmod -R g+ws <dir>` on the directory the log
+names. A data root hal0 created is already `hal0:hal0 2775`; the models
+directory may stay read-only.
 
 **The Engine tab reads `ComfyUI is stopped` or `ComfyUI isn't answering`.**
 Stopped is fine: the next render starts the engine, and a cold start can take up

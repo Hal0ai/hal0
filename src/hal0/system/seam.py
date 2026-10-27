@@ -39,6 +39,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from hal0.errors import Hal0Error
@@ -197,6 +198,34 @@ def is_hal0_service_user() -> bool:
     except KeyError:
         return False
     return os.geteuid() == hal0_uid
+
+
+@dataclass(frozen=True)
+class ServiceAccount:
+    """The ``hal0`` service account as the kernel sees it."""
+
+    uid: int
+    gid: int
+    """Primary group."""
+    groups: tuple[int, ...]
+    """Supplementary gids, sorted, primary excluded (``video``/``render``, a
+    shared model-store group, ...)."""
+
+
+def hal0_service_account() -> ServiceAccount | None:
+    """uid, primary gid and supplementary gids of the ``hal0`` account, or
+    ``None`` when the account doesn't exist on this box (dev/CI).
+
+    The img slot pins its container process to exactly this identity (#3066):
+    the account that owns the data the container mounts, with the same group
+    reach it has on the host, so a store shared through a group (gid 2000 on
+    one lab box) stays readable inside."""
+    try:
+        pw = pwd.getpwnam("hal0")
+    except KeyError:
+        return None
+    groups = sorted(set(os.getgrouplist("hal0", pw.pw_gid)) - {pw.pw_gid})
+    return ServiceAccount(pw.pw_uid, pw.pw_gid, tuple(groups))
 
 
 def hal0_service_home() -> str:

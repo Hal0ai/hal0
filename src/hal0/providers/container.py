@@ -836,6 +836,10 @@ def _render_quadlet_from_plan(
     compat_args: list[str] = []
     if effective_network_mode:
         lines.append(f"Network={effective_network_mode}")
+    # Native key (not PodmanArgs=--user): the wrapper pins its value to the hal0
+    # account's uid:gid, which a flag buried in PodmanArgs= could not express.
+    if plan.user:
+        lines.append(f"User={plan.user}")
     # Explicit device nodes (podman won't recurse /dev/dri, #674); CDI names
     # (nvidia.com/gpu=all) pass through the same key.
     for dev in plan.devices:
@@ -2240,13 +2244,21 @@ class ContainerProvider(Provider):
         # lambda: the guard returns early for cpu/npu/gpu-cuda and for
         # non-ROCm lanes, and charging every slot on the box for a probe only
         # the gated ones need is what the laziness exists to avoid.
+        # A provider that pins the container's identity (ComfyUI runs as the
+        # hal0 account, #3066) is asked for it; the guard then checks that
+        # /dev/kfd opens for THAT uid, which is the one that will try.
         resolved_image = _resolve_image_ref(slot_cfg, None)
+        pinned_user = getattr(spec_provider, "runtime_user", lambda: "")()
         require_kfd_for_gpu_slot(
             str(slot_cfg.get("name", "") or token),
             device=str(slot_cfg.get("device", "") or ""),
             runtime_lane=runtime_lane_for_provider(spec_provider),
             image=resolved_image,
-            runner_uid=lambda: resolve_image_runtime_uid(resolved_image),
+            runner_uid=(
+                int(pinned_user.split(":", 1)[0])
+                if pinned_user
+                else (lambda: resolve_image_runtime_uid(resolved_image))
+            ),
         )
 
         # Loud-fail for NPU slots only: a missing FLM tag must not silently

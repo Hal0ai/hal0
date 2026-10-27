@@ -52,8 +52,9 @@
 # HONEST BOUNDARY (read this before calling the seam a sandbox): the allow-list
 # removes the DIRECT host-side exec primitive — no host `[Service]`/`[Unit]`
 # directive beyond the five/three fixed ones, no `Exec*=` on the host side, no
-# `User=`/`Group=`, no second section, no `[Install] WantedBy=` other than
-# hal0.target. `PodmanArgs=` IS host-side too — quadlet copies it into the
+# `[Service] User=`/`Group=`, no second section, no `[Install] WantedBy=` other
+# than hal0.target. (`[Container] User=` is the in-container identity, and is
+# accepted for exactly one value: the hal0 account's own uid:gid — #3066.) `PodmanArgs=` IS host-side too — quadlet copies it into the
 # generated unit's `podman run` argv — so it is pinned to exactly the flags
 # hal0's providers emit (`--group-add`/`--security-opt`/`--ipc`/`--ulimit`); a
 # `--runtime`/`--hooks-dir` root exec is refused (#1759, validate_podman_args).
@@ -342,6 +343,9 @@ _QRE_RESTART='^(always|on-failure|no)$'
 # refused, so the value stays a closed set of integers the renderer chose.
 _QRE_EXITSTATUS_LIST='^[0-9]{1,3}( [0-9]{1,3}){0,7}$'
 _QRE_WANTEDBY='^hal0\.target$'
+# [Container] User= (#3066): numeric uid:gid only; the arm then requires it to
+# BE the hal0 service account (see _hal0_account_ids).
+_QRE_USER='^[0-9]{1,9}:[0-9]{1,9}$'
 # The four flags hal0's providers emit into PodmanArgs= (GPU/llama:
 # --group-add/--security-opt; comfyui: --ipc=host; flm: --ulimit memlock=-1).
 # See validate_podman_args (#1759).
@@ -399,6 +403,13 @@ validate_podman_args() {  # arg: the PodmanArgs= value
   done
 }
 
+_hal0_account_ids() {  # "uid:gid" of the hal0 service account; empty when absent
+  local uid gid
+  uid=$(id -u hal0 2>/dev/null) || return 0
+  gid=$(id -g hal0 2>/dev/null) || return 0
+  printf '%s:%s' "$uid" "$gid"
+}
+
 validate_quadlet_directive() {  # args: section, "Key=Value" line
   local section="$1" line="$2" key value
   [[ "$line" == *=* ]] || _quadlet_die "not a Key=Value directive: $line"
@@ -427,6 +438,17 @@ validate_quadlet_directive() {  # args: section, "Key=Value" line
     'Container|LogDriver')      [[ "$value" == "passthrough" || "$value" == "none" ]] \
                                                                  || _quadlet_die "bad LogDriver: $value" ;;
     'Container|Network')        [[ "$value" =~ $_QRE_NETWORK ]]  || _quadlet_die "bad Network: $value" ;;
+    # The in-container identity (podman run --user). The img slot pins it to
+    # the hal0 account so ComfyUI is not root inside its rw mounts (#3066).
+    # Semantics-pinned, unlike the rest of this section: the ONLY accepted
+    # value is hal0's own uid:gid, read here on the root side — a caller can
+    # name neither 0:0 nor any other account, and a box with no hal0 account
+    # refuses the key outright.
+    'Container|User')
+      [[ "$value" =~ $_QRE_USER ]] || _quadlet_die "bad User: $value"
+      [[ -n "$(_hal0_account_ids)" && "$value" == "$(_hal0_account_ids)" ]] \
+        || _quadlet_die "User= must be the hal0 account's uid:gid: $value"
+      ;;
     'Container|AddDevice')
       [[ "$value" =~ $_QRE_DEVICE ]] || _quadlet_die "bad AddDevice: $value"
       [[ "$value" != *".."* ]] || _quadlet_die "AddDevice traversal: $value"

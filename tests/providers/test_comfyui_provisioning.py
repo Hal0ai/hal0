@@ -51,7 +51,7 @@ def _asset_bytes() -> bytes:
 def test_render_lists_every_subdir_in_sorted_order() -> None:
     lines = render_extra_model_paths().splitlines()
     assert lines[0] == "comfyui:"
-    assert lines[1].strip() == "base_path: /root/comfy-models"
+    assert lines[1].strip() == "base_path: /opt/hal0-models"
     assert [line.strip() for line in lines[2:]] == [
         f"{name}: {comfyui_paths.SUBDIRS[name]}" for name in sorted(comfyui_paths.SUBDIRS)
     ]
@@ -65,7 +65,7 @@ def test_render_is_valid_yaml_comfyui_accepts() -> None:
     parsed = yaml.safe_load(render_extra_model_paths())
     assert list(parsed) == ["comfyui"]
     section = parsed["comfyui"]
-    assert section["base_path"] == "/root/comfy-models"
+    assert section["base_path"] == "/opt/hal0-models"
     assert {k: v for k, v in section.items() if k != "base_path"} == dict(comfyui_paths.SUBDIRS)
 
 
@@ -76,7 +76,7 @@ def test_provision_creates_every_mounted_dir(data_root: Path) -> None:
     provision_data_root()
     for sub in comfyui_paths.SUBDIRS.values():
         assert (data_root / "models" / sub).is_dir()
-    for sub in ("output", "input", "user", "custom_nodes", "workflows"):
+    for sub in ("output", "input", "user", "custom_nodes", "workflows", "home"):
         assert (data_root / sub).is_dir()
 
 
@@ -91,7 +91,7 @@ def test_provision_writes_yaml_when_empty(data_root: Path) -> None:
     yaml_path.write_text("")
     provision_data_root()
     text = yaml_path.read_text()
-    assert "base_path: /root/comfy-models" in text
+    assert "base_path: /opt/hal0-models" in text
     assert "diffusion_models: diffusion_models" in text
 
 
@@ -110,6 +110,59 @@ def test_provision_keeps_operator_yaml(data_root: Path) -> None:
     yaml_path.write_text(operator)
     provision_data_root()
     assert yaml_path.read_text() == operator
+
+
+def test_provision_moves_hal0s_own_legacy_models_mount(data_root: Path) -> None:
+    """#3066 moved the models mount out of /root (not traversable as the hal0
+    account). A yaml whose base_path is the mount hal0 itself wrote before is
+    hal0's: the one line moves, every other line survives byte for byte."""
+    yaml_path = comfyui_paths.extra_model_paths_file()
+    yaml_path.parent.mkdir(parents=True)
+    legacy = (
+        "# operator note kept\n"
+        "comfyui:\n"
+        "    base_path: /root/comfy-models\n"
+        "    checkpoints: checkpoints\n"
+        "    my_extra_type: extra\n"
+    )
+    yaml_path.write_text(legacy)
+    provision_data_root()
+    assert yaml_path.read_text() == legacy.replace("/root/comfy-models", "/opt/hal0-models")
+
+
+def test_provision_migration_is_a_one_time_rewrite(data_root: Path) -> None:
+    yaml_path = comfyui_paths.extra_model_paths_file()
+    yaml_path.parent.mkdir(parents=True)
+    yaml_path.write_text("comfyui:\n    base_path: /root/comfy-models\n")
+    provision_data_root()
+    moved = yaml_path.read_text()
+    assert "/opt/hal0-models" in moved
+    comfyui_provider._reset_provision_memo()
+    provision_data_root()
+    assert yaml_path.read_text() == moved
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes anywhere")
+def test_provision_reports_a_mount_source_hal0_cannot_write_once(
+    data_root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The container runs as the hal0 account (#3066): a data dir this process
+    cannot write is one ComfyUI cannot write either. Reported once, with the
+    remedy, never raised — provisioning stays best-effort."""
+    provision_data_root()
+    output = data_root / "output"
+    output.chmod(0o555)
+    try:
+        comfyui_provider._reset_provision_memo()
+        with caplog.at_level(logging.WARNING, logger="hal0.providers.comfyui"):
+            provision_data_root()
+            provision_data_root()
+        hits = [r for r in caplog.records if "comfyui.data_dir_not_writable" in r.getMessage()]
+        assert len(hits) == 1
+        assert str(output) in hits[0].getMessage()
+        assert "chgrp" in hits[0].getMessage()
+    finally:
+        output.chmod(0o755)
 
 
 def test_provision_syncs_gpu_gate_node(data_root: Path) -> None:
@@ -378,7 +431,8 @@ def test_container_spec_mount_sources_come_from_the_paths_module(
     monkeypatch.setattr("hal0.providers.comfyui.resolve_gpu_device_paths", lambda: [])
     spec = ComfyUIProvider().container_spec(img_cfg, {})
     by_target = {m.target: m for m in spec.mounts}
-    assert by_target["/root/comfy-models"].source == str(comfyui_paths.models_root())
+    assert by_target["/opt/hal0-models"].source == str(comfyui_paths.models_root())
+    assert by_target["/home/hal0"].source == str(data_root / "home")
     assert by_target["/opt/ComfyUI/custom_nodes"].source == str(comfyui_paths.custom_nodes_dir())
     assert by_target["/opt/ComfyUI/user"].source == str(comfyui_paths.user_dir())
     assert by_target["/opt/ComfyUI/extra_model_paths.yaml"].source == str(

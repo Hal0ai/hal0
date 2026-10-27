@@ -59,6 +59,7 @@ from hal0.install.perms import ensure_shared_dir
 from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
 from hal0.providers.base import Mount, Provider, RuntimeLaunchPlan
 from hal0.providers.comfyui_workflows import build_workflow
+from hal0.system.seam import hal0_service_account
 
 log = logging.getLogger(__name__)
 
@@ -71,8 +72,20 @@ log = logging.getLogger(__name__)
 _COMFYUI_APP_DIR = "/opt/ComfyUI"
 _COMFYUI_BASE_DIR = "/var/lib/hal0/comfyui"
 # Where the host's models dir is mounted inside the container; also the
-# base_path extra_model_paths.yaml points ComfyUI at.
-_COMFYUI_MODELS_MOUNT = "/root/comfy-models"
+# base_path extra_model_paths.yaml points ComfyUI at. Beside the gate mount
+# (/opt/hal0-gate), NOT under /root: the container runs as the hal0 account
+# (#3066) and the image's /root is 0550 root, so nothing under it resolves.
+_COMFYUI_MODELS_MOUNT = "/opt/hal0-models"
+# Mount targets hal0 wrote into extra_model_paths.yaml before; a file whose
+# base_path still names one is hal0's own and is moved to the current mount
+# (see _ensure_extra_model_paths). An operator's base_path is never touched.
+_LEGACY_MODELS_MOUNTS = ("/root/comfy-models",)
+# $HOME inside the container: a hal0-owned, persistent host dir, so ROCm's
+# kernel caches (MIOpen/comgr), triton and any node's ~/.cache survive a restart
+# and the non-root process has a writable home at all (the image's /root is not
+# traversable as hal0). ComfyUI's own temp dir goes to the container's /tmp.
+_COMFYUI_HOME_MOUNT = "/home/hal0"
+_COMFYUI_TEMP_PARENT = "/tmp"
 # The GPU-gate custom node, shipped as a package asset (hal0.comfyui.assets)
 # and synced into custom_nodes/ once per process (see provision_data_root).
 _GPU_GATE_NODE = "hal0_gpu_gate.py"
@@ -426,10 +439,7 @@ def _ensure_data_dirs() -> None:
     models = comfyui_paths.models_root()
     dirs = [
         models,
-        root / "output",
-        root / "input",
-        comfyui_paths.user_dir(),
-        comfyui_paths.custom_nodes_dir(),
+        *_writable_mount_sources(root),
         comfyui_paths.workflows_dir(),
         *(models / sub for sub in comfyui_paths.SUBDIRS.values()),
     ]
@@ -447,19 +457,82 @@ def _ensure_data_dirs() -> None:
             )
 
 
+def _writable_mount_sources(root: Path) -> list[Path]:
+    """The bind-mount sources ComfyUI writes through, in mount order.
+
+    ``models`` is deliberately absent: ComfyUI only reads it, and a read-only
+    store (a share owned by another account) is a supported layout.
+    """
+    return [
+        root / "output",
+        root / "input",
+        comfyui_paths.user_dir(),
+        comfyui_paths.custom_nodes_dir(),
+        root / "home",
+    ]
+
+
+def _check_writable_mount_sources() -> None:
+    """Report, once per directory, a mount source the hal0 account cannot write.
+
+    The container process IS the hal0 account (#3066), so what this process
+    (hal0-api runs as hal0) cannot write, ComfyUI cannot either: a render's
+    SaveImage fails with ``Permission denied`` instead of quietly landing a
+    root-owned file. Boxes whose data root was provisioned by hal0 are fine
+    (``ensure_shared_dir`` births 2775 hal0:hal0); a store laid down by hand
+    under another account needs the one-line fix the message carries.
+    """
+    for directory in _writable_mount_sources(comfyui_paths.data_root()):
+        if not directory.is_dir() or os.access(directory, os.W_OK | os.X_OK):
+            continue
+        _warn_once(
+            ("not-writable", str(directory)),
+            "comfyui.data_dir_not_writable path=%s — the img slot runs ComfyUI as the "
+            "hal0 account (#3066) and cannot write here; as root: "
+            "chgrp -R <hal0 group> %s && chmod -R g+ws %s",
+            directory,
+            directory,
+            directory,
+        )
+
+
+def _migrate_models_mount(text: str) -> str | None:
+    """``text`` with a legacy hal0 ``base_path`` moved to the current mount, else None.
+
+    Only the one ``base_path`` line changes; every other line (an operator's
+    extra model types, comments) is kept byte for byte. A ``base_path`` hal0
+    never wrote is the operator's and returns None.
+    """
+    pattern = re.compile(r"^(?P<lead>\s*base_path:\s*)(?P<path>\S+)(?P<tail>\s*)$", re.MULTILINE)
+    match = pattern.search(text)
+    if match is None or match.group("path") not in _LEGACY_MODELS_MOUNTS:
+        return None
+    return text[: match.start("path")] + _COMFYUI_MODELS_MOUNT + text[match.end("path") :]
+
+
 def _ensure_extra_model_paths() -> bool:
     """Write the model-paths file unless the operator already put content in it.
 
     An empty file hides every model from ComfyUI, so absent or blank (after
-    strip) means "write ours"; anything else is the operator's and stays.
-    Returns True once the file is settled.
+    strip) means "write ours"; anything else is the operator's and stays —
+    except that a ``base_path`` naming a mount hal0 itself used to render
+    (:data:`_LEGACY_MODELS_MOUNTS`) is hal0's, and is moved to the current
+    mount so the models stay visible after the move (#3066). Returns True once
+    the file is settled.
     """
     path = comfyui_paths.extra_model_paths_file()
     try:
-        if path.read_bytes().strip():
-            return True
+        text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        pass
+        text = ""
+    if text.strip():
+        migrated = _migrate_models_mount(text)
+        if migrated is not None:
+            path.write_text(migrated, encoding="utf-8")
+            log.info(
+                "comfyui.extra_model_paths_migrated path=%s mount=%s", path, _COMFYUI_MODELS_MOUNT
+            )
+        return True
     path.write_text(render_extra_model_paths(), encoding="utf-8")
     return True
 
@@ -532,6 +605,7 @@ def provision_data_root() -> None:
     """
     root_key = str(comfyui_paths.data_root())
     _run_step(_ensure_data_dirs, root_key)
+    _check_writable_mount_sources()
     for step in (_ensure_extra_model_paths, _sync_gpu_gate_node):
         memo = (root_key, step.__name__)
         if memo not in _provisioned and _run_step(step, root_key):
@@ -811,6 +885,16 @@ class ComfyUIProvider(Provider):
         flags = resolve_named_profile(slot_cfg, profile_name).resolved_flags.strip()
         return flags or _DEFAULT_PROFILE_FLAGS
 
+    @staticmethod
+    def runtime_user() -> str:
+        """``uid:gid`` the img container runs as — the hal0 account (#3066).
+
+        Empty on a box without a hal0 account (dev/CI), where the plan carries
+        no ``User=`` and the image's own identity (root) stands.
+        """
+        account = hal0_service_account()
+        return "" if account is None else f"{account.uid}:{account.gid}"
+
     def container_spec(
         self,
         slot_cfg: dict[str, Any],
@@ -822,9 +906,17 @@ class ComfyUIProvider(Provider):
         what works):
           * argv: ``bash -lc 'cd /opt/ComfyUI && exec python main.py …'``
             — the image needs the login shell to activate /opt/venv.
-          * mounts: ``<data_root>/models → /root/comfy-models`` plus
-            output/input/user/custom_nodes into /opt/ComfyUI, and
-            extra_model_paths.yaml read-only into the app dir.
+          * mounts: ``<data_root>/models → /opt/hal0-models`` plus
+            output/input/user/custom_nodes into /opt/ComfyUI, a persistent
+            ``home`` at /home/hal0, and extra_model_paths.yaml read-only into
+            the app dir.
+          * identity (#3066): ``User=<hal0 uid>:<hal0 gid>`` with hal0's host
+            supplementary groups added, so ComfyUI runs as the account that
+            owns the data it mounts — not root. $HOME is the mounted home,
+            the temp dir is under the container's /tmp (the image's /root and
+            /opt/ComfyUI/temp are root-only). Without a hal0 account on the
+            box (dev/CI) the plan carries no ``User=`` and the image's root
+            identity stands.
           * ``--ipc=host`` — Wan/Hunyuan video models need shared memory;
             host IPC means the container uses the host's /dev/shm directly.
             No ``--shm-size``: podman exits 125 on that combo ("cannot set
@@ -847,7 +939,8 @@ class ComfyUIProvider(Provider):
 
         flags = self._profile_flags(slot_cfg)
         payload = (
-            f"cd {_COMFYUI_APP_DIR} && exec python main.py --listen 0.0.0.0 --port {port} {flags}"
+            f"cd {_COMFYUI_APP_DIR} && exec python main.py --listen 0.0.0.0 --port {port} "
+            f"--temp-directory {_COMFYUI_TEMP_PARENT} {flags}"
         ).strip()
         command: list[str] = ["bash", "-lc", payload]
 
@@ -863,6 +956,7 @@ class ComfyUIProvider(Provider):
             Mount(str(data_root / "input"), f"{_COMFYUI_APP_DIR}/input"),
             Mount(str(comfyui_paths.user_dir()), f"{_COMFYUI_APP_DIR}/user"),
             Mount(str(comfyui_paths.custom_nodes_dir()), f"{_COMFYUI_APP_DIR}/custom_nodes"),
+            Mount(str(data_root / "home"), _COMFYUI_HOME_MOUNT),
             Mount(
                 str(comfyui_paths.extra_model_paths_file()),
                 f"{_COMFYUI_APP_DIR}/extra_model_paths.yaml",
@@ -875,10 +969,20 @@ class ComfyUIProvider(Provider):
         if gate_mount is not None:
             mounts.append(gate_mount)
             env[_GATE_TOKEN_FILE_ENV] = f"{_GATE_TOKEN_MOUNT}/{gate_credential.TOKEN_FILE_NAME}"
+        # The container has no passwd entry for the hal0 uid, so the login
+        # shell and getpass-style lookups (torch inductor, triton) read these.
+        env["HOME"] = _COMFYUI_HOME_MOUNT
+        env["USER"] = "hal0"
+        env["LOGNAME"] = "hal0"
 
         # Numeric GIDs for the host's render+video groups (see _gpu.py
-        # and llama_server's notes on stock-ubuntu /etc/group).
+        # and llama_server's notes on stock-ubuntu /etc/group), then whatever
+        # else the hal0 account belongs to on the host (a shared store group),
+        # so the process reaches inside exactly what hal0 reaches outside.
         group_add: list[str] = [str(gid) for gid in resolve_gpu_group_ids()]
+        account = hal0_service_account()
+        if account is not None:
+            group_add += [str(gid) for gid in account.groups if str(gid) not in group_add]
 
         return RuntimeLaunchPlan(
             image=self.image_ref(slot_cfg),
@@ -889,6 +993,7 @@ class ComfyUIProvider(Provider):
             cap_add=[],
             security_opt=["seccomp=unconfined", "apparmor=unconfined", "label=disable"],
             group_add=group_add,
+            user=self.runtime_user(),
             port=port,
             network_mode="host",
             # The editor's reach, from [network].comfyui_listen (see above).
