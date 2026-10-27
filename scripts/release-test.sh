@@ -243,12 +243,20 @@ remote_slot_create() {
 # Load a slot; on success record it in LOADED_SLOTS for the `unload` row.
 # Like remote_slot_create, call it directly (an `if` condition is fine),
 # never inside $(...): a subshell would drop the append (#2262).
+# Last non-blank line `hal0 slot load` printed when remote_slot_load failed,
+# so a failed row's detail says what the CLI said instead of a guess.
+LAST_LOAD_OUTPUT=""
 remote_slot_load() {
-    # remote_slot_load <slot>  → exit status of `hal0 slot load`
-    if ssh_exec "${REMOTE_HAL0_BIN} slot load $1" >/dev/null 2>&1; then
+    # remote_slot_load <slot> [load args…]  → exit status of `hal0 slot load`
+    local out args
+    # The script's IFS is newline+tab, so "$*" would join the load args with
+    # newlines and ssh would run each as its own command line.
+    args="$(printf '%s ' "$@")"
+    if out="$(ssh_exec "${REMOTE_HAL0_BIN} slot load ${args% }" 2>&1)"; then
         LOADED_SLOTS+=("$1")
         return 0
     fi
+    LAST_LOAD_OUTPUT="$(printf '%s\n' "${out}" | grep -v '^[[:space:]]*$' | tail -n 1)"
     return 1
 }
 
@@ -416,16 +424,20 @@ else
     # v0.1 hardware token (slot_commands.py::SlotHardware), so this row
     # exercises the SEEDED flm slot (installer/etc-hal0/slots/flm.toml,
     # device=npu). The seed ships model-less (grey tile, #1369); a box
-    # with no FLM model assigned skips rather than fails.
+    # with no FLM model assigned skips rather than fails. The model the
+    # listing reports can be the slot's sticky last-run `model_id` while
+    # `[model].default` is still empty, in which case a bare `slot load`
+    # refuses with "no default model" — so the load names the model it
+    # found and the row tests the NPU, not the seed's default.
     FLM_MODEL="$(remote_slot_model flm || true)"
     if [[ -z "${FLM_MODEL}" ]]; then
         add_row "flm" "skip" "$(since_ms "${start}")" "seeded flm slot absent or model-less (grey seed, #1369) — assign an FLM model to it first"
     else
         LOADED_SEEDED_SLOTS+=("flm")
-        if remote_slot_load flm; then
+        if remote_slot_load flm -m "${FLM_MODEL}"; then
             add_row "flm" "pass" "$(since_ms "${start}")" "seeded flm slot (device=npu) reached ready serving ${FLM_MODEL}"
         else
-            add_row "flm" "fail" "$(since_ms "${start}")" "FLM slot failed to load; check /sys/class/accel and the xdna driver"
+            add_row "flm" "fail" "$(since_ms "${start}")" "FLM slot failed to load (${LAST_LOAD_OUTPUT:-no CLI output}); check /sys/class/accel and the xdna driver"
         fi
     fi
 fi
