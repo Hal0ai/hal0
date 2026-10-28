@@ -60,3 +60,14 @@ def test_name_of_rejects_invalid_embedded_name() -> None:
 )
 def test_valid_name(name: str, ok: bool) -> None:
     assert keys.valid_name(name) is ok
+
+
+def test_normalize_scopes_always_includes_agents() -> None:
+    assert keys.normalize_scopes([]) == frozenset({"agents"})
+    assert keys.normalize_scopes([" Memory ", "ADMIN"]) == frozenset({"agents", "memory", "admin"})
+    assert frozenset({"agents", "memory", "admin"}) == keys.SCOPES
+
+
+def test_normalize_scopes_rejects_unknown_scope() -> None:
+    with pytest.raises(ValueError, match="root"):
+        keys.normalize_scopes(["agents", "root"])

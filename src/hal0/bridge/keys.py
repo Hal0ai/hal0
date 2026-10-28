@@ -16,12 +16,18 @@ from __future__ import annotations
 import hashlib
 import re
 import secrets
+from collections.abc import Iterable
 
 KEY_PREFIX = "hal0bk_"
 
 # Lowercase, starts with a letter or digit, at most 32 characters. No ``.``,
 # so a name can never swallow the key's separator.
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+
+# What a bridge client may be granted. ``agents`` (delegate to Hermes) is held
+# by every client; ``memory`` reaches the memory MCP server; ``admin`` reaches
+# the hal0 admin MCP server.
+SCOPES: frozenset[str] = frozenset({"agents", "memory", "admin"})
 
 
 def valid_name(name: str) -> bool:
@@ -58,3 +64,18 @@ def name_of(key: str) -> str | None:
     if not sep or not valid_name(head):
         return None
     return head
+
+
+def normalize_scopes(values: Iterable[str]) -> frozenset[str]:
+    """Return ``values`` as a canonical scope set that always includes ``agents``.
+
+    Each value is stripped and lowercased. Raises ``ValueError`` naming the
+    first scope that is not in :data:`SCOPES`.
+    """
+    scopes = {"agents"}
+    for value in values:
+        scope = value.strip().lower()
+        if scope not in SCOPES:
+            raise ValueError(f"unknown bridge scope {scope!r}")
+        scopes.add(scope)
+    return frozenset(scopes)
