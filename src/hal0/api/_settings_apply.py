@@ -267,6 +267,14 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     # lan_bind, ADR-0041), so the slot must restart to observe it. The mDNS
     # eligibility and /api/config/urls read it live.
     "network.comfyui_listen": {"apply_class": "service-restart", "services": [SERVICE_SLOTS]},
+    # [bridge] (ADR-0043) — enabled decides at create_app time whether the
+    # bridge MCP server is mounted and /api/bridge/* answers; the three limits
+    # are consulted per start request, question or maintenance pass, so they
+    # apply immediately.
+    "bridge.enabled": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
+    "bridge.max_concurrent_runs_per_client": {"apply_class": "immediate", "services": []},
+    "bridge.run_retention_days": {"apply_class": "immediate", "services": []},
+    "bridge.clarify_timeout_s": {"apply_class": "immediate", "services": []},
     # [slots] — network_mode is baked into each slot's rendered quadlet
     # unit the same way publish_host is; preload_evict_* are SlotManager
     # constructor args fixed at create_app time.
