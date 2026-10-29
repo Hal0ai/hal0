@@ -213,7 +213,7 @@ def test_the_public_url_host_is_allowed(monkeypatch, box):
     )
     sec = _mcp_transport_security()
     assert {"hal0.example.com", "hal0.example.com:8080"} <= set(sec.allowed_hosts)
-    assert "https://hal0.example.com" in sec.allowed_origins
+    assert "https://hal0.example.com" in set(sec.allowed_origins)
 
 
 def test_the_public_url_port_is_kept(monkeypatch, box):
@@ -223,8 +223,8 @@ def test_the_public_url_port_is_kept(monkeypatch, box):
         mcp_mount, "_box_public_authority", lambda: ("https", "hal0.example.com", 8443)
     )
     sec = _mcp_transport_security()
-    assert "hal0.example.com:8443" in sec.allowed_hosts
-    assert "https://hal0.example.com:8443" in sec.allowed_origins
+    assert "hal0.example.com:8443" in set(sec.allowed_hosts)
+    assert "https://hal0.example.com:8443" in set(sec.allowed_origins)
 
 
 def test_the_public_url_comes_from_hal0_toml(monkeypatch, tmp_path):
