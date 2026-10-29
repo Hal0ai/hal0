@@ -177,3 +177,12 @@ def test_prune_cascades_events(store: BridgeStore) -> None:
     assert store.events("run_old", since_seq=0, limit=5) == []
     assert store.get_run("run_old") is None
     assert len(store.events("run_new", since_seq=0, limit=5)) == 1
+
+
+def test_last_events_returns_the_newest_in_order(store: BridgeStore) -> None:
+    store.insert_run(_row("run_t", client="cc"))
+    for seq in (1, 2, 5, 9, 12):
+        store.append_event("run_t", seq, float(seq), "tool.started", {"seq": seq})
+    assert [e["seq"] for e in store.last_events("run_t", limit=3)] == [5, 9, 12]
+    assert [e["seq"] for e in store.last_events("run_t", limit=10)] == [1, 2, 5, 9, 12]
+    assert store.last_events("run_none", limit=3) == []

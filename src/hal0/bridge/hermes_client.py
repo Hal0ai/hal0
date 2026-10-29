@@ -121,6 +121,11 @@ class HermesGateway:
 
     # -- naming, addresses and keys ----------------------------------------------------
 
+    @property
+    def home(self) -> Path:
+        """The Hermes home this gateway reads the API server's address from."""
+        return self._home if self._home is not None else hermes_home()
+
     @staticmethod
     def profile_of(agent: str) -> str:
         """The Hermes profile an agent id names: ``hermes`` is the default profile.
@@ -140,8 +145,7 @@ class HermesGateway:
 
     def base_for(self, profile: str) -> str:
         """Base URL of ``profile``: the API server's, plus ``/p/<profile>`` for a named one."""
-        home = self._home if self._home is not None else hermes_home()
-        base = api_server_base(home)
+        base = api_server_base(self.home)
         return base if profile == DEFAULT_PROFILE else f"{base}/p/{quote(profile, safe='')}"
 
     def key_for(self, profile: str) -> str:

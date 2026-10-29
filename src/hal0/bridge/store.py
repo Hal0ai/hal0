@@ -155,6 +155,15 @@ def _select_run(conn: sqlite3.Connection, run_id: str) -> RunRow | None:
     return None if row is None else _run_from_row(row)
 
 
+def _event_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "seq": row["seq"],
+        "ts": row["ts"],
+        "event": row["event"],
+        "payload": json.loads(row["payload_json"]),
+    }
+
+
 def _run_not_found(run_id: str) -> BridgeError:
     return BridgeError("bridge.run_not_found", f"no run {run_id!r}")
 
@@ -435,15 +444,18 @@ class BridgeStore:
                 "WHERE run_id = ? AND seq > ? ORDER BY seq LIMIT ?",
                 (run_id, since_seq, limit),
             ).fetchall()
-        return [
-            {
-                "seq": r["seq"],
-                "ts": r["ts"],
-                "event": r["event"],
-                "payload": json.loads(r["payload_json"]),
-            }
-            for r in rows
-        ]
+        return [_event_from_row(r) for r in rows]
+
+    def last_events(self, run_id: str, *, limit: int) -> list[dict[str, Any]]:
+        """Return the newest ``limit`` events of a run, oldest first (a wait's tail)."""
+        with connect(self.path) as conn:
+            rows = conn.execute(
+                "SELECT seq, ts, event, payload_json FROM ("
+                "SELECT seq, ts, event, payload_json FROM run_events "
+                "WHERE run_id = ? ORDER BY seq DESC LIMIT ?) ORDER BY seq",
+                (run_id, limit),
+            ).fetchall()
+        return [_event_from_row(r) for r in rows]
 
     def live_runs(self) -> list[RunRow]:
         """Return every run that is not terminal, oldest first (what the watcher resumes)."""

@@ -29,8 +29,15 @@ Design notes
 
 * **Approve runs the tool.** ``approve(id)`` invokes the bound
   ``executor`` callable that the MCP server stashed at enqueue time.
-  ``deny(id)`` simply transitions state and emits an event; nothing
-  downstream runs.
+  ``deny(id)`` transitions state and emits an event; the executor never
+  runs. An entry enqueued with ``on_deny`` runs that hook instead, for a
+  request whose owner must hear about a denial (a delegated Hermes run's
+  approval, ADR-0043 decision 9, posts ``deny`` back to Hermes).
+
+* **Withdraw.** ``withdraw(id, reason)`` retires a pending entry whose
+  request was settled somewhere else (the run's approval was answered in
+  Hermes, or the run ended), so the inbox stops offering a decision that
+  can no longer apply and the dedup slot is free for the next request.
 """
 
 from __future__ import annotations
@@ -66,6 +73,9 @@ _PRIMARY_TARGET_ARG: dict[str, str] = {
     "config_write": "path",
     "provider_credential_write": "name",
     "memory_delete": "ids",  # list — dedup key joins them
+    # A delegated Hermes run has at most one approval pending at a time, and a
+    # reconnect can replay its frame: one inbox row per run (ADR-0043).
+    "agent_run_approval": "run_id",
 }
 
 
@@ -143,6 +153,9 @@ class ApprovalEntry:
     _executor: Callable[[dict[str, Any]], Awaitable[Any]] | None = field(
         default=None, repr=False, compare=False
     )
+    _on_deny: Callable[[dict[str, Any]], Awaitable[Any]] | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def as_dict(self) -> dict[str, Any]:
         """JSON-safe projection for REST / SSE consumers."""
@@ -198,12 +211,16 @@ class ApprovalQueue:
         client_id: str,
         executor: Callable[[dict[str, Any]], Awaitable[Any]],
         target_args: Iterable[str] = (),
+        on_deny: Callable[[dict[str, Any]], Awaitable[Any]] | None = None,
     ) -> str:
         """Queue a gated tool call. Returns the approval id.
 
         ``target_args`` names the args that select the resource (for an admin
         tool, its URL path args); the entry carries them, plus the tool's
         primary target arg, as ``target_args`` for the approval cards.
+
+        ``on_deny`` is awaited with the args when the owner denies the entry;
+        most tools pass nothing, because a denied call simply never runs.
 
         If an existing pending entry shares the same dedup key, its
         ``hit_count`` bumps and the existing id is returned — no new
@@ -237,6 +254,7 @@ class ApprovalQueue:
                 client_id=client_id,
                 enqueued_at=time.time(),
                 _executor=executor,
+                _on_deny=on_deny,
             )
             self._entries[approval_id] = entry
             self._dedup[dedup_key] = approval_id
@@ -323,7 +341,12 @@ class ApprovalQueue:
         return entry.as_dict()
 
     async def deny(self, approval_id: str) -> dict[str, Any]:
-        """Owner denies the call; no executor runs."""
+        """Owner denies the call; no executor runs.
+
+        The entry's ``on_deny`` hook, when it has one, runs after the state
+        change. Its return value lands in ``result``; a hook that raises leaves
+        the entry ``denied`` with the failure in ``error``.
+        """
         async with self._lock:
             entry = self._entries.get(approval_id)
             if entry is None:
@@ -334,9 +357,42 @@ class ApprovalQueue:
             entry.decided_at = time.time()
             target = _primary_target(entry.tool, entry.args)
             self._dedup.pop((entry.tool, target), None)
+            on_deny = entry._on_deny
 
         log.info("mcp.approval.denied", approval_id=approval_id, tool=entry.tool)
         await self._emit(_Event(kind="denied", entry=entry.as_dict()))
+        if on_deny is not None:
+            try:
+                entry.result = await on_deny(entry.args)
+            except Exception as exc:
+                entry.error = f"{type(exc).__name__}: {exc}"
+                log.warning(
+                    "mcp.approval.deny_hook_failed",
+                    approval_id=approval_id,
+                    tool=entry.tool,
+                    error=entry.error,
+                )
+        return entry.as_dict()
+
+    async def withdraw(self, approval_id: str, reason: str) -> dict[str, Any] | None:
+        """Retire a pending entry whose request was settled elsewhere.
+
+        The entry becomes ``failed`` with ``reason`` as its error and leaves
+        the inbox; neither the executor nor ``on_deny`` runs. Returns None,
+        changing nothing, for an unknown id or an entry already resolved.
+        """
+        async with self._lock:
+            entry = self._entries.get(approval_id)
+            if entry is None or entry.state != "pending":
+                return None
+            entry.state = "failed"
+            entry.error = reason
+            entry.decided_at = time.time()
+            target = _primary_target(entry.tool, entry.args)
+            self._dedup.pop((entry.tool, target), None)
+
+        log.info("mcp.approval.withdrawn", approval_id=approval_id, tool=entry.tool)
+        await self._emit(_Event(kind="failed", entry=entry.as_dict()))
         return entry.as_dict()
 
     # ── SSE fan-out ────────────────────────────────────────────────────

@@ -22,6 +22,8 @@ EXPECTED = {
     "bridge.idempotency_conflict": 409,
     "bridge.run_not_running": 409,
     "bridge.no_pending_request": 409,
+    "bridge.invalid_session_key": 422,
+    "bridge.invalid_idempotency_key": 422,
     "bridge.skill_invalid": 422,
     "bridge.skill_not_found": 404,
     "bridge.skill_readonly": 403,
