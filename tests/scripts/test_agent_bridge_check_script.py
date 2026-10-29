@@ -10,7 +10,10 @@ as server-sent events, because the real mounts answer with SSE.
 Pinned here: the exit codes (0 pass, 1 fail, 2 usage, 3 pass with the pong step
 skipped), that ``--mode auto`` reads the default profile's health and model id,
 that the key is parsed from the ``claude mcp add`` line and never printed, and
-that the probe client is revoked even when the probe stops early.
+that the probe client is revoked even when the probe stops early, that its scopes go
+back to ``agents`` only after the admin step (so ``--keep`` leaves no admin key), that a
+box without memory skips the memory checks instead of failing, that a failed ``add``
+neither prints a key nor leaves the client unrevoked, and that probe names do not repeat.
 """
 
 from __future__ import annotations
@@ -32,7 +35,7 @@ _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "agent-bridge-check.
 _TOKEN = (
     "fake-token-for-tests-0123456789abcdef"  # stands in for the secret the probe must not print
 )
-_KEY_RE = re.compile(r"^Bearer (hal0bk_ci-probe-\d+\.[A-Za-z0-9_-]+)$")
+_KEY_RE = re.compile(r"^Bearer (hal0bk_ci-probe-\d+-\d+\.[A-Za-z0-9_-]+)$")
 
 # The stub `hal0`: the three verbs the probe calls. `add` prints what the real
 # command prints (a panel that wraps the key, then one pasteable line per scope);
@@ -55,6 +58,15 @@ def control(action, **body):
 
 if args[:2] == ["bridge", "add"]:
     key = "hal0bk_" + args[2] + ".{_TOKEN}"
+    if os.environ.get("STUB_ADD") == "fail-quietly":
+        print("error: bridge.disabled: the agent bridge is off", file=sys.stderr)
+        sys.exit(1)
+    if os.environ.get("STUB_ADD") == "fail-echoing":
+        # minted, then the command failed: the output already holds the (wrapped) key
+        print("| " + key[:30] + " |")
+        print("| " + key[30:] + " |")
+        print("error: could not write the onboarding lines", file=sys.stderr)
+        sys.exit(1)
     print("+----- " + args[2] + " -----+")
     print("| " + key[:30] + " |")   # a narrow terminal wraps the key here
     print("| " + key[30:] + " |")
@@ -83,6 +95,8 @@ class Fake:
     status: str = "completed"
     output: str = "Pong."
     ignore_revoke: bool = False
+    memory_mounted: bool = True
+    admin_mounted: bool = True
     leak_approve: bool = False
     scopes: set[str] = field(default_factory=lambda: {"agents"})
     revoked: bool = False
@@ -154,6 +168,10 @@ def _handler(fake: Fake) -> type[BaseHTTPRequestHandler]:
             auth = _KEY_RE.match(self.headers.get("Authorization", ""))
             if not auth or fake.revoked:
                 return self._send(401)
+            if mount == "memory" and not fake.memory_mounted:
+                return self._send(404)  # /mcp/memory is mounted only while memory runs
+            if mount == "admin" and not fake.admin_mounted:
+                return self._send(404)
             if mount not in fake.scopes:
                 return self._send(403)
             if "text/event-stream" not in self.headers.get("Accept", ""):
@@ -207,13 +225,16 @@ def box(tmp_path: Path):
         server.server_close()
 
 
-def _run(box_: Any, *args: str, base: str | None = None) -> subprocess.CompletedProcess[str]:
+def _run(
+    box_: Any, *args: str, base: str | None = None, **env_extra: str
+) -> subprocess.CompletedProcess[str]:
     _fake, url, stub, log = box_
     env = {
         "PATH": os.environ["PATH"],
         "HAL0_BIN": str(stub),
         "STUB_LOG": str(log),
         "TMPDIR": str(log.parent),
+        **env_extra,
     }
     return subprocess.run(
         ["bash", str(_SCRIPT), "--base", base or url, *args],
@@ -242,6 +263,8 @@ def test_help_lists_the_modes_and_exit_codes() -> None:
     assert proc.returncode == 0
     for word in ("--mode", "reduced", "--base", "--keep", "3 passed"):
         assert word in proc.stdout
+    # --keep leaves a client behind, so --help says what scopes it keeps
+    assert "restored to the agents scope" in proc.stdout
 
 
 @pytest.mark.parametrize(
@@ -275,11 +298,12 @@ def test_reduced_mode_passes_with_exit_3_and_skips_the_pong_step(box, sse: bool)
     assert proc.returncode == 3, proc.stdout + proc.stderr
     assert "SKIPPED (reduced)" in proc.stdout
     assert "agent_run" not in fake.tool_calls
-    assert _verbs(log) == ["bridge add", "bridge scopes", "bridge revoke"]
+    assert _verbs(log) == ["bridge add", "bridge scopes", "bridge scopes", "bridge revoke"]
     add = _stub_calls(log)[0]
-    assert re.fullmatch(r"ci-probe-\d+", add[2]) and add[3:] == ["--scope", "agents"]
+    assert re.fullmatch(r"ci-probe-\d{10}-\d+", add[2]) and add[3:] == ["--scope", "agents"]
     assert _stub_calls(log)[1][3:] == ["agents", "memory", "admin"]
-    for step in ("[1]", "[2]", "[3]", "[5a]", "[5b]", "[6]"):
+    assert _stub_calls(log)[2][2:] == [add[2], "agents"]  # put back before the revoke
+    for step in ("[1]", "[2]", "[3]", "[5a]", "[5b]", "[5c]", "[6]"):
         assert f"PASS: {step}" in proc.stdout
     assert _TOKEN not in proc.stdout + proc.stderr  # the key is never printed
     assert "hal0bk_" not in proc.stdout + proc.stderr
@@ -351,12 +375,16 @@ def test_an_admin_tool_list_with_approval_approve_fails_the_probe(box) -> None:
     assert "approval_approve" in proc.stderr
 
 
-def test_keep_skips_the_revoke(box) -> None:
-    _fake, _url, _stub, log = box
+def test_keep_skips_the_revoke_and_leaves_the_client_on_agents_only(box) -> None:
+    fake, _url, _stub, log = box
     proc = _run(box, "--mode", "reduced", "--keep")
     assert proc.returncode == 3  # --keep alone never changes the exit code: reduced still does
     assert "SKIPPED (--keep)" in proc.stdout
+    assert "scope agents only" in proc.stdout
     assert "bridge revoke" not in _verbs(log)
+    # step 5 granted memory and admin; the client a --keep run leaves behind must not hold them
+    assert _verbs(log) == ["bridge add", "bridge scopes", "bridge scopes"]
+    assert fake.scopes == {"agents"} and not fake.revoked
 
 
 def test_keep_with_a_full_run_exits_0(box) -> None:
@@ -370,3 +398,76 @@ def test_a_probe_that_cannot_reach_the_box_still_revokes_its_client(box) -> None
     assert proc.returncode == 1
     assert "FAIL: [2]" in proc.stderr
     assert _verbs(log) == ["bridge add", "bridge revoke"]
+
+
+def test_a_box_without_memory_skips_the_memory_checks_and_still_passes(box) -> None:
+    """``/mcp/memory`` is mounted only while memory runs: a 404 there is not a bridge fault."""
+    fake, _url, _stub, log = box
+    fake.memory_mounted = False
+    proc = _run(box, "--mode", "reduced")
+    assert proc.returncode == 3, proc.stdout + proc.stderr  # reduced, not failed
+    assert "FAIL" not in proc.stderr
+    assert proc.stdout.count("SKIPPED (memory-off)") == 2  # before and after the grant
+    assert "PASS: [5a] the agents-only key is refused (403) on /mcp/admin" in proc.stdout
+    assert "PASS: [5b]" in proc.stdout and "memory not mounted" in proc.stdout
+    assert _verbs(log)[-1] == "bridge revoke"
+
+
+def test_a_404_on_admin_is_still_a_failure(box) -> None:
+    """Only memory may be absent; an unmounted admin server is a real fault."""
+    fake, *_ = box
+    fake.admin_mounted = False
+    proc = _run(box, "--mode", "reduced")
+    assert proc.returncode == 1
+    assert "FAIL: [5] an agents-only key on /mcp/admin/mcp: expected HTTP 403" in proc.stderr
+
+
+def test_a_failed_add_is_revoked_and_never_prints_the_key(box) -> None:
+    """``add`` can mint the client and still exit non-zero; its output may hold the key."""
+    _fake, _url, _stub, log = box
+    proc = _run(box, "--mode", "reduced", STUB_ADD="fail-echoing")
+    assert proc.returncode == 1
+    out = proc.stdout + proc.stderr
+    assert "FAIL: [1] hal0 bridge add" in proc.stderr and "failed" in proc.stderr
+    assert _TOKEN not in out and "hal0bk_" not in out
+    assert _TOKEN[10:] not in out  # nor the wrapped second half of the key
+    # the client may exist, so the exit trap must revoke it
+    assert _verbs(log) == ["bridge add", "bridge revoke"]
+
+
+def test_a_failed_add_without_a_key_shows_why(box) -> None:
+    _fake, _url, _stub, log = box
+    proc = _run(box, "--mode", "reduced", STUB_ADD="fail-quietly")
+    assert proc.returncode == 1
+    assert "bridge.disabled: the agent bridge is off" in proc.stderr
+    assert _verbs(log) == ["bridge add", "bridge revoke"]
+
+
+def test_a_key_in_any_failure_line_is_masked(tmp_path: Path) -> None:
+    """``fail`` and ``abort`` mask ``hal0bk_...`` in whatever they print."""
+    script = _SCRIPT.read_text()
+    mask_def = next(line for line in script.splitlines() if line.startswith("mask()"))
+    fail_def = next(line for line in script.splitlines() if line.startswith("fail()"))
+    proc = subprocess.run(
+        ["bash", "-c", f'{mask_def}\n{fail_def}\nfail "boom: Bearer hal0bk_x.{_TOKEN} here"'],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0
+    assert _TOKEN not in proc.stderr
+    assert proc.stderr.strip() == "FAIL: boom: Bearer hal0bk_<masked> here"
+
+
+def test_probe_names_carry_the_time_so_they_do_not_collide(box) -> None:
+    """Revoked names stay taken, so a bare ``$RANDOM`` suffix would repeat over time."""
+    from hal0.bridge.keys import NAME_RE
+
+    _fake, _url, _stub, log = box
+    proc = _run(box, "--mode", "reduced")
+    assert proc.returncode == 3
+    name = _stub_calls(log)[0][2]
+    assert NAME_RE.fullmatch(name) and len(name) <= 32
+    assert re.fullmatch(r"ci-probe-\d{10}-\d{1,5}", name)
+    # a fixed RANDOM would still differ between runs a second apart: the time is in the name
+    assert int(name.split("-")[2]) > 1_700_000_000

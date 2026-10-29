@@ -3,14 +3,17 @@
 #
 # Walks one bridge client through its life against a running hal0-api:
 #
-#   1. hal0 bridge add ci-probe-$RANDOM --scope agents   (key parsed from the output)
+#   1. hal0 bridge add ci-probe-<epoch>-$RANDOM --scope agents  (key parsed from the output;
+#      revoked names stay taken, so the name carries the time)
 #   2. MCP initialize + tools/list on $BASE/mcp/agents/mcp  (agents_list must be listed)
 #   3. tools/call agents_list                               (hermes must be listed)
 #   4. tools/call agent_run "Reply with the single word pong ..." wait_s=180
 #      -> status completed, "pong" in output   (full mode only)
-#   5. the agents-only key is refused (403) on /mcp/memory and /mcp/admin;
+#   5. the agents-only key is refused (403) on /mcp/memory and /mcp/admin
+#      (/mcp/memory is mounted only while memory runs; a 404 there is SKIPPED);
 #      after `hal0 bridge scopes <name> agents memory admin` both open, and the
-#      admin tool list holds no approval_approve
+#      admin tool list holds no approval_approve; the client is then put back
+#      to `agents` only
 #   6. hal0 bridge revoke <name>; the same tools/list now gets 401
 #
 # Modes: full runs step 4. reduced skips it, for a box whose Hermes is not
@@ -22,7 +25,9 @@
 #
 # Needs: bash, curl, python3, and the hal0 CLI (HAL0_BIN names another binary),
 # run as a user that can call the admin API (root, or HAL0_ADMIN_KEY exported).
-# The key is never printed. The client is revoked on exit unless --keep is given.
+# The probe's key briefly holds the admin scope (step 5); it is put back to `agents`
+# only, then the client is revoked on exit unless --keep is given. The key is never
+# printed: output that echoes one is masked or withheld.
 set -euo pipefail
 
 BASE="${HAL0_API_URL:-http://127.0.0.1:8080}"
@@ -40,7 +45,8 @@ Usage: agent-bridge-check.sh [--mode auto|full|reduced] [--base URL] [--keep]
                 auto (default): full when the default Hermes profile is healthy
                 and advertises a model, else reduced.
   --base URL    hal0-api base URL (default: $HAL0_API_URL, else http://127.0.0.1:8080)
-  --keep        leave the probe client in place (skip the revoke step)
+  --keep        leave the probe client in place, restored to the agents scope
+                only (skip the revoke step)
   -h, --help    show this help
 
 Exit: 0 pass, 1 fail, 2 bad arguments, 3 passed with the pong step skipped.
@@ -80,7 +86,9 @@ export HAL0_API_URL="$BASE"
 
 FAILED=0
 SKIPPED_REDUCED=0
-NAME="ci-probe-$RANDOM"
+# Revoked names stay taken, so $RANDOM alone would collide over time. 9 + 10 + 1 + up
+# to 5 characters, inside the 32 a client name may hold.
+NAME="ci-probe-$(date +%s)-$RANDOM"
 CLIENT_ADDED=0
 CLIENT_REVOKED=0
 KEY=""
@@ -98,8 +106,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# mask TEXT — TEXT with any bridge key (hal0bk_...) replaced. A failure message can carry
+# output that echoes a key; nothing the probe prints may show one.
+mask() { printf '%s' "$*" | sed 's/hal0bk_[^" ]*/hal0bk_<masked>/g'; }
+
 pass() { printf 'PASS: %s\n' "$*"; }
-fail() { printf 'FAIL: %s\n' "$*" >&2; FAILED=1; }
+fail() { printf 'FAIL: %s\n' "$(mask "$*")" >&2; FAILED=1; }
 skip() { printf 'SKIPPED (%s): %s\n' "$1" "$2"; }
 # A failure that makes every later step meaningless.
 abort() { fail "$*"; exit 1; }
@@ -242,10 +254,17 @@ if ! command -v curl >/dev/null 2>&1; then die_usage "curl is required"; fi
 if ! command -v python3 >/dev/null 2>&1; then die_usage "python3 is required"; fi
 
 add_out=""
+# Set before the call: an add that exits non-zero may still have minted the client (it can
+# fail after the server answered), and the exit trap must then revoke it.
+CLIENT_ADDED=1
 if ! add_out="$("$HAL0_BIN" bridge add "$NAME" --scope agents 2>&1)"; then
+  # The panel wraps a key over lines that do not start with hal0bk_, so masking the prefix
+  # is not enough: output that holds a key at all is not echoed.
+  case "$add_out" in
+    *hal0bk_*) add_out="(output withheld: it holds a bridge key)" ;;
+  esac
   abort "[1] hal0 bridge add $NAME failed: $add_out"
 fi
-CLIENT_ADDED=1
 # The key is on the "Authorization: Bearer" header of every printed claude mcp add
 # line, which hal0 never wraps. The panel above them can wrap at a narrow terminal.
 KEY="$(printf '%s\n' "$add_out" | grep -o 'Bearer hal0bk_[^" ]*' | head -1 | sed 's/^Bearer //' || true)"
@@ -341,22 +360,36 @@ fi
 
 # --- 5. scopes -----------------------------------------------------------------
 
+# /mcp/memory is mounted only while memory runs, so a 404 there means "memory is off on
+# this box", not a bridge fault: it is SKIPPED, and exit stays 0.
 scope_ok=1
+refused=()
 for mount in /mcp/memory /mcp/admin; do
   mcp_open "$mount" || true
-  if [ "$HTTP_CODE" != 403 ]; then
+  if [ "$mount" = /mcp/memory ] && [ "$HTTP_CODE" = 404 ]; then
+    skip memory-off "[5a] /mcp/memory is not mounted (memory is not running); its 403 was not checked"
+  elif [ "$HTTP_CODE" != 403 ]; then
     fail "[5] an agents-only key on $mount/mcp: expected HTTP 403, got $(describe_http)"
     scope_ok=0
+  else
+    refused+=("$mount")
   fi
 done
-[ "$scope_ok" = 1 ] && pass "[5a] the agents-only key is refused (403) on /mcp/memory and /mcp/admin"
+if [ "$scope_ok" = 1 ] && [ "${#refused[@]}" -gt 0 ]; then
+  pass "[5a] the agents-only key is refused (403) on ${refused[*]}"
+fi
 
 if "$HAL0_BIN" bridge scopes "$NAME" agents memory admin >/dev/null 2>&1; then
   scope_ok=1
-  if ! mcp_open /mcp/memory; then
-    fail "[5] after granting memory: initialize on /mcp/memory/mcp got $(describe_http)"
-    scope_ok=0
-  fi
+  memory_state=open
+  mcp_open /mcp/memory || true
+  case "$HTTP_CODE" in
+    200) ;;
+    404) memory_state="not mounted"
+         skip memory-off "[5b] /mcp/memory is not mounted (memory is not running); not checked" ;;
+    *) fail "[5] after granting memory: initialize on /mcp/memory/mcp got $(describe_http)"
+       scope_ok=0 ;;
+  esac
   if mcp_open /mcp/admin; then
     admin_tools="$(tools_list /mcp/admin || true)"
     if [ -z "$admin_tools" ]; then
@@ -370,15 +403,29 @@ if "$HAL0_BIN" bridge scopes "$NAME" agents memory admin >/dev/null 2>&1; then
     fail "[5] after granting admin: initialize on /mcp/admin/mcp got $(describe_http)"
     scope_ok=0
   fi
-  [ "$scope_ok" = 1 ] && pass "[5b] with scopes agents, memory, admin both servers open, and the admin tools hold no approval_approve"
+  if [ "$scope_ok" = 1 ]; then
+    if [ "$memory_state" = open ]; then
+      pass "[5b] with scopes agents, memory, admin both servers open, and the admin tools hold no approval_approve"
+    else
+      pass "[5b] with scopes agents, memory, admin the admin server opens and its tools hold no approval_approve (memory $memory_state)"
+    fi
+  fi
 else
   fail "[5] hal0 bridge scopes $NAME agents memory admin failed"
+fi
+
+# The probe's key held admin a moment ago. Put it back to agents only before anything can
+# leave it behind (--keep, or a revoke that fails).
+if "$HAL0_BIN" bridge scopes "$NAME" agents >/dev/null 2>&1; then
+  pass "[5c] scopes put back to agents only"
+else
+  fail "[5c] hal0 bridge scopes $NAME agents failed; the client may still hold memory and admin"
 fi
 
 # --- 6. revoke -------------------------------------------------------------------
 
 if [ "$KEEP" = 1 ]; then
-  skip --keep "[6] revoke; client $NAME stays — remove it with: hal0 bridge revoke $NAME"
+  skip --keep "[6] revoke; client $NAME stays, with scope agents only — remove it with: hal0 bridge revoke $NAME"
 elif "$HAL0_BIN" bridge revoke "$NAME" >/dev/null 2>&1; then
   CLIENT_REVOKED=1
   SESSION=""
