@@ -92,7 +92,7 @@ describe('OvServingNow', () => {
     const onGo = vi.fn()
     ;(window as any).confirm = vi.fn(() => true)
     mount(onGo)
-    const btn = host.querySelector('.ov-tile .ov-acts .ov-btn') as HTMLButtonElement
+    const btn = [...host.querySelectorAll('.ov-tile .ov-acts .ov-btn')].find((b) => b.textContent === 'unload') as HTMLButtonElement
     act(() => btn.click())
     expect(unloadMutate).toHaveBeenCalledWith('agent')
     expect(onGo).not.toHaveBeenCalled()
@@ -107,6 +107,41 @@ describe('OvServingNow', () => {
     expect(tile.classList.contains('serving')).toBe(true)
     expect(tile.textContent).toContain('58 tok/s')
     expect(tile.querySelector('svg')).not.toBeNull()
+  })
+
+  it('counts warming and error tiles as loaded in the lane header and the card note', () => {
+    slotsData = [
+      { name: 'a', device: 'gpu-vulkan', state: 'ready', type: 'llm' },
+      { name: 'b', device: 'gpu-vulkan', state: 'warming', type: 'llm' },
+      { name: 'c', device: 'gpu-vulkan', state: 'error', type: 'llm' },
+      { name: 'd', device: 'gpu-vulkan', state: 'offline', type: 'llm' },
+    ]
+    mount()
+    expect(host.querySelector('.ov-lane-h')?.textContent).toContain('3 / 4 loaded')
+    expect(host.querySelector('.ov-card-n')?.textContent).toBe('3/4 loaded')
+  })
+
+  it('logs routes to slots then dispatches hal0:slot-logs with the slot name', () => {
+    vi.useFakeTimers()
+    try {
+      const onGo = vi.fn()
+      const seen: string[] = []
+      const listener = (e: Event) => seen.push((e as CustomEvent).detail.name)
+      window.addEventListener('hal0:slot-logs', listener)
+      mount(onGo)
+      const btn = [...host.querySelectorAll('.ov-tile .ov-acts .ov-btn')].find((b) => b.textContent === 'logs') as HTMLButtonElement
+      act(() => btn.click())
+      expect(onGo).toHaveBeenCalledTimes(1)
+      expect(onGo).toHaveBeenCalledWith('slots')
+      expect(seen).toEqual([])
+      act(() => {
+        vi.advanceTimersByTime(100)
+      })
+      expect(seen).toEqual(['agent'])
+      window.removeEventListener('hal0:slot-logs', listener)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('shows an empty state when there are no slots', () => {

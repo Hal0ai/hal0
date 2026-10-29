@@ -1,7 +1,7 @@
 // hal0 Overview v2 — Serving now: OvServingNow({ onGo }).
 //
 // The old 13-row slot table as lane-grouped tiles. A lane is a rail group (vulkan / rocm / npu /
-// cpu); loaded slots are tiles (state, model, ctx fill, sparkline while serving), stopped ones are
+// cpu); loaded slots (any state but stopped) are tiles (state, model, ctx fill, sparkline while serving), stopped ones are
 // chips that load on click. The grouping and every figure come from serving-pure.ts.
 
 import { useSlots, useSlotLoad, useSlotUnload } from '@/api/hooks/useSlots'
@@ -14,7 +14,7 @@ const { useMemo } = React
 
 const DOT = { serving: 'serving', stale: 'ready', warming: 'ready', error: 'err', offline: '' }
 
-function ServingTile({ tile, onGo, onUnload }) {
+function ServingTile({ tile, onGo, onUnload, onLogs }) {
   const open = () => onGo('slots/' + tile.name)
   const serving = tile.cls === 'serving'
   const stop = (e) => e.stopPropagation()
@@ -35,6 +35,9 @@ function ServingTile({ tile, onGo, onUnload }) {
         {tile.isDefault && <span className="ov-chip amber">default</span>}
         <span className="ov-st">{tile.stateText}</span>
         <span className="ov-acts" onClick={stop}>
+          <button type="button" className="ov-btn sm" onClick={() => onLogs(tile.name)}>
+            logs
+          </button>
           <button type="button" className="ov-btn sm" onClick={() => onUnload(tile.name)}>
             unload
           </button>
@@ -73,9 +76,14 @@ function OvServingNow({ onGo }) {
     [slots, sys, history],
   )
 
-  const up = (l) => l.loaded.filter((t) => t.cls === 'serving' || t.cls === 'stale').length
-  const total = lanes.reduce((n, l) => n + l.loaded.length + l.stopped.length, 0)
-  const loaded = lanes.reduce((n, l) => n + up(l), 0)
+    const total = lanes.reduce((n, l) => n + l.loaded.length + l.stopped.length, 0)
+  const loaded = lanes.reduce((n, l) => n + l.loaded.length, 0)
+  // Same hand-off as the command palette: route to Slots, then ask its log drawer to open (the short
+  // delay covers SlotsView's listener not being mounted yet).
+  const onLogs = (name) => {
+    onGo('slots')
+    setTimeout(() => window.dispatchEvent(new CustomEvent('hal0:slot-logs', { detail: { name } })), 60)
+  }
   const onUnload = (name) => {
     if (window.confirm('Unload ' + name + '?')) unload.mutate(name)
   }
@@ -98,13 +106,13 @@ function OvServingNow({ onGo }) {
             <span className="ov-d" style={{ background: 'var(--dev-' + l.key + ')' }} />
             {l.label}
             <span className="ov-cnt">
-              {up(l)} / {l.loaded.length + l.stopped.length} loaded
+              {l.loaded.length} / {l.loaded.length + l.stopped.length} loaded
             </span>
           </div>
           {l.loaded.length > 0 && (
             <div className="ov-tiles">
               {l.loaded.map((t) => (
-                <ServingTile key={t.name} tile={t} onGo={onGo} onUnload={onUnload} />
+                <ServingTile key={t.name} tile={t} onGo={onGo} onUnload={onUnload} onLogs={onLogs} />
               ))}
             </div>
           )}
