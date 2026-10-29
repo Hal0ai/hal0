@@ -772,23 +772,6 @@ def ownership_table(
             child_mode=0o644,
             role="images/cache/ (image-gen PNG cache)",
         ),
-        # dashboard-layout.json — the operator's persisted dashboard layout
-        # (``dashboard/layout_store.py`` ``save``/``load``); single-writer
-        # (``hal0-api``), single-operator LAN device (no auth, no per-user
-        # keys). Same O13 birth-ownership class as the rows above: no row
-        # existed, so a root-run process touching ``var_lib`` before the
-        # daemon's first save leaves it un-writable to ``hal0`` with no
-        # ``doctor perms --fix`` remedy (#1938). Written via
-        # ``tempfile.mkstemp`` + ``os.replace`` (the same atomic-write shape
-        # as ``hal0.toml`` above), which always births the
-        # tempfile ``0600`` regardless of umask.
-        PermRow(
-            var_lib / "dashboard-layout.json",
-            state_owner,
-            service_group,
-            0o600,
-            role="dashboard-layout.json",
-        ),
         # agents/ (var_lib) — per-agent sub-homes. 0711 (not 2775): the
         # User=hal0 unit needs to traverse INTO its own home without being able
         # to enumerate siblings. Was repaired ad hoc by hermes_provision's late

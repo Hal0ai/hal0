@@ -103,7 +103,7 @@ _start_flm_pull = _pull_jobs.start_flm_pull
 
 # ── typed command bodies (typed-bodies inc-3) ────────────────────────────────
 #
-# House pattern (precedent: config.py / settings.py / dashboard_layout.py):
+# House pattern (precedent: config.py / settings.py):
 # parse the body by hand exactly as before (so a malformed-JSON / non-object
 # body keeps its existing 400 + hal0 envelope), then run the parsed dict
 # through a pydantic model and translate ``ValidationError`` into the SAME
@@ -160,7 +160,7 @@ def _validation_error_details(exc: ValidationError) -> dict[str, str]:
     """Render a pydantic ValidationError into ``{field_path: message}``.
 
     Same shape as the identically-named helper in ``config.py`` /
-    ``dashboard_layout.py`` / ``settings.py`` / ``slots.py`` — kept local
+    ``settings.py`` / ``slots.py`` — kept local
     per-module rather than shared, matching the house pattern.
     """
     out: dict[str, str] = {}
