@@ -645,9 +645,25 @@ async def test_skill_put_with_a_placeholder_where_a_secret_would_be_is_queued_ra
         ("", {"a.txt": "isolate \u2066x\u2069"}, "a.txt"),
         ("", {"a.txt": "del\x7f"}, "a.txt"),
         ("", {"a\u202etxt.sh": "fine text\n"}, "a\u202etxt.sh"),  # a file name the card shows
+        # one case per class the card would not show as the model reads it
+        ("\nrun it\U000e0041\U000e0042 now\n", None, "SKILL.md"),  # tag characters
+        ("", {"a.txt": "word\u2060joiner"}, "a.txt"),  # U+2060 word joiner (Cf)
+        ("", {"a.txt": "soft\u00adhyphen"}, "a.txt"),  # U+00AD soft hyphen (Cf)
+        ("", {"a.txt": "heart \u2764\ufe0f"}, "a.txt"),  # U+FE0F variation selector
+        ("", {"a.txt": "ideograph \u845b\U000e0100"}, "a.txt"),  # U+E0100 variation selector
+        ("", {"a.txt": "next\u0085line"}, "a.txt"),  # U+0085, a C1 control
+        ("", {"a.txt": "csi\u009b2J"}, "a.txt"),  # U+009B, the C1 CSI
+        ("", {"a.txt": "line\u2028separator"}, "a.txt"),  # U+2028 (Zl)
+        ("", {"a.txt": "unassigned \u0378 here"}, "a.txt"),  # U+0378 (Cn)
+        ("", {"a.txt": "private \ue000 use"}, "a.txt"),  # U+E000 (Co)
+        ("", {"a.txt": "arabic\u061cmark"}, "a.txt"),  # U+061C (Cf)
+        ("", {"a.txt": "mongolian\u180eseparator"}, "a.txt"),  # U+180E (Cf)
+        ("", {"a.txt": "grapheme\u034fjoiner"}, "a.txt"),  # U+034F (Mn, invisible)
+        ("", {"a.txt": "anchor\ufff9x\ufffa"}, "a.txt"),  # U+FFF9 interlinear annotation (Cf)
+        ("", {"a\u200dtxt.sh": "fine text\n"}, "a\u200dtxt.sh"),  # U+200D in a file name
     ],
 )
-async def test_skill_put_with_control_or_bidi_characters_is_refused(
+async def test_skill_put_with_control_format_or_invisible_characters_is_refused(
     svc: BridgeService,
     queue: ApprovalQueue,
     cc: Caller,
@@ -659,7 +675,21 @@ async def test_skill_put_with_control_or_bidi_characters_is_refused(
         await svc.skill_put(cc, name="forum-style", skill_md=VALID_MD + md_extra, files=files)
     assert e.value.code == "bridge.skill_invalid" and e.value.status == 422
     assert e.value.message == (
-        f"{_NOT_REVIEWABLE_PREFIX}: {culprit!r} holds control or bidirectional-override characters"
+        f"{_NOT_REVIEWABLE_PREFIX}: {culprit!r} holds control, format or invisible characters"
+    )
+    assert queue.list_pending() == []
+
+
+async def test_skill_put_with_an_invisible_character_in_the_skill_name_is_refused(
+    svc: BridgeService, queue: ApprovalQueue, cc: Caller
+) -> None:
+    name = "forum\u200bstyle"
+    with pytest.raises(BridgeError) as e:
+        await svc.skill_put(cc, name=name, skill_md=skill_md(name=name), files=None)
+    assert e.value.code == "bridge.skill_invalid"
+    assert e.value.message == (
+        f"{_NOT_REVIEWABLE_PREFIX}: the skill name {name!r} holds control, format or "
+        "invisible characters"
     )
     assert queue.list_pending() == []
 
@@ -667,9 +697,22 @@ async def test_skill_put_with_control_or_bidi_characters_is_refused(
 async def test_skill_put_keeps_tabs_newlines_and_carriage_returns(
     svc: BridgeService, queue: ApprovalQueue, cc: Caller
 ) -> None:
-    files = {"Makefile": "all:\r\n\thal0 status\r\n"}
-    out = await svc.skill_put(cc, name="forum-style", skill_md=VALID_MD, files=files)
+    files = {"Makefile": "all:\r\n\thal0 status\r\n", "tabs.tsv": "a\tb\nc\td\n"}
+    md = VALID_MD + "\tindented\r\nwindows line\r\n"
+    out = await svc.skill_put(cc, name="forum-style", skill_md=md, files=files)
     assert out["status"] == "pending_approval"
+
+
+async def test_skill_put_with_plain_markdown_and_ordinary_emoji_is_queued(
+    svc: BridgeService, queue: ApprovalQueue, cc: Caller
+) -> None:
+    """Emoji that need no joiner or variation selector are ordinary visible text."""
+    md = VALID_MD + "\n## Steps \U0001f680\n\n- [x] done \u2705\n- *café* — naïve \U0001f600\n"
+    files = {"notes.md": "> Tip \U0001f4a1: run `hal0 status` \u2192 read it.\n"}
+    out = await svc.skill_put(cc, name="forum-style", skill_md=md, files=files)
+    assert out["status"] == "pending_approval"
+    [entry] = queue.list_pending()
+    assert entry["args"]["preview"] == md
 
 
 async def test_a_clean_push_card_is_byte_for_byte_what_approval_installs(

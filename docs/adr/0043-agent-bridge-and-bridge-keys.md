@@ -274,9 +274,12 @@ ADR-0035 was verified against), shapes the answer:
     secret, but teaching Hermes to call an authenticated API is what a pushed
     skill is for, so where the log redactor would mask a value, a placeholder
     such as `<token>`, `$ENV_VAR`, `YOUR_KEY` or `...` passes and an opaque
-    token does not), or control text (DEL, a C0 control other than tab,
-    newline and carriage return, a zero-width, bidirectional-override or
-    isolate character, or a BOM). The card is the exact text written, never
+    token does not), or text the card would not show as the model reads it,
+    in a file, a file name or the skill name: a control character other than
+    tab, newline and carriage return, a format character (Unicode category
+    Cf: zero-width, bidirectional, tag characters, the BOM), a private-use or
+    unassigned code point, a line or paragraph separator, or a variation
+    selector. The card is the exact text written, never
     the redactor's output: a masked card once showed
     `export API_TOKEN="***REDACTED***"` for a line whose raw command was what
     Hermes loaded. The card shows the

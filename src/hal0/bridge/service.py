@@ -68,10 +68,10 @@ behind for a Hermes profile:
   ``bridge.too_many_pending``); the queue lets go of a resolved row's executor,
   which is what holds the pushed content. A push must be reviewable on its card
   in full: ``SKILL.md`` at most 16 KiB, the whole push at most 48 KiB, all of it
-  UTF-8 text with no secret-shaped value that is not a placeholder and no control
-  or bidirectional-override character; the card carries ``SKILL.md`` and every
-  file's content exactly as approval writes them, never cut. A bigger skill is
-  the operator's to drop in by hand.
+  UTF-8 text with no secret-shaped value that is not a placeholder and no control,
+  format or invisible character (in a file, a file name or the skill name); the
+  card carries ``SKILL.md`` and every file's content exactly as approval writes
+  them, never cut. A bigger skill is the operator's to drop in by hand.
 * **Capabilities.** :func:`hal0.bridge.capabilities.capabilities_view`, off the
   event loop.
 """
@@ -86,6 +86,7 @@ import json
 import math
 import re
 import time
+import unicodedata
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -178,14 +179,21 @@ MAX_PUSH_TOTAL_BYTES = 48 * 1024
 
 _NOT_REVIEWABLE = "bridge pushes are limited to reviewable text (SKILL.md ≤ 16 KiB, total ≤ 48 KiB)"
 
-#: Characters that can make text display differently from what is written: the C0
-#: controls other than tab, newline and carriage return, DEL, the zero-width and
-#: directional marks (U+200B-U+200F), the bidirectional embeddings and overrides
-#: (U+202A-U+202E), the bidirectional isolates (U+2066-U+2069) and the BOM (U+FEFF).
-#: NUL is refused separately, as not text at all.
-_HIDDEN_TEXT = re.compile(
-    r"[\x01-\x08\x0b\x0c\x0e-\x1f\x7f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]"
-)
+#: Unicode categories of characters a reader does not see as written on the inbox
+#: card while the model still reads them: controls (Cc: C0, DEL and C1), format
+#: characters (Cf: zero-width and joiner characters, bidirectional marks, embeddings,
+#: overrides and isolates, tag characters, the soft hyphen, the BOM), private use
+#: (Co), unassigned code points (Cn, by this Python's Unicode database) and the line
+#: and paragraph separators (Zl, Zp: U+2028 and U+2029, which break a line in some
+#: viewers and not in others). Tab, newline and carriage return are the only
+#: controls a skill may hold; NUL is refused earlier, as not text at all.
+_HIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Co", "Cn", "Zl", "Zp"})
+_SHOWN_CONTROLS = frozenset("\t\n\r")
+#: Invisible marks outside those categories: the variation selectors (U+FE00-U+FE0F,
+#: U+E0100-U+E01EF), which change how the character before them is drawn and show
+#: nothing themselves, and the combining grapheme joiner (U+034F).
+_INVISIBLE_MARKS = ((0xFE00, 0xFE0F), (0xE0100, 0xE01EF), (0x034F, 0x034F))
+_HIDDEN_TEXT_KINDS = "control, format or invisible characters"
 
 #: A value a skill may show where the log redactor would mask a secret: it names one
 #: rather than being one (``Bearer <token>``, ``$ENV_VAR``, ``HF_TOKEN=...``). Matched
@@ -845,7 +853,7 @@ class BridgeService:
         """
         self._check_open()
         queue = self._inbox()
-        total = _check_reviewable(skill_md, files)
+        total = _check_reviewable(name, skill_md, files)
         await asyncio.to_thread(self._skills.validate, name, skill_md, files)
         if await asyncio.to_thread(self._skills.is_shipped, name):
             raise _readonly(name, "changed")
@@ -1167,7 +1175,7 @@ def _readonly(name: str, verb: str) -> BridgeError:
     return BridgeError("bridge.skill_readonly", f"{name!r} is a shipped skill and cannot be {verb}")
 
 
-def _check_reviewable(skill_md: Any, files: Any) -> int:
+def _check_reviewable(name: Any, skill_md: Any, files: Any) -> int:
     """The push's size in UTF-8 bytes; 422 ``bridge.skill_invalid`` when it is not reviewable text.
 
     A bridge push is shown whole on its inbox card, so it must be text a person can
@@ -1177,9 +1185,10 @@ def _check_reviewable(skill_md: Any, files: Any) -> int:
     would mask (:func:`hal0.redaction.secret_spans`) must be a placeholder
     (:data:`_PLACEHOLDER`: ``<token>``, ``$ENV_VAR``, ``...``, ``YOUR_KEY`` and the
     like), since teaching Hermes to call an authenticated API is what a pushed skill
-    is for, and an opaque token is refused. No file or file name may hold a
-    :data:`_HIDDEN_TEXT` character. The card then shows each file exactly as it is
-    written. Anything that is not a string is left to :meth:`SkillLibrary.validate`.
+    is for, and an opaque token is refused. No file, file name or the skill name
+    may hold a character the card would not show (:func:`_holds_hidden_text`). The
+    card then shows each file exactly as it is written. Anything that is not a
+    string is left to :meth:`SkillLibrary.validate`.
     """
     parts: list[tuple[str, Any]] = [("SKILL.md", skill_md)]
     if isinstance(files, dict):
@@ -1208,11 +1217,15 @@ def _check_reviewable(skill_md: Any, files: Any) -> int:
     if total > MAX_PUSH_TOTAL_BYTES:
         raise BridgeError("bridge.skill_invalid", f"{_NOT_REVIEWABLE}; the push is {total} bytes")
     # Only now, with the sizes bounded, is each file read for what the card cannot show.
+    if isinstance(name, str) and _holds_hidden_text(name):  # the card shows the name too
+        raise BridgeError(
+            "bridge.skill_invalid",
+            f"{_NOT_REVIEWABLE}: the skill name {name!r} holds {_HIDDEN_TEXT_KINDS}",
+        )
     for label, text in texts:
-        if _HIDDEN_TEXT.search(text) or _HIDDEN_TEXT.search(label):  # the card shows both
+        if _holds_hidden_text(text) or _holds_hidden_text(label):  # the card shows both
             raise BridgeError(
-                "bridge.skill_invalid",
-                f"{_NOT_REVIEWABLE}: {label!r} holds control or bidirectional-override characters",
+                "bridge.skill_invalid", f"{_NOT_REVIEWABLE}: {label!r} holds {_HIDDEN_TEXT_KINDS}"
             )
         if any(not _is_placeholder(text[start:end]) for start, end in secret_spans(text)):
             raise BridgeError(
@@ -1221,6 +1234,24 @@ def _check_reviewable(skill_md: Any, files: Any) -> int:
                 f"mask; a skill has no business carrying a secret; {_USE_A_PLACEHOLDER}",
             )
     return total
+
+
+def _holds_hidden_text(text: str) -> bool:
+    """Whether ``text`` holds a character the inbox card would not show as the model reads it.
+
+    That is a character of :data:`_HIDDEN_CATEGORIES` other than tab, newline and
+    carriage return, or one of :data:`_INVISIBLE_MARKS`. Each distinct character is
+    judged once.
+    """
+    for char in set(text):
+        if char in _SHOWN_CONTROLS:
+            continue
+        point = ord(char)
+        if unicodedata.category(char) in _HIDDEN_CATEGORIES or any(
+            low <= point <= high for low, high in _INVISIBLE_MARKS
+        ):
+            return True
+    return False
 
 
 def _is_placeholder(value: str) -> bool:
