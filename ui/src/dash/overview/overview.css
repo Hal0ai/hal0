@@ -32,6 +32,9 @@
 
 .ov-stack { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 .ov-stack > .ov-card { flex: 1; }
+/* band column wrapper (OverviewView): the section's card fills the stretched grid cell */
+.ov-col { display: flex; flex-direction: column; min-width: 0; }
+.ov-col > .ov-card { flex: 1; }
 .ov-card { background: var(--bg-1); border: 1px solid var(--line); border-radius: var(--rad-lg); display: flex; flex-direction: column; min-width: 0; }
 .ov-card-h { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--line-soft); min-height: 40px; }
 .ov-card-t { font-family: var(--jbm); font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-3); }

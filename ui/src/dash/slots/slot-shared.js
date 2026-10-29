@@ -105,3 +105,13 @@ export function deviceHue(deviceToken) {
   if (t.includes("npu") || t.includes("flm")) return { label: "npu", cssVar: "--dev-npu" };
   return { label: "cpu", cssVar: "--dev-cpu" };
 }
+
+// A slot's resident memory as a short label: 'shared' for a co-resident slot with
+// no figure of its own, '23.1 GB' when mem_mb is known, '—' otherwise. Used by the
+// overview slot rows and the slot rail.
+export function slotMemLabel(slot) {
+  const mb = slot.mem_mb;
+  if (slot.coresident && !(typeof mb === 'number' && mb > 0)) return 'shared';
+  if (typeof mb === 'number' && mb > 0) return `${(Math.round((mb / 1024) * 10) / 10).toFixed(1)} GB`;
+  return '—';
+}

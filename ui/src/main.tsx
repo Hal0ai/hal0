@@ -81,6 +81,7 @@ import './dash/extra-modals.jsx'
 // cards-shell and the card modules above (slottrack / power / quickchat
 // window globals are offered as swap-in widgets).
 import './dash/dashboard-redesign.jsx'
+import './dash/overview/OverviewView.jsx'
 import './dash/slots.jsx'
 import './dash/slot-modals.jsx'
 // D2 (post-R3 surface rework): slot surfaces decomposed out of the

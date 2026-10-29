@@ -7,7 +7,7 @@ import React from 'react'
 import { useSlots } from '@/api/hooks/useSlots'
 import { useArbiter } from '@/api/hooks/useComfyui'
 import { useMemoryBudget } from '@/api/hooks/useStatsHardware'
-import { slotMemLabel } from './dashboard-redesign.jsx'
+import { slotMemLabel } from './slots/slot-shared.js'
 import { RAIL_GROUPS, railCounts, railFooter, railRows, stateCell } from './slot-rail-pure'
 
 const { useEffect, useMemo, useRef } = React
