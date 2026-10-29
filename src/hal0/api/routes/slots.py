@@ -433,7 +433,7 @@ def _validation_error_details(exc: ValidationError) -> dict[str, str]:
     """Render a pydantic ValidationError into ``{field_path: message}``.
 
     Same shape as the identically-named helper in ``config.py`` /
-    ``dashboard_layout.py`` / ``settings.py`` — kept local per-module rather
+    ``settings.py`` — kept local per-module rather
     than shared, matching the house pattern.
     """
     out: dict[str, str] = {}
