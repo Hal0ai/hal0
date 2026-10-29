@@ -117,7 +117,6 @@ _BUS_FOR_STATUS: dict[str, tuple[str, str]] = {
 
 _FORGOTTEN = "Hermes no longer knows this run"
 _MAX_ERROR_TEXT = 2000
-_MAX_BUS_TEXT = 120
 
 Decide = Callable[[RunRow], dict[str, Any]]
 
@@ -213,14 +212,18 @@ def _timestamp(event: Mapping[str, Any]) -> float:
     return time.time()
 
 
+def _bus_message(tail: _Tail) -> str:
+    """A bus event's message for a run: who delegated to which agent, and no run text.
+
+    ``activity.db`` is world-readable (0644), so a command, a question, the
+    task or an error from Hermes stays in the 0600 ledger; the event's ``data``
+    carries the run id and status (ADR-0043).
+    """
+    return f"{tail.client} → {tail.agent}"
+
+
 def _int_or_none(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
-
-
-def _short(value: Any) -> str:
-    text = value if isinstance(value, str) else ""
-    text = " ".join(text.split())
-    return text if len(text) <= _MAX_BUS_TEXT else text[: _MAX_BUS_TEXT - 1] + "…"
 
 
 def _record_sync(
@@ -678,7 +681,7 @@ class RunWatcher:
             tail,
             "agents.approval_requested",
             "warn",
-            f"{tail.client}'s run on {tail.agent} needs approval: {_short(event.get('command'))}",
+            _bus_message(tail),
             "waiting_for_approval",
         )
         self._changed(tail.run_id)
@@ -709,7 +712,7 @@ class RunWatcher:
             tail,
             "agents.clarification_requested",
             "warn",
-            f"{tail.client}'s run on {tail.agent} asks: {_short(event.get('question'))}",
+            _bus_message(tail),
             "waiting_for_clarification",
         )
         self._changed(tail.run_id)
@@ -749,14 +752,11 @@ class RunWatcher:
             tail.last_seq = max(tail.last_seq, event[0])
         if result is None:
             return
-        before, after, _changed = result
+        before, _after, _changed = result
         if _is_pending(before, "approval.request"):
             await self._withdraw(before, f"the run ended ({status})")
         bus_type, severity = _BUS_FOR_STATUS[status]
-        message = f"{tail.client}'s run on {tail.agent} {status}"
-        if after.error and status in ("failed", "unknown"):
-            message = f"{message}: {_short(after.error)}"
-        await self._emit(tail, bus_type, severity, message, status)
+        await self._emit(tail, bus_type, severity, f"{_bus_message(tail)}: {status}", status)
         self._changed(tail.run_id)
 
     # -- approvals ---------------------------------------------------------------------

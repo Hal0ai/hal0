@@ -350,6 +350,9 @@ async def test_start_and_wait_completed(
     [started] = [e for e in bus.ring if e["type"] == "agents.run_started"]
     assert started["source"] == "bridge:cc" and started["severity"] == "info"
     assert started["data"]["run_id"] == view["run_id"] and started["data"]["agent"] == "hermes"
+    # Who and where, never the task: the bus lands in the world-readable activity.db.
+    assert started["message"] == "cc → hermes"
+    assert completed["message"] == "cc → hermes: completed"
 
 
 async def test_input_preview_is_capped(svc: BridgeService, cc: Caller) -> None:
@@ -593,6 +596,7 @@ async def test_approval_mirrored_once_and_executes(
     assert waited["pending"]["approval_id"] == entry["id"]
     asked = await _bus_event(bus, "agents.approval_requested")
     assert asked["severity"] == "warn" and asked["data"]["status"] == "waiting_for_approval"
+    assert asked["message"] == "cc → hermes" and asked["data"]["run_id"] == rid  # no command
 
     result = await queue.approve(entry["id"])
     assert result["state"] == "executed"
@@ -774,6 +778,7 @@ async def test_clarify_goes_to_client_and_answer_resumes(
     assert queue.list_all() == []  # the question is for the client, not the inbox
     asked = await _bus_event(bus, "agents.clarification_requested")
     assert asked["severity"] == "warn"
+    assert asked["message"] == "cc → hermes" and asked["data"]["run_id"] == rid  # no question
 
     with pytest.raises(BridgeError) as e:
         await svc.answer_run(cc, rid, request_id="wrong", answer="blue")

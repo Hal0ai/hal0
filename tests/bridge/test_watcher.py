@@ -342,7 +342,9 @@ async def test_failed_run_records_error_and_emits_run_failed(
     row = store.get_run(rid)
     assert row is not None and row.status == "failed" and row.error == "model crashed"
     assert failed["severity"] == "error"
-    assert failed["message"] == "cc's run on hermes failed: model crashed"
+    # No run text on the bus: activity.db is 0644, the error stays in the 0600 ledger.
+    assert failed["message"] == "cc → hermes: failed"
+    assert failed["data"]["run_id"] == rid
 
 
 async def test_cancelled_run_emits_run_stopped(

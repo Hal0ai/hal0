@@ -85,7 +85,6 @@ _HEADER_KEY = re.compile(r"[\x21-\x7e]+")
 
 _MAX_LIST = 200
 _MAX_EVENTS = 500
-_BUS_PREVIEW_CHARS = 80
 
 #: RunView keys, in order.
 _VIEW_KEYS = (
@@ -356,8 +355,9 @@ class BridgeService:
             )
             # Hermes has accepted the run: record and watch it even if the caller
             # goes away now, or it would hold a concurrency slot unwatched.
-            preview = " ".join(input.split())[:_BUS_PREVIEW_CHARS]
-            admit = asyncio.create_task(self._admit(row, f"{client} → {agent}: {preview}"))
+            # The bus message names who and where, never the task: activity.db is
+            # world-readable (0644) and run text belongs in the 0600 ledger.
+            admit = asyncio.create_task(self._admit(row, f"{client} → {agent}"))
             self._admitting.add(admit)
             admit.add_done_callback(self._admitting.discard)
             await asyncio.shield(admit)
