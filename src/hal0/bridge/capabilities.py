@@ -29,7 +29,8 @@ into every profile's file.
 
 ``api_server_version`` is read from the API server's ``GET /health/detailed``
 (3 s timeout) and is ``None`` when the gateway is down, answers an error or sends
-no usable ``version``. The route needs the profile's API key (it answers 401
+no usable ``version`` (one that is not version-shaped, such as ``0.22.4``, is not
+usable). The route needs the profile's API key (it answers 401
 without it, checked live), so the caller passes ``api_key``, the one hal0 holds for
 that profile (the same one ``HermesGateway.key_for`` reads), and it goes out as a
 bearer header on that one request, never through a proxy (``trust_env=False``:
@@ -77,6 +78,10 @@ _PROFILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 
 _FETCH_TIMEOUT_S = 3.0
 _MAX_TEXT = 200
+
+#: What a version looks like (``0.22.4``, ``v0.22.4``, ``0.23.0rc1``, ``0.22.4+g4d04303``):
+#: the gateway's answer is allow-listed like everything else, not just redacted.
+_VERSION = re.compile(r"v?\d+(?:\.\d+){0,3}(?:[.+-]?[0-9A-Za-z][0-9A-Za-z.+-]{0,39})?")
 
 
 def capabilities_view(
@@ -211,8 +216,8 @@ def _version(
         body = fetch(base + path, {"Authorization": f"Bearer {key}"})
     except Exception:  # the gateway being down is a normal state, not an error to report
         return None
-    version = body.get("version") if isinstance(body, dict) else None
-    return _text(version)
+    version = _text(body.get("version") if isinstance(body, dict) else None)
+    return version if version is not None and _VERSION.fullmatch(version) else None
 
 
 def _fetch_json(url: str, headers: Mapping[str, str]) -> Any:

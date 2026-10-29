@@ -305,12 +305,32 @@ def test_the_key_never_goes_through_a_proxy_for_a_hermes_beyond_loopback(
     assert seen["trust_env"] is False
 
 
-@pytest.mark.parametrize("answer", [None, {}, {"version": 7}, {"version": ""}, ["x"], "up"])
+@pytest.mark.parametrize(
+    "answer",
+    [
+        None,
+        {},
+        {"version": 7},
+        {"version": ""},
+        ["x"],
+        "up",
+        {"version": SECRET},  # not version-shaped: never echoed, even unrecognised as a secret
+        {"version": "0.22.4 and more words"},
+    ],
+)
 def test_unreadable_version_is_none(tmp_hermes_home: Path, answer: Any) -> None:
     view = capabilities_view(
         tmp_hermes_home, "default", fetch_json=lambda _u, _h: answer, api_key=API_KEY
     )
     assert view["api_server_version"] is None
+
+
+@pytest.mark.parametrize("version", ["0.22.4", "v0.22.4", "0.23.0rc1", "0.22.4+g4d04303", "1"])
+def test_a_version_shaped_answer_is_reported(tmp_hermes_home: Path, version: str) -> None:
+    view = capabilities_view(
+        tmp_hermes_home, "default", fetch_json=lambda _u, _h: {"version": version}, api_key=API_KEY
+    )
+    assert view["api_server_version"] == version
 
 
 def test_unreachable_gateway_gives_none_not_an_error(tmp_hermes_home: Path) -> None:
