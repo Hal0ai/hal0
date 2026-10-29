@@ -107,7 +107,7 @@ def test_store_with_two_clients_passes_with_schema_version(tmp_path: Path) -> No
     c = da.check_bridge_store(path=db, enabled=True)
     assert c.status == "pass"
     assert "2 clients" in c.detail
-    assert "schema v1" in c.detail
+    assert "schema v2" in c.detail
 
 
 def test_one_client_is_singular(tmp_path: Path) -> None:
@@ -131,7 +131,7 @@ def test_empty_store_passes_with_zero_clients(tmp_path: Path) -> None:
     c = da.check_bridge_store(path=db, enabled=True)
     assert c.status == "pass"
     assert "0 clients" in c.detail
-    assert "schema v1" in c.detail
+    assert "schema v2" in c.detail
 
 
 def test_mode_wider_than_0600_warns(tmp_path: Path) -> None:
@@ -224,7 +224,7 @@ def test_stale_schema_warns(tmp_path: Path) -> None:
     c = da.check_bridge_store(path=db, enabled=True)
     assert c.status == "warn"
     assert "schema v0" in c.detail
-    assert "v1" in c.detail
+    assert "v2" in c.detail  # the newest migration the code ships
 
 
 def test_enabled_defaults_to_the_bridge_config(

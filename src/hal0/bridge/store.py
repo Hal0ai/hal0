@@ -136,10 +136,22 @@ class RunRow:
     execution_generation: int | None
     pending_request_json: str | None
     last_seq: int
+    #: The key hal0 sent Hermes for the start (``hal0-bridge:<client>:<key>``), or None.
+    idempotency_key: str | None = None
+    #: sha256 of the start's request (``BridgeService``), to tell a replay from a conflict.
+    request_sha256: str | None = None
+    #: When hal0 decided to stop the run while the stop has not reached Hermes yet.
+    pending_stop: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        """Return a JSON-ready dict: ``usage`` and ``pending`` are decoded, the raw columns dropped."""
+        """Return a JSON-ready dict: ``usage`` and ``pending`` are decoded, the raw columns dropped.
+
+        The replay columns (``idempotency_key``, ``request_sha256``) are hal0's own
+        bookkeeping and are left out too.
+        """
         body = {f.name: getattr(self, f.name) for f in fields(self)}
+        body.pop("idempotency_key")
+        body.pop("request_sha256")
         usage = body.pop("usage_json")
         pending = body.pop("pending_request_json")
         body["usage"] = None if usage is None else json.loads(usage)
@@ -366,6 +378,19 @@ class BridgeStore:
         """Return the run, or None."""
         with connect(self.path) as conn:
             return _select_run(conn, run_id)
+
+    def run_for_idempotency_key(
+        self, client: str, profile: str, idempotency_key: str
+    ) -> RunRow | None:
+        """The newest run ``client`` started on ``profile`` with ``idempotency_key``, or None."""
+        with connect(self.path) as conn:
+            row = conn.execute(
+                f"SELECT {_RUN_SELECT} FROM runs "
+                "WHERE client = ? AND profile = ? AND idempotency_key = ? "
+                "ORDER BY created_at DESC, run_id DESC LIMIT 1",
+                (client, profile, idempotency_key),
+            ).fetchone()
+        return None if row is None else _run_from_row(row)
 
     def list_runs(self, *, client: str | None, status: str | None, limit: int) -> list[RunRow]:
         """Return up to ``limit`` runs, newest first.

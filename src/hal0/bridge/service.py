@@ -15,12 +15,26 @@ both enforce the same rules:
   idempotent replay with a run the ledger holds for another client, the start
   is refused with 409 ``bridge.idempotency_conflict``.
 * **Concurrency.** ``[bridge].max_concurrent_runs_per_client`` is checked before
-  the run is posted; admin runs count under the client name ``admin``.
+  the run is posted; admin runs count under the client name ``admin``. A start
+  is admitted under its client's lock, which is held until the run is in the
+  ledger even when the caller goes away mid-start, so two starts can never
+  both pass the cap. A start whose idempotency key the ledger already holds
+  for that client and profile is answered from the ledger before the cap is
+  checked: the same request is that run, another request with the same key is
+  409 ``bridge.idempotency_conflict`` (what Hermes answers itself).
+* **Ledger failures.** If the ledger cannot record a run Hermes has just
+  accepted, hal0 asks Hermes to stop it (best effort, so it holds no slot
+  unwatched) and the start is 503 ``bridge.store_unavailable``.
 * **Waiting.** ``wait_run`` defaults to 120 s and is capped at 600 s. It returns
   when the run ends or needs the caller (a clarification is pending); an
   approval is the operator's to give in the inbox, so it does not end a wait.
-* **Shutdown.** After :meth:`BridgeService.close`, starting a run or re-attaching
-  is 503 ``bridge.unavailable``: a watcher started then could not be stopped.
+* **Shutdown.** After :meth:`BridgeService.close`, starting a run, a teach call
+  or re-attaching is 503 ``bridge.unavailable``: a watcher started then could
+  not be stopped.
+* **Restart.** :meth:`BridgeService.reattach` probes every live run at once,
+  each with a short timeout (:data:`REATTACH_PROBE_S`), so one hung profile
+  cannot hold up the others; a run whose profile does not answer in time is
+  watched anyway and the watcher's own reconnect loop keeps trying.
 
 The :class:`~hal0.bridge.watcher.RunWatcher` keeps each live run's ledger row
 current and calls back on every change, which wakes waiters here.
@@ -64,6 +78,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import json
 import math
 import re
 import time
@@ -125,6 +140,9 @@ INPUT_PREVIEW_CHARS = 200
 
 #: Events a finished ``wait_run`` carries.
 WAIT_TAIL_EVENTS = 20
+
+#: How long :meth:`BridgeService.reattach` waits for Hermes to answer for one run.
+REATTACH_PROBE_S = 10.0
 
 #: ``X-Hermes-Session-Key`` is at most 256 characters; the idempotency key gets the same cap.
 _MAX_HEADER_KEY = 256
@@ -378,7 +396,26 @@ class BridgeService:
         sent_idempotency = _namespaced(
             client, idempotency_key, code="bridge.invalid_idempotency_key", what="idempotency_key"
         )
+        fingerprint = _request_digest(
+            input=input,
+            instructions=instructions,
+            reasoning_effort=reasoning_effort,
+            session_key=session_key,
+        )
         async with self._start_lock(client):
+            if sent_idempotency is not None:
+                # A retried start is answered from the ledger before the cap is checked:
+                # the run it names is already admitted and counts once.
+                known = await asyncio.to_thread(
+                    self._store.run_for_idempotency_key, client, profile, sent_idempotency
+                )
+                if known is not None:
+                    if known.request_sha256 not in (None, fingerprint):
+                        raise BridgeError(
+                            "bridge.idempotency_conflict",
+                            "idempotency_key was already used for a run with different input",
+                        )
+                    return _view(known)
             live = await asyncio.to_thread(self._store.count_live_runs, client)
             limit = config.max_concurrent_runs_per_client
             if live >= limit:
@@ -439,6 +476,8 @@ class BridgeService:
                 execution_generation=None,
                 pending_request_json=None,
                 last_seq=0,
+                idempotency_key=sent_idempotency,
+                request_sha256=fingerprint,
             )
             # Hermes has accepted the run: record and watch it even if the caller
             # goes away now, or it would hold a concurrency slot unwatched.
@@ -447,11 +486,40 @@ class BridgeService:
             admit = asyncio.create_task(self._admit(row, f"{client} → {agent}"))
             self._admitting.add(admit)
             admit.add_done_callback(self._admitting.discard)
-            await asyncio.shield(admit)
+            try:
+                await asyncio.shield(admit)
+            finally:
+                # A cancelled caller must not release the client's lock while the
+                # shielded admission is still writing: the next start would count
+                # the live runs before this one is in the ledger.
+                await _until_done(admit)
         return _view(row)
 
     async def _admit(self, row: RunRow, message: str) -> None:
-        await asyncio.to_thread(self._store.insert_run, row)
+        """Record and watch a run Hermes accepted; 503 ``bridge.store_unavailable`` if it cannot.
+
+        A ledger that cannot take the row would leave the run unwatched, holding a
+        Hermes slot with nobody to report it: hal0 asks Hermes to stop it (best
+        effort) before refusing the start.
+        """
+        try:
+            await asyncio.to_thread(self._store.insert_run, row)
+        except Exception as exc:
+            log.error(
+                "bridge.ledger_insert_failed",
+                run_id=row.run_id,
+                client=row.client,
+                error=redact_log_line(f"{type(exc).__name__}: {exc}"),
+            )
+            try:
+                await self._gateway.stop(row.profile, row.run_id)
+            except Exception:
+                log.warning("bridge.unrecorded_run_stop_failed", run_id=row.run_id, exc_info=True)
+            raise BridgeError(
+                "bridge.store_unavailable",
+                "the run ledger could not record the run, so it was stopped; try again",
+                status=503,
+            ) from None
         self._watcher.start(row)
         await self._emit("agents.run_started", "info", row, message)
 
@@ -844,31 +912,47 @@ class BridgeService:
 
     # -- process lifecycle -------------------------------------------------------------
 
-    async def reattach(self) -> int:
+    async def reattach(self, *, probe_timeout_s: float = REATTACH_PROBE_S) -> int:
         """Resume watching every live run in the ledger (hal0-api start); returns how many.
 
-        A run Hermes no longer knows (404) is marked ``unknown``. A run whose
-        profile cannot be reached now is watched anyway: the watcher keeps trying.
-        Overlapping calls are safe: each run gets one watcher.
+        Every run is probed at once, each for at most ``probe_timeout_s``, so a hung
+        profile cannot hold up the healthy ones. A run Hermes no longer knows (404)
+        is marked ``unknown``. A run whose profile cannot be reached, or does not
+        answer in time, is watched anyway: the watcher's reconnect loop keeps
+        trying. Overlapping calls are safe: each run gets one watcher.
         """
         self._check_open()
+        rows = await asyncio.to_thread(self._store.live_runs)
+        results = await asyncio.gather(
+            *(self._reattach_one(row, probe_timeout_s) for row in rows),
+            return_exceptions=True,
+        )
         started = 0
-        for row in await asyncio.to_thread(self._store.live_runs):
-            if self._closed:  # close() ran meanwhile: nothing more may be watched
-                break
-            try:
-                await self._gateway.get_run(row.profile, row.run_id)
-            except HermesRefused as exc:
-                if exc.hermes_status == 404:
-                    await self._watcher.mark_unknown(
-                        row, "Hermes no longer knows this run (it ended or Hermes restarted)"
-                    )
-                    continue
-            except BridgeError:
-                pass
-            if await self._watcher.attach(row):
+        for row, result in zip(rows, results, strict=True):
+            if isinstance(result, BaseException):
+                if isinstance(result, asyncio.CancelledError):
+                    raise result
+                log.warning("bridge.reattach_failed", run_id=row.run_id, exc_info=result)
+            elif result:
                 started += 1
         return started
+
+    async def _reattach_one(self, row: RunRow, timeout_s: float) -> bool:
+        if self._closed:  # close() ran meanwhile: nothing more may be watched
+            return False
+        try:
+            await asyncio.wait_for(self._gateway.get_run(row.profile, row.run_id), timeout_s)
+        except HermesRefused as exc:
+            if exc.hermes_status == 404:
+                await self._watcher.mark_unknown(
+                    row, "Hermes no longer knows this run (it ended or Hermes restarted)"
+                )
+                return False
+        except (BridgeError, TimeoutError):
+            pass  # unreachable or slow: the watcher's reconnect loop takes it from here
+        if self._closed:
+            return False
+        return await self._watcher.attach(row)
 
     async def close(self) -> None:
         """Stop every watcher (hal0-api shutdown); the ledger keeps the runs for ``reattach``.
@@ -923,6 +1007,35 @@ class BridgeService:
             await self._events.emit(type_, severity, f"bridge:{row.client}", message, data=data)
         except Exception:
             log.warning("bridge.event_emit_failed", run_id=row.run_id, exc_info=True)
+
+
+async def _until_done(task: asyncio.Task[None]) -> None:
+    """Wait for ``task`` to finish, through any number of cancellations of the waiter.
+
+    The caller's own cancellation (or exception) still propagates once ``task`` is
+    done; ``task``'s outcome is the caller's to read, not raised here.
+    """
+    while not task.done():
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.shield(task)
+    if not task.cancelled():
+        task.exception()  # read, so a failure is not reported as never retrieved
+
+
+def _request_digest(
+    *, input: str, instructions: str | None, reasoning_effort: str | None, session_key: str | None
+) -> str:
+    """sha256 of what a start asks Hermes for: the same key with another request is a conflict."""
+    body = json.dumps(
+        {
+            "input": input,
+            "instructions": instructions,
+            "reasoning_effort": reasoning_effort,
+            "session_key": session_key,
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(body.encode()).hexdigest()
 
 
 def _not_running(run_id: str, status: str, why: str) -> BridgeError:
