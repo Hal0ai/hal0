@@ -44,7 +44,10 @@ That cleanup runs first in every ``put`` and ``delete``, with the write lock
 held, so no entry in ``.archive/.bridge/`` belongs to a live write: it finishes
 or undoes each swap a marker names (the old copy goes back if the skill is
 missing, else it is dropped), puts back any other parked ``old-<name>-<uuid>``
-whose skill is missing from the drop-in root, and only then reaps the rest.
+whose skill is missing from the drop-in root, and only then reaps the rest. A
+parked copy whose put-back fails is not "the rest": it may be the last whole copy
+of that skill, so the reap leaves it where it is (logged
+``bridge.skill_restore_failed``) and the next cleanup tries again.
 
 ``put`` and ``delete`` hold one lock per drop-in root for their whole run
 (hal0-api is one process; the CLI never writes skills), so same-name writers
@@ -334,15 +337,18 @@ def _remove(dir_fd: int, name: str) -> None:
         log.warning("bridge.skill_scratch_left name=%s error=%s", name, exc)
 
 
-def _reap(scratch_fd: int) -> None:
-    """Remove every entry of the scratch directory.
+def _reap(scratch_fd: int, keep: frozenset[str]) -> None:
+    """Remove every entry of the scratch directory except those named in ``keep``.
 
     Called with the write lock held, after :meth:`SkillLibrary._recover`, so none
     is a live stage or a parked copy that still has to go back: each is left over
-    from a crash, a failed removal or a lost race.
+    from a crash, a failed removal or a lost race. ``keep`` is what ``_recover``
+    returned, the parked copies it could not put back: they stay for the next
+    cleanup to retry.
     """
     for entry in os.listdir(scratch_fd):
-        _remove(scratch_fd, entry)
+        if entry not in keep:
+            _remove(scratch_fd, entry)
 
 
 _MARKER_SUFFIX = ".json"
@@ -701,19 +707,22 @@ class SkillLibrary:
             except FileNotFoundError:
                 return
             try:
-                self._recover(root_fd, scratch_fd)
-                _reap(scratch_fd)
+                _reap(scratch_fd, self._recover(root_fd, scratch_fd))
             finally:
                 os.close(scratch_fd)
         finally:
             os.close(root_fd)
 
-    def _recover(self, root_fd: int, scratch_fd: int) -> None:
+    def _recover(self, root_fd: int, scratch_fd: int) -> frozenset[str]:
         """Finish or undo interrupted swaps, then put back parked copies whose skill is gone.
 
         Runs with the write lock held, before :func:`_reap` (module docstring). Every
         step is best effort: a failure is logged and the entry is left to the reap,
         except a parked copy, which is never reaped while its skill is missing.
+        Returns the scratch names of the parked copies it could not put back: the
+        reap leaves those in place and the next cleanup retries them. A swap whose
+        marker failed to settle is covered too, since the second pass rescans every
+        parked copy and tries the old one once more.
         """
         entries = sorted(os.listdir(scratch_fd))
         for marker in (e for e in entries if e.endswith(_MARKER_SUFFIX)):
@@ -724,6 +733,7 @@ class SkillLibrary:
                 except OSError as exc:
                     log.warning("bridge.skill_swap_unsettled marker=%s error=%s", marker, exc)
             _remove(scratch_fd, marker)
+        unrestored: set[str] = set()
         for entry in sorted(os.listdir(scratch_fd)):
             parked = _PARKED_RE.fullmatch(entry)
             if parked is None or self._present(parked["name"]):
@@ -732,7 +742,9 @@ class SkillLibrary:
                 os.replace(entry, parked["name"], src_dir_fd=scratch_fd, dst_dir_fd=root_fd)
                 log.warning("bridge.skill_restored name=%s from=%s", parked["name"], entry)
             except OSError as exc:
+                unrestored.add(entry)
                 log.warning("bridge.skill_restore_failed name=%s error=%s", parked["name"], exc)
+        return frozenset(unrestored)
 
     def _settle_swap(self, root_fd: int, scratch_fd: int, info: dict[str, str]) -> None:
         """Bring one interrupted swap to a whole skill: the old copy back, or the new one in."""
@@ -770,8 +782,7 @@ class SkillLibrary:
             if parent != self._dropin_root:
                 parent_fd = nofollow.open_dir(parent)
             scratch_fd = _open_scratch(root_fd, create=True)
-            self._recover(root_fd, scratch_fd)
-            _reap(scratch_fd)
+            _reap(scratch_fd, self._recover(root_fd, scratch_fd))
             stage = f"stage-{name}-{uuid.uuid4().hex}"
             category = "" if parent == self._dropin_root else parent.name
             try:

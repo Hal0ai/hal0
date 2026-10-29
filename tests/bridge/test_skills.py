@@ -10,6 +10,7 @@ follow a symlink or touch a shipped skill.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import stat
@@ -1007,6 +1008,80 @@ def test_a_parked_copy_of_a_skill_that_is_present_is_reaped(lib: SkillLibrary) -
     make_skill(scratch(lib), f"old-demo-{HEX_B}", md("demo", "stale"))
     lib.put("other", md("other"))
     assert "current" in (dropin(lib) / "demo" / "SKILL.md").read_text()
+    assert os.listdir(scratch(lib)) == []
+
+
+def fail_putting_back(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    """Make every rename of a parked ``old-<name>-…`` copy back to ``<name>`` raise ``OSError``."""
+    import hal0.bridge.skills as skills_mod
+
+    real = os.replace
+
+    def failing(src: Any, dst: Any, **kw: Any) -> None:
+        if str(src).startswith(f"old-{name}-") and dst == name:
+            raise OSError(errno.EIO, "the put-back fails")
+        real(src, dst, **kw)
+
+    monkeypatch.setattr(skills_mod.os, "replace", failing)
+
+
+@pytest.mark.parametrize("op", ["put", "delete"])
+def test_a_parked_copy_that_cannot_be_put_back_survives_the_cleanup(
+    lib: SkillLibrary, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, op: str
+) -> None:
+    """It may be the last whole copy: the reap leaves it, and a later cleanup restores it."""
+    lib.put("other", md("other"))
+    lib.put("demo", md("demo", "old copy"))
+    parked = scratch(lib) / f"old-demo-{HEX_B}"
+    os.replace(dropin(lib) / "demo", parked)
+    with monkeypatch.context() as patch, caplog.at_level("WARNING", logger="hal0.bridge.skills"):
+        fail_putting_back(patch, "demo")
+        if op == "put":
+            lib.put("other", md("other", "again"))
+        else:
+            lib.delete("other")
+    assert "bridge.skill_restore_failed name=demo" in caplog.text
+    assert "old copy" in (parked / "SKILL.md").read_text()
+    assert not (dropin(lib) / "demo").exists()
+    assert os.listdir(scratch(lib)) == [parked.name]
+
+    lib.put("third", md("third"))  # the next cleanup puts it back
+    assert "old copy" in (dropin(lib) / "demo" / "SKILL.md").read_text()
+    assert os.listdir(scratch(lib)) == []
+
+
+def test_a_swap_whose_old_copy_cannot_be_put_back_keeps_it(
+    lib: SkillLibrary, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The marker's own settle fails too; the rescan of parked copies fails again and keeps it."""
+    skill = half_swapped(lib, "demo", installed=False)
+    with monkeypatch.context() as patch:
+        fail_putting_back(patch, "demo")
+        lib.put("other", md("other"))
+    assert not skill.exists()
+    assert "old copy" in (scratch(lib) / f"old-demo-{HEX_B}" / "SKILL.md").read_text()
+    assert os.listdir(scratch(lib)) == [f"old-demo-{HEX_B}"]  # marker and stage are reaped
+
+    lib.delete("other")
+    assert "old copy" in (skill / "SKILL.md").read_text()
+    assert os.listdir(scratch(lib)) == []
+
+
+def test_a_put_over_a_skill_whose_parked_copy_cannot_be_put_back_installs_and_keeps_it_parked(
+    lib: SkillLibrary, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The put itself is not blocked; the stale parked copy goes at the cleanup after it."""
+    lib.put("demo", md("demo", "old copy"))
+    parked = scratch(lib) / f"old-demo-{HEX_B}"
+    os.replace(dropin(lib) / "demo", parked)
+    with monkeypatch.context() as patch:
+        fail_putting_back(patch, "demo")
+        lib.put("demo", md("demo", "third copy"))
+    assert "third copy" in (dropin(lib) / "demo" / "SKILL.md").read_text()
+    assert os.listdir(scratch(lib)) == [parked.name]
+
+    lib.put("other", md("other"))  # demo is present now: the parked copy is stale
+    assert "third copy" in (dropin(lib) / "demo" / "SKILL.md").read_text()
     assert os.listdir(scratch(lib)) == []
 
 
