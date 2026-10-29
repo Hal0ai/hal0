@@ -12,6 +12,10 @@ export type StatsWindow = '1h' | '24h' | '7d'
 
 export interface StatsModelRow {
   model_id: string
+  /** by_model groups on (model_id, runner, device, modality); the server always sends the last three. */
+  runner?: string | null
+  device?: string | null
+  modality?: string | null
   ttft_ms: { p50: number | null; p95: number | null }
   tps_decode: { avg: number | null; p50: number | null }
   tps_prefill: { avg: number | null }
