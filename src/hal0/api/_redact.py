@@ -34,54 +34,25 @@ import cycle (#1523). It is re-exported here unchanged, so every existing
 
 from __future__ import annotations
 
-import re
-from typing import Any, Final
+from typing import Any
 
 from hal0.redaction import (
     LOG_SECRET_RE,
     MASK,
+    SENSITIVE_KEY_RE,
+    is_sensitive_key,
     redact_log_line,
     redact_text_tree,
 )
 
-# Match by key NAME. Case-insensitive. ``(?:...)`` non-capturing group;
-# alternation ordered longest-token-first so e.g. ``PRIVATE_KEY`` wins
-# over ``PASS`` when both could match. ``re.search`` (not ``match``) so
-# the pattern triggers anywhere in the key — ``TOKEN`` matches
-# ``TOKENIZER_ID`` and ``HF_TOKEN`` alike, which is the conservative
-# (over-redact) behaviour the spec asks for.
-_SENSITIVE_RE: Final[re.Pattern[str]] = re.compile(
-    # The trailing ``_KEY$``/``^KEY$`` alternative catches credential names
-    # that end in a bare KEY suffix — hal0's OWN auth keys
-    # (HAL0_ADMIN_KEY / HAL0_CLIENT_KEY) matched none of the older
-    # substrings and leaked VERBATIM into shareable doctor bundles
-    # (halo150 O9). Anchored as a suffix (not a bare ``KEY`` substring) so
-    # non-secret settings like KEY_ROTATION_DAYS or KEYBOARD_LAYOUT don't
-    # over-mask. The KEY words take an optional ``_``/``-`` separator so
-    # run-together and camelCase names (``apikey``, ``apiKey``,
-    # ``accessKey``, ``x-api-key``) are caught too (#2384), still without
-    # a bare ``KEY`` substring. installer/lib/failure-report.sh mirrors
-    # this pattern; tests/installer/test_failure_report.py pins the two.
-    # ui/src/sentry.ts mirrors it too (``isSensitiveKey``); the
-    # ``sensitive_keys`` / ``plain_keys`` lists in
-    # tests/fixtures/redaction_shapes.json pin that pair.
-    r"(?i)(?:SECRET|TOKEN|PASSWORD|PASS|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY"
-    r"|ENCRYPTION[_-]?KEY|SALT|_KEY$|^KEY$)"
-)
+# The key-name pattern lives in hal0.redaction now (so hal0.bridge can use it without importing
+# this package); the old name stays for the mirrors that cite it (installer/lib/failure-report.sh,
+# ui/src/sentry.ts, doctor_bundle).
+_SENSITIVE_RE = SENSITIVE_KEY_RE
 
 # ``MASK`` is defined once in hal0.redaction and re-exported above — both
 # strategies must mask to the SAME sentinel or a caller grepping for it
 # would find only half the redactions.
-
-
-def is_sensitive_key(key: str) -> bool:
-    """True if ``key`` (the *name*, not the value) matches a sensitive pattern.
-
-    Case-insensitive substring search over the regex alternation. Safe to
-    call on untrusted / user-supplied strings — it only ever returns a
-    bool, never echoes the value.
-    """
-    return bool(_SENSITIVE_RE.search(key))
 
 
 def redact_value(value: Any) -> dict[str, Any]:

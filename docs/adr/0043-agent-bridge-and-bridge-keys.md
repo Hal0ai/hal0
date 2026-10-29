@@ -221,7 +221,7 @@ ADR-0035 was verified against), shapes the answer:
      seconds to the first token.
    - Concurrency is limited per client by `max_concurrent_runs_per_client`
      before the run is posted.
-10. **Teach tools (a later change on this ADR).** Memory add and search write
+10. **Teach tools (implemented in the third change).** Memory add and search write
     to the agent's own namespace (`private:hermes` or
     `private:hermes__<profile>`, or the shared one when asked for), forced by
     `MemoryDispatcher.scoped` (`src/hal0/dispatcher/memory_dispatcher.py:107`)

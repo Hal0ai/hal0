@@ -11,7 +11,7 @@ config:
   from scalars: MCP servers are their **names** (never a URL, header or env),
   model aliases are ``{model, provider}`` (never a ``base_url`` or key);
 * then every string that survives is checked once more: a name whose key is
-  secret-shaped (:func:`hal0.api._redact.is_sensitive_key`) or a string the log
+  secret-shaped (:func:`hal0.redaction.is_sensitive_key`) or a string the log
   redactor would change (:func:`hal0.redaction.redact_log_line`: a ``Bearer``
   token, a ``*_KEY=`` value, URL userinfo, a well-known token prefix) is
   dropped, never echoed, and never replaced by a mask.
@@ -41,8 +41,7 @@ from urllib.parse import quote
 from hal0.agents import hermes_command_approvals
 from hal0.agents.hermes_api import DEFAULT_PROFILE, _config, api_server_base
 from hal0.agents.hermes_platforms import _explicit_enabled
-from hal0.api._redact import is_sensitive_key
-from hal0.redaction import redact_log_line
+from hal0.redaction import is_sensitive_key, redact_log_line
 
 __all__ = ["CAPABILITY_KEYS", "FetchJson", "capabilities_view"]
 

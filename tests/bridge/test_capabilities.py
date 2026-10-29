@@ -34,7 +34,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "agent": {
             "model": "Qwen3.8-27B",
             "provider": "custom",
-            "base_url": f"http://user:{SECRET}@10.0.1.142:8080/v1",
+            "base_url": f"http://user:{SECRET}@192.0.2.10:8080/v1",
             "api_key": SECRET,
         },
         "fast": {"model": "Qwen3.5-4B", "provider": "custom"},
@@ -98,7 +98,7 @@ def test_capabilities_view_has_no_secret_shaped_values(tmp_hermes_home: Path) ->
     view = capabilities_view(tmp_hermes_home, "default", fetch_json=_no_gateway)
     flat = json.dumps(view)
     assert "Bearer" not in flat and "nlQ_" not in flat and SECRET not in flat
-    assert "10.0.1.142" not in flat and "127.0.0.1" not in flat  # no urls at all
+    assert "192.0.2.10" not in flat and "127.0.0.1" not in flat  # no urls at all
     assert "Authorization" not in flat and "api_key" not in flat and "headers" not in flat
     assert view["mcp_servers"] == ["hal0-admin", "hal0-memory"]
     assert view["toolsets_disabled"] and "a2a" in view["toolsets_disabled"]

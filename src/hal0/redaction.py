@@ -37,6 +37,45 @@ from typing import Any, Final, NamedTuple
 # fixtures for the exact token.
 MASK: Final[str] = "***REDACTED***"
 
+# The key-NAME check lives here, below the API package, so ``hal0.bridge`` can use it
+# without importing ``hal0.api`` (importing ``hal0.api._redact`` runs the whole package
+# ``__init__``). ``hal0.api._redact`` re-exports it as ``_SENSITIVE_RE`` / ``is_sensitive_key``.
+# Match by key NAME. Case-insensitive. ``(?:...)`` non-capturing group;
+# alternation ordered longest-token-first so e.g. ``PRIVATE_KEY`` wins
+# over ``PASS`` when both could match. ``re.search`` (not ``match``) so
+# the pattern triggers anywhere in the key — ``TOKEN`` matches
+# ``TOKENIZER_ID`` and ``HF_TOKEN`` alike, which is the conservative
+# (over-redact) behaviour the spec asks for.
+SENSITIVE_KEY_RE: Final[re.Pattern[str]] = re.compile(
+    # The trailing ``_KEY$``/``^KEY$`` alternative catches credential names
+    # that end in a bare KEY suffix — hal0's OWN auth keys
+    # (HAL0_ADMIN_KEY / HAL0_CLIENT_KEY) matched none of the older
+    # substrings and leaked VERBATIM into shareable doctor bundles
+    # (halo150 O9). Anchored as a suffix (not a bare ``KEY`` substring) so
+    # non-secret settings like KEY_ROTATION_DAYS or KEYBOARD_LAYOUT don't
+    # over-mask. The KEY words take an optional ``_``/``-`` separator so
+    # run-together and camelCase names (``apikey``, ``apiKey``,
+    # ``accessKey``, ``x-api-key``) are caught too (#2384), still without
+    # a bare ``KEY`` substring. installer/lib/failure-report.sh mirrors
+    # this pattern; tests/installer/test_failure_report.py pins the two.
+    # ui/src/sentry.ts mirrors it too (``isSensitiveKey``); the
+    # ``sensitive_keys`` / ``plain_keys`` lists in
+    # tests/fixtures/redaction_shapes.json pin that pair.
+    r"(?i)(?:SECRET|TOKEN|PASSWORD|PASS|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY"
+    r"|ENCRYPTION[_-]?KEY|SALT|_KEY$|^KEY$)"
+)
+
+
+def is_sensitive_key(key: str) -> bool:
+    """True if ``key`` (the *name*, not the value) matches a sensitive pattern.
+
+    Case-insensitive substring search over the regex alternation. Safe to
+    call on untrusted / user-supplied strings — it only ever returns a
+    bool, never echoes the value.
+    """
+    return bool(SENSITIVE_KEY_RE.search(key))
+
+
 # Where a ``*_KEY=`` name may start in LOG_SECRET_RE: after anything that is no
 # part of a name run. The run is the ASCII word characters, with the four
 # non-ASCII letters that ``re.I`` folds onto them (U+0130, U+0131, U+017F and
@@ -1342,6 +1381,8 @@ __all__ = [
     "AUDIT_SECRET_ARGS",
     "LOG_SECRET_RE",
     "MASK",
+    "SENSITIVE_KEY_RE",
+    "is_sensitive_key",
     "mask_audit_secret_args",
     "redact_audit_args",
     "redact_audit_row_secret_args",
