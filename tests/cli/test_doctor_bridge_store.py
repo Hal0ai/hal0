@@ -198,3 +198,56 @@ def test_unparsable_config_does_not_hide_the_store(
     c = da.check_bridge_store(path=db)
     assert c.status == "pass"
     assert "1 client," in c.detail
+
+
+def test_unreadable_config_does_not_crash_the_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """hal0.toml is 0600: an unprivileged doctor gets ``PermissionError``, not ``ConfigError``.
+
+    The row falls back to the default (on) instead of taking ``hal0 doctor all`` down.
+    """
+
+    def _deny(*_a: object, **_kw: object) -> object:
+        raise PermissionError(13, "Permission denied", "/etc/hal0/hal0.toml")
+
+    monkeypatch.setattr("hal0.config.loader.load_hal0_config", _deny)
+    absent = da.check_bridge_store(path=tmp_path / "bridge.db")
+    assert absent.status == "pass"
+    assert "no clients yet" in absent.detail
+
+    db = _store(tmp_path, "alpha")
+    present = da.check_bridge_store(path=db)
+    assert present.status == "pass"
+    assert "1 client," in present.detail
+
+
+def test_unreadable_config_file_on_disk_does_not_crash_the_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same, through the real loader and a mode-000 hal0.toml (skipped when root)."""
+    toml = tmp_path / "hal0.toml"
+    toml.write_text("[bridge]\nenabled = false\n")
+    os.chmod(toml, 0o000)
+    try:
+        if os.access(toml, os.R_OK):
+            pytest.skip("running as a user that can read a mode-000 file")
+        monkeypatch.setattr("hal0.config.paths.hal0_toml", lambda: toml)
+        c = da.check_bridge_store(path=tmp_path / "bridge.db")
+    finally:
+        os.chmod(toml, 0o600)
+    assert c.status == "pass"
+    assert "no clients yet" in c.detail
+
+
+def test_reading_leaves_bridge_db_itself_untouched(tmp_path: Path) -> None:
+    """``bridge.db`` keeps its bytes and mode. SQLite may add ``-wal``/``-shm`` siblings, and
+    that is accepted: they have perms rows and take the main file's mode."""
+    db = _store(tmp_path, "alpha")
+    before = (db.read_bytes(), db.stat().st_mode, db.stat().st_mtime_ns)
+    c = da.check_bridge_store(path=db, enabled=True)
+    assert c.status == "pass"
+    assert (db.read_bytes(), db.stat().st_mode, db.stat().st_mtime_ns) == before
+    for sibling in (db.with_name(db.name + "-wal"), db.with_name(db.name + "-shm")):
+        if sibling.exists():
+            assert sibling.stat().st_mode & 0o777 == 0o600

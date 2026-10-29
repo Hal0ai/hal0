@@ -1577,14 +1577,17 @@ _BRIDGE_DB_OWNER = "hal0"
 def _bridge_config_enabled() -> bool:
     """``[bridge].enabled`` from hal0.toml; the default (on) when it cannot be read.
 
-    A hal0.toml that fails to parse is another row's finding. This row falls
-    back to the shipped default instead of hiding the store behind it.
+    A hal0.toml that fails to parse is another row's finding, and one the
+    doctor's user may not open at all (it is ``0600``, so ``load_hal0_config``
+    raises ``PermissionError`` for anyone but the service user and root). This
+    row falls back to the shipped default in both cases instead of hiding the
+    store behind it, and instead of taking the whole report down.
     """
     from hal0.config.loader import ConfigError, load_hal0_config
 
     try:
         return load_hal0_config().bridge.enabled
-    except ConfigError:
+    except (ConfigError, OSError):
         return True
 
 
@@ -1605,10 +1608,13 @@ def check_bridge_store(*, path: Path | None = None, enabled: bool | None = None)
 
     ``bridge.db`` holds the sha256 of every bridge key and, later, the text of
     delegated runs, which is why it is a separate 0600 file from the 0644
-    ``hal0.db``. The row reads it and never changes it: no create, no
-    migration, no chmod (the store opens read-only, so even the ``-shm``
-    sibling is left alone). ``enabled`` is ``[bridge].enabled`` unless a caller
-    pins it.
+    ``hal0.db``. The row never creates, migrates or re-permissions
+    ``bridge.db`` itself: it opens it read-only (``mode=ro``). SQLite still
+    creates the ``-wal`` and ``-shm`` siblings of a WAL database it opens
+    read-only when they are absent (hal0-api's per-call connections leave them
+    absent between calls), and keeps them after close; they carry perms rows
+    in ``install/perms.py`` and take the main file's mode. ``enabled`` is
+    ``[bridge].enabled`` unless a caller pins it.
 
     * ``[bridge].enabled`` off: PASS, nothing to audit.
     * No file: PASS, "no clients yet" (the first ``hal0 bridge add`` creates it).
@@ -1655,9 +1661,10 @@ def check_bridge_store(*, path: Path | None = None, enabled: bool | None = None)
         return _warn(unreadable)
     latest = _bridge_schema_latest()
     try:
-        # mode=ro: opening must not create the file, add -wal/-shm siblings or
-        # apply a migration. ``applied_versions`` would create the bookkeeping
-        # table, so it only runs once the table is known to exist.
+        # mode=ro: opening must not create bridge.db or apply a migration (it
+        # can still leave the -wal/-shm siblings behind, see the docstring).
+        # ``applied_versions`` would create the bookkeeping table, so it only
+        # runs once the table is known to exist.
         conn = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True, timeout=2.0)
         try:
             tables = {
