@@ -174,7 +174,7 @@ claude mcp add --transport http hal0-memory http://<host>:8080/mcp/memory/mcp --
 claude mcp add --transport http hal0-admin http://<host>:8080/mcp/admin/mcp --header "Authorization: Bearer <key>"
 ```
 
-`<host>:8080` is `[network].public_url` when it is set. Otherwise it is the address the command reached hal0-api at, which for `hal0 bridge` on the box is loopback, so hal0 prints the box's first LAN address on the API port instead.
+`<host>:8080` is `[network].public_url` when it is set. Otherwise it is the address the command reached hal0-api at, which for `hal0 bridge` on the box is loopback, so hal0 prints the address of the box's default-route interface on the API port instead.
 
 `agents` is always held; `--scope memory` and `--scope admin` add the `hal0-memory` and `hal0-admin` lines. `agents` alone already reaches memory: the teach tools of [`hal0-agents`](/docs/reference/mcp-tools-agents#memory) write and search a Hermes profile's memory, and the Hermes that runs a delegated task uses its own memory tools; `--scope memory` adds direct access to the `hal0-memory` server. `bridge revoke` ends a key at once and keeps the name, so it cannot be added again; `bridge rotate` replaces a live client's key at once and keeps its scopes and note, and refuses a revoked client. `bridge scopes` replaces the whole set (`agents` stays), so the same key opens different servers from the next request.
 

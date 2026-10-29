@@ -63,7 +63,8 @@ claude mcp add --transport http hal0-memory http://<host>:8080/mcp/memory/mcp --
 Paste the lines on the machine that will use the key. `<host>` is
 `[network].public_url` when you have set it. Otherwise it is the address the
 command reached hal0-api at; because `hal0 bridge add` on the box calls
-loopback, hal0 prints the box's first LAN address instead.
+loopback, hal0 prints the address of the box's default-route interface
+instead.
 
 What each line gives the remote agent:
 
@@ -138,9 +139,11 @@ A run's `status` is one of:
 | `unknown` | Terminal. Hermes no longer knows the run, so treat it as failed; `error` says why. |
 
 The same `session_key` on later `agent_run` calls continues one conversation.
-Pass an `idempotency_key` to make a retried start safe. Both are private to
-your client: hal0 prefixes them with your client's name, so one client cannot
-bind or replay another's.
+Pass an `idempotency_key` to make a retried start safe: the same request returns
+the same run for as long as hal0 keeps it (`run_retention_days`), and a
+different request with that key is `bridge.idempotency_conflict`. Both keys are
+private to your client: hal0 prefixes them with your client's name, so one
+client cannot bind or replay another's.
 
 ## Long tasks: wait, poll, read events
 
@@ -159,7 +162,9 @@ the default `wait_s=0` returns at once with a `run_id`; then:
   follow a run, or with `since_seq=0` to replay it. hal0 keeps a run's newest
   500 events only, so a long run replays from partway in.
 
-Run text is passed through hal0's secret redactor before it leaves the box. A
+Run text is passed through hal0's secret redactor before it leaves the box, and
+a known token prefix that runs to the end of a live run's text is masked through
+the end, since the rest of the token may not be stored yet. A
 long `output` comes in 16 KiB windows: the view carries `truncated: true` and
 `more`, the next call, `agent_run_status(run_id, offset=<next_offset>)`. Follow
 `more` until `next_offset` is `null`. The events are no way back to a long
@@ -244,22 +249,29 @@ differently:
 | Tool | What it does |
 |---|---|
 | `agent_skills_list()` | Names, source (shipped or drop-in), description and modification time of every skill. |
-| `agent_skill_get(name)` | A skill's `SKILL.md` text and its file list. |
+| `agent_skill_get(name)` | A skill's `SKILL.md` text and its file names. The text passes through the redactor and is cut at 16 KiB, so it is not an exact copy: do not prepare a replacement from it as it stands. |
 | `agent_skill_put(name, skill_md, files?)` | Checks a skill, then proposes writing it to `/var/lib/hal0/skills/<name>/`. **Gated.** |
 | `agent_skill_delete(name)` | Proposes removing a drop-in skill. **Gated.** |
 
 A skill name is lower-case letters, digits and `-`, up to 64 characters, and
-the `name` in the frontmatter must equal it. `description` is required. hal0
-refuses symlinks and path components in file names, and caps a skill at 16
-files of at most 256 KiB each. It checks all of that before anything reaches
-the inbox.
+the `name` in the frontmatter must equal it. `description` is required. A push
+is text a person can read on the inbox card: valid UTF-8, `SKILL.md` at most
+16 KiB, the whole push at most 48 KiB, at most 16 files, each a plain file name
+with no path components. A file may hold a placeholder such as `<token>` or
+`$ENV_VAR`, but not a secret-shaped value (an opaque `Bearer` token, a `ghp_`
+token), and no file, file name or skill name may hold a control, format or
+invisible character. hal0 checks all of that before anything reaches the
+inbox, and refuses with `bridge.skill_invalid`. A push replaces the skill whole:
+without `files` it installs `SKILL.md` alone and the previous version's other
+files are removed with it, so resubmit every file you want to keep. The
+[tool reference](/docs/reference/mcp-tools-agents#skills) lists every rule.
 
 **A pushed skill waits for a person.** `agent_skill_put` and
 `agent_skill_delete` do not write on the spot. They return
 `{"status": "pending_approval", "approval_id": "…"}` and the request sits in
 the approvals inbox with the skill name as its target. A skill has at most one
 pending put: pushing the same content again is the same row, and an edited push
-from the same client withdraws its older row, so approving always writes what
+from the same client withdraws its older row, so approving always writes exactly what
 the card shows. An edited push while another client's put of that name is
 pending fails with `bridge.skill_pending_elsewhere`, and a client holds at most
 eight pending skill changes (`bridge.too_many_pending`). After you approve a
@@ -272,8 +284,11 @@ within about half a minute, with no restart.
 do now: its model aliases and providers, which toolsets are on, the names of
 its MCP servers (never their URLs or headers), its skill directories, the
 messaging platforms it has enabled, its API server version and its approvals
-mode. A secret-shaped value is never echoed. Call it before you delegate, so
-the task fits what the agent has.
+mode. A secret-shaped value is dropped, never echoed. A field the profile's
+config does not set is `null`, meaning Hermes uses its built-in default; every
+field `null` can also mean hal0 could not read the config, so do not take an
+all-`null` view as "Hermes defaults". Call it before you delegate, so the task
+fits what the agent has.
 
 ## See it in the dashboard
 
