@@ -381,7 +381,6 @@ RULES: tuple[_Rule, ...] = (
     _Rule("bridge: clients and runs (operator)", _prefix("/api/bridge"), AuthClass.ADMIN, None),
     _Rule("mcp introspection", _prefix("/api/mcp"), AuthClass.ADMIN, None),
     _Rule("images cache", _prefix("/api/images"), AuthClass.ADMIN, None),
-    _Rule("user layout", _prefix("/api/user"), AuthClass.ADMIN, None),
     _Rule("config (rest, may hold secrets)", _prefix("/api/config"), AuthClass.ADMIN, None),
     _Rule(
         "openrouter oauth (already loopback-gated)",
