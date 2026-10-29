@@ -80,7 +80,7 @@ function MemorySegment({ seg, barWidth, totalGb, onGo }) {
   )
 }
 
-function OvNowBand({ onGo }) {
+export function OvNowBand({ onGo }) {
   const mm = useMemoryMapModel()
   const hw = useHardware()
   const slotsQuery = useSlots()

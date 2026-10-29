@@ -55,7 +55,6 @@ import './dash/memory-overhaul.css'
 import './dash/memory-v2.css'
 import './dash/dock/dock.css'
 import './dash/overhaul.css'
-import './dash/redesign.css'
 import './dash/slot-rail.css'
 
 import './dash/data.jsx'
@@ -65,22 +64,11 @@ import './dash/primitives.jsx'
 import './dash/cards-shell.jsx'
 import './dash/overview/overview.css'
 import './dash/overview/shell.jsx'
-// Board card modules — each registers a window global (ThroughputCard2, UtilizationCard, QuickChatCard, ServicesCard, PowerCard,
-// SlotTrackCard, …). MUST load after cards-shell (they use DCard/StatusDot);
-// the redesign view offers slottrack/power/quickchat as swap-in widgets.
-import './dash/metric-cards.jsx'
-import './dash/quickchat-card.jsx'
-import './dash/services-card.jsx'
-import './dash/optin-cards.jsx'
 import './dash/command-palette.jsx'
 import './dash/flow-modals.jsx'
 import './dash/extra-modals.jsx'
-// Dashboard redesign (design_handoff_dashboard_redesign): fixed-band layout
-// with swap-in-place customization (DashboardRedesignView). Replaces the
-// free-form DashGrid / DashboardOverhaulView board. Must load after
-// cards-shell and the card modules above (slottrack / power / quickchat
-// window globals are offered as swap-in widgets).
-import './dash/dashboard-redesign.jsx'
+// Overview v2 landing page. OverviewView.jsx imports every ov-* section module itself, so the
+// sections always evaluate before it; shell.jsx (OvCard/OvPill/OvSpark) is loaded above.
 import './dash/overview/OverviewView.jsx'
 import './dash/slots.jsx'
 import './dash/slot-modals.jsx'

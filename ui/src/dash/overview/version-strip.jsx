@@ -7,7 +7,7 @@ import { useHardware } from '@/api/hooks/useHardware'
 import { useMemoryMapModel } from '../memory-map'
 import { hostSummary } from './version-strip-pure'
 
-function OvVersionStrip() {
+export function OvVersionStrip() {
   const upd = useUpdateState().data
   const hw = useHardware().data
   const mm = useMemoryMapModel()

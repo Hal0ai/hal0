@@ -1,22 +1,22 @@
 // hal0 Overview v2 — the landing page: OverviewView({ onGo }).
 //
-// A window-global module. The sections (OvNowBand, OvNeedsYou, …) live in their own
-// files and register themselves on window; this view resolves each by name at render
-// time and renders nothing for a missing one, so the section files can land in any order.
+// A window-global module. Each section lives in its own file and is imported directly, so
+// the section modules always evaluate before this one; this view owns the band layout and the
+// column classes (cN + ov-col) around them.
 
 import { useSlots } from '@/api/hooks/useSlots'
 import { useHardware } from '@/api/hooks/useHardware'
-
-// One overview section, looked up on window at render time.
-function Section({ name, onGo }) {
-  const C = window[name]
-  return C ? <C onGo={onGo} /> : null
-}
-
-// A column wrapper (c8, c4, …) around one section; empty when the section is missing.
-function Col({ cls, name, onGo }) {
-  return window[name] ? <div className={cls + ' ov-col'}><Section name={name} onGo={onGo} /></div> : null
-}
+import { OvNowBand } from './now-band.jsx'
+import { OvNeedsYou } from './needs-you.jsx'
+import { OvServingNow } from './serving-now.jsx'
+import { OvAgents } from './agents-panel.jsx'
+import { OvUsage } from './usage.jsx'
+import { OvHardware } from './hardware.jsx'
+import { OvRecent } from './recent.jsx'
+import { OvImageEngine } from './image-engine.jsx'
+import { OvServices } from './services.jsx'
+import { OvMemory } from './memory.jsx'
+import { OvVersionStrip } from './version-strip.jsx'
 
 // Confirmed-empty install → point at setup instead of an empty board.
 function OverviewEmpty({ onGo }) {
@@ -52,25 +52,25 @@ function OverviewView({ onGo }) {
 
   return (
     <div className="view ov-view">
-      <Section name="OvNowBand" onGo={go} />
-      <Section name="OvNeedsYou" onGo={go} />
+      <OvNowBand onGo={go} />
+      <OvNeedsYou onGo={go} />
       <div className="ov-band">
-        <Col cls="c8" name="OvServingNow" onGo={go} />
-        <Col cls="c4" name="OvAgents" onGo={go} />
+        <div className="c8 ov-col"><OvServingNow onGo={go} /></div>
+        <div className="c4 ov-col"><OvAgents onGo={go} /></div>
       </div>
       <div className="ov-band">
-        <Col cls="c7" name="OvUsage" onGo={go} />
+        <div className="c7 ov-col"><OvUsage onGo={go} /></div>
         <div className="c5 ov-stack">
-          <Section name="OvHardware" onGo={go} />
-          <Section name="OvRecent" onGo={go} />
+          <OvHardware onGo={go} />
+          <OvRecent onGo={go} />
         </div>
       </div>
       <div className="ov-band">
-        <Col cls="c4" name="OvImageEngine" onGo={go} />
-        <Col cls="c4" name="OvServices" onGo={go} />
-        <Col cls="c4" name="OvMemory" onGo={go} />
+        <div className="c4 ov-col"><OvImageEngine onGo={go} /></div>
+        <div className="c4 ov-col"><OvServices onGo={go} /></div>
+        <div className="c4 ov-col"><OvMemory onGo={go} /></div>
       </div>
-      <Section name="OvVersionStrip" onGo={go} />
+      <OvVersionStrip onGo={go} />
     </div>
   )
 }

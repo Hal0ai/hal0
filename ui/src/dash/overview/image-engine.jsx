@@ -10,7 +10,7 @@ import { imageModel } from './image-engine-pure'
 
 const { useMemo } = React
 
-function OvImageEngine({ onGo }) {
+export function OvImageEngine({ onGo }) {
   const status = useComfyui()
   const arbiter = useArbiter()
   const access = useEditorAccess()

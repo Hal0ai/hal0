@@ -242,13 +242,8 @@ function App() {
     // bridge command-palette actions into App state
     const onApprovals = () => setApprovalsOpen(true);
     window.addEventListener("hal0:open-approvals", onApprovals);
-    // dashboard-redesign: the Activity card's "Open journal →" expands the
-    // footer journal pane from anywhere.
-    const onJournal = () => setFooterOpen(true);
-    window.addEventListener("hal0:open-journal", onJournal);
     return () => {
       window.removeEventListener("hal0:open-approvals", onApprovals);
-      window.removeEventListener("hal0:open-journal", onJournal);
     };
   }, []);
 
@@ -280,11 +275,8 @@ function App() {
   const renderView = () => {
     switch (route) {
       case "dashboard":
-        // Dashboard redesign (design_handoff_dashboard_redesign): the
-        // fixed-band, swap-in-place view. It owns its own swap-mode state
-        // and customize toggle in the hero strip, so it drops in without
-        // topbar threading.
-        return <DashboardRedesignView onGo={go} />;
+        // Overview v2: the operator's briefing (dash/overview/OverviewView.jsx).
+        return <OverviewView onGo={go} />;
       case "slots":
         return (
           <SlotsView

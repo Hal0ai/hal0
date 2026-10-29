@@ -106,7 +106,7 @@ function PiAgent({ row }) {
   )
 }
 
-function OvAgents({ onGo }) {
+export function OvAgents({ onGo }) {
   const usePersonas = window.__hal0UseAgentPersonas
   const agents = useAgents().data
   const hermesOv = useAgentOverview('hermes').data || null

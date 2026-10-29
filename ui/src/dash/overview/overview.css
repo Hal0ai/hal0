@@ -264,3 +264,6 @@
 @media (prefers-reduced-motion: reduce) {
   .ov-view *, .ov-view *::before, .ov-view *::after { transition: none !important; animation: none !important; }
 }
+
+/* Identifier spans inside a Needs-you row body (notifications.jsx builds the JSX). */
+.rd-attn-ident { font-size: 10.5px; }

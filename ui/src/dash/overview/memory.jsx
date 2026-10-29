@@ -19,7 +19,7 @@ function storedBank() {
 }
 
 // Thin gate: a box with memory off never mounts the body, so it never polls /api/memory/*.
-function OvMemory({ onGo }) {
+export function OvMemory({ onGo }) {
   const enabled = useMemoryEnabled()
   return enabled ? <OvMemoryBody onGo={onGo} /> : null
 }

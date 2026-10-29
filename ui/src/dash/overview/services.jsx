@@ -12,7 +12,7 @@ import { useEditorAccess } from '../image/useEditorAccess'
 const SERVICE_ORDER = ['openwebui', 'comfyui', 'hermes', 'n8n']
 const WIRED_KEYS = ['chat', 'voice', 'documents', 'images', 'web_search']
 
-function OvServices({ onGo }) {
+export function OvServices({ onGo }) {
   const svc = useServices()
   const editor = useEditorAccess()
   const rows = servicesForWidget(svc, SERVICE_ORDER, 8).filter((s) => SERVICE_ORDER.includes(s.id))

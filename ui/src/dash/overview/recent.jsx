@@ -7,7 +7,7 @@ import { digest } from './recent-digest-pure'
 
 const { useMemo } = React
 
-function OvRecent() {
+export function OvRecent() {
   const { data: records } = useActivityRecent(200)
   const rows = useMemo(() => digest(records ?? []), [records])
 

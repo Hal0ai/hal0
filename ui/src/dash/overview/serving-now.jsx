@@ -65,7 +65,7 @@ function ServingTile({ tile, onGo, onUnload, onLogs }) {
   )
 }
 
-function OvServingNow({ onGo }) {
+export function OvServingNow({ onGo }) {
   const slots = useSlots().data
   const sys = useSystemStats().data
   const history = useThroughputHistory().data

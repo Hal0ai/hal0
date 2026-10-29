@@ -55,7 +55,7 @@ function UsageBars({ values }) {
   )
 }
 
-function OvUsage({ onGo }) {
+export function OvUsage({ onGo }) {
   const [win, setWin] = useState(readWindow)
   const stats = useStatsSummary(win)
   const m = usageModel(stats.data, win)
