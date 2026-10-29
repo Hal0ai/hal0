@@ -144,6 +144,12 @@ WAIT_TAIL_EVENTS = 20
 #: How long :meth:`BridgeService.reattach` waits for Hermes to answer for one run.
 REATTACH_PROBE_S = 10.0
 
+#: Streamed text read on each side of an events window to mask a secret split over
+#: events (:meth:`BridgeService.run_events_window`): at most this many characters,
+#: from at most :data:`_CONTEXT_EVENTS` stored events.
+TEXT_CONTEXT_CHARS = 8192
+_CONTEXT_EVENTS = 256
+
 #: ``X-Hermes-Session-Key`` is at most 256 characters; the idempotency key gets the same cap.
 _MAX_HEADER_KEY = 256
 
@@ -568,32 +574,36 @@ class BridgeService:
 
     async def run_events_window(
         self, caller: Caller, run_id: str, *, since_seq: int = 0, limit: int = 100
-    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], dict[str, Any] | None]:
-        """:meth:`run_events` with its neighbours: ``(event before, events, event after)``.
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        """:meth:`run_events` with its streamed-text context: ``(before, events, after)``.
 
-        The neighbours are the stored events just outside the window (None at either
-        end of the run). The ``hal0-agents`` tools mask streamed text across event
-        boundaries with them, so a secret split between two ``message.text`` events,
-        or between two pages, is still caught.
+        ``before`` is the run of stored ``message.text`` events just before the
+        window and ``after`` the run just after it, oldest first, each at most
+        :data:`TEXT_CONTEXT_CHARS` of text (fewer at either end of the run, or where
+        another event interrupts the text). The ``hal0-agents`` tools mask streamed
+        text across event boundaries with them, so a secret split over several
+        ``message.text`` events, or over pages, is still caught.
         """
         await self._owned(caller, run_id)
         since = max(int(since_seq), 0)
         size = min(max(int(limit), 1), _MAX_EVENTS)
         events = await asyncio.to_thread(
-            self._store.events, run_id, since_seq=since, limit=size + 1
+            self._store.events, run_id, since_seq=since, limit=size + _CONTEXT_EVENTS
         )
-        after = events[size] if len(events) > size else None
-        before = (
-            await asyncio.to_thread(self._store.event_before, run_id, since + 1)
-            if since > 0
-            else None
-        )
-        return before, events[:size], after
+        window, rest = events[:size], events[size:]
+        before = await self._text_before(run_id, since + 1) if since > 0 else []
+        return before, window, _text_run(rest)
 
-    async def event_before(self, caller: Caller, run_id: str, seq: int) -> dict[str, Any] | None:
-        """The run's stored event just before ``seq``, or None (a wait tail's left neighbour)."""
+    async def events_before(self, caller: Caller, run_id: str, seq: int) -> list[dict[str, Any]]:
+        """The stored ``message.text`` run just before ``seq`` (a wait tail's left context)."""
         await self._owned(caller, run_id)
-        return await asyncio.to_thread(self._store.event_before, run_id, int(seq))
+        return await self._text_before(run_id, int(seq))
+
+    async def _text_before(self, run_id: str, seq: int) -> list[dict[str, Any]]:
+        newest_first = await asyncio.to_thread(
+            self._store.events_before, run_id, seq, limit=_CONTEXT_EVENTS
+        )
+        return list(reversed(_text_run(newest_first)))
 
     async def wait_run(
         self, caller: Caller, run_id: str, *, timeout_s: float = DEFAULT_WAIT_S
@@ -1041,6 +1051,22 @@ class BridgeService:
             await self._events.emit(type_, severity, f"bridge:{row.client}", message, data=data)
         except Exception:
             log.warning("bridge.event_emit_failed", run_id=row.run_id, exc_info=True)
+
+
+def _text_run(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The leading ``message.text`` events of ``events``, up to :data:`TEXT_CONTEXT_CHARS`."""
+    run: list[dict[str, Any]] = []
+    chars = 0
+    for event in events:
+        payload = event.get("payload")
+        text = payload.get("text") if isinstance(payload, dict) else None
+        if event.get("event") != "message.text" or not isinstance(text, str):
+            break
+        run.append(event)
+        chars += len(text)
+        if chars >= TEXT_CONTEXT_CHARS:
+            break
+    return run
 
 
 async def _until_done(task: asyncio.Task[None]) -> None:

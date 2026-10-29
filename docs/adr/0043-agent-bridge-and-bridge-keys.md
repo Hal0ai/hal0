@@ -364,9 +364,10 @@ the bot findings left on the second change's run tools:
 - **Restart probes run at once**, each with a 10 s timeout; a run whose
   profile does not answer is watched anyway and its reconnect loop takes over.
 - **Streamed text is masked across event boundaries.** Consecutive
-  `message.text` events, with the stored neighbour just outside the returned
-  window on each side, are masked as one text before each event shows its
-  part, so a secret split across a flush or a page is still masked.
+  `message.text` events, with the stored `message.text` run just outside the
+  returned window on each side (up to 8192 characters), are masked as one
+  text before each event shows its part, so a secret split across flushes or
+  pages is still masked.
 
 ## Rejected
 

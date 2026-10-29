@@ -75,10 +75,11 @@ a remote machine sees it, and a string over 16 KiB is cut at that size with
 Streamed text is stored as ``message.text`` events cut wherever the watcher
 flushed, so a secret can straddle two of them (``Authorization: Bearer `` in
 one, the token in the next). Consecutive ``message.text`` events are therefore
-masked as one text, together with the stored neighbour just outside the
-window on each side (the event before ``since_seq``, the one after the page,
-the one before a wait's tail), and each event then shows its own part of the
-masked text: a secret is masked whichever events, or pages, it is split over.
+masked as one text, together with the stored ``message.text`` run just outside
+the window on each side (before ``since_seq``, after the page, before a wait's
+tail; up to 8192 characters each), and each event then shows its own part of
+the masked text: a secret is masked whichever events, or pages, it is split
+over.
 
 ``output`` is paged rather than lost (:mod:`hal0.bridge.output`): a view shows
 the 16 KiB window of the masked text that ``agent_run_status``'s ``offset``
@@ -298,16 +299,19 @@ def _mask_run(texts: list[str]) -> list[str]:
 def _clean_events(
     events: list[dict[str, Any]],
     *,
-    before: dict[str, Any] | None = None,
-    after: dict[str, Any] | None = None,
+    before: list[dict[str, Any]] | None = None,
+    after: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Events made safe to return; streamed text is masked across event boundaries.
 
-    Each run of consecutive ``message.text`` events, with ``before`` and ``after``
-    (the stored neighbours just outside the window) when they are text that
-    touches it, is masked as one text by :func:`_mask_run`; then every event goes
+    Each run of consecutive ``message.text`` events is masked as one text by
+    :func:`_mask_run`, the first run together with ``before`` and the last with
+    ``after`` (the stored ``message.text`` runs just outside the window, oldest
+    first, from :meth:`BridgeService.run_events_window`); then every event goes
     through :func:`_clean_tree` as before. True when any text was cut.
     """
+    left_context = [t for t in map(_text_of, before or []) if t is not None]
+    right_context = [t for t in map(_text_of, after or []) if t is not None]
     texts = [_text_of(event) for event in events]
     rewritten: dict[int, str] = {}
     index = 0
@@ -319,15 +323,10 @@ def _clean_events(
         while stop < len(events) and texts[stop] is not None:
             stop += 1
         group = [t for t in texts[index:stop] if t is not None]
-        left = _text_of(before) if index == 0 else None
-        right = _text_of(after) if stop == len(events) else None
-        masked = _mask_run(
-            [*([left] if left is not None else []), *group, *([right] if right is not None else [])]
-        )
-        if left is not None:
-            masked = masked[1:]
-        if right is not None:
-            masked = masked[:-1]
+        left = left_context if index == 0 else []
+        right = right_context if stop == len(events) else []
+        masked = _mask_run([*left, *group, *right])
+        masked = masked[len(left) : len(masked) - len(right)]
         for offset, text in enumerate(masked):
             rewritten[index + offset] = text
         index = stop
@@ -340,7 +339,7 @@ def _clean_events(
 
 
 def _view(
-    view: dict[str, Any], *, offset: int = 0, tail_before: dict[str, Any] | None = None
+    view: dict[str, Any], *, offset: int = 0, tail_before: list[dict[str, Any]] | None = None
 ) -> dict[str, Any]:
     """A RunView (or a wait's view) made safe to return: secrets masked, texts capped.
 
@@ -351,7 +350,7 @@ def _view(
     ``input_preview``, the ``pending`` request (a clarification's question or an
     approval's command) and ``events_tail`` of a wait go through :func:`_clean`,
     the tail's streamed text masked across events (:func:`_clean_events`, with
-    ``tail_before``, the stored event just before the tail).
+    ``tail_before``, the stored text run just before the tail).
     ``truncated`` is true when any text was cut or more output follows; ``more``
     names the call that reads the next window of the output.
     """
@@ -407,11 +406,11 @@ def _list_item(view: dict[str, Any]) -> dict[str, Any]:
 async def _wait_view(
     service: BridgeService, caller: Caller, view: dict[str, Any]
 ) -> dict[str, Any]:
-    """A wait's view made safe, its tail's text masked with the stored event before it."""
+    """A wait's view made safe, its tail's text masked with the stored text run before it."""
     tail = view.get("events_tail")
-    before = None
+    before: list[dict[str, Any]] = []
     if isinstance(tail, list) and tail and _text_of(tail[0]) is not None:
-        before = await service.event_before(caller, view["run_id"], int(tail[0]["seq"]))
+        before = await service.events_before(caller, view["run_id"], int(tail[0]["seq"]))
     return _view(view, tail_before=before)
 
 

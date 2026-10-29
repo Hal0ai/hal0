@@ -369,7 +369,7 @@ class _Recorder:
                 return [self.view]
             if name == "run_events_window":
                 event = {"seq": 4, "ts": 1.0, "event": "message.text", "payload": {"text": "hi"}}
-                return None, [event], None
+                return [], [event], []
             return dict(self.view)
 
         return call
@@ -596,7 +596,7 @@ async def test_events_are_scrubbed_and_capped_too() -> None:
     class _Events(_Recorder):
         async def run_events_window(self, *_a: Any, **_kw: Any) -> Any:
             return (
-                None,
+                [],
                 [
                     {
                         "seq": 7,
@@ -611,7 +611,7 @@ async def test_events_are_scrubbed_and_capped_too() -> None:
                         "payload": {"text": "z" * 30_000},
                     },
                 ],
-                None,
+                [],
             )
 
     server = _server(_Events(), CC)
@@ -624,7 +624,7 @@ async def test_events_are_scrubbed_and_capped_too() -> None:
 async def test_an_empty_events_page_keeps_the_callers_position() -> None:
     class _Empty(_Recorder):
         async def run_events_window(self, *_a: Any, **_kw: Any) -> Any:
-            return None, [], None
+            return [], [], []
 
     out = _payload(
         await _server(_Empty(), CC).call_tool("agent_run_events", {"run_id": "r", "since_seq": 41})
@@ -941,7 +941,7 @@ async def test_a_secret_split_across_two_text_events_is_masked(
 ) -> None:
     class _Split(_Recorder):
         async def run_events_window(self, *_a: Any, **_kw: Any) -> Any:
-            return None, [_text_event(1, left), _text_event(2, right)], None
+            return [], [_text_event(1, left), _text_event(2, right)], []
 
     out = _payload(await _server(_Split(), CC).call_tool("agent_run_events", {"run_id": "r"}))
     first, second = (e["payload"]["text"] for e in out["events"])
@@ -958,11 +958,11 @@ async def test_a_secret_split_across_pages_is_masked_on_both() -> None:
 
     class _PageOne(_Recorder):
         async def run_events_window(self, *_a: Any, **_kw: Any) -> Any:
-            return None, [_text_event(1, left)], _text_event(2, right)
+            return [], [_text_event(1, left)], [_text_event(2, right)]
 
     class _PageTwo(_Recorder):
         async def run_events_window(self, *_a: Any, **_kw: Any) -> Any:
-            return _text_event(1, left), [_text_event(2, right)], None
+            return [_text_event(1, left)], [_text_event(2, right)], []
 
     one = _payload(await _server(_PageOne(), CC).call_tool("agent_run_events", {"run_id": "r"}))
     two = _payload(
@@ -987,8 +987,8 @@ async def test_a_wait_tail_masks_a_secret_split_with_the_event_before_it() -> No
     }
 
     class _Wait(_Recorder):
-        async def event_before(self, *_a: Any, **_kw: Any) -> Any:
-            return _text_event(1, left)
+        async def events_before(self, *_a: Any, **_kw: Any) -> Any:
+            return [_text_event(1, left)]
 
     out = _payload(
         await _server(_Wait(view), CC).call_tool(
@@ -1007,9 +1007,32 @@ async def test_text_without_secrets_is_unchanged_across_events() -> None:
         async def run_events_window(self, *_a: Any, **_kw: Any) -> Any:
             events = [_text_event(n + 1, t) for n, t in enumerate(texts)]
             events.insert(2, {"seq": 9, "ts": 1.0, "event": "tool.started", "payload": {}})
-            return None, events, None
+            return [], events, []
 
     out = _payload(await _server(_Plain(), CC).call_tool("agent_run_events", {"run_id": "r"}))
     shown = [e["payload"].get("text") for e in out["events"]]
     # "Bearer is" masks "is" as a bearer token, in context as it did per event
     assert shown[0] == "Hello, " and shown[3] == "" and shown[4] == " and that is all."
+
+
+async def test_a_secret_split_over_three_events_is_masked_when_paged_one_by_one() -> None:
+    """The context is the whole adjacent text run, not one neighbour (B1 probe finding)."""
+    parts = ["Use Authorization: Bearer ", "q7ZpL0xV9m", "T2wR8sK4nB6cD1 to call it."]
+    stored = [_text_event(n + 1, t) for n, t in enumerate(parts)]
+
+    class _Paged(_Recorder):
+        async def run_events_window(self, *_a: Any, since_seq: int = 0, **_kw: Any) -> Any:
+            return stored[:since_seq], stored[since_seq : since_seq + 1], stored[since_seq + 1 :]
+
+    server = _server(_Paged(), CC)
+    shown = []
+    for since in range(3):
+        page = _payload(
+            await server.call_tool(
+                "agent_run_events", {"run_id": "r", "since_seq": since, "limit": 1}
+            )
+        )
+        shown.append(page["events"][0]["payload"]["text"])
+    flat = "".join(shown)
+    assert "q7ZpL0xV9m" not in flat and "T2wR8sK4nB6cD1" not in flat
+    assert shown[0] == "Use Authorization: Bearer " and shown[2].endswith(" to call it.")
