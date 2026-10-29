@@ -352,6 +352,21 @@
 .agents-overview .fcb-pin b { color: var(--fg); }
 .agents-overview .fcb-danger { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; padding-top: 9px; border-top: 1px dashed var(--err-line); }
 
+/* Delegated tab (Hermes only): runs that bridge clients handed to Hermes. bridge-runs.jsx */
+.agents-overview .brg-filters { display: flex; gap: 6px; }
+.agents-overview .brg-run { display: flex; flex-direction: column; gap: 4px; background: var(--bg-sunken); border: 1px solid var(--line);
+  border-radius: 9px; padding: 8px 10px; font-family: var(--jbm); font-size: 10px; }
+.agents-overview .brg-run-top { display: flex; align-items: center; gap: 7px; }
+.agents-overview .brg-run-top .grow { flex: 1; }
+.agents-overview .brg-run-id { font-size: 10.5px; color: var(--fg); }
+.agents-overview .brg-run-when { color: var(--fg-3); }
+.agents-overview .brg-run-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px; color: var(--fg-3); }
+.agents-overview .brg-run-meta .dim { color: var(--fg-5); }
+.agents-overview .brg-run-client { color: var(--fg-2); }
+.agents-overview .brg-run-in { color: var(--fg-2); line-height: 1.45; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.agents-overview .brg-run-ev { flex: none; align-self: flex-start; padding: 4px 9px; font-size: 9.5px; margin-top: 2px; }
+
 /* lore: unlock line per ability, lit or dim skills */
 .agents-overview .atk.locked .atk-name { color: var(--fg-2); }
 .agents-overview .atk.locked .atk-cost, .agents-overview .atk.locked .atk-pow { opacity: 0.5; }

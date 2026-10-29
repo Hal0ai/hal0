@@ -10,7 +10,8 @@
 // The second block of names (overview, repair, gateway restart, uninstall,
 // approvals mode, log tail, personas, converge, job poll, config URLs,
 // capabilities, approvals count, Open WebUI re-mirror) serves the state-aware
-// cards.
+// cards. The agent-bridge names serve the MCP tab's Bridge clients card and the
+// Hermes card's Delegated tab.
 
 import {
   useAgentApprovalsCount,
@@ -27,12 +28,25 @@ import {
   useUnitLogTail,
   refreshAgentOverview,
 } from '@/api/hooks/useAgents'
+import {
+  BRIDGE_SCOPE_SERVER,
+  bridgeDisabled,
+  useBridgeClientCreate,
+  useBridgeClientRevoke,
+  useBridgeClientRotate,
+  useBridgeClients,
+  useBridgeClientScopes,
+  useBridgeMe,
+  useBridgeRuns,
+} from '@/api/hooks/useBridge'
 import { useCapabilities } from '@/api/hooks/useCapabilities'
 import { useComponentConverge } from '@/api/hooks/useComponents'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
 import { useSlots } from '@/api/hooks/useSlots'
 import { useUpdateJob } from '@/api/hooks/useUpdates'
+import { copyTextToClipboard } from '@/lib/clipboard'
 import { deriveCardModel } from './agent-phase'
+import { BRIDGE_FMT } from './bridge-format'
 
 // Bundled card art. Imported (not referenced from /public) so Vite fingerprints
 // them and they survive any base-path mount.
@@ -64,6 +78,19 @@ Object.assign(window, {
   __hal0UseCapabilities: useCapabilities,
   __hal0UseAgentApprovalsCount: useAgentApprovalsCount,
   __hal0UseHermesReconcileUpstreams: useHermesReconcileUpstreams,
+  // Agent bridge (ADR-0043): bridge-clients-card.jsx (MCP tab) and bridge-runs.jsx (the
+  // Hermes card's Delegated tab). The last four are pure, not hooks.
+  __hal0UseBridgeClients: useBridgeClients,
+  __hal0UseBridgeClientCreate: useBridgeClientCreate,
+  __hal0UseBridgeClientRotate: useBridgeClientRotate,
+  __hal0UseBridgeClientRevoke: useBridgeClientRevoke,
+  __hal0UseBridgeClientScopes: useBridgeClientScopes,
+  __hal0UseBridgeMe: useBridgeMe,
+  __hal0UseBridgeRuns: useBridgeRuns,
+  __hal0BridgeDisabled: bridgeDisabled,
+  __hal0BridgeScopeServer: BRIDGE_SCOPE_SERVER,
+  __hal0BridgeFmt: BRIDGE_FMT,
+  __hal0CopyText: copyTextToClipboard,
   // Pure (no hook): the cards call it each render with the hooks' data.
   __hal0DeriveCardModel: deriveCardModel,
   // Not a hook: the overview calls it with its query client after an action,

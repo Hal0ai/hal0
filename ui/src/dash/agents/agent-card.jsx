@@ -11,7 +11,8 @@
 //                     the install command or the running job otherwise).
 //                     A click on the card, or its "tap · console" button,
 //                     flips it to a tabbed console: Status, Controls, Lore,
-//                     Lifecycle. The console's "front" button or Escape
+//                     Lifecycle (Hermes adds Delegated, the runs bridge clients
+//                     handed it; bridge-runs.jsx). The console's "front" button or Escape
 //                     flips it back. The two buttons are the keyboard and
 //                     screen-reader way in and out; the card shell itself
 //                     carries no role, so the console's own controls are
@@ -111,6 +112,10 @@ const TABS = [
   ["lore", "Lore"],
   ["lifecycle", "Lifecycle"],
 ];
+
+// Hermes also shows the runs that bridge clients delegated to it (bridge-runs.jsx). Pi does not
+// take delegated work, so its console keeps the four tabs.
+const HERMES_TABS = [...TABS, ["delegated", "Delegated"]];
 
 const PHASE_MOD = {
   down: " is-down",
@@ -1014,10 +1019,10 @@ function LifecycleTab({ live, identity, model, actions, busy, ask }) {
   );
 }
 
-function ConsoleTabs({ id, tab, setTab, live }) {
+function ConsoleTabs({ id, tab, setTab, live, tabs }) {
   return (
     <div className="fcb-tabs" role="tablist" aria-label="console">
-      {TABS.map(([k, label]) => (
+      {tabs.map(([k, label]) => (
         <button
           key={k}
           id={"agent-" + id + "-tab-" + k}
@@ -1033,8 +1038,8 @@ function ConsoleTabs({ id, tab, setTab, live }) {
             // Arrow keys move between tabs (WAI-ARIA tabs pattern).
             if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
             e.preventDefault();
-            const i = TABS.findIndex(([t]) => t === k);
-            const next = TABS[(i + (e.key === "ArrowRight" ? 1 : TABS.length - 1)) % TABS.length][0];
+            const i = tabs.findIndex(([t]) => t === k);
+            const next = tabs[(i + (e.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length][0];
             setTab(next);
             const el = document.getElementById("agent-" + id + "-tab-" + next);
             if (el) el.focus();
@@ -1178,6 +1183,13 @@ function LiveAgentCard({ identity, model, actions }) {
   if (tab === "status") pane = <StatusTab {...back} />;
   else if (tab === "lore") pane = <LoreTab {...back} />;
   else if (tab === "lifecycle") pane = <LifecycleTab {...back} />;
+  else if (tab === "delegated" && !isPi) {
+    // bridge-runs.jsx registers BridgeRunsList; say so if it did not, rather than showing Controls
+    // under a tab that says Delegated.
+    pane = window.BridgeRunsList
+      ? <window.BridgeRunsList />
+      : <div className="fcb-pane-in"><div className="fc-note">Delegated runs unavailable</div></div>;
+  }
   else pane = <ControlsTab {...back} />;
 
   return (
@@ -1281,7 +1293,7 @@ function LiveAgentCard({ identity, model, actions }) {
                 </button>
                 <StatusDot cls={model.statusCls} />
               </div>
-              <ConsoleTabs id={a.id} tab={tab} setTab={setTab} live={flipped} />
+              <ConsoleTabs id={a.id} tab={tab} setTab={setTab} live={flipped} tabs={isPi ? TABS : HERMES_TABS} />
               <div
                 className="fcb-body fcb-pane"
                 role="tabpanel"

@@ -133,6 +133,9 @@ import './dash/agents/memory-tab.jsx'
 import './dash/agents/agent-cards.css'
 import './dash/agents/agents-hook-bridge'
 import './dash/agents/agent-card.jsx'
+// Agent bridge (ADR-0043): the Hermes card's Delegated tab and the MCP tab's Bridge clients card.
+import './dash/agents/bridge-runs.jsx'
+import './dash/agents/bridge-clients-card.jsx'
 import './dash/agents/agents-overview.jsx'
 import './dash/agents/agent-view.jsx'
 

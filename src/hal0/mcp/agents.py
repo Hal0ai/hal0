@@ -119,10 +119,15 @@ from mcp.types import ToolAnnotations
 from hal0.api.auth import ANON, AuthPrincipal
 from hal0.bridge.caller import Caller
 from hal0.bridge.errors import BridgeError
-from hal0.bridge.output import OUTPUT_WINDOW_BYTES, output_window
-from hal0.bridge.store import TERMINAL_STATUSES
+from hal0.bridge.output import (
+    OUTPUT_WINDOW_BYTES,
+    mask_run,
+    masked_output,
+    output_window,
+    run_list_item,
+)
 from hal0.mcp._binding import BoundFastMCP, ToolContext, bound_server
-from hal0.redaction import MASK, redact_log_line, secret_spans, token_head_at_end
+from hal0.redaction import redact_log_line
 
 if TYPE_CHECKING:
     from hal0.bridge.service import BridgeService
@@ -233,49 +238,6 @@ def _text_of(event: Any) -> str | None:
     return text if isinstance(text, str) else None
 
 
-def _merged(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
-    """``spans`` sorted, with overlapping or touching spans joined into one."""
-    out: list[tuple[int, int]] = []
-    for start, end in sorted(spans):
-        if out and start <= out[-1][1]:
-            out[-1] = (out[-1][0], max(out[-1][1], end))
-        else:
-            out.append((start, end))
-    return out
-
-
-def _mask_run(texts: list[str], *, at_edge: bool = False) -> list[str]:
-    """``texts`` masked as one string, each given back its own part of the result.
-
-    A span that covers part of a text becomes one MASK in it; a text wholly inside a
-    span becomes MASK. ``at_edge`` says the joined text ends at the newest stored
-    event: a token the redactor would mask only once it is whole is masked from
-    its known prefix to the end (:func:`~hal0.redaction.token_head_at_end`).
-    """
-    joined = "".join(texts)
-    spans = secret_spans(joined)
-    if at_edge and (head := token_head_at_end(joined)) is not None:
-        spans = _merged([*spans, (head, len(joined))])
-    if not spans:
-        return list(texts)
-    out: list[str] = []
-    start = 0
-    for text in texts:
-        end = start + len(text)
-        parts: list[str] = []
-        pos = start
-        for span_start, span_end in spans:
-            if span_end <= start or span_start >= end:
-                continue
-            lo, hi = max(span_start, start), min(span_end, end)
-            parts += (joined[pos:lo], MASK)
-            pos = hi
-        parts.append(joined[pos:end])
-        out.append("".join(parts))
-        start = end
-    return out
-
-
 def _clean_events(
     events: list[dict[str, Any]],
     *,
@@ -286,7 +248,7 @@ def _clean_events(
     """Events made safe to return; streamed text is masked across event boundaries.
 
     Each run of consecutive ``message.text`` events is masked as one text by
-    :func:`_mask_run`, the first run together with ``before`` and the last with
+    :func:`~hal0.bridge.output.mask_run`, the first run together with ``before`` and the last with
     ``after`` (the stored ``message.text`` runs just outside the window, oldest
     first, from :meth:`BridgeService.run_events_window`); then every event goes
     through :func:`_clean_tree` as before. True when any text was cut.
@@ -312,7 +274,7 @@ def _clean_events(
         group = [t for t in texts[index:stop] if t is not None]
         left = left_context if index == 0 else []
         right = right_context if stop == len(events) else []
-        masked = _mask_run([*left, *group, *right], at_edge=at_edge and stop == len(events))
+        masked = mask_run([*left, *group, *right], at_edge=at_edge and stop == len(events))
         masked = masked[len(left) : len(masked) - len(right)]
         for offset, text in enumerate(masked):
             rewritten[index + offset] = text
@@ -325,27 +287,12 @@ def _clean_events(
     return _clean_tree(out)
 
 
-def _masked_output(view: dict[str, Any], output: str) -> str:
-    """A run's ``output`` with its secrets masked, by the run's status.
-
-    A finished run's output is complete: the log redactor masks it. A run that is
-    not finished has its output extended on every flush of the watcher, so its end
-    is the live edge, as at the end of an events page: a known token prefix running
-    to the end is also masked through the end (:func:`_mask_run` ``at_edge``). A
-    view without a status is treated as live. Without such a prefix at the end the
-    redactor's output is used as is.
-    """
-    if view.get("status") in TERMINAL_STATUSES or token_head_at_end(output) is None:
-        return redact_log_line(output)
-    return _mask_run([output], at_edge=True)[0]
-
-
 def _view(
     view: dict[str, Any], *, offset: int = 0, tail_before: list[dict[str, Any]] | None = None
 ) -> dict[str, Any]:
     """A RunView (or a wait's view) made safe to return: secrets masked, texts capped.
 
-    ``output`` is masked whole (:func:`_masked_output`), then the 16 KiB window
+    ``output`` is masked whole (:func:`~hal0.bridge.output.masked_output`), then the 16 KiB window
     at byte ``offset`` is shown with ``output_offset``, ``output_total`` and
     ``next_offset`` (:func:`hal0.bridge.output.output_window`); masking first
     means a window edge cannot split a secret the redactor would have caught.
@@ -361,7 +308,7 @@ def _view(
     truncated = False
     output = out.get("output")
     if isinstance(output, str):
-        out["output"], page = output_window(_masked_output(out, output), offset)
+        out["output"], page = output_window(masked_output(out, output), offset)
         out.update(page)
         if page["next_offset"] is not None:
             truncated = True
@@ -387,26 +334,16 @@ def _view(
     return out
 
 
-#: Characters of a run's output an ``agent_runs_list`` item previews.
-OUTPUT_PREVIEW_CHARS = 200
-
-
 def _list_item(view: dict[str, Any]) -> dict[str, Any]:
     """A RunView as an ``agent_runs_list`` item: ``output_preview`` in place of ``output``.
 
-    A list is for finding a run, not reading it: the first
-    :data:`OUTPUT_PREVIEW_CHARS` characters of the masked output
-    (:func:`_masked_output`), and ``error`` (cleaned like a view's).
-    ``agent_run_status`` reads the whole output.
+    The projection is :func:`hal0.bridge.output.run_list_item`, the one
+    ``GET /api/bridge/runs`` uses, so a live run's ``output_preview`` is masked
+    to the live edge here and there alike; this adds the tool's masking and caps
+    on ``error``, ``input_preview`` and ``pending``. ``output_preview`` is already
+    masked and 200 characters, so :func:`_view` leaves it as it is.
     """
-    item = dict(view)
-    output = item.pop("output", None)
-    preview = (
-        _masked_output(item, output)[:OUTPUT_PREVIEW_CHARS] if isinstance(output, str) else None
-    )
-    out = _view(item)
-    out["output_preview"] = preview
-    return out
+    return _view(run_list_item(view))
 
 
 async def _wait_view(
