@@ -608,12 +608,26 @@ async def test_an_empty_events_page_keeps_the_callers_position() -> None:
     assert out == {"run_id": "r", "events": [], "last_seq": 41}
 
 
-async def test_runs_list_scrubs_and_caps_each_run() -> None:
-    view = {"run_id": "run_1", "status": "completed", "output": "y" * 30_000, "last_seq": 5}
+async def test_runs_list_items_preview_the_output() -> None:
+    """A list item carries ``output_preview`` (200 characters) and ``error``, not the output."""
+    view = {
+        "run_id": "run_1",
+        "status": "failed",
+        "output": "Authorization: Bearer hal0bk_cc.s3cr3tvalue0123456789 " + "y" * 30_000,
+        "error": "e" * 20_000,
+        "last_seq": 5,
+    }
     server = _server(_Recorder(view), CC)
     listed = _payload(await server.call_tool("agent_runs_list", {}))
     (run,) = listed["runs"]
-    assert run["truncated"] is True and len(run["output"].encode()) <= 16 * 1024
+    assert "output" not in run and "next_offset" not in run and "more" not in run
+    assert len(run["output_preview"]) == 200
+    assert run["output_preview"].startswith("Authorization: Bearer")
+    assert "s3cr3tvalue" not in run["output_preview"]
+    assert len(run["error"].encode()) <= 16 * 1024 and run["truncated"] is True
+    quiet = _server(_Recorder({"run_id": "run_2", "status": "running", "output": None}), CC)
+    (item,) = _payload(await quiet.call_tool("agent_runs_list", {}))["runs"]
+    assert item["output_preview"] is None and "truncated" not in item
 
 
 async def test_pending_and_input_preview_are_scrubbed_like_output() -> None:

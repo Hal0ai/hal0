@@ -225,6 +225,25 @@ def _view(view: dict[str, Any], *, offset: int = 0) -> dict[str, Any]:
     return out
 
 
+#: Characters of a run's output an ``agent_runs_list`` item previews.
+OUTPUT_PREVIEW_CHARS = 200
+
+
+def _list_item(view: dict[str, Any]) -> dict[str, Any]:
+    """A RunView as an ``agent_runs_list`` item: ``output_preview`` in place of ``output``.
+
+    A list is for finding a run, not reading it: the first
+    :data:`OUTPUT_PREVIEW_CHARS` characters of the masked output, and ``error``
+    (cleaned like a view's). ``agent_run_status`` reads the whole output.
+    """
+    item = dict(view)
+    output = item.pop("output", None)
+    preview = redact_log_line(output)[:OUTPUT_PREVIEW_CHARS] if isinstance(output, str) else None
+    out = _view(item)
+    out["output_preview"] = preview
+    return out
+
+
 def _who(ctx: Any) -> str:
     """The calling client's name for a log line; never raises."""
     try:
@@ -465,8 +484,9 @@ def _agents_tool_definitions() -> dict[str, Tool]:
         name="agent_runs_list",
         description=(
             "Your runs, newest first. status filters to one status (for example 'running'); "
-            "limit is at most 200. Returns {runs}. The operator's admin key sees every "
-            "client's runs."
+            "limit is at most 200. Returns {runs}: each a run view with output_preview (the "
+            "first 200 characters of the output) in place of output; read a run's output "
+            "with agent_run_status. The operator's admin key sees every client's runs."
         ),
         annotations=_ANNOTATIONS["agent_runs_list"],
     )
@@ -476,6 +496,6 @@ def _agents_tool_definitions() -> dict[str, Tool]:
     ) -> dict[str, Any]:
         caller, service = _context(ctx)
         runs = await service.list_runs(caller, status=status, limit=limit)
-        return {"runs": [_view(run) for run in runs]}
+        return {"runs": [_list_item(run) for run in runs]}
 
     return {tool.name: tool for tool in server._tool_manager.list_tools()}

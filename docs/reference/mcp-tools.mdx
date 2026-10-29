@@ -341,7 +341,7 @@ A client sees only its own runs. A run another client owns is reported exactly l
 | `agent_run_answer` | `run_id`, `request_id`, `answer` | the run view. Answers the clarification in the run's `pending` field; the run resumes |
 | `agent_run_steer` | `run_id`, `input` | the run view. Adds guidance to a run that is `running` |
 | `agent_run_stop` | `run_id` | the run view, `stopping` until the run ends |
-| `agent_runs_list` | none | `{runs: [...]}`: the caller's runs, newest first. Optional: `status`, `limit` (at most 200; default 20) |
+| `agent_runs_list` | none | `{runs: [...]}`: the caller's runs, newest first, each the run view with `output_preview` (the output's first 200 characters) in place of `output`. Optional: `status`, `limit` (at most 200; default 20) |
 
 A run that needs an approval waits for the operator in the hal0 inbox; an approval does not end `agent_run_wait`. A clarification does: the client answers it with `agent_run_answer`.
 
