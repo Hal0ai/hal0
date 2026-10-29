@@ -58,17 +58,18 @@ behind for a Hermes profile:
   ``agent_skill_delete``); nothing is written until the operator approves, and
   a request that could never succeed (invalid, or a shipped skill's name) is
   refused before anything is queued. A put and a delete of one name can both be
-  pending. For a put: an identical re-push by the same client is the same row
-  (an identical push by another client is that client's own row); an edited
-  re-push by the *same client* withdraws its older row, so approving always
-  writes what the card shows; an edited push while *another client's* put of
-  that name is pending is 409 ``bridge.skill_pending_elsewhere``. A client holds
-  at most :data:`MAX_PENDING_SKILL_CHANGES` pending skill changes (429
+  pending. Each client's change is its own row: a repeat by the same client is
+  that row, and an identical put or delete by another client is that client's
+  own. For a put, an edited re-push by the *same client* withdraws its older row,
+  so approving always writes what the card shows, and an edited push while
+  *another client's* put of that name is pending is 409
+  ``bridge.skill_pending_elsewhere``. A client holds at most
+  :data:`MAX_PENDING_SKILL_CHANGES` pending skill changes (429
   ``bridge.too_many_pending``); the queue lets go of a resolved row's executor,
   which is what holds the pushed content. A push must be reviewable on its card
   in full: ``SKILL.md`` at most 16 KiB, the whole push at most 48 KiB, all of it
-  UTF-8 text with nothing the log redactor would mask and no control or
-  bidirectional-override character; the card carries ``SKILL.md`` and every
+  UTF-8 text with no secret-shaped value that is not a placeholder and no control
+  or bidirectional-override character; the card carries ``SKILL.md`` and every
   file's content exactly as approval writes them, never cut. A bigger skill is
   the operator's to drop in by hand.
 * **Capabilities.** :func:`hal0.bridge.capabilities.capabilities_view`, off the
@@ -115,7 +116,7 @@ from hal0.bridge.watcher import (
     pending_of,
 )
 from hal0.config.schema import BridgeConfig
-from hal0.redaction import redact_log_line
+from hal0.redaction import redact_log_line, secret_spans
 
 if TYPE_CHECKING:
     from hal0.events import EventBus
@@ -185,6 +186,25 @@ _NOT_REVIEWABLE = "bridge pushes are limited to reviewable text (SKILL.md ≤ 16
 _HIDDEN_TEXT = re.compile(
     r"[\x01-\x08\x0b\x0c\x0e-\x1f\x7f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]"
 )
+
+#: A value a skill may show where the log redactor would mask a secret: it names one
+#: rather than being one (``Bearer <token>``, ``$ENV_VAR``, ``HF_TOKEN=...``). Matched
+#: whole, ignoring case, once quotes and whitespace are trimmed (:func:`_is_placeholder`).
+_PLACEHOLDER = re.compile(
+    r"<[^<>]{1,64}>"
+    r"|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?"
+    r"|YOUR_[A-Z0-9_]+"
+    r"|\.{3}|\N{HORIZONTAL ELLIPSIS}"
+    r"|x{3,}|\*{3,}"
+    r"|(?:TODO|TBD|CHANGEME|REPLACE[_-]?ME|PLACEHOLDER|EXAMPLE|REDACTED)"
+    r"|[<\[{(]?(?:your|my|the)[ _-][a-z _-]{1,40}[>\]})]?",
+    re.IGNORECASE,
+)
+
+#: What a masked value is trimmed of before it is judged (backticks: skills are Markdown).
+_PLACEHOLDER_TRIM = " \t\r\n\"'`"
+
+_USE_A_PLACEHOLDER = "use a placeholder such as <token> or $ENV_VAR"
 
 #: Why a pending skill row was retired when a newer push of the same skill arrived.
 _SUPERSEDED = "superseded by a newer push of this skill"
@@ -836,7 +856,8 @@ class BridgeService:
         # not through the log redactor: a mask would show the operator something
         # other than what Hermes loads (a quoted command after a secret-shaped name is
         # masked whole). That is safe only because _check_reviewable refused any file
-        # the redactor would change, so there is nothing secret-shaped here to mask.
+        # holding a secret-shaped value that is not a placeholder: what the redactor
+        # would still mask here is a placeholder, which the operator must read as is.
         # ``client`` names the pusher, and being in the args it is part of the
         # queue's dedup digest: an identical push by another client is its own row.
         args: dict[str, Any] = {
@@ -896,7 +917,9 @@ class BridgeService:
         A shipped skill is 403 ``bridge.skill_readonly`` and an unknown one 404
         ``bridge.skill_not_found``, both before anything is queued; this client
         already holding :data:`MAX_PENDING_SKILL_CHANGES` pending changes is 429
-        ``bridge.too_many_pending``.
+        ``bridge.too_many_pending``. The card names the pushing ``client``, which is
+        part of the queue's dedup digest: a repeat by this client is its one row,
+        while another client's delete of the same skill is that client's own row.
         """
         self._check_open()
         queue = self._inbox()
@@ -915,7 +938,7 @@ class BridgeService:
             )
             approval_id = await queue.enqueue(
                 "agent_skill_delete",
-                {"name": name},
+                {"name": name, "client": caller.name},
                 client_id=client_id,
                 executor=execute,
                 target_args=("name",),
@@ -1150,11 +1173,13 @@ def _check_reviewable(skill_md: Any, files: Any) -> int:
     A bridge push is shown whole on its inbox card, so it must be text a person can
     read there: ``SKILL.md`` at most :data:`MAX_PUSH_SKILL_MD_BYTES`, everything at
     most :data:`MAX_PUSH_TOTAL_BYTES`, every file valid UTF-8 with no NUL character.
-    Once the sizes pass, every file must also read on the card exactly as it is
-    written: nothing the log redactor would mask (the card would show a mask where
-    approval writes the raw text, and a skill has no business carrying a secret),
-    and no :data:`_HIDDEN_TEXT` character. Anything that is not a string is left to
-    :meth:`SkillLibrary.validate`.
+    Once the sizes pass, no file may carry a secret: every value the log redactor
+    would mask (:func:`hal0.redaction.secret_spans`) must be a placeholder
+    (:data:`_PLACEHOLDER`: ``<token>``, ``$ENV_VAR``, ``...``, ``YOUR_KEY`` and the
+    like), since teaching Hermes to call an authenticated API is what a pushed skill
+    is for, and an opaque token is refused. No file or file name may hold a
+    :data:`_HIDDEN_TEXT` character. The card then shows each file exactly as it is
+    written. Anything that is not a string is left to :meth:`SkillLibrary.validate`.
     """
     parts: list[tuple[str, Any]] = [("SKILL.md", skill_md)]
     if isinstance(files, dict):
@@ -1189,13 +1214,18 @@ def _check_reviewable(skill_md: Any, files: Any) -> int:
                 "bridge.skill_invalid",
                 f"{_NOT_REVIEWABLE}: {label!r} holds control or bidirectional-override characters",
             )
-        if redact_log_line(text) != text:
+        if any(not _is_placeholder(text[start:end]) for start, end in secret_spans(text)):
             raise BridgeError(
                 "bridge.skill_invalid",
                 f"{_NOT_REVIEWABLE}: {label!r} holds secret-shaped text the inbox card would "
-                "mask; a skill has no business carrying a secret",
+                f"mask; a skill has no business carrying a secret; {_USE_A_PLACEHOLDER}",
             )
     return total
+
+
+def _is_placeholder(value: str) -> bool:
+    """Whether a value the redactor would mask names a secret rather than being one."""
+    return _PLACEHOLDER.fullmatch(value.strip(_PLACEHOLDER_TRIM)) is not None
 
 
 def _skill_digest(skill_md: str, files: dict[str, str]) -> str:

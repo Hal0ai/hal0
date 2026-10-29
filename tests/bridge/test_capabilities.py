@@ -360,6 +360,59 @@ def test_unreachable_gateway_gives_none_not_an_error(tmp_hermes_home: Path) -> N
     assert "8642" not in json.dumps(view)
 
 
+@pytest.mark.parametrize("failure", ["raises", "status", "not_json"])
+def test_a_failed_probe_is_logged_masked_with_its_profile(
+    tmp_hermes_home: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    """The view stays quiet about it, but the journal shows a probe that keeps failing.
+
+    An h11 header error quotes the header's value: the logged text is masked.
+    """
+    import httpx
+    from structlog.testing import capture_logs
+
+    def fake_get(url: str, **kwargs: Any) -> httpx.Response:
+        if failure == "raises":
+            raise httpx.LocalProtocolError(f"Illegal header value b'Bearer {API_KEY}'")
+        if failure == "status":
+            return httpx.Response(401, json={"error": "unauthorized"})
+        return httpx.Response(200, content=b"<html>not json</html>")
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    with capture_logs() as logs:
+        view = capabilities_view(tmp_hermes_home, "coder", read_api_key=lambda: API_KEY)
+    assert view["api_server_version"] is None
+    [entry] = [e for e in logs if e["event"] == "bridge.capabilities_probe_failed"]
+    assert entry["log_level"] == "warning" and entry["profile"] == "coder"
+    assert "exc_info" not in entry  # text only: no traceback, no frames
+    assert API_KEY not in json.dumps(logs)
+    expected = {"raises": "LocalProtocolError", "status": "401", "not_json": "not JSON"}[failure]
+    assert expected in entry["error"]
+    if failure == "raises":
+        assert "REDACTED" in entry["error"]
+
+
+def test_an_injected_fetch_failure_is_logged_too(tmp_hermes_home: Path) -> None:
+    from structlog.testing import capture_logs
+
+    def boom(_url: str, _headers: Callable[[], Mapping[str, str]]) -> Any:
+        raise OSError(f"refused, Authorization: Bearer {API_KEY}")
+
+    with capture_logs() as logs:
+        capabilities_view(tmp_hermes_home, "default", fetch_json=boom, read_api_key=lambda: API_KEY)
+    [entry] = [e for e in logs if e["event"] == "bridge.capabilities_probe_failed"]
+    assert entry["profile"] == "default" and entry["error"].startswith("OSError: refused")
+    assert API_KEY not in json.dumps(logs)
+
+
+def test_no_key_is_no_probe_and_nothing_logged(tmp_hermes_home: Path) -> None:
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        capabilities_view(tmp_hermes_home, "default", read_api_key=lambda: None)
+    assert [e for e in logs if e["event"] == "bridge.capabilities_probe_failed"] == []
+
+
 def test_default_fetch_against_a_closed_port_is_none(tmp_path: Path) -> None:
     """With no injected fetcher the real probe runs; a closed port is ``None``, within 3 s."""
     home = tmp_path / "hermes"

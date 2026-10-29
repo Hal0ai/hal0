@@ -43,8 +43,11 @@ The key is never a local of a frame that can raise while it is live, as in
 :class:`~hal0.bridge.hermes_client.HermesGateway`: ``hal0 serve`` renders a
 traceback with every frame's locals (#3137). The caller hands over a reader, not
 the key; the fetcher gets a header factory, not the header, and calls it inside
-the request call; and the real fetcher swallows whatever the HTTP call raises, so
-no httpx frame (which does hold the header) reaches a traceback.
+the request call; and the real fetcher turns whatever the HTTP call raises into a
+fresh error raised outside the handler, so no httpx frame (which does hold the
+header) is chained to it. A failed probe is logged as a warning
+(``bridge.capabilities_probe_failed``, with the profile and the error's text,
+masked by the log redactor, never a traceback), so it shows in the journal.
 """
 
 from __future__ import annotations
@@ -55,12 +58,16 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+import structlog
+
 from hal0.agents import hermes_command_approvals
 from hal0.agents.hermes_api import DEFAULT_PROFILE, _config, api_server_base
 from hal0.agents.hermes_platforms import _explicit_enabled
 from hal0.redaction import is_sensitive_key, redact_log_line
 
 __all__ = ["CAPABILITY_KEYS", "FetchJson", "ReadApiKey", "capabilities_view"]
+
+log = structlog.get_logger(__name__)
 
 #: The view's keys, in order. The contract with the ``agent_capabilities`` tool.
 CAPABILITY_KEYS: tuple[str, ...] = (
@@ -230,7 +237,11 @@ def _version(
     try:
         # A header factory, not the header: the key is read inside the request call.
         body = fetch(base + path, lambda: _bearer(read_api_key))
-    except Exception:  # the gateway being down is a normal state, not an error to report
+    except Exception as exc:
+        # The gateway being down is a normal state, not an error for the caller, but it
+        # is logged so a probe that keeps failing (a stale key, a bad address) shows.
+        error = str(exc) if isinstance(exc, _ProbeFailed) else _failure_text(exc)
+        log.warning("bridge.capabilities_probe_failed", profile=profile, error=error)
         return None
     version = _text(body.get("version") if isinstance(body, dict) else None)
     return version if version is not None and _VERSION.fullmatch(version) else None
@@ -246,21 +257,43 @@ def _bearer(read_api_key: ReadApiKey) -> dict[str, str]:
     return {"Authorization": f"Bearer {(read_api_key() or '').strip()}"}
 
 
-def _fetch_json(url: str, headers: Callable[[], Mapping[str, str]]) -> Any:
-    """Sync ``GET url`` with ``headers()`` and a 3 s timeout; the parsed JSON, or ``None``.
+class _ProbeFailed(Exception):
+    """The version probe failed; its text is already masked by the log redactor."""
 
-    Whatever the HTTP call raises is ``None``, not only ``httpx.HTTPError`` (an
-    address httpx cannot parse raises ``httpx.InvalidURL``, which is not one): the
-    exception, and with it the httpx frames that hold the header, never leaves.
+
+#: Longest error text a failed probe logs.
+_MAX_ERROR_TEXT = 300
+
+
+def _failure_text(exc: BaseException) -> str:
+    """``exc`` as one line safe to log: its type and text, masked by the log redactor."""
+    return redact_log_line(f"{type(exc).__name__}: {exc}")[:_MAX_ERROR_TEXT]
+
+
+def _fetch_json(url: str, headers: Callable[[], Mapping[str, str]]) -> Any:
+    """Sync ``GET url`` with ``headers()`` and a 3 s timeout; the parsed JSON.
+
+    Any failure raises :class:`_ProbeFailed` with a masked text: an answer other
+    than 200 or not JSON, and whatever the HTTP call raises, not only
+    ``httpx.HTTPError`` (an address httpx cannot parse raises ``httpx.InvalidURL``,
+    which is not one). It is raised after the handler has ended, so neither the
+    httpx exception nor its frames (which hold the header) are chained to it.
     """
     import httpx
 
+    failure: _ProbeFailed | None = None
     try:
         # Never through a proxy: the request carries the profile's API key, and a
         # Hermes that listens beyond loopback is still on this box's network.
         resp = httpx.get(url, headers=dict(headers()), timeout=_FETCH_TIMEOUT_S, trust_env=False)
-        if resp.status_code != 200:
-            return None
+    except Exception as exc:
+        failure = _ProbeFailed(_failure_text(exc))
+    if failure is not None:
+        raise failure
+    if resp.status_code != 200:
+        raise _ProbeFailed(f"GET /health/detailed answered {resp.status_code}")
+    try:
         return resp.json()
-    except Exception:
-        return None
+    except ValueError:
+        failure = _ProbeFailed("GET /health/detailed answered with a body that is not JSON")
+    raise failure

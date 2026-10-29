@@ -186,6 +186,52 @@ def redact_log_line(line: str) -> str:
     return _redact_shapes("".join(out), log=True)
 
 
+def secret_spans(text: str) -> list[tuple[int, int]]:
+    """The ``(start, end)`` character ranges of ``text`` that :func:`redact_log_line` masks.
+
+    No pattern is repeated here: every rule of the redactor only ever replaces a
+    substring with :data:`MASK`, so the spans are read off by aligning ``text`` with
+    ``redact_log_line(text)``, and the rule table stays the one authority. Each
+    MASK stands for one non-empty span; the verbatim piece after a mask starts with
+    what ended the secret (a space, a quote, a separator), which the secret cannot
+    hold, so its first occurrence is where the span ends. Replacing each span of
+    ``text`` with MASK gives ``redact_log_line(text)`` back. Should the two ever fail
+    to align, the whole stretch between the first and the last difference is one
+    span: more is covered, never less.
+
+    The agent bridge masks streamed text split over events with these spans, and
+    reads each masked value of a pushed skill to tell a placeholder from a secret.
+    """
+    masked = redact_log_line(text)
+    if text == masked:
+        return []
+    pieces = masked.split(MASK)
+    spans: list[tuple[int, int]] = []
+    at = len(pieces[0])
+    aligned = len(pieces) > 1 and text.startswith(pieces[0])
+    for index, piece in enumerate(pieces[1:], start=1):
+        if not aligned:
+            break
+        if index == len(pieces) - 1:
+            end = len(text) - len(piece)
+            aligned = end > at and text.endswith(piece)
+        else:
+            end = text.find(piece, at + 1) if piece else at + 1
+            aligned = end > at
+        if aligned:
+            spans.append((at, end))
+            at = end + len(piece)
+    if aligned:
+        return spans
+    head = 0
+    while head < min(len(text), len(masked)) and text[head] == masked[head]:
+        head += 1
+    tail = 0
+    while tail < min(len(text), len(masked)) - head and text[-1 - tail] == masked[-1 - tail]:
+        tail += 1
+    return [(head, max(head + 1, len(text) - tail))]
+
+
 def redact_text_tree(value: Any) -> Any:
     """Apply :func:`redact_log_line` to every string inside ``value``.
 
@@ -1436,5 +1482,6 @@ __all__ = [
     "redact_secret_shapes",
     "redact_shareable_text",
     "redact_text_tree",
+    "secret_spans",
     "token_head_at_end",
 ]

@@ -119,7 +119,7 @@ from hal0.bridge.caller import Caller
 from hal0.bridge.errors import BridgeError
 from hal0.bridge.output import OUTPUT_WINDOW_BYTES, output_window
 from hal0.mcp._binding import BoundFastMCP, ToolContext, bound_server
-from hal0.redaction import MASK, redact_log_line, token_head_at_end
+from hal0.redaction import MASK, redact_log_line, secret_spans, token_head_at_end
 
 if TYPE_CHECKING:
     from hal0.bridge.service import BridgeService
@@ -230,47 +230,6 @@ def _text_of(event: Any) -> str | None:
     return text if isinstance(text, str) else None
 
 
-def _masked_spans(original: str, masked: str) -> list[tuple[int, int]]:
-    """The spans of ``original`` that :func:`redact_log_line` replaced, given its result.
-
-    The redactor only ever replaces substrings with :data:`~hal0.redaction.MASK`, so
-    ``original`` is ``masked`` with each MASK standing for one non-empty span. The
-    verbatim piece after a mask starts with what ended the secret (a space, a quote,
-    a separator), which the secret cannot hold, so its first occurrence is where the
-    span ends. Should the two ever fail to align, the whole stretch between the
-    first and the last difference is one span: more is masked, never less.
-    """
-    if original == masked:
-        return []
-    pieces = masked.split(MASK)
-    spans: list[tuple[int, int]] = []
-    at = len(pieces[0])
-    aligned = len(pieces) > 1 and original.startswith(pieces[0])
-    for index, piece in enumerate(pieces[1:], start=1):
-        if not aligned:
-            break
-        if index == len(pieces) - 1:
-            end = len(original) - len(piece)
-            aligned = end > at and original.endswith(piece)
-        else:
-            end = original.find(piece, at + 1) if piece else at + 1
-            aligned = end > at
-        if aligned:
-            spans.append((at, end))
-            at = end + len(piece)
-    if aligned:
-        return spans
-    head = 0
-    while head < min(len(original), len(masked)) and original[head] == masked[head]:
-        head += 1
-    tail = 0
-    while (
-        tail < min(len(original), len(masked)) - head and original[-1 - tail] == masked[-1 - tail]
-    ):
-        tail += 1
-    return [(head, max(head + 1, len(original) - tail))]
-
-
 def _merged(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
     """``spans`` sorted, with overlapping or touching spans joined into one."""
     out: list[tuple[int, int]] = []
@@ -291,7 +250,7 @@ def _mask_run(texts: list[str], *, at_edge: bool = False) -> list[str]:
     its known prefix to the end (:func:`~hal0.redaction.token_head_at_end`).
     """
     joined = "".join(texts)
-    spans = _masked_spans(joined, redact_log_line(joined))
+    spans = secret_spans(joined)
     if at_edge and (head := token_head_at_end(joined)) is not None:
         spans = _merged([*spans, (head, len(joined))])
     if not spans:
