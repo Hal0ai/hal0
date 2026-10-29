@@ -54,6 +54,11 @@ function idleBox() {
   ]
 }
 
+/** The same box with an image engine slot, which the Image engine card needs (the status route alone answers 200 anywhere). */
+function idleBoxWithImg() {
+  return [...idleBox(), { ...base, name: 'img', type: 'image', group: 'image', state: 'ready', backend: 'rocm', device: 'gpu-rocm', model: 'sdxl-turbo', port: 8188 }]
+}
+
 /* ── network fixtures ── */
 
 /** GET /api/doctor with one failing diagnosis the inbox shows as an `err` row. */
@@ -168,8 +173,16 @@ function card(page: Page, title: string) {
 }
 
 test.describe('Overview v2 (#dashboard)', () => {
-  test('idle box renders every section', async ({ page }) => {
+  test('a box with no img slot has no Image engine card', async ({ page }) => {
     await seedSlots(page, idleBox())
+    await upToDate(page)
+    await page.goto('/#dashboard')
+    await expect(card(page, 'Services')).toBeVisible()
+    await expect(card(page, 'Image engine')).toHaveCount(0)
+  })
+
+  test('idle box renders every section', async ({ page }) => {
+    await seedSlots(page, idleBoxWithImg())
     await upToDate(page)
     await page.goto('/#dashboard')
 
