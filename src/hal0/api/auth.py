@@ -4,7 +4,7 @@ Three-tier, deny-by-default auth built around one classification table
 (:mod:`hal0.security.exposure`, seam S9). This module owns:
 
 - :class:`AuthPrincipal` — the resolved identity of a request (``anon`` /
-  ``client`` / ``admin``).
+  ``client`` / ``admin``, plus ``bridge`` for an agent-bridge client key).
 - Key resolution: cookie -> ``Authorization: Bearer`` -> ``?api_key=``,
   in that priority order (browsers can't set headers on a WebSocket
   upgrade, hence the query-param fallback for WS/SSE).
@@ -61,6 +61,20 @@ the box itself only, when the ADMIN gate would refuse them, and marks the reques
 is not a tier: :func:`resolve_principal` never returns it, so it opens no
 other route, no WebSocket and no stream.
 
+The bridge's own credential (ADR-0043)
+--------------------------------------
+A bridge client (a coding agent on another machine) carries a key of its own,
+``hal0bk_<name>.<token>``. The operator mints it, and ``bridge.db``
+(:mod:`hal0.bridge.store`) keeps only its hash. :func:`resolve_principal`
+accepts it from ``Authorization: Bearer`` only, never from ``?api_key=``, and
+resolves it to the ``bridge`` tier carrying the client's name and scopes; a
+revoked, rotated-out or unknown key resolves to ``anon``. The tier opens the
+BRIDGE class (``/mcp/agents``, ``GET /api/bridge/me``) and the MCP mounts its
+scopes name (:data:`BRIDGE_SCOPE_PREFIXES`); every other route refuses it with
+403. Both checks run ahead of the dev-open bypass: a BRIDGE-class request is
+never waved through, and a bridge key is held to its scopes on a box with auth
+off as well. OPEN routes stay open to it, as to anyone.
+
 The browser session cookie is **reused, not reimplemented**: minting and
 verification both delegate to :mod:`hal0.api.agents._auth` (one
 HMAC-SHA256 cookie scheme), so
@@ -82,23 +96,29 @@ import hmac
 import ipaddress
 import json
 import os
+import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import parse_qs
 
 import structlog
 
 from hal0.api import live_sockets
 from hal0.api.agents._auth import SESSION_COOKIE_NAME, verify_session_cookie
+from hal0.bridge.keys import KEY_PREFIX
 from hal0.comfyui.gate_version import GATE_USER_AGENT_PREFIX, GATE_VERSION_HEADER
 from hal0.config.network import bind_host, is_loopback_bind
 from hal0.security.exposure import AuthClass, classify
 
+if TYPE_CHECKING:
+    from hal0.bridge.store import BridgeStore
+
 log = structlog.get_logger(__name__)
 
-Tier = Literal["anon", "client", "admin"]
+Tier = Literal["anon", "client", "admin", "bridge"]
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
@@ -109,11 +129,18 @@ class AuthPrincipal:
     """The resolved identity of an in-flight request.
 
     ``source`` is diagnostic only (audit logging / debugging) -- never
-    used for authorization decisions, only ``tier`` is.
+    used for authorization decisions; ``tier`` is, and for a bridge
+    principal so is ``scopes``.
+
+    ``name`` and ``scopes`` are set for the ``bridge`` tier only: the bridge
+    client's name and the scopes it was granted (ADR-0043). Every other tier
+    leaves them empty.
     """
 
     tier: Tier
     source: str = "none"
+    name: str | None = None
+    scopes: frozenset[str] = frozenset()
 
 
 ANON: AuthPrincipal = AuthPrincipal(tier="anon", source="none")
@@ -306,6 +333,92 @@ def _config_trust_forwarded_for() -> bool | None:
 
 
 # ---------------------------------------------------------------------------
+# The bridge's own credential (ADR-0043) — see the module docstring.
+
+#: The MCP mount each bridge scope opens. ``agents`` needs no entry: every
+#: bridge client holds it, and the BRIDGE class (``/mcp/agents``,
+#: ``GET /api/bridge/me``) admits the tier itself.
+BRIDGE_SCOPE_PREFIXES: Mapping[str, str] = MappingProxyType(
+    {"memory": "/mcp/memory", "admin": "/mcp/admin"}
+)
+
+_bridge_store_lock = threading.Lock()
+_bridge_store_instance: BridgeStore | None = None
+_bridge_store_warned = False
+
+
+def bridge_store() -> BridgeStore:
+    """Return the process's bridge client store, opening it on first use.
+
+    Built from :func:`hal0.config.paths.bridge_db` and opened (created,
+    migrated, narrowed to 0600) once, then reused; rebuilt only when that path
+    changes (``HAL0_HOME`` moves between tests). Raises what
+    :meth:`~hal0.bridge.store.BridgeStore.open` raises; the auth path catches
+    it in :func:`_bridge_principal`. Thread-safe: the live-socket ticker
+    thread reaches it through :func:`_still_admitted`.
+    """
+    global _bridge_store_instance
+    from hal0.bridge import store as bridge_store_mod
+    from hal0.config import paths
+
+    path = paths.bridge_db()
+    with _bridge_store_lock:
+        current = _bridge_store_instance
+        if current is None or current.path != path:
+            current = bridge_store_mod.BridgeStore(path)
+            current.open()
+            _bridge_store_instance = current
+        return current
+
+
+def _bridge_principal(candidate: str) -> AuthPrincipal | None:
+    """Resolve a ``hal0bk_`` key to its bridge principal, or ``None``.
+
+    ``None`` for an unknown, revoked or rotated-out key, and also when the
+    store cannot be opened or read (an unwritable ``var_lib``, a damaged
+    file): the key then simply does not verify. That is logged once per
+    process at warning, and never fails the request.
+    """
+    global _bridge_store_warned
+    try:
+        row = bridge_store().verify_key(candidate)
+    except Exception as exc:  # deny by default; never 500 the auth gate
+        if not _bridge_store_warned:
+            _bridge_store_warned = True
+            log.warning("hal0.auth.bridge_store_unavailable", error=f"{type(exc).__name__}: {exc}")
+        return None
+    if row is None:
+        return None
+    return AuthPrincipal(tier="bridge", source="bearer", name=row.name, scopes=row.scopes)
+
+
+def bridge_scope_admits(path: str, principal: AuthPrincipal) -> bool:
+    """True iff ``path`` lies under the MCP mount of a scope ``principal`` holds.
+
+    Only a ``bridge`` principal is ever admitted. The match is boundary-safe
+    (``/mcp/memory2`` is not under ``/mcp/memory``), and a path with a ``.``
+    or ``..`` segment is refused outright rather than reasoned about.
+    """
+    if principal.tier != "bridge":
+        return False
+    if any(segment in (".", "..") for segment in path.split("/")):
+        return False
+    for scope_name in principal.scopes:
+        prefix = BRIDGE_SCOPE_PREFIXES.get(scope_name)
+        if prefix is not None and (path == prefix or path.startswith(prefix + "/")):
+            return True
+    return False
+
+
+def _bears_bridge_key(scope: dict[str, Any]) -> bool:
+    """True iff the request's bearer is shaped like a bridge key (no store read)."""
+    authorization = _headers_from_scope(scope).get("authorization", "")
+    return authorization[:7].lower() == "bearer " and authorization[7:].strip().startswith(
+        KEY_PREFIX
+    )
+
+
+# ---------------------------------------------------------------------------
 # Principal resolution (cookie -> bearer -> api_key)
 
 
@@ -343,6 +456,11 @@ def resolve_principal(scope: dict[str, Any]) -> AuthPrincipal:
     resolves to ``admin`` -- it's the operator's own browser dashboard
     session (:mod:`hal0.api.agents._auth` mints it and is the ONLY place
     that ever does; this module never mints its own cookie signature).
+
+    A bearer carrying the ``hal0bk_`` prefix is looked up in the bridge store
+    (ADR-0043) and, when it verifies, resolves to the ``bridge`` tier. One
+    that does not verify goes on to the box keys, which it cannot match, and
+    so ends ``anon``. The ``?api_key=`` fallback never accepts a bridge key.
     """
     headers = _headers_from_scope(scope)
 
@@ -354,7 +472,12 @@ def resolve_principal(scope: dict[str, Any]) -> AuthPrincipal:
 
     authorization = headers.get("authorization", "")
     if authorization[:7].lower() == "bearer ":
-        tier = _tier_for_key(authorization[7:].strip())
+        candidate = authorization[7:].strip()
+        if candidate.startswith(KEY_PREFIX):
+            bridge = _bridge_principal(candidate)
+            if bridge is not None:
+                return bridge
+        tier = _tier_for_key(candidate)
         if tier is not None:
             return AuthPrincipal(tier=tier, source="bearer")
 
@@ -612,6 +735,14 @@ def _decide(auth_class: AuthClass, principal: AuthPrincipal) -> tuple[bool, int,
             return True, 200, ""
         auth_class = AuthClass.ADMIN
 
+    if auth_class is AuthClass.BRIDGE:
+        # ADR-0043: a bridge client key, or the operator's admin credential.
+        if principal.tier in ("bridge", "admin"):
+            return True, 200, ""
+        code = "auth.required" if principal.tier == "anon" else "auth.forbidden"
+        status = 401 if principal.tier == "anon" else 403
+        return False, status, code
+
     if auth_class is AuthClass.CLIENT:
         if principal.tier in ("client", "admin"):
             return True, 200, ""
@@ -625,6 +756,41 @@ def _decide(auth_class: AuthClass, principal: AuthPrincipal) -> tuple[bool, int,
     code = "auth.required" if principal.tier == "anon" else "auth.forbidden"
     status = 401 if principal.tier == "anon" else 403
     return False, status, code
+
+
+def _verdict(auth_class: AuthClass, principal: AuthPrincipal, path: str) -> tuple[bool, int, str]:
+    """:func:`_decide`, with a bridge principal held to its scopes (ADR-0043).
+
+    Outside OPEN and BRIDGE, a bridge principal is admitted only on the MCP
+    mount of a scope it holds (:func:`bridge_scope_admits`) and refused with
+    403 everywhere else, whatever class the path has.
+    """
+    if principal.tier == "bridge" and auth_class not in (AuthClass.OPEN, AuthClass.BRIDGE):
+        if bridge_scope_admits(path, principal):
+            return True, 200, ""
+        return False, 403, "auth.forbidden"
+    return _decide(auth_class, principal)
+
+
+def _enforced_principal(auth_class: AuthClass, scope: dict[str, Any]) -> AuthPrincipal | None:
+    """The principal this request is judged as, or ``None`` when it rides the dev-open bypass.
+
+    The bypass (enforcement off and the posture-coupled ADMIN gate not in
+    effect) never applies to a BRIDGE-class request, and never to a bridge
+    key outside OPEN routes: a bridge key is held to its scopes whatever the
+    posture (ADR-0043). Otherwise the bypass is as before and resolves no
+    principal; only a bearer shaped like a bridge key costs a store read.
+    """
+    if (
+        auth_class is AuthClass.BRIDGE
+        or require_auth_enabled()
+        or _lan_admin_gate(auth_class, scope)
+    ):
+        return resolve_principal(scope)
+    if auth_class is AuthClass.OPEN or not _bears_bridge_key(scope):
+        return None
+    principal = resolve_principal(scope)
+    return principal if principal.tier == "bridge" else None
 
 
 def admin_gated(scope: Any) -> bool:
@@ -673,12 +839,14 @@ def _still_admitted(auth_class: AuthClass, scope: dict[str, Any]) -> bool:
     credential the request carried (a WebSocket or an open stream cannot
     change its cookie, bearer or ``api_key`` later), so a rotated key, a
     replaced session secret or an expired session revokes exactly the
-    sockets and streams it would refuse to open today. The Origin half is
-    not repeated: it cannot change for an open connection.
+    sockets and streams it would refuse to open today. A revoked bridge key
+    is caught the same way. The Origin half is not repeated: it cannot
+    change for an open connection.
     """
-    if not require_auth_enabled() and not _lan_admin_gate(auth_class, scope):
+    principal = _enforced_principal(auth_class, scope)
+    if principal is None:
         return True
-    allowed, _status, _code = _decide(auth_class, resolve_principal(scope))
+    allowed, _status, _code = _verdict(auth_class, principal, scope.get("path", "/"))
     return allowed
 
 
@@ -701,7 +869,10 @@ class AuthEnforcementMiddleware:
     posture-coupled ADMIN gate (:func:`_lan_admin_gate`, #1822): an
     ADMIN-classified request from a non-loopback peer against a
     non-loopback bind with an admin key already configured is enforced
-    even while the dev-open bypass is otherwise in effect.
+    even while the dev-open bypass is otherwise in effect. The bridge
+    credential (ADR-0043) is the other: a BRIDGE-class request, and any
+    request bearing a bridge key outside OPEN routes, is judged here at
+    every posture (:func:`_enforced_principal`).
     """
 
     def __init__(self, app: Any) -> None:
@@ -720,7 +891,8 @@ class AuthEnforcementMiddleware:
         method = scope.get("method", "GET") if scope_type == "http" else "GET"
         auth_class = classify(method, path)
 
-        if not require_auth_enabled() and not _lan_admin_gate(auth_class, scope):
+        principal = _enforced_principal(auth_class, scope)
+        if principal is None:
             await self.app(scope, receive, send)
             return
 
@@ -756,8 +928,7 @@ class AuthEnforcementMiddleware:
             await send({"type": "http.response.body", "body": payload})
             return
 
-        principal = resolve_principal(scope)
-        allowed, status, code = _decide(auth_class, principal)
+        allowed, status, code = _verdict(auth_class, principal, path)
 
         if allowed:
             if scope_type == "websocket":
@@ -798,6 +969,7 @@ class AuthEnforcementMiddleware:
             method=method,
             auth_class=auth_class.value,
             principal_tier=principal.tier,
+            bridge_client=principal.name,
             status=status,
         )
 
@@ -825,12 +997,15 @@ class AuthEnforcementMiddleware:
 
 __all__ = [
     "ANON",
+    "BRIDGE_SCOPE_PREFIXES",
     "GATE_SCOPE_KEY",
     "AuthEnforcementMiddleware",
     "AuthPrincipal",
     "Tier",
     "admin_gated",
     "admin_sign_in_required",
+    "bridge_scope_admits",
+    "bridge_store",
     "gate_path_refused_at",
     "has_admin_key",
     "require_auth_enabled",

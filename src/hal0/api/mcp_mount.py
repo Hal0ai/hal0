@@ -36,6 +36,9 @@ import structlog
 from starlette.requests import Request
 from starlette.types import ASGIApp
 
+from hal0.api.auth import resolve_principal_from_scope
+from hal0.service_identity import service_key
+
 log = structlog.get_logger("hal0.api.mcp_mount")
 
 # Header carrying the caller's agent identity (Bearer auth was removed;
@@ -174,10 +177,18 @@ def bearer_resolver() -> tuple[str | None, str]:
     that need the actual bearer for auth read element 0; nothing should
     ever treat element 1 as a credential. See :func:`_bearer_label` for
     why (issue: raw bearer stamped into journald as client_id).
+
+    A bridge client holding the ``admin`` scope (ADR-0043) gets the box's
+    own admin key as element 0, because its bridge key opens no ``/api/*``
+    route the admin tools call, and ``bridge:<name>`` as element 1, so the
+    audit trail names the client rather than the service key.
     """
     request = _current_mcp_request()
     if request is None:
         return None, "anonymous"
+    principal = resolve_principal_from_scope(request)
+    if principal.tier == "bridge" and "admin" in principal.scopes:
+        return service_key(prefer="admin"), f"bridge:{principal.name}"
     bearer = _resolve_bearer(request)
     return bearer, _bearer_label(bearer) if bearer else "anonymous"
 
@@ -199,10 +210,17 @@ def client_id_resolver() -> str:
     falls back to ``"anonymous"`` — the downstream namespace resolver then
     rejects a ``private`` write with no client_id rather than mis-scoping
     it.
+
+    A request carrying a bridge client key (ADR-0043) is the exception: its
+    identity is the client's name, bound to the key, and the header is
+    ignored, so a bridge client cannot write as another agent.
     """
     request = _current_mcp_request()
     if request is None:
         return "anonymous"
+    principal = resolve_principal_from_scope(request)
+    if principal.tier == "bridge" and principal.name:
+        return principal.name
     raw = request.headers.get(_AGENT_HEADER)
     if raw is None:
         return "anonymous"

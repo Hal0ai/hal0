@@ -28,6 +28,11 @@ Design (full rationale: ``hal0-specs/spec-kb1-auth.md``):
   route that can return secrets/config. **Unclassified paths fall back to
   ADMIN** — deny-by-default. A newly added router is locked out until a
   rule is added here (that's the whole point of the ratchet).
+- **BRIDGE** — the agent bridge's own surfaces (ADR-0043): the
+  ``/mcp/agents`` mount and ``GET /api/bridge/me``. A bridge client key or
+  the admin credential opens them; nothing else does, and the middleware
+  never lets one ride the dev-open bypass. A bridge key is held to its
+  scopes everywhere else (:func:`hal0.api.auth.bridge_scope_admits`).
 
 Ordering matters: rules are evaluated first-match-wins, so more specific
 rules (exact paths, narrow method sets) must precede the broader prefix
@@ -70,12 +75,13 @@ Matcher = Callable[[str], bool]
 
 
 class AuthClass(Enum):
-    """The four classes a route can resolve to. See module docstring."""
+    """The five classes a route can resolve to. See module docstring."""
 
     OPEN = "open"
     CLIENT = "client"
     ADMIN = "admin"
     BOOTSTRAP = "bootstrap"
+    BRIDGE = "bridge"
 
 
 def _exact(path: str) -> Matcher:
@@ -369,6 +375,10 @@ RULES: tuple[_Rule, ...] = (
         AuthClass.ADMIN,
         None,
     ),
+    # Agent bridge (ADR-0043): a bridge client may read only its own record;
+    # client management and delegated runs are the operator's.
+    _Rule("bridge: caller self-check", _exact("/api/bridge/me"), AuthClass.BRIDGE, _GET),
+    _Rule("bridge: clients and runs (operator)", _prefix("/api/bridge"), AuthClass.ADMIN, None),
     _Rule("mcp introspection", _prefix("/api/mcp"), AuthClass.ADMIN, None),
     _Rule("images cache", _prefix("/api/images"), AuthClass.ADMIN, None),
     _Rule("user layout", _prefix("/api/user"), AuthClass.ADMIN, None),
@@ -388,7 +398,10 @@ RULES: tuple[_Rule, ...] = (
     _Rule("events", _prefix("/api/events"), AuthClass.ADMIN, None),
     _Rule("activity", _prefix("/api/activity"), AuthClass.ADMIN, None),
     _Rule("journal", _prefix("/api/journal"), AuthClass.ADMIN, None),
-    # ── mcp raw JSON-RPC mounts (admin + memory tool servers) ──────────
+    # ── mcp raw JSON-RPC mounts (agents, admin + memory tool servers) ──
+    # The agents mount is the bridge's delegation surface (ADR-0043): a bridge
+    # client key or the admin credential, whatever the auth posture.
+    _Rule("mcp agents bridge mount", _prefix("/mcp/agents"), AuthClass.BRIDGE, None),
     # The memory mount is CLIENT, not ADMIN: it is the surface agents use
     # for their own long-term memory, its blast radius is bounded by the
     # fail-closed namespace ACL (memory/namespace.py) plus the approval

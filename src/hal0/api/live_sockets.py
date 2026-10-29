@@ -119,7 +119,8 @@ def track(still_authorized: Callable[[], bool]) -> Iterator[asyncio.Event]:
     loop state: read the credential state and the request's scope, nothing
     else. The middleware's predicate (``_still_admitted``) does only that:
     it reads ``os.environ``, the cached auth posture, the immutable scope
-    headers, query string and peer, and the session secret file.
+    headers, query string and peer, the session secret file and, for a
+    bridge key, ``bridge.db`` (one connection per call).
     """
     entry = _Entry(still_authorized=still_authorized, loop=asyncio.get_running_loop())
     with _lock:
