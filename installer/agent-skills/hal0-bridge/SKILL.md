@@ -33,9 +33,11 @@ After the block:
 1. **What was done.** A few sentences or short bullets of facts, with what you ran
    or checked and what it showed. Do not retell the task.
 2. **What awaits approval.** Each action the operator must allow in the hal0 inbox
-   (a command Hermes gated, a skill proposed with `agent_skill_put`), what it
-   unblocks, and that you cannot approve it yourself. Leave this out when nothing
-   is waiting.
+   (a command Hermes gated for this run), what it unblocks, and that you cannot
+   approve it yourself. Leave this out when nothing is waiting. You cannot
+   propose a skill yourself: `agent_skill_put` is a tool of the remote agent that
+   delegated to you, not one Hermes has. If a skill would help, say so under
+   `needs` and let the caller propose it.
 
 ## Questions
 

@@ -767,11 +767,16 @@ class BridgeService:
     # -- teach: skills -------------------------------------------------------------------
 
     def skills_list(self) -> list[dict[str, Any]]:
-        """Every skill in hal0's shipped mirror and the drop-in directory (see :class:`SkillLibrary`)."""
+        """Every skill in hal0's shipped mirror and the drop-in directory (see :class:`SkillLibrary`).
+
+        503 ``bridge.unavailable`` once the service is closed, like every teach call.
+        """
+        self._check_open()
         return self._skills.list()
 
     def skill_get(self, name: str) -> dict[str, Any]:
-        """One skill with its ``SKILL.md`` text and supporting file names."""
+        """One skill with its ``SKILL.md`` text and supporting file names (503 once closed)."""
+        self._check_open()
         return self._skills.get(name)
 
     async def skill_put(

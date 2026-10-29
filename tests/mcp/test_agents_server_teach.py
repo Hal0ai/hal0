@@ -304,7 +304,9 @@ async def test_agent_skill_put_returns_pending_approval(
     assert out["status"] == "pending_approval" and out["name"] == "forum-style"
     [entry] = queue.list_pending()
     assert entry["id"] == out["approval_id"] and entry["tool"] == "agent_skill_put"
-    assert entry["client_id"] == "bridge:cc" and entry["args"]["files"] == ["notes.md"]
+    assert entry["client_id"] == "bridge:cc"
+    assert entry["args"]["files"]["notes.md"]["content"] == "n\n"  # the card shows it whole
+    assert entry["args"]["preview_truncated"] is False
     assert not (dropin / "forum-style").exists()
 
     await queue.approve(entry["id"])
@@ -407,3 +409,38 @@ async def test_an_unexpected_failure_is_bridge_internal_without_its_text(
     with pytest.raises(Exception) as e:
         await server.call_tool("agent_memory_search", {"agent": "hermes", "query": "q"})
     assert "bridge.internal" in str(e.value) and "postgres" not in str(e.value)
+
+
+# -- every teach result is masked like a run text ------------------------------------------
+
+
+async def test_every_teach_result_passes_through_the_redactor(
+    svc: BridgeService, dispatcher: FakeDispatcher
+) -> None:
+    """memory_add, skill_put, skill_delete and capabilities results are masked like the rest."""
+    leaked = f"Authorization: Bearer {SECRET}"
+
+    class _Leaky:
+        async def memory_add(self, *_a: Any, **_kw: Any) -> dict[str, Any]:
+            return {"status": "ok", "id": leaked, "timestamp": "t"}
+
+        async def skill_put(self, *_a: Any, **_kw: Any) -> dict[str, Any]:
+            return {"status": "pending_approval", "approval_id": leaked, "name": "n"}
+
+        async def skill_delete(self, *_a: Any, **_kw: Any) -> dict[str, Any]:
+            return {"status": "pending_approval", "approval_id": leaked, "name": "n"}
+
+        async def capabilities(self, *_a: Any, **_kw: Any) -> dict[str, Any]:
+            return {"agent": "hermes", "api_server_version": leaked}
+
+    server = _server(_Leaky())
+    calls = [
+        ("agent_memory_add", {"agent": "hermes", "text": "t"}),
+        ("agent_skill_put", {"name": "n", "skill_md": "x"}),
+        ("agent_skill_delete", {"name": "n"}),
+        ("agent_capabilities", {"agent": "hermes"}),
+    ]
+    for tool, args in calls:
+        out = _payload(await server.call_tool(tool, args))
+        assert SECRET not in json.dumps(out), tool
+        assert "REDACTED" in json.dumps(out), tool

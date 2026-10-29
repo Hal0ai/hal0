@@ -68,8 +68,8 @@ def redact_value(value: Any) -> dict[str, Any]:
 
 # ── Line-level secret redaction (moved from hal0.mcp.admin) ─────────────────
 #
-# redact_config()/is_sensitive_key() above scrub STRUCTURED dict/list
-# trees by key NAME. Free-text log lines (journald output) have no key
+# redact_config() above (with is_sensitive_key, which lives in hal0.redaction
+# and is re-exported here) scrubs STRUCTURED dict/list trees by key NAME. Free-text log lines (journald output) have no key
 # shape to inspect, so this second helper scans the line's TEXT for
 # known secret-bearing shapes instead. It originated in hal0.mcp.admin
 # (security review MED-1, logs_tail) and lives here — not there — so

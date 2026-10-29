@@ -707,12 +707,12 @@ def _agents_tool_definitions() -> dict[str, Tool]:
         description=(
             "Remember a note for a Hermes agent. agent is 'hermes' (the default profile), "
             "'hermes/<profile>', or 'shared' (the box's shared memory). The note is stored in "
-            "that agent's own private memory, which hal0 picks, not you, and is tagged "
-            "source:bridge:<your client name> along with any tags you pass, except tags that "
-            "start with agent:, visibility:, project: or source:bridge: (hal0 owns those, so "
-            "they are dropped). Returns {status, id, timestamp}. Refused with "
-            "bridge.unknown_agent for any other agent and bridge.memory_disabled when the box "
-            "runs no memory."
+            "that agent's own private memory, or in the shared memory for 'shared'; hal0 picks "
+            "the namespace, not you. It is tagged source:bridge:<your client name> along with "
+            "any tags you pass, except tags that start with agent:, visibility:, project: or "
+            "source:bridge: (hal0 owns those, so they are dropped). Returns {status, id, "
+            "timestamp}. Refused with bridge.unknown_agent for any other agent and "
+            "bridge.memory_disabled when the box runs no memory."
         ),
         annotations=_ANNOTATIONS["agent_memory_add"],
     )
@@ -721,15 +721,16 @@ def _agents_tool_definitions() -> dict[str, Tool]:
         agent: str, text: str, tags: list[str] | None = None, ctx: ToolContext | None = None
     ) -> dict[str, Any]:
         caller, service = _context(ctx)
-        return await service.memory_add(caller, agent=agent, text=text, tags=tags)
+        return _cleaned(await service.memory_add(caller, agent=agent, text=text, tags=tags))
 
     @server.tool(
         name="agent_memory_search",
         description=(
             "Search what a Hermes agent remembers. agent is 'hermes', 'hermes/<profile>' (its "
             "own private memory and the shared memory) or 'shared' (the shared memory and any "
-            "private memory filed under your own client name). limit is 1 to 50 (default 10). Returns {status, results}. A text over 16 KiB is cut and "
-            "the result then carries truncated: true."
+            "private memory filed under your own client name). limit is 1 to 50 (default 10). "
+            "Returns {status, results}. A text over 16 KiB is cut and the result then carries "
+            "truncated: true."
         ),
         annotations=_ANNOTATIONS["agent_memory_search"],
     )
@@ -747,7 +748,7 @@ def _agents_tool_definitions() -> dict[str, Tool]:
             "List the skills Hermes loads: hal0's shipped skills (source 'shipped', read-only) "
             "and the operator's drop-in skills (source 'dropin'; the ones you add with "
             "agent_skill_put). Returns {skills: [{name, source, category, description, mtime, "
-            "files}]}."
+            "files, broken}]}; broken is true for a skill whose frontmatter cannot be read."
         ),
         annotations=_ANNOTATIONS["agent_skills_list"],
     )
@@ -776,9 +777,11 @@ def _agents_tool_definitions() -> dict[str, Tool]:
             "Propose a skill for Hermes: create or replace the drop-in skill name (lowercase "
             "letters, digits and hyphens). skill_md is the whole SKILL.md and must start with a "
             "frontmatter block holding name (the same name) and description; files maps "
-            "supporting file names (no paths) to text (at most 16 files, 256 KiB each). It is "
-            "checked at once (bridge.skill_invalid), but nothing is written until the operator "
-            "approves it in the hal0 inbox. Returns {status: 'pending_approval', approval_id, "
+            "supporting file names (no paths) to text. The operator reads the whole push on "
+            "the inbox card, so it must be reviewable UTF-8 text: SKILL.md at most 16 KiB, "
+            "everything at most 48 KiB, at most 16 files. It is checked at once "
+            "(bridge.skill_invalid), but nothing is written until the operator approves it "
+            "in the hal0 inbox. Returns {status: 'pending_approval', approval_id, "
             "name}; pushing the same skill again is the same inbox row, and an edited push "
             "replaces your own pending one. Another client's pending change to that skill is "
             "bridge.skill_pending_elsewhere, and more than 8 changes of yours waiting in the "
@@ -795,7 +798,7 @@ def _agents_tool_definitions() -> dict[str, Tool]:
         ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
         caller, service = _context(ctx)
-        return await service.skill_put(caller, name=name, skill_md=skill_md, files=files)
+        return _cleaned(await service.skill_put(caller, name=name, skill_md=skill_md, files=files))
 
     @server.tool(
         name="agent_skill_delete",
@@ -810,7 +813,7 @@ def _agents_tool_definitions() -> dict[str, Tool]:
     @_guarded
     async def agent_skill_delete(name: str, ctx: ToolContext | None = None) -> dict[str, Any]:
         caller, service = _context(ctx)
-        return await service.skill_delete(caller, name=name)
+        return _cleaned(await service.skill_delete(caller, name=name))
 
     @server.tool(
         name="agent_capabilities",
@@ -819,13 +822,15 @@ def _agents_tool_definitions() -> dict[str, Tool]:
             "{agent, profile, api_server_version, model_aliases: {alias: {model, provider}}, "
             "toolsets_enabled, toolsets_disabled, mcp_servers (names only), skills_dirs, "
             "platforms_enabled, approvals_mode}. agent is 'hermes' or 'hermes/<profile>'. "
-            "api_server_version is null when Hermes is not answering."
+            "Each field is what that profile's own config.yaml sets; null means the file does "
+            "not set it, so Hermes uses its built-in default. api_server_version is null when "
+            "Hermes is not answering."
         ),
         annotations=_ANNOTATIONS["agent_capabilities"],
     )
     @_guarded
     async def agent_capabilities(agent: str, ctx: ToolContext | None = None) -> dict[str, Any]:
         _, service = _context(ctx)
-        return await service.capabilities(agent)
+        return _cleaned(await service.capabilities(agent))
 
     return {tool.name: tool for tool in server._tool_manager.list_tools()}

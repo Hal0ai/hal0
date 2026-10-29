@@ -859,6 +859,12 @@ async def test_teach_writes_after_close_are_unavailable(
     with pytest.raises(BridgeError) as e:
         await svc.capabilities("hermes")
     assert e.value.code == "bridge.unavailable"
+    with pytest.raises(BridgeError) as e:  # reads too: a closed service answers nothing
+        svc.skills_list()
+    assert e.value.code == "bridge.unavailable"
+    with pytest.raises(BridgeError) as e:
+        svc.skill_get("forum-style")
+    assert e.value.code == "bridge.unavailable"
 
 
 # -- capabilities ----------------------------------------------------------------------------
