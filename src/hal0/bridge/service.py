@@ -191,8 +191,18 @@ _HIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Co", "Cn", "Zl", "Zp"})
 _SHOWN_CONTROLS = frozenset("\t\n\r")
 #: Invisible marks outside those categories: the variation selectors (U+FE00-U+FE0F,
 #: U+E0100-U+E01EF), which change how the character before them is drawn and show
-#: nothing themselves, and the combining grapheme joiner (U+034F).
-_INVISIBLE_MARKS = ((0xFE00, 0xFE0F), (0xE0100, 0xE01EF), (0x034F, 0x034F))
+#: nothing themselves, the combining grapheme joiner (U+034F), the Mongolian free
+#: variation selectors (U+180B-U+180D) and the blank Hangul fillers (U+115F, U+1160,
+#: U+3164, U+FFA0).
+_INVISIBLE_MARKS = (
+    (0xFE00, 0xFE0F),
+    (0xE0100, 0xE01EF),
+    (0x034F, 0x034F),
+    (0x180B, 0x180D),  # Mongolian free variation selectors (Mn)
+    (0x115F, 0x1160),  # Hangul choseong / jungseong fillers (Lo, blank)
+    (0x3164, 0x3164),  # Hangul filler (Lo, blank)
+    (0xFFA0, 0xFFA0),  # halfwidth Hangul filler (Lo, blank)
+)
 _HIDDEN_TEXT_KINDS = "control, format or invisible characters"
 
 #: A value a skill may show where the log redactor would mask a secret: it names one
