@@ -47,8 +47,8 @@ What it cannot do is admit a second caller of its own:
    `anon | client | admin` (`Tier` in `src/hal0/api/auth.py`). A bearer is
    compared with `hmac.compare_digest` (same file) against two values,
    `HAL0_ADMIN_KEY` and `HAL0_CLIENT_KEY` (`_KEY_ENV` in
-   `src/hal0/service_identity.py`). No store holds more than one key per tier. The agent tier ADR-0024 proposes was never
-   built.
+   `src/hal0/service_identity.py`). No store holds more than one key per tier.
+   The agent tier ADR-0024 proposes was never built.
 2. **The MCP mounts are classified for the box's own agents.** `/mcp/memory`
    is CLIENT and every other `/mcp` path is ADMIN
    (`src/hal0/security/exposure.py:400-401`); anything unclassified is ADMIN
@@ -110,7 +110,8 @@ ADR-0035 was verified against), shapes the answer:
    require_auth` off, and from loopback. This is the precedent of ADR-0040
    (the ComfyUI gate's own credential) applied to a surface that must not
    open as a side effect of the trusted-LAN default. A `bridge` principal is
-   refused everywhere else.
+   refused everywhere except the scope-gated `/mcp/memory` and `/mcp/admin`
+   mounts (Decision 4).
 4. **Scopes decide which MCP servers a key opens.** A client carries a subset
    of `{agents, memory, admin}`. `agents` is held by every client; the default
    is `agents,memory`; `admin` is granted only when asked for.
@@ -149,13 +150,15 @@ ADR-0035 was verified against), shapes the answer:
 7. **`hal0 doctor all` carries a `bridge-store` row.** It reports whether
    `bridge.db` is present, owner-only (`0600`, owned by the service user),
    migrated to the schema this build ships, and how many clients it holds.
-   It reads the file and never creates, migrates or re-permissions it. The row
-   is advisory: a broken store only stops bridge keys from authenticating.
-8. **`hal0-agents` is the bridge's MCP server.** It is mounted at
-   `/mcp/agents` (client URL `/mcp/agents/mcp`), built once like the other two,
-   and added to `BUNDLED_SERVER_IDS`. Hermes's keys stay in hal0-api's process
-   environment; the server forwards with the keys hal0 already holds and
-   never hands one to a caller.
+   It opens the file read-only and never creates, migrates or re-permissions
+   `bridge.db`; SQLite may leave the `-wal` and `-shm` siblings of a database
+   it reads, and those have permission rows too. The row is advisory: a broken
+   store only stops bridge keys from authenticating.
+8. **`hal0-agents` is the bridge's MCP server (a later change on this ADR).**
+   It is mounted at `/mcp/agents` (client URL `/mcp/agents/mcp`), built once
+   like the other two, and added to `BUNDLED_SERVER_IDS`. Hermes's keys stay in
+   hal0-api's process environment; the server forwards with the keys hal0
+   already holds and never hands one to a caller.
 9. **Run tools (a later change on this ADR).** Agents are listed with their
    kind and health; a run is started on a Hermes profile (`hermes` is the
    default profile, `hermes/<profile>` a named one), waited for, polled,
@@ -164,8 +167,8 @@ ADR-0035 was verified against), shapes the answer:
    close them off:
    - There is **no approve tool**. A gated action needs a human click
      (ADR-0004). An `approval.request` from a run is mirrored into the existing
-     inbox, which grants `once` or denies; `session` and `always` are Hermes-side
-     allowlist decisions an operator makes in Hermes.
+     inbox, which grants `once` or denies; `session` and `always` are
+     Hermes-side allowlist decisions an operator makes in Hermes.
    - A **clarification question goes to the delegating client**, not the
      inbox: the question is for the agent that asked. The client answers it
      with a tool, and a run whose question stays unanswered for
@@ -196,10 +199,10 @@ ADR-0035 was verified against), shapes the answer:
   LAN today and is rejected. The key is one shared secret per profile and is
   the key hal0 itself uses, which ADR-0035 keeps out of every file hal0 writes,
   so handing it out copies it to another machine, and revoking one caller
-  becomes a rotation for the whole gateway. Two callers with one key see and stop each
-  other's runs. A run waiting on an approval or an answer is stuck unless
-  someone watches its event stream. Teaching is not on that API. And nothing
-  would appear in the dashboard, the dock or `hal0 doctor`.
+  becomes a rotation for the whole gateway. Two callers with one key see and
+  stop each other's runs. A run waiting on an approval or an answer is stuck
+  unless someone watches its event stream. Teaching is not on that API. And
+  nothing would appear in the dashboard, the dock or `hal0 doctor`.
 - **Hermes's A2A plugin as the first step.** It is the right answer for agent
   frameworks calling Hermes and for Hermes-to-Hermes across machines, and the
   wrong first step here: inbound tasks are framed as untrusted peer input,
