@@ -1036,3 +1036,105 @@ async def test_a_secret_split_over_three_events_is_masked_when_paged_one_by_one(
     flat = "".join(shown)
     assert "q7ZpL0xV9m" not in flat and "T2wR8sK4nB6cD1" not in flat
     assert shown[0] == "Use Authorization: Bearer " and shown[2].endswith(" to call it.")
+
+
+# -- the live edge: a token's head before the rest is stored (NB#2 on the PR 3 fix wave) --
+
+
+def _edge_page(*texts: str, after: list[dict[str, Any]] | None = None) -> type[_Recorder]:
+    """A service whose events page is ``texts``; ``after`` None is the live edge."""
+    events = [_text_event(n + 1, text) for n, text in enumerate(texts)]
+
+    class _Page(_Recorder):
+        async def run_events_window(self, *_a: Any, **_kw: Any) -> Any:
+            return [], events, after
+
+    return _Page
+
+
+async def _shown(service: type[_Recorder]) -> list[str]:
+    page = _payload(await _server(service(), CC).call_tool("agent_run_events", {"run_id": "r"}))
+    return [e["payload"]["text"] for e in page["events"]]
+
+
+async def test_a_token_cut_off_at_the_live_edge_is_masked_from_its_prefix() -> None:
+    """The page ends after ``ghp_A1b2C3``: 20+ characters would be masked, 6 were not."""
+    shown = await _shown(_edge_page("Here it is, gh", "p_A1b2C3"))
+    assert "A1b2C3" not in "".join(shown) and "p_A1" not in "".join(shown)
+    assert shown[0] == "Here it is, ***REDACTED***" and shown[1] == "***REDACTED***"
+
+    # following with since_seq=last_seq, the rest arrives with the head as left context
+    class _Next(_Recorder):
+        async def run_events_window(self, *_a: Any, **_kw: Any) -> Any:
+            before = [_text_event(1, "Here it is, gh"), _text_event(2, "p_A1b2C3")]
+            return before, [_text_event(3, "D4e5F6g7H8i9J0k1L2m3 and more")], None
+
+    [rest] = await _shown(_Next)
+    assert rest == "***REDACTED*** and more"
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        "hf_Ab12",
+        "sk-Ab12",
+        "ghp_Ab12",
+        "gho_Ab12",
+        "github_pat_Ab12",
+        "xoxb-12",
+        "hal0bk_cc.Ab12",
+        "hal0bk_c",
+        "AKIA12AB",
+        "ghp_",
+    ],
+)
+async def test_every_known_prefix_is_masked_at_the_live_edge(head: str) -> None:
+    [shown] = await _shown(_edge_page(f"I got ({head}"))
+    assert shown == "I got (***REDACTED***"
+
+
+@pytest.mark.parametrize(
+    "prose",
+    ["We call it state-of-the-", "the snake_", "a low-risk-", "ask-", "my_task_", "sk"],
+)
+async def test_a_page_ending_in_ordinary_prose_is_untouched_at_the_live_edge(prose: str) -> None:
+    assert await _shown(_edge_page(prose)) == [prose]
+
+
+async def test_a_prefix_not_at_the_tail_is_left_to_the_existing_rule() -> None:
+    whole = "ghp_" + "Q" * 24
+    shown = await _shown(_edge_page(f"use {whole} then ghp_short, done"))
+    assert shown == ["use ***REDACTED*** then ghp_short, done"]  # only the whole token
+
+
+@pytest.mark.parametrize(
+    "after",
+    [[], [_text_event(3, " is all.")]],
+    ids=["closed-by-another-event", "text-stored-after"],
+)
+async def test_away_from_the_live_edge_a_short_token_head_is_text(
+    after: list[dict[str, Any]],
+) -> None:
+    """With events stored after the page, its last text run is closed: nothing to guess."""
+    assert await _shown(_edge_page("see ghp_A1b2C3", after=after)) == ["see ghp_A1b2C3"]
+
+
+async def test_a_wait_tail_is_the_live_edge() -> None:
+    view = {
+        "run_id": "run_1",
+        "status": "running",
+        "last_seq": 2,
+        "events_tail": [_text_event(2, "it is hf_A1b2")],
+        "timed_out": True,
+    }
+
+    class _Wait(_Recorder):
+        async def events_before(self, *_a: Any, **_kw: Any) -> Any:
+            return []
+
+    out = _payload(
+        await _server(_Wait(view), CC).call_tool(
+            "agent_run_wait", {"run_id": "run_1", "timeout_s": 1}
+        )
+    )
+    assert out["events_tail"][0]["payload"]["text"] == "it is ***REDACTED***"

@@ -1086,6 +1086,21 @@ async def test_run_events_pages_the_ledger(
     assert [e["seq"] for e in later] == [3]
 
 
+async def test_an_events_window_says_when_it_ends_at_the_live_edge(
+    svc: BridgeService, planner: Planner, cc: Caller
+) -> None:
+    """``after`` is None only when nothing is stored past the window (NB#2: no right context)."""
+    planner.plan(frames=_plain)  # message.text, tool.started, message.text, run.completed
+    v = await svc.start_run(cc, agent="hermes", input="x")
+    await svc.wait_run(cc, v["run_id"], timeout_s=5)
+    _before, page, after = await svc.run_events_window(cc, v["run_id"], since_seq=0, limit=1)
+    assert [e["seq"] for e in page] == [1] and after == []  # closed by tool.started
+    _before, page, after = await svc.run_events_window(cc, v["run_id"], since_seq=2, limit=1)
+    assert [e["seq"] for e in page] == [3] and after == []  # run.completed follows
+    _before, page, after = await svc.run_events_window(cc, v["run_id"], since_seq=3, limit=1)
+    assert [e["seq"] for e in page] == [4] and after is None  # the newest stored event
+
+
 # -- restart -----------------------------------------------------------------------------
 
 
@@ -1283,13 +1298,16 @@ async def test_an_outstanding_stop_is_delivered_after_a_restart(
     assert len(_posts(fake, "/stop")) == 1
 
 
+@pytest.mark.parametrize(("status", "code"), [(404, "run_not_found"), (409, "run_not_running")])
 async def test_a_stop_hermes_refuses_as_not_needed_clears_the_marker(
     store: BridgeStore,
     fake: FakeHermes,
     svc_factory: SvcFactory,
     monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    code: str,
 ) -> None:
-    """A 4xx (the run is gone or already ending) is final: nothing is left to stop."""
+    """404 (the run is gone) and 409 (it is already ending) are final: nothing is left to stop."""
     from hal0.bridge.hermes_client import HermesRefused
 
     rid = fake.seed_run("run_ending", statuses=("running",), frames=[])
@@ -1299,12 +1317,51 @@ async def test_a_stop_hermes_refuses_as_not_needed_clears_the_marker(
 
     async def refuse(profile: str, run_id: str) -> dict[str, Any]:
         calls.append(run_id)
-        raise HermesRefused(409, "run_not_running", "the run is already ending")
+        raise HermesRefused(status, code, "nothing to stop")
 
     monkeypatch.setattr(svc._gateway, "stop", refuse)
     assert await svc.reattach() == 1
     row = await _until(svc, store, rid, lambda r: r.pending_stop is None)
-    assert row.pending_stop is None and calls == [rid]
+    assert row.pending_stop is None and calls == [rid]  # cleared at once, no retry
+
+
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [(429, "rate_limited"), (401, None), (403, "forbidden"), (400, "bad_request")],
+)
+async def test_a_stop_refused_with_any_other_4xx_is_retried_until_hermes_takes_it(
+    store: BridgeStore,
+    fake: FakeHermes,
+    svc_factory: SvcFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    code: str | None,
+) -> None:
+    """After a 401 or 403 (a rotated key) or a 429 the run is still going in Hermes.
+
+    Such a refusal cleared the marker as "nothing left to stop" and the run stayed
+    ``stopping`` with no retry. It is retried like a 5xx; the marker clears only
+    once Hermes takes the stop.
+    """
+    from hal0.bridge.hermes_client import HermesRefused
+
+    rid = fake.seed_run("run_refused", statuses=("running",), frames=[])
+    store.insert_run(_live_row(rid, status="stopping", last_seq=0, pending_stop=1.0))
+    svc = svc_factory()
+    marker_at_post: list[float | None] = []
+
+    async def refuse_then_take(profile: str, run_id: str) -> dict[str, Any]:
+        row = store.get_run(run_id)
+        marker_at_post.append(None if row is None else row.pending_stop)
+        if len(marker_at_post) == 1:
+            raise HermesRefused(status, code, "not now")
+        return {"run_id": run_id, "status": "stopping"}  # Hermes takes it (200)
+
+    monkeypatch.setattr(svc._gateway, "stop", refuse_then_take)
+    assert await svc.reattach() == 1
+    row = await _until(svc, store, rid, lambda r: r.pending_stop is None)
+    assert marker_at_post == [1.0, 1.0]  # still marked when the stop was posted again
+    assert row.pending_stop is None
 
 
 def _watch_tasks(run_id: str) -> list[asyncio.Task[Any]]:

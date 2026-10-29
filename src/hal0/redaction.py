@@ -802,6 +802,16 @@ def _mask_quoted_values(pattern: re.Pattern[str], line: str, log: bool) -> str:
     return "".join(out)
 
 
+# Well-known token prefixes and the characters a token is made of: the one table
+# the shape rules below and :func:`token_head_at_end` (the agent bridge's live edge)
+# both read. ui/src/sentry.ts and installer/lib/failure-report.sh mirror the
+# generic prefixes as one literal pattern.
+_BRIDGE_KEY_PREFIX: Final[str] = "hal0bk_"
+_TOKEN_PREFIX: Final[str] = r"(?:hf_|sk-|gh[pousr]_|github_pat_|xox[baprs]-)"
+_TOKEN_BODY: Final[str] = r"[A-Za-z0-9_-]"
+_AWS_KEY_PREFIX: Final[str] = "AKIA"
+_AWS_KEY_BODY: Final[str] = r"[0-9A-Z]"
+
 # A shape rule: ``rule(line, log)``, ``log`` as in :func:`_starts_secret`.
 _Rule = Callable[[str, bool], str]
 
@@ -882,12 +892,47 @@ _SHAPE_RULES_AFTER: Final[tuple[_Rule, ...]] = (
     # A minted agent-bridge key, ``hal0bk_<client>.<token>`` (ADR-0043), bare
     # or quoted; before the generic prefixes, so a ``sk-`` inside the token
     # cannot leave its head unmasked.
-    _sub_rule(re.compile(r"hal0bk_[a-z0-9_-]+\.[A-Za-z0-9_-]{20,}"), MASK),
-    _sub_rule(
-        re.compile(r"(?:hf_|sk-|gh[pousr]_|github_pat_|xox[baprs]-)[A-Za-z0-9_-]{20,}"), MASK
-    ),
-    _sub_rule(re.compile(r"AKIA[0-9A-Z]{16}"), MASK),
+    _sub_rule(re.compile(_BRIDGE_KEY_PREFIX + r"[a-z0-9_-]+\." + _TOKEN_BODY + "{20,}"), MASK),
+    _sub_rule(re.compile(_TOKEN_PREFIX + _TOKEN_BODY + "{20,}"), MASK),
+    _sub_rule(re.compile(_AWS_KEY_PREFIX + _AWS_KEY_BODY + "{16}"), MASK),
 )
+
+#: Each fixed token prefix above, not preceded by a letter or digit, with the
+#: characters its token is made of (a bridge key's include the ``.`` between client
+#: and token), for :func:`token_head_at_end`. Every prefix is spelled in its own
+#: body's characters, which is what keeps that function linear.
+_TOKEN_HEADS: Final[tuple[tuple[re.Pattern[str], re.Pattern[str]], ...]] = tuple(
+    (re.compile(r"(?<![A-Za-z0-9])" + prefix), re.compile(body + "*"))
+    for prefix, body in (
+        (_BRIDGE_KEY_PREFIX, r"[A-Za-z0-9_.-]"),
+        (_TOKEN_PREFIX, _TOKEN_BODY),
+        (_AWS_KEY_PREFIX, _AWS_KEY_BODY),
+    )
+)
+
+
+def token_head_at_end(text: str) -> int | None:
+    """Where a well-known token that runs to the very end of ``text`` starts, else None.
+
+    That is a fixed prefix of the shape rules (``hal0bk_``, ``hf_``, ``sk-``,
+    ``ghp_`` and the other GitHub prefixes, ``github_pat_``, the Slack ``xox?-``
+    prefixes, ``AKIA``), not preceded by a letter or digit, followed by any run of
+    its token's characters (none included) that reaches the end. The shape rules
+    mask such a token only once it is whole (20 or more characters after the
+    prefix, 16 for ``AKIA``); text read at a stream's live edge can stop short of
+    that, so the agent bridge masks it from here to the end (:mod:`hal0.mcp.agents`).
+
+    Linear in the text: a match lies inside the trailing run of its body's
+    characters, so each prefix is searched for only there.
+    """
+    backwards = text[::-1]
+    starts: list[int] = []
+    for prefix, body in _TOKEN_HEADS:
+        run = body.match(backwards)
+        found = prefix.search(text, len(text) - (run.end() if run is not None else 0))
+        if found is not None:
+            starts.append(found.start())
+    return min(starts, default=None)
 
 
 def _is_secret_name(name: str) -> bool:
@@ -1391,4 +1436,5 @@ __all__ = [
     "redact_secret_shapes",
     "redact_shareable_text",
     "redact_text_tree",
+    "token_head_at_end",
 ]

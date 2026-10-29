@@ -122,6 +122,10 @@ _BUS_FOR_STATUS: dict[str, tuple[str, str]] = {
 _FORGOTTEN = "Hermes no longer knows this run"
 _MAX_ERROR_TEXT = 2000
 
+#: Hermes's answers to a stop that leave nothing to stop: 404 (the run is gone) and
+#: 409 (it is no longer running). Any other refusal is retried (``_deliver_stop``).
+_STOP_FINAL: frozenset[int] = frozenset({404, 409})
+
 Decide = Callable[[RunRow], dict[str, Any]]
 
 
@@ -1021,9 +1025,13 @@ class RunWatcher:
     async def _deliver_stop(self, tail: _Tail) -> None:
         """Post the stop until Hermes takes it, then clear ``pending_stop``.
 
-        A transient failure (Hermes unreachable, a 5xx) is retried with the
-        reconnect backoff. Hermes refusing with a 4xx (the run is gone, or no longer
-        running) is final too: there is nothing left to stop.
+        Only a definitive answer ends it: Hermes taking the stop, or refusing it
+        with :data:`_STOP_FINAL` (404, the run is gone; 409, it is no longer
+        running), when there is nothing left to stop. Every other failure is
+        retried with the reconnect backoff until the run ends (the watcher's
+        give-up included) or the watcher stops: Hermes unreachable, a 5xx, and
+        every other 4xx, since after a 401 or 403 (hal0's key rotated) or a 429 the
+        run is still going in Hermes.
         """
         attempt = 0
         backoff = self._timing.backoff_s
@@ -1031,7 +1039,7 @@ class RunWatcher:
             try:
                 await self._gateway.stop(tail.profile, tail.run_id)
             except HermesRefused as exc:
-                if 400 <= exc.hermes_status < 500:
+                if exc.hermes_status in _STOP_FINAL:
                     log.info("bridge.stop_not_needed", run_id=tail.run_id, error=exc.message)
                     break
                 log.warning("bridge.stop_failed", run_id=tail.run_id, error=exc.message)

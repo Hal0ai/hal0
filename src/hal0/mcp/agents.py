@@ -79,7 +79,10 @@ masked as one text, together with the stored ``message.text`` run just outside
 the window on each side (before ``since_seq``, after the page, before a wait's
 tail; up to 8192 characters each), and each event then shows its own part of
 the masked text: a secret is masked whichever events, or pages, it is split
-over.
+over. At the live edge (a page that ends at the newest stored event, and a
+wait's tail) there is no right context and the rest of a token may not be
+stored yet, so a known token prefix (:func:`hal0.redaction.token_head_at_end`)
+whose characters run to the end of the text is masked through the end.
 
 ``output`` is paged rather than lost (:mod:`hal0.bridge.output`): a view shows
 the 16 KiB window of the masked text that ``agent_run_status``'s ``offset``
@@ -116,7 +119,7 @@ from hal0.bridge.caller import Caller
 from hal0.bridge.errors import BridgeError
 from hal0.bridge.output import OUTPUT_WINDOW_BYTES, output_window
 from hal0.mcp._binding import BoundFastMCP, ToolContext, bound_server
-from hal0.redaction import MASK, redact_log_line
+from hal0.redaction import MASK, redact_log_line, token_head_at_end
 
 if TYPE_CHECKING:
     from hal0.bridge.service import BridgeService
@@ -268,14 +271,29 @@ def _masked_spans(original: str, masked: str) -> list[tuple[int, int]]:
     return [(head, max(head + 1, len(original) - tail))]
 
 
-def _mask_run(texts: list[str]) -> list[str]:
+def _merged(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """``spans`` sorted, with overlapping or touching spans joined into one."""
+    out: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if out and start <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], end))
+        else:
+            out.append((start, end))
+    return out
+
+
+def _mask_run(texts: list[str], *, at_edge: bool = False) -> list[str]:
     """``texts`` masked as one string, each given back its own part of the result.
 
     A span that covers part of a text becomes one MASK in it; a text wholly inside a
-    span becomes MASK.
+    span becomes MASK. ``at_edge`` says the joined text ends at the newest stored
+    event: a token the redactor would mask only once it is whole is masked from
+    its known prefix to the end (:func:`~hal0.redaction.token_head_at_end`).
     """
     joined = "".join(texts)
     spans = _masked_spans(joined, redact_log_line(joined))
+    if at_edge and (head := token_head_at_end(joined)) is not None:
+        spans = _merged([*spans, (head, len(joined))])
     if not spans:
         return list(texts)
     out: list[str] = []
@@ -309,7 +327,12 @@ def _clean_events(
     ``after`` (the stored ``message.text`` runs just outside the window, oldest
     first, from :meth:`BridgeService.run_events_window`); then every event goes
     through :func:`_clean_tree` as before. True when any text was cut.
+
+    ``after`` is None when nothing is stored after the window (the live edge; a
+    wait's tail always is): a last run that reaches the end of the window is then
+    masked ``at_edge``, since the rest of a token in it may not be stored yet.
     """
+    at_edge = after is None
     left_context = [t for t in map(_text_of, before or []) if t is not None]
     right_context = [t for t in map(_text_of, after or []) if t is not None]
     texts = [_text_of(event) for event in events]
@@ -325,7 +348,7 @@ def _clean_events(
         group = [t for t in texts[index:stop] if t is not None]
         left = left_context if index == 0 else []
         right = right_context if stop == len(events) else []
-        masked = _mask_run([*left, *group, *right])
+        masked = _mask_run([*left, *group, *right], at_edge=at_edge and stop == len(events))
         masked = masked[len(left) : len(masked) - len(right)]
         for offset, text in enumerate(masked):
             rewritten[index + offset] = text
@@ -350,7 +373,8 @@ def _view(
     ``input_preview``, the ``pending`` request (a clarification's question or an
     approval's command) and ``events_tail`` of a wait go through :func:`_clean`,
     the tail's streamed text masked across events (:func:`_clean_events`, with
-    ``tail_before``, the stored text run just before the tail).
+    ``tail_before``, the stored text run just before the tail, and as the live
+    edge: the tail is the newest events stored).
     ``truncated`` is true when any text was cut or more output follows; ``more``
     names the call that reads the next window of the output.
     """
