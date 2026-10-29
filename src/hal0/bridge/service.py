@@ -34,8 +34,7 @@ import math
 import re
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -47,6 +46,7 @@ from hal0.agents.hermes_api import (
     profile_health,
     served_profiles,
 )
+from hal0.bridge.caller import Caller
 from hal0.bridge.errors import BridgeError
 from hal0.bridge.hermes_client import HermesGateway, HermesRefused, HermesUnavailable
 from hal0.bridge.store import TERMINAL_STATUSES, BridgeStore, RunRow
@@ -60,7 +60,6 @@ from hal0.bridge.watcher import (
 from hal0.config.schema import BridgeConfig
 
 if TYPE_CHECKING:
-    from hal0.api.auth import AuthPrincipal
     from hal0.events import EventBus
     from hal0.mcp.approval_queue import ApprovalQueue
 
@@ -104,25 +103,6 @@ _VIEW_KEYS = (
     "pending",
     "last_seq",
 )
-
-
-@dataclass(frozen=True)
-class Caller:
-    """Who is asking: a bridge client by name, or the admin key (``name="admin"``)."""
-
-    tier: Literal["bridge", "admin"]
-    name: str
-
-    @classmethod
-    def from_principal(cls, principal: AuthPrincipal) -> Caller:
-        """The caller an authenticated principal acts as; other tiers get 403 ``auth.forbidden``."""
-        if principal.tier == "admin":
-            return cls("admin", "admin")
-        if principal.tier == "bridge" and principal.name:
-            return cls("bridge", principal.name)
-        raise BridgeError(
-            "auth.forbidden", "the agent bridge needs a bridge key or the admin key", status=403
-        )
 
 
 def clamp_wait(timeout_s: float) -> float:

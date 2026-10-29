@@ -61,7 +61,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import structlog
 from fastapi import APIRouter, Depends, Header, Query, Request
@@ -71,13 +71,16 @@ from pydantic import BaseModel, ConfigDict
 from hal0.api import live_sockets
 from hal0.api.auth import bridge_enabled, judged_principal
 from hal0.api.routes.config import api_base_url
+from hal0.bridge.caller import Caller
 from hal0.bridge.errors import BridgeError
 from hal0.bridge.keys import SCOPE_SERVERS
-from hal0.bridge.service import BridgeService, Caller
 from hal0.bridge.store import TERMINAL_STATUSES, BridgeStore, BridgeStoreError, ClientRow
 from hal0.config import paths
 from hal0.config.loader import load_hal0_config
 from hal0.errors import Conflict, Hal0Error, NotFound, Unauthorized, UnprocessableEntity
+
+if TYPE_CHECKING:
+    from hal0.bridge.service import BridgeService
 
 log = structlog.get_logger(__name__)
 

@@ -67,7 +67,7 @@ from __future__ import annotations
 
 import functools
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from mcp.server.fastmcp import FastMCP
@@ -76,10 +76,13 @@ from mcp.server.fastmcp.tools import Tool
 from mcp.types import ToolAnnotations
 
 from hal0.api.auth import ANON, AuthPrincipal
+from hal0.bridge.caller import Caller
 from hal0.bridge.errors import BridgeError
-from hal0.bridge.service import BridgeService, Caller
 from hal0.mcp._binding import BoundFastMCP, ToolContext, bound_server
 from hal0.redaction import redact_log_line
+
+if TYPE_CHECKING:
+    from hal0.bridge.service import BridgeService
 
 __all__ = ["MAX_TEXT_BYTES", "build_server"]
 

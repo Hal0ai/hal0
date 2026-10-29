@@ -146,8 +146,6 @@ from hal0.api.routes import (
 from hal0.api.routes import (
     stacks as stacks_routes,
 )
-from hal0.bridge.hermes_client import HermesGateway
-from hal0.bridge.service import BridgeService
 from hal0.capabilities.orchestrator import CapabilityOrchestrator
 from hal0.config.loader import ConfigParseError, load_hal0_config, load_upstreams_config
 from hal0.config.paths import activity_db
@@ -166,6 +164,8 @@ from hal0.upstreams.huggingface import hf_token_from_env
 from hal0.upstreams.registry import Upstream, UpstreamRegistry, upstream_from_entry
 
 if TYPE_CHECKING:
+    from hal0.bridge.hermes_client import HermesGateway
+    from hal0.bridge.service import BridgeService
     from hal0.bridge.store import BridgeStore
 
 log = structlog.get_logger(__name__)
@@ -1458,8 +1458,13 @@ BRIDGE_REATTACH_WAIT_S: float = 20.0
 
 
 def _make_bridge_gateway() -> HermesGateway:
-    """The Hermes client the bridge boot phase hands the service (tests swap this)."""
+    """The Hermes client the bridge boot phase hands the service (tests swap this).
+
+    Imported here, not at module level: ``hal0.api`` must pull in no Hermes
+    module (golden path #15, ADR-0043).
+    """
     from hal0.agents import hermes_api
+    from hal0.bridge.hermes_client import HermesGateway
 
     return HermesGateway(home=hermes_api.hermes_home(), environ=os.environ)
 
@@ -1528,6 +1533,9 @@ async def _boot_bridge(app: FastAPI, ctx: BootState) -> None:
     store: BridgeStore | None = getattr(app.state, "bridge_store", None)
     if store is None:  # disabled, or bridge.db did not open (_boot_bridge_store says which)
         return
+    # Imported here: the service pulls in the Hermes client, and hal0.api must not (gp15).
+    from hal0.bridge.service import BridgeService
+
     service: BridgeService | None = None
     try:
         boot_config = ctx.hal0_config.bridge

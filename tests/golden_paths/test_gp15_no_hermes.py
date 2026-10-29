@@ -80,6 +80,12 @@ def test_brain_engine_import_graph_pulls_in_no_hermes() -> None:
         "import hal0.api.routes.slots\n"
         "import hal0.api.routes.models\n"
         "import hal0.api.routes.brain\n"
+        # The agent bridge's surfaces (ADR-0043): ``hal0.api`` builds the app at
+        # import, which mounts ``/mcp/agents`` and the ``/api/bridge`` routes; the
+        # bridge service (and its Hermes client) is imported only when it boots.
+        "import hal0.api\n"
+        "import hal0.api.routes.bridge\n"
+        "import hal0.mcp.agents\n"
         "hits = sorted(m for m in sys.modules if 'hermes' in m.lower())\n"
         "print(repr(hits))\n"
     )
