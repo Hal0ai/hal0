@@ -44,6 +44,10 @@ import { gpuUtilReading, GPU_PINNED_SHORT, GPU_PINNED_LONG } from '@/lib/gpuUtil
 import { slotIndicatorFromPhase, isSlotLive } from './slot-status.js'
 import { useMemoryMapModel } from './memory-map'
 import { useNotifications } from './notifications.jsx'
+import { slotMemLabel } from './slots/slot-shared.js'
+
+// Kept for importers that still read it from here; the definition lives in slots/slot-shared.js.
+export { slotMemLabel }
 
 const { useState, useEffect, useRef, useMemo, useCallback } = React
 
@@ -746,12 +750,6 @@ function RDRequestsCard({ swap }) {
 }
 
 // ─── band B · slots (locked) ─────────────────────────────────────────────────
-
-export function slotMemLabel(slot) {
-  if (slot.coresident && !(typeof slot.mem_mb === 'number' && slot.mem_mb > 0)) return 'shared'
-  if (typeof slot.mem_mb === 'number' && slot.mem_mb > 0) return `${mbToGb(slot.mem_mb).toFixed(1)} GB`
-  return '—'
-}
 
 function RDSlotRow({ slot, onGo }) {
   const ind = slotIndicatorFromPhase(slot)

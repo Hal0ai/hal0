@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest'
 
 // slot-shared.js is untyped JS; tsconfig has allowJs with checkJs:false, so the
 // import resolves and the exports come through as `any`.
-import { slotModelId, slotModelRow, npuAnchorSlot } from './slot-shared.js'
+import { slotModelId, slotModelRow, npuAnchorSlot, slotMemLabel } from './slot-shared.js'
 
 const ROWS = [
   { id: 'qwen3.6-27b', name: 'Qwen3.6 27B', type: 'llm' },
@@ -119,4 +119,10 @@ describe('npuAnchorSlot', () => {
     expect(npuAnchorSlot(undefined)).toBeNull()
     expect(npuAnchorSlot([{ name: 'flm-stt', type: 'transcription', device: 'npu' }])).toBeNull()
   })
+})
+
+describe('slotMemLabel', () => {
+  it('reads coresident without mem as shared', () => expect(slotMemLabel({ coresident: true })).toBe('shared'))
+  it('formats mem_mb', () => expect(slotMemLabel({ mem_mb: 23654 })).toBe('23.1 GB'))
+  it('dashes when unknown', () => expect(slotMemLabel({})).toBe('—'))
 })

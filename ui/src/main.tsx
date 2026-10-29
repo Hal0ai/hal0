@@ -63,6 +63,8 @@ import './dash/tweaks-panel.jsx'
 import './dash/chrome.jsx'
 import './dash/primitives.jsx'
 import './dash/cards-shell.jsx'
+import './dash/overview/overview.css'
+import './dash/overview/shell.jsx'
 // Board card modules — each registers a window global (ThroughputCard2, UtilizationCard, QuickChatCard, ServicesCard, PowerCard,
 // SlotTrackCard, …). MUST load after cards-shell (they use DCard/StatusDot);
 // the redesign view offers slottrack/power/quickchat as swap-in widgets.
@@ -79,6 +81,7 @@ import './dash/extra-modals.jsx'
 // cards-shell and the card modules above (slottrack / power / quickchat
 // window globals are offered as swap-in widgets).
 import './dash/dashboard-redesign.jsx'
+import './dash/overview/OverviewView.jsx'
 import './dash/slots.jsx'
 import './dash/slot-modals.jsx'
 // D2 (post-R3 surface rework): slot surfaces decomposed out of the
