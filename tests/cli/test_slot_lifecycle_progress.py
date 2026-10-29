@@ -14,7 +14,7 @@ timeout handling (the typed-error message plus the remedy lines).
 from __future__ import annotations
 
 import io
-import time
+import threading
 from typing import Any
 
 import pytest
@@ -67,13 +67,19 @@ def test_run_with_progress_json_out_suppresses_all_output() -> None:
 def test_run_with_progress_interactive_shows_elapsed_and_polled_state() -> None:
     console, buf = _capturing_console(interactive=True)
     poll_calls: list[int] = []
+    polled = threading.Event()
 
     def poll_state() -> str:
         poll_calls.append(1)
+        polled.set()
         return "starting"
 
     def call() -> str:
-        time.sleep(0.05)
+        # Return only once the status line has polled: entering `console.status`
+        # before the first `is_alive()` check can outlast a short sleep on a
+        # loaded runner, and the loop then never polls at all. The ceiling
+        # keeps a loop that never polls failing instead of hanging.
+        polled.wait(5.0)
         return "done"
 
     result = run_with_progress(
