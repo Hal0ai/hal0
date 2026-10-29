@@ -817,25 +817,64 @@ def test_principal_resolver_outside_a_request_is_anon(monkeypatch: pytest.Monkey
     assert mcp_mount.principal_resolver().tier == "anon"
 
 
-def test_principal_resolver_reads_the_request(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_principal_resolver_is_the_judged_principal(monkeypatch: pytest.MonkeyPatch) -> None:
     from starlette.requests import Request
 
     request = Request({"type": "http", "headers": []})
     monkeypatch.setattr(mcp_mount, "_current_mcp_request", lambda: request)
-    monkeypatch.setattr(mcp_mount, "resolve_principal_from_scope", lambda _r: CC)
+    monkeypatch.setattr(mcp_mount, "judged_principal", lambda _r: CC)
     assert mcp_mount.principal_resolver() == CC
+
+
+def _no_second_verify(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Make any bridge-key lookup verify (as a racing store would) and record it."""
+    from hal0.api import auth as auth_mod
+
+    looked_up: list[str] = []
+
+    def _verifies(key: str) -> AuthPrincipal:
+        looked_up.append(key)
+        return OTHER
+
+    monkeypatch.setattr(auth_mod, "_bridge_principal", _verifies)
+    return looked_up
 
 
 def test_a_principal_stored_on_the_scope_wins(monkeypatch: pytest.MonkeyPatch) -> None:
     """The middleware's verdict is used as is; the resolver does not re-verify the key."""
     from starlette.requests import Request
 
+    looked_up = _no_second_verify(monkeypatch)
     stored = AuthPrincipal(tier="bridge", name="stored", scopes=frozenset({"agents"}))
-    request = Request({"type": "http", "headers": [], "hal0.bridge_principal": stored})
+    request = Request(
+        {
+            "type": "http",
+            "headers": [(b"authorization", b"Bearer hal0bk_stored.abcdefghijklmnopqrstuvwxyz")],
+            "hal0.bridge_principal": stored,
+        }
+    )
     monkeypatch.setattr(mcp_mount, "_current_mcp_request", lambda: request)
-
-    def _no_reverify(_r: Any) -> AuthPrincipal:
-        raise AssertionError("resolve_principal_from_scope called with a stored principal")
-
-    monkeypatch.setattr(mcp_mount, "resolve_principal_from_scope", _no_reverify)
     assert mcp_mount.principal_resolver() == stored
+    assert looked_up == []
+
+
+def test_a_bridge_key_the_gate_did_not_store_is_never_verified_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No stored principal: the bridge-shaped bearer resolves as an unknown key does.
+
+    Re-verifying it here could hand a tool an identity the auth gate never
+    judged (a key revoked, or a store that failed, between the gate and here).
+    """
+    from starlette.requests import Request
+
+    looked_up = _no_second_verify(monkeypatch)
+    request = Request(
+        {
+            "type": "http",
+            "headers": [(b"authorization", b"Bearer hal0bk_other.abcdefghijklmnopqrstuvwxyz")],
+        }
+    )
+    monkeypatch.setattr(mcp_mount, "_current_mcp_request", lambda: request)
+    assert mcp_mount.principal_resolver().tier == "anon"
+    assert looked_up == []

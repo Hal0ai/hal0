@@ -39,12 +39,10 @@ from starlette.types import ASGIApp
 
 from hal0.api.auth import (
     ANON,
-    BRIDGE_PRINCIPAL_SCOPE_KEY,
     AuthPrincipal,
     bearer_token,
     bears_bridge_key,
     judged_principal,
-    resolve_principal_from_scope,
 )
 from hal0.service_identity import service_key
 
@@ -356,19 +354,18 @@ def principal_resolver() -> AuthPrincipal:
     """Return the :class:`AuthPrincipal` of the current MCP request (ADR-0043).
 
     Wired into :func:`hal0.mcp.agents.build_server`, which maps it to the bridge
-    caller of each run tool. A principal the auth middleware already verified
-    and stored on the request's ASGI scope is used as is; failing that, the
-    request is resolved the way the REST routes resolve theirs. Outside an MCP
-    request (direct tool calls in unit tests) the caller is anonymous, and the
-    tools refuse an anonymous caller.
+    caller of each run tool. It is :func:`hal0.api.auth.judged_principal`: the
+    bridge principal the auth middleware stored on the request's ASGI scope
+    when it admitted the request, else the cookie or box key the request
+    carries. A bridge key is never verified a second time here, so a revoke
+    race or a store error cannot hand a tool an identity the gate did not
+    judge. Outside an MCP request (direct tool calls in unit tests) the caller
+    is anonymous, and the tools refuse an anonymous caller.
     """
     request = _current_mcp_request()
     if request is None:
         return ANON
-    stored = request.scope.get(BRIDGE_PRINCIPAL_SCOPE_KEY)
-    if isinstance(stored, AuthPrincipal):
-        return stored
-    return resolve_principal_from_scope(request)
+    return judged_principal(request)
 
 
 def _bridge_enabled(app: Any) -> bool:
