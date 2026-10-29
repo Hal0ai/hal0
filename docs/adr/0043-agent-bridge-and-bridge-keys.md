@@ -260,19 +260,35 @@ ADR-0035 was verified against), shapes the answer:
     `bridge.skill_pending_elsewhere` (409): a client cannot retire someone
     else's pending change. A client holds at most eight pending skill changes
     (puts and deletes together); the ninth is `bridge.too_many_pending` (429),
-    and the cap frees as the operator decides rows. The card shows the skill
-    name, the byte count, a 16-hex digest, the file names and a preview of the
-    first 2000 characters of `SKILL.md` passed through the log redactor; the
-    full content, and the contents of supporting files, are not on the card.
-    Once a row is approved, denied, withdrawn or failed, the queue lets go of
-    the executor that holds the pushed content.
+    and the cap frees as the operator decides rows.
+
+    The operator must be able to read what they approve, so a bridge push is
+    reviewable on its card in full. It must be UTF-8 text with no NUL
+    character, `SKILL.md` at most 16 KiB and the whole push at most 48 KiB;
+    anything else is refused before queueing with `bridge.skill_invalid`
+    ("bridge pushes are limited to reviewable text (SKILL.md ≤ 16 KiB, total
+    ≤ 48 KiB)"). The card shows the skill name, the byte count, a 16-hex
+    digest, the whole `SKILL.md` and every supporting file as `{size, sha256,
+    content}`, all text passed through the log redactor first and never cut
+    (`preview_truncated` stays, always false, for the UI). The library's own
+    limits (256 KiB a file, 16 files) remain the rule for what is written to
+    disk; a skill larger than a push may be, or one with binary files, is the
+    operator's to put in the drop-in directory by hand. Once a row is
+    approved, denied, withdrawn or failed, the queue lets go of the executor
+    that holds the pushed content, and it keeps only the newest 200 resolved
+    rows, since each still carries its card.
 
     The capabilities view is built by allow-list (MCP server names, model alias
     names and `{model, provider}`, never a URL, header or key), and any string
-    the log redactor would change is dropped. Its `api_server_version` comes
-    from `GET /health/detailed`, which answers 401 without the profile's API
-    key, so the request carries the key hal0 holds for that profile as a
-    bearer; with no key held, no request is made and the version is `null`.
+    the log redactor would change is dropped. It reports only what the
+    profile's own `config.yaml` sets, and a field that file does not set is
+    `null` ("Hermes default"): Hermes merges a profile's file over its
+    built-in defaults only, never over the default profile's file
+    (`hermes_cli/config.py:431-433`, `:2088-2089` at the pinned ref). Its
+    `api_server_version` comes from `GET /health/detailed`, which answers 401
+    without the profile's API key, so the request carries the key hal0 holds
+    for that profile as a bearer, never through a proxy; with no key held, no
+    request is made and the version is `null`.
 
 ### Implementation decisions (second change)
 
@@ -325,6 +341,32 @@ while building it and reviewing it:
   belongs in the `0600` ledger. A bus message about a run names only
   `<client> → <agent>` (and the status when the run ends); the event's data
   carries the run id.
+
+### Implementation decisions (third change)
+
+The third change (PR 3) implements Decision 10 and, in its fix wave, closes
+the bot findings left on the second change's run tools:
+
+- **A retried start is answered from the ledger.** `bridge.db` schema 2
+  records the idempotency key hal0 sent and a digest of the request. A start
+  whose key the ledger holds for that client and profile returns that run
+  before the concurrency cap is checked (a replay is not one run too many),
+  and the same key with a different request is `bridge.idempotency_conflict`,
+  as Hermes answers.
+- **A start is admitted under its client's lock until the run is recorded**,
+  even when the caller goes away mid-start. If the ledger cannot record a run
+  Hermes accepted, hal0 asks Hermes to stop it and answers 503
+  `bridge.store_unavailable`, so no run holds a slot unwatched.
+- **A stop hal0 decides on is durable.** The clarify-timeout stop is written
+  to the run (`pending_stop`) before it is posted and retried with the
+  reconnect backoff, and again after a restart, until Hermes takes it or
+  answers that nothing is left to stop.
+- **Restart probes run at once**, each with a 10 s timeout; a run whose
+  profile does not answer is watched anyway and its reconnect loop takes over.
+- **Streamed text is masked across event boundaries.** Consecutive
+  `message.text` events, with the stored neighbour just outside the returned
+  window on each side, are masked as one text before each event shows its
+  part, so a secret split across a flush or a page is still masked.
 
 ## Rejected
 
