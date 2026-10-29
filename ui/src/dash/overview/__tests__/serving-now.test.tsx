@@ -67,7 +67,7 @@ describe('OvServingNow', () => {
     expect(tiles[0].querySelector('.ov-chip.amber')?.textContent).toBe('default')
     expect(tiles[1].querySelector('.ov-chip.amber')).toBeNull()
     expect(tiles[1].textContent).toContain('ctx')
-    expect(tiles[1].textContent).toContain('84k/131k')
+    expect(tiles[1].textContent).toContain('10k/131k')
   })
 
   it('stopped chip loads the slot on click', () => {

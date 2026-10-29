@@ -56,9 +56,13 @@ function buildTile(
   }
 
   const max = slot.ctx_effective ?? (slot as { ctx_max?: number | null }).ctx_max ?? null
-  const used = sysSlot?.kv_used ?? null
-  const ctx =
-    isNum(used) && isNum(max) && max > 0 ? { used, max, pct: Math.min(100, Math.round((used / max) * 100)) } : null
+  // kv_used is parts-per-million of the slot's KV cache in use (sampler: kv_cache_usage * 1e6), not tokens.
+  const kv = sysSlot?.kv_used ?? null
+  let ctx: Tile['ctx'] = null
+  if (isNum(kv) && isNum(max) && max > 0) {
+    const pct = Math.min(100, Math.round(kv / 10000))
+    ctx = { used: Math.round((pct / 100) * max), max, pct }
+  }
 
   const isImageEngine = slot.type === 'image' || slot.name === 'img'
   let caption: string | null = null

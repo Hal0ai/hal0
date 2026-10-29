@@ -32,14 +32,18 @@ describe('laneRows', () => {
     ).toEqual(['x', 'y'])
   })
 
-  it('builds ctx fill from kv_used over ctx_effective', () =>
-    expect(
-      laneRows(
-        [{ name: 'utility', device: 'gpu-vulkan', state: 'ready', type: 'llm', ctx_effective: 131072 }] as any,
-        { slots: [{ slot_id: 'utility', kv_used: 83801 }] } as any,
-        undefined,
-      )[0].loaded[0].ctx,
-    ).toEqual({ used: 83801, max: 131072, pct: 64 }))
+  const ctxFor = (kv_used: number) =>
+    laneRows(
+      [{ name: 'utility', device: 'gpu-vulkan', state: 'ready', type: 'llm', ctx_effective: 131072 }] as any,
+      { slots: [{ slot_id: 'utility', kv_used }] } as any,
+      undefined,
+    )[0].loaded[0].ctx
+
+  it('reads kv_used as parts-per-million of the KV cache, scaled to ctx_effective', () =>
+    expect(ctxFor(83801)).toEqual({ used: 10486, max: 131072, pct: 8 }))
+
+  it('a full KV cache (1,000,000 ppm) is 100% of the context', () =>
+    expect(ctxFor(1000000)).toEqual({ used: 131072, max: 131072, pct: 100 }))
 
   it('leaves ctx null when either side is missing', () => {
     const noKv = laneRows([{ name: 'u', device: 'gpu-vulkan', state: 'ready', type: 'llm', ctx_effective: 4096 }] as any, undefined, undefined)
