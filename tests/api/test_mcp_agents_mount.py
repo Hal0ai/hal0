@@ -143,12 +143,14 @@ def test_a_tool_call_acts_as_the_key_holder(client: TestClient) -> None:
     assert service.callers == [("bridge", "cc"), ("admin", "admin")]
 
 
-def test_a_tool_call_before_the_service_exists_is_bridge_disabled(client: TestClient) -> None:
+def test_a_tool_call_before_the_service_exists_is_bridge_unavailable(client: TestClient) -> None:
+    """Mounted, so the bridge is on: no service yet is 503 ``bridge.unavailable``, as REST says."""
     key = _mint(client)
     client.app.state.bridge_service = None  # type: ignore[attr-defined]
     result = _result(_call(client, key, "agent_runs_list"))
     assert result["isError"] is True
-    assert "bridge.disabled" in result["content"][0]["text"]
+    assert "bridge.unavailable" in result["content"][0]["text"]
+    assert "bridge.disabled" not in result["content"][0]["text"]
 
 
 def test_no_key_is_refused_before_the_mount(client: TestClient) -> None:
