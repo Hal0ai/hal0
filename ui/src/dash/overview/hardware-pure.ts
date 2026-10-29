@@ -103,7 +103,8 @@ function npuRow(i: HardwareInput): Row {
     caption,
     pct,
     value: pctText(pct),
-    pill: status?.ok ? 'active' : 'idle',
+    // No npu_status at all is an unread driver, not an idle device: no pill, the row shows a dash.
+    pill: status ? (status.ok ? 'active' : 'idle') : undefined,
   }
 }
 

@@ -105,6 +105,11 @@ describe('hardwareRows', () => {
     expect(npu.pct).toBe(40)
   })
 
+  it('leaves the NPU pill unset when the driver reports no npu_status (the row shows a dash)', () => {
+    const rows = hardwareRows({ ...CT105, stats: { ...CT105.stats, npu_status: undefined } })
+    expect(byKey(rows, 'npu').pill).toBeUndefined()
+  })
+
   it('names a single NPU slot', () => {
     const rows = hardwareRows({ ...CT105, npuSlots: ['flm'] })
     expect(byKey(rows, 'npu').caption).toBe('flm')
