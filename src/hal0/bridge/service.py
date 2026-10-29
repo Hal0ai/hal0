@@ -620,27 +620,33 @@ class BridgeService:
 
     async def run_events_window(
         self, caller: Caller, run_id: str, *, since_seq: int = 0, limit: int = 100
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]] | None]:
-        """:meth:`run_events` with its streamed-text context: ``(before, events, after)``.
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], bool]:
+        """:meth:`run_events` with its streamed-text context: ``(before, events, after, at_edge)``.
 
         ``before`` is the run of stored ``message.text`` events just before the
         window and ``after`` the run just after it, oldest first, each at most
         :data:`TEXT_CONTEXT_CHARS` of text (fewer at either end of the run, or where
-        another event interrupts the text). ``after`` is None when nothing at all
-        is stored after the window: the window ends at the run's live edge. The
-        ``hal0-agents`` tools mask streamed text across event boundaries with them,
-        so a secret split over several ``message.text`` events, or over pages, is
-        still caught, and one cut off at the live edge is masked from its prefix.
+        another event interrupts the text). ``at_edge`` is True when the end of the
+        window and ``after`` together is the newest stored event, the run's live
+        edge: nothing is stored after the window, or ``after`` runs to the end of
+        the ledger, neither cut by the context cap nor followed by another event.
+        The ``hal0-agents`` tools mask streamed text across event boundaries with
+        them, so a secret split over several ``message.text`` events, or over pages,
+        is still caught, and one cut off at the live edge is masked from its prefix.
         """
         await self._owned(caller, run_id)
         since = max(int(since_seq), 0)
         size = min(max(int(limit), 1), _MAX_EVENTS)
+        reach = size + _CONTEXT_EVENTS
+        # One event past the context's reach tells whether anything is stored beyond it.
         events = await asyncio.to_thread(
-            self._store.events, run_id, since_seq=since, limit=size + _CONTEXT_EVENTS
+            self._store.events, run_id, since_seq=since, limit=reach + 1
         )
-        window, rest = events[:size], events[size:]
+        window, rest = events[:size], events[size:reach]
+        after = _text_run(rest)
+        at_edge = len(events) <= reach and len(after) == len(rest)
         before = await self._text_before(run_id, since + 1) if since > 0 else []
-        return before, window, (_text_run(rest) if rest else None)
+        return before, window, after, at_edge
 
     async def events_before(self, caller: Caller, run_id: str, seq: int) -> list[dict[str, Any]]:
         """The stored ``message.text`` run just before ``seq`` (a wait tail's left context)."""

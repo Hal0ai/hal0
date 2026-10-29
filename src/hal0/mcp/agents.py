@@ -79,10 +79,12 @@ masked as one text, together with the stored ``message.text`` run just outside
 the window on each side (before ``since_seq``, after the page, before a wait's
 tail; up to 8192 characters each), and each event then shows its own part of
 the masked text: a secret is masked whichever events, or pages, it is split
-over. At the live edge (a page that ends at the newest stored event, and a
-wait's tail) there is no right context and the rest of a token may not be
+over. At the live edge (a page whose last text, with its right context, ends at
+the newest stored event, and a wait's tail) the rest of a token may not be
 stored yet, so a known token prefix (:func:`hal0.redaction.token_head_at_end`)
-whose characters run to the end of the text is masked through the end.
+whose characters run to the end of the text is masked through the end. The
+output of a run that has not finished grows on every flush, so its end is the
+live edge too, in a view and in a list's ``output_preview``.
 
 ``output`` is paged rather than lost (:mod:`hal0.bridge.output`): a view shows
 the 16 KiB window of the masked text that ``agent_run_status``'s ``offset``
@@ -118,6 +120,7 @@ from hal0.api.auth import ANON, AuthPrincipal
 from hal0.bridge.caller import Caller
 from hal0.bridge.errors import BridgeError
 from hal0.bridge.output import OUTPUT_WINDOW_BYTES, output_window
+from hal0.bridge.store import TERMINAL_STATUSES
 from hal0.mcp._binding import BoundFastMCP, ToolContext, bound_server
 from hal0.redaction import MASK, redact_log_line, secret_spans, token_head_at_end
 
@@ -278,6 +281,7 @@ def _clean_events(
     *,
     before: list[dict[str, Any]] | None = None,
     after: list[dict[str, Any]] | None = None,
+    at_edge: bool = True,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Events made safe to return; streamed text is masked across event boundaries.
 
@@ -287,11 +291,12 @@ def _clean_events(
     first, from :meth:`BridgeService.run_events_window`); then every event goes
     through :func:`_clean_tree` as before. True when any text was cut.
 
-    ``after`` is None when nothing is stored after the window (the live edge; a
-    wait's tail always is): a last run that reaches the end of the window is then
-    masked ``at_edge``, since the rest of a token in it may not be stored yet.
+    ``at_edge`` says the end of the events and ``after`` together is the newest
+    stored event (the live edge; a wait's tail always is): a last run that reaches
+    the end of the window is then masked ``at_edge`` with ``after`` joined to it,
+    since the rest of a token running to the end of that text may not be stored
+    yet. False when ``after`` was cut by the context cap or another event follows.
     """
-    at_edge = after is None
     left_context = [t for t in map(_text_of, before or []) if t is not None]
     right_context = [t for t in map(_text_of, after or []) if t is not None]
     texts = [_text_of(event) for event in events]
@@ -320,18 +325,33 @@ def _clean_events(
     return _clean_tree(out)
 
 
+def _masked_output(view: dict[str, Any], output: str) -> str:
+    """A run's ``output`` with its secrets masked, by the run's status.
+
+    A finished run's output is complete: the log redactor masks it. A run that is
+    not finished has its output extended on every flush of the watcher, so its end
+    is the live edge, as at the end of an events page: a known token prefix running
+    to the end is also masked through the end (:func:`_mask_run` ``at_edge``). A
+    view without a status is treated as live. Without such a prefix at the end the
+    redactor's output is used as is.
+    """
+    if view.get("status") in TERMINAL_STATUSES or token_head_at_end(output) is None:
+        return redact_log_line(output)
+    return _mask_run([output], at_edge=True)[0]
+
+
 def _view(
     view: dict[str, Any], *, offset: int = 0, tail_before: list[dict[str, Any]] | None = None
 ) -> dict[str, Any]:
     """A RunView (or a wait's view) made safe to return: secrets masked, texts capped.
 
-    ``output`` is masked whole, then the 16 KiB window at byte ``offset`` is
-    shown with ``output_offset``, ``output_total`` and ``next_offset``
-    (:func:`hal0.bridge.output.output_window`); masking first means a window
-    edge cannot split a secret the redactor would have caught. ``error``,
-    ``input_preview``, the ``pending`` request (a clarification's question or an
-    approval's command) and ``events_tail`` of a wait go through :func:`_clean`,
-    the tail's streamed text masked across events (:func:`_clean_events`, with
+    ``output`` is masked whole (:func:`_masked_output`), then the 16 KiB window
+    at byte ``offset`` is shown with ``output_offset``, ``output_total`` and
+    ``next_offset`` (:func:`hal0.bridge.output.output_window`); masking first
+    means a window edge cannot split a secret the redactor would have caught.
+    ``error``, ``input_preview``, the ``pending`` request (a clarification's
+    question or an approval's command) and ``events_tail`` of a wait go through
+    :func:`_clean`, the tail's streamed text masked across events (:func:`_clean_events`, with
     ``tail_before``, the stored text run just before the tail, and as the live
     edge: the tail is the newest events stored).
     ``truncated`` is true when any text was cut or more output follows; ``more``
@@ -341,7 +361,7 @@ def _view(
     truncated = False
     output = out.get("output")
     if isinstance(output, str):
-        out["output"], page = output_window(redact_log_line(output), offset)
+        out["output"], page = output_window(_masked_output(out, output), offset)
         out.update(page)
         if page["next_offset"] is not None:
             truncated = True
@@ -375,12 +395,15 @@ def _list_item(view: dict[str, Any]) -> dict[str, Any]:
     """A RunView as an ``agent_runs_list`` item: ``output_preview`` in place of ``output``.
 
     A list is for finding a run, not reading it: the first
-    :data:`OUTPUT_PREVIEW_CHARS` characters of the masked output, and ``error``
-    (cleaned like a view's). ``agent_run_status`` reads the whole output.
+    :data:`OUTPUT_PREVIEW_CHARS` characters of the masked output
+    (:func:`_masked_output`), and ``error`` (cleaned like a view's).
+    ``agent_run_status`` reads the whole output.
     """
     item = dict(view)
     output = item.pop("output", None)
-    preview = redact_log_line(output)[:OUTPUT_PREVIEW_CHARS] if isinstance(output, str) else None
+    preview = (
+        _masked_output(item, output)[:OUTPUT_PREVIEW_CHARS] if isinstance(output, str) else None
+    )
     out = _view(item)
     out["output_preview"] = preview
     return out
@@ -615,10 +638,10 @@ def _agents_tool_definitions() -> dict[str, Tool]:
         run_id: str, since_seq: int = 0, limit: int = 100, ctx: ToolContext | None = None
     ) -> dict[str, Any]:
         caller, service = _context(ctx)
-        before, events, after = await service.run_events_window(
+        before, events, after, at_edge = await service.run_events_window(
             caller, run_id, since_seq=since_seq, limit=limit
         )
-        cleaned, cut = _clean_events(events, before=before, after=after)
+        cleaned, cut = _clean_events(events, before=before, after=after, at_edge=at_edge)
         last_seq = max((int(e.get("seq", 0)) for e in cleaned), default=max(since_seq, 0))
         page: dict[str, Any] = {"run_id": run_id, "events": cleaned, "last_seq": last_seq}
         if cut:

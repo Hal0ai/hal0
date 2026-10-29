@@ -1089,16 +1089,63 @@ async def test_run_events_pages_the_ledger(
 async def test_an_events_window_says_when_it_ends_at_the_live_edge(
     svc: BridgeService, planner: Planner, cc: Caller
 ) -> None:
-    """``after`` is None only when nothing is stored past the window (NB#2: no right context)."""
+    """``at_edge`` only when nothing is stored past the window and its right context."""
     planner.plan(frames=_plain)  # message.text, tool.started, message.text, run.completed
     v = await svc.start_run(cc, agent="hermes", input="x")
     await svc.wait_run(cc, v["run_id"], timeout_s=5)
-    _before, page, after = await svc.run_events_window(cc, v["run_id"], since_seq=0, limit=1)
-    assert [e["seq"] for e in page] == [1] and after == []  # closed by tool.started
-    _before, page, after = await svc.run_events_window(cc, v["run_id"], since_seq=2, limit=1)
-    assert [e["seq"] for e in page] == [3] and after == []  # run.completed follows
-    _before, page, after = await svc.run_events_window(cc, v["run_id"], since_seq=3, limit=1)
-    assert [e["seq"] for e in page] == [4] and after is None  # the newest stored event
+    _before, page, after, edge = await svc.run_events_window(cc, v["run_id"], since_seq=0, limit=1)
+    assert [e["seq"] for e in page] == [1] and after == [] and not edge  # tool.started next
+    _before, page, after, edge = await svc.run_events_window(cc, v["run_id"], since_seq=2, limit=1)
+    assert [e["seq"] for e in page] == [3] and after == [] and not edge  # run.completed next
+    _before, page, after, edge = await svc.run_events_window(cc, v["run_id"], since_seq=3, limit=1)
+    assert [e["seq"] for e in page] == [4] and after == [] and edge  # the newest stored event
+
+
+def _text(text: str) -> tuple[str, dict[str, Any]]:
+    return "message.text", {"text": text}
+
+
+def _stored_run(store: BridgeStore, *events: tuple[str, dict[str, Any]]) -> str:
+    """A finished run of the ``cc`` client holding ``events`` as seq 1, 2, ..."""
+    rid = "run_stored"
+    store.insert_run(_live_row(rid, status="completed", last_seq=0))
+    for seq, (name, payload) in enumerate(events, start=1):
+        store.append_event(rid, seq, float(seq), name, payload)
+    return rid
+
+
+@pytest.mark.parametrize(
+    ("events", "after_seqs", "at_edge"),
+    [
+        # the right context is the newest stored text (M-1 on the PR 3 tail)
+        ([_text("Here is ghp_A1"), _text("b2C3")], [2], True),
+        # cut by the 8192-character cap: more text is stored after it
+        ([_text("use hal0bk_aaa"), _text("a" * 9000), _text("a" * 10)], [2], False),
+        # the cap reached exactly at the newest stored event cuts nothing
+        ([_text("use hal0bk_aaa"), _text("a" * 9000)], [2], True),
+        # closed by another event
+        ([_text("Here is ghp_A1"), _text("b2C3"), ("tool.started", {"tool": "t"})], [2], False),
+        # nothing after the window at all
+        ([_text("Here is ghp_A1")], [], True),
+        # 256 events of context, then one more stored past the context's reach
+        ([_text("x")] + [_text("y")] * 257, list(range(2, 258)), False),
+        ([_text("x")] + [_text("y")] * 256, list(range(2, 258)), True),
+    ],
+    ids=["reaches-edge", "cap-cut", "cap-at-edge", "non-text-after", "empty", "beyond", "reach"],
+)
+async def test_an_events_window_says_whether_its_right_context_reaches_the_live_edge(
+    svc: BridgeService,
+    store: BridgeStore,
+    cc: Caller,
+    events: list[tuple[str, dict[str, Any]]],
+    after_seqs: list[int],
+    at_edge: bool,
+) -> None:
+    rid = _stored_run(store, *events)
+    _before, page, after, edge = await svc.run_events_window(cc, rid, since_seq=0, limit=1)
+    assert [e["seq"] for e in page] == [1]
+    assert [e["seq"] for e in after] == after_seqs
+    assert edge is at_edge
 
 
 # -- restart -----------------------------------------------------------------------------

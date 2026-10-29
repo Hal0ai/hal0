@@ -389,10 +389,13 @@ the bot findings left on the second change's run tools:
   `message.text` events, with the stored `message.text` run just outside the
   returned window on each side (up to 8192 characters), are masked as one
   text before each event shows its part, so a secret split across flushes or
-  pages is still masked. At the live edge (a page that ends at the newest
-  stored event, or a wait's tail) there is no right context, so a known token
-  prefix from the redactor's table whose characters run to the end is masked
-  through the end, before the rest of the token is stored. A secret whose
+  pages is still masked. At the live edge (a page whose last text, with the
+  stored text after it, runs to the newest stored event; a wait's tail; the
+  output of a run that has not finished, which grows on every flush) a known
+  token prefix from the redactor's table whose characters run to the end is
+  masked through the end, before the rest of the token is stored. A right
+  context cut by the 8192-character cap, or followed by another event, is not
+  the live edge. A secret whose
   head the 500-row event cap has already pruned, with only its tail left in
   the ledger, is accepted and not masked by this rule.
 
