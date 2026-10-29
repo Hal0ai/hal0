@@ -535,8 +535,11 @@ async def test_watch_stops_when_the_ledger_row_is_gone(
 
     watcher = _watcher(store, fake, tmp_path, changes, handler=Hooked(fake, before))
     watcher.start(_row(rid))  # never inserted into the ledger
+    # Hold the task before anything runs: the watch can end (and drop itself from
+    # the registry) as soon as it finds no row, which on a loaded runner happened
+    # before a lookup by name after the stream opened.
+    task = watcher._tasks[rid]
     await asyncio.wait_for(opened.wait(), 3)
-    [task] = [t for t in asyncio.all_tasks() if t.get_name() == f"bridge-watch:{rid}"]
     try:
         await asyncio.wait_for(task, 3)  # the watch ends on its own
     finally:
