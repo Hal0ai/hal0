@@ -321,15 +321,25 @@ class HermesGateway:
         Like :func:`~hal0.agents.hermes_api.probe_status`, 4xx and 5xx are returned
         rather than raised (404 means the gateway does not serve the profile, 401 that
         the key was refused). Sends the profile's key when hal0 holds one.
+
+        Any failure, not only ``httpx.HTTPError`` (an address httpx cannot parse
+        raises ``httpx.InvalidURL``), reads ``0`` and nothing is raised or logged: as
+        in :meth:`_request`, the header is built in the call rather than held in a
+        local (#3137).
         """
-        key = self._environ.get(env_key_name(profile), "").strip()
-        headers = {"Authorization": f"Bearer {key}"} if key else {}
         try:
             async with self._client(_HEALTH_TIMEOUT) as client:
-                resp = await client.get(self.base_for(profile) + "/health", headers=headers)
-        except httpx.HTTPError:
+                resp = await client.get(
+                    self.base_for(profile) + "/health", headers=self._health_headers(profile)
+                )
+        except Exception:
             return 0
         return resp.status_code
+
+    def _health_headers(self, profile: str) -> dict[str, str]:
+        """``Authorization`` for a health probe: the profile's key, or none when unkeyed."""
+        key = self._environ.get(env_key_name(profile), "").strip()
+        return {"Authorization": f"Bearer {key}"} if key else {}
 
     # -- events ------------------------------------------------------------------------
 

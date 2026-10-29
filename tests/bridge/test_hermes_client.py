@@ -526,6 +526,15 @@ async def _raised(call: Awaitable[Any]) -> BaseException:
     raise AssertionError("the call did not raise")
 
 
+async def _raised_or_none(call: Awaitable[Any]) -> BaseException | None:
+    """The exception ``call`` raises, or None when it returns."""
+    try:
+        await call
+    except BaseException as exc:
+        return exc
+    return None
+
+
 async def _drain(stream: AsyncIterator[Any]) -> None:
     async for _ in stream:
         pass
@@ -580,6 +589,30 @@ async def test_any_transport_failure_is_unavailable_and_hides_the_key(
     assert isinstance(exc, HermesUnavailable), repr(exc)
     assert "transport broke" in exc.message
     assert fake.keys[DEFAULT_PROFILE] not in _journal_render(exc)
+
+
+@pytest.mark.parametrize("failure", ["bad_base", "transport"])
+async def test_health_is_zero_on_any_failure_and_hides_the_key(
+    fake: FakeHermes,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failure: str,
+) -> None:
+    """``health`` swallows every failure as ``0``, ``httpx.InvalidURL`` included.
+
+    It held the key in a local and caught only ``httpx.HTTPError``, so an address
+    httpx cannot parse escaped it with the header in the frame (#3137).
+    """
+    if failure == "bad_base":
+        monkeypatch.setattr(hermes_client, "api_server_base", lambda home: _BAD_BASE)
+        gw = HermesGateway(home=tmp_path, environ=fake.environ(), transport=fake.transport())
+    else:
+        gw = _gateway_with(_down(RuntimeError("transport broke")), fake, tmp_path)
+    exc = await _raised_or_none(gw.health(DEFAULT_PROFILE))
+    assert exc is None, _journal_render(exc) if exc is not None else ""
+    assert await gw.health(DEFAULT_PROFILE) == 0
+    assert fake.keys[DEFAULT_PROFILE] not in caplog.text
 
 
 async def test_an_error_text_never_carries_the_authorization_header(

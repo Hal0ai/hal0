@@ -481,6 +481,15 @@ async def test_status_offset_pages_the_whole_output() -> None:
     assert past["output"] == "" and past["output_offset"] == 40_000 and past["next_offset"] is None
 
 
+async def test_status_refuses_a_negative_offset_as_the_rest_route_does() -> None:
+    server = _server(_Recorder({"run_id": "run_1", "status": "completed", "output": "x"}), CC)
+    with pytest.raises(Exception) as e:
+        await server.call_tool("agent_run_status", {"run_id": "run_1", "offset": -1})
+    assert "bridge.invalid_offset" in str(e.value)
+    assert "bridge.internal" not in str(e.value)
+    assert BridgeError("bridge.invalid_offset", "x").status == 422
+
+
 async def test_status_offset_never_splits_a_character() -> None:
     text = "é" * 20_000  # two bytes each: 16 384 is a boundary, 16 385 is not
     server = _server(_Recorder({"run_id": "run_1", "status": "completed", "output": text}), CC)

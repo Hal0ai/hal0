@@ -406,8 +406,9 @@ async def get_run(
 
     ``output`` is the 16 KiB window that starts ``offset`` bytes into the run's
     whole output, with ``output_offset``, ``output_total`` and ``next_offset``
-    (None after the last window): :mod:`hal0.bridge.output`, as
-    ``agent_run_status`` pages it (ADR-0043 decision 9).
+    (None after the last window): :mod:`hal0.bridge.output` (ADR-0043 decision 9).
+    This route pages the stored output; ``agent_run_status`` pages the redacted
+    output, so the two surfaces' offsets and totals differ once a secret was masked.
     """
     service = _service(request)
     view = await _serve(service.get_run(_caller(request), run_id))

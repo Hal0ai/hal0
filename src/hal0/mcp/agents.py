@@ -56,7 +56,8 @@ a remote machine sees it, and a string over 16 KiB is cut at that size with
 ``output`` is paged rather than lost (:mod:`hal0.bridge.output`): a view shows
 the 16 KiB window of the masked text that ``agent_run_status``'s ``offset``
 names (0 everywhere else), with ``output_offset``, ``output_total`` and
-``next_offset`` in bytes. While more follows, ``truncated`` is true and
+``next_offset`` in bytes (a negative ``offset`` is refused: ``bridge.invalid_offset``,
+422). While more follows, ``truncated`` is true and
 ``more`` names the call that reads the next window,
 ``agent_run_status(run_id, offset=<next_offset>)``. The events are no way back
 to a long answer: the ledger keeps only a run's newest 500 event rows. Any
@@ -399,7 +400,7 @@ def _agents_tool_definitions() -> dict[str, Tool]:
             "pending (the approval or clarification it waits on, if any). Output comes in "
             "16 KiB windows: offset is the byte offset to read from (default 0), and the "
             "view carries output_offset, output_total and next_offset (null after the last "
-            "window). While more follows, truncated is true and more names the next call, "
+            "window); a negative offset is refused. While more follows, truncated is true and more names the next call, "
             "agent_run_status(run_id, offset=<next_offset>)."
         ),
         annotations=_ANNOTATIONS["agent_run_status"],
@@ -408,6 +409,8 @@ def _agents_tool_definitions() -> dict[str, Tool]:
     async def agent_run_status(
         run_id: str, offset: int = 0, ctx: ToolContext | None = None
     ) -> dict[str, Any]:
+        if offset < 0:  # as GET /api/bridge/runs/{run_id}?offset= refuses one
+            raise BridgeError("bridge.invalid_offset", f"offset must be 0 or more, not {offset}")
         caller, service = _context(ctx)
         return _view(await service.get_run(caller, run_id), offset=offset)
 
