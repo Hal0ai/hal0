@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from itertools import pairwise
 from pathlib import Path
 
 from hal0.db.connection import connect
@@ -102,6 +103,81 @@ class TestStatsSummary:
             )
         out = metrics_read.stats_summary(db)
         assert "qwen3-4b x rocm x hw:hw123" in out["bench_baseline"]
+
+
+class TestStatsSummaryBuckets:
+    """``buckets`` time series on ``stats_summary`` -- zero-filled, oldest first."""
+
+    @staticmethod
+    def _seed(db: Path) -> None:
+        now = datetime.now(UTC)
+        with connect(db) as conn:
+            migrate(conn)
+            for i, (age, tokens) in enumerate(
+                [(timedelta(minutes=5), 20), (timedelta(minutes=40), 30), (timedelta(hours=3), 7)]
+            ):
+                conn.execute(
+                    "INSERT INTO request_metric "
+                    "(ts, request_id, model_id, runner, device, modality, ok, completion_tokens) "
+                    "VALUES (?, ?, 'qwen3-4b', 'rocm', 'gpu-rocm', 'chat', 1, ?)",
+                    ((now - age).isoformat(), f"r{i}", tokens),
+                )
+
+    def test_shape_1h(self, tmp_path: Path) -> None:
+        db = tmp_path / "t.db"
+        self._seed(db)
+        out = metrics_read.stats_summary(db, window="1h")
+        assert len(out["buckets"]) == 24
+        assert all(set(b) == {"ts", "requests", "tokens_completed"} for b in out["buckets"])
+
+    def test_count_by_window(self, tmp_path: Path) -> None:
+        db = tmp_path / "t.db"
+        self._seed(db)
+        assert len(metrics_read.stats_summary(db, window="24h")["buckets"]) == 24
+        assert len(metrics_read.stats_summary(db, window="7d")["buckets"]) == 21
+
+    def test_bucket_spacing_and_alignment(self, tmp_path: Path) -> None:
+        db = tmp_path / "t.db"
+        self._seed(db)
+        out = metrics_read.stats_summary(db, window="1h")
+        starts = [datetime.fromisoformat(b["ts"]) for b in out["buckets"]]
+        assert starts == sorted(starts)  # oldest first
+        assert all((b - a).total_seconds() == 150 for a, b in pairwise(starts))
+        assert starts[0] == datetime.fromisoformat(out["window"]["from"])
+        end = starts[-1] + timedelta(seconds=150)
+        assert end == datetime.fromisoformat(out["window"]["to"])
+
+    def test_sum_to_totals(self, tmp_path: Path) -> None:
+        db = tmp_path / "t.db"
+        self._seed(db)
+        out = metrics_read.stats_summary(db, window="24h")
+        assert out["totals"]["requests"] == 3
+        assert sum(b["requests"] for b in out["buckets"]) == out["totals"]["requests"]
+        assert (
+            sum(b["tokens_completed"] for b in out["buckets"]) == out["totals"]["tokens_completed"]
+        )
+
+    def test_rows_land_in_expected_bucket(self, tmp_path: Path) -> None:
+        db = tmp_path / "t.db"
+        self._seed(db)
+        out = metrics_read.stats_summary(db, window="1h")
+        # 40 min ago sits ~bucket 8 of 24; 5 min ago sits ~bucket 22.
+        assert sum(b["tokens_completed"] for b in out["buckets"][:12]) == 30
+        assert sum(b["tokens_completed"] for b in out["buckets"][-3:]) == 20
+        assert sum(b["requests"] for b in out["buckets"]) == 2  # the 3 h-old row is out of window
+
+    def test_empty_window_is_zero_filled(self, tmp_path: Path) -> None:
+        db = tmp_path / "t.db"
+        with connect(db) as conn:
+            migrate(conn)
+        out = metrics_read.stats_summary(db, window="1h")
+        assert len(out["buckets"]) == 24
+        assert all(b["requests"] == 0 and b["tokens_completed"] == 0 for b in out["buckets"])
+
+    def test_unmigrated_db_is_zero_filled(self, tmp_path: Path) -> None:
+        out = metrics_read.stats_summary(tmp_path / "fresh.db", window="7d")
+        assert len(out["buckets"]) == 21
+        assert all(b["requests"] == 0 for b in out["buckets"])
 
 
 class TestRequestsRollup:
