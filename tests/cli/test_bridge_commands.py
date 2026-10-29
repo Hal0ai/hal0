@@ -173,8 +173,8 @@ def test_add_prints_each_line_verbatim_unwrapped(fake_api: FakeApi) -> None:
 
 
 def test_add_prints_an_ipv6_url_intact(fake_api: FakeApi, monkeypatch: pytest.MonkeyPatch) -> None:
-    """rich would read ":100:" in "[2001:db8::100:5]" as the 💯 emoji code."""
-    url = "http://[2001:db8::100:5]:8080/mcp/agents/mcp"
+    """rich would read ":100:" in "[2001:db8:100::5]" as the 💯 emoji code."""
+    url = "http://[2001:db8:100::5]:8080/mcp/agents/mcp"
     minted = _minted("cc", ["agents"])
     line = minted["onboarding"]["lines"][0]
     line["mcp_url"] = url

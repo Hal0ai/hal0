@@ -115,7 +115,7 @@ def _print_minted(result: dict[str, Any]) -> None:
         # soft_wrap keeps each command on one physical line (rich would otherwise
         # insert newlines at the terminal width and break the pasted command), and
         # emoji=False keeps an IPv6 host intact: rich reads ":100:" in
-        # "[2001:db8::100:5]" as an emoji code.
+        # "[2001:db8:100::5]" as an emoji code.
         console.print(Text(f"# {line.get('server', '')}"), highlight=False)
         console.print(
             str(line["claude_mcp_add"]),
