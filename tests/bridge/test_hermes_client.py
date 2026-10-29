@@ -9,13 +9,16 @@ two bridge errors.
 
 from __future__ import annotations
 
+import io
 import json
-from collections.abc import Callable
+import re
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
+import structlog
 
 from hal0.agents.hermes_api import DEFAULT_PROFILE
 from hal0.bridge import hermes_client
@@ -494,6 +497,125 @@ async def test_events_connect_error_is_unavailable(gw_down: HermesGateway) -> No
     with pytest.raises(HermesUnavailable):
         async for _ in gw_down.events(DEFAULT_PROFILE, "run_a", last_seq=0):
             pass
+
+
+# -- a failure never carries the key into a log (#3137) -----------------------------------
+
+#: ``API_SERVER_HOST=[::1`` written into the Hermes home: an address httpx cannot parse.
+_BAD_BASE = "http://[::1:8642"
+
+
+def _journal_render(exc: BaseException) -> str:
+    """``exc`` as hal0-api's journal prints it: structlog's rich traceback, frame locals on.
+
+    ``hal0 serve`` keeps structlog's default renderer, which shows every frame's
+    locals (#3137); a wide console keeps a value on one line.
+    """
+    sio = io.StringIO()
+    formatter = structlog.dev.RichTracebackFormatter(show_locals=True, width=400)
+    formatter(sio, (type(exc), exc, exc.__traceback__))
+    return re.sub(r"\x1b\[[0-9;]*m", "", sio.getvalue())
+
+
+async def _raised(call: Awaitable[Any]) -> BaseException:
+    """The exception ``call`` raises, caught here so the traceback holds no test frame."""
+    try:
+        await call
+    except BaseException as exc:
+        return exc
+    raise AssertionError("the call did not raise")
+
+
+async def _drain(stream: AsyncIterator[Any]) -> None:
+    async for _ in stream:
+        pass
+
+
+def test_the_journal_renderer_prints_frame_locals() -> None:
+    """Control for the tests below: a key held in a local does show up in the render."""
+
+    def holds_a_header(key: str) -> None:
+        headers = {"Authorization": f"Bearer {key}"}
+        raise RuntimeError(len(headers))
+
+    with pytest.raises(RuntimeError) as e:
+        holds_a_header("control-key-0123456789abcdef")
+    assert "control-key-0123456789abcdef" in _journal_render(e.value)
+
+
+@pytest.mark.parametrize("call", ["request", "events"])
+async def test_an_address_httpx_cannot_parse_is_unavailable_and_hides_the_key(
+    fake: FakeHermes, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, call: str
+) -> None:
+    """``httpx.InvalidURL`` is no ``httpx.HTTPError``: it must still become a bridge error.
+
+    Escaping as itself, it reached ``log.error(exc_info=True)`` in the MCP tool
+    guard (and ``log.exception`` in the run watcher), and the rendered frame
+    locals printed the profile's key.
+    """
+    monkeypatch.setattr(hermes_client, "api_server_base", lambda home: _BAD_BASE)
+    gw = HermesGateway(home=tmp_path, environ=fake.environ(), transport=fake.transport())
+    if call == "request":
+        exc = await _raised(gw.get_run(DEFAULT_PROFILE, "run_x"))
+    else:
+        exc = await _raised(_drain(gw.events(DEFAULT_PROFILE, "run_x", last_seq=0)))
+    assert isinstance(exc, HermesUnavailable), repr(exc)
+    assert exc.status == 502
+    assert "InvalidURL" in exc.message
+    key = fake.keys[DEFAULT_PROFILE]
+    assert key not in exc.message
+    assert key not in _journal_render(exc)
+
+
+@pytest.mark.parametrize("call", ["request", "events"])
+async def test_any_transport_failure_is_unavailable_and_hides_the_key(
+    fake: FakeHermes, tmp_path: Path, call: str
+) -> None:
+    """Not only httpx's own errors: whatever the HTTP call raises maps to ``HermesUnavailable``."""
+    gw = _gateway_with(_down(RuntimeError("transport broke")), fake, tmp_path)
+    if call == "request":
+        exc = await _raised(gw.stop(DEFAULT_PROFILE, "run_x"))
+    else:
+        exc = await _raised(_drain(gw.events(DEFAULT_PROFILE, "run_x", last_seq=0)))
+    assert isinstance(exc, HermesUnavailable), repr(exc)
+    assert "transport broke" in exc.message
+    assert fake.keys[DEFAULT_PROFILE] not in _journal_render(exc)
+
+
+async def test_an_error_text_never_carries_the_authorization_header(
+    fake: FakeHermes, tmp_path: Path
+) -> None:
+    """An httpx error whose text quotes the header (h11 does, for a bad value) is masked."""
+    key = fake.keys[DEFAULT_PROFILE]
+    leaky = httpx.LocalProtocolError(f"Illegal header value b'Bearer {key}'")
+    gw = _gateway_with(_down(leaky), fake, tmp_path)
+    exc = await _raised(gw.get_run(DEFAULT_PROFILE, "run_x"))
+    assert isinstance(exc, HermesUnavailable)
+    assert key not in exc.message
+    assert key not in _journal_render(exc)
+
+
+async def test_an_error_text_drops_url_userinfo(fake: FakeHermes, tmp_path: Path) -> None:
+    gw = _gateway_with(
+        _down(httpx.ConnectError("cannot reach http://hal0:s3cret-pass@127.0.0.1:8642/v1/runs")),
+        fake,
+        tmp_path,
+    )
+    exc = await _raised(gw.get_run(DEFAULT_PROFILE, "run_x"))
+    assert isinstance(exc, HermesUnavailable)
+    assert "s3cret-pass" not in exc.message
+    assert "http://127.0.0.1:8642/v1/runs" in exc.message
+
+
+async def test_the_unkeyed_error_still_passes_through_the_mapping(tmp_path: Path) -> None:
+    """``bridge.agent_unkeyed`` is a bridge error of its own, not an unavailable Hermes."""
+    gw = HermesGateway(home=tmp_path, environ={})
+    for call in (
+        gw.get_run(DEFAULT_PROFILE, "r"),
+        _drain(gw.events(DEFAULT_PROFILE, "r", last_seq=0)),
+    ):
+        exc = await _raised(call)
+        assert isinstance(exc, BridgeError) and exc.code == "bridge.agent_unkeyed"
 
 
 async def test_events_ends_at_the_total_deadline(

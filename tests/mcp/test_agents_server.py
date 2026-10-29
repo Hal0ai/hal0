@@ -625,6 +625,59 @@ async def test_an_unexpected_exception_becomes_bridge_internal(
     assert "disk I/O" in entry["error"] and entry.get("exc_info") is True
 
 
+async def test_an_unparseable_hermes_address_never_puts_the_key_in_the_log(
+    store: BridgeStore, fake: FakeHermes, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reviewer's leak probe (#3137): ``API_SERVER_HOST=[::1`` and ``hal0 serve``'s logging.
+
+    ``httpx.InvalidURL`` used to escape the Hermes client, reach the guard's
+    ``log.error(exc_info=True)`` and print the profile key from the frame locals.
+    It is now ``bridge.agent_unavailable``, which is never logged with a traceback.
+    """
+    import io
+    import re
+
+    import structlog
+
+    from hal0.bridge import hermes_client
+
+    monkeypatch.setattr(hermes_client, "api_server_base", lambda home: "http://[::1:8642")
+    service = BridgeService(
+        store=store,
+        gateway=HermesGateway(home=tmp_path, environ=fake.environ(), transport=fake.transport()),
+        config=BridgeConfig(),
+        approval_queue=None,
+        events=None,
+        timing=FAST,
+    )
+    sio = io.StringIO()
+    saved = structlog.get_config()
+    structlog.configure(
+        processors=[
+            structlog.processors.add_log_level,
+            structlog.dev.ConsoleRenderer(
+                colors=False,
+                exception_formatter=structlog.dev.RichTracebackFormatter(
+                    show_locals=True, width=400
+                ),
+            ),
+        ],
+        logger_factory=structlog.PrintLoggerFactory(file=sio),
+        cache_logger_on_first_use=False,
+    )
+    try:
+        with pytest.raises(Exception) as e:
+            await _server(service, CC).call_tool("agent_run", {"agent": "hermes", "input": "hi"})
+    finally:
+        structlog.configure(**saved)
+        await service.close()
+    assert "bridge.agent_unavailable" in str(e.value)
+    assert "bridge.internal" not in str(e.value)
+    logged = re.sub(r"\x1b\[[0-9;]*m", "", sio.getvalue())
+    assert fake.keys["default"] not in logged
+    assert fake.keys["default"] not in str(e.value)
+
+
 async def test_a_bridge_error_passes_through_unchanged() -> None:
     class _Refusing(_Recorder):
         async def get_run(self, *_a: Any, **_kw: Any) -> Any:

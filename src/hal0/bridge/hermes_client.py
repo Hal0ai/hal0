@@ -17,7 +17,17 @@ Hermes serves the default profile at ``/v1/runs`` and a named profile under
   the stream ends, and the run watcher reconnects with ``Last-Event-ID``;
 * it reports exactly two failures, :class:`HermesUnavailable` (nothing usable
   came back) and :class:`HermesRefused` (Hermes answered with an error), both
-  :class:`~hal0.bridge.errors.BridgeError`.
+  :class:`~hal0.bridge.errors.BridgeError`. Whatever the HTTP call raises
+  becomes one of them, not only ``httpx.HTTPError``: an address httpx cannot
+  parse raises ``httpx.InvalidURL``, which is not one.
+
+A failure never carries the key into a log. ``hal0 serve`` renders tracebacks
+with every frame's locals (#3137), so the ``Authorization`` header is built in
+the call rather than held in a local, a failure is raised without its httpx
+cause chained (the httpx frames hold the header), and its text has the bearer
+token and any URL userinfo masked. A :class:`~hal0.bridge.errors.BridgeError`
+is never logged with its traceback, so mapping to one keeps the frames out of
+the journal too.
 
 Timeouts follow ADR-0035 decision 5 (the Hermes upstreams use 600 s idle and
 1800 s total for streams): 600 s read, and :data:`EVENTS_DEADLINE_S` for a whole
@@ -45,6 +55,7 @@ from hal0.agents.hermes_api import (
     hermes_home,
 )
 from hal0.bridge.errors import BridgeError
+from hal0.redaction import redact_log_line
 
 __all__ = ["EVENTS_DEADLINE_S", "HermesGateway", "HermesRefused", "HermesUnavailable"]
 
@@ -65,6 +76,9 @@ _PROFILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 
 #: Longest error text copied from a Hermes response into a bridge error.
 _MAX_ERROR_TEXT = 300
+
+#: The ``user:password@`` of a URL quoted in an error text.
+_URL_USERINFO = re.compile(r"(?<=://)[^/@\s]*@")
 
 
 class HermesUnavailable(BridgeError):
@@ -178,12 +192,19 @@ class HermesGateway:
         headers: Mapping[str, str] | None = None,
     ) -> httpx.Response:
         url = self.base_for(profile) + path
-        request_headers = self._headers(profile, headers)
         try:
             async with self._client() as client:
-                resp = await client.request(method, url, json=body, headers=request_headers)
-        except httpx.HTTPError as exc:
-            raise _unavailable(profile, exc) from exc
+                # The key goes straight into the call, never into a local of this
+                # frame: a traceback rendered with locals (#3137) would print it.
+                resp = await client.request(
+                    method, url, json=body, headers=self._headers(profile, headers)
+                )
+        except BridgeError:  # bridge.agent_unkeyed
+            raise
+        except Exception as exc:
+            # Not only httpx.HTTPError: httpx.InvalidURL is not one. ``from None``
+            # keeps the httpx frames (which hold the header) out of any traceback.
+            raise _unavailable(profile, exc) from None
         if resp.status_code >= 400:
             raise _refusal(resp, profile)
         return resp
@@ -330,16 +351,15 @@ class HermesGateway:
         :class:`HermesRefused`.
         """
         url = self.base_for(profile) + _run_path(run_id, "events")
-        headers = self._headers(
-            profile, {"Accept": "text/event-stream", "Last-Event-ID": str(last_seq)}
-        )
+        extra = {"Accept": "text/event-stream", "Last-Event-ID": str(last_seq)}
         deadline = time.monotonic() + EVENTS_DEADLINE_S
         seq: int | None = None
         data: list[str] = []
         try:
             async with (
                 self._client() as client,
-                client.stream("GET", url, headers=headers) as resp,
+                # As in _request: the key is never a local of this frame (#3137).
+                client.stream("GET", url, headers=self._headers(profile, extra)) as resp,
             ):
                 if resp.status_code >= 400:
                     await resp.aread()
@@ -366,8 +386,10 @@ class HermesGateway:
                 event = _frame_to_event(run_id, seq, data)
                 if event is not None:
                     yield event
-        except httpx.HTTPError as exc:
-            raise _unavailable(profile, exc) from exc
+        except BridgeError:  # HermesRefused, bridge.agent_unkeyed
+            raise
+        except Exception as exc:
+            raise _unavailable(profile, exc) from None
 
 
 def _run_path(run_id: str, action: str = "") -> str:
@@ -397,9 +419,17 @@ def _frame_to_event(run_id: str, seq: int | None, data: list[str]) -> dict[str, 
     return payload
 
 
-def _unavailable(profile: str, exc: httpx.HTTPError) -> HermesUnavailable:
-    detail = str(exc) or type(exc).__name__
-    return HermesUnavailable(f"Hermes profile {profile!r} is unavailable: {detail}")
+def _unavailable(profile: str, exc: Exception) -> HermesUnavailable:
+    """``exc`` from the HTTP call as :class:`HermesUnavailable`, its text safe to log.
+
+    The text names the exception type and keeps httpx's detail with any URL
+    userinfo dropped and any bearer token masked (an h11 header error quotes the
+    header's value).
+    """
+    detail = redact_log_line(_URL_USERINFO.sub("", str(exc)))[:_MAX_ERROR_TEXT]
+    name = type(exc).__name__
+    text = f"{name}: {detail}" if detail else name
+    return HermesUnavailable(f"Hermes profile {profile!r} is unavailable: {text}")
 
 
 def _refusal(resp: httpx.Response, profile: str) -> HermesRefused:
