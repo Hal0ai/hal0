@@ -20,7 +20,10 @@ const STATE_TONE = { serving: 'ok', ready: 'warn', down: 'err', unknown: 'dim' }
 // The same event the topbar and the board toolbar dispatch; main.jsx listens for it.
 const openAgentChat = () => window.dispatchEvent(new CustomEvent('hal0:toggle-agent-chat'))
 
-function emptyRunsLine(clients) {
+// A failed or pending runs read is not an empty answer: only a successful empty list says "No delegated runs".
+function runsEmptyLine(runsQ, clients) {
+  if (runsQ.isError) return 'delegated runs unavailable'
+  if (runsQ.isPending || !runsQ.data) return '—'
   const base = 'No delegated runs in the last 24 h'
   if (!Array.isArray(clients)) return base
   return `${base} · ${clients.length} bridge client${clients.length === 1 ? '' : 's'} paired`
@@ -124,7 +127,8 @@ function OvAgents({ onGo }) {
 
   const nowS = Math.floor(Date.now() / 1000)
   const runs = (runsQ.data?.items || []).map((r) => runRow(r, nowS))
-  const running = runs.filter((r) => r.dot === 'serving').length
+  const runsKnown = !runsQ.isError && !runsQ.isPending && !!runsQ.data
+  const running = runsKnown ? runs.filter((r) => r.dot === 'serving').length : null
   const board = inProgress(stats)
 
   return (
@@ -152,12 +156,12 @@ function OvAgents({ onGo }) {
       <PiAgent row={pi} />
       <div className="ov-card-h" style={{ borderTop: '1px solid var(--line-soft)' }}>
         <span className="ov-card-t">Delegated runs</span>
-        <span className="ov-card-n">{running} running</span>
+        <span className="ov-card-n">{running === null ? '—' : running} running</span>
         <span className="sp" />
         <span className="ov-card-n">board · {board === null ? '—' : board + ' in progress'}</span>
       </div>
       {runs.length === 0 ? (
-        <div className="ov-empty">{emptyRunsLine(clients)}</div>
+        <div className="ov-empty">{runsEmptyLine(runsQ, clients)}</div>
       ) : (
         <div className="ov-runs">
           {runs.map((r) => (

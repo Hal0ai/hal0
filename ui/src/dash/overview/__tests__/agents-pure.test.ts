@@ -107,6 +107,12 @@ describe('runRow', () => {
       dot: 'ready',
     }))
 
+  it('says waiting on input for a clarification wait even when pending is set', () =>
+    expect(runRow({ ...RUN, status: 'waiting_for_clarification', pending: { q: 'which?' } }, 1100)).toMatchObject({
+      time: 'waiting on input',
+      dot: 'ready',
+    }))
+
   it('formats a queued run', () =>
     expect(runRow({ ...RUN, status: 'queued' }, 1100)).toMatchObject({ time: 'queued', dot: 'ready' }))
 

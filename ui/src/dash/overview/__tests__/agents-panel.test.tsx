@@ -15,6 +15,7 @@ let runs: any[] | undefined = []
 let clients: any[] | undefined = []
 let boardStats: any = { total: 7, by_status: { in_progress: 2, done: 5 } }
 let slots: any[] = []
+let runsState: { isError?: boolean; isPending?: boolean } = {}
 
 vi.mock('@/api/hooks/useAgents', () => ({
   useAgents: () => ({ data: { agents: [] } }),
@@ -22,7 +23,7 @@ vi.mock('@/api/hooks/useAgents', () => ({
 }))
 vi.mock('@/api/hooks/useSlots', () => ({ useSlots: () => ({ data: slots }) }))
 vi.mock('@/api/hooks/useBridge', () => ({
-  useBridgeRuns: () => ({ data: runs ? { items: runs } : undefined }),
+  useBridgeRuns: () => ({ data: runs ? { items: runs } : undefined, isError: false, isPending: false, ...runsState }),
   useBridgeClients: () => ({ data: clients ? { items: clients } : undefined }),
 }))
 vi.mock('@/api/hooks/useBoard', () => ({ useBoardStats: () => ({ data: boardStats }) }))
@@ -49,6 +50,7 @@ beforeEach(() => {
   clients = [{ name: 'claude-code' }]
   boardStats = { total: 7, by_status: { in_progress: 2, done: 5 } }
   slots = []
+  runsState = {}
   ;(window as any).__hal0UseAgentPersonas = () => ({ data: { active: 'Hermes', personas: [] } })
   ;(window as any).__hal0PrimarySlot = (s: any[]) => s[0] ?? null
   ;(window as any).__hal0DeriveCardModel = undefined
@@ -108,6 +110,23 @@ describe('OvAgents', () => {
     mount()
     expect(host.querySelectorAll('.ov-run')).toHaveLength(0)
     expect(host.querySelector('.ov-empty')?.textContent).toBe('No delegated runs in the last 24 h · 1 bridge client paired')
+  })
+
+  it('does not claim an empty list when the runs read failed', () => {
+    runs = undefined
+    runsState = { isError: true }
+    mount()
+    expect(host.querySelector('.ov-empty')?.textContent).toBe('delegated runs unavailable')
+    expect(host.textContent).not.toContain('No delegated runs')
+    expect(host.textContent).toContain('— running')
+  })
+
+  it('shows a dash while the runs read is pending', () => {
+    runs = undefined
+    runsState = { isPending: true }
+    mount()
+    expect(host.querySelector('.ov-empty')?.textContent).toBe('—')
+    expect(host.textContent).toContain('— running')
   })
 
   it('pluralises clients and drops the count when clients are unread', () => {

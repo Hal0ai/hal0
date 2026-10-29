@@ -186,10 +186,10 @@ export function runRow(r: BridgeRun, nowS: number): RunRow {
   }
   const rel = relTime(r.updated_at, nowS)
   const live = !['completed', 'done', 'failed', 'cancelled', 'interrupted', 'unknown'].includes(status)
+  if (LIVE_WAIT[status]) return { ...base, time: LIVE_WAIT[status], dot: 'ready' }
   if (live && r.pending != null && r.pending !== false) {
     return { ...base, time: 'waiting on approval', dot: 'ready' }
   }
-  if (LIVE_WAIT[status]) return { ...base, time: LIVE_WAIT[status], dot: 'ready' }
   switch (status) {
     case 'running':
       return { ...base, time: `running · ${elapsed(nowS - r.created_at)}`, dot: 'serving' }
