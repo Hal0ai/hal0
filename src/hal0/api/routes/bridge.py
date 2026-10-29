@@ -153,6 +153,15 @@ router = APIRouter()
 _gated = APIRouter(dependencies=[Depends(_require_enabled)])
 
 
+async def _agent_tool_names(request: Request) -> list[str]:
+    """Names of the tools the ``hal0-agents`` MCP server lists, or ``[]`` when it is not mounted."""
+    servers: dict[str, Any] = getattr(request.app.state, "mcp_servers", None) or {}
+    server = servers.get("hal0-agents")
+    if server is None:
+        return []
+    return [tool.name for tool in await server.list_tools()]
+
+
 def _store(request: Request) -> BridgeStore:
     """Return the process's bridge store, or refuse with 503 when it could not be opened."""
     store: BridgeStore | None = getattr(request.app.state, "bridge_store", None)
@@ -493,8 +502,8 @@ async def get_me(request: Request) -> dict[str, Any]:
     """Who the caller is and which MCP servers it may reach.
 
     A bridge client sees its own record. The operator's admin credential sees
-    ``name: "admin"`` and every server. ``tools`` is empty until the
-    ``hal0-agents`` server (a later task) lists its tool names here. The caller
+    ``name: "admin"`` and every server. ``tools`` names the tools of the
+    ``hal0-agents`` server, empty while that server is not mounted. The caller
     is the principal the auth middleware judged
     (:func:`hal0.api.auth.judged_principal`); its key is not verified again.
     """
@@ -507,7 +516,7 @@ async def get_me(request: Request) -> dict[str, Any]:
             "created_at": None,
             "last_seen_at": None,
             "servers": _servers_for(frozenset(_ADMIN_SCOPES)),
-            "tools": [],  # filled from the hal0-agents server's tool list once it exists
+            "tools": await _agent_tool_names(request),
         }
     if principal.tier != "bridge" or principal.name is None:
         raise Unauthorized("A bridge client key or the admin key is required.")
@@ -521,7 +530,7 @@ async def get_me(request: Request) -> dict[str, Any]:
         "created_at": row.created_at,
         "last_seen_at": row.last_seen_at,
         "servers": _servers_for(row.scopes),
-        "tools": [],  # as above
+        "tools": await _agent_tool_names(request),
     }
 
 

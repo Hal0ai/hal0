@@ -521,13 +521,17 @@ Multi-user hardening of the rule is a future concern.
 
 ### MCP server (hal0-exposed)
 
-hal0 exposes two MCP servers:
+hal0 exposes three MCP servers:
 - `/mcp/admin` — wraps existing `/api/*` routes (slot/model/hardware/log
   admin). Tool catalog rule: ships iff it maps to an existing route.
 - `/mcp/memory` — wraps the Hindsight memory surface.
+- `/mcp/agents` (`hal0-agents`) — the agent bridge's run tools (ADR-0043):
+  start, wait for, steer, stop and read runs on Hermes profiles. A projection
+  of `BridgeService`; mounted whenever `[bridge].enabled` is on.
 
-Both reachable by any MCP-speaking client: bundled agents, Claude Code,
-future RAG services. Auth via the API's existing Bearer token.
+All reachable by any MCP-speaking client: bundled agents, Claude Code,
+future RAG services. Auth via the API's existing Bearer token; `/mcp/agents`
+also accepts a bridge client key.
 
 ### memory
 

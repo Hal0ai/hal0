@@ -11,6 +11,8 @@ operators can widen the allowlist without losing the secure default.
 
 from __future__ import annotations
 
+import pytest
+
 from hal0.api.mcp_mount import _mcp_transport_security
 
 
@@ -135,3 +137,118 @@ def test_unconfigured_host_still_rejected(monkeypatch):
 
     # Protection is still live for hosts outside the allowlist.
     assert resp.status_code == 421
+
+
+# -- the box's own names are allowed without any setup (ADR-0043) --------------------------
+
+
+def _post_initialize(client, host: str, **extra_headers: str):
+    return client.post(
+        "/mcp",
+        headers={
+            "Host": host,
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            **extra_headers,
+        },
+        json=_initialize_body(),
+    )
+
+
+@pytest.fixture
+def box(monkeypatch):
+    """A box with one LAN address, a hostname and no ``[network].public_url``."""
+    from hal0.api import mcp_mount
+
+    monkeypatch.delenv("HAL0_MCP_ALLOWED_HOSTS", raising=False)
+    monkeypatch.delenv("HAL0_MCP_ALLOWED_ORIGINS", raising=False)
+    monkeypatch.delenv("HAL0_PORT", raising=False)
+    monkeypatch.setenv("HAL0_HOSTNAME", "strix")
+    monkeypatch.setattr("hal0.config.network.detect_lan_ips", lambda: ["10.0.0.5"])
+    monkeypatch.setattr(mcp_mount, "_box_public_authority", lambda: None)
+
+
+def test_a_remote_client_reaching_the_lan_address_passes(monkeypatch, box):
+    """A bridge client on another machine sends ``Host: <lan ip>:<api port>``."""
+    with _streamable_client(monkeypatch) as client:
+        assert _post_initialize(client, "10.0.0.5:8080").status_code != 421
+        assert _post_initialize(client, "10.0.0.5").status_code != 421
+
+
+def test_the_hostname_and_mdns_name_pass(monkeypatch, box):
+    with _streamable_client(monkeypatch) as client:
+        for host in ("strix", "strix:8080", "strix.local", "strix.local:8080"):
+            assert _post_initialize(client, host).status_code != 421, host
+
+
+def test_an_unrelated_host_still_fails(monkeypatch, box):
+    with _streamable_client(monkeypatch) as client:
+        assert _post_initialize(client, "10.0.0.6:8080").status_code == 421
+        assert _post_initialize(client, "attacker.example:8080").status_code == 421
+
+
+def test_the_api_port_follows_hal0_port(monkeypatch, box):
+    monkeypatch.setenv("HAL0_PORT", "9090")
+    sec = _mcp_transport_security()
+    assert {"10.0.0.5:9090", "strix:9090", "strix.local:9090"} <= set(sec.allowed_hosts)
+    assert "10.0.0.5:8080" not in sec.allowed_hosts
+
+
+def test_box_origins_are_allowed_too(box):
+    sec = _mcp_transport_security()
+    assert {
+        "http://10.0.0.5",
+        "http://10.0.0.5:8080",
+        "http://strix.local:8080",
+        "http://strix:8080",
+    } <= set(sec.allowed_origins)
+    assert "http://attacker.example:8080" not in sec.allowed_origins
+
+
+def test_the_public_url_host_is_allowed(monkeypatch, box):
+    from hal0.api import mcp_mount
+
+    monkeypatch.setattr(
+        mcp_mount, "_box_public_authority", lambda: ("https", "hal0.example.com", None)
+    )
+    sec = _mcp_transport_security()
+    assert {"hal0.example.com", "hal0.example.com:8080"} <= set(sec.allowed_hosts)
+    assert "https://hal0.example.com" in sec.allowed_origins
+
+
+def test_the_public_url_port_is_kept(monkeypatch, box):
+    from hal0.api import mcp_mount
+
+    monkeypatch.setattr(
+        mcp_mount, "_box_public_authority", lambda: ("https", "hal0.example.com", 8443)
+    )
+    sec = _mcp_transport_security()
+    assert "hal0.example.com:8443" in sec.allowed_hosts
+    assert "https://hal0.example.com:8443" in sec.allowed_origins
+
+
+def test_the_public_url_comes_from_hal0_toml(monkeypatch, tmp_path):
+    """``[network].public_url`` is read from config; a broken config reads as unset."""
+    from hal0.api import mcp_mount
+    from hal0.config.schema import Hal0Config, NetworkConfig
+
+    cfg = Hal0Config(network=NetworkConfig(public_url="https://hal0.example.com:8443/base"))
+    monkeypatch.setattr("hal0.config.loader.load_hal0_config", lambda *a, **k: cfg)
+    assert mcp_mount._box_public_authority() == ("https", "hal0.example.com", 8443)
+
+    def _broken(*_a, **_k):
+        raise PermissionError("hal0.toml")
+
+    monkeypatch.setattr("hal0.config.loader.load_hal0_config", _broken)
+    assert mcp_mount._box_public_authority() is None
+
+
+def test_operator_hosts_are_added_to_the_box_names(monkeypatch, box):
+    monkeypatch.setenv("HAL0_MCP_ALLOWED_HOSTS", "edge.example:443")
+    sec = _mcp_transport_security()
+    assert {"edge.example:443", "10.0.0.5:8080", "127.0.0.1:*"} <= set(sec.allowed_hosts)
+
+
+def test_wildcard_still_disables_protection_with_box_names(monkeypatch, box):
+    monkeypatch.setenv("HAL0_MCP_ALLOWED_HOSTS", "*")
+    assert _mcp_transport_security().enable_dns_rebinding_protection is False

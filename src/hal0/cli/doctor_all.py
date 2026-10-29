@@ -42,9 +42,10 @@ import shutil
 import sqlite3
 import stat
 import subprocess
+import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import typer
 from rich.console import Console
@@ -60,6 +61,10 @@ from hal0.cli.doctor_verify import (
 )
 from hal0.config import paths
 from hal0.system.seam_check import REMEDIATION, SeamStatus, probe_seams
+
+if TYPE_CHECKING:
+    from hal0.bridge.hermes_client import HermesGateway
+    from hal0.bridge.store import BridgeStore
 
 console = Console()
 
@@ -1718,6 +1723,136 @@ def check_bridge_store(
     return Check(key, label, _PASS, detail)
 
 
+#: How long a run may wait on an approval or a clarification before the doctor flags it.
+_BRIDGE_STUCK_RUN_S = 3600.0
+
+
+def _agent_mount_present(base: str | None) -> bool | None:
+    """Whether ``GET /api/mcp/servers`` lists ``hal0-agents``; None when hal0-api does not answer."""
+    payload = _get_any("/api/mcp/servers", base)
+    if not isinstance(payload, dict):
+        return None
+    servers = payload.get("servers")
+    return isinstance(servers, list) and any(
+        isinstance(item, dict) and item.get("id") == "hal0-agents" for item in servers
+    )
+
+
+def _live_bridge_runs(store: BridgeStore | None) -> tuple[int, int]:
+    """``(live runs, runs waiting on a pending request for over an hour)`` in the run ledger.
+
+    A run that waits on an approval or a clarification does not change its row
+    while it waits, so ``updated_at`` is when the wait began. With no ``store``
+    the default ``bridge.db`` is opened read-only (``mode=ro``): the row never
+    creates or migrates it. A missing or unreadable file counts as no runs.
+    """
+    from hal0.bridge.store import TERMINAL_STATUSES
+
+    rows: list[tuple[str | None, float]]
+    if store is not None:
+        rows = [(r.pending_request_json, r.updated_at) for r in store.live_runs()]
+    else:
+        db = paths.bridge_db()
+        if not os.access(db, os.R_OK):
+            return 0, 0
+        marks = ", ".join("?" for _ in TERMINAL_STATUSES)
+        try:
+            conn = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True, timeout=2.0)
+            try:
+                rows = conn.execute(
+                    "SELECT pending_request_json, updated_at FROM runs "
+                    f"WHERE status NOT IN ({marks})",
+                    sorted(TERMINAL_STATUSES),
+                ).fetchall()
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return 0, 0
+    cutoff = time.time() - _BRIDGE_STUCK_RUN_S
+    waiting = sum(1 for pending, updated_at in rows if pending is not None and updated_at < cutoff)
+    return len(rows), waiting
+
+
+def check_agent_bridge(
+    *,
+    enabled: bool | None = None,
+    mounted: bool | None = None,
+    gateway: HermesGateway | None = None,
+    store: BridgeStore | None = None,
+    base: str | None = None,
+) -> Check:
+    """The agent bridge can take a delegated run: mounted, Hermes up, nothing stuck (ADR-0043).
+
+    ``enabled`` is ``[bridge].enabled`` unless a caller pins it. ``mounted`` is
+    whether hal0-api serves ``hal0-agents`` (probed via ``GET /api/mcp/servers``
+    against ``base`` when not pinned), ``gateway`` the Hermes gateway to ask
+    (default: the box's own), and ``store`` the run ledger to count runs in
+    (default: ``bridge.db``, read-only).
+
+    * ``[bridge].enabled`` off: PASS "disabled".
+    * Enabled but ``hal0-agents`` is not mounted: FAIL "mount missing while
+      enabled". Delegation cannot work until hal0-api is restarted with it.
+    * hal0-api not answering, so the mount cannot be checked; the Hermes
+      gateway's default ``/health`` not answering 200; or runs waiting on an
+      approval or a clarification for over an hour: WARN. These add up in one
+      row.
+    * Otherwise PASS "<n> profiles keyed, <m> live runs": the served Hermes
+      profiles hal0 holds an API key for, and the runs in flight.
+
+    ADVISORY (never critical): the bridge is an optional surface and the rest of
+    hal0 works without it.
+    """
+    key, label = "agent-bridge", "Agent bridge"
+    if enabled is None:
+        enabled = _bridge_config_enabled()
+    if not enabled:
+        return Check(key, label, _PASS, "disabled ([bridge].enabled = false)")
+    if mounted is None:
+        mounted = _agent_mount_present(base)
+    if mounted is False:
+        return Check(
+            key,
+            label,
+            _FAIL,
+            "mount missing while enabled: /mcp/agents is not served; "
+            "restart hal0-api (and check `hal0 doctor` for a failed MCP mount)",
+        )
+
+    from hal0.agents.hermes_api import gateway_alive, served_profiles
+    from hal0.bridge.errors import BridgeError
+    from hal0.bridge.hermes_client import HermesGateway
+
+    problems: list[str] = []
+    if mounted is None:
+        problems.append("hal0-api is not answering, so the /mcp/agents mount is unchecked")
+    gw = gateway if gateway is not None else HermesGateway()
+    home = gw.home
+    alive = gateway_alive(home)
+    if not alive:
+        problems.append("Hermes gateway not answering")
+    keyed = 0
+    if alive:
+        for profile in served_profiles(home):
+            try:
+                gw.key_for(profile)
+            except BridgeError:
+                continue
+            keyed += 1
+    live, waiting = _live_bridge_runs(store)
+    if waiting:
+        problems.append(
+            f"{waiting} run{'' if waiting == 1 else 's'} waiting on an approval or answer "
+            "for over 1 h"
+        )
+    summary = (
+        f"{keyed} profile{'' if keyed == 1 else 's'} keyed, "
+        f"{live} live run{'' if live == 1 else 's'}"
+    )
+    if problems:
+        return Check(key, label, _WARN, "; ".join([*problems, summary]))
+    return Check(key, label, _PASS, summary)
+
+
 def check_hermes_generation_extras(*, home: Path | None = None, venv: Path | None = None) -> Check:
     """A committed pm generation for the live release must carry its extras (#2891).
 
@@ -2462,6 +2597,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_hermes_mcp_config_auth(auth=auth_payload),
         check_hermes_profiles_mcp(auth=auth_payload),
         check_bridge_store(api_running=payloads["health"] is not None),
+        check_agent_bridge(base=base),
         check_hermes_generation_extras(),
         check_hermes_command_approvals(),
         check_hermes_delegation_slot(slots_payload),
@@ -2552,6 +2688,7 @@ def doctor_all_cmd(
 __all__ = [
     "SLOTS_PROBE_TIMEOUT_S",
     "build_all_checks",
+    "check_agent_bridge",
     "check_auth_posture",
     "check_hal0_target",
     "check_hermes_anchor_window",

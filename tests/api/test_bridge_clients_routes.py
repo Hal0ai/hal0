@@ -23,6 +23,19 @@ from hal0.config import paths
 
 ADMIN_KEY = "admin-key-for-bridge-routes"
 
+#: The tools of the ``hal0-agents`` MCP server, as ``/api/bridge/me`` lists them.
+AGENT_TOOLS = [
+    "agents_list",
+    "agent_run",
+    "agent_run_wait",
+    "agent_run_status",
+    "agent_run_events",
+    "agent_run_answer",
+    "agent_run_steer",
+    "agent_run_stop",
+    "agent_runs_list",
+]
+
 
 def bearer(value: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {value}"}
@@ -389,7 +402,7 @@ def test_me_as_admin(admin_client: TestClient) -> None:
     assert body["tier"] == "admin"
     assert body["scopes"] == ["agents", "memory", "admin"]
     assert body["servers"] == ["hal0-agents", "hal0-memory", "hal0-admin"]
-    assert body["tools"] == []
+    assert body["tools"] == AGENT_TOOLS
     assert body["created_at"] is None and body["last_seen_at"] is None
 
 
@@ -403,7 +416,7 @@ def test_me_as_a_bridge_client(admin_client: TestClient) -> None:
     assert isinstance(body["created_at"], float)
     # The verify that authenticated this very request stamped the row.
     assert isinstance(body["last_seen_at"], float)
-    assert body["tools"] == []
+    assert body["tools"] == AGENT_TOOLS
 
 
 def test_me_servers_follow_the_scopes(admin_client: TestClient) -> None:

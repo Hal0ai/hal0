@@ -25,7 +25,7 @@ Endpoints
     POST   /api/mcp/{id}/{action}      — start/stop/restart — stubs 501
                                           pending the stdio supervisor (ADR-0015).
 
-Bundled servers (``hal0-admin``, ``hal0-memory``) are uninstall-protected;
+Bundled servers (``hal0-admin``, ``hal0-memory``, ``hal0-agents``) are uninstall-protected;
 the route returns ``409 mcp.bundled`` rather than letting the registry
 file system shadow the in-process FastMCP mount.
 """

@@ -537,12 +537,14 @@ content-addressed, host-redacted archive you can attach anywhere, and
 
 ### Agents, MCP, and the brain steward
 
-hal0 ships **two MCP servers** and **two bundled agents**. The MCP servers
+hal0 ships **three MCP servers** and **two bundled agents**. The MCP servers
 (`/mcp/admin` for slot / model / capability / config / hardware / log admin,
-`/mcp/memory` for Hindsight-backed long-term memory) are reachable by any
+`/mcp/memory` for Hindsight-backed long-term memory, `/mcp/agents` — the
+`hal0-agents` server — for delegating runs to Hermes) are reachable by any
 MCP-speaking client — Claude Code, RAG services, your own scripts.
 `/mcp/admin` is ADMIN-tier; `/mcp/memory` is CLIENT-tier as of 1.0, so a
-memory-only agent does not need the platform-admin key. The bundled agents
+memory-only agent does not need the platform-admin key; `/mcp/agents` takes a
+bridge client key from `hal0 bridge add` (or the admin key). The bundled agents
 are `Hermes-Agent` (service shape, via the hal0-owned `hermes` wrapper —
 `hal0-hermes` remains a back-compat symlink — connecting to `hal0-api` at
 `HAL0_INFERENCE_BASE=http://127.0.0.1:8080`) and `pi` (CLI shape, from

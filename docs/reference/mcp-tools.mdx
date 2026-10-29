@@ -1,15 +1,17 @@
 ---
 title: MCP tools reference
-description: "Every MCP tool hal0 exposes over hal0-admin and hal0-memory, gating rules, and how hal0 acts as an MCP client — verified against src/hal0/mcp in the v1.0 tree."
+description: "Every MCP tool hal0 exposes over hal0-admin, hal0-memory and hal0-agents, gating rules, and how hal0 acts as an MCP client — verified against src/hal0/mcp."
 sidebar:
   order: 90
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-hal0 mounts two [FastMCP](https://github.com/jlowin/fastmcp) (Streamable-HTTP) servers
-on the main FastAPI app: `hal0-admin` at `/mcp/admin` and `hal0-memory` at
-`/mcp/memory`.
+hal0 mounts three [FastMCP](https://github.com/jlowin/fastmcp) (Streamable-HTTP) servers
+on the main FastAPI app: `hal0-admin` at `/mcp/admin`, `hal0-memory` at
+`/mcp/memory` and `hal0-agents` at `/mcp/agents`. `hal0-agents` is for remote coding agents
+admitted with [`hal0 bridge`](/docs/reference/cli#hal0-bridge--admit-remote-coding-agents);
+it is mounted whenever `[bridge].enabled` is on (the default).
 
 Every Hermes profile is wired to both servers. hal0 writes `hal0-admin` and `hal0-memory` into each named profile's `config.yaml` as `hermes__<profile>`, with a private memory bank and the box bearer, at provisioning and on every hal0-api reconcile sweep (120 s). A profile opts out with `hal0: {wire_mcp: false}`. `hal0 doctor` reports the state on the `hermes_profiles_mcp` row.
 
@@ -322,6 +324,30 @@ it to `private:<client_id>`.
 same handlers — the admin server calls them in-process via a `memory_dispatcher`
 closure, with no HTTP hop.
 </Aside>
+
+## `hal0-agents` (`/mcp/agents`)
+
+The agent bridge's run tools ([ADR-0043](/docs/adr/0043-agent-bridge-and-bridge-keys)). A bridge client, or the box's admin key, starts a run on a Hermes profile, waits for it, answers its questions, steers or stops it, and reads its events. Every bridge client holds the `agents` scope, so every client can reach this server. Each tool has a typed signature, so `tools/list` returns real per-field schemas.
+
+A client sees only its own runs. A run another client owns is reported exactly like a run that does not exist (`bridge.run_not_found`), so run ids cannot be probed; the admin key sees every client's runs. `agent` is `hermes` (the default profile) or `hermes/<profile>`. `session_key` and `idempotency_key` are private to the calling client: hal0 prefixes them with the client's name before they reach Hermes.
+
+| Tool | Required | Returns |
+|---|---|---|
+| `agents_list` | none | `{agents: [...]}`: Hermes with each served profile (`name`, `agent_id`, `health`, `keyed`, `model_id`), and Pi, which is not runnable |
+| `agent_run` | `agent`, `input` | the run view: `run_id`, `agent`, `profile`, `client`, `status`, `created_at`, `updated_at`, `input_preview`, `output`, `error`, `usage`, `pending`, `last_seq`. Optional: `session_key`, `instructions`, `reasoning_effort`, `idempotency_key`, and `wait_s` (default `0`: return at once; above `0`, wait up to that many seconds, at most 600, like `agent_run_wait`) |
+| `agent_run_wait` | `run_id` | the run view plus `events_tail` (the last 20 events) and `timed_out`. Blocks until the run ends, asks a question, or `timeout_s` passes (default 120, at most 600) |
+| `agent_run_status` | `run_id` | the run view |
+| `agent_run_events` | `run_id` | `{run_id, events, last_seq}`: stored events with `seq` above `since_seq` (default 0), oldest first, `limit` at most 500 (default 100). Call again with `since_seq=last_seq` to follow a run |
+| `agent_run_answer` | `run_id`, `request_id`, `answer` | the run view. Answers the clarification in the run's `pending` field; the run resumes |
+| `agent_run_steer` | `run_id`, `input` | the run view. Adds guidance to a run that is `running` |
+| `agent_run_stop` | `run_id` | the run view, `stopping` until the run ends |
+| `agent_runs_list` | none | `{runs: [...]}`: the caller's runs, newest first. Optional: `status`, `limit` (at most 200; default 20) |
+
+A run that needs an approval waits for the operator in the hal0 inbox; an approval does not end `agent_run_wait`. A clarification does: the client answers it with `agent_run_answer`.
+
+Failures are raised, not returned: the call comes back with `isError` set and a message that starts with a stable code. `auth.forbidden` (403) is a caller with neither a bridge key nor the admin key. The `bridge.*` codes are `bridge.disabled` (the bridge is off, or not running yet), `bridge.unknown_agent`, `bridge.agent_unkeyed`, `bridge.agent_unavailable`, `bridge.agent_refused`, `bridge.run_not_found`, `bridge.too_many_runs` (the client's `[bridge].max_concurrent_runs_per_client` is reached), `bridge.idempotency_conflict`, `bridge.run_not_running`, `bridge.no_pending_request`, `bridge.invalid_session_key` and `bridge.invalid_idempotency_key`.
+
+A run's `output` and `error` pass through the log redactor before a remote machine sees them (bearer tokens, `*_KEY=` values and similar are masked). A text over 16 KiB is cut at 16 KiB, and the result then carries `truncated: true` and `more`, for example `agent_run_events(run_id, since_seq=12)`, naming the call that reads the rest. `hal0 doctor` reports the bridge on the `agent-bridge` row.
 
 ## MCP server management REST API
 
