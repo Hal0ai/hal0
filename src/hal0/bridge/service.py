@@ -19,6 +19,8 @@ both enforce the same rules:
 * **Waiting.** ``wait_run`` defaults to 120 s and is capped at 600 s. It returns
   when the run ends or needs the caller (a clarification is pending); an
   approval is the operator's to give in the inbox, so it does not end a wait.
+* **Shutdown.** After :meth:`BridgeService.close`, starting a run or re-attaching
+  is 503 ``bridge.unavailable``: a watcher started then could not be stopped.
 
 The :class:`~hal0.bridge.watcher.RunWatcher` keeps each live run's ledger row
 current and calls back on every change, which wakes waiters here.
@@ -194,6 +196,7 @@ class BridgeService:
         self._changed: dict[str, asyncio.Event] = {}
         self._start_locks: dict[str, asyncio.Lock] = {}
         self._admitting: set[asyncio.Task[None]] = set()
+        self._closed = False
         self._watcher = RunWatcher(
             store=store,
             gateway=gateway,
@@ -298,6 +301,7 @@ class BridgeService:
         ``agent`` is ``hermes`` (the default profile) or ``hermes/<profile>``. An
         idempotent replay of the caller's own run returns that run unchanged.
         """
+        self._check_open()
         config = self._config_now()
         if not config.enabled:
             raise BridgeError("bridge.disabled", "the agent bridge is disabled ([bridge].enabled)")
@@ -503,16 +507,20 @@ class BridgeService:
         return await self._fresh_view(run_id, None)
 
     async def stop_run(self, caller: Caller, run_id: str) -> dict[str, Any]:
-        """Ask Hermes to stop the run; the view shows ``stopping`` until it ends."""
+        """Ask Hermes to stop the run; the view shows ``stopping`` until it ends.
+
+        Hermes's answer sets the status only when it is a live one: the run ends
+        when the watcher sees its terminal event, which also withdraws the inbox
+        row and tells the bus. A pending approval or clarification is cleared at
+        once, with the clarify timer.
+        """
         row = await self._owned(caller, run_id)
         if row.status in TERMINAL_STATUSES:
             raise _not_running(run_id, row.status, "only a live run can be stopped")
         answer = await self._gateway.stop(row.profile, run_id)
         reported = answer.get("status")
-        status = reported if reported in HERMES_STATUSES else "stopping"
-        updated = await self._watcher.update(
-            run_id, lambda current: {"status": status} if current.status != status else {}
-        )
+        live = reported in HERMES_STATUSES and reported not in TERMINAL_STATUSES
+        updated = await self._watcher.stopping(run_id, str(reported) if live else "stopping")
         return await self._fresh_view(run_id, updated)
 
     # -- process lifecycle -------------------------------------------------------------
@@ -522,9 +530,13 @@ class BridgeService:
 
         A run Hermes no longer knows (404) is marked ``unknown``. A run whose
         profile cannot be reached now is watched anyway: the watcher keeps trying.
+        Overlapping calls are safe: each run gets one watcher.
         """
+        self._check_open()
         started = 0
         for row in await asyncio.to_thread(self._store.live_runs):
+            if self._closed:  # close() ran meanwhile: nothing more may be watched
+                break
             try:
                 await self._gateway.get_run(row.profile, row.run_id)
             except HermesRefused as exc:
@@ -540,12 +552,21 @@ class BridgeService:
         return started
 
     async def close(self) -> None:
-        """Stop every watcher (hal0-api shutdown); the ledger keeps the runs for ``reattach``."""
+        """Stop every watcher (hal0-api shutdown); the ledger keeps the runs for ``reattach``.
+
+        Afterwards the service takes no new runs and attaches nothing (503
+        ``bridge.unavailable``). Closing again is harmless.
+        """
+        self._closed = True
         if self._admitting:
             await asyncio.gather(*self._admitting, return_exceptions=True)
         await self._watcher.stop_all()
 
     # -- helpers -----------------------------------------------------------------------
+
+    def _check_open(self) -> None:
+        if self._closed:
+            raise BridgeError("bridge.unavailable", "the agent bridge is shutting down")
 
     def _config_now(self) -> BridgeConfig:
         return self._config if isinstance(self._config, BridgeConfig) else self._config()

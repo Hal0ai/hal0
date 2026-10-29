@@ -31,6 +31,7 @@ BRIDGE_ERROR_STATUS: dict[str, int] = {
     "bridge.skill_not_found": 404,
     "bridge.skill_readonly": 403,
     "bridge.store_unavailable": 503,
+    "bridge.unavailable": 503,
 }
 
 

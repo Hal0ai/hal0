@@ -63,13 +63,18 @@ class Planner:
     function of the run id, and any ``_Run`` attribute). A run started with no
     plan queued stays ``running`` with no events, so it counts as in flight until
     a test scripts more. ``on_stop`` runs after a ``POST .../stop`` with the run
-    id, so a test can script what Hermes sends after a stop.
+    id, so a test can script what Hermes sends after a stop. ``approval_failures``
+    holds ``(status, code)`` answers for the next ``POST .../approval`` calls (the
+    post is still recorded in ``fake.calls``), and ``stop_status`` replaces the
+    status Hermes's stop answer carries.
     """
 
     def __init__(self, fake: FakeHermes) -> None:
         self.fake = fake
         self.plans: list[Callable[[str], None]] = []
         self.on_stop: Callable[[str], None] | None = None
+        self.approval_failures: list[tuple[int, str]] = []
+        self.stop_status: str | None = None
 
     def plan(
         self,
@@ -89,16 +94,25 @@ class Planner:
         self.plans.append(apply)
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
-        resp = self.fake(request)
         path = request.url.path
+        if request.method == "POST" and path.endswith("/approval") and self.approval_failures:
+            status, code = self.approval_failures.pop(0)
+            self.fake.calls.append(request)
+            return httpx.Response(status, json={"error": {"code": code, "message": "scripted"}})
+        resp = self.fake(request)
         if request.method == "POST" and path.endswith("/v1/runs") and resp.status_code == 202:
             body = json.loads(resp.read())
             if not body["replayed"]:
                 if not self.plans:
                     self.plan()
                 self.plans.pop(0)(body["run_id"])
-        if request.method == "POST" and path.endswith("/stop") and self.on_stop is not None:
-            self.on_stop(path.split("/")[-2])
+        if request.method == "POST" and path.endswith("/stop"):
+            if self.on_stop is not None:
+                self.on_stop(path.split("/")[-2])
+            if self.stop_status is not None:
+                body = json.loads(resp.read())
+                body["status"] = self.stop_status
+                return httpx.Response(resp.status_code, json=body)
         return resp
 
 
@@ -632,6 +646,98 @@ async def test_approval_after_the_run_ended_is_withdrawn(
     assert queue.list_pending() == []
 
 
+async def _gated_run(svc: BridgeService, planner: Planner, store: BridgeStore, cc: Caller) -> str:
+    """Start a run that waits for approval ``req1``; returns once the ledger says so."""
+    planner.plan(statuses=("waiting_for_approval",), frames=_approval, pending_approval="req1")
+    started = await svc.start_run(cc, agent="hermes", input="rm -rf tmp")
+    await _until(svc, store, started["run_id"], lambda r: r.status == "waiting_for_approval")
+    return str(started["run_id"])
+
+
+@pytest.mark.parametrize("decision", ["approve", "deny"])
+async def test_failed_inbox_decision_puts_the_request_back_in_the_inbox(
+    decision: str,
+    svc: BridgeService,
+    planner: Planner,
+    fake: FakeHermes,
+    store: BridgeStore,
+    cc: Caller,
+    queue: ApprovalQueue,
+) -> None:
+    rid = await _gated_run(svc, planner, store, cc)
+    [first] = queue.list_pending()
+    decide = queue.approve if decision == "approve" else queue.deny
+    choice = "once" if decision == "approve" else "deny"
+
+    planner.approval_failures.append((503, "hermes_restarting"))  # a transient Hermes failure
+    result = await decide(first["id"])
+    assert "503" in result["error"]
+    # The operator can still answer: one fresh pending row, the run still waiting.
+    [again] = queue.list_pending()
+    assert again["id"] != first["id"] and again["args"]["request_id"] == "req1"
+    assert again["tool"] == "agent_run_approval" and again["client_id"] == "bridge:cc"
+    waiting = await svc.get_run(cc, rid)
+    assert waiting["status"] == "waiting_for_approval"
+    assert waiting["pending"]["approval_id"] == again["id"]
+
+    retried = await decide(again["id"])
+    assert retried["error"] is None
+    assert [_body(r)["choice"] for r in _posts(fake, "/approval")] == [choice, choice]
+    resumed = await svc.get_run(cc, rid)
+    assert resumed["status"] == "running" and resumed["pending"] is None
+    assert queue.list_pending() == []
+
+
+@pytest.mark.parametrize("code", ["approval_not_pending", "stale_generation"])
+async def test_a_definitive_hermes_409_is_not_filed_again(
+    code: str,
+    svc: BridgeService,
+    planner: Planner,
+    store: BridgeStore,
+    cc: Caller,
+    queue: ApprovalQueue,
+) -> None:
+    rid = await _gated_run(svc, planner, store, cc)
+    [entry] = queue.list_pending()
+    planner.approval_failures.append((409, code))
+    result = await queue.approve(entry["id"])
+    assert result["state"] == "failed" and "409" in result["error"]
+    assert queue.list_pending() == []  # Hermes no longer has the request: nothing to answer
+    # The ledger is left for Hermes's own settled/terminal event to clear.
+    assert (await svc.get_run(cc, rid))["status"] == "waiting_for_approval"
+
+
+async def test_approving_on_the_enqueued_event_posts_once(
+    svc: BridgeService,
+    planner: Planner,
+    fake: FakeHermes,
+    store: BridgeStore,
+    cc: Caller,
+    queue: ApprovalQueue,
+) -> None:
+    # The operator's UI can decide the instant the row shows up, before the watcher
+    # has finished recording the request.
+    planner.plan(statuses=("waiting_for_approval",), frames=_approval, pending_approval="req1")
+    subscribed = asyncio.Event()
+
+    async def instant_approver() -> dict[str, Any]:
+        async with queue.subscribe() as sub:
+            subscribed.set()
+            event = await sub.get()
+            assert event.kind == "enqueued"
+            return await queue.approve(event.entry["id"])  # no pause between row and decision
+
+    approver = asyncio.create_task(instant_approver())
+    await subscribed.wait()
+    started = await svc.start_run(cc, agent="hermes", input="rm -rf tmp")
+    result = await asyncio.wait_for(approver, 3)
+    assert result["state"] == "executed", result["error"]
+    posts = _posts(fake, "/approval")
+    assert len(posts) == 1 and _body(posts[0])["choice"] == "once"
+    row = store.get_run(started["run_id"])
+    assert row is not None and row.status == "running" and row.pending_request_json is None
+
+
 # -- clarification -----------------------------------------------------------------------
 
 
@@ -776,6 +882,75 @@ async def test_stop_run(svc: BridgeService, planner: Planner, fake: FakeHermes, 
     assert e.value.code == "bridge.run_not_running"
 
 
+async def test_stop_answer_with_a_terminal_status_is_not_copied(
+    svc: BridgeService,
+    planner: Planner,
+    fake: FakeHermes,
+    store: BridgeStore,
+    cc: Caller,
+    bus: EventBus,
+) -> None:
+    # Only the watcher's terminal frame finishes a run (bus event, inbox, timers).
+    planner.stop_status = "completed"
+    v = await svc.start_run(cc, agent="hermes", input="x")
+    rid = v["run_id"]
+    stopped = await svc.stop_run(cc, rid)
+    assert stopped["status"] == "stopping"
+    row = store.get_run(rid)
+    assert row is not None and row.status == "stopping"
+    assert not any(e["type"] == "agents.run_completed" for e in bus.ring)
+
+    fake.script_events(rid, [(1, sse_frame(1, "run.completed", rid, completed=True, output="x"))])
+    done = await svc.wait_run(cc, rid, timeout_s=3)
+    assert done["status"] == "completed"
+    await _bus_event(bus, "agents.run_completed")
+
+
+async def test_stop_clears_a_pending_clarification_and_its_timer(
+    svc_factory: SvcFactory, planner: Planner, fake: FakeHermes, cc: Caller
+) -> None:
+    svc = svc_factory(timing=WatcherTiming(backoff_s=(0.01,), clarify_timeout_s=0.1))
+    planner.plan(frames=_clarify, pending_clarify="clr1")
+    v = await svc.start_run(cc, agent="hermes", input="?")
+    asked = await svc.wait_run(cc, v["run_id"], timeout_s=5)
+    assert asked["status"] == "waiting_for_clarification"
+
+    stopped = await svc.stop_run(cc, v["run_id"])
+    assert stopped["status"] == "stopping" and stopped["pending"] is None
+    later = await svc.wait_run(cc, v["run_id"], timeout_s=0.4)  # well past the clarify timeout
+    assert later["timed_out"] is True and later["error"] is None
+    assert len(_posts(fake, "/stop")) == 1  # the timer posted no second stop
+
+
+async def test_stop_withdraws_a_pending_approval(
+    svc: BridgeService,
+    planner: Planner,
+    store: BridgeStore,
+    cc: Caller,
+    queue: ApprovalQueue,
+) -> None:
+    rid = await _gated_run(svc, planner, store, cc)
+    stopped = await svc.stop_run(cc, rid)
+    assert stopped["status"] == "stopping" and stopped["pending"] is None
+    assert queue.list_pending() == []
+    [entry] = queue.list_all()
+    assert entry["state"] == "failed" and "stopped" in entry["error"]
+
+
+async def test_terminal_event_cancels_the_clarify_timer(
+    svc_factory: SvcFactory, planner: Planner, fake: FakeHermes, store: BridgeStore, cc: Caller
+) -> None:
+    svc = svc_factory(timing=WatcherTiming(backoff_s=(0.01,), clarify_timeout_s=0.1))
+    planner.plan(frames=_then(_clarify, ("run.completed", {"completed": True, "output": "ok"})))
+    v = await svc.start_run(cc, agent="hermes", input="?")
+    done = await _until(svc, store, v["run_id"], lambda r: r.status in TERMINAL_STATUSES)
+    assert done.status == "completed" and done.pending_request_json is None
+    await asyncio.sleep(0.25)  # past the clarify timeout
+    final = await svc.get_run(cc, v["run_id"])
+    assert final["status"] == "completed" and final["error"] is None
+    assert _posts(fake, "/stop") == []
+
+
 async def test_run_events_pages_the_ledger(
     svc: BridgeService, planner: Planner, cc: Caller
 ) -> None:
@@ -898,6 +1073,59 @@ async def test_reattach_enforces_an_overdue_clarify_timeout(
     row = await _until(svc, store, rid, lambda r: r.error is not None)
     assert row.error == "clarification unanswered after 60s"
     assert len(_posts(fake, "/stop")) == 1
+
+
+def _watch_tasks(run_id: str) -> list[asyncio.Task[Any]]:
+    return [
+        t for t in asyncio.all_tasks() if t.get_name() == f"bridge-watch:{run_id}" and not t.done()
+    ]
+
+
+async def test_overlapping_reattach_starts_one_watcher(
+    store: BridgeStore, fake: FakeHermes, svc_factory: SvcFactory, queue: ApprovalQueue
+) -> None:
+    rid = fake.seed_run(
+        "run_gated",
+        statuses=("waiting_for_approval",),
+        frames=_approval("run_gated"),
+        pending_approval="req1",
+    )
+    pending = json.loads(_approval(rid)[0][1].split("data: ", 1)[1])
+    store.insert_run(
+        _live_row(
+            rid,
+            status="waiting_for_approval",
+            last_seq=1,
+            pending_request_json=json.dumps(pending),
+        )
+    )
+    svc = svc_factory()
+    counts = await asyncio.gather(svc.reattach(), svc.reattach())
+    assert sorted(counts) == [0, 1]
+    assert len(_watch_tasks(rid)) == 1 and svc.watching() == [rid]
+    [entry] = queue.list_pending()
+    assert entry["hit_count"] == 1  # mirrored into the inbox once
+    await svc.close()
+    assert _watch_tasks(rid) == []
+
+
+async def test_start_and_reattach_after_close_are_unavailable(
+    store: BridgeStore, fake: FakeHermes, svc_factory: SvcFactory, cc: Caller
+) -> None:
+    store.insert_run(_live_row("run_live"))
+    fake.seed_run("run_live", statuses=("running",), frames=[])
+    svc = svc_factory()
+    await svc.close()
+    await svc.close()  # closing again is harmless
+    for call in (
+        lambda: svc.start_run(cc, agent="hermes", input="x"),
+        svc.reattach,
+    ):
+        with pytest.raises(BridgeError) as e:
+            await call()
+        assert e.value.code == "bridge.unavailable" and e.value.status == 503
+    assert _posts(fake, "/v1/runs") == []  # nothing was started in Hermes
+    assert svc.watching() == [] and _watch_tasks("run_live") == []
 
 
 async def test_close_stops_every_watcher(svc: BridgeService, cc: Caller) -> None:

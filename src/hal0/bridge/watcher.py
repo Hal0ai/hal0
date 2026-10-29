@@ -26,6 +26,13 @@ follows ``GET /v1/runs/<id>/events`` with ``Last-Event-ID`` and:
   (404: status ``unknown``), or after :attr:`WatcherTiming.give_up_s` without
   reaching Hermes.
 
+A decision made in the inbox can fail (Hermes restarting, a dropped connection).
+The run then stays ``waiting_for_approval`` in the ledger, so the watcher files the
+request in the inbox again unless Hermes answered that the request is no longer
+pending (409 ``approval_not_pending`` or ``stale_generation``): the operator must
+always have a row to answer. For the same reason the ledger holds a pending request
+before its inbox row exists, and a decision reads the ledger under the run's lock.
+
 Every change to a run calls ``on_change(run_id)``; :class:`~hal0.bridge.service.
 BridgeService` uses it to wake ``wait_run`` and the run event streams. All
 ledger access goes through ``asyncio.to_thread`` (the store is synchronous
@@ -271,13 +278,14 @@ class RunWatcher:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._tails: dict[str, _Tail] = {}
         self._timers: set[asyncio.Task[None]] = set()
+        self._stopped = False
         self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
     # -- lifecycle ---------------------------------------------------------------------
 
     def start(self, row: RunRow) -> None:
         """Start watching a new run; a terminal row, or a run already watched, is a no-op."""
-        if row.status in TERMINAL_STATUSES or self.watching(row.run_id):
+        if self._stopped or row.status in TERMINAL_STATUSES or self._claimed(row.run_id):
             return
         self._spawn(row, _Tail.of(row))
 
@@ -287,17 +295,34 @@ class RunWatcher:
         Unlike :meth:`start`, a pending request is restored before this returns:
         an approval is mirrored into the (in-memory, so empty) inbox again, and a
         clarification gets its timeout re-armed from when it was asked.
+
+        The run is claimed before the first await, so overlapping calls for one run
+        start one watcher (the later call returns False), and none starts after
+        :meth:`stop_all`.
         """
-        if row.status in TERMINAL_STATUSES or self.watching(row.run_id):
+        if self._stopped or row.status in TERMINAL_STATUSES or self._claimed(row.run_id):
             return False
         tail = _Tail.of(row)
         self._tails[row.run_id] = tail
+        spawned = False
         try:
-            await self._resume_pending(tail, row)
-        except Exception:
-            log.warning("bridge.resume_pending_failed", run_id=row.run_id, exc_info=True)
-        self._spawn(row, tail)
-        return True
+            try:
+                await self._resume_pending(tail, row)
+            except Exception:
+                log.warning("bridge.resume_pending_failed", run_id=row.run_id, exc_info=True)
+            if self._stopped:  # stop_all ran while the pending request was restored
+                return False
+            self._spawn(row, tail)
+            spawned = True
+            return True
+        finally:
+            if not spawned and self._tails.get(row.run_id) is tail:
+                del self._tails[row.run_id]
+                self._cancel_clarify(tail)
+
+    def _claimed(self, run_id: str) -> bool:
+        """Whether a watcher task is alive for ``run_id``, or an :meth:`attach` has reserved it."""
+        return self.watching(run_id) or run_id in self._tails
 
     def _spawn(self, row: RunRow, tail: _Tail) -> None:
         self._tails[row.run_id] = tail
@@ -319,8 +344,9 @@ class RunWatcher:
 
         A cancelled watcher writes nothing more: deltas still in its buffer were
         never stored, so ``last_seq`` has not passed them and Hermes replays them
-        when the run is re-attached.
+        when the run is re-attached. Once stopped, the watcher takes no new runs.
         """
+        self._stopped = True
         tasks = [*self._tasks.values(), *self._timers]
         for task in tasks:
             task.cancel()
@@ -369,6 +395,37 @@ class RunWatcher:
         tail = self._tails.get(run_id)
         if tail is not None and "clarify.request" in cleared:
             self._cancel_clarify(tail)
+        return row
+
+    async def stopping(self, run_id: str, status: str = "stopping") -> RunRow | None:
+        """Record that a stop was asked of Hermes for a live run.
+
+        The status becomes ``status`` (``stopping``; a ``waiting_for_*`` status is
+        derived here and never taken from Hermes). A pending approval or
+        clarification is cleared with it: its inbox row is withdrawn and the
+        clarify timer cancelled, or the timer would later overwrite the run's
+        ``error`` and post a second stop. The terminal event that follows finishes
+        the run.
+        """
+        if status in _WAITING:
+            status = "stopping"
+        cleared: list[RunRow] = []
+
+        def decide(row: RunRow) -> dict[str, Any]:
+            changes: dict[str, Any] = {}
+            if row.status != status:
+                changes["status"] = status
+            if row.pending_request_json is not None:
+                changes["pending_request_json"] = None
+                cleared.append(row)
+            return changes
+
+        tail = self._tails.get(run_id)
+        row = await self.update(run_id, decide)
+        if tail is not None:
+            self._cancel_clarify(tail)
+        for before in cleared:
+            await self._withdraw(before, "the run was stopped")
         return row
 
     async def mark_unknown(self, row: RunRow, reason: str) -> None:
@@ -435,9 +492,11 @@ class RunWatcher:
                     error=f"lost contact with Hermes for {self._timing.give_up_s:g}s",
                 )
                 return
+            if progressed:  # the connection worked: the sequence starts over from its first delay
+                attempt = 0
             backoff = self._timing.backoff_s
             delay = backoff[min(attempt, len(backoff) - 1)]
-            attempt = 0 if progressed else attempt + 1
+            attempt += 1
             await asyncio.sleep(delay)
 
     async def _finished_in_snapshot(self, tail: _Tail) -> bool:
@@ -576,8 +635,25 @@ class RunWatcher:
     async def _approval_requested(
         self, tail: _Tail, seq: int, ts: float, event: dict[str, Any]
     ) -> None:
+        """Record the request in the ledger, then file it in the inbox (ADR-0043 decision 9).
+
+        The ledger comes first, and the whole step holds the run's lock: an inbox
+        row can be decided the moment it exists, and the decision must find the
+        request pending (and wait for this step to finish).
+        """
         pending = {**event, "received_at": time.time()}
         generation = _int_or_none(event.get("execution_generation"))
+        request_id = event.get("request_id")
+
+        def decide(row: RunRow) -> dict[str, Any]:
+            changes: dict[str, Any] = {
+                "status": "waiting_for_approval",
+                "pending_request_json": json.dumps(pending),
+            }
+            if generation is not None:
+                changes["execution_generation"] = generation
+            return changes
+
         async with self._lock(tail.run_id):
             current = await asyncio.to_thread(self._store.get_run, tail.run_id)
             prior = pending_of(current)
@@ -585,26 +661,13 @@ class RunWatcher:
                 current is not None
                 and prior is not None
                 and prior.get("event") == "approval.request"
-                and prior.get("request_id") != event.get("request_id")
+                and prior.get("request_id") != request_id
             ):
                 # Retire the older row first: the inbox keeps one row per run, so
                 # a pending stale row would swallow this request.
                 await self._withdraw(current, "superseded by a newer approval request")
             if prior is not None and prior.get("event") == "clarify.request":
                 self._cancel_clarify(tail)  # Hermes moved on past the question
-            approval_id = await self._mirror(tail, pending)
-            if approval_id is not None:
-                pending["approval_id"] = approval_id
-
-            def decide(row: RunRow) -> dict[str, Any]:
-                changes: dict[str, Any] = {
-                    "status": "waiting_for_approval",
-                    "pending_request_json": json.dumps(pending),
-                }
-                if generation is not None:
-                    changes["execution_generation"] = generation
-                return changes
-
             result = await asyncio.to_thread(
                 _record_sync,
                 self._store,
@@ -613,9 +676,10 @@ class RunWatcher:
                 decide,
                 skip_terminal=False,
             )
-        if result is None:  # the ledger row is gone (pruned): stop watching
-            raise BridgeError("bridge.run_not_found", f"no run {tail.run_id!r}")
-        tail.last_seq = seq
+            if result is None:  # the ledger row is gone (pruned): stop watching
+                raise BridgeError("bridge.run_not_found", f"no run {tail.run_id!r}")
+            tail.last_seq = seq
+            await self._file_in_inbox(tail, pending)
         await self._emit(
             tail,
             "agents.approval_requested",
@@ -667,6 +731,7 @@ class RunWatcher:
         error: str | None = None,
     ) -> None:
         """Record a terminal status with the run's output, usage and error."""
+        self._cancel_clarify(tail)  # before any await: a timer must not stop a run that ended
         await self._flush(tail)
 
         def decide(row: RunRow) -> dict[str, Any]:
@@ -716,17 +781,8 @@ class RunWatcher:
             return
         if pending.get("event") == "approval.request" and self._queue is not None:
             async with self._lock(tail.run_id):
-                approval_id = await self._mirror(tail, pending)
-            if approval_id is not None and approval_id != pending.get("approval_id"):
-                mirrored = json.dumps({**pending, "approval_id": approval_id})
-                await self.update(
-                    tail.run_id,
-                    lambda r: (
-                        {"pending_request_json": mirrored}
-                        if _is_pending(r, "approval.request", request_id)
-                        else {}
-                    ),
-                )
+                await self._file_in_inbox(tail, pending)
+            self._changed(tail.run_id)
         elif pending.get("event") == "clarify.request":
             received = pending.get("received_at")
             asked_at = float(received) if isinstance(received, int | float) else time.time()
@@ -763,15 +819,53 @@ class RunWatcher:
             on_deny=deny,
         )
 
+    async def _file_in_inbox(self, tail: _Tail, pending: Mapping[str, Any]) -> None:
+        """Mirror ``pending`` into the inbox and record the row's id in the ledger.
+
+        The caller holds the run's lock. A failure is logged, not raised: the
+        request is already in the ledger, and the next :meth:`attach` files it.
+        """
+        request_id = pending.get("request_id")
+        try:
+            approval_id = await self._mirror(tail, pending)
+            if approval_id is None or not isinstance(request_id, str):
+                return
+            await self._store_approval_id(tail.run_id, request_id, approval_id)
+        except Exception:
+            log.warning("bridge.approval_mirror_failed", run_id=tail.run_id, exc_info=True)
+
+    async def _store_approval_id(self, run_id: str, request_id: str, approval_id: str) -> None:
+        """Put the inbox row's id into the run's pending request; the caller holds the lock."""
+
+        def decide(row: RunRow) -> dict[str, Any]:
+            pending = pending_of(row)
+            if (
+                pending is None
+                or pending.get("event") != "approval.request"
+                or pending.get("request_id") != request_id
+                or pending.get("approval_id") == approval_id
+            ):
+                return {}
+            return {"pending_request_json": json.dumps({**pending, "approval_id": approval_id})}
+
+        await asyncio.to_thread(_record_sync, self._store, run_id, None, decide, skip_terminal=True)
+
     async def _answer_approval(
         self, run_id: str, profile: str, request_id: str, generation: int | None, choice: str
     ) -> dict[str, Any]:
         """Post the operator's inbox decision to Hermes, if the request is still pending.
 
         The inbox grants ``once`` only; ``session`` and ``always`` are Hermes-side
-        allowlist decisions (ADR-0043 decision 9).
+        allowlist decisions (ADR-0043 decision 9). The ledger is read under the
+        run's lock, so a decision made the moment the row appeared waits for the
+        request to be recorded.
+
+        If the post fails for any reason but Hermes saying the request is no longer
+        pending, the request goes back in the inbox (the queue marks this decision
+        failed or denied, and the run is still waiting).
         """
-        row = await asyncio.to_thread(self._store.get_run, run_id)
+        async with self._lock(run_id):
+            row = await asyncio.to_thread(self._store.get_run, run_id)
         if (
             row is None
             or row.status in TERMINAL_STATUSES
@@ -787,15 +881,46 @@ class RunWatcher:
                 "bridge.no_pending_request",
                 f"approval {request_id!r} of run {run_id!r} carries no execution generation",
             )
-        result = await self._gateway.approval(
-            profile,
-            run_id,
-            request_id=request_id,
-            execution_generation=execution_generation,
-            choice=choice,
-        )
+        try:
+            result = await self._gateway.approval(
+                profile,
+                run_id,
+                request_id=request_id,
+                execution_generation=execution_generation,
+                choice=choice,
+            )
+        except asyncio.CancelledError:
+            # The decision was abandoned part-way; Hermes may or may not have it.
+            await asyncio.shield(self._refile(run_id, request_id))
+            raise
+        except Exception as exc:
+            if not _no_longer_pending(exc):
+                await self._refile(run_id, request_id)
+            raise
         await self.settle(run_id, request_id)
         return result
+
+    async def _refile(self, run_id: str, request_id: str) -> None:
+        """Put a run's still-pending approval back in the inbox after a failed decision.
+
+        A no-op when the request is no longer pending in the ledger. The inbox
+        keeps one row per run, so the failed decision's entry (already out of the
+        queue's dedup index) is replaced, not joined, by the new one.
+        """
+        try:
+            async with self._lock(run_id):
+                row = await asyncio.to_thread(self._store.get_run, run_id)
+                if (
+                    row is None
+                    or row.status in TERMINAL_STATUSES
+                    or not _is_pending(row, "approval.request", request_id)
+                ):
+                    return
+                await self._file_in_inbox(_Tail.of(row), pending_of(row) or {})
+        except Exception:
+            log.warning("bridge.approval_refile_failed", run_id=run_id, exc_info=True)
+            return
+        self._changed(run_id)
 
     async def _withdraw(self, row: RunRow, reason: str) -> None:
         """Retire the inbox row of ``row``'s pending approval, if it is still pending."""
@@ -817,6 +942,8 @@ class RunWatcher:
 
     def _arm_clarify(self, tail: _Tail, request_id: str, delay: float) -> None:
         self._cancel_clarify(tail)
+        if self._stopped:
+            return
         task = asyncio.create_task(
             self._clarify_deadline(tail, request_id, delay),
             name=f"bridge-clarify:{tail.run_id}",
@@ -905,6 +1032,19 @@ def _clear_pending(request_id: str | None, row: RunRow) -> dict[str, Any]:
     if row.status in _WAITING:
         changes["status"] = "running"
     return changes
+
+
+def _no_longer_pending(exc: BaseException) -> bool:
+    """Whether ``exc`` is Hermes saying the approval it was asked about is gone.
+
+    That is a final answer (409 ``approval_not_pending``, or ``stale_generation``
+    for a run that moved on); anything else may succeed on another try.
+    """
+    return (
+        isinstance(exc, HermesRefused)
+        and exc.hermes_status == 409
+        and exc.hermes_code in ("approval_not_pending", "stale_generation")
+    )
 
 
 def _config(source: ConfigSource) -> BridgeConfig:

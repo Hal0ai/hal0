@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import json
 from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ from hal0.bridge.store import BridgeStore, RunRow
 from hal0.bridge.watcher import RunWatcher, WatcherTiming
 from hal0.config.schema import BridgeConfig
 from hal0.events import EventBus
+from hal0.mcp.approval_queue import ApprovalQueue
 from tests.bridge._fake_hermes import FakeHermes, sse_frame
 
 FAST = WatcherTiming(backoff_s=(0.01,), coalesce_s=2.0, coalesce_bytes=2048)
@@ -155,6 +157,7 @@ def _watcher(
     bus: EventBus | None = None,
     timing: WatcherTiming = FAST,
     clock: Callable[[], float] | None = None,
+    queue: ApprovalQueue | None = None,
 ) -> RunWatcher:
     gateway = HermesGateway(
         home=tmp_path,
@@ -166,7 +169,7 @@ def _watcher(
         store=store,
         gateway=gateway,
         config=BridgeConfig(),
-        approval_queue=None,
+        approval_queue=queue,
         events=bus,
         on_change=changes,
         timing=timing,
@@ -538,3 +541,141 @@ async def test_watch_stops_when_the_ledger_row_is_gone(
         await watcher.stop_all()
     assert not watcher.watching(rid)
     assert len(fake.requests_to("/events")) == 1
+
+
+async def test_backoff_restarts_after_a_connection_that_delivered_events(
+    store: BridgeStore, fake: FakeHermes, tmp_path: Path, changes: Changes
+) -> None:
+    # refused (delay 0.01), then events and a cut stream, then the rest. The delay after
+    # the second connection starts the sequence over; it must not be the 30 s a third
+    # consecutive failure would earn.
+    rid = "run_backoff"
+    frames = [
+        (1, sse_frame(1, "tool.started", rid, tool="terminal")),
+        _completed(2, rid, output="done"),
+    ]
+    fake.seed_run(rid, statuses=("running",), frames=frames)
+    fake.script_events(rid, frames[:1], then_error=True)
+
+    def before(n: int, _req: httpx.Request) -> httpx.Response | None:
+        if n == 1:
+            return httpx.Response(503, json={"error": {"code": "busy", "message": "busy"}})
+        if n == 3:
+            fake.script_events(rid, frames)
+        return None
+
+    store.insert_run(_row(rid))
+    timing = WatcherTiming(backoff_s=(0.01, 30.0))
+    watcher = _watcher(store, fake, tmp_path, changes, handler=Hooked(fake, before), timing=timing)
+    try:
+        watcher.start(_row(rid))
+        await changes.until(lambda: _status(store, rid) == "completed", timeout=3)
+    finally:
+        await watcher.stop_all()
+    assert fake.resume_headers == ["0", "0", "1"]
+
+
+async def test_pending_row_is_written_before_the_request_is_mirrored(
+    store: BridgeStore,
+    fake: FakeHermes,
+    tmp_path: Path,
+    changes: Changes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Whoever the inbox row reaches first (an operator deciding at once) must find
+    # the request in the ledger.
+    rid = "run_gate"
+    frames = [
+        (
+            1,
+            sse_frame(
+                1,
+                "approval.request",
+                rid,
+                request_id="req1",
+                command="ls",
+                execution_generation=1,
+            ),
+        )
+    ]
+    fake.seed_run(rid, statuses=("waiting_for_approval",), frames=frames, pending_approval="req1")
+    store.insert_run(_row(rid))
+    queue = ApprovalQueue()
+    at_enqueue: list[RunRow | None] = []
+    real_enqueue = queue.enqueue
+
+    async def spy(*args: Any, **kwargs: Any) -> str:
+        at_enqueue.append(store.get_run(rid))
+        return await real_enqueue(*args, **kwargs)
+
+    monkeypatch.setattr(queue, "enqueue", spy)
+    watcher = _watcher(store, fake, tmp_path, changes, queue=queue)
+    try:
+        watcher.start(_row(rid))
+        await changes.until(
+            lambda: (
+                (r := store.get_run(rid)) is not None
+                and r.pending_request_json is not None
+                and "approval_id" in r.pending_request_json
+            )
+        )
+    finally:
+        await watcher.stop_all()
+    [seen] = at_enqueue
+    assert seen is not None and seen.status == "waiting_for_approval" and seen.last_seq == 1
+    assert seen.pending_request_json is not None
+    assert json.loads(seen.pending_request_json)["request_id"] == "req1"
+    [entry] = queue.list_pending()
+    final = store.get_run(rid)
+    assert final is not None and final.pending_request_json is not None
+    assert json.loads(final.pending_request_json)["approval_id"] == entry["id"]
+
+
+async def test_nothing_starts_after_stop_all(
+    store: BridgeStore, fake: FakeHermes, tmp_path: Path, changes: Changes
+) -> None:
+    rid = fake.seed_run("run_late", statuses=("running",), frames=[])
+    store.insert_run(_row(rid))
+    watcher = _watcher(store, fake, tmp_path, changes)
+    await watcher.stop_all()
+    watcher.start(_row(rid))
+    assert await watcher.attach(_row(rid)) is False
+    assert watcher.watched() == []
+    assert not [t for t in asyncio.all_tasks() if t.get_name() == f"bridge-watch:{rid}"]
+
+
+async def test_a_cancelled_attach_releases_its_claim_on_the_run(
+    store: BridgeStore,
+    fake: FakeHermes,
+    tmp_path: Path,
+    changes: Changes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rid = fake.seed_run("run_claim", statuses=("running",), frames=[])
+    pending = {"event": "approval.request", "request_id": "req1", "execution_generation": 1}
+    row = _row(rid, status="waiting_for_approval", pending_request_json=json.dumps(pending))
+    store.insert_run(row)
+    queue = ApprovalQueue()
+    real_enqueue = queue.enqueue
+    entered = asyncio.Event()
+
+    async def stuck(*args: Any, **kwargs: Any) -> str:
+        entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(queue, "enqueue", stuck)
+    watcher = _watcher(store, fake, tmp_path, changes, queue=queue)
+    first = asyncio.create_task(watcher.attach(row))
+    await asyncio.wait_for(entered.wait(), 3)
+    # While the first attach is restoring the request, a second one backs off.
+    assert await watcher.attach(row) is False
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    monkeypatch.setattr(queue, "enqueue", real_enqueue)
+    try:
+        assert await watcher.attach(row) is True  # the claim did not outlive the cancel
+        assert watcher.watching(rid)
+    finally:
+        await watcher.stop_all()
