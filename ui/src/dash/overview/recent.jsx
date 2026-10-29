@@ -8,7 +8,7 @@ import { digest } from './recent-digest-pure'
 const { useMemo } = React
 
 export function OvRecent() {
-  const { data: records } = useActivityRecent(200)
+  const { data: records, isPending, isError } = useActivityRecent(200)
   const rows = useMemo(() => digest(records ?? []), [records])
 
   return (
@@ -27,7 +27,7 @@ export function OvRecent() {
       }
     >
       {rows.length === 0 ? (
-        <div className="ov-empty">no recent activity</div>
+        <div className="ov-empty">{isError ? 'activity unavailable' : isPending ? '—' : 'no recent activity'}</div>
       ) : (
         rows.map((r) => (
           <div key={r.key} className="ov-act">
