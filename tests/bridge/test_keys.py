@@ -71,3 +71,28 @@ def test_normalize_scopes_always_includes_agents() -> None:
 def test_normalize_scopes_rejects_unknown_scope() -> None:
     with pytest.raises(ValueError, match="root"):
         keys.normalize_scopes(["agents", "root"])
+
+
+def test_reserved_names_cover_the_built_in_identities() -> None:
+    """A client named like a bundled agent would alias that agent's memory namespace."""
+    assert frozenset({"hermes", "pi", "admin", "anonymous", "hal0", "hal0-cli", "shared"}) == (
+        keys.RESERVED_CLIENT_NAMES
+    )
+    assert keys.RESERVED_CLIENT_PREFIXES == ("hermes__",)
+
+
+@pytest.mark.parametrize(
+    ("name", "reserved"),
+    [
+        ("hermes", True),
+        ("hermes__scout", True),
+        ("hal0-cli", True),
+        ("shared", True),
+        ("hermes2", False),
+        ("hermes_scout", False),
+        ("my-pi", False),
+        ("claude-code", False),
+    ],
+)
+def test_is_reserved_name(name: str, reserved: bool) -> None:
+    assert keys.is_reserved_name(name) is reserved

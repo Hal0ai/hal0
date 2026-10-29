@@ -26,7 +26,7 @@ before stating a blanket "no auth" or "auth required" claim.
 
 ## Auth tiers
 
-Every route resolves to one of four classes in `src/hal0/security/exposure.py`
+Every route resolves to one of five classes in `src/hal0/security/exposure.py`
 (`hal0.security.exposure.classify`), evaluated first-match-wins against an explicit
 rule table:
 
@@ -39,6 +39,9 @@ rule table:
 - **BOOTSTRAP** — open only until an admin key is configured (`/api/install/*`).
 - **CLIENT** — the `/v1/*` inference/writer surface plus a short list of genuinely
   read-only introspection `GET`s.
+- **BRIDGE** — the agent bridge's own surfaces (ADR-0043): `GET /api/bridge/me` and the
+  `/mcp/agents` mount, open to a bridge client key (`hal0bk_…`) or the admin key and never
+  to the dev-open bypass.
 - **ADMIN** — everything else, including every mutating route and every route that can
   return secrets or config. **Unclassified paths fall back to ADMIN** (deny-by-default).
 

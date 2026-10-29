@@ -142,6 +142,23 @@ def _behind_proxy(request: Request) -> bool:
     return any(fwd.get(h) for h in ("x-forwarded-host", "x-forwarded-proto", "x-forwarded-for"))
 
 
+def api_base_url(request: Request) -> str:
+    """Return the URL this request reached the hal0 API at, with no trailing slash.
+
+    Behind a reverse proxy that is the proxy's ``scheme://host`` (from
+    ``X-Forwarded-Proto`` / ``X-Forwarded-Host``); on a direct hit it is
+    ``http://<request host>:<API port>``. :func:`get_urls` advertises it as
+    ``api``, and the bridge onboarding lines (ADR-0043) build their MCP URLs on
+    it, so a client pastes the address browsers already use for this box.
+    """
+    host = _resolve_host(request)
+    if _behind_proxy(request):
+        scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
+        forwarded_host = request.headers.get("x-forwarded-host") or host
+        return f"{scheme}://{forwarded_host}"
+    return f"http://{host}:{_api_port()}"
+
+
 def _host_without_port(host: str) -> str:
     """Return a hostname suitable for adding the OpenWebUI fixed port."""
     if host.startswith("["):
@@ -240,13 +257,9 @@ async def get_urls(request: Request) -> dict[str, object]:
     comfyui_public = bool(_comfyui_public_url())
     comfyui_lan = editor_on_lan()
 
+    api_url = api_base_url(request)
+
     if public:
-        if _behind_proxy(request):
-            scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
-            forwarded_host = request.headers.get("x-forwarded-host") or host
-            api_url = f"{scheme}://{forwarded_host}"
-        else:
-            api_url = f"http://{host}:{_api_port()}"
         return {
             "api": api_url,
             "openwebui": public,
@@ -259,11 +272,10 @@ async def get_urls(request: Request) -> dict[str, object]:
         }
 
     if _behind_proxy(request):
-        scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
         forwarded_host = request.headers.get("x-forwarded-host") or host
         openwebui_host = _host_without_port(forwarded_host)
         return {
-            "api": f"{scheme}://{forwarded_host}",
+            "api": api_url,
             "openwebui": f"http://{openwebui_host}:{_OPENWEBUI_PORT}",
             "openwebui_enabled": enabled,
             "hermes": hermes,
@@ -273,7 +285,7 @@ async def get_urls(request: Request) -> dict[str, object]:
             "comfyui_lan": comfyui_lan,
         }
     return {
-        "api": f"http://{host}:{_api_port()}",
+        "api": api_url,
         "openwebui": f"http://{host}:{_OPENWEBUI_PORT}",
         "openwebui_enabled": enabled,
         "hermes": hermes,

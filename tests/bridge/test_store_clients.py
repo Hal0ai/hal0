@@ -145,3 +145,15 @@ def test_list_and_as_dict(store: BridgeStore) -> None:
     assert a["revoked_at"] is not None
     assert rows[1].as_dict()["scopes"] == ["agents", "memory"]
     assert "key_hash" not in a
+
+
+@pytest.mark.parametrize(
+    "name", ["hermes", "pi", "admin", "anonymous", "hal0", "hal0-cli", "shared", "hermes__scout"]
+)
+def test_reserved_names_are_refused(store: BridgeStore, name: str) -> None:
+    """The bridge identity is the bare client name; a reserved one aliases a built-in's memory."""
+    with pytest.raises(BridgeStoreError) as refused:
+        store.add_client(name, created_by="cli")
+    assert refused.value.code == "bridge.invalid_name"
+    assert "reserved name" in refused.value.message
+    assert store.list_clients() == []

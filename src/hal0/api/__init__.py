@@ -69,6 +69,9 @@ from hal0.api.routes import (
     brain as brain_routes,
 )
 from hal0.api.routes import (
+    bridge as bridge_routes,
+)
+from hal0.api.routes import (
     capabilities as capabilities_routes,
 )
 from hal0.api.routes import (
@@ -1389,6 +1392,37 @@ async def _boot_hermes_upstreams(app: FastAPI, ctx: BootState) -> None:
     )
 
 
+async def _boot_bridge_store(app: FastAPI, ctx: BootState) -> None:
+    """Phase — open the agent bridge's client store (non-fatal; ADR-0043).
+
+    Publishes ``app.state.bridge_store`` for the ``/api/bridge/*`` routes. It is
+    the same process-wide instance the auth middleware verifies keys against
+    (:func:`hal0.api.auth.bridge_store`), so a row a route writes is honoured on
+    the next request. ``None`` when ``[bridge].enabled`` is false (the file is
+    not even created) or when ``bridge.db`` cannot be opened: the routes then
+    answer 503 ``bridge.store_unavailable`` and bridge keys do not verify, but
+    the rest of hal0 boots.
+    """
+    from hal0.api import auth as auth_module
+    from hal0.bridge.store import BridgeStore
+
+    def _open() -> BridgeStore:
+        store = auth_module.bridge_store()
+        # Idempotent; also recreates a file that went away after the lazy open
+        # the singleton caches (the singleton is keyed on the path alone).
+        store.open()
+        return store
+
+    app.state.bridge_store = None
+    try:
+        if not ctx.hal0_config.bridge.enabled:
+            log.info("api.boot.bridge_disabled")
+            return
+        app.state.bridge_store = await asyncio.to_thread(_open)
+    except Exception as exc:
+        log.warning("hal0.bridge.store_unavailable", error=f"{type(exc).__name__}: {exc}")
+
+
 async def _hermes_reconcile_loop(registry: Any, model_cache: Any = None) -> None:
     """Re-run the Hermes key sweep + reconcile every ``HERMES_RECONCILE_INTERVAL_S``.
 
@@ -2627,6 +2661,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await _run_boot_phase(report, "slot_manager", lambda: _boot_slot_manager(app, ctx))
     await _run_boot_phase(report, "dispatcher", lambda: _boot_dispatcher(app, ctx))
     await _run_boot_phase(report, "hermes_upstreams", lambda: _boot_hermes_upstreams(app, ctx))
+    await _run_boot_phase(report, "bridge_store", lambda: _boot_bridge_store(app, ctx))
     # ``slot_reconcile`` starts the READY model-cache refresher (#2442) before
     # the AsyncExitStack below exists; a later phase failing must not leave
     # it subscribed.
@@ -3056,6 +3091,16 @@ def create_app() -> FastAPI:
         approvals_routes.router,
         prefix="/api/agent/approvals",
         tags=["approvals"],
+    )
+
+    # Agent bridge (ADR-0043): bridge clients (coding agents on other machines)
+    # and the caller's own record. ``/api/bridge/me`` is BRIDGE class, the rest
+    # ADMIN class; both are enforced centrally in hal0.security.exposure. With
+    # ``[bridge].enabled`` false every route answers 404 ``bridge.disabled``.
+    app.include_router(
+        bridge_routes.router,
+        prefix="/api/bridge",
+        tags=["bridge"],
     )
 
     # MCP introspection (issue #206). Read-only view of hosted MCP

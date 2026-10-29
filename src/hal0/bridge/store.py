@@ -104,6 +104,11 @@ def _check_name(name: str) -> None:
             f"invalid bridge client name {name!r}: use 1-32 characters from a-z, 0-9, '_' "
             "and '-', starting with a letter or digit",
         )
+    if keys.is_reserved_name(name):
+        raise BridgeStoreError(
+            "bridge.invalid_name",
+            f"invalid bridge client name {name!r}: reserved name",
+        )
 
 
 def _scopes_or_error(values: Iterable[str]) -> frozenset[str]:
