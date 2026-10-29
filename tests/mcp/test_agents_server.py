@@ -2,7 +2,8 @@
 
 ``hal0.mcp.agents`` is a thin projection of :class:`~hal0.bridge.service.BridgeService`
 (decision 9), so these tests pin the projection, not the lifecycle (that is
-``tests/bridge/test_service_runs.py``): the nine tool names, a start-and-wait
+``tests/bridge/test_service_runs.py``): the nine run tool names (the seven teach
+tools are in ``test_agents_server_teach.py``), a start-and-wait
 round trip against ``FakeHermes``, the caller each call acts as, a foreign run
 reading as a missing one, failures raised (never returned as success payloads),
 and the 16 KiB cap on a run's text.
@@ -36,6 +37,7 @@ from tests.bridge._fake_hermes import FakeHermes, sse_frame
 
 FAST = WatcherTiming(backoff_s=(0.01,))
 
+#: The run tools. The teach tools (ADR-0043 decision 10) are listed in ``test_agents_server_teach.py``.
 TOOL_NAMES = sorted(
     [
         "agents_list",
@@ -190,7 +192,9 @@ def server_anon(svc: BridgeService) -> FastMCP:
 
 
 async def test_tools_list_names(server: FastMCP) -> None:
-    assert sorted(t.name for t in await server.list_tools()) == TOOL_NAMES
+    listed = sorted(t.name for t in await server.list_tools())
+    assert [name for name in listed if name in TOOL_NAMES] == TOOL_NAMES
+    assert len(listed) == len(TOOL_NAMES) + 7  # + the teach tools
 
 
 async def test_every_tool_has_a_description_and_no_ctx_parameter(server: FastMCP) -> None:

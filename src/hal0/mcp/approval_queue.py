@@ -76,6 +76,10 @@ _PRIMARY_TARGET_ARG: dict[str, str] = {
     # A delegated Hermes run has at most one approval pending at a time, and a
     # reconnect can replay its frame: one inbox row per run (ADR-0043).
     "agent_run_approval": "run_id",
+    # A bridge client's skill push or removal (ADR-0043 decision 10): one inbox row
+    # per skill name, so repeated pushes of one skill are one decision.
+    "agent_skill_put": "name",
+    "agent_skill_delete": "name",
 }
 
 

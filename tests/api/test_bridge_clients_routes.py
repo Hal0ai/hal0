@@ -34,6 +34,13 @@ AGENT_TOOLS = [
     "agent_run_steer",
     "agent_run_stop",
     "agent_runs_list",
+    "agent_memory_add",
+    "agent_memory_search",
+    "agent_skills_list",
+    "agent_skill_get",
+    "agent_skill_put",
+    "agent_skill_delete",
+    "agent_capabilities",
 ]
 
 

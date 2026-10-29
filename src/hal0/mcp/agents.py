@@ -1,4 +1,4 @@
-"""hal0 agents MCP server: the run tools of the agent bridge (ADR-0043 decision 9).
+"""hal0 agents MCP server: the run and teach tools of the agent bridge (ADR-0043 decisions 9-10).
 
 A remote coding agent (Claude Code, Codex, a CI job) holding a bridge key
 reaches this server at ``/mcp/agents`` and delegates work to hal0's Hermes
@@ -20,6 +20,23 @@ Tool catalog
     agent_run_steer    — add guidance to a running run
     agent_run_stop     — ask Hermes to stop a run
     agent_runs_list    — the caller's runs, newest first
+
+The teach tools (decision 10) leave knowledge behind for a Hermes profile::
+
+    agent_memory_add     — remember a note in an agent's own (or the shared) memory
+    agent_memory_search  — search that memory
+    agent_skills_list    — the skills Hermes loads (shipped, read-only; and drop-in)
+    agent_skill_get      — one skill's SKILL.md and file names
+    agent_skill_put      — propose a drop-in skill: queued for the operator, not written
+    agent_skill_delete   — propose removing a drop-in skill: queued likewise
+    agent_capabilities   — a sanitised view of what a Hermes profile can do now
+
+Memory is namespaced by hal0 (``private:hermes``, ``private:hermes__<profile>`` or
+``shared``), never by the caller's arguments or headers. A skill write or delete is
+gated: the tool returns ``{status: "pending_approval", approval_id}`` and the
+change happens only if the operator approves the row in the hal0 inbox (there is no
+approve tool). ``agent_capabilities`` never carries a URL, header, key or other
+secret.
 
 Who is asking
 -------------
@@ -72,6 +89,7 @@ and shared by every server; the bridge service is read off the server's
 
 from __future__ import annotations
 
+import asyncio
 import functools
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
@@ -245,6 +263,15 @@ def _list_item(view: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _cleaned(value: dict[str, Any]) -> dict[str, Any]:
+    """``value`` with every string masked and capped like a run text; ``truncated`` when any was cut."""
+    cleaned, cut = _clean_tree(value)
+    out: dict[str, Any] = dict(cleaned)
+    if cut:
+        out["truncated"] = True
+    return out
+
+
 def _who(ctx: Any) -> str:
     """The calling client's name for a log line; never raises."""
     try:
@@ -310,6 +337,21 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
         readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=True
     ),
     "agent_runs_list": _READ,
+    "agent_memory_add": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+    ),
+    "agent_memory_search": _READ,
+    "agent_skills_list": _READ,
+    "agent_skill_get": _READ,
+    # A push is a proposal for the operator's inbox, and pushing the same skill again is the
+    # same row: idempotent, and nothing is destroyed until a human approves.
+    "agent_skill_put": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "agent_skill_delete": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
+    ),
+    "agent_capabilities": _READ,
 }
 
 
@@ -500,5 +542,128 @@ def _agents_tool_definitions() -> dict[str, Tool]:
         caller, service = _context(ctx)
         runs = await service.list_runs(caller, status=status, limit=limit)
         return {"runs": [_list_item(run) for run in runs]}
+
+    # -- teach tools (ADR-0043 decision 10) ---------------------------------------------
+
+    @server.tool(
+        name="agent_memory_add",
+        description=(
+            "Remember a note for a Hermes agent. agent is 'hermes' (the default profile), "
+            "'hermes/<profile>', or 'shared' (the box's shared memory). The note is stored in "
+            "that agent's own private memory, which hal0 picks, not you, and is tagged "
+            "source:bridge:<your client name> along with any tags you pass. Returns "
+            "{status, id, timestamp}. Refused with bridge.unknown_agent for any other agent "
+            "and bridge.memory_disabled when the box runs no memory."
+        ),
+        annotations=_ANNOTATIONS["agent_memory_add"],
+    )
+    @_guarded
+    async def agent_memory_add(
+        agent: str, text: str, tags: list[str] | None = None, ctx: ToolContext | None = None
+    ) -> dict[str, Any]:
+        caller, service = _context(ctx)
+        return await service.memory_add(caller, agent=agent, text=text, tags=tags)
+
+    @server.tool(
+        name="agent_memory_search",
+        description=(
+            "Search what a Hermes agent remembers. agent is 'hermes', 'hermes/<profile>' (its "
+            "own private memory and the shared memory) or 'shared' (shared memory only). limit "
+            "is 1 to 50 (default 10). Returns {status, results}. A text over 16 KiB is cut and "
+            "the result then carries truncated: true."
+        ),
+        annotations=_ANNOTATIONS["agent_memory_search"],
+    )
+    @_guarded
+    async def agent_memory_search(
+        agent: str, query: str, limit: int = 10, ctx: ToolContext | None = None
+    ) -> dict[str, Any]:
+        caller, service = _context(ctx)
+        found = await service.memory_search(caller, agent=agent, query=query, limit=limit)
+        return _cleaned(found)
+
+    @server.tool(
+        name="agent_skills_list",
+        description=(
+            "List the skills Hermes loads: hal0's shipped skills (source 'shipped', read-only) "
+            "and the operator's drop-in skills (source 'dropin'; the ones you add with "
+            "agent_skill_put). Returns {skills: [{name, source, category, description, mtime, "
+            "files}]}."
+        ),
+        annotations=_ANNOTATIONS["agent_skills_list"],
+    )
+    @_guarded
+    async def agent_skills_list(ctx: ToolContext | None = None) -> dict[str, Any]:
+        _, service = _context(ctx)
+        return _cleaned({"skills": await asyncio.to_thread(service.skills_list)})
+
+    @server.tool(
+        name="agent_skill_get",
+        description=(
+            "One skill: {name, source, category, skill_md, files}. skill_md is the SKILL.md text "
+            "(cut at 16 KiB with truncated: true); files names the supporting files, whose "
+            "content is not returned. Refused with bridge.skill_not_found."
+        ),
+        annotations=_ANNOTATIONS["agent_skill_get"],
+    )
+    @_guarded
+    async def agent_skill_get(name: str, ctx: ToolContext | None = None) -> dict[str, Any]:
+        _, service = _context(ctx)
+        return _cleaned(await asyncio.to_thread(service.skill_get, name))
+
+    @server.tool(
+        name="agent_skill_put",
+        description=(
+            "Propose a skill for Hermes: create or replace the drop-in skill name (lowercase "
+            "letters, digits and hyphens). skill_md is the whole SKILL.md and must start with a "
+            "frontmatter block holding name (the same name) and description; files maps "
+            "supporting file names (no paths) to text (at most 16 files, 256 KiB each). It is "
+            "checked at once (bridge.skill_invalid), but nothing is written until the operator "
+            "approves it in the hal0 inbox. Returns {status: 'pending_approval', approval_id, "
+            "name}; pushing the same skill again is the same inbox row, an edited one replaces "
+            "it. A shipped skill cannot be changed (bridge.skill_readonly)."
+        ),
+        annotations=_ANNOTATIONS["agent_skill_put"],
+    )
+    @_guarded
+    async def agent_skill_put(
+        name: str,
+        skill_md: str,
+        files: dict[str, str] | None = None,
+        ctx: ToolContext | None = None,
+    ) -> dict[str, Any]:
+        caller, service = _context(ctx)
+        return await service.skill_put(caller, name=name, skill_md=skill_md, files=files)
+
+    @server.tool(
+        name="agent_skill_delete",
+        description=(
+            "Propose removing the drop-in skill name. Nothing is deleted until the operator "
+            "approves it in the hal0 inbox. Returns {status: 'pending_approval', approval_id, "
+            "name}. A shipped skill cannot be deleted (bridge.skill_readonly); an unknown one "
+            "is bridge.skill_not_found."
+        ),
+        annotations=_ANNOTATIONS["agent_skill_delete"],
+    )
+    @_guarded
+    async def agent_skill_delete(name: str, ctx: ToolContext | None = None) -> dict[str, Any]:
+        caller, service = _context(ctx)
+        return await service.skill_delete(caller, name=name)
+
+    @server.tool(
+        name="agent_capabilities",
+        description=(
+            "What a Hermes agent can do right now, read-only and with every secret left out: "
+            "{agent, profile, api_server_version, model_aliases: {alias: {model, provider}}, "
+            "toolsets_enabled, toolsets_disabled, mcp_servers (names only), skills_dirs, "
+            "platforms_enabled, approvals_mode}. agent is 'hermes' or 'hermes/<profile>'. "
+            "api_server_version is null when Hermes is not answering."
+        ),
+        annotations=_ANNOTATIONS["agent_capabilities"],
+    )
+    @_guarded
+    async def agent_capabilities(agent: str, ctx: ToolContext | None = None) -> dict[str, Any]:
+        _, service = _context(ctx)
+        return await service.capabilities(agent)
 
     return {tool.name: tool for tool in server._tool_manager.list_tools()}

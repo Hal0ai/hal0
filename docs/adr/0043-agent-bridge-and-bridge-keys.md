@@ -233,6 +233,21 @@ ADR-0035 was verified against), shapes the answer:
     repeated pushes of one skill collapse into one row. A capabilities tool
     gives a read-only, sanitised view of what Hermes can do now.
 
+    *Amendment (the teach-tools change).* Three details the first wording left
+    open. The shared namespace is reached through `MemoryDispatcher.shared`, the
+    counterpart of `scoped` with private mode forced *off*: the app-level
+    dispatcher takes private mode from the `X-hal0-Private` request header,
+    which the caller controls, so a shared write sent through it could be
+    promoted into `private:<client>`. A tag a client sends that starts with
+    `source:bridge:` is dropped, so provenance cannot be forged. And a skill
+    write is checked (including the shipped-name refusal) before it is queued,
+    so the operator is never asked to approve a write that cannot succeed; one
+    skill is at most one pending inbox row, an identical re-push is the same row
+    and an edited one withdraws the older row, so approving always writes the
+    content the card shows. The capabilities view is built by allow-list
+    (MCP server names, model alias names and `{model, provider}`, never a URL,
+    header or key), and any string the log redactor would change is dropped.
+
 ### Implementation decisions (second change)
 
 The second change (PR 2) implements Decisions 8 and 9. These calls were made

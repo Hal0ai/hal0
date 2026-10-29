@@ -387,6 +387,16 @@ class SkillLibrary:
     def _scratch_path(self) -> Path:
         return self._dropin_root / ARCHIVE_DIR / SCRATCH_DIR
 
+    def is_shipped(self, name: str) -> bool:
+        """True when hal0's shipped mirror holds ``name``: such a skill cannot be put or deleted.
+
+        The same test :meth:`put` applies, so a caller can refuse a doomed write
+        up front. Raises ``bridge.skill_invalid`` for a name that is not a valid
+        skill name.
+        """
+        _check_name(name)
+        return self._is_shipped(name)
+
     def get(self, name: str) -> SkillRow:
         """One skill: the drop-in copy if there is one, else the shipped one.
 

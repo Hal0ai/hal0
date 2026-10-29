@@ -24,16 +24,37 @@ both enforce the same rules:
 
 The :class:`~hal0.bridge.watcher.RunWatcher` keeps each live run's ledger row
 current and calls back on every change, which wakes waiters here.
+
+The teach methods (ADR-0043 decision 10) let a bridge client leave knowledge
+behind for a Hermes profile:
+
+* **Memory.** ``memory_add`` and ``memory_search`` act in the agent's own
+  namespace, forced by :meth:`MemoryDispatcher.scoped` (private mode on, identity
+  fixed to ``hermes`` or ``hermes__<profile>``), or in ``shared`` through
+  :meth:`MemoryDispatcher.shared` (private mode off). Neither trusts the live
+  request's headers. Every write carries ``source:bridge:<client>``, and a tag a
+  client sends in that namespace is dropped, so provenance cannot be forged.
+* **Skills.** Reads are direct. ``skill_put`` and ``skill_delete`` validate, then
+  queue the change in the approval inbox (tools ``agent_skill_put`` and
+  ``agent_skill_delete``); nothing is written until the operator approves, and
+  a request that could never succeed (invalid, or a shipped skill's name) is
+  refused before anything is queued. One skill is at most one pending row: an
+  identical re-push is the same row, an edited one withdraws the older row, so
+  approving always writes what the card shows.
+* **Capabilities.** :func:`hal0.bridge.capabilities.capabilities_view`, off the
+  event loop.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import math
 import re
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -43,12 +64,16 @@ from hal0.agents.hermes_api import (
     api_server_base,
     model_id_for,
     probe_status,
+    profile_dirs,
     profile_health,
     served_profiles,
 )
+from hal0.agents.hermes_provision import SKILLS_EXTERNAL_DIRS, profile_agent_id
 from hal0.bridge.caller import Caller
+from hal0.bridge.capabilities import FetchJson, capabilities_view
 from hal0.bridge.errors import BridgeError
 from hal0.bridge.hermes_client import HermesGateway, HermesRefused, HermesUnavailable
+from hal0.bridge.skills import SkillLibrary
 from hal0.bridge.store import TERMINAL_STATUSES, BridgeStore, RunRow
 from hal0.bridge.watcher import (
     HERMES_STATUSES,
@@ -58,6 +83,7 @@ from hal0.bridge.watcher import (
     pending_of,
 )
 from hal0.config.schema import BridgeConfig
+from hal0.redaction import redact_log_line
 
 if TYPE_CHECKING:
     from hal0.events import EventBus
@@ -85,6 +111,18 @@ _HEADER_KEY = re.compile(r"[\x21-\x7e]+")
 
 _MAX_LIST = 200
 _MAX_EVENTS = 500
+
+#: The agent id of the shared memory namespace (``agent="shared"`` in the memory tools).
+SHARED_AGENT = "shared"
+
+#: The most hits ``memory_search`` asks for; the memory layer itself allows 200.
+_MAX_MEMORY_HITS = 50
+
+#: Characters of a pushed ``SKILL.md`` shown on its approval card.
+SKILL_PREVIEW_CHARS = 2000
+
+#: Why a pending skill row was retired when a newer push of the same skill arrived.
+_SUPERSEDED = "superseded by a newer push of this skill"
 
 #: RunView keys, in order.
 _VIEW_KEYS = (
@@ -149,9 +187,13 @@ class BridgeService:
     ``config`` is the ``[bridge]`` section, or a callable returning the current
     one so the limits apply to the next request without a restart.
     ``approval_queue`` and ``events`` may be None (no inbox mirroring, no bus
-    events). ``memory_dispatcher`` is held for the teach tools (decision 10).
-    ``timing`` scales the watcher's clocks (tests) and ``probe`` replaces the HTTP
-    status probe :meth:`list_agents` uses.
+    events; with no inbox a skill change is refused, since nobody could approve
+    it). ``memory_dispatcher`` is the app-level one the memory teach tools pin
+    with ``scoped`` / ``shared`` (None when memory is off). ``skills`` is the skill
+    library (default: hal0's shipped mirror and the drop-in directory from
+    ``SKILLS_EXTERNAL_DIRS``). ``timing`` scales the watcher's clocks (tests),
+    ``probe`` replaces the HTTP status probe :meth:`list_agents` uses and
+    ``detail_fetch`` the ``GET /health/detailed`` request :meth:`capabilities` makes.
     """
 
     def __init__(
@@ -163,15 +205,21 @@ class BridgeService:
         approval_queue: ApprovalQueue | None,
         events: EventBus | None,
         memory_dispatcher: Any | None = None,
+        skills: SkillLibrary | None = None,
         timing: WatcherTiming | None = None,
         probe: Callable[[str], int] | None = None,
+        detail_fetch: FetchJson | None = None,
     ) -> None:
         self._store = store
         self._gateway = gateway
         self._config = config
         self._events = events
+        self._approvals = approval_queue
         self.memory_dispatcher = memory_dispatcher
+        self._skills = skills if skills is not None else _default_skills()
+        self._skill_gate = asyncio.Lock()
         self._probe = probe
+        self._detail_fetch = detail_fetch
         self._changed: dict[str, asyncio.Event] = {}
         self._start_locks: dict[str, asyncio.Lock] = {}
         self._admitting: set[asyncio.Task[None]] = set()
@@ -517,6 +565,169 @@ class BridgeService:
         updated = await self._watcher.stopping(run_id, str(reported) if live else "stopping")
         return await self._fresh_view(run_id, updated)
 
+    # -- teach: memory -------------------------------------------------------------------
+
+    async def memory_add(
+        self, caller: Caller, *, agent: str, text: str, tags: list[str] | None
+    ) -> dict[str, Any]:
+        """Remember ``text`` for ``agent`` (``hermes``, ``hermes/<profile>`` or ``shared``).
+
+        The note lands in the agent's own private namespace (``private:hermes`` or
+        ``private:hermes__<profile>``), or in ``shared``, and is tagged
+        ``source:bridge:<client>``; the namespace is fixed by the dispatcher, not by
+        anything in the arguments. A memory refusal is 422 ``bridge.memory_invalid``
+        or 502 ``bridge.memory_failed``, memory off is 503 ``bridge.memory_disabled``.
+        """
+        self._check_open()
+        dispatcher, extra = await self._memory_target(caller, agent)
+        own = f"source:bridge:{caller.name}"
+        kept = [tag for tag in (tags or []) if not tag.startswith("source:bridge:")]
+        merged = list(dict.fromkeys([*kept, own]))
+        return await _memory_call(dispatcher, "memory_add", {"text": text, "tags": merged, **extra})
+
+    async def memory_search(
+        self, caller: Caller, *, agent: str, query: str, limit: int = 10
+    ) -> dict[str, Any]:
+        """Search ``agent``'s memory: its own private namespace and ``shared``; or ``shared`` alone.
+
+        ``limit`` is clamped to 1..50. Returns the memory layer's ``{status, results}``.
+        """
+        dispatcher, extra = await self._memory_target(caller, agent)
+        hits = min(max(int(limit), 1), _MAX_MEMORY_HITS)
+        return await _memory_call(
+            dispatcher, "memory_search", {"query": query, "limit": hits, **extra}
+        )
+
+    async def _memory_target(self, caller: Caller, agent: str) -> tuple[Any, dict[str, Any]]:
+        """The dispatcher pinned for ``agent`` and the arguments that name its namespace."""
+        if agent == SHARED_AGENT:
+            client_id: str | None = None
+        else:
+            profile = await self._known_profile(agent)
+            client_id = "hermes" if profile == DEFAULT_PROFILE else profile_agent_id(profile)
+        base = self.memory_dispatcher
+        if base is None:
+            raise BridgeError(
+                "bridge.memory_disabled", "memory is not enabled on this box", status=503
+            )
+        if client_id is None:
+            return base.shared(caller.name), {"dataset": SHARED_AGENT}
+        return base.scoped(client_id), {}
+
+    async def _known_profile(self, agent: str) -> str:
+        """The Hermes profile ``agent`` names, if the box has it; else 404 ``bridge.unknown_agent``."""
+        profile = self._gateway.profile_of(agent)
+        if profile != DEFAULT_PROFILE:
+            known = await asyncio.to_thread(profile_dirs, self._gateway.home)
+            if profile not in known:
+                raise BridgeError(
+                    "bridge.unknown_agent", f"no Hermes profile {profile!r} on this box"
+                )
+        return profile
+
+    # -- teach: skills -------------------------------------------------------------------
+
+    def skills_list(self) -> list[dict[str, Any]]:
+        """Every skill in hal0's shipped mirror and the drop-in directory (see :class:`SkillLibrary`)."""
+        return self._skills.list()
+
+    def skill_get(self, name: str) -> dict[str, Any]:
+        """One skill with its ``SKILL.md`` text and supporting file names."""
+        return self._skills.get(name)
+
+    async def skill_put(
+        self, caller: Caller, *, name: str, skill_md: str, files: dict[str, str] | None
+    ) -> dict[str, Any]:
+        """Queue creating or replacing the drop-in skill ``name`` for the operator's approval.
+
+        Validation (name, frontmatter, sizes, file names) and the shipped-name check
+        run first, so a doomed request is refused here, before anything is queued:
+        422 ``bridge.skill_invalid`` or 403 ``bridge.skill_readonly``. Returns
+        ``{status: "pending_approval", approval_id, name}``; the write happens only
+        when the operator approves the ``agent_skill_put`` row.
+        """
+        self._check_open()
+        queue = self._inbox()
+        await asyncio.to_thread(self._skills.validate, name, skill_md, files)
+        if await asyncio.to_thread(self._skills.is_shipped, name):
+            raise _readonly(name, "changed")
+        pushed = dict(files) if files else {}
+        digest = _skill_digest(skill_md, pushed)
+        args: dict[str, Any] = {
+            "name": name,
+            "bytes": len(skill_md.encode()) + sum(len(c.encode()) for c in pushed.values()),
+            "files": sorted(pushed),
+            "sha256": digest,
+            "preview": redact_log_line(skill_md[:SKILL_PREVIEW_CHARS]),
+        }
+
+        async def execute(_args: dict[str, Any]) -> dict[str, Any]:
+            row = await asyncio.to_thread(self._skills.put, name, skill_md, pushed)
+            return {key: row[key] for key in ("name", "source", "category", "files")}
+
+        async with self._skill_gate:
+            # One pending row per skill, always the newest content: a row for other
+            # content would write that content when approved, not what was just pushed.
+            for entry in queue.list_pending():
+                if (
+                    entry["tool"] == "agent_skill_put"
+                    and entry["args"].get("name") == name
+                    and entry["args"].get("sha256") != digest
+                ):
+                    await queue.withdraw(entry["id"], _SUPERSEDED)
+            approval_id = await queue.enqueue(
+                "agent_skill_put",
+                args,
+                client_id=f"bridge:{caller.name}",
+                executor=execute,
+                target_args=("name",),
+            )
+        return {"status": "pending_approval", "approval_id": approval_id, "name": name}
+
+    async def skill_delete(self, caller: Caller, *, name: str) -> dict[str, Any]:
+        """Queue removing the drop-in skill ``name`` for the operator's approval.
+
+        A shipped skill is 403 ``bridge.skill_readonly`` and an unknown one 404
+        ``bridge.skill_not_found``, both before anything is queued.
+        """
+        self._check_open()
+        queue = self._inbox()
+        row = await asyncio.to_thread(self._skills.get, name)
+        if row["source"] == "shipped":
+            raise _readonly(name, "deleted")
+
+        async def execute(_args: dict[str, Any]) -> dict[str, Any]:
+            await asyncio.to_thread(self._skills.delete, name)
+            return {"deleted": name}
+
+        async with self._skill_gate:
+            approval_id = await queue.enqueue(
+                "agent_skill_delete",
+                {"name": name},
+                client_id=f"bridge:{caller.name}",
+                executor=execute,
+                target_args=("name",),
+            )
+        return {"status": "pending_approval", "approval_id": approval_id, "name": name}
+
+    def _inbox(self) -> ApprovalQueue:
+        """The approval inbox that gates skill changes; without one nothing is queued."""
+        if self._approvals is None:
+            raise BridgeError(
+                "bridge.unavailable",
+                "no approval inbox is running, so a skill change cannot be gated",
+            )
+        return self._approvals
+
+    # -- teach: capabilities -------------------------------------------------------------
+
+    async def capabilities(self, agent: str) -> dict[str, Any]:
+        """What the Hermes profile ``agent`` can do now; secrets never appear (see ``capabilities_view``)."""
+        profile = await self._known_profile(agent)
+        return await asyncio.to_thread(
+            capabilities_view, self._gateway.home, profile, fetch_json=self._detail_fetch
+        )
+
     # -- process lifecycle -------------------------------------------------------------
 
     async def reattach(self) -> int:
@@ -606,3 +817,35 @@ def _not_running(run_id: str, status: str, why: str) -> BridgeError:
 
 def _str_or_none(value: Any) -> str | None:
     return value if isinstance(value, str) else None
+
+
+def _default_skills() -> SkillLibrary:
+    """The library over hal0's shipped mirror and the drop-in directory Hermes loads."""
+    shipped, dropin = SKILLS_EXTERNAL_DIRS
+    return SkillLibrary(shipped_root=Path(shipped), dropin_root=Path(dropin))
+
+
+def _readonly(name: str, verb: str) -> BridgeError:
+    return BridgeError("bridge.skill_readonly", f"{name!r} is a shipped skill and cannot be {verb}")
+
+
+def _skill_digest(skill_md: str, files: dict[str, str]) -> str:
+    """A short hash of everything a push would write, to tell an edited push from a repeat."""
+    h = hashlib.sha256()
+    for part in (skill_md, *(f"{key}\0{files[key]}" for key in sorted(files))):
+        h.update(part.encode())
+        h.update(b"\0\0")
+    return h.hexdigest()[:16]
+
+
+async def _memory_call(dispatcher: Any, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Run a memory tool; the memory layer's error envelope becomes a raised :class:`BridgeError`."""
+    result: dict[str, Any] = await dispatcher.dispatch(tool, args)
+    if result.get("status") != "error":
+        return result
+    error = result.get("error")
+    error = error if isinstance(error, dict) else {}
+    code = str(error.get("code") or "mcp.memory_failed")
+    detail = redact_log_line(str(error.get("detail") or code))[:500]
+    bridge_code = "bridge.memory_invalid" if code == "mcp.memory_schema" else "bridge.memory_failed"
+    raise BridgeError(bridge_code, f"{code}: {detail}")
