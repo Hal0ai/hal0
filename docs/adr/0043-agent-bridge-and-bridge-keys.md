@@ -252,11 +252,11 @@ ADR-0035 was verified against), shapes the answer:
     A skill write is checked (including the shipped-name refusal) before it is
     queued, so the operator is never asked to approve a write that cannot
     succeed. The inbox rule for pushes is this. A put and a delete of one skill
-    name can both be pending, each its own row. A re-push of a put that is
-    identical to the client's own pending one is the same row; an identical
-    push by another client is that client's own row, so each client's push is
-    recorded under it (the card names the pushing client). An edited re-push by the
-    *same client* withdraws that client's older row and queues the new one, so
+    name can both be pending, each its own row. A repeat of a client's own
+    pending put or delete is the same row; an identical put or delete by
+    another client is that client's own row, so each client's change is
+    recorded under it (the card names the pushing client). An edited re-push
+    of a put by the *same client* withdraws that client's older row and queues the new one, so
     approving always writes the content the card shows. An edited re-push while
     *another client's* put of that name is pending is refused with
     `bridge.skill_pending_elsewhere` (409): a client cannot retire someone
@@ -270,12 +270,16 @@ ADR-0035 was verified against), shapes the answer:
     anything else is refused before queueing with `bridge.skill_invalid`
     ("bridge pushes are limited to reviewable text (SKILL.md ≤ 16 KiB, total
     ≤ 48 KiB)"). A push is also refused when a file carries secret-shaped
-    text (anything the log redactor would mask: a skill has no business
-    carrying a secret) or control text (DEL, a C0 control other than tab,
+    values that are not placeholders (a skill has no business carrying a
+    secret, but teaching Hermes to call an authenticated API is what a pushed
+    skill is for, so where the log redactor would mask a value, a placeholder
+    such as `<token>`, `$ENV_VAR`, `YOUR_KEY` or `...` passes and an opaque
+    token does not), or control text (DEL, a C0 control other than tab,
     newline and carriage return, a zero-width, bidirectional-override or
-    isolate character, or a BOM), because the card must be the exact text
-    written: a masked card once showed `export API_TOKEN="***REDACTED***"`
-    for a line whose raw command was what Hermes loaded. The card shows the
+    isolate character, or a BOM). The card is the exact text written, never
+    the redactor's output: a masked card once showed
+    `export API_TOKEN="***REDACTED***"` for a line whose raw command was what
+    Hermes loaded. The card shows the
     skill name, the pushing client, the byte count, a 16-hex digest, the
     whole `SKILL.md` and every supporting file as `{size, sha256, content}`,
     byte for byte what approval writes and never cut (`preview_truncated`
