@@ -672,6 +672,8 @@ async def test_skill_put_with_a_placeholder_where_a_secret_would_be_is_queued_ra
         ("", {"a.txt": "mongolian\u180eseparator"}, "a.txt"),  # U+180E (Cf)
         ("", {"a.txt": "grapheme\u034fjoiner"}, "a.txt"),  # U+034F (Mn, invisible)
         ("", {"a.txt": "mongol\u180bfvs"}, "a.txt"),  # U+180B Mongolian FVS (Mn, invisible)
+        ("", {"a.txt": "mongol\u180ffvs4"}, "a.txt"),  # U+180F Mongolian FVS4 (Mn, invisible)
+        ("", {"a.txt": "khmer\u17b4vowel"}, "a.txt"),  # U+17B4 Khmer inherent vowel (Mn, blank)
         ("", {"a.txt": "hangul\u3164filler"}, "a.txt"),  # U+3164 Hangul filler (Lo, blank)
         ("", {"a.txt": "anchor\ufff9x\ufffa"}, "a.txt"),  # U+FFF9 interlinear annotation (Cf)
         ("", {"a\u200dtxt.sh": "fine text\n"}, "a\u200dtxt.sh"),  # U+200D in a file name

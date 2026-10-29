@@ -192,13 +192,14 @@ _SHOWN_CONTROLS = frozenset("\t\n\r")
 #: Invisible marks outside those categories: the variation selectors (U+FE00-U+FE0F,
 #: U+E0100-U+E01EF), which change how the character before them is drawn and show
 #: nothing themselves, the combining grapheme joiner (U+034F), the Mongolian free
-#: variation selectors (U+180B-U+180D) and the blank Hangul fillers (U+115F, U+1160,
-#: U+3164, U+FFA0).
+#: variation selectors (U+180B-U+180F), the Khmer inherent vowels (U+17B4, U+17B5) and
+#: the blank Hangul fillers (U+115F, U+1160, U+3164, U+FFA0).
 _INVISIBLE_MARKS = (
     (0xFE00, 0xFE0F),
     (0xE0100, 0xE01EF),
     (0x034F, 0x034F),
-    (0x180B, 0x180D),  # Mongolian free variation selectors (Mn)
+    (0x17B4, 0x17B5),  # Khmer inherent vowels (Mn, blank)
+    (0x180B, 0x180F),  # Mongolian free variation selectors (Mn)
     (0x115F, 0x1160),  # Hangul choseong / jungseong fillers (Lo, blank)
     (0x3164, 0x3164),  # Hangul filler (Lo, blank)
     (0xFFA0, 0xFFA0),  # halfwidth Hangul filler (Lo, blank)
