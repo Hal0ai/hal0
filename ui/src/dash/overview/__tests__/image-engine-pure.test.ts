@@ -127,8 +127,22 @@ describe('imageModel', () => {
     ])
   })
 
-  it('a body without a queue reads as an empty queue', () => {
+  it('a body without a queue reads queue —, not a made-up empty queue', () => {
     const m = imageModel(status({ queue: undefined as any }), arbiter('llm'))!
-    expect(m.queueLine).toBe('queue 0 running · 0 pending')
+    expect(m.queueLine).toBe('queue —')
+  })
+
+  it('an unreachable engine reads queue — (the backend sends {0,0} when /queue failed)', () => {
+    const m = imageModel(status({ reachable: false }), arbiter('llm'))!
+    expect(m.queueLine).toBe('queue —')
+  })
+
+  it('a step count with no total shows no step label (agrees with the percentage)', () => {
+    const m = imageModel(
+      status({ progress: { model: 'm', step: 3, total: 0, node: null, elapsed_s: 1, prompt_id: 'p' } }),
+      arbiter('img'),
+    )!
+    expect(m.progress!.step).toBeNull()
+    expect(m.progress!.pct).toBeNull()
   })
 })

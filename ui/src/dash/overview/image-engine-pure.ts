@@ -35,6 +35,9 @@ function mode(status: ComfyuiStatus, arbiter: ArbiterReading | undefined): Pick<
 /** The card's model, or null when there is no status (404 from an older backend, or no img slot). */
 export function imageModel(status: ComfyuiStatus | undefined, arbiter: ArbiterReading | undefined): ImageEngineModel | null {
   if (!status) return null
+  // The backend answers {0,0} when ComfyUI's /queue could not be fetched, and an older body has no
+  // queue at all: neither is a measured empty queue, so neither reads as 0.
+  const queueKnown = status.reachable !== false && status.queue != null
   const running = status.queue?.running ?? 0
   const pending = status.queue?.pending ?? 0
   const a = arbiter?.arbiter ?? status.arbiter
@@ -50,7 +53,7 @@ export function imageModel(status: ComfyuiStatus | undefined, arbiter: ArbiterRe
   const progress = p
     ? {
         model: p.model,
-        step: p.step != null && p.total != null ? `step ${p.step}/${p.total}` : null,
+        step: p.step != null && p.total != null && p.total > 0 ? `step ${p.step}/${p.total}` : null,
         node: p.node || null,
         elapsed: clockLabel(p.elapsed_s),
         pct: renderPct(p),
@@ -60,5 +63,5 @@ export function imageModel(status: ComfyuiStatus | undefined, arbiter: ArbiterRe
   const inv = status.inventory ?? {}
   const inventory = TILES.filter(([key]) => typeof inv[key] === 'number').map(([key, k]) => ({ k, v: inv[key] }))
 
-  return { ...mode(status, arbiter), engine: status.engine, queueLine: `queue ${running} running · ${pending} pending`, progress, pendingNote, inventory }
+  return { ...mode(status, arbiter), engine: status.engine, queueLine: queueKnown ? `queue ${running} running · ${pending} pending` : 'queue —', progress, pendingNote, inventory }
 }
