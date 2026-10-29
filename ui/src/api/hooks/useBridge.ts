@@ -74,12 +74,18 @@ export type BridgeRunStatus =
   | 'cancelled'
   | 'interrupted'
 
-/** A run that will not change again. Everything else is live (queued, running, waiting, …). */
+/**
+ * A run that will not change again. Mirrors the backend's `TERMINAL_STATUSES`
+ * (src/hal0/bridge/store.py): `unknown` is terminal there too — it marks a run Hermes no longer
+ * knows, and the watcher publishes it as `agents.run_failed`. Everything else is live (queued,
+ * running, waiting, …).
+ */
 export const BRIDGE_TERMINAL_STATUSES: ReadonlySet<string> = new Set([
   'completed',
   'failed',
   'cancelled',
   'interrupted',
+  'unknown',
 ])
 
 export interface BridgeRun {

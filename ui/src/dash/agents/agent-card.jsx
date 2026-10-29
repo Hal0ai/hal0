@@ -1183,7 +1183,13 @@ function LiveAgentCard({ identity, model, actions }) {
   if (tab === "status") pane = <StatusTab {...back} />;
   else if (tab === "lore") pane = <LoreTab {...back} />;
   else if (tab === "lifecycle") pane = <LifecycleTab {...back} />;
-  else if (tab === "delegated" && !isPi && window.BridgeRunsList) pane = <window.BridgeRunsList />;
+  else if (tab === "delegated" && !isPi) {
+    // bridge-runs.jsx registers BridgeRunsList; say so if it did not, rather than showing Controls
+    // under a tab that says Delegated.
+    pane = window.BridgeRunsList
+      ? <window.BridgeRunsList />
+      : <div className="fcb-pane-in"><div className="fc-note">Delegated runs unavailable</div></div>;
+  }
   else pane = <ControlsTab {...back} />;
 
   return (

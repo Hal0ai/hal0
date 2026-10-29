@@ -20,6 +20,12 @@
 //
 // The key is only ever rendered into the result view. It is not logged, toasted or stored.
 //
+// Add and rotate outcomes are read from the mutation hooks' own state (`create.data`,
+// `rotate.error`, …), never from the promise a click handler awaits. A 401 `auth.required` hands
+// the failed mutation to the sign-in drawer, which re-runs that same mutation after login; the
+// handler that started it is long gone by then, but the hook state still reaches the page, so the
+// retried call's key is shown (and its failure reported) like a first-try one.
+//
 // Window-globals shim: reads React, Modal, ConfirmDialog, EnginePane, Icon and the bridge hooks /
 // pure helpers from `window` (primitives.jsx, connections.jsx, agents-hook-bridge.ts), registers
 // BridgeClientsCard on it. No ES imports.
@@ -41,15 +47,6 @@ function toast(msg, kind) {
 
 function errText(err) {
   return (err && err.message) || "request failed";
-}
-
-function useNow(ms) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), ms);
-    return () => clearInterval(t);
-  }, [ms]);
-  return now;
 }
 
 // ── scopes ──────────────────────────────────────────────────────────
@@ -113,7 +110,7 @@ function CopyBtn({ text, label, what }) {
 
 // ── add ─────────────────────────────────────────────────────────────
 
-function AddClientModal({ open, create, onClose, onMinted, onDisabled }) {
+function AddClientModal({ open, create, onClose, onDisabled }) {
   const fmt = window.__hal0BridgeFmt;
   const Modal = window.Modal;
   const [name, setName] = useState("");
@@ -132,17 +129,19 @@ function AddClientModal({ open, create, onClose, onMinted, onDisabled }) {
   const nameError = name ? fmt.bridgeNameError(name) : null;
   const canSubmit = !!name && !nameError && !create.isPending;
 
-  const submit = async () => {
+  const submit = () => {
     if (!canSubmit) return;
     setError(null);
-    try {
-      const minted = await create.mutateAsync({ name, note: note.trim(), scopes });
-      onMinted(minted);
-    } catch (err) {
-      if (window.__hal0BridgeDisabled(err)) onDisabled();
-      else setError(errText(err));
-    }
+    create.mutate({ name, note: note.trim(), scopes });
   };
+
+  // A refusal is read off the mutation, so it also reaches the modal when the call that failed is
+  // a sign-in retry. (Success is read off it too, in BridgeClientsCard, where the key is shown.)
+  useEffect(() => {
+    if (!create.error) return;
+    if (window.__hal0BridgeDisabled(create.error)) onDisabled();
+    else setError(errText(create.error));
+  }, [create.error]);
 
   return (
     <Modal
@@ -338,7 +337,20 @@ function ClientRow({ c, now, busy, onScopes, onRotate, onRevoke }) {
   const seenTip = SEEN_TIP + (c.last_seen_at != null ? " · " + fmt.fmtStamp(c.last_seen_at) : "");
   return (
     <div className={"mcprow" + (open ? " expanded" : "")} data-testid={"bridge-client-" + c.name} data-revoked={revoked ? "true" : "false"}>
-      <div className="mcprow-main" onClick={() => setOpen((o) => !o)}>
+      <div
+        className="mcprow-main brg-toggle"
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+        onKeyDown={(e) => {
+          if (e.target !== e.currentTarget) return;
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setOpen((o) => !o);
+          }
+        }}
+      >
         <span className={"mcp-dot" + (revoked ? " down" : "")} />
         <span className="mcp-id">
           <span><span className="nm">{c.name}</span></span>
@@ -385,11 +397,10 @@ function BridgeClientsCard() {
   const rotate = window.__hal0UseBridgeClientRotate();
   const revoke = window.__hal0UseBridgeClientRevoke();
   const scopesMut = window.__hal0UseBridgeClientScopes();
-  const now = useNow(30000);
+  const now = window.__hal0BridgeFmt.useNow(30000);
 
   const [addOpen, setAddOpen] = useState(false);
   const [disabled, setDisabled] = useState(false);
-  const [result, setResult] = useState(null);
   const [rotating, setRotating] = useState(null);
   const [revoking, setRevoking] = useState(null);
   const [editing, setEditing] = useState(null);
@@ -398,13 +409,16 @@ function BridgeClientsCard() {
   const active = items.filter((c) => c.revoked_at == null).length;
   const busy = rotate.isPending || revoke.isPending;
 
-  const minted = (kind, m) => {
-    setAddOpen(false);
-    setResult({ kind, minted: m });
-  };
+  // The key view is whatever add or rotate last resolved with. It lives in the hook state (not a
+  // useState set by the click handler) so a call re-run after the sign-in drawer shows it too.
+  const result = create.data
+    ? { kind: "add", minted: create.data }
+    : rotate.data
+      ? { kind: "rotate", minted: rotate.data }
+      : null;
   // Drop the key from the page and from the mutations that carried it.
   const doneWithKey = () => {
-    setResult(null);
+    setAddOpen(false);
     create.reset();
     rotate.reset();
   };
@@ -414,16 +428,16 @@ function BridgeClientsCard() {
     setDisabled(true);
   };
 
-  const confirmRotate = async () => {
+  const confirmRotate = () => {
     const name = rotating;
     setRotating(null);
-    try {
-      minted("rotate", await rotate.mutateAsync(name));
-    } catch (err) {
-      if (window.__hal0BridgeDisabled(err)) markDisabled();
-      else toast("Rotate failed: " + errText(err), "err");
-    }
+    rotate.mutate(name);
   };
+  useEffect(() => {
+    if (!rotate.error) return;
+    if (window.__hal0BridgeDisabled(rotate.error)) markDisabled();
+    else toast("Rotate failed: " + errText(rotate.error), "err");
+  }, [rotate.error]);
   const confirmRevoke = async () => {
     const name = revoking;
     setRevoking(null);
@@ -491,7 +505,7 @@ function BridgeClientsCard() {
         <div className="mcplist" data-testid="bridge-clients">{body}</div>
       </EnginePane>
 
-      <AddClientModal open={addOpen} create={create} onClose={() => setAddOpen(false)} onMinted={(m) => minted("add", m)} onDisabled={markDisabled} />
+      <AddClientModal open={addOpen && !create.data} create={create} onClose={() => setAddOpen(false)} onDisabled={markDisabled} />
       <KeyResultModal result={result} onDone={doneWithKey} />
       <ScopesModal client={editing} scopesMut={scopesMut} onClose={() => setEditing(null)} onDisabled={markDisabled} />
       <ConfirmDialog

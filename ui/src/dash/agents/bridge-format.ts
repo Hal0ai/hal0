@@ -4,7 +4,21 @@
 // everything they need that is not a hook lives here and is published on
 // `window.__hal0BridgeFmt` by agents-hook-bridge.ts (the way `deriveCardModel` is).
 
+import { useEffect, useState } from 'react'
 import { BRIDGE_TERMINAL_STATUSES, type BridgeRun } from '@/api/hooks/useBridge'
+
+/**
+ * A clock that re-renders its caller every `ms`, so "5m ago" and a live run's duration keep
+ * moving. Both bridge .jsx files call it as `window.__hal0BridgeFmt.useNow(ms)`.
+ */
+export function useNow(ms: number): number {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), ms)
+    return () => clearInterval(t)
+  }, [ms])
+  return now
+}
 
 /** The client-name rule the API enforces (src/hal0/bridge/keys.py NAME_RE). */
 export const BRIDGE_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/
@@ -55,8 +69,9 @@ const LIVE = new Set(['queued', 'running', 'stopping'])
 
 /**
  * The colour group of a run status. `live` is in flight; `waiting` needs a person (approval or
- * clarification) or has an unknown state; `ok` is completed; `bad` is failed, cancelled or
- * interrupted. A status this build does not know reads as `waiting`, since it wants a look.
+ * clarification); `ok` is completed; `bad` is every other terminal status: failed, cancelled,
+ * interrupted, and `unknown` (Hermes no longer knows the run, which the backend treats as a
+ * failure). A status this build has never heard of reads as `waiting`, since it wants a look.
  */
 export function bridgeRunGroup(status: string): BridgeRunGroup {
   if (LIVE.has(status)) return 'live'
@@ -105,6 +120,7 @@ export function bridgeRunSeconds(run: Pick<BridgeRun, 'status' | 'created_at' | 
 }
 
 export const BRIDGE_FMT = {
+  useNow,
   bridgeNameError,
   fmtAgo,
   fmtSpan,

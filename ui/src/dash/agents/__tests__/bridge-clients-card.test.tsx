@@ -9,8 +9,9 @@
 // Pinned here: a client row with its scope chips, last-seen tooltip, revoked badge and per-row
 // active-run count; the Add modal's defaults and name rule; the result view showing the key
 // exactly once and one `claude mcp add` line per scope; the key not leaking into toasts or the
-// console, nor surviving Done; Revoke and Rotate behind a confirm; the scopes editor; and the
-// `bridge.disabled` one-liner.
+// console, nor surviving Done; Revoke and Rotate behind a confirm; the scopes editor; the
+// `bridge.disabled` one-liner; and add / rotate calls that the sign-in drawer re-runs after a 401
+// `auth.required` (against the app's real queryClient and challenge store).
 import React, { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -26,6 +27,8 @@ vi.mock('@/api/client', async () => {
 })
 
 const client = await import('@/api/client')
+const { queryClient } = await import('@/lib/queryClient')
+const { useAuthChallengeStore } = await import('@/stores/useAuthChallengeStore')
 await import('../../primitives.jsx')
 await import('../agents-hook-bridge')
 await import('../bridge-clients-card.jsx')
@@ -107,9 +110,8 @@ async function flush() {
   }
 }
 
-async function mount() {
+async function mount(qc: QueryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
   const Card = w.BridgeClientsCard as React.ComponentType
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   container = document.createElement('div')
   document.body.appendChild(container)
   root = createRoot(container)
@@ -199,13 +201,40 @@ describe('client list', () => {
   })
 
   it('counts a client\'s live runs only once its row is open', async () => {
-    routeGets([RUN('running', 'r1'), RUN('waiting_for_approval', 'r2'), RUN('completed', 'r3')])
+    // an orphaned `unknown` run is terminal in the backend, so it is not "active"
+    routeGets([RUN('running', 'r1'), RUN('waiting_for_approval', 'r2'), RUN('completed', 'r3'), RUN('unknown', 'r4')])
     await mount()
     expect(vi.mocked(client.apiGet).mock.calls.some(([p]) => String(p).startsWith('/api/bridge/runs'))).toBe(false)
 
     await click(q('[data-testid="bridge-client-laptop"] .mcprow-main'))
     expect(client.apiGet).toHaveBeenCalledWith('/api/bridge/runs?client=laptop&limit=50')
     expect(q('[data-testid="bridge-active-runs"]')!.textContent).toBe('active runs 2')
+  })
+
+  it('opens and closes a row from the keyboard, with Enter or Space', async () => {
+    await mount()
+    const toggle = q('[data-testid="bridge-client-laptop"] .mcprow-main')!
+    expect(toggle.getAttribute('role')).toBe('button')
+    expect(toggle.getAttribute('tabindex')).toBe('0')
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    expect(byText('[data-testid="bridge-client-laptop"] button', 'Rotate key')).toBeNull()
+
+    const press = async (key: string) => {
+      await act(async () => {
+        toggle.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
+      })
+      await flush()
+    }
+    await press('Enter')
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    expect(byText('[data-testid="bridge-client-laptop"] button', 'Scopes')).not.toBeNull()
+    expect(byText('[data-testid="bridge-client-laptop"] button', 'Rotate key')).not.toBeNull()
+    expect(byText('[data-testid="bridge-client-laptop"] button', 'Revoke')).not.toBeNull()
+    await press(' ')
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    // other keys do nothing
+    await press('a')
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
   })
 
   it('shows an empty state with no clients', async () => {
@@ -399,5 +428,118 @@ describe('row actions', () => {
 
     expect(client.apiPatch).toHaveBeenCalledWith('/api/bridge/clients/laptop', { scopes: ['agents'] })
     expect(q('[data-testid="bridge-scopes-save"]')).toBeNull()
+  })
+})
+
+// A 401 `auth.required` on a mutation is caught by the app's MutationCache, which parks the failed
+// mutation in useAuthChallengeStore; after login the drawer calls `retry()`, which re-runs that
+// same mutation. The click handler's own promise has long since rejected, so the minted key can
+// only reach the page through the hook state. These use the real queryClient and store.
+describe('sign-in challenge (401 auth.required)', () => {
+  const refused = () => new client.Hal0Error('Admin sign-in required.', { code: 'auth.required', status: 401 })
+  // What AuthChallengeDrawer does after a good login. `retry()` rejects when the re-run is refused
+  // again; the drawer's login mutation takes that, so the page under it never sees the rejection.
+  const signIn = async () => {
+    await act(async () => {
+      await useAuthChallengeStore.getState().retry().catch(() => {})
+    })
+    await flush()
+  }
+
+  afterEach(() => {
+    useAuthChallengeStore.getState().dismiss()
+    queryClient.clear()
+  })
+
+  async function submitAdd(name: string) {
+    await mount(queryClient)
+    await click(q('[data-testid="bridge-add"]'))
+    await type(q('[data-testid="bridge-add-name"]'), name)
+    await click(q('[data-testid="bridge-add-submit"]'))
+  }
+
+  it('shows the key of an add that was re-run after sign-in, exactly once', async () => {
+    vi.mocked(client.apiPost).mockRejectedValueOnce(refused()).mockResolvedValueOnce(minted('phone'))
+    await submitAdd('phone')
+
+    // refused: the drawer holds the mutation, nothing was minted, the form is still up
+    expect(useAuthChallengeStore.getState().pending).not.toBeNull()
+    expect(q('[data-testid="bridge-key"]')).toBeNull()
+    expect(q('[data-testid="bridge-add-name"]')).not.toBeNull()
+
+    await signIn()
+
+    expect(client.apiPost).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(client.apiPost).mock.calls[1]).toEqual(vi.mocked(client.apiPost).mock.calls[0])
+    expect(q('[data-testid="bridge-add-name"]')).toBeNull()
+    expect(qa('[data-testid="bridge-key"]')).toHaveLength(1)
+    expect(q('[data-testid="bridge-key"]')!.textContent).toBe(KEY)
+    expect(text()).toContain('Key for phone')
+    const lines = qa('[data-testid^="bridge-add-line-"]')
+    expect(lines).toHaveLength(2)
+    expect(occurrences(text(), KEY)).toBe(1 + lines.length)
+    // no leftover sign-in error under the result view
+    expect(q('[role="alert"]')).toBeNull()
+
+    await click(q('[data-testid="bridge-result-done"]'))
+    expect(text()).not.toContain(KEY)
+    // Done does not bring the Add form back
+    expect(q('[data-testid="bridge-add-name"]')).toBeNull()
+    expect(q('[data-testid="bridge-result"]')).toBeNull()
+  })
+
+  it('still shows the key when the Add form was cancelled while the drawer was open', async () => {
+    vi.mocked(client.apiPost).mockRejectedValueOnce(refused()).mockResolvedValueOnce(minted('phone'))
+    await submitAdd('phone')
+    await click(byText('button', 'Cancel'))
+    expect(q('[data-testid="bridge-add-name"]')).toBeNull()
+
+    await signIn()
+
+    expect(client.apiPost).toHaveBeenCalledTimes(2)
+    expect(qa('[data-testid="bridge-key"]')).toHaveLength(1)
+    expect(q('[data-testid="bridge-key"]')!.textContent).toBe(KEY)
+    await click(q('[data-testid="bridge-result-done"]'))
+    expect(text()).not.toContain(KEY)
+  })
+
+  it('shows the real refusal, not the stale sign-in one, when the re-run is refused again', async () => {
+    vi.mocked(client.apiPost)
+      .mockRejectedValueOnce(refused())
+      .mockRejectedValueOnce(
+        new client.Hal0Error("a bridge client named 'phone' already exists", { code: 'bridge.client_exists', status: 409 }),
+      )
+    await submitAdd('phone')
+    expect(q('[role="alert"]')!.textContent).toBe('Admin sign-in required.')
+
+    await signIn()
+
+    expect(q('[role="alert"]')!.textContent).toBe("a bridge client named 'phone' already exists")
+    expect(q('[data-testid="bridge-key"]')).toBeNull()
+    expect(q('[data-testid="bridge-add-name"]')).not.toBeNull()
+  })
+
+  it('shows the new key of a rotate that was re-run after sign-in, exactly once', async () => {
+    vi.mocked(client.apiPost).mockRejectedValueOnce(refused()).mockResolvedValueOnce(minted('laptop'))
+    await mount(queryClient)
+    await click(q('[data-testid="bridge-client-laptop"] .mcprow-main'))
+    await click(byText('[data-testid="bridge-client-laptop"] button', 'Rotate key'))
+    await click(byText('.modal-foot button', 'Rotate key'))
+
+    expect(useAuthChallengeStore.getState().pending).not.toBeNull()
+    expect(q('[data-testid="bridge-key"]')).toBeNull()
+
+    await signIn()
+
+    expect(vi.mocked(client.apiPost).mock.calls.map(([p]) => p)).toEqual([
+      '/api/bridge/clients/laptop/rotate',
+      '/api/bridge/clients/laptop/rotate',
+    ])
+    expect(qa('[data-testid="bridge-key"]')).toHaveLength(1)
+    expect(q('[data-testid="bridge-key"]')!.textContent).toBe(KEY)
+    expect(text()).toContain('New key for laptop')
+
+    await click(q('[data-testid="bridge-result-done"]'))
+    expect(text()).not.toContain(KEY)
   })
 })

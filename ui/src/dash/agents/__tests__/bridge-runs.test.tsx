@@ -142,6 +142,26 @@ describe('BridgeRunsList', () => {
     }
   })
 
+  it('shows an unknown run as terminal: red chip, filed under failed, duration stopped', async () => {
+    // Hermes no longer knows the run; the backend treats that as a failure (store.py
+    // TERMINAL_STATUSES), so the page must not read it as waiting or keep its clock running.
+    vi.mocked(client.apiGet).mockResolvedValue({
+      items: [run({ run_id: 'run_ffffffffffff', status: 'unknown', created_at: NOW_S - 600, updated_at: NOW_S - 500 })],
+    })
+    await mount()
+    const chip = row('run_ffffffffffff').querySelector('[data-testid="bridge-run-status"]') as HTMLElement
+    expect(chip.getAttribute('data-group')).toBe('bad')
+    expect(chip.classList.contains('err')).toBe(true)
+    expect(chip.classList.contains('warn')).toBe(false)
+    expect(row('run_ffffffffffff').querySelector('.brg-run-meta')!.textContent).toMatch(/·1m 40s$/)
+
+    const [, statusSel] = qa('select') as HTMLSelectElement[]
+    await choose(statusSel, 'bad')
+    expect(qa('.brg-run')).toHaveLength(1)
+    await choose(statusSel, 'waiting')
+    expect(qa('.brg-run')).toHaveLength(0)
+  })
+
   it('filters by client and by status group', async () => {
     await mount()
     const [clientSel, statusSel] = qa('select') as HTMLSelectElement[]

@@ -234,13 +234,22 @@ describe('useBridgeRuns', () => {
     act(() => probe.root.unmount())
   })
 
-  it('treats every non-terminal status as live', () => {
-    for (const s of ['queued', 'running', 'waiting_for_approval', 'waiting_for_clarification', 'stopping', 'unknown']) {
+  it('treats every non-terminal status as live, and unknown as terminal like the backend does', () => {
+    for (const s of ['queued', 'running', 'waiting_for_approval', 'waiting_for_clarification', 'stopping']) {
       expect(BRIDGE_TERMINAL_STATUSES.has(s)).toBe(false)
     }
-    for (const s of ['completed', 'failed', 'cancelled', 'interrupted']) {
+    for (const s of ['completed', 'failed', 'cancelled', 'interrupted', 'unknown']) {
       expect(BRIDGE_TERMINAL_STATUSES.has(s)).toBe(true)
     }
+  })
+
+  it('does not hold the 5 s poll open for an orphaned unknown run', async () => {
+    vi.mocked(client.apiGet).mockResolvedValue({ items: [run('unknown', 'gone'), run('completed', 'done')] })
+    const qc = newClient()
+    const probe = mountHook(() => useBridgeRuns({ client: 'laptop' }), qc)
+    await flush()
+    expect(intervalOf(qc, ['bridge', 'runs', { client: 'laptop' }])).toBe(30_000)
+    act(() => probe.root.unmount())
   })
 })
 

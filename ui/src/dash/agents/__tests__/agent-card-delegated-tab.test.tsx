@@ -92,6 +92,18 @@ describe('LiveAgentCard console tabs', () => {
     expect(container.querySelector('[data-testid="delegated-stub"]')).not.toBeNull()
   })
 
+  it('says so when the runs list did not load, instead of showing Controls under a Delegated tab', async () => {
+    delete w.BridgeRunsList
+    await mount('hermes')
+    await act(async () => {
+      ;(container.querySelector('[data-testid="agent-tab-delegated"]') as HTMLElement).click()
+    })
+    expect(container.textContent).toContain('Delegated runs unavailable')
+    expect(container.querySelector('[data-testid="delegated-stub"]')).toBeNull()
+    // not the Controls pane
+    expect(container.querySelector('[data-testid="agent-tab-controls"]')!.getAttribute('aria-selected')).toBe('false')
+  })
+
   it('arrow keys step through the Delegated tab and wrap around', async () => {
     await mount('hermes')
     const last = container.querySelector('[data-testid="agent-tab-delegated"]') as HTMLElement

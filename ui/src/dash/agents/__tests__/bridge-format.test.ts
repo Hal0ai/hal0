@@ -29,9 +29,10 @@ describe('bridgeRunGroup', () => {
   it('groups every status the API names', () => {
     const groups: Record<string, string[]> = {
       live: ['queued', 'running', 'stopping'],
-      waiting: ['waiting_for_approval', 'waiting_for_clarification', 'unknown'],
+      waiting: ['waiting_for_approval', 'waiting_for_clarification'],
       ok: ['completed'],
-      bad: ['failed', 'cancelled', 'interrupted'],
+      // `unknown` is terminal in the backend (store.py TERMINAL_STATUSES), published as run_failed
+      bad: ['failed', 'cancelled', 'interrupted', 'unknown'],
     }
     for (const [group, statuses] of Object.entries(groups)) {
       for (const s of statuses) expect(bridgeRunGroup(s)).toBe(group)
@@ -83,5 +84,7 @@ describe('time', () => {
     const base = { created_at: now / 1000 - 600, updated_at: now / 1000 - 500 }
     expect(bridgeRunSeconds({ ...base, status: 'completed' }, now)).toBe(100)
     expect(bridgeRunSeconds({ ...base, status: 'running' }, now)).toBe(600)
+    // unknown is terminal in the backend, so its clock stops too
+    expect(bridgeRunSeconds({ ...base, status: 'unknown' }, now)).toBe(100)
   })
 })

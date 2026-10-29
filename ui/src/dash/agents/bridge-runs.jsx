@@ -3,12 +3,13 @@
 // The runs that bridge clients (coding agents on other machines) handed to hal0's Hermes through
 // the hal0-agents MCP server (ADR-0043). One row per run: short id, status chip, when it started,
 // who sent it, how long it has taken, what it was asked. Filters narrow by client and by status
-// group. "Events" opens the dock's events tab, where the run's journal lines and approvals show.
+// group. "Events" opens the dock's events tab (the whole stream: it does not filter to the run,
+// and the dock ignores the event's detail for now).
 //
 // Window-globals shim: reads React and the bridge hooks / pure helpers from `window`
 // (agents-hook-bridge.ts), registers BridgeRunsList on it. No ES imports.
 
-const { useState, useEffect, useMemo } = React;
+const { useState, useMemo } = React;
 
 // Runs fetched at once. The list is for glancing at recent work, not an archive.
 const RUNS_LIMIT = 100;
@@ -17,21 +18,12 @@ const GROUPS = ["live", "waiting", "ok", "bad"];
 
 function stop(e) { e.stopPropagation(); }
 
-// A clock that re-renders every `ms`, so "5m ago" and a live run's duration keep moving.
-function useNow(ms) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), ms);
-    return () => clearInterval(t);
-  }, [ms]);
-  return now;
-}
-
 function RunRow({ run, now }) {
   const fmt = window.__hal0BridgeFmt;
   const group = fmt.bridgeRunGroup(run.status);
   const open = () => {
-    // The dock's events tab opens on this event (Dock.jsx); the detail says which run asked.
+    // Dock.jsx opens its events tab on this event and ignores the detail; it says which run asked
+    // so a later dock filter has it.
     window.dispatchEvent(
       new CustomEvent("hal0:open-events", { detail: { source: "bridge", run_id: run.run_id, client: run.client } }),
     );
@@ -66,7 +58,7 @@ function BridgeRunsList() {
   const fmt = window.__hal0BridgeFmt;
   const disabled = window.__hal0BridgeDisabled;
   const runsQ = window.__hal0UseBridgeRuns({ limit: RUNS_LIMIT });
-  const now = useNow(1000);
+  const now = fmt.useNow(1000);
   const [client, setClient] = useState("");
   const [group, setGroup] = useState("");
 
