@@ -33,6 +33,16 @@ describe('mergeAttention', () => {
     expect(restart).toHaveBeenCalledOnce()
   })
 
+  it('shows a disabled restarting… action while the drift restart is in flight', () => {
+    const [d] = mergeAttention({
+      notifications: [], diagnoses: [], failing: [],
+      drift: { count: 1, slots: ['agent'] },
+      handlers: { driftPending: true },
+    })
+    expect(d.actions).toHaveLength(1)
+    expect(d.actions[0]).toMatchObject({ label: 'restarting…', disabled: true })
+  })
+
   it('keeps the drift wording from the old banner', () => {
     const [d] = mergeAttention({ notifications: [], diagnoses: [], failing: [], drift: { count: 1, slots: ['agent'] } })
     expect(d.eyebrow).toBe('update · slots need restart')
@@ -122,11 +132,16 @@ describe('mergeAttention', () => {
 })
 
 describe('allClearLine', () => {
-  const base = { slotsHealthy: [13, 13] as [number, number], diskFreeMb: 124429, channel: 'nightly', available: null, checkedAt: new Date(2026, 9, 29, 15, 10) }
+  const base = { doctorKnown: true, slotsHealthy: [13, 13] as [number, number], diskFreeMb: 124429, channel: 'nightly', available: null, checkedAt: new Date(2026, 9, 29, 15, 10) }
   it('composes the line', () =>
     expect(allClearLine(base)).toBe('All clear · doctor ok · 13/13 slots healthy · disk 124 GB free · up to date on nightly · checked 15:10'))
   it('renders an em dash for an unsourced disk figure and drops an unknown channel', () =>
     expect(allClearLine({ ...base, diskFreeMb: null, channel: null })).toBe('All clear · doctor ok · 13/13 slots healthy · disk — free · checked 15:10'))
+  it('says doctor unavailable instead of doctor ok when the doctor feed has not answered', () => {
+    const line = allClearLine({ ...base, doctorKnown: false })
+    expect(line).toContain('doctor unavailable')
+    expect(line).not.toContain('doctor ok')
+  })
   it('omits the slot segment when no slot list is known', () =>
     expect(allClearLine({ ...base, slotsHealthy: [0, 0] })).not.toContain('slots healthy'))
   it('zero-pads the clock', () =>

@@ -39,6 +39,8 @@ export type DiagnosisRow = Pick<Diagnosis, 'id' | 'severity' | 'summary' | 'next
 export interface AttentionHandlers {
   runStep?: (step: NextStep) => void
   restartDrift?: () => void
+  /** The drift restart mutation is in flight: the action shows `restarting…` and is disabled. */
+  driftPending?: boolean
   openDoctor?: () => void
 }
 
@@ -78,7 +80,11 @@ function driftItem(drift: { count: number; slots: string[] }, h: AttentionHandle
       `${drift.count} slot${drift.count === 1 ? ' needs' : 's need'} restart` +
       (names ? ` — ${names}` : '') +
       ', still running the pre-update launch command. Restarting briefly interrupts any in-flight request on those slots.',
-    actions: [{ label: 'restart drifted slots', run: h.restartDrift ?? noop }],
+    actions: [
+      h.driftPending
+        ? { label: 'restarting…', disabled: true, run: noop }
+        : { label: 'restart drifted slots', run: h.restartDrift ?? noop },
+    ],
   }
 }
 
@@ -120,6 +126,8 @@ export function mergeAttention(input: AttentionInput): InboxItem[] {
 }
 
 export interface AllClearInput {
+  /** True only when the doctor feed answered; otherwise the line must not claim `doctor ok`. */
+  doctorKnown: boolean
   slotsHealthy: [number, number]
   diskFreeMb: number | null
   channel: string | null
@@ -134,7 +142,7 @@ export function allClearLine(i: AllClearInput): string {
     typeof i.diskFreeMb === 'number' && Number.isFinite(i.diskFreeMb)
       ? `${Math.round(i.diskFreeMb / 1000)} GB`
       : '—'
-  const parts = ['All clear', 'doctor ok']
+  const parts = ['All clear', i.doctorKnown ? 'doctor ok' : 'doctor unavailable']
   // No slot list yet (still loading, or none configured): say nothing rather than "0/0".
   if (i.slotsHealthy[1] > 0) parts.push(`${i.slotsHealthy[0]}/${i.slotsHealthy[1]} slots healthy`)
   parts.push(`disk ${disk} free`)

@@ -40,7 +40,7 @@ function InboxRow({ item }) {
 function OvNeedsYou({ onGo }) {
   const go = onGo || ((id) => { window.location.hash = '#' + id })
   const notifications = useNotifications().actionableItems
-  const { diagnoses } = useDiagnoses()
+  const { diagnoses, isLoading, isError, doctorFeedPending } = useDiagnoses()
   const { run } = useNextStepRunner()
   const health = useHealthSystem()
   const driftQ = useSlotDrift()
@@ -60,7 +60,7 @@ function OvNeedsYou({ onGo }) {
     diagnoses,
     failing,
     drift,
-    handlers: { runStep: run, restartDrift: () => restart.mutate(undefined), openDoctor },
+    handlers: { runStep: run, restartDrift: () => restart.mutate(undefined), driftPending: restart.isPending, openDoctor },
   })
 
   // The clock only moves when a source refreshes, not on every render.
@@ -73,6 +73,7 @@ function OvNeedsYou({ onGo }) {
     const healthy = slots.filter((s) => slotIndicatorFromPhase(s).cls !== 'error').length
     const hal0 = updates.data?.hal0
     const line = allClearLine({
+      doctorKnown: !isLoading && !isError && !doctorFeedPending,
       slotsHealthy: [healthy, slots.length],
       diskFreeMb: health.data?.checks?.disk_state?.free_mb ?? null,
       channel: hal0?.channel ?? null,

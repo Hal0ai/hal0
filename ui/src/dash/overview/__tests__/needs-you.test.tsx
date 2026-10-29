@@ -9,9 +9,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 ;(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true
 ;(globalThis as any).React = React
 
-const state: { notifs: any[]; diagnoses: any[]; failing: string[]; drift: any; updates: any } = {
+const state: { notifs: any[]; diagnoses: any[]; doctor: any; restartPending: boolean; failing: string[]; drift: any; updates: any } = {
   notifs: [],
   diagnoses: [],
+  doctor: {},
+  restartPending: false,
   failing: [],
   drift: { count: 0, slots: [] },
   updates: { hal0: { current: '1.7.1', available: null, channel: 'nightly' } },
@@ -20,7 +22,7 @@ const run = vi.fn()
 const restart = vi.fn()
 
 vi.mock('../../notifications.jsx', () => ({ useNotifications: () => ({ actionableItems: state.notifs }) }))
-vi.mock('@/api/hooks/useDiagnoses', () => ({ useDiagnoses: () => ({ diagnoses: state.diagnoses, verdict: 'ok' }) }))
+vi.mock('@/api/hooks/useDiagnoses', () => ({ useDiagnoses: () => ({ diagnoses: state.diagnoses, verdict: 'ok', isLoading: false, isError: false, doctorFeedPending: false, ...state.doctor }) }))
 vi.mock('../../diagnostics/useNextStepRunner.js', () => ({ useNextStepRunner: () => ({ run }) }))
 vi.mock('@/api/hooks/useRuntime', () => ({
   useHealthSystem: () => ({ data: { status: 'ok', checks: { disk_state: { ok: true, free_mb: 124429 } } } }),
@@ -28,7 +30,7 @@ vi.mock('@/api/hooks/useRuntime', () => ({
 }))
 vi.mock('@/api/hooks/useUpdates', () => ({
   useSlotDrift: () => ({ data: state.drift }),
-  useRestartDriftedSlots: () => ({ mutate: restart, isPending: false }),
+  useRestartDriftedSlots: () => ({ mutate: restart, isPending: state.restartPending }),
   useUpdateState: () => ({ data: state.updates }),
 }))
 vi.mock('@/api/hooks/useSlots', () => ({
@@ -56,6 +58,8 @@ const button = (label: string) =>
 beforeEach(() => {
   state.notifs = []
   state.diagnoses = []
+  state.doctor = {}
+  state.restartPending = false
   state.failing = []
   state.drift = { count: 0, slots: [] }
   run.mockClear()
@@ -124,5 +128,28 @@ describe('OvNeedsYou', () => {
     expect(host.textContent).toContain('1 item')
     act(() => button('open doctor')!.click())
     expect(onGo).toHaveBeenCalledWith('settings/doctor')
+  })
+
+  it('does not claim doctor ok while the doctor feed is loading', () => {
+    state.doctor = { isLoading: true }
+    mount()
+    expect(host.textContent).toContain('doctor unavailable')
+    expect(host.textContent).not.toContain('doctor ok')
+  })
+
+  it('says doctor ok when the feed answered', () => {
+    mount()
+    expect(host.textContent).toContain('doctor ok')
+  })
+
+  it('disables the drift action and shows restarting… while the restart runs', () => {
+    state.drift = { count: 1, slots: [{ slot: 'agent', diffs: [] }] }
+    state.restartPending = true
+    mount()
+    expect(button('restart drifted slots')).toBeUndefined()
+    const b = button('restarting…')!
+    expect(b.disabled).toBe(true)
+    act(() => b.click())
+    expect(restart).not.toHaveBeenCalled()
   })
 })
