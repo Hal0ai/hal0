@@ -33,6 +33,7 @@ from hal0.cli.auth_commands import app as auth_app
 from hal0.cli.bench_commands import BENCH_CONTEXT_SETTINGS, BENCH_HELP
 from hal0.cli.bench_commands import bench as bench_command
 from hal0.cli.board_commands import app as board_app
+from hal0.cli.bridge_commands import app as bridge_app
 from hal0.cli.capabilities_commands import app as capabilities_app
 from hal0.cli.chat_commands import chat_command
 from hal0.cli.comfyui_commands import app as comfyui_app
@@ -81,6 +82,8 @@ app.add_typer(capabilities_app, name="capabilities")
 # files``: the image-model catalog and the weight files it puts on disk.
 app.add_typer(comfyui_app, name="comfyui")
 app.add_typer(agent_app, name="agent")
+# ADR-0043 — ``hal0 bridge {add,list,revoke,rotate,scopes}``: keys for remote coding agents.
+app.add_typer(bridge_app, name="bridge")
 # Issue #1102 — ``hal0 app install <name>`` (deferred install verb for apps
 # skipped via HAL0_SKIP_OPENWEBUI=1 at install time; Q9 skip/defer parity).
 app.add_typer(app_ext_app, name="app")
