@@ -296,26 +296,29 @@ async def test_no_resolver_means_anonymous(svc: BridgeService) -> None:
 # -- failures are raised -----------------------------------------------------------------
 
 
-async def test_service_absent_is_bridge_disabled() -> None:
+async def test_service_absent_is_bridge_unavailable() -> None:
+    """Mounted (so enabled) but no service: 503 ``bridge.unavailable``, as REST answers."""
     server = agents.build_server(
         state=SimpleNamespace(bridge_service=None), principal_resolver=lambda: CC
     )
     with pytest.raises(Exception) as e:
         await server.call_tool("agents_list", {})
-    assert "bridge.disabled" in str(e.value)
+    assert "bridge.unavailable" in str(e.value)
+    assert "bridge.disabled" not in str(e.value)
+    assert BRIDGE_ERROR_STATUS["bridge.unavailable"] == 503
 
 
-async def test_state_without_the_attribute_is_bridge_disabled() -> None:
+async def test_state_without_the_attribute_is_bridge_unavailable() -> None:
     server = agents.build_server(state=SimpleNamespace(), principal_resolver=lambda: CC)
     with pytest.raises(Exception) as e:
         await server.call_tool("agent_runs_list", {})
-    assert "bridge.disabled" in str(e.value)
+    assert "bridge.unavailable" in str(e.value)
 
 
 async def test_service_is_read_at_call_time(svc: BridgeService) -> None:
     state = SimpleNamespace(bridge_service=None)
     server = agents.build_server(state=state, principal_resolver=lambda: CC)
-    with pytest.raises(Exception, match=r"bridge\.disabled"):
+    with pytest.raises(Exception, match=r"bridge\.unavailable"):
         await server.call_tool("agents_list", {})
     state.bridge_service = svc
     assert _payload(await server.call_tool("agents_list", {}))["agents"]
@@ -795,7 +798,7 @@ async def test_mount_tolerates_the_service_appearing_later(
     server = app.state.mcp_servers["hal0-agents"]
     with pytest.raises(Exception) as e:
         await server.call_tool("agents_list", {})
-    assert "bridge.disabled" in str(e.value)
+    assert "bridge.unavailable" in str(e.value)
     app.state.bridge_service = svc  # the server holds app.state
     assert _payload(await server.call_tool("agents_list", {}))["agents"]
 

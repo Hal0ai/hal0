@@ -133,13 +133,18 @@ def _context(ctx: ToolContext | None) -> tuple[Caller, BridgeService]:
 
     Identity is checked first, so an anonymous caller learns nothing about
     whether the bridge is up. ``bridge_service`` is None until the boot phase
-    publishes it (and when the bridge is disabled): ``bridge.disabled``.
+    publishes it, and stays None when it could not be built: 503
+    ``bridge.unavailable``, as the ``/api/bridge/runs`` routes answer. A
+    disabled bridge never gets here: ``/mcp/agents`` is then not mounted.
     """
     server = bound_server(ctx)
     caller = Caller.from_principal(server.hal0_hooks["principal_resolver"]())
     service: BridgeService | None = getattr(server.hal0_state, "bridge_service", None)
     if service is None:
-        raise BridgeError("bridge.disabled", "the agent bridge is not running on this box")
+        raise BridgeError(
+            "bridge.unavailable",
+            "the agent bridge's run service is not running; see the hal0-api log",
+        )
     return caller, service
 
 
