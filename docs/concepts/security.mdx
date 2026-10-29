@@ -57,7 +57,9 @@ fallback exists because a browser can't set a custom header on a WebSocket
 upgrade). An admin key presented anywhere a client key would be accepted
 still resolves to the more powerful `admin` tier, rather than being rejected
 as "the wrong kind of key." Key comparison is constant-time
-(`hmac.compare_digest`) to avoid a timing side-channel.
+(`hmac.compare_digest`) to avoid a timing side-channel; bridge keys are the
+exception, matched by a sha256 lookup rather than a compare, since the hash of a
+guessed key tells a timing observer nothing about the stored one.
 
 ### Every route is pre-classified — deny-by-default
 

@@ -135,7 +135,7 @@ A run's `status` is one of:
 | `waiting_for_approval` | A person has to approve something in the inbox. |
 | `stopping` | A stop is in progress. |
 | `completed`, `failed`, `cancelled`, `interrupted` | Terminal. `output` and `error` hold the result. |
-| `unknown` | Hermes no longer knows the run. |
+| `unknown` | Terminal. Hermes no longer knows the run, so treat it as failed; `error` says why. |
 
 The same `session_key` on later `agent_run` calls continues one conversation.
 Pass an `idempotency_key` to make a retried start safe. Both are private to
@@ -227,7 +227,10 @@ the bridge wrote. A tag of yours that starts with `agent:`, `visibility:`,
 `project:` or `source:bridge:` is dropped, because the memory layer reads an
 entry's owner from those. Pass `agent="shared"` to write the shared namespace
 instead.
-`agent_memory_search(agent, query, limit=10)` reads the same scope.
+`agent_memory_search(agent, query, limit=10)` searches `hermes` and
+`hermes/<profile>` in that agent's own private memory plus the shared memory.
+`shared` searches the shared memory plus any private memory filed under your
+client's own name.
 
 ### Skills
 
@@ -316,7 +319,7 @@ client already started: they run on in Hermes, and `hal0 bridge runs --client
 
 | Key | Default | Meaning |
 |---|---|---|
-| `enabled` | `true` | Master switch. Off, no bridge key works; `hal0 bridge list` and `revoke` still do. |
+| `enabled` | `true` | Master switch, read when hal0-api starts. Off, after the restart, no bridge key works and `/mcp/agents` is not mounted; until then keys still verify and `agent_run` answers `bridge.disabled`. `hal0 bridge list` and `revoke` work either way. |
 | `max_concurrent_runs_per_client` | `2` | Runs one client may have in flight. A start past it fails with `bridge.too_many_runs`. |
 | `run_retention_days` | `7` | How long finished runs are kept for `agent_run_events` and the Delegated tab. |
 | `clarify_timeout_s` | `900` | How long an unanswered clarification waits before the run is stopped. |
@@ -337,7 +340,10 @@ same-user process on the box can still do, is in
 through the whole path on a running box: it adds the client, opens
 `/mcp/agents/mcp`, lists the agents, sends Hermes a one-word `pong` task, checks
 that an agents-only key is refused on `/mcp/memory` and `/mcp/admin`, then
-revokes the key and confirms the next call gets `401`. `--mode reduced` skips
+revokes the key and confirms the next call gets `401`. The throwaway key briefly
+holds the `admin` scope, for read-only calls (it lists the admin tools and
+calls none); the probe then sets it back to `agents` only and revokes the client.
+`--mode reduced` skips
 the `pong` task for a box whose Hermes is not serving a model (the script then
 exits 3, not 0). Run it as root on the box; `--help` lists the options.
 
@@ -349,6 +355,7 @@ exits 3, not 0). Run it as root on the box; `--help` lists the options.
 | `401` | The key is revoked, was replaced by `hal0 bridge rotate`, or is mistyped. Run `hal0 bridge list`; add or rotate for a fresh key. |
 | `403` | The key is valid but lacks the scope for that server: `/mcp/memory` needs `memory`, `/mcp/admin` needs `admin`. Use `hal0 bridge scopes`. |
 | `404` on `/mcp/agents` | The bridge is off: `/mcp/agents` is not mounted while `[bridge].enabled` is false. Turn it on in `hal0.toml` and restart hal0-api. |
+| `bridge.disabled` | `agent_run` while `[bridge].enabled` is false in `hal0.toml` but hal0-api has not restarted: keys still verify and new runs are refused. Set it back to `true`, or restart hal0-api and `/mcp/agents` goes away. |
 | `bridge.unavailable` | The bridge's run service is not running: hal0-api has not finished starting, or the service could not start. See the hal0-api log. |
 | `bridge.agent_unkeyed` | hal0 holds no API key for that Hermes profile. The `agent-bridge` row of `hal0 doctor all` counts the keyed profiles. |
 | `bridge.agent_unavailable` | Hermes is not answering. Check the Hermes card and `hal0 doctor all`. |
