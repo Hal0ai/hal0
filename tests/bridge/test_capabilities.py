@@ -12,7 +12,7 @@ appear in the output, in whatever form.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -73,7 +73,7 @@ def tmp_hermes_home(tmp_path: Path) -> Path:
     return home
 
 
-def _no_gateway(_url: str, _headers: Mapping[str, str]) -> Any:
+def _no_gateway(_url: str, _headers: Callable[[], Mapping[str, str]]) -> Any:
     return None
 
 
@@ -220,17 +220,19 @@ def test_secret_shaped_names_and_values_are_dropped(tmp_hermes_home: Path) -> No
 def test_version_comes_from_health_detailed(tmp_hermes_home: Path) -> None:
     seen: list[str] = []
 
-    def fetch(url: str, _headers: Mapping[str, str]) -> Any:
+    def fetch(url: str, _headers: Callable[[], Mapping[str, str]]) -> Any:
         seen.append(url)
         return {"status": "ok", "version": "0.22.4", "token": SECRET}
 
-    view = capabilities_view(tmp_hermes_home, "default", fetch_json=fetch, api_key=API_KEY)
+    view = capabilities_view(
+        tmp_hermes_home, "default", fetch_json=fetch, read_api_key=lambda: API_KEY
+    )
     assert view["api_server_version"] == "0.22.4"
     assert seen == ["http://127.0.0.1:8642/health/detailed"]
     assert SECRET not in json.dumps(view)
 
     seen.clear()
-    capabilities_view(tmp_hermes_home, "coder", fetch_json=fetch, api_key=API_KEY)
+    capabilities_view(tmp_hermes_home, "coder", fetch_json=fetch, read_api_key=lambda: API_KEY)
     assert seen == ["http://127.0.0.1:8642/p/coder/health/detailed"]
 
 
@@ -238,11 +240,13 @@ def test_version_probe_sends_the_profile_key_and_never_echoes_it(tmp_hermes_home
     """The route answers 401 without the key; the key is only ever a request header."""
     sent: list[Mapping[str, str]] = []
 
-    def fetch(_url: str, headers: Mapping[str, str]) -> Any:
-        sent.append(dict(headers))
+    def fetch(_url: str, headers: Callable[[], Mapping[str, str]]) -> Any:
+        sent.append(dict(headers()))
         return {"version": "0.22.4"}
 
-    view = capabilities_view(tmp_hermes_home, "coder", fetch_json=fetch, api_key=API_KEY)
+    view = capabilities_view(
+        tmp_hermes_home, "coder", fetch_json=fetch, read_api_key=lambda: API_KEY
+    )
     assert sent == [{"Authorization": f"Bearer {API_KEY}"}]
     assert API_KEY not in json.dumps(view)
 
@@ -251,13 +255,15 @@ def test_version_probe_sends_the_profile_key_and_never_echoes_it(tmp_hermes_home
 def test_no_key_means_no_request_and_no_version(tmp_hermes_home: Path, key: str | None) -> None:
     calls: list[str] = []
 
-    def fetch(url: str, _headers: Mapping[str, str]) -> Any:
+    def fetch(url: str, _headers: Callable[[], Mapping[str, str]]) -> Any:
         calls.append(url)
         return {"version": "0.22.4"}
 
-    view = capabilities_view(tmp_hermes_home, "default", fetch_json=fetch, api_key=key)
+    view = capabilities_view(tmp_hermes_home, "default", fetch_json=fetch, read_api_key=lambda: key)
     assert view["api_server_version"] is None
     assert calls == []  # without the key the route would only answer 401
+    view = capabilities_view(tmp_hermes_home, "default", fetch_json=fetch, read_api_key=None)
+    assert view["api_server_version"] is None and calls == []
 
 
 def test_the_real_fetch_sends_the_bearer_header(
@@ -273,7 +279,7 @@ def test_the_real_fetch_sends_the_bearer_header(
         return httpx.Response(200, json={"version": "0.22.4"})
 
     monkeypatch.setattr(httpx, "get", fake_get)
-    view = capabilities_view(tmp_hermes_home, "default", api_key=API_KEY)
+    view = capabilities_view(tmp_hermes_home, "default", read_api_key=lambda: API_KEY)
     assert view["api_server_version"] == "0.22.4"
     assert seen["url"] == "http://127.0.0.1:8642/health/detailed"
     assert seen["headers"] == {"Authorization": f"Bearer {API_KEY}"}
@@ -300,7 +306,7 @@ def test_the_key_never_goes_through_a_proxy_for_a_hermes_beyond_loopback(
         return httpx.Response(200, json={"version": "0.22.4"})
 
     monkeypatch.setattr(httpx, "get", fake_get)
-    capabilities_view(home, "default", api_key=API_KEY)
+    capabilities_view(home, "default", read_api_key=lambda: API_KEY)
     assert seen["url"].startswith("http://192.0.2.9:8642/")
     assert seen["trust_env"] is False
 
@@ -316,28 +322,40 @@ def test_the_key_never_goes_through_a_proxy_for_a_hermes_beyond_loopback(
         "up",
         {"version": SECRET},  # not version-shaped: never echoed, even unrecognised as a secret
         {"version": "0.22.4 and more words"},
+        # a 40-hex secret fullmatched the old suffix rule; a version needs a dotted core
+        {"version": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b"},
+        {"version": "1"},
+        {"version": "0.22.4-" + "a" * 25},  # and is short
     ],
 )
 def test_unreadable_version_is_none(tmp_hermes_home: Path, answer: Any) -> None:
     view = capabilities_view(
-        tmp_hermes_home, "default", fetch_json=lambda _u, _h: answer, api_key=API_KEY
+        tmp_hermes_home, "default", fetch_json=lambda _u, _h: answer, read_api_key=lambda: API_KEY
     )
     assert view["api_server_version"] is None
 
 
-@pytest.mark.parametrize("version", ["0.22.4", "v0.22.4", "0.23.0rc1", "0.22.4+g4d04303", "1"])
+@pytest.mark.parametrize(
+    "version",
+    ["0.22.4", "v0.22.4", "0.22.4-rc1", "0.22.4+local.3", "0.22.4+g4d04303", "1.2", "1.2.3.4"],
+)
 def test_a_version_shaped_answer_is_reported(tmp_hermes_home: Path, version: str) -> None:
     view = capabilities_view(
-        tmp_hermes_home, "default", fetch_json=lambda _u, _h: {"version": version}, api_key=API_KEY
+        tmp_hermes_home,
+        "default",
+        fetch_json=lambda _u, _h: {"version": version},
+        read_api_key=lambda: API_KEY,
     )
     assert view["api_server_version"] == version
 
 
 def test_unreachable_gateway_gives_none_not_an_error(tmp_hermes_home: Path) -> None:
-    def boom(_url: str, _headers: Mapping[str, str]) -> Any:
+    def boom(_url: str, _headers: Callable[[], Mapping[str, str]]) -> Any:
         raise OSError("connection refused to http://127.0.0.1:8642")
 
-    view = capabilities_view(tmp_hermes_home, "default", fetch_json=boom, api_key=API_KEY)
+    view = capabilities_view(
+        tmp_hermes_home, "default", fetch_json=boom, read_api_key=lambda: API_KEY
+    )
     assert view["api_server_version"] is None
     assert "8642" not in json.dumps(view)
 
@@ -350,7 +368,10 @@ def test_default_fetch_against_a_closed_port_is_none(tmp_path: Path) -> None:
         "platforms": {"api_server": {"enabled": True, "host": "127.0.0.1", "port": 1}}
     }
     _write(home / "config.yaml", cfg)
-    assert capabilities_view(home, "default", api_key=API_KEY)["api_server_version"] is None
+    assert (
+        capabilities_view(home, "default", read_api_key=lambda: API_KEY)["api_server_version"]
+        is None
+    )
 
 
 @pytest.mark.parametrize("profile", ["../etc", "a/b", "", "x" * 80, "with space"])

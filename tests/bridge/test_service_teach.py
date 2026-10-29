@@ -23,7 +23,8 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import AsyncIterator
+import traceback
+from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -1015,7 +1016,7 @@ async def test_capabilities_probe_sends_the_profile_key(
     sent: list[tuple[str, dict[str, str]]] = []
 
     def fetch(url: str, headers: Any) -> Any:
-        sent.append((url, dict(headers)))
+        sent.append((url, dict(headers())))
         return {"version": "0.22.4"}
 
     keys = FakeHermes().keys
@@ -1034,6 +1035,64 @@ async def test_capabilities_probe_sends_the_profile_key(
     ]
     assert default["api_server_version"] == coder["api_server_version"] == "0.22.4"
     assert keys["default"] not in str(default) and keys["coder"] not in str(coder)
+
+
+async def _raised(call: Awaitable[Any]) -> BaseException:
+    """The exception ``call`` raises, caught here so the traceback holds no test frame."""
+    try:
+        await call
+    except BaseException as exc:
+        return exc
+    raise AssertionError("the call did not raise")
+
+
+class _Interrupted(BaseException):
+    """What gets past ``except Exception``, the way ``KeyboardInterrupt`` does."""
+
+
+@pytest.mark.parametrize("where", ["fetch", "address"])
+async def test_the_profile_key_is_in_no_frame_when_the_capabilities_call_raises(
+    tmp_path: Path,
+    home: Path,
+    queue: ApprovalQueue,
+    tmp_roots: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    where: str,
+) -> None:
+    """``hal0 serve`` renders a traceback with every frame's locals (#3137).
+
+    The service held the key in ``api_key`` and the view in ``api_key`` and ``key``
+    across calls that can raise: the version fetch, and reading the API server's
+    address before it. No frame of the captured traceback may hold it now.
+    """
+    reached: list[str] = []
+
+    def fetch(url: str, headers: Any) -> Any:
+        dict(headers())  # what a real fetch does inside its request call
+        reached.append(url)
+        raise _Interrupted
+
+    if where == "address":
+        import hal0.bridge.capabilities as capabilities_mod
+
+        def unreadable(_home: Path) -> str:
+            raise RuntimeError("API_SERVER_HOST cannot be read")
+
+        monkeypatch.setattr(capabilities_mod, "api_server_base", unreadable)
+    service, _store = _service(tmp_path, home, queue, tmp_roots, None, detail=fetch)
+    key = service._gateway.key_for("default")
+    try:
+        caught = await _raised(service.capabilities("hermes"))
+    finally:
+        await service.close()
+    assert isinstance(caught, _Interrupted if where == "fetch" else RuntimeError), repr(caught)
+    assert reached == (["http://127.0.0.1:8642/health/detailed"] if where == "fetch" else [])
+    frames = [frame for frame, _lineno in traceback.walk_tb(caught.__traceback__)]
+    names = {frame.f_code.co_name for frame in frames}
+    assert {"capabilities", "capabilities_view", "_version"} <= names
+    for frame in frames:
+        for local, value in frame.f_locals.items():
+            assert key not in repr(value), f"{frame.f_code.co_name}: {local} holds the key"
 
 
 async def test_capabilities_without_a_profile_key_makes_no_request(

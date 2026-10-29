@@ -31,13 +31,20 @@ into every profile's file.
 (3 s timeout) and is ``None`` when the gateway is down, answers an error or sends
 no usable ``version`` (one that is not version-shaped, such as ``0.22.4``, is not
 usable). The route needs the profile's API key (it answers 401
-without it, checked live), so the caller passes ``api_key``, the one hal0 holds for
-that profile (the same one ``HermesGateway.key_for`` reads), and it goes out as a
-bearer header on that one request, never through a proxy (``trust_env=False``:
-a Hermes listening beyond loopback is still not a proxy's to see) and never
-into the view. With no key there is no request and the version is ``None``.
-Nothing here raises for an unreadable config or an unreachable gateway: the
-view is simply emptier.
+without it, checked live), so the caller passes ``read_api_key``, which returns the
+one hal0 holds for that profile (the same one ``HermesGateway.key_for`` reads), and
+it goes out as a bearer header on that one request, never through a proxy
+(``trust_env=False``: a Hermes listening beyond loopback is still not a proxy's to
+see) and never into the view. With no key there is no request and the version is
+``None``. Nothing here raises for an unreadable config or an unreachable gateway:
+the view is simply emptier.
+
+The key is never a local of a frame that can raise while it is live, as in
+:class:`~hal0.bridge.hermes_client.HermesGateway`: ``hal0 serve`` renders a
+traceback with every frame's locals (#3137). The caller hands over a reader, not
+the key; the fetcher gets a header factory, not the header, and calls it inside
+the request call; and the real fetcher swallows whatever the HTTP call raises, so
+no httpx frame (which does hold the header) reaches a traceback.
 """
 
 from __future__ import annotations
@@ -53,7 +60,7 @@ from hal0.agents.hermes_api import DEFAULT_PROFILE, _config, api_server_base
 from hal0.agents.hermes_platforms import _explicit_enabled
 from hal0.redaction import is_sensitive_key, redact_log_line
 
-__all__ = ["CAPABILITY_KEYS", "FetchJson", "capabilities_view"]
+__all__ = ["CAPABILITY_KEYS", "FetchJson", "ReadApiKey", "capabilities_view"]
 
 #: The view's keys, in order. The contract with the ``agent_capabilities`` tool.
 CAPABILITY_KEYS: tuple[str, ...] = (
@@ -69,9 +76,14 @@ CAPABILITY_KEYS: tuple[str, ...] = (
     "approvals_mode",
 )
 
-#: Fetches a URL with the given request headers and returns its parsed JSON, or ``None``;
-#: may raise. Replaced in tests.
-FetchJson = Callable[[str, Mapping[str, str]], Any]
+#: Fetches a URL and returns its parsed JSON, or ``None``; may raise. The second
+#: argument makes the request headers: call it inside the request call, never bind
+#: its result (it carries the profile's API key, see the module docstring). Replaced
+#: in tests.
+FetchJson = Callable[[str, Callable[[], Mapping[str, str]]], Any]
+
+#: Returns the profile's API key, or ``None`` (or blank) when hal0 holds none.
+ReadApiKey = Callable[[], str | None]
 
 #: A profile name is one URL segment (the same rule as ``HermesGateway.profile_of``).
 _PROFILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
@@ -79,9 +91,12 @@ _PROFILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 _FETCH_TIMEOUT_S = 3.0
 _MAX_TEXT = 200
 
-#: What a version looks like (``0.22.4``, ``v0.22.4``, ``0.23.0rc1``, ``0.22.4+g4d04303``):
-#: the gateway's answer is allow-listed like everything else, not just redacted.
-_VERSION = re.compile(r"v?\d+(?:\.\d+){0,3}(?:[.+-]?[0-9A-Za-z][0-9A-Za-z.+-]{0,39})?")
+#: What a version looks like: a dotted numeric core, then at most a short pre-release
+#: or local tag that starts with a separator (``0.22.4``, ``v0.22.4``, ``0.22.4-rc1``,
+#: ``0.22.4+local.3``). The gateway's answer is allow-listed like everything else,
+#: not just redacted, and tight enough that a secret cannot pass for a version: a
+#: 40-hex digest has no dotted core.
+_VERSION = re.compile(r"v?\d+(?:\.\d+){1,3}(?:[-+.][0-9A-Za-z.-]{1,24})?")
 
 
 def capabilities_view(
@@ -89,7 +104,7 @@ def capabilities_view(
     profile: str,
     *,
     fetch_json: FetchJson | None = None,
-    api_key: str | None = None,
+    read_api_key: ReadApiKey | None = None,
 ) -> dict[str, Any]:
     """The sanitised capabilities of ``profile`` under the Hermes ``home``.
 
@@ -97,7 +112,8 @@ def capabilities_view(
     that is not one URL segment raises ``ValueError`` (the service checks the
     name first, this keeps the function safe on its own). ``fetch_json`` replaces
     the ``GET /health/detailed`` request (it may raise or return ``None``);
-    ``api_key`` is the profile's API key, sent as its bearer. Without one the
+    ``read_api_key`` returns the profile's API key, sent as its bearer, and is
+    called where the key is used, so no frame here holds it. Without a key the
     version is ``None`` and nothing is requested.
     """
     if profile != DEFAULT_PROFILE and _PROFILE_NAME.fullmatch(profile) is None:
@@ -108,7 +124,7 @@ def capabilities_view(
     return {
         "agent": "hermes" if profile == DEFAULT_PROFILE else f"hermes/{profile}",
         "profile": profile,
-        "api_server_version": _version(home, profile, fetch_json, api_key),
+        "api_server_version": _version(home, profile, fetch_json, read_api_key),
         "model_aliases": _model_aliases(_get(own, "model_aliases")),
         "toolsets_enabled": _strings(_get(own, "toolsets")),
         "toolsets_disabled": _strings(_get(own, "agent", "disabled_toolsets")),
@@ -199,11 +215,10 @@ def _platforms(own: dict[str, Any]) -> list[str] | None:
 
 
 def _version(
-    home: Path, profile: str, fetch_json: FetchJson | None, api_key: str | None
+    home: Path, profile: str, fetch_json: FetchJson | None, read_api_key: ReadApiKey | None
 ) -> str | None:
     """``version`` from ``GET /health/detailed``; ``None`` for no key, any failure or an odd answer."""
-    key = (api_key or "").strip()
-    if not key:
+    if read_api_key is None or not _holds_key(read_api_key):
         return None  # the route answers 401 without the key: do not ask
     base = api_server_base(home)
     path = (
@@ -213,23 +228,39 @@ def _version(
     )
     fetch = fetch_json if fetch_json is not None else _fetch_json
     try:
-        body = fetch(base + path, {"Authorization": f"Bearer {key}"})
+        # A header factory, not the header: the key is read inside the request call.
+        body = fetch(base + path, lambda: _bearer(read_api_key))
     except Exception:  # the gateway being down is a normal state, not an error to report
         return None
     version = _text(body.get("version") if isinstance(body, dict) else None)
     return version if version is not None and _VERSION.fullmatch(version) else None
 
 
-def _fetch_json(url: str, headers: Mapping[str, str]) -> Any:
-    """Sync ``GET url`` with ``headers`` and a 3 s timeout; the parsed JSON, or ``None``."""
+def _holds_key(read_api_key: ReadApiKey) -> bool:
+    """Whether hal0 holds a key for the profile; the key is looked at, never kept."""
+    return bool((read_api_key() or "").strip())
+
+
+def _bearer(read_api_key: ReadApiKey) -> dict[str, str]:
+    """``Authorization`` with the profile's key, read here and bound to no local."""
+    return {"Authorization": f"Bearer {(read_api_key() or '').strip()}"}
+
+
+def _fetch_json(url: str, headers: Callable[[], Mapping[str, str]]) -> Any:
+    """Sync ``GET url`` with ``headers()`` and a 3 s timeout; the parsed JSON, or ``None``.
+
+    Whatever the HTTP call raises is ``None``, not only ``httpx.HTTPError`` (an
+    address httpx cannot parse raises ``httpx.InvalidURL``, which is not one): the
+    exception, and with it the httpx frames that hold the header, never leaves.
+    """
     import httpx
 
     try:
         # Never through a proxy: the request carries the profile's API key, and a
         # Hermes that listens beyond loopback is still on this box's network.
-        resp = httpx.get(url, headers=dict(headers), timeout=_FETCH_TIMEOUT_S, trust_env=False)
+        resp = httpx.get(url, headers=dict(headers()), timeout=_FETCH_TIMEOUT_S, trust_env=False)
         if resp.status_code != 200:
             return None
         return resp.json()
-    except (httpx.HTTPError, OSError, ValueError):
+    except Exception:
         return None

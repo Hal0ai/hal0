@@ -79,6 +79,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import hashlib
 import json
 import math
@@ -957,21 +958,27 @@ class BridgeService:
         """What the Hermes profile ``agent`` can do now; secrets never appear (see ``capabilities_view``).
 
         The profile's API key (the one the run tools use) authenticates the version
-        probe; a profile hal0 holds no key for reports no version.
+        probe; a profile hal0 holds no key for reports no version. The view gets a
+        reader for the key, never the key: no frame of this call holds it while
+        something can raise (#3137 renders every frame's locals), the same rule as
+        :class:`HermesGateway`.
         """
         self._check_open()
         profile = await self._known_profile(agent)
-        try:
-            api_key: str | None = self._gateway.key_for(profile)
-        except BridgeError:
-            api_key = None
         return await asyncio.to_thread(
             capabilities_view,
             self._gateway.home,
             profile,
             fetch_json=self._detail_fetch,
-            api_key=api_key,
+            read_api_key=functools.partial(self._profile_key, profile),
         )
+
+    def _profile_key(self, profile: str) -> str | None:
+        """The API key hal0 holds for ``profile``, or None; returned, never bound to a local."""
+        try:
+            return self._gateway.key_for(profile)
+        except BridgeError:  # bridge.agent_unkeyed: raised before any key is read
+            return None
 
     # -- process lifecycle -------------------------------------------------------------
 
