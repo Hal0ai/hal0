@@ -367,8 +367,9 @@ class _Recorder:
                 return {"agents": []}
             if name == "list_runs":
                 return [self.view]
-            if name == "run_events":
-                return [{"seq": 4, "ts": 1.0, "event": "message.text", "payload": {"text": "hi"}}]
+            if name == "run_events_window":
+                event = {"seq": 4, "ts": 1.0, "event": "message.text", "payload": {"text": "hi"}}
+                return None, [event], None
             return dict(self.view)
 
         return call
@@ -413,6 +414,7 @@ async def test_arguments_reach_the_service() -> None:
     await server.call_tool("agent_runs_list", {"status": "running", "limit": 3})
     assert rec.calls[-1][2] == {"args": (), "status": "running", "limit": 3}
     await server.call_tool("agent_run_events", {"run_id": "run_1", "since_seq": 3, "limit": 9})
+    assert rec.calls[-1][0] == "run_events_window"
     assert rec.calls[-1][2] == {"args": ("run_1",), "since_seq": 3, "limit": 9}
 
 
@@ -592,16 +594,25 @@ async def test_the_cap_never_splits_a_character() -> None:
 
 async def test_events_are_scrubbed_and_capped_too() -> None:
     class _Events(_Recorder):
-        async def run_events(self, *_a: Any, **_kw: Any) -> list[dict[str, Any]]:
-            return [
-                {
-                    "seq": 7,
-                    "ts": 1.0,
-                    "event": "tool.completed",
-                    "payload": {"out": "Authorization: Bearer hal0bk_cc.s3cr3tvalue0123456789"},
-                },
-                {"seq": 8, "ts": 2.0, "event": "message.text", "payload": {"text": "z" * 30_000}},
-            ]
+        async def run_events_window(self, *_a: Any, **_kw: Any) -> Any:
+            return (
+                None,
+                [
+                    {
+                        "seq": 7,
+                        "ts": 1.0,
+                        "event": "tool.completed",
+                        "payload": {"out": "Authorization: Bearer hal0bk_cc.s3cr3tvalue0123456789"},
+                    },
+                    {
+                        "seq": 8,
+                        "ts": 2.0,
+                        "event": "message.text",
+                        "payload": {"text": "z" * 30_000},
+                    },
+                ],
+                None,
+            )
 
     server = _server(_Events(), CC)
     out = _payload(await server.call_tool("agent_run_events", {"run_id": "run_1"}))
@@ -612,8 +623,8 @@ async def test_events_are_scrubbed_and_capped_too() -> None:
 
 async def test_an_empty_events_page_keeps_the_callers_position() -> None:
     class _Empty(_Recorder):
-        async def run_events(self, *_a: Any, **_kw: Any) -> list[dict[str, Any]]:
-            return []
+        async def run_events_window(self, *_a: Any, **_kw: Any) -> Any:
+            return None, [], None
 
     out = _payload(
         await _server(_Empty(), CC).call_tool("agent_run_events", {"run_id": "r", "since_seq": 41})
@@ -905,3 +916,100 @@ def test_a_bridge_key_the_gate_did_not_store_is_never_verified_again(
     monkeypatch.setattr(mcp_mount, "_current_mcp_request", lambda: request)
     assert mcp_mount.principal_resolver().tier == "anon"
     assert looked_up == []
+
+
+# -- streamed text: a secret split across events is still masked (Codex on #3138) ---------
+
+
+def _text_event(seq: int, text: str) -> dict[str, Any]:
+    return {"seq": seq, "ts": 1.0, "event": "message.text", "payload": {"text": text}}
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "in_left", "in_right"),
+    [
+        # split before the token: the first event shows the header, the second masks it all
+        ("call it with Authorization: Bearer ", "supersecret0123456789 and go", "", "supersecret"),
+        # split inside the token: both halves masked
+        ("call it with Authorization: Bearer super", "secret0123456789 and go", "super", "secret"),
+        # a *_KEY= value split inside
+        ("export HAL0_ADMIN_KEY=supers", "ecret0123456789\nnext", "supers", "ecret01"),
+    ],
+)
+async def test_a_secret_split_across_two_text_events_is_masked(
+    left: str, right: str, in_left: str, in_right: str
+) -> None:
+    class _Split(_Recorder):
+        async def run_events_window(self, *_a: Any, **_kw: Any) -> Any:
+            return None, [_text_event(1, left), _text_event(2, right)], None
+
+    out = _payload(await _server(_Split(), CC).call_tool("agent_run_events", {"run_id": "r"}))
+    first, second = (e["payload"]["text"] for e in out["events"])
+    assert "0123456789" not in first + second
+    assert in_right not in second and (not in_left or in_left not in first)
+    assert "REDACTED" in second and (not in_left or "REDACTED" in first)
+    assert second.endswith(("and go", "next"))  # the text after the secret is kept
+    assert [e["seq"] for e in out["events"]] == [1, 2] and out["last_seq"] == 2
+
+
+async def test_a_secret_split_across_pages_is_masked_on_both() -> None:
+    """The neighbours outside the window are context: page one's tail, page two's head."""
+    left, right = "header Authorization: Bearer super", "secret0123456789abcdef done"
+
+    class _PageOne(_Recorder):
+        async def run_events_window(self, *_a: Any, **_kw: Any) -> Any:
+            return None, [_text_event(1, left)], _text_event(2, right)
+
+    class _PageTwo(_Recorder):
+        async def run_events_window(self, *_a: Any, **_kw: Any) -> Any:
+            return _text_event(1, left), [_text_event(2, right)], None
+
+    one = _payload(await _server(_PageOne(), CC).call_tool("agent_run_events", {"run_id": "r"}))
+    two = _payload(
+        await _server(_PageTwo(), CC).call_tool("agent_run_events", {"run_id": "r", "since_seq": 1})
+    )
+    assert [e["seq"] for e in one["events"]] == [1] and one["last_seq"] == 1
+    assert [e["seq"] for e in two["events"]] == [2] and two["last_seq"] == 2
+    page_one = one["events"][0]["payload"]["text"]
+    page_two = two["events"][0]["payload"]["text"]
+    assert page_one.startswith("header Authorization: Bearer ") and "super" not in page_one
+    assert "secret0123" not in page_two and page_two.endswith(" done")
+
+
+async def test_a_wait_tail_masks_a_secret_split_with_the_event_before_it() -> None:
+    left, right = "token: Bearer abc", "def0123456789xyz then more"
+    view = {
+        "run_id": "run_1",
+        "status": "completed",
+        "last_seq": 2,
+        "events_tail": [_text_event(2, right)],
+        "timed_out": False,
+    }
+
+    class _Wait(_Recorder):
+        async def event_before(self, *_a: Any, **_kw: Any) -> Any:
+            return _text_event(1, left)
+
+    out = _payload(
+        await _server(_Wait(view), CC).call_tool(
+            "agent_run_wait", {"run_id": "run_1", "timeout_s": 1}
+        )
+    )
+    [only] = out["events_tail"]
+    assert "def0123456789xyz" not in only["payload"]["text"]
+    assert only["payload"]["text"].endswith(" then more")
+
+
+async def test_text_without_secrets_is_unchanged_across_events() -> None:
+    texts = ["Hello, ", "world. Bearer is a word here", "", " and that is all."]
+
+    class _Plain(_Recorder):
+        async def run_events_window(self, *_a: Any, **_kw: Any) -> Any:
+            events = [_text_event(n + 1, t) for n, t in enumerate(texts)]
+            events.insert(2, {"seq": 9, "ts": 1.0, "event": "tool.started", "payload": {}})
+            return None, events, None
+
+    out = _payload(await _server(_Plain(), CC).call_tool("agent_run_events", {"run_id": "r"}))
+    shown = [e["payload"].get("text") for e in out["events"]]
+    # "Bearer is" masks "is" as a bearer token, in context as it did per event
+    assert shown[0] == "Hello, " and shown[3] == "" and shown[4] == " and that is all."

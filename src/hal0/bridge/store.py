@@ -524,6 +524,16 @@ class BridgeStore:
             ).fetchall()
         return [_event_from_row(r) for r in rows]
 
+    def event_before(self, run_id: str, seq: int) -> dict[str, Any] | None:
+        """The newest event of a run with ``seq`` below ``seq``, or None (a window's left edge)."""
+        with connect(self.path) as conn:
+            row = conn.execute(
+                "SELECT seq, ts, event, payload_json FROM run_events "
+                "WHERE run_id = ? AND seq < ? ORDER BY seq DESC LIMIT 1",
+                (run_id, seq),
+            ).fetchone()
+        return None if row is None else _event_from_row(row)
+
     def last_events(self, run_id: str, *, limit: int) -> list[dict[str, Any]]:
         """Return the newest ``limit`` events of a run, oldest first (a wait's tail)."""
         with connect(self.path) as conn:

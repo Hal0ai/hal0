@@ -72,6 +72,14 @@ passes through the log redactor (:func:`hal0.redaction.redact_log_line`) before
 a remote machine sees it, and a string over 16 KiB is cut at that size with
 ``truncated: true``.
 
+Streamed text is stored as ``message.text`` events cut wherever the watcher
+flushed, so a secret can straddle two of them (``Authorization: Bearer `` in
+one, the token in the next). Consecutive ``message.text`` events are therefore
+masked as one text, together with the stored neighbour just outside the
+window on each side (the event before ``since_seq``, the one after the page,
+the one before a wait's tail), and each event then shows its own part of the
+masked text: a secret is masked whichever events, or pages, it is split over.
+
 ``output`` is paged rather than lost (:mod:`hal0.bridge.output`): a view shows
 the 16 KiB window of the masked text that ``agent_run_status``'s ``offset``
 names (0 everywhere else), with ``output_offset``, ``output_total`` and
@@ -107,7 +115,7 @@ from hal0.bridge.caller import Caller
 from hal0.bridge.errors import BridgeError
 from hal0.bridge.output import OUTPUT_WINDOW_BYTES, output_window
 from hal0.mcp._binding import BoundFastMCP, ToolContext, bound_server
-from hal0.redaction import redact_log_line
+from hal0.redaction import MASK, redact_log_line
 
 if TYPE_CHECKING:
     from hal0.bridge.service import BridgeService
@@ -204,7 +212,136 @@ def _clean_tree(value: Any) -> tuple[Any, bool]:
     return value, False
 
 
-def _view(view: dict[str, Any], *, offset: int = 0) -> dict[str, Any]:
+# -- streamed text masked across event boundaries (Codex on #3138) -------------------------
+
+_TEXT_EVENT = "message.text"
+
+
+def _text_of(event: Any) -> str | None:
+    """The streamed text a stored ``message.text`` event carries, else None."""
+    if not isinstance(event, dict) or event.get("event") != _TEXT_EVENT:
+        return None
+    payload = event.get("payload")
+    text = payload.get("text") if isinstance(payload, dict) else None
+    return text if isinstance(text, str) else None
+
+
+def _masked_spans(original: str, masked: str) -> list[tuple[int, int]]:
+    """The spans of ``original`` that :func:`redact_log_line` replaced, given its result.
+
+    The redactor only ever replaces substrings with :data:`~hal0.redaction.MASK`, so
+    ``original`` is ``masked`` with each MASK standing for one non-empty span. The
+    verbatim piece after a mask starts with what ended the secret (a space, a quote,
+    a separator), which the secret cannot hold, so its first occurrence is where the
+    span ends. Should the two ever fail to align, the whole stretch between the
+    first and the last difference is one span: more is masked, never less.
+    """
+    if original == masked:
+        return []
+    pieces = masked.split(MASK)
+    spans: list[tuple[int, int]] = []
+    at = len(pieces[0])
+    aligned = len(pieces) > 1 and original.startswith(pieces[0])
+    for index, piece in enumerate(pieces[1:], start=1):
+        if not aligned:
+            break
+        if index == len(pieces) - 1:
+            end = len(original) - len(piece)
+            aligned = end > at and original.endswith(piece)
+        else:
+            end = original.find(piece, at + 1) if piece else at + 1
+            aligned = end > at
+        if aligned:
+            spans.append((at, end))
+            at = end + len(piece)
+    if aligned:
+        return spans
+    head = 0
+    while head < min(len(original), len(masked)) and original[head] == masked[head]:
+        head += 1
+    tail = 0
+    while (
+        tail < min(len(original), len(masked)) - head and original[-1 - tail] == masked[-1 - tail]
+    ):
+        tail += 1
+    return [(head, max(head + 1, len(original) - tail))]
+
+
+def _mask_run(texts: list[str]) -> list[str]:
+    """``texts`` masked as one string, each given back its own part of the result.
+
+    A span that covers part of a text becomes one MASK in it; a text wholly inside a
+    span becomes MASK.
+    """
+    joined = "".join(texts)
+    spans = _masked_spans(joined, redact_log_line(joined))
+    if not spans:
+        return list(texts)
+    out: list[str] = []
+    start = 0
+    for text in texts:
+        end = start + len(text)
+        parts: list[str] = []
+        pos = start
+        for span_start, span_end in spans:
+            if span_end <= start or span_start >= end:
+                continue
+            lo, hi = max(span_start, start), min(span_end, end)
+            parts += (joined[pos:lo], MASK)
+            pos = hi
+        parts.append(joined[pos:end])
+        out.append("".join(parts))
+        start = end
+    return out
+
+
+def _clean_events(
+    events: list[dict[str, Any]],
+    *,
+    before: dict[str, Any] | None = None,
+    after: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Events made safe to return; streamed text is masked across event boundaries.
+
+    Each run of consecutive ``message.text`` events, with ``before`` and ``after``
+    (the stored neighbours just outside the window) when they are text that
+    touches it, is masked as one text by :func:`_mask_run`; then every event goes
+    through :func:`_clean_tree` as before. True when any text was cut.
+    """
+    texts = [_text_of(event) for event in events]
+    rewritten: dict[int, str] = {}
+    index = 0
+    while index < len(events):
+        if texts[index] is None:
+            index += 1
+            continue
+        stop = index
+        while stop < len(events) and texts[stop] is not None:
+            stop += 1
+        group = [t for t in texts[index:stop] if t is not None]
+        left = _text_of(before) if index == 0 else None
+        right = _text_of(after) if stop == len(events) else None
+        masked = _mask_run(
+            [*([left] if left is not None else []), *group, *([right] if right is not None else [])]
+        )
+        if left is not None:
+            masked = masked[1:]
+        if right is not None:
+            masked = masked[:-1]
+        for offset, text in enumerate(masked):
+            rewritten[index + offset] = text
+        index = stop
+    out: list[dict[str, Any]] = []
+    for position, event in enumerate(events):
+        if position in rewritten:
+            event = {**event, "payload": {**event["payload"], "text": rewritten[position]}}
+        out.append(event)
+    return _clean_tree(out)
+
+
+def _view(
+    view: dict[str, Any], *, offset: int = 0, tail_before: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """A RunView (or a wait's view) made safe to return: secrets masked, texts capped.
 
     ``output`` is masked whole, then the 16 KiB window at byte ``offset`` is
@@ -212,7 +349,9 @@ def _view(view: dict[str, Any], *, offset: int = 0) -> dict[str, Any]:
     (:func:`hal0.bridge.output.output_window`); masking first means a window
     edge cannot split a secret the redactor would have caught. ``error``,
     ``input_preview``, the ``pending`` request (a clarification's question or an
-    approval's command) and ``events_tail`` of a wait go through :func:`_clean`.
+    approval's command) and ``events_tail`` of a wait go through :func:`_clean`,
+    the tail's streamed text masked across events (:func:`_clean_events`, with
+    ``tail_before``, the stored event just before the tail).
     ``truncated`` is true when any text was cut or more output follows; ``more``
     names the call that reads the next window of the output.
     """
@@ -231,7 +370,7 @@ def _view(view: dict[str, Any], *, offset: int = 0) -> dict[str, Any]:
         truncated = truncated or cut
     tail = out.get("events_tail")
     if isinstance(tail, list):
-        out["events_tail"], cut = _clean_tree(tail)
+        out["events_tail"], cut = _clean_events(tail, before=tail_before)
         truncated = truncated or cut
     preview = out.get("input_preview")
     if isinstance(preview, str):
@@ -263,6 +402,17 @@ def _list_item(view: dict[str, Any]) -> dict[str, Any]:
     out = _view(item)
     out["output_preview"] = preview
     return out
+
+
+async def _wait_view(
+    service: BridgeService, caller: Caller, view: dict[str, Any]
+) -> dict[str, Any]:
+    """A wait's view made safe, its tail's text masked with the stored event before it."""
+    tail = view.get("events_tail")
+    before = None
+    if isinstance(tail, list) and tail and _text_of(tail[0]) is not None:
+        before = await service.event_before(caller, view["run_id"], int(tail[0]["seq"]))
+    return _view(view, tail_before=before)
 
 
 def _cleaned(value: dict[str, Any]) -> dict[str, Any]:
@@ -418,7 +568,8 @@ def _agents_tool_definitions() -> dict[str, Tool]:
             idempotency_key=idempotency_key,
         )
         if wait_s > 0:
-            return _view(await service.wait_run(caller, started["run_id"], timeout_s=wait_s))
+            waited = await service.wait_run(caller, started["run_id"], timeout_s=wait_s)
+            return await _wait_view(service, caller, waited)
         return _view(started)
 
     @server.tool(
@@ -435,7 +586,9 @@ def _agents_tool_definitions() -> dict[str, Tool]:
         run_id: str, timeout_s: int = 120, ctx: ToolContext | None = None
     ) -> dict[str, Any]:
         caller, service = _context(ctx)
-        return _view(await service.wait_run(caller, run_id, timeout_s=timeout_s))
+        return await _wait_view(
+            service, caller, await service.wait_run(caller, run_id, timeout_s=timeout_s)
+        )
 
     @server.tool(
         name="agent_run_status",
@@ -475,8 +628,10 @@ def _agents_tool_definitions() -> dict[str, Tool]:
         run_id: str, since_seq: int = 0, limit: int = 100, ctx: ToolContext | None = None
     ) -> dict[str, Any]:
         caller, service = _context(ctx)
-        events = await service.run_events(caller, run_id, since_seq=since_seq, limit=limit)
-        cleaned, cut = _clean_tree(events)
+        before, events, after = await service.run_events_window(
+            caller, run_id, since_seq=since_seq, limit=limit
+        )
+        cleaned, cut = _clean_events(events, before=before, after=after)
         last_seq = max((int(e.get("seq", 0)) for e in cleaned), default=max(since_seq, 0))
         page: dict[str, Any] = {"run_id": run_id, "events": cleaned, "last_seq": last_seq}
         if cut:

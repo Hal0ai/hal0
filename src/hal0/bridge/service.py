@@ -566,6 +566,35 @@ class BridgeService:
             limit=min(max(int(limit), 1), _MAX_EVENTS),
         )
 
+    async def run_events_window(
+        self, caller: Caller, run_id: str, *, since_seq: int = 0, limit: int = 100
+    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], dict[str, Any] | None]:
+        """:meth:`run_events` with its neighbours: ``(event before, events, event after)``.
+
+        The neighbours are the stored events just outside the window (None at either
+        end of the run). The ``hal0-agents`` tools mask streamed text across event
+        boundaries with them, so a secret split between two ``message.text`` events,
+        or between two pages, is still caught.
+        """
+        await self._owned(caller, run_id)
+        since = max(int(since_seq), 0)
+        size = min(max(int(limit), 1), _MAX_EVENTS)
+        events = await asyncio.to_thread(
+            self._store.events, run_id, since_seq=since, limit=size + 1
+        )
+        after = events[size] if len(events) > size else None
+        before = (
+            await asyncio.to_thread(self._store.event_before, run_id, since + 1)
+            if since > 0
+            else None
+        )
+        return before, events[:size], after
+
+    async def event_before(self, caller: Caller, run_id: str, seq: int) -> dict[str, Any] | None:
+        """The run's stored event just before ``seq``, or None (a wait tail's left neighbour)."""
+        await self._owned(caller, run_id)
+        return await asyncio.to_thread(self._store.event_before, run_id, int(seq))
+
     async def wait_run(
         self, caller: Caller, run_id: str, *, timeout_s: float = DEFAULT_WAIT_S
     ) -> dict[str, Any]:
