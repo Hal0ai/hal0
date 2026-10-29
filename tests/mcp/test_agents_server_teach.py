@@ -397,7 +397,7 @@ async def test_an_unexpected_failure_is_bridge_internal_without_its_text(
 ) -> None:
     class Boom(FakeDispatcher):
         async def dispatch(self, tool: str, args: dict[str, Any]) -> dict[str, Any]:
-            raise RuntimeError("psycopg connect failed at postgres://u:p@10.0.0.9/db")
+            raise RuntimeError("psycopg connect failed at postgres://u:p@192.0.2.9/db")
 
         def scoped(self, client_id: str) -> Any:  # type: ignore[override]
             return self

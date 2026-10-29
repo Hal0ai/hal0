@@ -8,18 +8,28 @@ a helper module such as ``hal0.api._redact``, Python would run the whole
 
 from __future__ import annotations
 
+import pkgutil
 import subprocess
 import sys
 
 import pytest
 
-_BRIDGE_MODULES = (
-    "hal0.bridge.service",
-    "hal0.bridge.capabilities",
-    "hal0.bridge.skills",
-    "hal0.bridge.watcher",
-    "hal0.bridge.caller",
+import hal0.bridge
+
+#: Every module of the package, so a new one is checked without editing this list.
+_BRIDGE_MODULES = tuple(
+    sorted(
+        f"hal0.bridge.{info.name}"
+        for info in pkgutil.iter_modules(hal0.bridge.__path__)
+        if not info.ispkg
+    )
 )
+
+
+def test_the_module_list_is_the_whole_package() -> None:
+    assert {"hal0.bridge.service", "hal0.bridge.skills", "hal0.bridge.watcher"} <= set(
+        _BRIDGE_MODULES
+    )
 
 
 @pytest.mark.parametrize("module", _BRIDGE_MODULES)
