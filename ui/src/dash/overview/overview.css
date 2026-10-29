@@ -91,6 +91,8 @@
 .ov-now-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
 .ov-now-mode { display: inline-flex; align-items: center; gap: 9px; font-family: var(--jbm); font-size: 13px; font-weight: 500; }
 .ov-now-mode .ov-d { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 10px color-mix(in srgb, var(--ok) 50%, transparent); }
+.ov-now-mode.warn .ov-d { background: var(--warn); box-shadow: 0 0 10px color-mix(in srgb, var(--warn) 50%, transparent); }
+.ov-now-mode.unk .ov-d { background: var(--fg-4); box-shadow: none; }
 .ov-now-mode.img .ov-d { background: var(--comfy); box-shadow: 0 0 10px color-mix(in srgb, var(--comfy) 50%, transparent); }
 .ov-now-facts { display: flex; flex-wrap: wrap; gap: 4px 14px; font-family: var(--jbm); font-size: 11.5px; color: var(--fg-3); }
 .ov-now-facts b { color: var(--fg); font-weight: 500; }
@@ -153,6 +155,9 @@
 .ov-tile .ov-nm { font-family: var(--jbm); font-size: 12.5px; font-weight: 600; }
 .ov-tile .ov-st { margin-left: auto; font-family: var(--jbm); font-size: 11px; color: var(--fg-3); white-space: nowrap; }
 .ov-tile.serving .ov-st { color: var(--ok); }
+.ov-tile.error { border-color: var(--err-line); }
+.ov-tile.error .ov-st { color: var(--err); }
+.ov-tile.warming .ov-st { color: var(--warn); }
 .ov-tile .ov-model { font-family: var(--jbm); font-size: 10.5px; color: var(--fg-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ov-tile .ov-r3 { display: flex; align-items: center; gap: 10px; font-family: var(--jbm); font-size: 10px; color: var(--fg-4); }
 .ov-tile .ov-r3 .ov-ctx { flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0; }
@@ -264,3 +269,6 @@
 @media (prefers-reduced-motion: reduce) {
   .ov-view *, .ov-view *::before, .ov-view *::after { transition: none !important; animation: none !important; }
 }
+
+/* Identifier spans inside a Needs-you row body (notifications.jsx builds the JSX). */
+.rd-attn-ident { font-size: 10.5px; }

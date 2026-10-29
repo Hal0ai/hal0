@@ -100,6 +100,23 @@ describe('OvUsage', () => {
     expect(host.querySelectorAll('svg.ov-usage-spk rect')).toHaveLength(2)
   })
 
+  it('renders one row per device for a model served on two devices, without a key collision', () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const base = STATS_1H.by_model[0]
+    stats = {
+      ...STATS_1H,
+      by_model: [
+        { ...base, runner: 'llama', device: 'gpu-vulkan', modality: 'text', ok: 4 },
+        { ...base, runner: 'llama', device: 'gpu-rocm', modality: 'text', ok: 2 },
+      ],
+    }
+    mount()
+    const cells = [...host.querySelectorAll('.ov-mtable tbody td.m')].map((c) => c.textContent)
+    expect(cells).toEqual([`${MODEL} · gpu-vulkan`, `${MODEL} · gpu-rocm`])
+    expect(err.mock.calls.flat().join(' ')).not.toContain('same key')
+    err.mockRestore()
+  })
+
   it('drops the table and says so for an empty window', () => {
     stats = STATS_EMPTY
     mount()

@@ -14,11 +14,11 @@ import { OFF_BOX_NOTE } from '../../image/editor-reach'
 
 type Json = Record<string, unknown>
 const { box } = vi.hoisted(() => ({
-  box: { services: [] as Json[], pending: false, urls: undefined as Json | undefined },
+  box: { services: [] as Json[], pending: false, unavailable: false, urls: undefined as Json | undefined },
 }))
 
 vi.mock('@/api/hooks/useServices', () => ({
-  useServices: () => ({ services: box.services, mdns: null, pending: box.pending }),
+  useServices: () => ({ services: box.services, mdns: null, pending: box.pending, unavailable: box.unavailable }),
 }))
 vi.mock('@/api/hooks/useConfigUrls', () => ({ useConfigUrls: () => ({ data: box.urls }) }))
 
@@ -70,6 +70,7 @@ const comfyOpen = () => host.querySelector<HTMLElement>('[data-testid="ov-svc-op
 beforeEach(() => {
   visit('localhost')
   box.pending = false
+  box.unavailable = false
   box.services = [
     svc('openwebui', { name: 'OpenWebUI', url: 'http://hal0.lan:3001', wired: { chat: true, voice: true, documents: false, images: false, web_search: false } }),
     svc('comfyui', { name: 'ComfyUI', url: 'http://hal0.lan:8188' }),
@@ -95,10 +96,26 @@ afterEach(() => {
 })
 
 describe('Overview v2 services rows', () => {
-  it('renders the four companions in order, nothing more', () => {
+  it('renders the four companions in order, then any other service', () => {
+    box.services = [box.services[4], box.services[3], box.services[2], box.services[1], box.services[0]]
     mount()
     const names = [...host.querySelectorAll('.ov-svc .ov-nm')].map((n) => n.textContent)
-    expect(names).toEqual(['openwebui', 'comfyui', 'hermes', 'n8n'])
+    expect(names).toEqual(['openwebui', 'comfyui', 'hermes', 'n8n', 'extra'])
+  })
+
+  it('says services are unavailable when the source did not answer, not that there are none', () => {
+    box.pending = true
+    box.unavailable = true
+    box.services = []
+    mount()
+    expect(host.textContent).toContain('services unavailable')
+    expect(host.textContent).not.toContain('no companion services')
+  })
+
+  it('says no companion services only for a successful empty list', () => {
+    box.services = []
+    mount()
+    expect(host.textContent).toContain('no companion services')
   })
 
   it('shows OpenWebUI wired chips for true keys only', () => {

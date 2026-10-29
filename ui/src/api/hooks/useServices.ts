@@ -87,6 +87,10 @@ export function useServices(): {
   services: ManagedService[]
   mdns: MdnsStatus | null
   pending: boolean
+  /** The fetch finished but the source did not answer (404, network error, bad shape). Also
+   *  `pending`, which the Services page treats alike; callers that must not read it as an empty
+   *  list use this to tell "still loading" from "not answering". */
+  unavailable: boolean
 } {
   const q = useQuery<ServicesPayload | null>({
     queryKey: ['services', 'list'],
@@ -98,6 +102,7 @@ export function useServices(): {
     services: q.data?.services ?? [],
     mdns: q.data?.mdns ?? null,
     pending: q.isPending || (q.isSuccess && q.data === null),
+    unavailable: q.isError || (q.isSuccess && q.data === null),
   }
 }
 

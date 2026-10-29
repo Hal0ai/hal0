@@ -3,6 +3,14 @@
 
 const DASH = '—'
 
+/** MB to GB for every disk and memory figure on the page (binary, matching the Hardware card). */
+export const MB_PER_GB = 1024
+
+/** Free disk in whole GB, floored so free space is never overstated: 124429 MB is 121 GB. */
+export function freeGb(mb: number): number {
+  return Math.floor(mb / MB_PER_GB)
+}
+
 /** Token / request counts: 312, 1.9k (under 10k), 19k (10k and up). */
 export function fmtK(n: number): string {
   if (!Number.isFinite(n)) return DASH

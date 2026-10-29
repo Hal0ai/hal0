@@ -45,6 +45,11 @@ describe('hermesRow', () => {
     expect(hermesRow(OV_HERMES, null, null).state).toBe('ready')
   })
 
+  it('treats a ctx counter of 0 as absent, not 0%', () => {
+    const r = hermesRow(OV_HERMES, null, { metrics: { ctx: 0 }, ctx_effective: 66000 })
+    expect(r.ctx).toBeNull()
+  })
+
   it('names the persona by display name and has no ctx without a slot', () => {
     const r = hermesRow(
       OV_HERMES,

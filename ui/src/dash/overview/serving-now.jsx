@@ -20,7 +20,7 @@ function ServingTile({ tile, onGo, onUnload, onLogs }) {
   const stop = (e) => e.stopPropagation()
   return (
     <div
-      className={'ov-tile ' + (serving ? 'serving' : 'ready')}
+      className={'ov-tile ' + (serving ? 'serving' : tile.cls === 'error' ? 'error' : tile.cls === 'warming' ? 'warming' : 'ready')}
       tabIndex={0}
       role="link"
       aria-label={tile.name}
@@ -65,7 +65,7 @@ function ServingTile({ tile, onGo, onUnload, onLogs }) {
   )
 }
 
-function OvServingNow({ onGo }) {
+export function OvServingNow({ onGo }) {
   const slots = useSlots().data
   const sys = useSystemStats().data
   const history = useThroughputHistory().data

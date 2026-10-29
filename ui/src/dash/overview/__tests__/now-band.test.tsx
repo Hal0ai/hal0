@@ -52,13 +52,18 @@ const budget = {
   render_free_gb: 60,
 }
 
-const state: { arbiter: any } = { arbiter: { mode: 'llm', switching: false, pinned: false, image_jobs: 0, phase: null } }
-const switchover = vi.fn(() => Promise.resolve({}))
+const state: { arbiter: any; slots: any; comfy: any; switchoverError: Error | null } = {
+  arbiter: { mode: 'llm', switching: false, pinned: false, image_jobs: 0, phase: null },
+  slots: { data: undefined, isPending: false, isError: false },
+  comfy: undefined,
+  switchoverError: null,
+}
+const switchover = vi.fn(() => (state.switchoverError ? Promise.reject(state.switchoverError) : Promise.resolve({})))
 const slotLoad = vi.fn(() => Promise.resolve({}))
 const mutation = (fn: any) => ({ mutateAsync: fn, mutate: fn, isPending: false })
 
 vi.mock('@/api/hooks/useSlots', () => ({
-  useSlots: () => ({ data: SLOTS, isLoading: false }),
+  useSlots: () => (state.slots.data === undefined && !state.slots.isPending && !state.slots.isError ? { data: SLOTS, isPending: false, isError: false } : state.slots),
   useSlotLoad: () => mutation(slotLoad),
 }))
 vi.mock('@/api/hooks/useHardware', () => ({
@@ -90,6 +95,7 @@ vi.mock('@/api/hooks/useSystemStats', () => ({
   }),
 }))
 vi.mock('@/api/hooks/useComfyui', () => ({
+  useComfyui: () => ({ data: state.comfy }),
   useArbiter: () => ({ data: { arbiter: state.arbiter, mode: state.arbiter?.mode ?? null, skewMs: 0 } }),
   useComfyuiSwitchover: () => mutation(switchover),
   useComfyuiPin: () => mutation(vi.fn()),
@@ -122,6 +128,9 @@ const button = (label: string) =>
 
 beforeEach(() => {
   state.arbiter = { mode: 'llm', switching: false, pinned: false, image_jobs: 0, phase: null }
+  state.slots = { data: undefined, isPending: false, isError: false }
+  state.comfy = undefined
+  state.switchoverError = null
   switchover.mockClear()
   slotLoad.mockClear()
   // The bar is 1000px wide: 30 GB of 116 is ~259px, wide enough for a label.
@@ -210,5 +219,77 @@ describe('OvNowBand', () => {
     expect(host.querySelector('.ov-now-mode.img')).not.toBeNull()
     expect(button('Back to chat')).toBeDefined()
     expect(button('Hold image mode')).toBeUndefined()
+  })
+
+  it('shows dashes, not 0 of 0, while /api/slots is pending', () => {
+    state.slots = { data: undefined, isPending: true, isError: false }
+    mount()
+    const facts = host.querySelector('.ov-now-facts')?.textContent ?? ''
+    expect(facts).toContain('— of — slots loaded')
+    expect(facts).toContain('— serving')
+    expect(facts).not.toContain('0 of 0')
+    expect(button('Load spare')).toBeUndefined()
+  })
+
+  it('shows the same dashes when /api/slots errored', () => {
+    state.slots = { data: undefined, isPending: false, isError: true }
+    mount()
+    const facts = host.querySelector('.ov-now-facts')?.textContent ?? ''
+    expect(facts).toContain('— of — slots loaded')
+    expect(facts).not.toContain('0 of 0')
+    expect(button('Load spare')).toBeUndefined()
+  })
+
+  it('colours the mode pip: amber while switching, grey when unknown, green for chat, blue for image', () => {
+    const cls = () => host.querySelector('.ov-now-mode')!.className
+    state.arbiter = { mode: 'llm', switching: true, pinned: false, image_jobs: 0, phase: null }
+    mount()
+    expect(cls()).toContain('warn')
+    act(() => root.unmount())
+    document.body.innerHTML = ''
+    state.arbiter = null
+    mount()
+    expect(cls()).toContain('unk')
+    act(() => root.unmount())
+    document.body.innerHTML = ''
+    state.arbiter = { mode: 'llm', switching: false, pinned: false, image_jobs: 0, phase: null }
+    mount()
+    expect(cls()).not.toMatch(/warn|unk|img/)
+  })
+
+  it('styles the warn and unknown pips with --warn and --fg-4', async () => {
+    const { readFileSync } = await import(/* @vite-ignore */ ['node', 'fs'].join(':') as string)
+    const css = readFileSync(`${(globalThis as any).process.cwd()}/src/dash/overview/overview.css`, 'utf8')
+    expect(css).toMatch(/\.ov-now-mode\.warn \.ov-d\s*\{[^}]*var\(--warn\)/)
+    expect(css).toMatch(/\.ov-now-mode\.unk \.ov-d\s*\{[^}]*var\(--fg-4\)/)
+  })
+
+  it('Back to chat while the ComfyUI editor has a render queued takes the force-confirm path', async () => {
+    state.arbiter = { mode: 'img', switching: false, pinned: false, image_jobs: 0, phase: null }
+    state.comfy = { queue: { running: 1, pending: 0 } }
+    mount()
+    act(() => button('Back to chat')!.click())
+    expect(switchover).not.toHaveBeenCalled()
+    const confirm = [...document.body.querySelectorAll('button')].filter((b) => /stop|back to chat/i.test(b.textContent ?? '') && b !== button('Back to chat')).pop()
+    expect(confirm).toBeTruthy()
+    await act(async () => confirm!.click())
+    expect(switchover).toHaveBeenCalledWith({ mode: 'inference', force: true })
+  })
+
+  it('drops a failure message once the mode has moved on', async () => {
+    state.arbiter = { mode: 'img', switching: false, pinned: false, image_jobs: 0, phase: null }
+    state.switchoverError = new Error('gpu busy')
+    mount()
+    await act(async () => button('Back to chat')!.click())
+    expect(host.querySelector('[role="alert"]')?.textContent).toBe('gpu busy')
+    state.arbiter = { mode: 'llm', switching: false, pinned: false, image_jobs: 0, phase: null }
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={new QueryClient()}>
+          <OvNowBand onGo={() => {}} />
+        </QueryClientProvider>,
+      )
+    })
+    expect(host.querySelector('[role="alert"]')).toBeNull()
   })
 })

@@ -55,7 +55,7 @@ function UsageBars({ values }) {
   )
 }
 
-function OvUsage({ onGo }) {
+export function OvUsage({ onGo }) {
   const [win, setWin] = useState(readWindow)
   const stats = useStatsSummary(win)
   const m = usageModel(stats.data, win)
@@ -132,8 +132,8 @@ function OvUsage({ onGo }) {
             </thead>
             <tbody>
               {m.rows.map((r) => (
-                <tr key={r.model}>
-                  <td className="m" title={r.model}>{r.model}</td>
+                <tr key={r.key}>
+                  <td className="m" title={r.label}>{r.label}</td>
                   <td>
                     {r.req}
                     <span className="ov-bar"><i style={{ width: `${Math.round(r.share)}%` }} /></span>

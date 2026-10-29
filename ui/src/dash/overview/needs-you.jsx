@@ -37,7 +37,7 @@ function InboxRow({ item }) {
   )
 }
 
-function OvNeedsYou({ onGo }) {
+export function OvNeedsYou({ onGo }) {
   const go = onGo || ((id) => { window.location.hash = '#' + id })
   const notifications = useNotifications().actionableItems
   const { diagnoses, isLoading, isError, doctorFeedPending } = useDiagnoses()

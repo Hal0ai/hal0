@@ -1,21 +1,25 @@
 // @vitest-environment happy-dom
-// Dashboard health strip and "Unified memory" card read the backend memory
-// budget (ADR-0039) through useMemoryMapModel: RAM figures from `mm.ram`, the
-// bar total from the pool, the striped block from the budget's other guests.
+//
+// The Overview Now band's unified-memory bar reads the backend memory budget (ADR-0039) through
+// useMemoryMapModel: RAM figures from `mm.ram`, the bar total from the pool, the striped block
+// from the budget's other guests, free from the budget. These assertions were carried over from
+// the retired dashboard Memory card test.
 //
 // The real memory-map model runs here: only the data hooks are mocked.
 import React from 'react'
 import { createRoot } from 'react-dom/client'
 import { act } from 'react-dom/test-utils'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 ;(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true
 ;(globalThis as any).React = React
 ;(globalThis as any).FieldInfoIcon = () => null
+// primitives.jsx (Modal) reads `Icons` off the window at render time.
+;(globalThis as any).Icons = new Proxy({}, { get: () => null })
 
-// Same reference-box shape as telemetry-header-memory.test.tsx: occupants
-// (30 + 12 + the 4.4 image engine = 46.4) overshoot the live counter (43.4),
-// so the budget's free (72.6) is larger than the 69.6 the drawn blocks leave.
+// Reference-box shape: occupants (30 + 12 + the 4.4 image engine = 46.4) overshoot the live
+// counter (43.4), so the budget's free (72.6) is larger than the 69.6 the drawn blocks leave.
 const budget = (gpuOver: Record<string, unknown> | null = {}, ramOver: Record<string, unknown> = {}) => ({
   gpu:
     gpuOver === null
@@ -47,16 +51,12 @@ const SLOTS = [
 ]
 
 const state: { memory: any; host: any } = { memory: budget(), host: undefined }
+const mutation = () => ({ mutateAsync: vi.fn(), mutate: vi.fn(), isPending: false })
 
-// dashboard-redesign.jsx imports every hook the whole dashboard uses. The two
-// components under test need only the ones mocked for real below; the rest are
-// inert (their data is undefined).
-const inert = vi.hoisted(
-  () => () =>
-    new Proxy({}, { get: (_t, k) => (k === 'then' ? undefined : () => ({ data: undefined })) }),
-)
-
-vi.mock('@/api/hooks/useSlots', () => ({ useSlots: () => ({ data: SLOTS, isLoading: false }) }))
+vi.mock('@/api/hooks/useSlots', () => ({
+  useSlots: () => ({ data: SLOTS, isPending: false, isError: false }),
+  useSlotLoad: () => mutation(),
+}))
 vi.mock('@/api/hooks/useHardware', () => ({
   useHardware: () => ({ data: { platform_label: 'test' }, isLoading: false }),
   hasGpuAccess: () => true,
@@ -69,49 +69,71 @@ vi.mock('@/api/hooks/useStatsHardware', () => ({
   }),
   useMemoryBudget: () => ({ data: state.memory }),
 }))
+vi.mock('@/api/hooks/useStatsPower', () => ({ useStatsPower: () => ({ data: undefined }) }))
 vi.mock('@/api/hooks/useProxmoxSettings', () => ({
   useProxmoxSettings: () => ({ data: null, isLoading: false }),
 }))
-vi.mock('@/api/hooks/useStatsPower', inert)
-vi.mock('@/api/hooks/useThroughputHistory', inert)
-vi.mock('@/api/hooks/useRequestsRollup', inert)
-vi.mock('@/api/hooks/useServices', inert)
-vi.mock('@/api/hooks/useConfigUrls', inert)
-vi.mock('@/api/hooks/useActivity', inert)
-vi.mock('@/api/hooks/useAgents', inert)
-vi.mock('@/api/hooks/useUpdates', inert)
-vi.mock('@/api/hooks/useDashLayout', inert)
-vi.mock('../notifications.jsx', inert)
-vi.mock('../services-widget-pure', inert)
+vi.mock('@/api/hooks/useSystemStats', () => ({ useSystemStats: () => ({ data: undefined }) }))
+vi.mock('@/api/hooks/useComfyui', () => ({
+  useComfyui: () => ({ data: undefined }),
+  useArbiter: () => ({ data: { arbiter: null, mode: null, skewMs: 0 } }),
+  useComfyuiSwitchover: () => mutation(),
+  useComfyuiPin: () => mutation(),
+  useComfyuiRenderCancel: () => mutation(),
+  useComfyuiRestart: () => mutation(),
+}))
 
-const { HealthStrip, MemoryHeroCard } = await import('../dashboard-redesign.jsx')
+await import('../shell.jsx')
+const { OvNowBand } = await import('../now-band.jsx')
+
+let root: ReturnType<typeof createRoot>
 
 function render(memory: any, pveHost?: any): HTMLElement {
   state.memory = memory
   state.host = pveHost
   const host = document.createElement('div')
   document.body.appendChild(host)
+  root = createRoot(host)
   act(() => {
-    createRoot(host).render(
-      <>
-        <HealthStrip slots={[]} heroTps={null} attentionItems={[]} />
-        <MemoryHeroCard swap={null} onGo={() => {}} />
-      </>,
+    root.render(
+      <QueryClientProvider client={new QueryClient()}>
+        <OvNowBand onGo={() => {}} />
+      </QueryClientProvider>,
     )
   })
   return host
 }
 
-afterEach(() => {
-  document.body.innerHTML = ''
+beforeEach(() => {
+  // A 1000px bar, so blocks are wide enough to carry labels.
+  Object.defineProperty(HTMLElement.prototype, 'offsetWidth', { configurable: true, get: () => 1000 })
+  ;(globalThis as any).ResizeObserver = class {
+    cb: (e: any[]) => void
+    constructor(cb: (e: any[]) => void) {
+      this.cb = cb
+    }
+    observe() {
+      this.cb([{ contentRect: { width: 1000 } }])
+    }
+    disconnect() {}
+  }
 })
 
-const striped = (host: HTMLElement) => host.querySelector('.rd-mem-seg-system') as HTMLElement | null
-const freeLabel = (host: HTMLElement) => host.querySelector('.rd-mem-free')?.textContent
-const legend = (host: HTMLElement) => host.querySelector('.rd-mem-legend')?.textContent ?? ''
+afterEach(() => {
+  act(() => root.unmount())
+  document.body.innerHTML = ''
+  delete (globalThis as any).ResizeObserver
+  delete (HTMLElement.prototype as any).offsetWidth
+})
 
-describe('dashboard memory card', () => {
-  it('dashboard card striped block is other guests on a gpu box', () => {
+const striped = (host: HTMLElement) => host.querySelector('.ov-mem-seg.sys') as HTMLElement | null
+const freeLabel = (host: HTMLElement) => host.querySelector('.ov-mem-free')?.textContent
+const legend = (host: HTMLElement) => host.querySelector('.ov-mem-leg')?.textContent ?? ''
+const slotTitles = (host: HTMLElement) =>
+  [...host.querySelectorAll('.ov-mem-seg[role="link"]')].map((e) => e.getAttribute('title') || '')
+
+describe('Now band memory bar (ADR-0039 budget)', () => {
+  it('striped block is other guests on a gpu box', () => {
     const host = render(budget({ used_gb: 60, other_guests_gb: 20, attribution_excess_gb: 0, free_gb: 56 }))
     const block = striped(host)!
     expect(block).not.toBeNull()
@@ -124,7 +146,7 @@ describe('dashboard memory card', () => {
     expect(freeLabel(host)).toBe('free · 56.0 GB')
   })
 
-  it('card free label is the budget free, the same figure the ruler shows', () => {
+  it('free label is the budget free', () => {
     const host = render(budget())
     expect(freeLabel(host)).toBe('free · 72.6 GB')
     // nothing else holds the pool on the reference box, so no striped block
@@ -132,19 +154,15 @@ describe('dashboard memory card', () => {
   })
 
   it('names the image engine and says per-slot figures are estimated', () => {
-    const titles = [...render(budget()).querySelectorAll('.rd-mem-seg[role="link"]')].map(
-      (e) => e.getAttribute('title') || '',
-    )
+    const titles = slotTitles(render(budget()))
     expect(titles.find((t) => t.startsWith('image engine'))).toMatch(/^image engine · 4\.4 GB · /)
     expect(titles.find((t) => t.startsWith('brain'))).toMatch(/^brain · 30\.0 GB \(estimated\) · /)
   })
 
   it('calls the engine an estimate only when the backend says it is one', () => {
-    const engineTitle = (host: HTMLElement) =>
-      [...host.querySelectorAll('.rd-mem-seg[role="link"]')]
-        .map((e) => e.getAttribute('title') || '')
-        .find((t) => t.startsWith('image engine'))
+    const engineTitle = (host: HTMLElement) => slotTitles(host).find((t) => t.startsWith('image engine'))
     expect(engineTitle(render(budget()))).toMatch(/^image engine · 4\.4 GB · /)
+    act(() => root.unmount())
     document.body.innerHTML = ''
     expect(engineTitle(render(budget({ image_engine_estimated: true })))).toMatch(
       /^image engine · 4\.4 GB \(estimated\) · /,
@@ -157,62 +175,44 @@ describe('dashboard memory card', () => {
     expect(striped(host)!.getAttribute('title')).toBe('system + page cache · 16.1 GB')
     expect(legend(host)).toContain('system 16.1G')
     expect(freeLabel(host)).toBe('free · 89.4 GB')
-    expect(host.querySelector('.rd-card-note')?.textContent).toContain('106 GB pool')
+    expect(legend(host)).toContain('106 GB pool')
   })
 })
 
-describe('dashboard memory card on a Proxmox-configured GPU box', () => {
+describe('Now band memory bar on a Proxmox-configured GPU box', () => {
   // Host: 128 GB DIMMs, 90 GB in use, 38 GB free. This box's occupants hold
   // 30 + 12 + 4.4 = 46.4 GB of the pool, so the host's "others" are 43.6 GB:
   // that already includes the other guests' GTT.
-  const host = {
+  const pve = {
     configured: true,
     ok: true,
     host_mem_total_mb: 131072,
     host_mem_used_mb: 92160,
     host_mem_free_mb: 38912,
   }
-  // Other guests hold 20 GB of this box's pool: drawn as their own block on
-  // the pool bar, but inside the host's "others" once the bar is host-wide.
+  // Other guests hold 20 GB of this box's pool: drawn as their own block on the pool bar,
+  // but inside the host's "others" once the bar is host-wide.
   const withOtherGuests = () =>
     budget({ used_gb: 66.4, other_guests_gb: 20, attribution_excess_gb: 0, free_gb: 49.6 })
 
-  it('does not draw the pool\'s other guests on top of the host\'s others', () => {
-    const h = render(withOtherGuests(), host)
-    const blocks = [...h.querySelectorAll<HTMLElement>('.rd-mem-seg-system')]
-    expect(blocks.map((b) => b.getAttribute('title'))).toEqual([
-      'proxmox host (other tenants) · 43.6 GB',
-    ])
+  it("does not draw the pool's other guests on top of the host's others", () => {
+    const h = render(withOtherGuests(), pve)
+    const blocks = [...h.querySelectorAll<HTMLElement>('.ov-mem-seg.sys')]
+    expect(blocks.map((b) => b.getAttribute('title'))).toEqual(['proxmox host (other tenants) · 43.6 GB'])
     expect(legend(h)).not.toMatch(/other guests/)
     expect(legend(h)).toContain('proxmox host 43.6G')
   })
 
-  it('the free label is what the host-wide bar leaves, not the pool free', () => {
-    const h = render(withOtherGuests(), host)
+  it("the free label is what the host-wide bar leaves, not the pool free", () => {
+    const h = render(withOtherGuests(), pve)
     // 128 total - (46.4 occupants + 43.6 host others) = 38.0, the host's free
     expect(freeLabel(h)).toBe('free · 38.0 GB')
-    expect(h.querySelector('.rd-card-note')?.textContent).toContain('128 GB pool')
+    expect(legend(h)).toContain('128 GB pool')
   })
 
   it('the same budget without a host is the pool bar, other guests drawn', () => {
     const h = render(withOtherGuests())
     expect(striped(h)!.getAttribute('title')).toBe('other guests · 20.0 GB')
     expect(freeLabel(h)).toBe('free · 49.6 GB')
-  })
-})
-
-describe('dashboard health strip RAM cell', () => {
-  const cell = (host: HTMLElement) =>
-    [...host.querySelectorAll('.rd-health-cell')].find((c) => c.querySelector('.rd-health-k')?.textContent === 'RAM')!
-
-  it('is RAM used over the RAM limit, not the GPU pool', () => {
-    const c = cell(render(budget()))
-    expect(c.querySelector('.rd-health-v')?.textContent).toBe('16.1/106 GB')
-    expect(c.querySelector('.rd-health-v')?.getAttribute('title')).toBe('container limit')
-  })
-
-  it('shows no figure when the backend could not read RAM', () => {
-    const c = cell(render(budget({}, { limit_gb: 0, used_gb: 0, free_gb: 0 })))
-    expect(c.querySelector('.rd-health-v')?.textContent).toBe('—')
   })
 })

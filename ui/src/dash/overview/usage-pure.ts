@@ -7,7 +7,11 @@ import { fmtK } from './overview-pure'
 const DASH = '—'
 
 export interface UsageRow {
+  /** Unique per (model, runner, device, modality): the group key the server aggregates on. */
+  key: string
   model: string
+  /** The model cell: the model id, plus ` · device` when the same model has several rows. */
+  label: string
   req: number
   share: number
   ttft: string
@@ -68,10 +72,14 @@ export function usageModel(s: StatsSummary | undefined, win: StatsWindow): Usage
   const models = s.by_model
   const prefill = weighted(models, (m) => m.tps_prefill.avg)
   const p95s = models.map((m) => m.ttft_ms.p95).filter(finite)
+  const perModel = new Map<string, number>()
+  for (const m of models) perModel.set(m.model_id, (perModel.get(m.model_id) ?? 0) + 1)
   const rows: UsageRow[] = [...models]
     .sort((a, b) => reqOf(b) - reqOf(a))
     .map((m) => ({
+      key: [m.model_id, m.runner ?? '', m.device ?? '', m.modality ?? ''].join('\u0000'),
       model: m.model_id,
+      label: (perModel.get(m.model_id) ?? 0) > 1 && m.device ? `${m.model_id} · ${m.device}` : m.model_id,
       req: reqOf(m),
       share: (reqOf(m) / s.totals.requests) * 100,
       ttft: secs(m.ttft_ms.p50),

@@ -1,10 +1,9 @@
 // hal0 Overview v2 — Hardware card model: sample rings and the five rows.
 // No React, no window globals: unit-testable in isolation.
 import { GPU_PINNED_LONG, gpuUtilReading } from '@/lib/gpuUtil'
-import { pctOf } from './overview-pure'
+import { freeGb, MB_PER_GB, pctOf } from './overview-pure'
 
 const DASH = '—'
-const MB_PER_GB = 1024
 
 /** Append `value` to `ring`, keeping the newest `cap` samples. Returns a new
  *  array; null and non-finite values are skipped (no fabricated trend). */
@@ -104,7 +103,8 @@ function npuRow(i: HardwareInput): Row {
     caption,
     pct,
     value: pctText(pct),
-    pill: status?.ok ? 'active' : 'idle',
+    // No npu_status at all is an unread driver, not an idle device: no pill, the row shows a dash.
+    pill: status ? (status.ok ? 'active' : 'idle') : undefined,
   }
 }
 
@@ -134,7 +134,7 @@ function diskRow(i: HardwareInput): Row {
     ...base,
     caption: joinParts([d.path, floorGb]) || 'state root',
     pct: used == null ? null : Math.round(used),
-    value: `${Math.round(d.free_mb / MB_PER_GB)} GB free`,
+    value: `${freeGb(d.free_mb)} GB free`,
   }
 }
 

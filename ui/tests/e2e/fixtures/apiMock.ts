@@ -25,6 +25,12 @@ import {
   BOARD_TASKS,
   BOARD_ORCH_DEFAULT,
   makeBoardLanesResponse,
+  OVERVIEW_SYSTEM_STATS,
+  OVERVIEW_STATS,
+  OVERVIEW_THROUGHPUT_HISTORY,
+  OVERVIEW_BRIDGE_RUNS,
+  OVERVIEW_COMFYUI_STATUS,
+  OVERVIEW_ARBITER_CHAT,
 } from './mock-data'
 
 export const LIVE = process.env.HAL0_E2E_LIVE === '1'
@@ -135,6 +141,20 @@ export async function installDefaultMocks(page: Page, state: MockState) {
     json(route, { models: [], engine: { available: true, reason: null } }),
   )
   await page.route('**/api/slots', (route) => json(route, { slots: state.slots }))
+
+  // ── Overview v2 polls ───────────────────────────────────────────────
+  // Quiet-box defaults for what the landing page reads beyond slots/hardware/status. The
+  // catch-all's `{}` is not a valid body for any of them (the Usage card, for one, reads
+  // `totals` off it). /api/memory/engine and /api/updates/state are already answered by the
+  // in-bundle mock layer; /api/board/stats is below with the board routes.
+  await page.route('**/api/system-stats', (route) => json(route, OVERVIEW_SYSTEM_STATS))
+  await page.route(/\/api\/stats(\?|$)/, (route) => json(route, OVERVIEW_STATS))
+  await page.route(/\/api\/stats\/throughput\/history(\?|$)/, (route) =>
+    json(route, OVERVIEW_THROUGHPUT_HISTORY),
+  )
+  await page.route(/\/api\/bridge\/runs(\?|$)/, (route) => json(route, OVERVIEW_BRIDGE_RUNS))
+  await page.route('**/api/comfyui/status', (route) => json(route, OVERVIEW_COMFYUI_STATUS))
+  await page.route('**/api/comfyui/arbiter', (route) => json(route, OVERVIEW_ARBITER_CHAT))
   await page.route('**/api/slots/metrics', (route) => json(route, {}))
   await page.route('**/api/backends', (route) => json(route, { backends: state.backends }))
   // GET /api/upstreams returns a bare UpstreamEntry[] (providers.py). Without

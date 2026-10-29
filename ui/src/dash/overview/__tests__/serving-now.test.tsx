@@ -67,7 +67,7 @@ describe('OvServingNow', () => {
     expect(tiles[0].querySelector('.ov-chip.amber')?.textContent).toBe('default')
     expect(tiles[1].querySelector('.ov-chip.amber')).toBeNull()
     expect(tiles[1].textContent).toContain('ctx')
-    expect(tiles[1].textContent).toContain('84k/131k')
+    expect(tiles[1].textContent).toContain('10k/131k')
   })
 
   it('stopped chip loads the slot on click', () => {
@@ -100,7 +100,7 @@ describe('OvServingNow', () => {
 
   it('a serving tile is marked, shows tok/s and draws the sparkline', () => {
     slotsData = SLOTS.map((s) => (s.name === 'utility' ? { ...s, ...SERVING_UTILITY } : s))
-    sysData = { ...SYS, slots: [...SYS.slots.filter((s: any) => s.slot_id !== 'utility'), { slot_id: 'utility', inflight: 2, kv_used: 1000 }] }
+    sysData = { ...SYS, slots: [...SYS.slots.filter((s: any) => s.slot_id !== 'utility'), { slot_id: 'utility', inflight: 2 }] }
     history = { per_slot: { utility: [40, 52, 61] } }
     mount()
     const tile = [...host.querySelectorAll('.ov-tile')].find((t) => t.querySelector('.ov-nm')?.textContent === 'utility')!
@@ -119,6 +119,27 @@ describe('OvServingNow', () => {
     mount()
     expect(host.querySelector('.ov-lane-h')?.textContent).toContain('3 / 4 loaded')
     expect(host.querySelector('.ov-card-n')?.textContent).toBe('3/4 loaded')
+  })
+
+  it('marks an error tile and a warming tile so the state colours apply', () => {
+    slotsData = [
+      { name: 'b', device: 'gpu-vulkan', state: 'warming', type: 'llm' },
+      { name: 'c', device: 'gpu-vulkan', state: 'error', type: 'llm' },
+      { name: 'a', device: 'gpu-vulkan', state: 'ready', type: 'llm' },
+    ]
+    mount()
+    const tile = (n: string) => [...host.querySelectorAll('.ov-tile')].find((t) => t.querySelector('.ov-nm')?.textContent === n)!
+    expect(tile('c').classList.contains('error')).toBe(true)
+    expect(tile('b').classList.contains('warming')).toBe(true)
+    expect(tile('a').classList.contains('error') || tile('a').classList.contains('warming')).toBe(false)
+  })
+
+  it('styles error tiles with --err and warming text with --warn', async () => {
+    const { readFileSync } = await import(/* @vite-ignore */ ['node', 'fs'].join(':') as string)
+    const css = readFileSync(`${(globalThis as any).process.cwd()}/src/dash/overview/overview.css`, 'utf8')
+    expect(css).toMatch(/\.ov-tile\.error\s*\{[^}]*border-color:\s*var\(--err-line\)/)
+    expect(css).toMatch(/\.ov-tile\.error \.ov-st\s*\{[^}]*color:\s*var\(--err\)/)
+    expect(css).toMatch(/\.ov-tile\.warming \.ov-st\s*\{[^}]*color:\s*var\(--warn\)/)
   })
 
   it('logs routes to slots then dispatches hal0:slot-logs with the slot name', () => {

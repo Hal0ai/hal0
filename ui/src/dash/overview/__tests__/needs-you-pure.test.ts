@@ -134,7 +134,7 @@ describe('mergeAttention', () => {
 describe('allClearLine', () => {
   const base = { doctorKnown: true, slotsHealthy: [13, 13] as [number, number], diskFreeMb: 124429, channel: 'nightly', available: null, checkedAt: new Date(2026, 9, 29, 15, 10) }
   it('composes the line', () =>
-    expect(allClearLine(base)).toBe('All clear · doctor ok · 13/13 slots healthy · disk 124 GB free · up to date on nightly · checked 15:10'))
+    expect(allClearLine(base)).toBe('All clear · doctor ok · 13/13 slots healthy · disk 121 GB free · up to date on nightly · checked 15:10'))
   it('renders an em dash for an unsourced disk figure and drops an unknown channel', () =>
     expect(allClearLine({ ...base, diskFreeMb: null, channel: null })).toBe('All clear · doctor ok · 13/13 slots healthy · disk — free · checked 15:10'))
   it('says doctor unavailable instead of doctor ok when the doctor feed has not answered', () => {

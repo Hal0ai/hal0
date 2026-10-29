@@ -825,3 +825,74 @@ export const BOARD_WORKERS_ACTIVE = [
   { id: 'admin-agent', status: 'active', claimed: 3 },
   { id: 'mem-agent',   status: 'active', claimed: 1 },
 ]
+
+/* ── Overview v2 defaults ────────────────────────────────────────────
+ * Quiet-box bodies for the endpoints the Overview page polls on top of the
+ * slot / hardware / status ones. Every figure is a measured zero or an empty
+ * list, never a number a spec would then have to explain. */
+
+// GET /api/system-stats: fleet gauges and one live row per slot.
+export const OVERVIEW_SYSTEM_STATS = {
+  ts: '2026-10-29T12:00:00Z',
+  fleet: { gpu_util: null, vram_bytes: null, gtt_bytes: null, power_w: null, temp_c: null },
+  slots: [] as unknown[],
+}
+
+// GET /api/stats?window=: the request-metric rollup the Usage card reads.
+export const OVERVIEW_STATS = {
+  window: { from: '2026-10-28T12:00:00Z', to: '2026-10-29T12:00:00Z', bucket: '1h' },
+  totals: { requests: 0, ok: 0, errors: 0, tokens_completed: 0 },
+  by_model: [] as unknown[],
+}
+
+// GET /api/stats/throughput/history: no samples, no per-slot series.
+export const OVERVIEW_THROUGHPUT_HISTORY = {
+  window_s: 100,
+  bucket_s: 5,
+  samples: [] as unknown[],
+  per_slot: {} as Record<string, number[]>,
+}
+
+// GET /api/bridge/runs: no delegated runs.
+export const OVERVIEW_BRIDGE_RUNS = { items: [] as unknown[] }
+
+// GET /api/comfyui/status on a box with an idle ComfyUI (the Image engine card).
+export const OVERVIEW_COMFYUI_STATUS = {
+  mode: 'inference',
+  reachable: true,
+  engine: 'running',
+  container: { name: 'hal0-img', state: 'running' },
+  endpoint: null,
+  queue: { running: 0, pending: 0 },
+  util: null,
+  temp: null,
+  clock: null,
+  progress: null,
+  inference: { hermes: false },
+  inventory: { checkpoints: 3, diffusion: 2, loras: 5, vae: 1 },
+  switchover: { active: false, target: null, error: null },
+  arbiter: null,
+  gate: null,
+  gate_refusal: null,
+}
+
+// GET /api/comfyui/arbiter in chat mode: the Now band's `chat mode` pip.
+export const OVERVIEW_ARBITER_CHAT = {
+  mode: 'inference',
+  arbiter: {
+    mode: 'llm',
+    pinned: false,
+    saved_llm_slots: [] as string[],
+    switching: false,
+    image_jobs: 0,
+    phase: null,
+    restore_at: null,
+    handoff_until: null,
+    drain_in_flight: 0,
+    unload_set: ['brain', 'utility', 'embed', 'stt'],
+    llm_waiters: { count: 0, oldest_s: null },
+  },
+  switchover: { active: false, target: null, error: null },
+  gate_refusal: null,
+  skewMs: 0,
+}

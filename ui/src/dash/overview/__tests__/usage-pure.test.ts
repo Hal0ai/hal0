@@ -59,3 +59,24 @@ describe('usageModel', () => {
     expect(usageModel(STATS_1H, '7d').bucketNote).toBe('tokens per 8 h')
   })
 })
+
+describe('usageModel rows of one model on several devices', () => {
+  const two: StatsSummary = {
+    ...STATS_1H,
+    totals: { ...STATS_1H.totals, requests: 6 },
+    by_model: [
+      { ...STATS_1H.by_model[0], runner: 'llama', device: 'gpu-vulkan', modality: 'text', ok: 4, errors: 0 },
+      { ...STATS_1H.by_model[0], runner: 'llama', device: 'gpu-rocm', modality: 'text', ok: 2, errors: 0 },
+    ],
+  }
+
+  it('gives every group its own key and names the device when the model repeats', () => {
+    const rows = usageModel(two, '1h').rows
+    expect(new Set(rows.map((r) => r.key)).size).toBe(2)
+    expect(rows.map((r) => r.label).sort()).toEqual([`${MODEL} · gpu-rocm`, `${MODEL} · gpu-vulkan`])
+  })
+
+  it('leaves the plain model id when it appears once', () => {
+    expect(usageModel({ ...two, by_model: [two.by_model[0]] }, '1h').rows[0].label).toBe(MODEL)
+  })
+})

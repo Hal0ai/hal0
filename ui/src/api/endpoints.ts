@@ -489,12 +489,6 @@ export const ENDPOINTS = {
   logsUnit: (unit: string, n = 120) =>
     `/api/logs?unit=${encodeURIComponent(unit)}&n=${n}`,
 
-  // ── Dashboard layout persistence (§2c, DashLayout store) ────────
-  // GET → 200 DashLayout | 200 {} (no saved layout yet)
-  // PUT <DashLayout> → 204
-  // Fail-soft: 404 treated as "no layout saved" by useDashLayout hook.
-  dashboardLayout: '/api/user/dashboard-layout',
-
   // ── Meta enums (static per-release taxonomy) ─────────────────────
   // GET /api/meta/enums → devices / backends / device_classes / slot_types /
   // model_capabilities (+ aliases) / model_backends / runtime_families +

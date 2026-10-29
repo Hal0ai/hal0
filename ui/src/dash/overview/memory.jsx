@@ -19,7 +19,7 @@ function storedBank() {
 }
 
 // Thin gate: a box with memory off never mounts the body, so it never polls /api/memory/*.
-function OvMemory({ onGo }) {
+export function OvMemory({ onGo }) {
   const enabled = useMemoryEnabled()
   return enabled ? <OvMemoryBody onGo={onGo} /> : null
 }
@@ -36,7 +36,7 @@ function OvMemoryBody({ onGo }) {
   const total = typeof e?.banks_total === 'number' ? e.banks_total : bankIds.length > 0 ? bankIds.length : null
   const f = bankFigures(stats.data)
   const notes = []
-  if (f.pending != null) notes.push(`${f.pending} operations pending`)
+  if (f.pending != null) notes.push(`${f.pending} ${f.pending === 1 ? 'operation' : 'operations'} pending`)
   if (f.consolidated) notes.push(`consolidated ${f.consolidated}`)
 
   return (

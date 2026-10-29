@@ -105,9 +105,19 @@ describe('hardwareRows', () => {
     expect(npu.pct).toBe(40)
   })
 
+  it('leaves the NPU pill unset when the driver reports no npu_status (the row shows a dash)', () => {
+    const rows = hardwareRows({ ...CT105, stats: { ...CT105.stats, npu_status: undefined } })
+    expect(byKey(rows, 'npu').pill).toBeUndefined()
+  })
+
   it('names a single NPU slot', () => {
     const rows = hardwareRows({ ...CT105, npuSlots: ['flm'] })
     expect(byKey(rows, 'npu').caption).toBe('flm')
+  })
+
+  it('shows free disk as the same floored figure the Needs-you line uses', () => {
+    const rows = hardwareRows({ ...CT105, disk: { free_mb: 124429, floor_mb: 512, total_mb: 248 * 1024, path: '/var/lib/hal0' } })
+    expect(byKey(rows, 'disk').value).toBe('121 GB free')
   })
 
   it('renders dashes, never zero, for unsourced RAM and disk', () => {

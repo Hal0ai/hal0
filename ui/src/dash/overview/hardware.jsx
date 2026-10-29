@@ -14,7 +14,7 @@ import { hardwareRows, pushSample } from './hardware-pure'
 
 const { useRef, useEffect, useState } = React
 
-function OvHardware({ onGo: _onGo }) {
+export function OvHardware({ onGo: _onGo }) {
   const hw = useHardware()
   const stats = useStatsHardware()
   const power = useStatsPower()

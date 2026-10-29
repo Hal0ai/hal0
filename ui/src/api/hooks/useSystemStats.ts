@@ -20,7 +20,7 @@ export interface SystemStatsSlot {
   state: string
   vram_bytes: number | null
   inflight: number | null
-  kv_used: number | null
+  kv_used: number | null // ppm of the KV cache in use, not tokens
   ts: string
 }
 

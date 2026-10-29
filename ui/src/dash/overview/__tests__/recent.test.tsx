@@ -11,7 +11,8 @@ import { CT105_RECORDS, ERR_RECORD, NOW_MS } from './recent-digest-fixtures'
 ;(globalThis as any).React = React
 
 let records: ActivityRecord[] | undefined = []
-const useActivityRecent = vi.fn((_limit?: number) => ({ data: records }))
+let q: { isPending?: boolean; isError?: boolean } = {}
+const useActivityRecent = vi.fn((_limit?: number) => ({ data: records, isPending: records === undefined && !q.isError, isError: false, ...q }))
 vi.mock('@/api/hooks/useActivity', () => ({ useActivityRecent: (n?: number) => useActivityRecent(n) }))
 
 await import('../shell.jsx')
@@ -35,6 +36,7 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ['Date'] })
   vi.setSystemTime(NOW_MS)
   records = CT105_RECORDS
+  q = {}
   useActivityRecent.mockClear()
 })
 afterEach(() => {
@@ -73,15 +75,23 @@ describe('OvRecent', () => {
     expect(seen).toHaveBeenCalledTimes(1)
   })
 
-  it('shows "no recent activity" for an empty or not-yet-loaded list', () => {
+  it('shows "no recent activity" only for a successful empty list', () => {
     records = []
     mount()
     expect(host.querySelector('.ov-empty')?.textContent).toBe('no recent activity')
     expect(host.querySelectorAll('.ov-act')).toHaveLength(0)
-    act(() => root.unmount())
-    document.body.innerHTML = ''
+  })
+
+  it('shows a dash while the activity query is pending', () => {
     records = undefined
     mount()
-    expect(host.querySelector('.ov-empty')?.textContent).toBe('no recent activity')
+    expect(host.querySelector('.ov-empty')?.textContent).toBe('—')
+  })
+
+  it('says activity is unavailable when the query errored', () => {
+    records = undefined
+    q = { isError: true, isPending: false }
+    mount()
+    expect(host.querySelector('.ov-empty')?.textContent).toBe('activity unavailable')
   })
 })

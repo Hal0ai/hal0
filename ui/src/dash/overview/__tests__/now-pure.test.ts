@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { laneRows } from '../serving-pure'
 import { contextualActions, modeLabel, nowFacts } from '../now-pure'
 
 const slot = (name: string, state: string, device = 'gpu-vulkan', toks?: number) => ({
@@ -35,6 +36,19 @@ const SYS: any = {
 }
 
 describe('nowFacts', () => {
+  it('counts a starting and an errored slot as loaded, agreeing with the Serving now tiles', () => {
+    const slots = [
+      { name: 'a', device: 'gpu-vulkan', state: 'ready', type: 'llm' },
+      { name: 'w', device: 'gpu-vulkan', state: 'starting', type: 'llm' },
+      { name: 'e', device: 'gpu-vulkan', state: 'error', type: 'llm' },
+      { name: 'o', device: 'gpu-vulkan', state: 'offline', type: 'llm' },
+    ] as any[]
+    const facts = nowFacts(slots, undefined, null, null, { access: true, pct: null, tempC: null, watts: null })
+    const tiles = laneRows(slots, undefined, undefined).flatMap((l) => l.loaded)
+    expect(facts.loaded).toBe(3)
+    expect(tiles).toHaveLength(facts.loaded)
+  })
+
   it('counts loaded and serving and sums tok/s', () => {
     const r = nowFacts(SLOTS_2_SERVING, SYS, 48, 116, { access: true, pct: 0, tempC: 47, watts: 33 })
     expect(r).toMatchObject({

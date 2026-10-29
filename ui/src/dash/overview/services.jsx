@@ -1,4 +1,4 @@
-// hal0 Overview v2 — Services: the four companion services as rows (state dot, name + detail,
+// hal0 Overview v2 — Services: the companion services as rows (the four, in order, then any others) (state dot, name + detail,
 // what OpenWebUI is wired to, an open arrow). Window-global (OvServices). A row click goes to the
 // Services page; the arrow opens the service's own URL. ComfyUI's arrow is the editor access's,
 // never the row's `url`: ComfyUI listens on the box's loopback (image/editor-reach.ts has the
@@ -9,19 +9,20 @@ import { servicesForWidget } from '../services-widget-pure'
 import { OFF_BOX_NOTE } from '../image/editor-reach'
 import { useEditorAccess } from '../image/useEditorAccess'
 
+// The four companions lead, in this order; any other service follows (servicesForWidget orders and caps).
 const SERVICE_ORDER = ['openwebui', 'comfyui', 'hermes', 'n8n']
 const WIRED_KEYS = ['chat', 'voice', 'documents', 'images', 'web_search']
 
-function OvServices({ onGo }) {
+export function OvServices({ onGo }) {
   const svc = useServices()
   const editor = useEditorAccess()
-  const rows = servicesForWidget(svc, SERVICE_ORDER, 8).filter((s) => SERVICE_ORDER.includes(s.id))
+  const rows = servicesForWidget(svc, SERVICE_ORDER, 8)
   const upCount = rows.filter((s) => s.up).length
 
   return (
     <OvCard
       title="Services"
-      note={svc.pending || rows.length === 0 ? null : `${upCount} / ${rows.length} up`}
+      note={svc.pending || svc.unavailable || rows.length === 0 ? null : `${upCount} / ${rows.length} up`}
       right={
         <button type="button" className="ov-lnk" onClick={() => onGo('services')}>
           Manage →
@@ -29,7 +30,9 @@ function OvServices({ onGo }) {
       }
       flush
     >
-      {svc.pending ? (
+      {svc.unavailable ? (
+        <div className="ov-empty">services unavailable</div>
+      ) : svc.pending ? (
         <div className="ov-empty">source pending</div>
       ) : rows.length === 0 ? (
         <div className="ov-empty">no companion services</div>
