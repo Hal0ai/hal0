@@ -75,6 +75,16 @@ scopes name (:data:`BRIDGE_SCOPE_PREFIXES`); every other route refuses it with
 never waved through, and a bridge key is held to its scopes on a box with auth
 off as well. OPEN routes stay open to it, as to anyone.
 
+``[bridge].enabled`` is recorded here when hal0-api boots
+(:func:`set_bridge_enabled`). While it is off no bridge key verifies, and the
+store is not even opened for one. A request the middleware admits as a bridge
+principal carries that principal on its ASGI scope
+(:data:`BRIDGE_PRINCIPAL_SCOPE_KEY`), and the handlers behind it (the MCP
+identity resolvers, ``GET /api/bridge/me``) read it there through
+:func:`judged_principal` instead of verifying the key again. Only
+:func:`_still_admitted` verifies a second time, live, so revoking a key ends
+the streams it opened.
+
 The browser session cookie is **reused, not reimplemented**: minting and
 verification both delegate to :mod:`hal0.api.agents._auth` (one
 HMAC-SHA256 cookie scheme), so
@@ -108,7 +118,7 @@ import structlog
 
 from hal0.api import live_sockets
 from hal0.api.agents._auth import SESSION_COOKIE_NAME, verify_session_cookie
-from hal0.bridge.keys import KEY_PREFIX
+from hal0.bridge.keys import KEY_PREFIX, SCOPE_SERVERS
 from hal0.comfyui.gate_version import GATE_USER_AGENT_PREFIX, GATE_VERSION_HEADER
 from hal0.config.network import bind_host, is_loopback_bind
 from hal0.security.exposure import AuthClass, classify
@@ -335,16 +345,43 @@ def _config_trust_forwarded_for() -> bool | None:
 # ---------------------------------------------------------------------------
 # The bridge's own credential (ADR-0043) — see the module docstring.
 
-#: The MCP mount each bridge scope opens. ``agents`` needs no entry: every
+#: The MCP mount each bridge scope opens, derived from the one scope table
+#: (:data:`hal0.bridge.keys.SCOPE_SERVERS`). ``agents`` has no entry: every
 #: bridge client holds it, and the BRIDGE class (``/mcp/agents``,
 #: ``GET /api/bridge/me``) admits the tier itself.
 BRIDGE_SCOPE_PREFIXES: Mapping[str, str] = MappingProxyType(
-    {"memory": "/mcp/memory", "admin": "/mcp/admin"}
+    {scope: mount for scope, (_server, mount) in SCOPE_SERVERS.items() if scope != "agents"}
 )
+
+#: Set on the ASGI scope of a request the middleware admitted as a bridge
+#: principal: the :class:`AuthPrincipal` it was judged as. Handlers read it
+#: through :func:`judged_principal`; a client cannot set an ASGI scope key.
+BRIDGE_PRINCIPAL_SCOPE_KEY = "hal0.bridge_principal"
 
 _bridge_store_lock = threading.Lock()
 _bridge_store_instance: BridgeStore | None = None
 _bridge_store_warned = False
+
+#: ``[bridge].enabled`` as hal0-api read it at boot (ADR-0043, Decision 6).
+#: On until the ``bridge_store`` boot phase records otherwise, like the
+#: shipped default.
+_bridge_enabled = True
+
+
+def set_bridge_enabled(enabled: bool) -> None:
+    """Record ``[bridge].enabled`` for this process (the ``bridge_store`` boot phase).
+
+    Off, no bridge key verifies: :func:`_bridge_principal` answers ``None``
+    without opening ``bridge.db``, so a disabled bridge never creates the file
+    on a request's behalf (ADR-0043).
+    """
+    global _bridge_enabled
+    _bridge_enabled = bool(enabled)
+
+
+def bridge_enabled() -> bool:
+    """``[bridge].enabled`` as recorded when hal0-api started (ADR-0043)."""
+    return _bridge_enabled
 
 
 def bridge_store() -> BridgeStore:
@@ -374,12 +411,15 @@ def bridge_store() -> BridgeStore:
 def _bridge_principal(candidate: str) -> AuthPrincipal | None:
     """Resolve a ``hal0bk_`` key to its bridge principal, or ``None``.
 
-    ``None`` for an unknown, revoked or rotated-out key, and also when the
-    store cannot be opened or read (an unwritable ``var_lib``, a damaged
-    file): the key then simply does not verify. That is logged once per
-    process at warning, and never fails the request.
+    ``None`` while the bridge is disabled (without building the store), for
+    an unknown, revoked or rotated-out key, and also when the store cannot be
+    opened or read (an unwritable ``var_lib``, a damaged file): the key then
+    simply does not verify. A store failure is logged once per process at
+    warning, and never fails the request.
     """
     global _bridge_store_warned
+    if not _bridge_enabled:
+        return None
     try:
         row = bridge_store().verify_key(candidate)
     except Exception as exc:  # deny by default; never 500 the auth gate
@@ -410,12 +450,34 @@ def bridge_scope_admits(path: str, principal: AuthPrincipal) -> bool:
     return False
 
 
-def _bears_bridge_key(scope: dict[str, Any]) -> bool:
-    """True iff the request's bearer is shaped like a bridge key (no store read)."""
-    authorization = _headers_from_scope(scope).get("authorization", "")
-    return authorization[:7].lower() == "bearer " and authorization[7:].strip().startswith(
-        KEY_PREFIX
-    )
+def bears_bridge_key(scope: Any) -> bool:
+    """True iff the request's bearer is shaped like a bridge key (no store read).
+
+    Accepts a raw ASGI scope or a Starlette ``Request``/``WebSocket``. The
+    MCP identity resolvers use it to refuse the ``X-hal0-Agent`` fallback to
+    a bridge-shaped bearer the middleware did not admit as a bridge principal.
+    """
+    raw_scope = getattr(scope, "scope", scope)
+    token = bearer_token(_headers_from_scope(raw_scope))
+    return token is not None and token.startswith(KEY_PREFIX)
+
+
+def judged_principal(scope: Any) -> AuthPrincipal:
+    """The principal a handler acts as, without verifying a bridge key again.
+
+    The bridge principal the middleware stored on the scope
+    (:data:`BRIDGE_PRINCIPAL_SCOPE_KEY`) when it admitted the request, else
+    the cookie or box key the request carries. A bridge-shaped bearer with no
+    stored principal is never looked up here: it resolves as an unknown key
+    does, so a store error or a revoke race can never hand a handler an
+    identity the gate did not judge. Accepts a raw ASGI scope or a Starlette
+    ``Request``/``WebSocket``.
+    """
+    raw_scope = getattr(scope, "scope", scope)
+    stored = raw_scope.get(BRIDGE_PRINCIPAL_SCOPE_KEY)
+    if isinstance(stored, AuthPrincipal) and stored.tier == "bridge":
+        return stored
+    return resolve_principal(raw_scope, verify_bridge=False)
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +499,20 @@ def _headers_from_scope(scope: dict[str, Any]) -> dict[str, str]:
     return out
 
 
+def bearer_token(headers: Mapping[str, str]) -> str | None:
+    """The ``Authorization: Bearer`` token in ``headers``, stripped, or ``None``.
+
+    ``headers`` is keyed by lowercase name (:func:`_headers_from_scope`, or a
+    Starlette ``Headers``). The one parser :func:`resolve_principal`,
+    :func:`bears_bridge_key`, the ComfyUI gate check and the MCP mount's
+    bearer read share, so they can never disagree on what a request carries.
+    """
+    authorization = headers.get("authorization", "")
+    if authorization[:7].lower() != "bearer ":
+        return None
+    return authorization[7:].strip()
+
+
 def _cookie_value(cookie_header: str, name: str) -> str | None:
     for part in cookie_header.split(";"):
         part = part.strip()
@@ -448,7 +524,7 @@ def _cookie_value(cookie_header: str, name: str) -> str | None:
     return None
 
 
-def resolve_principal(scope: dict[str, Any]) -> AuthPrincipal:
+def resolve_principal(scope: dict[str, Any], *, verify_bridge: bool = True) -> AuthPrincipal:
     """Resolve an :class:`AuthPrincipal` from a raw ASGI ``scope``.
 
     Priority (per ``spec-kb1-auth.md``): cookie -> ``Authorization:
@@ -461,6 +537,9 @@ def resolve_principal(scope: dict[str, Any]) -> AuthPrincipal:
     (ADR-0043) and, when it verifies, resolves to the ``bridge`` tier. One
     that does not verify goes on to the box keys, which it cannot match, and
     so ends ``anon``. The ``?api_key=`` fallback never accepts a bridge key.
+    Any other bearer never touches the store. ``verify_bridge=False`` skips
+    the store for a bridge-shaped bearer too, treating it as unknown; that is
+    what :func:`judged_principal` uses once the middleware has judged it.
     """
     headers = _headers_from_scope(scope)
 
@@ -470,10 +549,9 @@ def resolve_principal(scope: dict[str, Any]) -> AuthPrincipal:
         if cookie_value and verify_session_cookie(cookie_value):
             return AuthPrincipal(tier="admin", source="cookie")
 
-    authorization = headers.get("authorization", "")
-    if authorization[:7].lower() == "bearer ":
-        candidate = authorization[7:].strip()
-        if candidate.startswith(KEY_PREFIX):
+    candidate = bearer_token(headers)
+    if candidate is not None:
+        if verify_bridge and candidate.startswith(KEY_PREFIX):
             bridge = _bridge_principal(candidate)
             if bridge is not None:
                 return bridge
@@ -662,12 +740,12 @@ def _gate_admits(scope: dict[str, Any], method: str, path: str) -> bool:
         return False
     if not _gate_peer(scope):
         return False
-    authorization = _headers_from_scope(scope).get("authorization", "")
-    if authorization[:7].lower() != "bearer ":
+    token = bearer_token(_headers_from_scope(scope))
+    if token is None:
         return False
     from hal0.comfyui import gate_credential
 
-    return gate_credential.verify(authorization[7:].strip())
+    return gate_credential.verify(token)
 
 
 #: When a request shaped like the ComfyUI gate's, from the box, without the gate's
@@ -787,7 +865,7 @@ def _enforced_principal(auth_class: AuthClass, scope: dict[str, Any]) -> AuthPri
         or _lan_admin_gate(auth_class, scope)
     ):
         return resolve_principal(scope)
-    if auth_class is AuthClass.OPEN or not _bears_bridge_key(scope):
+    if auth_class is AuthClass.OPEN or not bears_bridge_key(scope):
         return None
     principal = resolve_principal(scope)
     return principal if principal.tier == "bridge" else None
@@ -931,6 +1009,10 @@ class AuthEnforcementMiddleware:
         allowed, status, code = _verdict(auth_class, principal, path)
 
         if allowed:
+            if principal.tier == "bridge":
+                # What the handlers behind this request act as (ADR-0043); they
+                # read it through judged_principal() and never verify again.
+                scope[BRIDGE_PRINCIPAL_SCOPE_KEY] = principal
             if scope_type == "websocket":
                 # The upgrade was the only check; keep the socket only while
                 # its credential still passes this same gate (#2801).
@@ -997,6 +1079,7 @@ class AuthEnforcementMiddleware:
 
 __all__ = [
     "ANON",
+    "BRIDGE_PRINCIPAL_SCOPE_KEY",
     "BRIDGE_SCOPE_PREFIXES",
     "GATE_SCOPE_KEY",
     "AuthEnforcementMiddleware",
@@ -1004,12 +1087,17 @@ __all__ = [
     "Tier",
     "admin_gated",
     "admin_sign_in_required",
+    "bearer_token",
+    "bears_bridge_key",
+    "bridge_enabled",
     "bridge_scope_admits",
     "bridge_store",
     "gate_path_refused_at",
     "has_admin_key",
+    "judged_principal",
     "require_auth_enabled",
     "resolve_principal",
     "resolve_principal_from_scope",
+    "set_bridge_enabled",
     "verify_admin_key",
 ]

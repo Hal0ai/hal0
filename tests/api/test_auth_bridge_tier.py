@@ -58,6 +58,12 @@ def _fresh_posture_cache() -> Iterator[None]:
 
 
 @pytest.fixture
+def bridge_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``[bridge].enabled = false`` as the boot phase records it."""
+    monkeypatch.setattr(auth_mod, "_bridge_enabled", False)
+
+
+@pytest.fixture
 def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> BridgeStore:
     """A tmp bridge store, installed as the one the auth layer reads."""
     s = BridgeStore(tmp_path / "bridge.db")
@@ -157,12 +163,43 @@ def _scope(
     }
 
 
-def request_with(*, bearer: str | None = None, headers: dict[str, str] | None = None) -> Request:
-    """A Starlette ``Request`` as the MCP transport hands it to a tool handler."""
+def request_with(
+    *,
+    bearer: str | None = None,
+    headers: dict[str, str] | None = None,
+    path: str = "/mcp/memory/mcp",
+) -> Request:
+    """A Starlette ``Request`` the auth middleware never saw (no judged principal on it)."""
     merged = dict(headers or {})
     if bearer is not None:
         merged["Authorization"] = f"Bearer {bearer}"
-    return Request(_scope(headers=merged, path="/mcp/memory/mcp", method="POST"))
+    return Request(_scope(headers=merged, path=path, method="POST"))
+
+
+def judged_request(
+    *,
+    bearer: str | None = None,
+    headers: dict[str, str] | None = None,
+    path: str = "/mcp/memory/mcp",
+) -> Request:
+    """The ``Request`` an MCP tool handler sees after the real middleware judged it.
+
+    Runs the request through :class:`AuthEnforcementMiddleware` around a stub
+    app and returns a ``Request`` on the scope the middleware passed on, so a
+    bridge principal it admitted is stored there exactly as in production. A
+    refused request never reaches the stub; its scope carries no principal.
+    """
+    request = request_with(bearer=bearer, headers=headers, path=path)
+    scope = request.scope
+
+    async def _receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def _send(_message: dict[str, Any]) -> None:
+        return None
+
+    asyncio.run(AuthEnforcementMiddleware(_ok_app)(scope, _receive, _send))
+    return Request(scope)
 
 
 @contextlib.contextmanager
@@ -329,17 +366,38 @@ def test_bridge_class_refuses_the_client_key_when_auth_off(
     assert app_auth_off.get("/api/bridge/me", headers=bearer(CLIENT_KEY)).status_code == 403
 
 
-def test_scope_is_enforced_when_auth_off(app_auth_off: TestClient, key: str) -> None:
-    """Default scopes (agents, memory) on a dev-open box: the key opens only its mounts."""
-    assert ok(app_auth_off.post("/mcp/memory/mcp", headers=bearer(key)))
-    assert app_auth_off.post("/mcp/admin/mcp", headers=bearer(key)).status_code == 403
-    assert app_auth_off.get("/api/slots", headers=bearer(key)).status_code == 403
-    assert app_auth_off.post("/v1/chat/completions", headers=bearer(key)).status_code == 403
-    assert app_auth_off.get("/api/bridge/clients", headers=bearer(key)).status_code == 403
+#: Every scope set a client can hold, and which of the two scoped mounts it opens.
+_SCOPE_MATRIX = [
+    (("agents",), False, False),
+    (("agents", "memory"), True, False),
+    (("agents", "admin"), False, True),
+    (("agents", "memory", "admin"), True, True),
+]
+
+
+@pytest.mark.parametrize(("scopes", "memory_ok", "admin_ok"), _SCOPE_MATRIX)
+def test_scope_is_enforced_when_auth_off(
+    app_auth_off: TestClient,
+    store: BridgeStore,
+    scopes: tuple[str, ...],
+    memory_ok: bool,
+    admin_ok: bool,
+) -> None:
+    """Every scope set on a dev-open box, from loopback: the key opens only its mounts."""
+    client = app_auth_off
+    _, key = store.add_client("cc", created_by="t", scopes=scopes)
+    assert ok(client.get("/api/bridge/me", headers=bearer(key)))
+    assert ok(client.post("/mcp/agents/mcp", headers=bearer(key)))
+    assert ok(client.post("/mcp/memory/mcp", headers=bearer(key))) is memory_ok
+    assert ok(client.post("/mcp/admin/mcp", headers=bearer(key))) is admin_ok
+    assert client.get("/api/slots", headers=bearer(key)).status_code == 403
+    assert client.post("/v1/chat/completions", headers=bearer(key)).status_code == 403
+    assert client.get("/api/bridge/clients", headers=bearer(key)).status_code == 403
     # OPEN stays open with or without the key; dev-open is unchanged for anon.
-    assert app_auth_off.get("/api/health", headers=bearer(key)).status_code == 200
-    assert app_auth_off.get("/api/slots").status_code == 200
-    assert app_auth_off.get("/api/bridge/clients").status_code == 200
+    assert client.get("/api/health", headers=bearer(key)).status_code == 200
+    assert client.get("/v1/models", headers=bearer(key)).status_code == 200
+    assert client.get("/api/slots").status_code == 200
+    assert client.get("/api/bridge/clients").status_code == 200
 
 
 def test_unknown_bridge_shaped_key_rides_dev_open_as_anon(app_auth_off: TestClient) -> None:
@@ -355,35 +413,57 @@ def test_revoked_key_is_refused_on_bridge_surfaces_when_auth_off(
     assert app_auth_off.post("/mcp/agents/mcp", headers=bearer(key)).status_code == 401
 
 
+@pytest.mark.parametrize(("scopes", "memory_ok", "admin_ok"), _SCOPE_MATRIX)
 def test_lan_bound_box_with_auth_off(
-    monkeypatch: pytest.MonkeyPatch, store: BridgeStore, key_with_admin: str
+    monkeypatch: pytest.MonkeyPatch,
+    store: BridgeStore,
+    scopes: tuple[str, ...],
+    memory_ok: bool,
+    admin_ok: bool,
 ) -> None:
-    """The trusted-LAN posture: auth off, wide bind, admin key set, LAN peer."""
+    """The trusted-LAN posture: auth off, wide bind, admin key set, LAN peer; every scope set."""
     monkeypatch.setenv("HAL0_REQUIRE_AUTH", "0")
     monkeypatch.setenv("HAL0_BIND_HOST", "0.0.0.0")
     monkeypatch.setenv("HAL0_ADMIN_KEY", ADMIN_KEY)
+    _, key = store.add_client("cc", created_by="t", scopes=scopes)
     lan = _client(peer="203.0.113.5")
-    assert lan.get("/api/bridge/me", headers=bearer(key_with_admin)).status_code == 200
-    assert ok(lan.post("/mcp/admin/mcp", headers=bearer(key_with_admin)))
-    assert lan.post("/mcp/memory/mcp", headers=bearer(key_with_admin)).status_code == 403
-    assert lan.get("/api/slots", headers=bearer(key_with_admin)).status_code == 403
-    assert lan.get("/api/settings", headers=bearer(key_with_admin)).status_code == 403
+    assert lan.get("/api/bridge/me", headers=bearer(key)).status_code == 200
+    assert ok(lan.post("/mcp/agents/mcp", headers=bearer(key)))
+    assert ok(lan.post("/mcp/memory/mcp", headers=bearer(key))) is memory_ok
+    assert ok(lan.post("/mcp/admin/mcp", headers=bearer(key))) is admin_ok
+    assert lan.get("/api/slots", headers=bearer(key)).status_code == 403
+    assert lan.get("/api/settings", headers=bearer(key)).status_code == 403
+    assert lan.post("/v1/chat/completions", headers=bearer(key)).status_code == 403
+    assert lan.get("/api/health", headers=bearer(key)).status_code == 200
     assert lan.get("/api/bridge/me").status_code == 401
+
+
+@pytest.mark.parametrize(("scopes", "memory_ok", "admin_ok"), _SCOPE_MATRIX)
+def test_lan_peer_with_auth_on(
+    monkeypatch: pytest.MonkeyPatch,
+    store: BridgeStore,
+    auth_on: None,
+    scopes: tuple[str, ...],
+    memory_ok: bool,
+    admin_ok: bool,
+) -> None:
+    """Auth on, from a LAN peer: the same answers as from loopback, for every scope set."""
+    monkeypatch.setenv("HAL0_BIND_HOST", "0.0.0.0")
+    _, key = store.add_client("cc", created_by="t", scopes=scopes)
+    lan = _client(peer="203.0.113.5")
+    assert ok(lan.get("/api/bridge/me", headers=bearer(key)))
+    assert ok(lan.post("/mcp/agents/mcp", headers=bearer(key)))
+    assert ok(lan.post("/mcp/memory/mcp", headers=bearer(key))) is memory_ok
+    assert ok(lan.post("/mcp/admin/mcp", headers=bearer(key))) is admin_ok
+    assert lan.get("/api/slots", headers=bearer(key)).status_code == 403
+    assert lan.post("/v1/chat/completions", headers=bearer(key)).status_code == 403
 
 
 # ---------------------------------------------------------------------------
 # Middleware, auth on
 
 
-@pytest.mark.parametrize(
-    ("scopes", "memory_ok", "admin_ok"),
-    [
-        (("agents",), False, False),
-        (("agents", "memory"), True, False),
-        (("agents", "admin"), False, True),
-        (("agents", "memory", "admin"), True, True),
-    ],
-)
+@pytest.mark.parametrize(("scopes", "memory_ok", "admin_ok"), _SCOPE_MATRIX)
 def test_middleware_matrix_auth_on(
     app_auth_on: TestClient,
     store: BridgeStore,
@@ -479,27 +559,31 @@ def test_real_app_refuses_bridge_key_outside_scope(
 def test_memory_identity_is_key_bound(key_with_memory: str) -> None:
     # X-hal0-Agent: hermes is ignored for a bridge principal.
     cid = client_id_resolver_under(
-        request_with(bearer=key_with_memory, headers={"X-hal0-Agent": "hermes"})
+        judged_request(bearer=key_with_memory, headers={"X-hal0-Agent": "hermes"})
     )
     assert cid == "cc"
 
 
 def test_memory_identity_without_a_bridge_key_reads_the_header(store: BridgeStore) -> None:
-    assert client_id_resolver_under(request_with(headers={"X-hal0-Agent": "hermes"})) == "hermes"
+    assert client_id_resolver_under(judged_request(headers={"X-hal0-Agent": "hermes"})) == "hermes"
 
 
 def test_revoked_key_loses_its_identity(store: BridgeStore, key_with_memory: str) -> None:
+    """A revoked key is never the header's claim, though dev-open still lets the call through."""
     store.revoke_client("cc")
-    request = request_with(bearer=key_with_memory, headers={"X-hal0-Agent": "hermes"})
-    assert client_id_resolver_under(request) == "hermes"
-    assert client_id_resolver_under(request_with(bearer=key_with_memory)) == "anonymous"
+    request = judged_request(bearer=key_with_memory, headers={"X-hal0-Agent": "hermes"})
+    assert client_id_resolver_under(request) == "anonymous"
+    assert bearer_resolver_under(request) == (None, "anonymous")
+    assert client_id_resolver_under(judged_request(bearer=key_with_memory)) == "anonymous"
 
 
 def test_admin_scope_calls_rest_as_service(
     key_with_admin: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("HAL0_ADMIN_KEY", "adminsecret")
-    bearer_, label = bearer_resolver_under(request_with(bearer=key_with_admin))
+    bearer_, label = bearer_resolver_under(
+        judged_request(bearer=key_with_admin, path="/mcp/admin/mcp")
+    )
     assert (bearer_, label) == ("adminsecret", "bridge:cc")
 
 
@@ -507,9 +591,114 @@ def test_memory_scope_never_gets_the_service_key(
     key_with_memory: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("HAL0_ADMIN_KEY", "adminsecret")
-    bearer_, label = bearer_resolver_under(request_with(bearer=key_with_memory))
+    bearer_, label = bearer_resolver_under(judged_request(bearer=key_with_memory))
     assert bearer_ == key_with_memory
     assert label == mcp_mount._bearer_label(key_with_memory)
+
+
+@pytest.mark.parametrize("posture", ["auth_off", "auth_on"])
+def test_store_error_never_falls_back_to_the_header(
+    request: pytest.FixtureRequest,
+    store: BridgeStore,
+    key_with_memory: str,
+    monkeypatch: pytest.MonkeyPatch,
+    posture: str,
+) -> None:
+    """I1: a key that cannot be verified (locked store) is anonymous, not ``X-hal0-Agent``.
+
+    Before the fix a memory-scope key landed a private write in ``private:hermes``
+    whenever the store errored or a revoke raced the request.
+    """
+    import sqlite3
+
+    request.getfixturevalue(posture)
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "adminsecret")
+
+    def _locked(_key: str) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(store, "verify_key", _locked)
+    judged = judged_request(bearer=key_with_memory, headers={"X-hal0-Agent": "hermes"})
+    assert client_id_resolver_under(judged) == "anonymous"
+    assert bearer_resolver_under(judged) == (None, "anonymous")
+    # Nor does a request the middleware never judged (no stored principal at all).
+    unjudged = request_with(bearer=key_with_memory, headers={"X-hal0-Agent": "hermes"})
+    assert client_id_resolver_under(unjudged) == "anonymous"
+    assert bearer_resolver_under(unjudged) == (None, "anonymous")
+
+
+def test_resolvers_read_the_judged_principal_without_verifying_again(
+    store: BridgeStore, key_with_admin: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I1: the middleware's verify is the only one; the resolvers read what it stored."""
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "adminsecret")
+    judged = judged_request(bearer=key_with_admin, path="/mcp/admin/mcp")
+    stored = judged.scope[auth_mod.BRIDGE_PRINCIPAL_SCOPE_KEY]
+    assert (stored.tier, stored.name) == ("bridge", "cc")
+
+    def _no_second_verify(_key: str) -> None:
+        raise AssertionError("a resolver verified the bridge key again")
+
+    monkeypatch.setattr(store, "verify_key", _no_second_verify)
+    assert client_id_resolver_under(judged) == "cc"
+    assert bearer_resolver_under(judged) == ("adminsecret", "bridge:cc")
+    assert auth_mod.judged_principal(judged) is stored
+
+
+def test_still_admitted_verifies_live_not_from_the_stored_principal(
+    store: BridgeStore, key: str, auth_on: None
+) -> None:
+    """I1 (4): revocation ends an open stream even though its scope holds a judged principal."""
+    judged = judged_request(bearer=key, path="/mcp/agents/mcp")
+    assert auth_mod.BRIDGE_PRINCIPAL_SCOPE_KEY in judged.scope
+    assert auth_mod._still_admitted(AuthClass.BRIDGE, judged.scope) is True
+    store.revoke_client("cc")
+    assert auth_mod._still_admitted(AuthClass.BRIDGE, judged.scope) is False
+
+
+def test_middleware_stores_no_principal_for_other_tiers(store: BridgeStore, auth_on: None) -> None:
+    judged = judged_request(bearer=ADMIN_KEY, path="/api/slots")
+    assert auth_mod.BRIDGE_PRINCIPAL_SCOPE_KEY not in judged.scope
+
+
+@pytest.mark.parametrize(
+    "credential",
+    [
+        {"headers": {"authorization": f"Bearer {ADMIN_KEY}"}},
+        {"headers": {"authorization": f"Bearer {CLIENT_KEY}"}},
+        {"headers": {"authorization": "Bearer some-other-token"}},
+        {"headers": {"authorization": "Basic aGFsMGJrX2NjLng="}},
+        {"query": "api_key=hal0bk_cc.via-query"},
+        {"query": f"api_key={ADMIN_KEY}"},
+    ],
+)
+def test_a_non_bridge_bearer_never_touches_the_store(
+    store: BridgeStore, monkeypatch: pytest.MonkeyPatch, auth_on: None, credential: dict[str, Any]
+) -> None:
+    """I1 (7): only a ``hal0bk_`` bearer costs a store read."""
+
+    def _never(_key: str) -> None:
+        raise AssertionError("verify_key called for a non-bridge credential")
+
+    monkeypatch.setattr(store, "verify_key", _never)
+    monkeypatch.setattr(auth_mod, "bridge_store", lambda: pytest.fail("store opened"))
+    resolve_principal(_scope(**credential))
+    headers = credential.get("headers", {})
+    path = "/api/slots" + (f"?{credential['query']}" if "query" in credential else "")
+    for method, target in [("GET", path), ("POST", "/mcp/memory/mcp"), ("GET", "/api/bridge/me")]:
+        _client().request(method, target, headers=headers)
+
+
+def test_bearer_parsing_is_shared() -> None:
+    """I1 (6): one parser decides what bearer a request carries, for every caller."""
+    assert auth_mod.bearer_token({"authorization": "Bearer  hal0bk_cc.x "}) == "hal0bk_cc.x"
+    assert auth_mod.bearer_token({"authorization": "bearer hal0bk_cc.x"}) == "hal0bk_cc.x"
+    assert auth_mod.bearer_token({"authorization": "Basic abc"}) is None
+    assert auth_mod.bearer_token({}) is None
+    assert auth_mod.bears_bridge_key(_scope(headers=bearer("hal0bk_cc.x"))) is True
+    assert auth_mod.bears_bridge_key(_scope(headers=bearer(ADMIN_KEY))) is False
+    request = request_with(bearer="hal0bk_cc.x")
+    assert mcp_mount._resolve_bearer(request) == "hal0bk_cc.x"
 
 
 def test_admin_bearer_resolver_unchanged_for_box_keys(
@@ -535,3 +724,48 @@ def test_middleware_runs_off_the_event_loop_thread_safely(store: BridgeStore, ke
         )
 
     assert asyncio.run(_both()) == [True] * 8
+
+
+# ---------------------------------------------------------------------------
+# [bridge].enabled = false (C1)
+
+
+def test_disabled_bridge_verifies_no_key_and_opens_no_store(
+    store: BridgeStore,
+    key_with_admin: str,
+    monkeypatch: pytest.MonkeyPatch,
+    auth_on: None,
+    bridge_disabled: None,
+) -> None:
+    """C1: a key minted while enabled opens nothing once the bridge is off."""
+    monkeypatch.setattr(auth_mod, "bridge_store", lambda: pytest.fail("store opened"))
+    _, both = store.add_client("both", created_by="t", scopes=("memory", "admin"))
+    for key_ in (key_with_admin, both):
+        assert resolve_principal(_scope(headers=bearer(key_))).tier == "anon"
+        for method, path in [
+            ("POST", "/mcp/admin/mcp"),
+            ("POST", "/mcp/memory/mcp"),
+            ("POST", "/mcp/agents/mcp"),
+            ("GET", "/api/bridge/me"),
+        ]:
+            assert _client().request(method, path, headers=bearer(key_)).status_code == 401
+
+
+def test_disabled_bridge_key_is_anonymous_to_the_mcp_resolvers(
+    store: BridgeStore,
+    key_with_memory: str,
+    monkeypatch: pytest.MonkeyPatch,
+    bridge_disabled: None,
+) -> None:
+    """Dev-open still waves the request through as anon, but never as the header's claim."""
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "adminsecret")
+    judged = judged_request(bearer=key_with_memory, headers={"X-hal0-Agent": "hermes"})
+    assert client_id_resolver_under(judged) == "anonymous"
+    assert bearer_resolver_under(judged) == (None, "anonymous")
+
+
+def test_set_bridge_enabled_records_the_boot_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    auth_mod.set_bridge_enabled(False)
+    assert auth_mod.bridge_enabled() is False
+    auth_mod.set_bridge_enabled(True)
+    assert auth_mod.bridge_enabled() is True

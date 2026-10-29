@@ -36,7 +36,7 @@ import structlog
 from starlette.requests import Request
 from starlette.types import ASGIApp
 
-from hal0.api.auth import resolve_principal_from_scope
+from hal0.api.auth import bearer_token, bears_bridge_key, judged_principal
 from hal0.service_identity import service_key
 
 log = structlog.get_logger("hal0.api.mcp_mount")
@@ -61,14 +61,12 @@ _LOCALHOST_ORIGINS = ("http://127.0.0.1:*", "http://localhost:*", "http://[::1]:
 
 
 def _resolve_bearer(request: Request) -> str | None:
-    """Extract a bearer token from the Authorization header, if present."""
-    raw = request.headers.get("authorization") or request.headers.get("Authorization")
-    if not raw:
-        return None
-    parts = raw.strip().split(None, 1)
-    if len(parts) != 2 or parts[0].lower() != "bearer":
-        return None
-    return parts[1].strip() or None
+    """Extract a bearer token from the Authorization header, if present.
+
+    Parsed by :func:`hal0.api.auth.bearer_token`, the auth gate's own parser,
+    so this mount never reads a bearer the gate did not see.
+    """
+    return bearer_token(request.headers) or None
 
 
 def _mcp_transport_security():
@@ -181,14 +179,20 @@ def bearer_resolver() -> tuple[str | None, str]:
     A bridge client holding the ``admin`` scope (ADR-0043) gets the box's
     own admin key as element 0, because its bridge key opens no ``/api/*``
     route the admin tools call, and ``bridge:<name>`` as element 1, so the
-    audit trail names the client rather than the service key.
+    audit trail names the client rather than the service key. The bridge
+    principal is the one the auth middleware judged and stored on the request
+    (:func:`hal0.api.auth.judged_principal`); the key is never verified again
+    here. A bridge-shaped bearer without one gets ``(None, "anonymous")``:
+    never the service key, and never the bridge key forwarded as a bearer.
     """
     request = _current_mcp_request()
     if request is None:
         return None, "anonymous"
-    principal = resolve_principal_from_scope(request)
+    principal = judged_principal(request)
     if principal.tier == "bridge" and "admin" in principal.scopes:
         return service_key(prefer="admin"), f"bridge:{principal.name}"
+    if principal.tier != "bridge" and bears_bridge_key(request):
+        return None, "anonymous"
     bearer = _resolve_bearer(request)
     return bearer, _bearer_label(bearer) if bearer else "anonymous"
 
@@ -213,14 +217,20 @@ def client_id_resolver() -> str:
 
     A request carrying a bridge client key (ADR-0043) is the exception: its
     identity is the client's name, bound to the key, and the header is
-    ignored, so a bridge client cannot write as another agent.
+    ignored, so a bridge client cannot write as another agent. The name comes
+    from the principal the auth middleware judged and stored on the request
+    (:func:`hal0.api.auth.judged_principal`), not from a second verify. A
+    bridge-shaped bearer without one (a revoke race, a store error, a disabled
+    bridge on a dev-open box) is ``"anonymous"``, never the header's claim.
     """
     request = _current_mcp_request()
     if request is None:
         return "anonymous"
-    principal = resolve_principal_from_scope(request)
+    principal = judged_principal(request)
     if principal.tier == "bridge" and principal.name:
         return principal.name
+    if bears_bridge_key(request):
+        return "anonymous"
     raw = request.headers.get(_AGENT_HEADER)
     if raw is None:
         return "anonymous"

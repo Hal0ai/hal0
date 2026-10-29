@@ -49,10 +49,6 @@ console = Console()
 
 _CLIENTS = "/api/bridge/clients"
 
-#: Scopes a new client gets when ``--scope`` is not given. The server always
-#: adds ``agents`` on top, so this is the "agents + memory" pair spelled out.
-_DEFAULT_SCOPES = ["agents", "memory"]
-
 _DISABLED_CODE = "bridge.disabled"
 _DISABLED_MESSAGE = (
     "The agent bridge is disabled: set [bridge] enabled = true in /etc/hal0/hal0.toml "
@@ -117,9 +113,17 @@ def _print_minted(result: dict[str, Any]) -> None:
     for line in lines:
         # A "# label" comment keeps the whole block pasteable into a shell, and
         # soft_wrap keeps each command on one physical line (rich would otherwise
-        # insert newlines at the terminal width and break the pasted command).
+        # insert newlines at the terminal width and break the pasted command), and
+        # emoji=False keeps an IPv6 host intact: rich reads ":100:" in
+        # "[fd00:100:1234::100:5]" as an emoji code.
         console.print(Text(f"# {line.get('server', '')}"), highlight=False)
-        console.print(str(line["claude_mcp_add"]), soft_wrap=True, markup=False, highlight=False)
+        console.print(
+            str(line["claude_mcp_add"]),
+            soft_wrap=True,
+            markup=False,
+            highlight=False,
+            emoji=False,
+        )
     if any(line.get("server") == _ADMIN_SERVER for line in lines):
         console.print()
         console.print(_ADMIN_WARNING, style="yellow", soft_wrap=True)
@@ -137,7 +141,11 @@ def add_cmd(
     ),
 ) -> None:
     """Mint a key for a remote agent and print how to connect it."""
-    body = {"name": name, "note": note, "scopes": list(scope) if scope else _DEFAULT_SCOPES}
+    # No --scope leaves ``scopes`` out, so the server's default set applies
+    # (hal0.bridge.keys.DEFAULT_SCOPES) and this command never restates it.
+    body: dict[str, Any] = {"name": name, "note": note}
+    if scope:
+        body["scopes"] = list(scope)
     _print_minted(_call(lambda: api_post(_CLIENTS, json=body)))
 
 

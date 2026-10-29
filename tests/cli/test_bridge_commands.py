@@ -90,7 +90,9 @@ class FakeApi:
     def post(self, path: str, *, json: Any = None, **_kw: Any) -> Any:
         self.calls.append(("POST", path, json))
         if path == "/api/bridge/clients":
-            scopes = ["agents", *[s for s in json["scopes"] if s != "agents"]]
+            # Like the store: no ``scopes`` in the body means the default set.
+            asked = json.get("scopes", ["agents", "memory"])
+            scopes = ["agents", *[s for s in asked if s != "agents"]]
             return _minted(json["name"], scopes, json["note"])
         name = path.removeprefix("/api/bridge/clients/").removesuffix("/rotate")
         if name not in self.existing:
@@ -155,7 +157,8 @@ def test_add_prints_key_once_and_onboarding(fake_api: FakeApi) -> None:
         (
             "POST",
             "/api/bridge/clients",
-            {"name": "claude-code", "note": "devops", "scopes": ["agents", "memory"]},
+            # No --scope: the body leaves scopes out and the server's default applies.
+            {"name": "claude-code", "note": "devops"},
         )
     ]
 
@@ -166,6 +169,22 @@ def test_add_prints_each_line_verbatim_unwrapped(fake_api: FakeApi) -> None:
     for line in _minted("claude-code", ["agents", "memory"])["onboarding"]["lines"]:
         # One physical line each: wrapping would break the pasted command.
         assert line["claude_mcp_add"] in res.stdout.splitlines()
+
+
+def test_add_prints_an_ipv6_url_intact(fake_api: FakeApi, monkeypatch: pytest.MonkeyPatch) -> None:
+    """rich would read ":100:" in "[fd00:100:1234::100:5]" as the 💯 emoji code."""
+    url = "http://[fd00:100:1234::100:5]:8080/mcp/agents/mcp"
+    minted = _minted("cc", ["agents"])
+    line = minted["onboarding"]["lines"][0]
+    line["mcp_url"] = url
+    line["claude_mcp_add"] = (
+        f'claude mcp add --transport http hal0-agents {url} --header "Authorization: Bearer k"'
+    )
+    monkeypatch.setattr(bridge_commands, "api_post", lambda *_a, **_kw: minted)
+    res = runner.invoke(app, ["bridge", "add", "cc"])
+    assert res.exit_code == 0, res.output
+    assert line["claude_mcp_add"] in res.stdout.splitlines()
+    assert "\N{HUNDRED POINTS SYMBOL}" not in res.stdout
 
 
 def test_add_admin_scope_prints_warning_and_line(fake_api: FakeApi) -> None:

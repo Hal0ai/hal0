@@ -8,9 +8,12 @@ and the file is created owner-only because it carries credential hashes.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -148,7 +151,18 @@ def test_list_and_as_dict(store: BridgeStore) -> None:
 
 
 @pytest.mark.parametrize(
-    "name", ["hermes", "pi", "admin", "anonymous", "hal0", "hal0-cli", "shared", "hermes__scout"]
+    "name",
+    [
+        "hermes",
+        "pi",
+        "admin",
+        "anonymous",
+        "hal0",
+        "hal0-cli",
+        "hal0-doctor",
+        "shared",
+        "hermes__scout",
+    ],
 )
 def test_reserved_names_are_refused(store: BridgeStore, name: str) -> None:
     """The bridge identity is the bare client name; a reserved one aliases a built-in's memory."""
@@ -157,3 +171,75 @@ def test_reserved_names_are_refused(store: BridgeStore, name: str) -> None:
     assert refused.value.code == "bridge.invalid_name"
     assert "reserved name" in refused.value.message
     assert store.list_clients() == []
+
+
+class _Clock:
+    """A settable ``time.time`` for the store module."""
+
+    def __init__(self, now: float) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_verify_stamps_last_seen_at_most_once_a_minute(
+    store: BridgeStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0043: the per-request verify is a read; ``last_seen_at`` moves at most every 60 s."""
+    from hal0.bridge import store as store_mod
+
+    clock = _Clock(1_800_000_000.0)
+    monkeypatch.setattr(store_mod, "time", SimpleNamespace(time=clock))
+    _row, key = store.add_client("cc", created_by="t")
+
+    first = store.verify_key(key)
+    assert first is not None and first.last_seen_at == clock.now
+
+    # Within the window: the row comes back as read and no UPDATE runs.
+    updates: list[str] = []
+    real_connect = store_mod.connect
+
+    @contextlib.contextmanager
+    def _tracing_connect(path: Path) -> Iterator[sqlite3.Connection]:
+        with real_connect(path) as conn:
+            conn.set_trace_callback(
+                lambda sql: (
+                    updates.append(sql) if sql.lstrip().upper().startswith("UPDATE") else None
+                )
+            )
+            yield conn
+
+    monkeypatch.setattr(store_mod, "connect", _tracing_connect)
+    clock.now += store_mod.LAST_SEEN_RESOLUTION_S - 1
+    fresh = store.verify_key(key)
+    assert fresh is not None and fresh.last_seen_at == first.last_seen_at
+    assert updates == []
+
+    # Past the window: one UPDATE, and the row reflects it.
+    clock.now += 2
+    stale = store.verify_key(key)
+    assert stale is not None and stale.last_seen_at == clock.now
+    assert len(updates) == 1
+
+
+def test_verify_fast_path_still_refuses_a_revoked_key(store: BridgeStore) -> None:
+    _row, key = store.add_client("cc", created_by="t")
+    assert store.verify_key(key) is not None
+    store.revoke_client("cc")
+    assert store.verify_key(key) is None
+
+
+def test_verify_restamps_after_a_clock_step_backwards(
+    store: BridgeStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``last_seen_at`` in the future (the clock stepped back) is stale, not fresh forever."""
+    from hal0.bridge import store as store_mod
+
+    clock = _Clock(1_800_000_000.0)
+    monkeypatch.setattr(store_mod, "time", SimpleNamespace(time=clock))
+    _row, key = store.add_client("cc", created_by="t")
+    store.verify_key(key)
+    clock.now -= 3600
+    again = store.verify_key(key)
+    assert again is not None and again.last_seen_at == clock.now

@@ -30,7 +30,9 @@ _MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 #: Owner read/write only: the file carries key hashes and run text.
 _DB_MODE = 0o600
 
-_DEFAULT_SCOPES: tuple[str, ...] = ("agents", "memory")
+#: ``last_seen_at`` is stamped at most this often per client (seconds), so
+#: verifying a key on every request is a read, not a write.
+LAST_SEEN_RESOLUTION_S = 60.0
 
 _CLIENT_COLUMNS = "name, created_at, created_by, revoked_at, last_seen_at, note, scopes"
 
@@ -148,7 +150,7 @@ class BridgeStore:
         name: str,
         created_by: str,
         note: str = "",
-        scopes: Iterable[str] = _DEFAULT_SCOPES,
+        scopes: Iterable[str] = keys.DEFAULT_SCOPES,
     ) -> tuple[ClientRow, str]:
         """Add a client; return ``(row, plaintext key)``.
 
@@ -175,28 +177,40 @@ class BridgeStore:
         """Return the live client that ``key`` belongs to, or None.
 
         None for a malformed key, an unknown or revoked key, and a key whose
-        embedded name is not the name on the row its hash matches. A hit bumps
-        ``last_seen_at`` and returns the row as it is after the bump.
+        embedded name is not the name on the row its hash matches. The lookup
+        is one indexed read on the sha256 of the key; matching a hash replaces
+        a constant-time compare, since the digest of a guessed key tells a
+        timing observer nothing about the stored one.
+
+        A hit stamps ``last_seen_at``, but at most once every
+        :data:`LAST_SEEN_RESOLUTION_S`: a fresher stamp is returned as read,
+        so the per-request check stays a read and takes no write lock. A
+        stale one is bumped and the row returned as it is after the bump.
         """
         name = keys.name_of(key)
         if name is None:
             return None
         digest = keys.hash_key(key)
         with connect(self.path) as conn:
-            # Read first so keys that match nothing never take the write lock.
-            hit = conn.execute(
-                "SELECT 1 FROM clients WHERE key_hash = ? AND name = ? AND revoked_at IS NULL",
+            row = conn.execute(
+                f"SELECT {_CLIENT_COLUMNS} FROM clients "
+                "WHERE key_hash = ? AND name = ? AND revoked_at IS NULL",
                 (digest, name),
             ).fetchone()
-            if hit is None:
+            if row is None:
                 return None
+            client = _client_from_row(row)
+            now = time.time()
+            seen = client.last_seen_at
+            if seen is not None and 0 <= now - seen < LAST_SEEN_RESOLUTION_S:
+                return client
             with tx(conn):
                 # Match again under the write lock: a revoke or rotate may have
                 # landed since the read, and it must not be answered with a row.
                 updated = conn.execute(
                     "UPDATE clients SET last_seen_at = ? "
                     "WHERE key_hash = ? AND name = ? AND revoked_at IS NULL",
-                    (time.time(), digest, name),
+                    (now, digest, name),
                 )
                 if updated.rowcount == 0:
                     return None

@@ -1393,18 +1393,27 @@ async def _boot_hermes_upstreams(app: FastAPI, ctx: BootState) -> None:
 
 
 async def _boot_bridge_store(app: FastAPI, ctx: BootState) -> None:
-    """Phase — open the agent bridge's client store (non-fatal; ADR-0043).
+    """Phase — record ``[bridge].enabled`` and open the bridge's client store (ADR-0043).
 
-    Publishes ``app.state.bridge_store`` for the ``/api/bridge/*`` routes. It is
-    the same process-wide instance the auth middleware verifies keys against
-    (:func:`hal0.api.auth.bridge_store`), so a row a route writes is honoured on
-    the next request. ``None`` when ``[bridge].enabled`` is false (the file is
-    not even created) or when ``bridge.db`` cannot be opened: the routes then
-    answer 503 ``bridge.store_unavailable`` and bridge keys do not verify, but
-    the rest of hal0 boots.
+    Non-fatal. Records ``enabled`` on the auth module first
+    (:func:`hal0.api.auth.set_bridge_enabled`), the one place the gate and the
+    ``/api/bridge/*`` routes read it, so it is the value this process booted
+    with until the next restart. Publishes ``app.state.bridge_store``: the same
+    process-wide instance the auth middleware verifies keys against
+    (:func:`hal0.api.auth.bridge_store`), so a row a route writes is honoured
+    on the next request.
+
+    Enabled, the store is created if needed and migrated. Disabled, no bridge
+    key verifies and ``bridge.db`` is never created; a file that already exists
+    is still opened, so the operator can list and revoke clients while the
+    bridge is off. ``app.state.bridge_store`` is ``None`` when the bridge is off
+    and there is no file, or when ``bridge.db`` cannot be opened: the routes
+    then answer 503 ``bridge.store_unavailable`` (or an empty list while off)
+    and bridge keys do not verify, but the rest of hal0 boots.
     """
     from hal0.api import auth as auth_module
     from hal0.bridge.store import BridgeStore
+    from hal0.config import paths
 
     def _open() -> BridgeStore:
         store = auth_module.bridge_store()
@@ -1414,10 +1423,14 @@ async def _boot_bridge_store(app: FastAPI, ctx: BootState) -> None:
         return store
 
     app.state.bridge_store = None
+    enabled = bool(ctx.hal0_config.bridge.enabled)
+    auth_module.set_bridge_enabled(enabled)
     try:
-        if not ctx.hal0_config.bridge.enabled:
-            log.info("api.boot.bridge_disabled")
-            return
+        if not enabled:
+            present = await asyncio.to_thread(paths.bridge_db().exists)
+            log.info("api.boot.bridge_disabled", store_present=present)
+            if not present:
+                return
         app.state.bridge_store = await asyncio.to_thread(_open)
     except Exception as exc:
         log.warning("hal0.bridge.store_unavailable", error=f"{type(exc).__name__}: {exc}")

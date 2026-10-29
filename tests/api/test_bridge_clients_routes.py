@@ -135,23 +135,6 @@ def test_create_response_shape(admin_client: TestClient) -> None:
         )
 
 
-def test_created_by_names_the_bridge_caller(
-    admin_client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A non-admin caller is recorded as ``api:bridge:<name>`` (the routes are ADMIN class today)."""
-    from hal0.api.routes import bridge as bridge_routes
-
-    monkeypatch.setattr(
-        bridge_routes,
-        "resolve_principal_from_scope",
-        lambda _request: auth_mod.AuthPrincipal(
-            tier="bridge", source="bearer", name="cc", scopes=frozenset({"agents"})
-        ),
-    )
-    created = admin_client.post("/api/bridge/clients", json={"name": "child"}).json()
-    assert created["client"]["created_by"] == "api:bridge:cc"
-
-
 def test_create_defaults_to_agents_and_memory(admin_client: TestClient) -> None:
     body = admin_client.post("/api/bridge/clients", json={"name": "dflt"}).json()
     assert body["client"]["scopes"] == ["agents", "memory"]
@@ -212,7 +195,17 @@ def test_unknown_scope_is_the_bridge_422_not_the_pydantic_shape(admin_client: Te
 
 @pytest.mark.parametrize(
     "name",
-    ["hermes", "pi", "admin", "anonymous", "hal0", "hal0-cli", "shared", "hermes__scout"],
+    [
+        "hermes",
+        "pi",
+        "admin",
+        "anonymous",
+        "hal0",
+        "hal0-cli",
+        "hal0-doctor",
+        "shared",
+        "hermes__scout",
+    ],
 )
 def test_reserved_names_are_422(admin_client: TestClient, name: str) -> None:
     """A bridge identity is the bare client name; it must not alias a bundled agent's memory."""
@@ -319,6 +312,62 @@ def test_onboarding_prefers_the_configured_public_url(admin_client: TestClient) 
     assert body["onboarding"]["lines"][0]["mcp_url"] == "https://hal0.example.com/mcp/agents/mcp"
 
 
+@pytest.mark.parametrize("host", ["127.0.0.1:8080", "localhost:8080", "[::1]:8080", "127.0.1.1"])
+def test_onboarding_from_loopback_names_the_lan_address(
+    admin_client: TestClient, monkeypatch: pytest.MonkeyPatch, host: str
+) -> None:
+    """I2: ``hal0 bridge add`` calls 127.0.0.1; the lines are for another machine."""
+    from hal0.config import network
+
+    monkeypatch.setattr(network, "detect_lan_ips", lambda: ["192.0.2.10", "198.51.100.7"])
+    body = admin_client.post("/api/bridge/clients", json={"name": "cc"}, headers={"host": host})
+    lines = body.json()["onboarding"]["lines"]
+    assert [line["mcp_url"] for line in lines] == [
+        "http://192.0.2.10:8080/mcp/agents/mcp",
+        "http://192.0.2.10:8080/mcp/memory/mcp",
+    ]
+
+
+def test_onboarding_from_loopback_without_a_lan_address_keeps_loopback(
+    admin_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hal0.config import network
+
+    monkeypatch.setattr(network, "detect_lan_ips", lambda: [])
+    body = admin_client.post(
+        "/api/bridge/clients", json={"name": "cc"}, headers={"host": "127.0.0.1:8080"}
+    ).json()
+    assert body["onboarding"]["lines"][0]["mcp_url"] == "http://127.0.0.1:8080/mcp/agents/mcp"
+
+
+def test_onboarding_public_url_beats_the_lan_address(
+    admin_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hal0.config import network
+
+    monkeypatch.setattr(network, "detect_lan_ips", lambda: ["192.0.2.10"])
+    _write_hal0_toml('[network]\npublic_url = "https://hal0.example.com"\n')
+    body = admin_client.post(
+        "/api/bridge/clients", json={"name": "cc"}, headers={"host": "127.0.0.1:8080"}
+    ).json()
+    assert body["onboarding"]["lines"][0]["mcp_url"] == "https://hal0.example.com/mcp/agents/mcp"
+
+
+def test_onboarding_brackets_an_ipv6_request_host(
+    admin_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hal0.config import network
+
+    monkeypatch.setattr(network, "detect_lan_ips", lambda: pytest.fail("not a loopback host"))
+    body = admin_client.post(
+        "/api/bridge/clients", json={"name": "cc"}, headers={"host": "[fd00:100:1234::100:5]:8080"}
+    ).json()
+    assert (
+        body["onboarding"]["lines"][0]["mcp_url"]
+        == "http://[fd00:100:1234::100:5]:8080/mcp/agents/mcp"
+    )
+
+
 def test_rotate_returns_onboarding_lines_for_the_current_scopes(admin_client: TestClient) -> None:
     admin_client.post("/api/bridge/clients", json={"name": "cc", "scopes": ["admin"]})
     rotated = admin_client.post("/api/bridge/clients/cc/rotate")
@@ -371,6 +420,24 @@ def test_me_servers_follow_the_scopes(admin_client: TestClient) -> None:
     assert me["scopes"] == ["agents"] and me["servers"] == ["hal0-agents"]
 
 
+def test_me_verifies_the_key_exactly_once(
+    admin_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I1: the middleware verifies; ``GET /me`` reads the principal it stored."""
+    key = admin_client.post("/api/bridge/clients", json={"name": "cc"}).json()["key"]
+    store = auth_mod.bridge_store()
+    calls: list[str] = []
+    real = store.verify_key
+
+    def _counted(candidate: str) -> Any:
+        calls.append(candidate)
+        return real(candidate)
+
+    monkeypatch.setattr(store, "verify_key", _counted)
+    assert admin_client.get("/api/bridge/me", headers=bearer(key)).status_code == 200
+    assert calls == [key]
+
+
 def test_a_bridge_key_cannot_reach_the_client_routes(admin_client: TestClient) -> None:
     key = admin_client.post("/api/bridge/clients", json={"name": "cc"}).json()["key"]
     assert admin_client.get("/api/bridge/clients", headers=bearer(key)).status_code == 403
@@ -386,25 +453,108 @@ def test_a_bridge_key_cannot_reach_the_client_routes(admin_client: TestClient) -
 # Disabled and unavailable
 
 
-_ROUTES: list[tuple[str, str, dict[str, Any] | None]] = [
-    ("GET", "/api/bridge/clients", None),
+#: Off while the bridge is disabled.
+_GATED: list[tuple[str, str, dict[str, Any] | None]] = [
     ("POST", "/api/bridge/clients", {"name": "cc"}),
-    ("DELETE", "/api/bridge/clients/cc", None),
     ("POST", "/api/bridge/clients/cc/rotate", None),
     ("PATCH", "/api/bridge/clients/cc", {"scopes": ["memory"]}),
     ("GET", "/api/bridge/me", None),
 ]
+#: Still on while the bridge is disabled, so the operator can clean up.
+_CLEANUP: list[tuple[str, str, dict[str, Any] | None]] = [
+    ("GET", "/api/bridge/clients", None),
+    ("DELETE", "/api/bridge/clients/cc", None),
+]
+_ROUTES = [*_GATED, *_CLEANUP]
 
 
-@pytest.mark.parametrize(("method", "path", "payload"), _ROUTES)
-def test_disabled_404(
-    disabled_client: TestClient, method: str, path: str, payload: dict[str, Any] | None
-) -> None:
-    r = disabled_client.request(method, path, json=payload)
-    assert r.status_code == 404
+def _assert_disabled(r: Any) -> None:
+    assert r.status_code == 404, r.text
     error = r.json()["error"]
     assert error["code"] == "bridge.disabled"
     assert error["message"] == "The agent bridge is disabled in [bridge] config."
+
+
+@pytest.mark.parametrize(("method", "path", "payload"), _GATED)
+def test_disabled_404(
+    disabled_client: TestClient, method: str, path: str, payload: dict[str, Any] | None
+) -> None:
+    _assert_disabled(disabled_client.request(method, path, json=payload))
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "payload"),
+    [
+        ("POST", "/api/bridge/clients", {}),
+        ("POST", "/api/bridge/clients", {"name": 5}),
+        ("POST", "/api/bridge/clients", {"name": "cc", "extra": True}),
+        ("PATCH", "/api/bridge/clients/cc", {}),
+        ("PATCH", "/api/bridge/clients/cc", {"scopes": "memory"}),
+    ],
+)
+def test_disabled_beats_body_validation(
+    disabled_client: TestClient, method: str, path: str, payload: dict[str, Any]
+) -> None:
+    """C1: the router-level check runs before pydantic, so a bad body is 404, not 422."""
+    _assert_disabled(disabled_client.request(method, path, json=payload))
+
+
+def test_disabled_without_a_store_lists_nothing_and_revokes_nothing(
+    disabled_client: TestClient,
+) -> None:
+    assert disabled_client.get("/api/bridge/clients").json() == {"items": []}
+    r = disabled_client.delete("/api/bridge/clients/cc")
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "bridge.client_not_found"
+    assert not paths.bridge_db().exists()
+
+
+def test_disabled_bridge_still_lists_and_revokes(revalidations: list[int]) -> None:
+    """C1: the operator can clean up while the bridge is off; the key opens nothing meanwhile."""
+    _write_hal0_toml("")
+    with TestClient(create_app(), headers=bearer(ADMIN_KEY)) as client:
+        key = client.post(
+            "/api/bridge/clients", json={"name": "cc", "scopes": ["memory", "admin"]}
+        ).json()["key"]
+        assert client.post("/mcp/memory/mcp", headers=bearer(key), json={}).status_code not in (
+            401,
+            403,
+        )
+    _write_hal0_toml("[bridge]\nenabled = false\n")
+    with TestClient(create_app(), headers=bearer(ADMIN_KEY)) as client:
+        assert client.app.state.bridge_store is not None  # type: ignore[attr-defined]
+        # The key no longer authenticates anywhere, the mounts included.
+        for method, path in [
+            ("POST", "/mcp/admin/mcp"),
+            ("POST", "/mcp/memory/mcp"),
+            ("GET", "/api/bridge/me"),
+        ]:
+            assert client.request(method, path, headers=bearer(key), json={}).status_code == 401
+        listed = client.get("/api/bridge/clients")
+        assert listed.status_code == 200
+        assert [c["name"] for c in listed.json()["items"]] == ["cc"]
+        revoked = client.delete("/api/bridge/clients/cc")
+        assert revoked.status_code == 200
+        assert revoked.json()["client"]["revoked_at"] is not None
+        assert revalidations
+    _write_hal0_toml("")
+    with TestClient(create_app(), headers=bearer(ADMIN_KEY)) as client:
+        assert client.get("/api/bridge/me", headers=bearer(key)).status_code == 401
+
+
+def test_disabled_bridge_never_creates_bridge_db() -> None:
+    """C1: a ``hal0bk_`` bearer on a disabled box does not create the store on its behalf."""
+    _write_hal0_toml("[bridge]\nenabled = false\n")
+    with TestClient(create_app()) as client:
+        for method, path in [
+            ("POST", "/mcp/memory/mcp"),
+            ("POST", "/mcp/admin/mcp"),
+            ("GET", "/api/bridge/me"),
+            ("GET", "/api/slots"),
+        ]:
+            r = client.request(method, path, headers=bearer("hal0bk_cc.forged"), json={})
+            assert r.status_code == 401
+    assert not paths.bridge_db().exists()
 
 
 def test_disabled_does_not_open_the_store(disabled_client: TestClient) -> None:
@@ -412,7 +562,9 @@ def test_disabled_does_not_open_the_store(disabled_client: TestClient) -> None:
     assert not paths.bridge_db().exists()
 
 
-@pytest.mark.parametrize(("method", "path", "payload"), _ROUTES[:5])
+@pytest.mark.parametrize(
+    ("method", "path", "payload"), [r for r in _ROUTES if r[1] != "/api/bridge/me"]
+)
 def test_store_unavailable_is_503(
     monkeypatch: pytest.MonkeyPatch, method: str, path: str, payload: dict[str, Any] | None
 ) -> None:

@@ -16,7 +16,8 @@ from __future__ import annotations
 import hashlib
 import re
 import secrets
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from types import MappingProxyType
 
 KEY_PREFIX = "hal0bk_"
 
@@ -24,22 +25,36 @@ KEY_PREFIX = "hal0bk_"
 # so a name can never swallow the key's separator.
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 
-# What a bridge client may be granted. ``agents`` (delegate to Hermes) is held
-# by every client; ``memory`` reaches the memory MCP server; ``admin`` reaches
-# the hal0 admin MCP server.
-SCOPES: frozenset[str] = frozenset({"agents", "memory", "admin"})
+#: What a bridge client may be granted, and the MCP server each scope opens:
+#: ``scope -> (server id, mount)``, in the order onboarding lines are printed.
+#: The one table of that mapping: the auth gate's scope prefixes
+#: (:data:`hal0.api.auth.BRIDGE_SCOPE_PREFIXES`) and the onboarding lines
+#: (:mod:`hal0.api.routes.bridge`) both derive from it. ``agents`` (delegate
+#: to Hermes) is held by every client; ``memory`` reaches the memory MCP
+#: server; ``admin`` reaches the hal0 admin MCP server.
+SCOPE_SERVERS: Mapping[str, tuple[str, str]] = MappingProxyType(
+    {
+        "agents": ("hal0-agents", "/mcp/agents"),
+        "memory": ("hal0-memory", "/mcp/memory"),
+        "admin": ("hal0-admin", "/mcp/admin"),
+    }
+)
+SCOPES: frozenset[str] = frozenset(SCOPE_SERVERS)
+
+#: The scopes a client gets when none are asked for (ADR-0043, Decision 4).
+#: The store applies it; the CLI and the REST body leave ``scopes`` out.
+DEFAULT_SCOPES: tuple[str, ...] = ("agents", "memory")
 
 # Names no client may take. A bridge principal's memory identity is the bare
 # client name, so a client called ``hermes`` would read and write the bundled
 # Hermes agent's private memory namespace, and ``shared`` or ``anonymous``
 # would alias the namespaces memory already treats specially. ``admin`` is the
-# name the operator's own credential reports on ``GET /api/bridge/me``;
-# ``hal0`` and ``hal0-cli`` are hal0's own callers. ``hermes__<profile>`` is a
-# Hermes profile's namespace.
-RESERVED_CLIENT_NAMES: frozenset[str] = frozenset(
-    {"hermes", "pi", "admin", "anonymous", "hal0", "hal0-cli", "shared"}
-)
-RESERVED_CLIENT_PREFIXES: tuple[str, ...] = ("hermes__",)
+# name the operator's own credential reports on ``GET /api/bridge/me``.
+# Every name starting ``hal0`` is hal0's own (``hal0``, ``hal0-cli``,
+# ``hal0-doctor``, and whatever caller it adds next), and ``hermes__<profile>``
+# is a Hermes profile's namespace.
+RESERVED_CLIENT_NAMES: frozenset[str] = frozenset({"hermes", "pi", "admin", "anonymous", "shared"})
+RESERVED_CLIENT_PREFIXES: tuple[str, ...] = ("hermes__", "hal0")
 
 
 def valid_name(name: str) -> bool:

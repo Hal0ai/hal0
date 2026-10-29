@@ -75,10 +75,11 @@ def test_normalize_scopes_rejects_unknown_scope() -> None:
 
 def test_reserved_names_cover_the_built_in_identities() -> None:
     """A client named like a bundled agent would alias that agent's memory namespace."""
-    assert frozenset({"hermes", "pi", "admin", "anonymous", "hal0", "hal0-cli", "shared"}) == (
+    assert frozenset({"hermes", "pi", "admin", "anonymous", "shared"}) == (
         keys.RESERVED_CLIENT_NAMES
     )
-    assert keys.RESERVED_CLIENT_PREFIXES == ("hermes__",)
+    # Every ``hal0*`` name is hal0's own caller (hal0, hal0-cli, hal0-doctor, ...).
+    assert keys.RESERVED_CLIENT_PREFIXES == ("hermes__", "hal0")
 
 
 @pytest.mark.parametrize(
@@ -86,8 +87,12 @@ def test_reserved_names_cover_the_built_in_identities() -> None:
     [
         ("hermes", True),
         ("hermes__scout", True),
+        ("hal0", True),
         ("hal0-cli", True),
+        ("hal0-doctor", True),
+        ("hal0_bot", True),
         ("shared", True),
+        ("myhal0", False),
         ("hermes2", False),
         ("hermes_scout", False),
         ("my-pi", False),
@@ -96,3 +101,16 @@ def test_reserved_names_cover_the_built_in_identities() -> None:
 )
 def test_is_reserved_name(name: str, reserved: bool) -> None:
     assert keys.is_reserved_name(name) is reserved
+
+
+def test_scope_table_is_the_one_owner_of_scopes_and_mounts() -> None:
+    """ADR-0043: one table maps each scope to its server and mount; the rest derive from it."""
+    from hal0.api import auth
+    from hal0.api.routes import bridge as bridge_routes
+
+    assert frozenset(keys.SCOPE_SERVERS) == keys.SCOPES
+    assert set(keys.DEFAULT_SCOPES) <= keys.SCOPES
+    assert dict(auth.BRIDGE_SCOPE_PREFIXES) == {
+        scope: mount for scope, (_server, mount) in keys.SCOPE_SERVERS.items() if scope != "agents"
+    }
+    assert list(keys.SCOPE_SERVERS) == bridge_routes._ADMIN_SCOPES
