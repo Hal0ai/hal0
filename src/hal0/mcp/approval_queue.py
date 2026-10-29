@@ -38,6 +38,14 @@ Design notes
   request was settled somewhere else (the run's approval was answered in
   Hermes, or the run ended), so the inbox stops offering a decision that
   can no longer apply and the dedup slot is free for the next request.
+
+* **Bounded history.** A resolved entry (executed, failed or denied) is
+  kept for the inbox's history, but only the newest
+  :data:`MAX_RESOLVED_ENTRIES` of them, by decision time; older ones are
+  dropped as new ones resolve. A bridge skill push carries its whole
+  reviewable content in ``args`` (up to 48 KiB, ADR-0043 decision 10), so an
+  unbounded history would grow with every push. Pending and still-executing
+  entries are never dropped.
 """
 
 from __future__ import annotations
@@ -58,6 +66,11 @@ log = structlog.get_logger("hal0.mcp.approvals")
 
 
 ApprovalState = Literal["pending", "approved", "denied", "executed", "failed"]
+
+#: Resolved entries kept for the inbox's history (see the module docstring).
+MAX_RESOLVED_ENTRIES = 200
+
+_RESOLVED_STATES: frozenset[str] = frozenset({"denied", "executed", "failed"})
 
 
 # Map of tool_name → arg name that uniquely identifies the operation.
@@ -155,8 +168,8 @@ class ApprovalEntry:
     # Stored separately from the dataclass-serialised payload — callers
     # must not see the bound executor through public API surface. Both are
     # released (set to None) once the entry is resolved, so a resolved row keeps
-    # only its small ``args``, never the closure an executor holds (ADR-0043:
-    # a pushed skill's executor holds up to ~4 MB of its content).
+    # only its ``args``, never the closure an executor holds (ADR-0043: a pushed
+    # skill's executor holds its content, up to 48 KiB).
     _executor: Callable[[dict[str, Any]], Awaitable[Any]] | None = field(
         default=None, repr=False, compare=False
     )
@@ -332,6 +345,7 @@ class ApprovalQueue:
             entry.state = "failed"
             entry.error = "no executor bound to approval"
             await self._emit(_Event(kind="failed", entry=entry.as_dict()))
+            self._prune_resolved()
             return entry.as_dict()
 
         try:
@@ -354,6 +368,7 @@ class ApprovalQueue:
                 error=entry.error,
             )
             await self._emit(_Event(kind="failed", entry=entry.as_dict()))
+        self._prune_resolved()
         return entry.as_dict()
 
     async def deny(self, approval_id: str) -> dict[str, Any]:
@@ -389,6 +404,7 @@ class ApprovalQueue:
                     tool=entry.tool,
                     error=entry.error,
                 )
+        self._prune_resolved()
         return entry.as_dict()
 
     async def withdraw(self, approval_id: str, reason: str) -> dict[str, Any] | None:
@@ -411,7 +427,22 @@ class ApprovalQueue:
 
         log.info("mcp.approval.withdrawn", approval_id=approval_id, tool=entry.tool)
         await self._emit(_Event(kind="failed", entry=entry.as_dict()))
+        self._prune_resolved()
         return entry.as_dict()
+
+    def _prune_resolved(self) -> None:
+        """Drop resolved entries beyond the newest :data:`MAX_RESOLVED_ENTRIES` (by decision time).
+
+        Synchronous, so it runs without an await between reading and deleting; a
+        pending or still-executing (``approved``) entry is never dropped.
+        """
+        resolved = [e for e in self._entries.values() if e.state in _RESOLVED_STATES]
+        excess = len(resolved) - MAX_RESOLVED_ENTRIES
+        if excess <= 0:
+            return
+        resolved.sort(key=lambda e: (e.decided_at or 0.0, e.enqueued_at))
+        for entry in resolved[:excess]:
+            self._entries.pop(entry.id, None)
 
     # ── SSE fan-out ────────────────────────────────────────────────────
 
@@ -459,6 +490,7 @@ class ApprovalQueue:
 
 
 __all__ = [
+    "MAX_RESOLVED_ENTRIES",
     "ApprovalEntry",
     "ApprovalQueue",
     "ApprovalState",

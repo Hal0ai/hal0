@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from hal0.mcp.approval_queue import ApprovalQueue
+from hal0.mcp.approval_queue import MAX_RESOLVED_ENTRIES, ApprovalQueue
 
 
 async def _noop_executor(args: dict[str, Any]) -> dict[str, Any]:
@@ -503,3 +503,33 @@ async def test_a_pending_entry_keeps_its_executor_until_decided() -> None:
     entry = q.get(aid)
     assert entry is not None and entry._executor is _noop_executor
     assert (await q.approve(aid))["state"] == "executed"  # and it still ran once
+
+
+@pytest.mark.asyncio
+async def test_resolved_entries_are_pruned_to_the_newest_two_hundred() -> None:
+    """A skill push carries up to 48 KiB in its args, so the resolved history is bounded."""
+    assert MAX_RESOLVED_ENTRIES == 200
+    q = ApprovalQueue()
+    pending = await q.enqueue(
+        tool="model_pull", args={"model_id": "keep-me"}, client_id="c", executor=_noop_executor
+    )
+    ids: list[str] = []
+    for n in range(MAX_RESOLVED_ENTRIES + 25):
+        aid = await q.enqueue(
+            tool="model_delete", args={"model_id": f"m{n}"}, client_id="c", executor=_noop_executor
+        )
+        ids.append(aid)
+        how = n % 3
+        if how == 0:
+            await q.approve(aid)
+        elif how == 1:
+            await q.deny(aid)
+        else:
+            await q.withdraw(aid, "settled elsewhere")
+    resolved = [e for e in q.list_all() if e["state"] != "pending"]
+    assert len(resolved) == MAX_RESOLVED_ENTRIES
+    # the oldest decisions went, the newest stayed
+    assert all(q.get(aid) is None for aid in ids[:25])
+    assert all(q.get(aid) is not None for aid in ids[25:])
+    # a pending entry is never pruned
+    assert [e["id"] for e in q.list_pending()] == [pending]

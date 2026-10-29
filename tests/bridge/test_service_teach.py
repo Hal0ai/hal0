@@ -21,6 +21,7 @@ the rules are pinned here:
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -496,6 +497,15 @@ async def test_skill_put_invalid_never_enqueues(
     with pytest.raises(BridgeError) as e:
         await svc.skill_put(cc, name="forum-style", skill_md=VALID_MD, files={"../x": "y"})
     assert e.value.code == "bridge.skill_invalid" and queue.list_pending() == []
+    with pytest.raises(BridgeError) as e:  # the frontmatter names another skill
+        await svc.skill_put(cc, name="forum-style", skill_md=skill_md("other-name"), files=None)
+    assert e.value.code == "bridge.skill_invalid" and "does not match" in e.value.message
+    assert queue.list_pending() == []
+    blob = "![x](data:image/png;base64," + "A" * 2048 + ")"
+    with pytest.raises(BridgeError) as e:  # an oversized data: URI pasted into SKILL.md
+        await svc.skill_put(cc, name="forum-style", skill_md=VALID_MD + blob, files=None)
+    assert e.value.code == "bridge.skill_invalid" and "data: URI" in e.value.message
+    assert queue.list_pending() == []
 
 
 async def test_skill_put_over_a_shipped_name_is_refused_before_queueing(
@@ -508,18 +518,85 @@ async def test_skill_put_over_a_shipped_name_is_refused_before_queueing(
     assert e.value.code == "bridge.skill_readonly" and queue.list_pending() == []
 
 
-async def test_skill_put_args_count_bytes_and_name_files(
+async def test_skill_put_card_shows_everything_the_approval_writes(
     svc: BridgeService, queue: ApprovalQueue, cc: Caller
 ) -> None:
+    """The operator approves what they can read: SKILL.md and every file, in full."""
     files = {"b.sh": "echo é\n", "a.md": "notes\n"}
     await svc.skill_put(cc, name="forum-style", skill_md=VALID_MD, files=files)
     [entry] = queue.list_pending()
     expected = len(VALID_MD.encode()) + sum(len(c.encode()) for c in files.values())
     assert entry["args"]["bytes"] == expected  # UTF-8 bytes, not characters
-    assert entry["args"]["files"] == ["a.md", "b.sh"]
     assert re.fullmatch(r"[0-9a-f]{16}", entry["args"]["sha256"])
-    assert entry["args"]["preview"].startswith("---\nname: forum-style")
-    assert "echo" not in str(entry["args"])  # supporting file contents are not in the card
+    assert entry["args"]["preview"] == VALID_MD
+    assert entry["args"]["preview_truncated"] is False
+    assert entry["args"]["files"] == {
+        "a.md": {
+            "size": 6,
+            "sha256": hashlib.sha256(b"notes\n").hexdigest(),
+            "content": "notes\n",
+        },
+        "b.sh": {
+            "size": len("echo é\n".encode()),
+            "sha256": hashlib.sha256("echo é\n".encode()).hexdigest(),
+            "content": "echo é\n",
+        },
+    }
+    assert list(entry["args"]["files"]) == ["a.md", "b.sh"]
+
+
+async def test_skill_put_card_shows_a_long_skill_md_whole_and_masked(
+    svc: BridgeService, queue: ApprovalQueue, cc: Caller
+) -> None:
+    """Masked first, then never cut: a token past the old 2000-character preview is masked."""
+    body = "x" * 3000 + "\nAuthorization: Bearer supersecrettoken123\nend\n"
+    md = skill_md() + body
+    files = {"run.sh": "export HF_TOKEN=hf_abcdefghijklmnopqrstuvwx\n"}
+    await svc.skill_put(cc, name="forum-style", skill_md=md, files=files)
+    [entry] = queue.list_pending()
+    card = entry["args"]
+    assert card["preview"].endswith("\nend\n") and len(card["preview"]) > 3000
+    assert "supersecrettoken123" not in card["preview"] and "REDACTED" in card["preview"]
+    assert "hf_abcdefghijklmnopqrstuvwx" not in card["files"]["run.sh"]["content"]
+    # the digest is of what will be written, not of the masked text
+    assert card["files"]["run.sh"]["sha256"] == hashlib.sha256(files["run.sh"].encode()).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("md_extra", "files"),
+    [
+        ("y" * (16 * 1024), None),  # SKILL.md over 16 KiB
+        ("", {f"f{n}.txt": "z" * (12 * 1024) for n in range(4)}),  # total over 48 KiB
+        ("", {"blob.bin": "ok\x00binary"}),  # not text
+        ("", {"bad.txt": "half a pair \ud800"}),  # not valid UTF-8
+    ],
+)
+async def test_skill_put_that_is_not_reviewable_text_is_refused_before_queueing(
+    svc: BridgeService,
+    queue: ApprovalQueue,
+    cc: Caller,
+    md_extra: str,
+    files: dict[str, str] | None,
+) -> None:
+    with pytest.raises(BridgeError) as e:
+        await svc.skill_put(cc, name="forum-style", skill_md=VALID_MD + md_extra, files=files)
+    assert e.value.code == "bridge.skill_invalid" and e.value.status == 422
+    assert e.value.message.startswith(
+        "bridge pushes are limited to reviewable text (SKILL.md ≤ 16 KiB, total ≤ 48 KiB)"
+    )
+    assert queue.list_pending() == []
+
+
+async def test_skill_put_at_the_caps_is_queued(
+    svc: BridgeService, queue: ApprovalQueue, cc: Caller
+) -> None:
+    md = VALID_MD + "y" * (16 * 1024 - len(VALID_MD.encode()))
+    rest = 48 * 1024 - 16 * 1024
+    files = {"a.txt": "a" * (rest // 2), "b.txt": "b" * (rest - rest // 2)}
+    out = await svc.skill_put(cc, name="forum-style", skill_md=md, files=files)
+    assert out["status"] == "pending_approval"
+    [entry] = queue.list_pending()
+    assert entry["args"]["bytes"] == 48 * 1024
 
 
 async def test_repeated_identical_pushes_are_one_row(
@@ -681,7 +758,7 @@ async def test_the_pending_cap_ignores_other_tools_and_resolved_rows(
 async def test_resolved_skill_rows_hold_no_executor(
     svc: BridgeService, queue: ApprovalQueue, cc: Caller
 ) -> None:
-    """Each executor closes over the pushed content (up to ~4 MB); only a pending row may keep it."""
+    """Each executor closes over the pushed content (up to 48 KiB); only a pending row may keep it."""
     big = {f"f{n}.txt": "x" * 4096 for n in range(4)}
     ids = [
         (

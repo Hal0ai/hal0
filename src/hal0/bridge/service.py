@@ -50,7 +50,11 @@ behind for a Hermes profile:
   pending is 409 ``bridge.skill_pending_elsewhere``. A client holds at most
   :data:`MAX_PENDING_SKILL_CHANGES` pending skill changes (429
   ``bridge.too_many_pending``); the queue lets go of a resolved row's executor,
-  which is what holds the pushed content.
+  which is what holds the pushed content. A push must be reviewable on its card
+  in full: ``SKILL.md`` at most 16 KiB, the whole push at most 48 KiB, all of it
+  UTF-8 text; the card carries ``SKILL.md`` and every file's content, masked by
+  the log redactor and never cut. A bigger skill is the operator's to drop in by
+  hand.
 * **Capabilities.** :func:`hal0.bridge.capabilities.capabilities_view`, off the
   event loop.
 """
@@ -102,6 +106,8 @@ if TYPE_CHECKING:
 __all__ = [
     "DEFAULT_WAIT_S",
     "MAX_PENDING_SKILL_CHANGES",
+    "MAX_PUSH_SKILL_MD_BYTES",
+    "MAX_PUSH_TOTAL_BYTES",
     "MAX_WAIT_S",
     "BridgeService",
     "Caller",
@@ -135,8 +141,14 @@ SHARED_AGENT = "shared"
 #: The most hits ``memory_search`` asks for; the memory layer itself allows 200.
 _MAX_MEMORY_HITS = 50
 
-#: Characters of a pushed ``SKILL.md`` shown on its approval card.
-SKILL_PREVIEW_CHARS = 2000
+#: A bridge push must be reviewable on its inbox card, in full: ``SKILL.md`` at most
+#: 16 KiB and the whole push (``SKILL.md`` plus supporting files) at most 48 KiB of
+#: UTF-8 text. The library's own limits (256 KiB a file, 16 files) stay the on-disk
+#: rule; a bigger skill is the operator's to drop in by hand (ADR-0043 decision 10).
+MAX_PUSH_SKILL_MD_BYTES = 16 * 1024
+MAX_PUSH_TOTAL_BYTES = 48 * 1024
+
+_NOT_REVIEWABLE = "bridge pushes are limited to reviewable text (SKILL.md ≤ 16 KiB, total ≤ 48 KiB)"
 
 #: Why a pending skill row was retired when a newer push of the same skill arrived.
 _SUPERSEDED = "superseded by a newer push of this skill"
@@ -418,7 +430,8 @@ class BridgeService:
                 status=status if status in HERMES_STATUSES else "running",
                 created_at=now,
                 updated_at=now,
-                input_preview=input[:INPUT_PREVIEW_CHARS],
+                # Masked before it is cut, so the cut cannot leave half a token unmasked.
+                input_preview=redact_log_line(input)[:INPUT_PREVIEW_CHARS],
                 output=None,
                 error=None,
                 usage_json=None,
@@ -669,9 +682,13 @@ class BridgeService:
     ) -> dict[str, Any]:
         """Queue creating or replacing the drop-in skill ``name`` for the operator's approval.
 
-        Validation (name, frontmatter, sizes, file names) and the shipped-name check
-        run first, so a doomed request is refused here, before anything is queued:
-        422 ``bridge.skill_invalid`` or 403 ``bridge.skill_readonly``. Returns
+        Validation (the reviewable-text caps, name, frontmatter, sizes, file names)
+        and the shipped-name check run first, so a doomed request is refused here,
+        before anything is queued: 422 ``bridge.skill_invalid`` or 403
+        ``bridge.skill_readonly``. The card's ``preview`` is the whole ``SKILL.md`` and
+        ``files`` maps each supporting file to ``{size, sha256, content}``, all text
+        masked by the log redactor and never cut (``preview_truncated`` is always
+        false). Returns
         ``{status: "pending_approval", approval_id, name}``; the write happens only
         when the operator approves the ``agent_skill_put`` row. Another client's
         pending put of this name is 409 ``bridge.skill_pending_elsewhere`` (unless
@@ -681,17 +698,28 @@ class BridgeService:
         """
         self._check_open()
         queue = self._inbox()
+        total = _check_reviewable(skill_md, files)
         await asyncio.to_thread(self._skills.validate, name, skill_md, files)
         if await asyncio.to_thread(self._skills.is_shipped, name):
             raise _readonly(name, "changed")
         pushed = dict(files) if files else {}
         digest = _skill_digest(skill_md, pushed)
+        # Everything the approval writes is on the card, masked by the log redactor and
+        # never cut: the operator must be able to read what they approve.
         args: dict[str, Any] = {
             "name": name,
-            "bytes": len(skill_md.encode()) + sum(len(c.encode()) for c in pushed.values()),
-            "files": sorted(pushed),
+            "bytes": total,
             "sha256": digest,
-            "preview": redact_log_line(skill_md[:SKILL_PREVIEW_CHARS]),
+            "preview": redact_log_line(skill_md),
+            "preview_truncated": False,
+            "files": {
+                fname: {
+                    "size": len(pushed[fname].encode()),
+                    "sha256": hashlib.sha256(pushed[fname].encode()).hexdigest(),
+                    "content": redact_log_line(pushed[fname]),
+                }
+                for fname in sorted(pushed)
+            },
         }
 
         async def execute(_args: dict[str, Any]) -> dict[str, Any]:
@@ -913,6 +941,41 @@ def _default_skills() -> SkillLibrary:
 
 def _readonly(name: str, verb: str) -> BridgeError:
     return BridgeError("bridge.skill_readonly", f"{name!r} is a shipped skill and cannot be {verb}")
+
+
+def _check_reviewable(skill_md: Any, files: Any) -> int:
+    """The push's size in UTF-8 bytes; 422 ``bridge.skill_invalid`` when it is not reviewable text.
+
+    A bridge push is shown whole on its inbox card, so it must be text a person can
+    read there: ``SKILL.md`` at most :data:`MAX_PUSH_SKILL_MD_BYTES`, everything at
+    most :data:`MAX_PUSH_TOTAL_BYTES`, every file valid UTF-8 with no NUL character.
+    Anything that is not a string is left to :meth:`SkillLibrary.validate`.
+    """
+    parts: list[tuple[str, Any]] = [("SKILL.md", skill_md)]
+    if isinstance(files, dict):
+        parts += [(str(key), value) for key, value in files.items()]
+    total = 0
+    for label, text in parts:
+        if not isinstance(text, str):
+            continue
+        try:
+            size = len(text.encode("utf-8"))
+        except UnicodeEncodeError:
+            raise BridgeError(
+                "bridge.skill_invalid", f"{_NOT_REVIEWABLE}; {label!r} is not valid UTF-8 text"
+            ) from None
+        if "\x00" in text:
+            raise BridgeError(
+                "bridge.skill_invalid", f"{_NOT_REVIEWABLE}; {label!r} is not text (it holds NUL)"
+            )
+        if label == "SKILL.md" and size > MAX_PUSH_SKILL_MD_BYTES:
+            raise BridgeError(
+                "bridge.skill_invalid", f"{_NOT_REVIEWABLE}; SKILL.md is {size} bytes"
+            )
+        total += size
+    if total > MAX_PUSH_TOTAL_BYTES:
+        raise BridgeError("bridge.skill_invalid", f"{_NOT_REVIEWABLE}; the push is {total} bytes")
+    return total
 
 
 def _skill_digest(skill_md: str, files: dict[str, str]) -> str:
