@@ -4,6 +4,7 @@
 
 import type { Diagnosis, NextStep } from '@/api/hooks/useDiagnoses'
 import { actionForNextStep } from '../diagnostics/next-step-actions'
+import { freeGb } from './overview-pure'
 
 export type InboxTone = 'accent' | 'warn' | 'err' | 'info'
 
@@ -140,7 +141,7 @@ const pad2 = (n: number) => String(n).padStart(2, '0')
 export function allClearLine(i: AllClearInput): string {
   const disk =
     typeof i.diskFreeMb === 'number' && Number.isFinite(i.diskFreeMb)
-      ? `${Math.round(i.diskFreeMb / 1000)} GB`
+      ? `${freeGb(i.diskFreeMb)} GB`
       : '—'
   const parts = ['All clear', i.doctorKnown ? 'doctor ok' : 'doctor unavailable']
   // No slot list yet (still loading, or none configured): say nothing rather than "0/0".

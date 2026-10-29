@@ -78,7 +78,7 @@ describe('OvNeedsYou', () => {
     expect(host.querySelector('.ov-inbox.has')).toBeNull()
     expect(host.textContent).toContain('All clear')
     expect(host.textContent).toContain('2/2 slots healthy')
-    expect(host.textContent).toContain('disk 124 GB free')
+    expect(host.textContent).toContain('disk 121 GB free')
     expect(host.textContent).toContain('up to date on nightly')
     act(() => button('Run doctor →')!.click())
     expect(onGo).toHaveBeenCalledWith('settings/doctor')

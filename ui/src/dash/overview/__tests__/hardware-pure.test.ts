@@ -110,6 +110,11 @@ describe('hardwareRows', () => {
     expect(byKey(rows, 'npu').caption).toBe('flm')
   })
 
+  it('shows free disk as the same floored figure the Needs-you line uses', () => {
+    const rows = hardwareRows({ ...CT105, disk: { free_mb: 124429, floor_mb: 512, total_mb: 248 * 1024, path: '/var/lib/hal0' } })
+    expect(byKey(rows, 'disk').value).toBe('121 GB free')
+  })
+
   it('renders dashes, never zero, for unsourced RAM and disk', () => {
     const rows = hardwareRows({ ...CT105, ram: null, disk: null })
     expect(byKey(rows, 'ram').value).toBe('—')
