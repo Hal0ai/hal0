@@ -163,6 +163,8 @@ export const ENDPOINTS = {
 
   // ── Hardware ─────────────────────────────────────────────────────
   hardware: '/api/hardware',
+  // Request-metric rollup (totals + per-model + optional buckets), ?window=1h|24h|7d.
+  stats: '/api/stats',
   statsHardware: '/api/stats/hardware',
   // NPU occupancy — AIE column allocation (xrt-smi probe) + per-FLM-slot
   // composition for the NPU occupancy card. Single-tenant: one FLM claims
