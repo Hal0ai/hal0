@@ -136,7 +136,7 @@ export function OvAgents({ onGo }) {
       title="Agents"
       flush
       right={
-        <button type="button" className="ov-lnk" onClick={() => onGo('agents')}>
+        <button type="button" className="ov-lnk" onClick={() => onGo('agent')}>
           Agents →
         </button>
       }

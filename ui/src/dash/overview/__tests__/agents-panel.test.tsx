@@ -176,7 +176,7 @@ describe('OvAgents', () => {
     act(() => byText('Kanban').click())
     expect(onGo).toHaveBeenCalledWith('board')
     act(() => byText('Agents →').click())
-    expect(onGo).toHaveBeenCalledWith('agents')
+    expect(onGo).toHaveBeenCalledWith('agent')
     window.removeEventListener('hal0:toggle-agent-chat', seen)
   })
 })
