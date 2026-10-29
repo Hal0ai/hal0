@@ -24,6 +24,35 @@ describe('digest', () => {
     expect(rows[1].html).toBe('<b>utility</b> ready → idle')
   })
 
+  it('folds per target when two slots serve together', () => {
+    const mk = (id: number, hhmmss: string, target: string, from: string, to: string) => ({
+      ...CT105_RECORDS[0],
+      id,
+      ts: `2026-10-29T${hhmmss}+00:00`,
+      target,
+      message: `${target}: ${from} → ${to}`,
+      after: { slot: target, from, to },
+    })
+    const rows = digest(
+      [
+        mk(9, '15:08:30', 'utility', 'serving', 'ready'),
+        mk(8, '15:08:20', 'agent', 'serving', 'ready'),
+        mk(7, '15:08:10', 'utility', 'ready', 'serving'),
+        mk(6, '15:08:00', 'agent', 'ready', 'serving'),
+        mk(5, '15:07:50', 'utility', 'serving', 'ready'),
+        mk(4, '15:07:40', 'agent', 'serving', 'ready'),
+        mk(3, '15:07:30', 'utility', 'ready', 'serving'),
+        mk(2, '15:07:20', 'agent', 'ready', 'serving'),
+      ],
+      opts,
+    )
+    expect(rows).toHaveLength(2)
+    expect(rows.map((r) => r.html)).toEqual([
+      '<b>utility</b> served 2 requests · 15:07–15:08',
+      '<b>agent</b> served 2 requests · 15:07–15:08',
+    ])
+  })
+
   it('digest never folds error records', () => {
     const rows = digest([ERR_RECORD, ...CT105_RECORDS], opts)
     expect(rows.filter((r) => r.tone === 'err')).toHaveLength(1)

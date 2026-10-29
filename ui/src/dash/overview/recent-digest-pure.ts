@@ -89,34 +89,30 @@ function passthroughRow(r: ActivityRecord, now: number): DigestRow {
   }
 }
 
-/** Newest-first records → at most `rows` display rows. */
+/** Newest-first records → at most `rows` display rows. Slot flaps fold per target: another slot's
+ *  records between two of a target's do not break its fold, and rows stay ordered by their newest
+ *  record. Any record that cannot fold (an error, another kind of event) closes every open fold. */
 export function digest(records: ActivityRecord[], opts: DigestOpts = {}): DigestRow[] {
   const windowMs = (opts.windowS ?? 600) * 1000
   const cap = opts.rows ?? 5
   const now = opts.now ?? Date.now()
-  const out: DigestRow[] = []
-  let i = 0
-  while (i < records.length && out.length < cap) {
-    const head = records[i]
-    if (!foldable(head)) {
-      out.push(passthroughRow(head, now))
-      i++
+  const items: ({ fold: ActivityRecord[] } | { rec: ActivityRecord })[] = []
+  const open = new Map<string, ActivityRecord[]>()
+  for (const r of records) {
+    if (!foldable(r)) {
+      items.push({ rec: r })
+      open.clear()
       continue
     }
-    const anchor = Date.parse(head.ts)
-    const fold = [head]
-    let j = i + 1
-    while (
-      j < records.length &&
-      foldable(records[j]) &&
-      records[j].target === head.target &&
-      anchor - Date.parse(records[j].ts) <= windowMs
-    ) {
-      fold.push(records[j])
-      j++
+    const target = r.target as string
+    const fold = open.get(target)
+    if (fold && Date.parse(fold[0].ts) - Date.parse(r.ts) <= windowMs) {
+      fold.push(r)
+    } else {
+      const next = [r]
+      open.set(target, next)
+      items.push({ fold: next })
     }
-    out.push(foldRow(fold, now))
-    i = j
   }
-  return out
+  return items.slice(0, cap).map((it) => ('fold' in it ? foldRow(it.fold, now) : passthroughRow(it.rec, now)))
 }
