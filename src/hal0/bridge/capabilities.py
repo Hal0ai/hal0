@@ -16,18 +16,27 @@ config:
   token, a ``*_KEY=`` value, URL userinfo, a well-known token prefix) is
   dropped, never echoed, and never replaced by a mask.
 
-A named profile's ``config.yaml`` sits at ``<home>/profiles/<profile>/``; a
-field it does not set falls back to the default profile's, which is how Hermes
-profiles that hal0 clones from the default behave.
+Each profile reports only what its own ``config.yaml`` sets: the default
+profile's file is ``<home>/config.yaml``, a named profile's is
+``<home>/profiles/<profile>/config.yaml``. A field the file does not set is
+``None``, meaning "Hermes's built-in default". Nothing is borrowed from the
+default profile: at the pinned Hermes (v0.22.4, ``4d043038``) a profile's
+config is its own ``HERMES_HOME/config.yaml`` (``get_config_path``,
+``hermes_cli/config.py:431-433``) merged over Hermes's built-in
+``DEFAULT_CONFIG`` (``load_config``, ``:2088-2089``), never over another
+profile's file. That is why hal0 writes settings such as the terminal gate
+into every profile's file.
 
 ``api_server_version`` is read from the API server's ``GET /health/detailed``
 (3 s timeout) and is ``None`` when the gateway is down, answers an error or sends
 no usable ``version``. The route needs the profile's API key (it answers 401
 without it, checked live), so the caller passes ``api_key``, the one hal0 holds for
 that profile (the same one ``HermesGateway.key_for`` reads), and it goes out as a
-bearer header on that one loopback request, never into the view. With no key
-there is no request and the version is ``None``. Nothing here raises for an
-unreadable config or an unreachable gateway: the view is simply emptier.
+bearer header on that one request, never through a proxy (``trust_env=False``:
+a Hermes listening beyond loopback is still not a proxy's to see) and never
+into the view. With no key there is no request and the version is ``None``.
+Nothing here raises for an unreadable config or an unreachable gateway: the
+view is simply emptier.
 """
 
 from __future__ import annotations
@@ -88,38 +97,31 @@ def capabilities_view(
     """
     if profile != DEFAULT_PROFILE and _PROFILE_NAME.fullmatch(profile) is None:
         raise ValueError(f"{profile!r} is not a Hermes profile name")
-    own = _config(home) if profile == DEFAULT_PROFILE else _config(home / "profiles" / profile)
-    base = _config(home)
-    config = _Layers(own, base)
+    profile_home = home if profile == DEFAULT_PROFILE else home / "profiles" / profile
+    own = _config(profile_home)
 
     return {
         "agent": "hermes" if profile == DEFAULT_PROFILE else f"hermes/{profile}",
         "profile": profile,
         "api_server_version": _version(home, profile, fetch_json, api_key),
-        "model_aliases": _model_aliases(config.get("model_aliases")),
-        "toolsets_enabled": _strings(config.get("toolsets")),
-        "toolsets_disabled": _strings(config.get("agent", "disabled_toolsets")),
-        "mcp_servers": _names(config.get("mcp_servers")),
-        "skills_dirs": _strings(config.get("skills", "external_dirs")),
-        "platforms_enabled": _platforms(own, base),
-        "approvals_mode": _approvals_mode(home, profile),
+        "model_aliases": _model_aliases(_get(own, "model_aliases")),
+        "toolsets_enabled": _strings(_get(own, "toolsets")),
+        "toolsets_disabled": _strings(_get(own, "agent", "disabled_toolsets")),
+        "mcp_servers": _names(_get(own, "mcp_servers")),
+        "skills_dirs": _strings(_get(own, "skills", "external_dirs")),
+        "platforms_enabled": _platforms(own),
+        "approvals_mode": _text(
+            hermes_command_approvals.read_rendered(profile_home / "config.yaml")
+        ),
     }
 
 
-class _Layers:
-    """A profile's config over the default profile's: a key the profile lacks reads from the default."""
-
-    def __init__(self, own: dict[str, Any], base: dict[str, Any]) -> None:
-        self._layers = (own, base)
-
-    def get(self, *path: str) -> Any:
-        for layer in self._layers:
-            node: Any = layer
-            for part in path:
-                node = node.get(part) if isinstance(node, dict) else None
-            if node is not None:
-                return node
-        return None
+def _get(config: dict[str, Any], *path: str) -> Any:
+    """The value at ``path`` in ``config``, or ``None`` when the file does not set it."""
+    node: Any = config
+    for part in path:
+        node = node.get(part) if isinstance(node, dict) else None
+    return node
 
 
 # -- allow-listed projections -------------------------------------------------------------
@@ -141,22 +143,31 @@ def _name(value: Any) -> str | None:
     return text if text is not None and not is_sensitive_key(text) else None
 
 
-def _strings(value: Any) -> list[str]:
-    """A YAML list of strings, in order, with unsafe entries dropped."""
+def _strings(value: Any) -> list[str] | None:
+    """A YAML list of strings, in order, with unsafe entries dropped; ``None`` when unset."""
+    if value is None:
+        return None
     if not isinstance(value, list):
         return []
     return [text for item in value if (text := _text(item)) is not None]
 
 
-def _names(value: Any) -> list[str]:
-    """The sorted names of a YAML mapping's entries; the entries themselves are never read."""
+def _names(value: Any) -> list[str] | None:
+    """The sorted names of a YAML mapping's entries (never the entries); ``None`` when unset."""
+    if value is None:
+        return None
     if not isinstance(value, dict):
         return []
     return sorted({name for key in value if (name := _name(key)) is not None})
 
 
-def _model_aliases(value: Any) -> dict[str, dict[str, str | None]]:
-    """``{alias: {model, provider}}``; an alias with a secret-shaped name or value is dropped whole."""
+def _model_aliases(value: Any) -> dict[str, dict[str, str | None]] | None:
+    """``{alias: {model, provider}}``; an alias with a secret-shaped name or value is dropped whole.
+
+    ``None`` when the file sets no ``model_aliases``.
+    """
+    if value is None:
+        return None
     if not isinstance(value, dict):
         return {}
     out: dict[str, dict[str, str | None]] = {}
@@ -171,22 +182,12 @@ def _model_aliases(value: Any) -> dict[str, dict[str, str | None]]:
     return dict(sorted(out.items()))
 
 
-def _platforms(own: dict[str, Any], base: dict[str, Any]) -> list[str]:
-    """Platforms with ``enabled: true``; the profile's explicit setting wins over the default's."""
-    enabled = {**_explicit_enabled(base), **_explicit_enabled(own)}
+def _platforms(own: dict[str, Any]) -> list[str] | None:
+    """Platforms the file sets ``enabled: true``; ``None`` when it sets ``enabled`` for none."""
+    enabled = _explicit_enabled(own)
+    if not enabled:
+        return None
     return sorted({name for key, on in enabled.items() if on and (name := _name(key)) is not None})
-
-
-def _approvals_mode(home: Path, profile: str) -> str | None:
-    """``approvals.mode`` from the profile's ``config.yaml``, else the default profile's."""
-    paths = [home / "config.yaml"]
-    if profile != DEFAULT_PROFILE:
-        paths.insert(0, home / "profiles" / profile / "config.yaml")
-    for path in paths:
-        mode = _text(hermes_command_approvals.read_rendered(path))
-        if mode is not None:
-            return mode
-    return None
 
 
 # -- the gateway's version ----------------------------------------------------------------
@@ -218,15 +219,10 @@ def _fetch_json(url: str, headers: Mapping[str, str]) -> Any:
     """Sync ``GET url`` with ``headers`` and a 3 s timeout; the parsed JSON, or ``None``."""
     import httpx
 
-    from hal0.service_identity import is_loopback_url
-
     try:
-        resp = httpx.get(
-            url,
-            headers=dict(headers),
-            timeout=_FETCH_TIMEOUT_S,
-            trust_env=not is_loopback_url(url),
-        )
+        # Never through a proxy: the request carries the profile's API key, and a
+        # Hermes that listens beyond loopback is still on this box's network.
+        resp = httpx.get(url, headers=dict(headers), timeout=_FETCH_TIMEOUT_S, trust_env=False)
         if resp.status_code != 200:
             return None
         return resp.json()

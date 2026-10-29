@@ -118,7 +118,9 @@ def test_view_reports_the_default_profile(tmp_hermes_home: Path) -> None:
     }
 
 
-def test_named_profile_overrides_and_falls_back_to_the_default(tmp_hermes_home: Path) -> None:
+def test_a_named_profile_reports_only_its_own_file(tmp_hermes_home: Path) -> None:
+    """Hermes merges a profile's config.yaml over its built-in defaults only, never over the
+    default profile's file, so a field the profile does not set is null ("Hermes default")."""
     _write(
         tmp_hermes_home / "profiles" / "coder" / "config.yaml",
         {
@@ -129,21 +131,59 @@ def test_named_profile_overrides_and_falls_back_to_the_default(tmp_hermes_home: 
     )
     view = capabilities_view(tmp_hermes_home, "coder", fetch_json=_no_gateway)
     assert view["agent"] == "hermes/coder" and view["profile"] == "coder"
-    # overridden by the profile
+    # set by the profile's own file
     assert view["toolsets_enabled"] == ["hermes-cli"]
     assert view["mcp_servers"] == ["hal0-memory"]
     assert view["approvals_mode"] == "manual"
-    # not set by the profile: the default profile's value
-    assert view["toolsets_disabled"] == ["a2a", "terminal"]
-    assert view["skills_dirs"] == ["/etc/hal0/agent-skills", "/var/lib/hal0/skills"]
+    # not set by it: null, never the default profile's value
+    assert view["toolsets_disabled"] is None
+    assert view["skills_dirs"] is None
+    assert view["model_aliases"] is None
+    assert view["platforms_enabled"] is None
     assert SECRET not in json.dumps(view)
+
+
+def test_a_profile_without_a_config_file_reports_nothing_of_the_default(
+    tmp_hermes_home: Path,
+) -> None:
+    (tmp_hermes_home / "profiles" / "bare").mkdir(parents=True)
+    view = capabilities_view(tmp_hermes_home, "bare", fetch_json=_no_gateway)
+    assert all(
+        view[key] is None
+        for key in CAPABILITY_KEYS
+        if key not in ("agent", "profile", "api_server_version")
+    )
+
+
+def test_the_default_profile_reports_its_own_unset_fields_as_null(tmp_path: Path) -> None:
+    home = tmp_path / "hermes"
+    _write(home / "config.yaml", {"toolsets": ["hermes-cli"]})
+    view = capabilities_view(home, "default", fetch_json=_no_gateway)
+    assert view["toolsets_enabled"] == ["hermes-cli"]
+    assert view["toolsets_disabled"] is None and view["mcp_servers"] is None
+    assert view["approvals_mode"] is None and view["platforms_enabled"] is None
+
+
+def test_a_set_but_empty_field_is_an_empty_list_not_null(tmp_path: Path) -> None:
+    home = tmp_path / "hermes"
+    _write(
+        home / "config.yaml",
+        {
+            "toolsets": [],
+            "mcp_servers": {},
+            "gateway": {"platforms": {"telegram": {"enabled": False}}},
+        },
+    )
+    view = capabilities_view(home, "default", fetch_json=_no_gateway)
+    assert view["toolsets_enabled"] == [] and view["mcp_servers"] == []
+    assert view["platforms_enabled"] == []
 
 
 def test_unreadable_or_missing_config_gives_an_empty_view(tmp_path: Path) -> None:
     view = capabilities_view(tmp_path / "nowhere", "default", fetch_json=_no_gateway)
-    assert view["toolsets_enabled"] == [] and view["toolsets_disabled"] == []
-    assert view["mcp_servers"] == [] and view["model_aliases"] == {}
-    assert view["platforms_enabled"] == [] and view["skills_dirs"] == []
+    assert view["toolsets_enabled"] is None and view["toolsets_disabled"] is None
+    assert view["mcp_servers"] is None and view["model_aliases"] is None
+    assert view["platforms_enabled"] is None and view["skills_dirs"] is None
     assert view["approvals_mode"] is None and view["api_server_version"] is None
 
 
@@ -195,7 +235,7 @@ def test_version_comes_from_health_detailed(tmp_hermes_home: Path) -> None:
 
 
 def test_version_probe_sends_the_profile_key_and_never_echoes_it(tmp_hermes_home: Path) -> None:
-    """The route answers 401 without the key (live on CT105); the key is only ever a request header."""
+    """The route answers 401 without the key; the key is only ever a request header."""
     sent: list[Mapping[str, str]] = []
 
     def fetch(_url: str, headers: Mapping[str, str]) -> Any:
@@ -229,6 +269,7 @@ def test_the_real_fetch_sends_the_bearer_header(
 
     def fake_get(url: str, **kwargs: Any) -> httpx.Response:
         seen["url"], seen["headers"] = url, kwargs.get("headers")
+        seen["trust_env"] = kwargs.get("trust_env")
         return httpx.Response(200, json={"version": "0.22.4"})
 
     monkeypatch.setattr(httpx, "get", fake_get)
@@ -236,6 +277,32 @@ def test_the_real_fetch_sends_the_bearer_header(
     assert view["api_server_version"] == "0.22.4"
     assert seen["url"] == "http://127.0.0.1:8642/health/detailed"
     assert seen["headers"] == {"Authorization": f"Bearer {API_KEY}"}
+    assert seen["trust_env"] is False  # the profile key never goes through a proxy
+
+
+def test_the_key_never_goes_through_a_proxy_for_a_hermes_beyond_loopback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Hermes listening on all interfaces is not loopback; HTTP_PROXY must still be ignored."""
+    import httpx
+
+    home = tmp_path / "hermes"
+    cfg = dict(DEFAULT_CONFIG)
+    cfg["gateway"] = {
+        "platforms": {"api_server": {"enabled": True, "host": "192.0.2.9", "port": 8642}}
+    }
+    _write(home / "config.yaml", cfg)
+    monkeypatch.setenv("HTTP_PROXY", "http://192.0.2.200:3128")
+    seen: dict[str, Any] = {}
+
+    def fake_get(url: str, **kwargs: Any) -> httpx.Response:
+        seen["url"], seen["trust_env"] = url, kwargs.get("trust_env")
+        return httpx.Response(200, json={"version": "0.22.4"})
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    capabilities_view(home, "default", api_key=API_KEY)
+    assert seen["url"].startswith("http://192.0.2.9:8642/")
+    assert seen["trust_env"] is False
 
 
 @pytest.mark.parametrize("answer", [None, {}, {"version": 7}, {"version": ""}, ["x"], "up"])

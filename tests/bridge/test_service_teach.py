@@ -808,7 +808,8 @@ async def test_capabilities_reads_the_profiles_config(
     assert view["agent"] == "hermes" and view["api_server_version"] == "0.22.4"
     assert view["mcp_servers"] == ["hal0-memory"] and view["toolsets_disabled"] == ["a2a"]
     assert "nlQ_" not in str(view) and "Bearer" not in str(view)
-    assert coder["agent"] == "hermes/coder" and coder["toolsets_enabled"] == ["hermes-cli"]
+    # coder has no config.yaml of its own: nothing is borrowed from the default profile's
+    assert coder["agent"] == "hermes/coder" and coder["toolsets_enabled"] is None
     assert e.value.code == "bridge.unknown_agent"
 
 
