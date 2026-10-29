@@ -366,7 +366,8 @@ def _run_view(
     }
 
 
-def test_runs_table(fake_api: FakeApi) -> None:
+def _two_runs(fake_api: FakeApi) -> list[list[str]]:
+    """Load two runs into the fake API and return the cells the table must show."""
     now = time.time()
     fake_api.runs = [
         _run_view(
@@ -374,16 +375,34 @@ def test_runs_table(fake_api: FakeApi) -> None:
         ),
         _run_view("run_" + "b" * 32, "ci", "completed", started=now - 3 * 86400, updated=now - 20),
     ]
-    res = runner.invoke(app, ["bridge", "runs"], env={"COLUMNS": "100"})
+    return [
+        ["run_" + "a" * 32, "claude-code", "hermes", "running", "2h", "1m"],
+        ["run_" + "b" * 32, "ci", "hermes", "completed", "3d", "20s"],
+    ]
+
+
+def test_runs_table(fake_api: FakeApi, monkeypatch: pytest.MonkeyPatch) -> None:
+    _console_width(monkeypatch, 200)
+    expected = _two_runs(fake_api)
+    res = runner.invoke(app, ["bridge", "runs"])
     assert res.exit_code == 0, res.output
     header = res.stdout.splitlines()[1]
     assert header.split() == ["run_id", "client", "agent", "status", "started", "updated"]
     rows = [line.split() for line in res.stdout.splitlines()[2:]]
-    assert rows == [
-        ["run_" + "a" * 32, "claude-code", "hermes", "running", "2h", "1m"],
-        ["run_" + "b" * 32, "ci", "hermes", "completed", "3d", "20s"],
-    ]
+    assert rows == expected
     assert fake_api.calls == [("GET", "/api/bridge/runs", {"limit": 20})]
+
+
+def test_runs_table_keeps_cells_whole_at_80_columns(
+    fake_api: FakeApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At 80 columns no cell wraps onto a second line: one row per run."""
+    _console_width(monkeypatch, 80)
+    expected = _two_runs(fake_api)
+    res = runner.invoke(app, ["bridge", "runs"])
+    assert res.exit_code == 0, res.output
+    rows = [line.split() for line in res.stdout.splitlines()[2:]]
+    assert rows == expected
 
 
 def test_runs_keeps_the_run_id_whole_at_80_columns(fake_api: FakeApi) -> None:

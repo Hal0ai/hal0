@@ -258,9 +258,9 @@ def runs_cmd(
     )
     # The run id is what 'agent_run_status' takes, so it is never wrapped or cut.
     table.add_column("run_id", no_wrap=True)
-    table.add_column("client", overflow="fold")
-    table.add_column("agent", overflow="fold")
-    table.add_column("status", overflow="fold")
+    table.add_column("client", no_wrap=True)
+    table.add_column("agent", no_wrap=True)
+    table.add_column("status", no_wrap=True)
     table.add_column("started", no_wrap=True)
     table.add_column("updated", no_wrap=True)
     for run in items:
