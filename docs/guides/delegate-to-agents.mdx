@@ -26,7 +26,7 @@ shows up in the dashboard and the status dock, and anything it needs a person
 for lands in the approvals inbox.
 
 The bridge is an MCP server, `hal0-agents`. This guide is the walkthrough; the
-[tool reference](/docs/reference/mcp-tools#hal0-agents-mcpagents) lists every
+[tool reference](/docs/reference/mcp-tools-agents) lists every
 tool and argument, and [ADR-0043](/docs/adr/0043-agent-bridge-and-bridge-keys)
 records the design.
 
@@ -150,22 +150,26 @@ the default `wait_s=0` returns at once with a `run_id`; then:
 - `agent_run_wait(run_id, timeout_s=120)` blocks until the run ends, asks a
   question, or the timeout passes (at most 600). On a timeout the view carries
   `timed_out: true`; the run keeps going, so call it again.
-- `agent_run_status(run_id)` is a cheap look at the current view.
+- `agent_run_status(run_id)` is a cheap look at the current view. Its optional
+  `offset` reads a later window of a long `output` (see below).
 - `agent_run_events(run_id, since_seq=0, limit=100)` returns the run's stored
   events: the model's text arrives as `message.text` chunks, with the tool
   starts and completions, approvals, clarifications and the terminal event in
   order. Call it again with `since_seq` set to the returned `last_seq` to
-  follow a run, or with `since_seq=0` to replay it from the start.
+  follow a run, or with `since_seq=0` to replay it. hal0 keeps a run's newest
+  500 events only, so a long run replays from partway in.
 
-Run text is passed through hal0's secret redactor before it leaves the box.
-Any text over 16 KiB is cut and the result carries `truncated: true`; for
-`output` and `error` it also carries `more: "agent_run_events(run_id,
-since_seq=0)"`, which replays the run so you can join the `message.text`
-events.
+Run text is passed through hal0's secret redactor before it leaves the box. A
+long `output` comes in 16 KiB windows: the view carries `truncated: true` and
+`more`, the next call, `agent_run_status(run_id, offset=<next_offset>)`. Follow
+`more` until `next_offset` is `null`. The events are no way back to a long
+output. Any other text over 16 KiB (`error`, a `pending` request, an event) is
+cut with `truncated: true` and nothing pages the rest.
 
 `agent_run_steer(run_id, input)` adds guidance to a run that is still
 `running`. `agent_run_stop(run_id)` asks Hermes to stop it, and
-`agent_runs_list` shows your runs, newest first. You see only your own runs; a
+`agent_runs_list` shows your runs, newest first, each with `output_preview`
+(the first 200 characters) in place of `output`. You see only your own runs; a
 run another client started answers exactly like a run that does not exist.
 
 ## Answer a clarification
@@ -219,7 +223,10 @@ These tools change what Hermes knows and can do. They are on the same
 private memory namespace: `private:hermes` for `hermes`, or
 `private:hermes__<profile>` for `hermes/<profile>`. hal0 forces that namespace
 and tags the entry `source:bridge:<your client>`, so you can always tell what
-the bridge wrote. Pass `agent="shared"` to write the shared namespace instead.
+the bridge wrote. A tag of yours that starts with `agent:`, `visibility:`,
+`project:` or `source:bridge:` is dropped, because the memory layer reads an
+entry's owner from those. Pass `agent="shared"` to write the shared namespace
+instead.
 `agent_memory_search(agent, query, limit=10)` reads the same scope.
 
 ### Skills
@@ -236,8 +243,8 @@ differently:
 |---|---|
 | `agent_skills_list()` | Names, source (shipped or drop-in), description and modification time of every skill. |
 | `agent_skill_get(name)` | A skill's `SKILL.md` text and its file list. |
-| `agent_skill_put(name, skill_md, files?)` | Validates and writes a skill to `/var/lib/hal0/skills/<name>/`. **Gated.** |
-| `agent_skill_delete(name)` | Removes a drop-in skill. **Gated.** |
+| `agent_skill_put(name, skill_md, files?)` | Checks a skill, then proposes writing it to `/var/lib/hal0/skills/<name>/`. **Gated.** |
+| `agent_skill_delete(name)` | Proposes removing a drop-in skill. **Gated.** |
 
 A skill name is lower-case letters, digits and `-`, up to 64 characters, and
 the `name` in the frontmatter must equal it. `description` is required. hal0
@@ -248,10 +255,14 @@ the inbox.
 **A pushed skill waits for a person.** `agent_skill_put` and
 `agent_skill_delete` do not write on the spot. They return
 `{"status": "pending_approval", "approval_id": "…"}` and the request sits in
-the approvals inbox with the skill name as its target. Repeated pushes of
-the same skill collapse into that one row. After you
-approve it, confirm with `agent_skill_get(name)`; Hermes picks up the new
-directory within about half a minute, with no restart.
+the approvals inbox with the skill name as its target. A skill has at most one
+pending put: pushing the same content again is the same row, and an edited push
+from the same client withdraws its older row, so approving always writes what
+the card shows. An edited push while another client's put of that name is
+pending fails with `bridge.skill_pending_elsewhere`, and a client holds at most
+eight pending skill changes (`bridge.too_many_pending`). After you approve a
+put, confirm with `agent_skill_get(name)`; Hermes picks up the new directory
+within about half a minute, with no restart.
 
 ### Capabilities
 
@@ -337,7 +348,8 @@ exits 3, not 0). Run it as root on the box; `--help` lists the options.
 | `421 Invalid Host` | The remote agent reached the box by a name the MCP host allowlist does not hold, a proxy domain for example. The allowlist already holds the box's own addresses, hostname and `.local` name; add others with `HAL0_MCP_ALLOWED_HOSTS`. See [Widen the host and origin allowlists](/docs/guides/connect-mcp#widen-the-host-and-origin-allowlists). |
 | `401` | The key is revoked, was replaced by `hal0 bridge rotate`, or is mistyped. Run `hal0 bridge list`; add or rotate for a fresh key. |
 | `403` | The key is valid but lacks the scope for that server: `/mcp/memory` needs `memory`, `/mcp/admin` needs `admin`. Use `hal0 bridge scopes`. |
-| `bridge.disabled` | The bridge is off (`[bridge].enabled = false`) or hal0-api has not finished starting. Turn it on in `hal0.toml` and restart hal0-api. |
+| `404` on `/mcp/agents` | The bridge is off: `/mcp/agents` is not mounted while `[bridge].enabled` is false. Turn it on in `hal0.toml` and restart hal0-api. |
+| `bridge.unavailable` | The bridge's run service is not running: hal0-api has not finished starting, or the service could not start. See the hal0-api log. |
 | `bridge.agent_unkeyed` | hal0 holds no API key for that Hermes profile. The `agent-bridge` row of `hal0 doctor all` counts the keyed profiles. |
 | `bridge.agent_unavailable` | Hermes is not answering. Check the Hermes card and `hal0 doctor all`. |
 | `bridge.too_many_runs` | The client is at `max_concurrent_runs_per_client`. Wait for a run to end or stop one. |
@@ -346,10 +358,12 @@ exits 3, not 0). Run it as root on the box; `--help` lists the options.
 | A run sits in `waiting_for_approval` | Look in the approvals inbox; `hal0 doctor all` flags runs waiting over an hour. |
 
 Every error from a tool carries the code as `bridge.<code>:` in its message.
+The reference lists every code under
+[Failures](/docs/reference/mcp-tools-agents#failures).
 
 ## See also
 
 - [Connect MCP servers](/docs/guides/connect-mcp) — the other bundled servers and the approvals flow.
 - [Run agents](/docs/guides/run-agents) — install and manage Hermes, and its command approvals.
-- [`hal0-agents` tool reference](/docs/reference/mcp-tools#hal0-agents-mcpagents) — every tool and argument.
+- [`hal0-agents` tool reference](/docs/reference/mcp-tools-agents) — every tool and argument.
 - [`hal0 bridge`](/docs/reference/cli-operator#hal0-bridge--admit-remote-coding-agents) — the CLI.
