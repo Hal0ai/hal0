@@ -478,6 +478,20 @@ async def test_list_runs_filters_by_status(
     assert len(await svc.list_runs(cc, limit=1)) == 1
 
 
+async def test_list_runs_client_filter(
+    svc: BridgeService, planner: Planner, cc: Caller, other: Caller, admin: Caller
+) -> None:
+    """``client`` narrows the admin view; a bridge caller cannot widen its own."""
+    mine = await svc.start_run(cc, agent="hermes", input="a")
+    theirs = await svc.start_run(other, agent="hermes", input="b")
+    assert {r["run_id"] for r in await svc.list_runs(admin)} == {mine["run_id"], theirs["run_id"]}
+    assert [r["run_id"] for r in await svc.list_runs(admin, client="cc")] == [mine["run_id"]]
+    assert await svc.list_runs(admin, client="nobody") == []
+    assert [r["run_id"] for r in await svc.list_runs(cc, client="cc")] == [mine["run_id"]]
+    assert await svc.list_runs(cc, client="other") == []
+    assert [r["run_id"] for r in await svc.list_runs(cc, client=None)] == [mine["run_id"]]
+
+
 # -- concurrency -------------------------------------------------------------------------
 
 

@@ -11,6 +11,13 @@ client asks who it is::
     DELETE /api/bridge/clients/{name}          — revoke the key (the name stays taken)
     GET    /api/bridge/me                      — the caller's own record
 
+and the operator watches and stops the runs clients have delegated to Hermes::
+
+    GET    /api/bridge/runs                    — runs, newest first (?client= ?status= ?limit=)
+    GET    /api/bridge/runs/{run_id}           — one run
+    GET    /api/bridge/runs/{run_id}/events    — SSE: ledger replay, then live, until the run ends
+    POST   /api/bridge/runs/{run_id}/stop      — ask Hermes to stop a live run
+
 Auth
 ----
 
@@ -38,24 +45,36 @@ Disabled
 and re-scoping a client and ``GET /me`` answer 404 ``bridge.disabled``, from a
 router-level dependency that runs before the body is validated. Listing and
 revoking keep working, so an operator can clean up clients while the bridge is
-off: no bridge key verifies then anyway (ADR-0043, Decision 6).
+off: no bridge key verifies then anyway (ADR-0043, Decision 6). The run
+routes are gated like add and rotate: ADMIN class, and 404 ``bridge.disabled``
+while the bridge is off.
+
+The run routes are thin projections of the :class:`~hal0.bridge.service.BridgeService`
+on ``app.state.bridge_service`` (the ``bridge`` boot phase; ``None`` when it could
+not be built, which answers 503 ``bridge.unavailable``). They act as the admin
+caller, so they see every client's runs. A :class:`~hal0.bridge.errors.BridgeError`
+from the service keeps its code and status in the envelope.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+import json
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, NoReturn
 
 import structlog
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Header, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 from hal0.api import live_sockets
 from hal0.api.auth import bridge_enabled, judged_principal
 from hal0.api.routes.config import api_base_url
+from hal0.bridge.errors import BridgeError
 from hal0.bridge.keys import SCOPE_SERVERS
-from hal0.bridge.store import BridgeStore, BridgeStoreError, ClientRow
+from hal0.bridge.service import BridgeService, Caller
+from hal0.bridge.store import TERMINAL_STATUSES, BridgeStore, BridgeStoreError, ClientRow
 from hal0.config import paths
 from hal0.config.loader import load_hal0_config
 from hal0.errors import Conflict, Hal0Error, NotFound, Unauthorized, UnprocessableEntity
@@ -72,12 +91,26 @@ _DISABLED_MESSAGE = "The agent bridge is disabled in [bridge] config."
 #: the caller is always the operator's credential.
 _CREATED_BY = "api:admin"
 
+#: Seconds of silence after which a run's event stream sends a ``: keepalive`` comment.
+STREAM_KEEPALIVE_S = 10.0
+
+#: Events read from the ledger per query while a run's stream replays.
+_EVENT_PAGE = 200
+
 
 class BridgeStoreUnavailable(Hal0Error):
     """``bridge.db`` could not be opened at boot, so no client can be read or written."""
 
     code = "bridge.store_unavailable"
     status = 503
+
+
+class BridgeFailure(Hal0Error):
+    """A :class:`~hal0.bridge.errors.BridgeError` in the shared envelope: same code, message, status."""
+
+    def __init__(self, error: BridgeError) -> None:
+        super().__init__(error.message, code=error.code)
+        self.status = error.status
 
 
 class CreateClientBody(BaseModel):
@@ -143,8 +176,13 @@ def _store_while_off(request: Request) -> BridgeStore | None:
     return _store(request)
 
 
-def _raise_for(exc: BridgeStoreError) -> NoReturn:
-    """Map a store refusal onto the shared error envelope, keeping its ``bridge.*`` code."""
+def _raise_for(exc: BridgeStoreError | BridgeError) -> NoReturn:
+    """Map a store or service refusal onto the shared error envelope, keeping its ``bridge.*`` code.
+
+    A :class:`BridgeError` carries its own HTTP status; a store refusal is mapped by code.
+    """
+    if isinstance(exc, BridgeError):
+        raise BridgeFailure(exc) from exc
     error_class: dict[str, type[Hal0Error]] = {
         "bridge.client_exists": Conflict,
         "bridge.client_not_found": NotFound,
@@ -164,6 +202,43 @@ async def _run[**P, T](fn: Callable[P, T], *args: P.args, **kwargs: P.kwargs) ->
         return await asyncio.to_thread(fn, *args, **kwargs)
     except BridgeStoreError as exc:
         _raise_for(exc)
+
+
+async def _serve[T](work: Awaitable[T]) -> T:
+    """Await a :class:`BridgeService` call, mapping its refusals."""
+    try:
+        return await work
+    except BridgeError as exc:
+        _raise_for(exc)
+
+
+def _service(request: Request) -> BridgeService:
+    """Return the run service, or refuse with 503 when it is not running.
+
+    The bridge being off is refused before this runs, by :data:`_gated`.
+    """
+    service: BridgeService | None = getattr(request.app.state, "bridge_service", None)
+    if service is None:
+        _raise_for(
+            BridgeError(
+                "bridge.unavailable",
+                "The agent bridge's run service is not running; see the hal0-api log.",
+            )
+        )
+    return service
+
+
+def _caller(request: Request) -> Caller:
+    """Who the run routes act as: the admin, whose view is every client's runs.
+
+    These routes are ADMIN class, so only the operator's credential reaches them
+    (or anyone, on a box with auth off). A bridge principal that got here anyway
+    is held to its own runs.
+    """
+    principal = judged_principal(request)
+    if principal.tier == "bridge":
+        return Caller.from_principal(principal)
+    return Caller("admin", "admin")
 
 
 def _configured_public_url(fallback: Any) -> str | None:
@@ -293,6 +368,124 @@ async def revoke_client(name: str, request: Request) -> dict[str, Any]:
     row = await _run(store.revoke_client, name)
     live_sockets.revalidate()
     return {"client": row.as_dict()}
+
+
+@_gated.get("/runs")
+async def list_runs(
+    request: Request,
+    client: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=200),
+) -> dict[str, Any]:
+    """Runs, newest first; ``client`` and ``status`` narrow the list."""
+    service = _service(request)
+    items = await _serve(
+        service.list_runs(_caller(request), status=status, limit=limit, client=client)
+    )
+    return {"items": items}
+
+
+@_gated.get("/runs/{run_id}")
+async def get_run(run_id: str, request: Request) -> dict[str, Any]:
+    """One run's RunView; 404 ``bridge.run_not_found`` for an id the ledger does not hold."""
+    service = _service(request)
+    return await _serve(service.get_run(_caller(request), run_id))
+
+
+@_gated.post("/runs/{run_id}/stop")
+async def stop_run(run_id: str, request: Request) -> dict[str, Any]:
+    """Ask Hermes to stop a live run. The view shows ``stopping`` until the run ends."""
+    service = _service(request)
+    return await _serve(service.stop_run(_caller(request), run_id))
+
+
+def _sse_name(name: str) -> str:
+    """An SSE field value on one line (an event name from Hermes must not inject fields)."""
+    return " ".join(name.split())
+
+
+def _event_frame(event: dict[str, Any]) -> str:
+    """One ledger event as an SSE frame: ``id`` is its sequence, ``data`` the whole event."""
+    return f"id: {event['seq']}\nevent: {_sse_name(str(event['event']))}\ndata: {json.dumps(event)}\n\n"
+
+
+def _closed_frame(view: dict[str, Any]) -> str:
+    """The last frame of a stream: the run ended and everything it recorded has been sent."""
+    body = json.dumps({"run_id": view["run_id"], "status": view["status"]})
+    return f"event: run.closed\ndata: {body}\n\n"
+
+
+async def run_event_frames(
+    request: Request, service: BridgeService, caller: Caller, run_id: str, *, since_seq: int
+) -> AsyncIterator[str]:
+    """SSE frames for one run: the ledger from ``since_seq``, then live until the run ends.
+
+    Each loop takes the run's change signal before reading, so a change that
+    lands during the read still wakes the wait. The status is read before the
+    events: the watcher writes a run's last event and its terminal status in one
+    transaction, so a terminal status means the events read next are complete.
+    A ``: keepalive`` comment goes out after :data:`STREAM_KEEPALIVE_S` of
+    silence. The stream also ends when the client disconnects or the run is
+    pruned mid-stream.
+    """
+    cursor = since_seq
+    while True:
+        if await request.is_disconnected():
+            return
+        signal = service.change_signal(run_id)
+        try:
+            view = await service.get_run(caller, run_id)
+            events = await service.run_events(caller, run_id, since_seq=cursor, limit=_EVENT_PAGE)
+        except BridgeError:
+            return
+        for event in events:
+            cursor = event["seq"]
+            yield _event_frame(event)
+        if len(events) == _EVENT_PAGE:
+            continue  # a full page: more may be waiting
+        if view["status"] in TERMINAL_STATUSES:
+            yield _closed_frame(view)
+            return
+        try:
+            await asyncio.wait_for(signal.wait(), STREAM_KEEPALIVE_S)
+        except TimeoutError:
+            yield ": keepalive\n\n"
+
+
+def _resume_point(last_event_id: str | None) -> int:
+    """The sequence an ``EventSource`` reconnect resumes after (``Last-Event-ID``), else 0."""
+    if last_event_id is not None and last_event_id.isdecimal():
+        return int(last_event_id)
+    return 0
+
+
+@_gated.get("/runs/{run_id}/events")
+async def stream_run_events(
+    run_id: str,
+    request: Request,
+    since_seq: int | None = Query(default=None, ge=0),
+    last_event_id: str | None = Header(default=None),
+) -> StreamingResponse:
+    """SSE: the run's recorded events after ``since_seq``, then live ones until it ends.
+
+    Frames are ``id: <seq>``, ``event: <name>``, ``data: <event as JSON>``. After
+    the run's last event comes ``event: run.closed`` and the stream ends.
+    ``since_seq`` wins over a ``Last-Event-ID`` header; with neither, the stream
+    starts at the run's first event. An unknown run is a 404 before any stream.
+    """
+    service = _service(request)
+    caller = _caller(request)
+    await _serve(service.get_run(caller, run_id))
+    start = since_seq if since_seq is not None else _resume_point(last_event_id)
+    return StreamingResponse(
+        run_event_frames(request, service, caller, run_id, since_seq=start),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @_gated.get("/me")

@@ -14,7 +14,7 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import structlog
@@ -146,9 +146,12 @@ from hal0.api.routes import (
 from hal0.api.routes import (
     stacks as stacks_routes,
 )
+from hal0.bridge.hermes_client import HermesGateway
+from hal0.bridge.service import BridgeService
 from hal0.capabilities.orchestrator import CapabilityOrchestrator
 from hal0.config.loader import ConfigParseError, load_hal0_config, load_upstreams_config
 from hal0.config.paths import activity_db
+from hal0.config.schema import BridgeConfig
 from hal0.dispatcher.router import Dispatcher
 from hal0.events import EventBus
 from hal0.hardware.probe import HardwareProbe
@@ -161,6 +164,9 @@ from hal0.registry.store import ModelRegistry
 from hal0.slots.manager import SlotManager
 from hal0.upstreams.huggingface import hf_token_from_env
 from hal0.upstreams.registry import Upstream, UpstreamRegistry, upstream_from_entry
+
+if TYPE_CHECKING:
+    from hal0.bridge.store import BridgeStore
 
 log = structlog.get_logger(__name__)
 
@@ -1147,6 +1153,9 @@ class BootState:
     stop_memory_reprobe_task: Any = None
     hermes_reconcile_task: asyncio.Task[None] | None = None
     stop_hermes_reconcile_task: Any = None
+    bridge_reattach_task: asyncio.Task[int] | None = None
+    bridge_maintenance_task: asyncio.Task[None] | None = None
+    stop_bridge: Any = None
     omni_router_client: httpx.AsyncClient | None = None
     boot_report: BootReport = field(default_factory=BootReport)
 
@@ -1412,7 +1421,6 @@ async def _boot_bridge_store(app: FastAPI, ctx: BootState) -> None:
     and bridge keys do not verify, but the rest of hal0 boots.
     """
     from hal0.api import auth as auth_module
-    from hal0.bridge.store import BridgeStore
     from hal0.config import paths
 
     def _open() -> BridgeStore:
@@ -1437,6 +1445,143 @@ async def _boot_bridge_store(app: FastAPI, ctx: BootState) -> None:
         app.state.bridge_store = await asyncio.to_thread(_open)
     except Exception as exc:
         log.warning("hal0.bridge.store_unavailable", error=f"{type(exc).__name__}: {exc}")
+
+
+#: Seconds between the agent bridge's retention passes (ADR-0043 decision 9).
+BRIDGE_MAINTENANCE_INTERVAL_S: float = 3600
+
+#: Longest the bridge boot phase waits for ``BridgeService.reattach`` before it
+#: lets the rest of boot go ahead. Reattach asks Hermes about each live run (a
+#: call with a 600 s read timeout), so a Hermes that accepts connections and never
+#: answers must not hold hal0-api's start; the reattach carries on in the background.
+BRIDGE_REATTACH_WAIT_S: float = 20.0
+
+
+def _make_bridge_gateway() -> HermesGateway:
+    """The Hermes client the bridge boot phase hands the service (tests swap this)."""
+    from hal0.agents import hermes_api
+
+    return HermesGateway(home=hermes_api.hermes_home(), environ=os.environ)
+
+
+def _live_bridge_config(boot: BridgeConfig) -> Callable[[], BridgeConfig]:
+    """A callable returning ``[bridge]`` as ``hal0.toml`` has it now (ADR-0043 decision 6).
+
+    Limits (concurrency, retention, the clarify timeout) apply to the next
+    request or pass without a restart. ``enabled`` stays what it was at boot,
+    like the mount and the routes; a ``hal0.toml`` that cannot be read keeps the
+    boot values instead of failing the call.
+    """
+
+    def current() -> BridgeConfig:
+        try:
+            live = load_hal0_config().bridge
+        except Exception as exc:
+            log.warning("hal0.bridge.config_unreadable", error=f"{type(exc).__name__}: {exc}")
+            return boot
+        return live.model_copy(update={"enabled": boot.enabled})
+
+    return current
+
+
+async def _bridge_maintenance_loop(
+    store: BridgeStore,
+    config: Callable[[], BridgeConfig],
+    *,
+    interval_s: float = BRIDGE_MAINTENANCE_INTERVAL_S,
+) -> None:
+    """Delete bridge runs older than ``[bridge].run_retention_days``, every ``interval_s``.
+
+    The first pass runs at once (hal0-api restarts often, an hour's wait would
+    skip it); the retention is read fresh each pass. A failed pass is logged and
+    the loop goes on; it ends only when cancelled.
+    """
+    while True:
+        try:
+            days = config().run_retention_days
+            pruned = await asyncio.to_thread(store.prune_runs, time.time() - days * 86400)
+            if pruned:
+                log.info("hal0.bridge.runs_pruned", runs=pruned, retention_days=days)
+        except Exception as exc:
+            log.warning("hal0.bridge.maintenance_failed", error=f"{type(exc).__name__}: {exc}")
+        await asyncio.sleep(interval_s)
+
+
+async def _nothing_to_stop() -> None:
+    """The shutdown step of a phase that started nothing."""
+
+
+async def _boot_bridge(app: FastAPI, ctx: BootState) -> None:
+    """Phase — build the agent bridge's run service and resume live runs (non-fatal; ADR-0043).
+
+    Publishes ``app.state.bridge_service`` for the ``/api/bridge/runs*`` routes
+    and the ``hal0-agents`` tools: a :class:`BridgeService` over the bridge store,
+    the Hermes gateway, the approval inbox and the event bus. Every run the
+    ledger still holds as live is followed again (:meth:`BridgeService.reattach`),
+    and an hourly pass deletes runs past ``[bridge].run_retention_days``.
+    ``None`` when the bridge is disabled, when the store did not open, or when
+    any of this fails: the routes then answer 503 ``bridge.unavailable`` and the
+    rest of hal0 boots.
+    """
+    app.state.bridge_service = None
+    ctx.stop_bridge = _nothing_to_stop
+    store: BridgeStore | None = getattr(app.state, "bridge_store", None)
+    if store is None:  # disabled, or bridge.db did not open (_boot_bridge_store says which)
+        return
+    service: BridgeService | None = None
+    try:
+        boot_config = ctx.hal0_config.bridge
+        if not boot_config.enabled:
+            return
+        config = _live_bridge_config(boot_config)
+        service = BridgeService(
+            store=store,
+            gateway=_make_bridge_gateway(),
+            config=config,
+            approval_queue=app.state.approval_queue,
+            events=ctx.events,  # app.state.events is published by a later phase
+            memory_dispatcher=getattr(app.state, "memory_dispatcher", None),
+        )
+        reattach = asyncio.create_task(service.reattach(), name="bridge-reattach")
+        done, _pending = await asyncio.wait({reattach}, timeout=BRIDGE_REATTACH_WAIT_S)
+        if reattach in done:
+            log.info("api.boot.bridge_reattached", runs=reattach.result())
+        else:
+            log.warning("hal0.bridge.reattach_slow", wait_s=BRIDGE_REATTACH_WAIT_S)
+            ctx.bridge_reattach_task = reattach
+            reattach.add_done_callback(_log_bridge_reattach)
+    except Exception as exc:
+        log.warning("hal0.bridge.boot_failed", error=f"{type(exc).__name__}: {exc}")
+        if service is not None:
+            with contextlib.suppress(Exception):
+                await service.close()
+        return
+    built: BridgeService = service
+    app.state.bridge_service = built
+    ctx.bridge_maintenance_task = asyncio.create_task(
+        _bridge_maintenance_loop(store, config), name="bridge-maintenance"
+    )
+
+    async def _stop_bridge() -> None:
+        for task in (ctx.bridge_maintenance_task, ctx.bridge_reattach_task):
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+        await built.close()
+
+    ctx.stop_bridge = _stop_bridge
+
+
+def _log_bridge_reattach(task: asyncio.Task[int]) -> None:
+    """Report how a reattach that outlived the boot wait ended."""
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        log.warning("hal0.bridge.reattach_failed", error=f"{type(error).__name__}: {error}")
+    else:
+        log.info("api.boot.bridge_reattached", runs=task.result())
 
 
 async def _hermes_reconcile_loop(registry: Any, model_cache: Any = None) -> None:
@@ -2678,6 +2823,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await _run_boot_phase(report, "dispatcher", lambda: _boot_dispatcher(app, ctx))
     await _run_boot_phase(report, "hermes_upstreams", lambda: _boot_hermes_upstreams(app, ctx))
     await _run_boot_phase(report, "bridge_store", lambda: _boot_bridge_store(app, ctx))
+    await _run_boot_phase(report, "bridge", lambda: _boot_bridge(app, ctx))
     # ``slot_reconcile`` starts the READY model-cache refresher (#2442) before
     # the AsyncExitStack below exists; a later phase failing must not leave
     # it subscribed.
@@ -2702,6 +2848,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if ctx.stop_refresh_task is not None:
             with contextlib.suppress(Exception):
                 await ctx.stop_refresh_task()
+        if ctx.stop_bridge is not None:
+            with contextlib.suppress(Exception):
+                await ctx.stop_bridge()
         raise
 
     from contextlib import AsyncExitStack
@@ -2719,6 +2868,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 ("runner_catalogue_sync_task", ctx.stop_runner_catalogue_sync_task),
                 ("memory_reprobe_task", ctx.stop_memory_reprobe_task),
                 ("hermes_reconcile_task", ctx.stop_hermes_reconcile_task),
+                ("bridge", ctx.stop_bridge),
             ):
                 stack.push_async_callback(_bounded_shutdown_step(name, stop))
             ctx.metrics_service.start()

@@ -393,13 +393,27 @@ class BridgeService:
         return _view(await self._owned(caller, run_id))
 
     async def list_runs(
-        self, caller: Caller, *, status: str | None = None, limit: int = 20
+        self,
+        caller: Caller,
+        *,
+        status: str | None = None,
+        limit: int = 20,
+        client: str | None = None,
     ) -> list[dict[str, Any]]:
-        """The caller's runs (the admin key: every client's), newest first."""
-        client = None if caller.tier == "admin" else caller.name
+        """The caller's runs (the admin key: every client's), newest first.
+
+        ``client`` narrows the admin view to one client's runs. A bridge caller
+        only ever sees its own, so a ``client`` naming anyone else matches nothing.
+        """
+        if caller.tier == "admin":
+            scope = client
+        elif client is not None and client != caller.name:
+            return []
+        else:
+            scope = caller.name
         rows = await asyncio.to_thread(
             self._store.list_runs,
-            client=client,
+            client=scope,
             status=status,
             limit=min(max(int(limit), 1), _MAX_LIST),
         )
