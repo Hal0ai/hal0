@@ -165,7 +165,7 @@ ADR-0035 was verified against), shapes the answer:
    its server and mount). The lines are pasted on another machine, so their
    base is `[network].public_url` when set, else the address the request
    reached hal0-api at, with a loopback host (the CLI calls the API on
-   `127.0.0.1`) replaced by the box's first LAN address on the API port.
+   `127.0.0.1`) replaced by the address of the box's default-route interface on the API port.
 6. **`[bridge]` in `hal0.toml` holds the limits, and the bridge is on by
    default.** `BridgeConfig` (`extra="forbid"`) has `enabled = true`,
    `max_concurrent_runs_per_client = 2`, `run_retention_days = 7` and
