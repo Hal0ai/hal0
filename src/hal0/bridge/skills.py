@@ -374,13 +374,31 @@ def _write_marker(scratch_fd: int, marker: str, body: dict[str, str]) -> None:
 
 
 def _read_marker(scratch_fd: int, marker: str) -> dict[str, str] | None:
-    """A swap marker's ``{name, category, stage, old}``, or None when it is not one we wrote."""
+    """A swap marker's ``{name, category, stage, old}``, or None when it is not one we wrote.
+
+    Only hal0 writes the scratch directory, but it is on disk: an entry named like a
+    marker that is a directory, a FIFO or a link, or that cannot be read, is no
+    marker (logged ``bridge.skill_marker_unreadable``), so :meth:`SkillLibrary._recover`
+    carries on. ``O_NONBLOCK`` keeps a FIFO from blocking the open under the write
+    lock, and ``fstat`` refuses anything but a regular file before it is read.
+    """
     try:
-        fd = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=scratch_fd)
-    except OSError:
+        fd = os.open(
+            marker,
+            os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=scratch_fd,
+        )
+    except OSError as exc:
+        log.warning("bridge.skill_marker_unreadable marker=%s error=%s", marker, exc)
         return None
     try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            log.warning("bridge.skill_marker_unreadable marker=%s error=not a regular file", marker)
+            return None
         raw = os.read(fd, 4096)
+    except OSError as exc:
+        log.warning("bridge.skill_marker_unreadable marker=%s error=%s", marker, exc)
+        return None
     finally:
         os.close(fd)
     try:

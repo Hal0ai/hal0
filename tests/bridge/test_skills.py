@@ -1059,3 +1059,25 @@ def test_a_marker_that_is_not_ours_is_reaped_without_acting_on_it(
     lib.put("other", md("other"))
     assert os.listdir(scratch(lib)) == []
     assert visible(lib) == ["other"]
+
+
+@pytest.mark.parametrize("kind", ["directory", "fifo"])
+def test_an_entry_named_like_a_marker_that_is_no_file_does_not_break_put(
+    lib: SkillLibrary, kind: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A directory raised ``IsADirectoryError`` out of the cleanup, and a FIFO blocked the open.
+
+    Either stopped every put and delete; now it is no marker, logged, and reaped.
+    """
+    scratch(lib).mkdir(parents=True)
+    entry = scratch(lib) / f"stage-demo-{HEX_A}.json"
+    if kind == "directory":
+        entry.mkdir()
+        (entry / "inside").write_text("x")
+    else:
+        os.mkfifo(entry)
+    with caplog.at_level("WARNING", logger="hal0.bridge.skills"):
+        lib.put("other", md("other"))
+    assert visible(lib) == ["other"]
+    assert os.listdir(scratch(lib)) == []
+    assert "bridge.skill_marker_unreadable" in caplog.text

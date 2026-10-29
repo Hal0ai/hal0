@@ -58,17 +58,19 @@ behind for a Hermes profile:
   ``agent_skill_delete``); nothing is written until the operator approves, and
   a request that could never succeed (invalid, or a shipped skill's name) is
   refused before anything is queued. A put and a delete of one name can both be
-  pending. For a put: an identical re-push is the same row; an edited re-push by
-  the *same client* withdraws its older row, so approving always writes what the
-  card shows; an edited push while *another client's* put of that name is
-  pending is 409 ``bridge.skill_pending_elsewhere``. A client holds at most
-  :data:`MAX_PENDING_SKILL_CHANGES` pending skill changes (429
+  pending. For a put: an identical re-push by the same client is the same row
+  (an identical push by another client is that client's own row); an edited
+  re-push by the *same client* withdraws its older row, so approving always
+  writes what the card shows; an edited push while *another client's* put of
+  that name is pending is 409 ``bridge.skill_pending_elsewhere``. A client holds
+  at most :data:`MAX_PENDING_SKILL_CHANGES` pending skill changes (429
   ``bridge.too_many_pending``); the queue lets go of a resolved row's executor,
   which is what holds the pushed content. A push must be reviewable on its card
   in full: ``SKILL.md`` at most 16 KiB, the whole push at most 48 KiB, all of it
-  UTF-8 text; the card carries ``SKILL.md`` and every file's content, masked by
-  the log redactor and never cut. A bigger skill is the operator's to drop in by
-  hand.
+  UTF-8 text with nothing the log redactor would mask and no control or
+  bidirectional-override character; the card carries ``SKILL.md`` and every
+  file's content exactly as approval writes them, never cut. A bigger skill is
+  the operator's to drop in by hand.
 * **Capabilities.** :func:`hal0.bridge.capabilities.capabilities_view`, off the
   event loop.
 """
@@ -173,6 +175,15 @@ MAX_PUSH_SKILL_MD_BYTES = 16 * 1024
 MAX_PUSH_TOTAL_BYTES = 48 * 1024
 
 _NOT_REVIEWABLE = "bridge pushes are limited to reviewable text (SKILL.md ≤ 16 KiB, total ≤ 48 KiB)"
+
+#: Characters that can make text display differently from what is written: the C0
+#: controls other than tab, newline and carriage return, DEL, the zero-width and
+#: directional marks (U+200B-U+200F), the bidirectional embeddings and overrides
+#: (U+202A-U+202E), the bidirectional isolates (U+2066-U+2069) and the BOM (U+FEFF).
+#: NUL is refused separately, as not text at all.
+_HIDDEN_TEXT = re.compile(
+    r"[\x01-\x08\x0b\x0c\x0e-\x1f\x7f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]"
+)
 
 #: Why a pending skill row was retired when a newer push of the same skill arrived.
 _SUPERSEDED = "superseded by a newer push of this skill"
@@ -797,15 +808,16 @@ class BridgeService:
         Validation (the reviewable-text caps, name, frontmatter, sizes, file names)
         and the shipped-name check run first, so a doomed request is refused here,
         before anything is queued: 422 ``bridge.skill_invalid`` or 403
-        ``bridge.skill_readonly``. The card's ``preview`` is the whole ``SKILL.md`` and
-        ``files`` maps each supporting file to ``{size, sha256, content}``, all text
-        masked by the log redactor and never cut (``preview_truncated`` is always
-        false). Returns
+        ``bridge.skill_readonly``. The card names the pushing ``client``; its
+        ``preview`` is the whole ``SKILL.md`` and ``files`` maps each supporting file
+        to ``{size, sha256, content}``, every text exactly what approval writes and
+        never cut (``preview_truncated`` is always false). Returns
         ``{status: "pending_approval", approval_id, name}``; the write happens only
         when the operator approves the ``agent_skill_put`` row. Another client's
-        pending put of this name is 409 ``bridge.skill_pending_elsewhere`` (unless
-        the push is identical to it, which is the same row); this client already
-        holding :data:`MAX_PENDING_SKILL_CHANGES` pending changes is 429
+        pending put of this name is 409 ``bridge.skill_pending_elsewhere``, unless
+        the push is identical to it: then this client gets its own row, and the
+        other client's is left as it is. This client already holding
+        :data:`MAX_PENDING_SKILL_CHANGES` pending changes is 429
         ``bridge.too_many_pending``.
         """
         self._check_open()
@@ -816,19 +828,26 @@ class BridgeService:
             raise _readonly(name, "changed")
         pushed = dict(files) if files else {}
         digest = _skill_digest(skill_md, pushed)
-        # Everything the approval writes is on the card, masked by the log redactor and
-        # never cut: the operator must be able to read what they approve.
+        # Everything the approval writes is on the card, byte for byte and never cut:
+        # the operator must be able to read what they approve. The text goes on raw,
+        # not through the log redactor: a mask would show the operator something
+        # other than what Hermes loads (a quoted command after a secret-shaped name is
+        # masked whole). That is safe only because _check_reviewable refused any file
+        # the redactor would change, so there is nothing secret-shaped here to mask.
+        # ``client`` names the pusher, and being in the args it is part of the
+        # queue's dedup digest: an identical push by another client is its own row.
         args: dict[str, Any] = {
             "name": name,
+            "client": caller.name,
             "bytes": total,
             "sha256": digest,
-            "preview": redact_log_line(skill_md),
+            "preview": skill_md,
             "preview_truncated": False,
             "files": {
                 fname: {
                     "size": len(pushed[fname].encode()),
                     "sha256": hashlib.sha256(pushed[fname].encode()).hexdigest(),
-                    "content": redact_log_line(pushed[fname]),
+                    "content": pushed[fname],
                 }
                 for fname in sorted(pushed)
             },
@@ -1122,15 +1141,21 @@ def _check_reviewable(skill_md: Any, files: Any) -> int:
     A bridge push is shown whole on its inbox card, so it must be text a person can
     read there: ``SKILL.md`` at most :data:`MAX_PUSH_SKILL_MD_BYTES`, everything at
     most :data:`MAX_PUSH_TOTAL_BYTES`, every file valid UTF-8 with no NUL character.
-    Anything that is not a string is left to :meth:`SkillLibrary.validate`.
+    Once the sizes pass, every file must also read on the card exactly as it is
+    written: nothing the log redactor would mask (the card would show a mask where
+    approval writes the raw text, and a skill has no business carrying a secret),
+    and no :data:`_HIDDEN_TEXT` character. Anything that is not a string is left to
+    :meth:`SkillLibrary.validate`.
     """
     parts: list[tuple[str, Any]] = [("SKILL.md", skill_md)]
     if isinstance(files, dict):
         parts += [(str(key), value) for key, value in files.items()]
     total = 0
+    texts: list[tuple[str, str]] = []
     for label, text in parts:
         if not isinstance(text, str):
             continue
+        texts.append((label, text))
         try:
             size = len(text.encode("utf-8"))
         except UnicodeEncodeError:
@@ -1148,6 +1173,19 @@ def _check_reviewable(skill_md: Any, files: Any) -> int:
         total += size
     if total > MAX_PUSH_TOTAL_BYTES:
         raise BridgeError("bridge.skill_invalid", f"{_NOT_REVIEWABLE}; the push is {total} bytes")
+    # Only now, with the sizes bounded, is each file read for what the card cannot show.
+    for label, text in texts:
+        if _HIDDEN_TEXT.search(text) or _HIDDEN_TEXT.search(label):  # the card shows both
+            raise BridgeError(
+                "bridge.skill_invalid",
+                f"{_NOT_REVIEWABLE}: {label!r} holds control or bidirectional-override characters",
+            )
+        if redact_log_line(text) != text:
+            raise BridgeError(
+                "bridge.skill_invalid",
+                f"{_NOT_REVIEWABLE}: {label!r} holds secret-shaped text the inbox card would "
+                "mask; a skill has no business carrying a secret",
+            )
     return total
 
 

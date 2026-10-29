@@ -89,10 +89,13 @@ _PRIMARY_TARGET_ARG: dict[str, str] = {
     # A delegated Hermes run has at most one approval pending at a time, and a
     # reconnect can replay its frame: one inbox row per run (ADR-0043).
     "agent_run_approval": "run_id",
-    # A bridge client's skill push or removal (ADR-0043 decision 10): one inbox row
-    # per skill name, so repeated pushes of one skill are one decision.
-    "agent_skill_put": "name",
+    # A bridge client's skill removal (ADR-0043 decision 10): one inbox row per
+    # skill name, so repeated deletes of one skill are one decision.
     "agent_skill_delete": "name",
+    # ``agent_skill_put`` has no entry on purpose: it dedups on the digest of its
+    # whole card, which names the pushing client and the content, so a repeat by
+    # the same client is one row while an identical push by another client is that
+    # client's own row (the bridge service keeps one *content* per skill pending).
 }
 
 
