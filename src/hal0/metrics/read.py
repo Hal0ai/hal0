@@ -24,6 +24,18 @@ _WINDOW_TO_TIMEDELTA = {
     "7d": timedelta(days=7),
 }
 
+# window -> (bucket count, bucket width in seconds); count * width == window length.
+_WINDOW_TO_BUCKETS = {"1h": (24, 150), "24h": (24, 3600), "7d": (21, 28800)}
+
+
+def _parse_ts(raw: Any) -> datetime | None:
+    """Parse a stored ISO timestamp; naive values are taken as UTC."""
+    try:
+        parsed = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
 
 def _percentile(values: list[float], pct: float) -> float | None:
     if not values:
@@ -97,7 +109,10 @@ def stats_summary(
     runner: str | None = None,
 ) -> dict[str, Any]:
     """``GET /api/stats`` payload: totals + per-(model,runner,device,modality) rollup."""
-    delta = _WINDOW_TO_TIMEDELTA.get(window, _WINDOW_TO_TIMEDELTA["1h"])
+    # Unknown window names fall back to 1h everywhere (delta, bucket layout).
+    window_key = window if window in _WINDOW_TO_TIMEDELTA else "1h"
+    delta = _WINDOW_TO_TIMEDELTA[window_key]
+    bucket_count, bucket_s = _WINDOW_TO_BUCKETS[window_key]
     now = datetime.now(UTC)
     start = now - delta
     out: dict[str, Any] = {
@@ -105,6 +120,15 @@ def stats_summary(
         "totals": {"requests": 0, "ok": 0, "errors": 0, "tokens_completed": 0},
         "by_model": [],
         "bench_baseline": {},
+        # Zero-filled, oldest first; the last bucket ends at window.to.
+        "buckets": [
+            {
+                "ts": (start + timedelta(seconds=i * bucket_s)).isoformat(),
+                "requests": 0,
+                "tokens_completed": 0,
+            }
+            for i in range(bucket_count)
+        ],
     }
     with connect(db_path) as conn:
         clauses = ["ts >= ?"]
@@ -119,7 +143,7 @@ def stats_summary(
 
         rows = _safe_query(
             conn,
-            f"SELECT model_id, runner, device, modality, ok, ttft_ms, prefill_tps, decode_tps, "
+            f"SELECT ts, model_id, runner, device, modality, ok, ttft_ms, prefill_tps, decode_tps, "
             f"spec_accept_rate, completion_tokens FROM request_metric WHERE {where}",
             tuple(params),
         )
@@ -133,6 +157,15 @@ def stats_summary(
                 "errors": len(rows) - total_ok,
                 "tokens_completed": total_tokens,
             }
+
+            for row in rows:
+                row_ts = _parse_ts(row["ts"])
+                if row_ts is None:
+                    continue
+                idx = int((row_ts - start).total_seconds() // bucket_s)
+                bucket = out["buckets"][min(max(idx, 0), bucket_count - 1)]
+                bucket["requests"] += 1
+                bucket["tokens_completed"] += row["completion_tokens"] or 0
 
             grouped: dict[tuple, list[sqlite3.Row]] = {}
             for row in rows:
