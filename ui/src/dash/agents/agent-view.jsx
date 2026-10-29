@@ -10,7 +10,8 @@
 //              from the standalone #memory route. Gated on the memory
 //              subsystem ([memory].enabled) via the window bridge.
 //   - MCP    — the bundled FastMCP servers (window.McpServersPanel), moved in
-//              from the dissolved Connections page.
+//              from the dissolved Connections page, and under them the bridge
+//              clients that reach hal0 over MCP (window.BridgeClientsCard).
 //
 // Hash routes (resolved here from window.location.hash):
 //   #agent                  → Overview tab (the cards landing; default)
@@ -108,6 +109,7 @@ function AgentView() {
       {tab === "mcp" && (
         <div className="conn">
           {window.McpServersPanel ? <window.McpServersPanel /> : null}
+          {window.BridgeClientsCard ? <window.BridgeClientsCard /> : null}
         </div>
       )}
     </div>

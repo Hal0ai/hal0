@@ -195,6 +195,16 @@ export const ENDPOINTS = {
   // prefix which caused the Clients tab to 404 on every real install.
   agentMcpClients: '/api/mcp/clients',
 
+  // ── Agent bridge (ADR-0043) ──────────────────────────────────────
+  // Bridge clients are the coding agents on other machines that delegate to
+  // hal0's Hermes through the hal0-agents MCP server; runs are what they
+  // delegated. Backend: src/hal0/api/routes/bridge.py.
+  bridgeClients: '/api/bridge/clients',
+  bridgeClient: (name: string) => `/api/bridge/clients/${encodeURIComponent(name)}`,
+  bridgeClientRotate: (name: string) =>
+    `/api/bridge/clients/${encodeURIComponent(name)}/rotate`,
+  bridgeRuns: '/api/bridge/runs',
+
   // ── Agents — bundled lifecycle + sidebar rollup (v0.3 PR-6) ──────
   // `agents` lives in the catalogue block above (one entry, used by
   // both the bundled-list and sidebar surfaces). The remaining

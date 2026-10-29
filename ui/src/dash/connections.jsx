@@ -28,6 +28,7 @@ import { useAuthStatus } from '@/api/hooks/useAuthStatus'
 import { useSlots } from '@/api/hooks/useSlots'
 import { slotIndicatorFromPhase } from './slot-status.js'
 import { useMcpServers } from '@/api/hooks/useMcp'
+import { useBridgeClients } from '@/api/hooks/useBridge'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
 import {
   isManagedRemote,
@@ -730,8 +731,26 @@ function AddTo({ client, servers }) {
   )
 }
 
+// ─── bridge-client count (agent bridge, ADR-0043) ─────────────────────
+// Shown on the hal0-agents row, the server bridge clients delegate through, or in the section
+// strip when that row is not listed. The clients themselves are managed in the Bridge clients
+// card under the server list (dash/agents/bridge-clients-card.jsx).
+function BridgeCount({ n }) {
+  return (
+    <a
+      className="chip info"
+      href="#agent/mcp"
+      data-testid="bridge-client-count"
+      title="Bridge clients: coding agents on other machines with a key to this box"
+      onClick={(e) => e.stopPropagation()}
+    >
+      {n} bridge {n === 1 ? 'client' : 'clients'}
+    </a>
+  )
+}
+
 // ─── one MCP server (expandable pane with its tools) ─────────────────
-function McpServerRow({ srv, defaultOpen }) {
+function McpServerRow({ srv, defaultOpen, bridgeCount }) {
   const [open, setOpen] = useCS(!!defaultOpen)
   const tools = srv.tools || []
   return (
@@ -746,6 +765,7 @@ function McpServerRow({ srv, defaultOpen }) {
           <div className="desc">{srv.desc}</div>
         </span>
         <span className="mcp-meta">
+          {bridgeCount != null && <BridgeCount n={bridgeCount} />}
           {srv.connected > 0 && <span className="chip ok">{srv.connected} connected</span>}
           <span className="chip info">{srv.transport}</span>
         </span>
@@ -939,6 +959,13 @@ function McpServersPanel() {
 
   const servers = (mcpQuery.data ?? []).map(toMcpRow)
 
+  // Live bridge clients (revoked ones are not a way in). null until the first answer.
+  const bridgeQuery = useBridgeClients()
+  const bridgeCount = bridgeQuery.data
+    ? (bridgeQuery.data.items || []).filter((c) => c.revoked_at == null).length
+    : null
+  const agentsListed = servers.some((m) => m.name === 'hal0-agents')
+
   const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:8080'
   void (cfg.data?.api || origin)
   const host = typeof window !== 'undefined' ? window.location.hostname : 'hal0'
@@ -968,6 +995,7 @@ function McpServersPanel() {
           <span className="ss-summary">
             <b>{mcpUp}</b> servers up · {toolTotal} tools exposed
           </span>
+          {bridgeCount != null && !agentsListed && <BridgeCount n={bridgeCount} />}
           <span className="grow" />
           {servers.length > 0 && (
             <div className="mcp-links">
@@ -998,7 +1026,12 @@ function McpServersPanel() {
           <div className="cn-empty mono">No MCP servers hosted.</div>
         )}
         {servers.map((m, i) => (
-          <McpServerRow key={m.name} srv={m} defaultOpen={i === 0} />
+          <McpServerRow
+            key={m.name}
+            srv={m}
+            defaultOpen={i === 0}
+            bridgeCount={m.name === 'hal0-agents' ? bridgeCount : null}
+          />
         ))}
       </div>
     </EnginePane>
