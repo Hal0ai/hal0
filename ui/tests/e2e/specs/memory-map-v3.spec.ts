@@ -1,9 +1,9 @@
 /**
  * memory-map-v3 — the dashboard's memory surface.
  *
- * The dashboard's memory surface is the full-width UNIFIED MEMORY hero
- * (dashboard-redesign .rd-mem-*): slot allocations render as colored blocks INSIDE the pool
- * bar, with a striped "other guests" block and a free remainder.
+ * The dashboard's memory surface is the unified memory bar in the Overview v2 Now band
+ * (`.ov-now`, `.ov-mem-*`): slot allocations render as colored blocks INSIDE the pool bar, with
+ * a striped "other guests" block and a free remainder.
  *
  * Every memory figure on these screens comes from the backend memory budget
  * (ADR-0039): /api/stats/hardware `memory`, read through useMemoryMapModel().
@@ -16,8 +16,8 @@
  *   - container slots attribute like any other slot (#660)
  *   - the free label is the budget's `free_gb`, not the pool total minus the
  *     drawn blocks (the attribution can overshoot the kernel's live counter)
- *   - the health strip and the top bar show this box's RAM over its limit,
- *     not over the GPU pool
+ *   - the Hardware card's RAM row and the top bar show this box's RAM over its
+ *     limit, not over the GPU pool
  *   - no Proxmox nudge on the dashboard surface (expanded-variant only)
  *
  * isSlotLive/limitedBy logic remains
@@ -82,16 +82,16 @@ test.describe('Unified memory hero (dashboard)', () => {
   test('renders the pool bar with slot blocks, free remainder and legend', async ({ page }) => {
     await mockStatsHardware(page, { configured: false, detected: false })
     await page.goto('/#dashboard')
-    const card = page.locator('.rd-mem-card')
+    const card = page.locator('.ov-now')
     await expect(card).toBeVisible()
     // Pool bar with at least one attributed slot block (the budget's per-slot
     // rows) plus the free remainder.
-    const bar = card.locator('.rd-mem-bar')
+    const bar = card.locator('.ov-membar')
     await expect(bar).toBeVisible()
-    await expect(bar.locator('.rd-mem-seg')).not.toHaveCount(0)
-    await expect(bar.locator('.rd-mem-free')).toContainText('free')
+    await expect(bar.locator('.ov-mem-seg')).not.toHaveCount(0)
+    await expect(bar.locator('.ov-mem-free')).toContainText('free')
     // Legend: one row per attributed slot + the click affordance hint.
-    await expect(card.locator('.rd-mem-leg').first()).toBeVisible()
+    await expect(card.locator('.ov-mem-leg').first()).toBeVisible()
     await expect(card).toContainText('click a block → slot')
   })
 
@@ -101,7 +101,7 @@ test.describe('Unified memory hero (dashboard)', () => {
     // device=gpu-rocm, which must NOT collapse to one device hue.
     await mockStatsHardware(page, { configured: false, detected: false })
     await page.goto('/#dashboard')
-    const swatches = page.locator('.rd-mem-card .rd-mem-leg i')
+    const swatches = page.locator('.ov-now .ov-mem-leg i')
     await expect(swatches.first()).toBeVisible()
     const count = await swatches.count()
     expect(count).toBeGreaterThanOrEqual(2)
@@ -119,27 +119,27 @@ test.describe('Unified memory hero (dashboard)', () => {
     // the card's label is the budget's, the same figure the top bar shows.
     await mockStatsHardware(page, { configured: false, detected: false })
     await page.goto('/#dashboard')
-    const card = page.locator('.rd-mem-card')
+    const card = page.locator('.ov-now')
     await expect(card).toBeVisible()
-    await expect(card.locator('.rd-mem-free')).toHaveText('free · 72.6 GB')
+    await expect(card.locator('.ov-mem-free')).toHaveText('free · 72.6 GB')
     await expect(card).not.toContainText('69.6')
     // The img slot's memory is the image engine's, shown under its own name;
     // the per-slot figures are estimates and say so, and so is the engine's
     // while the img slot's row stands in for ComfyUI's own reading.
-    const legend = card.locator('.rd-mem-legend')
+    const legend = card.locator('.ov-mem-leg')
     await expect(legend).toContainText('image engine 6.6G')
     await expect(legend).toContainText('primary 30.8G')
     await expect(legend).toContainText('tts 6.2G')
-    await expect(card.locator('.rd-mem-seg[title^="primary"]')).toHaveAttribute(
+    await expect(card.locator('.ov-mem-seg[title^="primary"]')).toHaveAttribute(
       'title',
       /^primary · 30\.8 GB \(estimated\) · /,
     )
-    await expect(card.locator('.rd-mem-seg[title^="image engine"]')).toHaveAttribute(
+    await expect(card.locator('.ov-mem-seg[title^="image engine"]')).toHaveAttribute(
       'title',
       /^image engine · 6\.6 GB \(estimated\) · /,
     )
     // Nothing else holds the pool: no striped block.
-    await expect(card.locator('.rd-mem-seg-system')).toHaveCount(0)
+    await expect(card.locator('.ov-mem-seg.sys')).toHaveCount(0)
   })
 
   test('container slot attributed as a block in the pool bar (#660)', async ({ page }) => {
@@ -174,15 +174,15 @@ test.describe('Unified memory hero (dashboard)', () => {
       memory: referenceBox([{ slot: 'primary-container', gb: 22.4, state: 'serving' }]),
     })
     await page.goto('/#dashboard')
-    const card = page.locator('.rd-mem-card')
+    const card = page.locator('.ov-now')
     await expect(card).toBeVisible()
     // The 22.4 GB container slot must register in the legend with its name…
-    await expect(card.locator('.rd-mem-legend')).toContainText('primary-container 22.4G')
+    await expect(card.locator('.ov-mem-leg')).toContainText('primary-container 22.4G')
     // …and attribute as a non-zero block in the bar, alongside the free
     // remainder. (The model attributes ONLY the budget's rows — the mock
     // slots' own mem_mb is not read, and a slot the budget omits is not drawn.)
-    await expect(card.locator('.rd-mem-bar .rd-mem-seg[title^="primary-container"]')).toHaveCount(1)
-    await expect(card.locator('.rd-mem-free')).toContainText('free')
+    await expect(card.locator('.ov-membar .ov-mem-seg[title^="primary-container"]')).toHaveCount(1)
+    await expect(card.locator('.ov-mem-free')).toContainText('free')
   })
 
   test('no Proxmox nudge on the dashboard memory surface', async ({ page }) => {
@@ -195,30 +195,32 @@ test.describe('Unified memory hero (dashboard)', () => {
       hint: 'Configure /etc/hal0/proxmox.json to see host pressure.',
     })
     await page.goto('/#dashboard')
-    const card = page.locator('.rd-mem-card')
+    const card = page.locator('.ov-now')
     await expect(card).toBeVisible()
     await expect(card).not.toContainText('Hosted on Proxmox')
     await expect(page.locator('.memmap-pve-nudge')).toHaveCount(0)
   })
 
-  test('health strip shows RAM used over the RAM limit, not over the GPU pool', async ({ page }) => {
-    // The 5-cell health strip's RAM cell reads the budget's RAM block: used
-    // over the container's limit. It used to divide RAM used by the GPU pool
-    // ("unified memory", 39.1/128 GB), which misstated a box whose RAM is capped
-    // below the pool, and it read the raw ram_used_mb counter.
+  test('Hardware card shows RAM used over the RAM limit, not over the GPU pool', async ({ page }) => {
+    // The Hardware card's RAM row reads the budget's RAM block: used over the
+    // container's limit. It used to divide RAM used by the GPU pool ("unified
+    // memory", 39.1/128 GB), which misstated a box whose RAM is capped below the
+    // pool, and it read the raw ram_used_mb counter.
     await mockStatsHardware(page, { configured: false, detected: false })
     await page.goto('/#dashboard')
-    const cell = page
-      .locator('.rd-health-cell')
-      .filter({ has: page.locator('.rd-health-k', { hasText: /^RAM$/ }) })
-    await expect(cell).toBeVisible()
+    const row = page
+      .locator('.ov-card')
+      .filter({ has: page.locator('.ov-card-t', { hasText: /^Hardware$/ }) })
+      .locator('.ov-hw')
+      .filter({ has: page.locator('.ov-k', { hasText: /^\s*ram$/ }) })
+    await expect(row).toBeVisible()
     // 16.1 GB used of the 105.5 GB container limit, shown as 106.
-    await expect(cell.locator('.rd-health-v')).toHaveText('16.1/106 GB')
-    await expect(cell.locator('.rd-health-v')).toHaveAttribute('title', 'container limit')
+    await expect(row.locator('.ov-v')).toHaveText('16.1 / 106 GB')
+    await expect(row.locator('.ov-cap')).toHaveText('this box · container limit')
     // Not the raw 40000 MB counter (39.1 GB), not the 116 GB pool.
-    await expect(cell).not.toContainText('39.1')
-    await expect(cell).not.toContainText('/116')
-    await expect(page.locator('.rd-health-k', { hasText: 'unified memory' })).toHaveCount(0)
+    await expect(row).not.toContainText('39.1')
+    await expect(row).not.toContainText('/ 116')
+    await expect(page.locator('.ov-card', { hasText: 'unified memory' })).toHaveCount(0)
   })
 
   // Live screenshot feedback (2026-08-22): the operator spotted the

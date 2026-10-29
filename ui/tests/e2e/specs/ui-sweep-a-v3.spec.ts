@@ -317,17 +317,19 @@ test.describe('ApprovalModal live wiring', () => {
 //        pointer card (design §7). Those tests were deleted; the memory
 //        surface is covered by memory-view/-tools/-graph specs instead.
 
-// ─── 7. Dashboard: compact operational toolbar ───────────────────────────
+// ─── 7. Dashboard: the Now band is the page's status line ────────────────
 
-test.describe('Dashboard hero strip', () => {
-  test('renders status metadata without the old greeting copy', async ({ page }) => {
-    // dashboard-redesign: the hero strip is .rd-hero ("steady on <host> ·
-    // N slots up …" + quick actions + customize).
+test.describe('Dashboard Now band', () => {
+  test('renders status facts without the old greeting copy', async ({ page }) => {
+    // Overview v2: the Now band (.ov-now) carries the mode pip, "N of M slots loaded" and the
+    // contextual actions; the old .rd-hero strip and its Customize toggle are gone.
     await page.goto('/#dashboard')
-    await expect(page.locator('.rd-hero')).toBeVisible({ timeout: FIVE_S })
-    await expect(page.locator('.rd-hero')).not.toContainText('Welcome back, halo')
-    await expect(page.locator('.rd-hero')).not.toContainText('system steady on')
-    await expect(page.getByRole('button', { name: /customize/i })).toBeVisible()
+    const now = page.locator('.ov-now')
+    await expect(now).toBeVisible({ timeout: FIVE_S })
+    await expect(now).toContainText('slots loaded')
+    await expect(now).not.toContainText('Welcome back, halo')
+    await expect(now).not.toContainText('system steady on')
+    await expect(page.getByRole('button', { name: /customize/i })).toHaveCount(0)
   })
 })
 

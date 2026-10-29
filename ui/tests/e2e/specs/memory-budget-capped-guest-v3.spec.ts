@@ -151,24 +151,26 @@ test.describe('Memory budget: capped second guest on a shared GPU pool', () => {
     await expect(page.locator('.infer-pane .body-status')).toContainText('0 serving · 73 GB free')
   })
 
-  test('dashboard card and health strip agree: other guests, 72.6 free, RAM over its limit', async ({
+  test('dashboard bar and Hardware card agree: other guests, 72.6 free, RAM over its limit', async ({
     page,
   }) => {
     await page.goto('/#dashboard')
-    const card = page.locator('.rd-mem-card')
+    const card = page.locator('.ov-now')
     await expect(card).toBeVisible()
     // The striped block is other guests, not a RAM-derived "system" block.
-    const striped = card.locator('.rd-mem-seg-system')
+    const striped = card.locator('.ov-mem-seg.sys')
     await expect(striped).toHaveCount(1)
     await expect(striped).toHaveAttribute('title', 'other guests · 43.4 GB')
-    await expect(card.locator('.rd-mem-legend')).toContainText('other guests 43.4G')
-    await expect(card.locator('.rd-mem-legend')).not.toContainText('system')
-    await expect(card.locator('.rd-mem-free')).toHaveText('free · 72.6 GB')
+    await expect(card.locator('.ov-mem-leg')).toContainText('other guests 43.4G')
+    await expect(card.locator('.ov-mem-leg')).not.toContainText('system')
+    await expect(card.locator('.ov-mem-free')).toHaveText('free · 72.6 GB')
 
     const ram = page
-      .locator('.rd-health-cell')
-      .filter({ has: page.locator('.rd-health-k', { hasText: /^RAM$/ }) })
-    await expect(ram.locator('.rd-health-v')).toHaveText('2.2/48 GB')
-    await expect(ram.locator('.rd-health-v')).toHaveAttribute('title', 'container limit')
+      .locator('.ov-card')
+      .filter({ has: page.locator('.ov-card-t', { hasText: /^Hardware$/ }) })
+      .locator('.ov-hw')
+      .filter({ has: page.locator('.ov-k', { hasText: /^\s*ram$/ }) })
+    await expect(ram.locator('.ov-v')).toHaveText('2.2 / 48 GB')
+    await expect(ram.locator('.ov-cap')).toHaveText('this box · container limit')
   })
 })
