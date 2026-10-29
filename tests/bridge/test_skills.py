@@ -3,14 +3,16 @@
 The library lists skills from hal0's shipped mirror (read-only; its entries
 are symlinks into ``/usr/share/hal0/skills``) and from the operator drop-in
 directory, and writes only to the drop-in directory. These tests use two
-``tmp_path`` roots and pin every validation rule, the atomic swap, and the
-refusal to follow a symlink or touch a shipped skill.
+``tmp_path`` roots and pin every validation rule, the atomic swap (staged
+where Hermes does not walk), same-name write serialisation, and the refusal to
+follow a symlink or touch a shipped skill.
 """
 
 from __future__ import annotations
 
 import os
 import stat
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +43,55 @@ def dropin(lib: SkillLibrary) -> Path:
 
 def shipped(lib: SkillLibrary) -> Path:
     return lib._shipped_root
+
+
+def scratch(lib: SkillLibrary) -> Path:
+    """Where a put stages and parks: ``<dropin>/.archive/.bridge``."""
+    return dropin(lib) / ".archive" / ".bridge"
+
+
+def visible(lib: SkillLibrary) -> list[str]:
+    """Top-level drop-in entries a directory scan would see (no dot names)."""
+    return sorted(n for n in os.listdir(dropin(lib)) if not n.startswith("."))
+
+
+#: Directory names Hermes prunes while walking a skills root: ``EXCLUDED_SKILL_DIRS``
+#: at NousResearch/hermes-agent 4d043038 (v0.22.4, our pin), ``agent/skill_utils.py:24``.
+HERMES_PRUNED = frozenset(
+    (
+        ".git",
+        ".github",
+        ".hub",
+        ".archive",
+        ".curator_backups",
+        ".locks",
+        ".venv",
+        "venv",
+        "node_modules",
+        "site-packages",
+        "__pycache__",
+        ".tox",
+        ".nox",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+    )
+)
+
+
+def hermes_sees(root: Path) -> list[str]:
+    """Every ``SKILL.md`` Hermes's ``iter_skill_index_files`` finds under ``root``.
+
+    Same walk as ``agent/skill_utils.py:859`` at 4d043038: ``os.walk`` with
+    ``followlinks=True``, pruning :data:`HERMES_PRUNED` (and the support
+    directories of a skill, which no test here creates).
+    """
+    found: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=True):
+        dirnames[:] = [d for d in dirnames if d not in HERMES_PRUNED]
+        if "SKILL.md" in filenames:
+            found.append(os.path.relpath(os.path.join(dirpath, "SKILL.md"), root))
+    return sorted(found)
 
 
 def make_skill(root: Path, name: str, text: str | None = None, **files: str) -> Path:
@@ -178,6 +229,49 @@ def test_validate_allows_a_small_data_uri(lib: SkillLibrary) -> None:
     lib.validate("demo", md(body=f"![x]({small})\n"), None)
 
 
+def data_uri(total: int, scheme: str = "data:") -> str:
+    """A ``data:`` URI exactly ``total`` characters long, scheme included."""
+    return scheme + "A" * (total - len(scheme))
+
+
+@pytest.mark.parametrize("scheme", ["data:", "DATA:", "Data:"])
+def test_validate_allows_a_data_uri_of_exactly_1024_chars(lib: SkillLibrary, scheme: str) -> None:
+    uri = data_uri(1024, scheme)
+    assert len(uri) == 1024
+    lib.validate("demo", md(body=f"![x]({uri})\n"), None)
+
+
+@pytest.mark.parametrize("scheme", ["data:", "DATA:", "Data:"])
+def test_validate_refuses_a_data_uri_of_1025_chars(lib: SkillLibrary, scheme: str) -> None:
+    uri = data_uri(1025, scheme)
+    assert len(uri) == 1025
+    assert "data:" in invalid(lib, "demo", md(body=f"![x]({uri})\n"))
+
+
+def test_validate_data_uri_boundary_counts_the_media_type(lib: SkillLibrary) -> None:
+    prefix = "data:image/png;base64,"
+    lib.validate("demo", md(body=prefix + "A" * (1024 - len(prefix)) + "\n"), None)
+    assert "data:" in invalid(lib, "demo", md(body=prefix + "A" * (1025 - len(prefix)) + "\n"))
+
+
+def test_validate_caps_file_names_at_200_utf8_bytes(lib: SkillLibrary) -> None:
+    lib.validate("demo", md(), {"k" * 200: "x"})
+    assert "200" in invalid(lib, "demo", md(), {"k" * 201: "x"})
+    # 100 two-byte characters fit; 101 are fewer than 200 characters but 202 bytes.
+    lib.validate("demo", md(), {"é" * 100: "x"})
+    assert "200" in invalid(lib, "demo", md(), {"é" * 101: "x"})
+
+
+def test_validate_rejects_a_file_name_that_is_not_utf8(lib: SkillLibrary) -> None:
+    assert "UTF-8" in invalid(lib, "demo", md(), {"\ud800": "x"})
+
+
+def test_put_writes_a_file_with_a_200_byte_name(lib: SkillLibrary) -> None:
+    key = "k" * 200
+    assert lib.put("demo", md(), {key: "x"})["files"] == [key]
+    assert (dropin(lib) / "demo" / key).read_text() == "x"
+
+
 # ── put ─────────────────────────────────────────────────────────────────────
 
 
@@ -211,8 +305,9 @@ def test_put_replaces_an_existing_skill_atomically(lib: SkillLibrary) -> None:
     d = dropin(lib) / "demo"
     assert sorted(os.listdir(d)) == ["SKILL.md", "new.md"]
     assert "new" in (d / "SKILL.md").read_text()
-    # No .tmp-/.old- leftovers beside the skill.
-    assert os.listdir(dropin(lib)) == ["demo"]
+    # No stage or parked copy beside the skill or left in the scratch directory.
+    assert visible(lib) == ["demo"]
+    assert os.listdir(scratch(lib)) == []
 
 
 def test_put_validates_before_touching_disk(lib: SkillLibrary) -> None:
@@ -319,7 +414,8 @@ def test_put_failure_midway_leaves_the_old_skill_and_no_debris(
     d = dropin(lib) / "demo"
     assert sorted(os.listdir(d)) == ["SKILL.md", "keep.md"]
     assert "old" in (d / "SKILL.md").read_text()
-    assert os.listdir(dropin(lib)) == ["demo"]
+    assert visible(lib) == ["demo"]
+    assert os.listdir(scratch(lib)) == []
 
 
 # ── list ────────────────────────────────────────────────────────────────────
@@ -333,6 +429,8 @@ def test_list_sees_both_roots_and_categories(lib: SkillLibrary, tmp_path: Path) 
     # Debris and non-skills are not listed.
     (dropin(lib) / ".tmp-x-1").mkdir()
     (dropin(lib) / ".old-x-1").mkdir()
+    make_skill(scratch(lib), "stage-leftover-1")
+    make_skill(dropin(lib) / ".archive", "archived")
     (dropin(lib) / "empty-dir").mkdir()
     (dropin(lib) / "stray.txt").write_text("x")
 
@@ -454,7 +552,7 @@ def test_get_does_not_read_through_a_dropin_symlink(lib: SkillLibrary, tmp_path:
 def test_delete_removes_the_dropin_dir(lib: SkillLibrary) -> None:
     lib.put("demo", md(), {"a.md": "a"})
     lib.delete("demo")
-    assert os.listdir(dropin(lib)) == []
+    assert visible(lib) == []
 
 
 def test_delete_removes_a_categorised_dropin_skill(lib: SkillLibrary) -> None:
@@ -504,3 +602,288 @@ def test_delete_rejects_malformed_names(lib: SkillLibrary, name: str) -> None:
     with pytest.raises(BridgeError) as exc:
         lib.delete(name)
     assert exc.value.code == "bridge.skill_invalid"
+
+
+# ── staging lives where Hermes does not walk ────────────────────────────────
+
+
+def test_put_stages_and_parks_where_hermes_does_not_walk(
+    lib: SkillLibrary, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lib.put("demo", md(description="old"), {"a.md": "a"})
+    seen: dict[str, Any] = {}
+    real_stage = SkillLibrary._stage
+    real_replace = os.replace
+
+    def spy_stage(stage: Path, skill_md: str, files: dict[str, str]) -> None:
+        real_stage(stage, skill_md, files)
+        seen["stage"] = stage
+        seen["stage_files"] = sorted(os.listdir(stage))
+        seen["after_stage"] = hermes_sees(dropin(lib))
+
+    def spy_replace(src: Any, dst: Any, **kw: Any) -> None:
+        if str(src).startswith("stage-"):
+            # The old copy is parked, the new one not yet in place.
+            seen["between_renames"] = hermes_sees(dropin(lib))
+        real_replace(src, dst, **kw)
+
+    monkeypatch.setattr(SkillLibrary, "_stage", staticmethod(spy_stage))
+    monkeypatch.setattr(os, "replace", spy_replace)
+    lib.put("demo", md(description="new"), {"b.md": "b"})
+
+    assert seen["stage"].parent == scratch(lib)
+    assert seen["stage"].name.startswith("stage-demo-")
+    # A complete stage is on disk, and Hermes still sees exactly the old skill.
+    assert seen["stage_files"] == ["SKILL.md", "b.md"]
+    assert seen["after_stage"] == ["demo/SKILL.md"]
+    assert seen["between_renames"] == []
+    assert hermes_sees(dropin(lib)) == ["demo/SKILL.md"]
+
+
+def test_put_creates_the_scratch_directories_mode_0755(lib: SkillLibrary) -> None:
+    old = os.umask(0o077)
+    try:
+        lib.put("demo", md())
+    finally:
+        os.umask(old)
+    assert mode(dropin(lib) / ".archive") == 0o755
+    assert mode(scratch(lib)) == 0o755
+
+
+def make_stale_scratch(lib: SkillLibrary, victim: Path) -> None:
+    scratch(lib).mkdir(parents=True, exist_ok=True)
+    make_skill(scratch(lib), "stage-demo-aaa")
+    make_skill(scratch(lib), "old-demo-bbb", extra="x")
+    (scratch(lib) / "old-demo-bbb" / "nested").mkdir()
+    (scratch(lib) / "old-demo-bbb" / "nested" / "f").write_text("f")
+    (scratch(lib) / "stray-file").write_text("x")
+    (scratch(lib) / "old-link").symlink_to(victim, target_is_directory=True)
+
+
+def test_put_reaps_every_stale_scratch_entry_without_following_links(
+    lib: SkillLibrary, tmp_path: Path
+) -> None:
+    victim = make_skill(tmp_path / "victim-root", "victim")
+    make_stale_scratch(lib, victim)
+    lib.put("demo", md())
+    assert os.listdir(scratch(lib)) == []
+    assert (victim / "SKILL.md").is_file()
+
+
+def test_delete_reaps_every_stale_scratch_entry_without_following_links(
+    lib: SkillLibrary, tmp_path: Path
+) -> None:
+    victim = make_skill(tmp_path / "victim-root", "victim")
+    lib.put("demo", md())
+    make_stale_scratch(lib, victim)
+    lib.delete("demo")
+    assert os.listdir(scratch(lib)) == []
+    assert visible(lib) == []
+    assert (victim / "SKILL.md").is_file()
+
+
+def test_delete_of_an_unknown_name_still_reaps(lib: SkillLibrary, tmp_path: Path) -> None:
+    make_stale_scratch(lib, make_skill(tmp_path / "victim-root", "victim"))
+    with pytest.raises(BridgeError) as exc:
+        lib.delete("nope")
+    assert exc.value.code == "bridge.skill_not_found"
+    assert os.listdir(scratch(lib)) == []
+
+
+def test_delete_without_a_scratch_directory_creates_none(lib: SkillLibrary) -> None:
+    make_skill(dropin(lib), "demo")
+    lib.delete("demo")
+    assert os.listdir(dropin(lib)) == []
+
+
+@pytest.mark.parametrize("op", ["put", "delete"])
+@pytest.mark.parametrize("link", [".archive", ".bridge"])
+def test_a_symlinked_scratch_directory_is_refused(
+    lib: SkillLibrary, tmp_path: Path, link: str, op: str
+) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "keep").write_text("keep")
+    make_skill(dropin(lib), "demo")
+    if link == ".archive":
+        (dropin(lib) / ".archive").symlink_to(elsewhere, target_is_directory=True)
+    else:
+        (dropin(lib) / ".archive").mkdir()
+        (dropin(lib) / ".archive" / ".bridge").symlink_to(elsewhere, target_is_directory=True)
+    with pytest.raises(BridgeError) as exc:
+        if op == "put":
+            lib.put("demo", md(description="new"))
+        else:
+            lib.delete("demo")
+    assert exc.value.code == "bridge.skill_invalid"
+    assert "symlink" in exc.value.message
+    assert os.listdir(elsewhere) == ["keep"]
+    assert "old" not in (dropin(lib) / "demo" / "SKILL.md").read_text()
+    assert (dropin(lib) / "demo" / "SKILL.md").is_file()
+
+
+def test_a_scratch_path_that_is_a_file_is_refused(lib: SkillLibrary) -> None:
+    (dropin(lib) / ".archive").write_text("not a dir")
+    with pytest.raises(BridgeError) as exc:
+        lib.put("demo", md())
+    assert exc.value.code == "bridge.skill_invalid"
+    assert (dropin(lib) / ".archive").read_text() == "not a dir"
+    assert visible(lib) == []
+
+
+def test_a_link_planted_at_the_name_mid_put_is_replaced_not_followed(
+    lib: SkillLibrary, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    victim = make_skill(tmp_path / "victim-root", "victim")
+    real_stage = SkillLibrary._stage
+
+    def stage_then_plant(stage: Path, skill_md: str, files: dict[str, str]) -> None:
+        real_stage(stage, skill_md, files)
+        (dropin(lib) / "demo").symlink_to(victim, target_is_directory=True)
+
+    monkeypatch.setattr(SkillLibrary, "_stage", staticmethod(stage_then_plant))
+    got = lib.put("demo", md(), {"n.md": "n"})
+    assert not (dropin(lib) / "demo").is_symlink()
+    assert got["files"] == ["n.md"]
+    assert sorted(os.listdir(victim)) == ["SKILL.md"]
+    assert os.listdir(scratch(lib)) == []
+
+
+# ── same-name writers are serialised ────────────────────────────────────────
+
+
+def run_threads(targets: list[Any]) -> list[BaseException]:
+    errors: list[BaseException] = []
+    barrier = threading.Barrier(len(targets))
+
+    def wrap(target: Any) -> None:
+        barrier.wait()
+        try:
+            target()
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=wrap, args=(t,)) for t in targets]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return errors
+
+
+def hammer(library: SkillLibrary, worker: int) -> None:
+    """20 puts of one name; each must return the skill *this* call wrote.
+
+    ``put`` reads its result back inside the write lock, so no other writer's
+    swap can land between its rename and that read.
+    """
+    for k in range(20):
+        got = library.put("demo", md(description=f"w{worker}-{k}"), {"a.md": "a"})
+        assert f"description: w{worker}-{k}\n" in got["skill_md"]
+        assert got["files"] == ["a.md"]
+
+
+def assert_one_clean_skill(lib: SkillLibrary) -> None:
+    assert visible(lib) == ["demo"]
+    assert os.listdir(scratch(lib)) == []
+    assert hermes_sees(dropin(lib)) == ["demo/SKILL.md"]
+    assert lib.get("demo")["files"] == ["a.md"]
+
+
+def test_concurrent_puts_of_one_name_do_not_fail_or_leave_debris(lib: SkillLibrary) -> None:
+    errors = run_threads([lambda w=w: hammer(lib, w) for w in range(4)])
+    assert errors == []
+    assert_one_clean_skill(lib)
+
+
+def test_the_write_lock_is_shared_by_libraries_on_one_dropin_root(lib: SkillLibrary) -> None:
+    others = [SkillLibrary(shipped_root=shipped(lib), dropin_root=dropin(lib)) for _ in range(3)]
+    errors = run_threads([lambda w=w, o=o: hammer(o, w) for w, o in enumerate([lib, *others])])
+    assert errors == []
+    assert_one_clean_skill(lib)
+
+
+def test_concurrent_puts_and_deletes_leave_no_debris_and_no_stray_errors(
+    lib: SkillLibrary,
+) -> None:
+    lib.put("demo", md(), {"a.md": "a"})
+
+    def deleter() -> None:
+        for _ in range(20):
+            try:
+                lib.delete("demo")
+            except BridgeError as exc:
+                assert exc.code == "bridge.skill_not_found"
+
+    errors = run_threads([lambda: hammer(lib, 0), lambda: hammer(lib, 1), deleter, deleter])
+    assert errors == []
+    assert os.listdir(scratch(lib)) == []
+    assert hermes_sees(dropin(lib)) in ([], ["demo/SKILL.md"])
+
+
+# ── the shipped root follows its directory links and nothing below them ─────
+
+
+@pytest.fixture
+def secret(tmp_path: Path) -> Path:
+    path = tmp_path / "hal0-readable-secret"
+    path.write_text("api_key=SECRET")
+    return path
+
+
+@pytest.mark.parametrize("mirrored", [False, True])
+def test_a_symlinked_skill_md_in_a_shipped_skill_is_not_returned(
+    lib: SkillLibrary, tmp_path: Path, secret: Path, mirrored: bool
+) -> None:
+    if mirrored:
+        real = tmp_path / "usr-share" / "x"
+        real.mkdir(parents=True)
+        (real / "SKILL.md").symlink_to(secret)
+        (shipped(lib) / "x").symlink_to(real, target_is_directory=True)
+    else:
+        (shipped(lib) / "x").mkdir()
+        (shipped(lib) / "x" / "SKILL.md").symlink_to(secret)
+    with pytest.raises(BridgeError) as exc:
+        lib.get("x")
+    assert exc.value.code == "bridge.skill_not_found"
+    assert lib.list() == []
+
+
+def test_a_shipped_skill_neither_lists_nor_descends_file_level_links(
+    lib: SkillLibrary, tmp_path: Path, secret: Path
+) -> None:
+    real = make_skill(tmp_path / "usr-share", "hal0-bench", ok="ok")
+    (real / "leak").symlink_to(secret)
+    (real / "sub").symlink_to(tmp_path, target_is_directory=True)
+    (shipped(lib) / "hal0-bench").symlink_to(real, target_is_directory=True)
+    assert lib.get("hal0-bench")["files"] == ["ok"]
+    assert [r["files"] for r in lib.list()] == [["ok"]]
+
+
+def test_a_shipped_skill_md_that_is_a_fifo_or_directory_is_not_a_skill(
+    lib: SkillLibrary,
+) -> None:
+    (shipped(lib) / "a").mkdir()
+    (shipped(lib) / "a" / "SKILL.md").mkdir()
+    (shipped(lib) / "b").mkdir()
+    os.mkfifo(shipped(lib) / "b" / "SKILL.md")
+    assert lib.list() == []
+
+
+def test_a_shipped_directory_link_to_a_file_or_nowhere_is_skipped(
+    lib: SkillLibrary, tmp_path: Path, secret: Path
+) -> None:
+    (shipped(lib) / "to-file").symlink_to(secret)
+    (shipped(lib) / "dangling").symlink_to(tmp_path / "gone", target_is_directory=True)
+    assert lib.list() == []
+    with pytest.raises(BridgeError) as exc:
+        lib.get("to-file")
+    assert exc.value.code == "bridge.skill_not_found"
+
+
+def test_a_shipped_category_directory_link_is_followed(lib: SkillLibrary, tmp_path: Path) -> None:
+    category = tmp_path / "usr-share" / "ops"
+    make_skill(category, "deploy")
+    (shipped(lib) / "ops").symlink_to(category, target_is_directory=True)
+    got = lib.get("deploy")
+    assert (got["source"], got["category"]) == ("shipped", "ops")

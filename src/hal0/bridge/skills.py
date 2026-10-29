@@ -11,15 +11,32 @@ Both use Hermes's layout: ``<root>/<skill>/SKILL.md`` or
 TTL, so a new directory is picked up without a restart.
 
 Trust differs between the two roots. The shipped mirror is a farm of symlinks
-into ``/usr/share/hal0/skills`` by design, and the bridge only reads it, so
-its links are followed. The drop-in directory is writable by the ``hal0``
-group, so nothing in it is followed: reads, writes and deletes go through
-:mod:`hal0.security.nofollow` or descriptors opened relative to the parent, and
-a symlinked skill is skipped when listing and refused when written.
+into ``/usr/share/hal0/skills`` by design, so the *skill directory* link
+(``<shipped>/<name>``, or a category directory) is followed, resolved once with
+:func:`os.path.realpath`. Nothing below it is: ``SKILL.md`` and every
+supporting file are read with ``lstat``/``O_NOFOLLOW`` as in the drop-in root,
+so a file-level link inside a shipped skill makes that skill absent instead of
+exposing whatever it names. The drop-in directory is writable by the ``hal0``
+group, so nothing in it is followed at all: reads, writes and deletes go
+through :mod:`hal0.security.nofollow` or descriptors opened relative to the
+parent, and a symlinked skill is skipped when listing and refused when written.
 
-A write is staged in ``.tmp-<name>-<uuid>`` beside the target and swapped in
-with ``rename``, so Hermes never reads a half-written skill; a failure leaves
-the previous skill in place and removes the staging directory.
+Hermes walks the drop-in root with ``os.walk(followlinks=True)`` and prunes only
+a fixed set of names (``EXCLUDED_SKILL_DIRS``, Hermes 4d043038
+``agent/skill_utils.py:24``; ``iter_skill_index_files``, ``:859``). A staging
+directory beside the skills would therefore be read as a second, ambiguous copy
+of the skill. A write is staged, and the previous copy parked, under
+``<dropin>/.archive/.bridge/`` (``stage-<name>-<uuid>``, ``old-<name>-<uuid>``):
+``.archive`` is in that pruned set and is on the same filesystem, so the final
+``rename`` is still atomic and Hermes never reads a half-written skill or a
+second copy. A failure leaves the previous skill in place and removes the
+stage. Every entry in ``.archive/.bridge/`` is debris by construction once the
+write lock is held, so each ``put`` and ``delete`` reaps them all first.
+
+``put`` and ``delete`` hold one lock per drop-in root for their whole run
+(hal0-api is one process; the CLI never writes skills), so same-name writers
+never interleave their renames and the trailing ``get`` of a ``put`` cannot land
+in another writer's swap window.
 """
 
 from __future__ import annotations
@@ -31,6 +48,7 @@ import os
 import re
 import shutil
 import stat
+import threading
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -53,10 +71,23 @@ NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 MAX_FILES = 16
 #: Cap on ``SKILL.md`` and on each supporting file, in UTF-8 bytes.
 MAX_FILE_BYTES = 262144
-#: A ``data:`` URI longer than this in ``SKILL.md`` is refused: it is an image
-#: or blob pasted into a file the model reads on every load.
+#: Cap on a supporting file's name, in UTF-8 bytes. A name is also written as
+#: ``.<name>.<16 hex>`` by :func:`hal0.security.nofollow.write_file`, so a
+#: filesystem's 255-byte limit would otherwise surface as a raw ``OSError``.
+MAX_FILE_NAME_BYTES = 200
+#: A ``data:`` URI longer than this in ``SKILL.md`` is refused (the whole URI,
+#: scheme included): it is an image or blob pasted into a file the model reads
+#: on every load. The URI ends at whitespace, ``)``, ``"`` or ``'``.
 MAX_DATA_URI_CHARS = 1024
-_DATA_URI_RE = re.compile(rf"data:[^\s)\"']{{{MAX_DATA_URI_CHARS + 1},}}")
+_DATA_SCHEME = "data:"
+_DATA_URI_RE = re.compile(
+    rf"{_DATA_SCHEME}[^\s)\"']{{{MAX_DATA_URI_CHARS - len(_DATA_SCHEME) + 1},}}", re.IGNORECASE
+)
+
+#: Where a write is staged and the previous copy parked: below the drop-in root,
+#: in a directory Hermes does not walk (see the module docstring).
+ARCHIVE_DIR = ".archive"
+SCRATCH_DIR = ".bridge"
 
 #: Reads of an existing ``SKILL.md`` stop here; an operator can drop a bigger
 #: file than a bridge write may create, but not an unbounded one.
@@ -131,62 +162,75 @@ def _subdirs(path: Path, *, follow: bool) -> list[Path]:
     return sorted(found)
 
 
-def _has_skill_file(directory: Path, *, follow: bool) -> bool:
+def _resolve_dir(entry: Path, *, follow_dirs: bool) -> Path | None:
+    """The directory to read for ``entry``, or ``None`` when it is not usable.
+
+    The one place a link is followed: a shipped skill (or category) directory
+    is resolved once, so everything read below it can be refused a link.
+    """
+    if not follow_dirs:
+        return entry
     try:
-        st = os.stat(directory / SKILL_FILE) if follow else os.lstat(directory / SKILL_FILE)
+        resolved = os.path.realpath(entry, strict=True)
+    except OSError:
+        return None
+    return Path(resolved) if os.path.isdir(resolved) else None
+
+
+def _has_skill_file(directory: Path) -> bool:
+    """True when ``directory/SKILL.md`` is a regular file (a link to one is not)."""
+    try:
+        return stat.S_ISREG(os.lstat(directory / SKILL_FILE).st_mode)
     except OSError:
         return False
-    return stat.S_ISREG(st.st_mode)
 
 
-def _scan(root: Path, *, follow: bool) -> Iterator[tuple[str, str | None, Path]]:
-    """Yield ``(name, category, directory)`` for every skill under ``root``."""
-    for entry in _subdirs(root, follow=follow):
-        if _has_skill_file(entry, follow=follow):
-            yield entry.name, None, entry
+def _scan(root: Path, *, follow_dirs: bool) -> Iterator[tuple[str, str | None, Path]]:
+    """Yield ``(name, category, directory)`` for every skill under ``root``.
+
+    With ``follow_dirs`` a symlinked skill or category directory is followed
+    (the shipped mirror); ``directory`` is then its resolved target. A link
+    below the skill directory never is.
+    """
+    for entry in _subdirs(root, follow=follow_dirs):
+        directory = _resolve_dir(entry, follow_dirs=follow_dirs)
+        if directory is None:
             continue
-        for inner in _subdirs(entry, follow=follow):
-            if _has_skill_file(inner, follow=follow):
-                yield inner.name, entry.name, inner
+        if _has_skill_file(directory):
+            yield entry.name, None, directory
+            continue
+        for inner in _subdirs(directory, follow=follow_dirs):
+            inner_dir = _resolve_dir(inner, follow_dirs=follow_dirs)
+            if inner_dir is not None and _has_skill_file(inner_dir):
+                yield inner.name, entry.name, inner_dir
 
 
-def _find(root: Path, name: str, *, follow: bool) -> tuple[Path, str | None] | None:
-    for found, category, directory in _scan(root, follow=follow):
+def _find(root: Path, name: str, *, follow_dirs: bool) -> tuple[Path, str | None] | None:
+    for found, category, directory in _scan(root, follow_dirs=follow_dirs):
         if found == name:
             return directory, category
     return None
 
 
-def _read_text(path: Path, *, follow: bool) -> str:
+def _read_text(path: Path) -> str:
     """Contents of ``path`` as text, capped at :data:`_READ_CAP`.
 
-    Raises ``OSError`` when it is absent, too big, not a regular file, or (not
-    ``follow``) reached through a symlink.
+    Never follows a link: raises ``OSError`` when it is absent, too big, not a
+    regular file, or a symlink.
     """
-    if follow:
-        with open(path, "rb") as fh:
-            st = os.fstat(fh.fileno())
-            if not stat.S_ISREG(st.st_mode):
-                raise OSError(errno.EINVAL, f"{path} is not a regular file")
-            if st.st_size > _READ_CAP:
-                raise OSError(errno.EFBIG, f"{path} is larger than {_READ_CAP} bytes")
-            data = fh.read(_READ_CAP + 1)
-    else:
-        if os.lstat(path).st_size > _READ_CAP:
-            raise OSError(errno.EFBIG, f"{path} is larger than {_READ_CAP} bytes")
-        raw = nofollow.read_bytes(path)
-        if raw is None:
-            raise FileNotFoundError(errno.ENOENT, "no such file", str(path))
-        data = raw
-    return data.decode("utf-8", errors="replace")
+    if os.lstat(path).st_size > _READ_CAP:
+        raise OSError(errno.EFBIG, f"{path} is larger than {_READ_CAP} bytes")
+    raw = nofollow.read_bytes(path)
+    if raw is None:
+        raise FileNotFoundError(errno.ENOENT, "no such file", str(path))
+    return raw.decode("utf-8", errors="replace")
 
 
-def _mtime(path: Path, *, follow: bool) -> float:
-    return (os.stat(path) if follow else os.lstat(path)).st_mtime
+def _list_files(skill_dir: Path) -> list[str]:
+    """Regular files in ``skill_dir`` besides its ``SKILL.md``, as sorted relative paths.
 
-
-def _list_files(skill_dir: Path, *, follow: bool) -> list[str]:
-    """Regular files in ``skill_dir`` besides its ``SKILL.md``, as sorted relative paths."""
+    A symlinked file, and a symlinked directory (not descended), are not listed.
+    """
     out: list[str] = []
     for dirpath, dirnames, filenames in os.walk(skill_dir):
         dirnames.sort()
@@ -196,7 +240,7 @@ def _list_files(skill_dir: Path, *, follow: bool) -> list[str]:
             if rel == "." and fname == SKILL_FILE:
                 continue
             try:
-                st = os.stat(full) if follow else os.lstat(full)
+                st = os.lstat(full)
             except OSError:
                 continue
             if not stat.S_ISREG(st.st_mode):
@@ -207,7 +251,112 @@ def _list_files(skill_dir: Path, *, follow: bool) -> list[str]:
     return sorted(out)
 
 
+# ── the scratch directory ───────────────────────────────────────────────────
+
+_OPEN_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def _open_child_dir(dir_fd: int, name: str, *, create: bool) -> int:
+    """Descriptor of the real directory ``name`` in ``dir_fd``; a link is refused.
+
+    ``create`` makes it, mode 0755, when absent. Raises ``FileNotFoundError``
+    when it is absent and not ``create``, and ``bridge.skill_invalid`` when it is
+    a symlink or not a directory.
+    """
+    created = False
+    try:
+        try:
+            fd = os.open(name, _OPEN_DIR_FLAGS, dir_fd=dir_fd)
+        except FileNotFoundError:
+            if not create:
+                raise
+            try:
+                os.mkdir(name, 0o755, dir_fd=dir_fd)
+                created = True
+            except FileExistsError:
+                pass
+            fd = os.open(name, _OPEN_DIR_FLAGS, dir_fd=dir_fd)
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise _invalid(
+                f"{name!r} in the drop-in directory is a symlink or not a directory"
+            ) from exc
+        raise
+    if created:
+        os.fchmod(fd, 0o755)
+    return fd
+
+
+def _open_scratch(root_fd: int, *, create: bool) -> int:
+    """Descriptor of ``.archive/.bridge`` below the drop-in root ``root_fd``.
+
+    Raises ``FileNotFoundError`` when it is absent and not ``create``, and
+    ``bridge.skill_invalid`` when ``.archive`` or ``.bridge`` is a symlink.
+    """
+    archive_fd = _open_child_dir(root_fd, ARCHIVE_DIR, create=create)
+    try:
+        return _open_child_dir(archive_fd, SCRATCH_DIR, create=create)
+    finally:
+        os.close(archive_fd)
+
+
+def _remove(dir_fd: int, name: str) -> None:
+    """Remove ``name`` from ``dir_fd`` without following it; log, never raise."""
+    try:
+        if stat.S_ISDIR(os.lstat(name, dir_fd=dir_fd).st_mode):
+            shutil.rmtree(name, dir_fd=dir_fd)
+        else:
+            os.unlink(name, dir_fd=dir_fd)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        log.warning("bridge.skill_scratch_left name=%s error=%s", name, exc)
+
+
+def _reap(scratch_fd: int) -> None:
+    """Remove every entry of the scratch directory.
+
+    Called with the write lock held, so none is a live stage: each is left over
+    from a crash, a failed removal or a lost race.
+    """
+    for entry in os.listdir(scratch_fd):
+        _remove(scratch_fd, entry)
+
+
+def _swap(scratch_fd: int, stage: str, parent_fd: int, name: str) -> None:
+    """Rename ``stage`` (in the scratch directory) over ``name`` in ``parent_fd``.
+
+    An existing skill is parked in the scratch directory first (a directory
+    cannot be renamed over a non-empty one), put back if the second rename
+    fails, and removed once the new one is in place.
+    """
+    try:
+        os.lstat(name, dir_fd=parent_fd)
+    except FileNotFoundError:
+        os.replace(stage, name, src_dir_fd=scratch_fd, dst_dir_fd=parent_fd)
+        return
+    old = f"old-{name}-{uuid.uuid4().hex}"
+    os.replace(name, old, src_dir_fd=parent_fd, dst_dir_fd=scratch_fd)
+    try:
+        os.replace(stage, name, src_dir_fd=scratch_fd, dst_dir_fd=parent_fd)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.replace(old, name, src_dir_fd=scratch_fd, dst_dir_fd=parent_fd)
+        raise
+    _remove(scratch_fd, old)
+
+
 # ── the library ─────────────────────────────────────────────────────────────
+
+_LOCKS: dict[str, threading.Lock] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _write_lock(dropin_root: Path) -> threading.Lock:
+    """The one lock for writers of ``dropin_root``, shared by every library on it."""
+    key = os.path.abspath(dropin_root)
+    with _LOCKS_GUARD:
+        return _LOCKS.setdefault(key, threading.Lock())
 
 
 class SkillLibrary:
@@ -222,9 +371,10 @@ class SkillLibrary:
     def __init__(self, *, shipped_root: Path, dropin_root: Path) -> None:
         self._shipped_root = Path(shipped_root)
         self._dropin_root = Path(dropin_root)
+        self._lock = _write_lock(self._dropin_root)
 
     def _sources(self) -> tuple[tuple[str, Path, bool], ...]:
-        """``(source, root, follow symlinks)``, drop-in first."""
+        """``(source, root, follow skill-directory links)``, drop-in first."""
         return (("dropin", self._dropin_root, False), ("shipped", self._shipped_root, True))
 
     def _is_shipped(self, name: str) -> bool:
@@ -233,6 +383,10 @@ class SkillLibrary:
             return True
         return any(os.path.lexists(category / name) for category in _subdirs(root, follow=True))
 
+    @property
+    def _scratch_path(self) -> Path:
+        return self._dropin_root / ARCHIVE_DIR / SCRATCH_DIR
+
     def get(self, name: str) -> SkillRow:
         """One skill: the drop-in copy if there is one, else the shipped one.
 
@@ -240,13 +394,13 @@ class SkillLibrary:
         is not returned.
         """
         _check_name(name)
-        for source, root, follow in self._sources():
-            found = _find(root, name, follow=follow)
+        for source, root, follow_dirs in self._sources():
+            found = _find(root, name, follow_dirs=follow_dirs)
             if found is None:
                 continue
             directory, category = found
             try:
-                text = _read_text(directory / SKILL_FILE, follow=follow)
+                text = _read_text(directory / SKILL_FILE)
             except OSError as exc:
                 log.warning("bridge.skill_unreadable name=%s source=%s error=%s", name, source, exc)
                 continue
@@ -255,7 +409,7 @@ class SkillLibrary:
                 "source": source,
                 "category": category,
                 "skill_md": text,
-                "files": _list_files(directory, follow=follow),
+                "files": _list_files(directory),
             }
         raise BridgeError("bridge.skill_not_found", f"no skill named {name!r}")
 
@@ -282,6 +436,15 @@ class SkillLibrary:
                 )
             if key == SKILL_FILE:
                 raise _invalid(f"file name {key!r} collides with the skill file {SKILL_FILE}")
+            try:
+                key_bytes = len(key.encode("utf-8"))
+            except UnicodeEncodeError as exc:
+                raise _invalid(f"file name {key!r} is not valid UTF-8 text") from exc
+            if key_bytes > MAX_FILE_NAME_BYTES:
+                raise _invalid(
+                    f"file name {key[:40]!r}... is {key_bytes} bytes; "
+                    f"the limit is {MAX_FILE_NAME_BYTES}"
+                )
             if not isinstance(content, str):
                 raise _invalid(f"file {key!r} content must be text")
             _check_size(key, content)
@@ -303,57 +466,49 @@ class SkillLibrary:
     def put(self, name: str, skill_md: str, files: dict[str, str] | None = None) -> SkillRow:
         """Create or replace a drop-in skill; return it as :meth:`get` does.
 
-        The files are written to a staging directory and renamed into place,
-        so a failure leaves the previous skill (or none) and no debris. A name
-        that already lives in the drop-in directory under a category is
-        replaced there.
+        The files are written to a staging directory under ``.archive/.bridge``
+        and renamed into place, so a failure leaves the previous skill (or
+        none) and no debris. A name that already lives in the drop-in directory
+        under a category is replaced there. Writers of one drop-in root run
+        one at a time, the returned :meth:`get` included.
         """
         self.validate(name, skill_md, files)
-        if self._is_shipped(name):
-            raise BridgeError(
-                "bridge.skill_readonly", f"{name!r} is a shipped skill and cannot be changed"
-            )
-        target = self._put_target(name)
-        parent = target.parent
-        try:
-            dfd = nofollow.open_dir(parent, create=True)
-        except nofollow.UnsafePathError as exc:
-            raise _invalid(f"refusing to write: {exc.reason}") from exc
-        stage = f".tmp-{name}-{uuid.uuid4().hex}"
-        try:
-            self._stage(parent / stage, skill_md, files or {})
-            self._swap(dfd, stage, name)
-        except nofollow.UnsafePathError as exc:
-            shutil.rmtree(stage, ignore_errors=True, dir_fd=dfd)
-            raise _invalid(f"refusing to write: {exc.reason}") from exc
-        except BaseException:
-            shutil.rmtree(stage, ignore_errors=True, dir_fd=dfd)
-            raise
-        finally:
-            os.close(dfd)
-        return self.get(name)
+        with self._lock:
+            if self._is_shipped(name):
+                raise BridgeError(
+                    "bridge.skill_readonly", f"{name!r} is a shipped skill and cannot be changed"
+                )
+            target = self._put_target(name)
+            try:
+                self._write(name, target.parent, skill_md, files or {})
+            except nofollow.UnsafePathError as exc:
+                raise _invalid(f"refusing to write: {exc.reason}") from exc
+            return self.get(name)
 
     def delete(self, name: str) -> None:
         """Remove a drop-in skill's directory; a shipped skill is read-only."""
         _check_name(name)
-        found = _find(self._dropin_root, name, follow=False)
-        if found is None:
-            if self._is_shipped(name):
-                raise BridgeError(
-                    "bridge.skill_readonly", f"{name!r} is a shipped skill and cannot be deleted"
-                )
-            if _is_symlink(self._dropin_root / name):
-                raise _invalid("target is a symlink")
-            raise BridgeError("bridge.skill_not_found", f"no drop-in skill named {name!r}")
-        directory, _category = found
-        try:
-            dfd = nofollow.open_dir(directory.parent)
-        except nofollow.UnsafePathError as exc:
-            raise _invalid(f"refusing to delete: {exc.reason}") from exc
-        try:
-            shutil.rmtree(directory.name, dir_fd=dfd)
-        finally:
-            os.close(dfd)
+        with self._lock:
+            self._reap_scratch()
+            found = _find(self._dropin_root, name, follow_dirs=False)
+            if found is None:
+                if self._is_shipped(name):
+                    raise BridgeError(
+                        "bridge.skill_readonly",
+                        f"{name!r} is a shipped skill and cannot be deleted",
+                    )
+                if _is_symlink(self._dropin_root / name):
+                    raise _invalid("target is a symlink")
+                raise BridgeError("bridge.skill_not_found", f"no drop-in skill named {name!r}")
+            directory, _category = found
+            try:
+                dfd = nofollow.open_dir(directory.parent)
+            except nofollow.UnsafePathError as exc:
+                raise _invalid(f"refusing to delete: {exc.reason}") from exc
+            try:
+                shutil.rmtree(directory.name, dir_fd=dfd)
+            finally:
+                os.close(dfd)
 
     def list(self) -> list[SkillRow]:
         """Every skill in both roots, sorted by name then source.
@@ -362,12 +517,12 @@ class SkillLibrary:
         apart. ``description`` is ``""`` when the frontmatter cannot be read.
         """
         rows: list[SkillRow] = []
-        for source, root, follow in self._sources():
-            for name, category, directory in _scan(root, follow=follow):
+        for source, root, follow_dirs in self._sources():
+            for name, category, directory in _scan(root, follow_dirs=follow_dirs):
                 skill_file = directory / SKILL_FILE
                 try:
-                    text = _read_text(skill_file, follow=follow)
-                    mtime = _mtime(skill_file, follow=follow)
+                    text = _read_text(skill_file)
+                    mtime = os.lstat(skill_file).st_mtime
                 except OSError as exc:
                     log.warning(
                         "bridge.skill_unreadable name=%s source=%s error=%s", name, source, exc
@@ -380,7 +535,7 @@ class SkillLibrary:
                         "category": category,
                         "description": _description_of(text),
                         "mtime": mtime,
-                        "files": _list_files(directory, follow=follow),
+                        "files": _list_files(directory),
                     }
                 )
         rows.sort(key=lambda row: (row["name"], row["source"]))
@@ -394,13 +549,55 @@ class SkillLibrary:
         try:
             st = os.lstat(flat)
         except FileNotFoundError:
-            existing = _find(self._dropin_root, name, follow=False)
+            existing = _find(self._dropin_root, name, follow_dirs=False)
             return existing[0] if existing else flat
         if stat.S_ISLNK(st.st_mode):
             raise _invalid("target is a symlink")
-        if not stat.S_ISDIR(st.st_mode) or not _has_skill_file(flat, follow=False):
+        if not stat.S_ISDIR(st.st_mode) or not _has_skill_file(flat):
             raise _invalid(f"{flat.name!r} exists in the drop-in directory and is not a skill")
         return flat
+
+    def _reap_scratch(self) -> None:
+        """Remove stale scratch entries; nothing to do when there is no scratch directory."""
+        try:
+            root_fd = nofollow.open_dir(self._dropin_root)
+        except FileNotFoundError:
+            return
+        except nofollow.UnsafePathError as exc:
+            raise _invalid(f"refusing to write: {exc.reason}") from exc
+        try:
+            try:
+                scratch_fd = _open_scratch(root_fd, create=False)
+            except FileNotFoundError:
+                return
+            try:
+                _reap(scratch_fd)
+            finally:
+                os.close(scratch_fd)
+        finally:
+            os.close(root_fd)
+
+    def _write(self, name: str, parent: Path, skill_md: str, files: dict[str, str]) -> None:
+        """Stage the skill under ``.archive/.bridge`` and swap it into ``parent``."""
+        root_fd = nofollow.open_dir(self._dropin_root, create=True)
+        parent_fd = root_fd
+        scratch_fd = -1
+        try:
+            if parent != self._dropin_root:
+                parent_fd = nofollow.open_dir(parent)
+            scratch_fd = _open_scratch(root_fd, create=True)
+            _reap(scratch_fd)
+            stage = f"stage-{name}-{uuid.uuid4().hex}"
+            try:
+                self._stage(self._scratch_path / stage, skill_md, files)
+                _swap(scratch_fd, stage, parent_fd, name)
+            except BaseException:
+                shutil.rmtree(stage, ignore_errors=True, dir_fd=scratch_fd)
+                raise
+        finally:
+            for fd in {root_fd, parent_fd, scratch_fd}:
+                if fd >= 0:
+                    os.close(fd)
 
     @staticmethod
     def _stage(stage: Path, skill_md: str, files: dict[str, str]) -> None:
@@ -408,32 +605,6 @@ class SkillLibrary:
         nofollow.write_file(stage / SKILL_FILE, skill_md, mode=0o644, create_dirs=False)
         for fname, content in files.items():
             nofollow.write_file(stage / fname, content, mode=0o644, create_dirs=False)
-
-    @staticmethod
-    def _swap(dfd: int, stage: str, name: str) -> None:
-        """Rename ``stage`` over ``name`` in the directory ``dfd``.
-
-        An existing skill is renamed aside first (a directory cannot be renamed
-        over a non-empty one), restored if the second rename fails, and removed
-        once the new one is in place.
-        """
-        try:
-            os.lstat(name, dir_fd=dfd)
-        except FileNotFoundError:
-            os.replace(stage, name, src_dir_fd=dfd, dst_dir_fd=dfd)
-            return
-        old = f".old-{name}-{uuid.uuid4().hex}"
-        os.replace(name, old, src_dir_fd=dfd, dst_dir_fd=dfd)
-        try:
-            os.replace(stage, name, src_dir_fd=dfd, dst_dir_fd=dfd)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.replace(old, name, src_dir_fd=dfd, dst_dir_fd=dfd)
-            raise
-        try:
-            shutil.rmtree(old, dir_fd=dfd)
-        except OSError as exc:
-            log.warning("bridge.skill_old_copy_left name=%s path=%s error=%s", name, old, exc)
 
 
 def _is_symlink(path: Path) -> bool:
