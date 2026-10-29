@@ -77,7 +77,6 @@
 .ov-dot.serving { background: var(--ok); box-shadow: 0 0 8px color-mix(in srgb, var(--ok) 55%, transparent); animation: pulse 1.6s ease-in-out infinite; }
 .ov-dot.err { background: var(--err); }
 .ov-dot.up { background: var(--ok); }
-@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
 
 .ov-track { height: 4px; background: var(--bg-3); border-radius: 2px; overflow: hidden; }
 .ov-track > i { display: block; height: 100%; border-radius: 2px; background: var(--fg-3); transition: width 0.22s var(--ease); }
