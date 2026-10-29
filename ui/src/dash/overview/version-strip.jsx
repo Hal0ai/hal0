@@ -21,17 +21,17 @@ function OvVersionStrip() {
         hal0 <b>{hal0?.current ?? '…'}</b>
         {hal0?.channel ? ` · ${hal0.channel}` : ''}
       </span>
-      {upd?.flm?.current && (
+      <span>
+        FLM <b>{upd?.flm?.current ?? '—'}</b>
+      </span>
+      {typeof upd?.autoCheck === 'boolean' && <span>auto-check {upd.autoCheck ? 'on' : 'off'}</span>}
+      {/* `available` null = checked, nothing newer; undefined = unknown, so claim nothing. */}
+      {hal0?.current && typeof available === 'string' && available && (
         <span>
-          FLM <b>{upd.flm.current}</b>
+          <b style={{ color: 'var(--accent)' }}>{available} available</b>
         </span>
       )}
-      {upd && <span>auto-check {upd.autoCheck ? 'on' : 'off'}</span>}
-      {hal0 && (
-        <span>
-          {available ? <b style={{ color: 'var(--accent)' }}>{available} available</b> : 'up to date'}
-        </span>
-      )}
+      {hal0?.current && available === null && <span>up to date</span>}
       <span style={{ flex: 1 }} />
       {hw && <span>{hostSummary(hw, mm.pool?.totalGb ?? 0)}</span>}
     </div>

@@ -79,8 +79,27 @@ describe('OvVersionStrip', () => {
     expect(text()).toContain('hal0 …')
     expect(text()).not.toContain('up to date')
     expect(text()).not.toContain('available')
-    expect(text()).not.toContain('FLM')
+    expect(text()).toContain('FLM —')
     expect(text()).not.toContain('auto-check')
+  })
+
+  it('unknown availability (field omitted) claims neither up to date nor available', () => {
+    delete m.updates.hal0.available
+    mount()
+    expect(text()).not.toContain('up to date')
+    expect(text()).not.toContain('available')
+  })
+
+  it('omitted autoCheck renders no auto-check segment', () => {
+    delete m.updates.autoCheck
+    mount()
+    expect(text()).not.toContain('auto-check')
+  })
+
+  it('FLM version absent renders a dash', () => {
+    m.updates.flm = undefined
+    mount()
+    expect(text()).toContain('FLM —')
   })
 
   it('omits the uma word on a discrete-memory host', () => {
