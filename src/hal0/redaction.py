@@ -197,7 +197,9 @@ def secret_spans(text: str) -> list[tuple[int, int]]:
     hold, so its first occurrence is where the span ends. Replacing each span of
     ``text`` with MASK gives ``redact_log_line(text)`` back. Should the two ever fail
     to align, the whole stretch between the first and the last difference is one
-    span: more is covered, never less.
+    span: more is covered, never less. Every span lies inside ``text`` and is not
+    empty: a MASK the redactor puts after the last character (a value that opens
+    at the very end, ``password: "``) covers nothing of ``text`` and has no span.
 
     The agent bridge masks streamed text split over events with these spans, and
     reads each masked value of a pushed skill to tell a placeholder from a secret.
@@ -214,6 +216,8 @@ def secret_spans(text: str) -> list[tuple[int, int]]:
             break
         if index == len(pieces) - 1:
             end = len(text) - len(piece)
+            if not piece and at == len(text):
+                break  # a last MASK after the end of the text covers nothing of it
             aligned = end > at and text.endswith(piece)
         else:
             end = text.find(piece, at + 1) if piece else at + 1
@@ -221,15 +225,18 @@ def secret_spans(text: str) -> list[tuple[int, int]]:
         if aligned:
             spans.append((at, end))
             at = end + len(piece)
-    if aligned:
-        return spans
-    head = 0
-    while head < min(len(text), len(masked)) and text[head] == masked[head]:
-        head += 1
-    tail = 0
-    while tail < min(len(text), len(masked)) - head and text[-1 - tail] == masked[-1 - tail]:
-        tail += 1
-    return [(head, max(head + 1, len(text) - tail))]
+    if not aligned:
+        head = 0
+        while head < min(len(text), len(masked)) and text[head] == masked[head]:
+            head += 1
+        tail = 0
+        while tail < min(len(text), len(masked)) - head and text[-1 - tail] == masked[-1 - tail]:
+            tail += 1
+        spans = [(head, max(head + 1, len(text) - tail))]
+    # A value that opens at the very end (``password: "``) is masked with nothing of
+    # the text under it, and the fallback's one-character minimum would reach past
+    # the end: every span is cut to the text, and one left covering nothing dropped.
+    return [(start, min(end, len(text))) for start, end in spans if start < len(text)]
 
 
 def redact_text_tree(value: Any) -> Any:

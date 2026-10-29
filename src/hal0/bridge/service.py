@@ -117,7 +117,7 @@ from hal0.bridge.watcher import (
     pending_of,
 )
 from hal0.config.schema import BridgeConfig
-from hal0.redaction import redact_log_line, secret_spans
+from hal0.redaction import redact_log_line, redact_secret_shapes, secret_spans
 
 if TYPE_CHECKING:
     from hal0.events import EventBus
@@ -197,11 +197,17 @@ _HIDDEN_TEXT_KINDS = "control, format or invisible characters"
 
 #: A value a skill may show where the log redactor would mask a secret: it names one
 #: rather than being one (``Bearer <token>``, ``$ENV_VAR``, ``HF_TOKEN=...``). Matched
-#: whole, ignoring case, once quotes and whitespace are trimmed (:func:`_is_placeholder`).
+#: whole once quotes and whitespace are trimmed (:func:`_is_placeholder`), ignoring
+#: case except where marked ``(?-i:...)``. A ``<...>`` holds no ``$(`` or backtick (a
+#: command is not a placeholder). A ``$VAR`` or ``${VAR}`` ends the value (``${VAR``:
+#: the redactor's span stops before the brace), and its name is in one case
+#: (``$API_KEY``, ``$api_key``), so an opaque mixed-case value behind a ``$`` is not
+#: taken for a name. ``YOUR_KEY`` is upper case.
 _PLACEHOLDER = re.compile(
-    r"<[^<>]{1,64}>"
-    r"|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?"
-    r"|YOUR_[A-Z0-9_]+"
+    r"<(?:(?!\$\()[^<>`]){1,64}>"
+    r"|\$(?:\{(?-i:[A-Z_][A-Z0-9_]*|[a-z_][a-z0-9_]*)\}?"
+    r"|(?-i:[A-Z_][A-Z0-9_]*|[a-z_][a-z0-9_]*))\Z"
+    r"|(?-i:YOUR_[A-Z0-9_]+)"
     r"|\.{3}|\N{HORIZONTAL ELLIPSIS}"
     r"|x{3,}|\*{3,}"
     r"|(?:TODO|TBD|CHANGEME|REPLACE[_-]?ME|PLACEHOLDER|EXAMPLE|REDACTED)"
@@ -1255,7 +1261,14 @@ def _holds_hidden_text(text: str) -> bool:
 
 
 def _is_placeholder(value: str) -> bool:
-    """Whether a value the redactor would mask names a secret rather than being one."""
+    """Whether a value the redactor would mask names a secret rather than being one.
+
+    It must match :data:`_PLACEHOLDER` whole once trimmed, and hold no secret shape
+    of its own (``$hf_...``, ``<ghp_...>``, ``YOUR_KEYghp_...``): the shape rules find
+    nothing in a value that only names a secret.
+    """
+    if redact_secret_shapes(value) != value:
+        return False
     return _PLACEHOLDER.fullmatch(value.strip(_PLACEHOLDER_TRIM)) is not None
 
 

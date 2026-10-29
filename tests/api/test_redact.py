@@ -1730,3 +1730,20 @@ def test_secret_spans_agree_with_redact_log_line(text: str) -> None:
 def test_secret_spans_cover_each_masked_value() -> None:
     text = 'see Authorization: Bearer <token> and password: "YOUR_PASSWORD" here'
     assert [text[s:e] for s, e in secret_spans(text)] == ["<token>", "YOUR_PASSWORD"]
+
+
+@pytest.mark.parametrize(
+    ("text", "covered"),
+    [
+        ('password: "', []),
+        ('HF_TOKEN="', []),
+        ('see Authorization: Bearer <token> and password: "', ["<token>"]),
+        ('Authorization: Bearer abc123def456ghi789jkl and password: "', ["abc123def456ghi789jkl"]),
+    ],
+)
+def test_secret_spans_stay_inside_the_text(text: str, covered: list[str]) -> None:
+    """A value that opens at the very end is masked with nothing under it: no span for it."""
+    assert redact_log_line(text).endswith(MASK)  # the redactor does mask past the end
+    spans = secret_spans(text)
+    assert all(0 <= start < end <= len(text) for start, end in spans)
+    assert [text[s:e] for s, e in spans] == covered
