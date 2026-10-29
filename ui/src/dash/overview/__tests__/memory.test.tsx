@@ -99,6 +99,13 @@ describe('OvMemory', () => {
     expect(t).toContain('consolidated 5 min ago')
   })
 
+  it('pluralises the pending operations note', () => {
+    m.stats = { ...m.stats, pending_operations: 1 }
+    mount()
+    expect(host.textContent).toContain('1 operation pending')
+    expect(host.textContent).not.toContain('1 operations pending')
+  })
+
   it('uses the stored bank over the first one', () => {
     localStorage.setItem('hal0.mem.bank', 'other')
     mount()
