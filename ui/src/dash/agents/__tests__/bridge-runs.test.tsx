@@ -28,7 +28,7 @@ const NOW_S = Math.floor(Date.now() / 1000)
 const run = (over: Record<string, unknown>) => ({
   run_id: 'run_000000000001',
   agent: 'hermes',
-  profile: null,
+  profile: 'default',
   client: 'laptop',
   status: 'running',
   created_at: NOW_S - 300,
@@ -44,7 +44,7 @@ const run = (over: Record<string, unknown>) => ({
 
 const RUNS = [
   run({ run_id: 'run_aaaaaaaaaaaa_long_tail', status: 'running' }),
-  run({ run_id: 'run_bbbbbbbbbbbb', status: 'waiting_for_approval', client: 'phone', profile: 'coder' }),
+  run({ run_id: 'run_bbbbbbbbbbbb', status: 'waiting_for_approval', client: 'phone', agent: 'hermes/coder', profile: 'coder' }),
   run({ run_id: 'run_cccccccccccc', status: 'completed', created_at: NOW_S - 400, updated_at: NOW_S - 275 }),
   run({ run_id: 'run_dddddddddddd', status: 'failed', client: 'phone' }),
   run({ run_id: 'run_eeeeeeeeeeee', status: 'interrupted' }),
@@ -117,8 +117,13 @@ describe('BridgeRunsList', () => {
     // a live run's duration is now − created
     expect(first.querySelector('.brg-run-meta')!.textContent).toMatch(/·5m \d+s$/)
 
-    // a named profile reads agent/profile
-    expect(row('run_bbbbbbbbbbbb').querySelector('.brg-run-meta')!.textContent).toContain('hermes/coder')
+    // a named profile reads agent/profile because the backend's `agent` already says so; the
+    // page shows `agent` as it is and must not append `profile` again
+    const named = row('run_bbbbbbbbbbbb').querySelector('.brg-run-meta')!.textContent!
+    expect(named).toContain('hermes/coder')
+    expect(named).not.toContain('hermes/coder/coder')
+    // the default profile is just `hermes`, not `hermes/default`
+    expect(first.querySelector('.brg-run-meta')!.textContent).not.toContain('hermes/default')
     // a finished run's duration is updated − created, and stops moving
     expect(row('run_cccccccccccc').querySelector('.brg-run-meta')!.textContent).toMatch(/·2m 5s$/)
   })

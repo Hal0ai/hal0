@@ -10,7 +10,7 @@
 // active-run count; the Add modal's defaults and name rule; the result view showing the key
 // exactly once and one `claude mcp add` line per scope; the key not leaking into toasts or the
 // console, nor surviving Done; Revoke and Rotate behind a confirm; the scopes editor; the
-// `bridge.disabled` one-liner; and add / rotate calls that the sign-in drawer re-runs after a 401
+// `bridge.disabled` one-liner (from `GET /api/bridge/me` up front, or from a refused add); and add / rotate calls that the sign-in drawer re-runs after a 401
 // `auth.required` (against the app's real queryClient and challenge store).
 import React, { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -39,7 +39,7 @@ const NOW_S = Math.floor(Date.now() / 1000)
 const CLIENTS = [
   {
     name: 'laptop',
-    note: 'alex dev box',
+    note: 'devops box',
     scopes: ['agents', 'memory', 'admin'],
     created_at: NOW_S - 86400 * 2,
     created_by: 'api:admin',
@@ -51,7 +51,7 @@ const CLIENTS = [
     note: '',
     scopes: ['agents'],
     created_at: NOW_S - 86400 * 9,
-    created_by: 'cli:mint',
+    created_by: 'api:admin',
     revoked_at: NOW_S - 3600,
     last_seen_at: null,
   },
@@ -74,7 +74,7 @@ const minted = (name: string, scopes = ['agents', 'memory']) => ({
 const RUN = (status: string, id: string) => ({
   run_id: id,
   agent: 'hermes',
-  profile: null,
+  profile: 'default',
   client: 'laptop',
   status,
   created_at: NOW_S - 100,
@@ -94,8 +94,19 @@ let root: Root | null = null
 let container: HTMLElement
 const toasts: unknown[][] = []
 
-function routeGets(runs: unknown[] = []) {
+const BRIDGE_OFF = () =>
+  new client.Hal0Error('The agent bridge is disabled in [bridge] config.', {
+    code: 'bridge.disabled',
+    status: 404,
+  })
+
+// `me` is what GET /api/bridge/me answers: the admin record while the bridge is on, or an error.
+function routeGets(runs: unknown[] = [], me: Error | null = null) {
   vi.mocked(client.apiGet).mockImplementation(async (path: string) => {
+    if (path === '/api/bridge/me') {
+      if (me) throw me
+      return { name: 'admin', tier: 'admin' }
+    }
     if (path === '/api/bridge/clients') return { items: CLIENTS }
     if (path.startsWith('/api/bridge/runs')) return { items: runs }
     throw new Error('unexpected GET ' + path)
@@ -182,7 +193,7 @@ describe('client list', () => {
 
     const laptop = q('[data-testid="bridge-client-laptop"]')!
     expect(laptop).not.toBeNull()
-    expect(laptop.textContent).toContain('alex dev box')
+    expect(laptop.textContent).toContain('devops box')
     const chips = Array.from(laptop.querySelectorAll('[data-scope]')).map((c) => c.textContent)
     expect(chips).toEqual(['hal0-agents', 'hal0-memory', 'hal0-admin'])
     expect(laptop.querySelector('[data-testid="bridge-last-seen"]')!.textContent).toBe('seen 5m ago')
@@ -350,6 +361,36 @@ describe('Add modal', () => {
     expect((q('[data-testid="bridge-add"]') as HTMLButtonElement).disabled).toBe(true)
     // the list still renders: listing works while the bridge is off
     expect(q('[data-testid="bridge-client-laptop"]')).not.toBeNull()
+  })
+
+  it('says so up front, and turns Add, Rotate and Scopes off, when /api/bridge/me answers bridge.disabled', async () => {
+    routeGets([], BRIDGE_OFF())
+    await mount()
+
+    expect(client.apiGet).toHaveBeenCalledWith('/api/bridge/me')
+    expect(text()).toContain('Agent bridge disabled in [bridge] config')
+    expect((q('[data-testid="bridge-add"]') as HTMLButtonElement).disabled).toBe(true)
+
+    // the list still renders, and a live row's Scopes and Rotate are off; Revoke still works
+    await click(q('[data-testid="bridge-client-laptop"] .mcprow-main'))
+    const acts = qa('[data-testid="bridge-client-laptop"] .brg-acts button')
+    expect(acts.map((b) => b.textContent)).toEqual(['Scopes', 'Rotate key', 'Revoke'])
+    expect(acts.map((b) => (b as HTMLButtonElement).disabled)).toEqual([true, true, false])
+    expect(client.apiPost).not.toHaveBeenCalled()
+  })
+
+  it('leaves the actions on when /api/bridge/me answers, or fails for some other reason', async () => {
+    await mount()
+    expect(text()).not.toContain('Agent bridge disabled')
+    expect((q('[data-testid="bridge-add"]') as HTMLButtonElement).disabled).toBe(false)
+
+    if (root) act(() => root!.unmount())
+    root = null
+    document.body.innerHTML = ''
+    routeGets([], new client.Hal0Error('boom', { code: 'system.internal', status: 500 }))
+    await mount()
+    expect(text()).not.toContain('Agent bridge disabled')
+    expect((q('[data-testid="bridge-add"]') as HTMLButtonElement).disabled).toBe(false)
   })
 
   it('keeps the modal and shows the server\'s message on a refusal that is not disabled', async () => {

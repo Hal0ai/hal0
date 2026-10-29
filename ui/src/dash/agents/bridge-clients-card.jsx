@@ -14,9 +14,10 @@
 //             own copy button. That view closes only on Done, so the key is not lost to a stray
 //             click, and it is dropped from memory when it closes.
 //   rotate    the same result view.
-//   disabled  a 404 `bridge.disabled` on add / rotate / scopes means `[bridge].enabled` is off.
-//             The card says so in one line and stops offering Add. (Listing and revoking still
-//             work while the bridge is off.)
+//   disabled  `[bridge].enabled` is off. The card asks `GET /api/bridge/me` (404 `bridge.disabled`
+//             exactly then), and a 404 `bridge.disabled` on add / rotate / scopes says the same.
+//             Either way the card says so in one line and stops offering Add, Rotate and Scopes.
+//             (Listing and revoking still work while the bridge is off.)
 //
 // The key is only ever rendered into the result view. It is not logged, toasted or stored.
 //
@@ -328,7 +329,7 @@ function ActiveRuns({ name }) {
   return <span data-testid="bridge-active-runs">active runs <b>{n}</b></span>;
 }
 
-function ClientRow({ c, now, busy, onScopes, onRotate, onRevoke }) {
+function ClientRow({ c, now, busy, off, onScopes, onRotate, onRevoke }) {
   const fmt = window.__hal0BridgeFmt;
   const Icon = window.Icon;
   const [open, setOpen] = useState(false);
@@ -374,8 +375,8 @@ function ClientRow({ c, now, busy, onScopes, onRotate, onRevoke }) {
               </div>
               {revoked ? null : (
                 <div className="brg-acts">
-                  <button type="button" className="cbtn sm" disabled={busy} onClick={() => onScopes(c)}>Scopes</button>
-                  <button type="button" className="cbtn sm" disabled={busy} onClick={() => onRotate(c.name)}>Rotate key</button>
+                  <button type="button" className="cbtn sm" disabled={busy || off} title={off ? DISABLED_LINE : undefined} onClick={() => onScopes(c)}>Scopes</button>
+                  <button type="button" className="cbtn sm" disabled={busy || off} title={off ? DISABLED_LINE : undefined} onClick={() => onRotate(c.name)}>Rotate key</button>
                   <button type="button" className="cbtn sm brg-danger" disabled={busy} onClick={() => onRevoke(c.name)}>Revoke</button>
                 </div>
               )}
@@ -393,6 +394,7 @@ function BridgeClientsCard() {
   const EnginePane = window.EnginePane;
   const ConfirmDialog = window.ConfirmDialog;
   const clientsQ = window.__hal0UseBridgeClients();
+  const meQ = window.__hal0UseBridgeMe();
   const create = window.__hal0UseBridgeClientCreate();
   const rotate = window.__hal0UseBridgeClientRotate();
   const revoke = window.__hal0UseBridgeClientRevoke();
@@ -400,11 +402,13 @@ function BridgeClientsCard() {
   const now = window.__hal0BridgeFmt.useNow(30000);
 
   const [addOpen, setAddOpen] = useState(false);
-  const [disabled, setDisabled] = useState(false);
+  // Set by a failed add / rotate / scopes; the `/me` probe is the other way to learn it.
+  const [refused, setRefused] = useState(false);
   const [rotating, setRotating] = useState(null);
   const [revoking, setRevoking] = useState(null);
   const [editing, setEditing] = useState(null);
 
+  const disabled = refused || window.__hal0BridgeDisabled(meQ.error);
   const items = (clientsQ.data && clientsQ.data.items) || [];
   const active = items.filter((c) => c.revoked_at == null).length;
   const busy = rotate.isPending || revoke.isPending;
@@ -425,7 +429,7 @@ function BridgeClientsCard() {
   const markDisabled = () => {
     setAddOpen(false);
     setRotating(null);
-    setDisabled(true);
+    setRefused(true);
   };
 
   const confirmRotate = () => {
@@ -462,7 +466,7 @@ function BridgeClientsCard() {
     );
   } else {
     body = items.map((c) => (
-      <ClientRow key={c.name} c={c} now={now} busy={busy} onScopes={setEditing} onRotate={setRotating} onRevoke={setRevoking} />
+      <ClientRow key={c.name} c={c} now={now} busy={busy} off={disabled} onScopes={setEditing} onRotate={setRotating} onRevoke={setRevoking} />
     ));
   }
 

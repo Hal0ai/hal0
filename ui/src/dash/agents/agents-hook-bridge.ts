@@ -36,6 +36,7 @@ import {
   useBridgeClientRotate,
   useBridgeClients,
   useBridgeClientScopes,
+  useBridgeMe,
   useBridgeRuns,
 } from '@/api/hooks/useBridge'
 import { useCapabilities } from '@/api/hooks/useCapabilities'
@@ -84,6 +85,7 @@ Object.assign(window, {
   __hal0UseBridgeClientRotate: useBridgeClientRotate,
   __hal0UseBridgeClientRevoke: useBridgeClientRevoke,
   __hal0UseBridgeClientScopes: useBridgeClientScopes,
+  __hal0UseBridgeMe: useBridgeMe,
   __hal0UseBridgeRuns: useBridgeRuns,
   __hal0BridgeDisabled: bridgeDisabled,
   __hal0BridgeScopeServer: BRIDGE_SCOPE_SERVER,

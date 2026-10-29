@@ -203,6 +203,7 @@ export const ENDPOINTS = {
   bridgeClient: (name: string) => `/api/bridge/clients/${encodeURIComponent(name)}`,
   bridgeClientRotate: (name: string) =>
     `/api/bridge/clients/${encodeURIComponent(name)}/rotate`,
+  bridgeMe: '/api/bridge/me',
   bridgeRuns: '/api/bridge/runs',
 
   // ── Agents — bundled lifecycle + sidebar rollup (v0.3 PR-6) ──────

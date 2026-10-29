@@ -44,7 +44,7 @@ function RunRow({ run, now }) {
       <div className="brg-run-meta">
         <span className="brg-run-client" title="bridge client">{run.client}</span>
         <span className="dim">·</span>
-        <span title="agent">{fmt.bridgeAgentLabel(run)}</span>
+        <span title="agent">{run.agent}</span>
         <span className="dim">·</span>
         <span title="duration">{fmt.fmtSpan(fmt.bridgeRunSeconds(run, now))}</span>
       </div>

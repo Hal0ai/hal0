@@ -100,11 +100,6 @@ export function bridgeStatusLabel(status: string): string {
   return status.replace(/_/g, ' ')
 }
 
-/** `hermes`, or `hermes/<profile>` when the run used a named profile. */
-export function bridgeAgentLabel(run: Pick<BridgeRun, 'agent' | 'profile'>): string {
-  return run.profile ? `${run.agent}/${run.profile}` : run.agent
-}
-
 /** The first 12 characters of a run id; the full id goes in the tooltip. */
 export function bridgeShortRunId(runId: string): string {
   return runId.slice(0, 12)
@@ -127,7 +122,6 @@ export const BRIDGE_FMT = {
   fmtStamp,
   bridgeRunGroup,
   bridgeStatusLabel,
-  bridgeAgentLabel,
   bridgeShortRunId,
   bridgeRunSeconds,
   BRIDGE_GROUP_CHIP,

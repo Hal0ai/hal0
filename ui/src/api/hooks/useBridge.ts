@@ -12,9 +12,11 @@
 //   PATCH  /api/bridge/clients/{name}        replace the client's scopes
 //   GET    /api/bridge/runs                  runs delegated through the bridge
 //
+//   GET    /api/bridge/me                    the caller's own record (an admin session sees `admin`)
+//
 // While `[bridge].enabled` is false, listing and revoking still work, and adding, rotating and
-// re-scoping answer 404 `bridge.disabled` (see `bridgeDisabled`). `/runs` answers 503
-// `bridge.unavailable` when the bridge service is down.
+// re-scoping answer 404 `bridge.disabled` (see `bridgeDisabled`), and so do `/me` and `/runs`.
+// `/runs` also answers 503 `bridge.unavailable` when the bridge service is down.
 //
 // The key reaches the page exactly once, in the create/rotate mutation result. Those two
 // mutations use `gcTime: 0` so the result is dropped from the mutation cache the moment nothing
@@ -90,10 +92,13 @@ export const BRIDGE_TERMINAL_STATUSES: ReadonlySet<string> = new Set([
 
 export interface BridgeRun {
   run_id: string
-  /** Always `hermes` today. */
+  /**
+   * The agent that ran it, already carrying its profile: `hermes`, or `hermes/<profile>` for a
+   * named one. Show this as it is; do not append `profile` to it.
+   */
   agent: string
-  /** The Hermes profile the run used, or null for the default one. */
-  profile: string | null
+  /** The Hermes profile the run used (`default` for the default one); never null. */
+  profile: string
   client: string
   status: BridgeRunStatus
   /** Epoch seconds. */
@@ -115,7 +120,10 @@ export interface BridgeRunsParams {
 
 const CLIENTS_KEY = ['bridge', 'clients'] as const
 
+const ME_KEY = ['bridge', 'me'] as const
+
 const CLIENTS_POLL_MS = 15_000
+const ME_STALE_MS = 60_000
 const RUNS_LIVE_POLL_MS = 5_000
 const RUNS_IDLE_POLL_MS = 30_000
 
@@ -132,6 +140,22 @@ export function bridgeDisabled(error: unknown): boolean {
 export function bridgeRunsPollMs(items: readonly BridgeRun[] | undefined): number {
   const live = (items ?? []).some((r) => !BRIDGE_TERMINAL_STATUSES.has(r.status))
   return live ? RUNS_LIVE_POLL_MS : RUNS_IDLE_POLL_MS
+}
+
+/**
+ * Whether the bridge is on, read off `GET /api/bridge/me`. The route answers 404
+ * `bridge.disabled` exactly when `[bridge].enabled` was off at boot and 200 for an admin session
+ * otherwise, so it tells the card up front, before anyone tries to add a client. Only a restart
+ * changes the answer, so a `bridge.disabled` is not retried or polled; any other failure (a
+ * sign-in prompt, a blip) is not "disabled" and the card keeps offering its actions.
+ */
+export function useBridgeMe() {
+  return useQuery({
+    queryKey: ME_KEY,
+    queryFn: () => apiGet<{ name: string; tier: string }>(ENDPOINTS.bridgeMe),
+    retry: (count, error) => !bridgeDisabled(error) && count < 1,
+    staleTime: ME_STALE_MS,
+  })
 }
 
 export function useBridgeClients() {

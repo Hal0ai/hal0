@@ -63,7 +63,7 @@ async function mount() {
   })
 }
 
-const counts = () => Array.from(container.querySelectorAll('[data-testid="bridge-client-count"]')) as HTMLAnchorElement[]
+const counts = () => Array.from(container.querySelectorAll('[data-testid="bridge-client-count"]')) as HTMLElement[]
 
 beforeEach(() => {
   ;(window as unknown as { Icon: unknown }).Icon = () => null
@@ -78,12 +78,14 @@ afterEach(() => {
 })
 
 describe('McpServersPanel bridge-client count', () => {
-  it('sits on the hal0-agents row, links to the MCP tab, and leaves revoked clients out', async () => {
+  it('sits on the hal0-agents row as a plain label, and leaves revoked clients out', async () => {
     await mount()
     const chips = counts()
     expect(chips).toHaveLength(1)
     expect(chips[0].textContent).toBe('2 bridge clients')
-    expect(chips[0].getAttribute('href')).toBe('#agent/mcp')
+    // the panel is the MCP tab, so a link to #agent/mcp would do nothing
+    expect(chips[0].tagName).toBe('SPAN')
+    expect(chips[0].getAttribute('href')).toBeNull()
     expect(chips[0].closest('.mcprow')!.querySelector('.nm')!.textContent).toBe('hal0-agents')
   })
 

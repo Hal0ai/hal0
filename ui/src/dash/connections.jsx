@@ -734,18 +734,17 @@ function AddTo({ client, servers }) {
 // ─── bridge-client count (agent bridge, ADR-0043) ─────────────────────
 // Shown on the hal0-agents row, the server bridge clients delegate through, or in the section
 // strip when that row is not listed. The clients themselves are managed in the Bridge clients
-// card under the server list (dash/agents/bridge-clients-card.jsx).
+// card under the server list (dash/agents/bridge-clients-card.jsx). This panel only renders on
+// the Agents ▸ MCP tab, so the chip is a label, not a link to the tab it is already on.
 function BridgeCount({ n }) {
   return (
-    <a
+    <span
       className="chip info"
-      href="#agent/mcp"
       data-testid="bridge-client-count"
-      title="Bridge clients: coding agents on other machines with a key to this box"
-      onClick={(e) => e.stopPropagation()}
+      title="Bridge clients: coding agents on other machines with a key to this box. Manage them in the card below."
     >
       {n} bridge {n === 1 ? 'client' : 'clients'}
-    </a>
+    </span>
   )
 }
 

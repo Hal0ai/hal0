@@ -3,7 +3,6 @@ import { describe, expect, it } from 'vitest'
 
 import {
   BRIDGE_GROUP_CHIP,
-  bridgeAgentLabel,
   bridgeNameError,
   bridgeRunGroup,
   bridgeRunSeconds,
@@ -49,10 +48,8 @@ describe('bridgeRunGroup', () => {
 })
 
 describe('labels', () => {
-  it('spaces a status and names the agent with its profile', () => {
+  it('spaces a status and shortens a run id', () => {
     expect(bridgeStatusLabel('waiting_for_clarification')).toBe('waiting for clarification')
-    expect(bridgeAgentLabel({ agent: 'hermes', profile: null })).toBe('hermes')
-    expect(bridgeAgentLabel({ agent: 'hermes', profile: 'coder' })).toBe('hermes/coder')
     expect(bridgeShortRunId('run_0123456789abcdef')).toBe('run_01234567')
     expect(bridgeShortRunId('short')).toBe('short')
   })
