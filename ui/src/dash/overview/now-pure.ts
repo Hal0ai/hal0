@@ -4,7 +4,7 @@
 import type { Slot } from '@/api/hooks/useSlots'
 import type { SystemStats } from '@/api/hooks/useSystemStats'
 import type { ArbiterState } from '@/api/hooks/useComfyui'
-import { slotIndicatorFromPhase, isSlotLive } from '../slot-status.js'
+import { slotIndicatorFromPhase } from '../slot-status.js'
 import { railGroup } from '../slot-rail-pure'
 
 const DASH = '—'
@@ -57,7 +57,8 @@ export function nowFacts(
   }
 
   return {
-    loaded: slots.filter((s) => isSlotLive(s)).length,
+    // One rule with Serving now: every slot the indicator does not call offline is loaded.
+    loaded: slots.filter((s) => indicatorCls(s) !== 'offline').length,
     total: slots.length,
     serving: serving.length,
     tps,
