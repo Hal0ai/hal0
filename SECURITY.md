@@ -102,6 +102,40 @@ when an agent unit resolves to the same `User=` as `hal0-api.service`.
 - Do not feed the agent untrusted content on a box holding credentials you care
   about, and do not reuse those credentials elsewhere.
 
+### Bridge keys: remote agents that use the bundled agent
+
+An operator can admit a remote coding agent (Claude Code, Codex, a CI job) with
+`hal0 bridge add`. Each such **bridge client** gets a key of its own,
+`hal0bk_<name>.<token>`; hal0 stores only its sha256, in
+`/var/lib/hal0/bridge.db` (`0600`, owned by the `hal0` account, kept apart from
+the world-readable `hal0.db`). The design is
+[ADR-0043](docs/adr/0043-agent-bridge-and-bridge-keys.md).
+
+**A bridge key is as powerful as asking Hermes to do something, for every
+profile hal0 holds a key for. With the `admin` scope it is the agent-tier key
+[ADR-0024](docs/adr/0024-agent-credential-tier.md) describes: it opens the admin
+MCP server's tools (autonomous reads and writes included, with gated actions
+waiting in the approval inbox) and nothing on the REST surface. Treat a bridge
+key like an operator credential:** keep it out of dotfiles under version
+control, grant `admin` only to an agent that operates the box, and revoke it
+with `hal0 bridge revoke <name>` (or replace it with `hal0 bridge rotate
+<name>`) the moment it may have leaked. Revocation takes effect on the next
+request.
+
+What the design does and does not do:
+
+- A bridge key is accepted on the bridge's own MCP server, and on the memory and
+  admin MCP servers only when its client holds that scope. It is refused on
+  every `/api/*` and `/v1/*` route, with one exception, `GET /api/bridge/me`.
+- The bridge asks for a credential even when `[security].require_auth` is off.
+  A box with no bridge clients accepts no bridge key at all.
+- A bridge client's memory identity is the name in its key, not the
+  `X-hal0-Agent` header, which stays unverified for every other caller.
+- A bridge key does not make the same-UID risk above smaller: the bundled
+  agent, and anything else running as `hal0`, can still open `bridge.db`. It
+  holds hashes, not keys, but an attacker with the `hal0` account does not need
+  a bridge key.
+
 ## Reporting a Vulnerability
 
 **Please do not open a public GitHub issue for security vulnerabilities.**

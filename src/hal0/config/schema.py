@@ -3206,7 +3206,7 @@ class BridgeConfig(BaseModel):
     The bridge lets a remote coding agent (Claude Code, Codex, a CI job)
     reach hal0's MCP servers and delegate to Hermes with its own revocable
     ``hal0bk_`` key. ``enabled`` defaults on because the surface is inert
-    until an operator adds a client (spec §4.4): the mount and ``/api/bridge/*``
+    until an operator adds a client (ADR-0043): the mount and ``/api/bridge/*``
     exist on every box, but with no client rows nothing except the admin key
     can authenticate, so onboarding stays one command with no restart.
 

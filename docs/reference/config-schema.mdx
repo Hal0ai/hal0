@@ -24,7 +24,7 @@ below) — see [Environment variables](/docs/reference/env-vars/) for the full l
 
 | File | Format | Purpose |
 |---|---|---|
-| `/etc/hal0/hal0.toml` | TOML | Main config — `[meta]`, `[slots]`, `[dispatcher]`, `[telemetry]`, `[updates]`, `[models]`, `[memory]`, `[activity]`, `[brain_chat]`, `[security]`, `[network]`, `[realtime]`, `[metrics]` (the last is read independently of the rest — see below). |
+| `/etc/hal0/hal0.toml` | TOML | Main config — `[meta]`, `[slots]`, `[dispatcher]`, `[telemetry]`, `[updates]`, `[models]`, `[memory]`, `[activity]`, `[brain_chat]`, `[security]`, `[network]`, `[bridge]`, `[realtime]`, `[metrics]` (the last is read independently of the rest — see below). |
 | `/etc/hal0/slots/<name>.toml` | TOML | One file per slot. |
 | `/etc/hal0/providers.toml` | TOML | Local cloud-provider API entries (`[[provider]]`). |
 | `/etc/hal0/upstreams.toml` | TOML | Remote/cloud LLM upstream entries (`[[upstream]]`). |
@@ -242,6 +242,22 @@ hostname stay in `api.env`. See
 | `public_url` | str \| null | `null` (no reverse proxy) | absolute `http`/`https` URL; no user info, query or fragment; stored with a lower-case host, no default port and no trailing slash. An empty string means unset. The host is a DNS name (punycode for an internationalised name), an IPv4 address or a bracketed IPv6 address; the path may hold only letters, digits and `. _ ~ / % -`. Its origin joins the allowlist |
 | `extra_origins` | list[str] | `[]` | each `scheme://host[:port]` with `http`/`https` and no path, query or fragment; the host follows the `public_url` rules; stored without a trailing slash or default port, deduplicated. `hal0 network origins add\|remove` and the Settings page edit it in place on the server (`POST /api/settings/network`) |
 | `comfyui_listen` | `"lan"` \| `"loopback"` | `"lan"` | where ComfyUI's web UI (the `img` slot, `:8188`) answers. `"lan"` binds the LAN so other machines reach `http://<host>:8188` and the Discovery (mDNS) card can announce it; ComfyUI has no sign-in of its own. `"loopback"` fences the port to `127.0.0.1` like every other slot (the box itself, an SSH tunnel, or `HAL0_COMFYUI_PUBLIC_URL`). Case-insensitive, trimmed. Applies at the next `hal0 slot restart img` ([ADR-0041](/docs/adr/0041-the-comfyui-editor-answers-on-the-lan)) |
+
+### `[bridge]`
+
+`extra="forbid"`. The agent bridge, which lets a remote coding agent reach
+hal0's MCP servers and delegate to Hermes with a key of its own that you can
+revoke. Clients are added with `hal0 bridge add`; they live in
+`/var/lib/hal0/bridge.db`, not in this file. See
+[Connect an external MCP client](/docs/guides/connect-mcp#connect-an-external-mcp-client)
+and [ADR-0043](/docs/adr/0043-agent-bridge-and-bridge-keys).
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `enabled` | bool | `true` | master switch. Off: the `hal0-agents` MCP server is not mounted (404), `/api/bridge/*` answers 404 `bridge.disabled`, `hal0 bridge` says the bridge is disabled, and `hal0 doctor all` passes the `bridge-store` row as "disabled". On does nothing until you add a client: with no clients, only the admin key can authenticate, and the bridge asks for a credential even when sign-in is off. Applies at the next hal0-api restart |
+| `max_concurrent_runs_per_client` | int | `2` | `1-16`. How many Hermes runs one client may have in flight; a start past the limit is refused until one finishes. Applies to the next start request, no restart |
+| `run_retention_days` | int | `7` | `1-365`. How long delegated runs and their recorded events are kept before the maintenance pass deletes them. Applies at the next pass, no restart |
+| `clarify_timeout_s` | int | `900` | `60-3600`. How long a run waits for the calling agent to answer a clarifying question before it is stopped with "clarification unanswered". Applies to the next question, no restart |
 
 ### `[realtime]`
 

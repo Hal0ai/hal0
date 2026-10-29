@@ -1,6 +1,6 @@
 ---
 title: hal0 CLI reference
-description: "Reference for the hal0 CLI — the global flags, the top-level commands, and the slot, model, config, doctor, upstream, capabilities, comfyui, agent and app sub-apps, with exact flags and defaults, verified against src/hal0/cli in the v1.0 tree. The remaining sub-apps are on a second page."
+description: "Reference for the hal0 CLI — the global flags, the top-level commands, and the slot, model, config, doctor, upstream, capabilities, comfyui, agent, bridge and app sub-apps, with exact flags and defaults, verified against src/hal0/cli in the v1.0 tree. The remaining sub-apps are on a second page."
 sidebar:
   order: 10
 ---
@@ -304,6 +304,30 @@ hal0 pins Hermes v0.22.4 (`4d04303818b61bf3aa09278af48356315515965b`). `--target
 `agent install hermes` respects an operator-disabled gateway. If `hermes-gateway.service` is `disabled`, the unit file is refreshed with `--no-start-now --no-start-on-login` and the unit is not enabled or started (a copy already running is left running). If it is `masked-runtime` it is treated the same way. If it is persistently `masked`, the generator does not run at all. Either way the command prints how to turn it back on (`systemctl enable --now hermes-gateway.service`, preceded by `systemctl unmask` or `unmask --runtime` for a mask). A fresh or enabled gateway is installed and enabled as before.
 
 While the terminal tool is off (the default; `--no-terminal-tool` or `HAL0_HERMES_TERMINAL=0`), hal0 writes `terminal.backend: hal0-terminal-off` into the Hermes root `config.yaml` and into every profile it wires. Hermes rejects that backend in the terminal tool's own availability check, so `terminal` and `process_manage` leave every tool schema, including the one built for the gateway's preview-restart side agent, which ignores `agent.disabled_toolsets` from Hermes v0.22.3. Cloned profiles also lose `execute_code` and `delegate_task` while the terminal is off. A docker or ssh backend you chose is saved under `hal0.terminal_backend_saved` and restored when you turn the terminal back on. `hal0 update` applies the gate to an existing box and restarts Hermes when `terminal.backend` changed. Hermes logs `Unknown TERMINAL_ENV 'hal0-terminal-off'` at ERROR about every 30 seconds while tools are listed; on a terminal-off box that line is expected.
+
+## `hal0 bridge` — admit remote coding agents
+
+A bridge client is a named remote agent (Claude Code, Codex, a CI job) with a key of its own. The group goes through hal0-api, so the API must be running, and it answers with a message of its own while `[bridge].enabled` is `false`. See [Connect an external MCP client](/docs/guides/connect-mcp#connect-an-external-mcp-client) and [ADR-0043](/docs/adr/0043-agent-bridge-and-bridge-keys).
+
+| Command | Args | Flags |
+|---|---|---|
+| `bridge add <name>` | `name` (lower-case letters, digits, `_` and `-`; 1 to 32 characters; starts with a letter or digit) | `--note TEXT`, `--scope agents\|memory\|admin` (repeatable; default `agents` and `memory`) |
+| `bridge list` | — | — |
+| `bridge revoke <name>` | `name` | — |
+| `bridge rotate <name>` | `name` | — |
+| `bridge scopes <name> <scope>...` | `name`, one or more of `agents`, `memory`, `admin` | — |
+
+`bridge add` and `bridge rotate` print the key once, as `hal0bk_<name>.<token>`, and cannot show it again: hal0 keeps only its sha256. Under the key they print one `claude mcp add` line for each scope the client holds, ready to paste on the remote machine:
+
+```sh
+claude mcp add --transport http hal0-agents http://<host>:8080/mcp/agents/mcp --header "Authorization: Bearer <key>"
+claude mcp add --transport http hal0-memory http://<host>:8080/mcp/memory/mcp --header "Authorization: Bearer <key>"
+claude mcp add --transport http hal0-admin http://<host>:8080/mcp/admin/mcp --header "Authorization: Bearer <key>"
+```
+
+`agents` is always held; `--scope memory` and `--scope admin` add the `hal0-memory` and `hal0-admin` lines. `bridge revoke` ends a key at once and keeps the name, so it cannot be added again; `bridge rotate` replaces a live client's key at once and keeps its scopes and note, and refuses a revoked client. `bridge scopes` replaces the whole set (`agents` stays), so the same key opens different servers from the next request.
+
+The `admin` scope opens the hal0 admin tools: treat that key like an operator credential and grant the scope only to an agent that operates the box ([SECURITY.md](https://github.com/Hal0ai/hal0/blob/main/SECURITY.md#bundled-agent-trust-boundary)).
 
 ## `hal0 app` — manage optional apps
 

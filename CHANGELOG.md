@@ -30,6 +30,10 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Added
+
+- **The agent bridge: remote coding agents get a revocable key of their own.** `hal0 bridge add <name>` admits a remote agent (Claude Code, Codex, a CI job) and prints its `hal0bk_` key once, with one `claude mcp add` line for each MCP server its scopes open: `hal0-agents` (delegate to the bundled Hermes agent), `hal0-memory`, and `hal0-admin` only when asked for with `--scope admin`. The default scopes are `agents` and `memory`. `hal0 bridge list`, `revoke`, `rotate` and `scopes` manage clients, `/api/bridge/clients` does the same over REST, and `GET /api/bridge/me` checks a key. A key is bound to its client's name (a memory write is attributed to the client, never to an `X-hal0-Agent` header), is refused on every `/api/*` and `/v1/*` route, and is required even when sign-in is off. Clients live in `/var/lib/hal0/bridge.db` (`0600`), `[bridge]` in `hal0.toml` sets `enabled` (on by default, and inert until a client exists), `max_concurrent_runs_per_client`, `run_retention_days` and `clarify_timeout_s`, and `hal0 doctor all` gains a `bridge-store` row. A bridge key with the `admin` scope is the agent-tier key ADR-0024 describes: treat it like an operator credential (ADR-0043).
+
 ## [1.7.1] — 2026-10-27
 
 ### Highlights
