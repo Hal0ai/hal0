@@ -1592,18 +1592,23 @@ def _bridge_config_enabled() -> bool:
 
 
 def _bridge_schema_latest() -> int:
-    """The highest migration version this build ships for ``bridge.db``."""
-    from importlib import resources
+    """The highest migration version this build ships for ``bridge.db``.
 
-    versions = [
-        int(m.group(1))
-        for entry in resources.files("hal0.bridge.migrations").iterdir()
-        if (m := re.match(r"^(\d+)_.+\.sql$", entry.name))
-    ]
-    return max(versions, default=0)
+    Read through :func:`hal0.db.migrate.available_versions`, the runner's own
+    discovery, so "current" here is what hal0-api applies at start.
+    """
+    from hal0.bridge.store import MIGRATIONS_DIR
+    from hal0.db.migrate import available_versions
+
+    return max(available_versions(MIGRATIONS_DIR), default=0)
 
 
-def check_bridge_store(*, path: Path | None = None, enabled: bool | None = None) -> Check:
+def check_bridge_store(
+    *,
+    path: Path | None = None,
+    enabled: bool | None = None,
+    api_running: bool | None = None,
+) -> Check:
     """The agent bridge's client store is present, owner-only and migrated (ADR-0043).
 
     ``bridge.db`` holds the sha256 of every bridge key and, later, the text of
@@ -1614,10 +1619,17 @@ def check_bridge_store(*, path: Path | None = None, enabled: bool | None = None)
     read-only when they are absent (hal0-api's per-call connections leave them
     absent between calls), and keeps them after close; they carry perms rows
     in ``install/perms.py`` and take the main file's mode. ``enabled`` is
-    ``[bridge].enabled`` unless a caller pins it.
+    ``[bridge].enabled`` unless a caller pins it. ``api_running`` is whether
+    hal0-api answered the doctor (``build_all_checks`` passes it from the
+    health probe); ``None`` means not known.
 
     * ``[bridge].enabled`` off: PASS, nothing to audit.
-    * No file: PASS, "no clients yet" (the first ``hal0 bridge add`` creates it).
+    * No file, hal0-api running: WARN. hal0-api creates ``bridge.db`` when it
+      starts with the bridge on, so a missing file means that open failed and
+      no bridge key can verify; the hal0-api log says why
+      (``hal0.bridge.store_unavailable``).
+    * No file, hal0-api not running or not known: PASS, "not created yet"
+      (hal0-api creates it at its next start).
     * Mode other than 0600, or an owner other than the service user: WARN. The
       owner is only compared when the service account exists, so a dev box
       without one is not flagged.
@@ -1639,7 +1651,16 @@ def check_bridge_store(*, path: Path | None = None, enabled: bool | None = None)
     try:
         st = os.stat(db)
     except FileNotFoundError:
-        return Check(key, label, _PASS, f"no clients yet ({db} is created by `hal0 bridge add`)")
+        if api_running:
+            return Check(
+                key,
+                label,
+                _WARN,
+                f"{db} is missing although hal0-api is running: it could not open the store at "
+                "start, so no bridge key verifies; see the hal0-api log "
+                "(hal0.bridge.store_unavailable) and restart hal0-api",
+            )
+        return Check(key, label, _PASS, f"not created yet ({db} is created when hal0-api starts)")
     except PermissionError:
         return Check(key, label, _WARN, unreadable)
     except OSError as exc:
@@ -2440,7 +2461,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         ),
         check_hermes_mcp_config_auth(auth=auth_payload),
         check_hermes_profiles_mcp(auth=auth_payload),
-        check_bridge_store(),
+        check_bridge_store(api_running=payloads["health"] is not None),
         check_hermes_generation_extras(),
         check_hermes_command_approvals(),
         check_hermes_delegation_slot(slots_payload),

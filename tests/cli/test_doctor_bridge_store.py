@@ -41,12 +41,65 @@ def test_disabled_passes_without_touching_the_file(tmp_path: Path) -> None:
     assert not db.exists()
 
 
-def test_absent_file_passes_as_no_clients_yet(tmp_path: Path) -> None:
+@pytest.mark.parametrize("api_running", [False, None])
+def test_absent_file_passes_while_hal0_api_is_down(
+    tmp_path: Path, api_running: bool | None
+) -> None:
+    """hal0-api creates bridge.db at start, so before that a missing file is expected."""
     db = tmp_path / "bridge.db"
-    c = da.check_bridge_store(path=db, enabled=True)
+    c = da.check_bridge_store(path=db, enabled=True, api_running=api_running)
     assert c.status == "pass"
-    assert "no clients yet" in c.detail
+    assert "not created yet" in c.detail
+    assert "hal0-api starts" in c.detail
+    assert "hal0 bridge add" not in c.detail
     assert not db.exists()  # the row is read-only: it must not create the store
+
+
+def test_absent_file_warns_when_hal0_api_is_running(tmp_path: Path) -> None:
+    """A running hal0-api with the bridge on created bridge.db, unless that open failed."""
+    db = tmp_path / "bridge.db"
+    c = da.check_bridge_store(path=db, enabled=True, api_running=True)
+    assert c.status == "warn"
+    assert not c.critical
+    assert "hal0-api is running" in c.detail
+    assert "hal0.bridge.store_unavailable" in c.detail
+    assert not db.exists()
+
+
+def test_build_all_checks_tells_the_row_whether_hal0_api_answered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The health probe answering is what "hal0-api is running" means to the row."""
+
+    def _stub(*_a: object, **_kw: object) -> da.Check:
+        return da.Check("stub", "stub", "pass", "stub")
+
+    # Every other row is stubbed: only the bridge row's wiring is under test.
+    for name in dir(da):
+        if name.startswith("check_") and callable(getattr(da, name)):
+            monkeypatch.setattr(da, name, _stub)
+    monkeypatch.setattr(da, "build_checks", lambda **_kw: [])
+    monkeypatch.setattr(da, "_get_any", lambda *_a, **_kw: None)
+    seen: list[object] = []
+
+    def _row(**kwargs: object) -> da.Check:
+        seen.append(kwargs.get("api_running"))
+        return _stub()
+
+    monkeypatch.setattr(da, "check_bridge_store", _row)
+    for health in ({"status": "ok"}, None):
+        payloads = dict.fromkeys(("urls", "system", "capabilities", "memory", "services"))
+        payloads["health"] = health
+        monkeypatch.setattr(da, "gather_payloads", lambda _base, p=payloads: p)
+        da.build_all_checks()
+    assert seen == [True, False]
+
+
+def test_schema_latest_uses_the_migration_runner_discovery() -> None:
+    from hal0.bridge.store import MIGRATIONS_DIR
+    from hal0.db.migrate import available_versions
+
+    assert da._bridge_schema_latest() == max(available_versions(MIGRATIONS_DIR))
 
 
 def test_store_with_two_clients_passes_with_schema_version(tmp_path: Path) -> None:
@@ -214,7 +267,7 @@ def test_unreadable_config_does_not_crash_the_row(
     monkeypatch.setattr("hal0.config.loader.load_hal0_config", _deny)
     absent = da.check_bridge_store(path=tmp_path / "bridge.db")
     assert absent.status == "pass"
-    assert "no clients yet" in absent.detail
+    assert "not created yet" in absent.detail
 
     db = _store(tmp_path, "alpha")
     present = da.check_bridge_store(path=db)
@@ -237,7 +290,7 @@ def test_unreadable_config_file_on_disk_does_not_crash_the_row(
     finally:
         os.chmod(toml, 0o600)
     assert c.status == "pass"
-    assert "no clients yet" in c.detail
+    assert "not created yet" in c.detail
 
 
 def test_reading_leaves_bridge_db_itself_untouched(tmp_path: Path) -> None:

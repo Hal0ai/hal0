@@ -25,7 +25,8 @@ from hal0.bridge import keys
 from hal0.db.connection import connect, tx
 from hal0.db.migrate import migrate
 
-_MIGRATIONS_DIR = Path(__file__).parent / "migrations"
+#: The ``bridge.db`` schema, applied by :func:`hal0.db.migrate.migrate`.
+MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
 #: Owner read/write only: the file carries key hashes and run text.
 _DB_MODE = 0o600
@@ -142,7 +143,7 @@ class BridgeStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         os.close(os.open(self.path, os.O_RDWR | os.O_CREAT, _DB_MODE))
         with connect(self.path) as conn:
-            migrate(conn, migrations_dir=_MIGRATIONS_DIR)
+            migrate(conn, migrations_dir=MIGRATIONS_DIR)
         os.chmod(self.path, _DB_MODE)
 
     def add_client(
