@@ -153,6 +153,9 @@
 .ov-tile .ov-nm { font-family: var(--jbm); font-size: 12.5px; font-weight: 600; }
 .ov-tile .ov-st { margin-left: auto; font-family: var(--jbm); font-size: 11px; color: var(--fg-3); white-space: nowrap; }
 .ov-tile.serving .ov-st { color: var(--ok); }
+.ov-tile.error { border-color: var(--err-line); }
+.ov-tile.error .ov-st { color: var(--err); }
+.ov-tile.warming .ov-st { color: var(--warn); }
 .ov-tile .ov-model { font-family: var(--jbm); font-size: 10.5px; color: var(--fg-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ov-tile .ov-r3 { display: flex; align-items: center; gap: 10px; font-family: var(--jbm); font-size: 10px; color: var(--fg-4); }
 .ov-tile .ov-r3 .ov-ctx { flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0; }

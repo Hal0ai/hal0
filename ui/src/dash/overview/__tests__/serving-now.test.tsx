@@ -121,6 +121,27 @@ describe('OvServingNow', () => {
     expect(host.querySelector('.ov-card-n')?.textContent).toBe('3/4 loaded')
   })
 
+  it('marks an error tile and a warming tile so the state colours apply', () => {
+    slotsData = [
+      { name: 'b', device: 'gpu-vulkan', state: 'warming', type: 'llm' },
+      { name: 'c', device: 'gpu-vulkan', state: 'error', type: 'llm' },
+      { name: 'a', device: 'gpu-vulkan', state: 'ready', type: 'llm' },
+    ]
+    mount()
+    const tile = (n: string) => [...host.querySelectorAll('.ov-tile')].find((t) => t.querySelector('.ov-nm')?.textContent === n)!
+    expect(tile('c').classList.contains('error')).toBe(true)
+    expect(tile('b').classList.contains('warming')).toBe(true)
+    expect(tile('a').classList.contains('error') || tile('a').classList.contains('warming')).toBe(false)
+  })
+
+  it('styles error tiles with --err and warming text with --warn', async () => {
+    const { readFileSync } = await import(/* @vite-ignore */ ['node', 'fs'].join(':') as string)
+    const css = readFileSync(`${(globalThis as any).process.cwd()}/src/dash/overview/overview.css`, 'utf8')
+    expect(css).toMatch(/\.ov-tile\.error\s*\{[^}]*border-color:\s*var\(--err-line\)/)
+    expect(css).toMatch(/\.ov-tile\.error \.ov-st\s*\{[^}]*color:\s*var\(--err\)/)
+    expect(css).toMatch(/\.ov-tile\.warming \.ov-st\s*\{[^}]*color:\s*var\(--warn\)/)
+  })
+
   it('logs routes to slots then dispatches hal0:slot-logs with the slot name', () => {
     vi.useFakeTimers()
     try {
