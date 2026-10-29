@@ -253,7 +253,9 @@ ADR-0035 was verified against), shapes the answer:
     queued, so the operator is never asked to approve a write that cannot
     succeed. The inbox rule for pushes is this. A put and a delete of one skill
     name can both be pending, each its own row. A re-push of a put that is
-    identical to the pending one is the same row. An edited re-push by the
+    identical to the client's own pending one is the same row; an identical
+    push by another client is that client's own row, so each client's push is
+    recorded under it (the card names the pushing client). An edited re-push by the
     *same client* withdraws that client's older row and queues the new one, so
     approving always writes the content the card shows. An edited re-push while
     *another client's* put of that name is pending is refused with
@@ -267,12 +269,19 @@ ADR-0035 was verified against), shapes the answer:
     character, `SKILL.md` at most 16 KiB and the whole push at most 48 KiB;
     anything else is refused before queueing with `bridge.skill_invalid`
     ("bridge pushes are limited to reviewable text (SKILL.md ≤ 16 KiB, total
-    ≤ 48 KiB)"). The card shows the skill name, the byte count, a 16-hex
-    digest, the whole `SKILL.md` and every supporting file as `{size, sha256,
-    content}`, all text passed through the log redactor first and never cut
-    (`preview_truncated` stays, always false, for the UI). The library's own
-    limits (256 KiB a file, 16 files) remain the rule for what is written to
-    disk; a skill larger than a push may be, or one with binary files, is the
+    ≤ 48 KiB)"). A push is also refused when a file carries secret-shaped
+    text (anything the log redactor would mask: a skill has no business
+    carrying a secret) or control text (DEL, a C0 control other than tab,
+    newline and carriage return, a zero-width, bidirectional-override or
+    isolate character, or a BOM), because the card must be the exact text
+    written: a masked card once showed `export API_TOKEN="***REDACTED***"`
+    for a line whose raw command was what Hermes loaded. The card shows the
+    skill name, the pushing client, the byte count, a 16-hex digest, the
+    whole `SKILL.md` and every supporting file as `{size, sha256, content}`,
+    byte for byte what approval writes and never cut (`preview_truncated`
+    stays, always false, for the UI); a dedicated inbox view for reading a
+    pending push in full is #3141. The library's own limits (256 KiB a file,
+    16 files) remain the rule for what is written to disk; a skill larger than a push may be, or one with binary files, is the
     operator's to put in the drop-in directory by hand. Once a row is
     approved, denied, withdrawn or failed, the queue lets go of the executor
     that holds the pushed content, and it keeps only the newest 200 resolved
@@ -288,7 +297,9 @@ ADR-0035 was verified against), shapes the answer:
     `api_server_version` comes from `GET /health/detailed`, which answers 401
     without the profile's API key, so the request carries the key hal0 holds
     for that profile as a bearer, never through a proxy; with no key held, no
-    request is made and the version is `null`.
+    request is made and the version is `null`. Only a version-shaped answer is
+    reported (a dotted numeric core with at most a short tag that starts with
+    a separator), so a secret cannot pass for a version.
 
 ### Implementation decisions (second change)
 
@@ -349,10 +360,12 @@ the bot findings left on the second change's run tools:
 
 - **A retried start is answered from the ledger.** `bridge.db` schema 2
   records the idempotency key hal0 sent and a digest of the request. A start
-  whose key the ledger holds for that client and profile returns that run
-  before the concurrency cap is checked (a replay is not one run too many),
-  and the same key with a different request is `bridge.idempotency_conflict`,
-  as Hermes answers.
+  whose key the ledger holds for that client and profile returns that run,
+  finished or not, before the concurrency cap is checked (a replay is not one
+  run too many), and the same key with a different request is
+  `bridge.idempotency_conflict`, as Hermes answers. A key holds for as long as
+  the ledger keeps its run (`[bridge].run_retention_days`), which is longer
+  than Hermes's own idempotency window.
 - **A start is admitted under its client's lock until the run is recorded**,
   even when the caller goes away mid-start. If the ledger cannot record a run
   Hermes accepted, hal0 asks Hermes to stop it and answers 503
@@ -360,14 +373,21 @@ the bot findings left on the second change's run tools:
 - **A stop hal0 decides on is durable.** The clarify-timeout stop is written
   to the run (`pending_stop`) before it is posted and retried with the
   reconnect backoff, and again after a restart, until Hermes takes it or
-  answers that nothing is left to stop.
+  answers that nothing is left to stop: 404 (the run is gone) or 409 (it is
+  no longer running). Any other refusal, a 401 or 403 after a key rotation
+  and a 429 among them, is retried like a 5xx, since the run is still going.
 - **Restart probes run at once**, each with a 10 s timeout; a run whose
   profile does not answer is watched anyway and its reconnect loop takes over.
 - **Streamed text is masked across event boundaries.** Consecutive
   `message.text` events, with the stored `message.text` run just outside the
   returned window on each side (up to 8192 characters), are masked as one
   text before each event shows its part, so a secret split across flushes or
-  pages is still masked.
+  pages is still masked. At the live edge (a page that ends at the newest
+  stored event, or a wait's tail) there is no right context, so a known token
+  prefix from the redactor's table whose characters run to the end is masked
+  through the end, before the rest of the token is stored. A secret whose
+  head the 500-row event cap has already pruned, with only its tail left in
+  the ledger, is accepted and not masked by this rule.
 
 ## Rejected
 
