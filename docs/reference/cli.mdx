@@ -307,7 +307,7 @@ While the terminal tool is off (the default; `--no-terminal-tool` or `HAL0_HERME
 
 ## `hal0 bridge` — admit remote coding agents
 
-A bridge client is a named remote agent (Claude Code, Codex, a CI job) with a key of its own. The group goes through hal0-api, so the API must be running, and it answers with a message of its own while `[bridge].enabled` is `false`. See [Connect an external MCP client](/docs/guides/connect-mcp#connect-an-external-mcp-client) and [ADR-0043](/docs/adr/0043-agent-bridge-and-bridge-keys).
+A bridge client is a named remote agent (Claude Code, Codex, a CI job) with a key of its own. The group goes through hal0-api, so the API must be running. See [Connect an external MCP client](/docs/guides/connect-mcp#connect-an-external-mcp-client) and [ADR-0043](/docs/adr/0043-agent-bridge-and-bridge-keys).
 
 | Command | Args | Flags |
 |---|---|---|
@@ -326,6 +326,12 @@ claude mcp add --transport http hal0-admin http://<host>:8080/mcp/admin/mcp --he
 ```
 
 `agents` is always held; `--scope memory` and `--scope admin` add the `hal0-memory` and `hal0-admin` lines. `bridge revoke` ends a key at once and keeps the name, so it cannot be added again; `bridge rotate` replaces a live client's key at once and keeps its scopes and note, and refuses a revoked client. `bridge scopes` replaces the whole set (`agents` stays), so the same key opens different servers from the next request.
+
+A failed command prints the API's `error.message` and exits 1: a name that is taken or malformed, an unknown scope, a client that does not exist, `rotate` on a revoked client. While `[bridge].enabled` is `false` every `hal0 bridge` command exits 1 with:
+
+```text
+The agent bridge is disabled: set [bridge] enabled = true in /etc/hal0/hal0.toml and restart hal0-api.
+```
 
 The `admin` scope opens the hal0 admin tools: treat that key like an operator credential and grant the scope only to an agent that operates the box ([SECURITY.md](https://github.com/Hal0ai/hal0/blob/main/SECURITY.md#bundled-agent-trust-boundary)).
 
