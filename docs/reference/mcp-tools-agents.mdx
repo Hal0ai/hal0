@@ -1,0 +1,99 @@
+---
+title: "MCP tools: hal0-agents (agent bridge)"
+description: "The sixteen tools of the hal0-agents MCP server at /mcp/agents: run, follow and stop a Hermes run, and leave memory and skills for a Hermes profile — with the output paging, the approval gate and the bridge.* error codes."
+sidebar:
+  order: 91
+---
+
+The `hal0-agents` server is the agent bridge's tool surface ([ADR-0043](/docs/adr/0043-agent-bridge-and-bridge-keys)), mounted under `/mcp/agents` whenever `[bridge].enabled` is on (the default) and 404 while it is off. A client connects to the transport endpoint `/mcp/agents/mcp`, the URL [`hal0 bridge add`](/docs/reference/cli-operator#hal0-bridge--admit-remote-coding-agents) prints, not to the mount prefix `/mcp/agents`. A bridge client admitted with [`hal0 bridge`](/docs/reference/cli-operator#hal0-bridge--admit-remote-coding-agents), or the box's admin key, uses it to delegate work to a Hermes profile and to teach that profile. Every bridge client holds the `agents` scope, so every client can reach this server. That scope alone already reaches memory: `agent_memory_add` and `agent_memory_search` write and search a Hermes profile's memory, and the Hermes that runs a delegated task uses its own memory tools. `--scope memory` adds direct access to the `hal0-memory` server on top. Each tool has a typed signature, so `tools/list` returns real per-field schemas. The other two servers, `hal0-admin` and `hal0-memory`, are on the [MCP tools reference](/docs/reference/mcp-tools).
+
+`agent` is `hermes` (the default profile) or `hermes/<profile>`; the memory tools also take `shared`. Failures are raised, not returned (see [Failures](#failures)).
+
+## Run tools
+
+A client sees only its own runs. A run another client owns is reported exactly like a run that does not exist (`bridge.run_not_found`), so run ids cannot be probed; the admin key sees every client's runs. `session_key` and `idempotency_key` are private to the calling client: hal0 prefixes them with the client's name before they reach Hermes. A start whose `idempotency_key` the client already used on that profile is answered from hal0's run ledger before the concurrency cap is checked, for as long as the ledger keeps the run (`[bridge].run_retention_days`, longer than Hermes's own idempotency window): the same request returns that run, finished or not, and a different request with the same key is `bridge.idempotency_conflict`.
+
+| Tool | Required | Returns |
+|---|---|---|
+| `agents_list` | none | `{agents: [...]}`: Hermes with each served profile (`name`, `agent_id`, `health`, `keyed`, `model_id`), and Pi, which is not runnable |
+| `agent_run` | `agent`, `input` | the run view: `run_id`, `agent`, `profile`, `client`, `status`, `created_at`, `updated_at`, `input_preview`, `output`, `error`, `usage`, `pending`, `last_seq`. Optional: `session_key`, `instructions`, `reasoning_effort`, `idempotency_key`, and `wait_s` (default `0`: return at once; above `0`, wait up to that many seconds, at most 600, like `agent_run_wait`) |
+| `agent_run_wait` | `run_id` | the run view plus `events_tail` (the last 20 events) and `timed_out`. Blocks until the run ends, asks a question, or `timeout_s` passes (default 120, at most 600) |
+| `agent_run_status` | `run_id` | the run view. Optional: `offset`, the byte offset of the `output` window to read (see below) |
+| `agent_run_events` | `run_id` | `{run_id, events, last_seq}`: stored events with `seq` above `since_seq` (default 0), oldest first, `limit` at most 500 (default 100). Call again with `since_seq=last_seq` to follow a run, or with `since_seq=0` to replay it |
+| `agent_run_answer` | `run_id`, `request_id`, `answer` | the run view. Answers the clarification in the run's `pending` field; the run resumes |
+| `agent_run_steer` | `run_id`, `input` | the run view. Adds guidance to a run that is `running` |
+| `agent_run_stop` | `run_id` | the run view, `stopping` until the run ends |
+| `agent_runs_list` | none | `{runs: [...]}`: the caller's runs, newest first, each the run view with `output_preview` (the output's first 200 characters) in place of `output`. Optional: `status`, `limit` (at most 200; default 20) |
+
+A run that needs an approval waits for the operator in the hal0 inbox; an approval does not end `agent_run_wait`. A clarification does: the client answers it with `agent_run_answer`.
+
+A run's `output`, `error`, `input_preview`, `pending` request, `events_tail` and event payloads pass through the log redactor before a remote machine sees them (bearer tokens, `*_KEY=` values and similar are masked). `output` comes in 16 KiB windows: `agent_run_status`'s `offset` (in bytes, default 0) picks one, and the view carries `output_offset`, `output_total` and `next_offset` (`null` after the last window). While more follows, the view has `truncated: true` and `more`, the next call: `agent_run_status(run_id, offset=<next_offset>)`. The events are no way back to a long output: hal0 keeps a run's newest 500 events only. Any other text over 16 KiB (`error`, `pending`, an event in `events_tail` or an events page) is cut with `truncated: true`, and nothing pages the rest. Streamed text is stored as `message.text` events cut wherever hal0 flushed, so consecutive `message.text` events are masked as one text, with the stored `message.text` run just outside the window on each side (up to 8192 characters): a secret split across events, or pages, is still masked. At the live edge (a page whose last text, together with the stored text just after it, runs to the newest stored event, a wait's `events_tail`, and the `output` and `output_preview` of a run that has not finished) the rest of a token may not be stored yet, so a known token prefix (`hal0bk_`, `hf_`, `sk-`, `ghp_` and the other GitHub prefixes, `xoxb-` and the other Slack prefixes, `AKIA`) whose characters run to the end of the text is masked through the end. `hal0 doctor` reports the bridge on the `agent-bridge` row.
+
+## Teach tools
+
+The teach tools leave knowledge behind for a Hermes profile. They do not start a run.
+
+| Tool | Required | Returns |
+|---|---|---|
+| `agent_memory_add` | `agent`, `text` | `{status, id, timestamp}`. Remembers `text` in the agent's own private memory, or in the shared memory for `shared`. Optional: `tags`, a list of strings |
+| `agent_memory_search` | `agent`, `query` | `{status, results}`. `limit` is 1 to 50 (default 10) |
+| `agent_skills_list` | none | `{skills: [{name, source, category, description, mtime, files, broken}]}`: the skills Hermes loads, `source` being `shipped` (hal0's own, read-only) or `dropin` (the operator's); `broken` is `true` for a skill whose frontmatter cannot be read |
+| `agent_skill_get` | `name` | `{name, source, category, skill_md, files}`: the `SKILL.md` text and the names of the supporting files, whose content is not returned. The text passes through the log redactor, so a placeholder the push check permits, such as `HF_TOKEN=...`, comes back as `HF_TOKEN=***REDACTED***`, and it is cut at 16 KiB with `truncated: true`. It is not an exact copy: a client must not prepare a replacement from it as it stands |
+| `agent_skill_put` | `name`, `skill_md` | `{status: "pending_approval", approval_id, name}`. Proposes creating or replacing the drop-in skill `name`; nothing is written until the operator approves. Optional: `files`, a map of file name to text. The whole push must be reviewable text (see [Skills](#skills)). A replacement is complete: a push without `files` installs `SKILL.md` alone, and the previous version's supporting files are parked and removed with it. A client that wants to keep them resubmits every one in `files`; `agent_skill_get` lists their names only |
+| `agent_skill_delete` | `name` | `{status: "pending_approval", approval_id, name}`. Proposes removing the drop-in skill `name`; nothing is deleted until the operator approves |
+| `agent_capabilities` | `agent` | what the Hermes profile can do now, with every secret left out (see below) |
+
+### Memory
+
+hal0, not the caller, picks the namespace: `hermes` writes to `private:hermes`, `hermes/<profile>` to `private:hermes__<profile>`, and `shared` to the box's shared memory. A search of `hermes` or `hermes/<profile>` reads that private memory and the shared memory; a search of `shared` reads the shared memory and any private memory filed under the calling client's own name (`private:<client>`). Neither takes the namespace from the request's headers, so a caller cannot promote a write into another namespace.
+
+Every note carries the tag `source:bridge:<client>`. A tag the client sends that starts with `agent:`, `visibility:`, `project:` or `source:bridge:` (compared case-insensitively) is dropped: the memory layer reads a note's owner and visibility from those tags, so a client could otherwise plant a note in another agent's private memory.
+
+### Skills
+
+`agent_skills_list` and `agent_skill_get` read hal0's shipped skills and the drop-in directory (`/var/lib/hal0/skills`). A write or a delete touches the drop-in directory only. There is no approve tool: a person approves or denies each row in the hal0 inbox, and only then is the skill written. A shipped skill's name is refused before anything is queued (`bridge.skill_readonly`).
+
+`agent_skill_put` checks the request at once and refuses it with `bridge.skill_invalid` before anything is queued unless:
+
+- `name` is 1 to 64 lowercase letters, digits and hyphens, not starting with a hyphen;
+- `SKILL.md` starts with a frontmatter block that YAML can read, holding the same `name` and a non-blank `description`, and holds no `data:` URI longer than 1024 characters (the scheme counts; an image pasted into a file Hermes reads on every load);
+- there are at most 16 `files`, each a plain name: no `/`, `\`, `..` or NUL, not starting with `.`, not empty, not `SKILL.md`, and at most 200 bytes of UTF-8;
+- the push is reviewable text: everything valid UTF-8 with no NUL character, `SKILL.md` at most 16 KiB and the whole push at most 48 KiB. Past that the message starts "bridge pushes are limited to reviewable text (SKILL.md ≤ 16 KiB, total ≤ 48 KiB)";
+- no file carries secret-shaped values that are not placeholders. Where the log redactor would mask a value, the value must name a secret rather than be one: `<token>`, `$ENV_VAR` or `${ENV_VAR}`, `YOUR_KEY`, `...`, `xxx`, `***`, `TODO`, `CHANGEME`, `"your api key"` and the like (a placeholder with a space needs quotes, as in `HF_TOKEN="<your token>"`: unquoted, the value ends at the space). A placeholder holds no secret shape of its own (`$hf_…` or `<ghp_…>` is refused), a `<…>` holds no `$(` or backtick, a `$ENV_VAR` ends the value and its name is in one case (`$API_KEY` or `$api_key`), and `YOUR_KEY` is upper case. So `Authorization: Bearer <token>` and `HF_TOKEN=...` teach Hermes to call an API while an opaque token (`Bearer abc123…`, a `ghp_` token) is refused; the message names the file: `'SKILL.md' holds secret-shaped text the inbox card would mask; … use a placeholder such as <token> or $ENV_VAR`;
+- no file, file name or skill name holds a character the card would not show as Hermes reads it: a control character other than tab, newline and carriage return (C0, DEL and C1), a format character (zero-width and joiner characters, bidirectional marks, overrides and isolates, tag characters, the soft hyphen, the BOM), a private-use or unassigned code point, U+2028 or U+2029, a variation selector (U+FE00 to U+FE0F, U+E0100 to U+E01EF) or U+034F; ordinary emoji that need no joiner or variation selector pass. The message names the file: `'notes.md' holds control, format or invisible characters`.
+
+The operator reads what they approve: the inbox card names the pushing `client` and shows the whole `SKILL.md` (`preview`, `preview_truncated` always `false`) and every file as `{size, sha256, content}`, each exactly the text approval writes and never cut, beside the total `bytes` and a digest. A bigger skill, or one with binary files, is the operator's to put in the drop-in directory by hand; the read tools then list and read it like any other (`skill_md` cut at 16 KiB with `truncated: true`).
+
+A skill has at most one content pending. A client pushing the same content again is the same row; another client pushing identical content gets its own row, with its own `approval_id`. Deletes work the same way: each client's delete of a skill is its own row, and a repeat is that row. An edited push from the same client withdraws that client's older row and queues the new one, so approving always writes what the card shows. An edited push while another client's put of that name is pending is `bridge.skill_pending_elsewhere` (409). A client holds at most eight pending skill changes, puts and deletes together; the ninth is `bridge.too_many_pending` (429).
+
+### Capabilities
+
+`agent_capabilities` returns `agent`, `profile`, `api_server_version` (`null` when Hermes is not answering, hal0 holds no key for the profile, or the answer is not a version: a dotted numeric core with at most a short tag that starts with `-`, `+` or `.`, such as `0.22.4-rc1`), `model_aliases` (alias to `{model, provider}`), `toolsets_enabled`, `toolsets_disabled`, `mcp_servers` (names only), `skills_dirs`, `platforms_enabled` and `approvals_mode`. It is built from an allow-list of the profile's own `config.yaml` (`<home>/config.yaml` for `hermes`, `<home>/profiles/<profile>/config.yaml` for `hermes/<profile>`): it never carries a URL, header, key or other secret, and any string the log redactor would change is dropped rather than masked. A field that file does not set is `null`, meaning Hermes uses its built-in default. `null` also means hal0 could not read the file (unreadable, or not valid YAML): every field taken from it is then `null`, nothing is logged, and the view does not tell this from a file that sets nothing, so a client must not take an all-`null` view as "Hermes defaults". Nothing is taken from another profile's file, as Hermes itself does not.
+
+## Failures
+
+Failures are raised, not returned: the call comes back with `isError` set and a message that contains the stable code as `bridge.<code>: <message>` (FastMCP puts `Error executing tool <name>: ` in front). `auth.forbidden` (403) is a caller with neither a bridge key nor the admin key.
+
+| Code | Status | Meaning |
+|---|---|---|
+| `bridge.unavailable` | 503 | the run service is not running or is shutting down, or (for a skill change) no approval inbox is running; see the hal0-api log |
+| `bridge.unknown_agent` | 404 | no such agent id or Hermes profile |
+| `bridge.agent_unkeyed` | 503 | hal0 holds no API key for the profile |
+| `bridge.agent_unavailable` | 502 | Hermes does not answer |
+| `bridge.agent_refused` | 502 | Hermes refused hal0's request (its key, or Hermes itself) |
+| `bridge.run_not_found` | 404 | no such run, or it belongs to another client |
+| `bridge.too_many_runs` | 429 | the client's `[bridge].max_concurrent_runs_per_client` is reached |
+| `bridge.idempotency_conflict` | 409 | the idempotency key was used for a different request, or belongs to another client's run |
+| `bridge.run_not_running` | 409 | the run is not in a state that allows the call |
+| `bridge.no_pending_request` | 409 | the clarification is not pending |
+| `bridge.invalid_session_key`, `bridge.invalid_idempotency_key` | 422 | the key is empty, too long (the header holds 256 characters, the client prefix included) or not visible ASCII without spaces |
+| `bridge.invalid_offset` | 422 | a negative `offset` |
+| `bridge.store_unavailable` | 503 | the run ledger could not record a run Hermes had accepted; hal0 asked Hermes to stop it |
+| `bridge.memory_disabled` | 503 | the box runs no memory |
+| `bridge.memory_invalid`, `bridge.memory_failed` | 422, 502 | the memory layer refused the note or query as malformed, or failed |
+| `bridge.skill_invalid` | 422 | the skill's name, frontmatter, size or file names are not valid, or the push is not reviewable text |
+| `bridge.skill_not_found` | 404 | no such skill |
+| `bridge.skill_readonly` | 403 | a shipped skill cannot be changed or deleted |
+| `bridge.skill_pending_elsewhere` | 409 | another client has a pending change to that skill |
+| `bridge.too_many_pending` | 429 | the client already holds eight pending skill changes |
+| `bridge.internal` | 500 | any other failure: its detail is logged on hal0-api and never sent |

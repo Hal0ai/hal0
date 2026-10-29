@@ -18,7 +18,11 @@ follows ``GET /v1/runs/<id>/events`` with ``Last-Event-ID`` and:
   approve tool, a gated action needs a human (ADR-0004);
 * keeps a ``clarify.request`` for the delegating client, and stops the run with
   ``"clarification unanswered after <n>s"`` if nobody answers within
-  ``[bridge].clarify_timeout_s``;
+  ``[bridge].clarify_timeout_s``. That stop is recorded on the row
+  (``pending_stop``) before it is posted and cleared only once Hermes takes it
+  (or answers that the run is gone or already ending); until then it is retried
+  with the reconnect backoff, and again after a hal0-api restart, so a stop
+  that fails once cannot leave the run holding its slot while Hermes waits;
 * reconnects after a quiet end or a dropped stream, with backoff, from the last
   sequence it stored. A run that is silent for a minute is not a failed run (the
   local model can take 40 s to its first token), so silence alone never ends a
@@ -118,6 +122,10 @@ _BUS_FOR_STATUS: dict[str, tuple[str, str]] = {
 _FORGOTTEN = "Hermes no longer knows this run"
 _MAX_ERROR_TEXT = 2000
 
+#: Hermes's answers to a stop that leave nothing to stop: 404 (the run is gone) and
+#: 409 (it is no longer running). Any other refusal is retried (``_deliver_stop``).
+_STOP_FINAL: frozenset[int] = frozenset({404, 409})
+
 Decide = Callable[[RunRow], dict[str, Any]]
 
 
@@ -155,6 +163,9 @@ class _Tail:
     buffer_to: int = 0
     buffer_started: float = 0.0
     clarify_timer: asyncio.Task[None] | None = None
+    #: A stop hal0 decided on (``runs.pending_stop``) that has not reached Hermes yet.
+    stop_pending: bool = False
+    stop_task: asyncio.Task[None] | None = None
     done: bool = False
 
     @classmethod
@@ -166,6 +177,7 @@ class _Tail:
             profile=row.profile,
             last_seq=row.last_seq,
             output=row.output or "",
+            stop_pending=row.pending_stop is not None,
         )
 
     @property
@@ -415,12 +427,15 @@ class RunWatcher:
             if row.pending_request_json is not None:
                 changes["pending_request_json"] = None
                 cleared.append(row)
+            if row.pending_stop is not None:  # this stop reached Hermes: nothing to retry
+                changes["pending_stop"] = None
             return changes
 
         tail = self._tails.get(run_id)
         row = await self.update(run_id, decide)
         if tail is not None:
             self._cancel_clarify(tail)
+            self._cancel_stop(tail)
         for before in cleared:
             await self._withdraw(before, "the run was stopped")
         return row
@@ -442,6 +457,7 @@ class RunWatcher:
             log.exception("bridge.watcher_failed", run_id=tail.run_id)
         finally:
             self._cancel_clarify(tail)
+            self._cancel_stop(tail)
             if self._tails.get(tail.run_id) is tail:
                 del self._tails[tail.run_id]
 
@@ -450,6 +466,7 @@ class RunWatcher:
         last_contact = self._clock()
         while True:
             progressed = False
+            self._ensure_stop(tail)  # a stop that has not reached Hermes is retried on reconnect
             try:
                 stream = cast(
                     AsyncGenerator[dict[str, Any], None],
@@ -732,7 +749,11 @@ class RunWatcher:
         await self._flush(tail)
 
         def decide(row: RunRow) -> dict[str, Any]:
-            changes: dict[str, Any] = {"status": status, "pending_request_json": None}
+            changes: dict[str, Any] = {
+                "status": status,
+                "pending_request_json": None,
+                "pending_stop": None,
+            }
             final = output if output is not None else (tail.output or row.output)
             if final is not None:
                 changes["output"] = final
@@ -748,6 +769,7 @@ class RunWatcher:
             )
         tail.done = True
         self._cancel_clarify(tail)
+        self._cancel_stop(tail)
         if event is not None:
             tail.last_seq = max(tail.last_seq, event[0])
         if result is None:
@@ -762,11 +784,15 @@ class RunWatcher:
     # -- approvals ---------------------------------------------------------------------
 
     async def _resume_pending(self, tail: _Tail, row: RunRow) -> None:
-        """On (re)attach, mirror a pending approval again and re-arm a clarify timeout.
+        """On (re)attach, mirror a pending approval again, re-arm a clarify timeout,
+        and resume delivering a stop that had not reached Hermes.
 
         The approval inbox is in memory, so after a restart a run waiting for
         approval has no inbox row until it is mirrored again.
         """
+        if row.pending_stop is not None:
+            tail.stop_pending = True
+            self._ensure_stop(tail)
         pending = pending_of(row)
         if pending is None:
             return
@@ -956,12 +982,18 @@ class RunWatcher:
         await asyncio.sleep(delay)
         tail.clarify_timer = None  # fired: an answer arriving now must not cancel the stop
         error = f"clarification unanswered after {self._clarify_timeout():g}s"
-        # The error is written before the stop is posted, so the terminal event
-        # that the stop produces finds it and keeps it.
+        # The error and the outstanding stop are written before the stop is posted:
+        # the terminal event that the stop produces finds the error and keeps it,
+        # and a stop that does not get through is retried (``_deliver_stop``).
         changed = await self.update(
             tail.run_id,
             lambda row: (
-                {"pending_request_json": None, "error": error, "status": "stopping"}
+                {
+                    "pending_request_json": None,
+                    "error": error,
+                    "status": "stopping",
+                    "pending_stop": time.time(),
+                }
                 if _is_pending(row, "clarify.request", request_id)
                 else {}
             ),
@@ -969,10 +1001,68 @@ class RunWatcher:
         if changed is None:
             return  # answered meanwhile, or the run ended
         log.info("bridge.clarify_timeout", run_id=tail.run_id, request_id=request_id)
+        tail.stop_pending = True
+        self._ensure_stop(tail)
+
+    # -- a stop hal0 decided on ----------------------------------------------------------
+
+    def _ensure_stop(self, tail: _Tail) -> None:
+        """Start delivering the run's outstanding stop, unless that is already under way."""
+        if not tail.stop_pending or tail.done or self._stopped:
+            return
+        if tail.stop_task is not None and not tail.stop_task.done():
+            return
+        task = asyncio.create_task(self._deliver_stop(tail), name=f"bridge-stop:{tail.run_id}")
+        tail.stop_task = task
+        self._timers.add(task)
+        task.add_done_callback(self._timers.discard)
+
+    def _cancel_stop(self, tail: _Tail) -> None:
+        task, tail.stop_task = tail.stop_task, None
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+
+    async def _deliver_stop(self, tail: _Tail) -> None:
+        """Post the stop until Hermes takes it, then clear ``pending_stop``.
+
+        Only a definitive answer ends it: Hermes taking the stop, or refusing it
+        with :data:`_STOP_FINAL` (404, the run is gone; 409, it is no longer
+        running), when there is nothing left to stop. Every other failure is
+        retried with the reconnect backoff until the run ends (the watcher's
+        give-up included) or the watcher stops: Hermes unreachable, a 5xx, and
+        every other 4xx, since after a 401 or 403 (hal0's key rotated) or a 429 the
+        run is still going in Hermes.
+        """
+        attempt = 0
+        backoff = self._timing.backoff_s
+        while tail.stop_pending and not tail.done and not self._stopped:
+            try:
+                await self._gateway.stop(tail.profile, tail.run_id)
+            except HermesRefused as exc:
+                if exc.hermes_status in _STOP_FINAL:
+                    log.info("bridge.stop_not_needed", run_id=tail.run_id, error=exc.message)
+                    break
+                log.warning("bridge.stop_failed", run_id=tail.run_id, error=exc.message)
+            except BridgeError as exc:
+                log.warning("bridge.stop_failed", run_id=tail.run_id, error=exc.message)
+            except Exception:
+                log.exception("bridge.stop_failed", run_id=tail.run_id)
+            else:
+                break
+            await asyncio.sleep(backoff[min(attempt, len(backoff) - 1)])
+            attempt += 1
+        else:
+            return  # the run ended, or the watcher stopped: _finish or a restart takes it
+        tail.stop_pending = False
         try:
-            await self._gateway.stop(tail.profile, tail.run_id)
-        except BridgeError as exc:
-            log.warning("bridge.clarify_stop_failed", run_id=tail.run_id, error=exc.message)
+            await self.update(
+                tail.run_id,
+                lambda row: {"pending_stop": None} if row.pending_stop is not None else {},
+            )
+        except Exception:
+            # The stop got through; a marker left behind only makes a restart post it
+            # once more, which Hermes answers as a run already stopping.
+            log.warning("bridge.stop_marker_left", run_id=tail.run_id, exc_info=True)
 
     # -- plumbing ----------------------------------------------------------------------
 

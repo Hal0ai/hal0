@@ -31,6 +31,15 @@ BRIDGE_ERROR_STATUS: dict[str, int] = {
     "bridge.skill_invalid": 422,
     "bridge.skill_not_found": 404,
     "bridge.skill_readonly": 403,
+    # Skill changes wait in the approval inbox: a client may hold at most eight there
+    # (429), and a client cannot replace another client's pending change (409).
+    "bridge.too_many_pending": 429,
+    "bridge.skill_pending_elsewhere": 409,
+    # Teach tools: memory the box does not run (503), a memory write or search the
+    # memory layer refused as malformed (422) or failed (502).
+    "bridge.memory_disabled": 503,
+    "bridge.memory_invalid": 422,
+    "bridge.memory_failed": 502,
     "bridge.store_unavailable": 503,
     "bridge.unavailable": 503,
     # An unexpected failure behind a tool call: the detail is logged, never sent (ADR-0043).

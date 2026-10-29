@@ -1,4 +1,4 @@
-"""hal0 agents MCP server: the run tools of the agent bridge (ADR-0043 decision 9).
+"""hal0 agents MCP server: the run and teach tools of the agent bridge (ADR-0043 decisions 9-10).
 
 A remote coding agent (Claude Code, Codex, a CI job) holding a bridge key
 reaches this server at ``/mcp/agents`` and delegates work to hal0's Hermes
@@ -20,6 +20,25 @@ Tool catalog
     agent_run_steer    — add guidance to a running run
     agent_run_stop     — ask Hermes to stop a run
     agent_runs_list    — the caller's runs, newest first
+
+The teach tools (decision 10) leave knowledge behind for a Hermes profile::
+
+    agent_memory_add     — remember a note in an agent's own (or the shared) memory
+    agent_memory_search  — search that memory
+    agent_skills_list    — the skills Hermes loads (shipped, read-only; and drop-in)
+    agent_skill_get      — one skill's SKILL.md and file names
+    agent_skill_put      — propose a drop-in skill: queued for the operator, not written
+    agent_skill_delete   — propose removing a drop-in skill: queued likewise
+    agent_capabilities   — a sanitised view of what a Hermes profile can do now
+
+Memory is namespaced by hal0 (``private:hermes``, ``private:hermes__<profile>`` or
+``shared``), never by the caller's arguments or headers; tags the caller sends that
+start ``agent:``, ``visibility:``, ``project:`` or ``source:bridge:`` are dropped, because
+the memory layer trusts them for ownership (#3136). A skill write or delete is
+gated: the tool returns ``{status: "pending_approval", approval_id}`` and the
+change happens only if the operator approves the row in the hal0 inbox (there is no
+approve tool). ``agent_capabilities`` never carries a URL, header, key or other
+secret.
 
 Who is asking
 -------------
@@ -53,6 +72,20 @@ passes through the log redactor (:func:`hal0.redaction.redact_log_line`) before
 a remote machine sees it, and a string over 16 KiB is cut at that size with
 ``truncated: true``.
 
+Streamed text is stored as ``message.text`` events cut wherever the watcher
+flushed, so a secret can straddle two of them (``Authorization: Bearer `` in
+one, the token in the next). Consecutive ``message.text`` events are therefore
+masked as one text, together with the stored ``message.text`` run just outside
+the window on each side (before ``since_seq``, after the page, before a wait's
+tail; up to 8192 characters each), and each event then shows its own part of
+the masked text: a secret is masked whichever events, or pages, it is split
+over. At the live edge (a page whose last text, with its right context, ends at
+the newest stored event, and a wait's tail) the rest of a token may not be
+stored yet, so a known token prefix (:func:`hal0.redaction.token_head_at_end`)
+whose characters run to the end of the text is masked through the end. The
+output of a run that has not finished grows on every flush, so its end is the
+live edge too, in a view and in a list's ``output_preview``.
+
 ``output`` is paged rather than lost (:mod:`hal0.bridge.output`): a view shows
 the 16 KiB window of the masked text that ``agent_run_status``'s ``offset``
 names (0 everywhere else), with ``output_offset``, ``output_total`` and
@@ -72,6 +105,7 @@ and shared by every server; the bridge service is read off the server's
 
 from __future__ import annotations
 
+import asyncio
 import functools
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
@@ -86,8 +120,9 @@ from hal0.api.auth import ANON, AuthPrincipal
 from hal0.bridge.caller import Caller
 from hal0.bridge.errors import BridgeError
 from hal0.bridge.output import OUTPUT_WINDOW_BYTES, output_window
+from hal0.bridge.store import TERMINAL_STATUSES
 from hal0.mcp._binding import BoundFastMCP, ToolContext, bound_server
-from hal0.redaction import redact_log_line
+from hal0.redaction import MASK, redact_log_line, secret_spans, token_head_at_end
 
 if TYPE_CHECKING:
     from hal0.bridge.service import BridgeService
@@ -184,15 +219,141 @@ def _clean_tree(value: Any) -> tuple[Any, bool]:
     return value, False
 
 
-def _view(view: dict[str, Any], *, offset: int = 0) -> dict[str, Any]:
+# -- streamed text masked across event boundaries (Codex on #3138) -------------------------
+
+_TEXT_EVENT = "message.text"
+
+
+def _text_of(event: Any) -> str | None:
+    """The streamed text a stored ``message.text`` event carries, else None."""
+    if not isinstance(event, dict) or event.get("event") != _TEXT_EVENT:
+        return None
+    payload = event.get("payload")
+    text = payload.get("text") if isinstance(payload, dict) else None
+    return text if isinstance(text, str) else None
+
+
+def _merged(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """``spans`` sorted, with overlapping or touching spans joined into one."""
+    out: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if out and start <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], end))
+        else:
+            out.append((start, end))
+    return out
+
+
+def _mask_run(texts: list[str], *, at_edge: bool = False) -> list[str]:
+    """``texts`` masked as one string, each given back its own part of the result.
+
+    A span that covers part of a text becomes one MASK in it; a text wholly inside a
+    span becomes MASK. ``at_edge`` says the joined text ends at the newest stored
+    event: a token the redactor would mask only once it is whole is masked from
+    its known prefix to the end (:func:`~hal0.redaction.token_head_at_end`).
+    """
+    joined = "".join(texts)
+    spans = secret_spans(joined)
+    if at_edge and (head := token_head_at_end(joined)) is not None:
+        spans = _merged([*spans, (head, len(joined))])
+    if not spans:
+        return list(texts)
+    out: list[str] = []
+    start = 0
+    for text in texts:
+        end = start + len(text)
+        parts: list[str] = []
+        pos = start
+        for span_start, span_end in spans:
+            if span_end <= start or span_start >= end:
+                continue
+            lo, hi = max(span_start, start), min(span_end, end)
+            parts += (joined[pos:lo], MASK)
+            pos = hi
+        parts.append(joined[pos:end])
+        out.append("".join(parts))
+        start = end
+    return out
+
+
+def _clean_events(
+    events: list[dict[str, Any]],
+    *,
+    before: list[dict[str, Any]] | None = None,
+    after: list[dict[str, Any]] | None = None,
+    at_edge: bool = True,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Events made safe to return; streamed text is masked across event boundaries.
+
+    Each run of consecutive ``message.text`` events is masked as one text by
+    :func:`_mask_run`, the first run together with ``before`` and the last with
+    ``after`` (the stored ``message.text`` runs just outside the window, oldest
+    first, from :meth:`BridgeService.run_events_window`); then every event goes
+    through :func:`_clean_tree` as before. True when any text was cut.
+
+    ``at_edge`` says the end of the events and ``after`` together is the newest
+    stored event (the live edge; a wait's tail always is): a last run that reaches
+    the end of the window is then masked ``at_edge`` with ``after`` joined to it,
+    since the rest of a token running to the end of that text may not be stored
+    yet. False when ``after`` was cut by the context cap or another event follows.
+    """
+    left_context = [t for t in map(_text_of, before or []) if t is not None]
+    right_context = [t for t in map(_text_of, after or []) if t is not None]
+    texts = [_text_of(event) for event in events]
+    rewritten: dict[int, str] = {}
+    index = 0
+    while index < len(events):
+        if texts[index] is None:
+            index += 1
+            continue
+        stop = index
+        while stop < len(events) and texts[stop] is not None:
+            stop += 1
+        group = [t for t in texts[index:stop] if t is not None]
+        left = left_context if index == 0 else []
+        right = right_context if stop == len(events) else []
+        masked = _mask_run([*left, *group, *right], at_edge=at_edge and stop == len(events))
+        masked = masked[len(left) : len(masked) - len(right)]
+        for offset, text in enumerate(masked):
+            rewritten[index + offset] = text
+        index = stop
+    out: list[dict[str, Any]] = []
+    for position, event in enumerate(events):
+        if position in rewritten:
+            event = {**event, "payload": {**event["payload"], "text": rewritten[position]}}
+        out.append(event)
+    return _clean_tree(out)
+
+
+def _masked_output(view: dict[str, Any], output: str) -> str:
+    """A run's ``output`` with its secrets masked, by the run's status.
+
+    A finished run's output is complete: the log redactor masks it. A run that is
+    not finished has its output extended on every flush of the watcher, so its end
+    is the live edge, as at the end of an events page: a known token prefix running
+    to the end is also masked through the end (:func:`_mask_run` ``at_edge``). A
+    view without a status is treated as live. Without such a prefix at the end the
+    redactor's output is used as is.
+    """
+    if view.get("status") in TERMINAL_STATUSES or token_head_at_end(output) is None:
+        return redact_log_line(output)
+    return _mask_run([output], at_edge=True)[0]
+
+
+def _view(
+    view: dict[str, Any], *, offset: int = 0, tail_before: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
     """A RunView (or a wait's view) made safe to return: secrets masked, texts capped.
 
-    ``output`` is masked whole, then the 16 KiB window at byte ``offset`` is
-    shown with ``output_offset``, ``output_total`` and ``next_offset``
-    (:func:`hal0.bridge.output.output_window`); masking first means a window
-    edge cannot split a secret the redactor would have caught. ``error``,
-    ``input_preview``, the ``pending`` request (a clarification's question or an
-    approval's command) and ``events_tail`` of a wait go through :func:`_clean`.
+    ``output`` is masked whole (:func:`_masked_output`), then the 16 KiB window
+    at byte ``offset`` is shown with ``output_offset``, ``output_total`` and
+    ``next_offset`` (:func:`hal0.bridge.output.output_window`); masking first
+    means a window edge cannot split a secret the redactor would have caught.
+    ``error``, ``input_preview``, the ``pending`` request (a clarification's
+    question or an approval's command) and ``events_tail`` of a wait go through
+    :func:`_clean`, the tail's streamed text masked across events (:func:`_clean_events`, with
+    ``tail_before``, the stored text run just before the tail, and as the live
+    edge: the tail is the newest events stored).
     ``truncated`` is true when any text was cut or more output follows; ``more``
     names the call that reads the next window of the output.
     """
@@ -200,7 +361,7 @@ def _view(view: dict[str, Any], *, offset: int = 0) -> dict[str, Any]:
     truncated = False
     output = out.get("output")
     if isinstance(output, str):
-        out["output"], page = output_window(redact_log_line(output), offset)
+        out["output"], page = output_window(_masked_output(out, output), offset)
         out.update(page)
         if page["next_offset"] is not None:
             truncated = True
@@ -211,7 +372,7 @@ def _view(view: dict[str, Any], *, offset: int = 0) -> dict[str, Any]:
         truncated = truncated or cut
     tail = out.get("events_tail")
     if isinstance(tail, list):
-        out["events_tail"], cut = _clean_tree(tail)
+        out["events_tail"], cut = _clean_events(tail, before=tail_before)
         truncated = truncated or cut
     preview = out.get("input_preview")
     if isinstance(preview, str):
@@ -234,14 +395,37 @@ def _list_item(view: dict[str, Any]) -> dict[str, Any]:
     """A RunView as an ``agent_runs_list`` item: ``output_preview`` in place of ``output``.
 
     A list is for finding a run, not reading it: the first
-    :data:`OUTPUT_PREVIEW_CHARS` characters of the masked output, and ``error``
-    (cleaned like a view's). ``agent_run_status`` reads the whole output.
+    :data:`OUTPUT_PREVIEW_CHARS` characters of the masked output
+    (:func:`_masked_output`), and ``error`` (cleaned like a view's).
+    ``agent_run_status`` reads the whole output.
     """
     item = dict(view)
     output = item.pop("output", None)
-    preview = redact_log_line(output)[:OUTPUT_PREVIEW_CHARS] if isinstance(output, str) else None
+    preview = (
+        _masked_output(item, output)[:OUTPUT_PREVIEW_CHARS] if isinstance(output, str) else None
+    )
     out = _view(item)
     out["output_preview"] = preview
+    return out
+
+
+async def _wait_view(
+    service: BridgeService, caller: Caller, view: dict[str, Any]
+) -> dict[str, Any]:
+    """A wait's view made safe, its tail's text masked with the stored text run before it."""
+    tail = view.get("events_tail")
+    before: list[dict[str, Any]] = []
+    if isinstance(tail, list) and tail and _text_of(tail[0]) is not None:
+        before = await service.events_before(caller, view["run_id"], int(tail[0]["seq"]))
+    return _view(view, tail_before=before)
+
+
+def _cleaned(value: dict[str, Any]) -> dict[str, Any]:
+    """``value`` with every string masked and capped like a run text; ``truncated`` when any was cut."""
+    cleaned, cut = _clean_tree(value)
+    out: dict[str, Any] = dict(cleaned)
+    if cut:
+        out["truncated"] = True
     return out
 
 
@@ -310,6 +494,21 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
         readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=True
     ),
     "agent_runs_list": _READ,
+    "agent_memory_add": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+    ),
+    "agent_memory_search": _READ,
+    "agent_skills_list": _READ,
+    "agent_skill_get": _READ,
+    # A push is a proposal for the operator's inbox, and pushing the same skill again is the
+    # same row: idempotent, and nothing is destroyed until a human approves.
+    "agent_skill_put": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "agent_skill_delete": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
+    ),
+    "agent_capabilities": _READ,
 }
 
 
@@ -345,7 +544,12 @@ def _agents_tool_definitions() -> dict[str, Tool]:
             "Start a run on a Hermes profile and return its view (run_id, status, ...). "
             "agent is 'hermes' or 'hermes/<profile>'; input is the task. session_key "
             "continues one conversation across runs and idempotency_key makes a retried "
-            "start safe; both are private to your client. wait_s > 0 also waits that many "
+            "start safe; both are private to your client. A start that repeats an "
+            "idempotency_key (per client and profile) is answered from hal0's run ledger "
+            "for as long as it keeps the run ([bridge].run_retention_days, longer than "
+            "Hermes's own idempotency window) and returns that run, finished or not; the "
+            "same key with a different request is bridge.idempotency_conflict. wait_s > 0 "
+            "also waits that many "
             "seconds (at most 600) for the run to end or need an answer, like agent_run_wait; "
             "0 returns at once. A run that waits on an approval is the operator's to approve "
             "in the hal0 inbox."
@@ -374,7 +578,8 @@ def _agents_tool_definitions() -> dict[str, Tool]:
             idempotency_key=idempotency_key,
         )
         if wait_s > 0:
-            return _view(await service.wait_run(caller, started["run_id"], timeout_s=wait_s))
+            waited = await service.wait_run(caller, started["run_id"], timeout_s=wait_s)
+            return await _wait_view(service, caller, waited)
         return _view(started)
 
     @server.tool(
@@ -391,7 +596,9 @@ def _agents_tool_definitions() -> dict[str, Tool]:
         run_id: str, timeout_s: int = 120, ctx: ToolContext | None = None
     ) -> dict[str, Any]:
         caller, service = _context(ctx)
-        return _view(await service.wait_run(caller, run_id, timeout_s=timeout_s))
+        return await _wait_view(
+            service, caller, await service.wait_run(caller, run_id, timeout_s=timeout_s)
+        )
 
     @server.tool(
         name="agent_run_status",
@@ -431,8 +638,10 @@ def _agents_tool_definitions() -> dict[str, Tool]:
         run_id: str, since_seq: int = 0, limit: int = 100, ctx: ToolContext | None = None
     ) -> dict[str, Any]:
         caller, service = _context(ctx)
-        events = await service.run_events(caller, run_id, since_seq=since_seq, limit=limit)
-        cleaned, cut = _clean_tree(events)
+        before, events, after, at_edge = await service.run_events_window(
+            caller, run_id, since_seq=since_seq, limit=limit
+        )
+        cleaned, cut = _clean_events(events, before=before, after=after, at_edge=at_edge)
         last_seq = max((int(e.get("seq", 0)) for e in cleaned), default=max(since_seq, 0))
         page: dict[str, Any] = {"run_id": run_id, "events": cleaned, "last_seq": last_seq}
         if cut:
@@ -500,5 +709,138 @@ def _agents_tool_definitions() -> dict[str, Tool]:
         caller, service = _context(ctx)
         runs = await service.list_runs(caller, status=status, limit=limit)
         return {"runs": [_list_item(run) for run in runs]}
+
+    # -- teach tools (ADR-0043 decision 10) ---------------------------------------------
+
+    @server.tool(
+        name="agent_memory_add",
+        description=(
+            "Remember a note for a Hermes agent. agent is 'hermes' (the default profile), "
+            "'hermes/<profile>', or 'shared' (the box's shared memory). The note is stored in "
+            "that agent's own private memory, or in the shared memory for 'shared'; hal0 picks "
+            "the namespace, not you. It is tagged source:bridge:<your client name> along with "
+            "any tags you pass, except tags that start with agent:, visibility:, project: or "
+            "source:bridge: (hal0 owns those, so they are dropped). Returns {status, id, "
+            "timestamp}. Refused with bridge.unknown_agent for any other agent and "
+            "bridge.memory_disabled when the box runs no memory."
+        ),
+        annotations=_ANNOTATIONS["agent_memory_add"],
+    )
+    @_guarded
+    async def agent_memory_add(
+        agent: str, text: str, tags: list[str] | None = None, ctx: ToolContext | None = None
+    ) -> dict[str, Any]:
+        caller, service = _context(ctx)
+        return _cleaned(await service.memory_add(caller, agent=agent, text=text, tags=tags))
+
+    @server.tool(
+        name="agent_memory_search",
+        description=(
+            "Search what a Hermes agent remembers. agent is 'hermes', 'hermes/<profile>' (its "
+            "own private memory and the shared memory) or 'shared' (the shared memory and any "
+            "private memory filed under your own client name). limit is 1 to 50 (default 10). "
+            "Returns {status, results}. A text over 16 KiB is cut and the result then carries "
+            "truncated: true."
+        ),
+        annotations=_ANNOTATIONS["agent_memory_search"],
+    )
+    @_guarded
+    async def agent_memory_search(
+        agent: str, query: str, limit: int = 10, ctx: ToolContext | None = None
+    ) -> dict[str, Any]:
+        caller, service = _context(ctx)
+        found = await service.memory_search(caller, agent=agent, query=query, limit=limit)
+        return _cleaned(found)
+
+    @server.tool(
+        name="agent_skills_list",
+        description=(
+            "List the skills Hermes loads: hal0's shipped skills (source 'shipped', read-only) "
+            "and the operator's drop-in skills (source 'dropin'; the ones you add with "
+            "agent_skill_put). Returns {skills: [{name, source, category, description, mtime, "
+            "files, broken}]}; broken is true for a skill whose frontmatter cannot be read."
+        ),
+        annotations=_ANNOTATIONS["agent_skills_list"],
+    )
+    @_guarded
+    async def agent_skills_list(ctx: ToolContext | None = None) -> dict[str, Any]:
+        _, service = _context(ctx)
+        return _cleaned({"skills": await asyncio.to_thread(service.skills_list)})
+
+    @server.tool(
+        name="agent_skill_get",
+        description=(
+            "One skill: {name, source, category, skill_md, files}. skill_md is the SKILL.md text "
+            "(cut at 16 KiB with truncated: true); files names the supporting files, whose "
+            "content is not returned. Refused with bridge.skill_not_found."
+        ),
+        annotations=_ANNOTATIONS["agent_skill_get"],
+    )
+    @_guarded
+    async def agent_skill_get(name: str, ctx: ToolContext | None = None) -> dict[str, Any]:
+        _, service = _context(ctx)
+        return _cleaned(await asyncio.to_thread(service.skill_get, name))
+
+    @server.tool(
+        name="agent_skill_put",
+        description=(
+            "Propose a skill for Hermes: create or replace the drop-in skill name (lowercase "
+            "letters, digits and hyphens). skill_md is the whole SKILL.md and must start with a "
+            "frontmatter block holding name (the same name) and description; files maps "
+            "supporting file names (no paths) to text. The operator reads the whole push on "
+            "the inbox card, so it must be reviewable UTF-8 text: SKILL.md at most 16 KiB, "
+            "everything at most 48 KiB, at most 16 files. It is checked at once "
+            "(bridge.skill_invalid), but nothing is written until the operator approves it "
+            "in the hal0 inbox. Returns {status: 'pending_approval', approval_id, "
+            "name}; pushing the same skill again is the same inbox row, and an edited push "
+            "replaces your own pending one. Another client's pending change to that skill is "
+            "bridge.skill_pending_elsewhere, and more than 8 changes of yours waiting in the "
+            "inbox is bridge.too_many_pending. A shipped skill cannot be changed "
+            "(bridge.skill_readonly)."
+        ),
+        annotations=_ANNOTATIONS["agent_skill_put"],
+    )
+    @_guarded
+    async def agent_skill_put(
+        name: str,
+        skill_md: str,
+        files: dict[str, str] | None = None,
+        ctx: ToolContext | None = None,
+    ) -> dict[str, Any]:
+        caller, service = _context(ctx)
+        return _cleaned(await service.skill_put(caller, name=name, skill_md=skill_md, files=files))
+
+    @server.tool(
+        name="agent_skill_delete",
+        description=(
+            "Propose removing the drop-in skill name. Nothing is deleted until the operator "
+            "approves it in the hal0 inbox. Returns {status: 'pending_approval', approval_id, "
+            "name}. A shipped skill cannot be deleted (bridge.skill_readonly); an unknown one "
+            "is bridge.skill_not_found."
+        ),
+        annotations=_ANNOTATIONS["agent_skill_delete"],
+    )
+    @_guarded
+    async def agent_skill_delete(name: str, ctx: ToolContext | None = None) -> dict[str, Any]:
+        caller, service = _context(ctx)
+        return _cleaned(await service.skill_delete(caller, name=name))
+
+    @server.tool(
+        name="agent_capabilities",
+        description=(
+            "What a Hermes agent can do right now, read-only and with every secret left out: "
+            "{agent, profile, api_server_version, model_aliases: {alias: {model, provider}}, "
+            "toolsets_enabled, toolsets_disabled, mcp_servers (names only), skills_dirs, "
+            "platforms_enabled, approvals_mode}. agent is 'hermes' or 'hermes/<profile>'. "
+            "Each field is what that profile's own config.yaml sets; null means the file does "
+            "not set it, so Hermes uses its built-in default. api_server_version is null when "
+            "Hermes is not answering."
+        ),
+        annotations=_ANNOTATIONS["agent_capabilities"],
+    )
+    @_guarded
+    async def agent_capabilities(agent: str, ctx: ToolContext | None = None) -> dict[str, Any]:
+        _, service = _context(ctx)
+        return _cleaned(await service.capabilities(agent))
 
     return {tool.name: tool for tool in server._tool_manager.list_tools()}

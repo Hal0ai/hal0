@@ -165,7 +165,7 @@ ADR-0035 was verified against), shapes the answer:
    its server and mount). The lines are pasted on another machine, so their
    base is `[network].public_url` when set, else the address the request
    reached hal0-api at, with a loopback host (the CLI calls the API on
-   `127.0.0.1`) replaced by the box's first LAN address on the API port.
+   `127.0.0.1`) replaced by the address of the box's default-route interface on the API port.
 6. **`[bridge]` in `hal0.toml` holds the limits, and the bridge is on by
    default.** `BridgeConfig` (`extra="forbid"`) has `enabled = true`,
    `max_concurrent_runs_per_client = 2`, `run_retention_days = 7` and
@@ -221,7 +221,7 @@ ADR-0035 was verified against), shapes the answer:
      seconds to the first token.
    - Concurrency is limited per client by `max_concurrent_runs_per_client`
      before the run is posted.
-10. **Teach tools (a later change on this ADR).** Memory add and search write
+10. **Teach tools (implemented in the third change).** Memory add and search write
     to the agent's own namespace (`private:hermes` or
     `private:hermes__<profile>`, or the shared one when asked for), forced by
     `MemoryDispatcher.scoped` (`src/hal0/dispatcher/memory_dispatcher.py:107`)
@@ -229,9 +229,84 @@ ADR-0035 was verified against), shapes the answer:
     shipped mirror (read-only) and from the drop-in directory
     `/var/lib/hal0/skills`; writes and deletes touch only the drop-in
     directory, validate the skill's frontmatter, refuse symlinks and path
-    components, cap size, and are **gated**: they go to the approval inbox, and
-    repeated pushes of one skill collapse into one row. A capabilities tool
-    gives a read-only, sanitised view of what Hermes can do now.
+    components, cap size, and are **gated**: they go to the approval inbox (the
+    amendment says how repeated pushes behave). A capabilities tool gives a
+    read-only, sanitised view of what Hermes can do now.
+
+    *Amendment (the teach-tools change).* Details the first wording left
+    open. The shared namespace is reached through `MemoryDispatcher.shared`, the
+    counterpart of `scoped` with private mode forced *off*: the app-level
+    dispatcher takes private mode from the `X-hal0-Private` request header,
+    which the caller controls, so a shared write sent through it could be
+    promoted into `private:<client>`.
+
+    The memory layer decides who owns a note, and who may read it, from the
+    note's tags: the first `agent:<id>` tag, `visibility:private` and
+    `project:<id>`, and it trusts the writer's (tracked as #3136). A client
+    could therefore plant a note in another agent's private memory by sending
+    `agent:<that agent>`. So the bridge drops every client tag that starts with
+    `agent:`, `visibility:`, `project:` or `source:bridge:`, compared
+    case-insensitively after stripping, and stamps its own: the agent tag the
+    memory layer adds for the namespace, and `source:bridge:<client>`.
+
+    A skill write is checked (including the shipped-name refusal) before it is
+    queued, so the operator is never asked to approve a write that cannot
+    succeed. The inbox rule for pushes is this. A put and a delete of one skill
+    name can both be pending, each its own row. A repeat of a client's own
+    pending put or delete is the same row; an identical put or delete by
+    another client is that client's own row, so each client's change is
+    recorded under it (the card names the pushing client). An edited re-push
+    of a put by the *same client* withdraws that client's older row and queues the new one, so
+    approving always writes the content the card shows. An edited re-push while
+    *another client's* put of that name is pending is refused with
+    `bridge.skill_pending_elsewhere` (409): a client cannot retire someone
+    else's pending change. A client holds at most eight pending skill changes
+    (puts and deletes together); the ninth is `bridge.too_many_pending` (429),
+    and the cap frees as the operator decides rows.
+
+    The operator must be able to read what they approve, so a bridge push is
+    reviewable on its card in full. It must be UTF-8 text with no NUL
+    character, `SKILL.md` at most 16 KiB and the whole push at most 48 KiB;
+    anything else is refused before queueing with `bridge.skill_invalid`
+    ("bridge pushes are limited to reviewable text (SKILL.md ≤ 16 KiB, total
+    ≤ 48 KiB)"). A push is also refused when a file carries secret-shaped
+    values that are not placeholders (a skill has no business carrying a
+    secret, but teaching Hermes to call an authenticated API is what a pushed
+    skill is for, so where the log redactor would mask a value, a placeholder
+    such as `<token>`, `$ENV_VAR`, `YOUR_KEY` or `...` passes and an opaque
+    token does not), or text the card would not show as the model reads it,
+    in a file, a file name or the skill name: a control character other than
+    tab, newline and carriage return, a format character (Unicode category
+    Cf: zero-width, bidirectional, tag characters, the BOM), a private-use or
+    unassigned code point, a line or paragraph separator, or a variation
+    selector. The card is the exact text written, never
+    the redactor's output: a masked card once showed
+    `export API_TOKEN="***REDACTED***"` for a line whose raw command was what
+    Hermes loaded. The card shows the
+    skill name, the pushing client, the byte count, a 16-hex digest, the
+    whole `SKILL.md` and every supporting file as `{size, sha256, content}`,
+    byte for byte what approval writes and never cut (`preview_truncated`
+    stays, always false, for the UI); a dedicated inbox view for reading a
+    pending push in full is #3141. The library's own limits (256 KiB a file,
+    16 files) remain the rule for what is written to disk; a skill larger than a push may be, or one with binary files, is the
+    operator's to put in the drop-in directory by hand. Once a row is
+    approved, denied, withdrawn or failed, the queue lets go of the executor
+    that holds the pushed content, and it keeps only the newest 200 resolved
+    rows, since each still carries its card.
+
+    The capabilities view is built by allow-list (MCP server names, model alias
+    names and `{model, provider}`, never a URL, header or key), and any string
+    the log redactor would change is dropped. It reports only what the
+    profile's own `config.yaml` sets, and a field that file does not set is
+    `null` ("Hermes default"): Hermes merges a profile's file over its
+    built-in defaults only, never over the default profile's file
+    (`hermes_cli/config.py:431-433`, `:2088-2089` at the pinned ref). Its
+    `api_server_version` comes from `GET /health/detailed`, which answers 401
+    without the profile's API key, so the request carries the key hal0 holds
+    for that profile as a bearer, never through a proxy; with no key held, no
+    request is made and the version is `null`. Only a version-shaped answer is
+    reported (a dotted numeric core with at most a short tag that starts with
+    a separator), so a secret cannot pass for a version.
 
 ### Implementation decisions (second change)
 
@@ -284,6 +359,45 @@ while building it and reviewing it:
   belongs in the `0600` ledger. A bus message about a run names only
   `<client> → <agent>` (and the status when the run ends); the event's data
   carries the run id.
+
+### Implementation decisions (third change)
+
+The third change (PR 3) implements Decision 10 and, in its fix wave, closes
+the bot findings left on the second change's run tools:
+
+- **A retried start is answered from the ledger.** `bridge.db` schema 2
+  records the idempotency key hal0 sent and a digest of the request. A start
+  whose key the ledger holds for that client and profile returns that run,
+  finished or not, before the concurrency cap is checked (a replay is not one
+  run too many), and the same key with a different request is
+  `bridge.idempotency_conflict`, as Hermes answers. A key holds for as long as
+  the ledger keeps its run (`[bridge].run_retention_days`), which is longer
+  than Hermes's own idempotency window.
+- **A start is admitted under its client's lock until the run is recorded**,
+  even when the caller goes away mid-start. If the ledger cannot record a run
+  Hermes accepted, hal0 asks Hermes to stop it and answers 503
+  `bridge.store_unavailable`, so no run holds a slot unwatched.
+- **A stop hal0 decides on is durable.** The clarify-timeout stop is written
+  to the run (`pending_stop`) before it is posted and retried with the
+  reconnect backoff, and again after a restart, until Hermes takes it or
+  answers that nothing is left to stop: 404 (the run is gone) or 409 (it is
+  no longer running). Any other refusal, a 401 or 403 after a key rotation
+  and a 429 among them, is retried like a 5xx, since the run is still going.
+- **Restart probes run at once**, each with a 10 s timeout; a run whose
+  profile does not answer is watched anyway and its reconnect loop takes over.
+- **Streamed text is masked across event boundaries.** Consecutive
+  `message.text` events, with the stored `message.text` run just outside the
+  returned window on each side (up to 8192 characters), are masked as one
+  text before each event shows its part, so a secret split across flushes or
+  pages is still masked. At the live edge (a page whose last text, with the
+  stored text after it, runs to the newest stored event; a wait's tail; the
+  output of a run that has not finished, which grows on every flush) a known
+  token prefix from the redactor's table whose characters run to the end is
+  masked through the end, before the rest of the token is stored. A right
+  context cut by the 8192-character cap, or followed by another event, is not
+  the live edge. A secret whose
+  head the 500-row event cap has already pruned, with only its tail left in
+  the ledger, is accepted and not masked by this rule.
 
 ## Rejected
 

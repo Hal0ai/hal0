@@ -121,6 +121,25 @@ class MemoryDispatcher:
             add_preflight=self._add_preflight,
         )
 
+    def shared(self, client_id: str) -> MemoryDispatcher:
+        """A dispatcher pinned to ``client_id`` with private mode always OFF.
+
+        The counterpart of :meth:`scoped` for an in-process caller that writes or
+        reads the ``shared`` namespace (the agent bridge's ``agent="shared"``,
+        ADR-0043 decision 10). The app-level instance takes private mode from the
+        live request's ``X-hal0-Private`` header, which the caller controls: a
+        shared write sent through it could be promoted into ``private:<client>``.
+        This sibling shares the provider and the ``memory_add`` preflight but fixes
+        the identity to ``client_id`` (it becomes the item's ``source``) and never
+        promotes, so a request naming ``shared`` lands in ``shared``.
+        """
+        return MemoryDispatcher(
+            self._wrapper,
+            client_id_resolver=lambda: client_id,
+            private_resolver=lambda: False,
+            add_preflight=self._add_preflight,
+        )
+
     @property
     def wrapper(self) -> Any:
         """The underlying memory provider. Exposed so tests can introspect

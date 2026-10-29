@@ -29,9 +29,25 @@ of the skill. A write is staged, and the previous copy parked, under
 ``<dropin>/.archive/.bridge/`` (``stage-<name>-<uuid>``, ``old-<name>-<uuid>``):
 ``.archive`` is in that pruned set and is on the same filesystem, so the final
 ``rename`` is still atomic and Hermes never reads a half-written skill or a
-second copy. A failure leaves the previous skill in place and removes the
-stage. Every entry in ``.archive/.bridge/`` is debris by construction once the
-write lock is held, so each ``put`` and ``delete`` reaps them all first.
+second copy. ``.archive`` here is the bridge's own: at the same Hermes ref the
+curator's archive is ``~/.hermes/skills/.archive`` only (``_archive_dir``,
+``tools/skill_usage.py:55-56``) and a skill under ``skills.external_dirs``, as
+the drop-in root is, is read-only to the curator (``tools/skill_usage.py:274-275``),
+so nothing of Hermes's moves into or out of this directory.
+
+Replacing an existing skill takes two renames: the old copy is parked, then the
+stage moved in. Before the first, a marker ``stage-<name>-<uuid>.json`` naming
+both is written to the scratch directory. A failure between them puts the old
+copy back at once; a crash between them leaves the skill parked, so Hermes does
+not see it until the next ``put`` or ``delete``, whose cleanup puts it back.
+That cleanup runs first in every ``put`` and ``delete``, with the write lock
+held, so no entry in ``.archive/.bridge/`` belongs to a live write: it finishes
+or undoes each swap a marker names (the old copy goes back if the skill is
+missing, else it is dropped), puts back any other parked ``old-<name>-<uuid>``
+whose skill is missing from the drop-in root, and only then reaps the rest. A
+parked copy whose put-back fails is not "the rest": it may be the last whole copy
+of that skill, so the reap leaves it where it is (logged
+``bridge.skill_restore_failed``) and the next cleanup tries again.
 
 ``put`` and ``delete`` hold one lock per drop-in root for their whole run
 (hal0-api is one process; the CLI never writes skills), so same-name writers
@@ -43,6 +59,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import json
 import logging
 import os
 import re
@@ -111,7 +128,7 @@ def _check_name(name: str) -> None:
 
 def _frontmatter_block(text: str) -> str | None:
     """The text between the opening ``---`` line and the next ``---`` line."""
-    lines = text.removeprefix("﻿").replace("\r\n", "\n").split("\n")
+    lines = text.removeprefix("\ufeff").replace("\r\n", "\n").split("\n")
     if not lines or lines[0].strip() != "---":
         return None
     for i in range(1, len(lines)):
@@ -129,18 +146,25 @@ def _parse_frontmatter(text: str) -> dict[Any, Any]:
     except yaml.YAMLError as exc:
         reason = getattr(exc, "problem", None) or "parse error"
         raise _invalid(f"frontmatter is not valid YAML: {reason}") from exc
+    except (ValueError, RecursionError) as exc:
+        # safe_load also raises these: a timestamp that is no date (``created:
+        # 2024-13-45``) is a ValueError, and deep nesting a RecursionError.
+        reason = (
+            "nested too deeply" if isinstance(exc, RecursionError) else "a value it cannot read"
+        )
+        raise _invalid(f"frontmatter is not valid YAML: {reason}") from exc
     if not isinstance(data, dict):
         raise _invalid("frontmatter must be a YAML mapping")
     return data
 
 
-def _description_of(text: str) -> str:
-    """Frontmatter ``description``, or ``""`` when it cannot be read."""
+def _description_of(text: str) -> tuple[str, bool]:
+    """Frontmatter ``description`` (``""`` when absent), and whether the frontmatter is broken."""
     try:
         description = _parse_frontmatter(text).get("description")
     except BridgeError:
-        return ""
-    return description.strip() if isinstance(description, str) else ""
+        return "", True
+    return (description.strip() if isinstance(description, str) else ""), False
 
 
 # ── filesystem reads ────────────────────────────────────────────────────────
@@ -313,29 +337,116 @@ def _remove(dir_fd: int, name: str) -> None:
         log.warning("bridge.skill_scratch_left name=%s error=%s", name, exc)
 
 
-def _reap(scratch_fd: int) -> None:
-    """Remove every entry of the scratch directory.
+def _reap(scratch_fd: int, keep: frozenset[str]) -> None:
+    """Remove every entry of the scratch directory except those named in ``keep``.
 
-    Called with the write lock held, so none is a live stage: each is left over
-    from a crash, a failed removal or a lost race.
+    Called with the write lock held, after :meth:`SkillLibrary._recover`, so none
+    is a live stage or a parked copy that still has to go back: each is left over
+    from a crash, a failed removal or a lost race. ``keep`` is what ``_recover``
+    returned, the parked copies it could not put back: they stay for the next
+    cleanup to retry.
     """
     for entry in os.listdir(scratch_fd):
-        _remove(scratch_fd, entry)
+        if entry not in keep:
+            _remove(scratch_fd, entry)
 
 
-def _swap(scratch_fd: int, stage: str, parent_fd: int, name: str) -> None:
+_MARKER_SUFFIX = ".json"
+_PARKED_RE = re.compile(r"^old-(?P<name>[a-z0-9][a-z0-9-]{0,63})-[0-9a-f]{32}$")
+_STAGE_RE = re.compile(r"^stage-[a-z0-9][a-z0-9-]{0,63}-[0-9a-f]{32}$")
+
+
+def _exists(dir_fd: int, name: str) -> bool:
+    try:
+        os.lstat(name, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _write_marker(scratch_fd: int, marker: str, body: dict[str, str]) -> None:
+    """Write the swap marker ``marker`` in the scratch directory, durably, never through a link."""
+    fd = os.open(
+        marker,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+        0o644,
+        dir_fd=scratch_fd,
+    )
+    try:
+        os.write(fd, json.dumps(body).encode())
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _read_marker(scratch_fd: int, marker: str) -> dict[str, str] | None:
+    """A swap marker's ``{name, category, stage, old}``, or None when it is not one we wrote.
+
+    Only hal0 writes the scratch directory, but it is on disk: an entry named like a
+    marker that is a directory, a FIFO or a link, or that cannot be read, is no
+    marker (logged ``bridge.skill_marker_unreadable``), so :meth:`SkillLibrary._recover`
+    carries on. ``O_NONBLOCK`` keeps a FIFO from blocking the open under the write
+    lock, and ``fstat`` refuses anything but a regular file before it is read.
+    """
+    try:
+        fd = os.open(
+            marker,
+            os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=scratch_fd,
+        )
+    except OSError as exc:
+        log.warning("bridge.skill_marker_unreadable marker=%s error=%s", marker, exc)
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            log.warning("bridge.skill_marker_unreadable marker=%s error=not a regular file", marker)
+            return None
+        raw = os.read(fd, 4096)
+    except OSError as exc:
+        log.warning("bridge.skill_marker_unreadable marker=%s error=%s", marker, exc)
+        return None
+    finally:
+        os.close(fd)
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(body, dict):
+        return None
+    name, category = body.get("name"), body.get("category")
+    stage, old = body.get("stage"), body.get("old")
+    if not (isinstance(name, str) and NAME_RE.fullmatch(name)):
+        return None
+    if not (isinstance(stage, str) and _STAGE_RE.fullmatch(stage)):
+        return None
+    if not (isinstance(old, str) and (m := _PARKED_RE.fullmatch(old)) and m["name"] == name):
+        return None
+    if not isinstance(category, str) or (
+        category and (category.startswith(".") or any(c in category for c in "/\\\0"))
+    ):
+        return None
+    return {"name": name, "category": category, "stage": stage, "old": old}
+
+
+def _swap(scratch_fd: int, stage: str, parent_fd: int, name: str, *, category: str) -> None:
     """Rename ``stage`` (in the scratch directory) over ``name`` in ``parent_fd``.
 
     An existing skill is parked in the scratch directory first (a directory
     cannot be renamed over a non-empty one), put back if the second rename
-    fails, and removed once the new one is in place.
+    fails, and removed once the new one is in place. A marker naming the
+    stage and the parked copy is written before the first rename and removed
+    after the last step, so a crash in between is finished or undone by the
+    next cleanup (module docstring). ``category`` is the parent's name below the
+    drop-in root, ``""`` for the root itself.
     """
-    try:
-        os.lstat(name, dir_fd=parent_fd)
-    except FileNotFoundError:
+    if not _exists(parent_fd, name):
         os.replace(stage, name, src_dir_fd=scratch_fd, dst_dir_fd=parent_fd)
         return
     old = f"old-{name}-{uuid.uuid4().hex}"
+    marker = stage + _MARKER_SUFFIX
+    _write_marker(
+        scratch_fd, marker, {"name": name, "category": category, "stage": stage, "old": old}
+    )
     os.replace(name, old, src_dir_fd=parent_fd, dst_dir_fd=scratch_fd)
     try:
         os.replace(stage, name, src_dir_fd=scratch_fd, dst_dir_fd=parent_fd)
@@ -344,6 +455,7 @@ def _swap(scratch_fd: int, stage: str, parent_fd: int, name: str) -> None:
             os.replace(old, name, src_dir_fd=scratch_fd, dst_dir_fd=parent_fd)
         raise
     _remove(scratch_fd, old)
+    _remove(scratch_fd, marker)
 
 
 # ── the library ─────────────────────────────────────────────────────────────
@@ -386,6 +498,16 @@ class SkillLibrary:
     @property
     def _scratch_path(self) -> Path:
         return self._dropin_root / ARCHIVE_DIR / SCRATCH_DIR
+
+    def is_shipped(self, name: str) -> bool:
+        """True when hal0's shipped mirror holds ``name``: such a skill cannot be put or deleted.
+
+        The same test :meth:`put` applies, so a caller can refuse a doomed write
+        up front. Raises ``bridge.skill_invalid`` for a name that is not a valid
+        skill name.
+        """
+        _check_name(name)
+        return self._is_shipped(name)
 
     def get(self, name: str) -> SkillRow:
         """One skill: the drop-in copy if there is one, else the shipped one.
@@ -478,6 +600,9 @@ class SkillLibrary:
                 raise BridgeError(
                     "bridge.skill_readonly", f"{name!r} is a shipped skill and cannot be changed"
                 )
+            # Before the target is chosen: a copy an earlier crash left parked goes back
+            # to where it was, so this write replaces it there instead of beside it.
+            self._reap_scratch()
             target = self._put_target(name)
             try:
                 self._write(name, target.parent, skill_md, files or {})
@@ -514,7 +639,10 @@ class SkillLibrary:
         """Every skill in both roots, sorted by name then source.
 
         A name present in both roots is listed twice; ``source`` tells them
-        apart. ``description`` is ``""`` when the frontmatter cannot be read.
+        apart. A skill whose frontmatter cannot be read (not YAML, a value YAML
+        cannot load, nested too deeply) is still listed, with ``broken: true``
+        and ``description: ""``, and a warning is logged: one bad drop-in file
+        never hides the others. Every other row has ``broken: false``.
         """
         rows: list[SkillRow] = []
         for source, root, follow_dirs in self._sources():
@@ -528,14 +656,22 @@ class SkillLibrary:
                         "bridge.skill_unreadable name=%s source=%s error=%s", name, source, exc
                     )
                     continue
+                description, broken = _description_of(text)
+                if broken:
+                    log.warning(
+                        "bridge.skill_broken name=%s source=%s: its frontmatter cannot be read",
+                        name,
+                        source,
+                    )
                 rows.append(
                     {
                         "name": name,
                         "source": source,
                         "category": category,
-                        "description": _description_of(text),
+                        "description": description,
                         "mtime": mtime,
                         "files": _list_files(directory),
+                        "broken": broken,
                     }
                 )
         rows.sort(key=lambda row: (row["name"], row["source"]))
@@ -571,11 +707,71 @@ class SkillLibrary:
             except FileNotFoundError:
                 return
             try:
-                _reap(scratch_fd)
+                _reap(scratch_fd, self._recover(root_fd, scratch_fd))
             finally:
                 os.close(scratch_fd)
         finally:
             os.close(root_fd)
+
+    def _recover(self, root_fd: int, scratch_fd: int) -> frozenset[str]:
+        """Finish or undo interrupted swaps, then put back parked copies whose skill is gone.
+
+        Runs with the write lock held, before :func:`_reap` (module docstring). Every
+        step is best effort: a failure is logged and the entry is left to the reap,
+        except a parked copy, which is never reaped while its skill is missing.
+        Returns the scratch names of the parked copies it could not put back: the
+        reap leaves those in place and the next cleanup retries them. A swap whose
+        marker failed to settle is covered too, since the second pass rescans every
+        parked copy and tries the old one once more.
+        """
+        entries = sorted(os.listdir(scratch_fd))
+        for marker in (e for e in entries if e.endswith(_MARKER_SUFFIX)):
+            info = _read_marker(scratch_fd, marker)
+            if info is not None:
+                try:
+                    self._settle_swap(root_fd, scratch_fd, info)
+                except OSError as exc:
+                    log.warning("bridge.skill_swap_unsettled marker=%s error=%s", marker, exc)
+            _remove(scratch_fd, marker)
+        unrestored: set[str] = set()
+        for entry in sorted(os.listdir(scratch_fd)):
+            parked = _PARKED_RE.fullmatch(entry)
+            if parked is None or self._present(parked["name"]):
+                continue
+            try:
+                os.replace(entry, parked["name"], src_dir_fd=scratch_fd, dst_dir_fd=root_fd)
+                log.warning("bridge.skill_restored name=%s from=%s", parked["name"], entry)
+            except OSError as exc:
+                unrestored.add(entry)
+                log.warning("bridge.skill_restore_failed name=%s error=%s", parked["name"], exc)
+        return frozenset(unrestored)
+
+    def _settle_swap(self, root_fd: int, scratch_fd: int, info: dict[str, str]) -> None:
+        """Bring one interrupted swap to a whole skill: the old copy back, or the new one in."""
+        name, category = info["name"], info["category"]
+        parent_fd = root_fd
+        if category:
+            try:
+                parent_fd = _open_child_dir(root_fd, category, create=False)
+            except FileNotFoundError:
+                parent_fd = root_fd  # the category is gone: the skill goes back at the root
+        try:
+            if _exists(parent_fd, name):
+                return  # the swap finished (or never started): what is left is debris
+            for source in (info["old"], info["stage"]):
+                if _exists(scratch_fd, source):
+                    os.replace(source, name, src_dir_fd=scratch_fd, dst_dir_fd=parent_fd)
+                    log.warning("bridge.skill_swap_settled name=%s from=%s", name, source)
+                    return
+        finally:
+            if parent_fd != root_fd:
+                os.close(parent_fd)
+
+    def _present(self, name: str) -> bool:
+        """Whether the drop-in root holds ``name``, as a skill or as anything else."""
+        if os.path.lexists(self._dropin_root / name):
+            return True
+        return _find(self._dropin_root, name, follow_dirs=False) is not None
 
     def _write(self, name: str, parent: Path, skill_md: str, files: dict[str, str]) -> None:
         """Stage the skill under ``.archive/.bridge`` and swap it into ``parent``."""
@@ -586,11 +782,12 @@ class SkillLibrary:
             if parent != self._dropin_root:
                 parent_fd = nofollow.open_dir(parent)
             scratch_fd = _open_scratch(root_fd, create=True)
-            _reap(scratch_fd)
+            _reap(scratch_fd, self._recover(root_fd, scratch_fd))
             stage = f"stage-{name}-{uuid.uuid4().hex}"
+            category = "" if parent == self._dropin_root else parent.name
             try:
                 self._stage(self._scratch_path / stage, skill_md, files)
-                _swap(scratch_fd, stage, parent_fd, name)
+                _swap(scratch_fd, stage, parent_fd, name, category=category)
             except BaseException:
                 shutil.rmtree(stage, ignore_errors=True, dir_fd=scratch_fd)
                 raise

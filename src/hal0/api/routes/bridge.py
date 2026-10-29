@@ -275,7 +275,7 @@ async def _onboarding(request: Request, scopes: frozenset[str], key: str) -> dic
     The lines are pasted on another machine, so the URL base is
     ``[network].public_url`` when set; else the address this request reached
     the API at, except that a loopback host (``hal0 bridge add`` calls
-    ``http://127.0.0.1``) becomes the box's first LAN address, on the API port
+    ``http://127.0.0.1``) becomes the box's default-route address, on the API port
     (:func:`hal0.api.routes.config.api_base_url` with ``prefer_lan``).
     """
     fallback = getattr(request.app.state, "hal0_config", None)

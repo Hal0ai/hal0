@@ -27,7 +27,7 @@ from hal0.api._redact import (
     redact_value,
 )
 from hal0.observability.sentry import SENSITIVE_HEADERS
-from hal0.redaction import MASK, redact_secret_shapes, redact_shareable_text
+from hal0.redaction import MASK, redact_secret_shapes, redact_shareable_text, secret_spans
 
 # ── is_sensitive_key ──────────────────────────────────────────────────────
 
@@ -1691,3 +1691,59 @@ class TestSharedFixture:
     def test_the_sensitive_headers_are_the_backend_set(self) -> None:
         # ui/src/sentry.ts masks the same headers whole; its test reads this list.
         assert set(self._CASES["sensitive_headers"]) == SENSITIVE_HEADERS
+
+
+# -- secret_spans: where redact_log_line masks, read off the redactor itself ------------------
+
+_MIXED_SAMPLE = (
+    "start Authorization: Bearer abc123def456ghi789jkl then\n"
+    'export HF_TOKEN=hf_abcdefghijklmnopqrstuvwx and password: "hunter2-long"\n'
+    "url https://user:s3cret@example.com/x, flag --api-key=k3y-value; "
+    "a hal0bk_cc.ABCDEFGHIJKLMNOPQRSTUVWX key, AKIAABCDEFGHIJKLMNOP and "
+    "HAL0_ADMIN_KEY=adm1n, plain words here, Bearer <token>, $NOT_A_SECRET"
+)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        _MIXED_SAMPLE,
+        "nothing to mask at all",
+        "",
+        "Bearer x",
+        "curl -H 'Authorization: Bearer $TOKEN'",
+        "api_key: ${API_KEY} and HF_TOKEN=... then x_KEY=a;Bearer b",
+    ],
+)
+def test_secret_spans_agree_with_redact_log_line(text: str) -> None:
+    """Replacing each span with MASK gives exactly what the redactor gives."""
+    spans = secret_spans(text)
+    rebuilt, pos = [], 0
+    for start, end in spans:
+        assert pos <= start < end <= len(text)  # in order, non-empty, not overlapping
+        rebuilt += (text[pos:start], MASK)
+        pos = end
+    rebuilt.append(text[pos:])
+    assert "".join(rebuilt) == redact_log_line(text)
+
+
+def test_secret_spans_cover_each_masked_value() -> None:
+    text = 'see Authorization: Bearer <token> and password: "YOUR_PASSWORD" here'
+    assert [text[s:e] for s, e in secret_spans(text)] == ["<token>", "YOUR_PASSWORD"]
+
+
+@pytest.mark.parametrize(
+    ("text", "covered"),
+    [
+        ('password: "', []),
+        ('HF_TOKEN="', []),
+        ('see Authorization: Bearer <token> and password: "', ["<token>"]),
+        ('Authorization: Bearer abc123def456ghi789jkl and password: "', ["abc123def456ghi789jkl"]),
+    ],
+)
+def test_secret_spans_stay_inside_the_text(text: str, covered: list[str]) -> None:
+    """A value that opens at the very end is masked with nothing under it: no span for it."""
+    assert redact_log_line(text).endswith(MASK)  # the redactor does mask past the end
+    spans = secret_spans(text)
+    assert all(0 <= start < end <= len(text) for start, end in spans)
+    assert [text[s:e] for s, e in spans] == covered

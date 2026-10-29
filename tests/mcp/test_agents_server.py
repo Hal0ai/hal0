@@ -2,7 +2,8 @@
 
 ``hal0.mcp.agents`` is a thin projection of :class:`~hal0.bridge.service.BridgeService`
 (decision 9), so these tests pin the projection, not the lifecycle (that is
-``tests/bridge/test_service_runs.py``): the nine tool names, a start-and-wait
+``tests/bridge/test_service_runs.py``): the nine run tool names (the seven teach
+tools are in ``test_agents_server_teach.py``), a start-and-wait
 round trip against ``FakeHermes``, the caller each call acts as, a foreign run
 reading as a missing one, failures raised (never returned as success payloads),
 and the 16 KiB cap on a run's text.
@@ -26,7 +27,7 @@ from hal0.api.auth import ANON, AuthPrincipal
 from hal0.bridge.errors import BRIDGE_ERROR_STATUS, BridgeError
 from hal0.bridge.hermes_client import HermesGateway
 from hal0.bridge.service import BridgeService
-from hal0.bridge.store import BridgeStore
+from hal0.bridge.store import BridgeStore, RunRow
 from hal0.bridge.watcher import WatcherTiming
 from hal0.config.schema import BridgeConfig, Hal0Config
 from hal0.events import EventBus
@@ -36,6 +37,7 @@ from tests.bridge._fake_hermes import FakeHermes, sse_frame
 
 FAST = WatcherTiming(backoff_s=(0.01,))
 
+#: The run tools. The teach tools (ADR-0043 decision 10) are listed in ``test_agents_server_teach.py``.
 TOOL_NAMES = sorted(
     [
         "agents_list",
@@ -190,7 +192,9 @@ def server_anon(svc: BridgeService) -> FastMCP:
 
 
 async def test_tools_list_names(server: FastMCP) -> None:
-    assert sorted(t.name for t in await server.list_tools()) == TOOL_NAMES
+    listed = sorted(t.name for t in await server.list_tools())
+    assert [name for name in listed if name in TOOL_NAMES] == TOOL_NAMES
+    assert len(listed) == len(TOOL_NAMES) + 7  # + the teach tools
 
 
 async def test_every_tool_has_a_description_and_no_ctx_parameter(server: FastMCP) -> None:
@@ -363,8 +367,9 @@ class _Recorder:
                 return {"agents": []}
             if name == "list_runs":
                 return [self.view]
-            if name == "run_events":
-                return [{"seq": 4, "ts": 1.0, "event": "message.text", "payload": {"text": "hi"}}]
+            if name == "run_events_window":
+                event = {"seq": 4, "ts": 1.0, "event": "message.text", "payload": {"text": "hi"}}
+                return [], [event], [], False
             return dict(self.view)
 
         return call
@@ -409,6 +414,7 @@ async def test_arguments_reach_the_service() -> None:
     await server.call_tool("agent_runs_list", {"status": "running", "limit": 3})
     assert rec.calls[-1][2] == {"args": (), "status": "running", "limit": 3}
     await server.call_tool("agent_run_events", {"run_id": "run_1", "since_seq": 3, "limit": 9})
+    assert rec.calls[-1][0] == "run_events_window"
     assert rec.calls[-1][2] == {"args": ("run_1",), "since_seq": 3, "limit": 9}
 
 
@@ -588,16 +594,26 @@ async def test_the_cap_never_splits_a_character() -> None:
 
 async def test_events_are_scrubbed_and_capped_too() -> None:
     class _Events(_Recorder):
-        async def run_events(self, *_a: Any, **_kw: Any) -> list[dict[str, Any]]:
-            return [
-                {
-                    "seq": 7,
-                    "ts": 1.0,
-                    "event": "tool.completed",
-                    "payload": {"out": "Authorization: Bearer hal0bk_cc.s3cr3tvalue0123456789"},
-                },
-                {"seq": 8, "ts": 2.0, "event": "message.text", "payload": {"text": "z" * 30_000}},
-            ]
+        async def run_events_window(self, *_a: Any, **_kw: Any) -> Any:
+            return (
+                [],
+                [
+                    {
+                        "seq": 7,
+                        "ts": 1.0,
+                        "event": "tool.completed",
+                        "payload": {"out": "Authorization: Bearer hal0bk_cc.s3cr3tvalue0123456789"},
+                    },
+                    {
+                        "seq": 8,
+                        "ts": 2.0,
+                        "event": "message.text",
+                        "payload": {"text": "z" * 30_000},
+                    },
+                ],
+                [],
+                False,
+            )
 
     server = _server(_Events(), CC)
     out = _payload(await server.call_tool("agent_run_events", {"run_id": "run_1"}))
@@ -608,8 +624,8 @@ async def test_events_are_scrubbed_and_capped_too() -> None:
 
 async def test_an_empty_events_page_keeps_the_callers_position() -> None:
     class _Empty(_Recorder):
-        async def run_events(self, *_a: Any, **_kw: Any) -> list[dict[str, Any]]:
-            return []
+        async def run_events_window(self, *_a: Any, **_kw: Any) -> Any:
+            return [], [], [], True
 
     out = _payload(
         await _server(_Empty(), CC).call_tool("agent_run_events", {"run_id": "r", "since_seq": 41})
@@ -901,3 +917,342 @@ def test_a_bridge_key_the_gate_did_not_store_is_never_verified_again(
     monkeypatch.setattr(mcp_mount, "_current_mcp_request", lambda: request)
     assert mcp_mount.principal_resolver().tier == "anon"
     assert looked_up == []
+
+
+# -- streamed text: a secret split across events is still masked (Codex on #3138) ---------
+
+
+def _text_event(seq: int, text: str) -> dict[str, Any]:
+    return {"seq": seq, "ts": 1.0, "event": "message.text", "payload": {"text": text}}
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "in_left", "in_right"),
+    [
+        # split before the token: the first event shows the header, the second masks it all
+        ("call it with Authorization: Bearer ", "supersecret0123456789 and go", "", "supersecret"),
+        # split inside the token: both halves masked
+        ("call it with Authorization: Bearer super", "secret0123456789 and go", "super", "secret"),
+        # a *_KEY= value split inside
+        ("export HAL0_ADMIN_KEY=supers", "ecret0123456789\nnext", "supers", "ecret01"),
+    ],
+)
+async def test_a_secret_split_across_two_text_events_is_masked(
+    left: str, right: str, in_left: str, in_right: str
+) -> None:
+    class _Split(_Recorder):
+        async def run_events_window(self, *_a: Any, **_kw: Any) -> Any:
+            return [], [_text_event(1, left), _text_event(2, right)], [], False
+
+    out = _payload(await _server(_Split(), CC).call_tool("agent_run_events", {"run_id": "r"}))
+    first, second = (e["payload"]["text"] for e in out["events"])
+    assert "0123456789" not in first + second
+    assert in_right not in second and (not in_left or in_left not in first)
+    assert "REDACTED" in second and (not in_left or "REDACTED" in first)
+    assert second.endswith(("and go", "next"))  # the text after the secret is kept
+    assert [e["seq"] for e in out["events"]] == [1, 2] and out["last_seq"] == 2
+
+
+async def test_a_secret_split_across_pages_is_masked_on_both() -> None:
+    """The neighbours outside the window are context: page one's tail, page two's head."""
+    left, right = "header Authorization: Bearer super", "secret0123456789abcdef done"
+
+    class _PageOne(_Recorder):
+        async def run_events_window(self, *_a: Any, **_kw: Any) -> Any:
+            return [], [_text_event(1, left)], [_text_event(2, right)], False
+
+    class _PageTwo(_Recorder):
+        async def run_events_window(self, *_a: Any, **_kw: Any) -> Any:
+            return [_text_event(1, left)], [_text_event(2, right)], [], True
+
+    one = _payload(await _server(_PageOne(), CC).call_tool("agent_run_events", {"run_id": "r"}))
+    two = _payload(
+        await _server(_PageTwo(), CC).call_tool("agent_run_events", {"run_id": "r", "since_seq": 1})
+    )
+    assert [e["seq"] for e in one["events"]] == [1] and one["last_seq"] == 1
+    assert [e["seq"] for e in two["events"]] == [2] and two["last_seq"] == 2
+    page_one = one["events"][0]["payload"]["text"]
+    page_two = two["events"][0]["payload"]["text"]
+    assert page_one.startswith("header Authorization: Bearer ") and "super" not in page_one
+    assert "secret0123" not in page_two and page_two.endswith(" done")
+
+
+async def test_a_wait_tail_masks_a_secret_split_with_the_event_before_it() -> None:
+    left, right = "token: Bearer abc", "def0123456789xyz then more"
+    view = {
+        "run_id": "run_1",
+        "status": "completed",
+        "last_seq": 2,
+        "events_tail": [_text_event(2, right)],
+        "timed_out": False,
+    }
+
+    class _Wait(_Recorder):
+        async def events_before(self, *_a: Any, **_kw: Any) -> Any:
+            return [_text_event(1, left)]
+
+    out = _payload(
+        await _server(_Wait(view), CC).call_tool(
+            "agent_run_wait", {"run_id": "run_1", "timeout_s": 1}
+        )
+    )
+    [only] = out["events_tail"]
+    assert "def0123456789xyz" not in only["payload"]["text"]
+    assert only["payload"]["text"].endswith(" then more")
+
+
+async def test_text_without_secrets_is_unchanged_across_events() -> None:
+    texts = ["Hello, ", "world. Bearer is a word here", "", " and that is all."]
+
+    class _Plain(_Recorder):
+        async def run_events_window(self, *_a: Any, **_kw: Any) -> Any:
+            events = [_text_event(n + 1, t) for n, t in enumerate(texts)]
+            events.insert(2, {"seq": 9, "ts": 1.0, "event": "tool.started", "payload": {}})
+            return [], events, [], False
+
+    out = _payload(await _server(_Plain(), CC).call_tool("agent_run_events", {"run_id": "r"}))
+    shown = [e["payload"].get("text") for e in out["events"]]
+    # "Bearer is" masks "is" as a bearer token, in context as it did per event
+    assert shown[0] == "Hello, " and shown[3] == "" and shown[4] == " and that is all."
+
+
+async def test_a_secret_split_over_three_events_is_masked_when_paged_one_by_one() -> None:
+    """The context is the whole adjacent text run, not one neighbour (B1 probe finding)."""
+    parts = ["Use Authorization: Bearer ", "q7ZpL0xV9m", "T2wR8sK4nB6cD1 to call it."]
+    stored = [_text_event(n + 1, t) for n, t in enumerate(parts)]
+
+    class _Paged(_Recorder):
+        async def run_events_window(self, *_a: Any, since_seq: int = 0, **_kw: Any) -> Any:
+            page = stored[since_seq : since_seq + 1]
+            return stored[:since_seq], page, stored[since_seq + 1 :], False
+
+    server = _server(_Paged(), CC)
+    shown = []
+    for since in range(3):
+        page = _payload(
+            await server.call_tool(
+                "agent_run_events", {"run_id": "r", "since_seq": since, "limit": 1}
+            )
+        )
+        shown.append(page["events"][0]["payload"]["text"])
+    flat = "".join(shown)
+    assert "q7ZpL0xV9m" not in flat and "T2wR8sK4nB6cD1" not in flat
+    assert shown[0] == "Use Authorization: Bearer " and shown[2].endswith(" to call it.")
+
+
+# -- the live edge: a token's head before the rest is stored (NB#2 on the PR 3 fix wave) --
+
+
+def _edge_page(
+    *texts: str, after: list[dict[str, Any]] | None = None, at_edge: bool | None = None
+) -> type[_Recorder]:
+    """A service whose events page is ``texts`` with ``after`` as its right context.
+
+    ``at_edge`` defaults to True without a right context (the page ends at the
+    newest stored event) and to False with one.
+    """
+    events = [_text_event(n + 1, text) for n, text in enumerate(texts)]
+    edge = after is None if at_edge is None else at_edge
+
+    class _Page(_Recorder):
+        async def run_events_window(self, *_a: Any, **_kw: Any) -> Any:
+            return [], events, after or [], edge
+
+    return _Page
+
+
+async def _shown(service: type[_Recorder]) -> list[str]:
+    page = _payload(await _server(service(), CC).call_tool("agent_run_events", {"run_id": "r"}))
+    return [e["payload"]["text"] for e in page["events"]]
+
+
+async def test_a_token_cut_off_at_the_live_edge_is_masked_from_its_prefix() -> None:
+    """The page ends after ``ghp_A1b2C3``: 20+ characters would be masked, 6 were not."""
+    shown = await _shown(_edge_page("Here it is, gh", "p_A1b2C3"))
+    assert "A1b2C3" not in "".join(shown) and "p_A1" not in "".join(shown)
+    assert shown[0] == "Here it is, ***REDACTED***" and shown[1] == "***REDACTED***"
+
+    # following with since_seq=last_seq, the rest arrives with the head as left context
+    class _Next(_Recorder):
+        async def run_events_window(self, *_a: Any, **_kw: Any) -> Any:
+            before = [_text_event(1, "Here it is, gh"), _text_event(2, "p_A1b2C3")]
+            return before, [_text_event(3, "D4e5F6g7H8i9J0k1L2m3 and more")], [], True
+
+    [rest] = await _shown(_Next)
+    assert rest == "***REDACTED*** and more"
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        "hf_Ab12",
+        "sk-Ab12",
+        "ghp_Ab12",
+        "gho_Ab12",
+        "github_pat_Ab12",
+        "xoxb-12",
+        "hal0bk_cc.Ab12",
+        "hal0bk_c",
+        "AKIA12AB",
+        "ghp_",
+    ],
+)
+async def test_every_known_prefix_is_masked_at_the_live_edge(head: str) -> None:
+    [shown] = await _shown(_edge_page(f"I got ({head}"))
+    assert shown == "I got (***REDACTED***"
+
+
+@pytest.mark.parametrize(
+    "prose",
+    ["We call it state-of-the-", "the snake_", "a low-risk-", "ask-", "my_task_", "sk"],
+)
+async def test_a_page_ending_in_ordinary_prose_is_untouched_at_the_live_edge(prose: str) -> None:
+    assert await _shown(_edge_page(prose)) == [prose]
+
+
+async def test_a_prefix_not_at_the_tail_is_left_to_the_existing_rule() -> None:
+    whole = "ghp_" + "Q" * 24
+    shown = await _shown(_edge_page(f"use {whole} then ghp_short, done"))
+    assert shown == ["use ***REDACTED*** then ghp_short, done"]  # only the whole token
+
+
+@pytest.mark.parametrize(
+    "after",
+    [[], [_text_event(3, " is all.")]],
+    ids=["closed-by-another-event", "text-stored-after"],
+)
+async def test_away_from_the_live_edge_a_short_token_head_is_text(
+    after: list[dict[str, Any]],
+) -> None:
+    """With events stored after the page, its last text run is closed: nothing to guess."""
+    assert await _shown(_edge_page("see ghp_A1b2C3", after=after)) == ["see ghp_A1b2C3"]
+
+
+async def test_a_wait_tail_is_the_live_edge() -> None:
+    view = {
+        "run_id": "run_1",
+        "status": "running",
+        "last_seq": 2,
+        "events_tail": [_text_event(2, "it is hf_A1b2")],
+        "timed_out": True,
+    }
+
+    class _Wait(_Recorder):
+        async def events_before(self, *_a: Any, **_kw: Any) -> Any:
+            return []
+
+    out = _payload(
+        await _server(_Wait(view), CC).call_tool(
+            "agent_run_wait", {"run_id": "run_1", "timeout_s": 1}
+        )
+    )
+    assert out["events_tail"][0]["payload"]["text"] == "it is ***REDACTED***"
+
+
+async def test_a_right_context_reaching_the_live_edge_masks_the_head_in_the_page() -> None:
+    """The page ends inside ``ghp_A1``; the rest of the text is stored and is the newest."""
+    page = _edge_page("Here is ghp_A1", after=[_text_event(2, "b2C3")], at_edge=True)
+    assert await _shown(page) == ["Here is ***REDACTED***"]
+
+
+# -- the live edge against the real ledger (M-1 on the PR 3 tail) ------------------------
+
+
+def _stored_run(
+    store: BridgeStore, *events: tuple[str, str | None], status: str = "running"
+) -> str:
+    """A ``cc`` run in the ledger holding ``events`` as seq 1, 2, ...: (name, text)."""
+    rid = "run_stored"
+    store.insert_run(
+        RunRow(
+            run_id=rid,
+            client="cc",
+            agent="hermes",
+            profile="default",
+            session_key=None,
+            status=status,
+            created_at=100.0,
+            updated_at=100.0,
+            input_preview="ping",
+            output=None,
+            error=None,
+            usage_json=None,
+            admission_id=None,
+            execution_generation=None,
+            pending_request_json=None,
+            last_seq=0,
+        )
+    )
+    for seq, (name, text) in enumerate(events, start=1):
+        store.append_event(rid, seq, float(seq), name, {"text": text} if text is not None else {})
+    return rid
+
+
+async def _first_shown(server: FastMCP, rid: str) -> str:
+    page = _payload(
+        await server.call_tool("agent_run_events", {"run_id": rid, "since_seq": 0, "limit": 1})
+    )
+    text: str = page["events"][0]["payload"]["text"]
+    return text
+
+
+async def test_a_token_head_whose_rest_is_the_newest_stored_text_is_masked(
+    server: FastMCP, store: BridgeStore
+) -> None:
+    """A follower whose limit lags reads the head while the rest is already stored."""
+    rid = _stored_run(store, ("message.text", "Here is ghp_A1"), ("message.text", "b2C3"))
+    assert await _first_shown(server, rid) == "Here is ***REDACTED***"
+
+
+async def test_a_right_context_cut_by_the_cap_is_not_the_live_edge(
+    server: FastMCP, store: BridgeStore
+) -> None:
+    """More text is stored past the 8192-character context: the head is not at the edge."""
+    events = [("message.text", "use hal0bk_aaa"), ("message.text", "a" * 9000)]
+    rid = _stored_run(store, *events, ("message.text", "a" * 10))
+    assert await _first_shown(server, rid) == "use hal0bk_aaa"
+
+
+async def test_the_same_long_context_at_the_live_edge_is_masked(
+    server: FastMCP, store: BridgeStore
+) -> None:
+    rid = _stored_run(store, ("message.text", "use hal0bk_aaa"), ("message.text", "a" * 9000))
+    assert await _first_shown(server, rid) == "use ***REDACTED***"
+
+
+async def test_a_right_context_closed_by_another_event_is_not_the_live_edge(
+    server: FastMCP, store: BridgeStore
+) -> None:
+    events = [("message.text", "Here is ghp_A1"), ("message.text", "b2C3")]
+    rid = _stored_run(store, *events, ("tool.started", None))
+    assert await _first_shown(server, rid) == "Here is ghp_A1"
+
+
+# -- a live run's output is the live edge too (item 5 on the PR 3 tail) -------------------
+
+
+@pytest.mark.parametrize("status", ["running", "stopping", "queued", "waiting_for_approval"])
+async def test_a_live_runs_output_is_masked_from_a_token_head_at_its_end(status: str) -> None:
+    view = {"run_id": "run_1", "status": status, "output": "Here is ghp_A1b2C3", "last_seq": 3}
+    server = _server(_Recorder(view), CC)
+    shown = _payload(await server.call_tool("agent_run_status", {"run_id": "run_1"}))
+    waited = _payload(await server.call_tool("agent_run_wait", {"run_id": "run_1", "timeout_s": 1}))
+    (item,) = _payload(await server.call_tool("agent_runs_list", {}))["runs"]
+    for output in (shown["output"], waited["output"], item["output_preview"]):
+        assert "ghp_" not in output and output == "Here is ***REDACTED***"
+    assert shown["output_total"] == len(b"Here is ***REDACTED***")
+
+
+@pytest.mark.parametrize("status", ["completed", "failed", "cancelled", "interrupted", "unknown"])
+async def test_a_finished_runs_output_is_left_to_the_whole_token_rule(status: str) -> None:
+    """A finished run's output is complete: a short ``ghp_`` word is not a token cut short."""
+    view = {"run_id": "run_1", "status": status, "output": "Here is ghp_A1b2C3", "last_seq": 3}
+    server = _server(_Recorder(view), CC)
+    shown = _payload(await server.call_tool("agent_run_status", {"run_id": "run_1"}))
+    (item,) = _payload(await server.call_tool("agent_runs_list", {}))["runs"]
+    assert shown["output"] == item["output_preview"] == "Here is ghp_A1b2C3"
+    whole = {**view, "output": "Here is ghp_" + "A1b2C3" * 4}
+    finished = _payload(
+        await _server(_Recorder(whole), CC).call_tool("agent_run_status", {"run_id": "run_1"})
+    )
+    assert finished["output"] == "Here is ***REDACTED***"

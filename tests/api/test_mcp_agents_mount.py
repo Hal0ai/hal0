@@ -96,7 +96,7 @@ def _mint(client: TestClient) -> str:
     return str(resp.json()["key"])
 
 
-def test_a_bridge_key_lists_the_nine_tools(client: TestClient) -> None:
+def test_a_bridge_key_lists_the_sixteen_tools(client: TestClient) -> None:
     key = _mint(client)
     init = _rpc(client, key, "initialize", _INIT)
     assert init.status_code == 200, init.text
@@ -105,7 +105,7 @@ def test_a_bridge_key_lists_the_nine_tools(client: TestClient) -> None:
     assert listed.status_code == 200, listed.text
     names = sorted(t["name"] for t in _result(listed)["tools"])
     me = client.get("/api/bridge/me", headers={"Authorization": f"Bearer {key}"}).json()
-    assert names == sorted(me["tools"]) and len(names) == 9
+    assert names == sorted(me["tools"]) and len(names) == 16  # 9 run tools + 7 teach tools
 
 
 class _Service:

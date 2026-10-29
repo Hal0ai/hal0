@@ -37,6 +37,45 @@ from typing import Any, Final, NamedTuple
 # fixtures for the exact token.
 MASK: Final[str] = "***REDACTED***"
 
+# The key-NAME check lives here, below the API package, so ``hal0.bridge`` can use it
+# without importing ``hal0.api`` (importing ``hal0.api._redact`` runs the whole package
+# ``__init__``). ``hal0.api._redact`` re-exports it as ``_SENSITIVE_RE`` / ``is_sensitive_key``.
+# Match by key NAME. Case-insensitive. ``(?:...)`` non-capturing group;
+# alternation ordered longest-token-first so e.g. ``PRIVATE_KEY`` wins
+# over ``PASS`` when both could match. ``re.search`` (not ``match``) so
+# the pattern triggers anywhere in the key — ``TOKEN`` matches
+# ``TOKENIZER_ID`` and ``HF_TOKEN`` alike, which is the conservative
+# (over-redact) behaviour the spec asks for.
+SENSITIVE_KEY_RE: Final[re.Pattern[str]] = re.compile(
+    # The trailing ``_KEY$``/``^KEY$`` alternative catches credential names
+    # that end in a bare KEY suffix — hal0's OWN auth keys
+    # (HAL0_ADMIN_KEY / HAL0_CLIENT_KEY) matched none of the older
+    # substrings and leaked VERBATIM into shareable doctor bundles
+    # (halo150 O9). Anchored as a suffix (not a bare ``KEY`` substring) so
+    # non-secret settings like KEY_ROTATION_DAYS or KEYBOARD_LAYOUT don't
+    # over-mask. The KEY words take an optional ``_``/``-`` separator so
+    # run-together and camelCase names (``apikey``, ``apiKey``,
+    # ``accessKey``, ``x-api-key``) are caught too (#2384), still without
+    # a bare ``KEY`` substring. installer/lib/failure-report.sh mirrors
+    # this pattern; tests/installer/test_failure_report.py pins the two.
+    # ui/src/sentry.ts mirrors it too (``isSensitiveKey``); the
+    # ``sensitive_keys`` / ``plain_keys`` lists in
+    # tests/fixtures/redaction_shapes.json pin that pair.
+    r"(?i)(?:SECRET|TOKEN|PASSWORD|PASS|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY"
+    r"|ENCRYPTION[_-]?KEY|SALT|_KEY$|^KEY$)"
+)
+
+
+def is_sensitive_key(key: str) -> bool:
+    """True if ``key`` (the *name*, not the value) matches a sensitive pattern.
+
+    Case-insensitive substring search over the regex alternation. Safe to
+    call on untrusted / user-supplied strings — it only ever returns a
+    bool, never echoes the value.
+    """
+    return bool(SENSITIVE_KEY_RE.search(key))
+
+
 # Where a ``*_KEY=`` name may start in LOG_SECRET_RE: after anything that is no
 # part of a name run. The run is the ASCII word characters, with the four
 # non-ASCII letters that ``re.I`` folds onto them (U+0130, U+0131, U+017F and
@@ -145,6 +184,59 @@ def redact_log_line(line: str) -> str:
         at = end
     out.append(line[pos:])
     return _redact_shapes("".join(out), log=True)
+
+
+def secret_spans(text: str) -> list[tuple[int, int]]:
+    """The ``(start, end)`` character ranges of ``text`` that :func:`redact_log_line` masks.
+
+    No pattern is repeated here: every rule of the redactor only ever replaces a
+    substring with :data:`MASK`, so the spans are read off by aligning ``text`` with
+    ``redact_log_line(text)``, and the rule table stays the one authority. Each
+    MASK stands for one non-empty span; the verbatim piece after a mask starts with
+    what ended the secret (a space, a quote, a separator), which the secret cannot
+    hold, so its first occurrence is where the span ends. Replacing each span of
+    ``text`` with MASK gives ``redact_log_line(text)`` back. Should the two ever fail
+    to align, the whole stretch between the first and the last difference is one
+    span: more is covered, never less. Every span lies inside ``text`` and is not
+    empty: a MASK the redactor puts after the last character (a value that opens
+    at the very end, ``password: "``) covers nothing of ``text`` and has no span.
+
+    The agent bridge masks streamed text split over events with these spans, and
+    reads each masked value of a pushed skill to tell a placeholder from a secret.
+    """
+    masked = redact_log_line(text)
+    if text == masked:
+        return []
+    pieces = masked.split(MASK)
+    spans: list[tuple[int, int]] = []
+    at = len(pieces[0])
+    aligned = len(pieces) > 1 and text.startswith(pieces[0])
+    for index, piece in enumerate(pieces[1:], start=1):
+        if not aligned:
+            break
+        if index == len(pieces) - 1:
+            end = len(text) - len(piece)
+            if not piece and at == len(text):
+                break  # a last MASK after the end of the text covers nothing of it
+            aligned = end > at and text.endswith(piece)
+        else:
+            end = text.find(piece, at + 1) if piece else at + 1
+            aligned = end > at
+        if aligned:
+            spans.append((at, end))
+            at = end + len(piece)
+    if not aligned:
+        head = 0
+        while head < min(len(text), len(masked)) and text[head] == masked[head]:
+            head += 1
+        tail = 0
+        while tail < min(len(text), len(masked)) - head and text[-1 - tail] == masked[-1 - tail]:
+            tail += 1
+        spans = [(head, max(head + 1, len(text) - tail))]
+    # A value that opens at the very end (``password: "``) is masked with nothing of
+    # the text under it, and the fallback's one-character minimum would reach past
+    # the end: every span is cut to the text, and one left covering nothing dropped.
+    return [(start, min(end, len(text))) for start, end in spans if start < len(text)]
 
 
 def redact_text_tree(value: Any) -> Any:
@@ -763,6 +855,16 @@ def _mask_quoted_values(pattern: re.Pattern[str], line: str, log: bool) -> str:
     return "".join(out)
 
 
+# Well-known token prefixes and the characters a token is made of: the one table
+# the shape rules below and :func:`token_head_at_end` (the agent bridge's live edge)
+# both read. ui/src/sentry.ts and installer/lib/failure-report.sh mirror the
+# generic prefixes as one literal pattern.
+_BRIDGE_KEY_PREFIX: Final[str] = "hal0bk_"
+_TOKEN_PREFIX: Final[str] = r"(?:hf_|sk-|gh[pousr]_|github_pat_|xox[baprs]-)"
+_TOKEN_BODY: Final[str] = r"[A-Za-z0-9_-]"
+_AWS_KEY_PREFIX: Final[str] = "AKIA"
+_AWS_KEY_BODY: Final[str] = r"[0-9A-Z]"
+
 # A shape rule: ``rule(line, log)``, ``log`` as in :func:`_starts_secret`.
 _Rule = Callable[[str, bool], str]
 
@@ -843,12 +945,47 @@ _SHAPE_RULES_AFTER: Final[tuple[_Rule, ...]] = (
     # A minted agent-bridge key, ``hal0bk_<client>.<token>`` (ADR-0043), bare
     # or quoted; before the generic prefixes, so a ``sk-`` inside the token
     # cannot leave its head unmasked.
-    _sub_rule(re.compile(r"hal0bk_[a-z0-9_-]+\.[A-Za-z0-9_-]{20,}"), MASK),
-    _sub_rule(
-        re.compile(r"(?:hf_|sk-|gh[pousr]_|github_pat_|xox[baprs]-)[A-Za-z0-9_-]{20,}"), MASK
-    ),
-    _sub_rule(re.compile(r"AKIA[0-9A-Z]{16}"), MASK),
+    _sub_rule(re.compile(_BRIDGE_KEY_PREFIX + r"[a-z0-9_-]+\." + _TOKEN_BODY + "{20,}"), MASK),
+    _sub_rule(re.compile(_TOKEN_PREFIX + _TOKEN_BODY + "{20,}"), MASK),
+    _sub_rule(re.compile(_AWS_KEY_PREFIX + _AWS_KEY_BODY + "{16}"), MASK),
 )
+
+#: Each fixed token prefix above, not preceded by a letter or digit, with the
+#: characters its token is made of (a bridge key's include the ``.`` between client
+#: and token), for :func:`token_head_at_end`. Every prefix is spelled in its own
+#: body's characters, which is what keeps that function linear.
+_TOKEN_HEADS: Final[tuple[tuple[re.Pattern[str], re.Pattern[str]], ...]] = tuple(
+    (re.compile(r"(?<![A-Za-z0-9])" + prefix), re.compile(body + "*"))
+    for prefix, body in (
+        (_BRIDGE_KEY_PREFIX, r"[A-Za-z0-9_.-]"),
+        (_TOKEN_PREFIX, _TOKEN_BODY),
+        (_AWS_KEY_PREFIX, _AWS_KEY_BODY),
+    )
+)
+
+
+def token_head_at_end(text: str) -> int | None:
+    """Where a well-known token that runs to the very end of ``text`` starts, else None.
+
+    That is a fixed prefix of the shape rules (``hal0bk_``, ``hf_``, ``sk-``,
+    ``ghp_`` and the other GitHub prefixes, ``github_pat_``, the Slack ``xox?-``
+    prefixes, ``AKIA``), not preceded by a letter or digit, followed by any run of
+    its token's characters (none included) that reaches the end. The shape rules
+    mask such a token only once it is whole (20 or more characters after the
+    prefix, 16 for ``AKIA``); text read at a stream's live edge can stop short of
+    that, so the agent bridge masks it from here to the end (:mod:`hal0.mcp.agents`).
+
+    Linear in the text: a match lies inside the trailing run of its body's
+    characters, so each prefix is searched for only there.
+    """
+    backwards = text[::-1]
+    starts: list[int] = []
+    for prefix, body in _TOKEN_HEADS:
+        run = body.match(backwards)
+        found = prefix.search(text, len(text) - (run.end() if run is not None else 0))
+        if found is not None:
+            starts.append(found.start())
+    return min(starts, default=None)
 
 
 def _is_secret_name(name: str) -> bool:
@@ -1342,6 +1479,8 @@ __all__ = [
     "AUDIT_SECRET_ARGS",
     "LOG_SECRET_RE",
     "MASK",
+    "SENSITIVE_KEY_RE",
+    "is_sensitive_key",
     "mask_audit_secret_args",
     "redact_audit_args",
     "redact_audit_row_secret_args",
@@ -1350,4 +1489,6 @@ __all__ = [
     "redact_secret_shapes",
     "redact_shareable_text",
     "redact_text_tree",
+    "secret_spans",
+    "token_head_at_end",
 ]

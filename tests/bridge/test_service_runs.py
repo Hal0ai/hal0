@@ -360,6 +360,19 @@ async def test_input_preview_is_capped(svc: BridgeService, cc: Caller) -> None:
     assert view["input_preview"] == "y" * 200
 
 
+async def test_input_preview_is_masked_before_it_is_cut(
+    svc: BridgeService, store: BridgeStore, cc: Caller
+) -> None:
+    """A token the 200-character cut would halve is masked whole, not left half-recognisable."""
+    token = "hf_" + "a" * 40
+    text = "x" * 190 + " " + token  # the cut falls inside the token
+    view = await svc.start_run(cc, agent="hermes", input=text)
+    row = store.get_run(view["run_id"])
+    assert row is not None
+    assert "aaaaaa" not in row.input_preview and "hf_aaa" not in row.input_preview
+    assert len(row.input_preview) <= 200
+
+
 async def test_session_and_idempotency_namespaced(
     svc: BridgeService, fake: FakeHermes, cc: Caller
 ) -> None:
@@ -431,6 +444,65 @@ async def test_start_cancelled_after_hermes_accepted_still_records_the_run(
     started = await _bus_event(bus, "agents.run_started")
     rid = started["data"]["run_id"]
     assert store.get_run(rid) is not None and rid in svc.watching()
+
+
+async def test_a_cancelled_start_holds_the_client_lock_until_its_run_is_recorded(
+    svc_factory: SvcFactory,
+    store: BridgeStore,
+    fake: FakeHermes,
+    cc: Caller,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex on #3138: a second start while the first one's insert is in flight must see it."""
+    svc = svc_factory(config=BridgeConfig(max_concurrent_runs_per_client=1))
+    entered, release = threading.Event(), threading.Event()
+    real_insert = store.insert_run
+
+    def slow_insert(row: RunRow) -> None:
+        entered.set()
+        release.wait(3)
+        real_insert(row)
+
+    monkeypatch.setattr(store, "insert_run", slow_insert)
+    first = asyncio.create_task(svc.start_run(cc, agent="hermes", input="one"))
+    assert await asyncio.to_thread(entered.wait, 3)
+    first.cancel()
+    second = asyncio.create_task(svc.start_run(cc, agent="hermes", input="two"))
+    await asyncio.sleep(0.05)  # without the fix, the second start posts here
+    assert len(_posts(fake, "/v1/runs")) == 1
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    with pytest.raises(BridgeError) as e:
+        await second
+    assert e.value.code == "bridge.too_many_runs"
+    assert len(_posts(fake, "/v1/runs")) == 1
+    assert len(store.list_runs(client="cc", status=None, limit=10)) == 1
+
+
+async def test_a_ledger_failure_after_hermes_accepted_stops_the_run_and_is_503(
+    svc: BridgeService,
+    store: BridgeStore,
+    fake: FakeHermes,
+    cc: Caller,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CodeRabbit on #3138: an unrecorded run would hold a Hermes slot with nobody watching."""
+    import sqlite3
+
+    def broken_insert(_row: RunRow) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(store, "insert_run", broken_insert)
+    with pytest.raises(BridgeError) as e:
+        await svc.start_run(cc, agent="hermes", input="x")
+    assert e.value.code == "bridge.store_unavailable" and e.value.status == 503
+    assert "locked" not in e.value.message  # the cause is logged, not sent
+    assert len(_posts(fake, "/v1/runs")) == 1
+    [stop] = _posts(fake, "/stop")
+    assert stop.url.path.endswith("/stop") and "/v1/runs/" in stop.url.path
+    assert svc.watching() == []
+    assert store.list_runs(client="cc", status=None, limit=10) == []
 
 
 # -- ownership (Review Focus 4) ------------------------------------------------------------
@@ -552,6 +624,33 @@ async def test_replayed_idempotency_for_own_run_returns_it(
     assert _posts(fake, "/v1/runs")[-1].headers["idempotency-key"] == "hal0-bridge:cc:k"
     assert again["run_id"] == v["run_id"]
     assert len(store.list_runs(client="cc", status=None, limit=10)) == 1
+
+
+async def test_an_idempotent_replay_at_the_concurrency_cap_returns_the_run(
+    svc_factory: SvcFactory, fake: FakeHermes, cc: Caller
+) -> None:
+    """Codex on #3138: the replay of an admitted start is that run, not one run too many."""
+    svc = svc_factory(config=BridgeConfig(max_concurrent_runs_per_client=1))
+    first = await svc.start_run(cc, agent="hermes", input="same", idempotency_key="k")
+    again = await svc.start_run(cc, agent="hermes", input="same", idempotency_key="k")
+    assert again["run_id"] == first["run_id"] and again["status"] == "running"
+    assert len(_posts(fake, "/v1/runs")) == 1  # answered from the ledger
+    with pytest.raises(BridgeError) as e:  # the same key with another request
+        await svc.start_run(cc, agent="hermes", input="different", idempotency_key="k")
+    assert e.value.code == "bridge.idempotency_conflict"
+    with pytest.raises(BridgeError) as e:  # a new key still counts against the cap
+        await svc.start_run(cc, agent="hermes", input="same", idempotency_key="k2")
+    assert e.value.code == "bridge.too_many_runs"
+
+
+async def test_an_idempotency_key_is_per_client_and_per_profile(
+    svc: BridgeService, fake: FakeHermes, cc: Caller, other: Caller
+) -> None:
+    mine = await svc.start_run(cc, agent="hermes", input="same", idempotency_key="k")
+    coder = await svc.start_run(cc, agent="hermes/coder", input="same", idempotency_key="k")
+    theirs = await svc.start_run(other, agent="hermes", input="same", idempotency_key="k")
+    assert len({mine["run_id"], coder["run_id"], theirs["run_id"]}) == 3
+    assert len(_posts(fake, "/v1/runs")) == 3
 
 
 async def test_idempotency_key_reused_with_another_input_is_409(
@@ -987,6 +1086,68 @@ async def test_run_events_pages_the_ledger(
     assert [e["seq"] for e in later] == [3]
 
 
+async def test_an_events_window_says_when_it_ends_at_the_live_edge(
+    svc: BridgeService, planner: Planner, cc: Caller
+) -> None:
+    """``at_edge`` only when nothing is stored past the window and its right context."""
+    planner.plan(frames=_plain)  # message.text, tool.started, message.text, run.completed
+    v = await svc.start_run(cc, agent="hermes", input="x")
+    await svc.wait_run(cc, v["run_id"], timeout_s=5)
+    _before, page, after, edge = await svc.run_events_window(cc, v["run_id"], since_seq=0, limit=1)
+    assert [e["seq"] for e in page] == [1] and after == [] and not edge  # tool.started next
+    _before, page, after, edge = await svc.run_events_window(cc, v["run_id"], since_seq=2, limit=1)
+    assert [e["seq"] for e in page] == [3] and after == [] and not edge  # run.completed next
+    _before, page, after, edge = await svc.run_events_window(cc, v["run_id"], since_seq=3, limit=1)
+    assert [e["seq"] for e in page] == [4] and after == [] and edge  # the newest stored event
+
+
+def _text(text: str) -> tuple[str, dict[str, Any]]:
+    return "message.text", {"text": text}
+
+
+def _stored_run(store: BridgeStore, *events: tuple[str, dict[str, Any]]) -> str:
+    """A finished run of the ``cc`` client holding ``events`` as seq 1, 2, ..."""
+    rid = "run_stored"
+    store.insert_run(_live_row(rid, status="completed", last_seq=0))
+    for seq, (name, payload) in enumerate(events, start=1):
+        store.append_event(rid, seq, float(seq), name, payload)
+    return rid
+
+
+@pytest.mark.parametrize(
+    ("events", "after_seqs", "at_edge"),
+    [
+        # the right context is the newest stored text (M-1 on the PR 3 tail)
+        ([_text("Here is ghp_A1"), _text("b2C3")], [2], True),
+        # cut by the 8192-character cap: more text is stored after it
+        ([_text("use hal0bk_aaa"), _text("a" * 9000), _text("a" * 10)], [2], False),
+        # the cap reached exactly at the newest stored event cuts nothing
+        ([_text("use hal0bk_aaa"), _text("a" * 9000)], [2], True),
+        # closed by another event
+        ([_text("Here is ghp_A1"), _text("b2C3"), ("tool.started", {"tool": "t"})], [2], False),
+        # nothing after the window at all
+        ([_text("Here is ghp_A1")], [], True),
+        # 256 events of context, then one more stored past the context's reach
+        ([_text("x")] + [_text("y")] * 257, list(range(2, 258)), False),
+        ([_text("x")] + [_text("y")] * 256, list(range(2, 258)), True),
+    ],
+    ids=["reaches-edge", "cap-cut", "cap-at-edge", "non-text-after", "empty", "beyond", "reach"],
+)
+async def test_an_events_window_says_whether_its_right_context_reaches_the_live_edge(
+    svc: BridgeService,
+    store: BridgeStore,
+    cc: Caller,
+    events: list[tuple[str, dict[str, Any]]],
+    after_seqs: list[int],
+    at_edge: bool,
+) -> None:
+    rid = _stored_run(store, *events)
+    _before, page, after, edge = await svc.run_events_window(cc, rid, since_seq=0, limit=1)
+    assert [e["seq"] for e in page] == [1]
+    assert [e["seq"] for e in after] == after_seqs
+    assert edge is at_edge
+
+
 # -- restart -----------------------------------------------------------------------------
 
 
@@ -1031,6 +1192,35 @@ async def test_reattach_resumes_live_runs(
     done = await svc.wait_run(admin, "run_live", timeout_s=3)
     assert done["status"] == "completed" and done["output"] == "back"
     assert fake.resume_headers[0] == "7"  # row.last_seq
+
+
+async def test_reattach_does_not_let_a_hung_profile_hold_up_the_others(
+    store_with_live_run: BridgeStore,
+    svc_factory: SvcFactory,
+    admin: Caller,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex on #3138: probes run at once, each with a short timeout; the watcher retries."""
+    store_with_live_run.insert_run(_live_row("run_hung", profile="slow"))
+    svc = svc_factory(store_with_live_run)
+    gateway = svc._gateway
+    real_get = gateway.get_run
+    never = asyncio.Event()
+
+    async def get_run(profile: str, run_id: str) -> dict[str, Any]:
+        if run_id == "run_hung":
+            await never.wait()  # a profile that accepts the connection and never answers
+        return await real_get(profile, run_id)
+
+    monkeypatch.setattr(gateway, "get_run", get_run)
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    attached = await asyncio.wait_for(svc.reattach(probe_timeout_s=0.2), 3)
+    assert loop.time() - began < 1.5  # one short timeout, not one per row in turn
+    assert attached == 2
+    assert "run_hung" in svc.watching()  # watched anyway: its reconnect loop keeps trying
+    done = await svc.wait_run(admin, "run_live", timeout_s=3)
+    assert done["status"] == "completed"
 
 
 async def test_reattach_marks_runs_hermes_forgot_unknown(
@@ -1089,9 +1279,136 @@ async def test_reattach_enforces_an_overdue_clarify_timeout(
     )
     svc = svc_factory(timing=WatcherTiming(backoff_s=(0.01,), clarify_timeout_s=60))
     assert await svc.reattach() == 1
-    row = await _until(svc, store, rid, lambda r: r.error is not None)
+    # The error and the outstanding stop are written first; the marker clears once
+    # Hermes has taken the stop.
+    row = await _until(svc, store, rid, lambda r: r.error is not None and r.pending_stop is None)
     assert row.error == "clarification unanswered after 60s"
     assert len(_posts(fake, "/stop")) == 1
+
+
+async def test_a_clarify_timeout_stop_that_fails_is_retried_until_hermes_takes_it(
+    svc_factory: SvcFactory,
+    planner: Planner,
+    fake: FakeHermes,
+    store: BridgeStore,
+    cc: Caller,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex on #3138: a transient stop failure left the run 'stopping' with no retry."""
+    from hal0.bridge.hermes_client import HermesUnavailable
+
+    svc = svc_factory(timing=WatcherTiming(backoff_s=(0.01,), clarify_timeout_s=0.05))
+    planner.plan(frames=_clarify, pending_clarify="clr1")
+    planner.on_stop = lambda rid: fake.script_events(
+        rid, _then(_clarify, ("run.cancelled", {}))(rid)
+    )
+    gateway = svc._gateway
+    real_stop = gateway.stop
+    attempts: list[str] = []
+    seen_marker: list[float | None] = []
+
+    async def flaky_stop(profile: str, run_id: str) -> dict[str, Any]:
+        attempts.append(run_id)
+        row = store.get_run(run_id)
+        seen_marker.append(None if row is None else row.pending_stop)
+        if len(attempts) == 1:
+            raise HermesUnavailable("Hermes is restarting")
+        return await real_stop(profile, run_id)
+
+    monkeypatch.setattr(gateway, "stop", flaky_stop)
+    v = await svc.start_run(cc, agent="hermes", input="?")
+    rid = v["run_id"]
+    row = await _until(svc, store, rid, lambda r: r.status in TERMINAL_STATUSES)
+    assert len(attempts) == 2  # failed once, then got through
+    assert all(marker is not None for marker in seen_marker)  # persisted before each post
+    assert row.status == "cancelled" and row.pending_stop is None
+    assert row.error == "clarification unanswered after 0.05s"
+
+
+async def test_an_outstanding_stop_is_delivered_after_a_restart(
+    store: BridgeStore, fake: FakeHermes, svc_factory: SvcFactory
+) -> None:
+    rid = fake.seed_run("run_stopping", statuses=("running",), frames=[])
+    store.insert_run(
+        _live_row(
+            rid,
+            status="stopping",
+            last_seq=0,
+            error="clarification unanswered after 60s",
+            pending_stop=1.0,
+        )
+    )
+    svc = svc_factory()
+    assert await svc.reattach() == 1
+    row = await _until(svc, store, rid, lambda r: r.pending_stop is None)
+    assert row.status != "running"
+    assert len(_posts(fake, "/stop")) == 1
+
+
+@pytest.mark.parametrize(("status", "code"), [(404, "run_not_found"), (409, "run_not_running")])
+async def test_a_stop_hermes_refuses_as_not_needed_clears_the_marker(
+    store: BridgeStore,
+    fake: FakeHermes,
+    svc_factory: SvcFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    code: str,
+) -> None:
+    """404 (the run is gone) and 409 (it is already ending) are final: nothing is left to stop."""
+    from hal0.bridge.hermes_client import HermesRefused
+
+    rid = fake.seed_run("run_ending", statuses=("running",), frames=[])
+    store.insert_run(_live_row(rid, status="stopping", last_seq=0, pending_stop=1.0))
+    svc = svc_factory()
+    calls: list[str] = []
+
+    async def refuse(profile: str, run_id: str) -> dict[str, Any]:
+        calls.append(run_id)
+        raise HermesRefused(status, code, "nothing to stop")
+
+    monkeypatch.setattr(svc._gateway, "stop", refuse)
+    assert await svc.reattach() == 1
+    row = await _until(svc, store, rid, lambda r: r.pending_stop is None)
+    assert row.pending_stop is None and calls == [rid]  # cleared at once, no retry
+
+
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [(429, "rate_limited"), (401, None), (403, "forbidden"), (400, "bad_request")],
+)
+async def test_a_stop_refused_with_any_other_4xx_is_retried_until_hermes_takes_it(
+    store: BridgeStore,
+    fake: FakeHermes,
+    svc_factory: SvcFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    code: str | None,
+) -> None:
+    """After a 401 or 403 (a rotated key) or a 429 the run is still going in Hermes.
+
+    Such a refusal cleared the marker as "nothing left to stop" and the run stayed
+    ``stopping`` with no retry. It is retried like a 5xx; the marker clears only
+    once Hermes takes the stop.
+    """
+    from hal0.bridge.hermes_client import HermesRefused
+
+    rid = fake.seed_run("run_refused", statuses=("running",), frames=[])
+    store.insert_run(_live_row(rid, status="stopping", last_seq=0, pending_stop=1.0))
+    svc = svc_factory()
+    marker_at_post: list[float | None] = []
+
+    async def refuse_then_take(profile: str, run_id: str) -> dict[str, Any]:
+        row = store.get_run(run_id)
+        marker_at_post.append(None if row is None else row.pending_stop)
+        if len(marker_at_post) == 1:
+            raise HermesRefused(status, code, "not now")
+        return {"run_id": run_id, "status": "stopping"}  # Hermes takes it (200)
+
+    monkeypatch.setattr(svc._gateway, "stop", refuse_then_take)
+    assert await svc.reattach() == 1
+    row = await _until(svc, store, rid, lambda r: r.pending_stop is None)
+    assert marker_at_post == [1.0, 1.0]  # still marked when the stop was posted again
+    assert row.pending_stop is None
 
 
 def _watch_tasks(run_id: str) -> list[asyncio.Task[Any]]:
