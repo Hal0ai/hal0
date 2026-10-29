@@ -34,7 +34,7 @@ const run = (over: Record<string, unknown>) => ({
   created_at: NOW_S - 300,
   updated_at: NOW_S - 290,
   input_preview: 'fix the failing build',
-  output: null,
+  output_preview: null,
   error: null,
   usage: null,
   pending: null,
@@ -103,7 +103,7 @@ afterEach(() => {
 describe('BridgeRunsList', () => {
   it('reads the runs route and renders a row per run with the fields an operator scans', async () => {
     await mount()
-    expect(client.apiGet).toHaveBeenCalledWith('/api/bridge/runs?limit=100')
+    expect(client.apiGet).toHaveBeenCalledWith('/api/bridge/runs?limit=50')
     expect(qa('.brg-run')).toHaveLength(5)
 
     const first = row('run_aaaaaaaaaaaa_long_tail')

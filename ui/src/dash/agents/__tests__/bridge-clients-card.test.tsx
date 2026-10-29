@@ -80,7 +80,7 @@ const RUN = (status: string, id: string) => ({
   created_at: NOW_S - 100,
   updated_at: NOW_S - 90,
   input_preview: 'x',
-  output: null,
+  output_preview: null,
   error: null,
   usage: null,
   pending: null,

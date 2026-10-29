@@ -11,8 +11,9 @@
 
 const { useState, useMemo } = React;
 
-// Runs fetched at once. The list is for glancing at recent work, not an archive.
-const RUNS_LIMIT = 100;
+// Runs fetched at once. The list is for glancing at recent work, not an archive, and it is
+// polled every 5 s while any run is live.
+const RUNS_LIMIT = 50;
 
 const GROUPS = ["live", "waiting", "ok", "bad"];
 

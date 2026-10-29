@@ -105,7 +105,11 @@ export interface BridgeRun {
   created_at: number
   updated_at: number
   input_preview: string
-  output: string | null
+  /**
+   * The first 200 characters of the output with secrets masked, or null while there is none.
+   * A list item never carries the whole `output`; `GET /api/bridge/runs/{id}` does.
+   */
+  output_preview: string | null
   error: string | null
   usage: Record<string, unknown> | null
   pending: unknown

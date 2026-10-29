@@ -13,7 +13,7 @@ client asks who it is::
 
 and the operator watches and stops the runs clients have delegated to Hermes::
 
-    GET    /api/bridge/runs                    — runs, newest first (?client= ?status= ?limit=)
+    GET    /api/bridge/runs                    — runs, newest first (?client= ?status= ?limit=); output_preview, not output
     GET    /api/bridge/runs/{run_id}           — one run, its output in 16 KiB windows (?offset=)
     GET    /api/bridge/runs/{run_id}/events    — SSE: ledger replay, then live, until the run ends
     POST   /api/bridge/runs/{run_id}/stop      — ask Hermes to stop a live run
@@ -74,7 +74,7 @@ from hal0.api.routes.config import api_base_url
 from hal0.bridge.caller import Caller
 from hal0.bridge.errors import BridgeError
 from hal0.bridge.keys import SCOPE_SERVERS
-from hal0.bridge.output import output_window
+from hal0.bridge.output import output_window, run_list_item
 from hal0.bridge.store import TERMINAL_STATUSES, BridgeStore, BridgeStoreError, ClientRow
 from hal0.config import paths
 from hal0.config.loader import load_hal0_config
@@ -390,12 +390,18 @@ async def list_runs(
     status: str | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=200),
 ) -> dict[str, Any]:
-    """Runs, newest first; ``client`` and ``status`` narrow the list."""
+    """Runs, newest first; ``client`` and ``status`` narrow the list.
+
+    Items are the ``agent_runs_list`` items of the MCP tool: ``output_preview``
+    (the first 200 characters, secrets masked) in place of ``output``, so a
+    polled list of 200 runs does not carry 200 full outputs. ``GET /runs/{run_id}``
+    reads one run whole.
+    """
     service = _service(request)
-    items = await _serve(
+    views = await _serve(
         service.list_runs(_caller(request), status=status, limit=limit, client=client)
     )
-    return {"items": items}
+    return {"items": [run_list_item(view) for view in views]}
 
 
 @_gated.get("/runs/{run_id}")

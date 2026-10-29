@@ -215,6 +215,48 @@ def test_runs_list_filters_by_client_status_and_limit(admin_client: TestClient) 
     assert admin_client.get("/api/bridge/runs?limit=201").status_code == 422
 
 
+def test_runs_list_items_preview_the_output_instead_of_carrying_it(
+    admin_client: TestClient,
+) -> None:
+    """The list is polled; a run's whole output belongs to ``GET /runs/{run_id}``."""
+    secret = "hal0bk_cc.s3cr3tvalue0123456789"
+    long_output = f"Authorization: Bearer {secret} " + "y" * 30_000
+    seed(admin_client, make_run("run_long", status="completed", output=long_output))
+    seed(admin_client, make_run("run_quiet", status="running"))
+
+    items = {i["run_id"]: i for i in admin_client.get("/api/bridge/runs").json()["items"]}
+
+    long = items["run_long"]
+    assert "output" not in long
+    assert not {"output_offset", "output_total", "next_offset"} & set(long)
+    assert len(long["output_preview"]) == 200
+    assert long["output_preview"].startswith("Authorization: Bearer")
+    assert secret not in long["output_preview"]
+    assert "error" in long and "input_preview" in long
+    assert items["run_quiet"]["output_preview"] is None
+    # nothing but the preview stands in for the output
+    view_keys = set(admin_client.get("/api/bridge/runs/run_quiet").json())
+    assert set(long) == (view_keys - {"output"}) | {"output_preview"}
+
+    # the whole output is still one GET away
+    whole = admin_client.get("/api/bridge/runs/run_long").json()
+    assert whole["output"].startswith("Authorization: Bearer") and whole["output_total"] > 30_000
+
+
+def test_the_rest_list_and_the_mcp_list_carry_the_same_items(admin_client: TestClient) -> None:
+    """One projection feeds both: the REST item is the MCP ``agent_runs_list`` item."""
+    from hal0.mcp.agents import _list_item
+
+    seed(admin_client, make_run("run_a", status="completed", output="pong " * 100))
+    (rest,) = admin_client.get("/api/bridge/runs").json()["items"]
+    stored = admin_client.get("/api/bridge/runs/run_a").json()
+    view = {
+        k: v for k, v in stored.items() if k not in ("output_offset", "output_total", "next_offset")
+    }
+    view["output"] = "pong " * 100
+    assert _list_item(view) == rest
+
+
 def test_stop_a_finished_run_is_409(admin_client: TestClient) -> None:
     seed(admin_client, make_run("run_done", status="completed"))
     r = admin_client.post("/api/bridge/runs/run_done/stop")
