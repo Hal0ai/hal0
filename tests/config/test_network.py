@@ -14,6 +14,7 @@ depends on the host running the suite.
 from __future__ import annotations
 
 import socket
+from pathlib import Path
 from types import SimpleNamespace
 
 import psutil
@@ -43,6 +44,7 @@ def test_all_exports_are_callable() -> None:
         "detect_lan_ips",
         "hostname",
         "is_loopback_bind",
+        "primary_lan_ip",
     }
     for name in network.__all__:
         assert callable(getattr(network, name)), f"network.{name} is not callable"
@@ -240,6 +242,99 @@ class TestDetectLanIps:
 
 
 # ── derive_allowed_origins() ──────────────────────────────────────────────────
+
+
+# ── primary_lan_ip() ──────────────────────────────────────────────────────────
+
+_ROUTE_HEADER = "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT"
+
+
+def _route(iface: str, dest: str, flags: str, metric: int, mask: str) -> str:
+    return f"{iface}\t{dest}\t0101A8C0\t{flags}\t0\t0\t{metric}\t{mask}\t0\t0\t0"
+
+
+def _addrs(**by_iface: str) -> dict[str, list[SimpleNamespace]]:
+    return {
+        iface: [SimpleNamespace(family=socket.AF_INET, address=ip)]
+        for iface, ip in by_iface.items()
+    }
+
+
+class TestPrimaryLanIp:
+    """The address another machine can reach: the default route's, not the first sorted."""
+
+    @pytest.fixture
+    def route_table(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        table = tmp_path / "route"
+        monkeypatch.setattr(network, "PROC_NET_ROUTE", table)
+        monkeypatch.setattr(
+            psutil,
+            "net_if_addrs",
+            lambda: _addrs(docker0="172.17.0.1", eth0="192.168.1.20", wlan0="192.168.7.9"),
+        )
+        return table
+
+    def test_the_default_route_interface_wins_over_a_container_bridge(
+        self, route_table: Path
+    ) -> None:
+        route_table.write_text(
+            "\n".join(
+                [
+                    _ROUTE_HEADER,
+                    _route("docker0", "000011AC", "0001", 0, "0000FFFF"),
+                    _route("eth0", "00000000", "0003", 100, "00000000"),
+                    _route("eth0", "0001A8C0", "0001", 100, "00FFFFFF"),
+                ]
+            )
+        )
+        assert network.detect_lan_ips()[0] == "172.17.0.1"  # string-sorted: the old pick
+        assert network.primary_lan_ip() == "192.168.1.20"
+
+    def test_the_lowest_metric_default_route_wins(self, route_table: Path) -> None:
+        route_table.write_text(
+            "\n".join(
+                [
+                    _ROUTE_HEADER,
+                    _route("wlan0", "00000000", "0003", 600, "00000000"),
+                    _route("eth0", "00000000", "0003", 100, "00000000"),
+                ]
+            )
+        )
+        assert network.primary_lan_ip() == "192.168.1.20"
+
+    def test_a_route_that_is_down_or_not_default_is_ignored(self, route_table: Path) -> None:
+        route_table.write_text(
+            "\n".join(
+                [
+                    _ROUTE_HEADER,
+                    _route("eth0", "00000000", "0002", 0, "00000000"),  # not RTF_UP
+                    _route("wlan0", "0007A8C0", "0001", 0, "00FFFFFF"),  # not the default
+                ]
+            )
+        )
+        assert network.primary_lan_ip() == "172.17.0.1"  # no default route: as before
+
+    @pytest.mark.parametrize("table", [None, "garbage\nnot a route table at all\n"])
+    def test_an_unreadable_table_falls_back_to_the_first_address(
+        self, route_table: Path, table: str | None
+    ) -> None:
+        if table is not None:
+            route_table.write_text(table)
+        assert network.primary_lan_ip() == "172.17.0.1"
+
+    def test_a_default_interface_without_a_detected_address_falls_back(
+        self, route_table: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        route_table.write_text(
+            "\n".join([_ROUTE_HEADER, _route("tun0", "00000000", "0003", 0, "00000000")])
+        )
+        assert network.primary_lan_ip() == "172.17.0.1"
+
+    def test_no_lan_address_is_none(
+        self, route_table: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(network, "detect_lan_ips", lambda: [])
+        assert network.primary_lan_ip() is None
 
 
 class TestDeriveAllowedOrigins:

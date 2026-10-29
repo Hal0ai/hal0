@@ -30,6 +30,10 @@ from __future__ import annotations
 
 import os
 import socket
+from pathlib import Path
+
+#: The kernel's IPv4 routing table; :func:`primary_lan_ip` reads the default route from it.
+PROC_NET_ROUTE = Path("/proc/net/route")
 
 _DEFAULT_BIND_HOST = "127.0.0.1"
 _DEFAULT_API_PORT = 8080
@@ -124,6 +128,65 @@ def detect_lan_ips() -> list[str]:
     return sorted(ips)
 
 
+def _default_route_interface(route_table: Path) -> str | None:
+    """The interface of the IPv4 default route with the lowest metric, or None.
+
+    Reads the kernel table (``/proc/net/route``): a default route has
+    destination and mask ``00000000`` and the ``RTF_UP`` flag. Any failure to
+    read or parse it is None.
+    """
+    best: tuple[int, str] | None = None
+    try:
+        lines = route_table.read_text().splitlines()[1:]  # the first line is the header
+    except OSError:
+        return None
+    for line in lines:
+        cols = line.split()
+        if len(cols) < 8:
+            continue
+        iface, destination, flags, metric, mask = cols[0], cols[1], cols[3], cols[6], cols[7]
+        try:
+            up = int(flags, 16) & 0x1
+            rank = int(metric)
+        except ValueError:
+            continue
+        default = destination == "00000000" and mask == "00000000" and up
+        if default and (best is None or rank < best[0]):
+            best = (rank, iface)
+    return best[1] if best is not None else None
+
+
+def _interface_ipv4(iface: str) -> str | None:
+    """The first non-loopback IPv4 address of ``iface`` (psutil), or None."""
+    try:
+        import psutil
+
+        addrs = psutil.net_if_addrs().get(iface, [])
+    except Exception:
+        return None
+    for addr in addrs:
+        if addr.family == socket.AF_INET and not addr.address.startswith("127."):
+            return str(addr.address)
+    return None
+
+
+def primary_lan_ip() -> str | None:
+    """The box's main LAN IPv4 address, for a URL another machine will use; None without one.
+
+    The address of the interface the IPv4 default route leaves by, when
+    :func:`detect_lan_ips` found it: that list is string-sorted, so its first
+    entry can be a container bridge (``172.17.0.1`` sorts before
+    ``192.168.1.20``), which no other machine can reach. Without a default
+    route (or a readable table) it is the first detected address, as before.
+    """
+    lan = detect_lan_ips()
+    if not lan:
+        return None
+    iface = _default_route_interface(PROC_NET_ROUTE)
+    preferred = _interface_ipv4(iface) if iface is not None else None
+    return preferred if preferred in lan else lan[0]
+
+
 def derive_allowed_origins(port: int | None = None) -> tuple[str, ...]:
     """Derive the WS/CORS origin allowlist from the bind host + hostname.
 
@@ -157,4 +220,5 @@ __all__ = [
     "detect_lan_ips",
     "hostname",
     "is_loopback_bind",
+    "primary_lan_ip",
 ]

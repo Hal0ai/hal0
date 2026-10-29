@@ -149,8 +149,9 @@ def api_base_url(request: Request, *, prefer_lan: bool = False) -> str:
     ``prefer_lan`` is for a URL another machine will use: the bridge
     onboarding lines (ADR-0043), which ``hal0 bridge add`` asks for over
     ``http://127.0.0.1``. A direct hit on a loopback host then names the box's
-    first LAN address (:func:`hal0.config.network.detect_lan_ips`) instead,
-    when it has one; the port stays the API port.
+    main LAN address (:func:`hal0.config.network.primary_lan_ip`: the
+    default-route interface's) instead, when it has one; the port stays the
+    API port.
     """
     host = _resolve_host(request)
     if _behind_proxy(request):
@@ -158,9 +159,9 @@ def api_base_url(request: Request, *, prefer_lan: bool = False) -> str:
         forwarded_host = request.headers.get("x-forwarded-host") or host
         return f"{scheme}://{forwarded_host}"
     if prefer_lan and _is_loopback_host(host):
-        lan = network.detect_lan_ips()
-        if lan:
-            host = lan[0]
+        lan = network.primary_lan_ip()
+        if lan is not None:
+            host = lan
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
     return f"http://{host}:{api_port()}"
