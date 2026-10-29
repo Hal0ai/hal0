@@ -35,7 +35,7 @@ hal0 already owns every part of that except the front door:
 - It serves `hal0-admin` and `hal0-memory` over Streamable HTTP, with an
   approval inbox for gated calls (ADR-0004). Servers are built once per
   process (`BoundFastMCP`, `src/hal0/mcp/_binding.py:59`) and mounted by
-  `mount_mcp_servers` (`src/hal0/api/mcp_mount.py:230`); the bundled set is
+  `mount_mcp_servers` (`src/hal0/api/mcp_mount.py`); the bundled set is
   `BUNDLED_SERVER_IDS = {"hal0-admin", "hal0-memory"}`
   (`src/hal0/mcp/installed.py:56`).
 - It keeps the agent's credentials in a root-only vault (ADR-0002) and shows
@@ -50,12 +50,12 @@ What it cannot do is admit a second caller of its own:
    `src/hal0/service_identity.py`). No store holds more than one key per tier.
    The agent tier ADR-0024 proposes was never built.
 2. **The MCP mounts are classified for the box's own agents.** `/mcp/memory`
-   is CLIENT and every other `/mcp` path is ADMIN
-   (`src/hal0/security/exposure.py:400-401`); anything unclassified is ADMIN
+   is CLIENT and every other `/mcp` path is ADMIN (the `/mcp` rows of `RULES`
+   in `src/hal0/security/exposure.py`); anything unclassified is ADMIN
    (anti-scar rule 8, `CONTRIBUTING.md`). A remote agent that wants memory or
    the admin tools has to be handed the box's own key.
 3. **Caller identity is a claim.** `X-hal0-Agent` is read from the request
-   header (`_AGENT_HEADER`, `src/hal0/api/mcp_mount.py:44`) and nothing binds
+   header (`_AGENT_HEADER` in `src/hal0/api/mcp_mount.py`) and nothing binds
    it to a credential, so any holder of the client key can write into any
    agent's `private:<agent>` memory.
 4. **hal0's one SQLite file is world-readable.** `hal0.db` is mode `0644`
@@ -87,7 +87,12 @@ ADR-0035 was verified against), shapes the answer:
    embedded so the auth path looks the client row up directly; the separator is
    a literal `.` because the urlsafe alphabet never produces one. hal0 stores
    only the sha256 of the whole key. The plaintext is shown once, when the
-   client is added or its key rotated, and cannot be recovered.
+   client is added or its key rotated, and cannot be recovered. Because a
+   client's memory identity is its bare name, the names hal0's own callers and
+   namespaces use are reserved: `hermes`, `pi`, `admin`, `anonymous`, `shared`,
+   every name starting `hal0`, and every name starting `hermes__`
+   (`RESERVED_CLIENT_NAMES` and `RESERVED_CLIENT_PREFIXES` in
+   `src/hal0/bridge/keys.py`).
 2. **The store is `bridge.db`, a separate SQLite file.**
    `/var/lib/hal0/bridge.db`, `hal0:hal0` mode `0600`, with the `-wal` and
    `-shm` siblings listed as permission rows in `install/perms.py` so
@@ -97,7 +102,13 @@ ADR-0035 was verified against), shapes the answer:
    file). The `clients` table is `name` (primary key), `key_hash` (unique),
    `created_at`, `created_by`, `revoked_at`, `last_seen_at`, `note` and
    `scopes`. Revocation is immediate: the check is one indexed lookup per
-   request, with no cache. A revoked client keeps its row, so its name cannot be
+   request, with no cache. The lookup matches the sha256 of the presented key
+   against the indexed `key_hash` instead of comparing keys in constant time.
+   That is safe: a timing difference could only tell an observer how the
+   digest of a key it chose compares with the stored digests, and getting from
+   a digest back to a key is a preimage search. The check is a read:
+   `last_seen_at` is stamped at most once a minute. A revoked client keeps its
+   row, so its name cannot be
    reused and its past runs stay attributable. Machine-minted credentials are
    machine state, which is SQLite, not TOML (anti-scar rule 7).
 3. **`bridge` is a credential tier, and the bridge always asks for it.**
@@ -111,7 +122,16 @@ ADR-0035 was verified against), shapes the answer:
    (the ComfyUI gate's own credential) applied to a surface that must not
    open as a side effect of the trusted-LAN default. A `bridge` principal is
    refused everywhere except the scope-gated `/mcp/memory` and `/mcp/admin`
-   mounts (Decision 4).
+   mounts (Decision 4) and the OPEN routes, which admit anyone. The key is
+   verified once per request, by the auth middleware, which stores the
+   principal it judged on the request (`BRIDGE_PRINCIPAL_SCOPE_KEY`); what runs
+   behind it (the MCP identity resolvers, `GET /api/bridge/me`) reads that
+   principal (`judged_principal` in `src/hal0/api/auth.py`) instead of
+   verifying again. A bridge-shaped key the middleware did not admit, because
+   it did not verify, the store could not be read or the bridge is disabled, is
+   anonymous to them: never the `X-hal0-Agent` header's claim and never the
+   service identity. Only the re-check of an open stream or socket verifies
+   again, live, so revoking a key ends what it opened.
 4. **Scopes decide which MCP servers a key opens.** A client carries a subset
    of `{agents, memory, admin}`. `agents` is held by every client; the default
    is `agents,memory`; `admin` is granted only when asked for.
@@ -122,8 +142,10 @@ ADR-0035 was verified against), shapes the answer:
    | `/mcp/memory` | scope `memory` | identity is the client name from the key; `X-hal0-Agent` is ignored, so `X-hal0-Private: 1` lands in `private:<client>` and nowhere else |
    | `/mcp/admin` | scope `admin` | the admin server calls REST with hal0's own service identity (`service_key(prefer="admin")`) and audits the call as `bridge:<client>`, instead of forwarding the caller's bearer; gated tools still go to the approval inbox and `EXCLUDED_TOOLS` (`hal0.mcp.admin`) stay hidden |
 
-   A bridge key is refused on every `/api/*` and `/v1/*` route, whatever its
-   scope. The one exception is `GET /api/bridge/me`, which accepts the bridge
+   A bridge key is refused on every non-OPEN `/api/*` and `/v1/*` route,
+   whatever its scope; OPEN routes such as `GET /api/health` and
+   `GET /v1/models` admit it as they admit a caller with no key. The one
+   exception is `GET /api/bridge/me`, which accepts the bridge
    key itself and returns the caller's name and its created and last-seen
    times, so onboarding is verifiable with one `curl`.
 5. **The operator surface is one CLI over one REST group.** REST, all ADMIN:
@@ -136,20 +158,36 @@ ADR-0035 was verified against), shapes the answer:
    `add` and `rotate` print the key once and one onboarding line per granted
    scope: `claude mcp add --transport http <server> <url> --header
    "Authorization: Bearer <key>"`, with `hal0-agents` at `/mcp/agents/mcp`,
-   `hal0-memory` at `/mcp/memory/mcp` and `hal0-admin` at `/mcp/admin/mcp`.
+   `hal0-memory` at `/mcp/memory/mcp` and `hal0-admin` at `/mcp/admin/mcp`
+   (one table, `SCOPE_SERVERS` in `src/hal0/bridge/keys.py`, maps each scope to
+   its server and mount). The lines are pasted on another machine, so their
+   base is `[network].public_url` when set, else the address the request
+   reached hal0-api at, with a loopback host (the CLI calls the API on
+   `127.0.0.1`) replaced by the box's first LAN address on the API port.
 6. **`[bridge]` in `hal0.toml` holds the limits, and the bridge is on by
    default.** `BridgeConfig` (`extra="forbid"`) has `enabled = true`,
    `max_concurrent_runs_per_client = 2`, `run_retention_days = 7` and
    `clarify_timeout_s = 900`. The default is on because the surface is inert
    until the operator adds a client: with no client rows nothing except the
    admin key can authenticate, so onboarding stays one command with no
-   restart. `enabled = false` leaves the MCP server unmounted (404), answers
-   `/api/bridge/*` with 404 `bridge.disabled`, makes `hal0 bridge` say why,
-   and makes the doctor row pass as "disabled". `enabled` is read when
-   hal0-api starts; the other three apply to the next request that uses them.
+   restart. `enabled = false` switches every bridge key off: none
+   authenticates anywhere, the scoped MCP mounts included, and hal0-api never
+   creates `bridge.db` on a request's behalf. It also leaves the MCP server
+   unmounted (404); answers adding, rotating and re-scoping a client and
+   `GET /api/bridge/me` with 404 `bridge.disabled`, ahead of body validation;
+   makes those `hal0 bridge` verbs say why; and makes the doctor row pass as
+   "disabled". Listing and revoking clients keep working while the bridge is
+   off, over the `bridge.db` that already exists, so an operator can end a key
+   before turning the bridge back on. `enabled` is read when hal0-api starts
+   and recorded on the auth module (`set_bridge_enabled`), the one value the
+   gate and the routes consult; the other three apply to the next request that
+   uses them.
 7. **`hal0 doctor all` carries a `bridge-store` row.** It reports whether
    `bridge.db` is present, owner-only (`0600`, owned by the service user),
    migrated to the schema this build ships, and how many clients it holds.
+   hal0-api creates the file when it starts with the bridge on, so a missing
+   file while hal0-api answers is a warning (that open failed and no key can
+   verify), and with hal0-api down it passes as not created yet.
    It opens the file read-only and never creates, migrates or re-permissions
    `bridge.db`; SQLite may leave the `-wal` and `-shm` siblings of a database
    it reads, and those have permission rows too. The row is advisory: a broken
@@ -238,10 +276,10 @@ ADR-0035 was verified against), shapes the answer:
 - `bridge.db` is box state. It is preserved across updates like the rest of
   `/var/lib/hal0`, and a lost file means every bridge key stops working and
   each client is added again.
-- Code that switches on `Tier` has to handle `"bridge"`; the auth matrix test
-  covers every scope against `/mcp/agents`, `/mcp/memory`, `/mcp/admin`,
-  `/api/*` and `/v1/*`, with `require_auth` on and off, from loopback and from
-  a LAN peer.
+- Code that switches on `Tier` has to handle `"bridge"`; the auth matrix tests
+  (`tests/api/test_auth_bridge_tier.py`) cover every scope set against
+  `/mcp/agents`, `/mcp/memory`, `/mcp/admin`, `/api/*` and `/v1/*`, with
+  `require_auth` on and off, from loopback and from a LAN peer.
 - **A bridge key is as powerful as asking Hermes to do something, for every
   profile hal0 holds a key for. With the `admin` scope it is the agent-tier
   key ADR-0024 describes: the admin MCP server's tools, autonomous reads and
@@ -296,7 +334,8 @@ ADR-0035 was verified against), shapes the answer:
   `src/hal0/config/paths.py` (`bridge_db`), `src/hal0/config/schema.py`
   (`BridgeConfig`), `src/hal0/install/perms.py` (the `bridge.db` rows),
   `src/hal0/cli/doctor_all.py` (`check_bridge_store`).
-- `docs/reference/config-schema.mdx` (`[bridge]`), `docs/reference/cli.mdx`
-  (`hal0 bridge`), `docs/guides/connect-mcp.mdx`, `SECURITY.md` ("Bundled
-  agent trust boundary").
+- `docs/reference/config-schema.mdx` (`[bridge]`),
+  `docs/reference/cli-operator.mdx` (`hal0 bridge`),
+  `docs/guides/connect-mcp.mdx`, `SECURITY.md` ("Bundled agent trust
+  boundary").
 - ADR-0002, ADR-0004, ADR-0024, ADR-0035, ADR-0040, ADR-0042.

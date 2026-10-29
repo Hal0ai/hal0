@@ -126,7 +126,9 @@ What the design does and does not do:
 
 - A bridge key is accepted on the bridge's own MCP server, and on the memory and
   admin MCP servers only when its client holds that scope. It is refused on
-  every `/api/*` and `/v1/*` route, with one exception, `GET /api/bridge/me`.
+  every non-OPEN `/api/*` and `/v1/*` route, with one exception,
+  `GET /api/bridge/me`; OPEN routes such as `GET /api/health` and
+  `GET /v1/models` answer it as they answer a caller with no key.
 - The bridge asks for a credential even when `[security].require_auth` is off.
   A box with no bridge clients accepts no bridge key at all.
 - A bridge client's memory identity is the name in its key, not the

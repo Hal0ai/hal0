@@ -78,11 +78,11 @@ silently paper over.
 | Prefix | Auth | Purpose |
 |---|---|---|
 | `/api/auth` | Mixed | `login`/`status`/`logout` are OPEN (you can't require a cookie to obtain one); `require` (toggle enforcement) and `rotate` (mint a new admin/client key) are ADMIN; `exposure` (serialize this whole rule table) is ADMIN. |
-| `/api/secrets` | ADMIN | Operator-managed secrets store. See "Secrets" below — dedicated section, not just a table row. |
+| `/api/secrets` | ADMIN | Operator-managed secrets store. See [Secrets](/docs/reference/api/rest-api-credentials#secrets-apisecrets) for the routes and the server-side validation — dedicated section, not just a table row. |
 | `/api/oauth` | Mixed | OAuth passthrough for Hermes skills (see [Run agents](/docs/guides/run-agents/)): `GET /api/oauth/providers`, `POST /api/oauth/{provider_id}/start` (returns `authorize_url`), `GET /api/oauth/{provider_id}/status`, `DELETE /api/oauth/{provider_id}` (best-effort revoke, then delete the token), `POST /api/oauth/{provider_id}/client-secret`, and `GET /api/oauth/{provider_id}/callback`, the provider's redirect target. The callback is OPEN (it carries no hal0 credential, only the provider's single-use `state` nonce, which the route validates); every other route is ADMIN. Tokens and client secrets persist to `/etc/hal0/api.env` and are never returned. |
 | `/api/settings` | ADMIN | Root config read/write/reload, JSON schema, apply-plan registry, schema-driven field metadata (`fields`), and a dry-run ChangeSet preview (`preview`) sharing the same diff the write path applies. |
 | `/api/settings/models/store` | ADMIN | Model store path get/set/migrate (part of the `/api/settings` prefix). |
-| `/api/settings/proxmox` | ADMIN | Proxmox integration config (host/token) + live cluster status. See "Proxmox integration" below — no dedicated exposure rule; it inherits ADMIN from the generic `/api/settings` prefix. |
+| `/api/settings/proxmox` | ADMIN | Proxmox integration config (host/token) + live cluster status. See [Proxmox integration](/docs/reference/api/rest-api-credentials#proxmox-integration-apisettingsproxmox) — no dedicated exposure rule; it inherits ADMIN from the generic `/api/settings` prefix. |
 | `/api/slots` | CLIENT (list) / ADMIN (else) | Slot lifecycle — list, create, delete, restart, model swap, resolved-argv provenance by layer, metrics, capacity. Slot views carry `ctx_effective`, `ctx_source` and, for a slot the profile-centric conversion blocked, `conversion_blocked`. A slot write that carries a tuning key is refused with `slot.tuning_key_denied`; rebind a model with `PUT /api/slots/{name}/config` and `{"model": {"default": ...}}`. See [Slot lifecycle](/docs/reference/slot-lifecycle/). |
 | `/api/models` | CLIENT (GET) / ADMIN (mutations) | Model registry — list, pull, delete, inspect, scan, catalogue, update checks, and speculative-decoding drafters (`PUT /api/models/{id}` takes `{"draft": path\|null}`; `DELETE /api/models/{id}/draft` unpairs and deletes the file; `POST /api/models/inspect-draft` fit-checks a drafter against a target before download; the pull body takes `draft_filename` and `draft_repo`; `POST /api/models/inspect` also returns `drafts` and `companion_repos`). The registry holds no image models: a pull of an image catalog id, and a create, update or add-from-path whose `path` is in ComfyUI's models folder, answer 422 `model.image_asset`. `GET /api/models/health` is registered by `hardware.router`, not `models.router` — it's mounted ahead of `/api/models` so the literal path wins over the `{model_id}` catch-all. See [Model roster & benchmarks](/docs/reference/model-roster-benchmark/). |
 | `/api/runner-images` | CLIENT (list/detail) / ADMIN (sync/pull) | Runner Image catalogue — sync from `images.json`, pull-job orchestration, tag removal and restart-affected-slots for GHCR-hosted runner images. |
@@ -120,6 +120,7 @@ silently paper over.
 | `/api/images` | ADMIN | Cache for PNGs written by `POST /v1/images/generations`. ADMIN because a cached-image URL could otherwise leak a prompt via filename. |
 | `/api/agents` | ADMIN | Bundled-agent lifecycle (install/uninstall/list/status), personas, service restart, Hermes gateway restart and Hermes repair (see the [Agents API reference](/docs/reference/api/agents/)), memory stats, and Hermes command approvals (`GET`/`PUT /api/agents/hermes/command-approvals`). The command-approvals `PUT` also refuses a request whose `X-hal0-Agent` header names an agent. `POST /api/agents/hermes/reconcile-upstreams` re-registers the Hermes profiles as upstreams on demand (it runs the profile API-key sweep first) and returns `{ok: true, ...report}`; 404 `agent.not_installed` when Hermes is not installed. hal0-api also reconciles every 120 s and after an agent install or uninstall. The agent chat proxy is gone: `/api/agents/{id}/events`, `/submit` and `/session/handshake\|create\|resume\|history` return 404. `GET /api/agents/{name}/overview` is the state behind the Hermes and Pi cards (see the [Agents API reference](/docs/reference/api/agents/)). |
 | `/api/agent/approvals` | ADMIN | Gated-tool approval inbox — every method (GET list, POST approve/deny, GET `/events` SSE) is ADMIN; `exposure.py`'s rule on this prefix carries no method filter, and the route module itself (`approvals.py`) declares no `Depends` — enforcement is entirely middleware-side. |
+| `/api/bridge` | BRIDGE (`GET /me`) / ADMIN (else) | Agent bridge clients for remote coding agents ([ADR-0043](/docs/adr/0043-agent-bridge-and-bridge-keys)): `POST`/`GET /clients` (add with the key shown once and one `claude mcp add` line per scope; list), `PATCH /clients/{name}` (replace scopes), `POST /clients/{name}/rotate`, `DELETE /clients/{name}` (revoke; the name stays taken), and `GET /me`, the caller's own record and the one REST route a bridge key opens. A bridge key gets 403 on every other non-OPEN route. With `[bridge].enabled` false, add, rotate, scopes and `/me` answer 404 `bridge.disabled` while list and revoke keep working. See [Connect an external MCP client](/docs/guides/connect-mcp#connect-an-external-mcp-client). |
 | `/api/user` | ADMIN | Dashboard layout persistence (single-operator LAN device — one layout file per install). |
 | `/api/config` | Mixed | `GET /api/config/urls` (dashboard bootstrap hostnames) is OPEN; the rest of this prefix is ADMIN (may hold config-derived secrets). |
 | `/api/meta` | CLIENT (GET) / ADMIN (else) | `GET /api/meta/enums` — the canonical device/backend/capability vocabulary from `hal0.model_meta`. |
@@ -134,6 +135,12 @@ documented coverage to every `/api/*` prefix currently mounted (previously 18 of
 roughly 43). `WS /v1/realtime` is documented separately — see
 [Realtime API reference](/docs/reference/api/realtime/).
 
+## Secrets and Proxmox
+
+The `/api/secrets` routes and their server-side validation, and the
+`/api/settings/proxmox` routes, are documented in
+[REST API: secrets and Proxmox credentials](/docs/reference/api/rest-api-credentials/).
+
 ## Agent overview, restart and repair
 
 `GET /api/agents/{name}/overview` (the state behind the Hermes and Pi cards),
@@ -141,100 +148,6 @@ roughly 43). `WS /v1/realtime` is documented separately — see
 `POST /api/agents/hermes/repair` (a tracked job, served by
 `GET /api/updates/status/{id}`) are documented in the
 [Agents API reference](/docs/reference/api/agents/).
-
-## Secrets (`/api/secrets`)
-
-Backs the dashboard's Settings → Secrets panel. Persists to `/etc/hal0/api.env` — the
-same systemd `EnvironmentFile=` the provider-credential writer targets — via the
-shared atomic, mode-0600 writer in `hal0.api._env_store`. A successful write also
-updates the running process's `os.environ` so the new value is observable without a
-restart; the persisted file is the source of truth across restarts. ADMIN-gated
-(whole prefix, `exposure.py` line-item `secrets`).
-
-| Method | Path | Status | Notes |
-|---|---|---|---|
-| GET | `/api/secrets` | 200 | Lists secret **names** only — `{"secrets": [{name, set, masked, updated_at, protected}]}`. `masked` is always the constant `"••••••••"`; a value is never returned by any endpoint, logged, or echoed in an error body. |
-| POST | `/api/secrets/{name}` | 204 | Set/overwrite. Body `{"value": "..."}`. Accepted alongside PUT because the shipped dashboard hook POSTs. |
-| PUT | `/api/secrets/{name}` | 204 | Set/overwrite — the documented-contract verb; identical handler to POST. |
-| DELETE | `/api/secrets/{name}` | 204 | Idempotent — 204 even if the name was never set. |
-
-Validation, enforced server-side (not just in the UI, since this route is reachable
-by anyone who can reach the API):
-
-- **Name grammar**: `^[A-Z][A-Z0-9_]{0,63}$` — ALL_CAPS, leading letter, ≤64 chars.
-  A non-conforming name is `400 secret.name_invalid`.
-- **Protected prefix**: any name starting with `HAL0_` is hal0's own service
-  configuration and auth surface (written by the installer, `hal0.toml` derivation,
-  and `hal0 auth rotate`) — it is listed by GET (with `protected: true`, so an
-  operator can see what the service is configured with) but every mutation against
-  it is refused with `403 secret.protected`, including a DELETE of a name that isn't
-  even currently set (so the response doesn't leak which `HAL0_*` keys exist on the
-  box). Deleting `HAL0_ADMIN_KEY` would disarm every future login and deleting
-  `HAL0_PORT`/`HAL0_UI_DIST` would break the service on next restart — this is the
-  control introduced after #1450.
-- **Process-control names** (1.6.0, #2936 / #2940): a name that changes how processes load
-  code or find programs is refused on POST/PUT with `403 secret.protected`
-  (`details.reason: "process_control"`), because `api.env` is hal0-api's own
-  environment and every process it starts inherits it. Refused: `PATH`, `HOME`,
-  `SHELL`, `IFS`, `ENV`, `BASH_ENV`, `NODE_OPTIONS`, `NODE_PATH`,
-  `PERL5OPT`, `PERL5LIB`, `RUBYOPT`, `GCONV_PATH`,
-  `SHELLOPTS`, `BASHOPTS`, `PS4`, `HERMES_HOME`, and any name starting with `LD_`,
-  `DYLD_`, `PYTHON`, `UV_`, `PIP_`, `NPM_CONFIG_`, `GIT_` or (since 1.6.1, #2998)
-  `OPENSSL_`, which covers `OPENSSL_CONF`, `OPENSSL_MODULES` and `OPENSSL_ENGINES`, or
-  `XDG_` (#3000), which covers `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_CACHE_HOME`. Since 1.6.1 the same
-  answer covers names that change how those processes do TLS, find their configuration
-  or route traffic: `SSLKEYLOGFILE` (#2997), `NODE_TLS_REJECT_UNAUTHORIZED` (#2999), and any name ending in `_PROXY`
-  (#3006: `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`). A box behind a proxy
-  sets the proxy variables by editing `/etc/hal0/api.env` as root. Hugging Face endpoint
-  and cache overrides are refused too (#3017): `HF_ENDPOINT`, `HF_INFERENCE_ENDPOINT`,
-  `HUGGINGFACE_CO_STAGING`, `HF_TOKEN_PATH`, `HF_ASSETS_CACHE`, `HUGGINGFACE_ASSETS_CACHE`
-  and any name starting with `HF_HUB_`, `HUGGINGFACE_HUB_` or `HF_XET_`; `HF_TOKEN` and
-  `HF_HOME` are still accepted. Names are matched in any letter case.
-  DELETE still accepts them, so an entry written before the guard can be removed. The provider credentials
-  route (`POST /api/providers/{name}/credentials`) refuses the same names and any
-  `HAL0_*` name with a 400, and so does an upstream's `auth_value_env` on create or
-  patch.
-- **TLS trust names** (1.6.1, #2941): `SSL_CERT_FILE`, `SSL_CERT_DIR`,
-  `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE` and `NODE_EXTRA_CA_CERTS` pick the CA bundle outbound TLS clients
-  trust, so they are accepted on POST/PUT only when the value is an absolute path to
-  an existing root-owned file (a directory for `SSL_CERT_DIR`; a `:` list needs every
-  entry to qualify) that is not group- or world-writable, with every parent directory
-  root-owned and not group- or world-writable. Symlinks are followed hop by hop and
-  every hop, its directory and the final target must pass; for `SSL_CERT_DIR` so
-  must every entry of the directory (at most 2000). A value is capped at 4 KB and
-  16 list entries. Anything else is `403 secret.protected` with
-  `details.reason: "tls_trust"`; the credentials route answers 400 with the same
-  reason. DELETE still works on a planted entry. A box behind a corporate proxy
-  installs its CA as root and then sets the variable to that path.
-- **Value grammar**: non-empty and printable (`str.isprintable()`). Control
-  characters — including the higher-codepoint line separators `U+0085`/`U+2028`/
-  `U+2029`, not just the ASCII C0 set — are rejected as `400 secret.value_invalid`,
-  because `api.env` is an unauthenticated-at-the-filesystem-level, LAN-writable
-  systemd `EnvironmentFile`: an injected line separator could otherwise smuggle a
-  second `KEY=value` pair into the file on round-trip.
-
-Every set/delete emits a structured `hal0.audit` log line and a journal event (shown in the dock)
-carrying the secret **name** only, never the value.
-
-## Proxmox integration (`/api/settings/proxmox`)
-
-Lets an operator configure the optional Proxmox API token the dashboard's "Proxmox
-host" hardware panel uses (`hal0.hardware.pve`). Persisted to `/etc/hal0/proxmox.json`
-— a separate file from `hal0.toml`, mounted as a sibling under `/api/settings` purely
-for the dashboard's Settings-panel grouping. There is **no dedicated exposure.py rule**
-for this path — it inherits ADMIN from the generic `/api/settings` prefix rule, the
-same as every other settings sub-route.
-
-| Method | Path | Notes |
-|---|---|---|
-| GET | `/api/settings/proxmox` | Returns `{configured, host, port, user, token_name, verify_ssl, token_value_set, status}` — the token **value** is never included; `token_value_set` is a boolean instead. `status` is a live `pve_status()` cluster snapshot fetched on every call. |
-| PUT | `/api/settings/proxmox` | Body: `{host, port?, user, token_name, token_value?, verify_ssl?}`. `token_value` is optional on edit — if omitted and a config already exists on disk, the existing token is preserved so an operator can flip `verify_ssl` or change the host without re-entering the secret. If omitted with **no** existing config, the write is rejected `400 proxmox.token_required`. |
-| DELETE | `/api/settings/proxmox` | Removes the config file entirely — returns to "not configured". |
-| POST | `/api/settings/proxmox/test` | Body: same shape as PUT but `token_value` is **required** (there's no "test the saved config" path that can omit it — that's what GET's live `status` field already covers). Validates a candidate connection without writing anything to disk. |
-
-`port` defaults to `8006` and is constrained `1-65535`; `verify_ssl` defaults to
-`false`. Both request bodies are `extra: "forbid"` pydantic models — an unrecognized
-field is a validation error, not a silently-dropped key.
 
 <Aside type="note">
 This page could not verify the `/v1/*` OpenAI-compatible inference surface in depth —

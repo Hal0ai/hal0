@@ -233,7 +233,8 @@ agent's name, and can be revoked on its own.
 
 2. hal0 prints the key **once** and one `claude mcp add` line for each
    server the key opens. It keeps only the key's sha256, so a key you did not
-   save is replaced with `hal0 bridge rotate`.
+   save is replaced with `hal0 bridge rotate`. The lines name
+   `[network].public_url` when it is set, else the box's LAN address.
 
 3. On the remote machine, paste the lines:
 
@@ -263,8 +264,9 @@ What the key opens depends on its scopes. `agents` is always held.
 | `memory` | `/mcp/memory` (`hal0-memory`) | Search and write memory. The writer is the client named in the key: `X-hal0-Agent` is ignored, so `X-hal0-Private: 1` lands in `private:<client>` and nowhere else. |
 | `admin` | `/mcp/admin` (`hal0-admin`) | The admin tools. Calls reach hal0 as hal0's own service identity and are audited as `bridge:<client>`; gated tools still wait in the approvals inbox for a person. |
 
-A bridge key is refused on every other route, `/api/*` and `/v1/*` included,
-`/api/bridge/me` apart. Manage clients with:
+A bridge key is refused on every other non-OPEN route of `/api/*` and
+`/v1/*`, `/api/bridge/me` apart; OPEN routes such as `GET /api/health` and
+`GET /v1/models` answer it as they answer anyone. Manage clients with:
 
 ```sh
 hal0 bridge list                          # clients, scopes, last seen, revoked
@@ -273,7 +275,7 @@ hal0 bridge rotate workstation-claude     # new key; the old one stops at once
 hal0 bridge revoke workstation-claude     # ends the key; the name stays reserved
 ```
 
-See [`hal0 bridge`](/docs/reference/cli#hal0-bridge--admit-remote-coding-agents)
+See [`hal0 bridge`](/docs/reference/cli-operator#hal0-bridge--admit-remote-coding-agents)
 for every flag and [ADR-0043](/docs/adr/0043-agent-bridge-and-bridge-keys) for
 the design.
 

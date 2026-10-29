@@ -41,13 +41,15 @@ open; a box with no admin key stays fully open. See
 ## The v1.0 auth layer: three tiers, deny-by-default
 
 When you do turn it on, hal0 resolves every request to one of three
-principal tiers via `AuthPrincipal`:
+principal tiers via `AuthPrincipal`, plus a fourth for the agent bridge that
+is enforced whether auth is on or not:
 
 | Tier | What it grants |
 |---|---|
 | `anon` | No credential presented, or none configured to check against. |
 | `client` | A valid client key — access to the inference surface (`/v1/*`) and a short, explicit list of read-only introspection routes. |
 | `admin` | A valid admin key, or a verified dashboard session cookie — full control plane access. |
+| `bridge` | A remote coding agent's own key (`hal0bk_…`, minted by `hal0 bridge add`; [ADR-0043](/docs/adr/0043-agent-bridge-and-bridge-keys)) — the bridge's own surfaces and the MCP mounts its scopes name, and no other non-OPEN route. Required even with auth off. |
 
 Credentials are resolved in a fixed priority order: **session cookie →
 `Authorization: Bearer` header → `?api_key=` query param** (the query-param
@@ -60,8 +62,8 @@ as "the wrong kind of key." Key comparison is constant-time
 ### Every route is pre-classified — deny-by-default
 
 Underneath the principal check is a **route exposure table**
-(`AuthClass`: `OPEN | CLIENT | ADMIN | BOOTSTRAP`), evaluated first-match-wins
-per request path:
+(`AuthClass`: `OPEN | CLIENT | ADMIN | BOOTSTRAP | BRIDGE`), evaluated
+first-match-wins per request path:
 
 - **`OPEN`** — a deliberately tiny, enumerated set: the `/v1/models` SDK
   probe, the Prometheus scrape endpoint, liveness checks the installer and
@@ -73,6 +75,9 @@ per request path:
   dev-open) exists specifically to avoid a first-run chicken-and-egg lockout.
 - **`CLIENT`** — the inference surface plus a short list of genuinely
   read-only introspection `GET`s.
+- **`BRIDGE`** — the agent bridge's `/mcp/agents` mount and
+  `GET /api/bridge/me`: a bridge key or the admin key, and never the dev-open
+  bypass.
 - **`ADMIN`** — everything else, including every mutating route and every
   route that can return secrets or config. **Unclassified paths fall back to
   ADMIN.** A newly added router is locked out until a rule is added for it —

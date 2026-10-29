@@ -198,3 +198,14 @@ def test_pass_one_body_over_the_limit_is_caught_even_when_pass_two_fits() -> Non
     over = oversized_pages([target, source], limit=limit, url_map=short_urls)
     assert [key for key, _ in over] == ["reference/source"]
     assert over[0][1] == len(created)
+
+
+def test_split_rest_api_pages_have_distinct_topics() -> None:
+    # The secrets and Proxmox sections moved out of the REST API index. The
+    # index keeps its topic (and the route-group table), the new page gets one.
+    docs = {d.rel_key: d for d in discovery.discover_docs(REPO_ROOT / "docs")}
+    assert docs["reference/api/rest-api"].external_id == "hal0-docs--reference--api--rest-api"
+    assert (
+        docs["reference/api/rest-api-credentials"].external_id
+        == "hal0-docs--reference--api--rest-api-credentials"
+    )
