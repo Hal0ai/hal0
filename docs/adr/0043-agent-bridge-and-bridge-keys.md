@@ -229,24 +229,50 @@ ADR-0035 was verified against), shapes the answer:
     shipped mirror (read-only) and from the drop-in directory
     `/var/lib/hal0/skills`; writes and deletes touch only the drop-in
     directory, validate the skill's frontmatter, refuse symlinks and path
-    components, cap size, and are **gated**: they go to the approval inbox, and
-    repeated pushes of one skill collapse into one row. A capabilities tool
-    gives a read-only, sanitised view of what Hermes can do now.
+    components, cap size, and are **gated**: they go to the approval inbox (the
+    amendment says how repeated pushes behave). A capabilities tool gives a
+    read-only, sanitised view of what Hermes can do now.
 
-    *Amendment (the teach-tools change).* Three details the first wording left
+    *Amendment (the teach-tools change).* Details the first wording left
     open. The shared namespace is reached through `MemoryDispatcher.shared`, the
     counterpart of `scoped` with private mode forced *off*: the app-level
     dispatcher takes private mode from the `X-hal0-Private` request header,
     which the caller controls, so a shared write sent through it could be
-    promoted into `private:<client>`. A tag a client sends that starts with
-    `source:bridge:` is dropped, so provenance cannot be forged. And a skill
-    write is checked (including the shipped-name refusal) before it is queued,
-    so the operator is never asked to approve a write that cannot succeed; one
-    skill is at most one pending inbox row, an identical re-push is the same row
-    and an edited one withdraws the older row, so approving always writes the
-    content the card shows. The capabilities view is built by allow-list
-    (MCP server names, model alias names and `{model, provider}`, never a URL,
-    header or key), and any string the log redactor would change is dropped.
+    promoted into `private:<client>`.
+
+    The memory layer decides who owns a note, and who may read it, from the
+    note's tags: the first `agent:<id>` tag, `visibility:private` and
+    `project:<id>`, and it trusts the writer's (tracked as #3136). A client
+    could therefore plant a note in another agent's private memory by sending
+    `agent:<that agent>`. So the bridge drops every client tag that starts with
+    `agent:`, `visibility:`, `project:` or `source:bridge:`, compared
+    case-insensitively after stripping, and stamps its own: the agent tag the
+    memory layer adds for the namespace, and `source:bridge:<client>`.
+
+    A skill write is checked (including the shipped-name refusal) before it is
+    queued, so the operator is never asked to approve a write that cannot
+    succeed. The inbox rule for pushes is this. A put and a delete of one skill
+    name can both be pending, each its own row. A re-push of a put that is
+    identical to the pending one is the same row. An edited re-push by the
+    *same client* withdraws that client's older row and queues the new one, so
+    approving always writes the content the card shows. An edited re-push while
+    *another client's* put of that name is pending is refused with
+    `bridge.skill_pending_elsewhere` (409): a client cannot retire someone
+    else's pending change. A client holds at most eight pending skill changes
+    (puts and deletes together); the ninth is `bridge.too_many_pending` (429),
+    and the cap frees as the operator decides rows. The card shows the skill
+    name, the byte count, a 16-hex digest, the file names and a preview of the
+    first 2000 characters of `SKILL.md` passed through the log redactor; the
+    full content, and the contents of supporting files, are not on the card.
+    Once a row is approved, denied, withdrawn or failed, the queue lets go of
+    the executor that holds the pushed content.
+
+    The capabilities view is built by allow-list (MCP server names, model alias
+    names and `{model, provider}`, never a URL, header or key), and any string
+    the log redactor would change is dropped. Its `api_server_version` comes
+    from `GET /health/detailed`, which answers 401 without the profile's API
+    key, so the request carries the key hal0 holds for that profile as a
+    bearer; with no key held, no request is made and the version is `null`.
 
 ### Implementation decisions (second change)
 

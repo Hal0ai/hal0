@@ -463,3 +463,43 @@ async def test_withdraw_leaves_resolved_and_unknown_entries_alone() -> None:
     entry = q.get(aid)
     assert entry is not None and entry.state == "executed"
     assert await q.withdraw("nope", "late") is None
+
+
+# -- a resolved entry lets go of its callables (ADR-0043: a skill push's executor pins its content) --
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("how", ["approve", "approve_failing", "deny", "withdraw"])
+async def test_a_resolved_entry_holds_no_executor_or_deny_hook(how: str) -> None:
+    async def failing(args: dict[str, Any]) -> dict[str, Any]:
+        raise RuntimeError("boom")
+
+    q = ApprovalQueue()
+    aid = await q.enqueue(
+        tool="agent_skill_put",
+        args={"name": "forum-style"},
+        client_id="bridge:cc",
+        executor=failing if how == "approve_failing" else _noop_executor,
+        on_deny=_noop_executor,
+    )
+    entry = q.get(aid)
+    assert entry is not None and entry._executor is not None and entry._on_deny is not None
+    if how.startswith("approve"):
+        await q.approve(aid)
+    elif how == "deny":
+        await q.deny(aid)
+    else:
+        await q.withdraw(aid, "superseded")
+    assert entry.state != "pending"
+    assert entry._executor is None and entry._on_deny is None
+
+
+@pytest.mark.asyncio
+async def test_a_pending_entry_keeps_its_executor_until_decided() -> None:
+    q = ApprovalQueue()
+    aid = await q.enqueue(
+        tool="slot_restart", args={"name": "primary"}, client_id="pi", executor=_noop_executor
+    )
+    entry = q.get(aid)
+    assert entry is not None and entry._executor is _noop_executor
+    assert (await q.approve(aid))["state"] == "executed"  # and it still ran once

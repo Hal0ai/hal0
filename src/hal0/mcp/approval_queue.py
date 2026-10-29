@@ -153,13 +153,21 @@ class ApprovalEntry:
     result: Any = None
     error: str | None = None
     # Stored separately from the dataclass-serialised payload — callers
-    # must not see the bound executor through public API surface.
+    # must not see the bound executor through public API surface. Both are
+    # released (set to None) once the entry is resolved, so a resolved row keeps
+    # only its small ``args``, never the closure an executor holds (ADR-0043:
+    # a pushed skill's executor holds up to ~4 MB of its content).
     _executor: Callable[[dict[str, Any]], Awaitable[Any]] | None = field(
         default=None, repr=False, compare=False
     )
     _on_deny: Callable[[dict[str, Any]], Awaitable[Any]] | None = field(
         default=None, repr=False, compare=False
     )
+
+    def release(self) -> None:
+        """Drop the bound callables: the entry is resolved and will never run them."""
+        self._executor = None
+        self._on_deny = None
 
     def as_dict(self) -> dict[str, Any]:
         """JSON-safe projection for REST / SSE consumers."""
@@ -313,6 +321,10 @@ class ApprovalQueue:
         )
         await self._emit(_Event(kind="approved", entry=entry.as_dict()))
 
+        # Released as soon as the executor has been taken (it runs once): from here
+        # on the entry is "approved" and nothing may run it again.
+        entry.release()
+
         if executor is None:
             # Defensive: queue invariant says executor exists at enqueue
             # time. Treat missing executor as a failure rather than a
@@ -362,6 +374,7 @@ class ApprovalQueue:
             target = _primary_target(entry.tool, entry.args)
             self._dedup.pop((entry.tool, target), None)
             on_deny = entry._on_deny
+            entry.release()
 
         log.info("mcp.approval.denied", approval_id=approval_id, tool=entry.tool)
         await self._emit(_Event(kind="denied", entry=entry.as_dict()))
@@ -394,6 +407,7 @@ class ApprovalQueue:
             entry.decided_at = time.time()
             target = _primary_target(entry.tool, entry.args)
             self._dedup.pop((entry.tool, target), None)
+            entry.release()
 
         log.info("mcp.approval.withdrawn", approval_id=approval_id, tool=entry.tool)
         await self._emit(_Event(kind="failed", entry=entry.as_dict()))

@@ -21,15 +21,19 @@ field it does not set falls back to the default profile's, which is how Hermes
 profiles that hal0 clones from the default behave.
 
 ``api_server_version`` is read from the API server's ``GET /health/detailed``
-(3 s timeout, no credentials sent) and is ``None`` when the gateway is down,
-answers an error or sends no usable ``version``. Nothing here raises for an
+(3 s timeout) and is ``None`` when the gateway is down, answers an error or sends
+no usable ``version``. The route needs the profile's API key (it answers 401
+without it, checked live), so the caller passes ``api_key``, the one hal0 holds for
+that profile (the same one ``HermesGateway.key_for`` reads), and it goes out as a
+bearer header on that one loopback request, never into the view. With no key
+there is no request and the version is ``None``. Nothing here raises for an
 unreadable config or an unreachable gateway: the view is simply emptier.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -56,8 +60,9 @@ CAPABILITY_KEYS: tuple[str, ...] = (
     "approvals_mode",
 )
 
-#: Fetches a URL and returns its parsed JSON, or ``None``; may raise. Replaced in tests.
-FetchJson = Callable[[str], Any]
+#: Fetches a URL with the given request headers and returns its parsed JSON, or ``None``;
+#: may raise. Replaced in tests.
+FetchJson = Callable[[str, Mapping[str, str]], Any]
 
 #: A profile name is one URL segment (the same rule as ``HermesGateway.profile_of``).
 _PROFILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
@@ -67,14 +72,20 @@ _MAX_TEXT = 200
 
 
 def capabilities_view(
-    home: Path, profile: str, *, fetch_json: FetchJson | None = None
+    home: Path,
+    profile: str,
+    *,
+    fetch_json: FetchJson | None = None,
+    api_key: str | None = None,
 ) -> dict[str, Any]:
     """The sanitised capabilities of ``profile`` under the Hermes ``home``.
 
     ``profile`` is ``"default"`` or a name under ``<home>/profiles``; anything
     that is not one URL segment raises ``ValueError`` (the service checks the
     name first, this keeps the function safe on its own). ``fetch_json`` replaces
-    the ``GET /health/detailed`` request (it may raise or return ``None``).
+    the ``GET /health/detailed`` request (it may raise or return ``None``);
+    ``api_key`` is the profile's API key, sent as its bearer. Without one the
+    version is ``None`` and nothing is requested.
     """
     if profile != DEFAULT_PROFILE and _PROFILE_NAME.fullmatch(profile) is None:
         raise ValueError(f"{profile!r} is not a Hermes profile name")
@@ -85,7 +96,7 @@ def capabilities_view(
     return {
         "agent": "hermes" if profile == DEFAULT_PROFILE else f"hermes/{profile}",
         "profile": profile,
-        "api_server_version": _version(home, profile, fetch_json),
+        "api_server_version": _version(home, profile, fetch_json, api_key),
         "model_aliases": _model_aliases(config.get("model_aliases")),
         "toolsets_enabled": _strings(config.get("toolsets")),
         "toolsets_disabled": _strings(config.get("agent", "disabled_toolsets")),
@@ -182,8 +193,13 @@ def _approvals_mode(home: Path, profile: str) -> str | None:
 # -- the gateway's version ----------------------------------------------------------------
 
 
-def _version(home: Path, profile: str, fetch_json: FetchJson | None) -> str | None:
-    """``version`` from ``GET /health/detailed``; ``None`` for any failure or odd answer."""
+def _version(
+    home: Path, profile: str, fetch_json: FetchJson | None, api_key: str | None
+) -> str | None:
+    """``version`` from ``GET /health/detailed``; ``None`` for no key, any failure or an odd answer."""
+    key = (api_key or "").strip()
+    if not key:
+        return None  # the route answers 401 without the key: do not ask
     base = api_server_base(home)
     path = (
         "/health/detailed"
@@ -192,21 +208,26 @@ def _version(home: Path, profile: str, fetch_json: FetchJson | None) -> str | No
     )
     fetch = fetch_json if fetch_json is not None else _fetch_json
     try:
-        body = fetch(base + path)
+        body = fetch(base + path, {"Authorization": f"Bearer {key}"})
     except Exception:  # the gateway being down is a normal state, not an error to report
         return None
     version = body.get("version") if isinstance(body, dict) else None
     return _text(version)
 
 
-def _fetch_json(url: str) -> Any:
-    """Sync ``GET url`` with a 3 s timeout and no credentials; the parsed JSON, or ``None``."""
+def _fetch_json(url: str, headers: Mapping[str, str]) -> Any:
+    """Sync ``GET url`` with ``headers`` and a 3 s timeout; the parsed JSON, or ``None``."""
     import httpx
 
     from hal0.service_identity import is_loopback_url
 
     try:
-        resp = httpx.get(url, timeout=_FETCH_TIMEOUT_S, trust_env=not is_loopback_url(url))
+        resp = httpx.get(
+            url,
+            headers=dict(headers),
+            timeout=_FETCH_TIMEOUT_S,
+            trust_env=not is_loopback_url(url),
+        )
         if resp.status_code != 200:
             return None
         return resp.json()

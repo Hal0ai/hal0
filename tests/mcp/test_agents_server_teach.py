@@ -122,7 +122,7 @@ async def svc(
         events=None,
         memory_dispatcher=dispatcher,
         skills=SkillLibrary(shipped_root=shipped, dropin_root=dropin),
-        detail_fetch=lambda _url: {"version": "0.22.4"},
+        detail_fetch=lambda _url, _headers: {"version": "0.22.4"},
     )
     yield service
     await service.close()

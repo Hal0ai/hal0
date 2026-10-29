@@ -32,7 +32,9 @@ The teach tools (decision 10) leave knowledge behind for a Hermes profile::
     agent_capabilities   — a sanitised view of what a Hermes profile can do now
 
 Memory is namespaced by hal0 (``private:hermes``, ``private:hermes__<profile>`` or
-``shared``), never by the caller's arguments or headers. A skill write or delete is
+``shared``), never by the caller's arguments or headers; tags the caller sends that
+start ``agent:``, ``visibility:``, ``project:`` or ``source:bridge:`` are dropped, because
+the memory layer trusts them for ownership (#3136). A skill write or delete is
 gated: the tool returns ``{status: "pending_approval", approval_id}`` and the
 change happens only if the operator approves the row in the hal0 inbox (there is no
 approve tool). ``agent_capabilities`` never carries a URL, header, key or other
@@ -551,9 +553,11 @@ def _agents_tool_definitions() -> dict[str, Tool]:
             "Remember a note for a Hermes agent. agent is 'hermes' (the default profile), "
             "'hermes/<profile>', or 'shared' (the box's shared memory). The note is stored in "
             "that agent's own private memory, which hal0 picks, not you, and is tagged "
-            "source:bridge:<your client name> along with any tags you pass. Returns "
-            "{status, id, timestamp}. Refused with bridge.unknown_agent for any other agent "
-            "and bridge.memory_disabled when the box runs no memory."
+            "source:bridge:<your client name> along with any tags you pass, except tags that "
+            "start with agent:, visibility:, project: or source:bridge: (hal0 owns those, so "
+            "they are dropped). Returns {status, id, timestamp}. Refused with "
+            "bridge.unknown_agent for any other agent and bridge.memory_disabled when the box "
+            "runs no memory."
         ),
         annotations=_ANNOTATIONS["agent_memory_add"],
     )
@@ -568,8 +572,8 @@ def _agents_tool_definitions() -> dict[str, Tool]:
         name="agent_memory_search",
         description=(
             "Search what a Hermes agent remembers. agent is 'hermes', 'hermes/<profile>' (its "
-            "own private memory and the shared memory) or 'shared' (shared memory only). limit "
-            "is 1 to 50 (default 10). Returns {status, results}. A text over 16 KiB is cut and "
+            "own private memory and the shared memory) or 'shared' (the shared memory and any "
+            "private memory filed under your own client name). limit is 1 to 50 (default 10). Returns {status, results}. A text over 16 KiB is cut and "
             "the result then carries truncated: true."
         ),
         annotations=_ANNOTATIONS["agent_memory_search"],
@@ -620,8 +624,11 @@ def _agents_tool_definitions() -> dict[str, Tool]:
             "supporting file names (no paths) to text (at most 16 files, 256 KiB each). It is "
             "checked at once (bridge.skill_invalid), but nothing is written until the operator "
             "approves it in the hal0 inbox. Returns {status: 'pending_approval', approval_id, "
-            "name}; pushing the same skill again is the same inbox row, an edited one replaces "
-            "it. A shipped skill cannot be changed (bridge.skill_readonly)."
+            "name}; pushing the same skill again is the same inbox row, and an edited push "
+            "replaces your own pending one. Another client's pending change to that skill is "
+            "bridge.skill_pending_elsewhere, and more than 8 changes of yours waiting in the "
+            "inbox is bridge.too_many_pending. A shipped skill cannot be changed "
+            "(bridge.skill_readonly)."
         ),
         annotations=_ANNOTATIONS["agent_skill_put"],
     )

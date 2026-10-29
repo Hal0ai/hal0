@@ -32,15 +32,25 @@ behind for a Hermes profile:
   namespace, forced by :meth:`MemoryDispatcher.scoped` (private mode on, identity
   fixed to ``hermes`` or ``hermes__<profile>``), or in ``shared`` through
   :meth:`MemoryDispatcher.shared` (private mode off). Neither trusts the live
-  request's headers. Every write carries ``source:bridge:<client>``, and a tag a
-  client sends in that namespace is dropped, so provenance cannot be forged.
+  request's headers. Every write carries ``source:bridge:<client>``. The memory
+  layer reads ownership and visibility off a note's *tags* (``agent:<id>``,
+  ``visibility:private``, ``project:<id>``) and trusts what the writer put there
+  (issue #3136), so a client's own tags are filtered first: any tag starting
+  ``agent:``, ``visibility:``, ``project:`` or ``source:bridge:`` (compared
+  case-insensitively, after stripping) is dropped. Ownership and provenance are
+  hal0's to stamp, never the client's.
 * **Skills.** Reads are direct. ``skill_put`` and ``skill_delete`` validate, then
   queue the change in the approval inbox (tools ``agent_skill_put`` and
   ``agent_skill_delete``); nothing is written until the operator approves, and
   a request that could never succeed (invalid, or a shipped skill's name) is
-  refused before anything is queued. One skill is at most one pending row: an
-  identical re-push is the same row, an edited one withdraws the older row, so
-  approving always writes what the card shows.
+  refused before anything is queued. A put and a delete of one name can both be
+  pending. For a put: an identical re-push is the same row; an edited re-push by
+  the *same client* withdraws its older row, so approving always writes what the
+  card shows; an edited push while *another client's* put of that name is
+  pending is 409 ``bridge.skill_pending_elsewhere``. A client holds at most
+  :data:`MAX_PENDING_SKILL_CHANGES` pending skill changes (429
+  ``bridge.too_many_pending``); the queue lets go of a resolved row's executor,
+  which is what holds the pushed content.
 * **Capabilities.** :func:`hal0.bridge.capabilities.capabilities_view`, off the
   event loop.
 """
@@ -89,7 +99,14 @@ if TYPE_CHECKING:
     from hal0.events import EventBus
     from hal0.mcp.approval_queue import ApprovalQueue
 
-__all__ = ["DEFAULT_WAIT_S", "MAX_WAIT_S", "BridgeService", "Caller", "clamp_wait"]
+__all__ = [
+    "DEFAULT_WAIT_S",
+    "MAX_PENDING_SKILL_CHANGES",
+    "MAX_WAIT_S",
+    "BridgeService",
+    "Caller",
+    "clamp_wait",
+]
 
 log = structlog.get_logger(__name__)
 
@@ -123,6 +140,15 @@ SKILL_PREVIEW_CHARS = 2000
 
 #: Why a pending skill row was retired when a newer push of the same skill arrived.
 _SUPERSEDED = "superseded by a newer push of this skill"
+
+#: Most pending ``agent_skill_put`` / ``agent_skill_delete`` rows one client may hold in the inbox.
+MAX_PENDING_SKILL_CHANGES = 8
+
+_SKILL_TOOLS = frozenset({"agent_skill_put", "agent_skill_delete"})
+
+#: Tag prefixes a client may not write: the memory layer treats these as hal0's own
+#: (ownership, visibility, project scope, provenance); see the module docstring and #3136.
+_RESERVED_TAG_PREFIXES = ("agent:", "visibility:", "project:", "source:bridge:")
 
 #: RunView keys, in order.
 _VIEW_KEYS = (
@@ -575,14 +601,16 @@ class BridgeService:
         The note lands in the agent's own private namespace (``private:hermes`` or
         ``private:hermes__<profile>``), or in ``shared``, and is tagged
         ``source:bridge:<client>``; the namespace is fixed by the dispatcher, not by
-        anything in the arguments. A memory refusal is 422 ``bridge.memory_invalid``
+        anything in the arguments. The client's own ``tags`` are filtered by
+        :func:`_client_tags`: the memory layer takes ownership and visibility from
+        ``agent:`` / ``visibility:`` / ``project:`` tags (#3136), so a client cannot
+        write any of them. A memory refusal is 422 ``bridge.memory_invalid``
         or 502 ``bridge.memory_failed``, memory off is 503 ``bridge.memory_disabled``.
         """
         self._check_open()
         dispatcher, extra = await self._memory_target(caller, agent)
         own = f"source:bridge:{caller.name}"
-        kept = [tag for tag in (tags or []) if not tag.startswith("source:bridge:")]
-        merged = list(dict.fromkeys([*kept, own]))
+        merged = list(dict.fromkeys([*_client_tags(tags), own]))
         return await _memory_call(dispatcher, "memory_add", {"text": text, "tags": merged, **extra})
 
     async def memory_search(
@@ -592,6 +620,7 @@ class BridgeService:
 
         ``limit`` is clamped to 1..50. Returns the memory layer's ``{status, results}``.
         """
+        self._check_open()
         dispatcher, extra = await self._memory_target(caller, agent)
         hits = min(max(int(limit), 1), _MAX_MEMORY_HITS)
         return await _memory_call(
@@ -644,7 +673,11 @@ class BridgeService:
         run first, so a doomed request is refused here, before anything is queued:
         422 ``bridge.skill_invalid`` or 403 ``bridge.skill_readonly``. Returns
         ``{status: "pending_approval", approval_id, name}``; the write happens only
-        when the operator approves the ``agent_skill_put`` row.
+        when the operator approves the ``agent_skill_put`` row. Another client's
+        pending put of this name is 409 ``bridge.skill_pending_elsewhere`` (unless
+        the push is identical to it, which is the same row); this client already
+        holding :data:`MAX_PENDING_SKILL_CHANGES` pending changes is 429
+        ``bridge.too_many_pending``.
         """
         self._check_open()
         queue = self._inbox()
@@ -665,20 +698,31 @@ class BridgeService:
             row = await asyncio.to_thread(self._skills.put, name, skill_md, pushed)
             return {key: row[key] for key in ("name", "source", "category", "files")}
 
+        client_id = f"bridge:{caller.name}"
         async with self._skill_gate:
-            # One pending row per skill, always the newest content: a row for other
+            # One pending put per skill, always the newest content: a row for other
             # content would write that content when approved, not what was just pushed.
-            for entry in queue.list_pending():
-                if (
-                    entry["tool"] == "agent_skill_put"
-                    and entry["args"].get("name") == name
-                    and entry["args"].get("sha256") != digest
-                ):
-                    await queue.withdraw(entry["id"], _SUPERSEDED)
+            # Only the pusher's own row is replaced; another client's is theirs to keep.
+            pending = queue.list_pending()
+            stale = [
+                entry
+                for entry in pending
+                if entry["tool"] == "agent_skill_put"
+                and entry["args"].get("name") == name
+                and entry["args"].get("sha256") != digest
+            ]
+            if any(entry["client_id"] != client_id for entry in stale):
+                raise BridgeError(
+                    "bridge.skill_pending_elsewhere",
+                    f"another client has a pending change to skill {name!r}",
+                )
+            self._check_pending_cap(pending, client_id, tool="agent_skill_put", name=name)
+            for entry in stale:
+                await queue.withdraw(entry["id"], _SUPERSEDED)
             approval_id = await queue.enqueue(
                 "agent_skill_put",
                 args,
-                client_id=f"bridge:{caller.name}",
+                client_id=client_id,
                 executor=execute,
                 target_args=("name",),
             )
@@ -688,7 +732,9 @@ class BridgeService:
         """Queue removing the drop-in skill ``name`` for the operator's approval.
 
         A shipped skill is 403 ``bridge.skill_readonly`` and an unknown one 404
-        ``bridge.skill_not_found``, both before anything is queued.
+        ``bridge.skill_not_found``, both before anything is queued; this client
+        already holding :data:`MAX_PENDING_SKILL_CHANGES` pending changes is 429
+        ``bridge.too_many_pending``.
         """
         self._check_open()
         queue = self._inbox()
@@ -700,15 +746,42 @@ class BridgeService:
             await asyncio.to_thread(self._skills.delete, name)
             return {"deleted": name}
 
+        client_id = f"bridge:{caller.name}"
         async with self._skill_gate:
+            self._check_pending_cap(
+                queue.list_pending(), client_id, tool="agent_skill_delete", name=name
+            )
             approval_id = await queue.enqueue(
                 "agent_skill_delete",
                 {"name": name},
-                client_id=f"bridge:{caller.name}",
+                client_id=client_id,
                 executor=execute,
                 target_args=("name",),
             )
         return {"status": "pending_approval", "approval_id": approval_id, "name": name}
+
+    @staticmethod
+    def _check_pending_cap(
+        pending: list[dict[str, Any]], client_id: str, *, tool: str, name: str
+    ) -> None:
+        """429 ``bridge.too_many_pending`` when ``client_id`` holds the cap of skill changes.
+
+        The client's pending row for this very ``(tool, name)`` does not count: a re-push
+        replaces it (put) or is the same row (delete), so it never adds a row.
+        """
+        held = sum(
+            1
+            for entry in pending
+            if entry["tool"] in _SKILL_TOOLS
+            and entry["client_id"] == client_id
+            and not (entry["tool"] == tool and entry["args"].get("name") == name)
+        )
+        if held >= MAX_PENDING_SKILL_CHANGES:
+            raise BridgeError(
+                "bridge.too_many_pending",
+                f"{MAX_PENDING_SKILL_CHANGES} skill changes are already waiting for approval; "
+                "wait for the operator to decide some before pushing more",
+            )
 
     def _inbox(self) -> ApprovalQueue:
         """The approval inbox that gates skill changes; without one nothing is queued."""
@@ -722,10 +795,23 @@ class BridgeService:
     # -- teach: capabilities -------------------------------------------------------------
 
     async def capabilities(self, agent: str) -> dict[str, Any]:
-        """What the Hermes profile ``agent`` can do now; secrets never appear (see ``capabilities_view``)."""
+        """What the Hermes profile ``agent`` can do now; secrets never appear (see ``capabilities_view``).
+
+        The profile's API key (the one the run tools use) authenticates the version
+        probe; a profile hal0 holds no key for reports no version.
+        """
+        self._check_open()
         profile = await self._known_profile(agent)
+        try:
+            api_key: str | None = self._gateway.key_for(profile)
+        except BridgeError:
+            api_key = None
         return await asyncio.to_thread(
-            capabilities_view, self._gateway.home, profile, fetch_json=self._detail_fetch
+            capabilities_view,
+            self._gateway.home,
+            profile,
+            fetch_json=self._detail_fetch,
+            api_key=api_key,
         )
 
     # -- process lifecycle -------------------------------------------------------------
@@ -836,6 +922,25 @@ def _skill_digest(skill_md: str, files: dict[str, str]) -> str:
         h.update(part.encode())
         h.update(b"\0\0")
     return h.hexdigest()[:16]
+
+
+def _client_tags(tags: list[str] | None) -> list[str]:
+    """The tags a bridge client sent, minus every reserved namespace (see the module docstring).
+
+    The memory layer reads a note's owner, visibility and project from ``agent:``,
+    ``visibility:`` and ``project:`` tags and trusts the writer's (#3136), and
+    ``source:bridge:`` is the provenance hal0 stamps. A tag is judged stripped and
+    lower-cased; one that survives is passed on as written. Anything that is not a
+    string is dropped.
+    """
+    kept: list[str] = []
+    for tag in tags or []:
+        if not isinstance(tag, str):
+            continue
+        if tag.strip().lower().startswith(_RESERVED_TAG_PREFIXES):
+            continue
+        kept.append(tag)
+    return kept
 
 
 async def _memory_call(dispatcher: Any, tool: str, args: dict[str, Any]) -> dict[str, Any]:

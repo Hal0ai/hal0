@@ -7,13 +7,16 @@ the rules are pinned here:
   ``MemoryDispatcher.scoped`` (private mode on, identity fixed): ``private:hermes``
   for the default profile, ``private:hermes__<profile>`` for ``hermes/<profile>``;
   ``agent="shared"`` uses the shared bucket with private mode forced *off*. Every
-  write is tagged ``source:bridge:<client>``. A memory refusal is raised, never
-  returned as a success payload.
+  write is tagged ``source:bridge:<client>``. A client's own ``agent:``,
+  ``visibility:``, ``project:`` and ``source:bridge:`` tags are dropped: the memory
+  layer trusts those tags for ownership and visibility (#3136). A memory refusal is
+  raised, never returned as a success payload.
 * **Skill writes and deletes never touch disk directly.** They are validated, then
   queued in the approval inbox as ``agent_skill_put`` / ``agent_skill_delete`` and
   executed only when the operator approves. An invalid or shipped-name request is
-  refused before anything is queued; a repeated push of one skill is one row that
-  always carries the newest content.
+  refused before anything is queued; a repeated push of one skill by one client is one
+  row that always carries the newest content, another client's pending put of that name
+  is 409, and a client holds at most eight pending skill changes (429).
 """
 
 from __future__ import annotations
@@ -37,6 +40,7 @@ from hal0.bridge.store import BridgeStore
 from hal0.config.schema import BridgeConfig
 from hal0.dispatcher.memory_dispatcher import MemoryDispatcher
 from hal0.mcp.approval_queue import ApprovalQueue
+from hal0.memory.hindsight_provider import HindsightProvider
 from tests.bridge._fake_hermes import FakeHermes
 
 
@@ -159,7 +163,7 @@ def _service(
         events=None,
         memory_dispatcher=dispatcher,
         skills=SkillLibrary(shipped_root=roots.shipped, dropin_root=roots.dropin),
-        detail_fetch=detail if detail is not None else (lambda _url: None),
+        detail_fetch=detail if detail is not None else (lambda _url, _headers: None),
     )
     return service, store
 
@@ -218,6 +222,98 @@ async def test_memory_add_cannot_forge_the_source_tag_of_another_client(
 ) -> None:
     await svc.memory_add(cc, agent="hermes", text="t", tags=["source:bridge:other"])
     assert fake_dispatcher.calls[-1].args["tags"] == ["source:bridge:cc"]
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        "agent:brain",
+        "Agent:brain",
+        "AGENT:BRAIN",
+        "  agent:brain",
+        "\tagent:brain\n",
+        "visibility:private",
+        "Visibility:Private",
+        "visibility:public",
+        "project:apollo",
+        " PROJECT:apollo",
+        "source:bridge:other",
+        "SOURCE:BRIDGE:other",
+    ],
+)
+async def test_memory_add_drops_the_tags_the_memory_layer_trusts(
+    svc: BridgeService, fake_dispatcher: FakeDispatcher, cc: Caller, hostile: str
+) -> None:
+    """The memory layer reads owner, visibility and project off a note's tags (#3136), so a
+    client cannot write any of them, whatever the case or padding."""
+    for agent in ("hermes/coder", "shared"):
+        await svc.memory_add(cc, agent=agent, text="t", tags=["keep-me", hostile])
+        assert fake_dispatcher.calls[-1].args["tags"] == ["keep-me", "source:bridge:cc"]
+
+
+async def test_memory_add_keeps_tags_that_only_look_reserved(
+    svc: BridgeService, fake_dispatcher: FakeDispatcher, cc: Caller
+) -> None:
+    lookalikes = [
+        "agents",
+        "agent",
+        "agent-notes",
+        "my-agent:x",
+        "visibility",
+        "projects",
+        "topic:x",
+    ]
+    await svc.memory_add(cc, agent="hermes", text="t", tags=lookalikes)
+    assert fake_dispatcher.calls[-1].args["tags"] == [*lookalikes, "source:bridge:cc"]
+
+
+class StubEngine:
+    """The Hindsight engine client: records every call and answers a retain with an operation id."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def __getattr__(self, name: str) -> Any:
+        async def call(**kw: Any) -> Any:
+            self.calls.append((name, kw))
+            return {"operation_id": "op1"}
+
+        return call
+
+    def retained(self) -> list[dict[str, Any]]:
+        return [kw for name, kw in self.calls if name == "retain"]
+
+
+async def test_a_client_cannot_write_into_another_agents_private_memory(
+    tmp_path: Path, home: Path, queue: ApprovalQueue, tmp_roots: SimpleNamespace, cc: Caller
+) -> None:
+    """Against the real unified-bank provider (the shipped default): private visibility is the
+    first ``agent:<id>`` tag plus ``visibility:private``, so client tags naming ``brain`` would
+    plant a note in brain's private memory. The stored ``agent:`` tag must be hal0's own."""
+    engine = StubEngine()
+    provider = HindsightProvider(client=engine, unified_bank=True)
+    service, _store = _service(tmp_path, home, queue, tmp_roots, MemoryDispatcher(provider))
+    try:
+        await service.memory_add(cc, agent="hermes/coder", text="a", tags=["agent:brain"])
+        await service.memory_add(
+            cc, agent="shared", text="b", tags=["agent:brain", "visibility:private"]
+        )
+        await service.memory_add(cc, agent="hermes/coder", text="c", tags=None)
+    finally:
+        await service.close()
+    private_hostile, shared_hostile, private_plain = engine.retained()
+
+    for stored in (private_hostile, private_plain):
+        assert [t for t in stored["tags"] if t.startswith("agent:")] == ["agent:hermes__coder"]
+        assert "visibility:private" in stored["tags"]
+        assert "source:bridge:cc" in stored["tags"]
+        assert HindsightProvider._is_visible_to({"tags": stored["tags"]}, "hermes__coder")
+        assert not HindsightProvider._is_visible_to({"tags": stored["tags"]}, "brain")
+    assert private_hostile["tags"] == private_plain["tags"]  # the hostile tag changed nothing
+
+    assert [t for t in shared_hostile["tags"] if t.startswith("agent:")] == ["agent:cc"]
+    assert "visibility:private" not in shared_hostile["tags"]  # the hostile tag is gone
+    assert "agent:brain" not in shared_hostile["tags"]
 
 
 @pytest.mark.parametrize("agent", ["pi", "claude", "hermes/", "hermes/nope", "hermes/../x", ""])
@@ -322,7 +418,9 @@ async def test_real_dispatcher_namespaces_survive_a_hostile_request_context(
     )
     service, _store = _service(tmp_path, home, queue, tmp_roots, hostile)
     try:
-        await service.memory_add(cc, agent="hermes/coder", text="private fact", tags=["x"])
+        await service.memory_add(
+            cc, agent="hermes/coder", text="private fact", tags=["x", "agent:brain"]
+        )
         await service.memory_add(cc, agent="shared", text="shared fact", tags=None)
         await service.memory_search(cc, agent="hermes/coder", query="fact")
         await service.memory_search(cc, agent="shared", query="fact")
@@ -334,6 +432,7 @@ async def test_real_dispatcher_namespaces_survive_a_hostile_request_context(
         and private_add["client_id"] == "hermes__coder"
     )
     assert private_add["source"] == "hermes__coder"
+    # the client's own plain tag passes; the one naming another agent does not
     assert set(private_add["tags"]) == {"x", "source:bridge:cc"}
     assert shared_add["dataset"] == "shared" and shared_add["client_id"] == "cc"
     private_search, shared_search = provider.searched
@@ -466,6 +565,152 @@ async def test_pushes_of_different_skills_do_not_collapse(
     assert sorted(e["args"]["name"] for e in queue.list_pending()) == ["forum-style", "other-skill"]
 
 
+def _other() -> Caller:
+    return Caller.from_principal(
+        AuthPrincipal(tier="bridge", name="other", scopes=frozenset({"agents"}))
+    )
+
+
+async def test_another_clients_edited_push_is_refused_not_withdrawn(
+    svc: BridgeService, queue: ApprovalQueue, cc: Caller, tmp_roots: SimpleNamespace
+) -> None:
+    """A client cannot retire another client's pending change by pushing its own version."""
+    mine = await svc.skill_put(
+        cc, name="forum-style", skill_md=skill_md(description="A."), files=None
+    )
+    with pytest.raises(BridgeError) as e:
+        await svc.skill_put(
+            _other(), name="forum-style", skill_md=skill_md(description="B."), files=None
+        )
+    assert e.value.code == "bridge.skill_pending_elsewhere" and e.value.status == 409
+    assert "another client" in e.value.message
+    [entry] = queue.list_pending()
+    assert entry["id"] == mine["approval_id"] and entry["client_id"] == "bridge:cc"
+    row = queue.get(mine["approval_id"])
+    assert row is not None and row.state == "pending" and row._executor is not None
+
+    # the same client still supersedes its own row
+    again = await svc.skill_put(
+        cc, name="forum-style", skill_md=skill_md(description="C."), files=None
+    )
+    [entry] = queue.list_pending()
+    assert entry["id"] == again["approval_id"] != mine["approval_id"]
+
+    # and once the row is decided the other client may push
+    await queue.approve(again["approval_id"])
+    ok = await svc.skill_put(
+        _other(), name="forum-style", skill_md=skill_md(description="B."), files=None
+    )
+    assert ok["status"] == "pending_approval"
+
+
+async def test_a_put_and_a_delete_of_one_name_can_both_be_pending(
+    svc: BridgeService, queue: ApprovalQueue, cc: Caller
+) -> None:
+    first = await svc.skill_put(cc, name="forum-style", skill_md=VALID_MD, files=None)
+    await queue.approve(first["approval_id"])
+    await svc.skill_put(cc, name="forum-style", skill_md=skill_md(description="Newer."), files=None)
+    await svc.skill_delete(cc, name="forum-style")
+    assert sorted(e["tool"] for e in queue.list_pending()) == [
+        "agent_skill_delete",
+        "agent_skill_put",
+    ]
+
+
+async def test_a_client_holds_at_most_eight_pending_skill_changes(
+    svc: BridgeService, queue: ApprovalQueue, cc: Caller, tmp_roots: SimpleNamespace
+) -> None:
+    (tmp_roots.dropin / "old-skill").mkdir()  # an installed drop-in skill a delete could target
+    (tmp_roots.dropin / "old-skill" / "SKILL.md").write_text(skill_md("old-skill"))
+    ids = [
+        (await svc.skill_put(cc, name=f"skill-{n}", skill_md=skill_md(f"skill-{n}"), files=None))[
+            "approval_id"
+        ]
+        for n in range(8)
+    ]
+    with pytest.raises(BridgeError) as e:
+        await svc.skill_put(cc, name="skill-8", skill_md=skill_md("skill-8"), files=None)
+    assert e.value.code == "bridge.too_many_pending" and e.value.status == 429
+    assert len(queue.list_pending()) == 8
+
+    # a delete counts against the same cap
+    with pytest.raises(BridgeError) as e:
+        await svc.skill_delete(cc, name="old-skill")
+    assert e.value.code == "bridge.too_many_pending"
+
+    # re-pushing a skill that already has a pending row adds no row, so it is not refused
+    same = await svc.skill_put(cc, name="skill-3", skill_md=skill_md("skill-3"), files=None)
+    assert same["approval_id"] == ids[3]
+    edited = await svc.skill_put(
+        cc, name="skill-3", skill_md=skill_md("skill-3", "Edited."), files=None
+    )
+    assert edited["approval_id"] not in ids and len(queue.list_pending()) == 8
+
+    # another client has its own allowance
+    assert (
+        await svc.skill_put(_other(), name="skill-9", skill_md=skill_md("skill-9"), files=None)
+    )["status"] == "pending_approval"
+
+    # deciding one frees a slot
+    await queue.deny(ids[0])
+    assert (await svc.skill_put(cc, name="skill-8", skill_md=skill_md("skill-8"), files=None))[
+        "status"
+    ] == "pending_approval"
+
+
+async def test_the_pending_cap_ignores_other_tools_and_resolved_rows(
+    svc: BridgeService, queue: ApprovalQueue, cc: Caller
+) -> None:
+    async def noop(_args: dict[str, Any]) -> None:
+        return None
+
+    for n in range(20):  # not skill changes, and not this client's
+        await queue.enqueue("slot_restart", {"name": f"s{n}"}, client_id="bridge:cc", executor=noop)
+        await queue.enqueue(
+            "agent_skill_put", {"name": f"theirs-{n}"}, client_id="bridge:other", executor=noop
+        )
+    for n in range(8):
+        out = await svc.skill_put(
+            cc, name=f"skill-{n}", skill_md=skill_md(f"skill-{n}"), files=None
+        )
+        await queue.approve(out["approval_id"])  # resolved: no longer counted
+    out = await svc.skill_put(cc, name="skill-9", skill_md=skill_md("skill-9"), files=None)
+    assert out["status"] == "pending_approval"
+
+
+async def test_resolved_skill_rows_hold_no_executor(
+    svc: BridgeService, queue: ApprovalQueue, cc: Caller
+) -> None:
+    """Each executor closes over the pushed content (up to ~4 MB); only a pending row may keep it."""
+    big = {f"f{n}.txt": "x" * 4096 for n in range(4)}
+    ids = [
+        (
+            await svc.skill_put(
+                cc, name="forum-style", skill_md=skill_md(description=f"v{n}"), files=big
+            )
+        )["approval_id"]
+        for n in range(6)
+    ]
+    held = {i: queue.get(i) for i in ids}
+    assert [i for i, e in held.items() if e is not None and e._executor is not None] == [ids[-1]]
+    assert all(
+        e is not None and e.state == "failed" and e._on_deny is None
+        for i, e in held.items()
+        if i != ids[-1]
+    )
+    assert len(queue.list_pending()) == 1
+
+    await queue.approve(ids[-1])
+    last = queue.get(ids[-1])
+    assert last is not None and last.state == "executed" and last._executor is None
+
+    gone = await svc.skill_delete(cc, name="forum-style")
+    await queue.deny(gone["approval_id"])
+    denied = queue.get(gone["approval_id"])
+    assert denied is not None and denied.state == "denied" and denied._executor is None
+    assert all(e._executor is None for e in queue._entries.values())
+
+
 async def test_skill_delete_is_gated_and_executes_on_approve(
     svc: BridgeService, queue: ApprovalQueue, cc: Caller, tmp_roots: SimpleNamespace
 ) -> None:
@@ -531,6 +776,12 @@ async def test_teach_writes_after_close_are_unavailable(
     with pytest.raises(BridgeError) as e:
         await svc.memory_add(cc, agent="hermes", text="t", tags=None)
     assert e.value.code == "bridge.unavailable"
+    with pytest.raises(BridgeError) as e:
+        await svc.memory_search(cc, agent="hermes", query="q")
+    assert e.value.code == "bridge.unavailable"
+    with pytest.raises(BridgeError) as e:
+        await svc.capabilities("hermes")
+    assert e.value.code == "bridge.unavailable"
 
 
 # -- capabilities ----------------------------------------------------------------------------
@@ -545,7 +796,7 @@ async def test_capabilities_reads_the_profiles_config(
         encoding="utf-8",
     )
     service, _store = _service(
-        tmp_path, home, queue, tmp_roots, None, detail=lambda _url: {"version": "0.22.4"}
+        tmp_path, home, queue, tmp_roots, None, detail=lambda _url, _headers: {"version": "0.22.4"}
     )
     try:
         view = await service.capabilities("hermes")
@@ -559,3 +810,51 @@ async def test_capabilities_reads_the_profiles_config(
     assert "nlQ_" not in str(view) and "Bearer" not in str(view)
     assert coder["agent"] == "hermes/coder" and coder["toolsets_enabled"] == ["hermes-cli"]
     assert e.value.code == "bridge.unknown_agent"
+
+
+async def test_capabilities_probe_sends_the_profile_key(
+    tmp_path: Path, home: Path, queue: ApprovalQueue, tmp_roots: SimpleNamespace
+) -> None:
+    """/health/detailed answers 401 without the key; the key hal0 holds for the profile goes
+    as a bearer, and appears nowhere in the view."""
+    sent: list[tuple[str, dict[str, str]]] = []
+
+    def fetch(url: str, headers: Any) -> Any:
+        sent.append((url, dict(headers)))
+        return {"version": "0.22.4"}
+
+    keys = FakeHermes().keys
+    service, _store = _service(tmp_path, home, queue, tmp_roots, None, detail=fetch)
+    try:
+        default = await service.capabilities("hermes")
+        coder = await service.capabilities("hermes/coder")
+    finally:
+        await service.close()
+    assert sent == [
+        ("http://127.0.0.1:8642/health/detailed", {"Authorization": f"Bearer {keys['default']}"}),
+        (
+            "http://127.0.0.1:8642/p/coder/health/detailed",
+            {"Authorization": f"Bearer {keys['coder']}"},
+        ),
+    ]
+    assert default["api_server_version"] == coder["api_server_version"] == "0.22.4"
+    assert keys["default"] not in str(default) and keys["coder"] not in str(coder)
+
+
+async def test_capabilities_without_a_profile_key_makes_no_request(
+    tmp_path: Path, home: Path, queue: ApprovalQueue, tmp_roots: SimpleNamespace
+) -> None:
+    (home / "profiles" / "unkeyed").mkdir()  # a profile hal0 holds no API key for
+    calls: list[str] = []
+
+    def fetch(url: str, _headers: Any) -> Any:
+        calls.append(url)
+        return {"version": "0.22.4"}
+
+    service, _store = _service(tmp_path, home, queue, tmp_roots, None, detail=fetch)
+    try:
+        view = await service.capabilities("hermes/unkeyed")
+    finally:
+        await service.close()
+    assert view["api_server_version"] is None and calls == []
+    assert view["profile"] == "unkeyed"  # the rest of the view is still served
