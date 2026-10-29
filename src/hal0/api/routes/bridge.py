@@ -449,7 +449,8 @@ async def run_event_frames(
     Each loop takes the run's change signal before reading, so a change that
     lands during the read still wakes the wait. The status is read before the
     events: the watcher writes a run's last event and its terminal status in one
-    transaction, so a terminal status means the events read next are complete.
+    transaction (:meth:`~hal0.bridge.store.BridgeStore.record`), so a terminal
+    status means the events read next are complete.
     A ``: keepalive`` comment goes out after :data:`STREAM_KEEPALIVE_S` of
     silence. The stream also ends when the client disconnects or the run is
     pruned mid-stream.

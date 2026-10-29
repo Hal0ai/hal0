@@ -22,7 +22,7 @@ import json
 import os
 import sqlite3
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
@@ -398,6 +398,12 @@ class BridgeStore:
         unknown column raises ``ValueError``; an unknown run raises
         ``bridge.run_not_found``.
         """
+        with connect(self.path) as conn, tx(conn):
+            return self._update_run(conn, run_id, fields_)
+
+    @staticmethod
+    def _update_run(conn: sqlite3.Connection, run_id: str, fields_: dict[str, Any]) -> RunRow:
+        """:meth:`update_run` inside the caller's transaction."""
         if "run_id" in fields_:
             raise ValueError("update_run cannot change run_id")
         unknown = sorted(set(fields_) - set(_RUN_COLUMNS))
@@ -405,15 +411,49 @@ class BridgeStore:
             raise ValueError(f"unknown runs column(s): {', '.join(unknown)}")
         fields_.setdefault("updated_at", time.time())
         assignments = ", ".join(f"{name} = ?" for name in fields_)
+        updated = conn.execute(
+            f"UPDATE runs SET {assignments} WHERE run_id = ?", (*fields_.values(), run_id)
+        )
+        if updated.rowcount == 0:
+            raise _run_not_found(run_id)
+        row = _select_run(conn, run_id)
+        assert row is not None  # the UPDATE just matched it, inside this transaction
+        return row
+
+    def record(
+        self,
+        run_id: str,
+        event: tuple[int, float, str, Any] | None,
+        decide: Callable[[RunRow], dict[str, Any]],
+        *,
+        skip_terminal: bool,
+    ) -> tuple[RunRow, RunRow, bool] | None:
+        """Append ``event`` (``(seq, ts, name, payload)``, optional) and update the run, atomically.
+
+        One transaction reads the run, writes the event, and applies the column
+        changes ``decide(run)`` picks, so a crash cannot keep the event without
+        the row change (a pending request lost while its ``approval.request``
+        event survives) or the other way round, and a reader of a terminal
+        status finds every event the run recorded (ADR-0043 decision 9).
+
+        Returns ``(before, after, changed)``, or None, with nothing written, when
+        the run is gone or, with ``skip_terminal``, already terminal.
+        """
         with connect(self.path) as conn, tx(conn):
-            updated = conn.execute(
-                f"UPDATE runs SET {assignments} WHERE run_id = ?", (*fields_.values(), run_id)
-            )
-            if updated.rowcount == 0:
-                raise _run_not_found(run_id)
-            row = _select_run(conn, run_id)
-            assert row is not None  # the UPDATE just matched it, inside this transaction
-            return row
+            before = _select_run(conn, run_id)
+            if before is None or (skip_terminal and before.status in TERMINAL_STATUSES):
+                return None
+            if event is not None:
+                seq, ts, name, payload = event
+                self._append_event(conn, run_id, seq, ts, name, payload)
+            changes = decide(before)
+            if changes:
+                after = self._update_run(conn, run_id, changes)
+            elif event is not None:
+                after = _select_run(conn, run_id) or before  # last_seq moved
+            else:
+                after = before
+            return before, after, bool(changes) or event is not None
 
     def append_event(self, run_id: str, seq: int, ts: float, event: str, payload: Any) -> None:
         """Write one event, raise ``last_seq``, and keep only the newest :data:`EVENT_CAP` rows.

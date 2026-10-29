@@ -8,6 +8,7 @@ by client, the event cap, and the cascade on prune.
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -164,6 +165,65 @@ def test_append_event_keeps_highest_last_seq_and_replaces_a_repeat(store: Bridge
         (3, "tool.started"),
         (5, "tool.completed"),
     ]
+
+
+def test_record_writes_the_event_and_the_row_in_one_transaction(store: BridgeStore) -> None:
+    store.insert_run(_row("run_1", client="a"))
+    result = store.record(
+        "run_1",
+        (4, 1.0, "approval.request", {"request_id": "q1"}),
+        lambda row: {"status": "waiting_for_approval", "pending_request_json": '{"x": 1}'},
+        skip_terminal=False,
+    )
+    assert result is not None
+    before, after, changed = result
+    assert before.status == "running" and after.status == "waiting_for_approval"
+    assert after.last_seq == 4 and changed is True
+    assert [e["event"] for e in store.events("run_1", since_seq=0, limit=10)] == [
+        "approval.request"
+    ]
+
+
+def test_record_keeps_nothing_when_the_row_change_fails(store: BridgeStore) -> None:
+    """A failure after the event is written rolls the event back with it (#7).
+
+    Two transactions lost a pending request on a crash between them: the
+    ``approval.request`` event was kept, the row never said it was pending.
+    """
+    store.insert_run(_row("run_1", client="a"))
+
+    def boom(row: RunRow) -> dict[str, Any]:
+        raise sqlite3.OperationalError("disk I/O error")
+
+    with pytest.raises(sqlite3.OperationalError):
+        store.record("run_1", (4, 1.0, "approval.request", {}), boom, skip_terminal=False)
+    assert store.events("run_1", since_seq=0, limit=10) == []
+    run = store.get_run("run_1")
+    assert run is not None and run.last_seq == 0
+    with pytest.raises(ValueError):  # an unknown column fails inside the transaction too
+        store.record("run_1", (5, 1.0, "x", {}), lambda row: {"bogus": 1}, skip_terminal=False)
+    assert store.events("run_1", since_seq=0, limit=10) == []
+
+
+def test_the_watcher_records_through_the_one_transaction(store: BridgeStore) -> None:
+    """The watcher's write path (``_record_sync``) is :meth:`BridgeStore.record`."""
+    from hal0.bridge.watcher import _record_sync
+
+    store.insert_run(_row("run_1", client="a"))
+
+    def boom(row: RunRow) -> dict[str, Any]:
+        raise sqlite3.OperationalError("disk I/O error")
+
+    with pytest.raises(sqlite3.OperationalError):
+        _record_sync(store, "run_1", (4, 1.0, "approval.request", {}), boom, skip_terminal=False)
+    assert store.events("run_1", since_seq=0, limit=10) == []
+
+
+def test_record_skips_a_terminal_or_missing_run(store: BridgeStore) -> None:
+    store.insert_run(_row("run_1", client="a", status="completed"))
+    assert store.record("run_1", (1, 0.0, "x", {}), lambda row: {}, skip_terminal=True) is None
+    assert store.record("run_nope", None, lambda row: {}, skip_terminal=False) is None
+    assert store.events("run_1", since_seq=0, limit=10) == []
 
 
 def test_append_event_for_an_unknown_run_is_run_not_found(store: BridgeStore) -> None:

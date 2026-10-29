@@ -233,18 +233,12 @@ def _record_sync(
 ) -> tuple[RunRow, RunRow, bool] | None:
     """Write an event (optional) and the row changes ``decide`` picks, in a worker thread.
 
-    Returns ``(before, after, changed)``, or None when the run is gone or, with
+    One transaction (:meth:`BridgeStore.record`): a crash between the event and
+    the row cannot lose a pending request the event announced. Returns
+    ``(before, after, changed)``, or None when the run is gone or, with
     ``skip_terminal``, already terminal (nothing is written then).
     """
-    before = store.get_run(run_id)
-    if before is None or (skip_terminal and before.status in TERMINAL_STATUSES):
-        return None
-    if event is not None:
-        seq, ts, name, payload = event
-        store.append_event(run_id, seq, ts, name, payload)
-    changes = decide(before)
-    after = store.update_run(run_id, **changes) if changes else before
-    return before, after, bool(changes) or event is not None
+    return store.record(run_id, event, decide, skip_terminal=skip_terminal)
 
 
 class RunWatcher:
