@@ -10,6 +10,7 @@ follow a symlink or touch a shipped skill.
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import threading
@@ -887,3 +888,174 @@ def test_a_shipped_category_directory_link_is_followed(lib: SkillLibrary, tmp_pa
     (shipped(lib) / "ops").symlink_to(category, target_is_directory=True)
     got = lib.get("deploy")
     assert (got["source"], got["category"]) == ("shipped", "ops")
+
+
+# ── frontmatter YAML can fail in more ways than YAMLError (CodeRabbit on #3138) ──
+
+
+_BAD_DATE = "---\nname: demo\ndescription: Does a thing.\ncreated: 2024-13-45\n---\n\nBody.\n"
+_TOO_DEEP = "---\nname: demo\ndescription: d\nx: " + "[" * 5000 + "]" * 5000 + "\n---\n"
+
+
+@pytest.mark.parametrize("text", [_BAD_DATE, _TOO_DEEP], ids=["bad-date", "too-deep"])
+def test_validate_refuses_frontmatter_yaml_cannot_load(lib: SkillLibrary, text: str) -> None:
+    """``yaml.safe_load`` raises ValueError and RecursionError too: a 422, never a 500."""
+    assert "frontmatter is not valid YAML" in invalid(lib, "demo", text)
+
+
+@pytest.mark.parametrize("text", [_BAD_DATE, _TOO_DEEP], ids=["bad-date", "too-deep"])
+def test_list_marks_a_skill_yaml_cannot_load_broken_and_lists_the_rest(
+    lib: SkillLibrary, text: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    make_skill(dropin(lib), "demo", text)
+    make_skill(dropin(lib), "fine", md("fine", "Fine."))
+    with caplog.at_level("WARNING", logger="hal0.bridge.skills"):
+        rows = {r["name"]: r for r in lib.list()}
+    assert set(rows) == {"demo", "fine"}
+    assert rows["demo"]["broken"] is True and rows["demo"]["description"] == ""
+    assert rows["fine"]["broken"] is False and rows["fine"]["description"] == "Fine."
+    assert any("bridge.skill_broken name=demo" in r.getMessage() for r in caplog.records)
+
+
+def test_a_skill_without_frontmatter_is_listed_broken(lib: SkillLibrary) -> None:
+    make_skill(dropin(lib), "broken", "no frontmatter at all\n")
+    [row] = lib.list()
+    assert row["broken"] is True
+
+
+# ── an interrupted swap is finished or undone, never reaped (Codex on #3138) ──
+
+
+HEX_A, HEX_B = "a" * 32, "b" * 32
+
+
+def half_swapped(lib: SkillLibrary, name: str, *, category: str = "", installed: bool) -> Path:
+    """The state a crash leaves between (``installed=False``) or after the two renames.
+
+    Builds what :func:`hal0.bridge.skills._swap` would have: the marker, the parked
+    old copy and, before the second rename, the stage. Returns the skill's directory.
+    """
+    parent = dropin(lib) / category if category else dropin(lib)
+    lib.put(name, md(name, "old copy"))
+    if category:
+        parent.mkdir(exist_ok=True)
+        os.replace(dropin(lib) / name, parent / name)
+    scratch(lib).mkdir(parents=True, exist_ok=True)
+    stage, old = f"stage-{name}-{HEX_A}", f"old-{name}-{HEX_B}"
+    make_skill(scratch(lib), stage, md(name, "new copy"))
+    (scratch(lib) / f"{stage}.json").write_text(
+        f'{{"name": "{name}", "category": "{category}", "stage": "{stage}", "old": "{old}"}}'
+    )
+    os.replace(parent / name, scratch(lib) / old)
+    if installed:
+        os.replace(scratch(lib) / stage, parent / name)
+    return parent / name
+
+
+@pytest.mark.parametrize("op", ["put", "delete"])
+def test_a_swap_interrupted_between_the_renames_gets_its_old_copy_back(
+    lib: SkillLibrary, op: str
+) -> None:
+    lib.put("other", md("other"))
+    skill = half_swapped(lib, "demo", installed=False)
+    assert not skill.exists() and hermes_sees(dropin(lib)) == ["other/SKILL.md"]  # half state
+    if op == "put":
+        lib.put("other", md("other", "again"))
+    else:
+        lib.delete("other")
+    assert "old copy" in (skill / "SKILL.md").read_text()
+    expected = ["demo/SKILL.md", "other/SKILL.md"] if op == "put" else ["demo/SKILL.md"]
+    assert hermes_sees(dropin(lib)) == expected
+    assert os.listdir(scratch(lib)) == []
+
+
+def test_a_swap_interrupted_after_the_renames_keeps_the_new_copy(lib: SkillLibrary) -> None:
+    skill = half_swapped(lib, "demo", installed=True)
+    lib.put("other", md("other"))
+    assert "new copy" in (skill / "SKILL.md").read_text()
+    assert os.listdir(scratch(lib)) == []
+
+
+def test_an_interrupted_swap_in_a_category_goes_back_into_it(lib: SkillLibrary) -> None:
+    skill = half_swapped(lib, "deploy", category="ops", installed=False)
+    lib.put("other", md("other"))
+    assert "old copy" in (skill / "SKILL.md").read_text()
+    assert not (dropin(lib) / "deploy").exists()
+    assert os.listdir(scratch(lib)) == []
+
+
+def test_a_put_of_the_same_name_replaces_the_restored_copy_in_place(lib: SkillLibrary) -> None:
+    skill = half_swapped(lib, "deploy", category="ops", installed=False)
+    lib.put("deploy", md("deploy", "third copy"))
+    assert "third copy" in (skill / "SKILL.md").read_text()
+    assert hermes_sees(dropin(lib)) == ["ops/deploy/SKILL.md"]  # one copy, where it was
+
+
+def test_a_parked_copy_without_a_marker_goes_back_when_its_skill_is_missing(
+    lib: SkillLibrary,
+) -> None:
+    lib.put("demo", md("demo", "old copy"))
+    scratch(lib).mkdir(parents=True, exist_ok=True)
+    os.replace(dropin(lib) / "demo", scratch(lib) / f"old-demo-{HEX_B}")
+    lib.put("other", md("other"))
+    assert "old copy" in (dropin(lib) / "demo" / "SKILL.md").read_text()
+    assert os.listdir(scratch(lib)) == []
+
+
+def test_a_parked_copy_of_a_skill_that_is_present_is_reaped(lib: SkillLibrary) -> None:
+    lib.put("demo", md("demo", "current"))
+    make_skill(scratch(lib), f"old-demo-{HEX_B}", md("demo", "stale"))
+    lib.put("other", md("other"))
+    assert "current" in (dropin(lib) / "demo" / "SKILL.md").read_text()
+    assert os.listdir(scratch(lib)) == []
+
+
+def test_a_crash_between_the_renames_is_recovered_by_the_next_write(
+    lib: SkillLibrary, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real path: the marker is written by ``_swap``, then the process dies."""
+    import hal0.bridge.skills as skills_mod
+
+    lib.put("demo", md("demo", "old copy"))
+    real = os.replace
+
+    def dying(src: Any, dst: Any, **kw: Any) -> None:
+        if str(src).startswith("stage-") and dst == "demo":
+            raise KeyboardInterrupt  # killed after the old copy was parked
+        if str(src).startswith("old-") and dst == "demo":
+            raise OSError("the put-back is lost with the process")
+        real(src, dst, **kw)
+
+    monkeypatch.setattr(skills_mod.os, "replace", dying)
+    with pytest.raises(KeyboardInterrupt):
+        lib.put("demo", md("demo", "new copy"))
+    monkeypatch.setattr(skills_mod.os, "replace", real)
+    assert not (dropin(lib) / "demo").exists()
+    assert any(n.endswith(".json") for n in os.listdir(scratch(lib)))  # the marker survived
+
+    lib.put("other", md("other"))
+    assert "old copy" in (dropin(lib) / "demo" / "SKILL.md").read_text()
+    assert os.listdir(scratch(lib)) == []
+
+
+def _marker(name: str, category: str, stage: str, old: str) -> str:
+    return json.dumps({"name": name, "category": category, "stage": stage, "old": old})
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "not json",
+        _marker("demo", "../x", f"stage-demo-{HEX_A}", f"old-demo-{HEX_B}"),
+        _marker("demo", "", "../../etc", f"old-demo-{HEX_B}"),
+        _marker("demo", "", f"stage-demo-{HEX_A}", f"old-other-{HEX_B}"),
+    ],
+)
+def test_a_marker_that_is_not_ours_is_reaped_without_acting_on_it(
+    lib: SkillLibrary, body: str, tmp_path: Path
+) -> None:
+    scratch(lib).mkdir(parents=True)
+    (scratch(lib) / f"stage-demo-{HEX_A}.json").write_text(body)
+    lib.put("other", md("other"))
+    assert os.listdir(scratch(lib)) == []
+    assert visible(lib) == ["other"]
