@@ -54,7 +54,7 @@ const state: { memory: any; host: any } = { memory: budget(), host: undefined }
 const mutation = () => ({ mutateAsync: vi.fn(), mutate: vi.fn(), isPending: false })
 
 vi.mock('@/api/hooks/useSlots', () => ({
-  useSlots: () => ({ data: SLOTS, isLoading: false }),
+  useSlots: () => ({ data: SLOTS, isPending: false, isError: false }),
   useSlotLoad: () => mutation(),
 }))
 vi.mock('@/api/hooks/useHardware', () => ({
@@ -75,6 +75,7 @@ vi.mock('@/api/hooks/useProxmoxSettings', () => ({
 }))
 vi.mock('@/api/hooks/useSystemStats', () => ({ useSystemStats: () => ({ data: undefined }) }))
 vi.mock('@/api/hooks/useComfyui', () => ({
+  useComfyui: () => ({ data: undefined }),
   useArbiter: () => ({ data: { arbiter: null, mode: null, skewMs: 0 } }),
   useComfyuiSwitchover: () => mutation(),
   useComfyuiPin: () => mutation(),

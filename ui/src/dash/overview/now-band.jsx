@@ -8,7 +8,7 @@ import { useSlots, useSlotLoad } from '@/api/hooks/useSlots'
 import { useHardware, hasGpuAccess } from '@/api/hooks/useHardware'
 import { useStatsHardware } from '@/api/hooks/useStatsHardware'
 import { useStatsPower } from '@/api/hooks/useStatsPower'
-import { useArbiter } from '@/api/hooks/useComfyui'
+import { useArbiter, useComfyui } from '@/api/hooks/useComfyui'
 import { useSystemStats } from '@/api/hooks/useSystemStats'
 import { gpuUtilReading } from '@/lib/gpuUtil'
 import { useMemoryMapModel } from '../memory-map'
@@ -26,6 +26,9 @@ const fmtGb = (gb) => (typeof gb === 'number' && Number.isFinite(gb) ? `${gb.toF
 const toast = (msg, kind = 'info') => window.__hal0Toast && window.__hal0Toast(msg, kind)
 
 const SEG_LABEL_MIN_PX = 90
+
+// The pip: green for chat (the base), ComfyUI blue for image, amber while switching, grey when unknown.
+const MODE_CLASS = { chat: '', image: ' img', switching: ' warn', unknown: ' unk' }
 
 // Element width via ResizeObserver: a segment carries its label only when it is wide enough.
 function useMeasuredWidth() {
@@ -84,13 +87,17 @@ export function OvNowBand({ onGo }) {
   const mm = useMemoryMapModel()
   const hw = useHardware()
   const slotsQuery = useSlots()
-  const slots = slotsQuery.data ?? []
+  // Until /api/slots answers (or after it fails) nothing about the slots is known: the facts line
+  // reads dashes and no slot-dependent action shows, never "0 of 0".
+  const slotsKnown = !slotsQuery.isPending && !slotsQuery.isError && Array.isArray(slotsQuery.data)
+  const slots = slotsKnown ? slotsQuery.data : []
   const stats = useStatsHardware()
   const power = useStatsPower()
   const sys = useSystemStats()
   const arbiterQ = useArbiter()
+  // Shared cache with the dock: a render queued from the ComfyUI editor shows only in /status.
+  const comfyQ = useComfyui({ active: false })
   const loadMut = useSlotLoad()
-  const actions = useStatusLineActions()
   const [barRef, barWidth] = useMeasuredWidth()
 
   const slotByName = useMemo(() => {
@@ -162,8 +169,9 @@ export function OvNowBand({ onGo }) {
   })
   const arbiter = arbiterQ.data?.arbiter ?? null
   const mode = modeLabel(arbiter)
+  const actions = useStatusLineActions({ resetKey: mode.kind })
   const acts = contextualActions(mode.kind, slots)
-  const ctx = actionFacts(arbiterQ.data, null)
+  const ctx = actionFacts(arbiterQ.data, comfyQ.data)
 
   const loadSlot = (name) => {
     Promise.resolve(loadMut.mutateAsync(name)).catch((e) => toast(`Could not load ${name}: ${e?.message || e}`, 'err'))
@@ -180,12 +188,18 @@ export function OvNowBand({ onGo }) {
   return (
     <section className="ov-card ov-now">
       <div className="ov-now-row">
-        <span className={'ov-now-mode' + (mode.kind === 'image' ? ' img' : '')}>
+        <span className={'ov-now-mode' + MODE_CLASS[mode.kind]}>
           <span className="ov-d" />{mode.text}
         </span>
         <span className="ov-now-facts">
-          <span><b>{facts.loaded}</b> of {facts.total} slots loaded</span>
-          {facts.serving > 0 ? (
+          {slotsKnown ? (
+            <span><b>{facts.loaded}</b> of {facts.total} slots loaded</span>
+          ) : (
+            <span><b>—</b> of <b>—</b> slots loaded</span>
+          )}
+          {!slotsKnown ? (
+            <span><b>—</b> serving</span>
+          ) : facts.serving > 0 ? (
             <span>
               <b className="hot">{facts.serving} serving · {facts.tps != null ? fmtInt(facts.tps) : '—'} tok/s</b>
               {' '}· {facts.inflight != null ? facts.inflight : '—'} in flight
