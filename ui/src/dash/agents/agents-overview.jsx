@@ -103,7 +103,7 @@ function _fmtK(n) {
 // not a stable marker of "this is the chat slot". Name literals are kept
 // only as a last-resort fallback for responses so sparse even group/type
 // inference couldn't run.
-function _primarySlot(slots) {
+export function primarySlot(slots) {
   if (!Array.isArray(slots)) return null;
   return (
     slots.find((s) => s.isDefault && (s.group === "chat" || s.type === "llm")) ||
@@ -312,7 +312,7 @@ function AgentsOverview() {
   const agents = (agentsQ.data && agentsQ.data.agents) || [];
   const hermesRec = agents.find((a) => a.name === "hermes" || a.id === "hermes") || null;
   const piRec = agents.find((a) => a.name === "pi" || a.id === "pi") || null;
-  const primary = _primarySlot(slotsQ.data);
+  const primary = primarySlot(slotsQ.data);
   const caps = capsQ.data || null;
   const urls = urlsQ.data || null;
   const piOv = piOvQ.data || null;
@@ -537,4 +537,5 @@ function AgentsOverview() {
   );
 }
 
-Object.assign(window, { AgentsOverview });
+// The Overview page's Agents panel reads the same slot (window.__hal0PrimarySlot).
+Object.assign(window, { AgentsOverview, __hal0PrimarySlot: primarySlot });
