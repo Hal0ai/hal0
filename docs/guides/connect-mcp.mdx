@@ -194,7 +194,8 @@ sub-apps, for any external client (an IDE, Hermes, another agent) to
 connect to directly:
 
 - **`/mcp/agents`** — `hal0-agents`, the agent bridge: delegate work to the
-  Hermes agent on the box. Reachable only with a bridge key.
+  Hermes agent on the box, and teach it memory and skills. Reachable only with
+  a bridge key; see [Delegate work to the Hermes agent](/docs/guides/delegate-to-agents).
 - **`/mcp/memory`** — long-term memory tools (search, add, recall, list,
   delete). Only mounted when the memory subsystem is initialised.
 - **`/mcp/admin`** — operate hal0: slots, models, capabilities, profiles,
