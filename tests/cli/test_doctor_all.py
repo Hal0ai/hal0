@@ -1441,8 +1441,8 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
 
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
-    # 7 verify rows + 29 extras.
-    assert keys[-30:] == [
+    # 7 verify rows + 30 extras.
+    assert keys[-31:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1464,6 +1464,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "hermes_mcp_auth",
         "hermes_profiles_mcp",
         "bridge-store",
+        "agent-bridge",
         "hermes_generation",
         "hermes_command_approvals",
         "hermes_delegation_slot",
