@@ -25,6 +25,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiDelete, apiGet, apiPatch, apiPost } from '../client'
 import { ENDPOINTS } from '../endpoints'
+import { retryUnlessAuthRequired } from '@/lib/queryClient'
 
 export type BridgeScope = 'agents' | 'memory' | 'admin'
 export type BridgeServer = 'hal0-agents' | 'hal0-memory' | 'hal0-admin'
@@ -151,13 +152,15 @@ export function bridgeRunsPollMs(items: readonly BridgeRun[] | undefined): numbe
  * `bridge.disabled` exactly when `[bridge].enabled` was off at boot and 200 for an admin session
  * otherwise, so it tells the card up front, before anyone tries to add a client. Only a restart
  * changes the answer, so a `bridge.disabled` is not retried or polled; any other failure (a
- * sign-in prompt, a blip) is not "disabled" and the card keeps offering its actions.
+ * sign-in prompt, a blip) is not "disabled" and the card keeps offering its actions. Every other
+ * error follows the app default (`retryUnlessAuthRequired`): one retry, but never for a 401
+ * `auth.required`.
  */
 export function useBridgeMe() {
   return useQuery({
     queryKey: ME_KEY,
     queryFn: () => apiGet<{ name: string; tier: string }>(ENDPOINTS.bridgeMe),
-    retry: (count, error) => !bridgeDisabled(error) && count < 1,
+    retry: (count, error) => !bridgeDisabled(error) && retryUnlessAuthRequired(count, error),
     staleTime: ME_STALE_MS,
   })
 }

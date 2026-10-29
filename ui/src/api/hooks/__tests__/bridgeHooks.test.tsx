@@ -15,6 +15,7 @@ import React, { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { BridgeRun } from '@/api/hooks/useBridge'
 
 ;(globalThis as unknown as { window: typeof globalThis }).window = globalThis
 ;(globalThis as unknown as { React: typeof React }).React = React
@@ -47,16 +48,16 @@ const CLIENT = {
   last_seen_at: null,
 }
 
-const run = (status: string, run_id = 'run_1') => ({
+const run = (status: BridgeRun['status'], run_id = 'run_1'): BridgeRun => ({
   run_id,
   agent: 'hermes',
-  profile: null,
+  profile: 'default',
   client: 'laptop',
   status,
   created_at: 1_790_000_000,
   updated_at: 1_790_000_005,
   input_preview: 'fix the build',
-  output: null,
+  output_preview: null,
   error: null,
   usage: null,
   pending: null,

@@ -39,7 +39,7 @@ const NOW_S = Math.floor(Date.now() / 1000)
 const CLIENTS = [
   {
     name: 'laptop',
-    note: 'devops box',
+    note: 'build box',
     scopes: ['agents', 'memory', 'admin'],
     created_at: NOW_S - 86400 * 2,
     created_by: 'api:admin',
@@ -193,7 +193,7 @@ describe('client list', () => {
 
     const laptop = q('[data-testid="bridge-client-laptop"]')!
     expect(laptop).not.toBeNull()
-    expect(laptop.textContent).toContain('devops box')
+    expect(laptop.textContent).toContain('build box')
     const chips = Array.from(laptop.querySelectorAll('[data-scope]')).map((c) => c.textContent)
     expect(chips).toEqual(['hal0-agents', 'hal0-memory', 'hal0-admin'])
     expect(laptop.querySelector('[data-testid="bridge-last-seen"]')!.textContent).toBe('seen 5m ago')
@@ -389,6 +389,17 @@ describe('Add modal', () => {
     document.body.innerHTML = ''
     routeGets([], new client.Hal0Error('boom', { code: 'system.internal', status: 500 }))
     await mount()
+    expect(text()).not.toContain('Agent bridge disabled')
+    expect((q('[data-testid="bridge-add"]') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('does not retry /api/bridge/me on a 401 auth.required, and leaves the actions on', async () => {
+    routeGets([], new client.Hal0Error('Admin sign-in required.', { code: 'auth.required', status: 401 }))
+    // retryDelay 0 so a retry, if the hook made one, lands inside mount()'s flush
+    await mount(new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0 } } }))
+
+    const meCalls = vi.mocked(client.apiGet).mock.calls.filter(([path]) => path === '/api/bridge/me')
+    expect(meCalls).toHaveLength(1)
     expect(text()).not.toContain('Agent bridge disabled')
     expect((q('[data-testid="bridge-add"]') as HTMLButtonElement).disabled).toBe(false)
   })

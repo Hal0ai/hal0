@@ -227,10 +227,9 @@ the bridge wrote. A tag of yours that starts with `agent:`, `visibility:`,
 `project:` or `source:bridge:` is dropped, because the memory layer reads an
 entry's owner from those. Pass `agent="shared"` to write the shared namespace
 instead.
-`agent_memory_search(agent, query, limit=10)` searches `hermes` and
-`hermes/<profile>` in that agent's own private memory plus the shared memory.
-`shared` searches the shared memory plus any private memory filed under your
-client's own name.
+`agent_memory_search(agent, query, limit=10)` searches the named agent's own
+private memory plus the shared memory. Pass `agent="shared"` to search the
+shared memory plus any private memory filed under your client's own name.
 
 ### Skills
 

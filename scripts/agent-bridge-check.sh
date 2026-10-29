@@ -254,16 +254,21 @@ if ! command -v curl >/dev/null 2>&1; then die_usage "curl is required"; fi
 if ! command -v python3 >/dev/null 2>&1; then die_usage "python3 is required"; fi
 
 add_out=""
+add_rc=0
 # Set before the call: an add that exits non-zero may still have minted the client (it can
 # fail after the server answered), and the exit trap must then revoke it.
 CLIENT_ADDED=1
-if ! add_out="$("$HAL0_BIN" bridge add "$NAME" --scope agents 2>&1)"; then
+# stdout and stderr are kept apart: the key panel and the claude mcp add lines are on stdout,
+# the CLI's errors are on stderr and carry no key, so a failed add can always say why.
+add_out="$("$HAL0_BIN" bridge add "$NAME" --scope agents 2>"$WORK/add.err")" || add_rc=$?
+if [ "$add_rc" -ne 0 ]; then
+  add_err="$(cat "$WORK/add.err")"
   # The panel wraps a key over lines that do not start with hal0bk_, so masking the prefix
-  # is not enough: output that holds a key at all is not echoed.
+  # is not enough: a stdout that holds a key at all is not echoed.
   case "$add_out" in
-    *hal0bk_*) add_out="(output withheld: it holds a bridge key)" ;;
+    *hal0bk_*) add_out="(withheld: it holds a bridge key)" ;;
   esac
-  abort "[1] hal0 bridge add $NAME failed: $add_out"
+  abort "[1] hal0 bridge add $NAME failed (exit $add_rc): ${add_err:-no error text on stderr}${add_out:+ | stdout: $add_out}"
 fi
 # The key is on the "Authorization: Bearer" header of every printed claude mcp add
 # line, which hal0 never wraps. The panel above them can wrap at a narrow terminal.

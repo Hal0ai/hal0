@@ -443,6 +443,20 @@ def test_a_failed_add_without_a_key_shows_why(box) -> None:
     assert _verbs(log) == ["bridge add", "bridge revoke"]
 
 
+def test_a_failed_add_with_a_key_on_stdout_still_shows_the_stderr_reason(box) -> None:
+    """The key is withheld with its stdout; the exit code and the stderr reason are not."""
+    _fake, _url, _stub, log = box
+    proc = _run(box, "--mode", "reduced", STUB_ADD="fail-echoing")
+    assert proc.returncode == 1
+    out = proc.stdout + proc.stderr
+    assert "(exit 1)" in proc.stderr
+    assert "error: could not write the onboarding lines" in proc.stderr
+    assert "withheld" in proc.stderr
+    assert _TOKEN not in out and "hal0bk_" not in out
+    assert _TOKEN[10:] not in out  # nor the wrapped second half of the key
+    assert _verbs(log) == ["bridge add", "bridge revoke"]
+
+
 def test_a_key_in_any_failure_line_is_masked(tmp_path: Path) -> None:
     """``fail`` and ``abort`` mask ``hal0bk_...`` in whatever they print."""
     script = _SCRIPT.read_text()
