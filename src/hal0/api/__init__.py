@@ -1423,7 +1423,10 @@ async def _boot_bridge_store(app: FastAPI, ctx: BootState) -> None:
         return store
 
     app.state.bridge_store = None
-    enabled = bool(ctx.hal0_config.bridge.enabled)
+    # The config phase always sets hal0_config (a default one if hal0.toml is
+    # unreadable); a boot that skipped it gets the shipped default, on.
+    config = ctx.hal0_config
+    enabled = True if config is None else bool(config.bridge.enabled)
     auth_module.set_bridge_enabled(enabled)
     try:
         if not enabled:
