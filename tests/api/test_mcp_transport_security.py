@@ -252,3 +252,44 @@ def test_operator_hosts_are_added_to_the_box_names(monkeypatch, box):
 def test_wildcard_still_disables_protection_with_box_names(monkeypatch, box):
     monkeypatch.setenv("HAL0_MCP_ALLOWED_HOSTS", "*")
     assert _mcp_transport_security().enable_dns_rebinding_protection is False
+
+
+def test_a_failure_collecting_box_names_keeps_the_configured_list(monkeypatch, box):
+    """The box's own names are a convenience: losing them must not fail every mount."""
+    import structlog
+
+    def broken() -> list[str]:
+        raise RuntimeError("psutil exploded")
+
+    monkeypatch.setattr("hal0.config.network.detect_lan_ips", broken)
+    monkeypatch.setenv("HAL0_MCP_ALLOWED_HOSTS", "192.0.2.142:8080")
+    with structlog.testing.capture_logs() as logs:
+        sec = _mcp_transport_security()
+    assert sec.enable_dns_rebinding_protection is True
+    # The localhost floor and the operator's additions survive; no box names were added.
+    assert {"127.0.0.1:*", "localhost:*", "192.0.2.142:8080"} <= set(sec.allowed_hosts)
+    assert "strix:8080" not in sec.allowed_hosts and "10.0.0.5:8080" not in sec.allowed_hosts
+    (entry,) = [e for e in logs if e["event"] == "hal0.mcp_mount.box_names_unavailable"]
+    assert entry["log_level"] == "warning" and "psutil exploded" in entry["error"]
+
+
+def test_a_failing_box_name_lookup_does_not_stop_the_mounts(monkeypatch, box):
+    """``mount_mcp_servers`` still builds every server when the names cannot be collected."""
+    from fastapi import FastAPI
+
+    from hal0.api import mcp_mount
+    from hal0.config.schema import BridgeConfig, Hal0Config
+    from hal0.mcp import admin
+    from hal0.mcp.approval_queue import ApprovalQueue
+
+    def broken() -> list[str]:
+        raise OSError("no network")
+
+    monkeypatch.setattr("hal0.config.network.detect_lan_ips", broken)
+    monkeypatch.setattr(admin, "install_admin_route_map", lambda _app: None)
+    app = FastAPI()
+    app.state.hal0_config = Hal0Config(bridge=BridgeConfig(enabled=True))
+    queue = ApprovalQueue()
+    app.state.approval_queue = queue
+    mcp_mount.mount_mcp_servers(app, approval_queue=queue)
+    assert {"hal0-admin", "hal0-agents"} <= set(app.state.mcp_servers)

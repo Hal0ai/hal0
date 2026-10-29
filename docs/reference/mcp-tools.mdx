@@ -337,7 +337,7 @@ A client sees only its own runs. A run another client owns is reported exactly l
 | `agent_run` | `agent`, `input` | the run view: `run_id`, `agent`, `profile`, `client`, `status`, `created_at`, `updated_at`, `input_preview`, `output`, `error`, `usage`, `pending`, `last_seq`. Optional: `session_key`, `instructions`, `reasoning_effort`, `idempotency_key`, and `wait_s` (default `0`: return at once; above `0`, wait up to that many seconds, at most 600, like `agent_run_wait`) |
 | `agent_run_wait` | `run_id` | the run view plus `events_tail` (the last 20 events) and `timed_out`. Blocks until the run ends, asks a question, or `timeout_s` passes (default 120, at most 600) |
 | `agent_run_status` | `run_id` | the run view |
-| `agent_run_events` | `run_id` | `{run_id, events, last_seq}`: stored events with `seq` above `since_seq` (default 0), oldest first, `limit` at most 500 (default 100). Call again with `since_seq=last_seq` to follow a run |
+| `agent_run_events` | `run_id` | `{run_id, events, last_seq}`: stored events with `seq` above `since_seq` (default 0), oldest first, `limit` at most 500 (default 100). Call again with `since_seq=last_seq` to follow a run, or with `since_seq=0` to replay it |
 | `agent_run_answer` | `run_id`, `request_id`, `answer` | the run view. Answers the clarification in the run's `pending` field; the run resumes |
 | `agent_run_steer` | `run_id`, `input` | the run view. Adds guidance to a run that is `running` |
 | `agent_run_stop` | `run_id` | the run view, `stopping` until the run ends |
@@ -345,16 +345,16 @@ A client sees only its own runs. A run another client owns is reported exactly l
 
 A run that needs an approval waits for the operator in the hal0 inbox; an approval does not end `agent_run_wait`. A clarification does: the client answers it with `agent_run_answer`.
 
-Failures are raised, not returned: the call comes back with `isError` set and a message that starts with a stable code. `auth.forbidden` (403) is a caller with neither a bridge key nor the admin key. The `bridge.*` codes are `bridge.disabled` (the bridge is off, or not running yet), `bridge.unknown_agent`, `bridge.agent_unkeyed`, `bridge.agent_unavailable`, `bridge.agent_refused`, `bridge.run_not_found`, `bridge.too_many_runs` (the client's `[bridge].max_concurrent_runs_per_client` is reached), `bridge.idempotency_conflict`, `bridge.run_not_running`, `bridge.no_pending_request`, `bridge.invalid_session_key` and `bridge.invalid_idempotency_key`.
+Failures are raised, not returned: the call comes back with `isError` set and a message that contains the stable code as `bridge.<code>: <message>` (FastMCP puts `Error executing tool <name>: ` in front). `auth.forbidden` (403) is a caller with neither a bridge key nor the admin key. The `bridge.*` codes are `bridge.disabled` (the bridge is off, or not running yet), `bridge.unknown_agent`, `bridge.agent_unkeyed`, `bridge.agent_unavailable`, `bridge.agent_refused`, `bridge.run_not_found`, `bridge.too_many_runs` (the client's `[bridge].max_concurrent_runs_per_client` is reached), `bridge.idempotency_conflict`, `bridge.run_not_running`, `bridge.no_pending_request`, `bridge.invalid_session_key` and `bridge.invalid_idempotency_key`. `bridge.internal` (500) is any other failure: its detail is logged on hal0-api and never sent.
 
-A run's `output` and `error` pass through the log redactor before a remote machine sees them (bearer tokens, `*_KEY=` values and similar are masked). A text over 16 KiB is cut at 16 KiB, and the result then carries `truncated: true` and `more`, for example `agent_run_events(run_id, since_seq=12)`, naming the call that reads the rest. `hal0 doctor` reports the bridge on the `agent-bridge` row.
+A run's `output`, `error`, `input_preview` and `pending` request pass through the log redactor before a remote machine sees them (bearer tokens, `*_KEY=` values and similar are masked). A text over 16 KiB is cut at 16 KiB, and the result then carries `truncated: true`. For `output` and `error`, `more` is `agent_run_events(run_id, since_seq=0)`: replay the run's events and join the `message.text` ones, which carry the text in small pieces (page a long run with `limit` and `last_seq`). `hal0 doctor` reports the bridge on the `agent-bridge` row.
 
 ## MCP server management REST API
 
 Router: `src/hal0/api/routes/mcp.py`, mounted at `/api/mcp`. This manages *installed
 3rd-party MCP server registrations* for the dashboard — distinct from the tool-calling
 protocol surface above. Tool invocation only happens over the actual MCP protocol at
-`/mcp/admin` and `/mcp/memory`; this REST surface cannot invoke a tool.
+`/mcp/admin`, `/mcp/memory` and `/mcp/agents`; this REST surface cannot invoke a tool.
 
 | Method | Path | Request | Response |
 |---|---|---|---|

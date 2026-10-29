@@ -1738,13 +1738,17 @@ def _agent_mount_present(base: str | None) -> bool | None:
     )
 
 
-def _live_bridge_runs(store: BridgeStore | None) -> tuple[int, int]:
-    """``(live runs, runs waiting on a pending request for over an hour)`` in the run ledger.
+def _live_bridge_runs(store: BridgeStore | None) -> tuple[int, int] | None:
+    """``(live runs, runs waiting on a pending request for over an hour)``, or None when unreadable.
 
     A run that waits on an approval or a clarification does not change its row
     while it waits, so ``updated_at`` is when the wait began. With no ``store``
     the default ``bridge.db`` is opened read-only (``mode=ro``): the row never
-    creates or migrates it. A missing or unreadable file counts as no runs.
+    creates or migrates it. A file that does not exist yet holds no runs. A file
+    that exists but cannot be read (it is ``0600``, so any user but ``hal0`` and
+    root; or a directory the user cannot enter; or not a SQLite database) is
+    None, never ``(0, 0)``: "unknown" must not read as "nothing is stuck", the
+    way the ``bridge-store`` row refuses to (ADR-0043).
     """
     from hal0.bridge.store import TERMINAL_STATUSES
 
@@ -1753,8 +1757,14 @@ def _live_bridge_runs(store: BridgeStore | None) -> tuple[int, int]:
         rows = [(r.pending_request_json, r.updated_at) for r in store.live_runs()]
     else:
         db = paths.bridge_db()
-        if not os.access(db, os.R_OK):
+        try:
+            os.stat(db)
+        except FileNotFoundError:
             return 0, 0
+        except OSError:  # PermissionError: the directory or the file is shut to this user
+            return None
+        if not os.access(db, os.R_OK):
+            return None
         marks = ", ".join("?" for _ in TERMINAL_STATUSES)
         try:
             conn = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True, timeout=2.0)
@@ -1767,7 +1777,7 @@ def _live_bridge_runs(store: BridgeStore | None) -> tuple[int, int]:
             finally:
                 conn.close()
         except sqlite3.Error:
-            return 0, 0
+            return None
     cutoff = time.time() - _BRIDGE_STUCK_RUN_S
     waiting = sum(1 for pending, updated_at in rows if pending is not None and updated_at < cutoff)
     return len(rows), waiting
@@ -1785,9 +1795,9 @@ def check_agent_bridge(
 
     ``enabled`` is ``[bridge].enabled`` unless a caller pins it. ``mounted`` is
     whether hal0-api serves ``hal0-agents`` (probed via ``GET /api/mcp/servers``
-    against ``base`` when not pinned), ``gateway`` the Hermes gateway to ask
-    (default: the box's own), and ``store`` the run ledger to count runs in
-    (default: ``bridge.db``, read-only).
+    against ``base`` when not pinned), ``gateway`` a gateway whose Hermes home
+    to read (default: the box's own, ``$HERMES_HOME``), and ``store`` the run
+    ledger to count runs in (default: ``bridge.db``, read-only).
 
     * ``[bridge].enabled`` off: PASS "disabled".
     * Enabled but ``hal0-agents`` is not mounted: FAIL "mount missing while
@@ -1796,8 +1806,15 @@ def check_agent_bridge(
       gateway's default ``/health`` not answering 200; or runs waiting on an
       approval or a clarification for over an hour: WARN. These add up in one
       row.
+    * ``bridge.db`` exists but this user cannot read it (it is ``0600``): WARN
+      "run ledger unreadable (run as hal0 or root)"; the stuck-run check cannot
+      run, and the live-run count is reported as unknown, not zero.
     * Otherwise PASS "<n> profiles keyed, <m> live runs": the served Hermes
-      profiles hal0 holds an API key for, and the runs in flight.
+      profiles that have a usable ``API_SERVER_KEY`` in Hermes's own ``.env``
+      (the ``hermes-api`` row's source, :func:`hal0.agents.hermes_api.api_key_for`),
+      and the runs in flight. ``hal0 doctor`` runs outside hal0-api, whose
+      ``HAL0_HERMES_API_KEY__*`` variables are not in its environment, so the
+      count never reads ``os.environ``.
 
     ADVISORY (never critical): the bridge is an optional surface and the rest of
     hal0 works without it.
@@ -1818,36 +1835,33 @@ def check_agent_bridge(
             "restart hal0-api (and check `hal0 doctor` for a failed MCP mount)",
         )
 
-    from hal0.agents.hermes_api import gateway_alive, served_profiles
-    from hal0.bridge.errors import BridgeError
-    from hal0.bridge.hermes_client import HermesGateway
+    from hal0.agents.hermes_api import api_key_for, gateway_alive, hermes_home, served_profiles
 
     problems: list[str] = []
     if mounted is None:
         problems.append("hal0-api is not answering, so the /mcp/agents mount is unchecked")
-    gw = gateway if gateway is not None else HermesGateway()
-    home = gw.home
+    # ``gateway`` only says which Hermes home to read (tests pin it); the keys come from
+    # that home's files, like ``check_hermes_api_upstreams``, never from ``os.environ``.
+    home = gateway.home if gateway is not None else hermes_home()
     alive = gateway_alive(home)
     if not alive:
         problems.append("Hermes gateway not answering")
     keyed = 0
     if alive:
-        for profile in served_profiles(home):
-            try:
-                gw.key_for(profile)
-            except BridgeError:
-                continue
-            keyed += 1
-    live, waiting = _live_bridge_runs(store)
-    if waiting:
-        problems.append(
-            f"{waiting} run{'' if waiting == 1 else 's'} waiting on an approval or answer "
-            "for over 1 h"
-        )
-    summary = (
-        f"{keyed} profile{'' if keyed == 1 else 's'} keyed, "
-        f"{live} live run{'' if live == 1 else 's'}"
-    )
+        keyed = sum(1 for profile in served_profiles(home) if api_key_for(profile, home))
+    ledger = _live_bridge_runs(store)
+    if ledger is None:
+        problems.append("run ledger unreadable (run as hal0 or root)")
+        live_runs = "live runs unknown"
+    else:
+        live, waiting = ledger
+        if waiting:
+            problems.append(
+                f"{waiting} run{'' if waiting == 1 else 's'} waiting on an approval or answer "
+                "for over 1 h"
+            )
+        live_runs = f"{live} live run{'' if live == 1 else 's'}"
+    summary = f"{keyed} profile{'' if keyed == 1 else 's'} keyed, {live_runs}"
     if problems:
         return Check(key, label, _WARN, "; ".join([*problems, summary]))
     return Check(key, label, _PASS, summary)

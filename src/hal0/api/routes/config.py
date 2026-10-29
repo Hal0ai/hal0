@@ -27,6 +27,7 @@ from hal0.api.middleware.error_codes import Hal0Error
 from hal0.comfyui.reach import editor_on_lan
 from hal0.config import network
 from hal0.config.loader import hal0_config_txn, load_hal0_config
+from hal0.config.network import api_port
 from hal0.config.schema import ModelsConfig
 from hal0.registry.discover import scan_and_register
 
@@ -49,11 +50,10 @@ def _validation_error_details(exc: ValidationError) -> dict[str, str]:
     return out
 
 
-# Default ports — these match what `hal0-api.service` and
-# `hal0-openwebui.service` bind to.  The API port can be overridden via
-# the HAL0_PORT env var that ``hal0-api.service`` sources from
-# /etc/hal0/api.env; OpenWebUI's port is fixed at 3001 in the unit.
-_DEFAULT_API_PORT = 8080
+# Default ports — these match what `hal0-openwebui.service` binds to.  The API
+# port is :func:`hal0.config.network.api_port` (the HAL0_PORT env var that
+# ``hal0-api.service`` sources from /etc/hal0/api.env); OpenWebUI's port is fixed
+# at 3001 in the unit.
 _OPENWEBUI_PORT = 3001
 # ComfyUI's own web UI is :8188 on the runtime host. The img slot's container
 # shares the host network; it binds the LAN under [network].comfyui_listen =
@@ -84,22 +84,6 @@ def _resolve_host(request: Request) -> str:
     if not hostname:
         return "127.0.0.1"
     return hostname
-
-
-def _api_port() -> int:
-    """Return the API port the unit is bound to.
-
-    ``HAL0_PORT`` is the same env var ``hal0-api.service`` consumes via
-    ``EnvironmentFile=/etc/hal0/api.env``, so reading it here keeps the
-    dashboard and the unit in lockstep without an extra config read.
-    """
-    raw = os.environ.get("HAL0_PORT", "").strip()
-    if not raw:
-        return _DEFAULT_API_PORT
-    try:
-        return int(raw)
-    except ValueError:
-        return _DEFAULT_API_PORT
 
 
 async def _openwebui_is_active() -> bool:
@@ -179,7 +163,7 @@ def api_base_url(request: Request, *, prefer_lan: bool = False) -> str:
             host = lan[0]
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
-    return f"http://{host}:{_api_port()}"
+    return f"http://{host}:{api_port()}"
 
 
 def _host_without_port(host: str) -> str:

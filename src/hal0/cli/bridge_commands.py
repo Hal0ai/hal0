@@ -52,7 +52,6 @@ console = Console()
 
 _CLIENTS = "/api/bridge/clients"
 _RUNS = "/api/bridge/runs"
-_RUNS = "/api/bridge/runs"
 
 _DISABLED_CODE = "bridge.disabled"
 _DISABLED_MESSAGE = (

@@ -29,6 +29,7 @@ EXPECTED = {
     "bridge.skill_readonly": 403,
     "bridge.store_unavailable": 503,
     "bridge.unavailable": 503,
+    "bridge.internal": 500,
 }
 
 

@@ -5,10 +5,16 @@ served, the Hermes gateway answers, and no run has sat on an approval or a
 question for over an hour. Hermes is simulated by pinning
 ``hermes_api.probe_status`` (the one HTTP probe the row makes); the run ledger
 is a real :class:`~hal0.bridge.store.BridgeStore`.
+
+``hal0 doctor`` runs outside hal0-api, so ``HAL0_HERMES_API_KEY__*`` is never in
+its environment: the row counts keyed profiles from the keys in Hermes's own
+``.env`` files (the way the ``hermes-api`` row does), and these tests write
+those files and hand the row an empty environment.
 """
 
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 
@@ -17,7 +23,21 @@ import pytest
 from hal0.bridge.hermes_client import HermesGateway
 from hal0.bridge.store import BridgeStore, RunRow
 from hal0.cli import doctor_all as da
-from tests.bridge._fake_hermes import FakeHermes
+
+#: A key Hermes accepts (``hermes_api.api_key_for`` wants at least 16 characters).
+KEY = "k" * 32
+
+
+def _hermes_home(root: Path, *, keyed: tuple[str, ...], unkeyed: tuple[str, ...] = ()) -> Path:
+    """A Hermes home with a ``.env`` per profile: ``keyed`` ones carry ``API_SERVER_KEY``."""
+    home = root / "hermes"
+    home.mkdir(parents=True, exist_ok=True)
+    for profile in (*keyed, *unkeyed):
+        target = home if profile == "default" else home / "profiles" / profile
+        target.mkdir(parents=True, exist_ok=True)
+        body = f"API_SERVER_KEY={KEY}\n" if profile in keyed else "OTHER=1\n"
+        (target / ".env").write_text(body, encoding="utf-8")
+    return home
 
 
 @pytest.fixture
@@ -29,8 +49,8 @@ def store(tmp_path: Path) -> BridgeStore:
 
 @pytest.fixture
 def gateway(tmp_path: Path) -> HermesGateway:
-    """Keys for ``default`` and ``coder`` (hal0 holds both)."""
-    return HermesGateway(home=tmp_path / "hermes", environ=FakeHermes().environ())
+    """Keys for ``default`` and ``coder`` in Hermes's files; no ``HAL0_HERMES_API_KEY__*`` at all."""
+    return HermesGateway(home=_hermes_home(tmp_path, keyed=("default", "coder")), environ={})
 
 
 def _hermes_answers(monkeypatch: pytest.MonkeyPatch, *, status: int = 200) -> list[str]:
@@ -128,10 +148,9 @@ def test_one_waiting_run_is_singular(
 
 
 def test_healthy_bridge_passes_with_counts(
-    monkeypatch: pytest.MonkeyPatch, store: BridgeStore, gateway: HermesGateway, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, store: BridgeStore, gateway: HermesGateway
 ) -> None:
     _hermes_answers(monkeypatch)
-    (tmp_path / "hermes" / "profiles" / "coder").mkdir(parents=True)
     _run(store, "run_a", status="running", pending=None, age_s=30)
     _run(store, "run_b", status="queued", pending=None, age_s=10)
     _run(store, "run_c", status="completed", pending=None, age_s=10)
@@ -144,12 +163,45 @@ def test_a_profile_without_a_key_is_not_counted(
     monkeypatch: pytest.MonkeyPatch, store: BridgeStore, tmp_path: Path
 ) -> None:
     _hermes_answers(monkeypatch)
-    (tmp_path / "hermes" / "profiles" / "coder").mkdir(parents=True)
-    keys = {k: v for k, v in FakeHermes().environ().items() if "CODER" not in k}
-    gw = HermesGateway(home=tmp_path / "hermes", environ=keys)
+    home = _hermes_home(tmp_path, keyed=("default",), unkeyed=("coder",))
+    gw = HermesGateway(home=home, environ={})
     c = da.check_agent_bridge(enabled=True, mounted=True, gateway=gw, store=store)
     assert c.status == "pass"
     assert c.detail == "1 profile keyed, 0 live runs"
+
+
+def test_keys_are_counted_from_hermes_files_with_an_empty_environment(
+    monkeypatch: pytest.MonkeyPatch, store: BridgeStore, tmp_path: Path
+) -> None:
+    """Regression: ``hal0 doctor`` never has ``HAL0_HERMES_API_KEY__*`` (only hal0-api sets it)."""
+    _hermes_answers(monkeypatch)
+    home = _hermes_home(tmp_path, keyed=("default", "coder", "writer"))
+    gw = HermesGateway(home=home, environ={})
+    c = da.check_agent_bridge(enabled=True, mounted=True, gateway=gw, store=store)
+    assert c.status == "pass"
+    assert c.detail == "3 profiles keyed, 0 live runs"
+
+
+def test_the_default_gateway_does_not_read_the_process_environment(
+    monkeypatch: pytest.MonkeyPatch, store: BridgeStore, tmp_path: Path
+) -> None:
+    """No ``gateway``: the row reads ``$HERMES_HOME``'s files, not ``os.environ``'s key variables."""
+    _hermes_answers(monkeypatch)
+    home = _hermes_home(tmp_path, keyed=("default", "coder"))
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    for name in [n for n in os.environ if n.startswith("HAL0_HERMES_API_KEY__")]:
+        monkeypatch.delenv(name)
+    assert da.check_agent_bridge(enabled=True, mounted=True, store=store).detail == (
+        "2 profiles keyed, 0 live runs"
+    )
+    # ...and a key that only the environment holds is not what the doctor reports.
+    bare = _hermes_home(tmp_path / "bare", keyed=(), unkeyed=("default", "coder"))
+    monkeypatch.setenv("HERMES_HOME", str(bare))
+    monkeypatch.setenv("HAL0_HERMES_API_KEY__DEFAULT", KEY)
+    monkeypatch.setenv("HAL0_HERMES_API_KEY__CODER", KEY)
+    assert da.check_agent_bridge(enabled=True, mounted=True, store=store).detail == (
+        "0 profiles keyed, 0 live runs"
+    )
 
 
 def test_unknown_mount_state_warns_but_still_reports(
@@ -197,6 +249,54 @@ def test_default_ledger_is_read_only_and_never_created(
     _run(opened, "run_a", status="running", pending='{"event": "approval.request"}', age_s=7200)
     _run(opened, "run_b", status="completed", pending=None, age_s=7200)
     assert da._live_bridge_runs(None) == (1, 1)
+
+
+def test_an_unreadable_ledger_is_unknown_not_zero(
+    monkeypatch: pytest.MonkeyPatch, gateway: HermesGateway, tmp_path: Path
+) -> None:
+    """``bridge.db`` is 0600: a doctor run as another user must say so, not report "0 live runs"."""
+    _hermes_answers(monkeypatch)
+    db = tmp_path / "var" / "bridge.db"
+    opened = BridgeStore(db)
+    opened.open()
+    _run(opened, "run_stuck", status="running", pending='{"event": "approval.request"}', age_s=7200)
+    monkeypatch.setattr(da.paths, "bridge_db", lambda: db)
+    real_access = os.access
+    monkeypatch.setattr(
+        da.os,
+        "access",
+        lambda p, mode, **kw: False if Path(p) == db else real_access(p, mode, **kw),
+    )
+    assert da._live_bridge_runs(None) is None
+    c = da.check_agent_bridge(enabled=True, mounted=True, gateway=gateway)
+    assert c.status == "warn"
+    assert "run ledger unreadable (run as hal0 or root)" in c.detail
+    assert "0 live runs" not in c.detail and "live runs unknown" in c.detail
+
+
+def test_a_ledger_that_is_not_sqlite_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    db = tmp_path / "bridge.db"
+    db.write_bytes(b"not a database" * 100)
+    monkeypatch.setattr(da.paths, "bridge_db", lambda: db)
+    assert da._live_bridge_runs(None) is None
+
+
+def test_a_ledger_in_a_directory_the_user_cannot_enter_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    db = tmp_path / "var" / "bridge.db"
+    monkeypatch.setattr(da.paths, "bridge_db", lambda: db)
+    real_stat = os.stat
+
+    def deny(path: object, *a: object, **kw: object) -> os.stat_result:
+        if Path(str(path)) == db:
+            raise PermissionError(13, "Permission denied")
+        return real_stat(path, *a, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(da.os, "stat", deny)
+    assert da._live_bridge_runs(None) is None
 
 
 def test_the_row_is_registered_after_the_store_row(monkeypatch: pytest.MonkeyPatch) -> None:

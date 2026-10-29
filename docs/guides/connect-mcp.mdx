@@ -252,9 +252,10 @@ agent's name, and can be revoked on its own.
 
 </Steps>
 
-A remote client's host has to be on hal0's MCP host allowlist; see
-[Widen the host and origin allowlists](#widen-the-host-and-origin-allowlists)
-if the first request answers `421 Invalid Host`.
+hal0's MCP host allowlist already holds this box's own LAN IP, hostname and
+`.local` name. If the first request answers `421 Invalid Host` (a client that
+reaches the box by a proxy domain, say), see
+[Widen the host and origin allowlists](#widen-the-host-and-origin-allowlists).
 
 What the key opens depends on its scopes. `agents` is always held.
 
@@ -376,13 +377,16 @@ dataset (or the unified bank, if `[memory].unified_bank` is on — see
 
 ### Widen the host and origin allowlists
 
-Each mounted server inherits FastMCP's **localhost-only**
-DNS-rebinding protection. A non-localhost client otherwise gets a bare
-**`421 Invalid Host`**. Two environment knobs on hal0-api widen the
-allowlist:
+Each mounted server applies DNS-rebinding protection. The allowlist starts
+with the names this box answers to: loopback, every detected LAN IP, the
+hostname, its `.local` name and the `[network].public_url` host, each bare and
+with the API port, so a client on another machine reaches the box by any of
+them with no setup. Any other `Host` gets a bare **`421 Invalid Host`**. The
+set is read when hal0-api starts; a changed LAN IP or hostname needs a restart.
+Two environment knobs on hal0-api add to it:
 
 - `HAL0_MCP_ALLOWED_HOSTS` — comma-separated `host` / `host:port` /
-  `host:*` values added to the localhost floor. The single value `*`
+  `host:*` values added to that default. The single value `*`
   disables DNS-rebinding protection entirely.
 - `HAL0_MCP_ALLOWED_ORIGINS` — comma-separated browser origins, derived
   automatically from each added host when unset.

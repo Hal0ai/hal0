@@ -32,6 +32,8 @@ BRIDGE_ERROR_STATUS: dict[str, int] = {
     "bridge.skill_readonly": 403,
     "bridge.store_unavailable": 503,
     "bridge.unavailable": 503,
+    # An unexpected failure behind a tool call: the detail is logged, never sent (ADR-0043).
+    "bridge.internal": 500,
 }
 
 

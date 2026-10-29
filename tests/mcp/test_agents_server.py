@@ -23,6 +23,7 @@ from mcp.server.fastmcp import FastMCP
 
 from hal0.api import mcp_mount
 from hal0.api.auth import ANON, AuthPrincipal
+from hal0.bridge.errors import BRIDGE_ERROR_STATUS, BridgeError
 from hal0.bridge.hermes_client import HermesGateway
 from hal0.bridge.service import BridgeService
 from hal0.bridge.store import BridgeStore
@@ -64,10 +65,15 @@ def _payload(out: Any) -> dict[str, Any]:
 
 
 class _Pong:
-    """A FakeHermes handler whose new runs stay ``running`` and replay a short plain reply."""
+    """A FakeHermes handler whose new runs stay ``running`` and replay a short plain reply.
 
-    def __init__(self, fake: FakeHermes) -> None:
+    ``chunks`` replaces the two-delta ``pong`` with one ``message.delta`` per chunk and a
+    ``run.completed`` whose output is all of them: a long answer for the 16 KiB cap tests.
+    """
+
+    def __init__(self, fake: FakeHermes, chunks: list[str] | None = None) -> None:
         self.fake = fake
+        self.chunks = chunks
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         resp = self.fake(request)
@@ -78,6 +84,26 @@ class _Pong:
                 run = self.fake.runs[rid]
                 run.statuses = ["running"]
                 run.polls = 0
+                if self.chunks is not None:
+                    n = len(self.chunks)
+                    run.frames = [
+                        (i, sse_frame(i, "message.delta", rid, delta=text))
+                        for i, text in enumerate(self.chunks, start=1)
+                    ]
+                    run.frames.append(
+                        (
+                            n + 1,
+                            sse_frame(
+                                n + 1,
+                                "run.completed",
+                                rid,
+                                completed=True,
+                                output="".join(self.chunks),
+                                usage={"total_tokens": 9},
+                            ),
+                        )
+                    )
+                    return resp
                 run.frames = [
                     (1, sse_frame(1, "message.delta", rid, delta="po")),
                     (2, sse_frame(2, "message.delta", rid, delta="ng")),
@@ -109,9 +135,20 @@ def store(tmp_path: Path) -> Iterator[BridgeStore]:
 
 
 @pytest.fixture
-async def svc(store: BridgeStore, fake: FakeHermes, tmp_path: Path) -> AsyncIterator[BridgeService]:
+def pong_chunks(request: pytest.FixtureRequest) -> list[str] | None:
+    """The reply the fake Hermes streams, when a test parametrizes it (indirectly)."""
+    chunks: list[str] | None = getattr(request, "param", None)
+    return chunks
+
+
+@pytest.fixture
+async def svc(
+    store: BridgeStore, fake: FakeHermes, tmp_path: Path, pong_chunks: list[str] | None
+) -> AsyncIterator[BridgeService]:
     gateway = HermesGateway(
-        home=tmp_path, environ=fake.environ(), transport=httpx.MockTransport(_Pong(fake))
+        home=tmp_path,
+        environ=fake.environ(),
+        transport=httpx.MockTransport(_Pong(fake, pong_chunks)),
     )
     service = BridgeService(
         store=store,
@@ -413,7 +450,47 @@ async def test_output_over_16_kib_is_cut_with_a_pointer_to_the_events() -> None:
     out = _payload(await server.call_tool("agent_run_status", {"run_id": "run_1"}))
     assert len(out["output"].encode()) <= 16 * 1024
     assert out["truncated"] is True
-    assert out["more"] == "agent_run_events(run_id, since_seq=12)"
+    # Always from 0: a finished run has nothing after its last_seq, so since_seq=last_seq
+    # would page nothing; the message.text events replayed from 0 carry the whole text.
+    assert out["more"] == "agent_run_events(run_id, since_seq=0)"
+
+
+#: 20 deltas of 2.1 KiB: each flushes as its own ``message.text`` event, 42 KB in all.
+LONG_REPLY = [f"{i:02d}" + "abcdefghij" * 209 for i in range(20)]
+
+
+@pytest.mark.parametrize("pong_chunks", [LONG_REPLY], indirect=True)
+async def test_following_the_more_pointer_returns_the_text(server: FastMCP) -> None:
+    full = "".join(LONG_REPLY)
+    done = _payload(
+        await server.call_tool("agent_run", {"agent": "hermes", "input": "talk", "wait_s": 5})
+    )
+    assert done["status"] == "completed" and done["truncated"] is True
+    assert (
+        len(done["output"].encode()) <= 16 * 1024 and done["output"] == full[: len(done["output"])]
+    )
+    assert done["more"] == "agent_run_events(run_id, since_seq=0)"
+
+    # What the old pointer (since_seq=<last_seq>) would have fetched: nothing.
+    after_last = _payload(
+        await server.call_tool(
+            "agent_run_events", {"run_id": done["run_id"], "since_seq": done["last_seq"]}
+        )
+    )
+    assert after_last["events"] == []
+
+    # What the pointer says: from 0, the text arrives as message.text events.
+    page = _payload(
+        await server.call_tool(
+            "agent_run_events", {"run_id": done["run_id"], "since_seq": 0, "limit": 500}
+        )
+    )
+    texts = [e["payload"]["text"] for e in page["events"] if e["event"] == "message.text"]
+    assert "".join(texts) == full  # each message.text event is far under the cap
+    # run.completed repeats the whole output, so that one event is cut and the page says so.
+    (completed,) = [e for e in page["events"] if e["event"] == "run.completed"]
+    assert len(completed["payload"]["output"].encode()) <= 16 * 1024
+    assert page["truncated"] is True
 
 
 async def test_output_under_the_cap_is_whole() -> None:
@@ -470,6 +547,98 @@ async def test_runs_list_scrubs_and_caps_each_run() -> None:
     listed = _payload(await server.call_tool("agent_runs_list", {}))
     (run,) = listed["runs"]
     assert run["truncated"] is True and len(run["output"].encode()) <= 16 * 1024
+
+
+async def test_pending_and_input_preview_are_scrubbed_like_output() -> None:
+    """A clarification's question and the echoed task text can carry a secret too."""
+    view = {
+        "run_id": "run_1",
+        "status": "waiting_for_clarification",
+        "input_preview": "deploy with Authorization: Bearer hal0bk_cc.s3cr3tvalue0123456789",
+        "pending": {
+            "event": "clarify.request",
+            "request_id": "r1",
+            "question": "Which token? HF_TOKEN=hf_abcdefghijklmnopqrstuvwxyz0123456789",
+            "choices": ["a", "b"],
+        },
+        "last_seq": 3,
+    }
+    out = _payload(
+        await _server(_Recorder(view), CC).call_tool("agent_run_status", {"run_id": "run_1"})
+    )
+    blob = json.dumps(out)
+    assert "s3cr3tvalue0123456789" not in blob
+    assert "hf_abcdefghijklmnopqrstuvwxyz0123456789" not in blob
+    assert out["pending"]["request_id"] == "r1" and out["pending"]["choices"] == ["a", "b"]
+    assert out["input_preview"].startswith("deploy with Authorization: Bearer")
+    assert "truncated" not in out
+
+
+# -- an unexpected failure is not shown to the remote client -------------------------------
+
+
+class _Exploding(_Recorder):
+    """A service whose every call fails with something that is not a BridgeError."""
+
+    def __getattr__(self, name: str) -> Callable[..., Any]:
+        async def call(*_a: Any, **_kw: Any) -> Any:
+            raise RuntimeError("sqlite3.OperationalError at /var/lib/hal0/bridge.db: disk I/O")
+
+        return call
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("agents_list", {}),
+        ("agent_run", {"agent": "hermes", "input": "x"}),
+        ("agent_run", {"agent": "hermes", "input": "x", "wait_s": 3}),
+        ("agent_run_wait", {"run_id": "r"}),
+        ("agent_run_status", {"run_id": "r"}),
+        ("agent_run_events", {"run_id": "r"}),
+        ("agent_run_answer", {"run_id": "r", "request_id": "q", "answer": "a"}),
+        ("agent_run_steer", {"run_id": "r", "input": "x"}),
+        ("agent_run_stop", {"run_id": "r"}),
+        ("agent_runs_list", {}),
+    ],
+)
+async def test_an_unexpected_exception_becomes_bridge_internal(
+    tool: str, args: dict[str, Any]
+) -> None:
+    """Every tool: detail is logged on hal0-api, the client gets a fixed ``bridge.internal``."""
+    import mcp.types as mt
+    import structlog
+
+    server = _server(_Exploding(), CC)
+    handler = server._mcp_server.request_handlers[mt.CallToolRequest]
+    request = mt.CallToolRequest(
+        method="tools/call", params=mt.CallToolRequestParams(name=tool, arguments=args)
+    )
+    with structlog.testing.capture_logs() as logs:
+        result = await handler(request)
+    assert result.root.isError is True
+    text = result.root.content[0].text
+    assert "bridge.internal: internal error; see hal0-api logs" in text
+    assert "sqlite3" not in text and "/var/lib/hal0" not in text and "RuntimeError" not in text
+    (entry,) = [e for e in logs if e["event"] == "hal0.mcp.agents.internal_error"]
+    assert entry["log_level"] == "error" and entry["tool"] == tool and entry["client"] == "cc"
+    assert "disk I/O" in entry["error"] and entry.get("exc_info") is True
+
+
+async def test_a_bridge_error_passes_through_unchanged() -> None:
+    class _Refusing(_Recorder):
+        async def get_run(self, *_a: Any, **_kw: Any) -> Any:
+            raise BridgeError("bridge.run_not_found", "no run 'r' for client 'cc'")
+
+    with pytest.raises(Exception) as e:
+        await _server(_Refusing(), CC).call_tool("agent_run_status", {"run_id": "r"})
+    assert "bridge.run_not_found: no run 'r' for client 'cc'" in str(e.value)
+    assert "bridge.internal" not in str(e.value)
+
+
+def test_internal_has_a_500_in_the_status_table() -> None:
+    assert BRIDGE_ERROR_STATUS["bridge.internal"] == 500
+    assert BridgeError("bridge.internal", "internal error; see hal0-api logs").status == 500
 
 
 # -- the mount ---------------------------------------------------------------------------

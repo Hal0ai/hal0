@@ -115,11 +115,30 @@ def _box_hosts_and_origins() -> tuple[list[str], list[str]]:
     hostname, its mDNS ``.local`` name, and the ``[network].public_url`` host.
     Allowing the box's own names loosens nothing: DNS rebinding sends a name the
     attacker controls, which is not among them.
+
+    The names are a convenience on top of the configured list, so an unexpected
+    failure collecting them (a broken network stack, a bad config) is logged and
+    reads as "no names": the mount then keeps the localhost floor and
+    ``HAL0_MCP_ALLOWED_HOSTS`` instead of failing every ``/mcp/*`` mount.
     """
+    try:
+        return _collect_box_hosts_and_origins()
+    except Exception as exc:
+        log.warning(
+            "hal0.mcp_mount.box_names_unavailable",
+            error=f"{type(exc).__name__}: {exc}",
+            note="the MCP allowlist keeps the localhost floor and HAL0_MCP_ALLOWED_HOSTS only",
+            exc_info=True,
+        )
+        return [], []
+
+
+def _collect_box_hosts_and_origins() -> tuple[list[str], list[str]]:
+    """The unguarded collection behind :func:`_box_hosts_and_origins`."""
     from hal0.config import network
     from hal0.services.mdns import mdns_hostname
 
-    port = network._api_port()
+    port = network.api_port()
     names = [
         "localhost",
         "127.0.0.1",

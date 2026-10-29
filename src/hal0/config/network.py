@@ -76,7 +76,12 @@ def hostname() -> str:
     return raw.removesuffix(".local").strip(".") or "hal0"
 
 
-def _api_port() -> int:
+def api_port() -> int:
+    """The port hal0-api listens on: ``HAL0_PORT`` (what ``hal0-api.service`` reads), else 8080.
+
+    A value that is not an integer falls back to the default, like the unit's own
+    reading of it.
+    """
     raw = os.environ.get("HAL0_PORT", "").strip()
     if not raw:
         return _DEFAULT_API_PORT
@@ -129,7 +134,7 @@ def derive_allowed_origins(port: int | None = None) -> tuple[str, ...]:
     other than loopback, so the allowlist's reach matches how far the
     service is actually reachable rather than over- or under-shooting it.
     """
-    p = port if port is not None else _api_port()
+    p = port if port is not None else api_port()
     host = hostname()
     origins = {
         f"http://localhost:{p}",
@@ -146,6 +151,7 @@ def derive_allowed_origins(port: int | None = None) -> tuple[str, ...]:
 
 
 __all__ = [
+    "api_port",
     "bind_host",
     "derive_allowed_origins",
     "detect_lan_ips",

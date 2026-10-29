@@ -34,16 +34,29 @@ Failures
 --------
 
 A :class:`~hal0.bridge.errors.BridgeError` is raised, never returned: FastMCP
-catches it and marks the result ``isError``, with the ``bridge.<reason>`` code
-leading the message. A client must not mistake a refusal for a success payload.
+catches it and marks the result ``isError``. The message is FastMCP's
+``Error executing tool <name>: `` followed by the error, so it contains the
+stable code as ``bridge.<reason>: <message>``. A client must not mistake a
+refusal for a success payload.
+
+Any other exception a tool body raises is a bug or an outage, and its text can
+name paths, SQL or addresses a remote machine has no business seeing. It is
+logged on hal0-api with its traceback (``hal0.mcp.agents.internal_error``) and
+the client gets ``bridge.internal: internal error; see hal0-api logs``.
 
 Output
 ------
 
-A run's ``output`` and ``error`` are agent text, so they pass through the log
-redactor (:func:`hal0.redaction.redact_log_line`) before a remote machine sees
-them, and a string over 16 KiB is cut at that size with ``truncated: true`` and
-``more`` naming the call that pages the rest (``agent_run_events``).
+Every agent-written text a result carries (``output``, ``error``,
+``input_preview``, the ``pending`` request, ``events_tail`` and event payloads)
+passes through the log redactor (:func:`hal0.redaction.redact_log_line`) before
+a remote machine sees it, and a string over 16 KiB is cut at that size with
+``truncated: true``. When the cut text can be read from the run's events,
+``more`` names the call that reads it: ``agent_run_events(run_id, since_seq=0)``.
+It is ``since_seq=0``, not the run's last sequence: events are returned after
+``since_seq``, so a finished run has none after its last one, while a replay
+from 0 carries the text in ``message.text`` events (each far under the cap;
+page a long run with ``limit`` and ``last_seq``).
 
 Like :mod:`hal0.mcp.memory`, the tool definitions are built once per process
 and shared by every server; the bridge service is read off the server's
@@ -53,10 +66,12 @@ and shared by every server; the bridge service is read off the server's
 from __future__ import annotations
 
 import functools
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
+import structlog
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.fastmcp.tools import Tool
 from mcp.types import ToolAnnotations
 
@@ -68,8 +83,15 @@ from hal0.redaction import redact_log_line
 
 __all__ = ["MAX_TEXT_BYTES", "build_server"]
 
+log = structlog.get_logger(__name__)
+
 #: The most bytes of one run text (``output``, ``error``, an event's text) a tool returns.
 MAX_TEXT_BYTES = 16 * 1024
+
+#: The call a ``more`` pointer names. From 0, because events come back *after* ``since_seq``:
+#: a finished run has none after its last sequence, but its ``message.text`` events carry
+#: the whole text from 0.
+_MORE = "agent_run_events(run_id, since_seq=0)"
 
 
 def build_server(
@@ -149,24 +171,77 @@ def _clean_tree(value: Any) -> tuple[Any, bool]:
 def _view(view: dict[str, Any]) -> dict[str, Any]:
     """A RunView (or a wait's view) made safe to return: secrets masked, texts capped.
 
-    ``events_tail`` of a wait is cleaned like an events page. When any text was
-    cut, ``truncated`` is true and ``more`` names the call that reads the rest.
+    Every agent-written text goes through :func:`_clean`: ``output`` and ``error``,
+    ``input_preview``, the ``pending`` request (a clarification's question or an
+    approval's command), and ``events_tail`` of a wait (cleaned like an events
+    page). When any text was cut, ``truncated`` is true; when the cut text is one
+    the run's events carry (``output``, ``error``, ``events_tail``), ``more`` names
+    the call that reads it (see :data:`_MORE`).
     """
     out = dict(view)
     truncated = False
+    pageable = False
     for key in ("output", "error"):
         text = out.get(key)
         if isinstance(text, str):
             out[key], cut = _clean(text)
-            truncated = truncated or cut
+            pageable = pageable or cut
     tail = out.get("events_tail")
     if isinstance(tail, list):
         out["events_tail"], cut = _clean_tree(tail)
+        pageable = pageable or cut
+    preview = out.get("input_preview")
+    if isinstance(preview, str):
+        out["input_preview"], cut = _clean(preview)
         truncated = truncated or cut
-    if truncated:
+    pending = out.get("pending")
+    if pending is not None:
+        out["pending"], cut = _clean_tree(pending)
+        truncated = truncated or cut
+    if pageable or truncated:
         out["truncated"] = True
-        out["more"] = f"agent_run_events(run_id, since_seq={int(out.get('last_seq') or 0)})"
+    if pageable:
+        out["more"] = _MORE
     return out
+
+
+def _who(ctx: Any) -> str:
+    """The calling client's name for a log line; never raises."""
+    try:
+        return Caller.from_principal(bound_server(ctx).hal0_hooks["principal_resolver"]()).name
+    except Exception:  # an anonymous caller, an unbound call: log "unknown", not a second failure
+        return "unknown"
+
+
+def _guarded[**P](
+    fn: Callable[P, Awaitable[dict[str, Any]]],
+) -> Callable[P, Awaitable[dict[str, Any]]]:
+    """Run a tool body so only a :class:`BridgeError` (or FastMCP's own ``ToolError``) escapes.
+
+    Anything else is logged with its traceback on hal0-api and replaced by
+    ``bridge.internal``: the exception text may carry paths, SQL or addresses
+    that a remote client has no business seeing (ADR-0043). The signature is
+    preserved (``functools.wraps``), so FastMCP builds the same input schema and
+    still finds the ``ctx`` parameter.
+    """
+
+    @functools.wraps(fn)
+    async def guarded(*args: P.args, **kwargs: P.kwargs) -> dict[str, Any]:
+        try:
+            return await fn(*args, **kwargs)
+        except (BridgeError, ToolError):
+            raise
+        except Exception as exc:
+            log.error(
+                "hal0.mcp.agents.internal_error",
+                tool=fn.__name__,
+                client=_who(kwargs.get("ctx")),
+                error=redact_log_line(f"{type(exc).__name__}: {exc}"),
+                exc_info=True,
+            )
+            raise BridgeError("bridge.internal", "internal error; see hal0-api logs") from None
+
+    return guarded
 
 
 # -- tool definitions ----------------------------------------------------------------------
@@ -219,6 +294,7 @@ def _agents_tool_definitions() -> dict[str, Tool]:
         ),
         annotations=_ANNOTATIONS["agents_list"],
     )
+    @_guarded
     async def agents_list(ctx: ToolContext | None = None) -> dict[str, Any]:
         _, service = _context(ctx)
         return await service.list_agents()
@@ -236,6 +312,7 @@ def _agents_tool_definitions() -> dict[str, Tool]:
         ),
         annotations=_ANNOTATIONS["agent_run"],
     )
+    @_guarded
     async def agent_run(
         agent: str,
         input: str,
@@ -269,6 +346,7 @@ def _agents_tool_definitions() -> dict[str, Tool]:
         ),
         annotations=_ANNOTATIONS["agent_run_wait"],
     )
+    @_guarded
     async def agent_run_wait(
         run_id: str, timeout_s: int = 120, ctx: ToolContext | None = None
     ) -> dict[str, Any]:
@@ -280,10 +358,12 @@ def _agents_tool_definitions() -> dict[str, Tool]:
         description=(
             "A run's current view: status, output when it has finished, error, usage, and "
             "pending (the approval or clarification it waits on, if any). Output over "
-            "16 KiB is cut; page the rest with agent_run_events."
+            "16 KiB is cut and the view then carries truncated: true; read the whole text "
+            "from its message.text events with agent_run_events(run_id, since_seq=0)."
         ),
         annotations=_ANNOTATIONS["agent_run_status"],
     )
+    @_guarded
     async def agent_run_status(run_id: str, ctx: ToolContext | None = None) -> dict[str, Any]:
         caller, service = _context(ctx)
         return _view(await service.get_run(caller, run_id))
@@ -293,11 +373,13 @@ def _agents_tool_definitions() -> dict[str, Tool]:
         description=(
             "The run's stored events with seq above since_seq, oldest first (limit at most "
             "500). Returns {run_id, events, last_seq}; call again with since_seq=last_seq "
-            "to follow a run. Streamed text arrives as message.text events; an event text "
-            "over 16 KiB is cut and the page then carries truncated: true."
+            "to follow a run, or since_seq=0 to replay it from the start. Streamed text "
+            "arrives as message.text events; an event text over 16 KiB is cut and the "
+            "page then carries truncated: true."
         ),
         annotations=_ANNOTATIONS["agent_run_events"],
     )
+    @_guarded
     async def agent_run_events(
         run_id: str, since_seq: int = 0, limit: int = 100, ctx: ToolContext | None = None
     ) -> dict[str, Any]:
@@ -319,6 +401,7 @@ def _agents_tool_definitions() -> dict[str, Tool]:
         ),
         annotations=_ANNOTATIONS["agent_run_answer"],
     )
+    @_guarded
     async def agent_run_answer(
         run_id: str, request_id: str, answer: str, ctx: ToolContext | None = None
     ) -> dict[str, Any]:
@@ -333,6 +416,7 @@ def _agents_tool_definitions() -> dict[str, Tool]:
         ),
         annotations=_ANNOTATIONS["agent_run_steer"],
     )
+    @_guarded
     async def agent_run_steer(
         run_id: str, input: str, ctx: ToolContext | None = None
     ) -> dict[str, Any]:
@@ -347,6 +431,7 @@ def _agents_tool_definitions() -> dict[str, Tool]:
         ),
         annotations=_ANNOTATIONS["agent_run_stop"],
     )
+    @_guarded
     async def agent_run_stop(run_id: str, ctx: ToolContext | None = None) -> dict[str, Any]:
         caller, service = _context(ctx)
         return _view(await service.stop_run(caller, run_id))
@@ -360,6 +445,7 @@ def _agents_tool_definitions() -> dict[str, Tool]:
         ),
         annotations=_ANNOTATIONS["agent_runs_list"],
     )
+    @_guarded
     async def agent_runs_list(
         status: str | None = None, limit: int = 20, ctx: ToolContext | None = None
     ) -> dict[str, Any]:

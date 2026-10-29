@@ -37,6 +37,7 @@ def _hermetic_network_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_all_exports_are_callable() -> None:
     assert set(network.__all__) == {
+        "api_port",
         "bind_host",
         "derive_allowed_origins",
         "detect_lan_ips",
@@ -45,6 +46,25 @@ def test_all_exports_are_callable() -> None:
     }
     for name in network.__all__:
         assert callable(getattr(network, name)), f"network.{name} is not callable"
+
+
+# ── api_port() ────────────────────────────────────────────────────────────────
+
+
+class TestApiPort:
+    def test_default_when_unset(self) -> None:
+        assert network.api_port() == 8080
+
+    def test_hal0_port_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("HAL0_PORT", " 9090 ")
+        assert network.api_port() == 9090
+
+    @pytest.mark.parametrize("raw", ["", "  ", "not-a-number"])
+    def test_unusable_value_falls_back_to_default(
+        self, monkeypatch: pytest.MonkeyPatch, raw: str
+    ) -> None:
+        monkeypatch.setenv("HAL0_PORT", raw)
+        assert network.api_port() == 8080
 
 
 # ── bind_host() ───────────────────────────────────────────────────────────────
