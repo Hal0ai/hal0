@@ -36,15 +36,16 @@ const SYS: any = {
 }
 
 describe('nowFacts', () => {
-  it('counts a warming slot as loaded, agreeing with the Serving now tiles', () => {
+  it('counts a starting and an errored slot as loaded, agreeing with the Serving now tiles', () => {
     const slots = [
       { name: 'a', device: 'gpu-vulkan', state: 'ready', type: 'llm' },
-      { name: 'w', device: 'gpu-vulkan', state: 'warming', type: 'llm' },
+      { name: 'w', device: 'gpu-vulkan', state: 'starting', type: 'llm' },
+      { name: 'e', device: 'gpu-vulkan', state: 'error', type: 'llm' },
       { name: 'o', device: 'gpu-vulkan', state: 'offline', type: 'llm' },
     ] as any[]
     const facts = nowFacts(slots, undefined, null, null, { access: true, pct: null, tempC: null, watts: null })
     const tiles = laneRows(slots, undefined, undefined).flatMap((l) => l.loaded)
-    expect(facts.loaded).toBe(2)
+    expect(facts.loaded).toBe(3)
     expect(tiles).toHaveLength(facts.loaded)
   })
 
