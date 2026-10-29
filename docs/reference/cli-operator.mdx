@@ -177,7 +177,7 @@ claude mcp add --transport http hal0-admin http://<host>:8080/mcp/admin/mcp --he
 
 `agents` is always held; `--scope memory` and `--scope admin` add the `hal0-memory` and `hal0-admin` lines. `bridge revoke` ends a key at once and keeps the name, so it cannot be added again; `bridge rotate` replaces a live client's key at once and keeps its scopes and note, and refuses a revoked client. `bridge scopes` replaces the whole set (`agents` stays), so the same key opens different servers from the next request.
 
-A failed command prints the API's `error.message` and exits 1: a name that is taken or malformed (names starting `hal0` and the bundled agents' names are reserved), an unknown scope, a client that does not exist, `rotate` on a revoked client. While `[bridge].enabled` is `false`, no bridge key works and `bridge add`, `bridge rotate` and `bridge scopes` exit 1 with:
+A failed command prints the API's `error.message` and exits 1: a name that is taken, malformed or reserved (`hermes` and `pi`, the bundled agents' names, plus `admin`, `anonymous`, `shared`, and any name starting `hal0`, such as `hal0-cli`, or `hermes__`, such as `hermes__scout`), an unknown scope, a client that does not exist, `rotate` on a revoked client. While `[bridge].enabled` is `false`, no bridge key works and `bridge add`, `bridge rotate` and `bridge scopes` exit 1 with:
 
 ```text
 The agent bridge is disabled: set [bridge] enabled = true in /etc/hal0/hal0.toml and restart hal0-api.

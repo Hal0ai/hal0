@@ -21,7 +21,7 @@ import asyncio
 import contextlib
 import os
 import stat
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +31,7 @@ from starlette.requests import Request
 from starlette.websockets import WebSocketDisconnect
 
 from hal0.api import auth as auth_mod
-from hal0.api import mcp_mount
+from hal0.api import live_sockets, mcp_mount
 from hal0.api.auth import (
     AuthEnforcementMiddleware,
     AuthPrincipal,
@@ -654,6 +654,94 @@ def test_still_admitted_verifies_live_not_from_the_stored_principal(
     assert auth_mod._still_admitted(AuthClass.BRIDGE, judged.scope) is True
     store.revoke_client("cc")
     assert auth_mod._still_admitted(AuthClass.BRIDGE, judged.scope) is False
+
+
+async def _revalidated(
+    scope: dict[str, Any], change: Callable[[], object], auth_class: AuthClass = AuthClass.CLIENT
+) -> tuple[bool, int]:
+    """Track a stream on ``scope``, run ``change``, then ``live_sockets.revalidate()``.
+
+    Registers the predicate the middleware registers for a stream it admitted
+    (``_still_admitted``), the way ``guard_http_stream`` does. Returns whether
+    that stream was signalled and how many streams the pass revoked.
+    """
+    with live_sockets.track(lambda: auth_mod._still_admitted(auth_class, scope)) as revoked:
+        assert not revoked.is_set()
+        change()
+        count = live_sockets.revalidate()
+        return revoked.is_set(), count
+
+
+@pytest.mark.parametrize("change", ["revoke", "rotate"])
+def test_open_bridge_stream_ends_on_key_change_with_auth_off(
+    store: BridgeStore, key: str, auth_off: None, change: str
+) -> None:
+    """Codex P2: with auth off, a stream opened on a bridge key ends once the key stops verifying.
+
+    ``/mcp/memory/mcp`` is CLIENT-class, so with enforcement off a key that no
+    longer verifies leaves nothing to judge and used to read as the dev-open
+    bypass: ``revalidate()`` never closed the stream. It is held to its
+    original credential now (ADR-0043).
+    """
+    judged = judged_request(bearer=key, path="/mcp/memory/mcp")
+    assert auth_mod.judged_principal(judged).name == "cc"
+
+    def _change() -> None:
+        if change == "revoke":
+            store.revoke_client("cc")
+        else:
+            store.rotate_client("cc")
+
+    signalled, count = asyncio.run(_revalidated(judged.scope, _change))
+    assert (signalled, count) == (True, 1)
+    # The handler behind the ended stream no longer acts as that client.
+    assert auth_mod.BRIDGE_PRINCIPAL_SCOPE_KEY not in judged.scope
+    assert auth_mod.judged_principal(judged).tier == "anon"
+
+
+def test_open_bridge_stream_survives_while_its_key_verifies(
+    store: BridgeStore, key: str, auth_off: None
+) -> None:
+    """The live re-verify is not a trip wire: an untouched key, and other clients, leave it open."""
+    judged = judged_request(bearer=key, path="/mcp/memory/mcp")
+    _row, _other_key = store.add_client("other", created_by="t")
+
+    signalled, count = asyncio.run(_revalidated(judged.scope, lambda: store.revoke_client("other")))
+    assert (signalled, count) == (False, 0)
+    assert auth_mod.judged_principal(judged).name == "cc"
+
+
+@pytest.mark.parametrize("change", ["revoke", "rotate"])
+def test_anonymous_dev_open_stream_is_not_affected_by_key_changes(
+    store: BridgeStore, key: str, auth_off: None, change: str
+) -> None:
+    """A dev-open stream that never held a bridge principal stays open when keys change."""
+    anonymous = judged_request(path="/mcp/memory/mcp")
+    # A bridge-shaped bearer that did not verify when the stream opened was never admitted as one.
+    store.revoke_client("cc")
+    stale = judged_request(bearer=key, path="/mcp/memory/mcp")
+    for scope in (anonymous.scope, stale.scope):
+        assert auth_mod.BRIDGE_PRINCIPAL_SCOPE_KEY not in scope
+
+    _row, _plain = store.add_client("later", created_by="t")
+
+    async def _both() -> tuple[bool, bool, int]:
+        with (
+            live_sockets.track(
+                lambda: auth_mod._still_admitted(AuthClass.CLIENT, anonymous.scope)
+            ) as anonymous_revoked,
+            live_sockets.track(
+                lambda: auth_mod._still_admitted(AuthClass.CLIENT, stale.scope)
+            ) as stale_revoked,
+        ):
+            if change == "revoke":
+                store.revoke_client("later")
+            else:
+                store.rotate_client("later")
+            count = live_sockets.revalidate()
+            return anonymous_revoked.is_set(), stale_revoked.is_set(), count
+
+    assert asyncio.run(_both()) == (False, False, 0)
 
 
 def test_middleware_stores_no_principal_for_other_tiers(store: BridgeStore, auth_on: None) -> None:

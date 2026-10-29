@@ -3220,10 +3220,13 @@ class BridgeConfig(BaseModel):
     enabled: bool = Field(
         default=True,
         description=(
-            "Master switch for the agent bridge. Off = the bridge MCP server "
-            "is not mounted and /api/bridge/* answers 404. On is harmless "
-            "until you add a client: with no clients, nothing but the admin "
-            "key can authenticate. Applies at the next hal0-api restart."
+            "Master switch for the agent bridge. Off = no bridge key "
+            "authenticates, the bridge MCP server is not mounted, and adding, "
+            "rotating or re-scoping a client and GET /api/bridge/me answer "
+            "404 bridge.disabled; listing and revoking clients keep working. "
+            "On is harmless until you add a client: with no clients, nothing "
+            "but the admin key can authenticate. Applies at the next hal0-api "
+            "restart."
         ),
     )
 

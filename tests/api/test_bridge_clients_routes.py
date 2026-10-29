@@ -360,11 +360,10 @@ def test_onboarding_brackets_an_ipv6_request_host(
 
     monkeypatch.setattr(network, "detect_lan_ips", lambda: pytest.fail("not a loopback host"))
     body = admin_client.post(
-        "/api/bridge/clients", json={"name": "cc"}, headers={"host": "[fd00:100:1234::100:5]:8080"}
+        "/api/bridge/clients", json={"name": "cc"}, headers={"host": "[2001:db8::100:5]:8080"}
     ).json()
     assert (
-        body["onboarding"]["lines"][0]["mcp_url"]
-        == "http://[fd00:100:1234::100:5]:8080/mcp/agents/mcp"
+        body["onboarding"]["lines"][0]["mcp_url"] == "http://[2001:db8::100:5]:8080/mcp/agents/mcp"
     )
 
 

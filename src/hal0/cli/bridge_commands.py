@@ -115,7 +115,7 @@ def _print_minted(result: dict[str, Any]) -> None:
         # soft_wrap keeps each command on one physical line (rich would otherwise
         # insert newlines at the terminal width and break the pasted command), and
         # emoji=False keeps an IPv6 host intact: rich reads ":100:" in
-        # "[fd00:100:1234::100:5]" as an emoji code.
+        # "[2001:db8::100:5]" as an emoji code.
         console.print(Text(f"# {line.get('server', '')}"), highlight=False)
         console.print(
             str(line["claude_mcp_add"]),
@@ -158,7 +158,7 @@ def list_cmd() -> None:
         return
     table = Table(title="hal0 bridge clients", box=box.SIMPLE_HEAD)
     table.add_column("name", no_wrap=True)
-    table.add_column("scopes")
+    table.add_column("scopes", no_wrap=True)
     table.add_column("note", overflow="fold")
     table.add_column("created", no_wrap=True)
     table.add_column("last seen", no_wrap=True)

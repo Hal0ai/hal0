@@ -917,13 +917,32 @@ def _still_admitted(auth_class: AuthClass, scope: dict[str, Any]) -> bool:
     credential the request carried (a WebSocket or an open stream cannot
     change its cookie, bearer or ``api_key`` later), so a rotated key, a
     replaced session secret or an expired session revokes exactly the
-    sockets and streams it would refuse to open today. A revoked bridge key
-    is caught the same way. The Origin half is not repeated: it cannot
-    change for an open connection.
+    sockets and streams it would refuse to open today. The Origin half is not
+    repeated: it cannot change for an open connection.
+
+    A request the middleware admitted as a bridge principal
+    (:data:`BRIDGE_PRINCIPAL_SCOPE_KEY` on its scope) is held to that
+    credential whatever the posture (ADR-0043). With enforcement off, a key
+    that stops verifying leaves :func:`_enforced_principal` with nothing to
+    judge on a CLIENT-class route, which reads as the dev-open bypass and
+    would keep the stream alive. So the bearer is verified again, live, and
+    the stream ends unless it still resolves to the same bridge client (not
+    revoked, rotated out or switched off with the bridge). A stream that
+    never held a bridge principal, an anonymous dev-open one, is judged as
+    before. The stored principal is cleared on failure, so a handler behind
+    the ended stream no longer acts as that client.
     """
-    principal = _enforced_principal(auth_class, scope)
-    if principal is None:
-        return True
+    stored = scope.get(BRIDGE_PRINCIPAL_SCOPE_KEY)
+    if isinstance(stored, AuthPrincipal) and stored.tier == "bridge":
+        principal = resolve_principal(scope)
+        if principal.tier != "bridge" or principal.name != stored.name:
+            scope.pop(BRIDGE_PRINCIPAL_SCOPE_KEY, None)
+            return False
+    else:
+        enforced = _enforced_principal(auth_class, scope)
+        if enforced is None:
+            return True
+        principal = enforced
     allowed, _status, _code = _verdict(auth_class, principal, scope.get("path", "/"))
     return allowed
 

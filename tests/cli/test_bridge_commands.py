@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from rich.console import Console
 from typer.testing import CliRunner
 
 from hal0.cli import bridge_commands
@@ -172,8 +173,8 @@ def test_add_prints_each_line_verbatim_unwrapped(fake_api: FakeApi) -> None:
 
 
 def test_add_prints_an_ipv6_url_intact(fake_api: FakeApi, monkeypatch: pytest.MonkeyPatch) -> None:
-    """rich would read ":100:" in "[fd00:100:1234::100:5]" as the 💯 emoji code."""
-    url = "http://[fd00:100:1234::100:5]:8080/mcp/agents/mcp"
+    """rich would read ":100:" in "[2001:db8::100:5]" as the 💯 emoji code."""
+    url = "http://[2001:db8::100:5]:8080/mcp/agents/mcp"
     minted = _minted("cc", ["agents"])
     line = minted["onboarding"]["lines"][0]
     line["mcp_url"] = url
@@ -236,8 +237,19 @@ def test_scopes_requires_a_scope(fake_api: FakeApi) -> None:
     assert runner.invoke(app, ["bridge", "scopes", "claude-code"]).exit_code == 2
 
 
-def test_list_table(fake_api: FakeApi) -> None:
-    res = runner.invoke(app, ["bridge", "list"], env={"COLUMNS": "120"})
+def _console_width(monkeypatch: pytest.MonkeyPatch, width: int) -> None:
+    """Pin the width of the console the commands print to.
+
+    ``bridge_commands.console`` is built at import time, so a ``COLUMNS`` passed
+    to ``runner.invoke`` never reaches it: the width is the terminal's, or 80 off
+    a tty (CI). Tests that depend on a width set it here.
+    """
+    monkeypatch.setattr(bridge_commands, "console", Console(width=width, force_terminal=False))
+
+
+def test_list_table(fake_api: FakeApi, monkeypatch: pytest.MonkeyPatch) -> None:
+    _console_width(monkeypatch, 200)
+    res = runner.invoke(app, ["bridge", "list"])
     assert res.exit_code == 0, res.output
     assert fake_api.calls == [("GET", "/api/bridge/clients", None)]
     for text in ("claude-code", "agents, memory", "devops", "old-bot", "2026-10-"):
@@ -246,11 +258,16 @@ def test_list_table(fake_api: FakeApi) -> None:
         assert column in res.stdout.lower()
 
 
-def test_list_keeps_names_whole_at_80_columns(fake_api: FakeApi) -> None:
-    res = runner.invoke(app, ["bridge", "list"], env={"COLUMNS": "80"})
+def test_list_keeps_names_and_scopes_whole_at_80_columns(
+    fake_api: FakeApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At 80 columns the note column wraps; a name and the scopes stay on one line."""
+    _console_width(monkeypatch, 80)
+    res = runner.invoke(app, ["bridge", "list"])
     assert res.exit_code == 0, res.output
     assert "claude-code" in res.stdout
     assert "old-bot" in res.stdout
+    assert "agents, memory" in res.stdout
 
 
 def test_list_empty(fake_api: FakeApi) -> None:
