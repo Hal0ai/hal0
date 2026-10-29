@@ -32,23 +32,29 @@ describe('laneRows', () => {
     ).toEqual(['x', 'y'])
   })
 
-  const ctxFor = (kv_used: number) =>
+  const ctxFor = (metrics: any, extra: any = {}) =>
     laneRows(
-      [{ name: 'utility', device: 'gpu-vulkan', state: 'ready', type: 'llm', ctx_effective: 131072 }] as any,
-      { slots: [{ slot_id: 'utility', kv_used }] } as any,
+      [{ name: 'utility', device: 'gpu-vulkan', state: 'ready', type: 'llm', ctx_effective: 131072, metrics, ...extra }] as any,
+      // kv_used is ppm of the KV cache (not tokens) and must not feed the context bar
+      { slots: [{ slot_id: 'utility', kv_used: 999999 }] } as any,
       undefined,
     )[0].loaded[0].ctx
 
-  it('reads kv_used as parts-per-million of the KV cache, scaled to ctx_effective', () =>
-    expect(ctxFor(83801)).toEqual({ used: 10486, max: 131072, pct: 8 }))
+  it('reads the busiest llama slot prompt tokens (metrics.ctx) against ctx_effective', () =>
+    expect(ctxFor({ ctx: 10486 })).toEqual({ used: 10486, max: 131072, pct: 8 }))
 
-  it('a full KV cache (1,000,000 ppm) is 100% of the context', () =>
-    expect(ctxFor(1000000)).toEqual({ used: 131072, max: 131072, pct: 100 }))
+  it('a full window is 100% of the context', () =>
+    expect(ctxFor({ ctx: 131072 })).toEqual({ used: 131072, max: 131072, pct: 100 }))
+
+  it('falls back to ctx_max when ctx_effective is absent', () =>
+    expect(ctxFor({ ctx: 2048 }, { ctx_effective: undefined, ctx_max: 4096 })).toEqual({ used: 2048, max: 4096, pct: 50 }))
+
+  it('treats metrics.ctx of 0 as absent, like the slot pane', () => expect(ctxFor({ ctx: 0 })).toBeNull())
 
   it('leaves ctx null when either side is missing', () => {
-    const noKv = laneRows([{ name: 'u', device: 'gpu-vulkan', state: 'ready', type: 'llm', ctx_effective: 4096 }] as any, undefined, undefined)
-    const noMax = laneRows([{ name: 'u', device: 'gpu-vulkan', state: 'ready', type: 'llm' }] as any, { slots: [{ slot_id: 'u', kv_used: 5 }] } as any, undefined)
-    expect(noKv[0].loaded[0].ctx).toBeNull()
+    const noUsed = laneRows([{ name: 'u', device: 'gpu-vulkan', state: 'ready', type: 'llm', ctx_effective: 4096 }] as any, undefined, undefined)
+    const noMax = laneRows([{ name: 'u', device: 'gpu-vulkan', state: 'ready', type: 'llm', metrics: { ctx: 5 } }] as any, undefined, undefined)
+    expect(noUsed[0].loaded[0].ctx).toBeNull()
     expect(noMax[0].loaded[0].ctx).toBeNull()
   })
 

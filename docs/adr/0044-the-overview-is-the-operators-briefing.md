@@ -76,14 +76,20 @@ and it had three problems:
    over `GET /api/stats/hardware`'s `memory` block; the section computes no
    budget of its own. The Memory section (bank stats) shows only when the
    memory subsystem is enabled, the same gate as the Memory nav item.
-6. **`kv_used` is a fraction, not a token count.** In `GET /api/system-stats`
-   (`system_stats` in `src/hal0/metrics/read.py`), a slot's `kv_used` is the
-   share of its KV cache in use in parts per million: the sampler stores
-   `kv_cache_usage * 1_000_000` (`src/hal0/metrics/sampler.py`). The Serving
-   tile derives tokens from it: percent is `kv_used / 10000`, and the context
-   bar shows that share of the slot's effective context
-   (`ui/src/dash/overview/serving-pure.ts`). Treating `kv_used` as tokens
-   draws a bar that is wrong by orders of magnitude.
+6. **The context bar reads `metrics.ctx`, not `kv_used`.** `GET /api/slots`
+   exposes `metrics.ctx`: the prompt tokens of the busiest llama slot
+   (`src/hal0/slots/metrics_collect.py`), a real token count, where `0` means the
+   counter is not reporting. The Serving tile and the Agents row both draw the
+   bar from it against the slot's effective window (`ctx_effective`, else
+   `ctx_max`), as the slot pane does, so the two sections show one figure
+   (`ui/src/dash/overview/serving-pure.ts`, `agents-pure.ts`). A `0` renders
+   `—`, never an empty bar. Separately, `kv_used` in `GET /api/system-stats`
+   (`system_stats` in `src/hal0/metrics/read.py`) is the share of a slot's KV
+   cache in use in parts per million: the sampler stores
+   `kv_cache_usage * 1_000_000` (`src/hal0/metrics/sampler.py`). It is a
+   fraction, not a token count, so the Overview does not use it for the
+   context bar. Treating it as tokens draws a bar that is wrong by orders of
+   magnitude.
 
 ### The sections
 
@@ -146,8 +152,10 @@ Each section links to the owner of the detail:
 - **Source the usage figures from the dispatcher rollups, as before.**
   Rejected: they are a 60 s live window, so an idle box shows nothing. The
   request-metric table answers "how did it perform" over hours and days.
-- **Read tokens per slot from `kv_used` as a count.** Rejected: it is a
-  fraction. Only a ratio against the slot's effective context gives tokens.
+- **Derive the context bar from `kv_used`.** Rejected: it is a parts per
+  million fraction of the KV cache, so scaling it by the window gives an
+  estimate that disagrees with the Agents row and the slot pane, which read
+  `metrics.ctx`. One measured token count feeds every context bar.
 - **Show raw events on the page.** Rejected: ADR-0042 gives the dock that
   job. The Overview folds recent activity into a five-row digest and links to
   the dock.

@@ -100,7 +100,7 @@ describe('OvServingNow', () => {
 
   it('a serving tile is marked, shows tok/s and draws the sparkline', () => {
     slotsData = SLOTS.map((s) => (s.name === 'utility' ? { ...s, ...SERVING_UTILITY } : s))
-    sysData = { ...SYS, slots: [...SYS.slots.filter((s: any) => s.slot_id !== 'utility'), { slot_id: 'utility', inflight: 2, kv_used: 1000 }] }
+    sysData = { ...SYS, slots: [...SYS.slots.filter((s: any) => s.slot_id !== 'utility'), { slot_id: 'utility', inflight: 2 }] }
     history = { per_slot: { utility: [40, 52, 61] } }
     mount()
     const tile = [...host.querySelectorAll('.ov-tile')].find((t) => t.querySelector('.ov-nm')?.textContent === 'utility')!

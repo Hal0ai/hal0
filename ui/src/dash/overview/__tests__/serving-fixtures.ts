@@ -1,7 +1,7 @@
 // Shared fixtures for the serving-now tests: the CT105 shape — 13 slots over four lanes, five loaded.
 export const SLOTS: any[] = [
   { name: 'agent', device: 'gpu-vulkan', state: 'ready', type: 'llm', model: 'Qwen3.8-27B-MTP', port: 8101, isDefault: true, mem_mb: 22528, ctx_effective: 65536 },
-  { name: 'utility', device: 'gpu-vulkan', state: 'ready', type: 'llm', model: 'Qwen3.8-35B-A3B', port: 8102, mem_mb: 20480, ctx_effective: 131072 },
+  { name: 'utility', device: 'gpu-vulkan', state: 'ready', type: 'llm', model: 'Qwen3.8-35B-A3B', port: 8102, mem_mb: 20480, ctx_effective: 131072, metrics: { ctx: 10486 } },
   { name: 'brain', device: 'gpu-vulkan', state: 'ready', type: 'llm', model: 'Qwen3-4B', port: 8103, mem_mb: 4096, ctx_effective: 32768 },
   { name: 'ops', device: 'gpu-vulkan', state: 'offline', type: 'llm', model: 'Qwopus3.6-27B-Coder' },
   { name: 'img', device: 'gpu-rocm', state: 'ready', type: 'image', model: 'sdxl-turbo', port: 8188, mem_mb: 5836 },

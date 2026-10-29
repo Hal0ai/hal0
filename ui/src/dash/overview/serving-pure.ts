@@ -55,13 +55,14 @@ function buildTile(
     if (isNum(sysSlot?.inflight)) stateText += ` · ${sysSlot.inflight} in flight`
   }
 
+  // Same figure as the Agents row and the slot pane: prompt tokens of the busiest llama slot
+  // (metrics.ctx, 0 = not reporting) against the effective window. /api/system-stats kv_used is
+  // parts-per-million of the KV cache, not tokens, so it does not feed the bar.
   const max = slot.ctx_effective ?? (slot as { ctx_max?: number | null }).ctx_max ?? null
-  // kv_used is parts-per-million of the slot's KV cache in use (sampler: kv_cache_usage * 1e6), not tokens.
-  const kv = sysSlot?.kv_used ?? null
+  const used = slot.metrics?.ctx
   let ctx: Tile['ctx'] = null
-  if (isNum(kv) && isNum(max) && max > 0) {
-    const pct = Math.min(100, Math.round(kv / 10000))
-    ctx = { used: Math.round((pct / 100) * max), max, pct }
+  if (isNum(used) && used > 0 && isNum(max) && max > 0) {
+    ctx = { used, max, pct: Math.min(100, Math.round((used / max) * 100)) }
   }
 
   const isImageEngine = slot.type === 'image' || slot.name === 'img'

@@ -40,6 +40,7 @@ export interface RunRow {
 export interface SlotLike {
   state?: string | null
   metrics?: { ctx?: number | null; toks?: number | null } | null
+  ctx_max?: number | null
   ctx_effective?: number | null
 }
 
@@ -127,8 +128,10 @@ export function hermesRow(
 ): HermesRow {
   const live = blob(blob(ov?.version).live)
   const minor = text(live.python_minor)
-  const used = slot?.metrics?.ctx
-  const max = slot?.ctx_effective
+  // 0 means the counter is not reporting (as in the slot pane), so it reads `—`, never 0%.
+  const rawUsed = slot?.metrics?.ctx
+  const used = typeof rawUsed === 'number' && rawUsed > 0 ? rawUsed : undefined
+  const max = slot?.ctx_effective ?? slot?.ctx_max
   const pct = typeof used === 'number' && typeof max === 'number' ? pctOf(used, max) : null
   const active = personas?.active ?? null
   const activeRow = active ? personas?.personas?.find((p) => p.id === active) : undefined
