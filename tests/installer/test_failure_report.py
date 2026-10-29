@@ -177,8 +177,9 @@ _TOML_SECRET = "tomlS3cr3tV4lu3Kq9Wz2Xc7Rv5Bn"
 _BEARER = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJoYWwwIn0.c2lnbmF0dXJlMTIzNDU2"
 _URL_PW = "p4ssW0rdInUrl99"
 _FLAG_TOKEN = "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+_BRIDGE = "Rk4mQ8zX2wN6pL1vT9bC5hJ3fD7sA0gE2yU8iO4kM6n"  # a bare hal0bk_<client>.<token>
 
-_ALL_SECRETS = (_HF, _CLIENT, _UPSTREAM, _TOML_SECRET, _BEARER, _URL_PW, _FLAG_TOKEN)
+_ALL_SECRETS = (_HF, _CLIENT, _UPSTREAM, _TOML_SECRET, _BEARER, _URL_PW, _FLAG_TOKEN, _BRIDGE)
 
 
 def _stub(bin_dir: Path, name: str, body: str) -> None:
@@ -222,7 +223,8 @@ def _make_box(tmp_path: Path) -> dict[str, Path]:
     _stub(
         bin_dir,
         "journalctl",
-        f'echo "journal: hal0-api started with HF_TOKEN {_HF}"; echo "journalctl $*"',
+        f'echo "journal: hal0-api started with HF_TOKEN {_HF}"; '
+        f'echo "journal: bridge key hal0bk_ci.{_BRIDGE} admitted"; echo "journalctl $*"',
     )
     return {"etc": etc, "log": log, "bin": bin_dir}
 

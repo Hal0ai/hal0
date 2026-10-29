@@ -942,7 +942,8 @@ function shapes(line: string, log: boolean): string {
   out = maskFlags(out, log)
   out = out.replace(CLIENT_ID_RE, `$1${MASK}`)
   out = maskJwts(out)
-  // Case-sensitive, as in Python.
+  // Case-sensitive, as in Python. A minted agent-bridge key first (ADR-0043).
+  out = out.replace(/hal0bk_[a-z0-9_-]+\.[A-Za-z0-9_-]{20,}/g, MASK)
   out = out.replace(/(?:hf_|sk-|gh[pousr]_|github_pat_|xox[baprs]-)[A-Za-z0-9_-]{20,}/g, MASK)
   return out.replace(/AKIA[0-9A-Z]{16}/g, MASK)
 }

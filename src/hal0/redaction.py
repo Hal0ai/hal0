@@ -840,6 +840,10 @@ _SHAPE_RULES_AFTER: Final[tuple[_Rule, ...]] = (
         ),
         rf"\g<1>{MASK}",
     ),
+    # A minted agent-bridge key, ``hal0bk_<client>.<token>`` (ADR-0043), bare
+    # or quoted; before the generic prefixes, so a ``sk-`` inside the token
+    # cannot leave its head unmasked.
+    _sub_rule(re.compile(r"hal0bk_[a-z0-9_-]+\.[A-Za-z0-9_-]{20,}"), MASK),
     _sub_rule(
         re.compile(r"(?:hf_|sk-|gh[pousr]_|github_pat_|xox[baprs]-)[A-Za-z0-9_-]{20,}"), MASK
     ),
