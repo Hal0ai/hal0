@@ -13,12 +13,14 @@ import { OFF_BOX_NOTE } from '../../image/editor-reach'
 
 let statusResult: { data: ComfyuiStatus | undefined; isError?: boolean } = { data: undefined, isError: true }
 let arbiterResult: { data: ArbiterReading | undefined } = { data: undefined }
+let slotsResult: { data: any[] | undefined } = { data: [{ name: 'img', type: 'image' }] }
 let access = { onBox: true, lan: true, url: 'http://box:8188' as string | null, tunnel: 'ssh -L 8188:127.0.0.1:8188 <user>@box' }
 
 vi.mock('@/api/hooks/useComfyui', () => ({
   useComfyui: () => statusResult,
   useArbiter: () => arbiterResult,
 }))
+vi.mock('@/api/hooks/useSlots', () => ({ useSlots: () => slotsResult }))
 vi.mock('../../image/useEditorAccess', () => ({ useEditorAccess: () => access }))
 
 await import('../shell.jsx')
@@ -77,6 +79,7 @@ function mount() {
 beforeEach(() => {
   statusResult = { data: IDLE }
   arbiterResult = { data: CHAT }
+  slotsResult = { data: [{ name: 'img', type: 'image' }] }
   access = { onBox: true, lan: true, url: 'http://box:8188', tunnel: 'ssh -L 8188:127.0.0.1:8188 <user>@box' }
   onGo.mockClear()
 })
@@ -93,6 +96,26 @@ describe('OvImageEngine', () => {
     mount()
     expect(host.innerHTML).toBe('')
     expect(err).not.toHaveBeenCalled()
+  })
+
+  // GET /api/comfyui/status always answers 200 (a status object with reachable:false on a box with
+  // no engine), so a present status alone must not show the card: an img slot has to exist.
+  it('renders nothing when the status is present but the box has no img slot', () => {
+    slotsResult = { data: [{ name: 'agent', type: 'llm' }] }
+    mount()
+    expect(host.innerHTML).toBe('')
+  })
+
+  it('renders nothing while the slot list is still loading', () => {
+    slotsResult = { data: undefined }
+    mount()
+    expect(host.innerHTML).toBe('')
+  })
+
+  it('an image-typed slot under another name still shows the card', () => {
+    slotsResult = { data: [{ name: 'draw', type: 'image' }] }
+    mount()
+    expect(host.querySelector('.ov-card-t')?.textContent).toBe('Image engine')
   })
 
   it('idle: card title, chat mode pill, engine and queue line, four inventory tiles', () => {

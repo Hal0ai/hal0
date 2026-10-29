@@ -1,9 +1,11 @@
 // hal0 Overview v2 — Image engine: ComfyUI at a glance (mode, engine, queue, the render in
 // flight, a held render's wait note, the weight inventory). Window-global (OvImageEngine).
-// Renders nothing while /api/comfyui/status has no answer (404 from an older backend or a box
-// without an img slot): the card is absent, not an error.
+// Renders nothing unless the box has an image engine slot and /api/comfyui/status answers:
+// the status route returns 200 even with no engine, so the slot list is the real gate. The
+// card is absent, not an error.
 
 import { useArbiter, useComfyui } from '@/api/hooks/useComfyui'
+import { useSlots } from '@/api/hooks/useSlots'
 import { OFF_BOX_NOTE } from '../image/editor-reach'
 import { useEditorAccess } from '../image/useEditorAccess'
 import { imageModel } from './image-engine-pure'
@@ -12,10 +14,12 @@ const { useMemo } = React
 
 export function OvImageEngine({ onGo }) {
   const status = useComfyui()
+  const slots = useSlots()
   const arbiter = useArbiter()
   const access = useEditorAccess()
   const m = useMemo(() => imageModel(status.data, arbiter.data), [status.data, arbiter.data])
-  if (!m) return null
+  const hasImgSlot = (slots.data ?? []).some((s) => s.type === 'image' || s.name === 'img')
+  if (!m || !hasImgSlot) return null
 
   const editorUrl = access.onBox ? access.url : null
 
