@@ -23,6 +23,19 @@ from hal0.config import paths
 
 ADMIN_KEY = "admin-key-for-bridge-routes"
 
+#: The tools of the ``hal0-agents`` MCP server, as ``/api/bridge/me`` lists them.
+AGENT_TOOLS = [
+    "agents_list",
+    "agent_run",
+    "agent_run_wait",
+    "agent_run_status",
+    "agent_run_events",
+    "agent_run_answer",
+    "agent_run_steer",
+    "agent_run_stop",
+    "agent_runs_list",
+]
+
 
 def bearer(value: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {value}"}
@@ -328,6 +341,38 @@ def test_onboarding_from_loopback_names_the_lan_address(
     ]
 
 
+def test_onboarding_names_the_default_route_address_not_a_container_bridge(
+    admin_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``detect_lan_ips`` is string-sorted, so docker0's 172.17.0.1 came first."""
+    import socket
+    from types import SimpleNamespace
+
+    import psutil
+
+    from hal0.config import network
+
+    table = tmp_path / "route"
+    table.write_text(
+        "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n"
+        "docker0\t000011AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0\n"
+        "eth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n"
+    )
+    monkeypatch.setattr(network, "PROC_NET_ROUTE", table)
+    monkeypatch.setattr(
+        psutil,
+        "net_if_addrs",
+        lambda: {
+            "docker0": [SimpleNamespace(family=socket.AF_INET, address="172.17.0.1")],
+            "eth0": [SimpleNamespace(family=socket.AF_INET, address="192.168.1.20")],
+        },
+    )
+    body = admin_client.post(
+        "/api/bridge/clients", json={"name": "cc"}, headers={"host": "127.0.0.1:8080"}
+    ).json()
+    assert body["onboarding"]["lines"][0]["mcp_url"] == "http://192.168.1.20:8080/mcp/agents/mcp"
+
+
 def test_onboarding_from_loopback_without_a_lan_address_keeps_loopback(
     admin_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -389,7 +434,7 @@ def test_me_as_admin(admin_client: TestClient) -> None:
     assert body["tier"] == "admin"
     assert body["scopes"] == ["agents", "memory", "admin"]
     assert body["servers"] == ["hal0-agents", "hal0-memory", "hal0-admin"]
-    assert body["tools"] == []
+    assert body["tools"] == AGENT_TOOLS
     assert body["created_at"] is None and body["last_seen_at"] is None
 
 
@@ -403,7 +448,7 @@ def test_me_as_a_bridge_client(admin_client: TestClient) -> None:
     assert isinstance(body["created_at"], float)
     # The verify that authenticated this very request stamped the row.
     assert isinstance(body["last_seen_at"], float)
-    assert body["tools"] == []
+    assert body["tools"] == AGENT_TOOLS
 
 
 def test_me_servers_follow_the_scopes(admin_client: TestClient) -> None:

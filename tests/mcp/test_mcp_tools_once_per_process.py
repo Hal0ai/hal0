@@ -27,6 +27,8 @@ from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.fastmcp.tools import base as tool_base
 
 from hal0.api import mcp_mount
+from hal0.api.auth import AuthPrincipal
+from hal0.config.schema import Hal0Config
 from hal0.mcp import admin
 from hal0.mcp.approval_queue import ApprovalQueue
 
@@ -47,6 +49,7 @@ def _mount(monkeypatch: pytest.MonkeyPatch, *, provider: Any = None) -> FastAPI:
     """Mount the MCP servers on a bare app the way ``create_app`` does."""
     monkeypatch.setattr(admin, "install_admin_route_map", lambda _app: None)
     app = FastAPI()
+    app.state.hal0_config = Hal0Config()  # [bridge].enabled defaults on: /mcp/agents mounts
     app.state.approval_queue = ApprovalQueue()
     app.state.memory_provider = provider
     app.state.memory_dispatcher = None
@@ -80,7 +83,7 @@ def test_second_mount_builds_no_tools(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert built == [], f"mount rebuilt {len(built)} tool definitions: {built[:5]}..."
     # ...and the second app still exposes the full catalog on both mounts.
-    assert set(app.state.mcp_servers) == {"hal0-admin", "hal0-memory"}
+    assert set(app.state.mcp_servers) == {"hal0-admin", "hal0-memory", "hal0-agents"}
     admin_tools = app.state.mcp_servers["hal0-admin"]._tool_manager.list_tools()
     assert {t.name for t in admin_tools} == set(admin.TOOL_DESCRIPTIONS)
 
@@ -108,7 +111,7 @@ def test_each_app_gets_its_own_server_and_session_manager(
     a = _mount(monkeypatch, provider=_Provider("a"))
     b = _mount(monkeypatch, provider=_Provider("b"))
 
-    for key in ("hal0-admin", "hal0-memory"):
+    for key in ("hal0-admin", "hal0-memory", "hal0-agents"):
         assert a.state.mcp_servers[key] is not b.state.mcp_servers[key]
     assert not set(map(id, a.state.mcp_session_managers)) & set(
         map(id, b.state.mcp_session_managers)
@@ -191,3 +194,36 @@ async def test_unbound_tool_call_fails_loudly() -> None:
     assert tool is not None
     with pytest.raises(ToolError, match="not bound to a hal0 MCP server"):
         await tool.run({"args": {}}, context=None)
+
+
+@pytest.mark.asyncio
+async def test_agents_tool_reads_its_own_apps_bridge_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ``hal0-agents`` definitions are shared; the bridge service is per app, read per call."""
+    from starlette.requests import Request
+
+    class _Service:
+        def __init__(self, label: str) -> None:
+            self.label = label
+
+        async def list_agents(self) -> dict[str, Any]:
+            return {"agents": [{"id": self.label}]}
+
+    caller = AuthPrincipal(tier="bridge", name="cc", scopes=frozenset({"agents"}))
+    request = Request({"type": "http", "headers": [], "hal0.bridge_principal": caller})
+    monkeypatch.setattr(mcp_mount, "_current_mcp_request", lambda: request)
+    a = _mount(monkeypatch)
+    b = _mount(monkeypatch)
+    a.state.bridge_service = _Service("a")
+    b.state.bridge_service = _Service("b")
+
+    async def agent_id(app: FastAPI) -> str:
+        out = await app.state.mcp_servers["hal0-agents"].call_tool("agents_list", {})
+        payload = out[1] if isinstance(out, tuple) else out
+        assert isinstance(payload, dict)
+        return str(payload["agents"][0]["id"])
+
+    assert [await agent_id(a), await agent_id(b)] == ["a", "b"]
+    a.state.bridge_service = _Service("swapped")  # call-time lookup, not captured at mount
+    assert await agent_id(a) == "swapped"

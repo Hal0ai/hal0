@@ -53,7 +53,7 @@ log = structlog.get_logger(__name__)
 # Bundled mounts that can't be uninstalled via this registry. The FastAPI
 # route layer guards against deletion + the registry itself never lists
 # them; this set is exposed for the route's bundled-rejection branch.
-BUNDLED_SERVER_IDS = frozenset({"hal0-admin", "hal0-memory"})
+BUNDLED_SERVER_IDS = frozenset({"hal0-admin", "hal0-memory", "hal0-agents"})
 
 
 # ── Agent exposure guard (#2358) ────────────────────────────────────────────

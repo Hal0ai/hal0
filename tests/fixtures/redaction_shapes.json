@@ -546,6 +546,14 @@
     [
       "\u017fecret_KEY=,pk13_leak_value",
       "pk13_leak_value"
+    ],
+    [
+      "delegated with hal0bk_cc.Zx8_Qw3-Er5Ty7Ui9Op1As2Df4Gh6Jk8Lz0Xc2Vb4 from ci",
+      "Zx8_Qw3-Er5Ty7Ui9Op1As2Df4Gh6Jk8Lz0Xc2Vb4"
+    ],
+    [
+      "see hal0bk_ci-runner.Wq9sk-qqqqqqqqqqqqqqqqqqqqqqqq in the log",
+      "Wq9"
     ]
   ],
   "keep": [
@@ -572,7 +580,8 @@
     "authorization: denied for bob",
     "see https://example.com/docs and ftp://host/file",
     "max_tokens=\"5\"",
-    "tokenizer='Qwen/Qwen3-8B'"
+    "tokenizer='Qwen/Qwen3-8B'",
+    "the hal0bk_ prefix names a bridge key"
   ],
   "exact": [
     [

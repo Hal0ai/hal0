@@ -340,3 +340,126 @@ async def test_entry_target_args_empty_for_an_unmapped_tool() -> None:
         executor=_noop_executor,
     )
     assert q.list_pending()[0]["target_args"] == []
+
+
+# ── deny hook and withdraw (agent bridge, ADR-0043 decision 9) ─────────────
+
+
+@pytest.mark.asyncio
+async def test_deny_runs_the_deny_hook_not_the_executor() -> None:
+    """A mirrored run approval tells Hermes about a denial through ``on_deny``."""
+    ran: list[str] = []
+
+    async def _exec(args: dict[str, Any]) -> str:
+        ran.append("executor")
+        return "approved"
+
+    async def _on_deny(args: dict[str, Any]) -> str:
+        ran.append(f"deny:{args['run_id']}")
+        return "denied in hermes"
+
+    q = ApprovalQueue()
+    aid = await q.enqueue(
+        tool="agent_run_approval",
+        args={"run_id": "run_1", "request_id": "req1"},
+        client_id="bridge:cc",
+        executor=_exec,
+        on_deny=_on_deny,
+    )
+    result = await q.deny(aid)
+    assert ran == ["deny:run_1"]
+    assert result["state"] == "denied" and result["result"] == "denied in hermes"
+
+
+@pytest.mark.asyncio
+async def test_deny_hook_failure_is_recorded_and_the_entry_stays_denied() -> None:
+    async def _on_deny(args: dict[str, Any]) -> None:
+        raise RuntimeError("hermes is down")
+
+    q = ApprovalQueue()
+    aid = await q.enqueue(
+        tool="agent_run_approval",
+        args={"run_id": "run_1"},
+        client_id="bridge:cc",
+        executor=_noop_executor,
+        on_deny=_on_deny,
+    )
+    result = await q.deny(aid)
+    assert result["state"] == "denied"
+    assert result["error"] == "RuntimeError: hermes is down"
+
+
+@pytest.mark.asyncio
+async def test_agent_run_approval_dedups_on_run_id() -> None:
+    q = ApprovalQueue()
+    first = await q.enqueue(
+        tool="agent_run_approval",
+        args={"run_id": "run_1", "request_id": "req1", "command": "rm a"},
+        client_id="bridge:cc",
+        executor=_noop_executor,
+        target_args=("run_id",),
+    )
+    again = await q.enqueue(  # a replayed frame: incidental fields may differ
+        tool="agent_run_approval",
+        args={"run_id": "run_1", "request_id": "req1", "command": "rm a", "pattern_key": "rm"},
+        client_id="bridge:cc",
+        executor=_noop_executor,
+        target_args=("run_id",),
+    )
+    other = await q.enqueue(
+        tool="agent_run_approval",
+        args={"run_id": "run_2", "request_id": "req1", "command": "rm a"},
+        client_id="bridge:cc",
+        executor=_noop_executor,
+        target_args=("run_id",),
+    )
+    assert first == again != other
+    entry = q.get(first)
+    assert entry is not None and entry.hit_count == 2 and entry.target_args == ["run_id"]
+
+
+@pytest.mark.asyncio
+async def test_withdraw_retires_a_pending_entry_without_running_anything() -> None:
+    """A request settled elsewhere leaves the inbox and frees its dedup slot."""
+    ran: list[str] = []
+
+    async def _hook(args: dict[str, Any]) -> None:
+        ran.append("hook")
+
+    q = ApprovalQueue()
+    events: list[Any] = []
+    async with q.subscribe() as sub:
+        aid = await q.enqueue(
+            tool="agent_run_approval",
+            args={"run_id": "run_1", "request_id": "req1"},
+            client_id="bridge:cc",
+            executor=_hook,
+            on_deny=_hook,
+        )
+        withdrawn = await q.withdraw(aid, "settled in Hermes")
+        while not sub.empty():
+            events.append(sub.get_nowait())
+    assert withdrawn is not None
+    assert withdrawn["state"] == "failed" and withdrawn["error"] == "settled in Hermes"
+    assert ran == [] and q.list_pending() == []
+    assert [e.kind for e in events] == ["enqueued", "failed"]
+    fresh = await q.enqueue(
+        tool="agent_run_approval",
+        args={"run_id": "run_1", "request_id": "req2"},
+        client_id="bridge:cc",
+        executor=_hook,
+    )
+    assert fresh != aid
+
+
+@pytest.mark.asyncio
+async def test_withdraw_leaves_resolved_and_unknown_entries_alone() -> None:
+    q = ApprovalQueue()
+    aid = await q.enqueue(
+        tool="slot_restart", args={"name": "primary"}, client_id="pi", executor=_noop_executor
+    )
+    await q.approve(aid)
+    assert await q.withdraw(aid, "late") is None
+    entry = q.get(aid)
+    assert entry is not None and entry.state == "executed"
+    assert await q.withdraw("nope", "late") is None

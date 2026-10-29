@@ -2,8 +2,9 @@
 
 The agent bridge lets a remote coding agent (Claude Code, Codex, ...) reach
 hal0's MCP servers with a per-client key instead of the box admin key. These
-verbs mint, list, revoke, rotate and re-scope those clients; hal0-api owns the
-client store, so the CLI never opens ``bridge.db`` itself.
+verbs mint, list, revoke, rotate and re-scope those clients, and list the runs
+they have delegated to Hermes; hal0-api owns the store, so the CLI never opens
+``bridge.db`` itself.
 
 Endpoints hit
 -------------
@@ -13,6 +14,7 @@ Endpoints hit
     hal0 bridge revoke <name>           → DELETE /api/bridge/clients/{name}
     hal0 bridge rotate <name>           → POST   /api/bridge/clients/{name}/rotate
     hal0 bridge scopes <name> <scope>…  → PATCH  /api/bridge/clients/{name}
+    hal0 bridge runs                    → GET    /api/bridge/runs
 
 ``add`` and ``rotate`` print the new key once, then one ``claude mcp add`` line
 per granted scope exactly as the API built it; hal0 keeps only a hash of the
@@ -21,6 +23,7 @@ key, so it cannot be shown again. Exit codes: 0 ok, 1 API error, 2 usage.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -48,6 +51,7 @@ app = typer.Typer(help="Manage agent-bridge clients: keys for remote agents to r
 console = Console()
 
 _CLIENTS = "/api/bridge/clients"
+_RUNS = "/api/bridge/runs"
 
 _DISABLED_CODE = "bridge.disabled"
 _DISABLED_MESSAGE = (
@@ -95,6 +99,21 @@ def _fmt_ts(value: Any, *, with_time: bool = False) -> str:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC).strftime(fmt)
+
+
+def _age(value: Any) -> str:
+    """How long ago an API timestamp (epoch seconds) was, as ``45s``, ``5m``, ``2h`` or ``3d``.
+
+    Runs last minutes, so the runs table shows ages: a date would say nothing
+    and a full date-time would not fit next to a 36-character run id.
+    """
+    if not isinstance(value, int | float):
+        return "-"
+    seconds = max(0, int(time.time() - value))
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= size:
+            return f"{seconds // size}{unit}"
+    return f"{seconds}s"
 
 
 def _print_minted(result: dict[str, Any]) -> None:
@@ -204,3 +223,53 @@ def scopes_cmd(
     console.print(Text(f"Scopes for {name}: {', '.join(granted)}"))
     if "admin" in granted:
         console.print(_ADMIN_WARNING, style="yellow", soft_wrap=True)
+
+
+@app.command("runs")
+def runs_cmd(
+    client: str | None = typer.Option(
+        None, "--client", help="Only this client's runs (as admin you see every client's)."
+    ),
+    status: str | None = typer.Option(
+        None, "--status", help="Only runs in this status, for example running or completed."
+    ),
+    limit: int = typer.Option(20, "--limit", min=1, max=200, help="Most runs to show."),
+) -> None:
+    """List the runs bridge clients delegated to Hermes, newest first.
+
+    started and updated are ages: 45s, 5m, 2h, 3d.
+    """
+    params: dict[str, Any] = {"limit": limit}
+    if client:
+        params["client"] = client
+    if status:
+        params["status"] = status
+    items: list[dict[str, Any]] = _call(lambda: api_get(_RUNS, params=params)).get("items", [])
+    if not items:
+        filtered = bool(client or status)
+        console.print("No runs match." if filtered else "No delegated runs yet.")
+        return
+    table = Table(
+        title="hal0 bridge runs",
+        box=None,
+        pad_edge=False,
+        collapse_padding=True,
+        header_style="bold",
+    )
+    # The run id is what 'agent_run_status' takes, so it is never wrapped or cut.
+    table.add_column("run_id", no_wrap=True)
+    table.add_column("client", no_wrap=True)
+    table.add_column("agent", no_wrap=True)
+    table.add_column("status", no_wrap=True)
+    table.add_column("started", no_wrap=True)
+    table.add_column("updated", no_wrap=True)
+    for run in items:
+        table.add_row(
+            Text(str(run.get("run_id", ""))),
+            Text(str(run.get("client", ""))),
+            Text(str(run.get("agent", ""))),
+            Text(str(run.get("status", ""))),
+            _age(run.get("created_at")),
+            _age(run.get("updated_at")),
+        )
+    console.print(table)

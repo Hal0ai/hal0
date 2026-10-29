@@ -139,20 +139,25 @@ about which one you use and ships nothing to configure it.
 ## MCP host and origin allowlists
 
 The MCP mount enforces a separate network gate. The admin and memory MCP
-servers are mounted as sub-applications under `/mcp/admin` and `/mcp/memory`,
-and the MCP transport applies DNS-rebinding protection.
+servers are mounted as sub-applications under `/mcp/admin` and `/mcp/memory`
+(and `/mcp/agents` while the agent bridge is on), and the MCP transport applies
+DNS-rebinding protection.
 
 ![MCP tab showing tool and resource inventory](/screenshots/mcp-tab.png)
 *The dashboard's MCP tab displays the live admin and memory server status.*
 
-By default that protection is **localhost-only**: only `127.0.0.1`, `localhost`,
-and `[::1]` (any port) are accepted as `Host` headers and request origins. A
-client reaching the mount from any other host gets a bare `421 Invalid Host header`
-response. Because hal0 binds `0.0.0.0` on a LAN, you usually need to widen this
-to reach `/mcp/*` from another machine or through your proxy:
+By default the allowlist holds the names this box answers to: loopback
+(`127.0.0.1`, `localhost` and `[::1]`, any port), every detected LAN IP, the
+hostname, its `.local` mDNS name, and the host of `[network].public_url`, each
+bare and with the API port (`HAL0_PORT`, default 8080). A bridge client on
+another machine reaches `/mcp/*` by any of them with no setup. The box's own
+names loosen nothing, because DNS rebinding sends a name the attacker controls.
+Any other `Host` gets a bare `421 Invalid Host header` response. The set is read
+when hal0-api starts, so a new LAN IP, hostname or `public_url` needs a restart.
+To reach `/mcp/*` by another name, such as a reverse-proxy domain, add it:
 
 - **`HAL0_MCP_ALLOWED_HOSTS`** — a comma-separated list of `host`,
-  `host:port`, or `host:*` values added to the localhost allowlist. The single
+  `host:port`, or `host:*` values added to the default allowlist. The single
   value `*` disables DNS-rebinding protection entirely (the fully-open posture
   some LAN-only deployments want).
 - **`HAL0_MCP_ALLOWED_ORIGINS`** — a comma-separated list of browser origins.

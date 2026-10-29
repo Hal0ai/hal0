@@ -425,6 +425,7 @@ class TestShareableTextShapes:
             ("loaded hf_" + "a" * 30, "hf_" + "a" * 30),
             ("using sk-" + "b" * 30, "sk-" + "b" * 30),
             ("pat ghp_" + "c" * 36, "ghp_" + "c" * 36),
+            ("key hal0bk_cc." + "d" * 43, "d" * 43),
             (
                 "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJoYWwwIn0.c2lnbmF0dXJlMTIzNDU2",
                 "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJoYWwwIn0.c2lnbmF0dXJlMTIzNDU2",

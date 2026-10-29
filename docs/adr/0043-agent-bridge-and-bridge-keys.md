@@ -12,9 +12,11 @@ bridge principals only. The rest of ADR-0024 stays open; see "Relationship to
 other records".
 
 The first change under this record ships the keys, the store, the credential
-tier, the REST and CLI surface, the config section and a doctor row. The run
-tools and the teach tools are decided here and land in later changes on this
-ADR; see Consequences.
+tier, the REST and CLI surface, the config section and a doctor row. The
+second ships Decisions 8 and 9, the `hal0-agents` server and its run tools;
+what it settled along the way is under "Implementation decisions (second
+change)". The teach tools (Decision 10) land in a later change on this ADR;
+see Consequences.
 
 ## Context
 
@@ -192,12 +194,12 @@ ADR-0035 was verified against), shapes the answer:
    `bridge.db`; SQLite may leave the `-wal` and `-shm` siblings of a database
    it reads, and those have permission rows too. The row is advisory: a broken
    store only stops bridge keys from authenticating.
-8. **`hal0-agents` is the bridge's MCP server (a later change on this ADR).**
+8. **`hal0-agents` is the bridge's MCP server (implemented in the second change).**
    It is mounted at `/mcp/agents` (client URL `/mcp/agents/mcp`), built once
    like the other two, and added to `BUNDLED_SERVER_IDS`. Hermes's keys stay in
    hal0-api's process environment; the server forwards with the keys hal0
    already holds and never hands one to a caller.
-9. **Run tools (a later change on this ADR).** Agents are listed with their
+9. **Run tools (implemented in the second change).** Agents are listed with their
    kind and health; a run is started on a Hermes profile (`hermes` is the
    default profile, `hermes/<profile>` a named one), waited for, polled,
    steered, stopped and listed; its events are replayed from a ledger in
@@ -230,6 +232,58 @@ ADR-0035 was verified against), shapes the answer:
     components, cap size, and are **gated**: they go to the approval inbox, and
     repeated pushes of one skill collapse into one row. A capabilities tool
     gives a read-only, sanitised view of what Hermes can do now.
+
+### Implementation decisions (second change)
+
+The second change (PR 2) implements Decisions 8 and 9. These calls were made
+while building it and reviewing it:
+
+- **The event cap counts rows.** The ledger keeps a run's newest 500 event
+  rows, not the events within 500 sequence numbers of its newest: Hermes
+  numbers every `message.delta`, while the watcher stores about 2 KiB of
+  deltas as one `message.text` row, so a window of sequence numbers kept only
+  the last ~500 deltas of text. A run's whole output stays in `runs.output`,
+  and `agent_run_status(run_id, offset=…)` and
+  `GET /api/bridge/runs/{run_id}?offset=` read it in 16 KiB windows
+  (`output_offset`, `output_total` and `next_offset`, in UTF-8 bytes). A view
+  whose output is cut names the next window in `more`.
+- **`unknown` is a terminal status.** A run that Hermes answers 404 for, that
+  Hermes reports as `unknown`, or that the watcher cannot reach Hermes about
+  for `give_up_s` (1800 s) ends as `unknown`: the ledger will hear nothing
+  more, so it no longer counts against the concurrency limit.
+- **Giving up is measured from the last contact with Hermes**, meaning the
+  last event, or the last stream that ended normally. A connection that stays
+  open and quiet is not a failure, so a slow model never ends a watch;
+  connection failures and refusals do not count as contact.
+- **Hermes's 401, 403 and 5xx answers are 502 to the client**
+  (`bridge.agent_refused`). They mean hal0's key or Hermes itself failed, not
+  the client's request. Other 4xx answers pass through with Hermes's status,
+  and Hermes's error code is in the message.
+- **The inbox row is withdrawn and filed again as the run moves.** The inbox
+  keeps one row per run. A request that a newer approval or a clarification
+  supersedes, that Hermes settles first, or that the run outlives is
+  withdrawn. A decision that does not reach Hermes leaves the run
+  `waiting_for_approval`, and the request is filed again unless Hermes
+  answered that it is no longer pending (409 `approval_not_pending` or
+  `stale_generation`): the operator must always have a row to answer.
+- **`bridge.disabled` and `bridge.unavailable` are different states.**
+  `bridge.disabled` (404) is a bridge switched off at boot: the REST routes
+  answer it and `/mcp/agents` is not mounted. `bridge.unavailable` (503) is a
+  bridge that is on but whose run service is not running (not published yet,
+  or its boot phase failed). The run routes and the `hal0-agents` tools both
+  answer it.
+- **The `/mcp/*` host allowlist is seeded from the box's own names.** The MCP
+  SDK's DNS-rebinding guard matches the `Host` header exactly, and its
+  localhost-only default refused a remote client calling the box by its
+  address. The default now carries `localhost`, `127.0.0.1`, every detected
+  LAN address, the hostname, its mDNS `.local` name and the
+  `[network].public_url` host, each bare and with the API port, on top of
+  `HAL0_MCP_ALLOWED_HOSTS`. This loosens nothing: a rebinding attack sends a
+  name the attacker controls, which is not among them.
+- **Bus events carry no run text.** `activity.db` is `0644`, while run text
+  belongs in the `0600` ledger. A bus message about a run names only
+  `<client> → <agent>` (and the status when the run ends); the event's data
+  carries the run id.
 
 ## Rejected
 
@@ -289,13 +343,13 @@ ADR-0035 was verified against), shapes the answer:
 - Memory written through the bridge is the first memory whose namespace is
   bound to a credential: a client can no longer write into another agent's
   private bank by naming it in a header.
-- The first change adds no `hal0-agents` server. Until it lands, the lines
-  `hal0 bridge add` prints for `hal0-agents` point at a path that is not
-  mounted, and `GET /api/bridge/me` is what proves a key works. The server and
-  its run tools, the run ledger, the watcher, the `agent-bridge` doctor row
-  and `hal0 bridge runs` land in a second change on this ADR. The teach tools
-  and the shipped skill that tells Hermes how to answer a delegated run land
-  in a third, and the dashboard card and the guide follow. Each applies the
+- The first change added no `hal0-agents` server: the lines `hal0 bridge add`
+  printed for it pointed at a path that was not mounted, and
+  `GET /api/bridge/me` was what proved a key worked. The second change landed
+  the server and its run tools, the run ledger, the watcher, the
+  `agent-bridge` doctor row and `hal0 bridge runs`. The teach tools and the
+  shipped skill that tells Hermes how to answer a delegated run land in a
+  third, and the dashboard card and the guide follow. Each applies the
   decisions above and records anything it learns as an amendment here.
 - Hermes's own approvals still apply to what a delegated run does. hal0 does
   not rewrite a run's input: it is work the operator delegated, not untrusted

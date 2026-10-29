@@ -1,4 +1,4 @@
-"""Tests for ``hal0 bridge {add,list,revoke,rotate,scopes}`` (ADR-0043).
+"""Tests for ``hal0 bridge {add,list,revoke,rotate,scopes,runs}`` (ADR-0043).
 
 The CLI is a thin client over ``/api/bridge/clients``: these tests stub the
 ``api_*`` helpers in :mod:`hal0.cli.bridge_commands` with fakes that return the
@@ -8,6 +8,7 @@ app so the ``bridge`` registration in :mod:`hal0.cli.main` is covered too.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import pytest
@@ -87,6 +88,7 @@ class FakeApi:
             ),
             "old-bot": _client("old-bot", ["agents"], revoked_at=1_792_100_000.0),
         }
+        self.runs: list[dict[str, Any]] = []
 
     def post(self, path: str, *, json: Any = None, **_kw: Any) -> Any:
         self.calls.append(("POST", path, json))
@@ -100,8 +102,10 @@ class FakeApi:
             raise _error("bridge.client_not_found", f"no bridge client named {name!r}")
         return _minted(name, self.existing[name]["scopes"])
 
-    def get(self, path: str, **_kw: Any) -> Any:
-        self.calls.append(("GET", path, None))
+    def get(self, path: str, **kw: Any) -> Any:
+        self.calls.append(("GET", path, kw.get("params")))
+        if path == "/api/bridge/runs":
+            return {"items": list(self.runs)}
         return {"items": list(self.existing.values())}
 
     def delete(self, path: str, **_kw: Any) -> Any:
@@ -336,3 +340,124 @@ def test_unreachable_api_exits_one(monkeypatch: pytest.MonkeyPatch) -> None:
     res = runner.invoke(app, ["bridge", "list"])
     assert res.exit_code == 1
     assert called == []
+
+
+# -- hal0 bridge runs ---------------------------------------------------------------------
+
+
+def _run_view(
+    run_id: str, client: str, status: str, *, started: float, updated: float
+) -> dict[str, Any]:
+    """The ``RunView`` keys ``GET /api/bridge/runs`` answers with."""
+    return {
+        "run_id": run_id,
+        "agent": "hermes",
+        "profile": "default",
+        "client": client,
+        "status": status,
+        "created_at": started,
+        "updated_at": updated,
+        "input_preview": "Reply pong",
+        "output": None,
+        "error": None,
+        "usage": None,
+        "pending": None,
+        "last_seq": 3,
+    }
+
+
+def _two_runs(fake_api: FakeApi) -> list[list[str]]:
+    """Load two runs into the fake API and return the cells the table must show."""
+    now = time.time()
+    fake_api.runs = [
+        _run_view(
+            "run_" + "a" * 32, "claude-code", "running", started=now - 7200, updated=now - 90
+        ),
+        _run_view("run_" + "b" * 32, "ci", "completed", started=now - 3 * 86400, updated=now - 20),
+    ]
+    return [
+        ["run_" + "a" * 32, "claude-code", "hermes", "running", "2h", "1m"],
+        ["run_" + "b" * 32, "ci", "hermes", "completed", "3d", "20s"],
+    ]
+
+
+def test_runs_table(fake_api: FakeApi, monkeypatch: pytest.MonkeyPatch) -> None:
+    _console_width(monkeypatch, 200)
+    expected = _two_runs(fake_api)
+    res = runner.invoke(app, ["bridge", "runs"])
+    assert res.exit_code == 0, res.output
+    header = res.stdout.splitlines()[1]
+    assert header.split() == ["run_id", "client", "agent", "status", "started", "updated"]
+    rows = [line.split() for line in res.stdout.splitlines()[2:]]
+    assert rows == expected
+    assert fake_api.calls == [("GET", "/api/bridge/runs", {"limit": 20})]
+
+
+def test_runs_table_keeps_cells_whole_at_80_columns(
+    fake_api: FakeApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At 80 columns no cell wraps onto a second line: one row per run."""
+    _console_width(monkeypatch, 80)
+    expected = _two_runs(fake_api)
+    res = runner.invoke(app, ["bridge", "runs"])
+    assert res.exit_code == 0, res.output
+    rows = [line.split() for line in res.stdout.splitlines()[2:]]
+    assert rows == expected
+
+
+def test_runs_keeps_the_run_id_whole_at_80_columns(fake_api: FakeApi) -> None:
+    """The id is what ``agent_run_status`` takes: other columns fold before it is cut."""
+    now = time.time()
+    run_id = "run_" + "c" * 32
+    fake_api.runs = [_run_view(run_id, "claude-code", "completed", started=now, updated=now)]
+    res = runner.invoke(app, ["bridge", "runs"], env={"COLUMNS": "80"})
+    assert res.exit_code == 0, res.output
+    assert run_id in res.stdout.splitlines()[2]
+
+
+def test_runs_filters_go_to_the_api(fake_api: FakeApi) -> None:
+    res = runner.invoke(
+        app, ["bridge", "runs", "--client", "ci", "--status", "running", "--limit", "5"]
+    )
+    assert res.exit_code == 0, res.output
+    assert fake_api.calls == [
+        ("GET", "/api/bridge/runs", {"limit": 5, "client": "ci", "status": "running"})
+    ]
+    assert "No runs match." in res.stdout
+
+
+def test_runs_empty(fake_api: FakeApi) -> None:
+    res = runner.invoke(app, ["bridge", "runs"])
+    assert res.exit_code == 0
+    assert "No delegated runs yet." in res.stdout
+
+
+@pytest.mark.parametrize("limit", ["0", "201", "many"])
+def test_runs_limit_is_validated(fake_api: FakeApi, limit: str) -> None:
+    res = runner.invoke(app, ["bridge", "runs", "--limit", limit])
+    assert res.exit_code == 2
+    assert fake_api.calls == []
+
+
+def test_runs_while_disabled(fake_api_disabled: None) -> None:
+    res = runner.invoke(app, ["bridge", "runs"])
+    assert res.exit_code == 1
+    assert "The agent bridge is disabled" in _flat(res.output)
+
+
+def test_runs_with_an_unreachable_api_exits_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: list[str] = []
+    monkeypatch.setattr(bridge_commands, "_api_unreachable", lambda _url: True)
+    monkeypatch.setattr(bridge_commands, "api_get", lambda *a, **k: called.append("get"))
+    assert runner.invoke(app, ["bridge", "runs"]).exit_code == 1
+    assert called == []
+
+
+def test_age_formats() -> None:
+    now = time.time()
+    assert bridge_commands._age(now - 5) == "5s"
+    assert bridge_commands._age(now - 300) == "5m"
+    assert bridge_commands._age(now - 7300) == "2h"
+    assert bridge_commands._age(now - 90000) == "1d"
+    assert bridge_commands._age(now + 60) == "0s"  # a clock skew never reads as negative
+    assert bridge_commands._age(None) == "-"
