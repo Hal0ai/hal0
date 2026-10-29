@@ -132,6 +132,27 @@ def test_events_cap_500_and_since_seq(store: BridgeStore) -> None:
     assert run is not None and run.last_seq == 600
 
 
+def test_events_cap_counts_rows_not_sequence_numbers(store: BridgeStore) -> None:
+    """The watcher stores many deltas as one ``message.text`` row, so seqs are sparse.
+
+    A window of 500 sequence numbers kept only the rows of the last ~500 deltas;
+    the cap keeps the newest 500 rows, however far apart their seqs are.
+    """
+    store.insert_run(_row("run_1", client="a"))
+    for i in range(1, 601):
+        store.append_event("run_1", i * 20, 0.0, "message.text", {"text": f"{i}"})
+    evs = store.events("run_1", since_seq=0, limit=1000)
+    assert len(evs) == 500
+    assert evs[0]["seq"] == 101 * 20 and evs[-1]["seq"] == 600 * 20
+    # Fewer rows than the cap: nothing is deleted, whatever the seqs.
+    store.insert_run(_row("run_2", client="a"))
+    for seq in (1, 10_000, 99_999):
+        store.append_event("run_2", seq, 0.0, "message.text", {"text": "x"})
+    assert [e["seq"] for e in store.events("run_2", since_seq=0, limit=10)] == [1, 10_000, 99_999]
+    # The cap is per run: run_2's rows did not touch run_1's.
+    assert len(store.events("run_1", since_seq=0, limit=1000)) == 500
+
+
 def test_append_event_keeps_highest_last_seq_and_replaces_a_repeat(store: BridgeStore) -> None:
     store.insert_run(_row("run_1", client="a"))
     store.append_event("run_1", 5, 1.0, "tool.started", {"n": 1})

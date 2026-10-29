@@ -14,7 +14,7 @@ client asks who it is::
 and the operator watches and stops the runs clients have delegated to Hermes::
 
     GET    /api/bridge/runs                    — runs, newest first (?client= ?status= ?limit=)
-    GET    /api/bridge/runs/{run_id}           — one run
+    GET    /api/bridge/runs/{run_id}           — one run, its output in 16 KiB windows (?offset=)
     GET    /api/bridge/runs/{run_id}/events    — SSE: ledger replay, then live, until the run ends
     POST   /api/bridge/runs/{run_id}/stop      — ask Hermes to stop a live run
 
@@ -74,6 +74,7 @@ from hal0.api.routes.config import api_base_url
 from hal0.bridge.caller import Caller
 from hal0.bridge.errors import BridgeError
 from hal0.bridge.keys import SCOPE_SERVERS
+from hal0.bridge.output import output_window
 from hal0.bridge.store import TERMINAL_STATUSES, BridgeStore, BridgeStoreError, ClientRow
 from hal0.config import paths
 from hal0.config.loader import load_hal0_config
@@ -398,10 +399,23 @@ async def list_runs(
 
 
 @_gated.get("/runs/{run_id}")
-async def get_run(run_id: str, request: Request) -> dict[str, Any]:
-    """One run's RunView; 404 ``bridge.run_not_found`` for an id the ledger does not hold."""
+async def get_run(
+    run_id: str, request: Request, offset: int = Query(default=0, ge=0)
+) -> dict[str, Any]:
+    """One run's RunView; 404 ``bridge.run_not_found`` for an id the ledger does not hold.
+
+    ``output`` is the 16 KiB window that starts ``offset`` bytes into the run's
+    whole output, with ``output_offset``, ``output_total`` and ``next_offset``
+    (None after the last window): :mod:`hal0.bridge.output`, as
+    ``agent_run_status`` pages it (ADR-0043 decision 9).
+    """
     service = _service(request)
-    return await _serve(service.get_run(_caller(request), run_id))
+    view = await _serve(service.get_run(_caller(request), run_id))
+    output = view.get("output")
+    if isinstance(output, str):
+        view["output"], page = output_window(output, offset)
+        view.update(page)
+    return view
 
 
 @_gated.post("/runs/{run_id}/stop")

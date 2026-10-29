@@ -6,8 +6,8 @@ runs. Only the sha256 of each client key is stored; the plaintext is returned
 once by :meth:`BridgeStore.add_client` / :meth:`BridgeStore.rotate_client` and
 cannot be recovered.
 
-The run ledger (decision 9) is the ``runs`` table plus the last
-:data:`EVENT_CAP` events of each run in ``run_events``. A run is the bridge's
+The run ledger (decision 9) is the ``runs`` table plus the newest
+:data:`EVENT_CAP` event rows of each run in ``run_events``. A run is the bridge's
 record of work it delegated to Hermes; the ledger is what survives a client
 disconnect or a hal0-api restart so the run can still be polled and replayed.
 
@@ -44,7 +44,12 @@ LAST_SEEN_RESOLUTION_S = 60.0
 
 _CLIENT_COLUMNS = "name, created_at, created_by, revoked_at, last_seen_at, note, scopes"
 
-#: Events kept per run: ``append_event`` deletes rows at or below ``seq - EVENT_CAP``.
+#: Event rows kept per run: ``append_event`` deletes every row below the
+#: ``EVENT_CAP``-th newest. A count of rows, not a window of sequence numbers:
+#: Hermes gives every ``message.delta`` its own ``seq`` while the watcher stores
+#: many as one ``message.text`` row, so a window of 500 sequence numbers kept the
+#: text of only the last ~500 deltas. A run's whole output stays in
+#: ``runs.output`` and is read in windows (:mod:`hal0.bridge.output`).
 EVENT_CAP = 500
 
 #: Run statuses that mean nothing more will happen to a run. ``unknown`` is
@@ -411,27 +416,35 @@ class BridgeStore:
             return row
 
     def append_event(self, run_id: str, seq: int, ts: float, event: str, payload: Any) -> None:
-        """Write one event, raise ``last_seq``, and keep only the newest :data:`EVENT_CAP`.
+        """Write one event, raise ``last_seq``, and keep only the newest :data:`EVENT_CAP` rows.
 
         A repeated ``seq`` replaces the earlier row (a reconnect can replay a frame).
-        Rows at or below ``seq - EVENT_CAP`` are deleted, so a run keeps the 500
-        events up to its highest sequence. An unknown run raises
-        ``bridge.run_not_found``.
+        An unknown run raises ``bridge.run_not_found``.
         """
         with connect(self.path) as conn, tx(conn):
-            bumped = conn.execute(
-                "UPDATE runs SET last_seq = MAX(last_seq, ?) WHERE run_id = ?", (seq, run_id)
-            )
-            if bumped.rowcount == 0:
-                raise _run_not_found(run_id)
-            conn.execute(
-                "INSERT OR REPLACE INTO run_events (run_id, seq, ts, event, payload_json) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (run_id, seq, ts, event, json.dumps(payload)),
-            )
-            conn.execute(
-                "DELETE FROM run_events WHERE run_id = ? AND seq <= ?", (run_id, seq - EVENT_CAP)
-            )
+            self._append_event(conn, run_id, seq, ts, event, payload)
+
+    @staticmethod
+    def _append_event(
+        conn: sqlite3.Connection, run_id: str, seq: int, ts: float, event: str, payload: Any
+    ) -> None:
+        """:meth:`append_event` inside the caller's transaction."""
+        bumped = conn.execute(
+            "UPDATE runs SET last_seq = MAX(last_seq, ?) WHERE run_id = ?", (seq, run_id)
+        )
+        if bumped.rowcount == 0:
+            raise _run_not_found(run_id)
+        conn.execute(
+            "INSERT OR REPLACE INTO run_events (run_id, seq, ts, event, payload_json) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (run_id, seq, ts, event, json.dumps(payload)),
+        )
+        # Below the EVENT_CAP-th newest row; NULL (nothing deleted) while there are fewer.
+        conn.execute(
+            "DELETE FROM run_events WHERE run_id = ? AND seq < ("
+            "SELECT seq FROM run_events WHERE run_id = ? ORDER BY seq DESC LIMIT 1 OFFSET ?)",
+            (run_id, run_id, EVENT_CAP - 1),
+        )
 
     def events(self, run_id: str, *, since_seq: int, limit: int) -> list[dict[str, Any]]:
         """Return up to ``limit`` events with ``seq`` above ``since_seq``, oldest first.

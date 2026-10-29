@@ -51,12 +51,18 @@ Every agent-written text a result carries (``output``, ``error``,
 ``input_preview``, the ``pending`` request, ``events_tail`` and event payloads)
 passes through the log redactor (:func:`hal0.redaction.redact_log_line`) before
 a remote machine sees it, and a string over 16 KiB is cut at that size with
-``truncated: true``. When the cut text can be read from the run's events,
-``more`` names the call that reads it: ``agent_run_events(run_id, since_seq=0)``.
-It is ``since_seq=0``, not the run's last sequence: events are returned after
-``since_seq``, so a finished run has none after its last one, while a replay
-from 0 carries the text in ``message.text`` events (each far under the cap;
-page a long run with ``limit`` and ``last_seq``).
+``truncated: true``.
+
+``output`` is paged rather than lost (:mod:`hal0.bridge.output`): a view shows
+the 16 KiB window of the masked text that ``agent_run_status``'s ``offset``
+names (0 everywhere else), with ``output_offset``, ``output_total`` and
+``next_offset`` in bytes. While more follows, ``truncated`` is true and
+``more`` names the call that reads the next window,
+``agent_run_status(run_id, offset=<next_offset>)``. The events are no way back
+to a long answer: the ledger keeps only a run's newest 500 event rows. Any
+other text over 16 KiB (``error``, a ``pending`` request, an event in
+``events_tail`` or an events page) is cut with ``truncated: true`` and nothing
+pages the rest.
 
 Like :mod:`hal0.mcp.memory`, the tool definitions are built once per process
 and shared by every server; the bridge service is read off the server's
@@ -78,6 +84,7 @@ from mcp.types import ToolAnnotations
 from hal0.api.auth import ANON, AuthPrincipal
 from hal0.bridge.caller import Caller
 from hal0.bridge.errors import BridgeError
+from hal0.bridge.output import OUTPUT_WINDOW_BYTES, output_window
 from hal0.mcp._binding import BoundFastMCP, ToolContext, bound_server
 from hal0.redaction import redact_log_line
 
@@ -89,12 +96,12 @@ __all__ = ["MAX_TEXT_BYTES", "build_server"]
 log = structlog.get_logger(__name__)
 
 #: The most bytes of one run text (``output``, ``error``, an event's text) a tool returns.
-MAX_TEXT_BYTES = 16 * 1024
+MAX_TEXT_BYTES = OUTPUT_WINDOW_BYTES
 
-#: The call a ``more`` pointer names. From 0, because events come back *after* ``since_seq``:
-#: a finished run has none after its last sequence, but its ``message.text`` events carry
-#: the whole text from 0.
-_MORE = "agent_run_events(run_id, since_seq=0)"
+
+def _more(next_offset: int) -> str:
+    """The call a ``more`` pointer names: the next window of the run's output."""
+    return f"agent_run_status(run_id, offset={next_offset})"
 
 
 def build_server(
@@ -171,28 +178,35 @@ def _clean_tree(value: Any) -> tuple[Any, bool]:
     return value, False
 
 
-def _view(view: dict[str, Any]) -> dict[str, Any]:
+def _view(view: dict[str, Any], *, offset: int = 0) -> dict[str, Any]:
     """A RunView (or a wait's view) made safe to return: secrets masked, texts capped.
 
-    Every agent-written text goes through :func:`_clean`: ``output`` and ``error``,
+    ``output`` is masked whole, then the 16 KiB window at byte ``offset`` is
+    shown with ``output_offset``, ``output_total`` and ``next_offset``
+    (:func:`hal0.bridge.output.output_window`); masking first means a window
+    edge cannot split a secret the redactor would have caught. ``error``,
     ``input_preview``, the ``pending`` request (a clarification's question or an
-    approval's command), and ``events_tail`` of a wait (cleaned like an events
-    page). When any text was cut, ``truncated`` is true; when the cut text is one
-    the run's events carry (``output``, ``error``, ``events_tail``), ``more`` names
-    the call that reads it (see :data:`_MORE`).
+    approval's command) and ``events_tail`` of a wait go through :func:`_clean`.
+    ``truncated`` is true when any text was cut or more output follows; ``more``
+    names the call that reads the next window of the output.
     """
     out = dict(view)
     truncated = False
-    pageable = False
-    for key in ("output", "error"):
-        text = out.get(key)
-        if isinstance(text, str):
-            out[key], cut = _clean(text)
-            pageable = pageable or cut
+    output = out.get("output")
+    if isinstance(output, str):
+        out["output"], page = output_window(redact_log_line(output), offset)
+        out.update(page)
+        if page["next_offset"] is not None:
+            truncated = True
+            out["more"] = _more(page["next_offset"])
+    error = out.get("error")
+    if isinstance(error, str):
+        out["error"], cut = _clean(error)
+        truncated = truncated or cut
     tail = out.get("events_tail")
     if isinstance(tail, list):
         out["events_tail"], cut = _clean_tree(tail)
-        pageable = pageable or cut
+        truncated = truncated or cut
     preview = out.get("input_preview")
     if isinstance(preview, str):
         out["input_preview"], cut = _clean(preview)
@@ -201,10 +215,8 @@ def _view(view: dict[str, Any]) -> dict[str, Any]:
     if pending is not None:
         out["pending"], cut = _clean_tree(pending)
         truncated = truncated or cut
-    if pageable or truncated:
+    if truncated:
         out["truncated"] = True
-    if pageable:
-        out["more"] = _MORE
     return out
 
 
@@ -359,17 +371,21 @@ def _agents_tool_definitions() -> dict[str, Tool]:
     @server.tool(
         name="agent_run_status",
         description=(
-            "A run's current view: status, output when it has finished, error, usage, and "
-            "pending (the approval or clarification it waits on, if any). Output over "
-            "16 KiB is cut and the view then carries truncated: true; read the whole text "
-            "from its message.text events with agent_run_events(run_id, since_seq=0)."
+            "A run's current view: status, output (the text so far), error, usage, and "
+            "pending (the approval or clarification it waits on, if any). Output comes in "
+            "16 KiB windows: offset is the byte offset to read from (default 0), and the "
+            "view carries output_offset, output_total and next_offset (null after the last "
+            "window). While more follows, truncated is true and more names the next call, "
+            "agent_run_status(run_id, offset=<next_offset>)."
         ),
         annotations=_ANNOTATIONS["agent_run_status"],
     )
     @_guarded
-    async def agent_run_status(run_id: str, ctx: ToolContext | None = None) -> dict[str, Any]:
+    async def agent_run_status(
+        run_id: str, offset: int = 0, ctx: ToolContext | None = None
+    ) -> dict[str, Any]:
         caller, service = _context(ctx)
-        return _view(await service.get_run(caller, run_id))
+        return _view(await service.get_run(caller, run_id), offset=offset)
 
     @server.tool(
         name="agent_run_events",
@@ -377,8 +393,9 @@ def _agents_tool_definitions() -> dict[str, Tool]:
             "The run's stored events with seq above since_seq, oldest first (limit at most "
             "500). Returns {run_id, events, last_seq}; call again with since_seq=last_seq "
             "to follow a run, or since_seq=0 to replay it from the start. Streamed text "
-            "arrives as message.text events; an event text over 16 KiB is cut and the "
-            "page then carries truncated: true."
+            "arrives as message.text events. Only a run's newest 500 events are kept, so "
+            "read a long output with agent_run_status(run_id, offset=...); an event text "
+            "over 16 KiB is cut and the page then carries truncated: true."
         ),
         annotations=_ANNOTATIONS["agent_run_events"],
     )

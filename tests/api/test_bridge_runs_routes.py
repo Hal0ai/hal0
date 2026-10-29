@@ -166,8 +166,31 @@ def test_run_view_shape(admin_client: TestClient) -> None:
         "usage",
         "pending",
         "last_seq",
+        "output_offset",
+        "output_total",
+        "next_offset",
     }
     assert view["output"] == "pong"
+    assert (view["output_offset"], view["output_total"], view["next_offset"]) == (0, 4, None)
+
+
+def test_run_output_pages_in_16_kib_windows(admin_client: TestClient) -> None:
+    """``?offset=`` pages the whole ``runs.output``, as ``agent_run_status`` does (ADR-0043)."""
+    text = "".join(f"{i:05d}" for i in range(6_000))  # 30 000 bytes
+    seed(admin_client, make_run("run_long", status="completed", output=text))
+    first = admin_client.get("/api/bridge/runs/run_long").json()
+    assert first["output"] == text[:16_384]
+    assert (first["output_offset"], first["output_total"]) == (0, 30_000)
+    second = admin_client.get(f"/api/bridge/runs/run_long?offset={first['next_offset']}").json()
+    assert second["next_offset"] is None
+    assert first["output"] + second["output"] == text
+    assert admin_client.get("/api/bridge/runs/run_long?offset=-1").status_code == 422
+
+
+def test_a_run_without_output_has_no_paging_fields(admin_client: TestClient) -> None:
+    seed(admin_client, make_run("run_quiet", status="running"))
+    view = admin_client.get("/api/bridge/runs/run_quiet").json()
+    assert view["output"] is None and "next_offset" not in view
 
 
 def test_runs_list_filters_by_client_status_and_limit(admin_client: TestClient) -> None:

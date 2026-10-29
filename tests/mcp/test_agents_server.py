@@ -444,15 +444,63 @@ async def test_output_and_error_are_scrubbed() -> None:
     assert out["output"].startswith("curl -H 'Authorization: Bearer")
 
 
-async def test_output_over_16_kib_is_cut_with_a_pointer_to_the_events() -> None:
+async def test_output_over_16_kib_is_cut_with_a_pointer_to_the_next_window() -> None:
     view = {"run_id": "run_1", "status": "completed", "output": "x" * 40_000, "last_seq": 12}
     server = _server(_Recorder(view), CC)
     out = _payload(await server.call_tool("agent_run_status", {"run_id": "run_1"}))
-    assert len(out["output"].encode()) <= 16 * 1024
+    assert out["output"] == "x" * 16_384
     assert out["truncated"] is True
-    # Always from 0: a finished run has nothing after its last_seq, so since_seq=last_seq
-    # would page nothing; the message.text events replayed from 0 carry the whole text.
-    assert out["more"] == "agent_run_events(run_id, since_seq=0)"
+    assert (out["output_offset"], out["output_total"], out["next_offset"]) == (0, 40_000, 16_384)
+    assert out["more"] == "agent_run_status(run_id, offset=16384)"
+
+
+async def test_status_offset_pages_the_whole_output() -> None:
+    text = "".join(f"{i:05d}" for i in range(8_000))  # 40 000 bytes, every window different
+    server = _server(_Recorder({"run_id": "run_1", "status": "completed", "output": text}), CC)
+    got: list[str] = []
+    offset: int | None = 0
+    while offset is not None:
+        out = _payload(
+            await server.call_tool("agent_run_status", {"run_id": "run_1", "offset": offset})
+        )
+        assert out["output_offset"] == offset and out["output_total"] == 40_000
+        got.append(out["output"])
+        if out["next_offset"] is None:
+            assert "truncated" not in out and "more" not in out
+        else:
+            assert out["more"] == f"agent_run_status(run_id, offset={out['next_offset']})"
+        offset = out["next_offset"]
+    assert [len(w) for w in got] == [16_384, 16_384, 7_232]
+    assert "".join(got) == text
+    past = _payload(
+        await server.call_tool("agent_run_status", {"run_id": "run_1", "offset": 99_999})
+    )
+    assert past["output"] == "" and past["output_offset"] == 40_000 and past["next_offset"] is None
+
+
+async def test_status_offset_never_splits_a_character() -> None:
+    text = "é" * 20_000  # two bytes each: 16 384 is a boundary, 16 385 is not
+    server = _server(_Recorder({"run_id": "run_1", "status": "completed", "output": text}), CC)
+    mid = _payload(
+        await server.call_tool("agent_run_status", {"run_id": "run_1", "offset": 16_385})
+    )
+    assert mid["output_offset"] == 16_386  # moved forward to the next character
+    assert set(mid["output"]) == {"é"}
+
+
+async def test_status_pages_the_masked_text() -> None:
+    """Masking runs on the whole output first: no window edge can split a secret."""
+    secret = "Authorization: Bearer hal0bk_cc.s3cr3tvalue0123456789"
+    text = "a" * (16_384 - 30) + secret + "b" * 100
+    server = _server(_Recorder({"run_id": "run_1", "status": "completed", "output": text}), CC)
+    first = _payload(await server.call_tool("agent_run_status", {"run_id": "run_1"}))
+    rest = _payload(
+        await server.call_tool(
+            "agent_run_status", {"run_id": "run_1", "offset": first["next_offset"]}
+        )
+    )
+    assert "s3cr3tvalue" not in first["output"] + rest["output"]
+    assert "0123456789" not in first["output"] + rest["output"]
 
 
 #: 20 deltas of 2.1 KiB: each flushes as its own ``message.text`` event, 42 KB in all.
@@ -466,31 +514,47 @@ async def test_following_the_more_pointer_returns_the_text(server: FastMCP) -> N
         await server.call_tool("agent_run", {"agent": "hermes", "input": "talk", "wait_s": 5})
     )
     assert done["status"] == "completed" and done["truncated"] is True
-    assert (
-        len(done["output"].encode()) <= 16 * 1024 and done["output"] == full[: len(done["output"])]
-    )
-    assert done["more"] == "agent_run_events(run_id, since_seq=0)"
-
-    # What the old pointer (since_seq=<last_seq>) would have fetched: nothing.
-    after_last = _payload(
-        await server.call_tool(
-            "agent_run_events", {"run_id": done["run_id"], "since_seq": done["last_seq"]}
+    assert done["output"] == full[: len(done["output"])] and len(done["output"]) == 16_384
+    assert done["more"] == f"agent_run_status(run_id, offset={done['next_offset']})"
+    assert done["output_total"] == len(full.encode())
+    text = done["output"]
+    offset = done["next_offset"]
+    while offset is not None:
+        page = _payload(
+            await server.call_tool("agent_run_status", {"run_id": done["run_id"], "offset": offset})
         )
-    )
-    assert after_last["events"] == []
+        text += page["output"]
+        offset = page["next_offset"]
+    assert text == full
 
-    # What the pointer says: from 0, the text arrives as message.text events.
+
+#: The reviewer's probe: 8 000 four-byte deltas, a 32 000-byte answer. Hermes numbers
+#: every delta, the watcher stores ~2 KiB of them per ``message.text`` row.
+PROBE_REPLY = ["abcd"] * 8_000
+
+
+@pytest.mark.parametrize("pong_chunks", [PROBE_REPLY], indirect=True)
+async def test_a_long_answer_of_small_deltas_is_recoverable_whole(server: FastMCP) -> None:
+    full = "".join(PROBE_REPLY)
+    done = _payload(
+        await server.call_tool("agent_run", {"agent": "hermes", "input": "talk", "wait_s": 30})
+    )
+    assert done["status"] == "completed" and done["output_total"] == 32_000
+    text, offset = done["output"], done["next_offset"]
+    while offset is not None:
+        page = _payload(
+            await server.call_tool("agent_run_status", {"run_id": done["run_id"], "offset": offset})
+        )
+        text, offset = text + page["output"], page["next_offset"]
+    assert text == full
+    # The events alone hold every message.text row: the cap counts rows, not seqs.
     page = _payload(
         await server.call_tool(
             "agent_run_events", {"run_id": done["run_id"], "since_seq": 0, "limit": 500}
         )
     )
     texts = [e["payload"]["text"] for e in page["events"] if e["event"] == "message.text"]
-    assert "".join(texts) == full  # each message.text event is far under the cap
-    # run.completed repeats the whole output, so that one event is cut and the page says so.
-    (completed,) = [e for e in page["events"] if e["event"] == "run.completed"]
-    assert len(completed["payload"]["output"].encode()) <= 16 * 1024
-    assert page["truncated"] is True
+    assert "".join(texts) == full
 
 
 async def test_output_under_the_cap_is_whole() -> None:
