@@ -8,6 +8,7 @@
 export const ENDPOINTS = {
   // ── Slots / status (hal0-api) ────────────────────────────────────
   status: '/api/status',
+  systemStats: '/api/system-stats',
   slots: '/api/slots',
 
   // ── ComfyUI generation engine (slots-page Image-Gen tab) ─────────

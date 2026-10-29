@@ -1,0 +1,213 @@
+/* hal0 Overview v2 — #dashboard landing page.
+   Colours are var(--…) tokens from dashboard.css only; no literals. */
+
+.ov-view {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  /* no min-width: the page reflows down to phone width */
+}
+
+/* ─── band grid ─────────────────────────────────────────────────────────── */
+.ov-band {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+.ov-band > .c3  { grid-column: span 3; }
+.ov-band > .c4  { grid-column: span 4; }
+.ov-band > .c5  { grid-column: span 5; }
+.ov-band > .c7  { grid-column: span 7; }
+.ov-band > .c8  { grid-column: span 8; }
+.ov-band > .c12 { grid-column: span 12; }
+.ov-stack { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+
+@media (max-width: 1100px) {
+  .ov-band > .c3,
+  .ov-band > .c4 { grid-column: span 6; }
+  .ov-band > .c5,
+  .ov-band > .c7,
+  .ov-band > .c8 { grid-column: span 12; }
+}
+@media (max-width: 760px) {
+  .ov-band > .c3,
+  .ov-band > .c4,
+  .ov-band > .c5,
+  .ov-band > .c7,
+  .ov-band > .c8,
+  .ov-band > .c12 { grid-column: span 12; }
+}
+
+/* ─── card ──────────────────────────────────────────────────────────────── */
+.ov-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--rad-lg);
+  overflow: hidden;
+}
+.ov-card-h {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--line-soft);
+  flex: none;
+}
+.ov-card-t {
+  font-family: var(--jbm);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-2);
+  white-space: nowrap;
+}
+.ov-card-n {
+  font-family: var(--jbm);
+  font-size: 10.5px;
+  color: var(--fg-4);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ov-card-h .sp { flex: 1; }
+.ov-card-b { padding: 14px; min-width: 0; }
+.ov-card-b.flush { padding: 0; }
+.ov-card-f {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 14px;
+  border-top: 1px solid var(--line-soft);
+  font-size: 11.5px;
+  color: var(--fg-3);
+  flex: none;
+}
+
+/* hero digits */
+.ov-hero {
+  font-family: var(--jbm);
+  font-size: 26px;
+  font-weight: 500;
+  line-height: 1.1;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ─── pill ──────────────────────────────────────────────────────────────── */
+.ov-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 18px;
+  padding: 0 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--rad-pill);
+  font-family: var(--jbm);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  color: var(--fg-3);
+  background: var(--bg-2);
+}
+.ov-pill.ok     { color: var(--ok);     background: var(--ok-soft);     border-color: var(--ok-line); }
+.ov-pill.warn   { color: var(--warn);   background: var(--warn-soft);   border-color: var(--warn-line); }
+.ov-pill.err    { color: var(--err);    background: var(--err-soft);    border-color: var(--err-line); }
+.ov-pill.img    { color: var(--comfy);  background: var(--comfy-soft);  border-color: var(--comfy-line); }
+.ov-pill.accent { color: var(--accent); background: var(--accent-soft); border-color: var(--accent-line); }
+.ov-pill.dim    { color: var(--fg-4);   background: transparent;        border-color: var(--line); }
+
+/* ─── device chip ───────────────────────────────────────────────────────── */
+.ov-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--rad-xs);
+  font-family: var(--jbm);
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: var(--fg-3);
+}
+.ov-chip.vulkan { color: var(--dev-vulkan); border-color: var(--info-line); }
+.ov-chip.rocm   { color: var(--dev-rocm);   border-color: var(--err-line); }
+.ov-chip.npu    { color: var(--dev-npu);    border-color: var(--line-strong); }
+.ov-chip.cpu    { color: var(--dev-cpu);    border-color: var(--line-strong); }
+.ov-chip.amber  { color: var(--accent);     border-color: var(--accent-line); background: var(--accent-soft); }
+
+/* ─── status dot ────────────────────────────────────────────────────────── */
+.ov-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--fg-5);
+}
+.ov-dot.ready   { background: var(--accent); }
+.ov-dot.serving { background: var(--ok); animation: pulse 1.6s ease-in-out infinite; }
+.ov-dot.err     { background: var(--err); }
+.ov-dot.up      { background: var(--ok); }
+
+/* ─── track (thin meter) ────────────────────────────────────────────────── */
+.ov-track {
+  position: relative;
+  height: 4px;
+  border-radius: var(--rad-pill);
+  background: var(--bg-4);
+  overflow: hidden;
+}
+.ov-track > i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+/* ─── link + buttons ────────────────────────────────────────────────────── */
+.ov-lnk {
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-size: 11.5px;
+  color: var(--accent);
+  cursor: pointer;
+}
+.ov-lnk:hover { color: var(--hal0-accent-hover); text-decoration: underline; }
+
+.ov-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--rad);
+  background: var(--bg-2);
+  color: var(--fg-2);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ov-btn:hover { background: var(--bg-3); color: var(--fg); }
+.ov-btn.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+.ov-btn.primary:hover { background: var(--hal0-accent-hover); border-color: var(--hal0-accent-hover); color: var(--bg); }
+.ov-btn.danger { color: var(--err); border-color: var(--err-line); background: var(--err-soft); }
+.ov-btn.danger:hover { background: var(--err-soft); border-color: var(--err); color: var(--err); }
+.ov-btn.sm { height: 22px; padding: 0 8px; font-size: 11px; }
+.ov-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* ─── sparkline ─────────────────────────────────────────────────────────── */
+.ov-spk { display: block; flex: none; overflow: visible; }
