@@ -119,6 +119,19 @@ describe('Overview v2 services rows', () => {
     expect(went).toEqual(['services'])
   })
 
+  it('Enter on a focused open arrow does not navigate; Enter on the row does', () => {
+    mount()
+    const arrow = host.querySelector('[data-testid="ov-svc-open-openwebui"]')!
+    act(() => {
+      arrow.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    })
+    expect(went).toEqual([])
+    act(() => {
+      host.querySelectorAll('.ov-svc')[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    })
+    expect(went).toEqual(['services'])
+  })
+
   it('says the source is pending while services have not loaded', () => {
     box.pending = true
     box.services = []

@@ -18,14 +18,18 @@ function storedBank() {
   }
 }
 
+// Thin gate: a box with memory off never mounts the body, so it never polls /api/memory/*.
 function OvMemory({ onGo }) {
   const enabled = useMemoryEnabled()
+  return enabled ? <OvMemoryBody onGo={onGo} /> : null
+}
+
+function OvMemoryBody({ onGo }) {
   const engine = useMemoryEngine()
   const banksQ = useMemoryBanks()
   const bankIds = useMemo(() => (banksQ.data?.banks ?? []).map((b) => b.bank_id), [banksQ.data])
   const bank = chosenBank(bankIds, storedBank(), (typeof window !== 'undefined' && window.location.hash) || '')
-  const stats = useBankStats(enabled ? bank : null)
-  if (!enabled) return null
+  const stats = useBankStats(bank)
 
   const e = engine.data
   const up = e?.reachable === true

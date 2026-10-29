@@ -48,7 +48,7 @@ function OvServices({ onGo }) {
               tabIndex={0}
               onClick={() => onGo('services')}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') onGo('services')
+                if (e.key === 'Enter' && e.target === e.currentTarget) onGo('services')
               }}
               title={s.name}
               style={{ cursor: 'pointer' }}

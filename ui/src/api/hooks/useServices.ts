@@ -36,6 +36,7 @@ export interface ManagedService {
   actions: string[]
   mdns_capable: boolean
   hints: string[]
+  wired?: Record<string, boolean | string | string[] | null> | null
 }
 
 export interface MdnsStatus {

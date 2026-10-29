@@ -15,12 +15,20 @@ const m = vi.hoisted(() => ({
   banks: ['hal0-mono', 'other'],
   stats: undefined as any,
   statsFor: [] as unknown[],
+  engineCalls: 0,
+  banksCalls: 0,
 }))
 
 vi.mock('@/api/hooks/useMemory', () => ({ useMemoryEnabled: () => m.enabled }))
 vi.mock('@/api/hooks/useHindsight', () => ({
-  useMemoryEngine: () => ({ data: m.engine }),
-  useMemoryBanks: () => ({ data: { banks: m.banks.map((bank_id) => ({ bank_id })) } }),
+  useMemoryEngine: () => {
+    m.engineCalls++
+    return { data: m.engine }
+  },
+  useMemoryBanks: () => {
+    m.banksCalls++
+    return { data: { banks: m.banks.map((bank_id) => ({ bank_id })) } }
+  },
   useBankStats: (bank: string | null) => {
     m.statsFor.push(bank)
     return { data: m.stats }
@@ -49,6 +57,8 @@ beforeEach(() => {
     last_consolidated_at: new Date(Date.now() - 5 * 60_000).toISOString(),
   }
   m.statsFor = []
+  m.engineCalls = 0
+  m.banksCalls = 0
   went = []
   try {
     localStorage.clear()
@@ -72,6 +82,10 @@ describe('OvMemory', () => {
     m.enabled = false
     mount()
     expect(host.innerHTML).toBe('')
+    // A gated-off box never polls /api/memory/* from the Overview.
+    expect(m.engineCalls).toBe(0)
+    expect(m.banksCalls).toBe(0)
+    expect(m.statsFor).toEqual([])
   })
 
   it('shows the Hindsight pill, bank count, bank and three figures', () => {
