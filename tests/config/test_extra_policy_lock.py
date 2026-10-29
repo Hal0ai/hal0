@@ -105,6 +105,9 @@ _EXPECTED_EXTRA_POLICY: dict[str, str] = {
     # [network] — persisted browser-origin additions (#2382). Forbid: a typo'd
     # key must fail loudly, never silently leave an origin out of the allowlist.
     "NetworkConfig": "forbid",
+    # [bridge] — agent bridge limits (ADR-0043). Forbid: a typo'd key must
+    # fail loudly, never silently leave a limit at its default.
+    "BridgeConfig": "forbid",
 }
 
 

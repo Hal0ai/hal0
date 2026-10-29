@@ -1,0 +1,306 @@
+"""``hal0 doctor all`` ``bridge-store`` row (ADR-0043).
+
+The row audits ``bridge.db`` read-only: it never creates, migrates or
+re-permissions the file, so every case here builds the store with
+:class:`~hal0.bridge.store.BridgeStore` first and then checks what the row
+says about it.
+"""
+
+from __future__ import annotations
+
+import os
+import sqlite3
+from pathlib import Path
+
+import pytest
+
+from hal0.bridge.store import BridgeStore
+from hal0.cli import doctor_all as da
+
+
+def _store(tmp_path: Path, *names: str) -> Path:
+    """A real ``bridge.db`` (0600, migrated) holding one live client per name."""
+    db = tmp_path / "bridge.db"
+    store = BridgeStore(db)
+    store.open()
+    for name in names:
+        store.add_client(name, created_by="test")
+    return db
+
+
+def test_disabled_passes_without_touching_the_file(tmp_path: Path) -> None:
+    db = tmp_path / "bridge.db"
+    c = da.check_bridge_store(path=db, enabled=False)
+    assert (c.key, c.label, c.status, c.critical) == (
+        "bridge-store",
+        "Agent bridge store",
+        "pass",
+        False,
+    )
+    assert "disabled" in c.detail
+    assert not db.exists()
+
+
+@pytest.mark.parametrize("api_running", [False, None])
+def test_absent_file_passes_while_hal0_api_is_down(
+    tmp_path: Path, api_running: bool | None
+) -> None:
+    """hal0-api creates bridge.db at start, so before that a missing file is expected."""
+    db = tmp_path / "bridge.db"
+    c = da.check_bridge_store(path=db, enabled=True, api_running=api_running)
+    assert c.status == "pass"
+    assert "not created yet" in c.detail
+    assert "hal0-api starts" in c.detail
+    assert "hal0 bridge add" not in c.detail
+    assert not db.exists()  # the row is read-only: it must not create the store
+
+
+def test_absent_file_warns_when_hal0_api_is_running(tmp_path: Path) -> None:
+    """A running hal0-api with the bridge on created bridge.db, unless that open failed."""
+    db = tmp_path / "bridge.db"
+    c = da.check_bridge_store(path=db, enabled=True, api_running=True)
+    assert c.status == "warn"
+    assert not c.critical
+    assert "hal0-api is running" in c.detail
+    assert "hal0.bridge.store_unavailable" in c.detail
+    assert not db.exists()
+
+
+def test_build_all_checks_tells_the_row_whether_hal0_api_answered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The health probe answering is what "hal0-api is running" means to the row."""
+
+    def _stub(*_a: object, **_kw: object) -> da.Check:
+        return da.Check("stub", "stub", "pass", "stub")
+
+    # Every other row is stubbed: only the bridge row's wiring is under test.
+    for name in dir(da):
+        if name.startswith("check_") and callable(getattr(da, name)):
+            monkeypatch.setattr(da, name, _stub)
+    monkeypatch.setattr(da, "build_checks", lambda **_kw: [])
+    monkeypatch.setattr(da, "_get_any", lambda *_a, **_kw: None)
+    seen: list[object] = []
+
+    def _row(**kwargs: object) -> da.Check:
+        seen.append(kwargs.get("api_running"))
+        return _stub()
+
+    monkeypatch.setattr(da, "check_bridge_store", _row)
+    for health in ({"status": "ok"}, None):
+        payloads = dict.fromkeys(("urls", "system", "capabilities", "memory", "services"))
+        payloads["health"] = health
+        monkeypatch.setattr(da, "gather_payloads", lambda _base, p=payloads: p)
+        da.build_all_checks()
+    assert seen == [True, False]
+
+
+def test_schema_latest_uses_the_migration_runner_discovery() -> None:
+    from hal0.bridge.store import MIGRATIONS_DIR
+    from hal0.db.migrate import available_versions
+
+    assert da._bridge_schema_latest() == max(available_versions(MIGRATIONS_DIR))
+
+
+def test_store_with_two_clients_passes_with_schema_version(tmp_path: Path) -> None:
+    db = _store(tmp_path, "alpha", "beta")
+    c = da.check_bridge_store(path=db, enabled=True)
+    assert c.status == "pass"
+    assert "2 clients" in c.detail
+    assert "schema v1" in c.detail
+
+
+def test_one_client_is_singular(tmp_path: Path) -> None:
+    db = _store(tmp_path, "alpha")
+    c = da.check_bridge_store(path=db, enabled=True)
+    assert c.status == "pass"
+    assert "1 client," in c.detail
+
+
+def test_revoked_clients_are_counted_apart(tmp_path: Path) -> None:
+    db = _store(tmp_path, "alpha", "beta")
+    BridgeStore(db).revoke_client("beta")
+    c = da.check_bridge_store(path=db, enabled=True)
+    assert c.status == "pass"
+    assert "1 client," in c.detail
+    assert "1 revoked" in c.detail
+
+
+def test_empty_store_passes_with_zero_clients(tmp_path: Path) -> None:
+    db = _store(tmp_path)
+    c = da.check_bridge_store(path=db, enabled=True)
+    assert c.status == "pass"
+    assert "0 clients" in c.detail
+    assert "schema v1" in c.detail
+
+
+def test_mode_wider_than_0600_warns(tmp_path: Path) -> None:
+    db = _store(tmp_path, "alpha")
+    os.chmod(db, 0o644)
+    c = da.check_bridge_store(path=db, enabled=True)
+    assert c.status == "warn"
+    assert not c.critical
+    assert "644" in c.detail
+    assert "600" in c.detail
+
+
+def test_foreign_owner_warns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db = _store(tmp_path, "alpha")
+    # The service user resolves to a uid that is not the file's owner.
+    monkeypatch.setattr(da, "_resolve_uid", lambda _user: os.getuid() + 1)
+    c = da.check_bridge_store(path=db, enabled=True)
+    assert c.status == "warn"
+    assert "owned by uid" in c.detail
+
+
+def test_owner_is_not_checked_when_the_service_user_is_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dev box has no ``hal0`` account: nothing to compare the owner with."""
+    db = _store(tmp_path, "alpha")
+    monkeypatch.setattr(da, "_resolve_uid", lambda _user: None)
+    assert da.check_bridge_store(path=db, enabled=True).status == "pass"
+
+
+def test_permission_error_on_stat_warns_cannot_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _store(tmp_path, "alpha")
+    real_stat = os.stat
+
+    def _deny(p: object, *a: object, **kw: object) -> os.stat_result:
+        if str(p) == str(db):
+            raise PermissionError(13, "Permission denied", str(db))
+        return real_stat(p, *a, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "stat", _deny)
+    c = da.check_bridge_store(path=db, enabled=True)
+    assert c.status == "warn"
+    assert "cannot read" in c.detail
+    assert str(db) in c.detail
+
+
+def test_unreadable_file_warns_cannot_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The doctor run as an operator: the stat works, the open does not."""
+    db = _store(tmp_path, "alpha")
+    real_access = os.access
+    monkeypatch.setattr(
+        os,
+        "access",
+        lambda p, mode, **kw: False if str(p) == str(db) else real_access(p, mode, **kw),
+    )
+    c = da.check_bridge_store(path=db, enabled=True)
+    assert c.status == "warn"
+    assert "cannot read" in c.detail
+    assert "hal0 doctor as hal0 or root" in c.detail
+
+
+def test_garbage_file_warns_instead_of_raising(tmp_path: Path) -> None:
+    db = tmp_path / "bridge.db"
+    db.write_bytes(b"this is not a sqlite database" * 20)
+    os.chmod(db, 0o600)
+    c = da.check_bridge_store(path=db, enabled=True)
+    assert c.status == "warn"
+    assert "cannot read" in c.detail
+
+
+def test_empty_file_without_schema_warns(tmp_path: Path) -> None:
+    """A 0-byte file (a start that died before migrating) is not a healthy store."""
+    db = tmp_path / "bridge.db"
+    db.touch(mode=0o600)
+    c = da.check_bridge_store(path=db, enabled=True)
+    assert c.status == "warn"
+    assert "schema" in c.detail
+    # Read-only: the row did not apply the migration it is complaining about.
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT name FROM sqlite_master").fetchall() == []
+
+
+def test_stale_schema_warns(tmp_path: Path) -> None:
+    db = _store(tmp_path, "alpha")
+    with sqlite3.connect(db) as conn:
+        conn.execute("DELETE FROM schema_migrations")
+        conn.execute("INSERT INTO schema_migrations (version, applied_at) VALUES (0, 'x')")
+    c = da.check_bridge_store(path=db, enabled=True)
+    assert c.status == "warn"
+    assert "schema v0" in c.detail
+    assert "v1" in c.detail
+
+
+def test_enabled_defaults_to_the_bridge_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no ``enabled`` argument the row reads ``[bridge].enabled`` from hal0.toml."""
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path / "home"))
+    toml = tmp_path / "hal0.toml"
+    toml.write_text("[bridge]\nenabled = false\n")
+    monkeypatch.setattr("hal0.config.paths.hal0_toml", lambda: toml)
+    c = da.check_bridge_store(path=tmp_path / "bridge.db")
+    assert c.status == "pass"
+    assert "disabled" in c.detail
+
+
+def test_unparsable_config_does_not_hide_the_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A broken hal0.toml is another row's finding; this row falls back to the default (on)."""
+    toml = tmp_path / "hal0.toml"
+    toml.write_text("[bridge\n")
+    monkeypatch.setattr("hal0.config.paths.hal0_toml", lambda: toml)
+    db = _store(tmp_path, "alpha")
+    c = da.check_bridge_store(path=db)
+    assert c.status == "pass"
+    assert "1 client," in c.detail
+
+
+def test_unreadable_config_does_not_crash_the_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """hal0.toml is 0600: an unprivileged doctor gets ``PermissionError``, not ``ConfigError``.
+
+    The row falls back to the default (on) instead of taking ``hal0 doctor all`` down.
+    """
+
+    def _deny(*_a: object, **_kw: object) -> object:
+        raise PermissionError(13, "Permission denied", "/etc/hal0/hal0.toml")
+
+    monkeypatch.setattr("hal0.config.loader.load_hal0_config", _deny)
+    absent = da.check_bridge_store(path=tmp_path / "bridge.db")
+    assert absent.status == "pass"
+    assert "not created yet" in absent.detail
+
+    db = _store(tmp_path, "alpha")
+    present = da.check_bridge_store(path=db)
+    assert present.status == "pass"
+    assert "1 client," in present.detail
+
+
+def test_unreadable_config_file_on_disk_does_not_crash_the_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same, through the real loader and a mode-000 hal0.toml (skipped when root)."""
+    toml = tmp_path / "hal0.toml"
+    toml.write_text("[bridge]\nenabled = false\n")
+    os.chmod(toml, 0o000)
+    try:
+        if os.access(toml, os.R_OK):
+            pytest.skip("running as a user that can read a mode-000 file")
+        monkeypatch.setattr("hal0.config.paths.hal0_toml", lambda: toml)
+        c = da.check_bridge_store(path=tmp_path / "bridge.db")
+    finally:
+        os.chmod(toml, 0o600)
+    assert c.status == "pass"
+    assert "not created yet" in c.detail
+
+
+def test_reading_leaves_bridge_db_itself_untouched(tmp_path: Path) -> None:
+    """``bridge.db`` keeps its bytes and mode. SQLite may add ``-wal``/``-shm`` siblings, and
+    that is accepted: they have perms rows and take the main file's mode."""
+    db = _store(tmp_path, "alpha")
+    before = (db.read_bytes(), db.stat().st_mode, db.stat().st_mtime_ns)
+    c = da.check_bridge_store(path=db, enabled=True)
+    assert c.status == "pass"
+    assert (db.read_bytes(), db.stat().st_mode, db.stat().st_mtime_ns) == before
+    for sibling in (db.with_name(db.name + "-wal"), db.with_name(db.name + "-shm")):
+        if sibling.exists():
+            assert sibling.stat().st_mode & 0o777 == 0o600

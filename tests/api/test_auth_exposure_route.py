@@ -21,7 +21,7 @@ def test_shape_and_class_completeness(client: TestClient) -> None:
     body = resp.json()
 
     assert set(body) == {"classes", "rules", "open_allowlist"}
-    assert set(body["classes"]) == {"open", "client", "admin", "bootstrap"}
+    assert set(body["classes"]) == {"open", "client", "admin", "bootstrap", "bridge"}
     assert len(body["rules"]) == len(RULES)
 
     for rule in body["rules"]:

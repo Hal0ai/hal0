@@ -1,6 +1,6 @@
 ---
 title: Connect MCP servers
-description: Install MCP servers into hal0 with the hal0 mcp CLI, and connect an external MCP client to hal0's own bundled hal0-admin and hal0-memory servers.
+description: Install MCP servers into hal0 with the hal0 mcp CLI, and connect an external MCP client to hal0's own bundled hal0-agents, hal0-memory and hal0-admin servers with a revocable bridge key.
 sidebar:
   order: 90
 ---
@@ -9,8 +9,8 @@ import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components
 
 hal0 talks [Model Context Protocol](https://modelcontextprotocol.io) in
 both directions: it can **install and run MCP servers** for its bundled
-agent to use, and it **exposes its own admin and memory surfaces** as MCP
-servers for any external client.
+agent to use, and it **exposes its own agents, memory and admin surfaces** as
+MCP servers for any external client.
 
 ## Install an MCP server
 
@@ -43,7 +43,7 @@ hal0 mcp catalog refresh
 ```
 
 <Aside type="note">
-`hal0-admin` and `hal0-memory` (below) are bundled and cannot be
+`hal0-admin`, `hal0-memory` and `hal0-agents` (below) are bundled and cannot be
 uninstalled — `hal0 mcp uninstall hal0-admin` is rejected with a 409.
 </Aside>
 
@@ -189,10 +189,12 @@ hal0 itself previously wrote.
 
 ## hal0's own bundled servers
 
-hal0 ships two MCP servers, mounted on the API as Streamable-HTTP
+hal0 ships three MCP servers, mounted on the API as Streamable-HTTP
 sub-apps, for any external client (an IDE, Hermes, another agent) to
 connect to directly:
 
+- **`/mcp/agents`** — `hal0-agents`, the agent bridge: delegate work to the
+  Hermes agent on the box. Reachable only with a bridge key.
 - **`/mcp/memory`** — long-term memory tools (search, add, recall, list,
   delete). Only mounted when the memory subsystem is initialised.
 - **`/mcp/admin`** — operate hal0: slots, models, capabilities, profiles,
@@ -202,12 +204,97 @@ connect to directly:
 <Aside type="note">
 hal0 supports optional static-key network auth (`hal0 auth status` / `hal0
 auth rotate`) — **off by default** on a fresh loopback/LAN install. When
-it's armed, both MCP mounts are token-gated — see the Authenticate
-section below. Auth or not, run hal0 on a trusted LAN
-or behind your own reverse proxy — do not expose `/mcp/*` to the internet.
+it's armed, the memory and admin mounts are token-gated — see the
+Authenticate section below. The agent bridge is not optional: it asks for a
+bridge key (or the admin key) even when auth is off. Auth or not, run hal0 on
+a trusted LAN or behind your own reverse proxy — do not expose `/mcp/*` to
+the internet.
 </Aside>
 
-### Connect
+### Connect an external MCP client
+
+Give each remote agent (Claude Code on a workstation, Codex, a CI job) a
+**bridge key** of its own, instead of a copy of the box's admin or client key.
+One command on the hal0 box mints the key and prints what to paste on the
+other machine; the key opens only the servers you name, is bound to the
+agent's name, and can be revoked on its own.
+
+<Steps>
+
+1. On the hal0 box, add the client. Its name is lower-case letters, digits,
+   `_` and `-`, up to 32 characters:
+
+   ```sh
+   hal0 bridge add workstation-claude --note "Claude Code on my workstation"
+   ```
+
+   The default scopes are `agents` and `memory`. Add `--scope admin` for the
+   admin tools (see the caution below), or repeat `--scope` to choose the set.
+
+2. hal0 prints the key **once** and one `claude mcp add` line for each
+   server the key opens. It keeps only the key's sha256, so a key you did not
+   save is replaced with `hal0 bridge rotate`. The lines name
+   `[network].public_url` when it is set, else the box's LAN address.
+
+3. On the remote machine, paste the lines:
+
+   ```sh
+   claude mcp add --transport http hal0-agents http://<host>:8080/mcp/agents/mcp --header "Authorization: Bearer <key>"
+   claude mcp add --transport http hal0-memory http://<host>:8080/mcp/memory/mcp --header "Authorization: Bearer <key>"
+   ```
+
+4. Check the key from there. `/api/bridge/me` is the one REST route a bridge
+   key can call:
+
+   ```sh
+   curl -s http://<host>:8080/api/bridge/me -H "Authorization: Bearer <key>"
+   ```
+
+</Steps>
+
+A remote client's host has to be on hal0's MCP host allowlist; see
+[Widen the host and origin allowlists](#widen-the-host-and-origin-allowlists)
+if the first request answers `421 Invalid Host`.
+
+What the key opens depends on its scopes. `agents` is always held.
+
+| Scope | Server | What the key does there |
+|-------|--------|-------------------------|
+| `agents` | `/mcp/agents` (`hal0-agents`) | Delegate work to the Hermes agent and read its results. A client sees only its own runs. |
+| `memory` | `/mcp/memory` (`hal0-memory`) | Search and write memory. The writer is the client named in the key: `X-hal0-Agent` is ignored, so `X-hal0-Private: 1` lands in `private:<client>` and nowhere else. |
+| `admin` | `/mcp/admin` (`hal0-admin`) | The admin tools. Calls reach hal0 as hal0's own service identity and are audited as `bridge:<client>`; gated tools still wait in the approvals inbox for a person. |
+
+A bridge key is refused on every other non-OPEN route of `/api/*` and
+`/v1/*`, `/api/bridge/me` apart; OPEN routes such as `GET /api/health` and
+`GET /v1/models` answer it as they answer anyone. Manage clients with:
+
+```sh
+hal0 bridge list                          # clients, scopes, last seen, revoked
+hal0 bridge scopes workstation-claude agents memory admin   # replace the scope set
+hal0 bridge rotate workstation-claude     # new key; the old one stops at once
+hal0 bridge revoke workstation-claude     # ends the key; the name stays reserved
+```
+
+See [`hal0 bridge`](/docs/reference/cli-operator#hal0-bridge--admit-remote-coding-agents)
+for every flag and [ADR-0043](/docs/adr/0043-agent-bridge-and-bridge-keys) for
+the design.
+
+<Aside type="caution">
+A bridge key is as powerful as asking Hermes to do something, for the profiles
+hal0 holds keys for. With the `admin` scope it is the agent-tier key ADR-0024
+describes: the admin MCP tools, autonomous reads and writes included, and no
+REST. Treat it like an operator credential, and grant `admin` only to an agent
+that operates the box.
+</Aside>
+
+### Connect with the box keys (fallback)
+
+The bridge above is the recommended route: a key per client, bound to its name
+and revocable on its own. The box's own keys still work on `/mcp/memory` and
+`/mcp/admin`. They are one key shared by every client that holds it, cannot be
+revoked for one client without rotating them for all, and carry whatever
+identity the client's `X-hal0-Agent` header claims. This section and the ones
+after it, through the workstation example, cover that route.
 
 Point your MCP client at the Streamable-HTTP endpoint on the hal0 host — the
 mount root itself 405s (no redirect); the working path always ends in `/mcp`:

@@ -87,6 +87,17 @@ def _discover_migrations(migrations_dir: Path | None) -> list[tuple[int, str, st
     return found
 
 
+def available_versions(migrations_dir: Path | None = None) -> list[int]:
+    """Return the migration versions a build ships, ascending.
+
+    The same discovery :func:`migrate` applies (``migrations_dir`` when given,
+    else the package's own), so a caller that asks "is this database current?"
+    (``hal0 doctor all``'s ``bridge-store`` row) cannot disagree with the runner
+    about what "current" is.
+    """
+    return [version for version, _name, _sql in _discover_migrations(migrations_dir)]
+
+
 def migrate(conn: sqlite3.Connection, migrations_dir: Path | None = None) -> list[int]:
     """Apply every not-yet-applied migration, in ascending version order.
 

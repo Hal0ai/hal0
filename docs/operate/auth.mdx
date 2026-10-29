@@ -34,20 +34,28 @@ below (OpenWebUI on `:3001`).
 
 ## Tiers and credential resolution
 
-Three tiers, in ascending privilege: `anon` → `client` → `admin`. On every
-request, hal0 resolves the caller's tier in this order:
+Three tiers, in ascending privilege: `anon` → `client` → `admin`, plus
+`bridge`, a remote coding agent's own key
+([ADR-0043](/docs/adr/0043-agent-bridge-and-bridge-keys)). On every request,
+hal0 resolves the caller's tier in this order:
 
 <Steps>
 
 1. **Session cookie** (`hal0_session`) — if present and valid, the caller is
    **admin**. A session always means "an operator's own browser," never
    `client`.
-2. **`Authorization: Bearer <key>`** — checked against the configured admin
-   key first, then the client key.
+2. **`Authorization: Bearer <key>`** — a `hal0bk_` key of a live bridge
+   client is **bridge**; any other key is checked against the configured
+   admin key first, then the client key.
 3. **`?api_key=<key>` query param** — same admin-then-client check, as a
-   fallback for WebSocket upgrades, which can't set headers.
+   fallback for WebSocket upgrades, which can't set headers. Never a bridge key.
 
 </Steps>
+
+A `bridge` caller reaches `/mcp/agents`, `GET /api/bridge/me` and the MCP
+mounts its scopes name, and gets 403 on every other non-OPEN route, with
+enforcement on or off; see
+[Connect an external MCP client](/docs/guides/connect-mcp#connect-an-external-mcp-client).
 
 There is no client-side login flow — the client tier is Bearer/`api_key`-only,
 meant for programmatic or embedded callers. Only an admin key or an
@@ -415,10 +423,11 @@ under `hal0.auth.origin_rejected`.
 
 ## Route classification
 
-Every route falls into one of four classes — **open** (no auth), **bootstrap**
-(open until an admin key exists, then treated as admin), **client**, or
-**admin**. An unclassified path defaults to **admin** — deny-by-default, not
-allow-by-default. The full live table is served at `GET /api/auth/exposure`
+Every route falls into one of five classes — **open** (no auth), **bootstrap**
+(open until an admin key exists, then treated as admin), **client**,
+**bridge** (`/mcp/agents` and `GET /api/bridge/me`, enforced even with auth
+off), or **admin**. An unclassified path defaults to **admin** —
+deny-by-default, not allow-by-default. The full live table is served at `GET /api/auth/exposure`
 (admin-gated) and backs the dashboard's Settings → Security page.
 
 The open allowlist is intentionally small — model listing, health, metrics,

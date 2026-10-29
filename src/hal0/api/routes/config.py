@@ -15,6 +15,7 @@ Chat link instead of leading users to a 404.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import os
 from typing import Any
 
@@ -24,6 +25,7 @@ from pydantic import ValidationError
 from hal0.api._redact import redact_config
 from hal0.api.middleware.error_codes import Hal0Error
 from hal0.comfyui.reach import editor_on_lan
+from hal0.config import network
 from hal0.config.loader import hal0_config_txn, load_hal0_config
 from hal0.config.schema import ModelsConfig
 from hal0.registry.discover import scan_and_register
@@ -142,6 +144,44 @@ def _behind_proxy(request: Request) -> bool:
     return any(fwd.get(h) for h in ("x-forwarded-host", "x-forwarded-proto", "x-forwarded-for"))
 
 
+def _is_loopback_host(host: str) -> bool:
+    """True iff ``host`` (a request's host part, no port) names the box's loopback."""
+    if network.is_loopback_bind(host.lower()):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def api_base_url(request: Request, *, prefer_lan: bool = False) -> str:
+    """Return the URL this request reached the hal0 API at, with no trailing slash.
+
+    Behind a reverse proxy that is the proxy's ``scheme://host`` (from
+    ``X-Forwarded-Proto`` / ``X-Forwarded-Host``); on a direct hit it is
+    ``http://<request host>:<API port>``, an IPv6 host in brackets.
+    :func:`get_urls` advertises it as ``api``.
+
+    ``prefer_lan`` is for a URL another machine will use: the bridge
+    onboarding lines (ADR-0043), which ``hal0 bridge add`` asks for over
+    ``http://127.0.0.1``. A direct hit on a loopback host then names the box's
+    first LAN address (:func:`hal0.config.network.detect_lan_ips`) instead,
+    when it has one; the port stays the API port.
+    """
+    host = _resolve_host(request)
+    if _behind_proxy(request):
+        scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
+        forwarded_host = request.headers.get("x-forwarded-host") or host
+        return f"{scheme}://{forwarded_host}"
+    if prefer_lan and _is_loopback_host(host):
+        lan = network.detect_lan_ips()
+        if lan:
+            host = lan[0]
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"http://{host}:{_api_port()}"
+
+
 def _host_without_port(host: str) -> str:
     """Return a hostname suitable for adding the OpenWebUI fixed port."""
     if host.startswith("["):
@@ -240,13 +280,9 @@ async def get_urls(request: Request) -> dict[str, object]:
     comfyui_public = bool(_comfyui_public_url())
     comfyui_lan = editor_on_lan()
 
+    api_url = api_base_url(request)
+
     if public:
-        if _behind_proxy(request):
-            scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
-            forwarded_host = request.headers.get("x-forwarded-host") or host
-            api_url = f"{scheme}://{forwarded_host}"
-        else:
-            api_url = f"http://{host}:{_api_port()}"
         return {
             "api": api_url,
             "openwebui": public,
@@ -259,11 +295,10 @@ async def get_urls(request: Request) -> dict[str, object]:
         }
 
     if _behind_proxy(request):
-        scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
         forwarded_host = request.headers.get("x-forwarded-host") or host
         openwebui_host = _host_without_port(forwarded_host)
         return {
-            "api": f"{scheme}://{forwarded_host}",
+            "api": api_url,
             "openwebui": f"http://{openwebui_host}:{_OPENWEBUI_PORT}",
             "openwebui_enabled": enabled,
             "hermes": hermes,
@@ -273,7 +308,7 @@ async def get_urls(request: Request) -> dict[str, object]:
             "comfyui_lan": comfyui_lan,
         }
     return {
-        "api": f"http://{host}:{_api_port()}",
+        "api": api_url,
         "openwebui": f"http://{host}:{_OPENWEBUI_PORT}",
         "openwebui_enabled": enabled,
         "hermes": hermes,

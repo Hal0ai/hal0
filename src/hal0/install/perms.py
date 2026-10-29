@@ -870,6 +870,33 @@ def ownership_table(
             0o2775,
             role="skills/ (drop-in agent skills)",
         ),
+        # bridge.db — agent-bridge client key hashes + run text (ADR-0043). Owner
+        # + group only, unlike the 0644 hal0.db. SQLite gives the -wal/-shm
+        # siblings the main file's mode; they are listed so the audit sees them.
+        PermRow(
+            var_lib / "bridge.db",
+            state_owner,
+            service_group,
+            0o600,
+            optional=True,
+            role="bridge.db (agent-bridge client keys + runs)",
+        ),
+        PermRow(
+            var_lib / "bridge.db-wal",
+            state_owner,
+            service_group,
+            0o600,
+            optional=True,
+            role="bridge.db-wal",
+        ),
+        PermRow(
+            var_lib / "bridge.db-shm",
+            state_owner,
+            service_group,
+            0o600,
+            optional=True,
+            role="bridge.db-shm",
+        ),
         # STATE.md — the live session-state snapshot the Hermes session-start
         # hook cats. Optional: absent until the first render. Replaces the old
         # install.sh chgrp/chmod/touch/chown STATE.md dance.

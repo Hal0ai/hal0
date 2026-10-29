@@ -308,8 +308,8 @@ one line and a link here rather than a repeat.
   mode `0600` — the same systemd `EnvironmentFile=` `hal0-api` reads at
   start. Includes a dedicated `HF_TOKEN` field that applies live (no
   restart) so a gated or large pull can authenticate right away. See
-  "Secrets" on [REST API index](/docs/reference/api/rest-api/) for the
-  write path.
+  [REST API: secrets and Proxmox credentials](/docs/reference/api/rest-api-credentials#secrets-apisecrets)
+  for the write path.
 - **Agent Chat** — the `[brain_chat]` policy surface: kill switch,
   read-only guardrail, chat model override, tool-routing model, and loop
   knobs. `tool_model` (where a tool-calling round reroutes when the chat

@@ -351,6 +351,27 @@ def test_mcp_mount_tiers() -> None:
     assert classify("POST", "/mcp/memory2/mcp") is AuthClass.ADMIN
 
 
+@pytest.mark.parametrize(
+    ("method", "path", "cls"),
+    [
+        ("GET", "/api/bridge/me", AuthClass.BRIDGE),
+        ("HEAD", "/api/bridge/me", AuthClass.BRIDGE),
+        ("GET", "/api/bridge/clients", AuthClass.ADMIN),
+        ("POST", "/api/bridge/clients", AuthClass.ADMIN),
+        ("POST", "/api/bridge/me", AuthClass.ADMIN),
+        ("POST", "/api/bridge/runs/run_x/stop", AuthClass.ADMIN),
+        ("POST", "/mcp/agents/mcp", AuthClass.BRIDGE),
+        ("GET", "/mcp/agents/mcp", AuthClass.BRIDGE),
+        ("POST", "/mcp/agents2/mcp", AuthClass.ADMIN),
+        ("POST", "/mcp/memory/mcp", AuthClass.CLIENT),
+        ("POST", "/mcp/admin/mcp", AuthClass.ADMIN),
+    ],
+)
+def test_bridge_rules(method: str, path: str, cls: AuthClass) -> None:
+    """ADR-0043: the bridge's own surfaces, and the operator's management routes."""
+    assert classify(method, path) is cls
+
+
 def test_unclassified_new_route_denies_by_default() -> None:
     """A path nobody has classified must fall back to ADMIN (not OPEN/CLIENT)."""
     assert match_rule("GET", "/api/totally-new-router-nobody-classified-yet") is None

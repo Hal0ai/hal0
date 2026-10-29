@@ -3200,6 +3200,72 @@ def normalise_origin(value: str) -> str:
     return f"{scheme}://{netloc}"
 
 
+class BridgeConfig(BaseModel):
+    """``[bridge]`` — the agent bridge for remote coding agents (ADR-0043).
+
+    The bridge lets a remote coding agent (Claude Code, Codex, a CI job)
+    reach hal0's MCP servers and delegate to Hermes with its own revocable
+    ``hal0bk_`` key. ``enabled`` defaults on because the surface is inert
+    until an operator adds a client (ADR-0043): the mount and ``/api/bridge/*``
+    exist on every box, but with no client rows nothing except the admin key
+    can authenticate, so onboarding stays one command with no restart.
+
+    ``extra="forbid"`` (P3-schema Part C leaf-table policy, same as
+    ``[network]``): a typo'd key must fail loudly instead of silently leaving
+    a limit at its default.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Master switch for the agent bridge. Off = no bridge key "
+            "authenticates, the bridge MCP server is not mounted, and adding, "
+            "rotating or re-scoping a client and GET /api/bridge/me answer "
+            "404 bridge.disabled; listing and revoking clients keep working. "
+            "On is harmless until you add a client: with no clients, nothing "
+            "but the admin key can authenticate. Applies at the next hal0-api "
+            "restart."
+        ),
+    )
+
+    max_concurrent_runs_per_client: int = Field(
+        default=2,
+        ge=1,
+        le=16,
+        description=(
+            "How many Hermes runs one bridge client may have in flight at "
+            "once (1 to 16). A start request past the limit is refused until "
+            "one of its runs finishes. Applies on the next start request, no "
+            "restart."
+        ),
+    )
+
+    run_retention_days: int = Field(
+        default=7,
+        ge=1,
+        le=365,
+        description=(
+            "How many days bridge runs and their recorded events are kept "
+            "before the maintenance pass deletes them (1 to 365). Applies on "
+            "the next pass, no restart."
+        ),
+    )
+
+    clarify_timeout_s: int = Field(
+        default=900,
+        ge=60,
+        le=3600,
+        description=(
+            "How long, in seconds, a run waits for the calling agent to "
+            "answer a clarifying question from Hermes before the run is "
+            "stopped with 'clarification unanswered' (60 to 3600). Applies "
+            "to the next question, no restart."
+        ),
+    )
+
+
 class NetworkConfig(BaseModel):
     """``[network]`` — how browsers reach this box, beyond the installer's view (#2382).
 
@@ -3459,6 +3525,7 @@ class Hal0Config(BaseModel):
     brain_chat: BrainChatConfig = Field(default_factory=BrainChatConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     network: NetworkConfig = Field(default_factory=NetworkConfig)
+    bridge: BridgeConfig = Field(default_factory=BridgeConfig)
     realtime: RealtimeConfig = Field(default_factory=RealtimeConfig)
 
 

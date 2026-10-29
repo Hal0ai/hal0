@@ -312,6 +312,20 @@ def _auth_dev_open_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _bridge_enabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start every test with the agent bridge recorded as enabled (ADR-0043).
+
+    ``[bridge].enabled`` is process state on :mod:`hal0.api.auth`, recorded by
+    the ``bridge_store`` boot phase. A test that boots an app with the bridge
+    disabled would otherwise leave it off for every later test in the same
+    worker that drives the auth middleware without booting an app.
+    """
+    from hal0.api import auth
+
+    monkeypatch.setattr(auth, "_bridge_enabled", True)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_hal0_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Keep tests away from host FHS state, including non-API unit tests.
 

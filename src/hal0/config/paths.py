@@ -215,6 +215,18 @@ def db_path() -> Path:
     return var_lib() / "hal0.db"
 
 
+def bridge_db() -> Path:
+    """Return the agent-bridge store path (/var/lib/hal0/bridge.db).
+
+    A separate SQLite file from :func:`db_path` because it holds credential
+    hashes (bridge client keys) and the text of delegated runs, so it is kept
+    owner/group-only at 0600, while ``hal0.db`` is world-readable 0644. See
+    ADR-0043. Preserved across updates like the rest of ``var_lib()``; under
+    HAL0_HOME it lands in the tmp tree, so tests are auto-isolated.
+    """
+    return var_lib() / "bridge.db"
+
+
 #: Conventional external model-store mount and the historic default for slot
 #: container bind-mounts. Most hal0 deployments target an NFS / fast-disk
 #: mount here; overridable per-install via ``[models].store`` or the

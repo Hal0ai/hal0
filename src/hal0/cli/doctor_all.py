@@ -39,6 +39,7 @@ import os
 import pwd
 import re
 import shutil
+import sqlite3
 import stat
 import subprocess
 from collections.abc import Callable
@@ -1568,6 +1569,155 @@ def _bearer_ok(value: Any, wanted: Any) -> bool:
     return value == wanted if isinstance(wanted, str) else True
 
 
+#: The account that owns ``bridge.db``: ``install/perms.py`` gives every state
+#: file under ``/var/lib/hal0`` to ``hal0``, root-era tables included.
+_BRIDGE_DB_OWNER = "hal0"
+
+
+def _bridge_config_enabled() -> bool:
+    """``[bridge].enabled`` from hal0.toml; the default (on) when it cannot be read.
+
+    A hal0.toml that fails to parse is another row's finding, and one the
+    doctor's user may not open at all (it is ``0600``, so ``load_hal0_config``
+    raises ``PermissionError`` for anyone but the service user and root). This
+    row falls back to the shipped default in both cases instead of hiding the
+    store behind it, and instead of taking the whole report down.
+    """
+    from hal0.config.loader import ConfigError, load_hal0_config
+
+    try:
+        return load_hal0_config().bridge.enabled
+    except (ConfigError, OSError):
+        return True
+
+
+def _bridge_schema_latest() -> int:
+    """The highest migration version this build ships for ``bridge.db``.
+
+    Read through :func:`hal0.db.migrate.available_versions`, the runner's own
+    discovery, so "current" here is what hal0-api applies at start.
+    """
+    from hal0.bridge.store import MIGRATIONS_DIR
+    from hal0.db.migrate import available_versions
+
+    return max(available_versions(MIGRATIONS_DIR), default=0)
+
+
+def check_bridge_store(
+    *,
+    path: Path | None = None,
+    enabled: bool | None = None,
+    api_running: bool | None = None,
+) -> Check:
+    """The agent bridge's client store is present, owner-only and migrated (ADR-0043).
+
+    ``bridge.db`` holds the sha256 of every bridge key and, later, the text of
+    delegated runs, which is why it is a separate 0600 file from the 0644
+    ``hal0.db``. The row never creates, migrates or re-permissions
+    ``bridge.db`` itself: it opens it read-only (``mode=ro``). SQLite still
+    creates the ``-wal`` and ``-shm`` siblings of a WAL database it opens
+    read-only when they are absent (hal0-api's per-call connections leave them
+    absent between calls), and keeps them after close; they carry perms rows
+    in ``install/perms.py`` and take the main file's mode. ``enabled`` is
+    ``[bridge].enabled`` unless a caller pins it. ``api_running`` is whether
+    hal0-api answered the doctor (``build_all_checks`` passes it from the
+    health probe); ``None`` means not known.
+
+    * ``[bridge].enabled`` off: PASS, nothing to audit.
+    * No file, hal0-api running: WARN. hal0-api creates ``bridge.db`` when it
+      starts with the bridge on, so a missing file means that open failed and
+      no bridge key can verify; the hal0-api log says why
+      (``hal0.bridge.store_unavailable``).
+    * No file, hal0-api not running or not known: PASS, "not created yet"
+      (hal0-api creates it at its next start).
+    * Mode other than 0600, or an owner other than the service user: WARN. The
+      owner is only compared when the service account exists, so a dev box
+      without one is not flagged.
+    * Unreadable (``PermissionError``, or a doctor run by a user the 0600 file
+      shuts out): WARN "cannot read", the ``hermes-api`` row's wording.
+    * Schema older than this build ships, or never applied: WARN. hal0-api
+      applies migrations at start, so a restart brings it current.
+
+    ADVISORY (never critical): a broken store only stops bridge keys from
+    authenticating, and the admin key still works.
+    """
+    key, label = "bridge-store", "Agent bridge store"
+    if enabled is None:
+        enabled = _bridge_config_enabled()
+    if not enabled:
+        return Check(key, label, _PASS, "disabled ([bridge].enabled = false)")
+    db = path if path is not None else paths.bridge_db()
+    unreadable = f"cannot read {db}; run hal0 doctor as hal0 or root"
+    try:
+        st = os.stat(db)
+    except FileNotFoundError:
+        if api_running:
+            return Check(
+                key,
+                label,
+                _WARN,
+                f"{db} is missing although hal0-api is running: it could not open the store at "
+                "start, so no bridge key verifies; see the hal0-api log "
+                "(hal0.bridge.store_unavailable) and restart hal0-api",
+            )
+        return Check(key, label, _PASS, f"not created yet ({db} is created when hal0-api starts)")
+    except PermissionError:
+        return Check(key, label, _WARN, unreadable)
+    except OSError as exc:
+        return Check(key, label, _WARN, f"cannot read {db}: {exc}")
+
+    problems: list[str] = []
+    mode = stat.S_IMODE(st.st_mode)
+    if mode != 0o600:
+        problems.append(f"{db} is mode {mode:o}, expected 600 (it holds client key hashes)")
+    owner = _resolve_uid(_BRIDGE_DB_OWNER)
+    if owner is not None and st.st_uid != owner:
+        problems.append(f"{db} is owned by uid {st.st_uid}, expected {_BRIDGE_DB_OWNER}")
+    fix = "; fix with `hal0 doctor perms --fix`"
+
+    def _warn(*extra: str) -> Check:
+        return Check(key, label, _WARN, "; ".join([*problems, *extra]) + (fix if problems else ""))
+
+    if not os.access(db, os.R_OK):
+        return _warn(unreadable)
+    latest = _bridge_schema_latest()
+    try:
+        # mode=ro: opening must not create bridge.db or apply a migration (it
+        # can still leave the -wal/-shm siblings behind, see the docstring).
+        # ``applied_versions`` would create the bookkeeping table, so it only
+        # runs once the table is known to exist.
+        conn = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True, timeout=2.0)
+        try:
+            tables = {
+                r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            }
+            if not {"schema_migrations", "clients"} <= tables:
+                return _warn(
+                    f"{db} has no bridge schema yet (v{latest} expected); "
+                    "restart hal0-api so it applies the migration"
+                )
+            from hal0.db.migrate import applied_versions
+
+            version = max(applied_versions(conn), default=0)
+            live, revoked = conn.execute(
+                "SELECT COUNT(*) FILTER (WHERE revoked_at IS NULL), "
+                "COUNT(*) FILTER (WHERE revoked_at IS NOT NULL) FROM clients"
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return _warn(f"cannot read {db}: {exc}")
+    if version < latest:
+        return _warn(
+            f"schema v{version}, v{latest} expected; restart hal0-api so it applies the migration"
+        )
+    counted = f"{live} client{'' if live == 1 else 's'}"
+    detail = f"{counted}, schema v{version}" + (f" ({revoked} revoked)" if revoked else "")
+    if problems:
+        return _warn(detail)
+    return Check(key, label, _PASS, detail)
+
+
 def check_hermes_generation_extras(*, home: Path | None = None, venv: Path | None = None) -> Check:
     """A committed pm generation for the live release must carry its extras (#2891).
 
@@ -2311,6 +2461,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         ),
         check_hermes_mcp_config_auth(auth=auth_payload),
         check_hermes_profiles_mcp(auth=auth_payload),
+        check_bridge_store(api_running=payloads["health"] is not None),
         check_hermes_generation_extras(),
         check_hermes_command_approvals(),
         check_hermes_delegation_slot(slots_payload),

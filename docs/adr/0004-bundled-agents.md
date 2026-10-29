@@ -14,6 +14,11 @@ bullet used to say hal0-api proxies the agent's chat WebSocket. That proxy
 is gone: chat is the agent's own dashboard, and hal0 does not proxy it. The
 bundling rule and every other decision here are unchanged.
 
+Amended by ADR-0043 (2026-10-28): hal0 bundles a third MCP server,
+`hal0-agents`, the agent bridge, next to `hal0-admin` and `hal0-memory`. The
+"One MCP tool catalog" bullet below describes the first two; the third maps onto
+Hermes's API and the memory dispatcher, not onto `/api/*` routes.
+
 ## Context
 
 hal0 previously carried a first-party agent runtime (`haloai`) that was

@@ -1,6 +1,6 @@
 ---
 title: "hal0 CLI reference: memory, runner images, profiles, MCP, auth & more"
-description: "Reference for the hal0 memory, runner-images, profile, mcp, auth, network, oauth and board sub-apps, the slot lifecycle timeouts, and the hal0-agent binary — verified against src/hal0/cli in the v1.0 tree."
+description: "Reference for the hal0 memory, runner-images, profile, mcp, bridge, auth, network, oauth and board sub-apps, the slot lifecycle timeouts, and the hal0-agent binary — verified against src/hal0/cli in the v1.0 tree."
 sidebar:
   order: 11
 ---
@@ -152,6 +152,40 @@ route, same behaviour, different vocabulary.
 | `mcp expose <server_id>` | `server_id` | `--hermes`/`--no-hermes`, `--brain`/`--no-brain` |
 | `mcp catalog list` | — | `--json` |
 | `mcp catalog refresh` | — | `--json` |
+
+## `hal0 bridge` — admit remote coding agents
+
+A bridge client is a named remote agent (Claude Code, Codex, a CI job) with a key of its own. The group goes through hal0-api, so the API must be running. See [Connect an external MCP client](/docs/guides/connect-mcp#connect-an-external-mcp-client) and [ADR-0043](/docs/adr/0043-agent-bridge-and-bridge-keys).
+
+| Command | Args | Flags |
+|---|---|---|
+| `bridge add <name>` | `name` (lower-case letters, digits, `_` and `-`; 1 to 32 characters; starts with a letter or digit) | `--note TEXT`, `--scope agents\|memory\|admin` (repeatable; default `agents` and `memory`) |
+| `bridge list` | — | — |
+| `bridge revoke <name>` | `name` | — |
+| `bridge rotate <name>` | `name` | — |
+| `bridge scopes <name> <scope>...` | `name`, one or more of `agents`, `memory`, `admin` | — |
+
+`bridge add` and `bridge rotate` print the key once, as `hal0bk_<name>.<token>`, and cannot show it again: hal0 keeps only its sha256. Under the key they print one `claude mcp add` line for each scope the client holds, ready to paste on the remote machine:
+
+```sh
+claude mcp add --transport http hal0-agents http://<host>:8080/mcp/agents/mcp --header "Authorization: Bearer <key>"
+claude mcp add --transport http hal0-memory http://<host>:8080/mcp/memory/mcp --header "Authorization: Bearer <key>"
+claude mcp add --transport http hal0-admin http://<host>:8080/mcp/admin/mcp --header "Authorization: Bearer <key>"
+```
+
+`<host>:8080` is `[network].public_url` when it is set. Otherwise it is the address the command reached hal0-api at, which for `hal0 bridge` on the box is loopback, so hal0 prints the box's first LAN address on the API port instead.
+
+`agents` is always held; `--scope memory` and `--scope admin` add the `hal0-memory` and `hal0-admin` lines. `bridge revoke` ends a key at once and keeps the name, so it cannot be added again; `bridge rotate` replaces a live client's key at once and keeps its scopes and note, and refuses a revoked client. `bridge scopes` replaces the whole set (`agents` stays), so the same key opens different servers from the next request.
+
+A failed command prints the API's `error.message` and exits 1: a name that is taken, malformed or reserved (`hermes` and `pi`, the bundled agents' names, plus `admin`, `anonymous`, `shared`, and any name starting `hal0`, such as `hal0-cli`, or `hermes__`, such as `hermes__scout`), an unknown scope, a client that does not exist, `rotate` on a revoked client. While `[bridge].enabled` is `false`, no bridge key works and `bridge add`, `bridge rotate` and `bridge scopes` exit 1 with:
+
+```text
+The agent bridge is disabled: set [bridge] enabled = true in /etc/hal0/hal0.toml and restart hal0-api.
+```
+
+`bridge list` and `bridge revoke` keep working while the bridge is off, so you can revoke a key before turning it back on.
+
+The `admin` scope opens the hal0 admin tools: treat that key like an operator credential and grant the scope only to an agent that operates the box ([SECURITY.md](https://github.com/Hal0ai/hal0/blob/main/SECURITY.md#bundled-agent-trust-boundary)).
 
 ## `hal0 auth` — manage hal0 API authentication
 
