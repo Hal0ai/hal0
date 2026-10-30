@@ -128,3 +128,94 @@ async def test_string_observation_scopes_pass_through():
     p = _provider()
     await p.add("x", client_id="openwebui", observation_scopes="per_tag")
     assert p._client.retained[-1]["observation_scopes"] == "per_tag"
+
+
+# ── private writes in unified mode: document ids and observation scopes ─────
+
+
+@pytest.mark.asyncio
+async def test_private_write_namespaces_a_caller_document_id():
+    p = _provider()
+    out = await p.add("x", dataset="private:alice", document_id="notes", client_id="alice")
+    assert out["id"] == "private:alice:notes"
+    assert p._client.retained[-1]["document_id"] == "private:alice:notes"
+
+
+@pytest.mark.asyncio
+async def test_shared_and_private_writes_with_one_document_id_do_not_collide():
+    p = _provider()
+    await p.add("secret", dataset="private:alice", document_id="notes", client_id="alice")
+    await p.add("public", document_id="notes", client_id="bob")
+    ids = [r["document_id"] for r in p._client.retained]
+    assert ids == ["private:alice:notes", "notes"]
+
+
+@pytest.mark.asyncio
+async def test_private_write_namespaces_the_session_derived_id():
+    p = _provider()
+    await p.add("a", dataset="private:alice", client_id="alice", metadata={"session_id": "s1"})
+    await p.add("b", client_id="alice", metadata={"session_id": "s1"})
+    ids = [r["document_id"] for r in p._client.retained]
+    assert ids == ["private:alice:s1", "alice:s1"]
+
+
+@pytest.mark.asyncio
+async def test_private_write_without_an_id_keeps_its_fresh_uuid():
+    p = _provider()
+    out = await p.add("x", dataset="private:alice", client_id="alice")
+    assert not out["id"].startswith("private:")
+
+
+@pytest.mark.asyncio
+async def test_a_shared_write_cannot_claim_a_private_document_id():
+    p = _provider()
+    with pytest.raises(ValueError, match="private:"):
+        await p.add("x", document_id="private:alice:notes", client_id="mallory")
+    assert p._client.retained == []
+
+
+@pytest.mark.asyncio
+async def test_private_write_ignores_caller_observation_scopes():
+    p = _provider()
+    for scopes in (["per_tag"][0], [["topic:cats"]], "combined"):
+        await p.add("x", dataset="private:alice", client_id="alice", observation_scopes=scopes)
+        assert "observation_scopes" not in p._client.retained[-1]
+
+
+@pytest.mark.asyncio
+async def test_shared_write_still_forwards_observation_scopes():
+    p = _provider()
+    await p.add("x", client_id="alice", observation_scopes=[["topic:cats"]])
+    assert p._client.retained[-1]["observation_scopes"] == [["topic:cats"]]
+
+
+@pytest.mark.asyncio
+async def test_a_private_document_can_be_deleted_by_the_id_add_returned():
+    p = _provider()
+    out = await p.add("x", dataset="private:alice", document_id="notes", client_id="alice")
+    res = await p.delete([out["id"]], client_id="alice")
+    assert res["deleted"] == 1
+
+
+@pytest.mark.asyncio
+async def test_pre_unified_private_writes_keep_their_ids():
+    p = HindsightProvider(client=_ScopeClient(), unified_bank=False)
+    out = await p.add("x", dataset="private:alice", document_id="notes", client_id="alice")
+    assert out["id"] == "notes"
+
+
+@pytest.mark.asyncio
+async def test_resending_the_returned_private_id_upserts_the_same_document():
+    p = _provider()
+    first = await p.add("a", dataset="private:alice", document_id="notes", client_id="alice")
+    again = await p.add("b", dataset="private:alice", document_id=first["id"], client_id="alice")
+    assert again["id"] == first["id"] == "private:alice:notes"
+
+
+@pytest.mark.asyncio
+async def test_a_private_write_cannot_land_on_another_agents_private_id():
+    p = _provider()
+    out = await p.add(
+        "x", dataset="private:alice", document_id="private:bob:notes", client_id="alice"
+    )
+    assert out["id"] == "private:alice:private:bob:notes"

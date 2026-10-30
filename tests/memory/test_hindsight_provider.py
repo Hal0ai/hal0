@@ -478,6 +478,46 @@ async def test_delete_sweep_survives_404_and_reaches_private_bank():
     assert not fake._facts_by_bank["private__hermes"]
 
 
+class _DocListingClient(FakeHindsightClient):
+    """list_memories as the engine returns it: one world fact per document."""
+
+    async def list_memories(self, *, bank_id, limit=50, offset=0, types=None, query=None):
+        facts = self._facts_by_bank.get(bank_id, [])[offset : offset + limit]
+        items = [
+            {
+                "id": f"fact-{f['document_id']}",
+                "document_id": f["document_id"],
+                "text": f["text"],
+                "fact_type": "world",
+                "tags": list(f.get("tags") or []),
+            }
+            for f in facts
+        ]
+        return {"items": items, "total": len(facts), "limit": limit, "offset": offset}
+
+
+@pytest.mark.asyncio
+async def test_unified_private_document_id_round_trips_list_delete_and_curate():
+    """The namespaced id ``add`` returns is the id list/search/delete/curate use."""
+    fake = _DocListingClient()
+    p = HindsightProvider(client=fake, client_id="alice", unified_bank=True)
+    out = await p.add("my secret", dataset="private:alice", document_id="notes", client_id="alice")
+    assert out["id"] == "private:alice:notes"
+
+    listed = await p.list_items(dataset="private:alice", client_id="alice")
+    assert [i["id"] for i in listed["items"]] == ["private:alice:notes"]
+    # another agent can neither see it nor delete it
+    assert (await p.list_items(dataset="shared", client_id="bob"))["items"] == []
+    assert await p.delete([out["id"]], client_id="bob") == {"deleted": 0}
+    assert fake._facts_by_bank["shared"]
+
+    await p.curate(out["id"], dataset="private:alice", client_id="alice", text="edited")
+    assert fake.updated_memories[-1]["memory_id"] == "private:alice:notes"
+
+    assert await p.delete([out["id"]], client_id="alice") == {"deleted": 1}
+    assert not fake._facts_by_bank["shared"]
+
+
 @pytest.mark.asyncio
 async def test_delete_missing_everywhere_counts_zero():
     fake = Fake404HindsightClient()
@@ -810,7 +850,14 @@ async def test_recall_returns_list_compatible_results_with_entities_chunks_attrs
     keeps working) AND carries the response-level enrichment as attributes."""
     fake = FakeHindsightClient()
     fake._facts_by_bank["shared"] = [
-        {"document_id": "d1", "text": "Alice works at Google", "type": "world", "tags": []}
+        {
+            "id": "f1",
+            "document_id": "d1",
+            "chunk_id": "c1",
+            "text": "Alice works at Google",
+            "type": "world",
+            "tags": [],
+        }
     ]
     fake._entities_by_bank["shared"] = {"Alice": {"entity_id": "e1", "canonical_name": "Alice"}}
     fake._chunks_by_bank["shared"] = {"c1": {"id": "c1", "text": "chunk text", "chunk_index": 0}}
@@ -821,6 +868,9 @@ async def test_recall_returns_list_compatible_results_with_entities_chunks_attrs
     assert out == [
         {
             "id": "d1",
+            "fact_id": "f1",
+            "document_id": "d1",
+            "chunk_id": "c1",
             "text": "Alice works at Google",
             "timestamp": out[0]["timestamp"],
             "dataset": "shared",
@@ -837,6 +887,90 @@ async def test_recall_returns_list_compatible_results_with_entities_chunks_attrs
     assert out.entities == {"Alice": {"entity_id": "e1", "canonical_name": "Alice"}}
     assert out.chunks == {"c1": {"id": "c1", "text": "chunk text", "chunk_index": 0}}
     assert out.source_facts is None  # nothing seeded -> omitted, not an empty dict
+
+
+def _enrichment_provider() -> HindsightProvider:
+    """A unified bank holding one public fact and one other agent's private fact."""
+    fake = FakeHindsightClient()
+    fake._facts_by_bank["shared"] = [
+        {
+            "id": "f-public",
+            "document_id": "d-public",
+            "chunk_id": "c-public",
+            "text": "public",
+            "tags": [],
+            "metadata": {},
+            "entities": ["Alice"],
+            "source_fact_ids": ["sf-public"],
+        },
+        {
+            "id": "f-secret",
+            "document_id": "d-secret",
+            "chunk_id": "c-secret",
+            "text": "secret",
+            "tags": ["visibility:private", "agent:other"],
+            "metadata": {},
+            "entities": ["Alice", "Bob"],
+            "source_fact_ids": ["sf-secret"],
+        },
+    ]
+    fake._chunks_by_bank["shared"] = {
+        "c-public": {"id": "c-public", "document_id": "d-public", "text": "public raw"},
+        "c-secret": {"id": "c-secret", "document_id": "d-secret", "text": "secret raw"},
+        "c-orphan": {"id": "c-orphan", "text": "unjoinable raw"},
+    }
+    fake._source_facts_by_bank["shared"] = {
+        "sf-public": {"id": "sf-public", "text": "public src", "tags": []},
+        "sf-secret": {
+            "id": "sf-secret",
+            "text": "secret src",
+            "tags": ["visibility:private", "agent:other"],
+        },
+        "sf-orphan": {"id": "sf-orphan", "text": "orphan src", "tags": []},
+    }
+    fake._entities_by_bank["shared"] = {
+        "Alice": {"entity_id": "e1", "canonical_name": "Alice"},
+        "Bob": {"entity_id": "e2", "canonical_name": "Bob"},
+        "Carol": {"entity_id": "e3", "canonical_name": "Carol"},
+    }
+    return HindsightProvider(client=fake, client_id="anonymous", unified_bank=True)
+
+
+@pytest.mark.asyncio
+async def test_recall_drops_enrichment_not_joined_to_visible_results():
+    """Response-level chunks and source facts must not outlive the result ACL."""
+    p = _enrichment_provider()
+    out = await p.recall("q", dataset="shared", client_id="anonymous")
+    assert [item["document_id"] for item in out] == ["d-public"]
+    assert out.chunks == {
+        "c-public": {"id": "c-public", "document_id": "d-public", "text": "public raw"}
+    }
+    assert set(out.source_facts or {}) == {"sf-public"}
+
+
+@pytest.mark.asyncio
+async def test_recall_drops_all_entities_when_a_result_was_filtered_out():
+    """Entity state is bank-wide: once any result was withheld, none is returned."""
+    p = _enrichment_provider()
+    out = await p.recall("q", dataset="shared", client_id="anonymous")
+    assert out.entities is None
+
+
+@pytest.mark.asyncio
+async def test_recall_keeps_entities_joined_to_results_when_nothing_was_filtered():
+    p = _enrichment_provider()
+    p._client._facts_by_bank["shared"].pop()  # remove the private fact
+    out = await p.recall("q", dataset="shared", client_id="anonymous")
+    assert set(out.entities or {}) == {"Alice"}  # Bob/Carol are not in any result
+
+
+@pytest.mark.asyncio
+async def test_recall_enrichment_is_unfiltered_in_pre_unified_mode():
+    """Per-bank isolation already holds there; the enrichment passes through."""
+    p = _enrichment_provider()
+    p._unified_bank = False
+    out = await p.recall("q", dataset="shared", client_id="anonymous")
+    assert "c-orphan" in (out.chunks or {})
 
 
 @pytest.mark.asyncio
