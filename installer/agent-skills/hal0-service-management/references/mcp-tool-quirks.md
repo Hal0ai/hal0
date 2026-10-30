@@ -77,7 +77,8 @@ API surface facts that differ from what the tool signatures suggest.
   every tool takes a single `args` object, so nest it: `{"args": {"text": "...",
   "private": true}}`. A top-level `private` is silently dropped. (`hal0-memory`
   takes `private` as a normal top-level argument.) A profile set to
-  `memory_private` makes every write private without the argument.
+  `memory_private` makes its memory facts private without the argument; mental
+  models and directives are bank-level and stay visible to every agent.
 
 ### `capability_list` — catalog truncation
 - Returns 3 backend entries + a massive pullable-model catalog. The catalog

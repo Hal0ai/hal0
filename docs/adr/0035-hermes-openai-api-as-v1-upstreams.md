@@ -254,8 +254,9 @@ line above disagree.
    hal0-memory (both can write memory), makes the Hermes memory plugin's
    `hindsight_retain` private and, for `hal0-brain`, makes the dashboard
    steward write private. Mental models and directives are bank-level in the
-   unified bank and are not covered. Only a missing key or null, false and the
-   strings false/no/0/off mean shared; any other value is private, in the
+   unified bank and are not covered. Only a missing key or null, false, the integer
+   `0` and the strings false/no/0/off mean shared (a non-boolean value still
+   warns in the doctor); any other value is private, in the
    provisioner, the plugin and the doctor alike. The renderers write `"0"` for shared, never
    omit the header, so converge overwrites a stale or hand-set `"1"` on a
    profile that has not opted in. That includes the default profile, which
