@@ -1492,11 +1492,13 @@ def check_hermes_profiles_mcp(
             unwired.append(name)
             continue
         # The identity and target must be the ones hal0 wires: a copied
-        # X-hal0-Agent would read another profile's private memory, a missing
-        # X-hal0-Private would write to the shared bank. The bearer must be the
-        # box's current service key when one is discoverable (a rotated key
+        # X-hal0-Agent would read another profile's private memory, a wrong
+        # X-hal0-Private would write to the wrong (shared vs private) bank.
+        # The bearer must be the box's current service key when one is discoverable (a rotated key
         # leaves a stale one behind), else at least a ``Bearer …`` string.
-        desired = hp._profile_wire_desired(hp.profile_agent_id(name))
+        desired = hp._profile_wire_desired(
+            hp.profile_agent_id(name), private=hp.profile_memory_private(data)
+        )
         if auth_required and any(
             not _bearer_ok(
                 _header(servers[n], "Authorization"), want["headers"].get("Authorization")

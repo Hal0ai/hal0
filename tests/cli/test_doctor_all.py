@@ -2202,7 +2202,7 @@ def _wired_yaml() -> str:
         "    headers:\n      X-hal0-Agent: hermes__coder\n      Authorization: Bearer k\n"
         f"    timeout: {admin_t}\n"
         "  hal0-memory:\n    type: http\n    url: http://127.0.0.1:8080/mcp/memory/mcp\n"
-        "    headers:\n      X-hal0-Agent: hermes__coder\n      X-hal0-Private: '1'\n"
+        "    headers:\n      X-hal0-Agent: hermes__coder\n      X-hal0-Private: '0'\n"
         "      Authorization: Bearer k\n"
         f"    timeout: {mem_t}\n"
     )
@@ -2404,13 +2404,25 @@ def test_profiles_mcp_warns_when_home_is_not_traversable(tmp_path, monkeypatch) 
 def test_profiles_mcp_warns_on_drifted_identity_or_provider(tmp_path) -> None:
     """Codex P2: a copied X-hal0-Agent or a missing X-hal0-Private is not "wired"."""
     copied = _WIRED.replace("hermes__coder", "hermes__hal0-brain")
-    no_private = _WIRED.replace("      X-hal0-Private: '1'\n", "")
+    no_private = _WIRED.replace("      X-hal0-Private: '0'\n", "")
     home = _profiles_home(tmp_path, coder=copied, lab=no_private)
     c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
     assert c.status == "warn"
     assert "coder, lab" in c.detail and "differ from hal0's wiring" in c.detail
     # Only a different profile name than the fixture's identity drifts: ``coder`` as itself passes.
     home2 = _profiles_home(tmp_path / "b", coder=_WIRED)
+    assert da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home2).status == "pass"
+
+
+def test_profiles_mcp_private_header_follows_the_profile_opt_in(tmp_path) -> None:
+    """A "1" is drift on a shared profile and correct on a memory_private one."""
+    stale = _WIRED.replace("X-hal0-Private: '0'", "X-hal0-Private: '1'")
+    c = da.check_hermes_profiles_mcp(
+        auth={"auth_required": True}, home=_profiles_home(tmp_path, coder=stale)
+    )
+    assert c.status == "warn" and "differ from hal0's wiring" in c.detail
+    opted = stale + "hal0:\n  memory_private: true\n"
+    home2 = _profiles_home(tmp_path / "b", coder=opted)
     assert da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home2).status == "pass"
 
 

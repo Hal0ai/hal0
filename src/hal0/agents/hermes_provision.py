@@ -1705,7 +1705,9 @@ def _default_mcp_servers() -> list[dict[str, Any]]:
             "name": "hal0-memory",
             "url": "http://127.0.0.1:8080/mcp/memory/mcp",
             "type": "http",
-            "private": True,
+            # Shared by default; a Hermes profile opts into a private bank with
+            # ``hal0: {memory_private: true}`` (:func:`profile_memory_private`).
+            "private": False,
             # memory_reflect is an agentic LLM loop on the engine side — on the
             # reference box a single reflect legitimately runs 5-9 minutes, so a
             # short per-server timeout guarantees a spurious client-side failure
@@ -2313,16 +2315,16 @@ def _config_list_keys(
     if not terminal_enabled:
         disabled += TERMINAL_OFF_TOOLSETS
     keys["agent"] = {"disabled_toolsets": disabled}
-    # X-hal0-Private must reach config.yaml as the STRING "1" (#2085): the
-    # config-set path can't express a numeric-looking string (hermes coerces
-    # it to the YAML int 1, which wedges hermes' MCP client post-initialize),
-    # so private servers get their header here, where safe_dump quotes it.
+    # X-hal0-Private must reach config.yaml as a STRING, "1" or "0" (#2085):
+    # the config-set path can't express a numeric-looking string (hermes
+    # coerces it to the YAML int, which wedges hermes' MCP client
+    # post-initialize), so the header is written here, where safe_dump quotes
+    # it. Shared servers render "0" so converge overwrites a stale "1".
     # The nested-dict merge preserves the sibling headers config set wrote
     # (X-hal0-Agent, Authorization) and overlay-wins repairs poisoned boxes.
     private_headers = {
-        srv["name"]: {"headers": {"X-hal0-Private": "1"}}
+        srv["name"]: {"headers": {"X-hal0-Private": "1" if srv.get("private") else "0"}}
         for srv in (mcp_servers or [])
-        if srv.get("private")
     }
     if private_headers:
         keys["mcp_servers"] = private_headers
@@ -3652,8 +3654,7 @@ def _probe_mcp_server(
     bearer = service_key(prefer="admin")
     if bearer:
         base_headers["Authorization"] = f"Bearer {bearer}"
-    if private:
-        base_headers["X-hal0-Private"] = "1"
+    base_headers["X-hal0-Private"] = "1" if private else "0"
 
     def _parse_jsonrpc(body: str) -> dict[str, Any]:
         body = (body or "").strip()
@@ -3850,8 +3851,7 @@ def _probe_mcp_client(
     bearer = service_key(prefer="admin")
     if bearer:
         headers["Authorization"] = f"Bearer {bearer}"
-    if private:
-        headers["X-hal0-Private"] = "1"
+    headers["X-hal0-Private"] = "1" if private else "0"
     env = _hal0_subprocess_env(
         HAL0_MCP_PROBE_URL=url or "",
         # Env, not argv: the bearer must not show up in the process list.
@@ -4691,8 +4691,7 @@ def _mcp_memory_call(
     bearer = service_key(prefer="admin")
     if bearer:
         headers["Authorization"] = f"Bearer {bearer}"
-    if private:
-        headers["X-hal0-Private"] = "1"
+    headers["X-hal0-Private"] = "1" if private else "0"
     req = Request(url, data=body_bytes, headers=headers, method="POST")
     try:
         with open_url(req, timeout=timeout) as resp:
@@ -5063,12 +5062,12 @@ def _brain_profile_config_path(state: BootstrapState) -> Path:
     return Path(state.hermes_home) / "profiles" / _BRAIN_PROFILE_NAME / "config.yaml"
 
 
-def _build_profile_mcp_servers(agent_id: str) -> dict[str, Any]:
+def _build_profile_mcp_servers(agent_id: str, *, private: bool = False) -> dict[str, Any]:
     """The hal0-owned MCP servers a Hermes profile is wired to, as ``agent_id``.
 
     Mirrors the top-level ``_default_mcp_servers`` admin + memory pair but scoped
-    to the profile's identity (``X-hal0-Agent``); memory is private (its own
-    3-tier bank). Deliberately just these two — a profile gets platform control
+    to the profile's identity (``X-hal0-Agent``); memory is shared by default
+    (``X-hal0-Private: "0"``) and private (its own bank) when ``private``. Deliberately just these two — a profile gets platform control
     + memory only, not any other MCP surface.
 
     The ``/mcp`` mount is ADMIN-classed (security/exposure.py), so — same as
@@ -5083,7 +5082,10 @@ def _build_profile_mcp_servers(agent_id: str) -> dict[str, Any]:
 
     bearer = service_key(prefer="admin")
     admin_headers: dict[str, Any] = {"X-hal0-Agent": agent_id}
-    memory_headers: dict[str, Any] = {"X-hal0-Agent": agent_id, "X-hal0-Private": "1"}
+    memory_headers: dict[str, Any] = {
+        "X-hal0-Agent": agent_id,
+        "X-hal0-Private": "1" if private else "0",
+    }
     if bearer:
         admin_headers["Authorization"] = f"Bearer {bearer}"
         memory_headers["Authorization"] = f"Bearer {bearer}"
@@ -5126,6 +5128,10 @@ def _build_brain_profile_mcp_servers() -> dict[str, Any]:
 #: ``hal0: {wire_mcp: false}``. The profile then keeps whatever ``mcp_servers``
 #: the operator wrote, and hal0 never touches the file again.
 PROFILE_MCP_OPT_OUT_KEY = "wire_mcp"
+
+#: ``hal0: {memory_private: true}`` in a profile's config.yaml gives that
+#: profile a private memory bank (``X-hal0-Private: "1"``); the default is shared.
+PROFILE_MEMORY_PRIVATE_KEY = "memory_private"
 
 #: Hermes's own profile id rule (``hermes_constants.py:323`` at d923a5eb). A
 #: directory under ``profiles/`` that breaks it is not a profile Hermes serves,
@@ -5417,11 +5423,21 @@ def _replace_profile_config_at(dir_fd: int, text: str, st: os.stat_result) -> No
         raise
 
 
-def _profile_wire_desired(agent_id: str) -> dict[str, Any]:
+def profile_memory_private(cfg: dict[str, Any]) -> bool:
+    """True when a profile's own config opts into a private memory bank.
+
+    ``hal0: {memory_private: true}``; anything but a literal boolean ``True``
+    (absent, malformed, a string) means shared, the default.
+    """
+    hal0 = cfg.get("hal0") if isinstance(cfg, dict) else None
+    return isinstance(hal0, dict) and hal0.get(PROFILE_MEMORY_PRIVATE_KEY) is True
+
+
+def _profile_wire_desired(agent_id: str, *, private: bool = False) -> dict[str, Any]:
     # hal0-owned profile keys: the two MCP servers + the memory provider. Only
     # scalar/dict keys are set — never a list (see _merge_profile_config_at).
     return {
-        "mcp_servers": _build_profile_mcp_servers(agent_id),
+        "mcp_servers": _build_profile_mcp_servers(agent_id, private=private),
         "memory": {"provider": "hal0-memory"},
     }
 
@@ -5507,9 +5523,9 @@ def _profile_wire_desired_for(
     """
     if terminal_enabled is _UNSET:
         terminal_enabled = read_terminal_state()
-    fixed = _profile_wire_desired(agent_id)
 
     def desired(base: dict[str, Any]) -> dict[str, Any]:
+        fixed = _profile_wire_desired(agent_id, private=profile_memory_private(base))
         return _deep_merge(fixed, _terminal_profile_keys(base, terminal_enabled=terminal_enabled))
 
     return desired

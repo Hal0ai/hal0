@@ -2204,7 +2204,7 @@ def test_config_write_phase_writes_yaml_idempotently(
     # guard on the mcp_servers= kwarg into _config_list_keys — without it,
     # dropping that kwarg keeps every unit test green while fresh installs
     # ship no private header at all (memory writes silently land shared).
-    assert "X-hal0-Private: '1'" in cfg.read_text(encoding="utf-8")
+    assert "X-hal0-Private: '0'" in cfg.read_text(encoding="utf-8")
     first_hash = out1.hash
     # Re-run is idempotent: config set re-writes the same values + the YAML
     # merge is a no-op, so the on-disk file (and its hash) is unchanged.
@@ -2904,7 +2904,7 @@ def test_brain_profile_mcp_wire_merges_and_preserves_upstream_keys(tmp_path: Pat
     servers = merged["mcp_servers"]
     # hal0-owned servers wired under the brain profile identity…
     assert servers["hal0-admin"]["headers"]["X-hal0-Agent"] == "hermes__hal0-brain"
-    assert servers["hal0-memory"]["headers"]["X-hal0-Private"] == "1"  # str, not int (#2085)
+    assert servers["hal0-memory"]["headers"]["X-hal0-Private"] == "0"  # str, not int (#2085)
     assert servers["hal0-memory"]["headers"]["X-hal0-Agent"] == "hermes__hal0-brain"
     # memory provider is written too (scalar merge, safe)…
     assert merged["memory"]["provider"] == "hal0-memory"
@@ -5853,7 +5853,7 @@ def test_wire_named_profiles_wires_each_profile_as_its_own_identity(
         "X-hal0-Agent": "hermes__coder",
         "Authorization": "Bearer svc-key",
     }
-    assert coder["mcp_servers"]["hal0-memory"]["headers"]["X-hal0-Private"] == "1"
+    assert coder["mcp_servers"]["hal0-memory"]["headers"]["X-hal0-Private"] == "0"
     assert coder["mcp_servers"]["hal0-memory"]["headers"]["X-hal0-Agent"] == "hermes__coder"
     assert coder["memory"]["provider"] == "hal0-memory"
     assert coder["mcp_servers"]["mine"] == {"type": "http", "url": "http://x"}  # kept
