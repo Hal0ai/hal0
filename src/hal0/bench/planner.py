@@ -219,6 +219,7 @@ def attach_slot_profiles(
     """
     try:
         from hal0.providers.container import resolve_slot_profile, slot_effective_context
+        from hal0.slots.tune import effective_tune
 
         slot_cfgs = _read_slot_cfgs() if slots is None else slots
         registry = _ModelDictRegistry(models)
@@ -236,6 +237,7 @@ def attach_slot_profiles(
                     except Exception:
                         continue  # a slot naming a missing profile cannot be benched as-is
                     ctx, ctx_source = slot_effective_context(cfg, registry)
+                    tune = effective_tune(cfg, profile)
                     attached = {
                         **model,
                         "profile": {
@@ -244,10 +246,11 @@ def attach_slot_profiles(
                             "flags": str(getattr(profile, "flags", "") or ""),
                             "ctx_size": ctx,
                             "ctx_source": ctx_source,
-                            "enable_thinking": getattr(profile, "enable_thinking", None),
-                            "vision": getattr(profile, "vision", "auto"),
-                            "speculation": getattr(profile, "speculation", "auto"),
+                            "enable_thinking": tune.enable_thinking,
+                            "vision": tune.vision,
+                            "speculation": tune.speculation,
                             "runner": getattr(profile, "runner", None),
+                            "tune": tune.as_dict(),
                         },
                     }
                     break

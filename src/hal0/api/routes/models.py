@@ -653,12 +653,20 @@ async def models_feasibility(request: Request) -> dict[str, Any]:
       profile's ``ctx_size``, else the model's native window capped at 32768,
       else 8192 (``ctx_source`` ``profile`` / ``native`` / ``fallback``). An
       unknown profile degrades the row to ``"unknown"``.
+    * ``slot`` — a slot name: the slot's window under its profile plus its
+      ``[tune]`` override, applied to THIS model (``ctx_source`` ``slot`` when
+      the override set it). Wins over ``profile``.
     * neither — the window a profile with no ``ctx_size`` would launch.
 
     Every result row carries ``ctx`` and ``ctx_source`` (both ``null`` on an
     ``"unknown"`` row).
     """
-    from hal0.providers.container import profile_context, resolve_named_profile
+    from hal0.providers.container import (
+        profile_context,
+        resolve_named_profile,
+        resolve_slot_profile,
+    )
+    from hal0.slots.tune import effective_tune
 
     try:
         body = await request.json()
@@ -687,6 +695,19 @@ async def models_feasibility(request: Request) -> dict[str, Any]:
             log.warning("models.feasibility_gpu_sample_failed", exc_info=True)
     free = getattr(gpu, "gtt_free_mb", None)
     total = getattr(gpu, "gtt_total_mb", None)
+
+    slot_cfgs: dict[str, dict[str, Any]] = {}
+    if any(isinstance(i, dict) and i.get("slot") for i in items):
+        sm = getattr(request.app.state, "slot_manager", None)
+        try:
+            slot_cfgs = {
+                str(c.get("name")): c
+                for c in (await sm.iter_configs() if sm is not None else [])
+                if isinstance(c, dict) and c.get("name")
+            }
+        except Exception:
+            slot_cfgs = {}
+            log.warning("models.feasibility_slot_configs_failed", exc_info=True)
 
     results: list[dict[str, Any]] = []
     for item in items:
@@ -723,6 +744,13 @@ async def models_feasibility(request: Request) -> dict[str, Any]:
                     if isinstance(profile_name, str) and profile_name.strip()
                     else None
                 )
+                slot_name = item.get("slot")
+                slot_cfg = (
+                    slot_cfgs.get(slot_name) if isinstance(slot_name, str) and slot_name else None
+                )
+                if slot_cfg is not None:
+                    # The slot's window (its profile plus its [tune]) for THIS model.
+                    profile = effective_tune(slot_cfg, resolve_slot_profile(slot_cfg))
                 ctx, ctx_source = profile_context(profile, ctx_meta)
             # The KV estimate reads the resolved window from ``ctx_tokens``.
             ctx_meta["ctx_tokens"] = ctx
