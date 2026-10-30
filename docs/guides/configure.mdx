@@ -167,7 +167,9 @@ with it. Any profile save whose `flags` contain it is rejected
 it, so remove it from `flags` to edit such a profile (a save that leaves
 `flags` out still goes through). A profile that has it stored on disk is not
 refused at launch: hal0 strips the pair from the command and launches without
-it. To turn thinking off, use `--reasoning off` instead.
+it. To turn thinking off, set the profile's `enable_thinking` to `false`: in
+the dashboard Profiles page, with `hal0 profile edit <name> --no-thinking`, or
+with `PUT /api/profiles/{name}`.
 
 A slot's `[server].env` is screened the same way: it may not set any
 `LLAMA_ARG_*` variable, nor `LLAMA_API_KEY`, `HF_TOKEN` or
