@@ -17,7 +17,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from hal0.api import create_app
-from hal0.config.schema import SEED_PROFILES
+from hal0.config.schema import SEED_PROFILES, ProfileConfig
+from hal0.profiles import ProfileCatalog
 
 
 @pytest.fixture
@@ -81,6 +82,16 @@ class TestExportRoute:
         assert body["vision"] == "off"
         assert body["speculation"] == "off"
         assert not {"device_class", "backend", "quant"} & set(body)
+
+    def test_export_carries_reasoning_knobs(self, client: TestClient) -> None:
+        ProfileCatalog().create(
+            "reasoner", ProfileConfig(reasoning_effort="high", reasoning_budget=2048)
+        )
+        r = client.post("/api/profiles/reasoner/export")
+        assert r.status_code == 200
+        body = r.json()["profile"]
+        assert body["reasoning_effort"] == "high"
+        assert body["reasoning_budget"] == 2048
 
     def test_export_unknown_404(self, client: TestClient) -> None:
         r = client.post("/api/profiles/does-not-exist/export")
