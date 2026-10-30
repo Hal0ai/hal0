@@ -21,7 +21,7 @@ route) — never the installer's cold ``python -m hal0.openwebui.env_writer``
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from hal0.capabilities.config import CapabilityConfig, load_capabilities_config
@@ -100,17 +100,45 @@ def openwebui_wiring_status(
     }
 
 
-def _bridge_mcp_ready() -> bool:
-    """``[bridge].enabled`` and a bridge client named ``openwebui`` exists. Fail-soft."""
+def _bridge_client() -> Any | None:
+    """The ``openwebui`` bridge client row, or ``None``. Read-only and fail-soft.
+
+    Never creates ``bridge.db``: the image-model installer renders this as root,
+    and a root-owned file there would lock hal0-api out. Absent file, bridge
+    disabled or any error all read as "no client".
+    """
     try:
-        from hal0.api.auth import bridge_store
+        from hal0.bridge.store import BridgeStore
+        from hal0.config import paths
         from hal0.config.loader import load_hal0_config
 
         if not load_hal0_config().bridge.enabled:
-            return False
-        return bridge_store().get_client("openwebui") is not None
+            return None
+        db = paths.bridge_db()
+        if not db.exists():
+            return None
+        return BridgeStore(db).get_client("openwebui")
     except Exception:
-        return False
+        return None
+
+
+def _bridge_mcp_ready() -> bool:
+    """``[bridge].enabled`` and a bridge client named ``openwebui`` exists. Fail-soft."""
+    return _bridge_client() is not None
+
+
+def _mcp_base_url() -> str:
+    """hal0's container-side origin: the first ``OPENAI_API_BASE_URLS`` entry, sans ``/v1``."""
+    from hal0.openwebui import env_writer
+
+    try:
+        urls = env_writer._read_existing_env(env_writer._default_path()).get(
+            "OPENAI_API_BASE_URLS", ""
+        )
+    except Exception:
+        urls = ""
+    first = (urls or env_writer.default_openwebui_env()["OPENAI_API_BASE_URLS"]).split(";")[0]
+    return first.strip().rstrip("/").removesuffix("/v1")
 
 
 def _renderable_image_model(model_id: str) -> str | None:
@@ -140,6 +168,7 @@ def _renderable_image_model(model_id: str) -> str | None:
 def resolve_dynamic_env_overrides(
     bridge_key: str | None = None,
     mcp_enabled: bool | None = None,
+    bridge_scopes: Iterable[str] | None = None,
 ) -> dict[str, str | None]:
     """Live capability state → the overrides dict
     :func:`~hal0.openwebui.env_writer.write_openwebui_env` merges in.
@@ -149,12 +178,22 @@ def resolve_dynamic_env_overrides(
     it from the bridge store, as :func:`openwebui_wiring_status` does).
     """
     status = openwebui_wiring_status(mcp=mcp_enabled)
+    scopes: frozenset[str] | None = None
+    if bridge_scopes is not None:
+        scopes = frozenset(bridge_scopes)
+    elif status["mcp"]:
+        client = _bridge_client()
+        if client is not None:
+            scopes = frozenset(client.scopes)
+    extra: dict[str, Any] = {"bridge_scopes": scopes} if scopes else {}
     return dynamic_env_overrides(
         embed_model_id=status["embed_model"],
         image_model_id=status["image_model"],
         search_provider=_search_provider_lookup(),
         bridge_key=bridge_key,
         mcp_enabled=bool(status["mcp"]),
+        mcp_base_url=_mcp_base_url(),
+        **extra,
     )
 
 
