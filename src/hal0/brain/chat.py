@@ -190,26 +190,39 @@ _MEMORY_RULE = (
     "what the operator told you before, call memory_search first."
 )
 
-# The #2658 wording ("you have a private memory bank ...") that boxes seeded
-# before the shared-memory switch still carry in their persona TOML.
-# Bounded to one paragraph: the match cannot cross a blank line, so an edited
-# rule that lost its closing sentence cannot swallow operator text up to some
-# later "call memory_search first." It ends at that sentence, or at the end of
-# the paragraph when the sentence is gone.
-_OLD_PRIVATE_RULE_RE = re.compile(
-    r"Memory: you have a private memory bank(?:(?!\n[ \t]*\n).)*?"
-    r"(?:call memory_search first\.|(?=\n[ \t]*\n|\Z))",
-    re.DOTALL,
+# The two wordings boxes seeded before the shared-memory switch still carry in
+# their persona TOML (the seeder never overwrites): the #2658 rule, and the
+# sentence the seeded persona prompt ends with. They are matched whole, case-
+# and whitespace-insensitively, so a rule wrapped across lines still matches;
+# nothing else in a persona prompt is ever deleted.
+_SEEDED_PRIVATE_RULE = (
+    "Memory: you have a private memory bank (namespace private:hermes__hal0-brain), "
+    "separate from the Hermes chat agent. memory_add(text) saves one fact, "
+    "memory_search(query) finds saved facts, memory_list() shows recent ones. "
+    "Nothing is remembered unless you call memory_add: never say you noted, saved "
+    "or remembered something without a memory_add result in this turn. When asked "
+    "what the operator told you before, call memory_search first."
 )
-# The seeded persona sentence ("You have a private memory bank of your own
-# (namespace ...): ..."), up to the period, or the end of the line when the
-# author left the period off. Only that wording is stale; an operator's own
-# sentence that merely mentions a "private memory bank" is left alone. Trailing
-# spaces/tabs go, the paragraph break stays.
-_STALE_SENTENCE_RE = re.compile(
-    r"[^.\n]*you have a private memory bank of your own[^.\n]*(?:\.|(?=\n|$))[ \t]*",
-    re.IGNORECASE,
+_SEEDED_PRIVATE_SENTENCE = (
+    "You have a private memory bank of your own (namespace "
+    "private:hermes__hal0-brain): memory_add(text) saves a fact, "
+    "memory_search(query) and memory_list() read saved facts back. "
+    "Call memory_add before you say you have noted or will remember "
+    "anything, and memory_search before answering what the operator "
+    "told you earlier; without a tool result you remember nothing."
 )
+
+
+def _whitespace_tolerant(text: str) -> re.Pattern[str]:
+    return re.compile(r"\s+".join(re.escape(w) for w in text.split()), re.IGNORECASE)
+
+
+_SEEDED_PRIVATE_RES = (
+    _whitespace_tolerant(_SEEDED_PRIVATE_RULE),
+    _whitespace_tolerant(_SEEDED_PRIVATE_SENTENCE),
+)
+# Any remaining claim of a private bank, in the operator's own words or not.
+_PRIVATE_BANK_CLAIM_RE = re.compile(r"private\s+memory\s+bank", re.IGNORECASE)
 
 # Injected as the leading system message when the client doesn't send one.
 # Without it the LLM had ten write tools, no read tools, and no idea what the
@@ -295,7 +308,24 @@ Rules:
 )
 
 
+#: Appended to the steward's prompt when its Hermes profile opted into private
+#: memory (``hal0: {memory_private: true}``): the shared-memory rule above is
+#: then not the whole truth, and the last word must be.
+_PRIVATE_MEMORY_NOTE = (
+    "Your profile keeps your memory private: what you save with memory_add is "
+    "readable only by you, not by the other agents."
+)
+
+
 def _resolve_profile(request: Request) -> tuple[str, str]:
+    """:func:`_resolve_profile_base`, plus the private-memory note when the profile opted in."""
+    prompt, model = _resolve_profile_base(request)
+    if _brain_memory_private():
+        prompt = f"{prompt}\n\n{_PRIVATE_MEMORY_NOTE}"
+    return prompt, model
+
+
+def _resolve_profile_base(request: Request) -> tuple[str, str]:
     """Resolve (system_prompt, default_model) from the hal0-brain profile.
 
     Reads the ``hal0-brain`` persona TOML from the personas store (root
@@ -311,13 +341,13 @@ def _resolve_profile(request: Request) -> tuple[str, str]:
     except (FileNotFoundError, PersonaError, OSError):
         return _SYSTEM_PROMPT, BRAIN_SLOT_MODEL
     prompt = persona.system_prompt.strip() or _SYSTEM_PROMPT
-    if _OLD_PRIVATE_RULE_RE.search(prompt) or _STALE_SENTENCE_RE.search(prompt):
-        # A persona seeded after #2658 (the seeder never overwrites) still
-        # claims a private bank, but the steward now writes shared memory.
-        prompt = _OLD_PRIVATE_RULE_RE.sub(lambda _m: _MEMORY_RULE, prompt)
-        if _STALE_SENTENCE_RE.search(prompt):
-            # Hand-edited variant: drop the stale sentence, append the rule.
-            prompt = _STALE_SENTENCE_RE.sub("", prompt).strip()
+    for pattern in _SEEDED_PRIVATE_RES:
+        prompt = pattern.sub(lambda _m: _MEMORY_RULE, prompt)
+    if _PRIVATE_BANK_CLAIM_RE.search(prompt):
+        # The operator's own text still talks about a private bank (a guardrail,
+        # an edited rule). It stays as written; the true rule goes after it so it
+        # is the last word.
+        if not prompt.rstrip().endswith(_MEMORY_RULE):
             prompt = f"{prompt}\n\n{_MEMORY_RULE}"
     elif "memory_add" not in prompt:
         # A persona seeded before #2658 says nothing about memory; without the

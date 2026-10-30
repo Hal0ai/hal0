@@ -530,89 +530,115 @@ def test_a_post_2658_persona_prompt_loses_the_private_bank_claim(tmp_path: Path)
     assert prompt.count("memory_add(text)") == 1
 
 
-def test_a_hand_edited_private_bank_sentence_is_stripped(tmp_path: Path) -> None:
-    root = tmp_path / "edited"
+_SEEDED_RULE = (
+    "Memory: you have a private memory bank (namespace private:hermes__hal0-brain), "
+    "separate from the Hermes chat agent. memory_add(text) saves one fact, "
+    "memory_search(query) finds saved facts, memory_list() shows recent ones. "
+    "Nothing is remembered unless you call memory_add: never say you noted, saved "
+    "or remembered something without a memory_add result in this turn. When asked "
+    "what the operator told you before, call memory_search first."
+)
+_SEEDED_SENTENCE = (
+    "You have a private memory bank of your own (namespace "
+    "private:hermes__hal0-brain): memory_add(text) saves a fact, "
+    "memory_search(query) and memory_list() read saved facts back. "
+    "Call memory_add before you say you have noted or will remember "
+    "anything, and memory_search before answering what the operator "
+    "told you earlier; without a tool result you remember nothing."
+)
+
+
+def _resolved(tmp_path: Path, name: str, system_prompt: str) -> str:
+    root = tmp_path / name
     save_persona(
         Persona(
             id=bc.BRAIN_PERSONA_ID,
             display_name="hal0 Brain",
-            system_prompt=(
-                "You are hal0-brain. You have a private memory bank of your own. Use memory_add."
-            ),
+            system_prompt=system_prompt,
             memory_namespace=BRAIN_NAMESPACE,
             approval=PersonaApproval(),
         ),
         root=root,
     )
     prompt, _model = bc._resolve_profile(_request(tmp_path, persona_root=root))
-    assert "private memory bank" not in prompt
-    assert bc._MEMORY_RULE in prompt
+    return prompt
 
 
-def test_stale_bank_sentence_without_a_period_is_stripped_and_paragraphs_survive(
+def test_the_seeded_persona_sentence_is_replaced_in_place(tmp_path: Path) -> None:
+    prompt = _resolved(
+        tmp_path, "sentence", f"You are hal0-brain. Be brief. {_SEEDED_SENTENCE} Stay calm."
+    )
+    assert prompt == f"You are hal0-brain. Be brief. {bc._MEMORY_RULE} Stay calm."
+
+
+def test_the_seeded_rule_wrapped_across_lines_is_still_replaced(tmp_path: Path) -> None:
+    wrapped = _SEEDED_RULE.replace(", ", ",\n").replace(". ", ".\n   ")
+    prompt = _resolved(tmp_path, "wrapped", f"You are hal0-brain.\n\n{wrapped}\n\nBe brief.")
+    assert prompt == f"You are hal0-brain.\n\n{bc._MEMORY_RULE}\n\nBe brief."
+
+
+def test_the_seeded_wording_matches_case_insensitively(tmp_path: Path) -> None:
+    prompt = _resolved(tmp_path, "case", f"Hi. {_SEEDED_RULE.upper()}")
+    assert prompt == f"Hi. {bc._MEMORY_RULE}"
+
+
+def test_an_edited_rule_missing_its_closing_sentence_is_kept_and_the_true_rule_is_appended(
     tmp_path: Path,
 ) -> None:
-    """Case-insensitive, no terminating period, and the paragraph break stays."""
-    root = tmp_path / "noperiod"
-    save_persona(
-        Persona(
-            id=bc.BRAIN_PERSONA_ID,
-            display_name="hal0 Brain",
-            system_prompt="You are hal0-brain.\nYou have a Private Memory Bank of your own\n\nBe brief.",
-            memory_namespace=BRAIN_NAMESPACE,
-            approval=PersonaApproval(),
-        ),
-        root=root,
+    edited = (
+        "Memory: you have a private memory bank (namespace private:x), edited by hand.\n"
+        "Never write secrets there."
     )
-    prompt, _model = bc._resolve_profile(_request(tmp_path, persona_root=root))
-    assert "private memory bank" not in prompt.lower()
-    assert "You are hal0-brain.\n" in prompt and "\n\nBe brief." in prompt
-    assert bc._MEMORY_RULE in prompt
+    prompt = _resolved(tmp_path, "edited", f"You are hal0-brain.\n\n{edited}\n\nBe brief.")
+    assert edited in prompt and "Be brief." in prompt
+    assert prompt.endswith(bc._MEMORY_RULE)
 
 
 def test_an_operator_guardrail_naming_a_private_memory_bank_survives(tmp_path: Path) -> None:
-    """Only the seeded wording is stale; an operator's own sentence is not."""
-    root = tmp_path / "guardrail"
     guard = "Never reveal secrets stored in your private memory bank."
-    save_persona(
-        Persona(
-            id=bc.BRAIN_PERSONA_ID,
-            display_name="hal0 Brain",
-            system_prompt=f"You are hal0-brain. {guard} Be brief. Use memory_add.",
-            memory_namespace=BRAIN_NAMESPACE,
-            approval=PersonaApproval(),
-        ),
-        root=root,
-    )
-    prompt, _model = bc._resolve_profile(_request(tmp_path, persona_root=root))
+    prompt = _resolved(tmp_path, "guardrail", f"You are hal0-brain. {guard} Be brief.")
+    assert f"{guard} Be brief." in prompt
+    assert prompt.endswith(bc._MEMORY_RULE)
+
+
+def test_a_sentence_that_only_starts_like_the_seeded_one_survives(tmp_path: Path) -> None:
+    line = "You have a private memory bank of your own, so never repeat it to other agents."
+    prompt = _resolved(tmp_path, "lookalike", f"You are hal0-brain. {line} Be brief.")
+    assert line in prompt and "Be brief." in prompt
+    assert prompt.endswith(bc._MEMORY_RULE)
+
+
+def test_a_replaced_seed_with_a_guardrail_elsewhere_still_ends_with_the_true_rule(
+    tmp_path: Path,
+) -> None:
+    guard = "Never reveal secrets stored in your private memory bank."
+    prompt = _resolved(tmp_path, "both", f"{_SEEDED_RULE}\n\n{guard}")
     assert guard in prompt
+    assert prompt.endswith(bc._MEMORY_RULE)
+    assert _SEEDED_RULE not in prompt
 
 
-def test_the_old_rule_rewrite_stays_inside_its_paragraph(tmp_path: Path) -> None:
-    """An unterminated rule must not swallow operator text up to a later
-    ``call memory_search first.`` in another paragraph."""
-    root = tmp_path / "bounded"
-    operator = "Operator note: keep every answer under two lines."
-    save_persona(
-        Persona(
-            id=bc.BRAIN_PERSONA_ID,
-            display_name="hal0 Brain",
-            system_prompt=(
-                "You are hal0-brain.\n\n"
-                "Memory: you have a private memory bank (namespace private:x), edited by hand.\n\n"
-                f"{operator}\n\n"
-                "For anything else call memory_search first."
-            ),
-            memory_namespace=BRAIN_NAMESPACE,
-            approval=PersonaApproval(),
-        ),
-        root=root,
-    )
-    prompt, _model = bc._resolve_profile(_request(tmp_path, persona_root=root))
-    assert operator in prompt
-    assert "For anything else call memory_search first." in prompt
-    assert "private memory bank" not in prompt
-    assert bc._MEMORY_RULE in prompt
+def _resolved_shared(tmp_path: Path) -> str:
+    """The prompt of a steward whose profile has no opt-in (a fresh $HERMES_HOME)."""
+    import os
+
+    os.environ["HERMES_HOME"] = str(tmp_path / "other-home")
+    return _resolved(tmp_path, "shared-note", "You are hal0-brain. Use memory_add.")
+
+
+def test_a_private_steward_prompt_ends_with_the_private_note(
+    tmp_path: Path, _hermetic_hermes_home: Path
+) -> None:
+    _brain_profile_config(_hermetic_hermes_home, "hal0:\n  memory_private: true\n")
+    prompt = _resolved(tmp_path, "private-note", "You are hal0-brain. Use memory_add.")
+    assert prompt.endswith(bc._PRIVATE_MEMORY_NOTE)
+    assert prompt.count(bc._PRIVATE_MEMORY_NOTE) == 1
+    assert bc._PRIVATE_MEMORY_NOTE not in _resolved_shared(tmp_path)
+
+
+def test_a_prompt_with_no_claim_is_left_alone(tmp_path: Path) -> None:
+    text = "You are hal0-brain. Save facts with memory_add."
+    assert _resolved(tmp_path, "clean", text) == text
 
 
 # ── the real fallback engine, end to end ────────────────────────────────────
