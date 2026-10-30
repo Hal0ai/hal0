@@ -99,13 +99,13 @@ async def test_unified_shared_write_gets_agent_tag_no_visibility():
 
 
 @pytest.mark.asyncio
-async def test_unified_preserves_caller_tags_and_does_not_double_stamp_agent():
+async def test_unified_preserves_caller_tags_and_overwrites_caller_agent_tag():
     p = _unified()
     await p.add("x", dataset="shared", client_id="hermes", tags=["topic:cats", "agent:override"])
     rec = p._client.retained[0]
     assert "topic:cats" in rec["tags"]
-    # Caller already supplied an agent: tag — server must not add a second.
-    assert [t for t in rec["tags"] if t.startswith("agent:")] == ["agent:override"]
+    # #3136: the provider owns agent: — caller's is replaced by the resolved caller.
+    assert [t for t in rec["tags"] if t.startswith("agent:")] == ["agent:hermes"]
 
 
 @pytest.mark.asyncio

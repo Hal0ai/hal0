@@ -1280,14 +1280,20 @@ class HindsightProvider(MemoryProvider):
         else:
             resolved_id = str(uuid.uuid4())
 
-        # Server-side tag enforcement: an ``agent:<id>`` tag on every write
-        # (unless the caller already supplied one), plus ``visibility:private``
-        # when the write came in under the private toggle. Caller tags are
+        # Server-side tag enforcement (#3136): the provider owns both the
+        # ``agent:`` and ``visibility:private`` tags. Any caller-supplied
+        # ``agent:*`` is dropped and replaced with the resolved caller, and a
+        # caller-supplied ``visibility:private`` is dropped unless the write
+        # came in under the private toggle — otherwise a caller could plant
+        # a note in another agent's private namespace. Other caller tags are
         # preserved.
-        out_tags = list(tags or [])
-        if not any(str(t).startswith(_AGENT_TAG_PREFIX) for t in out_tags):
-            out_tags.append(f"{_AGENT_TAG_PREFIX}{agent}")
-        if requested_private and _VISIBILITY_PRIVATE not in out_tags:
+        out_tags = [
+            t
+            for t in (tags or [])
+            if not str(t).startswith(_AGENT_TAG_PREFIX) and t != _VISIBILITY_PRIVATE
+        ]
+        out_tags.append(f"{_AGENT_TAG_PREFIX}{agent}")
+        if requested_private:
             out_tags.append(_VISIBILITY_PRIVATE)
         # #1300: only in unified mode — pre-unified multi-bank mode isolates the
         # project by bank, so tagging there would be a second owner of the
