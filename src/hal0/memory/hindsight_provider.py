@@ -57,6 +57,37 @@ _AGENTS = "agents"
 # (below) keeps such a doc addressable only by its owning agent.
 _VISIBILITY_PRIVATE = "visibility:private"
 _AGENT_TAG_PREFIX = "agent:"
+#: Tag namespaces the provider owns. A caller's tag is judged stripped and
+#: lower-cased (as the bridge's ``_client_tags`` does), so ``AGENT:x``,
+#: `` agent:x`` and ``Visibility:Shared`` are reserved too.
+_RESERVED_TAG_PREFIXES = (_AGENT_TAG_PREFIX, "visibility:")
+
+
+def _is_reserved_tag(tag: Any) -> bool:
+    return str(tag).strip().lower().startswith(_RESERVED_TAG_PREFIXES)
+
+
+def _strip_reserved_scopes(scopes: Any) -> Any:
+    """``observation_scopes`` with reserved tags removed from list-form scopes.
+
+    A string mode (``per_tag`` ...) passes through. A list of tag-lists keeps
+    each scope's other tags; a scope left empty is dropped, and a list left
+    with no scope at all becomes ``None`` (the engine default), so a caller
+    cannot aim consolidation at another agent's or the private partition.
+    """
+    if not isinstance(scopes, list):
+        return scopes
+    kept: list[Any] = []
+    for scope in scopes:
+        if isinstance(scope, list):
+            inner = [t for t in scope if not _is_reserved_tag(t)]
+            if inner:
+                kept.append(inner)
+        elif not _is_reserved_tag(scope):
+            kept.append(scope)
+    return kept or None
+
+
 # The front-door sentinel for a missing X-hal0-Agent; collapses to ``unknown``
 # on both write (agent tag) and read (caller identity) so an absent identity
 # can never match a real agent's private docs.
@@ -1281,17 +1312,13 @@ class HindsightProvider(MemoryProvider):
             resolved_id = str(uuid.uuid4())
 
         # Server-side tag enforcement (#3136): the provider owns both the
-        # ``agent:`` and ``visibility:private`` tags. Any caller-supplied
-        # ``agent:*`` is dropped and replaced with the resolved caller, and a
-        # caller-supplied ``visibility:private`` is dropped unless the write
-        # came in under the private toggle — otherwise a caller could plant
-        # a note in another agent's private namespace. Other caller tags are
-        # preserved.
-        out_tags = [
-            t
-            for t in (tags or [])
-            if not str(t).startswith(_AGENT_TAG_PREFIX) and t != _VISIBILITY_PRIVATE
-        ]
+        # ``agent:`` and ``visibility:`` tags. Any caller-supplied ``agent:*``
+        # or ``visibility:*`` (compared stripped and case-insensitively) is
+        # dropped; ``agent:`` is replaced with the resolved caller and
+        # ``visibility:private`` is added only when the write came in under the
+        # private toggle — otherwise a caller could plant a note in another
+        # agent's private namespace. Other caller tags are preserved.
+        out_tags = [t for t in (tags or []) if not _is_reserved_tag(t)]
         out_tags.append(f"{_AGENT_TAG_PREFIX}{agent}")
         if requested_private:
             out_tags.append(_VISIBILITY_PRIVATE)
@@ -1315,6 +1342,7 @@ class HindsightProvider(MemoryProvider):
         extra: dict[str, Any] = {}
         if entities is not None:
             extra["entities"] = entities
+        observation_scopes = _strip_reserved_scopes(observation_scopes)
         if observation_scopes is not None:
             extra["observation_scopes"] = observation_scopes
         if strategy is not None:
