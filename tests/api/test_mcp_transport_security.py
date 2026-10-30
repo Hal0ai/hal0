@@ -29,6 +29,17 @@ def test_default_is_localhost_only(monkeypatch):
     assert "192.0.2.142:8080" not in sec.allowed_hosts
 
 
+def test_host_docker_internal_is_allowed_by_default(monkeypatch):
+    """The Open WebUI container reaches hal0 as ``host.docker.internal``."""
+    monkeypatch.delenv("HAL0_MCP_ALLOWED_HOSTS", raising=False)
+    monkeypatch.delenv("HAL0_MCP_ALLOWED_ORIGINS", raising=False)
+
+    sec = _mcp_transport_security()
+
+    assert "host.docker.internal:*" in sec.allowed_hosts
+    assert "http://host.docker.internal:*" in sec.allowed_origins
+
+
 def test_extra_hosts_added_and_origins_derived(monkeypatch):
     # Note the stray whitespace — it must be trimmed.
     monkeypatch.setenv("HAL0_MCP_ALLOWED_HOSTS", "192.0.2.142:8080, hal0.example.com")
