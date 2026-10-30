@@ -1549,3 +1549,16 @@ class TestTuneInSnapshot:
         assert d["tune_effective"] is None
         d = await _ctx_view(_llm_cfg(device="npu", profile="flm", model={"default": "g:1b"}), None)
         assert d["tune_effective"] is None
+
+
+class TestTuneLiftIsValidated:
+    async def test_invalid_tune_keys_are_left_out_of_tune(
+        self, no_mem: None, tmp_hal0_home: str
+    ) -> None:
+        cfg = _llm_cfg(
+            profile="chat",
+            model={"default": _CTX_MODEL},
+            tune={"vision": "off", "reasoning_effort": "high --x", "ctx_size": -5},
+        )
+        d = await _ctx_view(cfg, 8000)
+        assert d["tune"] == {"vision": "off"}

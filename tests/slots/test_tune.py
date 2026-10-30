@@ -228,15 +228,56 @@ def test_slot_send_nothing_value_cannot_cancel_a_flag():
     assert t.sources["reasoning_effort"] == "profile-flags"
 
 
-def test_unusable_flag_values_are_ignored():
+def test_unusable_flag_values_read_as_nothing_set():
     p = ProfileConfig(
         flags="--reasoning-effort sideways --reasoning-budget x", reasoning_effort="low"
     )
     t = effective_tune({}, p)
-    assert t.reasoning_effort == "low" and t.sources["reasoning_effort"] == "profile"
-    assert t.reasoning_budget == -1 and t.sources["reasoning_budget"] == "profile"
+    # The flag still launches (and shadows the typed field), so the typed value is not shown.
+    assert t.reasoning_effort == "default" and t.sources["reasoning_effort"] == "profile-flags"
+    assert t.reasoning_budget == -1 and t.sources["reasoning_budget"] == "profile-flags"
 
 
 def test_tune_effective_field_set_is_unchanged():
     t = effective_tune({}, ProfileConfig(flags="--reasoning-effort low"))
     assert set(t.as_dict()) == {*TUNE_KEYS, "sources"}
+
+
+# ── reasoning budget upper bound ─────────────────────────────────────────────
+
+
+def test_budget_upper_bound_in_schema_and_resolver():
+    from pydantic import ValidationError
+
+    from hal0.config.schema import REASONING_BUDGET_MAX, SlotTuneConfig
+    from hal0.slots.tune import budget_flag_in
+
+    assert SlotTuneConfig(reasoning_budget=REASONING_BUDGET_MAX).reasoning_budget == 2**24
+    with pytest.raises(ValidationError):
+        SlotTuneConfig(reasoning_budget=REASONING_BUDGET_MAX + 1)
+    with pytest.raises(ValidationError):
+        ProfileConfig(reasoning_budget=REASONING_BUDGET_MAX + 1)
+    t = effective_tune({"tune": {"reasoning_budget": 10**12}}, P)
+    assert t.reasoning_budget == -1 and t.sources["reasoning_budget"] == "profile"
+    assert budget_flag_in("--reasoning-budget 99999999999") is None
+    assert budget_flag_in("--reasoning-budget 2048") == 2048
+
+
+# ── repeated / trailing flags: the last occurrence decides ───────────────────
+
+
+def test_unusable_last_flag_does_not_fall_back_to_an_earlier_one():
+    p = ProfileConfig(
+        flags="--reasoning-effort high --reasoning-effort bogus", reasoning_effort="low"
+    )
+    t = effective_tune({}, p)
+    assert t.reasoning_effort == "default" and t.sources["reasoning_effort"] == "profile-flags"
+    p = ProfileConfig(flags="--reasoning-budget 256 --reasoning-budget", reasoning_budget=64)
+    t = effective_tune({}, p)
+    assert t.reasoning_budget == -1 and t.sources["reasoning_budget"] == "profile-flags"
+    assert reasoning_flag_in("--reasoning off --reasoning") is None
+
+
+def test_later_usable_flag_wins():
+    p = ProfileConfig(flags="--reasoning-effort bogus --reasoning-effort high")
+    assert effective_tune({}, p).reasoning_effort == "high"

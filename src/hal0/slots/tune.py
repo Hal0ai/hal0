@@ -19,7 +19,12 @@ from typing import Any, get_args
 
 from pydantic import ValidationError
 
-from hal0.config.schema import TUNE_KEYS, ReasoningEffort, SlotTuneConfig
+from hal0.config.schema import (
+    REASONING_BUDGET_MAX,
+    TUNE_KEYS,
+    ReasoningEffort,
+    SlotTuneConfig,
+)
 from hal0.errors import BadRequest
 from hal0.slots.argv import _split_pairs
 
@@ -89,10 +94,13 @@ def slot_tune_table_valid(slot_cfg: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def flag_value_in(flags: str, canon: str) -> str | None:
-    """The value of the last ``canon`` flag in ``flags`` that carries one, else None.
+    """The value of the LAST ``canon`` flag in ``flags``; ``None`` when absent.
 
-    Every spelling argv folds (aliases, ``--flag=value``) is honoured because
-    the match goes through ``_split_pairs``. Malformed flag text reads as absent.
+    A last occurrence that carries no value (a trailing bare flag) reads as the
+    empty string: it is present but unusable, and it does not fall back to an
+    earlier occurrence, because the argv ends on it. Every spelling argv folds
+    (aliases, ``--flag=value``) is honoured through ``_split_pairs``. Malformed
+    flag text reads as absent.
     """
     try:
         tokens = shlex.split(flags or "")
@@ -106,14 +114,16 @@ def flag_value_in(flags: str, canon: str) -> str | None:
             found = pair.flag.split("=", 1)[1]
         elif pair.values:
             found = pair.values[0]
+        else:
+            found = ""
     return found
 
 
 def reasoning_flag_in(flags: str) -> bool | None:
     """The ``--reasoning`` value pinned in ``flags``: ``on`` True, ``off`` False, else None.
 
-    Last occurrence wins; a later `--reasoning auto` or unknown value resets an
-    earlier pin.
+    Last occurrence wins; a later `--reasoning auto`, unknown or missing value
+    resets an earlier pin.
     """
     value = flag_value_in(flags, "--reasoning")
     if value is None:
@@ -123,20 +133,19 @@ def reasoning_flag_in(flags: str) -> bool | None:
 
 
 def effort_flag_in(flags: str) -> str | None:
-    """The effort ``--reasoning-effort`` pins in ``flags``, or None (absent or not a level)."""
-    value = flag_value_in(flags, "--reasoning-effort")
-    low = (value or "").strip().lower()
+    """The effort the last ``--reasoning-effort`` pins in ``flags``, or None (absent or unusable)."""
+    low = (flag_value_in(flags, "--reasoning-effort") or "").strip().lower()
     return low if low in _EFFORT_FLAG_VALUES else None
 
 
 def budget_flag_in(flags: str) -> int | None:
-    """The token budget ``--reasoning-budget`` pins in ``flags``, or None (absent or not >= -1)."""
+    """The budget the last ``--reasoning-budget`` pins in ``flags``, or None (absent or unusable)."""
     value = flag_value_in(flags, "--reasoning-budget")
     try:
         budget = int((value or "").strip())
     except ValueError:
         return None
-    return budget if budget >= -1 else None
+    return budget if -1 <= budget <= REASONING_BUDGET_MAX else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,19 +194,21 @@ def effective_tune(slot_cfg: Mapping[str, Any], profile: Any) -> EffectiveTune:
         sources["enable_thinking"] = "profile-flags"
     # A free `--reasoning-effort` / `--reasoning-budget` in the profile's flags
     # beats the profile's typed field in the launch command (same layer, later),
-    # so it is what runs. A slot override still wins, except a "send nothing"
-    # value (effort ``default``, budget ``-1``): that cannot cancel a flag.
-    flag_effort = effort_flag_in(flags)
-    if flag_effort is not None and (
+    # so the flag is what runs, and the typed field is not emitted. An unusable
+    # last value (bare, or out of range) is that value being invalid: it reads as
+    # "nothing set", never as an earlier occurrence. A slot override still wins,
+    # except a "send nothing" value (effort ``default``, budget ``-1``): that
+    # cannot cancel a flag.
+    if flag_value_in(flags, "--reasoning-effort") is not None and (
         sources["reasoning_effort"] != "slot" or values["reasoning_effort"] == "default"
     ):
-        values["reasoning_effort"] = flag_effort
+        values["reasoning_effort"] = effort_flag_in(flags) or "default"
         sources["reasoning_effort"] = "profile-flags"
-    flag_budget = budget_flag_in(flags)
-    if flag_budget is not None and (
+    if flag_value_in(flags, "--reasoning-budget") is not None and (
         sources["reasoning_budget"] != "slot" or values["reasoning_budget"] == -1
     ):
-        values["reasoning_budget"] = flag_budget
+        flag_budget = budget_flag_in(flags)
+        values["reasoning_budget"] = -1 if flag_budget is None else flag_budget
         sources["reasoning_budget"] = "profile-flags"
     return EffectiveTune(
         name=getattr(profile, "name", ""),

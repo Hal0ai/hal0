@@ -240,3 +240,11 @@ def test_flag_budget_beats_typed_budget_in_report_and_argv() -> None:
     assert _value(d, "--reasoning-budget") == ("-1", "profile")
     assert d["tune_effective"]["reasoning_budget"] == -1
     assert d["tune_effective"]["sources"]["reasoning_budget"] == "profile-flags"
+
+
+def test_typed_profile_field_not_emitted_when_a_free_flag_is_present() -> None:
+    prof = _profile(flags="--reasoning-effort bogus", reasoning_effort="low")
+    d = _detail(_slot(), prof, _model())
+    assert d["argv"].count("--reasoning-effort") == 1
+    assert _value(d, "--reasoning-effort") == ("bogus", "profile")
+    assert d["tune_effective"]["reasoning_effort"] == "default"

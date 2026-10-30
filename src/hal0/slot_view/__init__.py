@@ -299,14 +299,12 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         # asks, so this is the one place the operator re-points it.
         entry["default"] = cfg.get("default") is True
 
-        # ADR-0045: the slot's raw sparse [tune] overrides ({} when none). The
+        # ADR-0045: the slot's [tune] overrides the launch honours ({} when
+        # none; a key the launch would ignore as invalid is left out). The
         # merged result rides beside ``ctx_effective`` as ``tune_effective``.
-        raw_tune = cfg.get("tune")
-        entry["tune"] = (
-            {k: v for k, v in raw_tune.items() if v is not None}
-            if isinstance(raw_tune, dict)
-            else {}
-        )
+        from hal0.slots.tune import slot_tune_table_valid
+
+        entry["tune"] = slot_tune_table_valid(cfg)
 
         # Spec 1 / Component 1: surface the edit-panel config fields so the
         # card + drawer seed their controls without a per-slot /config fetch.
