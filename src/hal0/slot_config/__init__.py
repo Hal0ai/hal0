@@ -217,6 +217,12 @@ def merge_slot_config(base: dict[str, Any], updates: dict[str, Any]) -> dict[str
 # ── slot-write tuning partition (ADR-0029) ───────────────────────────────────
 
 
+#: Offenders a ``[tune]`` override can stand in for (the hint is only useful then).
+_TUNE_OVERRIDE_OFFENDERS = frozenset(
+    {"ctx_size", "enable_thinking", "vision", "mtp", "[model].context_size", "[model].ctx_size"}
+)
+
+
 def reject_slot_tuning_keys(payload: dict[str, Any]) -> None:
     """400 when a slot-config write body carries a tuning key.
 
@@ -234,9 +240,15 @@ def reject_slot_tuning_keys(payload: dict[str, Any]) -> None:
     offenders = slot_tuning_keys(payload)
     if offenders:
         keys = ", ".join(repr(k) for k in offenders)
+        hint = ""
+        if any(k in _TUNE_OVERRIDE_OFFENDERS for k in offenders):
+            hint = (
+                "; a per-slot override goes under [tune] (ctx_size, enable_thinking, "
+                "vision, speculation, reasoning_effort, reasoning_budget)"
+            )
         raise BadRequest(
             f"key(s) {keys} belong on a profile, not the slot (ADR-0029) — set them on "
-            "the slot's profile (PUT /api/profiles/{name}) or pick another profile.",
+            f"the slot's profile (PUT /api/profiles/{{name}}) or pick another profile{hint}.",
             details={"keys": offenders},
             code="slot.tuning_key_denied",
         )
@@ -327,6 +339,7 @@ def unknown_slot_config_keys(payload: dict[str, Any]) -> list[str]:
         NpuConfig,
         ServerConfig,
         SlotConfig,
+        SlotTuneConfig,
     )
 
     sub_models: dict[str, Any] = {
@@ -334,6 +347,7 @@ def unknown_slot_config_keys(payload: dict[str, Any]) -> list[str]:
         "server": ServerConfig,
         "npu": NpuConfig,
         "image": ImageGenConfig,
+        "tune": SlotTuneConfig,
     }
     top_known = _known_field_names(SlotConfig)
     unknown: list[str] = []
@@ -386,7 +400,7 @@ def reject_unknown_slot_keys(payload: dict[str, Any]) -> None:
             details={
                 "unknown_keys": unknown,
                 "hint": "check spelling against the SlotConfig schema "
-                "(known sub-tables: [model], [server], [npu], [image])",
+                "(known sub-tables: [model], [server], [npu], [image], [tune])",
             },
             code="validation.unknown_keys",
         )
