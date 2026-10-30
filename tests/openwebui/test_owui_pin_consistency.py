@@ -58,6 +58,5 @@ def test_all_owui_pins_agree() -> None:
 
 def test_pin_label_matches_pin_digest_prefix() -> None:
     assert (
-        image_pin.OPENWEBUI_PIN_LABEL
-        == image_pin.OPENWEBUI_IMAGE_PIN.removeprefix("sha256:")[:12]
+        image_pin.OPENWEBUI_IMAGE_PIN.removeprefix("sha256:")[:12] == image_pin.OPENWEBUI_PIN_LABEL
     )
