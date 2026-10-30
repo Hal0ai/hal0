@@ -220,3 +220,35 @@ class TestExportEnvelope:
         assert a["checksum"] == b["checksum"], (
             "checksum must cover the stack body only, not exported_at"
         )
+
+
+class TestExportSparseProfiles:
+    def test_default_reasoning_keys_stay_out_and_set_ones_stay_in(
+        self, reg: ModelRegistry, tmp_hal0_home: str
+    ) -> None:
+        from hal0.stacks.portable import verify_checksum
+
+        save_profiles_config(
+            ProfilesConfig(
+                profile={
+                    "plain": ProfileConfig(flags="-fa on"),
+                    "tuned": ProfileConfig(
+                        flags="-fa on", reasoning_effort="low", reasoning_budget=512
+                    ),
+                }
+            )
+        )
+        stack = StackConfig(
+            name="Saber",
+            slots=[
+                StackSlotEntry(slot="agent", model="ace-saber", profile="plain"),
+                StackSlotEntry(slot="chat", model="ace-saber", profile="tuned"),
+            ],
+        )
+        env = export_envelope(stack, exported_at="t", registry=reg)
+        profiles = env["stack"]["profiles"]
+        assert "reasoning_effort" not in profiles["plain"]
+        assert "reasoning_budget" not in profiles["plain"]
+        assert profiles["tuned"]["reasoning_effort"] == "low"
+        assert profiles["tuned"]["reasoning_budget"] == 512
+        assert verify_checksum(env)

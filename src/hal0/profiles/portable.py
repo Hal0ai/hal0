@@ -19,7 +19,11 @@ from typing import Any
 from pydantic import BaseModel
 
 from hal0 import __version__
-from hal0.config.schema import PROFILE_SCHEMA_VERSION_CURRENT, ProfileConfig
+from hal0.config.schema import (
+    PROFILE_SCHEMA_VERSION_CURRENT,
+    ProfileConfig,
+    profile_sparse_dump,
+)
 from hal0.errors import BadRequest
 
 ENVELOPE_KIND = "hal0.profile"
@@ -38,13 +42,7 @@ def export_envelope(name: str, profile: ProfileConfig, *, exported_at: str) -> d
     profile body only — re-exporting the same profile yields the same checksum
     regardless of ``exported_at``.
     """
-    body = profile.model_dump(mode="json", exclude_none=True)
-    # Sparse like profiles.toml: the reasoning defaults stay out of the body, so
-    # a profile that never set them keeps its published checksum.
-    if body.get("reasoning_effort") == "default":
-        body.pop("reasoning_effort")
-    if body.get("reasoning_budget") == -1:
-        body.pop("reasoning_budget")
+    body = profile_sparse_dump(profile, mode="json")
     return {
         "kind": ENVELOPE_KIND,
         "schema_version": PROFILE_SCHEMA_VERSION_CURRENT,
