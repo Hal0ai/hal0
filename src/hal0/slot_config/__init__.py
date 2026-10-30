@@ -219,7 +219,14 @@ def merge_slot_config(base: dict[str, Any], updates: dict[str, Any]) -> dict[str
 
 #: Offenders a ``[tune]`` override can stand in for (the hint is only useful then).
 _TUNE_OVERRIDE_OFFENDERS = frozenset(
-    {"ctx_size", "enable_thinking", "vision", "mtp", "[model].context_size", "[model].ctx_size"}
+    {
+        "ctx_size",
+        "enable_thinking",
+        "vision",
+        "speculation",
+        "[model].context_size",
+        "[model].ctx_size",
+    }
 )
 
 

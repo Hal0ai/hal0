@@ -11,6 +11,7 @@ thinking: it wins over both the slot and the profile ``enable_thinking``.
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -46,8 +47,12 @@ def reasoning_flag_in(flags: str) -> bool | None:
     Last occurrence wins. Every spelling argv folds (``-rea``, ``--reasoning=off``,
     ``--reasoning_x``) is honoured because the match goes through ``_split_pairs``.
     """
+    try:
+        tokens = shlex.split(flags or "")
+    except ValueError:  # stored flags can be malformed; the save screen refuses new ones
+        return None
     pinned: bool | None = None
-    for pair in _split_pairs((flags or "").split()):
+    for pair in _split_pairs(tokens):
         if pair.canon != "--reasoning":
             continue
         value: str | None

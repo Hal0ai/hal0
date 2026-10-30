@@ -7,6 +7,7 @@ import pytest
 from hal0.config.schema import TUNE_KEYS, ProfileConfig
 from hal0.errors import BadRequest
 from hal0.providers.container import resolve_slot_profile
+from hal0.slot_config import reject_slot_tuning_keys
 from hal0.slots.tune import (
     effective_tune,
     guard_tune_write,
@@ -126,3 +127,26 @@ def test_guard_npu_clear_and_unresolved_profile():
     guard_tune_write({"type": "embedding"}, {"tune": None}, P)  # clear never refused
     guard_tune_write({"type": "embedding"}, {"name": "x"}, P)  # no tune: no-op
     guard_tune_write({"type": "llm"}, {"tune": {"enable_thinking": True}}, None)  # profile unknown
+
+
+@pytest.mark.parametrize(
+    ("flags", "want"),
+    [
+        ("--reasoning 'off'", False),
+        ('--reasoning "on"', True),
+        ("--reasoning 'off", None),  # unbalanced quote: no pin rather than a crash
+    ],
+)
+def test_reasoning_flag_in_reads_flags_the_way_the_save_screen_does(flags, want):
+    assert reasoning_flag_in(flags) == want
+
+
+def test_top_level_speculation_gets_the_tune_hint():
+    with pytest.raises(BadRequest, match=r"\[tune\]"):
+        reject_slot_tuning_keys({"speculation": "off"})
+
+
+def test_top_level_mtp_gets_no_tune_hint():
+    with pytest.raises(BadRequest) as exc:
+        reject_slot_tuning_keys({"mtp": "off"})
+    assert "[tune]" not in str(exc.value)
