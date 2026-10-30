@@ -564,7 +564,10 @@ function RunnerPullButton({ runnerKey, backends }) {
   );
 }
 
-export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
+// `saveAs` (slot drawer's "Save as profile…"): a clone whose source already
+// carries the suggested name and the staged overrides, so the name is used
+// verbatim and `cloned_from` is the source's own.
+export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved, saveAs = false }) {
   const isEdit = mode === 'edit';
   const systemInfoQuery = useSystemInfo();
   const backends = systemInfoQuery.data?.backends ?? {};
@@ -590,6 +593,9 @@ export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved })
       speculation: specOf(source.speculation),
       runner: source.runner || '',
     };
+    if (mode === 'clone' && saveAs) {
+      return { ...base, name: String(source.name || '').slice(0, 32), ...(source.cloned_from ? { cloned_from: source.cloned_from } : {}) };
+    }
     if (mode === 'clone') {
       const suffix = source.seed ? '-custom' : '-copy';
       return { ...base, name: (source.name + suffix).slice(0, 32), cloned_from: source.name };
@@ -677,9 +683,10 @@ export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved })
   }
 
   const title = isEdit ? `Edit · ${source.name}`
+    : mode === 'clone' && saveAs ? 'Save as profile'
     : mode === 'clone' ? (source.seed ? `Edit a copy · ${source.name}` : `Clone · ${source.name}`)
     : 'New profile';
-  const eyebrow = mode === 'create' ? 'CREATE' : mode === 'clone' ? (source.seed ? 'EDIT A COPY' : 'CLONE') : 'EDIT';
+  const eyebrow = mode === 'create' ? 'CREATE' : mode === 'clone' ? (saveAs ? 'SAVE AS' : source.seed ? 'EDIT A COPY' : 'CLONE') : 'EDIT';
 
   return (
     <FormDrawer

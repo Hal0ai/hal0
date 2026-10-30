@@ -74,3 +74,34 @@ describe('tune-state', () => {
     expect(restartNeeded(['ctx_size'])).toBe(true)
   })
 })
+
+import { changedTuneKeys, tuneBody, tuneErrors, tuneWire } from '../tune-state.js'
+
+describe('staged tune helpers', () => {
+  it('tuneBody parses numeric text and drops blanks', () => {
+    expect(tuneBody({ ctx_size: '32768', reasoning_budget: '0', vision: 'off', enable_thinking: false, speculation: '' })).toEqual({
+      ctx_size: 32768,
+      reasoning_budget: 0,
+      vision: 'off',
+      enable_thinking: false,
+    })
+  })
+  it('tuneErrors mirrors the server ranges', () => {
+    expect(tuneErrors({ ctx_size: '64' }).ctx_size).toContain('128')
+    expect(tuneErrors({ ctx_size: '32k' }).ctx_size).toContain('whole number')
+    expect(tuneErrors({ ctx_size: '128', reasoning_budget: '-1' })).toEqual({})
+    expect(tuneErrors({ reasoning_budget: '-2' }).reasoning_budget).toContain('-1')
+    expect(tuneErrors({})).toEqual({})
+  })
+  it('changedTuneKeys ignores text-vs-number differences', () => {
+    expect(changedTuneKeys({ ctx_size: 32768 }, { ctx_size: '32768' })).toEqual([])
+    expect(changedTuneKeys({ vision: 'off' }, {})).toEqual(['vision'])
+  })
+  it('tuneWire: unchanged -> undefined, cleared -> null, partial clear -> explicit null', () => {
+    expect(tuneWire({ vision: 'off' }, { vision: 'off' })).toBeUndefined()
+    expect(tuneWire({}, {})).toBeUndefined()
+    expect(tuneWire({ vision: 'off' }, {})).toBeNull()
+    expect(tuneWire({}, { enable_thinking: false, vision: 'off' })).toEqual({ enable_thinking: false, vision: 'off' })
+    expect(tuneWire({ vision: 'off', speculation: 'ngram' }, { vision: 'off' })).toEqual({ vision: 'off', speculation: null })
+  })
+})

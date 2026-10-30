@@ -207,7 +207,9 @@ describe('slot drawer profile row (ADR-0029)', () => {
     for (const id of ['slot-profile-diverges', 'slot-profile-device-switch', 'slot-profile-strands-model']) {
       expect(byId(id)).toBeNull()
     }
-    expect(byId('slot-launch-tune-note')!.textContent).toContain('profile')
+    // The old "use Edit profile" hint is replaced by the Tune block on an LLM slot.
+    expect(byId('slot-launch-tune-note')).toBeNull()
+    expect(byId('slot-tune-block')).not.toBeNull()
     act(() => root.unmount())
   })
 })

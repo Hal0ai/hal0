@@ -43,6 +43,14 @@ import { formatProvenanceShort } from "./runner-images.jsx";
 import { runtimeChips, useRunnerPull, ProfileDrawer, ctxLabel } from "./profiles.jsx";
 import { RichSelect } from "./rich-select.jsx";
 import { FitChip, ModalityTag } from "./fit-chip.jsx";
+import { TuneBlock, tuneApplies } from "./slot-tune-block.jsx";
+import {
+	changedTuneKeys,
+	restartNeeded,
+	tuneBody,
+	tuneErrors,
+	tuneWire,
+} from "./tune-state.js";
 import { draftTagValue, slotSpecLine } from "./spec-state.js";
 // The profile apply preview + its lane-title table. Pure derivations, so they
 // live in their own module (profile-apply-preview.js) rather than in this view
@@ -449,6 +457,8 @@ function configBaseline(slot) {
 		binary: slot.binary || "",
 		imagePin: slot.image_pin ?? null,
 		profile: slot.profile || "",
+		// Sparse per-slot overrides of the profile ([tune]); {} = none.
+		tune: slot.tune && typeof slot.tune === "object" ? slot.tune : {},
 	};
 }
 
@@ -476,6 +486,11 @@ function deriveChanges(baseline, form) {
 		binary: form.binary !== baseline.binary,
 		imagePin: pinValue !== baseline.imagePin,
 		profile: form.profile !== baseline.profile,
+		// Tune overrides: which keys moved, and the PUT value (undefined =
+		// unchanged, null = clear the table).
+		tuneKeys: changedTuneKeys(baseline.tune, form.tune),
+		tune: changedTuneKeys(baseline.tune, form.tune).length > 0,
+		tuneValue: tuneWire(baseline.tune, form.tune),
 	};
 }
 
@@ -566,6 +581,14 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// "Edit profile" on a custom profile, "Duplicate & edit" on a seed (seeds
 	// are read-only server-side).
 	const [profileDrawer, setProfileDrawer] = useStateSM(null);
+	// Staged per-slot tune overrides (the Tune block): the sparse [tune] table,
+	// numeric rows held as text while typing. {} = running the profile as-is.
+	const [tuneForm, setTuneForm] = useStateSM(
+		slot?.tune && typeof slot.tune === "object" ? { ...slot.tune } : {},
+	);
+	// Set after "Save as profile" saved the new profile: the effect below runs
+	// the normal Save once the staged profile/tune state has re-rendered.
+	const [saveAfterProfile, setSaveAfterProfile] = useStateSM(null);
 	// Eviction priority (spec 2026-08-02) — instant-apply on blur/Enter, NOT
 	// part of the Save batch (see the pinned-toggle-shaped handler below).
 	// Hooks must execute every render (see the note atop this component), so
@@ -781,6 +804,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		setPinCustom(false);
 		setAdvOpen(false);
 		setProfileSel(slot.profile || "");
+		setTuneForm(slot.tune && typeof slot.tune === "object" ? { ...slot.tune } : {});
+		setSaveAfterProfile(null);
 		setSubmitErr(null);
 		setDiscardOpen(false);
 		setPendingNav(null);
@@ -850,6 +875,15 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	const pinDescId = React.useId();
 	const nameDescId = React.useId();
 
+	// "Save as profile" follow-through: once the staged profile is the new one
+	// and the overrides are cleared, run the drawer's normal Save.
+	useEffectSM(() => {
+		if (saveAfterProfile && profileSel === saveAfterProfile && changes && slot) {
+			setSaveAfterProfile(null);
+			onSaveClick();
+		}
+	}, [saveAfterProfile, profileSel, tuneForm]);
+
 	if (!slot) return null;
 
 	async function onSaveClick() {
@@ -891,6 +925,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		// guarded a value the launch path ignores, and #1389 was that gate vetoing
 		// unrelated saves from an unmounted subtree — a whole failure mode that
 		// removing the control makes unrepresentable.)
+		// Tune overrides: the same ranges the server enforces (inline under each
+		// row too); a bad number blocks Save rather than shipping a stale value.
+		if (Object.keys(tuneErrors(tuneForm)).length > 0) {
+			errs.tune = "Fix the highlighted Tune values";
+			setSubmitErr("Fix the highlighted Tune values");
+		}
 		if (Object.keys(errs).length > 0) {
 			setFieldErrs(errs);
 			return;
@@ -911,7 +951,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			changes.threads ||
 			changes.binary ||
 			changes.imagePin ||
-			changes.profile;
+			changes.profile ||
+			restartNeeded(changes.tuneKeys);
 		try {
 			// One PUT /config for the placement keys (device / NGL / threads /
 			// binary / image_pin / profile). A fast on-disk write.
@@ -927,6 +968,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			if (changes.binary) slotBody.binary = binary;
 			if (changes.imagePin) slotBody.image_pin = changes.pinValue;
 			if (changes.profile) slotBody.profile = profileSel || null;
+			// Tune overrides ride the same single PUT: the full staged table, or
+			// null when every override was cleared.
+			if (changes.tune) slotBody.tune = changes.tuneValue;
 			if (Object.keys(slotBody).length > 0) {
 				await editMut.mutateAsync({
 					name: slot.name,
@@ -953,6 +997,21 @@ function EditSlotDrawer({ open, slot, onClose }) {
 				window.__hal0Toast(
 					`Slot "${slot.name}" saved — restarting in the background`,
 					"info",
+				);
+		} else if (
+			changes.tune &&
+			!changes.device &&
+			!changes.ngl &&
+			!changes.threads &&
+			!changes.binary &&
+			!changes.imagePin &&
+			!changes.profile
+		) {
+			// Thinking is a request-time default: nothing to restart.
+			window.__hal0Toast &&
+				window.__hal0Toast(
+					`Slot "${slot.name}" saved — thinking applies to new requests`,
+					"ok",
 				);
 		} else {
 			window.__hal0Toast &&
@@ -1114,6 +1173,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		binary,
 		imagePin,
 		profile: profileSel,
+		tune: tuneForm,
 	});
 	// #1391: the payload lost its config enrichment (or the drawer opened on one
 	// that never had it), so there is no baseline to compare against. Refuse to
@@ -1138,7 +1198,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			changes.device ||
 			changes.binary ||
 			changes.imagePin ||
-			changes.profile);
+			changes.profile ||
+			changes.tune);
 	const requestClose = () => {
 		// While the ModelDrawer is stacked on top, one Esc press fires BOTH
 		// drawers' document-level keydown listeners — swallow ours so only the
@@ -1185,6 +1246,25 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// Rendered inside the Model group right under the model select (it rides
 	// the model choice), or under its own group on an NPU slot where the Model
 	// group is replaced by the NPU capability matrix.
+	const allProfileRows = Array.isArray(profilesQuery.data) ? profilesQuery.data : [];
+	const stagedProfileRow = allProfileRows.find((p) => p.name === profileSel) || null;
+	// "Save as profile…": open the profile drawer in clone mode seeded from the
+	// STAGED state (the staged profile pick with every staged override laid on
+	// top). A ctx_size the profile leaves unset stays unset unless overridden.
+	const onTuneSaveAsProfile = () => {
+		const suggested = `${slot.name}-${profileSel || "tune"}`.slice(0, 32);
+		setProfileDrawer({
+			mode: "clone",
+			saveAs: true,
+			source: {
+				...(stagedProfileRow || { flags: "", runner: "", intent: "" }),
+				...tuneBody(tuneForm),
+				seed: false,
+				name: suggested,
+				cloned_from: stagedProfileRow ? profileSel : undefined,
+			},
+		});
+	};
 	const profileRow = (() => {
 		const all = Array.isArray(profilesQuery.data) ? profilesQuery.data : [];
 		// Apply preview (Task 10 D4): a profile carrying `runner` (a
@@ -1246,6 +1326,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			profile: slot.profile ? `set by profile ${slot.profile}` : "set by the profile",
 			native: "the model's native window",
 			fallback: "the default window (the model reports none)",
+			slot: "overridden on this slot (Tune below)",
 		};
 		const ctxEffective = Number.isFinite(Number(slot.ctx_effective)) && slot.ctx_effective > 0
 			? Number(slot.ctx_effective)
@@ -1798,17 +1879,29 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
 							{profileRow}
 
-							{/* ADR-0029: Template / Parallel / Extra Args / Context are not
-          slot config. The launch tune is the PROFILE's (flags, context,
-          thinking, vision, speculation, runtime); the model records file facts only
-          (chat template, jinja, MTP heads). The server rejects tuning keys on
-          a slot write with slot.tuning_key_denied. */}
-							<div className="hint" data-testid="slot-launch-tune-note">
-								The launch tune — flags, context, thinking, vision, speculation — is
-								the profile's: use “Edit profile” above. The model only holds
-								facts about its file (chat template, jinja, MTP heads): use
-								“Edit model…”.
-							</div>
+							{/* ADR-0029: the launch tune is the PROFILE's; the Tune block
+          below layers sparse per-slot overrides over it ([tune]). The
+          model records file facts only (chat template, jinja, MTP heads):
+          use "Edit model…". The server still rejects the legacy root-level
+          tuning keys with slot.tuning_key_denied. */}
+							{tuneApplies(slot) ? (
+								<TuneBlock
+									slot={slot}
+									profile={stagedProfileRow}
+									model={curModelRow}
+									value={tuneForm}
+									onChange={setTuneForm}
+									onSaveAsProfile={onTuneSaveAsProfile}
+									onReset={() => setTuneForm({})}
+									disabled={degraded}
+								/>
+							) : (
+								<div className="hint" data-testid="slot-launch-tune-note">
+									The launch tune is the profile's: use “Edit profile” above.
+									The model only holds facts about its file (chat template,
+									jinja, MTP heads): use “Edit model…”.
+								</div>
+							)}
 						</>
 					)}
 				</FieldGroup>
@@ -2712,6 +2805,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			{profileDrawer && (
 				<ProfileDrawer
 					mode={profileDrawer.mode}
+					saveAs={!!profileDrawer.saveAs}
 					source={profileDrawer.source}
 					existing={(Array.isArray(profilesQuery.data) ? profilesQuery.data : []).map(
 						(p) => p.name,
@@ -2719,8 +2813,16 @@ function EditSlotDrawer({ open, slot, onClose }) {
 					onClose={() => setProfileDrawer(null)}
 					onSaved={(savedName) => {
 						const wasClone = profileDrawer.mode === "clone";
+						const wasSaveAs = !!profileDrawer.saveAs;
 						setProfileDrawer(null);
 						if (wasClone && savedName) setProfileSel(savedName);
+						if (wasSaveAs && savedName) {
+							// The new profile now carries the overrides: bind the slot to
+							// it, drop the table, then run the normal Save (one PUT with
+							// profile + tune: null) once that state has re-rendered.
+							setTuneForm({});
+							setSaveAfterProfile(savedName);
+						}
 					}}
 				/>
 			)}
