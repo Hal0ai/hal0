@@ -75,9 +75,8 @@ _MCP_MEMORY_PATH = "/mcp/memory/mcp"
 # Builtin hal0 MCP servers wired into pi's ``~/.pi/agent/mcp.json`` at
 # install time — the same pair hermes_provision wires for a bundled
 # Hermes agent (``_default_mcp_servers()``: hal0-admin + hal0-memory).
-# hal0-agents is deliberately NOT here: it is a separate remote service
-# (https://hal0.thinmint.dev/mcp/agents/mcp), not a bundled local mount
-# on hal0-api. Name → mount-path.
+# hal0-agents is deliberately NOT here: it is a separate remote service,
+# not a bundled local mount on hal0-api. Name → mount-path.
 _MANAGED_MCP_SERVERS: dict[str, str] = {
     "hal0-admin": _MCP_ADMIN_PATH,
     "hal0-memory": _MCP_MEMORY_PATH,
