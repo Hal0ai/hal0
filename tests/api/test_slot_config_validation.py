@@ -413,3 +413,98 @@ def test_tune_speculation_ngram_needs_no_drafter(slot_toml: Path, client: TestCl
         r = client.put("/api/slots/chat/config", json={"tune": {"speculation": mode}})
         assert r.status_code == 200, r.text
         assert _read(slot_toml)["tune"]["speculation"] == mode
+
+
+# ── review fixes: coercion, nested-shape clear, create guard ─────────────────
+
+
+def test_put_tune_persists_the_coerced_value(slot_toml: Path, client: TestClient) -> None:
+    r = client.put(
+        "/api/slots/chat/config",
+        json={"tune": {"enable_thinking": "off", "ctx_size": "4096"}},
+    )
+    assert r.status_code == 200, r.text
+    assert _read(slot_toml)["tune"] == {"enable_thinking": False, "ctx_size": 4096}
+
+
+def test_put_tune_bool_is_not_an_int_budget(slot_toml: Path, client: TestClient) -> None:
+    before = slot_toml.read_bytes()
+    r = client.put("/api/slots/chat/config", json={"tune": {"reasoning_budget": True}})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "validation.tune_invalid"
+    assert slot_toml.read_bytes() == before
+
+
+@pytest.fixture
+def nested_slot_toml(tmp_hal0_home: str) -> Path:
+    root = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "nest.toml"
+    path.write_text(
+        '[slot]\nname = "nest"\ntype = "llm"\ndevice = "gpu-vulkan"\nport = 8083\n'
+        '[model]\ndefault = "qwen3-4b"\n',
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_tune_null_clears_on_nested_shape_file(nested_slot_toml: Path, client: TestClient) -> None:
+    r = client.put("/api/slots/nest/config", json={"tune": {"vision": "off"}})
+    assert r.status_code == 200, r.text
+    assert _read(nested_slot_toml)["tune"] == {"vision": "off"}
+    r = client.put("/api/slots/nest/config", json={"tune": None})
+    assert r.status_code == 200, r.text
+    assert "tune" not in _read(nested_slot_toml)
+
+
+def test_tune_null_clears_on_flat_shape_file(slot_toml: Path, client: TestClient) -> None:
+    client.put("/api/slots/chat/config", json={"tune": {"vision": "off"}})
+    assert client.put("/api/slots/chat/config", json={"tune": None}).status_code == 200
+    assert "tune" not in _read(slot_toml)
+
+
+def test_create_refuses_tune_on_non_llm_slot(tmp_hal0_home: str, client: TestClient) -> None:
+    r = client.post(
+        "/api/slots",
+        json={
+            "name": "emb",
+            "type": "embedding",
+            "device": "gpu-vulkan",
+            "model": "bge-small",
+            "tune": {"vision": "off"},
+        },
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "slot.tune_not_supported"
+    assert not (Path(tmp_hal0_home) / "etc" / "hal0" / "slots" / "emb.toml").exists()
+
+
+def test_create_refuses_bad_tune_value(tmp_hal0_home: str, client: TestClient) -> None:
+    r = client.post(
+        "/api/slots",
+        json={
+            "name": "bad",
+            "type": "llm",
+            "device": "gpu-vulkan",
+            "model": "qwen3-4b",
+            "tune": {"ctx_size": 5},
+        },
+    )
+    assert r.status_code in (400, 422), r.text
+    assert not (Path(tmp_hal0_home) / "etc" / "hal0" / "slots" / "bad.toml").exists()
+
+
+def test_create_accepts_valid_tune(tmp_hal0_home: str, client: TestClient) -> None:
+    r = client.post(
+        "/api/slots",
+        json={
+            "name": "good",
+            "type": "llm",
+            "device": "gpu-vulkan",
+            "model": "qwen3-4b",
+            "tune": {"vision": "off", "ctx_size": "4096"},
+        },
+    )
+    assert r.status_code == 201, r.text
+    got = _read(Path(tmp_hal0_home) / "etc" / "hal0" / "slots" / "good.toml")
+    assert got["tune"] == {"vision": "off", "ctx_size": 4096}

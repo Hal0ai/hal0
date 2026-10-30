@@ -58,6 +58,7 @@ from hal0.slots.config_write import (
     _reconcile_device_profile,
     check_default_uniqueness,
     check_npu_exclusivity,
+    guard_and_normalize_tune,
     guard_slot_write_payload,
     reconcile_and_guard_slot_config,
     reconcile_slot_updates,
@@ -2888,6 +2889,9 @@ class SlotManager:
         # "new" at create time, so a conflicting device+profile is an explicit
         # operator error and raises.
         _reconcile_device_profile(cfg_dict, set(cfg_dict.keys()))
+        # Same [tune] validation, guard and normalization as the update path.
+        if "tune" in cfg_dict:
+            guard_and_normalize_tune(cfg_dict, {"tune": cfg_dict["tune"]})
         await self._check_npu_exclusivity(slot_name, cfg_dict)
         # SC-4, first-of-type: the create modal no longer asks "make this the
         # default?" — the FIRST slot of a type silently becomes that type's
