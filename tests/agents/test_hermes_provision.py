@@ -5851,6 +5851,7 @@ def test_wire_named_profiles_wires_each_profile_as_its_own_identity(
     coder = yaml.safe_load((home / "profiles" / "coder" / "config.yaml").read_text())
     assert coder["mcp_servers"]["hal0-admin"]["headers"] == {
         "X-hal0-Agent": "hermes__coder",
+        "X-hal0-Private": "0",
         "Authorization": "Bearer svc-key",
     }
     assert coder["mcp_servers"]["hal0-memory"]["headers"]["X-hal0-Private"] == "0"

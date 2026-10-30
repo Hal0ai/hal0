@@ -2294,13 +2294,24 @@ def terminal_tool_enabled(
 HAL0_APPROVALS_MODE = "smart"
 
 
+#: hal0's own MCP servers that can write memory for the caller: hal0-memory,
+#: and hal0-admin whose catalog carries ``memory_add``. A profile's
+#: ``memory_private`` opt-in must put the private header on both.
+_MEMORY_REACHING_SERVERS: tuple[str, ...] = ("hal0-admin", "hal0-memory")
+
+
 def _config_list_keys(
     *,
     terminal_enabled: bool,
     existing_disabled: list[str] | None = None,
     mcp_servers: list[dict[str, Any]] | None = None,
+    memory_private: bool = False,
 ) -> dict[str, Any]:
     """The list-valued overlay, with the terminal posture folded in.
+
+    ``memory_private`` is the root config's ``hal0: {memory_private: true}``
+    opt-in (:func:`profile_memory_private`); it makes BOTH hal0 servers
+    private, since ``memory_add`` is reachable through hal0-admin too.
 
     ``agent.disabled_toolsets`` is written in BOTH directions so the posture is
     convergent: opting in later clears the subtraction instead of leaving a
@@ -2323,7 +2334,16 @@ def _config_list_keys(
     # The nested-dict merge preserves the sibling headers config set wrote
     # (X-hal0-Agent, Authorization) and overlay-wins repairs poisoned boxes.
     private_headers = {
-        srv["name"]: {"headers": {"X-hal0-Private": "1" if srv.get("private") else "0"}}
+        srv["name"]: {
+            "headers": {
+                "X-hal0-Private": (
+                    "1"
+                    if srv.get("private")
+                    or (memory_private and srv["name"] in _MEMORY_REACHING_SERVERS)
+                    else "0"
+                )
+            }
+        }
         for srv in (mcp_servers or [])
     }
     if private_headers:
@@ -3014,6 +3034,24 @@ def _carry_prelude_to_system_prompt(data: dict[str, Any]) -> bool:
 RELEASE_CONFIG_INVARIANTS: dict[str, Any] = {"sessions": {"auto_prune": False}}
 
 
+def _root_memory_header_layer(cfg: dict[str, Any]) -> dict[str, Any]:
+    """``X-hal0-Private`` for the root's existing hal0 MCP entries, from its opt-in.
+
+    Only servers already in the file get the header; converge never invents a
+    server entry (that is the overlay's job).
+    """
+    servers = cfg.get("mcp_servers")
+    if not isinstance(servers, dict):
+        return {}
+    value = "1" if profile_memory_private(cfg) else "0"
+    layer = {
+        name: {"headers": {"X-hal0-Private": value}}
+        for name in _MEMORY_REACHING_SERVERS
+        if isinstance(servers.get(name), dict)
+    }
+    return {"mcp_servers": layer} if layer else {}
+
+
 def apply_release_config_invariants(
     hermes_home: Path | str,
     *,
@@ -3064,6 +3102,11 @@ def apply_release_config_invariants(
     # the next reprovision. The recorded decision is the authority here.
     decision = box_terminal_decision(home)
     layers = _deep_merge(layers, _terminal_profile_keys(loaded or {}, terminal_enabled=decision))
+    # The default profile's memory header converges here too: ``hal0 update``
+    # never runs the overlay, so without this the root keeps whatever header it
+    # had while named profiles follow the shared default. A hand-set "1" is
+    # overwritten; ``hal0: {memory_private: true}`` is how a profile stays private.
+    layers = _deep_merge(layers, _root_memory_header_layer(loaded or {}))
     changed = _merge_config_yaml_layers(
         config,
         list_keys=layers,
@@ -3461,6 +3504,7 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
                     terminal_enabled=terminal_enabled,
                     existing_disabled=_disabled_toolsets(_parse_yaml_config(pre_merge)),
                     mcp_servers=mcp_servers,
+                    memory_private=profile_memory_private(_parse_yaml_config(pre_merge) or {}),
                 ),
                 _terminal_saved_layer(
                     terminal_enabled=terminal_enabled,
@@ -5083,7 +5127,12 @@ def _build_profile_mcp_servers(agent_id: str, *, private: bool = False) -> dict[
     from hal0.service_identity import service_key
 
     bearer = service_key(prefer="admin")
-    admin_headers: dict[str, Any] = {"X-hal0-Agent": agent_id}
+    # hal0-admin carries the header too: its catalog has ``memory_add``, so a
+    # private profile's writes through it must land in the private bank.
+    admin_headers: dict[str, Any] = {
+        "X-hal0-Agent": agent_id,
+        "X-hal0-Private": "1" if private else "0",
+    }
     memory_headers: dict[str, Any] = {
         "X-hal0-Agent": agent_id,
         "X-hal0-Private": "1" if private else "0",

@@ -1385,6 +1385,57 @@ def _header(server: dict[str, Any], name: str) -> Any:
     return headers.get(name) if isinstance(headers, dict) else None
 
 
+def check_hermes_default_memory(*, home: Path | None = None) -> Check:
+    """The default Hermes profile's memory headers match its ``memory_private`` opt-in.
+
+    ``check_hermes_profiles_mcp`` walks named profiles only. The default
+    profile's root ``config.yaml`` carries ``X-hal0-Private`` on hal0-admin and
+    hal0-memory; both must be ``"0"`` (shared, the default) unless the file
+    has ``hal0: {memory_private: true}``, then ``"1"``. ``hal0 update`` and
+    ``reprovision --repair`` converge them. ADVISORY (never critical).
+    """
+    from hal0.agents import hermes_api as ha
+    from hal0.agents import hermes_provision as hp
+
+    key, label = "hermes_default_memory", "Hermes default profile memory"
+    root = home if home is not None else ha.hermes_home()
+    path = root / "config.yaml"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return Check(key, label, _PASS, "hermes not provisioned - nothing to check")
+    except (OSError, UnicodeDecodeError) as exc:
+        return Check(key, label, _WARN, f"cannot read {path}: {exc}")
+    import yaml
+
+    try:
+        data = yaml.safe_load(text) or {}
+    except yaml.YAMLError as exc:
+        return Check(key, label, _WARN, f"cannot parse {path}: {exc}")
+    if not isinstance(data, dict):
+        return Check(key, label, _WARN, f"{path} is not a mapping")
+    private = hp.profile_memory_private(data)
+    want = "1" if private else "0"
+    servers = data.get("mcp_servers")
+    servers = servers if isinstance(servers, dict) else {}
+    wrong = [
+        n
+        for n in hp._MEMORY_REACHING_SERVERS
+        if isinstance(servers.get(n), dict) and _header(servers[n], "X-hal0-Private") != want
+    ]
+    mode = "private (opt-in)" if private else "shared"
+    if wrong:
+        return Check(
+            key,
+            label,
+            _WARN,
+            f"default profile memory is {mode} but {', '.join(wrong)} carries "
+            f'X-hal0-Private other than "{want}"; run `sudo hal0 update` or '
+            "`sudo hal0 agent reprovision hermes --repair` to converge it",
+        )
+    return Check(key, label, _PASS, f"default profile memory: {mode}")
+
+
 def check_hermes_profiles_mcp(
     *,
     auth: dict[str, Any] | None,
@@ -2631,6 +2682,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         ),
         check_hermes_mcp_config_auth(auth=auth_payload),
         check_hermes_profiles_mcp(auth=auth_payload),
+        check_hermes_default_memory(),
         check_bridge_store(api_running=payloads["health"] is not None),
         check_agent_bridge(base=base),
         check_hermes_generation_extras(),
