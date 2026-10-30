@@ -1500,3 +1500,52 @@ class TestSnapshotComposition:
         assert v.name == "chat"
         assert v.status == "ready"
         assert v.metrics.toks == 0.0
+
+
+class TestTuneInSnapshot:
+    """ADR-0045: the snapshot lifts the raw ``[tune]`` and the merged ``tune_effective``."""
+
+    async def test_snapshot_lifts_tune_and_effective(
+        self, no_mem: None, tmp_hal0_home: str
+    ) -> None:
+        cfg = _llm_cfg(
+            profile="chat",
+            model={"default": _CTX_MODEL},
+            tune={"vision": "off", "reasoning_effort": "high"},
+        )
+        d = await _ctx_view(cfg, 8000)
+        assert d["tune"] == {"vision": "off", "reasoning_effort": "high"}
+        te = d["tune_effective"]
+        assert te["vision"] == "off" and te["sources"]["vision"] == "slot"
+        assert te["sources"]["speculation"] == "profile"
+        assert set(te) == {
+            "ctx_size",
+            "enable_thinking",
+            "reasoning_effort",
+            "reasoning_budget",
+            "vision",
+            "speculation",
+            "sources",
+            "reasoning_effort_unavailable",
+        }
+
+    async def test_snapshot_without_tune_is_empty_and_profile_sourced(
+        self, no_mem: None, tmp_hal0_home: str
+    ) -> None:
+        d = await _ctx_view(_llm_cfg(profile="chat", model={"default": _CTX_MODEL}), 8000)
+        assert d["tune"] == {}
+        assert set(d["tune_effective"]["sources"].values()) <= {"profile", "profile-flags"}
+
+    async def test_snapshot_ctx_source_slot(self, no_mem: None, tmp_hal0_home: str) -> None:
+        cfg = _llm_cfg(profile="chat", model={"default": _CTX_MODEL}, tune={"ctx_size": 4096})
+        d = await _ctx_view(cfg, 8000)
+        assert (d["ctx_effective"], d["ctx_source"]) == (4096, "slot")
+        assert d["tune_effective"]["ctx_size"] == 4096
+
+    async def test_tune_effective_none_when_profile_missing_or_not_llm(
+        self, no_mem: None, tmp_hal0_home: str
+    ) -> None:
+        d = await _ctx_view(_llm_cfg(profile="no-such", model={"default": _CTX_MODEL}), 8000)
+        assert d["tune_effective"] is None
+        d = await _ctx_view(_llm_cfg(device="npu", profile="flm", model={"default": "g:1b"}), None)
+        assert d["tune_effective"] is None
