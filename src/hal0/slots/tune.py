@@ -58,6 +58,7 @@ def reasoning_flag_in(flags: str) -> bool | None:
         if value is None:
             continue
         low = value.strip().lower()
+        # Last wins: a later `--reasoning auto` or unknown value resets an earlier pin.
         pinned = True if low == "on" else False if low == "off" else None
     return pinned
 
