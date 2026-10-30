@@ -36,7 +36,12 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Changed
 
+- **The bundled Hindsight memory engine moves to 1.1.0** (from 1.0.0). `hal0 update` and an `install.sh` re-run upgrade it with the existing build-aside, snapshot, swap, verify and roll-back pass; see Migrations for what that does to the engine's database. 1.1.0 is the release the engine's maintainer tells every 1.0.x install to take: it fixes database deadlocks, failed chunks replacing stored documents, retains replayed after a rejected LLM key and API freezes on large graph reads, its workers stop on one `SIGTERM`, and live API requests get LLM slots ahead of background jobs. One operator-visible rule changes with it: a bank id that starts with `_` is reserved by the engine, so `hal0 memory bank import` refuses a manifest whose bank id starts with `_`. hal0's own bank ids (`shared`, `private__<agent>`, `project__<id>`) are unaffected, and existing banks are not renamed.
 - **`/mcp/*` accepts the box's own names by default.** The host allowlist of the MCP servers' DNS-rebinding guard defaulted to localhost only, so a remote MCP client calling the box by its address was refused. It now also carries every LAN address, the hostname, its mDNS `.local` name and the `[network].public_url` host, each bare and with the API port, on top of `HAL0_MCP_ALLOWED_HOSTS` (ADR-0043).
+
+### Migrations
+
+- **The Hindsight memory engine's database migrates one way to 1.1.0.** The first start of hindsight-api 1.1.0 runs five of the engine's schema migrations on `/var/lib/hal0/memory/hindsight/.pg0`; the last of them clears placeholder `event_date` values that made retain fail on older PostgreSQL releases. Before the new engine starts, the upgrade stops the old engine and copies `.pg0` to `.pg0.pre-1.0.0`, and it needs 1.5 times the size of `.pg0` free to do so. If 1.1.0 does not answer `/health` and report its version, the old venv and that copy are both restored. The copy is kept after a successful upgrade; the next run that finds the engine on 1.1.0 deletes only older copies such as `.pg0.pre-0.9.2`. Memories, documents, directives, mental models and bank settings are carried over unchanged. `hal0 update --rollback` leaves the engine on 1.1.0, as it did for 1.0.0.
 
 ## [1.7.1] — 2026-10-27
 

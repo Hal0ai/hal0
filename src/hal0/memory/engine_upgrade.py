@@ -84,7 +84,7 @@ log = structlog.get_logger(__name__)
 #: The engine version every box converges on. Single source of truth —
 #: install.sh's ``HINDSIGHT_PIN`` shell variable must match
 #: (tests/installer/test_hindsight_pin_lockstep.py enforces it).
-HINDSIGHT_API_PIN = "1.0.0"
+HINDSIGHT_API_PIN = "1.1.0"
 
 #: Full unit name — must key into ``COMPANION_SERVICE_UNITS`` so the seam
 #: routes to the wrapper's ``svc-stop/svc-start hindsight`` arms (a bare
