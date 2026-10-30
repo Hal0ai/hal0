@@ -45,6 +45,7 @@ from hal0.slot_view import (
     container_enrichment,
     loaded_model_names_from_slots,
     resolve_ctx_effective,
+    resolve_tune_effective,
     serialize_slot,
     synthesize_upstream_entries,
 )
@@ -1056,18 +1057,20 @@ async def get_slot(name: str, request: Request) -> dict[str, object]:
                 out.setdefault(k, v)
 
         # ADR-0029: the effective window comes from the slot's profile — the
-        # same resolver the list route and the launch path use.
-        if out.get("type", "llm") in ("llm", "embedding", "reranking"):
-            try:
-                cfg = await sm._load_slot_config(name)
-            except Exception:
-                cfg = None
-            if isinstance(cfg, dict):
+        # same resolver the list route and the launch path use. ADR-0045: the
+        # merged tune rides beside it (``None`` where a [tune] cannot apply).
+        try:
+            cfg = await sm._load_slot_config(name)
+        except Exception:
+            cfg = None
+        if isinstance(cfg, dict):
+            if out.get("type", "llm") in ("llm", "embedding", "reranking"):
                 ctx, source = resolve_ctx_effective(
                     cfg, getattr(request.app.state, "model_registry", None)
                 )
                 out["ctx_effective"] = ctx
                 out["ctx_source"] = source
+            out["tune_effective"] = resolve_tune_effective(cfg)
         return out
     except Exception:
         # Fall through to synthetic lookup before re-raising — a remote
