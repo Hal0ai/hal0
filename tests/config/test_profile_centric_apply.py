@@ -1147,3 +1147,62 @@ def test_dry_run_previews_the_speculation_rename_without_writing() -> None:
     assert any("quiet" in line for line in report.lines() if "speculation" in line)
     assert path.read_bytes() == before
     assert not list(path.parent.glob("profiles.toml.bak-*"))
+
+
+# ── slot [tune] on rollback (ADR-0045) ────────────────────────────────────────
+
+
+def _tune_slot_files() -> tuple[Path, Path]:
+    d = paths.slots_config_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    tuned = d / "tuned.toml"
+    tuned.write_text(
+        'name = "tuned"\nport = 8101\nprofile = "chat"\n[model]\ndefault = "m"\n'
+        '[tune]\nvision = "off"\nctx_size = 4096\n',
+        encoding="utf-8",
+    )
+    clean = d / "clean.toml"
+    clean.write_text('# hand comment\nname = "clean"\nport = 8102\n', encoding="utf-8")
+    return tuned, clean
+
+
+def test_rollback_strips_tune(tmp_hal0_home: str, tmp_path: Path) -> None:
+    import tomllib
+
+    from hal0.updater import updater
+
+    tuned, _clean = _tune_slot_files()
+    original = tuned.read_bytes()
+    older = tmp_path / "hal0-1.7.1"
+    older.mkdir()
+    assert updater._strip_slot_tune_for(older, job_id=None) == [str(tuned)]
+    after = tomllib.loads(tuned.read_text(encoding="utf-8"))
+    assert "tune" not in after
+    assert after["name"] == "tuned" and after["model"] == {"default": "m"}
+    baks = list(tuned.parent.glob("tuned.toml.bak-*"))
+    assert len(baks) == 1 and baks[0].read_bytes() == original
+
+
+def test_rollback_leaves_clean_slot_alone(tmp_hal0_home: str, tmp_path: Path) -> None:
+    from hal0.updater import updater
+
+    _tuned, clean = _tune_slot_files()
+    before = clean.read_bytes()
+    older = tmp_path / "hal0-1.7.1"
+    older.mkdir()
+    updater._strip_slot_tune_for(older, job_id=None)
+    assert clean.read_bytes() == before
+    assert not list(clean.parent.glob("clean.toml.bak-*"))
+
+
+def test_rollback_skips_when_target_understands_tune(tmp_hal0_home: str, tmp_path: Path) -> None:
+    from hal0.updater import updater
+
+    tuned, _clean = _tune_slot_files()
+    before = tuned.read_bytes()
+    newer = tmp_path / "hal0-1.8.0"
+    (newer / updater._SLOT_TUNE_MARKER).parent.mkdir(parents=True)
+    (newer / updater._SLOT_TUNE_MARKER).write_text("")
+    assert updater._strip_slot_tune_for(newer, job_id=None) == []
+    assert tuned.read_bytes() == before
+    assert not list(tuned.parent.glob("*.bak-*"))

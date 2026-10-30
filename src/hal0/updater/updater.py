@@ -4279,6 +4279,10 @@ class Updater:
         # the converted config. Undo the conversion first (files, model
         # columns, migration 012's bookkeeping) or refuse with the manual steps.
         profile_restore = _restore_profile_conversion_for(prior_path, job_id=self.job_id)
+        # ADR-0045: a release before per-slot [tune] refuses a slot file that
+        # carries the table. Strip it (after the profile restore, which may put
+        # slot files back) and leave a .bak-<stamp> copy of each file touched.
+        tune_stripped = _strip_slot_tune_for(prior_path, job_id=self.job_id)
         # Steps 8 + 8b via the same privileged primitive commit() uses: swap the
         # symlink back and re-pip the prior tree so the next hal0-api restart
         # actually serves the rolled-back version. On a pip failure activate
@@ -4342,6 +4346,7 @@ class Updater:
             "previous_now": str(current_target) if current_target else None,
             "schema_warning": warning,
             "profile_conversion_restored": profile_restore,
+            "slot_tune_stripped": tune_stripped,
         }
 
 
@@ -4378,6 +4383,49 @@ def _restore_profile_conversion_for(prior_path: Path, *, job_id: str | None) -> 
             "`sudo systemctl start hal0-api`; then run `hal0 update --rollback` again.",
             details={"previous": str(prior_path), "backups": backups, "error": exc.message},
         ) from exc
+
+
+#: A release tree that understands a slot's ``[tune]`` table (ADR-0045): the
+#: resolver module that reads it. Older trees do not ship this file.
+_SLOT_TUNE_MARKER = Path("src/hal0/slots/tune.py")
+
+
+def _strip_slot_tune_for(prior_path: Path, *, job_id: str | None) -> list[str]:
+    """Remove ``[tune]`` from every slot file before rolling back to ``prior_path``
+    when that release predates per-slot tune overrides.
+
+    A slot file without a ``[tune]`` table is not touched (not even rewritten).
+    Each file that has one is first copied to ``<file>.bak-<UTC stamp>``, then
+    rewritten without the table. Returns the slot files changed; empty when the
+    target understands ``[tune]`` or no slot carries one.
+    """
+    if (prior_path / _SLOT_TUNE_MARKER).is_file():
+        return []
+    import tomllib
+
+    import tomli_w
+
+    slots_dir = paths.slots_config_dir()
+    if not slots_dir.is_dir():
+        return []
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    changed: list[str] = []
+    for path in sorted(slots_dir.glob("*.toml")):
+        try:
+            raw = path.read_bytes()
+            data = tomllib.loads(raw.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+            log.warning("updater.slot_tune_strip_unreadable", job_id=job_id, path=str(path))
+            continue
+        if "tune" not in data:
+            continue
+        backup = path.with_name(f"{path.name}.bak-{stamp}")
+        shutil.copy2(path, backup)
+        data.pop("tune")
+        path.write_text(tomli_w.dumps(data), encoding="utf-8")
+        changed.append(str(path))
+        log.info("updater.slot_tune_stripped", job_id=job_id, path=str(path), backup=str(backup))
+    return changed
 
 
 __all__ = [
