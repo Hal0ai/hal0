@@ -5047,11 +5047,11 @@ def _phase_brain_profile_seed(ctx: _StepCtx) -> PhaseResult:
 #
 # The hal0-brain profile (``~/.hermes/profiles/hal0-brain/``, created by the
 # upstream hermes binary) needs the two hal0-owned MCP servers — hal0-admin
-# (platform control) + hal0-memory (shared memory tagged as the steward) — so the steward
-# can actually interact with + control the box. On a hand-configured host these
-# were wired out-of-band; this phase makes them reproducible. ``hermes config
-# set`` has no per-profile target, so — exactly like honcho.json and the YAML
-# list-keys — hal0 deep-merges the block into the profile's config.yaml,
+# (platform control) + hal0-memory (shared memory tagged as the steward) — so
+# the steward can actually interact with + control the box. On a
+# hand-configured host these were wired out-of-band; this phase makes them
+# reproducible. ``hermes config set`` has no per-profile target, so — exactly
+# like honcho.json and the YAML list-keys — hal0 deep-merges the block into the profile's config.yaml,
 # preserving every upstream/operator key. Only rewrites when the wiring is
 # actually missing/wrong (a correct box is left byte-untouched, so the file's
 # comments/formatting survive). Warn-as-OK; skips when the profile isn't there.

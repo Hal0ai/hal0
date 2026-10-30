@@ -190,6 +190,14 @@ _MEMORY_RULE = (
     "what the operator told you before, call memory_search first."
 )
 
+# The #2658 wording ("you have a private memory bank ...") that boxes seeded
+# before the shared-memory switch still carry in their persona TOML.
+_OLD_PRIVATE_RULE_RE = re.compile(
+    r"Memory: you have a private memory bank.*?call memory_search first\.",
+    re.DOTALL,
+)
+_STALE_SENTENCE_RE = re.compile(r"[^.\n]*private memory bank[^.\n]*\.\s*")
+
 # Injected as the leading system message when the client doesn't send one.
 # Without it the LLM had ten write tools, no read tools, and no idea what the
 # lanes mean — it could mutate the board but never see it, so "what's
@@ -290,7 +298,15 @@ def _resolve_profile(request: Request) -> tuple[str, str]:
     except (FileNotFoundError, PersonaError, OSError):
         return _SYSTEM_PROMPT, BRAIN_SLOT_MODEL
     prompt = persona.system_prompt.strip() or _SYSTEM_PROMPT
-    if "memory_add" not in prompt:
+    if "private memory bank" in prompt:
+        # A persona seeded after #2658 (the seeder never overwrites) still
+        # claims a private bank, but the steward now writes shared memory.
+        prompt = _OLD_PRIVATE_RULE_RE.sub(lambda _m: _MEMORY_RULE, prompt)
+        if "private memory bank" in prompt:
+            # Hand-edited variant: drop the stale sentence, append the rule.
+            prompt = _STALE_SENTENCE_RE.sub("", prompt).strip()
+            prompt = f"{prompt}\n\n{_MEMORY_RULE}"
+    elif "memory_add" not in prompt:
         # A persona seeded before #2658 says nothing about memory; without the
         # rule the model "notes" facts it never stored.
         prompt = f"{prompt}\n\n{_MEMORY_RULE}"
@@ -571,9 +587,9 @@ _ADMIN_TOOL_EXCLUDES: frozenset[str] = frozenset(
         # memory_* minus the steward's own trio (#2658). The brain surfaces
         # exactly _BRAIN_MEMORY_TOOLS (memory_add / memory_search /
         # memory_list, the persona's auto_approve set), each scoped server-side
-        # to the shared pool as the persona's agent id. Every other memory_* tool (the
-        # Hindsight 0.8.4 parity buildout's delete/recall/reflect/curate/
-        # history, mental-model and directive CRUD, operations, tags,
+        # to the shared pool as the persona's agent id. Every other memory_*
+        # tool (the Hindsight 0.8.4 parity buildout's delete/recall/reflect/
+        # curate/history, mental-model and directive CRUD, operations, tags,
         # bank-stats/consolidate) stays out. Listed explicitly so this stays a
         # plain frozenset that other test modules read directly (e.g.
         # tests/board/test_board_chat_admin_tools.py's ``catalog -
@@ -627,8 +643,7 @@ def _is_admin_tool_excluded(name: str) -> bool:
 # The hal0-brain persona auto-approves memory_add / memory_search / memory_list
 # and writes shared hal0 memory as the agent id ``hermes__hal0-brain`` (reads
 # still see its own earlier private notes through the normal read ACL). These
-# three reach the
-# model with deliberately tiny schemas (the shipped ~1.1B anchor picks the wrong
+# three reach the model with deliberately tiny schemas (the shipped ~1.1B anchor picks the wrong
 # tool when schemas are noisy, #2022) and every call is rewritten server-side
 # before it reaches the memory dispatcher: the model's arguments are reduced to
 # ``text`` / ``query`` / ``limit``, the dataset is forced to ``shared``, and the
@@ -705,7 +720,7 @@ def _brain_memory_limit(raw: Any, default: int) -> int:
     return max(1, min(value, _BRAIN_MEMORY_MAX_LIMIT))
 
 
-def _brain_memory_args(name: str, args: dict[str, Any], namespace: str) -> dict[str, Any]:
+def _brain_memory_args(name: str, args: dict[str, Any], dataset: str) -> dict[str, Any]:
     """Rebuild a memory call's arguments from the allowed fields only.
 
     Anything else the model sent (``dataset``, ``bank``, ``tags``,
@@ -713,14 +728,14 @@ def _brain_memory_args(name: str, args: dict[str, Any], namespace: str) -> dict[
     ``shared``.
     """
     if name == "memory_add":
-        return {"text": str(args.get("text") or ""), "dataset": namespace}
+        return {"text": str(args.get("text") or ""), "dataset": dataset}
     if name == "memory_search":
         return {
             "query": str(args.get("query") or ""),
             "limit": _brain_memory_limit(args.get("limit"), 10),
-            "dataset": namespace,
+            "dataset": dataset,
         }
-    return {"limit": _brain_memory_limit(args.get("limit"), 20), "dataset": namespace}
+    return {"limit": _brain_memory_limit(args.get("limit"), 20), "dataset": dataset}
 
 
 def _brain_memory_dispatcher(request: Request, agent_id: str) -> Any | None:

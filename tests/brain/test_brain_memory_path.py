@@ -427,6 +427,54 @@ def test_an_older_persona_prompt_gets_the_memory_rule_appended(tmp_path: Path) -
     assert "memory_add" in seeded_prompt
 
 
+def test_a_post_2658_persona_prompt_loses_the_private_bank_claim(tmp_path: Path) -> None:
+    """Boxes seeded after #2658 keep a prompt describing a private bank; the
+    resolved prompt must describe shared memory instead (spec R7)."""
+    root = tmp_path / "post2658"
+    old_rule = (
+        "Memory: you have a private memory bank (namespace private:hermes__hal0-brain), "
+        "separate from the Hermes chat agent. memory_add(text) saves one fact, "
+        "memory_search(query) finds saved facts, memory_list() shows recent ones. "
+        "Nothing is remembered unless you call memory_add: never say you noted, saved "
+        "or remembered something without a memory_add result in this turn. When asked "
+        "what the operator told you before, call memory_search first."
+    )
+    save_persona(
+        Persona(
+            id=bc.BRAIN_PERSONA_ID,
+            display_name="hal0 Brain",
+            system_prompt=f"You are hal0-brain.\n\n{old_rule}\n\nKeep replies short.",
+            memory_namespace=BRAIN_NAMESPACE,
+            approval=PersonaApproval(),
+        ),
+        root=root,
+    )
+    prompt, _model = bc._resolve_profile(_request(tmp_path, persona_root=root))
+    assert "private memory bank" not in prompt
+    assert "private:hermes__hal0-brain" not in prompt
+    assert bc._MEMORY_RULE in prompt
+    assert prompt.startswith("You are hal0-brain.")
+    assert prompt.endswith("Keep replies short.")
+    assert prompt.count("memory_add(text)") == 1
+
+
+def test_a_hand_edited_private_bank_sentence_is_stripped(tmp_path: Path) -> None:
+    root = tmp_path / "edited"
+    save_persona(
+        Persona(
+            id=bc.BRAIN_PERSONA_ID,
+            display_name="hal0 Brain",
+            system_prompt="You are hal0-brain. You own a private memory bank. Use memory_add.",
+            memory_namespace=BRAIN_NAMESPACE,
+            approval=PersonaApproval(),
+        ),
+        root=root,
+    )
+    prompt, _model = bc._resolve_profile(_request(tmp_path, persona_root=root))
+    assert "private memory bank" not in prompt
+    assert bc._MEMORY_RULE in prompt
+
+
 # ── the real fallback engine, end to end ────────────────────────────────────
 
 
