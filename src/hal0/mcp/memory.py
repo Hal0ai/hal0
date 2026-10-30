@@ -315,6 +315,11 @@ async def _memory_add(
       - ``text``: required, non-empty str.
       - ``dataset``: defaults to ``"shared"``; ``--private`` promotes
         to ``private:<client_id>``.
+      - ``private``: optional bool, per-call. ``true`` writes to the
+        caller's own ``private:<client_id>`` namespace. It can only make a
+        write more private: ``false`` never undoes the ``X-hal0-Private``
+        header, and the namespace is always derived from the resolved
+        ``client_id`` (a bridge key's bound name), never from ``dataset``.
       - ``tags``: defaults to ``[]``.
       - ``metadata``: defaults to ``{}``.
       - ``document_id``: optional engine grouping key — reuse one id
@@ -350,6 +355,7 @@ async def _memory_add(
     requested_ds = args.get("dataset")
     if requested_ds is not None and not isinstance(requested_ds, str):
         raise MemorySchemaError("dataset must be str when provided")
+    private = private or _optional_bool(args, "private", default=False)
     dataset = _resolve_dataset(requested_ds, private=private, client_id=client_id)
     tags = _normalise_tags(args.get("tags"))
     metadata_raw = args.get("metadata", {})
@@ -1534,7 +1540,9 @@ def _memory_tool_definitions() -> dict[str, Tool]:
             "operation_id/operation_ids/items_count when the engine reports them. "
             "Reuse document_id across calls to upsert one logical document (e.g. "
             "a conversation). sync=true waits for extraction instead of the "
-            "default fire-and-forget background ingest."
+            "default fire-and-forget background ingest. Writes are shared by "
+            "default; private=true keeps this one write in your own private "
+            "bank (it can only make a write more private)."
         ),
         annotations=_ANNOTATIONS["memory_add"],
     )
@@ -1549,6 +1557,7 @@ def _memory_tool_definitions() -> dict[str, Tool]:
         strategy: str | None = None,
         update_mode: str | None = None,
         sync: bool | None = None,
+        private: bool | None = None,
         args: dict[str, Any] | None = None,
         ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
@@ -1567,6 +1576,7 @@ def _memory_tool_definitions() -> dict[str, Tool]:
                 strategy=strategy,
                 update_mode=update_mode,
                 sync=sync,
+                private=private,
             ),
         )
 

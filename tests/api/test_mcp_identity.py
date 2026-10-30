@@ -73,3 +73,49 @@ def test_private_write_lands_in_agent_namespace(patch_request) -> None:
     private = mcp_mount.private_resolver()
     dataset = resolve_write_dataset(None, private=private, client_id=client_id)
     assert dataset == "private:bob"
+
+
+# ── per-call ``private`` cannot reach another agent's namespace ──────────────
+
+
+@pytest.mark.asyncio
+async def test_bridge_key_private_write_stays_in_its_own_namespace(monkeypatch) -> None:
+    """A bridge caller is bound to its key's name: neither ``X-hal0-Agent`` nor a
+    ``dataset`` of ``private:<victim>`` can steer a ``private: true`` write."""
+    from hal0.api.auth import BRIDGE_PRINCIPAL_SCOPE_KEY, AuthPrincipal
+    from hal0.mcp import memory
+
+    class _Wrapper:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        async def add(self, **kw):
+            self.calls.append(kw)
+            return {"id": "i", "timestamp": "t"}
+
+    raw = [
+        (b"x-hal0-agent", b"victim"),
+        (b"authorization", b"Bearer hal0bk_cc.token"),
+    ]
+    scope = {
+        "type": "http",
+        "headers": raw,
+        BRIDGE_PRINCIPAL_SCOPE_KEY: AuthPrincipal(
+            tier="bridge", source="bearer", name="cc", scopes=frozenset({"memory"})
+        ),
+    }
+    monkeypatch.setattr(mcp_mount, "_current_mcp_request", lambda: Request(scope))
+    wrapper = _Wrapper()
+    disp = memory.make_dispatcher(
+        wrapper,
+        client_id_resolver=mcp_mount.client_id_resolver,
+        private_resolver=mcp_mount.private_resolver,
+    )
+    for args in (
+        {"text": "x", "private": True},
+        {"text": "x", "private": True, "dataset": "private:victim"},
+    ):
+        out = await disp("memory_add", args)
+        assert out["status"] == "ok", out
+    assert [c["dataset"] for c in wrapper.calls] == ["private:cc", "private:cc"]
+    assert {c["client_id"] for c in wrapper.calls} == {"cc"}
