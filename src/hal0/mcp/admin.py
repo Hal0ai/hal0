@@ -1283,6 +1283,19 @@ _PROFILE_REASONING_PROPS: dict[str, Any] = {
     },
 }
 
+#: ``profile_create`` takes a non-null budget (the route's body field is a plain
+#: int); only ``profile_update`` accepts null, to clear the stored value.
+_PROFILE_CREATE_REASONING_PROPS: dict[str, Any] = {
+    **_PROFILE_REASONING_PROPS,
+    "reasoning_budget": {
+        "type": "integer",
+        "minimum": -1,
+        "description": (
+            "Reasoning token budget (--reasoning-budget): -1 = unlimited, 0 = no thinking."
+        ),
+    },
+}
+
 TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
     "memory_add": {
         "properties": {
@@ -1741,7 +1754,7 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
                 "enum": ["auto", "off"],
                 "description": "'auto' loads the model's mmproj when it has one; 'off' never does.",
             },
-            **_PROFILE_REASONING_PROPS,
+            **_PROFILE_CREATE_REASONING_PROPS,
             "speculation": {
                 "type": "string",
                 "enum": ["auto", "off", "ngram"],
