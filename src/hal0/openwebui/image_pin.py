@@ -48,7 +48,7 @@ OPENWEBUI_UNIT_NAME = "hal0-openwebui.service"
 #: ExecStartPre pull + ExecStart run), and installer/install.sh. Bump all
 #: three together; tests/installer/test_owui_pin_lockstep.py fails naming
 #: whichever site is stale.
-OPENWEBUI_IMAGE_PIN = "sha256:1565038903151ced924b5a3226f73f40f16963df4b910441f6391f10144afdaa"
+OPENWEBUI_IMAGE_PIN = "sha256:03443b8de6b617da9d900edd09b4bf1cb0ddbfdcba6afb42c548336a0b821ded"
 
 #: Human-readable label for the pin, shown next to the digest in status
 #: surfaces. Informational only — the digest is the authority.

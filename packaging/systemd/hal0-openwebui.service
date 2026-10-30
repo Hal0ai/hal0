@@ -37,7 +37,7 @@ EnvironmentFile=/etc/hal0/openwebui.env
 # minutes the first time. Idempotent — podman reuses the cached image.
 # pin per release (#79) — sha256 digest is deterministic; bump on each
 # hal0 release after a smoke test.
-ExecStartPre=-/usr/bin/podman pull ghcr.io/open-webui/open-webui@sha256:1565038903151ced924b5a3226f73f40f16963df4b910441f6391f10144afdaa
+ExecStartPre=-/usr/bin/podman pull ghcr.io/open-webui/open-webui@sha256:03443b8de6b617da9d900edd09b4bf1cb0ddbfdcba6afb42c548336a0b821ded
 
 # Best-effort cleanup of any stale container from a previous start that
 # didn't shut down cleanly. The leading `-` makes systemd ignore the
@@ -69,7 +69,7 @@ ExecStart=/usr/bin/podman run \
   -p ${HAL0_OWUI_BIND_HOST}:3001:8080 \
   --add-host=host.docker.internal:host-gateway \
   --security-opt apparmor=unconfined \
-  ghcr.io/open-webui/open-webui@sha256:1565038903151ced924b5a3226f73f40f16963df4b910441f6391f10144afdaa
+  ghcr.io/open-webui/open-webui@sha256:03443b8de6b617da9d900edd09b4bf1cb0ddbfdcba6afb42c548336a0b821ded
 
 # Graceful stop: tell the named container to stop (SIGTERM + 10s timeout).
 # systemd will SIGKILL ExecStart if it doesn't exit within TimeoutStopSec.
