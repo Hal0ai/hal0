@@ -101,6 +101,21 @@ def test_guard_refuses_non_llm_and_pinned():
     )
 
 
+@pytest.mark.parametrize(
+    ("enable_thinking", "code"),
+    [(False, "slot.tune_pinned_by_flags"), (None, None)],
+)
+def test_guard_pin_refuses_only_a_set_enable_thinking(enable_thinking, code):
+    base, profile = {"type": "llm"}, ProfileConfig(flags="--reasoning off")
+    update = {"tune": {"enable_thinking": enable_thinking}}
+    if code is None:
+        guard_tune_write(base, update, profile)
+        return
+    with pytest.raises(BadRequest) as e:
+        guard_tune_write(base, update, profile)
+    assert e.value.code == code
+
+
 def test_guard_npu_clear_and_unresolved_profile():
     with pytest.raises(BadRequest) as e:
         guard_tune_write({"type": "llm", "device": "npu"}, {"tune": {"vision": "off"}}, P)
