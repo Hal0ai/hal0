@@ -1401,15 +1401,43 @@ def check_hermes_default_memory(*, home: Path | None = None) -> Check:
     ADVISORY (never critical).
     """
     from hal0.agents import hermes_api as ha
+
+    root = home if home is not None else ha.hermes_home()
+    return _memory_headers_check(
+        "hermes_default_memory",
+        "Hermes default profile memory",
+        root / "config.yaml",
+        subject="default profile",
+    )
+
+
+def check_hermes_brain_memory(*, home: Path | None = None) -> Check:
+    """The ``hal0-brain`` profile's memory headers match its ``memory_private`` opt-in.
+
+    ``check_hermes_profiles_mcp`` skips ``hal0-brain`` (its own provisioning
+    phase). The dashboard steward reads the same opt-in from this file, so the
+    row reports it: shared unless ``hal0: {memory_private: true}``. A profile
+    that is not there passes. ADVISORY (never critical).
+    """
+    from hal0.agents import hermes_api as ha
+
+    root = home if home is not None else ha.hermes_home()
+    return _memory_headers_check(
+        "hermes_brain_memory",
+        "Hermes hal0-brain profile memory",
+        root / "profiles" / "hal0-brain" / "config.yaml",
+        subject="hal0-brain profile",
+    )
+
+
+def _memory_headers_check(key: str, label: str, path: Path, *, subject: str) -> Check:
+    """Compare a profile config's hal0 MCP memory headers with its ``memory_private`` opt-in."""
     from hal0.agents import hermes_provision as hp
 
-    key, label = "hermes_default_memory", "Hermes default profile memory"
-    root = home if home is not None else ha.hermes_home()
-    path = root / "config.yaml"
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return Check(key, label, _PASS, "hermes not provisioned - nothing to check")
+        return Check(key, label, _PASS, "not provisioned - nothing to check")
     except (OSError, UnicodeDecodeError) as exc:
         return Check(key, label, _WARN, f"cannot read {path}: {exc}")
     import yaml
@@ -1425,7 +1453,7 @@ def check_hermes_default_memory(*, home: Path | None = None) -> Check:
             key,
             label,
             _PASS,
-            "root opted out with hal0: {wire_mcp: false}; hal0 leaves its memory headers alone",
+            f"{subject} opted out with hal0: {{wire_mcp: false}}; hal0 leaves its memory headers alone",
         )
     private = hp.profile_memory_private(data)
     want = "1" if private else "0"
@@ -1445,14 +1473,14 @@ def check_hermes_default_memory(*, home: Path | None = None) -> Check:
         )
     if wrong:
         parts.append(
-            f"default profile memory is {mode} but {', '.join(wrong)} carries "
+            f"{subject} memory is {mode} but {', '.join(wrong)} carries "
             f'X-hal0-Private other than "{want}"; run `sudo hal0 agent reprovision hermes '
-            "--repair` (or `sudo hal0 update`) to converge it, since the default profile "
-            "is not converged periodically"
+            "--repair` (or `sudo hal0 update`) to converge it; nothing converges this "
+            "profile periodically"
         )
     if parts:
         return Check(key, label, _WARN, "; ".join(parts))
-    return Check(key, label, _PASS, f"default profile memory: {mode}")
+    return Check(key, label, _PASS, f"{subject} memory: {mode}")
 
 
 def check_hermes_profiles_mcp(
@@ -2710,6 +2738,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_hermes_mcp_config_auth(auth=auth_payload),
         check_hermes_profiles_mcp(auth=auth_payload),
         check_hermes_default_memory(),
+        check_hermes_brain_memory(),
         check_bridge_store(api_running=payloads["health"] is not None),
         check_agent_bridge(base=base),
         check_hermes_generation_extras(),

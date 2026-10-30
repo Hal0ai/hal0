@@ -1366,6 +1366,13 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
     )
     monkeypatch.setattr(
         da,
+        "check_hermes_brain_memory",
+        lambda **_kw: Check(
+            "hermes_brain_memory", "Hermes hal0-brain profile memory", "pass", "stubbed"
+        ),
+    )
+    monkeypatch.setattr(
+        da,
         "check_bridge_store",
         lambda **_kw: Check("bridge-store", "Agent bridge store", "pass", "stubbed"),
     )
@@ -1448,8 +1455,8 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
 
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
-    # 7 verify rows + 31 extras.
-    assert keys[-32:] == [
+    # 7 verify rows + 32 extras.
+    assert keys[-33:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1471,6 +1478,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "hermes_mcp_auth",
         "hermes_profiles_mcp",
         "hermes_default_memory",
+        "hermes_brain_memory",
         "bridge-store",
         "agent-bridge",
         "hermes_generation",
@@ -2806,3 +2814,36 @@ def test_profiles_mcp_warns_on_a_non_boolean_opt_in(tmp_path) -> None:
     home = _profiles_home(tmp_path, coder=text)
     c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
     assert c.status == "warn" and "memory_private" in c.detail and "coder" in c.detail
+
+
+def _brain_home(tmp_path, text):
+    home = tmp_path / "hermes"
+    (home / "profiles" / "hal0-brain").mkdir(parents=True)
+    if text is not None:
+        (home / "profiles" / "hal0-brain" / "config.yaml").write_text(text)
+    return home
+
+
+def test_brain_memory_passes_without_the_profile(tmp_path) -> None:
+    c = da.check_hermes_brain_memory(home=_brain_home(tmp_path, None))
+    assert (c.key, c.status, c.critical) == ("hermes_brain_memory", "pass", False)
+
+
+def test_brain_memory_flags_an_opt_in_its_headers_do_not_carry(tmp_path) -> None:
+    home = _brain_home(
+        tmp_path,
+        "hal0:\n  memory_private: true\n"
+        "mcp_servers:\n  hal0-memory:\n    headers:\n      X-hal0-Private: '0'\n",
+    )
+    c = da.check_hermes_brain_memory(home=home)
+    assert c.status == "warn" and "hal0-brain profile" in c.detail and "hal0-memory" in c.detail
+
+
+def test_brain_memory_passes_when_headers_follow_the_opt_in(tmp_path) -> None:
+    home = _brain_home(
+        tmp_path,
+        "hal0:\n  memory_private: true\n"
+        "mcp_servers:\n  hal0-memory:\n    headers:\n      X-hal0-Private: '1'\n",
+    )
+    c = da.check_hermes_brain_memory(home=home)
+    assert c.status == "pass" and "private" in c.detail

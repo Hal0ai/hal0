@@ -733,37 +733,65 @@ def _brain_memory_limit(raw: Any, default: int) -> int:
     return max(1, min(value, _BRAIN_MEMORY_MAX_LIMIT))
 
 
-def _brain_memory_args(name: str, args: dict[str, Any], dataset: str) -> dict[str, Any]:
+def _brain_memory_args(
+    name: str, args: dict[str, Any], dataset: str, *, private: bool = False
+) -> dict[str, Any]:
     """Rebuild a memory call's arguments from the allowed fields only.
 
     Anything else the model sent (``dataset``, ``bank``, ``tags``,
     ``metadata``, ``document_id`` ...) is dropped; the dataset is always
-    ``shared``.
+    ``shared``. When the profile opted into private memory the dispatcher
+    promotes writes to the steward's own namespace regardless, and a search
+    names no dataset so it spans ``shared`` plus that namespace.
     """
     if name == "memory_add":
         return {"text": str(args.get("text") or ""), "dataset": dataset}
     if name == "memory_search":
-        return {
+        out: dict[str, Any] = {
             "query": str(args.get("query") or ""),
             "limit": _brain_memory_limit(args.get("limit"), 10),
-            "dataset": dataset,
         }
+        if not private:
+            out["dataset"] = dataset
+        return out
     return {"limit": _brain_memory_limit(args.get("limit"), 20), "dataset": dataset}
 
 
-def _brain_memory_dispatcher(request: Request, agent_id: str) -> Any | None:
-    """The app's memory dispatcher, pinned to the steward's agent id, shared.
+def _brain_memory_private() -> bool:
+    """Whether ``hal0: {memory_private: true}`` is set on the hal0-brain Hermes profile.
+
+    The dashboard steward has no request headers to carry the opt-in, so it
+    reads the same ``profiles/hal0-brain/config.yaml`` the Hermes profile does,
+    by the one rule (and failing closed) of
+    :func:`hal0.agents.hermes_provision.read_profile_memory_private`. Read per
+    call, so an edit takes effect without a restart.
+    """
+    from hal0.agents import hermes_api, hermes_provision
+
+    return hermes_provision.read_profile_memory_private(
+        hermes_api.hermes_home() / "profiles" / "hal0-brain" / "config.yaml"
+    )
+
+
+def _brain_memory_dispatcher(
+    request: Request, agent_id: str, *, private: bool | None = None
+) -> Any | None:
+    """The app's memory dispatcher, pinned to the steward's agent id.
 
     ``app.state.memory_dispatcher`` resolves identity off the live MCP
     request, which this in-process caller does not have; its ``shared``
-    sibling shares the provider and the ``memory_add`` preflight. ``None``
-    when the memory subsystem is off.
+    sibling shares the provider and the ``memory_add`` preflight. Shared by
+    default; ``scoped`` (private mode always on) when the hal0-brain profile
+    opted in with ``hal0: {memory_private: true}``. ``None`` when the memory
+    subsystem is off.
     """
     base = getattr(request.app.state, "memory_dispatcher", None)
     if base is None:
         return None
-    shared = getattr(base, "shared", None)
-    return shared(agent_id) if callable(shared) else None
+    if private is None:
+        private = _brain_memory_private()
+    pin = getattr(base, "scoped" if private else "shared", None)
+    return pin(agent_id) if callable(pin) else None
 
 
 async def _dispatch_brain_memory_tool(request: Request, name: str, args: dict[str, Any]) -> Any:
@@ -774,7 +802,8 @@ async def _dispatch_brain_memory_tool(request: Request, name: str, args: dict[st
     only the memory dispatcher handed to it is the shared-pinned one.
     """
     agent_id = _brain_memory_agent_id(request)
-    dispatcher = _brain_memory_dispatcher(request, agent_id)
+    private = _brain_memory_private()
+    dispatcher = _brain_memory_dispatcher(request, agent_id, private=private)
     if dispatcher is None:
         return {
             "error": (
@@ -792,7 +821,7 @@ async def _dispatch_brain_memory_tool(request: Request, name: str, args: dict[st
     base = getattr(request.app.state, "self_api_base_url", "http://127.0.0.1:8080")
     return await admin.dispatch(
         tool=name,
-        args=_brain_memory_args(name, args, "shared"),
+        args=_brain_memory_args(name, args, "shared", private=private),
         client_id=BRAIN_PERSONA_ID,
         bearer=_self_call_bearer(request, prefer="admin"),
         base_url=base,

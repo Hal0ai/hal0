@@ -169,6 +169,78 @@ def _tokens(events: list[dict[str, Any]]) -> str:
     return "\n".join(e["text"] for e in events if e["type"] == "token")
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_hermes_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The steward reads ``profiles/hal0-brain/config.yaml`` under $HERMES_HOME."""
+    home = tmp_path / "hermes-home"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    return home
+
+
+def _brain_profile_config(home: Path, text: str | None) -> None:
+    d = home / "profiles" / "hal0-brain"
+    d.mkdir(parents=True, exist_ok=True)
+    if text is not None:
+        (d / "config.yaml").write_text(text)
+
+
+# ── the steward honours hal0: {memory_private: true} on its Hermes profile ──
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("opt_in", ["true", "'yes'", "1", "garbage"])
+async def test_the_steward_writes_private_when_its_profile_opts_in(
+    tmp_path: Path, _hermetic_hermes_home: Path, opt_in: str
+) -> None:
+    _brain_profile_config(_hermetic_hermes_home, f"hal0:\n  memory_private: {opt_in}\n")
+    provider = _FakeProvider()
+    request = _request(tmp_path, provider=provider)
+    result = await bc._dispatch_tool(request, "memory_add", {"text": "a private fact"}, board=None)
+    assert result["status"] == "ok"
+    (kw,) = [kw for op, kw in provider.calls if op == "add"]
+    assert kw["dataset"] == f"private:{BRAIN_PROFILE_AGENT_ID}"
+    assert kw["client_id"] == BRAIN_PROFILE_AGENT_ID
+
+
+@pytest.mark.asyncio
+async def test_a_private_steward_search_spans_shared_and_its_own_namespace(
+    tmp_path: Path, _hermetic_hermes_home: Path
+) -> None:
+    _brain_profile_config(_hermetic_hermes_home, "hal0:\n  memory_private: true\n")
+    provider = _FakeProvider()
+    request = _request(tmp_path, provider=provider)
+    await bc._dispatch_tool(request, "memory_search", {"query": "cat"}, board=None)
+    (kw,) = [kw for op, kw in provider.calls if op == "search"]
+    assert kw["dataset"] == [SHARED, f"private:{BRAIN_PROFILE_AGENT_ID}"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("opt_in", [None, "false", "null", "'off'", "no"])
+async def test_the_steward_stays_shared_without_the_opt_in(
+    tmp_path: Path, _hermetic_hermes_home: Path, opt_in: str | None
+) -> None:
+    text = None if opt_in is None else f"hal0:\n  memory_private: {opt_in}\n"
+    _brain_profile_config(_hermetic_hermes_home, text)
+    provider = _FakeProvider()
+    request = _request(tmp_path, provider=provider)
+    await bc._dispatch_tool(request, "memory_add", {"text": "a shared fact"}, board=None)
+    (kw,) = [kw for op, kw in provider.calls if op == "add"]
+    assert kw["dataset"] == SHARED
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_brain_profile_config_fails_closed(
+    tmp_path: Path, _hermetic_hermes_home: Path
+) -> None:
+    _brain_profile_config(_hermetic_hermes_home, "hal0: [unclosed\n")
+    provider = _FakeProvider()
+    request = _request(tmp_path, provider=provider)
+    await bc._dispatch_tool(request, "memory_add", {"text": "x fact"}, board=None)
+    (kw,) = [kw for op, kw in provider.calls if op == "add"]
+    assert kw["dataset"] == f"private:{BRAIN_PROFILE_AGENT_ID}"
+
+
 # ── (a) the catalog carries exactly the persona-approved trio ───────────────
 
 

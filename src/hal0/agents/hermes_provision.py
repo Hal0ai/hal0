@@ -5542,6 +5542,38 @@ def profile_memory_private(cfg: dict[str, Any] | None) -> bool:
     return memory_private_value_is_private(hal0.get(PROFILE_MEMORY_PRIVATE_KEY))
 
 
+def read_profile_memory_private(config_path: Path) -> bool:
+    """Whether the profile at ``config_path`` opts into private memory. FAILS CLOSED.
+
+    Only a missing file, or an opt-in that is absent/null/false/an off word,
+    means shared. A file that exists but cannot be read or parsed, or is not
+    a mapping, means private: a broken config must not publish a private
+    profile's notes. Used by the dashboard steward, which has no request
+    headers to carry the opt-in; the Hermes memory plugin carries a copy of
+    the same rule.
+    """
+    try:
+        text = Path(config_path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return False
+    except (OSError, UnicodeDecodeError) as exc:
+        log.warning("hermes.memory_private_unreadable", path=str(config_path), error=str(exc))
+        return True
+    try:
+        import yaml  # type: ignore[import-untyped]
+
+        data = yaml.safe_load(text)
+    except Exception as exc:
+        log.warning("hermes.memory_private_unparseable", path=str(config_path), error=str(exc))
+        return True
+    if data is None:
+        return False
+    if not isinstance(data, dict):
+        log.warning("hermes.memory_private_not_a_mapping", path=str(config_path))
+        return True
+    return profile_memory_private(data)
+
+
 def memory_private_is_boolean(cfg: dict[str, Any] | None) -> bool:
     """False when ``hal0.memory_private`` is set to something other than a bool or null.
 
