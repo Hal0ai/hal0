@@ -123,6 +123,34 @@ def _profile_name(hermes_home: str | None) -> str | None:
     return name if os.path.basename(parent) == "profiles" and name else None
 
 
+def _profile_memory_private(hermes_home: str | None) -> bool:
+    """True when the bound profile's config.yaml has ``hal0: {memory_private: true}``.
+
+    The same opt-in hal0 reads when it renders the profile's MCP headers
+    (``hermes_provision.profile_memory_private``): only a literal boolean true
+    counts. ``hermes_home`` is the bound profile's home, else ``$HERMES_HOME``;
+    with neither there is nothing to read. Best-effort, never raises: an
+    unreadable file means the shared default.
+    """
+    base = hermes_home or os.environ.get("HERMES_HOME")
+    if not base:
+        return False
+    path = os.path.join(base, "config.yaml")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except (OSError, UnicodeDecodeError):
+        return False
+    try:
+        import yaml
+
+        data = yaml.safe_load(text)
+    except Exception:
+        return False
+    hal0 = data.get("hal0") if isinstance(data, dict) else None
+    return isinstance(hal0, dict) and hal0.get("memory_private") is True
+
+
 def _hindsight_config_path(hermes_home: str | None = None) -> str:
     """Resolve ``<hermes_home>/hindsight/config.json`` (upstream layout).
 
@@ -229,6 +257,9 @@ class Hal0MemoryProvider(MemoryProvider):  # type: ignore[misc]
         # Durable-write default visibility; may be overridden by profile policy
         # (env HAL0_MEMORY_DEFAULT_VISIBILITY) or per-write ``visibility`` arg.
         self._default_visibility: str = _DEFAULT_DURABLE_VISIBILITY
+        # ``hal0: {memory_private: true}`` in the bound profile's config.yaml:
+        # every durable write is private, whatever the per-call arg says.
+        self._memory_private: bool = False
         # Deeper next-turn retrieval hint parked by queue_prefetch (bounded,
         # single-slot, non-blocking — drained best-effort on the next prefetch).
         self._queued_query: str = ""
@@ -257,6 +288,7 @@ class Hal0MemoryProvider(MemoryProvider):  # type: ignore[misc]
         self._default_visibility = (
             os.environ.get("HAL0_MEMORY_DEFAULT_VISIBILITY") or _DEFAULT_DURABLE_VISIBILITY
         ).lower()
+        self._memory_private = _profile_memory_private(str(kwargs.get("hermes_home") or "") or None)
         # Secret-free local retry spool location (design §"Memory failure
         # behavior"); declared for backup even before it is written.
         self._spool_dir = os.environ.get("HAL0_MEMORY_SPOOL") or None
@@ -547,8 +579,10 @@ class Hal0MemoryProvider(MemoryProvider):  # type: ignore[misc]
         if not text:
             return json.dumps({"status": "error", "error": "Missing required parameter: text"})
         # Durable writes default SHARED; explicit private override honored.
+        # A profile that opted into ``memory_private`` is private for every
+        # write: the opt-in is not something a per-call arg can undo.
         visibility = str(args.get("visibility") or self._default_visibility).lower()
-        private = visibility == "private"
+        private = self._memory_private or visibility == "private"
         tags = args.get("tags")
         tag_list = [str(t) for t in tags] if isinstance(tags, list) and tags else ["agent:hermes"]
         assert self._client is not None  # guarded by handle_tool_call

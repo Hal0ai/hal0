@@ -637,6 +637,53 @@ def test_handle_tool_call_add_profile_default_visibility_override() -> None:
     assert out["bank"] == "private:hermes"
 
 
+def _private_home(tmp_path, opt_in) -> str:
+    home = tmp_path / "profiles" / "coder"
+    home.mkdir(parents=True)
+    if opt_in is not None:
+        (home / "config.yaml").write_text(
+            f"hal0:\n  memory_private: {opt_in}\nmemory:\n  provider: hal0-memory\n"
+        )
+    return str(home)
+
+
+def test_memory_private_opt_in_makes_retain_private(tmp_path, monkeypatch) -> None:
+    # ``hal0: {memory_private: true}`` in the profile's config.yaml covers the
+    # plugin's own writes, not only the MCP headers.
+    monkeypatch.delenv("HAL0_MEMORY_DEFAULT_VISIBILITY", raising=False)
+    fake_client = Mock(spec=Hal0MemoryClient)
+    fake_client.agent_id = "hermes__coder"
+    fake_client.add.return_value = {"status": "ok"}
+    provider = Hal0MemoryProvider(client=fake_client)
+    provider.initialize(hermes_home=_private_home(tmp_path, "true"))
+    out = json.loads(provider.handle_tool_call("hindsight_retain", {"text": "fact"}))
+    fake_client.add.assert_called_once_with("fact", tags=["agent:hermes"], private=True)
+    assert out["visibility"] == "private"
+
+
+def test_memory_private_opt_in_beats_an_explicit_shared_arg(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("HAL0_MEMORY_DEFAULT_VISIBILITY", raising=False)
+    fake_client = Mock(spec=Hal0MemoryClient)
+    fake_client.agent_id = "hermes__coder"
+    fake_client.add.return_value = {"status": "ok"}
+    provider = Hal0MemoryProvider(client=fake_client)
+    provider.initialize(hermes_home=_private_home(tmp_path, "true"))
+    provider.handle_tool_call("hindsight_retain", {"text": "fact", "visibility": "shared"})
+    assert fake_client.add.call_args.kwargs["private"] is True
+
+
+@pytest.mark.parametrize("opt_in", [None, "false", '"true"', "1"])
+def test_no_literal_true_opt_in_stays_shared(tmp_path, monkeypatch, opt_in) -> None:
+    monkeypatch.delenv("HAL0_MEMORY_DEFAULT_VISIBILITY", raising=False)
+    fake_client = Mock(spec=Hal0MemoryClient)
+    fake_client.agent_id = "hermes__coder"
+    fake_client.add.return_value = {"status": "ok"}
+    provider = Hal0MemoryProvider(client=fake_client)
+    provider.initialize(hermes_home=_private_home(tmp_path, opt_in))
+    provider.handle_tool_call("hindsight_retain", {"text": "fact"})
+    assert fake_client.add.call_args.kwargs["private"] is False
+
+
 def test_handle_tool_call_add_custom_tags() -> None:
     fake_client = Mock(spec=Hal0MemoryClient)
     fake_client.add.return_value = {"status": "ok"}
