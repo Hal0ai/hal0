@@ -87,7 +87,82 @@ def _restart_openwebui(
         return False
 
 
-def _render_dynamic_env(job_id: str | None) -> tuple[bool, str | None]:
+_OWUI_CLIENT = "openwebui"
+_OWUI_CREATED_BY = "system:openwebui"
+
+
+def _existing_bridge_key() -> str | None:
+    """The bridge key already rendered in ``openwebui.env``'s ``TOOL_SERVER_CONNECTIONS``."""
+    import json
+
+    from hal0.config.paths import openwebui_env
+    from hal0.openwebui import env_writer
+
+    try:
+        raw = env_writer._read_existing_env(openwebui_env()).get("TOOL_SERVER_CONNECTIONS", "")
+        for entry in json.loads(raw) if raw else []:
+            key = entry.get("key") if isinstance(entry, dict) else None
+            if isinstance(key, str) and key.startswith("hal0bk_"):
+                return key
+    except Exception:
+        return None
+    return None
+
+
+def _resolve_bridge(
+    bridge_key: str | None, is_hal0_user: Callable[[], bool]
+) -> tuple[str | None, bool, tuple[str, ...] | None]:
+    """``(key, mcp_enabled, scopes)`` for the MCP block. Fails closed: any doubt renders no block.
+
+    Mints the ``openwebui`` client only for the ``hal0`` service account (a root
+    caller renders what exists), stamps it ``system:openwebui``, and never adopts a
+    client of that name someone else made. A revoked client renders no block.
+    """
+    from hal0.bridge.keys import DEFAULT_SCOPES
+    from hal0.bridge.managed import ManagedClientRefused, ensure_managed_bridge_client
+    from hal0.config.loader import load_hal0_config
+    from hal0.config.paths import bridge_db
+
+    try:
+        if not load_hal0_config().bridge.enabled:
+            return None, False, None
+        if is_hal0_user():
+            from hal0.api.auth import bridge_store
+
+            store = bridge_store()
+        else:
+            from hal0.bridge.store import BridgeStore
+
+            if not bridge_db().exists():
+                return None, False, None
+            store = BridgeStore(bridge_db())
+        row, minted = ensure_managed_bridge_client(
+            _OWUI_CLIENT,
+            scopes=DEFAULT_SCOPES,
+            created_by=_OWUI_CREATED_BY,
+            store=store,
+            may_mint=is_hal0_user(),
+        )
+    except ManagedClientRefused as exc:
+        log.warning("openwebui.bridge_client_foreign", error=str(exc))
+        return None, False, None
+    except Exception as exc:
+        log.warning("openwebui.bridge_client_failed", error=str(exc))
+        return None, False, None
+    if row is None or row.revoked_at is not None:
+        return None, False, None
+    scopes = tuple(row.scopes)
+    key = minted or bridge_key
+    if key is None:
+        key = _existing_bridge_key()
+    return key, True, scopes
+
+
+def _render_dynamic_env(
+    job_id: str | None,
+    bridge_key: str | None = None,
+    is_hal0_user: Callable[[], bool] | None = None,
+) -> tuple[bool, str | None]:
     """Re-render ``openwebui.env``'s dynamic RAG/image-gen/web-search blocks
     from live capability state. Returns ``(env_changed, error)`` — never
     raises; a broken resolver degrades to ``(False, <error>)`` so it can
@@ -105,7 +180,12 @@ def _render_dynamic_env(job_id: str | None) -> tuple[bool, str | None]:
         return False, f"env read failed: {exc}"
 
     try:
-        overrides = resolve_dynamic_env_overrides()
+        key, mcp_enabled, scopes = _resolve_bridge(
+            bridge_key, is_hal0_user if is_hal0_user is not None else is_hal0_service_user
+        )
+        overrides = resolve_dynamic_env_overrides(
+            bridge_key=key, mcp_enabled=mcp_enabled, bridge_scopes=scopes
+        )
         write_openwebui_env(target, overrides=overrides, preserve_existing=True)
     except Exception as exc:
         log.warning("components.owui_env_render_failed", job_id=job_id, error=str(exc))
@@ -124,6 +204,7 @@ def reconcile_openwebui_env(
     job_id: str | None = None,
     runner: Runner | None = None,
     is_hal0_user: Callable[[], bool] | None = None,
+    bridge_key: str | None = None,
 ) -> dict[str, Any]:
     """Re-render the dynamic env blocks and try-restart the unit only when the
     rendered bytes actually changed.
@@ -155,7 +236,7 @@ def reconcile_openwebui_env(
         # why the restart below is a try-restart.)
         return {"status": "skipped", "reason": "openwebui unit not installed"}
 
-    changed, error = _render_dynamic_env(job_id)
+    changed, error = _render_dynamic_env(job_id, bridge_key, is_hal0_user)
     if error is not None:
         return {"status": "build_failed", "error": error}
     if not changed:
@@ -172,7 +253,7 @@ def reconcile_openwebui_env(
     return {"status": "converged", "env_changed": True, "restarted": restarted}
 
 
-def reconcile_openwebui_env_background() -> None:
+def reconcile_openwebui_env_background(bridge_key: str | None = None) -> None:
     """``reconcile_openwebui_env()``, fire-and-forget.
 
     The one shared body for every caller that triggers a reconcile as a
@@ -184,7 +265,10 @@ def reconcile_openwebui_env_background() -> None:
     a failure on the response it's piggybacking on.
     """
     try:
-        reconcile_openwebui_env()
+        if bridge_key is None:
+            reconcile_openwebui_env()
+        else:
+            reconcile_openwebui_env(bridge_key=bridge_key)
     except Exception as exc:  # pragma: no cover — defensive, arm is fail-soft
         log.warning("components.owui_reconcile_background_failed", error=str(exc))
 
@@ -204,7 +288,7 @@ def _env_reconcile_fields(
     this. Re-deriving the path here would silently diverge from the one
     the caller already resolved.
     """
-    changed, error = _render_dynamic_env(job_id)
+    changed, error = _render_dynamic_env(job_id, None, is_hal0_user)
     fields: dict[str, Any] = {}
     if error is not None:
         fields["env_error"] = error
@@ -376,7 +460,7 @@ def converge_openwebui(
     # Render before the restart below so it's the new image AND the new env
     # that come up together — one restart covers both (a second,
     # env-triggered restart would just be wasted churn here).
-    env_changed, env_error = _render_dynamic_env(job_id)
+    env_changed, env_error = _render_dynamic_env(job_id, None, is_hal0_user)
 
     # try-restart: a unit the operator stopped stays down. The repin and env
     # are already on disk, so its next manual start runs the new image.

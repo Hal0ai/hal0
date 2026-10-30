@@ -431,6 +431,28 @@ def test_rotate_returns_onboarding_lines_for_the_current_scopes(admin_client: Te
     assert all(body["key"] in line["claude_mcp_add"] for line in body["onboarding"]["lines"])
 
 
+def test_openwebui_mutations_repoint_open_webui(
+    admin_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hal0.components import openwebui_arm
+
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        openwebui_arm, "reconcile_openwebui_env_background", lambda **kw: calls.append(kw)
+    )
+    admin_client.post("/api/bridge/clients", json={"name": "openwebui"})
+    admin_client.post("/api/bridge/clients", json={"name": "other"})
+    rotated = admin_client.post("/api/bridge/clients/openwebui/rotate").json()
+    assert calls == [{"bridge_key": rotated["key"]}]
+    admin_client.patch("/api/bridge/clients/openwebui", json={"scopes": ["memory"]})
+    assert calls[-1] == {"bridge_key": None}
+    admin_client.delete("/api/bridge/clients/openwebui")
+    assert calls[-1] == {"bridge_key": None} and len(calls) == 3
+    admin_client.post("/api/bridge/clients/other/rotate")
+    admin_client.delete("/api/bridge/clients/other")
+    assert len(calls) == 3  # other clients never re-render Open WebUI
+
+
 # ---------------------------------------------------------------------------
 # GET /api/bridge/me
 

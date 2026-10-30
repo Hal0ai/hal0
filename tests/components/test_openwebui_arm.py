@@ -445,3 +445,106 @@ def test_clear_override(tmp_path) -> None:
     )
     assert openwebui_arm.read_pin_override() is None
     assert res["status"] == "upgraded"  # back to the release pin
+
+
+# ── openwebui bridge client: mint, scopes, revoke (Task 8) ──
+
+
+def _env() -> dict[str, str]:
+    from hal0.config.paths import openwebui_env
+    from hal0.openwebui import env_writer
+
+    return env_writer._read_existing_env(openwebui_env())
+
+
+def _bridge(tmp_path):
+    from hal0.api import auth as auth_mod
+    from hal0.config import paths
+
+    auth_mod._bridge_store_instance = None
+    store = auth_mod.bridge_store()
+    assert store.path == paths.bridge_db()
+    return store
+
+
+def _reconcile(user: bool, **kw):
+    return openwebui_arm.reconcile_openwebui_env(
+        runner=_ok_runner(), is_hal0_user=lambda: user, **kw
+    )
+
+
+def test_reconcile_mints_openwebui_client_once(tmp_path) -> None:
+    _installed_unit(tmp_path)
+    store = _bridge(tmp_path)
+    _reconcile(True)
+    row = store.get_client("openwebui")
+    assert row is not None and set(row.scopes) == {"agents", "memory"}
+    assert row.created_by == "system:openwebui"
+    assert "hal0bk_openwebui." in _env()["TOOL_SERVER_CONNECTIONS"]
+    first = _env()["TOOL_SERVER_CONNECTIONS"]
+    _reconcile(True)
+    assert [c.name for c in store.list_clients()].count("openwebui") == 1
+    assert _env()["TOOL_SERVER_CONNECTIONS"] == first  # key preserved, not re-minted
+
+
+def test_reconcile_skips_mint_when_bridge_disabled(tmp_path) -> None:
+    _installed_unit(tmp_path)
+    etc = tmp_path / "etc" / "hal0"
+    etc.mkdir(parents=True, exist_ok=True)
+    (etc / "hal0.toml").write_text("[bridge]\nenabled = false\n")
+    _reconcile(True)
+    from hal0.config import paths
+
+    assert not paths.bridge_db().exists()
+    assert "TOOL_SERVER_CONNECTIONS" not in _env()
+
+
+def test_root_caller_never_mints(tmp_path) -> None:
+    _installed_unit(tmp_path)
+    store = _bridge(tmp_path)
+    _reconcile(False)
+    assert store.get_client("openwebui") is None
+    assert "TOOL_SERVER_CONNECTIONS" not in _env()
+
+
+def test_foreign_openwebui_client_not_adopted(tmp_path) -> None:
+    _installed_unit(tmp_path)
+    store = _bridge(tmp_path)
+    store.add_client("openwebui", "api:admin")
+    _reconcile(True)
+    assert "TOOL_SERVER_CONNECTIONS" not in _env()
+    assert store.get_client("openwebui").created_by == "api:admin"
+
+
+def test_scope_change_rerenders_with_same_key(tmp_path) -> None:
+    import json
+
+    _installed_unit(tmp_path)
+    store = _bridge(tmp_path)
+    _reconcile(True)
+    before = json.loads(_env()["TOOL_SERVER_CONNECTIONS"])
+    store.set_scopes("openwebui", ["agents", "memory", "admin"])
+    _reconcile(True)
+    after = json.loads(_env()["TOOL_SERVER_CONNECTIONS"])
+    assert len(after) == len(before) + 1
+    assert {e["key"] for e in after} == {e["key"] for e in before}
+
+
+def test_rotated_key_is_rendered(tmp_path) -> None:
+    _installed_unit(tmp_path)
+    store = _bridge(tmp_path)
+    _reconcile(True)
+    _row, new = store.rotate_client("openwebui")
+    _reconcile(True, bridge_key=new)
+    assert new in _env()["TOOL_SERVER_CONNECTIONS"]
+
+
+def test_revoke_openwebui_nulls_block(tmp_path) -> None:
+    _installed_unit(tmp_path)
+    store = _bridge(tmp_path)
+    _reconcile(True)
+    assert "TOOL_SERVER_CONNECTIONS" in _env()
+    store.revoke_client("openwebui")
+    _reconcile(True)
+    assert "TOOL_SERVER_CONNECTIONS" not in _env()
+    assert store.get_client("openwebui").revoked_at is not None  # not re-minted

@@ -350,3 +350,16 @@ async def test_maintenance_interval_defaults_to_an_hour() -> None:
     from hal0.api import BRIDGE_MAINTENANCE_INTERVAL_S
 
     assert BRIDGE_MAINTENANCE_INTERVAL_S == 3600
+
+
+def test_boot_hook_runs_reconcile_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hal0.components import openwebui_arm
+
+    calls: list[int] = []
+    monkeypatch.setattr(
+        openwebui_arm, "reconcile_openwebui_env_background", lambda **kw: calls.append(1)
+    )
+    _write_hal0_toml("")
+    with TestClient(create_app()):
+        pass
+    assert calls == [1]

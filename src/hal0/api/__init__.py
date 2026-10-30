@@ -1400,6 +1400,21 @@ async def _boot_hermes_upstreams(app: FastAPI, ctx: BootState) -> None:
     )
 
 
+async def _boot_openwebui_bridge_client(app: FastAPI, ctx: BootState) -> None:
+    """Phase — mint the ``openwebui`` bridge client and render its MCP block, once.
+
+    Non-fatal and fire-and-forget: the reconcile runs on a worker thread and is a
+    no-op while the bridge is off, the Open WebUI unit is not installed, or the
+    client exists and the rendered env is unchanged. Runs after ``bridge_store`` so
+    the singleton it mints through is open.
+    """
+    from hal0.components.openwebui_arm import reconcile_openwebui_env_background
+
+    app.state.openwebui_bridge_task = asyncio.create_task(
+        asyncio.to_thread(reconcile_openwebui_env_background)
+    )
+
+
 async def _boot_bridge_store(app: FastAPI, ctx: BootState) -> None:
     """Phase — record ``[bridge].enabled`` and open the bridge's client store (ADR-0043).
 
@@ -2830,6 +2845,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await _run_boot_phase(report, "dispatcher", lambda: _boot_dispatcher(app, ctx))
     await _run_boot_phase(report, "hermes_upstreams", lambda: _boot_hermes_upstreams(app, ctx))
     await _run_boot_phase(report, "bridge_store", lambda: _boot_bridge_store(app, ctx))
+    await _run_boot_phase(
+        report, "openwebui_bridge_client", lambda: _boot_openwebui_bridge_client(app, ctx)
+    )
     await _run_boot_phase(report, "bridge", lambda: _boot_bridge(app, ctx))
     # ``slot_reconcile`` starts the READY model-cache refresher (#2442) before
     # the AsyncExitStack below exists; a later phase failing must not leave
