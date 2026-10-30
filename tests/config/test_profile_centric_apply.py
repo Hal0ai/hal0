@@ -1206,3 +1206,36 @@ def test_rollback_skips_when_target_understands_tune(tmp_hal0_home: str, tmp_pat
     assert updater._strip_slot_tune_for(newer, job_id=None) == []
     assert tuned.read_bytes() == before
     assert not list(tuned.parent.glob("*.bak-*"))
+
+
+def test_strip_slot_tune_failure_midway_restores_the_files_already_changed(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import tomli_w
+
+    from hal0.updater import updater
+
+    d = paths.slots_config_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    originals = {}
+    for n in ("a", "b"):
+        f = d / f"{n}.toml"
+        f.write_text(f'name = "{n}"\n[tune]\nvision = "off"\n', encoding="utf-8")
+        originals[f] = f.read_bytes()
+    real_dumps = tomli_w.dumps
+    calls = {"n": 0}
+
+    def flaky(obj: Any, *a: Any, **k: Any) -> str:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("disk full")
+        return real_dumps(obj, *a, **k)
+
+    monkeypatch.setattr(tomli_w, "dumps", flaky)
+    older = tmp_path / "hal0-1.7.1"
+    older.mkdir()
+    with pytest.raises(OSError, match="disk full"):
+        updater._strip_slot_tune_for(older, job_id=None)
+    for f, data in originals.items():
+        assert f.read_bytes() == data
+    assert not list(d.glob("*.bak-*"))

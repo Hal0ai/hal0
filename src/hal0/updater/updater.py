@@ -4282,7 +4282,10 @@ class Updater:
         # ADR-0045: a release before per-slot [tune] refuses a slot file that
         # carries the table. Strip it (after the profile restore, which may put
         # slot files back) and leave a .bak-<stamp> copy of each file touched.
-        tune_stripped = _strip_slot_tune_for(prior_path, job_id=self.job_id)
+        tune_backups: dict[str, Path] = {}
+        tune_stripped = _strip_slot_tune_for(
+            prior_path, job_id=self.job_id, backups_out=tune_backups
+        )
         # Steps 8 + 8b via the same privileged primitive commit() uses: swap the
         # symlink back and re-pip the prior tree so the next hal0-api restart
         # actually serves the rolled-back version. On a pip failure activate
@@ -4290,6 +4293,9 @@ class Updater:
         try:
             activated = await seam.activate(prior_path.name)
         except Exception:
+            # Still on this release: its slot files get their [tune] back. This
+            # comes first, so a re-conversion below sees the files as they were.
+            _restore_slot_tune_backups(tune_backups, job_id=self.job_id)
             if profile_restore:
                 # Still on this release: convert again so it keeps running.
                 from hal0.config.migrations.profile_centric_apply import (
@@ -4390,7 +4396,37 @@ def _restore_profile_conversion_for(prior_path: Path, *, job_id: str | None) -> 
 _SLOT_TUNE_MARKER = Path("src/hal0/slots/tune.py")
 
 
-def _strip_slot_tune_for(prior_path: Path, *, job_id: str | None) -> list[str]:
+def _restore_slot_tune_backups(backups: dict[str, Path], *, job_id: str | None) -> list[str]:
+    """Put each slot file in ``backups`` ({file: its ``.bak-<stamp>``}) back as it was.
+
+    Writes in place (the file keeps its owner and mode) and removes the backup
+    once its file is restored; a backup that cannot be restored is kept and
+    logged. Returns the files restored. Never raises: it runs on a failure path.
+    """
+    restored: list[str] = []
+    for file, backup in backups.items():
+        try:
+            Path(file).write_bytes(backup.read_bytes())
+            backup.unlink()
+        except OSError as exc:
+            log.error(
+                "updater.slot_tune_restore_failed",
+                job_id=job_id,
+                path=file,
+                backup=str(backup),
+                error=str(exc),
+            )
+            continue
+        restored.append(file)
+    return restored
+
+
+def _strip_slot_tune_for(
+    prior_path: Path,
+    *,
+    job_id: str | None,
+    backups_out: dict[str, Path] | None = None,
+) -> list[str]:
     """Remove ``[tune]`` from every slot file before rolling back to ``prior_path``
     when that release predates per-slot tune overrides.
 
@@ -4398,6 +4434,11 @@ def _strip_slot_tune_for(prior_path: Path, *, job_id: str | None) -> list[str]:
     Each file that has one is first copied to ``<file>.bak-<UTC stamp>``, then
     rewritten without the table. Returns the slot files changed; empty when the
     target understands ``[tune]`` or no slot carries one.
+
+    ``backups_out`` receives ``{file: backup}`` for each file changed, so a
+    caller whose later step fails can undo this with
+    :func:`_restore_slot_tune_backups`. If a write fails part-way, the files
+    already changed are restored before the error propagates.
     """
     if (prior_path / _SLOT_TUNE_MARKER).is_file():
         return []
@@ -4409,22 +4450,30 @@ def _strip_slot_tune_for(prior_path: Path, *, job_id: str | None) -> list[str]:
     if not slots_dir.is_dir():
         return []
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    backups: dict[str, Path] = backups_out if backups_out is not None else {}
     changed: list[str] = []
-    for path in sorted(slots_dir.glob("*.toml")):
-        try:
-            raw = path.read_bytes()
-            data = tomllib.loads(raw.decode("utf-8"))
-        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
-            log.warning("updater.slot_tune_strip_unreadable", job_id=job_id, path=str(path))
-            continue
-        if "tune" not in data:
-            continue
-        backup = path.with_name(f"{path.name}.bak-{stamp}")
-        shutil.copy2(path, backup)
-        data.pop("tune")
-        path.write_text(tomli_w.dumps(data), encoding="utf-8")
-        changed.append(str(path))
-        log.info("updater.slot_tune_stripped", job_id=job_id, path=str(path), backup=str(backup))
+    try:
+        for path in sorted(slots_dir.glob("*.toml")):
+            try:
+                raw = path.read_bytes()
+                data = tomllib.loads(raw.decode("utf-8"))
+            except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+                log.warning("updater.slot_tune_strip_unreadable", job_id=job_id, path=str(path))
+                continue
+            if "tune" not in data:
+                continue
+            backup = path.with_name(f"{path.name}.bak-{stamp}")
+            shutil.copy2(path, backup)
+            backups[str(path)] = backup
+            data.pop("tune")
+            path.write_text(tomli_w.dumps(data), encoding="utf-8")
+            changed.append(str(path))
+            log.info(
+                "updater.slot_tune_stripped", job_id=job_id, path=str(path), backup=str(backup)
+            )
+    except Exception:
+        _restore_slot_tune_backups(backups, job_id=job_id)
+        raise
     return changed
 
 

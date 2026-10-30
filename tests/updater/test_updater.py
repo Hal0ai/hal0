@@ -36,6 +36,7 @@ from hal0.updater import (
     UpdateManifestInvalid,
     Updater,
     UpdateRollbackUnavailable,
+    UpdateSwapError,
     UpdateVerifyError,
     releases_url,
     releases_url_override,
@@ -2174,6 +2175,50 @@ def test_rollback_swaps_symlink_back(
     # schema_warning is always present in the result (None when the on-disk
     # schema is not ahead of the reverted tree).
     assert "schema_warning" in res
+
+
+def test_rollback_restores_slot_tune_when_activate_fails(
+    synthetic_release: dict[str, Any],
+    cosign_skip: None,
+    tmp_hal0_home: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0045: the rollback strips each slot's ``[tune]`` before the symlink swap; if
+    the swap fails the current release stays active, so every slot file must get its
+    ``[tune]`` back (byte-identical) and no backup is left behind."""
+    from hal0.config import paths
+    from hal0.updater.privileged import UpdateSeam
+
+    asyncio.run(Updater().apply())
+    artifacts = tmp_path / "v2"
+    artifacts.mkdir()
+    tarball2 = _build_release_tarball(tmp=artifacts, version="0.0.2")
+    _write_release_manifest(
+        manifest_path=Path(os.environ["HAL0_RELEASES_URL"]),
+        tarball=tarball2,
+        version="0.0.2",
+    )
+    asyncio.run(Updater().apply())
+
+    slots_dir = paths.slots_config_dir()
+    slots_dir.mkdir(parents=True, exist_ok=True)
+    tuned = slots_dir / "tuned.toml"
+    tuned.write_text(
+        '# keep me\nname = "tuned"\nport = 8101\n[tune]\nvision = "off"\n', encoding="utf-8"
+    )
+    original = tuned.read_bytes()
+
+    def _boom(self: Any, *_a: Any, **_k: Any) -> Any:
+        raise UpdateSwapError("symlink swap failed")
+
+    monkeypatch.setattr(UpdateSeam, "activate", _boom)
+    with pytest.raises(UpdateSwapError):
+        asyncio.run(Updater().rollback())
+
+    assert tuned.read_bytes() == original
+    assert not list(slots_dir.glob("*.bak-*"))
+    assert Path(os.readlink(_current_symlink())).name == "hal0-0.0.2"
 
 
 # ── rollback re-pip into venv (#980) ──────────────────────────────────────────
