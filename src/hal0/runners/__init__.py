@@ -54,6 +54,9 @@ class RunnerSupports:
 #: Minimum llama.cpp build number (``b<N>``) a drafter kind needs.
 DRAFT_KIND_MIN_BUILD: dict[str, int] = {"lilicorr": 11669}
 
+#: First llama.cpp build verified to accept ``--reasoning-effort``.
+REASONING_EFFORT_MIN_BUILD = 11840
+
 _LLAMA_BUILD_RE = re.compile(r"(?<![A-Za-z0-9])b(\d+)(?![A-Za-z0-9])")
 
 
@@ -234,6 +237,19 @@ def runner_draft_kinds(runner: Runner, image_tag: str | None) -> frozenset[str]:
     return frozenset(
         k for k in runner.supports.draft_kinds if build >= DRAFT_KIND_MIN_BUILD.get(k, 0)
     )
+
+
+def runner_supports_reasoning_effort(runner: Runner, image_tag: str | None) -> bool:
+    """Whether ``runner`` at ``image_tag`` accepts ``--reasoning-effort``.
+
+    Only llama-server runners do, and only from :data:`REASONING_EFFORT_MIN_BUILD`;
+    an unparseable tag is given the benefit of the doubt (same as
+    :func:`runner_draft_kinds`).
+    """
+    if runner.runtime_family != "llama-server":
+        return False
+    build = llama_build_from_tag(image_tag)
+    return build is None or build >= REASONING_EFFORT_MIN_BUILD
 
 
 def get_runner(key: str) -> Runner:
