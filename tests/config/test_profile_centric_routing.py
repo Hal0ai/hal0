@@ -197,7 +197,10 @@ def test_custom_named_like_a_new_seed_is_renamed() -> None:
     assert "-b 1" in " ".join(sp.argv_after)
 
 
-def test_custom_identical_to_a_new_seed_just_becomes_the_seed() -> None:
+def test_old_shape_custom_with_the_seed_flags_is_renamed_since_it_cannot_carry_thinking() -> None:
+    # The coding seed now turns thinking off through ``enable_thinking``, a
+    # new-shape key; an old-shape custom (``mtp`` marks it) cannot express it,
+    # so even with the seed's exact flags it is a different tune and moves aside.
     seed = pc.target_seeds()["coding"]
     _write(
         paths.profiles_toml(),
@@ -208,8 +211,7 @@ def test_custom_identical_to_a_new_seed_just_becomes_the_seed() -> None:
         },
     )
     plan = pc.plan_conversion()
-    assert plan.renames == {}
-    assert "identical to the new seed" in plan.profile_rewrites["coding"][0]
+    assert plan.renames == {"coding": "coding-custom"}
 
 
 def test_fresh_install_demoted_reference_is_adopted_in_the_new_shape() -> None:

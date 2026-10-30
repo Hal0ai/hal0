@@ -34,7 +34,7 @@ def test_resolved_profile_items_carry_the_profile_centric_fields(tmp_hal0_home: 
     assert item["ctx_size"] == 65536
     assert item["vision"] == "off"
     assert item["speculation"] == "auto"
-    assert item["enable_thinking"] is None
+    assert item["enable_thinking"] is False
     assert item["resolved_flags"] == item["flags"]
     assert not {"device_class", "backend", "quant"} & set(item)
 
