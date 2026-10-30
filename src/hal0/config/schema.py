@@ -1032,6 +1032,28 @@ class ProfileConfig(BaseModel):
     )
 
 
+def sparse_profile_body(body: dict[str, Any]) -> dict[str, Any]:
+    """Drop the reasoning defaults from a dumped profile body, in place.
+
+    A profile at ``reasoning_effort="default"`` / ``reasoning_budget=-1`` keeps
+    those keys off disk and out of exported envelopes, so files and published
+    checksums that predate the fields are unchanged and an older hal0 does not
+    refuse them. Returns *body* for chaining.
+    """
+    if body.get("reasoning_effort") == "default":
+        body.pop("reasoning_effort")
+    if body.get("reasoning_budget") == -1:
+        body.pop("reasoning_budget")
+    return body
+
+
+def profile_sparse_dump(
+    profile: ProfileConfig, *, mode: Literal["python", "json"] = "python"
+) -> dict[str, Any]:
+    """``profile`` dumped without ``None`` values or default reasoning keys."""
+    return sparse_profile_body(profile.model_dump(mode=mode, exclude_none=True))
+
+
 class ProfilesConfig(BaseModel):
     """Parsed profiles.toml — top-level ``[profile]`` table of custom profiles.
 

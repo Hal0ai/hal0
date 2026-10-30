@@ -35,6 +35,7 @@ from hal0.config.schema import (
     StackConfig,
     StackModelMeta,
     StackSlotEntry,
+    sparse_profile_body,
 )
 from hal0.errors import BadRequest
 from hal0.model_meta import derive_model_provider
@@ -140,6 +141,8 @@ def export_envelope(
     """
     embedded = embed_references(stack, registry=registry, profiles_path=profiles_path)
     body = embedded.model_dump(mode="python", exclude_none=True)
+    for entry in (body.get("profiles") or {}).values():
+        sparse_profile_body(entry)
     return {
         "kind": ENVELOPE_KIND,
         "schema_version": embedded.schema_version,
