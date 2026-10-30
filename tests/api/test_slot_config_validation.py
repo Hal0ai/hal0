@@ -250,3 +250,166 @@ def test_next_free_slot_port_exhausted_configured_range_raises(
     with pytest.raises(BadRequest) as exc_info:
         _next_free_slot_port()
     assert exc_info.value.code == "slot.no_free_port"
+
+
+# ── PUT /config: the [tune] override table (slot tune overrides) ─────────────
+
+
+@pytest.fixture
+def embed_slot_toml(tmp_hal0_home: str) -> Path:
+    root = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "embed.toml"
+    path.write_text(
+        'name = "embed"\ntype = "embedding"\ndevice = "gpu-vulkan"\nport = 8082\n'
+        '[model]\ndefault = "bge-small"\n',
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_put_tune_persists_table(slot_toml: Path, client: TestClient) -> None:
+    r = client.put("/api/slots/chat/config", json={"tune": {"vision": "off", "ctx_size": 8192}})
+    assert r.status_code == 200, r.text
+    assert _read(slot_toml)["tune"] == {"vision": "off", "ctx_size": 8192}
+    # A second partial write merges key by key; a null key clears just that key.
+    r = client.put("/api/slots/chat/config", json={"tune": {"vision": None, "reasoning_budget": 0}})
+    assert r.status_code == 200, r.text
+    assert _read(slot_toml)["tune"] == {"ctx_size": 8192, "reasoning_budget": 0}
+
+
+def test_put_tune_null_clears_table(slot_toml: Path, client: TestClient) -> None:
+    client.put("/api/slots/chat/config", json={"tune": {"vision": "off"}})
+    assert "tune" in _read(slot_toml)
+    r = client.put("/api/slots/chat/config", json={"tune": None})
+    assert r.status_code == 200, r.text
+    assert "tune" not in _read(slot_toml)
+
+
+def test_put_tune_unknown_key_400(slot_toml: Path, client: TestClient) -> None:
+    before = slot_toml.read_bytes()
+    r = client.put("/api/slots/chat/config", json={"tune": {"mtp": "off"}})
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert err["code"] == "validation.unknown_keys"
+    assert err["details"]["unknown_keys"] == ["tune.mtp"]
+    assert slot_toml.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "tune",
+    [
+        {"vision": "maybe"},
+        {"ctx_size": 5},
+        {"reasoning_effort": "wild"},
+        {"reasoning_budget": -2},
+        {"speculation": "on"},
+    ],
+)
+def test_put_tune_bad_value_400_and_file_untouched(
+    slot_toml: Path, client: TestClient, tune: dict
+) -> None:
+    before = slot_toml.read_bytes()
+    r = client.put("/api/slots/chat/config", json={"tune": tune})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "validation.tune_invalid"
+    assert slot_toml.read_bytes() == before
+
+
+def test_put_tune_not_an_object_400(slot_toml: Path, client: TestClient) -> None:
+    before = slot_toml.read_bytes()
+    r = client.put("/api/slots/chat/config", json={"tune": "off"})
+    assert r.status_code == 400, r.text
+    assert slot_toml.read_bytes() == before
+
+
+def test_tune_refused_on_non_llm_slot(embed_slot_toml: Path, client: TestClient) -> None:
+    before = embed_slot_toml.read_bytes()
+    r = client.put("/api/slots/embed/config", json={"tune": {"vision": "off"}})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "slot.tune_not_supported"
+    assert embed_slot_toml.read_bytes() == before
+
+
+def test_tune_refused_on_npu_slot(slot_toml: Path, client: TestClient) -> None:
+    before = slot_toml.read_bytes()
+    r = client.put("/api/slots/chat/config", json={"device": "npu", "tune": {"vision": "off"}})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "slot.tune_not_supported"
+    assert slot_toml.read_bytes() == before
+
+
+def test_tune_clear_is_allowed_on_non_llm_slot(embed_slot_toml: Path, client: TestClient) -> None:
+    r = client.put("/api/slots/embed/config", json={"tune": None})
+    assert r.status_code == 200, r.text
+
+
+def test_tune_thinking_refused_when_pinned(slot_toml: Path, client: TestClient) -> None:
+    from hal0.config.schema import ProfileConfig
+    from hal0.profiles import ProfileCatalog
+
+    ProfileCatalog().create("pinned", ProfileConfig(flags="--reasoning off"))
+    assert client.put("/api/slots/chat/config", json={"profile": "pinned"}).status_code == 200
+    before = slot_toml.read_bytes()
+    r = client.put("/api/slots/chat/config", json={"tune": {"enable_thinking": True}})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "slot.tune_pinned_by_flags"
+    assert slot_toml.read_bytes() == before
+    # The other keys are not pinned by the flag.
+    assert client.put("/api/slots/chat/config", json={"tune": {"vision": "off"}}).status_code == 200
+
+
+def test_tune_thinking_judged_against_the_profile_in_the_same_write(
+    slot_toml: Path, client: TestClient
+) -> None:
+    from hal0.config.schema import ProfileConfig
+    from hal0.profiles import ProfileCatalog
+
+    ProfileCatalog().create("pinned2", ProfileConfig(flags="--reasoning off"))
+    r = client.put(
+        "/api/slots/chat/config", json={"profile": "pinned2", "tune": {"enable_thinking": True}}
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "slot.tune_pinned_by_flags"
+
+
+def test_put_tune_per_key_nulls_remove_keys_and_empty_table(
+    slot_toml: Path, client: TestClient
+) -> None:
+    client.put("/api/slots/chat/config", json={"tune": {"vision": "off", "ctx_size": 8192}})
+    r = client.put("/api/slots/chat/config", json={"tune": {"vision": None, "ctx_size": None}})
+    assert r.status_code == 200, r.text
+    assert "tune" not in _read(slot_toml)
+    assert "[tune]" not in slot_toml.read_text()
+
+
+def test_put_tune_null_clear_never_refused(
+    embed_slot_toml: Path, slot_toml: Path, client: TestClient
+) -> None:
+    from hal0.config.schema import ProfileConfig
+    from hal0.profiles import ProfileCatalog
+
+    # Unsupported slot (embedding): per-key nulls and tune=null are both accepted.
+    assert (
+        client.put("/api/slots/embed/config", json={"tune": {"enable_thinking": None}}).status_code
+        == 200
+    )
+    assert client.put("/api/slots/embed/config", json={"tune": None}).status_code == 200
+    # Pinned key (profile flags carry --reasoning): clearing it is fine.
+    ProfileCatalog().create("pinned3", ProfileConfig(flags="--reasoning off"))
+    client.put("/api/slots/chat/config", json={"tune": {"vision": "off"}})
+    client.put("/api/slots/chat/config", json={"profile": "pinned3"})
+    r = client.put(
+        "/api/slots/chat/config", json={"tune": {"enable_thinking": None, "vision": None}}
+    )
+    assert r.status_code == 200, r.text
+    assert "tune" not in _read(slot_toml)
+
+
+def test_tune_speculation_ngram_needs_no_drafter(slot_toml: Path, client: TestClient) -> None:
+    """The guard checks slot type/device and the thinking pin only; it never asks
+    whether the model carries a drafter or MTP heads, so ngram (and auto/off) pass."""
+    for mode in ("ngram", "auto", "off"):
+        r = client.put("/api/slots/chat/config", json={"tune": {"speculation": mode}})
+        assert r.status_code == 200, r.text
+        assert _read(slot_toml)["tune"]["speculation"] == mode

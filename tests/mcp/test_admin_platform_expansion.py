@@ -953,3 +953,32 @@ def test_mcp_server_action_and_service_action_hints_reach_schema() -> None:
     assert service_schema["required"] == ["service_id", "action"]
     action_schema = admin.tool_param_schema("mcp_server_action")
     assert set(action_schema["required"]) == {"server_id", "action"}
+
+
+def test_mcp_slot_edit_documents_the_tune_object() -> None:
+    schema = admin.tool_param_schema("slot_edit")
+    tune = schema["properties"]["tune"]
+    assert "object" in tune["type"]
+    assert set(tune["properties"]) == {
+        "ctx_size",
+        "enable_thinking",
+        "reasoning_effort",
+        "reasoning_budget",
+        "vision",
+        "speculation",
+    }
+    assert tune["additionalProperties"] is False
+    desc = admin.TOOL_DESCRIPTIONS["slot_edit"]
+    assert "tune" in desc
+    assert "slot.tuning_key_denied" in desc
+    assert "ctx-size" not in desc
+
+
+def test_mcp_slot_edit_tune_passthrough() -> None:
+    """The nested tune object (and a null clear) reaches the PUT body untouched."""
+    tune = {"vision": "off", "reasoning_budget": None}
+    path_args, body = admin._split_args("slot_edit", {"name": "chat", "tune": tune})
+    assert path_args == {"name": "chat"}
+    assert body == {"tune": tune}
+    _, cleared = admin._split_args("slot_edit", {"name": "chat", "tune": None})
+    assert cleared == {"tune": None}

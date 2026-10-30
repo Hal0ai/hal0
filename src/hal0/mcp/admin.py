@@ -1432,6 +1432,58 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
                     "applying it also sets the slot's runner when the profile names one."
                 ),
             },
+            "tune": {
+                "type": ["object", "null"],
+                "description": (
+                    "Per-slot overrides of the profile's tune, applied at the next load. "
+                    "Sparse and merged key by key; a key set to null drops that override, "
+                    "and tune=null drops them all (the slot follows its profile again). "
+                    "llm slots on a non-NPU device only; thinking cannot be overridden "
+                    "while the profile's flags pin --reasoning."
+                ),
+                "properties": {
+                    "ctx_size": {
+                        "type": ["integer", "null"],
+                        "minimum": 128,
+                        "maximum": 16777216,
+                        "description": "Context window.",
+                    },
+                    "enable_thinking": {
+                        "type": ["boolean", "null"],
+                        "description": "Reasoning default at request time.",
+                    },
+                    "reasoning_effort": {
+                        "type": ["string", "null"],
+                        "enum": [
+                            "default",
+                            "minimal",
+                            "low",
+                            "medium",
+                            "high",
+                            "xhigh",
+                            "max",
+                            None,
+                        ],
+                        "description": "Reasoning effort hint ('default' sends none).",
+                    },
+                    "reasoning_budget": {
+                        "type": ["integer", "null"],
+                        "minimum": -1,
+                        "description": "Reasoning token budget (-1 = unlimited, 0 = none).",
+                    },
+                    "vision": {
+                        "type": ["string", "null"],
+                        "enum": ["auto", "off", None],
+                        "description": "'auto' loads the model's mmproj when it has one.",
+                    },
+                    "speculation": {
+                        "type": ["string", "null"],
+                        "enum": ["auto", "off", "ngram", None],
+                        "description": "'auto' | 'off' | 'ngram'.",
+                    },
+                },
+                "additionalProperties": False,
+            },
             "autoload": {
                 "type": "boolean",
                 "description": "Boot-start this slot on hal0 startup (spec 2026-08-02).",
@@ -3193,10 +3245,12 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "slot_unload": "Unload a running slot gracefully.",
     "slot_edit": (
         "Update one or more slot placement fields (model, profile, port, device, "
-        "autoload, priority, pinned, idle_timeout_s). Tuning (context window, flags, "
-        "reasoning, vision, MTP) is NOT a slot field: it lives on the slot's profile — "
-        "edit it with profile_update, or point the slot at another profile "
-        "(a tuning key here is rejected with slot.tuning_key_denied)."
+        "autoload, priority, pinned, idle_timeout_s), or its per-slot `tune` overrides "
+        "(ctx_size, enable_thinking, reasoning_effort, reasoning_budget, vision, "
+        "speculation; sparse, null drops one, tune=null drops all). Everything else "
+        "about the tune (flags, KV cache, sampling) is NOT a slot field: it lives on the "
+        "slot's profile — edit it with profile_update, or point the slot at another "
+        "profile (a root-level tuning key here is rejected with slot.tuning_key_denied)."
     ),
     "settings_reload": "Ask the running hal0 daemon to reload configs (re-reads TOMLs).",
     "memory_add": "Add an item to long-term memory.",

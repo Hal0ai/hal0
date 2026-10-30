@@ -474,6 +474,62 @@ def reconcile_slot_updates(base: dict[str, Any], updates: dict[str, Any]) -> dic
     return merged
 
 
+def _guard_tune_update(merged: dict[str, Any], updates: dict[str, Any]) -> None:
+    """Validate and guard a ``tune`` write on the projected slot config.
+
+    The one place every in-process writer (``PUT /config`` through
+    ``SlotManager.update_config``, the stacks apply engine) checks a ``[tune]``
+    update: value ranges first (a bad value would otherwise persist and then fail
+    the slot's next typed load), then :func:`hal0.slots.tune.guard_tune_write`
+    (``slot.tune_not_supported`` / ``slot.tune_pinned_by_flags``). Nothing here
+    runs without a non-null ``tune`` in *updates*, and the projected *merged*
+    config is the base so a nested ``[slot]`` shape reads the same as a flat one.
+    """
+    tune_update = updates.get("tune")
+    if tune_update is None:
+        return
+    from pydantic import ValidationError
+
+    from hal0.config.schema import SlotTuneConfig
+    from hal0.errors import BadRequest, Hal0Error
+    from hal0.slots.tune import guard_tune_write
+
+    if not isinstance(tune_update, dict):
+        raise BadRequest(
+            "tune must be an object of overrides (or null to clear it)",
+            code="validation.tune_invalid",
+        )
+    try:
+        SlotTuneConfig.model_validate(merged.get("tune") or {})
+    except ValidationError as exc:
+        raise BadRequest(
+            "invalid tune override: "
+            + "; ".join(f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()),
+            code="validation.tune_invalid",
+            details={"errors": [{"loc": list(e["loc"]), "msg": e["msg"]} for e in exc.errors()]},
+        ) from exc
+
+    if all(v is None for v in tune_update.values()):
+        # A pure per-key clear (the console's "back to the profile") removes
+        # overrides; like ``tune: null`` it can never be refused, even on a
+        # slot where the key is unsupported or pinned by the profile's flags.
+        return
+    # Scalars live in [slot] on a nested-shape file and at the root on a flat one.
+    view = {**(merged.get("slot") or {}), **{k: v for k, v in merged.items() if k != "slot"}}
+    profile = None
+    if tune_update.get("enable_thinking") is not None:
+        # Only the thinking pin needs the profile; a profile that does not
+        # resolve is not this guard's error (the launch path owns that), so the
+        # pin check is skipped rather than blocking the write.
+        from hal0.providers.container import resolve_slot_profile
+
+        try:
+            profile = resolve_slot_profile(view)
+        except Hal0Error:
+            profile = None
+    guard_tune_write(view, updates, profile)
+
+
 def reconcile_and_guard_slot_config(
     slot_name: str,
     base: dict[str, Any],
@@ -504,6 +560,13 @@ def reconcile_and_guard_slot_config(
     """
     guard_slot_write_payload(updates)
     merged = reconcile_slot_updates(base, updates)
+    _guard_tune_update(merged, updates)
+    if isinstance(merged.get("tune"), dict):
+        # Per-key nulls drop keys (merge does so only for keys already present),
+        # and a table cleared key by key leaves no empty [tune] on disk.
+        merged["tune"] = {k: v for k, v in merged["tune"].items() if v is not None}
+        if not merged["tune"]:
+            del merged["tune"]
     check_npu_exclusivity(slot_name, merged, slots_dir=slots_dir)
     # Only the keys this apply actually carries drive the SC-4 guard — an
     # unrelated stack field must not be blocked by a stale duplicate-default
