@@ -758,7 +758,7 @@ def _unflatten_slot_toml(cfg: SlotConfig) -> dict[str, Any]:
     """
     data = cfg.model_dump(mode="python", exclude_none=True)
     model = data.pop("model", {})
-    tables = {k: data.pop(k) for k in ("server", "npu", "image") if k in data}
+    tables = {k: data.pop(k) for k in ("server", "npu", "image", "tune") if k in data}
     out: dict[str, Any] = {"slot": data, "model": model}
     out.update(tables)
     return out

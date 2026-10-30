@@ -315,6 +315,53 @@ CTX_SIZE_MIN = 128
 CTX_SIZE_MAX = 2**24
 
 
+#: The tune keys a slot's sparse ``[tune]`` table may override, in field order.
+TUNE_KEYS: tuple[str, ...] = (
+    "ctx_size",
+    "enable_thinking",
+    "reasoning_effort",
+    "reasoning_budget",
+    "vision",
+    "speculation",
+)
+
+
+class SlotTuneConfig(BaseModel):
+    """A slot's sparse ``[tune]`` override table.
+
+    ADR-0029 keeps every launch tune on the profile; this table lets one slot
+    override a few of them without a new profile. Every field is optional and
+    ``None`` means "inherit the profile's value", so only what the operator
+    changed is stored.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    ctx_size: int | None = Field(
+        default=None,
+        ge=CTX_SIZE_MIN,
+        le=CTX_SIZE_MAX,
+        description="Context window override (--ctx-size). None = the profile's.",
+    )
+    enable_thinking: bool | None = Field(
+        default=None, description="Reasoning default override. None = the profile's."
+    )
+    reasoning_effort: ReasoningEffort | None = Field(
+        default=None, description="Reasoning effort override. None = the profile's."
+    )
+    reasoning_budget: int | None = Field(
+        default=None,
+        ge=-1,
+        description="Reasoning token budget override (-1 = unlimited). None = the profile's.",
+    )
+    vision: Literal["auto", "off"] | None = Field(
+        default=None, description="Vision override. None = the profile's."
+    )
+    speculation: SpeculationMode | None = Field(
+        default=None, description="Speculation override. None = the profile's."
+    )
+
+
 class SlotConfig(BaseModel):
     """Pydantic model for a single slot's TOML config (slots/<name>.toml).
 
@@ -618,6 +665,15 @@ class SlotConfig(BaseModel):
         ),
     )
 
+    tune: SlotTuneConfig | None = Field(
+        default=None,
+        description=(
+            "[tune] table — sparse per-slot overrides of the profile's tune "
+            "(ctx_size, enable_thinking, reasoning_effort, reasoning_budget, "
+            "vision, speculation). Absent = the slot runs its profile as-is."
+        ),
+    )
+
     @model_validator(mode="before")
     @classmethod
     def _refuse_tuning_keys(cls, data: Any) -> Any:
@@ -656,9 +712,9 @@ class SlotConfig(BaseModel):
 
     @model_serializer(mode="wrap")
     def _dump_as_toml_tables(self, handler: Any) -> dict[str, Any]:
-        """Dump in the on-disk table shape: ``[server]`` / ``[npu]`` / ``[image]``.
+        """Dump in the on-disk table shape: ``[server]`` / ``[npu]`` / ``[image]`` / ``[tune]``.
 
-        An all-default ``[server]``, an absent ``[npu]`` and an all-default
+        An all-default ``[server]``, an absent ``[npu]``, an empty ``[tune]`` and an all-default
         ``[image]`` are elided, so a slot that never set them doesn't grow an
         empty table on disk, and the typed ``image_gen`` field dumps under its
         TOML name ``image``. Readers of a dumped config therefore see the same
@@ -674,6 +730,10 @@ class SlotConfig(BaseModel):
                 data.pop("server")
         if data.get("npu") is None:
             data.pop("npu", None)
+        # An absent or all-None ``[tune]`` carries no override: no table.
+        tune = data.get("tune")
+        if not (isinstance(tune, dict) and any(v is not None for v in tune.values())):
+            data.pop("tune", None)
         # ``by_alias`` dumps already say ``image``; either way elide the default.
         image = data.pop("image_gen", None)
         image = data.pop("image", None) if image is None else image
@@ -3616,6 +3676,7 @@ __all__ = [
     "SecurityConfig",
     "ServerConfig",
     "SlotConfig",
+    "SlotTuneConfig",
     "SlotsConfig",
     "SpeculationMode",
     "TelemetryConfig",
