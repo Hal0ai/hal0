@@ -1265,6 +1265,19 @@ def set_admin_route_map(*source: object) -> None:
 # agent that can call the tool. Keys must be catalog tools (guarded by
 # :func:`_validate_catalog`).
 TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
+    "memory_add": {
+        "properties": {
+            "text": {"type": "string", "description": "The fact to remember"},
+            "private": {
+                "type": "boolean",
+                "description": (
+                    "true keeps this one write in your own private memory. Writes are "
+                    "shared by default; this can only make a write more private"
+                ),
+            },
+        },
+        "required": ["text"],
+    },
     "model_inspect": {
         "properties": {
             "hf_repo": {"type": "string", "description": "HuggingFace repo as 'org/name'"},

@@ -73,7 +73,10 @@ API surface facts that differ from what the tool signatures suggest.
   name** — `dataset="private:<agent>"` returns an `mcp.memory_schema` error:
   "non-private callers cannot address the private namespace by name."
 - Writes are shared by default. To keep one note private pass `private=true`
-  (a bool argument); hal0 files it under your own identity. A profile set to
+  (a bool argument); hal0 files it under your own identity. On `hal0-admin`
+  every tool takes a single `args` object, so nest it: `{"args": {"text": "...",
+  "private": true}}`. A top-level `private` is silently dropped. (`hal0-memory`
+  takes `private` as a normal top-level argument.) A profile set to
   `memory_private` makes every write private without the argument.
 
 ### `capability_list` — catalog truncation
