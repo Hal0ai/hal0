@@ -6,6 +6,7 @@
 // object (`{}` = no overrides) and `onChange` receives the next one. The parent
 // owns Save, validation of the numbers (tuneErrors) and the profile drawer.
 import React from 'react'
+import { flagPairs, tokenizeFlags } from './flags-tune.js'
 import { TUNE_KEYS, effectiveProfileName, overrideCount, profileValueLabel, tuneErrors } from './tune-state.js'
 
 const ROWS = {
@@ -19,7 +20,7 @@ const ROWS = {
   },
   reasoning_effort: {
     label: 'Effort',
-    options: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map((v) => [v, v, v]),
+    options: ['default', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map((v) => [v, v, v]),
   },
   reasoning_budget: { label: 'Budget', numeric: true, placeholder: '0 = none' },
   vision: {
@@ -43,14 +44,32 @@ const ROWS = {
 const RESTART_NOTE =
   'Context, effort, budget, vision and speculation restart the slot on save; thinking applies to new requests.'
 
+/** Whether this profile's last --reasoning value pins thinking on or off. */
+function profilePinsThinking(profile) {
+  const { tokens, error } = tokenizeFlags(profile?.flags)
+  if (error) return false
+  let pinned = null
+  for (const pair of flagPairs(tokens)) {
+    if (pair.canon !== '--reasoning') continue
+    const value = pair.flag.includes('=') ? pair.flag.split('=', 2)[1] : pair.value
+    if (value == null) continue
+    const low = value.trim().toLowerCase()
+    pinned = low === 'on' ? true : low === 'off' ? false : null
+  }
+  return pinned !== null
+}
+
 /** Reason a row cannot take an override, or null. */
-function disabledReason(key, { model, tuneEffective }) {
+function disabledReason(key, { profile, model, tuneEffective }) {
   if (key === 'vision' && !model?.mmproj) return 'This model has no vision projector (mmproj).'
   if (key === 'reasoning_effort' && tuneEffective?.reasoning_effort_unavailable) {
     // The server's own reason text (runner build too old, runner unknown, ...).
     return String(tuneEffective.reasoning_effort_unavailable)
   }
-  if (key === 'enable_thinking' && tuneEffective?.sources?.enable_thinking === 'profile-flags') {
+  const thinkingPinned = profile
+    ? profilePinsThinking(profile)
+    : tuneEffective?.sources?.enable_thinking === 'profile-flags'
+  if (key === 'enable_thinking' && thinkingPinned) {
     return "The profile's flags pin thinking with --reasoning; edit the profile to change it."
   }
   return null
@@ -162,7 +181,7 @@ export function TuneBlock({
             tune={tune}
             profile={profile}
             tuneEffective={tuneEffective}
-            reason={disabledReason(k, { model, tuneEffective })}
+            reason={disabledReason(k, { profile, model, tuneEffective })}
             error={errors[k]}
             disabled={disabled}
             onChange={onChange}

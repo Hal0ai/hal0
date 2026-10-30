@@ -192,6 +192,16 @@ describe('slot drawer Tune block', () => {
     act(() => root.unmount())
   })
 
+  it('can explicitly override inherited effort back to runner default', async () => {
+    profilesBox.current = [{ ...PROFILE, reasoning_effort: 'high' }]
+    const { root } = mount({ ...SLOT, tune_effective: { ...EFFECTIVE, reasoning_effort: 'high' } })
+    click('tune-reasoning_effort-default')
+    await save()
+    expect((editCalls[0] as any).body.tune).toEqual({ reasoning_effort: 'default' })
+    expect(restartCalls).toEqual(['chat'])
+    act(() => root.unmount())
+  })
+
   it('an out-of-range number blocks Save and says why', async () => {
     const { root } = mount(SLOT)
     typeInto('tune-ctx_size-input', '64')
@@ -356,12 +366,30 @@ describe('slot drawer Tune block', () => {
   })
 
   it('disables thinking row when pinned by flags', () => {
+    profilesBox.current = [{ ...PROFILE, flags: '--reasoning off' }]
     const { root } = mount({
       ...SLOT,
       tune_effective: { ...EFFECTIVE, sources: { enable_thinking: 'profile-flags' } },
     })
     expect((byId('tune-enable_thinking-on') as HTMLButtonElement).disabled).toBe(true)
     expect(byId('tune-enable_thinking-reason')!.textContent).toContain('--reasoning')
+    act(() => root.unmount())
+  })
+
+  it('updates the thinking lock from the profile staged in the drawer', () => {
+    profilesBox.current = [
+      { ...PROFILE, flags: '--reasoning off' },
+      { ...PROFILE, name: 'open', flags: '-fa on' },
+    ]
+    const { root } = mount({
+      ...SLOT,
+      tune_effective: { ...EFFECTIVE, sources: { enable_thinking: 'profile-flags' } },
+    })
+    expect((byId('tune-enable_thinking-on') as HTMLButtonElement).disabled).toBe(true)
+    act(() => (document.querySelector('[data-testid="slot-profile"]') as HTMLElement).click())
+    act(() => (document.querySelector('[data-option-id="open"]') as HTMLElement).click())
+    expect((byId('tune-enable_thinking-on') as HTMLButtonElement).disabled).toBe(false)
+    expect(byId('tune-enable_thinking-reason')).toBeNull()
     act(() => root.unmount())
   })
 
