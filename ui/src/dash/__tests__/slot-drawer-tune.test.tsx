@@ -243,13 +243,14 @@ describe('slot drawer Tune block', () => {
     act(() => root.unmount())
   })
 
-  it('disables vision, speculation and effort with their reasons', () => {
+  it('disables vision and effort with their reasons, and leaves speculation open', () => {
     modelsBox.current = [{ id: 'qwen', capabilities: ['chat'] }]
     const { root } = mount({ ...SLOT, tune_effective: { ...EFFECTIVE, reasoning_effort_unavailable: true } })
     expect((byId('tune-vision-off') as HTMLButtonElement).disabled).toBe(true)
     expect(byId('tune-vision-reason')!.textContent).toContain('mmproj')
-    expect((byId('tune-speculation-ngram') as HTMLButtonElement).disabled).toBe(true)
-    expect(byId('tune-speculation-reason')).not.toBeNull()
+    // N-gram is model-free: a model with no drafter and no MTP heads can still take it.
+    expect((byId('tune-speculation-ngram') as HTMLButtonElement).disabled).toBe(false)
+    expect(byId('tune-speculation-reason')).toBeNull()
     expect((byId('tune-reasoning_effort-high') as HTMLButtonElement).disabled).toBe(true)
     expect(byId('tune-reasoning_effort-reason')!.textContent).toContain('--reasoning-effort')
     act(() => root.unmount())

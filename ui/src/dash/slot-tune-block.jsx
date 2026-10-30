@@ -7,8 +7,6 @@
 // owns Save, validation of the numbers (tuneErrors) and the profile drawer.
 import React from 'react'
 import { TUNE_KEYS, overrideCount, profileValueLabel, tuneErrors } from './tune-state.js'
-import { isDrafterModel } from './spec-state.js'
-import { isMtpModel } from './model-sort.js'
 
 const ROWS = {
   ctx_size: { label: 'Context', numeric: true, placeholder: 'tokens' },
@@ -48,9 +46,6 @@ const RESTART_NOTE =
 /** Reason a row cannot take an override, or null. */
 function disabledReason(key, { model, tuneEffective }) {
   if (key === 'vision' && !model?.mmproj) return 'This model has no vision projector (mmproj).'
-  if (key === 'speculation' && !isDrafterModel(model) && !isMtpModel(model)) {
-    return 'This model has neither a drafter nor MTP heads.'
-  }
   if (key === 'reasoning_effort' && tuneEffective?.reasoning_effort_unavailable) {
     return 'This runner build does not support --reasoning-effort.'
   }
