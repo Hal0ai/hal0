@@ -309,8 +309,8 @@ from zero.
   Hermes profile, so `hermes-agent` and one model per profile appear in the
   Open WebUI picker and in `/v1/models` for any OpenAI-compatible client.
 - **Every profile gets hal0's tools and memory.** `hal0-admin` and
-  `hal0-memory` are written into each named profile, with a private memory
-  bank per profile.
+  `hal0-memory` are written into each named profile as that profile's
+  identity, with shared memory unless the profile sets `hal0: {memory_private: true}`.
 - **Auth revocation.** Rotating a key closes open WebSockets with code 4401
   and ends SSE streams; an expired session ends its streams too.
 - **Python 3.14 in CI.** Pull requests run 3.12 and 3.14; the Hindsight
@@ -597,8 +597,8 @@ inference, tools and memory. `hal0 agent install hermes` installs it.
   Hermes model never falls back to a slot: if the upstream is down you get
   `dispatch.upstream_unavailable` (502).
 - **hal0 tools and memory in every profile.** hal0 writes the `hal0-admin`
-  and `hal0-memory` MCP servers into each named profile, with its own private
-  memory bank. Opt a profile out with `hal0: {wire_mcp: false}`.
+  and `hal0-memory` MCP servers into each named profile, with shared memory by
+  default. Opt a profile out with `hal0: {wire_mcp: false}`.
 - **Approvals in the dashboard.** Gated tool calls from any profile land in
   the dashboard inbox, same as the other agents.
 - **Delegation.** `[hermes] delegation_slot` in

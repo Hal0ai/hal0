@@ -51,9 +51,10 @@ live state.
   (incl. `profile_generate`), services, ComfyUI, updater reads, approvals
   visibility, capabilities, hardware probes.
 - `hal0_memory` MCP — Hindsight-backed durable memory, plus advanced memory
-  tools incl. reflection, mental models, and directives; agents own
-  `private:<agent_id>` namespaces; identity cards live in the
-  `agents` dataset.
+  tools incl. reflection, mental models, and directives; writes are
+  shared by default and tagged with the writer's identity, and a single write
+  is private only when the caller passes `private=true` to `memory_add`;
+  identity cards live in the `agents` dataset.
 
 ## Conventions
 

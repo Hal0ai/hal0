@@ -110,7 +110,7 @@ Any MCP-compatible client with HTTP transport support. Key requirements:
 - **Transport:** `http` (plain POST, NOT streamable-http or SSE)
 - **URL suffix:** Always ends with `/mcp` (e.g. `/mcp/admin/mcp`, not `/mcp/admin`)
 - **Headers:** Set `X-hal0-Agent: <your-agent-id>` for identity routing
-- **Memory namespace:** Set `X-hal0-Private: 1` to access private memory namespaces
+- **Memory namespace:** Writes are shared by default. Set `X-hal0-Private: 1` to make every write from this client private, or pass `private=true` on one `memory_add` call. Never name a `private:<agent>` dataset yourself
 
 ## Verification
 

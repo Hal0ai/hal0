@@ -93,7 +93,7 @@ key fails validation rather than being silently ignored.
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `enabled` | bool | `true` | Hard kill switch — `false` refuses every turn before any model call. |
-| `read_only` | bool | `true` | Refuses every mutating or admin-write tool **server-side**, independent of the persona's own tool policy. The steward's own `memory_add` into its private namespace is exempt. Ships `true`: a fresh v1.0 box answers questions and reads state, but cannot mutate the board or write admin config until an operator sets this to `false`. |
+| `read_only` | bool | `true` | Refuses every mutating or admin-write tool **server-side**, independent of the persona's own tool policy. The steward's own `memory_add` into shared memory is exempt. Ships `true`: a fresh v1.0 box answers questions and reads state, but cannot mutate the board or write admin config until an operator sets this to `false`. |
 | `model` | str | `""` | Chat-model override; empty defers to the persona / `hal0/brain`. |
 | `tool_model` | str | `"hal0/agent"` | Where tool-calling rounds reroute when the chat model can't carry them (see below). `""` on disk is treated as "nobody set this" and coerced back to the default with a logged warning — to genuinely turn routing off, set it to `"off"`, `"none"`, or `"disabled"` explicitly. |
 | `max_rounds` | int | `8` | `1`–`100`. Runaway backstop on the tool loop per turn. |
@@ -192,7 +192,7 @@ the model was shown: the persona's `tools_allowed` policy is checked again
 against the call the model actually made (never trust the advertised list),
 and `[brain_chat] read_only` — when true, the default — refuses any tool
 that isn't a read, regardless of what the persona would otherwise allow. The
-one exception is `memory_add` into the steward's own private namespace: it
+one exception is the steward's own `memory_add` into shared memory: it
 changes no platform state, and without it a fresh install could not remember
 anything honestly.
 
@@ -205,29 +205,26 @@ operator flips it — that's a deliberate default, not a bug.
 ## Memory and MCP
 
 When [memory](/docs/concepts/memory) is enabled, the `hal0-brain` persona
-has its own namespace, `private:hermes__hal0-brain` (the persona's
-`memory_namespace`), separate from Hermes's own agent namespace. The steward
-reaches it through exactly three tools, the ones the persona auto-approves:
+writes shared hal0 memory tagged `agent:hermes__hal0-brain` (the agent id
+behind the persona's `memory_namespace`), so the other agents can read what it
+saves. The steward reaches it through exactly three tools, the ones the persona auto-approves:
 
 - `memory_add(text)` saves one fact.
 - `memory_search(query, limit?)` finds saved facts.
 - `memory_list(limit?)` lists the most recent ones.
 
 The model never chooses where these go. Brain chat rebuilds each call from
-those fields only, forces the dataset to the persona's namespace, and runs it
-through the app's memory dispatcher with the identity pinned to
-`hermes__hal0-brain` in private mode. A `dataset` or bank argument from the
+those fields only, forces the dataset to `shared`, and runs it through the
+app's memory dispatcher with the identity pinned to `hermes__hal0-brain` and
+private mode off. A `dataset` or bank argument from the
 model is dropped. The call takes the same retain/recall pipeline every other
 memory write takes, including the in-memory fallback when Hindsight is
 unreachable (writes there are lost on restart).
 
-Where the facts land depends on `[memory] unified_bank`. With the default
-(`true`) they go into the single `shared` Hindsight bank, tagged
-`visibility:private` and `agent:hermes__hal0-brain`, so only the steward reads
-them back and `GET /api/memory/banks` still lists just `shared`. With
-`unified_bank = false` they go into their own bank,
-`private__hermes__hal0-brain`, which appears in the bank list after the first
-write. No bank has to be created up front in either mode.
+The facts go into the `shared` namespace (the single `shared` Hindsight bank
+under the default `unified_bank = true`), tagged
+`agent:hermes__hal0-brain`. Notes the steward wrote privately before this change stay
+private to it and it still reads them. No bank has to be created up front.
 
 The other `memory_*` tools (delete, recall, reflect, curate, history,
 mental models, directives, operations, tags, bank stats and consolidation)

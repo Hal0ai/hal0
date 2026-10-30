@@ -288,3 +288,26 @@ def test_save_persona_refuses_a_symlinked_hermes_home(tmp_path: Path) -> None:
             P.Persona(id="example", display_name="Example"), root=state / ".hermes" / "personas"
         )
     assert list(victim.iterdir()) == []
+
+
+def test_prompt_addendum_describes_shared_memory_not_a_private_namespace() -> None:
+    """Agents must not be told ``private:<id>`` is theirs: naming it is a schema error."""
+    persona = P._seed_hermes("hermes")
+    block = P.build_prompt_addendum(persona)
+    assert "private:hermes" not in block
+    assert "shared by default" in block
+    assert "private=true" in block
+
+
+def test_hermes_templates_do_not_claim_a_private_namespace() -> None:
+    from pathlib import Path
+
+    from hal0.agents import hermes_provision as hp
+
+    root = Path(hp.__file__).parent / "hermes_templates"
+    for name in ("SOUL.md.j2", "HERMES.md.j2", "AGENTS.md.j2", "MCP-CLIENTS.md.j2"):
+        text = (root / name).read_text(encoding="utf-8")
+        assert "private:hermes" not in text, name
+        assert "namespace is yours" not in text, name
+    for name in ("SOUL.md.j2", "HERMES.md.j2", "AGENTS.md.j2"):
+        assert "private=true" in (root / name).read_text(encoding="utf-8"), name

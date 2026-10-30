@@ -28,7 +28,13 @@ Project | project:<name>       | project:rework
 Agent   | agent:<agent_id>     | agent:hermes
 Private | private:<agent_id>   | private:hermes
 
-## Setting Up Your Private Bank
+Memory is shared by default: a write lands in the shared bank, tagged as you.
+A private bank is opt-in, either per write (`private=true` on `memory_add`) or
+for the whole profile (`hal0: {memory_private: true}` in its config.yaml). Never
+name a `private:<agent>` dataset yourself; the server derives it from your
+identity and rejects the name.
+
+## Setting Up Your Private Bank (optional)
 
 Check if your private bank exists:
 
