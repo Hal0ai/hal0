@@ -325,13 +325,13 @@ describe('slot drawer Tune block', () => {
   it('feasibility probe sends the staged ctx override (wins), else the slot resolver', () => {
     const { root } = mount(SLOT)
     click('slot-model-swap')
-    expect(feasCalls[0]).toEqual({ models: [{ model_id: 'qwen', slot: 'chat' }] })
+    expect(feasCalls[0]).toEqual({ models: [{ model_id: 'qwen', profile: 'agent-chat', slot: 'chat' }] })
     act(() => root.unmount())
     document.body.innerHTML = ''
     feasCalls.length = 0
     const staged = mount({ ...SLOT, tune: { ctx_size: 8192 } })
     click('slot-model-swap')
-    expect(feasCalls[0]).toEqual({ models: [{ model_id: 'qwen', ctx: 8192 }] })
+    expect(feasCalls[0]).toEqual({ models: [{ model_id: 'qwen', ctx: 8192, profile: 'agent-chat', slot: 'chat' }] })
     act(() => staged.root.unmount())
   })
 
@@ -339,7 +339,7 @@ describe('slot drawer Tune block', () => {
     const { root } = mount({ ...SLOT, profile: '', tune: {} })
     typeInto('tune-ctx_size-input', '64')
     click('slot-model-swap')
-    expect(feasCalls[0]).toEqual({ models: [{ model_id: 'qwen', slot: 'chat' }] })
+    expect(feasCalls[0]).toEqual({ models: [{ model_id: 'qwen', profile: 'chat', slot: 'chat' }] })
     act(() => root.unmount())
   })
 

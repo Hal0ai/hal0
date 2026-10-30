@@ -681,9 +681,13 @@ export function ModelPicker({ s, models, allSlots, disabled, onSwap }) {
   const cur = s.model_id || s.model || ''
   const has = opts.some((m) => m.id === cur)
   // The window each candidate would launch with in THIS slot: the server
-  // resolves `slot` per candidate from the slot's profile (type seed when it
-  // names none) plus its [tune] context override, else the candidate's native
-  // window. ctx_effective is the CURRENT model's window, so it is not sent.
+  // resolves `slot` per candidate from the slot's profile plus its [tune]
+  // override. Keep the profile as a compatibility fallback for a server that
+  // predates slot resolution; when Context itself is overridden, its explicit
+  // value is candidate-independent and wins on both server versions.
+  const profileName = effectiveProfileName(s)
+  const tuneCtx = Number(s.tune?.ctx_size)
+  const ctxOverride = Number.isFinite(tuneCtx) && tuneCtx > 0 ? tuneCtx : null
   const verdictFor = (id) => {
     const row = (feasibility.data?.results || []).find((r) => r.model_id === id)
     return modelFitChip(row)
@@ -706,6 +710,8 @@ export function ModelPicker({ s, models, allSlots, disabled, onSwap }) {
           feasibility.mutate({
             models: ids.map((id) => ({
               model_id: id,
+              profile: profileName,
+              ...(ctxOverride ? { ctx: ctxOverride } : {}),
               slot: s.name,
             })),
           })

@@ -35,7 +35,7 @@ const { feasibilityCalls, feasibilityHandler } = vi.hoisted(() => ({
   feasibilityCalls: [] as unknown[],
   feasibilityHandler: {
     current: undefined as
-      | ((body: { models: { model_id: string; ctx?: number }[] }) => { results: unknown[] } | undefined)
+      | ((body: { models: { model_id: string; ctx?: number; profile?: string; slot?: string }[] }) => { results: unknown[] } | undefined)
       | undefined,
   },
 }))
@@ -45,7 +45,7 @@ vi.mock('@/api/hooks/useModelsFeasibility', () => ({
     const [data, setData] = React.useState<{ results: unknown[] } | undefined>(undefined)
     return {
       data,
-      mutate: (body: { models: { model_id: string; ctx?: number }[] }) => {
+      mutate: (body: { models: { model_id: string; ctx?: number; profile?: string; slot?: string }[] }) => {
         feasibilityCalls.push(body)
         const resp = feasibilityHandler.current?.(body)
         if (resp) setData(resp)
@@ -402,8 +402,8 @@ describe('ModelPicker (card-dropdowns Task 1)', () => {
     expect(feasibilityCalls.length).toBe(1)
     expect(feasibilityCalls[0]).toEqual({
       models: [
-        { model_id: 'm1', slot: 'chat' },
-        { model_id: 'm2', slot: 'chat' },
+        { model_id: 'm1', profile: 'chat', slot: 'chat' },
+        { model_id: 'm2', profile: 'chat', slot: 'chat' },
       ],
     })
     // Closing and reopening does not re-fire — first open only.
@@ -414,10 +414,10 @@ describe('ModelPicker (card-dropdowns Task 1)', () => {
     expect(feasibilityCalls.length).toBe(1)
   })
 
-  it('sends the slot name, not ctx or profile, so the server applies the slot [tune] override', () => {
-    // The server resolves `slot` per candidate: the slot's profile (the type
-    // seed when it names none) plus its [tune] context. `ctx` would win over it
-    // and `ctx_effective` is only the CURRENT model's window, so neither goes out.
+  it('sends the slot tune context plus profile fallback for both server generations', () => {
+    // The explicit sparse override is candidate-independent and wins. The
+    // slot lets the current server resolve the whole tune; profile keeps the
+    // request correct against a server that predates slot resolution.
     const { host } = mount(
       <ModelPicker
         s={{ ...SLOT, profile: 'rocm', tune: { ctx_size: 8192 } }}
@@ -430,8 +430,8 @@ describe('ModelPicker (card-dropdowns Task 1)', () => {
     openMenu(host, 'chat')
     expect(feasibilityCalls[0]).toEqual({
       models: [
-        { model_id: 'm1', slot: 'chat' },
-        { model_id: 'm2', slot: 'chat' },
+        { model_id: 'm1', ctx: 8192, profile: 'rocm', slot: 'chat' },
+        { model_id: 'm2', ctx: 8192, profile: 'rocm', slot: 'chat' },
       ],
     })
   })

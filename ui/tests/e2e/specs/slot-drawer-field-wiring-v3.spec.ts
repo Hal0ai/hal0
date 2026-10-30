@@ -227,10 +227,12 @@ test.describe('Slot drawer — GTT feasibility (model-row fit chips)', () => {
     // Fired once on the open transition — never per keystroke, never per row.
     await expect.poll(() => probes.length).toBe(1)
     // The slot goes on the wire so the server resolves its profile plus [tune]
-    // for each candidate.
+    // for each candidate; profile keeps the request compatible with the
+    // pre-slot-resolver server during the stacked merge.
     expect(probes[0].models.length).toBeGreaterThan(0)
     for (const m of probes[0].models) {
       expect(m.slot).toBe('primary')
+      expect(m.profile).toBe('rocm')
       expect(m).not.toHaveProperty('ctx')
     }
     await expect(listbox.locator('[data-option-id="qwen3.6-27b-mtp"]')).toContainText('~14 GB')
@@ -274,7 +276,7 @@ test.describe('Slot drawer — GTT feasibility (model-row fit chips)', () => {
     for (const m of probes[0].models) {
       expect(m.slot).toBe('primary')
       expect(m).not.toHaveProperty('ctx')
-      expect(m).not.toHaveProperty('profile')
+      expect(m.profile).toBe('chat')
     }
   })
 })
