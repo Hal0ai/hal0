@@ -72,6 +72,12 @@ backend to point at, never a claim OpenWebUI can't cash:
     ENABLE_WEB_SEARCH=True                   — a search provider is installed
     WEB_SEARCH_ENGINE / SEARXNG_QUERY_URL / …
 
+    TOOL_SERVER_CONNECTIONS=[...]            — the openwebui bridge client exists:
+                                               hal0 memory / Hermes (and, as an
+                                               operator opt-in, hal0 admin) as MCP
+                                               tool servers, bearer-keyed
+    ENABLE_IMAGE_EDIT=True / IMAGE_EDIT_ENGINE=openai — with the image block
+
 Image generation goes through hal0's own ``/v1/images/generations`` like STT and
 TTS do, so size, step count and GPU arbitration are the ones any ``/v1`` client
 gets. Nothing is written for ComfyUI itself.
@@ -110,6 +116,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import os
 import sys
 import textwrap
@@ -183,6 +190,14 @@ _DEFAULT_OPENWEBUI_ENV: dict[str, str] = {
     "OPENAI_API_BASE_URLS": "http://host.docker.internal:8080/v1",
     "WEBUI_AUTH": "False",
     "WEBUI_NAME": "hal0",
+    # Title/tag/query helper calls go to the always-on utility slot, not the chat
+    # model. Plain X-OpenWebUI-User-* headers (never the JWT form, so
+    # FORWARD_USER_INFO_HEADER_JWT_SECRET is deliberately not written) let hal0
+    # tag memory writes per user. OWUI's own memory store stays off: hal0's
+    # shared memory is reached over MCP instead.
+    "TASK_MODEL_EXTERNAL": "utility",
+    "ENABLE_FORWARD_USER_INFO_HEADERS": "True",
+    "ENABLE_MEMORIES": "False",
 }
 
 
@@ -342,11 +357,14 @@ _DYNAMIC_ENV_KEYS: tuple[str, ...] = (
     "IMAGES_OPENAI_API_KEY",
     "IMAGE_GENERATION_MODEL",
     "IMAGE_SIZE",
+    "ENABLE_IMAGE_EDIT",
+    "IMAGE_EDIT_ENGINE",
     "ENABLE_WEB_SEARCH",
     "ENABLE_SEARCH_QUERY_GENERATION",
     "WEB_SEARCH_ENGINE",
     "SEARXNG_QUERY_URL",
     "WEB_SEARCH_RESULT_COUNT",
+    "TOOL_SERVER_CONNECTIONS",
 )
 
 #: Every key hal0 may put in the file: the shipped defaults, the bind host and
@@ -471,7 +489,78 @@ def _image_gen_env_block(model_id: str) -> dict[str, str]:
         "IMAGES_OPENAI_API_KEY": _PLACEHOLDER_KEY,
         "IMAGE_GENERATION_MODEL": model_id,
         "IMAGE_SIZE": "",
+        "ENABLE_IMAGE_EDIT": "True",
+        "IMAGE_EDIT_ENGINE": "openai",
     }
+
+
+#: Tools Open WebUI may call on each hal0 MCP mount. Rendered as the entry's
+#: ``config.function_name_filter_list`` (Open WebUI 0.12.5 ``utils/tools.py``
+#: reads that comma list from the connection's ``config``).
+_OWUI_AGENTS_TOOLS: tuple[str, ...] = (
+    "agent_run",
+    "agent_run_wait",
+    "agent_run_status",
+    "agent_run_stop",
+    "agent_memory_search",
+    "agents_list",
+)
+_OWUI_MEMORY_TOOLS: tuple[str, ...] = (
+    "memory_add",
+    "memory_search",
+    "memory_recall",
+    "memory_list",
+)
+
+#: Scopes the ``openwebui`` bridge client is minted with; ``admin`` is an operator opt-in.
+_DEFAULT_BRIDGE_SCOPES: frozenset[str] = frozenset({"agents", "memory"})
+
+#: (scope, display name, entry id, tool filter or None for unfiltered), in render order.
+_MCP_MOUNTS: tuple[tuple[str, str, str, tuple[str, ...] | None], ...] = (
+    ("memory", "hal0 memory", "hal0-memory", _OWUI_MEMORY_TOOLS),
+    ("agents", "Hermes (delegate)", "hal0-agents", _OWUI_AGENTS_TOOLS),
+    ("admin", "hal0 admin", "hal0-admin", None),
+)
+
+
+def _mcp_env_block(bridge_key: str, base_url: str, scopes: frozenset[str]) -> dict[str, str]:
+    """``TOOL_SERVER_CONNECTIONS``: one MCP connection per scope the bridge client holds.
+
+    ``base_url`` is hal0's origin as the container sees it (``OPENAI_API_BASE_URLS``
+    without ``/v1``). The bridge key rides in the entry as a bearer token; the file is
+    0600 and already carries the box client key. Compact one-line JSON: podman reads
+    values verbatim (#3045).
+    """
+    entries = []
+    for scope, name, ident, tools in _MCP_MOUNTS:
+        if scope not in scopes:
+            continue
+        config: dict[str, object] = {"enable": True}
+        if tools is not None:
+            config["function_name_filter_list"] = ",".join(tools)
+        entries.append(
+            {
+                "type": "mcp",
+                "url": f"{base_url.rstrip('/')}/mcp/{scope}/mcp",
+                "path": "",
+                "auth_type": "bearer",
+                "key": bridge_key,
+                "config": config,
+                "info": {"id": ident, "name": name},
+            }
+        )
+    return {"TOOL_SERVER_CONNECTIONS": json.dumps(entries, separators=(",", ":"))}
+
+
+class _Preserve(str):
+    """Override value meaning "keep the existing line, write nothing if absent"."""
+
+    __slots__ = ()
+
+
+#: Sentinel for :func:`write_openwebui_env`: the caller wants a managed key kept but
+#: has no fresh value to render (the bridge key is not in hand).
+_PRESERVE = _Preserve("")
 
 
 def _web_search_env_block(provider: dict[str, str]) -> dict[str, str]:
@@ -496,8 +585,12 @@ def dynamic_env_overrides(
     embed_model_id: str | None,
     image_model_id: str | None,
     search_provider: dict[str, str] | None,
+    bridge_key: str | None = None,
+    mcp_enabled: bool = False,
+    bridge_scopes: frozenset[str] = _DEFAULT_BRIDGE_SCOPES,
+    mcp_base_url: str | None = None,
 ) -> dict[str, str | None]:
-    """Render the RAG / image-gen / web-search blocks as a
+    """Render the RAG / image-gen / web-search / MCP blocks as a
     :func:`write_openwebui_env` ``overrides`` dict.
 
     Pure function of already-resolved values — no I/O, no slot/registry
@@ -511,6 +604,11 @@ def dynamic_env_overrides(
     (:func:`hal0.openwebui.wiring._renderable_image_model`); a caller whose
     selection does not resolve passes ``None`` rather than a block Open WebUI
     cannot cash.
+
+    ``TOOL_SERVER_CONNECTIONS`` is the block for ``bridge_key`` when one is in hand;
+    :data:`_PRESERVE` when ``mcp_enabled`` but no key is (keep the existing line);
+    ``None`` when ``mcp_enabled`` is false. ``mcp_base_url`` defaults to hal0's
+    container-side origin (``_HAL0_V1_URL`` without ``/v1``).
     """
     merged: dict[str, str | None] = dict.fromkeys(_DYNAMIC_ENV_KEYS, None)
     if embed_model_id:
@@ -519,6 +617,11 @@ def dynamic_env_overrides(
         merged.update(_image_gen_env_block(image_model_id))
     if search_provider:
         merged.update(_web_search_env_block(search_provider))
+    if bridge_key:
+        base = mcp_base_url or _HAL0_V1_URL.removesuffix("/v1")
+        merged.update(_mcp_env_block(bridge_key, base, bridge_scopes))
+    elif mcp_enabled:
+        merged["TOOL_SERVER_CONNECTIONS"] = _PRESERVE
     return merged
 
 
@@ -623,6 +726,9 @@ def write_openwebui_env(
         managed &= _HAL0_KEYS
     if overrides:
         for key, value in overrides.items():
+            if value is _PRESERVE:
+                # Keep the line as the merge left it (present and managed, or absent).
+                continue
             if value is not None:
                 env_vars[key] = value
                 managed.add(key)
