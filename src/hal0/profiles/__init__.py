@@ -37,6 +37,7 @@ from hal0.config.schema import (
     PROFILE_BENCH,
     SEED_PROFILES,
     ProfileConfig,
+    ReasoningEffort,
 )
 from hal0.errors import Conflict, NotFound, UnprocessableEntity
 
@@ -63,6 +64,8 @@ class ResolvedProfile:
     ctx_size: int | None = None
     enable_thinking: bool | None = None
     vision: str = "auto"
+    reasoning_effort: str = "default"
+    reasoning_budget: int = -1
     speculation: str = "auto"
     runner: str | None = None
     cloned_from: str | None = None
@@ -86,6 +89,8 @@ class ResolvedProfile:
             "ctx_size": self.ctx_size,
             "enable_thinking": self.enable_thinking,
             "vision": self.vision,
+            "reasoning_effort": self.reasoning_effort,
+            "reasoning_budget": self.reasoning_budget,
             "speculation": self.speculation,
             "runner": self.runner,
             "seed": self.seed,
@@ -136,7 +141,8 @@ class ProfilePatch:
     """Partial profile update input.
 
     A field left at :data:`UNSET` keeps the stored value. ``ctx_size=None`` /
-    ``enable_thinking=None`` clear the stored value; ``runner=""`` clears the
+    ``enable_thinking=None`` clear the stored value (``reasoning_budget=None``
+    clears to ``-1``, unlimited); ``runner=""`` clears the
     runtime back to the slot's own runner (#2186).
     """
 
@@ -144,6 +150,8 @@ class ProfilePatch:
     ctx_size: Any = field(default=UNSET)
     enable_thinking: Any = field(default=UNSET)
     vision: Literal["auto", "off"] | None = None
+    reasoning_effort: ReasoningEffort | None = None
+    reasoning_budget: Any = field(default=UNSET)
     speculation: Literal["auto", "off", "ngram"] | None = None
     runner: str | None = None
     intent: str | None = None
@@ -285,6 +293,16 @@ class ProfileCatalog:
                     else patch.enable_thinking
                 ),
                 vision=patch.vision if patch.vision is not None else existing.vision,
+                reasoning_effort=(
+                    patch.reasoning_effort
+                    if patch.reasoning_effort is not None
+                    else existing.reasoning_effort
+                ),
+                reasoning_budget=(
+                    existing.reasoning_budget
+                    if patch.reasoning_budget is UNSET
+                    else (-1 if patch.reasoning_budget is None else patch.reasoning_budget)
+                ),
                 speculation=(
                     patch.speculation if patch.speculation is not None else existing.speculation
                 ),
@@ -438,6 +456,8 @@ def resolve_loaded_profile(
         ctx_size=profile.ctx_size,
         enable_thinking=profile.enable_thinking,
         vision=profile.vision,
+        reasoning_effort=profile.reasoning_effort,
+        reasoning_budget=profile.reasoning_budget,
         speculation=profile.speculation,
         runner=profile.runner,
         seed=name in SEED_PROFILES,
