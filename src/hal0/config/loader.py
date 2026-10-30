@@ -919,6 +919,13 @@ def save_profiles_config(cfg: ProfilesConfig, path: Path | None = None) -> None:
     # so writing them would freeze a stale copy on disk (the #PS-2 bug).
     profiles = data.get("profile") or {}
     data["profile"] = {name: entry for name, entry in profiles.items() if name not in SEED_PROFILES}
+    # The reasoning tunes are sparse on disk: a profile at the defaults does not
+    # grow the keys (an old hal0 reading the file would refuse them).
+    for entry in data["profile"].values():
+        if entry.get("reasoning_effort") == "default":
+            entry.pop("reasoning_effort")
+        if entry.get("reasoning_budget") == -1:
+            entry.pop("reasoning_budget")
     # A quarantined entry (invalid as stored) is written back exactly as it
     # was, unless the operator has since defined that name validly.
     for name, held in cfg.quarantined.items():

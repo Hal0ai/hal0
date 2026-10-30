@@ -39,6 +39,12 @@ def export_envelope(name: str, profile: ProfileConfig, *, exported_at: str) -> d
     regardless of ``exported_at``.
     """
     body = profile.model_dump(mode="json", exclude_none=True)
+    # Sparse like profiles.toml: the reasoning defaults stay out of the body, so
+    # a profile that never set them keeps its published checksum.
+    if body.get("reasoning_effort") == "default":
+        body.pop("reasoning_effort")
+    if body.get("reasoning_budget") == -1:
+        body.pop("reasoning_budget")
     return {
         "kind": ENVELOPE_KIND,
         "schema_version": PROFILE_SCHEMA_VERSION_CURRENT,

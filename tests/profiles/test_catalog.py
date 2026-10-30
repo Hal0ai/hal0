@@ -597,3 +597,18 @@ def test_recreating_a_quarantined_name_replaces_the_held_entry(tmp_hal0_home: st
 
     assert "not_a_field" not in path.read_text(encoding="utf-8")
     assert ProfileCatalog().resolve("broken").flags == "-fa on"
+
+
+def test_patch_reasoning_fields_and_clear(tmp_hal0_home: str) -> None:
+    catalog = ProfileCatalog()
+    catalog.create("p", ProfileConfig(flags="-fa on"))
+    catalog.update("p", ProfilePatch(reasoning_effort="low", reasoning_budget=512))
+    got = catalog.resolve("p")
+    assert (got.reasoning_effort, got.reasoning_budget) == ("low", 512)
+
+    left = catalog.update("p", ProfilePatch(intent="x"))
+    assert (left.reasoning_effort, left.reasoning_budget) == ("low", 512)
+
+    catalog.update("p", ProfilePatch(reasoning_budget=None))
+    assert catalog.resolve("p").to_dict()["reasoning_budget"] == -1
+    assert catalog.resolve("p").to_dict()["reasoning_effort"] == "low"

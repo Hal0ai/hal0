@@ -299,6 +299,22 @@ REMOVED_SLOT_KEYS: dict[str, str] = {
 }
 
 
+#: ``speculation`` on a profile (ADR-0031): ``auto`` drafts through whatever the
+#: model carries (a drafter file, else MTP heads), ``off`` never speculates,
+#: ``ngram`` uses n-gram lookup and needs no extra file.
+SpeculationMode = Literal["auto", "off", "ngram"]
+
+#: ``reasoning_effort`` (profile and slot ``[tune]``): ``default`` sends no
+#: effort hint; the rest are the effort levels a reasoning model may honour.
+ReasoningEffort = Literal["default", "minimal", "low", "medium", "high", "xhigh", "max"]
+
+#: Plausible context window range for a profile's ``ctx_size`` (the launch
+#: path's ``--ctx-size``). Below 128 llama-server cannot run; above 2**24 is
+#: never a real window.
+CTX_SIZE_MIN = 128
+CTX_SIZE_MAX = 2**24
+
+
 class SlotConfig(BaseModel):
     """Pydantic model for a single slot's TOML config (slots/<name>.toml).
 
@@ -758,11 +774,6 @@ _LANE_DEVICE: dict[str, str] = {
     "cpu": "none",
 }
 
-#: ``speculation`` on a profile (ADR-0031): ``auto`` drafts through whatever the
-#: model carries (a drafter file, else MTP heads), ``off`` never speculates,
-#: ``ngram`` uses n-gram lookup and needs no extra file.
-SpeculationMode = Literal["auto", "off", "ngram"]
-
 #: Shared tail of every draft bundle: the KV cache types for the draft context.
 _DRAFT_KV = " --spec-draft-type-k q8_0 --spec-draft-type-v q8_0"
 
@@ -881,13 +892,6 @@ def family_flags(*hints: str | None, architecture: str | None = None) -> str:
 DEVICE_DEFAULT_PROFILES: dict[str, str] = DEVICE_TO_DEFAULT_PROFILE
 
 
-#: Plausible context window range for a profile's ``ctx_size`` (the launch
-#: path's ``--ctx-size``). Below 128 llama-server cannot run; above 2**24 is
-#: never a real window.
-CTX_SIZE_MIN = 128
-CTX_SIZE_MAX = 2**24
-
-
 class ProfileConfig(BaseModel):
     """One ``[profile.<name>]`` entry in profiles.toml: a complete tune.
 
@@ -932,6 +936,15 @@ class ProfileConfig(BaseModel):
     vision: Literal["auto", "off"] = Field(
         default="auto",
         description="'auto' loads the model's mmproj when it has one; 'off' never does.",
+    )
+    reasoning_effort: ReasoningEffort = Field(
+        default="default",
+        description="Reasoning effort hint for slots running this profile; 'default' sends none.",
+    )
+    reasoning_budget: int = Field(
+        default=-1,
+        ge=-1,
+        description="Reasoning token budget (--reasoning-budget); -1 = unlimited.",
     )
     speculation: SpeculationMode = Field(
         default="auto",
