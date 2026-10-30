@@ -46,7 +46,9 @@ import { FitChip, ModalityTag } from "./fit-chip.jsx";
 import { TuneBlock, tuneApplies } from "./slot-tune-block.jsx";
 import {
 	changedTuneKeys,
+	eyeState,
 	restartNeeded,
+	thinkingMark,
 	tuneBody,
 	tuneErrors,
 	tuneWire,
@@ -253,7 +255,7 @@ function modelModalityTag(m) {
 // the batch `useModelsFeasibility` call fired on dropdown open. `usedByCount`
 // is read from the slots list already queried in this drawer (`slotsQuery`),
 // never a second fetch.
-function modelRichOptions({ compatible, cur, has, slotLong, allSlots, verdictChipFor }) {
+function modelRichOptions({ compatible, cur, has, slotLong, allSlots, verdictChipFor, tuneEffective }) {
 	const opts = [];
 	if (cur && !has) {
 		opts.push({ id: cur, row: slotLong || cur });
@@ -265,6 +267,11 @@ function modelRichOptions({ compatible, cur, has, slotLong, allSlots, verdictChi
 		const quant = m.quant || null;
 		const modTag = modelModalityTag(m);
 		const caps = Array.isArray(m.capabilities) ? m.capabilities : [];
+		// Slot tune state rides the slot's CURRENT model only (thinking is slot
+		// state, not a model fact): thinking glyph and the vision-off eye.
+		const isCur = m.id === cur;
+		const thinking = isCur ? thinkingMark(tuneEffective)?.title : undefined;
+		const visionOff = isCur && eyeState(m, tuneEffective) === "off";
 		const fit = verdictChipFor ? verdictChipFor(m.id) : null;
 		const name = (
 			<span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
@@ -277,7 +284,12 @@ function modelRichOptions({ compatible, cur, has, slotLong, allSlots, verdictChi
 			row: (
 				<span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
 					{name}
-					<ModalityTag tag={modTag} draft={draftTagValue(m)} />
+					<ModalityTag
+						tag={modTag}
+						draft={draftTagValue(m)}
+						thinking={thinking}
+						visionOff={visionOff}
+					/>
 				</span>
 			),
 			// closed trigger: everything inline on one line — modality glyphs
@@ -285,7 +297,12 @@ function modelRichOptions({ compatible, cur, has, slotLong, allSlots, verdictChi
 			trigger: (
 				<span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
 					{name}
-					<ModalityTag tag={modTag} draft={draftTagValue(m)} />
+					<ModalityTag
+						tag={modTag}
+						draft={draftTagValue(m)}
+						thinking={thinking}
+						visionOff={visionOff}
+					/>
 					{quant && <span className="chip amber">{quant}</span>}
 					{fit}
 				</span>
@@ -1805,6 +1822,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 																? slotsQuery.data
 																: [],
 															verdictChipFor: modelFeasibilityChipFor,
+															tuneEffective: slot.tune_effective,
 														})}
 														// Task 11d: one batch feasibility call for every listed
 														// model, fired once per dropdown open — not per keystroke,

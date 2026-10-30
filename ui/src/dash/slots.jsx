@@ -34,7 +34,8 @@ import { slotIndicatorFromPhase, slotButtonPhase, isSlotLive, imageStatusChip } 
 import { statusCopyForSlotState } from './status-copy'
 import { prettyProfile } from './profile-names.js'
 import { slotModelRow } from './slots/slot-shared.js'
-import { SlotSpecBolt } from './fit-chip.jsx'
+import { SlotSpecBolt, ModalityTag } from './fit-chip.jsx'
+import { eyeState, overrideCount, thinkingMark } from './tune-state.js'
 import { SlotRail } from './slot-rail.jsx';
 
 const { useState: useStateS, useRef, useEffect } = React;
@@ -324,6 +325,15 @@ function SlotCard({
             </span>
           );
         })()}
+        {overrideCount(slot.tune) > 0 && (
+          <span
+            className="chip amber"
+            data-testid="sl-tune-count"
+            title={`${overrideCount(slot.tune)} per-slot tune override${overrideCount(slot.tune) === 1 ? '' : 's'} on the profile`}
+          >
+            +{overrideCount(slot.tune)}
+          </span>
+        )}
         <span className="chip">{type}</span>
         {/* N5: runtime micro-tag — model swap on a container slot is a
             cold restart, not a hot swap. */}
@@ -526,7 +536,11 @@ function SlotListRow({ slot, modelRow, onEdit }) {
         {slot.name}
         {isDefault && <span className="chip outlined amber" style={{fontSize: 9, padding: "1px 4px"}}>def</span>}
       </span>
-      <span className="ml">{slot.model}<SlotSpecBolt spec={metrics.spec} model={modelRow} /></span>
+      <span className="ml">{slot.model}<SlotSpecBolt spec={metrics.spec} model={modelRow} /><ModalityTag
+        tag={eyeState(modelRow, slot.tune_effective) === 'off' ? 'vision' : null}
+        visionOff
+        thinking={thinkingMark(slot.tune_effective)?.title}
+      /></span>
       <span className="ch">
         <span className="chip">{type}</span>
         <span className={"chip dev-" + (device || "cpu").replace("gpu-", "")}>{device}</span>

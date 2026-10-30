@@ -55,6 +55,7 @@ import { slotModelRow } from './slots/slot-shared.js'
 import { useCardReorder } from './slots/card-order.js'
 import { RichSelect } from './rich-select.jsx'
 import { FitChip, ModalityTag, SlotSpecBolt } from './fit-chip.jsx'
+import { eyeState, thinkingMark } from './tune-state.js'
 import { draftTagValue } from './spec-state.js'
 import { feasibilityHint } from './feasibility-copy'
 // devKind — one shared, meta-aware helper (src/lib/deviceMeta.ts); replaces
@@ -601,6 +602,11 @@ export function modelPickerOptions({ s, opts, cur, has, allSlots, verdictFor }) 
   for (const m of opts) {
     const quant = m.quant || null
     const modTag = modelModalityTag(m)
+    // The slot's tune state shows on its CURRENT model only: thinking is slot
+    // state, not a model fact, so other rows never carry the glyph.
+    const isCur = m.id === cur
+    const thinking = isCur ? thinkingMark(s.tune_effective)?.title : undefined
+    const visionOff = isCur && eyeState(m, s.tune_effective) === 'off'
     const fit = verdictFor ? verdictFor(m.id) : null
     const name = (
       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{m.longName || m.id}</span>
@@ -616,7 +622,12 @@ export function modelPickerOptions({ s, opts, cur, has, allSlots, verdictFor }) 
       row: (
         <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
           {name}
-          <ModalityTag tag={modTag} draft={draftTagValue(m)} />
+          <ModalityTag
+            tag={modTag}
+            draft={draftTagValue(m)}
+            thinking={thinking}
+            visionOff={visionOff}
+          />
         </span>
       ),
       // closed trigger: everything inline on one line — the modality glyphs
@@ -625,7 +636,12 @@ export function modelPickerOptions({ s, opts, cur, has, allSlots, verdictFor }) 
         <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
           {name}
           {/* the current model's state bolt replaces the static drafter bolt */}
-          <ModalityTag tag={modTag} draft={m.id === cur ? null : draftTagValue(m)} />
+          <ModalityTag
+            tag={modTag}
+            draft={m.id === cur ? null : draftTagValue(m)}
+            thinking={thinking}
+            visionOff={visionOff}
+          />
           {m.id === cur && <SlotSpecBolt spec={s.metrics?.spec} model={m} />}
           {quant && <span className="chip amber">{quant}</span>}
           {fit}

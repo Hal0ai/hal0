@@ -272,6 +272,18 @@ describe('slot drawer Tune block', () => {
     act(() => root.unmount())
   })
 
+  it('the drawer model picker trigger carries the thinking glyph and vision-off eye', () => {
+    const { root } = mount({
+      ...SLOT,
+      tune: { enable_thinking: true, vision: 'off' },
+      tune_effective: { ...EFFECTIVE, enable_thinking: true, vision: 'off' },
+    })
+    const trigger = byId('slot-model-swap')!
+    expect(trigger.querySelector('[data-testid="thinking-mark"]')).not.toBeNull()
+    expect(trigger.querySelector('.modality-icon.off')).not.toBeNull()
+    act(() => root.unmount())
+  })
+
   it('save as profile is disabled with no overrides', () => {
     const { root } = mount(SLOT)
     expect((byId('tune-save-as-profile') as HTMLButtonElement).disabled).toBe(true)
