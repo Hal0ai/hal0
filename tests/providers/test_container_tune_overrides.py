@@ -115,6 +115,14 @@ def test_effort_gated_by_runner_build() -> None:
     assert d["tune_effective"]["reasoning_effort"] == "high"
 
 
+def test_effort_gated_on_digest_pinned_ref() -> None:
+    """The shipped refs are ``repo:tag@sha256:<hex>``; the digest must not defeat the gate."""
+    img = "registry.example/hal0-runner-standard:b11700-rabc123@sha256:" + "ab" * 32
+    d = _detail(_slot({"reasoning_effort": "high"}), _profile(), _model(), image=img)
+    assert "--reasoning-effort" not in d["argv"]
+    assert d["tune_effective"]["reasoning_effort_unavailable"].startswith("runner build 11700")
+
+
 def test_effort_available_on_verified_build() -> None:
     img = "registry.example/hal0-runner-standard:b11840-rabc123"
     d = _detail(_slot({"reasoning_effort": "high"}), _profile(), _model(), image=img)
