@@ -2757,3 +2757,52 @@ def test_default_memory_passes_for_an_opt_in_with_private_headers(tmp_path) -> N
 def test_default_memory_warns_when_an_opt_in_is_not_applied(tmp_path) -> None:
     c = da.check_hermes_default_memory(home=_root_cfg(tmp_path, "0", "0", opt_in=True))
     assert c.status == "warn" and "hal0-admin" in c.detail and "hal0-memory" in c.detail
+
+
+def _root_text(tmp_path, text):
+    home = tmp_path / "hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text(text)
+    return home
+
+
+_SERVERS_1 = (
+    "mcp_servers:\n"
+    "  hal0-admin:\n    headers:\n      X-hal0-Private: '1'\n"
+    "  hal0-memory:\n    headers:\n      X-hal0-Private: '1'\n"
+)
+
+
+def test_default_memory_leaves_a_wire_mcp_opt_out_alone(tmp_path) -> None:
+    home = _root_text(tmp_path, "hal0:\n  wire_mcp: false\n" + _SERVERS_1)
+    c = da.check_hermes_default_memory(home=home)
+    assert c.status == "pass" and "wire_mcp" in c.detail
+
+
+def test_default_memory_warns_on_a_non_boolean_opt_in(tmp_path) -> None:
+    home = _root_text(tmp_path, "hal0:\n  memory_private: 'true'\n" + _SERVERS_1)
+    c = da.check_hermes_default_memory(home=home)
+    assert c.status == "warn" and "memory_private" in c.detail and "not a boolean" in c.detail
+
+
+def test_default_memory_treats_an_off_word_as_shared(tmp_path) -> None:
+    home = _root_text(
+        tmp_path, "hal0:\n  memory_private: 'off'\n" + _SERVERS_1.replace("'1'", "'0'")
+    )
+    c = da.check_hermes_default_memory(home=home)
+    assert c.status == "warn" and "not a boolean" in c.detail
+    assert "shared" in c.detail and "private" not in c.detail.replace("memory_private", "")
+
+
+def test_default_memory_unapplied_opt_in_names_the_repair(tmp_path) -> None:
+    c = da.check_hermes_default_memory(home=_root_cfg(tmp_path, "0", "0", opt_in=True))
+    assert c.status == "warn" and "reprovision hermes --repair" in c.detail
+
+
+def test_profiles_mcp_warns_on_a_non_boolean_opt_in(tmp_path) -> None:
+    text = "hal0:\n  memory_private: 'yes'\n" + _wired_yaml().replace(
+        "X-hal0-Private: '0'", "X-hal0-Private: '1'"
+    )
+    home = _profiles_home(tmp_path, coder=text)
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
+    assert c.status == "warn" and "memory_private" in c.detail and "coder" in c.detail
