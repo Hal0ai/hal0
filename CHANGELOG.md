@@ -40,6 +40,12 @@ applying. Add those subsections to a version's section to surface them; see
 - **`/mcp/*` accepts the box's own names by default.** The host allowlist of the MCP servers' DNS-rebinding guard defaulted to localhost only, so a remote MCP client calling the box by its address was refused. It now also carries every LAN address, the hostname, its mDNS `.local` name and the `[network].public_url` host, each bare and with the API port, on top of `HAL0_MCP_ALLOWED_HOSTS` (ADR-0043).
 - **The `agent` and `coding` seed profiles turn thinking off with `enable_thinking = false`.** They no longer carry `--reasoning off --reasoning-budget -1` in their flags: thinking off is now the request-time default a caller may override per request, not a launch-time hard off. A custom profile cloned from the old seed keeps its flags.
 
+- **Hermes profiles and the brain write hal0 memory shared by default.** Every write still carries `agent:<id>`; private is a per-call choice (`X-hal0-Private: 1`) or a per-profile opt-in (`hal0: {memory_private: true}`). Notes written before 1.8.0 stay private; `memory_curate` can release them. Converge rewrites a stale private header on wired profiles, and upgraded steward prompts drop the old private-bank sentence at resolve time.
+
+### Fixed
+
+- **A caller can no longer plant a note in another agent's private namespace.** The memory provider owns the `agent:` and `visibility:` tags on every write (#3136).
+
 ## [1.7.1] — 2026-10-27
 
 ### Highlights

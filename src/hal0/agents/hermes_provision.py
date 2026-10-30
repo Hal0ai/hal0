@@ -5051,8 +5051,8 @@ def _phase_brain_profile_seed(ctx: _StepCtx) -> PhaseResult:
 # the steward can actually interact with + control the box. On a
 # hand-configured host these were wired out-of-band; this phase makes them
 # reproducible. ``hermes config set`` has no per-profile target, so — exactly
-# like honcho.json and the YAML list-keys — hal0 deep-merges the block into the profile's config.yaml,
-# preserving every upstream/operator key. Only rewrites when the wiring is
+# like honcho.json and the YAML list-keys — hal0 deep-merges the block into
+# the profile's config.yaml, preserving every upstream/operator key. Only rewrites when the wiring is
 # actually missing/wrong (a correct box is left byte-untouched, so the file's
 # comments/formatting survive). Warn-as-OK; skips when the profile isn't there.
 
@@ -5068,8 +5068,9 @@ def _build_profile_mcp_servers(agent_id: str, *, private: bool = False) -> dict[
 
     Mirrors the top-level ``_default_mcp_servers`` admin + memory pair but scoped
     to the profile's identity (``X-hal0-Agent``); memory is shared by default
-    (``X-hal0-Private: "0"``) and private (its own bank) when ``private``. Deliberately just these two — a profile gets platform control
-    + memory only, not any other MCP surface.
+    (``X-hal0-Private: "0"``) and private (its own bank) when ``private``.
+    Deliberately just these two — a profile gets platform control + memory
+    only, not any other MCP surface.
 
     The ``/mcp`` mount is ADMIN-classed (security/exposure.py), so — same as
     the top-level overlay — a bearer is attached from the box service identity

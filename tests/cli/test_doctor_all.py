@@ -2415,15 +2415,20 @@ def test_profiles_mcp_warns_on_drifted_identity_or_provider(tmp_path) -> None:
 
 
 def test_profiles_mcp_private_header_follows_the_profile_opt_in(tmp_path) -> None:
-    """A "1" is drift on a shared profile and correct on a memory_private one."""
+    """A "1" is a stale header on a shared profile and correct on a memory_private one."""
     stale = _WIRED.replace("X-hal0-Private: '0'", "X-hal0-Private: '1'")
     c = da.check_hermes_profiles_mcp(
         auth={"auth_required": True}, home=_profiles_home(tmp_path, coder=stale)
     )
-    assert c.status == "warn" and "differ from hal0's wiring" in c.detail
+    assert c.status == "warn"
+    assert "stale private header" in c.detail and "converge will remove it" in c.detail
     opted = stale + "hal0:\n  memory_private: true\n"
     home2 = _profiles_home(tmp_path / "b", coder=opted)
-    assert da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home2).status == "pass"
+    c2 = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home2)
+    assert c2.status == "pass" and "memory: private (opt-in)" in c2.detail
+    home3 = _profiles_home(tmp_path / "c", coder=_WIRED)
+    c3 = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home3)
+    assert c3.status == "pass" and "private" not in c3.detail
 
 
 def test_profiles_mcp_ignores_dirs_hermes_would_not_serve(tmp_path) -> None:

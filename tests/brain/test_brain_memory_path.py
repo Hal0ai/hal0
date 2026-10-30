@@ -475,6 +475,27 @@ def test_a_hand_edited_private_bank_sentence_is_stripped(tmp_path: Path) -> None
     assert bc._MEMORY_RULE in prompt
 
 
+def test_stale_bank_sentence_without_a_period_is_stripped_and_paragraphs_survive(
+    tmp_path: Path,
+) -> None:
+    """Case-insensitive, no terminating period, and the paragraph break stays."""
+    root = tmp_path / "noperiod"
+    save_persona(
+        Persona(
+            id=bc.BRAIN_PERSONA_ID,
+            display_name="hal0 Brain",
+            system_prompt="You are hal0-brain.\nYou own a Private Memory Bank\n\nBe brief.",
+            memory_namespace=BRAIN_NAMESPACE,
+            approval=PersonaApproval(),
+        ),
+        root=root,
+    )
+    prompt, _model = bc._resolve_profile(_request(tmp_path, persona_root=root))
+    assert "private memory bank" not in prompt.lower()
+    assert "You are hal0-brain.\n" in prompt and "\n\nBe brief." in prompt
+    assert bc._MEMORY_RULE in prompt
+
+
 # ── the real fallback engine, end to end ────────────────────────────────────
 
 

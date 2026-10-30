@@ -196,7 +196,12 @@ _OLD_PRIVATE_RULE_RE = re.compile(
     r"Memory: you have a private memory bank.*?call memory_search first\.",
     re.DOTALL,
 )
-_STALE_SENTENCE_RE = re.compile(r"[^.\n]*private memory bank[^.\n]*\.\s*")
+# One sentence that mentions the bank: up to the period, or the end of the line
+# when the author left the period off. Trailing spaces/tabs go, the paragraph
+# break stays.
+_STALE_SENTENCE_RE = re.compile(
+    r"[^.\n]*private memory bank[^.\n]*(?:\.|(?=\n|$))[ \t]*", re.IGNORECASE
+)
 
 # Injected as the leading system message when the client doesn't send one.
 # Without it the LLM had ten write tools, no read tools, and no idea what the
@@ -298,11 +303,11 @@ def _resolve_profile(request: Request) -> tuple[str, str]:
     except (FileNotFoundError, PersonaError, OSError):
         return _SYSTEM_PROMPT, BRAIN_SLOT_MODEL
     prompt = persona.system_prompt.strip() or _SYSTEM_PROMPT
-    if "private memory bank" in prompt:
+    if _STALE_SENTENCE_RE.search(prompt):
         # A persona seeded after #2658 (the seeder never overwrites) still
         # claims a private bank, but the steward now writes shared memory.
         prompt = _OLD_PRIVATE_RULE_RE.sub(lambda _m: _MEMORY_RULE, prompt)
-        if "private memory bank" in prompt:
+        if _STALE_SENTENCE_RE.search(prompt):
             # Hand-edited variant: drop the stale sentence, append the rule.
             prompt = _STALE_SENTENCE_RE.sub("", prompt).strip()
             prompt = f"{prompt}\n\n{_MEMORY_RULE}"

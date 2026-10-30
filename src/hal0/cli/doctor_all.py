@@ -1449,6 +1449,8 @@ def check_hermes_profiles_mcp(
     no_config: list[str] = []
     unauthed: list[str] = []
     drifted: list[str] = []
+    stale_private: list[str] = []
+    private_opt_in: list[str] = []
     opted_out: list[str] = []
     unreadable: list[str] = []
     wired: list[str] = []
@@ -1494,10 +1496,15 @@ def check_hermes_profiles_mcp(
         # The identity and target must be the ones hal0 wires: a copied
         # X-hal0-Agent would read another profile's private memory, a wrong
         # X-hal0-Private would write to the wrong (shared vs private) bank.
-        # The bearer must be the box's current service key when one is discoverable (a rotated key
-        # leaves a stale one behind), else at least a ``Bearer …`` string.
-        desired = hp._profile_wire_desired(
-            hp.profile_agent_id(name), private=hp.profile_memory_private(data)
+        # The bearer must be the box's current service key when one is
+        # discoverable (a rotated key leaves a stale one behind), else at
+        # least a ``Bearer …`` string.
+        private = hp.profile_memory_private(data)
+        desired = hp._profile_wire_desired(hp.profile_agent_id(name), private=private)
+        # A "1" left over from before shared-by-default, on a profile that has
+        # not opted in: reported on its own, since converge removes it.
+        stale_private_header = (
+            not private and _header(servers["hal0-memory"], "X-hal0-Private") == "1"
         )
         if auth_required and any(
             not _bearer_ok(
@@ -1516,13 +1523,18 @@ def check_hermes_profiles_mcp(
             or any(
                 _header(servers[n], h) != v
                 for h, v in want["headers"].items()
-                if h != "Authorization"
+                if h != "Authorization" and not (stale_private_header and h == "X-hal0-Private")
             )
             for n, want in desired["mcp_servers"].items()
         ):
             drifted.append(name)
             continue
+        if stale_private_header:
+            stale_private.append(name)
+            continue
         wired.append(name)
+        if private:
+            private_opt_in.append(name)
 
     parts: list[str] = []
     if unauthed:
@@ -1541,6 +1553,11 @@ def check_hermes_profiles_mcp(
             f"profile(s) {', '.join(drifted)} carry hal0 MCP entries that differ from hal0's "
             "wiring (identity, target or memory provider); the next hal0-api sweep rewrites them"
         )
+    if stale_private:
+        parts.append(
+            f"profile(s) {', '.join(stale_private)} carry a stale private header "
+            "(X-hal0-Private: 1) without a hal0.memory_private opt-in; converge will remove it"
+        )
     if unreadable:
         parts.append(
             f"config.yaml of profile(s) {', '.join(unreadable)} is unreadable or not a mapping; "
@@ -1558,9 +1575,11 @@ def check_hermes_profiles_mcp(
         )
     if unauthed:
         return Check(key, label, _FAIL, "; ".join(parts))
-    if unwired or drifted or unreadable or linked:
+    if unwired or drifted or stale_private or unreadable or linked:
         return Check(key, label, _WARN, "; ".join(parts))
     detail = f"wired: {', '.join(wired)}" if wired else "no profile wired"
+    if private_opt_in:
+        detail += f"; memory: private (opt-in): {', '.join(private_opt_in)}"
     if opted_out:
         detail += f"; opted out: {', '.join(opted_out)}"
     if parts:  # only the informational no-config note is left
