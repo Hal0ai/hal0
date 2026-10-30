@@ -57,6 +57,7 @@ FLAG_ALIASES: dict[str, str] = {
     "-dev": "--device",
     "-sm": "--split-mode",
     "-c": "--ctx-size",
+    "-rea": "--reasoning",
     "-ts": "--tensor-split",
     "-mg": "--main-gpu",
     "-np": "--parallel",
@@ -722,7 +723,7 @@ def deny_reasoning_format_none(
         "HTTP 400 'Failed to initialize samplers' to every response_format "
         "(json_object / json_schema) request when the server runs with it, so "
         "structured output and tool-call grammars would stop working. Omit the "
-        "flag (use `--reasoning off` to disable thinking), or pick another "
+        "flag (set the profile's `enable_thinking` to control thinking), or pick another "
         "--reasoning-format value such as `deepseek`.",
         code="slot.reasoning_format_none_denied",
         details={"segment": segment, "flags": ["--reasoning-format", "none"]},

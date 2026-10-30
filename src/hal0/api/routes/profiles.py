@@ -536,6 +536,8 @@ def export_profile(name: str) -> dict[str, Any]:
         enable_thinking=resolved.enable_thinking,
         vision=resolved.vision,  # type: ignore[arg-type]  # ResolvedProfile carries the validated literal
         speculation=resolved.speculation,  # type: ignore[arg-type]
+        reasoning_effort=resolved.reasoning_effort,  # type: ignore[arg-type]
+        reasoning_budget=resolved.reasoning_budget,
         # The envelope is the import preview's only source of runtime truth,
         # so the export has to actually carry `runner` — it was omitted here
         # while every other ProfileConfig field was copied across.

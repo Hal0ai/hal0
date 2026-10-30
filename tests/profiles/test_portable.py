@@ -479,3 +479,12 @@ class TestV140EnvelopeImport:
         assert parsed.profile.speculation == "ngram"
         assert parsed.profile.flags == "-fa on"
         assert env["profile"]["flags"] == "-fa on --spec-type ngram-mod"  # input untouched
+
+
+def test_export_omits_default_reasoning_keys() -> None:
+    from hal0.profiles.portable import export_envelope
+
+    plain = export_envelope("p", ProfileConfig(flags=""), exported_at="t")["profile"]
+    assert "reasoning_effort" not in plain and "reasoning_budget" not in plain
+    tuned = export_envelope("p", ProfileConfig(flags="", reasoning_effort="low"), exported_at="t")
+    assert tuned["profile"]["reasoning_effort"] == "low"

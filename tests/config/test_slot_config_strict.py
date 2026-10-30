@@ -29,9 +29,13 @@ from hal0.config.loader import (
     load_slot_config,
     save_slot_config,
 )
-from hal0.config.schema import REMOVED_SLOT_KEYS, SlotConfig
+from hal0.config.schema import REMOVED_SLOT_KEYS, TUNE_KEYS, SlotConfig, SlotTuneConfig
 from hal0.errors import BadRequest
-from hal0.slot_config import unknown_slot_config_keys
+from hal0.slot_config import (
+    reject_slot_tuning_keys,
+    reject_unknown_slot_keys,
+    unknown_slot_config_keys,
+)
 from hal0.slots.config_write import guard_slot_write_payload
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -358,3 +362,84 @@ def test_a_dumped_config_uses_the_toml_table_names() -> None:
     assert "extra" not in dumped
     bare = SlotConfig.model_validate({"name": "x", "port": 8081}).model_dump(mode="python")
     assert "server" not in bare and "npu" not in bare and "image" not in bare
+
+
+# ── [tune] override table (slot tune overrides) ──────────────────────────────
+
+
+def test_slot_toml_with_tune_table_loads(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        _BASE + '\n[tune]\nenable_thinking = false\nvision = "off"\nreasoning_effort = "high"\n',
+    )
+    cfg = load_slot_config("brain", path)
+    assert cfg.tune is not None
+    assert cfg.tune.model_dump(exclude_none=True) == {
+        "enable_thinking": False,
+        "vision": "off",
+        "reasoning_effort": "high",
+    }
+
+
+def test_slot_tune_rejects_unknown_and_out_of_range() -> None:
+    with pytest.raises(ValidationError):
+        SlotTuneConfig(mtp="off")  # type: ignore[call-arg]
+    with pytest.raises(ValidationError):
+        SlotTuneConfig(ctx_size=64)
+    with pytest.raises(ValidationError):
+        SlotTuneConfig(reasoning_budget=-2)
+
+
+def test_tune_keys_follow_the_field_order() -> None:
+    assert tuple(SlotTuneConfig.model_fields) == TUNE_KEYS
+    assert TUNE_KEYS == (
+        "ctx_size",
+        "enable_thinking",
+        "reasoning_effort",
+        "reasoning_budget",
+        "vision",
+        "speculation",
+    )
+
+
+def test_tune_table_is_a_known_write_key() -> None:
+    assert not unknown_slot_config_keys({"tune": {"vision": "off"}})
+    assert unknown_slot_config_keys({"tune": {"mtp": "off"}}) == ["tune.mtp"]
+
+
+def test_absent_or_empty_tune_writes_no_table(tmp_path: Path) -> None:
+    out = tmp_path / "x.toml"
+    save_slot_config(SlotConfig(name="x", port=8081), out)
+    assert "tune" not in tomllib.loads(out.read_text(encoding="utf-8"))
+    save_slot_config(SlotConfig(name="x", port=8081, tune=SlotTuneConfig()), out)
+    assert "tune" not in tomllib.loads(out.read_text(encoding="utf-8"))
+    assert "tune" not in SlotConfig(name="x", port=8081).model_dump()
+
+
+def test_tune_table_round_trips(tmp_path: Path) -> None:
+    out = tmp_path / "x.toml"
+    cfg = SlotConfig(name="x", port=8081, tune=SlotTuneConfig(ctx_size=4096, speculation="off"))
+    save_slot_config(cfg, out)
+    assert tomllib.loads(out.read_text(encoding="utf-8"))["tune"] == {
+        "ctx_size": 4096,
+        "speculation": "off",
+    }
+    assert load_slot_config("x", out).tune == cfg.tune
+
+
+def test_unknown_key_hint_lists_the_tune_table() -> None:
+    with pytest.raises(BadRequest) as exc:
+        reject_unknown_slot_keys({"bogus": 1})
+    assert "[tune]" in exc.value.details["hint"]
+
+
+def test_tuning_key_denied_hint_names_tune_table() -> None:
+    with pytest.raises(BadRequest) as e:
+        reject_slot_tuning_keys({"enable_thinking": True})
+    assert "[tune]" in e.value.message
+
+
+def test_non_override_tuning_key_denial_has_no_tune_hint() -> None:
+    with pytest.raises(BadRequest) as e:
+        reject_slot_tuning_keys({"parallel": 2})
+    assert "[tune]" not in e.value.message

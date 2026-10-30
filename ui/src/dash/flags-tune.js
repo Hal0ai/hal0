@@ -205,6 +205,7 @@ export const FLAG_ALIASES = {
   "-dev": "--device",
   "-sm": "--split-mode",
   "-c": "--ctx-size",
+  "-rea": "--reasoning",
   "-ts": "--tensor-split",
   "-mg": "--main-gpu",
   "-np": "--parallel",

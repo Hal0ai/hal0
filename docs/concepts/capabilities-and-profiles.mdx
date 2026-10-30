@@ -111,9 +111,9 @@ regardless of which device a slot targets:
 | Profile | Purpose |
 |---|---|
 | `chat` | Minimal generic chat — fallback for unknown models |
-| `agent` | The agent workload: deterministic sampling, reasoning off, vision off, 64K context (`ctx_size` 65536 — the bundled Hermes agent needs at least 64,000) |
+| `agent` | The agent workload: deterministic sampling, thinking off (`enable_thinking = false`), vision off, 64K context (`ctx_size` 65536 — the bundled Hermes agent needs at least 64,000) |
 | `utility` | The utility workload: generic chat flags, 64K context |
-| `coding` | Code generation: higher temperature, reasoning off, vision off |
+| `coding` | Code generation: higher temperature, thinking off (`enable_thinking = false`), vision off |
 | `embedding` | Pooled embeddings (`--embedding`, wide ubatch), 4096 context |
 | `reranking` | Reranking (`--reranking`), 4096 context — always a separate instance from `embedding` |
 | `cpu-chat` | CPU-safe chat |

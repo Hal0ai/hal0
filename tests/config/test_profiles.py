@@ -477,3 +477,36 @@ def test_demoted_seed_catalog_is_gone() -> None:
     import hal0.config.schema as schema
 
     assert not hasattr(schema, "LEGACY_SEED_PROFILES")
+
+
+# ── reasoning_effort / reasoning_budget (slot tune overrides) ────────────────
+
+
+def test_profile_reasoning_defaults_round_trip() -> None:
+    p = ProfileConfig(flags="")
+    assert (p.reasoning_effort, p.reasoning_budget) == ("default", -1)
+    p2 = ProfileConfig(flags="", reasoning_effort="high", reasoning_budget=2048)
+    assert ProfileConfig.model_validate(p2.model_dump()) == p2
+
+
+def test_profile_reasoning_rejects_bad_values() -> None:
+    with pytest.raises(ValueError):
+        ProfileConfig(flags="", reasoning_effort="turbo")  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        ProfileConfig(flags="", reasoning_budget=-2)
+
+
+def test_saved_profiles_omit_default_reasoning_keys(tmp_path: Path) -> None:
+    target = tmp_path / "profiles.toml"
+    cfg = ProfilesConfig(
+        profile={
+            "plain": ProfileConfig(flags=""),
+            "tuned": ProfileConfig(flags="", reasoning_effort="low", reasoning_budget=512),
+        }
+    )
+    save_profiles_config(cfg, target)
+    saved = tomllib.loads(target.read_text(encoding="utf-8"))["profile"]
+    assert "reasoning_effort" not in saved["plain"]
+    assert "reasoning_budget" not in saved["plain"]
+    assert (saved["tuned"]["reasoning_effort"], saved["tuned"]["reasoning_budget"]) == ("low", 512)
+    assert load_profiles_config(target).profile["tuned"].reasoning_budget == 512

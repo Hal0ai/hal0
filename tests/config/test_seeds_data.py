@@ -195,3 +195,13 @@ class TestColdImportOrder:
         import hal0.config.seeds as seeds_mod
 
         assert seeds_mod.seed_profiles() == schema_mod.SEED_PROFILES
+
+
+class TestSeedThinkingOffIsTyped:
+    """agent/coding turn thinking off through the typed field, not flags."""
+
+    def test_agent_and_coding_use_enable_thinking(self) -> None:
+        for name in ("agent", "coding"):
+            seed = SEED_PROFILES[name]
+            assert "--reasoning" not in seed["flags"], name
+            assert seed["enable_thinking"] is False, name

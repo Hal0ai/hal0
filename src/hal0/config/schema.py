@@ -299,6 +299,69 @@ REMOVED_SLOT_KEYS: dict[str, str] = {
 }
 
 
+#: ``speculation`` on a profile (ADR-0031): ``auto`` drafts through whatever the
+#: model carries (a drafter file, else MTP heads), ``off`` never speculates,
+#: ``ngram`` uses n-gram lookup and needs no extra file.
+SpeculationMode = Literal["auto", "off", "ngram"]
+
+#: ``reasoning_effort`` (profile and slot ``[tune]``): ``default`` sends no
+#: effort hint; the rest are the effort levels a reasoning model may honour.
+ReasoningEffort = Literal["default", "minimal", "low", "medium", "high", "xhigh", "max"]
+
+#: Plausible context window range for a profile's ``ctx_size`` (the launch
+#: path's ``--ctx-size``). Below 128 llama-server cannot run; above 2**24 is
+#: never a real window.
+CTX_SIZE_MIN = 128
+CTX_SIZE_MAX = 2**24
+
+
+#: The tune keys a slot's sparse ``[tune]`` table may override, in field order.
+TUNE_KEYS: tuple[str, ...] = (
+    "ctx_size",
+    "enable_thinking",
+    "reasoning_effort",
+    "reasoning_budget",
+    "vision",
+    "speculation",
+)
+
+
+class SlotTuneConfig(BaseModel):
+    """A slot's sparse ``[tune]`` override table.
+
+    ADR-0029 keeps every launch tune on the profile; this table lets one slot
+    override a few of them without a new profile. Every field is optional and
+    ``None`` means "inherit the profile's value", so only what the operator
+    changed is stored.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    ctx_size: int | None = Field(
+        default=None,
+        ge=CTX_SIZE_MIN,
+        le=CTX_SIZE_MAX,
+        description="Context window override (--ctx-size). None = the profile's.",
+    )
+    enable_thinking: bool | None = Field(
+        default=None, description="Reasoning default override. None = the profile's."
+    )
+    reasoning_effort: ReasoningEffort | None = Field(
+        default=None, description="Reasoning effort override. None = the profile's."
+    )
+    reasoning_budget: int | None = Field(
+        default=None,
+        ge=-1,
+        description="Reasoning token budget override (-1 = unlimited). None = the profile's.",
+    )
+    vision: Literal["auto", "off"] | None = Field(
+        default=None, description="Vision override. None = the profile's."
+    )
+    speculation: SpeculationMode | None = Field(
+        default=None, description="Speculation override. None = the profile's."
+    )
+
+
 class SlotConfig(BaseModel):
     """Pydantic model for a single slot's TOML config (slots/<name>.toml).
 
@@ -602,6 +665,15 @@ class SlotConfig(BaseModel):
         ),
     )
 
+    tune: SlotTuneConfig | None = Field(
+        default=None,
+        description=(
+            "[tune] table — sparse per-slot overrides of the profile's tune "
+            "(ctx_size, enable_thinking, reasoning_effort, reasoning_budget, "
+            "vision, speculation). Absent = the slot runs its profile as-is."
+        ),
+    )
+
     @model_validator(mode="before")
     @classmethod
     def _refuse_tuning_keys(cls, data: Any) -> Any:
@@ -640,9 +712,9 @@ class SlotConfig(BaseModel):
 
     @model_serializer(mode="wrap")
     def _dump_as_toml_tables(self, handler: Any) -> dict[str, Any]:
-        """Dump in the on-disk table shape: ``[server]`` / ``[npu]`` / ``[image]``.
+        """Dump in the on-disk table shape: ``[server]`` / ``[npu]`` / ``[image]`` / ``[tune]``.
 
-        An all-default ``[server]``, an absent ``[npu]`` and an all-default
+        An all-default ``[server]``, an absent ``[npu]``, an empty ``[tune]`` and an all-default
         ``[image]`` are elided, so a slot that never set them doesn't grow an
         empty table on disk, and the typed ``image_gen`` field dumps under its
         TOML name ``image``. Readers of a dumped config therefore see the same
@@ -658,6 +730,10 @@ class SlotConfig(BaseModel):
                 data.pop("server")
         if data.get("npu") is None:
             data.pop("npu", None)
+        # An absent or all-None ``[tune]`` carries no override: no table.
+        tune = data.get("tune")
+        if not (isinstance(tune, dict) and any(v is not None for v in tune.values())):
+            data.pop("tune", None)
         # ``by_alias`` dumps already say ``image``; either way elide the default.
         image = data.pop("image_gen", None)
         image = data.pop("image", None) if image is None else image
@@ -757,11 +833,6 @@ _LANE_DEVICE: dict[str, str] = {
     "cuda": "CUDA0",
     "cpu": "none",
 }
-
-#: ``speculation`` on a profile (ADR-0031): ``auto`` drafts through whatever the
-#: model carries (a drafter file, else MTP heads), ``off`` never speculates,
-#: ``ngram`` uses n-gram lookup and needs no extra file.
-SpeculationMode = Literal["auto", "off", "ngram"]
 
 #: Shared tail of every draft bundle: the KV cache types for the draft context.
 _DRAFT_KV = " --spec-draft-type-k q8_0 --spec-draft-type-v q8_0"
@@ -881,13 +952,6 @@ def family_flags(*hints: str | None, architecture: str | None = None) -> str:
 DEVICE_DEFAULT_PROFILES: dict[str, str] = DEVICE_TO_DEFAULT_PROFILE
 
 
-#: Plausible context window range for a profile's ``ctx_size`` (the launch
-#: path's ``--ctx-size``). Below 128 llama-server cannot run; above 2**24 is
-#: never a real window.
-CTX_SIZE_MIN = 128
-CTX_SIZE_MAX = 2**24
-
-
 class ProfileConfig(BaseModel):
     """One ``[profile.<name>]`` entry in profiles.toml: a complete tune.
 
@@ -933,6 +997,15 @@ class ProfileConfig(BaseModel):
         default="auto",
         description="'auto' loads the model's mmproj when it has one; 'off' never does.",
     )
+    reasoning_effort: ReasoningEffort = Field(
+        default="default",
+        description="Reasoning effort hint for slots running this profile; 'default' sends none.",
+    )
+    reasoning_budget: int = Field(
+        default=-1,
+        ge=-1,
+        description="Reasoning token budget (--reasoning-budget); -1 = unlimited.",
+    )
     speculation: SpeculationMode = Field(
         default="auto",
         description=(
@@ -957,6 +1030,28 @@ class ProfileConfig(BaseModel):
         default="",
         description="Human label for what this profile is for (the dashboard card headline).",
     )
+
+
+def sparse_profile_body(body: dict[str, Any]) -> dict[str, Any]:
+    """Drop the reasoning defaults from a dumped profile body, in place.
+
+    A profile at ``reasoning_effort="default"`` / ``reasoning_budget=-1`` keeps
+    those keys off disk and out of exported envelopes, so files and published
+    checksums that predate the fields are unchanged and an older hal0 does not
+    refuse them. Returns *body* for chaining.
+    """
+    if body.get("reasoning_effort") == "default":
+        body.pop("reasoning_effort")
+    if body.get("reasoning_budget") == -1:
+        body.pop("reasoning_budget")
+    return body
+
+
+def profile_sparse_dump(
+    profile: ProfileConfig, *, mode: Literal["python", "json"] = "python"
+) -> dict[str, Any]:
+    """``profile`` dumped without ``None`` values or default reasoning keys."""
+    return sparse_profile_body(profile.model_dump(mode=mode, exclude_none=True))
 
 
 class ProfilesConfig(BaseModel):
@@ -3603,6 +3698,7 @@ __all__ = [
     "SecurityConfig",
     "ServerConfig",
     "SlotConfig",
+    "SlotTuneConfig",
     "SlotsConfig",
     "SpeculationMode",
     "TelemetryConfig",

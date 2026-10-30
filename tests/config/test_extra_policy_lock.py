@@ -54,6 +54,7 @@ _EXPECTED_EXTRA_POLICY: dict[str, str] = {
     # field (tests/slots/test_slot_writers_load.py), so a stray key fails the
     # load naming itself.
     "SlotConfig": "forbid",
+    "SlotTuneConfig": "forbid",
     "HardwareInfo": "allow",
     "GPUInfo": "allow",
     "NPUInfo": "allow",

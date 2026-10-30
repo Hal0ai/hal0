@@ -45,6 +45,7 @@ from hal0.config.schema import (
     StackConfig,
     StacksConfig,
     UpstreamsConfig,
+    sparse_profile_body,
 )
 from hal0.errors import Hal0Error
 
@@ -758,7 +759,7 @@ def _unflatten_slot_toml(cfg: SlotConfig) -> dict[str, Any]:
     """
     data = cfg.model_dump(mode="python", exclude_none=True)
     model = data.pop("model", {})
-    tables = {k: data.pop(k) for k in ("server", "npu", "image") if k in data}
+    tables = {k: data.pop(k) for k in ("server", "npu", "image", "tune") if k in data}
     out: dict[str, Any] = {"slot": data, "model": model}
     out.update(tables)
     return out
@@ -919,6 +920,8 @@ def save_profiles_config(cfg: ProfilesConfig, path: Path | None = None) -> None:
     # so writing them would freeze a stale copy on disk (the #PS-2 bug).
     profiles = data.get("profile") or {}
     data["profile"] = {name: entry for name, entry in profiles.items() if name not in SEED_PROFILES}
+    for entry in data["profile"].values():
+        sparse_profile_body(entry)
     # A quarantined entry (invalid as stored) is written back exactly as it
     # was, unless the operator has since defined that name validly.
     for name, held in cfg.quarantined.items():
