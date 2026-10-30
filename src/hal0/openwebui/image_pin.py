@@ -42,17 +42,19 @@ OPENWEBUI_UNIT_NAME = "hal0-openwebui.service"
 
 #: The digest every box converges on — the release-carried pin (spec
 #: 2026-08-30 §2, same single-owner posture as
-#: hal0.memory.engine_upgrade.HINDSIGHT_API_PIN). Three declaration sites
-#: by design, and this is only one of them: this constant, the shipped
-#: unit (packaging/systemd/hal0-openwebui.service — pins the digest twice,
-#: ExecStartPre pull + ExecStart run), and installer/install.sh. Bump all
-#: three together; tests/installer/test_owui_pin_lockstep.py fails naming
+#: hal0.memory.engine_upgrade.HINDSIGHT_API_PIN). Five declaration sites
+#: by design, and this is only one of them: this constant (plus
+#: OPENWEBUI_PIN_LABEL, its 12-char prefix), the shipped unit
+#: (packaging/systemd/hal0-openwebui.service — pins the digest twice,
+#: ExecStartPre pull + ExecStart run), installer/install.sh, and the
+#: duplicate in tests/openwebui/test_prewire_smoke.py. Bump all
+#: together; tests/installer/test_owui_pin_lockstep.py fails naming
 #: whichever site is stale.
 OPENWEBUI_IMAGE_PIN = "sha256:03443b8de6b617da9d900edd09b4bf1cb0ddbfdcba6afb42c548336a0b821ded"
 
 #: Human-readable label for the pin, shown next to the digest in status
 #: surfaces. Informational only — the digest is the authority.
-OPENWEBUI_PIN_LABEL = "156503890315"
+OPENWEBUI_PIN_LABEL = "03443b8de6b6"
 
 #: Matches the pinned ref in the unit / install.sh, capturing the digest.
 #: e.g. ``ghcr.io/open-webui/open-webui@sha256:7f1b0a…`` → ``sha256:7f1b0a…``.
