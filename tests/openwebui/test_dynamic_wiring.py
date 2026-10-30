@@ -449,3 +449,51 @@ def test_resolve_threads_bridge_key_and_mcp(tmp_hal0_home: str) -> None:
     on = resolve_dynamic_env_overrides(bridge_key="hal0bk_x.y", mcp_enabled=True)
     assert json.loads(on["TOOL_SERVER_CONNECTIONS"])[0]["key"] == "hal0bk_x.y"
     assert resolve_dynamic_env_overrides(mcp_enabled=False)["TOOL_SERVER_CONNECTIONS"] is None
+
+
+def _enable_bridge(home: str) -> None:
+    etc = Path(home) / "etc" / "hal0"
+    etc.mkdir(parents=True, exist_ok=True)
+    (etc / "hal0.toml").write_text("[bridge]\nenabled = true\n", encoding="utf-8")
+
+
+def test_resolve_never_creates_bridge_db(tmp_hal0_home: str) -> None:
+    """Root installer path: bridge on, no DB yet → no file is created (spec B1)."""
+    from hal0.config import paths
+    from hal0.openwebui.wiring import resolve_dynamic_env_overrides
+
+    _enable_bridge(tmp_hal0_home)
+    assert not paths.bridge_db().exists()
+    out = resolve_dynamic_env_overrides()
+    assert out["TOOL_SERVER_CONNECTIONS"] is None
+    assert not paths.bridge_db().exists()
+
+
+def test_resolve_base_url_follows_openai_api_base_urls(tmp_hal0_home: str) -> None:
+    from hal0.openwebui.wiring import resolve_dynamic_env_overrides
+
+    etc = Path(tmp_hal0_home) / "etc" / "hal0"
+    etc.mkdir(parents=True, exist_ok=True)
+    (etc / "openwebui.env").write_text(
+        "OPENAI_API_BASE_URLS=http://10.9.8.7:9999/v1;http://other/v1\n", encoding="utf-8"
+    )
+    out = resolve_dynamic_env_overrides(bridge_key="hal0bk_x.y", mcp_enabled=True)
+    urls = [e["url"] for e in json.loads(out["TOOL_SERVER_CONNECTIONS"])]
+    assert urls and all(u.startswith("http://10.9.8.7:9999/mcp/") for u in urls)
+
+
+def test_resolve_scopes_from_stored_client(tmp_hal0_home: str) -> None:
+    from hal0.bridge.store import BridgeStore
+    from hal0.config import paths
+    from hal0.openwebui.wiring import resolve_dynamic_env_overrides
+
+    _enable_bridge(tmp_hal0_home)
+    store = BridgeStore(paths.bridge_db())
+    store.open()
+    store.add_client("openwebui", "test", scopes=["agents", "memory", "admin"])
+    out = resolve_dynamic_env_overrides(bridge_key="hal0bk_x.y")
+    ids = [e["info"]["id"] for e in json.loads(out["TOOL_SERVER_CONNECTIONS"])]
+    assert "hal0-admin" in ids
+    out = resolve_dynamic_env_overrides(bridge_key="hal0bk_x.y", bridge_scopes=["memory"])
+    ids = [e["info"]["id"] for e in json.loads(out["TOOL_SERVER_CONNECTIONS"])]
+    assert ids == ["hal0-memory"]

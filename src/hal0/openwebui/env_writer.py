@@ -122,6 +122,7 @@ import sys
 import textwrap
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 
 def _load_write_env_atomic():
@@ -552,15 +553,9 @@ def _mcp_env_block(bridge_key: str, base_url: str, scopes: frozenset[str]) -> di
     return {"TOOL_SERVER_CONNECTIONS": json.dumps(entries, separators=(",", ":"))}
 
 
-class _Preserve(str):
-    """Override value meaning "keep the existing line, write nothing if absent"."""
-
-    __slots__ = ()
-
-
 #: Sentinel for :func:`write_openwebui_env`: the caller wants a managed key kept but
 #: has no fresh value to render (the bridge key is not in hand).
-_PRESERVE = _Preserve("")
+_PRESERVE: Any = object()
 
 
 def _web_search_env_block(provider: dict[str, str]) -> dict[str, str]:
@@ -608,7 +603,7 @@ def dynamic_env_overrides(
     ``TOOL_SERVER_CONNECTIONS`` is the block for ``bridge_key`` when one is in hand;
     :data:`_PRESERVE` when ``mcp_enabled`` but no key is (keep the existing line);
     ``None`` when ``mcp_enabled`` is false. ``mcp_base_url`` defaults to hal0's
-    container-side origin (``_HAL0_V1_URL`` without ``/v1``).
+    container-side origin (the shipped ``OPENAI_API_BASE_URLS`` without ``/v1``).
     """
     merged: dict[str, str | None] = dict.fromkeys(_DYNAMIC_ENV_KEYS, None)
     if embed_model_id:
@@ -618,7 +613,9 @@ def dynamic_env_overrides(
     if search_provider:
         merged.update(_web_search_env_block(search_provider))
     if bridge_key:
-        base = mcp_base_url or _HAL0_V1_URL.removesuffix("/v1")
+        base = mcp_base_url or (
+            default_openwebui_env()["OPENAI_API_BASE_URLS"].split(";")[0].removesuffix("/v1")
+        )
         merged.update(_mcp_env_block(bridge_key, base, bridge_scopes))
     elif mcp_enabled:
         merged["TOOL_SERVER_CONNECTIONS"] = _PRESERVE
