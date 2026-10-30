@@ -41,7 +41,7 @@ import contextlib
 import logging
 import tomllib
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -52,6 +52,8 @@ from hal0.model_meta import canonical_device
 
 if TYPE_CHECKING:
     from hal0.capabilities.config import CapabilitySelection
+    from hal0.config.schema import SlotTuneConfig
+    from hal0.profiles import ResolvedProfile
 
 # NOTE: hal0.capabilities.* is imported lazily inside the store methods.
 # This module is imported by hal0.slots.manager (the write_slot_toml
@@ -809,11 +811,112 @@ def no_model_assigned_message(slot_name: str) -> str:
     )
 
 
+# ── tune-effective merge (Track 3 Lane B) ───────────────────────────────────
+
+#: The keys :func:`tune_effective` resolves, in field order.
+TUNE_EFFECTIVE_KEYS: tuple[str, ...] = (
+    "ctx_size",
+    "enable_thinking",
+    "reasoning_effort",
+    "reasoning_budget",
+    "vision",
+    "speculation",
+)
+
+
+@dataclass
+class TuneEffective:
+    """A profile's tune values merged with per-slot ``[tune]`` overrides.
+
+    Every field that the profile supplies carries its runtime value. Every
+    field the slot overrides carries the slot's value instead. ``sources``
+    records ``"profile"`` or ``"slot"`` for each key, so consumers
+    (the delegator, the console, the launch path) can show provenance.
+
+    The type is deliberately a dataclass, not a Pydantic model: it is
+    computed from two already-validated inputs and is never serialised
+    directly to TOML.
+    """
+
+    ctx_size: int | None = None
+    enable_thinking: bool | None = None
+    reasoning_effort: str = "default"
+    reasoning_budget: int = -1
+    vision: str = "auto"
+    speculation: str = "auto"
+    sources: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def any_overrides(self) -> bool:
+        """True when at least one field came from the slot rather than the profile."""
+        return any(v == "slot" for v in self.sources.values())
+
+    def to_dict(self) -> dict[str, object]:
+        """The dict shape the REST/MCP slot-summary route emits."""
+        out: dict[str, object] = {}
+        for key in TUNE_EFFECTIVE_KEYS:
+            v = getattr(self, key)
+            if (v is not None and not (isinstance(v, str) and v in ("default", "auto"))) or key in self.sources:
+                out[key] = v
+        if self.sources:
+            out["sources"] = self.sources
+        return out
+
+
+def tune_effective(
+    profile: ResolvedProfile | None,  # TYPE_CHECKING-only, avoids circular import
+    slot_tune: SlotTuneConfig | None = None,  # TYPE_CHECKING-only
+) -> TuneEffective:
+    """Merge a profile's tune values with per-slot ``[tune]`` overrides.
+
+    Every key in :data:`TUNE_EFFECTIVE_KEYS` is resolved profile-first:
+    the profile's value is the default; the slot's ``[tune]`` field, when
+    not ``None``, takes precedence and is recorded in ``sources`` as
+    ``"slot"`` (everything else is ``"profile"``).
+    """
+    sources: dict[str, str] = {}
+
+    def _resolve(key: str, profile_val: object, slot_val: object) -> object:
+        if slot_val is not None:
+            sources[key] = "slot"
+            return slot_val
+        sources[key] = "profile"
+        return profile_val
+
+    if profile is not None:
+        p_ctx = profile.ctx_size
+        p_thinking = profile.enable_thinking
+        p_effort = profile.reasoning_effort
+        p_budget = profile.reasoning_budget
+        p_vision = profile.vision
+        p_spec = profile.speculation
+    else:
+        p_ctx = None
+        p_thinking = None
+        p_effort = "default"
+        p_budget = -1
+        p_vision = "auto"
+        p_spec = "auto"
+
+    st = slot_tune
+    return TuneEffective(
+        ctx_size=_resolve("ctx_size", p_ctx, st.ctx_size if st else None),
+        enable_thinking=_resolve("enable_thinking", p_thinking, st.enable_thinking if st else None),
+        reasoning_effort=_resolve("reasoning_effort", p_effort, st.reasoning_effort if st else None),
+        reasoning_budget=_resolve("reasoning_budget", p_budget, st.reasoning_budget if st else None),
+        vision=_resolve("vision", p_vision, st.vision if st else None),
+        speculation=_resolve("speculation", p_spec, st.speculation if st else None),
+        sources=sources,
+    )
+
+
 __all__ = [
+    "TUNE_EFFECTIVE_KEYS",
     "ChangeSet",
     "FileState",
     "SlotConfigStore",
     "SlotSelection",
+    "TuneEffective",
     "merge_slot_config",
     "no_model_assigned_message",
     "reject_removed_slot_keys",
@@ -822,6 +925,7 @@ __all__ = [
     "reject_unknown_slot_keys",
     "slot_scalar_table",
     "slot_write_lock",
+    "tune_effective",
     "unassigned_model_remedy",
     "unknown_slot_config_keys",
     "write_slot_toml",
