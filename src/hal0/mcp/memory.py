@@ -79,6 +79,7 @@ import structlog
 
 from hal0.errors import Hal0Error
 from hal0.memory.namespace import (
+    DOCUMENT_ID_PATTERN,
     MemoryNamespaceError,
     resolve_read_datasets,
     resolve_write_dataset,
@@ -366,8 +367,13 @@ async def _memory_add(
             "source is server-injected from client_id and cannot be supplied by callers"
         )
     document_id = _optional(args, "document_id", str)
-    if document_id is not None and not _AGENT_ID_LIKE.match(document_id):
-        raise MemorySchemaError("document_id must match the identity grammar (alnum/-/_ ≤64 chars)")
+    if document_id is not None and not DOCUMENT_ID_PATTERN.match(document_id):
+        raise MemorySchemaError(
+            "document_id must match the identity grammar (alnum/-/_ ≤64 chars), "
+            "or be the private:<agent>:<id> a private add returned"
+        )
+    if document_id is not None and document_id.startswith("private:") and not private:
+        raise MemorySchemaError("a private:<agent>:<id> document_id needs a private write")
     entities = _optional_entities(args)
     observation_scopes = args.get("observation_scopes")
     strategy = _optional(args, "strategy", str)

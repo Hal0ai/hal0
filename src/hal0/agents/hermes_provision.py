@@ -5557,14 +5557,22 @@ def read_profile_memory_private(config_path: Path) -> bool:
     except FileNotFoundError:
         return False
     except (OSError, UnicodeDecodeError) as exc:
-        log.warning("hermes.memory_private_unreadable", path=str(config_path), error=str(exc))
+        log.warning(
+            "hermes.memory_private_unreadable",
+            path=str(config_path),
+            error=_yaml_error_summary(exc),
+        )
         return True
     try:
         import yaml  # type: ignore[import-untyped]
 
         data = yaml.safe_load(text)
     except Exception as exc:
-        log.warning("hermes.memory_private_unparseable", path=str(config_path), error=str(exc))
+        log.warning(
+            "hermes.memory_private_unparseable",
+            path=str(config_path),
+            error=_yaml_error_summary(exc),
+        )
         return True
     if data is None:
         return False

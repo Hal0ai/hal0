@@ -130,6 +130,31 @@ def test_add_default_writes_to_shared_no_headers(
     assert call["metadata"] == {}
 
 
+def test_add_accepts_the_private_document_id_a_private_add_returned(
+    client: TestClient, stub_wrapper: StubWrapper
+) -> None:
+    headers = {"X-hal0-Agent": "alice", "X-hal0-Private": "1"}
+    r = client.post(
+        "/api/memory/add",
+        json={"text": "again", "document_id": "private:alice:notes"},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    assert stub_wrapper.add_calls[0]["document_id"] == "private:alice:notes"
+
+
+def test_add_refuses_a_private_document_id_on_a_shared_write(
+    client: TestClient, stub_wrapper: StubWrapper
+) -> None:
+    r = client.post(
+        "/api/memory/add",
+        json={"text": "x", "document_id": "private:alice:notes"},
+        headers={"X-hal0-Agent": "alice"},
+    )
+    assert r.status_code == 400, r.text
+    assert stub_wrapper.add_calls == []
+
+
 def test_add_private_header_promotes_dataset_to_caller_namespace(
     client: TestClient, stub_wrapper: StubWrapper
 ) -> None:

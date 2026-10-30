@@ -1391,3 +1391,17 @@ def test_prompt_and_retain_schema_do_not_overclaim_privacy() -> None:
     block = provider.system_prompt_block()
     assert "only you" not in block and "only you" not in prov.RETAIN_SCHEMA["description"]
     assert "reflect is not yet filtered" in block
+
+
+def test_a_yaml_parse_error_never_puts_the_config_text_in_the_log(tmp_path, caplog) -> None:
+    """config.yaml carries ``Authorization: Bearer ...`` headers; PyYAML's message quotes the line."""
+    home = tmp_path / "profiles" / "leaky"
+    home.mkdir(parents=True)
+    (home / "config.yaml").write_text(
+        "mcp_servers:\n  hal0-memory:\n    headers: {Authorization: Bearer hunter2-secret, : [\n"
+    )
+    provider, fake = _provider(str(home))
+    with caplog.at_level("WARNING"):
+        assert _retain(provider, fake) is True
+    assert "hunter2-secret" not in caplog.text
+    assert "hal0.memory_private" in caplog.text

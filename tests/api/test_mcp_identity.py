@@ -119,3 +119,12 @@ async def test_bridge_key_private_write_stays_in_its_own_namespace(monkeypatch) 
         assert out["status"] == "ok", out
     assert [c["dataset"] for c in wrapper.calls] == ["private:cc", "private:cc"]
     assert {c["client_id"] for c in wrapper.calls} == {"cc"}
+
+
+def test_document_id_pattern_takes_the_returned_private_id_only() -> None:
+    from hal0.memory.namespace import DOCUMENT_ID_PATTERN as pat
+
+    for ok in ("notes", "a-b_c", "private:alice:notes", "private:alice:private:bob:x"[:0] or "x"):
+        assert pat.match(ok), ok
+    for bad in ("", "a:b", "private:alice", "private::x", "../x", "private:a:b:c", "x" * 65):
+        assert not pat.match(bad), bad

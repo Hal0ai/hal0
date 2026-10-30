@@ -38,6 +38,7 @@ from hal0.memory.extraction_env import MEMORY_ALIAS, ExtractionLimits, memory_en
 from hal0.memory.hindsight_provider import bank_to_namespace
 from hal0.memory.namespace import (
     DEFAULT_DATASET,
+    DOCUMENT_ID_PATTERN,
     MemoryNamespaceError,
     resolve_read_datasets,
     resolve_write_dataset,
@@ -1071,10 +1072,15 @@ async def memory_add(request: Request) -> dict[str, Any]:
 
     document_id = body.get("document_id")
     if document_id is not None and (
-        not isinstance(document_id, str) or not _AGENT_ID_PATTERN.match(document_id)
+        not isinstance(document_id, str) or not DOCUMENT_ID_PATTERN.match(document_id)
     ):
         raise BadRequest(
             "memory_add 'document_id' must match the identity grammar (alnum/-/_ ≤64 chars)",
+            details={"path": "/api/memory/add"},
+        )
+    if document_id is not None and document_id.startswith("private:") and not private:
+        raise BadRequest(
+            "memory_add a private:<agent>:<id> 'document_id' needs a private write",
             details={"path": "/api/memory/add"},
         )
 

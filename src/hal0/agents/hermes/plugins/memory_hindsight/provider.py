@@ -146,6 +146,19 @@ def _memory_private_config_path(hermes_home: str | None) -> str:
     return os.path.join(base, "config.yaml")
 
 
+def _yaml_error_summary(exc: Exception) -> str:
+    """Name and position of a parse error, safe to log.
+
+    ``str()`` of a PyYAML error quotes the offending line, and a profile
+    config.yaml carries ``Authorization: Bearer ...`` headers. (The plugin runs
+    in the Hermes venv and cannot import hal0's helper of the same name.)
+    """
+    mark = getattr(exc, "problem_mark", None)
+    if mark is not None:
+        return f"{type(exc).__name__} at line {mark.line + 1}, column {mark.column + 1}"
+    return type(exc).__name__
+
+
 def _read_memory_private(path: str) -> bool:
     """Whether the profile's config.yaml opts into private memory (``hal0.memory_private``).
 
@@ -162,7 +175,9 @@ def _read_memory_private(path: str) -> bool:
         return False
     except (OSError, UnicodeDecodeError) as exc:
         logger.warning(
-            "hal0-memory: cannot read %s (%s); treating hal0.memory_private as true", path, exc
+            "hal0-memory: cannot read %s (%s); treating hal0.memory_private as true",
+            path,
+            type(exc).__name__,
         )
         return True
     try:
@@ -171,7 +186,9 @@ def _read_memory_private(path: str) -> bool:
         data = yaml.safe_load(text)
     except Exception as exc:
         logger.warning(
-            "hal0-memory: cannot parse %s (%s); treating hal0.memory_private as true", path, exc
+            "hal0-memory: cannot parse %s (%s); treating hal0.memory_private as true",
+            path,
+            _yaml_error_summary(exc),
         )
         return True
     if data is None:

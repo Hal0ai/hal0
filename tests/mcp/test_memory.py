@@ -631,3 +631,35 @@ async def test_memory_add_private_arg_refuses_anonymous(wrapper: _FakeWrapper) -
     out = await disp("memory_add", {"text": "x", "private": True})
     assert out["status"] == "error"
     assert wrapper.add_calls == []
+
+
+@pytest.mark.asyncio
+async def test_memory_add_accepts_the_private_id_add_returned(
+    wrapper: _FakeWrapper, dispatcher: Any
+) -> None:
+    out = await dispatcher(
+        "memory_add", {"text": "again", "private": True, "document_id": "private:pi-coder:notes"}
+    )
+    assert out["status"] == "ok"
+    assert wrapper.add_calls[0]["document_id"] == "private:pi-coder:notes"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad", ["a:b", "private:x", "private::x", "private:a b:c", "x/y", "p:" + "a" * 70]
+)
+async def test_memory_add_still_rejects_other_document_ids(
+    wrapper: _FakeWrapper, dispatcher: Any, bad: str
+) -> None:
+    out = await dispatcher("memory_add", {"text": "x", "document_id": bad})
+    assert out["status"] == "error"
+    assert wrapper.add_calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_shared_write_cannot_send_a_private_prefixed_document_id(
+    wrapper: _FakeWrapper, dispatcher: Any
+) -> None:
+    out = await dispatcher("memory_add", {"text": "x", "document_id": "private:pi-coder:notes"})
+    assert out["status"] == "error" and out["error"]["code"] == "mcp.memory_schema"
+    assert wrapper.add_calls == []

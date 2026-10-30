@@ -231,3 +231,15 @@ def test_reprovision_leaves_the_header_alone_when_the_root_opted_out_of_wiring(
         {"hal0": {"wire_mcp": False}, "mcp_servers": _servers("1", "1")},
     )
     assert _privates(cfg) == ("1", "1")
+
+
+def test_a_yaml_parse_error_never_puts_the_config_text_in_the_log(tmp_path: Path) -> None:
+    import structlog.testing
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "mcp_servers:\n  hal0-memory:\n    headers: {Authorization: Bearer hunter2-secret, : [\n"
+    )
+    with structlog.testing.capture_logs() as logs:
+        assert hp.read_profile_memory_private(cfg) is True
+    assert logs and "hunter2-secret" not in repr(logs)
