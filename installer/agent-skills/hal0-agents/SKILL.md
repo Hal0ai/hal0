@@ -13,7 +13,7 @@ description: >
 
 ## MCP Endpoint
 
-Remote (auth required): `https://hal0.thinmint.dev/mcp/agents/mcp`
+Remote (auth required): `https://<hal0-host>/mcp/agents/mcp`
 Auth: Bearer token (set `HAL0_MCP_TOKEN` env var)
 
 ## Available Tools

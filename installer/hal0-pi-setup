@@ -2,9 +2,10 @@
 set -euo pipefail
 
 # hal0-pi-setup — One-command setup to add all hal0 MCP servers to Pi
-# Usage: hal0-pi-setup [--token TOKEN] [--remote] [--force] [--dry-run]
+# Usage: hal0-pi-setup [--token TOKEN] [--remote] [--host HOST] [--force] [--dry-run]
 #   --token TOKEN     Bearer token (or set HAL0_MCP_TOKEN env var)
 #   --remote          Force remote HTTPS endpoints even on hal0 itself
+#   --host HOST       hal0 host for remote endpoints (or set HAL0_MCP_HOST)
 #   --force           Re-add servers that already exist
 #   --dry-run         Print what would be done without doing it
 #   -h, --help        Show this help
@@ -22,17 +23,19 @@ info() { echo -e "  ${CYAN}→${NC} $1"; }
 
 # ── Parse args ──────────────────────────────────────────────
 TOKEN="${HAL0_MCP_TOKEN:-}"
+HOST="${HAL0_MCP_HOST:-}"
 REMOTE=false
 DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --token) TOKEN="$2"; shift 2 ;;
+    --host) HOST="$2"; shift 2 ;;
     --remote) REMOTE=true; shift ;;
     --force) FORCE=true; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
     -h|--help)
-      sed -n '2,12p' "$0" | sed 's/^# //'
+      sed -n '2,13p' "$0" | sed 's/^# //'
       exit 0 ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
@@ -80,11 +83,16 @@ else
     echo "  Get your token from the hal0 dashboard → API Keys → pi-agent"
     exit 1
   fi
-  info "Using remote HTTPS endpoints at hal0.thinmint.dev"
+  if [ -z "$HOST" ]; then
+    echo -e "${RED}Error:${NC} Remote host required for remote endpoints."
+    echo "  Set HAL0_MCP_HOST env var or pass --host <hal0-host>"
+    exit 1
+  fi
+  info "Using remote HTTPS endpoints at $HOST"
   ENDPOINTS=(
-    [hal0-memory]="https://hal0.thinmint.dev/mcp/memory/mcp"
-    [hal0-agents]="https://hal0.thinmint.dev/mcp/agents/mcp"
-    [hal0-admin]="https://hal0.thinmint.dev/mcp/admin/mcp"
+    [hal0-memory]="https://$HOST/mcp/memory/mcp"
+    [hal0-agents]="https://$HOST/mcp/agents/mcp"
+    [hal0-admin]="https://$HOST/mcp/admin/mcp"
   )
   DESCRIPTIONS=(
     [hal0-memory]="hal0 Memory MCP — vector+graph memory bank"

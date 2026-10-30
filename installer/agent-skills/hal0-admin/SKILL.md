@@ -17,7 +17,7 @@ slots, models, hardware, benchmarks, services, and MCP server management.
 ## MCP Endpoint
 
 Local (on hal0): `http://127.0.0.1:8080/mcp/admin/mcp` (no auth)
-Remote: `https://hal0.thinmint.dev/mcp/admin/mcp` (Bearer token)
+Remote (Bearer token): `https://<hal0-host>/mcp/admin/mcp`
 
 Tool namespace: `mcp__local_mcp` (when installed via `pi mcp add`)
 
