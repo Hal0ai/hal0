@@ -13,7 +13,7 @@ copy and point a slot at it (``hal0 slot edit <slot> --profile <new>``).
 from __future__ import annotations
 
 import json as jsonlib
-from typing import Any
+from typing import Any, get_args
 
 import typer
 from rich.console import Console
@@ -28,7 +28,7 @@ from hal0.cli._shared import (
     api_put,
     die,
 )
-from hal0.config.schema import CTX_SIZE_MAX, CTX_SIZE_MIN
+from hal0.config.schema import CTX_SIZE_MAX, CTX_SIZE_MIN, ReasoningEffort
 
 app = typer.Typer(
     name="profile",
@@ -72,6 +72,7 @@ def profile_list(
     table.add_column("Ctx", justify="right")
     table.add_column("Thinking")
     table.add_column("Vision")
+    table.add_column("Reasoning")
     table.add_column("Speculation")
     table.add_column("Runner")
     table.add_column("Intent")
@@ -92,6 +93,7 @@ def profile_list(
                 "",
                 "",
                 "",
+                "",
                 ", ".join(used_by) if used_by else "—",
             )
             continue
@@ -100,6 +102,7 @@ def profile_list(
             f"{p['ctx_size']:,}" if isinstance(p.get("ctx_size"), int) else "native",
             _tri(p.get("enable_thinking")),
             str(p.get("vision") or "auto"),
+            _reasoning_cell(p),
             str(p.get("speculation") or "auto"),
             p.get("runner") or "—",
             p.get("intent") or "—",
@@ -139,6 +142,8 @@ def profile_show(
         "ctx_size",
         "enable_thinking",
         "vision",
+        "reasoning_effort",
+        "reasoning_budget",
         "speculation",
         "runner",
         "cloned_from",
@@ -173,6 +178,29 @@ def _refuse_mtp(value: str | None) -> None:
     if value is not None:
         typer.echo(f"Error: {_MTP_RENAMED}", err=True)
         raise typer.Exit(code=2)
+
+
+_REASONING_EFFORTS = get_args(ReasoningEffort)
+
+
+def _check_effort(value: str | None) -> str | None:
+    if value is not None and value not in _REASONING_EFFORTS:
+        raise typer.BadParameter(
+            f"--reasoning-effort must be one of {', '.join(_REASONING_EFFORTS)} (got {value!r})"
+        )
+    return value
+
+
+def _reasoning_cell(p: dict[str, Any]) -> str:
+    """``effort/budget`` for the list table; a dash when both are at their defaults."""
+    effort = p.get("reasoning_effort") or "default"
+    budget = p.get("reasoning_budget")
+    parts = []
+    if effort != "default":
+        parts.append(str(effort))
+    if isinstance(budget, int) and budget != -1:
+        parts.append(f"budget {budget}")
+    return " / ".join(parts) or "—"
 
 
 def _check_auto_off(option: str, value: str | None) -> str | None:
@@ -212,6 +240,17 @@ def profile_create(
     vision: str | None = typer.Option(
         None, "--vision", help="'auto' loads the model's mmproj when it has one; 'off' never does."
     ),
+    reasoning_effort: str | None = typer.Option(
+        None,
+        "--reasoning-effort",
+        help="Reasoning effort hint: default|minimal|low|medium|high|xhigh|max ('default' sends none).",
+    ),
+    reasoning_budget: int | None = typer.Option(
+        None,
+        "--reasoning-budget",
+        min=-1,
+        help="Reasoning token budget (-1 = unlimited, 0 = no thinking).",
+    ),
     speculation: str | None = typer.Option(
         None,
         "--speculation",
@@ -227,6 +266,7 @@ def profile_create(
 ) -> None:
     """Create a custom profile (POST /api/profiles); ``--from`` duplicates one first."""
     _check_auto_off("--vision", vision)
+    _check_effort(reasoning_effort)
     _refuse_mtp(mtp)
     _check_speculation(speculation)
     url = _api_base()
@@ -245,6 +285,8 @@ def profile_create(
             "ctx_size",
             "enable_thinking",
             "vision",
+            "reasoning_effort",
+            "reasoning_budget",
             "speculation",
             "runner",
             "intent",
@@ -257,6 +299,8 @@ def profile_create(
         ("ctx_size", ctx_size),
         ("enable_thinking", thinking),
         ("vision", vision),
+        ("reasoning_effort", reasoning_effort),
+        ("reasoning_budget", reasoning_budget),
         ("speculation", speculation),
         ("runner", runner),
         ("intent", intent),
@@ -296,6 +340,17 @@ def profile_edit(
         False, "--clear-thinking", help="Unset the reasoning default."
     ),
     vision: str | None = typer.Option(None, "--vision", help="'auto' | 'off'."),
+    reasoning_effort: str | None = typer.Option(
+        None,
+        "--reasoning-effort",
+        help="Reasoning effort hint: default|minimal|low|medium|high|xhigh|max.",
+    ),
+    reasoning_budget: int | None = typer.Option(
+        None, "--reasoning-budget", min=-1, help="Reasoning token budget (-1 = unlimited)."
+    ),
+    clear_reasoning_budget: bool = typer.Option(
+        False, "--clear-reasoning-budget", help="Unset the budget (back to unlimited)."
+    ),
     speculation: str | None = typer.Option(None, "--speculation", help="'auto' | 'off' | 'ngram'."),
     mtp: str | None = typer.Option(None, "--mtp", hidden=True, help="Removed: use --speculation."),
     runner: str | None = typer.Option(
@@ -306,12 +361,17 @@ def profile_edit(
 ) -> None:
     """Edit a custom profile (PUT /api/profiles/{name}); omitted options keep their value."""
     _check_auto_off("--vision", vision)
+    _check_effort(reasoning_effort)
     _refuse_mtp(mtp)
     _check_speculation(speculation)
     if ctx_size is not None and clear_ctx_size:
         raise typer.BadParameter("--ctx-size and --clear-ctx-size are mutually exclusive")
     if thinking is not None and clear_thinking:
         raise typer.BadParameter("--thinking/--no-thinking and --clear-thinking are exclusive")
+    if reasoning_budget is not None and clear_reasoning_budget:
+        raise typer.BadParameter(
+            "--reasoning-budget and --clear-reasoning-budget are mutually exclusive"
+        )
 
     payload: dict[str, Any] = {}
     if flags is not None:
@@ -326,6 +386,12 @@ def profile_edit(
         payload["enable_thinking"] = None
     if vision is not None:
         payload["vision"] = vision
+    if reasoning_effort is not None:
+        payload["reasoning_effort"] = reasoning_effort
+    if reasoning_budget is not None:
+        payload["reasoning_budget"] = reasoning_budget
+    if clear_reasoning_budget:
+        payload["reasoning_budget"] = None
     if speculation is not None:
         payload["speculation"] = speculation
     if runner is not None:
@@ -336,7 +402,8 @@ def profile_edit(
         console.print(
             "[bold yellow]No fields provided.[/bold yellow]  Pass at least one of --flags, "
             "--ctx-size/--clear-ctx-size, --thinking/--no-thinking/--clear-thinking, "
-            "--vision, --speculation, --runner, --intent."
+            "--vision, --reasoning-effort, --reasoning-budget/--clear-reasoning-budget, "
+            "--speculation, --runner, --intent."
         )
         raise typer.Exit(code=2)
 

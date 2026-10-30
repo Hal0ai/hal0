@@ -1264,6 +1264,25 @@ def set_admin_route_map(*source: object) -> None:
 # passthrough ``args`` object), so a hint authored once reaches every
 # agent that can call the tool. Keys must be catalog tools (guarded by
 # :func:`_validate_catalog`).
+_PROFILE_REASONING_PROPS: dict[str, Any] = {
+    "reasoning_effort": {
+        "type": "string",
+        "enum": ["default", "minimal", "low", "medium", "high", "xhigh", "max"],
+        "description": (
+            "Reasoning effort hint (--reasoning-effort) for slots running this "
+            "profile; 'default' sends none. Needs a runner build that supports it."
+        ),
+    },
+    "reasoning_budget": {
+        "type": ["integer", "null"],
+        "minimum": -1,
+        "description": (
+            "Reasoning token budget (--reasoning-budget): -1 = unlimited, 0 = no "
+            "thinking. On update, null clears it back to -1."
+        ),
+    },
+}
+
 TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
     "memory_add": {
         "properties": {
@@ -1670,6 +1689,7 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
                 "enum": ["auto", "off"],
                 "description": "'auto' loads the model's mmproj when it has one; 'off' never does.",
             },
+            **_PROFILE_REASONING_PROPS,
             "speculation": {
                 "type": "string",
                 "enum": ["auto", "off", "ngram"],
@@ -1723,6 +1743,7 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
                 "enum": ["auto", "off"],
                 "description": "'auto' loads the model's mmproj when it has one; 'off' never does.",
             },
+            **_PROFILE_REASONING_PROPS,
             "speculation": {
                 "type": "string",
                 "enum": ["auto", "off", "ngram"],
@@ -3119,7 +3140,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "stack_list": "List every stack, with the active stack + drift status.",
     "stack_status": "Get one stack's detail, active flag, and drift status.",
     "profile_list": "List every profile in the catalog (seed + custom).",
-    "profile_status": "Get one profile's resolved detail (flags, ctx_size, thinking, vision, speculation, runner, used-by).",
+    "profile_status": "Get one profile's resolved detail (flags, ctx_size, thinking, vision, reasoning_effort, reasoning_budget, speculation, runner, used-by).",
     "profile_export": (
         "Export a profile to a portable .hal0profile.json envelope (no secrets/host-paths)."
     ),
@@ -3288,12 +3309,14 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "stack_delete": "Delete a custom stack from the catalog (gated).",
     "profile_create": (
         "Create a custom profile — the tune a slot launches a model with: flags, ctx_size, "
-        "enable_thinking, vision (auto|off), speculation (auto|off|ngram), optional runner — e.g. "
+        "enable_thinking, vision (auto|off), reasoning_effort, reasoning_budget, speculation "
+        "(auto|off|ngram), optional runner — e.g. "
         "authored from a model card's requirements (gated)."
     ),
     "profile_update": (
         "Update an existing custom profile (sparse: omitted fields are kept; ctx_size=null "
-        "clears the window, runner='' clears the runner) (gated). Slots running it pick the "
+        "clears the window, reasoning_budget=null returns to unlimited, runner='' clears the runner) "
+        "(gated). Slots running it pick the "
         "change up at their next restart."
     ),
     "profile_import": "Import a profile from a .hal0profile.json envelope (gated).",
@@ -3368,7 +3391,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "mcp_client_list": "List MCP clients seen in the recent audit window.",
     "mcp_catalog": "The static installable-MCP-servers catalog.",
     "profile_generate": (
-        "Generate a draft profile (flags, ctx_size, enable_thinking, vision, speculation, runner) from "
+        "Generate a draft profile (flags, ctx_size, enable_thinking, vision, reasoning_effort, reasoning_budget, speculation, runner) from "
         "a registered model or a HuggingFace repo — compute-only, persists nothing. Args: exactly one of model_id / hf_repo (required), "
         "optional name, optional use_llm=true to summarize the model card via the platform "
         "utility LLM (degrades to heuristics on failure). Returns {profile, warnings, sources} "

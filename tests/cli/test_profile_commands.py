@@ -332,3 +332,62 @@ def test_mtp_flag_exits_2_with_the_rename_message(api: _Api, verb: str) -> None:
     assert result.exit_code == 2, result.output
     assert "profile 'mtp' is now 'speculation' (auto | off | ngram)" in result.output
     assert api.posts == [] and api.puts == []
+
+
+def test_cli_profile_create_reasoning_flags_in_body(api: _Api) -> None:
+    result = runner.invoke(
+        profile_commands.app,
+        ["create", "thinker", "--reasoning-effort", "high", "--reasoning-budget", "0"],
+    )
+    assert result.exit_code == 0, result.output
+    assert api.posts == [
+        ("/api/profiles", {"name": "thinker", "reasoning_effort": "high", "reasoning_budget": 0})
+    ]
+
+
+def test_cli_profile_create_rejects_bad_effort(api: _Api) -> None:
+    result = runner.invoke(profile_commands.app, ["create", "x", "--reasoning-effort", "wild"])
+    assert result.exit_code == 2, result.output
+    assert api.posts == []
+
+
+def test_cli_profile_edit_reasoning_and_clear_budget(api: _Api) -> None:
+    result = runner.invoke(
+        profile_commands.app,
+        ["edit", "mine", "--reasoning-effort", "low", "--clear-reasoning-budget"],
+    )
+    assert result.exit_code == 0, result.output
+    assert api.puts == [
+        ("/api/profiles/mine", {"reasoning_effort": "low", "reasoning_budget": None})
+    ]
+
+
+def test_cli_profile_edit_budget_and_clear_are_exclusive(api: _Api) -> None:
+    result = runner.invoke(
+        profile_commands.app,
+        ["edit", "mine", "--reasoning-budget", "10", "--clear-reasoning-budget"],
+    )
+    assert result.exit_code == 2, result.output
+    assert api.puts == []
+
+
+def test_cli_profile_create_from_copies_reasoning(api: _Api) -> None:
+    api.profiles["agent"].update(reasoning_effort="medium", reasoning_budget=1024)
+    result = runner.invoke(profile_commands.app, ["create", "agent-2", "--from", "agent"])
+    assert result.exit_code == 0, result.output
+    body = api.posts[0][1]
+    assert (body["reasoning_effort"], body["reasoning_budget"]) == ("medium", 1024)
+
+
+def test_cli_profile_list_shows_reasoning_column(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = [
+        {"name": "a", "reasoning_effort": "high", "reasoning_budget": 2048},
+        {"name": "b", "reasoning_effort": "default", "reasoning_budget": -1},
+    ]
+    _stub_reachable(monkeypatch)
+    monkeypatch.setattr(profile_commands, "api_get", lambda _p, **_k: payload)
+    monkeypatch.setattr(profile_commands, "console", Console(width=220))
+    result = runner.invoke(profile_commands.app, ["list"], env={"COLUMNS": "220"})
+    assert result.exit_code == 0, result.output
+    assert "high" in result.output
+    assert "budget 2048" in result.output

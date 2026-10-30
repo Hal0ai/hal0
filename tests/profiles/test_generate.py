@@ -515,3 +515,41 @@ def test_generate_use_llm_without_context_warns_and_skips_call(tmp_hal0_home: st
     )
 
     assert any("no LLM call context was provided" in w for w in result.warnings)
+
+
+def test_generate_draft_carries_seed_reasoning_fields(
+    tmp_hal0_home: str, rocm_nodes: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The draft is rebuilt field by field from the seed: reasoning must survive."""
+    import asyncio
+    import dataclasses
+
+    from hal0.profiles import generate as gen
+
+    real = gen._resolve_seed_or_fall_back
+
+    def _tuned(seed_name: str, warnings: list[str]):
+        return dataclasses.replace(
+            real(seed_name, warnings), reasoning_effort="low", reasoning_budget=256
+        )
+
+    monkeypatch.setattr(gen, "_resolve_seed_or_fall_back", _tuned)
+    reg = ModelRegistry(registry_dir=tmp_hal0_home + "/registry")
+    reg.add(
+        Model(
+            id="qwen3-4b-q4_k_m",
+            name="Qwen3 4B",
+            path="/models/qwen3-4b.gguf",
+            capabilities=["chat"],
+            quant="Q4_K_M",
+            size_bytes=4_000_000_000,
+            architecture="qwen3",
+        )
+    )
+    result = asyncio.run(
+        generate_draft_profile(
+            model_id="qwen3-4b-q4_k_m", exported_at=_EXPORTED_AT, hw=_hw_rocm(), registry=reg
+        )
+    )
+    body = result.profile["profile"]
+    assert (body["reasoning_effort"], body["reasoning_budget"]) == ("low", 256)
