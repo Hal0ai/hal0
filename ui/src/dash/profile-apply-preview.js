@@ -78,6 +78,9 @@ function ctxText(p) {
 function thinkingText(p) {
 	return p?.enable_thinking === true ? "on" : p?.enable_thinking === false ? "off" : "auto";
 }
+const effortText = (p) => p?.reasoning_effort || "default";
+const budgetText = (p) =>
+	p?.reasoning_budget == null || p.reasoning_budget === -1 ? "unlimited" : String(p.reasoning_budget);
 const offAuto = (v) => (v === "off" ? "off" : "auto");
 const specText = (p) => (p?.speculation === "off" || p?.speculation === "ngram" ? p.speculation : "auto");
 
@@ -87,6 +90,8 @@ function tuneChanges(next, prev) {
 	const rows = [
 		["context", ctxText(prev), ctxText(next)],
 		["thinking", thinkingText(prev), thinkingText(next)],
+		["effort", effortText(prev), effortText(next)],
+		["budget", budgetText(prev), budgetText(next)],
 		["vision", offAuto(prev?.vision), offAuto(next?.vision)],
 		["speculation", specText(prev), specText(next)],
 	];
@@ -123,7 +128,7 @@ function tuneChanges(next, prev) {
  *
  * Returns `{ runtime: { unchanged, title, lanes }, lane, flags, tune,
  * restart }` or null. `flags` counts the flag pairs the swap adds, changes or
- * drops; `tune` lists the typed fields (context / thinking / vision / speculation)
+ * drops; `tune` lists the typed fields (context / thinking / effort / budget / vision / speculation)
  * that differ.
  */
 export function profileApplyPreview({

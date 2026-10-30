@@ -54,6 +54,8 @@ const CONFIG_ENRICHMENT_KEYS = [
   'priority',
   'ctx_effective',
   'ctx_source',
+  'tune',
+  'tune_effective',
   'conversion_blocked',
   'n_gpu_layers',
   'threads',

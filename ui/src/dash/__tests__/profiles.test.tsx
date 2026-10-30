@@ -636,11 +636,43 @@ describe('ProfileDrawer tune fields (ADR-0029)', () => {
       flags: '-fa on -b 2048',
       ctx_size: 32768,
       enable_thinking: false,
+      reasoning_effort: 'default',
+      reasoning_budget: -1,
       vision: 'off',
       speculation: 'off',
       intent: '',
       runner: '',
     })
+    act(() => root.unmount())
+  })
+
+  it('saves reasoning effort and budget; a blank budget saves -1', async () => {
+    const { host, root } = drawer('create')
+    setValue(field(host, 'pf-input-name') as HTMLInputElement, 'deep')
+    setValue(field(host, 'pf-select-effort') as HTMLSelectElement, 'high')
+    setValue(field(host, 'pf-input-budget') as HTMLInputElement, '2048')
+    await submit(host)
+    expect(createCalls[0]).toMatchObject({ reasoning_effort: 'high', reasoning_budget: 2048 })
+    createCalls.length = 0
+    setValue(field(host, 'pf-input-budget') as HTMLInputElement, '')
+    await submit(host)
+    expect(createCalls[0]).toMatchObject({ reasoning_effort: 'high', reasoning_budget: -1 })
+    act(() => root.unmount())
+  })
+
+  it('prefills effort and budget on edit, defaults on a new profile, rejects a bad budget', async () => {
+    const e = drawer('edit', { name: 'r', flags: '', reasoning_effort: 'low', reasoning_budget: 0 })
+    expect((field(e.host, 'pf-select-effort') as HTMLSelectElement).value).toBe('low')
+    expect((field(e.host, 'pf-input-budget') as HTMLInputElement).value).toBe('0')
+    act(() => e.root.unmount())
+    const { host, root } = drawer('create')
+    expect((field(host, 'pf-select-effort') as HTMLSelectElement).value).toBe('default')
+    expect((field(host, 'pf-input-budget') as HTMLInputElement).value).toBe('')
+    setValue(field(host, 'pf-input-name') as HTMLInputElement, 'badb')
+    setValue(field(host, 'pf-input-budget') as HTMLInputElement, 'lots')
+    await submit(host)
+    expect(createCalls).toHaveLength(0)
+    expect(host.textContent).toContain('whole number')
     act(() => root.unmount())
   })
 
@@ -806,6 +838,13 @@ describe('ProfileCard tune rows (ADR-0029)', () => {
     expect(rows).toContain('specoff')
     expect(rows).toContain('runnerStandard')
     expect(rows).toContain('-fa on')
+    act(() => root.unmount())
+  })
+
+  it('shows effort and budget', () => {
+    const { host, root } = card({ name: 'deep', flags: '', reasoning_effort: 'high', reasoning_budget: 2048 })
+    const rows = (host.querySelector('[data-testid="pf-tune-deep"]') as HTMLElement).textContent || ''
+    expect(rows).toContain('effort high · budget 2048')
     act(() => root.unmount())
   })
 

@@ -107,6 +107,8 @@ export function ThinkingIcon({ title }) {
  * bolt when the model carries a drafter (`draft` = its variant, from
  * `draftTagValue`), plus a thought bubble when `thinking` (a title string) is
  * given. `visionOff` dims the eye: the slot overrides vision off.
+ *
+ * @param {{ tag?: string | null, draft?: string | null, thinking?: string | null, visionOff?: boolean }} props
  */
 export function ModalityTag({ tag, draft, thinking = null, visionOff = false }) {
   if (!tag && !draft && typeof thinking !== 'string') return null

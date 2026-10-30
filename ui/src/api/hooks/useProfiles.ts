@@ -16,6 +16,8 @@ import { ENDPOINTS } from '../endpoints'
 export type ProfileVision = 'auto' | 'off'
 export type ProfileSpeculation = 'auto' | 'off' | 'ngram'
 
+export type ReasoningEffort = 'default' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+
 export interface Profile {
   name: string
   flags: string
@@ -26,6 +28,11 @@ export interface Profile {
    *  A structured-output request that states no preference keeps the chat
    *  template's default instead of the off default. */
   enable_thinking?: boolean | null
+  /** Reasoning effort passed to llama-server (--reasoning-effort); "default"
+   *  emits nothing. Needs a runner build that supports it. */
+  reasoning_effort?: ReasoningEffort
+  /** Thinking-token budget; -1 = unlimited (emits nothing), 0 = end immediately. */
+  reasoning_budget?: number
   /** Vision: "auto" loads the model's mmproj when present, "off" never does. */
   vision?: ProfileVision
   /** Speculative decoding (ADR-0031): "auto" uses the model's drafter or MTP
@@ -71,6 +78,8 @@ export interface ProfileBody {
   /** 128..16777216, or null to clear on PUT. Omit to leave alone. */
   ctx_size?: number | null
   enable_thinking?: boolean | null
+  reasoning_effort?: ReasoningEffort
+  reasoning_budget?: number
   vision?: ProfileVision
   speculation?: ProfileSpeculation
   /** Optional runtime binding — a RUNNER_IMAGES key (D4). On PUT, "" clears
