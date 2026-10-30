@@ -673,7 +673,7 @@ async def test_round_trip_through_the_pgvector_fallback_is_shared(tmp_path: Path
 async def test_brain_memory_add_dispatches_shared(tmp_path: Path) -> None:
     provider = _FakeProvider()
     request = _request(tmp_path, provider=provider)
-    await bc._dispatch_tool(request, "memory_add", {"text": "CT151 is the utility box"}, board=None)
+    await bc._dispatch_tool(request, "memory_add", {"text": "The utility box is the small one"}, board=None)
     (kw,) = [kw for op, kw in provider.calls if op == "add"]
     assert kw["dataset"] == SHARED
     assert kw["client_id"] == BRAIN_PROFILE_AGENT_ID
