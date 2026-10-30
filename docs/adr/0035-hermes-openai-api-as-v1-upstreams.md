@@ -249,22 +249,30 @@ line above disagree.
    wired): profiles write to the shared pool. Every write carries an
    `agent:<id>` tag for provenance, and a caller picks private per call with
    `private: true` on `memory_add` or the `X-hal0-Private: 1` header. A profile
-   opts into private memory for all its writes with
+   opts into private memory for its memory facts with
    `hal0: {memory_private: true}`, which renders `"1"` on hal0-admin and
-   hal0-memory (both can write memory) and makes the Hermes memory plugin's
-   `hindsight_retain` private. The renderers write `"0"` for shared, never
+   hal0-memory (both can write memory), makes the Hermes memory plugin's
+   `hindsight_retain` private and, for `hal0-brain`, makes the dashboard
+   steward write private. Mental models and directives are bank-level in the
+   unified bank and are not covered. Only a missing key or null, false and the
+   strings false/no/0/off mean shared; any other value is private, in the
+   provisioner, the plugin and the doctor alike. The renderers write `"0"` for shared, never
    omit the header, so converge overwrites a stale or hand-set `"1"` on a
    profile that has not opted in. That includes the default profile, which
    `hal0 update` converges as well as `reprovision --repair`; the
-   `hermes_default_memory` doctor row reports it.
+   `hermes_default_memory` doctor row reports it. Nothing converges the
+   default profile periodically, so an opt-in added by hand takes
+   `reprovision --repair` (or the next `hal0 update`).
    `hal0-brain` joins the shared pool under its own identity,
    `hermes__hal0-brain`. Its persona `memory_namespace` and the identity
    card's `namespace` metadata still read `private:hermes__hal0-brain`; they
    are an identity key for the agent, not a privacy claim, since the steward
-   writes shared. Tag grammar: the memory provider owns `agent:` and
-   `visibility:` and drops any caller-supplied tag of either, compared
-   stripped and case-insensitively, also inside list-form
-   `observation_scopes` (#3136). A caller therefore cannot forge those tags.
+   writes shared. Tag grammar: the Hindsight memory provider owns `agent:` and
+   `visibility:` on every document write and drops any caller-supplied tag of
+   either, compared stripped and case-insensitively, also inside list-form
+   `observation_scopes` (#3136). Mental models, directives and the PgVector
+   fallback do not stamp them. A caller therefore cannot forge those tags on
+   a memory write.
    Which namespace a write reaches follows the caller's identity: a bridge
    key is bound to its own name and cannot address another agent's namespace,
    but a caller that is not a bridge key still states its identity in its own
@@ -276,7 +284,8 @@ line above disagree.
    the change stay private. `memory_curate` cannot release them (it edits a
    memory unit's text and state and takes no tags); the path is the engine
    proxy, `PATCH /api/memory/banks/<bank>/documents/<id>` with the full
-   `tags` list minus `visibility:private`, as `hal0 memory migrate unify` does.
+   `tags` list minus `visibility:private`, as `hal0 memory migrate unify` does. That is the unified-bank procedure;
+   with `unified_bank = false` private notes live in their own bank.
 10. **Visibility.** The Services page's OWUI card shows an "Agents" wired chip
    (`wired.agents`, from the server-side classifier). `hal0 doctor` has a
    `hermes-api` row, "Hermes API upstreams". Green on that row means the API

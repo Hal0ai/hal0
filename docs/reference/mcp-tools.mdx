@@ -13,7 +13,7 @@ on the main FastAPI app: `hal0-admin` at `/mcp/admin`, `hal0-memory` at
 admitted with [`hal0 bridge`](/docs/reference/cli-operator#hal0-bridge--admit-remote-coding-agents);
 it is mounted whenever `[bridge].enabled` is on (the default), and is 404 while it is off.
 
-Every Hermes profile is wired to both servers. hal0 writes `hal0-admin` and `hal0-memory` into each named profile's `config.yaml` as `hermes__<profile>`, with shared memory by default (`hal0: {memory_private: true}` in a profile's `config.yaml` makes all its writes private) and the box bearer, at provisioning and on every hal0-api reconcile sweep (120 s). A profile opts out with `hal0: {wire_mcp: false}`. `hal0 doctor` reports the state on the `hermes_profiles_mcp` row.
+Every Hermes profile is wired to both servers. hal0 writes `hal0-admin` and `hal0-memory` into each named profile's `config.yaml` as `hermes__<profile>`, with shared memory by default (`hal0: {memory_private: true}` in a profile's `config.yaml` makes its memory facts private; mental models and directives are bank-level in the unified bank and are not covered) and the box bearer, at provisioning and on every hal0-api reconcile sweep (120 s). A profile opts out with `hal0: {wire_mcp: false}`. The default profile is not converged periodically: after adding the opt-in to its `config.yaml` by hand, run `sudo hal0 agent reprovision hermes --repair` (or the next `hal0 update` does it). `hal0 doctor` reports the state on the `hermes_profiles_mcp` row, and on `hermes_default_memory` and `hermes_brain_memory` for the default and `hal0-brain` profiles.
 
 ## `hal0-admin` (`/mcp/admin`)
 

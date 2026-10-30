@@ -1380,3 +1380,14 @@ def test_initialize_ignores_a_stored_default_id_on_a_profile_home(
     p = Hal0MemoryProvider()
     p.initialize(session_id="s", hermes_home=str(_profile_home(tmp_path, "coder", "hermes")))
     assert p._client is not None and p._client.agent_id == "hermes__coder"
+
+
+def test_prompt_and_retain_schema_do_not_overclaim_privacy() -> None:
+    """Private notes are filtered from recall; reflect is not filtered yet."""
+    from hal0.agents.hermes.plugins.memory_hindsight import provider as prov
+
+    provider = Hal0MemoryProvider(client=Mock(spec=Hal0MemoryClient))
+    provider.initialize()
+    block = provider.system_prompt_block()
+    assert "only you" not in block and "only you" not in prov.RETAIN_SCHEMA["description"]
+    assert "reflect is not yet filtered" in block
