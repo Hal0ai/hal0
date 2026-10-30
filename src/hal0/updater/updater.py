@@ -4282,19 +4282,21 @@ class Updater:
         # ADR-0045: a release before per-slot [tune] refuses a slot file that
         # carries the table. Strip it (after the profile restore, which may put
         # slot files back) and leave a .bak-<stamp> copy of each file touched.
-        tune_backups: dict[str, Path] = {}
-        tune_stripped = _strip_slot_tune_for(
-            prior_path, job_id=self.job_id, backups_out=tune_backups
-        )
+        tune_backups: dict[str, _TuneBackup] = {}
         # Steps 8 + 8b via the same privileged primitive commit() uses: swap the
         # symlink back and re-pip the prior tree so the next hal0-api restart
         # actually serves the rolled-back version. On a pip failure activate
         # swaps *forward* again, so `current` and site-packages stay consistent.
+        # The strip sits inside the same protection: on any failure (a
+        # cancellation included) the slot files get their [tune] back and the
+        # reverted profile conversion is re-applied, so nothing is left half-done.
         try:
+            tune_stripped = _strip_slot_tune_for(
+                prior_path, job_id=self.job_id, backups_out=tune_backups
+            )
             activated = await seam.activate(prior_path.name)
-        except Exception:
-            # Still on this release: its slot files get their [tune] back. This
-            # comes first, so a re-conversion below sees the files as they were.
+        except BaseException:
+            # This comes first, so a re-conversion below sees the files as they were.
             _restore_slot_tune_backups(tune_backups, job_id=self.job_id)
             if profile_restore:
                 # Still on this release: convert again so it keeps running.
@@ -4396,28 +4398,55 @@ def _restore_profile_conversion_for(prior_path: Path, *, job_id: str | None) -> 
 _SLOT_TUNE_MARKER = Path("src/hal0/slots/tune.py")
 
 
-def _restore_slot_tune_backups(backups: dict[str, Path], *, job_id: str | None) -> list[str]:
-    """Put each slot file in ``backups`` ({file: its ``.bak-<stamp>``}) back as it was.
+@dataclasses.dataclass(frozen=True)
+class _TuneBackup:
+    """One slot file stripped of ``[tune]``: its backup and the content written."""
 
-    Writes in place (the file keeps its owner and mode) and removes the backup
-    once its file is restored; a backup that cannot be restored is kept and
-    logged. Returns the files restored. Never raises: it runs on a failure path.
+    backup: Path
+    stripped_sha256: str
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _restore_slot_tune_backups(
+    backups: dict[str, _TuneBackup], *, job_id: str | None, force: bool = False
+) -> list[str]:
+    """Put each slot file in ``backups`` back as it was before the strip.
+
+    A file whose content no longer matches what the strip wrote was edited
+    since (by an operator, or another process): it is left alone, its backup is
+    kept, and a line is logged. ``force`` skips that check, for a strip that
+    failed mid-write. Writes in place (the file keeps its owner and mode) and
+    removes the backup once restored. Returns the files restored. Never raises
+    on an OS error: it runs on a failure path.
     """
     restored: list[str] = []
-    for file, backup in backups.items():
+    for file, entry in backups.items():
         try:
-            Path(file).write_bytes(backup.read_bytes())
-            backup.unlink()
+            if not force and _sha256_file(Path(file)) != entry.stripped_sha256:
+                log.warning(
+                    "updater.slot_tune_restore_skipped_edited",
+                    job_id=job_id,
+                    path=file,
+                    backup=str(entry.backup),
+                )
+                continue
+            Path(file).write_bytes(entry.backup.read_bytes())
+            entry.backup.unlink()
         except OSError as exc:
             log.error(
                 "updater.slot_tune_restore_failed",
                 job_id=job_id,
                 path=file,
-                backup=str(backup),
+                backup=str(entry.backup),
                 error=str(exc),
             )
             continue
         restored.append(file)
+    for file in restored:  # a restored file needs no second restore
+        backups.pop(file, None)
     return restored
 
 
@@ -4425,20 +4454,21 @@ def _strip_slot_tune_for(
     prior_path: Path,
     *,
     job_id: str | None,
-    backups_out: dict[str, Path] | None = None,
+    backups_out: dict[str, _TuneBackup] | None = None,
 ) -> list[str]:
     """Remove ``[tune]`` from every slot file before rolling back to ``prior_path``
     when that release predates per-slot tune overrides.
 
     A slot file without a ``[tune]`` table is not touched (not even rewritten).
-    Each file that has one is first copied to ``<file>.bak-<UTC stamp>``, then
-    rewritten without the table. Returns the slot files changed; empty when the
-    target understands ``[tune]`` or no slot carries one.
+    Each file that has one is first copied to ``<file>.bak-<UTC stamp>`` (via a
+    temporary name, so a failed copy leaves no truncated backup), then rewritten
+    without the table. Returns the slot files changed; empty when the target
+    understands ``[tune]`` or no slot carries one.
 
-    ``backups_out`` receives ``{file: backup}`` for each file changed, so a
+    ``backups_out`` receives ``{file: _TuneBackup}`` for each file changed, so a
     caller whose later step fails can undo this with
-    :func:`_restore_slot_tune_backups`. If a write fails part-way, the files
-    already changed are restored before the error propagates.
+    :func:`_restore_slot_tune_backups`. If anything fails part-way (including
+    cancellation), the files already changed are restored before it propagates.
     """
     if (prior_path / _SLOT_TUNE_MARKER).is_file():
         return []
@@ -4450,7 +4480,7 @@ def _strip_slot_tune_for(
     if not slots_dir.is_dir():
         return []
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    backups: dict[str, Path] = backups_out if backups_out is not None else {}
+    backups: dict[str, _TuneBackup] = backups_out if backups_out is not None else {}
     changed: list[str] = []
     try:
         for path in sorted(slots_dir.glob("*.toml")):
@@ -4462,17 +4492,29 @@ def _strip_slot_tune_for(
                 continue
             if "tune" not in data:
                 continue
-            backup = path.with_name(f"{path.name}.bak-{stamp}")
-            shutil.copy2(path, backup)
-            backups[str(path)] = backup
             data.pop("tune")
-            path.write_text(tomli_w.dumps(data), encoding="utf-8")
+            text = tomli_w.dumps(data)  # before any file work: a failure here leaves nothing
+            backup = path.with_name(f"{path.name}.bak-{stamp}")
+            partial = path.with_name(f"{path.name}.bak-{stamp}.part")
+            try:
+                shutil.copy2(path, partial)
+                partial.replace(backup)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    partial.unlink()
+                raise
+            backups[str(path)] = _TuneBackup(
+                backup, hashlib.sha256(text.encode("utf-8")).hexdigest()
+            )
+            path.write_text(text, encoding="utf-8")
             changed.append(str(path))
             log.info(
                 "updater.slot_tune_stripped", job_id=job_id, path=str(path), backup=str(backup)
             )
-    except Exception:
-        _restore_slot_tune_backups(backups, job_id=job_id)
+    except BaseException:
+        # Nothing else touches these files inside this window, so restore without
+        # the edited-since check (the file being written may be half-written).
+        _restore_slot_tune_backups(backups, job_id=job_id, force=True)
         raise
     return changed
 
