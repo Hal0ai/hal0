@@ -432,7 +432,9 @@ def test_profile_memory_private_reads_hal0_key() -> None:
     assert hp.profile_memory_private({"hal0": {"memory_private": True}}) is True
     assert hp.profile_memory_private({"hal0": {"memory_private": False}}) is False
     assert hp.profile_memory_private({"hal0": "junk"}) is False
-    assert hp.profile_memory_private({"hal0": {"memory_private": "yes"}}) is False
+    # One rule: only absent/null/false/"false|no|0|off" is shared; a typo fails closed.
+    assert hp.profile_memory_private({"hal0": {"memory_private": "yes"}}) is True
+    assert hp.profile_memory_private({"hal0": {"memory_private": "off"}}) is False
 
 
 def test_wire_named_profiles_rewrites_stale_private_header(
