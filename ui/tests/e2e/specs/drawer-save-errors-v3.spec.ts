@@ -74,7 +74,7 @@ test.describe('Slot drawer — rejected writes', () => {
     // NGL lives behind the Advanced disclosure now (Task 11a).
     await page.getByTestId('slot-hw-advanced').click()
     await page.getByTestId('slot-hw-ngl').fill('24')
-    await drawer(page).locator('button:has-text("Save")').click()
+    await drawer(page).getByRole('button', { name: 'Save', exact: true }).click()
 
     // The envelope message is surfaced verbatim next to the Save button…
     await expect(drawer(page)).toContainText('unknown slot config key(s): n_gpu_layerss')
@@ -107,7 +107,7 @@ test.describe('Slot drawer — rejected writes', () => {
     // successful write WOULD restart.
     await page.getByTestId('slot-hw-advanced').click()
     await page.getByTestId('slot-hw-ngl').fill('24')
-    await drawer(page).locator('button:has-text("Save")').click()
+    await drawer(page).getByRole('button', { name: 'Save', exact: true }).click()
 
     await expect(drawer(page)).toContainText('failed to rewrite primary.toml')
     await expect(drawer(page)).toBeVisible()

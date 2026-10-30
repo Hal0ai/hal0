@@ -142,7 +142,7 @@ test.describe('Slot edit controls (/slots)', () => {
     await page.goto('/#slots/primary')
     await openAdvanced(page)
     await page.getByTestId('slot-hw-ngl').fill('24')
-    await page.locator('.drawer button:has-text("Save")').click()
+    await page.locator('.drawer').getByRole('button', { name: 'Save', exact: true }).click()
     await expect.poll(() => puts.length).toBeGreaterThan(0)
     for (const key of ['mtp', 'enable_thinking', 'vision']) {
       expect(puts[0]).not.toHaveProperty(key)
@@ -188,7 +188,7 @@ test.describe('Slot edit controls (/slots)', () => {
     await page.goto('/#slots/primary')
     await openAdvanced(page)
     await page.getByTestId('slot-hw-ngl').fill('24')
-    await page.locator('.drawer button:has-text("Save")').click()
+    await page.locator('.drawer').getByRole('button', { name: 'Save', exact: true }).click()
     await expect.poll(() => puts.length).toBeGreaterThan(0)
     expect(puts[0].n_gpu_layers).toBe(24)
     // NGL is a TOP-LEVEL slot field now, not a [model] default — and no
@@ -214,7 +214,7 @@ test.describe('Slot edit controls (/slots)', () => {
     await page.goto('/#slots/primary')
     await openAdvanced(page)
     await page.getByTestId('slot-hw-ngl').fill('')
-    await page.locator('.drawer button:has-text("Save")').click()
+    await page.locator('.drawer').getByRole('button', { name: 'Save', exact: true }).click()
     await expect.poll(() => puts.length).toBeGreaterThan(0)
     expect(puts[0]).toHaveProperty('n_gpu_layers', -1)
   })
@@ -289,7 +289,7 @@ test.describe('Slot edit controls (/slots)', () => {
     // on this backend row, so it falls back to the raw key).
     await expect(page.getByTestId('slot-hw-runtime')).toContainText('standard')
     await page.getByTestId('slot-hw-lane').getByRole('button', { name: 'Vulkan' }).click()
-    await page.locator('.drawer button:has-text("Save")').click()
+    await page.locator('.drawer').getByRole('button', { name: 'Save', exact: true }).click()
     await expect.poll(() => puts.length).toBeGreaterThan(0)
     expect(puts[0]).toMatchObject({ device: 'gpu-vulkan' })
     // A device flip is a hardware change — the cold restart fires in the
@@ -343,7 +343,7 @@ test.describe('Slot edit controls (/slots)', () => {
     await page.getByTestId('slot-hw-threads').fill('8')
     await page.getByTestId('slot-hw-debug-pin-open').click()
     await page.getByTestId('slot-hw-image-pin').fill('ghcr.io/example/runner:test')
-    await page.locator('.drawer button:has-text("Save")').click()
+    await page.locator('.drawer').getByRole('button', { name: 'Save', exact: true }).click()
     await expect.poll(() => puts.length).toBeGreaterThan(0)
     expect(puts[0]).toMatchObject({
       n_gpu_layers: 0,
@@ -557,7 +557,7 @@ test.describe('Slot edit controls (/slots)', () => {
     // Touch a real field: only that field rides the write; never a context key.
     await page.getByTestId('slot-hw-advanced').click()
     await page.getByTestId('slot-hw-ngl').fill('24')
-    await page.locator('.drawer button:has-text("Save")').click()
+    await page.locator('.drawer').getByRole('button', { name: 'Save', exact: true }).click()
     await expect.poll(() => puts.length).toBeGreaterThan(0)
     expect(puts[0]).toEqual({ n_gpu_layers: 24 })
     expect(patches).toEqual([])
@@ -598,7 +598,7 @@ test.describe('Slot edit controls (/slots)', () => {
 
     await page.goto('/#slots/primary')
     // Click Save immediately — no field edits.
-    await page.locator('.drawer button:has-text("Save")').click()
+    await page.locator('.drawer').getByRole('button', { name: 'Save', exact: true }).click()
     await expect(page.locator('.drawer')).toHaveCount(0)
     expect(puts).toEqual([])
   })
@@ -654,7 +654,7 @@ test.describe('Slot edit controls (/slots)', () => {
     // Make a real config change so the emitted body can prove `default` stays absent.
     await openAdvanced(page)
     await page.getByTestId('slot-hw-ngl').fill('24')
-    await page.locator('.drawer button:has-text("Save")').click()
+    await page.locator('.drawer').getByRole('button', { name: 'Save', exact: true }).click()
     await expect.poll(() => puts.length).toBeGreaterThan(0)
     expect(puts[0]).toHaveProperty('n_gpu_layers', 24)
     expect(puts[0]).not.toHaveProperty('default')

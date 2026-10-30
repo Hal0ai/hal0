@@ -1849,22 +1849,23 @@ function EditSlotDrawer({ open, slot, onClose }) {
 														// The window is the one each CANDIDATE would launch with
 														// under the STAGED config. A staged (valid) Context override
 														// is sent as `ctx`, which wins server-side; otherwise the
-														// STAGED profile NAME goes out and the server resolves it per
-														// candidate (profile ctx_size, else the candidate's native
-														// window). An empty selection runs the type seed, so that is
-														// the name sent — never the saved `slot.profile`, and never
-														// the saved window (`ctx_effective` may carry an override
-														// the operator has staged away).
+														// slot NAME goes out so the server resolves the saved profile
+														// plus sparse [tune] override for each candidate. If the
+														// operator staged a different profile, send that profile
+														// instead because it is not yet present in the saved slot.
 														onOpenChange={(isOpen) => {
 															if (!isOpen || compatible.length === 0) return;
 															const stagedCtx = tuneBody(tuneForm).ctx_size;
 															const windowArg =
 																stagedCtx && !tuneErrors(tuneForm).ctx_size
 																	? { ctx: stagedCtx }
-																	: {
-																			profile:
-																				profileSel || effectiveProfileName(slot),
-																		};
+																	: profileSel !== (slot.profile || "")
+																		? {
+																				profile:
+																					profileSel ||
+																					effectiveProfileName({ type: slot.type }),
+																			}
+																		: { slot: slot.name };
 															modelListFeasibility.mutate({
 																models: compatible.map((m) => ({
 																	model_id: m.id,

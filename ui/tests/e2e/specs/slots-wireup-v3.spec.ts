@@ -105,7 +105,7 @@ test.describe('Slots v3 wire-up (/slots)', () => {
     // NGL (slot-owned hardware) sits behind the Advanced disclosure.
     await page.getByTestId('slot-hw-advanced').click()
     await page.getByTestId('slot-hw-ngl').fill('24')
-    await page.locator('.drawer button:has-text("Save")').click()
+    await page.locator('.drawer').getByRole('button', { name: 'Save', exact: true }).click()
     await expect.poll(() => putBodies.length).toBeGreaterThan(0)
     expect(putBodies[0]).toEqual({ n_gpu_layers: 24 })
     await expect(page.locator('.drawer')).toHaveCount(0)

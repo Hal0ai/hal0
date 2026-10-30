@@ -312,10 +312,10 @@ describe('slot drawer Tune block', () => {
     act(() => root.unmount())
   })
 
-  it('feasibility probe sends the staged ctx override (wins), else the staged profile', () => {
+  it('feasibility probe sends the staged ctx override (wins), else the slot resolver', () => {
     const { root } = mount(SLOT)
     click('slot-model-swap')
-    expect(feasCalls[0]).toEqual({ models: [{ model_id: 'qwen', profile: 'agent-chat' }] })
+    expect(feasCalls[0]).toEqual({ models: [{ model_id: 'qwen', slot: 'chat' }] })
     act(() => root.unmount())
     document.body.innerHTML = ''
     feasCalls.length = 0
@@ -325,11 +325,11 @@ describe('slot drawer Tune block', () => {
     act(() => staged.root.unmount())
   })
 
-  it('feasibility probe ignores an invalid staged ctx and a profile-less slot uses the type seed', () => {
+  it('feasibility probe ignores an invalid staged ctx and still uses the slot resolver', () => {
     const { root } = mount({ ...SLOT, profile: '', tune: {} })
     typeInto('tune-ctx_size-input', '64')
     click('slot-model-swap')
-    expect(feasCalls[0]).toEqual({ models: [{ model_id: 'qwen', profile: 'chat' }] })
+    expect(feasCalls[0]).toEqual({ models: [{ model_id: 'qwen', slot: 'chat' }] })
     act(() => root.unmount())
   })
 

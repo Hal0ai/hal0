@@ -1,7 +1,7 @@
 // hal0 v3 dashboard — GTT feasibility probe hook (drawer overhaul PR-3,
 // Task 7 / host-truth GTT feasibility signal, 993ea3b6).
 //
-// POST /api/models/feasibility body {models: [{model_id, ctx?, profile?}]} →
+// POST /api/models/feasibility body {models: [{model_id, ctx?, profile?, slot?}]} →
 // {results: [...]}. Batched so the model drawer can probe every slot
 // candidate in one round trip; a non-list `models` body 400s server-side.
 // The window tested is `ctx` when given (it wins), else the window the named
@@ -22,6 +22,8 @@ export interface FeasibilityQuery {
   ctx?: number
   /** Profile name the server resolves through the launch resolver. */
   profile?: string
+  /** Slot name whose profile plus sparse tune override the server resolves. */
+  slot?: string
 }
 
 export interface FeasibilityRequest {
@@ -39,7 +41,7 @@ export interface FeasibilityResult {
   /** The window the verdict was computed for; null when unknown. */
   ctx?: number | null
   /** Where `ctx` came from; null when unknown. */
-  ctx_source?: 'request' | 'profile' | 'native' | 'fallback' | null
+  ctx_source?: 'request' | 'slot' | 'profile' | 'native' | 'fallback' | null
 }
 
 export interface FeasibilityResponse {

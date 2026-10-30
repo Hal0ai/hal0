@@ -226,11 +226,11 @@ test.describe('Slot drawer — GTT feasibility (model-row fit chips)', () => {
     const listbox = await openRichSelect(trigger)
     // Fired once on the open transition — never per keystroke, never per row.
     await expect.poll(() => probes.length).toBe(1)
-    // The staged profile goes on the wire, never the CURRENT model's window:
-    // each candidate is sized under the profile it would run with.
+    // The slot goes on the wire so the server resolves its profile plus [tune]
+    // for each candidate.
     expect(probes[0].models.length).toBeGreaterThan(0)
     for (const m of probes[0].models) {
-      expect(m.profile).toBe('rocm')
+      expect(m.slot).toBe('primary')
       expect(m).not.toHaveProperty('ctx')
     }
     await expect(listbox.locator('[data-option-id="qwen3.6-27b-mtp"]')).toContainText('~14 GB')
@@ -245,11 +245,11 @@ test.describe('Slot drawer — GTT feasibility (model-row fit chips)', () => {
     await expect.poll(() => probes.length).toBe(2)
   })
 
-  test('a slot with no profile probes at its effective context instead', async ({ page }) => {
+  test('a slot with no profile still probes through the slot resolver', async ({ page }) => {
     const probes: any[] = []
     await page.route('**/api/models/feasibility', async (route) => {
       const body = route.request().postDataJSON() as {
-        models: { model_id: string; ctx?: number; profile?: string }[]
+        models: { model_id: string; ctx?: number; profile?: string; slot?: string }[]
       }
       probes.push(body)
       const results = body.models.map((m) => ({
@@ -272,7 +272,8 @@ test.describe('Slot drawer — GTT feasibility (model-row fit chips)', () => {
     await expect.poll(() => probes.length).toBe(1)
     expect(probes[0].models.length).toBeGreaterThan(0)
     for (const m of probes[0].models) {
-      expect(m.ctx).toBe(16384)
+      expect(m.slot).toBe('primary')
+      expect(m).not.toHaveProperty('ctx')
       expect(m).not.toHaveProperty('profile')
     }
   })

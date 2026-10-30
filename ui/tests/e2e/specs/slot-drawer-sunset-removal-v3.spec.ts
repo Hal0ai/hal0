@@ -161,7 +161,7 @@ test.describe('Slot drawer — sunset launch controls are gone (#1379)', () => {
     // behind the Advanced disclosure now (Task 11a).
     await page.getByTestId('slot-hw-advanced').click()
     await page.getByTestId('slot-hw-ngl').fill('24')
-    await page.locator('.drawer button:has-text("Save")').click()
+    await page.locator('.drawer').getByRole('button', { name: 'Save', exact: true }).click()
 
     await expect.poll(() => puts.length).toBe(1)
     expect(puts[0]).toHaveProperty('n_gpu_layers', 24)
@@ -189,7 +189,7 @@ test.describe('Slot drawer — sunset launch controls are gone (#1379)', () => {
     await expect(rowByLabel(page, /^Context \(ceiling\)$/)).toHaveCount(0)
     await page.getByTestId('slot-hw-advanced').click()
     await page.getByTestId('slot-hw-ngl').fill('24')
-    await page.locator('.drawer button:has-text("Save")').click()
+    await page.locator('.drawer').getByRole('button', { name: 'Save', exact: true }).click()
 
     await expect.poll(() => puts.length).toBe(1)
     expect(JSON.stringify(puts[0])).not.toMatch(/ctx|context/)
@@ -207,7 +207,7 @@ test.describe('Slot drawer — sunset launch controls are gone (#1379)', () => {
     // Threads lives behind the Advanced disclosure now (Task 11a).
     await page.getByTestId('slot-hw-advanced').click()
     await page.getByTestId('slot-hw-threads').fill('8')
-    await page.locator('.drawer button:has-text("Save")').click()
+    await page.locator('.drawer').getByRole('button', { name: 'Save', exact: true }).click()
 
     await expect.poll(() => puts.length).toBe(1)
     expect(puts[0]).toHaveProperty('threads', 8)
@@ -240,9 +240,7 @@ test.describe('Slot drawer — sunset launch controls are gone (#1379)', () => {
     await page.goto('/#slots/primary')
     await expect(drawer(page)).toBeVisible()
 
-    const note = page.getByTestId('slot-launch-tune-note')
-    await expect(note).toContainText(/profile/i)
-    await expect(note).toContainText(/Edit model/)
+    await expect(page.getByTestId('slot-tune-block')).toContainText(/profile/i)
     // The in-place editors are the destinations: the profile (the tune) and the
     // model (file facts).
     await expect(page.getByTestId('slot-profile-edit')).toBeVisible()
