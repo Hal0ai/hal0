@@ -47,9 +47,15 @@ export function FitChip({ verdict, neededMb }) {
 
 /** Eye glyph for the `vision` modality: a bare icon, not a chip, so it reads
  * as part of the model's name rather than as another tag. */
-export function VisionIcon() {
+export function VisionIcon({ off = false }) {
+  const title = off ? 'vision off for this slot' : 'vision'
   return (
-    <span className="modality-icon" title="vision" aria-label="vision" role="img">
+    <span
+      className={'modality-icon' + (off ? ' off' : '')}
+      title={title}
+      aria-label={title}
+      role="img"
+    >
       <svg {...svgProps}>
         <path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z" />
         <circle cx="8" cy="8" r="1.8" />
@@ -77,17 +83,42 @@ export function DrafterBolt({ variant }) {
   )
 }
 
+/** Thought-bubble glyph: the slot's effective thinking is on (bare icon, like the eye). */
+export function ThinkingIcon({ title }) {
+  return (
+    <span
+      className="modality-icon think"
+      title={title}
+      aria-label={title}
+      role="img"
+      data-testid="thinking-mark"
+    >
+      <svg {...svgProps}>
+        <path d="M3 9.5C1.8 8.7 1.5 6.2 3.2 5 4 2.8 7 2.2 8.5 3.8c1.8-.8 4 .4 4 2.4 1.4.8 1.2 3-.5 3.5-.6 1.3-2.6 1.6-3.6.6-1 .9-2.4.6-3-.4-.6.1-1.2 0-1.6-.4z" />
+        <circle cx="4.2" cy="13" r="0.8" />
+        <circle cx="2.4" cy="15" r="0.5" />
+      </svg>
+    </span>
+  )
+}
+
 /**
  * Modality marker: eye for vision, the plain text tag for the rest, plus a
  * bolt when the model carries a drafter (`draft` = its variant, from
- * `draftTagValue`).
+ * `draftTagValue`), plus a thought bubble when `thinking` (a title string) is
+ * given. `visionOff` dims the eye: the slot overrides vision off.
  */
-export function ModalityTag({ tag, draft }) {
-  if (!tag && !draft) return null
+export function ModalityTag({ tag, draft, thinking = null, visionOff = false }) {
+  if (!tag && !draft && typeof thinking !== 'string') return null
   return (
     <>
-      {tag === 'vision' ? <VisionIcon /> : tag ? <span className="chip info">{tag}</span> : null}
+      {tag === 'vision' ? (
+        <VisionIcon off={visionOff} />
+      ) : tag ? (
+        <span className="chip info">{tag}</span>
+      ) : null}
       {draft ? <DrafterBolt variant={draft} /> : null}
+      {typeof thinking === 'string' ? <ThinkingIcon title={thinking} /> : null}
     </>
   )
 }

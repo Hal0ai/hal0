@@ -3545,6 +3545,8 @@ select.npu-sel {
 /* Modality glyphs (eye, drafter bolt) sit bare right after the model name —
    no chip box — so the chips that follow (quant, runtime, fit) stay the tags. */
 .modality-icon { display: inline-flex; align-items: center; flex-shrink: 0; color: var(--info); }
+.modality-icon.off { color: var(--fg-4); opacity: 0.6; }
+.modality-icon.think { color: var(--dev-npu); }
 .chip.fit-chip svg, .modality-icon svg { flex-shrink: 0; display: block; }
 .rsel-option:hover, .rsel-option[data-active="true"] { background: var(--bg-3); }
 .rsel-option[aria-selected="true"] { background: var(--accent-bg); }
