@@ -32,6 +32,7 @@ import hashlib
 import os
 import re
 from typing import TYPE_CHECKING, Any
+from urllib.parse import unquote
 
 import structlog
 from starlette.requests import Request
@@ -345,6 +346,41 @@ def client_id_resolver() -> str:
     return candidate
 
 
+_OWUI_CLIENT = "openwebui"
+_OWUI_USER_HEADER = "x-openwebui-user-name"
+_OWUI_CHAT_HEADER = "x-openwebui-chat-id"
+_USER_TAG_JUNK = re.compile(r"[^a-z0-9_-]+")
+
+
+def normalise_user_tag(raw: str) -> str:
+    """Lowercase, collapse runs outside ``[a-z0-9_-]`` to ``-``, cap at 64."""
+    return _USER_TAG_JUNK.sub("-", raw.strip().lower()).strip("-")[:64]
+
+
+def provenance_resolver() -> dict[str, str]:
+    """Open WebUI user/chat annotations for the current memory write.
+
+    Empty unless the judged principal is the bridge client named ``openwebui``
+    (ADR-0043): the headers only annotate, they never establish identity. Read
+    off the live MCP request, never the mount-time scope. Open WebUI sends the
+    user name percent-encoded.
+    """
+    request = _current_mcp_request()
+    if request is None:
+        return {}
+    principal = judged_principal(request)
+    if principal.tier != "bridge" or principal.name != _OWUI_CLIENT:
+        return {}
+    out: dict[str, str] = {}
+    user = normalise_user_tag(unquote(request.headers.get(_OWUI_USER_HEADER, "")))
+    if user:
+        out["user"] = user
+    chat = request.headers.get(_OWUI_CHAT_HEADER, "").strip()
+    if chat:
+        out["session_id"] = chat[:128]
+    return out
+
+
 def private_resolver() -> bool:
     """Return whether the calling client toggled ``--private`` mode.
 
@@ -483,6 +519,7 @@ def mount_mcp_servers(
             state=app.state,
             client_id_resolver=client_id_resolver,
             private_resolver=private_resolver,
+            provenance_resolver=provenance_resolver,
         )
         memory_server.settings.transport_security = transport_security
         memory_app: ASGIApp = memory_server.streamable_http_app()
