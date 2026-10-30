@@ -1825,6 +1825,84 @@ async def list_all(
     return {"models": data, "count": len(data), "filtered_aliases": filtered}
 
 
+def _csv(value: str | None) -> list[str]:
+    """Split a comma list query value into trimmed, non-empty items."""
+    return [part for part in (p.strip() for p in (value or "").split(",")) if part]
+
+
+def narrow_models(
+    payload: dict[str, Any],
+    *,
+    installed: bool | None = None,
+    type: str | None = None,
+    capability: str | None = None,
+    runs_on: str | None = None,
+    q: str | None = None,
+    fields: str | None = None,
+    limit: int | None = None,
+    offset: int | None = None,
+) -> dict[str, Any]:
+    """Filter, page and project a :func:`list_all` payload (``GET /api/models``).
+
+    Pure: no I/O, ``payload`` is not mutated. Order of operations is filter,
+    count ``total``, page, project. Callers apply this only when at least one
+    parameter was supplied, so the unfiltered response stays byte-for-byte what
+    ``list_all`` returns.
+
+    * ``installed`` keeps rows whose ``installed`` equals the value.
+    * ``type`` (comma list) keeps rows whose dispatch ``type`` is in the list.
+    * ``capability`` (comma list) keeps rows whose ``capabilities`` include ALL
+      listed values. A row's ``capabilities`` is a list of strings (registry
+      rows and FLM probe rows alike); a row without that list never matches.
+    * ``runs_on`` (comma list) keeps rows whose ``runs_on`` lane list contains
+      ANY listed lane.
+    * ``q`` is a case-insensitive substring match on ``id`` and ``name``.
+    * ``offset`` / ``limit`` page the filtered rows.
+    * ``fields`` (comma list) projects each row to those top-level keys; ``id``
+      is always kept and unknown keys are ignored.
+
+    The envelope keeps ``count`` (rows returned) and every other key
+    (``filtered_aliases``) and gains ``total`` (rows matching the filters,
+    before paging).
+    """
+    rows: list[dict[str, Any]] = list(payload.get("models") or [])
+    if installed is not None:
+        rows = [r for r in rows if bool(r.get("installed")) is installed]
+    types = _csv(type)
+    if types:
+        rows = [r for r in rows if r.get("type") in types]
+    caps = _csv(capability)
+    if caps:
+        rows = [
+            r
+            for r in rows
+            if isinstance(r.get("capabilities"), list) and all(c in r["capabilities"] for c in caps)
+        ]
+    lanes = _csv(runs_on)
+    if lanes:
+        rows = [
+            r
+            for r in rows
+            if isinstance(r.get("runs_on"), list) and any(lane in r["runs_on"] for lane in lanes)
+        ]
+    needle = (q or "").strip().lower()
+    if needle:
+        rows = [
+            r
+            for r in rows
+            if needle in str(r.get("id") or "").lower()
+            or needle in str(r.get("name") or "").lower()
+        ]
+    total = len(rows)
+    start = offset or 0
+    rows = rows[start : start + limit] if limit is not None else rows[start:]
+    keep = _csv(fields)
+    if keep:
+        wanted = {"id", *keep}
+        rows = [{k: v for k, v in r.items() if k in wanted} for r in rows]
+    return {**payload, "models": rows, "count": len(rows), "total": total}
+
+
 # ── add-by-path (POST /api/models/add-from-path) ──────────────────────────────
 
 
