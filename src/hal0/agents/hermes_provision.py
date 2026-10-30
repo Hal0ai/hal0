@@ -4882,7 +4882,8 @@ def _phase_namespace_register(ctx: _StepCtx) -> PhaseResult:
 # to the default ``hermes`` agent. This phase registers its identity card in
 # the ``agents`` dataset — the same treatment ``_phase_namespace_register``
 # gives the default agent — so the steward is a real profile, discoverable and
-# with a provisioned private bank (``private:hermes__hal0-brain``). Warn-as-OK:
+# with its identity card written (its memory is shared, tagged
+# ``hermes__hal0-brain``). Warn-as-OK:
 # memory-layer unavailability never blocks bootstrap.
 
 
@@ -4891,7 +4892,8 @@ def _build_brain_identity_card() -> dict[str, Any]:
 
     Mirrors :func:`_build_identity_card` (the default agent's card) so the
     dashboard steward registers as a first-class agent identity rather than a
-    mere persona overlay. Its memory rides ``private:hermes__hal0-brain``.
+    mere persona overlay. Its memory is shared, tagged ``hermes__hal0-brain``
+    (the card's ``namespace`` metadata is the historical identity key).
     """
     from hal0.agents.personas import BRAIN_PROFILE_AGENT_ID
 
@@ -4924,8 +4926,7 @@ def _phase_brain_profile_seed(ctx: _StepCtx) -> PhaseResult:
 
     Writes the brain identity card to the ``shared`` dataset under the
     ``agent-identity`` tag (search → delete
-    stale → add), keyed on the ``hermes__hal0-brain`` agent-id so its private
-    bank is provisioned rather than left to lazy first-write. Idempotent;
+    stale → add), keyed on the ``hermes__hal0-brain`` agent-id. Idempotent;
     warn-as-OK so bootstrap never blocks on the memory layer.
     """
     from hal0.agents.personas import BRAIN_PROFILE_AGENT_ID
@@ -5046,7 +5047,7 @@ def _phase_brain_profile_seed(ctx: _StepCtx) -> PhaseResult:
 #
 # The hal0-brain profile (``~/.hermes/profiles/hal0-brain/``, created by the
 # upstream hermes binary) needs the two hal0-owned MCP servers — hal0-admin
-# (platform control) + hal0-memory (its private 3-tier bank) — so the steward
+# (platform control) + hal0-memory (shared memory tagged as the steward) — so the steward
 # can actually interact with + control the box. On a hand-configured host these
 # were wired out-of-band; this phase makes them reproducible. ``hermes config
 # set`` has no per-profile target, so — exactly like honcho.json and the YAML

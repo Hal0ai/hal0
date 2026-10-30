@@ -11,7 +11,8 @@ These tests pin the real path:
   memory_search, memory_list) among the memory_* tools, with one-line
   descriptions and minimal arguments for the small steward model;
 * every call is scoped server-side to the persona's ``memory_namespace``
-  (``private:hermes__hal0-brain``) through the app's memory dispatcher; a
+  (``private:hermes__hal0-brain``) through the app's memory dispatcher, which
+  now writes the SHARED pool as that agent id (private mode off); a
   ``dataset``/``bank`` argument from the model is dropped, never trusted;
 * the #2022/#2675 grounding guard treats "remember ..." / "what did I tell
   you ..." as live state, so a no-tool "I've noted that" is rerouted.
@@ -42,7 +43,8 @@ from hal0.dispatcher.memory_dispatcher import MemoryDispatcher
 from hal0.mcp import admin
 from hal0.mcp.approval_queue import ApprovalQueue
 
-BRAIN_NAMESPACE = f"private:{BRAIN_PROFILE_AGENT_ID}"
+BRAIN_NAMESPACE = f"private:{BRAIN_PROFILE_AGENT_ID}"  # the persona's identity source
+SHARED = "shared"
 MEMORY_TRIO = {"memory_add", "memory_search", "memory_list"}
 
 
@@ -236,7 +238,7 @@ def test_remember_turn_retains_into_the_brain_bank_and_ignores_model_bank(
     adds = [kw for op, kw in provider.calls if op == "add"]
     assert len(adds) == 1
     assert adds[0]["text"] == "The operator's cat is called Zorbo."
-    assert adds[0]["dataset"] == BRAIN_NAMESPACE
+    assert adds[0]["dataset"] == SHARED
     assert adds[0]["client_id"] == BRAIN_PROFILE_AGENT_ID
     result = next(e for e in events if e["type"] == "tool_result")
     assert result["name"] == "memory_add"
@@ -256,7 +258,7 @@ async def test_memory_add_strips_every_unknown_argument(tmp_path: Path) -> None:
     )
     assert result["status"] == "ok"
     (kw,) = [kw for op, kw in provider.calls if op == "add"]
-    assert kw["dataset"] == BRAIN_NAMESPACE
+    assert kw["dataset"] == SHARED
     assert kw["tags"] == []
     assert kw["metadata"] == {}
 
@@ -297,7 +299,7 @@ def test_recall_turn_reads_the_stored_fact_back(tmp_path: Path) -> None:
 
     searches = [kw for op, kw in provider.calls if op == "search"]
     assert len(searches) == 1
-    assert searches[0]["dataset"] == BRAIN_NAMESPACE
+    assert searches[0]["dataset"] == SHARED
     assert searches[0]["client_id"] == BRAIN_PROFILE_AGENT_ID
     result = next(e for e in events if e["type"] == "tool_result")
     texts = [r["text"] for r in result["result"]["results"]]
@@ -314,7 +316,7 @@ async def test_memory_list_is_scoped_and_limit_is_coerced(tmp_path: Path) -> Non
     )
     assert result["status"] == "ok"
     (kw,) = [kw for op, kw in provider.calls if op == "list"]
-    assert kw["dataset"] == BRAIN_NAMESPACE
+    assert kw["dataset"] == SHARED
     assert kw["limit"] == 5
 
 
@@ -429,10 +431,10 @@ def test_an_older_persona_prompt_gets_the_memory_rule_appended(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_round_trip_through_the_pgvector_fallback_stays_private(tmp_path: Path) -> None:
+async def test_round_trip_through_the_pgvector_fallback_is_shared(tmp_path: Path) -> None:
     """The Hindsight-unavailable fallback provider takes the same path: the
-    fact lands in the steward's namespace, reads back through memory_search,
-    and is not visible to a plain shared read."""
+    fact lands in the shared pool (tagged as the steward), reads back through
+    memory_search, and is visible to a plain shared read."""
     from hal0.memory.pgvector_provider import PgVectorProvider
 
     provider = PgVectorProvider()
@@ -450,4 +452,33 @@ async def test_round_trip_through_the_pgvector_fallback_stays_private(tmp_path: 
     assert any("Zorbo" in r["text"] for r in found["results"])
 
     shared = await provider.search(query="Zorbo cat", limit=10, dataset="shared")
-    assert not any("Zorbo" in r["text"] for r in shared)
+    assert any("Zorbo" in r["text"] for r in shared)
+
+
+@pytest.mark.asyncio
+async def test_brain_memory_add_dispatches_shared(tmp_path: Path) -> None:
+    provider = _FakeProvider()
+    request = _request(tmp_path, provider=provider)
+    await bc._dispatch_tool(request, "memory_add", {"text": "CT151 is the utility box"}, board=None)
+    (kw,) = [kw for op, kw in provider.calls if op == "add"]
+    assert kw["dataset"] == SHARED
+    assert kw["client_id"] == BRAIN_PROFILE_AGENT_ID
+    assert not kw.get("private")
+
+
+def test_no_steward_string_claims_a_private_bank(tmp_path: Path) -> None:
+    """R7: the steward never describes privacy it no longer has."""
+    from hal0.agents.personas import load_persona
+
+    root = tmp_path / "personas"
+    seed_default_personas(root=root)
+    texts = [
+        bc._MEMORY_RULE,
+        bc._SYSTEM_PROMPT,
+        load_persona(bc.BRAIN_PERSONA_ID, root=root).system_prompt,
+        *(desc for desc, _p, _r in bc._BRAIN_MEMORY_SCHEMAS.values()),
+    ]
+    for text in texts:
+        assert "private" not in text.lower(), text
+    assert "shared" in bc._MEMORY_RULE.lower()
+    assert BRAIN_PROFILE_AGENT_ID in bc._MEMORY_RULE
