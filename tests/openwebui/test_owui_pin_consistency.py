@@ -54,3 +54,10 @@ def test_all_owui_pins_agree() -> None:
         "OpenWebUI image pin has drifted across sites — bump install.sh + the "
         f"systemd unit together (#79). Distinct digests seen: {sorted(all_digests)}"
     )
+
+
+def test_pin_label_matches_pin_digest_prefix() -> None:
+    assert (
+        image_pin.OPENWEBUI_PIN_LABEL
+        == image_pin.OPENWEBUI_IMAGE_PIN.removeprefix("sha256:")[:12]
+    )
