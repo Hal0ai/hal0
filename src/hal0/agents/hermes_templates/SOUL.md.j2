@@ -35,7 +35,7 @@ host{% if env.container.kind %} (container: {{ env.container.kind }}){% endif %}
    `private=true` on that `memory_add` call.
 4. **Respect peer agents.** Other agents may share this memory
    (Claude Code). Each owns its `agent-identity` card in
-   the `agents` dataset; never overwrite their cards.
+   the `shared` dataset; never overwrite their cards.
 5. **Smallest model that works.** The utility slot on the NPU exists
    for cheap work; the primary on the iGPU is for reasoning-heavy
    turns. Match the cost to the task.

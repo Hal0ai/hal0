@@ -557,7 +557,8 @@ def build_prompt_addendum(
         lines.append(
             "Your memory is shared by default: what you write with hal0-memory is "
             "visible to the other agents and tagged as you. A single write is "
-            "private only when you pass private=true to memory_add; never name a "
+            "private only when you pass private=true to memory_add, or when your "
+            "profile is configured to keep all your memory private; never name a "
             "private: dataset yourself. Use hal0-memory read/search before asking "
             "the operator to repeat themselves; use hal0-memory write to persist "
             "durable facts."
