@@ -55,7 +55,7 @@ import { slotModelRow } from './slots/slot-shared.js'
 import { useCardReorder } from './slots/card-order.js'
 import { RichSelect } from './rich-select.jsx'
 import { FitChip, ModalityTag, SlotSpecBolt } from './fit-chip.jsx'
-import { eyeState, thinkingMark } from './tune-state.js'
+import { effectiveProfileName, eyeState, thinkingMark } from './tune-state.js'
 import { draftTagValue } from './spec-state.js'
 import { feasibilityHint } from './feasibility-copy'
 // devKind — one shared, meta-aware helper (src/lib/deviceMeta.ts); replaces
@@ -358,7 +358,9 @@ function ProfileApplyConfirm({ pending, profiles, backends, hardware, onClose })
           }).options,
           baselineRunner: s.binary || '',
           currentDevice: s.device || '',
-          currentProfile: (profiles || []).find((p) => p.name === (s.profile || '')) || null,
+          currentProfile: (profiles || []).find((p) => p.name === effectiveProfileName(s)) || null,
+          // The slot's saved overrides outlive a profile swap.
+          tune: s.tune,
         })
       : null
   // A stopped slot does not "restart": SlotManager.restart is unload-then-load
@@ -678,12 +680,10 @@ export function ModelPicker({ s, models, allSlots, disabled, onSwap }) {
   const opts = compatibleModels(models, { type: 'llm', slot: s })
   const cur = s.model_id || s.model || ''
   const has = opts.some((m) => m.id === cur)
-  // The window each candidate would launch with under this slot's profile —
-  // the server resolves the profile name per candidate (profile ctx_size, else
-  // the candidate's native window). ctx_effective is the CURRENT model's
-  // window, so it is only the fallback for a slot with no profile.
-  const profileName = typeof s.profile === 'string' && s.profile ? s.profile : undefined
-  const ctx = typeof s.ctx_effective === 'number' && s.ctx_effective > 0 ? s.ctx_effective : undefined
+  // The window each candidate would launch with in THIS slot: the server
+  // resolves `slot` per candidate from the slot's profile (type seed when it
+  // names none) plus its [tune] context override, else the candidate's native
+  // window. ctx_effective is the CURRENT model's window, so it is not sent.
   const verdictFor = (id) => {
     const row = (feasibility.data?.results || []).find((r) => r.model_id === id)
     return modelFitChip(row)
@@ -706,7 +706,7 @@ export function ModelPicker({ s, models, allSlots, disabled, onSwap }) {
           feasibility.mutate({
             models: ids.map((id) => ({
               model_id: id,
-              ...(profileName ? { profile: profileName } : ctx ? { ctx } : {}),
+              slot: s.name,
             })),
           })
         }}

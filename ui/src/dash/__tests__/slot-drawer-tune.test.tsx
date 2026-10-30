@@ -19,10 +19,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 ;(globalThis as unknown as { Icons: unknown }).Icons = new Proxy({}, { get: () => null })
 ;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-const { profilesBox, modelsBox, toasts, editCalls, restartCalls, createCalls } = vi.hoisted(() => ({
+const { profilesBox, modelsBox, toasts, feasCalls, editCalls, restartCalls, createCalls } = vi.hoisted(() => ({
   profilesBox: { current: [] as Record<string, unknown>[] },
   modelsBox: { current: [] as Record<string, unknown>[] },
   toasts: [] as string[],
+  feasCalls: [] as unknown[],
   editCalls: [] as unknown[],
   restartCalls: [] as string[],
   createCalls: [] as unknown[],
@@ -57,7 +58,7 @@ vi.mock('@/api/hooks/useModels', () => ({
   usePullJob: () => ({ ...idle, start: async () => {}, state: 'idle', reset: () => {} }),
 }))
 vi.mock('@/api/hooks/useModelsFeasibility', () => ({
-  useModelsFeasibility: () => ({ data: undefined, mutate: () => {} }),
+  useModelsFeasibility: () => ({ data: undefined, mutate: (b: unknown) => feasCalls.push(b) }),
 }))
 vi.mock('@/api/hooks/useLogs', () => ({ useSlotLogsStream: () => ({ lines: [] }) }))
 vi.mock('@/api/hooks/useRuntimes', async () => {
@@ -102,7 +103,7 @@ const PROFILE = {
 const MODEL = { id: 'qwen', mmproj: '/m/mmproj.gguf', capabilities: ['chat', 'vision'], draft: 'd.gguf' }
 const EFFECTIVE = {
   ctx_size: 32768, enable_thinking: false, reasoning_effort: 'default', reasoning_budget: -1,
-  vision: 'auto', speculation: 'auto', sources: {}, reasoning_effort_unavailable: false,
+  vision: 'auto', speculation: 'auto', sources: {}, reasoning_effort_unavailable: null,
 }
 const SLOT = {
   name: 'chat', type: 'llm', device: 'gpu-rocm', profile: 'agent-chat',
@@ -151,6 +152,7 @@ beforeEach(() => {
   restartCalls.length = 0
   createCalls.length = 0
   toasts.length = 0
+  feasCalls.length = 0
   ;(window as any).__hal0Toast = (m: string) => toasts.push(m)
 })
 afterEach(() => {
@@ -222,7 +224,127 @@ describe('slot drawer Tune block', () => {
     const { root } = mount({ ...SLOT, tune: { vision: 'off', enable_thinking: true } })
     click('tune-vision-profile')
     await save()
-    expect((editCalls[0] as any).body.tune).toEqual({ enable_thinking: true, vision: null })
+    // only the changed key goes out: enable_thinking is not re-sent
+    expect((editCalls[0] as any).body.tune).toEqual({ vision: null })
+    act(() => root.unmount())
+  })
+
+  it('Save does not re-send an unchanged enable_thinking the profile now pins', async () => {
+    const { root } = mount({
+      ...SLOT,
+      tune: { enable_thinking: true },
+      tune_effective: { ...EFFECTIVE, enable_thinking: false, sources: { enable_thinking: 'profile-flags' } },
+    })
+    click('tune-vision-off')
+    await save()
+    expect((editCalls[0] as any).body.tune).toEqual({ vision: 'off' })
+    act(() => root.unmount())
+  })
+
+  it('a disabled row can still drop its own stale override, leaving the others', async () => {
+    modelsBox.current = [{ id: 'qwen', capabilities: ['chat'], draft: 'd.gguf' }] // no mmproj
+    const { root } = mount({ ...SLOT, tune: { vision: 'off', enable_thinking: true } })
+    expect((byId('tune-vision-off') as HTMLButtonElement).disabled).toBe(true)
+    const pill = byId('tune-vision-profile') as HTMLButtonElement
+    expect(pill.disabled).toBe(false)
+    click('tune-vision-profile')
+    expect(byId('tune-summary')!.textContent).toBe('1 override on profile agent-chat')
+    await save()
+    expect((editCalls[0] as any).body.tune).toEqual({ vision: null })
+    act(() => root.unmount())
+  })
+
+  it('a disabled row with no override keeps its Profile pill disabled', () => {
+    modelsBox.current = [{ id: 'qwen', capabilities: ['chat'], draft: 'd.gguf' }]
+    const { root } = mount(SLOT)
+    expect((byId('tune-vision-profile') as HTMLButtonElement).disabled).toBe(true)
+    act(() => root.unmount())
+  })
+
+  it('a profile-less slot shows the type seed values, not defaults', () => {
+    profilesBox.current = [
+      { ...PROFILE, name: 'chat', seed: true, flags: '-fa on -b 2048', ctx_size: 65536, enable_thinking: true, reasoning_effort: 'high', reasoning_budget: 512, vision: 'off' },
+    ]
+    const { root } = mount({ ...SLOT, profile: '', tune: { speculation: 'ngram' } })
+    expect(byId('tune-ctx_size-profile')!.textContent).toContain('Profile · 64K')
+    expect(byId('tune-enable_thinking-profile')!.textContent).toContain('Profile · on')
+    expect(byId('tune-reasoning_effort-profile')!.textContent).toContain('Profile · high')
+    expect(byId('tune-reasoning_budget-profile')!.textContent).toContain('Profile · 512')
+    expect(byId('tune-summary')!.textContent).toBe('1 override on profile chat')
+    act(() => root.unmount())
+  })
+
+  it('with no profile row at all, pills fall back to tune_effective profile-sourced values', () => {
+    profilesBox.current = []
+    const { root } = mount({
+      ...SLOT,
+      profile: '',
+      tune_effective: { ...EFFECTIVE, ctx_size: 131072, reasoning_effort: 'low', sources: { ctx_size: 'profile', reasoning_effort: 'profile' } },
+    })
+    expect(byId('tune-ctx_size-profile')!.textContent).toContain('Profile · 128K')
+    expect(byId('tune-reasoning_effort-profile')!.textContent).toContain('Profile · low')
+    act(() => root.unmount())
+  })
+
+  it('Save as profile on a profile-less slot clones the type seed, keeping its flags', async () => {
+    profilesBox.current = [{ ...PROFILE, name: 'chat', seed: true, flags: '-fa on -b 2048', ctx_size: 65536 }]
+    const { root } = mount({ ...SLOT, name: 'agent', profile: '', tune: { vision: 'off' } })
+    click('tune-save-as-profile')
+    expect((byId('pf-input-name') as HTMLInputElement).value).toBe('agent-chat')
+    expect((byId('pf-input-flags') as HTMLTextAreaElement).value).toBe('-fa on -b 2048')
+    await act(async () => byId('pf-btn-submit')!.click())
+    expect(createCalls[0]).toMatchObject({ name: 'agent-chat', flags: '-fa on -b 2048', cloned_from: 'chat', vision: 'off', ctx_size: 65536 })
+    act(() => root.unmount())
+  })
+
+  it('Save as profile falls back to the type seed when the named profile row is gone', () => {
+    profilesBox.current = [{ ...PROFILE, name: 'chat', seed: true, flags: '-fa on -b 2048' }]
+    const { root } = mount({ ...SLOT, name: 'agent', profile: 'deleted-one', tune: { vision: 'off' } })
+    click('tune-save-as-profile')
+    expect((byId('pf-input-flags') as HTMLTextAreaElement).value).toBe('-fa on -b 2048')
+    act(() => root.unmount())
+  })
+
+  it('Save as profile is disabled while the profile list has no usable row', () => {
+    profilesBox.current = []
+    const { root } = mount({ ...SLOT, profile: '', tune: { vision: 'off' } })
+    expect((byId('tune-save-as-profile') as HTMLButtonElement).disabled).toBe(true)
+    act(() => root.unmount())
+  })
+
+  it('feasibility probe sends the staged ctx override (wins), else the staged profile', () => {
+    const { root } = mount(SLOT)
+    click('slot-model-swap')
+    expect(feasCalls[0]).toEqual({ models: [{ model_id: 'qwen', profile: 'agent-chat' }] })
+    act(() => root.unmount())
+    document.body.innerHTML = ''
+    feasCalls.length = 0
+    const staged = mount({ ...SLOT, tune: { ctx_size: 8192 } })
+    click('slot-model-swap')
+    expect(feasCalls[0]).toEqual({ models: [{ model_id: 'qwen', ctx: 8192 }] })
+    act(() => staged.root.unmount())
+  })
+
+  it('feasibility probe ignores an invalid staged ctx and a profile-less slot uses the type seed', () => {
+    const { root } = mount({ ...SLOT, profile: '', tune: {} })
+    typeInto('tune-ctx_size-input', '64')
+    click('slot-model-swap')
+    expect(feasCalls[0]).toEqual({ models: [{ model_id: 'qwen', profile: 'chat' }] })
+    act(() => root.unmount())
+  })
+
+  it('profile swap preview does not announce a context change the slot overrides', () => {
+    profilesBox.current = [
+      PROFILE,
+      { ...PROFILE, name: 'big', ctx_size: 131072, enable_thinking: true },
+    ]
+    const { root } = mount({ ...SLOT, tune: { ctx_size: 8192 } })
+    // pick the other profile through the profile select
+    act(() => (document.querySelector('[data-testid="slot-profile"]') as HTMLElement).click())
+    act(() => (document.querySelector('[data-option-id="big"]') as HTMLElement).click())
+    const preview = byId('slot-profile-preview')!
+    expect(preview.textContent).toContain('thinking')
+    expect(preview.textContent).not.toContain('context')
     act(() => root.unmount())
   })
 
@@ -245,14 +367,15 @@ describe('slot drawer Tune block', () => {
 
   it('disables vision and effort with their reasons, and leaves speculation open', () => {
     modelsBox.current = [{ id: 'qwen', capabilities: ['chat'] }]
-    const { root } = mount({ ...SLOT, tune_effective: { ...EFFECTIVE, reasoning_effort_unavailable: true } })
+    const { root } = mount({ ...SLOT, tune_effective: { ...EFFECTIVE, reasoning_effort_unavailable: 'runner build 11000 predates --reasoning-effort (needs b11840)' } })
     expect((byId('tune-vision-off') as HTMLButtonElement).disabled).toBe(true)
     expect(byId('tune-vision-reason')!.textContent).toContain('mmproj')
     // N-gram is model-free: a model with no drafter and no MTP heads can still take it.
     expect((byId('tune-speculation-ngram') as HTMLButtonElement).disabled).toBe(false)
     expect(byId('tune-speculation-reason')).toBeNull()
     expect((byId('tune-reasoning_effort-high') as HTMLButtonElement).disabled).toBe(true)
-    expect(byId('tune-reasoning_effort-reason')!.textContent).toContain('--reasoning-effort')
+    // the server's own reason text, not a canned one
+    expect(byId('tune-reasoning_effort-reason')!.textContent).toBe('runner build 11000 predates --reasoning-effort (needs b11840)')
     act(() => root.unmount())
   })
 

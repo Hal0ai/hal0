@@ -97,8 +97,9 @@ export interface TuneEffective {
   vision: 'auto' | 'off'
   speculation: 'auto' | 'off' | 'ngram'
   sources: Partial<Record<keyof SlotTune, TuneSource>>
-  /** True when the runner build is too old for --reasoning-effort. */
-  reasoning_effort_unavailable: boolean
+  /** Why a non-default reasoning_effort cannot be passed to this runner (build
+   *  too old, runner unknown, ...); null when it can. Server-worded text. */
+  reasoning_effort_unavailable: string | null
 }
 
 export interface Slot {

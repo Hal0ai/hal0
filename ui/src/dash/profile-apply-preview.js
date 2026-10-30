@@ -85,19 +85,25 @@ const offAuto = (v) => (v === "off" ? "off" : "auto");
 const specText = (p) => (p?.speculation === "off" || p?.speculation === "ngram" ? p.speculation : "auto");
 
 // The typed tune fields that differ between the outgoing and incoming profile,
-// as [{ label, from, to }] — only the ones that actually change.
-function tuneChanges(next, prev) {
+// as [{ label, from, to }] — only the ones that actually change. A key the slot
+// OVERRIDES ([tune]) keeps its override whichever profile is bound, so it never
+// changes and is left out.
+function tuneChanges(next, prev, overrides) {
+	const held = (key) => {
+		const v = overrides?.[key];
+		return v !== undefined && v !== null && v !== "";
+	};
 	const rows = [
-		["context", ctxText(prev), ctxText(next)],
-		["thinking", thinkingText(prev), thinkingText(next)],
-		["effort", effortText(prev), effortText(next)],
-		["budget", budgetText(prev), budgetText(next)],
-		["vision", offAuto(prev?.vision), offAuto(next?.vision)],
-		["speculation", specText(prev), specText(next)],
+		["context", "ctx_size", ctxText(prev), ctxText(next)],
+		["thinking", "enable_thinking", thinkingText(prev), thinkingText(next)],
+		["effort", "reasoning_effort", effortText(prev), effortText(next)],
+		["budget", "reasoning_budget", budgetText(prev), budgetText(next)],
+		["vision", "vision", offAuto(prev?.vision), offAuto(next?.vision)],
+		["speculation", "speculation", specText(prev), specText(next)],
 	];
 	return rows
-		.filter(([, from, to]) => from !== to)
-		.map(([label, from, to]) => ({ label, from, to }));
+		.filter(([, key, from, to]) => from !== to && !held(key))
+		.map(([label, , from, to]) => ({ label, from, to }));
 }
 
 /**
@@ -125,6 +131,8 @@ function tuneChanges(next, prev) {
  * @param baselineRunner      the slot's FROZEN persisted binary ('' = auto)
  * @param currentDevice       the slot's pending device enum, e.g. "gpu-rocm"
  * @param currentProfile      the OUTGOING profile row (null = none)
+ * @param tune                the slot's [tune] overrides (staged or saved); a
+ *                            key set there is not reported as changing
  *
  * Returns `{ runtime: { unchanged, title, lanes }, lane, flags, tune,
  * restart }` or null. `flags` counts the flag pairs the swap adds, changes or
@@ -138,6 +146,7 @@ export function profileApplyPreview({
 	baselineRunner,
 	currentDevice,
 	currentProfile,
+	tune,
 }) {
 	if (!profile) return null;
 	const key = profile.runner || "";
@@ -188,7 +197,7 @@ export function profileApplyPreview({
 		runtime,
 		lane,
 		flags: d.added.length + d.changed.length + d.removed.length,
-		tune: tuneChanges(profile, currentProfile),
+		tune: tuneChanges(profile, currentProfile, tune),
 		restart: true,
 	};
 }

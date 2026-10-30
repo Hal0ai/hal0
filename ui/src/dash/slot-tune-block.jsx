@@ -6,7 +6,7 @@
 // object (`{}` = no overrides) and `onChange` receives the next one. The parent
 // owns Save, validation of the numbers (tuneErrors) and the profile drawer.
 import React from 'react'
-import { TUNE_KEYS, overrideCount, profileValueLabel, tuneErrors } from './tune-state.js'
+import { TUNE_KEYS, effectiveProfileName, overrideCount, profileValueLabel, tuneErrors } from './tune-state.js'
 
 const ROWS = {
   ctx_size: { label: 'Context', numeric: true, placeholder: 'tokens' },
@@ -47,7 +47,8 @@ const RESTART_NOTE =
 function disabledReason(key, { model, tuneEffective }) {
   if (key === 'vision' && !model?.mmproj) return 'This model has no vision projector (mmproj).'
   if (key === 'reasoning_effort' && tuneEffective?.reasoning_effort_unavailable) {
-    return 'This runner build does not support --reasoning-effort.'
+    // The server's own reason text (runner build too old, runner unknown, ...).
+    return String(tuneEffective.reasoning_effort_unavailable)
   }
   if (key === 'enable_thinking' && tuneEffective?.sources?.enable_thinking === 'profile-flags') {
     return "The profile's flags pin thinking with --reasoning; edit the profile to change it."
@@ -55,7 +56,7 @@ function disabledReason(key, { model, tuneEffective }) {
   return null
 }
 
-function TuneRow({ k, tune, profile, reason, error, disabled, onChange }) {
+function TuneRow({ k, tune, profile, tuneEffective, reason, error, disabled, onChange }) {
   const row = ROWS[k]
   const has = tune[k] !== undefined && tune[k] !== null && tune[k] !== ''
   const set = (v) => onChange({ ...tune, [k]: v })
@@ -77,11 +78,14 @@ function TuneRow({ k, tune, profile, reason, error, disabled, onChange }) {
             type="button"
             className={'tune-seg profile' + (has ? '' : ' on')}
             aria-pressed={!has}
-            disabled={off}
+            // Always reachable while the row holds an override, so a stale one
+            // (model lost its mmproj, profile now pins thinking) can be removed
+            // without Reset dropping the other rows.
+            disabled={disabled || (!!reason && !has)}
             data-testid={`tune-${k}-profile`}
             onClick={clear}
           >
-            Profile · {profileValueLabel(k, profile)}
+            Profile · {profileValueLabel(k, profile, tuneEffective)}
           </button>
           {row.options?.map(([id, val, text]) => (
             <button
@@ -129,7 +133,17 @@ export function tuneApplies(slot) {
   return !!slot && slot.type === 'llm' && slot.device !== 'npu'
 }
 
-export function TuneBlock({ slot, profile, model, value, onChange, onSaveAsProfile, onReset, disabled }) {
+export function TuneBlock({
+  slot,
+  profile,
+  model,
+  value,
+  onChange,
+  onSaveAsProfile,
+  canSaveAsProfile = true,
+  onReset,
+  disabled,
+}) {
   if (!tuneApplies(slot)) return null
   const tune = value || {}
   const errors = tuneErrors(tune)
@@ -147,6 +161,7 @@ export function TuneBlock({ slot, profile, model, value, onChange, onSaveAsProfi
             k={k}
             tune={tune}
             profile={profile}
+            tuneEffective={tuneEffective}
             reason={disabledReason(k, { model, tuneEffective })}
             error={errors[k]}
             disabled={disabled}
@@ -156,7 +171,7 @@ export function TuneBlock({ slot, profile, model, value, onChange, onSaveAsProfi
         <div className="tune-foot">
           <span className="hint" data-testid="tune-summary">
             {n > 0
-              ? `${n} override${n === 1 ? '' : 's'} on profile ${slot.profile || 'default'}`
+              ? `${n} override${n === 1 ? '' : 's'} on profile ${effectiveProfileName(slot)}`
               : 'no overrides · running the profile as-is'}
           </span>
           <span className="pf-grow" />
@@ -164,7 +179,8 @@ export function TuneBlock({ slot, profile, model, value, onChange, onSaveAsProfi
             type="button"
             className="btn ghost sm"
             data-testid="tune-save-as-profile"
-            disabled={disabled || n === 0}
+            disabled={disabled || n === 0 || !canSaveAsProfile}
+            title={canSaveAsProfile ? undefined : 'The profile list has not loaded yet'}
             onClick={() => onSaveAsProfile()}
           >
             Save as profile…

@@ -46,6 +46,7 @@ import { FitChip, ModalityTag } from "./fit-chip.jsx";
 import { TuneBlock, tuneApplies } from "./slot-tune-block.jsx";
 import {
 	changedTuneKeys,
+	effectiveProfileName,
 	eyeState,
 	restartNeeded,
 	thinkingMark,
@@ -1264,21 +1265,33 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// the model choice), or under its own group on an NPU slot where the Model
 	// group is replaced by the NPU capability matrix.
 	const allProfileRows = Array.isArray(profilesQuery.data) ? profilesQuery.data : [];
-	const stagedProfileRow = allProfileRows.find((p) => p.name === profileSel) || null;
+	// The profile the STAGED config launches with: the picked one, else (none
+	// picked: the normal state of a new slot) the type's seed, exactly as the
+	// server's resolver does. Null while the list has no such row.
+	const stagedProfileName = effectiveProfileName({ type: slot?.type, profile: profileSel });
+	const stagedProfileRow = allProfileRows.find((p) => p.name === stagedProfileName) || null;
+	// What "Save as profile…" clones: the staged profile's row, else the type
+	// seed when the named row is gone. Never an empty profile, which would
+	// drop the launch flags the slot runs with now.
+	const cloneBaseRow =
+		stagedProfileRow ||
+		allProfileRows.find((p) => p.name === effectiveProfileName({ type: slot?.type })) ||
+		null;
 	// "Save as profile…": open the profile drawer in clone mode seeded from the
-	// STAGED state (the staged profile pick with every staged override laid on
-	// top). A ctx_size the profile leaves unset stays unset unless overridden.
+	// STAGED state (the base row with every staged override laid on top). A
+	// ctx_size the profile leaves unset stays unset unless overridden.
 	const onTuneSaveAsProfile = () => {
-		const suggested = `${slot.name}-${profileSel || "tune"}`.slice(0, 32);
+		if (!cloneBaseRow) return;
+		const suggested = `${slot.name}-${cloneBaseRow.name}`.slice(0, 32);
 		setProfileDrawer({
 			mode: "clone",
 			saveAs: true,
 			source: {
-				...(stagedProfileRow || { flags: "", runner: "", intent: "" }),
+				...cloneBaseRow,
 				...tuneBody(tuneForm),
 				seed: false,
 				name: suggested,
-				cloned_from: stagedProfileRow ? profileSel : undefined,
+				cloned_from: cloneBaseRow.name,
 			},
 		});
 	};
@@ -1302,7 +1315,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			hw: hostHwFlags(systemInfoQuery.data?.hardware),
 		});
 		const selProfileRow = all.find((p) => p.name === profileSel) || null;
-		const outgoingProfileRow = all.find((p) => p.name === (slot.profile || "")) || null;
+		// The outgoing tune is the slot's EFFECTIVE profile: a profile-less slot
+		// runs its type's seed, so the preview diffs against that row.
+		const outgoingProfileRow =
+			all.find((p) => p.name === effectiveProfileName(slot)) || null;
 		// Only a LIVE pick previews. Compared against the persisted profile
 		// name — NOT against the live `binary`/`device` state, which the
 		// select's onChange has already mirrored to the profile's runner by
@@ -1319,6 +1335,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 					baselineRunner: baseline?.binary ?? "",
 					currentDevice: pendingDevice,
 					currentProfile: outgoingProfileRow,
+					// Staged overrides survive a profile swap: they are not a change.
+					tune: tuneBody(tuneForm),
 				})
 			: null;
 		// Mirror backend profile_fits_slot: the slot type must be one the profile
@@ -1829,22 +1847,24 @@ function EditSlotDrawer({ open, slot, onClose }) {
 														// not per row. `has` rows with no verdict in the response
 														// render no chip (see modelFeasibilityChipFor above).
 														// The window is the one each CANDIDATE would launch with
-														// under the STAGED profile selection (`profileSel`, seeded
-														// from the saved profile), so send that profile NAME and let
-														// the server resolve it per candidate (profile ctx_size, else
-														// the candidate's native window). An empty selection (the
-														// operator cleared it) never falls back to the saved
-														// `slot.profile` — that window is not what the staged config
-														// would run; it sends `slot.ctx_effective` instead.
+														// under the STAGED config. A staged (valid) Context override
+														// is sent as `ctx`, which wins server-side; otherwise the
+														// STAGED profile NAME goes out and the server resolves it per
+														// candidate (profile ctx_size, else the candidate's native
+														// window). An empty selection runs the type seed, so that is
+														// the name sent — never the saved `slot.profile`, and never
+														// the saved window (`ctx_effective` may carry an override
+														// the operator has staged away).
 														onOpenChange={(isOpen) => {
 															if (!isOpen || compatible.length === 0) return;
-															const profileName = profileSel || "";
-															const ctxNum = Number(slot.ctx_effective);
-															const windowArg = profileName
-																? { profile: profileName }
-																: Number.isFinite(ctxNum) && ctxNum > 0
-																	? { ctx: ctxNum }
-																	: {};
+															const stagedCtx = tuneBody(tuneForm).ctx_size;
+															const windowArg =
+																stagedCtx && !tuneErrors(tuneForm).ctx_size
+																	? { ctx: stagedCtx }
+																	: {
+																			profile:
+																				profileSel || effectiveProfileName(slot),
+																		};
 															modelListFeasibility.mutate({
 																models: compatible.map((m) => ({
 																	model_id: m.id,
@@ -1910,6 +1930,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 									value={tuneForm}
 									onChange={setTuneForm}
 									onSaveAsProfile={onTuneSaveAsProfile}
+									canSaveAsProfile={!!cloneBaseRow}
 									onReset={() => setTuneForm({})}
 									disabled={degraded}
 								/>

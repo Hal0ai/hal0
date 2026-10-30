@@ -75,7 +75,7 @@ describe('tune-state', () => {
   })
 })
 
-import { changedTuneKeys, tuneBody, tuneErrors, tuneWire } from '../tune-state.js'
+import { changedTuneKeys, effectiveProfileName, tuneBody, tuneErrors, tuneWire } from '../tune-state.js'
 
 describe('staged tune helpers', () => {
   it('tuneBody parses numeric text and drops blanks', () => {
@@ -97,11 +97,46 @@ describe('staged tune helpers', () => {
     expect(changedTuneKeys({ ctx_size: 32768 }, { ctx_size: '32768' })).toEqual([])
     expect(changedTuneKeys({ vision: 'off' }, {})).toEqual(['vision'])
   })
-  it('tuneWire: unchanged -> undefined, cleared -> null, partial clear -> explicit null', () => {
+  it('tuneWire: unchanged -> undefined, all cleared -> null, otherwise only changed keys', () => {
     expect(tuneWire({ vision: 'off' }, { vision: 'off' })).toBeUndefined()
     expect(tuneWire({}, {})).toBeUndefined()
     expect(tuneWire({ vision: 'off' }, {})).toBeNull()
     expect(tuneWire({}, { enable_thinking: false, vision: 'off' })).toEqual({ enable_thinking: false, vision: 'off' })
-    expect(tuneWire({ vision: 'off', speculation: 'ngram' }, { vision: 'off' })).toEqual({ vision: 'off', speculation: null })
+    // removed key -> explicit null; untouched key is NOT re-sent
+    expect(tuneWire({ vision: 'off', speculation: 'ngram' }, { vision: 'off' })).toEqual({ speculation: null })
+  })
+  it('tuneWire never re-sends an unchanged enable_thinking (profile may pin it since)', () => {
+    expect(tuneWire({ enable_thinking: true }, { enable_thinking: true, vision: 'off' })).toEqual({ vision: 'off' })
+    expect(tuneWire({ enable_thinking: true, vision: 'off' }, { enable_thinking: true, vision: 'auto' })).toEqual({
+      vision: 'auto',
+    })
+    // text-vs-number noise is not a change
+    expect(tuneWire({ ctx_size: 32768 }, { ctx_size: '32768', vision: 'off' })).toEqual({ vision: 'off' })
+  })
+  it('effectiveProfileName follows the server resolver: named, else type seed, else chat', () => {
+    expect(effectiveProfileName({ profile: 'mine', type: 'llm' })).toBe('mine')
+    expect(effectiveProfileName({ profile: '', type: 'llm' })).toBe('chat')
+    expect(effectiveProfileName({ type: 'embedding' })).toBe('embedding')
+    expect(effectiveProfileName({ type: 'reranking' })).toBe('reranking')
+  })
+  it('profileValueLabel falls back to profile-sourced tune_effective values without a profile row', () => {
+    const eff = {
+      ctx_size: 65536,
+      enable_thinking: true,
+      reasoning_effort: 'high',
+      reasoning_budget: 512,
+      vision: 'off',
+      speculation: 'ngram',
+      sources: { ctx_size: 'profile', enable_thinking: 'slot', reasoning_effort: 'profile', reasoning_budget: 'profile', vision: 'profile', speculation: 'profile' },
+    }
+    expect(profileValueLabel('ctx_size', null, eff)).toBe('64K')
+    expect(profileValueLabel('reasoning_effort', null, eff)).toBe('high')
+    expect(profileValueLabel('reasoning_budget', null, eff)).toBe('512')
+    expect(profileValueLabel('vision', null, eff)).toBe('off')
+    expect(profileValueLabel('speculation', null, eff)).toBe('ngram')
+    // slot-sourced value is the override, not the profile's: no fallback
+    expect(profileValueLabel('enable_thinking', null, eff)).toBe('default (off)')
+    // a real profile row always wins
+    expect(profileValueLabel('vision', { vision: 'auto' }, eff)).toBe('auto')
   })
 })

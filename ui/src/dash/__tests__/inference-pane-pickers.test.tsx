@@ -393,7 +393,7 @@ describe('ModelPicker (card-dropdowns Task 1)', () => {
     expect(row.querySelector('.rsel-option-desc .chip.info')).toBeNull()
   })
 
-  it('fires one lazy feasibility batch on first open with slot ctx, not on render', () => {
+  it('fires one lazy feasibility batch on first open, keyed by slot, not on render', () => {
     const { host } = mount(
       <ModelPicker s={SLOT} models={MODELS} allSlots={ALL_SLOTS} disabled={false} onSwap={() => {}} />,
     )
@@ -402,8 +402,8 @@ describe('ModelPicker (card-dropdowns Task 1)', () => {
     expect(feasibilityCalls.length).toBe(1)
     expect(feasibilityCalls[0]).toEqual({
       models: [
-        { model_id: 'm1', ctx: 32768 },
-        { model_id: 'm2', ctx: 32768 },
+        { model_id: 'm1', slot: 'chat' },
+        { model_id: 'm2', slot: 'chat' },
       ],
     })
     // Closing and reopening does not re-fire — first open only.
@@ -414,13 +414,13 @@ describe('ModelPicker (card-dropdowns Task 1)', () => {
     expect(feasibilityCalls.length).toBe(1)
   })
 
-  it('sends the slot profile name instead of ctx when the slot has a profile', () => {
-    // ctx_effective is the CURRENT model's window; a candidate must be judged
-    // at the window it would launch with under the slot's profile, which the
-    // server resolves per candidate from the profile name.
+  it('sends the slot name, not ctx or profile, so the server applies the slot [tune] override', () => {
+    // The server resolves `slot` per candidate: the slot's profile (the type
+    // seed when it names none) plus its [tune] context. `ctx` would win over it
+    // and `ctx_effective` is only the CURRENT model's window, so neither goes out.
     const { host } = mount(
       <ModelPicker
-        s={{ ...SLOT, profile: 'rocm' }}
+        s={{ ...SLOT, profile: 'rocm', tune: { ctx_size: 8192 } }}
         models={MODELS}
         allSlots={ALL_SLOTS}
         disabled={false}
@@ -430,8 +430,8 @@ describe('ModelPicker (card-dropdowns Task 1)', () => {
     openMenu(host, 'chat')
     expect(feasibilityCalls[0]).toEqual({
       models: [
-        { model_id: 'm1', profile: 'rocm' },
-        { model_id: 'm2', profile: 'rocm' },
+        { model_id: 'm1', slot: 'chat' },
+        { model_id: 'm2', slot: 'chat' },
       ],
     })
   })

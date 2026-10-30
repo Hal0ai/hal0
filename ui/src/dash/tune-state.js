@@ -41,23 +41,49 @@ export function eyeState(model, tuneEffective) {
   return tuneEffective?.vision === 'off' ? 'off' : 'lit'
 }
 
-/** Profile value for a tune row, as the pill label next to the override pills. */
-export function profileValueLabel(key, profile) {
-  const p = profile || {}
+// Mirrors hal0.providers.container.TYPE_DEFAULT_PROFILE: a slot that names no
+// profile launches its type's seed (embedding / reranking), else `chat`.
+const TYPE_DEFAULT_PROFILE = { embedding: 'embedding', reranking: 'reranking' };
+
+/** Name of the profile the slot actually launches with. */
+export function effectiveProfileName(slot) {
+  if (slot?.profile) return slot.profile;
+  return TYPE_DEFAULT_PROFILE[slot?.type] || 'chat';
+}
+
+// The profile-sourced value of `key` from the slot's tune_effective, as a
+// profile-shaped object, for when the profile row itself is not at hand.
+function profileFromEffective(tuneEffective) {
+  if (!tuneEffective) return {};
+  const src = tuneEffective.sources || {};
+  const out = {};
+  for (const k of TUNE_KEYS) {
+    if (src[k] === 'profile' && tuneEffective[k] !== undefined) out[k] = tuneEffective[k];
+  }
+  return out;
+}
+
+/**
+ * Profile value for a tune row, as the pill label next to the override pills.
+ * With no profile row (list not loaded, profile-less slot on an old payload)
+ * the slot's `tune_effective` profile-sourced values stand in, never defaults.
+ */
+export function profileValueLabel(key, profile, tuneEffective) {
+  const p = profile || profileFromEffective(tuneEffective);
   switch (key) {
     case 'ctx_size':
-      return ctxLabel(p.ctx_size)
+      return ctxLabel(p.ctx_size);
     case 'enable_thinking':
-      return thinkingLabel(thinkingToForm(p.enable_thinking))
+      return thinkingLabel(thinkingToForm(p.enable_thinking));
     case 'reasoning_effort':
-      return p.reasoning_effort || 'default'
+      return p.reasoning_effort || 'default';
     case 'reasoning_budget':
-      return p.reasoning_budget == null || p.reasoning_budget === -1 ? 'unlimited' : String(p.reasoning_budget)
+      return p.reasoning_budget == null || p.reasoning_budget === -1 ? 'unlimited' : String(p.reasoning_budget);
     case 'vision':
     case 'speculation':
-      return p[key] || 'auto'
+      return p[key] || 'auto';
     default:
-      return ''
+      return '';
   }
 }
 
@@ -125,17 +151,19 @@ export function changedTuneKeys(baseline, staged) {
 }
 
 /**
- * Value for `tune` in the PUT body, or undefined when nothing changed. Clearing
- * every override sends null (drops the table); otherwise the full staged table,
- * with an explicit null for each key that was set and no longer is, so the
- * write is right whether the server replaces or merges the table.
+ * Value for `tune` in the PUT body, or undefined when nothing changed. The
+ * server merges the table key by key, so only CHANGED keys go out, plus an
+ * explicit null for each key that was set and no longer is. An unchanged key is
+ * never re-sent: the profile may have started pinning it since (a re-sent
+ * enable_thinking would 400 slot.tune_pinned_by_flags). Clearing every override
+ * sends null (drops the table).
  */
 export function tuneWire(baseline, staged) {
-  if (changedTuneKeys(baseline, staged).length === 0) return undefined;
+  const changed = changedTuneKeys(baseline, staged);
+  if (changed.length === 0) return undefined;
   const next = tuneBody(staged);
   if (Object.keys(next).length === 0) return null;
-  const prev = tuneBody(baseline);
-  const out = { ...next };
-  for (const k of TUNE_KEYS) if (k in prev && !(k in next)) out[k] = null;
+  const out = {};
+  for (const k of changed) out[k] = k in next ? next[k] : null;
   return out;
 }
