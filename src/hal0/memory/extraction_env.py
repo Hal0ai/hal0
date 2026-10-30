@@ -709,12 +709,12 @@ class ExtractionWindow(AnchorWindow):
             )
         if self.ceiling_is_binding:
             return (
-                f"{head} The limit is the slot profile's own window: "
-                f"{self._profile_note} sets ctx_size = {self.ceiling:,} "
+                f"{head} The limit is {self._ceiling_owner_phrase}: "
+                f"{self._ceiling_note} sets ctx_size = {self.ceiling:,} "
                 f"(slot file {self.slot_path}). Fix: {self.fix_command}"
             )
         ceiling_note = (
-            f"{self._profile_note} sets ctx_size = {self.ceiling:,}, which is not the limit; "
+            f"{self._ceiling_note} sets ctx_size = {self.ceiling:,}, which is not the limit; "
             if self.ceiling is not None
             else f"{self._profile_note} sets no ctx_size; "
         )
@@ -777,6 +777,7 @@ def resolve_extraction_window(
         slots_dir=window.slots_dir,
         endpoint=window.endpoint,
         profile=window.profile,
+        ceiling_source=window.ceiling_source,
     )
 
 

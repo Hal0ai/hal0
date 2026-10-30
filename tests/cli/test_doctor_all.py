@@ -553,6 +553,25 @@ def test_seed_context_envelope_flags_an_oversized_profile_window(
     assert "[model]" not in c.detail
 
 
+def test_seed_context_envelope_flags_an_oversized_slot_tune_window(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:  # type: ignore[no-untyped-def]
+    """A ``[tune].ctx_size`` above the envelope is flagged and named as the slot's override."""
+    from hal0.config.schema import HardwareInfo
+
+    (tmp_path / "brain.toml").write_text(
+        'profile = "brain"\n[tune]\nctx_size = 16000000\n', encoding="utf-8"
+    )
+    cpu_only = HardwareInfo(platform="bare-metal-cpu-only", ram_mb=4096, gpus=[])
+    monkeypatch.setattr(
+        "hal0.hardware.freshness.resolve_fresh_hardware_info", lambda: (cpu_only, None)
+    )
+    c = da.check_seed_context_envelope(slots_dir=tmp_path)
+    assert c.status == "warn"
+    assert "brain" in c.detail
+    assert "[tune]" in c.detail
+
+
 def test_seed_context_envelope_ignores_a_stale_slot_level_window(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:  # type: ignore[no-untyped-def]
