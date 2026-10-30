@@ -66,8 +66,15 @@ _AGENT_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_\-]{1,64}$")
 # Localhost values FastMCP itself uses when it auto-enables DNS-rebinding
 # protection for a 127.0.0.1 server. We keep them as the secure floor so
 # the default posture is unchanged even when an operator widens the set.
-_LOCALHOST_HOSTS = ("127.0.0.1:*", "localhost:*", "[::1]:*")
-_LOCALHOST_ORIGINS = ("http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*")
+# ``host.docker.internal`` is the podman host-gateway name, resolvable only from
+# containers on this box (the Open WebUI unit passes ``--add-host`` for it).
+_LOCALHOST_HOSTS = ("127.0.0.1:*", "localhost:*", "[::1]:*", "host.docker.internal:*")
+_LOCALHOST_ORIGINS = (
+    "http://127.0.0.1:*",
+    "http://localhost:*",
+    "http://[::1]:*",
+    "http://host.docker.internal:*",
+)
 
 
 def _resolve_bearer(request: Request) -> str | None:
@@ -172,7 +179,8 @@ def _mcp_transport_security() -> TransportSecuritySettings:
 
     hal0 removed network auth entirely and binds ``0.0.0.0`` on
     the trusted LAN, so the mount has to be reachable by its real host
-    name. The allowlist is the secure localhost floor, plus the names this
+    name. The allowlist is the secure localhost floor (plus ``host.docker.internal``,
+    the podman host-gateway name the Open WebUI container uses), plus the names this
     box answers to (:func:`_box_hosts_and_origins`: LAN addresses, hostname,
     mDNS name, public URL, each bare and with the API port, so a bridge client
     on another machine connects without setup), plus whatever the operator
