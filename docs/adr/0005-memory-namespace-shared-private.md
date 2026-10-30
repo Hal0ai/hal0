@@ -47,6 +47,8 @@ all-unknown lists fail closed per #1451).
 
 ## Consequences
 
+- From v1.8.0 Hermes profiles and the brain write `shared` by default
+  (private per call, or per profile opt-in; see ADR-0035 decision 9).
 - `hermes_provision.py` / `agent_commands.py` identity cards moved to
   `shared` (the `AGENT_IDENTITY_TAG` scoping they already had is the
   boundary).

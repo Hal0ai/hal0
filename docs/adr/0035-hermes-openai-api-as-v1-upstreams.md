@@ -7,6 +7,11 @@ proxy Hermes's dashboard chat. It adds routing targets for Hermes's own
 OpenAI-compatible API, so that Open WebUI (OWUI) and any other `/v1` client
 can reach a Hermes profile.
 
+**Amended (2026-10-30).** Decision 9 no longer wires a private memory bank:
+Hermes profiles and `hal0-brain` write the shared pool by default, with
+`agent:<id>` provenance and a per-call or per-profile private opt-in. The
+memory tag grammar is recorded there too.
+
 ## Context
 
 OWUI is the chat front door on a hal0 box, and it talks only to hal0's `/v1`.
@@ -225,8 +230,9 @@ line above disagree.
 9. **Every named profile gets hal0's tools and memory (#2891).** A profile the
    operator clones starts with no `mcp_servers`, so through `/v1` it answered
    without hal0-admin and hal0-memory. `wire_named_profiles` deep-merges the
-   two hal0-owned MCP servers, as `X-hal0-Agent: hermes__<profile>` with a
-   private memory bank and the box bearer, and `memory.provider: hal0-memory`
+   two hal0-owned MCP servers, as `X-hal0-Agent: hermes__<profile>` with
+   `X-hal0-Private: "0"` (shared memory) and the box bearer, and
+   `memory.provider: hal0-memory`
    into every `profiles/<p>/config.yaml` except `hal0-brain`, which keeps its
    own phase and identity. It merges and never clobbers: scalars and dicts
    only, rewritten only when the content differs. It runs in the provisioning
@@ -239,6 +245,48 @@ line above disagree.
    `hermes_profiles_mcp` row for it and a `hermes_generation` row that warns
    when a committed pm generation lacks extras the release has, the drift
    that first hid the tools.
+   Memory (amended 2026-10-30, supersedes the private bank this decision first
+   wired): profiles write to the shared pool. Every write carries an
+   `agent:<id>` tag for provenance, and a caller picks private per call with
+   `private: true` on `memory_add` or the `X-hal0-Private: 1` header. A profile
+   opts into private memory for its memory facts with
+   `hal0: {memory_private: true}`, which renders `"1"` on hal0-admin and
+   hal0-memory (both can write memory), makes the Hermes memory plugin's
+   `hindsight_retain` private and, for `hal0-brain`, makes the dashboard
+   steward write private. Mental models and directives are bank-level in the
+   unified bank and are not covered. Only a missing key or null, false, the integer
+   `0` and the strings false/no/0/off mean shared (a non-boolean value still
+   warns in the doctor); any other value is private, in the
+   provisioner, the plugin and the doctor alike. The renderers write `"0"` for shared, never
+   omit the header, so converge overwrites a stale or hand-set `"1"` on a
+   profile that has not opted in. That includes the default profile, which
+   `hal0 update` converges as well as `reprovision --repair`; the
+   `hermes_default_memory` doctor row reports it. Nothing converges the
+   default profile periodically, so an opt-in added by hand takes
+   `reprovision --repair` (or the next `hal0 update`).
+   `hal0-brain` joins the shared pool under its own identity,
+   `hermes__hal0-brain`. Its persona `memory_namespace` and the identity
+   card's `namespace` metadata still read `private:hermes__hal0-brain`; they
+   are an identity key for the agent, not a privacy claim, since the steward
+   writes shared. Tag grammar: the Hindsight memory provider owns `agent:` and
+   `visibility:` on every document write and drops any caller-supplied tag of
+   either, compared stripped and case-insensitively, also inside list-form
+   `observation_scopes` (#3136). Mental models, directives and the PgVector
+   fallback do not stamp them. A caller therefore cannot forge those tags on
+   a memory write.
+   Which namespace a write reaches follows the caller's identity: a bridge
+   key is bound to its own name and cannot address another agent's namespace,
+   but a caller that is not a bridge key still states its identity in its own
+   `X-hal0-Agent` header, which hal0 does not authenticate (ADR-0012), so
+   the tags protect against forged tags, not against a non-bridge caller
+   claiming another agent's name.
+   Caller tags such as `user:<name>`, `run:<run_id>`, `thread:<thread_id>` and
+   `kind:<run_summary|vision|…>` pass through unchanged. Notes written before
+   the change stay private. `memory_curate` cannot release them (it edits a
+   memory unit's text and state and takes no tags); the path is the engine
+   proxy, `PATCH /api/memory/banks/<bank>/documents/<id>` with the full
+   `tags` list minus `visibility:private`, as `hal0 memory migrate unify` does. That is the unified-bank procedure;
+   with `unified_bank = false` private notes live in their own bank.
 10. **Visibility.** The Services page's OWUI card shows an "Agents" wired chip
    (`wired.agents`, from the server-side classifier). `hal0 doctor` has a
    `hermes-api` row, "Hermes API upstreams". Green on that row means the API

@@ -258,8 +258,8 @@ unbounded bill.
 ## Agent memory
 
 When the [memory subsystem](/docs/concepts/memory) is enabled, the agent gets
-a per-agent memory namespace (e.g. `private:hermes`) it reads and writes
-through MCP — five tools: `memory_add`, `memory_search`, `memory_list`,
+shared memory tagged with its own identity (a single write can be kept private
+with `private=true`) that it reads and writes through MCP — five tools: `memory_add`, `memory_search`, `memory_list`,
 `memory_delete`, and `memory_recall`. Because memory is opt-in, the agent's
 memory surface degrades cleanly when it's off: the per-agent memory stats
 simply report as unavailable rather than erroring, so an install without

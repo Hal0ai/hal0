@@ -50,8 +50,16 @@ in the active provider — this layer is for transport-side resolution.
 
 from __future__ import annotations
 
+import re
+
 DEFAULT_DATASET = "shared"
 PRIVATE_PREFIX = "private:"
+
+#: A caller-supplied ``document_id``: the identity grammar (alnum, ``-``, ``_``,
+#: at most 64 chars), optionally behind the ``private:<agent>:`` prefix the
+#: provider puts on a private document's id in the unified bank. ``add``
+#: returns that prefixed id, and re-sending it must upsert the same document.
+DOCUMENT_ID_PATTERN = re.compile(r"^(?:private:[a-zA-Z0-9_\-]{1,64}:)?[a-zA-Z0-9_\-]{1,64}$")
 
 # Retired namespaces (ADR 0005). Kept as named constants only so the
 # rejection messages and tests can refer to them without magic strings.

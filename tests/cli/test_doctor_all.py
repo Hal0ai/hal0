@@ -1359,6 +1359,20 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
     )
     monkeypatch.setattr(
         da,
+        "check_hermes_default_memory",
+        lambda **_kw: Check(
+            "hermes_default_memory", "Hermes default profile memory", "pass", "stubbed"
+        ),
+    )
+    monkeypatch.setattr(
+        da,
+        "check_hermes_brain_memory",
+        lambda **_kw: Check(
+            "hermes_brain_memory", "Hermes hal0-brain profile memory", "pass", "stubbed"
+        ),
+    )
+    monkeypatch.setattr(
+        da,
         "check_bridge_store",
         lambda **_kw: Check("bridge-store", "Agent bridge store", "pass", "stubbed"),
     )
@@ -1441,8 +1455,8 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
 
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
-    # 7 verify rows + 30 extras.
-    assert keys[-31:] == [
+    # 7 verify rows + 32 extras.
+    assert keys[-33:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1463,6 +1477,8 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "hermes-api",
         "hermes_mcp_auth",
         "hermes_profiles_mcp",
+        "hermes_default_memory",
+        "hermes_brain_memory",
         "bridge-store",
         "agent-bridge",
         "hermes_generation",
@@ -2199,10 +2215,11 @@ def _wired_yaml() -> str:
         "memory:\n  provider: hal0-memory\n"
         "mcp_servers:\n"
         "  hal0-admin:\n    type: http\n    url: http://127.0.0.1:8080/mcp/admin/mcp\n"
-        "    headers:\n      X-hal0-Agent: hermes__coder\n      Authorization: Bearer k\n"
+        "    headers:\n      X-hal0-Agent: hermes__coder\n      X-hal0-Private: '0'\n"
+        "      Authorization: Bearer k\n"
         f"    timeout: {admin_t}\n"
         "  hal0-memory:\n    type: http\n    url: http://127.0.0.1:8080/mcp/memory/mcp\n"
-        "    headers:\n      X-hal0-Agent: hermes__coder\n      X-hal0-Private: '1'\n"
+        "    headers:\n      X-hal0-Agent: hermes__coder\n      X-hal0-Private: '0'\n"
         "      Authorization: Bearer k\n"
         f"    timeout: {mem_t}\n"
     )
@@ -2377,7 +2394,8 @@ def test_generation_extras_passes_when_generation_matches(tmp_path, monkeypatch)
 
 def test_profiles_mcp_treats_non_mapping_headers_as_missing_auth(tmp_path) -> None:
     broken = _WIRED.replace(
-        "    headers:\n      X-hal0-Agent: hermes__coder\n      Authorization: Bearer k\n",
+        "    headers:\n      X-hal0-Agent: hermes__coder\n      X-hal0-Private: '0'\n"
+        "      Authorization: Bearer k\n",
         "    headers: invalid\n",
         1,
     )
@@ -2404,7 +2422,7 @@ def test_profiles_mcp_warns_when_home_is_not_traversable(tmp_path, monkeypatch) 
 def test_profiles_mcp_warns_on_drifted_identity_or_provider(tmp_path) -> None:
     """Codex P2: a copied X-hal0-Agent or a missing X-hal0-Private is not "wired"."""
     copied = _WIRED.replace("hermes__coder", "hermes__hal0-brain")
-    no_private = _WIRED.replace("      X-hal0-Private: '1'\n", "")
+    no_private = _WIRED.replace("      X-hal0-Private: '0'\n", "")
     home = _profiles_home(tmp_path, coder=copied, lab=no_private)
     c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
     assert c.status == "warn"
@@ -2412,6 +2430,23 @@ def test_profiles_mcp_warns_on_drifted_identity_or_provider(tmp_path) -> None:
     # Only a different profile name than the fixture's identity drifts: ``coder`` as itself passes.
     home2 = _profiles_home(tmp_path / "b", coder=_WIRED)
     assert da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home2).status == "pass"
+
+
+def test_profiles_mcp_private_header_follows_the_profile_opt_in(tmp_path) -> None:
+    """A "1" is a stale header on a shared profile and correct on a memory_private one."""
+    stale = _WIRED.replace("X-hal0-Private: '0'", "X-hal0-Private: '1'")
+    c = da.check_hermes_profiles_mcp(
+        auth={"auth_required": True}, home=_profiles_home(tmp_path, coder=stale)
+    )
+    assert c.status == "warn"
+    assert "stale private header" in c.detail and "converge will remove it" in c.detail
+    opted = stale + "hal0:\n  memory_private: true\n"
+    home2 = _profiles_home(tmp_path / "b", coder=opted)
+    c2 = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home2)
+    assert c2.status == "pass" and "memory: private (opt-in)" in c2.detail
+    home3 = _profiles_home(tmp_path / "c", coder=_WIRED)
+    c3 = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home3)
+    assert c3.status == "pass" and "private" not in c3.detail
 
 
 def test_profiles_mcp_ignores_dirs_hermes_would_not_serve(tmp_path) -> None:
@@ -2688,3 +2723,127 @@ def test_gateway_unit_flags_both_units_installed(tmp_path) -> None:
         home=home, unit_path=units / "hermes-gateway.service", proc=_proc(tmp_path, [])
     )
     assert c.status == "fail" and "both hermes-gateway.service" in c.detail
+
+
+# ── default profile memory privacy (ADR-0035 d9) ─────────────────────────────
+
+
+def _root_cfg(tmp_path, admin: str, memory: str, *, opt_in: bool = False):
+    home = tmp_path / "hermes"
+    home.mkdir()
+    hal0 = "hal0:\n  memory_private: true\n" if opt_in else ""
+    (home / "config.yaml").write_text(
+        hal0
+        + "mcp_servers:\n"
+        + f"  hal0-admin:\n    headers:\n      X-hal0-Private: '{admin}'\n"
+        + f"  hal0-memory:\n    headers:\n      X-hal0-Private: '{memory}'\n"
+    )
+    return home
+
+
+def test_default_memory_passes_when_not_provisioned(tmp_path) -> None:
+    c = da.check_hermes_default_memory(home=tmp_path / "nope")
+    assert (c.key, c.status, c.critical) == ("hermes_default_memory", "pass", False)
+
+
+def test_default_memory_passes_when_shared_and_no_opt_in(tmp_path) -> None:
+    c = da.check_hermes_default_memory(home=_root_cfg(tmp_path, "0", "0"))
+    assert c.status == "pass" and "shared" in c.detail
+
+
+def test_default_memory_warns_on_a_stale_private_header(tmp_path) -> None:
+    c = da.check_hermes_default_memory(home=_root_cfg(tmp_path, "0", "1"))
+    assert c.status == "warn"
+    assert "hal0-memory" in c.detail and "hal0 update" in c.detail
+
+
+def test_default_memory_passes_for_an_opt_in_with_private_headers(tmp_path) -> None:
+    c = da.check_hermes_default_memory(home=_root_cfg(tmp_path, "1", "1", opt_in=True))
+    assert c.status == "pass" and "private" in c.detail
+
+
+def test_default_memory_warns_when_an_opt_in_is_not_applied(tmp_path) -> None:
+    c = da.check_hermes_default_memory(home=_root_cfg(tmp_path, "0", "0", opt_in=True))
+    assert c.status == "warn" and "hal0-admin" in c.detail and "hal0-memory" in c.detail
+
+
+def _root_text(tmp_path, text):
+    home = tmp_path / "hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text(text)
+    return home
+
+
+_SERVERS_1 = (
+    "mcp_servers:\n"
+    "  hal0-admin:\n    headers:\n      X-hal0-Private: '1'\n"
+    "  hal0-memory:\n    headers:\n      X-hal0-Private: '1'\n"
+)
+
+
+def test_default_memory_leaves_a_wire_mcp_opt_out_alone(tmp_path) -> None:
+    home = _root_text(tmp_path, "hal0:\n  wire_mcp: false\n" + _SERVERS_1)
+    c = da.check_hermes_default_memory(home=home)
+    assert c.status == "pass" and "wire_mcp" in c.detail
+
+
+def test_default_memory_warns_on_a_non_boolean_opt_in(tmp_path) -> None:
+    home = _root_text(tmp_path, "hal0:\n  memory_private: 'true'\n" + _SERVERS_1)
+    c = da.check_hermes_default_memory(home=home)
+    assert c.status == "warn" and "memory_private" in c.detail and "not a boolean" in c.detail
+
+
+def test_default_memory_treats_an_off_word_as_shared(tmp_path) -> None:
+    home = _root_text(
+        tmp_path, "hal0:\n  memory_private: 'off'\n" + _SERVERS_1.replace("'1'", "'0'")
+    )
+    c = da.check_hermes_default_memory(home=home)
+    assert c.status == "warn" and "not a boolean" in c.detail
+    assert "shared" in c.detail and "private" not in c.detail.replace("memory_private", "")
+
+
+def test_default_memory_unapplied_opt_in_names_the_repair(tmp_path) -> None:
+    c = da.check_hermes_default_memory(home=_root_cfg(tmp_path, "0", "0", opt_in=True))
+    assert c.status == "warn" and "reprovision hermes --repair" in c.detail
+
+
+def test_profiles_mcp_warns_on_a_non_boolean_opt_in(tmp_path) -> None:
+    text = "hal0:\n  memory_private: 'yes'\n" + _wired_yaml().replace(
+        "X-hal0-Private: '0'", "X-hal0-Private: '1'"
+    )
+    home = _profiles_home(tmp_path, coder=text)
+    c = da.check_hermes_profiles_mcp(auth={"auth_required": True}, home=home)
+    assert c.status == "warn" and "memory_private" in c.detail and "coder" in c.detail
+
+
+def _brain_home(tmp_path, text):
+    home = tmp_path / "hermes"
+    (home / "profiles" / "hal0-brain").mkdir(parents=True)
+    if text is not None:
+        (home / "profiles" / "hal0-brain" / "config.yaml").write_text(text)
+    return home
+
+
+def test_brain_memory_passes_without_the_profile(tmp_path) -> None:
+    c = da.check_hermes_brain_memory(home=_brain_home(tmp_path, None))
+    assert (c.key, c.status, c.critical) == ("hermes_brain_memory", "pass", False)
+
+
+def test_brain_memory_flags_an_opt_in_its_headers_do_not_carry(tmp_path) -> None:
+    home = _brain_home(
+        tmp_path,
+        "hal0:\n  memory_private: true\n"
+        "mcp_servers:\n  hal0-memory:\n    headers:\n      X-hal0-Private: '0'\n",
+    )
+    c = da.check_hermes_brain_memory(home=home)
+    assert c.status == "warn" and "hal0-brain profile" in c.detail and "hal0-memory" in c.detail
+
+
+def test_brain_memory_passes_when_headers_follow_the_opt_in(tmp_path) -> None:
+    home = _brain_home(
+        tmp_path,
+        "hal0:\n  memory_private: true\n"
+        "mcp_servers:\n  hal0-memory:\n    headers:\n      X-hal0-Private: '1'\n",
+    )
+    c = da.check_hermes_brain_memory(home=home)
+    assert c.status == "pass" and "private" in c.detail

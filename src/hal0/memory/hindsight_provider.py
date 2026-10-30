@@ -57,6 +57,37 @@ _AGENTS = "agents"
 # (below) keeps such a doc addressable only by its owning agent.
 _VISIBILITY_PRIVATE = "visibility:private"
 _AGENT_TAG_PREFIX = "agent:"
+#: Tag namespaces the provider owns. A caller's tag is judged stripped and
+#: lower-cased (as the bridge's ``_client_tags`` does), so ``AGENT:x``,
+#: `` agent:x`` and ``Visibility:Shared`` are reserved too.
+_RESERVED_TAG_PREFIXES = (_AGENT_TAG_PREFIX, "visibility:")
+
+
+def _is_reserved_tag(tag: Any) -> bool:
+    return str(tag).strip().lower().startswith(_RESERVED_TAG_PREFIXES)
+
+
+def _strip_reserved_scopes(scopes: Any) -> Any:
+    """``observation_scopes`` with reserved tags removed from list-form scopes.
+
+    A string mode (``per_tag`` ...) passes through. A list of tag-lists keeps
+    each scope's other tags; a scope left empty is dropped, and a list left
+    with no scope at all becomes ``None`` (the engine default), so a caller
+    cannot aim consolidation at another agent's or the private partition.
+    """
+    if not isinstance(scopes, list):
+        return scopes
+    kept: list[Any] = []
+    for scope in scopes:
+        if isinstance(scope, list):
+            inner = [t for t in scope if not _is_reserved_tag(t)]
+            if inner:
+                kept.append(inner)
+        elif not _is_reserved_tag(scope):
+            kept.append(scope)
+    return kept or None
+
+
 # The front-door sentinel for a missing X-hal0-Agent; collapses to ``unknown``
 # on both write (agent tag) and read (caller identity) so an absent identity
 # can never match a real agent's private docs.
@@ -1279,15 +1310,34 @@ class HindsightProvider(MemoryProvider):
             resolved_id = f"{agent}:{session_id}"
         else:
             resolved_id = str(uuid.uuid4())
+        if self._unified_bank:
+            # One bank holds shared and private documents, and the engine upserts
+            # on document id. Without a namespace a shared write could reuse a
+            # private document's id (or a session-derived ``<agent>:<session>``
+            # id could be hit by a shared and a private write of one agent) and
+            # replace it. Private ids carry ``private:<agent>:``; a shared write
+            # may not claim that prefix. A fresh uuid needs neither.
+            own_prefix = f"{_PRIVATE}{agent}:"
+            if requested_private:
+                # Re-sending the id ``add`` returned must upsert the same document.
+                if (document_id or session_id) and not resolved_id.startswith(own_prefix):
+                    resolved_id = f"{own_prefix}{document_id or session_id}"
+            elif resolved_id.startswith(_PRIVATE):
+                raise ValueError(
+                    f"document_id may not start with {_PRIVATE!r}: that prefix is reserved "
+                    "for private documents"
+                )
 
-        # Server-side tag enforcement: an ``agent:<id>`` tag on every write
-        # (unless the caller already supplied one), plus ``visibility:private``
-        # when the write came in under the private toggle. Caller tags are
-        # preserved.
-        out_tags = list(tags or [])
-        if not any(str(t).startswith(_AGENT_TAG_PREFIX) for t in out_tags):
-            out_tags.append(f"{_AGENT_TAG_PREFIX}{agent}")
-        if requested_private and _VISIBILITY_PRIVATE not in out_tags:
+        # Server-side tag enforcement (#3136): the provider owns both the
+        # ``agent:`` and ``visibility:`` tags. Any caller-supplied ``agent:*``
+        # or ``visibility:*`` (compared stripped and case-insensitively) is
+        # dropped; ``agent:`` is replaced with the resolved caller and
+        # ``visibility:private`` is added only when the write came in under the
+        # private toggle — otherwise a caller could plant a note in another
+        # agent's private namespace. Other caller tags are preserved.
+        out_tags = [t for t in (tags or []) if not _is_reserved_tag(t)]
+        out_tags.append(f"{_AGENT_TAG_PREFIX}{agent}")
+        if requested_private:
             out_tags.append(_VISIBILITY_PRIVATE)
         # #1300: only in unified mode — pre-unified multi-bank mode isolates the
         # project by bank, so tagging there would be a second owner of the
@@ -1309,6 +1359,12 @@ class HindsightProvider(MemoryProvider):
         extra: dict[str, Any] = {}
         if entities is not None:
             extra["entities"] = entities
+        # A private note in the unified bank must not feed an observation that
+        # lacks ``visibility:private``, so on a private write the caller's
+        # scopes (any form) are ignored and the engine default applies.
+        if self._unified_bank and requested_private:
+            observation_scopes = None
+        observation_scopes = _strip_reserved_scopes(observation_scopes)
         if observation_scopes is not None:
             extra["observation_scopes"] = observation_scopes
         if strategy is not None:
@@ -1896,7 +1952,9 @@ class HindsightProvider(MemoryProvider):
         # budget so that docs the caller may not see never consume the caller's
         # budget (and never leak). No-op in pre-unified multi-bank mode. Done
         # pre-budget so the returned count reflects only visible docs.
+        before_filter = len(union)
         union = self._filter_visible(union, client_id, dataset)
+        withheld = len(union) != before_filter
         if not union:
             return RecallResults([])
 
@@ -1927,12 +1985,110 @@ class HindsightProvider(MemoryProvider):
                 if doc_items:
                     budgeted = list(budgeted) + doc_items
 
+        # ``chunks``/``source_facts``/``entities`` ride beside ``results`` at the
+        # response level, so filtering only the result list left another
+        # agent's private text reachable through them. Unified mode only: with
+        # a bank per namespace the fan-out never fetched a foreign private one.
+        if self._unified_bank:
+            chunks_merged, source_facts_merged, entities_merged = self._filter_recall_enrichment(
+                budgeted,
+                chunks_merged,
+                source_facts_merged,
+                entities_merged,
+                withheld=withheld,
+                client_id=client_id,
+                dataset=dataset,
+            )
+
         return RecallResults(
             budgeted,
             entities=entities_merged or None,
             chunks=chunks_merged or None,
             source_facts=source_facts_merged or None,
         )
+
+    def _filter_recall_enrichment(
+        self,
+        items: list[dict[str, Any]],
+        chunks: dict[str, Any],
+        source_facts: dict[str, Any],
+        entities: dict[str, Any],
+        *,
+        withheld: bool,
+        client_id: str | None,
+        dataset: str | list[str],
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        """Fail closed when joining response-level recall enrichment.
+
+        Only explicit joins to a result that survived visibility and the token
+        budget are kept; an enrichment that cannot be joined is omitted rather
+        than guessed visible.
+
+        * ``source_facts``: kept when a surviving result lists the fact in
+          ``source_fact_ids`` and the fact itself passes the read ACL.
+        * ``chunks``: kept when the chunk id, document id or fact id matches a
+          surviving result or kept source fact.
+        * ``entities``: keyed by entity name, joined to the ``entities`` names
+          the surviving results carry. An entity's state is bank-wide, and
+          nothing in the response says which facts it was built from, so when
+          any result was withheld for visibility none is returned.
+        """
+
+        def _values(value: Any) -> set[str]:
+            if value is None:
+                return set()
+            if isinstance(value, (list, tuple, set)):
+                return {str(v) for v in value if v is not None and str(v)}
+            return {str(value)} if str(value) else set()
+
+        fact_ids: set[str] = set()
+        document_ids: set[str] = set()
+        chunk_ids: set[str] = set()
+        referenced_source_ids: set[str] = set()
+        entity_names: set[str] = set()
+        for item in items:
+            fact_ids.update(_values(item.get("fact_id")))
+            document_ids.update(_values(item.get("document_id") or item.get("id")))
+            chunk_ids.update(_values(item.get("chunk_id")))
+            referenced_source_ids.update(_values(item.get("source_fact_ids")))
+            for ent in item.get("entities") or []:
+                name = ent.get("text") or ent.get("name") if isinstance(ent, dict) else ent
+                entity_names.update(_values(name))
+
+        visible_source_facts: dict[str, Any] = {}
+        for key, raw in source_facts.items():
+            if not isinstance(raw, dict):
+                continue
+            if str(raw.get("id") or key) not in referenced_source_ids:
+                continue
+            if not self._filter_visible([self._fact_to_item(raw, _SHARED)], client_id, dataset):
+                continue
+            visible_source_facts[str(key)] = raw
+            fact_ids.update(_values(raw.get("id") or key))
+            document_ids.update(_values(raw.get("document_id")))
+            chunk_ids.update(_values(raw.get("chunk_id")))
+
+        visible_chunks: dict[str, Any] = {}
+        for key, raw in chunks.items():
+            if not isinstance(raw, dict):
+                continue
+            if (
+                _values(raw.get("id") or key) & chunk_ids
+                or _values(raw.get("document_id")) & document_ids
+                or _values(raw.get("fact_id") or raw.get("fact_ids")) & fact_ids
+            ):
+                visible_chunks[str(key)] = raw
+
+        visible_entities: dict[str, Any] = {}
+        if not withheld:
+            for key, raw in entities.items():
+                names = {str(key)}
+                if isinstance(raw, dict):
+                    names |= _values(raw.get("canonical_name"))
+                if names & entity_names:
+                    visible_entities[str(key)] = raw
+
+        return visible_chunks, visible_source_facts, visible_entities
 
     @staticmethod
     def _precedence_key(item: dict[str, Any]) -> tuple[int, float]:
@@ -2414,6 +2570,11 @@ class HindsightProvider(MemoryProvider):
         final_score = scores.get("final")
         return {
             "id": fact.get("document_id") or fact.get("id"),
+            # The joins ``_filter_recall_enrichment`` needs: which fact, document
+            # and chunk this result is, so response-level chunks follow its ACL.
+            "fact_id": fact.get("id"),
+            "document_id": fact.get("document_id"),
+            "chunk_id": fact.get("chunk_id"),
             "text": fact.get("text", ""),
             "timestamp": fact.get("mentioned_at") or _now(),
             "dataset": bank.replace("__", ":"),

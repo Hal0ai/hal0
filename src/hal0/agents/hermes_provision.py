@@ -34,6 +34,7 @@ converging writes.
 from __future__ import annotations
 
 import contextlib
+import copy
 import datetime
 import errno
 import grp
@@ -1705,7 +1706,9 @@ def _default_mcp_servers() -> list[dict[str, Any]]:
             "name": "hal0-memory",
             "url": "http://127.0.0.1:8080/mcp/memory/mcp",
             "type": "http",
-            "private": True,
+            # Shared by default; a Hermes profile opts into a private bank with
+            # ``hal0: {memory_private: true}`` (:func:`profile_memory_private`).
+            "private": False,
             # memory_reflect is an agentic LLM loop on the engine side — on the
             # reference box a single reflect legitimately runs 5-9 minutes, so a
             # short per-server timeout guarantees a spurious client-side failure
@@ -2292,6 +2295,12 @@ def terminal_tool_enabled(
 HAL0_APPROVALS_MODE = "smart"
 
 
+#: hal0's own MCP servers that can write memory for the caller: hal0-memory,
+#: and hal0-admin whose catalog carries ``memory_add``. A profile's
+#: ``memory_private`` opt-in must put the private header on both.
+_MEMORY_REACHING_SERVERS: tuple[str, ...] = ("hal0-admin", "hal0-memory")
+
+
 def _config_list_keys(
     *,
     terminal_enabled: bool,
@@ -2299,6 +2308,10 @@ def _config_list_keys(
     mcp_servers: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """The list-valued overlay, with the terminal posture folded in.
+
+    The ``X-hal0-Private`` header it renders for :data:`_MEMORY_REACHING_SERVERS`
+    is only a base: :func:`_merge_config_yaml_layers` (``memory_servers=``)
+    recomputes it from the root's merged ``hal0: {memory_private: ...}`` opt-in.
 
     ``agent.disabled_toolsets`` is written in BOTH directions so the posture is
     convergent: opting in later clears the subtraction instead of leaving a
@@ -2313,16 +2326,16 @@ def _config_list_keys(
     if not terminal_enabled:
         disabled += TERMINAL_OFF_TOOLSETS
     keys["agent"] = {"disabled_toolsets": disabled}
-    # X-hal0-Private must reach config.yaml as the STRING "1" (#2085): the
-    # config-set path can't express a numeric-looking string (hermes coerces
-    # it to the YAML int 1, which wedges hermes' MCP client post-initialize),
-    # so private servers get their header here, where safe_dump quotes it.
+    # X-hal0-Private must reach config.yaml as a STRING, "1" or "0" (#2085):
+    # the config-set path can't express a numeric-looking string (hermes
+    # coerces it to the YAML int, which wedges hermes' MCP client
+    # post-initialize), so the header is written here, where safe_dump quotes
+    # it. Shared servers render "0" so converge overwrites a stale "1".
     # The nested-dict merge preserves the sibling headers config set wrote
     # (X-hal0-Agent, Authorization) and overlay-wins repairs poisoned boxes.
     private_headers = {
-        srv["name"]: {"headers": {"X-hal0-Private": "1"}}
+        srv["name"]: {"headers": {"X-hal0-Private": "1" if srv.get("private") else "0"}}
         for srv in (mcp_servers or [])
-        if srv.get("private")
     }
     if private_headers:
         keys["mcp_servers"] = private_headers
@@ -2911,12 +2924,58 @@ def apply_brain_profile_mcp_entries(
     }
 
 
+def _wire_mcp_opted_out(cfg: dict[str, Any]) -> bool:
+    """True when ``hal0: {wire_mcp: false}`` tells hal0 to leave the MCP entries alone."""
+    block = cfg.get("hal0")
+    return isinstance(block, dict) and block.get(PROFILE_MCP_OPT_OUT_KEY) is False
+
+
+def _without_private_header(layer: dict[str, Any], names: tuple[str, ...]) -> dict[str, Any]:
+    """``layer`` minus ``mcp_servers.<name>.headers.X-hal0-Private`` for ``names``.
+
+    Those headers are computed from the merged config instead. A server entry
+    left with no other keys is dropped, so a stub is never created.
+    """
+    out = copy.deepcopy(layer)
+    servers = out.get("mcp_servers")
+    if not isinstance(servers, dict):
+        return out
+    for name in names:
+        srv = servers.get(name)
+        hdrs = srv.get("headers") if isinstance(srv, dict) else None
+        if isinstance(hdrs, dict):
+            hdrs.pop("X-hal0-Private", None)
+            if not hdrs:
+                del srv["headers"]
+        if isinstance(srv, dict) and not srv:
+            del servers[name]
+    if not servers:
+        del out["mcp_servers"]
+    return out
+
+
+def _set_private_header(cfg: dict[str, Any], names: tuple[str, ...], value: str) -> None:
+    """Set ``X-hal0-Private`` on the named servers ``cfg`` already has; never invent one."""
+    servers = cfg.get("mcp_servers")
+    if not isinstance(servers, dict):
+        return
+    for name in names:
+        srv = servers.get(name)
+        if not isinstance(srv, dict):
+            continue
+        hdrs = srv.get("headers")
+        if not isinstance(hdrs, dict):
+            hdrs = srv["headers"] = {}
+        hdrs["X-hal0-Private"] = value
+
+
 def _merge_config_yaml_layers(
     config_path: Path,
     *,
     list_keys: dict[str, Any],
     overrides_path: Path,
     persona_names: Iterable[str] = (),
+    memory_servers: tuple[str, ...] = (),
 ) -> bool:
     """Deep-merge the irreducible list keys + operator overrides onto config.yaml.
 
@@ -2932,6 +2991,14 @@ def _merge_config_yaml_layers(
     known personality override ``agent.system_prompt``, so a custom persona
     named like a built-in personality ("Concise") would otherwise replace the
     persona prompt. Returns True iff the file changed.
+
+    ``memory_servers`` names the hal0 MCP servers whose ``X-hal0-Private``
+    header follows the file's ``hal0: {memory_private: ...}`` opt-in. It is read
+    from the MERGED result (the file plus ``overrides.yaml``), so an opt-in that
+    only the overrides carry takes effect in the same pass; an explicit header
+    in ``overrides.yaml`` still wins. Only servers already present in the file
+    get the header, and a root with ``hal0: {wire_mcp: false}`` keeps whatever
+    header it has.
     """
     try:
         import yaml  # type: ignore[import-untyped]
@@ -2944,10 +3011,19 @@ def _merge_config_yaml_layers(
     for dotted in RETIRED_HAL0_CONFIG_KEYS:
         _drop_dotted_key(base, dotted)
     _retire_hal0_personality(base, persona_names)
-    merged = _deep_merge(base, list_keys)
+    overlay: dict[str, Any] = {}
     if overrides_path.exists():
         overlay = yaml.safe_load(overrides_path.read_text(encoding="utf-8")) or {}
-        merged = _deep_merge(merged, overlay)
+    if memory_servers:
+        list_keys = _without_private_header(list_keys, memory_servers)
+    merged = _deep_merge(base, list_keys)
+    if memory_servers:
+        final = _deep_merge(merged, overlay)
+        if not _wire_mcp_opted_out(final):
+            _set_private_header(
+                merged, memory_servers, "1" if profile_memory_private(final) else "0"
+            )
+    merged = _deep_merge(merged, overlay)
     # #2085 hardening: X-hal0-Private must be a string wherever it ends up.
     # An operator overrides.yaml copied from a pre-fix config.yaml carries
     # the unquoted int 1 (overrides win by design), and that exact value
@@ -3062,11 +3138,17 @@ def apply_release_config_invariants(
     # the next reprovision. The recorded decision is the authority here.
     decision = box_terminal_decision(home)
     layers = _deep_merge(layers, _terminal_profile_keys(loaded or {}, terminal_enabled=decision))
+    # The default profile's memory header converges here too (memory_servers):
+    # ``hal0 update`` never runs the overlay, so without this the root keeps
+    # whatever header it had while named profiles follow the shared default. A
+    # hand-set "1" is overwritten; ``hal0: {memory_private: true}`` is how a
+    # profile stays private.
     changed = _merge_config_yaml_layers(
         config,
         list_keys=layers,
         overrides_path=overrides_path if overrides_path is not None else OVERRIDES_PATH,
         persona_names=_persona_display_names_for_home(home),
+        memory_servers=_MEMORY_REACHING_SERVERS,
     )
     # Every profile too, hal0-brain included: the profile phases run only on a
     # provision or a hal0-api start, and a release activation restarts the
@@ -3471,6 +3553,7 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
         ),
         overrides_path=OVERRIDES_PATH,
         persona_names=_hal0_persona_display_names(state),
+        memory_servers=_MEMORY_REACHING_SERVERS,
     )
 
     # Legacy honcho.json cleanup — see _disable_honcho_hermes_host.
@@ -3652,8 +3735,7 @@ def _probe_mcp_server(
     bearer = service_key(prefer="admin")
     if bearer:
         base_headers["Authorization"] = f"Bearer {bearer}"
-    if private:
-        base_headers["X-hal0-Private"] = "1"
+    base_headers["X-hal0-Private"] = "1" if private else "0"
 
     def _parse_jsonrpc(body: str) -> dict[str, Any]:
         body = (body or "").strip()
@@ -3850,8 +3932,7 @@ def _probe_mcp_client(
     bearer = service_key(prefer="admin")
     if bearer:
         headers["Authorization"] = f"Bearer {bearer}"
-    if private:
-        headers["X-hal0-Private"] = "1"
+    headers["X-hal0-Private"] = "1" if private else "0"
     env = _hal0_subprocess_env(
         HAL0_MCP_PROBE_URL=url or "",
         # Env, not argv: the bearer must not show up in the process list.
@@ -4691,8 +4772,7 @@ def _mcp_memory_call(
     bearer = service_key(prefer="admin")
     if bearer:
         headers["Authorization"] = f"Bearer {bearer}"
-    if private:
-        headers["X-hal0-Private"] = "1"
+    headers["X-hal0-Private"] = "1" if private else "0"
     req = Request(url, data=body_bytes, headers=headers, method="POST")
     try:
         with open_url(req, timeout=timeout) as resp:
@@ -4883,7 +4963,8 @@ def _phase_namespace_register(ctx: _StepCtx) -> PhaseResult:
 # to the default ``hermes`` agent. This phase registers its identity card in
 # the ``agents`` dataset — the same treatment ``_phase_namespace_register``
 # gives the default agent — so the steward is a real profile, discoverable and
-# with a provisioned private bank (``private:hermes__hal0-brain``). Warn-as-OK:
+# with its identity card written (its memory is shared, tagged
+# ``hermes__hal0-brain``). Warn-as-OK:
 # memory-layer unavailability never blocks bootstrap.
 
 
@@ -4892,7 +4973,8 @@ def _build_brain_identity_card() -> dict[str, Any]:
 
     Mirrors :func:`_build_identity_card` (the default agent's card) so the
     dashboard steward registers as a first-class agent identity rather than a
-    mere persona overlay. Its memory rides ``private:hermes__hal0-brain``.
+    mere persona overlay. Its memory is shared, tagged ``hermes__hal0-brain``
+    (the card's ``namespace`` metadata is the historical identity key).
     """
     from hal0.agents.personas import BRAIN_PROFILE_AGENT_ID
 
@@ -4925,8 +5007,7 @@ def _phase_brain_profile_seed(ctx: _StepCtx) -> PhaseResult:
 
     Writes the brain identity card to the ``shared`` dataset under the
     ``agent-identity`` tag (search → delete
-    stale → add), keyed on the ``hermes__hal0-brain`` agent-id so its private
-    bank is provisioned rather than left to lazy first-write. Idempotent;
+    stale → add), keyed on the ``hermes__hal0-brain`` agent-id. Idempotent;
     warn-as-OK so bootstrap never blocks on the memory layer.
     """
     from hal0.agents.personas import BRAIN_PROFILE_AGENT_ID
@@ -5047,12 +5128,12 @@ def _phase_brain_profile_seed(ctx: _StepCtx) -> PhaseResult:
 #
 # The hal0-brain profile (``~/.hermes/profiles/hal0-brain/``, created by the
 # upstream hermes binary) needs the two hal0-owned MCP servers — hal0-admin
-# (platform control) + hal0-memory (its private 3-tier bank) — so the steward
-# can actually interact with + control the box. On a hand-configured host these
-# were wired out-of-band; this phase makes them reproducible. ``hermes config
-# set`` has no per-profile target, so — exactly like honcho.json and the YAML
-# list-keys — hal0 deep-merges the block into the profile's config.yaml,
-# preserving every upstream/operator key. Only rewrites when the wiring is
+# (platform control) + hal0-memory (shared memory tagged as the steward) — so
+# the steward can actually interact with + control the box. On a
+# hand-configured host these were wired out-of-band; this phase makes them
+# reproducible. ``hermes config set`` has no per-profile target, so — exactly
+# like honcho.json and the YAML list-keys — hal0 deep-merges the block into
+# the profile's config.yaml, preserving every upstream/operator key. Only rewrites when the wiring is
 # actually missing/wrong (a correct box is left byte-untouched, so the file's
 # comments/formatting survive). Warn-as-OK; skips when the profile isn't there.
 
@@ -5063,13 +5144,14 @@ def _brain_profile_config_path(state: BootstrapState) -> Path:
     return Path(state.hermes_home) / "profiles" / _BRAIN_PROFILE_NAME / "config.yaml"
 
 
-def _build_profile_mcp_servers(agent_id: str) -> dict[str, Any]:
+def _build_profile_mcp_servers(agent_id: str, *, private: bool = False) -> dict[str, Any]:
     """The hal0-owned MCP servers a Hermes profile is wired to, as ``agent_id``.
 
     Mirrors the top-level ``_default_mcp_servers`` admin + memory pair but scoped
-    to the profile's identity (``X-hal0-Agent``); memory is private (its own
-    3-tier bank). Deliberately just these two — a profile gets platform control
-    + memory only, not any other MCP surface.
+    to the profile's identity (``X-hal0-Agent``); memory is shared by default
+    (``X-hal0-Private: "0"``) and private (its own bank) when ``private``.
+    Deliberately just these two — a profile gets platform control + memory
+    only, not any other MCP surface.
 
     The ``/mcp`` mount is ADMIN-classed (security/exposure.py), so — same as
     the top-level overlay — a bearer is attached from the box service identity
@@ -5082,8 +5164,16 @@ def _build_profile_mcp_servers(agent_id: str) -> dict[str, Any]:
     from hal0.service_identity import service_key
 
     bearer = service_key(prefer="admin")
-    admin_headers: dict[str, Any] = {"X-hal0-Agent": agent_id}
-    memory_headers: dict[str, Any] = {"X-hal0-Agent": agent_id, "X-hal0-Private": "1"}
+    # hal0-admin carries the header too: its catalog has ``memory_add``, so a
+    # private profile's writes through it must land in the private bank.
+    admin_headers: dict[str, Any] = {
+        "X-hal0-Agent": agent_id,
+        "X-hal0-Private": "1" if private else "0",
+    }
+    memory_headers: dict[str, Any] = {
+        "X-hal0-Agent": agent_id,
+        "X-hal0-Private": "1" if private else "0",
+    }
     if bearer:
         admin_headers["Authorization"] = f"Bearer {bearer}"
         memory_headers["Authorization"] = f"Bearer {bearer}"
@@ -5126,6 +5216,10 @@ def _build_brain_profile_mcp_servers() -> dict[str, Any]:
 #: ``hal0: {wire_mcp: false}``. The profile then keeps whatever ``mcp_servers``
 #: the operator wrote, and hal0 never touches the file again.
 PROFILE_MCP_OPT_OUT_KEY = "wire_mcp"
+
+#: ``hal0: {memory_private: true}`` in a profile's config.yaml gives that
+#: profile a private memory bank (``X-hal0-Private: "1"``); the default is shared.
+PROFILE_MEMORY_PRIVATE_KEY = "memory_private"
 
 #: Hermes's own profile id rule (``hermes_constants.py:323`` at d923a5eb). A
 #: directory under ``profiles/`` that breaks it is not a profile Hermes serves,
@@ -5417,11 +5511,96 @@ def _replace_profile_config_at(dir_fd: int, text: str, st: os.stat_result) -> No
         raise
 
 
-def _profile_wire_desired(agent_id: str) -> dict[str, Any]:
+#: ``memory_private`` values that mean shared, besides absent, null and false.
+#: Anything else is private: a typo on a privacy switch fails closed. The Hermes
+#: memory plugin (``memory_hindsight/provider.py``) carries a copy of this rule,
+#: and a test holds the two together.
+_MEMORY_PRIVATE_OFF_WORDS = frozenset({"false", "no", "0", "off"})
+
+
+def memory_private_value_is_private(value: Any) -> bool:
+    """The one ``memory_private`` rule: absent/null/false/"false|no|0|off" is shared."""
+    if value is None or value is False:
+        return False
+    off = isinstance(value, (str, int, float)) and (
+        str(value).strip().lower() in _MEMORY_PRIVATE_OFF_WORDS
+    )
+    return not off
+
+
+def profile_memory_private(cfg: dict[str, Any] | None) -> bool:
+    """True when a profile's own config opts into a private memory bank.
+
+    ``hal0: {memory_private: true}``. Absent, null, false and the strings
+    false/no/0/off mean shared, the default; any other value is private
+    (:func:`memory_private_value_is_private`). A ``hal0`` that is not a
+    mapping cannot carry the opt-in.
+    """
+    hal0 = cfg.get("hal0") if isinstance(cfg, dict) else None
+    if not isinstance(hal0, dict):
+        return False
+    return memory_private_value_is_private(hal0.get(PROFILE_MEMORY_PRIVATE_KEY))
+
+
+def read_profile_memory_private(config_path: Path) -> bool:
+    """Whether the profile at ``config_path`` opts into private memory. FAILS CLOSED.
+
+    Only a missing file, or an opt-in that is absent/null/false/an off word,
+    means shared. A file that exists but cannot be read or parsed, or is not
+    a mapping, means private: a broken config must not publish a private
+    profile's notes. Used by the dashboard steward, which has no request
+    headers to carry the opt-in; the Hermes memory plugin carries a copy of
+    the same rule.
+    """
+    try:
+        text = Path(config_path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return False
+    except (OSError, UnicodeDecodeError) as exc:
+        log.warning(
+            "hermes.memory_private_unreadable",
+            path=str(config_path),
+            error=_yaml_error_summary(exc),
+        )
+        return True
+    try:
+        import yaml  # type: ignore[import-untyped]
+
+        data = yaml.safe_load(text)
+    except Exception as exc:
+        log.warning(
+            "hermes.memory_private_unparseable",
+            path=str(config_path),
+            error=_yaml_error_summary(exc),
+        )
+        return True
+    if data is None:
+        return False
+    if not isinstance(data, dict):
+        log.warning("hermes.memory_private_not_a_mapping", path=str(config_path))
+        return True
+    return profile_memory_private(data)
+
+
+def memory_private_is_boolean(cfg: dict[str, Any] | None) -> bool:
+    """False when ``hal0.memory_private`` is set to something other than a bool or null.
+
+    Such a value still works (see :func:`profile_memory_private`), but
+    ``"true"`` or ``1`` is almost certainly a typo for ``true``; the doctor
+    rows warn on it.
+    """
+    hal0 = cfg.get("hal0") if isinstance(cfg, dict) else None
+    if not isinstance(hal0, dict):
+        return True
+    value = hal0.get(PROFILE_MEMORY_PRIVATE_KEY)
+    return value is None or isinstance(value, bool)
+
+
+def _profile_wire_desired(agent_id: str, *, private: bool = False) -> dict[str, Any]:
     # hal0-owned profile keys: the two MCP servers + the memory provider. Only
     # scalar/dict keys are set — never a list (see _merge_profile_config_at).
     return {
-        "mcp_servers": _build_profile_mcp_servers(agent_id),
+        "mcp_servers": _build_profile_mcp_servers(agent_id, private=private),
         "memory": {"provider": "hal0-memory"},
     }
 
@@ -5507,9 +5686,9 @@ def _profile_wire_desired_for(
     """
     if terminal_enabled is _UNSET:
         terminal_enabled = read_terminal_state()
-    fixed = _profile_wire_desired(agent_id)
 
     def desired(base: dict[str, Any]) -> dict[str, Any]:
+        fixed = _profile_wire_desired(agent_id, private=profile_memory_private(base))
         return _deep_merge(fixed, _terminal_profile_keys(base, terminal_enabled=terminal_enabled))
 
     return desired

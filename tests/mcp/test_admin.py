@@ -1923,3 +1923,30 @@ async def test_every_route_template_round_trips_through_starlette_routing() -> N
                 where = f"{tool} {template} value={value!r}"
                 assert response.status_code == 200, where
                 assert response.json() == {"route": template, "params": sent}, where
+
+
+def test_memory_add_advertises_text_and_the_per_call_private_flag() -> None:
+    """hal0-admin only advertises ``args``; without a hint a model never learns that
+    ``private`` exists, and one sent at the top level is dropped."""
+    schema = admin.tool_param_schema("memory_add")
+    assert schema["properties"]["text"]["type"] == "string"
+    assert schema["properties"]["private"]["type"] == "boolean"
+    assert "text" in schema["required"]
+    assert "more private" in schema["properties"]["private"]["description"]
+
+
+@pytest.mark.asyncio
+async def test_memory_add_private_nested_under_args_reaches_the_dispatcher(
+    queue: ApprovalQueue,
+) -> None:
+    dispatcher = AsyncMock(return_value={"status": "ok", "id": "x"})
+    await admin.dispatch(
+        tool="memory_add",
+        args={"text": "secret", "private": True},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+        memory_dispatcher=dispatcher,
+    )
+    dispatcher.assert_awaited_once_with("memory_add", {"text": "secret", "private": True})

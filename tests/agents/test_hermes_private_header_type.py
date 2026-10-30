@@ -74,17 +74,19 @@ def test_config_list_keys_carry_private_header_as_string() -> None:
     hdr = keys["mcp_servers"]["hal0-memory"]["headers"]["X-hal0-Private"]
     assert hdr == "1"
     assert isinstance(hdr, str)
-    # Non-private servers get no header overlay at all.
-    assert "hal0-admin" not in keys["mcp_servers"]
+    # Shared servers render the string "0" so converge overwrites a stale "1".
+    assert keys["mcp_servers"]["hal0-admin"]["headers"]["X-hal0-Private"] == "0"
 
 
-def test_config_list_keys_omit_mcp_table_without_private_servers() -> None:
+def test_config_list_keys_render_zero_for_shared_servers() -> None:
     keys = hp._config_list_keys(
         terminal_enabled=False,
         existing_disabled=[],
         mcp_servers=[{"name": "hal0-admin", "url": "http://x", "type": "http"}],
     )
-    assert "mcp_servers" not in keys
+    hdr = keys["mcp_servers"]["hal0-admin"]["headers"]["X-hal0-Private"]
+    assert hdr == "0"
+    assert isinstance(hdr, str)
 
 
 def test_merge_repairs_an_int_poisoned_config(tmp_path) -> None:
@@ -154,5 +156,5 @@ def test_overrides_cannot_repoison_the_private_header(tmp_path) -> None:
 def test_brain_profile_private_header_is_a_string() -> None:
     servers = hp._build_brain_profile_mcp_servers()
     hdr = servers["hal0-memory"]["headers"]["X-hal0-Private"]
-    assert hdr == "1"
+    assert hdr == "0"
     assert isinstance(hdr, str)

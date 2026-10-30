@@ -104,7 +104,7 @@ def test_brain_profile_servers_carry_bearer(
     assert servers["hal0-memory"]["headers"]["Authorization"] == "Bearer brain-admin-key"
     # Identity + private-mode headers are untouched by the bearer addition.
     assert servers["hal0-admin"]["headers"]["X-hal0-Agent"] == BRAIN_PROFILE_AGENT_ID
-    assert servers["hal0-memory"]["headers"]["X-hal0-Private"] == "1"  # str, not int (#2085)
+    assert servers["hal0-memory"]["headers"]["X-hal0-Private"] == "0"  # str, not int (#2085)
 
 
 def test_brain_profile_servers_omit_bearer_when_no_key(
@@ -387,3 +387,112 @@ def test_mcp_memory_call_headers_without_bearer_401s_with_auth_on(
             json={"text": "probe", "dataset": "shared"},
         )
     assert resp.status_code == 401
+
+
+# ── shared-by-default memory: X-hal0-Private "0" / "1" ──────────────────────
+
+
+def _memory_private_header(servers: dict) -> str:
+    return servers["hal0-memory"]["headers"]["X-hal0-Private"]
+
+
+def test_default_hal0_memory_is_shared() -> None:
+    srv = {s["name"]: s for s in hp._default_mcp_servers()}
+    assert srv["hal0-memory"]["private"] is False
+
+
+def test_list_keys_overlay_renders_private_zero_for_shared() -> None:
+    keys = hp._config_list_keys(
+        mcp_servers=hp._default_mcp_servers(), terminal_enabled=True, existing_disabled=[]
+    )
+    hdr = keys["mcp_servers"]["hal0-memory"]["headers"]["X-hal0-Private"]
+    assert hdr == "0"
+    assert isinstance(hdr, str)
+
+
+def test_list_keys_overlay_renders_private_one_for_private_server() -> None:
+    servers = [{"name": "hal0-memory", "private": True}]
+    keys = hp._config_list_keys(mcp_servers=servers, terminal_enabled=True, existing_disabled=[])
+    assert keys["mcp_servers"]["hal0-memory"]["headers"]["X-hal0-Private"] == "1"
+
+
+def test_brain_profile_memory_headers_shared(tmp_hal0_home: str) -> None:
+    hdr = _memory_private_header(hp._build_brain_profile_mcp_servers())
+    assert hdr == "0"
+    assert isinstance(hdr, str)
+
+
+def test_build_profile_mcp_servers_private_opt_in(tmp_hal0_home: str) -> None:
+    servers = hp._build_profile_mcp_servers("hermes__vault", private=True)
+    assert _memory_private_header(servers) == "1"
+
+
+def test_profile_memory_private_reads_hal0_key() -> None:
+    assert hp.profile_memory_private({}) is False
+    assert hp.profile_memory_private({"hal0": {"memory_private": True}}) is True
+    assert hp.profile_memory_private({"hal0": {"memory_private": False}}) is False
+    assert hp.profile_memory_private({"hal0": "junk"}) is False
+    # One rule: only absent/null/false/"false|no|0|off" is shared; a typo fails closed.
+    assert hp.profile_memory_private({"hal0": {"memory_private": "yes"}}) is True
+    assert hp.profile_memory_private({"hal0": {"memory_private": "off"}}) is False
+
+
+def test_wire_named_profiles_rewrites_stale_private_header(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: "svc-key")
+    home = tmp_path / "hh"
+    (home / "profiles" / "coder").mkdir(parents=True)
+    (home / "profiles" / "coder" / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "mcp_servers": {
+                    "hal0-memory": {
+                        "headers": {"X-hal0-Private": "1", "X-hal0-Agent": "hermes__coder"}
+                    }
+                }
+            }
+        )
+    )
+    hp.wire_named_profiles(home, terminal_enabled=True)
+    cfg = yaml.safe_load((home / "profiles" / "coder" / "config.yaml").read_text())
+    headers = cfg["mcp_servers"]["hal0-memory"]["headers"]
+    assert headers["X-hal0-Private"] == "0"
+    assert headers["X-hal0-Agent"] == "hermes__coder"
+
+
+def test_wire_named_profiles_honours_memory_private_opt_in(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: "svc-key")
+    home = tmp_path / "hh"
+    (home / "profiles" / "vault").mkdir(parents=True)
+    (home / "profiles" / "vault" / "config.yaml").write_text(
+        yaml.safe_dump({"hal0": {"memory_private": True}})
+    )
+    hp.wire_named_profiles(home, terminal_enabled=True)
+    cfg = yaml.safe_load((home / "profiles" / "vault" / "config.yaml").read_text())
+    assert cfg["mcp_servers"]["hal0-memory"]["headers"]["X-hal0-Private"] == "1"
+    assert cfg["hal0"]["memory_private"] is True
+
+
+def test_wire_named_profiles_opted_out_profile_untouched(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: "svc-key")
+    home = tmp_path / "hh"
+    (home / "profiles" / "own").mkdir(parents=True)
+    body = {
+        "hal0": {"wire_mcp": False},
+        "mcp_servers": {"hal0-memory": {"headers": {"X-hal0-Private": "1"}}},
+    }
+    (home / "profiles" / "own" / "config.yaml").write_text(yaml.safe_dump(body))
+    hp.wire_named_profiles(home, terminal_enabled=True)
+    cfg = yaml.safe_load((home / "profiles" / "own" / "config.yaml").read_text())
+    assert cfg["mcp_servers"]["hal0-memory"]["headers"]["X-hal0-Private"] == "1"

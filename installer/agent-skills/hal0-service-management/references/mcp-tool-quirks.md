@@ -68,14 +68,17 @@ API surface facts that differ from what the tool signatures suggest.
   via terminal. If a specific slot name triggers this, avoid calling
   `slot_status` on it and fall back to `slot_list`.
 
-### `memory_add` — private namespace rejected on admin server
-- `mcp_hal0_admin.memory_add` **cannot address private namespaces** — the call
-  returns `mcp.memory_schema` error: "non-private callers cannot address the
-  private namespace by name."
-- **Always use `mcp_hal0_memory` (dedicated memory server) for private
-  dataset operations** (`private:hermes-agent` etc.). The dedicated server
-  supports private namespaces correctly. The admin server is shared-memory
-  only.
+### `memory_add` — never name a private namespace
+- `memory_add` (admin or memory server) **cannot address a private namespace by
+  name** — `dataset="private:<agent>"` returns an `mcp.memory_schema` error:
+  "non-private callers cannot address the private namespace by name."
+- Writes are shared by default. To keep one note private pass `private=true`
+  (a bool argument); hal0 files it under your own identity. On `hal0-admin`
+  every tool takes a single `args` object, so nest it: `{"args": {"text": "...",
+  "private": true}}`. A top-level `private` is silently dropped. (`hal0-memory`
+  takes `private` as a normal top-level argument.) A profile set to
+  `memory_private` makes its memory facts private without the argument; mental
+  models and directives are bank-level and stay visible to every agent.
 
 ### `capability_list` — catalog truncation
 - Returns 3 backend entries + a massive pullable-model catalog. The catalog

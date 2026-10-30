@@ -568,3 +568,98 @@ def test_server_stamps_hal0_version_not_sdk_version() -> None:
 
     server = memory.build_server(wrapper=_FakeWrapper())
     assert server._mcp_server.version == hal0.__version__
+
+
+# ── per-call ``private`` argument (spec: per-call private, ADR-0035 d9) ──────
+
+
+@pytest.mark.asyncio
+async def test_memory_add_private_arg_writes_the_callers_private_namespace(
+    wrapper: _FakeWrapper, dispatcher: Any
+) -> None:
+    out = await dispatcher("memory_add", {"text": "mine", "private": True})
+    assert out["status"] == "ok"
+    assert wrapper.add_calls[0]["dataset"] == "private:pi-coder"
+
+
+@pytest.mark.asyncio
+async def test_memory_add_private_false_stays_shared(
+    wrapper: _FakeWrapper, dispatcher: Any
+) -> None:
+    await dispatcher("memory_add", {"text": "x", "private": False})
+    assert wrapper.add_calls[0]["dataset"] == "shared"
+
+
+@pytest.mark.asyncio
+async def test_memory_add_private_arg_cannot_loosen_a_private_header(
+    wrapper: _FakeWrapper,
+) -> None:
+    """``private: false`` never undoes a private header: it only adds privacy."""
+    disp = memory.make_dispatcher(
+        wrapper, client_id_resolver=lambda: "pi-coder", private_resolver=lambda: True
+    )
+    await disp("memory_add", {"text": "x", "private": False})
+    assert wrapper.add_calls[0]["dataset"] == "private:pi-coder"
+
+
+@pytest.mark.asyncio
+async def test_memory_add_private_arg_must_be_boolean(
+    wrapper: _FakeWrapper, dispatcher: Any
+) -> None:
+    out = await dispatcher("memory_add", {"text": "x", "private": "yes"})
+    assert out["status"] == "error"
+    assert out["error"]["code"] == "mcp.memory_schema"
+    assert wrapper.add_calls == []
+
+
+@pytest.mark.asyncio
+async def test_memory_add_private_arg_cannot_name_another_agents_namespace(
+    wrapper: _FakeWrapper, dispatcher: Any
+) -> None:
+    out = await dispatcher(
+        "memory_add", {"text": "x", "private": True, "dataset": "private:victim"}
+    )
+    assert out["status"] == "ok"
+    assert wrapper.add_calls[0]["dataset"] == "private:pi-coder"
+
+
+@pytest.mark.asyncio
+async def test_memory_add_private_arg_refuses_anonymous(wrapper: _FakeWrapper) -> None:
+    disp = memory.make_dispatcher(
+        wrapper, client_id_resolver=lambda: "anonymous", private_resolver=lambda: False
+    )
+    out = await disp("memory_add", {"text": "x", "private": True})
+    assert out["status"] == "error"
+    assert wrapper.add_calls == []
+
+
+@pytest.mark.asyncio
+async def test_memory_add_accepts_the_private_id_add_returned(
+    wrapper: _FakeWrapper, dispatcher: Any
+) -> None:
+    out = await dispatcher(
+        "memory_add", {"text": "again", "private": True, "document_id": "private:pi-coder:notes"}
+    )
+    assert out["status"] == "ok"
+    assert wrapper.add_calls[0]["document_id"] == "private:pi-coder:notes"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad", ["a:b", "private:x", "private::x", "private:a b:c", "x/y", "p:" + "a" * 70]
+)
+async def test_memory_add_still_rejects_other_document_ids(
+    wrapper: _FakeWrapper, dispatcher: Any, bad: str
+) -> None:
+    out = await dispatcher("memory_add", {"text": "x", "document_id": bad})
+    assert out["status"] == "error"
+    assert wrapper.add_calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_shared_write_cannot_send_a_private_prefixed_document_id(
+    wrapper: _FakeWrapper, dispatcher: Any
+) -> None:
+    out = await dispatcher("memory_add", {"text": "x", "document_id": "private:pi-coder:notes"})
+    assert out["status"] == "error" and out["error"]["code"] == "mcp.memory_schema"
+    assert wrapper.add_calls == []

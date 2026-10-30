@@ -11,7 +11,8 @@ These tests pin the real path:
   memory_search, memory_list) among the memory_* tools, with one-line
   descriptions and minimal arguments for the small steward model;
 * every call is scoped server-side to the persona's ``memory_namespace``
-  (``private:hermes__hal0-brain``) through the app's memory dispatcher; a
+  (``private:hermes__hal0-brain``) through the app's memory dispatcher, which
+  now writes the SHARED pool as that agent id (private mode off); a
   ``dataset``/``bank`` argument from the model is dropped, never trusted;
 * the #2022/#2675 grounding guard treats "remember ..." / "what did I tell
   you ..." as live state, so a no-tool "I've noted that" is rerouted.
@@ -42,7 +43,8 @@ from hal0.dispatcher.memory_dispatcher import MemoryDispatcher
 from hal0.mcp import admin
 from hal0.mcp.approval_queue import ApprovalQueue
 
-BRAIN_NAMESPACE = f"private:{BRAIN_PROFILE_AGENT_ID}"
+BRAIN_NAMESPACE = f"private:{BRAIN_PROFILE_AGENT_ID}"  # the persona's identity source
+SHARED = "shared"
 MEMORY_TRIO = {"memory_add", "memory_search", "memory_list"}
 
 
@@ -167,6 +169,78 @@ def _tokens(events: list[dict[str, Any]]) -> str:
     return "\n".join(e["text"] for e in events if e["type"] == "token")
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_hermes_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The steward reads ``profiles/hal0-brain/config.yaml`` under $HERMES_HOME."""
+    home = tmp_path / "hermes-home"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    return home
+
+
+def _brain_profile_config(home: Path, text: str | None) -> None:
+    d = home / "profiles" / "hal0-brain"
+    d.mkdir(parents=True, exist_ok=True)
+    if text is not None:
+        (d / "config.yaml").write_text(text)
+
+
+# ── the steward honours hal0: {memory_private: true} on its Hermes profile ──
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("opt_in", ["true", "'yes'", "1", "garbage"])
+async def test_the_steward_writes_private_when_its_profile_opts_in(
+    tmp_path: Path, _hermetic_hermes_home: Path, opt_in: str
+) -> None:
+    _brain_profile_config(_hermetic_hermes_home, f"hal0:\n  memory_private: {opt_in}\n")
+    provider = _FakeProvider()
+    request = _request(tmp_path, provider=provider)
+    result = await bc._dispatch_tool(request, "memory_add", {"text": "a private fact"}, board=None)
+    assert result["status"] == "ok"
+    (kw,) = [kw for op, kw in provider.calls if op == "add"]
+    assert kw["dataset"] == f"private:{BRAIN_PROFILE_AGENT_ID}"
+    assert kw["client_id"] == BRAIN_PROFILE_AGENT_ID
+
+
+@pytest.mark.asyncio
+async def test_a_private_steward_search_spans_shared_and_its_own_namespace(
+    tmp_path: Path, _hermetic_hermes_home: Path
+) -> None:
+    _brain_profile_config(_hermetic_hermes_home, "hal0:\n  memory_private: true\n")
+    provider = _FakeProvider()
+    request = _request(tmp_path, provider=provider)
+    await bc._dispatch_tool(request, "memory_search", {"query": "cat"}, board=None)
+    (kw,) = [kw for op, kw in provider.calls if op == "search"]
+    assert kw["dataset"] == [SHARED, f"private:{BRAIN_PROFILE_AGENT_ID}"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("opt_in", [None, "false", "null", "'off'", "no"])
+async def test_the_steward_stays_shared_without_the_opt_in(
+    tmp_path: Path, _hermetic_hermes_home: Path, opt_in: str | None
+) -> None:
+    text = None if opt_in is None else f"hal0:\n  memory_private: {opt_in}\n"
+    _brain_profile_config(_hermetic_hermes_home, text)
+    provider = _FakeProvider()
+    request = _request(tmp_path, provider=provider)
+    await bc._dispatch_tool(request, "memory_add", {"text": "a shared fact"}, board=None)
+    (kw,) = [kw for op, kw in provider.calls if op == "add"]
+    assert kw["dataset"] == SHARED
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_brain_profile_config_fails_closed(
+    tmp_path: Path, _hermetic_hermes_home: Path
+) -> None:
+    _brain_profile_config(_hermetic_hermes_home, "hal0: [unclosed\n")
+    provider = _FakeProvider()
+    request = _request(tmp_path, provider=provider)
+    await bc._dispatch_tool(request, "memory_add", {"text": "x fact"}, board=None)
+    (kw,) = [kw for op, kw in provider.calls if op == "add"]
+    assert kw["dataset"] == f"private:{BRAIN_PROFILE_AGENT_ID}"
+
+
 # ── (a) the catalog carries exactly the persona-approved trio ───────────────
 
 
@@ -236,7 +310,7 @@ def test_remember_turn_retains_into_the_brain_bank_and_ignores_model_bank(
     adds = [kw for op, kw in provider.calls if op == "add"]
     assert len(adds) == 1
     assert adds[0]["text"] == "The operator's cat is called Zorbo."
-    assert adds[0]["dataset"] == BRAIN_NAMESPACE
+    assert adds[0]["dataset"] == SHARED
     assert adds[0]["client_id"] == BRAIN_PROFILE_AGENT_ID
     result = next(e for e in events if e["type"] == "tool_result")
     assert result["name"] == "memory_add"
@@ -256,7 +330,7 @@ async def test_memory_add_strips_every_unknown_argument(tmp_path: Path) -> None:
     )
     assert result["status"] == "ok"
     (kw,) = [kw for op, kw in provider.calls if op == "add"]
-    assert kw["dataset"] == BRAIN_NAMESPACE
+    assert kw["dataset"] == SHARED
     assert kw["tags"] == []
     assert kw["metadata"] == {}
 
@@ -297,7 +371,7 @@ def test_recall_turn_reads_the_stored_fact_back(tmp_path: Path) -> None:
 
     searches = [kw for op, kw in provider.calls if op == "search"]
     assert len(searches) == 1
-    assert searches[0]["dataset"] == BRAIN_NAMESPACE
+    assert searches[0]["dataset"] == SHARED
     assert searches[0]["client_id"] == BRAIN_PROFILE_AGENT_ID
     result = next(e for e in events if e["type"] == "tool_result")
     texts = [r["text"] for r in result["result"]["results"]]
@@ -314,7 +388,7 @@ async def test_memory_list_is_scoped_and_limit_is_coerced(tmp_path: Path) -> Non
     )
     assert result["status"] == "ok"
     (kw,) = [kw for op, kw in provider.calls if op == "list"]
-    assert kw["dataset"] == BRAIN_NAMESPACE
+    assert kw["dataset"] == SHARED
     assert kw["limit"] == 5
 
 
@@ -425,14 +499,156 @@ def test_an_older_persona_prompt_gets_the_memory_rule_appended(tmp_path: Path) -
     assert "memory_add" in seeded_prompt
 
 
+def test_a_post_2658_persona_prompt_loses_the_private_bank_claim(tmp_path: Path) -> None:
+    """Boxes seeded after #2658 keep a prompt describing a private bank; the
+    resolved prompt must describe shared memory instead (spec R7)."""
+    root = tmp_path / "post2658"
+    old_rule = (
+        "Memory: you have a private memory bank (namespace private:hermes__hal0-brain), "
+        "separate from the Hermes chat agent. memory_add(text) saves one fact, "
+        "memory_search(query) finds saved facts, memory_list() shows recent ones. "
+        "Nothing is remembered unless you call memory_add: never say you noted, saved "
+        "or remembered something without a memory_add result in this turn. When asked "
+        "what the operator told you before, call memory_search first."
+    )
+    save_persona(
+        Persona(
+            id=bc.BRAIN_PERSONA_ID,
+            display_name="hal0 Brain",
+            system_prompt=f"You are hal0-brain.\n\n{old_rule}\n\nKeep replies short.",
+            memory_namespace=BRAIN_NAMESPACE,
+            approval=PersonaApproval(),
+        ),
+        root=root,
+    )
+    prompt, _model = bc._resolve_profile(_request(tmp_path, persona_root=root))
+    assert "private memory bank" not in prompt
+    assert "private:hermes__hal0-brain" not in prompt
+    assert bc._MEMORY_RULE in prompt
+    assert prompt.startswith("You are hal0-brain.")
+    assert prompt.endswith("Keep replies short.")
+    assert prompt.count("memory_add(text)") == 1
+
+
+_SEEDED_RULE = (
+    "Memory: you have a private memory bank (namespace private:hermes__hal0-brain), "
+    "separate from the Hermes chat agent. memory_add(text) saves one fact, "
+    "memory_search(query) finds saved facts, memory_list() shows recent ones. "
+    "Nothing is remembered unless you call memory_add: never say you noted, saved "
+    "or remembered something without a memory_add result in this turn. When asked "
+    "what the operator told you before, call memory_search first."
+)
+_SEEDED_SENTENCE = (
+    "You have a private memory bank of your own (namespace "
+    "private:hermes__hal0-brain): memory_add(text) saves a fact, "
+    "memory_search(query) and memory_list() read saved facts back. "
+    "Call memory_add before you say you have noted or will remember "
+    "anything, and memory_search before answering what the operator "
+    "told you earlier; without a tool result you remember nothing."
+)
+
+
+def _resolved(tmp_path: Path, name: str, system_prompt: str) -> str:
+    root = tmp_path / name
+    save_persona(
+        Persona(
+            id=bc.BRAIN_PERSONA_ID,
+            display_name="hal0 Brain",
+            system_prompt=system_prompt,
+            memory_namespace=BRAIN_NAMESPACE,
+            approval=PersonaApproval(),
+        ),
+        root=root,
+    )
+    prompt, _model = bc._resolve_profile(_request(tmp_path, persona_root=root))
+    return prompt
+
+
+def test_the_seeded_persona_sentence_is_replaced_in_place(tmp_path: Path) -> None:
+    prompt = _resolved(
+        tmp_path, "sentence", f"You are hal0-brain. Be brief. {_SEEDED_SENTENCE} Stay calm."
+    )
+    assert prompt == f"You are hal0-brain. Be brief. {bc._MEMORY_RULE} Stay calm."
+
+
+def test_the_seeded_rule_wrapped_across_lines_is_still_replaced(tmp_path: Path) -> None:
+    wrapped = _SEEDED_RULE.replace(", ", ",\n").replace(". ", ".\n   ")
+    prompt = _resolved(tmp_path, "wrapped", f"You are hal0-brain.\n\n{wrapped}\n\nBe brief.")
+    assert prompt == f"You are hal0-brain.\n\n{bc._MEMORY_RULE}\n\nBe brief."
+
+
+def test_the_seeded_wording_matches_case_insensitively(tmp_path: Path) -> None:
+    prompt = _resolved(tmp_path, "case", f"Hi. {_SEEDED_RULE.upper()}")
+    assert prompt == f"Hi. {bc._MEMORY_RULE}"
+
+
+def test_an_edited_rule_missing_its_closing_sentence_is_kept_and_the_true_rule_is_appended(
+    tmp_path: Path,
+) -> None:
+    edited = (
+        "Memory: you have a private memory bank (namespace private:x), edited by hand.\n"
+        "Never write secrets there."
+    )
+    prompt = _resolved(tmp_path, "edited", f"You are hal0-brain.\n\n{edited}\n\nBe brief.")
+    assert edited in prompt and "Be brief." in prompt
+    assert prompt.endswith(bc._MEMORY_RULE)
+
+
+def test_an_operator_guardrail_naming_a_private_memory_bank_survives(tmp_path: Path) -> None:
+    guard = "Never reveal secrets stored in your private memory bank."
+    prompt = _resolved(tmp_path, "guardrail", f"You are hal0-brain. {guard} Be brief.")
+    assert f"{guard} Be brief." in prompt
+    assert prompt.endswith(bc._MEMORY_RULE)
+
+
+def test_a_sentence_that_only_starts_like_the_seeded_one_survives(tmp_path: Path) -> None:
+    line = "You have a private memory bank of your own, so never repeat it to other agents."
+    prompt = _resolved(tmp_path, "lookalike", f"You are hal0-brain. {line} Be brief.")
+    assert line in prompt and "Be brief." in prompt
+    assert prompt.endswith(bc._MEMORY_RULE)
+
+
+def test_a_replaced_seed_with_a_guardrail_elsewhere_still_ends_with_the_true_rule(
+    tmp_path: Path,
+) -> None:
+    guard = "Never reveal secrets stored in your private memory bank."
+    prompt = _resolved(tmp_path, "both", f"{_SEEDED_RULE}\n\n{guard}")
+    assert guard in prompt
+    assert prompt.endswith(bc._MEMORY_RULE)
+    assert _SEEDED_RULE not in prompt
+
+
+def _resolved_shared(tmp_path: Path) -> str:
+    """The prompt of a steward whose profile has no opt-in (a fresh $HERMES_HOME)."""
+    import os
+
+    os.environ["HERMES_HOME"] = str(tmp_path / "other-home")
+    return _resolved(tmp_path, "shared-note", "You are hal0-brain. Use memory_add.")
+
+
+def test_a_private_steward_prompt_ends_with_the_private_note(
+    tmp_path: Path, _hermetic_hermes_home: Path
+) -> None:
+    _brain_profile_config(_hermetic_hermes_home, "hal0:\n  memory_private: true\n")
+    prompt = _resolved(tmp_path, "private-note", "You are hal0-brain. Use memory_add.")
+    assert prompt.endswith(bc._PRIVATE_MEMORY_NOTE)
+    assert prompt.count(bc._PRIVATE_MEMORY_NOTE) == 1
+    assert bc._PRIVATE_MEMORY_NOTE not in _resolved_shared(tmp_path)
+
+
+def test_a_prompt_with_no_claim_is_left_alone(tmp_path: Path) -> None:
+    text = "You are hal0-brain. Save facts with memory_add."
+    assert _resolved(tmp_path, "clean", text) == text
+
+
 # ── the real fallback engine, end to end ────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_round_trip_through_the_pgvector_fallback_stays_private(tmp_path: Path) -> None:
+async def test_round_trip_through_the_pgvector_fallback_is_shared(tmp_path: Path) -> None:
     """The Hindsight-unavailable fallback provider takes the same path: the
-    fact lands in the steward's namespace, reads back through memory_search,
-    and is not visible to a plain shared read."""
+    fact lands in the shared pool (tagged as the steward), reads back through
+    memory_search, and is visible to a plain shared read."""
     from hal0.memory.pgvector_provider import PgVectorProvider
 
     provider = PgVectorProvider()
@@ -450,4 +666,35 @@ async def test_round_trip_through_the_pgvector_fallback_stays_private(tmp_path: 
     assert any("Zorbo" in r["text"] for r in found["results"])
 
     shared = await provider.search(query="Zorbo cat", limit=10, dataset="shared")
-    assert not any("Zorbo" in r["text"] for r in shared)
+    assert any("Zorbo" in r["text"] for r in shared)
+
+
+@pytest.mark.asyncio
+async def test_brain_memory_add_dispatches_shared(tmp_path: Path) -> None:
+    provider = _FakeProvider()
+    request = _request(tmp_path, provider=provider)
+    await bc._dispatch_tool(
+        request, "memory_add", {"text": "The utility box is the small one"}, board=None
+    )
+    (kw,) = [kw for op, kw in provider.calls if op == "add"]
+    assert kw["dataset"] == SHARED
+    assert kw["client_id"] == BRAIN_PROFILE_AGENT_ID
+    assert not kw.get("private")
+
+
+def test_no_steward_string_claims_a_private_bank(tmp_path: Path) -> None:
+    """R7: the steward never describes privacy it no longer has."""
+    from hal0.agents.personas import load_persona
+
+    root = tmp_path / "personas"
+    seed_default_personas(root=root)
+    texts = [
+        bc._MEMORY_RULE,
+        bc._SYSTEM_PROMPT,
+        load_persona(bc.BRAIN_PERSONA_ID, root=root).system_prompt,
+        *(desc for desc, _p, _r in bc._BRAIN_MEMORY_SCHEMAS.values()),
+    ]
+    for text in texts:
+        assert "private" not in text.lower(), text
+    assert "shared" in bc._MEMORY_RULE.lower()
+    assert BRAIN_PROFILE_AGENT_ID in bc._MEMORY_RULE

@@ -1385,6 +1385,104 @@ def _header(server: dict[str, Any], name: str) -> Any:
     return headers.get(name) if isinstance(headers, dict) else None
 
 
+def check_hermes_default_memory(*, home: Path | None = None) -> Check:
+    """The default Hermes profile's memory headers match its ``memory_private`` opt-in.
+
+    ``check_hermes_profiles_mcp`` walks named profiles only. The default
+    profile's root ``config.yaml`` carries ``X-hal0-Private`` on hal0-admin and
+    hal0-memory; both must be ``"0"`` (shared, the default) unless the file
+    has ``hal0: {memory_private: true}``, then ``"1"``. ``hal0 update`` and
+    ``reprovision --repair`` converge them; nothing converges the default
+    profile periodically, so an opt-in added by hand needs one of those (the
+    row flags it until then). ``hal0: {wire_mcp: false}`` on the root means
+    hands off: the row passes and says so. A non-boolean ``memory_private``
+    (``"true"``, ``1``) is read by the one rule in
+    ``hermes_provision.profile_memory_private`` and reported as a warning.
+    ADVISORY (never critical).
+    """
+    from hal0.agents import hermes_api as ha
+
+    root = home if home is not None else ha.hermes_home()
+    return _memory_headers_check(
+        "hermes_default_memory",
+        "Hermes default profile memory",
+        root / "config.yaml",
+        subject="default profile",
+    )
+
+
+def check_hermes_brain_memory(*, home: Path | None = None) -> Check:
+    """The ``hal0-brain`` profile's memory headers match its ``memory_private`` opt-in.
+
+    ``check_hermes_profiles_mcp`` skips ``hal0-brain`` (its own provisioning
+    phase). The dashboard steward reads the same opt-in from this file, so the
+    row reports it: shared unless ``hal0: {memory_private: true}``. A profile
+    that is not there passes. ADVISORY (never critical).
+    """
+    from hal0.agents import hermes_api as ha
+
+    root = home if home is not None else ha.hermes_home()
+    return _memory_headers_check(
+        "hermes_brain_memory",
+        "Hermes hal0-brain profile memory",
+        root / "profiles" / "hal0-brain" / "config.yaml",
+        subject="hal0-brain profile",
+    )
+
+
+def _memory_headers_check(key: str, label: str, path: Path, *, subject: str) -> Check:
+    """Compare a profile config's hal0 MCP memory headers with its ``memory_private`` opt-in."""
+    from hal0.agents import hermes_provision as hp
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return Check(key, label, _PASS, "not provisioned - nothing to check")
+    except (OSError, UnicodeDecodeError) as exc:
+        return Check(key, label, _WARN, f"cannot read {path}: {exc}")
+    import yaml
+
+    try:
+        data = yaml.safe_load(text) or {}
+    except yaml.YAMLError as exc:
+        return Check(key, label, _WARN, f"cannot parse {path}: {exc}")
+    if not isinstance(data, dict):
+        return Check(key, label, _WARN, f"{path} is not a mapping")
+    if hp._wire_mcp_opted_out(data):
+        return Check(
+            key,
+            label,
+            _PASS,
+            f"{subject} opted out with hal0: {{wire_mcp: false}}; hal0 leaves its memory headers alone",
+        )
+    private = hp.profile_memory_private(data)
+    want = "1" if private else "0"
+    servers = data.get("mcp_servers")
+    servers = servers if isinstance(servers, dict) else {}
+    wrong = [
+        n
+        for n in hp._MEMORY_REACHING_SERVERS
+        if isinstance(servers.get(n), dict) and _header(servers[n], "X-hal0-Private") != want
+    ]
+    mode = "private (opt-in)" if private else "shared"
+    parts: list[str] = []
+    if not hp.memory_private_is_boolean(data):
+        parts.append(
+            "hal0.memory_private is not a boolean; it is read as "
+            f"{'private' if private else 'shared'} (use true or false)"
+        )
+    if wrong:
+        parts.append(
+            f"{subject} memory is {mode} but {', '.join(wrong)} carries "
+            f'X-hal0-Private other than "{want}"; run `sudo hal0 agent reprovision hermes '
+            "--repair` (or `sudo hal0 update`) to converge it; nothing converges this "
+            "profile periodically"
+        )
+    if parts:
+        return Check(key, label, _WARN, "; ".join(parts))
+    return Check(key, label, _PASS, f"{subject} memory: {mode}")
+
+
 def check_hermes_profiles_mcp(
     *,
     auth: dict[str, Any] | None,
@@ -1449,6 +1547,9 @@ def check_hermes_profiles_mcp(
     no_config: list[str] = []
     unauthed: list[str] = []
     drifted: list[str] = []
+    stale_private: list[str] = []
+    non_boolean: list[str] = []
+    private_opt_in: list[str] = []
     opted_out: list[str] = []
     unreadable: list[str] = []
     wired: list[str] = []
@@ -1492,11 +1593,20 @@ def check_hermes_profiles_mcp(
             unwired.append(name)
             continue
         # The identity and target must be the ones hal0 wires: a copied
-        # X-hal0-Agent would read another profile's private memory, a missing
-        # X-hal0-Private would write to the shared bank. The bearer must be the
-        # box's current service key when one is discoverable (a rotated key
-        # leaves a stale one behind), else at least a ``Bearer …`` string.
-        desired = hp._profile_wire_desired(hp.profile_agent_id(name))
+        # X-hal0-Agent would read another profile's private memory, a wrong
+        # X-hal0-Private would write to the wrong (shared vs private) bank.
+        # The bearer must be the box's current service key when one is
+        # discoverable (a rotated key leaves a stale one behind), else at
+        # least a ``Bearer …`` string.
+        private = hp.profile_memory_private(data)
+        if not hp.memory_private_is_boolean(data):
+            non_boolean.append(f"{name} (read as {'private' if private else 'shared'})")
+        desired = hp._profile_wire_desired(hp.profile_agent_id(name), private=private)
+        # A "1" left over from before shared-by-default, on a profile that has
+        # not opted in: reported on its own, since converge removes it.
+        stale_private_header = (
+            not private and _header(servers["hal0-memory"], "X-hal0-Private") == "1"
+        )
         if auth_required and any(
             not _bearer_ok(
                 _header(servers[n], "Authorization"), want["headers"].get("Authorization")
@@ -1514,13 +1624,18 @@ def check_hermes_profiles_mcp(
             or any(
                 _header(servers[n], h) != v
                 for h, v in want["headers"].items()
-                if h != "Authorization"
+                if h != "Authorization" and not (stale_private_header and h == "X-hal0-Private")
             )
             for n, want in desired["mcp_servers"].items()
         ):
             drifted.append(name)
             continue
+        if stale_private_header:
+            stale_private.append(name)
+            continue
         wired.append(name)
+        if private:
+            private_opt_in.append(name)
 
     parts: list[str] = []
     if unauthed:
@@ -1539,6 +1654,16 @@ def check_hermes_profiles_mcp(
             f"profile(s) {', '.join(drifted)} carry hal0 MCP entries that differ from hal0's "
             "wiring (identity, target or memory provider); the next hal0-api sweep rewrites them"
         )
+    if non_boolean:
+        parts.append(
+            f"hal0.memory_private is not a boolean in profile(s) {', '.join(non_boolean)}; "
+            "use true or false"
+        )
+    if stale_private:
+        parts.append(
+            f"profile(s) {', '.join(stale_private)} carry a stale private header "
+            "(X-hal0-Private: 1) without a hal0.memory_private opt-in; converge will remove it"
+        )
     if unreadable:
         parts.append(
             f"config.yaml of profile(s) {', '.join(unreadable)} is unreadable or not a mapping; "
@@ -1556,9 +1681,11 @@ def check_hermes_profiles_mcp(
         )
     if unauthed:
         return Check(key, label, _FAIL, "; ".join(parts))
-    if unwired or drifted or unreadable or linked:
+    if unwired or drifted or stale_private or non_boolean or unreadable or linked:
         return Check(key, label, _WARN, "; ".join(parts))
     detail = f"wired: {', '.join(wired)}" if wired else "no profile wired"
+    if private_opt_in:
+        detail += f"; memory: private (opt-in): {', '.join(private_opt_in)}"
     if opted_out:
         detail += f"; opted out: {', '.join(opted_out)}"
     if parts:  # only the informational no-config note is left
@@ -2610,6 +2737,8 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         ),
         check_hermes_mcp_config_auth(auth=auth_payload),
         check_hermes_profiles_mcp(auth=auth_payload),
+        check_hermes_default_memory(),
+        check_hermes_brain_memory(),
         check_bridge_store(api_running=payloads["health"] is not None),
         check_agent_bridge(base=base),
         check_hermes_generation_extras(),

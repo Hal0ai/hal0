@@ -182,6 +182,20 @@ BRAIN_PERSONA_ID = "hal0-brain"
 # overwrites an existing persona TOML, so upgraded boxes keep a prompt that
 # predates the memory path.
 _MEMORY_RULE = (
+    "Memory: you use shared hal0 memory, tagged as you (hermes__hal0-brain), "
+    "so the other agents can see what you save. memory_add(text) saves one fact, "
+    "memory_search(query) finds saved facts, memory_list() shows recent ones. "
+    "Nothing is remembered unless you call memory_add: never say you noted, saved "
+    "or remembered something without a memory_add result in this turn. When asked "
+    "what the operator told you before, call memory_search first."
+)
+
+# The two wordings boxes seeded before the shared-memory switch still carry in
+# their persona TOML (the seeder never overwrites): the #2658 rule, and the
+# sentence the seeded persona prompt ends with. They are matched whole, case-
+# and whitespace-insensitively, so a rule wrapped across lines still matches;
+# nothing else in a persona prompt is ever deleted.
+_SEEDED_PRIVATE_RULE = (
     "Memory: you have a private memory bank (namespace private:hermes__hal0-brain), "
     "separate from the Hermes chat agent. memory_add(text) saves one fact, "
     "memory_search(query) finds saved facts, memory_list() shows recent ones. "
@@ -189,6 +203,26 @@ _MEMORY_RULE = (
     "or remembered something without a memory_add result in this turn. When asked "
     "what the operator told you before, call memory_search first."
 )
+_SEEDED_PRIVATE_SENTENCE = (
+    "You have a private memory bank of your own (namespace "
+    "private:hermes__hal0-brain): memory_add(text) saves a fact, "
+    "memory_search(query) and memory_list() read saved facts back. "
+    "Call memory_add before you say you have noted or will remember "
+    "anything, and memory_search before answering what the operator "
+    "told you earlier; without a tool result you remember nothing."
+)
+
+
+def _whitespace_tolerant(text: str) -> re.Pattern[str]:
+    return re.compile(r"\s+".join(re.escape(w) for w in text.split()), re.IGNORECASE)
+
+
+_SEEDED_PRIVATE_RES = (
+    _whitespace_tolerant(_SEEDED_PRIVATE_RULE),
+    _whitespace_tolerant(_SEEDED_PRIVATE_SENTENCE),
+)
+# Any remaining claim of a private bank, in the operator's own words or not.
+_PRIVATE_BANK_CLAIM_RE = re.compile(r"private\s+memory\s+bank", re.IGNORECASE)
 
 # Injected as the leading system message when the client doesn't send one.
 # Without it the LLM had ten write tools, no read tools, and no idea what the
@@ -274,7 +308,24 @@ Rules:
 )
 
 
+#: Appended to the steward's prompt when its Hermes profile opted into private
+#: memory (``hal0: {memory_private: true}``): the shared-memory rule above is
+#: then not the whole truth, and the last word must be.
+_PRIVATE_MEMORY_NOTE = (
+    "Your profile keeps your memory private: what you save with memory_add is "
+    "readable only by you, not by the other agents."
+)
+
+
 def _resolve_profile(request: Request) -> tuple[str, str]:
+    """:func:`_resolve_profile_base`, plus the private-memory note when the profile opted in."""
+    prompt, model = _resolve_profile_base(request)
+    if _brain_memory_private():
+        prompt = f"{prompt}\n\n{_PRIVATE_MEMORY_NOTE}"
+    return prompt, model
+
+
+def _resolve_profile_base(request: Request) -> tuple[str, str]:
     """Resolve (system_prompt, default_model) from the hal0-brain profile.
 
     Reads the ``hal0-brain`` persona TOML from the personas store (root
@@ -290,7 +341,15 @@ def _resolve_profile(request: Request) -> tuple[str, str]:
     except (FileNotFoundError, PersonaError, OSError):
         return _SYSTEM_PROMPT, BRAIN_SLOT_MODEL
     prompt = persona.system_prompt.strip() or _SYSTEM_PROMPT
-    if "memory_add" not in prompt:
+    for pattern in _SEEDED_PRIVATE_RES:
+        prompt = pattern.sub(lambda _m: _MEMORY_RULE, prompt)
+    if _PRIVATE_BANK_CLAIM_RE.search(prompt):
+        # The operator's own text still talks about a private bank (a guardrail,
+        # an edited rule). It stays as written; the true rule goes after it so it
+        # is the last word.
+        if not prompt.rstrip().endswith(_MEMORY_RULE):
+            prompt = f"{prompt}\n\n{_MEMORY_RULE}"
+    elif "memory_add" not in prompt:
         # A persona seeded before #2658 says nothing about memory; without the
         # rule the model "notes" facts it never stored.
         prompt = f"{prompt}\n\n{_MEMORY_RULE}"
@@ -571,9 +630,9 @@ _ADMIN_TOOL_EXCLUDES: frozenset[str] = frozenset(
         # memory_* minus the steward's own trio (#2658). The brain surfaces
         # exactly _BRAIN_MEMORY_TOOLS (memory_add / memory_search /
         # memory_list, the persona's auto_approve set), each scoped server-side
-        # to the persona's private namespace. Every other memory_* tool (the
-        # Hindsight 0.8.4 parity buildout's delete/recall/reflect/curate/
-        # history, mental-model and directive CRUD, operations, tags,
+        # to the shared pool as the persona's agent id. Every other memory_*
+        # tool (the Hindsight 0.8.4 parity buildout's delete/recall/reflect/
+        # curate/history, mental-model and directive CRUD, operations, tags,
         # bank-stats/consolidate) stays out. Listed explicitly so this stays a
         # plain frozenset that other test modules read directly (e.g.
         # tests/board/test_board_chat_admin_tools.py's ``catalog -
@@ -625,34 +684,36 @@ def _is_admin_tool_excluded(name: str) -> bool:
 # ── the steward's own memory (#2658) ────────────────────────────────────────
 #
 # The hal0-brain persona auto-approves memory_add / memory_search / memory_list
-# and owns the namespace ``private:hermes__hal0-brain``. These three reach the
-# model with deliberately tiny schemas (the shipped ~1.1B anchor picks the wrong
+# and writes shared hal0 memory as the agent id ``hermes__hal0-brain`` (reads
+# still see its own earlier private notes through the normal read ACL). These
+# three reach the model with deliberately tiny schemas (the shipped ~1.1B anchor picks the wrong
 # tool when schemas are noisy, #2022) and every call is rewritten server-side
 # before it reaches the memory dispatcher: the model's arguments are reduced to
-# ``text`` / ``query`` / ``limit``, the dataset is forced to the persona's
-# namespace, and the dispatcher's identity is pinned to that namespace's agent
-# id with private mode on. The model cannot name another bank.
+# ``text`` / ``query`` / ``limit``, the dataset is forced to ``shared``, and the
+# dispatcher's identity is pinned to the persona's agent id with private mode
+# off. The model cannot name another bank.
 
 _BRAIN_MEMORY_TOOLS: frozenset[str] = frozenset({"memory_add", "memory_search", "memory_list"})
 
-#: Fallback when the persona is missing or names no usable private namespace.
+#: Fallback when the persona is missing or names no usable ``private:<id>``
+#: namespace (that namespace is only the source of the agent id).
 _BRAIN_MEMORY_AGENT_ID = "hermes__hal0-brain"
 _BRAIN_MEMORY_AGENT_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
 _BRAIN_MEMORY_MAX_LIMIT = 50
 
 _BRAIN_MEMORY_SCHEMAS: dict[str, tuple[str, dict[str, Any], list[str]]] = {
     "memory_add": (
-        "Save one fact to your private memory. Call this before saying you will remember it.",
+        "Save one fact to your memory. Call this before saying you will remember it.",
         {"text": {"type": "string", "description": "The fact, as one sentence."}},
         ["text"],
     ),
     "memory_search": (
-        "Search your private memory for facts saved earlier.",
+        "Search your memory for facts saved earlier.",
         {"query": {"type": "string"}, "limit": {"type": "integer"}},
         ["query"],
     ),
     "memory_list": (
-        "List the most recent facts in your private memory.",
+        "List the most recent facts in your memory.",
         {"limit": {"type": "integer"}},
         [],
     ),
@@ -702,48 +763,77 @@ def _brain_memory_limit(raw: Any, default: int) -> int:
     return max(1, min(value, _BRAIN_MEMORY_MAX_LIMIT))
 
 
-def _brain_memory_args(name: str, args: dict[str, Any], namespace: str) -> dict[str, Any]:
+def _brain_memory_args(
+    name: str, args: dict[str, Any], dataset: str, *, private: bool = False
+) -> dict[str, Any]:
     """Rebuild a memory call's arguments from the allowed fields only.
 
     Anything else the model sent (``dataset``, ``bank``, ``tags``,
-    ``metadata``, ``document_id`` ...) is dropped; the dataset is always the
-    persona's namespace.
+    ``metadata``, ``document_id`` ...) is dropped; the dataset is always
+    ``shared``. When the profile opted into private memory the dispatcher
+    promotes writes to the steward's own namespace regardless, and a search
+    names no dataset so it spans ``shared`` plus that namespace.
     """
     if name == "memory_add":
-        return {"text": str(args.get("text") or ""), "dataset": namespace}
+        return {"text": str(args.get("text") or ""), "dataset": dataset}
     if name == "memory_search":
-        return {
+        out: dict[str, Any] = {
             "query": str(args.get("query") or ""),
             "limit": _brain_memory_limit(args.get("limit"), 10),
-            "dataset": namespace,
         }
-    return {"limit": _brain_memory_limit(args.get("limit"), 20), "dataset": namespace}
+        if not private:
+            out["dataset"] = dataset
+        return out
+    return {"limit": _brain_memory_limit(args.get("limit"), 20), "dataset": dataset}
 
 
-def _brain_memory_dispatcher(request: Request, agent_id: str) -> Any | None:
-    """The app's memory dispatcher, pinned to the steward's private namespace.
+def _brain_memory_private() -> bool:
+    """Whether ``hal0: {memory_private: true}`` is set on the hal0-brain Hermes profile.
+
+    The dashboard steward has no request headers to carry the opt-in, so it
+    reads the same ``profiles/hal0-brain/config.yaml`` the Hermes profile does,
+    by the one rule (and failing closed) of
+    :func:`hal0.agents.hermes_provision.read_profile_memory_private`. Read per
+    call, so an edit takes effect without a restart.
+    """
+    from hal0.agents import hermes_api, hermes_provision
+
+    return hermes_provision.read_profile_memory_private(
+        hermes_api.hermes_home() / "profiles" / "hal0-brain" / "config.yaml"
+    )
+
+
+def _brain_memory_dispatcher(
+    request: Request, agent_id: str, *, private: bool | None = None
+) -> Any | None:
+    """The app's memory dispatcher, pinned to the steward's agent id.
 
     ``app.state.memory_dispatcher`` resolves identity off the live MCP
-    request, which this in-process caller does not have; its ``scoped``
-    sibling shares the provider and the ``memory_add`` preflight. ``None``
-    when the memory subsystem is off.
+    request, which this in-process caller does not have; its ``shared``
+    sibling shares the provider and the ``memory_add`` preflight. Shared by
+    default; ``scoped`` (private mode always on) when the hal0-brain profile
+    opted in with ``hal0: {memory_private: true}``. ``None`` when the memory
+    subsystem is off.
     """
     base = getattr(request.app.state, "memory_dispatcher", None)
     if base is None:
         return None
-    scoped = getattr(base, "scoped", None)
-    return scoped(agent_id) if callable(scoped) else None
+    if private is None:
+        private = _brain_memory_private()
+    pin = getattr(base, "scoped" if private else "shared", None)
+    return pin(agent_id) if callable(pin) else None
 
 
 async def _dispatch_brain_memory_tool(request: Request, name: str, args: dict[str, Any]) -> Any:
-    """Run one of the steward's memory tools against its own namespace.
+    """Run one of the steward's memory tools against shared memory as the steward.
 
     Routed through :func:`hal0.mcp.admin.dispatch` like every other admin
     tool, so the persona policy, classification and audit row are the same;
-    only the memory dispatcher handed to it is the scoped one.
+    only the memory dispatcher handed to it is the shared-pinned one.
     """
     agent_id = _brain_memory_agent_id(request)
-    dispatcher = _brain_memory_dispatcher(request, agent_id)
+    private = _brain_memory_private()
+    dispatcher = _brain_memory_dispatcher(request, agent_id, private=private)
     if dispatcher is None:
         return {
             "error": (
@@ -761,7 +851,7 @@ async def _dispatch_brain_memory_tool(request: Request, name: str, args: dict[st
     base = getattr(request.app.state, "self_api_base_url", "http://127.0.0.1:8080")
     return await admin.dispatch(
         tool=name,
-        args=_brain_memory_args(name, args, f"private:{agent_id}"),
+        args=_brain_memory_args(name, args, "shared", private=private),
         client_id=BRAIN_PERSONA_ID,
         bearer=_self_call_bearer(request, prefer="admin"),
         base_url=base,
@@ -1219,7 +1309,7 @@ async def _dispatch_tool(
     # of the persona's tools_allowed / approval policy ([brain_chat]
     # read_only=true). Reads still pass so the steward can answer questions.
     # The steward's own memory (#2658) is exempt: it writes only to the
-    # persona's private namespace, never to platform state, and without it a
+    # shared memory pool as itself, never to platform state, and without it a
     # fresh box (read_only ships true) has no honest way to "remember".
     if (
         _brain_chat_config(request).read_only

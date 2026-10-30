@@ -637,6 +637,168 @@ def test_handle_tool_call_add_profile_default_visibility_override() -> None:
     assert out["bank"] == "private:hermes"
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_hermes_home(tmp_path, monkeypatch) -> None:
+    """No test reads the host's real ~/.hermes/config.yaml (the opt-in fallback)."""
+    home = tmp_path / "ambient-hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.delenv("HAL0_MEMORY_DEFAULT_VISIBILITY", raising=False)
+
+
+def _private_home(tmp_path, opt_in) -> str:
+    """A profile home whose config.yaml has ``memory_private: <opt_in>`` (raw YAML)."""
+    home = tmp_path / "profiles" / "coder"
+    home.mkdir(parents=True)
+    if opt_in is not None:
+        (home / "config.yaml").write_text(
+            f"hal0:\n  memory_private: {opt_in}\nmemory:\n  provider: hal0-memory\n"
+        )
+    return str(home)
+
+
+def _retain(provider, fake_client, **extra):
+    fake_client.add.reset_mock()
+    provider.handle_tool_call("hindsight_retain", {"text": "fact", **extra})
+    return fake_client.add.call_args.kwargs["private"]
+
+
+def _provider(home: str | None):
+    fake_client = Mock(spec=Hal0MemoryClient)
+    fake_client.agent_id = "hermes__coder"
+    fake_client.add.return_value = {"status": "ok"}
+    provider = Hal0MemoryProvider(client=fake_client)
+    provider.initialize(hermes_home=home) if home else provider.initialize()
+    return provider, fake_client
+
+
+def test_memory_private_opt_in_makes_retain_private(tmp_path) -> None:
+    provider, fake = _provider(_private_home(tmp_path, "true"))
+    out = json.loads(provider.handle_tool_call("hindsight_retain", {"text": "fact"}))
+    fake.add.assert_called_once_with("fact", tags=["agent:hermes"], private=True)
+    assert out["visibility"] == "private"
+
+
+def test_memory_private_opt_in_beats_an_explicit_shared_arg(tmp_path) -> None:
+    provider, fake = _provider(_private_home(tmp_path, "true"))
+    assert _retain(provider, fake, visibility="shared") is True
+
+
+@pytest.mark.parametrize("opt_in", [None, "false", "null", "no", "'off'", "'0'", "0"])
+def test_absent_null_false_and_off_words_stay_shared(tmp_path, opt_in) -> None:
+    provider, fake = _provider(_private_home(tmp_path, opt_in))
+    assert _retain(provider, fake) is False
+
+
+@pytest.mark.parametrize("opt_in", ["'true'", "1", "yes", "garbage", "'1'"])
+def test_any_other_value_is_private(tmp_path, opt_in) -> None:
+    provider, fake = _provider(_private_home(tmp_path, opt_in))
+    assert _retain(provider, fake) is True
+
+
+def test_a_missing_config_file_is_shared(tmp_path) -> None:
+    home = tmp_path / "profiles" / "empty"
+    home.mkdir(parents=True)
+    provider, fake = _provider(str(home))
+    assert _retain(provider, fake) is False
+
+
+def test_an_unparseable_config_fails_closed(tmp_path, caplog) -> None:
+    home = tmp_path / "profiles" / "broken"
+    home.mkdir(parents=True)
+    (home / "config.yaml").write_text("hal0: [unclosed\n  - : :\n")
+    provider, fake = _provider(str(home))
+    with caplog.at_level("WARNING"):
+        assert _retain(provider, fake) is True
+    assert "memory_private" in caplog.text
+
+
+def test_an_unreadable_config_fails_closed(tmp_path, caplog) -> None:
+    home = tmp_path / "profiles" / "binary"
+    home.mkdir(parents=True)
+    (home / "config.yaml").write_bytes(b"\xff\xfe\x00bad")
+    provider, fake = _provider(str(home))
+    with caplog.at_level("WARNING"):
+        assert _retain(provider, fake) is True
+
+
+def test_a_config_that_is_a_directory_fails_closed(tmp_path) -> None:
+    home = tmp_path / "profiles" / "isdir"
+    (home / "config.yaml").mkdir(parents=True)
+    provider, fake = _provider(str(home))
+    assert _retain(provider, fake) is True
+
+
+def test_a_missing_yaml_module_fails_closed(tmp_path, monkeypatch) -> None:
+    import builtins
+
+    real = builtins.__import__
+
+    def no_yaml(name, *a, **k):
+        if name == "yaml":
+            raise ImportError("no yaml")
+        return real(name, *a, **k)
+
+    provider, fake = _provider(_private_home(tmp_path, "false"))
+    monkeypatch.setattr(builtins, "__import__", no_yaml)
+    assert _retain(provider, fake) is True
+
+
+def test_env_hermes_home_is_the_fallback(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HERMES_HOME", _private_home(tmp_path, "true"))
+    provider, fake = _provider(None)
+    assert _retain(provider, fake) is True
+
+
+def test_dot_hermes_is_the_last_fallback(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    fake_home = tmp_path / "fakehome"
+    (fake_home / ".hermes").mkdir(parents=True)
+    (fake_home / ".hermes" / "config.yaml").write_text("hal0:\n  memory_private: true\n")
+    monkeypatch.setenv("HOME", str(fake_home))
+    provider, fake = _provider(None)
+    assert _retain(provider, fake) is True
+
+
+def test_a_live_session_picks_up_an_opt_in_added_later(tmp_path) -> None:
+    home = _private_home(tmp_path, "false")
+    provider, fake = _provider(home)
+    assert _retain(provider, fake) is False
+    cfg = tmp_path / "profiles" / "coder" / "config.yaml"
+    cfg.write_text("hal0:\n  memory_private: true\n# changed so size differs too\n")
+    assert _retain(provider, fake) is True
+    cfg.write_text("hal0:\n  memory_private: false\n")
+    assert _retain(provider, fake) is False
+
+
+def test_the_opt_in_is_cached_on_the_files_mtime(tmp_path, monkeypatch) -> None:
+    from hal0.agents.hermes.plugins.memory_hindsight import provider as prov
+
+    home = _private_home(tmp_path, "true")
+    provider, fake = _provider(home)
+    calls: list[str] = []
+    real = prov._read_memory_private
+
+    def counting(path):
+        calls.append(path)
+        return real(path)
+
+    monkeypatch.setattr(prov, "_read_memory_private", counting)
+    _retain(provider, fake)
+    _retain(provider, fake)
+    _retain(provider, fake)
+    assert len(calls) <= 1
+
+
+def test_the_plugin_rule_matches_the_hal0_rule() -> None:
+    """The plugin cannot import hal0; this holds its copy of the rule to the original."""
+    from hal0.agents import hermes_provision as hp
+    from hal0.agents.hermes.plugins.memory_hindsight import provider as prov
+
+    for value in (True, False, None, "true", "false", " No ", "0", 0, 1, "off", "x", [], {}):
+        assert prov._memory_private_value(value) is hp.memory_private_value_is_private(value), value
+
+
 def test_handle_tool_call_add_custom_tags() -> None:
     fake_client = Mock(spec=Hal0MemoryClient)
     fake_client.add.return_value = {"status": "ok"}
@@ -1218,3 +1380,28 @@ def test_initialize_ignores_a_stored_default_id_on_a_profile_home(
     p = Hal0MemoryProvider()
     p.initialize(session_id="s", hermes_home=str(_profile_home(tmp_path, "coder", "hermes")))
     assert p._client is not None and p._client.agent_id == "hermes__coder"
+
+
+def test_prompt_and_retain_schema_do_not_overclaim_privacy() -> None:
+    """Private notes are filtered from recall; reflect is not filtered yet."""
+    from hal0.agents.hermes.plugins.memory_hindsight import provider as prov
+
+    provider = Hal0MemoryProvider(client=Mock(spec=Hal0MemoryClient))
+    provider.initialize()
+    block = provider.system_prompt_block()
+    assert "only you" not in block and "only you" not in prov.RETAIN_SCHEMA["description"]
+    assert "reflect is not yet filtered" in block
+
+
+def test_a_yaml_parse_error_never_puts_the_config_text_in_the_log(tmp_path, caplog) -> None:
+    """config.yaml carries ``Authorization: Bearer ...`` headers; PyYAML's message quotes the line."""
+    home = tmp_path / "profiles" / "leaky"
+    home.mkdir(parents=True)
+    (home / "config.yaml").write_text(
+        "mcp_servers:\n  hal0-memory:\n    headers: {Authorization: Bearer hunter2-secret, : [\n"
+    )
+    provider, fake = _provider(str(home))
+    with caplog.at_level("WARNING"):
+        assert _retain(provider, fake) is True
+    assert "hunter2-secret" not in caplog.text
+    assert "hal0.memory_private" in caplog.text
