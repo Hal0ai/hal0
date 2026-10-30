@@ -56,6 +56,8 @@ def openwebui_wiring_status(
     *,
     upstreams: Any | None = None,
     model_cache: Mapping[str, list[str]] | None = None,
+    mcp: bool | None = None,
+    hermes_api_down: bool = False,
 ) -> dict[str, Any]:
     """Live truth behind both the dashboard's wired chips and the dynamic
     env blocks.
@@ -74,7 +76,10 @@ def openwebui_wiring_status(
 
     ``agents`` lists the model ids Hermes profiles answer as; it needs the
     live upstream registry, so callers outside the API process (the env
-    writer) omit it and get ``[]``.
+    writer) omit it and get ``[]``; ``hermes_api_down`` (the Hermes API doctor
+    state) empties it too. ``mcp`` is true when ``[bridge].enabled`` and a bridge
+    client named ``openwebui`` exists; callers that already know pass it, otherwise
+    it is read through the bridge store (fail-soft to ``False``).
     """
     cfg = load_capabilities_config()
     embed_sel = _selection(cfg, "embed", "embed")
@@ -90,8 +95,22 @@ def openwebui_wiring_status(
         "web_search": False,
         "embed_model": embed_model or None,
         "image_model": image_model,
-        "agents": _agent_model_ids(upstreams, model_cache),
+        "agents": [] if hermes_api_down else _agent_model_ids(upstreams, model_cache),
+        "mcp": _bridge_mcp_ready() if mcp is None else mcp,
     }
+
+
+def _bridge_mcp_ready() -> bool:
+    """``[bridge].enabled`` and a bridge client named ``openwebui`` exists. Fail-soft."""
+    try:
+        from hal0.api.auth import bridge_store
+        from hal0.config.loader import load_hal0_config
+
+        if not load_hal0_config().bridge.enabled:
+            return False
+        return bridge_store().get_client("openwebui") is not None
+    except Exception:
+        return False
 
 
 def _renderable_image_model(model_id: str) -> str | None:
@@ -118,15 +137,24 @@ def _renderable_image_model(model_id: str) -> str | None:
     return resolved.id
 
 
-def resolve_dynamic_env_overrides() -> dict[str, str | None]:
+def resolve_dynamic_env_overrides(
+    bridge_key: str | None = None,
+    mcp_enabled: bool | None = None,
+) -> dict[str, str | None]:
     """Live capability state → the overrides dict
     :func:`~hal0.openwebui.env_writer.write_openwebui_env` merges in.
+
+    ``bridge_key`` is the ``openwebui`` bridge client's key when the caller holds
+    one; ``mcp_enabled`` is whether the MCP block is wanted at all (``None`` reads
+    it from the bridge store, as :func:`openwebui_wiring_status` does).
     """
-    status = openwebui_wiring_status()
+    status = openwebui_wiring_status(mcp=mcp_enabled)
     return dynamic_env_overrides(
         embed_model_id=status["embed_model"],
         image_model_id=status["image_model"],
         search_provider=_search_provider_lookup(),
+        bridge_key=bridge_key,
+        mcp_enabled=bool(status["mcp"]),
     )
 
 

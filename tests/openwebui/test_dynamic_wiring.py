@@ -420,3 +420,32 @@ enabled = true
     )
     overrides = resolve_dynamic_env_overrides()
     assert overrides["ENABLE_IMAGE_GENERATION"] is None
+
+
+# ── MCP / agents signals on the wiring status ───────────────────────────────
+
+
+def test_wiring_status_mcp_and_agents_signals(tmp_hal0_home: str) -> None:
+    from hal0.openwebui.wiring import openwebui_wiring_status
+
+    class _Up:
+        name = "hermes"
+        managed_by = "agent:hermes"
+        owned_models = ("hermes-agent",)
+
+    class _Reg:
+        def list(self):
+            return [_Up()]
+
+    assert openwebui_wiring_status(mcp=True)["mcp"] is True
+    assert openwebui_wiring_status(mcp=False)["mcp"] is False
+    assert openwebui_wiring_status(upstreams=_Reg())["agents"] == ["hermes-agent"]
+    assert openwebui_wiring_status(upstreams=_Reg(), hermes_api_down=True)["agents"] == []
+
+
+def test_resolve_threads_bridge_key_and_mcp(tmp_hal0_home: str) -> None:
+    from hal0.openwebui.wiring import resolve_dynamic_env_overrides
+
+    on = resolve_dynamic_env_overrides(bridge_key="hal0bk_x.y", mcp_enabled=True)
+    assert json.loads(on["TOOL_SERVER_CONNECTIONS"])[0]["key"] == "hal0bk_x.y"
+    assert resolve_dynamic_env_overrides(mcp_enabled=False)["TOOL_SERVER_CONNECTIONS"] is None
