@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from hal0 import __version__
 from hal0.capabilities.config import load_capabilities_config
@@ -31,6 +31,7 @@ from hal0.config.loader import (
 from hal0.config.schema import (
     _VALID_DEVICES,
     STACK_SCHEMA_VERSION_CURRENT,
+    SlotTuneConfig,
     StackCapabilityRow,
     StackConfig,
     StackModelMeta,
@@ -341,6 +342,20 @@ def import_stack(
 # ── snapshot from live ───────────────────────────────────────────────────────
 
 
+def _valid_tune(raw: Any) -> dict[str, Any] | None:
+    """The slot's ``[tune]`` table when it parses, else None.
+
+    Tolerant like the rest of the snapshot read: a hand-edited table that would
+    not validate is left out rather than failing the whole snapshot.
+    """
+    if not isinstance(raw, dict) or not raw:
+        return None
+    try:
+        return SlotTuneConfig.model_validate(raw).model_dump(exclude_none=True) or None
+    except ValidationError:
+        return None
+
+
 def _read_slot_raw(slot_name: str) -> dict[str, Any] | None:
     """Tolerantly read a slot TOML into the fields a snapshot needs.
 
@@ -385,6 +400,7 @@ def _read_slot_raw(slot_name: str) -> dict[str, Any] | None:
         "device": device if device in _VALID_DEVICES else None,
         "provider": g("provider"),
         "profile": g("profile"),
+        "tune": _valid_tune(raw.get("tune")),
     }
 
 
@@ -443,6 +459,7 @@ def snapshot_live_stack(
                 device=sc["device"],
                 provider=sc["provider"],
                 profile=sc["profile"],
+                tune=sc["tune"] or None,
                 capabilities=rows,
             )
         )

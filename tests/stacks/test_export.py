@@ -252,3 +252,25 @@ class TestExportSparseProfiles:
         assert profiles["tuned"]["reasoning_effort"] == "low"
         assert profiles["tuned"]["reasoning_budget"] == 512
         assert verify_checksum(env)
+
+
+class TestExportTune:
+    def test_tune_rides_the_envelope_and_unset_stays_out(
+        self, reg: ModelRegistry, tmp_hal0_home: str
+    ) -> None:
+        from hal0.stacks.portable import verify_checksum
+
+        stack = StackConfig(
+            name="Saber",
+            slots=[
+                StackSlotEntry.model_validate(
+                    {"slot": "agent", "model": "ace-saber", "tune": {"vision": "off"}}
+                ),
+                StackSlotEntry(slot="chat", model="ace-saber"),
+            ],
+        )
+        env = export_envelope(stack, exported_at="t", registry=reg)
+        agent, chat = env["stack"]["slots"]
+        assert agent["tune"] == {"vision": "off"}
+        assert "tune" not in chat
+        assert verify_checksum(env)
