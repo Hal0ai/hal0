@@ -183,3 +183,60 @@ def test_container_spec_and_preview_agree() -> None:
     assert "--reasoning-effort" in spec.command
     assert spec.command[spec.command.index("--ctx-size") + 1] == "8192"
     assert resolved.argv[resolved.argv.index("--ctx-size") + 1] == "8192"
+
+
+# ── hand-edited [tune] cannot inject flags or crash the launch ───────────────
+
+
+def test_hand_edited_effort_cannot_inject_flags() -> None:
+    d = _detail(_slot({"reasoning_effort": "high --hf-file /etc/shadow"}), _profile(), _model())
+    assert "--hf-file" not in d["argv"]
+    assert "/etc/shadow" not in d["argv"]
+    assert "--reasoning-effort" not in d["argv"]
+    assert d["tune_effective"]["reasoning_effort"] == "default"
+    assert d["tune_effective"]["sources"]["reasoning_effort"] == "profile"
+
+
+def test_hand_edited_bad_budget_and_ctx_do_not_raise_or_emit() -> None:
+    d = _detail(
+        _slot({"reasoning_budget": "abc", "ctx_size": -5}), _profile(ctx_size=16384), _model()
+    )
+    assert d is not None
+    assert "--reasoning-budget" not in d["argv"]
+    assert _value(d, "--ctx-size") == ("16384", "base")
+    assert d["tune_effective"]["ctx_size"] == 16384
+
+
+def test_reasoning_tokens_are_a_list_not_split_text() -> None:
+    from hal0.providers.container import _llama_argv_segments
+
+    segs = dict(
+        _llama_argv_segments(
+            port=1,
+            model_path="m",
+            context_size=8192,
+            profile_reasoning=["--reasoning-effort", "low --x"],
+            slot_reasoning=["--reasoning-budget", "0"],
+        )
+    )
+    assert segs["profile"][-2:] == ["--reasoning-effort", "low --x"]
+    assert segs["slot"][-2:] == ["--reasoning-budget", "0"]
+
+
+# ── a free reasoning flag in the profile is what runs (and what is reported) ──
+
+
+def test_flag_effort_is_reported_as_what_runs() -> None:
+    prof = _profile(flags="-fa on --reasoning-effort low", reasoning_effort="high")
+    d = _detail(_slot(), prof, _model())
+    assert _value(d, "--reasoning-effort") == ("low", "profile")
+    te = d["tune_effective"]
+    assert te["reasoning_effort"] == "low" and te["sources"]["reasoning_effort"] == "profile-flags"
+
+
+def test_flag_budget_beats_typed_budget_in_report_and_argv() -> None:
+    prof = _profile(flags="--reasoning-budget -1", reasoning_budget=512)
+    d = _detail(_slot(), prof, _model())
+    assert _value(d, "--reasoning-budget") == ("-1", "profile")
+    assert d["tune_effective"]["reasoning_budget"] == -1
+    assert d["tune_effective"]["sources"]["reasoning_budget"] == "profile-flags"

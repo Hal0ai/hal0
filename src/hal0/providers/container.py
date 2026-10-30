@@ -52,7 +52,7 @@ import os
 import shlex
 import shutil
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -1021,8 +1021,8 @@ def _llama_argv_segments(
     slot_metrics: bool = True,
     draft_device: str | None = None,
     lane_device: str | None = None,
-    profile_reasoning: str = "",
-    slot_reasoning: str = "",
+    profile_reasoning: Sequence[str] = (),
+    slot_reasoning: Sequence[str] = (),
 ) -> list[tuple[str, list[str]]]:
     """The labelled llama-server argv segments (SINGLE SOURCE, ADR-0029).
 
@@ -1070,8 +1070,7 @@ def _llama_argv_segments(
     profile: list[str] = shlex.split(spec_bundle) if spec_bundle.strip() else []
     # The profile's typed reasoning fields sit before its free flags, so a
     # hand-written `--reasoning-effort` in `flags` still wins within the layer.
-    if profile_reasoning.strip():
-        profile += shlex.split(profile_reasoning)
+    profile += list(profile_reasoning)
     profile += _profile_flag_tokens(profile_flags)
 
     slot: list[str] = []
@@ -1091,8 +1090,7 @@ def _llama_argv_segments(
         slot += ["--spec-draft-device", draft_device]
     # A slot [tune] override is the last word: it beats the profile's typed
     # field and its free flags by last-wins dedupe.
-    if slot_reasoning.strip():
-        slot += shlex.split(slot_reasoning)
+    slot += list(slot_reasoning)
 
     return [("base", base), ("model", model), ("profile", profile), ("slot", slot)]
 
@@ -1120,8 +1118,8 @@ def _llama_launch_plan(
     draft_device: str | None = None,
     lane_device: str | None = None,
     env: dict[str, str] | None = None,
-    profile_reasoning: str = "",
-    slot_reasoning: str = "",
+    profile_reasoning: Sequence[str] = (),
+    slot_reasoning: Sequence[str] = (),
 ) -> RuntimeLaunchPlan:
     """Build the GPU/llama-server :class:`RuntimeLaunchPlan`.
 
@@ -1661,21 +1659,24 @@ def _placement_only(slot_cfg: Mapping[str, Any]) -> dict[str, Any]:
 
 def _reasoning_segments(
     tune: EffectiveTune, runner: Any, image: str
-) -> tuple[str, str, str | None]:
-    """``(profile_text, slot_text, effort_unavailable)`` for the typed reasoning tunes.
+) -> tuple[list[str], list[str], str | None]:
+    """``(profile_tokens, slot_tokens, effort_unavailable)`` for the typed reasoning tunes.
 
     Each value is spelled in the layer that set it (``tune.sources``), so the
-    resolved-command drawer credits it correctly. ``default`` effort and a
-    ``-1`` budget emit nothing. Effort is withheld, with a reason, when the
-    runner build predates ``--reasoning-effort``.
+    resolved-command drawer credits it correctly; a value read from the
+    profile's own ``flags`` is already in the command and is not re-emitted.
+    ``default`` effort and a ``-1`` budget emit nothing. Effort is withheld,
+    with a reason, when the runner build predates ``--reasoning-effort``.
+    Tokens are built as lists (never joined and re-split), and the values were
+    validated by :func:`~hal0.slots.tune.effective_tune`.
     """
-    texts: dict[str, list[str]] = {"profile": [], "slot": []}
+    tokens: dict[str, list[str]] = {"profile": [], "slot": []}
     unavailable: str | None = None
     effort = str(tune.reasoning_effort or "default")
-    if effort != "default":
+    effort_origin = tune.sources.get("reasoning_effort")
+    if effort != "default" and effort_origin in ("profile", "slot"):
         if runner_supports_reasoning_effort(runner, image):
-            origin = "slot" if tune.sources.get("reasoning_effort") == "slot" else "profile"
-            texts[origin].append(f"--reasoning-effort {effort}")
+            tokens[str(effort_origin)] += ["--reasoning-effort", effort]
         else:
             build = llama_build_from_tag(image)
             unavailable = (
@@ -1685,10 +1686,10 @@ def _reasoning_segments(
                 else "this runner does not support --reasoning-effort"
             )
     budget = int(tune.reasoning_budget)
-    if budget != -1:
-        origin = "slot" if tune.sources.get("reasoning_budget") == "slot" else "profile"
-        texts[origin].append(f"--reasoning-budget {budget}")
-    return " ".join(texts["profile"]), " ".join(texts["slot"]), unavailable
+    budget_origin = tune.sources.get("reasoning_budget")
+    if budget != -1 and budget_origin in ("profile", "slot"):
+        tokens[str(budget_origin)] += ["--reasoning-budget", str(budget)]
+    return tokens["profile"], tokens["slot"], unavailable
 
 
 def _resolve_llama_scalars(
@@ -1843,8 +1844,8 @@ def _segments_from_scalars(
         slot_metrics=sc["slot_metrics"],
         draft_device=sc["draft_device"],
         lane_device=sc["lane_device"],
-        profile_reasoning=sc.get("profile_reasoning", ""),
-        slot_reasoning=sc.get("slot_reasoning", ""),
+        profile_reasoning=sc.get("profile_reasoning", ()),
+        slot_reasoning=sc.get("slot_reasoning", ()),
     )
 
 
