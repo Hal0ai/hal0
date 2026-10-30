@@ -464,7 +464,9 @@ def test_a_hand_edited_private_bank_sentence_is_stripped(tmp_path: Path) -> None
         Persona(
             id=bc.BRAIN_PERSONA_ID,
             display_name="hal0 Brain",
-            system_prompt="You are hal0-brain. You own a private memory bank. Use memory_add.",
+            system_prompt=(
+                "You are hal0-brain. You have a private memory bank of your own. Use memory_add."
+            ),
             memory_namespace=BRAIN_NAMESPACE,
             approval=PersonaApproval(),
         ),
@@ -484,7 +486,7 @@ def test_stale_bank_sentence_without_a_period_is_stripped_and_paragraphs_survive
         Persona(
             id=bc.BRAIN_PERSONA_ID,
             display_name="hal0 Brain",
-            system_prompt="You are hal0-brain.\nYou own a Private Memory Bank\n\nBe brief.",
+            system_prompt="You are hal0-brain.\nYou have a Private Memory Bank of your own\n\nBe brief.",
             memory_namespace=BRAIN_NAMESPACE,
             approval=PersonaApproval(),
         ),
@@ -493,6 +495,51 @@ def test_stale_bank_sentence_without_a_period_is_stripped_and_paragraphs_survive
     prompt, _model = bc._resolve_profile(_request(tmp_path, persona_root=root))
     assert "private memory bank" not in prompt.lower()
     assert "You are hal0-brain.\n" in prompt and "\n\nBe brief." in prompt
+    assert bc._MEMORY_RULE in prompt
+
+
+def test_an_operator_guardrail_naming_a_private_memory_bank_survives(tmp_path: Path) -> None:
+    """Only the seeded wording is stale; an operator's own sentence is not."""
+    root = tmp_path / "guardrail"
+    guard = "Never reveal secrets stored in your private memory bank."
+    save_persona(
+        Persona(
+            id=bc.BRAIN_PERSONA_ID,
+            display_name="hal0 Brain",
+            system_prompt=f"You are hal0-brain. {guard} Be brief. Use memory_add.",
+            memory_namespace=BRAIN_NAMESPACE,
+            approval=PersonaApproval(),
+        ),
+        root=root,
+    )
+    prompt, _model = bc._resolve_profile(_request(tmp_path, persona_root=root))
+    assert guard in prompt
+
+
+def test_the_old_rule_rewrite_stays_inside_its_paragraph(tmp_path: Path) -> None:
+    """An unterminated rule must not swallow operator text up to a later
+    ``call memory_search first.`` in another paragraph."""
+    root = tmp_path / "bounded"
+    operator = "Operator note: keep every answer under two lines."
+    save_persona(
+        Persona(
+            id=bc.BRAIN_PERSONA_ID,
+            display_name="hal0 Brain",
+            system_prompt=(
+                "You are hal0-brain.\n\n"
+                "Memory: you have a private memory bank (namespace private:x), edited by hand.\n\n"
+                f"{operator}\n\n"
+                "For anything else call memory_search first."
+            ),
+            memory_namespace=BRAIN_NAMESPACE,
+            approval=PersonaApproval(),
+        ),
+        root=root,
+    )
+    prompt, _model = bc._resolve_profile(_request(tmp_path, persona_root=root))
+    assert operator in prompt
+    assert "For anything else call memory_search first." in prompt
+    assert "private memory bank" not in prompt
     assert bc._MEMORY_RULE in prompt
 
 

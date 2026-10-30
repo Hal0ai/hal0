@@ -192,15 +192,23 @@ _MEMORY_RULE = (
 
 # The #2658 wording ("you have a private memory bank ...") that boxes seeded
 # before the shared-memory switch still carry in their persona TOML.
+# Bounded to one paragraph: the match cannot cross a blank line, so an edited
+# rule that lost its closing sentence cannot swallow operator text up to some
+# later "call memory_search first." It ends at that sentence, or at the end of
+# the paragraph when the sentence is gone.
 _OLD_PRIVATE_RULE_RE = re.compile(
-    r"Memory: you have a private memory bank.*?call memory_search first\.",
+    r"Memory: you have a private memory bank(?:(?!\n[ \t]*\n).)*?"
+    r"(?:call memory_search first\.|(?=\n[ \t]*\n|\Z))",
     re.DOTALL,
 )
-# One sentence that mentions the bank: up to the period, or the end of the line
-# when the author left the period off. Trailing spaces/tabs go, the paragraph
-# break stays.
+# The seeded persona sentence ("You have a private memory bank of your own
+# (namespace ...): ..."), up to the period, or the end of the line when the
+# author left the period off. Only that wording is stale; an operator's own
+# sentence that merely mentions a "private memory bank" is left alone. Trailing
+# spaces/tabs go, the paragraph break stays.
 _STALE_SENTENCE_RE = re.compile(
-    r"[^.\n]*private memory bank[^.\n]*(?:\.|(?=\n|$))[ \t]*", re.IGNORECASE
+    r"[^.\n]*you have a private memory bank of your own[^.\n]*(?:\.|(?=\n|$))[ \t]*",
+    re.IGNORECASE,
 )
 
 # Injected as the leading system message when the client doesn't send one.
@@ -303,7 +311,7 @@ def _resolve_profile(request: Request) -> tuple[str, str]:
     except (FileNotFoundError, PersonaError, OSError):
         return _SYSTEM_PROMPT, BRAIN_SLOT_MODEL
     prompt = persona.system_prompt.strip() or _SYSTEM_PROMPT
-    if _STALE_SENTENCE_RE.search(prompt):
+    if _OLD_PRIVATE_RULE_RE.search(prompt) or _STALE_SENTENCE_RE.search(prompt):
         # A persona seeded after #2658 (the seeder never overwrites) still
         # claims a private bank, but the steward now writes shared memory.
         prompt = _OLD_PRIVATE_RULE_RE.sub(lambda _m: _MEMORY_RULE, prompt)
