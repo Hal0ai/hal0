@@ -13,10 +13,12 @@ minimal profile (spec D2):
    from ``/v1/models`` and registers them as an OpenAI-compatible pi
    provider. Set as the default provider/model in ``settings.json``.
 3. Memory — two wires (spec D3/D4), not one:
-   a. ``hal0-memory`` MCP server upserted into pi's global
-      ``~/.pi/agent/mcp.json`` (Pi's own MCP config, read by the pinned
-      ``pi-mcp-adapter`` package), pointed at hal0-api's memory MCP
-      mount.
+   a. The builtin hal0 MCP servers (``hal0-admin`` + ``hal0-memory`` —
+      the same pair Hermes wires via
+      ``hermes_provision._default_mcp_servers()``) upserted into pi's
+      global ``~/.pi/agent/mcp.json`` (Pi's own MCP config, read by the
+      pinned ``pi-mcp-adapter`` package), pointed at hal0-api's admin
+      and memory MCP mounts.
    b. The ``hindsight`` extension (``plugins/hindsight/``), a vendored
       wrapper around ``@vectorize-io/hindsight-coding-agents`` pinned
       in its own ``package.json`` — resolved via ``npm install`` inside
@@ -67,7 +69,18 @@ from hal0.config import paths as _paths
 # ``<mount>/mcp`` — Hermes wires the identical server the same way
 # (``hermes_provision.py:1424``: "http://127.0.0.1:8080/mcp/memory/mcp").
 _HAL0_API_BASE_DEFAULT = "http://127.0.0.1:8080"
+_MCP_ADMIN_PATH = "/mcp/admin/mcp"
 _MCP_MEMORY_PATH = "/mcp/memory/mcp"
+
+# Builtin hal0 MCP servers wired into pi's ``~/.pi/agent/mcp.json`` at
+# install time — the same pair hermes_provision wires for a bundled
+# Hermes agent (``_default_mcp_servers()``: hal0-admin + hal0-memory).
+# hal0-agents is deliberately NOT here: it is a separate remote service,
+# not a bundled local mount on hal0-api. Name → mount-path.
+_MANAGED_MCP_SERVERS: dict[str, str] = {
+    "hal0-admin": _MCP_ADMIN_PATH,
+    "hal0-memory": _MCP_MEMORY_PATH,
+}
 
 # Vendored extension + theme sources, deployed into pi's config tree at
 # install time. These live inside the hal0 repo, not the operator's
@@ -571,11 +584,12 @@ class PiDriver(AgentDriver):
             return None
 
     def _write_mcp_config(self, *, bearer_token: str | None) -> None:
-        """Upsert the hal0-memory MCP server into ~/.pi/agent/mcp.json
-        (Pi's own global MCP file; ``pi-mcp-adapter`` >= 5.0 reads it on
-        Pi >= 0.99, and the entry shape — ``url`` + ``headers`` — is the
-        same one Pi's built-in MCP uses). Preserves every other server the
-        operator configured.
+        """Upsert the builtin hal0 MCP servers (hal0-admin + hal0-memory)
+        into ~/.pi/agent/mcp.json (Pi's own global MCP file; ``pi-mcp-adapter``
+        >= 5.0 reads it on Pi >= 0.99, and the entry shape — ``url`` +
+        ``headers`` — is the same one Pi's built-in MCP uses) — the same pair
+        hermes_provision wires for a bundled Hermes agent. Preserves every
+        other server the operator configured.
 
         Identity always rides the ``X-hal0-Agent`` header (mirrors
         ``hermes_provision.py``'s MCP wiring and the ``_AGENT_HEADER`` the
@@ -598,11 +612,11 @@ class PiDriver(AgentDriver):
                 existing = {}
         servers = existing.setdefault("mcpServers", {})
         token = bearer_token or self._resolve_service_token()
-        headers: dict[str, str] = {"X-hal0-Agent": self.name}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        entry: dict[str, Any] = {"url": f"{_api_base()}{_MCP_MEMORY_PATH}", "headers": headers}
-        servers["hal0-memory"] = entry
+        for name, mount_path in _MANAGED_MCP_SERVERS.items():
+            headers: dict[str, str] = {"X-hal0-Agent": self.name}
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            servers[name] = {"url": f"{_api_base()}{mount_path}", "headers": headers}
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -613,7 +627,7 @@ class PiDriver(AgentDriver):
         tmp.replace(path)
 
     def _remove_mcp_config(self) -> None:
-        """Drop the hal0-memory entry from ~/.pi/agent/mcp.json,
+        """Drop the managed hal0 MCP entries from ~/.pi/agent/mcp.json,
         preserving every other server. Tolerates a missing or corrupt
         file (nothing to do)."""
         path = self._mcp_config_path()
@@ -627,7 +641,8 @@ class PiDriver(AgentDriver):
             return
         servers = existing.get("mcpServers")
         if isinstance(servers, dict):
-            servers.pop("hal0-memory", None)
+            for name in _MANAGED_MCP_SERVERS:
+                servers.pop(name, None)
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
         tmp.replace(path)

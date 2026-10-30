@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# hal0-pi-setup — One-command setup to add all hal0 MCP servers to Pi
+# Usage: hal0-pi-setup [--token TOKEN] [--remote] [--host HOST] [--force] [--dry-run]
+#   --token TOKEN     Bearer token (or set HAL0_MCP_TOKEN env var)
+#   --remote          Force remote HTTPS endpoints even on hal0 itself
+#   --host HOST       hal0 host for remote endpoints (or set HAL0_MCP_HOST)
+#   --force           Re-add servers that already exist
+#   --dry-run         Print what would be done without doing it
+#   -h, --help        Show this help
+
+VERSION="1.0.0"
+
+# ── Colors ──────────────────────────────────────────────────
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+
+ok()   { echo -e "  ${GREEN}✓${NC} $1"; }
+warn() { echo -e "  ${YELLOW}⚠${NC} $1"; }
+fail() { echo -e "  ${RED}✗${NC} $1"; }
+info() { echo -e "  ${CYAN}→${NC} $1"; }
+
+# ── Parse args ──────────────────────────────────────────────
+TOKEN="${HAL0_MCP_TOKEN:-}"
+HOST="${HAL0_MCP_HOST:-}"
+REMOTE=false
+DRY_RUN=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --token) TOKEN="$2"; shift 2 ;;
+    --host) HOST="$2"; shift 2 ;;
+    --remote) REMOTE=true; shift ;;
+    --force) FORCE=true; shift ;;
+    --dry-run) DRY_RUN=true; shift ;;
+    -h|--help)
+      sed -n '2,13p' "$0" | sed 's/^# //'
+      exit 0 ;;
+    *) echo "Unknown option: $1"; exit 1 ;;
+  esac
+done
+
+# ── Detect environment ──────────────────────────────────────
+ON_HAL0=false
+if hostname | grep -qi hal0 || grep -q "hal0" /etc/hosts 2>/dev/null; then
+  if curl -sf http://127.0.0.1:8080/mcp/admin/mcp \
+       -H "Accept: application/json" -o /dev/null --connect-timeout 2 2>/dev/null; then
+    ON_HAL0=true
+  fi
+fi
+
+MCP_JSON="${HOME}/.pi/agent/mcp.json"
+PI_BIN="${PI_BIN:-pi}"
+
+# ── Banner ──────────────────────────────────────────────────
+echo ""
+echo -e "${BOLD}hal0-pi-setup ${VERSION}${NC}"
+echo "──────────────────────────────────────────"
+if $DRY_RUN; then
+  echo -e "${YELLOW}DRY RUN — no changes will be made${NC}"
+fi
+echo ""
+
+# ── Determine endpoints ─────────────────────────────────────
+declare -A ENDPOINTS
+declare -A DESCRIPTIONS
+
+if $ON_HAL0 && ! $REMOTE; then
+  info "Detected running on hal0 — using local endpoints (no auth needed)"
+  ENDPOINTS=(
+    [hal0-memory]="http://127.0.0.1:8080/mcp/memory/mcp"
+    [hal0-admin]="http://127.0.0.1:8080/mcp/admin/mcp"
+  )
+  DESCRIPTIONS=(
+    [hal0-memory]="hal0 Memory MCP (local, no auth)"
+    [hal0-admin]="hal0 Admin MCP — slots, models, hardware, ComfyUI (local, no auth)"
+  )
+else
+  if [ -z "$TOKEN" ]; then
+    echo -e "${RED}Error:${NC} Token required for remote endpoints."
+    echo "  Set HAL0_MCP_TOKEN env var or pass --token <token>"
+    echo "  Get your token from the hal0 dashboard → API Keys → pi-agent"
+    exit 1
+  fi
+  if [ -z "$HOST" ]; then
+    echo -e "${RED}Error:${NC} Remote host required for remote endpoints."
+    echo "  Set HAL0_MCP_HOST env var or pass --host <hal0-host>"
+    exit 1
+  fi
+  info "Using remote HTTPS endpoints at $HOST"
+  ENDPOINTS=(
+    [hal0-memory]="https://$HOST/mcp/memory/mcp"
+    [hal0-agents]="https://$HOST/mcp/agents/mcp"
+    [hal0-admin]="https://$HOST/mcp/admin/mcp"
+  )
+  DESCRIPTIONS=(
+    [hal0-memory]="hal0 Memory MCP — vector+graph memory bank"
+    [hal0-agents]="hal0 Agents MCP — agent orchestration, skills, programs"
+    [hal0-admin]="hal0 Admin MCP — slots, models, hardware, services"
+  )
+fi
+
+# ── Add servers ─────────────────────────────────────────────
+ADDED=0
+SKIPPED=0
+FAILED=0
+
+for name in "${!ENDPOINTS[@]}"; do
+  url="${ENDPOINTS[$name]}"
+  desc="${DESCRIPTIONS[$name]}"
+  
+  echo -e "${BOLD}${name}${NC} — ${desc}"
+  
+  # Check if already configured
+  if [ -f "$MCP_JSON" ] && grep -q "\"${name}\"" "$MCP_JSON" 2>/dev/null; then
+    if [ "${FORCE:-false}" != true ]; then
+      warn "Already configured — skipping (use --force to re-add)"
+      ((SKIPPED++)) || true
+      continue
+    fi
+    info "Re-adding (force mode)"
+  fi
+
+  if $DRY_RUN; then
+    echo "  Would run: pi mcp add ${name} --url ${url} ..."
+    ((ADDED++)) || true
+    continue
+  fi
+
+  # Build the command
+  if [ -n "$TOKEN" ] && [[ "$url" == https://* ]]; then
+    export HAL0_MCP_TOKEN="$TOKEN"
+    if pi mcp add "$name" --url "$url" --bearer-token-env-var HAL0_MCP_TOKEN 2>&1; then
+      ok "Added"
+      ((ADDED++)) || true
+    else
+      fail "Failed to add"
+      ((FAILED++)) || true
+    fi
+  else
+    if pi mcp add "$name" --url "$url" 2>&1; then
+      ok "Added"
+      ((ADDED++)) || true
+    else
+      fail "Failed to add"
+      ((FAILED++)) || true
+    fi
+  fi
+  echo ""
+done
+
+# ── Verify ──────────────────────────────────────────────────
+if ! $DRY_RUN; then
+  echo "──────────────────────────────────────────"
+  echo -e "${BOLD}Verifying connections...${NC}"
+  echo ""
+  if pi mcp list 2>&1; then
+    echo ""
+    ok "All servers connected"
+  else
+    echo ""
+    warn "Some servers failed to connect — check output above"
+  fi
+fi
+
+# ── Summary ─────────────────────────────────────────────────
+echo ""
+echo "──────────────────────────────────────────"
+echo -e "${BOLD}Summary:${NC} ${GREEN}${ADDED} added${NC}, ${YELLOW}${SKIPPED} skipped${NC}, ${RED}${FAILED} failed${NC}"
+
+if ! $ON_HAL0 && [ $ADDED -gt 0 ]; then
+  echo ""
+  echo -e "${YELLOW}Remember:${NC} add this to your shell profile (~/.bashrc):"
+  echo "  export HAL0_MCP_TOKEN=\"${TOKEN}\""
+fi
+
+echo ""
+echo -e "${CYAN}Next:${NC} restart Pi or run /reload to pick up new servers"
+echo "  Slots:       ask \"list slots\" or \"what slots are running?\""
+echo "  Agents:      ask \"list hermes agents\" or \"run agent X\""
+echo "  Memory:      ask \"what do we know about X?\" or \"remember this\""
+echo "  Hardware:    ask \"check system status\" or \"show hardware\""
+echo ""

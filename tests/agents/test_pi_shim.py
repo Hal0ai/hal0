@@ -70,16 +70,25 @@ def test_install_writes_minimal_profile(home: Path) -> None:
     assert (home / ".pi" / "agent" / "extensions" / "hindsight" / "index.ts").exists()
 
 
-def test_install_writes_memory_mcp_config(home: Path) -> None:
+def test_install_writes_mcp_config(home: Path) -> None:
+    """Both builtin hal0 MCP servers (hal0-admin + hal0-memory) are wired
+    — the same pair hermes_provision._default_mcp_servers() gives Hermes."""
     drv, _ = _driver()
     drv.install(bearer_token="tok123")
 
     mcp_path = home / ".pi" / "agent" / "mcp.json"
     mcp = json.loads(mcp_path.read_text())
-    server = mcp["mcpServers"]["hal0-memory"]
-    assert server["url"] == "http://127.0.0.1:8080/mcp/memory/mcp"
-    assert server["headers"]["Authorization"] == "Bearer tok123"
-    assert server["headers"]["X-hal0-Agent"] == "pi"
+    assert set(mcp["mcpServers"].keys()) == {"hal0-admin", "hal0-memory"}
+
+    admin = mcp["mcpServers"]["hal0-admin"]
+    assert admin["url"] == "http://127.0.0.1:8080/mcp/admin/mcp"
+    assert admin["headers"]["Authorization"] == "Bearer tok123"
+    assert admin["headers"]["X-hal0-Agent"] == "pi"
+
+    memory = mcp["mcpServers"]["hal0-memory"]
+    assert memory["url"] == "http://127.0.0.1:8080/mcp/memory/mcp"
+    assert memory["headers"]["Authorization"] == "Bearer tok123"
+    assert memory["headers"]["X-hal0-Agent"] == "pi"
 
 
 def test_mcp_config_written_mode_0600(home: Path) -> None:
@@ -104,9 +113,10 @@ def test_mcp_config_self_resolves_token_when_none_passed(
     drv.install()
 
     mcp = json.loads((home / ".pi" / "agent" / "mcp.json").read_text())
-    server = mcp["mcpServers"]["hal0-memory"]
-    assert server["headers"]["Authorization"] == "Bearer resolved-tok"
-    assert server["headers"]["X-hal0-Agent"] == "pi"
+    for name in ("hal0-admin", "hal0-memory"):
+        server = mcp["mcpServers"][name]
+        assert server["headers"]["Authorization"] == "Bearer resolved-tok"
+        assert server["headers"]["X-hal0-Agent"] == "pi"
 
 
 def test_mcp_config_tolerates_resolver_failure(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -123,9 +133,10 @@ def test_mcp_config_tolerates_resolver_failure(home: Path, monkeypatch: pytest.M
     drv.install()
 
     mcp = json.loads((home / ".pi" / "agent" / "mcp.json").read_text())
-    server = mcp["mcpServers"]["hal0-memory"]
-    assert "Authorization" not in server["headers"]
-    assert server["headers"]["X-hal0-Agent"] == "pi"
+    for name in ("hal0-admin", "hal0-memory"):
+        server = mcp["mcpServers"][name]
+        assert "Authorization" not in server["headers"]
+        assert server["headers"]["X-hal0-Agent"] == "pi"
 
 
 def test_install_writes_hindsight_config_only_if_absent(home: Path) -> None:
@@ -246,6 +257,7 @@ def test_status_and_uninstall(home: Path) -> None:
     settings = json.loads((home / ".pi" / "agent" / "settings.json").read_text())
     assert settings.get("defaultProvider") != "hal0"
     mcp = json.loads((home / ".pi" / "agent" / "mcp.json").read_text())
+    assert "hal0-admin" not in mcp.get("mcpServers", {})
     assert "hal0-memory" not in mcp.get("mcpServers", {})
     assert drv.status() == "broken"
 
