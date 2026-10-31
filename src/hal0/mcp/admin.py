@@ -278,6 +278,7 @@ _SLOT_LIST_ROW_KEYS: tuple[str, ...] = (
     "declared_backend",
     "provider",
     "profile",
+    "tune_effective",
     "port",
     "container_status",
     "container_health",
