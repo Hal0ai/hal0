@@ -29,7 +29,13 @@ from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from hal0.api._audit import record_action
-from hal0.config.schema import CTX_SIZE_MAX, CTX_SIZE_MIN, ProfileConfig, ReasoningEffort
+from hal0.config.schema import (
+    CTX_SIZE_MAX,
+    CTX_SIZE_MIN,
+    REASONING_BUDGET_MAX,
+    ProfileConfig,
+    ReasoningEffort,
+)
 from hal0.errors import BadRequest, UnprocessableEntity
 from hal0.profiles import (
     UNSET,
@@ -110,6 +116,7 @@ class ProfileBody(BaseModel):
     reasoning_budget: int = Field(
         default=-1,
         ge=-1,
+        le=REASONING_BUDGET_MAX,
         description="Reasoning token budget (--reasoning-budget); -1 = unlimited, 0 = no thinking.",
     )
     speculation: Literal["auto", "off", "ngram"] = Field(
@@ -204,6 +211,7 @@ class ProfileUpdateBody(BaseModel):
     reasoning_budget: int | None = Field(
         default=None,
         ge=-1,
+        le=REASONING_BUDGET_MAX,
         description="Reasoning token budget. Omit to leave alone; null clears it to -1 (unlimited).",
     )
     speculation: Literal["auto", "off", "ngram"] | None = Field(

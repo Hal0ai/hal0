@@ -1011,3 +1011,18 @@ def test_update_rejects_bad_reasoning_values(client: TestClient) -> None:
     client.post("/api/profiles", json={"name": "budget-bad"})
     assert client.put("/api/profiles/budget-bad", json={"reasoning_budget": -5}).status_code == 422
     assert client.put("/api/profiles/budget-bad", json={"reasoning_effort": "x"}).status_code == 422
+
+
+def test_profile_budget_upper_bound_returns_client_error(client: TestClient) -> None:
+    from hal0.config.schema import REASONING_BUDGET_MAX
+
+    assert client.post(
+        "/api/profiles", json={"name": "bounded", "reasoning_budget": REASONING_BUDGET_MAX}
+    ).status_code == 201
+    assert client.post(
+        "/api/profiles", json={"name": "too-big", "reasoning_budget": REASONING_BUDGET_MAX + 1}
+    ).status_code == 422
+    assert client.put(
+        "/api/profiles/bounded", json={"reasoning_budget": REASONING_BUDGET_MAX + 1}
+    ).status_code == 422
+    assert client.get("/api/profiles/bounded").json()["reasoning_budget"] == REASONING_BUDGET_MAX
