@@ -506,27 +506,6 @@ hal0 update --rollback
 
 Updating forward again converts the files again.
 
-### Rolling back past per-slot tune overrides
-
-A release before per-slot tune overrides
-([ADR-0045](/docs/adr/0045-slots-carry-a-sparse-tune-override-table)) refuses
-keys it does not know. So when `hal0 update --rollback` targets one, it removes
-them first:
-
-- `[tune]` from each slot file;
-- `reasoning_effort` and `reasoning_budget` from `profiles.toml`;
-- `tune` from each stack's slot entries, and the two reasoning keys from each
-  stack's embedded profiles, in `stacks.toml`.
-
-Each changed file is first copied to `<file>.bak-<stamp>` beside it, and a file
-with none of these keys is not rewritten. If the swap fails or is cancelled, the
-files go back as they were, except one edited since the strip, which keeps your
-edit and its backup. The rollback response lists the changed files under
-`tune_stripped`.
-
-Updating forward again does not put the keys back. To restore an override, copy
-it from the backup or set it again.
-
 ### Rolling back past the speculation rename
 
 The release that adds speculative-decoding drafters renames the profile field

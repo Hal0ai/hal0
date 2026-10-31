@@ -1424,3 +1424,41 @@ def test_strip_failure_on_a_catalog_restores_the_slot_files_already_changed(
     assert {f: f.read_bytes() for f in originals} == originals
     assert not list(d.glob("*.bak-*"))
     assert not list(profiles.parent.glob("*.bak-*"))
+
+
+def test_strip_interrupted_mid_write_leaves_the_catalog_whole(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The new content reaches disk before the file is swapped: an interrupted write
+    leaves the operator's catalog as it was, never truncated, and no temporary file."""
+    from hal0.updater import updater
+
+    profiles, stacks = _tuned_catalogs()
+    originals = {f: f.read_bytes() for f in (profiles, stacks)}
+
+    def _killed(_fd: int) -> None:
+        assert {f: f.read_bytes() for f in originals} == originals
+        raise OSError("interrupted")
+
+    monkeypatch.setattr(updater.os, "fsync", _killed)
+    older = tmp_path / "hal0-1.7.1"
+    older.mkdir()
+    with pytest.raises(OSError, match="interrupted"):
+        updater._strip_tune_config_for(older, job_id=None)
+    assert {f: f.read_bytes() for f in originals} == originals
+    assert sorted(p.name for p in profiles.parent.iterdir() if p.is_file()) == [
+        "profiles.toml",
+        "stacks.toml",
+    ]
+
+
+def test_strip_keeps_the_mode_of_a_rewritten_file(tmp_hal0_home: str, tmp_path: Path) -> None:
+    from hal0.updater import updater
+
+    profiles, _stacks = _tuned_catalogs()
+    profiles.chmod(0o640)
+    older = tmp_path / "hal0-1.7.1"
+    older.mkdir()
+    updater._strip_tune_config_for(older, job_id=None)
+    assert "reasoning_effort" not in profiles.read_text(encoding="utf-8")
+    assert stat.S_IMODE(profiles.stat().st_mode) == 0o640
