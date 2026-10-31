@@ -530,7 +530,7 @@ def guard_and_normalize_tune(merged: dict[str, Any], updates: dict[str, Any]) ->
     # where the key is unsupported or pinned by the profile's flags.
     if any(v is not None for v in tune_update.values()):
         # Scalars live in [slot] on a nested-shape file and at the root on a flat one.
-        view = {**(merged.get("slot") or {}), **{k: v for k, v in merged.items() if k != "slot"}}
+        view = {**{k: v for k, v in merged.items() if k != "slot"}, **(merged.get("slot") or {})}
         profile = None
         if tune_update.get("enable_thinking") is not None:
             # Only the thinking pin needs the profile; a profile that does not
