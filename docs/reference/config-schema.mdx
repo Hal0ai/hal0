@@ -312,6 +312,31 @@ Each key also has a `HAL0_METRICS_*` environment variable that overrides it
 (precedence: env var > `[metrics]` TOML table > default) — see
 [Environment variables](/docs/reference/env-vars/) for that list.
 
+## Slot `[tune]` table
+
+An LLM slot outside the NPU lane may contain:
+
+```toml
+[tune]
+ctx_size = 8192
+enable_thinking = false
+reasoning_effort = "low"
+reasoning_budget = 512
+vision = "off"
+speculation = "ngram"
+```
+
+All keys are optional and inherit the profile when absent. Context accepts
+128–16777216. Effort accepts `default|minimal|low|medium|high|xhigh|max`;
+`default` emits no effort flag. Budget is -1 through 16777216 (-1 emits no
+budget flag; 0 ends reasoning immediately). Vision accepts `auto|off` and
+speculation accepts `auto|off|ngram`.
+
+Unsupported slot types/devices fail with `slot.tune_not_supported`; a thinking
+override pinned by profile flags fails with `slot.tune_pinned_by_flags`.
+Legacy root-level tuning keys remain refused with `slot.tuning_key_denied`.
+Effort flags require a resolved runner build of at least 11840.
+
 ## `slots/<name>.toml`
 
 Root model `SlotConfig`, `extra="forbid"`: every key a slot file may carry is a field

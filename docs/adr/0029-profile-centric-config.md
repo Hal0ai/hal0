@@ -2,6 +2,8 @@
 
 ## Status
 
+Amended by ADR-0045: slots may carry six sparse tune overrides over their profile.
+
 Proposed (2026-10-12). It supersedes the v1.0 "hardware/model write
 boundary", which had no ADR. That boundary came from the
 `spec-flags-ownership` and `spec-hw-slot-ownership` design specs (now only in

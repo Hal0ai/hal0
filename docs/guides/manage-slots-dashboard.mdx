@@ -12,6 +12,21 @@ This is the second half of the manage-slots guide. The first half,
 creating, loading, swapping, editing, deleting, logs and migration. This page covers
 the dashboard's slot edit drawer, which drives the same API.
 
+## Tune one slot
+
+Open an LLM slot drawer and use **Tune** to override context, thinking,
+effort, budget, vision or speculation. A Profile pill shows the selected
+profile's value and removes that row's override. **Reset to profile** clears
+staged overrides. **Save** persists them: thinking applies to new requests;
+the other rows restart the slot. **Save as profile…** clones the selected
+profile with the staged tune, preserves flags, and rebinds the slot.
+
+Pinned thinking explains the profile's `--reasoning` flag. Vision needs a
+model projector; effort shows the runner's unavailable reason when unsupported.
+N-gram remains available without a drafter. The thinking glyph lights for
+effective thinking; the vision-off eye marks vision suppression. The bolt
+continues to show speculation state.
+
 ## Dashboard: the slot edit drawer
 
 Click **Edit** on any slot card, or a slot's row in the SLOTS list, to open

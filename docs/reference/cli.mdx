@@ -124,6 +124,17 @@ component. `--yes`/`-y` skips the confirmation prompt that `--target` and
 `--clear-override` show on a terminal. `hal0 update owui` no longer exists; use
 `hal0 update component openwebui`.
 
+## Editing a slot tune
+
+`hal0 slot edit NAME` accepts `--ctx`, `--thinking/--no-thinking`, `--reasoning-effort`,
+`--reasoning-budget`, `--vision`, and `--speculation`. They write sparse
+`[tune]` overrides. Use `--tune-reset` alone to resume profile inheritance:
+
+```bash
+hal0 slot edit fast --ctx 8192 --reasoning-effort low
+hal0 slot edit fast --tune-reset
+```
+
 ## `hal0 slot` — manage inference slots
 
 Enums: `--type` = `llm|embedding|reranking|transcription|tts|image`; `--provider` =

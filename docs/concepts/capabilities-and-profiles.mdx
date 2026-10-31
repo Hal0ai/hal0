@@ -53,6 +53,15 @@ capability resolves to an ordinary [slot](/docs/concepts/slots) that the
 SlotManager runs as a podman container.
 </Aside>
 
+## Slot exceptions to a profile
+
+Profiles supply the base tune. A slot's sparse `[tune]` table overrides only
+context, thinking, reasoning effort/budget, vision and speculation. Missing
+keys keep following the profile; free flags and runtime remain profile-owned.
+`--reasoning on|off` in profile flags pins thinking. **Save as profile…**
+clones the selected profile with staged overrides, preserves its flags, and
+rebinds the slot.
+
 ## Profiles: the whole tune
 
 A **profile** is a reusable, device-agnostic tune. It holds everything that

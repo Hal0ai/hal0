@@ -15,6 +15,14 @@ it is mounted whenever `[bridge].enabled` is on (the default), and is 404 while 
 
 Every Hermes profile is wired to both servers. hal0 writes `hal0-admin` and `hal0-memory` into each named profile's `config.yaml` as `hermes__<profile>`, with shared memory by default (`hal0: {memory_private: true}` in a profile's `config.yaml` makes its memory facts private; mental models and directives are bank-level in the unified bank and are not covered) and the box bearer, at provisioning and on every hal0-api reconcile sweep (120 s). A profile opts out with `hal0: {wire_mcp: false}`. The default profile is not converged periodically: after adding the opt-in to its `config.yaml` by hand, run `sudo hal0 agent reprovision hermes --repair` (or the next `hal0 update` does it). `hal0 doctor` reports the state on the `hermes_profiles_mcp` row, and on `hermes_default_memory` and `hermes_brain_memory` for the default and `hal0-brain` profiles.
 
+## Per-slot tune through MCP
+
+`slot_edit` accepts a sparse `tune` object: `ctx_size`, `enable_thinking`,
+`reasoning_effort`, `reasoning_budget`, `vision`, `speculation`. Null removes
+an override; null for the whole table clears it. REST guards also apply here.
+`slot_list` retains `tune_effective` in its compact roster. Profile create/edit
+tools also accept reasoning effort and integer budget.
+
 ## `hal0-admin` (`/mcp/admin`)
 
 Every admin tool is registered through one generic factory, so every tool's call

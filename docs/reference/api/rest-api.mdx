@@ -73,6 +73,19 @@ between route-level intent and the enforced classification, not a doc error to
 silently paper over.
 </Aside>
 
+## Slot tune API
+
+`PUT /api/slots/{name}/config` accepts `{"tune":{"vision":"off"}}`.
+Only supplied keys change. A null key removes one override; `{"tune":null}`
+removes all. Slot creation applies the same type/device and thinking guards.
+
+Slot snapshots and `GET /api/slots/{name}/resolved` expose `tune_effective`:
+`ctx_size`, `enable_thinking`, `reasoning_effort`, `reasoning_budget`, `vision`,
+`speculation`, `sources`, and `reasoning_effort_unavailable`. Sources are
+`profile`, `slot` or `profile-flags`; unavailable is a string or null. This is
+an additive read contract. Model feasibility accepts a `slot` name per model
+row to resolve its profile plus tune for the candidate; explicit `ctx` wins.
+
 ## Router groups
 
 | Prefix | Auth | Purpose |
