@@ -179,6 +179,7 @@ import structlog
 from mcp.types import CallToolResult, TextContent
 
 from hal0.api._redact import redact_log_line as _redact_log_line
+from hal0.config.schema import REASONING_BUDGET_MAX
 from hal0.mcp.approval_queue import ApprovalQueue
 from hal0.mcp.memory import _ANNOTATIONS as _MEMORY_TOOL_ANNOTATIONS
 from hal0.mcp.probes import PROBE_TOOLS, dispatch_probe
@@ -278,6 +279,7 @@ _SLOT_LIST_ROW_KEYS: tuple[str, ...] = (
     "declared_backend",
     "provider",
     "profile",
+    "tune_effective",
     "port",
     "container_status",
     "container_health",
@@ -1264,6 +1266,40 @@ def set_admin_route_map(*source: object) -> None:
 # passthrough ``args`` object), so a hint authored once reaches every
 # agent that can call the tool. Keys must be catalog tools (guarded by
 # :func:`_validate_catalog`).
+_PROFILE_REASONING_PROPS: dict[str, Any] = {
+    "reasoning_effort": {
+        "type": "string",
+        "enum": ["default", "minimal", "low", "medium", "high", "xhigh", "max"],
+        "description": (
+            "Reasoning effort hint (--reasoning-effort) for slots running this "
+            "profile; 'default' sends none. Needs a runner build that supports it."
+        ),
+    },
+    "reasoning_budget": {
+        "type": ["integer", "null"],
+        "minimum": -1,
+        "maximum": REASONING_BUDGET_MAX,
+        "description": (
+            "Reasoning token budget (--reasoning-budget): -1 = unlimited, 0 = no "
+            "thinking. On update, null clears it back to -1."
+        ),
+    },
+}
+
+#: ``profile_create`` takes a non-null budget (the route's body field is a plain
+#: int); only ``profile_update`` accepts null, to clear the stored value.
+_PROFILE_CREATE_REASONING_PROPS: dict[str, Any] = {
+    **_PROFILE_REASONING_PROPS,
+    "reasoning_budget": {
+        "type": "integer",
+        "minimum": -1,
+        "maximum": REASONING_BUDGET_MAX,
+        "description": (
+            "Reasoning token budget (--reasoning-budget): -1 = unlimited, 0 = no thinking."
+        ),
+    },
+}
+
 TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
     "memory_add": {
         "properties": {
@@ -1412,6 +1448,59 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
                     "Profile name (profile_list) — the tune this slot launches with; "
                     "applying it also sets the slot's runner when the profile names one."
                 ),
+            },
+            "tune": {
+                "type": ["object", "null"],
+                "description": (
+                    "Per-slot overrides of the profile's tune, applied at the next load. "
+                    "Sparse and merged key by key; a key set to null drops that override, "
+                    "and tune=null drops them all (the slot follows its profile again). "
+                    "llm slots on a non-NPU device only; thinking cannot be overridden "
+                    "while the profile's flags pin --reasoning."
+                ),
+                "properties": {
+                    "ctx_size": {
+                        "type": ["integer", "null"],
+                        "minimum": 128,
+                        "maximum": 16777216,
+                        "description": "Context window.",
+                    },
+                    "enable_thinking": {
+                        "type": ["boolean", "null"],
+                        "description": "Reasoning default at request time.",
+                    },
+                    "reasoning_effort": {
+                        "type": ["string", "null"],
+                        "enum": [
+                            "default",
+                            "minimal",
+                            "low",
+                            "medium",
+                            "high",
+                            "xhigh",
+                            "max",
+                            None,
+                        ],
+                        "description": "Reasoning effort hint ('default' sends none).",
+                    },
+                    "reasoning_budget": {
+                        "type": ["integer", "null"],
+                        "minimum": -1,
+                        "maximum": REASONING_BUDGET_MAX,
+                        "description": "Reasoning token budget (-1 = unlimited, 0 = none).",
+                    },
+                    "vision": {
+                        "type": ["string", "null"],
+                        "enum": ["auto", "off", None],
+                        "description": "'auto' loads the model's mmproj when it has one.",
+                    },
+                    "speculation": {
+                        "type": ["string", "null"],
+                        "enum": ["auto", "off", "ngram", None],
+                        "description": "'auto' | 'off' | 'ngram'.",
+                    },
+                },
+                "additionalProperties": False,
             },
             "autoload": {
                 "type": "boolean",
@@ -1670,6 +1759,7 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
                 "enum": ["auto", "off"],
                 "description": "'auto' loads the model's mmproj when it has one; 'off' never does.",
             },
+            **_PROFILE_CREATE_REASONING_PROPS,
             "speculation": {
                 "type": "string",
                 "enum": ["auto", "off", "ngram"],
@@ -1723,6 +1813,7 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
                 "enum": ["auto", "off"],
                 "description": "'auto' loads the model's mmproj when it has one; 'off' never does.",
             },
+            **_PROFILE_REASONING_PROPS,
             "speculation": {
                 "type": "string",
                 "enum": ["auto", "off", "ngram"],
@@ -3119,7 +3210,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "stack_list": "List every stack, with the active stack + drift status.",
     "stack_status": "Get one stack's detail, active flag, and drift status.",
     "profile_list": "List every profile in the catalog (seed + custom).",
-    "profile_status": "Get one profile's resolved detail (flags, ctx_size, thinking, vision, speculation, runner, used-by).",
+    "profile_status": "Get one profile's resolved detail (flags, ctx_size, thinking, vision, reasoning_effort, reasoning_budget, speculation, runner, used-by).",
     "profile_export": (
         "Export a profile to a portable .hal0profile.json envelope (no secrets/host-paths)."
     ),
@@ -3172,10 +3263,12 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "slot_unload": "Unload a running slot gracefully.",
     "slot_edit": (
         "Update one or more slot placement fields (model, profile, port, device, "
-        "autoload, priority, pinned, idle_timeout_s). Tuning (context window, flags, "
-        "reasoning, vision, MTP) is NOT a slot field: it lives on the slot's profile — "
-        "edit it with profile_update, or point the slot at another profile "
-        "(a tuning key here is rejected with slot.tuning_key_denied)."
+        "autoload, priority, pinned, idle_timeout_s), or its per-slot `tune` overrides "
+        "(ctx_size, enable_thinking, reasoning_effort, reasoning_budget, vision, "
+        "speculation; sparse, null drops one, tune=null drops all). Everything else "
+        "about the tune (flags, KV cache, sampling) is NOT a slot field: it lives on the "
+        "slot's profile — edit it with profile_update, or point the slot at another "
+        "profile (a root-level tuning key here is rejected with slot.tuning_key_denied)."
     ),
     "settings_reload": "Ask the running hal0 daemon to reload configs (re-reads TOMLs).",
     "memory_add": "Add an item to long-term memory.",
@@ -3288,12 +3381,14 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "stack_delete": "Delete a custom stack from the catalog (gated).",
     "profile_create": (
         "Create a custom profile — the tune a slot launches a model with: flags, ctx_size, "
-        "enable_thinking, vision (auto|off), speculation (auto|off|ngram), optional runner — e.g. "
+        "enable_thinking, vision (auto|off), reasoning_effort, reasoning_budget, speculation "
+        "(auto|off|ngram), optional runner — e.g. "
         "authored from a model card's requirements (gated)."
     ),
     "profile_update": (
         "Update an existing custom profile (sparse: omitted fields are kept; ctx_size=null "
-        "clears the window, runner='' clears the runner) (gated). Slots running it pick the "
+        "clears the window, reasoning_budget=null returns to unlimited, runner='' clears the runner) "
+        "(gated). Slots running it pick the "
         "change up at their next restart."
     ),
     "profile_import": "Import a profile from a .hal0profile.json envelope (gated).",
@@ -3368,7 +3463,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "mcp_client_list": "List MCP clients seen in the recent audit window.",
     "mcp_catalog": "The static installable-MCP-servers catalog.",
     "profile_generate": (
-        "Generate a draft profile (flags, ctx_size, enable_thinking, vision, speculation, runner) from "
+        "Generate a draft profile (flags, ctx_size, enable_thinking, vision, reasoning_effort, reasoning_budget, speculation, runner) from "
         "a registered model or a HuggingFace repo — compute-only, persists nothing. Args: exactly one of model_id / hf_repo (required), "
         "optional name, optional use_llm=true to summarize the model card via the platform "
         "utility LLM (degrades to heuristics on failure). Returns {profile, warnings, sources} "

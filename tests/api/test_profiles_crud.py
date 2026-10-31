@@ -963,3 +963,75 @@ def test_profile_detail_reports_speculation(client: TestClient) -> None:
 def test_profile_speculation_rejects_unknown_value(client: TestClient) -> None:
     r = client.post("/api/profiles", json={"name": "bad-spec", "speculation": "turbo"})
     assert r.status_code == 422
+
+
+# ── reasoning effort and budget (slot tune overrides, Lane C) ─────────────────
+
+
+def test_create_profile_with_effort_and_budget(client: TestClient) -> None:
+    r = client.post(
+        "/api/profiles",
+        json={"name": "thinker", "reasoning_effort": "high", "reasoning_budget": 2048},
+    )
+    assert r.status_code == 201, r.text
+    assert (r.json()["reasoning_effort"], r.json()["reasoning_budget"]) == ("high", 2048)
+    got = client.get("/api/profiles/thinker").json()
+    assert (got["reasoning_effort"], got["reasoning_budget"]) == ("high", 2048)
+
+
+def test_create_defaults_leave_reasoning_unset(client: TestClient) -> None:
+    r = client.post("/api/profiles", json={"name": "plain-r"})
+    assert (r.json()["reasoning_effort"], r.json()["reasoning_budget"]) == ("default", -1)
+
+
+@pytest.mark.parametrize(
+    "body", [{"reasoning_effort": "extreme"}, {"reasoning_budget": -2}, {"reasoning_budget": "x"}]
+)
+def test_create_rejects_bad_reasoning_values(client: TestClient, body: dict) -> None:
+    assert client.post("/api/profiles", json={"name": "bad-r", **body}).status_code == 422
+
+
+def test_update_profile_clears_budget_with_null(client: TestClient) -> None:
+    client.post(
+        "/api/profiles",
+        json={"name": "budget-edit", "reasoning_effort": "low", "reasoning_budget": 512},
+    )
+    left = client.put("/api/profiles/budget-edit", json={"intent": "x"})
+    assert (left.json()["reasoning_effort"], left.json()["reasoning_budget"]) == ("low", 512)
+
+    changed = client.put("/api/profiles/budget-edit", json={"reasoning_effort": "max"})
+    assert (changed.json()["reasoning_effort"], changed.json()["reasoning_budget"]) == ("max", 512)
+
+    cleared = client.put("/api/profiles/budget-edit", json={"reasoning_budget": None})
+    assert cleared.status_code == 200, cleared.text
+    assert (cleared.json()["reasoning_effort"], cleared.json()["reasoning_budget"]) == ("max", -1)
+
+
+def test_update_rejects_bad_reasoning_values(client: TestClient) -> None:
+    client.post("/api/profiles", json={"name": "budget-bad"})
+    assert client.put("/api/profiles/budget-bad", json={"reasoning_budget": -5}).status_code == 422
+    assert client.put("/api/profiles/budget-bad", json={"reasoning_effort": "x"}).status_code == 422
+
+
+def test_profile_budget_upper_bound_returns_client_error(client: TestClient) -> None:
+    from hal0.config.schema import REASONING_BUDGET_MAX
+
+    assert (
+        client.post(
+            "/api/profiles", json={"name": "bounded", "reasoning_budget": REASONING_BUDGET_MAX}
+        ).status_code
+        == 201
+    )
+    assert (
+        client.post(
+            "/api/profiles", json={"name": "too-big", "reasoning_budget": REASONING_BUDGET_MAX + 1}
+        ).status_code
+        == 422
+    )
+    assert (
+        client.put(
+            "/api/profiles/bounded", json={"reasoning_budget": REASONING_BUDGET_MAX + 1}
+        ).status_code
+        == 422
+    )
+    assert client.get("/api/profiles/bounded").json()["reasoning_budget"] == REASONING_BUDGET_MAX

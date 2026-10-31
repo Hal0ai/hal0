@@ -29,7 +29,13 @@ from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from hal0.api._audit import record_action
-from hal0.config.schema import CTX_SIZE_MAX, CTX_SIZE_MIN, ProfileConfig
+from hal0.config.schema import (
+    CTX_SIZE_MAX,
+    CTX_SIZE_MIN,
+    REASONING_BUDGET_MAX,
+    ProfileConfig,
+    ReasoningEffort,
+)
 from hal0.errors import BadRequest, UnprocessableEntity
 from hal0.profiles import (
     UNSET,
@@ -100,6 +106,19 @@ class ProfileBody(BaseModel):
     vision: Literal["auto", "off"] = Field(
         default="auto", description="'auto' loads the model's mmproj when it has one."
     )
+    reasoning_effort: ReasoningEffort = Field(
+        default="default",
+        description=(
+            "Reasoning effort hint (--reasoning-effort) for slots running this "
+            "profile; 'default' sends none."
+        ),
+    )
+    reasoning_budget: int = Field(
+        default=-1,
+        ge=-1,
+        le=REASONING_BUDGET_MAX,
+        description="Reasoning token budget (--reasoning-budget); -1 = unlimited, 0 = no thinking.",
+    )
     speculation: Literal["auto", "off", "ngram"] = Field(
         default="auto",
         description=(
@@ -165,7 +184,7 @@ class ProfileUpdateBody(BaseModel):
 
     Sparse: an omitted field keeps its stored value. ``ctx_size`` and
     ``enable_thinking`` additionally take an explicit ``null`` to CLEAR the
-    stored value (omitted ≠ null, told apart through ``model_fields_set``).
+    stored value, and so does ``reasoning_budget`` (back to -1) (omitted ≠ null, told apart through ``model_fields_set``).
     """
 
     _refuse_mtp = model_validator(mode="before")(_refuse_renamed_mtp)
@@ -184,6 +203,16 @@ class ProfileUpdateBody(BaseModel):
     )
     vision: Literal["auto", "off"] | None = Field(
         default=None, description="'auto' | 'off'. Omit to leave alone."
+    )
+    reasoning_effort: ReasoningEffort | None = Field(
+        default=None,
+        description="Reasoning effort hint. Omit to leave alone; 'default' sends none.",
+    )
+    reasoning_budget: int | None = Field(
+        default=None,
+        ge=-1,
+        le=REASONING_BUDGET_MAX,
+        description="Reasoning token budget. Omit to leave alone; null clears it to -1 (unlimited).",
     )
     speculation: Literal["auto", "off", "ngram"] | None = Field(
         default=None, description="'auto' | 'off' | 'ngram'. Omit to leave alone."
@@ -228,6 +257,8 @@ def list_profiles() -> list[dict[str, Any]]:
             "ctx_size":             65536,       # int | null (null = model native, capped)
             "enable_thinking":      null,        # bool | null
             "vision":               "auto",      # auto | off
+            "reasoning_effort":     "default",   # default|minimal|low|medium|high|xhigh|max
+            "reasoning_budget":     -1,          # int >= -1 (-1 = unlimited)
             "speculation":          "auto",      # auto | off | ngram
             "runner":               null,        # RUNNER_IMAGES key | null
             "seed":                 true,
@@ -292,6 +323,8 @@ async def create_profile(body: ProfileBody, request: Request) -> dict[str, Any]:
                 ctx_size=body.ctx_size,
                 enable_thinking=body.enable_thinking,
                 vision=body.vision,
+                reasoning_effort=body.reasoning_effort,
+                reasoning_budget=body.reasoning_budget,
                 speculation=body.speculation,
                 runner=body.runner,
                 cloned_from=body.cloned_from,
@@ -303,6 +336,8 @@ async def create_profile(body: ProfileBody, request: Request) -> dict[str, Any]:
             "ctx_size": body.ctx_size,
             "enable_thinking": body.enable_thinking,
             "vision": body.vision,
+            "reasoning_effort": body.reasoning_effort,
+            "reasoning_budget": body.reasoning_budget,
             "speculation": body.speculation,
         }
     return profile.to_dict()
@@ -582,6 +617,7 @@ async def update_profile(name: str, body: ProfileUpdateBody, request: Request) -
     sent = body.model_fields_set
     ctx_size = body.ctx_size if "ctx_size" in sent else UNSET
     enable_thinking = body.enable_thinking if "enable_thinking" in sent else UNSET
+    reasoning_budget = body.reasoning_budget if "reasoning_budget" in sent else UNSET
     if ctx_size is not UNSET:
         _check_ctx_size(ctx_size)
     screen_profile_flags(body.flags)
@@ -599,6 +635,8 @@ async def update_profile(name: str, body: ProfileUpdateBody, request: Request) -
                 ctx_size=ctx_size,
                 enable_thinking=enable_thinking,
                 vision=body.vision,
+                reasoning_effort=body.reasoning_effort,
+                reasoning_budget=reasoning_budget,
                 speculation=body.speculation,
                 runner=body.runner,
                 intent=body.intent,

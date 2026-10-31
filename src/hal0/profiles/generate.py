@@ -550,6 +550,8 @@ async def generate_draft_profile(
         enable_thinking=seed.enable_thinking,
         vision=seed.vision,
         speculation=seed.speculation,
+        reasoning_effort=seed.reasoning_effort,  # type: ignore[arg-type]
+        reasoning_budget=seed.reasoning_budget,
         runner=seed.runner,
         cloned_from=seed.name,
         intent=intent,

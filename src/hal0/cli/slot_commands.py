@@ -17,7 +17,7 @@ from collections.abc import Callable, Iterable, Iterator
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import typer
 from rich.console import Console
@@ -39,6 +39,7 @@ from hal0.cli._shared import (
     follow_sse_logs,
     run_with_progress,
 )
+from hal0.config.schema import CTX_SIZE_MAX, CTX_SIZE_MIN, ReasoningEffort
 from hal0.hardware.stats import SLOT_PORT_RANGE_END, SLOT_PORT_RANGE_START
 from hal0.slot_lifecycle_budget import slot_lifecycle_timeout_s
 
@@ -688,21 +689,98 @@ def slot_edit(
             "created before the profile was inferred (#1830)."
         ),
     ),
+    ctx: int | None = typer.Option(
+        None,
+        "--ctx",
+        min=CTX_SIZE_MIN,
+        max=CTX_SIZE_MAX,
+        help=f"Override the profile's context window for this slot ({CTX_SIZE_MIN}-{CTX_SIZE_MAX}).",
+    ),
+    thinking: bool | None = typer.Option(
+        None,
+        "--thinking/--no-thinking",
+        help="Override the profile's reasoning default for this slot (on/off).",
+    ),
+    reasoning_effort: str | None = typer.Option(
+        None,
+        "--reasoning-effort",
+        help="Override the reasoning effort: default|minimal|low|medium|high|xhigh|max.",
+    ),
+    reasoning_budget: int | None = typer.Option(
+        None,
+        "--reasoning-budget",
+        min=-1,
+        help="Override the reasoning token budget (-1 = unlimited, 0 = no thinking).",
+    ),
+    vision: str | None = typer.Option(
+        None, "--vision", help="Override vision for this slot: 'auto' | 'off'."
+    ),
+    speculation: str | None = typer.Option(
+        None, "--speculation", help="Override speculation for this slot: 'auto' | 'off' | 'ngram'."
+    ),
+    tune_reset: bool = typer.Option(
+        False,
+        "--tune-reset",
+        help="Drop every per-slot tune override; the slot follows its profile again.",
+    ),
 ) -> None:
-    """Update one or more slot config fields (PUT /api/slots/{name}/config)."""
+    """Update one or more slot config fields (PUT /api/slots/{name}/config).
+
+    ``--ctx``, ``--thinking``, ``--reasoning-effort``, ``--reasoning-budget``,
+    ``--vision`` and ``--speculation`` write the slot's sparse ``[tune]``
+    overrides; only the keys given are sent. Applies at the next load.
+    """
+    if vision is not None and vision not in ("auto", "off"):
+        raise typer.BadParameter(f"--vision must be 'auto' or 'off' (got {vision!r})")
+    if speculation is not None and speculation not in ("auto", "off", "ngram"):
+        raise typer.BadParameter(
+            f"--speculation must be 'auto', 'off' or 'ngram' (got {speculation!r})"
+        )
+    if reasoning_effort is not None and reasoning_effort not in _REASONING_EFFORTS:
+        raise typer.BadParameter(
+            f"--reasoning-effort must be one of {', '.join(_REASONING_EFFORTS)} "
+            f"(got {reasoning_effort!r})"
+        )
+    tune: dict[str, Any] = {}
+    for key, value in (
+        ("ctx_size", ctx),
+        ("enable_thinking", thinking),
+        ("reasoning_effort", reasoning_effort),
+        ("reasoning_budget", reasoning_budget),
+        ("vision", vision),
+        ("speculation", speculation),
+    ):
+        if value is not None:
+            tune[key] = value
+    if tune_reset and tune:
+        raise typer.BadParameter("--tune-reset cannot be combined with other tune options")
+
     url = _api_base()
     if _api_unreachable(url):
         raise typer.Exit(1)
 
-    if model is None and port is None and provider is None and hardware is None and profile is None:
+    if (
+        model is None
+        and port is None
+        and provider is None
+        and hardware is None
+        and profile is None
+        and not tune
+        and not tune_reset
+    ):
         console.print(
             "[bold yellow]No fields provided.[/bold yellow]  "
             "Pass at least one of --model, --port, --provider, "
-            "--hardware, --profile."
+            "--hardware, --profile, --ctx, --thinking, --reasoning-effort, "
+            "--reasoning-budget, --vision, --speculation, --tune-reset."
         )
         raise typer.Exit(code=2)
 
     payload: dict[str, Any] = {}
+    if tune:
+        payload["tune"] = tune
+    if tune_reset:
+        payload["tune"] = None
     if port is not None:
         payload["port"] = port
     if provider is not None:
@@ -763,6 +841,33 @@ def slot_delete(
     console.print(f"Deleted slot [bold]{name}[/bold].")
 
 
+_REASONING_EFFORTS = get_args(ReasoningEffort)
+
+
+def _tune_line(status: Any) -> str:
+    """``[tune] key=value (source) ...`` from the snapshot's ``tune_effective``.
+
+    Empty when the snapshot carries none (an older daemon). ``(slot)`` marks an
+    override; everything else follows the profile.
+    """
+    eff = status.get("tune_effective") if isinstance(status, dict) else None
+    if not isinstance(eff, dict):
+        return ""
+    sources = eff.get("sources") if isinstance(eff.get("sources"), dict) else {}
+    parts = []
+    for key in (
+        "ctx_size",
+        "enable_thinking",
+        "reasoning_effort",
+        "reasoning_budget",
+        "vision",
+        "speculation",
+    ):
+        if key in eff:
+            parts.append(f"{key}={eff[key]} ({sources.get(key, 'profile')})")
+    return "[bold]\\[tune][/bold] " + "  ".join(parts) if parts else ""
+
+
 @app.command("show")
 def slot_show(
     name: str = typer.Argument(..., help="Slot name to inspect"),
@@ -789,6 +894,9 @@ def slot_show(
     if json_out:
         typer.echo(body)
         return
+    tune_line = _tune_line(status)
+    if tune_line:
+        console.print(tune_line)
     console.print(
         Panel(
             Syntax(body, "json", theme="ansi_dark", background_color="default"),

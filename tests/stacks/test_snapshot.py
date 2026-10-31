@@ -41,6 +41,66 @@ def _write_caps(home: str, text: str) -> None:
 
 
 class TestSnapshot:
+    @pytest.mark.parametrize("slot_type,device", [("embedding", "gpu-rocm"), ("llm", "npu")])
+    def test_snapshot_omits_inert_tune(
+        self, reg: ModelRegistry, tmp_hal0_home: str, slot_type: str, device: str
+    ) -> None:
+        _write_slot(
+            tmp_hal0_home,
+            "inert",
+            [
+                'name = "inert"',
+                "port = 8087",
+                f'type = "{slot_type}"',
+                f'device = "{device}"',
+                "[model]",
+                'default = "m"',
+                "[tune]",
+                'vision = "off"',
+            ],
+        )
+        entry = next(e for e in snapshot_live_stack(registry=reg).slots if e.slot == "inert")
+        assert entry.tune is None
+        assert entry.model == "m"
+
+    def test_snapshot_includes_tune(self, reg: ModelRegistry, tmp_hal0_home: str) -> None:
+        _write_slot(
+            tmp_hal0_home,
+            "agent",
+            [
+                'name = "agent"',
+                "port = 8087",
+                'device = "gpu-rocm"',
+                "[model]",
+                'default = "ace-saber"',
+                "[tune]",
+                'vision = "off"',
+                "ctx_size = 8192",
+            ],
+        )
+        _write_slot(
+            tmp_hal0_home,
+            "chat",
+            ['name = "chat"', "port = 8088", "[model]", 'default = "m"'],
+        )
+        stack = snapshot_live_stack(registry=reg, name="Live")
+        agent = next(e for e in stack.slots if e.slot == "agent")
+        assert agent.tune is not None
+        assert (agent.tune.vision, agent.tune.ctx_size) == ("off", 8192)
+        chat = next(e for e in stack.slots if e.slot == "chat")
+        assert chat.tune is None
+
+    def test_snapshot_skips_an_invalid_tune_table(
+        self, reg: ModelRegistry, tmp_hal0_home: str
+    ) -> None:
+        _write_slot(
+            tmp_hal0_home,
+            "agent",
+            ['name = "agent"', "[model]", 'default = "m"', "[tune]", 'vision = "maybe"'],
+        )
+        stack = snapshot_live_stack(registry=reg, name="Live")
+        assert next(e for e in stack.slots if e.slot == "agent").tune is None
+
     def test_captures_primary_slot(self, reg: ModelRegistry, tmp_hal0_home: str) -> None:
         _write_slot(
             tmp_hal0_home,

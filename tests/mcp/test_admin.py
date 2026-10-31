@@ -1950,3 +1950,19 @@ async def test_memory_add_private_nested_under_args_reaches_the_dispatcher(
         memory_dispatcher=dispatcher,
     )
     dispatcher.assert_awaited_once_with("memory_add", {"text": "secret", "private": True})
+
+
+def test_mcp_profile_update_accepts_reasoning_fields() -> None:
+    for tool in ("profile_create", "profile_update"):
+        props = admin.tool_param_schema(tool)["properties"]
+        assert "high" in props["reasoning_effort"]["enum"]
+        assert props["reasoning_budget"]["minimum"] == -1
+    assert "reasoning_budget" in admin.TOOL_DESCRIPTIONS["profile_update"]
+
+
+def test_mcp_profile_create_budget_hint_is_integer_only() -> None:
+    """ProfileBody.reasoning_budget is a non-null int: null would 422 on create."""
+    create = admin.tool_param_schema("profile_create")["properties"]["reasoning_budget"]
+    update = admin.tool_param_schema("profile_update")["properties"]["reasoning_budget"]
+    assert create["type"] == "integer"
+    assert update["type"] == ["integer", "null"]

@@ -12,6 +12,21 @@ This is the second half of the manage-slots guide. The first half,
 creating, loading, swapping, editing, deleting, logs and migration. This page covers
 the dashboard's slot edit drawer, which drives the same API.
 
+## Tune one slot
+
+Open an LLM slot drawer and use **Tune** to override context, thinking,
+effort, budget, vision or speculation. A Profile pill shows the selected
+profile's value and removes that row's override. **Reset to profile** clears
+staged overrides. **Save** persists them: thinking applies to new requests;
+the other rows restart the slot. **Save as profile…** clones the selected
+profile with the staged tune, preserves flags, and rebinds the slot.
+
+Pinned thinking explains the profile's `--reasoning` flag. Vision needs a
+model projector; effort shows the runner's unavailable reason when unsupported.
+N-gram remains available without a drafter. The thinking glyph lights for
+effective thinking; the vision-off eye marks vision suppression. The bolt
+continues to show speculation state.
+
 ## Dashboard: the slot edit drawer
 
 Click **Edit** on any slot card, or a slot's row in the SLOTS list, to open
@@ -92,12 +107,12 @@ ref ships — the slot keeps its current runtime binary and may fail at
 spawn." and a "Use release image" button to clear it. A pin never widens or
 narrows the Runtime/Lane options above it.
 
-### Profile: the slot's whole tune
+### Profile: the slot's base tune
 
 The **Profile** select lists the profiles that suit the slot: its type, and,
 for a profile that pins a runtime, the slot's device class. Picking one stages
 it; nothing is written until Save, which applies the profile and restarts the
-slot. The profile is the slot's whole tune (flags, context window, thinking
+slot. The profile supplies the slot's base tune (flags, context window, thinking
 default, vision, speculation, and optionally a runtime), so an inline preview above
 the select lists what the pick changes: the runtime and lane when the profile
 pins one, each of context, thinking, vision and speculation that differs (old → new),
@@ -113,7 +128,7 @@ picks up the change at its next restart, except a changed runtime, which
 needs the profile re-applied to the slot). Under the select, a read-only line
 shows the **effective context** and where it came from: set by the profile,
 the model's native window, or the default window when the model reports none.
-To change it, edit the profile.
+To change it for this slot, use Tune; edit the profile to change the shared base.
 
 A profile can also carry a **runtime** (see [Capabilities &
 profiles](/docs/concepts/capabilities-and-profiles)), not just flags. Picking

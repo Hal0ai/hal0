@@ -321,3 +321,108 @@ def test_slot_load_with_no_model_reports_not_loaded(monkeypatch: pytest.MonkeyPa
     assert "Not loaded" in result.output
     assert "no default model" in result.output
     assert "hal0 slot load flm -m" in result.output
+
+
+# ── hal0 slot edit: per-slot [tune] overrides ────────────────────────────────
+
+
+@pytest.fixture
+def put_capture(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    seen: dict[str, Any] = {}
+
+    def fake_put(path: str, *, json: dict[str, Any] | None = None, **kw: Any) -> dict[str, Any]:
+        seen["path"] = path
+        seen["body"] = json
+        return {"state": "offline"}
+
+    monkeypatch.setattr(slot_commands, "_api_unreachable", lambda _u: False)
+    monkeypatch.setattr(slot_commands, "api_put", fake_put)
+    return seen
+
+
+def test_cli_slot_edit_tune_flags_build_body(put_capture: dict[str, Any]) -> None:
+    result = runner.invoke(
+        slot_commands.app,
+        ["edit", "chat", "--thinking", "--vision", "off", "--ctx", "8192"],
+    )
+    assert result.exit_code == 0, result.output
+    assert put_capture["path"] == "/api/slots/chat/config"
+    assert put_capture["body"] == {
+        "tune": {"enable_thinking": True, "vision": "off", "ctx_size": 8192}
+    }
+    result = runner.invoke(slot_commands.app, ["edit", "chat", "--no-thinking"])
+    assert put_capture["body"] == {"tune": {"enable_thinking": False}}
+
+
+def test_cli_slot_edit_sends_only_the_keys_given(put_capture: dict[str, Any]) -> None:
+    result = runner.invoke(
+        slot_commands.app,
+        [
+            "edit",
+            "chat",
+            "--reasoning-effort",
+            "low",
+            "--reasoning-budget",
+            "0",
+            "--speculation",
+            "ngram",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert put_capture["body"] == {
+        "tune": {"reasoning_effort": "low", "reasoning_budget": 0, "speculation": "ngram"}
+    }
+
+
+def test_cli_slot_edit_tune_reset(put_capture: dict[str, Any]) -> None:
+    result = runner.invoke(slot_commands.app, ["edit", "chat", "--tune-reset"])
+    assert result.exit_code == 0, result.output
+    assert put_capture["body"] == {"tune": None}
+
+
+def test_cli_slot_edit_tune_reset_excludes_other_tune_flags(put_capture: dict[str, Any]) -> None:
+    result = runner.invoke(slot_commands.app, ["edit", "chat", "--tune-reset", "--vision", "off"])
+    assert result.exit_code == 2, result.output
+    assert put_capture == {}
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--vision", "maybe"],
+        ["--speculation", "on"],
+        ["--reasoning-effort", "wild"],
+        ["--reasoning-budget", "-2"],
+        ["--ctx", "5"],
+    ],
+)
+def test_cli_slot_edit_rejects_bad_tune_values(
+    put_capture: dict[str, Any], args: list[str]
+) -> None:
+    result = runner.invoke(slot_commands.app, ["edit", "chat", *args])
+    assert result.exit_code == 2, result.output
+    assert put_capture == {}
+
+
+def test_cli_slot_edit_with_nothing_is_a_usage_error(put_capture: dict[str, Any]) -> None:
+    result = runner.invoke(slot_commands.app, ["edit", "chat"])
+    assert result.exit_code == 2
+    assert "--tune-reset" in result.output
+    assert put_capture == {}
+
+
+def test_tune_line_renders_values_with_sources() -> None:
+    line = slot_commands._tune_line(
+        {
+            "tune_effective": {
+                "ctx_size": 8192,
+                "enable_thinking": False,
+                "vision": "off",
+                "sources": {"ctx_size": "slot", "enable_thinking": "profile-flags"},
+            }
+        }
+    )
+    assert "ctx_size=8192 (slot)" in line
+    assert "enable_thinking=False (profile-flags)" in line
+    assert "vision=off (profile)" in line
+    assert slot_commands._tune_line({"state": "offline"}) == ""

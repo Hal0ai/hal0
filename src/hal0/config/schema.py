@@ -1198,6 +1198,13 @@ class StackSlotEntry(BaseModel):
     capabilities: list[StackCapabilityRow] = Field(
         default_factory=list, description="Capability child selections."
     )
+    tune: SlotTuneConfig | None = Field(
+        default=None,
+        description=(
+            "Per-slot tune overrides carried with the stack (the slot's sparse "
+            "[tune] table). Applied through the same guarded write as PUT /config."
+        ),
+    )
 
     @field_validator("slot")
     @classmethod

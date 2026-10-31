@@ -244,3 +244,62 @@ class TestGuardedReconcile:
         assert "NPU" in plan.errors[0][1]
         after = {fs.path: fs.data for fs in plan.change_set.after}[slot_path]
         assert after == _read(slot_path)
+
+
+class TestPlanTune:
+    def _slot(self, home: str, name: str, slot_type: str, device: str) -> Path:
+        path = _slots_dir(home) / f"{name}.toml"
+        path.write_text(
+            f'name = "{name}"\ntype = "{slot_type}"\nport = 8090\ndevice = "{device}"\n'
+            '[model]\ndefault = "old"\n',
+            encoding="utf-8",
+        )
+        return path
+
+    def test_stack_apply_persists_tune_on_an_llm_slot(self, tmp_hal0_home: str) -> None:
+        path = self._slot(tmp_hal0_home, "chat", "llm", "gpu-vulkan")
+        stack = StackConfig(
+            name="S",
+            slots=[
+                StackSlotEntry.model_validate(
+                    {"slot": "chat", "model": "new", "tune": {"vision": "off"}}
+                )
+            ],
+        )
+        plan = StackApplyEngine().plan("s", stack)
+        assert plan.errors == []
+        after = {fs.path: fs.data for fs in plan.change_set.after}[path]
+        assert after["tune"] == {"vision": "off"}
+        assert "tune" not in _read(path), "plan() must not touch disk"
+
+    def test_stack_apply_tune_guarded(self, tmp_hal0_home: str) -> None:
+        """A tune on an embedding slot goes through the same guard as PUT /config."""
+        path = self._slot(tmp_hal0_home, "embed", "embedding", "gpu-vulkan")
+        before = path.read_bytes()
+        stack = StackConfig(
+            name="S",
+            slots=[
+                StackSlotEntry.model_validate(
+                    {"slot": "embed", "model": "new", "tune": {"vision": "off"}}
+                )
+            ],
+        )
+        plan = StackApplyEngine().plan("s", stack)
+        assert plan.errors and plan.errors[0][0] == "embed"
+        assert "tune" in plan.errors[0][1]
+        after = {fs.path: fs.data for fs in plan.change_set.after}[path]
+        assert "tune" not in after and after == _read(path)
+        assert path.read_bytes() == before
+
+    def test_stack_apply_tune_guarded_on_npu(self, tmp_hal0_home: str) -> None:
+        self._slot(tmp_hal0_home, "npu1", "llm", "npu")
+        stack = StackConfig(
+            name="S",
+            slots=[
+                StackSlotEntry.model_validate(
+                    {"slot": "npu1", "model": "new", "tune": {"ctx_size": 4096}}
+                )
+            ],
+        )
+        plan = StackApplyEngine().plan("s", stack)
+        assert plan.errors and plan.errors[0][0] == "npu1"

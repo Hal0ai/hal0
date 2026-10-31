@@ -77,6 +77,20 @@ class TestStackSlotEntry:
         with pytest.raises(ValidationError):
             StackSlotEntry(slot="Agent Slot!")
 
+    def test_stack_entry_tune_round_trip(self) -> None:
+        e = StackSlotEntry.model_validate(
+            {"slot": "agent", "tune": {"vision": "off", "ctx_size": 8192}}
+        )
+        assert e.tune is not None and e.tune.vision == "off" and e.tune.ctx_size == 8192
+        back = StackSlotEntry.model_validate(e.model_dump(mode="json", exclude_none=True))
+        assert back == e
+        assert StackSlotEntry(slot="agent").tune is None
+
+    @pytest.mark.parametrize("tune", [{"mtp": "off"}, {"vision": "maybe"}, {"ctx_size": 5}])
+    def test_stack_entry_tune_is_validated(self, tune: dict) -> None:
+        with pytest.raises(ValidationError):
+            StackSlotEntry.model_validate({"slot": "agent", "tune": tune})
+
     def test_bad_device_raises(self) -> None:
         with pytest.raises(ValidationError):
             StackSlotEntry(slot="agent", device="gpu-quantum")

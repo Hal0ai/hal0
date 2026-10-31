@@ -15,6 +15,14 @@ it is mounted whenever `[bridge].enabled` is on (the default), and is 404 while 
 
 Every Hermes profile is wired to both servers. hal0 writes `hal0-admin` and `hal0-memory` into each named profile's `config.yaml` as `hermes__<profile>`, with shared memory by default (`hal0: {memory_private: true}` in a profile's `config.yaml` makes its memory facts private; mental models and directives are bank-level in the unified bank and are not covered) and the box bearer, at provisioning and on every hal0-api reconcile sweep (120 s). A profile opts out with `hal0: {wire_mcp: false}`. The default profile is not converged periodically: after adding the opt-in to its `config.yaml` by hand, run `sudo hal0 agent reprovision hermes --repair` (or the next `hal0 update` does it). `hal0 doctor` reports the state on the `hermes_profiles_mcp` row, and on `hermes_default_memory` and `hermes_brain_memory` for the default and `hal0-brain` profiles.
 
+## Per-slot tune through MCP
+
+`slot_edit` accepts a sparse `tune` object: `ctx_size`, `enable_thinking`,
+`reasoning_effort`, `reasoning_budget`, `vision`, `speculation`. Null removes
+an override; null for the whole table clears it. REST guards also apply here.
+`slot_list` retains `tune_effective` in its compact roster. Profile create/edit
+tools also accept reasoning effort and integer budget.
+
 ## `hal0-admin` (`/mcp/admin`)
 
 Every admin tool is registered through one generic factory, so every tool's call
@@ -68,7 +76,17 @@ overrides for the handful that don't map 1:1 onto their route live in
 
 ### Slot, model and profile tools
 
-The tune lives on the profile. `slot_create` and `slot_edit` take a `profile` name, the model and placement; a tuning key is refused with `slot.tuning_key_denied`. `model_edit`, `model_register` and `model_validate` take the file facts as top-level fields — `chat_template`, `tokenizer_repo`, `mtp` (the file has MTP heads) and `jinja`; a `defaults` object is `422 model.defaults_removed` and a tuning key is `422 model.tune_key_removed`. `profile_create`, `profile_update` and `profile_generate` carry `flags`, `ctx_size`, `enable_thinking`, `vision` (`auto`/`off`), `speculation` (`auto`/`off`/`ngram`) and `runner`. A model's drafter is the file fact `draft` on `model_edit` (a path, or null to unpair); `model_pull` takes `draft_filename` and `draft_repo`, and `model_inspect` returns `drafts`. There is no tool that sets a slot's context window or flags.
+The profile supplies the base tune. `slot_create` and `slot_edit` take a profile,
+model and placement, plus sparse `tune` overrides. Legacy root-level tuning
+keys remain refused with `slot.tuning_key_denied`. `slot_edit` can set context
+through `tune.ctx_size`; free flags stay on the profile. `model_edit`,
+`model_register` and `model_validate` take file facts as top-level fields:
+`chat_template`, `tokenizer_repo`, `mtp` (MTP heads) and `jinja`. A `defaults`
+object is `422 model.defaults_removed`; model tuning is `422 model.tune_key_removed`.
+`profile_create`, `profile_update` and `profile_generate` carry flags, context,
+thinking, reasoning effort/budget, vision, speculation and runner. A model's
+drafter is the file fact `draft` on `model_edit` (path or null to unpair);
+`model_pull` takes `draft_filename` and `draft_repo`, and `model_inspect` returns `drafts`.
 
 ### Autonomous — read (no approval)
 

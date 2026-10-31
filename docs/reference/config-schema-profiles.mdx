@@ -72,6 +72,14 @@ warning logged.
 | `include` | list[str] | `[]` | fnmatch globs |
 | `exclude` | list[str] | `[]` | fnmatch globs; always wins over `include` |
 
+## Profile reasoning fields
+
+Profiles accept `reasoning_effort` (`default|minimal|low|medium|high|xhigh|max`)
+and `reasoning_budget` (-1 through 16777216). Their defaults, `default` and
+`-1`, are omitted from profile exports. Slots can override them in `[tune]`,
+along with context, thinking, vision and speculation. Stack exports retain
+the sparse tune table without a schema-version bump.
+
 ## `profiles.toml`
 
 Root model `ProfilesConfig`, `extra="forbid"`: `profile: dict[str, ProfileConfig]` keyed

@@ -23,7 +23,10 @@ from hal0.mcp.approval_queue import ApprovalQueue
 # Hermes' inline budget for the 65,536-ctx anchor, and the tighter bound the
 # 30-slot roster must meet so growth has headroom.
 HERMES_BUDGET = 39_321
-ROSTER_BOUND = 20_000
+# ADR-0045 adds the full effective-tune contract to each roster row. The
+# representative 30-slot payload is ~21k; retain at least 15k headroom below
+# Hermes' real truncation budget rather than dropping provenance fields.
+ROSTER_BOUND = 24_000
 
 _DIGEST = "sha256:" + "ab12" * 16
 
@@ -44,6 +47,23 @@ def _full_slot(i: int, *, state: str = "ready") -> dict[str, Any]:
         "backend": "llamacpp",
         "declared_backend": "vulkan",
         "profile": "balanced",
+        "tune_effective": {
+            "ctx_size": 8192,
+            "enable_thinking": False,
+            "reasoning_effort": "low",
+            "reasoning_budget": -1,
+            "vision": "off",
+            "speculation": "auto",
+            "sources": {
+                "ctx_size": "slot",
+                "enable_thinking": "profile-flags",
+                "reasoning_effort": "profile",
+                "reasoning_budget": "profile",
+                "vision": "slot",
+                "speculation": "profile",
+            },
+            "reasoning_effort_unavailable": None,
+        },
         "runtime": "container",
         "container_status": "running",
         "container_health": True,
@@ -142,6 +162,7 @@ async def test_payload_is_carried_once_not_text_plus_structured(
     assert len(result.content) == 1
     body = json.loads(result.content[0].text)
     assert body["count"] == 3
+    assert body["slots"][0]["tune_effective"] == _full_slot(0)["tune_effective"]
     assert [s["name"] for s in body["slots"]] == ["slot-0", "slot-1", "slot-2"]
     # compact JSON, not indent=2
     assert "\n" not in result.content[0].text

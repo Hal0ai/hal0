@@ -315,6 +315,10 @@ class StackApplyEngine:
             updates["provider"] = entry.provider
         if entry.profile is not None:
             updates["profile"] = entry.profile
+        if entry.tune is not None:
+            # Through reconcile_and_guard_slot_config like every other key, so the
+            # tune guard (llm/non-NPU slot, thinking pin) applies to a stack too.
+            updates["tune"] = entry.tune.model_dump(exclude_none=True)
 
         return reconcile_and_guard_slot_config(
             stem or entry.slot, before, updates, slots_dir=self._slots_dir
