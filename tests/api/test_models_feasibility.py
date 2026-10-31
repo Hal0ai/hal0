@@ -313,3 +313,31 @@ def test_feasibility_unknown_model_row_reports_null_ctx(crud_client: TestClient)
     assert row["verdict"] == "unknown"
     assert row["ctx"] is None
     assert row["ctx_source"] is None
+
+
+def test_feasibility_slot_row_uses_slot_tune_window(
+    crud_client: TestClient, crud_models_root: Path
+) -> None:
+    """A row naming a ``slot`` is sized at that slot's [tune] window, source ``slot``."""
+    from unittest.mock import patch
+
+    from hal0.config.schema import ProfileConfig
+
+    mid = _create_minimal_model(crud_client, crud_models_root)
+
+    class _Sm:
+        async def iter_configs(self):
+            return [{"name": "chat", "type": "llm", "profile": "p", "tune": {"ctx_size": 4096}}]
+
+    crud_client.app.state.slot_manager = _Sm()
+    with patch(
+        "hal0.providers.container._resolve_profile", return_value=ProfileConfig(ctx_size=65536)
+    ):
+        row = crud_client.post(
+            "/api/models/feasibility", json={"models": [{"model_id": mid, "slot": "chat"}]}
+        ).json()["results"][0]
+        plain = crud_client.post(
+            "/api/models/feasibility", json={"models": [{"model_id": mid}]}
+        ).json()["results"][0]
+    assert (row["ctx"], row["ctx_source"]) == (4096, "slot")
+    assert plain["ctx_source"] != "slot"

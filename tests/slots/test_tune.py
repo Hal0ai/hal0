@@ -150,3 +150,134 @@ def test_top_level_mtp_gets_no_tune_hint():
     with pytest.raises(BadRequest) as exc:
         reject_slot_tuning_keys({"mtp": "off"})
     assert "[tune]" not in str(exc.value)
+
+
+# ── invalid hand-edited [tune] keys are dropped, not launched ────────────────
+
+
+@pytest.mark.parametrize(
+    ("key", "bad"),
+    [
+        ("reasoning_effort", "high --hf-file /etc/shadow"),
+        ("reasoning_effort", "extreme"),
+        ("reasoning_budget", "abc"),
+        ("reasoning_budget", -2),
+        ("reasoning_budget", True),
+        ("ctx_size", -5),
+        ("ctx_size", 2**24 + 1),
+        ("ctx_size", "lots"),
+        ("ctx_size", True),
+        ("vision", "maybe"),
+        ("speculation", "yes"),
+        ("enable_thinking", "sometimes"),
+    ],
+)
+def test_invalid_tune_key_falls_back_to_the_profile(key, bad, caplog):
+    profile = ProfileConfig(flags="-b 512", ctx_size=32768, reasoning_effort="low")
+    with caplog.at_level("WARNING", logger="hal0.slots.tune"):
+        t = effective_tune({"name": "bad-tune", "tune": {key: bad}}, profile)
+    assert t.sources[key] == "profile"
+    assert getattr(t, key) == getattr(profile, key)
+    assert any("slot.tune_key_invalid" in r.getMessage() for r in caplog.records)
+
+
+def test_one_bad_key_does_not_drop_the_good_ones():
+    t = effective_tune({"tune": {"vision": "off", "reasoning_budget": "abc", "ctx_size": 4096}}, P)
+    assert (t.vision, t.ctx_size, t.reasoning_budget) == ("off", 4096, -1)
+    assert t.sources["vision"] == "slot" and t.sources["reasoning_budget"] == "profile"
+
+
+def test_numeric_text_in_a_tune_key_is_taken_as_the_number():
+    t = effective_tune({"tune": {"ctx_size": "4096", "reasoning_budget": "0"}}, P)
+    assert (t.ctx_size, t.reasoning_budget) == (4096, 0)
+
+
+# ── free reasoning flags in the profile are what runs ────────────────────────
+
+
+def test_flag_effort_and_budget_beat_the_typed_profile_fields():
+    p = ProfileConfig(
+        flags="--reasoning-effort low --reasoning-budget 256",
+        reasoning_effort="high",
+        reasoning_budget=1024,
+    )
+    t = effective_tune({"tune": {}}, p)
+    assert (t.reasoning_effort, t.reasoning_budget) == ("low", 256)
+    assert t.sources["reasoning_effort"] == "profile-flags"
+    assert t.sources["reasoning_budget"] == "profile-flags"
+
+
+def test_flag_spellings_and_the_negative_budget_are_read():
+    p = ProfileConfig(flags="--reasoning-effort=medium --reasoning-budget -1", reasoning_budget=64)
+    t = effective_tune({}, p)
+    assert (t.reasoning_effort, t.reasoning_budget) == ("medium", -1)
+    assert t.sources["reasoning_budget"] == "profile-flags"
+
+
+def test_slot_override_beats_the_flags():
+    p = ProfileConfig(flags="--reasoning-effort low --reasoning-budget 256")
+    t = effective_tune({"tune": {"reasoning_effort": "high", "reasoning_budget": 0}}, p)
+    assert (t.reasoning_effort, t.reasoning_budget) == ("high", 0)
+    assert t.sources["reasoning_effort"] == "slot" and t.sources["reasoning_budget"] == "slot"
+
+
+def test_slot_send_nothing_value_cannot_cancel_a_flag():
+    p = ProfileConfig(flags="--reasoning-effort low --reasoning-budget 256")
+    t = effective_tune({"tune": {"reasoning_effort": "default", "reasoning_budget": -1}}, p)
+    assert (t.reasoning_effort, t.reasoning_budget) == ("low", 256)
+    assert t.sources["reasoning_effort"] == "profile-flags"
+
+
+def test_unusable_flag_values_read_as_nothing_set():
+    p = ProfileConfig(
+        flags="--reasoning-effort sideways --reasoning-budget x", reasoning_effort="low"
+    )
+    t = effective_tune({}, p)
+    # The flag still launches (and shadows the typed field), so the typed value is not shown.
+    assert t.reasoning_effort == "default" and t.sources["reasoning_effort"] == "profile-flags"
+    assert t.reasoning_budget == -1 and t.sources["reasoning_budget"] == "profile-flags"
+
+
+def test_tune_effective_field_set_is_unchanged():
+    t = effective_tune({}, ProfileConfig(flags="--reasoning-effort low"))
+    assert set(t.as_dict()) == {*TUNE_KEYS, "sources"}
+
+
+# ── reasoning budget upper bound ─────────────────────────────────────────────
+
+
+def test_budget_upper_bound_in_schema_and_resolver():
+    from pydantic import ValidationError
+
+    from hal0.config.schema import REASONING_BUDGET_MAX, SlotTuneConfig
+    from hal0.slots.tune import budget_flag_in
+
+    assert SlotTuneConfig(reasoning_budget=REASONING_BUDGET_MAX).reasoning_budget == 2**24
+    with pytest.raises(ValidationError):
+        SlotTuneConfig(reasoning_budget=REASONING_BUDGET_MAX + 1)
+    with pytest.raises(ValidationError):
+        ProfileConfig(reasoning_budget=REASONING_BUDGET_MAX + 1)
+    t = effective_tune({"tune": {"reasoning_budget": 10**12}}, P)
+    assert t.reasoning_budget == -1 and t.sources["reasoning_budget"] == "profile"
+    assert budget_flag_in("--reasoning-budget 99999999999") is None
+    assert budget_flag_in("--reasoning-budget 2048") == 2048
+
+
+# ── repeated / trailing flags: the last occurrence decides ───────────────────
+
+
+def test_unusable_last_flag_does_not_fall_back_to_an_earlier_one():
+    p = ProfileConfig(
+        flags="--reasoning-effort high --reasoning-effort bogus", reasoning_effort="low"
+    )
+    t = effective_tune({}, p)
+    assert t.reasoning_effort == "default" and t.sources["reasoning_effort"] == "profile-flags"
+    p = ProfileConfig(flags="--reasoning-budget 256 --reasoning-budget", reasoning_budget=64)
+    t = effective_tune({}, p)
+    assert t.reasoning_budget == -1 and t.sources["reasoning_budget"] == "profile-flags"
+    assert reasoning_flag_in("--reasoning off --reasoning") is None
+
+
+def test_later_usable_flag_wins():
+    p = ProfileConfig(flags="--reasoning-effort bogus --reasoning-effort high")
+    assert effective_tune({}, p).reasoning_effort == "high"

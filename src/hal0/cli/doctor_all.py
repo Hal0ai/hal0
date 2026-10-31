@@ -237,7 +237,7 @@ def check_seed_context_envelope(*, slots_dir: Path | None = None) -> Check:
     this box can spend on a model + KV cache — advisory (the slot may still
     run fine if the model itself is small), never a fail.
     """
-    from hal0.agents.anchor_window import SLOTS_DIR, read_slot_ceiling
+    from hal0.agents.anchor_window import SLOTS_DIR, read_slot_ceiling_detail
     from hal0.hardware.freshness import resolve_fresh_hardware_info
     from hal0.hardware.memory_envelope import max_affordable_context_tokens
 
@@ -257,20 +257,31 @@ def check_seed_context_envelope(*, slots_dir: Path | None = None) -> Check:
     affordable = max_affordable_context_tokens(hw)
 
     offenders: list[str] = []
+    overrides: list[str] = []
     for slot_name in names:
-        ceiling = read_slot_ceiling(slot_name, slots_dir=directory)
+        ceiling, owner = read_slot_ceiling_detail(slot_name, slots_dir=directory)
         if ceiling is not None and ceiling > affordable:
-            offenders.append(f"{slot_name} ({ceiling:,} > {affordable:,})")
-    if offenders:
-        return Check(
-            name,
-            title,
-            _WARN,
-            "profile ctx_size above this box's memory envelope: "
-            + ", ".join(offenders)
-            + " — lower the slot profile's ctx_size (duplicate a seed profile and point "
-            "the slot at the copy), or add memory",
-        )
+            if owner == "slot":
+                overrides.append(f"{slot_name} ({ceiling:,} > {affordable:,})")
+            else:
+                offenders.append(f"{slot_name} ({ceiling:,} > {affordable:,})")
+    if offenders or overrides:
+        parts: list[str] = []
+        if offenders:
+            parts.append(
+                "profile ctx_size above this box's memory envelope: "
+                + ", ".join(offenders)
+                + " — lower the slot profile's ctx_size (duplicate a seed profile and point "
+                "the slot at the copy), or add memory"
+            )
+        if overrides:
+            parts.append(
+                "slot [tune] ctx_size above this box's memory envelope: "
+                + ", ".join(overrides)
+                + " — lower the slot's [tune].ctx_size (Tune block in the slot drawer) or "
+                "clear the override"
+            )
+        return Check(name, title, _WARN, "; ".join(parts))
     return Check(
         name, title, _PASS, f"every slot profile ctx_size fits the {affordable:,}-token envelope"
     )

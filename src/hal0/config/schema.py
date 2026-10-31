@@ -314,6 +314,10 @@ ReasoningEffort = Literal["default", "minimal", "low", "medium", "high", "xhigh"
 CTX_SIZE_MIN = 128
 CTX_SIZE_MAX = 2**24
 
+#: Upper bound for a ``reasoning_budget`` (profile and slot ``[tune]``).
+#: llama-server parses the value as a 32-bit int; no real budget nears 2**24.
+REASONING_BUDGET_MAX = 2**24
+
 
 #: The tune keys a slot's sparse ``[tune]`` table may override, in field order.
 TUNE_KEYS: tuple[str, ...] = (
@@ -352,6 +356,7 @@ class SlotTuneConfig(BaseModel):
     reasoning_budget: int | None = Field(
         default=None,
         ge=-1,
+        le=REASONING_BUDGET_MAX,
         description="Reasoning token budget override (-1 = unlimited). None = the profile's.",
     )
     vision: Literal["auto", "off"] | None = Field(
@@ -1004,6 +1009,7 @@ class ProfileConfig(BaseModel):
     reasoning_budget: int = Field(
         default=-1,
         ge=-1,
+        le=REASONING_BUDGET_MAX,
         description="Reasoning token budget (--reasoning-budget); -1 = unlimited.",
     )
     speculation: SpeculationMode = Field(

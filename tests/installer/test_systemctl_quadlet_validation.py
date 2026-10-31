@@ -314,6 +314,8 @@ def test_live_container_provider_render_is_accepted() -> None:
     profile.backend = "rocm"
     profile.device_class = "gpu"
     profile.name = "rocm"
+    profile.reasoning_effort = "default"
+    profile.reasoning_budget = -1
     slot_cfg = {
         "name": "chat",
         "port": 8095,

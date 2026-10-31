@@ -224,24 +224,40 @@ def read_slot_profile(slot: str, *, slots_dir: Path = SLOTS_DIR) -> str | None:
     return name if isinstance(name, str) and name else None
 
 
-def read_slot_ceiling(
+def read_slot_ceiling_detail(
     slot: str, *, slots_dir: Path = SLOTS_DIR, model_registry: Any = None
-) -> int | None:
-    """The ``ctx_size`` of the slot's profile, or ``None`` when it sets none.
+) -> tuple[int | None, str | None]:
+    """``(ctx_size, owner)`` of the slot's explicit window; ``(None, None)`` when it sets none.
 
-    ADR-0029: the window a slot launches with is its profile's ``ctx_size``;
-    :func:`hal0.providers.container.slot_effective_context` is the one
-    resolver. ``None`` covers every "no explicit window" case alike — no TOML,
-    a profile that does not resolve, and a profile that sets no ``ctx_size``
-    (the window then comes from the model, so the model is the limit).
+    ``owner`` is ``"profile"`` (the profile's ``ctx_size``) or ``"slot"`` (the
+    slot's own ``[tune].ctx_size`` override, ADR-0045). See
+    :func:`read_slot_ceiling`.
     """
     raw = _read_slot_raw(slot, slots_dir)
     if raw is None:
-        return None
+        return None, None
     from hal0.providers.container import slot_effective_context
 
     ctx, source = slot_effective_context(raw, model_registry)
-    return ctx if source == "profile" and ctx else None
+    if ctx and source in ("profile", "slot"):
+        return ctx, source
+    return None, None
+
+
+def read_slot_ceiling(
+    slot: str, *, slots_dir: Path = SLOTS_DIR, model_registry: Any = None
+) -> int | None:
+    """The explicit ``ctx_size`` the slot launches with, or ``None`` when it sets none.
+
+    ADR-0029: the window a slot launches with is its profile's ``ctx_size``,
+    unless the slot's own ``[tune].ctx_size`` overrides it (ADR-0045);
+    :func:`hal0.providers.container.slot_effective_context` is the one
+    resolver. ``None`` covers every "no explicit window" case alike — no TOML,
+    a profile that does not resolve, and neither profile nor slot setting a
+    ``ctx_size`` (the window then comes from the model, so the model is the
+    limit).
+    """
+    return read_slot_ceiling_detail(slot, slots_dir=slots_dir, model_registry=model_registry)[0]
 
 
 def recommended_ceiling(floor: int) -> int:
@@ -271,7 +287,8 @@ class AnchorWindow:
     """Effective window as advertised to Hermes; ``None`` when unknown."""
 
     ceiling: int | None
-    """The ``ctx_size`` of the slot's profile; ``None`` when the profile sets none."""
+    """The explicit ``ctx_size`` the slot launches with (its profile's, or its own
+    ``[tune]`` override); ``None`` when neither sets one."""
 
     floor: int
     """Hermes' ``MINIMUM_CONTEXT_LENGTH``."""
@@ -286,6 +303,9 @@ class AnchorWindow:
 
     profile: str | None = None
     """The profile the serving slot runs; ``None`` when it could not be read."""
+
+    ceiling_source: str = "profile"
+    """Who set :attr:`ceiling`: ``"profile"`` or ``"slot"`` (a ``[tune].ctx_size``)."""
 
     @property
     def slot_path(self) -> Path | None:
@@ -317,7 +337,7 @@ class AnchorWindow:
 
     @property
     def fix_command(self) -> str:
-        """What repairs a profile-bound anchor.
+        """What repairs a profile- or override-bound anchor.
 
         Empty when the serving slot could not be proven — a command naming a
         slot that may not exist is worse than no command. The window is a
@@ -328,6 +348,14 @@ class AnchorWindow:
         if not self.slot:
             return ""
         target = recommended_ceiling(self.floor)
+        if self.ceiling_source == "slot":
+            # The slot's own [tune].ctx_size is what binds: editing the profile
+            # would change nothing while the override stays.
+            return (
+                f"raise [tune].ctx_size to {target} on slot {self.slot!r} (the Tune block in "
+                f"the slot drawer), or clear that override so the slot inherits its "
+                f"profile's window, then `hal0 slot restart {self.slot}`"
+            )
         which = f"profile {self.profile!r}" if self.profile else "the slot's profile"
         return (
             f"raise ctx_size to {target} on {which} (Profiles page, or "
@@ -369,12 +397,12 @@ class AnchorWindow:
             )
         if self.ceiling_is_binding:
             return (
-                f"{head} The limit is the slot profile's own window: "
-                f"{self._profile_note} sets ctx_size = {self.ceiling:,} "
+                f"{head} The limit is {self._ceiling_owner_phrase}: "
+                f"{self._ceiling_note} sets ctx_size = {self.ceiling:,} "
                 f"(slot file {self.slot_path}). Fix: {self.fix_command}"
             )
         ceiling_note = (
-            f"{self._profile_note} sets ctx_size = {self.ceiling:,}, which is not the limit; "
+            f"{self._ceiling_note} sets ctx_size = {self.ceiling:,}, which is not the limit; "
             if self.ceiling is not None
             else f"{self._profile_note} sets no ctx_size; "
         )
@@ -385,6 +413,19 @@ class AnchorWindow:
             f"({self.fix_command}), or point slot {self.slot!r} at a model whose window is "
             f"at least {self.floor:,} (`hal0 slot edit {self.slot} --model <model-id>`)."
         )
+
+    @property
+    def _ceiling_note(self) -> str:
+        """Who set the binding window: the slot's ``[tune]`` override, else its profile."""
+        if self.ceiling_source == "slot" and self.slot:
+            return f"slot {self.slot!r} [tune]"
+        return self._profile_note
+
+    @property
+    def _ceiling_owner_phrase(self) -> str:
+        if self.ceiling_source == "slot":
+            return "the slot's own [tune] override"
+        return "the slot profile's own window"
 
     @property
     def _profile_note(self) -> str:
@@ -431,7 +472,9 @@ def resolve_anchor_window(
     effective = _entry_context(entry)
     if effective is None and contexts:
         effective = _positive_int(contexts.get(model_name))
-    ceiling = read_slot_ceiling(slot, slots_dir=slots_dir) if slot else None
+    ceiling, ceiling_source = (
+        read_slot_ceiling_detail(slot, slots_dir=slots_dir) if slot else (None, None)
+    )
     profile = read_slot_profile(slot, slots_dir=slots_dir) if slot else None
     return AnchorWindow(
         model=model_name,
@@ -443,6 +486,7 @@ def resolve_anchor_window(
         slots_dir=Path(slots_dir),
         endpoint=endpoint,
         profile=profile,
+        ceiling_source=ceiling_source or "profile",
     )
 
 

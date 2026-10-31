@@ -52,7 +52,7 @@ import os
 import shlex
 import shutil
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -89,6 +89,11 @@ from hal0.providers._gpu import (
 from hal0.providers.base import HealthCheck, Provider, RuntimeLaunchPlan
 from hal0.providers.podman_mutate import PullLineParser
 from hal0.providers.speculation import effective_speculation
+from hal0.runners import (
+    REASONING_EFFORT_MIN_BUILD,
+    llama_build_from_tag,
+    runner_supports_reasoning_effort,
+)
 from hal0.slot_lifecycle_budget import (
     HEALTH_TIMEOUT_S,
     UNIT_ADMIN_CALLS_ALLOWANCE_S,
@@ -103,6 +108,7 @@ from hal0.slots.naming import (
     slot_unit_name,
 )
 from hal0.slots.state import SlotSpawnFailed
+from hal0.slots.tune import EffectiveTune, effective_tune
 from hal0.system.seam import SeamTimeout, SystemCtlSeam, is_hal0_service_user
 
 #: Existence probe for GPU device nodes (/dev/kfd, /dev/dri/renderD*), used by
@@ -1015,6 +1021,8 @@ def _llama_argv_segments(
     slot_metrics: bool = True,
     draft_device: str | None = None,
     lane_device: str | None = None,
+    profile_reasoning: Sequence[str] = (),
+    slot_reasoning: Sequence[str] = (),
 ) -> list[tuple[str, list[str]]]:
     """The labelled llama-server argv segments (SINGLE SOURCE, ADR-0029).
 
@@ -1060,6 +1068,9 @@ def _llama_argv_segments(
         model += ["--spec-draft-model", draft_model]
 
     profile: list[str] = shlex.split(spec_bundle) if spec_bundle.strip() else []
+    # The profile's typed reasoning fields sit before its free flags, so a
+    # hand-written `--reasoning-effort` in `flags` still wins within the layer.
+    profile += list(profile_reasoning)
     profile += _profile_flag_tokens(profile_flags)
 
     slot: list[str] = []
@@ -1077,6 +1088,9 @@ def _llama_argv_segments(
         slot += ["--metrics"]
     if draft_device and spec_type == "draft-mtp":
         slot += ["--spec-draft-device", draft_device]
+    # A slot [tune] override is the last word: it beats the profile's typed
+    # field and its free flags by last-wins dedupe.
+    slot += list(slot_reasoning)
 
     return [("base", base), ("model", model), ("profile", profile), ("slot", slot)]
 
@@ -1104,6 +1118,8 @@ def _llama_launch_plan(
     draft_device: str | None = None,
     lane_device: str | None = None,
     env: dict[str, str] | None = None,
+    profile_reasoning: Sequence[str] = (),
+    slot_reasoning: Sequence[str] = (),
 ) -> RuntimeLaunchPlan:
     """Build the GPU/llama-server :class:`RuntimeLaunchPlan`.
 
@@ -1129,6 +1145,8 @@ def _llama_launch_plan(
         slot_metrics=slot_metrics,
         draft_device=draft_device,
         lane_device=lane_device,
+        profile_reasoning=profile_reasoning,
+        slot_reasoning=slot_reasoning,
     )
     command = resolve_argv(segments).argv
 
@@ -1292,12 +1310,16 @@ def _native_ctx(model_info: Mapping[str, Any]) -> int | None:
 def profile_context(profile: Any, model_info: Mapping[str, Any]) -> tuple[int, str]:
     """The window a slot launches with, and where it came from.
 
-    ``(ctx, "profile")`` when the profile sets ``ctx_size``; else
+    ``(ctx, "profile")`` when the profile sets ``ctx_size`` (``"slot"`` when the
+    object is an :class:`~hal0.slots.tune.EffectiveTune` whose window came from
+    the slot's ``[tune]``); else
     ``(min(native, 32768), "native")``; else ``(8192, "fallback")``.
     """
     ctx_size = getattr(profile, "ctx_size", None)
     if ctx_size:
-        return int(ctx_size), "profile"
+        sources = getattr(profile, "sources", None)
+        origin = sources.get("ctx_size") if isinstance(sources, Mapping) else None
+        return int(ctx_size), "slot" if origin == "slot" else "profile"
     native = _native_ctx(model_info)
     if native:
         return min(native, _CTX_DENSE_CAP), "native"
@@ -1331,6 +1353,7 @@ def slot_effective_context(
     if str(slot_cfg.get("device") or "") == "npu":
         ctx_size = getattr(profile, "ctx_size", None)
         return (int(ctx_size), "profile") if ctx_size else (_FLM_DEFAULT_CTX, "fallback")
+    profile = effective_tune(slot_cfg, profile)
     model_table = slot_cfg.get("model") if isinstance(slot_cfg.get("model"), Mapping) else {}
     model_id = str(model_table.get("default") or "")
     model_info: dict[str, Any] = {}
@@ -1634,6 +1657,41 @@ def _placement_only(slot_cfg: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _reasoning_segments(
+    tune: EffectiveTune, runner: Any, image: str
+) -> tuple[list[str], list[str], str | None]:
+    """``(profile_tokens, slot_tokens, effort_unavailable)`` for the typed reasoning tunes.
+
+    Each value is spelled in the layer that set it (``tune.sources``), so the
+    resolved-command drawer credits it correctly; a value read from the
+    profile's own ``flags`` is already in the command and is not re-emitted.
+    ``default`` effort and a ``-1`` budget emit nothing. Effort is withheld,
+    with a reason, when the runner build predates ``--reasoning-effort``.
+    Tokens are built as lists (never joined and re-split), and the values were
+    validated by :func:`~hal0.slots.tune.effective_tune`.
+    """
+    tokens: dict[str, list[str]] = {"profile": [], "slot": []}
+    unavailable: str | None = None
+    effort = str(tune.reasoning_effort or "default")
+    effort_origin = tune.sources.get("reasoning_effort")
+    if effort != "default" and effort_origin in ("profile", "slot"):
+        if runner_supports_reasoning_effort(runner, image):
+            tokens[str(effort_origin)] += ["--reasoning-effort", effort]
+        else:
+            build = llama_build_from_tag(image)
+            unavailable = (
+                f"runner build {build} predates --reasoning-effort "
+                f"(needs b{REASONING_EFFORT_MIN_BUILD})"
+                if build is not None
+                else "this runner does not support --reasoning-effort"
+            )
+    budget = int(tune.reasoning_budget)
+    budget_origin = tune.sources.get("reasoning_budget")
+    if budget != -1 and budget_origin in ("profile", "slot"):
+        tokens[str(budget_origin)] += ["--reasoning-budget", str(budget)]
+    return tokens["profile"], tokens["slot"], unavailable
+
+
 def _resolve_llama_scalars(
     slot_cfg: dict[str, Any],
     model_info: dict[str, Any],
@@ -1660,12 +1718,15 @@ def _resolve_llama_scalars(
     if for_launch:
         _guard_unsupported_quant(slot_cfg, model_info)
     image = _resolve_image_ref(slot_cfg, profile, model_info=model_info)
+    # The one merge of profile + slot [tune] (ADR-0045): every tune value below
+    # is read from `tune`, never from `profile` directly.
+    tune = effective_tune(slot_cfg, profile)
 
     profile_flags = str(getattr(profile, "flags", "") or "")
     profile_tokens = set(_profile_flag_tokens(profile_flags))
     embed_mode = bool(profile_tokens & {"--embedding", "--reranking"})
 
-    context_size, _ctx_source = profile_context(profile, model_info)
+    context_size, _ctx_source = profile_context(tune, model_info)
 
     server_table = slot_cfg.get("server") or {}
     server_env = server_table.get("env") if isinstance(server_table, dict) else None
@@ -1687,7 +1748,7 @@ def _resolve_llama_scalars(
 
     # The projector follows the model's mmproj and the profile's vision.
     mmproj = model_info.get("mmproj")
-    if str(getattr(profile, "vision", "auto") or "auto") == "off":
+    if str(tune.vision or "auto") == "off":
         mmproj = None
 
     # --jinja: a runner capability, suppressible per model file
@@ -1700,10 +1761,13 @@ def _resolve_llama_scalars(
     spec = effective_speculation(
         model_info,
         runner,
-        profile,
+        tune,
         embed_mode=embed_mode,
         image_tag=str(image),
         log_launch=for_launch,
+    )
+    profile_reasoning, slot_reasoning, effort_unavailable = _reasoning_segments(
+        tune, runner, str(image)
     )
 
     slot_metrics_raw = slot_cfg.get("metrics")
@@ -1737,6 +1801,9 @@ def _resolve_llama_scalars(
         "draft_model": spec.draft_model,
         "spec_bundle": spec.bundle,
         "spec_plan": spec.as_dict(),
+        "profile_reasoning": profile_reasoning,
+        "slot_reasoning": slot_reasoning,
+        "tune_effective": {**tune.as_dict(), "reasoning_effort_unavailable": effort_unavailable},
         "lane_device": lane_device(effective_backend),
         "draft_device": (
             lane_device(effective_backend)
@@ -1777,6 +1844,8 @@ def _segments_from_scalars(
         slot_metrics=sc["slot_metrics"],
         draft_device=sc["draft_device"],
         lane_device=sc["lane_device"],
+        profile_reasoning=sc.get("profile_reasoning", ()),
+        slot_reasoning=sc.get("slot_reasoning", ()),
     )
 
 
@@ -1919,6 +1988,8 @@ class ContainerProvider(Provider):
             slot_metrics=scalars["slot_metrics"],
             draft_device=scalars["draft_device"],
             lane_device=scalars["lane_device"],
+            profile_reasoning=scalars["profile_reasoning"],
+            slot_reasoning=scalars["slot_reasoning"],
             env=merged_env or None,
         )
         if pin is not None:
@@ -3069,6 +3140,18 @@ def _resolve_slot_argv(
     return str(scalars["image"]), resolve_argv(segments), scalars["spec_plan"]
 
 
+def tune_effective_for_slot(
+    slot_cfg: dict[str, Any], model_path: str | None = None
+) -> dict[str, Any] | None:
+    """The slot's ``tune_effective`` read shape, from the launch resolver's scalars.
+
+    ``None`` when the slot's profile does not resolve (best-effort, like the
+    other preview helpers).
+    """
+    bundle = _resolve_preview_bundle(slot_cfg, model_path)
+    return bundle[1].get("tune_effective") if bundle else None
+
+
 def resolved_argv_detail_for_slot(
     slot_cfg: dict[str, Any],
     model_path: str | None = None,
@@ -3092,6 +3175,7 @@ def resolved_argv_detail_for_slot(
         return None
     image, result, spec = resolved
     return {
+        "tune_effective": tune_effective_for_slot(slot_cfg, model_path),
         "argv": [image, *result.argv],
         "provenance": [
             {"flag": p.flag, "value": p.value, "source": p.source} for p in result.provenance
@@ -3109,6 +3193,7 @@ __all__ = [
     "container_provider",
     "resolved_argv_detail_for_slot",
     "resolved_command_for_slot",
+    "tune_effective_for_slot",
 ]
 
 

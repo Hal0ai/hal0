@@ -24,6 +24,7 @@ from hal0.runners import (
     runner_draft_kinds,
     runner_for_backend,
     runner_matches,
+    runner_supports_reasoning_effort,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -220,6 +221,15 @@ def test_llama_build_from_tag() -> None:
     assert llama_build_from_tag("ghcr.io/x/b2") is None
     assert llama_build_from_tag("host:5000/x/b2") is None
     assert llama_build_from_tag("0.9.44-re14329d") is None
+
+
+def test_llama_build_from_digest_pinned_ref() -> None:
+    """The shipped refs are ``repo:tag@sha256:<hex>``: the digest must not hide the tag."""
+    digest = "@sha256:" + "ab" * 32
+    assert llama_build_from_tag("ghcr.io/x/y:b11700-r52bc433" + digest) == 11700
+    assert llama_build_from_tag("localhost:5000/x/y:b11700-r1" + digest) == 11700
+    assert llama_build_from_tag("ghcr.io/x/y" + digest) is None
+    assert llama_build_from_tag("localhost:5000/x/y" + digest) is None
     assert llama_build_from_tag(None) is None
 
 
@@ -232,3 +242,14 @@ def test_runner_draft_kinds_drops_lilicorr_below_floor() -> None:
     assert "lilicorr" not in runner_draft_kinds(runner, "ghcr.io/x/llama:rocm-b11596")
     assert runner_draft_kinds(runner, None) == _ALL_DRAFT_KINDS
     assert runner_draft_kinds(runner, "0.9.44-re14329d") == _ALL_DRAFT_KINDS
+
+
+def test_digest_pinned_ref_is_gated_by_build() -> None:
+    """A digest-pinned ref (the shipped shape) is gated like its bare tag."""
+    runner = RUNNER_IMAGES["standard"]
+    digest = "@sha256:" + "ab" * 32
+    assert "lilicorr" not in runner_draft_kinds(runner, "ghcr.io/x/y:b11596-r6d1fb9e" + digest)
+    assert "lilicorr" in runner_draft_kinds(runner, "ghcr.io/x/y:b11716-r52bc433" + digest)
+    assert not runner_supports_reasoning_effort(runner, "ghcr.io/x/y:b11700-r1" + digest)
+    assert runner_supports_reasoning_effort(runner, "ghcr.io/x/y:b11840-r1" + digest)
+    assert runner_supports_reasoning_effort(runner, "ghcr.io/x/y" + digest)  # unparseable: allowed

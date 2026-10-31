@@ -74,6 +74,7 @@ __all__ = [
     "image_status_for",
     "loaded_model_names_from_slots",
     "resolve_ctx_effective",
+    "resolve_tune_effective",
     "serialize_slot",
     "synthesize_upstream_entries",
 ]
@@ -298,6 +299,13 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         # asks, so this is the one place the operator re-points it.
         entry["default"] = cfg.get("default") is True
 
+        # ADR-0045: the slot's [tune] overrides the launch honours ({} when
+        # none; a key the launch would ignore as invalid is left out). The
+        # merged result rides beside ``ctx_effective`` as ``tune_effective``.
+        from hal0.slots.tune import slot_tune_table_valid
+
+        entry["tune"] = slot_tune_table_valid(cfg)
+
         # Spec 1 / Component 1: surface the edit-panel config fields so the
         # card + drawer seed their controls without a per-slot /config fetch.
         # ``n_gpu_layers`` falls back to the ModelConfig default sentinel
@@ -435,6 +443,24 @@ def resolve_ctx_effective(cfg: Any, model_registry: Any) -> tuple[int | None, st
         return slot_effective_context(cfg, model_registry)
     except Exception:
         return None, None
+
+
+def resolve_tune_effective(cfg: Any) -> dict[str, Any] | None:
+    """The slot's ``tune_effective`` read shape (ADR-0045), or ``None``.
+
+    Computed from the launch resolver's own scalars
+    (:func:`hal0.providers.container.tune_effective_for_slot`) so the view and
+    the launch cannot drift. ``None`` for a slot a ``[tune]`` cannot apply to
+    (not an llm slot, or on the NPU) and for one whose profile does not resolve.
+    """
+    if str(cfg.get("type") or "llm") != "llm" or str(cfg.get("device") or "") == "npu":
+        return None
+    try:
+        from hal0.providers.container import tune_effective_for_slot
+
+        return tune_effective_for_slot(cfg)
+    except Exception:
+        return None
 
 
 # ── concern 3: container probe ───────────────────────────────────────────────
@@ -1042,6 +1068,8 @@ class SlotViewAggregator:
                 ctx, source = resolve_ctx_effective(cfg, self._registry)
                 payload["ctx_effective"] = ctx
                 payload["ctx_source"] = source
+            if isinstance(cfg, dict):
+                payload["tune_effective"] = resolve_tune_effective(cfg)
             if isinstance(cfg, dict):
                 blocked = conversion_blocked(cfg)
                 if blocked is not None:

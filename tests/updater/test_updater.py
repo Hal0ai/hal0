@@ -36,6 +36,7 @@ from hal0.updater import (
     UpdateManifestInvalid,
     Updater,
     UpdateRollbackUnavailable,
+    UpdateSwapError,
     UpdateVerifyError,
     releases_url,
     releases_url_override,
@@ -2174,6 +2175,154 @@ def test_rollback_swaps_symlink_back(
     # schema_warning is always present in the result (None when the on-disk
     # schema is not ahead of the reverted tree).
     assert "schema_warning" in res
+
+
+def test_rollback_restores_slot_tune_when_activate_fails(
+    synthetic_release: dict[str, Any],
+    cosign_skip: None,
+    tmp_hal0_home: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0045: the rollback strips each slot's ``[tune]`` before the symlink swap; if
+    the swap fails the current release stays active, so every slot file must get its
+    ``[tune]`` back (byte-identical) and no backup is left behind."""
+    from hal0.config import paths
+    from hal0.updater.privileged import UpdateSeam
+
+    asyncio.run(Updater().apply())
+    artifacts = tmp_path / "v2"
+    artifacts.mkdir()
+    tarball2 = _build_release_tarball(tmp=artifacts, version="0.0.2")
+    _write_release_manifest(
+        manifest_path=Path(os.environ["HAL0_RELEASES_URL"]),
+        tarball=tarball2,
+        version="0.0.2",
+    )
+    asyncio.run(Updater().apply())
+
+    slots_dir = paths.slots_config_dir()
+    slots_dir.mkdir(parents=True, exist_ok=True)
+    tuned = slots_dir / "tuned.toml"
+    tuned.write_text(
+        '# keep me\nname = "tuned"\nport = 8101\n[tune]\nvision = "off"\n', encoding="utf-8"
+    )
+    original = tuned.read_bytes()
+
+    def _boom(self: Any, *_a: Any, **_k: Any) -> Any:
+        raise UpdateSwapError("symlink swap failed")
+
+    monkeypatch.setattr(UpdateSeam, "activate", _boom)
+    with pytest.raises(UpdateSwapError):
+        asyncio.run(Updater().rollback())
+
+    assert tuned.read_bytes() == original
+    assert not list(slots_dir.glob("*.bak-*"))
+    assert Path(os.readlink(_current_symlink())).name == "hal0-0.0.2"
+
+
+def _two_release_rollback_setup(tmp_path: Path) -> None:
+    asyncio.run(Updater().apply())
+    artifacts = tmp_path / "v2"
+    artifacts.mkdir()
+    tarball2 = _build_release_tarball(tmp=artifacts, version="0.0.2")
+    _write_release_manifest(
+        manifest_path=Path(os.environ["HAL0_RELEASES_URL"]),
+        tarball=tarball2,
+        version="0.0.2",
+    )
+    asyncio.run(Updater().apply())
+
+
+def _tuned_slot() -> tuple[Path, bytes]:
+    from hal0.config import paths
+
+    d = paths.slots_config_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / "tuned.toml"
+    f.write_text('# keep\nname = "tuned"\n[tune]\nvision = "off"\n', encoding="utf-8")
+    return f, f.read_bytes()
+
+
+def test_rollback_restores_slot_tune_on_cancellation(
+    synthetic_release: dict[str, Any],
+    cosign_skip: None,
+    tmp_hal0_home: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hal0.updater.privileged import UpdateSeam
+
+    _two_release_rollback_setup(tmp_path)
+    tuned, original = _tuned_slot()
+
+    def _cancel(self: Any, *_a: Any, **_k: Any) -> Any:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(UpdateSeam, "activate", _cancel)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(Updater().rollback())
+    assert tuned.read_bytes() == original
+    assert not list(tuned.parent.glob("*.bak-*"))
+
+
+def test_rollback_reconverts_profile_when_the_strip_fails(
+    synthetic_release: dict[str, Any],
+    cosign_skip: None,
+    tmp_hal0_home: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hal0.config.migrations import profile_centric_apply as pca
+    from hal0.updater import updater as upd
+
+    _two_release_rollback_setup(tmp_path)
+    calls: list[str] = []
+    monkeypatch.setattr(upd, "_restore_profile_conversion_for", lambda *_a, **_k: ["x"])
+    monkeypatch.setattr(pca, "migrate_profile_centric", lambda **_k: calls.append("migrate"))
+
+    def _boom(*_a: Any, **_k: Any) -> Any:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(upd, "_strip_slot_tune_for", _boom)
+    with pytest.raises(OSError, match="disk full"):
+        asyncio.run(Updater().rollback())
+    assert calls == ["migrate"]
+
+
+def test_restore_skips_a_file_edited_after_the_strip(tmp_hal0_home: str, tmp_path: Path) -> None:
+    from hal0.updater import updater as upd
+
+    tuned, _original = _tuned_slot()
+    older = tmp_path / "hal0-1.7.1"
+    older.mkdir()
+    backups: dict[str, Any] = {}
+    upd._strip_slot_tune_for(older, job_id=None, backups_out=backups)
+    tuned.write_text(tuned.read_text() + "# operator edit\n", encoding="utf-8")
+    edited = tuned.read_bytes()
+    assert upd._restore_slot_tune_backups(backups, job_id=None) == []
+    assert tuned.read_bytes() == edited
+    assert len(list(tuned.parent.glob("tuned.toml.bak-*"))) == 1  # backup kept
+
+
+def test_failed_backup_copy_leaves_no_partial_file(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hal0.updater import updater as upd
+
+    tuned, original = _tuned_slot()
+
+    def _partial(src: Any, dst: Any, **_k: Any) -> None:
+        Path(dst).write_bytes(b"trunc")
+        raise OSError("no space")
+
+    monkeypatch.setattr(upd.shutil, "copy2", _partial)
+    older = tmp_path / "hal0-1.7.1"
+    older.mkdir()
+    with pytest.raises(OSError, match="no space"):
+        upd._strip_slot_tune_for(older, job_id=None)
+    assert tuned.read_bytes() == original
+    assert [p.name for p in tuned.parent.iterdir()] == ["tuned.toml"]
 
 
 # ── rollback re-pip into venv (#980) ──────────────────────────────────────────

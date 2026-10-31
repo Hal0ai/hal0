@@ -54,16 +54,22 @@ class RunnerSupports:
 #: Minimum llama.cpp build number (``b<N>``) a drafter kind needs.
 DRAFT_KIND_MIN_BUILD: dict[str, int] = {"lilicorr": 11669}
 
+#: First llama.cpp build verified to accept ``--reasoning-effort``.
+REASONING_EFFORT_MIN_BUILD = 11840
+
 _LLAMA_BUILD_RE = re.compile(r"(?<![A-Za-z0-9])b(\d+)(?![A-Za-z0-9])")
 
 
 def llama_build_from_tag(tag: str | None) -> int | None:
     """Parse the llama.cpp build number from an image tag or ``image:tag`` ref.
 
-    ``b11716-r52bc433`` -> 11716; ``None`` when the tag carries no ``b<N>``.
+    ``b11716-r52bc433`` -> 11716; ``None`` when the tag carries no ``b<N>``. A
+    ``@sha256:<hex>`` digest suffix (the shipped refs are digest-pinned) is
+    dropped first, so its colon is not mistaken for the tag separator.
     """
     if not tag:
         return None
+    tag = tag.partition("@")[0]
     # Only the tag part is searched: a path segment such as ``…/b2`` is not a
     # build. ``image:tag`` -> after the last ``:`` (unless that colon is a
     # registry port); a bare tag is searched whole; a tagless path has none.
@@ -234,6 +240,19 @@ def runner_draft_kinds(runner: Runner, image_tag: str | None) -> frozenset[str]:
     return frozenset(
         k for k in runner.supports.draft_kinds if build >= DRAFT_KIND_MIN_BUILD.get(k, 0)
     )
+
+
+def runner_supports_reasoning_effort(runner: Runner, image_tag: str | None) -> bool:
+    """Whether ``runner`` at ``image_tag`` accepts ``--reasoning-effort``.
+
+    Only llama-server runners do, and only from :data:`REASONING_EFFORT_MIN_BUILD`;
+    an unparseable tag is given the benefit of the doubt (same as
+    :func:`runner_draft_kinds`).
+    """
+    if runner.runtime_family != "llama-server":
+        return False
+    build = llama_build_from_tag(image_tag)
+    return build is None or build >= REASONING_EFFORT_MIN_BUILD
 
 
 def get_runner(key: str) -> Runner:

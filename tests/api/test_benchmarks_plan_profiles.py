@@ -38,3 +38,16 @@ def test_api_plan_cells_carry_the_profile_flags(
     assert cell.identity.config.ctx == 65536
     cells = resp.json()["cells"]
     assert any(row["model"] == "m1" and row["cell_key"] == cell.cell_key for row in cells)
+
+
+@pytest.mark.usefixtures("box")
+def test_planner_attaches_effective_tune(box) -> None:
+    """A slot's [tune] override is what the cell is measured under."""
+    from hal0.bench.planner import attach_slot_profiles
+
+    slot = box / "slots" / "chat.toml"
+    slot.write_text(slot.read_text() + '[tune]\nvision = "auto"\nenable_thinking = false\n')
+    prof = next(m for m in attach_slot_profiles(_registry()) if m["id"] == "m1")["profile"]
+    assert prof["vision"] == "auto"  # profile says "off"
+    assert prof["enable_thinking"] is False
+    assert prof["tune"]["sources"]["vision"] == "slot"

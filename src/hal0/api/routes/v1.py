@@ -526,11 +526,12 @@ def _is_pinned_owned(request: Request, model_id: str) -> bool:
 async def _slot_thinking_default(
     request: Request, model_id: str, slot_name: str | None = None
 ) -> bool | None:
-    """The reasoning default for a request: the serving slot's profile (ADR-0029).
+    """The reasoning default for a request: the serving slot's effective tune (ADR-0029).
 
     The slot is the lane the request pinned (``hal0/<slot>``), else the first
     llm slot bound to ``model_id`` (default slot first). Its profile's
-    ``enable_thinking`` decides. ``None`` means the operator expressed no
+    ``enable_thinking``, with the slot's ``[tune]`` override and any
+    ``--reasoning`` flag pin applied (:func:`hal0.slots.tune.effective_tune`), decides. ``None`` means the operator expressed no
     preference (unset, no slot, or an unresolvable profile) and the policy's
     own default (off) applies; an explicit ``False`` is the operator's choice
     and is honoured even on grammar requests (#2713). Always overridable per
@@ -538,6 +539,7 @@ async def _slot_thinking_default(
     """
     from hal0.errors import Hal0Error
     from hal0.providers.container import resolve_slot_profile
+    from hal0.slots.tune import effective_tune
 
     sm = getattr(request.app.state, "slot_manager", None)
     if sm is None:
@@ -560,7 +562,8 @@ async def _slot_thinking_default(
         profile = resolve_slot_profile(chosen)
     except Hal0Error:
         return None
-    value = getattr(profile, "enable_thinking", None)
+    # The slot's [tune] may override the profile; a `--reasoning` flag pin wins over both.
+    value = effective_tune(chosen, profile).enable_thinking
     return value if isinstance(value, bool) else None
 
 

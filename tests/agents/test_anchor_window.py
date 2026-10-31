@@ -421,6 +421,46 @@ class TestReadSlotCeiling:
         assert aw.read_slot_profile("agent", slots_dir=tmp_path) is None
 
 
+class TestSlotTuneCeiling:
+    """A ``[tune].ctx_size`` is an explicit window the anchor check must still see (ADR-0045)."""
+
+    def test_a_slot_tune_window_is_a_ceiling_owned_by_the_slot(
+        self, tmp_path: Path, tmp_hal0_home: str
+    ) -> None:
+        _write_profile(tmp_hal0_home, "big-win", 131072)
+        _write_slot(tmp_path, "agent", 'profile = "big-win"\n[tune]\nctx_size = 4096\n')
+        assert aw.read_slot_ceiling("agent", slots_dir=tmp_path) == 4096
+        assert aw.read_slot_ceiling_detail("agent", slots_dir=tmp_path) == (4096, "slot")
+
+    def test_a_profile_window_keeps_profile_ownership(self, tmp_path: Path) -> None:
+        _write_slot(tmp_path, "agent", 'profile = "agent"\n')
+        assert aw.read_slot_ceiling_detail("agent", slots_dir=tmp_path) == (65536, "profile")
+
+    def test_message_blames_the_slot_override_and_fixes_the_override(
+        self, tmp_path: Path, tmp_hal0_home: str
+    ) -> None:
+        _write_profile(tmp_hal0_home, "big-win", 131072)
+        slots = tmp_path / "slots"
+        _write_slot(slots, "agent", 'profile = "big-win"\n[tune]\nctx_size = 4096\n')
+        catalog = _catalog(agent=4096, brain=96000)
+        window = aw.resolve_anchor_window(
+            "hal0/agent",
+            entry=_by_id("hal0/agent", catalog[0]),
+            catalog=catalog,
+            floor=64_000,
+            floor_source="hermes",
+            slots_dir=slots,
+        )
+        assert window.ceiling == 4096 and window.ceiling_source == "slot"
+        assert window.ceiling_is_binding is True
+        message = window.message()
+        assert "slot 'agent' [tune] sets ctx_size = 4,096" in message
+        assert "[tune].ctx_size" in message
+        assert "hal0 slot restart agent" in message
+        # Raising the profile would change nothing while the override stays.
+        assert "raise ctx_size to 65536 on profile" not in message
+
+
 class TestRecommendedCeiling:
     @pytest.mark.parametrize(
         ("floor", "expected"),

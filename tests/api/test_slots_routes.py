@@ -2093,6 +2093,68 @@ def test_slot_detail_and_list_carry_ctx_effective_and_source(
     assert (listed["ctx_effective"], listed["ctx_source"]) == expected
 
 
+def test_slot_detail_carries_tune_and_tune_effective(
+    tmp_hal0_home: str,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+    isolated_app: FastAPI,
+) -> None:
+    """ADR-0045: the detail routes (`/{name}`, `/by-name/{name}`) carry the raw
+    ``tune`` and the merged ``tune_effective``, same as the list snapshot."""
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "chat",
+        [
+            'name = "chat"',
+            "port = 8081",
+            'device = "gpu-vulkan"',
+            'provider = "llama-server"',
+            'runtime = "container"',
+            'type = "llm"',
+            'profile = "chat"',
+            "[model]",
+            f'default = "{_CTX_MODEL}"',
+            "[tune]",
+            "ctx_size = 4096",
+            'vision = "off"',
+        ],
+    )
+    isolated_app.state.model_registry = _FakeCtxRegistry({_CTX_MODEL: _FakeCtxModel(8000)})
+    listed = {e["name"]: e for e in isolated_client.get("/api/slots").json()}["chat"]
+    for url in ("/api/slots/chat", "/api/slots/by-name/chat"):
+        body = isolated_client.get(url).json()
+        assert body["tune"] == {"ctx_size": 4096, "vision": "off"}, url
+        assert body["tune_effective"]["ctx_size"] == 4096, url
+        assert body["tune_effective"]["vision"] == "off", url
+        assert body["tune_effective"]["sources"]["vision"] == "slot", url
+        assert (body["ctx_effective"], body["ctx_source"]) == (4096, "slot"), url
+        assert body["tune_effective"] == listed["tune_effective"], url
+
+
+def test_non_llm_slot_detail_has_no_tune_effective(
+    tmp_hal0_home: str,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "voice",
+        [
+            'name = "voice"',
+            "port = 8083",
+            'device = "cpu"',
+            'provider = "kokoro"',
+            'runtime = "container"',
+            'type = "tts"',
+            'profile = "kokoro"',
+            "[model]",
+            'default = "kokoro-v1"',
+        ],
+    )
+    body = isolated_client.get("/api/slots/voice").json()
+    assert body["tune_effective"] is None
+
+
 def test_slot_naming_a_missing_profile_has_no_effective_window(
     tmp_hal0_home: str,
     container_stub: dict[str, Any],
