@@ -2266,6 +2266,70 @@ def test_rollback_restores_slot_tune_on_cancellation(
     assert not list(tuned.parent.glob("*.bak-*"))
 
 
+def _tuned_catalogs() -> dict[Path, bytes]:
+    from hal0.config import paths
+
+    profiles = paths.profiles_toml()
+    profiles.parent.mkdir(parents=True, exist_ok=True)
+    profiles.write_text(
+        '# keep\n[profile.tuned]\nflags = "-fa on"\nreasoning_effort = "high"\n', encoding="utf-8"
+    )
+    stacks = paths.stacks_toml()
+    stacks.write_text(
+        '# keep\n[stack.lab]\n[[stack.lab.slots]]\nslot = "chat"\n'
+        "[stack.lab.slots.tune]\nctx_size = 4096\n",
+        encoding="utf-8",
+    )
+    return {f: f.read_bytes() for f in (profiles, stacks)}
+
+
+def test_rollback_restores_tune_catalogs_when_activate_fails(
+    synthetic_release: dict[str, Any],
+    cosign_skip: None,
+    tmp_hal0_home: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The swap failing leaves the current release active, and that release reads
+    the reasoning keys and stack ``tune``: both catalogs come back byte-identical."""
+    from hal0.config import paths
+    from hal0.updater.privileged import UpdateSeam
+
+    _two_release_rollback_setup(tmp_path)
+    originals = _tuned_catalogs()
+
+    def _boom(self: Any, *_a: Any, **_k: Any) -> Any:
+        raise UpdateSwapError("symlink swap failed")
+
+    monkeypatch.setattr(UpdateSeam, "activate", _boom)
+    with pytest.raises(UpdateSwapError):
+        asyncio.run(Updater().rollback())
+
+    assert {f: f.read_bytes() for f in originals} == originals
+    assert not list(paths.etc().glob("*.bak-*"))
+
+
+def test_rollback_reports_every_file_it_stripped(
+    synthetic_release: dict[str, Any],
+    cosign_skip: None,
+    tmp_hal0_home: str,
+    tmp_path: Path,
+) -> None:
+    from hal0.config import paths
+
+    _two_release_rollback_setup(tmp_path)
+    tuned, _original = _tuned_slot()
+    _tuned_catalogs()
+
+    result = asyncio.run(Updater().rollback())
+
+    assert result["tune_stripped"] == [
+        str(tuned),
+        str(paths.profiles_toml()),
+        str(paths.stacks_toml()),
+    ]
+
+
 def test_rollback_reconverts_profile_when_the_strip_fails(
     synthetic_release: dict[str, Any],
     cosign_skip: None,
@@ -2284,7 +2348,7 @@ def test_rollback_reconverts_profile_when_the_strip_fails(
     def _boom(*_a: Any, **_k: Any) -> Any:
         raise OSError("disk full")
 
-    monkeypatch.setattr(upd, "_strip_slot_tune_for", _boom)
+    monkeypatch.setattr(upd, "_strip_tune_config_for", _boom)
     with pytest.raises(OSError, match="disk full"):
         asyncio.run(Updater().rollback())
     assert calls == ["migrate"]
@@ -2297,10 +2361,10 @@ def test_restore_skips_a_file_edited_after_the_strip(tmp_hal0_home: str, tmp_pat
     older = tmp_path / "hal0-1.7.1"
     older.mkdir()
     backups: dict[str, Any] = {}
-    upd._strip_slot_tune_for(older, job_id=None, backups_out=backups)
+    upd._strip_tune_config_for(older, job_id=None, backups_out=backups)
     tuned.write_text(tuned.read_text() + "# operator edit\n", encoding="utf-8")
     edited = tuned.read_bytes()
-    assert upd._restore_slot_tune_backups(backups, job_id=None) == []
+    assert upd._restore_tune_backups(backups, job_id=None) == []
     assert tuned.read_bytes() == edited
     assert len(list(tuned.parent.glob("tuned.toml.bak-*"))) == 1  # backup kept
 
@@ -2320,7 +2384,7 @@ def test_failed_backup_copy_leaves_no_partial_file(
     older = tmp_path / "hal0-1.7.1"
     older.mkdir()
     with pytest.raises(OSError, match="no space"):
-        upd._strip_slot_tune_for(older, job_id=None)
+        upd._strip_tune_config_for(older, job_id=None)
     assert tuned.read_bytes() == original
     assert [p.name for p in tuned.parent.iterdir()] == ["tuned.toml"]
 
