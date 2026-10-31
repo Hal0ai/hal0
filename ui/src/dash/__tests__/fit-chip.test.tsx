@@ -65,3 +65,24 @@ describe('ModalityTag drafter bolt', () => {
     expect(render(<ModalityTag tag={null} draft={null} />).innerHTML).toBe('')
   })
 })
+
+describe('ModalityTag thinking glyph and vision-off eye', () => {
+  it('renders the thinking mark only when given a title', () => {
+    expect(render(<ModalityTag tag="vision" draft={null} />).querySelector('[data-testid="thinking-mark"]')).toBeNull()
+    const host = render(<ModalityTag tag={null} draft={null} thinking="thinking on · effort high" />)
+    const mark = host.querySelector('[data-testid="thinking-mark"]')!
+    expect(mark.classList.contains('modality-icon')).toBe(true)
+    expect(mark.classList.contains('think')).toBe(true)
+    expect(mark.getAttribute('title')).toBe('thinking on · effort high')
+  })
+  it('orders eye, bolt, thinking', () => {
+    const host = render(<ModalityTag tag="vision" draft="eagle3" thinking="thinking on" />)
+    const icons = [...host.querySelectorAll('.modality-icon')].map((e) => e.getAttribute('title'))
+    expect(icons).toEqual(['vision', 'drafter · EAGLE3', 'thinking on'])
+  })
+  it('dims the eye and retitles it when vision is off', () => {
+    const eye = render(<ModalityTag tag="vision" draft={null} visionOff />).querySelector('.modality-icon')!
+    expect(eye.classList.contains('off')).toBe(true)
+    expect(eye.getAttribute('title')).toBe('vision off for this slot')
+  })
+})

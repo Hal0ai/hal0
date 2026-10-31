@@ -49,7 +49,7 @@ const PROFILE_CTX_MAX = 16777216;
 // thinking is 'auto' | 'on' | 'off'; vision is 'auto' | 'off'; speculation is 'auto' | 'off' | 'ngram'.
 const BLANK = {
   name: '', intent: '', flags: '', runner: '',
-  ctx: '', thinking: 'auto', vision: 'auto', speculation: 'auto',
+  ctx: '', thinking: 'auto', effort: 'default', budget: '', vision: 'auto', speculation: 'auto',
 };
 
 // ── typed tune fields ────────────────────────────────────────────────────────
@@ -61,6 +61,25 @@ export function thinkingFromForm(v) { return v === 'on' ? true : v === 'off' ? f
 // Unset (null) reasons only when a request asks — the same as 'off' — so the
 // card and preview say so instead of implying the model decides.
 export function thinkingLabel(v) { return v === 'on' ? 'on' : v === 'off' ? 'off' : 'default (off)'; }
+// Reasoning effort (llama-server --reasoning-effort); 'default' emits nothing.
+export const REASONING_EFFORTS = ['default', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+export const effortOf = (v) => (REASONING_EFFORTS.includes(v) ? v : 'default');
+// Thinking-token budget is held as text in the form ('' = unlimited = -1 on the wire).
+export function budgetToForm(v) { return v == null || v === -1 ? '' : String(v); }
+export function budgetFromForm(v) {
+  const t = String(v ?? '').trim();
+  return t === '' ? -1 : Number(t);
+}
+export function budgetError(text) {
+  const raw = String(text ?? '').trim();
+  if (!raw) return null;
+  if (!/^(-1|\d+)$/.test(raw)) return 'Must be a whole number, 0 or more (blank = unlimited)';
+  return null;
+}
+export function reasoningLabel(effort, budget) {
+  const b = budget == null || budget === -1 ? 'unlimited' : String(budget);
+  return `effort ${effortOf(effort)} · budget ${b}`;
+}
 const switchOf = (v) => (v === 'off' ? 'off' : 'auto');
 const specOf = (v) => (v === 'off' || v === 'ngram' ? v : 'auto');
 
@@ -372,6 +391,7 @@ function TunedProfileCard({ p, index, onEdit, onClone, onDelete, onExport }) {
       <div className="stk-lib-slotlist" data-testid={`pf-tune-${p.name}`}>
         <PfRow label="ctx" value={p.ctx_size != null ? ctxLabel(p.ctx_size) : 'model native'} />
         <PfRow label="thinking" value={thinkingLabel(thinkingToForm(p.enable_thinking))} />
+        <PfRow label="reasoning" value={reasoningLabel(p.reasoning_effort, p.reasoning_budget)} />
         <PfRow label="vision" value={p.vision === 'off' ? 'off' : 'auto'} />
         <PfRow label="spec" value={specOf(p.speculation)} />
         <PfRow label="runner" value={p.runner ? runnerTitleFor(p.runner, backends) : 'auto'} />
@@ -491,6 +511,8 @@ function validateForm(form, existing) {
   else if (existing.includes(name)) errs.name = `“${name}” already exists`;
   const ctxErr = ctxError(form.ctx);
   if (ctxErr) errs.ctx = ctxErr;
+  const budgetErr = budgetError(form.budget);
+  if (budgetErr) errs.budget = budgetErr;
   // Flag-ownership screens (§21.7 managed + §5 slot-hardware + ADR-0029
   // model-fact flags) — mirror the server hard-reject inline so the save never
   // surfaces the 400. Hardware first so -ngl (in both sets) gets the "belongs
@@ -542,7 +564,10 @@ function RunnerPullButton({ runnerKey, backends }) {
   );
 }
 
-export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
+// `saveAs` (slot drawer's "Save as profile…"): a clone whose source already
+// carries the suggested name and the staged overrides, so the name is used
+// verbatim and `cloned_from` is the source's own.
+export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved, saveAs = false }) {
   const isEdit = mode === 'edit';
   const systemInfoQuery = useSystemInfo();
   const backends = systemInfoQuery.data?.backends ?? {};
@@ -562,10 +587,15 @@ export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved })
       flags: source.flags || '',
       ctx: source.ctx_size != null ? String(source.ctx_size) : '',
       thinking: thinkingToForm(source.enable_thinking),
+      effort: effortOf(source.reasoning_effort),
+      budget: budgetToForm(source.reasoning_budget),
       vision: switchOf(source.vision),
       speculation: specOf(source.speculation),
       runner: source.runner || '',
     };
+    if (mode === 'clone' && saveAs) {
+      return { ...base, name: String(source.name || '').slice(0, 32), ...(source.cloned_from ? { cloned_from: source.cloned_from } : {}) };
+    }
     if (mode === 'clone') {
       const suffix = source.seed ? '-custom' : '-copy';
       return { ...base, name: (source.name + suffix).slice(0, 32), cloned_from: source.name };
@@ -615,6 +645,8 @@ export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved })
       // PUT; on a create the key is simply omitted.
       ...(ctxText ? { ctx_size: Number(ctxText) } : isEdit ? { ctx_size: null } : {}),
       enable_thinking: thinkingFromForm(form.thinking),
+      reasoning_effort: effortOf(form.effort),
+      reasoning_budget: budgetFromForm(form.budget),
       vision: switchOf(form.vision),
       speculation: specOf(form.speculation),
       intent: form.intent ?? '',
@@ -651,9 +683,10 @@ export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved })
   }
 
   const title = isEdit ? `Edit · ${source.name}`
+    : mode === 'clone' && saveAs ? 'Save as profile'
     : mode === 'clone' ? (source.seed ? `Edit a copy · ${source.name}` : `Clone · ${source.name}`)
     : 'New profile';
-  const eyebrow = mode === 'create' ? 'CREATE' : mode === 'clone' ? (source.seed ? 'EDIT A COPY' : 'CLONE') : 'EDIT';
+  const eyebrow = mode === 'create' ? 'CREATE' : mode === 'clone' ? (saveAs ? 'SAVE AS' : source.seed ? 'EDIT A COPY' : 'CLONE') : 'EDIT';
 
   return (
     <FormDrawer
@@ -666,7 +699,7 @@ export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved })
         <>
           <div className="pf-drawer-preview mono" data-testid="pf-drawer-preview">
             <span className="pf-chip-dot" />
-            ctx {ctxLabel(String(form.ctx ?? '').trim() || null)} · thinking {thinkingLabel(form.thinking)} · vision {form.vision} · speculation {form.speculation}
+            ctx {ctxLabel(String(form.ctx ?? '').trim() || null)} · thinking {thinkingLabel(form.thinking)} · {reasoningLabel(form.effort, budgetFromForm(form.budget))} · vision {form.vision} · speculation {form.speculation}
           </div>
           <span className="pf-grow" />
           {f.submitted && blocking && (
@@ -757,6 +790,24 @@ export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved })
             <option value="on">On — reason unless the request opts out</option>
             <option value="off">Off — reason only when the request asks</option>
           </select>
+        </FormRow>
+
+        <FormRow label="Effort" sub="how hard the model reasons when thinking is on (--reasoning-effort); needs a recent runner build">
+          <select className="pf-input mono" value={form.effort}
+            onChange={e => set('effort', e.target.value)} data-testid="pf-select-effort">
+            {REASONING_EFFORTS.map(v => (
+              <option key={v} value={v}>{v === 'default' ? 'Default — the model decides' : v}</option>
+            ))}
+          </select>
+        </FormRow>
+
+        <FormRow label="Budget" sub="thinking-token cap; blank = unlimited, 0 = end thinking immediately"
+          error={show('budget') ? errs.budget : null}>
+          <input className={'pf-input mono' + (show('budget') && errs.budget ? ' err' : '')}
+            inputMode="numeric" value={form.budget || ''}
+            onChange={e => set('budget', e.target.value)} onBlur={() => touch('budget')}
+            placeholder="unlimited" aria-invalid={!!(show('budget') && errs.budget)}
+            data-testid="pf-input-budget" />
         </FormRow>
 
         <FormRow label="Vision" sub="load the model's mmproj projector">

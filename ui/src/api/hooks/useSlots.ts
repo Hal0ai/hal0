@@ -11,6 +11,7 @@ import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tan
 import { useEffect, useRef, useState } from 'react'
 import { api, apiGet, isSignedOut, SIGNED_OUT_MESSAGE } from '../client'
 import { ENDPOINTS } from '../endpoints'
+import type { ReasoningEffort } from './useProfiles'
 
 // Mutating verbs go through `api(..., { raw: true })` so the dev-time
 // mockFetch shim (which is GET-shaped and answers POST/PUT/DELETE with
@@ -73,6 +74,34 @@ export interface SlotBreaker {
   retry_after_s: number
 }
 
+/** Sparse per-slot override table (`[tune]` in the slot TOML). Absent key = the
+ *  profile's value. */
+export interface SlotTune {
+  ctx_size?: number
+  enable_thinking?: boolean
+  reasoning_effort?: ReasoningEffort
+  reasoning_budget?: number
+  vision?: 'auto' | 'off'
+  speculation?: 'auto' | 'off' | 'ngram'
+}
+
+export type TuneSource = 'profile' | 'slot' | 'profile-flags'
+
+/** Resolved tune: what the slot actually runs with. Stable read contract
+ *  (keys are never renamed; additions only). */
+export interface TuneEffective {
+  ctx_size: number | null
+  enable_thinking: boolean | null
+  reasoning_effort: ReasoningEffort
+  reasoning_budget: number
+  vision: 'auto' | 'off'
+  speculation: 'auto' | 'off' | 'ngram'
+  sources: Partial<Record<keyof SlotTune, TuneSource>>
+  /** Why a non-default reasoning_effort cannot be passed to this runner (build
+   *  too old, runner unknown, ...); null when it can. Server-worded text. */
+  reasoning_effort_unavailable: string | null
+}
+
 export interface Slot {
   name: string
   type: string
@@ -131,7 +160,11 @@ export interface Slot {
   ctx_effective?: number | null
   /** Where `ctx_effective` came from: the slot's profile, the model's native
    *  window, or the built-in fallback. */
-  ctx_source?: 'profile' | 'native' | 'fallback' | null
+  /** Sparse per-slot overrides of the profile; `{}` = none. */
+  tune?: SlotTune | null
+  /** Resolved tune (profile + overrides); null when it cannot be resolved. */
+  tune_effective?: TuneEffective | null
+  ctx_source?: 'profile' | 'native' | 'fallback' | 'slot' | null
   /** Present only on a slot the profile-centric conversion could not convert
    *  (ADR-0029). The slot keeps launching its pre-conversion command
    *  (`running_pre_conversion`) until the operator fixes it. `fix` is the
@@ -356,7 +389,7 @@ function inferSlotShape(s: any): { type: string; group: string; device: string }
   return { type: type ?? 'llm', group: group ?? 'chat', device }
 }
 
-function normalizeSlot(s: any): Slot {
+export function normalizeSlot(s: any): Slot {
   const shape = inferSlotShape(s)
   return {
     ...s,
@@ -412,6 +445,10 @@ function normalizeSlot(s: any): Slot {
     // SC-4 default marker — strict boolean so an absent key reads as "not the
     // default" rather than undefined (the row action gates on `!== true`).
     default: s?.default === true,
+    // Per-slot tune overrides (sparse table) and the resolved effective view.
+    // Absent on an older server: {} / null, so the UI reads "no overrides".
+    tune: s?.tune ?? {},
+    tune_effective: s?.tune_effective ?? null,
   }
 }
 

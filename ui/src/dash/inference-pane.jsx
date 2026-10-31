@@ -55,6 +55,7 @@ import { slotModelRow } from './slots/slot-shared.js'
 import { useCardReorder } from './slots/card-order.js'
 import { RichSelect } from './rich-select.jsx'
 import { FitChip, ModalityTag, SlotSpecBolt } from './fit-chip.jsx'
+import { effectiveProfileName, eyeState, thinkingMark } from './tune-state.js'
 import { draftTagValue } from './spec-state.js'
 import { feasibilityHint } from './feasibility-copy'
 // devKind — one shared, meta-aware helper (src/lib/deviceMeta.ts); replaces
@@ -357,7 +358,9 @@ function ProfileApplyConfirm({ pending, profiles, backends, hardware, onClose })
           }).options,
           baselineRunner: s.binary || '',
           currentDevice: s.device || '',
-          currentProfile: (profiles || []).find((p) => p.name === (s.profile || '')) || null,
+          currentProfile: (profiles || []).find((p) => p.name === effectiveProfileName(s)) || null,
+          // The slot's saved overrides outlive a profile swap.
+          tune: s.tune,
         })
       : null
   // A stopped slot does not "restart": SlotManager.restart is unload-then-load
@@ -601,6 +604,11 @@ export function modelPickerOptions({ s, opts, cur, has, allSlots, verdictFor }) 
   for (const m of opts) {
     const quant = m.quant || null
     const modTag = modelModalityTag(m)
+    // The slot's tune state shows on its CURRENT model only: thinking is slot
+    // state, not a model fact, so other rows never carry the glyph.
+    const isCur = m.id === cur
+    const thinking = isCur ? thinkingMark(s.tune_effective)?.title : undefined
+    const visionOff = isCur && eyeState(m, s.tune_effective) === 'off'
     const fit = verdictFor ? verdictFor(m.id) : null
     const name = (
       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{m.longName || m.id}</span>
@@ -616,7 +624,12 @@ export function modelPickerOptions({ s, opts, cur, has, allSlots, verdictFor }) 
       row: (
         <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
           {name}
-          <ModalityTag tag={modTag} draft={draftTagValue(m)} />
+          <ModalityTag
+            tag={modTag}
+            draft={draftTagValue(m)}
+            thinking={thinking}
+            visionOff={visionOff}
+          />
         </span>
       ),
       // closed trigger: everything inline on one line — the modality glyphs
@@ -625,7 +638,12 @@ export function modelPickerOptions({ s, opts, cur, has, allSlots, verdictFor }) 
         <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
           {name}
           {/* the current model's state bolt replaces the static drafter bolt */}
-          <ModalityTag tag={modTag} draft={m.id === cur ? null : draftTagValue(m)} />
+          <ModalityTag
+            tag={modTag}
+            draft={m.id === cur ? null : draftTagValue(m)}
+            thinking={thinking}
+            visionOff={visionOff}
+          />
           {m.id === cur && <SlotSpecBolt spec={s.metrics?.spec} model={m} />}
           {quant && <span className="chip amber">{quant}</span>}
           {fit}
@@ -662,12 +680,14 @@ export function ModelPicker({ s, models, allSlots, disabled, onSwap }) {
   const opts = compatibleModels(models, { type: 'llm', slot: s })
   const cur = s.model_id || s.model || ''
   const has = opts.some((m) => m.id === cur)
-  // The window each candidate would launch with under this slot's profile —
-  // the server resolves the profile name per candidate (profile ctx_size, else
-  // the candidate's native window). ctx_effective is the CURRENT model's
-  // window, so it is only the fallback for a slot with no profile.
-  const profileName = typeof s.profile === 'string' && s.profile ? s.profile : undefined
-  const ctx = typeof s.ctx_effective === 'number' && s.ctx_effective > 0 ? s.ctx_effective : undefined
+  // The window each candidate would launch with in THIS slot: the server
+  // resolves `slot` per candidate from the slot's profile plus its [tune]
+  // override. Keep the profile as a compatibility fallback for a server that
+  // predates slot resolution; when Context itself is overridden, its explicit
+  // value is candidate-independent and wins on both server versions.
+  const profileName = effectiveProfileName(s)
+  const tuneCtx = Number(s.tune?.ctx_size)
+  const ctxOverride = Number.isFinite(tuneCtx) && tuneCtx > 0 ? tuneCtx : null
   const verdictFor = (id) => {
     const row = (feasibility.data?.results || []).find((r) => r.model_id === id)
     return modelFitChip(row)
@@ -690,7 +710,9 @@ export function ModelPicker({ s, models, allSlots, disabled, onSwap }) {
           feasibility.mutate({
             models: ids.map((id) => ({
               model_id: id,
-              ...(profileName ? { profile: profileName } : ctx ? { ctx } : {}),
+              profile: profileName,
+              ...(ctxOverride ? { ctx: ctxOverride } : {}),
+              slot: s.name,
             })),
           })
         }}

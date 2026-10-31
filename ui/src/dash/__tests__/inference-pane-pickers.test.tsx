@@ -35,7 +35,7 @@ const { feasibilityCalls, feasibilityHandler } = vi.hoisted(() => ({
   feasibilityCalls: [] as unknown[],
   feasibilityHandler: {
     current: undefined as
-      | ((body: { models: { model_id: string; ctx?: number }[] }) => { results: unknown[] } | undefined)
+      | ((body: { models: { model_id: string; ctx?: number; profile?: string; slot?: string }[] }) => { results: unknown[] } | undefined)
       | undefined,
   },
 }))
@@ -45,7 +45,7 @@ vi.mock('@/api/hooks/useModelsFeasibility', () => ({
     const [data, setData] = React.useState<{ results: unknown[] } | undefined>(undefined)
     return {
       data,
-      mutate: (body: { models: { model_id: string; ctx?: number }[] }) => {
+      mutate: (body: { models: { model_id: string; ctx?: number; profile?: string; slot?: string }[] }) => {
         feasibilityCalls.push(body)
         const resp = feasibilityHandler.current?.(body)
         if (resp) setData(resp)
@@ -393,7 +393,7 @@ describe('ModelPicker (card-dropdowns Task 1)', () => {
     expect(row.querySelector('.rsel-option-desc .chip.info')).toBeNull()
   })
 
-  it('fires one lazy feasibility batch on first open with slot ctx, not on render', () => {
+  it('fires one lazy feasibility batch on first open, keyed by slot, not on render', () => {
     const { host } = mount(
       <ModelPicker s={SLOT} models={MODELS} allSlots={ALL_SLOTS} disabled={false} onSwap={() => {}} />,
     )
@@ -402,8 +402,8 @@ describe('ModelPicker (card-dropdowns Task 1)', () => {
     expect(feasibilityCalls.length).toBe(1)
     expect(feasibilityCalls[0]).toEqual({
       models: [
-        { model_id: 'm1', ctx: 32768 },
-        { model_id: 'm2', ctx: 32768 },
+        { model_id: 'm1', profile: 'chat', slot: 'chat' },
+        { model_id: 'm2', profile: 'chat', slot: 'chat' },
       ],
     })
     // Closing and reopening does not re-fire — first open only.
@@ -414,13 +414,13 @@ describe('ModelPicker (card-dropdowns Task 1)', () => {
     expect(feasibilityCalls.length).toBe(1)
   })
 
-  it('sends the slot profile name instead of ctx when the slot has a profile', () => {
-    // ctx_effective is the CURRENT model's window; a candidate must be judged
-    // at the window it would launch with under the slot's profile, which the
-    // server resolves per candidate from the profile name.
+  it('sends the slot tune context plus profile fallback for both server generations', () => {
+    // The explicit sparse override is candidate-independent and wins. The
+    // slot lets the current server resolve the whole tune; profile keeps the
+    // request correct against a server that predates slot resolution.
     const { host } = mount(
       <ModelPicker
-        s={{ ...SLOT, profile: 'rocm' }}
+        s={{ ...SLOT, profile: 'rocm', tune: { ctx_size: 8192 } }}
         models={MODELS}
         allSlots={ALL_SLOTS}
         disabled={false}
@@ -430,8 +430,8 @@ describe('ModelPicker (card-dropdowns Task 1)', () => {
     openMenu(host, 'chat')
     expect(feasibilityCalls[0]).toEqual({
       models: [
-        { model_id: 'm1', profile: 'rocm' },
-        { model_id: 'm2', profile: 'rocm' },
+        { model_id: 'm1', ctx: 8192, profile: 'rocm', slot: 'chat' },
+        { model_id: 'm2', ctx: 8192, profile: 'rocm', slot: 'chat' },
       ],
     })
   })

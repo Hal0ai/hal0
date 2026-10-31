@@ -91,7 +91,7 @@ test.describe('C7 — slot-owned hardware grid; no drawer profile selector', () 
     const profileRow = page.locator('.drawer .form-row', { hasText: 'Profile' })
     await profileRow.locator('select').selectOption('vulkan')
 
-    await page.locator('.drawer button:has-text("Save")').click()
+    await page.locator('.drawer').getByRole('button', { name: 'Save', exact: true }).click()
 
     // PUT /config must include profile: "vulkan"
     await expect.poll(() => configPuts.length).toBeGreaterThan(0)
@@ -126,7 +126,7 @@ test.describe('C7 — slot-owned hardware grid; no drawer profile selector', () 
     await expect(page.locator('.drawer')).toBeVisible()
 
     // Click Save immediately — there is no changed config to persist.
-    await page.locator('.drawer button:has-text("Save")').click()
+    await page.locator('.drawer').getByRole('button', { name: 'Save', exact: true }).click()
 
     await expect(page.locator('.drawer')).toHaveCount(0)
     expect(configPuts).toEqual([])
@@ -162,7 +162,7 @@ test.describe('C7 — slot-owned hardware grid; no drawer profile selector', () 
     await expect(page.locator('.drawer')).toBeVisible()
 
     await page.locator('.drawer .form-row', { hasText: 'Profile' }).locator('select').selectOption('vulkan')
-    await page.locator('.drawer button:has-text("Save")').click()
+    await page.locator('.drawer').getByRole('button', { name: 'Save', exact: true }).click()
 
     // The restart must have been kicked off…
     await expect.poll(() => restartStarted).toBe(true)
@@ -297,7 +297,7 @@ test.describe('slot drawer profile row (ADR-0029)', () => {
     await expect(hint).toContainText('65,536')
     await expect(hint).toContainText('set by profile my-tune')
     await expect(page.locator('.drawer .form-lbl > span', { hasText: /^Context \(ceiling\)$/ })).toHaveCount(0)
-    await expect(page.getByTestId('slot-launch-tune-note')).toContainText('profile')
+    await expect(page.getByTestId('slot-tune-block')).toContainText('profile')
   })
 
   test('"Edit profile" opens the profiles drawer on the slot\'s profile', async ({ page }) => {
@@ -360,7 +360,7 @@ test.describe('slot drawer profile row (ADR-0029)', () => {
 
     // The slot drawer now stages the fork as the slot's profile; Save applies it.
     await expect(page.getByTestId('slot-profile')).toContainText('rocm-custom')
-    await page.locator('.drawer button:has-text("Save")').click()
+    await page.locator('.drawer').getByRole('button', { name: 'Save', exact: true }).click()
     await expect.poll(() => puts.length).toBeGreaterThan(0)
     expect(puts[0].profile).toBe('rocm-custom')
   })
@@ -519,7 +519,7 @@ test.describe('profile apply flow — runner-carrying profile applies a new runt
     // `.toHaveValue()`.
     await expect(page.getByTestId('slot-hw-runtime')).toContainText('Qwen3 TTS')
 
-    await page.locator('.drawer button:has-text("Save")').click()
+    await page.locator('.drawer').getByRole('button', { name: 'Save', exact: true }).click()
     await expect.poll(() => puts.length).toBeGreaterThan(0)
     expect(puts[0]).toMatchObject({
       binary: 'qwen3tts',

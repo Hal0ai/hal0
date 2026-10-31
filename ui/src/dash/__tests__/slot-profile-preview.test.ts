@@ -67,6 +67,7 @@ type PreviewArgs = {
   baselineRunner: string
   currentDevice: string
   currentProfile?: ProfileRow | null
+  tune?: Record<string, unknown>
 }
 
 const preview = (args: PreviewArgs): Preview | null =>
@@ -77,6 +78,7 @@ const preview = (args: PreviewArgs): Preview | null =>
     baselineRunner: args.baselineRunner,
     currentDevice: args.currentDevice,
     currentProfile: args.currentProfile ?? null,
+    tune: args.tune,
   }) as Preview | null
 
 describe('profileApplyPreview — runtime flip', () => {
@@ -308,5 +310,24 @@ describe('profileFitsSlot — the client twin of resolved_profile_fits_slot', ()
   })
   it('no profile never fits', () => {
     expect(profileFitsSlot(null, { type: 'llm' }, cat)).toBe(false)
+  })
+})
+
+describe('profileApplyPreview — slot overrides', () => {
+  const prev = { name: 'a', flags: '', ctx_size: 8192, enable_thinking: false, vision: 'auto' }
+  const next = { name: 'b', flags: '', ctx_size: 131072, enable_thinking: true, vision: 'off' }
+  const args = { baselineRunner: '', currentDevice: 'gpu-rocm', currentProfile: prev, profile: next }
+
+  it('a key the slot overrides is not reported as changing', () => {
+    const p = preview({ ...args, tune: { ctx_size: 8192 } })
+    expect(p!.tune.map((t) => t.label)).toEqual(['thinking', 'vision'])
+  })
+  it('every overridden key drops out; no overrides reports all', () => {
+    expect(preview({ ...args, tune: { ctx_size: 8192, enable_thinking: false, vision: 'auto' } })!.tune).toEqual([])
+    expect(preview({ ...args, tune: {} })!.tune.map((t) => t.label)).toEqual(['context', 'thinking', 'vision'])
+    expect(preview({ ...args })!.tune).toHaveLength(3)
+  })
+  it('an override of false still holds its key', () => {
+    expect(preview({ ...args, tune: { enable_thinking: false } })!.tune.map((t) => t.label)).not.toContain('thinking')
   })
 })

@@ -113,7 +113,8 @@ async function captureWrites(page: Page) {
 }
 
 const drawer = (page: Page) => page.locator('.drawer')
-const saveBtn = (page: Page) => page.locator('.drawer button:has-text("Save")')
+const saveBtn = (page: Page) =>
+  page.locator('.drawer').getByRole('button', { name: 'Save', exact: true })
 const stateChip = (page: Page) => page.getByTestId('slot-state-readonly')
 
 // The effective context is a read-only hint under the Profile row — there is

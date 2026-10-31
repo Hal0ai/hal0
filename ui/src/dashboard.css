@@ -3545,6 +3545,8 @@ select.npu-sel {
 /* Modality glyphs (eye, drafter bolt) sit bare right after the model name —
    no chip box — so the chips that follow (quant, runtime, fit) stay the tags. */
 .modality-icon { display: inline-flex; align-items: center; flex-shrink: 0; color: var(--info); }
+.modality-icon.off { color: var(--fg-4); opacity: 0.6; }
+.modality-icon.think { color: var(--dev-npu); }
 .chip.fit-chip svg, .modality-icon svg { flex-shrink: 0; display: block; }
 .rsel-option:hover, .rsel-option[data-active="true"] { background: var(--bg-3); }
 .rsel-option[aria-selected="true"] { background: var(--accent-bg); }
@@ -4047,3 +4049,20 @@ button.pf-state:disabled { cursor: default; opacity: 0.65; }
   color: var(--accent); background: var(--accent-soft); border: 1px solid var(--accent-line);
   border-radius: 5px; padding: 1px 5px; align-self: center; white-space: nowrap;
 }
+
+/* ── Slot drawer Tune block (per-slot overrides of the profile) ───────────── */
+.tune-block .tune-row { display: grid; grid-template-columns: 96px 1fr; gap: 8px; align-items: start; padding: 4px 0; }
+.tune-lbl { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--fg-3); padding-top: 5px; }
+.tune-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex-shrink: 0; }
+.tune-segs { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.tune-seg {
+  font: inherit; font-size: 11.5px; padding: 3px 9px; border-radius: 999px; cursor: pointer;
+  background: transparent; color: var(--fg-3); border: 1px solid var(--line, var(--fg-4));
+}
+.tune-seg:hover:not(:disabled) { color: var(--fg); }
+.tune-seg.profile { border-style: dashed; }
+.tune-seg.on { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-line); }
+.tune-seg:disabled, .tune-num:disabled { opacity: 0.45; cursor: not-allowed; }
+.tune-num { width: 96px; padding: 3px 8px; }
+.tune-foot { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.hint.err { color: var(--err, #ff6b6b); }
