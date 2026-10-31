@@ -64,5 +64,5 @@ remains available. Rollback backups preserve overrides for later recovery.
 - `src/hal0/slots/tune.py:174`, `:228`: resolver and write guards.
 - `src/hal0/providers/container.py:1695`, `:3155`: launch and resolved tune.
 - `src/hal0/mcp/admin.py:269`: compact roster contract.
-- `src/hal0/updater/updater.py:4438`, `:4519`: rollback restore and strip.
+- `src/hal0/updater/updater.py:4418`, `:4499`: rollback restore and strip.
 - `ui/src/dash/slot-tune-block.jsx:155`: Tune controls.

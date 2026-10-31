@@ -1462,3 +1462,38 @@ def test_strip_keeps_the_mode_of_a_rewritten_file(tmp_hal0_home: str, tmp_path: 
     updater._strip_tune_config_for(older, job_id=None)
     assert "reasoning_effort" not in profiles.read_text(encoding="utf-8")
     assert stat.S_IMODE(profiles.stat().st_mode) == 0o640
+
+
+def test_strip_hands_a_rewritten_file_back_to_its_owner(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A root-run rollback must not leave a catalog the hal0 account cannot read."""
+    from hal0.updater import updater
+
+    profiles, _stacks = _tuned_catalogs()
+    st = profiles.stat()
+    owners: list[tuple[int, int]] = []
+    monkeypatch.setattr(updater.os, "fchown", lambda _fd, uid, gid: owners.append((uid, gid)))
+    older = tmp_path / "hal0-1.7.1"
+    older.mkdir()
+    updater._strip_tune_config_for(older, job_id=None)
+    assert (st.st_uid, st.st_gid) in owners
+
+
+def test_strip_rewrites_a_writable_file_the_caller_cannot_chown(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """hal0 rolling back with a ``root:hal0`` 0664 catalog, the state the stacks loader
+    tells an operator to set up: failing to give the file away must not abort it."""
+    from hal0.updater import updater
+
+    profiles, _stacks = _tuned_catalogs()
+
+    def _not_root(*_a: Any) -> None:
+        raise PermissionError("Operation not permitted")
+
+    monkeypatch.setattr(updater.os, "fchown", _not_root)
+    older = tmp_path / "hal0-1.7.1"
+    older.mkdir()
+    assert str(profiles) in updater._strip_tune_config_for(older, job_id=None)
+    assert "reasoning_effort" not in profiles.read_text(encoding="utf-8")
