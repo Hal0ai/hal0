@@ -44,8 +44,10 @@ the table clears all overrides. Stack export preserves the sparse table.
 Profile exports omit default effort and budget; no schema-version bump is
 required. Stack apply currently merges tune keys rather than replacing them.
 
-Rollback to a release without tune support strips `[tune]` only after writing
-a `.bak-<stamp>` copy. Files without tune are untouched. Failed or cancelled
+Rollback to a release without tune support strips what that release refuses,
+only after writing a `.bak-<stamp>` copy: slot `[tune]`, profile reasoning keys
+in `profiles.toml`, and stack entry `tune` plus embedded profile reasoning keys
+in `stacks.toml`. Files without these keys are untouched. Failed or cancelled
 activation restores backups unless the stripped file has since been edited.
 
 ## Consequences
@@ -62,5 +64,5 @@ remains available. Rollback backups preserve overrides for later recovery.
 - `src/hal0/slots/tune.py:174`, `:228`: resolver and write guards.
 - `src/hal0/providers/container.py:1695`, `:3155`: launch and resolved tune.
 - `src/hal0/mcp/admin.py:269`: compact roster contract.
-- `src/hal0/updater/updater.py:4413`, `:4453`: rollback restore and strip.
+- `src/hal0/updater/updater.py:4417`, `:4498`: rollback restore and strip.
 - `ui/src/dash/slot-tune-block.jsx:155`: Tune controls.
