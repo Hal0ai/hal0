@@ -1927,12 +1927,93 @@ class HindsightProvider(MemoryProvider):
                 if doc_items:
                     budgeted = list(budgeted) + doc_items
 
+        # Hindsight returns chunks/source facts beside ``results``.  Filtering
+        # only the result list is not sufficient: an enrichment belonging to
+        # a private or project-scoped result would otherwise survive the ACL
+        # pass and become visible to callers that consume raw recall context
+        # (notably Open WebUI's RAG bridge).  Keep only enrichment that is
+        # explicitly joined to a result which survived visibility + budget.
+        chunks_merged, source_facts_merged = self._filter_recall_enrichment(
+            budgeted,
+            chunks_merged,
+            source_facts_merged,
+            client_id=client_id,
+            dataset=dataset,
+        )
+
         return RecallResults(
             budgeted,
             entities=entities_merged or None,
             chunks=chunks_merged or None,
             source_facts=source_facts_merged or None,
         )
+
+    def _filter_recall_enrichment(
+        self,
+        items: list[dict[str, Any]],
+        chunks: dict[str, Any],
+        source_facts: dict[str, Any],
+        *,
+        client_id: str | None,
+        dataset: str | list[str],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Fail closed when joining response-level recall enrichment.
+
+        Hindsight's ``chunks`` and ``source_facts`` maps are response-level
+        data, so they do not automatically follow the result ACL applied by
+        :meth:`_filter_visible`.  Only explicit fact/document/chunk joins are
+        accepted here; an unjoinable enrichment is omitted rather than
+        guessed visible.
+        """
+
+        def _values(value: Any) -> set[str]:
+            if value is None:
+                return set()
+            if isinstance(value, (list, tuple, set)):
+                return {str(v) for v in value if v is not None and str(v)}
+            return {str(value)} if str(value) else set()
+
+        fact_ids: set[str] = set()
+        document_ids: set[str] = set()
+        chunk_ids: set[str] = set()
+        referenced_source_ids: set[str] = set()
+        for item in items:
+            fact_ids.update(_values(item.get("fact_id")))
+            document_ids.update(_values(item.get("document_id") or item.get("id")))
+            chunk_ids.update(_values(item.get("chunk_id")))
+            referenced_source_ids.update(_values(item.get("source_fact_ids")))
+
+        visible_source_facts: dict[str, Any] = {}
+        for key, raw in source_facts.items():
+            if not isinstance(raw, dict):
+                continue
+            source_id = str(raw.get("id") or key)
+            if source_id not in referenced_source_ids:
+                continue
+            mapped = self._fact_to_item(raw, "shared")
+            if not self._filter_visible([mapped], client_id, dataset):
+                continue
+            visible_source_facts[str(key)] = raw
+            fact_ids.update(_values(raw.get("id") or key))
+            document_ids.update(_values(raw.get("document_id")))
+            chunk_ids.update(_values(raw.get("chunk_id")))
+
+        visible_chunks: dict[str, Any] = {}
+        for key, raw in chunks.items():
+            if not isinstance(raw, dict):
+                continue
+            raw_chunk_ids = _values(raw.get("id") or key)
+            raw_document_ids = _values(raw.get("document_id"))
+            raw_fact_ids = _values(raw.get("fact_id") or raw.get("fact_ids"))
+            if not (
+                raw_chunk_ids & chunk_ids
+                or raw_document_ids & document_ids
+                or raw_fact_ids & fact_ids
+            ):
+                continue
+            visible_chunks[str(key)] = raw
+
+        return visible_chunks, visible_source_facts
 
     @staticmethod
     def _precedence_key(item: dict[str, Any]) -> tuple[int, float]:
@@ -2414,6 +2495,9 @@ class HindsightProvider(MemoryProvider):
         final_score = scores.get("final")
         return {
             "id": fact.get("document_id") or fact.get("id"),
+            "fact_id": fact.get("id"),
+            "document_id": fact.get("document_id"),
+            "chunk_id": fact.get("chunk_id"),
             "text": fact.get("text", ""),
             "timestamp": fact.get("mentioned_at") or _now(),
             "dataset": bank.replace("__", ":"),

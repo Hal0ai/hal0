@@ -18,6 +18,7 @@ on what you have actually enabled through hal0's own capability slots:
 | Chat | — | Yes — points at hal0's own `/v1` |
 | Voice (Call mode) | — | Yes — STT/TTS point at hal0's `/v1/audio/*` |
 | Document uploads (RAG) | An **embed**-capable slot is enabled | No |
+| Shared Hindsight memory | The `hal0_hindsight_rag` Filter is active and global | No |
 | Image generation | The **img** capability has an installed model the API can render | No |
 | Web search | A search provider is installed | No — none ships today |
 
@@ -55,6 +56,46 @@ siblings are left unset — Open WebUI falls back to its own bundled
 sentence-transformers model rather than a broken hal0 route. See [Enable
 memory](/docs/guides/enable-memory) and [Choose
 models](/docs/guides/choose-models) for picking an embed model.
+
+## Shared Hindsight memory in RAG
+
+hal0 can add relevant shared Hindsight memory to every ordinary slot-model
+chat as another native Open WebUI source. It does not copy memory into Open
+WebUI's vector database: a global inlet Filter calls
+`POST /api/memory/context`, then adds the returned raw chunks to the same
+`metadata.files` collection used by uploads. Uploaded documents and Hindsight
+memory therefore share Open WebUI's normal source and citation UI.
+
+Automatic recall is deliberately **shared-only**. The endpoint accepts no
+bank, dataset, private toggle or caller-controlled agent identity. Private and
+project memory remains available through the explicit hal0-memory MCP tools,
+and chats with Hermes/agent models skip this Filter to avoid double recall.
+If Hindsight is unavailable or slow, the Filter fails open and the chat
+continues without memory context.
+
+On a deployment where hal0 has an Open WebUI admin token, put it in the
+hal0-api environment as `HAL0_OPENWEBUI_ADMIN_TOKEN` and run a component
+converge; hal0 creates and globally enables only its own Function ID:
+
+```sh
+sudo systemctl edit hal0-api.service
+# add Environment=HAL0_OPENWEBUI_ADMIN_TOKEN=<Open-WebUI-admin-token>
+sudo systemctl restart hal0-api.service
+sudo hal0 update component openwebui
+```
+
+On trusted-header or manually administered deployments, do a one-time import
+under **Admin → Functions** from:
+
+```text
+http://host.docker.internal:8080/api/memory/openwebui-function
+```
+
+Save it, then turn on both **Active** and **Global**. hal0 never uses Open
+WebUI's bulk Function sync, never touches other Functions, and will not
+overwrite a user-owned Function that happens to use the same ID. Open WebUI's
+separate native Memories feature is disabled so Hindsight remains the single
+durable memory system.
 
 ## Image generation
 

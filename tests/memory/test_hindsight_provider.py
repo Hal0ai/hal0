@@ -810,7 +810,14 @@ async def test_recall_returns_list_compatible_results_with_entities_chunks_attrs
     keeps working) AND carries the response-level enrichment as attributes."""
     fake = FakeHindsightClient()
     fake._facts_by_bank["shared"] = [
-        {"document_id": "d1", "text": "Alice works at Google", "type": "world", "tags": []}
+        {
+            "id": "f1",
+            "document_id": "d1",
+            "chunk_id": "c1",
+            "text": "Alice works at Google",
+            "type": "world",
+            "tags": [],
+        }
     ]
     fake._entities_by_bank["shared"] = {"Alice": {"entity_id": "e1", "canonical_name": "Alice"}}
     fake._chunks_by_bank["shared"] = {"c1": {"id": "c1", "text": "chunk text", "chunk_index": 0}}
@@ -821,6 +828,9 @@ async def test_recall_returns_list_compatible_results_with_entities_chunks_attrs
     assert out == [
         {
             "id": "d1",
+            "fact_id": "f1",
+            "document_id": "d1",
+            "chunk_id": "c1",
             "text": "Alice works at Google",
             "timestamp": out[0]["timestamp"],
             "dataset": "shared",
@@ -837,6 +847,43 @@ async def test_recall_returns_list_compatible_results_with_entities_chunks_attrs
     assert out.entities == {"Alice": {"entity_id": "e1", "canonical_name": "Alice"}}
     assert out.chunks == {"c1": {"id": "c1", "text": "chunk text", "chunk_index": 0}}
     assert out.source_facts is None  # nothing seeded -> omitted, not an empty dict
+
+
+@pytest.mark.asyncio
+async def test_recall_drops_enrichment_not_joined_to_visible_results():
+    """Response-level chunks must not outlive result ACL filtering."""
+    fake = FakeHindsightClient()
+    fake._facts_by_bank["shared"] = [
+        {
+            "id": "f-public",
+            "document_id": "d-public",
+            "chunk_id": "c-public",
+            "text": "public",
+            "tags": [],
+            "metadata": {},
+        },
+        {
+            "id": "f-secret",
+            "document_id": "d-secret",
+            "chunk_id": "c-secret",
+            "text": "secret",
+            "tags": ["visibility:private", "owner:other"],
+            "metadata": {},
+        },
+    ]
+    fake._chunks_by_bank["shared"] = {
+        "c-public": {"id": "c-public", "document_id": "d-public", "text": "public raw"},
+        "c-secret": {"id": "c-secret", "document_id": "d-secret", "text": "secret raw"},
+        "c-orphan": {"id": "c-orphan", "text": "unjoinable raw"},
+    }
+    p = HindsightProvider(client=fake, client_id="anonymous", unified_bank=True)
+
+    out = await p.recall("q", dataset="shared", client_id="anonymous")
+
+    assert [item["document_id"] for item in out] == ["d-public"]
+    assert out.chunks == {
+        "c-public": {"id": "c-public", "document_id": "d-public", "text": "public raw"}
+    }
 
 
 @pytest.mark.asyncio

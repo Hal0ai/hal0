@@ -224,6 +224,15 @@ RULES: tuple[_Rule, ...] = (
     _Rule("liveness (shallow)", _exact("/api/health"), AuthClass.OPEN, _GET),
     _Rule("liveness (deep)", _exact("/api/health/system"), AuthClass.OPEN, _GET),
     _Rule("dashboard bootstrap urls", _exact("/api/config/urls"), AuthClass.OPEN, _GET),
+    # Static Python source for Open WebUI's backend-side "Import from URL".
+    # Contains no data or credentials; it must remain fetchable when hal0 API
+    # auth is enabled because that importer cannot attach a hal0 bearer key.
+    _Rule(
+        "openwebui hindsight function source",
+        _exact("/api/memory/openwebui-function"),
+        AuthClass.OPEN,
+        _GET,
+    ),
     _Rule("login", _exact("/api/auth/login"), AuthClass.OPEN, _POST),
     _Rule("auth status", _exact("/api/auth/status"), AuthClass.OPEN, _GET),
     # Clearing your own HttpOnly session cookie is harmless and must work at
@@ -337,6 +346,9 @@ RULES: tuple[_Rule, ...] = (
     # OPEN_ALLOWLIST) is the CI ratchet that forces a conscious diff.
     _Rule("memory destructive (any DELETE)", _prefix("/api/memory"), AuthClass.ADMIN, _DELETE),
     _Rule("memory namespace bulk delete", _exact("/api/memory/delete"), AuthClass.ADMIN, _POST),
+    # Open WebUI presents the ordinary box client key. This route is a
+    # bounded shared-only read with no caller-controlled namespace/identity.
+    _Rule("memory shared RAG context", _exact("/api/memory/context"), AuthClass.CLIENT, _POST),
     _Rule("memory", _prefix("/api/memory"), AuthClass.ADMIN, None),
     _Rule("board", _prefix("/api/board"), AuthClass.ADMIN, None),
     # hal0-brain steward chat (R4 §G): the /api/brain/chat surface. Admin-only —
@@ -459,6 +471,7 @@ OPEN_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/api/health"),
         ("GET", "/api/health/system"),
         ("GET", "/api/config/urls"),
+        ("GET", "/api/memory/openwebui-function"),
         ("POST", "/api/auth/login"),
         ("GET", "/api/auth/status"),
         ("POST", "/api/auth/logout"),

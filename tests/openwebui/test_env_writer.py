@@ -32,7 +32,7 @@ def _parse_env(text: str) -> dict[str, str]:
 
 
 def test_write_openwebui_env_writes_all_prewired_keys(tmp_path: Path) -> None:
-    """All seven prewired vars from PLAN.md §8 are present in the file."""
+    """The core prewired vars are present in the file."""
     target = tmp_path / "openwebui.env"
     written = write_openwebui_env(target)
     assert written == target
@@ -44,6 +44,7 @@ def test_write_openwebui_env_writes_all_prewired_keys(tmp_path: Path) -> None:
     assert env["OPENAI_API_BASE_URLS"] == "http://host.docker.internal:8080/v1"
     assert env["WEBUI_AUTH"] == "False"
     assert env["WEBUI_NAME"] == "hal0"
+    assert env["ENABLE_MEMORIES"] == "False"
     assert env["ENABLE_OPENAI_API"] == "True"
     assert env["ENABLE_OLLAMA_API"] == "False"
     assert env["DATA_DIR"] == "/app/backend/data"

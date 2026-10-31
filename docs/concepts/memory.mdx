@@ -27,6 +27,16 @@ The memory subsystem is an engine-neutral layer behind two surfaces: the
 the same provider, so a fact written by an agent over MCP is the same fact
 the dashboard shows.
 
+Open WebUI is a third, read-only consumer when its global
+`hal0_hindsight_rag` Filter is enabled. `POST /api/memory/context` retrieves
+only the `shared` namespace as an anonymous caller, prefers the raw chunks
+behind visible recalled facts, and contributes them to Open WebUI's existing
+RAG sources and citations. It cannot request private or project scope; use
+MCP for those explicit operations. The Filter fails open when memory is
+unavailable, and Open WebUI's separate native Memories store is disabled so
+there is still one durable memory owner. See [Open WebUI — chat companion
+wiring](/docs/guides/open-webui#shared-hindsight-memory-in-rag).
+
 The MCP surface covers the full read/write/curate/synthesize lifecycle:
 
 - **Core**: `memory_add`, `memory_search`, `memory_list`, `memory_delete`,

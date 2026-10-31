@@ -20,13 +20,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 import re
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 from pydantic import ValidationError
 
 from hal0.api._audit import record_action
@@ -34,6 +35,7 @@ from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config.loader import hal0_config_txn, load_hal0_config
 from hal0.config.schema import MemoryGraphConfig
 from hal0.memory import extraction_env as _ee
+from hal0.memory.context import build_memory_context
 from hal0.memory.extraction_env import MEMORY_ALIAS, ExtractionLimits, memory_engine_target
 from hal0.memory.hindsight_provider import bank_to_namespace
 from hal0.memory.namespace import (
@@ -1192,6 +1194,85 @@ async def memory_recall(request: Request) -> dict[str, Any]:
         client_id=agent_id if agent_id != "anonymous" else None,
     )
     return {"items": items}
+
+
+@router.post("/context")
+async def memory_context(request: Request) -> dict[str, Any]:
+    """Return citation-ready, shared Hindsight context for chat RAG.
+
+    This surface deliberately exposes no dataset, bank, tags, private-mode,
+    or caller identity controls.  Automatic Open WebUI retrieval always uses
+    the public ``shared`` namespace as anonymous; explicit private/project
+    memory operations continue to go through the scoped recall/MCP surfaces.
+    """
+    body = await _read_json_body(request)
+    query = body.get("query")
+    if not isinstance(query, str) or not query.strip():
+        raise BadRequest(
+            "memory_context requires 'query' (non-empty string)",
+            details={"path": "/api/memory/context"},
+        )
+
+    def _bounded_int(name: str, default: int, low: int, high: int) -> int:
+        value = body.get(name, default)
+        if isinstance(value, bool):
+            raise BadRequest(f"memory_context '{name}' must be an integer")
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise BadRequest(f"memory_context '{name}' must be an integer") from exc
+        return min(high, max(low, parsed))
+
+    budget = body.get("budget", "low")
+    if budget not in {"low", "mid", "high"}:
+        raise BadRequest("memory_context 'budget' must be one of: low, mid, high")
+    prefer_observations = body.get("prefer_observations", True)
+    if not isinstance(prefer_observations, bool):
+        raise BadRequest("memory_context 'prefer_observations' must be a boolean")
+    min_scores = body.get("min_scores")
+    if min_scores is not None:
+        if not isinstance(min_scores, dict) or any(
+            not isinstance(key, str)
+            or isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            for key, value in min_scores.items()
+        ):
+            raise BadRequest("memory_context 'min_scores' must map names to numeric scores")
+        min_scores = {key: float(value) for key, value in min_scores.items()}
+
+    started = time.monotonic()
+    result = await build_memory_context(
+        _wrapper(request),
+        query.strip(),
+        fact_tokens=_bounded_int("fact_tokens", 1024, 0, 4096),
+        chunk_tokens=_bounded_int("chunk_tokens", 1536, 0, 4096),
+        max_sources=_bounded_int("max_sources", 8, 1, 20),
+        budget=budget,
+        prefer_observations=prefer_observations,
+        min_scores=min_scores,
+    )
+    log.info(
+        "memory.context.completed query=%s contexts=%d facts=%d latency_ms=%d",
+        hashlib.sha256(query.encode("utf-8", errors="replace")).hexdigest()[:12],
+        len(result["contexts"]),
+        len(result["facts"]),
+        int((time.monotonic() - started) * 1000),
+    )
+    return result
+
+
+@router.get("/openwebui-function")
+async def openwebui_memory_function() -> Response:
+    """Serve the bundled Filter for manual Open WebUI import.
+
+    Automatic provisioning uses the admin API when
+    ``HAL0_OPENWEBUI_ADMIN_TOKEN`` is configured.  This read-only source
+    endpoint keeps trusted-header and manually administered deployments
+    installable without granting hal0 an admin credential.
+    """
+    from hal0.openwebui.function_sync import bundled_source
+
+    return Response(content=bundled_source(), media_type="text/x-python; charset=utf-8")
 
 
 @router.get("/list")

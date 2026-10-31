@@ -14,7 +14,7 @@ written verbatim, unquoted (#3045), and HAL0_OWUI_BIND_HOST, the one value
 systemd also reads, comes first and must be a plain IP address or hostname.
 
 Prewired variables (PLAN.md §8):
-    OPENAI_API_BASE_URLS=http://127.0.0.1:8080/v1
+    OPENAI_API_BASE_URLS=http://host.docker.internal:8080/v1
     WEBUI_AUTH=False
     HAL0_OWUI_BIND_HOST=0.0.0.0     (consumed by the systemd unit, not OWUI)
     WEBUI_NAME=hal0
@@ -23,6 +23,7 @@ Prewired variables (PLAN.md §8):
     ENABLE_PERSISTENT_CONFIG=False
     DATA_DIR=/app/backend/data
     DEFAULT_LOCALE=en
+    ENABLE_MEMORIES=False
 
 Voice / Call-mode variables:
     AUDIO_STT_ENGINE=openai
@@ -183,6 +184,10 @@ _DEFAULT_OPENWEBUI_ENV: dict[str, str] = {
     "OPENAI_API_BASE_URLS": "http://host.docker.internal:8080/v1",
     "WEBUI_AUTH": "False",
     "WEBUI_NAME": "hal0",
+    # Hindsight is hal0's one durable memory system.  Open WebUI's separate
+    # per-user Memories store would create a second, uncited recall path and
+    # make deletes/visibility disagree with hal0's memory surfaces.
+    "ENABLE_MEMORIES": "False",
 }
 
 

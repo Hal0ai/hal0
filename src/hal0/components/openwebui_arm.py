@@ -119,6 +119,25 @@ def _render_dynamic_env(job_id: str | None) -> tuple[bool, str | None]:
     return before != after, None
 
 
+def _hindsight_rag_fields() -> dict[str, Any]:
+    """Best-effort bundled Function reconcile for convergence payloads.
+
+    Most existing boxes have not supplied an Open WebUI admin token; keep
+    that expected ``auth_required`` state out of legacy component payloads
+    while making every configured installation/update observable.
+    """
+    try:
+        from hal0.openwebui.function_sync import reconcile_hindsight_rag_function
+
+        result = reconcile_hindsight_rag_function()
+    except Exception as exc:  # pragma: no cover - convergence is fail-soft
+        log.warning("components.owui_hindsight_rag_failed", error=str(exc))
+        return {"hindsight_rag": {"status": "unavailable"}}
+    if result.get("status") == "auth_required":
+        return {}
+    return {"hindsight_rag": result}
+
+
 def reconcile_openwebui_env(
     *,
     job_id: str | None = None,
@@ -159,7 +178,7 @@ def reconcile_openwebui_env(
     if error is not None:
         return {"status": "build_failed", "error": error}
     if not changed:
-        return {"status": "unchanged", "env_changed": False}
+        return {"status": "unchanged", "env_changed": False, **_hindsight_rag_fields()}
 
     restarted = _restart_openwebui(runner, is_hal0_user, verb="try-restart")
     if not restarted:
@@ -169,7 +188,12 @@ def reconcile_openwebui_env(
             remedy=f"env rewritten; run 'systemctl restart {image_pin.OPENWEBUI_UNIT_NAME}' by hand",
         )
     log.info("components.owui_env_reconciled", job_id=job_id, restarted=restarted)
-    return {"status": "converged", "env_changed": True, "restarted": restarted}
+    return {
+        "status": "converged",
+        "env_changed": True,
+        "restarted": restarted,
+        **_hindsight_rag_fields(),
+    }
 
 
 def reconcile_openwebui_env_background() -> None:
@@ -212,6 +236,7 @@ def _env_reconcile_fields(
     if changed:
         fields["env_changed"] = True
         fields["restarted"] = _restart_openwebui(runner, is_hal0_user, verb="try-restart")
+    fields.update(_hindsight_rag_fields())
     return fields
 
 
@@ -399,4 +424,5 @@ def converge_openwebui(
         payload["env_changed"] = True
     if env_error is not None:
         payload["env_error"] = env_error
+    payload.update(_hindsight_rag_fields())
     return payload
