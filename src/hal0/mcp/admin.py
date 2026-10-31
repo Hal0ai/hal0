@@ -179,6 +179,7 @@ import structlog
 from mcp.types import CallToolResult, TextContent
 
 from hal0.api._redact import redact_log_line as _redact_log_line
+from hal0.config.schema import REASONING_BUDGET_MAX
 from hal0.mcp.approval_queue import ApprovalQueue
 from hal0.mcp.memory import _ANNOTATIONS as _MEMORY_TOOL_ANNOTATIONS
 from hal0.mcp.probes import PROBE_TOOLS, dispatch_probe
@@ -1277,6 +1278,7 @@ _PROFILE_REASONING_PROPS: dict[str, Any] = {
     "reasoning_budget": {
         "type": ["integer", "null"],
         "minimum": -1,
+        "maximum": REASONING_BUDGET_MAX,
         "description": (
             "Reasoning token budget (--reasoning-budget): -1 = unlimited, 0 = no "
             "thinking. On update, null clears it back to -1."
@@ -1291,6 +1293,7 @@ _PROFILE_CREATE_REASONING_PROPS: dict[str, Any] = {
     "reasoning_budget": {
         "type": "integer",
         "minimum": -1,
+        "maximum": REASONING_BUDGET_MAX,
         "description": (
             "Reasoning token budget (--reasoning-budget): -1 = unlimited, 0 = no thinking."
         ),
@@ -1483,6 +1486,7 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
                     "reasoning_budget": {
                         "type": ["integer", "null"],
                         "minimum": -1,
+                        "maximum": REASONING_BUDGET_MAX,
                         "description": "Reasoning token budget (-1 = unlimited, 0 = none).",
                     },
                     "vision": {

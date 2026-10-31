@@ -379,7 +379,7 @@ def _read_slot_raw(slot_name: str) -> dict[str, Any] | None:
     slot_sec = raw.get("slot") if isinstance(raw.get("slot"), dict) else {}
 
     def g(key: str, default: Any = None) -> Any:
-        return raw.get(key, slot_sec.get(key, default))
+        return slot_sec.get(key, raw.get(key, default))
 
     model_tbl = raw.get("model")
     if not isinstance(model_tbl, dict):
@@ -400,7 +400,9 @@ def _read_slot_raw(slot_name: str) -> dict[str, Any] | None:
         "device": device if device in _VALID_DEVICES else None,
         "provider": g("provider"),
         "profile": g("profile"),
-        "tune": _valid_tune(raw.get("tune")),
+        "tune": (
+            _valid_tune(raw.get("tune")) if g("type", "llm") == "llm" and device != "npu" else None
+        ),
     }
 
 

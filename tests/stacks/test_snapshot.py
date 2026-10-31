@@ -41,6 +41,28 @@ def _write_caps(home: str, text: str) -> None:
 
 
 class TestSnapshot:
+    @pytest.mark.parametrize("slot_type,device", [("embedding", "gpu-rocm"), ("llm", "npu")])
+    def test_snapshot_omits_inert_tune(
+        self, reg: ModelRegistry, tmp_hal0_home: str, slot_type: str, device: str
+    ) -> None:
+        _write_slot(
+            tmp_hal0_home,
+            "inert",
+            [
+                'name = "inert"',
+                "port = 8087",
+                f'type = "{slot_type}"',
+                f'device = "{device}"',
+                "[model]",
+                'default = "m"',
+                "[tune]",
+                'vision = "off"',
+            ],
+        )
+        entry = next(e for e in snapshot_live_stack(registry=reg).slots if e.slot == "inert")
+        assert entry.tune is None
+        assert entry.model == "m"
+
     def test_snapshot_includes_tune(self, reg: ModelRegistry, tmp_hal0_home: str) -> None:
         _write_slot(
             tmp_hal0_home,
