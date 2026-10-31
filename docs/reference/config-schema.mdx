@@ -405,8 +405,9 @@ hardware placement. See
 |---|---|---|---|
 | `default` | str | `""` | model id from the registry |
 
-The slot names its model and nothing else about it. The context window, flags and every
-other tune live on the slot's profile (ADR-0029); a write carrying one is rejected with
+The slot's `[model]` table names its model and nothing else about it. Base tune
+lives on the profile, and six sparse overrides belong in `[tune]` (ADR-0045).
+A write carrying tuning under `[model]` is rejected with
 `slot.tuning_key_denied`.
 
 ### `[server]` (nested under a slot)

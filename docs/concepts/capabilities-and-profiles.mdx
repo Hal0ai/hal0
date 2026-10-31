@@ -85,9 +85,9 @@ hal0's managed-args denylist and can never appear in a profile's `flags`.
 
 The model holds only facts about its file (path, architecture, native
 context, chat template, projector, whether it has MTP heads). A slot names
-exactly one profile. To run one model with different tuning — another
-context size, other sampling, a different KV-cache type — make a second
-profile and point another slot at it. No tune lives on the model, so two
+exactly one profile. Use sparse slot overrides for context, thinking, effort,
+budget, vision or speculation. For other sampling or a different KV-cache
+type, make a second profile and point another slot at it. No tune lives on the model, so two
 slots that share a file never conflict.
 
 ```sh
