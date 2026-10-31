@@ -4558,7 +4558,9 @@ def _strip_tune_config_for(
                 backup, hashlib.sha256(text.encode("utf-8")).hexdigest()
             )
             st = path.stat()
-            write_toml_atomic(path, data, mode=stat.S_IMODE(st.st_mode), owner=(st.st_uid, st.st_gid))
+            write_toml_atomic(
+                path, data, mode=stat.S_IMODE(st.st_mode), owner=(st.st_uid, st.st_gid)
+            )
             changed.append(str(path))
             log.info("updater.tune_stripped", job_id=job_id, path=str(path), backup=str(backup))
     except BaseException:
