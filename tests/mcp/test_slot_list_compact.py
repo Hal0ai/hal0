@@ -23,7 +23,10 @@ from hal0.mcp.approval_queue import ApprovalQueue
 # Hermes' inline budget for the 65,536-ctx anchor, and the tighter bound the
 # 30-slot roster must meet so growth has headroom.
 HERMES_BUDGET = 39_321
-ROSTER_BOUND = 20_000
+# ADR-0045 adds the full effective-tune contract to each roster row. The
+# representative 30-slot payload is ~21k; retain at least 15k headroom below
+# Hermes' real truncation budget rather than dropping provenance fields.
+ROSTER_BOUND = 24_000
 
 _DIGEST = "sha256:" + "ab12" * 16
 
@@ -51,7 +54,14 @@ def _full_slot(i: int, *, state: str = "ready") -> dict[str, Any]:
             "reasoning_budget": -1,
             "vision": "off",
             "speculation": "auto",
-            "sources": {"ctx_size": "slot", "enable_thinking": "profile-flags"},
+            "sources": {
+                "ctx_size": "slot",
+                "enable_thinking": "profile-flags",
+                "reasoning_effort": "profile",
+                "reasoning_budget": "profile",
+                "vision": "slot",
+                "speculation": "profile",
+            },
             "reasoning_effort_unavailable": None,
         },
         "runtime": "container",

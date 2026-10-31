@@ -74,10 +74,9 @@ owner:
 | **Profile** | Base tune: free llama-server `flags` (KV-cache types, batch size, sampling, reasoning, `--parallel`), `ctx_size`, `enable_thinking`, `reasoning_effort`, `reasoning_budget`, `vision` (`auto` or `off`), `speculation` (`auto`, `off` or `ngram`), and an optional `runner`. |
 | **Slot** | Placement and lifecycle: `device`, `gpu_index`, `n_gpu_layers`, `threads`, `binary` (a key into the `RUNNER_IMAGES` registry — the dashboard's slot drawer calls this the slot's **Runtime**), the `image_pin` escape hatch, and the port. Plus which model and which profile it runs. This is the "hardware grid": `[device · NGL · THREADS · BINARY]`. |
 
-A slot carries no llama-server flags and no context size. To run one model
-two ways — at a different context size, or with different sampling — make two
-profiles and point each slot at its own. Nothing is shared that could
-conflict:
+A slot carries no free llama-server flags. It may override context, thinking,
+effort, budget, vision and speculation under `[tune]`. For different sampling
+or KV-cache flags, make separate profiles and point each slot at its own:
 
 ```sh
 hal0 profile create agent-32k --from agent --ctx-size 32768
@@ -93,8 +92,9 @@ rollback) and never appears as a pickable Runtime option. See [Capabilities
 & profiles](/docs/concepts/capabilities-and-profiles) for the full Runtime
 picker and how a profile can carry one.
 
-The split is enforced at every write path, not just documented. A slot write
-that carries a tuning key — `[model].context_size` / `ctx_size`, `parallel`,
+The split is enforced at every write path. Sparse `[tune]` overrides are the
+six exceptions. A slot write carrying a legacy tuning key outside that table —
+`[model].context_size` / `ctx_size`, `parallel`,
 `chat_template`, `workers`, `mtp`, `speculation`, `enable_thinking`, `vision` or
 `[server].extra_args` — is rejected with `slot.tuning_key_denied`, whose
 message says the key belongs on a profile. The guard runs the other way too:
