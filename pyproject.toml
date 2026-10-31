@@ -86,7 +86,7 @@ dependencies = [
   # compromised emSign root from uv's bundled CA store (GHSA-hq85-5cpj-mr62),
   # the case a quarantine cannot help with. The floor moves to it too, so no
   # install keeps the vulnerable store.
-  "uv>=0.13.4,<0.13.5",
+  "uv>=0.13.4,<0.13.7",
 ]
 
 [project.optional-dependencies]
