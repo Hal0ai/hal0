@@ -405,13 +405,23 @@ async def test_boot_capabilities_phase_starts_the_probe_without_blocking(
     """The boot phase starts the probe and does not wait for it."""
     from hal0.api import _boot_capabilities
 
-    app, ctx = _boot_ctx()
-    started = time.monotonic()
-    await _boot_capabilities(app, ctx)
-    elapsed = time.monotonic() - started
+    # The probe holds until released, so the proof needs no wall clock: a boot
+    # that waited on it would return with the probe already finished.
+    release = threading.Event()
+    answer_after_release = slow_probe.image_present
 
-    assert elapsed < _FAST_S, f"boot waited on the FLM-image probe ({elapsed:.2f}s)"
+    def _held(image: str) -> bool | None:
+        release.wait(timeout=30)
+        return answer_after_release(image)
+
+    slow_probe.image_present = _held
+    app, ctx = _boot_ctx()
+    await _boot_capabilities(app, ctx)
+
     assert catalog._flm_probe_thread is not None, "boot did not start the probe"
+    probe_still_held = catalog._flm_probe_thread.is_alive()
+    release.set()
+    assert probe_still_held, "boot waited on the FLM-image probe"
     ticks = await _probe_lands_while_loop_runs()
     _assert_probe_ran_off_loop(slow_probe, ticks, threading.get_ident())
     assert catalog._flm_image_present() is True
