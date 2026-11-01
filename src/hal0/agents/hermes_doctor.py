@@ -369,3 +369,54 @@ def check_hermes_gateway_unit(
         }
     state = "installed (masked)" if unit.is_symlink() else "installed"
     return {"status": "ok", "detail": f"{unit.name} {state}; no unmanaged gateway"}
+
+
+def check_hermes_dashboard_token(*, path: Path | None = None) -> dict[str, str]:
+    """The Hermes dashboard token file hal0-api reads for ``/api/board/*`` exists.
+
+    The ``hal0-agent`` shim mints the file; the token value is never printed.
+    """
+    from hal0.board import BoardNoToken
+    from hal0.board.auth import read_dashboard_token
+
+    try:
+        read_dashboard_token(path)
+    except BoardNoToken as exc:
+        where = (exc.details or {}).get("path", str(path) if path else "the token file")
+        return {
+            "status": "warn",
+            "detail": f"missing at {where}; restart hal0-agent@hermes to mint it",
+        }
+    return {"status": "ok", "detail": "present"}
+
+
+def check_hermes_kanban_reachable(*, client: Any | None = None) -> dict[str, str]:
+    """``GET /boards`` on the Hermes kanban plugin answers (the Operator Board backend)."""
+    import asyncio
+
+    from hal0.board import HermesKanbanClient
+    from hal0.board import auth as board_auth
+    from hal0.errors import Hal0Error
+
+    if client is None:
+        if not board_auth.hermes_installed():
+            return {
+                "status": "ok",
+                "detail": "Hermes agent not installed; board unavailable by design",
+            }
+        client = HermesKanbanClient.from_env()
+
+    async def _probe() -> Any:
+        try:
+            return await client.request_json("GET", "/boards")
+        finally:
+            aclose = getattr(getattr(client, "_http", None), "aclose", None)
+            if aclose is not None:
+                await aclose()
+
+    try:
+        data = asyncio.run(_probe())
+    except Hal0Error as exc:
+        return {"status": "warn", "detail": f"{exc.code}: {exc}"}
+    boards = data.get("boards") if isinstance(data, dict) else None
+    return {"status": "ok", "detail": f"{len(boards) if isinstance(boards, list) else 0} board(s)"}
