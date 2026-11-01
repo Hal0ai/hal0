@@ -458,8 +458,8 @@ ui_component_picker() {
         _up_mode="plain"
     fi
 
-    exec 4<"${UI_TTY_IN:-/dev/tty}" 2>/dev/null || exec 4</dev/null
-    exec 3>"${UI_TTY_OUT:-/dev/tty}" 2>/dev/null || exec 3>/dev/null
+    { exec 4<"${UI_TTY_IN:-/dev/tty}"; } 2>/dev/null || exec 4</dev/null
+    { exec 3>"${UI_TTY_OUT:-/dev/tty}"; } 2>/dev/null || exec 3>/dev/null
 
     printf '\n%sWhich components should be installed?%s\n' "${BOLD}" "${RST}" >&3
     printf '  a) defaults  b) bare inference  p) pick  [a]: ' >&3
@@ -467,6 +467,7 @@ ui_component_picker() {
     local choice=""
     if [[ "$_up_mode" == "plain" ]]; then
         IFS= read -r choice <&4 || choice=""
+        choice="${choice//[[:space:]]/}"
         printf '\n' >&3
     else
         IFS= read -rsn1 choice <&4 || choice=""
@@ -482,12 +483,13 @@ ui_component_picker() {
                     printf '  > ' >&3
                     IFS= read -r line <&4 || break
                     printf '\n' >&3
+                    line="${line//[[:space:]]/}"
                     case "$line" in
                         ""|d|D) break ;;
                         a|A) _ui_picker_preset a ;;
                         b|B) _ui_picker_preset b ;;
-                        *[!0-9]*) ;;
-                        *) (( line >= 1 && line <= n )) && _ui_picker_toggle "$((line - 1))" ;;
+                        *[!0-9]*|?????*) ;;
+                        *) (( 10#$line >= 1 && 10#$line <= n )) && _ui_picker_toggle "$((10#$line - 1))" ;;
                     esac
                 done
             else

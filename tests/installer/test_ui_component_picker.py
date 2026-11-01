@@ -30,6 +30,7 @@ ui_component_picker rows result
 for id in openwebui comfyui hermes pi hindsight brain; do
   printf '%s=%s\n' "$id" "${{result[$id]}}"
 done
+echo stderr-still-works >&2
 """
 
 
@@ -52,6 +53,7 @@ def run_picker(tmp_path):
             ["bash", str(script)], env=env, capture_output=True, text=True, timeout=30
         )
         assert proc.returncode == 0, proc.stderr
+        assert "stderr-still-works" in proc.stderr, "picker leaked a stderr redirect"
         return dict(line.split("=", 1) for line in proc.stdout.splitlines())
 
     return _run
@@ -86,3 +88,8 @@ def test_cursor_pick_space_and_enter(run_picker):
 def test_read_failure_accepts_current_state(run_picker):
     out = run_picker(keys="", plain=True)                 # EOF at the preset line
     assert out["pi"] == "off" and out["brain"] == "on"
+
+
+def test_plain_leading_zero_and_padded_answers(run_picker):
+    out = run_picker(keys="p \n08\n 04 \n\n", plain=True)   # 08 ignored, pi on
+    assert out["pi"] == "on" and out["openwebui"] == "on"
