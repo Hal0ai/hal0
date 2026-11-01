@@ -1012,6 +1012,10 @@ export function useBoardEventsStream(
       ws.onopen = () => {
         setConnected(true)
         errorCountRef.current = 0
+        // A reopened socket may carry no frame (Hermes just came back), so
+        // refetch now; otherwise an unavailable-board state would linger.
+        // No hook test harness exists for this stream, so no unit test.
+        scheduleInvalidate()
       }
 
       ws.onmessage = (evt) => {
