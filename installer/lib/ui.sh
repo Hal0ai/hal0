@@ -366,3 +366,163 @@ ui_box() {
         "${bottom_fill}" \
         "${UI_GLYPH_BOX_BR}" "${RST}"
 }
+
+# ── Component picker ────────────────────────────────────────────────────────
+# Interactive checklist for the optional install components.
+#
+# Usage:
+#   rows=( $'id\tLabel\tsummary\ton|off\tunavailable-reason' ... )
+#   declare -A picked=()
+#   ui_component_picker rows picked      # picked[id] = on | off | unavailable
+#
+# An empty reason means the row is available; a non-empty reason greys the row
+# out, it never toggles, and its result is "unavailable". Input comes from
+# ${UI_TTY_IN:-/dev/tty}, output goes to ${UI_TTY_OUT:-/dev/tty}. Always
+# returns 0; a failed read (EOF) accepts the current state.
+#
+# The helpers below read the picker's locals through bash dynamic scope
+# (_up_* variables), so only ui_component_picker may call them.
+
+# Print the checklist (one line per row plus a hint line) to fd 3. Sets
+# _up_lines to the number of lines written so the cursor path can redraw.
+_ui_picker_render() {
+    local i mark line
+    _up_lines=0
+    for i in "${!_up_ids[@]}"; do
+        if [[ -n "${_up_reason[$i]}" ]]; then
+            line="${DIM}[-] ${_up_labels[$i]}  (${_up_reason[$i]})${RST}"
+        else
+            [[ "${_up_cur[$i]}" == "on" ]] && mark="x" || mark=" "
+            line="[${mark}] ${_up_labels[$i]}  ${DIM}${_up_sums[$i]}${RST}"
+        fi
+        if [[ "$_up_mode" == "plain" ]]; then
+            printf '  %d) %s\n' "$((i + 1))" "$line" >&3
+        elif (( i == _up_pos )); then
+            printf '\033[2K\r %s>%s %s\n' "${AMBER}" "${RST}" "$line" >&3
+        else
+            printf '\033[2K\r   %s\n' "$line" >&3
+        fi
+        _up_lines=$((_up_lines + 1))
+    done
+    if [[ "$_up_mode" == "plain" ]]; then
+        printf '  number toggles, a) defaults  b) bare  d) done\n' >&3
+    else
+        printf '\033[2K\r  %sj/k or arrows move, space toggles, a) defaults  b) bare, Enter accepts%s\n' \
+            "${DIM}" "${RST}" >&3
+    fi
+    _up_lines=$((_up_lines + 1))
+}
+
+# Toggle row index $1; unavailable rows are left alone.
+_ui_picker_toggle() {
+    local i="$1"
+    [[ -n "${_up_reason[$i]}" ]] && return 0
+    if [[ "${_up_cur[$i]}" == "on" ]]; then _up_cur[i]="off"; else _up_cur[i]="on"; fi
+}
+
+# Apply preset $1: "a" restores the row defaults, "b" turns every row off.
+_ui_picker_preset() {
+    local i
+    for i in "${!_up_ids[@]}"; do
+        [[ -n "${_up_reason[$i]}" ]] && continue
+        if [[ "$1" == "a" ]]; then _up_cur[i]="${_up_def[$i]}"; else _up_cur[i]="off"; fi
+    done
+}
+
+# Move the cursor back up $1 lines (tput when it works, ANSI otherwise).
+_ui_picker_up() {
+    local n="$1"
+    (( n > 0 )) || return 0
+    if [[ "$_up_have_tput" == "1" ]] && tput cuu "$n" >&3 2>/dev/null; then
+        return 0
+    fi
+    printf '\033[%dA' "$n" >&3
+}
+
+ui_component_picker() {
+    local -n _up_rows_ref="$1"
+    local -n _up_result_ref="$2"
+    local -a _up_ids=() _up_labels=() _up_sums=() _up_def=() _up_reason=() _up_cur=()
+    local _up_mode="cursor" _up_have_tput=0 _up_lines=0 _up_pos=0
+    local row id label summary state reason i key rest line n
+
+    for row in "${_up_rows_ref[@]}"; do
+        IFS=$'\t' read -r id label summary state reason <<<"$row"
+        _up_ids+=("$id"); _up_labels+=("$label"); _up_sums+=("$summary")
+        _up_def+=("$state"); _up_reason+=("$reason"); _up_cur+=("$state")
+    done
+    n=${#_up_ids[@]}
+
+    command -v tput >/dev/null 2>&1 && _up_have_tput=1
+    if [[ "${UI_PLAIN:-0}" == "1" || "$_up_have_tput" != "1" ]]; then
+        _up_mode="plain"
+    fi
+
+    exec 4<"${UI_TTY_IN:-/dev/tty}" 2>/dev/null || exec 4</dev/null
+    exec 3>"${UI_TTY_OUT:-/dev/tty}" 2>/dev/null || exec 3>/dev/null
+
+    printf '\n%sWhich components should be installed?%s\n' "${BOLD}" "${RST}" >&3
+    printf '  a) defaults  b) bare inference  p) pick  [a]: ' >&3
+
+    local choice=""
+    if [[ "$_up_mode" == "plain" ]]; then
+        IFS= read -r choice <&4 || choice=""
+        printf '\n' >&3
+    else
+        IFS= read -rsn1 choice <&4 || choice=""
+        printf '%s\n' "$choice" >&3
+    fi
+
+    case "$choice" in
+        b|B) _ui_picker_preset b ;;
+        p|P)
+            if [[ "$_up_mode" == "plain" ]]; then
+                while :; do
+                    _ui_picker_render
+                    printf '  > ' >&3
+                    IFS= read -r line <&4 || break
+                    printf '\n' >&3
+                    case "$line" in
+                        ""|d|D) break ;;
+                        a|A) _ui_picker_preset a ;;
+                        b|B) _ui_picker_preset b ;;
+                        *[!0-9]*) ;;
+                        *) (( line >= 1 && line <= n )) && _ui_picker_toggle "$((line - 1))" ;;
+                    esac
+                done
+            else
+                _ui_picker_render
+                while :; do
+                    IFS= read -rsn1 key <&4 || break
+                    case "$key" in
+                        ""|$'\r'|$'\n') break ;;
+                        a|A) _ui_picker_preset a ;;
+                        b|B) _ui_picker_preset b ;;
+                        j) (( _up_pos < n - 1 )) && _up_pos=$((_up_pos + 1)) ;;
+                        k) (( _up_pos > 0 )) && _up_pos=$((_up_pos - 1)) ;;
+                        " ") _ui_picker_toggle "$_up_pos" ;;
+                        $'\033')
+                            IFS= read -rsn2 -t 0.1 rest <&4 || rest=""
+                            case "$rest" in
+                                "[A") (( _up_pos > 0 )) && _up_pos=$((_up_pos - 1)) ;;
+                                "[B") (( _up_pos < n - 1 )) && _up_pos=$((_up_pos + 1)) ;;
+                            esac
+                            ;;
+                    esac
+                    _ui_picker_up "$_up_lines"
+                    _ui_picker_render
+                done
+            fi
+            ;;
+    esac
+
+    for i in "${!_up_ids[@]}"; do
+        if [[ -n "${_up_reason[$i]}" ]]; then
+            _up_result_ref["${_up_ids[$i]}"]="unavailable"
+        else
+            _up_result_ref["${_up_ids[$i]}"]="${_up_cur[$i]}"
+        fi
+    done
+    exec 3>&- 4<&-
+    return 0
+}
