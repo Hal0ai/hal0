@@ -3005,15 +3005,18 @@ def test_resolved_footprint_verdict_follows_the_pool(
     assert fp["host_free_mb"] == (total_gib - used_gib) * _GIB
 
 
-def _pin_slot_state(app: FastAPI, stub: dict[str, Any], state: str, name: str = "flash") -> None:
-    """Hold ``name`` in ``state`` the way the manager reports it: the persisted
-    record, plus the unit up so the status reconcile leaves a resident state alone."""
+def _pin_slot_state(
+    app: FastAPI, state: str, *, where: str = "memory", name: str = "flash"
+) -> None:
+    """Hold ``name`` in ``state`` where ``SlotManager.state`` reads it: the in-memory
+    record, or (``where="disk"``) a ``state.json`` with no record cached yet. The unit
+    is left down, so a ``status()`` reconcile would read a resident state as OFFLINE."""
     import time as _time
 
-    from hal0.slots.state import SlotState, SlotStateRecord
+    from hal0.slots.state import SlotState, SlotStateRecord, write_state_atomic
 
     sm: SlotManager = app.state.slot_manager
-    sm._states[sm._key(name)] = SlotStateRecord(
+    record = SlotStateRecord(
         name=name,
         state=SlotState(state),
         model_id="flash-next",
@@ -3022,12 +3025,20 @@ def _pin_slot_state(app: FastAPI, stub: dict[str, Any], state: str, name: str = 
         message="pinned by test",
         extra={},
     )
-    stub["active"].add(name)
+    if where == "disk":
+        sm._states.pop(sm._key(name), None)
+        write_state_atomic(sm._state_file_for(name), record)
+    else:
+        sm._states[sm._key(name)] = record
 
 
-@pytest.mark.parametrize("state", ["ready", "warming"])
+@pytest.mark.parametrize(
+    ("state", "where"),
+    [("ready", "memory"), ("warming", "memory"), ("ready", "disk")],
+)
 def test_resolved_footprint_reads_loaded_for_a_resident_slot(
     state: str,
+    where: str,
     container_stub: dict[str, Any],
     isolated_app: FastAPI,
     isolated_client: TestClient,
@@ -3039,7 +3050,7 @@ def test_resolved_footprint_reads_loaded_for_a_resident_slot(
     _bound_halogen_slot(isolated_client, tmp_hal0_home)
     _stub_halogen_footprint(monkeypatch, 72.0)
     _host_gtt(isolated_app, total_gib=128.0, used_gib=80.0)
-    _pin_slot_state(isolated_app, container_stub, state)
+    _pin_slot_state(isolated_app, state, where=where)
     fp = isolated_client.get("/api/slots/flash/resolved").json()["footprint"]
     assert fp == {
         "resident_mb": 72.0 * _GIB,
@@ -3047,6 +3058,29 @@ def test_resolved_footprint_reads_loaded_for_a_resident_slot(
         "host_free_mb": 48.0 * _GIB,
         "verdict": "loaded",
     }
+
+
+def test_resolved_footprint_never_probes_the_slot_for_its_state(
+    container_stub: dict[str, Any],
+    isolated_app: FastAPI,
+    isolated_client: TestClient,
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The state is the manager's own record: ``status()`` and ``list()`` probe the
+    unit and reconcile, and the drawer's readout must not trigger either."""
+    _bound_halogen_slot(isolated_client, tmp_hal0_home)
+    _stub_halogen_footprint(monkeypatch, 72.0)
+    _host_gtt(isolated_app, total_gib=128.0, used_gib=80.0)
+    _pin_slot_state(isolated_app, "ready")
+
+    async def _probed(self: Any, *args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the resolved readout probed the slot")
+
+    monkeypatch.setattr(SlotManager, "status", _probed)
+    monkeypatch.setattr(SlotManager, "list", _probed)
+    fp = isolated_client.get("/api/slots/flash/resolved").json()["footprint"]
+    assert fp["verdict"] == "loaded"
 
 
 def test_resolved_footprint_keeps_the_fit_verdict_for_an_offline_slot(
@@ -3060,8 +3094,7 @@ def test_resolved_footprint_keeps_the_fit_verdict_for_an_offline_slot(
     _bound_halogen_slot(isolated_client, tmp_hal0_home)
     _stub_halogen_footprint(monkeypatch, 72.0)
     _host_gtt(isolated_app, total_gib=128.0, used_gib=80.0)
-    _pin_slot_state(isolated_app, container_stub, "offline")
-    container_stub["active"].discard("flash")
+    _pin_slot_state(isolated_app, "offline")
     fp = isolated_client.get("/api/slots/flash/resolved").json()["footprint"]
     assert fp["verdict"] == "exceeds"
 
