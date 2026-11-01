@@ -10,6 +10,7 @@ assertions: hal0-managed facts always set and last, tune-owned variables from
 from __future__ import annotations
 
 import asyncio
+import shlex
 from collections.abc import Callable
 from typing import Any
 from unittest.mock import patch
@@ -19,6 +20,7 @@ import pytest
 
 from hal0.config.schema import ProfileConfig
 from hal0.errors import Hal0Error
+from hal0.install.perms import ensure_shared_dir as real_ensure_shared_dir
 from hal0.profiles import ProfileCatalog
 from hal0.providers import halogen as halogen_module
 from hal0.providers.container import _render_quadlet_from_plan, _spec_provider_for
@@ -78,6 +80,15 @@ def _stub_gpu(tmp_hal0_home: str) -> Any:
         yield
 
 
+@pytest.fixture(autouse=True)
+def _cache_dir_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Keep every spec build off the real filesystem: the provider creates the
+    ``/cache`` bind source at spec time, and the default one is under /var/lib."""
+    calls: list[str] = []
+    monkeypatch.setattr(halogen_module, "ensure_shared_dir", lambda path: calls.append(str(path)))
+    return calls
+
+
 def _tune(**overrides: Any) -> EffectiveTune:
     values: dict[str, Any] = {
         "name": "halogen",
@@ -113,6 +124,24 @@ def test_spec_shape() -> None:
     assert spec.mounts[0].read_only
 
 
+def test_checkpoint_outside_the_store_mounts_its_directory() -> None:
+    """The engine reads the tokenizer, lookup table and vision sidecar beside the
+    checkpoint, so a model file the store root does not cover gets its own
+    directory mounted, read-only and at the same path."""
+    info = {**_info(), "path": "/srv/halogen/qwen38-flash-next-ht43.hgn"}
+    spec = HalogenProvider().container_spec(_cfg(), info)
+    assert [m.target for m in spec.mounts] == ["/mnt/ai-models", "/srv/halogen", "/cache"]
+    extra = spec.mounts[1]
+    assert extra.source == "/srv/halogen"
+    assert extra.read_only is True
+    assert spec.mounts[2].read_only is False
+
+
+def test_checkpoint_under_the_store_adds_no_extra_mount() -> None:
+    spec = HalogenProvider().container_spec(_cfg(), _info())
+    assert [m.target for m in spec.mounts] == ["/mnt/ai-models", "/cache"]
+
+
 def test_spec_security_and_cache_mount() -> None:
     spec = HalogenProvider().container_spec(_cfg(), _info())
     assert spec.security_opt == ["apparmor=unconfined", "seccomp=unconfined"]
@@ -128,6 +157,50 @@ def test_cache_dir_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     spec = HalogenProvider().container_spec(_cfg(), _info())
     assert spec.mounts[1].source == "/srv/halogen-cache"
     assert spec.mounts[1].target == "/cache"
+
+
+def test_spec_asks_for_the_cache_dir_it_mounts(
+    monkeypatch: pytest.MonkeyPatch, _cache_dir_calls: list[str]
+) -> None:
+    HalogenProvider().container_spec(_cfg(), _info())
+    assert _cache_dir_calls == ["/var/lib/hal0/halogen-cache"]
+    monkeypatch.setenv("HAL0_HALOGEN_CACHE", "/srv/halogen-cache")
+    HalogenProvider().container_spec(_cfg(), _info())
+    assert _cache_dir_calls[-1] == "/srv/halogen-cache"
+
+
+def test_spec_creates_the_cache_dir_for_real(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """podman exits 125 on a bind source that does not exist, so the spec
+    creates it (shared-directory mode) instead of leaving the slot to fail."""
+    cache = tmp_path / "state" / "halogen-cache"
+    monkeypatch.setattr(halogen_module, "ensure_shared_dir", real_ensure_shared_dir)
+    monkeypatch.setenv("HAL0_HALOGEN_CACHE", str(cache))
+    spec = HalogenProvider().container_spec(_cfg(), _info())
+    assert cache.is_dir()
+    assert spec.mounts[-1].source == str(cache)
+    # A second render leaves the existing dir alone.
+    HalogenProvider().container_spec(_cfg(), _info())
+    assert cache.is_dir()
+
+
+def test_spec_survives_an_uncreatable_cache_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A path under a regular file cannot be created; the spec still builds and
+    the log names the path, so the later podman failure has a visible cause."""
+    blocker = tmp_path / "blocker"
+    blocker.write_bytes(b"")
+    monkeypatch.setattr(halogen_module, "ensure_shared_dir", real_ensure_shared_dir)
+    monkeypatch.setenv("HAL0_HALOGEN_CACHE", str(blocker / "cache"))
+    with caplog.at_level("WARNING", logger="hal0.providers.halogen"):
+        spec = HalogenProvider().container_spec(_cfg(), _info())
+    assert spec.mounts[-1].source == str(blocker / "cache")
+    assert any(
+        "halogen.cache_dir_unavailable" in r.getMessage() and str(blocker) in r.getMessage()
+        for r in caplog.records
+    )
 
 
 def test_spec_health_probe_targets_the_slot_port() -> None:
@@ -333,14 +406,36 @@ def test_malformed_profile_flags_refuse_the_launch() -> None:
     assert exc_info.value.code == "profiles.halogen_flag_malformed"
 
 
-def test_speculation_ngram_maps_like_auto() -> None:
-    """This engine has no n-gram drafter; the write seams refuse the value, and a
-    stale stored one launches the engine default instead of a made-up variable."""
+def test_speculation_ngram_env_stays_pure_and_unset() -> None:
+    """This engine has no n-gram drafter and the write seams refuse the value.
+    ``halogen_env`` stays pure: a stale stored ``ngram`` maps like ``auto``
+    here, and ``container_spec`` is where the ignored value is logged."""
     env = halogen_env(
         port=8099, checkpoint=CKPT, model_id="m", tune=_tune(speculation="ngram"), profile_flags=""
     )
     assert "HALOGEN_DRAFTER_DEFAULT" not in env
     assert "HALOGEN_PLD" not in env
+
+
+def test_stale_ngram_speculation_is_logged_with_the_slot(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level("WARNING", logger="hal0.providers.halogen"):
+        spec = HalogenProvider().container_spec(_cfg(tune={"speculation": "ngram"}), _info())
+    assert "HALOGEN_DRAFTER_DEFAULT" not in spec.env
+    messages = [r.getMessage() for r in caplog.records if "ngram" in r.getMessage()]
+    assert len(messages) == 1
+    assert "slot=flash" in messages[0]
+    assert "halogen.speculation_ngram_ignored" in messages[0]
+
+
+@pytest.mark.parametrize("speculation", ["auto", "off"])
+def test_supported_speculation_values_do_not_warn(
+    speculation: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level("WARNING", logger="hal0.providers.halogen"):
+        HalogenProvider().container_spec(_cfg(tune={"speculation": speculation}), _info())
+    assert not [r for r in caplog.records if r.name == "hal0.providers.halogen"]
 
 
 def test_halogen_env_is_pure() -> None:
@@ -369,6 +464,30 @@ def test_render_contains_stop_and_restart_keys() -> None:
     assert "PublishPort=127.0.0.1:8099:8099" in unit
     assert "Environment=HALOGEN_BIND=127.0.0.1" in unit
     assert "Exec=all" in unit
+
+
+def test_quoted_profile_value_renders_as_one_environment_assignment() -> None:
+    """Review round 1: a value with spaces must not truncate at the first space or
+    open a second assignment (a way to set HALOGEN_DOWNLOAD)."""
+    ProfileCatalog().create(
+        "flash-inject",
+        ProfileConfig(
+            flags=(
+                'HALOGEN_THINKING_BUDGET_MESSAGE="Time is up." HALOGEN_X="y HALOGEN_DOWNLOAD=1"'
+            ),
+            runner="halogen",
+        ),
+    )
+    plan = HalogenProvider().container_spec(_cfg(profile="flash-inject"), _info())
+    unit = _render_quadlet_from_plan("flash", plan)
+    assignments: list[str] = []
+    for line in unit.splitlines():
+        if line.startswith("Environment="):
+            assignments.extend(shlex.split(line[len("Environment=") :]))
+    assert "HALOGEN_THINKING_BUDGET_MESSAGE=Time is up." in assignments
+    assert "HALOGEN_X=y HALOGEN_DOWNLOAD=1" in assignments
+    assert not [a for a in assignments if a.startswith("HALOGEN_DOWNLOAD=")]
+    assert 'Environment="HALOGEN_THINKING_BUDGET_MESSAGE=Time is up."' in unit.splitlines()
 
 
 # ── ABC stubs ───────────────────────────────────────────────────────────────
@@ -404,10 +523,28 @@ async def test_health_ready_when_engine_responds() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/health"
         assert request.url.port == 8099
-        return httpx.Response(200, json={"engine": {"responds": True}})
+        return httpx.Response(200, json={"engine": {"responds": True}, "capability_probe": "ok"})
 
     with _patch_http(handler):
-        assert await HalogenProvider().health(8099) == {"ok": True, "status": "ready"}
+        assert await HalogenProvider().health(8099) == {
+            "ok": True,
+            "status": "ready",
+            "capability_probe": "ok",
+        }
+
+
+async def test_health_ok_rule_ignores_the_capability_probe() -> None:
+    """``ok`` stays the engine-answers check (the fail-watcher's); the probe
+    rides along for ``wait_ready`` to judge."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"engine": {"responds": True}, "capability_probe": "failed"}
+        )
+
+    with _patch_http(handler):
+        verdict = await HalogenProvider().health(8099)
+    assert verdict == {"ok": True, "status": "ready", "capability_probe": "failed"}
 
 
 async def test_health_loading_when_engine_not_responding() -> None:
@@ -415,7 +552,11 @@ async def test_health_loading_when_engine_not_responding() -> None:
         return httpx.Response(200, json={"engine": {"responds": False}})
 
     with _patch_http(handler):
-        assert await HalogenProvider().health(8099) == {"ok": False, "status": "loading"}
+        assert await HalogenProvider().health(8099) == {
+            "ok": False,
+            "status": "loading",
+            "capability_probe": None,
+        }
 
 
 async def test_health_loading_when_engine_block_missing() -> None:
@@ -431,7 +572,11 @@ async def test_health_non_200_reports_http_status() -> None:
         return httpx.Response(503, text="busy")
 
     with _patch_http(handler):
-        assert await HalogenProvider().health(8099) == {"ok": False, "status": "http_503"}
+        assert await HalogenProvider().health(8099) == {
+            "ok": False,
+            "status": "http_503",
+            "capability_probe": None,
+        }
 
 
 async def test_health_transport_error_is_not_ok() -> None:
@@ -449,7 +594,10 @@ async def test_wait_ready_returns_once_the_engine_responds() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls["n"] += 1
-        return httpx.Response(200, json={"engine": {"responds": calls["n"] >= 3}})
+        return httpx.Response(
+            200,
+            json={"engine": {"responds": calls["n"] >= 3}, "capability_probe": "ok"},
+        )
 
     with (
         _patch_http(handler),
@@ -457,6 +605,54 @@ async def test_wait_ready_returns_once_the_engine_responds() -> None:
     ):
         await HalogenProvider().wait_ready(8099)
     assert calls["n"] == 3
+
+
+async def test_wait_ready_waits_for_the_capability_probe() -> None:
+    """The engine answering its PING is not enough: the capability probe must
+    also have passed before the slot may read ready."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        probe = "ok" if calls["n"] >= 4 else "pending"
+        return httpx.Response(200, json={"engine": {"responds": True}, "capability_probe": probe})
+
+    with (
+        _patch_http(handler),
+        patch.object(HalogenProvider, "READY_POLL_S", 0.0),
+    ):
+        await HalogenProvider().wait_ready(8099)
+    assert calls["n"] == 4
+
+
+async def test_wait_ready_times_out_on_a_failed_capability_probe() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"engine": {"responds": True}, "capability_probe": "failed"}
+        )
+
+    with (
+        _patch_http(handler),
+        patch.object(HalogenProvider, "READY_POLL_S", 0.01),
+        patch.object(HalogenProvider, "READY_TIMEOUT_S", 0.05),
+        pytest.raises(TimeoutError) as exc_info,
+    ):
+        await HalogenProvider().wait_ready(8099)
+    assert "capability_probe" in str(exc_info.value)
+    assert "failed" in str(exc_info.value)
+
+
+async def test_wait_ready_times_out_when_the_capability_probe_is_absent() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"engine": {"responds": True}})
+
+    with (
+        _patch_http(handler),
+        patch.object(HalogenProvider, "READY_POLL_S", 0.01),
+        patch.object(HalogenProvider, "READY_TIMEOUT_S", 0.05),
+        pytest.raises(TimeoutError),
+    ):
+        await HalogenProvider().wait_ready(8099)
 
 
 async def test_wait_ready_times_out() -> None:

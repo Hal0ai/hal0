@@ -50,6 +50,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -752,6 +753,27 @@ def unit_sha_of_text(unit_text: str) -> str | None:
     return None
 
 
+#: Characters that make systemd split or unquote an ``Environment=`` word: white
+#: space ends the assignment, ``"`` and ``'`` open a quoted span, a backslash escapes.
+_ENV_NEEDS_QUOTES = re.compile(r"[\s\"'\\]")
+
+
+def _environment_line(key: str, value: str) -> str:
+    """One ``Environment=`` line for ``key=value``.
+
+    systemd (and Quadlet, which reads the key the same way) splits the value
+    into words on unquoted spaces, so ``K=Time is up.`` would set ``K=Time`` and
+    ``K=y X=1`` would set a second variable. An assignment holding white space,
+    a quote or a backslash is therefore written as ONE double-quoted word with
+    ``"`` and ``\\`` escaped. Anything else renders bare, exactly as before.
+    """
+    assignment = f"{key}={value}"
+    if _ENV_NEEDS_QUOTES.search(assignment) is None:
+        return f"Environment={assignment}"
+    escaped = assignment.replace("\\", "\\\\").replace('"', '\\"')
+    return f'Environment="{escaped}"'
+
+
 def _render_quadlet_from_plan(
     instance_token: str,
     plan: RuntimeLaunchPlan,
@@ -884,7 +906,7 @@ def _render_quadlet_from_plan(
     for mount in plan.mounts:
         lines.append(f"Volume={mount.render_quadlet()}")
     for k, v in plan.env.items():
-        lines.append(f"Environment={k}={v}")
+        lines.append(_environment_line(k, v))
     # Publish derived from plan.port (declarative). Skipped under host networking
     # where port publishing is meaningless. ``publish_host`` defaults to loopback;
     # an operator widens it via [slots].publish_host.

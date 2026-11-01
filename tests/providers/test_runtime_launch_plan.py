@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import shlex
 
+import pytest
+
 from hal0.config.schema import ProfileConfig
 from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
 from hal0.providers.base import HealthCheck, Mount, RuntimeLaunchPlan
@@ -171,6 +173,62 @@ def test_timeout_stop_sec_sits_right_after_restart_max_delay() -> None:
     plan = RuntimeLaunchPlan(image="img", command=["x"], stop_timeout_s=120)
     lines = _render_from_plan("s", plan).splitlines()
     assert lines[lines.index("RestartMaxDelaySec=300") + 1] == "TimeoutStopSec=150"
+
+
+# ── Environment= quoting ───────────────────────────────────────────────────────
+
+
+def _env_assignments(unit: str) -> list[str]:
+    """The assignments systemd reads from the unit's ``Environment=`` lines, in order.
+
+    systemd splits each line into words on unquoted spaces and strips ``"``
+    quoting with ``\\"`` and ``\\\\`` escapes inside it, which is what POSIX
+    ``shlex`` does for the shapes the renderer emits.
+    """
+    out: list[str] = []
+    for line in unit.splitlines():
+        if line.startswith("Environment="):
+            out.extend(shlex.split(line[len("Environment=") :]))
+    return out
+
+
+def test_environment_values_without_special_characters_render_bare() -> None:
+    plan = RuntimeLaunchPlan(
+        image="img",
+        command=["x"],
+        env={
+            "HSA_OVERRIDE_GFX_VERSION": "11.5.1",
+            "LD_LIBRARY_PATH": "/opt/a/lib:/opt/b/lib",
+            "URL": "http://127.0.0.1:8080/x?a=b",
+        },
+    )
+    lines = _render_from_plan("s", plan).splitlines()
+    assert "Environment=HSA_OVERRIDE_GFX_VERSION=11.5.1" in lines
+    assert "Environment=LD_LIBRARY_PATH=/opt/a/lib:/opt/b/lib" in lines
+    assert "Environment=URL=http://127.0.0.1:8080/x?a=b" in lines
+
+
+def test_environment_value_with_spaces_is_one_quoted_assignment() -> None:
+    plan = RuntimeLaunchPlan(image="img", command=["x"], env={"MSG": "Time is up."})
+    unit = _render_from_plan("s", plan)
+    assert 'Environment="MSG=Time is up."' in unit.splitlines()
+    assert _env_assignments(unit) == ["MSG=Time is up."]
+
+
+def test_environment_value_cannot_open_a_second_assignment() -> None:
+    plan = RuntimeLaunchPlan(
+        image="img", command=["x"], env={"A": "y HALOGEN_DOWNLOAD=1", "B": "2"}
+    )
+    assert _env_assignments(_render_from_plan("s", plan)) == ["A=y HALOGEN_DOWNLOAD=1", "B=2"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    ['say "hi"', "back\\slash", "it's", "tab\there", "mix \"q\" and \\ and 's' x"],
+)
+def test_environment_value_with_quotes_or_backslashes_round_trips(value: str) -> None:
+    plan = RuntimeLaunchPlan(image="img", command=["x"], env={"K": value, "OTHER": "2"})
+    assert _env_assignments(_render_from_plan("s", plan)) == [f"K={value}", "OTHER=2"]
 
 
 # ── legacy shim folds into the single builder ──────────────────────────────────

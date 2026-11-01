@@ -41,6 +41,7 @@ same sentinel over ``/v1/chat/completions`` with thinking off.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from collections.abc import Mapping
 from pathlib import Path
@@ -49,9 +50,10 @@ from typing import Any
 import httpx
 
 from hal0.config import store as model_store_module
-from hal0.config.paths import model_store_root
+from hal0.config.paths import _covers, model_store_root
 from hal0.errors import Hal0Error, UnprocessableEntity
 from hal0.http_client import async_client
+from hal0.install.perms import ensure_shared_dir
 from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
 from hal0.providers.base import HealthCheck, Mount, Provider, RuntimeLaunchPlan
 from hal0.runners.knobs import (
@@ -63,6 +65,8 @@ from hal0.runners.knobs import (
 )
 from hal0.slots import output_sanity
 from hal0.slots.tune import EffectiveTune, effective_tune
+
+log = logging.getLogger(__name__)
 
 #: Default profile name if the slot TOML omits one.
 _DEFAULT_PROFILE = "halogen"
@@ -167,6 +171,22 @@ def halogen_env(
 def _probe_failure(status: str, detail: str) -> dict[str, Any]:
     """A sentinel verdict for a round trip that did not complete."""
     return {"ok": False, "status": status, "sample": "", "detail": detail}
+
+
+def _ensure_cache_dir(path: str) -> None:
+    """Best-effort create the ``/cache`` bind source, as the hal0 service account.
+
+    podman exits 125 on a bind source that does not exist, so a missing cache
+    dir would fail every start. The default sits under ``/var/lib/hal0``, which
+    the service account owns, so it can create it (``ensure_shared_dir`` lands
+    the shared-directory mode whatever the umask). A dir that exists is left as
+    it is. A failure is logged with the path and never raised: the unit's start
+    failure then has a visible cause.
+    """
+    try:
+        ensure_shared_dir(path)
+    except OSError as exc:
+        log.warning("halogen.cache_dir_unavailable path=%s error=%s", path, exc)
 
 
 def _slot_model_default(slot_cfg: Mapping[str, Any]) -> str:
@@ -276,8 +296,19 @@ class HalogenProvider(Provider):
         profile_name = str(slot_cfg.get("profile") or _DEFAULT_PROFILE)
         profile = resolve_named_profile(slot_cfg, profile_name)
         tune = effective_tune(slot_cfg, profile)
+        if tune.speculation == "ngram":
+            # The write seams refuse ngram for this family; a stale stored value
+            # launches the engine default, and this is the one place that says so.
+            log.warning(
+                "halogen.speculation_ngram_ignored slot=%s: this engine has no n-gram "
+                "drafter, so the slot launches with its default speculation; set "
+                "speculation to auto or off",
+                slot_cfg.get("name") or "",
+            )
 
         cache_dir = os.environ.get("HAL0_HALOGEN_CACHE", self.CACHE_DIR)
+        _ensure_cache_dir(cache_dir)
+        model_roots = self._model_roots(checkpoint)
         probe = (
             'python3 -c "import urllib.request;'
             f"urllib.request.urlopen('http://127.0.0.1:{port}/health',timeout=30)\""
@@ -294,9 +325,9 @@ class HalogenProvider(Provider):
                 profile_flags=profile.flags,
             ),
             mounts=[
-                # Model store via the shared `mount_for` factory: identical path,
+                # Model roots via the shared `mount_for` factory: identical path,
                 # read-only, SELinux relabel omitted on NFS.
-                model_store_module.mount_for(model_store_root(), read_only=True),
+                *(model_store_module.mount_for(root, read_only=True) for root in model_roots),
                 Mount(cache_dir, "/cache", read_only=False, selinux="z"),
             ],
             devices=list(resolve_gpu_device_paths()),
@@ -322,6 +353,24 @@ class HalogenProvider(Provider):
             restart_prevent_exit_status=(1,),
         )
 
+    @staticmethod
+    def _model_roots(checkpoint: str) -> list[str]:
+        """Directories to mount read-only for ``checkpoint``.
+
+        The model store root, plus the checkpoint's own directory when the
+        store root does not cover it (the llama path's reachability rule): the
+        entrypoint reads the tokenizer, lookup table and vision sidecar beside
+        the checkpoint, so the engine must see that whole directory.
+        """
+        store = model_store_root()
+        path = os.path.normpath(checkpoint)
+        roots = [str(store)]
+        if not _covers(store, path):
+            parent = os.path.dirname(path)
+            if parent and not _covers(store, parent):
+                roots.append(parent)
+        return roots
+
     # ── Health / readiness / sentinel ──────────────────────────────────────────
 
     async def health(self, port: int) -> dict[str, Any]:
@@ -329,43 +378,63 @@ class HalogenProvider(Provider):
 
         ``ok`` needs HTTP 200 and ``engine.responds`` true. ``status`` is
         ``"ready"``, ``"loading"`` (200 but the engine is not up yet),
-        ``"http_<code>"`` or the transport error text. Never raises.
+        ``"http_<code>"`` or the transport error text. ``capability_probe`` is
+        the body's own ``capability_probe`` value (``None`` when the body has
+        none or there was no body); it does not change ``ok``, which stays the
+        engine-answers check the fail-watcher uses, and :meth:`wait_ready`
+        judges it. Never raises.
         """
         url = f"http://127.0.0.1:{port}/health"
         try:
             async with async_client(timeout=_HEALTH_TIMEOUT) as client:
                 resp = await client.get(url)
             if resp.status_code != 200:
-                return {"ok": False, "status": f"http_{resp.status_code}"}
+                return {"ok": False, "status": f"http_{resp.status_code}", "capability_probe": None}
             body = resp.json()
         except Exception as exc:
-            return {"ok": False, "status": str(exc) or type(exc).__name__}
+            return {
+                "ok": False,
+                "status": str(exc) or type(exc).__name__,
+                "capability_probe": None,
+            }
         engine = body.get("engine") if isinstance(body, Mapping) else None
         responds = isinstance(engine, Mapping) and engine.get("responds") is True
-        return {"ok": responds, "status": "ready" if responds else "loading"}
+        probe = body.get("capability_probe") if isinstance(body, Mapping) else None
+        return {
+            "ok": responds,
+            "status": "ready" if responds else "loading",
+            "capability_probe": probe,
+        }
 
     async def wait_ready(self, port: int) -> None:
-        """Poll :meth:`health` until it is ``ok``; ``TimeoutError`` past ``READY_TIMEOUT_S``.
+        """Poll :meth:`health` until the engine responds AND its capability probe is ``"ok"``.
 
+        ``TimeoutError`` past ``READY_TIMEOUT_S``, naming the last thing seen.
         The slot manager prefers a provider's own ``wait_ready`` over the
         generic container waiter, whose 180 s budget is shorter than a cold
-        load of this engine.
+        load of this engine. A 200 with the engine answering is not enough: a
+        failed capability probe means the chat template or tool path is broken,
+        and the slot must not read ready on it.
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.READY_TIMEOUT_S
         last = "no answer"
         while True:
             verdict = await self.health(port)
-            if verdict.get("ok"):
+            probe = verdict.get("capability_probe")
+            if verdict.get("ok") and probe == "ok":
                 return
-            last = str(verdict.get("status") or last)
+            if verdict.get("ok"):
+                last = f"engine responds, capability_probe={probe!r}"
+            else:
+                last = str(verdict.get("status") or last)
             remaining = deadline - loop.time()
             if remaining <= 0:
                 break
             await asyncio.sleep(min(self.READY_POLL_S, remaining))
         raise TimeoutError(
             f"halogen slot port {port} was not ready within {self.READY_TIMEOUT_S:.0f}s "
-            f"(last status: {last})"
+            f"(last: {last})"
         )
 
     async def verify_inference(self, port: int) -> dict[str, Any]:
