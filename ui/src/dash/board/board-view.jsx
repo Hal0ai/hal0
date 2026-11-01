@@ -160,6 +160,26 @@ function BoardCheckFlt({ on, onClick, children }) {
   );
 }
 
+// ─── Hermes-kanban unavailability (ADR-0046) ─────────────────────────────────
+// /api/board/* answers one of these 503 codes when it cannot reach the board.
+const BOARD_UNAVAILABLE = {
+  "board.not_installed": {
+    title: "No board yet",
+    body: "Install the Hermes agent to use the Operator Board.",
+    link: "Open Agents",
+  },
+  "board.unreachable": {
+    title: "Hermes agent is not running",
+    body: "The board lives in the Hermes kanban. Start the agent to see it.",
+    link: "Open the Hermes card",
+  },
+  "board.no_token": {
+    title: "Board token missing",
+    body: "Restart the Hermes agent so hal0 can mint its dashboard token.",
+    link: "Open the Hermes card",
+  },
+};
+
 // ─── BoardView ────────────────────────────────────────────────────────────────
 function BoardView() {
   // ── hook bridge reads (read-guarded — bridge may not be loaded yet) ──
@@ -289,6 +309,7 @@ function BoardView() {
 
   // ── data extraction ──
   const tasks = boardViewQ.data?.tasks ?? [];
+  const unavailable = BOARD_UNAVAILABLE[boardViewQ.error?.code] || null;
   const boards = Array.isArray(boardsQ.data)
     ? boardsQ.data
     : (boardsQ.data?.boards ?? []);
@@ -666,6 +687,15 @@ function BoardView() {
               never hard-delete the row — Hermes owns comments/runs/links).
               While a drag is over the board background (not a lane) the
               archive veil below arms; releasing there archives the card. */}
+          {unavailable ? (
+            <div className="lanes-scroll">
+              <div className="board-unavailable" data-testid="board-unavailable" role="status">
+                <div className="bu-title">{unavailable.title}</div>
+                <div className="bu-body">{unavailable.body}</div>
+                <a className="bu-link" href="#agents">{unavailable.link}</a>
+              </div>
+            </div>
+          ) : (
           <div
             className="lanes-scroll"
             data-testid="board-drop-archive"
@@ -707,6 +737,7 @@ function BoardView() {
               ))}
             </div>
           </div>
+          )}
         </div>
 
         {/* archive veil — pointer-events:none so the drop still lands on the
