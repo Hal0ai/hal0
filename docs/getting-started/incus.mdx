@@ -253,10 +253,36 @@ incus exec hal0 -- podman run --rm quay.io/podman/hello
 ```
 
 The loop skips profiles that are not installed, so it is safe on an image
-that has none. Ubuntu 26.04 guests are not affected. The installer will
-detect and repair this itself from the release that ships the fix tracked in
-[#3234](https://github.com/Hal0ai/hal0/issues/3234); until then, this check
-is manual.
+that has none.
+
+**The installer repairs this itself.** From the release that ships the fix
+tracked in [#3234](https://github.com/Hal0ai/hal0/issues/3234), hal0's
+installer detects this exact failure — `podman run` failing with `: socket:
+permission denied` — but only inside a nested AppArmor policy namespace,
+which is what an unprivileged LXC or Incus container is. It never acts on a
+bare-metal host or in a privileged container. It disables only those of the
+six profiles that exist and carry `flags=(unconfined)`, retries, and prints
+what it changed. Until you are on that release, this check is manual.
+
+The denial depends on the **host** kernel: it reproduced on a Proxmox VE 9.2
+host running kernel 7.0 and not on a 6.8 kernel, and Ubuntu 26.04 guests were
+unaffected in our runs.
+
+To put a profile back, whether you or the installer disabled it, run this
+inside the guest:
+
+```sh
+rm /etc/apparmor.d/disable/<name> && apparmor_parser -r /etc/apparmor.d/<name>
+```
+
+The trade-off is small. These stub profiles only grant `userns`, so
+disabling them does not weaken confinement. On a host with
+`kernel.apparmor_restrict_unprivileged_userns=1`, though, it removes that
+grant from unprivileged users of those binaries inside the guest, and that
+includes rootless podman as the `hal0` user. hal0 does not depend on it —
+slots and dashboard image pulls run rootful — but it is why a host that
+needs the profiles disabled may also leave `podman system migrate (as hal0)`
+failing. That combination has not been tested.
 
 ## 5. Install hal0
 
