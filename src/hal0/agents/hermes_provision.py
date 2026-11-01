@@ -4795,6 +4795,34 @@ def _mcp_memory_call(
     return {"ok": True, "result": data}
 
 
+def _prior_card_ids(search_result: Any, agent_id: str) -> list[str]:
+    """Distinct document ids of ``agent_id``'s existing identity cards (#2700).
+
+    Reads a ``memory_search`` result in either shape ``ctx.io.mcp_memory_call``
+    can hand back: ``{"results": [...]}`` from the in-process MCP dispatcher
+    (what the hal0-api boot brain lane uses) and ``{"items": [...]}`` from the
+    ``/api/memory/search`` REST shim (``_mcp_memory_call``'s default). Reading
+    only ``items`` found nothing on the boot path, so every boot added another
+    identical card.
+
+    Search returns one hit per extracted FACT, and every fact of a document
+    carries that document's id, so the ids are de-duplicated (order kept):
+    the delete-count guard compares ``deleted`` against the number of
+    documents, not facts.
+    """
+    if not isinstance(search_result, dict):
+        return []
+    hits = search_result.get("results") or search_result.get("items") or []
+    ids: list[str] = []
+    for hit in hits if isinstance(hits, list) else []:
+        if not isinstance(hit, dict):
+            continue
+        md = hit.get("metadata") or {}
+        if md.get("agent_id") == agent_id and hit.get("id"):
+            ids.append(hit["id"])
+    return list(dict.fromkeys(ids))
+
+
 def _phase_namespace_register(ctx: _StepCtx) -> PhaseResult:
     """Write the Hermes identity card to the `agents` memory dataset.
 
@@ -4835,15 +4863,9 @@ def _phase_namespace_register(ctx: _StepCtx) -> PhaseResult:
         agent_id=state.agent_id,
     )
     existing_ids: list[str] = []
-    if search["ok"] and isinstance(search["result"], dict):
-        items = search["result"].get("items") or []
-        for item in items if isinstance(items, list) else []:
-            if not isinstance(item, dict):
-                continue
-            md = item.get("metadata") or {}
-            if md.get("agent_id") == state.agent_id and item.get("id"):
-                existing_ids.append(item["id"])
-    elif not search["ok"]:
+    if search["ok"]:
+        existing_ids = _prior_card_ids(search["result"], state.agent_id)
+    else:
         warnings.append(f"memory_search: {search['error']}")
         fallbacks.append(
             {
@@ -5030,15 +5052,9 @@ def _phase_brain_profile_seed(ctx: _StepCtx) -> PhaseResult:
         agent_id=BRAIN_PROFILE_AGENT_ID,
     )
     existing_ids: list[str] = []
-    if search["ok"] and isinstance(search["result"], dict):
-        items = search["result"].get("items") or []
-        for item in items if isinstance(items, list) else []:
-            if not isinstance(item, dict):
-                continue
-            md = item.get("metadata") or {}
-            if md.get("agent_id") == BRAIN_PROFILE_AGENT_ID and item.get("id"):
-                existing_ids.append(item["id"])
-    elif not search["ok"]:
+    if search["ok"]:
+        existing_ids = _prior_card_ids(search["result"], BRAIN_PROFILE_AGENT_ID)
+    else:
         warnings.append(f"memory_search: {search['error']}")
         fallbacks.append(
             {
