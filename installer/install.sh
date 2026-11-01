@@ -3830,7 +3830,7 @@ else
     # tests/installer/test_hindsight_pin_lockstep.py enforces it. Kept as a
     # shell literal (not read from the venv) so the fresh-install branch works
     # even when the python side is broken.
-    HINDSIGHT_PIN="1.0.0"
+    HINDSIGHT_PIN="1.1.0"
     HS_DIR="${VAR_DIR}/memory/hindsight"
     HINDSIGHT_UNIT_SRC="${REPO_ROOT}/installer/systemd/hindsight-api.service"
     if [[ "${HAL0_SKIP_HINDSIGHT:-0}" -ne 1 && -f "${HINDSIGHT_UNIT_SRC}" ]]; then
