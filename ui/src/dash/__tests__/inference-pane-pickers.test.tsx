@@ -359,7 +359,7 @@ describe('card model picker on a halogen runtime', () => {
   })
 
   it('lists only halogen models for a slot pinned to the halogen runner', () => {
-    const { host } = mountCards([{ ...PROFILE_SLOT, binary: 'halogen', device: 'gpu-rocm' }], {
+    const { host } = mountCards([{ ...PROFILE_SLOT, binary: 'halogen', profile: 'halo', device: 'gpu-rocm' }], {
       full: true,
       models: HALO_MODELS,
     })
@@ -372,6 +372,22 @@ describe('card model picker on a halogen runtime', () => {
       models: HALO_MODELS,
     })
     expect(cardOptionIds(host, 'primary')).toEqual(['mh'])
+  })
+
+  it('lets the profile decide: binary standard on a halogen profile still lists only halogen rows', () => {
+    const { host } = mountCards([{ ...PROFILE_SLOT, binary: 'standard', profile: 'halo', device: 'gpu-rocm' }], {
+      full: true,
+      models: HALO_MODELS,
+    })
+    expect(cardOptionIds(host, 'primary')).toEqual(['mh'])
+  })
+
+  it('lets the profile decide: binary halogen on a llama profile lists the llama rows', () => {
+    const { host } = mountCards([{ ...PROFILE_SLOT, binary: 'halogen', device: 'gpu-rocm' }], {
+      full: true,
+      models: HALO_MODELS,
+    })
+    expect(cardOptionIds(host, 'primary')).toEqual(['m1'])
   })
 
   it('leaves a llama slot unchanged: no halogen rows', () => {

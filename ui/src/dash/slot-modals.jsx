@@ -28,7 +28,6 @@ import {
 	laneValues,
 	runnerOptions,
 	selectedRunnerKey,
-	effectiveRunnerKey,
 	effectiveRuntimeFamily,
 } from "./hw-cascade.js";
 // llama.cpp build-provenance formatter (h0/runner-provenance) — shared with
@@ -1700,30 +1699,26 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		? runtimeOptions.find((o) => o.key === runtimeSel)
 		: null;
 	const laneVals = laneValues(selectedRuntimeOption);
-	// The family of the runner this slot will launch on (staged `binary`, else
-	// the staged profile's runner, else the lane default). ONE value, threaded
-	// to the model picker and the Tune block: a halogen slot binds only halogen
-	// models and has no n-gram drafter.
+	// The runtime family this slot will launch on: the staged profile's family
+	// decides (as the launch dispatch does), `binary` and the lane default only
+	// while no profile row is known. ONE value, threaded to the model picker and
+	// the Tune block: a halogen slot binds only halogen models and has no
+	// n-gram drafter.
 	const runtimeFamily = effectiveRuntimeFamily({
 		binary,
 		profile: stagedProfileRow,
 		device: pendingDevice,
 		backends: hwBackends,
 	});
-	// The engine block shows for a halogen-family slot whose runner serves knobs
-	// and whose staged profile row is a real one (a quarantined entry has no
-	// flags). Null otherwise, which is every llama slot.
+	// The engine block shows for a halogen-family slot whose staged profile row
+	// is a real one (a quarantined entry has no flags) and whose runner serves
+	// knobs. Gated on the profile's own runner, never the slot's `binary`: the
+	// launch dispatch ignores `binary` for the family, and the knobs are the
+	// profile's flags. Null otherwise, which is every llama slot.
 	const halogenSlotEngine =
 		runtimeFamily === "halogen" && stagedProfileRow && !stagedProfileRow.quarantined
 			? (() => {
-					const engine = halogenEngine(
-						effectiveRunnerKey({
-							binary,
-							profile: stagedProfileRow,
-							device: pendingDevice,
-						}),
-						hwBackends,
-					);
+					const engine = halogenEngine(stagedProfileRow.runner, hwBackends);
 					return engine && engine.knobs.length > 0 ? engine : null;
 				})()
 			: null;

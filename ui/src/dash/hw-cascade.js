@@ -210,21 +210,16 @@ export function runnerForBackend(backend, deviceClass) {
 }
 
 /**
- * The runner key a slot effectively runs on: the slot's (staged) `binary`, else
- * the runner its profile carries, else the lane default (`runnerForBackend`).
- * That is the server's order, not the Runtime select's (which reads "Auto"
- * while `binary` is unset): applying a runner-carrying profile stamps the
- * slot's `binary` from `profile.runner` (slots/config_write.py
- * `_reconcile_device_profile`), and the launch picks its provider from the
- * profile's runtime family (providers/container.py `_spec_provider_for` ->
- * `_profile_runtime_family` -> `_provider_for_family`, and
- * `_fixed_family_provider` in `_resolve_image_ref`), so a slot whose `binary`
- * is still unset launches on the profile's runner. An NPU slot has no llama
- * runner default ('').
+ * The runner key a slot's `binary`, its profile's runner and its lane resolve
+ * to when no profile family has already decided: the slot's (staged) `binary`,
+ * else the runner its profile carries, else the lane default
+ * (`runnerForBackend`). That is the Runtime select's order for a llama slot,
+ * not the launch's for a non-llama one (see `effectiveRuntimeFamily`). An NPU
+ * slot has no llama runner default ('').
  *
  * @param {{ binary?: string, profile?: { runner?: string } | null, device?: string }} slot
  */
-export function effectiveRunnerKey({ binary, profile, device }) {
+function effectiveRunnerKey({ binary, profile, device }) {
 	if (binary) return String(binary);
 	if (profile?.runner) return String(profile.runner);
 	const d = String(device || "");
@@ -233,16 +228,30 @@ export function effectiveRunnerKey({ binary, profile, device }) {
 }
 
 /**
- * The runtime family ('llama-server' | 'halogen' | 'flm' | ...) of a slot's
- * effective runner, read off the system-info `backends` catalogue. '' while the
- * catalogue is not loaded or does not carry the runner — callers treat that as
- * "not halogen", so the pickers and the Tune block degrade to the llama shape
+ * The runtime family ('llama-server' | 'halogen' | 'flm' | ...) a slot launches
+ * on, read off the system-info `backends` catalogue. '' while the catalogue is
+ * not loaded or does not carry the runner — callers treat that as "not
+ * halogen", so the pickers and the Tune block degrade to the llama shape
  * rather than hiding everything.
  *
- * @param {{ binary?: string, profile?: { runner?: string } | null, device?: string,
+ * Mirrors the launch dispatch (providers/container.py `_spec_provider_for` ->
+ * `_profile_runtime_family`): the slot's PROFILE decides the family, and
+ * `binary` is not consulted for it. A non-llama profile (its server-derived
+ * `runtime_family`, else the family of its `runner`) wins whatever `binary`
+ * says, and under a llama or runner-less profile `binary` only picks which
+ * llama runner runs, so a non-llama `binary` there (a stale halogen pin) still
+ * launches llama-server. Only while the profile row is not known (the list is
+ * loading) does the slot's `binary`, then the lane default, decide.
+ *
+ * @param {{ binary?: string, profile?: { runner?: string, runtime_family?: string } | null, device?: string,
  *           backends?: Record<string, { runtime_family?: string }> }} slot
  */
 export function effectiveRuntimeFamily({ binary, profile, device, backends }) {
-	const key = effectiveRunnerKey({ binary, profile, device });
-	return (key && backends?.[key]?.runtime_family) || "";
+	const familyOf = (key) => (key && backends?.[key]?.runtime_family) || "";
+	const resolved = familyOf(effectiveRunnerKey({ binary, profile, device }));
+	if (!profile) return resolved;
+	const own = profile.runtime_family || familyOf(profile.runner);
+	if (own && own !== "llama-server") return own;
+	// A llama (or runner-less) profile: any non-llama `binary` is inert.
+	return resolved && resolved !== "llama-server" ? "llama-server" : resolved;
 }

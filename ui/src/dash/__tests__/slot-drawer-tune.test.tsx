@@ -677,6 +677,45 @@ describe('slot drawer engine settings (halogen)', () => {
   })
 })
 
+// ── the profile decides the family; `binary` is inert under it (mirrors the launch dispatch) ─
+describe('slot drawer family precedence (profile over binary)', () => {
+  const CUSTOM = { ...HALO_PROFILE, flags: 'HALOGEN_KV_SLOTS=4', resolved_flags: 'HALOGEN_KV_SLOTS=4' }
+  const LLAMA_HALOGEN_FLAGS = { ...PROFILE, name: 'custom-llama', flags: '-fa on', resolved_flags: '-fa on' }
+  beforeEach(() => {
+    sysBox.current = { backends: RUNNERS, hardware: { rocm: true } }
+    modelsBox.current = [LLAMA_MODEL, HALO_MODEL]
+    profilesBox.current = [PROFILE, CUSTOM, LLAMA_HALOGEN_FLAGS]
+    resolvedBox.current = {
+      name: 'halogen-chat', argv: null, provenance: [], removed: 0,
+      footprint: { resident_mb: 72 * 1024, advisory_cache_mb: 0, host_free_mb: 108 * 1024, verdict: 'fits' },
+    }
+  })
+
+  it('binary=standard on a halogen profile keeps the engine block and readout and hides n-gram', () => {
+    const { root } = mount({ ...HALO_SLOT, binary: 'standard' })
+    expect(engineBlock()).not.toBeNull()
+    expect(byId('slot-engine-footprint')).not.toBeNull()
+    expect(specIds()).toEqual(['auto', 'off'])
+    const ids = pickerOptionIds()
+    expect(ids).toContain('qwen-halo')
+    expect(ids).not.toContain('qwen')
+    act(() => root.unmount())
+  })
+
+  it('binary=halogen on a llama profile shows no engine block and no false -fa error', () => {
+    const { root } = mount({ ...SLOT, binary: 'halogen', profile: 'custom-llama' })
+    expect(engineBlock()).toBeNull()
+    expect(byId('pf-engine-settings')).toBeNull()
+    expect(byId('pf-engine-error')).toBeNull()
+    expect(document.body.textContent).not.toContain('is not a HALOGEN_NAME=value setting')
+    expect(specIds()).toEqual(['auto', 'off', 'ngram'])
+    const ids = pickerOptionIds()
+    expect(ids).toContain('qwen')
+    expect(ids).not.toContain('qwen-halo')
+    act(() => root.unmount())
+  })
+})
+
 // ── halogen live memory readout: the server's footprint under the engine settings ─
 const GIB = 1024
 const FOOTPRINT = { resident_mb: 72 * GIB, advisory_cache_mb: 10 * GIB, host_free_mb: 108 * GIB, verdict: 'fits' }

@@ -81,9 +81,22 @@ describe('effectiveRuntimeFamily', () => {
     halogen: { title: 'halogen (Flash-Next)', tier: 'optional', device_class: 'gpu',
       supported_backends: ['rocm'], runtime_family: 'halogen', state: 'installable' },
   }
-  it('prefers the slot binary, then the runner its profile carries', () => {
-    expect(effectiveRuntimeFamily({ binary: 'halogen', profile: { runner: 'standard' }, device: 'gpu-rocm', backends: cat })).toBe('halogen')
+  // Mirrors the launch dispatch (providers/container.py `_spec_provider_for`):
+  // the profile's family decides; `binary` is consulted only without a profile.
+  it('lets a non-llama profile decide the family whatever the binary says', () => {
+    expect(effectiveRuntimeFamily({ binary: 'standard', profile: { runner: 'halogen' }, device: 'gpu-rocm', backends: cat })).toBe('halogen')
     expect(effectiveRuntimeFamily({ binary: '', profile: { runner: 'halogen' }, device: 'gpu-rocm', backends: cat })).toBe('halogen')
+    expect(effectiveRuntimeFamily({ binary: 'halogen', profile: { runner: 'halogen' }, device: 'gpu-rocm', backends: cat })).toBe('halogen')
+    expect(effectiveRuntimeFamily({ binary: 'cpu', profile: { runtime_family: 'halogen' }, device: 'gpu-rocm', backends: cat })).toBe('halogen')
+  })
+  it('treats binary as inert under a llama profile: halogen there launches llama', () => {
+    expect(effectiveRuntimeFamily({ binary: 'halogen', profile: { runner: 'standard' }, device: 'gpu-rocm', backends: cat })).toBe('llama-server')
+    expect(effectiveRuntimeFamily({ binary: 'halogen', profile: { runner: '' }, device: 'gpu-rocm', backends: cat })).toBe('llama-server')
+    expect(effectiveRuntimeFamily({ binary: 'halogen', profile: { runtime_family: 'llama-server' }, device: 'gpu-rocm', backends: cat })).toBe('llama-server')
+  })
+  it('reads the binary, then the lane, while the profile row is not known', () => {
+    expect(effectiveRuntimeFamily({ binary: 'halogen', profile: null, device: 'gpu-rocm', backends: cat })).toBe('halogen')
+    expect(effectiveRuntimeFamily({ binary: 'standard', profile: null, device: 'gpu-rocm', backends: cat })).toBe('llama-server')
   })
   it('falls back to the lane default runner (runnerForBackend) when nothing is pinned', () => {
     expect(effectiveRuntimeFamily({ binary: '', profile: { runner: '' }, device: 'gpu-rocm', backends: cat })).toBe('llama-server')
