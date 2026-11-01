@@ -449,3 +449,68 @@ def test_not_installed_503(audit: AuditStore, monkeypatch: pytest.MonkeyPatch) -
         r = c.get("/api/board/board")
     assert r.status_code == 503
     assert r.json()["error"]["code"] == "board.not_installed"
+
+
+# ── status-dock reachability events ─────────────────────────────────────────
+
+
+class _Bus:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str, str, str]] = []
+
+    async def emit(self, type_: str, severity: str, source: str, message: str, data=None) -> None:
+        self.events.append((type_, severity, source, message))
+
+    @property
+    def types(self) -> list[str]:
+        return [e[0] for e in self.events]
+
+
+def test_unreachable_emits_one_dock_event_per_transition(
+    app_client: tuple, recorder: _Recorder
+) -> None:
+    app, client = app_client
+    bus = _Bus()
+    app.state.events = bus
+    recorder.fail_connect = True
+    for _ in range(3):
+        assert client.get("/api/board/board").status_code == 503
+    recorder.fail_connect = False
+    for _ in range(2):
+        assert client.get("/api/board/board").status_code == 200
+    recorder.fail_connect = True
+    client.get("/api/board/board")
+    assert bus.types == ["board.unreachable", "board.reachable", "board.unreachable"]
+    assert bus.events[0] == (
+        "board.unreachable",
+        "warn",
+        "board",
+        "Hermes agent is not running; the Operator Board is unavailable",
+    )
+    assert bus.events[1][1:] == ("info", "board", "The Operator Board is back")
+
+
+def test_not_installed_does_not_emit(audit: AuditStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("hal0.board.auth.hermes_installed", lambda: False)
+    app = _app(audit)
+    bus = _Bus()
+    app.state.events = bus
+    with TestClient(app) as c:
+        assert c.get("/api/board/board").status_code == 503
+    assert bus.events == []
+
+
+def test_success_first_does_not_emit(app_client: tuple) -> None:
+    app, client = app_client
+    bus = _Bus()
+    app.state.events = bus
+    assert client.get("/api/board/board").status_code == 200
+    assert bus.events == []
+
+
+def test_missing_event_bus_is_harmless(app_client: tuple, recorder: _Recorder) -> None:
+    _, client = app_client
+    recorder.fail_connect = True
+    assert client.get("/api/board/board").status_code == 503
+    recorder.fail_connect = False
+    assert client.get("/api/board/board").status_code == 200
