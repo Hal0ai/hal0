@@ -123,7 +123,7 @@ Every Hermes build (install, `hal0 agent reprovision hermes --repair` and `hal0 
 | Endpoint | Auth | Checks |
 |---|---|---|
 | `GET /api/health` | open | Shallow liveness — returns immediately, no slot/upstream/disk work. What the installer and the systemd watchdog poll. |
-| `GET /api/health/system` | open | Deep health — disk headroom on state/config roots, slot-manager responsiveness, errored-slot detection. Always `200`, with `{"status": "ok"\|"degraded", "checks": {...}}`. |
+| `GET /api/health/system` | open | Deep health — disk headroom on state/config roots (`disk_state`, `disk_config`: `ok`, `free_mb`, `total_mb`, `floor_mb`, `path`), slot-manager responsiveness, errored-slot detection. Always `200`, with `{"status": "ok"\|"degraded", "checks": {...}}`. |
 | `GET /api/status` | client | Dashboard summary poll (hardware, slots, memory-degraded flag). |
 
 ## hindsight-api.service

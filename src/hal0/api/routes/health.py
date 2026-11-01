@@ -39,19 +39,22 @@ router = APIRouter()
 _DISK_FREE_FLOOR_MB = 500
 
 
-def _disk_free_mb(path: Path) -> int:
-    """Free MiB on the filesystem hosting ``path`` (0 if unavailable).
+def _disk_usage_mb(path: Path) -> tuple[int, int]:
+    """``(free_mb, total_mb)`` MiB on the filesystem hosting ``path``.
 
-    Walks up to the first existing parent so a not-yet-created state dir
-    on a fresh install still reports the underlying filesystem's space.
+    Both come from one ``shutil.disk_usage`` read, so the pair is consistent.
+    ``(0, 0)`` if unavailable. Walks up to the first existing parent so a
+    not-yet-created state dir on a fresh install still reports the
+    underlying filesystem's space.
     """
     try:
         target = path
         while not target.exists() and target != target.parent:
             target = target.parent
-        return shutil.disk_usage(str(target)).free // (1024 * 1024)
+        usage = shutil.disk_usage(str(target))
+        return usage.free // (1024 * 1024), usage.total // (1024 * 1024)
     except OSError:
-        return 0
+        return 0, 0
 
 
 def _memory_degraded(request: Request) -> bool | None:
@@ -309,11 +312,12 @@ async def health_system(request: Request) -> dict[str, Any]:
     # HAL0_HOME (when set) reparents both roots, so checking var_lib()
     # covers the dev/test sandbox AND the production /var/lib/hal0 path.
     for label, root in (("state", paths.var_lib()), ("config", paths.etc())):
-        free_mb = _disk_free_mb(root)
+        free_mb, total_mb = _disk_usage_mb(root)
         ok = free_mb >= _DISK_FREE_FLOOR_MB
         checks[f"disk_{label}"] = {
             "ok": ok,
             "free_mb": free_mb,
+            "total_mb": total_mb,
             "floor_mb": _DISK_FREE_FLOOR_MB,
             "path": str(root),
         }
