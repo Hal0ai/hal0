@@ -365,7 +365,7 @@ def _render_error_reason(provider: Any, cfg: dict[str, Any], model_info: dict[st
 
 __all__ = [
     "_CONFIG_DRIFT_KEYS",
-    "load_would_restart",
     "DriftHost",
     "compute_config_drift",
+    "load_would_restart",
 ]
