@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import errno
+import fcntl
+import logging
+import os
+import stat
 from pathlib import Path
 
 import pytest
 
-from hal0.config import paths
+from hal0.config import locking, paths
 from hal0.registry import tombstones
 
 
@@ -17,6 +22,87 @@ def _home(tmp_hal0_home: str) -> None:
 
 def test_load_is_empty_when_file_absent() -> None:
     assert tombstones.load() == set()
+
+
+@pytest.mark.parametrize("umask", [0o022, 0o077])
+def test_clear_creates_group_writable_lock_despite_umask(tmp_path: Path, umask: int) -> None:
+    previous = os.umask(umask)
+    try:
+        assert tombstones.clear(tmp_path / "model.gguf") == []
+    finally:
+        os.umask(previous)
+    lock = paths.model_tombstones_path().with_suffix(".json.lock")
+    assert stat.S_IMODE(lock.stat().st_mode) == 0o664
+
+
+def test_root_created_lock_adopts_directory_ownership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = paths.model_tombstones_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    real_fstat = os.fstat
+
+    def service_owned_directory(fd: int) -> os.stat_result:
+        observed = real_fstat(fd)
+        if stat.S_ISDIR(observed.st_mode):
+            fields = list(observed)
+            fields[4:6] = [12345, 12346]
+            return os.stat_result(fields)
+        return observed
+
+    adopted: list[tuple[int, int]] = []
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(os, "fstat", service_owned_directory)
+    monkeypatch.setattr(os, "fchown", lambda fd, uid, gid: adopted.append((uid, gid)))
+
+    tombstones.clear(tmp_path / "model.gguf")
+
+    assert adopted == [(12345, 12346)]
+
+
+def test_existing_lock_is_flocked_without_chmod(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    lock = paths.model_tombstones_path().with_suffix(".json.lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.touch(mode=0o664)
+    acquired: list[int] = []
+    real_flock = fcntl.flock
+
+    def no_chmod(fd: int, mode: int) -> None:
+        raise PermissionError(errno.EPERM, "not the lock owner")
+
+    def record_flock(fd: int, operation: int) -> None:
+        real_flock(fd, operation)
+        acquired.append(operation)
+
+    monkeypatch.setattr(os, "fchmod", no_chmod)
+    monkeypatch.setattr(fcntl, "flock", record_flock)
+    tombstones.clear(tmp_path / "model.gguf")
+
+    assert acquired == [fcntl.LOCK_EX, fcntl.LOCK_UN]
+    assert "tombstones.lock_failed" not in caplog.text
+
+
+@pytest.mark.parametrize("failure", ["open", "flock"])
+def test_lock_failure_remains_a_warning_and_best_effort(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failure: str,
+) -> None:
+    def denied(*args: object, **kwargs: object) -> None:
+        raise PermissionError(errno.EACCES, "Permission denied")
+
+    if failure == "open":
+        monkeypatch.setattr(locking, "_open_lock_file", denied)
+    else:
+        monkeypatch.setattr(fcntl, "flock", denied)
+    with caplog.at_level(logging.WARNING):
+        assert tombstones.add([tmp_path / "model.gguf"]) == [str(tmp_path / "model.gguf")]
+    assert tombstones.load() == {str(tmp_path / "model.gguf")}
+    assert "tombstones.lock_failed" in caplog.text
+    assert "Permission denied" in caplog.text
 
 
 def test_add_persists_resolved_paths(tmp_path: Path) -> None:

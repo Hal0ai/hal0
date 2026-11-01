@@ -576,6 +576,51 @@ def test_registry_dir_rows_match_each_writer(tmp_hal0_home: str) -> None:
     assert var_lib / "registry" / "registry.toml.lock" not in by_target
 
 
+def test_registry_lock_drift_is_audited_and_repaired(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = paths.var_lib() / "registry"
+    registry.mkdir(parents=True, exist_ok=True)
+    lock = registry / "ignored-paths.json.lock"
+    lock.touch()
+    unrelated = registry / "unrelated.json"
+    unrelated.touch()
+    nested = registry / "nested"
+    nested.mkdir()
+    (nested / "other.lock").touch()
+    observations = {lock: _obs(lock, "root", "hal0", 0o644)}
+
+    def observe(path: Path) -> perms.PermObservation:
+        if path == registry:
+            return _obs(path, "hal0", "hal0", 0o2775)
+        return observations.get(
+            path, perms.PermObservation(path, exists=False, owner=None, group=None, mode=None)
+        )
+
+    table = perms.ownership_table()
+    before = perms.plan(table, observe_fn=observe)
+    assert [d.path for d in before.drifted] == [lock]
+    audit = next(row for row in perms.audit_rows(before) if row["path"] == str(lock))
+    assert audit["status"] == "drift"
+    assert audit["detail"] == "is root:hal0 0644, want hal0:hal0 0664"
+    assert unrelated not in {d.path for d in before.diffs}
+    assert nested / "other.lock" not in {d.path for d in before.diffs}
+    monkeypatch.setattr(pwd, "getpwnam", lambda _: type("User", (), {"pw_uid": 12345})())
+    monkeypatch.setattr(grp, "getgrnam", lambda _: type("Group", (), {"gr_gid": 12346})())
+
+    def chown(path: str, uid: int, gid: int) -> None:
+        assert (uid, gid) == (12345, 12346)
+        old = observations[Path(path)]
+        assert old.mode is not None
+        observations[Path(path)] = _obs(Path(path), "hal0", "hal0", old.mode)
+
+    def chmod(path: str, mode: int) -> None:
+        observations[Path(path)] = _obs(Path(path), "hal0", "hal0", mode)
+
+    assert perms.commit(before, chown=chown, chmod=chmod) == [lock]
+    assert not perms.plan(table, observe_fn=observe).changed
+
+
 def test_primary_database_has_an_ownership_row(tmp_hal0_home: str) -> None:
     """The PRIMARY database — ``paths.db_path()`` — must have a row (#1546).
 

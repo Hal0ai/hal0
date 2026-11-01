@@ -3591,6 +3591,21 @@ def activate_release(dir_name: str, *, job_id: str | None = None) -> dict[str, A
     gpu_perms_unit = refresh_gpu_perms_unit(target, job_id=job_id)
     retired = remove_retired_artifacts(job_id=job_id)
 
+    # Heal root-created tombstone locks on existing boxes (#2698), using
+    # the same narrow ownership row as doctor perms --fix.
+    if os.geteuid() == 0:
+        try:
+            from hal0.install import perms
+
+            lock_rows = [
+                row
+                for row in perms.ownership_table()
+                if row.target == paths.var_lib() / "registry" and row.glob == "*.lock"
+            ]
+            perms.commit(perms.plan(lock_rows))
+        except (OSError, KeyError) as exc:
+            log.warning("updater.registry_lock_perms_failed", job_id=job_id, error=str(exc))
+
     log.info(
         "updater.activate_ok",
         job_id=job_id,

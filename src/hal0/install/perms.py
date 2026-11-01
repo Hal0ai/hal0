@@ -690,6 +690,9 @@ def ownership_table(
             service_group,
             0o2775,
             optional=False,
+            # Root-run registration can leave tombstone locks behind (#2698).
+            glob="*.lock",
+            child_mode=0o664,
             role="registry/ (model registry)",
         ),
         PermRow(
