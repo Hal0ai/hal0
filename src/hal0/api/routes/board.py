@@ -33,7 +33,7 @@ from fastapi import APIRouter, Request, WebSocket
 
 from hal0.api._audit import record_action
 from hal0.board.client import BoardClient, resolve_board_client
-from hal0.board.legacy import run_once
+from hal0.board.legacy import run_once  # scar-ok: HAL0-SUNSET v1.9.0 converter
 from hal0.errors import BadRequest, Hal0Error
 
 log = structlog.get_logger(__name__)
@@ -45,7 +45,7 @@ router = APIRouter()
 
 
 async def _client(request: Request) -> BoardClient:
-    """Run the one-shot legacy converter, then resolve the app's facade."""
+    """Run the one-shot pre-1.8 converter, then resolve the app's facade."""
     await run_once(request.app)
     return resolve_board_client(request.app)
 

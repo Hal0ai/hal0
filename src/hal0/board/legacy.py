@@ -1,11 +1,11 @@
-"""One-shot converter: legacy hal0 board store → Hermes kanban (ADR-0046).
+"""One-shot converter: pre-1.8 hal0 board store → Hermes kanban (ADR-0046).
 
 The Operator Board is now a live proxy to the Hermes kanban plugin and hal0's
 own SQLite board store is gone. A box upgraded from a release that still held
 cards in that store runs this once: every card is pushed into Hermes as a
 ``triage`` task (keyed by ``idempotency_key`` so a rerun never duplicates; the
 dispatcher never claims a triage task, so an import cannot start work), then
-moved to its legacy status.
+moved to its old status.
 
 Outcomes:
 
@@ -23,6 +23,8 @@ The tables are dropped only when every card is converted or on disk in an
 export file. Exported cards carry ``hermes_id`` when Hermes already holds a
 task for them, so a manual re-import can skip those.
 """
+
+# HAL0-SUNSET: v1.9.0  — one-shot converter for pre-1.8 board cards; delete the module and its tests once every supported box has run it.
 
 from __future__ import annotations
 
@@ -100,6 +102,9 @@ def _mapped_ids(conn: sqlite3.Connection) -> dict[str, str]:
         return {}
 
 
+_EXPORT_PREFIX = "board-legacy-export-"  # scar-ok: one-shot pre-1.8 converter (HAL0-SUNSET v1.9.0)
+
+
 def _export(
     conn: sqlite3.Connection,
     boards: list[dict[str, Any]],
@@ -112,7 +117,7 @@ def _export(
     mapped = _mapped_ids(conn)
     out = [{**c, "hermes_id": mapped[c["id"]]} if c["id"] in mapped else dict(c) for c in cards]
     export_dir.mkdir(parents=True, exist_ok=True)
-    path = export_dir / f"board-legacy-export-{int(now())}.json"
+    path = export_dir / f"{_EXPORT_PREFIX}{int(now())}.json"
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps({"boards": boards, "cards": out}, indent=2, default=str))
     os.replace(tmp, path)
@@ -167,12 +172,12 @@ async def _push(
     for slug in dict.fromkeys(c["board_slug"] for c in cards):
         if slug in have:
             continue
-        legacy = by_slug.get(slug, {})
+        prior = by_slug.get(slug, {})
         await client.create_board(
             {
                 "slug": slug,
-                "name": legacy.get("name") or slug,
-                "description": legacy.get("description") or "",
+                "name": prior.get("name") or slug,
+                "description": prior.get("description") or "",
             }
         )
         have.add(slug)
@@ -250,7 +255,7 @@ async def convert_legacy_board(
     now: Callable[[], float] = time.time,
     defer: str | None = None,
 ) -> dict[str, Any]:
-    """Move legacy cards into Hermes (or a JSON export), then drop the tables.
+    """Move pre-1.8 cards into Hermes (or a JSON export), then drop the tables.
 
     ``client is None`` means Hermes is not installed (export now). ``defer``
     carries the code of a transient resolve failure (unreachable / no token).
