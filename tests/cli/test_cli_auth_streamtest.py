@@ -27,11 +27,14 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from hal0.api import create_app
+from hal0.board import HermesKanbanClient
+from hal0.board.client import BoardClient
 from hal0.cli import _shared
 
 ADMIN_KEY = "cli-streamtest-admin-key-0123456789"
@@ -62,6 +65,23 @@ def routed(monkeypatch: pytest.MonkeyPatch, auth_on_app: FastAPI) -> Iterator[No
     ``httpx.Client`` accepts (``timeout=``, bare positional none) have no
     ``TestClient`` equivalent and are safe to drop for this in-process rig.
     """
+
+    # ``/api/board/board`` proxies to the Hermes kanban; stub it so the rig
+    # needs no token file or live Hermes.
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"columns": []})
+
+    auth_on_app.state.board_installed = True
+    auth_on_app.state.board_legacy_done = True
+    auth_on_app.state.board_client = BoardClient(
+        HermesKanbanClient(
+            base_url="http://hermes.test",
+            token_resolver=lambda: "tok",
+            http_client=httpx.AsyncClient(
+                transport=httpx.MockTransport(_handler), base_url="http://hermes.test"
+            ),
+        )
+    )
 
     def _routed_client(*_args: Any, **kwargs: Any) -> TestClient:
         return TestClient(auth_on_app, headers=kwargs.get("headers"))
