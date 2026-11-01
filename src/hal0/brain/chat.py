@@ -3,7 +3,7 @@
 SPEC §G / R4: the brain is a FIRST-CLASS module that consumes the shared
 tool-loop engine (:mod:`hal0.toolloop.engine`) and works WITHOUT any agent
 plugin — it has ZERO import dependency on Hermes. The platform self-API is
-reached through ``app.state`` handles injected at runtime, and board
+reached through ``app.state`` handles injected at runtime, and the board
 facade is imported lazily inside :func:`_board_client`; nothing
 Hermes-shaped is imported here at all.
 
@@ -1327,7 +1327,7 @@ async def _dispatch_tool(
             client = await _board_client(request)
             return await _dispatch_board_read(client, name, args, board)
         except Hal0Error as exc:
-            return {"error": exc.code, "detail": exc.details}
+            return {"error": exc.code, "message": str(exc), "detail": exc.details}
 
     p_method, p_path, p_mutating = _resolve_platform_tool(name, args)
     if p_method is not None:
@@ -1370,7 +1370,7 @@ async def _dispatch_tool(
             rec.after = result if isinstance(result, dict) else {"result": result}
             return result
     except Hal0Error as exc:
-        return {"error": exc.code, "detail": exc.details}
+        return {"error": exc.code, "message": str(exc), "detail": exc.details}
 
 
 # ── LLM backend resolution ──────────────────────────────────────────────────

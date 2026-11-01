@@ -192,6 +192,7 @@ async def test_board_unreachable_is_tool_error_not_exception(tmp_path: Path) -> 
 
     assert result["error"] == "board.unreachable"
     assert "detail" in result
+    assert isinstance(result["message"], str) and result["message"]
     (row,) = _audit_rows(req)
     assert row["outcome"] == "error"
 
@@ -205,6 +206,7 @@ async def test_board_unreachable_read_is_tool_error(tmp_path: Path) -> None:
     result = await bc._dispatch_tool(req, "get_board", {}, board=None)
 
     assert result["error"] == "board.unreachable"
+    assert isinstance(result["message"], str) and result["message"]
     assert _audit_rows(req) == []
 
 
@@ -222,3 +224,55 @@ async def test_read_only_mode_still_blocks_mutations(tmp_path: Path) -> None:
     assert [r["method"] for r in hermes.requests] == ["GET"]  # only the read went out
     assert "read-only mode" not in json.dumps(read)
     assert _audit_rows(req) == []
+
+
+_ALL_BOARD_TOOLS: list[tuple[str, dict[str, Any]]] = [
+    ("move_task", {"task_id": "t1", "status": "done"}),
+    ("assign_task", {"task_id": "t1", "assignee": "bob"}),
+    ("block_task", {"task_id": "t1", "block_reason": "waiting"}),
+    ("create_task", {"title": "x"}),
+    ("comment_task", {"task_id": "t1", "body": "hi"}),
+    ("add_dependency", {"parent_id": "p", "child_id": "c"}),
+    ("remove_dependency", {"parent_id": "p", "child_id": "c"}),
+    ("specify_task", {"task_id": "t1"}),
+    ("decompose_task", {"task_id": "t1"}),
+    ("nudge_dispatcher", {"max": 3}),
+    ("update_orchestration", {"auto_decompose": True}),
+    ("get_board", {}),
+    ("get_task", {"task_id": "t1"}),
+    ("get_assignees", {}),
+    ("get_orchestration", {}),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("name", "args"), _ALL_BOARD_TOOLS, ids=[n for n, _ in _ALL_BOARD_TOOLS])
+async def test_every_board_tool_threads_board_scope(
+    tmp_path: Path, name: str, args: dict[str, Any]
+) -> None:
+    hermes = _Hermes()
+    req = _request(tmp_path, hermes)
+
+    await bc._dispatch_tool(req, name, args, board="alpha")
+
+    assert len(hermes.requests) == 1
+    assert hermes.requests[0]["params"]["board"] == "alpha"
+
+
+@pytest.mark.asyncio
+async def test_upstream_4xx_is_tool_error_and_audited(tmp_path: Path) -> None:
+    hermes = _Hermes()
+    hermes.responses[("PATCH", f"{P}/tasks/t1")] = httpx.Response(
+        409, json={"detail": "cannot move to running"}
+    )
+    req = _request(tmp_path, hermes)
+
+    result = await bc._dispatch_tool(
+        req, "move_task", {"task_id": "t1", "status": "running"}, board=None
+    )
+
+    assert result["error"] == "board.upstream_error"
+    assert result["detail"]["upstream_status"] == 409
+    assert isinstance(result["message"], str) and result["message"]
+    (row,) = _audit_rows(req)
+    assert row["outcome"] == "error"
