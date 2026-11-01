@@ -51,6 +51,7 @@ from hal0.slots._cfg_helpers import (
     _model_default,
     heal_missing_llm_type,
 )
+from hal0.slots.abandon import abandon_probe, is_abandoned, wait_for_load
 from hal0.slots.config_write import (
     _cfg_effective_backend,
     _cfg_effective_provider,
@@ -120,6 +121,9 @@ if TYPE_CHECKING:
     from hal0.config.schema import SlotConfig
     from hal0.slots.arbiter import GpuArbiter
     from hal0.slots.interface import SlotInterface
+
+#: States in which a slot is already loaded: ``load`` has nothing to start.
+_READY_STATES = (SlotState.READY, SlotState.SERVING, SlotState.IDLE)
 
 log = logging.getLogger(__name__)
 
@@ -1753,10 +1757,35 @@ class SlotManager:
         """Load a model into a slot.  Transitions: offline → starting → warming → ready.
 
         If model_id is None, uses the model assigned in the slot's TOML config.
+
+        A caller that published an abandon probe (:mod:`hal0.slots.abandon`, set
+        by the ``/v1`` routes) stops waiting once its client has gone and gets the
+        slot's current status back; the load itself runs on to completion (#2944).
         """
+        probe = abandon_probe.get()
+        if probe is None:
+            return await self._load(slot_name, model_id)
+        task = asyncio.ensure_future(self._load(slot_name, model_id))
+        finished, slot = await wait_for_load(task, probe)
+        if finished:
+            assert slot is not None
+            return slot
+        log.info("slot.load_wait_abandoned", extra={"slot": slot_name})
+        return await self.status(self._resolve_alias(slot_name))
+
+    async def _load(self, slot_name: str, model_id: str | None = None) -> Slot:
         slot_name = self._resolve_alias(slot_name)
         self._ensure_known(slot_name)
         async with self._lock(slot_name):
+            # The client that asked for this load may have gone while it queued
+            # for the lock (behind another load, usually). Start nothing on its
+            # behalf: not a cold load, not the stale-WARMING recovery below,
+            # which would tear down and respawn a unit nobody is waiting for
+            # (#2944). A loaded slot skips the probe: nothing to start, and the
+            # probe costs a moment on the hot path.
+            if self._current_state(slot_name) not in _READY_STATES and await is_abandoned():
+                log.info("slot.load_skipped_client_gone", extra={"slot": slot_name})
+                return await self.status(slot_name)
             cfg = await self._load_slot_config(slot_name)
             resolved_model = model_id or _model_default(cfg)
 
