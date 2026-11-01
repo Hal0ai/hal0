@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -164,17 +165,38 @@ def _resolve_bridge(
     return key, True, scopes
 
 
+#: Held across a whole render (read the file, resolve the key, write the file). A render
+#: that has no fresh key re-reads the one already in ``openwebui.env``; without this lock
+#: it could read the old key, be overtaken by a rotate's render that writes the new one,
+#: and then write the old one back, leaving Open WebUI with a revoked credential. Renders
+#: run on worker threads of this one process (capability apply, slot create/delete, boot,
+#: the bridge routes). The installer's root-run render is another process and never
+#: writes a key.
+_RENDER_LOCK = threading.Lock()
+
+
 def _render_dynamic_env(
     job_id: str | None,
     bridge_key: str | None = None,
     is_hal0_user: Callable[[], bool] | None = None,
 ) -> tuple[bool, str | None]:
-    """Re-render ``openwebui.env``'s dynamic RAG/image-gen/web-search blocks
+    """Re-render ``openwebui.env``'s dynamic RAG/image-gen/web-search/MCP blocks
     from live capability state. Returns ``(env_changed, error)`` — never
     raises; a broken resolver degrades to ``(False, <error>)`` so it can
     never break whichever caller is piggybacking this render on top of
     (image-pin convergence, a capability apply, a slot delete).
+
+    Renders are serialised on :data:`_RENDER_LOCK`.
     """
+    with _RENDER_LOCK:
+        return _render_dynamic_env_locked(job_id, bridge_key, is_hal0_user)
+
+
+def _render_dynamic_env_locked(
+    job_id: str | None,
+    bridge_key: str | None,
+    is_hal0_user: Callable[[], bool] | None,
+) -> tuple[bool, str | None]:
     from hal0.config.paths import openwebui_env
     from hal0.openwebui.env_writer import write_openwebui_env
     from hal0.openwebui.wiring import resolve_dynamic_env_overrides

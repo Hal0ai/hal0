@@ -578,3 +578,39 @@ def test_the_openwebui_key_in_the_env_is_carried_forward(tmp_path) -> None:
     _reconcile(True)
     key = json.loads(_env()["TOOL_SERVER_CONNECTIONS"])[0]["key"]
     assert openwebui_arm._existing_bridge_key() == key
+
+
+def test_renders_are_serialised(tmp_path) -> None:
+    """A render that re-reads the key from the env must not interleave with another render
+    (a rotate's), or the old key could be written back over the new one."""
+    import threading
+
+    _installed_unit(tmp_path)
+    _bridge(tmp_path)
+    done = threading.Event()
+
+    def render() -> None:
+        openwebui_arm._render_dynamic_env(None, None, lambda: True)
+        done.set()
+
+    with openwebui_arm._RENDER_LOCK:
+        t = threading.Thread(target=render)
+        t.start()
+        assert not done.wait(0.3), "a render ran while another held the lock"
+    t.join(timeout=10)
+    assert done.is_set()
+
+
+def test_a_rotate_render_that_overtakes_an_older_render_is_not_undone(tmp_path) -> None:
+    """The ordinary render reads the key under the lock, so it sees the rotated one."""
+    import json
+
+    _installed_unit(tmp_path)
+    store = _bridge(tmp_path)
+    _reconcile(True)
+    old = json.loads(_env()["TOOL_SERVER_CONNECTIONS"])[0]["key"]
+    _, new = store.rotate_client("openwebui")
+    _reconcile(True, bridge_key=new)  # the rotate route's render
+    _reconcile(True)  # an ordinary render (capability apply, slot delete) afterwards
+    assert {c["key"] for c in json.loads(_env()["TOOL_SERVER_CONNECTIONS"])} == {new}
+    assert old != new
