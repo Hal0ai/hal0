@@ -158,10 +158,13 @@ how to read the correct value with `stat -c %g` and why `getent group
 render` can silently resolve to the wrong group.
 </Aside>
 
-hal0's own preflight checks for exactly this device layout inside an LXC
-and prints the same `dev0`/`dev1`/`dev2` remedy if the nodes or gid mapping
-are missing or wrong — after installing hal0 inside the CT (§4 below),
-`hal0 doctor` will confirm the devices are visible.
+hal0's own preflight checks this device layout inside an LXC and prints the
+matching `devN` line for what it finds wrong: the whole `dev0`/`dev1`/`dev2`
+block when no render node is visible, the `dev0` line when the render node's
+gid is off, and the `dev1` line when `/dev/kfd`'s gid is off. It does not
+check the NPU node's gid, so confirm `/dev/accel/accel0` by hand with
+`ls -ln` after installing hal0 inside the CT (§4 below); `hal0 doctor` then
+confirms the devices are visible.
 
 ### PVE keyring sysctls
 
@@ -360,11 +363,12 @@ though the slot container has its devices. Check with `podman exec
 ## 5. FastFlowLM NPU trio
 
 On an apt-based CT with the NPU device nodes present, the installer's NPU
-prerequisites step handles the **FastFlowLM (FLM)** userspace automatically:
-it best-effort installs `libxrt-npu2` from the container's own configured
-apt sources, then fetches the pinned, SHA-256-verified FastFlowLM `.deb`
-matching the CT's distro (Debian 13 or Ubuntu 24.04/25.10/26.04) directly
-from FastFlowLM's GitHub releases — no third-party apt/PPA source is added.
+prerequisites step handles the **FastFlowLM (FLM)** userspace automatically.
+On Ubuntu it first adds the `lemonade-team/stable` PPA, which is where
+`libxrt-npu2` (the AMDXDNA NPU runtime) ships, then installs it; on Debian 13
+it uses the distribution's own sources. It then fetches the pinned,
+SHA-256-verified FastFlowLM `.deb` matching the CT's distro (Debian 13 or
+Ubuntu 24.04/25.10/26.04) directly from FastFlowLM's GitHub releases.
 A single `flm serve` process backs the **NPU trio** — one chat model plus
 optional embedding and speech-to-text "passengers" sharing the NPU.
 
@@ -380,7 +384,7 @@ flm validate       # → "flm validate ok — NPU runtime reachable"
 hal0 doctor        # re-runs preflight; hardware probe records the NPU
 ```
 
-The seeded `npu` slot serves a chat model on port `8088`. The trio's
+The seeded `flm` slot serves a chat model on port `8088`. The trio's
 embedding and STT passengers are **opt-in** — enable them per slot (the
 `asr` / `embed` keys on the slot's `[npu]` table) once the chat slot is
 loaded. See [Voice (STT/TTS)](/docs/guides/voice-stt-tts/) and

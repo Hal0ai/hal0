@@ -57,12 +57,11 @@ instead of the distro package.
 `incus admin init --minimal` creates a `dir` pool on the host's root
 filesystem. hal0 runs on it, but two things are worth deciding now:
 
-- **Size.** A fresh hal0 install is about 24 GB of container rootfs —
-  roughly 14 GB under `/var/lib/hal0` and 5 GB of container images under
-  `/var/lib/containers` — and the models you pull later land under
-  `/var/lib/hal0/models` inside the container too. Give the pool at least
-  **60 GB**. `hal0 doctor` flags less than 20 GB free under `/var/lib`, and
-  on a 38 GB disk a fresh install already left it short.
+- **Size.** A finished stable install is about 24 GB of rootfs, most of it
+  under `/var/lib/hal0` (models, virtualenvs) and `/var/lib/containers`
+  (runner images). Give the pool at least **60 GB**. `hal0 doctor` flags
+  less than 20 GB free under `/var/lib`, and on a 38 GB disk a fresh install
+  already left it short.
 - **Snapshots.** On a `dir` pool, `incus snapshot create` copies the whole
   rootfs: it takes time and needs as much free space as the container uses.
   (On the 38 GB test disk, the first snapshot of an installed hal0 container
@@ -158,12 +157,14 @@ The `gid` must be the `render` group's id **inside the container**, which
 you can only read once it exists:
 
 ```sh
-RENDER_GID=$(incus exec hal0 -- getent group render | cut -d: -f3)
+RENDER_GID=$(incus exec hal0 -- awk -F: '$1=="render"{print $3}' /etc/group)
 incus config device add hal0 renderD128 unix-char path=/dev/dri/renderD128 gid=$RENDER_GID
 incus config device add hal0 kfd        unix-char path=/dev/kfd            gid=$RENDER_GID
 incus config device add hal0 accel0     unix-char path=/dev/accel/accel0   gid=$RENDER_GID   # Strix Halo NPU only
 incus exec hal0 -- ls -ln /dev/kfd /dev/dri/ /dev/accel/
 ```
+
+The number has to be the `render` group that hal0's service user joins **inside** the container, which is why it is read from the container's own `/etc/group` and not from the host. Once the devices are added, confirm with `incus exec hal0 -- stat -c %g /dev/dri/renderD128` that the mapped node carries that gid, as [GPU drivers and memory](/docs/getting-started/drivers/) recommends.
 
 Every node should show the container's render gid as its group. The
 device appears immediately; no restart is needed.
