@@ -874,9 +874,12 @@ DRAFT_BUNDLE: dict[str, str] = {
 MTP_DRAFT_BUNDLE: str = DRAFT_BUNDLE["mtp"]
 
 #: ``speculation = "ngram"``: llama.cpp's ``--spec-default`` n-gram lookup.
-NGRAM_BUNDLE: str = (
-    "--spec-type ngram-mod --spec-ngram-size-n 24 --spec-ngram-size-m 48 --spec-ngram-n-max 64"
-)
+#: The three values are llama.cpp's own ``ngram-mod`` defaults, spelled out so
+#: the launch line is explicit. llama.cpp renamed these flags before build
+#: b11840: ``--spec-ngram-size-n`` / ``-size-m`` became removed-argument stubs
+#: and ``--spec-ngram-n-max`` went away, so a slot carrying the old names
+#: exits 64 at argument parsing (#3180).
+NGRAM_BUNDLE: str = "--spec-type ngram-mod --spec-ngram-mod-n-match 24 --spec-ngram-mod-n-min 48 --spec-ngram-mod-n-max 64"
 
 
 def lane_device(backend: str | None) -> str | None:
