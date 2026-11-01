@@ -61,7 +61,7 @@ P = KANBAN_BASE_PATH
 
 # (method name, args, kwargs, HTTP method, upstream path, extra query params)
 _READS: list[tuple[str, tuple[Any, ...], dict[str, Any], str, str, dict[str, str]]] = [
-    ("get_board", (), {}, "GET", "/board", {"include_archived": "false"}),
+    ("get_board", (), {}, "GET", "/board", {}),
     (
         "get_board",
         (),
@@ -73,7 +73,7 @@ _READS: list[tuple[str, tuple[Any, ...], dict[str, Any], str, str, dict[str, str
     ("get_task", ("t1",), {}, "GET", "/tasks/t1", {}),
     ("get_task_log", ("t1",), {}, "GET", "/tasks/t1/log", {}),
     ("get_task_log", ("t1",), {"tail": 50}, "GET", "/tasks/t1/log", {"tail": "50"}),
-    ("list_boards", (), {}, "GET", "/boards", {"include_archived": "false"}),
+    ("list_boards", (), {}, "GET", "/boards", {}),
     (
         "list_boards",
         (),
@@ -248,3 +248,15 @@ def test_resolve_checks_installed_once_per_process() -> None:
         with pytest.raises(BoardNotInstalled):
             resolve_board_client(app, installed_check=check)
     assert calls == [1]
+
+
+@pytest.mark.parametrize("name", ["get_board", "list_boards"])
+async def test_include_archived_only_sent_when_set(
+    client: BoardClient, recorder: _Recorder, name: str
+) -> None:
+    method = getattr(client, name)
+    await method()
+    assert "include_archived" not in recorder.requests[-1]["params"]
+    for flag, wire in ((True, "true"), (False, "false")):
+        await method(include_archived=flag)
+        assert recorder.requests[-1]["params"]["include_archived"] == wire

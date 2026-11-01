@@ -13,8 +13,9 @@ Conventions shared by every method:
   ``X-hal0-Agent`` audit header.
 * Read-query knobs (``tenant``, ``include_archived``, ``workflow_template_id``,
   ``tail``, ``max_dispatch``, ``delete``) go into ``params`` only when not
-  ``None``. Booleans (``include_archived``, ``delete``) are sent as the strings
-  ``"true"`` / ``"false"``; integers (``tail``, ``max_dispatch``) as
+  ``None`` (so ``include_archived`` defaults to None and Hermes's own
+  ``include_archived_by_default`` applies). Booleans (``include_archived``,
+  ``delete``) are sent as the strings ``"true"`` / ``"false"``; integers (``tail``, ``max_dispatch``) as
   ``str(int)``.
 
 ``resolve_board_client`` lazily builds and caches the facade on ``app.state``,
@@ -53,7 +54,7 @@ class BoardClient:
         self,
         *,
         tenant: str | None = None,
-        include_archived: bool | None = False,
+        include_archived: bool | None = None,
         workflow_template_id: str | None = None,
         board: str | None = None,
         agent_id: str | None = None,
@@ -95,7 +96,7 @@ class BoardClient:
     async def list_boards(
         self,
         *,
-        include_archived: bool | None = False,
+        include_archived: bool | None = None,
         board: str | None = None,
         agent_id: str | None = None,
     ) -> Any:
