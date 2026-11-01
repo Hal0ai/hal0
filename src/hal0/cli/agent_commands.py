@@ -1497,6 +1497,21 @@ def agent_uninstall(
     except CliApiError as exc:
         die(str(exc))
         return
+    # A partial uninstall is HTTP 207, so api_delete returns the error
+    # envelope normally. Its status and residuals live under error.details.
+    error = (result or {}).get("error", {})
+    if error.get("code") == "agent.uninstall_incomplete":
+        details = error.get("details", {})
+        console.print(f"[bold yellow]Partially uninstalled[/bold yellow] {name}.")
+        console.print("Files left behind:")
+        for residual in details.get("residual", []):
+            console.print(f"  {residual['path']} — {residual['reason']}", markup=False)
+        console.print(
+            "Review and remove the listed residual files with sufficient permissions "
+            "(root privileges may be required), then re-run "
+            f"`hal0 agent uninstall {name}`."
+        )
+        raise typer.Exit(1)
     status = (result or {}).get("status", "uninstalled")
     if status == "not_installed":
         console.print(f"[dim]{name} was not installed.[/dim]")
