@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { applyRunnerChoice, laneValues, runnerForBackend, runnerOptions, selectedRunnerKey } from '../hw-cascade.js'
+import { applyRunnerChoice, effectiveRuntimeFamily, laneValues, runnerForBackend, runnerOptions, selectedRunnerKey } from '../hw-cascade.js'
 
 // Backends fixture mirroring system-info's `backends[key]` shape (Task 2):
 // title/blurb/tier alongside the existing supported_backends/
@@ -71,6 +71,28 @@ describe('halogen runner', () => {
     const hidden = runnerOptions({ backends: withHalogen, device: 'gpu-vulkan', slotType: 'llm', hw: { rocm: false, vulkan: true, cuda: false } }).options
     expect(hidden.map((o) => o.key)).not.toContain('halogen')
     expect(runnerOptions({ backends: withHalogen, device: 'gpu-rocm', slotType: 'tts', hw: {} }).options.map((o) => o.key)).not.toContain('halogen')
+  })
+})
+
+describe('effectiveRuntimeFamily', () => {
+  const cat = {
+    ...backends,
+    cpu: { title: 'CPU', device_class: 'cpu', supported_backends: ['cpu'], runtime_family: 'llama-server' },
+    halogen: { title: 'halogen (Flash-Next)', tier: 'optional', device_class: 'gpu',
+      supported_backends: ['rocm'], runtime_family: 'halogen', state: 'installable' },
+  }
+  it('prefers the slot binary, then the runner its profile carries', () => {
+    expect(effectiveRuntimeFamily({ binary: 'halogen', profile: { runner: 'standard' }, device: 'gpu-rocm', backends: cat })).toBe('halogen')
+    expect(effectiveRuntimeFamily({ binary: '', profile: { runner: 'halogen' }, device: 'gpu-rocm', backends: cat })).toBe('halogen')
+  })
+  it('falls back to the lane default runner (runnerForBackend) when nothing is pinned', () => {
+    expect(effectiveRuntimeFamily({ binary: '', profile: { runner: '' }, device: 'gpu-rocm', backends: cat })).toBe('llama-server')
+    expect(effectiveRuntimeFamily({ binary: '', profile: null, device: 'cpu', backends: cat })).toBe('llama-server')
+  })
+  it('is empty when the runner is not in the catalogue (or the catalogue has not loaded)', () => {
+    expect(effectiveRuntimeFamily({ binary: 'ghost', device: 'gpu-rocm', backends: cat })).toBe('')
+    expect(effectiveRuntimeFamily({ binary: 'halogen', device: 'gpu-rocm', backends: {} })).toBe('')
+    expect(effectiveRuntimeFamily({ binary: 'halogen', device: 'gpu-rocm' })).toBe('')
   })
 })
 

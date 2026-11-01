@@ -25,12 +25,28 @@ export function localModels(models) {
 //   - upstream-advertised rows: a slot binds a local file path and these have
 //     none (they'd render as "will pull" and then 422);
 //   - engine mismatches (modelFitsSlot): FLM models appear only on NPU/FLM slots,
-//     never on a llama.cpp slot, and an FLM slot is offered only FLM models.
+//     never on a llama.cpp slot, and an FLM slot is offered only FLM models;
+//   - runtime-family mismatches: a halogen slot (`runtimeFamily === 'halogen'`,
+//     the family of the slot's effective runner — hw-cascade
+//     effectiveRuntimeFamily) is offered only rows whose `backends` carry
+//     'halogen', and every other slot never sees those rows.
 // The server refuses the same pairs (slots.config_write.check_model_fits_slot).
-export function compatibleModels(models, { type, slot }) {
+export function compatibleModels(models, { type, slot, runtimeFamily = "" }) {
+  const halogen = runtimeFamily === "halogen";
   return (models ?? [])
     .map(normalizeApiModel)
-    .filter((m) => m.type === type && !isUpstreamModel(m) && modelFitsSlot(m, slot));
+    .filter(
+      (m) =>
+        m.type === type &&
+        !isUpstreamModel(m) &&
+        modelFitsSlot(m, slot) &&
+        isHalogenModel(m) === halogen,
+    );
+}
+
+// A halogen (Flash-Next) model row: the registry tags it `backends: ['halogen']`.
+function isHalogenModel(m) {
+  return Array.isArray(m?.backends) && m.backends.includes("halogen");
 }
 
 // Device token derived from a model's backends/device — a model's backends

@@ -19,8 +19,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 ;(globalThis as unknown as { Icons: unknown }).Icons = new Proxy({}, { get: () => null })
 ;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-const { profilesBox, modelsBox, toasts, feasCalls, editCalls, restartCalls, createCalls } = vi.hoisted(() => ({
+const { profilesBox, modelsBox, sysBox, toasts, feasCalls, editCalls, restartCalls, createCalls } = vi.hoisted(() => ({
   profilesBox: { current: [] as Record<string, unknown>[] },
+  sysBox: { current: { backends: {}, hardware: {} } as Record<string, unknown> },
   modelsBox: { current: [] as Record<string, unknown>[] },
   toasts: [] as string[],
   feasCalls: [] as unknown[],
@@ -63,7 +64,7 @@ vi.mock('@/api/hooks/useModelsFeasibility', () => ({
 vi.mock('@/api/hooks/useLogs', () => ({ useSlotLogsStream: () => ({ lines: [] }) }))
 vi.mock('@/api/hooks/useRuntimes', async () => {
   const actual = await vi.importActual<typeof import('@/api/hooks/useRuntimes')>('@/api/hooks/useRuntimes')
-  return { ...actual, useSystemInfo: () => ({ data: { backends: {}, hardware: {} }, isLoading: false }) }
+  return { ...actual, useSystemInfo: () => ({ data: sysBox.current, isLoading: false }) }
 })
 vi.mock('@/api/hooks/useRunnerImages', () => ({
   useRunnerImages: () => ({ data: { images: [], families: [] } }),
@@ -148,6 +149,7 @@ function typeInto(testid: string, value: string) {
 beforeEach(() => {
   profilesBox.current = [PROFILE]
   modelsBox.current = [MODEL]
+  sysBox.current = { backends: {}, hardware: {} }
   editCalls.length = 0
   restartCalls.length = 0
   createCalls.length = 0
@@ -451,5 +453,98 @@ describe('slot drawer Tune block', () => {
     const emb = mount({ ...SLOT, type: 'embedding' })
     expect(byId('slot-tune-block')).toBeNull()
     act(() => emb.root.unmount())
+  })
+})
+
+// ── halogen (Flash-Next) slots: family-aware picker + speculation row ──────
+const RUNNERS = {
+  standard: {
+    title: 'Standard', tier: 'default', device_class: 'gpu', supported_backends: ['rocm', 'vulkan'],
+    runtime_family: 'llama-server', state: 'installed',
+  },
+  halogen: {
+    title: 'halogen (Flash-Next)', tier: 'optional', device_class: 'gpu', supported_backends: ['rocm'],
+    runtime_family: 'halogen', state: 'installed',
+  },
+}
+const HALO_MODEL = { id: 'qwen-halo', capabilities: ['chat'], backends: ['halogen'], installed: true }
+const LLAMA_MODEL = { id: 'qwen', capabilities: ['chat'], backends: ['rocm', 'vulkan'], installed: true }
+const HALO_PROFILE = { ...PROFILE, name: 'halogen-chat', runner: 'halogen', used_by: [] }
+const HALO_SLOT = { ...SLOT, binary: 'halogen', profile: 'halogen-chat', model: 'qwen-halo', model_id: 'qwen-halo' }
+
+const specIds = () =>
+  Array.from(document.querySelectorAll('[data-testid^="tune-speculation-"]'))
+    .map((el) => el.getAttribute('data-testid')!.replace('tune-speculation-', ''))
+    .filter((id) => id !== 'profile' && id !== 'reason')
+const pickerOptionIds = () => {
+  act(() => byId('slot-model-swap')!.click())
+  return Array.from(document.querySelectorAll('[data-option-id]')).map((el) => el.getAttribute('data-option-id'))
+}
+
+describe('slot drawer on a halogen runtime', () => {
+  beforeEach(() => {
+    sysBox.current = { backends: RUNNERS, hardware: { rocm: true } }
+    profilesBox.current = [PROFILE, HALO_PROFILE]
+    modelsBox.current = [LLAMA_MODEL, HALO_MODEL]
+  })
+
+  it('offers a halogen slot only halogen models', () => {
+    const { root } = mount(HALO_SLOT)
+    const ids = pickerOptionIds()
+    expect(ids).toContain('qwen-halo')
+    expect(ids).not.toContain('qwen')
+    act(() => root.unmount())
+  })
+
+  it('keeps halogen models out of a llama slot', () => {
+    const { root } = mount({ ...SLOT, binary: 'standard' })
+    const ids = pickerOptionIds()
+    expect(ids).toContain('qwen')
+    expect(ids).not.toContain('qwen-halo')
+    act(() => root.unmount())
+  })
+
+  it('reads the family from the lane default when no runtime is pinned', () => {
+    const { root } = mount({ ...SLOT, binary: '' })
+    const ids = pickerOptionIds()
+    expect(ids).toContain('qwen')
+    expect(ids).not.toContain('qwen-halo')
+    act(() => root.unmount())
+  })
+
+  it('follows the runner the profile carries when the slot pins none', () => {
+    const { root } = mount({ ...HALO_SLOT, binary: '' })
+    expect(pickerOptionIds()).not.toContain('qwen')
+    expect(specIds()).toEqual(['auto', 'off'])
+    act(() => root.unmount())
+  })
+
+  it('drops the n-gram speculation pill for halogen, keeps it for llama', () => {
+    const halo = mount(HALO_SLOT)
+    expect(specIds()).toEqual(['auto', 'off'])
+    act(() => halo.root.unmount())
+    document.body.innerHTML = ''
+    const llama = mount({ ...SLOT, binary: 'standard' })
+    expect(specIds()).toEqual(['auto', 'off', 'ngram'])
+    act(() => llama.root.unmount())
+  })
+
+  it("shows the server's reason and disables speculation when tune_unavailable names it", () => {
+    const reason = 'ngram: this engine has no n-gram drafter (auto or off)'
+    const { root } = mount({
+      ...HALO_SLOT,
+      tune_effective: { ...EFFECTIVE, tune_unavailable: { speculation: reason } },
+    })
+    expect(byId('tune-speculation-reason')!.textContent).toBe(reason)
+    expect((byId('tune-speculation-auto') as HTMLButtonElement).disabled).toBe(true)
+    act(() => root.unmount())
+  })
+
+  it('shows the server reason even before the catalogue says the family', () => {
+    sysBox.current = { backends: {}, hardware: {} }
+    const reason = 'ngram: this engine has no n-gram drafter (auto or off)'
+    const { root } = mount({ ...SLOT, tune_effective: { ...EFFECTIVE, tune_unavailable: { speculation: reason } } })
+    expect(byId('tune-speculation-reason')!.textContent).toBe(reason)
+    act(() => root.unmount())
   })
 })

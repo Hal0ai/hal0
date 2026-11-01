@@ -40,7 +40,7 @@ import { useArbiter } from '@/api/hooks/useComfyui'
 import { useModelsFeasibility } from '@/api/hooks/useModelsFeasibility'
 import { useProfiles } from '@/api/hooks/useProfiles'
 import { useSystemInfo } from '@/api/hooks/useRuntimes'
-import { hostHwFlags, runnerOptions } from './hw-cascade.js'
+import { effectiveRuntimeFamily, hostHwFlags, runnerOptions } from './hw-cascade.js'
 import { profileApplyPreview, profileFitsSlot } from './profile-apply-preview.js'
 import { runtimeChips } from './profiles.jsx'
 import { ConfirmDialog } from './primitives.jsx'
@@ -663,7 +663,7 @@ export function modelPickerOptions({ s, opts, cur, has, allSlots, verdictFor }) 
 
 // full cards get a real model picker (RichSelect, wired to useModels + the
 // GTT feasibility probe); non-LLM slots keep their static model line.
-export function ModelPicker({ s, models, allSlots, disabled, onSwap }) {
+export function ModelPicker({ s, models, allSlots, disabled, onSwap, runtimeFamily = '' }) {
   const feasibility = useModelsFeasibility()
   // Fires the batch probe on the FIRST dropdown open only (mockup callout A)
   // — the slot's ctx_effective is fixed for the life of this card, so a second open
@@ -675,9 +675,10 @@ export function ModelPicker({ s, models, allSlots, disabled, onSwap }) {
         {s.model || '—'}
       </div>
     )
-  // Same list as the slot drawer / swap popover: upstream rows and engine
-  // mismatches (FLM models on a llama.cpp slot) are excluded.
-  const opts = compatibleModels(models, { type: 'llm', slot: s })
+  // Same list as the slot drawer / swap popover: upstream rows, engine
+  // mismatches (FLM models on a llama.cpp slot) and rows of another runtime
+  // family (halogen models only on a halogen slot) are excluded.
+  const opts = compatibleModels(models, { type: 'llm', slot: s, runtimeFamily })
   const cur = s.model_id || s.model || ''
   const has = opts.some((m) => m.id === cur)
   // The window each candidate would launch with in THIS slot: the server
@@ -1006,6 +1007,12 @@ export function SlotCards({ rows, full, models, allSlots, busyName, handlers, lo
             allSlots={allSlots}
             disabled={busy}
             onSwap={(id) => handlers.onSwap(s, id)}
+            runtimeFamily={effectiveRuntimeFamily({
+              binary: s.binary,
+              profile: profiles.find((p) => p.name === effectiveProfileName(s)) || null,
+              device: s.device,
+              backends,
+            })}
           />
         ) : (
           <div className="smodel" title={s.model || ''}>

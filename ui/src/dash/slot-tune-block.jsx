@@ -59,9 +59,20 @@ function profilePinsThinking(profile) {
   return pinned !== null
 }
 
+/** The options a row offers on this runtime. Halogen has no n-gram drafter. */
+function rowOptions(k, runtimeFamily) {
+  const options = ROWS[k].options
+  if (k === 'speculation' && runtimeFamily === 'halogen') return options.filter(([id]) => id !== 'ngram')
+  return options
+}
+
 /** Reason a row cannot take an override, or null. */
 function disabledReason(key, { profile, model, tuneEffective }) {
   if (key === 'vision' && !model?.mmproj) return 'This model has no vision projector (mmproj).'
+  if (key === 'speculation' && tuneEffective?.tune_unavailable?.speculation) {
+    // The server's own reason text (this engine has no n-gram drafter, ...).
+    return String(tuneEffective.tune_unavailable.speculation)
+  }
   if (key === 'reasoning_effort' && tuneEffective?.reasoning_effort_unavailable) {
     // The server's own reason text (runner build too old, runner unknown, ...).
     return String(tuneEffective.reasoning_effort_unavailable)
@@ -75,7 +86,7 @@ function disabledReason(key, { profile, model, tuneEffective }) {
   return null
 }
 
-function TuneRow({ k, tune, profile, tuneEffective, reason, error, disabled, onChange }) {
+function TuneRow({ k, tune, profile, tuneEffective, runtimeFamily, reason, error, disabled, onChange }) {
   const row = ROWS[k]
   const has = tune[k] !== undefined && tune[k] !== null && tune[k] !== ''
   const set = (v) => onChange({ ...tune, [k]: v })
@@ -106,7 +117,7 @@ function TuneRow({ k, tune, profile, tuneEffective, reason, error, disabled, onC
           >
             Profile · {profileValueLabel(k, profile, tuneEffective)}
           </button>
-          {row.options?.map(([id, val, text]) => (
+          {rowOptions(k, runtimeFamily)?.map(([id, val, text]) => (
             <button
               key={id}
               type="button"
@@ -162,6 +173,7 @@ export function TuneBlock({
   canSaveAsProfile = true,
   onReset,
   disabled,
+  runtimeFamily = '',
 }) {
   if (!tuneApplies(slot)) return null
   const tune = value || {}
@@ -181,6 +193,7 @@ export function TuneBlock({
             tune={tune}
             profile={profile}
             tuneEffective={tuneEffective}
+            runtimeFamily={runtimeFamily}
             reason={disabledReason(k, { profile, model, tuneEffective })}
             error={errors[k]}
             disabled={disabled}

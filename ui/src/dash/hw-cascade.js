@@ -208,3 +208,34 @@ export function runnerForBackend(backend, deviceClass) {
 	if (dc === "cpu" || be === "cpu") return "cpu";
 	return "standard";
 }
+
+/**
+ * The runner key a slot effectively runs on — the same precedence the slot
+ * drawer's Runtime select shows: the slot's (staged) `binary`, else the runner
+ * its profile carries, else the lane default (`runnerForBackend`). An NPU slot
+ * has no llama runner default ('').
+ *
+ * @param {{ binary?: string, profile?: { runner?: string } | null, device?: string }} slot
+ */
+export function effectiveRunnerKey({ binary, profile, device }) {
+	if (binary) return String(binary);
+	if (profile?.runner) return String(profile.runner);
+	const d = String(device || "");
+	if (d === "npu") return "";
+	return runnerForBackend(d.startsWith("gpu-") ? d.slice(4) : d, deviceClassOf(d));
+}
+
+/**
+ * The runtime family ('llama-server' | 'halogen' | 'flm' | ...) of a slot's
+ * effective runner, read off the system-info `backends` catalogue. '' while the
+ * catalogue is not loaded or does not carry the runner — callers treat that as
+ * "not halogen", so the pickers and the Tune block degrade to the llama shape
+ * rather than hiding everything.
+ *
+ * @param {{ binary?: string, profile?: { runner?: string } | null, device?: string,
+ *           backends?: Record<string, { runtime_family?: string }> }} slot
+ */
+export function effectiveRuntimeFamily({ binary, profile, device, backends }) {
+	const key = effectiveRunnerKey({ binary, profile, device });
+	return (key && backends?.[key]?.runtime_family) || "";
+}

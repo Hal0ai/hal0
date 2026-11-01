@@ -28,6 +28,7 @@ import {
 	laneValues,
 	runnerOptions,
 	selectedRunnerKey,
+	effectiveRuntimeFamily,
 } from "./hw-cascade.js";
 // llama.cpp build-provenance formatter (h0/runner-provenance) — shared with
 // the Runner Images page so option labels and the RunnerCard can't drift.
@@ -1578,6 +1579,16 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		? runtimeOptions.find((o) => o.key === runtimeSel)
 		: null;
 	const laneVals = laneValues(selectedRuntimeOption);
+	// The family of the runner this slot will launch on (staged `binary`, else
+	// the staged profile's runner, else the lane default). ONE value, threaded
+	// to the model picker and the Tune block: a halogen slot binds only halogen
+	// models and has no n-gram drafter.
+	const runtimeFamily = effectiveRuntimeFamily({
+		binary,
+		profile: stagedProfileRow,
+		device: pendingDevice,
+		backends: hwBackends,
+	});
 
 	return (
 		<>
@@ -1809,6 +1820,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								const compatible = compatibleModels(modelsQuery.data, {
 									type: slot.type,
 									slot,
+									runtimeFamily,
 								});
 								const cur = slot.model_id || slot.model || "";
 								const has = compatible.some((m) => m.id === cur);
@@ -1933,6 +1945,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 									canSaveAsProfile={!!cloneBaseRow}
 									onReset={() => setTuneForm({})}
 									disabled={degraded}
+									runtimeFamily={runtimeFamily}
 								/>
 							) : (
 								<div className="hint" data-testid="slot-launch-tune-note">
@@ -2930,6 +2943,8 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
 	// useQuery's own caching means useModels() costs ~nothing when closed.
 	const modelsQuery = useModels();
 	const hwQuery = useHardware();
+	const profilesQuery = useProfiles();
+	const systemInfoQuery = useSystemInfo();
 	// UI-5 (state-driven): a live-container pick is stashed here and confirmed
 	// through the shared ConfirmDialog before committing. Must be declared
 	// before the early return (rules-of-hooks).
@@ -2939,12 +2954,21 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
 	const isContainer = slot.runtime === "container";
 	const ramFreeGb = hwQuery.data?.ram?.free ?? 0;
 	const isImage = slot.type === IMAGE_SLOT_TYPE;
+	// Same family rule as the drawer's picker: halogen slots offer halogen models only.
+	const profileRows = Array.isArray(profilesQuery.data) ? profilesQuery.data : [];
+	const runtimeFamily = effectiveRuntimeFamily({
+		binary: slot.binary,
+		profile: profileRows.find((p) => p.name === effectiveProfileName(slot)) || null,
+		device: slot.device,
+		backends: systemInfoQuery.data?.backends,
+	});
 	// No registry rows to offer an image slot (see IMAGE_SLOT_TYPE above).
 	const compatible = isImage
 		? []
 		: compatibleModels(modelsQuery.data, {
 				type: slot.type,
 				slot,
+				runtimeFamily,
 			});
 
 	// N2: container swap = cold systemctl restart (not a hot in-place swap).
