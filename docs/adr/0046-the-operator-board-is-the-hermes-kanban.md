@@ -2,13 +2,14 @@
 
 ## Status
 
-**PROPOSED (2026-11-01).** Operator decision of 2026-11-01: the hal0
+**ACCEPTED (2026-11-01).** Operator decision of 2026-11-01: the hal0
 dashboard's Operator Board reads and writes the Hermes kanban through
 hal0-api, and hal0's own board store is removed. This record amends the
 KB-4 rework decision (commits `0f09043e` and `e18c25ab`, which have no ADR
-of their own) and extends ADR-0033 to the board. Lanes A–D merged as #3264,
-#3266, #3265; lane B (routes, events socket, store removal) and this record
-merge together.
+of their own) and extends ADR-0033 to the board. Landed as #3264 (facade and
+token-file auth), #3266 (brain tools), #3265 (shim write-through and doctor
+rows), #3272 (routes, events socket, store removal, converter), #3269 (UI
+empty states) and the docs PR carrying this record.
 
 ## Context
 
