@@ -98,7 +98,6 @@ from hal0.slots.state import (
     IllegalSlotTransition,
     SlotConfigError,
     SlotCrashLooping,
-    SlotGttLeak,
     SlotNotFound,
     SlotOutputSanityFailed,
     SlotPinned,
@@ -245,6 +244,20 @@ ModelCacheCheck = Callable[[str], bool]
 
 The default check consults :class:`ModelRegistry`; tests inject stubs to
 force-trigger or skip the PULLING transition deterministically."""
+
+
+def _spec_provider_or_none(cfg: Any) -> Any | None:
+    """The slot's runtime provider (``None`` for the llama-server default).
+
+    A provider that cannot be resolved is left to ``ContainerProvider.load_sync``,
+    whose own error path reports it; advisory callers just see no provider.
+    """
+    from hal0.providers.container import _spec_provider_for
+
+    try:
+        return _spec_provider_for(_cfg_to_dict(cfg))
+    except Exception:
+        return None
 
 
 # ── Slot snapshot ────────────────────────────────────────────────────────────
@@ -1353,6 +1366,10 @@ class SlotManager:
             # #2738: the slow-stop mark belongs to the one ERROR that stamped
             # it; any other transition (including a different ERROR) retires it.
             carried_extra.pop("slow_stop", None)
+        if not carried_extra.get("gtt_leak_warning") or to_state == SlotState.OFFLINE:
+            # The GTT-leak suspicion belongs to one load attempt: an empty value
+            # (this load found none) or the slot going down retires it.
+            carried_extra.pop("gtt_leak_warning", None)
         if to_state in (SlotState.READY, SlotState.IDLE):
             # Converged healthy — clear the crash-loop breaker and its
             # carried extras. Covers load() success AND out-of-band
@@ -1361,6 +1378,9 @@ class SlotManager:
             self._load_failures.pop(key, None)
             carried_extra.pop("parked", None)
             carried_extra.pop("load_failures", None)
+            # …and the GTT-leak suspicion: it explains a load that might hang,
+            # and this one came up.
+            carried_extra.pop("gtt_leak_warning", None)
             # …and the crash-line evidence: it explains the failures the
             # breaker counted, so it retires with them.
             carried_extra.pop("last_crash_line", None)
@@ -1949,6 +1969,11 @@ class SlotManager:
                 # lying container meminfo) — warns, never blocks. See
                 # _warn_gtt_feasibility.
                 await self._warn_gtt_feasibility(slot_name, resolved_model, model_info)
+                # GTT-leak suspicion (a provider that asks for it): sampled here,
+                # BEFORE pre-load eviction below, so memory still being released
+                # by a slot evicted to make room cannot read as a leak. Advisory
+                # only — it never refuses; the text rides the STARTING record.
+                leak_warning = await self._guard_gtt_leak(slot_name, _spec_provider_or_none(cfg))
                 # Pre-load eviction (O26): estimate resolved_model's
                 # footprint and, if projected free memory is short, evict
                 # idle, non-pinned resident slots (lowest `priority` first,
@@ -1968,6 +1993,7 @@ class SlotManager:
                         SlotState.STARTING,
                         model_id=resolved_model,
                         port=_cfg_port(cfg),
+                        extra={"gtt_leak_warning": leak_warning},
                     )
                     await self._spawn_locked(slot_name, cfg, resolved_model, model_info=model_info)
                     await self._transition(
@@ -2534,6 +2560,17 @@ class SlotManager:
                 # #2715: an offline slot keeps a stale ``model_id`` from its
                 # last load; it is not serving anything, so don't claim it is.
                 meta["message"] = no_model_assigned_message(slot_name)
+        # The GTT-leak suspicion is the load's own message while the slot is
+        # still coming up (the case it explains: a start that hangs reserving
+        # the KV pool); any message already set — an error, a missing model —
+        # wins, and the raw text stays in metadata either way.
+        leak_warning = rec.extra.get("gtt_leak_warning")
+        if (
+            leak_warning
+            and not meta.get("message")
+            and observed in (SlotState.STARTING, SlotState.WARMING)
+        ):
+            meta["message"] = leak_warning
         breaker = self._breaker_snapshot(slot_name)
         if breaker:
             meta["breaker"] = breaker
@@ -2786,19 +2823,7 @@ class SlotManager:
             cfg = {**cfg, "model": {**base_model, "default": model_id}}
 
         # Container path: write + start the podman systemd unit.
-        from hal0.providers.container import _spec_provider_for, container_provider
-
-        # A runtime that leaves GPU memory behind when it dies (halogen) asks for
-        # the GTT-leak guard: refuse here, with the cause and the remedy, rather
-        # than let its next weight allocation fail with an opaque OOM. A provider
-        # that cannot be resolved is left for ``load_sync``, whose own error path
-        # reports it.
-        try:
-            spec_provider = _spec_provider_for(cfg)
-        except Exception:
-            spec_provider = None
-        if getattr(spec_provider, "gtt_leak_guard", False):
-            await self._guard_gtt_leak(slot_name, spec_provider)
+        from hal0.providers.container import container_provider
 
         port = int(cfg.get("port", 0))
         await asyncio.get_event_loop().run_in_executor(
@@ -2807,26 +2832,34 @@ class SlotManager:
         # Register loopback upstream so the dispatcher can route to this slot.
         self._register_container_upstream(slot_name, port)
 
-    async def _guard_gtt_leak(self, slot_name: str, provider: Any | None) -> None:
-        """Refuse a load onto a host whose GPU memory a dead process still holds.
+    async def _guard_gtt_leak(self, slot_name: str, provider: Any | None) -> str | None:
+        """Warn when this host holds GPU memory nothing on this box accounts for.
 
-        Only for a provider that asks (``gtt_leak_guard = True``). Builds the four
-        inputs of :func:`hal0.slots.gtt_guard.gtt_leak_message` (which owns the
-        rule): the amdgpu GTT counter, what resident GPU slots account for, how
-        many of them there are, and the KFD process count, then raises
-        :class:`SlotGttLeak` with its message.
+        Only for a provider that asks (``gtt_leak_guard = True``); returns the
+        warning text from :func:`hal0.slots.gtt_guard.gtt_leak_message`, else
+        ``None``, and logs it at WARNING as ``slot.gtt_leak_suspected``. It never
+        raises and never blocks a load: the GTT and KFD counters are host-wide
+        while this list is one guest's, so on a host whose LXC guests share the
+        GPU a sibling's Vulkan slot is indistinguishable from a leaked engine. The
+        caller stores the text on the slot's state for the dashboard.
 
-        Slots still loading count as holders (``include_starting``) because their
-        weights are already in GTT, and the slot under load is left out: it is in
-        STARTING itself and must not vouch for memory it does not yet own. NPU and
-        CPU slots are not holders (see ``slot_may_hold_gpu_memory``).
+        Called from :meth:`load` BEFORE pre-load eviction, so memory still being
+        released by a slot evicted to make room is not read as a leak. A restart
+        or swap that stops this slot's own engine first can still see its memory
+        lag; with a warning as the outcome no re-sample wait is needed, and the
+        text names the other explanation.
 
-        Refuses on proof only. Any reader that fails, or a figure the host does
-        not expose, ends in a silent pass: a gap in the data must never tell an
-        operator to reboot.
+        The inputs are the amdgpu GTT counter, the KFD process count and this
+        box's GPU holders: every other slot that is loading, up, unloading, or in
+        ``error`` with its process possibly alive (``slow_stop``, or an active
+        unit). The slot under load is left out (it holds nothing yet and must not
+        vouch for itself), as are NPU and CPU slots. ``resident_gpu_slots`` is the
+        number of holders, not the number of sized rows: a holder with no model
+        bound has no row but still holds GTT. Any reader that fails, or a figure
+        the host does not expose, ends in ``None``.
         """
         if not getattr(provider, "gtt_leak_guard", False):
-            return
+            return None
         try:
             from hal0.hardware import gpu_view
             from hal0.providers._gpu import kfd_proc_count
@@ -2842,32 +2875,48 @@ class SlotManager:
             # Cheap exits before the expensive slot sweep: below the threshold
             # nothing can be a leak, and any KFD process explains the memory.
             if gtt_used_mb is None or gtt_used_mb <= GTT_LEAK_THRESHOLD_MB:
-                return
+                return None
             kfd_procs = await asyncio.to_thread(kfd_proc_count)
             if kfd_procs != 0:
-                return
-            holders = [
-                s for s in await self.list() if s.name != slot_name and slot_may_hold_gpu_memory(s)
-            ]
+                return None
+            holders = []
+            for s in await self.list():
+                if s.name == slot_name:
+                    continue
+                # An ERROR slot's unit may still be up (the probe is only
+                # worth making for the one state that depends on it).
+                unit_active = s.state == SlotState.ERROR and await self._is_active(s.name)
+                if slot_may_hold_gpu_memory(s, unit_active=unit_active):
+                    holders.append(s)
             registry: Any = None
             with contextlib.suppress(Exception):
                 from hal0.registry.store import ModelRegistry
 
                 registry = ModelRegistry()
             rows = await build_per_slot(holders, registry=registry, include_starting=True)
+            resident_mb = sum(float(r.get("vram_mb") or 0.0) for r in rows.values())
             message = gtt_leak_message(
                 gtt_used_mb=gtt_used_mb,
-                resident_gpu_mb=sum(float(r.get("vram_mb") or 0.0) for r in rows.values()),
-                resident_gpu_slots=len(rows),
+                resident_gpu_mb=resident_mb,
+                resident_gpu_slots=len(holders),
                 kfd_procs=kfd_procs,
             )
         except Exception as exc:
             log.warning(
                 "slot.gtt_guard_unreadable: %s: %s", slot_name, exc, extra={"slot": slot_name}
             )
-            return
+            return None
         if message is not None:
-            raise SlotGttLeak(message, details={"slot": slot_name})
+            log.warning(
+                "slot.gtt_leak_suspected: %s: %s",
+                slot_name,
+                message,
+                extra={
+                    "slot": slot_name,
+                    "unexplained_gib": round((gtt_used_mb - resident_mb) / 1024.0, 1),
+                },
+            )
+        return message
 
     async def terminate(self, slot_name: str, *, timeout_s: float | None = None) -> None:
         """Stop the slot's container unit and deregister its upstream.

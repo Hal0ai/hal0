@@ -3056,7 +3056,8 @@ def test_gtt_leak_warns_with_the_guards_message(tmp_path: Path) -> None:
     )
     assert expected is not None and c.detail == expected
     assert "halogen-flash-server issue #79" in c.detail
-    assert "A host reboot is required" in c.detail
+    assert "another guest on this host" in c.detail
+    assert "a host reboot frees it" in c.detail
 
 
 def test_gtt_leak_passes_on_a_healthy_vulkan_only_box(tmp_path: Path) -> None:

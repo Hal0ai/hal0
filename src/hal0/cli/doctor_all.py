@@ -262,20 +262,23 @@ def check_gtt_leak(
     sample: Any = None,
     sys_root: str = "/sys",
 ) -> Check:
-    """GPU memory held by a dead process that only a host reboot frees.
+    """GPU memory held by a dead process that only a host reboot frees (suspected).
 
-    The same rule the halogen load guard enforces
+    The same signature the halogen load path warns on
     (:func:`hal0.slots.gtt_guard.gtt_leak_message`), so the doctor names the
-    state before an operator tries a load and watches it fail: unexplained amdgpu
-    GTT above the threshold, no GPU slot resident or loading, and no process on
-    the KFD proc table. ``warn``, never ``fail``: nothing here is broken in hal0,
-    and the remedy is the host's.
+    state before an operator tries a load and watches it hang: unexplained amdgpu
+    GTT above the threshold, no GPU slot of this box that could hold it, and no
+    process on the KFD proc table. ``warn``, never ``fail``: nothing here is
+    broken in hal0, and the signature is a suspicion, not proof, because the GTT
+    and KFD counters are host-wide while the slot list is one guest's. A sibling
+    guest sharing the GPU looks the same, and the message says so.
 
     ``slots`` is the ``GET /api/slots`` body the roll-up already fetched. A box
     running only Vulkan slots looks identical to a leak without it (Vulkan never
     appears on the KFD table), so a missing slot list skips the check instead of
-    guessing. ``sample`` (a ``GPUMemorySample``) and ``sys_root`` are the test
-    seams; by default the live amdgpu counters and ``/sys`` are read.
+    guessing; so does an unreadable KFD process table. ``sample`` (a
+    ``GPUMemorySample``) and ``sys_root`` are the test seams; by default the live
+    amdgpu counters and ``/sys`` are read.
     """
     from hal0.providers._gpu import kfd_proc_count
     from hal0.slots.gtt_guard import gtt_leak_message, slot_may_hold_gpu_memory

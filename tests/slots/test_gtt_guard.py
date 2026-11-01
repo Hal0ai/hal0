@@ -1,19 +1,26 @@
-"""The GTT-leak guard: the pure rule, its error type, and the manager seam.
+"""The GTT-leak signature: the pure rule, the holder set, and the manager seam.
 
 A halogen engine that dies badly can leave tens of GiB of GPU memory held with
 no process behind it (halogen-flash-server issue #79); the only fix is a host
-reboot, and the next load fails deep inside a weight allocation instead of
-saying so. ``gtt_leak_message`` names that state before the unit is written.
+reboot, and a start on top of it can hang at "reserving the KV pool".
+``gtt_leak_message`` names that suspicion.
+
+It is a WARNING, never a refusal: the GTT and KFD counters are host-wide while
+hal0's slot list is one guest's, so a sibling guest's Vulkan slot on a shared
+GPU looks exactly like a leak. The load path logs it, stores it on the slot's
+state for the dashboard and goes on loading.
 
 The rule is deliberately narrow. Vulkan slots hold their GTT through the DRM
 render node and never appear under ``/sys/class/kfd/kfd/proc``, so "GPU memory
 in use and no KFD process" describes every healthy Vulkan-only box too. The
-rule therefore also requires that no resident slot can account for the memory
+rule therefore also requires that no slot of this box can hold the memory
 (Review Focus 3).
 """
 
 from __future__ import annotations
 
+import contextlib
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -29,7 +36,7 @@ from hal0.slots.gtt_guard import (
     slot_may_hold_gpu_memory,
 )
 from hal0.slots.manager import Slot, SlotManager
-from hal0.slots.state import SlotGttLeak, SlotSpawnFailed, SlotState
+from hal0.slots.state import SlotState
 from tests.slots.conftest import FakeContainerProvider
 
 GIB = 1024.0  # MiB per GiB: every figure here is MiB
@@ -60,14 +67,17 @@ def test_gfx1151_is_the_kfd_target_version_for_strix_halo() -> None:
 # ── gtt_leak_message ───────────────────────────────────────────────────────
 
 
+_MESSAGE_40_GIB = (
+    "40 GiB of GPU memory is held that no slot on this box accounts for and no process "
+    "holds the GPU: either another guest on this host holds it, or a previous GPU process "
+    "did not give it back (halogen-flash-server issue #79). If no other guest runs GPU "
+    "work, a host reboot frees it; a start on top of a real leak can hang at 'reserving "
+    "the KV pool'."
+)
+
+
 def test_unexplained_gtt_with_no_residents_is_a_leak() -> None:
-    msg = _message()
-    assert msg == (
-        "40 GiB of GPU memory is held that no hal0 slot accounts for and no process "
-        "holds the GPU: memory a previous GPU process did not give back "
-        "(halogen-flash-server issue #79). A host reboot is required before this "
-        "slot can start."
-    )
+    assert _message() == _MESSAGE_40_GIB
 
 
 def test_vulkan_residents_never_read_as_a_leak() -> None:
@@ -120,14 +130,41 @@ def test_the_size_is_not_rounded_to_hide_a_fraction() -> None:
 # ── slot_may_hold_gpu_memory ───────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("state", ["starting", "warming", "ready", "serving", "idle"])
+@pytest.mark.parametrize("state", ["starting", "warming", "ready", "serving", "idle", "unloading"])
 def test_a_gpu_slot_in_a_holding_state_may_hold_memory(state: str) -> None:
+    """``unloading`` counts: the stop is issued but the process may still be up."""
     assert slot_may_hold_gpu_memory({"name": "a", "state": state, "backend": "vulkan"})
 
 
-@pytest.mark.parametrize("state", ["offline", "pulling", "error", "stopping", ""])
+@pytest.mark.parametrize("state", ["offline", "pulling", ""])
 def test_a_slot_that_is_not_up_holds_nothing(state: str) -> None:
     assert not slot_may_hold_gpu_memory({"name": "a", "state": state, "backend": "vulkan"})
+
+
+def test_every_real_slot_state_is_decided_on_purpose() -> None:
+    """A new ``SlotState`` must be classified here, not fall through by accident."""
+    decided = {"starting", "warming", "ready", "serving", "idle", "unloading"}
+    decided |= {"offline", "pulling", "error"}
+    assert {st.value for st in SlotState} == decided
+
+
+def test_a_crashed_slot_in_error_does_not_shield_the_box() -> None:
+    """A crashed halogen in ``error`` with its process gone is the leak case: it
+    must not count as a holder, or the leak could never be named."""
+    assert not slot_may_hold_gpu_memory({"name": "a", "state": "error", "backend": "rocm"})
+
+
+def test_an_error_slot_whose_unit_is_still_active_holds_memory() -> None:
+    assert slot_may_hold_gpu_memory(
+        {"name": "a", "state": "error", "backend": "rocm"}, unit_active=True
+    )
+
+
+def test_an_error_slot_with_an_abandoned_teardown_may_still_hold_memory() -> None:
+    """``slow_stop`` is hal0 having stopped WAITING on a stop that may yet finish."""
+    assert slot_may_hold_gpu_memory(
+        {"name": "a", "state": "error", "backend": "rocm", "metadata": {"slow_stop": "tok"}}
+    )
 
 
 @pytest.mark.parametrize("backend", ["cpu", "flm", "npu"])
@@ -144,7 +181,7 @@ def test_an_flm_provider_holds_no_gtt_even_with_a_gpu_backend_token() -> None:
 
 
 def test_an_unknown_backend_counts_as_a_holder() -> None:
-    """Unprovable reads as 'may hold': the guard only ever refuses on proof."""
+    """Unprovable reads as 'may hold': the warning fires on a clear signature only."""
     assert slot_may_hold_gpu_memory({"name": "a", "state": "ready"})
 
 
@@ -159,22 +196,21 @@ def test_holding_states_track_what_capacity_counts() -> None:
     must not drift apart: a state one counts and the other ignores is a false verdict."""
     from hal0.slots import capacity, gtt_guard
 
-    assert capacity._RESIDENT_STATES | {capacity._STARTING_STATE} == gtt_guard._HOLDING_STATES
+    assert (
+        capacity._RESIDENT_STATES | {capacity._STARTING_STATE, "unloading"}
+        == gtt_guard._HOLDING_STATES
+    )
 
 
-# ── SlotGttLeak ────────────────────────────────────────────────────────────
+# ── no refusal type ────────────────────────────────────────────────────────
 
 
-def test_slot_gtt_leak_is_a_spawn_failure_with_its_own_code() -> None:
-    err = SlotGttLeak("held")
-    assert isinstance(err, SlotSpawnFailed)
-    assert err.code == "slot.gtt_leak"
-
-
-def test_slot_gtt_leak_is_exported() -> None:
+def test_there_is_no_refusal_error_for_a_suspected_leak() -> None:
+    """The signature can never be certain on a shared host, so nothing raises."""
     from hal0.slots import state
 
-    assert "SlotGttLeak" in state.__all__
+    assert not hasattr(state, "SlotGttLeak")
+    assert "SlotGttLeak" not in state.__all__
 
 
 # ── SlotManager._guard_gtt_leak ────────────────────────────────────────────
@@ -196,7 +232,7 @@ def _sample(gtt_used_mb: float | None) -> GPUMemorySample:
 
 
 class _Guarded:
-    """A provider that asks hal0 for the GTT-leak guard."""
+    """A provider that asks hal0 for the GTT-leak check."""
 
     name = "guarded"
     gtt_leak_guard = True
@@ -219,33 +255,50 @@ def _wire(
     slots: list[Slot],
     rows: dict[str, dict[str, Any]] | None = None,
     kfd_procs: int | None = 0,
+    real_build: bool = False,
+    unit_active: bool | None = None,
 ) -> SimpleNamespace:
-    """Patch the guard's three readers; return the mocks so a test can inspect them."""
+    """Patch the guard's readers; return the mocks so a test can inspect them."""
     sample = MagicMock(return_value=_sample(gtt_used_mb))
     kfd = MagicMock(return_value=kfd_procs)
     build = AsyncMock(return_value=rows or {})
+    active = AsyncMock(return_value=bool(unit_active))
     monkeypatch.setattr("hal0.hardware.gpu_view.sample", sample)
     monkeypatch.setattr("hal0.providers._gpu.kfd_proc_count", kfd)
-    monkeypatch.setattr("hal0.slots.capacity.build_per_slot", build)
+    if real_build:
+        monkeypatch.setattr("hal0.slots.capacity._host_has_capable_gpu", lambda: True)
+    else:
+        monkeypatch.setattr("hal0.slots.capacity.build_per_slot", build)
     monkeypatch.setattr(manager, "list", AsyncMock(return_value=slots))
-    return SimpleNamespace(sample=sample, kfd=kfd, build=build)
+    if unit_active is not None:
+        # Only when a test is about the unit probe: patching it unconditionally
+        # would make every loaded slot read as stopped in ``load()`` tests.
+        monkeypatch.setattr(manager, "_is_active", active)
+    return SimpleNamespace(sample=sample, kfd=kfd, build=build, active=active)
 
 
-async def test_guard_refuses_unexplained_gtt_with_nothing_resident(
+async def test_guard_returns_the_warning_for_unexplained_gtt_with_nothing_resident(
     manager: SlotManager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _wire(monkeypatch, manager, gtt_used_mb=40 * GIB, slots=[])
-    with pytest.raises(SlotGttLeak) as exc_info:
+    assert await manager._guard_gtt_leak("flash", _Guarded()) == _MESSAGE_40_GIB
+
+
+async def test_guard_logs_the_suspicion_at_warning_with_the_slot_and_the_size(
+    manager: SlotManager, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _wire(monkeypatch, manager, gtt_used_mb=40 * GIB, slots=[])
+    with caplog.at_level(logging.WARNING, logger="hal0.slots.manager"):
         await manager._guard_gtt_leak("flash", _Guarded())
-    err = exc_info.value
-    assert err.code == "slot.gtt_leak"
-    assert str(err).startswith("40 GiB of GPU memory is held that no hal0 slot accounts for")
-    assert "A host reboot is required before this slot can start." in str(err)
-    assert err.details["slot"] == "flash"
+    (record,) = [r for r in caplog.records if "slot.gtt_leak_suspected" in r.getMessage()]
+    assert record.levelno == logging.WARNING
+    assert record.slot == "flash"  # type: ignore[attr-defined]
+    assert record.unexplained_gib == 40.0  # type: ignore[attr-defined]
+    assert "another guest on this host" in record.getMessage()
 
 
 async def test_guard_passes_two_vulkan_residents_holding_the_gtt(
-    manager: SlotManager, monkeypatch: pytest.MonkeyPatch
+    manager: SlotManager, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Review Focus 3, end to end: 38 of 40 GiB held by two Vulkan residents and
     kfd_procs 0 is a healthy box."""
@@ -258,15 +311,28 @@ async def test_guard_passes_two_vulkan_residents_holding_the_gtt(
         "coder": {"vram_mb": 19 * GIB, "ram_mb": 0.0, "mem_mb": 19 * GIB, "state": "ready"},
     }
     mocks = _wire(monkeypatch, manager, gtt_used_mb=40 * GIB, slots=residents, rows=rows)
-    await manager._guard_gtt_leak("flash", _Guarded())
+    with caplog.at_level(logging.WARNING, logger="hal0.slots.manager"):
+        assert await manager._guard_gtt_leak("flash", _Guarded()) is None
     mocks.kfd.assert_called_once()
+    assert not [r for r in caplog.records if "slot.gtt_leak_suspected" in r.getMessage()]
+
+
+async def test_a_resident_slot_with_no_model_still_clears_the_box(
+    manager: SlotManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``build_per_slot`` skips a slot with no model bound, so counting its ROWS
+    would read 'nothing resident'. The holder count is what the rule needs, and
+    this goes through the REAL ``build_per_slot``."""
+    modelless = Slot("brain", state=SlotState.READY, backend="vulkan", model_id=None)
+    _wire(monkeypatch, manager, gtt_used_mb=40 * GIB, slots=[modelless], real_build=True)
+    assert await manager._guard_gtt_leak("flash", _Guarded()) is None
 
 
 async def test_guard_asks_for_starting_slots_and_leaves_out_the_slot_being_loaded(
     manager: SlotManager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A slot still loading already holds its weights, so it counts as a holder;
-    the slot under load is in STARTING itself and must not vouch for its own GTT."""
+    the slot under load must not vouch for its own GTT."""
     loading = Slot("flash", state=SlotState.STARTING, backend="rocm", model_id="f")
     sibling = Slot("brain", state=SlotState.STARTING, backend="vulkan", model_id="b")
     mocks = _wire(
@@ -276,10 +342,59 @@ async def test_guard_asks_for_starting_slots_and_leaves_out_the_slot_being_loade
         slots=[loading, sibling],
         rows={"brain": {"vram_mb": 20 * GIB, "state": "starting"}},
     )
-    await manager._guard_gtt_leak("flash", _Guarded())
+    assert await manager._guard_gtt_leak("flash", _Guarded()) is None
     (passed,) = mocks.build.await_args.args
     assert [s.name for s in passed] == ["brain"]
     assert mocks.build.await_args.kwargs["include_starting"] is True
+
+
+async def test_an_unloading_slot_may_still_hold_the_memory(
+    manager: SlotManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    unloading = Slot("brain", state=SlotState.UNLOADING, backend="vulkan", model_id="b")
+    _wire(monkeypatch, manager, gtt_used_mb=40 * GIB, slots=[unloading])
+    assert await manager._guard_gtt_leak("flash", _Guarded()) is None
+
+
+async def test_a_crashed_slot_in_error_does_not_hide_the_leak(
+    manager: SlotManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The crashed halogen IS the leak case: ERROR with its process gone."""
+    crashed = Slot("flash2", state=SlotState.ERROR, backend="rocm", model_id="f")
+    mocks = _wire(monkeypatch, manager, gtt_used_mb=40 * GIB, slots=[crashed], unit_active=False)
+    assert await manager._guard_gtt_leak("flash", _Guarded()) == _MESSAGE_40_GIB
+    mocks.active.assert_awaited_once_with("flash2")
+
+
+async def test_an_error_slot_whose_unit_is_still_active_holds_the_memory(
+    manager: SlotManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    errored = Slot("flash2", state=SlotState.ERROR, backend="rocm", model_id="f")
+    _wire(monkeypatch, manager, gtt_used_mb=40 * GIB, slots=[errored], unit_active=True)
+    assert await manager._guard_gtt_leak("flash", _Guarded()) is None
+
+
+async def test_an_error_slot_with_an_abandoned_teardown_holds_the_memory(
+    manager: SlotManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stuck = Slot(
+        "flash2",
+        state=SlotState.ERROR,
+        backend="rocm",
+        model_id="f",
+        metadata={"slow_stop": "tok"},
+    )
+    _wire(monkeypatch, manager, gtt_used_mb=40 * GIB, slots=[stuck], unit_active=False)
+    assert await manager._guard_gtt_leak("flash", _Guarded()) is None
+
+
+async def test_the_unit_probe_is_made_only_for_a_slot_in_error(
+    manager: SlotManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ready = Slot("brain", state=SlotState.READY, backend="vulkan", model_id="b")
+    mocks = _wire(monkeypatch, manager, gtt_used_mb=40 * GIB, slots=[ready], unit_active=False)
+    await manager._guard_gtt_leak("flash", _Guarded())
+    mocks.active.assert_not_awaited()
 
 
 async def test_an_npu_resident_does_not_hide_a_leak(
@@ -288,8 +403,7 @@ async def test_an_npu_resident_does_not_hide_a_leak(
     flm = Slot("flm", state=SlotState.READY, backend="flm", model_id="qwen3")
     cpu = Slot("kokoro", state=SlotState.READY, backend="cpu", model_id="k")
     mocks = _wire(monkeypatch, manager, gtt_used_mb=40 * GIB, slots=[flm, cpu])
-    with pytest.raises(SlotGttLeak):
-        await manager._guard_gtt_leak("flash", _Guarded())
+    assert await manager._guard_gtt_leak("flash", _Guarded()) == _MESSAGE_40_GIB
     assert mocks.build.await_args.args[0] == []
 
 
@@ -297,8 +411,8 @@ async def test_guard_does_nothing_for_a_provider_that_does_not_ask(
     manager: SlotManager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     mocks = _wire(monkeypatch, manager, gtt_used_mb=40 * GIB, slots=[])
-    await manager._guard_gtt_leak("chat", _Plain())
-    await manager._guard_gtt_leak("chat", None)
+    assert await manager._guard_gtt_leak("chat", _Plain()) is None
+    assert await manager._guard_gtt_leak("chat", None) is None
     mocks.sample.assert_not_called()
     mocks.kfd.assert_not_called()
 
@@ -307,85 +421,185 @@ async def test_a_live_kfd_process_clears_the_box(
     manager: SlotManager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _wire(monkeypatch, manager, gtt_used_mb=40 * GIB, slots=[], kfd_procs=1)
-    await manager._guard_gtt_leak("flash", _Guarded())
+    assert await manager._guard_gtt_leak("flash", _Guarded()) is None
 
 
-async def test_an_unreadable_kfd_table_never_blocks_a_load(
+async def test_an_unreadable_kfd_table_is_never_a_suspicion(
     manager: SlotManager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _wire(monkeypatch, manager, gtt_used_mb=40 * GIB, slots=[], kfd_procs=None)
-    await manager._guard_gtt_leak("flash", _Guarded())
+    assert await manager._guard_gtt_leak("flash", _Guarded()) is None
 
 
-async def test_a_box_with_no_gtt_counter_never_blocks_a_load(
+async def test_a_box_with_no_gtt_counter_is_never_a_suspicion(
     manager: SlotManager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _wire(monkeypatch, manager, gtt_used_mb=None, slots=[])
-    await manager._guard_gtt_leak("flash", _Guarded())
+    assert await manager._guard_gtt_leak("flash", _Guarded()) is None
 
 
-async def test_a_reader_that_blows_up_never_blocks_a_load(
+async def test_a_reader_that_blows_up_never_raises(
     manager: SlotManager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The guard refuses on proof only: a failing reader is not proof of a leak."""
+    """A failing reader is not evidence of anything, and the guard never raises."""
     mocks = _wire(monkeypatch, manager, gtt_used_mb=40 * GIB, slots=[])
     mocks.sample.side_effect = RuntimeError("sysfs exploded")
-    await manager._guard_gtt_leak("flash", _Guarded())
+    assert await manager._guard_gtt_leak("flash", _Guarded()) is None
 
     mocks.sample.side_effect = None
     mocks.build.side_effect = RuntimeError("cgroup exploded")
-    await manager._guard_gtt_leak("flash", _Guarded())
+    assert await manager._guard_gtt_leak("flash", _Guarded()) is None
 
 
-# ── _spawn_locked wiring ───────────────────────────────────────────────────
+# ── load() wiring ──────────────────────────────────────────────────────────
 
 
-async def test_spawn_runs_the_guard_before_load_sync_and_a_leak_writes_no_unit(
+@pytest.fixture
+def guarded_load(
     manager: SlotManager,
     container_stub: FakeContainerProvider,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
+) -> SimpleNamespace:
+    """``load("chat")`` with a provider that asks for the check, a leak signature on
+    the host, and every step of the load recorded in order."""
+    events: list[str] = []
+    seen: dict[str, Any] = {}
     _wire(monkeypatch, manager, gtt_used_mb=40 * GIB, slots=[])
     monkeypatch.setattr("hal0.providers.container._spec_provider_for", lambda _cfg: _Guarded())
-    with pytest.raises(SlotGttLeak):
-        await manager._spawn_locked("flash", {"name": "flash", "port": 8099}, "m", model_info={})
-    assert container_stub.load_calls == []
+
+    real_guard = manager._guard_gtt_leak
+
+    async def guard(slot_name: str, provider: Any) -> str | None:
+        events.append("guard")
+        return await real_guard(slot_name, provider)
+
+    @contextlib.asynccontextmanager
+    async def admit(*_a: Any, **_k: Any):  # type: ignore[no-untyped-def]
+        events.append("admit")
+        yield
+
+    real_spawn = manager._spawn_locked
+
+    async def spawn(slot_name: str, *args: Any, **kwargs: Any) -> None:
+        events.append("spawn")
+        snapshot = await manager.status(slot_name)
+        seen["message"] = snapshot.metadata.get("message")
+        seen["extra"] = dict(manager._states[manager._key(slot_name)].extra)
+        await real_spawn(slot_name, *args, **kwargs)
+
+    monkeypatch.setattr(manager, "_guard_gtt_leak", guard)
+    monkeypatch.setattr("hal0.slots.manager._preload_admit", admit)
+    monkeypatch.setattr(manager, "_spawn_locked", spawn)
+    return SimpleNamespace(events=events, seen=seen, stub=container_stub)
 
 
-async def test_spawn_loads_when_the_guard_finds_no_leak(
+async def test_load_checks_before_pre_load_eviction_and_before_the_spawn(
+    manager: SlotManager, guarded_load: SimpleNamespace
+) -> None:
+    """Eviction stops other slots to make room; sampling after it would read the
+    memory they are still releasing as a leak."""
+    await manager.load("chat")
+    assert guarded_load.events == ["guard", "admit", "spawn"]
+
+
+async def test_load_with_a_suspicion_warns_and_still_loads(
+    manager: SlotManager, guarded_load: SimpleNamespace
+) -> None:
+    snap = await manager.load("chat")
+    assert snap.state == SlotState.READY
+    assert [cfg["name"] for cfg, _ in guarded_load.stub.load_calls] == ["chat"]
+
+
+async def test_the_warning_is_on_the_slot_state_and_its_message_while_it_loads(
+    manager: SlotManager, guarded_load: SimpleNamespace
+) -> None:
+    await manager.load("chat")
+    assert guarded_load.seen["extra"]["gtt_leak_warning"] == _MESSAGE_40_GIB
+    assert guarded_load.seen["message"] == _MESSAGE_40_GIB
+
+
+async def test_the_warning_retires_when_the_slot_comes_up(
+    manager: SlotManager, guarded_load: SimpleNamespace
+) -> None:
+    snap = await manager.load("chat")
+    assert "gtt_leak_warning" not in manager._states[manager._key("chat")].extra
+    assert "gtt_leak_warning" not in snap.metadata
+    assert snap.metadata.get("message") != _MESSAGE_40_GIB
+
+
+async def test_load_for_a_provider_that_does_not_ask_stores_nothing(
     manager: SlotManager,
     container_stub: FakeContainerProvider,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _wire(monkeypatch, manager, gtt_used_mb=2 * GIB, slots=[])
+    mocks = _wire(monkeypatch, manager, gtt_used_mb=40 * GIB, slots=[])
+    monkeypatch.setattr("hal0.providers.container._spec_provider_for", lambda _cfg: _Plain())
+    snap = await manager.load("chat")
+    assert snap.state == SlotState.READY
+    assert "gtt_leak_warning" not in manager._states[manager._key("chat")].extra
+    mocks.sample.assert_not_called()
+
+
+async def test_spawn_no_longer_runs_the_check(
+    manager: SlotManager,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pinned: ``_spawn_locked`` runs AFTER pre-load eviction, so the check lives in ``load``."""
+    guard = AsyncMock(return_value=_MESSAGE_40_GIB)
+    monkeypatch.setattr(manager, "_guard_gtt_leak", guard)
     monkeypatch.setattr("hal0.providers.container._spec_provider_for", lambda _cfg: _Guarded())
     await manager._spawn_locked("flash", {"name": "flash", "port": 8099}, "m", model_info={})
+    guard.assert_not_awaited()
     assert [cfg["name"] for cfg, _ in container_stub.load_calls] == ["flash"]
 
 
-async def test_spawn_does_not_call_the_guard_for_a_provider_that_does_not_ask(
+# ── the warning on the slot's state ────────────────────────────────────────
+
+
+async def test_a_message_already_set_wins_over_the_warning_and_the_text_stays_in_metadata(
     manager: SlotManager,
-    container_stub: FakeContainerProvider,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    guard = AsyncMock()
-    monkeypatch.setattr(manager, "_guard_gtt_leak", guard)
-    monkeypatch.setattr("hal0.providers.container._spec_provider_for", lambda _cfg: _Plain())
-    await manager._spawn_locked("chat", {"name": "chat", "port": 8081}, "m", model_info={})
-    guard.assert_not_awaited()
-    assert len(container_stub.load_calls) == 1
+    await manager._transition(
+        "chat",
+        SlotState.STARTING,
+        message="pulling the runner image",
+        extra={"gtt_leak_warning": _MESSAGE_40_GIB},
+    )
+    snap = await manager.status("chat")
+    assert snap.metadata["message"] == "pulling the runner image"
+    assert snap.metadata["gtt_leak_warning"] == _MESSAGE_40_GIB
 
 
-async def test_spawn_survives_a_provider_that_cannot_be_resolved(
+async def test_the_warning_carries_through_warming_and_clears_on_ready(
     manager: SlotManager,
-    container_stub: FakeContainerProvider,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Resolution failures belong to ``load_sync``'s own error path, not the guard's."""
+    await manager._transition(
+        "chat", SlotState.STARTING, extra={"gtt_leak_warning": _MESSAGE_40_GIB}
+    )
+    await manager._transition("chat", SlotState.WARMING)
+    assert (await manager.status("chat")).metadata["message"] == _MESSAGE_40_GIB
+    await manager._transition("chat", SlotState.READY)
+    snap = await manager.status("chat")
+    assert "gtt_leak_warning" not in snap.metadata
 
-    def boom(_cfg: dict[str, Any]) -> None:
-        raise RuntimeError("unknown runtime family")
 
-    monkeypatch.setattr("hal0.providers.container._spec_provider_for", boom)
-    await manager._spawn_locked("chat", {"name": "chat", "port": 8081}, "m", model_info={})
-    assert len(container_stub.load_calls) == 1
+async def test_the_warning_clears_when_the_slot_goes_down(manager: SlotManager) -> None:
+    await manager._transition(
+        "chat", SlotState.STARTING, extra={"gtt_leak_warning": _MESSAGE_40_GIB}
+    )
+    await manager._transition("chat", SlotState.ERROR, message="health timed out")
+    assert manager._states[manager._key("chat")].extra["gtt_leak_warning"] == _MESSAGE_40_GIB
+    await manager._transition("chat", SlotState.OFFLINE, force=True)
+    assert "gtt_leak_warning" not in manager._states[manager._key("chat")].extra
+
+
+async def test_a_retried_load_that_finds_nothing_retires_the_old_warning(
+    manager: SlotManager,
+) -> None:
+    await manager._transition(
+        "chat", SlotState.STARTING, extra={"gtt_leak_warning": _MESSAGE_40_GIB}
+    )
+    await manager._transition("chat", SlotState.ERROR, message="health timed out")
+    await manager._transition("chat", SlotState.STARTING, extra={"gtt_leak_warning": None})
+    assert "gtt_leak_warning" not in manager._states[manager._key("chat")].extra
