@@ -216,7 +216,7 @@ def flm_list_output[T](
     *,
     parse: Callable[[str], T | None],
     target: FlmTarget | None = None,
-    launcher: list[str] | None | Literal["auto"] = "auto",
+    launcher: list[str] | Literal["auto"] | None = "auto",
     run: Callable[..., subprocess.CompletedProcess[bytes]] | None = None,
     timeout: float = 30.0,
 ) -> T | None:
