@@ -264,6 +264,11 @@ export interface MemoryGraphStatus {
   // status route for the same reason. Keys are the ExtractionLimits names on
   // the server; the PUT takes them as the schema's extraction_* fields.
   extraction_limits?: MemoryExtractionLimits
+  // #2353: the cached throughput estimate for the current extraction slot, or
+  // null until something has measured it (PUT enabling the gate / changing the
+  // slot, or POST /api/memory/graph/throughput). Absent on an API that
+  // predates it.
+  throughput?: MemoryExtractionThroughput | null
   in_flight: number
   builds_ok: number
   errors: number
@@ -302,6 +307,26 @@ export interface MemoryExtractionLimits {
   retry_backoff_s: number
 }
 
+// #2353: ExtractionThroughput.as_dict() (hal0/memory/extraction_env.py) — what
+// the extraction slot measured, projected onto one extraction call against
+// [memory.graph].llm_timeout_s. `message` is the operator-facing sentence.
+export interface MemoryExtractionThroughput {
+  slot: string
+  timeout_s: number
+  max_tokens: number
+  prompt_tps: number | null
+  decode_tps: number | null
+  // where the rates came from: the slot's /metrics, one probe, or 'none'
+  source: 'metrics' | 'probe' | 'none' | string
+  probe_timed_out: boolean
+  measured_at: number
+  detail: string
+  projected_s: number | null
+  prompt_tokens: number
+  verdict: 'ok' | 'too_slow' | 'unknown'
+  message: string
+}
+
 export interface MemoryGraphUpdate {
   enabled?: boolean
   extraction_slot?: string
@@ -333,6 +358,10 @@ export interface MemoryGraphUpdateResponse extends MemoryGraphStatus {
   status: MemoryGraphStatus
   propagation?: MemoryGraphPropagation
   target?: MemoryEngineTarget
+  // #2353: present when the save measured (or re-projected) the extraction
+  // slot's throughput. `warnings` is [throughput.message] on a too_slow
+  // verdict and absent otherwise — a warning, never a refusal.
+  warnings?: string[]
 }
 
 // Per-bank tally returned by POST /api/memory/graph/retry.
