@@ -26,8 +26,9 @@ required) covering:
 #3234 adds a second branch for the unprivileged-LXC ``socket: permission
 denied`` shape (the guest's own ``flags=(unconfined)`` AppArmor profiles):
 the gate disables them via the same bare-script helper and re-smokes, and the
-``lxc-unprivileged`` fallback no longer claims ``features: nesting=1`` is
-missing when ``<rt> info`` already proved it on.
+``lxc-unprivileged`` fallback no longer names a missing ``features:
+nesting=1`` as the sole cause: it lists nesting as ONE candidate among the
+guest-AppArmor, keyring-quota and subuid causes, each with its check.
 """
 
 from __future__ import annotations
@@ -269,6 +270,13 @@ def test_socket_denied_without_profile_files_prints_manual_remedy(tmp_path: Path
     assert "apparmor_parser -R" in output
     assert _NESTING_HINT not in output
     assert "pct stop" not in output
+    # The cause is stated as typical, not certain, and the failure path says
+    # what to do when none of the six profile files exist (the loop is then a
+    # no-op): the cause is elsewhere, with the same inspect list.
+    assert "typically caused by" in output
+    assert "none of those six profile files exist" in output
+    for hint in ("aa-status", "journalctl -k | grep apparmor", "/proc/key-users", "/etc/subuid"):
+        assert hint in output
     assert not (aa / "disable").exists()
     assert not parser_log.exists()  # nothing to unload -> parser never called
 
@@ -303,22 +311,31 @@ def test_apparmor_1563_signature_keeps_precedence_over_socket_denied(tmp_path: P
 
     assert rc == 0, output
     assert "AppArmor profile-load failure detected" in output
+    assert "typically caused by" not in output  # the #3234 branch did not run
     assert (tmp_path / "containers.conf").exists()
     assert not (aa / "disable").exists()
 
 
-def test_lxc_unprivileged_fallback_no_longer_claims_nesting_is_missing(tmp_path: Path) -> None:
-    # An unrelated failure on an unprivileged LXC: `podman info` already
-    # succeeded, so nesting is proven on. The hint must say so and point at
-    # what to inspect instead of telling the operator to set nesting=1.
+def test_lxc_unprivileged_fallback_lists_causes_not_nesting_as_sole_cause(tmp_path: Path) -> None:
+    # An unrelated failure on an unprivileged LXC. `podman info` CAN pass
+    # without `features: nesting=1` while every `podman run` fails (that is
+    # this arm's reason to exist), so nesting is neither claimed proven nor the
+    # sole cause: it is one listed candidate next to AppArmor, keyring and
+    # subuid, each with its check.
     _fake_podman(tmp_path, fail_calls=10_000, fail_stderr="Error: crun: something odd")
     rc, output = _run_gate(tmp_path, {"HAL0_LXC_KIND_OVERRIDE": "lxc-unprivileged"})
 
     assert rc != 0, output
     assert "crun: something odd" in output  # smoke output is printed
-    assert "nesting is already" in output
-    assert _NESTING_HINT not in output
-    assert "pct stop" not in output
+    assert "podman info works but 'podman run' fails" in output
+    # the old sole-cause sentence and any "nesting is proven" claim are gone
+    assert "this needs 'features: nesting=1'" not in output
+    assert "nesting is already" not in output
+    assert "proven" not in output
+    # nesting is still offered, as one candidate with its host-side check
+    assert _NESTING_HINT in output
+    assert "/etc/pve/lxc/<CTID>.conf" in output
+    assert "pct stop <CTID>" in output
     for hint in ("aa-status", "journalctl -k | grep apparmor", "/proc/key-users", "/etc/subuid"):
         assert hint in output
 
