@@ -30,8 +30,10 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import httpx
 import pytest
 
+from hal0.errors import MemoryEngineUnavailable
 from hal0.memory.hindsight_provider import HindsightProvider
 
 
@@ -121,14 +123,60 @@ def _provider(client: _FakeClient) -> HindsightProvider:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure", [httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadError, ConnectionResetError]
+)
+async def test_connection_failure_has_retry_hint(failure: type[Exception]) -> None:
+    client = _FakeClient()
+    client.retain_error = failure("engine unavailable")
+    p = _provider(client)
+    with pytest.raises(MemoryEngineUnavailable) as caught:
+        await p.add("note")
+    assert caught.value.__cause__ is client.retain_error
+    assert caught.value.status == 503
+    assert caught.value.code == "memory.engine_unavailable"
+    assert caught.value.details == {"retry_after_s": 5}
+    assert "retry" in caught.value.message
+    assert p.write_degraded is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 401, 422, 500, 503])
+async def test_engine_response_is_not_reclassified(status: int) -> None:
+    client = _FakeClient()
+    client.retain_error = httpx.HTTPStatusError(
+        "engine rejected retain",
+        request=httpx.Request("POST", "/retain"),
+        response=httpx.Response(status),
+    )
+    p = _provider(client)
+    with pytest.raises(httpx.HTTPStatusError) as caught:
+        await p.add("note")
+    assert caught.value is client.retain_error
+    assert p.write_degraded is True
+
+
+@pytest.mark.asyncio
+async def test_read_timeout_is_not_a_connect_failure() -> None:
+    client = _FakeClient()
+    client.retain_error = httpx.ReadTimeout("engine took too long")
+    p = _provider(client)
+    with pytest.raises(httpx.ReadTimeout) as caught:
+        await p.add("note")
+    assert caught.value is client.retain_error
+    assert p.write_degraded is True
+
+
+@pytest.mark.asyncio
 async def test_retain_failure_marks_writes_degraded() -> None:
     client = _FakeClient()
     p = _provider(client)
     assert p.write_degraded is False
 
     client.retain_error = ConnectionError("connection refused")
-    with pytest.raises(ConnectionError):
+    with pytest.raises(MemoryEngineUnavailable) as caught:
         await p.add("x", dataset="shared", client_id="hermes")
+    assert caught.value.__cause__ is client.retain_error
 
     assert p.write_degraded is True
 
@@ -245,8 +293,9 @@ async def test_a_raised_retain_wins_over_a_clean_probe() -> None:
     p = _provider(client)
     client.operations["shared"] = {"failed": 0, "pending": 0, "processing": 0}
     client.retain_error = ConnectionError("refused")
-    with pytest.raises(ConnectionError):
+    with pytest.raises(MemoryEngineUnavailable) as caught:
         await p.add("x", dataset="shared", client_id="hermes")
+    assert caught.value.__cause__ is client.retain_error
 
     out = await p.write_health()
 

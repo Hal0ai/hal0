@@ -63,6 +63,19 @@ class Hal0Error(Exception):
             self.code = code
 
 
+class MemoryEngineUnavailable(Hal0Error):
+    """503 — a memory write could not connect to the engine."""
+
+    code = "memory.engine_unavailable"
+    status = 503
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Memory engine unavailable; retry shortly.",
+            details={"retry_after_s": 5},
+        )
+
+
 # ── Typed 4xx subclasses ─────────────────────────────────────────────────────
 #
 # These cover the everyday client-error statuses. They're deliberately thin —
@@ -270,6 +283,7 @@ __all__ = [
     "Conflict",
     "Forbidden",
     "Hal0Error",
+    "MemoryEngineUnavailable",
     "MultiStatus",
     "NotFound",
     "TooManyRequests",

@@ -141,6 +141,12 @@ row to resolve its profile plus tune for the candidate; explicit `ctx` wins.
 | `/api/dashboard/plugins` | ADMIN | Hermes dashboard-plugin manifest (kanban plugin discovery for `<AgentView>`). |
 | `/api/openrouter` | ADMIN | OpenRouter OAuth callback scaffold — only mounted when `HAL0_OPENROUTER_OAUTH_ENABLED` is truthy; 501 placeholder otherwise absent from the route table entirely. |
 
+`POST /api/memory/add` returns 503 `memory.engine_unavailable` when the
+memory engine connection fails or connecting times out. The message asks the
+caller to retry shortly; `error.details.retry_after_s` and `Retry-After` are
+both 5 seconds. An error response from the engine is not reclassified as
+engine unavailability.
+
 Every prefix above is backed by at least one route confirmed directly against
 `src/hal0/api/routes/` and the mount list in `src/hal0/api/__init__.py`. This brings
 documented coverage to every `/api/*` prefix currently mounted (previously 18 of
