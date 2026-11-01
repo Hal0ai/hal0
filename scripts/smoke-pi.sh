@@ -5,12 +5,10 @@ set -u
 
 PI_PIN="1.2.0"
 ADAPTER_PIN="5.3.0"
-HINDSIGHT_PIN="0.8.3"
+HINDSIGHT_PIN="0.8.4"
 FAIL=0
 ok()   { printf 'PASS: %s\n' "$*"; }
 bad()  { printf 'FAIL: %s\n' "$*" >&2; FAIL=1; }
-# Known upstream defect: reported, does not fail the run.
-warn() { printf 'WARN: %s\n' "$*" >&2; }
 
 AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
 
@@ -59,7 +57,7 @@ pijs="$AGENT_DIR/extensions/hindsight/node_modules/@vectorize-io/hindsight-codin
 if [ ! -f "$pijs" ]; then
   bad "hindsight dist/pi.js missing"
 elif grep -q 'event\.prompt\.trim()' "$pijs" && ! grep -q 'typeof event\.prompt' "$pijs"; then
-  warn "hindsight pi.js reads event.prompt unguarded: a custom-message turn throws TypeError (upstream fixed in 0.8.4)"
+  bad "hindsight pi.js reads event.prompt unguarded: a custom-message turn throws TypeError (fixed upstream in 0.8.4)"
 else
   ok "hindsight pi.js guards custom-message turns"
 fi

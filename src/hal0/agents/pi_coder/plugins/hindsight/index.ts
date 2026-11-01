@@ -9,7 +9,7 @@
  * reached through the package's `./dist/*` export map, an internal API —
  * hence the exact pin in this directory's package.json).
  *
- * That extension (verified against 0.8.3):
+ * That extension (verified against 0.8.4):
  *   - seeds (`RuntimeCore.seedIfCold`) when the extension loads / on
  *     "session_start" — no separate wiring to replicate,
  *   - wires "before_agent_start" -> `onPrompt` + injects recalled memory
@@ -33,10 +33,11 @@
  * (PiDriver._ensure_hindsight_auto_update_off) so the pinned version is the
  * version that runs.
  *
- * KNOWN UPSTREAM BUG (0.8.3): the "before_agent_start" handler calls
- * `event.prompt.trim()` unguarded, so a run started by a custom message
- * (`pi.sendMessage(..., { triggerTurn: true })`, Pi >= 1.2.0) throws; fixed
- * upstream in 0.8.4. See scripts/smoke-pi.sh.
+ * CUSTOM-MESSAGE TURNS: Pi >= 1.2.0 fires "before_agent_start" for runs
+ * started by `pi.sendMessage(..., { triggerTurn: true })`, whose event has no
+ * `prompt`. 0.8.3 and earlier called `event.prompt.trim()` unguarded and threw
+ * (vectorize-io/hindsight#5592, #6016); 0.8.4 guards it, which is why the pin
+ * is 0.8.4. scripts/smoke-pi.sh fails if a regressed build is installed.
  *
  * Upgrading the pin is a deliberate act: re-verify the dist/ layout and the
  * hook wiring above against the new version before bumping.
