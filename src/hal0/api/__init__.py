@@ -3285,7 +3285,8 @@ def create_app() -> FastAPI:
     # Agent bridge (ADR-0043): bridge clients (coding agents on other machines)
     # and the caller's own record. ``/api/bridge/me`` is BRIDGE class, the rest
     # ADMIN class; both are enforced centrally in hal0.security.exposure. With
-    # ``[bridge].enabled`` false every route answers 404 ``bridge.disabled``.
+    # ``[bridge].enabled`` false every route except list and revoke answers 404
+    # ``bridge.disabled`` (``GET /clients`` and ``DELETE /clients/{name}`` stay up).
     app.include_router(
         bridge_routes.router,
         prefix="/api/bridge",
