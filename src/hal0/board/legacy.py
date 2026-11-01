@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sqlite3
 import time
 from collections.abc import Callable
@@ -36,6 +37,7 @@ _UNREACHABLE = (BoardUnreachable, BoardNotInstalled, BoardNoToken)
 
 # Children first so foreign keys never block a drop.
 _LEGACY_TABLES = (
+    "board_legacy_map",
     "card_event",
     "card_link",
     "card_comment",
@@ -75,18 +77,36 @@ def _export(
 ) -> Path:
     export_dir.mkdir(parents=True, exist_ok=True)
     path = export_dir / f"board-legacy-export-{int(now())}.json"
-    path.write_text(json.dumps({"boards": boards, "cards": cards}, indent=2, default=str))
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps({"boards": boards, "cards": cards}, indent=2, default=str))
+    os.replace(tmp, path)
     log.info("board.legacy_exported", path=str(path), cards=len(cards))
     return path
 
 
 async def _push(
+    conn: sqlite3.Connection,
     client: BoardClient,
     boards: list[dict[str, Any]],
     cards: list[dict[str, Any]],
     stamp: str,
 ) -> tuple[int, int]:
-    """Push every card into Hermes; returns ``(converted, skipped)``."""
+    """Push every card into Hermes; returns ``(converted, skipped)``.
+
+    Rerun safety does not depend on Hermes: Hermes' idempotency lookup ignores
+    archived tasks, so each created id is committed to ``board_legacy_map``
+    (before the status PATCH). A mapped card whose Hermes task still exists is
+    skipped entirely (its status PATCH is not re-sent); a 404 falls through to
+    a fresh create. ``idempotency_key`` on creates is a second layer.
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS board_legacy_map "
+        "(card_id TEXT PRIMARY KEY, hermes_id TEXT NOT NULL)"
+    )
+    mapped = {
+        r["card_id"]: r["hermes_id"]
+        for r in conn.execute("SELECT card_id, hermes_id FROM board_legacy_map")
+    }
     listing = await client.list_boards()
     have = {b.get("slug") for b in (listing or {}).get("boards", [])}
     by_slug = {b["slug"]: b for b in boards}
@@ -106,8 +126,9 @@ async def _push(
     converted = skipped = 0
     for card in cards:
         slug = card["board_slug"]
+        known = mapped.get(card["id"])
         try:
-            await client.get_task(card["id"], board=slug)
+            await client.get_task(known or card["id"], board=slug)
             skipped += 1
             continue
         except BoardUpstreamError as exc:
@@ -125,6 +146,11 @@ async def _push(
             board=slug,
         )
         new_id = created["task"]["id"]
+        with tx(conn):
+            conn.execute(
+                "INSERT OR REPLACE INTO board_legacy_map (card_id, hermes_id) VALUES (?, ?)",
+                (card["id"], new_id),
+            )
         status = _map_status(card["status"])
         try:
             await client.update_task(new_id, {"status": status}, board=slug)
@@ -171,11 +197,16 @@ async def convert_legacy_board(
         export = client is None
         if client is not None:
             try:
-                result["converted"], result["skipped"] = await _push(client, boards, cards, stamp)
+                result["converted"], result["skipped"] = await _push(
+                    conn, client, boards, cards, stamp
+                )
             except _UNREACHABLE:
                 export = True
             except BoardUpstreamError as exc:
-                log.error("board.legacy_aborted", error=str(exc), details=exc.details)
+                log.warning(
+                    "board.legacy_aborted", error=str(exc), code=exc.code, details=exc.details
+                )
+                result["aborted"] = exc.code
                 return result
         if export:
             result["exported"] = str(_export(boards, cards, export_dir, now))
@@ -200,6 +231,9 @@ async def run_once(app: Any) -> None:
         except (BoardNotInstalled, BoardNoToken):
             client = None
         result = await convert_legacy_board(client)
+        if result.get("aborted"):
+            # Leave the flag unset so the next request retries.
+            return
         state.board_legacy_done = True
         log.info("board.legacy_converted", **result)
 

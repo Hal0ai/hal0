@@ -9,6 +9,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import structlog
+import structlog.testing
 
 from hal0.board import BoardNotInstalled, BoardUnreachable, BoardUpstreamError
 from hal0.board.legacy import convert_legacy_board, run_once
@@ -123,6 +125,7 @@ class FakeClient:
         if key not in self.by_key:
             self._n += 1
             self.by_key[key] = f"h_{self._n}"
+            self.known.add(f"h_{self._n}")
             self.created.append({**body, "_board": board})
         return {"task": {"id": self.by_key[key]}}
 
@@ -253,3 +256,69 @@ async def test_run_once_guard_and_not_installed(
     await run_once(app)
     assert seen == [None]
     assert app.state.board_legacy_done is True
+
+
+async def test_rerun_after_crash_before_drop_uses_map(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hal0.board.legacy as legacy
+
+    db = _db(tmp_path, [("t_x", "archived", "default"), ("t_y", "todo", "default")])
+    client = FakeClient()
+    real_drop = legacy._drop_tables
+    calls = {"n": 0}
+
+    def flaky(conn: sqlite3.Connection) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("crash before drop")
+        real_drop(conn)
+
+    monkeypatch.setattr(legacy, "_drop_tables", flaky)
+    with pytest.raises(RuntimeError):
+        await _run(client, db, tmp_path)
+    assert len(client.created) == 2
+    assert "board_legacy_map" in _tables(db)
+    # Hermes' idempotency lookup ignores archived tasks: forget the key to prove
+    # the map alone prevents a duplicate.
+    client.by_key.clear()
+    res = await _run(client, db, tmp_path)
+    assert len(client.created) == 2
+    assert (res["converted"], res["skipped"], res["dropped"]) == (0, 2, True)
+    assert "board_legacy_map" not in _tables(db)
+
+
+async def test_export_is_atomic(tmp_path: Path) -> None:
+    db = _db(tmp_path, [("t_a", "todo", "default")])
+    res = await _run(None, db, tmp_path)
+    out = Path(res["exported"])
+    assert out.exists()
+    assert list(out.parent.glob("*.tmp")) == []
+
+
+async def test_run_once_retries_after_abort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _db(tmp_path, [("t_a", "todo", "default")])
+    client = FakeClient()
+    client.fail_create_at = 1
+    import hal0.board.legacy as legacy
+
+    real = legacy.convert_legacy_board
+
+    async def with_paths(c: Any, **kw: Any) -> dict[str, Any]:
+        return await real(c, db_path=db, export_dir=tmp_path / "out", now=lambda: NOW)
+
+    monkeypatch.setattr(legacy, "convert_legacy_board", with_paths)
+    monkeypatch.setattr(legacy, "resolve_board_client", lambda _app: client)
+    app = SimpleNamespace(state=SimpleNamespace())
+    with structlog.testing.capture_logs() as logs:
+        await run_once(app)
+    assert getattr(app.state, "board_legacy_done", False) is False
+    warn = [e for e in logs if e["event"] == "board.legacy_aborted"]
+    assert warn and warn[0]["log_level"] == "warning" and warn[0]["code"] == "board.upstream_error"
+    assert not any(e["event"] == "board.legacy_converted" for e in logs)
+    await run_once(app)
+    assert app.state.board_legacy_done is True
+    assert [c["idempotency_key"] for c in client.created] == ["t_a"]
+    assert "card" not in _tables(db)
