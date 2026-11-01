@@ -43,7 +43,7 @@ beforeEach(() => {
   hw = GPU_HW
   stats = { gpu_util: 0.33, gpu_clock_mhz: 600, gpu_temp_c: 47, cpu_util: 0.12, npu_status: { ok: false } }
   power = { gpu_power_w: 33, cpu_temp_c: 52 }
-  health = { status: 'ok', checks: { disk_state: { ok: true, free_mb: 124 * 1024, floor_mb: 512, path: '/var/lib/hal0' } } }
+  health = { status: 'ok', checks: { disk_state: { ok: true, free_mb: 124 * 1024, total_mb: 248 * 1024, floor_mb: 512, path: '/var/lib/hal0' } } }
   slots = []
   ram = { usedGb: 13.14, limitGb: 106.2, source: 'container' }
   host = document.createElement('div')
@@ -103,6 +103,20 @@ describe('OvHardware', () => {
     render()
     expect(row('npu').textContent).toContain('flm-a + flm-b coresident')
     expect(row('npu').textContent).toContain('active')
+  })
+
+  it('fills the disk bar to used over total from the health check (#3158)', () => {
+    render()
+    const fill = row('disk').querySelector('.ov-track i') as HTMLElement | null
+    expect(fill).not.toBeNull()
+    expect(fill!.style.width).toBe('50%')
+  })
+
+  it('leaves the disk bar empty when the check carries no total', () => {
+    health = { status: 'ok', checks: { disk_state: { ok: true, free_mb: 124 * 1024, floor_mb: 512, path: '/var/lib/hal0' } } }
+    render()
+    expect(row('disk').querySelector('.ov-track i')).toBeNull()
+    expect(row('disk').textContent).toContain('124 GB free')
   })
 
   it('shows dashes for unsourced RAM and disk', () => {

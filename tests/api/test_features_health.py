@@ -7,8 +7,13 @@ return live gates + honest deep-health checks. The dashboard branches on
 
 from __future__ import annotations
 
+import shutil
+from collections import namedtuple
+
 import pytest
 from fastapi.testclient import TestClient
+
+_Usage = namedtuple("_Usage", "total used free")
 
 
 def test_features_shape(client: TestClient) -> None:
@@ -76,3 +81,46 @@ def test_health_system_ok_payload(client: TestClient) -> None:
     assert checks["event_bus"]["ok"] is True
     # Disk checks carry a numeric free_mb.
     assert isinstance(checks["disk_state"]["free_mb"], int)
+
+
+def test_health_system_disk_checks_carry_total_mb(client: TestClient) -> None:
+    """Both disk checks report the filesystem total beside the free figure (#3158).
+
+    The Overview Hardware card fills its disk bar from ``total_mb`` and
+    ``free_mb``; without a total the bar stayed empty.
+    """
+    checks = client.get("/api/health/system").json()["checks"]
+    for name in ("disk_state", "disk_config"):
+        disk = checks[name]
+        assert isinstance(disk["total_mb"], int), name
+        assert disk["total_mb"] >= disk["free_mb"] > 0, name
+
+
+def test_health_system_disk_total_and_free_share_one_disk_usage_call(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``total_mb`` and ``free_mb`` come from one ``shutil.disk_usage`` read in MiB."""
+    mib = 1024 * 1024
+    monkeypatch.setattr(shutil, "disk_usage", lambda _p: _Usage(1000 * mib, 400 * mib, 600 * mib))
+    disk = client.get("/api/health/system").json()["checks"]["disk_state"]
+    assert disk["total_mb"] == 1000
+    assert disk["free_mb"] == 600
+
+
+def test_health_system_disk_unreadable_reports_zero_total(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreadable filesystem reports 0 free and 0 total, not a stale or invented total."""
+
+    def _boom(_p: str) -> _Usage:
+        raise OSError("no such device")
+
+    monkeypatch.setattr(shutil, "disk_usage", _boom)
+    body = client.get("/api/health/system").json()
+    disk = body["checks"]["disk_state"]
+    assert disk["free_mb"] == 0
+    assert disk["total_mb"] == 0
+    assert disk["ok"] is False
+    assert body["status"] == "degraded"
