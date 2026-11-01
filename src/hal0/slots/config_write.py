@@ -24,7 +24,7 @@ from hal0.config import paths
 from hal0.slot_config import merge_slot_config
 from hal0.slots._cfg_helpers import _cfg_to_dict
 from hal0.slots.activation import claims_npu_anchor as _claims_npu_anchor
-from hal0.slots.state import NpuExclusivityViolation, SlotConfigError
+from hal0.slots.state import NpuExclusivityViolation, SlotConfigError, provider_requires_model
 
 # ── device/profile coherence ────────────────────────────────────────────────
 
@@ -415,6 +415,66 @@ def check_model_fits_slot(slot_name: str, cfg: Any, model_id: str | None, regist
     )
 
 
+def check_model_registered(
+    slot_name: str,
+    cfg: Any,
+    model_id: str | None,
+    registry: Any,
+    *,
+    current_model_id: str | None = None,
+) -> None:
+    """Refuse binding a slot to a model id hal0 cannot resolve (#2668).
+
+    ``load`` and ``swap`` already answer an unresolvable id with a 404, but a
+    config write used to store it: the next ``load`` then served a same-capability
+    stand-in (:func:`hal0.registry.fallback.resolve_servable_model`) under a
+    ``ready`` state that gave no hint the configured model was never used.
+
+    An id passes when any of these holds:
+
+    * ``registry`` is ``None`` (nothing to judge against, as :func:`model_is_flm`);
+    * ``model_id`` is empty, or equals ``current_model_id`` (the slot already
+      carries it, so re-sending it is not a new bind — a slot file that predates
+      this guard still saves its other fields);
+    * the slot is an NPU/FLM slot or a ComfyUI slot: their models are engine tags
+      and catalogue image models, never registry rows
+      (``resolve_servable_model`` leaves them alone too);
+    * the slot's engine is self-managed (``SELF_MANAGED_PROVIDERS``: Kokoro,
+      Qwen3-TTS, Moonshine, VibeVoice): it serves baked-in or operator-staged
+      weights and its model id is not a registry row
+      (:func:`hal0.slots.state.provider_requires_model` owns that fact);
+    * :func:`hal0.model_meta.is_resolvable` — a registry row or an installed FLM id;
+    * the id is in the curated catalogue, which ``load`` pulls on demand.
+
+    Raises:
+        BadRequest: code ``validation.model_not_registered`` (HTTP 400).
+    """
+    if not model_id or registry is None or model_id == current_model_id:
+        return
+    provider = _cfg_effective_provider(cfg)
+    if slot_is_flm(cfg) or provider == "comfyui" or not provider_requires_model(provider):
+        return
+    from hal0.model_meta import is_resolvable
+    from hal0.registry.curated import get_curated
+
+    if is_resolvable(model_id, registry) or get_curated(model_id) is not None:
+        return
+    from hal0.errors import BadRequest
+
+    raise BadRequest(
+        f"model {model_id!r} is not registered, so slot {slot_name!r} cannot bind it "
+        "(slot not touched). Register it with `hal0 model add <path>` or `hal0 model scan`, "
+        "pull a curated one with `hal0 model pull <alias>`, or pick a registered id from "
+        "`hal0 model list`",
+        code="validation.model_not_registered",
+        details={
+            "slot": slot_name,
+            "model_id": str(model_id),
+            "hint": "register the model (hal0 model add / scan / pull), then retry",
+        },
+    )
+
+
 def guard_slot_write_payload(updates: dict[str, Any]) -> None:
     """Run the slot-write PARTITION boundary over an in-process write payload.
 
@@ -602,6 +662,7 @@ __all__ = [
     "_reconcile_device_profile",
     "check_default_uniqueness",
     "check_model_fits_slot",
+    "check_model_registered",
     "check_npu_exclusivity",
     "guard_and_normalize_tune",
     "guard_slot_write_payload",

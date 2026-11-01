@@ -29,6 +29,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from hal0.api import create_app
+from tests.fixtures.model_registration import register_model_file
 from tests.fixtures.slot_probe import probe_slot_name
 
 
@@ -142,15 +143,19 @@ def client_factory(
     def _make() -> Iterator[TestClient]:
         app = create_app()
         with TestClient(app) as client:
+            # Slot create refuses an unregistered model id (#2668); every
+            # scenario binds SLOT_CREATE_BODY's model, so register it once per
+            # home (a second boot over the same home keeps its registry).
+            register_model_file(client, tmp_hal0_home, SLOT_CREATE_BODY["model"], exist_ok=True)
             yield client
 
     yield _make
 
 
 # The canonical create body used across scenarios: a GPU/vulkan llama-server
-# slot bound to a catalogue model. The model need not be registry-resolvable
-# for create/load — the load route only pre-validates an EXPLICIT model_id, and
-# a bodyless /load falls back to the slot's TOML default.
+# slot bound to a model that ``client_factory`` registers (slot create refuses
+# an id the registry cannot resolve). A bodyless /load falls back to the slot's
+# TOML default.
 SLOT_CREATE_BODY: dict[str, Any] = {
     "model": "qwen3-4b-q4_k_m",
     "device": "gpu-vulkan",

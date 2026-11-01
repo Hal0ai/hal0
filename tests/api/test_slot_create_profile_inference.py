@@ -20,6 +20,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from hal0.api import create_app
+from tests.fixtures.model_registration import register_model_file
 
 
 @pytest.fixture
@@ -57,6 +58,7 @@ def test_post_slots_persists_the_inferred_profile(
     device: str,
     expected: str,
 ) -> None:
+    register_model_file(isolated_client, tmp_hal0_home, "rcmodel")
     r = isolated_client.post(
         "/api/slots",
         json={
@@ -77,6 +79,7 @@ def test_post_slots_leaves_an_llm_slot_profileless(
     tmp_hal0_home: str,
     isolated_client: TestClient,
 ) -> None:
+    register_model_file(isolated_client, tmp_hal0_home, "rcmodel")
     r = isolated_client.post(
         "/api/slots",
         json={

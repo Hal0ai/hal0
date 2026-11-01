@@ -164,6 +164,16 @@ hardware backend. The hardware backend is selected with `--hardware`, and stored
 `gpu-cuda`, `cpu`, `npu`) — see [Providers, profiles & devices](/docs/reference/providers-profiles-devices/).
 </Aside>
 
+`slot create --model` and `slot edit --model` bind only a model hal0 can resolve: a registered
+id or a curated catalogue id (the first `slot load` pulls it). Any other id is refused with
+`validation.model_not_registered`, naming the id, and the slot file is left untouched. NPU,
+ComfyUI and the self-managed speech engines (Kokoro, Qwen3-TTS, Moonshine, VibeVoice) are not
+checked, since their models are FLM tags, image catalogue ids and baked-in or operator-staged
+weights, not registry rows. Register a model file with `hal0 model add <path>` or `hal0 model scan`, and list
+the registered ids with `hal0 model list`. A slot file written before this check that
+already names an unknown id keeps loading: `load` serves a registered model of the same capability
+in its place and logs a `slot.model_default_fallback` warning that names both ids.
+
 ## `hal0 model` — manage the local model registry
 
 | Command | Args | Flags |

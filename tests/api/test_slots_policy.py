@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 
 from hal0.api import create_app
 from hal0.api.routes.slots import _next_free_slot_port, _normalize_create_body
+from tests.fixtures.model_registration import register_model_file
 
 
 def _seed_slot(home: str, name: str, port: int) -> None:
@@ -100,6 +101,7 @@ def test_create_slot_allows_when_under_budget(
 ) -> None:
     _seed_slot(tmp_hal0_home, "existing", 8081)
     isolated_app.state.hal0_config.slots.max_slots = 5
+    register_model_file(isolated_client, tmp_hal0_home, "qwen3-4b-q4_k_m")
     r = isolated_client.post(
         "/api/slots",
         json={"name": "second", "model": "qwen3-4b-q4_k_m", "device": "gpu-vulkan"},

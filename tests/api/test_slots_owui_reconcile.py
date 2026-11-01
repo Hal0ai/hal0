@@ -20,6 +20,7 @@ from tests.api.test_slots_routes import (  # noqa: F401
     isolated_client,
     slot_root,
 )
+from tests.fixtures.model_registration import register_model_file
 
 _RECONCILE = "hal0.components.openwebui_arm.reconcile_openwebui_env"
 
@@ -28,6 +29,12 @@ _BASE_BODY = {
     "device": "gpu-vulkan",
     "profile": "vulkan-radv",
 }
+
+
+@pytest.fixture(autouse=True)
+def _registered_model(isolated_client: TestClient, tmp_hal0_home: str) -> None:  # noqa: F811
+    """Slot create refuses an unregistered model id (#2668)."""
+    register_model_file(isolated_client, tmp_hal0_home, _BASE_BODY["model"])
 
 
 @pytest.mark.parametrize("name", ["embed", "img"])

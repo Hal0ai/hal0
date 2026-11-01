@@ -725,6 +725,7 @@ async def create_slot(request: Request, background_tasks: BackgroundTasks) -> di
     _reject_slot_tuning_keys(body)
     _reject_unknown_config_keys(body)
     _validate_autoload_priority(body)
+    await _guard_model_registered(request, name, body, _bound_model_id(body))
     await _guard_model_fits_slot(request, name, body, _bound_model_id(body))
     async with record_action(
         request,
@@ -1145,6 +1146,39 @@ async def _guard_model_fits_slot(
     await asyncio.to_thread(check_model_fits_slot, name, cfg, model_id, registry)
 
 
+async def _guard_model_registered(
+    request: Request,
+    name: str,
+    cfg: dict[str, Any] | None,
+    model_id: str | None,
+    *,
+    current_model_id: str | None = None,
+) -> None:
+    """Refuse a create/edit that binds an id the model registry cannot resolve (#2668).
+
+    The one gate ``POST /api/slots`` and ``PUT /api/slots/{name}/config`` share, so
+    the CLI (``slot create`` / ``slot edit --model``), the dashboard and the
+    ``slot_create`` / ``slot_edit`` MCP tools — all of which end in these two
+    handlers — refuse the same id with ``validation.model_not_registered``.
+    ``current_model_id`` is the id the slot already carries: re-sending it is not a
+    new bind. Off the event loop for the same reason as :func:`_guard_model_fits_slot`
+    (``is_resolvable`` reads the host-flm probe, #2334).
+    """
+    if not model_id or cfg is None:
+        return
+    from hal0.slots.config_write import check_model_registered
+
+    registry = getattr(request.app.state, "model_registry", None)
+    await asyncio.to_thread(
+        check_model_registered,
+        name,
+        cfg,
+        model_id,
+        registry,
+        current_model_id=current_model_id,
+    )
+
+
 async def _refresh_composite_catalogue(
     request: Request, before: dict[str, Any] | None = None
 ) -> None:
@@ -1300,9 +1334,15 @@ async def update_slot_config(name: str, request: Request) -> dict[str, object]:
     # an NPU slot must not veto an unrelated modality toggle.
     from hal0.slot_config import merge_slot_config
 
-    await _guard_model_fits_slot(
-        request, name, merge_slot_config(before or {}, body), _bound_model_id(body)
+    projected = merge_slot_config(before or {}, body)
+    await _guard_model_registered(
+        request,
+        name,
+        projected,
+        _bound_model_id(body),
+        current_model_id=_bound_model_id(before or {}),
     )
+    await _guard_model_fits_slot(request, name, projected, _bound_model_id(body))
     async with record_action(
         request, category="slot", action="slot.edit_config", target=name, before=before
     ) as _rec:

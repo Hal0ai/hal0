@@ -34,6 +34,7 @@ from fastapi.testclient import TestClient
 from hal0.api import create_app
 from hal0.slots.manager import SlotManager
 from hal0.upstreams.registry import Upstream
+from tests.fixtures.model_registration import register_model_file
 from tests.fixtures.slot_probe import probe_slot_name
 
 # ── container stub ───────────────────────────────────────────────────────────
@@ -653,6 +654,7 @@ def test_create_slot_without_autoload_persists_explicit_false(
     slot_root: Path,
     container_stub: dict[str, Any],
     isolated_client: TestClient,
+    tmp_hal0_home: str,
 ) -> None:
     """POST /api/slots with no ``autoload`` key persists an explicit False.
 
@@ -661,6 +663,7 @@ def test_create_slot_without_autoload_persists_explicit_false(
     TOMLs only. A freshly created slot must not silently boot-start just
     because it has a model bound.
     """
+    register_model_file(isolated_client, tmp_hal0_home, "qwen3-4b-q4_k_m")
     body = {
         "name": "fresh",
         "model": "qwen3-4b-q4_k_m",
@@ -677,10 +680,12 @@ def test_put_config_accepts_a_model_rebind(
     slot_root: Path,
     container_stub: dict[str, Any],
     isolated_client: TestClient,
+    tmp_hal0_home: str,
 ) -> None:
     """Sanity floor: the guards didn't break the happy path — rebinding the
     slot's model is ``PUT /config`` with ``{"model": {"default": ...}}``, and
     ``[model]`` holds only it."""
+    register_model_file(isolated_client, tmp_hal0_home, "qwen3-8b")
     r = isolated_client.put("/api/slots/chat/config", json={"model": {"default": "qwen3-8b"}})
     assert r.status_code == 200, r.text
     cfg = isolated_client.get("/api/slots/chat/config").json()
@@ -749,6 +754,7 @@ def test_config_write_rebinding_the_model_default_evicts_the_old_id(
     slot_root: Path,
     container_stub: dict[str, Any],
     isolated_app_client: tuple[FastAPI, TestClient],
+    tmp_hal0_home: str,
 ) -> None:
     """#1837, same shape via the other mutation: PUT /config that rebinds
     ``model.default`` emits no ``ready`` event either, so the old id has to
@@ -756,6 +762,7 @@ def test_config_write_rebinding_the_model_default_evicts_the_old_id(
     app, client = isolated_app_client
     assert "qwen3-4b-q4_k_m" in app.state.upstream_models.get("hal0", [])
 
+    register_model_file(client, tmp_hal0_home, "qwen3-8b-q4_k_m")
     r = client.put("/api/slots/chat/config", json={"model": {"default": "qwen3-8b-q4_k_m"}})
     assert r.status_code == 200, r.text
 
@@ -1679,6 +1686,7 @@ def test_synthetic_composite_slot_serving_when_model_loaded(
 def test_put_config_model_rebind_preserves_slot_fields(
     slot_root: Path,
     isolated_client: TestClient,
+    tmp_hal0_home: str,
 ) -> None:
     """Regression: a ``PUT /config`` model rebind must not wipe the rest of
     the slot.
@@ -1691,6 +1699,7 @@ def test_put_config_model_rebind_preserves_slot_fields(
     assert before.status_code == 200, before.text
     assert before.json()["model"]["default"] == "qwen3-4b-q4_k_m"
 
+    register_model_file(isolated_client, tmp_hal0_home, "qwen3-8b")
     r = isolated_client.put("/api/slots/chat/config", json={"model": {"default": "qwen3-8b"}})
     assert r.status_code == 200, r.text
 

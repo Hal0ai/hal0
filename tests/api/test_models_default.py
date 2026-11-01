@@ -10,8 +10,8 @@ default" checkbox:
   * ``default`` round-trips through the SQLite registry (extra-blob storage).
   * ``POST /api/models/{id}/default`` promote / clear / 404.
   * ``POST /api/slots`` with ``default: true`` promotes the slot's MODEL as its
-    type default via the same chokepoint, and a promote failure (unregistered
-    model) does NOT break slot creation.
+    type default via the same chokepoint, and a promote failure does NOT
+    break slot creation.
   * Duplicating a default model does not clone the flag.
 """
 
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from fastapi import FastAPI
@@ -229,12 +230,17 @@ def test_create_slot_default_false_does_not_promote(client: TestClient, tmp_hal0
 def test_create_slot_promote_failure_does_not_break_create(
     client: TestClient, tmp_hal0_home: str
 ) -> None:
-    # Bind a model id that is NOT registered — the slot must still be created,
-    # with a soft-failed promotion report rather than a 500.
-    r = client.post(
-        "/api/slots",
-        json={"name": "slot3", "type": "llm", "model": "unregistered-model", "default": True},
-    )
+    # The slot is the primary object: when promoting its model fails (the model
+    # row vanished between the create guard and the promotion) the slot must
+    # still be created, with a soft-failed promotion report rather than a 500.
+    # (Slot create refuses an unregistered id up front, #2668, so the failure is
+    # injected at the promotion chokepoint instead.)
+    _register(client, tmp_hal0_home, "slot-model-3", ["chat"])
+    with patch.object(svc, "set_model_type_default", side_effect=ModelNotFound("slot-model-3")):
+        r = client.post(
+            "/api/slots",
+            json={"name": "slot3", "type": "llm", "model": "slot-model-3", "default": True},
+        )
     assert r.status_code == 201, r.text
     promo = r.json().get("default_promotion")
     assert promo and promo["promoted"] is False
