@@ -258,6 +258,7 @@ class ProfileCatalog:
         family = _runtime_family(name, profile)
         screen_profile_speculation(name, profile.speculation, runtime_family=family)
         screen_profile_flags(profile.flags, runtime_family=family)
+        screen_profile_context(name, profile.ctx_size, profile.flags, runtime_family=family)
         with self._lock:
             catalog = load_profiles_config(self._path)
             if name in catalog.profile:
@@ -326,6 +327,10 @@ class ProfileCatalog:
                 screen_profile_speculation(name, updated.speculation, runtime_family=family)
             if patch.flags is not None or family_moved:
                 screen_profile_flags(updated.flags, runtime_family=family)
+            # The window and the flag that permits it are judged together, so a
+            # patch that moves either one is screened against the merged pair.
+            if patch.ctx_size is not UNSET or patch.flags is not None or family_moved:
+                screen_profile_context(name, updated.ctx_size, updated.flags, runtime_family=family)
             catalog.profile[name] = updated
             save_profiles_config(catalog, self._path)
         return self._resolve_item(name, updated)
@@ -456,6 +461,7 @@ __all__ = [
     "resolve_loaded_profile",
     "runner_runtime_family",
     "runtime_family_of",
+    "screen_profile_context",
     "screen_profile_flags",
     "screen_profile_runner",
     "screen_profile_speculation",
@@ -561,6 +567,28 @@ def screen_profile_speculation(
             "(it takes 'auto' or 'off')",
             code="profiles.speculation_unsupported",
             details={"profile": name, "speculation": "ngram", "runtime_family": "halogen"},
+        )
+
+
+def screen_profile_context(
+    name: str, ctx_size: int | None, flags: str | None, *, runtime_family: str | None
+) -> None:
+    """Refuse a context window the profile's engine would refuse at start.
+
+    Only halogen has a hard native window (:func:`hal0.runners.knobs.native_ctx_problem`):
+    past it, the entrypoint exits 2 unless the flags carry ``HALOGEN_ROPE_YARN``
+    (``profiles.halogen_flag_out_of_range``).
+    """
+    if runtime_family != "halogen":
+        return
+    from hal0.runners.knobs import native_ctx_problem
+
+    problem = native_ctx_problem(ctx_size, flags)
+    if problem is not None:
+        raise UnprocessableEntity(
+            f"profile {name!r}: {problem}",
+            code="profiles.halogen_flag_out_of_range",
+            details={"profile": name, "ctx_size": ctx_size, "needs": "HALOGEN_ROPE_YARN"},
         )
 
 

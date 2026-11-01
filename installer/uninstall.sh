@@ -625,8 +625,8 @@ if [[ "${DEV_MODE}" -eq 0 && "${PURGE}" -eq 1 ]]; then
         # cuda runner is ggml-org's image (manifest.json runners.cuda); only
         # its server-cuda tags are hal0's, so other llama.cpp images an
         # operator pulled themselves stay. The optional halogen runner is the
-        # peonist-ai halogen-flash-server image (runners.halogen), which only
-        # hal0 pulls, so every tag of it goes.
+        # peonist-ai halogen-flash-server image (runners.halogen): every tag of
+        # that one repository goes, and the vendor's other images stay.
         while IFS= read -r _img; do
             [[ -n "${_img}" ]] || continue
             case "${_img}" in

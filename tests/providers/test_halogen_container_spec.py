@@ -89,8 +89,8 @@ def _stub_gpu(tmp_hal0_home: str) -> Any:
 
 @pytest.fixture(autouse=True)
 def _cache_dir_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Keep every spec build off the real filesystem: the provider creates the
-    ``/cache`` bind source at spec time, and the default one is under /var/lib."""
+    """Keep every load path off the real filesystem: ``prepare_load`` creates the
+    ``/cache`` bind source, and the default one is under /var/lib."""
     calls: list[str] = []
     monkeypatch.setattr(halogen_module, "ensure_shared_dir", lambda path: calls.append(str(path)))
     return calls
@@ -166,44 +166,77 @@ def test_cache_dir_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     assert spec.mounts[1].target == "/cache"
 
 
-def test_spec_asks_for_the_cache_dir_it_mounts(
+def test_prepare_load_asks_for_the_cache_dir_the_spec_mounts(
     monkeypatch: pytest.MonkeyPatch, _cache_dir_calls: list[str]
 ) -> None:
-    HalogenProvider().container_spec(_cfg(), _info())
-    assert _cache_dir_calls == ["/var/lib/hal0/halogen-cache"]
+    provider = HalogenProvider()
+    provider.prepare_load(_cfg())
+    assert _cache_dir_calls == [provider.container_spec(_cfg(), _info()).mounts[-1].source]
     monkeypatch.setenv("HAL0_HALOGEN_CACHE", "/srv/halogen-cache")
-    HalogenProvider().container_spec(_cfg(), _info())
+    provider.prepare_load(_cfg())
     assert _cache_dir_calls[-1] == "/srv/halogen-cache"
 
 
-def test_spec_creates_the_cache_dir_for_real(
+def test_prepare_load_creates_the_cache_dir_for_real(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
-    """podman exits 125 on a bind source that does not exist, so the spec
-    creates it (shared-directory mode) instead of leaving the slot to fail."""
+    """podman exits 125 on a bind source that does not exist, so the load creates
+    it (shared-directory mode) instead of leaving the slot to fail."""
     cache = tmp_path / "state" / "halogen-cache"
     monkeypatch.setattr(halogen_module, "ensure_shared_dir", real_ensure_shared_dir)
     monkeypatch.setenv("HAL0_HALOGEN_CACHE", str(cache))
-    spec = HalogenProvider().container_spec(_cfg(), _info())
+    HalogenProvider().prepare_load(_cfg())
     assert cache.is_dir()
-    assert spec.mounts[-1].source == str(cache)
-    # A second render leaves the existing dir alone.
-    HalogenProvider().container_spec(_cfg(), _info())
+    # A second load leaves the existing dir alone.
+    HalogenProvider().prepare_load(_cfg())
     assert cache.is_dir()
 
 
-def test_spec_survives_an_uncreatable_cache_dir(
+def test_load_sync_prepares_before_it_starts_the_unit(_cache_dir_calls: list[str]) -> None:
+    provider = ContainerProvider()
+    order: list[str] = []
+    with (
+        patch("hal0.providers.container.require_kfd_for_gpu_slot"),
+        patch.object(
+            HalogenProvider, "prepare_load", side_effect=lambda cfg: order.append("prepare")
+        ) as prepare,
+        patch.object(provider, "_render_quadlet_text", return_value="unit"),
+        patch.object(
+            provider, "_write_and_start_unit", side_effect=lambda *a: order.append("start")
+        ),
+    ):
+        provider.load_sync(_cfg(), _info())
+    prepare.assert_called_once()
+    assert order == ["prepare", "start"]
+
+
+def test_status_and_drift_reads_have_no_side_effects(
+    _cache_dir_calls: list[str], caplog: pytest.LogCaptureFixture
+) -> None:
+    """These run on each status poll of a loaded slot: no mkdir check, and a stale
+    tune warns per load rather than per poll."""
+    provider = ContainerProvider()
+    cfg = _cfg(tune={"speculation": "ngram"})
+    with caplog.at_level("WARNING", logger="hal0.providers.halogen"):
+        HalogenProvider().container_spec(cfg, _info())
+        assert provider.expected_argv(cfg, _info()) == ["all"]
+        assert provider.expected_identity(cfg, _info()) is not None
+        assert provider.render_error(cfg, _info()) is None
+    assert _cache_dir_calls == []
+    assert [r for r in caplog.records if r.name == "hal0.providers.halogen"] == []
+
+
+def test_prepare_load_survives_an_uncreatable_cache_dir(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A path under a regular file cannot be created; the spec still builds and
-    the log names the path, so the later podman failure has a visible cause."""
+    """A path under a regular file cannot be created; the load carries on and the
+    log names the path, so the later podman failure has a visible cause."""
     blocker = tmp_path / "blocker"
     blocker.write_bytes(b"")
     monkeypatch.setattr(halogen_module, "ensure_shared_dir", real_ensure_shared_dir)
     monkeypatch.setenv("HAL0_HALOGEN_CACHE", str(blocker / "cache"))
     with caplog.at_level("WARNING", logger="hal0.providers.halogen"):
-        spec = HalogenProvider().container_spec(_cfg(), _info())
-    assert spec.mounts[-1].source == str(blocker / "cache")
+        HalogenProvider().prepare_load(_cfg())
     assert any(
         "halogen.cache_dir_unavailable" in r.getMessage() and str(blocker) in r.getMessage()
         for r in caplog.records
@@ -416,7 +449,7 @@ def test_malformed_profile_flags_refuse_the_launch() -> None:
 def test_speculation_ngram_env_stays_pure_and_unset() -> None:
     """This engine has no n-gram drafter and the write seams refuse the value.
     ``halogen_env`` stays pure: a stale stored ``ngram`` maps like ``auto``
-    here, and ``container_spec`` is where the ignored value is logged."""
+    here, and ``prepare_load`` is where the ignored value is logged."""
     env = halogen_env(
         port=8099, checkpoint=CKPT, model_id="m", tune=_tune(speculation="ngram"), profile_flags=""
     )
@@ -427,8 +460,11 @@ def test_speculation_ngram_env_stays_pure_and_unset() -> None:
 def test_stale_ngram_speculation_is_logged_with_the_slot(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    provider = HalogenProvider()
+    cfg = _cfg(tune={"speculation": "ngram"})
     with caplog.at_level("WARNING", logger="hal0.providers.halogen"):
-        spec = HalogenProvider().container_spec(_cfg(tune={"speculation": "ngram"}), _info())
+        spec = provider.container_spec(cfg, _info())
+        provider.prepare_load(cfg)
     assert "HALOGEN_DRAFTER_DEFAULT" not in spec.env
     messages = [r.getMessage() for r in caplog.records if "ngram" in r.getMessage()]
     assert len(messages) == 1
@@ -441,8 +477,28 @@ def test_supported_speculation_values_do_not_warn(
     speculation: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     with caplog.at_level("WARNING", logger="hal0.providers.halogen"):
-        HalogenProvider().container_spec(_cfg(tune={"speculation": speculation}), _info())
+        HalogenProvider().prepare_load(_cfg(tune={"speculation": speculation}))
     assert not [r for r in caplog.records if r.name == "hal0.providers.halogen"]
+
+
+@pytest.mark.parametrize(
+    ("flags", "tune", "name"),
+    [
+        pytest.param(
+            "HALOGEN_VISION_TOWER=1", _tune(vision="off"), "HALOGEN_VISION_TOWER", id="vision"
+        ),
+        pytest.param("HALOGEN_PLD=0", _tune(speculation="auto"), "HALOGEN_PLD", id="speculation"),
+        pytest.param("HALOGEN_CTX=4096", _tune(ctx_size=None), "HALOGEN_CTX", id="context"),
+    ],
+)
+def test_a_hand_edited_tune_owned_flag_does_not_reach_the_container(
+    flags: str, tune: EffectiveTune, name: str
+) -> None:
+    """The write screens refuse these, so only a hand edit gets here. The tune
+    leaves the name unset, so nothing later in the layering would overwrite it,
+    and a vision tower with no sidecar stops the engine at start."""
+    env = halogen_env(port=8099, checkpoint=CKPT, model_id="m", tune=tune, profile_flags=flags)
+    assert name not in env
 
 
 def test_halogen_env_is_pure() -> None:
@@ -510,12 +566,13 @@ def test_load_still_launches_an_engine_profile_over_a_stale_runner() -> None:
 
 def test_render_contains_stop_and_restart_keys() -> None:
     unit = _render_quadlet_from_plan("flash", HalogenProvider().container_spec(_cfg(), _info()))
-    assert "--stop-timeout=120" in unit
-    assert "TimeoutStopSec=150" in unit
-    assert "RestartPreventExitStatus=64 132 1 2" in unit.splitlines()
-    assert "PublishPort=127.0.0.1:8099:8099" in unit
-    assert "Environment=HALOGEN_BIND=127.0.0.1" in unit
-    assert "Exec=all" in unit
+    lines = unit.splitlines()
+    assert "PodmanArgs=--ipc=host --ulimit memlock=-1 --stop-timeout=120" in lines
+    assert "TimeoutStopSec=150" in lines
+    assert "RestartPreventExitStatus=64 132 1 2" in lines
+    assert "PublishPort=127.0.0.1:8099:8099" in lines
+    assert "Environment=HALOGEN_BIND=127.0.0.1" in lines
+    assert "Exec=all" in lines
 
 
 def test_quoted_profile_value_renders_as_one_environment_assignment() -> None:
@@ -820,7 +877,7 @@ async def test_wait_ready_the_grace_restarts_when_the_failure_does_not_hold() ->
 async def test_wait_ready_anything_else_rides_out_the_full_budget(
     body: dict[str, Any], named: str
 ) -> None:
-    handler, clock, state = _clocked_health(lambda n: body, step_s=50.0)
+    handler, clock, _ = _clocked_health(lambda n: body, step_s=50.0)
     with (
         _patch_http(handler),
         patch.object(HalogenProvider, "READY_POLL_S", 0.0),

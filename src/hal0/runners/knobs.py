@@ -214,6 +214,11 @@ def runner_knob_denied(key: str) -> list[str]:
 
 _TOKEN = re.compile(r"(HALOGEN_[A-Z0-9_]+)=(.*)")
 _WHOLE_NUMBER = re.compile(r"[0-9]+")
+#: What the root unit validator refuses in a value: any control byte, and more
+#: than this many bytes (``installer/wrappers/hal0-systemctl``). A profile holding
+#: either would save and then fail every load with "quadlet rejected".
+_CONTROL_BYTE = re.compile(r"[\x00-\x1f\x7f]")
+_MAX_VALUE_BYTES = 1024
 #: Longest digit string converted with ``int()``. Python refuses 4300+ digits
 #: with ``ValueError`` (a 500 on the API path), and no knob takes a value near
 #: ten digits, so a longer string is out of range without being converted.
@@ -234,8 +239,9 @@ def parse_env_tokens(flags: str | None) -> dict[str, str]:
     quoting is shell quoting, so ``HALOGEN_X="two words"`` is one variable.
     A later duplicate wins. ``None`` or blank text yields ``{}``. Raises
     ``UnprocessableEntity`` (``profiles.halogen_flag_malformed``) for invalid
-    shell text, a token of any other shape, an empty value, or a value with a
-    line break (it would split an ``Environment=`` line in the unit file).
+    shell text, a token of any other shape, an empty value, or a value the unit
+    file cannot carry: one holding a control byte such as a line break, or longer
+    than 1024 bytes.
     """
     if not flags or not flags.strip():
         return {}
@@ -263,8 +269,41 @@ def parse_env_tokens(flags: str | None) -> dict[str, str]:
                 code="profiles.halogen_flag_malformed",
                 details={"token": token},
             )
+        if _CONTROL_BYTE.search(value) is not None:
+            raise UnprocessableEntity(
+                f"{name} holds a control character, which the slot's unit file cannot carry",
+                code="profiles.halogen_flag_malformed",
+                details={"flag": name},
+            )
+        if len(value.encode("utf-8", "surrogatepass")) > _MAX_VALUE_BYTES:
+            raise UnprocessableEntity(
+                f"{name} is longer than the {_MAX_VALUE_BYTES} bytes the slot's unit file can carry",
+                code="profiles.halogen_flag_malformed",
+                details={"flag": name},
+            )
         out[name] = value
     return out
+
+
+def native_ctx_problem(ctx_size: int | None, flags: str | None) -> str | None:
+    """Why a halogen context of ``ctx_size`` cannot launch under ``flags``, or ``None``.
+
+    Past :data:`HALOGEN_NATIVE_CTX` the entrypoint exits 2 at once unless
+    ``HALOGEN_ROPE_YARN`` is set, leaving the reason only in the journal. Flags
+    that do not parse carry nothing; reporting them is the flag screen's job.
+    """
+    if ctx_size is None or ctx_size <= HALOGEN_NATIVE_CTX:
+        return None
+    try:
+        carried = parse_env_tokens(flags)
+    except UnprocessableEntity:
+        carried = {}
+    if "HALOGEN_ROPE_YARN" in carried:
+        return None
+    return (
+        f"context {ctx_size} is past this engine's native {HALOGEN_NATIVE_CTX}-token window; "
+        "that needs HALOGEN_ROPE_YARN in the profile's flags, or the engine refuses to start"
+    )
 
 
 def _flag_owner(name: str) -> str | None:

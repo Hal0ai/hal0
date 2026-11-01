@@ -232,8 +232,9 @@ def guard_tune_write(
 
     No-op without a ``tune`` update, and a clear (``tune`` is None) is never
     refused. ``profile`` is None when the caller could not resolve it, which
-    skips the flag-pin check and the engine-family check (a halogen slot has no
-    n-gram drafter, so ``speculation = "ngram"`` is refused there).
+    skips the flag-pin check and the engine-family checks (a halogen slot has no
+    n-gram drafter, so ``speculation = "ngram"`` is refused there, and a context
+    past its native window needs ``HALOGEN_ROPE_YARN`` in the profile's flags).
     """
     if "tune" not in updates or updates["tune"] is None:
         return
@@ -257,6 +258,19 @@ def guard_tune_write(
             code="slot.tune_unsupported_value",
             details={"key": "speculation", "value": "ngram", "runtime_family": "halogen"},
         )
+    if runtime_family == "halogen":
+        from hal0.runners.knobs import native_ctx_problem
+
+        wants_ctx = (
+            tune.get("ctx_size") if isinstance(tune, Mapping) else getattr(tune, "ctx_size", None)
+        )
+        problem = native_ctx_problem(wants_ctx, getattr(profile, "flags", "") or "")
+        if problem is not None:
+            raise BadRequest(
+                problem,
+                code="slot.tune_unsupported_value",
+                details={"key": "ctx_size", "value": wants_ctx, "runtime_family": "halogen"},
+            )
     wants_thinking = (
         tune.get("enable_thinking")
         if isinstance(tune, Mapping)

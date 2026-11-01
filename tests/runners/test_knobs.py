@@ -8,6 +8,8 @@ into variables: :func:`parse_env_tokens` (shape) and
 
 from __future__ import annotations
 
+import shlex
+
 import pytest
 
 from hal0.errors import UnprocessableEntity
@@ -200,10 +202,9 @@ def test_screen_rejects_out_of_range_int_and_bool_values(bad):
     assert e.value.details["flag"] == bad.split("=")[0]
 
 
-@pytest.mark.parametrize("digits", [10, 4301, 5000])
+@pytest.mark.parametrize("digits", [10, 1024])
 def test_screen_huge_digit_string_is_out_of_range_not_a_crash(digits):
-    # int() on >4300 digits raises ValueError (a 500 on the API path); a long
-    # digit string must be a 422 for every int knob, bounded or not.
+    # A long digit string must be a 422 for every int knob, bounded or not.
     for env in ("HALOGEN_KV_SLOTS", "HALOGEN_KV_POOL_POSITIONS", "HALOGEN_HOST_RESERVE_GIB"):
         with pytest.raises(UnprocessableEntity) as e:
             screen_halogen_flags(f"{env}=" + "9" * digits)
@@ -211,6 +212,17 @@ def test_screen_huge_digit_string_is_out_of_range_not_a_crash(digits):
         assert e.value.details["flag"] == env
         assert len(e.value.message) < 200
         assert len(e.value.details["value"]) < 100
+
+
+@pytest.mark.parametrize("digits", [1025, 4301, 5000])
+def test_screen_digit_string_past_the_value_limit_is_malformed_not_a_crash(digits):
+    # int() on >4300 digits raises ValueError (a 500 on the API path). The value
+    # limit refuses these first, with a message that does not echo the value.
+    with pytest.raises(UnprocessableEntity) as e:
+        screen_halogen_flags("HALOGEN_KV_SLOTS=" + "9" * digits)
+    assert e.value.code == "profiles.halogen_flag_malformed"
+    assert e.value.details == {"flag": "HALOGEN_KV_SLOTS"}
+    assert len(e.value.message) < 200
 
 
 def test_screen_nine_digit_int_is_still_range_checked():
@@ -248,3 +260,37 @@ def test_screen_malformed_text_is_reported_as_malformed_not_denied():
     with pytest.raises(UnprocessableEntity) as e:
         screen_halogen_flags("--parallel 1")
     assert e.value.code == "profiles.halogen_flag_malformed"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("a\rb", id="carriage-return"),
+        pytest.param("a\tb", id="tab"),
+        pytest.param("a\x0bb", id="vertical-tab"),
+        pytest.param("a\x1bb", id="escape"),
+        pytest.param("a\x7fb", id="delete"),
+        pytest.param("a\nb", id="line-break"),
+    ],
+)
+def test_parse_env_tokens_refuses_a_control_byte(value: str) -> None:
+    """The root validator refuses a unit holding one, so a profile that saved with
+    one would fail every load."""
+    with pytest.raises(UnprocessableEntity) as exc_info:
+        parse_env_tokens(f"HALOGEN_X={shlex.quote(value)}")
+    assert exc_info.value.code == "profiles.halogen_flag_malformed"
+
+
+def test_parse_env_tokens_bounds_a_value_at_the_validators_1024_bytes() -> None:
+    assert parse_env_tokens("HALOGEN_X=" + "a" * 1024) == {"HALOGEN_X": "a" * 1024}
+    # Escapes do not count against it: the validator bounds value bytes, not the
+    # quoted spelling.
+    quotes = '"' * 1024
+    assert parse_env_tokens(f"HALOGEN_X={shlex.quote(quotes)}") == {"HALOGEN_X": quotes}
+    for too_long in ("a" * 1025, "é" * 513):
+        with pytest.raises(UnprocessableEntity) as exc_info:
+            parse_env_tokens("HALOGEN_X=" + too_long)
+        assert exc_info.value.code == "profiles.halogen_flag_malformed"
+        assert "1024" in str(exc_info.value)
+    # High bytes are legal, as they are in the unit file.
+    assert parse_env_tokens("HALOGEN_X=é") == {"HALOGEN_X": "é"}

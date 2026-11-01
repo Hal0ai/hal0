@@ -228,6 +228,21 @@ class TestImportStack:
         assert bad.value.code == "slot.positional_arg_denied"
         assert "llama-bad" not in load_profiles_config().profile
 
+    def test_import_refuses_a_halogen_context_past_the_native_window(
+        self, reg: ModelRegistry, tmp_hal0_home: str
+    ) -> None:
+        from hal0.config.loader import load_profiles_config
+        from hal0.errors import UnprocessableEntity
+
+        catalog = StacksCatalog(path=Path(tmp_hal0_home) / "etc/hal0/stacks.toml")
+        env = export_envelope(_stack(), exported_at="t", registry=reg)
+        env["stack"]["profiles"] = {"flash-big": {"ctx_size": 262145, "runner": "halogen"}}
+        env["stack"]["slots"][0]["profile"] = "flash-big"
+        with pytest.raises(UnprocessableEntity) as exc:
+            import_stack(env, "s9", catalog, registry=reg)
+        assert exc.value.code == "profiles.halogen_flag_out_of_range"
+        assert "flash-big" not in load_profiles_config().profile
+
     def test_import_refuses_ngram_speculation_on_a_halogen_profile(
         self, reg: ModelRegistry, tmp_hal0_home: str
     ) -> None:

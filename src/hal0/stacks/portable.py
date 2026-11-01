@@ -300,6 +300,7 @@ def _reconcile_profiles(stack: StackConfig, profiles_path: Path | None = None) -
         return
     from hal0.profiles import (
         runtime_family_of,
+        screen_profile_context,
         screen_profile_flags,
         screen_profile_speculation,
     )
@@ -311,6 +312,7 @@ def _reconcile_profiles(stack: StackConfig, profiles_path: Path | None = None) -
         family = runtime_family_of(name, profile)
         screen_profile_speculation(name, profile.speculation, runtime_family=family)
         screen_profile_flags(profile.flags, runtime_family=family)
+        screen_profile_context(name, profile.ctx_size, profile.flags, runtime_family=family)
     for name, profile in incoming.items():
         pcfg.profile[name] = profile
         changed = True

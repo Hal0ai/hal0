@@ -99,6 +99,7 @@ from hal0.runners import (
 from hal0.runners.knobs import HALOGEN_NATIVE_CTX, HALOGEN_TUNE_UNAVAILABLE
 from hal0.slot_lifecycle_budget import (
     HEALTH_TIMEOUT_S,
+    TEARDOWN_MARGIN_S,
     UNIT_ADMIN_CALLS_ALLOWANCE_S,
     UNIT_START_TIMEOUT_S,
 )
@@ -1334,9 +1335,9 @@ def unit_stop_bound_s(slot_cfg: Mapping[str, Any]) -> float | None:
     A runtime that declares one (``Provider.stop_grace_s``; halogen's engine
     needs 120 s to exit cleanly after SIGTERM) gets ``max(_UNIT_STOP_TIMEOUT_S,
     stop_grace_s + 30)``, which is the unit's own ``TimeoutStopSec`` (150 s for
-    halogen), so neither :meth:`ContainerProvider.unload_sync` nor
-    :meth:`SlotManager.terminate` abandons a shutdown the engine is still
-    performing correctly.
+    halogen), so :meth:`ContainerProvider.unload_sync` never abandons a shutdown
+    the engine is still performing correctly. :meth:`SlotManager.terminate` waits
+    longer again (:func:`terminate_budget_s`).
 
     ``None`` means "no declared grace": the llama-server default, and every
     provider whose ``stop_grace_s`` is 0 (podman's default stop timeout, not "no
@@ -1351,6 +1352,20 @@ def unit_stop_bound_s(slot_cfg: Mapping[str, Any]) -> float | None:
     if grace <= 0:
         return None
     return max(_UNIT_STOP_TIMEOUT_S, float(grace + _STOP_TIMEOUT_MARGIN_S))
+
+
+def terminate_budget_s(slot_cfg: Mapping[str, Any]) -> float | None:
+    """:meth:`SlotManager.terminate`'s wait for a runtime with a declared grace.
+
+    The stop bound (:func:`unit_stop_bound_s`) plus
+    :data:`~hal0.slot_lifecycle_budget.TEARDOWN_MARGIN_S`: 160 s for halogen, so
+    the worker gets through the Quadlet removal, ``daemon-reload`` and
+    ``reset-failed`` after even a full-length stop, and a caller never writes a
+    new unit while an abandoned thread may still remove the old one. ``None``
+    where :func:`unit_stop_bound_s` is: the caller keeps its own default.
+    """
+    bound = unit_stop_bound_s(slot_cfg)
+    return None if bound is None else bound + TEARDOWN_MARGIN_S
 
 
 def _provider_for_family(slot_cfg: dict[str, Any], family: str | None) -> Any | None:
@@ -2535,6 +2550,12 @@ class ContainerProvider(Provider):
             )
             if not tag:
                 raise ValueError("npu slot has no FLM model tag — set [model].default")
+
+        # What only a load does (halogen: its cache bind source, a once-per-load
+        # warning). Not in ``container_spec``, which status and drift reads call.
+        prepare_load = getattr(spec_provider, "prepare_load", None)
+        if prepare_load is not None:
+            prepare_load(slot_cfg)
 
         unit_text = self._render_quadlet_text(slot_cfg, model_info)
         self._write_and_start_unit(token, unit_text)

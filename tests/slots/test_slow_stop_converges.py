@@ -11,9 +11,12 @@ import asyncio
 import threading
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
+from hal0.providers.container import _UNIT_STOP_TIMEOUT_S, terminate_budget_s, unit_stop_bound_s
+from hal0.slot_lifecycle_budget import TEARDOWN_MARGIN_S, TERMINATE_TIMEOUT_S
 from hal0.slots.manager import SlotManager
 from hal0.slots.state import SlotState, SlotTerminateTimeout
 from hal0.upstreams.registry import UpstreamRegistry
@@ -229,3 +232,29 @@ async def test_an_explicit_terminate_budget_is_not_widened(
         await sm.terminate("flash", timeout_s=0.05)
 
     await asyncio.sleep(0.4)
+
+
+def test_terminate_budget_is_the_stop_bound_plus_the_standard_margin(
+    halogen_slow_stub: _SlowStopProvider, slot_root: Path
+) -> None:
+    """A stop that runs its full 150 s still has its Quadlet removal, daemon-reload
+    and reset-failed to come, so the wait outlasts it, by the same 10 s the
+    30 s / 20 s pair has for a runtime that declares no grace."""
+    flash = {"name": "flash", "profile": "halogen"}
+    assert unit_stop_bound_s(flash) == 150.0
+    assert terminate_budget_s(flash) == 160.0
+    assert TEARDOWN_MARGIN_S == TERMINATE_TIMEOUT_S - _UNIT_STOP_TIMEOUT_S == 10.0
+    assert terminate_budget_s({"name": "chat"}) is None
+
+
+async def test_terminate_waits_for_the_budget_not_the_bare_stop_bound(
+    halogen_slow_stub: _SlowStopProvider,
+) -> None:
+    sm = SlotManager()
+    sm._terminate_timeout_s = 0.01
+    with (
+        patch("hal0.providers.container.terminate_budget_s", return_value=0.06),
+        pytest.raises(SlotTerminateTimeout, match=r"within 0\.06s"),
+    ):
+        await sm.terminate("flash")
+    halogen_slow_stub.release.set()

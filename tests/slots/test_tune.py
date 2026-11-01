@@ -284,6 +284,30 @@ def test_later_usable_flag_wins():
     assert effective_tune({}, p).reasoning_effort == "high"
 
 
+# ── a halogen context past the native window needs HALOGEN_ROPE_YARN ─────────
+
+
+def test_guard_refuses_a_context_past_the_native_window_on_halogen(tmp_hal0_home: str) -> None:
+    halogen = ProfileCatalog().resolve("halogen")
+    with pytest.raises(BadRequest) as e:
+        guard_tune_write({"type": "llm"}, {"tune": {"ctx_size": 262145}}, halogen)
+    assert e.value.code == "slot.tune_unsupported_value"
+    assert e.value.details == {"key": "ctx_size", "value": 262145, "runtime_family": "halogen"}
+    assert "HALOGEN_ROPE_YARN" in str(e.value)
+    guard_tune_write({"type": "llm"}, {"tune": {"ctx_size": 262144}}, halogen)
+
+
+def test_guard_allows_it_when_the_profile_carries_the_flag(tmp_hal0_home: str) -> None:
+    roped = ProfileCatalog().create(
+        "flash-1m", ProfileConfig(flags="HALOGEN_ROPE_YARN=1", runner="halogen")
+    )
+    guard_tune_write({"type": "llm"}, {"tune": {"ctx_size": 1048576}}, roped)
+
+
+def test_guard_leaves_a_large_context_alone_on_a_llama_profile(tmp_hal0_home: str) -> None:
+    guard_tune_write({"type": "llm"}, {"tune": {"ctx_size": 1048576}}, ProfileConfig())
+
+
 # ── halogen has no n-gram drafter (auto or off) ──────────────────────────────
 
 

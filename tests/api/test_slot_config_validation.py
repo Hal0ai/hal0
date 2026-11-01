@@ -443,6 +443,29 @@ def test_put_llama_runner_on_a_halogen_slot_is_allowed(
     assert _read(halogen_slot_toml)["binary"] == "standard"
 
 
+def test_tune_ctx_past_the_native_window_refused_on_halogen_slot(
+    halogen_slot_toml: Path, client: TestClient
+) -> None:
+    """Without HALOGEN_ROPE_YARN the entrypoint exits 2 at once, and the reason
+    would otherwise only be in the journal."""
+    before = halogen_slot_toml.read_bytes()
+    r = client.put("/api/slots/flash/config", json={"tune": {"ctx_size": 262145}})
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert err["code"] == "slot.tune_unsupported_value"
+    assert "HALOGEN_ROPE_YARN" in err["message"]
+    assert err["details"]["key"] == "ctx_size"
+    assert halogen_slot_toml.read_bytes() == before
+
+
+def test_tune_ctx_at_the_native_window_allowed_on_halogen_slot(
+    halogen_slot_toml: Path, client: TestClient
+) -> None:
+    r = client.put("/api/slots/flash/config", json={"tune": {"ctx_size": 262144}})
+    assert r.status_code == 200, r.text
+    assert _read(halogen_slot_toml)["tune"]["ctx_size"] == 262144
+
+
 def test_tune_ngram_refused_on_halogen_slot(halogen_slot_toml: Path, client: TestClient) -> None:
     """The halogen engine has no n-gram drafter: the real write path refuses it."""
     before = halogen_slot_toml.read_bytes()

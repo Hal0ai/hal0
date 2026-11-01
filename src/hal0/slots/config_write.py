@@ -637,11 +637,14 @@ def guard_and_normalize_tune(merged: dict[str, Any], updates: dict[str, Any]) ->
         # Scalars live in [slot] on a nested-shape file and at the root on a flat one.
         view = {**{k: v for k, v in merged.items() if k != "slot"}, **(merged.get("slot") or {})}
         profile = None
-        if any(tune_update.get(k) is not None for k in ("enable_thinking", "speculation")):
+        if any(
+            tune_update.get(k) is not None for k in ("enable_thinking", "speculation", "ctx_size")
+        ):
             # Only the thinking pin and the engine family (a halogen slot has no
-            # n-gram drafter) need the profile; a profile that does not resolve
-            # is not this guard's error (the launch path owns that), so those
-            # checks are skipped rather than blocking the write.
+            # n-gram drafter and a native context window) need the profile; a
+            # profile that does not resolve is not this guard's error (the launch
+            # path owns that), so those checks are skipped rather than blocking
+            # the write.
             from hal0.providers.container import resolve_slot_profile
 
             try:

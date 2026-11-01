@@ -838,3 +838,41 @@ def test_seed_halogen_flags_pass_the_family_screen(tmp_hal0_home: str) -> None:
         "HALOGEN_MAX_TOK": "16384",
         "HALOGEN_WEIGHTS_LOCK": "1",
     }
+
+
+# A halogen context past the native window exits 2 at start without HALOGEN_ROPE_YARN.
+
+
+def test_halogen_profile_refuses_a_context_past_the_native_window(tmp_hal0_home: str) -> None:
+    with pytest.raises(UnprocessableEntity) as exc:
+        ProfileCatalog().create("flash-big", ProfileConfig(ctx_size=262145, runner="halogen"))
+    assert exc.value.code == "profiles.halogen_flag_out_of_range"
+    assert "HALOGEN_ROPE_YARN" in str(exc.value)
+
+
+def test_halogen_profile_takes_that_context_with_the_flag(tmp_hal0_home: str) -> None:
+    created = ProfileCatalog().create(
+        "flash-1m",
+        ProfileConfig(ctx_size=1048576, flags="HALOGEN_ROPE_YARN=1", runner="halogen"),
+    )
+    assert created.ctx_size == 1048576
+
+
+def test_halogen_profile_update_screens_the_context_and_the_flags_together(
+    tmp_hal0_home: str,
+) -> None:
+    catalog = ProfileCatalog()
+    catalog.create("flash-1m", ProfileConfig(flags="HALOGEN_ROPE_YARN=1", runner="halogen"))
+    catalog.update("flash-1m", ProfilePatch(ctx_size=1048576))
+    # Dropping the flag under the stored window is the same doomed profile.
+    with pytest.raises(UnprocessableEntity) as exc:
+        catalog.update("flash-1m", ProfilePatch(flags="HALOGEN_KV_SLOTS=2"))
+    assert exc.value.code == "profiles.halogen_flag_out_of_range"
+    # A native window needs no flag, and an unrelated edit is not judged here.
+    catalog.create("flash-native", ProfileConfig(ctx_size=262144, runner="halogen"))
+    catalog.update("flash-native", ProfilePatch(ctx_size=None))
+
+
+def test_llama_profile_keeps_any_context(tmp_hal0_home: str) -> None:
+    created = ProfileCatalog().create("wide", ProfileConfig(ctx_size=1048576))
+    assert created.ctx_size == 1048576

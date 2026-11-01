@@ -2804,11 +2804,11 @@ class SlotManager:
         ceremony.
 
         ``timeout_s`` bounds the wait on the (synchronous, executor-run)
-        systemd stop; ``None`` uses :attr:`_terminate_timeout_s`, widened to the
-        stop bound of a runtime that declares a shutdown grace
-        (:func:`hal0.providers.container.unit_stop_bound_s`: halogen's engine
-        needs up to 120 s, so 150 s) so the wait never ends before
-        ``unload_sync``'s own ``systemctl stop`` does. Every caller that stops
+        systemd stop; ``None`` uses :attr:`_terminate_timeout_s`, widened for a
+        runtime that declares a shutdown grace
+        (:func:`hal0.providers.container.terminate_budget_s`: halogen's engine
+        needs up to 120 s, so a 150 s stop bound and a 160 s wait) so the wait
+        never ends before ``unload_sync``'s teardown does. Every caller that stops
         a unit without naming a bound (``unload``, ``restart``, the
         output-sanity teardown, the drifted re-converge) gets it. The bound
         matters because ``systemctl stop`` against an already-``failed`` unit
@@ -2830,14 +2830,14 @@ class SlotManager:
             cfg = {"name": slot_name}
 
         # Stop the systemd unit + deregister upstream.
-        from hal0.providers.container import container_provider, unit_stop_bound_s
+        from hal0.providers.container import container_provider, terminate_budget_s
 
         cfg_dict = _cfg_to_dict(cfg)
         budget = self._terminate_timeout_s if timeout_s is None else timeout_s
         if timeout_s is None:
-            grace_bound = unit_stop_bound_s(cfg_dict)
-            if grace_bound is not None:
-                budget = max(budget, grace_bound)
+            grace_budget = terminate_budget_s(cfg_dict)
+            if grace_budget is not None:
+                budget = max(budget, grace_budget)
         stop = asyncio.get_event_loop().run_in_executor(
             None, container_provider().unload_sync, cfg_dict
         )

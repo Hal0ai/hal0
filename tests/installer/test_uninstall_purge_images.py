@@ -44,3 +44,12 @@ def test_every_pinned_runner_image_is_purged(key: str) -> None:
 def test_an_operators_own_llama_cpp_image_is_kept() -> None:
     assert not _purged("ghcr.io/ggml-org/llama.cpp:server-vulkan")
     assert not _purged("docker.io/library/alpine:latest")
+
+
+def test_an_operators_own_peonist_image_is_kept() -> None:
+    """Only the one repository hal0 runs goes, not the vendor's other images or
+    another registry's copy of the name."""
+    assert _purged("ghcr.io/peonist-ai/halogen-flash-server:0.18.22")
+    assert not _purged("ghcr.io/peonist-ai/halogen-tools:0.18.22")
+    assert not _purged("ghcr.io/peonist-ai/halogen-flash-server-dev:latest")
+    assert not _purged("docker.io/someone/halogen-flash-server:0.18.22")

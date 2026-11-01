@@ -61,6 +61,7 @@ from hal0.runners.knobs import (
     HALOGEN_DENIED_PREFIXES,
     HALOGEN_MANAGED_ENV,
     HALOGEN_MANAGED_PREFIXES,
+    HALOGEN_TUNE_ENV,
     parse_env_tokens,
 )
 from hal0.slots import output_sanity
@@ -84,7 +85,7 @@ VISION_SIDECAR = "qwen38-flash-next-vision.hgn"
 _HEALTH_TIMEOUT = httpx.Timeout(5.0)
 _INFER_TIMEOUT = httpx.Timeout(connect=5.0, read=120.0, write=5.0, pool=5.0)
 
-#: Names a profile may not put in the container: hal0-owned and held-back
+#: Name prefixes a profile may not put in the container: hal0-owned and held-back
 #: variables (:mod:`hal0.runners.knobs`). Stripped from the profile's tokens
 #: so a hand-edited profile file cannot bypass the write-time screen.
 _PROFILE_STRIPPED_PREFIXES: tuple[str, ...] = (
@@ -106,11 +107,17 @@ def vision_sidecar_present(checkpoint: str) -> bool:
 
 
 def _profile_env(profile_flags: str) -> dict[str, str]:
-    """The profile's ``HALOGEN_NAME=value`` tokens, less names hal0 keeps out of the container."""
+    """The profile's ``HALOGEN_NAME=value`` tokens, less names hal0 keeps out of the container.
+
+    Tune-owned names go too: the tune leaves a name unset to mean "engine default",
+    so a hand-edited ``HALOGEN_VISION_TOWER=1`` would otherwise survive
+    ``vision = "off"``, and stop the engine at start on a checkpoint with no sidecar.
+    """
     return {
         name: value
         for name, value in parse_env_tokens(profile_flags).items()
         if name not in HALOGEN_MANAGED_ENV
+        and name not in HALOGEN_TUNE_ENV
         and name not in HALOGEN_DENIED_ENV
         and not name.startswith(_PROFILE_STRIPPED_PREFIXES)
     }
@@ -275,6 +282,32 @@ class HalogenProvider(Provider):
 
         return resolve_family_image(slot_cfg, "halogen")
 
+    def _cache_dir(self) -> str:
+        """The ``/cache`` bind source."""
+        return os.environ.get("HAL0_HALOGEN_CACHE", self.CACHE_DIR)
+
+    def prepare_load(self, slot_cfg: Mapping[str, Any]) -> None:
+        """What only a load does: create the cache bind source, warn about a stale tune.
+
+        Called once per load (:meth:`hal0.providers.container.ContainerProvider.load_sync`).
+        Not part of :meth:`container_spec`, which the drift and status reads also
+        call for every poll of a loaded slot.
+        """
+        _ensure_cache_dir(self._cache_dir())
+        profile_name = str(slot_cfg.get("profile") or _DEFAULT_PROFILE)
+        from hal0.providers.container import resolve_named_profile
+
+        tune = effective_tune(slot_cfg, resolve_named_profile(slot_cfg, profile_name))
+        if tune.speculation == "ngram":
+            # The write seams refuse ngram for this family; a stale stored value
+            # launches the engine default, and this is the one place that says so.
+            log.warning(
+                "halogen.speculation_ngram_ignored slot=%s: this engine has no n-gram "
+                "drafter, so the slot launches with its default speculation; set "
+                "speculation to auto or off",
+                slot_cfg.get("name") or "",
+            )
+
     def container_spec(
         self,
         slot_cfg: dict[str, Any],
@@ -310,18 +343,6 @@ class HalogenProvider(Provider):
         profile_name = str(slot_cfg.get("profile") or _DEFAULT_PROFILE)
         profile = resolve_named_profile(slot_cfg, profile_name)
         tune = effective_tune(slot_cfg, profile)
-        if tune.speculation == "ngram":
-            # The write seams refuse ngram for this family; a stale stored value
-            # launches the engine default, and this is the one place that says so.
-            log.warning(
-                "halogen.speculation_ngram_ignored slot=%s: this engine has no n-gram "
-                "drafter, so the slot launches with its default speculation; set "
-                "speculation to auto or off",
-                slot_cfg.get("name") or "",
-            )
-
-        cache_dir = os.environ.get("HAL0_HALOGEN_CACHE", self.CACHE_DIR)
-        _ensure_cache_dir(cache_dir)
         model_roots = self._model_roots(checkpoint)
         probe = (
             'python3 -c "import urllib.request;'
@@ -342,7 +363,7 @@ class HalogenProvider(Provider):
                 # Model roots via the shared `mount_for` factory: identical path,
                 # read-only, SELinux relabel omitted on NFS.
                 *(model_store_module.mount_for(root, read_only=True) for root in model_roots),
-                Mount(cache_dir, "/cache", read_only=False, selinux="z"),
+                Mount(self._cache_dir(), "/cache", read_only=False, selinux="z"),
             ],
             devices=list(resolve_gpu_device_paths()),
             cap_add=[],
