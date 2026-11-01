@@ -998,6 +998,45 @@ describe('ProfileDrawer halogen engine settings', () => {
     act(() => root.unmount())
   })
 
+  const specOptions = (host: HTMLElement) =>
+    Array.from((field(host, 'pf-select-speculation') as HTMLSelectElement).options).map(o => o.value)
+
+  it('hides the n-gram speculation option for a halogen runner, which has no n-gram drafter', () => {
+    halogenBox()
+    const { host, root } = drawer('edit', { name: 'flash', flags: '', runner: 'halogen' })
+    expect(specOptions(host)).toEqual(['auto', 'off'])
+    act(() => root.unmount())
+  })
+
+  it('offers n-gram again for a llama runner, an Auto runner and a runner the registry lacks', () => {
+    halogenBox()
+    for (const runner of ['standard', '', 'gone']) {
+      const { host, root } = drawer('edit', { name: 'x', flags: '', runner })
+      expect(specOptions(host)).toEqual(['auto', 'off', 'ngram'])
+      act(() => root.unmount())
+    }
+  })
+
+  it('follows the Runtime select for the n-gram option', () => {
+    halogenBox()
+    const { host, root } = drawer('create')
+    expect(specOptions(host)).toContain('ngram')
+    pick(select(host), 'halogen')
+    expect(specOptions(host)).toEqual(['auto', 'off'])
+    pick(select(host), 'standard')
+    expect(specOptions(host)).toContain('ngram')
+    act(() => root.unmount())
+  })
+
+  it('keeps a stored n-gram choice visible on a halogen form, labelled as unsupported, so the select never lies', () => {
+    halogenBox()
+    const { host, root } = drawer('edit', { name: 'flash', flags: '', runner: 'halogen', speculation: 'ngram' })
+    const sel = field(host, 'pf-select-speculation') as HTMLSelectElement
+    expect(sel.value).toBe('ngram')
+    expect(sel.selectedOptions[0].text).toContain('not available on this runtime')
+    act(() => root.unmount())
+  })
+
   it('the Advanced disclosure opens the free-text flags, kept in step with the controls', () => {
     halogenBox()
     const { host, root } = drawer('edit', { name: 'flash', flags: 'HALOGEN_KV_SLOTS=4', runner: 'halogen' })

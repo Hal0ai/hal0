@@ -12,6 +12,7 @@ import { createPortal } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { HALOGEN_DENIED, HALOGEN_KNOBS } from './fixtures/halogen-knobs'
 
 ;(globalThis as unknown as { window: typeof globalThis }).window = globalThis
 ;(globalThis as unknown as { React: typeof React }).React = React
@@ -19,7 +20,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 ;(globalThis as unknown as { Icons: unknown }).Icons = new Proxy({}, { get: () => null })
 ;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-const { profilesBox, modelsBox, sysBox, toasts, feasCalls, editCalls, restartCalls, createCalls } = vi.hoisted(() => ({
+const { profilesBox, modelsBox, sysBox, toasts, feasCalls, editCalls, restartCalls, createCalls, updateCalls } = vi.hoisted(() => ({
   profilesBox: { current: [] as Record<string, unknown>[] },
   sysBox: { current: { backends: {}, hardware: {} } as Record<string, unknown> },
   modelsBox: { current: [] as Record<string, unknown>[] },
@@ -28,6 +29,7 @@ const { profilesBox, modelsBox, sysBox, toasts, feasCalls, editCalls, restartCal
   editCalls: [] as unknown[],
   restartCalls: [] as string[],
   createCalls: [] as unknown[],
+  updateCalls: [] as unknown[],
 }))
 
 const idle = { mutate: () => {}, mutateAsync: async () => ({}), isPending: false, reset: () => {} }
@@ -78,7 +80,12 @@ vi.mock('@/api/hooks/useProfiles', () => ({
       return b
     },
   }),
-  useProfileUpdate: () => ({ mutateAsync: async (b: unknown) => b }),
+  useProfileUpdate: () => ({
+    mutateAsync: async (b: unknown) => {
+      updateCalls.push(b)
+      return b
+    },
+  }),
   useProfileDelete: () => ({ mutateAsync: async () => undefined }),
   useProfileExport: () => ({ mutateAsync: async () => ({}) }),
   useProfileImport: () => ({ mutateAsync: async () => ({}) }),
@@ -153,6 +160,7 @@ beforeEach(() => {
   editCalls.length = 0
   restartCalls.length = 0
   createCalls.length = 0
+  updateCalls.length = 0
   toasts.length = 0
   feasCalls.length = 0
   ;(window as any).__hal0Toast = (m: string) => toasts.push(m)
@@ -464,7 +472,7 @@ const RUNNERS = {
   },
   halogen: {
     title: 'halogen (Flash-Next)', tier: 'optional', device_class: 'gpu', supported_backends: ['rocm'],
-    runtime_family: 'halogen', state: 'installed',
+    runtime_family: 'halogen', state: 'installed', knobs: HALOGEN_KNOBS, knob_denied: HALOGEN_DENIED,
   },
 }
 const HALO_MODEL = { id: 'qwen-halo', capabilities: ['chat'], backends: ['halogen'], installed: true }
@@ -546,5 +554,99 @@ describe('slot drawer on a halogen runtime', () => {
     const { root } = mount({ ...SLOT, tune_effective: { ...EFFECTIVE, tune_unavailable: { speculation: reason } } })
     expect(byId('tune-speculation-reason')!.textContent).toBe(reason)
     act(() => root.unmount())
+  })
+})
+
+// ── halogen engine settings: the profile's HALOGEN_* flags, edited in place ─
+const engineBlock = () => byId('slot-engine-block')
+const engineField = (env: string) => byId(`engine-input-${env}`) as HTMLInputElement | null
+
+describe('slot drawer engine settings (halogen)', () => {
+  const CUSTOM = { ...HALO_PROFILE, flags: 'HALOGEN_KV_SLOTS=4', resolved_flags: 'HALOGEN_KV_SLOTS=4' }
+  const SEED = { ...CUSTOM, name: 'halogen-seed', seed: true }
+  beforeEach(() => {
+    sysBox.current = { backends: RUNNERS, hardware: { rocm: true } }
+    modelsBox.current = [LLAMA_MODEL, HALO_MODEL]
+  })
+
+  it('shows a seed profile read-only and offers to duplicate it', () => {
+    profilesBox.current = [PROFILE, SEED]
+    const { root } = mount({ ...HALO_SLOT, profile: 'halogen-seed' })
+    expect(byId('pf-engine-settings')).not.toBeNull()
+    expect(engineField('HALOGEN_KV_SLOTS')!.value).toBe('4')
+    expect(engineField('HALOGEN_KV_SLOTS')!.disabled).toBe(true)
+    expect(byId('slot-engine-apply')).toBeNull()
+    expect(byId('slot-engine-duplicate')).not.toBeNull()
+    act(() => root.unmount())
+  })
+
+  it('Duplicate on the engine block opens the profile drawer on a custom copy of the seed', () => {
+    profilesBox.current = [PROFILE, SEED]
+    const { root } = mount({ ...HALO_SLOT, profile: 'halogen-seed' })
+    click('slot-engine-duplicate')
+    expect((byId('pf-input-name') as HTMLInputElement).value).toBe('halogen-seed-custom')
+    act(() => root.unmount())
+  })
+
+  it('saves a custom profile edit through the profile update, never the slot', async () => {
+    profilesBox.current = [PROFILE, CUSTOM]
+    const { root } = mount(HALO_SLOT)
+    expect(engineField('HALOGEN_KV_SLOTS')!.disabled).toBe(false)
+    expect(byId('slot-engine-duplicate')).toBeNull()
+    expect((byId('slot-engine-apply') as HTMLButtonElement).disabled).toBe(true)
+    typeInto('engine-input-HALOGEN_KV_SLOTS', '8')
+    expect(updateCalls).toHaveLength(0)
+    await act(async () => byId('slot-engine-apply')!.click())
+    expect(updateCalls).toEqual([{ name: 'halogen-chat', body: { flags: 'HALOGEN_KV_SLOTS=8' } }])
+    expect(editCalls).toHaveLength(0)
+    act(() => root.unmount())
+  })
+
+  it('writes a toggle and an enum choice into the same flags text', async () => {
+    profilesBox.current = [PROFILE, CUSTOM]
+    const { root } = mount(HALO_SLOT)
+    click('engine-opt-HALOGEN_MAX_TOK-32768')
+    click('engine-switch-HALOGEN_KV8')
+    await act(async () => byId('slot-engine-apply')!.click())
+    expect((updateCalls[0] as { body: { flags: string } }).body.flags).toBe(
+      'HALOGEN_KV_SLOTS=4 HALOGEN_MAX_TOK=32768 HALOGEN_KV8=1',
+    )
+    act(() => root.unmount())
+  })
+
+  it('names a rejected value in the block and holds the save', async () => {
+    profilesBox.current = [PROFILE, CUSTOM]
+    const { root } = mount(HALO_SLOT)
+    typeInto('engine-input-HALOGEN_KV_SLOTS', '100')
+    expect(byId('pf-engine-error')!.textContent).toContain('HALOGEN_KV_SLOTS')
+    expect((byId('slot-engine-apply') as HTMLButtonElement).disabled).toBe(true)
+    await act(async () => byId('slot-engine-apply')!.click())
+    expect(updateCalls).toHaveLength(0)
+    act(() => root.unmount())
+  })
+
+  it('keeps an unsaved engine edit out of the slot Save', async () => {
+    profilesBox.current = [PROFILE, CUSTOM]
+    const { root } = mount(HALO_SLOT)
+    typeInto('engine-input-HALOGEN_KV_SLOTS', '8')
+    await save()
+    expect(editCalls).toHaveLength(0)
+    act(() => root.unmount())
+  })
+
+  it('renders no block for a llama slot, nor for a halogen runner that serves no knobs', () => {
+    profilesBox.current = [PROFILE, CUSTOM]
+    const llama = mount({ ...SLOT, binary: 'standard' })
+    expect(engineBlock()).toBeNull()
+    expect(byId('pf-engine-settings')).toBeNull()
+    act(() => llama.root.unmount())
+    document.body.innerHTML = ''
+    sysBox.current = {
+      backends: { ...RUNNERS, halogen: { ...RUNNERS.halogen, knobs: [] } },
+      hardware: { rocm: true },
+    }
+    const bare = mount(HALO_SLOT)
+    expect(engineBlock()).toBeNull()
+    act(() => bare.root.unmount())
   })
 })

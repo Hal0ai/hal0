@@ -512,7 +512,7 @@ export function ctxError(text) {
 // names a profile may not set from `.knob_denied` (hal0.runners.knobs, served on
 // system-info), so the screen below reads both rather than carrying the
 // server's sets. Null for any other runner.
-function halogenEngine(runner, backends) {
+export function halogenEngine(runner, backends) {
   if (!runner) return null;
   if (effectiveRuntimeFamily({ binary: runner, backends }) !== 'halogen') return null;
   const row = backends[runner];
@@ -522,7 +522,7 @@ function halogenEngine(runner, backends) {
 // The inline mirror of the server's profiles.halogen_flag_malformed /
 // _denied / _out_of_range (hal0.runners.knobs.screen_halogen_flags), in the
 // server's order: the text is read before any name or value is judged.
-function halogenFlagsError(text, { knobs, denied }) {
+export function halogenFlagsError(text, { knobs, denied }) {
   const quoteErr = tokenizeFlags(text).error;
   if (quoteErr) return quoteErr;
   const malformed = findHalogenMalformed(text);
@@ -878,12 +878,21 @@ export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved, s
           </select>
         </FormRow>
 
-        <FormRow label="Speculation" sub="speculative decoding (drafter, MTP heads or n-gram)">
+        <FormRow label="Speculation" sub={engine ? 'speculative decoding (drafter or MTP heads)' : 'speculative decoding (drafter, MTP heads or n-gram)'}>
           <select className="pf-input mono" value={form.speculation}
             onChange={e => set('speculation', e.target.value)} data-testid="pf-select-speculation">
             <option value="auto">Auto — use the model's drafter or MTP heads when it has them</option>
             <option value="off">Off — never draft</option>
-            <option value="ngram">N-gram — model-free speculation, no drafter needed</option>
+            {/* The halogen engine has no n-gram drafter, and the server refuses
+                the value on a halogen profile. A stored choice stays listed,
+                marked, so the select never shows a value it does not hold. */}
+            {(!engine || form.speculation === 'ngram') && (
+              <option value="ngram">
+                {engine
+                  ? 'N-gram — not available on this runtime, pick Auto or Off'
+                  : 'N-gram — model-free speculation, no drafter needed'}
+              </option>
+            )}
           </select>
         </FormRow>
 

@@ -20,7 +20,7 @@ import { useModels, usePullJob } from "@/api/hooks/useModels";
 // Host-truth GTT feasibility signal (993ea3b6, drawer overhaul Task 11d) —
 // feeds the per-row fit chips on the Model picker.
 import { useModelsFeasibility } from "@/api/hooks/useModelsFeasibility";
-import { useProfiles } from "@/api/hooks/useProfiles";
+import { useProfiles, useProfileUpdate } from "@/api/hooks/useProfiles";
 import { useSystemInfo, deviceBackend } from "@/api/hooks/useRuntimes";
 import {
 	applyRunnerChoice,
@@ -28,6 +28,7 @@ import {
 	laneValues,
 	runnerOptions,
 	selectedRunnerKey,
+	effectiveRunnerKey,
 	effectiveRuntimeFamily,
 } from "./hw-cascade.js";
 // llama.cpp build-provenance formatter (h0/runner-provenance) — shared with
@@ -41,7 +42,15 @@ import { formatProvenanceShort } from "./runner-images.jsx";
 // Profiles view's not-pulled runtime chip uses — reused verbatim here for
 // the Runtime RichSelect's inline Pull affordance rather than a second
 // hook that could resolve a pull target differently.
-import { runtimeChips, useRunnerPull, ProfileDrawer, ctxLabel } from "./profiles.jsx";
+import {
+	runtimeChips,
+	useRunnerPull,
+	ProfileDrawer,
+	ctxLabel,
+	halogenEngine,
+	halogenFlagsError,
+} from "./profiles.jsx";
+import { EngineSettings } from "./engine-settings.jsx";
 import { RichSelect } from "./rich-select.jsx";
 import { FitChip, ModalityTag } from "./fit-chip.jsx";
 import { TuneBlock, tuneApplies } from "./slot-tune-block.jsx";
@@ -87,6 +96,93 @@ const {
 	useRef: useRefSM,
 	useCallback: useCallbackSM,
 } = React;
+
+// The halogen engine's settings for the slot's profile. Engine knobs live in
+// the profile's flags text as HALOGEN_NAME=value tokens (ADR-0029: the profile
+// owns the tune), so this block edits THAT profile through the profile update —
+// it never writes flags to the slot, and it commits on its own button rather
+// than on Save: a profile is shared, and the drawer's Cancel must not look as
+// if it could undo a profile write. A seed is read-only (the server refuses a
+// PUT with profiles.seed_immutable), so it shows the values and offers the same
+// "Duplicate & edit" fork the Profile row does.
+//
+// Mounted only for a halogen slot whose runner serves knobs, and keyed by the
+// profile name, so a profile pick starts a fresh draft and the hook below stays
+// out of every other slot's render.
+function SlotEngineBlock({ profile, engine, onDuplicate }) {
+	const update = useProfileUpdate();
+	const stored = profile.flags || "";
+	const readOnly = !!profile.seed;
+	// The unsaved text, with the stored text it started from: a profile that
+	// changed underneath (another tab, the refetch that follows our own save)
+	// retires the draft instead of overwriting the newer text.
+	const [draft, setDraft] = useStateSM(null);
+	const [saving, setSaving] = useStateSM(false);
+	const live = draft && draft.base === stored ? draft : null;
+	const flags = live ? live.flags : stored;
+	const dirty = !!live && !live.sent && flags !== stored;
+	const error = readOnly ? null : halogenFlagsError(flags, engine);
+	const toast = (msg, kind) => window.__hal0Toast && window.__hal0Toast(msg, kind);
+	const apply = async () => {
+		if (!dirty || error || saving) return;
+		setSaving(true);
+		try {
+			await update.mutateAsync({ name: profile.name, body: { flags } });
+			// Keep showing the saved text until the profile list refetches.
+			setDraft({ ...live, sent: true });
+			toast(`Profile ${profile.name} updated`, "ok");
+		} catch (err) {
+			toast(err?.message || "Could not save the engine settings", "err");
+		} finally {
+			setSaving(false);
+		}
+	};
+	return (
+		<div className="form-row" data-testid="slot-engine-block">
+			<div className="form-lbl">
+				<span>Engine</span>
+				<FieldInfoIcon description="The halogen engine's own settings. They are stored on the profile as HALOGEN_* flags, so every slot using the profile gets them." />
+			</div>
+			<div className="form-ctl">
+				<EngineSettings
+					knobs={engine.knobs}
+					flags={flags}
+					readOnly={readOnly}
+					error={error}
+					onChange={(next) => setDraft({ base: stored, flags: next, sent: false })}
+				/>
+				<div className="tune-foot">
+					<span className="hint" data-testid="slot-engine-note">
+						{readOnly
+							? `Profile ${profile.name} is a seed and read-only. Duplicate it to change these.`
+							: `Saved to profile ${profile.name}, read when the slot starts.`}
+					</span>
+					<span className="pf-grow" />
+					{readOnly ? (
+						<button
+							type="button"
+							className="btn ghost sm"
+							data-testid="slot-engine-duplicate"
+							onClick={onDuplicate}
+						>
+							Duplicate & edit
+						</button>
+					) : (
+						<button
+							type="button"
+							className="btn ghost sm"
+							data-testid="slot-engine-apply"
+							disabled={!dirty || !!error || saving}
+							onClick={apply}
+						>
+							{saving ? "Saving…" : "Save to profile"}
+						</button>
+					)}
+				</div>
+			</div>
+		</div>
+	);
+}
 
 // Map a slot lifecycle state to a chip color class.
 //   running healthy/serving → green (ok); starting/pulling → amber (warn);
@@ -1589,6 +1685,23 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		device: pendingDevice,
 		backends: hwBackends,
 	});
+	// The engine block shows for a halogen-family slot whose runner serves knobs
+	// and whose staged profile row is a real one (a quarantined entry has no
+	// flags). Null otherwise, which is every llama slot.
+	const halogenSlotEngine =
+		runtimeFamily === "halogen" && stagedProfileRow && !stagedProfileRow.quarantined
+			? (() => {
+					const engine = halogenEngine(
+						effectiveRunnerKey({
+							binary,
+							profile: stagedProfileRow,
+							device: pendingDevice,
+						}),
+						hwBackends,
+					);
+					return engine && engine.knobs.length > 0 ? engine : null;
+				})()
+			: null;
 
 	return (
 		<>
@@ -1953,6 +2066,19 @@ function EditSlotDrawer({ open, slot, onClose }) {
 									The model only holds facts about its file (chat template,
 									jinja, MTP heads): use “Edit model…”.
 								</div>
+							)}
+
+							{/* Halogen engine settings: the staged profile's HALOGEN_* flags,
+							    edited through the profile update, not the slot. */}
+							{halogenSlotEngine && (
+								<SlotEngineBlock
+									key={stagedProfileRow.name}
+									profile={stagedProfileRow}
+									engine={halogenSlotEngine}
+									onDuplicate={() =>
+										setProfileDrawer({ mode: "clone", source: stagedProfileRow })
+									}
+								/>
 							)}
 						</>
 					)}
