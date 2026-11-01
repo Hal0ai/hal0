@@ -271,3 +271,103 @@ def test_is_upgrade_capture(tmp_path: Path) -> None:
 def test_is_upgrade_captured_before_filesystem_layout() -> None:
     assert _TEXT.index("IS_UPGRADE=0\n") < _TEXT.index('ui_step "Filesystem layout"')
     assert _TEXT.index("IS_UPGRADE=0\n") < _TEXT.index('ui_step "System user"')
+
+
+# ── Pi gate (Task A3): the picker answer is the only prompt ─────────────────
+
+_PI_START = "# ── Optional: pi coding agent"
+_PI_END = "# Last verify action before the summary"
+
+
+@dataclass
+class PiResult:
+    agent_install_called: bool
+    tty_read_called: bool
+    out: str
+
+
+@pytest.fixture
+def run_pi(tmp_path: Path):
+    text = _INSTALL_SH.read_text(encoding="utf-8")
+    head = text.index(_PI_START)
+    pi_block = text[head : text.index(_PI_END, head)]
+
+    def run(
+        env: dict[str, str] | None = None,
+        *,
+        tty: bool = False,
+        pi_present: bool = False,
+        dev: str = "0",
+        no_start: str = "0",
+    ) -> PiResult:
+        bindir = tmp_path / "bin"
+        if bindir.exists():
+            shutil.rmtree(bindir)
+        bindir.mkdir()
+        if pi_present:
+            (bindir / "pi").write_text("#!/bin/sh\nexit 0\n")
+            (bindir / "pi").chmod(0o755)
+        hal0 = tmp_path / "hal0-stub"
+        calls = tmp_path / "hal0-calls"
+        tty_flag = tmp_path / "tty-read"
+        for p in (calls, tty_flag):
+            p.unlink(missing_ok=True)
+        hal0.write_text(f'#!/bin/sh\necho "$@" >>"{calls}"\n')
+        hal0.chmod(0o755)
+        script = tmp_path / "pi.sh"
+        script.write_text(
+            "set -euo pipefail\n"
+            "info() { printf 'INFO: %s\\n' \"$*\"; }\n"
+            "warn() { printf 'WARN: %s\\n' \"$*\"; }\n"
+            '_interactive() { [[ "${TTY:-0}" == "1" ]]; }\n'
+            f'_tty_read() {{ : >"{tty_flag}"; }}\n'
+            f'HAL0_BIN="{hal0}"\n'
+            f'DEV_MODE="{dev}"; NO_START="{no_start}"\n'
+            + pi_block
+            + "\n",
+            encoding="utf-8",
+        )
+        proc = subprocess.run(
+            [shutil.which("bash") or "/bin/bash", str(script)],
+            capture_output=True,
+            text=True,
+            env={"PATH": str(bindir), "TTY": "1" if tty else "0", **(env or {})},
+            stdin=subprocess.DEVNULL,
+            timeout=60,
+        )
+        assert proc.returncode == 0, proc.stderr + proc.stdout
+        return PiResult(
+            agent_install_called=calls.exists() and "agent install pi" in calls.read_text(),
+            tty_read_called=tty_flag.exists(),
+            out=proc.stdout,
+        )
+
+    return run
+
+
+def test_pi_installs_only_when_install_pi_set(run_pi) -> None:
+    assert run_pi(env={"HAL0_INSTALL_PI": "1"}).agent_install_called is True
+    assert run_pi(env={}).agent_install_called is False
+    assert run_pi(env={"HAL0_INSTALL_PI": "1", "HAL0_SKIP_PI": "1"}).agent_install_called is False
+    assert run_pi(env={"HAL0_INSTALL_PI": "1"}, pi_present=True).agent_install_called is False
+
+
+def test_pi_block_never_prompts(run_pi) -> None:
+    r = run_pi(env={"HAL0_INSTALL_PI": "1"}, tty=True)
+    assert r.tty_read_called is False
+    assert run_pi(env={}, tty=True).tty_read_called is False
+
+
+def test_pi_install_needs_no_tty(run_pi) -> None:
+    """The picker answer replaces the prompt, so the gate no longer needs a TTY."""
+    assert run_pi(env={"HAL0_INSTALL_PI": "1"}, tty=False).agent_install_called is True
+
+
+def test_pi_install_guards_dev_and_no_start(run_pi) -> None:
+    assert run_pi(env={"HAL0_INSTALL_PI": "1"}, dev="1").agent_install_called is False
+    assert run_pi(env={"HAL0_INSTALL_PI": "1"}, no_start="1").agent_install_called is False
+
+
+def test_pi_off_prints_later_install_hint(run_pi) -> None:
+    out = run_pi(env={}).out
+    assert "agent install pi" in out and out.count("INFO:") == 1
