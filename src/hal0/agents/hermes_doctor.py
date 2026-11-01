@@ -371,16 +371,24 @@ def check_hermes_gateway_unit(
     return {"status": "ok", "detail": f"{unit.name} {state}; no unmanaged gateway"}
 
 
+KANBAN_PROBE_TIMEOUT_S = 10.0
+
+
 def check_hermes_dashboard_token(*, path: Path | None = None) -> dict[str, str]:
     """The Hermes dashboard token file hal0-api reads for ``/api/board/*`` exists.
 
     The ``hal0-agent`` shim mints the file; the token value is never printed.
     """
     from hal0.board import BoardNoToken
-    from hal0.board.auth import read_dashboard_token
+    from hal0.board import auth as board_auth
 
+    if path is None and not board_auth.hermes_installed():
+        return {
+            "status": "ok",
+            "detail": "Hermes agent not installed; no dashboard token expected",
+        }
     try:
-        read_dashboard_token(path)
+        board_auth.read_dashboard_token(path)
     except BoardNoToken as exc:
         where = (exc.details or {}).get("path", str(path) if path else "the token file")
         return {
@@ -408,7 +416,9 @@ def check_hermes_kanban_reachable(*, client: Any | None = None) -> dict[str, str
 
     async def _probe() -> Any:
         try:
-            return await client.request_json("GET", "/boards")
+            return await asyncio.wait_for(
+                client.request_json("GET", "/boards"), timeout=KANBAN_PROBE_TIMEOUT_S
+            )
         finally:
             aclose = getattr(getattr(client, "_http", None), "aclose", None)
             if aclose is not None:
@@ -416,6 +426,11 @@ def check_hermes_kanban_reachable(*, client: Any | None = None) -> dict[str, str
 
     try:
         data = asyncio.run(_probe())
+    except TimeoutError:
+        return {
+            "status": "warn",
+            "detail": f"board.unreachable: timed out after {KANBAN_PROBE_TIMEOUT_S:g}s",
+        }
     except Hal0Error as exc:
         return {"status": "warn", "detail": f"{exc.code}: {exc}"}
     boards = data.get("boards") if isinstance(data, dict) else None

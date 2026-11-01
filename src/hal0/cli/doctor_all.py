@@ -2975,6 +2975,7 @@ def check_hermes_gateway_unit(
     return Check("hermes-gateway-unit", "Hermes gateway unit", status, row["detail"])
 
 
+@_report_unreadable("hermes-dashboard-token", "Hermes dashboard token")
 def check_hermes_dashboard_token(*, path: Path | None = None) -> Check:
     """Hermes dashboard token file present (see :mod:`hal0.agents.hermes_doctor`)."""
     from hal0.agents import hermes_doctor
@@ -2984,6 +2985,7 @@ def check_hermes_dashboard_token(*, path: Path | None = None) -> Check:
     return Check("hermes-dashboard-token", "Hermes dashboard token", status, row["detail"])
 
 
+@_report_unreadable("hermes-kanban", "Hermes kanban reachable")
 def check_hermes_kanban_reachable(*, client: Any | None = None) -> Check:
     """Hermes kanban plugin answers ``GET /boards`` (see :mod:`hal0.agents.hermes_doctor`)."""
     from hal0.agents import hermes_doctor

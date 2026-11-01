@@ -79,3 +79,26 @@ def test_kanban_hermes_not_installed_is_ok(monkeypatch: pytest.MonkeyPatch) -> N
         "status": "ok",
         "detail": "Hermes agent not installed; board unavailable by design",
     }
+
+
+def test_kanban_probe_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(5)
+        return httpx.Response(200, json={"boards": []})
+
+    monkeypatch.setattr(hermes_doctor, "KANBAN_PROBE_TIMEOUT_S", 0.05)
+    row = hermes_doctor.check_hermes_kanban_reachable(client=_client(handler))
+    assert row == {"status": "warn", "detail": "board.unreachable: timed out after 0.05s"}
+
+
+def test_token_not_installed_is_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hal0.board import auth
+
+    monkeypatch.setattr(auth, "hermes_installed", lambda: False)
+    row = hermes_doctor.check_hermes_dashboard_token()
+    assert row == {
+        "status": "ok",
+        "detail": "Hermes agent not installed; no dashboard token expected",
+    }

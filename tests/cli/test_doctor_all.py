@@ -2964,3 +2964,15 @@ def test_hermes_board_wrappers_map_status(tmp_path) -> None:  # type: ignore[no-
     assert da.check_hermes_dashboard_token(path=f).status == "warn"
     f.write_text("x")
     assert da.check_hermes_dashboard_token(path=f).status == "pass"
+
+
+def test_hermes_kanban_row_reports_unreadable_install_state(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from hal0.board import auth
+
+    def boom() -> bool:
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(auth, "hermes_installed", boom)
+    c = da.check_hermes_kanban_reachable()
+    assert c.key == "hermes-kanban" and c.status == "warn"
+    assert "could not run this check as this user" in c.detail
