@@ -11,6 +11,7 @@ is covered in ``test_preload_eviction.py``.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -129,11 +130,13 @@ class _RaisingProvider:
         raise RuntimeError("sidecar probe blew up")
 
 
-def _write_slot_toml(home: str, name: str) -> None:
+def _write_slot_toml(home: str, name: str, *, profile: str | None = None) -> None:
     slots = Path(home) / "etc" / "hal0" / "slots"
     slots.mkdir(parents=True, exist_ok=True)
-    lines = [f'name = "{name}"', "port = 8081", 'backend = "vulkan"', "[model]"]
-    lines += ['default = "mymodel"', ""]
+    lines = [f'name = "{name}"', "port = 8081", 'backend = "vulkan"']
+    if profile:
+        lines.append(f'profile = "{profile}"')
+    lines += ["[model]", 'default = "mymodel"', ""]
     (slots / f"{name}.toml").write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -222,7 +225,6 @@ async def test_build_per_slot_counts_a_starting_slot_at_the_provider_figure(
         pytest.param(_StubProvider(None), id="provider-has-no-figure"),
         pytest.param(_StubProvider(0.0), id="provider-figure-not-positive"),
         pytest.param(object(), id="provider-lacks-the-hook"),
-        pytest.param(_RaisingProvider(), id="provider-hook-raises"),
         pytest.param(None, id="llama-default-no-provider"),
     ],
 )
@@ -235,6 +237,40 @@ async def test_build_per_slot_falls_back_to_the_file_size_estimate(
 
     # 1000 MiB checkpoint + the native window (131072) capped at 32768 tokens of KV.
     assert result["brain"]["mem_mb"] == pytest.approx(1000.0 + 32768 / 1000 * 0.5, abs=0.1)
+
+
+async def test_a_raising_provider_hook_falls_back_and_warns_with_its_traceback(
+    tmp_hal0_home: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A defect in an override must not be a silent drop to the generic guess."""
+    _write_slot_toml(tmp_hal0_home, "brain")
+
+    with caplog.at_level(logging.DEBUG, logger="hal0.slots.capacity"):
+        result = await _per_slot(_slot(), _RaisingProvider())
+
+    assert result["brain"]["mem_mb"] == pytest.approx(1000.0 + 32768 / 1000 * 0.5, abs=0.1)
+    (record,) = [r for r in caplog.records if r.name == "hal0.slots.capacity"]
+    assert record.levelno == logging.WARNING
+    assert "sidecar probe blew up" in record.getMessage()
+    assert record.provider == "_RaisingProvider"  # type: ignore[attr-defined]
+    assert record.exc_info is not None
+    assert record.exc_info[0] is RuntimeError
+
+
+async def test_a_refused_profile_falls_back_at_debug_not_warning(
+    tmp_hal0_home: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A profile the catalog lacks is an expected refusal the launch path reports."""
+    _write_slot_toml(tmp_hal0_home, "brain", profile="no-such-profile")
+    provider = _StubProvider(70 * GIB)
+
+    with caplog.at_level(logging.DEBUG, logger="hal0.slots.capacity"):
+        result = await _per_slot(_slot(), provider)
+
+    assert provider.calls == []  # the hook is never reached without a profile
+    assert result["brain"]["mem_mb"] == pytest.approx(1000.0 + 131072 / 1000 * 0.5, abs=0.1)
+    records = [r for r in caplog.records if r.name == "hal0.slots.capacity"]
+    assert [r.levelno for r in records] == [logging.DEBUG]
 
 
 async def test_build_per_slot_does_not_ask_for_a_figure_without_a_slot_config(

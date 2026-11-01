@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any
 # importing them anyway is the lesser evil vs. a re-declared constant
 # silently diverging again (container.py is owned by another workstream, so
 # the constants cannot be moved to a neutral module from here).
+from hal0.errors import Hal0Error
 from hal0.providers.container import _CTX_DENSE_CAP
 from hal0.slots.metrics_collect import systemd_props
 from hal0.slots.naming import slot_unit_name
@@ -232,9 +233,16 @@ def provider_footprint_mb(
     :func:`build_per_slot`. ``None`` sends the caller to
     :func:`estimate_file_size_kv_mb`: no provider (the llama default), a
     provider without the hook or with no figure, a figure that is not a
-    positive number, or any failure asking. Sizing must never raise, and a
-    refused profile here is already reported by the launch path.
+    positive number, or any failure asking. Sizing must never raise.
+
+    A :class:`~hal0.errors.Hal0Error` is an expected refusal (a profile the
+    catalog lacks, an unknown runtime family) that the launch path reports, so
+    it logs at debug. Any other exception is a defect in a provider's override
+    and logs a warning with the traceback: it drops every slot of that runtime
+    to the generic estimate, which books a halogen engine about a quarter low,
+    on every admission and capacity poll.
     """
+    provider: Any = None
     try:
         from hal0.providers.container import _spec_provider_for, resolve_slot_profile
 
@@ -243,8 +251,16 @@ def provider_footprint_mb(
         if hook is None:
             return None
         mb = hook(model_info, slot_cfg, resolve_slot_profile(slot_cfg))
+    except Hal0Error as exc:
+        log.debug("capacity.provider_footprint_refused: %s", exc)
+        return None
     except Exception as exc:
-        log.debug("capacity.provider_footprint_failed", extra={"error": str(exc)})
+        log.warning(
+            "capacity.provider_footprint_failed: %s",
+            exc,
+            exc_info=True,
+            extra={"provider": type(provider).__name__ if provider is not None else "unresolved"},
+        )
         return None
     if not isinstance(mb, (int, float)) or isinstance(mb, bool) or mb <= 0:
         return None
