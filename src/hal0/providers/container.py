@@ -905,6 +905,8 @@ def _render_quadlet_from_plan(
         runtime_args.append(f"--ipc={plan.ipc}")
     for limit in plan.ulimits:
         runtime_args += ["--ulimit", limit]
+    if plan.stop_timeout_s > 0:
+        runtime_args.append(f"--stop-timeout={plan.stop_timeout_s}")
     if runtime_args:
         lines.append("PodmanArgs=" + " ".join(shlex.quote(a) for a in runtime_args))
     # Exec = the in-container argv (after the image). Every token is
@@ -947,6 +949,9 @@ def _render_quadlet_from_plan(
             "RestartSec=5",
             "RestartSteps=6",
             "RestartMaxDelaySec=300",
+            # A runtime with a stop grace needs the unit's own stop timeout to
+            # outlast it by 30 s (the podman --stop-timeout above). Absent by default.
+            *([f"TimeoutStopSec={plan.stop_timeout_s + 30}"] if plan.stop_timeout_s > 0 else []),
             # #2037 fail-fast: the runner entrypoint translates a death
             # before /health ever answered into exit 64 ("died during model
             # load" — corrupt GGUF, bogus flag), which would otherwise burn
@@ -974,7 +979,9 @@ def _render_quadlet_from_plan(
             # the backoff runway here and are handled load-phase-only, where
             # "before /health ever answered" makes them deterministic, in the
             # runner images' shared entrypoint (hal0-runner-images repo).
-            "RestartPreventExitStatus=64 132",
+            # Built-in codes first; a runtime's own terminal codes follow in order.
+            "RestartPreventExitStatus="
+            + " ".join(["64", "132", *map(str, plan.restart_prevent_exit_status)]),
             # #2130: a requested stop is not a failure. `systemctl stop` sends
             # SIGTERM; podman propagates the container's graceful SIGTERM exit
             # as its own exit CODE 143 (128+15), not a signal death — so

@@ -129,6 +129,50 @@ class TestRenderUnitFromPlan:
         assert "Volume=/m:/m:ro" in _render_from_plan("s", plan).splitlines()
 
 
+# ── stop grace + restart-prevent codes (typed launch-plan fields) ──────────────
+
+
+def test_plan_defaults_render_no_stop_or_extra_restart_codes() -> None:
+    """Both fields default to rendering nothing: no ``--stop-timeout``, no
+    ``TimeoutStopSec``, and ``RestartPreventExitStatus`` stays exactly ``64 132``."""
+    unit = _render_from_plan("s", RuntimeLaunchPlan(image="img", command=["x"]))
+    assert "--stop-timeout" not in unit
+    assert "TimeoutStopSec" not in unit
+    assert "RestartPreventExitStatus=64 132" in unit.splitlines()
+
+
+def test_stop_timeout_renders_podman_arg_and_service_key() -> None:
+    plan = RuntimeLaunchPlan(
+        image="x:1",
+        command=["all"],
+        stop_timeout_s=120,
+        restart_prevent_exit_status=(1,),
+    )
+    unit = _render_from_plan("flash", plan)
+    assert "PodmanArgs=--stop-timeout=120" in unit
+    assert "TimeoutStopSec=150" in unit
+    assert "RestartPreventExitStatus=64 132 1" in unit
+
+
+def test_stop_timeout_follows_ipc_and_ulimits_in_podman_args() -> None:
+    plan = RuntimeLaunchPlan(
+        image="img",
+        command=["x"],
+        ipc="host",
+        ulimits=["memlock=-1"],
+        stop_timeout_s=60,
+    )
+    assert "PodmanArgs=--ipc=host --ulimit memlock=-1 --stop-timeout=60" in (
+        _render_from_plan("s", plan).splitlines()
+    )
+
+
+def test_timeout_stop_sec_sits_right_after_restart_max_delay() -> None:
+    plan = RuntimeLaunchPlan(image="img", command=["x"], stop_timeout_s=120)
+    lines = _render_from_plan("s", plan).splitlines()
+    assert lines[lines.index("RestartMaxDelaySec=300") + 1] == "TimeoutStopSec=150"
+
+
 # ── legacy shim folds into the single builder ──────────────────────────────────
 
 

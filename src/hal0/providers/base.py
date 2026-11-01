@@ -189,6 +189,15 @@ class RuntimeLaunchPlan:
     health: HealthCheck | None = None
     """Optional ``--health-*`` override (None = inherit the image's HEALTHCHECK)."""
 
+    stop_timeout_s: int = 0
+    """Seconds the runtime gets to exit after SIGTERM before SIGKILL. ``0``
+    keeps podman's default and emits nothing; above zero the renderer adds
+    ``--stop-timeout`` and sets ``TimeoutStopSec`` to this plus 30."""
+
+    restart_prevent_exit_status: tuple[int, ...] = ()
+    """Exit codes beyond the built-in ``64 132`` that systemd must not restart
+    on (``RestartPreventExitStatus=``), for a runtime with a terminal status."""
+
 
 class Provider(ABC):
     """Abstract base for a hal0 inference backend.
@@ -222,6 +231,9 @@ class Provider(ABC):
     expressed here: it is the ``spec_provider is None`` default in
     ``ContainerProvider.load_sync`` and carries its own #1888 refusal wording.
     """
+
+    stop_grace_s: int = 0
+    """Seconds this runtime needs to exit cleanly after SIGTERM; ``0`` keeps podman's default."""
 
     @abstractmethod
     def build_env(
