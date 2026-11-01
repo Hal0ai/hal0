@@ -20,6 +20,8 @@ from typing import Any
 import structlog
 
 from hal0.config.paths import var_lib
+from hal0.install.perms import SHARED_DIR_MODE, ensure_shared_dir
+from hal0.security import nofollow
 
 log = structlog.get_logger(__name__)
 
@@ -45,11 +47,29 @@ def record_component_result(component_id: str, result: dict[str, Any]) -> None:
     current[component_id] = entry
     path = components_state_path()
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        owner: tuple[int, int] | None = None
+        if os.geteuid() == 0:
+            dir_fd = nofollow.open_dir(path.parent, create=True, mkdir_mode=SHARED_DIR_MODE)
+            try:
+                # Like config locks, adopt the service-owned state root rather
+                # than the root-run installer's identity. No account lookup is
+                # needed on development or root-owned installations.
+                owner = nofollow.dir_owner(var_lib())
+                os.fchown(dir_fd, *owner)
+                os.fchmod(dir_fd, SHARED_DIR_MODE)
+            finally:
+                os.close(dir_fd)
+        else:
+            ensure_shared_dir(path.parent)
+        tmp: str | None
         fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(current, f)
+                if owner is not None:
+                    # Publish only after ownership is correct; a failed chown
+                    # must leave the previous cache intact, never root-only.
+                    os.fchown(f.fileno(), *owner)
             os.replace(tmp, path)
             tmp = None
         finally:

@@ -21,6 +21,7 @@ from __future__ import annotations
 import grp
 import os
 import pwd
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -180,6 +181,36 @@ def test_ownership_table_builds_under_hal0_home(tmp_hal0_home: str) -> None:
     targets = {r.target for r in table}
     assert paths.etc() in targets
     assert paths.slots_config_dir() in targets
+
+
+def test_component_state_row_repairs_root_created_cache(tmp_hal0_home: str) -> None:
+    directory = paths.var_lib() / "state"
+    directory.mkdir(parents=True)
+    cache = directory / "components.json"
+    cache.write_text("{}")
+    unrelated = directory / "hermes.pin-override"
+    unrelated.write_text("pin")
+    row = next(r for r in perms.ownership_table() if r.target == directory)
+    assert (row.owner, row.group, row.mode) == ("hal0", "hal0", 0o2775)
+    assert row.glob == "components.json"
+    assert row.child_mode == 0o600
+    plan = perms.plan([row], observe_fn=lambda p: _obs(p, "root", "root", 0o755))
+    assert {d.path for d in plan.drifted} == {directory, cache}
+    assert all(r["status"] == "drift" for r in perms.audit_rows(plan))
+    chowns: list[tuple[str, int, int]] = []
+    modes: dict[str, int] = {}
+    # Resolve the declared account without requiring it on the test machine.
+    owner, group = _me()
+    repair_row = replace(row, owner=owner, group=group)
+    repair_plan = perms.plan([repair_row], observe_fn=lambda p: _obs(p, "root", "root", 0o755))
+    repaired = perms.commit(
+        repair_plan,
+        chown=lambda p, u, g: chowns.append((p, u, g)),
+        chmod=lambda p, m: modes.__setitem__(p, m),
+    )
+    assert set(repaired) == {directory, cache}
+    assert {p for p, _, _ in chowns} == {str(directory), str(cache)}
+    assert modes == {str(directory): 0o2775, str(cache): 0o600}
 
 
 # ── the D hardened-perms flip (service_user != root) ──────────────────────────
