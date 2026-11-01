@@ -47,6 +47,13 @@ Detection strategy, cheapest first:
    * fallback for ``.gguf`` w/ unreadable header → ``capabilities=['chat']``
 
    Filename-only detection always returns ``confidence='low'``.
+3. ``.hgn`` files → a halogen checkpoint (kind ``halogen``) when the first
+   four bytes are :data:`HGN_MAGIC`, ``confidence='high'``; a ``.hgn`` name
+   without the magic degrades to a low-confidence ``halogen`` guess. The
+   files the engine finds beside a checkpoint by name (the ngram lookup
+   table, vision sidecar, mtp draft head and ``*.overlay.hgn``) are
+   companions, never models: they detect as ``unknown`` with
+   ``raw_hints["halogen_companion"]``.
 """
 
 from __future__ import annotations
@@ -67,6 +74,35 @@ Confidence = Literal["high", "medium", "low"]
 # Backends llama-server can target for any GGUF file. The slot config
 # picks one based on hardware probe; detection just lists what's *compatible*.
 _GGUF_BACKENDS: list[str] = ["vulkan", "rocm", "cuda", "cpu"]
+
+#: First four bytes of a halogen ``.hgn`` checkpoint.
+HGN_MAGIC = b"HGN1"
+
+#: Name suffixes of the files the halogen engine finds beside a checkpoint by
+#: name: the ngram lookup table, the vision sidecar, the mtp draft head and
+#: ``*.overlay.hgn``. They carry the ``HGN1`` magic too but are never models.
+HALOGEN_COMPANION_SUFFIXES: tuple[str, ...] = (
+    "-ngram.hgn",
+    "-vision.hgn",
+    "-mtp.hgn",
+    ".overlay.hgn",
+)
+
+#: Context window the halogen engine serves; ``.hgn`` carries no header to read
+#: it from, so detection reports the engine's own fixed value.
+_HALOGEN_CONTEXT_LENGTH = 262144
+
+_HALOGEN_VISION_SUFFIX = "-vision.hgn"
+
+
+def is_halogen_companion(name: str) -> bool:
+    """True when ``name`` is a halogen companion file, not a checkpoint.
+
+    Matched on the file name alone (case-insensitive), so callers that only
+    have a directory listing (the scan walk) can use it without opening the
+    file.
+    """
+    return name.lower().endswith(HALOGEN_COMPANION_SUFFIXES)
 
 
 # ── quantisation extraction (WS-13) ────────────────────────────────────────
@@ -350,7 +386,7 @@ def _hf_repo_name_from_path(path: Path) -> str | None:
     return None
 
 
-Kind = Literal["llama", "moonshine", "kokoro", "flm", "unknown"]
+Kind = Literal["llama", "moonshine", "kokoro", "flm", "halogen", "unknown"]
 
 
 @dataclass
@@ -367,6 +403,7 @@ class DetectionResult:
       moonshine → ASR provider, backend=moonshine, caps={asr}
       kokoro    → TTS provider, backend=kokoro, caps={tts}
       flm       → AMD NPU, backend=flm, caps={chat, embed}
+      halogen   → single .hgn checkpoint, backend=halogen, caps={chat, vision}
       unknown   → could not classify; user picks manually if anything
     """
 
@@ -383,6 +420,72 @@ class DetectionResult:
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
+
+
+def _has_hgn_magic(path: Path) -> bool:
+    """True when ``path`` starts with :data:`HGN_MAGIC`; False if unreadable."""
+    try:
+        with path.open("rb") as fh:
+            return fh.read(len(HGN_MAGIC)) == HGN_MAGIC
+    except OSError:
+        return False
+
+
+def _halogen_companions(path: Path) -> dict[str, int]:
+    """``{name: bytes}`` for every companion file in ``path``'s directory."""
+    found: dict[str, int] = {}
+    try:
+        siblings = sorted(path.parent.iterdir())
+    except OSError:
+        return found
+    for sibling in siblings:
+        if not is_halogen_companion(sibling.name):
+            continue
+        try:
+            if sibling.is_file():
+                found[sibling.name] = sibling.stat().st_size
+        except OSError:
+            continue
+    return found
+
+
+def _detect_halogen(path: Path, *, name_for_capability: str) -> DetectionResult:
+    """Detection for a path whose name (or operator-typed hint) claims ``.hgn``."""
+    if is_halogen_companion(path.name) or is_halogen_companion(name_for_capability):
+        return DetectionResult(
+            suggested_backends=[],
+            suggested_capabilities=[],
+            context_length=None,
+            confidence="medium",
+            suggested_name=_hf_repo_name_from_path(path),
+            kind="unknown",
+            raw_hints={
+                "source": "hgn_companion",
+                "halogen_companion": True,
+                "stem": path.stem,
+                "suffix": path.suffix.lower(),
+            },
+        )
+    if not _has_hgn_magic(path):
+        # The name claimed .hgn but the magic failed: same degrade as a
+        # .gguf with a bad header — keep the family guess, drop the confidence.
+        r = _heuristic_only(path, filename_hint=name_for_capability)
+        r.raw_hints["hgn_magic_read"] = "failed"
+        return r
+    companions = _halogen_companions(path)
+    caps = ["chat"]
+    if any(n.lower().endswith(_HALOGEN_VISION_SUFFIX) for n in companions):
+        caps.append("vision")
+    return DetectionResult(
+        suggested_backends=["halogen"],
+        suggested_capabilities=caps,
+        context_length=_HALOGEN_CONTEXT_LENGTH,
+        confidence="high",
+        suggested_name=_hf_repo_name_from_path(path),
+        kind="halogen",
+        raw_hints={"source": "hgn_magic", "companions": companions},
+        quant=None,
+    )
 
 
 def detected_architecture(detection: DetectionResult) -> str | None:
@@ -428,7 +531,13 @@ def _heuristic_only(path: Path, *, filename_hint: str | None = None) -> Detectio
     backends: list[str] = []
     caps: list[str] = []
     kind: Kind = "unknown"
-    if "moonshine" in hint_name:
+    if path.suffix.lower() == ".hgn" or Path(hint_name).suffix == ".hgn":
+        # A halogen checkpoint is a text model; the extension is decisive,
+        # so it outranks the capability-token branches below.
+        backends = ["halogen"]
+        caps = ["chat"]
+        kind = "halogen"
+    elif "moonshine" in hint_name:
         backends = ["moonshine"]
         caps = ["asr"]
         kind = "moonshine"
@@ -501,6 +610,12 @@ def detect(path: str | Path, *, filename_hint: str | None = None) -> DetectionRe
     # instead of the deliberate "claims .gguf but magic failed" one.
     hint_suffix = Path(name_for_capability).suffix.lower()
     claims_gguf = suffix == ".gguf" or hint_suffix == ".gguf"
+
+    # A halogen checkpoint is claimed by name: ``.hgn`` carries no header to
+    # classify beyond its four magic bytes, and the GGUF read below would only
+    # fail on it.
+    if suffix == ".hgn" or hint_suffix == ".hgn":
+        return _detect_halogen(p, name_for_capability=name_for_capability)
 
     # Try GGUF magic bytes regardless of extension — HF blob cache stores
     # GGUF data under content-hash filenames with no suffix.
@@ -674,9 +789,12 @@ def detect(path: str | Path, *, filename_hint: str | None = None) -> DetectionRe
 
 
 __all__ = [
+    "HALOGEN_COMPANION_SUFFIXES",
+    "HGN_MAGIC",
     "DetectionResult",
     "detect",
     "detected_architecture",
+    "is_halogen_companion",
     "quant_from_file_type",
     "quant_from_filename",
     "quant_from_rocmfpx_filename",

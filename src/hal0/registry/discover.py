@@ -29,7 +29,7 @@ from hal0.config.schema import ModelsConfig
 from hal0.model_meta import capability_from_filename, derive_model_provider
 from hal0.registry import tombstones
 from hal0.registry.curated import CURATED_MODELS, CuratedModel
-from hal0.registry.detect import unsupported_moonshine_layout
+from hal0.registry.detect import is_halogen_companion, unsupported_moonshine_layout
 from hal0.registry.drafters import DrafterInfo, classify_drafter, draft_fit_errors
 from hal0.registry.fileset import SHARD_RE
 from hal0.registry.gguf_header import read_gguf_header
@@ -440,6 +440,12 @@ def _is_skippable(p: Path) -> bool:
     if name.endswith(".tmp"):
         return True
     if "mmproj" in name.lower():
+        return True
+    # Halogen companions (ngram table, vision sidecar, mtp head, overlay) sit
+    # beside a checkpoint and are found by the engine by name; only the
+    # checkpoint is a model. Checked ahead of the drafter pairing, which would
+    # otherwise take "-mtp.hgn" for a drafter.
+    if is_halogen_companion(name):
         return True
     if _HEX_BLOB_RE.match(p.stem):
         return True

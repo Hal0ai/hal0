@@ -1351,3 +1351,47 @@ def test_scan_leaves_an_already_paired_registered_model_alone(
     assert result["paired_drafts"] == []
     assert registry.get("x").draft == str(first.resolve())
     assert {"path": str(extra.resolve()), "reason": "drafter_unpaired"} in result["skipped"]
+
+
+def _halogen_dir(root: Path) -> Path:
+    """A halogen download dir: one checkpoint, its companions, a tokenizer/."""
+    d = root / "halogen-flash-next"
+    (d / "tokenizer").mkdir(parents=True)
+    (d / "qwen38-flash-next-ht43.hgn").write_bytes(b"HGN1" + b"c" * 60)
+    (d / "qwen38-flash-next-ngram.hgn").write_bytes(b"HGN1" + b"n" * 60)
+    (d / "qwen38-flash-next-vision.hgn").write_bytes(b"HGN1" + b"v" * 60)
+    (d / "qwen38-flash-next-mtp.hgn").write_bytes(b"HGN1" + b"m" * 60)
+    (d / "qwen38-flash-next-ht43.overlay.hgn").write_bytes(b"HGN1" + b"o" * 60)
+    (d / "tokenizer" / "tokenizer.json").write_text("{}")
+    return d
+
+
+def test_scan_skips_halogen_companions(tmp_path: Path) -> None:
+    """Only the checkpoint is a candidate; ngram/vision/mtp/overlay companions
+    and the tokenizer/ directory never become registry rows."""
+    root = tmp_path / "models"
+    _halogen_dir(root)
+    candidates = find_candidates(
+        roots=[root],
+        extensions=[".gguf", ".safetensors", ".hgn"],
+        known_paths=set(),
+    )
+    assert [c.path.name for c in candidates] == ["qwen38-flash-next-ht43.hgn"]
+    assert candidates[0].suggested_id == "qwen38-flash-next-ht43"
+
+
+def test_scan_and_register_picks_up_hgn_by_default(tmp_path: Path, registry: ModelRegistry) -> None:
+    """``.hgn`` is in the default ``[models].file_extensions``, so a stock
+    config registers the checkpoint and none of its companions."""
+    root = tmp_path / "models"
+    _halogen_dir(root)
+    scan_and_register(registry, ModelsConfig(roots=[str(root)]))
+    assert [Path(m.path).name for m in registry.list()] == ["qwen38-flash-next-ht43.hgn"]
+
+
+def test_is_skippable_drops_halogen_companions() -> None:
+    from hal0.registry.discover import is_skippable
+
+    assert is_skippable(Path("/m/qwen38-flash-next-ngram.hgn"))
+    assert is_skippable(Path("/m/qwen38-flash-next-mtp.hgn"))
+    assert not is_skippable(Path("/m/qwen38-flash-next-ht43.hgn"))

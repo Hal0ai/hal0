@@ -5,7 +5,12 @@ from __future__ import annotations
 import struct
 from pathlib import Path
 
-from hal0.registry.detect import detect
+from hal0.registry.detect import (
+    HALOGEN_COMPANION_SUFFIXES,
+    HGN_MAGIC,
+    detect,
+    is_halogen_companion,
+)
 from hal0.registry.gguf_header import (
     _GGUF_TYPE_ARRAY,
     _GGUF_TYPE_BOOL,
@@ -13,6 +18,13 @@ from hal0.registry.gguf_header import (
     _GGUF_TYPE_UINT32,
 )
 from tests.registry.test_gguf_header import _build_gguf, _enc_str, _write_fixture
+
+HALOGEN_COMPANION_NAMES = (
+    "qwen38-flash-next-ngram.hgn",
+    "qwen38-flash-next-vision.hgn",
+    "qwen38-flash-next-mtp.hgn",
+    "qwen38-flash-next-ht43.overlay.hgn",
+)
 
 
 class TestGgufChat:
@@ -402,3 +414,95 @@ class TestDetectedArchitecture:
 
         p = _write_fixture(tmp_path, "not-gguf.gguf", b"NOPE" + b"\x00" * 64)
         assert detected_architecture(detect(p)) is None
+
+
+class TestHalogenHgn:
+    """A halogen checkpoint is one ``.hgn`` file starting with ``HGN1``; the
+    ngram/vision/mtp/overlay files beside it are companions the engine finds
+    by name, never models."""
+
+    _CKPT = "qwen38-flash-next-ht43.hgn"
+
+    def test_detect_halogen_checkpoint_by_magic(self, tmp_path: Path) -> None:
+        p = tmp_path / self._CKPT
+        p.write_bytes(HGN_MAGIC + b"\x00" * 60)
+        r = detect(p)
+        assert r.kind == "halogen"
+        assert r.suggested_backends == ["halogen"]
+        assert r.suggested_capabilities == ["chat"]
+        assert r.context_length == 262144
+        assert r.confidence == "high"
+        assert r.quant is None
+        assert r.raw_hints["source"] == "hgn_magic"
+        assert r.raw_hints["companions"] == {}
+
+    def test_detect_halogen_vision_when_sidecar_present(self, tmp_path: Path) -> None:
+        p = tmp_path / self._CKPT
+        p.write_bytes(HGN_MAGIC + b"\x00" * 60)
+        (tmp_path / "qwen38-flash-next-vision.hgn").write_bytes(HGN_MAGIC + b"v" * 10)
+        (tmp_path / "qwen38-flash-next-ngram.hgn").write_bytes(HGN_MAGIC + b"n" * 20)
+        r = detect(p)
+        assert r.kind == "halogen"
+        assert r.suggested_capabilities == ["chat", "vision"]
+        assert r.raw_hints["companions"] == {
+            "qwen38-flash-next-ngram.hgn": 24,
+            "qwen38-flash-next-vision.hgn": 14,
+        }
+
+    def test_ngram_alone_does_not_add_vision(self, tmp_path: Path) -> None:
+        p = tmp_path / self._CKPT
+        p.write_bytes(HGN_MAGIC + b"\x00" * 60)
+        (tmp_path / "qwen38-flash-next-ngram.hgn").write_bytes(HGN_MAGIC)
+        assert detect(p).suggested_capabilities == ["chat"]
+
+    def test_detect_marks_companions(self, tmp_path: Path) -> None:
+        for name in HALOGEN_COMPANION_NAMES:
+            p = tmp_path / name
+            p.write_bytes(HGN_MAGIC + b"\x00" * 60)
+            r = detect(p)
+            assert r.kind == "unknown", name
+            assert r.suggested_backends == [], name
+            assert r.suggested_capabilities == [], name
+            assert r.raw_hints["halogen_companion"] is True, name
+
+    def test_is_halogen_companion(self) -> None:
+        for name in HALOGEN_COMPANION_NAMES:
+            assert is_halogen_companion(name), name
+        assert is_halogen_companion("QWEN38-FLASH-NEXT-NGRAM.HGN")
+        assert not is_halogen_companion("qwen38-flash-next-ht43.hgn")
+        assert not is_halogen_companion("qwen3-4b-q4_k_m.gguf")
+        assert HALOGEN_COMPANION_SUFFIXES == (
+            "-ngram.hgn",
+            "-vision.hgn",
+            "-mtp.hgn",
+            ".overlay.hgn",
+        )
+
+    def test_hgn_suffix_without_magic_is_low_confidence_halogen(self, tmp_path: Path) -> None:
+        p = tmp_path / self._CKPT
+        p.write_bytes(b"NOPE" + b"\x00" * 60)
+        r = detect(p)
+        assert r.kind == "halogen"
+        assert r.suggested_backends == ["halogen"]
+        assert r.confidence == "low"
+        assert r.raw_hints["hgn_magic_read"] == "failed"
+
+    def test_unreadable_hgn_is_low_confidence_halogen(self, tmp_path: Path) -> None:
+        r = detect(tmp_path / "missing-model.hgn")
+        assert r.kind == "halogen"
+        assert r.confidence == "low"
+
+    def test_hint_suffix_claims_hgn_for_extensionless_blob(self, tmp_path: Path) -> None:
+        blob = tmp_path / ("a" * 64)
+        blob.write_bytes(HGN_MAGIC + b"\x00" * 60)
+        r = detect(blob, filename_hint=self._CKPT)
+        assert r.kind == "halogen"
+        assert r.confidence == "high"
+
+    def test_gguf_path_unchanged(self, tmp_path: Path) -> None:
+        kvs = [("general.architecture", _GGUF_TYPE_STRING, _enc_str("llama"))]
+        p = _write_fixture(tmp_path, "llama-7b-q4_k_m.gguf", _build_gguf(3, kvs))
+        (tmp_path / "qwen38-flash-next-ngram.hgn").write_bytes(HGN_MAGIC)
+        r = detect(p)
+        assert r.kind == "llama"
+        assert "companions" not in r.raw_hints
