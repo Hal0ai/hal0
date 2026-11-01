@@ -10,6 +10,7 @@ carries the profile's flags and window instead of an empty argv.
 from __future__ import annotations
 
 import types
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ import pytest
 
 from hal0.bench import cli
 from hal0.bench.planner import attach_slot_profiles, plan
+from hal0.bench.schema import Host, Outcome, Record
 from hal0.bench.store import Store
 from hal0.bench.suites import suite_from_dict
 
@@ -170,6 +172,135 @@ def test_a_profile_tune_change_moves_the_cell_key(box: Path, tmp_path: Path) -> 
     after = next(c for c in plan(_suite(), attach_slot_profiles(_registry()), store))
 
     assert before.cell_key != after.cell_key
+
+
+# ── reasoning effort and budget are part of the cell identity (#3181) ────────
+
+
+def _planned_m1(slots: list[dict[str, Any]], store: Store) -> Any:
+    """The one ``m1`` cell the planner produces for ``slots`` (ADR-0045 tune)."""
+    cells = plan(_suite(), attach_slot_profiles(_registry(), slots=slots), store)
+    return next(c for c in cells if c.model_id == "m1")
+
+
+def _effort_slot(**tune: Any) -> dict[str, Any]:
+    slot: dict[str, Any] = {
+        "name": "chat",
+        "type": "llm",
+        "profile": "bench-tuned",
+        "model": {"default": "m1"},
+    }
+    if tune:
+        slot["tune"] = tune
+    return slot
+
+
+@pytest.fixture
+def effort_box(box: Path) -> Path:
+    """``bench-tuned`` carries ``reasoning_effort = "low"`` as its base tune."""
+    (box / "profiles.toml").write_text(
+        "[profile.bench-tuned]\n"
+        f'flags = "{PROFILE_FLAGS}"\n'
+        "ctx_size = 65536\n"
+        "enable_thinking = true\n"
+        'vision = "off"\n'
+        'speculation = "off"\n'
+        'reasoning_effort = "low"\n',
+        encoding="utf-8",
+    )
+    return box
+
+
+def test_slots_differing_only_in_effort_plan_two_cells(effort_box: Path, tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    low = _planned_m1([_effort_slot()], store)  # inherits the profile's "low"
+    high = _planned_m1([_effort_slot(reasoning_effort="high")], store)
+
+    assert low.cell_key != high.cell_key
+    assert low.identity.config.spec == {
+        "profile": {
+            "enable_thinking": True,
+            "vision": "off",
+            "speculation": "off",
+            "reasoning_effort": "low",
+        }
+    }
+    assert high.identity.config.spec["profile"]["reasoning_effort"] == "high"  # type: ignore[index]
+
+
+def test_slots_differing_only_in_budget_plan_two_cells(effort_box: Path, tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    unlimited = _planned_m1([_effort_slot()], store)
+    capped = _planned_m1([_effort_slot(reasoning_budget=512)], store)
+    other = _planned_m1([_effort_slot(reasoning_budget=2048)], store)
+
+    assert len({unlimited.cell_key, capped.cell_key, other.cell_key}) == 3
+    assert "reasoning_budget" not in unlimited.identity.config.spec["profile"]  # type: ignore[index]
+    assert capped.identity.config.spec["profile"]["reasoning_budget"] == 512  # type: ignore[index]
+
+
+def test_effort_and_budget_both_land_on_the_cell(effort_box: Path, tmp_path: Path) -> None:
+    """The issue's repro: ``low`` versus ``high`` + budget 512 are two cells."""
+    store = Store(tmp_path)
+    low = _planned_m1([_effort_slot()], store)
+    high = _planned_m1([_effort_slot(reasoning_effort="high", reasoning_budget=512)], store)
+
+    assert low.cell_key != high.cell_key
+    tunes = high.identity.config.spec["profile"]  # type: ignore[index]
+    assert (tunes["reasoning_effort"], tunes["reasoning_budget"]) == ("high", 512)
+
+
+def test_equal_effort_and_budget_stay_one_cell(effort_box: Path, tmp_path: Path) -> None:
+    """The same effective tune reached two ways (profile value, slot override)
+    is one cell: identity follows the effective tune, not where it came from."""
+    store = Store(tmp_path)
+    from_profile = _planned_m1([_effort_slot()], store)
+    from_slot = _planned_m1([_effort_slot(reasoning_effort="low")], store)
+    again = _planned_m1([_effort_slot()], store)
+
+    assert from_profile.cell_key == from_slot.cell_key == again.cell_key
+
+
+def test_default_effort_and_budget_leave_the_cell_key_alone(box: Path, tmp_path: Path) -> None:
+    """A profile that never names effort or budget plans the cell it planned
+    before #3181 — the new keys appear only when they are not the default."""
+    cell = _planned_m1([_effort_slot()], Store(tmp_path))
+
+    assert cell.identity.config.spec == {
+        "profile": {"enable_thinking": True, "vision": "off", "speculation": "off"}
+    }
+
+
+def test_a_stored_record_without_effort_or_budget_still_counts(box: Path, tmp_path: Path) -> None:
+    """History written before #3181 carries no effort or budget in its spec.
+    Absent means the profile default, so it stays the current value for a slot
+    on the default tune — no re-bench — and does not stand in for a slot that
+    overrides them."""
+    store = Store(tmp_path)
+    legacy = _planned_m1([_effort_slot()], store)
+    store.append_record(
+        Record(
+            run_id=datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ"),
+            suite="roster",
+            trigger="manual",
+            identity=legacy.identity,
+            host=Host(),
+            outcome=Outcome.OK,
+        )
+    )
+
+    assert store.newest_ok_by_cell()[legacy.cell_key]["identity"]["config"]["spec"] == {
+        "profile": {"enable_thinking": True, "vision": "off", "speculation": "off"}
+    }
+    cells = plan(_suite(), attach_slot_profiles(_registry(), slots=[_effort_slot()]), store)
+    assert all(c.model_id != "m1" for c in cells)  # fresh: nothing to re-measure
+
+    tuned = plan(
+        _suite(),
+        attach_slot_profiles(_registry(), slots=[_effort_slot(reasoning_effort="high")]),
+        store,
+    )
+    assert any(c.model_id == "m1" for c in tuned)  # a different arm is still unmeasured
 
 
 # ── the real entry points ────────────────────────────────────────────────────

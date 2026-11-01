@@ -453,3 +453,18 @@ def test_cell_spec_carries_a_non_default_speculation():
     default = _resolve_profile({"profile": {"flags": "-fa on", "speculation": "auto"}}, 4096)
     assert off.spec == {"profile": {"speculation": "off"}}
     assert default.spec == plain.spec
+
+
+def test_cell_spec_carries_a_non_default_reasoning_effort_and_budget():
+    from hal0.bench.planner import _resolve_profile
+
+    plain = _resolve_profile({"profile": {"flags": "-fa on"}}, 4096)
+    named_defaults = _resolve_profile(
+        {"profile": {"flags": "-fa on", "reasoning_effort": "default", "reasoning_budget": -1}},
+        4096,
+    )
+    high = _resolve_profile({"profile": {"flags": "-fa on", "reasoning_effort": "high"}}, 4096)
+    capped = _resolve_profile({"profile": {"flags": "-fa on", "reasoning_budget": 512}}, 4096)
+    assert named_defaults.spec == plain.spec  # defaults never move an existing key
+    assert high.spec == {"profile": {"reasoning_effort": "high"}}
+    assert capped.spec == {"profile": {"reasoning_budget": 512}}

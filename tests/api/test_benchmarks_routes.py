@@ -223,3 +223,45 @@ def test_queue_view_lists_items_the_worker_could_not_run(isolated_client: TestCl
     assert [(f["id"], f["outcome"], f["note"]) for f in body["failed"]] == [
         ("u1", "failed", "unknown model 'nope.gguf'")
     ]
+
+
+def test_cells_keep_effort_and_budget_arms_apart(isolated_client: TestClient) -> None:
+    """#3181: two arms that differ only in reasoning effort or budget are two
+    current cells, and ``GET /cells`` (the ``bench_cells`` tool's source) hands
+    back the effort and budget each one was measured under."""
+    from hal0.bench.planner import _build_identity
+    from hal0.bench.schema import Host, Outcome, Record
+
+    arms = {
+        "low": {"reasoning_effort": "low"},
+        "high": {"reasoning_effort": "high", "reasoning_budget": 512},
+    }
+    store = Store()
+    for n, tune in enumerate(arms.values()):
+        model = {"id": "qwen3.6-35b-a3b", "profile": {"flags": "-fa on", **tune}}
+        store.append_record(
+            Record(
+                run_id=f"2026-08-07T09:0{n}:00Z-abc12{n}",
+                suite="roster",
+                trigger="manual",
+                identity=_build_identity(model, "rocm", "tg", 2048, "greedy"),
+                host=Host(),
+                outcome=Outcome.OK,
+            ).to_dict()
+        )
+
+    resp = isolated_client.get("/api/benchmarks/cells", params={"model": "qwen3.6-35b-a3b"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["count"] == 2
+    tuned = {
+        row["record"]["identity"]["config"]["spec"]["profile"]["reasoning_effort"]: row["record"][
+            "identity"
+        ]["config"]["spec"]["profile"]
+        for row in body["cells"]
+    }
+    assert tuned == {
+        "low": {"reasoning_effort": "low"},
+        "high": {"reasoning_effort": "high", "reasoning_budget": 512},
+    }
