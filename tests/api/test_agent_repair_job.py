@@ -908,12 +908,28 @@ async def test_terminate_stops_descendants_of_the_child(
         assert proc.stdout is not None
         grandchild = int((await asyncio.wait_for(proc.stdout.readline(), 10)).decode())
 
-        def _running(pid: int) -> bool:
+        def _stat(pid: int) -> list[str] | None:
+            """``/proc/<pid>/stat`` after the command name; ``None`` once the pid is gone."""
             try:
-                state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+                return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
             except OSError:
-                return False
-            return state != "Z"
+                return None
+
+        # Field 22 (index 19 here) is the start time: with the pid it names one process.
+        initial = _stat(grandchild)
+        assert initial is not None
+        started = initial[19]
+
+        def _running(pid: int) -> bool:
+            """Is the grandchild we started still alive?
+
+            Not alive: gone from /proc, a zombie (``Z``), dead (``X``: init has claimed
+            the zombie and /proc has not dropped the entry yet, a microseconds-wide
+            window that two back-to-back reads can straddle), or a pid that now
+            belongs to a stranger (different start time).
+            """
+            fields = _stat(pid)
+            return fields is not None and fields[19] == started and fields[0] not in ("Z", "X", "x")
 
         assert _running(grandchild)
         await asyncio.wait_for(repair_route._terminate(proc), 15)
