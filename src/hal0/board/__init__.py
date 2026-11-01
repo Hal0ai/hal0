@@ -75,6 +75,20 @@ class BoardUnreachable(Hal0Error):
     status = 503
 
 
+class BoardNoToken(Hal0Error):
+    """The Hermes dashboard session token file is missing, unreadable or blank."""
+
+    code = "board.no_token"
+    status = 503
+
+
+class BoardNotInstalled(Hal0Error):
+    """Hermes is not installed on this box, so there is no kanban to proxy."""
+
+    code = "board.not_installed"
+    status = 503
+
+
 def _default_session_token() -> str | None:
     """Resolve an explicitly-pinned Hermes session bearer.
 
