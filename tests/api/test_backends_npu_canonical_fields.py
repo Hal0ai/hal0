@@ -21,6 +21,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from hal0.slots.state import SlotState
+from tests.fixtures.model_registration import register_model_file
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -217,6 +218,7 @@ def test_install_slot_model_preserves_all_existing_top_level_fields(
         ),
     )
 
+    register_model_file(client, tmp_hal0_home, "qwen3.6-27b")
     r = client.put(
         "/api/install/slots/agent/model",
         json={"model_id": "qwen3.6-27b"},

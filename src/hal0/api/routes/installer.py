@@ -54,6 +54,7 @@ from hal0.install.orchestrate import (
 )
 from hal0.registry.curated import CURATED_MODELS
 from hal0.slot_config import write_slot_toml
+from hal0.slots.config_write import check_model_registered
 from hal0.upstreams.huggingface import hf_token_from_env
 
 # Auth was removed by design. All endpoints are open on the local
@@ -535,9 +536,12 @@ async def update_slot_model(name: str, request: Request) -> dict[str, Any]:
     slot TOML does not exist — this endpoint never synthesises a
     profile-less slot from scratch.
 
-    The caller is responsible for ensuring ``model_id`` is present in
-    the model registry; this endpoint only updates the slot pointer and
-    does not pull or validate the model.
+    ``model_id`` must resolve like on the slot create/edit routes
+    (:func:`hal0.slots.config_write.check_model_registered`): a registry
+    row, a curated catalogue id (``load`` pulls it), or — on NPU/FLM,
+    ComfyUI and self-managed-provider slots — the slot's own engine tag.
+    Re-sending the id the slot already carries is also accepted. The
+    endpoint still does not pull or validate the model itself.
     """
     try:
         body = await request.json()
@@ -577,10 +581,25 @@ async def update_slot_model(name: str, request: Request) -> dict[str, Any]:
     # Deep-merge: preserve any sibling keys under [model] (e.g. context_size)
     # while updating only model.default — matches update_config semantics.
     existing_model = cfg.get("model")
+    current_model_id = existing_model.get("default") if isinstance(existing_model, dict) else None
     if isinstance(existing_model, dict):
         cfg["model"] = {**existing_model, "default": model_id}
     else:
         cfg["model"] = {"default": model_id}
+
+    # Same gate as the slot create/edit routes (#2668): refuse an id the
+    # model registry cannot resolve before the file is touched. cfg is the
+    # config AS IT WILL BE written, so the provider exemptions judge the
+    # final state.
+    registry = getattr(request.app.state, "model_registry", None)
+    await asyncio.to_thread(
+        check_model_registered,
+        name,
+        cfg,
+        model_id,
+        registry,
+        current_model_id=current_model_id if isinstance(current_model_id, str) else None,
+    )
 
     try:
         write_slot_toml(slot_path, cfg)
