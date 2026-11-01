@@ -45,10 +45,12 @@ def test_static_defaults_include_task_model_and_user_headers() -> None:
     assert "FORWARD_USER_INFO_HEADER_JWT_SECRET" not in env
 
 
-def test_image_block_enables_edit() -> None:
-    b = _image_gen_env_block("sdxl")
-    assert b["ENABLE_IMAGE_EDIT"] == "True" and b["IMAGE_EDIT_ENGINE"] == "openai"
-    assert {"ENABLE_IMAGE_EDIT", "IMAGE_EDIT_ENGINE"} <= set(_DYNAMIC_ENV_KEYS)
+def test_image_block_does_not_enable_image_edit() -> None:
+    """hal0 has no POST /v1/images/edits handler, so Open WebUI's edit button must stay off."""
+    assert "ENABLE_IMAGE_EDIT" not in _image_gen_env_block("sdxl")
+    assert "IMAGE_EDIT_ENGINE" not in _image_gen_env_block("sdxl")
+    assert not {"ENABLE_IMAGE_EDIT", "IMAGE_EDIT_ENGINE"} & set(_DYNAMIC_ENV_KEYS)
+    assert "ENABLE_IMAGE_EDIT" not in default_openwebui_env()
 
 
 def test_mcp_block_default_scopes_two_entries() -> None:
@@ -75,6 +77,13 @@ def test_mcp_block_filters_are_per_entry() -> None:
     assert conns[0]["config"]["function_name_filter_list"] == ",".join(_OWUI_MEMORY_TOOLS)
     assert conns[1]["config"]["function_name_filter_list"] == ",".join(_OWUI_AGENTS_TOOLS)
     assert "agent_run_wait" in _OWUI_AGENTS_TOOLS and "memory_recall" in _OWUI_MEMORY_TOOLS
+
+
+def test_agents_filter_lets_a_chat_answer_a_clarifying_question() -> None:
+    """agent_run_wait tells the caller to use agent_run_answer; without it the run stalls."""
+    assert "agent_run_answer" in _OWUI_AGENTS_TOOLS
+    assert "agent_run_steer" not in _OWUI_AGENTS_TOOLS
+    assert not any(t.startswith("agent_skill") for t in _OWUI_AGENTS_TOOLS)
 
 
 def test_mcp_block_no_scopes_is_empty_list() -> None:

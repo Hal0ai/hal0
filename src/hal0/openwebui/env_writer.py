@@ -76,7 +76,6 @@ backend to point at, never a claim OpenWebUI can't cash:
                                                hal0 memory / Hermes (and, as an
                                                operator opt-in, hal0 admin) as MCP
                                                tool servers, bearer-keyed
-    ENABLE_IMAGE_EDIT=True / IMAGE_EDIT_ENGINE=openai — with the image block
 
 Image generation goes through hal0's own ``/v1/images/generations`` like STT and
 TTS do, so size, step count and GPU arbitration are the ones any ``/v1`` client
@@ -358,8 +357,6 @@ _DYNAMIC_ENV_KEYS: tuple[str, ...] = (
     "IMAGES_OPENAI_API_KEY",
     "IMAGE_GENERATION_MODEL",
     "IMAGE_SIZE",
-    "ENABLE_IMAGE_EDIT",
-    "IMAGE_EDIT_ENGINE",
     "ENABLE_WEB_SEARCH",
     "ENABLE_SEARCH_QUERY_GENERATION",
     "WEB_SEARCH_ENGINE",
@@ -490,8 +487,6 @@ def _image_gen_env_block(model_id: str) -> dict[str, str]:
         "IMAGES_OPENAI_API_KEY": _PLACEHOLDER_KEY,
         "IMAGE_GENERATION_MODEL": model_id,
         "IMAGE_SIZE": "",
-        "ENABLE_IMAGE_EDIT": "True",
-        "IMAGE_EDIT_ENGINE": "openai",
     }
 
 
@@ -502,6 +497,7 @@ _OWUI_AGENTS_TOOLS: tuple[str, ...] = (
     "agent_run",
     "agent_run_wait",
     "agent_run_status",
+    "agent_run_answer",
     "agent_run_stop",
     "agent_memory_search",
     "agents_list",
