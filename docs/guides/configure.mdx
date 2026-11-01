@@ -67,7 +67,10 @@ hal0 config validate
 ```
 
 Loads and validates `hal0.toml`, `upstreams.toml`, and `providers.toml`
-against the current Pydantic schema. It prints each problem and exits
+against the current Pydantic schema, and runs every slot file in
+`/etc/hal0/slots/` through the same typed load the daemon uses at boot.
+A slot file the daemon would refuse (an undeclared key, an out-of-range
+port) fails here too, named by file. It prints each problem and exits
 non-zero on any failure.
 
 ## Reload a running daemon

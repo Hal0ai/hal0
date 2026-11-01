@@ -15,6 +15,7 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.syntax import Syntax
 
@@ -381,10 +382,17 @@ def _run_config_migration(path, target, run_migrations, MigrationError) -> None:
 
 @app.command("validate")
 def config_validate() -> None:
-    """Validate all config files against the current schema."""
+    """Validate hal0.toml, upstreams.toml, providers.toml and every slot file.
+
+    Each slot file goes through the typed ``SlotConfig`` load the daemon and
+    ``hal0 doctor profiles`` use, so a slot the daemon refuses at boot fails
+    here too, with the same error.
+    """
     from hal0.config.loader import (
+        list_slots,
         load_hal0_config,
         load_providers_config,
+        load_slot_config,
         load_upstreams_config,
     )
 
@@ -401,9 +409,21 @@ def config_validate() -> None:
         load_providers_config()
     except Exception as exc:
         problems.append(f"providers.toml: {exc}")
+    try:
+        slot_stems = list_slots()
+    except Exception as exc:
+        slot_stems = []
+        problems.append(f"slots/: {exc}")
+    for stem in slot_stems:
+        try:
+            load_slot_config(stem)
+        except Exception as exc:
+            problems.append(f"slot {stem}: does not load ({exc})")
     if problems:
         for p in problems:
-            console.print(f"[red]✗[/red] {p}")
+            # Escape: the typed errors quote keys like '[model].foo', which Rich
+            # would swallow as a style tag. No wrap: keep each path in one piece.
+            console.print(f"[red]✗[/red] {escape(p)}", soft_wrap=True)
         raise typer.Exit(1)
     console.print("[green]✓[/green] All configs pass schema validation.")
 

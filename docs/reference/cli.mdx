@@ -203,6 +203,10 @@ in its place and logs a `slot.model_default_fallback` warning that names both id
 | `config reload` | — | — |
 | `config hardware` | — | `--refresh` |
 
+`config validate` checks `hal0.toml`, `upstreams.toml`, `providers.toml` and
+every `slots/*.toml` (the typed slot load the daemon runs at boot); it exits
+`1` if any file fails.
+
 ## `hal0 doctor` — diagnostics and repair
 
 Bare `hal0 doctor` (no subcommand) runs `installer/lib/preflight.sh`:
