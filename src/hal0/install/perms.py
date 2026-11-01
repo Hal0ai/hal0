@@ -447,6 +447,15 @@ def ownership_table(
             optional=False,
             role="/var/lib/hal0 (state root)",
         ),
+        PermRow(
+            var_lib / "state",
+            state_owner,
+            service_group,
+            SHARED_DIR_MODE,
+            glob="components.json",
+            child_mode=0o600,
+            role="state/ (+ components.json)",
+        ),
         # *.lock siblings under the state root — same root-run-install hazard
         # as the /etc/hal0 lock row above. `.first-run.lock` needs its own row:
         # pathlib glob's `*` never matches a leading dot.
