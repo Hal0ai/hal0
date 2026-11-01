@@ -24,7 +24,8 @@ import {
 } from '@/api/hooks/useProfiles'
 import { useSystemInfo } from '@/api/hooks/useRuntimes'
 import { useRunnerImages, useRunnerImagePullJob } from '@/api/hooks/useRunnerImages'
-import { hostHwFlags, selectedRunnerKey, tierRank } from './hw-cascade.js'
+import { effectiveRuntimeFamily, hostHwFlags, selectedRunnerKey, tierRank } from './hw-cascade.js'
+import { EngineSettings } from './engine-settings.jsx'
 import { prettyProfile } from './profile-names'
 import {
   findManagedFlags,
@@ -32,6 +33,9 @@ import {
   findModelFactFlags,
   findHostOwnedFlags,
   findPositionalArgs,
+  findHalogenDenied,
+  findHalogenMalformed,
+  findHalogenOutOfRange,
   screenCanon,
   tokenizeFlags,
   MANAGED_FLAG_SOURCE,
@@ -503,7 +507,47 @@ export function ctxError(text) {
   return null;
 }
 
-function validateForm(form, existing) {
+// A halogen-family runner's flags are HALOGEN_NAME=value tokens, not llama
+// arguments. The engine block's rows come from `backends[runner].knobs` and the
+// names a profile may not set from `.knob_denied` (hal0.runners.knobs, served on
+// system-info), so the screen below reads both rather than carrying the
+// server's sets. Null for any other runner.
+function halogenEngine(runner, backends) {
+  if (!runner) return null;
+  if (effectiveRuntimeFamily({ binary: runner, backends }) !== 'halogen') return null;
+  const row = backends[runner];
+  return { knobs: row.knobs || [], denied: row.knob_denied || [] };
+}
+
+// The inline mirror of the server's profiles.halogen_flag_malformed /
+// _denied / _out_of_range (hal0.runners.knobs.screen_halogen_flags), in the
+// server's order: the text is read before any name or value is judged.
+function halogenFlagsError(text, { knobs, denied }) {
+  const quoteErr = tokenizeFlags(text).error;
+  if (quoteErr) return quoteErr;
+  const malformed = findHalogenMalformed(text);
+  if (malformed.length) {
+    const first = malformed[0];
+    const rest = malformed.length > 1 ? ` (also: ${malformed.slice(1).join(', ')})` : '';
+    if (/^HALOGEN_[A-Z0-9_]+=$/.test(first)) {
+      return `${first} needs a value — remove the token to leave it at the engine default.${rest}`;
+    }
+    return `“${first}” is not a HALOGEN_NAME=value setting — this runtime reads its tuning from HALOGEN_* variables, one NAME=value per token (quote a value that has spaces). Remove it or rewrite it.${rest}`;
+  }
+  const deniedNames = findHalogenDenied(text, knobs, denied);
+  if (deniedNames.length) {
+    const rest = deniedNames.length > 1 ? ` (also: ${deniedNames.slice(1).join(', ')})` : '';
+    return `${deniedNames[0]} can't be set on a profile — hal0 sets it from the slot, the model, or this profile's own context, thinking, vision and speculation fields. Remove it.${rest}`;
+  }
+  const range = findHalogenOutOfRange(text, knobs);
+  if (range.length) {
+    const rest = range.length > 1 ? ` (also: ${range.slice(1).map((r) => r.name).join(', ')})` : '';
+    return `${range[0].message}.${rest}`;
+  }
+  return null;
+}
+
+function validateForm(form, existing, halogen) {
   const errs = {};
   const name = (form.name || '').trim();
   if (!name) errs.name = 'Name is required';
@@ -520,6 +564,12 @@ function validateForm(form, existing) {
   // (hal0.profiles.screen_profile_flags), with no grandfathering of what a
   // stored profile already carries, so the client does the same.
   const flagsText = form.flags || '';
+  if (halogen) {
+    // None of the llama screens below apply: HALOGEN_* tokens are not flags.
+    const flagsErr = halogenFlagsError(flagsText, halogen);
+    if (flagsErr) errs.flags = flagsErr;
+    return errs;
+  }
   const quoteErr = tokenizeFlags(flagsText).error;
   const hw = quoteErr ? [] : findSlotHardwareFlags(flagsText);
   const managed = quoteErr ? [] : findManagedFlags(flagsText);
@@ -607,10 +657,13 @@ export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved, s
   const update = useProfileUpdate();
 
   const taken = existing.filter(n => !(isEdit && n === source.name));
+  // The "Advanced: flags" disclosure (halogen-family forms only); the engine
+  // block above it carries the editing, so the text starts collapsed.
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const f = useForm({
     deriveInitial,
     resetKey: `${mode}:${source?.name ?? ''}`,
-    validate: (v) => validateForm(v, taken),
+    validate: (v) => validateForm(v, taken, halogenEngine(v.runner, backends)),
     warn: (v) => warnForm(v),
   });
   const form = f.values;
@@ -627,6 +680,13 @@ export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved, s
   const runtimeUnknown = runtimeSel === null;
   const runtimeValue = runtimeUnknown ? form.runner : runtimeSel;
   const selectedRuntime = runtimeSel ? runtimeOptions.find(o => o.key === runtimeSel) : null;
+  // A halogen runner with engine knobs swaps the flags field for the engine
+  // block + a collapsed "Advanced: flags" text; any other runner is unchanged.
+  const engine = halogenEngine(form.runner, backends);
+  const engineKnobs = engine && engine.knobs.length > 0 ? engine.knobs : null;
+  const flagsErr = show('flags') ? errs.flags : null;
+  // A rejected flags text opens the field that holds it.
+  const advancedShown = advancedOpen || !!flagsErr;
 
   async function submit(e) {
     e.preventDefault();
@@ -827,14 +887,31 @@ export function ProfileDrawer({ mode, source, existing = [], onClose, onSaved, s
           </select>
         </FormRow>
 
-        <FormRow label="Flags" sub="appended to the run command"
-          error={show('flags') ? errs.flags : null}>
-          <textarea className={'pf-input mono pf-textarea' + (show('flags') && errs.flags ? ' err' : '')}
-            value={form.flags || ''}
-            onChange={e => set('flags', e.target.value)} onBlur={() => touch('flags')}
-            rows={3} placeholder="-fa on -b 2048 -ub 512"
-            aria-invalid={!!(show('flags') && errs.flags)} data-testid="pf-input-flags" />
-        </FormRow>
+        {engineKnobs && (
+          <FormRow label="Engine" sub="halogen settings · written as HALOGEN_* flags">
+            <EngineSettings knobs={engineKnobs} flags={form.flags || ''}
+              onChange={(next) => set('flags', next)} error={flagsErr} />
+          </FormRow>
+        )}
+
+        {engineKnobs && (
+          <button type="button" className="pf-disc" aria-expanded={advancedShown}
+            onClick={() => setAdvancedOpen(o => !o)} data-testid="pf-advanced-toggle">
+            <span className="pf-disc-caret">{advancedShown ? '▾' : '▸'}</span>
+            Advanced: flags
+          </button>
+        )}
+        {(!engineKnobs || advancedShown) && (
+          <FormRow label="Flags"
+            sub={engine ? 'HALOGEN_NAME=value, one per token — the controls above write here' : 'appended to the run command'}
+            error={engineKnobs ? null : flagsErr}>
+            <textarea className={'pf-input mono pf-textarea' + (flagsErr ? ' err' : '')}
+              value={form.flags || ''}
+              onChange={e => set('flags', e.target.value)} onBlur={() => touch('flags')}
+              rows={3} placeholder={engine ? 'HALOGEN_KV_SLOTS=4' : '-fa on -b 2048 -ub 512'}
+              aria-invalid={!!flagsErr} data-testid="pf-input-flags" />
+          </FormRow>
+        )}
       </form>
     </FormDrawer>
   );
