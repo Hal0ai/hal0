@@ -8,17 +8,20 @@ checkpoint (the ``HGN1`` magic, the ngram lookup table, ``tokenizer/``).
 from __future__ import annotations
 
 import json as jsonlib
+import sqlite3
 from pathlib import Path
 
 import pytest
 import typer
 
 from hal0.cli.doctor_commands import (
+    _halogen_weight_rows,
     _unregistered_store_files,
     check_halogen_weights,
     doctor_profiles,
 )
 from hal0.config.schema import ModelsConfig
+from hal0.diagnostics import DIAGNOSIS_IDS
 from hal0.registry.detect import HALOGEN_VISION_SIDECAR, HGN_MAGIC
 from hal0.registry.model import Model
 from hal0.registry.store import ModelRegistry
@@ -178,6 +181,7 @@ def test_doctor_profiles_json_reports_an_incomplete_halogen_checkpoint(
     out = jsonlib.loads(capsys.readouterr().out)
     warn = [d for d in out if d["id"] == "HAL0-HALOGEN-WEIGHTS-INCOMPLETE"]
     assert len(warn) == 1
+    assert warn[0]["id"] in DIAGNOSIS_IDS
     assert warn[0]["severity"] == "warn"
     assert "flash-next" in warn[0]["summary"]
 
@@ -197,6 +201,7 @@ def test_doctor_profiles_exits_nonzero_for_a_failing_halogen_checkpoint(
     out = jsonlib.loads(capsys.readouterr().out)
     fail = [d for d in out if d["id"] == "HAL0-HALOGEN-WEIGHTS-INCOMPLETE"]
     assert len(fail) == 1
+    assert fail[0]["id"] in DIAGNOSIS_IDS
     assert fail[0]["severity"] == "fail"
 
 
@@ -216,6 +221,80 @@ def test_doctor_profiles_human_report_renders_a_halogen_section(
     # The fetch line is copy-pasteable: the console never wraps it, however
     # long the checkpoint's directory is.
     assert FETCH.format(name=TABLE, dir=root) in out
+
+
+def test_doctor_profiles_human_report_exits_1_for_a_failing_halogen_checkpoint(
+    tmp_hal0_home: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = _halogen_dir(tmp_path / "flash", tokenizer=False)
+    ModelRegistry().add(_halogen_model(root))
+
+    with pytest.raises(typer.Exit) as exc_info:
+        doctor_profiles(json_output=False)
+    assert exc_info.value.exit_code == 1
+
+    out = capsys.readouterr().out
+    assert "FAIL" in out
+    assert "tokenizer/tokenizer.json" in out
+    assert "1 halogen checkpoint(s) cannot load" in out
+    assert "every slot resolves to a real profile" not in out
+
+
+def test_doctor_profiles_creates_no_registry_database(
+    tmp_hal0_home: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A read-only audit on a box that never registered a model must not mint a
+    registry database just to find it holds no halogen rows."""
+    assert not ModelRegistry().db_path.exists()
+
+    assert _halogen_weight_rows() == []
+    assert not ModelRegistry().db_path.exists()
+
+    with pytest.raises(typer.Exit) as exc_info:
+        doctor_profiles(json_output=True)
+    assert exc_info.value.exit_code == 0
+    assert not ModelRegistry().db_path.exists()
+
+
+def test_an_unreadable_registry_is_not_a_halogen_finding(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _BrokenRegistry:
+        db_path = tmp_path / "hal0.db"
+
+        def __init__(self) -> None:
+            self.db_path.write_bytes(b"not a database")
+
+        def list(self) -> list[Model]:
+            raise sqlite3.DatabaseError("file is not a database")
+
+    monkeypatch.setattr("hal0.registry.store.ModelRegistry", _BrokenRegistry)
+    assert _halogen_weight_rows() == []
+
+
+def test_a_bug_in_the_row_checks_is_not_swallowed(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _halogen_dir(tmp_path / "flash")
+
+    class _Registry:
+        db_path = tmp_path / "hal0.db"
+
+        def __init__(self) -> None:
+            self.db_path.write_bytes(b"")
+
+        def list(self) -> list[Model]:
+            return [_halogen_model(root)]
+
+    def _boom(_models: object) -> list[dict[str, str]]:
+        raise TypeError("a programming error in the row checks")
+
+    monkeypatch.setattr("hal0.registry.store.ModelRegistry", _Registry)
+    monkeypatch.setattr("hal0.cli.doctor_commands._halogen_weight_rows_for", _boom)
+    with pytest.raises(TypeError, match="programming error"):
+        _halogen_weight_rows()
 
 
 # ── store audit: .hgn companions are not unregistered models ──────────────────

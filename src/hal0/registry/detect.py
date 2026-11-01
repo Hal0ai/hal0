@@ -504,6 +504,46 @@ def _detect_halogen(path: Path, *, name_for_capability: str) -> DetectionResult:
     )
 
 
+def detection_metadata(
+    detection: DetectionResult, *, source: str, include_confidence: bool = True
+) -> dict[str, Any]:
+    """The ``Model.metadata`` every detection-backed registration path starts from.
+
+    ONE builder for add-from-path, scan commit and the halogen branch of the
+    auto-scan, so the same file registered by different routes carries the same
+    keys: ``discovered``, ``source``, the detected ``context_length`` (the value
+    the registry promotes to its ``context_length`` column and profile
+    generation reads) and, unless the caller overrode the detection with its own
+    capabilities, ``detection_confidence``.
+    """
+    metadata: dict[str, Any] = {"discovered": True, "source": source}
+    if detection.context_length is not None:
+        metadata["context_length"] = detection.context_length
+    if include_confidence:
+        metadata["detection_confidence"] = detection.confidence
+    return metadata
+
+
+def halogen_companion_owners(path: Path) -> list[str]:
+    """Names of the halogen checkpoints a companion file at ``path`` belongs to.
+
+    Every non-companion ``.hgn`` file with the ``HGN1`` magic in the same
+    directory, sorted. Empty when the directory holds none or cannot be listed.
+    """
+    try:
+        siblings = sorted(path.parent.iterdir())
+    except OSError:
+        return []
+    return [
+        sibling.name
+        for sibling in siblings
+        if sibling.suffix.lower() == ".hgn"
+        and not is_halogen_companion(sibling.name)
+        and sibling.is_file()
+        and _has_hgn_magic(sibling)
+    ]
+
+
 def halogen_registration(detection: DetectionResult) -> tuple[list[str], dict[str, Any]]:
     """``(tags, metadata)`` a registered halogen checkpoint carries.
 
@@ -843,6 +883,8 @@ __all__ = [
     "DetectionResult",
     "detect",
     "detected_architecture",
+    "detection_metadata",
+    "halogen_companion_owners",
     "halogen_registration",
     "is_halogen_companion",
     "quant_from_file_type",

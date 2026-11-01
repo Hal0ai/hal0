@@ -1683,6 +1683,7 @@ def _assert_halogen_row(entry: dict[str, Any], ckpt: Path, *, vision: bool) -> N
         companions[_HALOGEN_VISION] = 14
     assert entry["metadata"]["companions"] == companions
     assert entry["metadata"]["native_ctx"] == 262144
+    assert entry["metadata"]["context_length"] == 262144
 
 
 def test_add_from_path_registers_a_halogen_checkpoint_with_its_companions(
@@ -1696,6 +1697,7 @@ def test_add_from_path_registers_a_halogen_checkpoint_with_its_companions(
 
     assert r.status_code == 201, r.text
     _assert_halogen_row(r.json(), ckpt, vision=True)
+    assert r.json()["metadata"]["detection_confidence"] == "high"
     # What the response says is what the registry holds.
     _assert_halogen_row(crud_client.get("/api/models/flash-next").json(), ckpt, vision=True)
 
@@ -1740,6 +1742,24 @@ def test_auto_scan_registers_a_halogen_checkpoint_and_no_companion(
 
     assert r.status_code == 200, r.text
     assert r.json()["added"] == ["qwen38-flash-next-ht43"]
-    _assert_halogen_row(
-        crud_client.get("/api/models/qwen38-flash-next-ht43").json(), ckpt, vision=True
-    )
+    scanned = crud_client.get("/api/models/qwen38-flash-next-ht43").json()
+    _assert_halogen_row(scanned, ckpt, vision=True)
+    # The auto-scan records the same detection facts add-from-path does.
+    assert scanned["metadata"]["detection_confidence"] == "high"
+
+
+def test_add_from_path_refuses_a_halogen_companion_and_names_its_checkpoint(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    d = _write_halogen_dir(crud_models_root)
+
+    r = crud_client.post("/api/models/add-from-path", json={"path": str(d / _HALOGEN_TABLE)})
+
+    assert r.status_code == 409, r.text
+    error = r.json()["error"]
+    assert error["code"] == "models.halogen_companion"
+    assert _HALOGEN_CKPT in error["message"]
+    assert error["details"]["checkpoints"] == [_HALOGEN_CKPT]
+    # Nothing was registered for the companion.
+    assert crud_client.get("/api/models").json()["models"] == []

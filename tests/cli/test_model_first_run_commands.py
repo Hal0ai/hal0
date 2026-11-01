@@ -428,3 +428,35 @@ def test_model_add_registers_a_halogen_checkpoint_with_its_companions(
         "qwen38-flash-next-vision.hgn": 14,
     }
     assert m.metadata["native_ctx"] == 262144
+
+
+def test_model_add_refuses_a_halogen_companion_and_prints_the_checkpoint_hint(
+    monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str, tmp_path: Path
+) -> None:
+    from hal0.cli._shared import CliApiError
+    from hal0.errors import Hal0Error
+    from hal0.registry.store import ModelRegistry
+    from hal0.services import models_service as svc
+
+    d = tmp_path / "halogen-flash-next"
+    d.mkdir()
+    (d / "qwen38-flash-next-ht43.hgn").write_bytes(b"HGN1" + b"c" * 60)
+    table = d / "qwen38-flash-next-ngram.hgn"
+    table.write_bytes(b"HGN1" + b"n" * 20)
+    registry = ModelRegistry(registry_dir=tmp_path / "registry")
+
+    def real_post(path: str, *, json: Any = None, **_kw: Any) -> dict[str, Any]:
+        try:
+            return asyncio.run(svc.add_from_path(json, registry=registry, event_bus=None))
+        except Hal0Error as exc:  # what the API middleware + api_post do to a typed error
+            raise CliApiError(
+                f"POST {path} → HTTP {exc.status}: {exc.message}", code=exc.code, status=exc.status
+            ) from exc
+
+    monkeypatch.setattr(shared, "api_post", real_post)
+    result = runner.invoke(model_commands.app, ["add", str(table)])
+
+    assert result.exit_code != 0, result.output
+    assert "halogen companion" in result.output
+    assert "qwen38-flash-next-ht43.hgn" in result.output
+    assert registry.list() == []

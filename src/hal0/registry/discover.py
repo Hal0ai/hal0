@@ -31,6 +31,7 @@ from hal0.registry import tombstones
 from hal0.registry.curated import CURATED_MODELS, CuratedModel
 from hal0.registry.detect import (
     detect,
+    detection_metadata,
     halogen_registration,
     is_halogen_companion,
     unsupported_moonshine_layout,
@@ -696,7 +697,7 @@ def register_candidate(registry: ModelRegistry, candidate: CandidateModel) -> Mo
             backends=list(halogen.suggested_backends),
             provider=derive_model_provider(halogen.suggested_backends),
             tags=halogen_tags,
-            metadata={"discovered": True, "source": "auto-scan", **halogen_meta},
+            metadata={**detection_metadata(halogen, source="auto-scan"), **halogen_meta},
         )
     elif curated is not None:
         model = Model(

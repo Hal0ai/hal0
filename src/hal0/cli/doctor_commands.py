@@ -1918,6 +1918,11 @@ def check_halogen_weights(registry: Any) -> list[dict[str, str]]:
     The vision sidecar is optional, so its presence is only ever information
     appended to ``detail``.
     """
+    return _halogen_weight_rows_for(registry.list())
+
+
+def _halogen_weight_rows_for(models: list[Any]) -> list[dict[str, str]]:
+    """The rows :func:`check_halogen_weights` documents, over already-listed models."""
     from hal0.model_meta import derive_model_provider
     from hal0.registry.detect import (
         HALOGEN_NGRAM_TABLE,
@@ -1927,7 +1932,7 @@ def check_halogen_weights(registry: Any) -> list[dict[str, str]]:
     )
 
     rows: list[dict[str, str]] = []
-    for model in registry.list():
+    for model in models:
         provider = getattr(model, "provider", None) or derive_model_provider(
             getattr(model, "backends", None)
         )
@@ -1985,18 +1990,24 @@ def _halogen_weight_rows() -> list[dict[str, str]]:
     """``check_halogen_weights`` over the local registry; ``[]`` when there is none.
 
     A box that has never registered a model has no registry database yet, and a
-    read-only audit must not create one. A registry that cannot be read is not a
-    halogen finding either: ``hal0 doctor models`` is where that surfaces.
+    read-only audit must not create one. A registry that cannot be read (an I/O
+    error, a database SQLite refuses, the registry's own errors) is not a halogen
+    finding either: ``hal0 doctor models`` is where that surfaces. Only those
+    failures are swallowed, and only around the registry read; anything else,
+    including a bug in the row checks, propagates.
     """
-    from hal0.registry.store import ModelRegistry
+    import sqlite3
+
+    from hal0.registry.store import ModelRegistry, RegistryError
 
     try:
         registry = ModelRegistry()
         if not registry.db_path.exists():
             return []
-        return check_halogen_weights(registry)
-    except Exception:
+        models = registry.list()
+    except (OSError, sqlite3.Error, RegistryError):
         return []
+    return _halogen_weight_rows_for(models)
 
 
 def _render_profiles(title: str, rows: list[dict[str, str]]) -> None:

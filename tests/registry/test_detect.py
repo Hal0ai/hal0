@@ -10,6 +10,8 @@ from hal0.registry.detect import (
     HALOGEN_VISION_SIDECAR,
     HGN_MAGIC,
     detect,
+    detection_metadata,
+    halogen_companion_owners,
     halogen_registration,
     is_halogen_companion,
 )
@@ -598,3 +600,43 @@ class TestHalogenRegistration:
         kvs = [("general.architecture", _GGUF_TYPE_STRING, _enc_str("llama"))]
         p = _write_fixture(tmp_path, "llama-7b-q4_k_m.gguf", _build_gguf(3, kvs))
         assert halogen_registration(detect(p)) == ([], {})
+
+
+class TestDetectionMetadata:
+    """The metadata base shared by add-from-path, scan commit and the halogen auto-scan."""
+
+    def test_carries_source_context_and_confidence(self, tmp_path: Path) -> None:
+        p = tmp_path / "qwen38-flash-next-ht43.hgn"
+        p.write_bytes(HGN_MAGIC + b"\x00" * 60)
+        assert detection_metadata(detect(p), source="auto-scan") == {
+            "discovered": True,
+            "source": "auto-scan",
+            "context_length": 262144,
+            "detection_confidence": "high",
+        }
+
+    def test_confidence_can_be_left_out_and_unknown_context_is_not_invented(
+        self, tmp_path: Path
+    ) -> None:
+        p = tmp_path / "not-a-checkpoint.safetensors"
+        p.write_bytes(b"NOPE" + b"\x00" * 60)
+        assert detection_metadata(detect(p), source="scan", include_confidence=False) == {
+            "discovered": True,
+            "source": "scan",
+        }
+
+
+class TestHalogenCompanionOwners:
+    def test_names_the_checkpoint_beside_a_companion(self, tmp_path: Path) -> None:
+        (tmp_path / "qwen38-flash-next-ht43.hgn").write_bytes(HGN_MAGIC + b"c" * 20)
+        table = tmp_path / "qwen38-flash-next-ngram.hgn"
+        table.write_bytes(HGN_MAGIC + b"n" * 20)
+        (tmp_path / "qwen38-flash-next-vision.hgn").write_bytes(HGN_MAGIC)
+        (tmp_path / "README.md").write_text("not a checkpoint")
+        assert halogen_companion_owners(table) == ["qwen38-flash-next-ht43.hgn"]
+
+    def test_empty_when_no_checkpoint_sits_beside_it(self, tmp_path: Path) -> None:
+        table = tmp_path / "qwen38-flash-next-ngram.hgn"
+        table.write_bytes(HGN_MAGIC + b"n" * 20)
+        (tmp_path / "other.hgn").write_bytes(b"NOPE" + b"\x00" * 8)  # no HGN1 magic
+        assert halogen_companion_owners(table) == []

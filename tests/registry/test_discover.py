@@ -1413,6 +1413,10 @@ def test_scan_registers_a_halogen_checkpoint_with_its_companions(
         "qwen38-flash-next-ht43.overlay.hgn": 64,
     }
     assert m.metadata["native_ctx"] == 262144
+    # The detection facts add-from-path records, so the same file registered by
+    # either route carries the same keys (and the registry's context column).
+    assert m.metadata["context_length"] == 262144
+    assert m.metadata["detection_confidence"] == "high"
     # The generic scan stamp is still there.
     assert m.metadata["discovered"] is True
     assert m.metadata["source"] == "auto-scan"
