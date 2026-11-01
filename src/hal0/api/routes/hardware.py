@@ -24,6 +24,7 @@ from hal0.api import memory_source
 from hal0.config import paths
 from hal0.config.loader import load_hardware_info
 from hal0.hardware import gpu_view
+from hal0.hardware.gpu_name import gpu_display_name
 from hal0.hardware.gpu_view import GPUMemorySample
 from hal0.hardware.uptime import read_uptime_s
 from hal0.providers import podman_introspect
@@ -140,6 +141,10 @@ def _flatten_for_ui(info: dict[str, Any], gpu: GPUMemorySample | None = None) ->
     return {
         **info,
         "gpu_name": primary_gpu.get("name", ""),
+        # The label to show; ``gpu_name`` stays the raw probe string.
+        "gpu_display_name": gpu_display_name(
+            primary_gpu.get("name", ""), cpu_model=info.get("cpu_model", "")
+        ),
         "gpu_vendor": vendor,
         "vram_total_mb": 0 if is_uma else vram_mb,
         "gtt_total_mb": (live_gtt_total_mb or vram_mb) if is_uma else 0,
