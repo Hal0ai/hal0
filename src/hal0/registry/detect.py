@@ -48,8 +48,9 @@ Detection strategy, cheapest first:
 
    Filename-only detection always returns ``confidence='low'``.
 3. ``.hgn`` files → a halogen checkpoint (kind ``halogen``) when the first
-   four bytes are :data:`HGN_MAGIC`, ``confidence='high'``; a ``.hgn`` name
-   without the magic degrades to a low-confidence ``halogen`` guess. The
+   four bytes are :data:`HGN_MAGIC` — whatever the file is named, like the
+   GGUF magic — ``confidence='high'``; a ``.hgn`` name without the magic
+   degrades to a low-confidence ``halogen`` guess. The
    files the engine finds beside a checkpoint by name (the ngram lookup
    table, vision sidecar, mtp draft head and ``*.overlay.hgn``) are
    companions, never models: they detect as ``unknown`` with
@@ -92,7 +93,11 @@ HALOGEN_COMPANION_SUFFIXES: tuple[str, ...] = (
 #: it from, so detection reports the engine's own fixed value.
 _HALOGEN_CONTEXT_LENGTH = 262144
 
-_HALOGEN_VISION_SUFFIX = "-vision.hgn"
+#: The vision sidecar by its exact file name: the one the engine's entrypoint
+#: looks for beside the checkpoint. A checkpoint is vision-capable only when
+#: this file sits next to it; other ``*-vision.hgn`` files are still companions
+#: for the scan skip but do not enable vision.
+HALOGEN_VISION_SIDECAR = "qwen38-flash-next-vision.hgn"
 
 
 def is_halogen_companion(name: str) -> bool:
@@ -474,7 +479,7 @@ def _detect_halogen(path: Path, *, name_for_capability: str) -> DetectionResult:
         return r
     companions = _halogen_companions(path)
     caps = ["chat"]
-    if any(n.lower().endswith(_HALOGEN_VISION_SUFFIX) for n in companions):
+    if HALOGEN_VISION_SIDECAR in companions:
         caps.append("vision")
     return DetectionResult(
         suggested_backends=["halogen"],
@@ -784,12 +789,19 @@ def detect(path: str | Path, *, filename_hint: str | None = None) -> DetectionRe
             quant=quant,
         )
 
+    # No .gguf or .hgn name and no GGUF magic: a halogen checkpoint is still
+    # recognised by its own magic (an extensionless hub-cache blob), the same
+    # name-independent read the GGUF header gets above. Four bytes, so cheap.
+    if _has_hgn_magic(p):
+        return _detect_halogen(p, name_for_capability=name_for_capability)
+
     # Non-GGUF file: filename heuristic only.
     return _heuristic_only(p, filename_hint=filename_hint)
 
 
 __all__ = [
     "HALOGEN_COMPANION_SUFFIXES",
+    "HALOGEN_VISION_SIDECAR",
     "HGN_MAGIC",
     "DetectionResult",
     "detect",

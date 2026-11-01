@@ -7,6 +7,7 @@ from pathlib import Path
 
 from hal0.registry.detect import (
     HALOGEN_COMPANION_SUFFIXES,
+    HALOGEN_VISION_SIDECAR,
     HGN_MAGIC,
     detect,
     is_halogen_companion,
@@ -449,6 +450,18 @@ class TestHalogenHgn:
             "qwen38-flash-next-vision.hgn": 14,
         }
 
+    def test_vision_needs_the_exact_sidecar_name(self, tmp_path: Path) -> None:
+        """Only the file the engine's entrypoint looks for enables vision; a
+        differently named ``*-vision.hgn`` is a companion but not that sidecar."""
+        assert HALOGEN_VISION_SIDECAR == "qwen38-flash-next-vision.hgn"
+        assert HALOGEN_VISION_SIDECAR.endswith(HALOGEN_COMPANION_SUFFIXES[1])
+        p = tmp_path / self._CKPT
+        p.write_bytes(HGN_MAGIC + b"\x00" * 60)
+        (tmp_path / "other-model-vision.hgn").write_bytes(HGN_MAGIC)
+        r = detect(p)
+        assert r.suggested_capabilities == ["chat"]
+        assert "other-model-vision.hgn" in r.raw_hints["companions"]
+
     def test_ngram_alone_does_not_add_vision(self, tmp_path: Path) -> None:
         p = tmp_path / self._CKPT
         p.write_bytes(HGN_MAGIC + b"\x00" * 60)
@@ -498,6 +511,24 @@ class TestHalogenHgn:
         r = detect(blob, filename_hint=self._CKPT)
         assert r.kind == "halogen"
         assert r.confidence == "high"
+
+    def test_magic_alone_detects_halogen_without_hgn_name(self, tmp_path: Path) -> None:
+        """Any non-companion file starting with ``HGN1`` is a halogen
+        checkpoint, whatever it is named and with no filename hint."""
+        blob = tmp_path / ("b" * 64)
+        blob.write_bytes(HGN_MAGIC + b"\x00" * 60)
+        r = detect(blob)
+        assert r.kind == "halogen"
+        assert r.confidence == "high"
+        assert r.suggested_backends == ["halogen"]
+        assert r.raw_hints["source"] == "hgn_magic"
+
+    def test_extensionless_non_hgn_file_stays_unknown(self, tmp_path: Path) -> None:
+        blob = tmp_path / ("c" * 64)
+        blob.write_bytes(b"NOPE" + b"\x00" * 60)
+        r = detect(blob)
+        assert r.kind == "unknown"
+        assert r.suggested_backends == []
 
     def test_gguf_path_unchanged(self, tmp_path: Path) -> None:
         kvs = [("general.architecture", _GGUF_TYPE_STRING, _enc_str("llama"))]
