@@ -436,6 +436,94 @@ def test_put_tune_bool_is_not_an_int_budget(slot_toml: Path, client: TestClient)
     assert slot_toml.read_bytes() == before
 
 
+# ── #3183: an invalid STORED [tune] key must not veto an unrelated write ─────
+
+#: One invalid stored ``[tune]`` line per way a hand edit (or an older build)
+#: can leave a key the typed table refuses; ``vision = "off"`` rides along as
+#: the operator's valid key that every write below must keep.
+_BAD_STORED_TUNE = [
+    'reasoning_effort = "bogus"',
+    "reasoning_budget = -2",
+    "ctx_size = 5",
+    "ctx_size = true",
+    'speculation = "yes"',
+    'mtp = "off"',
+]
+
+
+@pytest.fixture(params=_BAD_STORED_TUNE)
+def bad_tune_slot_toml(request: pytest.FixtureRequest, slot_toml: Path) -> Path:
+    slot_toml.write_text(
+        slot_toml.read_text(encoding="utf-8") + f'[tune]\nvision = "off"\n{request.param}\n',
+        encoding="utf-8",
+    )
+    return slot_toml
+
+
+def test_put_without_tune_succeeds_despite_invalid_stored_tune_key(
+    bad_tune_slot_toml: Path, client: TestClient
+) -> None:
+    r = client.put("/api/slots/chat/config", json={"port": 8090})
+    assert r.status_code == 200, r.text
+    on_disk = _read(bad_tune_slot_toml)
+    assert on_disk["port"] == 8090
+    assert on_disk["tune"]["vision"] == "off"
+
+
+def test_put_tune_key_succeeds_despite_invalid_stored_tune_key(
+    bad_tune_slot_toml: Path, client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The refusal named a stored key the drawer never shows (the read path
+    already ignores it). The write now drops that key, keeps the valid ones,
+    and says so in the log."""
+    with caplog.at_level("WARNING", logger="hal0.slots.config_write"):
+        r = client.put("/api/slots/chat/config", json={"tune": {"enable_thinking": False}})
+    assert r.status_code == 200, r.text
+    assert _read(bad_tune_slot_toml)["tune"] == {"vision": "off", "enable_thinking": False}
+    assert any("slot.tune_stored_key_dropped" in rec.getMessage() for rec in caplog.records)
+
+
+def test_put_tune_per_key_clear_succeeds_despite_invalid_stored_tune_key(
+    bad_tune_slot_toml: Path, client: TestClient
+) -> None:
+    r = client.put("/api/slots/chat/config", json={"tune": {"vision": None}})
+    assert r.status_code == 200, r.text
+    assert "tune" not in _read(bad_tune_slot_toml)
+
+
+def test_put_bad_tune_key_still_refused_and_names_that_key(
+    bad_tune_slot_toml: Path, client: TestClient
+) -> None:
+    before = bad_tune_slot_toml.read_bytes()
+    r = client.put("/api/slots/chat/config", json={"tune": {"reasoning_effort": "wild"}})
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert err["code"] == "validation.tune_invalid"
+    assert [e["loc"] for e in err["details"]["errors"]] == [["reasoning_effort"]]
+    assert bad_tune_slot_toml.read_bytes() == before
+
+
+def test_put_valid_value_replaces_invalid_stored_value_of_the_same_key(
+    slot_toml: Path, client: TestClient
+) -> None:
+    slot_toml.write_text(
+        slot_toml.read_text(encoding="utf-8") + '[tune]\nreasoning_effort = "bogus"\n',
+        encoding="utf-8",
+    )
+    r = client.put("/api/slots/chat/config", json={"tune": {"reasoning_effort": "high"}})
+    assert r.status_code == 200, r.text
+    assert _read(slot_toml)["tune"] == {"reasoning_effort": "high"}
+
+
+def test_put_tune_null_clears_invalid_stored_tune_table(
+    bad_tune_slot_toml: Path, client: TestClient
+) -> None:
+    """``hal0 slot edit --tune-reset`` sends ``tune: null``: it clears the lot."""
+    r = client.put("/api/slots/chat/config", json={"tune": None})
+    assert r.status_code == 200, r.text
+    assert "tune" not in _read(bad_tune_slot_toml)
+
+
 @pytest.fixture
 def nested_slot_toml(tmp_hal0_home: str) -> Path:
     root = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
