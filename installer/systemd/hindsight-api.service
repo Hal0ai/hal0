@@ -75,7 +75,7 @@ Environment=HINDSIGHT_API_LLM_TIMEOUT=300
 # the dashboard / `hal0 memory graph` rewrite them through the
 # extraction-model.conf drop-in, which overrides these lines.
 Environment=HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT=1
-Environment=HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS=4096
+Environment=HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS=16384
 Environment=HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES=1
 Environment=HINDSIGHT_API_WORKER_MAX_RETRIES=2
 Environment=HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS=120

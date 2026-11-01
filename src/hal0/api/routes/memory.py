@@ -43,6 +43,7 @@ from hal0.memory.namespace import (
     resolve_read_datasets,
     resolve_write_dataset,
 )
+from hal0.memory.retain_chunk_guard import ChunkAudit, audit_bank_chunks
 
 router = APIRouter()
 
@@ -520,6 +521,39 @@ async def _all_banks(client: Any) -> list[Any] | None:
         offset += page
 
 
+async def _audit_retain_chunks(request: Request, max_tokens: int) -> ChunkAudit | None:
+    """Check every bank's retain chunk size against ``max_tokens`` (#3215).
+
+    ``None`` when the engine is unreachable or its bank list cannot be read, so
+    callers skip the check rather than report a clean result they did not earn.
+    """
+    provider = getattr(request.app.state, "memory_provider", None)
+    client = getattr(provider, "hindsight_client", None) if provider is not None else None
+    if client is None:
+        return None
+    banks = await _all_banks(client)
+    if not banks:
+        return None
+    ids = [
+        str(b.get("bank_id") if isinstance(b, dict) else b)
+        for b in banks
+        if (b.get("bank_id") if isinstance(b, dict) else b)
+    ]
+    return await audit_bank_chunks(client.request_json, ids, max_tokens)
+
+
+@router.get("/graph/chunk-check")
+async def graph_chunk_check(request: Request) -> dict[str, Any]:
+    """Does ``extraction_max_tokens`` clear every bank's retain chunk size? (#3215)
+
+    Read-only, never writes: warns about banks the engine would refuse every
+    retain into. ``{"chunk_check": null}`` when the engine is unreachable.
+    """
+    max_tokens = load_hal0_config().memory.graph.extraction_max_tokens
+    audit = await _audit_retain_chunks(request, max_tokens)
+    return {"chunk_check": audit.as_dict() if audit is not None else None}
+
+
 async def _augment_build_counters(request: Request, status: dict[str, Any]) -> None:
     """Replace the provider's placeholder ``0``/``None`` build counters with
     real extraction/consolidation activity aggregated from Hindsight's
@@ -888,6 +922,12 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
         out["throughput"] = throughput
         if throughput["verdict"] == "too_slow":
             out["warnings"] = [throughput["message"]]
+    # #3215: warn when the cap does not clear a bank's retain chunk size. Outside
+    # the config lock for the same reason as the probe; a down engine skips it.
+    audit = await _audit_retain_chunks(request, new_cfg.extraction_max_tokens)
+    if audit is not None and audit.message():
+        out["chunk_check"] = audit.as_dict()
+        out["warnings"] = [*out.get("warnings", []), audit.message()]
     return out
 
 

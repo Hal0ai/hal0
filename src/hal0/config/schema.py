@@ -2133,15 +2133,20 @@ class MemoryGraphConfig(BaseModel):
         ),
     )
     extraction_max_tokens: int = Field(
-        default=4096,
+        default=16384,
         ge=3072,
         le=32768,
         description=(
             "Completion-token cap per extraction call "
             "(HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS). Bounds how long one "
-            "call can run; the floor stays above Hindsight's retain chunk size "
-            "(3000), which it refuses to start without. Applied via the "
-            "hindsight-api drop-in; the daemon restarts to pick it up."
+            "call can run. Hindsight refuses every retain into a bank whose "
+            "retain chunk size is not strictly below this cap: the engine "
+            "default chunk is 3000 (which the 3072 floor clears), but the "
+            "Hindsight coding-agent plugin sets 12000 on its bank strategies, "
+            "hence the 16384 default. A larger cap lengthens each call on a "
+            "small slot, so keep llm_timeout_s above the time one call takes. "
+            "Applied via the hindsight-api drop-in; the daemon restarts to "
+            "pick it up."
         ),
     )
     extraction_llm_retries: int = Field(

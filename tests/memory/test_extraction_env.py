@@ -146,7 +146,7 @@ def test_extraction_limits_defaults_are_conservative():
 
     limits = ExtractionLimits()
     assert limits.max_concurrent == 1
-    assert limits.max_tokens == 4096
+    assert limits.max_tokens == 16384
     assert limits.llm_retries == 1
     assert limits.task_retries == 2
     assert limits.retry_backoff_s == 120
@@ -157,7 +157,7 @@ def test_render_drop_in_carries_the_extraction_limits():
 
     out = render_drop_in()
     assert "HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT=1" in out
-    assert "HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS=4096" in out
+    assert "HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS=16384" in out
     assert "HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES=1" in out
     assert "HINDSIGHT_API_WORKER_MAX_RETRIES=2" in out
     assert "HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS=120" in out

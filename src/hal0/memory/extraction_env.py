@@ -123,8 +123,10 @@ class ExtractionLimits:
     * ``max_concurrent`` -> ``HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT``: in-flight
       extraction calls against the slot. 1 serialises them.
     * ``max_tokens`` -> ``HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS``: per-call
-      completion cap. Must exceed hindsight's retain chunk size (3000) or the
-      daemon refuses to start; the schema floor (3072) keeps that unreachable.
+      completion cap. Hindsight refuses every retain into a bank whose chunk
+      size is not strictly below it: the schema floor (3072) clears the engine
+      default (3000), the 16384 default clears the coding-agent plugin's 12000
+      strategy chunks, and ``retain_chunk_guard`` warns about banks it misses.
     * ``llm_retries`` -> ``HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES``: retries of one
       LLM call inside a retain attempt.
     * ``task_retries`` -> ``HINDSIGHT_API_WORKER_MAX_RETRIES``: requeues of a
@@ -136,7 +138,7 @@ class ExtractionLimits:
     """
 
     max_concurrent: int = 1
-    max_tokens: int = 4096
+    max_tokens: int = 16384
     llm_retries: int = 1
     task_retries: int = 2
     retry_backoff_s: int = 120
@@ -801,6 +803,12 @@ def resolve_extraction_window(
 #: and #1834 measured ~3.2k. The round figure the issue's formula names.
 EXTRACTION_PROMPT_TOKENS = 3500
 
+#: Completion tokens the projection charges one extraction call at most. The
+#: 16384 default cap (#3215) exists so the engine accepts banks with a 12000
+#: chunk size, not because a call writes that much. Charging the whole cap would
+#: call an ordinary 45 tok/s GPU slot too slow against the default 300 s timeout.
+EXTRACTION_PROJECTED_COMPLETION_TOKENS = 4096
+
 #: Probe budget (#2353 decision): one completion, these caps, nothing more.
 PROBE_PROMPT_TOKENS = 512
 PROBE_DECODE_TOKENS = 32
@@ -832,10 +840,10 @@ class ExtractionThroughput:
     ``PROBE_PROMPT_TOKENS / PROBE_TIMEOUT_S``; without a busy signal a queued
     request cannot be distinguished from slow prefill, so no rate is inferred.
 
-    The projection is ``EXTRACTION_PROMPT_TOKENS / prompt_tps + max_tokens /
-    decode_tps`` against ``timeout_s``, the formula on the issue.
-    ``max_tokens`` is ``[memory.graph].extraction_max_tokens``, the completion
-    cap hindsight-api runs under, so the decode term is the worst case.
+    The projection is ``EXTRACTION_PROMPT_TOKENS / prompt_tps + completion /
+    decode_tps`` against ``timeout_s``, where ``completion`` is the smaller of
+    ``max_tokens`` (``[memory.graph].extraction_max_tokens``, the cap
+    hindsight-api runs under) and :data:`EXTRACTION_PROJECTED_COMPLETION_TOKENS`.
     """
 
     slot: str
@@ -862,7 +870,11 @@ class ExtractionThroughput:
             return prefill
         if not self.decode_tps or self.decode_tps <= 0:
             return None
-        return prefill + self.max_tokens / self.decode_tps
+        return prefill + self._projected_completion_tokens / self.decode_tps
+
+    @property
+    def _projected_completion_tokens(self) -> int:
+        return min(self.max_tokens, EXTRACTION_PROJECTED_COMPLETION_TOKENS)
 
     @property
     def verdict(self) -> str:
@@ -881,8 +893,7 @@ class ExtractionThroughput:
     def _remedy(self) -> str:
         return (
             "Point extraction at a faster slot (`hal0 memory graph enable --slot "
-            "<name>`), raise [memory.graph].llm_timeout_s, or lower "
-            "[memory.graph].extraction_max_tokens."
+            "<name>`) or raise [memory.graph].llm_timeout_s."
         )
 
     def message(self) -> str:
@@ -916,8 +927,8 @@ class ExtractionThroughput:
         rates = (
             f"extraction slot {self.slot!r} measured {self.prompt_tps:.1f} prompt tok/s "
             f"and {self.decode_tps:.1f} decode tok/s (from {self.source}); one "
-            f"extraction (~{EXTRACTION_PROMPT_TOKENS} prompt + up to {self.max_tokens} "
-            f"completion tokens) projects to ~{projected:.0f} s"
+            f"extraction (~{EXTRACTION_PROMPT_TOKENS} prompt + "
+            f"~{self._projected_completion_tokens} completion tokens) projects to ~{projected:.0f} s"
         )
         if self.verdict == "too_slow":
             return f"{rates}, over {timeout}. {consequence}"

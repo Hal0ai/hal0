@@ -104,7 +104,7 @@ engine never holds a cloud key). `[memory.graph].llm_timeout_s`
 extraction/consolidation/reflect calls — raise it if a cold slot start
 regularly times out. The **Extraction limits** on the same panel (Settings →
 Data → Memory) cap how hard Hindsight may drive that slot: one extraction call
-in flight, 4096 completion tokens per call, and a bounded retry ladder by
+in flight, 16384 completion tokens per call, and a bounded retry ladder by
 default. On a slow box they are what keeps a single stuck extraction from
 wedging the whole retain queue; see `[memory.graph]` in the config reference
 for each knob.
@@ -162,10 +162,10 @@ Enabling also measures whether the extraction slot can finish one
 extraction inside `[memory.graph].llm_timeout_s`. hal0 reads the slot's
 prompt and decode rates from its llama-server metrics, or runs one short
 timed completion (at most 512 prompt and 32 decode tokens, capped at 30 s),
-and projects `~3500 / prompt tok/s + extraction_max_tokens / decode tok/s`.
+and projects `~3500 / prompt tok/s + min(extraction_max_tokens, 4096) / decode tok/s`.
 When that exceeds the timeout, the enable still goes through and prints a
 warning that names the measured rates. Point extraction at a faster slot,
-raise `llm_timeout_s`, or lower `extraction_max_tokens`.
+or raise `llm_timeout_s`.
 
 </TabItem>
 <TabItem label="Check speed">
