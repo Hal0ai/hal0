@@ -503,6 +503,22 @@ describe('findHalogenMalformed', () => {
     expect(findHalogenMalformed('HALOGEN_MSG="a\nb"')).toHaveLength(1)
   })
 
+  // The two refusals knobs.parse_env_tokens adds (_CONTROL_BYTE, _MAX_VALUE_BYTES):
+  // the unit file cannot carry either, so the profile would save and fail every load.
+  it('flags a value holding any control byte, not only a line feed', () => {
+    expect(findHalogenMalformed('HALOGEN_A="a\tb"')).toHaveLength(1)
+    expect(findHalogenMalformed('HALOGEN_A="a\x01b"')).toHaveLength(1)
+    expect(findHalogenMalformed('HALOGEN_A="a\x7fb"')).toHaveLength(1)
+    expect(findHalogenMalformed('HALOGEN_A="a b"')).toEqual([])
+  })
+
+  it('flags a value over 1024 bytes, counted in UTF-8 bytes', () => {
+    expect(findHalogenMalformed(`HALOGEN_A=${'a'.repeat(1024)}`)).toEqual([])
+    expect(findHalogenMalformed(`HALOGEN_A=${'a'.repeat(1025)}`)).toHaveLength(1)
+    expect(findHalogenMalformed(`HALOGEN_A=${'\u00e9'.repeat(512)}`)).toEqual([])
+    expect(findHalogenMalformed(`HALOGEN_A=${'\u00e9'.repeat(513)}`)).toHaveLength(1)
+  })
+
   it('accepts quoted values and is empty for clean, blank or unbalanced text', () => {
     expect(findHalogenMalformed('HALOGEN_MSG="Time is up." HALOGEN_KV8=1')).toEqual([])
     expect(findHalogenMalformed('')).toEqual([])

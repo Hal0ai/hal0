@@ -16,7 +16,7 @@ function valueOf(flags, env) {
   return v === '' ? null : v
 }
 
-function NumberControl({ knob, value, disabled, onSet }) {
+function NumberControl({ knob, value, disabled, onSet, describedBy }) {
   return (
     <input
       type="number"
@@ -29,16 +29,17 @@ function NumberControl({ knob, value, disabled, onSet }) {
       placeholder={knob.default ?? 'engine default'}
       disabled={disabled}
       aria-label={knob.label}
+      aria-describedby={describedBy}
       data-testid={`engine-input-${knob.env}`}
       onChange={(e) => onSet(e.target.value.trim() === '' ? null : e.target.value)}
     />
   )
 }
 
-function EnumControl({ knob, value, disabled, onSet }) {
+function EnumControl({ knob, value, disabled, onSet, describedBy }) {
   const effective = value ?? knob.default
   return (
-    <div className="tune-segs" role="group" aria-label={knob.label}>
+    <div className="tune-segs" role="group" aria-label={knob.label} aria-describedby={describedBy}>
       {knob.choices.map((choice) => (
         <button
           key={choice}
@@ -57,7 +58,7 @@ function EnumControl({ knob, value, disabled, onSet }) {
   )
 }
 
-function BoolControl({ knob, value, disabled, onSet }) {
+function BoolControl({ knob, value, disabled, onSet, describedBy }) {
   const on = (value ?? knob.default) === '1'
   return (
     <button
@@ -65,6 +66,7 @@ function BoolControl({ knob, value, disabled, onSet }) {
       role="switch"
       aria-checked={on}
       aria-label={knob.label}
+      aria-describedby={describedBy}
       className={'pf-switch' + (on ? ' on' : '')}
       disabled={disabled}
       data-testid={`engine-switch-${knob.env}`}
@@ -82,6 +84,9 @@ function KnobRow({ knob, flags, readOnly, onSet }) {
   const Control = CONTROLS[knob.kind]
   if (!Control) return null
   const value = valueOf(flags, knob.env)
+  // The help line names the control it explains: one id per knob, so a screen
+  // reader announces it with the control rather than as stray text.
+  const helpId = knob.help ? `engine-help-${knob.env}` : undefined
   return (
     <div className={'eng-row' + (value !== null ? ' set' : '')} data-testid={`engine-knob-${knob.env}`}>
       <div className="eng-head">
@@ -99,6 +104,7 @@ function KnobRow({ knob, flags, readOnly, onSet }) {
           <button
             type="button"
             className="eng-reset mono"
+            aria-label={`Reset ${knob.label}`}
             data-testid={`engine-reset-${knob.env}`}
             onClick={() => onSet(knob.env, null)}
           >
@@ -107,9 +113,13 @@ function KnobRow({ knob, flags, readOnly, onSet }) {
         )}
       </div>
       <div className="eng-ctl">
-        <Control knob={knob} value={value} disabled={readOnly} onSet={(v) => onSet(knob.env, v)} />
+        <Control knob={knob} value={value} disabled={readOnly} describedBy={helpId} onSet={(v) => onSet(knob.env, v)} />
       </div>
-      {knob.help && <div className="eng-help">{knob.help}</div>}
+      {knob.help && (
+        <div className="eng-help" id={helpId}>
+          {knob.help}
+        </div>
+      )}
     </div>
   )
 }

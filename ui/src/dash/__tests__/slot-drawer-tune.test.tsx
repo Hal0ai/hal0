@@ -20,11 +20,13 @@ import { HALOGEN_DENIED, HALOGEN_KNOBS } from './fixtures/halogen-knobs'
 ;(globalThis as unknown as { Icons: unknown }).Icons = new Proxy({}, { get: () => null })
 ;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-const { profilesBox, modelsBox, sysBox, resolvedBox, toasts, feasCalls, editCalls, restartCalls, createCalls, updateCalls } = vi.hoisted(() => ({
+const { profilesBox, modelsBox, sysBox, resolvedBox, updateGate, toasts, feasCalls, editCalls, restartCalls, createCalls, updateCalls } = vi.hoisted(() => ({
   profilesBox: { current: [] as Record<string, unknown>[] },
   sysBox: { current: { backends: {}, hardware: {} } as Record<string, unknown> },
   modelsBox: { current: [] as Record<string, unknown>[] },
   resolvedBox: { current: undefined as Record<string, unknown> | undefined },
+  // When set, a profile update stays in flight until this promise settles.
+  updateGate: { current: null as Promise<void> | null },
   toasts: [] as string[],
   feasCalls: [] as unknown[],
   editCalls: [] as unknown[],
@@ -84,6 +86,7 @@ vi.mock('@/api/hooks/useProfiles', () => ({
   useProfileUpdate: () => ({
     mutateAsync: async (b: unknown) => {
       updateCalls.push(b)
+      if (updateGate.current) await updateGate.current
       return b
     },
   }),
@@ -163,6 +166,7 @@ beforeEach(() => {
   restartCalls.length = 0
   createCalls.length = 0
   updateCalls.length = 0
+  updateGate.current = null
   toasts.length = 0
   feasCalls.length = 0
   ;(window as any).__hal0Toast = (m: string) => toasts.push(m)
@@ -637,6 +641,55 @@ describe('slot drawer engine settings (halogen)', () => {
     expect((updateCalls[0] as { body: { flags: string } }).body.flags).toBe(
       'HALOGEN_KV_SLOTS=4 HALOGEN_MAX_TOK=32768 HALOGEN_KV8=1',
     )
+    act(() => root.unmount())
+  })
+
+  it('freezes the controls while Save to profile is in flight, so no edit is dropped', async () => {
+    profilesBox.current = [PROFILE, CUSTOM]
+    let release!: () => void
+    updateGate.current = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const { root } = mount(HALO_SLOT)
+    typeInto('engine-input-HALOGEN_KV_SLOTS', '8')
+    let pending!: Promise<void>
+    act(() => {
+      pending = Promise.resolve(byId('slot-engine-apply')!.click())
+    })
+    expect(updateCalls).toHaveLength(1)
+    expect(byId('slot-engine-apply')!.textContent).toBe('Saving…')
+    expect(engineField('HALOGEN_KV_SLOTS')!.disabled).toBe(true)
+    expect((byId('engine-switch-HALOGEN_KV8') as HTMLButtonElement).disabled).toBe(true)
+    expect((byId('engine-opt-HALOGEN_MAX_TOK-32768') as HTMLButtonElement).disabled).toBe(true)
+    expect(byId('engine-reset-HALOGEN_KV_SLOTS')).toBeNull()
+    await act(async () => {
+      release()
+      await pending
+    })
+    expect(engineField('HALOGEN_KV_SLOTS')!.disabled).toBe(false)
+    act(() => root.unmount())
+  })
+
+  it('names a control character in a stored value instead of calling the token malformed', () => {
+    profilesBox.current = [
+      PROFILE,
+      { ...CUSTOM, flags: 'HALOGEN_THINKING_BUDGET_MESSAGE="a\tb"', resolved_flags: 'HALOGEN_THINKING_BUDGET_MESSAGE="a\tb"' },
+    ]
+    const { root } = mount(HALO_SLOT)
+    const msg = byId('pf-engine-error')!.textContent!
+    expect(msg).toContain('HALOGEN_THINKING_BUDGET_MESSAGE')
+    expect(msg).toContain('control character')
+    expect(msg).not.toContain('is not a HALOGEN_NAME=value setting')
+    act(() => root.unmount())
+  })
+
+  it('names an over-long stored value with the byte limit', () => {
+    const flags = `HALOGEN_THINKING_BUDGET_MESSAGE=${'x'.repeat(1025)}`
+    profilesBox.current = [PROFILE, { ...CUSTOM, flags, resolved_flags: flags }]
+    const { root } = mount(HALO_SLOT)
+    const msg = byId('pf-engine-error')!.textContent!
+    expect(msg).toContain('HALOGEN_THINKING_BUDGET_MESSAGE')
+    expect(msg).toContain('1024 bytes')
     act(() => root.unmount())
   })
 

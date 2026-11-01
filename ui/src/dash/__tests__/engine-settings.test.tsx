@@ -149,6 +149,32 @@ describe('EngineSettings', () => {
     act(() => root.unmount())
   })
 
+  it('names the knob on its reset button, so a screen reader can tell them apart', () => {
+    const { host, root } = mount({ flags: 'HALOGEN_KV8=1 HALOGEN_KV_SLOTS=4' })
+    expect(q(host, 'engine-reset-HALOGEN_KV8')!.getAttribute('aria-label')).toBe('Reset 8-bit KV cache')
+    expect(q(host, 'engine-reset-HALOGEN_KV_SLOTS')!.getAttribute('aria-label')).toBe('Reset KV slots')
+    act(() => root.unmount())
+  })
+
+  it('ties each knob help line to its control with aria-describedby', () => {
+    const { host, root } = mount({})
+    for (const knob of HALOGEN_KNOBS) {
+      const row = q(host, `engine-knob-${knob.env}`)!
+      const help = row.querySelector('.eng-help') as HTMLElement
+      expect(help.id).toBeTruthy()
+      const control = (
+        q(host, `engine-input-${knob.env}`) ??
+        q(host, `engine-switch-${knob.env}`) ??
+        row.querySelector('[role="group"]')
+      ) as HTMLElement
+      expect(control.getAttribute('aria-describedby')).toBe(help.id)
+    }
+    // ids stay unique across rows
+    const ids = Array.from(host.querySelectorAll('.eng-help')).map((el) => el.id)
+    expect(new Set(ids).size).toBe(ids.length)
+    act(() => root.unmount())
+  })
+
   it('reads the last value of a repeated name, as the server does', () => {
     const { host, root } = mount({ flags: 'HALOGEN_KV_SLOTS=1 HALOGEN_KV_SLOTS=6' })
     expect((q(host, 'engine-input-HALOGEN_KV_SLOTS') as HTMLInputElement).value).toBe('6')

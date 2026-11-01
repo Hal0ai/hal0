@@ -36,6 +36,8 @@ import {
   findHalogenDenied,
   findHalogenMalformed,
   findHalogenOutOfRange,
+  halogenValueProblem,
+  HALOGEN_MAX_VALUE_BYTES,
   screenCanon,
   tokenizeFlags,
   MANAGED_FLAG_SOURCE,
@@ -531,6 +533,14 @@ export function halogenFlagsError(text, { knobs, denied }) {
     const rest = malformed.length > 1 ? ` (also: ${malformed.slice(1).join(', ')})` : '';
     if (/^HALOGEN_[A-Z0-9_]+=$/.test(first)) {
       return `${first} needs a value — remove the token to leave it at the engine default.${rest}`;
+    }
+    const held = /^(HALOGEN_[A-Z0-9_]+)=([\s\S]+)$/.exec(first);
+    const problem = held ? halogenValueProblem(held[2]) : null;
+    if (problem === 'control') {
+      return `${held[1]} holds a control character (a tab or a line break, say), which the slot's unit file cannot carry. Rewrite the value without it.${rest}`;
+    }
+    if (problem === 'long') {
+      return `${held[1]} is longer than ${HALOGEN_MAX_VALUE_BYTES} bytes, which is all the slot's unit file can carry. Shorten the value.${rest}`;
     }
     return `“${first}” is not a HALOGEN_NAME=value setting — this runtime reads its tuning from HALOGEN_* variables, one NAME=value per token (quote a value that has spaces). Remove it or rewrite it.${rest}`;
   }

@@ -148,7 +148,9 @@ function SlotEngineBlock({ profile, engine, footprint, onDuplicate }) {
 				<EngineSettings
 					knobs={engine.knobs}
 					flags={flags}
-					readOnly={readOnly}
+					// Frozen while the save is in flight: `apply` closes over the draft from
+					// the click, so an edit made now would be dropped when it lands.
+					readOnly={readOnly || saving}
 					error={error}
 					onChange={(next) => setDraft({ base: stored, flags: next, sent: false })}
 				/>

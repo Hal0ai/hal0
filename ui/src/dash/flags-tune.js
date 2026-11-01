@@ -683,11 +683,23 @@ export function flagsEquivalent(a, b) {
 // knob rows ride on /api/system-info (`backends[<runner>].knob_denied` / `.knobs`).
 
 const ENV_TOKEN = /^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/;
-// The server's token shape (`_TOKEN` + a non-empty, single-line value).
-const HALOGEN_TOKEN = /^HALOGEN_[A-Z0-9_]+=[^\n]+$/;
+// The server's token shape (`_TOKEN` + a non-empty value).
+const HALOGEN_TOKEN = /^HALOGEN_[A-Z0-9_]+=([\s\S]+)$/;
+// What the unit file cannot carry in a value, refused by knobs.parse_env_tokens
+// (`_CONTROL_BYTE`, `_MAX_VALUE_BYTES`): any control byte (a line break, a tab,
+// DEL...) and more than this many UTF-8 bytes.
+const CONTROL_BYTE = /[\x00-\x1f\x7f]/;
+export const HALOGEN_MAX_VALUE_BYTES = 1024;
 // Longest digit string an int knob accepts (knobs._MAX_INT_DIGITS).
 const MAX_INT_DIGITS = 9;
 const ECHO_CHARS = 40;
+
+/** Why a HALOGEN_* value cannot be stored: 'control', 'long', or null when it can. */
+export function halogenValueProblem(value) {
+  if (CONTROL_BYTE.test(value)) return "control";
+  if (new TextEncoder().encode(value).length > HALOGEN_MAX_VALUE_BYTES) return "long";
+  return null;
+}
 
 const echo = (value) => (value.length <= ECHO_CHARS ? value : `${value.slice(0, ECHO_CHARS)}...`);
 
@@ -754,8 +766,8 @@ export function setEnvToken(text, name, value) {
 }
 
 // Tokens of `text` that are not `HALOGEN_NAME=value` (an llama flag, a bare
-// word, a lowercase name, a token with no value, a value with a line break),
-// by the spelling typed. Deduped, order-preserved; empty = clean. Text with an
+// word, a lowercase name, a token with no value, a value holding a control
+// byte or over 1024 bytes), by the spelling typed. Deduped, order-preserved; empty = clean. Text with an
 // unbalanced quote is the quote error's to report, so it yields [] here.
 export function findHalogenMalformed(text) {
   const { tokens, error } = scanFlagTokens(text);
@@ -763,7 +775,8 @@ export function findHalogenMalformed(text) {
   const seen = new Set();
   const out = [];
   for (const { value } of tokens) {
-    if (HALOGEN_TOKEN.test(value) || seen.has(value)) continue;
+    const m = HALOGEN_TOKEN.exec(value);
+    if ((m && !halogenValueProblem(m[1])) || seen.has(value)) continue;
     seen.add(value);
     out.push(value);
   }

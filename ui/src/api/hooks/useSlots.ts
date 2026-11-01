@@ -700,9 +700,14 @@ export function useSlotEdit() {
     // Voice section reflects fields that only live in the slot TOML (e.g.
     // default_voice) via useSlotConfig(['slot-config', name]); without this
     // the dropdown stays stale after a save and reverts on reopen.
+    //
+    // And the resolved readout: a Save that changes the profile, a tune
+    // `ctx_size` or `vision` moves a halogen slot's `resident_mb`, so a drawer
+    // reopened inside the readout's staleTime must not show the old figure.
     onSuccess: (_data, { name }) => {
       invalidate()
       qc.invalidateQueries({ queryKey: ['slot-config', name] })
+      qc.invalidateQueries({ queryKey: ['slot-resolved', name] })
     },
   })
 }

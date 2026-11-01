@@ -58,6 +58,8 @@ describe('slot lifecycle mutations invalidate the resolved readout', () => {
     ['useSlotUnload', hooks.useSlotUnload, 'flash'],
     ['useSlotRestart', hooks.useSlotRestart, 'flash'],
     ['useSlotSwap', hooks.useSlotSwap, { name: 'flash', model_id: 'm' }],
+    // A Save that moves the profile, a tune ctx_size or vision moves resident_mb.
+    ['useSlotEdit', hooks.useSlotEdit, { name: 'flash', body: { profile: 'p' } }],
   ])('%s', async (_label, useHook, vars) => {
     const probe = mount(useHook as () => Mutation)
     expect(stale(probe.qc, ['slot-resolved', 'flash'])).toBe(false)
