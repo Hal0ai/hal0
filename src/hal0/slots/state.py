@@ -323,6 +323,19 @@ class SlotModelRuntimeMismatch(SlotConfigError):
     status = 400
 
 
+class SlotHostUnsupported(SlotConfigError):
+    """The host cannot run this slot's runtime (halogen: gfx1151 only).
+
+    Raised by a runtime provider's ``preflight`` hook from
+    ``ContainerProvider.load_sync`` before any unit is written. Surfaced as 409:
+    the slot's runtime and this host's hardware conflict, and either one can
+    resolve it (another runtime, or a host with the supported GPU).
+    """
+
+    code = "slot.host_unsupported"
+    status = 409
+
+
 class NpuExclusivityViolation(SlotError):
     """Two ``device=npu, type=llm, enabled=true`` slots cannot coexist.
 
@@ -489,6 +502,7 @@ __all__ = [
     "SlotCrashLooping",
     "SlotError",
     "SlotHealthFailed",
+    "SlotHostUnsupported",
     "SlotModelRuntimeMismatch",
     "SlotNotFound",
     "SlotNotReady",

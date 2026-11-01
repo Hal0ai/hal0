@@ -197,6 +197,9 @@ def test_load_sync_prepares_before_it_starts_the_unit(_cache_dir_calls: list[str
     order: list[str] = []
     with (
         patch("hal0.providers.container.require_kfd_for_gpu_slot"),
+        # The host and file preflight reads the real sysfs and file system; it has
+        # its own tests (test_halogen_preflight.py), and this one is about ordering.
+        patch.object(HalogenProvider, "preflight"),
         patch.object(
             HalogenProvider, "prepare_load", side_effect=lambda cfg: order.append("prepare")
         ) as prepare,

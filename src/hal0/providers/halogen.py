@@ -43,7 +43,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +56,7 @@ from hal0.http_client import async_client
 from hal0.install.perms import ensure_shared_dir
 from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
 from hal0.providers.base import HealthCheck, Mount, Provider, RuntimeLaunchPlan
+from hal0.registry.detect import HALOGEN_TOKENIZER_JSON
 from hal0.runners.knobs import (
     HALOGEN_DENIED_ENV,
     HALOGEN_DENIED_PREFIXES,
@@ -69,7 +70,9 @@ from hal0.runners.knobs import (
 )
 from hal0.slots import output_sanity
 from hal0.slots.capacity import halogen_footprint_mb
+from hal0.slots.gtt_guard import GFX1151
 from hal0.slots.model_fit import model_runtime_mismatch
+from hal0.slots.state import SlotHostUnsupported
 from hal0.slots.tune import EffectiveTune, effective_tune
 
 log = logging.getLogger(__name__)
@@ -226,6 +229,30 @@ def _slot_model_default(slot_cfg: Mapping[str, Any]) -> str:
     return ""
 
 
+def _model_missing(
+    slot_cfg: Mapping[str, Any], message: str, **details: str
+) -> UnprocessableEntity:
+    """The ``slot.model_missing`` refusal: the engine must never start on a file it cannot read."""
+    return UnprocessableEntity(
+        message,
+        code="slot.model_missing",
+        details={"slot": str(slot_cfg.get("name") or ""), **details},
+    )
+
+
+def _gfx_name(version: int) -> str:
+    """``110501`` as ``gfx1151`` (major, then minor and stepping as hex digits)."""
+    return f"gfx{version // 10000}{version // 100 % 100:x}{version % 100:x}"
+
+
+def _gfx_version(raw: Any) -> int | None:
+    """One reported KFD gfx target as an integer; ``None`` for anything unreadable."""
+    try:
+        return int(str(raw).strip())
+    except ValueError:
+        return None
+
+
 class HalogenProvider(Provider):
     """Provider for the halogen Flash-Next engine (ROCm, one model family).
 
@@ -239,6 +266,11 @@ class HalogenProvider(Provider):
     #: ROCm-only image (``RUNNER_IMAGES["halogen"].supported_backends ==
     #: ("rocm",)``); ``container_spec`` forwards ``/dev/kfd``.
     gpu_runtime_needs_rocm = True
+
+    #: Ask the manager for its warn-only suspected-GTT-leak check before a load
+    #: (:meth:`hal0.slots.manager.SlotManager._guard_gtt_leak`): a stopped engine
+    #: that leaked its GPU memory leaves the next load short of it.
+    gtt_leak_guard = True
 
     #: The entrypoint's own stop is SIGTERM, 30 s, SIGKILL, up to 30 s more,
     #: then a GTT report; hal0 gives it 120 s and never removes the unit sooner.
@@ -353,11 +385,10 @@ class HalogenProvider(Provider):
 
         checkpoint = str(model_info.get("path") or "")
         if not checkpoint:
-            raise UnprocessableEntity(
+            raise _model_missing(
+                slot_cfg,
                 f"slot {slot_cfg.get('name')!r} has no halogen checkpoint to launch; "
                 "assign a model whose file is a .hgn checkpoint",
-                code="slot.model_missing",
-                details={"slot": str(slot_cfg.get("name") or "")},
             )
         model_id = str(model_info.get("_model_key") or _slot_model_default(slot_cfg))
 
@@ -429,6 +460,66 @@ class HalogenProvider(Provider):
             if parent and not _covers(store, parent):
                 roots.append(parent)
         return roots
+
+    # ── Host and file preflight ────────────────────────────────────────────────
+
+    def preflight(
+        self,
+        slot_cfg: Mapping[str, Any],
+        model_info: Mapping[str, Any],
+        *,
+        gfx_versions: Sequence[int | str],
+    ) -> None:
+        """Refuse a load this host or this model directory cannot serve, before any unit exists.
+
+        Called by :meth:`hal0.providers.container.ContainerProvider.load_sync`
+        with the host's KFD gfx targets (:func:`hal0.providers._gpu.kfd_gfx_target_versions`:
+        integers, ``110501`` for gfx1151, ``0`` for a CPU node, ``[]`` when the
+        topology cannot be read). The rules, in order:
+
+        * a non-empty target list with no gfx1151 in it raises
+          :class:`~hal0.slots.state.SlotHostUnsupported` (``slot.host_unsupported``,
+          409). ``[]`` is "cannot tell" and skips this rule, so a box whose sysfs is
+          not visible is never refused on a guess;
+        * the checkpoint file must exist, and so must the tokenizer beside it
+          (``tokenizer/tokenizer.json``), or ``slot.model_missing`` names the
+          missing path. The engine's entrypoint exits at start on either.
+
+        Reads the file system and nothing else: no network, no engine.
+        """
+        if gfx_versions:
+            found = {v for v in map(_gfx_version, gfx_versions) if v is not None}
+            if GFX1151 not in found:
+                targets = ", ".join(_gfx_name(v) for v in sorted(found) if v > 0)
+                seen = (
+                    f"this host reports {targets}" if targets else "this host reports no GPU target"
+                )
+                raise SlotHostUnsupported(
+                    f"the halogen engine runs only on gfx1151 (Strix Halo); {seen}",
+                    details={"slot": str(slot_cfg.get("name") or ""), "targets": sorted(found)},
+                )
+        checkpoint = str(model_info.get("path") or "")
+        if not checkpoint:
+            raise _model_missing(
+                slot_cfg,
+                f"slot {slot_cfg.get('name')!r} has no halogen checkpoint to launch; "
+                "assign a model whose file is a .hgn checkpoint",
+            )
+        if not Path(checkpoint).is_file():
+            raise _model_missing(
+                slot_cfg,
+                f"halogen checkpoint {checkpoint} does not exist; "
+                "restore the file or assign another model to the slot",
+                path=checkpoint,
+            )
+        tokenizer = Path(checkpoint).parent / HALOGEN_TOKENIZER_JSON
+        if not tokenizer.is_file():
+            raise _model_missing(
+                slot_cfg,
+                f"halogen tokenizer {tokenizer} not found beside the checkpoint {checkpoint}; "
+                "restore the checkpoint's tokenizer directory",
+                path=str(tokenizer),
+            )
 
     # ── Memory footprint ───────────────────────────────────────────────────────
 
