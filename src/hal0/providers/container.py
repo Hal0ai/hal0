@@ -81,6 +81,7 @@ from hal0.providers import podman_introspect
 from hal0.providers._gpu import (
     gpu_visibility_env,
     is_nvidia_gpu_device,
+    kfd_gfx_target_versions,
     nvidia_cdi_devices,
     require_kfd_for_gpu_slot,
     resolve_gpu_device_paths,
@@ -2554,6 +2555,15 @@ class ContainerProvider(Provider):
                     "model_id": str(model_info.get("_model_key") or model_info.get("id") or ""),
                 },
             )
+
+        # A runtime that can refuse a host it cannot run on (halogen: gfx1151
+        # only, a checkpoint with its tokenizer beside it) says so here, before
+        # ANY unit is written. The provider owns the rule; this seam only hands it
+        # the host's KFD gfx targets, read lazily so no other runtime pays for the
+        # sysfs walk. Raises whatever it refuses with (a ``SlotConfigError``).
+        preflight = getattr(spec_provider, "preflight", None)
+        if preflight is not None:
+            preflight(slot_cfg, model_info, gfx_versions=kfd_gfx_target_versions())
 
         # Loud-fail for NPU slots only: a missing FLM tag must not silently
         # fall through to FLM's legacy build_env default. Kokoro/ComfyUI are

@@ -1493,6 +1493,16 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "check_api_journal_access",
         lambda **_kw: Check("api-journal", "API journal read", "pass", "stubbed"),
     )
+    # GTT-leak row reads the host's amdgpu counters + KFD table otherwise.
+    gtt_leak_slots: list = []
+    monkeypatch.setattr(
+        da,
+        "check_gtt_leak",
+        lambda slots=None, **_kw: (
+            gtt_leak_slots.append(slots),
+            Check("gtt_leak", "GPU memory leak", "pass", "stubbed"),
+        )[1],
+    )
 
     monkeypatch.setattr(
         da,
@@ -1502,8 +1512,9 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
 
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
-    # Verify rows plus the extra evidence rows.
-    assert keys[-39:] == [
+    assert gtt_leak_slots == [[{"port": 8081}]]
+    # Verify rows plus the extra evidence rows (one more: gtt-leak).
+    assert keys[-40:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1516,6 +1527,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "hal0_target",
         "secret-modes",
         "hardware_freshness",
+        "gtt_leak",
         "seed_context_envelope",
         "agent-uid",
         "api-journal",
@@ -2996,3 +3008,132 @@ def test_hermes_dashboard_token_unreadable_is_not_reported_missing(  # type: ign
     assert c.status == "warn"
     assert c.detail.startswith("could not run this check as this user")
     assert "missing" not in c.detail
+
+
+# ── check_gtt_leak ────────────────────────────────────────────────────────────
+
+_GIB = 1024.0
+
+
+def _gtt_sample(gtt_used_mb: float | None):  # type: ignore[no-untyped-def]
+    from hal0.hardware.gpu_view import GPUMemorySample
+
+    return GPUMemorySample(
+        vendor="amd",
+        is_uma=True,
+        vram_total_mb=512.0,
+        gtt_total_mb=98304.0 if gtt_used_mb is not None else None,
+        total_mb=98304.0,
+        vram_used_mb=100.0,
+        gtt_used_mb=gtt_used_mb,
+        used_mb=gtt_used_mb,
+        gpu_busy=0.0,
+        util_is_forced_high=False,
+    )
+
+
+def _kfd_sysfs(root: Path, *, procs: int | None) -> str:
+    """A fake ``/sys`` whose KFD proc table holds ``procs`` processes (None = no KFD)."""
+    if procs is not None:
+        proc = root / "class" / "kfd" / "kfd" / "proc"
+        proc.mkdir(parents=True)
+        for pid in range(procs):
+            (proc / str(1000 + pid)).mkdir()
+    return str(root)
+
+
+def test_gtt_leak_warns_with_the_guards_message(tmp_path: Path) -> None:
+    from hal0.slots.gtt_guard import gtt_leak_message
+
+    c = da.check_gtt_leak(
+        [],
+        sample=_gtt_sample(40 * _GIB),
+        sys_root=_kfd_sysfs(tmp_path, procs=0),
+    )
+    assert c.key == "gtt_leak" and c.status == "warn"
+    expected = gtt_leak_message(
+        gtt_used_mb=40 * _GIB, resident_gpu_mb=0.0, resident_gpu_slots=0, kfd_procs=0
+    )
+    assert expected is not None and c.detail == expected
+    assert "halogen-flash-server issue #79" in c.detail
+    assert "A host reboot is required" in c.detail
+
+
+def test_gtt_leak_passes_on_a_healthy_vulkan_only_box(tmp_path: Path) -> None:
+    """Review Focus 3: two Vulkan residents hold the GTT, KFD proc table empty."""
+    slots = [
+        {"name": "brain", "state": "ready", "backend": "vulkan"},
+        {"name": "coder", "state": "serving", "backend": "vulkan"},
+    ]
+    c = da.check_gtt_leak(
+        slots,
+        sample=_gtt_sample(38 * _GIB),
+        sys_root=_kfd_sysfs(tmp_path, procs=0),
+    )
+    assert c.status == "pass"
+
+
+def test_gtt_leak_an_npu_resident_does_not_hide_a_leak(tmp_path: Path) -> None:
+    slots = [{"name": "flm", "state": "ready", "backend": "flm"}]
+    c = da.check_gtt_leak(
+        slots,
+        sample=_gtt_sample(40 * _GIB),
+        sys_root=_kfd_sysfs(tmp_path, procs=0),
+    )
+    assert c.status == "warn"
+
+
+def test_gtt_leak_passes_when_a_kfd_process_holds_the_gpu(tmp_path: Path) -> None:
+    c = da.check_gtt_leak(
+        [],
+        sample=_gtt_sample(40 * _GIB),
+        sys_root=_kfd_sysfs(tmp_path, procs=1),
+    )
+    assert c.status == "pass"
+
+
+def test_gtt_leak_passes_when_the_kfd_table_is_unreadable(tmp_path: Path) -> None:
+    c = da.check_gtt_leak(
+        [],
+        sample=_gtt_sample(40 * _GIB),
+        sys_root=_kfd_sysfs(tmp_path, procs=None),
+    )
+    assert c.status == "pass"
+    assert "kfd" in c.detail.lower()
+
+
+def test_gtt_leak_passes_when_the_gpu_memory_is_small(tmp_path: Path) -> None:
+    c = da.check_gtt_leak(
+        [],
+        sample=_gtt_sample(2 * _GIB),
+        sys_root=_kfd_sysfs(tmp_path, procs=0),
+    )
+    assert c.status == "pass" and "2.0 GiB" in c.detail
+
+
+def test_gtt_leak_without_amdgpu_counters_passes() -> None:
+    c = da.check_gtt_leak([], sample=_gtt_sample(None))
+    assert c.status == "pass" and c.detail == "no amdgpu counters"
+
+
+def test_gtt_leak_a_failing_sample_reads_as_no_counters(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom() -> None:
+        raise OSError("no sysfs")
+
+    monkeypatch.setattr("hal0.hardware.gpu_view.sample", boom)
+    c = da.check_gtt_leak([])
+    assert c.status == "pass" and c.detail == "no amdgpu counters"
+
+
+def test_gtt_leak_skips_when_the_slot_list_is_unavailable(tmp_path: Path) -> None:
+    """Without the slot list a leak cannot be told from slot memory (a Vulkan-only
+    box looks identical), so the row says it skipped instead of crying leak."""
+    root = _kfd_sysfs(tmp_path, procs=0)
+    for payload in (None, {"error": "x"}):
+        c = da.check_gtt_leak(payload, sample=_gtt_sample(40 * _GIB), sys_root=root)
+        assert c.status == "pass" and "slot list" in c.detail
+
+
+def test_gtt_leak_with_no_arguments_reads_the_live_host() -> None:
+    c = da.check_gtt_leak()
+    assert c.key == "gtt_leak" and c.status in {"pass", "warn"}

@@ -25,6 +25,7 @@ probing the host at spec-build time.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import stat
@@ -382,6 +383,61 @@ def converge_kfd_device_group(
             "(the gid INSIDE the container), then pct stop/start."
         )
     return "changed", f"{kfd_path}: gid {st.st_gid} -> {target}, mode 0660"
+
+
+#: KFD's sysfs root, under ``/sys``: ``proc/<pid>/`` per process holding the
+#: compute device, ``topology/nodes/<n>/properties`` per CPU/GPU node.
+_KFD_SYSFS = ("class", "kfd", "kfd")
+
+
+def kfd_proc_count(sys_root: str = "/sys") -> int | None:
+    """How many processes hold the ROCm compute device right now, else ``None``.
+
+    One entry per process under ``<sys_root>/class/kfd/kfd/proc``. ``None`` is
+    "cannot tell" (no KFD, sysfs not visible, an unreadable table) and is NOT
+    ``0``: the GTT-leak guard (:mod:`hal0.slots.gtt_guard`) refuses a load only
+    on a positive zero, so an unreadable table must never read as one.
+
+    A Vulkan process holds GPU memory through the DRM render node and never
+    appears here, which is why ``0`` alone does not mean "nothing holds the GPU".
+    """
+    proc = os.path.join(sys_root, *_KFD_SYSFS, "proc")
+    try:
+        with os.scandir(proc) as entries:
+            return sum(1 for _ in entries)
+    except OSError:
+        return None
+
+
+def kfd_gfx_target_versions(sys_root: str = "/sys") -> list[int]:
+    """Every KFD topology node's ``gfx_target_version``, in node order.
+
+    Read from ``<sys_root>/class/kfd/kfd/topology/nodes/<n>/properties`` (lines
+    of ``<name> <value>``). Strix Halo's iGPU reports ``110501`` (gfx1151); a
+    CPU node reports ``0``, and is included. A node without the property, or
+    with a value that is not an integer, is skipped. ``[]`` when the topology is
+    unreadable, which a caller must treat as "cannot tell" rather than as "no
+    supported GPU".
+    """
+    nodes_dir = os.path.join(sys_root, *_KFD_SYSFS, "topology", "nodes")
+    try:
+        names = [n for n in os.listdir(nodes_dir) if n.isdigit()]
+    except OSError:
+        return []
+    versions: list[int] = []
+    for name in sorted(names, key=int):
+        try:
+            with open(os.path.join(nodes_dir, name, "properties"), encoding="utf-8") as fh:
+                lines = fh.read().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            key, _, value = line.partition(" ")
+            if key == "gfx_target_version":
+                with contextlib.suppress(ValueError):
+                    versions.append(int(value.strip()))
+                break
+    return versions
 
 
 def render_node_present(

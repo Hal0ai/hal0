@@ -231,6 +231,19 @@ class SlotSpawnFailed(SlotError):
     status = 500
 
 
+class SlotGttLeak(SlotSpawnFailed):
+    """The host holds GPU memory that nothing accounts for; only a reboot frees it.
+
+    Raised by ``SlotManager._guard_gtt_leak`` before a unit is written, for a
+    provider that asks for the guard (:mod:`hal0.slots.gtt_guard` owns the rule).
+    A ``SlotSpawnFailed`` subclass, so every caller that already handles a load
+    that did not start keeps handling this one; the message names the cause and
+    the remedy instead of the opaque allocation failure the engine would hit.
+    """
+
+    code = "slot.gtt_leak"
+
+
 class SlotHealthFailed(SlotError):
     """Health probe did not converge within the grace window."""
 
@@ -488,6 +501,7 @@ __all__ = [
     "SlotConfigError",
     "SlotCrashLooping",
     "SlotError",
+    "SlotGttLeak",
     "SlotHealthFailed",
     "SlotModelRuntimeMismatch",
     "SlotNotFound",

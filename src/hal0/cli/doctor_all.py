@@ -256,6 +256,63 @@ def check_hardware_freshness() -> Check:
     )
 
 
+def check_gtt_leak(
+    slots: Any = None,
+    *,
+    sample: Any = None,
+    sys_root: str = "/sys",
+) -> Check:
+    """GPU memory held by a dead process that only a host reboot frees.
+
+    The same rule the halogen load guard enforces
+    (:func:`hal0.slots.gtt_guard.gtt_leak_message`), so the doctor names the
+    state before an operator tries a load and watches it fail: unexplained amdgpu
+    GTT above the threshold, no GPU slot resident or loading, and no process on
+    the KFD proc table. ``warn``, never ``fail``: nothing here is broken in hal0,
+    and the remedy is the host's.
+
+    ``slots`` is the ``GET /api/slots`` body the roll-up already fetched. A box
+    running only Vulkan slots looks identical to a leak without it (Vulkan never
+    appears on the KFD table), so a missing slot list skips the check instead of
+    guessing. ``sample`` (a ``GPUMemorySample``) and ``sys_root`` are the test
+    seams; by default the live amdgpu counters and ``/sys`` are read.
+    """
+    from hal0.providers._gpu import kfd_proc_count
+    from hal0.slots.gtt_guard import gtt_leak_message, slot_may_hold_gpu_memory
+
+    name, title = "gtt_leak", "GPU memory leak"
+    if sample is None:
+        try:
+            from hal0.hardware import gpu_view
+
+            sample = gpu_view.sample()
+        except Exception:  # a read-only row must never raise
+            sample = None
+    gtt_used_mb = getattr(sample, "gtt_used_mb", None)
+    if gtt_used_mb is None:
+        return Check(name, title, _PASS, "no amdgpu counters")
+    in_use = f"{gtt_used_mb / 1024.0:.1f} GiB of GPU memory in use"
+    if not isinstance(slots, list):
+        return Check(name, title, _PASS, f"{in_use}; slot list unavailable, leak check skipped")
+    kfd_procs = kfd_proc_count(sys_root)
+    holders = [s for s in slots if isinstance(s, dict) and slot_may_hold_gpu_memory(s)]
+    # ``resident_gpu_mb=0.0`` is exact whenever it matters: a leak needs zero
+    # holders, and with any holder the rule returns None whatever the figure.
+    message = gtt_leak_message(
+        gtt_used_mb=gtt_used_mb,
+        resident_gpu_mb=0.0,
+        resident_gpu_slots=len(holders),
+        kfd_procs=kfd_procs,
+    )
+    if message is not None:
+        return Check(name, title, _WARN, message)
+    if kfd_procs is None:
+        return Check(
+            name, title, _PASS, f"{in_use}; KFD process table unreadable, leak check skipped"
+        )
+    return Check(name, title, _PASS, f"{in_use}, none unexplained")
+
+
 def check_seed_context_envelope(*, slots_dir: Path | None = None) -> Check:
     """A slot profile's ``ctx_size`` must fit this box's memory envelope (#1868).
 
@@ -3132,6 +3189,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_hal0_target(),
         check_secret_file_modes(),
         check_hardware_freshness(),
+        check_gtt_leak(slots_payload),
         check_seed_context_envelope(),
         check_agent_uid_isolation(),
         check_api_journal_access(),
