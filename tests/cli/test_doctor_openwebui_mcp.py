@@ -147,8 +147,13 @@ def test_env_with_a_wrong_url_or_key_fails(box: _Box) -> None:
 def test_a_connection_that_sends_the_key_off_the_box_fails(box: _Box) -> None:
     box.render(box.mint(), url="https://api.openai.com")
     c = box.check()
-    assert c.status == "fail" and "api.openai.com" in c.detail
-    assert "would send the key there" in c.detail
+    assert c.status == "fail"
+    # The whole message is pinned (not a bare host substring): the host the key would go to,
+    # then hal0's own expected URL.
+    assert c.detail.startswith(
+        "hal0-memory points at api.openai.com instead of hal0 "
+        "(http://host.docker.internal:8080/mcp/memory/mcp), and would send the key there"
+    )
 
 
 def test_a_rotated_away_key_fails_without_printing_either_key(box: _Box) -> None:
