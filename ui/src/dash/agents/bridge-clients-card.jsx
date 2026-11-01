@@ -329,6 +329,11 @@ function ActiveRuns({ name }) {
   return <span data-testid="bridge-active-runs">active runs <b>{n}</b></span>;
 }
 
+// hal0-api mints this client for Open WebUI's MCP tool servers and writes its key into
+// openwebui.env itself (hal0.bridge.managed, created_by "system:openwebui").
+const OWUI_MANAGED_BY = "system:openwebui";
+const OWUI_MANAGED_TIP = "hal0 minted this key for Open WebUI and renders it into Open WebUI's env file. Rotate and Scopes re-render it.";
+
 function ClientRow({ c, now, busy, off, onScopes, onRotate, onRevoke }) {
   const fmt = window.__hal0BridgeFmt;
   const Icon = window.Icon;
@@ -358,6 +363,9 @@ function ClientRow({ c, now, busy, off, onScopes, onRotate, onRevoke }) {
           <div className="desc">{c.note || "no note"}</div>
         </span>
         <span className="mcp-meta">
+          {c.created_by === OWUI_MANAGED_BY ? (
+            <span className="chip" data-testid="bridge-managed" title={OWUI_MANAGED_TIP}>managed by Open WebUI</span>
+          ) : null}
           {revoked ? <span className="chip err" data-testid="bridge-revoked">revoked</span> : null}
           <ScopeChips scopes={c.scopes} />
         </span>
@@ -412,6 +420,7 @@ function BridgeClientsCard() {
   const items = (clientsQ.data && clientsQ.data.items) || [];
   const active = items.filter((c) => c.revoked_at == null).length;
   const busy = rotate.isPending || revoke.isPending;
+  const revokingManaged = items.some((c) => c.name === revoking && c.created_by === OWUI_MANAGED_BY);
 
   // The key view is whatever add or rotate last resolved with. It lives in the hook state (not a
   // useState set by the click handler) so a call re-run after the sign-in drawer shows it too.
@@ -526,7 +535,11 @@ function BridgeClientsCard() {
         onCancel={() => setRevoking(null)}
         onConfirm={confirmRevoke}
         title={"Revoke " + revoking + "?"}
-        message="Its key stops working immediately, and the name stays taken so it cannot be reused."
+        message={
+          revokingManaged
+            ? "Open WebUI loses hal0's memory and agent tools immediately. hal0 does not re-mint a revoked client, and the name stays taken so it cannot be reused."
+            : "Its key stops working immediately, and the name stays taken so it cannot be reused."
+        }
         confirmLabel="Revoke"
         destructive
       />

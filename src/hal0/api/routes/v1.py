@@ -523,6 +523,70 @@ def _is_pinned_owned(request: Request, model_id: str) -> bool:
         return False
 
 
+#: The shape of an Open WebUI chat id hal0 will turn into a Hermes session id.
+_OWUI_CHAT_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _owui_hermes_adjust(
+    chat_id: str, headers: dict[str, str], body: bytes
+) -> tuple[dict[str, str], bytes]:
+    """The one non-verbatim step of the Hermes relay, for a request from Open WebUI.
+
+    Applied only to a chat request for a Hermes-profile model that carries
+    ``X-OpenWebUI-Chat-Id`` (Open WebUI sends it when
+    ``ENABLE_FORWARD_USER_INFO_HEADERS`` is on; ``[openwebui]
+    hermes_session_from_chat_id`` gates the caller). Two edits, both documented in
+    ADR-0035 (decision 8 note):
+
+    * R4: when the client sent no ``X-Hermes-Session-Id`` and the chat id is a safe
+      token, derive ``X-Hermes-Session-Id: owui-<chat id>`` so one Open WebUI chat is
+      one Hermes session. The id is a selector, not a credential, and a malformed
+      one is dropped rather than sanitised.
+    * R5: drop ``tools`` and ``tool_choice`` from the JSON body. Open WebUI would
+      attach its own tools and loop on ``delta.tool_calls``; a Hermes profile has
+      its memory and admin tools already. Every other field is kept.
+
+    A body that is not a JSON object is returned as it came.
+    """
+    out_headers = dict(headers)
+    if "x-hermes-session-id" not in out_headers and _OWUI_CHAT_ID.fullmatch(chat_id):
+        out_headers["x-hermes-session-id"] = f"owui-{chat_id}"
+    try:
+        parsed = json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        return out_headers, body
+    if not isinstance(parsed, dict) or not ({"tools", "tool_choice"} & parsed.keys()):
+        return out_headers, body
+    parsed.pop("tools", None)
+    parsed.pop("tool_choice", None)
+    return out_headers, json.dumps(parsed).encode("utf-8")
+
+
+def _apply_owui_hermes_adjust(request: Request, call: Any) -> None:
+    """Run :func:`_owui_hermes_adjust` on ``call`` when its conditions hold.
+
+    Conditions: a chat-completions request, ``X-OpenWebUI-Chat-Id`` present, the
+    selected upstream is a Hermes profile (``managed_by="agent:hermes"``), and
+    ``[openwebui].hermes_session_from_chat_id`` on (a bare app without the lifespan
+    behaves like the schema default).
+    """
+    chat_id = request.headers.get("x-openwebui-chat-id")
+    if chat_id is None or not request.url.path.endswith("/chat/completions"):
+        return
+    from hal0.agents.hermes_upstreams import MANAGED_BY
+    from hal0.config.schema import OpenWebUIConfig
+
+    upstreams = getattr(request.app.state, "upstreams", None)
+    upstream = upstreams.get(call.upstream_name) if upstreams is not None else None
+    if getattr(upstream, "managed_by", None) != MANAGED_BY:
+        return
+    cfg = getattr(request.app.state, "hal0_config", None)
+    owui = getattr(cfg, "openwebui", None) or OpenWebUIConfig()
+    if not owui.hermes_session_from_chat_id:
+        return
+    call.headers, call.body = _owui_hermes_adjust(chat_id, call.headers, call.body)
+
+
 async def _slot_thinking_default(
     request: Request, model_id: str, slot_name: str | None = None
 ) -> bool | None:
@@ -941,6 +1005,7 @@ async def _dispatch_and_forward(
     call = None
     try:
         call = await dispatcher.dispatch(request, body=body)
+        _apply_owui_hermes_adjust(request, call)
         # Remember the most recent model we sent to this upstream so the
         # dashboard's synthetic slot reflects what's actually being used,
         # not the first-non-alias from the catalog.

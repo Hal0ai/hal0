@@ -40,6 +40,7 @@ const SERVICES_PAYLOAD = {
         documents: true,
         images: false,
         web_search: false,
+        mcp: true,
         embed_model: 'nomic-embed-text-v1.5',
         image_model: null,
       },
@@ -173,8 +174,8 @@ test.describe('Services v3 (/services)', () => {
 
     const chips = page.getByTestId('svcp-wired-openwebui')
     await expect(chips).toBeVisible()
-    // On chips (chat/voice/documents) show the "serving" dot tone.
-    for (const key of ['chat', 'voice', 'documents']) {
+    // On chips (chat/voice/documents/mcp) show the "serving" dot tone.
+    for (const key of ['chat', 'voice', 'documents', 'mcp']) {
       await expect(page.getByTestId(`svcp-wired-${key}`)).toHaveClass(/\bon\b/)
     }
     // Off chips (images/web_search — no ComfyUI slot, no search provider bound).

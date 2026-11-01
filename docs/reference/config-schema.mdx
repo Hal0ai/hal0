@@ -24,7 +24,7 @@ below) — see [Environment variables](/docs/reference/env-vars/) for the full l
 
 | File | Format | Purpose |
 |---|---|---|
-| `/etc/hal0/hal0.toml` | TOML | Main config — `[meta]`, `[slots]`, `[dispatcher]`, `[telemetry]`, `[updates]`, `[models]`, `[memory]`, `[activity]`, `[brain_chat]`, `[security]`, `[network]`, `[bridge]`, `[realtime]`, `[metrics]` (the last is read independently of the rest — see below). |
+| `/etc/hal0/hal0.toml` | TOML | Main config — `[meta]`, `[slots]`, `[dispatcher]`, `[telemetry]`, `[updates]`, `[models]`, `[memory]`, `[activity]`, `[brain_chat]`, `[security]`, `[network]`, `[bridge]`, `[openwebui]`, `[realtime]`, `[metrics]` (the last is read independently of the rest — see below). |
 | `/etc/hal0/slots/<name>.toml` | TOML | One file per slot. |
 | `/etc/hal0/providers.toml` | TOML | Local cloud-provider API entries (`[[provider]]`). |
 | `/etc/hal0/upstreams.toml` | TOML | Remote/cloud LLM upstream entries (`[[upstream]]`). |
@@ -258,6 +258,15 @@ and [ADR-0043](/docs/adr/0043-agent-bridge-and-bridge-keys).
 | `max_concurrent_runs_per_client` | int | `2` | `1-16`. How many Hermes runs one client may have in flight; a start past the limit is refused until one finishes. Applies to the next start request, no restart |
 | `run_retention_days` | int | `7` | `1-365`. How long delegated runs and their recorded events are kept before the maintenance pass deletes them. Applies at the next pass, no restart |
 | `clarify_timeout_s` | int | `900` | `60-3600`. How long a run waits for the calling agent to answer a clarifying question before it is stopped with "clarification unanswered". Applies to the next question, no restart |
+
+### `[openwebui]`
+
+`extra="forbid"`. How hal0 treats requests that arrive from Open WebUI. See
+[ADR-0035](/docs/adr/0035-hermes-openai-api-as-v1-upstreams) decision 8.
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `hermes_session_from_chat_id` | bool | `true` | For a chat request to a Hermes-profile model that carries `X-OpenWebUI-Chat-Id`: send `X-Hermes-Session-Id: owui-<chat id>` to Hermes when the client sent no session header (the chat id must be 1-64 letters, digits, `_` or `-`), and drop `tools` and `tool_choice` from the body, because a Hermes profile already has hal0's memory and admin tools. Off: every request to Hermes is relayed unchanged. Applies to the next request, no restart |
 
 ### `[realtime]`
 

@@ -3612,6 +3612,29 @@ class RealtimeConfig(BaseModel):
     )
 
 
+class OpenWebUIConfig(BaseModel):
+    """``[openwebui]`` — how hal0 treats requests that arrive from Open WebUI.
+
+    ``extra="forbid"`` (P3-schema Part C leaf-table policy, same as ``[bridge]``):
+    a typo'd key must fail loudly instead of silently leaving the flag on.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    hermes_session_from_chat_id: bool = Field(
+        default=True,
+        description=(
+            "For a request to a Hermes-profile model that carries "
+            "X-OpenWebUI-Chat-Id: send X-Hermes-Session-Id: owui-<chat id> to "
+            "Hermes when the client sent no session header (one Open WebUI chat "
+            "is one Hermes session), and drop `tools` and `tool_choice` from the "
+            "body, because Hermes already has memory and admin tools of its own. "
+            "Off = every request to Hermes is relayed unchanged. Applies to the "
+            "next request."
+        ),
+    )
+
+
 class Hal0Config(BaseModel):
     """Top-level hal0.toml pydantic model.
 
@@ -3637,6 +3660,7 @@ class Hal0Config(BaseModel):
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     network: NetworkConfig = Field(default_factory=NetworkConfig)
     bridge: BridgeConfig = Field(default_factory=BridgeConfig)
+    openwebui: OpenWebUIConfig = Field(default_factory=OpenWebUIConfig)
     realtime: RealtimeConfig = Field(default_factory=RealtimeConfig)
 
 

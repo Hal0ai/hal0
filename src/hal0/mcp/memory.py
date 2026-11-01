@@ -307,6 +307,7 @@ async def _memory_add(
     client_id: str | None,
     private: bool,
     preflight: Callable[[], Awaitable[None]] | None = None,
+    provenance: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """memory_add(text, dataset?, tags?, metadata?, document_id?, entities?,
     observation_scopes?, strategy?, update_mode?, sync?)
@@ -340,6 +341,13 @@ async def _memory_add(
       - ``source``: NOT accepted from the caller. Server-injected from
         ``client_id`` so callers cannot lie about their identity,
         keeping the audit trail grounded.
+
+    ``provenance`` is server-derived (never caller-supplied): ``user`` adds a
+    ``user:<name>`` tag and ``chat_id`` fills ``metadata.chat_id`` when the
+    caller sent none. It is deliberately not ``metadata.session_id``: the provider
+    turns a session id into the document id (``<agent>:<session_id>``), so every
+    note from one chat would share a document and each ``memory_add`` would
+    replace the last.
 
     ``operation_id``/``operation_ids``/``items_count`` appear whenever the
     engine reports them (Hindsight retain is async by default) — poll
@@ -382,6 +390,13 @@ async def _memory_add(
         raise MemorySchemaError("update_mode must be 'replace' or 'append'")
     sync = _optional_bool(args, "sync", default=False)
     source = client_id or "anonymous"
+    if provenance:
+        user = provenance.get("user")
+        if user:
+            tags = [*tags, f"user:{user}"]
+        chat_id = provenance.get("chat_id")
+        if chat_id and "chat_id" not in metadata_raw:
+            metadata_raw = {**metadata_raw, "chat_id": chat_id}
     if preflight is not None:
         await preflight()
     result = await wrapper.add(
@@ -1206,6 +1221,7 @@ def make_dispatcher(
     private_resolver: Any = None,
     approval_queue: Any = None,
     add_preflight: Callable[[], Awaitable[None]] | None = None,
+    provenance_resolver: Any = None,
 ):
     """Return an async dispatcher closure bound to ``wrapper``.
 
@@ -1235,6 +1251,9 @@ def make_dispatcher(
     runs only for ``memory_add``; a :class:`~hal0.errors.Hal0Error` it raises
     is returned with its own stable ``code`` and ``details`` rather than the
     generic ``mcp.memory_failed``.
+
+    ``provenance_resolver`` returns the ``{"user", "chat_id"}`` annotations
+    for the current request; applied to ``memory_add`` only.
     """
 
     async def _dispatch(tool: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -1254,6 +1273,8 @@ def make_dispatcher(
         extra: dict[str, Any] = {}
         if tool == "memory_add" and add_preflight is not None:
             extra["preflight"] = add_preflight
+        if tool == "memory_add" and provenance_resolver is not None:
+            extra["provenance"] = provenance_resolver() or None
 
         async def _run(call_args: dict[str, Any]) -> dict[str, Any]:
             payload = await handler(
@@ -1437,6 +1458,7 @@ def build_server(
     name: str = "hal0-memory",
     client_id_resolver: Any = None,
     private_resolver: Any = None,
+    provenance_resolver: Any = None,
     approval_queue: Any = None,
     add_preflight: Callable[[], Awaitable[None]] | None = None,
     state: Any = None,
@@ -1481,7 +1503,11 @@ def build_server(
         name,
         tools=_memory_tool_definitions().values(),
         state=state,
-        hooks={"client_id_resolver": client_id_resolver, "private_resolver": private_resolver},
+        hooks={
+            "client_id_resolver": client_id_resolver,
+            "private_resolver": private_resolver,
+            "provenance_resolver": provenance_resolver,
+        },
     )
 
 
@@ -1507,6 +1533,7 @@ async def _dispatch(ctx: ToolContext | None, tool: str, args: dict[str, Any]) ->
         state.memory_provider,
         client_id_resolver=server.hal0_hooks.get("client_id_resolver"),
         private_resolver=server.hal0_hooks.get("private_resolver"),
+        provenance_resolver=server.hal0_hooks.get("provenance_resolver"),
         approval_queue=getattr(state, "approval_queue", None),
         add_preflight=getattr(state, "mcp_memory_add_preflight", None),
     )

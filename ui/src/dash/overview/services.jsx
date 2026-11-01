@@ -11,7 +11,7 @@ import { useEditorAccess } from '../image/useEditorAccess'
 
 // The four companions lead, in this order; any other service follows (servicesForWidget orders and caps).
 const SERVICE_ORDER = ['openwebui', 'comfyui', 'hermes', 'n8n']
-const WIRED_KEYS = ['chat', 'voice', 'documents', 'images', 'web_search']
+const WIRED_KEYS = ['chat', 'voice', 'documents', 'images', 'web_search', 'mcp']
 
 export function OvServices({ onGo }) {
   const svc = useServices()

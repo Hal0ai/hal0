@@ -1397,6 +1397,11 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
     )
     monkeypatch.setattr(
         da,
+        "check_openwebui_mcp",
+        lambda **_kw: Check("openwebui_mcp", "Open WebUI MCP tools", "pass", "stubbed"),
+    )
+    monkeypatch.setattr(
+        da,
         "check_hermes_generation_extras",
         lambda **_kw: Check("hermes_generation", "Hermes pm generation", "pass", "stubbed"),
     )
@@ -1474,8 +1479,8 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
 
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
-    # 7 verify rows + 32 extras.
-    assert keys[-33:] == [
+    # 7 verify rows + 33 extras.
+    assert keys[-34:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1500,6 +1505,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "hermes_brain_memory",
         "bridge-store",
         "agent-bridge",
+        "openwebui_mcp",
         "hermes_generation",
         "hermes_command_approvals",
         "hermes_delegation_slot",

@@ -275,6 +275,9 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     "bridge.max_concurrent_runs_per_client": {"apply_class": "immediate", "services": []},
     "bridge.run_retention_days": {"apply_class": "immediate", "services": []},
     "bridge.clarify_timeout_s": {"apply_class": "immediate", "services": []},
+    # [openwebui] — read per /v1 request off app.state.hal0_config, which the
+    # settings PUT refreshes in place.
+    "openwebui.hermes_session_from_chat_id": {"apply_class": "immediate", "services": []},
     # [slots] — network_mode is baked into each slot's rendered quadlet
     # unit the same way publish_host is; preload_evict_* are SlotManager
     # constructor args fixed at create_app time.

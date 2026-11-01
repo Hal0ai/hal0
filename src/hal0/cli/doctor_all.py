@@ -1746,6 +1746,201 @@ def _bridge_schema_latest() -> int:
     return max(available_versions(MIGRATIONS_DIR), default=0)
 
 
+#: scope -> the ``info.id`` of the MCP connection ``openwebui.env`` renders for it
+#: (mirrors ``hal0.openwebui.env_writer._MCP_MOUNTS``, the one writer).
+_OWUI_MCP_IDS: dict[str, str] = {
+    "memory": "hal0-memory",
+    "agents": "hal0-agents",
+    "admin": "hal0-admin",
+}
+
+_OWUI_ADD_HOST = "--add-host=host.docker.internal:host-gateway"
+
+
+def _read_openwebui_client(db: Path) -> tuple[str, dict[str, Any] | None]:
+    """``("ok", row)``, ``("absent", None)`` or ``("unreadable", None)`` for client ``openwebui``.
+
+    Opened ``mode=ro`` like :func:`check_bridge_store`: a doctor run must not create
+    ``bridge.db`` or apply a migration. The row carries the key's sha256 digest (never the
+    key, which hal0 does not store) so :func:`check_openwebui_mcp` can compare it with the
+    rendered key without verifying it, which would stamp ``last_seen_at``.
+    """
+    if not db.exists():
+        return "absent", None
+    if not os.access(db, os.R_OK):
+        return "unreadable", None
+    try:
+        conn = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True, timeout=2.0)
+        try:
+            row = conn.execute(
+                "SELECT created_by, revoked_at, scopes, key_hash FROM clients WHERE name = ?",
+                ("openwebui",),
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return "unreadable", None
+    if row is None:
+        return "absent", None
+    created_by, revoked_at, scopes, key_hash = row
+    return "ok", {
+        "created_by": created_by,
+        "revoked": revoked_at is not None,
+        "scopes": frozenset(s for s in str(scopes or "").split(",") if s),
+        "key_hash": key_hash,
+    }
+
+
+def check_openwebui_mcp(
+    *,
+    enabled: bool | None = None,
+    db_path: Path | None = None,
+    env_path: Path | None = None,
+    unit_path: Path | None = None,
+) -> Check:
+    """Open WebUI reaches hal0's MCP servers with the ``openwebui`` bridge key.
+
+    The chain is: ``[bridge].enabled`` -> a bridge client ``openwebui`` that hal0
+    minted (``created_by`` ``system:openwebui``) and has not been revoked -> a
+    ``TOOL_SERVER_CONNECTIONS`` line in ``openwebui.env`` with one connection per
+    scope the client holds, each keyed with a ``hal0bk_openwebui.`` key -> an
+    installed unit that passes ``--add-host=host.docker.internal:host-gateway`` so
+    the container can reach hal0 at all. The row reads files only and never prints a
+    key. It compares the rendered key's sha256 with the client's stored digest (read-only)
+    rather than verifying it, which would stamp ``last_seen_at``.
+
+    * Open WebUI unit not installed: PASS, nothing to wire.
+    * Bridge disabled, no client yet, a foreign or revoked client, an unreadable
+      store, a unit without ``--add-host`` (upgraded boxes keep their first-install
+      unit, #3160): WARN with the repair.
+    * The client exists but the env has no block, its connections differ from the
+      client's scopes, a connection sends the key to a host other than this box, or
+      the rendered key is not the client's current one: FAIL. Open WebUI has no hal0
+      tools (or hands the key to the wrong place) although the bridge says it should;
+      ``hal0 bridge rotate openwebui`` re-renders it.
+
+    ADVISORY (never critical): Open WebUI keeps working without its tools.
+    """
+    from urllib.parse import urlsplit
+
+    from hal0.bridge import keys as bridge_keys
+    from hal0.openwebui import env_writer, image_pin
+
+    key, label = "openwebui_mcp", "Open WebUI MCP tools"
+    hal0_origin = env_writer._HAL0_V1_URL.rstrip("/").removesuffix("/v1")
+    unit = unit_path if unit_path is not None else image_pin.installed_unit_path()
+    if not unit.exists():
+        return Check(key, label, _PASS, "Open WebUI is not installed")
+    if enabled is None:
+        enabled = _bridge_config_enabled()
+    if not enabled:
+        return Check(
+            key,
+            label,
+            _WARN,
+            "bridge disabled ([bridge].enabled = false): Open WebUI has no hal0 tools; "
+            "enable it and restart hal0-api",
+        )
+    db = db_path if db_path is not None else paths.bridge_db()
+    state, client = _read_openwebui_client(db)
+    if state == "unreadable":
+        return Check(key, label, _WARN, f"cannot read {db}; run hal0 doctor as hal0 or root")
+    if client is None:
+        return Check(
+            key,
+            label,
+            _WARN,
+            "no openwebui bridge client yet: hal0-api mints it at its next start; restart hal0-api",
+        )
+    if client["created_by"] != "system:openwebui":
+        return Check(
+            key,
+            label,
+            _WARN,
+            f"bridge client 'openwebui' was created by {client['created_by']!r}, not by hal0: "
+            "hal0 does not adopt or replace it and renders nothing from it, so Open WebUI has no "
+            "hal0 tools. Revoking it does not hand the name to hal0 (a revoked name stays taken, "
+            "ADR-0043)",
+        )
+    if client["revoked"]:
+        return Check(
+            key,
+            label,
+            _WARN,
+            "bridge client 'openwebui' is revoked: Open WebUI has no hal0 tools, and hal0 does "
+            "not re-mint a revoked client (the name stays taken, ADR-0043)",
+        )
+    env = env_path if env_path is not None else paths.openwebui_env()
+    raw = env_writer._read_existing_env(env).get("TOOL_SERVER_CONNECTIONS", "")
+    # In render order (memory, agents, admin), not the order of a set of scopes: the row's
+    # message must read the same on every run.
+    want = {ident: scope for scope, ident in _OWUI_MCP_IDS.items() if scope in client["scopes"]}
+    rotate = "run `hal0 bridge rotate openwebui` to re-render it"
+    if not raw:
+        return Check(
+            key,
+            label,
+            _FAIL,
+            f"client 'openwebui' exists but {env.name} has no TOOL_SERVER_CONNECTIONS: "
+            f"Open WebUI has no hal0 tools; {rotate}",
+        )
+    try:
+        entries = jsonlib.loads(raw)
+        have = {
+            e["info"]["id"]: e
+            for e in entries
+            if isinstance(e, dict) and isinstance(e.get("info"), dict)
+        }
+    except (ValueError, KeyError, TypeError):
+        return Check(
+            key, label, _FAIL, f"TOOL_SERVER_CONNECTIONS in {env.name} is not valid JSON; {rotate}"
+        )
+    problems: list[str] = []
+    if missing := sorted(set(want) - set(have)):
+        problems.append(f"missing connection(s) {', '.join(missing)}")
+    if extra := sorted(set(have) - set(want)):
+        problems.append(f"connection(s) {', '.join(extra)} are no longer in the client's scopes")
+    for ident, scope in want.items():
+        entry = have.get(ident)
+        if entry is None:
+            continue
+        url = str(entry.get("url", ""))
+        expected = f"{hal0_origin}/mcp/{scope}/mcp"
+        if url != expected:
+            # The bearer key goes wherever the URL does. The render only ever writes hal0's
+            # own origin, so anything else was edited in.
+            try:
+                host = urlsplit(url).hostname
+            except ValueError:
+                host = None
+            problems.append(
+                f"{ident} points at {host or 'an unreadable URL'} instead of hal0 ({expected}), "
+                "and would send the key there"
+            )
+        entry_key = str(entry.get("key", ""))
+        if bridge_keys.name_of(entry_key) != "openwebui":
+            problems.append(f"{ident} carries no openwebui bridge key")
+        elif client.get("key_hash") and bridge_keys.hash_key(entry_key) != client["key_hash"]:
+            problems.append(f"{ident} carries a key the openwebui client no longer accepts")
+    if problems:
+        return Check(key, label, _FAIL, f"{'; '.join(problems)}; {rotate}")
+    try:
+        unit_text = unit.read_text(encoding="utf-8")
+    except OSError as exc:
+        return Check(key, label, _WARN, f"cannot read {unit}: {exc}")
+    if _OWUI_ADD_HOST not in unit_text:
+        return Check(
+            key,
+            label,
+            _WARN,
+            f"the installed {unit.name} has no {_OWUI_ADD_HOST}: the container cannot reach "
+            "hal0 at host.docker.internal, so its MCP tools fail (an upgrade keeps the "
+            "first-install unit, #3160); reinstall the unit and restart hal0-openwebui",
+        )
+    scopes = ", ".join(sorted(want.values()))
+    return Check(key, label, _PASS, f"{len(have)} connection(s) rendered for scopes: {scopes}")
+
+
 def check_bridge_store(
     *,
     path: Path | None = None,
@@ -2752,6 +2947,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_hermes_brain_memory(),
         check_bridge_store(api_running=payloads["health"] is not None),
         check_agent_bridge(base=base),
+        check_openwebui_mcp(),
         check_hermes_generation_extras(),
         check_hermes_command_approvals(),
         check_hermes_delegation_slot(slots_payload),

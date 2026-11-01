@@ -420,3 +420,107 @@ enabled = true
     )
     overrides = resolve_dynamic_env_overrides()
     assert overrides["ENABLE_IMAGE_GENERATION"] is None
+
+
+# ── MCP / agents signals on the wiring status ───────────────────────────────
+
+
+def test_wiring_status_mcp_and_agents_signals(tmp_hal0_home: str) -> None:
+    from hal0.openwebui.wiring import openwebui_wiring_status
+
+    class _Up:
+        name = "hermes"
+        managed_by = "agent:hermes"
+        owned_models = ("hermes-agent",)
+
+    class _Reg:
+        def list(self):
+            return [_Up()]
+
+    assert openwebui_wiring_status(mcp=True)["mcp"] is True
+    assert openwebui_wiring_status(mcp=False)["mcp"] is False
+    assert openwebui_wiring_status(upstreams=_Reg())["agents"] == ["hermes-agent"]
+    assert openwebui_wiring_status(upstreams=_Reg(), hermes_api_down=True)["agents"] == []
+
+
+def test_resolve_threads_bridge_key_and_mcp(tmp_hal0_home: str) -> None:
+    from hal0.openwebui.wiring import resolve_dynamic_env_overrides
+
+    on = resolve_dynamic_env_overrides(bridge_key="hal0bk_x.y", mcp_enabled=True)
+    assert json.loads(on["TOOL_SERVER_CONNECTIONS"])[0]["key"] == "hal0bk_x.y"
+    assert resolve_dynamic_env_overrides(mcp_enabled=False)["TOOL_SERVER_CONNECTIONS"] is None
+
+
+def _enable_bridge(home: str) -> None:
+    etc = Path(home) / "etc" / "hal0"
+    etc.mkdir(parents=True, exist_ok=True)
+    (etc / "hal0.toml").write_text("[bridge]\nenabled = true\n", encoding="utf-8")
+
+
+def test_resolve_never_creates_bridge_db(tmp_hal0_home: str) -> None:
+    """Root installer path: bridge on, no DB yet → no file is created (spec B1)."""
+    from hal0.config import paths
+    from hal0.openwebui.wiring import resolve_dynamic_env_overrides
+
+    _enable_bridge(tmp_hal0_home)
+    assert not paths.bridge_db().exists()
+    out = resolve_dynamic_env_overrides()
+    assert out["TOOL_SERVER_CONNECTIONS"] is None
+    assert not paths.bridge_db().exists()
+
+
+def test_resolve_scopes_from_stored_client(tmp_hal0_home: str) -> None:
+    from hal0.bridge.store import BridgeStore
+    from hal0.config import paths
+    from hal0.openwebui.wiring import resolve_dynamic_env_overrides
+
+    _enable_bridge(tmp_hal0_home)
+    store = BridgeStore(paths.bridge_db())
+    store.open()
+    store.add_client("openwebui", "test", scopes=["agents", "memory", "admin"])
+    out = resolve_dynamic_env_overrides(bridge_key="hal0bk_x.y")
+    ids = [e["info"]["id"] for e in json.loads(out["TOOL_SERVER_CONNECTIONS"])]
+    assert "hal0-admin" in ids
+    out = resolve_dynamic_env_overrides(bridge_key="hal0bk_x.y", bridge_scopes=["memory"])
+    ids = [e["info"]["id"] for e in json.loads(out["TOOL_SERVER_CONNECTIONS"])]
+    assert ids == ["hal0-memory"]
+
+
+# ── the MCP connections (and the bridge key) only ever point at hal0's own origin ──
+
+
+@pytest.mark.parametrize(
+    "urls",
+    [
+        None,
+        "https://api.openai.com/v1;http://host.docker.internal:8080/v1",
+        "https://api.openai.com/v1;https://api.mistral.ai/v1",
+        "http://10.9.8.7:9999/v1;http://other/v1",
+        "http://host.docker.internal:11434/v1",
+        "https://host.docker.internal.evil.example/v1",
+    ],
+)
+def test_mcp_base_url_is_hal0s_origin_whatever_the_provider_list_says(
+    tmp_hal0_home: str, urls: str | None
+) -> None:
+    from hal0.openwebui import wiring
+
+    target = Path(tmp_hal0_home) / "etc" / "hal0" / "openwebui.env"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if urls is not None:
+        target.write_text(f"OPENAI_API_BASE_URLS={urls}\n", encoding="utf-8")
+    assert wiring._mcp_base_url() == "http://host.docker.internal:8080"
+
+
+def test_the_bridge_key_is_never_rendered_for_a_foreign_origin(tmp_hal0_home: str) -> None:
+    from hal0.openwebui.wiring import resolve_dynamic_env_overrides
+
+    etc = Path(tmp_hal0_home) / "etc" / "hal0"
+    etc.mkdir(parents=True, exist_ok=True)
+    (etc / "openwebui.env").write_text(
+        "OPENAI_API_BASE_URLS=https://api.openai.com/v1;http://host.docker.internal:8080/v1\n",
+        encoding="utf-8",
+    )
+    out = resolve_dynamic_env_overrides(bridge_key="hal0bk_x.y", mcp_enabled=True)
+    urls = [e["url"] for e in json.loads(out["TOOL_SERVER_CONNECTIONS"])]
+    assert urls and all(u.startswith("http://host.docker.internal:8080/mcp/") for u in urls)

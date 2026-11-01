@@ -21,7 +21,7 @@ route) — never the installer's cold ``python -m hal0.openwebui.env_writer``
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from hal0.capabilities.config import CapabilityConfig, load_capabilities_config
@@ -56,6 +56,8 @@ def openwebui_wiring_status(
     *,
     upstreams: Any | None = None,
     model_cache: Mapping[str, list[str]] | None = None,
+    mcp: bool | None = None,
+    hermes_api_down: bool = False,
 ) -> dict[str, Any]:
     """Live truth behind both the dashboard's wired chips and the dynamic
     env blocks.
@@ -74,7 +76,10 @@ def openwebui_wiring_status(
 
     ``agents`` lists the model ids Hermes profiles answer as; it needs the
     live upstream registry, so callers outside the API process (the env
-    writer) omit it and get ``[]``.
+    writer) omit it and get ``[]``; ``hermes_api_down`` (the Hermes API doctor
+    state) empties it too. ``mcp`` is true when ``[bridge].enabled`` and a bridge
+    client named ``openwebui`` exists; callers that already know pass it, otherwise
+    it is read through the bridge store (fail-soft to ``False``).
     """
     cfg = load_capabilities_config()
     embed_sel = _selection(cfg, "embed", "embed")
@@ -90,8 +95,50 @@ def openwebui_wiring_status(
         "web_search": False,
         "embed_model": embed_model or None,
         "image_model": image_model,
-        "agents": _agent_model_ids(upstreams, model_cache),
+        "agents": [] if hermes_api_down else _agent_model_ids(upstreams, model_cache),
+        "mcp": _bridge_mcp_ready() if mcp is None else mcp,
     }
+
+
+def _bridge_client() -> Any | None:
+    """The ``openwebui`` bridge client row, or ``None``. Read-only and fail-soft.
+
+    Never creates ``bridge.db``: the image-model installer renders this as root,
+    and a root-owned file there would lock hal0-api out. Absent file, bridge
+    disabled or any error all read as "no client".
+    """
+    try:
+        from hal0.bridge.store import BridgeStore
+        from hal0.config import paths
+        from hal0.config.loader import load_hal0_config
+
+        if not load_hal0_config().bridge.enabled:
+            return None
+        db = paths.bridge_db()
+        if not db.exists():
+            return None
+        return BridgeStore(db).get_client("openwebui")
+    except Exception:
+        return None
+
+
+def _bridge_mcp_ready() -> bool:
+    """``[bridge].enabled`` and a bridge client named ``openwebui`` exists. Fail-soft."""
+    return _bridge_client() is not None
+
+
+def _mcp_base_url() -> str:
+    """The origin the MCP connections, and so the bridge key, are sent to: hal0's own.
+
+    ``/v1`` is the one URL ``env_writer`` treats as "hal0" (``_HAL0_V1_URL``); an
+    ``OPENAI_API_BASE_URLS`` entry for any other address is an operator's own provider and is
+    never given hal0's keys (see ``_apply_client_key``). The MCP origin follows the same rule,
+    so it is that URL minus ``/v1`` whatever the editable list says: the bearer key must not
+    follow a first entry such as ``https://api.openai.com/v1`` to another party.
+    """
+    from hal0.openwebui import env_writer
+
+    return env_writer._HAL0_V1_URL.rstrip("/").removesuffix("/v1")
 
 
 def _renderable_image_model(model_id: str) -> str | None:
@@ -118,15 +165,35 @@ def _renderable_image_model(model_id: str) -> str | None:
     return resolved.id
 
 
-def resolve_dynamic_env_overrides() -> dict[str, str | None]:
+def resolve_dynamic_env_overrides(
+    bridge_key: str | None = None,
+    mcp_enabled: bool | None = None,
+    bridge_scopes: Iterable[str] | None = None,
+) -> dict[str, str | None]:
     """Live capability state → the overrides dict
     :func:`~hal0.openwebui.env_writer.write_openwebui_env` merges in.
+
+    ``bridge_key`` is the ``openwebui`` bridge client's key when the caller holds
+    one; ``mcp_enabled`` is whether the MCP block is wanted at all (``None`` reads
+    it from the bridge store, as :func:`openwebui_wiring_status` does).
     """
-    status = openwebui_wiring_status()
+    status = openwebui_wiring_status(mcp=mcp_enabled)
+    scopes: frozenset[str] | None = None
+    if bridge_scopes is not None:
+        scopes = frozenset(bridge_scopes)
+    elif status["mcp"]:
+        client = _bridge_client()
+        if client is not None:
+            scopes = frozenset(client.scopes)
+    extra: dict[str, Any] = {"bridge_scopes": scopes} if scopes else {}
     return dynamic_env_overrides(
         embed_model_id=status["embed_model"],
         image_model_id=status["image_model"],
         search_provider=_search_provider_lookup(),
+        bridge_key=bridge_key,
+        mcp_enabled=bool(status["mcp"]),
+        mcp_base_url=_mcp_base_url(),
+        **extra,
     )
 
 

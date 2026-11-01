@@ -40,6 +40,7 @@ class FakeHermes(ThreadingHTTPServer):
     def __init__(self, port: int = 0) -> None:
         super().__init__(("127.0.0.1", port), _Handler)
         self.received: list[dict[str, Any]] = []
+        self.received_headers: list[dict[str, str]] = []
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -97,6 +98,7 @@ class _Handler(BaseHTTPRequestHandler):
         if scope is None or not self._authed(scope[0]):
             return
         self.server.received.append(json.loads(raw))
+        self.server.received_headers.append({k.lower(): v for k, v in self.headers.items()})
         self._send(200, SSE_BODY.encode(), "text/event-stream")
 
 
@@ -243,3 +245,99 @@ def test_hermes_down_at_boot_fails_fast_then_routes_after_reconcile(
             assert [m["model"] for m in server.received] == ["coder"]
         finally:
             _stop(server, thread)
+
+
+# ── Open WebUI chat → Hermes session; no client tools on Hermes models (R4/R5) ──
+
+_TOOLS = [{"type": "function", "function": {"name": "t", "parameters": {"type": "object"}}}]
+
+
+def _chat(model: str, **extra: Any) -> dict[str, Any]:
+    return {
+        "model": model,
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": True,
+        **extra,
+    }
+
+
+def test_owui_chat_id_becomes_hermes_session(
+    hermes_client: TestClient, fake_hermes: FakeHermes
+) -> None:
+    r = hermes_client.post(
+        "/v1/chat/completions",
+        json=_chat("coder"),
+        headers={
+            "X-OpenWebUI-Chat-Id": "abc-123",
+            "X-OpenWebUI-User-Name": "Alexander",
+            "X-OpenWebUI-User-Email": "alexander@example.com",
+            "X-OpenWebUI-User-Id": "u-1",
+            "X-OpenWebUI-User-Role": "admin",
+        },
+    )
+    assert r.status_code == 200, r.text
+    sent = fake_hermes.received_headers[-1]
+    assert sent["x-hermes-session-id"] == "owui-abc-123"
+    # No Open WebUI header reaches Hermes (none is on the forwardable list): the
+    # user's name, email, id and role stay with hal0.
+    assert not [h for h in sent if h.startswith("x-openwebui-")]
+
+
+def test_client_session_header_wins(hermes_client: TestClient, fake_hermes: FakeHermes) -> None:
+    r = hermes_client.post(
+        "/v1/chat/completions",
+        json=_chat("coder"),
+        headers={"X-OpenWebUI-Chat-Id": "abc", "X-Hermes-Session-Id": "mine"},
+    )
+    assert r.status_code == 200, r.text
+    assert fake_hermes.received_headers[-1]["x-hermes-session-id"] == "mine"
+
+
+@pytest.mark.parametrize("chat_id", ["has space", "a" * 65, "semi;colon", "dot.dot"])
+def test_malformed_chat_id_adds_no_session_header(
+    hermes_client: TestClient, fake_hermes: FakeHermes, chat_id: str
+) -> None:
+    r = hermes_client.post(
+        "/v1/chat/completions",
+        json=_chat("coder", tools=_TOOLS),
+        headers={"X-OpenWebUI-Chat-Id": chat_id},
+    )
+    assert r.status_code == 200, r.text
+    assert "x-hermes-session-id" not in fake_hermes.received_headers[-1]
+    # The header is still the Open WebUI marker: client tools never reach Hermes.
+    assert "tools" not in fake_hermes.received[-1]
+
+
+def test_tools_stripped_for_hermes_from_owui(
+    hermes_client: TestClient, fake_hermes: FakeHermes
+) -> None:
+    r = hermes_client.post(
+        "/v1/chat/completions",
+        json=_chat("coder", tools=_TOOLS, tool_choice="auto", temperature=0.2),
+        headers={"X-OpenWebUI-Chat-Id": "abc"},
+    )
+    assert r.status_code == 200, r.text
+    body = fake_hermes.received[-1]
+    assert "tools" not in body and "tool_choice" not in body
+    assert body["temperature"] == 0.2 and body["model"] == "coder"
+
+
+def test_request_without_owui_header_is_relayed_verbatim(
+    hermes_client: TestClient, fake_hermes: FakeHermes
+) -> None:
+    sent = _chat("coder", tools=_TOOLS, tool_choice="auto")
+    r = hermes_client.post("/v1/chat/completions", json=sent)
+    assert r.status_code == 200, r.text
+    assert fake_hermes.received[-1] == sent
+    assert "x-hermes-session-id" not in fake_hermes.received_headers[-1]
+
+
+def test_flag_off_relays_verbatim(hermes_client: TestClient, fake_hermes: FakeHermes) -> None:
+    hermes_client.app.state.hal0_config.openwebui.hermes_session_from_chat_id = False
+    sent = _chat("coder", tools=_TOOLS, tool_choice="auto")
+    r = hermes_client.post(
+        "/v1/chat/completions", json=sent, headers={"X-OpenWebUI-Chat-Id": "abc"}
+    )
+    assert r.status_code == 200, r.text
+    assert fake_hermes.received[-1] == sent
+    assert "x-hermes-session-id" not in fake_hermes.received_headers[-1]

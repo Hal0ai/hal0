@@ -11,6 +11,13 @@ agents, and the third item (the admin MCP server calls REST as itself) for
 bridge principals only. The rest of ADR-0024 stays open; see "Relationship to
 other records".
 
+**Amended (2026-11-01).** The bridge is no longer inert on a box that has the
+Open WebUI unit. hal0-api mints a client named `openwebui` (`created_by`
+`system:openwebui`, scopes `agents` and `memory`; `admin` only on the
+operator's say-so) the first time it starts with the bridge on, renders its
+key into `openwebui.env` as MCP tool-server connections, and re-renders on
+rotate, re-scope and revoke. See "Managed client for Open WebUI" below.
+
 The first change under this record ships the keys, the store, the credential
 tier, the REST and CLI surface, the config section and a doctor row. The
 second ships Decisions 8 and 9, the `hal0-agents` server and its run tools;
@@ -307,6 +314,57 @@ ADR-0035 was verified against), shapes the answer:
     request is made and the version is `null`. Only a version-shaped answer is
     reported (a dotted numeric core with at most a short tag that starts with
     a separator), so a secret cannot pass for a version.
+
+### Managed client for Open WebUI
+
+Open WebUI reaches `/mcp/memory`, `/mcp/agents` and, as an opt-in,
+`/mcp/admin` with one bridge key that hal0 itself holds, so hal0-api creates
+the client rather than asking the operator to (`hal0.bridge.managed`).
+
+- **Who may mint.** Only the `hal0` service account, and only through the
+  `bridge_store()` singleton. `reconcile_openwebui_env` is also reached from the
+  image-model installer as root; a root caller renders what exists and never
+  creates a row, which could leave `bridge.db` or its `-wal`/`-shm` root-owned
+  and lock hal0-api out.
+- **Ownership.** The row is stamped `created_by = "system:openwebui"`. An
+  `openwebui` client with any other `created_by` is the operator's: hal0 does
+  not adopt it, renders no MCP block, and the `openwebui_mcp` doctor row warns.
+- **Scopes.** `agents` and `memory` by default. `admin` is an operator opt-in
+  (`hal0 bridge scopes openwebui agents memory admin`); the render follows the
+  client's current scopes, one connection per scope, each with the tool
+  allow-list `hal0.openwebui.env_writer` carries for `memory` and `agents`
+  (Open WebUI's per-connection `function_name_filter_list`). The `agents` list
+  includes `agent_run_answer`, because `agent_run_wait` tells its caller to use
+  it for a run that asks a clarifying question.
+- **Where the key goes.** Into `TOOL_SERVER_CONNECTIONS` in `openwebui.env`
+  (mode `0600`, the file that already carries the box's client key), as a bearer
+  token on each connection. A bridge key is the only credential on these mounts,
+  so Open WebUI never holds an admin key. The connection URLs are always hal0's
+  own origin (`http://host.docker.internal:8080`, the one `/v1` URL `env_writer`
+  treats as hal0's), never derived from the operator-editable
+  `OPENAI_API_BASE_URLS`: a first entry for another provider must not receive the
+  key. Renders are serialised in hal0-api, so a render that re-reads the key from the
+  file cannot write an old key over a rotated one.
+- **Re-render on every change.** Rotate, re-scope and revoke of this client
+  schedule an env re-render; the plaintext key from a rotate is passed straight
+  to the render and not stored elsewhere. A revoked client keeps its name, so
+  hal0 does not mint a replacement; the render drops the block.
+- **Request headers.** With `ENABLE_FORWARD_USER_INFO_HEADERS` on, Open WebUI
+  sends `X-OpenWebUI-User-Name` and `X-OpenWebUI-Chat-Id` on its MCP calls. For
+  a bridge principal named `openwebui` only, `/mcp/memory` turns them into a
+  `user:<name>` tag and `metadata.chat_id` on `memory_add`. For any other
+  principal the headers change nothing. The chat id is deliberately not
+  `metadata.session_id`: the memory provider derives the document id
+  `<agent>:<session_id>` from a session id, so every note of a chat would share
+  one document and each write would replace the last.
+- **Host allowlist.** `host.docker.internal` joins the MCP mounts' host and
+  origin floor, because that is the name the container reaches hal0 by. It
+  resolves only from containers on the box.
+- **Memory asymmetry.** Writes through the teach tools (`agent_memory_add`)
+  still land in the Hermes profile's private namespace unless the caller asks
+  for the shared one, while Hermes's own notes and Open WebUI's `memory_add`
+  are shared by default (ADR-0035 decision 9). The two are different writers
+  with different defaults on purpose.
 
 ### Implementation decisions (second change)
 

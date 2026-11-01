@@ -32,6 +32,7 @@ import hashlib
 import os
 import re
 from typing import TYPE_CHECKING, Any
+from urllib.parse import unquote
 
 import structlog
 from starlette.requests import Request
@@ -66,8 +67,15 @@ _AGENT_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_\-]{1,64}$")
 # Localhost values FastMCP itself uses when it auto-enables DNS-rebinding
 # protection for a 127.0.0.1 server. We keep them as the secure floor so
 # the default posture is unchanged even when an operator widens the set.
-_LOCALHOST_HOSTS = ("127.0.0.1:*", "localhost:*", "[::1]:*")
-_LOCALHOST_ORIGINS = ("http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*")
+# ``host.docker.internal`` is the podman host-gateway name, resolvable only from
+# containers on this box (the Open WebUI unit passes ``--add-host`` for it).
+_LOCALHOST_HOSTS = ("127.0.0.1:*", "localhost:*", "[::1]:*", "host.docker.internal:*")
+_LOCALHOST_ORIGINS = (
+    "http://127.0.0.1:*",
+    "http://localhost:*",
+    "http://[::1]:*",
+    "http://host.docker.internal:*",
+)
 
 
 def _resolve_bearer(request: Request) -> str | None:
@@ -172,7 +180,8 @@ def _mcp_transport_security() -> TransportSecuritySettings:
 
     hal0 removed network auth entirely and binds ``0.0.0.0`` on
     the trusted LAN, so the mount has to be reachable by its real host
-    name. The allowlist is the secure localhost floor, plus the names this
+    name. The allowlist is the secure localhost floor (plus ``host.docker.internal``,
+    the podman host-gateway name the Open WebUI container uses), plus the names this
     box answers to (:func:`_box_hosts_and_origins`: LAN addresses, hostname,
     mDNS name, public URL, each bare and with the API port, so a bridge client
     on another machine connects without setup), plus whatever the operator
@@ -337,6 +346,41 @@ def client_id_resolver() -> str:
     return candidate
 
 
+_OWUI_CLIENT = "openwebui"
+_OWUI_USER_HEADER = "x-openwebui-user-name"
+_OWUI_CHAT_HEADER = "x-openwebui-chat-id"
+_USER_TAG_JUNK = re.compile(r"[^a-z0-9_-]+")
+
+
+def normalise_user_tag(raw: str) -> str:
+    """Lowercase, collapse runs outside ``[a-z0-9_-]`` to ``-``, cap at 64."""
+    return _USER_TAG_JUNK.sub("-", raw.strip().lower()).strip("-")[:64]
+
+
+def provenance_resolver() -> dict[str, str]:
+    """Open WebUI user/chat annotations for the current memory write.
+
+    Empty unless the judged principal is the bridge client named ``openwebui``
+    (ADR-0043): the headers only annotate, they never establish identity. Read
+    off the live MCP request, never the mount-time scope. Open WebUI sends the
+    user name percent-encoded.
+    """
+    request = _current_mcp_request()
+    if request is None:
+        return {}
+    principal = judged_principal(request)
+    if principal.tier != "bridge" or principal.name != _OWUI_CLIENT:
+        return {}
+    out: dict[str, str] = {}
+    user = normalise_user_tag(unquote(request.headers.get(_OWUI_USER_HEADER, "")))
+    if user:
+        out["user"] = user
+    chat = request.headers.get(_OWUI_CHAT_HEADER, "").strip()
+    if chat:
+        out["chat_id"] = chat[:128]
+    return out
+
+
 def private_resolver() -> bool:
     """Return whether the calling client toggled ``--private`` mode.
 
@@ -475,6 +519,7 @@ def mount_mcp_servers(
             state=app.state,
             client_id_resolver=client_id_resolver,
             private_resolver=private_resolver,
+            provenance_resolver=provenance_resolver,
         )
         memory_server.settings.transport_security = transport_security
         memory_app: ASGIApp = memory_server.streamable_http_app()

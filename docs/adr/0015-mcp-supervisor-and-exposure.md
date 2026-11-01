@@ -197,6 +197,12 @@ equivalent write path in this codebase today; wiring either is new
 infrastructure, not a join, and is explicitly out of this ADR's scope —
 setting either flag `true` returns `501 mcp.exposure_unsupported`.
 
+*Note (2026-11-01).* The built-in `hal0-memory`, `hal0-agents` and (opt-in)
+`hal0-admin` servers do reach Open WebUI, but through the agent bridge, not
+through this exposure flag: hal0 renders them into `openwebui.env` with a
+bridge key (ADR-0043, "Managed client for Open WebUI"). User-installed servers
+stay `501`.
+
 ### 4. CLI verbs
 
 `src/hal0/cli/mcp_commands.py` gains:

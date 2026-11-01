@@ -109,6 +109,9 @@ _EXPECTED_EXTRA_POLICY: dict[str, str] = {
     # [bridge] — agent bridge limits (ADR-0043). Forbid: a typo'd key must
     # fail loudly, never silently leave a limit at its default.
     "BridgeConfig": "forbid",
+    # [openwebui] — Open WebUI request handling. Forbid: a leaf table, a typo'd
+    # key must fail loudly rather than silently leave the flag on.
+    "OpenWebUIConfig": "forbid",
 }
 
 
