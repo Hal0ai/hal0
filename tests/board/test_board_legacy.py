@@ -1,0 +1,255 @@
+"""Legacy hal0 board → Hermes kanban one-shot converter (ADR-0046)."""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from hal0.board import BoardNotInstalled, BoardUnreachable, BoardUpstreamError
+from hal0.board.legacy import convert_legacy_board, run_once
+
+# Carried copy of the 005 board schema (the migration file is deleted from the tree).
+LEGACY_SCHEMA = """
+CREATE TABLE board (
+    slug TEXT PRIMARY KEY, name TEXT NOT NULL, icon TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '', is_current INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+    updated_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+    revision INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE board_column (
+    status TEXT PRIMARY KEY, label TEXT NOT NULL, position INTEGER NOT NULL,
+    visible INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE card (
+    id TEXT PRIMARY KEY,
+    board_slug TEXT NOT NULL REFERENCES board(slug) ON DELETE CASCADE,
+    title TEXT NOT NULL DEFAULT '', status TEXT NOT NULL REFERENCES board_column(status),
+    assignee TEXT, tenant TEXT, priority INTEGER NOT NULL DEFAULT 0, workspace TEXT,
+    created_by TEXT, body TEXT, block_reason TEXT, schedule TEXT, summary TEXT,
+    created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+    updated_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+    revision INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE card_comment (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    card_id TEXT NOT NULL REFERENCES card(id) ON DELETE CASCADE,
+    author TEXT, body TEXT NOT NULL DEFAULT '', at REAL NOT NULL DEFAULT 0);
+CREATE TABLE card_link (
+    parent_id TEXT NOT NULL REFERENCES card(id) ON DELETE CASCADE,
+    child_id TEXT NOT NULL REFERENCES card(id) ON DELETE CASCADE,
+    PRIMARY KEY (parent_id, child_id));
+CREATE TABLE card_run (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    card_id TEXT NOT NULL REFERENCES card(id) ON DELETE CASCADE,
+    state TEXT NOT NULL, profile TEXT, dur TEXT, msg TEXT, at REAL NOT NULL DEFAULT 0);
+CREATE TABLE card_event (
+    cursor INTEGER PRIMARY KEY AUTOINCREMENT, board_slug TEXT, card_id TEXT,
+    kind TEXT NOT NULL, json TEXT, at REAL NOT NULL DEFAULT 0);
+CREATE TABLE board_orchestration (id INTEGER PRIMARY KEY CHECK (id = 1), default_assignee TEXT);
+CREATE TABLE board_profile (name TEXT PRIMARY KEY, label TEXT NOT NULL DEFAULT '');
+INSERT INTO board_column (status, label, position) VALUES
+ ('triage','triage',0),('todo','todo',1),('scheduled','scheduled',2),('ready','ready',3),
+ ('running','in-progress',4),('blocked','blocked',5),('review','review',6),
+ ('done','done',7),('archived','archived',8);
+"""
+
+NOW = 1_762_000_000.0  # 2025-11-01
+
+
+def _db(tmp_path: Path, cards: list[tuple[str, str, str]] | None) -> Path:
+    path = tmp_path / "hal0.db"
+    conn = sqlite3.connect(path)
+    if cards is not None:
+        conn.executescript(LEGACY_SCHEMA)
+        conn.execute("INSERT INTO board (slug, name, description) VALUES ('default','Default','d')")
+        conn.execute("INSERT INTO board (slug, name) VALUES ('ops','Ops')")
+        for cid, status, slug in cards:
+            conn.execute(
+                "INSERT INTO card (id, board_slug, title, status, assignee, tenant, priority, body)"
+                " VALUES (?, ?, ?, ?, 'worker', 'acme', 3, 'body text')",
+                (cid, slug, f"title {cid}", status),
+            )
+    conn.commit()
+    conn.close()
+    return path
+
+
+def _tables(path: Path) -> set[str]:
+    conn = sqlite3.connect(path)
+    try:
+        return {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    finally:
+        conn.close()
+
+
+class FakeClient:
+    """Records Hermes requests; dedups creates on idempotency_key like Hermes."""
+
+    def __init__(self) -> None:
+        self.boards: list[str] = ["default"]
+        self.known: set[str] = set()  # task ids present in Hermes
+        self.by_key: dict[str, str] = {}
+        self.created: list[dict[str, Any]] = []
+        self.created_boards: list[dict[str, Any]] = []
+        self.updates: list[tuple[str, dict[str, Any]]] = []
+        self.fail_create_at: int | None = None
+        self.fail_exc: Exception | None = None
+        self.archive_rejected = False
+        self._n = 0
+
+    async def list_boards(self, **_: Any) -> Any:
+        return {"boards": [{"slug": s, "name": s} for s in self.boards], "current": "default"}
+
+    async def create_board(self, body: Any, **_: Any) -> Any:
+        self.created_boards.append(body)
+        self.boards.append(body["slug"])
+        return {"board": body}
+
+    async def get_task(self, task_id: str, **_: Any) -> Any:
+        if task_id in self.known:
+            return {"task": {"id": task_id}}
+        err = BoardUpstreamError("nope")
+        err.status = 404
+        raise err
+
+    async def create_task(self, body: Any, *, board: str | None = None, **_: Any) -> Any:
+        if self.fail_create_at is not None and len(self.created) + 1 == self.fail_create_at:
+            self.fail_create_at = None
+            raise self.fail_exc or BoardUpstreamError("boom")
+        key = body["idempotency_key"]
+        if key not in self.by_key:
+            self._n += 1
+            self.by_key[key] = f"h_{self._n}"
+            self.created.append({**body, "_board": board})
+        return {"task": {"id": self.by_key[key]}}
+
+    async def update_task(self, task_id: str, body: Any, **_: Any) -> Any:
+        if body["status"] == "archived" and self.archive_rejected:
+            err = BoardUpstreamError("bad status")
+            err.status = 400
+            raise err
+        self.updates.append((task_id, body))
+        return {"task": {"id": task_id}}
+
+
+async def _run(client: Any, db: Path, tmp_path: Path) -> dict[str, Any]:
+    return await convert_legacy_board(
+        client, db_path=db, export_dir=tmp_path / "out", now=lambda: NOW
+    )
+
+
+async def test_no_tables_is_noop(tmp_path: Path) -> None:
+    db = _db(tmp_path, None)
+    client = FakeClient()
+    res = await _run(client, db, tmp_path)
+    assert res == {"converted": 0, "skipped": 0, "exported": None, "dropped": False}
+    assert client.created == []
+
+
+async def test_empty_store_drops_tables(tmp_path: Path) -> None:
+    db = _db(tmp_path, [])
+    res = await _run(FakeClient(), db, tmp_path)
+    assert res["dropped"] is True and res["converted"] == 0
+    assert not {"board", "card", "card_event", "card_link", "board_column"} & _tables(db)
+
+
+async def test_cards_pushed_with_idempotency_key_and_status(tmp_path: Path) -> None:
+    db = _db(tmp_path, [("t_a", "done", "default"), ("t_b", "blocked", "ops")])
+    client = FakeClient()
+    res = await _run(client, db, tmp_path)
+    assert res == {"converted": 2, "skipped": 0, "exported": None, "dropped": True}
+    assert [c["idempotency_key"] for c in client.created] == ["t_a", "t_b"]
+    first = client.created[0]
+    assert first["title"] == "title t_a"
+    assert first["body"] == "body text\n\nimported from hal0 board 2025-11-01"
+    assert (first["assignee"], first["tenant"], first["priority"]) == ("worker", "acme", 3)
+    assert client.created[1]["_board"] == "ops"
+    assert client.created_boards == [{"slug": "ops", "name": "Ops", "description": ""}]
+    assert client.updates == [("h_1", {"status": "done"}), ("h_2", {"status": "blocked"})]
+    assert "card" not in _tables(db)
+
+
+async def test_existing_hermes_id_skipped(tmp_path: Path) -> None:
+    db = _db(tmp_path, [("t_a", "todo", "default"), ("t_b", "todo", "default")])
+    client = FakeClient()
+    client.known.add("t_a")
+    res = await _run(client, db, tmp_path)
+    assert (res["converted"], res["skipped"], res["dropped"]) == (1, 1, True)
+    assert [c["idempotency_key"] for c in client.created] == ["t_b"]
+
+
+async def test_running_maps_to_ready(tmp_path: Path) -> None:
+    db = _db(
+        tmp_path,
+        [("t_r", "running", "default"), ("t_x", "archived", "default")],
+    )
+    client = FakeClient()
+    await _run(client, db, tmp_path)
+    assert client.updates == [("h_1", {"status": "ready"}), ("h_2", {"status": "archived"})]
+
+
+async def test_archive_rejection_is_logged_not_fatal(tmp_path: Path) -> None:
+    db = _db(tmp_path, [("t_x", "archived", "default")])
+    client = FakeClient()
+    client.archive_rejected = True
+    res = await _run(client, db, tmp_path)
+    assert (res["converted"], res["dropped"]) == (1, True)
+
+
+async def test_unreachable_exports_json_and_drops(tmp_path: Path) -> None:
+    db = _db(tmp_path, [("t_a", "todo", "default")])
+    res = await _run(None, db, tmp_path)
+    assert res["dropped"] is True and res["exported"] is not None
+    data = json.loads(Path(res["exported"]).read_text())
+    assert Path(res["exported"]).name == f"board-legacy-export-{int(NOW)}.json"
+    assert [c["id"] for c in data["cards"]] == ["t_a"]
+    assert {b["slug"] for b in data["boards"]} == {"default", "ops"}
+    assert "card" not in _tables(db)
+
+
+async def test_midrun_unreachable_exports_and_drops(tmp_path: Path) -> None:
+    db = _db(tmp_path, [("t_a", "todo", "default"), ("t_b", "todo", "default")])
+    client = FakeClient()
+    client.fail_create_at, client.fail_exc = 2, BoardUnreachable("down")
+    res = await _run(client, db, tmp_path)
+    assert res["exported"] is not None and res["dropped"] is True
+    assert len(json.loads(Path(res["exported"]).read_text())["cards"]) == 2
+
+
+async def test_rerun_after_partial_is_idempotent(tmp_path: Path) -> None:
+    db = _db(tmp_path, [(f"t_{i}", "todo", "default") for i in range(5)])
+    client = FakeClient()
+    client.fail_create_at = 3  # upstream 502 on the third create
+    first = await _run(client, db, tmp_path)
+    assert first["dropped"] is False and first["exported"] is None
+    assert "card" in _tables(db)
+    assert len(client.created) == 2
+    second = await _run(client, db, tmp_path)
+    assert (second["dropped"], len(client.created)) == (True, 5)
+    keys = [c["idempotency_key"] for c in client.created]
+    assert keys == [f"t_{i}" for i in range(5)]
+    assert all(c["idempotency_key"] for c in client.created)
+
+
+async def test_run_once_guard_and_not_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[Any] = []
+
+    async def fake_convert(client: Any, **kw: Any) -> dict[str, Any]:
+        seen.append(client)
+        return {"converted": 0, "skipped": 0, "exported": None, "dropped": True}
+
+    def raise_not_installed(_app: Any) -> Any:
+        raise BoardNotInstalled("no hermes")
+
+    monkeypatch.setattr("hal0.board.legacy.convert_legacy_board", fake_convert)
+    monkeypatch.setattr("hal0.board.legacy.resolve_board_client", raise_not_installed)
+    app = SimpleNamespace(state=SimpleNamespace())
+    await run_once(app)
+    await run_once(app)
+    assert seen == [None]
+    assert app.state.board_legacy_done is True
