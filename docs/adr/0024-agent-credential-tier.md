@@ -3,8 +3,10 @@
 ## Status
 
 **PROPOSED (2026-10-08).** Target: v1.5, shipped together with the
-auth-on-by-default change so the access tiers are rewritten once. Nothing
-here is implemented. Completes the open question ADR-0002 left for its
+auth-on-by-default change so the access tiers are rewritten once. Item 2 has
+shipped on its own, see [ADR-0046](0046-approval-decisions-need-a-session-or-root.md);
+items 1, 3 and 4 are not implemented, and until 1 and 4 land item 2 is not a
+boundary. Completes the open question ADR-0002 left for its
 Option B ("Until that token is scoped down to something narrower than the
 full box admin key … this has to be resolved before Option B can be called
 done").
@@ -66,9 +68,8 @@ Ship these together in v1.5. Each one alone leaves the hole open.
    surface included.
 2. **Approve and deny need a person.** `/api/agent/approvals/{id}/approve`
    and `/deny` accept a browser admin session or the CLI acting as root.
-   They refuse a bare Bearer key of any tier. Exact mechanism (session-only
-   vs. a separate operator key) is settled in implementation, with tests
-   that a key holder cannot approve.
+   They refuse a bare Bearer key of any tier. Settled and shipped by
+   [ADR-0046](0046-approval-decisions-need-a-session-or-root.md).
 3. **The admin MCP server calls REST as itself.** After its own policy and
    approval check, it calls REST with an internal service identity and an
    `X-hal0-Agent` audit header, instead of forwarding the agent's token.
@@ -92,8 +93,8 @@ Ship these together in v1.5. Each one alone leaves the hole open.
   approve with the cookie; and a caller on the box itself passes the
   loopback side of the LAN admin gate. Item 2 only holds once item 1 takes
   the admin key away from agents and item 4 stops them reading it from
-  disk. `tests/api/test_agent_self_approval.py` pins the hole as a strict
-  xfail until then.
+  disk. ADR-0046 ships it anyway and states these limits;
+  `tests/api/test_agent_self_approval.py` pins them as known gaps.
 
 ## Consequences
 
@@ -111,7 +112,8 @@ Ship these together in v1.5. Each one alone leaves the hole open.
 ## Open questions for the operator
 
 1. ~~If v1.5 slips, ship item 2 (approval route) on its own first?~~
-   Answered 2026-10-08: no; see "Options considered".
+   Answered 2026-10-08: no; see "Options considered". Revisited by ADR-0046,
+   which ships it with the same limits stated.
 2. One `agent` key per agent, or one shared agent key? Per-agent is
    recommended: it makes the audit trail truthful and lets one agent be
    revoked alone.
@@ -121,4 +123,5 @@ Ship these together in v1.5. Each one alone leaves the hole open.
 - ADR-0002 (agent credential isolation), Option B and its open question
 - ADR-0013 (per-agent MCP client allow-list)
 - ADR-0015 (MCP supervisor and Hermes exposure join)
+- ADR-0046 (approval decisions need a session or root)
 - `docs/operate/auth.mdx` (current tier model)

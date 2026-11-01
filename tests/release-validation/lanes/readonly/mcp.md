@@ -79,14 +79,14 @@ Speak MCP streamable-HTTP JSON-RPC with curl from the box (`127.0.0.1`), not fro
 16. **Docs at the release tag.** Compare `docs/reference/mcp-tools.mdx` names against the tool list at the exact release tag, not the working tree HEAD.
 17. **`slot_list` count.** `count` should equal the number of `kind=="local"` rows in `/api/slots`; the synthetic `hal0` row makes it +1 (#2697, regression `mcp-slot-list-counts-synthetic-hal0`). Every REAL slot entry must have `id` and `state`; the synthetic row has both null by design (`slot-list-rest-includes-synthetic-hal0`). Non-string path args being stringified is `mcp-admin-path-args-are-stringified`: record `known`.
 
-18. **Gated tools reject malformed calls before queueing.** For every tool in `GATED_TOOLS` call with empty args and require `isError: true mcp.missing_arg`, not `pending_approval` (#2722). Then deny or cancel every approval you queued (`POST /api/agent/approvals/<id>/deny`) and assert `GET /api/agent/approvals` is empty: the inbox is shared state.
+18. **Gated tools reject malformed calls before queueing.** For every tool in `GATED_TOOLS` call with empty args and require `isError: true mcp.missing_arg`, not `pending_approval` (#2722). Then deny or cancel every approval you queued (`sudo hal0 agent approvals deny <id>`; a key gets 403 on the REST route since ADR-0046) and assert `GET /api/agent/approvals` is empty: the inbox is shared state.
 
 19. **Docs names are a subset of served names**, not only a superset: a renamed or removed tool still named in `mcp-tools.mdx` is a docs defect.
 
 
 21. **Classify the gated tools before sweeping them.** Parse the split mechanically from the live `tools/list` plus the release-tag source rather than by hand (the 33-with-required-args / 22-without count was done by hand and must stay reproducible); this is a pytest candidate. From the live `tools/list` split the GATED_TOOLS into (a) tools with PATH args, (b) tools whose required args are BODY fields only, (c) tools with no required args. Only (a) and (b) can queue a malformed call (26 and 7 of 55 on 200136); for (c) `{}` is schema-valid and `pending_approval` is correct (#2722). Type errors and `name=123` are excluded (`mcp-admin-path-args-are-stringified`). Assert the GATED_TOOLS list parsed from the release tag source matches the `gated` flag in `/api/mcp/servers` `tool_details`.
 
-22. **Leave the approvals inbox empty.** Every approval you queue, you deny (`POST /api/agent/approvals/<id>/deny`); record `GET /api/agent/approvals` empty at lane exit. Repeat calls dedupe (one row, `hit_count` grows), so count rows, not calls.
+22. **Leave the approvals inbox empty.** Every approval you queue, you deny (`sudo hal0 agent approvals deny <id>`); record `GET /api/agent/approvals` empty at lane exit. Repeat calls dedupe (one row, `hit_count` grows), so count rows, not calls.
 
 23. **Annotation counts for both servers.** Report readOnly and destructive counts for memory as well as admin (13/3 for memory on 200136). When diffing docs names against served names, restrict the regex to the tool-column cells of the tables; an all-backticks regex pulls in field and error names.
 

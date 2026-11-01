@@ -445,9 +445,14 @@ shell commands Hermes runs are gated separately by
 
 ```sh
 hal0 agent approvals list                # pending requests
-hal0 agent approvals approve <id>        # let it run
-hal0 agent approvals deny <id>           # reject it
+sudo hal0 agent approvals approve <id>   # let it run
+sudo hal0 agent approvals deny <id>      # reject it
 ```
+
+Deciding takes root on the box or a dashboard session; an API key is refused.
+On a box with an admin key the dashboard asks you to sign in the first time you
+decide, even when `require_auth` is off. See
+[who can decide](/docs/operate/auth#who-can-decide-an-approval).
 
 Each pending row shows the request id, the tool, the requesting agent,
 when it was enqueued, and a one-line summary of the primary argument. The

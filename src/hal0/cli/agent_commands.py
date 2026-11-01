@@ -1863,19 +1863,46 @@ def approvals_list() -> None:
     console.print(table)
 
 
+def _decide_as_root(action: Literal["approve", "deny"], approval_id: str) -> dict[str, Any]:
+    """Send one decision over hal0-api's root-only socket (ADR-0046); return the entry.
+
+    An API key cannot decide, on this box or any other, so there is no remote
+    form of this command and no REST fallback.
+    """
+    from hal0.mcp import approval_socket
+    from hal0.service_identity import is_loopback_url
+
+    if os.geteuid() != approval_socket.ROOT_UID:
+        die(
+            f"deciding an approval needs root: run `sudo hal0 agent approvals {action} "
+            f"{approval_id}` on the box, or use the dashboard inbox."
+        )
+    if not is_loopback_url(_api_base()):
+        die(
+            "HAL0_API_URL points at another box, and this command only decides on this "
+            "one. Run it there, or use that box's dashboard inbox."
+        )
+    try:
+        reply = approval_socket.send_decision(action, approval_id)
+    except approval_socket.ApprovalSocketUnavailable as exc:
+        die(str(exc))
+        raise  # die() exits; this keeps the flow explicit for the type checker
+    entry = reply.get("approval")
+    if reply.get("status") != 200 or not isinstance(entry, dict):
+        error = reply.get("error")
+        die(str(error.get("message")) if isinstance(error, dict) else f"unexpected reply: {reply}")
+        return {}
+    return entry
+
+
 @approvals_app.command("approve")
 def approvals_approve(
     approval_id: str = typer.Argument(..., help="Approval request ID."),
 ) -> None:
-    """Approve a pending agent action."""
-    url = _api_base()
-    if _api_unreachable(url):
-        raise typer.Exit(1)
-    try:
-        api_post(f"/api/agent/approvals/{approval_id}/approve")
-    except CliApiError as exc:
-        die(str(exc))
-        return
+    """Approve a pending agent action (needs root; see also the dashboard inbox)."""
+    entry = _decide_as_root("approve", approval_id)
+    if entry.get("state") == "failed":
+        die(f"approved {approval_id}, but the tool call failed: {entry.get('error')}")
     console.print(f"[bold green]Approved[/bold green] {approval_id}.")
 
 
@@ -1883,15 +1910,8 @@ def approvals_approve(
 def approvals_deny(
     approval_id: str = typer.Argument(..., help="Approval request ID."),
 ) -> None:
-    """Deny a pending agent action."""
-    url = _api_base()
-    if _api_unreachable(url):
-        raise typer.Exit(1)
-    try:
-        api_post(f"/api/agent/approvals/{approval_id}/deny")
-    except CliApiError as exc:
-        die(str(exc))
-        return
+    """Deny a pending agent action (needs root; see also the dashboard inbox)."""
+    _decide_as_root("deny", approval_id)
     console.print(f"[bold]Denied[/bold] {approval_id}.")
 
 

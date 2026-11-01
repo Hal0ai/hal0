@@ -208,8 +208,8 @@ say. When a delegated run raises one:
 - The request appears in hal0's approvals inbox as the tool
   `agent_run_approval`, from the client `bridge:<name>`, with the run id, the
   command and Hermes's description of it. The dashboard's approvals tab and the
-  bell show it; `hal0 agent approvals list` lists it, and `approve <id>` or
-  `deny <id>` answers it.
+  bell show it; `hal0 agent approvals list` lists it, and
+  `sudo hal0 agent approvals approve <id>` or `deny <id>` answers it.
 - **Approve means once.** The inbox lets exactly this one command run, or
   denies it. `session` and `always` grants are Hermes-side allowlist decisions
   you make in Hermes, never from the inbox.

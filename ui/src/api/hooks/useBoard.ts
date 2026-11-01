@@ -1524,29 +1524,33 @@ export function useBoardChat(board?: string): UseBoardChatResult {
       })
   }
 
+  // A mutation, not a bare fetch: deciding needs a session (ADR-0046), and the
+  // global mutation handler answers the 401 with the sign-in drawer and retries.
+  // On any other failure the card stays pending and the bell is the fallback.
+  const decideApproval = useMutation({
+    mutationFn: ({ approvalId, verdict }: { approvalId: string; verdict: 'approve' | 'deny' }) =>
+      apiPost<unknown>(
+        verdict === 'approve'
+          ? ENDPOINTS.agentApprovalApprove(approvalId)
+          : ENDPOINTS.agentApprovalDeny(approvalId),
+      ),
+    onSuccess: (_data, { approvalId, verdict }) => {
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.approval_id === approvalId
+            ? { ...m, status: verdict === 'approve' ? 'approved' : 'denied' }
+            : m,
+        ),
+      )
+      // The executor ran (or was dropped) server-side — refresh board state
+      // and the bell's pending list.
+      qc.invalidateQueries({ queryKey: boardKey(board) })
+      qc.invalidateQueries({ queryKey: ['agents', 'approvals'] })
+    },
+  })
+
   const resolveApproval = (approvalId: string, verdict: 'approve' | 'deny') => {
-    const url =
-      verdict === 'approve'
-        ? ENDPOINTS.agentApprovalApprove(approvalId)
-        : ENDPOINTS.agentApprovalDeny(approvalId)
-    fetch(url, { method: 'POST' })
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.approval_id === approvalId
-              ? { ...m, status: verdict === 'approve' ? 'approved' : 'denied' }
-              : m,
-          ),
-        )
-        // The executor ran (or was dropped) server-side — refresh board state
-        // and the bell's pending list.
-        qc.invalidateQueries({ queryKey: boardKey(board) })
-        qc.invalidateQueries({ queryKey: ['agents', 'approvals'] })
-      })
-      .catch(() => {
-        /* leave the card pending — the bell remains the fallback path */
-      })
+    decideApproval.mutate({ approvalId, verdict })
   }
 
   const stop = () => {

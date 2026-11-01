@@ -485,10 +485,11 @@ routes to the gated tier at call time.
 1. The server enqueues the call and returns
    `{"status": "pending_approval", "approval_id": "..."}`.
 
-2. The owner reviews and approves (or denies) the request from
-   `hal0 agent approvals list` / `approve` / `deny` — the queued call
-   carries the tool name and arguments so the approver sees exactly what
-   will run.
+2. The owner reviews and approves (or denies) the request from the
+   dashboard's inbox, or on the box with `hal0 agent approvals list` and
+   `sudo hal0 agent approvals approve` / `deny` — the queued call carries
+   the tool name and arguments so the approver sees exactly what will run.
+   An API key cannot decide.
 
 3. On approval, the tool executes with the approved arguments and the
    real result is recorded; every gated call is written to the audit log.

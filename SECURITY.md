@@ -95,6 +95,22 @@ accepted for 1.0 as Option C on 2026-08-15 (merged in
 `hal0 doctor all` reports this posture directly: the **Agent UID split** row warns
 when an agent unit resolves to the same `User=` as `hal0-api.service`.
 
+### Who can decide an approval
+
+Approving or denying a gated agent call takes a dashboard session or
+`sudo hal0 agent approvals approve|deny`. A key of any tier is refused with
+`403 auth.forbidden`, and the CLI proves it is root through the kernel's
+`SO_PEERCRED` on a local socket, not through a credential.
+
+**This raises the bar; it is not a boundary while the agent runs as `hal0`.** The
+agent can still exchange the admin key it holds for a session at
+`POST /api/auth/login`, sign its own session with `secret.bin` above, or call the
+REST route behind a gated tool directly and skip the queue. On a box with **no**
+admin key nothing can sign in, so the inbox stays open to anonymous callers, an
+agent that drops its key included. Configure an admin key if you rely on the inbox.
+[ADR-0046](docs/adr/0046-approval-decisions-need-a-session-or-root.md) has the
+full list.
+
 ### If you cannot accept it
 
 - Run the box without the bundled agent (do not install/enable `hal0-agent@*`), or

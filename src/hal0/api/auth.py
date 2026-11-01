@@ -85,6 +85,14 @@ identity resolvers, ``GET /api/bridge/me``) read it there through
 :func:`_still_admitted` verifies a second time, live, so revoking a key ends
 the streams it opened.
 
+Who may decide an approval (ADR-0046)
+-------------------------------------
+Approving a gated call needs more than the ADMIN tier, or a key holder could
+approve its own. :func:`approval_decision_refusal` is that check, and the two
+decision routes run it at every posture. It is the one place ``source`` decides
+anything. The root CLI does not come through here at all
+(:mod:`hal0.mcp.approval_socket`).
+
 The browser session cookie is **reused, not reimplemented**: minting and
 verification both delegate to :mod:`hal0.api.agents._auth` (one
 HMAC-SHA256 cookie scheme), so
@@ -138,9 +146,10 @@ _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
 class AuthPrincipal:
     """The resolved identity of an in-flight request.
 
-    ``source`` is diagnostic only (audit logging / debugging) -- never
-    used for authorization decisions; ``tier`` is, and for a bridge
-    principal so is ``scopes``.
+    ``source`` is diagnostic (audit logging / debugging), with one exception:
+    :func:`approval_decision_refusal` reads it, because deciding an approval
+    needs a session and not merely the tier (ADR-0046). Everywhere else
+    ``tier`` is what authorizes, and for a bridge principal so is ``scopes``.
 
     ``name`` and ``scopes`` are set for the ``bridge`` tier only: the bridge
     client's name and the scopes it was granted (ADR-0043). Every other tier
@@ -948,6 +957,43 @@ def _still_admitted(auth_class: AuthClass, scope: dict[str, Any]) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Who may decide an approval (ADR-0046) — see the module docstring.
+
+
+def approval_decision_refusal(scope: Any) -> tuple[int, str] | None:
+    """Why this caller may not approve or deny a gated call: ``(status, code)``, or ``None``.
+
+    - A valid session cookie may decide, at every posture.
+    - A request presenting a key may not, whichever key it is and whether or
+      not it verifies: ``403 auth.forbidden``. This is what stops an agent
+      using the key it was provisioned with.
+    - No credential at all, on a box with an admin key, is refused with ``401
+      auth.required`` even over loopback and with ``require_auth`` off, because
+      an agent is on loopback too. The dashboard answers that 401 with its
+      sign-in drawer and retries, so the operator is asked for the key once.
+    - No credential at all, on a box with no admin key, may decide. Nothing on
+      such a box can sign in, so refusing would strand the dashboard, and the
+      keyless posture is open by design (see "Posture-coupled ADMIN gate"). It
+      also means this check is no gate on that box: anything that can reach the
+      API can decide by not sending a key. ADR-0046 records that conflict.
+
+    Accepts a raw ASGI scope or a Starlette ``Request``/``WebSocket``.
+    """
+    raw_scope = getattr(scope, "scope", scope)
+    if judged_principal(raw_scope).source == "cookie":
+        return None
+    query_string = raw_scope.get("query_string") or b""
+    presents_key = bearer_token(
+        _headers_from_scope(raw_scope)
+    ) is not None or "api_key" in parse_qs(query_string.decode("latin-1"), keep_blank_values=True)
+    if presents_key:
+        return 403, "auth.forbidden"
+    if has_admin_key():
+        return 401, "auth.required"
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Pure-ASGI enforcement middleware
 
 
@@ -1106,6 +1152,7 @@ __all__ = [
     "Tier",
     "admin_gated",
     "admin_sign_in_required",
+    "approval_decision_refusal",
     "bearer_token",
     "bears_bridge_key",
     "bridge_enabled",

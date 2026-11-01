@@ -543,8 +543,8 @@ the bot findings left on the second change's run tools:
   agents: the `bridge` tier. Item 3, the admin MCP server calling REST as
   itself with an audit header, is implemented here for bridge principals only;
   the box's own agents still have their bearer forwarded. Item 2 (approve and
-  deny need a person) is tracked as #3133 and item 4 (the agent-UID split) as
-  #3134, both open. A bridge key cannot reach `/api/agent/approvals`, which is
+  deny need a person) landed in ADR-0046, and item 4 (the agent-UID split) is
+  #3134, open. A bridge key cannot reach `/api/agent/approvals`, which is
   `/api/*`, but this record does not close the hole ADR-0024 describes for a
   caller that already holds the admin key.
 - **ADR-0035.** The profile keys hal0 already holds are what the bridge

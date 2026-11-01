@@ -230,7 +230,8 @@ approval** and returns a "pending approval" result.
 
 That queue is a single source of truth read by three surfaces: the dashboard's
 approval bell and inbox, the `hal0 agent approvals` CLI, and the approval REST
-API. Approving an entry actually runs the deferred action; denying it just closes
+API. Deciding takes a dashboard session or root on the box, never an API key.
+Approving an entry actually runs the deferred action; denying it just closes
 it. The queue de-duplicates — a repeated request for the same target bumps a
 counter rather than stacking entries — and every gated and autonomous invocation
 is audited so you can see exactly what the agent did and what's waiting on you.
