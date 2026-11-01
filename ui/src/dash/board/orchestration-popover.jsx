@@ -5,7 +5,7 @@
 // Read-only (GET /config): tick_interval, failure_limit, max_in_flight, claim_ttl
 
 (function () {
-  const { useState } = React;
+  const { useState, useEffect, useRef } = React;
 
   // Resolve BoardIcon at RENDER time (board-view.jsx registers it AFTER this
   // module loads; window.Icons is chrome's glyph-object, not a component).
@@ -18,7 +18,10 @@
     // Live orchestration state. These window hooks are TanStack queries —
     // the value lives on `.data`, not the QueryResult object itself.
     const useOrch = window.__hal0UseBoardOrchestration;
-    const orchData = (useOrch ? useOrch() : null)?.data || null;
+    const orchQuery = useOrch ? useOrch() : null;
+    const orchData = orchQuery?.data || null;
+    // No hook means a caller-supplied `set` and props, with nothing to wait for.
+    const canSave = !useOrch || !!(orchQuery?.isSuccess && orchData);
 
     // Config hook (read-only values from config.yaml)
     const useConfig = window.__hal0UseBoardConfig;
@@ -49,12 +52,23 @@
     const [autoPromote, setAutoPromote] = useState(
       src.auto_promote_children !== undefined ? src.auto_promote_children : false
     );
+    const edited = useRef({});
+
+    // Late loads and refetches may refresh only fields the operator has not edited.
+    useEffect(() => {
+      if (!orchData) return;
+      if (!edited.current.profile) setProfile(orchData.orchestrator_profile || "");
+      if (!edited.current.assignee) setAssignee(orchData.default_assignee || "");
+      if (!edited.current.autoDecompose) setAutoDecompose(orchData.auto_decompose ?? false);
+      if (!edited.current.autoPromote) setAutoPromote(orchData.auto_promote_children ?? false);
+    }, [orchData]);
 
     const toast = (msg) => {
       if (window.__hal0Toast) window.__hal0Toast(msg);
     };
 
     const handleSave = () => {
+      if (!canSave) return;
       const patch = {
         orchestrator_profile: profile,
         default_assignee: assignee,
@@ -109,7 +123,10 @@
               <select
                 className="input"
                 value={profile}
-                onChange={(e) => setProfile(e.target.value)}
+                onChange={(e) => {
+                  edited.current.profile = true;
+                  setProfile(e.target.value);
+                }}
                 data-testid="board-orch-profile"
               >
                 <option value="">— none —</option>
@@ -132,7 +149,10 @@
               <select
                 className="input"
                 value={assignee}
-                onChange={(e) => setAssignee(e.target.value)}
+                onChange={(e) => {
+                  edited.current.assignee = true;
+                  setAssignee(e.target.value);
+                }}
                 data-testid="board-orch-assignee"
               >
                 <option value="">— none —</option>
@@ -154,7 +174,10 @@
             <div className="ov">
               <div
                 className={"tw-toggle" + (autoDecompose ? " on" : "")}
-                onClick={() => setAutoDecompose((v) => !v)}
+                onClick={() => {
+                  edited.current.autoDecompose = true;
+                  setAutoDecompose((v) => !v);
+                }}
                 data-testid="board-orch-autodecompose"
               >
                 <span className="tw-switch" />
@@ -171,7 +194,10 @@
             <div className="ov">
               <div
                 className={"tw-toggle" + (autoPromote ? " on" : "")}
-                onClick={() => setAutoPromote((v) => !v)}
+                onClick={() => {
+                  edited.current.autoPromote = true;
+                  setAutoPromote((v) => !v);
+                }}
                 data-testid="board-orch-autopromote"
               >
                 <span className="tw-switch" />
@@ -217,8 +243,14 @@
 
         {/* save */}
         <div className="orch-pop-f" style={{ padding: "10px 14px", display: "flex", justifyContent: "flex-end" }}>
+          {!canSave && (
+            <span className="od" role="status" style={{ marginRight: "auto" }}>
+              {orchQuery?.isError ? "Could not load orchestration settings." : "Loading orchestration settings…"}
+            </span>
+          )}
           <button
             className="btn"
+            disabled={!canSave}
             onClick={handleSave}
             data-testid="board-action-orch-save"
           >
