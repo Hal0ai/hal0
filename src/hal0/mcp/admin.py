@@ -3200,7 +3200,10 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "slot_metrics": "Get per-slot performance metrics (tok/s, latency, queue depth).",
     "slot_capacity": "Get GPU/NPU memory capacity and per-slot allocation.",
     "slot_by_name": "Canonical name-keyed slot lookup (identical payload to slot_status).",
-    "slot_by_id": "Stable-id slot lookup: opaque id → current name → snapshot.",
+    "slot_by_id": (
+        "Stable-id slot lookup: opaque id → current name → enriched snapshot "
+        "(identical payload to slot_status and slot_by_name)."
+    ),
     "slot_resolved": (
         "The resolved llama-server argv with per-flag provenance (which segment — "
         "base/profile/extra_args — set each surviving flag)."
