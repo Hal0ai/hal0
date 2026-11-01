@@ -26,7 +26,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _INSTALL_SH = _REPO_ROOT / "installer" / "install.sh"
 
 _BLOCK_START = "# ── Hermes terminal tool: explicit opt-in, DEFAULTS OFF"
-_BLOCK_END = 'if [[ "${MODELS_DIR}" != /* ]]; then'
+_BLOCK_END = "# ── hal0 brain model (v1.0)"
 
 _STUBS = """
 info() { printf 'INFO: %s\\n' "$*"; }

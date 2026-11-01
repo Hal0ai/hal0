@@ -218,7 +218,6 @@ SUMMARY_JSON_PATH=""
 # down already honour. COMPONENT_FLAG_GIVEN=1 tells the interactive component
 # picker that the operator already chose on the command line.
 COMPONENT_FLAG_GIVEN=0
-# shellcheck disable=SC2034  # COMPONENT_FLAG_GIVEN is read by the component picker
 for arg in "$@"; do
     case "$arg" in
         --dev) DEV_MODE=1 ;;
@@ -830,58 +829,6 @@ if _interactive; then
     fi
 fi
 
-# ── Hermes terminal tool: explicit opt-in, DEFAULTS OFF ─────────────────────
-# The bundled agent can be given a terminal tool. Its only viable backend on
-# this box is `local`, which runs commands as the hal0 service user — and that
-# user is root-equivalent here (rootful podman + the hal0-systemctl /
-# hal0-agentenv sudo wrappers). The agent also reads untrusted content (web
-# pages, stored memories, MCP output), so this is asked out loud instead of
-# being switched on silently.
-#
-# Non-interactive / piped / CI installs never reach this prompt and therefore
-# default OFF. HAL0_HERMES_TERMINAL=1 in the environment is the unattended
-# opt-in; the value is exported so `hal0 agent install hermes` (and the
-# privilege-dropped provisioning under it) sees the same answer.
-#
-# Not asked on an upgrade (the hermes venv already exists): that box already
-# has a recorded answer, and the provisioner preserves it. Re-asking would let
-# a distracted Enter silently disable a working agent.
-#
-# Also not asked when this run will not provision Hermes at all (--dev,
-# --no-start — the provisioning block lives inside the service-start branch —
-# or HAL0_SKIP_HERMES=1): the answer lives only in this shell's environment, so
-# asking for consent we would then drop on the floor is worse than not asking —
-# the operator answers again on the deferred `hal0 agent install hermes
-# --terminal-tool`.
-_ht_answer=""
-if [[ -z "${HAL0_HERMES_TERMINAL:-}" ]] \
-   && [[ "${DEV_MODE}" -eq 0 ]] \
-   && [[ "${NO_START}" -eq 0 ]] \
-   && [[ "${HAL0_SKIP_HERMES:-0}" -ne 1 ]] \
-   && [[ ! -x /var/lib/hal0/venvs/hermes/bin/hermes ]] \
-   && _interactive; then
-    printf '\n' >/dev/tty 2>/dev/null || true
-    info "Hermes can be given a terminal tool. If you enable it, the agent will be able to run"
-    info "commands as the hal0 user on this box — that user is root-equivalent here, so this"
-    info "effectively gives the agent full control of the machine, including anything it is"
-    info "talked into running by a web page or a stored memory. There is no sandboxed option:"
-    info "the bundled host-management skills (hal0-service-management, hal0-bench, hal0-tune)"
-    info "need the real host, so a container would break them by design."
-    info "Leave it off unless you want that; you can turn it on later with"
-    info "  hal0 agent install hermes --terminal-tool"
-    _tty_read _ht_answer "Enable Hermes' terminal tool (run commands as a root-equivalent user)? [y/N]" "N"
-    if [[ "${_ht_answer}" =~ ^[Yy]([Ee][Ss])?$ ]]; then
-        export HAL0_HERMES_TERMINAL=1
-        warn "Hermes terminal tool ENABLED at your request — the agent can run root-equivalent commands."
-    else
-        export HAL0_HERMES_TERMINAL=0
-        info "Hermes terminal tool disabled (default)."
-    fi
-    unset _ht_answer
-elif [[ -n "${HAL0_HERMES_TERMINAL:-}" ]]; then
-    export HAL0_HERMES_TERMINAL
-    info "Hermes terminal tool: taken from the environment (HAL0_HERMES_TERMINAL=${HAL0_HERMES_TERMINAL})"
-fi
 if [[ "${MODELS_DIR}" != /* ]]; then
     die "model store must be an absolute path (got: ${MODELS_DIR})"
 fi
@@ -894,11 +841,13 @@ info "Pull destination: ${MODELS_DIR}"
 # minutes into the install; the memory engine is then skipped for this run.
 # Sets HINDSIGHT_PY, consumed in the Hindsight block below.
 # Skipped in dev mode and when HAL0_SKIP_HINDSIGHT=1.
+HINDSIGHT_UNAVAILABLE_REASON=""
 if [[ "${DEV_MODE}" -eq 0 && "${HAL0_SKIP_HINDSIGHT:-0}" -ne 1 ]]; then
     if ! HAL0_HINDSIGHT_AUTOINSTALL=1 resolve_hindsight_python; then
         # Not fatal: the rest of the install is useful without the memory
         # engine. Treat this run as HAL0_SKIP_HINDSIGHT=1.
         warn "Hindsight memory engine skipped for this run (no usable Python); fix the interpreter and re-run install.sh to add it"
+        HINDSIGHT_UNAVAILABLE_REASON="no usable Python 3.11-3.14"
         HAL0_SKIP_HINDSIGHT=1
     fi
 fi
@@ -965,6 +914,11 @@ fi
 # Q1), so the render/video group membership below is settled before any
 # later step that depends on group membership or on the user existing
 # (the FLM cache / HF cache / STATE.md ownership work further down).
+# Captured before the filesystem layout step flips CURRENT_LINK: an existing
+# `current` link means this run upgrades a box that already has hal0.
+IS_UPGRADE=0
+[[ -n "${CURRENT_LINK}" && -e "${CURRENT_LINK}" ]] && IS_UPGRADE=1
+
 ui_step "System user" "~1-2s"
 
 if [[ "${DEV_MODE}" -eq 1 ]]; then
@@ -2795,6 +2749,141 @@ else
         || warn "first-run seeding failed — slots can still be created from the dashboard; see the output above"
 fi
 
+# ── Components: interactive checklist ──
+# A fresh interactive install asks which optional components to lay down. Every
+# answer only exports the same env knobs the --no-* flags set (and the gates
+# further down already honour); there is no separate gate logic downstream
+# except the Pi gate. Never shown on --dev, --no-start, an upgrade, a non-TTY,
+# HAL0_NONINTERACTIVE=1, or when any component flag was given.
+#
+# Rows whose prerequisite is missing are passed greyed with a reason and count
+# as off. COMPONENT_STATES (id -> selected | skipped | unavailable:<reason>) is
+# filled from the effective environment on EVERY run, gated or not, so the
+# install summary has a record on headless runs too.
+declare -A COMPONENT_STATES=()
+declare -A _cp_unavail=()
+if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 && "${IS_UPGRADE}" -eq 0 \
+      && "${COMPONENT_FLAG_GIVEN}" -eq 0 ]] && _interactive; then
+    _cp_owui_reason=""
+    if ! { command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; }; then
+        _cp_owui_reason="needs podman"
+    fi
+    _cp_img_reason=""
+    _cp_img_plan="$("${VENV_DIR}/bin/python" -I -m hal0.install.image_models --plan 2>/dev/null || true)"
+    if [[ -z "${_cp_img_plan}" ]]; then
+        _cp_img_reason="image models cannot be planned on this box"
+    elif [[ "${_cp_img_plan%%$'\t'*}" == "none" ]]; then
+        _cp_img_reason="${_cp_img_plan#none}"
+        _cp_img_reason="${_cp_img_reason#$'\t'}"
+        _cp_img_reason="${_cp_img_reason%%$'\n'*}"
+        [[ -n "${_cp_img_reason}" ]] || _cp_img_reason="image models cannot be planned on this box"
+    fi
+    _cp_pi_reason=""
+    command -v npm >/dev/null 2>&1 || _cp_pi_reason="needs npm (Node.js)"
+
+    _cp_rows=(
+        "openwebui"$'\t'"Open WebUI"$'\t'"chat UI, podman container"$'\t'"on"$'\t'"${_cp_owui_reason}"
+        "comfyui"$'\t'"ComfyUI"$'\t'"image/video generation, starter models"$'\t'"on"$'\t'"${_cp_img_reason}"
+        "hermes"$'\t'"Hermes agent"$'\t'"venv + config + gateway; brings the Operator Board and MCP wiring"$'\t'"on"$'\t'
+        "pi"$'\t'"Pi agent"$'\t'"terminal coding agent (CLI/TUI)"$'\t'"off"$'\t'"${_cp_pi_reason}"
+        "hindsight"$'\t'"Hindsight memory"$'\t'"hindsight-api unit, Memory tab, Hermes memory bank"$'\t'"on"$'\t'"${HINDSIGHT_UNAVAILABLE_REASON}"
+        "brain"$'\t'"Brain model"$'\t'"~1-3 GB pull; steward chat and tools"$'\t'"on"$'\t'
+    )
+    declare -A _cp_res=()
+    ui_component_picker _cp_rows _cp_res
+    [[ "${_cp_res[openwebui]:-on}" == "on" ]] || export HAL0_SKIP_OPENWEBUI=1
+    [[ "${_cp_res[comfyui]:-on}" == "on" ]] || export HAL0_IMAGE_MODELS=none
+    [[ "${_cp_res[hermes]:-on}" == "on" ]] || export HAL0_SKIP_HERMES=1
+    if [[ "${_cp_res[pi]:-off}" == "on" ]]; then
+        export HAL0_INSTALL_PI=1
+    else
+        export HAL0_SKIP_PI=1
+    fi
+    [[ "${_cp_res[hindsight]:-on}" == "on" ]] || export HAL0_SKIP_HINDSIGHT=1
+    [[ "${_cp_res[brain]:-on}" == "on" ]] || export HAL0_SKIP_BRAIN_MODEL=1
+    _cp_reasons=(
+        "openwebui=${_cp_owui_reason}" "comfyui=${_cp_img_reason}"
+        "pi=${_cp_pi_reason}" "hindsight=${HINDSIGHT_UNAVAILABLE_REASON}"
+    )
+    for _cp_kv in "${_cp_reasons[@]}"; do
+        [[ "${_cp_res[${_cp_kv%%=*}]:-}" == "unavailable" ]] && _cp_unavail["${_cp_kv%%=*}"]="${_cp_kv#*=}"
+    done
+    unset _cp_owui_reason _cp_img_reason _cp_img_plan _cp_pi_reason _cp_rows _cp_res _cp_reasons _cp_kv
+fi
+# shellcheck disable=SC2034  # COMPONENT_STATES is read by the install summary
+_cp_state() {  # _cp_state ID SKIPPED(0|1): unavailable beats skipped beats selected
+    if [[ -n "${_cp_unavail[$1]:-}" ]]; then
+        COMPONENT_STATES["$1"]="unavailable:${_cp_unavail[$1]}"
+    elif [[ "$2" == "1" ]]; then
+        COMPONENT_STATES["$1"]="skipped"
+    else
+        COMPONENT_STATES["$1"]="selected"
+    fi
+}
+# A box that cannot run Hindsight is "unavailable", not merely skipped, even on
+# a headless run where the picker never computed the reason.
+[[ -n "${HINDSIGHT_UNAVAILABLE_REASON}" ]] && _cp_unavail[hindsight]="${HINDSIGHT_UNAVAILABLE_REASON}"
+_cp_state openwebui "$([[ "${HAL0_SKIP_OPENWEBUI:-0}" == 1 ]] && echo 1 || echo 0)"
+_cp_state comfyui "$([[ "${HAL0_IMAGE_MODELS:-}" == none ]] && echo 1 || echo 0)"
+_cp_state hermes "$([[ "${HAL0_SKIP_HERMES:-0}" == 1 ]] && echo 1 || echo 0)"
+_cp_state pi "$([[ "${HAL0_INSTALL_PI:-0}" == 1 && "${HAL0_SKIP_PI:-0}" != 1 ]] && echo 0 || echo 1)"
+_cp_state hindsight "$([[ "${HAL0_SKIP_HINDSIGHT:-0}" == 1 ]] && echo 1 || echo 0)"
+_cp_state brain "$([[ "${HAL0_SKIP_BRAIN_MODEL:-0}" == 1 ]] && echo 1 || echo 0)"
+unset -f _cp_state
+unset _cp_unavail
+
+# ── Hermes terminal tool: explicit opt-in, DEFAULTS OFF ─────────────────────
+# The bundled agent can be given a terminal tool. Its only viable backend on
+# this box is `local`, which runs commands as the hal0 service user — and that
+# user is root-equivalent here (rootful podman + the hal0-systemctl /
+# hal0-agentenv sudo wrappers). The agent also reads untrusted content (web
+# pages, stored memories, MCP output), so this is asked out loud instead of
+# being switched on silently.
+#
+# Non-interactive / piped / CI installs never reach this prompt and therefore
+# default OFF. HAL0_HERMES_TERMINAL=1 in the environment is the unattended
+# opt-in; the value is exported so `hal0 agent install hermes` (and the
+# privilege-dropped provisioning under it) sees the same answer.
+#
+# Not asked on an upgrade (the hermes venv already exists): that box already
+# has a recorded answer, and the provisioner preserves it. Re-asking would let
+# a distracted Enter silently disable a working agent.
+#
+# Also not asked when this run will not provision Hermes at all (--dev,
+# --no-start — the provisioning block lives inside the service-start branch —
+# or HAL0_SKIP_HERMES=1): the answer lives only in this shell's environment, so
+# asking for consent we would then drop on the floor is worse than not asking —
+# the operator answers again on the deferred `hal0 agent install hermes
+# --terminal-tool`.
+_ht_answer=""
+if [[ -z "${HAL0_HERMES_TERMINAL:-}" ]] \
+   && [[ "${DEV_MODE}" -eq 0 ]] \
+   && [[ "${NO_START}" -eq 0 ]] \
+   && [[ "${HAL0_SKIP_HERMES:-0}" -ne 1 ]] \
+   && [[ ! -x /var/lib/hal0/venvs/hermes/bin/hermes ]] \
+   && _interactive; then
+    printf '\n' >/dev/tty 2>/dev/null || true
+    info "Hermes can be given a terminal tool. If you enable it, the agent will be able to run"
+    info "commands as the hal0 user on this box — that user is root-equivalent here, so this"
+    info "effectively gives the agent full control of the machine, including anything it is"
+    info "talked into running by a web page or a stored memory. There is no sandboxed option:"
+    info "the bundled host-management skills (hal0-service-management, hal0-bench, hal0-tune)"
+    info "need the real host, so a container would break them by design."
+    info "Leave it off unless you want that; you can turn it on later with"
+    info "  hal0 agent install hermes --terminal-tool"
+    _tty_read _ht_answer "Enable Hermes' terminal tool (run commands as a root-equivalent user)? [y/N]" "N"
+    if [[ "${_ht_answer}" =~ ^[Yy]([Ee][Ss])?$ ]]; then
+        export HAL0_HERMES_TERMINAL=1
+        warn "Hermes terminal tool ENABLED at your request — the agent can run root-equivalent commands."
+    else
+        export HAL0_HERMES_TERMINAL=0
+        info "Hermes terminal tool disabled (default)."
+    fi
+    unset _ht_answer
+elif [[ -n "${HAL0_HERMES_TERMINAL:-}" ]]; then
+    export HAL0_HERMES_TERMINAL
+    info "Hermes terminal tool: taken from the environment (HAL0_HERMES_TERMINAL=${HAL0_HERMES_TERMINAL})"
+fi
 # ── hal0 brain model (v1.0) ─────────────────────────────────────────────────
 # The brain is the platform steward: the dashboard's sidebar chat targets the
 # virtual model `hal0/brain`, so unlike every other slot it must WORK out of
