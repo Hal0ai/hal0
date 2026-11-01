@@ -129,7 +129,7 @@ chat messages — that is the `hermes-e2e` stateful lane.
 23. **Board token file.** `sudo test -s /var/lib/hal0/state/agents/hermes/dashboard-session-token && echo present`
    must print `present`, and neither `systemctl show hal0-agent@hermes -p Environment` nor
    `config.yaml` may set `HERMES_DASHBOARD_PUBLIC_URL` / `dashboard.public_url`: either one
-   turns the dashboard login on and the file-minted token stops being accepted.
+   turns the dashboard login on; the board's loopback token path is only validated with it off.
 24. **No unmanaged gateway (v0.22.3+), passive checks only.** The dashboard's default Chat tab
    runs its turns in the dashboard process (its TUI attaches to the dashboard's own `/api/ws`). A
    profile-scoped chat (the profile switcher, for example `hal0-brain`) and `hermes chat` are
