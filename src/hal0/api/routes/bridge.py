@@ -64,7 +64,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING, Any, NoReturn
 
 import structlog
-from fastapi import APIRouter, Depends, Header, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
@@ -94,6 +94,22 @@ _DISABLED_MESSAGE = "The agent bridge is disabled in [bridge] config."
 #: ``created_by`` for a client added over REST. The routes are ADMIN class, so
 #: the caller is always the operator's credential.
 _CREATED_BY = "api:admin"
+
+#: The managed client Open WebUI's MCP connections are rendered from.
+_OPENWEBUI_CLIENT = "openwebui"
+
+
+def _repoint_openwebui(
+    background_tasks: BackgroundTasks, name: str, bridge_key: str | None = None
+) -> None:
+    """Re-render Open WebUI's env after a mutation of its bridge client (a rotated key, new
+    scopes, a revoke), the way a box client-key rotation does. A no-op for any other client."""
+    if name != _OPENWEBUI_CLIENT:
+        return
+    from hal0.components.openwebui_arm import reconcile_openwebui_env_background
+
+    background_tasks.add_task(reconcile_openwebui_env_background, bridge_key=bridge_key)
+
 
 #: Seconds of silence after which a run's event stream sends a ``: keepalive`` comment.
 STREAM_KEEPALIVE_S = 10.0
@@ -347,7 +363,9 @@ async def list_clients(request: Request) -> dict[str, Any]:
 
 
 @_gated.patch("/clients/{name}")
-async def set_client_scopes(name: str, body: ScopesBody, request: Request) -> dict[str, Any]:
+async def set_client_scopes(
+    name: str, body: ScopesBody, request: Request, background_tasks: BackgroundTasks
+) -> dict[str, Any]:
     """Replace the client's scopes (``agents`` is always kept).
 
     Open streams are re-checked, so a stream that only a dropped scope admitted
@@ -356,20 +374,26 @@ async def set_client_scopes(name: str, body: ScopesBody, request: Request) -> di
     store = _store(request)
     row = await _run(store.set_scopes, name, body.scopes)
     live_sockets.revalidate()
+    _repoint_openwebui(background_tasks, name)
     return {"client": row.as_dict()}
 
 
 @_gated.post("/clients/{name}/rotate")
-async def rotate_client(name: str, request: Request) -> dict[str, Any]:
+async def rotate_client(
+    name: str, request: Request, background_tasks: BackgroundTasks
+) -> dict[str, Any]:
     """Replace the client's key. The old key stops verifying and its open streams end."""
     store = _store(request)
     row, key = await _run(store.rotate_client, name)
     live_sockets.revalidate()
+    _repoint_openwebui(background_tasks, name, key)
     return await _minted(request, row, key)
 
 
 @router.delete("/clients/{name}")
-async def revoke_client(name: str, request: Request) -> dict[str, Any]:
+async def revoke_client(
+    name: str, request: Request, background_tasks: BackgroundTasks
+) -> dict[str, Any]:
     """Revoke the client's key. The name stays taken so past runs stay attributable.
 
     Works while the bridge is disabled, so the operator can end a key for good
@@ -380,6 +404,7 @@ async def revoke_client(name: str, request: Request) -> dict[str, Any]:
         raise NotFound(f"no bridge client named {name!r}", code="bridge.client_not_found")
     row = await _run(store.revoke_client, name)
     live_sockets.revalidate()
+    _repoint_openwebui(background_tasks, name)
     return {"client": row.as_dict()}
 
 

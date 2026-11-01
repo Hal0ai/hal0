@@ -236,6 +236,21 @@ def _no_static_slot_seed(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_boot_openwebui_reconcile(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Silence the lifespan's Open WebUI bridge-client mint and env render.
+
+    ``hal0.api._boot_openwebui_bridge_client`` mints the ``openwebui`` bridge client and
+    re-renders ``openwebui.env`` once per boot. Tests that boot the app rarely care, and
+    on a dev box with Open WebUI installed it would reach for the real unit. It runs on a
+    worker thread, so letting it run would also race the first request of every test.
+    tests/api/test_boot_bridge.py overrides this to prove the hook fires.
+    """
+    from hal0.components import openwebui_arm
+
+    monkeypatch.setattr(openwebui_arm, "reconcile_openwebui_env_at_boot", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def _slot_output_sanity_passes_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """Answer the slot output-sanity gate (#1922) without a model server.
 
