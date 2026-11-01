@@ -100,6 +100,10 @@ export interface TuneEffective {
   /** Why a non-default reasoning_effort cannot be passed to this runner (build
    *  too old, runner unknown, ...); null when it can. Server-worded text. */
   reasoning_effort_unavailable: string | null
+  /** Tune values this slot's engine cannot run, keyed by tune key, with
+   *  server-worded text (e.g. halogen has no n-gram drafter). Always an object
+   *  from the server, empty when every value is available. */
+  tune_unavailable?: Record<string, string>
 }
 
 export interface Slot {

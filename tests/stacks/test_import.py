@@ -228,6 +228,37 @@ class TestImportStack:
         assert bad.value.code == "slot.positional_arg_denied"
         assert "llama-bad" not in load_profiles_config().profile
 
+    def test_import_refuses_ngram_speculation_on_a_halogen_profile(
+        self, reg: ModelRegistry, tmp_hal0_home: str
+    ) -> None:
+        """The halogen engine has no n-gram drafter: an embedded halogen profile
+        asking for it blocks the whole import, as the catalog's create does."""
+        from hal0.config.loader import load_profiles_config
+        from hal0.errors import UnprocessableEntity
+
+        catalog = StacksCatalog(path=Path(tmp_hal0_home) / "etc/hal0/stacks.toml")
+        env = export_envelope(_stack(), exported_at="t", registry=reg)
+        env["stack"]["profiles"] = {
+            "flash-ngram": {
+                "flags": "HALOGEN_KV_SLOTS=4",
+                "runner": "halogen",
+                "speculation": "ngram",
+            },
+            "llama-ngram": {"flags": "-fa on", "speculation": "ngram"},
+        }
+        env["stack"]["slots"][0]["profile"] = "flash-ngram"
+        with pytest.raises(UnprocessableEntity) as exc:
+            import_stack(env, "s7", catalog, registry=reg)
+        assert exc.value.code == "profiles.speculation_unsupported"
+        assert not {"flash-ngram", "llama-ngram"} & set(load_profiles_config().profile)
+
+        # llama-server runs n-gram lookup, so the same value stands there.
+        ok = export_envelope(_stack(), exported_at="t", registry=reg)
+        ok["stack"]["profiles"] = {"llama-ngram": {"flags": "-fa on", "speculation": "ngram"}}
+        ok["stack"]["slots"][0]["profile"] = "llama-ngram"
+        import_stack(ok, "s8", catalog, registry=reg)
+        assert load_profiles_config().profile["llama-ngram"].speculation == "ngram"
+
 
 def test_a_v140_stack_envelope_with_embedded_mtp_profiles_imports_converted(
     reg: ModelRegistry, tmp_hal0_home: str

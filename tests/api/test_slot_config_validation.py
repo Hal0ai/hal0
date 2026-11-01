@@ -374,6 +374,47 @@ def test_tune_thinking_judged_against_the_profile_in_the_same_write(
     assert r.json()["error"]["code"] == "slot.tune_pinned_by_flags"
 
 
+@pytest.fixture
+def halogen_slot_toml(tmp_hal0_home: str) -> Path:
+    """A slot already on the halogen profile (written directly: the profile-wins
+    reconcile on PUT refuses halogen on a host with no ROCm render node)."""
+    root = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "flash.toml"
+    path.write_text(
+        'name = "flash"\ntype = "llm"\ndevice = "gpu-rocm"\nport = 8083\n'
+        'profile = "halogen"\n[model]\ndefault = "qwen3.8-flash-next-ht43"\n',
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_tune_ngram_refused_on_halogen_slot(halogen_slot_toml: Path, client: TestClient) -> None:
+    """The halogen engine has no n-gram drafter: the real write path refuses it."""
+    before = halogen_slot_toml.read_bytes()
+    r = client.put("/api/slots/flash/config", json={"tune": {"speculation": "ngram"}})
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert err["code"] == "slot.tune_unsupported_value"
+    assert err["details"] == {"key": "speculation", "value": "ngram", "runtime_family": "halogen"}
+    assert halogen_slot_toml.read_bytes() == before
+
+
+def test_tune_off_and_auto_allowed_on_halogen_slot(
+    halogen_slot_toml: Path, client: TestClient
+) -> None:
+    for mode in ("off", "auto"):
+        r = client.put("/api/slots/flash/config", json={"tune": {"speculation": mode}})
+        assert r.status_code == 200, r.text
+        assert _read(halogen_slot_toml)["tune"]["speculation"] == mode
+
+
+def test_tune_ngram_allowed_on_llama_slot(slot_toml: Path, client: TestClient) -> None:
+    r = client.put("/api/slots/chat/config", json={"tune": {"speculation": "ngram"}})
+    assert r.status_code == 200, r.text
+    assert _read(slot_toml)["tune"]["speculation"] == "ngram"
+
+
 def test_put_tune_per_key_nulls_remove_keys_and_empty_table(
     slot_toml: Path, client: TestClient
 ) -> None:

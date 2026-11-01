@@ -458,6 +458,7 @@ __all__ = [
     "runtime_family_of",
     "screen_profile_flags",
     "screen_profile_runner",
+    "screen_profile_speculation",
 ]
 
 

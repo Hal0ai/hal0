@@ -291,19 +291,26 @@ def _reconcile_profiles(stack: StackConfig, profiles_path: Path | None = None) -
 
     Name collisions keep the LOCAL profile (the importer never silently
     overwrites a profile the user already tuned). A profile that would be added
-    goes through the same flag screen as a profile import (hardware, managed and
-    model-fact flags are refused), BEFORE anything is written, so a stack cannot
-    back-door a flag the profile routes refuse.
+    goes through the same flag and speculation screens as a profile import
+    (hardware, managed and model-fact flags are refused, and so is an n-gram
+    speculation on a halogen profile), BEFORE anything is written, so a stack
+    cannot back-door a value the profile routes refuse.
     """
     if not stack.profiles:
         return
-    from hal0.profiles import runtime_family_of, screen_profile_flags
+    from hal0.profiles import (
+        runtime_family_of,
+        screen_profile_flags,
+        screen_profile_speculation,
+    )
 
     pcfg = load_profiles_config(profiles_path)
     changed = False
     incoming = {n: p for n, p in stack.profiles.items() if n not in pcfg.profile}
     for name, profile in incoming.items():
-        screen_profile_flags(profile.flags, runtime_family=runtime_family_of(name, profile))
+        family = runtime_family_of(name, profile)
+        screen_profile_speculation(name, profile.speculation, runtime_family=family)
+        screen_profile_flags(profile.flags, runtime_family=family)
     for name, profile in incoming.items():
         pcfg.profile[name] = profile
         changed = True
