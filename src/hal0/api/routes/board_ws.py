@@ -26,7 +26,7 @@ import structlog
 from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect, WebSocketState
 from websockets.asyncio.client import connect
-from websockets.exceptions import ConnectionClosedOK
+from websockets.exceptions import ConnectionClosed, ConnectionClosedOK
 
 from hal0.board import (
     DEFAULT_BASE_URL,
@@ -78,6 +78,15 @@ async def _close_browser(browser_ws: WebSocket, code: int) -> None:
             await browser_ws.close(code=code)
 
 
+def _forwardable_code(exc: ConnectionClosed) -> int:
+    """The upstream close code when it is one a server may send, else 1011."""
+    rcvd = exc.rcvd
+    code = rcvd.code if rcvd is not None else None
+    if code is None or code in (1005, 1006, 1015) or not 1000 <= code < 5000:
+        return 1011
+    return int(code)
+
+
 async def _upstream_to_browser(upstream, browser_ws: WebSocket) -> int:
     """Relay upstream frames to the browser; return the browser close code."""
     try:
@@ -90,6 +99,10 @@ async def _upstream_to_browser(upstream, browser_ws: WebSocket) -> int:
         return 1000
     except WebSocketDisconnect:
         return 1000
+    except ConnectionClosed as exc:
+        # Forward the upstream's own close code (Hermes sends 1008 for an
+        # archived or stale board slug) so the browser can tell why.
+        return _forwardable_code(exc)
     except Exception as exc:
         log.warning("board.events_pump_error", error=type(exc).__name__)
         return 1011

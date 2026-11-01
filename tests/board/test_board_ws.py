@@ -15,6 +15,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
+from websockets.frames import Close
 
 import hal0.api.routes.board_ws as board_ws_mod
 from hal0.api.middleware import error_codes
@@ -226,6 +227,19 @@ def test_ws_midstream_closed_error_closes_1011(app_client, monkeypatch) -> None:
         assert ws.receive_text() == "a"
         ws.receive_text()
     assert ei.value.code == 1011
+
+
+def test_ws_upstream_close_code_forwarded(app_client, monkeypatch) -> None:
+    err = ConnectionClosedError(Close(1008, "stale board"), None)
+    fake = _FakeConnect(_FakeUpstream(["a", err]), [])
+    monkeypatch.setattr(board_ws_mod, "connect", fake)
+    with (
+        app_client[1].websocket_connect("/api/board/events") as ws,
+        pytest.raises(WebSocketDisconnect) as ei,
+    ):
+        assert ws.receive_text() == "a"
+        ws.receive_text()
+    assert ei.value.code == 1008
 
 
 def test_ws_unexpected_pump_exception_closes_1011(app_client, monkeypatch) -> None:

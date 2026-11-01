@@ -12,8 +12,13 @@ import pytest
 import structlog
 import structlog.testing
 
-from hal0.board import BoardNotInstalled, BoardUnreachable, BoardUpstreamError
-from hal0.board.legacy import convert_legacy_board, run_once
+from hal0.board import BoardNotInstalled, BoardNoToken, BoardUnreachable, BoardUpstreamError
+from hal0.board.legacy import (
+    LEGACY_DEFER_DEADLINE_S,
+    LEGACY_RETRY_COOLDOWN_S,
+    convert_legacy_board,
+    run_once,
+)
 
 # Carried copy of the 005 board schema (the migration file is deleted from the tree).
 LEGACY_SCHEMA = """
@@ -100,6 +105,8 @@ class FakeClient:
         self.fail_create_at: int | None = None
         self.fail_exc: Exception | None = None
         self.archive_rejected = False
+        self.reject_create: set[str] = set()  # idempotency keys answered with a 400
+        self.reject_patch: set[str] = set()  # task ids whose status PATCH gets a 400
         self._n = 0
 
     async def list_boards(self, **_: Any) -> Any:
@@ -122,6 +129,10 @@ class FakeClient:
             self.fail_create_at = None
             raise self.fail_exc or BoardUpstreamError("boom")
         key = body["idempotency_key"]
+        if not body["title"].strip() or key in self.reject_create:
+            err = BoardUpstreamError("title required" if key not in self.reject_create else "bad")
+            err.status = 400
+            raise err
         if key not in self.by_key:
             self._n += 1
             self.by_key[key] = f"h_{self._n}"
@@ -130,6 +141,10 @@ class FakeClient:
         return {"task": {"id": self.by_key[key]}}
 
     async def update_task(self, task_id: str, body: Any, **_: Any) -> Any:
+        if task_id in self.reject_patch:
+            err = BoardUpstreamError("bad patch")
+            err.status = 400
+            raise err
         if body["status"] == "archived" and self.archive_rejected:
             err = BoardUpstreamError("bad status")
             err.status = 400
@@ -138,9 +153,11 @@ class FakeClient:
         return {"task": {"id": task_id}}
 
 
-async def _run(client: Any, db: Path, tmp_path: Path) -> dict[str, Any]:
+async def _run(
+    client: Any, db: Path, tmp_path: Path, *, now: float = NOW, **kw: Any
+) -> dict[str, Any]:
     return await convert_legacy_board(
-        client, db_path=db, export_dir=tmp_path / "out", now=lambda: NOW
+        client, db_path=db, export_dir=tmp_path / "out", now=lambda: now, **kw
     )
 
 
@@ -213,13 +230,130 @@ async def test_unreachable_exports_json_and_drops(tmp_path: Path) -> None:
     assert "card" not in _tables(db)
 
 
-async def test_midrun_unreachable_exports_and_drops(tmp_path: Path) -> None:
+async def test_midrun_unreachable_defers(tmp_path: Path) -> None:
     db = _db(tmp_path, [("t_a", "todo", "default"), ("t_b", "todo", "default")])
     client = FakeClient()
     client.fail_create_at, client.fail_exc = 2, BoardUnreachable("down")
     res = await _run(client, db, tmp_path)
-    assert res["exported"] is not None and res["dropped"] is True
-    assert len(json.loads(Path(res["exported"]).read_text())["cards"]) == 2
+    assert res["deferred"] == "board.unreachable"
+    assert res["exported"] is None and res["dropped"] is False
+    assert "card" in _tables(db)
+
+
+async def test_every_create_is_triage(tmp_path: Path) -> None:
+    db = _db(tmp_path, [("t_a", "ready", "default"), ("t_b", "todo", "ops")])
+    client = FakeClient()
+    await _run(client, db, tmp_path)
+    assert len(client.created) == 2
+    assert all(c["triage"] is True for c in client.created)
+
+
+async def test_blank_title_gets_fallback(tmp_path: Path) -> None:
+    db = _db(tmp_path, [("t_a", "todo", "default")])
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE card SET title = '  '")
+    conn.commit()
+    conn.close()
+    client = FakeClient()
+    res = await _run(client, db, tmp_path)
+    assert res["dropped"] is True and res["converted"] == 1
+    assert client.created[0]["title"] == "hal0 card t_a"
+
+
+async def test_create_400_exports_that_card_and_continues(tmp_path: Path) -> None:
+    db = _db(tmp_path, [("t_a", "todo", "default"), ("t_b", "todo", "default")])
+    client = FakeClient()
+    client.reject_create.add("t_a")
+    res = await _run(client, db, tmp_path)
+    assert (res["converted"], res["dropped"]) == (1, True)
+    assert [c["idempotency_key"] for c in client.created] == ["t_b"]
+    data = json.loads(Path(res["exported"]).read_text())
+    assert [c["id"] for c in data["cards"]] == ["t_a"]
+    assert data["cards"][0]["error"] == {"status": 400, "detail": "bad"}
+    assert "card" not in _tables(db)
+
+
+async def test_patch_400_exports_card_with_hermes_id(tmp_path: Path) -> None:
+    db = _db(tmp_path, [("t_a", "todo", "default"), ("t_b", "todo", "default")])
+    client = FakeClient()
+    client.reject_patch.add("h_1")
+    res = await _run(client, db, tmp_path)
+    assert (res["converted"], res["dropped"]) == (1, True)
+    data = json.loads(Path(res["exported"]).read_text())
+    assert [c["id"] for c in data["cards"]] == ["t_a"]
+    assert data["cards"][0]["error"]["status"] == 400
+    assert data["cards"][0]["hermes_id"] == "h_1"
+    assert [c["idempotency_key"] for c in client.created] == ["t_a", "t_b"]
+
+
+async def test_unreachable_at_start_defers(tmp_path: Path) -> None:
+    db = _db(tmp_path, [("t_a", "todo", "default")])
+    with structlog.testing.capture_logs() as logs:
+        res = await _run(None, db, tmp_path, defer="board.no_token")
+    assert res["deferred"] == "board.no_token"
+    assert res["dropped"] is False and res["exported"] is None
+    assert {"card", "board_legacy_state"} <= _tables(db)
+    conn = sqlite3.connect(db)
+    row = conn.execute("SELECT value FROM board_legacy_state WHERE key='first_deferred_at'")
+    assert float(row.fetchone()[0]) == NOW
+    conn.close()
+    ev = [e for e in logs if e["event"] == "board.legacy_deferred"]
+    assert ev and ev[0]["log_level"] == "warning" and ev[0]["code"] == "board.no_token"
+    # a second deferral keeps the first timestamp
+    await _run(None, db, tmp_path, now=NOW + 10, defer="board.no_token")
+    conn = sqlite3.connect(db)
+    assert conn.execute("SELECT value FROM board_legacy_state").fetchall() == [(str(int(NOW)),)]
+    conn.close()
+
+
+async def test_unreachable_past_deadline_exports_with_hermes_id(tmp_path: Path) -> None:
+    db = _db(tmp_path, [("t_a", "todo", "default"), ("t_b", "todo", "default")])
+    client = FakeClient()
+    client.fail_create_at, client.fail_exc = 2, BoardNoToken("no token")
+    first = await _run(client, db, tmp_path)
+    assert first["deferred"] == "board.no_token"
+    later = NOW + LEGACY_DEFER_DEADLINE_S
+    with structlog.testing.capture_logs() as logs:
+        res = await _run(None, db, tmp_path, now=later, defer="board.unreachable")
+    assert res["dropped"] is True and res["exported"] is not None
+    data = json.loads(Path(res["exported"]).read_text())
+    by_id = {c["id"]: c for c in data["cards"]}
+    assert by_id["t_a"]["hermes_id"] == "h_1"
+    assert "hermes_id" not in by_id["t_b"]
+    assert any(e["event"] == "board.legacy_exported" and e["reason"] == "deadline" for e in logs)
+    assert not {"card", "board_legacy_state", "board_legacy_map"} & _tables(db)
+
+
+async def test_unreachable_before_deadline_still_defers(tmp_path: Path) -> None:
+    db = _db(tmp_path, [("t_a", "todo", "default")])
+    await _run(None, db, tmp_path, defer="board.unreachable")
+    res = await _run(
+        None, db, tmp_path, now=NOW + LEGACY_DEFER_DEADLINE_S - 1, defer="board.unreachable"
+    )
+    assert res["deferred"] == "board.unreachable" and res["dropped"] is False
+
+
+async def test_run_once_cooldown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import hal0.board.legacy as legacy
+
+    calls: list[Any] = []
+
+    async def fake_convert(client: Any, **kw: Any) -> dict[str, Any]:
+        calls.append(kw)
+        return {"deferred": "board.unreachable", "dropped": False}
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(legacy, "convert_legacy_board", fake_convert)
+    monkeypatch.setattr(legacy, "resolve_board_client", lambda _app: object())
+    monkeypatch.setattr(legacy.time, "time", lambda: clock["t"])
+    app = SimpleNamespace(state=SimpleNamespace())
+    await run_once(app)
+    await run_once(app)
+    assert len(calls) == 1
+    assert app.state.board_legacy_next_try == 1000.0 + LEGACY_RETRY_COOLDOWN_S
+    clock["t"] += LEGACY_RETRY_COOLDOWN_S
+    await run_once(app)
+    assert len(calls) == 2
 
 
 async def test_rerun_after_partial_is_idempotent(tmp_path: Path) -> None:
@@ -315,6 +449,8 @@ async def test_run_once_retries_after_abort(
     with structlog.testing.capture_logs() as logs:
         await run_once(app)
     assert getattr(app.state, "board_legacy_done", False) is False
+    assert app.state.board_legacy_next_try > 0
+    app.state.board_legacy_next_try = 0.0  # cooldown elapsed
     warn = [e for e in logs if e["event"] == "board.legacy_aborted"]
     assert warn and warn[0]["log_level"] == "warning" and warn[0]["code"] == "board.upstream_error"
     assert not any(e["event"] == "board.legacy_converted" for e in logs)

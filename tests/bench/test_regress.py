@@ -128,7 +128,8 @@ class TestJournalFlags:
         journal_flags(above_threshold, "roster")
         [(path, task)] = FakeBoardApi.calls
         assert path == "/api/board/tasks"
-        assert set(task) == {"title", "body"}
+        assert set(task) == {"title", "body", "triage"}
+        assert task["triage"] is True
         assert str(BOARD_TASK_THRESHOLD + 1) in task["title"]
 
     def test_audit_failure_never_raises_and_board_task_still_attempted(self, monkeypatch):

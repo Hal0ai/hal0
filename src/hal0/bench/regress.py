@@ -190,6 +190,7 @@ def journal_flags(flags: list[Flag], suite_id: str) -> None:
         api_post(
             "/api/board/tasks",
             json={
+                "triage": True,
                 "title": f"bench regression: {len(flags)} cell(s) in {suite_id!r}",
                 "body": "\n".join(
                     f"- {f.model_id} {f.cell_key[:16]} {f.delta_pct}% vs {f.trailing_median}"

@@ -13,8 +13,8 @@ Hermes version bump that would break an adapter must re-vendor a fixture and
 consciously update a frozen signature/value here BEFORE the adapter lane builds
 against a verified surface.
 
-Lanes: hal0-memory, hal0-provider, hal0-voice, hal0-hermes-executor,
-hal0-hermes-automation, plus the cross-cutting security checklist (item 4).
+Lanes: hal0-memory, hal0-provider, hal0-voice, hal0-hermes-automation, plus the
+cross-cutting security checklist (item 4).
 """
 
 import tomllib
