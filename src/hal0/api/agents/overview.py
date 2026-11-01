@@ -456,12 +456,17 @@ def _endpoint(home: Path) -> str:
     return authority(host, port)
 
 
-async def _api_health(home: Path) -> tuple[bool, list[str]]:
-    """Whether the gateway answers, and the profiles it serves.
+async def _api_health(home: Path) -> tuple[bool, list[str], list[dict[str, Any]]]:
+    """Whether the gateway answers, the profiles it serves, and every configured profile's health.
 
     The gateway's ``/health`` and each profile's ``/p/<name>/health`` are
-    probed at once, one thread per probe. Profiles are only reported while the
-    gateway itself is healthy; ``default`` is always among them.
+    probed at once, one thread per probe. The served list (``api_server.profiles``)
+    only names profiles that answer 200, and only while the gateway itself is
+    healthy; ``default`` is always among them. The third value is the same
+    probe read the other way round: ``default`` plus every configured profile
+    directory with ``healthy`` set, so a profile whose server is down is listed
+    as down instead of being absent (#3157). A profile is served through the
+    gateway, so none is healthy while the gateway is not.
     """
 
     from hal0.agents.hermes_api import DEFAULT_PROFILE
@@ -477,12 +482,16 @@ async def _api_health(home: Path) -> tuple[bool, list[str]]:
             *(_in_thread("profile_probe", 0, profile_health, home, n, probe=probe) for n in names)
         ),
     )
-    if not healthy:
-        return False, []
-    return True, [
-        DEFAULT_PROFILE,
-        *(n for n, code in zip(names, codes, strict=True) if code == 200),
+    configured = [
+        {"name": DEFAULT_PROFILE, "healthy": healthy},
+        *(
+            {"name": n, "healthy": healthy and code == 200}
+            for n, code in zip(names, codes, strict=True)
+        ),
     ]
+    if not healthy:
+        return False, [], configured
+    return True, [DEFAULT_PROFILE, *(p["name"] for p in configured[1:] if p["healthy"])], configured
 
 
 def _pending_approvals(request: Request) -> int:
@@ -624,7 +633,7 @@ async def _gather_hermes(request: Request) -> dict[str, Any]:
     seam = _HAL0_AGENTENV if os.geteuid() != 0 else None
 
     no_releases: tuple[Release | None, Release | None] = (None, None)
-    no_health: tuple[bool, list[str]] = (False, [])
+    no_health: tuple[bool, list[str], list[dict[str, Any]]] = (False, [], [])
     no_gateway = _Gateway(None, None, False)
 
     # Three groups, themselves run concurrently: live state, files, doctor checks.
@@ -653,7 +662,7 @@ async def _gather_hermes(request: Request) -> dict[str, Any]:
             _check("gateway_unit", check_hermes_gateway_unit),
         ),
     )
-    gateway, endpoint, (healthy, profiles), memory_raw, platforms = state
+    gateway, endpoint, (healthy, profiles, profile_health_rows), memory_raw, platforms = state
     gateway_units = {"gateway": gateway.state or "unknown", "gateway_enabled": gateway.enabled}
     (live, previous), pin_ref, component, provision_raw, approvals_state = files
     sqlite_result, plugins_result, ownership_result, gateway_result = checks
@@ -712,6 +721,7 @@ async def _gather_hermes(request: Request) -> dict[str, Any]:
         ),
         "units": gateway_units,
         "api_server": {"endpoint": endpoint, "healthy": healthy, "profiles": profiles},
+        "profiles": profile_health_rows,
         "platforms": platforms,
         "provision": provision,
         "doctor": doctor,
@@ -913,6 +923,7 @@ def _neutral_hermes() -> dict[str, Any]:
         },
         "units": {"gateway": "unknown", "gateway_enabled": None},
         "api_server": {"endpoint": None, "healthy": None, "profiles": []},
+        "profiles": [],
         "platforms": [],
         "provision": {**builders.provision_summary(None), "live_built_at": None, "stale": False},
         "doctor": [],

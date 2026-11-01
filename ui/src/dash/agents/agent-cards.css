@@ -221,6 +221,8 @@
 .agents-overview .fc-chip.on { color: var(--accent); border-color: var(--accent-line); }
 .agents-overview .fc-chip.on b { color: var(--accent); }
 .agents-overview .fc-chip.home { align-self: flex-start; margin-top: 3px; }
+/* a configured profile whose server is not answering */
+.agents-overview .fc-chip.down { color: var(--err); border-color: var(--err-line); }
 
 /* reach: platforms, api · N profiles, desktop link */
 .agents-overview .fc-reach { display: flex; flex-wrap: wrap; gap: 5px; }
@@ -229,6 +231,9 @@
 .agents-overview .fc-rchip::before { content: ""; width: 5px; height: 5px; flex-shrink: 0; border-radius: 50%; background: var(--fg-5); }
 .agents-overview .fc-rchip.lit { color: var(--fg-2); border-style: solid; border-color: var(--ok-line); }
 .agents-overview .fc-rchip.lit::before { background: var(--ok); box-shadow: 0 0 6px rgba(111,207,151,0.6); }
+/* the api chip with a configured profile not answering: red dot and border over the lit green */
+.agents-overview .fc-rchip.bad { border-color: var(--err-line); }
+.agents-overview .fc-rchip.bad::before { background: var(--err); box-shadow: 0 0 6px color-mix(in srgb, var(--err) 60%, transparent); }
 /* the gateway is disabled on purpose: a solid neutral chip with a bar, not
    the dashed dot of a platform that is merely unlit */
 .agents-overview .fc-rchip.off { color: var(--fg-2); border-style: solid; border-color: var(--line-strong); background: rgba(20,20,20,0.82); }

@@ -282,6 +282,10 @@ def test_overview_hermes_ready_shape(client_ready):
         "healthy": True,
         "profiles": ["default", "coder"],
     }
+    assert body["profiles"] == [
+        {"name": "default", "healthy": True},
+        {"name": "coder", "healthy": True},
+    ]
     assert body["platforms"] == ["api_server", "telegram"]
     assert body["links"] == {"desktop": None} and body["job"] is None
     assert body["approvals"] == {
@@ -373,6 +377,10 @@ def test_overview_survives_a_failing_probe(client_ready, monkeypatch):
     assert resp.status_code == 200
     body = resp.json()
     assert body["api_server"] == {"endpoint": "127.0.0.1:8642", "healthy": False, "profiles": []}
+    assert body["profiles"] == [
+        {"name": "default", "healthy": False},
+        {"name": "coder", "healthy": False},
+    ]
     assert body["phase"] == "degraded"
     assert [r["reason"] for r in body["degraded"]] == ["api_unhealthy"]
 
@@ -534,6 +542,51 @@ def test_overview_probes_the_gateway_and_every_profile_at_once(client_ready, mon
     body = client_ready.get("/api/agents/hermes/overview").json()
     assert body["api_server"]["healthy"] is True
     assert body["api_server"]["profiles"] == ["default", "coder"]
+
+
+def test_overview_lists_a_configured_profile_whose_server_is_down(client_ready, monkeypatch):
+    """#3157: ``profiles`` carries every configured profile with its health; a down one is not absent.
+
+    ``api_server.profiles`` keeps its old meaning (the served ones), so existing readers see no change.
+    """
+    monkeypatch.setattr(overview_route, "profile_dirs", lambda home: ["coder", "ghost", "stopped"])
+
+    def health(home, name, *, probe=None):
+        return {"coder": 200, "ghost": 404, "stopped": 0}[name]
+
+    monkeypatch.setattr(overview_route, "profile_health", health)
+    body = client_ready.get("/api/agents/hermes/overview").json()
+    assert body["api_server"]["profiles"] == ["default", "coder"]
+    assert body["profiles"] == [
+        {"name": "default", "healthy": True},
+        {"name": "coder", "healthy": True},
+        {"name": "ghost", "healthy": False},
+        {"name": "stopped", "healthy": False},
+    ]
+
+
+def test_overview_profiles_are_all_down_while_the_gateway_is_down(client_ready, monkeypatch):
+    """A profile is served through the gateway, so a dead gateway leaves none of them healthy."""
+    monkeypatch.setattr(overview_route, "gateway_alive", lambda home, *, probe=None: False)
+    body = client_ready.get("/api/agents/hermes/overview").json()
+    assert body["api_server"] == {"endpoint": "127.0.0.1:8642", "healthy": False, "profiles": []}
+    assert body["profiles"] == [
+        {"name": "default", "healthy": False},
+        {"name": "coder", "healthy": False},
+    ]
+
+
+def test_overview_profile_health_comes_from_the_one_probe(client_ready, monkeypatch):
+    """The ``profiles`` list reuses the per-profile probe: one call per configured profile, no second pass."""
+    calls: list[str] = []
+
+    def health(home, name, *, probe=None):
+        calls.append(name)
+        return 200
+
+    monkeypatch.setattr(overview_route, "profile_health", health)
+    client_ready.get("/api/agents/hermes/overview")
+    assert calls == ["coder"]
 
 
 @pytest.mark.parametrize(

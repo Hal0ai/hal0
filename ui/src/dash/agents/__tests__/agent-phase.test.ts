@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest'
 import type { AgentOverview } from '@/api/hooks/useAgents'
 import type { ConfigUrls } from '@/api/hooks/useConfigUrls'
-import { deriveCardModel, type CardModelInput } from '../agent-phase'
+import { deriveCardModel, downProfiles, type CardModelInput } from '../agent-phase'
 
 const READY: CardModelInput = {
   record: { name: 'hermes', status: 'installed', unit_active: true },
@@ -355,15 +355,35 @@ describe('deriveCardModel: chips and reach', () => {
   it('lights platform chips with the gateway and leaves api_server to the api chip', () => {
     const up = deriveCardModel({ ...READY, overview: READY_OVERVIEW })
     expect(up.reach.platforms).toEqual([{ id: 'telegram', lit: true }])
-    expect(up.reach.api).toEqual({ lit: true, profiles: ['default', 'research'] })
+    expect(up.reach.api).toEqual({ lit: true, profiles: ['default', 'research'], down: [] })
     const down = deriveCardModel({ ...READY, overview: DEGRADED_OVERVIEW })
     expect(down.reach.platforms).toEqual([{ id: 'telegram', lit: false }])
   })
 
   it('an unhealthy or absent api is unlit', () => {
     const sick = { ...READY_OVERVIEW, api_server: { endpoint: 'x', healthy: false } }
-    expect(deriveCardModel({ ...READY, overview: sick }).reach.api).toEqual({ lit: false, profiles: [] })
-    expect(deriveCardModel(READY).reach.api).toEqual({ lit: false, profiles: [] })
+    expect(deriveCardModel({ ...READY, overview: sick }).reach.api).toEqual({
+      lit: false,
+      profiles: [],
+      down: [],
+    })
+    expect(deriveCardModel(READY).reach.api).toEqual({ lit: false, profiles: [], down: [] })
+  })
+
+  it('names a configured profile whose server is down beside the served ones (#3157)', () => {
+    const ov = {
+      ...READY_OVERVIEW,
+      profiles: [
+        { name: 'default', healthy: true },
+        { name: 'research', healthy: true },
+        { name: 'ghost', healthy: false },
+      ],
+    } as AgentOverview
+    expect(deriveCardModel({ ...READY, overview: ov }).reach.api).toEqual({
+      lit: true,
+      profiles: ['default', 'research'],
+      down: ['ghost'],
+    })
   })
 
   it('desktop link: overview first, then the configured public url, else null', () => {
@@ -723,5 +743,49 @@ describe('deriveCardModel: Pi', () => {
     // Broken with no failing check to name (the record said so).
     const bare = deriveCardModel({ ...PI, overview: null, record: { name: 'pi', status: 'broken' } })
     expect(bare.lore.abilities.find((a) => a.name === 'Delegate')?.note).toBe('pi is broken')
+  })
+})
+
+describe('downProfiles', () => {
+  const api = { endpoint: 'x', healthy: true, profiles: ['default'] }
+  const ov = (extra: Record<string, unknown>) => ({ ...READY_OVERVIEW, api_server: api, ...extra }) as AgentOverview
+
+  it('lists the configured profiles that are not healthy, in the order sent', () => {
+    const profiles = [
+      { name: 'default', healthy: true },
+      { name: 'zed', healthy: false },
+      { name: 'alpha', healthy: false },
+      { name: 'coder', healthy: true },
+    ]
+    expect(downProfiles(ov({ profiles }))).toEqual(['zed', 'alpha'])
+  })
+
+  it('is empty when every profile is healthy', () => {
+    expect(downProfiles(ov({ profiles: [{ name: 'default', healthy: true }] }))).toEqual([])
+  })
+
+  it('is empty while the api server itself is not healthy: the gateway is the fault, not the profiles', () => {
+    const profiles = [{ name: 'default', healthy: false }, { name: 'coder', healthy: false }]
+    const sick = { ...READY_OVERVIEW, api_server: { ...api, healthy: false }, profiles } as AgentOverview
+    expect(downProfiles(sick)).toEqual([])
+    const unknown = { ...READY_OVERVIEW, api_server: { ...api, healthy: undefined }, profiles } as AgentOverview
+    expect(downProfiles(unknown)).toEqual([])
+  })
+
+  it('is empty for an older server that sends no profiles list, and for no overview', () => {
+    expect(downProfiles(ov({}))).toEqual([])
+    expect(downProfiles(null)).toEqual([])
+    expect(downProfiles(undefined)).toEqual([])
+  })
+
+  it('skips entries of the wrong shape and reads only an explicit false as down', () => {
+    const profiles = [
+      null,
+      'ghost',
+      { name: 7, healthy: false },
+      { name: 'unknown-health' },
+      { name: 'stopped', healthy: false },
+    ]
+    expect(downProfiles(ov({ profiles }))).toEqual(['stopped'])
   })
 })

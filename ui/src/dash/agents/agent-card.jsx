@@ -426,6 +426,7 @@ function Reach({ model }) {
   }
   const r = model.reach;
   const n = r.api.profiles.length;
+  const down = r.api.down.length;
   return (
     <div className="fc-reach">
       {model.gatewayOff ? (
@@ -435,7 +436,10 @@ function Reach({ model }) {
           <span key={p.id} className={"fc-rchip" + (p.lit ? " lit" : "")}>{p.id}</span>
         ))
       )}
-      <span className={"fc-rchip" + (r.api.lit ? " lit" : "")}>api · {n} {n === 1 ? "profile" : "profiles"}</span>
+      <span className={"fc-rchip" + (r.api.lit ? " lit" : "") + (down > 0 ? " bad" : "")}>
+        api · {n} {n === 1 ? "profile" : "profiles"}
+        {down > 0 && ` · ${down} down`}
+      </span>
       {r.desktop && (
         <a className="fc-rchip link" href={r.desktop} target="_blank" rel="noopener noreferrer" onClick={stop}>
           desktop ↗
@@ -752,9 +756,12 @@ function StatusTab({ identity, model }) {
         ["platforms", _list(ov.platforms)],
         ["api server", _dash(api.endpoint) + " · " + (api.healthy === true ? "healthy" : api.healthy === false ? "unhealthy" : "—")],
       ]} />
-      {profiles.length > 0 && (
+      {profiles.length + model.reach.api.down.length > 0 && (
         <div className="fc-chips">
           {profiles.map((p) => <span key={p} className="fc-chip">{p}</span>)}
+          {model.reach.api.down.map((p) => (
+            <span key={p} className="fc-chip down" title="configured, but its server is not answering">{p}</span>
+          ))}
         </div>
       )}
       <Rows rows={[
