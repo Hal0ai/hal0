@@ -78,40 +78,53 @@ def _refused(request: httpx.Request) -> httpx.Response:
     raise httpx.ConnectError("connection refused")
 
 
-# Probes the watcher must have made before a hang is judged. A /health that was
+# Probes the watcher must have made before a stall is judged. A /health that was
 # counted as a strike would stamp ERROR after the second probe and the
 # re-verification under the lock (the refused-connection test below: 3 probes,
-# then ERROR) and the watcher would stop, so a fourth probe is proof the hang
+# then ERROR) and the watcher would stop, so a fourth probe is proof the stall
 # was tolerated, not just that it had not been caught yet.
 _PROBES_PAST_THE_STRIKES = 4
 
-# Only reached when the watcher stops probing (the failure this test exists to
-# catch), never on the passing path: the wait below ends on the probes, not on
-# elapsed time, so a loaded host only makes it slower, never wrong.
+# Only reached when the watcher stops probing (the failure these tests exist to
+# catch), never on the passing path: the wait ends on the probes, not on elapsed
+# time, so a loaded host only makes it slower, never wrong.
 _PROBE_WAIT_CEILING_S = 15.0
 
 
+class _Probes:
+    """The probes the watcher makes, counted by the transport handler."""
+
+    def __init__(self) -> None:
+        self.n = 0
+        self._enough = asyncio.Event()
+
+    def hit(self) -> None:
+        self.n += 1
+        if self.n >= _PROBES_PAST_THE_STRIKES:
+            self._enough.set()
+
+    async def past_the_strikes(self, sm: SlotManager) -> None:
+        """Wait for the probe that proves the stall was tolerated."""
+        try:
+            await asyncio.wait_for(self._enough.wait(), timeout=_PROBE_WAIT_CEILING_S)
+        except TimeoutError:
+            pytest.fail(
+                f"the watcher stopped probing after {self.n} probes; the slot is {sm.state('chat')}"
+            )
+        assert self.n >= _PROBES_PAST_THE_STRIKES, "the watcher must have probed past the strikes"
+
+
 async def test_a_hanging_health_never_stamps_error_on_a_ready_slot(provider: _RealHealth) -> None:
-    calls = {"n": 0}
-    enough = asyncio.Event()
+    probes = _Probes()
 
     def handler(request: httpx.Request) -> httpx.Response:
-        calls["n"] += 1
-        if calls["n"] >= _PROBES_PAST_THE_STRIKES:
-            enough.set()
+        probes.hit()
         return _hangs(request)
 
     sm = SlotManager()
     with _http(handler):
         await _ready(sm)
-        try:
-            await asyncio.wait_for(enough.wait(), timeout=_PROBE_WAIT_CEILING_S)
-        except TimeoutError:
-            pytest.fail(
-                f"the watcher stopped probing after {calls['n']} probes; "
-                f"the slot is {sm.state('chat')}"
-            )
-    assert calls["n"] >= _PROBES_PAST_THE_STRIKES, "the watcher must have probed past the strikes"
+        await probes.past_the_strikes(sm)
     assert sm.state("chat") is SlotState.READY
     await sm._transition("chat", SlotState.OFFLINE, force=True)
 
@@ -119,17 +132,16 @@ async def test_a_hanging_health_never_stamps_error_on_a_ready_slot(provider: _Re
 async def test_a_503_never_stamps_error_on_a_ready_slot(provider: _RealHealth) -> None:
     """Upstream's ``engine_unresponsive``: the front end is up and the engine's PING
     failed, which is the silent engine this probe exists to leave alone."""
-    calls = {"n": 0}
+    probes = _Probes()
 
     def handler(request: httpx.Request) -> httpx.Response:
-        calls["n"] += 1
+        probes.hit()
         return httpx.Response(503, text="engine_unresponsive")
 
     sm = SlotManager()
     with _http(handler):
         await _ready(sm)
-        await asyncio.sleep(0.3)
-        assert calls["n"] >= 2, "the watcher must have probed more than the strike count"
+        await probes.past_the_strikes(sm)
         assert sm.state("chat") is SlotState.READY
         assert await sm.container_readiness_check("chat") == (False, "starting")
         assert await sm._probe_health("chat", strict=True) is False
