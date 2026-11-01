@@ -59,12 +59,17 @@ from hal0.providers.base import HealthCheck, Mount, Provider, RuntimeLaunchPlan
 from hal0.runners.knobs import (
     HALOGEN_DENIED_ENV,
     HALOGEN_DENIED_PREFIXES,
+    HALOGEN_KNOBS,
     HALOGEN_MANAGED_ENV,
     HALOGEN_MANAGED_PREFIXES,
     HALOGEN_TUNE_ENV,
+    EngineKnob,
+    _range_problem,
     parse_env_tokens,
 )
 from hal0.slots import output_sanity
+from hal0.slots.capacity import halogen_footprint_mb
+from hal0.slots.model_fit import model_runtime_mismatch
 from hal0.slots.tune import EffectiveTune, effective_tune
 
 log = logging.getLogger(__name__)
@@ -173,6 +178,23 @@ def halogen_env(
         }
     )
     return env
+
+
+_KNOBS: dict[str, EngineKnob] = {knob.env: knob for knob in HALOGEN_KNOBS}
+
+
+def _knob_value(carried: Mapping[str, str], env: str) -> str:
+    """The profile's value for knob ``env``, or the knob's default when it is absent or odd.
+
+    "Odd" is anything the write-time screen would refuse (not a whole number, out
+    of range, not one of the choices): the launch path reports that error, and a
+    sizing read must keep working until it does.
+    """
+    knob = _KNOBS[env]
+    value = carried.get(env)
+    if value is not None and _range_problem(knob, value) is None:
+        return value
+    return str(knob.default)
 
 
 def _probe_failure(status: str, detail: str) -> dict[str, Any]:
@@ -407,6 +429,58 @@ class HalogenProvider(Provider):
             if parent and not _covers(store, parent):
                 roots.append(parent)
         return roots
+
+    # ── Memory footprint ───────────────────────────────────────────────────────
+
+    def footprint_mb(
+        self,
+        model_info: Mapping[str, Any],
+        slot_cfg: Mapping[str, Any],
+        profile: Any,
+    ) -> float | None:
+        """Resident memory (MiB) the engine will hold, from the slot's own layout.
+
+        Argument gathering only; the arithmetic is
+        :func:`hal0.slots.capacity.halogen_footprint_mb` (ADR-0039). The inputs
+        are read as :meth:`container_spec` reads them: the checkpoint's size from
+        the registry row, the KV pool, KV slot count, prefill chunk and 8-bit KV
+        switch from the profile's ``HALOGEN_*`` flags (a missing or odd value is
+        the knob's default), and the context window and vision from the slot's
+        effective tune. The pool is booked at ``max(pool, window)`` so a small
+        pool setting never books less than the window needs, and the vision
+        tower counts only when vision is on AND its sidecar sits beside the
+        checkpoint, the same condition that sets ``HALOGEN_VISION_TOWER``.
+
+        ``None`` (the caller then uses the generic estimate) for a model that is
+        not a halogen checkpoint, or a checkpoint of unknown size.
+        """
+        if model_runtime_mismatch(model_info, self):
+            return None  # a known non-halogen row: not this engine's memory
+        try:
+            checkpoint_bytes = int(model_info.get("size_bytes") or 0)
+        except (TypeError, ValueError):
+            checkpoint_bytes = 0
+        if checkpoint_bytes <= 0:
+            return None
+
+        try:
+            carried = _profile_env(getattr(profile, "flags", "") or "")
+        except UnprocessableEntity:
+            carried = {}  # the launch refuses these flags; sizing falls back to defaults
+        tune = effective_tune(slot_cfg, profile)
+        pool = int(_knob_value(carried, "HALOGEN_KV_POOL_POSITIONS"))
+        window = tune.ctx_size if isinstance(tune.ctx_size, int) else 0
+        checkpoint = str(model_info.get("path") or "")
+        return halogen_footprint_mb(
+            checkpoint_bytes=checkpoint_bytes,
+            pool_positions=max(pool, window),
+            kv_slots=int(_knob_value(carried, "HALOGEN_KV_SLOTS")),
+            max_tok=int(_knob_value(carried, "HALOGEN_MAX_TOK")),
+            kv8=_knob_value(carried, "HALOGEN_KV8") == "1",
+            vision=tune.vision == "auto"
+            and bool(checkpoint)
+            and vision_sidecar_present(checkpoint),
+        )
 
     # ── Health / readiness / sentinel ──────────────────────────────────────────
 
