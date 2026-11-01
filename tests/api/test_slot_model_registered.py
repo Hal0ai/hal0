@@ -27,10 +27,12 @@ from typer.testing import CliRunner
 
 from hal0.api import create_app
 from hal0.cli import slot_commands
+from hal0.errors import BadRequest
 from hal0.mcp import admin
 from hal0.mcp.approval_queue import ApprovalQueue
 from hal0.registry.curated import CURATED_MODELS
 from hal0.registry.fallback import resolve_servable_model
+from hal0.slots.config_write import check_model_registered
 from tests.fixtures.model_registration import register_model_file
 from tests.fixtures.slot_probe import probe_slot_name
 
@@ -199,6 +201,51 @@ def test_npu_slot_is_not_checked_against_the_registry(
         "/api/slots", json={"name": "npu2", "device": "npu", "type": "llm", "model": "qwen3-4b-FLM"}
     )
     assert r.status_code != 400 or _code(r) != CODE, r.text
+
+
+@pytest.mark.parametrize(
+    ("slot_type", "model", "profile"),
+    [
+        ("tts", "qwen3-tts", "qwen3-tts"),
+        ("tts", "kokoro-82m", None),
+        ("transcription", "moonshine-base-en", None),
+    ],
+)
+def test_self_managed_engine_slot_is_not_checked_against_the_registry(
+    slots: Path,
+    container_stub: None,
+    client: TestClient,
+    slot_type: str,
+    model: str,
+    profile: str | None,
+) -> None:
+    """Kokoro / Qwen3-TTS / Moonshine serve baked-in or operator-staged weights.
+
+    They are ``SELF_MANAGED_PROVIDERS``: ``provider_requires_model`` is False and
+    their model id is never a registry row, so the write must not demand one.
+    """
+    body: dict[str, Any] = {
+        "name": "voice2",
+        "type": slot_type,
+        "device": "gpu-rocm" if slot_type == "tts" else "cpu",
+        "model": model,
+    }
+    if profile:
+        body["profile"] = profile
+    r = client.post("/api/slots", json=body)
+    assert r.status_code == 201, r.text
+
+
+def test_self_managed_engine_is_exempt_in_the_pure_guard() -> None:
+    class _Empty:
+        def has(self, _model_id: str) -> bool:
+            return False
+
+    for cfg in ({"type": "tts", "device": "cpu"}, {"type": "transcription", "device": "cpu"}):
+        check_model_registered("voice", cfg, "operator-staged-weights", _Empty())
+    with pytest.raises(BadRequest) as exc:
+        check_model_registered("chat", {"type": "llm", "device": "gpu-vulkan"}, "x", _Empty())
+    assert exc.value.code == CODE
 
 
 # ── CLI → REST ───────────────────────────────────────────────────────────────

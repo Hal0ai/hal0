@@ -24,7 +24,7 @@ from hal0.config import paths
 from hal0.slot_config import merge_slot_config
 from hal0.slots._cfg_helpers import _cfg_to_dict
 from hal0.slots.activation import claims_npu_anchor as _claims_npu_anchor
-from hal0.slots.state import NpuExclusivityViolation, SlotConfigError
+from hal0.slots.state import NpuExclusivityViolation, SlotConfigError, provider_requires_model
 
 # ── device/profile coherence ────────────────────────────────────────────────
 
@@ -439,6 +439,10 @@ def check_model_registered(
     * the slot is an NPU/FLM slot or a ComfyUI slot: their models are engine tags
       and catalogue image models, never registry rows
       (``resolve_servable_model`` leaves them alone too);
+    * the slot's engine is self-managed (``SELF_MANAGED_PROVIDERS``: Kokoro,
+      Qwen3-TTS, Moonshine, VibeVoice): it serves baked-in or operator-staged
+      weights and its model id is not a registry row
+      (:func:`hal0.slots.state.provider_requires_model` owns that fact);
     * :func:`hal0.model_meta.is_resolvable` — a registry row or an installed FLM id;
     * the id is in the curated catalogue, which ``load`` pulls on demand.
 
@@ -447,7 +451,8 @@ def check_model_registered(
     """
     if not model_id or registry is None or model_id == current_model_id:
         return
-    if slot_is_flm(cfg) or _cfg_effective_provider(cfg) == "comfyui":
+    provider = _cfg_effective_provider(cfg)
+    if slot_is_flm(cfg) or provider == "comfyui" or not provider_requires_model(provider):
         return
     from hal0.model_meta import is_resolvable
     from hal0.registry.curated import get_curated
