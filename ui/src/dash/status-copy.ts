@@ -36,6 +36,10 @@ export type SlotStateWord =
 
 export type ServiceHealthWord = 'up' | 'stopped' | 'down'
 
+/** The one tone a service reads as everywhere it is drawn: `up` green, `off`
+ *  grey (deliberately stopped — comes back on demand), `err` red/warn. */
+export type ServiceTone = 'up' | 'off' | 'err'
+
 export const SLOT_STATE_COPY: Readonly<Record<SlotStateWord, string>> = {
   offline: 'Not running — no requests reach it until something starts it or a request wakes it.',
   pulling: 'Downloading its model files — not ready to serve yet.',
@@ -52,6 +56,20 @@ export const SERVICE_HEALTH_COPY: Readonly<Record<ServiceHealthWord, string>> = 
   up: 'Reachable and answering normally.',
   stopped: 'Not running on purpose — it starts on demand when something needs it.',
   down: 'Crashed or failed — it will not come back on its own; restart it.',
+}
+
+/** The single owner of the service-state -> tone mapping (#2705). The dock
+ *  footer pips and the Settings > Overview Services panel both derive from
+ *  this, so a `stopped` service cannot read grey in one and "down" in the
+ *  other. `state` is authoritative; older backends omit it, so fall back to
+ *  the legacy `up` boolean. An unrecognised word is an error, never healthy. */
+export function serviceTone(s: {
+  up: boolean
+  state?: ServiceHealthWord | null
+}): ServiceTone {
+  if (s.state === 'stopped') return 'off'
+  if (s.state) return s.state === 'up' ? 'up' : 'err'
+  return s.up ? 'up' : 'err'
 }
 
 const SLOT_STATE_FALLBACK = 'Unrecognised lifecycle state — treat as unavailable until confirmed otherwise.'

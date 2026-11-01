@@ -14,6 +14,7 @@ import { ENDPOINTS } from '@/api/endpoints'
 import { useUpdateState } from '@/api/hooks/useUpdates'
 import { useServicesHealth } from '@/api/hooks/useServicesHealth'
 import { slotIndicatorFromPhase } from '../slot-status.js'
+import { serviceTone } from '../status-copy'
 import { isImageGenRoute } from '../slots-route'
 import { useImageRunStore } from '@/stores/useImageRunStore'
 import { useStatusLineActions } from '../image/useStatusLineActions'
@@ -177,9 +178,9 @@ export function Dock({ route, param, expanded = false, onToggle }) {
           id: s.id,
           label: s.name || s.id,
           // 'stopped' is deliberate (grey pip, out of the ready count);
-          // only a failed/unknown service reads red. Older backends omit
-          // `state` — fall back to the boolean.
-          tone: s.state === 'stopped' ? 'off' : (s.state ? (s.state === 'up' ? 'up' : 'err') : (s.up ? 'up' : 'err')),
+          // only a failed/unknown service reads red. serviceTone owns the
+          // mapping so the Settings > Overview panel cannot drift from it.
+          tone: serviceTone(s),
           title: s.detail || `${s.name || s.id} down`,
         }))),
   ];

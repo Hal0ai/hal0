@@ -5,6 +5,7 @@ import {
   statusCopyForSlotState,
   statusCopyForServiceState,
   SERVICE_UNMONITORED_COPY,
+  serviceTone,
 } from './status-copy'
 
 // The 9 wire values of hal0.slots.state.SlotState — pinned again (in Python)
@@ -64,5 +65,28 @@ describe('statusCopyForSlotState / statusCopyForServiceState', () => {
     expect(statusCopyForSlotState('some-future-state')).toMatch(/unrecognised/i)
     expect(statusCopyForSlotState(null)).toMatch(/unrecognised/i)
     expect(statusCopyForServiceState(undefined)).toMatch(/unrecognised/i)
+  })
+})
+
+describe('serviceTone', () => {
+  it('maps the three health words: stopped is deliberate grey, only down is an error', () => {
+    expect(serviceTone({ up: true, state: 'up' })).toBe('up')
+    expect(serviceTone({ up: false, state: 'stopped' })).toBe('off')
+    expect(serviceTone({ up: false, state: 'down' })).toBe('err')
+  })
+
+  it('trusts the state word over the boolean when both are present', () => {
+    expect(serviceTone({ up: true, state: 'down' })).toBe('err')
+    expect(serviceTone({ up: false, state: 'up' })).toBe('up')
+  })
+
+  it('treats an unrecognised word as an error rather than healthy', () => {
+    expect(serviceTone({ up: true, state: 'bogus' as never })).toBe('err')
+  })
+
+  it('falls back to the boolean when an older backend omits state', () => {
+    expect(serviceTone({ up: true })).toBe('up')
+    expect(serviceTone({ up: false })).toBe('err')
+    expect(serviceTone({ up: true, state: null })).toBe('up')
   })
 })
