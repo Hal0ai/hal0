@@ -1,6 +1,9 @@
 version: 2
 updates:
-  - package-ecosystem: pip
+  # uv, not pip: CI installs with `uv sync --locked` (#3087), so a bump that
+  # edits pyproject.toml without re-locking fails at install (#3176, #3177).
+  # The uv ecosystem regenerates uv.lock in the same PR.
+  - package-ecosystem: uv
     directory: /
     schedule:
       interval: weekly
