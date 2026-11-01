@@ -12,7 +12,8 @@ test_upstream_dedup.py.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,22 @@ from hal0.api._redact import (
 )
 from hal0.observability.sentry import SENSITIVE_HEADERS
 from hal0.redaction import MASK, redact_secret_shapes, redact_shareable_text, secret_spans
+
+
+def _cpu_timed(redact: Callable[[str], str], text: str) -> tuple[str, float]:
+    """Run ``redact(text)``; return its output and the CPU seconds the process spent.
+
+    The one clock every ``@pytest.mark.timing`` guard in this file shares. They
+    exist to catch a super-linear scan (tens of seconds on 80 KB), so they bound
+    the CPU the call burns, which is the same on an idle box and a busy one.
+    ``time.perf_counter()`` also counts the time the process waits for a core,
+    and on a box with every core busy that tripped bounds on code that was fine
+    (#3209).
+    """
+    start = time.process_time()
+    out = redact(text)
+    return out, time.process_time() - start
+
 
 # ── is_sensitive_key ──────────────────────────────────────────────────────
 
@@ -844,14 +861,10 @@ class TestShareableLiteralsSinglePass:
         The fix runs in about 1.2 s on a dev box and about 5 s on a loaded
         PR runner (xdist workers share its cores), so the bound sits at 10 s:
         the old per-literal loop's 18 s still fails it."""
-        import time
-
         text = "\n".join(f"token={value.format(i)}\n{value.format(i)}" for i in range(45_000))
         assert len(text) > 700_000
-        start = time.perf_counter()
-        out = redact_shareable_text(text)
-        elapsed = time.perf_counter() - start
-        assert elapsed < 10.0, f"{len(text)} chars took {elapsed:.2f}s"
+        out, elapsed = _cpu_timed(redact_shareable_text, text)
+        assert elapsed < 10.0, f"{len(text)} chars took {elapsed:.2f}s CPU"
         assert out == "\n".join([f"token={MASK}\n{MASK}"] * 45_000)
 
     def test_differential_against_the_loop(self) -> None:
@@ -900,12 +913,8 @@ class TestShareableLiteralsSinglePass:
         it: 4.5 s for 320 KB of ``X_KEY=a.`` and 4.7 s for 120 KB of ``a`` in an
         open quote on main. Linear, they take about 0.1 s on a dev box (the
         bound leaves 10x for a loaded runner); the old scan fails it."""
-        import time
-
-        start = time.perf_counter()
-        out = redact_shareable_text(text)
-        elapsed = time.perf_counter() - start
-        assert elapsed < 3.0, f"{len(text)} chars took {elapsed:.2f}s"
+        out, elapsed = _cpu_timed(redact_shareable_text, text)
+        assert elapsed < 3.0, f"{len(text)} chars took {elapsed:.2f}s CPU"
         assert MASK in out
 
     def test_past_the_budget_the_longest_literals_still_take_the_replace(
@@ -1014,7 +1023,8 @@ class TestRedactionTimeIsLinear:
     hyphenated form about 50 s, and 8 KB of ``--token-x-`` about 20 s (the
     ``--flag`` rule was cubic), while journald passes lines of up to about
     48 KB that a client can partly control. Each line here takes well under
-    0.1 s with the fix; the 1 s bound only leaves room for a slow CI box.
+    0.1 s with the fix; the 1 s bound only leaves room for a slow CI box. The
+    bound is CPU time (``_cpu_timed``), so a busy box does not trip it.
     """
 
     _BOUND_S = 1.0
@@ -1035,13 +1045,9 @@ class TestRedactionTimeIsLinear:
     @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
     @pytest.mark.timing
     def test_a_worst_case_line_is_fast(self, redact, unit: str, length: int) -> None:
-        import time
-
         line = (unit * (length // len(unit) + 1))[:length]
-        start = time.perf_counter()
-        redact(line)
-        elapsed = time.perf_counter() - start
-        assert elapsed < self._BOUND_S, f"{len(line)} chars of {unit!r} took {elapsed:.2f}s"
+        _, elapsed = _cpu_timed(redact, line)
+        assert elapsed < self._BOUND_S, f"{len(line)} chars of {unit!r} took {elapsed:.2f}s CPU"
 
     def test_a_secret_after_a_long_run_is_still_masked(self) -> None:
         """The fast rules start at a run's start; a secret at its end still
@@ -1162,24 +1168,21 @@ class TestPackedSecrets:
     @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
     @pytest.mark.timing
     def test_a_long_packed_run_is_fast(self, redact, unit: str) -> None:
-        import time
-
         line = unit * (80_000 // len(unit))
-        start = time.perf_counter()
-        redact(line)
-        elapsed = time.perf_counter() - start
-        assert elapsed < TestRedactionTimeIsLinear._BOUND_S, f"{unit!r} took {elapsed:.2f}s"
+        _, elapsed = _cpu_timed(redact, line)
+        assert elapsed < TestRedactionTimeIsLinear._BOUND_S, f"{unit!r} took {elapsed:.2f}s CPU"
 
 
 # ── #2594: an empty value before a second secret ────────────────────────────
 
 
 class TestEmptyValueBeforeASecret:
-    #: Wall-clock bound for the long-run test below. The empty-value run costs
-    #: about 1 s on a loaded PR runner (1.01 s twice on 2026-10-14/15, #2677),
-    #: so borrowing TestRedactionTimeIsLinear's 1 s bound made unrelated PRs
-    #: red. 3x headroom keeps the linear-time property asserted (a quadratic
-    #: scan of 80 KB took tens of seconds, #2600) without flaking.
+    #: CPU-time bound (``_cpu_timed``) for the long-run test below. The
+    #: empty-value run costs about 1 s on a loaded PR runner (1.01 s twice on
+    #: 2026-10-14/15, #2677, as wall clock), so borrowing
+    #: TestRedactionTimeIsLinear's 1 s bound made unrelated PRs red. 3x
+    #: headroom keeps the linear-time property asserted (a quadratic scan of
+    #: 80 KB took tens of seconds, #2600) without flaking.
     _BOUND_S = 3.0
 
     """#2594: ``NAME=`` with an empty value, then whitespace, took the next
@@ -1269,14 +1272,10 @@ class TestEmptyValueBeforeASecret:
     @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
     @pytest.mark.timing
     def test_a_long_run_of_empty_values_is_fast(self, redact, unit: str) -> None:
-        import time
-
         line = unit * (80_000 // len(unit)) + "v"
-        start = time.perf_counter()
-        out = redact(line)
-        elapsed = time.perf_counter() - start
+        out, elapsed = _cpu_timed(redact, line)
         assert out.endswith(MASK)
-        assert elapsed < self._BOUND_S, f"{unit!r} took {elapsed:.2f}s"
+        assert elapsed < self._BOUND_S, f"{unit!r} took {elapsed:.2f}s CPU"
 
 
 # ── #2595: secrets glued together with no separator ─────────────────────────
@@ -1371,13 +1370,9 @@ class TestGluedSecrets:
     @pytest.mark.parametrize("redact", [redact_log_line, redact_secret_shapes])
     @pytest.mark.timing
     def test_a_long_glued_run_is_fast(self, redact, unit: str) -> None:
-        import time
-
         for line in (unit * (80_000 // len(unit)), unit * (80_000 // len(unit)) + " v"):
-            start = time.perf_counter()
-            redact(line)
-            elapsed = time.perf_counter() - start
-            assert elapsed < TestRedactionTimeIsLinear._BOUND_S, f"{unit!r} took {elapsed:.2f}s"
+            _, elapsed = _cpu_timed(redact, line)
+            assert elapsed < TestRedactionTimeIsLinear._BOUND_S, f"{unit!r} took {elapsed:.2f}s CPU"
 
 
 # ── #2593: a quote that does not close where it should ──────────────────────
@@ -1474,13 +1469,9 @@ class TestUnclosedQuotes:
     @pytest.mark.parametrize("redact", [redact_log_line, redact_shareable_text])
     @pytest.mark.timing
     def test_a_long_run_of_quotes_is_fast(self, redact, unit: str) -> None:
-        import time
-
         line = unit * (80_000 // len(unit))
-        start = time.perf_counter()
-        redact(line)
-        elapsed = time.perf_counter() - start
-        assert elapsed < TestRedactionTimeIsLinear._BOUND_S, f"{unit!r} took {elapsed:.2f}s"
+        _, elapsed = _cpu_timed(redact, line)
+        assert elapsed < TestRedactionTimeIsLinear._BOUND_S, f"{unit!r} took {elapsed:.2f}s CPU"
 
 
 class TestBackslashEscapedQuotes:
