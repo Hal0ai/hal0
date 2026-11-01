@@ -135,6 +135,9 @@ class ExtractionLimits:
       refresh share it, and the schema description says so.
     * ``retry_backoff_s`` -> ``HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS``:
       wait before a requeue. Worker-wide likewise.
+
+    ``HINDSIGHT_API_RETAIN_WALL_TIMEOUT`` is not a field: it is derived from
+    ``llm_timeout_s`` and ``llm_retries`` by :func:`retain_wall_timeout_s`.
     """
 
     max_concurrent: int = 1
@@ -157,6 +160,42 @@ class ExtractionLimits:
         return asdict(self)
 
 
+#: Floor for the retain wall limit: hindsight-api's own default (1 h). hal0 never
+#: lowers the limit below what the engine would have used.
+RETAIN_WALL_FLOOR_S = 3600
+#: Soft upper bound (4 h). One document holds the single extraction lane for at
+#: most this long, unless the operator's own per-call budget already exceeds it
+#: (see :func:`retain_wall_timeout_s`).
+RETAIN_WALL_CEILING_S = 14400
+#: A document may need this many worst-case calls (chunks) before the wall limit.
+RETAIN_WALL_CALL_BUDGET = 3
+
+
+def retain_wall_timeout_s(timeout_s: int, llm_retries: int) -> int:
+    """Value for ``HINDSIGHT_API_RETAIN_WALL_TIMEOUT`` (seconds, #3214).
+
+    hindsight-api cancels a retain task that runs past this limit and marks it
+    failed, with no retry. One extraction call may take ``timeout_s`` per
+    attempt and is attempted ``llm_retries + 1`` times, so the limit must be
+    strictly above that per-call budget or it cuts a call mid-flight::
+
+        per_call = timeout_s * (llm_retries + 1)
+        wall = max(min(max(3600, 3 * per_call), 14400), per_call + timeout_s)
+
+    That is: three worst-case calls' worth, never below the engine's own 1 h,
+    capped at 4 h so one document cannot hold the single extraction lane for
+    longer — except that the result is always at least one further ``timeout_s``
+    above ``per_call``, so a large operator-chosen timeout (up to 3600 s x 6
+    attempts) raises the cap rather than racing the limit. Defaults (300 s, 1
+    retry) give 3600 s.
+    """
+    per_call = int(timeout_s) * (int(llm_retries) + 1)
+    bounded = min(
+        max(RETAIN_WALL_FLOOR_S, RETAIN_WALL_CALL_BUDGET * per_call), RETAIN_WALL_CEILING_S
+    )
+    return max(bounded, per_call + int(timeout_s))
+
+
 _DROP_IN_TEMPLATE = (
     "# Managed by hal0 (ADR-0023 / #2919 — memory.graph llm_timeout_s and the\n"
     "# #1834 extraction limits). Overrides the hindsight-api LLM target, timeout\n"
@@ -174,6 +213,7 @@ _DROP_IN_TEMPLATE = (
     "Environment=HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES={llm_retries}\n"
     "Environment=HINDSIGHT_API_WORKER_MAX_RETRIES={task_retries}\n"
     "Environment=HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS={retry_backoff_s}\n"
+    "Environment=HINDSIGHT_API_RETAIN_WALL_TIMEOUT={wall_timeout_s}\n"
 )
 
 
@@ -231,6 +271,7 @@ def render_drop_in(
         llm_retries=int(lim.llm_retries),
         task_retries=int(lim.task_retries),
         retry_backoff_s=int(lim.retry_backoff_s),
+        wall_timeout_s=retain_wall_timeout_s(timeout_s, lim.llm_retries),
     )
 
 

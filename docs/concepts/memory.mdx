@@ -282,6 +282,15 @@ even on a fresh install, under `[memory.graph]`:
   already holds `extraction_max_tokens = 4096` keeps it; saving the graph
   settings and `hal0 doctor` both warn when a bank's chunk size is not cleared.
 
+  hal0 also owns Hindsight's retain wall limit (`HINDSIGHT_API_RETAIN_WALL_TIMEOUT`),
+  which cancels a retain that runs too long and marks it failed without a
+  retry. It is derived, not configured: with
+  `per_call = llm_timeout_s × (extraction_llm_retries + 1)` the limit is
+  `max(min(max(3600, 3 × per_call), 14400), per_call + llm_timeout_s)` seconds,
+  so it is always above one call, never below Hindsight's own 3600 s, and at
+  most 4 h unless one call's own budget already exceeds that. The defaults give
+  3600 s.
+
 The timeout and the extraction limits are propagated to the `hindsight-api`
 service as `HINDSIGHT_API_LLM_TIMEOUT=<n>` and the matching
 `HINDSIGHT_API_RETAIN_*` / `HINDSIGHT_API_WORKER_*` limits through a systemd

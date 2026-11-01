@@ -12,6 +12,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from hal0.memory.extraction_env import (
     DROP_IN_PATH,
     EXTRACTION_FLOOR_ENV,
@@ -939,3 +941,46 @@ def test_shipped_hindsight_unit_defaults_to_the_memory_alias():
     assert models == [MEMORY_ALIAS]
     # …and it is the same line the drop-in writes, so the two never disagree.
     assert f"Environment=HINDSIGHT_API_LLM_MODEL={MEMORY_ALIAS}" in render_drop_in()
+
+
+# ── retain wall limit (#3214) ──────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("timeout_s", "llm_retries", "expected"),
+    [
+        (300, 1, 3600),  # defaults: engine's own 1 h floor
+        (300, 5, 5400),  # three worst-case calls of 1800 s
+        (30, 0, 3600),  # fast slot never drops below the floor
+        (3600, 1, 14400),  # the #3214 box: 3 x 7200 capped at 4 h
+        (3600, 5, 25200),  # per-call budget 21600 exceeds the cap: per_call + timeout
+    ],
+)
+def test_retain_wall_timeout_formula(timeout_s: int, llm_retries: int, expected: int) -> None:
+    from hal0.memory.extraction_env import retain_wall_timeout_s
+
+    got = retain_wall_timeout_s(timeout_s, llm_retries)
+    per_call = timeout_s * (llm_retries + 1)
+    assert got > per_call  # a single call is never cut mid-flight
+    assert got >= 3600
+    assert got == expected
+
+
+def test_retain_wall_timeout_is_strictly_above_one_call_everywhere() -> None:
+    from hal0.memory.extraction_env import RETAIN_WALL_CEILING_S, retain_wall_timeout_s
+
+    for timeout_s in (30, 300, 900, 1800, 3600):
+        for retries in range(6):
+            wall = retain_wall_timeout_s(timeout_s, retries)
+            per_call = timeout_s * (retries + 1)
+            assert wall > per_call
+            assert wall <= max(RETAIN_WALL_CEILING_S, per_call + timeout_s)
+
+
+def test_drop_in_carries_the_wall_limit_and_follows_the_timeout() -> None:
+    from hal0.memory.extraction_env import ExtractionLimits, render_drop_in
+
+    assert "HINDSIGHT_API_RETAIN_WALL_TIMEOUT=3600\n" in render_drop_in()
+    out = render_drop_in(3600, limits=ExtractionLimits(llm_retries=1))
+    assert "HINDSIGHT_API_LLM_TIMEOUT=3600\n" in out
+    assert "HINDSIGHT_API_RETAIN_WALL_TIMEOUT=14400\n" in out
