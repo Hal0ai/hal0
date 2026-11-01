@@ -161,6 +161,46 @@ def test_a_missing_checkpoint_is_refused_even_when_the_host_cannot_be_read(
     assert exc.value.code == "slot.model_missing"
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param(b"NOPE" + b"\x00" * 60, id="garbage"),
+        pytest.param(b"HG", id="truncated"),
+        pytest.param(b"", id="empty"),
+    ],
+)
+def test_a_file_without_the_magic_is_refused_naming_the_path(store: Path, content: bytes) -> None:
+    """The engine's entrypoint exits on it, so it must not get as far as evicting for it."""
+    (store / CKPT_NAME).write_bytes(content)
+    with pytest.raises(Hal0Error) as exc:
+        _preflight(store, [GFX1151])
+    assert exc.value.code == "slot.model_missing"
+    assert str(store / CKPT_NAME) in str(exc.value)
+    assert "HGN1" in str(exc.value)
+    assert exc.value.details["path"] == str(store / CKPT_NAME)
+
+
+def test_a_checkpoint_this_account_cannot_open_is_refused_naming_the_path(
+    store: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``is_file`` answers from the directory, so a file with the wrong mode gets this far."""
+
+    def denied(path: Path, *_a: Any, **_k: Any) -> Any:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(Path, "open", denied)
+    with pytest.raises(Hal0Error) as exc:
+        _preflight(store, [GFX1151])
+    assert exc.value.code == "slot.model_missing"
+    assert str(store / CKPT_NAME) in str(exc.value)
+
+
+def test_a_bad_magic_on_the_wrong_host_is_still_about_the_host(store: Path) -> None:
+    (store / CKPT_NAME).write_bytes(b"NOPE")
+    with pytest.raises(SlotHostUnsupported):
+        _preflight(store, [110000])
+
+
 def test_a_missing_tokenizer_is_refused_naming_the_path(store: Path) -> None:
     (store / "tokenizer" / "tokenizer.json").unlink()
     with pytest.raises(Hal0Error) as exc:
@@ -244,6 +284,21 @@ def test_load_refuses_a_missing_tokenizer_before_any_unit_is_written(
     store: Path,
 ) -> None:
     (store / "tokenizer" / "tokenizer.json").unlink()
+    provider = ContainerProvider()
+    with (
+        patch("hal0.providers.container._SYSTEMCTL_SEAM") as seam,
+        patch("hal0.providers.container.require_kfd_for_gpu_slot"),
+        patch("hal0.providers.container.kfd_gfx_target_versions", return_value=[GFX1151]),
+        pytest.raises(Hal0Error) as exc,
+    ):
+        provider.load_sync(_cfg(), _info(store))
+    assert exc.value.code == "slot.model_missing"
+    seam.write_quadlet.assert_not_called()
+    seam.systemctl.assert_not_called()
+
+
+def test_load_refuses_a_garbage_checkpoint_before_any_unit_is_written(store: Path) -> None:
+    (store / CKPT_NAME).write_bytes(b"NOPE" + b"\x00" * 60)
     provider = ContainerProvider()
     with (
         patch("hal0.providers.container._SYSTEMCTL_SEAM") as seam,

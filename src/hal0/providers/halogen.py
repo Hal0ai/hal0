@@ -56,7 +56,11 @@ from hal0.http_client import async_client
 from hal0.install.perms import ensure_shared_dir
 from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
 from hal0.providers.base import HealthCheck, Mount, Provider, RuntimeLaunchPlan
-from hal0.registry.detect import HALOGEN_TOKENIZER_JSON, HALOGEN_VISION_SIDECAR
+from hal0.registry.detect import (
+    HALOGEN_TOKENIZER_JSON,
+    HALOGEN_VISION_SIDECAR,
+    has_hgn_magic,
+)
 from hal0.runners.knobs import (
     HALOGEN_DENIED_ENV,
     HALOGEN_DENIED_PREFIXES,
@@ -487,11 +491,14 @@ class HalogenProvider(Provider):
           :class:`~hal0.slots.state.SlotHostUnsupported` (``slot.host_unsupported``,
           409). ``[]`` is "cannot tell" and skips this rule, so a box whose sysfs is
           not visible is never refused on a guess;
-        * the checkpoint file must exist, and so must the tokenizer beside it
-          (``tokenizer/tokenizer.json``), or ``slot.model_missing`` names the
-          missing path. The engine's entrypoint exits at start on either.
+        * the checkpoint file must exist and start with the ``HGN1`` magic, and the
+          tokenizer must sit beside it (``tokenizer/tokenizer.json``), or
+          ``slot.model_missing`` names the path. The engine's entrypoint exits at
+          start on any of them, so a garbage ``.hgn`` must not get as far as
+          pre-load eviction.
 
-        Reads the file system and nothing else: no network, no engine.
+        Reads the file system and nothing else (a stat per file, four bytes of the
+        checkpoint): no network, no engine.
         """
         if gfx_versions:
             found = {v for v in map(_gfx_version, gfx_versions) if v is not None}
@@ -519,6 +526,14 @@ class HalogenProvider(Provider):
                 slot_cfg,
                 f"halogen checkpoint {checkpoint} does not exist or cannot be read; "
                 "restore the file or assign another model to the slot",
+                path=checkpoint,
+            )
+        if not has_hgn_magic(Path(checkpoint)):
+            raise _model_missing(
+                slot_cfg,
+                f"halogen checkpoint {checkpoint} cannot be read or does not start with HGN1, "
+                "so the engine cannot load it; restore the file or assign another model "
+                "to the slot",
                 path=checkpoint,
             )
         tokenizer = Path(checkpoint).parent / HALOGEN_TOKENIZER_JSON

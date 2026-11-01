@@ -146,6 +146,22 @@ async def test_a_missing_checkpoint_evicts_nothing(
     await _assert_nothing_moved(box, container_stub)
 
 
+async def test_a_garbage_checkpoint_evicts_nothing(
+    box: SlotManager,
+    store: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The file exists but the engine cannot load it: the box must not pay for finding out."""
+    (store / CKPT_NAME).write_bytes(b"NOPE" + b"\x00" * 60)
+    _resolves_to(box, monkeypatch, _halogen_row(store))
+    _gfx(monkeypatch, [0, GFX1151])
+    with pytest.raises(Hal0Error) as exc:
+        await box.load("flash")
+    assert exc.value.code == "slot.model_missing"
+    await _assert_nothing_moved(box, container_stub)
+
+
 async def test_a_missing_tokenizer_evicts_nothing(
     box: SlotManager,
     store: Path,
