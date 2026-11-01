@@ -760,6 +760,21 @@ export interface FlagProvenance {
   source: ProvenanceSource
 }
 
+/**
+ * A halogen slot's live memory readout (GET /api/slots/{name}/resolved).
+ * Every figure is the server's (ADR-0039); the UI only words them.
+ */
+export interface SlotFootprint {
+  /** What the layout holds once loaded, MiB. */
+  resident_mb: number
+  /** Lookup-table page cache advised on top, MiB. Reclaimable; not in `resident_mb`. */
+  advisory_cache_mb: number
+  /** The host's free GTT pool, MiB; null when the host gave no reading. */
+  host_free_mb: number | null
+  /** Advisory fit of `resident_mb` against the pool; never blocks a load. */
+  verdict: 'fits' | 'tight' | 'exceeds' | 'exceeds_total' | 'unknown'
+}
+
 /** Full resolved-command payload from GET /api/slots/{name}/resolved. */
 export interface SlotResolved {
   name: string
@@ -776,6 +791,9 @@ export interface SlotResolved {
     variant: string | null
     unavailable_reason: string | null
   }
+  /** Memory readout for a halogen slot; null for any other slot, and for a
+   *  halogen slot with no model bound or no figure to give. */
+  footprint?: SlotFootprint | null
 }
 
 /**

@@ -20,10 +20,11 @@ import { HALOGEN_DENIED, HALOGEN_KNOBS } from './fixtures/halogen-knobs'
 ;(globalThis as unknown as { Icons: unknown }).Icons = new Proxy({}, { get: () => null })
 ;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-const { profilesBox, modelsBox, sysBox, toasts, feasCalls, editCalls, restartCalls, createCalls, updateCalls } = vi.hoisted(() => ({
+const { profilesBox, modelsBox, sysBox, resolvedBox, toasts, feasCalls, editCalls, restartCalls, createCalls, updateCalls } = vi.hoisted(() => ({
   profilesBox: { current: [] as Record<string, unknown>[] },
   sysBox: { current: { backends: {}, hardware: {} } as Record<string, unknown> },
   modelsBox: { current: [] as Record<string, unknown>[] },
+  resolvedBox: { current: undefined as Record<string, unknown> | undefined },
   toasts: [] as string[],
   feasCalls: [] as unknown[],
   editCalls: [] as unknown[],
@@ -51,7 +52,7 @@ vi.mock('@/api/hooks/useSlots', () => ({
   }),
   useSlotLoad: () => idle,
   useSlotSwap: () => idle,
-  useSlotResolved: () => ({ data: undefined }),
+  useSlotResolved: () => ({ data: resolvedBox.current }),
   useSlots: () => ({ data: [], isLoading: false }),
   useSlotRename: () => idle,
 }))
@@ -156,6 +157,7 @@ function typeInto(testid: string, value: string) {
 beforeEach(() => {
   profilesBox.current = [PROFILE]
   modelsBox.current = [MODEL]
+  resolvedBox.current = undefined
   sysBox.current = { backends: {}, hardware: {} }
   editCalls.length = 0
   restartCalls.length = 0
@@ -648,5 +650,101 @@ describe('slot drawer engine settings (halogen)', () => {
     const bare = mount(HALO_SLOT)
     expect(engineBlock()).toBeNull()
     act(() => bare.root.unmount())
+  })
+})
+
+// ── halogen live memory readout: the server's footprint under the engine settings ─
+const GIB = 1024
+const FOOTPRINT = { resident_mb: 72 * GIB, advisory_cache_mb: 10 * GIB, host_free_mb: 108 * GIB, verdict: 'fits' }
+const resolvedWith = (footprint: Record<string, unknown> | null | undefined) => ({
+  name: 'halogen-chat',
+  argv: null,
+  provenance: [],
+  removed: 0,
+  ...(footprint === undefined ? {} : { footprint }),
+})
+const footText = () => byId('slot-engine-footprint-text')?.textContent
+const footVerdict = () => byId('slot-engine-footprint-verdict')
+
+describe('slot drawer halogen memory readout', () => {
+  const CUSTOM = { ...HALO_PROFILE, flags: 'HALOGEN_KV_SLOTS=4', resolved_flags: 'HALOGEN_KV_SLOTS=4' }
+  beforeEach(() => {
+    sysBox.current = { backends: RUNNERS, hardware: { rocm: true } }
+    profilesBox.current = [PROFILE, CUSTOM]
+    modelsBox.current = [LLAMA_MODEL, HALO_MODEL]
+  })
+
+  it('states the layout, the advised cache, the free pool and the verdict', () => {
+    resolvedBox.current = resolvedWith(FOOTPRINT)
+    const { root } = mount(HALO_SLOT)
+    expect(footText()).toBe(
+      'This layout: ~72 GiB resident · +10 GiB lookup-table cache advised · box has 108 GiB free',
+    )
+    expect(footVerdict()!.textContent).toBe('fits')
+    expect(footVerdict()!.className).toContain('ok')
+    // Inside the engine block, under its settings: no pane of its own.
+    expect(engineBlock()!.contains(byId('slot-engine-footprint'))).toBe(true)
+    act(() => root.unmount())
+  })
+
+  it.each([
+    ['fits', 'fits', 'ok'],
+    ['tight', 'tight', 'warn'],
+    ['exceeds', "won't fit", 'err'],
+    ['exceeds_total', "won't fit", 'err'],
+  ])('words a %s verdict as "%s" in the %s tone', (verdict, word, tone) => {
+    resolvedBox.current = resolvedWith({ ...FOOTPRINT, verdict })
+    const { root } = mount(HALO_SLOT)
+    expect(footVerdict()!.textContent).toBe(word)
+    expect(footVerdict()!.className).toContain(tone)
+    act(() => root.unmount())
+  })
+
+  it('keeps the figure but claims no free pool and no verdict when the host reading is unknown', () => {
+    resolvedBox.current = resolvedWith({ ...FOOTPRINT, host_free_mb: null, verdict: 'unknown' })
+    const { root } = mount(HALO_SLOT)
+    expect(footText()).toBe('This layout: ~72 GiB resident · +10 GiB lookup-table cache advised')
+    expect(footVerdict()).toBeNull()
+    act(() => root.unmount())
+  })
+
+  it('shows one decimal below 10 GiB and drops the advisory when it is zero', () => {
+    resolvedBox.current = resolvedWith({
+      resident_mb: 3.5 * GIB, advisory_cache_mb: 0, host_free_mb: 0, verdict: 'exceeds',
+    })
+    const { root } = mount(HALO_SLOT)
+    expect(footText()).toBe('This layout: ~3.5 GiB resident · box has 0 GiB free')
+    act(() => root.unmount())
+  })
+
+  it('renders nothing while the answer is loading, or when the server has no figure', () => {
+    resolvedBox.current = undefined
+    const loading = mount(HALO_SLOT)
+    expect(engineBlock()).not.toBeNull()
+    expect(byId('slot-engine-footprint')).toBeNull()
+    act(() => loading.root.unmount())
+    document.body.innerHTML = ''
+    resolvedBox.current = resolvedWith(null)
+    const none = mount(HALO_SLOT)
+    expect(engineBlock()).not.toBeNull()
+    expect(byId('slot-engine-footprint')).toBeNull()
+    act(() => none.root.unmount())
+  })
+
+  it('shows on a seed profile too, where the settings are read-only', () => {
+    profilesBox.current = [PROFILE, { ...CUSTOM, name: 'halogen-seed', seed: true }]
+    resolvedBox.current = resolvedWith(FOOTPRINT)
+    const { root } = mount({ ...HALO_SLOT, profile: 'halogen-seed' })
+    expect(byId('slot-engine-apply')).toBeNull()
+    expect(footText()).toContain('~72 GiB resident')
+    act(() => root.unmount())
+  })
+
+  it('renders no readout for a llama slot', () => {
+    resolvedBox.current = resolvedWith(FOOTPRINT)
+    const { root } = mount({ ...SLOT, binary: 'standard' })
+    expect(engineBlock()).toBeNull()
+    expect(byId('slot-engine-footprint')).toBeNull()
+    act(() => root.unmount())
   })
 })

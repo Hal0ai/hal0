@@ -143,7 +143,12 @@ export function useProfileUpdate() {
   return useMutation({
     mutationFn: ({ name, body }: { name: string; body: Partial<ProfileBody> }) =>
       api<Profile>(ENDPOINTS.profile(name), { method: 'PUT', body: body as any, raw: true }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['profiles'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['profiles'] })
+      // A profile owns the tune its slots launch with, and a halogen slot's
+      // memory readout is computed from it.
+      qc.invalidateQueries({ queryKey: ['slot-resolved'] })
+    },
   })
 }
 
