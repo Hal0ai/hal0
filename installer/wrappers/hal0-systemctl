@@ -51,12 +51,13 @@
 #
 # HONEST BOUNDARY (read this before calling the seam a sandbox): the allow-list
 # removes the DIRECT host-side exec primitive — no host `[Service]`/`[Unit]`
-# directive beyond the five/three fixed ones, no `Exec*=` on the host side, no
+# directive beyond the ten/three fixed ones, no `Exec*=` on the host side, no
 # `[Service] User=`/`Group=`, no second section, no `[Install] WantedBy=` other
 # than hal0.target. (`[Container] User=` is the in-container identity, and is
 # accepted for exactly one value: the hal0 account's own uid:gid — #3066.) `PodmanArgs=` IS host-side too — quadlet copies it into the
 # generated unit's `podman run` argv — so it is pinned to exactly the flags
-# hal0's providers emit (`--group-add`/`--security-opt`/`--ipc`/`--ulimit`); a
+# hal0's providers emit (`--group-add`/`--security-opt`/`--ipc`/`--ulimit`/
+# `--stop-timeout`); a
 # `--runtime`/`--hooks-dir` root exec is refused (#1759, validate_podman_args).
 # It does NOT make an
 # hal0-account compromise non-root-equivalent: `[Container]` still legitimately
@@ -297,7 +298,7 @@ validate_dropin_body() {  # arg: kind (gateway|hindsight); body on stdin
 #               HealthCmd= HealthStartPeriod= HealthInterval= HealthRetries=
 #               HealthTimeout= Exec=
 #   [Service]   Restart= RestartSec= RestartSteps= RestartMaxDelaySec=
-#               RestartPreventExitStatus= SuccessExitStatus=
+#               TimeoutStopSec= RestartPreventExitStatus= SuccessExitStatus=
 #               SyslogIdentifier= StandardOutput= StandardError=
 #   [Install]   WantedBy=hal0.target        (omitted when autoload = false)
 #
@@ -328,6 +329,14 @@ _QRE_DEVICE='^[A-Za-z0-9_./:=-]{1,255}$'
 _QRE_CAP='^[A-Za-z0-9_]{1,64}$'
 _QRE_VOLUME='^[A-Za-z0-9_./:,+@%=-]{1,512}$'
 _QRE_ENV='^[A-Za-z_][A-Za-z0-9_]*=.{0,1024}$'
+# The renderer's second spelling (_environment_line): one double-quoted word, for
+# an assignment holding white space, a quote or a backslash. Both quotes present,
+# nothing after the closing one, and inside it only plain bytes plus the two
+# escapes the renderer writes, \\ and \", so a quote can never end the word early
+# and open a second assignment. Bounded in value bytes, as the bare form is. A
+# separate pattern because its bounded group costs about 30 ms to compile, which
+# only a line that needs quoting should pay.
+_QRE_ENV_QUOTED='^"[A-Za-z_][A-Za-z0-9_]*=([^"\\]|\\[\\"]){0,1024}"$'
 # host:hostport:ctrport. The host is [slots].publish_host, which its schema
 # validator (_publish_host_sane) already constrains to a bare IPv4 or hostname
 # — no spaces, ':' or '/' — so the host segment here is colon-free; IPv6
@@ -347,8 +356,9 @@ _QRE_WANTEDBY='^hal0\.target$'
 # [Container] User= (#3066): numeric uid:gid only; the arm then requires it to
 # BE the hal0 service account (see _hal0_account_ids).
 _QRE_USER='^[0-9]{1,9}:[0-9]{1,9}$'
-# The four flags hal0's providers emit into PodmanArgs= (GPU/llama:
-# --group-add/--security-opt; comfyui: --ipc=host; flm: --ulimit memlock=-1).
+# The five flags hal0's providers emit into PodmanArgs= (GPU/llama:
+# --group-add/--security-opt; comfyui: --ipc=host; flm: --ulimit memlock=-1;
+# halogen: --stop-timeout=120, a number checked with _QRE_UINT).
 # See validate_podman_args (#1759).
 _QRE_GID='^[0-9]{1,7}$'
 _QRE_SECOPT='^[A-Za-z0-9_.:=@,+-]{1,128}$'
@@ -368,9 +378,10 @@ _quadlet_die() { die "quadlet rejected: $1"; }
 #   --security-opt <token>      GPU/llama-server + comfyui (seccomp/apparmor/label)
 #   --ipc <host|none|…>         comfyui (--ipc=host)
 #   --ulimit <name=soft[:hard]> flm/NPU (--ulimit memlock=-1)
+#   --stop-timeout <seconds>    halogen (--stop-timeout=120)
 # The exec-family (--runtime/--hooks-dir/…) and everything else is refused. The
 # renderer only emits these from typed RuntimeLaunchPlan fields (group_add,
-# security_opt, ipc, ulimits); this check is the root-side backstop.
+# security_opt, ipc, ulimits, stop_timeout_s); this check is the root-side backstop.
 #
 # Both `--flag=value` (one token) and `--flag value` (two tokens) are accepted —
 # comfyui emits the `=` form, the GPU path emits the space form.
@@ -399,6 +410,7 @@ validate_podman_args() {  # arg: the PodmanArgs= value
       --security-opt) [[ "$arg" =~ $_QRE_SECOPT ]] || _quadlet_die "bad --security-opt: $arg" ;;
       --ipc)          [[ "$arg" =~ $_QRE_IPC ]]    || _quadlet_die "bad --ipc: $arg" ;;
       --ulimit)       [[ "$arg" =~ $_QRE_ULIMIT ]] || _quadlet_die "bad --ulimit: $arg" ;;
+      --stop-timeout) [[ "$arg" =~ $_QRE_UINT ]]   || _quadlet_die "bad --stop-timeout: $arg" ;;
       *) _quadlet_die "PodmanArgs flag not allowed: $flag" ;;
     esac
   done
@@ -464,7 +476,8 @@ validate_quadlet_directive() {  # args: section, "Key=Value" line
       [[ "$value" =~ $_QRE_VOLUME ]] || _quadlet_die "bad Volume: $value"
       [[ "$value" != *".."* ]] || _quadlet_die "Volume traversal: $value"
       ;;
-    'Container|Environment')    [[ "$value" =~ $_QRE_ENV ]]      || _quadlet_die "bad Environment: $value" ;;
+    'Container|Environment')    [[ "$value" =~ $_QRE_ENV || "$value" =~ $_QRE_ENV_QUOTED ]] \
+                                                                 || _quadlet_die "bad Environment: $value" ;;
     'Container|PublishPort')    [[ "$value" =~ $_QRE_PUBLISH ]]  || _quadlet_die "bad PublishPort: $value" ;;
     'Container|HealthCmd')      [[ -n "$value" ]]                || _quadlet_die "empty HealthCmd" ;;
     'Container|HealthStartPeriod'|'Container|HealthInterval'|'Container|HealthTimeout')
@@ -480,7 +493,7 @@ validate_quadlet_directive() {  # args: section, "Key=Value" line
 
     # ── [Service] ───────────────────────────────────────────────────────
     # Copied VERBATIM into the generated system unit by podman's quadlet
-    # generator — i.e. host-side root. Exactly the nine the renderer emits;
+    # generator — i.e. host-side root. Exactly the ten the renderer emits;
     # every Exec*=, User=, Group=, WorkingDirectory=, … lands in the default
     # arm below and dies. RestartPreventExitStatus= (#2037, widened by #2126)
     # and SuccessExitStatus= (#2130 — the renderer emits `143` so a requested
@@ -491,6 +504,9 @@ validate_quadlet_directive() {  # args: section, "Key=Value" line
     'Service|RestartSec')        [[ "$value" =~ $_QRE_UINT ]]    || _quadlet_die "bad RestartSec: $value" ;;
     'Service|RestartSteps')      [[ "$value" =~ $_QRE_UINT ]]    || _quadlet_die "bad RestartSteps: $value" ;;
     'Service|RestartMaxDelaySec') [[ "$value" =~ $_QRE_UINT ]]   || _quadlet_die "bad RestartMaxDelaySec: $value" ;;
+    # A runtime's declared stop grace plus the unit's margin, as a bare number of
+    # seconds: systemd's duration words (`infinity`) are refused.
+    'Service|TimeoutStopSec')    [[ "$value" =~ $_QRE_UINT ]]    || _quadlet_die "bad TimeoutStopSec: $value" ;;
     'Service|RestartPreventExitStatus') [[ "$value" =~ $_QRE_EXITSTATUS_LIST ]] || _quadlet_die "bad RestartPreventExitStatus: $value" ;;
     'Service|SuccessExitStatus') [[ "$value" =~ $_QRE_EXITSTATUS_LIST ]]        || _quadlet_die "bad SuccessExitStatus: $value" ;;
     'Service|SyslogIdentifier')  [[ "$value" =~ $_QRE_CTRNAME ]] || _quadlet_die "bad SyslogIdentifier: $value" ;;
