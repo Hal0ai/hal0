@@ -402,6 +402,10 @@ class SlotWatchdog:
         healthy answer (#2442's adopted-WARMING poll): there, only a
         conclusive ``ok`` counts, and anything inconclusive reads as
         not-healthy-yet.
+
+        A provider's ``"stalled"`` answer is inconclusive too: it can take the
+        probe's whole read timeout to arrive, which the watcher's inline await
+        tolerates (a dead unit is only noticed later during a stall).
         """
         cfg = await self._host._maybe_load_config(slot_name)
         if not cfg:
@@ -430,6 +434,8 @@ class SlotWatchdog:
                 extra={"slot": slot_name, "error": str(exc)},
             )
             return not strict
+        if health.get("status") == "stalled":
+            return not strict
         return bool(health.get("ok"))
 
     async def readiness_check(self, slot_name: str) -> tuple[bool, str]:
@@ -452,7 +458,7 @@ class SlotWatchdog:
         if cfg is None:
             return False, "config_missing"
 
-        from hal0.providers.container import container_provider
+        from hal0.providers.container import container_provider, readiness_probe_budget_s
 
         # 1) systemctl is-active (synchronous — run in executor). The config
         # carries the instance token the unit is actually keyed by (#1417); a
@@ -467,11 +473,18 @@ class SlotWatchdog:
         # 2) /health probe (only meaningful when the unit is active). The
         # slot config is passed so FLM slots use the Tier-1 real-inference
         # probe (see ContainerProvider.health) — a still-loading FLM reports
-        # ok=False here, which maps to the retryable "starting" reason.
+        # ok=False here, which maps to the retryable "starting" reason. So does
+        # a stalled engine: this runs per request, so a provider whose probe can
+        # outlast one bounds it here (the fail-watcher waits it out instead).
         port = _cfg_port(cfg)
         if port:
-            health = await container_provider().health(port, cfg)
-            if not health.get("ok"):
+            try:
+                health = await asyncio.wait_for(
+                    container_provider().health(port, cfg), readiness_probe_budget_s(cfg)
+                )
+            except TimeoutError:
+                return False, "starting"
+            if not health.get("ok") or health.get("status") == "stalled":
                 return False, "starting"
 
         return True, "ready"

@@ -27,6 +27,7 @@ from hal0.providers.container import (
     ContainerProvider,
     _render_quadlet_from_plan,
     _spec_provider_for,
+    readiness_probe_budget_s,
     runner_family_mismatch,
 )
 from hal0.providers.halogen import (
@@ -585,8 +586,8 @@ async def test_health_ready_when_engine_responds() -> None:
 
 
 async def test_health_ok_rule_ignores_the_capability_probe() -> None:
-    """``ok`` stays the engine-answers check (the fail-watcher's); the probe
-    rides along for ``wait_ready`` to judge."""
+    """``ok`` stays the engine-answers check; the probe rides along for
+    ``wait_ready`` to judge."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -717,6 +718,213 @@ async def test_wait_ready_times_out() -> None:
         pytest.raises(TimeoutError),
     ):
         await HalogenProvider().wait_ready(8099)
+
+
+# ── capability grace (a failed probe does not strand a responding engine) ───
+#
+# The front end re-probes on the next real request, and a slot that is not ready
+# gets none, so hal0 stops waiting after CAPABILITY_GRACE_S and lets the sentinel
+# be that request. Driven by a clock the handler advances, so these prove the
+# budgets themselves rather than a scaled-down copy of them.
+
+
+def _clocked_health(
+    bodies: Callable[[int], dict[str, Any]], *, step_s: float
+) -> tuple[Callable[[httpx.Request], httpx.Response], Callable[[], float], dict[str, int]]:
+    """A ``/health`` handler that advances ``clock`` by ``step_s`` per call."""
+    state = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        state["n"] += 1
+        return httpx.Response(200, json=bodies(state["n"]))
+
+    def clock() -> float:
+        return state["n"] * step_s
+
+    return handler, clock, state
+
+
+def _engine_up(probe: Any = None) -> dict[str, Any]:
+    body: dict[str, Any] = {"engine": {"responds": True}}
+    if probe is not None:
+        body["capability_probe"] = probe
+    return body
+
+
+async def test_wait_ready_returns_once_a_failed_probe_holds_for_the_grace(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    handler, clock, state = _clocked_health(lambda n: _engine_up("failed"), step_s=20.0)
+    assert HalogenProvider.CAPABILITY_GRACE_S == 60.0
+    with (
+        _patch_http(handler),
+        patch.object(HalogenProvider, "READY_POLL_S", 0.0),
+        patch.object(asyncio.get_running_loop(), "time", clock),
+        caplog.at_level("WARNING", logger="hal0.providers.halogen"),
+    ):
+        await HalogenProvider().wait_ready(8099)
+    # First seen on call 1 (t=20); 60 s have held at call 4 (t=80).
+    assert state["n"] == 4
+    warning = "\n".join(r.getMessage() for r in caplog.records)
+    assert "capability_probe" in warning
+    assert "8099" in warning
+
+
+async def test_wait_ready_a_failed_probe_that_turns_ok_returns_at_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    handler, clock, state = _clocked_health(
+        lambda n: _engine_up("ok" if n >= 2 else "failed"), step_s=1.0
+    )
+    with (
+        _patch_http(handler),
+        patch.object(HalogenProvider, "READY_POLL_S", 0.0),
+        patch.object(asyncio.get_running_loop(), "time", clock),
+        caplog.at_level("WARNING", logger="hal0.providers.halogen"),
+    ):
+        await HalogenProvider().wait_ready(8099)
+    assert state["n"] == 2
+    assert caplog.records == []
+
+
+async def test_wait_ready_the_grace_restarts_when_the_failure_does_not_hold() -> None:
+    """The window is a held failure, not a total: the engine going quiet in the
+    middle starts it again."""
+
+    def body(n: int) -> dict[str, Any]:
+        return {"engine": {"responds": False}} if n == 3 else _engine_up("failed")
+
+    handler, clock, state = _clocked_health(body, step_s=20.0)
+    with (
+        _patch_http(handler),
+        patch.object(HalogenProvider, "READY_POLL_S", 0.0),
+        patch.object(asyncio.get_running_loop(), "time", clock),
+    ):
+        await HalogenProvider().wait_ready(8099)
+    # Failed at 1 and 2, broken at 3, then first seen again at 4; 60 s held at 7.
+    assert state["n"] == 7
+
+
+@pytest.mark.parametrize(
+    ("body", "named"),
+    [
+        pytest.param(_engine_up(), "capability_probe=None", id="missing-field"),
+        pytest.param(_engine_up("pending"), "capability_probe='pending'", id="other-value"),
+        pytest.param(
+            {"engine": {"responds": False}, "capability_probe": "failed"},
+            "capability_probe='failed'",
+            id="failed-but-engine-silent",
+        ),
+    ],
+)
+async def test_wait_ready_anything_else_rides_out_the_full_budget(
+    body: dict[str, Any], named: str
+) -> None:
+    handler, clock, state = _clocked_health(lambda n: body, step_s=50.0)
+    with (
+        _patch_http(handler),
+        patch.object(HalogenProvider, "READY_POLL_S", 0.0),
+        patch.object(asyncio.get_running_loop(), "time", clock),
+        pytest.raises(TimeoutError) as exc_info,
+    ):
+        await HalogenProvider().wait_ready(8099)
+    assert clock() >= HalogenProvider.READY_TIMEOUT_S
+    assert named in str(exc_info.value)
+
+
+# ── liveness (the fail-watcher's probe, not readiness) ──────────────────────
+
+
+async def test_liveness_200_is_alive_without_judging_the_engine() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/health"
+        return httpx.Response(200, json={"engine": {"responds": False}})
+
+    with _patch_http(handler):
+        verdict = await HalogenProvider().liveness(8099)
+    assert verdict["ok"] is True
+    assert verdict["status"] != "stalled"
+
+
+async def test_liveness_read_timeout_is_a_stall_not_a_death() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("no answer")
+
+    with _patch_http(handler):
+        assert await HalogenProvider().liveness(8099) == {"ok": True, "status": "stalled"}
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(httpx.ConnectError("connection refused"), id="refused"),
+        pytest.param(httpx.ReadError("connection reset"), id="reset"),
+        pytest.param(httpx.RemoteProtocolError("server disconnected"), id="closed"),
+        pytest.param(httpx.ConnectTimeout("no route"), id="connect-timeout"),
+    ],
+)
+async def test_liveness_a_broken_connection_is_not_ok(error: httpx.HTTPError) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise error
+
+    with _patch_http(handler):
+        verdict = await HalogenProvider().liveness(8099)
+    assert verdict["ok"] is False
+    assert verdict["status"] != "stalled"
+
+
+async def test_liveness_other_status_is_not_ok() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text="busy")
+
+    with _patch_http(handler):
+        assert await HalogenProvider().liveness(8099) == {"ok": False, "status": "http_503"}
+
+
+async def test_liveness_read_budget_is_the_slow_ping_figure() -> None:
+    seen: dict[str, Any] = {}
+    real = _fake_client(lambda request: httpx.Response(200, json={}))
+
+    def recording(**kwargs: Any) -> Any:
+        seen.update(kwargs)
+        return real(**kwargs)
+
+    with patch.object(halogen_module, "async_client", recording):
+        await HalogenProvider().liveness(8099)
+    assert seen["timeout"].read == 35.0
+
+
+async def test_container_health_sends_a_halogen_slot_to_liveness() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("no answer")
+
+    with _patch_http(handler):
+        verdict = await ContainerProvider().health(8099, _cfg())
+    assert verdict == {"ok": True, "status": "stalled"}
+
+
+async def test_a_non_halogen_slot_keeps_the_generic_three_second_probe() -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("no answer")
+
+    real = _fake_client(handler)
+
+    def recording(**kwargs: Any) -> Any:
+        seen.update(kwargs)
+        return real(**kwargs)
+
+    with patch("hal0.providers.container.async_client", recording):
+        verdict = await ContainerProvider().health(8081, _cfg(profile="agent"))
+    assert seen["timeout"] == 3.0
+    assert verdict["ok"] is False
+
+
+def test_readiness_budget_is_declared_only_for_halogen() -> None:
+    assert readiness_probe_budget_s(_cfg()) == HalogenProvider.readiness_budget_s
+    assert HalogenProvider.readiness_budget_s < HalogenProvider.LIVENESS_READ_TIMEOUT_S
+    assert readiness_probe_budget_s(_cfg(profile="agent")) is None
 
 
 async def test_wait_ready_has_a_budget_inside_the_warming_watchdog() -> None:

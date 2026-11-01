@@ -221,6 +221,20 @@ class HalogenProvider(Provider):
     READY_TIMEOUT_S = 600.0
     READY_POLL_S = 5.0
 
+    #: Seconds a responding engine may report a failed capability probe before
+    #: ``wait_ready`` stops waiting. The front end re-probes on the next request
+    #: and a slot that is not ready gets none, so the sentinel has to be it.
+    CAPABILITY_GRACE_S = 60.0
+
+    #: Read timeout of :meth:`liveness`: a PING can take up to 30 s on a busy
+    #: engine, the same figure as the unit's own health timeout.
+    LIVENESS_READ_TIMEOUT_S = 35.0
+
+    #: Seconds the per-request readiness gate waits on :meth:`liveness`
+    #: (:func:`hal0.providers.container.readiness_probe_budget_s`). A request
+    #: must not sit out a stall; it gets the retryable "starting" instead.
+    readiness_budget_s = 5.0
+
     #: Budget for the sentinel chat turn: the first prompt after a start pages
     #: the lookup table in from disk.
     SENTINEL_TIMEOUT_S = 60.0
@@ -382,9 +396,9 @@ class HalogenProvider(Provider):
         ``"ready"``, ``"loading"`` (200 but the engine is not up yet),
         ``"http_<code>"`` or the transport error text. ``capability_probe`` is
         the body's own ``capability_probe`` value (``None`` when the body has
-        none or there was no body); it does not change ``ok``, which stays the
-        engine-answers check the fail-watcher uses, and :meth:`wait_ready`
-        judges it. Never raises.
+        none or there was no body); it does not change ``ok``, and
+        :meth:`wait_ready` judges it. Never raises. This is the readiness view
+        of a start; a loaded slot is watched through :meth:`liveness`.
         """
         url = f"http://127.0.0.1:{port}/health"
         try:
@@ -408,28 +422,76 @@ class HalogenProvider(Provider):
             "capability_probe": probe,
         }
 
-    async def wait_ready(self, port: int) -> None:
-        """Poll :meth:`health` until the engine responds AND its capability probe is ``"ok"``.
+    async def liveness(self, port: int) -> dict[str, Any]:
+        """Is a loaded slot's front end still there? The fail-watcher's probe.
 
-        ``TimeoutError`` past ``READY_TIMEOUT_S``, naming the last thing seen.
-        The slot manager prefers a provider's own ``wait_ready`` over the
-        generic container waiter, whose 180 s budget is shorter than a cold
-        load of this engine. A 200 with the engine answering is not enough: a
-        failed capability probe means the chat template or tool path is broken,
-        and the slot must not read ready on it.
+        Deliberately does not ask whether the engine is healthy. The engine can
+        go silent under host memory pressure, and taking it down then is what
+        leaves the driver holding its memory, so only a connection that really
+        breaks may strike a slot (the container's own death reads through the
+        unit's is-active first).
+
+        ``GET /health`` with a :attr:`LIVENESS_READ_TIMEOUT_S` read timeout: HTTP
+        200 is ``ok`` without judging ``engine.responds``, a read timeout is ``ok``
+        with status ``"stalled"`` (accepted, then no answer), any other status or
+        a connection that fails is not ``ok``. Never raises.
+        """
+        url = f"http://127.0.0.1:{port}/health"
+        timeout = httpx.Timeout(connect=5.0, read=self.LIVENESS_READ_TIMEOUT_S, write=5.0, pool=5.0)
+        try:
+            async with async_client(timeout=timeout) as client:
+                resp = await client.get(url)
+        except httpx.ReadTimeout:
+            return {"ok": True, "status": "stalled"}
+        except (httpx.HTTPError, OSError) as exc:
+            return {"ok": False, "status": str(exc) or type(exc).__name__}
+        if resp.status_code != 200:
+            return {"ok": False, "status": f"http_{resp.status_code}"}
+        return {"ok": True, "status": "alive"}
+
+    async def wait_ready(self, port: int) -> None:
+        """Poll :meth:`health` until the engine responds and its capability probe has settled.
+
+        Returns on ``capability_probe == "ok"``, or once ``"failed"`` has held
+        for :attr:`CAPABILITY_GRACE_S` with the engine responding. A failed probe
+        is the front end not getting the engine's capability line (context and
+        version) in time, with ``HALOGEN_CTX`` as its fallback, not a broken
+        engine: the chat template has its own check, which refuses to start. It
+        re-probes on the next request, and the sentinel that runs after this
+        wait is that request, and judges the answer. Any other value, or none,
+        keeps waiting.
+
+        ``TimeoutError`` past ``READY_TIMEOUT_S``, naming the last thing seen and
+        the last probe state. The slot manager prefers a provider's own
+        ``wait_ready`` over the generic container waiter, whose 180 s budget is
+        shorter than a cold load of this engine.
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.READY_TIMEOUT_S
         last = "no answer"
+        failed_since: float | None = None
         while True:
             verdict = await self.health(port)
             probe = verdict.get("capability_probe")
-            if verdict.get("ok") and probe == "ok":
+            responds = bool(verdict.get("ok"))
+            if responds and probe == "ok":
                 return
-            if verdict.get("ok"):
-                last = f"engine responds, capability_probe={probe!r}"
+            if responds and probe == "failed":
+                if failed_since is None:
+                    failed_since = loop.time()
+                if loop.time() - failed_since >= self.CAPABILITY_GRACE_S:
+                    log.warning(
+                        "halogen.capability_probe_failed port=%s: the engine responds but "
+                        "capability_probe has read 'failed' for %gs; letting the sentinel's "
+                        "chat turn judge it",
+                        port,
+                        self.CAPABILITY_GRACE_S,
+                    )
+                    return
             else:
-                last = str(verdict.get("status") or last)
+                failed_since = None
+            status = "engine responds" if responds else str(verdict.get("status") or "no answer")
+            last = f"{status}, capability_probe={probe!r}"
             remaining = deadline - loop.time()
             if remaining <= 0:
                 break

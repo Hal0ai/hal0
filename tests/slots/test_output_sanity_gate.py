@@ -27,7 +27,9 @@ import json
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
+import httpx
 import pytest
 
 from hal0.slots import output_sanity
@@ -1291,6 +1293,50 @@ async def test_await_ready_halogen_uses_provider_sentinel(
     assert state is SlotState.READY
     assert sentinel.waited == [8081]
     assert sentinel.sentinel_ports == [8081], "the sentinel runs exactly once per load"
+
+
+def _real_wait_ready_on_failed_probe(sentinel: _HalogenSentinel) -> Any:
+    """Give ``sentinel.provider`` its real ``wait_ready`` over a ``/health`` that
+    keeps reporting a failed capability probe, past a zero grace."""
+    from hal0.providers import halogen as halogen_module
+    from hal0.providers.halogen import HalogenProvider
+
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, json={"engine": {"responds": True}, "capability_probe": "failed"}
+        )
+    )
+    sentinel.provider.wait_ready = HalogenProvider.wait_ready.__get__(sentinel.provider)
+    return (
+        patch.object(
+            halogen_module,
+            "async_client",
+            lambda **kw: httpx.AsyncClient(transport=transport),
+        ),
+        patch.object(HalogenProvider, "CAPABILITY_GRACE_S", 0.0),
+    )
+
+
+async def test_await_ready_halogen_failed_probe_past_the_grace_reaches_the_sentinel(
+    halogen_slot: Callable[[dict[str, Any]], tuple[SlotManager, _HalogenSentinel]],
+) -> None:
+    """The sentinel is the real request that re-probes, and its verdict decides."""
+    sm, sentinel = halogen_slot({"ok": True, "status": "ok", "sample": " Paris."})
+    http, grace = _real_wait_ready_on_failed_probe(sentinel)
+    with http, grace:
+        assert await sm._await_ready("chat", 8081) is SlotState.READY
+    assert sentinel.sentinel_ports == [8081]
+
+
+async def test_await_ready_halogen_failed_probe_with_a_broken_engine_still_fails(
+    halogen_slot: Callable[[dict[str, Any]], tuple[SlotManager, _HalogenSentinel]],
+) -> None:
+    """The grace only moves the judgement: a broken engine fails at the sentinel."""
+    sm, sentinel = halogen_slot({"ok": False, "status": "incoherent_output", "sample": ")))"})
+    http, grace = _real_wait_ready_on_failed_probe(sentinel)
+    with http, grace, pytest.raises(SlotOutputSanityFailed):
+        await sm._await_ready("chat", 8081)
+    assert sentinel.sentinel_ports == [8081]
 
 
 async def test_await_ready_halogen_garbage_raises_the_generic_failure(

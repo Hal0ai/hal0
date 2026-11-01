@@ -1313,6 +1313,21 @@ def runner_family_mismatch(slot_cfg: Mapping[str, Any]) -> RunnerFamilyMismatch 
     )
 
 
+def readiness_probe_budget_s(slot_cfg: Mapping[str, Any]) -> float | None:
+    """Seconds the per-request readiness gate may wait on this slot's health probe.
+
+    A provider whose health probe can legitimately outlast a request declares one
+    (``readiness_budget_s``; halogen's waits out a slow PING for the fail-watcher).
+    ``None`` is every other slot: the probe's own short bound applies.
+    """
+    try:
+        provider = _spec_provider_for(dict(slot_cfg))
+    except Exception:
+        return None
+    budget = getattr(provider, "readiness_budget_s", None)
+    return float(budget) if budget else None
+
+
 def unit_stop_bound_s(slot_cfg: Mapping[str, Any]) -> float | None:
     """The widened ``systemctl stop`` bound for a runtime with a declared grace.
 
@@ -2224,6 +2239,10 @@ class ContainerProvider(Provider):
         GET /v1/models; 200 there means the server is up and healthy.
         Connection-refused / timeout are always unhealthy (no fallback).
 
+        Halogen delegation: its own :meth:`~hal0.providers.halogen.HalogenProvider.liveness`,
+        where a read timeout is a stall and not a death, so a silent engine is
+        never struck to ERROR and torn down on this path.
+
         Returns {"ok": bool, "status": str}.
         """
         if slot_cfg is not None:
@@ -2233,6 +2252,7 @@ class ContainerProvider(Provider):
                 provider = None
             from hal0.providers.comfyui import ComfyUIProvider
             from hal0.providers.flm import FLMProvider
+            from hal0.providers.halogen import HalogenProvider
 
             # ComfyUI serves neither /health nor /v1/models (its liveness
             # probe is GET /system_stats), so the generic path below read a
@@ -2240,6 +2260,8 @@ class ContainerProvider(Provider):
             # READY img slot to ERROR within seconds of it coming up.
             if isinstance(provider, (FLMProvider, ComfyUIProvider)):
                 return await provider.health(port)
+            if isinstance(provider, HalogenProvider):
+                return await provider.liveness(port)
 
         health_url = f"http://127.0.0.1:{port}/health"
         models_url = f"http://127.0.0.1:{port}/v1/models"
