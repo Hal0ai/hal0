@@ -26,11 +26,13 @@ from hal0.model_meta import derive_model_provider
 from hal0.registry import pull_jobs as _pull_jobs
 from hal0.registry.curated import CURATED_MODELS
 from hal0.registry.discover import is_comfyui_asset
+from hal0.registry.fileset import SHARD_RE
 from hal0.registry.pull import ImageAsset, PullInvalidSource
 from hal0.registry.update_check import (
     evaluate_model_update,
     fetch_remote_lfs_shas,
     load_shard_shas,
+    resplit_first_parts,
 )
 from hal0.runners import RUNNER_IMAGES as _runner_images_registry
 from hal0.services import models_service as _svc
@@ -578,6 +580,36 @@ async def check_model_updates(request: Request, refresh: bool = False) -> dict[s
         return payload
 
 
+async def _update_source_file(model_id: str, hf_repo: str, hf_file: str) -> str:
+    """The file an update of ``hf_file`` pulls from ``hf_repo``.
+
+    Normally the row's own ``hf_filename``. A split GGUF whose upstream repo was
+    re-split (``-of-00003`` replaced by ``-of-00004``) has lost that first part,
+    and a pull of it can only fail with "split set is incomplete": the update
+    starts from the new layout's first part instead and lands over the same
+    model id. An unreachable repo leaves the name alone; the pull reports it.
+    """
+    if SHARD_RE.match(hf_file.rsplit("/", 1)[-1]) is None:
+        return hf_file
+    files = (await fetch_remote_lfs_shas({hf_repo}, hf_token=hf_token_from_env())).get(hf_repo)
+    if files is None:
+        return hf_file
+    firsts = resplit_first_parts(hf_file, files)
+    if len(firsts) > 1:
+        raise PullInvalidSource(
+            f"{hf_repo} now holds several other layouts of {hf_file!r} "
+            f"({', '.join(firsts)}) — pull the one you want by its first part",
+            details={"model_id": model_id, "hf_file": hf_file, "candidates": firsts},
+        )
+    if not firsts:
+        return hf_file
+    log.info(
+        "model.update_resplit",
+        extra={"model_id": model_id, "from_file": hf_file, "to_file": firsts[0]},
+    )
+    return firsts[0]
+
+
 @router.post("/{model_id}/update", status_code=202)
 async def update_model_from_hf(
     model_id: str,
@@ -591,6 +623,10 @@ async def update_model_from_hf(
     which would relocate pre-capability-layout models and orphan their
     old bytes. Job tracking, SSE progress, and the downloads pane all
     reuse the standard pull machinery under the same ``model_id`` key.
+
+    A split GGUF that upstream re-split into another number of parts is
+    re-pulled from its new first part (:func:`_update_source_file`); the old
+    set's rows and files go once the new set is in.
 
     Idempotent-ish like ``pull_model``: an in-flight job for the id is
     returned rather than duplicated.
@@ -613,6 +649,7 @@ async def update_model_from_hf(
             f"model {model_id!r} has no single-file install path to update in place",
             details={"model_id": model_id, "path": dest},
         )
+    hf_file = await _update_source_file(model_id, hf_repo, hf_file)
 
     # Job creation + queued-snapshot persist + emit + detached scheduling live in
     # ``pull_jobs.enqueue_update``; ``_run_pull_with_events`` is passed by module
