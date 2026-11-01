@@ -42,6 +42,7 @@ from hal0.dispatcher._capability_resolve import select_slot_by_type
 from hal0.dispatcher.lane_pin import lane_slot_pin, preferred_slot, set_lane_pin, set_upstream_only
 from hal0.dispatcher.stream_usage import ensure_include_usage, strip_usage_only_chunk
 from hal0.memory.extraction_env import MEMORY_ALIAS
+from hal0.slots.abandon import ClientGoneProbe, abandon_probe
 from hal0.upstreams.filters import apply_filters
 
 if TYPE_CHECKING:
@@ -1023,6 +1024,25 @@ async def _request_flm_stream_usage(request: Request, call: Any) -> bool:
     return strip
 
 
+#: A load shorter than this cannot have outlived a client; skip the probe (it waits a moment).
+_SLOW_LOAD_S = 0.5
+
+
+def _load_was_slow(since: float) -> bool:
+    return time.monotonic() - since >= _SLOW_LOAD_S
+
+
+def _client_gone_response(request: Request) -> Response:
+    """499 (nginx's "client closed request") for a client that left during a lazy load.
+
+    Nobody reads it; it ends the request without dispatching, so the dispatcher
+    does not enter its own load for a client that is gone (#2944). The load the
+    request started keeps running, see :mod:`hal0.slots.abandon`.
+    """
+    log.info("v1.client_gone_during_load", path=request.url.path)
+    return Response(status_code=499)
+
+
 async def _dispatch_and_forward(
     request: Request,
     dispatcher: DispatcherDep,
@@ -1030,6 +1050,22 @@ async def _dispatch_and_forward(
 ) -> Response:
     if body is None:
         body = await _read_json_body(request)
+    # #2944: tie the lazy loads below (and the dispatcher's own) to this request.
+    probe = ClientGoneProbe(request)
+    probe_token = abandon_probe.set(probe)
+    try:
+        return await _dispatch_and_forward_probed(request, dispatcher, body, probe)
+    finally:
+        probe.close()
+        abandon_probe.reset(probe_token)
+
+
+async def _dispatch_and_forward_probed(
+    request: Request,
+    dispatcher: DispatcherDep,
+    body: dict[str, Any],
+    probe: ClientGoneProbe,
+) -> Response:
     # Translate an llm-slot alias (agent/utility/any enabled llm slot) → model id
     # before routing so the dispatcher sees the real model name.
     # A model owned by a pinned remote upstream is never aliased to, or
@@ -1042,11 +1078,17 @@ async def _dispatch_and_forward(
         # loaded under its declared backend whichever routing path dispatch
         # then takes. A model no upstream serves surfaces as the dispatcher's
         # NoRouteFound envelope (404) — there is no catch-all fall-through.
+        loading_since = time.monotonic()
         await _ensure_backend_for_model(request, body)
+        if _load_was_slow(loading_since) and await probe():
+            return _client_gone_response(request)
     # DR-1: capability twin of the backend-aware load — wake an idle-EVICTED
     # embed/rerank/tts/img slot (resolved from the request PATH) so its
     # upstream is re-registered before dispatch, instead of 404ing.
+    loading_since = time.monotonic()
     await _wake_capability_slot(request, body)
+    if _load_was_slow(loading_since) and await probe():
+        return _client_gone_response(request)
 
     # OBS-1 (§13 / S12): the request seam. Observes the SAME call + response
     # objects the tps_events/ttft_events deques below already do — it does
