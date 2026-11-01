@@ -2110,7 +2110,10 @@ class MemoryGraphConfig(BaseModel):
             "extraction, consolidation, and reflect. Covers cold slot starts "
             "and long reflects. Propagated to hindsight-api as "
             "HINDSIGHT_API_LLM_TIMEOUT via the same systemd drop-in as the "
-            "extraction slot; the daemon restarts to pick it up."
+            "extraction slot; the daemon restarts to pick it up. It also sets "
+            "the retain wall limit (HINDSIGHT_API_RETAIN_WALL_TIMEOUT, which "
+            "hal0 derives, see extraction_llm_retries): the wall limit is "
+            "always above llm_timeout_s x (extraction_llm_retries + 1)."
         ),
     )
     # Extraction limits (#1834). The extraction slot is a shared inference
@@ -2156,8 +2159,17 @@ class MemoryGraphConfig(BaseModel):
         description=(
             "Retries of a single extraction LLM call inside one retain attempt "
             "(HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES). Each retry can wait the full "
-            "LLM timeout. Applied via the hindsight-api drop-in; the daemon "
-            "restarts to pick it up."
+            "LLM timeout. Together with llm_timeout_s it fixes the retain wall "
+            "limit hal0 writes as HINDSIGHT_API_RETAIN_WALL_TIMEOUT: Hindsight "
+            "cancels a retain that runs past it and marks it failed without "
+            "retrying. With per_call = llm_timeout_s x (extraction_llm_retries + "
+            "1), the limit is max(min(max(3600, 3 x per_call), 14400), per_call + "
+            "llm_timeout_s) seconds: three worst-case calls, never below "
+            "Hindsight's own 3600 s, capped at 4 h so one document cannot hold "
+            "the single extraction lane longer (only a per-call budget already "
+            "past the cap raises it), and always strictly above one call so a "
+            "call is never cut mid-flight. Defaults give 3600 s. Applied via "
+            "the hindsight-api drop-in; the daemon restarts to pick it up."
         ),
     )
     extraction_task_retries: int = Field(

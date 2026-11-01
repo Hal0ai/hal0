@@ -102,7 +102,7 @@ def test_live_hindsight_body_is_accepted_byte_for_byte() -> None:
     ],
     ids=["defaults", "ceilings", "floors"],
 )
-@pytest.mark.parametrize("timeout_s", [300, 60, 1800])
+@pytest.mark.parametrize("timeout_s", [300, 60, 1800, 3600])
 def test_live_hindsight_body_variants_are_accepted(
     timeout_s: int, limits: ExtractionLimits
 ) -> None:
