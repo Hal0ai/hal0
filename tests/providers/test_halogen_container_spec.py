@@ -23,7 +23,12 @@ from hal0.errors import Hal0Error
 from hal0.install.perms import ensure_shared_dir as real_ensure_shared_dir
 from hal0.profiles import ProfileCatalog
 from hal0.providers import halogen as halogen_module
-from hal0.providers.container import _render_quadlet_from_plan, _spec_provider_for
+from hal0.providers.container import (
+    ContainerProvider,
+    _render_quadlet_from_plan,
+    _spec_provider_for,
+    runner_family_mismatch,
+)
 from hal0.providers.halogen import (
     VISION_SIDECAR,
     HalogenProvider,
@@ -31,6 +36,7 @@ from hal0.providers.halogen import (
     vision_sidecar_present,
 )
 from hal0.slots import output_sanity
+from hal0.slots.state import RunnerFamilyMismatch
 from hal0.slots.tune import EffectiveTune
 
 CKPT = "/mnt/ai-models/halogen-flash-next/qwen38-flash-next-ht43.hgn"
@@ -454,6 +460,51 @@ def test_halogen_env_is_pure() -> None:
 
 def test_dispatch_family_halogen() -> None:
     assert isinstance(_spec_provider_for(_cfg()), HalogenProvider)
+
+
+def test_load_refuses_a_foreign_runner_before_writing_a_unit() -> None:
+    """A hand-edited ``binary`` the llama path would launch with llama-server argv.
+    Nothing reaches the seam: the slot fails with the reason, not a crash loop."""
+    cfg = _cfg(profile="agent", binary="halogen")
+    with (
+        patch("hal0.providers.container._SYSTEMCTL_SEAM") as seam,
+        pytest.raises(RunnerFamilyMismatch) as exc,
+    ):
+        ContainerProvider().load_sync(cfg, _info())
+    assert exc.value.code == "slot.runner_family_mismatch"
+    assert "'agent'" in str(exc.value)
+    assert exc.value.details["profiles"] == ["halogen"]
+    seam.write_quadlet.assert_not_called()
+    seam.systemctl.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        pytest.param(_cfg(profile="halogen", binary="halogen"), id="its-own-runner"),
+        pytest.param(_cfg(profile="halogen", binary="standard"), id="llama-runner-is-ignored"),
+        pytest.param(_cfg(profile="agent", binary="cuda"), id="llama-family-runner"),
+        pytest.param(_cfg(profile="agent"), id="no-runner"),
+    ],
+)
+def test_runner_family_agrees(cfg: dict[str, Any]) -> None:
+    assert runner_family_mismatch(cfg) is None
+
+
+def test_load_still_launches_an_engine_profile_over_a_stale_runner() -> None:
+    """A slot moved from Kokoro to Qwen3-TTS before the opt-out clear existed: the
+    provider launches its own image and ``binary`` is inert, so a box already in
+    this state keeps loading. Only a new write of the pair is refused."""
+    cfg = _cfg(type="tts", device="gpu-rocm", profile="qwen3-tts", binary="kokoro")
+    assert runner_family_mismatch(cfg) is not None
+    provider = ContainerProvider()
+    with (
+        patch("hal0.providers.container.require_kfd_for_gpu_slot"),
+        patch.object(provider, "_render_quadlet_text", return_value="unit"),
+        patch.object(provider, "_write_and_start_unit") as start,
+    ):
+        provider.load_sync(cfg, _info())
+    start.assert_called_once()
 
 
 def test_render_contains_stop_and_restart_keys() -> None:

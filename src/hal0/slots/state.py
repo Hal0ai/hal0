@@ -296,6 +296,19 @@ class SlotConfigError(SlotError):
     status = 400
 
 
+class RunnerFamilyMismatch(SlotConfigError):
+    """A slot's ``binary`` names a runner its launch would not dispatch to.
+
+    The provider comes from the profile's family, and on the llama path the
+    image comes from ``binary``, so a non-llama runner under a llama profile
+    launches that runner's image with llama-server arguments. Surfaced as 409:
+    the two fields conflict with each other, and either one can resolve it.
+    """
+
+    code = "slot.runner_family_mismatch"
+    status = 409
+
+
 class NpuExclusivityViolation(SlotError):
     """Two ``device=npu, type=llm, enabled=true`` slots cannot coexist.
 
@@ -457,6 +470,7 @@ __all__ = [
     "SELF_MANAGED_PROVIDERS",
     "IllegalSlotTransition",
     "NpuExclusivityViolation",
+    "RunnerFamilyMismatch",
     "SlotConfigError",
     "SlotCrashLooping",
     "SlotError",

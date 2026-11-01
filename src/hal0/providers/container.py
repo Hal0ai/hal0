@@ -110,7 +110,7 @@ from hal0.slots.naming import (
     slot_quadlet_name,
     slot_unit_name,
 )
-from hal0.slots.state import SlotSpawnFailed
+from hal0.slots.state import RunnerFamilyMismatch, SlotSpawnFailed
 from hal0.slots.tune import EffectiveTune, effective_tune
 from hal0.system.seam import SeamTimeout, SystemCtlSeam, is_hal0_service_user
 
@@ -1268,6 +1268,51 @@ def _spec_provider_for(slot_cfg: dict[str, Any]) -> Any | None:
     return _provider_for_family(slot_cfg, _profile_runtime_family(slot_cfg))
 
 
+def runner_family_mismatch(slot_cfg: Mapping[str, Any]) -> RunnerFamilyMismatch | None:
+    """The refusal for a ``binary`` this slot's launch would not dispatch to, else None.
+
+    ``slot_cfg`` is the flat view (scalars at the root). A llama-family ``binary``
+    is never a mismatch: a non-llama provider launches its own image and ignores
+    it, and the llama path can run any llama runner. Compared against what the
+    launch dispatch answers rather than the profile's family alone, so a profile-less
+    ``type=tts`` slot on ``binary=kokoro`` (which launches Kokoro) reads as agreeing.
+    A dispatch that cannot answer is not this check's to report.
+    """
+    runner = _binary_runner(slot_cfg)
+    if runner is None or runner.runtime_family == "llama-server":
+        return None
+    try:
+        provider = _spec_provider_for(dict(slot_cfg))
+    except Hal0Error:
+        return None
+    launches = getattr(provider, "name", "llama-server")
+    if launches == runner.runtime_family:
+        return None
+    try:
+        profiles = [
+            p.name for p in ProfileCatalog().list() if p.runtime_family == runner.runtime_family
+        ]
+    except Hal0Error:
+        profiles = []
+    slot = str(slot_cfg.get("name") or "")
+    profile = str(slot_cfg.get("profile") or "")
+    pick = f"pick the {profiles[0]!r} profile" if profiles else "pick a profile for that runtime"
+    return RunnerFamilyMismatch(
+        f"slot {slot!r} names the {runner.title or runner.key} runtime, but "
+        + (f"its profile {profile!r}" if profile else "with no profile it")
+        + f" launches {launches}, which cannot run that runtime's image; "
+        f"{pick}, or set the slot's runtime back to Auto",
+        details={
+            "slot": slot,
+            "binary": runner.key,
+            "runner_family": runner.runtime_family,
+            "launches": launches,
+            "profile": profile,
+            "profiles": profiles,
+        },
+    )
+
+
 def unit_stop_bound_s(slot_cfg: Mapping[str, Any]) -> float | None:
     """The widened ``systemctl stop`` bound for a runtime with a declared grace.
 
@@ -2392,6 +2437,16 @@ class ContainerProvider(Provider):
         # dispatch). ``None`` means the default llama-server GPU provider.
         spec_provider = _spec_provider_for(slot_cfg)
 
+        # The llama path takes its image from ``binary``, so a non-llama runner
+        # here would launch with llama-server argv and exit. The write seam
+        # refuses this state, which leaves a hand edit. Only this path: a
+        # dispatched provider launches its own image, so a stale ``binary``
+        # beside one is inert and that slot keeps loading.
+        if spec_provider is None:
+            mismatch = runner_family_mismatch(slot_cfg)
+            if mismatch is not None:
+                raise mismatch
+
         # Loud-fail for AMD-GPU slots with no /dev/kfd whose runtime needs it:
         # the Standard runner would silently fall back to its Vulkan backend,
         # which must not serve unless its digest passed the Vulkan gate
@@ -3380,6 +3435,7 @@ __all__ = [
     "container_provider",
     "resolved_argv_detail_for_slot",
     "resolved_command_for_slot",
+    "runner_family_mismatch",
     "tune_effective_for_slot",
 ]
 

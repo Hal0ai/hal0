@@ -389,6 +389,60 @@ def halogen_slot_toml(tmp_hal0_home: str) -> Path:
     return path
 
 
+def test_put_binary_of_another_family_on_a_llama_profile_is_409(
+    slot_toml: Path, client: TestClient
+) -> None:
+    """The drawer's Runtime select: halogen with a llama profile would launch the
+    vendor's image with llama-server arguments, so the slot write refuses it."""
+    assert client.put("/api/slots/chat/config", json={"profile": "agent"}).status_code == 200
+    before = slot_toml.read_bytes()
+
+    r = client.put("/api/slots/chat/config", json={"binary": "halogen"})
+
+    assert r.status_code == 409, r.text
+    err = r.json()["error"]
+    assert err["code"] == "slot.runner_family_mismatch"
+    assert "halogen" in err["message"]
+    assert err["details"]["profiles"] == ["halogen"]
+    assert slot_toml.read_bytes() == before
+
+
+def test_put_binary_of_another_family_with_no_profile_is_409(
+    slot_toml: Path, client: TestClient
+) -> None:
+    r = client.put("/api/slots/chat/config", json={"binary": "halogen"})
+    assert r.status_code == 409, r.text
+    assert r.json()["error"]["code"] == "slot.runner_family_mismatch"
+    assert "binary" not in _read(slot_toml)
+
+
+def test_put_halogen_profile_then_a_llama_profile_clears_the_runner(
+    slot_toml: Path, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Opt-in then opt-out through the real route: the file ends with no ``binary``."""
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: True)
+
+    assert client.put("/api/slots/chat/config", json={"profile": "halogen"}).status_code == 200
+    assert _read(slot_toml)["binary"] == "halogen"
+
+    r = client.put("/api/slots/chat/config", json={"profile": "agent"})
+
+    assert r.status_code == 200, r.text
+    on_disk = _read(slot_toml)
+    assert on_disk["profile"] == "agent"
+    assert "binary" not in on_disk
+    assert on_disk["device"] == "gpu-rocm"
+
+
+def test_put_llama_runner_on_a_halogen_slot_is_allowed(
+    halogen_slot_toml: Path, client: TestClient
+) -> None:
+    r = client.put("/api/slots/flash/config", json={"binary": "standard"})
+    assert r.status_code == 200, r.text
+    assert _read(halogen_slot_toml)["binary"] == "standard"
+
+
 def test_tune_ngram_refused_on_halogen_slot(halogen_slot_toml: Path, client: TestClient) -> None:
     """The halogen engine has no n-gram drafter: the real write path refuses it."""
     before = halogen_slot_toml.read_bytes()
