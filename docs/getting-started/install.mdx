@@ -142,6 +142,14 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash -s -- --no-start --models-dir
 | `--no-start` | Set everything up but do not enable/start the units |
 | `--models-dir=PATH` | Absolute path where Hugging Face pulls land (same as `HAL0_MODELS_DIR`) |
 | `--summary-json=PATH` | Write a versioned, machine-readable install summary to `PATH` once the install finishes (see below) |
+| `--no-owui` | Skip Open WebUI (same as `HAL0_SKIP_OPENWEBUI=1`) |
+| `--no-comfyui` | Skip the starter image models (same as `HAL0_IMAGE_MODELS=none`); the `img` slot still exists, parked |
+| `--no-hermes` | Skip the Hermes agent (same as `HAL0_SKIP_HERMES=1`) |
+| `--no-pi` | Skip the Pi agent (same as `HAL0_SKIP_PI=1`) |
+| `--no-agents` | Skip both agents; same as `--no-hermes --no-pi` |
+| `--no-memory` | Skip the Hindsight memory service (same as `HAL0_SKIP_HINDSIGHT=1`) |
+| `--no-brain-model` | Skip the brain model pull (same as `HAL0_SKIP_BRAIN_MODEL=1`) |
+| `--bare`, `--bare-inference` | Synonyms: turn every optional component above off |
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -155,7 +163,33 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash -s -- --no-start --models-dir
 | `HAL0_PY_AUTOINSTALL` | _(unset)_ | The installer already sets this itself when the default Python is below 3.12, so you rarely need it; it allows installing `python3.12` via apt or dnf when no 3.12-3.14 is on `PATH`. Other distros need `HAL0_PYTHON` pointed at a newer interpreter |
 | `HAL0_HINDSIGHT_PYTHON` | _(auto)_ | Interpreter (Python 3.11-3.14) for the Hindsight memory engine venv; use it when the installer reports none usable |
 | `HAL0_SKIP_HERMES` | _(unset)_ | Set to `1` to skip provisioning the bundled Hermes agent; install it later with `hal0 agent install hermes` |
+| `HAL0_INSTALL_PI` | _(unset)_ | Set to `1` to install the Pi agent unattended; the checklist sets it when the Pi row is on |
 | `HAL0_IMAGE_MODELS` | _(unset)_ | Starter image models to download without a prompt: `recommended` or a list of ids; `none` skips the step |
+
+### Choosing components
+
+On an interactive fresh install the installer shows a checklist of the six
+optional components before it starts:
+
+- Open WebUI: on
+- ComfyUI (starter image models): on
+- Hermes agent: on
+- Pi agent: off
+- Hindsight memory: on
+- Brain model: on
+
+Pick a preset: `a` keeps the defaults, `b` is bare inference (everything off),
+`p` lets you pick row by row. Enter alone is `a`. A row whose precondition
+fails on this machine is shown greyed with the reason and cannot be turned on.
+
+The checklist does not appear on an upgrade, with `--dev` or `--no-start`,
+without a terminal, with `HAL0_NONINTERACTIVE=1`, or when you pass any
+component flag; those installs use the flags and variables above. Each
+skipped component prints the command that installs it later:
+`hal0 app install openwebui`, `hal0 agent install hermes`,
+`hal0 agent install pi`, `hal0 comfyui models install <id>`, and
+`hal0 model pull <id>` for the brain model. Hindsight memory has no deferred
+install command; re-run the installer to add it.
 
 ### Install log and failure reports
 

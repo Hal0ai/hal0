@@ -174,12 +174,18 @@ Full step list and the complete env-var table:
 | `HAL0_CHANNEL=preview` | Install from a channel other than `stable` |
 | `HAL0_NONINTERACTIVE=1` | Force flag/env defaults; never prompt, even on a TTY |
 | `HAL0_SKIP_SETUP=1` | Skip first-run seeding **and** the brain, agent and image model steps |
-| `HAL0_SKIP_BRAIN_MODEL=1` | Keep the seeding, skip the brain pull (`brain` stays model-less) |
+| `--no-brain-model` / `HAL0_SKIP_BRAIN_MODEL=1` | Keep the seeding, skip the brain pull (`brain` stays model-less) |
 | `HAL0_BRAIN_MODEL=<id>` | Force a specific curated brain quant |
 | `HAL0_PULL_AGENT_MODEL=1` / `=0` | Opt in to the big agent pull unattended / force-skip it on a TTY |
 | `HAL0_IMAGE_MODELS=recommended` / `=<id>,<id>` / `=none` | Download starter image models unattended / skip the image step on a TTY |
 | `HAL0_PY_AUTOINSTALL=1` | Let the installer install `python3.12` when the box has no Python in 3.12-3.14 |
-| `HAL0_SKIP_HINDSIGHT=1`, `HAL0_SKIP_OPENWEBUI=1`, `HAL0_SKIP_HERMES=1` | Skip individual companion services |
+| `--no-owui` / `HAL0_SKIP_OPENWEBUI=1` | Skip Open WebUI |
+| `--no-comfyui` / `HAL0_IMAGE_MODELS=none` | Skip the starter image models (the `img` slot still exists, parked) |
+| `--no-hermes` / `HAL0_SKIP_HERMES=1` | Skip the Hermes agent |
+| `--no-pi` / `HAL0_SKIP_PI=1` | Skip the Pi agent (`HAL0_INSTALL_PI=1` installs it unattended) |
+| `--no-memory` / `HAL0_SKIP_HINDSIGHT=1` | Skip the Hindsight memory service |
+| `--no-agents` | Same as `--no-hermes --no-pi` |
+| `--bare` (or `--bare-inference`) | Turn every optional component off: inference only |
 | `--no-start` | Provision everything, leave services stopped |
 | `--summary-json=PATH` | Write a versioned, machine-readable install summary (see [`installer/README.md`](./installer/README.md#--summary-jsonpath)) |
 
