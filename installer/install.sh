@@ -917,7 +917,7 @@ fi
 # Captured before the filesystem layout step flips CURRENT_LINK: an existing
 # `current` link means this run upgrades a box that already has hal0.
 IS_UPGRADE=0
-[[ -n "${CURRENT_LINK}" && -e "${CURRENT_LINK}" ]] && IS_UPGRADE=1
+[[ -n "${CURRENT_LINK}" && ( -e "${CURRENT_LINK}" || -L "${CURRENT_LINK}" ) ]] && IS_UPGRADE=1
 
 ui_step "System user" "~1-2s"
 
@@ -2781,13 +2781,21 @@ if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 && "${IS_UPGRADE}" -eq 0 \
     _cp_pi_reason=""
     command -v npm >/dev/null 2>&1 || _cp_pi_reason="needs npm (Node.js)"
 
+    # Row defaults follow knobs already set in the environment, so the operator
+    # is never shown "on" for something that will not install.
+    _cp_d_owui=on; [[ "${HAL0_SKIP_OPENWEBUI:-0}" == 1 ]] && _cp_d_owui=off
+    _cp_d_img=on; [[ "${HAL0_IMAGE_MODELS:-}" == none || "${HAL0_IMAGE_MODELS:-}" == 0 ]] && _cp_d_img=off
+    _cp_d_hermes=on; [[ "${HAL0_SKIP_HERMES:-0}" == 1 ]] && _cp_d_hermes=off
+    _cp_d_pi=off; [[ "${HAL0_INSTALL_PI:-0}" == 1 && "${HAL0_SKIP_PI:-0}" != 1 ]] && _cp_d_pi=on
+    _cp_d_hind=on; [[ "${HAL0_SKIP_HINDSIGHT:-0}" == 1 ]] && _cp_d_hind=off
+    _cp_d_brain=on; [[ "${HAL0_SKIP_BRAIN_MODEL:-0}" == 1 ]] && _cp_d_brain=off
     _cp_rows=(
-        "openwebui"$'\t'"Open WebUI"$'\t'"chat UI, podman container"$'\t'"on"$'\t'"${_cp_owui_reason}"
-        "comfyui"$'\t'"ComfyUI"$'\t'"image/video generation, starter models"$'\t'"on"$'\t'"${_cp_img_reason}"
-        "hermes"$'\t'"Hermes agent"$'\t'"venv + config + gateway; brings the Operator Board and MCP wiring"$'\t'"on"$'\t'
-        "pi"$'\t'"Pi agent"$'\t'"terminal coding agent (CLI/TUI)"$'\t'"off"$'\t'"${_cp_pi_reason}"
-        "hindsight"$'\t'"Hindsight memory"$'\t'"hindsight-api unit, Memory tab, Hermes memory bank"$'\t'"on"$'\t'"${HINDSIGHT_UNAVAILABLE_REASON}"
-        "brain"$'\t'"Brain model"$'\t'"~1-3 GB pull; steward chat and tools"$'\t'"on"$'\t'
+        "openwebui"$'\t'"Open WebUI"$'\t'"chat UI, podman container"$'\t'"${_cp_d_owui}"$'\t'"${_cp_owui_reason}"
+        "comfyui"$'\t'"ComfyUI"$'\t'"image/video generation, starter models"$'\t'"${_cp_d_img}"$'\t'"${_cp_img_reason}"
+        "hermes"$'\t'"Hermes agent"$'\t'"venv + config + gateway; brings the Operator Board and MCP wiring"$'\t'"${_cp_d_hermes}"$'\t'
+        "pi"$'\t'"Pi agent"$'\t'"terminal coding agent (CLI/TUI)"$'\t'"${_cp_d_pi}"$'\t'"${_cp_pi_reason}"
+        "hindsight"$'\t'"Hindsight memory"$'\t'"hindsight-api unit, Memory tab, Hermes memory bank"$'\t'"${_cp_d_hind}"$'\t'"${HINDSIGHT_UNAVAILABLE_REASON}"
+        "brain"$'\t'"Brain model"$'\t'"~1-3 GB pull; steward chat and tools"$'\t'"${_cp_d_brain}"$'\t'
     )
     declare -A _cp_res=()
     ui_component_picker _cp_rows _cp_res
@@ -2808,6 +2816,7 @@ if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 && "${IS_UPGRADE}" -eq 0 \
     for _cp_kv in "${_cp_reasons[@]}"; do
         [[ "${_cp_res[${_cp_kv%%=*}]:-}" == "unavailable" ]] && _cp_unavail["${_cp_kv%%=*}"]="${_cp_kv#*=}"
     done
+    unset _cp_d_owui _cp_d_img _cp_d_hermes _cp_d_pi _cp_d_hind _cp_d_brain
     unset _cp_owui_reason _cp_img_reason _cp_img_plan _cp_pi_reason _cp_rows _cp_res _cp_reasons _cp_kv
 fi
 # shellcheck disable=SC2034  # COMPONENT_STATES is read by the install summary
@@ -2824,7 +2833,7 @@ _cp_state() {  # _cp_state ID SKIPPED(0|1): unavailable beats skipped beats sele
 # a headless run where the picker never computed the reason.
 [[ -n "${HINDSIGHT_UNAVAILABLE_REASON}" ]] && _cp_unavail[hindsight]="${HINDSIGHT_UNAVAILABLE_REASON}"
 _cp_state openwebui "$([[ "${HAL0_SKIP_OPENWEBUI:-0}" == 1 ]] && echo 1 || echo 0)"
-_cp_state comfyui "$([[ "${HAL0_IMAGE_MODELS:-}" == none ]] && echo 1 || echo 0)"
+_cp_state comfyui "$([[ "${HAL0_IMAGE_MODELS:-}" == none || "${HAL0_IMAGE_MODELS:-}" == 0 ]] && echo 1 || echo 0)"
 _cp_state hermes "$([[ "${HAL0_SKIP_HERMES:-0}" == 1 ]] && echo 1 || echo 0)"
 _cp_state pi "$([[ "${HAL0_INSTALL_PI:-0}" == 1 && "${HAL0_SKIP_PI:-0}" != 1 ]] && echo 0 || echo 1)"
 _cp_state hindsight "$([[ "${HAL0_SKIP_HINDSIGHT:-0}" == 1 ]] && echo 1 || echo 0)"

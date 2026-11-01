@@ -10,6 +10,7 @@ unavailable`` pairs; unlisted rows keep their default).
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,6 +45,7 @@ class Result:
     picker_called: bool
     env: dict[str, str]
     rows: dict[str, str] = field(default_factory=dict)  # id -> reason
+    defaults: dict[str, str] = field(default_factory=dict)
     states: dict[str, str] = field(default_factory=dict)
     proc: subprocess.CompletedProcess[str] | None = None
 
@@ -68,14 +70,20 @@ def run_block(tmp_path: Path, block: str):
     ) -> Result:
         bindir = tmp_path / "bin"
         venv_bin = tmp_path / "venv" / "bin"
-        bindir.mkdir(exist_ok=True)
+        if bindir.exists():
+            shutil.rmtree(bindir)
+        bindir.mkdir()
+        # Only the tools the fragment needs; the host's podman/npm never leak in.
+        for tool in ("env", "grep", "sed"):
+            (bindir / tool).symlink_to(shutil.which(tool) or f"/usr/bin/{tool}")
         venv_bin.mkdir(parents=True, exist_ok=True)
         if npm:
             (bindir / "npm").write_text("#!/bin/sh\nexit 0\n")
         if podman:
             (bindir / "podman").write_text("#!/bin/sh\nexit 0\n")
-        for f in bindir.iterdir():
-            f.chmod(0o755)
+        for f in ("npm", "podman"):
+            if (bindir / f).exists():
+                (bindir / f).chmod(0o755)
         py = venv_bin / "python"
         py.write_text(f"#!/bin/sh\nprintf '%b' '{plan}'\n")
         py.chmod(0o755)
@@ -95,11 +103,11 @@ def run_block(tmp_path: Path, block: str):
             encoding="utf-8",
         )
         proc = subprocess.run(
-            ["/usr/bin/env", "bash", str(script)],
+            [shutil.which("bash") or "/bin/bash", str(script)],
             capture_output=True,
             text=True,
             env={
-                "PATH": f"{bindir}:/usr/bin:/bin",
+                "PATH": str(bindir),
                 "PICKER_CALLED": str(called),
                 "PICKER_ANSWER": answer,
                 "TTY": "1" if tty else "0",
@@ -121,6 +129,7 @@ def run_block(tmp_path: Path, block: str):
                 if line.startswith("ROW\t"):
                     parts = line.split("\t")
                     res.rows[parts[1]] = parts[5] if len(parts) > 5 else ""
+                    res.defaults[parts[1]] = parts[4]
         return res
 
     return run
@@ -128,7 +137,9 @@ def run_block(tmp_path: Path, block: str):
 
 def test_non_interactive_never_calls_picker(run_block) -> None:
     r = run_block(env={"HAL0_NONINTERACTIVE": "1"})
-    assert r.picker_called is False and r.env.get("HAL0_SKIP_PI") is None
+    assert r.picker_called is False and r.env == {"HAL0_NONINTERACTIVE": "1"}
+    r = run_block(env={"HAL0_NONINTERACTIVE": "1", "HAL0_INSTALL_PI": "1"})
+    assert r.env == {"HAL0_NONINTERACTIVE": "1", "HAL0_INSTALL_PI": "1"}
 
 
 def test_any_component_flag_suppresses_picker(run_block) -> None:
@@ -196,3 +207,67 @@ def test_headless_states_come_from_environment(run_block) -> None:
     assert r.states["comfyui"] == "selected"
     r2 = run_block(env={"HAL0_INSTALL_PI": "1", "HAL0_SKIP_PI": "1"})
     assert r2.states["pi"] == "skipped"
+
+
+@pytest.mark.parametrize(
+    ("env", "row"),
+    [
+        ({"HAL0_SKIP_OPENWEBUI": "1"}, "openwebui"),
+        ({"HAL0_IMAGE_MODELS": "none"}, "comfyui"),
+        ({"HAL0_IMAGE_MODELS": "0"}, "comfyui"),
+        ({"HAL0_SKIP_HERMES": "1"}, "hermes"),
+        ({"HAL0_SKIP_HINDSIGHT": "1"}, "hindsight"),
+        ({"HAL0_SKIP_BRAIN_MODEL": "1"}, "brain"),
+        ({"HAL0_SKIP_PI": "1"}, "pi"),
+    ],
+)
+def test_env_skip_knobs_make_row_default_off(run_block, env, row) -> None:
+    r = run_block(tty=True, env=env)
+    assert r.defaults[row] == "off"
+    assert all(v == "on" for k, v in r.defaults.items() if k not in (row, "pi"))
+
+
+def test_env_install_pi_defaults_pi_on_and_survives(run_block) -> None:
+    r = run_block(tty=True, env={"HAL0_INSTALL_PI": "1"})
+    assert r.defaults["pi"] == "on"
+    assert r.states["pi"] == "selected" and "HAL0_SKIP_PI" not in r.env
+
+
+def test_default_row_defaults(run_block) -> None:
+    r = run_block(tty=True)
+    assert r.defaults == {
+        "openwebui": "on", "comfyui": "on", "hermes": "on",
+        "pi": "off", "hindsight": "on", "brain": "on",
+    }
+
+
+_TEXT = _INSTALL_SH.read_text(encoding="utf-8")
+
+
+def _capture_lines() -> str:
+    m = re.search(r"^IS_UPGRADE=0\n\[\[.*IS_UPGRADE=1\n", _TEXT, re.M)
+    assert m, "IS_UPGRADE capture not found"
+    return m.group(0)
+
+
+def _is_upgrade(current_link: str) -> str:
+    out = subprocess.run(
+        [shutil.which("bash") or "/bin/bash", "-c",
+         f'set -euo pipefail\nCURRENT_LINK="$1"\n{_capture_lines()}echo "$IS_UPGRADE"', "x", current_link],
+        capture_output=True, text=True, check=True,
+    )
+    return out.stdout.strip()
+
+
+def test_is_upgrade_capture(tmp_path: Path) -> None:
+    assert _is_upgrade(str(tmp_path)) == "1"
+    assert _is_upgrade(str(tmp_path / "missing")) == "0"
+    assert _is_upgrade("") == "0"
+    dangling = tmp_path / "current"
+    dangling.symlink_to(tmp_path / "gone")
+    assert _is_upgrade(str(dangling)) == "1"
+
+
+def test_is_upgrade_captured_before_filesystem_layout() -> None:
+    assert _TEXT.index("IS_UPGRADE=0\n") < _TEXT.index('ui_step "Filesystem layout"')
+    assert _TEXT.index("IS_UPGRADE=0\n") < _TEXT.index('ui_step "System user"')
