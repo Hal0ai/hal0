@@ -179,7 +179,10 @@ _HALOGEN_SLOT_BYTES = 120_586_240  # fixed state per KV slot
 _HALOGEN_WORK_GIB_PER_32K = 8.8  # working memory per 32768 tokens of MAX_TOK ...
 _HALOGEN_WORK_BASE_GIB = 3.8  # ... on top of this fixed share
 _HALOGEN_TOWER_MB = 0.84 * 1024  # vision tower, when the vision sidecar loads
-_HALOGEN_CACHE_ENTRY_MB = 115.0  # per prompt-cache entry (24 by default)
+_HALOGEN_CACHE_ENTRY_MB = 115.0  # per prompt-cache entry
+
+#: Prompt-cache entries the engine keeps when ``HALOGEN_CACHE_ENTRIES`` is unset.
+HALOGEN_CACHE_ENTRIES_DEFAULT = 24
 
 #: Page cache the engine's table files can fill. An advisory for the operator
 #: (reclaimable, so not memory the box has to find): it is never added to the
@@ -195,7 +198,7 @@ def halogen_footprint_mb(
     max_tok: int,
     kv8: bool,
     vision: bool,
-    cache_entries: int = 24,
+    cache_entries: int = HALOGEN_CACHE_ENTRIES_DEFAULT,
 ) -> float:
     """Resident memory (MiB) a halogen engine holds once loaded.
 

@@ -227,6 +227,17 @@ _MAX_INT_DIGITS = 9
 _ECHO_CHARS = 40
 
 
+def whole_number(value: str) -> int | None:
+    """``value`` as a non-negative whole number; ``None`` when it is not plain digits.
+
+    For a flag the sizing path reads that is no curated knob, so it has no range to
+    check it against. Same digit limit as a knob: past it the value is not converted.
+    """
+    if _WHOLE_NUMBER.fullmatch(value) is None or len(value) > _MAX_INT_DIGITS:
+        return None
+    return int(value)
+
+
 def _echo(value: str) -> str:
     """``value`` shortened for an error message or ``details``."""
     return value if len(value) <= _ECHO_CHARS else value[:_ECHO_CHARS] + "..."

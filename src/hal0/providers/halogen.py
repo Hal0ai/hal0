@@ -67,9 +67,10 @@ from hal0.runners.knobs import (
     EngineKnob,
     _range_problem,
     parse_env_tokens,
+    whole_number,
 )
 from hal0.slots import output_sanity
-from hal0.slots.capacity import halogen_footprint_mb
+from hal0.slots.capacity import HALOGEN_CACHE_ENTRIES_DEFAULT, halogen_footprint_mb
 from hal0.slots.gtt_guard import GFX1151
 from hal0.slots.model_fit import model_runtime_mismatch
 from hal0.slots.state import SlotHostUnsupported
@@ -198,6 +199,16 @@ def _knob_value(carried: Mapping[str, str], env: str) -> str:
     if value is not None and _range_problem(knob, value) is None:
         return value
     return str(knob.default)
+
+
+def _cache_entries(carried: Mapping[str, str]) -> int:
+    """The profile's ``HALOGEN_CACHE_ENTRIES``, or the engine's default when absent or odd.
+
+    Reachable as free text, not a curated knob, so it has no :data:`HALOGEN_KNOBS`
+    row: the screen lets any value through and only sizing reads it.
+    """
+    entries = whole_number(carried.get("HALOGEN_CACHE_ENTRIES", ""))
+    return HALOGEN_CACHE_ENTRIES_DEFAULT if entries is None else entries
 
 
 def _probe_failure(status: str, detail: str) -> dict[str, Any]:
@@ -535,10 +546,10 @@ class HalogenProvider(Provider):
         Argument gathering only; the arithmetic is
         :func:`hal0.slots.capacity.halogen_footprint_mb` (ADR-0039). The inputs
         are read as :meth:`container_spec` reads them: the checkpoint's size from
-        the registry row, the KV pool, KV slot count, prefill chunk and 8-bit KV
-        switch from the profile's ``HALOGEN_*`` flags (a missing or odd value is
-        the knob's default), and the context window and vision from the slot's
-        effective tune. The pool is booked at ``max(pool, window)`` so a small
+        the registry row, the KV pool, KV slot count, prefill chunk, 8-bit KV
+        switch and prompt-cache entries from the profile's ``HALOGEN_*`` flags (a
+        missing or odd value is the default), and the context window and vision
+        from the slot's effective tune. The pool is booked at ``max(pool, window)`` so a small
         pool setting never books less than the window needs, and the vision
         tower counts only when vision is on AND its sidecar sits beside the
         checkpoint, the same condition that sets ``HALOGEN_VISION_TOWER``.
@@ -572,6 +583,7 @@ class HalogenProvider(Provider):
             vision=tune.vision == "auto"
             and bool(checkpoint)
             and vision_sidecar_present(checkpoint),
+            cache_entries=_cache_entries(carried),
         )
 
     # ── Health / readiness / sentinel ──────────────────────────────────────────

@@ -17,7 +17,11 @@ import pytest
 
 from hal0.providers.container import resolve_named_profile
 from hal0.providers.halogen import VISION_SIDECAR, HalogenProvider
-from hal0.slots.capacity import halogen_footprint_mb, provider_footprint_mb
+from hal0.slots.capacity import (
+    HALOGEN_CACHE_ENTRIES_DEFAULT,
+    halogen_footprint_mb,
+    provider_footprint_mb,
+)
 
 GIB = 1024.0  # MiB per GiB: the estimator returns MiB
 CHECKPOINT_BYTES = int(53.7 * 2**30)  # the ht43 checkpoint
@@ -178,6 +182,37 @@ def test_a_slot_tune_can_turn_vision_off(tmp_path: Path) -> None:
     _with_sidecar(tmp_path)
     cfg = _cfg(tune={"vision": "off"})
     assert _footprint(tmp_path, cfg=cfg) == pytest.approx(_expected(vision=False))
+
+
+# ── the prompt cache ────────────────────────────────────────────────────────
+
+
+def test_the_cache_entry_flag_books_its_cost_per_entry(tmp_path: Path) -> None:
+    """200 entries is 176 more than the default, at the spec's 115 MiB each."""
+    flags = f"{SEED_FLAGS} HALOGEN_CACHE_ENTRIES=200"
+    mb = _footprint(tmp_path, profile=_profile(flags=flags))
+    assert mb == pytest.approx(_expected(cache_entries=200))
+    assert mb - _expected() == pytest.approx(176 * 115.0, abs=0.01)
+
+
+def test_a_cache_turned_off_books_nothing_for_it(tmp_path: Path) -> None:
+    flags = f"{SEED_FLAGS} HALOGEN_CACHE_ENTRIES=0"
+    mb = _footprint(tmp_path, profile=_profile(flags=flags))
+    assert mb == pytest.approx(_expected(cache_entries=0))
+    assert _expected() - mb == pytest.approx(24 * 115.0, abs=0.01)
+
+
+def test_no_cache_flag_books_the_default_count(tmp_path: Path) -> None:
+    assert HALOGEN_CACHE_ENTRIES_DEFAULT == 24
+    assert _footprint(tmp_path) == pytest.approx(
+        _expected(cache_entries=HALOGEN_CACHE_ENTRIES_DEFAULT)
+    )
+
+
+@pytest.mark.parametrize("value", ["lots", "-5", "1.5", "1_000", "٣", "9" * 10, "9" * 5000])
+def test_a_malformed_cache_flag_books_the_default_count(tmp_path: Path, value: str) -> None:
+    flags = f"{SEED_FLAGS} HALOGEN_CACHE_ENTRIES={value}"
+    assert _footprint(tmp_path, profile=_profile(flags=flags)) == pytest.approx(_expected())
 
 
 # ── no figure, never a raise ────────────────────────────────────────────────
