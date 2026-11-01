@@ -1872,7 +1872,9 @@ def check_openwebui_mcp(
         )
     env = env_path if env_path is not None else paths.openwebui_env()
     raw = env_writer._read_existing_env(env).get("TOOL_SERVER_CONNECTIONS", "")
-    want = {_OWUI_MCP_IDS[s]: s for s in client["scopes"] if s in _OWUI_MCP_IDS}
+    # In render order (memory, agents, admin), not the order of a set of scopes: the row's
+    # message must read the same on every run.
+    want = {ident: scope for scope, ident in _OWUI_MCP_IDS.items() if scope in client["scopes"]}
     rotate = "run `hal0 bridge rotate openwebui` to re-render it"
     if not raw:
         return Check(

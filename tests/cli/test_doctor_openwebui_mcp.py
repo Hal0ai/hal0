@@ -200,3 +200,12 @@ def test_unreadable_store_warns(box: _Box) -> None:
     finally:
         box.db.chmod(0o600)
     assert c.status == "warn" and "cannot read" in c.detail
+
+
+def test_problems_are_listed_in_render_order_whatever_the_hash_seed(box: _Box) -> None:
+    """The scopes come from a set; the message must not depend on its iteration order."""
+    key = box.mint(scopes=("agents", "memory", "admin"))
+    box.render(key, scopes=("memory", "agents", "admin"), url="https://example.invalid")
+    detail = box.check().detail
+    order = [detail.index(f"{i} points at") for i in ("hal0-memory", "hal0-agents", "hal0-admin")]
+    assert order == sorted(order)
