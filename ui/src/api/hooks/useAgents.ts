@@ -698,6 +698,9 @@ export interface AgentOverview {
     [key: string]: unknown
   }
   api_server?: { endpoint?: string; healthy?: boolean; profiles?: string[]; [key: string]: unknown }
+  /** Hermes: every configured profile with its health, so one that stopped answering is listed
+   *  as down, not absent (`api_server.profiles` names only the served ones). Absent on an older server. */
+  profiles?: { name: string; healthy: boolean }[]
   platforms?: string[]
   provision?: {
     present?: boolean

@@ -115,7 +115,8 @@ export interface CardModel {
   reach: {
     /** Configured chat platforms; `api_server` is the `api` chip, not a platform chip. */
     platforms: { id: string; lit: boolean }[]
-    api: { lit: boolean; profiles: string[] }
+    /** `profiles` are the served ones; `down` are configured profiles whose server is not answering. */
+    api: { lit: boolean; profiles: string[]; down: string[] }
     desktop: string | null
   }
   lastTool: LastTool | null
@@ -181,6 +182,24 @@ function text(v: unknown): string | undefined {
 
 function strings(v: unknown): string[] {
   return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
+}
+
+/**
+ * Configured Hermes profiles whose server is not answering while the API server is.
+ *
+ * `api_server.profiles` names only the served ones, so a profile that stopped is absent from it;
+ * `overview.profiles` lists every configured profile with its health. While the API server itself
+ * is down (or unknown) no profile is named: every profile is served through it, so the gateway is
+ * the fault the card already shows. An older server sends no `profiles`; nothing is down then.
+ */
+export function downProfiles(overview: AgentOverview | null | undefined): string[] {
+  if (overview?.api_server?.healthy !== true || !Array.isArray(overview.profiles)) return []
+  const down: string[] = []
+  for (const p of overview.profiles as unknown[]) {
+    const row = p as { name?: unknown; healthy?: unknown } | null
+    if (row && typeof row.name === 'string' && row.healthy === false) down.push(row.name)
+  }
+  return down
 }
 
 /** A full commit id shortens to seven characters; a tag or short ref stays as sent. */
@@ -452,6 +471,7 @@ export function deriveCardModel(input: CardModelInput): CardModel {
       api: {
         lit: overview?.api_server?.healthy === true,
         profiles: strings(overview?.api_server?.profiles),
+        down: downProfiles(overview),
       },
       desktop: deriveDesktop(agent, overview, urls),
     },
