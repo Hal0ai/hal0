@@ -128,6 +128,11 @@ class HermesKanbanClient:
             timeout=httpx.Timeout(120.0, connect=3.0),
         )
 
+    @property
+    def base_url(self) -> str:
+        """Hermes dashboard base URL (no trailing slash, no kanban prefix)."""
+        return self._base_url
+
     @classmethod
     def from_env(cls) -> HermesKanbanClient:
         base = os.environ.get("HERMES_DASHBOARD_BASE_URL", DEFAULT_BASE_URL)

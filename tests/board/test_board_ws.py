@@ -1,9 +1,4 @@
-"""board_ws.py — local card_event streamer for /api/board/events.
-
-hal0 owns the board: the events WS tails the local BoardStore event log instead
-of proxying to Hermes. Asserts the frozen frame shape
-``{"events":[...], "cursor": N}``, ``since=`` resume/replay, and ``board=``
-filtering.
+"""Tests for board_ws.py — the /api/board/events proxy to Hermes.
 
 Run targeted:
     PYTHONPATH=src .venv/bin/python -m pytest tests/board/test_board_ws.py -q
@@ -11,109 +6,153 @@ Run targeted:
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
+from urllib.parse import parse_qs, urlsplit
 
+import httpx
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
+from websockets.exceptions import ConnectionClosedOK
 
-from hal0.api.middleware.error_codes import install as install_errors
+import hal0.api.routes.board_ws as board_ws_mod
+from hal0.api.middleware import error_codes
 from hal0.api.routes import board
-from hal0.api.routes import board_ws as board_ws_mod
-from hal0.board.store import BoardStore
+from hal0.board import BoardNoToken, HermesKanbanClient
+from hal0.board.client import BoardClient
 
 
-def _app_with_store(store: BoardStore) -> FastAPI:
+class _FakeUpstream:
+    def __init__(self, frames: list[str]) -> None:
+        self._frames = list(frames)
+        self.sent: list[str] = []
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> str:
+        if self._frames:
+            return self._frames.pop(0)
+        raise ConnectionClosedOK(None, None)
+
+    async def send(self, data: str) -> None:
+        self.sent.append(data)
+
+
+class _FakeConnect:
+    def __init__(self, upstream: _FakeUpstream | None, urls: list[str], exc=None) -> None:
+        self._upstream = upstream
+        self._urls = urls
+        self._exc = exc
+
+    def __call__(self, url: str, **_kw):
+        self._urls.append(url)
+        return self
+
+    async def __aenter__(self):
+        if self._exc:
+            raise self._exc
+        return self._upstream
+
+    async def __aexit__(self, *a):
+        return None
+
+
+@pytest.fixture
+def app_client(monkeypatch):
     app = FastAPI()
-    install_errors(app)
+    error_codes.install(app)
     app.include_router(board.router, prefix="/api/board")
-    app.state.board_store = store
-    app.state.hermes_kanban = None
-    return app
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, json={})),
+        base_url="http://hermes.test:9119",
+    )
+    kanban = HermesKanbanClient(
+        base_url="http://hermes.test:9119", token_resolver=lambda: "tok", http_client=http
+    )
+    app.state.hermes_kanban = kanban
+    app.state.board_client = BoardClient(kanban)
+    app.state.board_installed = True
+    monkeypatch.setattr(board_ws_mod, "read_dashboard_token", lambda: "SECRET-TOK")
+    with TestClient(app) as c:
+        yield app, c
 
 
-def _store(tmp_path) -> BoardStore:
-    s = BoardStore(tmp_path / "board.db")
-    asyncio.run(s.ensure_initialized(None))
-    return s
+def test_ws_appends_token_and_passthrough_query(app_client, monkeypatch) -> None:
+    _, client = app_client
+    urls: list[str] = []
+    monkeypatch.setattr(board_ws_mod, "connect", _FakeConnect(_FakeUpstream([]), urls))
+    with (
+        client.websocket_connect(
+            "/api/board/events?since=5&board=alpha&tenant=x&evil=1&token=BROWSER"
+        ) as ws,
+        pytest.raises(WebSocketDisconnect),
+    ):
+        ws.receive_text()
+    parsed = urlsplit(urls[0])
+    assert (parsed.scheme, parsed.netloc) == ("ws", "hermes.test:9119")
+    assert parsed.path == "/api/plugins/kanban/events"
+    assert parse_qs(parsed.query) == {
+        "since": ["5"],
+        "board": ["alpha"],
+        "tenant": ["x"],
+        "token": ["SECRET-TOK"],
+    }
 
 
-def test_since_zero_replays_existing_events(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(board_ws_mod, "POLL_INTERVAL_SECONDS", 0.02)
-    store = _store(tmp_path)
-    tid = store.create_task({"title": "a", "status": "todo"})["task"]["id"]
-    store.update_task(tid, {"status": "ready"})
-
-    app = _app_with_store(store)
-    client = TestClient(app, raise_server_exceptions=False)
-    with client.websocket_connect("/api/board/events?since=0") as ws:
-        frame = ws.receive_json()
-    kinds = [e["kind"] for e in frame["events"]]
-    assert "created" in kinds and "updated" in kinds
-    assert frame["cursor"] == max(e["id"] for e in frame["events"])
-
-
-def test_since_absent_streams_only_new(tmp_path, monkeypatch) -> None:
-    """No ?since= ⇒ start at the latest cursor; a mutation AFTER connect streams."""
-    monkeypatch.setattr(board_ws_mod, "POLL_INTERVAL_SECONDS", 0.02)
-    store = _store(tmp_path)
-    store.create_task({"title": "old"})  # pre-existing, must NOT replay
-
-    app = _app_with_store(store)
-    client = TestClient(app, raise_server_exceptions=False)
+def test_ws_pumps_frames_both_ways(app_client, monkeypatch) -> None:
+    _, client = app_client
+    up = _FakeUpstream(['{"cursor":1}', '{"cursor":2}'])
+    monkeypatch.setattr(board_ws_mod, "connect", _FakeConnect(up, []))
     with client.websocket_connect("/api/board/events") as ws:
-        # New event after the socket is live.
-        store.create_task({"title": "new"})
-        frame = ws.receive_json()
-    kinds = [e["kind"] for e in frame["events"]]
-    assert kinds == ["created"]  # only the post-connect create, not the old one
+        ws.send_text("ping")
+        assert ws.receive_text() == '{"cursor":1}'
+        assert ws.receive_text() == '{"cursor":2}'
+        with pytest.raises(WebSocketDisconnect) as ei:
+            ws.receive_text()
+    assert ei.value.code == 1000
+    assert up.sent in ([], ["ping"])  # browser frame may race the clean close
 
 
-def test_board_filter(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(board_ws_mod, "POLL_INTERVAL_SECONDS", 0.02)
-    store = _store(tmp_path)
-    store.create_board({"slug": "other"})
-    store.create_task({"title": "a"})  # default board
-    store.create_task({"title": "b", "board": "other"})
-
-    app = _app_with_store(store)
-    client = TestClient(app, raise_server_exceptions=False)
-    with client.websocket_connect("/api/board/events?since=0&board=other") as ws:
-        frame = ws.receive_json()
-    assert all(e["board"] == "other" for e in frame["events"])
+def test_ws_upstream_failure_closes_1011(app_client, monkeypatch) -> None:
+    _, client = app_client
+    monkeypatch.setattr(board_ws_mod, "connect", _FakeConnect(None, [], exc=OSError("refused")))
+    with (
+        client.websocket_connect("/api/board/events") as ws,
+        pytest.raises(WebSocketDisconnect) as ei,
+    ):
+        ws.receive_text()
+    assert ei.value.code == 1011
 
 
-def test_frame_shape(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(board_ws_mod, "POLL_INTERVAL_SECONDS", 0.02)
-    store = _store(tmp_path)
-    store.create_task({"title": "a"})
-    app = _app_with_store(store)
-    client = TestClient(app, raise_server_exceptions=False)
-    with client.websocket_connect("/api/board/events?since=0") as ws:
-        frame = ws.receive_json()
-    assert set(frame.keys()) == {"events", "cursor"}
-    ev = frame["events"][0]
-    assert set(ev.keys()) >= {"id", "kind", "task_id", "board", "at"}
+def test_ws_no_token_closes_1011(app_client, monkeypatch) -> None:
+    _, client = app_client
+
+    def _boom() -> str:
+        raise BoardNoToken("missing")
+
+    monkeypatch.setattr(board_ws_mod, "read_dashboard_token", _boom)
+    urls: list[str] = []
+    monkeypatch.setattr(board_ws_mod, "connect", _FakeConnect(_FakeUpstream([]), urls))
+    with (
+        client.websocket_connect("/api/board/events") as ws,
+        pytest.raises(WebSocketDisconnect) as ei,
+    ):
+        ws.receive_text()
+    assert ei.value.code == 1011
+    assert urls == []
 
 
-def test_close_is_clean_when_no_store(tmp_path) -> None:
-    """No store on app.state and no way to build one under an isolated path:
-    the bridge closes the socket rather than crashing the server."""
-    import hal0.config.paths as paths_mod
-
-    app = FastAPI()
-    install_errors(app)
-    app.include_router(board.router, prefix="/api/board")
-    app.state.hermes_kanban = None
-    orig = paths_mod.db_path
-    paths_mod.db_path = lambda: tmp_path / "hal0.db"  # type: ignore[assignment]
-    try:
-        client = TestClient(app, raise_server_exceptions=False)
-        with (
-            contextlib.suppress(Exception),
-            client.websocket_connect("/api/board/events?since=0") as ws,
-        ):
-            # Lazily built empty store: connects fine, just no events yet.
-            ws.close()
-    finally:
-        paths_mod.db_path = orig  # type: ignore[assignment]
+def test_ws_not_installed_closes_1011(app_client, monkeypatch) -> None:
+    app, client = app_client
+    app.state.board_client = None
+    app.state.board_installed = False
+    urls: list[str] = []
+    monkeypatch.setattr(board_ws_mod, "connect", _FakeConnect(_FakeUpstream([]), urls))
+    with (
+        client.websocket_connect("/api/board/events") as ws,
+        pytest.raises(WebSocketDisconnect) as ei,
+    ):
+        ws.receive_text()
+    assert ei.value.code == 1011
+    assert urls == []
