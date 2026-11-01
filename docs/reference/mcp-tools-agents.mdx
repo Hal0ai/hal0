@@ -80,7 +80,7 @@ Failures are raised, not returned: the call comes back with `isError` set and a 
 | `bridge.unknown_agent` | 404 | no such agent id or Hermes profile |
 | `bridge.agent_unkeyed` | 503 | hal0 holds no API key for the profile |
 | `bridge.agent_unavailable` | 502 | Hermes does not answer |
-| `bridge.agent_refused` | 502 | Hermes refused hal0's request (its key, or Hermes itself) |
+| `bridge.agent_refused` | Hermes's own `4xx`, else 502 | Hermes refused hal0's request (its key, or Hermes itself). Hermes's `4xx` status passes through, except `401` and `403` (hal0's key was refused, which is not the caller's fault); those and every `5xx` are 502. The [Agent bridge API reference](/docs/reference/api/bridge/#errors) has the full error table |
 | `bridge.run_not_found` | 404 | no such run, or it belongs to another client |
 | `bridge.too_many_runs` | 429 | the client's `[bridge].max_concurrent_runs_per_client` is reached |
 | `bridge.idempotency_conflict` | 409 | the idempotency key was used for a different request, or belongs to another client's run |
