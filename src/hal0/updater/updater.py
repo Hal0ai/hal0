@@ -3773,9 +3773,17 @@ async def _run_post_activation_migrations_after_swap(
     script = (
         "import json, sys\n"
         "import structlog\n"
-        # Mirrors hal0.updater.privileged._pin_logs_to_stderr exactly: send
-        # structured logs to stderr so stdout carries only the result line.
-        "structlog.configure(logger_factory=structlog.PrintLoggerFactory(file=sys.stderr))\n"
+        # Like hal0.updater.privileged._pin_logs_to_stderr: send structured
+        # logs to stderr so stdout carries only the result line, and render
+        # tracebacks without frame locals (#3137). Spelled out rather than
+        # imported from hal0.log_setup because this script runs under the
+        # INCOMING release's venv, which on a rollback may predate that module;
+        # ``plain_traceback`` has existed in every structlog hal0 has shipped.
+        "structlog.configure(processors=[structlog.contextvars.merge_contextvars,"
+        " structlog.processors.add_log_level, structlog.processors.StackInfoRenderer(),"
+        " structlog.dev.set_exc_info, structlog.processors.TimeStamper(fmt='%Y-%m-%d %H:%M:%S', utc=False),"
+        " structlog.dev.ConsoleRenderer(exception_formatter=structlog.dev.plain_traceback)],"
+        " logger_factory=structlog.PrintLoggerFactory(file=sys.stderr))\n"
         "from hal0.updater.updater import run_post_activation_migrations\n"
         "args = json.loads(sys.argv[1])\n"
         "try:\n"

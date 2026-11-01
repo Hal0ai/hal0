@@ -51,6 +51,7 @@ from hal0.cli.setup_command import app as setup_app
 from hal0.cli.slot_commands import app as slot_app
 from hal0.cli.update_commands import update_app
 from hal0.cli.upstream_commands import app as upstream_app
+from hal0.log_setup import configure_stderr_logging
 from hal0.observability import sentry
 
 console = Console()
@@ -169,10 +170,10 @@ def _configure_cli_logging() -> None:
     level = logging.getLevelName(level_name)
     if not isinstance(level, int):
         level = logging.WARNING
-    structlog.configure(
-        wrapper_class=structlog.make_filtering_bound_logger(level),
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
-    )
+    # Through hal0.log_setup so tracebacks never print frame locals (#3137):
+    # the structlog default renderer would, and hal0-api's locals hold bearer
+    # keys. ``hal0 serve`` runs this callback too, so it covers the journal.
+    configure_stderr_logging(level=level)
 
 
 @app.callback()
