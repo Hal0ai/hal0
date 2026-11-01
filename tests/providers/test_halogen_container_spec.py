@@ -734,7 +734,7 @@ async def test_wait_ready_waits_for_the_capability_probe() -> None:
     assert calls["n"] == 4
 
 
-async def test_wait_ready_times_out_on_a_failed_capability_probe() -> None:
+async def test_wait_ready_timeout_inside_the_grace_names_the_failed_probe() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200, json={"engine": {"responds": True}, "capability_probe": "failed"}
@@ -930,12 +930,24 @@ async def test_liveness_a_broken_connection_is_not_ok(error: httpx.HTTPError) ->
     assert verdict["status"] != "stalled"
 
 
-async def test_liveness_other_status_is_not_ok() -> None:
+async def test_liveness_503_is_a_stall_not_a_death() -> None:
+    """The front end answering 503 is upstream's ``engine_unresponsive``: the
+    engine's PING failed, the same silent engine a read timeout reports."""
+
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(503, text="busy")
+        return httpx.Response(503, text="engine_unresponsive")
 
     with _patch_http(handler):
-        assert await HalogenProvider().liveness(8099) == {"ok": False, "status": "http_503"}
+        assert await HalogenProvider().liveness(8099) == {"ok": True, "status": "stalled"}
+
+
+@pytest.mark.parametrize("code", [204, 404, 500, 502])
+async def test_liveness_other_status_is_not_ok(code: int) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(code, text="no")
+
+    with _patch_http(handler):
+        assert await HalogenProvider().liveness(8099) == {"ok": False, "status": f"http_{code}"}
 
 
 async def test_liveness_read_budget_is_the_slow_ping_figure() -> None:

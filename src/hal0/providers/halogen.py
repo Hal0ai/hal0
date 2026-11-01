@@ -453,9 +453,10 @@ class HalogenProvider(Provider):
         unit's is-active first).
 
         ``GET /health`` with a :attr:`LIVENESS_READ_TIMEOUT_S` read timeout: HTTP
-        200 is ``ok`` without judging ``engine.responds``, a read timeout is ``ok``
-        with status ``"stalled"`` (accepted, then no answer), any other status or
-        a connection that fails is not ``ok``. Never raises.
+        200 is ``ok`` without judging ``engine.responds``. A read timeout (accepted,
+        then no answer) and HTTP 503 (upstream's ``engine_unresponsive``: the front
+        end is up and the engine's PING failed) are ``ok`` with status ``"stalled"``.
+        Any other status or a connection that fails is not ``ok``. Never raises.
         """
         url = f"http://127.0.0.1:{port}/health"
         timeout = httpx.Timeout(connect=5.0, read=self.LIVENESS_READ_TIMEOUT_S, write=5.0, pool=5.0)
@@ -466,6 +467,8 @@ class HalogenProvider(Provider):
             return {"ok": True, "status": "stalled"}
         except (httpx.HTTPError, OSError) as exc:
             return {"ok": False, "status": str(exc) or type(exc).__name__}
+        if resp.status_code == 503:
+            return {"ok": True, "status": "stalled"}
         if resp.status_code != 200:
             return {"ok": False, "status": f"http_{resp.status_code}"}
         return {"ok": True, "status": "alive"}

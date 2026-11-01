@@ -94,6 +94,34 @@ async def test_a_hanging_health_never_stamps_error_on_a_ready_slot(provider: _Re
     await sm._transition("chat", SlotState.OFFLINE, force=True)
 
 
+async def test_a_503_never_stamps_error_on_a_ready_slot(provider: _RealHealth) -> None:
+    """Upstream's ``engine_unresponsive``: the front end is up and the engine's PING
+    failed, which is the silent engine this probe exists to leave alone."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(503, text="engine_unresponsive")
+
+    sm = SlotManager()
+    with _http(handler):
+        await _ready(sm)
+        await asyncio.sleep(0.3)
+        assert calls["n"] >= 2, "the watcher must have probed more than the strike count"
+        assert sm.state("chat") is SlotState.READY
+        assert await sm.container_readiness_check("chat") == (False, "starting")
+        assert await sm._probe_health("chat", strict=True) is False
+    await sm._transition("chat", SlotState.OFFLINE, force=True)
+
+
+async def test_a_500_still_stamps_error_after_two_strikes(provider: _RealHealth) -> None:
+    """Only the engine-silent status is a stall."""
+    sm = SlotManager()
+    with _http(lambda request: httpx.Response(500, text="boom")):
+        await _ready(sm)
+        assert await _wait_for(sm, SlotState.ERROR) is SlotState.ERROR
+
+
 async def test_a_refused_connection_still_stamps_error_after_two_strikes(
     provider: _RealHealth,
 ) -> None:

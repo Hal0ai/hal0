@@ -651,7 +651,12 @@ def guard_and_normalize_tune(merged: dict[str, Any], updates: dict[str, Any]) ->
                 profile = resolve_slot_profile(view)
             except Hal0Error:
                 profile = None
-        guard_tune_write(view, updates, profile)
+        # Judged on the validated values (a numeric string has been coerced by
+        # now), and only for the keys this write carries, not the stored table.
+        carried = {
+            k: normalized[k] for k, v in tune_update.items() if v is not None and k in normalized
+        }
+        guard_tune_write(view, {**updates, "tune": carried}, profile)
 
     if dropped:
         import logging

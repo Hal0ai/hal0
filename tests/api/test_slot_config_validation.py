@@ -458,6 +458,44 @@ def test_tune_ctx_past_the_native_window_refused_on_halogen_slot(
     assert halogen_slot_toml.read_bytes() == before
 
 
+def test_tune_ctx_as_a_string_is_judged_by_its_value_on_halogen_slot(
+    halogen_slot_toml: Path, client: TestClient
+) -> None:
+    """The tune validation coerces a numeric string, so the guard judges what would
+    be stored rather than the raw JSON value, which raised a TypeError."""
+    before = halogen_slot_toml.read_bytes()
+    r = client.put("/api/slots/flash/config", json={"tune": {"ctx_size": "524288"}})
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert err["code"] == "slot.tune_unsupported_value"
+    assert err["details"]["value"] == 524288
+    assert halogen_slot_toml.read_bytes() == before
+
+    r = client.put("/api/slots/flash/config", json={"tune": {"ctx_size": "262144"}})
+    assert r.status_code == 200, r.text
+    assert _read(halogen_slot_toml)["tune"]["ctx_size"] == 262144
+
+
+def test_tune_ctx_that_is_not_a_number_is_the_tune_validation_error(
+    halogen_slot_toml: Path, client: TestClient
+) -> None:
+    r = client.put("/api/slots/flash/config", json={"tune": {"ctx_size": "lots"}})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "validation.tune_invalid"
+
+
+def test_tune_guard_still_judges_only_the_keys_the_write_carries(
+    halogen_slot_toml: Path, client: TestClient
+) -> None:
+    """Handing the guard validated values must not hand it the stored table too: a
+    stale stored n-gram value does not veto an edit of another key."""
+    with halogen_slot_toml.open("a", encoding="utf-8") as fh:
+        fh.write('\n[tune]\nspeculation = "ngram"\n')
+    r = client.put("/api/slots/flash/config", json={"tune": {"ctx_size": 262144}})
+    assert r.status_code == 200, r.text
+    assert _read(halogen_slot_toml)["tune"]["speculation"] == "ngram"
+
+
 def test_tune_ctx_at_the_native_window_allowed_on_halogen_slot(
     halogen_slot_toml: Path, client: TestClient
 ) -> None:
