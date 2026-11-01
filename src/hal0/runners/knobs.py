@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import re
 import shlex
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
@@ -142,6 +143,8 @@ HALOGEN_KNOBS: tuple[EngineKnob, ...] = (
         help="System RAM in GiB left free when the pool is sized; the lookup table is read through that file cache, so too little makes long prompts crawl, and raising it shrinks the pool (hal0 requires at least 10).",
     ),
 )
+
+_KNOBS_BY_ENV: dict[str, EngineKnob] = {knob.env: knob for knob in HALOGEN_KNOBS}
 
 #: Knob rows by runner key (``RUNNER_IMAGES`` key), for the dashboard schema.
 ENGINE_KNOBS: dict[str, tuple[EngineKnob, ...]] = {"halogen": HALOGEN_KNOBS}
@@ -360,6 +363,21 @@ def _range_problem(knob: EngineKnob, value: str) -> str | None:
     return None
 
 
+def knob_value(carried: Mapping[str, str], env: str) -> str:
+    """The profile's value for knob ``env``, or the knob's default when absent or odd.
+
+    "Odd" is anything the write-time screen would refuse (not a whole number, out
+    of range, not one of the choices). Unparseable flags are refused at launch, but
+    an out-of-range value in a hand-edited file is not: it reaches the engine as
+    written while sizing books the default. ``""`` for a knob with no default.
+    """
+    knob = _KNOBS_BY_ENV[env]
+    value = carried.get(env)
+    if value is not None and _range_problem(knob, value) is None:
+        return value
+    return "" if knob.default is None else knob.default
+
+
 def screen_halogen_flags(flags: str | None) -> None:
     """Refuse a halogen profile's ``flags`` text that hal0 cannot accept.
 
@@ -377,7 +395,6 @@ def screen_halogen_flags(flags: str | None) -> None:
     Names that are neither owned nor curated pass: the rest of the engine's
     flag reference stays reachable as free text.
     """
-    knobs = {knob.env: knob for knob in HALOGEN_KNOBS}
     for name, value in parse_env_tokens(flags).items():
         owner = _flag_owner(name)
         if owner is not None:
@@ -386,7 +403,7 @@ def screen_halogen_flags(flags: str | None) -> None:
                 code="profiles.halogen_flag_denied",
                 details={"flag": name, "owner": owner},
             )
-        knob = knobs.get(name)
+        knob = _KNOBS_BY_ENV.get(name)
         if knob is None:
             continue
         problem = _range_problem(knob, value)

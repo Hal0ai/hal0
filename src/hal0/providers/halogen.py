@@ -60,12 +60,10 @@ from hal0.registry.detect import HALOGEN_TOKENIZER_JSON, HALOGEN_VISION_SIDECAR
 from hal0.runners.knobs import (
     HALOGEN_DENIED_ENV,
     HALOGEN_DENIED_PREFIXES,
-    HALOGEN_KNOBS,
     HALOGEN_MANAGED_ENV,
     HALOGEN_MANAGED_PREFIXES,
     HALOGEN_TUNE_ENV,
-    EngineKnob,
-    _range_problem,
+    knob_value,
     parse_env_tokens,
     whole_number,
 )
@@ -110,9 +108,22 @@ class HalogenInferError(Hal0Error):
     status = 502
 
 
+def _is_readable_file(path: Path) -> bool:
+    """``Path.is_file``, False for a path it cannot stat.
+
+    ``is_file`` raises ``PermissionError`` under a parent directory this account
+    cannot read (a model store with the wrong group, which the doctor's permission
+    rows exist for) instead of answering, and the refusal must stay typed.
+    """
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
 def vision_sidecar_present(checkpoint: str) -> bool:
     """True when the vision sidecar file sits beside ``checkpoint``."""
-    return (Path(checkpoint).parent / VISION_SIDECAR).is_file()
+    return _is_readable_file(Path(checkpoint).parent / VISION_SIDECAR)
 
 
 def _profile_env(profile_flags: str) -> dict[str, str]:
@@ -182,23 +193,6 @@ def halogen_env(
         }
     )
     return env
-
-
-_KNOBS: dict[str, EngineKnob] = {knob.env: knob for knob in HALOGEN_KNOBS}
-
-
-def _knob_value(carried: Mapping[str, str], env: str) -> str:
-    """The profile's value for knob ``env``, or the knob's default when it is absent or odd.
-
-    "Odd" is anything the write-time screen would refuse (not a whole number, out
-    of range, not one of the choices): the launch path reports that error, and a
-    sizing read must keep working until it does.
-    """
-    knob = _KNOBS[env]
-    value = carried.get(env)
-    if value is not None and _range_problem(knob, value) is None:
-        return value
-    return str(knob.default)
 
 
 def _cache_entries(carried: Mapping[str, str]) -> int:
@@ -504,7 +498,10 @@ class HalogenProvider(Provider):
             if GFX1151 not in found:
                 targets = ", ".join(_gfx_name(v) for v in sorted(found) if v > 0)
                 seen = (
-                    f"this host reports {targets}" if targets else "this host reports no GPU target"
+                    f"this host reports {targets}"
+                    if targets
+                    else "no gfx1151 GPU is visible to this guest (its KFD topology has no GPU "
+                    "node; check that the GPU and /dev/kfd are passed through)"
                 )
                 raise SlotHostUnsupported(
                     f"the halogen engine runs only on gfx1151 (Strix Halo); {seen}",
@@ -517,18 +514,19 @@ class HalogenProvider(Provider):
                 f"slot {slot_cfg.get('name')!r} has no halogen checkpoint to launch; "
                 "assign a model whose file is a .hgn checkpoint",
             )
-        if not Path(checkpoint).is_file():
+        if not _is_readable_file(Path(checkpoint)):
             raise _model_missing(
                 slot_cfg,
-                f"halogen checkpoint {checkpoint} does not exist; "
+                f"halogen checkpoint {checkpoint} does not exist or cannot be read; "
                 "restore the file or assign another model to the slot",
                 path=checkpoint,
             )
         tokenizer = Path(checkpoint).parent / HALOGEN_TOKENIZER_JSON
-        if not tokenizer.is_file():
+        if not _is_readable_file(tokenizer):
             raise _model_missing(
                 slot_cfg,
-                f"halogen tokenizer {tokenizer} not found beside the checkpoint {checkpoint}; "
+                f"halogen tokenizer {tokenizer} not found or unreadable beside the checkpoint "
+                f"{checkpoint}; "
                 "restore the checkpoint's tokenizer directory",
                 path=str(tokenizer),
             )
@@ -561,7 +559,7 @@ class HalogenProvider(Provider):
             return None  # a known non-halogen row: not this engine's memory
         try:
             checkpoint_bytes = int(model_info.get("size_bytes") or 0)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             checkpoint_bytes = 0
         if checkpoint_bytes <= 0:
             return None
@@ -571,15 +569,15 @@ class HalogenProvider(Provider):
         except UnprocessableEntity:
             carried = {}  # the launch refuses these flags; sizing falls back to defaults
         tune = effective_tune(slot_cfg, profile)
-        pool = int(_knob_value(carried, "HALOGEN_KV_POOL_POSITIONS"))
+        pool = int(knob_value(carried, "HALOGEN_KV_POOL_POSITIONS"))
         window = tune.ctx_size if isinstance(tune.ctx_size, int) else 0
         checkpoint = str(model_info.get("path") or "")
         return halogen_footprint_mb(
             checkpoint_bytes=checkpoint_bytes,
             pool_positions=max(pool, window),
-            kv_slots=int(_knob_value(carried, "HALOGEN_KV_SLOTS")),
-            max_tok=int(_knob_value(carried, "HALOGEN_MAX_TOK")),
-            kv8=_knob_value(carried, "HALOGEN_KV8") == "1",
+            kv_slots=int(knob_value(carried, "HALOGEN_KV_SLOTS")),
+            max_tok=int(knob_value(carried, "HALOGEN_MAX_TOK")),
+            kv8=knob_value(carried, "HALOGEN_KV8") == "1",
             vision=tune.vision == "auto"
             and bool(checkpoint)
             and vision_sidecar_present(checkpoint),

@@ -19,6 +19,7 @@ rule therefore also requires that no slot of this box can hold the memory
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from pathlib import Path
@@ -253,28 +254,26 @@ def _wire(
     *,
     gtt_used_mb: float | None,
     slots: list[Slot],
-    rows: dict[str, dict[str, Any]] | None = None,
     kfd_procs: int | None = 0,
-    real_build: bool = False,
+    real_list: bool = False,
     unit_active: bool | None = None,
 ) -> SimpleNamespace:
     """Patch the guard's readers; return the mocks so a test can inspect them."""
     sample = MagicMock(return_value=_sample(gtt_used_mb))
     kfd = MagicMock(return_value=kfd_procs)
-    build = AsyncMock(return_value=rows or {})
+    build = AsyncMock(return_value={})
     active = AsyncMock(return_value=bool(unit_active))
+    listing = AsyncMock(return_value=slots)
     monkeypatch.setattr("hal0.hardware.gpu_view.sample", sample)
     monkeypatch.setattr("hal0.providers._gpu.kfd_proc_count", kfd)
-    if real_build:
-        monkeypatch.setattr("hal0.slots.capacity._host_has_capable_gpu", lambda: True)
-    else:
-        monkeypatch.setattr("hal0.slots.capacity.build_per_slot", build)
-    monkeypatch.setattr(manager, "list", AsyncMock(return_value=slots))
+    monkeypatch.setattr("hal0.slots.capacity.build_per_slot", build)
+    if not real_list:
+        monkeypatch.setattr(manager, "list", listing)
     if unit_active is not None:
         # Only when a test is about the unit probe: patching it unconditionally
         # would make every loaded slot read as stopped in ``load()`` tests.
         monkeypatch.setattr(manager, "_is_active", active)
-    return SimpleNamespace(sample=sample, kfd=kfd, build=build, active=active)
+    return SimpleNamespace(sample=sample, kfd=kfd, build=build, active=active, listing=listing)
 
 
 async def test_guard_returns_the_warning_for_unexplained_gtt_with_nothing_resident(
@@ -306,11 +305,7 @@ async def test_guard_passes_two_vulkan_residents_holding_the_gtt(
         Slot("brain", state=SlotState.READY, backend="vulkan", model_id="m1"),
         Slot("coder", state=SlotState.READY, backend="vulkan", model_id="m2"),
     ]
-    rows = {
-        "brain": {"vram_mb": 19 * GIB, "ram_mb": 0.0, "mem_mb": 19 * GIB, "state": "ready"},
-        "coder": {"vram_mb": 19 * GIB, "ram_mb": 0.0, "mem_mb": 19 * GIB, "state": "ready"},
-    }
-    mocks = _wire(monkeypatch, manager, gtt_used_mb=40 * GIB, slots=residents, rows=rows)
+    mocks = _wire(monkeypatch, manager, gtt_used_mb=40 * GIB, slots=residents)
     with caplog.at_level(logging.WARNING, logger="hal0.slots.manager"):
         assert await manager._guard_gtt_leak("flash", _Guarded()) is None
     mocks.kfd.assert_called_once()
@@ -320,32 +315,71 @@ async def test_guard_passes_two_vulkan_residents_holding_the_gtt(
 async def test_a_resident_slot_with_no_model_still_clears_the_box(
     manager: SlotManager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``build_per_slot`` skips a slot with no model bound, so counting its ROWS
-    would read 'nothing resident'. The holder count is what the rule needs, and
-    this goes through the REAL ``build_per_slot``."""
+    """A holder needs no sized row: a slot with no model bound still holds GTT."""
     modelless = Slot("brain", state=SlotState.READY, backend="vulkan", model_id=None)
-    _wire(monkeypatch, manager, gtt_used_mb=40 * GIB, slots=[modelless], real_build=True)
+    _wire(monkeypatch, manager, gtt_used_mb=40 * GIB, slots=[modelless])
     assert await manager._guard_gtt_leak("flash", _Guarded()) is None
 
 
-async def test_guard_asks_for_starting_slots_and_leaves_out_the_slot_being_loaded(
+async def test_a_slot_still_loading_counts_as_a_holder(
     manager: SlotManager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A slot still loading already holds its weights, so it counts as a holder;
-    the slot under load must not vouch for its own GTT."""
-    loading = Slot("flash", state=SlotState.STARTING, backend="rocm", model_id="f")
+    """It already holds its weights."""
     sibling = Slot("brain", state=SlotState.STARTING, backend="vulkan", model_id="b")
-    mocks = _wire(
-        monkeypatch,
-        manager,
-        gtt_used_mb=40 * GIB,
-        slots=[loading, sibling],
-        rows={"brain": {"vram_mb": 20 * GIB, "state": "starting"}},
-    )
+    _wire(monkeypatch, manager, gtt_used_mb=40 * GIB, slots=[sibling])
     assert await manager._guard_gtt_leak("flash", _Guarded()) is None
-    (passed,) = mocks.build.await_args.args
-    assert [s.name for s in passed] == ["brain"]
-    assert mocks.build.await_args.kwargs["include_starting"] is True
+
+
+async def test_a_holder_ends_the_check_without_sizing_anything(
+    manager: SlotManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Any holder clears the box, so a cgroup probe per holder could not change the answer."""
+    sibling = Slot("brain", state=SlotState.READY, backend="vulkan", model_id="b")
+    mocks = _wire(monkeypatch, manager, gtt_used_mb=40 * GIB, slots=[sibling])
+    assert await manager._guard_gtt_leak("flash", _Guarded()) is None
+    mocks.build.assert_not_awaited()
+
+
+async def test_a_suspicion_is_raised_without_sizing_anything(
+    manager: SlotManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no holder there is nothing to size: the whole counter is unexplained."""
+    mocks = _wire(monkeypatch, manager, gtt_used_mb=40 * GIB, slots=[])
+    assert await manager._guard_gtt_leak("flash", _Guarded()) == _MESSAGE_40_GIB
+    mocks.build.assert_not_awaited()
+
+
+async def test_the_slot_under_load_is_not_asked_to_vouch_for_itself(
+    manager: SlotManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mocks = _wire(monkeypatch, manager, gtt_used_mb=40 * GIB, slots=[])
+    await manager._guard_gtt_leak("flash", _Guarded())
+    mocks.listing.assert_awaited_once_with(exclude="flash")
+
+
+async def test_the_real_list_runs_under_the_load_lock_and_skips_the_slot_under_load(
+    manager: SlotManager, slot_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``load`` holds the slot's lock here. ``status`` on the slot under load could
+    run adoption on it mid-load, and a lock in that path would deadlock the load."""
+    (slot_root / "rerank.toml").write_text(
+        'name = "rerank"\nport = 8090\nbackend = "vulkan"\n[model]\ndefault = "r"\n',
+        encoding="utf-8",
+    )
+    _wire(monkeypatch, manager, gtt_used_mb=40 * GIB, slots=[], real_list=True)
+    read: list[str] = []
+    real_status = manager.status
+
+    async def status(name: str) -> Slot:
+        read.append(name)
+        return await real_status(name)
+
+    monkeypatch.setattr(manager, "status", status)
+    async with manager._lock("chat"):
+        message = await asyncio.wait_for(manager._guard_gtt_leak("chat", _Guarded()), timeout=5)
+    assert message == _MESSAGE_40_GIB
+    assert "rerank" in read
+    assert "chat" not in read
 
 
 async def test_an_unloading_slot_may_still_hold_the_memory(
@@ -402,9 +436,8 @@ async def test_an_npu_resident_does_not_hide_a_leak(
 ) -> None:
     flm = Slot("flm", state=SlotState.READY, backend="flm", model_id="qwen3")
     cpu = Slot("kokoro", state=SlotState.READY, backend="cpu", model_id="k")
-    mocks = _wire(monkeypatch, manager, gtt_used_mb=40 * GIB, slots=[flm, cpu])
+    _wire(monkeypatch, manager, gtt_used_mb=40 * GIB, slots=[flm, cpu])
     assert await manager._guard_gtt_leak("flash", _Guarded()) == _MESSAGE_40_GIB
-    assert mocks.build.await_args.args[0] == []
 
 
 async def test_guard_does_nothing_for_a_provider_that_does_not_ask(
@@ -447,7 +480,7 @@ async def test_a_reader_that_blows_up_never_raises(
     assert await manager._guard_gtt_leak("flash", _Guarded()) is None
 
     mocks.sample.side_effect = None
-    mocks.build.side_effect = RuntimeError("cgroup exploded")
+    mocks.listing.side_effect = RuntimeError("slot list exploded")
     assert await manager._guard_gtt_leak("flash", _Guarded()) is None
 
 

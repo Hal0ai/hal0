@@ -229,7 +229,7 @@ def test_a_model_that_is_not_a_halogen_checkpoint_gets_no_figure(tmp_path: Path)
     assert _footprint(tmp_path, info=gguf) is None
 
 
-@pytest.mark.parametrize("size", [0, None, "unknown"])
+@pytest.mark.parametrize("size", [0, None, "unknown", float("inf"), float("nan")])
 def test_a_checkpoint_of_unknown_size_gets_no_figure(tmp_path: Path, size: Any) -> None:
     """A figure built on a zero would book the engine as nearly free."""
     assert _footprint(tmp_path, info=_info(tmp_path, size_bytes=size)) is None
@@ -251,6 +251,16 @@ def test_a_malformed_flag_falls_back_to_the_knob_default(tmp_path: Path, flags: 
     """Odd values read as the knob default; the launch path reports the real error."""
     mb = _footprint(tmp_path, profile=_profile(flags=flags, ctx_size=None))
     assert mb == pytest.approx(_expected())
+
+
+def test_an_unreadable_sidecar_directory_books_no_tower_and_does_not_raise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def denied(path: Path, **_kwargs: Any) -> bool:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(Path, "is_file", denied)
+    assert _footprint(tmp_path) == pytest.approx(_expected(vision=False))
 
 
 def test_a_profile_without_attributes_still_gets_a_figure(tmp_path: Path) -> None:

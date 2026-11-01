@@ -123,6 +123,13 @@ def test_the_refusal_names_the_target_the_host_reported(store: Path) -> None:
     assert "gfx1100" in str(exc.value)
 
 
+def test_a_guest_with_only_cpu_nodes_is_told_no_gfx1151_gpu_is_visible(store: Path) -> None:
+    """An LXC guest with no GPU passthrough reports just this: say what that means."""
+    with pytest.raises(SlotHostUnsupported) as exc:
+        _preflight(store, [0])
+    assert "no gfx1151 GPU is visible to this guest" in str(exc.value)
+
+
 def test_the_refusal_is_a_slot_config_error() -> None:
     """Callers that already handle a refused slot config keep handling this one."""
     assert issubclass(SlotHostUnsupported, SlotConfigError)
@@ -175,9 +182,42 @@ def test_a_directory_is_not_a_checkpoint(store: Path) -> None:
     assert exc.value.code == "slot.model_missing"
 
 
+def _unreadable(*names: str) -> Any:
+    """``Path.is_file`` as it behaves under a parent directory the service cannot read."""
+    real = Path.is_file
+
+    def is_file(path: Path, **kwargs: Any) -> bool:
+        if path.name in names:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real(path, **kwargs)
+
+    return is_file
+
+
+def test_a_checkpoint_under_an_unreadable_parent_is_refused_naming_the_path(
+    store: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Path, "is_file", _unreadable(CKPT_NAME))
+    with pytest.raises(Hal0Error) as exc:
+        _preflight(store, [GFX1151])
+    assert exc.value.code == "slot.model_missing"
+    assert str(store / CKPT_NAME) in str(exc.value)
+    assert exc.value.details["path"] == str(store / CKPT_NAME)
+
+
+def test_a_tokenizer_under_an_unreadable_parent_is_refused_naming_the_path(
+    store: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Path, "is_file", _unreadable("tokenizer.json"))
+    with pytest.raises(Hal0Error) as exc:
+        _preflight(store, [GFX1151])
+    assert exc.value.code == "slot.model_missing"
+    assert str(store / "tokenizer" / "tokenizer.json") in str(exc.value)
+
+
 def test_preflight_never_touches_the_engine(store: Path) -> None:
-    """Files and a sysfs list only: no HTTP client is built."""
-    with patch.object(halogen_module, "async_client", side_effect=AssertionError("network")):
+    """Files and a sysfs list only: no socket is opened."""
+    with patch("socket.socket", side_effect=AssertionError("network")):
         _preflight(store, [GFX1151])
 
 

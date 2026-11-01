@@ -2642,8 +2642,11 @@ class SlotManager:
             # surface elsewhere (load/start/restart paths re-raise).
             return None
 
-    async def list(self) -> list[Slot]:
-        """Return snapshots for all configured slots, concurrently."""
+    async def list(self, *, exclude: str | None = None) -> list[Slot]:
+        """Return snapshots for all configured slots, concurrently.
+
+        ``exclude`` names one slot to leave unread, for a caller mid-load on it.
+        """
         names = self._all_configured_slot_names()
         # Slots that only exist in memory (test injection) also show up.
         # ``_states`` is id-keyed now — resolve each handle back to its name.
@@ -2651,6 +2654,7 @@ class SlotManager:
             n = self._name_for_key(key)
             if n and n not in names:
                 names.append(n)
+        names = [n for n in names if n != exclude]
         if not names:
             return []
 
@@ -2881,18 +2885,18 @@ class SlotManager:
         The inputs are the amdgpu GTT counter, the KFD process count and this
         box's GPU holders: every other slot that is loading, up, unloading, or in
         ``error`` with its process possibly alive (``slow_stop``, or an active
-        unit). The slot under load is left out (it holds nothing yet and must not
-        vouch for itself), as are NPU and CPU slots. ``resident_gpu_slots`` is the
-        number of holders, not the number of sized rows: a holder with no model
-        bound has no row but still holds GTT. Any reader that fails, or a figure
-        the host does not expose, ends in ``None``.
+        unit). The slot under load is left out and not even read (it holds nothing
+        yet and must not vouch for itself, and ``status`` could run adoption on it
+        mid-load), as are NPU and CPU slots. Any holder explains the memory, so no
+        slot is ever sized: with one the answer is ``None``, and without one the
+        whole counter is unexplained. Any reader that fails, or a figure the host
+        does not expose, ends in ``None``.
         """
         if not getattr(provider, "gtt_leak_guard", False):
             return None
         try:
             from hal0.hardware import gpu_view
             from hal0.providers._gpu import kfd_proc_count
-            from hal0.slots.capacity import build_per_slot
             from hal0.slots.gtt_guard import (
                 GTT_LEAK_THRESHOLD_MB,
                 gtt_leak_message,
@@ -2909,25 +2913,18 @@ class SlotManager:
             if kfd_procs != 0:
                 return None
             holders = []
-            for s in await self.list():
-                if s.name == slot_name:
-                    continue
+            for s in await self.list(exclude=slot_name):
                 # An ERROR slot's unit may still be up (the probe is only
                 # worth making for the one state that depends on it).
                 unit_active = s.state == SlotState.ERROR and await self._is_active(s.name)
                 if slot_may_hold_gpu_memory(s, unit_active=unit_active):
                     holders.append(s)
-            registry: Any = None
-            with contextlib.suppress(Exception):
-                from hal0.registry.store import ModelRegistry
-
-                registry = ModelRegistry()
-            rows = await build_per_slot(holders, registry=registry, include_starting=True)
-            resident_mb = sum(float(r.get("vram_mb") or 0.0) for r in rows.values())
+            if holders:
+                return None
             message = gtt_leak_message(
                 gtt_used_mb=gtt_used_mb,
-                resident_gpu_mb=resident_mb,
-                resident_gpu_slots=len(holders),
+                resident_gpu_mb=0.0,
+                resident_gpu_slots=0,
                 kfd_procs=kfd_procs,
             )
         except Exception as exc:
@@ -2942,7 +2939,7 @@ class SlotManager:
                 message,
                 extra={
                     "slot": slot_name,
-                    "unexplained_gib": round((gtt_used_mb - resident_mb) / 1024.0, 1),
+                    "unexplained_gib": round(gtt_used_mb / 1024.0, 1),
                 },
             )
         return message
