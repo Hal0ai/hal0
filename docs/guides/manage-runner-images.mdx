@@ -9,7 +9,7 @@ import { Steps, Aside } from '@astrojs/starlight/components';
 
 A **runner image** is the container image a slot actually launches: the
 `podman` image that bundles `llama-server` (or FLM, Kokoro, Qwen3-TTS,
-Moonshine, ComfyUI) plus the GPU/CPU backend it was built against. hal0
+Moonshine, ComfyUI, halogen) plus the GPU/CPU backend it was built against. hal0
 ships a fixed set of **runners**, pins one image per runner in
 `manifest.json`, and tracks them in a catalogue. The dashboard's **Runner
 Images** page — a sub-page of **Slots** (`#slots/runner-images`) — is where
@@ -23,9 +23,10 @@ A [slot](/docs/concepts/slots/) owns its own hardware placement: `device`,
 registry (`hal0.runners.RUNNER_IMAGES`) — the fixed set of runners hal0 knows
 how to launch. A runner's key is its only identifier: the same word names the
 registry entry, its row in the `manifest.json` pin table, its catalogue row,
-and its published package `ghcr.io/hal0ai/hal0-runner-<key>` (the `cuda`
-runner pins the upstream `ghcr.io/ggml-org/llama.cpp` CUDA server image
-instead of a hal0 build). Each entry carries the title and one-line
+and its published package `ghcr.io/hal0ai/hal0-runner-<key>` (the `cuda` and
+`halogen` runners pin an upstream image instead of a hal0 build: the
+`ghcr.io/ggml-org/llama.cpp` CUDA server image and Peonist's
+`ghcr.io/peonist-ai/halogen-flash-server`). Each entry carries the title and one-line
 description the dashboard shows, and a **tier**:
 
 | Runner key | Dashboard title | Tier | Runtime | Device class | Backend(s) |
@@ -38,6 +39,14 @@ description the dashboard shows, and a **tier**:
 | `comfyui` | ComfyUI | default | comfyui (image gen) | img | rocm |
 | `qwen3tts` | Qwen3 TTS | optional | qwen3tts (TTS) | gpu | rocm |
 | `cuda` | NVIDIA CUDA | optional | llama-server | gpu | cuda |
+| `halogen` | halogen (Flash-Next) | optional | halogen (Qwen3.8-Flash-Next) | gpu | rocm |
+
+`halogen` is Peonist's closed-source engine for one model, Qwen3.8-Flash-Next, on
+Strix Halo (gfx1151) only. Its pin names the vendor's image by tag `0.18.22` and
+digest, and `lanes_gated` stays empty until the hardware gate passes for that
+digest. hal0 does not mirror or modify it. See
+[Run Flash-Next on halogen](/docs/guides/run-flash-next-on-halogen/) for the
+licence, the memory it takes and how to stage the weights.
 
 The tier (`hal0.runners.Runner.tier`, ADR-0027) is the one place hal0 records
 whether a runtime is a default. **Default** runtimes are the set every box is
@@ -51,15 +60,16 @@ image serves both lanes, HIP for `gpu-rocm` and RADV for `gpu-vulkan`. It runs
 plain GGUF models. Fork-only quantizations (ROCmFPX, ROCmFP4, IU4, ActiveFPX)
 need a llama.cpp fork hal0 no longer ships, so no runner loads them; see
 [Pull and register models](/docs/guides/pull-and-register-models/) for where
-they are refused. Every other GPU runner (`qwen3tts`, `cuda`) declares exactly
-one backend (ADR-0006).
+they are refused. Every other GPU runner (`qwen3tts`, `cuda`, `halogen`)
+declares exactly one backend (ADR-0006).
 
 A slot with no `binary` set derives one from its `device`
 (`hal0.runners.runner_for_backend`) — this is the ordinary case: `cuda`
 backend picks `cuda`, a `cpu` device or backend picks `cpu`, and anything else
-(`rocm`, `vulkan`, an unspecified GPU) picks `standard`. A **profile** can
+(`rocm`, `vulkan`, an unspecified GPU) picks `standard`; it never derives
+`halogen`, which a slot gets by picking that runtime or the `halogen` profile. A **profile** can
 optionally pin one of these runner keys too (see [Capabilities & profiles → Profiles can carry a
-runtime](/docs/concepts/capabilities-and-profiles#profiles-can-carry-a-runtime)); flags-only profiles (all seeds) still
+runtime](/docs/concepts/capabilities-and-profiles#profiles-can-carry-a-runtime)); profiles still
 never name an image directly — see
 [Providers, profiles & devices](/docs/reference/providers-profiles-devices/).
 The provider (`ContainerProvider`, `FLMProvider`, …) is what actually starts
@@ -130,9 +140,9 @@ Resolution order, from `hal0.providers.container._resolve_image_ref`:
 4. The `manifest.json` pin for the runner.
 </Steps>
 
-Slots on a non-llama runtime (ComfyUI, FLM, Kokoro, Moonshine, Qwen3-TTS)
-follow the same order, keyed by their runtime's runner key (`comfyui`, `flm`,
-`kokoro`, `moonshine`, `qwen3tts`) rather than a `binary`: `image_pin`
+Slots on a non-llama runtime (ComfyUI, FLM, Kokoro, Moonshine, Qwen3-TTS,
+halogen) follow the same order, keyed by their runtime's runner key (`comfyui`,
+`flm`, `kokoro`, `moonshine`, `qwen3tts`, `halogen`) rather than a `binary`: `image_pin`
 (top-level or `[slot]`-nested), then `[slots].default_images[<key>]`, then the
 env override or pin. The `img` (ComfyUI) slot also honors an older plain
 `image` string between `image_pin` and the launch-image override — see

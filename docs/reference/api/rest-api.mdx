@@ -81,9 +81,12 @@ removes all. Slot creation applies the same type/device and thinking guards.
 
 Slot snapshots and `GET /api/slots/{name}/resolved` expose `tune_effective`:
 `ctx_size`, `enable_thinking`, `reasoning_effort`, `reasoning_budget`, `vision`,
-`speculation`, `sources`, and `reasoning_effort_unavailable`. Sources are
-`profile`, `slot` or `profile-flags`; unavailable is a string or null. This is
-an additive read contract. Model feasibility accepts a `slot` name per model
+`speculation`, `sources`, `reasoning_effort_unavailable` and `tune_unavailable`.
+Sources are `profile`, `slot` or `profile-flags`; `reasoning_effort_unavailable`
+is a string or null. `tune_unavailable` maps each tune value the slot's engine
+cannot run to the reason, and is `{}` on a llama-server slot; on a halogen slot it
+is `{"speculation": "ngram: this engine has no n-gram drafter (auto or off)"}`.
+This is an additive read contract. Model feasibility accepts a `slot` name per model
 row to resolve its profile plus tune for the candidate; explicit `ctx` wins.
 
 ## Router groups

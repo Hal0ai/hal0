@@ -20,7 +20,7 @@ Every Hermes profile is wired to both servers. hal0 writes `hal0-admin` and `hal
 `slot_edit` accepts a sparse `tune` object: `ctx_size`, `enable_thinking`,
 `reasoning_effort`, `reasoning_budget`, `vision`, `speculation`. Null removes
 an override; null for the whole table clears it. REST guards also apply here.
-`slot_list` retains `tune_effective` in its compact roster. Profile create/edit
+`slot_list` retains `tune_effective` (including `tune_unavailable`) in its compact roster. Profile create/edit
 tools also accept reasoning effort and integer budget.
 
 ## `hal0-admin` (`/mcp/admin`)

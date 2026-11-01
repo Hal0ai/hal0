@@ -155,6 +155,17 @@ section of [Slots](/docs/concepts/slots)): it gives the GPU's memory to
 either the LLM slots or the image slot, one group at a time, rather than
 letting them fight over the pool.
 
+<Aside type="note" title="halogen takes most of the pool">
+The optional **halogen** runtime (Peonist's engine for Qwen3.8-Flash-Next) keeps
+its weights resident and reserves its KV pool up front. At hal0's shipped layout
+that is about 72 GiB on the smaller checkpoint and about 80 GiB on the larger, out
+of 128 GB, plus a 47.7 GiB lookup table that wants about 10 GiB of file cache. With
+the weights locked in RAM, as the shipped profile does, `free` and `MemAvailable`
+drop by their size; size the rest of the box to the `host memory left for
+everything else` line the engine logs at startup. An unclean exit can leave GPU memory held by the driver until the
+host reboots. See [Run Flash-Next on halogen](/docs/guides/run-flash-next-on-halogen/).
+</Aside>
+
 hal0 also never budgets a model against the *entire* unified pool: the OS,
 the container runtime, and every other slot need headroom too. When hal0
 seeds its llama.cpp slots (`agent`, `brain`, `coder`, `embed`, `rerank`,

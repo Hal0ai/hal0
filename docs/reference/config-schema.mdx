@@ -111,7 +111,7 @@ clock: a healthy long generation on slow hardware that outlives it is also cut.
 |---|---|---|---|
 | `roots` | list[str] | `[models_dir()]` = `["/var/lib/hal0/models"]` | each entry non-empty and absolute |
 | `auto_scan_on_start` | bool | `true` | — (the startup scan also prunes rows whose file is gone, except rows a slot, stack or `hal0.toml` field references, rows with a pending pull, FLM rows, and rows under an empty or missing root such as an unmounted share) |
-| `file_extensions` | list[str] | `[".gguf", ".safetensors", ".hgn"]` | — |
+| `file_extensions` | list[str] | `[".gguf", ".safetensors", ".hgn"]` | — (`.hgn` is a halogen checkpoint) |
 | `pull_root` | str | `"/var/lib/hal0/models"` | **deprecated**; must be non-empty and absolute |
 | `store` | str | `""` | absolute if set, else empty |
 | `flm_store` | str | `""` | absolute if set (NPU/FLM model store) |
@@ -339,10 +339,13 @@ All keys are optional and inherit the profile when absent. Context accepts
 128–16777216. Effort accepts `default|minimal|low|medium|high|xhigh|max`;
 `default` emits no effort flag. Budget is -1 through 16777216 (-1 emits no
 budget flag; 0 ends reasoning immediately). Vision accepts `auto|off` and
-speculation accepts `auto|off|ngram`.
+speculation accepts `auto|off|ngram`, except on a halogen slot, where `ngram` is
+refused because the engine has no n-gram drafter.
 
 Unsupported slot types/devices fail with `slot.tune_not_supported`; a thinking
-override pinned by profile flags fails with `slot.tune_pinned_by_flags`.
+override pinned by profile flags fails with `slot.tune_pinned_by_flags`; a value
+the slot's engine cannot run (speculation `ngram` on a halogen slot) fails with
+`slot.tune_unsupported_value`.
 Legacy root-level tuning keys remain refused with `slot.tuning_key_denied`.
 Effort flags require a resolved runner build of at least 11840.
 
