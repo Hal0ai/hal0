@@ -558,8 +558,9 @@ regressions:
     summary: >-
       Every hal0-api -> Hermes kanban forward goes out with NO credential and 401s, killing all
       sixteen brain board tools. The pinned hermes wheel (0.18.2) ships no `hermes_cli/web_dist`,
-      so `GET :9119/` 404s and `_fetch_html_token()` has no HTML to scrape the rotating bearer
-      out of; neither HERMES_SESSION_TOKEN nor HERMES_DASHBOARD_SESSION_TOKEN is provisioned.
+      so `GET :9119/` 404s and the old HTML token scrape had no HTML to read the rotating bearer
+      from (ADR-0046 replaced the scrape with the token-file resolver
+      `hal0.board.auth.read_dashboard_token`).
       Second defect in the same place: the brain still reads the Hermes kanban while
       /api/board/* was rewired to the local hal0 BoardStore (KB-4), so a token-only fix would
       trade a loud error for silent divergence.

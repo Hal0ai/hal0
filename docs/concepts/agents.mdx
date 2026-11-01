@@ -235,8 +235,8 @@ it. The queue de-duplicates — a repeated request for the same target bumps a
 counter rather than stacking entries — and every gated and autonomous invocation
 is audited so you can see exactly what the agent did and what's waiting on you.
 
-![The hal0 Operator Board — a Hermes-backed kanban tracking agent tasks from Triage through Done, with an Archived lane hidden by default](/screenshots/operator-board.png)
-*The Operator Board orchestrates agent tasks across lanes (Triage, To-do, Scheduled, Ready, In-progress, Blocked, Review, Done); gated tool calls still pause for human sign-off before they run.*
+![The hal0 Operator Board — the Hermes kanban, proxied through hal0-api, tracking agent tasks from Triage through Done, with an Archived lane hidden by default](/screenshots/operator-board.png)
+*The Operator Board is the Hermes kanban, proxied through hal0-api: it shows agent tasks across lanes (Triage, To-do, Scheduled, Ready, In-progress, Blocked, Review, Done), and hal0 keeps no board of its own. It needs a running Hermes; without one it answers `board.not_installed`, `board.unreachable` or `board.no_token` (503). Gated tool calls still pause for human sign-off before they run.*
 
 <Aside type="tip">
 Gating is per-action, not all-or-nothing. A persona can auto-approve safe reads

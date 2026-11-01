@@ -195,12 +195,14 @@ Each spike: confirm a REAL source exists, propose the exact endpoint + effort, r
 
 > Authored & frozen by the UI lead from SPEC §4. The board UI reaches `/api/board/*`
 > via the typed-hook + React Query pattern (`useBoard.ts`) over the existing Vite proxy.
-> hal0 OWNS the operator board (rework R4 §Agents-and-brain) — these routes read/write
-> hal0's own SQLite-backed `BoardStore`, not a Hermes proxy. Hermes is an OPTIONAL
-> executor: its kanban plugin only seeds the store on first boot when present, and the
-> board works without it. Paths, methods, payload shapes, status codes, and WS events
-> stay FROZEN unchanged from the earlier proxy-forward era; neither team changes a shape
-> here without re-freeze.
+> The operator board IS the Hermes kanban (ADR-0046): these routes are a live, audited
+> proxy to the kanban plugin on the loopback Hermes dashboard, and `/events` is proxied
+> too. hal0 keeps no board state of its own. Hermes is REQUIRED: with no Hermes agent
+> the routes answer `503 board.not_installed`, with the dashboard down `503 board.unreachable`,
+> with the token file missing `503 board.no_token`; Hermes's own errors come back as
+> `board.upstream_error` (4xx passed through, 5xx as 502). Paths, methods, payload
+> shapes, status codes, and WS events stay FROZEN; neither team changes a shape here
+> without re-freeze. `ETag` / `If-Match` are no longer honoured.
 
 ## Hard rules (board)
 - **NO STUB DATA.** Every rendered value comes from a real `/api/board/*` response or is gated.
