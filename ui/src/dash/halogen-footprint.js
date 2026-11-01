@@ -10,6 +10,8 @@
 //
 // Pure: a function of its argument, no React, no window globals.
 
+import { FIT_VERDICTS } from "./fit-verdicts.js";
+
 const GIB = 1024;
 
 // Whole GiB from 10 up, one decimal below it (a 3.5 GiB layout must not read
@@ -21,25 +23,30 @@ function gib(mb) {
 
 const finite = (n) => typeof n === "number" && Number.isFinite(n);
 
-// The words match the model picker's fit chip (fit-chip.jsx). "unknown" has no
+// Tone and word for the four fit verdicts come from fit-verdicts.js, the same
+// map the model picker's fit chip words from; only the titles are this
+// readout's own. "loaded" is this readout's own too: the slot already holds the
+// layout, so it is not judged against the memory that is left. "unknown" has no
 // entry: the host gave no reading, and a missing signal must not read as a
 // verdict (warn, never block).
 const VERDICTS = {
-	fits: { tone: "ok", word: "fits", title: "Fits in the memory the box has free now" },
+	fits: { ...FIT_VERDICTS.fits, title: "Fits in the memory the box has free now" },
 	tight: {
-		tone: "warn",
-		word: "tight",
+		...FIT_VERDICTS.tight,
 		title: "Within 10% of the free memory: it may load with swap pressure",
 	},
 	exceeds: {
-		tone: "err",
-		word: "won't fit",
+		...FIT_VERDICTS.exceeds,
 		title: "More than is free now: free memory or unload a slot first",
 	},
 	exceeds_total: {
-		tone: "err",
-		word: "won't fit",
+		...FIT_VERDICTS.exceeds_total,
 		title: "More than the box has in total: it will not load here",
+	},
+	loaded: {
+		tone: "ok",
+		word: "loaded",
+		title: "Already resident in memory, so not judged against what is free",
 	},
 };
 

@@ -692,6 +692,7 @@ describe('slot drawer halogen memory readout', () => {
     ['tight', 'tight', 'warn'],
     ['exceeds', "won't fit", 'err'],
     ['exceeds_total', "won't fit", 'err'],
+    ['loaded', 'loaded', 'ok'],
   ])('words a %s verdict as "%s" in the %s tone', (verdict, word, tone) => {
     resolvedBox.current = resolvedWith({ ...FOOTPRINT, verdict })
     const { root } = mount(HALO_SLOT)

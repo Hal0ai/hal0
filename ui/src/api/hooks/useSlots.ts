@@ -610,8 +610,24 @@ function useSlotsInvalidator() {
   }
 }
 
-export function useSlotRestart() {
+/**
+ * Invalidator for the mutations that change what a slot holds in memory (load,
+ * unload, restart, swap). Also marks every `['slot-resolved']` query stale: its
+ * halogen readout's verdict is a function of the slot's state ("loaded" versus
+ * judged against the free pool), so an open drawer must follow the change
+ * instead of keeping the old verdict until its staleTime runs out.
+ */
+function useSlotLifecycleInvalidator() {
+  const qc = useQueryClient()
   const invalidate = useSlotsInvalidator()
+  return () => {
+    invalidate()
+    qc.invalidateQueries({ queryKey: ['slot-resolved'] })
+  }
+}
+
+export function useSlotRestart() {
+  const invalidate = useSlotLifecycleInvalidator()
   return useMutation({
     mutationFn: (name: string) => slotPost(ENDPOINTS.slotRestart(name)),
     onSuccess: invalidate,
@@ -619,7 +635,7 @@ export function useSlotRestart() {
 }
 
 export function useSlotLoad() {
-  const invalidate = useSlotsInvalidator()
+  const invalidate = useSlotLifecycleInvalidator()
   return useMutation({
     mutationFn: (name: string) => slotPost(ENDPOINTS.slotLoad(name)),
     onSuccess: invalidate,
@@ -627,7 +643,7 @@ export function useSlotLoad() {
 }
 
 export function useSlotUnload() {
-  const invalidate = useSlotsInvalidator()
+  const invalidate = useSlotLifecycleInvalidator()
   return useMutation({
     mutationFn: (name: string) => slotPost(ENDPOINTS.slotUnload(name)),
     onSuccess: invalidate,
@@ -635,7 +651,7 @@ export function useSlotUnload() {
 }
 
 export function useSlotSwap() {
-  const invalidate = useSlotsInvalidator()
+  const invalidate = useSlotLifecycleInvalidator()
   return useMutation({
     mutationFn: ({ name, model_id }: { name: string; model_id: string }) =>
       slotPost(ENDPOINTS.slotSwap(name), { model_id }),
@@ -771,8 +787,10 @@ export interface SlotFootprint {
   advisory_cache_mb: number
   /** The host's free GTT pool, MiB; null when the host gave no reading. */
   host_free_mb: number | null
-  /** Advisory fit of `resident_mb` against the pool; never blocks a load. */
-  verdict: 'fits' | 'tight' | 'exceeds' | 'exceeds_total' | 'unknown'
+  /** Advisory fit of `resident_mb` against the pool; never blocks a load. A slot
+   *  already holding the layout reads 'loaded' instead of being judged against
+   *  the memory that is left. */
+  verdict: 'fits' | 'tight' | 'exceeds' | 'exceeds_total' | 'loaded' | 'unknown'
 }
 
 /** Full resolved-command payload from GET /api/slots/{name}/resolved. */
