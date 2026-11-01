@@ -1175,7 +1175,7 @@ def test_rollback_strips_tune(tmp_hal0_home: str, tmp_path: Path) -> None:
     original = tuned.read_bytes()
     older = tmp_path / "hal0-1.7.1"
     older.mkdir()
-    assert updater._strip_slot_tune_for(older, job_id=None) == [str(tuned)]
+    assert updater._strip_tune_config_for(older, job_id=None) == [str(tuned)]
     after = tomllib.loads(tuned.read_text(encoding="utf-8"))
     assert "tune" not in after
     assert after["name"] == "tuned" and after["model"] == {"default": "m"}
@@ -1190,7 +1190,7 @@ def test_rollback_leaves_clean_slot_alone(tmp_hal0_home: str, tmp_path: Path) ->
     before = clean.read_bytes()
     older = tmp_path / "hal0-1.7.1"
     older.mkdir()
-    updater._strip_slot_tune_for(older, job_id=None)
+    updater._strip_tune_config_for(older, job_id=None)
     assert clean.read_bytes() == before
     assert not list(clean.parent.glob("clean.toml.bak-*"))
 
@@ -1201,9 +1201,9 @@ def test_rollback_skips_when_target_understands_tune(tmp_hal0_home: str, tmp_pat
     tuned, _clean = _tune_slot_files()
     before = tuned.read_bytes()
     newer = tmp_path / "hal0-1.8.0"
-    (newer / updater._SLOT_TUNE_MARKER).parent.mkdir(parents=True)
-    (newer / updater._SLOT_TUNE_MARKER).write_text("")
-    assert updater._strip_slot_tune_for(newer, job_id=None) == []
+    (newer / updater._TUNE_MARKER).parent.mkdir(parents=True)
+    (newer / updater._TUNE_MARKER).write_text("")
+    assert updater._strip_tune_config_for(newer, job_id=None) == []
     assert tuned.read_bytes() == before
     assert not list(tuned.parent.glob("*.bak-*"))
 
@@ -1235,7 +1235,265 @@ def test_strip_slot_tune_failure_midway_restores_the_files_already_changed(
     older = tmp_path / "hal0-1.7.1"
     older.mkdir()
     with pytest.raises(OSError, match="disk full"):
-        updater._strip_slot_tune_for(older, job_id=None)
+        updater._strip_tune_config_for(older, job_id=None)
     for f, data in originals.items():
         assert f.read_bytes() == data
     assert not list(d.glob("*.bak-*"))
+
+
+def _tuned_catalogs() -> tuple[Path, Path]:
+    """A profile and a stack catalog carrying keys a pre-tune release refuses."""
+    profiles = paths.profiles_toml()
+    profiles.parent.mkdir(parents=True, exist_ok=True)
+    profiles.write_text(
+        "# hand comment\n"
+        '[profile.tuned]\nflags = "-fa on"\nreasoning_effort = "high"\nreasoning_budget = 512\n'
+        '[profile.plain]\nflags = "-fa off"\n',
+        encoding="utf-8",
+    )
+    stacks = paths.stacks_toml()
+    stacks.write_text(
+        '[stack.lab]\nname = "Lab"\n'
+        '[[stack.lab.slots]]\nslot = "chat"\nprofile = "tuned"\n'
+        "[stack.lab.slots.tune]\nctx_size = 4096\n"
+        '[[stack.lab.slots]]\nslot = "embed"\n'
+        '[stack.lab.profiles.tuned]\nflags = "-fa on"\nreasoning_effort = "low"\n',
+        encoding="utf-8",
+    )
+    return profiles, stacks
+
+
+def test_rollback_strips_reasoning_keys_from_the_profile_catalog(
+    tmp_hal0_home: str, tmp_path: Path
+) -> None:
+    from hal0.updater import updater
+
+    profiles, _stacks = _tuned_catalogs()
+    original = profiles.read_bytes()
+    older = tmp_path / "hal0-1.7.1"
+    older.mkdir()
+    assert str(profiles) in updater._strip_tune_config_for(older, job_id=None)
+    assert tomllib.loads(profiles.read_text(encoding="utf-8")) == {
+        "profile": {"tuned": {"flags": "-fa on"}, "plain": {"flags": "-fa off"}}
+    }
+    baks = list(profiles.parent.glob("profiles.toml.bak-*"))
+    assert len(baks) == 1 and baks[0].read_bytes() == original
+
+
+def test_rollback_strips_stack_entry_tune_and_embedded_profile_keys(
+    tmp_hal0_home: str, tmp_path: Path
+) -> None:
+    from hal0.updater import updater
+
+    _profiles, stacks = _tuned_catalogs()
+    original = stacks.read_bytes()
+    older = tmp_path / "hal0-1.7.1"
+    older.mkdir()
+    assert str(stacks) in updater._strip_tune_config_for(older, job_id=None)
+    assert tomllib.loads(stacks.read_text(encoding="utf-8")) == {
+        "stack": {
+            "lab": {
+                "name": "Lab",
+                "slots": [{"slot": "chat", "profile": "tuned"}, {"slot": "embed"}],
+                "profiles": {"tuned": {"flags": "-fa on"}},
+            }
+        }
+    }
+    baks = list(stacks.parent.glob("stacks.toml.bak-*"))
+    assert len(baks) == 1 and baks[0].read_bytes() == original
+
+
+def test_rollback_strips_catalogs_on_a_box_with_no_slot_directory(
+    tmp_hal0_home: str, tmp_path: Path
+) -> None:
+    import shutil
+
+    from hal0.updater import updater
+
+    profiles, stacks = _tuned_catalogs()
+    shutil.rmtree(paths.slots_config_dir(), ignore_errors=True)
+    older = tmp_path / "hal0-1.7.1"
+    older.mkdir()
+    assert updater._strip_tune_config_for(older, job_id=None) == [str(profiles), str(stacks)]
+
+
+def test_rollback_leaves_catalogs_without_tune_keys_alone(
+    tmp_hal0_home: str, tmp_path: Path
+) -> None:
+    from hal0.updater import updater
+
+    profiles = paths.profiles_toml()
+    profiles.parent.mkdir(parents=True, exist_ok=True)
+    profiles.write_text('# hand comment\n[profile.plain]\nflags = "-fa off"\n', encoding="utf-8")
+    stacks = paths.stacks_toml()
+    stacks.write_text(
+        '# hand comment\n[stack.lab]\n[[stack.lab.slots]]\nslot = "chat"\n', encoding="utf-8"
+    )
+    before = {f: f.read_bytes() for f in (profiles, stacks)}
+    older = tmp_path / "hal0-1.7.1"
+    older.mkdir()
+    assert updater._strip_tune_config_for(older, job_id=None) == []
+    assert {f: f.read_bytes() for f in (profiles, stacks)} == before
+    assert not list(profiles.parent.glob("*.bak-*"))
+
+
+def test_rollback_keeps_catalogs_when_target_understands_tune(
+    tmp_hal0_home: str, tmp_path: Path
+) -> None:
+    from hal0.updater import updater
+
+    profiles, stacks = _tuned_catalogs()
+    before = {f: f.read_bytes() for f in (profiles, stacks)}
+    newer = tmp_path / "hal0-1.8.0"
+    (newer / updater._TUNE_MARKER).parent.mkdir(parents=True)
+    (newer / updater._TUNE_MARKER).write_text("")
+    assert updater._strip_tune_config_for(newer, job_id=None) == []
+    assert {f: f.read_bytes() for f in (profiles, stacks)} == before
+
+
+def test_rollback_skips_an_unparseable_catalog_and_strips_the_rest(
+    tmp_hal0_home: str, tmp_path: Path
+) -> None:
+    from hal0.updater import updater
+
+    profiles, stacks = _tuned_catalogs()
+    profiles.write_text("[profile.broken\n", encoding="utf-8")
+    broken = profiles.read_bytes()
+    older = tmp_path / "hal0-1.7.1"
+    older.mkdir()
+    assert updater._strip_tune_config_for(older, job_id=None) == [str(stacks)]
+    assert profiles.read_bytes() == broken
+
+
+@pytest.mark.parametrize(
+    ("profiles_text", "stacks_text"),
+    [
+        ('profile = "x"\n', 'stack = "x"\n'),
+        ('[profile]\ntuned = "x"\n', '[stack]\nlab = "x"\n'),
+        ('[profile.p]\nflags = ""\n', '[stack.lab]\nslots = "x"\nprofiles = "x"\n'),
+        (
+            '[profile.p]\nflags = ""\n',
+            '[stack.lab]\nslots = ["x"]\n[stack.lab.profiles]\np = "x"\n',
+        ),
+    ],
+)
+def test_rollback_leaves_unexpected_catalog_shapes_alone(
+    tmp_hal0_home: str, tmp_path: Path, profiles_text: str, stacks_text: str
+) -> None:
+    from hal0.updater import updater
+
+    profiles = paths.profiles_toml()
+    profiles.parent.mkdir(parents=True, exist_ok=True)
+    profiles.write_text(profiles_text, encoding="utf-8")
+    stacks = paths.stacks_toml()
+    stacks.write_text(stacks_text, encoding="utf-8")
+    older = tmp_path / "hal0-1.7.1"
+    older.mkdir()
+    assert updater._strip_tune_config_for(older, job_id=None) == []
+    assert profiles.read_text(encoding="utf-8") == profiles_text
+    assert stacks.read_text(encoding="utf-8") == stacks_text
+
+
+def test_strip_failure_on_a_catalog_restores_the_slot_files_already_changed(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import tomli_w
+
+    from hal0.updater import updater
+
+    d = paths.slots_config_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    slot = d / "a.toml"
+    slot.write_text('name = "a"\n[tune]\nvision = "off"\n', encoding="utf-8")
+    profiles, stacks = _tuned_catalogs()
+    originals = {f: f.read_bytes() for f in (slot, profiles, stacks)}
+    real_dumps = tomli_w.dumps
+    calls = {"n": 0}
+
+    def flaky(obj: Any, *a: Any, **k: Any) -> str:
+        calls["n"] += 1
+        if calls["n"] == 3:  # slot file, profile catalog, then the stack catalog fails
+            raise OSError("disk full")
+        return real_dumps(obj, *a, **k)
+
+    monkeypatch.setattr(tomli_w, "dumps", flaky)
+    older = tmp_path / "hal0-1.7.1"
+    older.mkdir()
+    with pytest.raises(OSError, match="disk full"):
+        updater._strip_tune_config_for(older, job_id=None)
+    assert {f: f.read_bytes() for f in originals} == originals
+    assert not list(d.glob("*.bak-*"))
+    assert not list(profiles.parent.glob("*.bak-*"))
+
+
+def test_strip_interrupted_mid_write_leaves_the_catalog_whole(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The new content reaches disk before the file is swapped: an interrupted write
+    leaves the operator's catalog as it was, never truncated, and no temporary file."""
+    from hal0.updater import updater
+
+    profiles, stacks = _tuned_catalogs()
+    originals = {f: f.read_bytes() for f in (profiles, stacks)}
+
+    def _killed(_fd: int) -> None:
+        assert {f: f.read_bytes() for f in originals} == originals
+        raise OSError("interrupted")
+
+    monkeypatch.setattr(updater.os, "fsync", _killed)
+    older = tmp_path / "hal0-1.7.1"
+    older.mkdir()
+    with pytest.raises(OSError, match="interrupted"):
+        updater._strip_tune_config_for(older, job_id=None)
+    assert {f: f.read_bytes() for f in originals} == originals
+    assert sorted(p.name for p in profiles.parent.iterdir() if p.is_file()) == [
+        "profiles.toml",
+        "stacks.toml",
+    ]
+
+
+def test_strip_keeps_the_mode_of_a_rewritten_file(tmp_hal0_home: str, tmp_path: Path) -> None:
+    from hal0.updater import updater
+
+    profiles, _stacks = _tuned_catalogs()
+    profiles.chmod(0o640)
+    older = tmp_path / "hal0-1.7.1"
+    older.mkdir()
+    updater._strip_tune_config_for(older, job_id=None)
+    assert "reasoning_effort" not in profiles.read_text(encoding="utf-8")
+    assert stat.S_IMODE(profiles.stat().st_mode) == 0o640
+
+
+def test_strip_hands_a_rewritten_file_back_to_its_owner(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A root-run rollback must not leave a catalog the hal0 account cannot read."""
+    from hal0.updater import updater
+
+    profiles, _stacks = _tuned_catalogs()
+    st = profiles.stat()
+    owners: list[tuple[int, int]] = []
+    monkeypatch.setattr(updater.os, "fchown", lambda _fd, uid, gid: owners.append((uid, gid)))
+    older = tmp_path / "hal0-1.7.1"
+    older.mkdir()
+    updater._strip_tune_config_for(older, job_id=None)
+    assert (st.st_uid, st.st_gid) in owners
+
+
+def test_strip_rewrites_a_writable_file_the_caller_cannot_chown(
+    tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """hal0 rolling back with a ``root:hal0`` 0664 catalog, the state the stacks loader
+    tells an operator to set up: failing to give the file away must not abort it."""
+    from hal0.updater import updater
+
+    profiles, _stacks = _tuned_catalogs()
+
+    def _not_root(*_a: Any) -> None:
+        raise PermissionError("Operation not permitted")
+
+    monkeypatch.setattr(updater.os, "fchown", _not_root)
+    older = tmp_path / "hal0-1.7.1"
+    older.mkdir()
+    assert str(profiles) in updater._strip_tune_config_for(older, job_id=None)
+    assert "reasoning_effort" not in profiles.read_text(encoding="utf-8")

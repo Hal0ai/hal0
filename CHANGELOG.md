@@ -39,8 +39,9 @@ applying. Add those subsections to a version's section to surface them; see
 - Slot reads and MCP rosters expose effective values with provenance and a
   runner-support reason for unavailable effort. Default profile reasoning
   fields stay omitted from exports; stack exports preserve slot overrides.
-- Rollback to a release without tune support backs up slot files before
-  stripping `[tune]`; failed activation restores unedited stripped files.
+- Rollback to a release without tune support backs up each changed file before
+  stripping slot `[tune]`, profile reasoning keys, and stack `tune` with embedded
+  profile reasoning keys; failed activation restores unedited stripped files.
 
 ### Added
 
