@@ -381,28 +381,24 @@ function crashLineSuffix(slot) {
 
 /**
  * Conversion-blocked badge (ADR-0029). `/api/slots` adds `conversion_blocked`
- * — `{reason, fix, running_pre_conversion}` — on a slot the profile-centric
- * conversion could not convert, and omits it otherwise. A blocked slot keeps
- * launching its pre-conversion command (`running_pre_conversion`), so it works
- * but needs fixing. Returns `{label, tooltip, reason, fix, running}` or null.
- * `fix` is the server's own text (the commands to run); it is shown verbatim.
+ * — `{reason, fix}` — on a slot file that still carries tuning keys, and omits
+ * it otherwise. Such a slot does not load or launch until the keys are moved
+ * to a profile. Returns `{label, tooltip, reason, fix}` or null.
+ * `fix` is the server's own text; it is shown verbatim.
  */
 export function conversionBlockedChip(slot) {
   const b = slot?.conversion_blocked;
   if (!b || typeof b !== "object") return null;
   const reason = String(b.reason || "").trim();
   const fix = String(b.fix || "").trim();
-  const running = b.running_pre_conversion === true;
   const parts = [];
   if (reason) parts.push(`Why: ${reason}`);
-  if (running) parts.push("Still running its pre-conversion tune: it works, but needs fixing.");
   if (fix) parts.push(`Fix: ${fix}`);
   return {
     label: "Conversion blocked",
-    tooltip: parts.join("\n") || "The profile-centric conversion could not convert this slot.",
+    tooltip: parts.join("\n") || "This slot file still carries tuning keys and will not launch.",
     reason,
     fix,
-    running,
   };
 }
 

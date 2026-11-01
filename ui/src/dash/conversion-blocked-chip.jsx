@@ -27,7 +27,7 @@ export function ConversionBlockedChip({ s }) {
   )
 }
 
-/** The full explanation, for the drawer: reason, the pre-conversion note and the fix. */
+/** The full explanation, for the drawer: reason and the fix. */
 export function ConversionBlockedDetail({ s }) {
   const chip = conversionBlockedChip(s)
   if (!chip) return null
@@ -48,11 +48,6 @@ export function ConversionBlockedDetail({ s }) {
         <b>Conversion blocked.</b>
         {chip.reason ? ` ${chip.reason}` : ''}
       </div>
-      {chip.running && (
-        <div data-testid="slot-conversion-blocked-running">
-          Still running its pre-conversion tune: it works, but needs fixing.
-        </div>
-      )}
       {chip.fix && (
         <div className="mono" data-testid="slot-conversion-blocked-fix" style={{ marginTop: 4 }}>
           {chip.fix}

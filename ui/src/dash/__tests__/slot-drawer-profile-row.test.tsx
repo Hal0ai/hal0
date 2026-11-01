@@ -215,28 +215,17 @@ describe('slot drawer profile row (ADR-0029)', () => {
 })
 
 describe('slot drawer conversion-blocked badge (ADR-0029)', () => {
-  const FIX = 'run `hal0 profile migrate` to see why, edit the slot file, then run `sudo -u hal0 hal0 profile migrate --apply`'
+  const FIX = 'delete the tuning keys from the slot file and put their values on a profile'
 
-  it('shows the badge in the header and the full reason, pre-conversion note and fix in the body', () => {
+  it('shows the badge in the header and the full reason and fix in the body', () => {
     const { root } = mount({
       ...SLOT,
-      conversion_blocked: { reason: 'extra_args did not parse', fix: FIX, running_pre_conversion: true },
+      conversion_blocked: { reason: 'extra_args did not parse', fix: FIX },
     })
     expect(byId('slot-conversion-blocked-chat')!.textContent).toBe('Conversion blocked')
     const detail = byId('slot-conversion-blocked-detail')!
     expect(detail.textContent).toContain('extra_args did not parse')
-    expect(byId('slot-conversion-blocked-running')!.textContent).toContain('pre-conversion tune')
     expect(byId('slot-conversion-blocked-fix')!.textContent).toBe(FIX)
-    act(() => root.unmount())
-  })
-
-  it('omits the pre-conversion note when the slot is not running its old command', () => {
-    const { root } = mount({
-      ...SLOT,
-      conversion_blocked: { reason: 'r', fix: FIX, running_pre_conversion: false },
-    })
-    expect(byId('slot-conversion-blocked-detail')).not.toBeNull()
-    expect(byId('slot-conversion-blocked-running')).toBeNull()
     act(() => root.unmount())
   })
 

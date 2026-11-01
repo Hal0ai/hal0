@@ -398,35 +398,32 @@ def _has_context_window(cfg: Any) -> bool:
     return str(cfg.get("type") or "llm") in ("llm", "embedding", "reranking")
 
 
-#: How an operator fixes a slot the profile-centric conversion blocked.
+#: How an operator fixes a slot file that still carries tuning keys.
 CONVERSION_FIX = (
-    "run `hal0 profile migrate` to see why, edit the slot file, then run "
-    "`sudo -u hal0 hal0 profile migrate --apply`"
+    "delete the tuning keys from the slot file, put their values on a profile "
+    '(`hal0 profile create`), and name it with `profile = "<name>"` in the slot file; '
+    "`hal0 config validate` confirms the file loads"
 )
 
 
 def conversion_blocked(cfg: Any) -> dict[str, Any] | None:
-    """``{"reason", "fix", "running_pre_conversion"}`` for a slot the
-    profile-centric conversion could not convert (ADR-0029), else ``None``.
+    """``{"reason", "fix"}`` for a slot file that still carries tuning keys
+    (ADR-0029), else ``None``.
 
-    ``running_pre_conversion`` says the slot still launches the command it ran
-    before the conversion (the conversion's pin), so it keeps working until
-    it is fixed.
+    Such a file fails to load (``slot.unconverted``) and the slot will not
+    launch until the keys are moved onto a profile.
     """
     try:
         from hal0.config.schema import slot_tuning_keys
-        from hal0.providers.container import blocked_slot_pin
 
-        if not slot_tuning_keys(cfg):
-            return None
-        pin = blocked_slot_pin(cfg)
+        found = slot_tuning_keys(cfg)
     except Exception:
         return None
-    reason = str(pin.get("reason") or "") if pin else ""
+    if not found:
+        return None
     return {
-        "reason": reason or "this slot file still carries tuning keys (not converted)",
+        "reason": f"this slot file still carries {', '.join(found)} (not converted)",
         "fix": CONVERSION_FIX,
-        "running_pre_conversion": bool(pin and isinstance(pin.get("argv"), list)),
     }
 
 

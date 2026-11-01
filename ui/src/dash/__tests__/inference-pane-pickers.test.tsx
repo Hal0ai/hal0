@@ -729,20 +729,18 @@ describe('conversion-blocked badge on the card (ADR-0029)', () => {
     ...PROFILE_SLOT,
     conversion_blocked: {
       reason: 'slot file has an unparsable [model] table',
-      fix: 'run `hal0 profile migrate` to see why',
-      running_pre_conversion: true,
+      fix: 'delete the tuning keys from the slot file',
     },
   }
 
-  it('shows the badge with the reason, the pre-conversion note and the fix in its tooltip', () => {
+  it('shows the badge with the reason and the fix in its tooltip', () => {
     const { host } = mountCards([BLOCKED])
     const chip = q(host, 'slot-conversion-blocked-primary')!
     expect(chip).not.toBeNull()
     expect(chip.textContent).toBe('Conversion blocked')
     const tip = chip.getAttribute('title') || ''
     expect(tip).toContain('unparsable [model] table')
-    expect(tip).toContain('Still running its pre-conversion tune')
-    expect(tip).toContain('hal0 profile migrate')
+    expect(tip).toContain('delete the tuning keys')
   })
 
   it('shows no badge on an ordinary slot', () => {

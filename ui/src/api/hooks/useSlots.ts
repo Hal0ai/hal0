@@ -169,14 +169,12 @@ export interface Slot {
   /** Resolved tune (profile + overrides); null when it cannot be resolved. */
   tune_effective?: TuneEffective | null
   ctx_source?: 'profile' | 'native' | 'fallback' | 'slot' | null
-  /** Present only on a slot the profile-centric conversion could not convert
-   *  (ADR-0029). The slot keeps launching its pre-conversion command
-   *  (`running_pre_conversion`) until the operator fixes it. `fix` is the
-   *  server's own instruction text. Absent otherwise. */
+  /** Present only on a slot file that still carries tuning keys (ADR-0029).
+   *  The slot does not load or launch until the operator moves them to a
+   *  profile. `fix` is the server's own instruction text. Absent otherwise. */
   conversion_blocked?: {
     reason: string
     fix: string
-    running_pre_conversion: boolean
   }
   /** Crash-loop breaker view (#2012), stamped into slot metadata by the
    *  manager whenever the breaker is non-closed and ABSENT otherwise —
