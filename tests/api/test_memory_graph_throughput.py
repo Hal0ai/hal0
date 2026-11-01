@@ -25,7 +25,7 @@ from fastapi.testclient import TestClient
 from hal0.api.middleware import error_codes
 from hal0.api.routes import memory as memory_routes
 from hal0.memory import extraction_env
-from tests.memory.test_extraction_throughput import FAST, SLOW, FakeSlot
+from tests.memory.test_extraction_throughput import FAST, SLOW, FakeSlot, Rates
 
 _real_measure = extraction_env.measure_extraction_throughput
 
@@ -56,8 +56,20 @@ def _slot_manager() -> MagicMock:
     mgr = MagicMock()
     mgr.iter_configs = AsyncMock(
         return_value=[
-            {"name": "agent", "type": "llm", "enabled": True, "model_id": "m-a", "port": 8081},
-            {"name": "utility", "type": "llm", "enabled": True, "model_id": "m-u", "port": 8082},
+            {
+                "name": "agent",
+                "type": "llm",
+                "enabled": True,
+                "model": {"default": "m-a"},
+                "port": 8081,
+            },
+            {
+                "name": "utility",
+                "type": "llm",
+                "enabled": True,
+                "model": {"default": "m-u"},
+                "port": 8082,
+            },
         ]
     )
     return mgr
@@ -93,14 +105,16 @@ def client(stub: StubWrapper, hal0_home: Path) -> Iterator[TestClient]:
         yield c
 
 
-def _fake_slots(monkeypatch: pytest.MonkeyPatch, **rates_by_port: dict[str, float]) -> list[int]:
+def _fake_slots(monkeypatch: pytest.MonkeyPatch, **rates_by_port: Rates) -> list[int]:
     """Route the measurement to a fake slot per port; return the ports probed."""
     probed: list[int] = []
 
     async def _measure(slot: str, port: int, **kw: Any) -> Any:
         probed.append(port)
         fake = FakeSlot(**rates_by_port[f"p{port}"])
-        return await _real_measure(slot, port, transport=fake.transport, **kw)
+        estimate = await _real_measure(slot, port, transport=fake.transport, **kw)
+        assert fake.probe_bodies[0]["model"] == {8081: "m-a", 8082: "m-u"}[port]
+        return estimate
 
     monkeypatch.setattr(extraction_env, "measure_extraction_throughput", _measure)
     return probed
@@ -242,3 +256,29 @@ def test_unknown_slot_port_is_an_unknown_estimate(
     body = client.post("/api/memory/graph/throughput").json()
 
     assert body["throughput"]["verdict"] == "unknown"
+
+
+@pytest.mark.parametrize("enable_with_put", [False, True])
+def test_timeout_without_metrics_is_cached_as_unknown(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, enable_with_put: bool
+) -> None:
+    fake = FakeSlot(**SLOW, timeout=True)
+
+    async def measure(slot: str, port: int, **kw: Any) -> Any:
+        return await _real_measure(slot, port, transport=fake.transport, **kw)
+
+    monkeypatch.setattr(extraction_env, "measure_extraction_throughput", measure)
+    if enable_with_put:
+        response = client.put("/api/memory/graph", json={"enabled": True, "llm_timeout_s": 60})
+    else:
+        response = client.post("/api/memory/graph/throughput")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["throughput"]["verdict"] == "unknown"
+    assert fake.probe_bodies[0]["model"] == "m-u"
+    cached = client.get("/api/memory/graph/throughput").json()["throughput"]
+    assert cached["verdict"] == "unknown"
+    assert "queued behind another request" in cached["message"]
+    reprojected = client.put("/api/memory/graph", json={"llm_timeout_s": 30}).json()
+    assert reprojected["throughput"]["verdict"] == "unknown"
+    assert len(fake.probe_bodies) == 1
