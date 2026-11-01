@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import time
 from pathlib import Path
 from typing import Any
@@ -925,6 +926,7 @@ async def system_info_endpoint(request: Request) -> dict[str, Any]:
     """
     from hal0.api.routes.health import list_features
     from hal0.runners import RUNNER_IMAGES, resolve_runner_image
+    from hal0.runners.knobs import ENGINE_KNOBS, runner_knob_denied
 
     hardware = await get_hardware(request)
     features = await list_features(request)
@@ -998,6 +1000,11 @@ async def system_info_endpoint(request: Request) -> dict[str, Any]:
             # provenance block above. The slot drawer's Runner select and
             # RunnerCard render it; null renders nothing.
             "provenance": provenance,
+            # Engine knobs the dashboard renders as typed controls, and the
+            # flag names a profile may not set (hal0.runners.knobs); empty for
+            # every runner but halogen.
+            "knobs": [dataclasses.asdict(k) for k in ENGINE_KNOBS.get(key, ())],
+            "knob_denied": runner_knob_denied(key),
             "state": _backend_state(image, local_repos),
         }
 

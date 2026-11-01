@@ -624,11 +624,13 @@ if [[ "${DEV_MODE}" -eq 0 && "${PURGE}" -eq 1 ]]; then
         # local dev builds (hal0-toolbox-*:dev) are all caught. The optional
         # cuda runner is ggml-org's image (manifest.json runners.cuda); only
         # its server-cuda tags are hal0's, so other llama.cpp images an
-        # operator pulled themselves stay.
+        # operator pulled themselves stay. The optional halogen runner is the
+        # peonist-ai halogen-flash-server image (runners.halogen): every tag of
+        # that one repository goes, and the vendor's other images stay.
         while IFS= read -r _img; do
             [[ -n "${_img}" ]] || continue
             case "${_img}" in
-                *open-webui*|*openwebui*|*hal0-toolbox*|ghcr.io/hal0ai/*|*amd-strix-halo-comfyui*|*kyuz0/*comfyui*|ghcr.io/ggml-org/llama.cpp:server-cuda*)
+                *open-webui*|*openwebui*|*hal0-toolbox*|ghcr.io/hal0ai/*|*amd-strix-halo-comfyui*|*kyuz0/*comfyui*|ghcr.io/ggml-org/llama.cpp:server-cuda*|ghcr.io/peonist-ai/halogen-flash-server:*)
                     if "${_rt}" rmi -f "${_img}" &>/dev/null; then
                         info "Removed ${_rt} image ${_img}"
                     else

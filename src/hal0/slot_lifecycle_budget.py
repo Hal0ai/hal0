@@ -131,12 +131,28 @@ OUTPUT_SANITY_LOAD_ALLOWANCE_S = 2 * OUTPUT_SANITY_CPU_TIMEOUT_S
 #: estimate; bounding it server-side is the real fix (#1869).
 EVICTION_UNLOAD_ALLOWANCE = 3
 
+#: What ``SlotManager.terminate``'s wait leaves beyond ``unload_sync``'s
+#: ``systemctl stop`` bound, for the Quadlet removal, ``daemon-reload`` and
+#: ``reset-failed`` that follow a stop which ran its full length. The default
+#: pair has this by construction (30 s against 20 s, the admin allowance's three
+#: calls); a runtime that declares a stop grace gets the same margin on its wider
+#: bound (:func:`hal0.providers.container.terminate_budget_s`).
+TEARDOWN_MARGIN_S = TERMINATE_TIMEOUT_S - UNIT_ADMIN_CALLS_ALLOWANCE_S / 3
+
 #: Worst wall-clock a single ``SlotManager.load`` can hold the slot lock —
 #: every phase it runs between acquiring and releasing, summed. Keep this
 #: derivation exhaustive: it is the number BOTH the per-load charge and the
 #: lock-wait allowance below are built from, so a phase added to ``load``
 #: without a line here silently re-creates #1832 (client reports a timeout on
 #: an op the server is still converging).
+#:
+#: The one named exception is a halogen slot, whose provider owns its own
+#: budgets: about 1310 s (160 pre-spawn terminate + 90 + 60 + 180 + 600 provider
+#: readiness + 60 sentinel + 160 teardown) against the 930 s below. Deliberately
+#: not charged here, so no other slot's client budget moves. A client still clears
+#: it unqueued (load 2139 s, unload 1104 s); only a request queued behind a full
+#: halogen load can outlast its timeout (load about 2620 s, unload about 1470 s),
+#: and then the client gives up while the server finishes.
 #:
 #:     30   pre-spawn terminate — the drifted re-converge (#1224), the ERROR
 #:          retry and the stale in-flight branches each stop the unit in place

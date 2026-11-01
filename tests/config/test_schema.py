@@ -502,6 +502,12 @@ class TestHal0Config:
         cfg = SlotsConfig(default_images={"standard": "ghcr.io/hal0ai/hal0-runner-standard:test"})
         assert cfg.default_images == {"standard": "ghcr.io/hal0ai/hal0-runner-standard:test"}
 
+    def test_default_images_accepts_the_halogen_key(self) -> None:
+        cfg = SlotsConfig(
+            default_images={"halogen": "ghcr.io/peonist-ai/halogen-flash-server:0.18.22"}
+        )
+        assert cfg.default_images["halogen"].endswith(":0.18.22")
+
     @pytest.mark.parametrize("retired", ["rocmfpx", "vulkanfpx", "strix", "promptforge"])
     def test_slots_default_images_rejects_a_retired_runner_key(self, retired: str) -> None:
         """Only ``RUNNER_IMAGES`` keys are accepted (ADR-0028): the retired

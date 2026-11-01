@@ -1380,7 +1380,7 @@ export function ModelDrawer({ open, onClose, model, onOpenSlot = undefined }) {
 				<div className="form-row">
 					<div className="form-lbl">
 						<span>Engine</span>
-						<FieldInfoIcon description="engine identity that serves this model's launch (llama-server · flm · kokoro · qwen3tts · moonshine · comfyui) · empty = derive from the stored backend tags" />
+						<FieldInfoIcon description="engine identity that serves this model's launch (llama-server · flm · kokoro · qwen3tts · moonshine · comfyui · halogen) · empty = derive from the stored backend tags" />
 					</div>
 					<div className="form-ctl">
 						<RichSelect

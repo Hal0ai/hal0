@@ -59,6 +59,7 @@ from hal0.slots.config_write import (
     _reconcile_device_profile,
     check_default_uniqueness,
     check_npu_exclusivity,
+    check_runner_family,
     guard_and_normalize_tune,
     guard_slot_write_payload,
     reconcile_and_guard_slot_config,
@@ -2803,7 +2804,13 @@ class SlotManager:
         ceremony.
 
         ``timeout_s`` bounds the wait on the (synchronous, executor-run)
-        systemd stop; ``None`` uses :attr:`_terminate_timeout_s`. The bound
+        systemd stop; ``None`` uses :attr:`_terminate_timeout_s`, widened for a
+        runtime that declares a shutdown grace
+        (:func:`hal0.providers.container.terminate_budget_s`: halogen's engine
+        needs up to 120 s, so a 150 s stop bound and a 160 s wait) so the wait
+        never ends before ``unload_sync``'s teardown does. Every caller that stops
+        a unit without naming a bound (``unload``, ``restart``, the
+        output-sanity teardown, the drifted re-converge) gets it. The bound
         matters because ``systemctl stop`` against an already-``failed`` unit
         can block indefinitely — unbounded, that wedged the whole restart and
         left the CLI ReadTimeout'ing with the unit never relaunched (#1224).
@@ -2823,11 +2830,16 @@ class SlotManager:
             cfg = {"name": slot_name}
 
         # Stop the systemd unit + deregister upstream.
-        from hal0.providers.container import container_provider
+        from hal0.providers.container import container_provider, terminate_budget_s
 
+        cfg_dict = _cfg_to_dict(cfg)
         budget = self._terminate_timeout_s if timeout_s is None else timeout_s
+        if timeout_s is None:
+            grace_budget = terminate_budget_s(cfg_dict)
+            if grace_budget is not None:
+                budget = max(budget, grace_budget)
         stop = asyncio.get_event_loop().run_in_executor(
-            None, container_provider().unload_sync, _cfg_to_dict(cfg)
+            None, container_provider().unload_sync, cfg_dict
         )
         try:
             await asyncio.wait_for(asyncio.shield(stop), timeout=budget)
@@ -2923,6 +2935,7 @@ class SlotManager:
         # "new" at create time, so a conflicting device+profile is an explicit
         # operator error and raises.
         _reconcile_device_profile(cfg_dict, set(cfg_dict.keys()))
+        check_runner_family(cfg_dict, set(cfg_dict.keys()))
         # Same [tune] validation, guard and normalization as the update path.
         if "tune" in cfg_dict:
             guard_and_normalize_tune(cfg_dict, {"tune": cfg_dict["tune"]})
@@ -4200,6 +4213,18 @@ class SlotManager:
                 return SlotState.WARMING
             return SlotState.READY
 
+        # The halogen Flash-Next engine proves itself with ITS OWN sentinel.
+        # It serves ``/v1/chat/completions`` only, so the generic gate below
+        # (a raw ``/completion`` probe) cannot judge it, and its provider
+        # already ran its own ``wait_ready`` above. Same contract as the
+        # generic gate, same place (slot lock held, not yet dispatchable, run
+        # once): a verdict on the MODEL raises, a verdict on the CLOCK is a
+        # retryable WARMING.
+        from hal0.providers.halogen import HalogenProvider
+
+        if isinstance(provider, HalogenProvider):
+            return await self._halogen_sentinel(slot_name, slot_port, cfg, provider)
+
         # ── output-sanity gate (#1922) ───────────────────────────────────────
         #
         # The container/llama-server lane's readiness proof stopped at /health
@@ -4296,6 +4321,91 @@ class SlotManager:
                         },
                     )
         return SlotState.READY
+
+    async def _halogen_sentinel(
+        self, slot_name: str, slot_port: int, cfg: dict[str, Any], provider: Any
+    ) -> SlotState:
+        """The output-sanity verdict for a halogen slot, from its own provider.
+
+        ``provider.verify_inference`` answers ``{"ok", "status", "sample"}``
+        over the engine's chat endpoint. ``ok`` is READY; a status the shared
+        policy calls ambiguous (``output_sanity.AMBIGUOUS_STATUSES``: the answer
+        did not arrive) is WARMING; anything else judged the model and raises
+        the same :class:`SlotOutputSanityFailed`, with the same message and
+        ``details`` shape, as the generic gate, so ``load``'s ERROR branch (unit
+        stopped, verdict stamped, slot un-adoptable) and the dashboard treat
+        both identically.
+
+        The operator escape hatches ``failure_message`` advertises
+        (``HAL0_SLOT_OUTPUT_SANITY=0``, ``output_sanity = false``) switch the
+        sentinel off here too; the engine's own readiness wait still ran.
+        """
+        from hal0.slots import output_sanity
+
+        opted_out = output_sanity.opt_out_reason(cfg)
+        if opted_out is not None:
+            log.debug(
+                "slot.output_sanity_skipped",
+                extra={"slot": slot_name, "reason": opted_out},
+            )
+            return SlotState.READY
+        if slot_port <= 0:
+            # A portless slot cannot be probed: a config fault for the health
+            # path to report, not something to mis-attribute to the model.
+            log.debug(
+                "slot.output_sanity_skipped",
+                extra={"slot": slot_name, "reason": "no_port"},
+            )
+            return SlotState.READY
+
+        verdict = await provider.verify_inference(slot_port)
+        ok = bool(verdict.get("ok"))
+        status = str(verdict.get("status") or "")
+        sample = str(verdict.get("sample") or "")
+        detail = str(verdict.get("detail") or "")
+        log.info(
+            "slot.output_sanity",
+            extra={
+                "slot": slot_name,
+                "port": slot_port,
+                "ok": ok,
+                "status": status,
+                "sample": sample,
+                "sentinel": "halogen",
+            },
+        )
+        if ok:
+            return SlotState.READY
+        if output_sanity.is_ambiguous(status):
+            # The completion did not arrive inside its wall clock: a fact about
+            # the clock, not a verdict on the model. Same policy as the generic
+            # gate (see ``output_sanity.AMBIGUOUS_STATUSES``): WARMING is not
+            # dispatchable, nothing is condemned, the next load re-runs this.
+            log.warning(
+                "slot.output_sanity_inconclusive",
+                extra={"slot": slot_name, "port": slot_port, "status": status, "detail": detail},
+            )
+            return SlotState.WARMING
+        failed = output_sanity.SanityVerdict(ok=False, status=status, sample=sample, detail=detail)
+        log.error(
+            "slot.output_sanity_failed",
+            extra={
+                "slot": slot_name,
+                "port": slot_port,
+                "status": status,
+                "sample": sample,
+                "detail": detail,
+            },
+        )
+        raise SlotOutputSanityFailed(
+            output_sanity.failure_message(failed),
+            details={
+                "slot": slot_name,
+                "port": slot_port,
+                "probe_status": status,
+                "sample": sample,
+            },
+        )
 
     # ── adoption / drift reconcile (ISSUE #30) ───────────────────────────────
 

@@ -58,6 +58,22 @@ describe('runnerOptions', () => {
   })
 })
 
+describe('halogen runner', () => {
+  it('lists halogen under optional for a gpu-rocm llm slot and hides it without a ROCm lane', () => {
+    const withHalogen = {
+      ...backends,
+      halogen: { title: 'halogen (Flash-Next)', blurb: '', tier: 'optional',
+        device_class: 'gpu', supported_backends: ['rocm'], runtime_family: 'halogen', state: 'installable' },
+    }
+    const shown = runnerOptions({ backends: withHalogen, device: 'gpu-rocm', slotType: 'llm', hw: { rocm: true, vulkan: true, cuda: false } }).options
+    expect(shown.map((o) => o.key)).toContain('halogen')
+    expect(shown.findIndex((o) => o.key === 'halogen')).toBeGreaterThan(shown.findIndex((o) => o.key === 'standard'))
+    const hidden = runnerOptions({ backends: withHalogen, device: 'gpu-vulkan', slotType: 'llm', hw: { rocm: false, vulkan: true, cuda: false } }).options
+    expect(hidden.map((o) => o.key)).not.toContain('halogen')
+    expect(runnerOptions({ backends: withHalogen, device: 'gpu-rocm', slotType: 'tts', hw: {} }).options.map((o) => o.key)).not.toContain('halogen')
+  })
+})
+
 describe('lanes + choice', () => {
   it('only the multi-lane default offers lane values', () => {
     const { options } = runnerOptions({ backends, device: 'gpu-rocm', slotType: 'llm', hw: { rocm: true, vulkan: true, cuda: true } })

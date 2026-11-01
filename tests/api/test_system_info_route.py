@@ -97,6 +97,38 @@ def test_system_info_backends_expose_fit_check_metadata(
         assert entry["supported_backends"], f"{key} declares no supported_backends"
 
 
+def test_system_info_backends_carry_engine_knobs(
+    isolated_client: TestClient,
+) -> None:
+    """The halogen runner's engine knobs ride on its backend row so the
+    dashboard renders them as typed controls; every other runner carries none."""
+    from hal0.runners.knobs import ENGINE_KNOBS
+
+    backends = isolated_client.get("/api/system-info").json()["backends"]
+    assert backends["halogen"]["knobs"][0]["env"] == "HALOGEN_KV_POOL_POSITIONS"
+    assert [k["env"] for k in backends["halogen"]["knobs"]] == [
+        k.env for k in ENGINE_KNOBS["halogen"]
+    ]
+    assert backends["standard"]["knobs"] == []
+
+
+def test_system_info_backends_carry_knob_denied_names(
+    isolated_client: TestClient,
+) -> None:
+    """``knob_denied`` is the server's screen mirrored for the UI: the halogen
+    names a profile flag may not set (exact names, then ``PREFIX*`` globs,
+    the exact names sorted); every other runner gets an empty list."""
+    backends = isolated_client.get("/api/system-info").json()["backends"]
+    denied = backends["halogen"]["knob_denied"]
+    assert {"HALOGEN_API_PORT", "HALOGEN_CTX", "HALOGEN_CACHE_DIR"} <= set(denied)
+    exact = [name for name in denied if not name.endswith("*")]
+    globs = [name for name in denied if name.endswith("*")]
+    assert {"HALOGEN_NPU_*", "HALOGEN_RECORD_*"} <= set(globs)
+    assert denied == exact + globs  # exact names first, then the PREFIX* globs
+    assert exact == sorted(exact)
+    assert backends["standard"]["knob_denied"] == []
+
+
 def test_system_info_backend_display_metadata(
     isolated_client: TestClient,
 ) -> None:

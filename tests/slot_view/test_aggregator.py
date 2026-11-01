@@ -1527,6 +1527,7 @@ class TestTuneInSnapshot:
             "speculation",
             "sources",
             "reasoning_effort_unavailable",
+            "tune_unavailable",
         }
 
     async def test_snapshot_without_tune_is_empty_and_profile_sourced(

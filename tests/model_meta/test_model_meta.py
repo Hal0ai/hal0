@@ -457,6 +457,10 @@ def test_derive_model_provider_specialty_tags() -> None:
     assert derive_model_provider(["flm"]) == "flm"
 
 
+def test_derive_model_provider_halogen() -> None:
+    assert derive_model_provider(["halogen"]) == "halogen"
+
+
 def test_derive_model_provider_llama_lanes_and_defaults() -> None:
     # GPU lane tags are lanes, not engines — they derive llama-server.
     assert derive_model_provider(["rocm", "vulkan"]) == "llama-server"

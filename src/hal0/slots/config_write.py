@@ -101,8 +101,11 @@ def _reconcile_device_profile(cfg_dict: dict[str, Any], changed: set[str]) -> No
     ``binary`` becomes that runner and, for a single-backend runner, its
     ``device`` follows (a ROCm-only runner on a host with no ROCm lane is
     refused before any write). A profile without a runner selects no
-    hardware (ADR-0029) and leaves the slot alone. Mutates ``cfg_dict`` in
-    place — through
+    hardware (ADR-0029) and leaves ``device`` alone, but a non-llama ``binary``
+    that profile cannot launch is cleared, so opting out of such a runner
+    returns the slot to a llama runner (a write naming ``binary`` itself is the
+    operator's choice, judged by :func:`check_runner_family`). Mutates
+    ``cfg_dict`` in place — through
     :func:`hal0.slot_config.slot_scalar_table` (#1685), since ``device``/
     ``profile`` are scalar fields that live under ``[slot]`` on a
     nested-shape config, not at ``cfg_dict``'s root.
@@ -111,16 +114,21 @@ def _reconcile_device_profile(cfg_dict: dict[str, Any], changed: set[str]) -> No
 
     scalars = slot_scalar_table(cfg_dict)
     profile_name = scalars.get("profile")
-    if not isinstance(profile_name, str) or not profile_name:
-        return
+    prof = None
+    if isinstance(profile_name, str) and profile_name:
+        from hal0.config.loader import load_profiles_config
 
-    from hal0.config.loader import load_profiles_config
-
-    prof = load_profiles_config().profile.get(profile_name)
+        prof = load_profiles_config().profile.get(profile_name)
 
     from hal0.config.schema import map_backend_to_device
 
     prof_runner = getattr(prof, "runner", None) if prof is not None else None
+    if not prof_runner and "profile" in changed and "binary" not in changed:
+        from hal0.providers.container import runner_family_mismatch
+
+        if runner_family_mismatch({**cfg_dict, **scalars}) is not None:
+            scalars.pop("binary", None)
+        return
     if prof_runner and "profile" in changed:
         from hal0.runners import get_runner
 
@@ -164,6 +172,28 @@ def _reconcile_device_profile(cfg_dict: dict[str, Any], changed: set[str]) -> No
         if new_device is not None:
             scalars["device"] = new_device
         return
+
+
+def check_runner_family(cfg_dict: dict[str, Any], changed_keys: set[str]) -> None:
+    """Refuse a write that leaves ``binary`` naming a runner the profile cannot launch.
+
+    Judged on the merged config, after :func:`_reconcile_device_profile`, so a
+    profile change that clears the runner passes. Only a write that moves one of
+    the two keys is judged: an unrelated edit did not create a state already on
+    disk. The load path refuses the part of this that cannot launch at all
+    (:meth:`hal0.providers.container.ContainerProvider.load_sync`).
+
+    Raises:
+        RunnerFamilyMismatch: code ``slot.runner_family_mismatch`` (HTTP 409).
+    """
+    if not changed_keys & {"binary", "profile"}:
+        return
+    from hal0.providers.container import runner_family_mismatch
+    from hal0.slot_config import slot_scalar_table
+
+    mismatch = runner_family_mismatch({**cfg_dict, **slot_scalar_table(cfg_dict)})
+    if mismatch is not None:
+        raise mismatch
 
 
 # ── guard/merge pipeline (shared with stacks/apply.py) ──────────────────────
@@ -607,17 +637,26 @@ def guard_and_normalize_tune(merged: dict[str, Any], updates: dict[str, Any]) ->
         # Scalars live in [slot] on a nested-shape file and at the root on a flat one.
         view = {**{k: v for k, v in merged.items() if k != "slot"}, **(merged.get("slot") or {})}
         profile = None
-        if tune_update.get("enable_thinking") is not None:
-            # Only the thinking pin needs the profile; a profile that does not
-            # resolve is not this guard's error (the launch path owns that), so
-            # the pin check is skipped rather than blocking the write.
+        if any(
+            tune_update.get(k) is not None for k in ("enable_thinking", "speculation", "ctx_size")
+        ):
+            # Only the thinking pin and the engine family (a halogen slot has no
+            # n-gram drafter and a native context window) need the profile; a
+            # profile that does not resolve is not this guard's error (the launch
+            # path owns that), so those checks are skipped rather than blocking
+            # the write.
             from hal0.providers.container import resolve_slot_profile
 
             try:
                 profile = resolve_slot_profile(view)
             except Hal0Error:
                 profile = None
-        guard_tune_write(view, updates, profile)
+        # Judged on the validated values (a numeric string has been coerced by
+        # now), and only for the keys this write carries, not the stored table.
+        carried = {
+            k: normalized[k] for k, v in tune_update.items() if v is not None and k in normalized
+        }
+        guard_tune_write(view, {**updates, "tune": carried}, profile)
 
     if dropped:
         import logging
@@ -664,6 +703,7 @@ def reconcile_and_guard_slot_config(
     """
     guard_slot_write_payload(updates)
     merged = reconcile_slot_updates(base, updates)
+    check_runner_family(merged, set(updates.keys()))
     guard_and_normalize_tune(merged, updates)
     check_npu_exclusivity(slot_name, merged, slots_dir=slots_dir)
     # Only the keys this apply actually carries drive the SC-4 guard — an
@@ -688,6 +728,7 @@ __all__ = [
     "check_model_fits_slot",
     "check_model_registered",
     "check_npu_exclusivity",
+    "check_runner_family",
     "guard_and_normalize_tune",
     "guard_slot_write_payload",
     "model_is_flm",

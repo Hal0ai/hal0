@@ -8,7 +8,9 @@
 # model carries (a paired drafter, else its MTP heads) when the runner
 # supports it, "ngram" uses n-gram lookup, "off" never speculates) and an
 # optional `runner` (the profile-carried runtime). No seed sets
-# `speculation`: the default is "auto".
+# `speculation`: the default is "auto". Only `halogen` sets `runner`: its engine
+# is one family, so the seed names its own; every other seed leaves the runner
+# to the slot's binary.
 #
 # What a profile never carries:
 #   * placement — `-ngl`, `-dev`, `--threads`: the slot's typed fields;
@@ -138,3 +140,16 @@ flags = "-fa auto -b 2048 -ub 512 --parallel 1 --reasoning-budget -1 --no-contex
 ctx_size = 65536
 vision = "off"
 intent = "Brain steward (LFM2.5-2.6B + persona + tool-call routing) · 64K ctx"
+
+[profile.halogen]
+# Peonist's halogen engine for Qwen3.8-Flash-Next (optional runner). Flags are
+# HALOGEN_NAME=value environment tokens, not llama-server flags; hal0 sets the
+# listener, checkpoint and model id itself, and the tune fields below set the
+# context, thinking, vision and speculation variables.
+# Share-a-third layout: a 262,144-position KV pool and two generating slots
+# keep one full conversation warm (about 70 GiB on a 128 GB box).
+runner = "halogen"
+flags = "HALOGEN_KV_POOL_POSITIONS=262144 HALOGEN_KV_SLOTS=2 HALOGEN_MAX_TOK=16384 HALOGEN_WEIGHTS_LOCK=1"
+ctx_size = 262144
+vision = "auto"
+intent = "Qwen3.8-Flash-Next on halogen · share-a-third layout (one full conversation warm; about 70 GiB on ht43)"

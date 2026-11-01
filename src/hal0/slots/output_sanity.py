@@ -237,16 +237,18 @@ def gate_disabled_globally() -> bool:
     return bool(raw) and _falsey(raw)
 
 
-def skip_reason(cfg: Mapping[str, Any] | None) -> str | None:
-    """Why the gate must NOT run for this slot — ``None`` means "run it".
+def opt_out_reason(cfg: Mapping[str, Any] | None) -> str | None:
+    """Which operator escape hatch switches the gate off, or ``None``.
 
-    The string is a log/telemetry reason, never a user-facing message.  Order
-    matters only for the log line: any single reason is sufficient.
+    The two hatches :func:`failure_message` advertises: the box-wide
+    :data:`SANITY_ENV_VAR` and the per-slot :data:`SANITY_CFG_KEY`. Shared by
+    :func:`skip_reason` and by a provider-owned sentinel (halogen), which must
+    honour the same promise even though it replaces the generic probe.
     """
     if gate_disabled_globally():
         return "disabled_by_env"
     if not isinstance(cfg, Mapping):
-        return "no_config"
+        return None
     raw = cfg.get(SANITY_CFG_KEY)
     if raw is None:
         slot_tbl = cfg.get("slot")
@@ -254,6 +256,20 @@ def skip_reason(cfg: Mapping[str, Any] | None) -> str | None:
             raw = slot_tbl.get(SANITY_CFG_KEY)
     if raw is not None and _falsey(raw):
         return "disabled_by_slot_config"
+    return None
+
+
+def skip_reason(cfg: Mapping[str, Any] | None) -> str | None:
+    """Why the gate must NOT run for this slot — ``None`` means "run it".
+
+    The string is a log/telemetry reason, never a user-facing message.  Order
+    matters only for the log line: any single reason is sufficient.
+    """
+    opted_out = opt_out_reason(cfg)
+    if opted_out is not None:
+        return opted_out
+    if not isinstance(cfg, Mapping):
+        return "no_config"
     slot_type = str(cfg.get("type") or "").strip().lower()
     if slot_type not in _GATED_SLOT_TYPES:
         # Includes the empty string: a type-less config is healed to "llm" on
@@ -261,6 +277,13 @@ def skip_reason(cfg: Mapping[str, Any] | None) -> str | None:
         # blank here means the config never went through the loader and we
         # cannot claim it is chat-capable.
         return f"slot_type_{slot_type or 'unset'}"
+    # The halogen engine serves ``/v1/chat/completions`` only, so the raw
+    # ``/completion`` probe below cannot judge it: its provider owns the
+    # sentinel (``HalogenProvider.verify_inference``, run from
+    # ``SlotManager._await_ready``). Not a "do not verify" — a "verified
+    # elsewhere".
+    if _profile_family(cfg) == "halogen":
+        return "family_halogen_sentinel"
     # #2693: a stale/wrong ``type="llm"`` on a reranker/embedder must not send
     # it through a chat completion it cannot answer. The profile name or the
     # launch flags (``--reranking`` / ``--embedding``) are the stronger signal.
@@ -268,6 +291,24 @@ def skip_reason(cfg: Mapping[str, Any] | None) -> str | None:
     if non_chat is not None:
         return f"non_chat_{non_chat}"
     return None
+
+
+def _profile_family(cfg: Mapping[str, Any]) -> str | None:
+    """The slot profile's runtime family, or ``None`` when it cannot be told.
+
+    Resolved through the catalog exactly as :func:`_non_chat_signal` resolves
+    the profile's flags. An unresolvable profile is not evidence either way, so
+    it reads as "unknown" and the slot stays on the generic gate.
+    """
+    profile = str(cfg.get("profile") or "").strip()
+    if not profile:
+        return None
+    try:
+        from hal0.profiles import ProfileCatalog
+
+        return str(ProfileCatalog().resolve(profile).runtime_family)
+    except Exception:  # unresolvable profile: not evidence either way
+        return None
 
 
 def _non_chat_signal(cfg: Mapping[str, Any]) -> str | None:
@@ -658,6 +699,7 @@ __all__ = [
     "gate_disabled_globally",
     "gate_failed",
     "is_ambiguous",
+    "opt_out_reason",
     "probe",
     "probe_budget_s",
     "skip_reason",

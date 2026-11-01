@@ -27,7 +27,9 @@ import json
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
+import httpx
 import pytest
 
 from hal0.slots import output_sanity
@@ -1190,3 +1192,271 @@ async def test_load_skips_the_gate_when_disabled_by_env(
 
     assert slot.state is SlotState.READY
     assert container_stub.sanity_probes == []
+
+
+# ── halogen: the provider owns the sentinel ─────────────────────────────────
+#
+# The halogen Flash-Next engine serves ``/v1/chat/completions`` only, so the
+# generic gate's raw ``/completion`` probe cannot judge it. Its provider ships
+# its own readiness (``wait_ready``) and sentinel (``verify_inference``);
+# ``_await_ready`` hands both over and the generic probe never runs.
+
+
+def test_skip_reason_halogen_family(tmp_hal0_home: str) -> None:
+    """A slot whose profile resolves to the halogen family is judged by the
+    provider's sentinel, not the generic probe."""
+    assert (
+        output_sanity.skip_reason({"type": "llm", "profile": "halogen"})
+        == "family_halogen_sentinel"
+    )
+
+
+def test_skip_reason_unresolvable_profile_is_not_evidence(tmp_hal0_home: str) -> None:
+    """A profile the catalog cannot resolve says nothing about the family: the
+    slot stays on the generic gate."""
+    assert output_sanity.skip_reason({"type": "llm", "profile": "no-such-profile"}) is None
+
+
+def test_the_operator_opt_outs_outrank_the_halogen_sentinel(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``failure_message`` advertises both escape hatches, so they must reach a
+    halogen slot too."""
+    per_slot = {"type": "llm", "profile": "halogen", output_sanity.SANITY_CFG_KEY: False}
+    assert output_sanity.skip_reason(per_slot) == "disabled_by_slot_config"
+    monkeypatch.setenv(output_sanity.SANITY_ENV_VAR, "0")
+    assert output_sanity.skip_reason({"type": "llm", "profile": "halogen"}) == "disabled_by_env"
+
+
+class _HalogenSentinel:
+    """Scripts a ``HalogenProvider`` and records the calls it receives."""
+
+    def __init__(self, verdict: dict[str, Any]) -> None:
+        self.verdict = verdict
+        self.waited: list[int] = []
+        self.sentinel_ports: list[int] = []
+        self.provider: Any = None
+
+
+def _halogen_provider(sentinel: _HalogenSentinel) -> Any:
+    """A real ``HalogenProvider`` whose network seams are scripted."""
+    from hal0.providers.halogen import HalogenProvider
+
+    provider = HalogenProvider()
+
+    async def _wait_ready(port: int) -> None:
+        sentinel.waited.append(port)
+
+    async def _verify_inference(port: int) -> dict[str, Any]:
+        sentinel.sentinel_ports.append(port)
+        return sentinel.verdict
+
+    provider.wait_ready = _wait_ready  # type: ignore[method-assign]
+    provider.verify_inference = _verify_inference  # type: ignore[method-assign]
+    return provider
+
+
+@pytest.fixture
+def halogen_slot(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[[dict[str, Any]], tuple[SlotManager, _HalogenSentinel]]:
+    """Build a manager whose ``chat`` slot resolves to a scripted halogen provider.
+
+    The generic probe is rigged to fail the test if anything calls it: a
+    halogen slot must be judged by the provider's sentinel alone.
+    """
+
+    def _build(verdict: dict[str, Any]) -> tuple[SlotManager, _HalogenSentinel]:
+        sentinel = _HalogenSentinel(verdict)
+        provider = sentinel.provider = _halogen_provider(sentinel)
+        monkeypatch.setattr("hal0.providers.container._spec_provider_for", lambda cfg: provider)
+
+        async def _generic_probe(port: int, **_kw: Any) -> Any:
+            raise AssertionError("the generic output-sanity probe ran on a halogen slot")
+
+        monkeypatch.setattr("hal0.slots.output_sanity.probe", _generic_probe)
+        return SlotManager(), sentinel
+
+    return _build
+
+
+async def test_await_ready_halogen_uses_provider_sentinel(
+    halogen_slot: Callable[[dict[str, Any]], tuple[SlotManager, _HalogenSentinel]],
+) -> None:
+    """The provider's wait, then the provider's sentinel; ``ok`` is READY."""
+    sm, sentinel = halogen_slot({"ok": True, "status": "ok", "sample": " Paris."})
+
+    state = await sm._await_ready("chat", 8081)
+
+    assert state is SlotState.READY
+    assert sentinel.waited == [8081]
+    assert sentinel.sentinel_ports == [8081], "the sentinel runs exactly once per load"
+
+
+def _real_wait_ready_on_failed_probe(sentinel: _HalogenSentinel) -> Any:
+    """Give ``sentinel.provider`` its real ``wait_ready`` over a ``/health`` that
+    keeps reporting a failed capability probe, past a zero grace."""
+    from hal0.providers import halogen as halogen_module
+    from hal0.providers.halogen import HalogenProvider
+
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, json={"engine": {"responds": True}, "capability_probe": "failed"}
+        )
+    )
+    sentinel.provider.wait_ready = HalogenProvider.wait_ready.__get__(sentinel.provider)
+    return (
+        patch.object(
+            halogen_module,
+            "async_client",
+            lambda **kw: httpx.AsyncClient(transport=transport),
+        ),
+        patch.object(HalogenProvider, "CAPABILITY_GRACE_S", 0.0),
+    )
+
+
+async def test_await_ready_halogen_failed_probe_past_the_grace_reaches_the_sentinel(
+    halogen_slot: Callable[[dict[str, Any]], tuple[SlotManager, _HalogenSentinel]],
+) -> None:
+    """The sentinel is the real request that re-probes, and its verdict decides."""
+    sm, sentinel = halogen_slot({"ok": True, "status": "ok", "sample": " Paris."})
+    http, grace = _real_wait_ready_on_failed_probe(sentinel)
+    with http, grace:
+        assert await sm._await_ready("chat", 8081) is SlotState.READY
+    assert sentinel.sentinel_ports == [8081]
+
+
+async def test_await_ready_halogen_failed_probe_with_a_broken_engine_still_fails(
+    halogen_slot: Callable[[dict[str, Any]], tuple[SlotManager, _HalogenSentinel]],
+) -> None:
+    """The grace only moves the judgement: a broken engine fails at the sentinel."""
+    sm, sentinel = halogen_slot({"ok": False, "status": "incoherent_output", "sample": ")))"})
+    http, grace = _real_wait_ready_on_failed_probe(sentinel)
+    with http, grace, pytest.raises(SlotOutputSanityFailed):
+        await sm._await_ready("chat", 8081)
+    assert sentinel.sentinel_ports == [8081]
+
+
+async def test_await_ready_halogen_garbage_raises_the_generic_failure(
+    halogen_slot: Callable[[dict[str, Any]], tuple[SlotManager, _HalogenSentinel]],
+) -> None:
+    """A judged-the-model failure raises the same typed error, in the same
+    shape, as the generic gate — so the dashboard message is identical."""
+    sm, _ = halogen_slot({"ok": False, "status": "incoherent_output", "sample": ")))))"})
+
+    with pytest.raises(SlotOutputSanityFailed) as excinfo:
+        await sm._await_ready("chat", 8081)
+
+    expected = output_sanity.failure_message(
+        output_sanity.SanityVerdict(ok=False, status="incoherent_output", sample=")))))")
+    )
+    assert str(excinfo.value) == expected
+    assert excinfo.value.code == "slot.output_sanity_failed"
+    assert excinfo.value.details["probe_status"] == "incoherent_output"
+    assert excinfo.value.details["sample"] == ")))))"
+    assert excinfo.value.details["slot"] == "chat"
+    assert excinfo.value.details["port"] == 8081
+
+
+async def test_await_ready_halogen_missing_sample_still_raises(
+    halogen_slot: Callable[[dict[str, Any]], tuple[SlotManager, _HalogenSentinel]],
+) -> None:
+    """``sample`` is optional on a verdict dict; a bare failure is a failure."""
+    sm, _ = halogen_slot({"ok": False, "status": "empty_output"})
+
+    with pytest.raises(SlotOutputSanityFailed) as excinfo:
+        await sm._await_ready("chat", 8081)
+
+    assert excinfo.value.details["probe_status"] == "empty_output"
+    assert excinfo.value.details["sample"] == ""
+
+
+@pytest.mark.parametrize("status", sorted(output_sanity.AMBIGUOUS_STATUSES))
+async def test_await_ready_halogen_a_clock_failure_parks_the_slot_warming(
+    halogen_slot: Callable[[dict[str, Any]], tuple[SlotManager, _HalogenSentinel]],
+    status: str,
+) -> None:
+    """A completion that never arrived is a fact about the clock, not a verdict
+    on the model: WARMING (retryable), not ERROR."""
+    sm, sentinel = halogen_slot({"ok": False, "status": status, "sample": ""})
+
+    assert await sm._await_ready("chat", 8081) is SlotState.WARMING
+    assert sentinel.sentinel_ports == [8081]
+
+
+async def test_await_ready_halogen_wait_timeout_skips_the_sentinel(
+    halogen_slot: Callable[[dict[str, Any]], tuple[SlotManager, _HalogenSentinel]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A readiness wait that times out never reaches the sentinel."""
+    sm, sentinel = halogen_slot({"ok": True, "status": "ok"})
+
+    async def _never_ready(port: int) -> None:
+        raise TimeoutError("halogen slot port 8081 was not ready")
+
+    monkeypatch.setattr(sentinel.provider, "wait_ready", _never_ready)
+
+    assert await sm._await_ready("chat", 8081) is SlotState.WARMING
+    assert sentinel.sentinel_ports == []
+
+
+async def test_generic_probe_not_called_for_halogen(
+    halogen_slot: Callable[[dict[str, Any]], tuple[SlotManager, _HalogenSentinel]],
+    container_stub: FakeContainerProvider,
+) -> None:
+    """The rigged generic probe (see ``halogen_slot``) raises if reached, and
+    the container double's own probe list stays empty."""
+    sm, _ = halogen_slot({"ok": True, "status": "ok", "sample": " Paris."})
+
+    slot = await sm.load("chat")
+
+    assert slot.state is SlotState.READY
+    assert container_stub.sanity_probes == []
+
+
+async def test_load_errors_and_stops_the_unit_when_the_halogen_sentinel_fails(
+    halogen_slot: Callable[[dict[str, Any]], tuple[SlotManager, _HalogenSentinel]],
+    container_stub: FakeContainerProvider,
+) -> None:
+    """End to end: the typed error lands the slot in ERROR with the sentinel's
+    verdict stamped on the record, exactly like a generic-gate failure."""
+    sm, _ = halogen_slot({"ok": False, "status": "incoherent_output", "sample": ")))"})
+
+    with pytest.raises(SlotOutputSanityFailed):
+        await sm.load("chat")
+
+    assert sm._current_state("chat") is SlotState.ERROR
+    record = sm._states[sm._key("chat")]
+    assert "The capital of France is" in record.message
+    assert record.extra[output_sanity.SANITY_FAILED_KEY] is True
+    assert record.extra[output_sanity.SANITY_STATUS_KEY] == "incoherent_output"
+    assert container_stub.unload_calls, "the judged unit is stopped"
+
+
+async def test_halogen_sentinel_honours_the_per_slot_opt_out(
+    halogen_slot: Callable[[dict[str, Any]], tuple[SlotManager, _HalogenSentinel]],
+    slot_root: Path,
+) -> None:
+    """``output_sanity = false`` is the escape hatch the failure message
+    advertises; it must switch the halogen sentinel off too."""
+    sm, sentinel = halogen_slot({"ok": False, "status": "incoherent_output", "sample": ")))"})
+    (slot_root / "chat.toml").write_text(
+        "\n".join(
+            [
+                'name = "chat"',
+                "port = 8081",
+                'provider = "llama-server"',
+                f"{output_sanity.SANITY_CFG_KEY} = false",
+                "[model]",
+                'default = "qwen3-4b-q4_k_m"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert await sm._await_ready("chat", 8081) is SlotState.READY
+    assert sentinel.waited == [8081]
+    assert sentinel.sentinel_ports == []

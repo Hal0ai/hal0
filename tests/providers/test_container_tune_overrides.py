@@ -155,6 +155,7 @@ def test_resolved_detail_carries_tune_effective() -> None:
         "speculation",
         "sources",
         "reasoning_effort_unavailable",
+        "tune_unavailable",
     }
     assert te["vision"] == "off" and te["sources"]["vision"] == "slot"
     assert te["reasoning_budget"] == 256 and te["sources"]["reasoning_budget"] == "profile"

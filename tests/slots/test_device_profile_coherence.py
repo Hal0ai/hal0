@@ -20,9 +20,14 @@ from __future__ import annotations
 
 import pytest
 
-from hal0.slots.config_write import _reconcile_device_profile
+from hal0.providers.container import _effective_runner, _resolve_image_ref
+from hal0.slots.config_write import (
+    _reconcile_device_profile,
+    reconcile_and_guard_slot_config,
+    reconcile_slot_updates,
+)
 from hal0.slots.manager import SlotManager
-from hal0.slots.state import SlotConfigError
+from hal0.slots.state import RunnerFamilyMismatch, SlotConfigError
 
 
 def _gpu_cfg(name: str, *, device: str, profile: str, model: str = "m") -> dict:
@@ -207,3 +212,121 @@ def test_profile_runner_ignored_on_unrelated_write(tmp_path, monkeypatch):
     cfg = {"profile": "pf", "device": "gpu-vulkan", "binary": ""}
     _reconcile_device_profile(cfg, changed={"threads"})
     assert cfg["binary"] == ""  # drift heals only on profile edit
+
+
+# ── a runner the profile does not launch (non-llama ``binary``) ──────────────
+#
+# The provider comes from the profile's family and, on the llama path, the image
+# from ``binary``. A non-llama runner under a llama profile would launch that
+# runner's image with llama-server arguments, so the opt-out clears it and the
+# write seam refuses to create it.
+
+
+def _rocm_lane(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: True)
+
+
+def _llm_cfg(**overrides: object) -> dict:
+    return {"name": "flash", "type": "llm", "device": "gpu-rocm", **overrides}
+
+
+def test_halogen_opt_in_then_opt_out_clears_the_runner(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _rocm_lane(monkeypatch)
+    cfg = _llm_cfg(device="gpu-vulkan", profile="agent")
+
+    cfg = reconcile_slot_updates(cfg, {"profile": "halogen"})
+    assert cfg["binary"] == "halogen"
+    assert cfg["device"] == "gpu-rocm"
+
+    cfg = reconcile_slot_updates(cfg, {"profile": "agent"})
+    assert "binary" not in cfg
+    assert cfg["device"] == "gpu-rocm"  # ADR-0029: a profile selects no hardware
+    assert _effective_runner(cfg, None).runtime_family == "llama-server"
+    assert "peonist" not in _resolve_image_ref(cfg, None)
+
+
+def test_clearing_the_profile_clears_a_runner_it_cannot_launch(tmp_hal0_home: str) -> None:
+    cfg = _llm_cfg(profile="halogen", binary="halogen")
+    cfg = reconcile_slot_updates(cfg, {"profile": None})
+    assert "profile" not in cfg
+    assert "binary" not in cfg
+
+
+def test_opt_out_clears_the_runner_on_a_nested_config(tmp_hal0_home: str) -> None:
+    cfg = {"slot": _llm_cfg(profile="halogen", binary="halogen"), "model": {"default": "m"}}
+    cfg = reconcile_slot_updates(cfg, {"profile": "agent"})
+    assert cfg["slot"]["profile"] == "agent"
+    assert "binary" not in cfg["slot"]
+
+
+def test_llama_family_runner_survives_a_runnerless_profile(tmp_hal0_home: str) -> None:
+    """``cuda`` is a llama runner: the llama provider launches its image correctly."""
+    cfg = _llm_cfg(device="gpu-cuda", profile="agent", binary="cuda")
+    cfg = reconcile_slot_updates(cfg, {"profile": "chat"})
+    assert cfg["binary"] == "cuda"
+
+
+def test_reselecting_an_engine_profile_keeps_its_own_runner(tmp_hal0_home: str) -> None:
+    """Runner-less seeds of a single-purpose engine still launch that engine."""
+    cfg = {"name": "voice", "type": "tts", "device": "cpu", "profile": "kokoro", "binary": "kokoro"}
+    cfg = reconcile_slot_updates(cfg, {"profile": "kokoro"})
+    assert cfg["binary"] == "kokoro"
+
+
+def test_an_unrelated_write_leaves_the_runner_alone(tmp_hal0_home: str) -> None:
+    """The clear is driven by a profile write, like the rest of the reconcile."""
+    cfg = _llm_cfg(profile="agent", binary="halogen")
+    cfg = reconcile_slot_updates(cfg, {"threads": 4})
+    assert cfg["binary"] == "halogen"
+
+
+@pytest.mark.parametrize(
+    "base",
+    [
+        pytest.param(_llm_cfg(profile="agent"), id="llama-profile"),
+        pytest.param(_llm_cfg(), id="no-profile"),
+    ],
+)
+def test_write_seam_refuses_a_runner_the_profile_cannot_launch(
+    tmp_hal0_home: str, base: dict
+) -> None:
+    with pytest.raises(RunnerFamilyMismatch) as exc:
+        reconcile_and_guard_slot_config("flash", base, {"binary": "halogen"})
+    assert exc.value.code == "slot.runner_family_mismatch"
+    assert exc.value.status == 409
+    assert "halogen" in exc.value.details["profiles"]
+    assert "halogen" in str(exc.value)
+
+
+def test_write_seam_refuses_the_mismatched_pair_written_together(tmp_hal0_home: str) -> None:
+    """A write that names both is the operator's own choice, so it is refused
+    rather than having its ``binary`` quietly dropped."""
+    base = _llm_cfg(profile="halogen", binary="halogen")
+    with pytest.raises(RunnerFamilyMismatch):
+        reconcile_and_guard_slot_config("flash", base, {"profile": "agent", "binary": "halogen"})
+
+
+def test_write_seam_allows_a_llama_runner_under_the_halogen_profile(tmp_hal0_home: str) -> None:
+    """The provider launches its own image, so this pair launches correctly."""
+    base = _llm_cfg(profile="halogen", binary="halogen")
+    merged = reconcile_and_guard_slot_config("flash", base, {"binary": "standard"})
+    assert merged["binary"] == "standard"
+
+
+def test_write_seam_does_not_veto_an_unrelated_write_on_an_old_slot(tmp_hal0_home: str) -> None:
+    """A write that moves neither key did not create the state on disk."""
+    base = _llm_cfg(profile="agent", binary="halogen")
+    merged = reconcile_and_guard_slot_config("flash", base, {"threads": 4})
+    assert merged["threads"] == 4
+
+
+async def test_create_refuses_a_runner_the_profile_cannot_launch(tmp_hal0_home: str) -> None:
+    sm = SlotManager()
+    with pytest.raises(RunnerFamilyMismatch):
+        await sm.create(
+            "flash",
+            {**_gpu_cfg("flash", device="gpu-rocm", profile="agent"), "binary": "halogen"},
+        )

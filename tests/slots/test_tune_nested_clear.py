@@ -84,3 +84,18 @@ def test_nested_profile_controls_thinking_pin(monkeypatch: pytest.MonkeyPatch) -
     with pytest.raises(BadRequest) as exc:
         guard_and_normalize_tune(merged, {"tune": {"enable_thinking": True}})
     assert exc.value.code == "slot.tune_pinned_by_flags"
+
+
+def test_ngram_judged_against_the_merged_profile(tmp_hal0_home: str) -> None:
+    """The guard resolves the slot's merged profile from the real catalog, so a
+    halogen slot refuses ngram and a llama slot takes it."""
+    halogen = {"type": "llm", "device": "gpu-rocm", "profile": "halogen"}
+    with pytest.raises(BadRequest) as exc:
+        guard_and_normalize_tune(dict(halogen), {"tune": {"speculation": "ngram"}})
+    assert exc.value.code == "slot.tune_unsupported_value"
+    merged = dict(halogen)
+    guard_and_normalize_tune(merged, {"tune": {"speculation": "off"}})
+    assert merged["tune"] == {"speculation": "off"}
+    llama = {"type": "llm", "device": "gpu-vulkan", "profile": "chat"}
+    guard_and_normalize_tune(llama, {"tune": {"speculation": "ngram"}})
+    assert llama["tune"] == {"speculation": "ngram"}

@@ -374,6 +374,162 @@ def test_tune_thinking_judged_against_the_profile_in_the_same_write(
     assert r.json()["error"]["code"] == "slot.tune_pinned_by_flags"
 
 
+@pytest.fixture
+def halogen_slot_toml(tmp_hal0_home: str) -> Path:
+    """A slot already on the halogen profile (written directly: the profile-wins
+    reconcile on PUT refuses halogen on a host with no ROCm render node)."""
+    root = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "flash.toml"
+    path.write_text(
+        'name = "flash"\ntype = "llm"\ndevice = "gpu-rocm"\nport = 8083\n'
+        'profile = "halogen"\n[model]\ndefault = "qwen3.8-flash-next-ht43"\n',
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_put_binary_of_another_family_on_a_llama_profile_is_409(
+    slot_toml: Path, client: TestClient
+) -> None:
+    """The drawer's Runtime select: halogen with a llama profile would launch the
+    vendor's image with llama-server arguments, so the slot write refuses it."""
+    assert client.put("/api/slots/chat/config", json={"profile": "agent"}).status_code == 200
+    before = slot_toml.read_bytes()
+
+    r = client.put("/api/slots/chat/config", json={"binary": "halogen"})
+
+    assert r.status_code == 409, r.text
+    err = r.json()["error"]
+    assert err["code"] == "slot.runner_family_mismatch"
+    assert "halogen" in err["message"]
+    assert err["details"]["profiles"] == ["halogen"]
+    assert slot_toml.read_bytes() == before
+
+
+def test_put_binary_of_another_family_with_no_profile_is_409(
+    slot_toml: Path, client: TestClient
+) -> None:
+    r = client.put("/api/slots/chat/config", json={"binary": "halogen"})
+    assert r.status_code == 409, r.text
+    assert r.json()["error"]["code"] == "slot.runner_family_mismatch"
+    assert "binary" not in _read(slot_toml)
+
+
+def test_put_halogen_profile_then_a_llama_profile_clears_the_runner(
+    slot_toml: Path, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Opt-in then opt-out through the real route: the file ends with no ``binary``."""
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: True)
+
+    assert client.put("/api/slots/chat/config", json={"profile": "halogen"}).status_code == 200
+    assert _read(slot_toml)["binary"] == "halogen"
+
+    r = client.put("/api/slots/chat/config", json={"profile": "agent"})
+
+    assert r.status_code == 200, r.text
+    on_disk = _read(slot_toml)
+    assert on_disk["profile"] == "agent"
+    assert "binary" not in on_disk
+    assert on_disk["device"] == "gpu-rocm"
+
+
+def test_put_llama_runner_on_a_halogen_slot_is_allowed(
+    halogen_slot_toml: Path, client: TestClient
+) -> None:
+    r = client.put("/api/slots/flash/config", json={"binary": "standard"})
+    assert r.status_code == 200, r.text
+    assert _read(halogen_slot_toml)["binary"] == "standard"
+
+
+def test_tune_ctx_past_the_native_window_refused_on_halogen_slot(
+    halogen_slot_toml: Path, client: TestClient
+) -> None:
+    """Without HALOGEN_ROPE_YARN the entrypoint exits 2 at once, and the reason
+    would otherwise only be in the journal."""
+    before = halogen_slot_toml.read_bytes()
+    r = client.put("/api/slots/flash/config", json={"tune": {"ctx_size": 262145}})
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert err["code"] == "slot.tune_unsupported_value"
+    assert "HALOGEN_ROPE_YARN" in err["message"]
+    assert err["details"]["key"] == "ctx_size"
+    assert halogen_slot_toml.read_bytes() == before
+
+
+def test_tune_ctx_as_a_string_is_judged_by_its_value_on_halogen_slot(
+    halogen_slot_toml: Path, client: TestClient
+) -> None:
+    """The tune validation coerces a numeric string, so the guard judges what would
+    be stored rather than the raw JSON value, which raised a TypeError."""
+    before = halogen_slot_toml.read_bytes()
+    r = client.put("/api/slots/flash/config", json={"tune": {"ctx_size": "524288"}})
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert err["code"] == "slot.tune_unsupported_value"
+    assert err["details"]["value"] == 524288
+    assert halogen_slot_toml.read_bytes() == before
+
+    r = client.put("/api/slots/flash/config", json={"tune": {"ctx_size": "262144"}})
+    assert r.status_code == 200, r.text
+    assert _read(halogen_slot_toml)["tune"]["ctx_size"] == 262144
+
+
+def test_tune_ctx_that_is_not_a_number_is_the_tune_validation_error(
+    halogen_slot_toml: Path, client: TestClient
+) -> None:
+    r = client.put("/api/slots/flash/config", json={"tune": {"ctx_size": "lots"}})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "validation.tune_invalid"
+
+
+def test_tune_guard_still_judges_only_the_keys_the_write_carries(
+    halogen_slot_toml: Path, client: TestClient
+) -> None:
+    """Handing the guard validated values must not hand it the stored table too: a
+    stale stored n-gram value does not veto an edit of another key."""
+    with halogen_slot_toml.open("a", encoding="utf-8") as fh:
+        fh.write('\n[tune]\nspeculation = "ngram"\n')
+    r = client.put("/api/slots/flash/config", json={"tune": {"ctx_size": 262144}})
+    assert r.status_code == 200, r.text
+    assert _read(halogen_slot_toml)["tune"]["speculation"] == "ngram"
+
+
+def test_tune_ctx_at_the_native_window_allowed_on_halogen_slot(
+    halogen_slot_toml: Path, client: TestClient
+) -> None:
+    r = client.put("/api/slots/flash/config", json={"tune": {"ctx_size": 262144}})
+    assert r.status_code == 200, r.text
+    assert _read(halogen_slot_toml)["tune"]["ctx_size"] == 262144
+
+
+def test_tune_ngram_refused_on_halogen_slot(halogen_slot_toml: Path, client: TestClient) -> None:
+    """The halogen engine has no n-gram drafter: the real write path refuses it."""
+    before = halogen_slot_toml.read_bytes()
+    r = client.put("/api/slots/flash/config", json={"tune": {"speculation": "ngram"}})
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert err["code"] == "slot.tune_unsupported_value"
+    assert err["details"] == {"key": "speculation", "value": "ngram", "runtime_family": "halogen"}
+    assert halogen_slot_toml.read_bytes() == before
+
+
+def test_tune_off_and_auto_allowed_on_halogen_slot(
+    halogen_slot_toml: Path, client: TestClient
+) -> None:
+    for mode in ("off", "auto"):
+        r = client.put("/api/slots/flash/config", json={"tune": {"speculation": mode}})
+        assert r.status_code == 200, r.text
+        assert _read(halogen_slot_toml)["tune"]["speculation"] == mode
+
+
+def test_tune_ngram_allowed_on_llama_slot(slot_toml: Path, client: TestClient) -> None:
+    r = client.put("/api/slots/chat/config", json={"tune": {"speculation": "ngram"}})
+    assert r.status_code == 200, r.text
+    assert _read(slot_toml)["tune"]["speculation"] == "ngram"
+
+
 def test_put_tune_per_key_nulls_remove_keys_and_empty_table(
     slot_toml: Path, client: TestClient
 ) -> None:

@@ -17,6 +17,7 @@ import pytest
 
 from hal0.providers.comfyui import ComfyUIProvider
 from hal0.providers.flm import FLMProvider
+from hal0.providers.halogen import HalogenProvider
 from hal0.providers.kokoro import KokoroProvider
 from hal0.providers.moonshine import MoonshineProvider
 from hal0.providers.qwen3tts import Qwen3TTSProvider
@@ -25,6 +26,7 @@ from hal0.runners import get_runner, resolve_runner_image
 _PROVIDERS = [
     pytest.param(ComfyUIProvider, "comfyui", id="comfyui"),
     pytest.param(FLMProvider, "flm", id="flm"),
+    pytest.param(HalogenProvider, "halogen", id="halogen"),
     pytest.param(KokoroProvider, "kokoro", id="kokoro"),
     pytest.param(MoonshineProvider, "moonshine", id="moonshine"),
     pytest.param(Qwen3TTSProvider, "qwen3tts", id="qwen3tts"),

@@ -65,6 +65,7 @@ _BACKEND_TO_PROVIDER: dict[str, str] = {
     "vibevoice": "kokoro",  # closest existing provider; the UI lets the user override
     "comfyui": "comfyui",
     "qwen3tts": "qwen3tts",
+    "halogen": "halogen",
 }
 
 # Per-runtime allow-list of host backends the toolbox image can actually
@@ -80,6 +81,7 @@ _RUNTIME_TO_HOST_BACKENDS: dict[str, tuple[str, ...]] = {
     "vibevoice": ("gpu-vulkan", "cpu"),
     "comfyui": ("gpu-vulkan",),
     "qwen3tts": ("gpu-rocm",),  # Qwen3-TTS runner is ROCm-only (needs /dev/kfd)
+    "halogen": ("gpu-rocm",),  # halogen Flash-Next is ROCm-only (needs /dev/kfd)
 }
 
 #: Runtimes whose image is ROCm-only (needs /dev/kfd) despite the

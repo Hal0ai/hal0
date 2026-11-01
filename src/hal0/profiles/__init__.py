@@ -43,7 +43,9 @@ from hal0.errors import Conflict, NotFound, UnprocessableEntity
 
 log = logging.getLogger(__name__)
 
-RuntimeFamily = Literal["llama-server", "flm", "kokoro", "qwen3tts", "moonshine", "comfyui"]
+RuntimeFamily = Literal[
+    "llama-server", "flm", "kokoro", "qwen3tts", "moonshine", "comfyui", "halogen"
+]
 SlotType = Literal["llm", "embedding", "reranking", "transcription", "tts", "image"]
 
 _PROFILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
@@ -194,6 +196,8 @@ def _supported_slot_types(runtime_family: RuntimeFamily) -> tuple[SlotType, ...]
         return ("transcription",)
     if runtime_family == "comfyui":
         return ("image",)
+    if runtime_family == "halogen":
+        return ("llm",)
     return ("llm", "embedding", "reranking")
 
 
@@ -250,8 +254,11 @@ class ProfileCatalog:
 
     def create(self, name: str, profile: ProfileConfig) -> ResolvedProfile:
         self._validate_name(name)
-        screen_profile_flags(profile.flags)
         profile = profile.model_copy(update={"runner": screen_profile_runner(profile.runner)})
+        family = _runtime_family(name, profile)
+        screen_profile_speculation(name, profile.speculation, runtime_family=family)
+        screen_profile_flags(profile.flags, runtime_family=family)
+        screen_profile_context(name, profile.ctx_size, profile.flags, runtime_family=family)
         with self._lock:
             catalog = load_profiles_config(self._path)
             if name in catalog.profile:
@@ -266,8 +273,6 @@ class ProfileCatalog:
 
     def update(self, name: str, patch: ProfilePatch) -> ResolvedProfile:
         self._guard_custom(name)
-        if patch.flags is not None:
-            screen_profile_flags(patch.flags)
         with self._lock:
             catalog = load_profiles_config(self._path)
             existing = catalog.profile.get(name)
@@ -310,6 +315,22 @@ class ProfileCatalog:
                 cloned_from=existing.cloned_from,
                 intent=patch.intent if patch.intent is not None else existing.intent,
             )
+            # The family comes from the MERGED profile (the patch's runner, else
+            # the stored one). Flags the patch carries are always screened; stored
+            # flags only when the patch moves the profile to another family, so a
+            # tune-only edit still works on a profile holding stale flags.
+            family = _runtime_family(name, updated)
+            family_moved = family != _runtime_family(name, existing)
+            # Speculation follows the same rule as flags: a patch that carries it
+            # is always screened, a stored value only when the family moves.
+            if patch.speculation is not None or family_moved:
+                screen_profile_speculation(name, updated.speculation, runtime_family=family)
+            if patch.flags is not None or family_moved:
+                screen_profile_flags(updated.flags, runtime_family=family)
+            # The window and the flag that permits it are judged together, so a
+            # patch that moves either one is screened against the merged pair.
+            if patch.ctx_size is not UNSET or patch.flags is not None or family_moved:
+                screen_profile_context(name, updated.ctx_size, updated.flags, runtime_family=family)
             catalog.profile[name] = updated
             save_profiles_config(catalog, self._path)
         return self._resolve_item(name, updated)
@@ -438,9 +459,12 @@ __all__ = [
     "RuntimeFamily",
     "SlotType",
     "resolve_loaded_profile",
+    "runner_runtime_family",
     "runtime_family_of",
+    "screen_profile_context",
     "screen_profile_flags",
     "screen_profile_runner",
+    "screen_profile_speculation",
 ]
 
 
@@ -512,8 +536,70 @@ def screen_profile_runner(runner: str | None) -> str | None:
     return key
 
 
-def screen_profile_flags(flags: str | None) -> None:
+def runner_runtime_family(runner: str | None) -> RuntimeFamily | None:
+    """The runtime family a runner key names; ``None`` for blank or unregistered.
+
+    Callers that hold a runner key but no profile (the profile routes, before
+    the catalog sees the write) derive the ``runtime_family`` for
+    :func:`screen_profile_flags` from here.
+    """
+    if runner is None or not runner.strip():
+        return None
+    from hal0.runners import RUNNER_IMAGES  # lazy: runners must not import profiles
+
+    spec = RUNNER_IMAGES.get(runner.strip())
+    return spec.runtime_family if spec is not None else None
+
+
+def screen_profile_speculation(
+    name: str, speculation: str | None, *, runtime_family: str | None
+) -> None:
+    """Refuse a speculation mode the profile's engine cannot run.
+
+    The halogen engine drafts with its own MTP heads (``auto``) or not at all
+    (``off``); it has no n-gram lookup, so ``speculation = "ngram"`` is refused
+    on a halogen-family profile (``profiles.speculation_unsupported``). Every
+    mode stands on the llama-server family.
+    """
+    if runtime_family == "halogen" and speculation == "ngram":
+        raise UnprocessableEntity(
+            f"profile {name!r}: speculation 'ngram' is not available on the halogen engine "
+            "(it takes 'auto' or 'off')",
+            code="profiles.speculation_unsupported",
+            details={"profile": name, "speculation": "ngram", "runtime_family": "halogen"},
+        )
+
+
+def screen_profile_context(
+    name: str, ctx_size: int | None, flags: str | None, *, runtime_family: str | None
+) -> None:
+    """Refuse a context window the profile's engine would refuse at start.
+
+    Only halogen has a hard native window (:func:`hal0.runners.knobs.native_ctx_problem`):
+    past it, the entrypoint exits 2 unless the flags carry ``HALOGEN_ROPE_YARN``
+    (``profiles.halogen_flag_out_of_range``).
+    """
+    if runtime_family != "halogen":
+        return
+    from hal0.runners.knobs import native_ctx_problem
+
+    problem = native_ctx_problem(ctx_size, flags)
+    if problem is not None:
+        raise UnprocessableEntity(
+            f"profile {name!r}: {problem}",
+            code="profiles.halogen_flag_out_of_range",
+            details={"profile": name, "ctx_size": ctx_size, "needs": "HALOGEN_ROPE_YARN"},
+        )
+
+
+def screen_profile_flags(flags: str | None, *, runtime_family: str | None = None) -> None:
     """Reject every flag a profile may not carry, before it is persisted.
+
+    ``runtime_family`` picks the screen. ``"halogen"`` routes to
+    :func:`hal0.runners.knobs.screen_halogen_flags`: a halogen profile's flags
+    are ``HALOGEN_NAME=value`` environment tokens, which the llama screen below
+    would refuse as bare positionals. Every other value, and ``None``, is the
+    llama screen.
 
     The catalog is the write seam (routes, import, CLI). A profile may not set
     hardware flags (the slot's typed fields), hal0-managed flags (including
@@ -524,6 +610,11 @@ def screen_profile_flags(flags: str | None) -> None:
     ``--reasoning-format none`` (#2545), in any spelling. The text must be
     valid shell text.
     """
+    if runtime_family == "halogen":
+        from hal0.runners.knobs import screen_halogen_flags
+
+        screen_halogen_flags(flags)
+        return
     if not flags or not flags.strip():
         return
     try:

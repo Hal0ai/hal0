@@ -29,6 +29,23 @@ export type RunnerState = 'installed' | 'installable' | 'unavailable'
 /** `hal0.runners.RunnerTier` (ADR-0027). */
 export type RunnerTier = 'default' | 'optional'
 
+/** One engine variable a runner's dashboard renders as a typed control
+ *  (`hal0.runners.knobs.EngineKnob`, served on `SystemInfoBackend.knobs`). */
+export interface EngineKnob {
+  env: string
+  label: string
+  kind: 'int' | 'bool' | 'enum'
+  default: string | null
+  minimum: number | null
+  maximum: number | null
+  choices: string[]
+  help: string
+  /** The capacity estimator counts this knob. */
+  memory: boolean
+  /** A change takes effect on the next slot start. */
+  restart: boolean
+}
+
 export interface SystemInfoBackend {
   image: string
   runtime_family: string
@@ -58,6 +75,11 @@ export interface SystemInfoBackend {
     jinja?: boolean
     mmproj?: boolean
   }
+  /** Engine knobs the runner's dashboard renders (halogen only; `[]` otherwise). */
+  knobs?: EngineKnob[]
+  /** Profile-flag names the runner's flags may not set; a trailing `*` marks a
+   *  name prefix (halogen only; `[]` otherwise). */
+  knob_denied?: string[]
   state: RunnerState
 }
 

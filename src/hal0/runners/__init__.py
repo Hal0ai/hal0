@@ -4,7 +4,8 @@ One entry per runner hal0 ships. A runner's key is its only identifier: the
 same word names the registry entry, the ``runners`` row in ``manifest.json``
 (:mod:`hal0.runners.pins`), the catalogue row in the runner-images repo's
 ``images.json`` and the published package ``ghcr.io/hal0ai/hal0-runner-<key>``
-(``cuda`` pins the upstream ggml-org CUDA server image instead of a build).
+(``cuda`` and ``halogen`` pin an upstream image instead of a build: the
+ggml-org CUDA server image and the peonist-ai halogen-flash-server image).
 
 This module decides "what image does runner X launch right now":
 :func:`resolve_runner_image` applies the ``HAL0_RUNNER_IMAGE_<KEY>`` env
@@ -29,7 +30,9 @@ from hal0.runners.pins import env_override, pin_for
 #: module has zero import-time coupling to the profiles subsystem —
 #: ``hal0.profiles._runtime_family`` imports FROM here. Same vocabulary as
 #: ``hal0.profiles.RuntimeFamily``.
-RuntimeFamily = Literal["llama-server", "flm", "kokoro", "qwen3tts", "moonshine", "comfyui"]
+RuntimeFamily = Literal[
+    "llama-server", "flm", "kokoro", "qwen3tts", "moonshine", "comfyui", "halogen"
+]
 
 #: Runtime tier vocabulary — see :attr:`Runner.tier`. Tuple order is display
 #: order: the Runner Images page and the runtime pickers list tiers this way.
@@ -224,6 +227,24 @@ RUNNER_IMAGES: dict[str, Runner] = {
         format_arch="gguf",
         title="NVIDIA CUDA",
         blurb="llama.cpp for NVIDIA GPUs. Pick it on a box with an NVIDIA card.",
+    ),
+    # Closed-source external engine: the image is pinned from the upstream
+    # peonist-ai registry, not built by hal0. Never returned by
+    # runner_for_backend (a profile must name it explicitly); the engine does
+    # its own speculation, so `supports` stays empty.
+    "halogen": Runner(
+        key="halogen",
+        runtime_family="halogen",
+        supports=RunnerSupports(),
+        device_class="gpu",
+        backend="rocm",
+        supported_backends=("rocm",),
+        format_arch="hgn",
+        title="halogen (Flash-Next)",
+        blurb=(
+            "Peonist's engine for Qwen3.8-Flash-Next on Strix Halo (ROCm). Opt-in;"
+            " one model, closed source, takes most of a 128 GB box."
+        ),
     ),
 }
 

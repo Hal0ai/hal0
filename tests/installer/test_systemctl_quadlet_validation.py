@@ -36,6 +36,7 @@ import pytest
 
 from hal0.providers.base import HealthCheck, Mount, RuntimeLaunchPlan
 from hal0.providers.container import ContainerProvider, _render_quadlet_from_plan
+from hal0.providers.halogen import HalogenProvider
 
 REPO = Path(__file__).resolve().parents[2]
 WRAPPER = REPO / "installer" / "wrappers" / "hal0-systemctl"
@@ -113,7 +114,9 @@ def test_remove_unit_verb_is_gone() -> None:
 # ── the real renderer's output, byte-for-byte ──────────────────────────────
 #
 # One plan per shape the fleet actually renders. Every optional key in
-# ``_render_quadlet_from_plan`` is covered by at least one entry.
+# ``_render_quadlet_from_plan`` is covered by at least one entry, except ``User=``:
+# the wrapper accepts only the box's own hal0 uid:gid there, so its own
+# ``test_user_*`` cases below cover it.
 
 _PLANS: dict[str, tuple[RuntimeLaunchPlan, dict[str, Any]]] = {
     "minimal": (
@@ -208,11 +211,73 @@ _PLANS: dict[str, tuple[RuntimeLaunchPlan, dict[str, Any]]] = {
         ),
         {},
     ),
+    # The halogen unit, field for field what HalogenProvider.container_spec
+    # builds: a typed stop grace (PodmanArgs=--stop-timeout, TimeoutStopSec=),
+    # its own terminal exit statuses, and a profile value holding a space, which
+    # renders as one double-quoted Environment= word.
+    "halogen": (
+        RuntimeLaunchPlan(
+            image="ghcr.io/peonist-ai/halogen-flash-server:0.18.22@sha256:" + "0" * 64,
+            command=["all"],
+            env={
+                "HALOGEN_THINKING_BUDGET_MESSAGE": "Time is up.",
+                "HALOGEN_API_PORT": "8099",
+                "HALOGEN_BIND": "127.0.0.1",
+                "HALOGEN_CHECKPOINT": "/mnt/ai-models/halogen/qwen38-flash-next-ht43.hgn",
+                "HALOGEN_MODEL_ID": "qwen3.8-flash-next-ht43",
+            },
+            mounts=[
+                Mount("/mnt/ai-models", "/mnt/ai-models", read_only=True),
+                Mount("/var/lib/hal0/halogen-cache", "/cache", read_only=False, selinux="z"),
+            ],
+            devices=["/dev/kfd", "/dev/dri/renderD128"],
+            security_opt=["apparmor=unconfined", "seccomp=unconfined"],
+            group_add=["993", "44"],
+            port=8099,
+            network_mode="",
+            ipc="host",
+            ulimits=["memlock=-1"],
+            health=HealthCheck(
+                cmd=(
+                    'python3 -c "import urllib.request;'
+                    "urllib.request.urlopen('http://127.0.0.1:8099/health',timeout=30)\""
+                ),
+                start_period="10m",
+                interval="30s",
+                retries=3,
+                timeout="35s",
+            ),
+            stop_timeout_s=120,
+            restart_prevent_exit_status=(1, 2),
+        ),
+        {},
+    ),
+    # A llama slot whose [server].env values need quoting. SlotConfig only forbids
+    # newlines in them, and the bare form they rendered as before would split on
+    # the space. Space, double quote, backslash and a trailing backslash each get
+    # a value, since each changes what the quoted word looks like.
+    "llama-env-space": (
+        RuntimeLaunchPlan(
+            image="ghcr.io/hal0ai/hal0-toolbox-rocm:v1",
+            command=["llama-server", "--port", "8095"],
+            env={
+                "HAL0_NOTE": "two words",
+                "HAL0_QUOTED": 'say "hi"',
+                "HAL0_PATH": "c:\\models",
+                "HAL0_TRAILING": "ends in a backslash\\",
+                "HAL0_SINGLE": "it's",
+                "HAL0_BARE": "plain",
+            },
+            port=8095,
+            network_mode="",
+        ),
+        {},
+    ),
 }
 
 
 # #1759 allow-lists only the PodmanArgs= flags hal0's renderer emits
-# (--group-add/--security-opt/--ipc/--ulimit), so an out-of-list flag is refused
+# (--group-add/--security-opt/--ipc/--ulimit/--stop-timeout), so an out-of-list flag is refused
 # at the root seam even though the renderer has no way left to produce one.
 def test_out_of_allowlist_podman_args_are_refused_at_the_seam() -> None:
     """A unit body carrying a flag outside the allow-list (e.g. --privileged)
@@ -238,6 +303,67 @@ def test_podman_args_allows_only_the_rendered_compat_flags() -> None:
         "--security-opt seccomp=unconfined --security-opt label=disable\n"
     )
     _accepts(body, "chat")
+
+
+def test_stop_grace_keys_accept_a_bare_number() -> None:
+    """A runtime's stop grace renders as both spellings of a number and nothing else."""
+    _accepts(f"{_HEAD}PodmanArgs=--stop-timeout=120\n\n[Service]\nTimeoutStopSec=150\n", "chat")
+    _accepts(f"{_HEAD}PodmanArgs=--stop-timeout 120\n", "chat")
+    # The bounds of the unit's key.
+    _accepts(f"{_HEAD}\n[Service]\nTimeoutStopSec=1\n", "chat")
+    _accepts(f"{_HEAD}\n[Service]\nTimeoutStopSec=999999999\n", "chat")
+
+
+def test_quoted_environment_value_is_one_word_or_refused() -> None:
+    """Both quotes present, nothing after the closing one, only the two escapes the
+    renderer writes. A value of 1024 bytes fits however many of them are escapes,
+    the same bound the bare form has."""
+    _accepts(f'{_HEAD}Environment="FOO=a b"\n', "chat")
+    _accepts(f'{_HEAD}Environment="FOO=a \\"b\\" c\\\\"\n', "chat")
+    _accepts(f'{_HEAD}Environment="FOO={"a" * 1024}"\n', "chat")
+    escaped_quote = '\\"'
+    _accepts(f'{_HEAD}Environment="FOO={escaped_quote * 1024}"\n', "chat")
+    _rejects(f'{_HEAD}Environment="FOO={"a" * 1025}"\n', "chat")
+
+
+def test_live_halogen_provider_render_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end through ``HalogenProvider.container_spec``, not a hand-built plan,
+    with a profile whose flag value holds a space and a quote."""
+    monkeypatch.setenv("HAL0_MODEL_STORE", "/mnt/ai-models")
+    monkeypatch.setenv("HAL0_HALOGEN_CACHE", str(tmp_path))
+    provider = HalogenProvider()
+    profile = MagicMock()
+    profile.flags = (
+        'HALOGEN_THINKING_BUDGET_MESSAGE="Time is up." '
+        "HALOGEN_REFUSAL='say \"no\" twice' HALOGEN_KV8=1"
+    )
+    profile.reasoning_effort = "default"
+    profile.reasoning_budget = -1
+    profile.runtime_family = "halogen"
+    slot_cfg = {
+        "name": "flash",
+        "port": 8099,
+        "device": "gpu-rocm",
+        "profile": "halogen",
+        "model": {"default": "qwen3.8-flash-next-ht43"},
+    }
+    model_info = {
+        "_model_key": "qwen3.8-flash-next-ht43",
+        "path": "/mnt/ai-models/halogen/qwen38-flash-next-ht43.hgn",
+    }
+    with (
+        patch("hal0.providers.container._resolve_profile", return_value=profile),
+        patch("hal0.providers.halogen.resolve_gpu_device_paths", return_value=["/dev/kfd"]),
+        patch("hal0.providers.halogen.resolve_gpu_group_ids", return_value=[993, 44]),
+    ):
+        plan = provider.container_spec(slot_cfg, model_info)
+    unit = _render_quadlet_from_plan("flash", plan)
+    assert 'Environment="HALOGEN_THINKING_BUDGET_MESSAGE=Time is up."' in unit.splitlines()
+    assert "--stop-timeout=120" in unit
+    assert "TimeoutStopSec=150" in unit.splitlines()
+    _accepts(unit, "flash")
 
 
 def _hal0_account_ids() -> str | None:
@@ -394,6 +520,27 @@ ESCALATIONS = {
         f"{_HEAD}PodmanArgs=--security-opt label=disable --runtime /tmp/evil.sh\n"
     ),
     "podmanargs-group-add-missing-value": f"{_HEAD}PodmanArgs=--group-add\n",
+    # --stop-timeout is a number of seconds and nothing else.
+    "podmanargs-stop-timeout-word": f"{_HEAD}PodmanArgs=--stop-timeout=abc\n",
+    "podmanargs-stop-timeout-injection": f"{_HEAD}PodmanArgs=--stop-timeout=1;x\n",
+    "podmanargs-stop-timeout-negative": f"{_HEAD}PodmanArgs=--stop-timeout=-1\n",
+    "podmanargs-stop-timeout-empty": f"{_HEAD}PodmanArgs=--stop-timeout=\n",
+    "podmanargs-stop-timeout-missing-value": f"{_HEAD}PodmanArgs=--stop-timeout\n",
+    "podmanargs-stop-timeout-then-runtime": (
+        f"{_HEAD}PodmanArgs=--stop-timeout=120 --runtime /tmp/evil.sh\n"
+    ),
+    # Environment=: the quoted spelling is one whole word, or it is refused.
+    "environment-quoted-trailing-word": f'{_HEAD}Environment="FOO=a b" trailing\n',
+    "environment-quoted-second-word": f'{_HEAD}Environment="FOO=a" "BAR=b"\n',
+    "environment-quoted-second-bare-word": f'{_HEAD}Environment="FOO=a" BAR=b\n',
+    "environment-quoted-unterminated": f'{_HEAD}Environment="FOO=a b\n',
+    "environment-quoted-escaped-closing-quote": f'{_HEAD}Environment="FOO=a\\"\n',
+    "environment-quoted-unknown-escape": f'{_HEAD}Environment="FOO=a\\nb"\n',
+    "environment-quoted-bad-name": f'{_HEAD}Environment="9BAD=1"\n',
+    "environment-quoted-no-assignment": f'{_HEAD}Environment="FOO"\n',
+    "environment-quoted-empty": f'{_HEAD}Environment=""\n',
+    "environment-single-quoted": f"{_HEAD}Environment='FOO=a b'\n",
+    "environment-quoted-control-byte": f'{_HEAD}Environment="FOO=a\tb"\n',
     # [Service] value pinning.
     "service-standardoutput-file": f"{_HEAD}\n[Service]\nStandardOutput=file:/root/.ssh/authorized_keys\n",
     "service-syslogidentifier-free": f"{_HEAD}\n[Service]\nSyslogIdentifier=../evil\n",
@@ -429,6 +576,20 @@ ESCALATIONS = {
     "service-successexitstatus-range": f"{_HEAD}\n[Service]\nSuccessExitStatus=0-255\n",
     "service-successexitstatus-too-wide": f"{_HEAD}\n[Service]\nSuccessExitStatus=1430\n",
     "service-workingdirectory": f"{_HEAD}\n[Service]\nWorkingDirectory=/root\n",
+    # TimeoutStopSec= is a bare number of seconds in [Service]; systemd's own
+    # duration words, and the key anywhere else, are refused.
+    "service-timeoutstopsec-word": f"{_HEAD}\n[Service]\nTimeoutStopSec=abc\n",
+    "service-timeoutstopsec-infinity": f"{_HEAD}\n[Service]\nTimeoutStopSec=infinity\n",
+    "service-timeoutstopsec-duration": f"{_HEAD}\n[Service]\nTimeoutStopSec=2min\n",
+    "service-timeoutstopsec-empty": f"{_HEAD}\n[Service]\nTimeoutStopSec=\n",
+    # systemd reads 0 as no timeout at all (config_parse_sec_fix_0), so a stop could
+    # block forever. Every spelling of it goes, and so does a tenth digit.
+    "service-timeoutstopsec-zero": f"{_HEAD}\n[Service]\nTimeoutStopSec=0\n",
+    "service-timeoutstopsec-all-zeros": f"{_HEAD}\n[Service]\nTimeoutStopSec=00\n",
+    "service-timeoutstopsec-leading-zero": f"{_HEAD}\n[Service]\nTimeoutStopSec=0150\n",
+    "service-timeoutstopsec-too-long": f"{_HEAD}\n[Service]\nTimeoutStopSec=1000000000\n",
+    "unit-timeoutstopsec": f"[Unit]\nTimeoutStopSec=150\n\n{_HEAD}",
+    "container-timeoutstopsec": f"{_HEAD}TimeoutStopSec=150\n",
     # #3066: [Container] User= exists for the img slot to DROP to the hal0
     # account. Root, a name, a bare uid and a [Service]-side User= are refused.
     "container-user-root": f"{_HEAD}User=0:0\n",

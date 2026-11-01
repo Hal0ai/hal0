@@ -50,6 +50,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -95,8 +96,10 @@ from hal0.runners import (
     llama_build_from_tag,
     runner_supports_reasoning_effort,
 )
+from hal0.runners.knobs import HALOGEN_NATIVE_CTX, HALOGEN_TUNE_UNAVAILABLE
 from hal0.slot_lifecycle_budget import (
     HEALTH_TIMEOUT_S,
+    TEARDOWN_MARGIN_S,
     UNIT_ADMIN_CALLS_ALLOWANCE_S,
     UNIT_START_TIMEOUT_S,
 )
@@ -108,7 +111,7 @@ from hal0.slots.naming import (
     slot_quadlet_name,
     slot_unit_name,
 )
-from hal0.slots.state import SlotSpawnFailed
+from hal0.slots.state import RunnerFamilyMismatch, SlotSpawnFailed
 from hal0.slots.tune import EffectiveTune, effective_tune
 from hal0.system.seam import SeamTimeout, SystemCtlSeam, is_hal0_service_user
 
@@ -595,6 +598,13 @@ _HEALTH_REQUEST_TIMEOUT_S = 3.0
 #: reset-failed) so the two stay numerically locked together.
 _UNIT_STOP_TIMEOUT_S = UNIT_ADMIN_CALLS_ALLOWANCE_S / 3
 
+#: Seconds a unit's own stop timeout outlasts the runtime's declared grace
+#: (``RuntimeLaunchPlan.stop_timeout_s``): ``TimeoutStopSec`` renders as the
+#: grace plus this (see :func:`_render_quadlet_from_plan`), and the client-side
+#: ``systemctl stop`` bound (:func:`unit_stop_bound_s`) is the same number so
+#: the client never gives up before systemd does.
+_STOP_TIMEOUT_MARGIN_S = 30
+
 #: Wall-clock bound on the ``systemctl restart`` that actually (re)spawns a
 #: slot's container (#1869/#1870) — the one seam call in the load path that
 #: can legitimately take a while (device attach, a cold netavark setup)
@@ -752,6 +762,27 @@ def unit_sha_of_text(unit_text: str) -> str | None:
     return None
 
 
+#: Characters that make systemd split or unquote an ``Environment=`` word: white
+#: space ends the assignment, ``"`` and ``'`` open a quoted span, a backslash escapes.
+_ENV_NEEDS_QUOTES = re.compile(r"[\s\"'\\]")
+
+
+def _environment_line(key: str, value: str) -> str:
+    """One ``Environment=`` line for ``key=value``.
+
+    systemd (and Quadlet, which reads the key the same way) splits the value
+    into words on unquoted spaces, so ``K=Time is up.`` would set ``K=Time`` and
+    ``K=y X=1`` would set a second variable. An assignment holding white space,
+    a quote or a backslash is therefore written as ONE double-quoted word with
+    ``"`` and ``\\`` escaped. Anything else renders bare, exactly as before.
+    """
+    assignment = f"{key}={value}"
+    if _ENV_NEEDS_QUOTES.search(assignment) is None:
+        return f"Environment={assignment}"
+    escaped = assignment.replace("\\", "\\\\").replace('"', '\\"')
+    return f'Environment="{escaped}"'
+
+
 def _render_quadlet_from_plan(
     instance_token: str,
     plan: RuntimeLaunchPlan,
@@ -884,7 +915,7 @@ def _render_quadlet_from_plan(
     for mount in plan.mounts:
         lines.append(f"Volume={mount.render_quadlet()}")
     for k, v in plan.env.items():
-        lines.append(f"Environment={k}={v}")
+        lines.append(_environment_line(k, v))
     # Publish derived from plan.port (declarative). Skipped under host networking
     # where port publishing is meaningless. ``publish_host`` defaults to loopback;
     # an operator widens it via [slots].publish_host.
@@ -905,6 +936,8 @@ def _render_quadlet_from_plan(
         runtime_args.append(f"--ipc={plan.ipc}")
     for limit in plan.ulimits:
         runtime_args += ["--ulimit", limit]
+    if plan.stop_timeout_s > 0:
+        runtime_args.append(f"--stop-timeout={plan.stop_timeout_s}")
     if runtime_args:
         lines.append("PodmanArgs=" + " ".join(shlex.quote(a) for a in runtime_args))
     # Exec = the in-container argv (after the image). Every token is
@@ -947,6 +980,13 @@ def _render_quadlet_from_plan(
             "RestartSec=5",
             "RestartSteps=6",
             "RestartMaxDelaySec=300",
+            # A runtime with a stop grace needs the unit's own stop timeout to
+            # outlast it by 30 s (the podman --stop-timeout above). Absent by default.
+            *(
+                [f"TimeoutStopSec={plan.stop_timeout_s + _STOP_TIMEOUT_MARGIN_S}"]
+                if plan.stop_timeout_s > 0
+                else []
+            ),
             # #2037 fail-fast: the runner entrypoint translates a death
             # before /health ever answered into exit 64 ("died during model
             # load" — corrupt GGUF, bogus flag), which would otherwise burn
@@ -974,7 +1014,9 @@ def _render_quadlet_from_plan(
             # the backoff runway here and are handled load-phase-only, where
             # "before /health ever answered" makes them deterministic, in the
             # runner images' shared entrypoint (hal0-runner-images repo).
-            "RestartPreventExitStatus=64 132",
+            # Built-in codes first; a runtime's own terminal codes follow in order.
+            "RestartPreventExitStatus="
+            + " ".join(["64", "132", *map(str, plan.restart_prevent_exit_status)]),
             # #2130: a requested stop is not a failure. `systemctl stop` sends
             # SIGTERM; podman propagates the container's graceful SIGTERM exit
             # as its own exit CODE 143 (128+15), not a signal death — so
@@ -1227,12 +1269,113 @@ def _spec_provider_for(slot_cfg: dict[str, Any]) -> Any | None:
     return _provider_for_family(slot_cfg, _profile_runtime_family(slot_cfg))
 
 
+def runner_family_mismatch(slot_cfg: Mapping[str, Any]) -> RunnerFamilyMismatch | None:
+    """The refusal for a ``binary`` this slot's launch would not dispatch to, else None.
+
+    ``slot_cfg`` is the flat view (scalars at the root). A llama-family ``binary``
+    is never a mismatch: a non-llama provider launches its own image and ignores
+    it, and the llama path can run any llama runner. Compared against what the
+    launch dispatch answers rather than the profile's family alone, so a profile-less
+    ``type=tts`` slot on ``binary=kokoro`` (which launches Kokoro) reads as agreeing.
+    A dispatch that cannot answer is not this check's to report.
+    """
+    runner = _binary_runner(slot_cfg)
+    if runner is None or runner.runtime_family == "llama-server":
+        return None
+    try:
+        provider = _spec_provider_for(dict(slot_cfg))
+    except Hal0Error:
+        return None
+    launches = getattr(provider, "name", "llama-server")
+    if launches == runner.runtime_family:
+        return None
+    try:
+        profiles = [
+            p.name for p in ProfileCatalog().list() if p.runtime_family == runner.runtime_family
+        ]
+    except Hal0Error:
+        profiles = []
+    slot = str(slot_cfg.get("name") or "")
+    profile = str(slot_cfg.get("profile") or "")
+    pick = f"pick the {profiles[0]!r} profile" if profiles else "pick a profile for that runtime"
+    return RunnerFamilyMismatch(
+        f"slot {slot!r} names the {runner.title or runner.key} runtime, but "
+        + (f"its profile {profile!r}" if profile else "with no profile it")
+        + f" launches {launches}, which cannot run that runtime's image; "
+        f"{pick}, or set the slot's runtime back to Auto",
+        details={
+            "slot": slot,
+            "binary": runner.key,
+            "runner_family": runner.runtime_family,
+            "launches": launches,
+            "profile": profile,
+            "profiles": profiles,
+        },
+    )
+
+
+def readiness_probe_budget_s(slot_cfg: Mapping[str, Any]) -> float | None:
+    """Seconds the per-request readiness gate may wait on this slot's health probe.
+
+    A provider whose health probe can legitimately outlast a request declares one
+    (``readiness_budget_s``; halogen's waits out a slow PING for the fail-watcher).
+    ``None`` is every other slot: the probe's own short bound applies.
+    """
+    try:
+        provider = _spec_provider_for(dict(slot_cfg))
+    except Exception:
+        return None
+    budget = getattr(provider, "readiness_budget_s", None)
+    return float(budget) if budget else None
+
+
+def unit_stop_bound_s(slot_cfg: Mapping[str, Any]) -> float | None:
+    """The widened ``systemctl stop`` bound for a runtime with a declared grace.
+
+    A runtime that declares one (``Provider.stop_grace_s``; halogen's engine
+    needs 120 s to exit cleanly after SIGTERM) gets ``max(_UNIT_STOP_TIMEOUT_S,
+    stop_grace_s + 30)``, which is the unit's own ``TimeoutStopSec`` (150 s for
+    halogen), so :meth:`ContainerProvider.unload_sync` never abandons a shutdown
+    the engine is still performing correctly. :meth:`SlotManager.terminate` waits
+    longer again (:func:`terminate_budget_s`).
+
+    ``None`` means "no declared grace": the llama-server default, and every
+    provider whose ``stop_grace_s`` is 0 (podman's default stop timeout, not "no
+    time"). The caller keeps its own default bound. A provider that cannot be
+    resolved is also ``None``: teardown must not fail on a lookup.
+    """
+    try:
+        provider = _spec_provider_for(dict(slot_cfg))
+    except Exception:
+        return None
+    grace = int(getattr(provider, "stop_grace_s", 0) or 0)
+    if grace <= 0:
+        return None
+    return max(_UNIT_STOP_TIMEOUT_S, float(grace + _STOP_TIMEOUT_MARGIN_S))
+
+
+def terminate_budget_s(slot_cfg: Mapping[str, Any]) -> float | None:
+    """:meth:`SlotManager.terminate`'s wait for a runtime with a declared grace.
+
+    The stop bound (:func:`unit_stop_bound_s`) plus
+    :data:`~hal0.slot_lifecycle_budget.TEARDOWN_MARGIN_S`: 160 s for halogen, so
+    the worker gets through the Quadlet removal, ``daemon-reload`` and
+    ``reset-failed`` after even a full-length stop, and a caller never writes a
+    new unit while an abandoned thread may still remove the old one. ``None``
+    where :func:`unit_stop_bound_s` is: the caller keeps its own default.
+    """
+    bound = unit_stop_bound_s(slot_cfg)
+    return None if bound is None else bound + TEARDOWN_MARGIN_S
+
+
 def _provider_for_family(slot_cfg: dict[str, Any], family: str | None) -> Any | None:
     """The dispatch half of :func:`_spec_provider_for`, given the runtime family.
 
-    Never resolves a profile itself, so a caller that must not write (the
-    flags-fold dry run — ``ProfileCatalog.resolve`` can persist a shipped seed
-    profile) supplies a family derived from already-loaded config.
+    Never looks a profile up itself: the caller supplies the family.
+    :func:`_spec_provider_for` reads it from the catalog
+    (:func:`_profile_runtime_family`); :func:`_fixed_family_provider` takes it
+    from a profile the caller has already resolved, so that path does not read
+    the catalog a second time.
     """
     device = str(slot_cfg.get("device", ""))
     slot_type = str(slot_cfg.get("type", ""))
@@ -1266,6 +1409,10 @@ def _provider_for_family(slot_cfg: dict[str, Any], family: str | None) -> Any | 
         from hal0.providers.comfyui import ComfyUIProvider
 
         return ComfyUIProvider()
+    if family == "halogen":
+        from hal0.providers.halogen import HalogenProvider
+
+        return HalogenProvider()
     if family not in (None, "llama-server"):
         # A runtime family with no dispatch branch above. This can only
         # happen when someone extends the RuntimeFamily literal without
@@ -1364,7 +1511,9 @@ def slot_effective_context(
     The ONE resolver views (``slot_view``, ``/v1/models``, the agent anchor
     window, capacity) use, so no surface re-implements the rule. A slot whose
     profile does not resolve yields ``(None, None)``. FLM slots report their
-    profile's window, else 8192. An FLM trio shadow (``served_by`` its anchor)
+    profile's window, else 8192. A halogen slot reports its profile's window,
+    else the engine's native one (:data:`~hal0.runners.knobs.HALOGEN_NATIVE_CTX`,
+    ``"fallback"``). An FLM trio shadow (``served_by`` its anchor)
     runs no process of its own: it reports its anchor's window.
     """
     if str(slot_cfg.get("device") or "") == "npu" and slot_cfg.get("type") in (
@@ -1383,6 +1532,10 @@ def slot_effective_context(
         ctx_size = getattr(profile, "ctx_size", None)
         return (int(ctx_size), "profile") if ctx_size else (_FLM_DEFAULT_CTX, "fallback")
     profile = effective_tune(slot_cfg, profile)
+    if not profile.ctx_size and _is_halogen_slot(slot_cfg):
+        # The engine serves a model of its own family at its native window; a
+        # profile that names none runs that, not the llama-server 8192 fallback.
+        return HALOGEN_NATIVE_CTX, "fallback"
     model_table = slot_cfg.get("model") if isinstance(slot_cfg.get("model"), Mapping) else {}
     model_id = str(model_table.get("default") or "")
     model_info: dict[str, Any] = {}
@@ -1832,7 +1985,13 @@ def _resolve_llama_scalars(
         "spec_plan": spec.as_dict(),
         "profile_reasoning": profile_reasoning,
         "slot_reasoning": slot_reasoning,
-        "tune_effective": {**tune.as_dict(), "reasoning_effort_unavailable": effort_unavailable},
+        "tune_effective": {
+            **tune.as_dict(),
+            "reasoning_effort_unavailable": effort_unavailable,
+            # llama-server takes every tune value; the key is always present so a
+            # reader never has to tell "none" from "this engine does not say".
+            "tune_unavailable": {},
+        },
         "lane_device": lane_device(effective_backend),
         "draft_device": (
             lane_device(effective_backend)
@@ -2095,6 +2254,10 @@ class ContainerProvider(Provider):
         GET /v1/models; 200 there means the server is up and healthy.
         Connection-refused / timeout are always unhealthy (no fallback).
 
+        Halogen delegation: its own :meth:`~hal0.providers.halogen.HalogenProvider.liveness`,
+        where a read timeout is a stall and not a death, so a silent engine is
+        never struck to ERROR and torn down on this path.
+
         Returns {"ok": bool, "status": str}.
         """
         if slot_cfg is not None:
@@ -2104,6 +2267,7 @@ class ContainerProvider(Provider):
                 provider = None
             from hal0.providers.comfyui import ComfyUIProvider
             from hal0.providers.flm import FLMProvider
+            from hal0.providers.halogen import HalogenProvider
 
             # ComfyUI serves neither /health nor /v1/models (its liveness
             # probe is GET /system_stats), so the generic path below read a
@@ -2111,6 +2275,8 @@ class ContainerProvider(Provider):
             # READY img slot to ERROR within seconds of it coming up.
             if isinstance(provider, (FLMProvider, ComfyUIProvider)):
                 return await provider.health(port)
+            if isinstance(provider, HalogenProvider):
+                return await provider.liveness(port)
 
         health_url = f"http://127.0.0.1:{port}/health"
         models_url = f"http://127.0.0.1:{port}/v1/models"
@@ -2308,6 +2474,16 @@ class ContainerProvider(Provider):
         # dispatch). ``None`` means the default llama-server GPU provider.
         spec_provider = _spec_provider_for(slot_cfg)
 
+        # The llama path takes its image from ``binary``, so a non-llama runner
+        # here would launch with llama-server argv and exit. The write seam
+        # refuses this state, which leaves a hand edit. Only this path: a
+        # dispatched provider launches its own image, so a stale ``binary``
+        # beside one is inert and that slot keeps loading.
+        if spec_provider is None:
+            mismatch = runner_family_mismatch(slot_cfg)
+            if mismatch is not None:
+                raise mismatch
+
         # Loud-fail for AMD-GPU slots with no /dev/kfd whose runtime needs it:
         # the Standard runner would silently fall back to its Vulkan backend,
         # which must not serve unless its digest passed the Vulkan gate
@@ -2374,6 +2550,12 @@ class ContainerProvider(Provider):
             )
             if not tag:
                 raise ValueError("npu slot has no FLM model tag — set [model].default")
+
+        # What only a load does (halogen: its cache bind source, a once-per-load
+        # warning). Not in ``container_spec``, which status and drift reads call.
+        prepare_load = getattr(spec_provider, "prepare_load", None)
+        if prepare_load is not None:
+            prepare_load(slot_cfg)
 
         unit_text = self._render_quadlet_text(slot_cfg, model_info)
         self._write_and_start_unit(token, unit_text)
@@ -2513,9 +2695,15 @@ class ContainerProvider(Provider):
         """
         token = slot_instance_token(slot_cfg)
         unit = self._unit_name(token)
+        # A runtime with a declared stop grace (halogen: 120 s) is given that
+        # grace plus the unit's own 30 s margin; everything else keeps the short
+        # bound. Only the stop is widened: the Quadlet removal, daemon-reload and
+        # reset-failed below run strictly after it returns (or is abandoned at
+        # this bound), on their own short bound.
+        stop_bound = unit_stop_bound_s(slot_cfg) or _UNIT_STOP_TIMEOUT_S
         log.info("container.unit_stop", extra={"slot": token, "unit": unit})
         try:
-            self._run("systemctl", "stop", unit, check=False, timeout=_UNIT_STOP_TIMEOUT_S)
+            self._run("systemctl", "stop", unit, check=False, timeout=stop_bound)
         except (subprocess.TimeoutExpired, SeamTimeout):
             # The real (unmocked) seam route raises SeamTimeout (#1869: every
             # ``_run`` call now goes through ``SystemCtlSeam.systemctl`` ->
@@ -2524,7 +2712,7 @@ class ContainerProvider(Provider):
             # stdlib error. Either way the stop is best-effort — see below.
             log.warning(
                 "container.unit_stop_timeout",
-                extra={"slot": token, "unit": unit, "timeout_s": _UNIT_STOP_TIMEOUT_S},
+                extra={"slot": token, "unit": unit, "timeout_s": stop_bound},
             )
         # Remove the Quadlet source so daemon-reload regenerates without it.
         unit_path = self._unit_path(token)
@@ -3213,13 +3401,40 @@ def _resolve_slot_argv(
 def tune_effective_for_slot(
     slot_cfg: dict[str, Any], model_path: str | None = None
 ) -> dict[str, Any] | None:
-    """The slot's ``tune_effective`` read shape, from the launch resolver's scalars.
+    """The slot's ``tune_effective`` read shape.
+
+    A llama-server slot reads it from the launch resolver's scalars. A halogen
+    slot has no llama scalars (``_resolve_preview_bundle`` is llama-only), so
+    its shape is built from :func:`~hal0.slots.tune.effective_tune` directly:
+    the same keys, ``reasoning_effort_unavailable`` ``None`` (the engine has no
+    runner build gate), and ``tune_unavailable`` naming the values the engine
+    cannot run (:data:`~hal0.runners.knobs.HALOGEN_TUNE_UNAVAILABLE`).
 
     ``None`` when the slot's profile does not resolve (best-effort, like the
     other preview helpers).
     """
+    if _is_halogen_slot(slot_cfg):
+        try:
+            profile = resolve_slot_profile(slot_cfg)
+        except Exception:
+            return None
+        return {
+            **effective_tune(slot_cfg, profile).as_dict(),
+            "reasoning_effort_unavailable": None,
+            "tune_unavailable": dict(HALOGEN_TUNE_UNAVAILABLE),
+        }
     bundle = _resolve_preview_bundle(slot_cfg, model_path)
     return bundle[1].get("tune_effective") if bundle else None
+
+
+def _is_halogen_slot(slot_cfg: dict[str, Any]) -> bool:
+    """Whether the launch dispatch gives this slot the halogen provider."""
+    from hal0.providers.halogen import HalogenProvider
+
+    try:
+        return isinstance(_spec_provider_for(slot_cfg), HalogenProvider)
+    except UnknownRuntimeFamilyError:
+        return False
 
 
 def resolved_argv_detail_for_slot(
@@ -3263,6 +3478,7 @@ __all__ = [
     "container_provider",
     "resolved_argv_detail_for_slot",
     "resolved_command_for_slot",
+    "runner_family_mismatch",
     "tune_effective_for_slot",
 ]
 
