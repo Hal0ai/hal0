@@ -175,6 +175,23 @@ describe('EngineSettings', () => {
     act(() => root.unmount())
   })
 
+  it('keeps help ids distinct across two mounted blocks (the profile drawer opens over the slot drawer)', () => {
+    const a = mount({})
+    const b = mount({})
+    const idsOf = (host: HTMLElement) => Array.from(host.querySelectorAll('.eng-help')).map((el) => el.id)
+    const first = idsOf(a.host)
+    const second = idsOf(b.host)
+    expect(first.length).toBeGreaterThan(0)
+    expect(new Set([...first, ...second]).size).toBe(first.length + second.length)
+    for (const { host } of [a, b]) {
+      const row = q(host, 'engine-knob-HALOGEN_KV_SLOTS')!
+      const help = row.querySelector('.eng-help') as HTMLElement
+      expect(q(host, 'engine-input-HALOGEN_KV_SLOTS')!.getAttribute('aria-describedby')).toBe(help.id)
+    }
+    act(() => a.root.unmount())
+    act(() => b.root.unmount())
+  })
+
   it('reads the last value of a repeated name, as the server does', () => {
     const { host, root } = mount({ flags: 'HALOGEN_KV_SLOTS=1 HALOGEN_KV_SLOTS=6' })
     expect((q(host, 'engine-input-HALOGEN_KV_SLOTS') as HTMLInputElement).value).toBe('6')

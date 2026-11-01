@@ -94,6 +94,11 @@ describe('effectiveRuntimeFamily', () => {
     expect(effectiveRuntimeFamily({ binary: 'halogen', profile: { runner: '' }, device: 'gpu-rocm', backends: cat })).toBe('llama-server')
     expect(effectiveRuntimeFamily({ binary: 'halogen', profile: { runtime_family: 'llama-server' }, device: 'gpu-rocm', backends: cat })).toBe('llama-server')
   })
+  it('collapses only halogen: another non-llama binary under a runner-less profile keeps its family', () => {
+    const withKokoro = { ...cat, kokoro: { title: 'Kokoro', device_class: 'cpu', supported_backends: ['cpu'], runtime_family: 'kokoro' } }
+    expect(effectiveRuntimeFamily({ binary: 'kokoro', profile: { runner: '' }, device: 'cpu', backends: withKokoro })).toBe('kokoro')
+    expect(effectiveRuntimeFamily({ binary: 'halogen', profile: { runner: '' }, device: 'gpu-rocm', backends: withKokoro })).toBe('llama-server')
+  })
   it('reads the binary, then the lane, while the profile row is not known', () => {
     expect(effectiveRuntimeFamily({ binary: 'halogen', profile: null, device: 'gpu-rocm', backends: cat })).toBe('halogen')
     expect(effectiveRuntimeFamily({ binary: 'standard', profile: null, device: 'gpu-rocm', backends: cat })).toBe('llama-server')

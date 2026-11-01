@@ -80,13 +80,14 @@ function BoolControl({ knob, value, disabled, onSet, describedBy }) {
 
 const CONTROLS = { int: NumberControl, enum: EnumControl, bool: BoolControl }
 
-function KnobRow({ knob, flags, readOnly, onSet }) {
+function KnobRow({ knob, flags, readOnly, onSet, idPrefix }) {
   const Control = CONTROLS[knob.kind]
   if (!Control) return null
   const value = valueOf(flags, knob.env)
   // The help line names the control it explains: one id per knob, so a screen
-  // reader announces it with the control rather than as stray text.
-  const helpId = knob.help ? `engine-help-${knob.env}` : undefined
+  // reader announces it with the control rather than as stray text. Prefixed per
+  // block, since the profile drawer can open over the slot drawer's block.
+  const helpId = knob.help ? `${idPrefix}-help-${knob.env}` : undefined
   return (
     <div className={'eng-row' + (value !== null ? ' set' : '')} data-testid={`engine-knob-${knob.env}`}>
       <div className="eng-head">
@@ -132,6 +133,7 @@ function KnobRow({ knob, flags, readOnly, onSet }) {
  *   collapsed).
  */
 export function EngineSettings({ knobs, flags = '', onChange, readOnly = false, error = null }) {
+  const idPrefix = React.useId()
   if (!Array.isArray(knobs) || knobs.length === 0) return null
   const set = (env, value) => {
     if (!readOnly) onChange(setEnvToken(flags, env, value))
@@ -139,7 +141,7 @@ export function EngineSettings({ knobs, flags = '', onChange, readOnly = false, 
   return (
     <div className="eng" data-testid="pf-engine-settings">
       {knobs.map((knob) => (
-        <KnobRow key={knob.env} knob={knob} flags={flags} readOnly={readOnly} onSet={set} />
+        <KnobRow key={knob.env} knob={knob} flags={flags} readOnly={readOnly} onSet={set} idPrefix={idPrefix} />
       ))}
       {error && (
         <div className="pf-msg err mono eng-err" role="alert" data-testid="pf-engine-error">

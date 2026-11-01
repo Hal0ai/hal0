@@ -239,9 +239,12 @@ function effectiveRunnerKey({ binary, profile, device }) {
  * `binary` is not consulted for it. A non-llama profile (its server-derived
  * `runtime_family`, else the family of its `runner`) wins whatever `binary`
  * says, and under a llama or runner-less profile `binary` only picks which
- * llama runner runs, so a non-llama `binary` there (a stale halogen pin) still
- * launches llama-server. Only while the profile row is not known (the list is
- * loading) does the slot's `binary`, then the lane default, decide.
+ * llama runner runs, so a stale halogen pin there still launches llama-server.
+ * Only halogen collapses that way: a TTS slot on `binary=kokoro` under a
+ * runner-less profile keeps its own runner's family, as the launch dispatch
+ * (`slot.type`, `device`) gives it. Only while the profile row is not known
+ * (the list is loading) does the slot's `binary`, then the lane default,
+ * decide.
  *
  * @param {{ binary?: string, profile?: { runner?: string, runtime_family?: string } | null, device?: string,
  *           backends?: Record<string, { runtime_family?: string }> }} slot
@@ -252,6 +255,6 @@ export function effectiveRuntimeFamily({ binary, profile, device, backends }) {
 	if (!profile) return resolved;
 	const own = profile.runtime_family || familyOf(profile.runner);
 	if (own && own !== "llama-server") return own;
-	// A llama (or runner-less) profile: any non-llama `binary` is inert.
-	return resolved && resolved !== "llama-server" ? "llama-server" : resolved;
+	// A llama (or runner-less) profile: a halogen `binary` is inert.
+	return resolved === "halogen" ? "llama-server" : resolved;
 }

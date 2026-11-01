@@ -672,8 +672,9 @@ export function flagsEquivalent(a, b) {
 // block of the profile drawer, and mirror the server's screen inline
 // (hal0.runners.knobs.parse_env_tokens / screen_halogen_flags):
 //
-//   · shape        — every token is `HALOGEN_[A-Z0-9_]+=value`, value non-empty
-//                    and single-line               (profiles.halogen_flag_malformed)
+//   · shape        — every token is `HALOGEN_[A-Z0-9_]+=value`, value non-empty,
+//                    free of control bytes and at most 1024 bytes
+//                                                  (profiles.halogen_flag_malformed)
 //   · denied names — the slot, the model row, the tune fields and hal0 own them
 //                    (profiles.halogen_flag_denied)
 //   · knob ranges  — a curated knob's value is in its range or choices
@@ -701,7 +702,7 @@ export function halogenValueProblem(value) {
   return null;
 }
 
-const echo = (value) => (value.length <= ECHO_CHARS ? value : `${value.slice(0, ECHO_CHARS)}...`);
+export const echo = (value) => (value.length <= ECHO_CHARS ? value : `${value.slice(0, ECHO_CHARS)}...`);
 
 // `NAME=value` tokens of `text` in order, value unquoted (shlex-like: a quoted
 // value stays one piece). Tokens of any other shape are skipped, a repeated

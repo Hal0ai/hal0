@@ -683,6 +683,17 @@ describe('slot drawer engine settings (halogen)', () => {
     act(() => root.unmount())
   })
 
+  it('caps each name in the "(also: ...)" echo at 40 characters, like the server', () => {
+    const long = 'x'.repeat(100)
+    const flags = `-fa on ${long}`
+    profilesBox.current = [PROFILE, { ...CUSTOM, flags, resolved_flags: flags }]
+    const { root } = mount(HALO_SLOT)
+    const msg = byId('pf-engine-error')!.textContent!
+    expect(msg).toContain('(also: on, ' + 'x'.repeat(40) + '...)')
+    expect(msg).not.toContain('x'.repeat(41))
+    act(() => root.unmount())
+  })
+
   it('names an over-long stored value with the byte limit', () => {
     const flags = `HALOGEN_THINKING_BUDGET_MESSAGE=${'x'.repeat(1025)}`
     profilesBox.current = [PROFILE, { ...CUSTOM, flags, resolved_flags: flags }]

@@ -37,6 +37,7 @@ import {
   findHalogenMalformed,
   findHalogenOutOfRange,
   halogenValueProblem,
+  echo,
   HALOGEN_MAX_VALUE_BYTES,
   screenCanon,
   tokenizeFlags,
@@ -530,7 +531,7 @@ export function halogenFlagsError(text, { knobs, denied }) {
   const malformed = findHalogenMalformed(text);
   if (malformed.length) {
     const first = malformed[0];
-    const rest = malformed.length > 1 ? ` (also: ${malformed.slice(1).join(', ')})` : '';
+    const rest = malformed.length > 1 ? ` (also: ${malformed.slice(1).map(echo).join(', ')})` : '';
     if (/^HALOGEN_[A-Z0-9_]+=$/.test(first)) {
       return `${first} needs a value — remove the token to leave it at the engine default.${rest}`;
     }
