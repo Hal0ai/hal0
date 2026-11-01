@@ -16,7 +16,7 @@ from hal0.config.schema import MemoryGraphConfig
 def test_defaults_cap_a_shared_slot():
     cfg = MemoryGraphConfig()
     assert cfg.extraction_max_concurrent == 1
-    assert cfg.extraction_max_tokens == 4096
+    assert cfg.extraction_max_tokens == 16384
     assert cfg.extraction_llm_retries == 1
     assert cfg.extraction_task_retries == 2
     assert cfg.extraction_retry_backoff_s == 120
