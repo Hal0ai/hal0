@@ -1,7 +1,9 @@
-"""Open WebUI provenance on memory writes: ``user:<name>`` tag + ``session_id``.
+"""Open WebUI provenance on memory writes: ``user:<name>`` tag + ``metadata.chat_id``.
 
 Identity never comes from the headers; they only annotate a write made by the
-bridge client named ``openwebui``.
+bridge client named ``openwebui``. The chat id is ``metadata.chat_id``, never
+``metadata.session_id``: the provider derives the document id from a session id, so
+every note of a chat would replace the previous one.
 """
 
 from __future__ import annotations
@@ -39,24 +41,36 @@ async def test_memory_add_tags_user_and_session_from_owui_headers() -> None:
         {"text": "x"},
         client_id="openwebui",
         private=False,
-        provenance={"user": "alexander-smith", "session_id": "abc-123"},
+        provenance={"user": "alexander-smith", "chat_id": "abc-123"},
     )
     call = w.add_calls[0]
     assert "user:alexander-smith" in call["tags"]
-    assert call["metadata"]["session_id"] == "abc-123"
+    assert call["metadata"]["chat_id"] == "abc-123"
+    assert "session_id" not in call["metadata"]
 
 
 @pytest.mark.asyncio
-async def test_memory_add_caller_session_id_wins() -> None:
+async def test_memory_add_caller_chat_id_wins() -> None:
     w = StubHindsightWrapper()
     await memory._memory_add(
         w,
-        {"text": "x", "metadata": {"session_id": "mine"}},
+        {"text": "x", "metadata": {"chat_id": "mine"}},
         client_id="openwebui",
         private=False,
-        provenance={"session_id": "abc"},
+        provenance={"chat_id": "abc"},
     )
-    assert w.add_calls[0]["metadata"]["session_id"] == "mine"
+    assert w.add_calls[0]["metadata"]["chat_id"] == "mine"
+
+
+@pytest.mark.asyncio
+async def test_provenance_never_sets_a_session_id() -> None:
+    """A session id becomes the document id in the provider, collapsing a chat into one note."""
+    w = StubHindsightWrapper()
+    await memory._memory_add(
+        w, {"text": "x"}, client_id="openwebui", private=False, provenance={"chat_id": "abc"}
+    )
+    assert "session_id" not in w.add_calls[0]["metadata"]
+    assert w.add_calls[0]["document_id"] is None
 
 
 @pytest.mark.asyncio
@@ -64,7 +78,7 @@ async def test_memory_add_without_provenance_is_unchanged() -> None:
     w = StubHindsightWrapper()
     await memory._memory_add(w, {"text": "x"}, client_id="a", private=False)
     assert not any(t.startswith("user:") for t in w.add_calls[0]["tags"])
-    assert "session_id" not in w.add_calls[0]["metadata"]
+    assert "chat_id" not in w.add_calls[0]["metadata"]
 
 
 @pytest.mark.asyncio
@@ -73,7 +87,7 @@ async def test_dispatcher_threads_the_resolver_into_memory_add() -> None:
     dispatch = memory.make_dispatcher(
         w,
         client_id_resolver=lambda: "openwebui",
-        provenance_resolver=lambda: {"user": "bob", "session_id": "s1"},
+        provenance_resolver=lambda: {"user": "bob", "chat_id": "s1"},
     )
     out = await dispatch("memory_add", {"text": "x"})
     assert out["status"] == "ok"
@@ -86,11 +100,11 @@ def test_resolver_reads_headers_for_openwebui(monkeypatch: pytest.MonkeyPatch) -
         OWUI,
         {"X-OpenWebUI-User-Name": "Alexander%20Smith", "X-OpenWebUI-Chat-Id": "abc-123"},
     )
-    assert got == {"user": "alexander-smith", "session_id": "abc-123"}
+    assert got == {"user": "alexander-smith", "chat_id": "abc-123"}
 
 
 def test_resolver_omits_absent_headers(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert _resolve(monkeypatch, OWUI, {"X-OpenWebUI-Chat-Id": "c"}) == {"session_id": "c"}
+    assert _resolve(monkeypatch, OWUI, {"X-OpenWebUI-Chat-Id": "c"}) == {"chat_id": "c"}
     assert _resolve(monkeypatch, OWUI, {}) == {}
 
 

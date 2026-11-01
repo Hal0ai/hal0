@@ -343,8 +343,11 @@ async def _memory_add(
         keeping the audit trail grounded.
 
     ``provenance`` is server-derived (never caller-supplied): ``user`` adds a
-    ``user:<name>`` tag and ``session_id`` fills ``metadata.session_id`` when
-    the caller sent none.
+    ``user:<name>`` tag and ``chat_id`` fills ``metadata.chat_id`` when the
+    caller sent none. It is deliberately not ``metadata.session_id``: the provider
+    turns a session id into the document id (``<agent>:<session_id>``), so every
+    note from one chat would share a document and each ``memory_add`` would
+    replace the last.
 
     ``operation_id``/``operation_ids``/``items_count`` appear whenever the
     engine reports them (Hindsight retain is async by default) — poll
@@ -391,9 +394,9 @@ async def _memory_add(
         user = provenance.get("user")
         if user:
             tags = [*tags, f"user:{user}"]
-        session_id = provenance.get("session_id")
-        if session_id and "session_id" not in metadata_raw:
-            metadata_raw = {**metadata_raw, "session_id": session_id}
+        chat_id = provenance.get("chat_id")
+        if chat_id and "chat_id" not in metadata_raw:
+            metadata_raw = {**metadata_raw, "chat_id": chat_id}
     if preflight is not None:
         await preflight()
     result = await wrapper.add(
@@ -1249,7 +1252,7 @@ def make_dispatcher(
     is returned with its own stable ``code`` and ``details`` rather than the
     generic ``mcp.memory_failed``.
 
-    ``provenance_resolver`` returns the ``{"user", "session_id"}`` annotations
+    ``provenance_resolver`` returns the ``{"user", "chat_id"}`` annotations
     for the current request; applied to ``memory_add`` only.
     """
 

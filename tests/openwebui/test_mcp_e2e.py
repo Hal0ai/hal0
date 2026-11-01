@@ -160,7 +160,25 @@ def test_one_key_from_mint_to_a_tagged_memory_write(box: TestClient) -> None:
     assert "agent:openwebui" in tags and "user:alexander" in tags
     assert "visibility:private" not in tags
     assert [t for t in tags if t.startswith("agent:")] == ["agent:openwebui"]
-    assert retained[0]["metadata"]["session_id"] == "c1"
+    # The chat id is an annotation. As metadata.session_id it would become the document id
+    # (<agent>:<session_id>) and every later note of the chat would replace this one.
+    assert retained[0]["metadata"]["chat_id"] == "c1"
+    assert "session_id" not in retained[0]["metadata"]
+
+    second = _rpc(
+        box,
+        "memory",
+        key,
+        "tools/call",
+        {"name": "memory_add", "arguments": {"text": "CT150 is the test box"}},
+        rid=4,
+        session=session,
+        extra={"X-OpenWebUI-User-Name": "Alexander", "X-OpenWebUI-Chat-Id": "c1"},
+    )
+    assert second.status_code == 200, second.text
+    _result(second)
+    assert len(retained) == 2
+    assert retained[0]["document_id"] != retained[1]["document_id"]  # two notes, two documents
 
     # 4. The same key opens the Hermes delegate mount...
     a_init = _rpc(box, "agents", key, "initialize", _INIT)

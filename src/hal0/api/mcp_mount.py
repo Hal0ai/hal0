@@ -377,7 +377,7 @@ def provenance_resolver() -> dict[str, str]:
         out["user"] = user
     chat = request.headers.get(_OWUI_CHAT_HEADER, "").strip()
     if chat:
-        out["session_id"] = chat[:128]
+        out["chat_id"] = chat[:128]
     return out
 
 
