@@ -14,7 +14,7 @@ import {
   type UseQueryResult,
 } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
-import { api, apiGet, apiPost, apiPatch, apiPut, apiDelete, readErrorEnvelope } from '../client'
+import { Hal0Error, api, apiGet, apiPost, apiPatch, apiPut, apiDelete, readErrorEnvelope } from '../client'
 import { ENDPOINTS } from '../endpoints'
 import { normaliseAssignee, normaliseProfile } from './boardActors.js'
 
@@ -422,6 +422,15 @@ function normaliseBoardResponse(
 
 // ── Queries ──────────────────────────────────────────────────────────
 
+/** 503 codes `/api/board/*` answers when the Hermes kanban is unavailable.
+ *  Retrying inside the same tick cannot fix them; the refetch on focus and
+ *  the next mount pick up a recovered agent. */
+const BOARD_UNAVAILABLE_CODES = new Set([
+  'board.not_installed',
+  'board.unreachable',
+  'board.no_token',
+])
+
 export interface UseBoardViewOptions {
   board?: string
   tenant?: string
@@ -452,6 +461,9 @@ export function useBoardView(
       return normaliseBoardResponse(raw, includeArchived)
     },
     refetchOnWindowFocus: true,
+    retry: (failureCount, err) =>
+      !(err instanceof Hal0Error && BOARD_UNAVAILABLE_CODES.has(err.code)) &&
+      failureCount < 3,
   })
 }
 
@@ -1000,6 +1012,10 @@ export function useBoardEventsStream(
       ws.onopen = () => {
         setConnected(true)
         errorCountRef.current = 0
+        // A reopened socket may carry no frame (Hermes just came back), so
+        // refetch now; otherwise an unavailable-board state would linger.
+        // No hook test harness exists for this stream, so no unit test.
+        scheduleInvalidate()
       }
 
       ws.onmessage = (evt) => {
