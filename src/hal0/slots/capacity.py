@@ -23,6 +23,8 @@ See PLAN.md §3 (module port plan).
 from __future__ import annotations
 
 import asyncio
+import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -41,6 +43,8 @@ from hal0.slots.state import SlotError
 
 if TYPE_CHECKING:
     from hal0.hardware.probe import HardwareInfo
+
+log = logging.getLogger(__name__)
 
 # Container-name prefix matches the convention in providers/container.py:
 # ``ExecStop = <runtime> stop -t 20 hal0-slot-<name>``.
@@ -158,6 +162,95 @@ def estimate_file_size_kv_mb(
     return round(model_mb + kv_mb, 1)
 
 
+# halogen (Flash-Next) resident memory: the checkpoint file, a KV pool sized in
+# positions, a fixed block per KV slot, working memory that grows with the
+# longest single request (MAX_TOK), an optional vision tower, and the prompt
+# cache. The model file size does NOT dominate the way it does for llama.cpp
+# (a 53.7 GiB checkpoint runs at ~72 GiB with the seed layout), so the generic
+# file-size + KV share would under-book it by a quarter. Constants are the
+# engine vendor's measurements (its host-setup guide, "If you must share it");
+# ``test_capacity_halogen`` pins them against the vendor's published rows and
+# the seed layout.
+_MIB = 1024.0 * 1024.0
+_HALOGEN_KV_BYTES = 29_500  # per KV position
+_HALOGEN_KV8_BYTES = 16_712  # per KV position with the 8-bit KV cache
+_HALOGEN_SLOT_BYTES = 120_586_240  # fixed state per KV slot
+_HALOGEN_WORK_GIB_PER_32K = 8.8  # working memory per 32768 tokens of MAX_TOK ...
+_HALOGEN_WORK_BASE_GIB = 3.8  # ... on top of this fixed share
+_HALOGEN_TOWER_MB = 0.84 * 1024  # vision tower, when the vision sidecar loads
+_HALOGEN_CACHE_ENTRY_MB = 115.0  # per prompt-cache entry (24 by default)
+
+#: Page cache the engine's table files can fill. An advisory for the operator
+#: (reclaimable, so not memory the box has to find): it is never added to the
+#: resident figure.
+HALOGEN_TABLE_CACHE_ADVISORY_MB = 10 * 1024
+
+
+def halogen_footprint_mb(
+    *,
+    checkpoint_bytes: int,
+    pool_positions: int,
+    kv_slots: int,
+    max_tok: int,
+    kv8: bool,
+    vision: bool,
+    cache_entries: int = 24,
+) -> float:
+    """Resident memory (MiB) a halogen engine holds once loaded.
+
+    The one owner of halogen's memory arithmetic (ADR-0039); the provider's
+    ``footprint_mb`` hook only gathers its arguments from the slot's tune.
+
+    ``pool_positions`` is taken as given: callers pass ``max(pool, ctx)``, the
+    larger of the profile's KV pool and the context window the slot is booked
+    for, so a small pool setting never books less than the window needs.
+    ``checkpoint_bytes`` is the checkpoint file alone; the vision tower is what
+    ``vision`` adds. ``kv8`` selects the 8-bit KV cache's smaller per-position
+    cost. Excludes :data:`HALOGEN_TABLE_CACHE_ADVISORY_MB`.
+    """
+    kv_bytes = _HALOGEN_KV8_BYTES if kv8 else _HALOGEN_KV_BYTES
+    resident_mb = (
+        checkpoint_bytes / _MIB
+        + pool_positions * kv_bytes / _MIB
+        + kv_slots * _HALOGEN_SLOT_BYTES / _MIB
+        + (_HALOGEN_WORK_GIB_PER_32K * max_tok / 32768 + _HALOGEN_WORK_BASE_GIB) * 1024.0
+        + cache_entries * _HALOGEN_CACHE_ENTRY_MB
+    )
+    if vision:
+        resident_mb += _HALOGEN_TOWER_MB
+    return resident_mb
+
+
+def provider_footprint_mb(
+    slot_cfg: Mapping[str, Any],
+    model_info: Mapping[str, Any],
+) -> float | None:
+    """The slot's provider's own footprint (MiB) for ``model_info``, else ``None``.
+
+    The shared first step of the two sizing call sites — pre-load eviction
+    (:func:`hal0.slots.preload_evict._estimate_incoming_footprint_mb`) and
+    :func:`build_per_slot`. ``None`` sends the caller to
+    :func:`estimate_file_size_kv_mb`: no provider (the llama default), a
+    provider without the hook or with no figure, a figure that is not a
+    positive number, or any failure asking. Sizing must never raise, and a
+    refused profile here is already reported by the launch path.
+    """
+    try:
+        from hal0.providers.container import _spec_provider_for, resolve_slot_profile
+
+        provider = _spec_provider_for(dict(slot_cfg))
+        hook = getattr(provider, "footprint_mb", None)
+        if hook is None:
+            return None
+        mb = hook(model_info, slot_cfg, resolve_slot_profile(slot_cfg))
+    except Exception as exc:
+        log.debug("capacity.provider_footprint_failed", extra={"error": str(exc)})
+        return None
+    if not isinstance(mb, (int, float)) or isinstance(mb, bool) or mb <= 0:
+        return None
+    return round(float(mb), 1)
+
+
 def gtt_fit_warning(
     needed_mb: float,
     *,
@@ -235,17 +328,11 @@ def gtt_feasibility_verdict(
     return out
 
 
-def _slot_ctx_tokens(slot: Any, registry: Any) -> int | None:
-    """The window ``slot`` runs with: its profile's (ADR-0029), else ``None``.
-
-    Reads the slot's own TOML (id- or name-keyed) and resolves it through
-    :func:`hal0.providers.container.slot_effective_context`, the resolver the
-    launch path uses, so the KV estimate sizes the context actually served.
-    """
+def _slot_cfg_for(slot: Any) -> dict[str, Any] | None:
+    """The slot's own flattened TOML (id- or name-keyed), else ``None``."""
     try:
         from hal0.config import paths
         from hal0.config.loader import _flatten_slot_toml, _read_toml
-        from hal0.providers.container import slot_effective_context
         from hal0.slots.layout import slot_toml_path
 
         name = str(getattr(slot, "name", "") or "")
@@ -253,7 +340,24 @@ def _slot_ctx_tokens(slot: Any, registry: Any) -> int | None:
         if not key:
             return None
         raw = _read_toml(slot_toml_path(paths.slots_config_dir(), key))
-        ctx, _source = slot_effective_context(_flatten_slot_toml(raw, slot_name=name), registry)
+        return _flatten_slot_toml(raw, slot_name=name)
+    except Exception:
+        return None
+
+
+def _cfg_ctx_tokens(slot_cfg: dict[str, Any] | None, registry: Any) -> int | None:
+    """The window a slot runs with: its profile's (ADR-0029), else ``None``.
+
+    Resolves ``slot_cfg`` through
+    :func:`hal0.providers.container.slot_effective_context`, the resolver the
+    launch path uses, so the KV estimate sizes the context actually served.
+    """
+    if slot_cfg is None:
+        return None
+    try:
+        from hal0.providers.container import slot_effective_context
+
+        ctx, _source = slot_effective_context(slot_cfg, registry)
     except Exception:
         return None
     return int(ctx) if ctx else None
@@ -614,10 +718,20 @@ async def build_per_slot(
                 ctx_meta = m.model_dump() if hasattr(m, "model_dump") else None
             except Exception:
                 model_mb = 0.0
-        slot_ctx = _slot_ctx_tokens(s, registry)
+        slot_cfg = _slot_cfg_for(s)
+        slot_ctx = _cfg_ctx_tokens(slot_cfg, registry)
         if slot_ctx:
             ctx_meta = {**(ctx_meta or {}), "ctx_tokens": slot_ctx}
-        estimate_mb = estimate_file_size_kv_mb(model_mb, ctx_meta)
+        # A runtime whose memory is not weights + a per-token KV share (halogen)
+        # sizes itself through its provider; everything else, and any provider
+        # with no figure, takes the generic file-size + KV estimate.
+        provider_mb: float | None = None
+        if slot_cfg is not None and model_mb > 0:
+            provider_info = {**(ctx_meta or {}), "size_bytes": int(model_mb * _MIB)}
+            provider_mb = provider_footprint_mb(slot_cfg, provider_info)
+        estimate_mb = (
+            provider_mb if provider_mb is not None else estimate_file_size_kv_mb(model_mb, ctx_meta)
+        )
 
         # ── Container cgroup probe (path 2) ────────────────────────────────
         # Probe the live podman/docker cgroup.  Returns 0 when no container

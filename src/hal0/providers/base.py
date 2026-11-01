@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -289,6 +290,33 @@ class Provider(ABC):
 
         Called by SlotManager.spawn() to render the systemd unit override.
         """
+
+    def footprint_mb(
+        self,
+        model_info: Mapping[str, Any],
+        slot_cfg: Mapping[str, Any],
+        profile: Any,
+    ) -> float | None:
+        """Resident footprint (MiB) this runtime will hold for the model, if it knows.
+
+        The hook the memory paths ask before sizing a load with the generic
+        file-size + KV estimate (:func:`hal0.slots.capacity.estimate_file_size_kv_mb`):
+        pre-load eviction (:mod:`hal0.slots.preload_evict`) and the capacity
+        map (:func:`hal0.slots.capacity.build_per_slot`). ``None`` (the default)
+        means "no figure of my own", and the caller falls back to that
+        estimate. A runtime whose memory is not weights plus a per-token KV
+        share overrides this and delegates the arithmetic to
+        :mod:`hal0.slots.capacity` (ADR-0039: memory figures have one owner),
+        keeping only the argument gathering here.
+
+        Args:
+            model_info: Registry entry of the model about to load (id, path,
+                size_bytes, ...).
+            slot_cfg:   The slot's flattened TOML dict.
+            profile:    The slot's resolved profile (not yet merged with the
+                slot's ``[tune]``; use :func:`hal0.slots.tune.effective_tune`).
+        """
+        return None
 
     def image_ref(self, slot_cfg: dict[str, Any]) -> str:
         """Return the toolbox image reference for this Provider + slot config.
