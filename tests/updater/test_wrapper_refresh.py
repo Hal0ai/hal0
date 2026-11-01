@@ -16,6 +16,7 @@ independent ``visudo -cf`` pass.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -249,3 +250,35 @@ def test_activate_release_includes_wrappers_refreshed_key(
 
     assert result["wrappers_refreshed"] == []
     assert result["path_links_refreshed"] == {}
+
+
+@pytest.mark.parametrize("root", [True, False])
+def test_activation_repairs_only_registry_locks(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch, root: bool
+) -> None:
+    from hal0.config import paths
+    from hal0.install import perms
+    from hal0.updater import updater
+
+    monkeypatch.setattr(updater, "_is_editable_install", lambda: True)
+    monkeypatch.setattr(os, "geteuid", lambda: 0 if root else 12345)
+    monkeypatch.setattr(updater, "refresh_privileged_wrappers", lambda *a, **k: {"refreshed": []})
+    monkeypatch.setattr(updater, "refresh_path_links", lambda *a, **k: {})
+    monkeypatch.setattr(updater, "refresh_gpu_perms_unit", lambda *a, **k: "skipped")
+    monkeypatch.setattr(updater, "remove_retired_artifacts", lambda **k: [])
+    target = updater._usr_lib_root() / "hal0-1.0.0"
+    target.mkdir(parents=True)
+    registry = paths.var_lib() / "registry"
+    registry.mkdir(parents=True)
+    lock = registry / "ignored-paths.json.lock"
+    lock.touch()
+    plans: list[perms.OwnershipPlan] = []
+    monkeypatch.setattr(perms, "commit", lambda plan: plans.append(plan))
+
+    updater.activate_release(target.name)
+
+    assert len(plans) == int(root)
+    if root:
+        assert {diff.path for diff in plans[0].diffs} == {registry, lock}
+        lock_diff = next(diff for diff in plans[0].diffs if diff.path == lock)
+        assert (lock_diff.owner, lock_diff.group, lock_diff.mode) == ("hal0", "hal0", 0o664)

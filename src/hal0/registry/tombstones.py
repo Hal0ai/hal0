@@ -24,17 +24,17 @@ tombstone file can never block a delete, a scan or an add. See ADR-0026.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import logging
 import os
 import tempfile
 import threading
 from collections.abc import Iterable, Iterator
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from pathlib import Path
 
 from hal0.config import paths
+from hal0.config.locking import file_lock, lock_path_for
 
 log = logging.getLogger(__name__)
 
@@ -51,27 +51,15 @@ def _locked() -> Iterator[None]:
     API). If the lock file cannot be opened, the in-process lock still
     applies and the failure is logged, keeping every operation best-effort.
     """
-    with _LOCK:
-        lock_path = paths.model_tombstones_path().with_suffix(".json.lock")
-        fd: int | None = None
+    with _LOCK, ExitStack() as stack:
+        target = paths.model_tombstones_path()
         try:
-            lock_path.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o664)
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            # The shared lock creator sets 0664 despite umask and adopts
+            # ownership on root-run creation so the API can reopen it.
+            stack.enter_context(file_lock(target))
         except OSError as exc:
-            log.warning("tombstones.lock_failed path=%s err=%s", lock_path, exc)
-            if fd is not None:
-                with suppress(OSError):
-                    os.close(fd)
-                fd = None
-        try:
-            yield
-        finally:
-            if fd is not None:
-                with suppress(OSError):
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-                with suppress(OSError):
-                    os.close(fd)
+            log.warning("tombstones.lock_failed path=%s err=%s", lock_path_for(target), exc)
+        yield
 
 
 def _norm(p: str | Path) -> str:
