@@ -525,6 +525,27 @@ def container_argv(
     return read.stdout or None
 
 
+def container_identity(
+    token: str,
+    *,
+    run: _RunFn = subprocess.run,
+    is_hal0_user: Callable[[], bool] = is_hal0_service_user,
+    timeout: float = 10.0,
+) -> str | None:
+    """Raw ``{"user": ..., "unit_sha": ...}`` JSON for ``hal0-slot-<token>`` (#3130).
+
+    ``user`` is the container's configured ``--user`` ("" = image default),
+    ``unit_sha`` its ``io.hal0.unit-sha`` label ("" = started before the label).
+    ``None`` when the seam did not answer or no such container.
+    """
+    if not is_valid_slot_token(token):
+        return None
+    read = _seam_read(
+        "container-identity", token, run=run, is_hal0_user=is_hal0_user, timeout=timeout
+    )
+    return read.stdout or None
+
+
 __all__ = [
     "IMAGE_REF_MAX_LEN",
     "IMAGE_REF_RE",
@@ -538,6 +559,7 @@ __all__ = [
     "PodmanImagesResult",
     "SeamUnanswered",
     "container_argv",
+    "container_identity",
     "container_image",
     "image_digest",
     "image_presence",
