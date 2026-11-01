@@ -51,11 +51,14 @@ async def _client(request: Request) -> BoardClient:
     return resolve_board_client(request.app)
 
 
-async def _note_transition(app: Any, *, reachable: bool) -> None:
+async def _note_transition(
+    app: Any, *, reachable: bool, code: str | None = None, path: str | None = None
+) -> None:
     """Emit ONE status-dock event per board reachability transition.
 
     State lives on ``app.state.board_reachable`` (absent until first observed).
-    A missing event bus is a no-op.
+    A missing event bus is a no-op, and a failing bus is logged, never raised:
+    the dock event must not change the response the caller is about to get.
     """
     previous = getattr(app.state, "board_reachable", None)
     app.state.board_reachable = reachable
@@ -65,14 +68,19 @@ async def _note_transition(app: Any, *, reachable: bool) -> None:
     if bus is None:
         return
     if reachable:
-        await bus.emit("board.reachable", "info", "board", "The Operator Board is back")
+        event = "board.reachable"
+        args = ("info", "board", "The Operator Board is back")
     else:
-        await bus.emit(
-            "board.unreachable",
+        event = "board.unreachable"
+        args = (
             "warn",
             "board",
             "Hermes agent is not running; the Operator Board is unavailable",
         )
+    try:
+        await bus.emit(event, *args, data={"code": code, "path": path})
+    except Exception as exc:
+        log.warning("board.dock_emit_failed", event_type=event, error=type(exc).__name__)
 
 
 async def _call(request: Request, make: Callable[[BoardClient], Awaitable[Any]]) -> Any:
@@ -82,9 +90,11 @@ async def _call(request: Request, make: Callable[[BoardClient], Awaitable[Any]])
     except Hal0Error as exc:
         log.warning("board.upstream", code=exc.code, status=exc.status, path=request.url.path)
         if isinstance(exc, BoardUnreachable):
-            await _note_transition(request.app, reachable=False)
+            await _note_transition(
+                request.app, reachable=False, code=exc.code, path=request.url.path
+            )
         raise
-    await _note_transition(request.app, reachable=True)
+    await _note_transition(request.app, reachable=True, path=request.url.path)
     return result
 
 

@@ -457,13 +457,20 @@ def test_not_installed_503(audit: AuditStore, monkeypatch: pytest.MonkeyPatch) -
 class _Bus:
     def __init__(self) -> None:
         self.events: list[tuple[str, str, str, str]] = []
+        self.data: list[Any] = []
 
     async def emit(self, type_: str, severity: str, source: str, message: str, data=None) -> None:
         self.events.append((type_, severity, source, message))
+        self.data.append(data)
 
     @property
     def types(self) -> list[str]:
         return [e[0] for e in self.events]
+
+
+class _RaisingBus:
+    async def emit(self, *args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("bus down")
 
 
 def test_unreachable_emits_one_dock_event_per_transition(
@@ -488,6 +495,58 @@ def test_unreachable_emits_one_dock_event_per_transition(
         "Hermes agent is not running; the Operator Board is unavailable",
     )
     assert bus.events[1][1:] == ("info", "board", "The Operator Board is back")
+    assert bus.events[2] == bus.events[0]
+    assert bus.data == [
+        {"code": "board.unreachable", "path": "/api/board/board"},
+        {"code": None, "path": "/api/board/board"},
+        {"code": "board.unreachable", "path": "/api/board/board"},
+    ]
+
+
+def test_no_token_and_upstream_error_leave_state_and_events_untouched(
+    app_client: tuple, recorder: _Recorder, audit: AuditStore
+) -> None:
+    app, client = app_client
+    bus = _Bus()
+    app.state.events = bus
+    recorder.fail_connect = True
+    assert client.get("/api/board/board").status_code == 503
+    recorder.fail_connect = False
+    recorder.respond("GET", f"{P}/tasks/ghost", 404, {"detail": "no"})
+    assert client.get("/api/board/tasks/ghost").status_code == 404
+    assert app.state.board_reachable is False
+    assert bus.types == ["board.unreachable"]
+    assert client.get("/api/board/board").status_code == 200
+    assert bus.types == ["board.unreachable", "board.reachable"]
+
+    app2 = _app(audit)
+    bus2 = _Bus()
+    app2.state.events = bus2
+
+    def no_token() -> str:
+        raise BoardNoToken("no dashboard token")
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(recorder.handler), base_url="http://hermes.test"
+    )
+    app2.state.board_client = BoardClient(
+        HermesKanbanClient(base_url="http://hermes.test", token_resolver=no_token, http_client=http)
+    )
+    with TestClient(app2) as c:
+        assert c.get("/api/board/board").status_code == 503
+    assert getattr(app2.state, "board_reachable", None) is None
+    assert bus2.events == []
+
+
+def test_bus_failure_never_masks_the_response(app_client: tuple, recorder: _Recorder) -> None:
+    app, client = app_client
+    app.state.events = _RaisingBus()
+    recorder.fail_connect = True
+    r = client.get("/api/board/board")
+    assert r.status_code == 503
+    assert r.json()["error"]["code"] == "board.unreachable"
+    recorder.fail_connect = False
+    assert client.get("/api/board/board").status_code == 200
 
 
 def test_not_installed_does_not_emit(audit: AuditStore, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -509,8 +568,10 @@ def test_success_first_does_not_emit(app_client: tuple) -> None:
 
 
 def test_missing_event_bus_is_harmless(app_client: tuple, recorder: _Recorder) -> None:
-    _, client = app_client
+    app, client = app_client
     recorder.fail_connect = True
     assert client.get("/api/board/board").status_code == 503
+    assert app.state.board_reachable is False
     recorder.fail_connect = False
     assert client.get("/api/board/board").status_code == 200
+    assert app.state.board_reachable is True
