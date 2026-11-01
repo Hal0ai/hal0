@@ -8,8 +8,9 @@ halogen engine handed a GGUF). This module is the one rule both seams share:
 * the slot-config write guard (``_guard_model_fits_slot`` in
   ``hal0.api.routes.slots``) refuses before anything is stored, through
   :func:`slot_model_runtime_mismatch`;
-* ``ContainerProvider.load_sync`` refuses before any unit is written, through
-  :func:`model_runtime_mismatch` directly (it already holds the launch provider).
+* ``ContainerProvider.check_load`` refuses before pre-load eviction and before any
+  unit is written, through :func:`model_runtime_mismatch` directly (it resolves the
+  launch provider).
 
 Only a positively identified mismatch is refused. A model the registry does not
 know, or an empty binding, is *unknown*, not wrong: the halogen provider names a

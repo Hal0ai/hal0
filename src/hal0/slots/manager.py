@@ -260,6 +260,16 @@ def _spec_provider_or_none(cfg: Any) -> Any | None:
         return None
 
 
+def _launch_cfg(slot_cfg: Any, model_id: str | None) -> dict[str, Any]:
+    """The slot config a load launches: ``model_id``, when set, overrides ``model.default``."""
+    cfg = _cfg_to_dict(slot_cfg)
+    if model_id:
+        existing_model = cfg.get("model")
+        base_model = existing_model if isinstance(existing_model, dict) else {}
+        cfg = {**cfg, "model": {**base_model, "default": model_id}}
+    return cfg
+
+
 # ── Slot snapshot ────────────────────────────────────────────────────────────
 
 
@@ -1965,6 +1975,13 @@ class SlotManager:
                 # eviction estimate and _spawn_locked below so a load never
                 # hits the model registry twice for the same model_id.
                 model_info = await self._resolve_model_info(resolved_model)
+                # A load the runtime is going to refuse (wrong host, a missing
+                # file, a model on the wrong runtime) stops here: before the
+                # memory warnings, which would be about a load that never starts,
+                # and before pre-load eviction, which would cost the box its idle
+                # slots for nothing. Runs on the executor because it reads sysfs
+                # and stats files. ``load_sync`` asks again for direct callers.
+                await self._check_load(cfg, resolved_model, model_info)
                 # Advisory GTT feasibility signal (host-truth sysfs vs the
                 # lying container meminfo) — warns, never blocks. See
                 # _warn_gtt_feasibility.
@@ -2816,11 +2833,7 @@ class SlotManager:
         if model_info is None:
             model_info = await self._resolve_model_info(model_id)
 
-        cfg = _cfg_to_dict(slot_cfg)
-        if model_id:
-            existing_model = cfg.get("model")
-            base_model = existing_model if isinstance(existing_model, dict) else {}
-            cfg = {**cfg, "model": {**base_model, "default": model_id}}
+        cfg = _launch_cfg(slot_cfg, model_id)
 
         # Container path: write + start the podman systemd unit.
         from hal0.providers.container import container_provider
@@ -2831,6 +2844,22 @@ class SlotManager:
         )
         # Register loopback upstream so the dispatcher can route to this slot.
         self._register_container_upstream(slot_name, port)
+
+    async def _check_load(
+        self,
+        slot_cfg: SlotConfig | dict[str, Any],
+        model_id: str | None,
+        model_info: dict[str, Any],
+    ) -> None:
+        """Run the container seam's refusals on the config ``_spawn_locked`` will launch."""
+        from hal0.providers.container import container_provider
+
+        check = getattr(container_provider(), "check_load", None)
+        if check is None:
+            return
+        await asyncio.get_running_loop().run_in_executor(
+            None, check, _launch_cfg(slot_cfg, model_id), model_info
+        )
 
     async def _guard_gtt_leak(self, slot_name: str, provider: Any | None) -> str | None:
         """Warn when this host holds GPU memory nothing on this box accounts for.

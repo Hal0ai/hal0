@@ -470,9 +470,10 @@ class HalogenProvider(Provider):
         *,
         gfx_versions: Sequence[int | str],
     ) -> None:
-        """Refuse a load this host or this model directory cannot serve, before any unit exists.
+        """Refuse a load this host or this model directory cannot serve, before it costs anything.
 
-        Called by :meth:`hal0.providers.container.ContainerProvider.load_sync`
+        Called by :meth:`hal0.providers.container.ContainerProvider.check_load`,
+        before pre-load eviction on a manager load and again from ``load_sync``,
         with the host's KFD gfx targets (:func:`hal0.providers._gpu.kfd_gfx_target_versions`:
         integers, ``110501`` for gfx1151, ``0`` for a CPU node, ``[]`` when the
         topology cannot be read). The rules, in order:

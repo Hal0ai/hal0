@@ -2453,6 +2453,43 @@ class ContainerProvider(Provider):
             autoload=autoload_enabled(slot_cfg),
         )
 
+    def check_load(self, slot_cfg: dict[str, Any], model_info: dict[str, Any]) -> None:
+        """Refuse a load this slot's runtime can already tell it cannot serve.
+
+        Cheap and local: a registry fact, the host's KFD topology and the file
+        system, no network. :meth:`hal0.slots.manager.SlotManager.load` calls it
+        before pre-load eviction, because a load that is going to be refused must
+        not cost the box its idle slots first. :meth:`load_sync` calls it again, so
+        it stays authoritative for ``spawn()`` and direct callers. A no-op for a
+        runtime with no ``preflight`` hook whose model agrees with it.
+
+        * The model and the runtime must agree: a halogen checkpoint only loads on
+          the halogen runtime, and that runtime loads nothing else. The write seam
+          refuses the same pairing, but a slot file edited by hand, a profile
+          switched under a bound model, or a ``load -m`` override reaches here
+          without passing it. An empty model binding is not this refusal (the
+          provider names it, ``slot.model_missing``).
+        * A runtime that can refuse a host it cannot run on (halogen: gfx1151 only,
+          a checkpoint with its tokenizer beside it) says so. The provider owns the
+          rule; this seam only hands it the host's KFD gfx targets, read lazily so
+          no other runtime pays for the sysfs walk. Raises whatever it refuses with
+          (a ``SlotConfigError``).
+        """
+        spec_provider = _spec_provider_for(slot_cfg)
+        slot_label = str(slot_cfg.get("name", "") or slot_instance_token(slot_cfg))
+        mismatch = model_runtime_mismatch(model_info, spec_provider, slot=slot_label)
+        if mismatch:
+            raise SlotModelRuntimeMismatch(
+                mismatch,
+                details={
+                    "slot": slot_label,
+                    "model_id": str(model_info.get("_model_key") or model_info.get("id") or ""),
+                },
+            )
+        preflight = getattr(spec_provider, "preflight", None)
+        if preflight is not None:
+            preflight(slot_cfg, model_info, gfx_versions=kfd_gfx_target_versions())
+
     def load_sync(
         self,
         slot_cfg: dict[str, Any],
@@ -2472,8 +2509,8 @@ class ContainerProvider(Provider):
         token = slot_instance_token(slot_cfg)
 
         # The slot's runtime family, resolved ONCE for both loud-fail guards
-        # below (and re-resolved inside _render_quadlet_text, which owns the
-        # dispatch). ``None`` means the default llama-server GPU provider.
+        # below (and re-resolved inside check_load and _render_quadlet_text, which
+        # owns the dispatch). ``None`` means the default llama-server GPU provider.
         spec_provider = _spec_provider_for(slot_cfg)
 
         # The llama path takes its image from ``binary``, so a non-llama runner
@@ -2539,31 +2576,8 @@ class ContainerProvider(Provider):
             ),
         )
 
-        # The model and the runtime must agree before ANY unit is written: a
-        # halogen checkpoint only loads on the halogen runtime, and that runtime
-        # loads nothing else. The write seam refuses the same pairing, but a
-        # slot file edited by hand, a profile switched under a bound model, or a
-        # ``load -m`` override reaches here without passing it. An empty model
-        # binding is not this refusal (the provider names it, ``slot.model_missing``).
-        slot_label = str(slot_cfg.get("name", "") or token)
-        mismatch = model_runtime_mismatch(model_info, spec_provider, slot=slot_label)
-        if mismatch:
-            raise SlotModelRuntimeMismatch(
-                mismatch,
-                details={
-                    "slot": slot_label,
-                    "model_id": str(model_info.get("_model_key") or model_info.get("id") or ""),
-                },
-            )
-
-        # A runtime that can refuse a host it cannot run on (halogen: gfx1151
-        # only, a checkpoint with its tokenizer beside it) says so here, before
-        # ANY unit is written. The provider owns the rule; this seam only hands it
-        # the host's KFD gfx targets, read lazily so no other runtime pays for the
-        # sysfs walk. Raises whatever it refuses with (a ``SlotConfigError``).
-        preflight = getattr(spec_provider, "preflight", None)
-        if preflight is not None:
-            preflight(slot_cfg, model_info, gfx_versions=kfd_gfx_target_versions())
+        # The last line of defence for a caller that skipped SlotManager.load.
+        self.check_load(slot_cfg, model_info)
 
         # Loud-fail for NPU slots only: a missing FLM tag must not silently
         # fall through to FLM's legacy build_env default. Kokoro/ComfyUI are
