@@ -190,6 +190,21 @@ HALOGEN_TUNE_ENV: frozenset[str] = frozenset(
 #: (see :data:`HALOGEN_DENIED_PREFIXES`).
 HALOGEN_DENIED_ENV: frozenset[str] = frozenset({"HALOGEN_CACHE_DIR", "HALOGEN_CACHE_FILE"})
 
+
+def runner_knob_denied(key: str) -> list[str]:
+    """Profile-flag names runner ``key`` may not set, for the dashboard screen.
+
+    The exact names sorted, then each owned name prefix as ``PREFIX*``. Only
+    halogen has knobs today; every other runner gets ``[]``.
+    """
+    if key != "halogen":
+        return []
+    prefixes = (*HALOGEN_MANAGED_PREFIXES, *HALOGEN_DENIED_PREFIXES)
+    return sorted(HALOGEN_MANAGED_ENV | HALOGEN_TUNE_ENV | HALOGEN_DENIED_ENV) + [
+        p + "*" for p in prefixes
+    ]
+
+
 _TOKEN = re.compile(r"(HALOGEN_[A-Z0-9_]+)=(.*)")
 _WHOLE_NUMBER = re.compile(r"[0-9]+")
 #: Longest digit string converted with ``int()``. Python refuses 4300+ digits
