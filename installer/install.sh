@@ -214,15 +214,37 @@ MODELS_DIR_EXPLICIT=0
 # A failed install writes the failure report instead (see the ERR trap).
 # Empty means "don't write one" (the default).
 SUMMARY_JSON_PATH=""
+# Component flags (--bare, --no-*) only export the env knobs the gates further
+# down already honour. COMPONENT_FLAG_GIVEN=1 tells the interactive component
+# picker that the operator already chose on the command line.
+COMPONENT_FLAG_GIVEN=0
+# shellcheck disable=SC2034  # COMPONENT_FLAG_GIVEN is read by the component picker
 for arg in "$@"; do
     case "$arg" in
         --dev) DEV_MODE=1 ;;
         --no-start) NO_START=1 ;;
         --models-dir=*) MODELS_DIR="${arg#--models-dir=}" ;;
         --summary-json=*) SUMMARY_JSON_PATH="${arg#--summary-json=}" ;;
+        --no-owui) export HAL0_SKIP_OPENWEBUI=1; COMPONENT_FLAG_GIVEN=1 ;;
+        --no-comfyui) export HAL0_IMAGE_MODELS=none; COMPONENT_FLAG_GIVEN=1 ;;
+        --no-hermes) export HAL0_SKIP_HERMES=1; COMPONENT_FLAG_GIVEN=1 ;;
+        --no-pi) export HAL0_SKIP_PI=1; COMPONENT_FLAG_GIVEN=1 ;;
+        --no-agents)
+            export HAL0_SKIP_HERMES=1 HAL0_SKIP_PI=1
+            COMPONENT_FLAG_GIVEN=1
+            ;;
+        --no-memory) export HAL0_SKIP_HINDSIGHT=1; COMPONENT_FLAG_GIVEN=1 ;;
+        --no-brain-model) export HAL0_SKIP_BRAIN_MODEL=1; COMPONENT_FLAG_GIVEN=1 ;;
+        --bare|--bare-inference)
+            export HAL0_SKIP_OPENWEBUI=1 HAL0_IMAGE_MODELS=none HAL0_SKIP_HERMES=1 \
+                HAL0_SKIP_PI=1 HAL0_SKIP_HINDSIGHT=1 HAL0_SKIP_BRAIN_MODEL=1
+            COMPONENT_FLAG_GIVEN=1
+            ;;
         --help|-h)
             cat <<EOF
 Usage: install.sh [--dev] [--no-start] [--models-dir=PATH] [--summary-json=PATH]
+                  [--bare] [--no-owui] [--no-comfyui] [--no-hermes] [--no-pi]
+                  [--no-agents] [--no-memory] [--no-brain-model]
   --dev               install under \$PWD/.hal0ai/, no systemd setup
   --no-start          set up everything but don't enable/start the API
   --models-dir=PATH   absolute path where HuggingFace pulls land
@@ -234,6 +256,18 @@ Usage: install.sh [--dev] [--no-start] [--models-dir=PATH] [--summary-json=PATH]
                       ports, bind host, model pulled, per-step durations,
                       warning count) to PATH as JSON, atomically. See
                       docs/getting-started/install.mdx.
+
+Components (each flag skips one optional piece; env twin in parentheses):
+  --no-owui           skip Open WebUI (HAL0_SKIP_OPENWEBUI=1)
+  --no-comfyui        skip ComfyUI starter image models (HAL0_IMAGE_MODELS=none)
+  --no-hermes         skip the Hermes agent (HAL0_SKIP_HERMES=1)
+  --no-pi             skip the Pi agent (HAL0_SKIP_PI=1)
+  --no-agents         --no-hermes and --no-pi together
+  --no-memory         skip Hindsight memory (HAL0_SKIP_HINDSIGHT=1)
+  --no-brain-model    skip the brain model pull (HAL0_SKIP_BRAIN_MODEL=1)
+  --bare              every component above off: inference only
+  --bare-inference    synonym for --bare
+Any component flag also suppresses the interactive component picker.
 
 Interactive prompts (models dir, HuggingFace token, Hermes terminal tool) only
 run when stdin is a terminal. Set HAL0_NONINTERACTIVE=1 to force the flag/env
