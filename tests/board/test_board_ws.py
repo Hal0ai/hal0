@@ -6,6 +6,7 @@ Run targeted:
 
 from __future__ import annotations
 
+import asyncio
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -13,7 +14,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
-from websockets.exceptions import ConnectionClosedOK
+from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
 import hal0.api.routes.board_ws as board_ws_mod
 from hal0.api.middleware import error_codes
@@ -23,20 +24,37 @@ from hal0.board.client import BoardClient
 
 
 class _FakeUpstream:
-    def __init__(self, frames: list[str]) -> None:
+    """Yields ``frames`` then ends per ``end``: close | stop | error | hold.
+
+    ``hold`` blocks until a frame was sent from the browser (or released).
+    """
+
+    def __init__(self, frames: list, end: str = "close") -> None:
         self._frames = list(frames)
-        self.sent: list[str] = []
+        self._end = end
+        self.sent: list = []
+        self._got = asyncio.Event()
 
     def __aiter__(self):
         return self
 
-    async def __anext__(self) -> str:
+    async def __anext__(self):
         if self._frames:
-            return self._frames.pop(0)
+            item = self._frames.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+        if self._end == "stop":
+            raise StopAsyncIteration
+        if self._end == "error":
+            raise ConnectionClosedError(None, None)
+        if self._end == "hold":
+            await asyncio.wait_for(self._got.wait(), 5)
         raise ConnectionClosedOK(None, None)
 
-    async def send(self, data: str) -> None:
+    async def send(self, data) -> None:
         self.sent.append(data)
+        self._got.set()
 
 
 class _FakeConnect:
@@ -44,9 +62,12 @@ class _FakeConnect:
         self._upstream = upstream
         self._urls = urls
         self._exc = exc
+        self.kwargs: dict = {}
+        self.exited = False
 
-    def __call__(self, url: str, **_kw):
+    def __call__(self, url: str, **kw):
         self._urls.append(url)
+        self.kwargs = kw
         return self
 
     async def __aenter__(self):
@@ -55,6 +76,7 @@ class _FakeConnect:
         return self._upstream
 
     async def __aexit__(self, *a):
+        self.exited = True
         return None
 
 
@@ -102,7 +124,7 @@ def test_ws_appends_token_and_passthrough_query(app_client, monkeypatch) -> None
 
 def test_ws_pumps_frames_both_ways(app_client, monkeypatch) -> None:
     _, client = app_client
-    up = _FakeUpstream(['{"cursor":1}', '{"cursor":2}'])
+    up = _FakeUpstream(['{"cursor":1}', '{"cursor":2}'], end="hold")
     monkeypatch.setattr(board_ws_mod, "connect", _FakeConnect(up, []))
     with client.websocket_connect("/api/board/events") as ws:
         ws.send_text("ping")
@@ -111,7 +133,7 @@ def test_ws_pumps_frames_both_ways(app_client, monkeypatch) -> None:
         with pytest.raises(WebSocketDisconnect) as ei:
             ws.receive_text()
     assert ei.value.code == 1000
-    assert up.sent in ([], ["ping"])  # browser frame may race the clean close
+    assert up.sent == ["ping"]
 
 
 def test_ws_upstream_failure_closes_1011(app_client, monkeypatch) -> None:
@@ -156,3 +178,89 @@ def test_ws_not_installed_closes_1011(app_client, monkeypatch) -> None:
         ws.receive_text()
     assert ei.value.code == 1011
     assert urls == []
+
+
+def _closes_with(client, monkeypatch, fake) -> int:
+    monkeypatch.setattr(board_ws_mod, "connect", fake)
+    with (
+        client.websocket_connect("/api/board/events") as ws,
+        pytest.raises(WebSocketDisconnect) as ei,
+    ):
+        ws.receive_text()
+    return ei.value.code
+
+
+def test_ws_connect_bypasses_proxy_env(app_client, monkeypatch) -> None:
+    fake = _FakeConnect(_FakeUpstream([]), [])
+    _closes_with(app_client[1], monkeypatch, fake)
+    assert fake.kwargs["proxy"] is None
+
+
+def test_ws_empty_params_not_forwarded(app_client, monkeypatch) -> None:
+    urls: list[str] = []
+    _closes_with(app_client[1], monkeypatch, _FakeConnect(_FakeUpstream([]), urls))  # baseline
+    urls.clear()
+    monkeypatch.setattr(board_ws_mod, "connect", _FakeConnect(_FakeUpstream([]), urls))
+    with (
+        app_client[1].websocket_connect("/api/board/events?since=&board=alpha") as ws,
+        pytest.raises(WebSocketDisconnect),
+    ):
+        ws.receive_text()
+    q = parse_qs(urlsplit(urls[0]).query)
+    assert q["board"] == ["alpha"]
+    assert "since" not in q
+
+
+def test_ws_stop_async_iteration_closes_1000(app_client, monkeypatch) -> None:
+    fake = _FakeConnect(_FakeUpstream([], end="stop"), [])
+    assert _closes_with(app_client[1], monkeypatch, fake) == 1000
+
+
+def test_ws_midstream_closed_error_closes_1011(app_client, monkeypatch) -> None:
+    fake = _FakeConnect(_FakeUpstream(["a"], end="error"), [])
+    monkeypatch.setattr(board_ws_mod, "connect", fake)
+    with (
+        app_client[1].websocket_connect("/api/board/events") as ws,
+        pytest.raises(WebSocketDisconnect) as ei,
+    ):
+        assert ws.receive_text() == "a"
+        ws.receive_text()
+    assert ei.value.code == 1011
+
+
+def test_ws_unexpected_pump_exception_closes_1011(app_client, monkeypatch) -> None:
+    fake = _FakeConnect(_FakeUpstream([ValueError("boom")]), [])
+    assert _closes_with(app_client[1], monkeypatch, fake) == 1011
+
+
+def test_ws_binary_frame_forwarded(app_client, monkeypatch) -> None:
+    up = _FakeUpstream([], end="hold")
+    monkeypatch.setattr(board_ws_mod, "connect", _FakeConnect(up, []))
+    with (
+        app_client[1].websocket_connect("/api/board/events") as ws,
+        pytest.raises(WebSocketDisconnect),
+    ):
+        ws.send_bytes(b"\x00\x01")
+        ws.receive_text()
+    assert up.sent == [b"\x00\x01"]
+
+
+def test_ws_browser_disconnect_closes_upstream(app_client, monkeypatch) -> None:
+    fake = _FakeConnect(_FakeUpstream([], end="hold"), [])
+    monkeypatch.setattr(board_ws_mod, "connect", fake)
+    with app_client[1].websocket_connect("/api/board/events") as ws:
+        ws.close()
+    # TestClient joins the app task on exit, so the handler has finished.
+    assert fake.exited
+
+
+def test_ws_https_base_becomes_wss(app_client, monkeypatch) -> None:
+    app, client = app_client
+    app.state.hermes_kanban = HermesKanbanClient(
+        base_url="https://hermes.test", token_resolver=lambda: "t"
+    )
+    urls: list[str] = []
+    monkeypatch.setattr(board_ws_mod, "connect", _FakeConnect(_FakeUpstream([]), urls))
+    with client.websocket_connect("/api/board/events") as ws, pytest.raises(WebSocketDisconnect):
+        ws.receive_text()
+    assert urls[0].startswith("wss://hermes.test/api/plugins/kanban/events")

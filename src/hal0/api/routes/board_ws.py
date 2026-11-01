@@ -26,7 +26,7 @@ import structlog
 from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect, WebSocketState
 from websockets.asyncio.client import connect
-from websockets.exceptions import ConnectionClosedOK, WebSocketException
+from websockets.exceptions import ConnectionClosedOK
 
 from hal0.board import (
     DEFAULT_BASE_URL,
@@ -65,7 +65,7 @@ def _build_upstream_url(browser_ws: WebSocket, *, token: str) -> str:
     qs: dict[str, str] = {}
     for key in _PASSTHROUGH_QUERY:
         val = browser_ws.query_params.get(key)
-        if val is not None:
+        if val:
             qs[key] = val
     qs["token"] = token
     ws_base = _http_to_ws(_upstream_base_url(browser_ws))
@@ -83,11 +83,15 @@ async def _upstream_to_browser(upstream, browser_ws: WebSocket) -> int:
     try:
         async for frame in upstream:
             if isinstance(frame, bytes):
-                frame = frame.decode("utf-8", errors="replace")
-            await browser_ws.send_text(frame)
+                await browser_ws.send_bytes(frame)
+            else:
+                await browser_ws.send_text(frame)
     except ConnectionClosedOK:
         return 1000
-    except (WebSocketException, WebSocketDisconnect, RuntimeError):
+    except WebSocketDisconnect:
+        return 1000
+    except Exception as exc:
+        log.warning("board.events_pump_error", error=type(exc).__name__)
         return 1011
     return 1000
 
@@ -95,10 +99,18 @@ async def _upstream_to_browser(upstream, browser_ws: WebSocket) -> int:
 async def _browser_to_upstream(browser_ws: WebSocket, upstream) -> int:
     try:
         while True:
-            await upstream.send(await browser_ws.receive_text())
+            msg = await browser_ws.receive()
+            if msg["type"] == "websocket.disconnect":
+                return 1000
+            data = msg.get("text")
+            if data is None:
+                data = msg.get("bytes")
+            if data is not None:
+                await upstream.send(data)
     except WebSocketDisconnect:
         return 1000
-    except (WebSocketException, RuntimeError):
+    except Exception as exc:
+        log.warning("board.events_pump_error", error=type(exc).__name__)
         return 1011
 
 
@@ -122,6 +134,8 @@ async def proxy_board_events(browser_ws: WebSocket) -> None:
         url,
         ping_interval=WS_PING_INTERVAL_SECONDS,
         open_timeout=WS_OPEN_TIMEOUT_SECONDS,
+        # Loopback upstream: never route through an environment proxy (#2526).
+        proxy=None,
     )
     try:
         upstream = await cm.__aenter__()
