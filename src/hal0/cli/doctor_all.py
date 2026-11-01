@@ -1006,6 +1006,30 @@ def check_ui_dist(
     )
 
 
+@_report_unreadable("hermes-session-token-pin", "Stale Hermes session token pin")
+def check_stale_hermes_session_token(api_env: Path | None = None) -> Check:
+    """Warn when the retired ``HERMES_SESSION_TOKEN`` pin is still in ``api.env``.
+
+    hal0-api reads the dashboard token from the shim's token file since 1.8.0;
+    the env pin is ignored. The value is never printed.
+    """
+    api_env = api_env if api_env is not None else paths.api_env()
+    if _read_env_value(api_env, "HERMES_SESSION_TOKEN") is None:
+        return Check(
+            "hermes-session-token-pin",
+            "Stale Hermes session token pin",
+            _PASS,
+            "no HERMES_SESSION_TOKEN in api.env",
+        )
+    return Check(
+        "hermes-session-token-pin",
+        "Stale Hermes session token pin",
+        _WARN,
+        f"HERMES_SESSION_TOKEN in {api_env} is ignored since 1.8.0; "
+        "remove it, then restart hal0-api",
+    )
+
+
 def _env_file_entries(text: str) -> list[tuple[str, str]]:
     """``(key, value)`` for every uncommented ``KEY=value`` line, in file order.
 
@@ -2952,6 +2976,26 @@ def check_hermes_gateway_unit(
     return Check("hermes-gateway-unit", "Hermes gateway unit", status, row["detail"])
 
 
+@_report_unreadable("hermes-dashboard-token", "Hermes dashboard token")
+def check_hermes_dashboard_token(*, path: Path | None = None) -> Check:
+    """Hermes dashboard token file present (see :mod:`hal0.agents.hermes_doctor`)."""
+    from hal0.agents import hermes_doctor
+
+    row = hermes_doctor.check_hermes_dashboard_token(path=path)
+    status = {"ok": _PASS, "warn": _WARN}[row["status"]]
+    return Check("hermes-dashboard-token", "Hermes dashboard token", status, row["detail"])
+
+
+@_report_unreadable("hermes-kanban", "Hermes kanban reachable")
+def check_hermes_kanban_reachable(*, client: Any | None = None) -> Check:
+    """Hermes kanban plugin answers ``GET /boards`` (see :mod:`hal0.agents.hermes_doctor`)."""
+    from hal0.agents import hermes_doctor
+
+    row = hermes_doctor.check_hermes_kanban_reachable(client=client)
+    status = {"ok": _PASS, "warn": _WARN}[row["status"]]
+    return Check("hermes-kanban", "Hermes kanban reachable", status, row["detail"])
+
+
 @_report_unreadable("hermes_anchor_window", "Hermes anchor context window")
 def check_hermes_anchor_window(
     *,
@@ -3080,6 +3124,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_model_store(_get_any("/api/models", base)),
         check_leftover_registry_toml(),
         check_ui_dist(),
+        check_stale_hermes_session_token(),
         check_api_env_entries(),
         check_ports(slots_payload),
         check_port_dnat(slots_payload),
@@ -3108,6 +3153,8 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_hermes_command_approvals(),
         check_hermes_delegation_slot(slots_payload),
         check_hermes_gateway_unit(),
+        check_hermes_dashboard_token(),
+        check_hermes_kanban_reachable(),
         check_hermes_anchor_window(base=base),
         check_hal0_linger(),
         check_hindsight_llm_auth(auth=auth_payload),
@@ -3199,6 +3246,8 @@ __all__ = [
     "check_auth_posture",
     "check_hal0_target",
     "check_hermes_anchor_window",
+    "check_hermes_dashboard_token",
+    "check_hermes_kanban_reachable",
     "check_hermes_mcp_config_auth",
     "check_hindsight_llm_auth",
     "check_mcp_mounts",
@@ -3208,6 +3257,7 @@ __all__ = [
     "check_model_store",
     "check_ports",
     "check_seams",
+    "check_stale_hermes_session_token",
     "check_ui_dist",
     "doctor_all_cmd",
     "overall_verdict",

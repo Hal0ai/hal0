@@ -439,11 +439,53 @@ class TestDashboardSessionToken:
 
     def test_operator_env_wins_over_file(self) -> None:
         # A `systemctl edit` drop-in that sets the variable is the operator's
-        # explicit choice; the shim neither overrides it nor mints a file.
+        # explicit choice; the shim never overrides it, and writes it through
+        # to the file so hal0-api reads the token Hermes actually runs with.
+        path = agent_shim.dashboard_session_token_path("hermes")
+        path.parent.mkdir(parents=True)
+        path.write_text("stale-file-token\n")
         with patch.dict(os.environ, {"HERMES_DASHBOARD_SESSION_TOKEN": "from-dropin"}):
             env = agent_shim._build_hermes_env(_cfg())
         assert env["HERMES_DASHBOARD_SESSION_TOKEN"] == "from-dropin"
-        assert not agent_shim.dashboard_session_token_path("hermes").exists()
+        assert path.read_text() == "from-dropin\n"
+
+    def test_supplied_token_written_to_file(self) -> None:
+        path = agent_shim.dashboard_session_token_path("hermes")
+        token = agent_shim._dashboard_session_token(_cfg(), supplied="from-dropin")
+        assert token == "from-dropin"
+        assert path.read_text() == "from-dropin\n"
+        assert path.stat().st_mode & 0o777 == 0o600
+
+    def test_supplied_token_unchanged_file_not_rewritten(self) -> None:
+        path = agent_shim.dashboard_session_token_path("hermes")
+        path.parent.mkdir(parents=True)
+        path.write_text("from-dropin\n")
+        os.utime(path, (1_000_000, 1_000_000))
+        token = agent_shim._dashboard_session_token(_cfg(), supplied="from-dropin")
+        assert token == "from-dropin"
+        assert path.read_text() == "from-dropin\n"
+        assert path.stat().st_mtime == 1_000_000
+
+    def test_no_supplied_token_mints_as_before(self) -> None:
+        path = agent_shim.dashboard_session_token_path("hermes")
+        token = agent_shim._dashboard_session_token(_cfg(), supplied="  ")
+        assert token and len(token) >= 32
+        assert path.read_text() == token + "\n"
+        assert agent_shim._dashboard_session_token(_cfg(), supplied=None) == token
+
+    def test_supplied_token_survives_unwritable_state_dir(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with (
+            patch.object(agent_shim.Path, "mkdir", side_effect=PermissionError("ro")),
+            patch.dict(os.environ, {"HERMES_DASHBOARD_SESSION_TOKEN": "from-dropin"}),
+        ):
+            env = agent_shim._build_hermes_env(_cfg())
+        assert env["HERMES_DASHBOARD_SESSION_TOKEN"] == "from-dropin"
+        err = capsys.readouterr().err
+        assert "could not write the dashboard session token to" in err
+        assert "Hermes still uses the supplied token" in err
+        assert "board.no_token or 401" in err
 
     def test_blank_file_is_replaced(self) -> None:
         path = agent_shim.dashboard_session_token_path("hermes")

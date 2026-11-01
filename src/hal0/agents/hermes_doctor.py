@@ -369,3 +369,72 @@ def check_hermes_gateway_unit(
         }
     state = "installed (masked)" if unit.is_symlink() else "installed"
     return {"status": "ok", "detail": f"{unit.name} {state}; no unmanaged gateway"}
+
+
+KANBAN_PROBE_TIMEOUT_S = 10.0
+
+
+def check_hermes_dashboard_token(*, path: Path | None = None) -> dict[str, str]:
+    """The Hermes dashboard token file hal0-api reads for ``/api/board/*`` exists.
+
+    The ``hal0-agent`` shim mints the file; the token value is never printed.
+    """
+    from hal0.board import BoardNoToken
+    from hal0.board import auth as board_auth
+
+    if path is None and not board_auth.hermes_installed():
+        return {
+            "status": "ok",
+            "detail": "Hermes agent not installed; no dashboard token expected",
+        }
+    try:
+        board_auth.read_dashboard_token(path)
+    except BoardNoToken as exc:
+        if isinstance(exc.__cause__, PermissionError):
+            # The file exists but this user cannot read it: not "missing".
+            raise exc.__cause__ from exc
+        where = (exc.details or {}).get("path", str(path) if path else "the token file")
+        return {
+            "status": "warn",
+            "detail": f"missing at {where}; restart hal0-agent@hermes to mint it",
+        }
+    return {"status": "ok", "detail": "present"}
+
+
+def check_hermes_kanban_reachable(*, client: Any | None = None) -> dict[str, str]:
+    """``GET /boards`` on the Hermes kanban plugin answers (the Operator Board backend)."""
+    import asyncio
+
+    from hal0.board import HermesKanbanClient
+    from hal0.board import auth as board_auth
+    from hal0.errors import Hal0Error
+
+    if client is None:
+        if not board_auth.hermes_installed():
+            return {
+                "status": "ok",
+                "detail": "Hermes agent not installed; board unavailable by design",
+            }
+        client = HermesKanbanClient.from_env()
+
+    async def _probe() -> Any:
+        try:
+            return await asyncio.wait_for(
+                client.request_json("GET", "/boards"), timeout=KANBAN_PROBE_TIMEOUT_S
+            )
+        finally:
+            await client.aclose()
+
+    try:
+        data = asyncio.run(_probe())
+    except TimeoutError:
+        return {
+            "status": "warn",
+            "detail": f"board.unreachable: timed out after {KANBAN_PROBE_TIMEOUT_S:g}s",
+        }
+    except Hal0Error as exc:
+        return {"status": "warn", "detail": f"{exc.code}: {exc}"}
+    except Exception as exc:
+        return {"status": "warn", "detail": f"probe failed: {exc.__class__.__name__}: {exc}"}
+    boards = data.get("boards") if isinstance(data, dict) else None
+    return {"status": "ok", "detail": f"{len(boards) if isinstance(boards, list) else 0} board(s)"}

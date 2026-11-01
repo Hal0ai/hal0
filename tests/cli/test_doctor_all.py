@@ -1445,6 +1445,23 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         ),
     )
 
+    # Board rows read the real token file / api.env / dashboard otherwise.
+    monkeypatch.setattr(
+        da,
+        "check_stale_hermes_session_token",
+        lambda **_kw: Check("hermes-session-token-pin", "Stale pin", "pass", "stubbed"),
+    )
+    monkeypatch.setattr(
+        da,
+        "check_hermes_dashboard_token",
+        lambda **_kw: Check("hermes-dashboard-token", "Token", "pass", "stubbed"),
+    )
+    monkeypatch.setattr(
+        da,
+        "check_hermes_kanban_reachable",
+        lambda **_kw: Check("hermes-kanban", "Kanban", "pass", "stubbed"),
+    )
+
     # Linger row (ADR-0034) shells out to loginctl otherwise.
     monkeypatch.setattr(
         da,
@@ -1486,11 +1503,12 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
     # Verify rows plus the extra evidence rows.
-    assert keys[-36:] == [
+    assert keys[-39:] == [
         "auth",
         "models",
         "registry-toml",
         "ui-dist",
+        "hermes-session-token-pin",
         "api-env-entries",
         "ports",
         "port_dnat",
@@ -1517,6 +1535,8 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "hermes_command_approvals",
         "hermes_delegation_slot",
         "hermes-gateway-unit",
+        "hermes-dashboard-token",
+        "hermes-kanban",
         "hermes_anchor_window",
         "hal0_linger",
         "hindsight_llm_auth",
@@ -2915,3 +2935,64 @@ def test_retain_chunk_skips_without_a_live_engine() -> None:
         {"enabled": True, "engine": "hindsight", "reachable": False},
     ):
         assert da.check_memory_retain_chunk(memory=memory, fetch=_never).status == "pass"
+
+
+# ── check_stale_hermes_session_token ───────────────────────────────────────────
+
+
+def test_stale_session_token_pin_warns_without_leaking_value(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    env = tmp_path / "api.env"
+    env.write_text("OTHER=1\nHERMES_SESSION_TOKEN=s3cr3t-value\n")
+    c = da.check_stale_hermes_session_token(env)
+    assert c.status == "warn"
+    assert c.detail == (
+        f"HERMES_SESSION_TOKEN in {env} is ignored since 1.8.0; remove it, then restart hal0-api"
+    )
+    assert "s3cr3t" not in c.detail
+
+
+def test_stale_session_token_pin_absent_passes(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    env = tmp_path / "api.env"
+    env.write_text("OTHER=1\n# HERMES_SESSION_TOKEN=commented\n")
+    assert da.check_stale_hermes_session_token(env).status == "pass"
+
+
+def test_stale_session_token_pin_missing_file_passes(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    assert da.check_stale_hermes_session_token(tmp_path / "nope.env").status == "pass"
+
+
+def test_hermes_board_wrappers_map_status(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    f = tmp_path / "tok"
+    assert da.check_hermes_dashboard_token(path=f).status == "warn"
+    f.write_text("x")
+    assert da.check_hermes_dashboard_token(path=f).status == "pass"
+
+
+def test_hermes_kanban_row_reports_unreadable_install_state(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from hal0.board import auth
+
+    def boom() -> bool:
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(auth, "hermes_installed", boom)
+    c = da.check_hermes_kanban_reachable()
+    assert c.key == "hermes-kanban" and c.status == "warn"
+    assert "could not run this check as this user" in c.detail
+
+
+def test_hermes_dashboard_token_unreadable_is_not_reported_missing(  # type: ignore[no-untyped-def]
+    tmp_path, monkeypatch
+) -> None:
+    from pathlib import Path
+
+    f = tmp_path / "tok"
+    f.write_text("x\n")
+
+    def deny(self, *a, **k):  # type: ignore[no-untyped-def]
+        raise PermissionError(13, "denied")
+
+    monkeypatch.setattr(Path, "read_text", deny)
+    c = da.check_hermes_dashboard_token(path=f)
+    assert c.status == "warn"
+    assert c.detail.startswith("could not run this check as this user")
+    assert "missing" not in c.detail
