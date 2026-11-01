@@ -12,6 +12,11 @@ Hermes profiles and `hal0-brain` write the shared pool by default, with
 `agent:<id>` provenance and a per-call or per-profile private opt-in. The
 memory tag grammar is recorded there too.
 
+**Amended (2026-11-01).** Decision 8 gains a note: for a request that carries
+`X-OpenWebUI-Chat-Id`, hal0 now derives `X-Hermes-Session-Id` and drops client
+tools on the way to a Hermes profile. OWUI no longer "sends neither" once it
+forwards user headers.
+
 ## Context
 
 OWUI is the chat front door on a hal0 box, and it talks only to hal0's `/v1`.
@@ -227,6 +232,28 @@ line above disagree.
    upstream receives them when a client sends them. They are protocol
    selectors, not credentials. OWUI sends neither, and resends history each
    turn.
+
+   *Note (2026-11-01).* hal0 sets `ENABLE_FORWARD_USER_INFO_HEADERS=True` for
+   OWUI, which then sends `X-OpenWebUI-Chat-Id` on every model request. The
+   dispatcher uses it for a Hermes-owned model id (an upstream with
+   `managed_by="agent:hermes"`), on `/chat/completions` only, behind
+   `[openwebui].hermes_session_from_chat_id` (default on):
+
+   - **One chat is one Hermes session.** When the client sent no
+     `X-Hermes-Session-Id` and the chat id matches `^[A-Za-z0-9_-]{1,64}$`,
+     the relay adds `X-Hermes-Session-Id: owui-<chat id>`. The Hermes dashboard
+     then shows the chat as a session and Hermes memory scopes to it. A client
+     header wins; an id of any other shape adds nothing. The OWUI header itself
+     is not on the forwardable list and never reaches Hermes.
+   - **No client tools on a Hermes model.** The relay drops `tools` and
+     `tool_choice` from the JSON body. OWUI would otherwise attach its own tools
+     and loop on `delta.tool_calls`, and a Hermes profile already has hal0's
+     memory and admin tools (decision 9). This is the one place the dispatcher
+     rewrites a relayed body for a reason other than the model name; every other
+     field is kept, and slot and other upstream bodies are untouched.
+
+   Both edits live in `_owui_hermes_adjust` (`api/routes/v1.py`) and turn off
+   together with the flag.
 9. **Every named profile gets hal0's tools and memory (#2891).** A profile the
    operator clones starts with no `mcp_servers`, so through `/v1` it answered
    without hal0-admin and hal0-memory. `wire_named_profiles` deep-merges the
