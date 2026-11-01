@@ -37,42 +37,40 @@ _READ_ONLY_CONFIG_HINT = "[brain_chat] read_only=true"
 
 
 class _RecordingStore:
-    """A BoardStore stand-in: records every board call, returns empty shapes.
+    """A ``BoardClient`` stand-in: records every board call, returns empty shapes.
 
-    Board tools run against the hal0-owned store (#1829), so "did the board get
-    touched?" is a store question now, not an upstream-HTTP one. Pre-flagged
-    ``initialized`` so ``resolve_store`` hands it straight back.
+    Board tools call the facade (ADR-0046), so "did the board get touched?" is
+    a facade question. Placed on ``app.state.board_client``.
     """
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, Any]] = []
-        self.initialized = True
 
-    def get_board(self, *, board: str | None = None, **kw: Any) -> Any:
+    async def get_board(self, *, board: str | None = None, **kw: Any) -> Any:
         self.calls.append(("get_board", board))
-        return {"lanes": {}}
+        return {"columns": []}
 
-    def get_task(self, task_id: str, **kw: Any) -> Any:
+    async def get_task(self, task_id: str, **kw: Any) -> Any:
         self.calls.append(("get_task", task_id))
         return {"id": task_id}
 
-    def list_assignees(self, *, board: str | None = None, **kw: Any) -> Any:
+    async def list_assignees(self, *, board: str | None = None, **kw: Any) -> Any:
         self.calls.append(("list_assignees", board))
         return []
 
-    def get_orchestration(self) -> Any:
+    async def get_orchestration(self, **kw: Any) -> Any:
         self.calls.append(("get_orchestration", None))
         return {}
 
-    def update_task(self, task_id: str, patch: dict[str, Any], **kw: Any) -> Any:
+    async def update_task(self, task_id: str, patch: dict[str, Any], **kw: Any) -> Any:
         self.calls.append(("update_task", task_id))
         return {"ok": True, "id": task_id}
 
-    def create_task(self, body: dict[str, Any], **kw: Any) -> Any:
+    async def create_task(self, body: dict[str, Any], **kw: Any) -> Any:
         self.calls.append(("create_task", body))
         return {"task": {"id": "t_new"}}
 
-    def update_orchestration(self, body: dict[str, Any]) -> Any:
+    async def update_orchestration(self, body: dict[str, Any], **kw: Any) -> Any:
         self.calls.append(("update_orchestration", body))
         return {}
 
@@ -93,7 +91,7 @@ def _fake_request(
         self_api_base_url="http://testserver",
         brain_persona_root=persona_root or Path("/nonexistent-personas-root"),
         platform_http=platform_http,
-        board_store=store if store is not None else _RecordingStore(),
+        board_client=store if store is not None else _RecordingStore(),
         hermes_kanban=None,
     )
     return SimpleNamespace(app=SimpleNamespace(state=state), headers={})

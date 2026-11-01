@@ -68,7 +68,7 @@ def _final(text: str) -> dict[str, Any]:
 
 
 class _FakeStore:
-    """A BoardStore stand-in for the steward's board tools (#1829).
+    """A ``BoardClient`` stand-in for the steward's board tools (ADR-0046).
 
     ``raise_on`` names the store method that blows up, so the loop's
     "a tool raised" paths can be driven without a real board.
@@ -78,30 +78,29 @@ class _FakeStore:
         self.board_result = board_result if board_result is not None else {"lanes": {}}
         self.raise_on = raise_on
         self.calls: list[str] = []
-        self.initialized = True
 
     def _hit(self, name: str) -> None:
         self.calls.append(name)
         if self.raise_on == name:
             raise RuntimeError("board store exploded")
 
-    def get_board(self, *, board: str | None = None, **kw: Any) -> Any:
+    async def get_board(self, *, board: str | None = None, **kw: Any) -> Any:
         self._hit("get_board")
         return self.board_result
 
-    def get_task(self, task_id: str, **kw: Any) -> Any:
+    async def get_task(self, task_id: str, **kw: Any) -> Any:
         self._hit("get_task")
         return {"id": task_id}
 
-    def list_assignees(self, *, board: str | None = None, **kw: Any) -> Any:
+    async def list_assignees(self, *, board: str | None = None, **kw: Any) -> Any:
         self._hit("list_assignees")
         return []
 
-    def get_orchestration(self) -> Any:
+    async def get_orchestration(self, **kw: Any) -> Any:
         self._hit("get_orchestration")
         return {}
 
-    def update_task(self, task_id: str, patch: dict[str, Any], **kw: Any) -> Any:
+    async def update_task(self, task_id: str, patch: dict[str, Any], **kw: Any) -> Any:
         self._hit("update_task")
         return {"ok": True, "id": task_id}
 
@@ -124,7 +123,7 @@ def _fake_request(
 ) -> Any:
     state = SimpleNamespace(
         board_chat_llm=stub,
-        board_store=store if store is not None else _FakeStore(),
+        board_client=store if store is not None else _FakeStore(),
         hermes_kanban=None,
         approval_queue=queue if queue is not None else ApprovalQueue(),
         self_api_base_url="http://testserver",
