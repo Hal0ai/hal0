@@ -102,3 +102,59 @@ def test_token_not_installed_is_ok(monkeypatch: pytest.MonkeyPatch) -> None:
         "status": "ok",
         "detail": "Hermes agent not installed; no dashboard token expected",
     }
+
+
+def test_token_permission_denied_is_reraised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    f = tmp_path / "tok"
+    f.write_text("x\n")
+
+    def deny(self: Path, *a: object, **k: object) -> str:
+        raise PermissionError(13, "denied")
+
+    monkeypatch.setattr(Path, "read_text", deny)
+    with pytest.raises(PermissionError):
+        hermes_doctor.check_hermes_dashboard_token(path=f)
+
+
+def test_kanban_unexpected_probe_error_warns() -> None:
+    class Boom:
+        async def request_json(self, *a: object, **k: object) -> object:
+            raise ValueError("bad url")
+
+        async def aclose(self) -> None:
+            pass
+
+    row = hermes_doctor.check_hermes_kanban_reachable(client=Boom())
+    assert row == {"status": "warn", "detail": "probe failed: ValueError: bad url"}
+
+
+def test_kanban_probe_closes_client() -> None:
+    closed: list[bool] = []
+
+    class C:
+        async def request_json(self, *a: object, **k: object) -> object:
+            return {"boards": []}
+
+        async def aclose(self) -> None:
+            closed.append(True)
+
+    hermes_doctor.check_hermes_kanban_reachable(client=C())
+    assert closed == [True]
+
+
+def test_client_aclose_closes_owned_transport_only() -> None:
+    import asyncio
+
+    async def run() -> tuple[bool, bool]:
+        owned = HermesKanbanClient(token_resolver=lambda: "t")
+        await owned.aclose()
+        injected_http = httpx.AsyncClient(base_url="http://127.0.0.1:9119")
+        injected = HermesKanbanClient(http_client=injected_http, token_resolver=lambda: "t")
+        await injected.aclose()
+        result = (owned._http.is_closed, injected_http.is_closed)
+        await injected_http.aclose()
+        return result
+
+    assert asyncio.run(run()) == (True, False)

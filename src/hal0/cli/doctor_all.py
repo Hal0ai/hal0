@@ -1025,7 +1025,8 @@ def check_stale_hermes_session_token(api_env: Path | None = None) -> Check:
         "hermes-session-token-pin",
         "Stale Hermes session token pin",
         _WARN,
-        "HERMES_SESSION_TOKEN in api.env is ignored since 1.8.0; remove it",
+        f"HERMES_SESSION_TOKEN in {api_env} is ignored since 1.8.0; "
+        "remove it, then restart hal0-api",
     )
 
 

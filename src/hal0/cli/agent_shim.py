@@ -482,6 +482,14 @@ def _dashboard_session_token(
                 os.chown(path, ent.pw_uid, ent.pw_gid)
         return token
     except OSError as exc:
+        if (supplied or "").strip():
+            print(
+                f"hal0-agent: could not write the dashboard session token to {path} ({exc}); "
+                "Hermes still uses the supplied token, but hal0-api reads that file, so the "
+                "Operator Board will answer board.no_token or 401 until it is written",
+                file=sys.stderr,
+            )
+            return None
         print(
             f"hal0-agent: dashboard session token unavailable ({path}: {exc}); "
             "Hermes mints a new one at every start, so a Desktop remote pairing "

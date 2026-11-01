@@ -482,7 +482,10 @@ class TestDashboardSessionToken:
         ):
             env = agent_shim._build_hermes_env(_cfg())
         assert env["HERMES_DASHBOARD_SESSION_TOKEN"] == "from-dropin"
-        assert "dashboard session token" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "could not write the dashboard session token to" in err
+        assert "Hermes still uses the supplied token" in err
+        assert "board.no_token or 401" in err
 
     def test_blank_file_is_replaced(self) -> None:
         path = agent_shim.dashboard_session_token_path("hermes")

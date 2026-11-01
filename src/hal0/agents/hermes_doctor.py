@@ -390,6 +390,9 @@ def check_hermes_dashboard_token(*, path: Path | None = None) -> dict[str, str]:
     try:
         board_auth.read_dashboard_token(path)
     except BoardNoToken as exc:
+        if isinstance(exc.__cause__, PermissionError):
+            # The file exists but this user cannot read it: not "missing".
+            raise exc.__cause__ from exc
         where = (exc.details or {}).get("path", str(path) if path else "the token file")
         return {
             "status": "warn",
@@ -420,9 +423,7 @@ def check_hermes_kanban_reachable(*, client: Any | None = None) -> dict[str, str
                 client.request_json("GET", "/boards"), timeout=KANBAN_PROBE_TIMEOUT_S
             )
         finally:
-            aclose = getattr(getattr(client, "_http", None), "aclose", None)
-            if aclose is not None:
-                await aclose()
+            await client.aclose()
 
     try:
         data = asyncio.run(_probe())
@@ -433,5 +434,7 @@ def check_hermes_kanban_reachable(*, client: Any | None = None) -> dict[str, str
         }
     except Hal0Error as exc:
         return {"status": "warn", "detail": f"{exc.code}: {exc}"}
+    except Exception as exc:
+        return {"status": "warn", "detail": f"probe failed: {exc.__class__.__name__}: {exc}"}
     boards = data.get("boards") if isinstance(data, dict) else None
     return {"status": "ok", "detail": f"{len(boards) if isinstance(boards, list) else 0} board(s)"}

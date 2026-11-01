@@ -2945,7 +2945,9 @@ def test_stale_session_token_pin_warns_without_leaking_value(tmp_path) -> None: 
     env.write_text("OTHER=1\nHERMES_SESSION_TOKEN=s3cr3t-value\n")
     c = da.check_stale_hermes_session_token(env)
     assert c.status == "warn"
-    assert c.detail == "HERMES_SESSION_TOKEN in api.env is ignored since 1.8.0; remove it"
+    assert c.detail == (
+        f"HERMES_SESSION_TOKEN in {env} is ignored since 1.8.0; remove it, then restart hal0-api"
+    )
     assert "s3cr3t" not in c.detail
 
 
@@ -2976,3 +2978,21 @@ def test_hermes_kanban_row_reports_unreadable_install_state(monkeypatch) -> None
     c = da.check_hermes_kanban_reachable()
     assert c.key == "hermes-kanban" and c.status == "warn"
     assert "could not run this check as this user" in c.detail
+
+
+def test_hermes_dashboard_token_unreadable_is_not_reported_missing(  # type: ignore[no-untyped-def]
+    tmp_path, monkeypatch
+) -> None:
+    from pathlib import Path
+
+    f = tmp_path / "tok"
+    f.write_text("x\n")
+
+    def deny(self, *a, **k):  # type: ignore[no-untyped-def]
+        raise PermissionError(13, "denied")
+
+    monkeypatch.setattr(Path, "read_text", deny)
+    c = da.check_hermes_dashboard_token(path=f)
+    assert c.status == "warn"
+    assert c.detail.startswith("could not run this check as this user")
+    assert "missing" not in c.detail
