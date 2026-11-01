@@ -581,6 +581,19 @@ _is_apparmor_profile_load_failure() {
         | grep -qiE 'install profile containers-default|apparmor_parser.*access denied|exit status 243'
 }
 
+# Guest-profile AppArmor denial signature (#3234): on an UNPRIVILEGED Ubuntu
+# 24.04 LXC the guest's own `flags=(unconfined)` AppArmor profiles for
+# podman/crun/buildah/runc/rootlesskit/slirp4netns are enforced inside the
+# nested container namespace and deny every podman socket() — `<rt> run` dies
+# with `... socket: permission denied` even though `<rt> info` works and
+# `features: nesting=1` is already set. Matched from the smoke failure text
+# only; the caller checks `_is_apparmor_profile_load_failure` first so the
+# #1563 shape keeps precedence.
+_is_unconfined_profile_network_denial() {
+    local blob="$1"
+    printf '%s\n' "${blob}" | grep -qi 'socket: permission denied'
+}
+
 # Shared AppArmor remediation — invokes the SAME convergent fix
 # install.sh's post-install re-check runs
 # (src/hal0/agents/containers_apparmor.py: detect → write
@@ -672,6 +685,33 @@ _container_runtime_gate() {
         warn "  'podman info --debug' for the runtime's own apparmor_profile setting"
         return 1
     fi
+    # #3234: unprivileged-LXC guest `flags=(unconfined)` profiles deny every
+    # podman socket(). Checked AFTER the #1563 branch (which keeps precedence
+    # for a blob carrying both shapes) and BEFORE the keyring / LXC-kind
+    # fallbacks, whose nesting/keyctl advice is wrong here: `<rt> info`
+    # already succeeded, so nesting is proven on. The remediation helper
+    # runs containers_apparmor.py, which disables the profiles; the verdict
+    # is still this gate's own re-smoke (nothing below parses its output).
+    if _is_unconfined_profile_network_denial "${_HAL0_CONTAINER_SMOKE_OUTPUT}"; then
+        warn "  ${rt} run: ${_HAL0_CONTAINER_SMOKE_OUTPUT}"
+        warn "  every ${rt} socket() is being denied — caused by the guest's own 'flags=(unconfined)' AppArmor"
+        warn "  profiles for podman/crun/buildah/runc/rootlesskit/slirp4netns, enforced inside a nested"
+        warn "  container namespace (seen on Ubuntu 24.04 guests; #3234). Attempting to disable them..."
+        if _apparmor_unconfined_remediate "${rt}"; then
+            info "  apparmor remediation applied — ${rt} run now succeeds, continuing install"
+            return 0
+        fi
+        err "${rt} info/version succeeded but '${rt} run' failed — the runtime can't actually launch a container"
+        warn "  automated remediation did NOT resolve it. As root inside THIS container, disable the guest's"
+        warn "  unconfined profiles by hand, then re-run install.sh:"
+        warn "    mkdir -p /etc/apparmor.d/disable"
+        warn "    for p in podman crun buildah runc rootlesskit slirp4netns; do"
+        warn "      [ -f /etc/apparmor.d/\$p ] || continue"
+        warn "      ln -sf /etc/apparmor.d/\$p /etc/apparmor.d/disable/\$p"
+        warn "      apparmor_parser -R /etc/apparmor.d/\$p"
+        warn "    done"
+        return 1
+    fi
     err "${rt} info/version succeeded but '${rt} run' failed — the runtime can't actually launch a container"
     if printf '%s\n' "${_HAL0_CONTAINER_SMOKE_OUTPUT}" \
         | grep -qiE 'create keyring.*(disk quota exceeded|quota exceeded)|keyring.*edquot'; then
@@ -682,8 +722,16 @@ _container_runtime_gate() {
         warn "  find + kill the leaked keyring holders, or raise the quota: sysctl kernel.keys.maxbytes (and"
         warn "  kernel.keys.maxkeys) higher on the PROXMOX HOST, then re-run install.sh"
     elif [[ "$(hal0_lxc_kind)" == "lxc-unprivileged" ]]; then
-        warn "  inside an unprivileged Proxmox/LXC container this needs 'features: nesting=1' (and often keyctl=1)"
-        warn "  set it in /etc/pve/lxc/<CTID>.conf on the PROXMOX HOST, then: pct stop <CTID> && pct start <CTID>"
+        # ${rt} info succeeded to get here, so nesting is already proven on —
+        # never tell the operator to (re)set it (#3234). Point at the real
+        # suspects instead.
+        warn "  ${rt} run: ${_HAL0_CONTAINER_SMOKE_OUTPUT}"
+        warn "  inside this unprivileged Proxmox/LXC container nesting is already on (${rt} info succeeded), so the"
+        warn "  cause is elsewhere. Inspect:"
+        warn "    aa-status                          in this guest (profiles that could be denying ${rt})"
+        warn "    journalctl -k | grep apparmor      on the PROXMOX HOST (look for DENIED lines)"
+        warn "    cat /proc/key-users                (keyring byte-quota exhaustion)"
+        warn "    cat /etc/subuid /etc/subgid        (subordinate id ranges for the user running ${rt})"
     elif [[ "$(hal0_lxc_kind)" == "lxc-privileged" ]]; then
         warn "  inside a PRIVILEGED Proxmox/LXC container the usual cause is missing container features rather"
         warn "  than the uid map: set 'features: nesting=1,keyctl=1,fuse=1,mknod=1' in /etc/pve/lxc/<CTID>.conf"

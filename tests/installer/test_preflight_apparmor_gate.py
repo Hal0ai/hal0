@@ -22,6 +22,12 @@ required) covering:
   non-zero (hard die path preserved)
 * an unrelated `<rt> run` failure never triggers remediation (existing
   keyring/LXC branches stay untouched)
+
+#3234 adds a second branch for the unprivileged-LXC ``socket: permission
+denied`` shape (the guest's own ``flags=(unconfined)`` AppArmor profiles):
+the gate disables them via the same bare-script helper and re-smokes, and the
+``lxc-unprivileged`` fallback no longer claims ``features: nesting=1`` is
+missing when ``<rt> info`` already proved it on.
 """
 
 from __future__ import annotations
@@ -46,7 +52,7 @@ def _write_exec(path: Path, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
 
-def _fake_podman(tmp_path: Path, *, fail_calls: int, fail_stderr: str) -> None:
+def _fake_podman(tmp_path: Path, *, fail_calls: int, fail_stderr: str, fail_rc: int = 243) -> None:
     """A ``podman`` shim: fails (with ``fail_stderr``) for the first
     ``fail_calls`` invocations of ``run``, then succeeds forever after.
     Call count is tracked in a state file so both the outer bash smoke test
@@ -68,7 +74,7 @@ n=$((n + 1))
 echo "$n" > {counter!s}
 if [[ "$n" -le {fail_calls} ]]; then
     echo {fail_stderr!r} >&2
-    exit 243
+    exit {fail_rc}
 fi
 exit 0
 """,
@@ -89,6 +95,8 @@ def _run_gate(tmp_path: Path, env_overrides: dict[str, str]) -> tuple[int, str]:
         "REPO_ROOT": str(_REPO_ROOT),
         "PY": os.environ.get("HAL0_PYTHON", "python3"),
         "HAL0_APPARMOR_CONF": str(tmp_path / "containers.conf"),
+        # Never let a gate test touch the real /etc/apparmor.d (#3234).
+        "HAL0_APPARMOR_D": str(tmp_path / "apparmor.d"),
         **env_overrides,
     }
     proc = subprocess.run(
@@ -144,7 +152,10 @@ def test_apparmor_remediation_resolves_helper_path_without_repo_root(tmp_path: P
 
 def test_unrelated_failure_does_not_trigger_apparmor_remediation(tmp_path: Path) -> None:
     _fake_podman(tmp_path, fail_calls=10_000, fail_stderr="Error: unable to pull image: not found")
-    rc, output = _run_gate(tmp_path, {})
+    # Pin the platform: the lxc-unprivileged fallback legitimately points at
+    # `aa-status` / apparmor logs (#3234), so the assertion below is only
+    # meaningful for the generic arm.
+    rc, output = _run_gate(tmp_path, {"HAL0_LXC_KIND_OVERRIDE": "none"})
     assert rc != 0, output
     assert "apparmor" not in output.lower()
     assert not (tmp_path / "containers.conf").exists()
@@ -195,3 +206,164 @@ def test_signature_matcher_rejects_unrelated_output() -> None:
     )
     proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
     assert proc.returncode != 0
+
+
+# ── #3234: unprivileged-LXC guest `flags=(unconfined)` profiles ──────────────
+
+_SOCKET_DENIED_STDERR = "Error: netavark: failed to create socket: socket: permission denied"
+_PROFILE_NAMES = ("podman", "crun", "buildah", "runc", "rootlesskit", "slirp4netns")
+_NESTING_HINT = "features: nesting=1"
+
+
+def _fake_apparmor_parser(tmp_path: Path) -> Path:
+    """An ``apparmor_parser`` shim that logs its argv and exits 0."""
+    log = tmp_path / "apparmor_parser.log"
+    _write_exec(tmp_path / "apparmor_parser", f'echo "$@" >> {log!s}\nexit 0')
+    return log
+
+
+def _seed_profiles(apparmor_d: Path, names: tuple[str, ...] = _PROFILE_NAMES) -> None:
+    apparmor_d.mkdir(parents=True, exist_ok=True)
+    for n in names:
+        (apparmor_d / n).write_text(
+            f"profile {n} /usr/bin/{n} flags=(unconfined) {{\n  userns,\n}}\n"
+        )
+
+
+def test_socket_denied_guest_profiles_disabled_and_gate_passes(tmp_path: Path) -> None:
+    # Outer smoke (1) and the helper's first smoke (2) hit the socket denial;
+    # after the six profiles are disabled the helper's retry (3) and the
+    # gate's own re-verify (4) pass.
+    _fake_podman(tmp_path, fail_calls=2, fail_stderr=_SOCKET_DENIED_STDERR, fail_rc=126)
+    parser_log = _fake_apparmor_parser(tmp_path)
+    aa = tmp_path / "apparmor.d"
+    _seed_profiles(aa)
+
+    rc, output = _run_gate(tmp_path, {"HAL0_LXC_KIND_OVERRIDE": "lxc-unprivileged"})
+
+    assert rc == 0, output
+    assert "apparmor remediation applied" in output
+    assert _NESTING_HINT not in output
+    for n in _PROFILE_NAMES:
+        link = aa / "disable" / n
+        assert link.is_symlink(), output
+        assert Path(os.readlink(link)) == aa / n
+    assert parser_log.read_text().splitlines() == [f"-R {aa / n}" for n in _PROFILE_NAMES]
+    # The #1563 containers.conf fix must not fire for this signature.
+    assert not (tmp_path / "containers.conf").exists()
+
+
+def test_socket_denied_without_profile_files_prints_manual_remedy(tmp_path: Path) -> None:
+    _fake_podman(tmp_path, fail_calls=10_000, fail_stderr=_SOCKET_DENIED_STDERR, fail_rc=126)
+    parser_log = _fake_apparmor_parser(tmp_path)
+    aa = tmp_path / "apparmor.d"
+    aa.mkdir()
+
+    rc, output = _run_gate(tmp_path, {"HAL0_LXC_KIND_OVERRIDE": "lxc-unprivileged"})
+
+    assert rc != 0, output
+    assert "runtime can't actually launch a container" in output
+    assert "socket: permission denied" in output
+    for n in _PROFILE_NAMES:
+        assert n in output  # the manual remedy names every profile
+    assert "apparmor_parser -R" in output
+    assert _NESTING_HINT not in output
+    assert "pct stop" not in output
+    assert not (aa / "disable").exists()
+    assert not parser_log.exists()  # nothing to unload -> parser never called
+
+
+def test_socket_denied_retry_still_failing_is_a_hard_failure(tmp_path: Path) -> None:
+    # Profiles exist and get disabled, but podman still can't open a socket:
+    # the gate re-smokes itself and must stay red (bash never trusts the helper).
+    _fake_podman(tmp_path, fail_calls=10_000, fail_stderr=_SOCKET_DENIED_STDERR, fail_rc=126)
+    _fake_apparmor_parser(tmp_path)
+    _seed_profiles(tmp_path / "apparmor.d")
+
+    rc, output = _run_gate(tmp_path, {"HAL0_LXC_KIND_OVERRIDE": "lxc-unprivileged"})
+
+    assert rc != 0, output
+    assert "runtime can't actually launch a container" in output
+    assert _NESTING_HINT not in output
+
+
+def test_apparmor_1563_signature_keeps_precedence_over_socket_denied(tmp_path: Path) -> None:
+    # Output carrying BOTH shapes goes down the #1563 branch (containers.conf),
+    # never the guest-profile one.
+    _fake_podman(
+        tmp_path,
+        fail_calls=2,
+        fail_stderr=f"{_APPARMOR_STDERR} socket: permission denied",
+    )
+    _fake_apparmor_parser(tmp_path)
+    aa = tmp_path / "apparmor.d"
+    _seed_profiles(aa)
+
+    rc, output = _run_gate(tmp_path, {})
+
+    assert rc == 0, output
+    assert "AppArmor profile-load failure detected" in output
+    assert (tmp_path / "containers.conf").exists()
+    assert not (aa / "disable").exists()
+
+
+def test_lxc_unprivileged_fallback_no_longer_claims_nesting_is_missing(tmp_path: Path) -> None:
+    # An unrelated failure on an unprivileged LXC: `podman info` already
+    # succeeded, so nesting is proven on. The hint must say so and point at
+    # what to inspect instead of telling the operator to set nesting=1.
+    _fake_podman(tmp_path, fail_calls=10_000, fail_stderr="Error: crun: something odd")
+    rc, output = _run_gate(tmp_path, {"HAL0_LXC_KIND_OVERRIDE": "lxc-unprivileged"})
+
+    assert rc != 0, output
+    assert "crun: something odd" in output  # smoke output is printed
+    assert "nesting is already" in output
+    assert _NESTING_HINT not in output
+    assert "pct stop" not in output
+    for hint in ("aa-status", "journalctl -k | grep apparmor", "/proc/key-users", "/etc/subuid"):
+        assert hint in output
+
+
+def test_lxc_privileged_and_keyring_arms_unchanged(tmp_path: Path) -> None:
+    _fake_podman(tmp_path, fail_calls=10_000, fail_stderr="Error: crun: something odd")
+    rc, output = _run_gate(tmp_path, {"HAL0_LXC_KIND_OVERRIDE": "lxc-privileged"})
+    assert rc != 0, output
+    assert "set 'features: nesting=1,keyctl=1,fuse=1,mknod=1'" in output
+
+    keyring_dir = tmp_path / "keyring"
+    keyring_dir.mkdir()
+    _fake_podman(
+        keyring_dir,
+        fail_calls=10_000,
+        fail_stderr="crun: create keyring `x`: Disk quota exceeded",
+        fail_rc=126,
+    )
+    rc, output = _run_gate(keyring_dir, {"HAL0_LXC_KIND_OVERRIDE": "lxc-unprivileged"})
+    assert rc != 0, output
+    assert "kernel keyring quota exhausted" in output
+    assert "AppArmor" not in output
+    assert "nesting is already" not in output
+
+
+@pytest.mark.parametrize(
+    "blob",
+    [
+        "Error: netavark: failed to create socket: socket: permission denied",
+        "SOCKET: PERMISSION DENIED",
+    ],
+)
+def test_socket_denial_matcher_recognizes_known_shapes(blob: str) -> None:
+    script = (
+        f"set -uo pipefail\nsource {_PREFLIGHT!s}\n_is_unconfined_profile_network_denial {blob!r}\n"
+    )
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_socket_denial_matcher_rejects_unrelated_output() -> None:
+    script = (
+        "set -uo pipefail\n"
+        f"source {_PREFLIGHT!s}\n"
+        "_is_unconfined_profile_network_denial 'Error: unable to pull image: not found'\n"
+    )
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert proc.returncode == 1, proc.stderr  # grep no-match, not 127
