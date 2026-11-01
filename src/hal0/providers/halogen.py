@@ -273,8 +273,8 @@ class HalogenProvider(Provider):
         device nodes and the numeric render/video GIDs come from the shared
         helpers; ``ipc=host`` and ``memlock=-1`` are load-bearing (the ROCm
         runtime, and ``HALOGEN_WEIGHTS_LOCK=1``). Stop and restart are typed:
-        a 120 s stop bound, and exit status 1 (the entrypoint's terminal
-        status) never auto-restarts.
+        a 120 s stop bound, and exit statuses 1 (the entrypoint's terminal
+        status) and 2 (a refused configuration) never auto-restart.
 
         Raises ``UnprocessableEntity`` (``slot.model_missing``) when
         ``model_info`` carries no checkpoint path: the engine must never start
@@ -350,7 +350,9 @@ class HalogenProvider(Provider):
                 timeout="35s",
             ),
             stop_timeout_s=self.stop_grace_s,
-            restart_prevent_exit_status=(1,),
+            # 1 = every runtime failure, 2 = a refused configuration (HALOGEN_CTX
+            # past the native window without HALOGEN_ROPE_YARN)
+            restart_prevent_exit_status=(1, 2),
         )
 
     @staticmethod

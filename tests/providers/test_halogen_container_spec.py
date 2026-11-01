@@ -115,7 +115,7 @@ def test_spec_shape() -> None:
     assert spec.ipc == "host"
     assert spec.ulimits == ["memlock=-1"]
     assert spec.stop_timeout_s == 120
-    assert spec.restart_prevent_exit_status == (1,)
+    assert spec.restart_prevent_exit_status == (1, 2)
     assert spec.port == 8099
     assert spec.network_mode == ""
     assert spec.devices == _FAKE_DEVICES
@@ -460,7 +460,7 @@ def test_render_contains_stop_and_restart_keys() -> None:
     unit = _render_quadlet_from_plan("flash", HalogenProvider().container_spec(_cfg(), _info()))
     assert "--stop-timeout=120" in unit
     assert "TimeoutStopSec=150" in unit
-    assert "RestartPreventExitStatus=64 132 1" in unit
+    assert "RestartPreventExitStatus=64 132 1 2" in unit.splitlines()
     assert "PublishPort=127.0.0.1:8099:8099" in unit
     assert "Environment=HALOGEN_BIND=127.0.0.1" in unit
     assert "Exec=all" in unit
