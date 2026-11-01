@@ -53,7 +53,7 @@ def test_export_is_valid_deterministic_json() -> None:
     assert doc["pins"] == sorted(doc["pins"])
     assert len(doc["pins"]) == len(set(doc["pins"]))
     for ref in doc["pins"]:
-        assert ref.startswith(("ghcr.io/hal0ai/", "ghcr.io/ggml-org/")), ref
+        assert ref.startswith(("ghcr.io/hal0ai/", "ghcr.io/ggml-org/", "ghcr.io/peonist-ai/")), ref
 
 
 def test_every_published_pin_is_exported_and_nothing_else() -> None:

@@ -29,7 +29,7 @@ from hal0.runners import (
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
-_REAL_FAMILIES = {"llama-server", "flm", "kokoro", "qwen3tts", "moonshine", "comfyui"}
+_REAL_FAMILIES = {"llama-server", "flm", "kokoro", "qwen3tts", "moonshine", "comfyui", "halogen"}
 _REAL_DEVICE_CLASSES = {"gpu", "cpu", "npu", "img"}
 
 
@@ -43,6 +43,7 @@ def test_registry_has_every_expected_key() -> None:
         "comfyui",
         "qwen3tts",
         "cuda",
+        "halogen",
     }
 
 
@@ -64,7 +65,7 @@ def test_manifest_has_exactly_one_pin_row_per_runner() -> None:
     assert "_legacy_toolboxes" not in manifest
 
 
-@pytest.mark.parametrize("key", sorted(set(RUNNER_IMAGES) - {"cuda"}))
+@pytest.mark.parametrize("key", sorted(set(RUNNER_IMAGES) - {"cuda", "halogen"}))
 def test_hal0_built_runners_use_one_package_name_scheme(key: str) -> None:
     manifest = json.loads((_REPO_ROOT / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["runners"][key]["image"] == f"ghcr.io/hal0ai/hal0-runner-{key}"
@@ -73,6 +74,43 @@ def test_hal0_built_runners_use_one_package_name_scheme(key: str) -> None:
 def test_cuda_pins_the_upstream_ggml_org_image() -> None:
     manifest = json.loads((_REPO_ROOT / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["runners"]["cuda"]["image"] == "ghcr.io/ggml-org/llama.cpp"
+
+
+def test_halogen_pins_the_upstream_peonist_image() -> None:
+    manifest = json.loads((_REPO_ROOT / "manifest.json").read_text(encoding="utf-8"))
+    row = manifest["runners"]["halogen"]
+    assert row["image"] == "ghcr.io/peonist-ai/halogen-flash-server"
+    assert row["tag"] == "0.18.22"
+    assert row["digest"].startswith("sha256:273714cc")
+
+
+def test_halogen_runner_shape() -> None:
+    r = RUNNER_IMAGES["halogen"]
+    assert (r.runtime_family, r.tier, r.device_class, r.backend) == (
+        "halogen",
+        "optional",
+        "gpu",
+        "rocm",
+    )
+    assert r.supported_backends == ("rocm",)
+    assert r.format_arch == "hgn"
+    assert r.title == "halogen (Flash-Next)"
+    # The runner-images catalogue row carries this same string as its summary.
+    assert r.blurb == (
+        "Peonist's engine for Qwen3.8-Flash-Next on Strix Halo (ROCm). Opt-in;"
+        " one model, closed source, takes most of a 128 GB box."
+    )
+
+
+def test_runner_for_backend_never_returns_halogen() -> None:
+    for be, dc in [
+        ("rocm", "gpu"),
+        ("vulkan", "gpu"),
+        (None, None),
+        ("cuda", "gpu"),
+        (None, "cpu"),
+    ]:
+        assert runner_for_backend(be, dc).key != "halogen"
 
 
 def test_get_runner_known_key() -> None:
@@ -175,7 +213,7 @@ def test_tiers_are_the_operator_decided_sets() -> None:
         assert runner.tier in RUNNER_TIERS, f"{key}: unknown tier {runner.tier!r}"
         by_tier[runner.tier].add(key)
     assert by_tier["default"] == {"standard", "cpu", "flm", "kokoro", "moonshine", "comfyui"}
-    assert by_tier["optional"] == {"qwen3tts", "cuda"}
+    assert by_tier["optional"] == {"qwen3tts", "cuda", "halogen"}
 
 
 def test_at_most_one_default_per_family_and_device_class() -> None:

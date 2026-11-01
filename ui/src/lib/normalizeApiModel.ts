@@ -66,7 +66,7 @@ export interface ApiModelRaw {
   default?: boolean
   /** Engine identity write path (registry Model.provider —
    * hal0.model_meta.derive_model_provider): llama-server | flm | kokoro |
-   * qwen3tts | moonshine | comfyui, or null/absent to derive server-side
+   * qwen3tts | moonshine | comfyui | halogen, or null/absent to derive server-side
    * from the stored backend tags. */
   provider?: string | null
   /** Host-backend lanes this model can run under — derived, read-only

@@ -77,7 +77,9 @@ DeviceLiteral = Literal["gpu-rocm", "gpu-vulkan", "gpu-cuda", "cpu", "npu"]
 # label compatibility. ``"comfyui"`` is the exception: it is the active
 # container image-gen provider (img.toml, ADR image slots), not a
 # deprecated legacy value.
-_VALID_PROVIDERS = frozenset({"llama-server", "flm", "moonshine", "kokoro", "qwen3tts", "comfyui"})
+_VALID_PROVIDERS = frozenset(
+    {"llama-server", "flm", "moonshine", "kokoro", "qwen3tts", "comfyui", "halogen"}
+)
 
 # Slot port range.  8080 is the hal0 API; slots get 8081-8099; 8188 =
 # ComfyUI's stock port for the img slot — kept well-known so operator
@@ -1845,7 +1847,7 @@ class SlotsConfig(BaseModel):
         description=(
             "Per-runner-family operator default-image overrides "
             "(runner-image-catalogue v2). Keys are hal0.runners.RUNNER_IMAGES "
-            "family keys (standard, cpu, cuda, flm, kokoro, "
+            "family keys (standard, cpu, cuda, halogen, flm, kokoro, "
             "moonshine, qwen3tts, comfyui); values are full image refs "
             "(e.g. 'ghcr.io/hal0ai/hal0-runner-standard:<tag>'). A family listed "
             "here launches that ref instead of the release-baked default "

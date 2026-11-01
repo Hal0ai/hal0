@@ -32,6 +32,7 @@ const FAMILY_SLOT_TYPES = {
 	kokoro: ["tts"],
 	qwen3tts: ["tts"],
 	comfyui: ["image"],
+	halogen: ["llm"],
 };
 
 function deviceClassOf(device) {

@@ -162,11 +162,11 @@ export const META_ENUMS_FALLBACK: MetaEnums = Object.freeze({
   // hal0.model_meta.RUNTIME_FAMILIES (src/hal0/model_meta/__init__.py) — this
   // fallback had drifted (llamacpp/whispercpp/sdcpp are not members; the
   // real engine-identity vocabulary is llama-server/flm/kokoro/qwen3tts/
-  // moonshine/comfyui). Corrected for the model drawer's Engine select
+  // moonshine/comfyui/halogen). Corrected for the model drawer's Engine select
   // (drawer overhaul PR-3, Task 8) — a client running against an older
   // backend without /api/meta/enums now offers the same options the write
   // path (`PUT /api/models/{id}` `provider`) actually accepts.
-  runtime_families: ['llama-server', 'flm', 'kokoro', 'qwen3tts', 'moonshine', 'comfyui'],
+  runtime_families: ['llama-server', 'flm', 'kokoro', 'qwen3tts', 'moonshine', 'comfyui', 'halogen'],
   backend_to_device: {
     rocm: 'gpu-rocm',
     vulkan: 'gpu-vulkan',

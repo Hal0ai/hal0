@@ -190,6 +190,7 @@ RUNTIME_FAMILIES: tuple[str, ...] = (
     "qwen3tts",
     "moonshine",
     "comfyui",
+    "halogen",
 )
 
 #: Legacy backend/tag → runtime family, for :func:`derive_model_provider`.
@@ -202,6 +203,7 @@ _PROVIDER_TAGS: dict[str, str] = {
     "kokoro": "kokoro",
     "comfyui": "comfyui",
     "qwen3tts": "qwen3tts",
+    "halogen": "halogen",
 }
 
 

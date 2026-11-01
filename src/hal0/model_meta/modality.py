@@ -216,7 +216,7 @@ def derive_modalities_from_model_info(model_info: Mapping[str, Any]) -> list[Mod
     """
     metadata = model_info.get("metadata") or {}
     pooling_type = metadata.get("pooling_type") if isinstance(metadata, Mapping) else None
-    _family_runners = {"flm", "moonshine", "kokoro", "qwen3tts", "comfyui"}
+    _family_runners = {"flm", "moonshine", "kokoro", "qwen3tts", "comfyui", "halogen"}
     backends = model_info.get("backends") or []
     runner_hint = next(
         (b for b in backends if isinstance(b, str) and b in _family_runners),

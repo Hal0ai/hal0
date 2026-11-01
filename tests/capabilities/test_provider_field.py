@@ -118,6 +118,7 @@ def seeded_registry(tmp_path: Path) -> ModelRegistry:
         Model(id="tts-a", path=str(tmp_path / "tts-a"), backends=["kokoro"]),
         Model(id="tts-b", path=str(tmp_path / "tts-b"), backends=["qwen3tts"]),
         Model(id="img-a", path=str(tmp_path / "img-a"), backends=["comfyui"]),
+        Model(id="llm-hgn", path=str(tmp_path / "llm-hgn.hgn"), backends=["halogen"]),
         Model(id="unknown-a", path=str(tmp_path / "unknown-a"), backends=[]),
     ]
     for model in seed:

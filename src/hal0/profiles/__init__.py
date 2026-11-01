@@ -43,7 +43,9 @@ from hal0.errors import Conflict, NotFound, UnprocessableEntity
 
 log = logging.getLogger(__name__)
 
-RuntimeFamily = Literal["llama-server", "flm", "kokoro", "qwen3tts", "moonshine", "comfyui"]
+RuntimeFamily = Literal[
+    "llama-server", "flm", "kokoro", "qwen3tts", "moonshine", "comfyui", "halogen"
+]
 SlotType = Literal["llm", "embedding", "reranking", "transcription", "tts", "image"]
 
 _PROFILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
@@ -194,6 +196,8 @@ def _supported_slot_types(runtime_family: RuntimeFamily) -> tuple[SlotType, ...]
         return ("transcription",)
     if runtime_family == "comfyui":
         return ("image",)
+    if runtime_family == "halogen":
+        return ("llm",)
     return ("llm", "embedding", "reranking")
 
 

@@ -1467,20 +1467,27 @@ const RUNNER_IMAGE_ROWS = [
     blurb: 'Higher-quality multilingual text-to-speech on the GPU (ROCm). Opt-in; a large download (about 10 GB).', inUse: [] },
   { id: 'cuda', repo: 'llama.cpp', title: 'NVIDIA CUDA', tier: 'optional', backends: ['cuda'], lanes: ['cuda'], size: 3_100_000_000,
     blurb: 'llama.cpp for NVIDIA GPUs. Pick it on a box with an NVIDIA card.', inUse: [] },
+  { id: 'halogen', repo: 'halogen-flash-server', title: 'halogen (Flash-Next)', tier: 'optional', backends: ['rocm'], lanes: [], size: 24_000_000_000,
+    blurb: "Peonist's engine for Qwen3.8-Flash-Next on Strix Halo (ROCm). Opt-in; one model, closed source, takes most of a 128 GB box.", inUse: [] },
 ]
 
 const MOCK_DIGEST = (n: number) => `sha256:${String(n).repeat(64)}`
 
 function buildRunnerImages() {
   const images = RUNNER_IMAGE_ROWS.map((r, idx) => {
-    const image = r.id === 'cuda' ? 'ghcr.io/ggml-org/llama.cpp' : `ghcr.io/hal0ai/${r.repo}`
-    const headTag = r.id === 'cuda' ? 'server-cuda-b8120' : '2026.10.04'
+    const image =
+      r.id === 'cuda'
+        ? 'ghcr.io/ggml-org/llama.cpp'
+        : r.id === 'halogen'
+          ? 'ghcr.io/peonist-ai/halogen-flash-server'
+          : `ghcr.io/hal0ai/${r.repo}`
+    const headTag = r.id === 'cuda' ? 'server-cuda-b8120' : r.id === 'halogen' ? '0.18.22' : '2026.10.04'
     const tags = r.newer
       ? [
           { tag: '2026.10.11', digest: MOCK_DIGEST(1), size_bytes: r.size, last_seen: '2026-10-11T00:00:00Z', provenance: null, downloaded: false },
           { tag: headTag, digest: MOCK_DIGEST(0), size_bytes: r.size, last_seen: '2026-10-04T00:00:00Z', provenance: null, downloaded: true },
         ]
-      : [{ tag: headTag, digest: MOCK_DIGEST(idx + 2), size_bytes: r.size, last_seen: '2026-10-04T00:00:00Z', provenance: null, downloaded: r.id !== 'qwen3tts' }]
+      : [{ tag: headTag, digest: MOCK_DIGEST(idx + 2), size_bytes: r.size, last_seen: '2026-10-04T00:00:00Z', provenance: null, downloaded: r.id !== 'qwen3tts' && r.id !== 'halogen' }]
     const head = tags.find((t) => t.tag === headTag)!
     return {
       id: r.id,
@@ -1523,7 +1530,7 @@ function buildRunnerImages() {
       tier: r.tier,
       effective_ref: `${images[idx].image}:${images[idx].tag}`,
       source: 'release',
-      store_state: idx === 6 ? 'missing' : 'present',
+      store_state: images[idx].store_state,
       slots: r.inUse,
       pinned_slots: [],
       newest_release: r.newer ? { tag: '2026.10.11', digest: MOCK_DIGEST(1) } : { tag: images[idx].tag, digest: images[idx].digest },

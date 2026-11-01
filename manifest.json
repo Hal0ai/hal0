@@ -53,6 +53,12 @@
       "tag": "server-cuda-b11804",
       "digest": "sha256:490d8cd8000203a3ab8fdfce14ef931e2aa85affd4dd4447bcc75f299f00fd9a",
       "lanes_gated": []
+    },
+    "halogen": {
+      "image": "ghcr.io/peonist-ai/halogen-flash-server",
+      "tag": "0.18.22",
+      "digest": "sha256:273714ccb64dabb7fac0418ee1b6dd83eb57d2fd44cf286eb68a7c694a27c203",
+      "lanes_gated": []
     }
   }
 }

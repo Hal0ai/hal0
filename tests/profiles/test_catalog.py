@@ -612,3 +612,9 @@ def test_patch_reasoning_fields_and_clear(tmp_hal0_home: str) -> None:
     catalog.update("p", ProfilePatch(reasoning_budget=None))
     assert catalog.resolve("p").to_dict()["reasoning_budget"] == -1
     assert catalog.resolve("p").to_dict()["reasoning_effort"] == "low"
+
+
+def test_supported_slot_types_halogen_is_llm_only() -> None:
+    from hal0.profiles import _supported_slot_types
+
+    assert _supported_slot_types("halogen") == ("llm",)
