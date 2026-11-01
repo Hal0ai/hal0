@@ -48,6 +48,7 @@ import sqlite3
 import stat
 import subprocess  # nosec B404 — needed to spawn python -m venv + pip
 import sys
+import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -2587,13 +2588,15 @@ def _ensure_hermes_config(hermes_bin: Path, hermes_home: Path, run: Callable[...
     # explicitly so config lands in the managed tree regardless.
     env = _hal0_subprocess_env(HERMES_HOME=str(hermes_home))
     try:
-        run(
-            [str(hermes_bin), "config", "migrate"],
-            check=True,
-            env=env,
-            capture_output=True,
-            text=True,
-        )  # nosec B603 — argv from local config
+        # ``migrate`` rewrites the root config.yaml: hold the root lock (#2995).
+        with root_config_lock(hermes_home):
+            run(
+                [str(hermes_bin), "config", "migrate"],
+                check=True,
+                env=env,
+                capture_output=True,
+                text=True,
+            )  # nosec B603 — argv from local config
         return True
     except (subprocess.SubprocessError, OSError) as exc:
         log.warning("hermes_provision.config_migrate_failed", error=str(exc))
@@ -2611,19 +2614,24 @@ def _apply_config_set(
 
     Returns ``(applied_count, errors)``. Each set is idempotent (writes the
     same value on a re-run), so the whole overlay is safe under ``--repair``.
+    Each ``hermes config set`` is its own read-modify-write of the root
+    ``config.yaml``, so it runs under :func:`root_config_lock` (#2995); the
+    lock is dropped between keys so a long overlay does not starve the
+    persona refresh or the approvals route.
     """
     env = _hal0_subprocess_env(HERMES_HOME=str(hermes_home))  # HOME-sanitized (O15)
     applied = 0
     errors: list[str] = []
     for key, value in pairs:
         try:
-            run(
-                [str(hermes_bin), "config", "set", key, _fmt_config_value(value)],
-                check=True,
-                env=env,
-                capture_output=True,
-                text=True,
-            )  # nosec B603 — argv from local config
+            with root_config_lock(hermes_home):
+                run(
+                    [str(hermes_bin), "config", "set", key, _fmt_config_value(value)],
+                    check=True,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                )  # nosec B603 — argv from local config
             applied += 1
         except (subprocess.SubprocessError, OSError) as exc:
             errors.append(f"{key}: {exc}")
@@ -2752,26 +2760,28 @@ def _prune_mcp_servers_yaml(
     except ImportError:
         return [], "PyYAML unavailable"
     try:
-        data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-        if not isinstance(data, dict):
-            return [], f"{config_path} is not a YAML mapping"
-        servers = data.get("mcp_servers")
-        if not isinstance(servers, dict):
-            return [], None
-        removed = [sid for sid in remove_ids if servers.pop(sid, None) is not None]
-        pruned = False
-        for sid, keep in desired_headers.items():
-            entry = servers.get(sid)
-            headers = entry.get("headers") if isinstance(entry, dict) else None
-            if isinstance(headers, dict):
-                for key in [k for k in headers if k not in keep]:
-                    del headers[key]
-                    pruned = True
-        if removed or pruned:
-            _atomic_write(
-                config_path, yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
-            )
-        return removed, None
+        # Read, edit and replace as one transaction (#2995).
+        with root_config_lock(config_path.parent):
+            data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            if not isinstance(data, dict):
+                return [], f"{config_path} is not a YAML mapping"
+            servers = data.get("mcp_servers")
+            if not isinstance(servers, dict):
+                return [], None
+            removed = [sid for sid in remove_ids if servers.pop(sid, None) is not None]
+            pruned = False
+            for sid, keep in desired_headers.items():
+                entry = servers.get(sid)
+                headers = entry.get("headers") if isinstance(entry, dict) else None
+                if isinstance(headers, dict):
+                    for key in [k for k in headers if k not in keep]:
+                        del headers[key]
+                        pruned = True
+            if removed or pruned:
+                _atomic_write(
+                    config_path, yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
+                )
+            return removed, None
     except (OSError, yaml.YAMLError) as exc:
         return [], _yaml_error_summary(exc)
 
@@ -2999,51 +3009,58 @@ def _merge_config_yaml_layers(
     in ``overrides.yaml`` still wins. Only servers already present in the file
     get the header, and a root with ``hal0: {wire_mcp: false}`` keeps whatever
     header it has.
+
+    The read, merge and replace run under :func:`root_config_lock`, so a
+    concurrent writer of the same ``config.yaml`` cannot be overwritten with a
+    stale base (#2995).
     """
     try:
         import yaml  # type: ignore[import-untyped]
     except ImportError:
         return False  # PyYAML absent — list keys can't be layered; ship as-is.
-    base: dict[str, Any] = {}
-    if config_path.exists():
-        base = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    _carry_prelude_to_system_prompt(base)
-    for dotted in RETIRED_HAL0_CONFIG_KEYS:
-        _drop_dotted_key(base, dotted)
-    _retire_hal0_personality(base, persona_names)
-    overlay: dict[str, Any] = {}
-    if overrides_path.exists():
-        overlay = yaml.safe_load(overrides_path.read_text(encoding="utf-8")) or {}
-    if memory_servers:
-        list_keys = _without_private_header(list_keys, memory_servers)
-    merged = _deep_merge(base, list_keys)
-    if memory_servers:
-        final = _deep_merge(merged, overlay)
-        if not _wire_mcp_opted_out(final):
-            _set_private_header(
-                merged, memory_servers, "1" if profile_memory_private(final) else "0"
-            )
-    merged = _deep_merge(merged, overlay)
-    # #2085 hardening: X-hal0-Private must be a string wherever it ends up.
-    # An operator overrides.yaml copied from a pre-fix config.yaml carries
-    # the unquoted int 1 (overrides win by design), and that exact value
-    # hard-hangs hermes' MCP client post-initialize with zero diagnostics —
-    # so the known-poisonous leaf is normalized after the final merge, no
-    # matter which layer supplied it.
-    for _srv in (merged.get("mcp_servers") or {}).values():
-        if isinstance(_srv, dict):
-            _hdrs = _srv.get("headers")
-            if isinstance(_hdrs, dict) and "X-hal0-Private" in _hdrs:
-                _val = _hdrs["X-hal0-Private"]
-                if not isinstance(_val, str):
-                    _hdrs["X-hal0-Private"] = (
-                        str(_val).lower() if isinstance(_val, bool) else str(_val)
-                    )
-    out = yaml.safe_dump(merged, sort_keys=False, default_flow_style=False)
-    if config_path.exists() and config_path.read_text(encoding="utf-8") == out:
-        return False
-    _atomic_write(config_path, out)
-    return True
+    # One transaction under the root lock (#2995): the base is read, the layers
+    # merged and the file replaced while no other writer can replace it.
+    with root_config_lock(config_path.parent):
+        base: dict[str, Any] = {}
+        if config_path.exists():
+            base = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        _carry_prelude_to_system_prompt(base)
+        for dotted in RETIRED_HAL0_CONFIG_KEYS:
+            _drop_dotted_key(base, dotted)
+        _retire_hal0_personality(base, persona_names)
+        overlay: dict[str, Any] = {}
+        if overrides_path.exists():
+            overlay = yaml.safe_load(overrides_path.read_text(encoding="utf-8")) or {}
+        if memory_servers:
+            list_keys = _without_private_header(list_keys, memory_servers)
+        merged = _deep_merge(base, list_keys)
+        if memory_servers:
+            final = _deep_merge(merged, overlay)
+            if not _wire_mcp_opted_out(final):
+                _set_private_header(
+                    merged, memory_servers, "1" if profile_memory_private(final) else "0"
+                )
+        merged = _deep_merge(merged, overlay)
+        # #2085 hardening: X-hal0-Private must be a string wherever it ends up.
+        # An operator overrides.yaml copied from a pre-fix config.yaml carries
+        # the unquoted int 1 (overrides win by design), and that exact value
+        # hard-hangs hermes' MCP client post-initialize with zero diagnostics —
+        # so the known-poisonous leaf is normalized after the final merge, no
+        # matter which layer supplied it.
+        for _srv in (merged.get("mcp_servers") or {}).values():
+            if isinstance(_srv, dict):
+                _hdrs = _srv.get("headers")
+                if isinstance(_hdrs, dict) and "X-hal0-Private" in _hdrs:
+                    _val = _hdrs["X-hal0-Private"]
+                    if not isinstance(_val, str):
+                        _hdrs["X-hal0-Private"] = (
+                            str(_val).lower() if isinstance(_val, bool) else str(_val)
+                        )
+        out = yaml.safe_dump(merged, sort_keys=False, default_flow_style=False)
+        if config_path.exists() and config_path.read_text(encoding="utf-8") == out:
+            return False
+        _atomic_write(config_path, out)
+        return True
 
 
 #: Dotted config keys an older hal0 wrote that Hermes v0.22.2 never reads.
@@ -3117,39 +3134,45 @@ def apply_release_config_invariants(
         return False
     import yaml
 
-    loaded = yaml.safe_load(config.read_text(encoding="utf-8"))
-    if loaded is not None and not isinstance(loaded, dict):
-        raise ValueError(f"{config} is not a YAML mapping")
-    layers: dict[str, Any] = dict(RELEASE_CONFIG_INVARIANTS)
-    agent = (loaded or {}).get("agent")
-    agent = agent if isinstance(agent, dict) else {}
-    has_prompt = any(
-        isinstance(agent.get(k), str) and agent[k].strip()
-        for k in ("system_prompt", "system_prompt_prelude")
-    )
-    if not has_prompt:
-        prompt, _name = _active_persona_render(
-            BootstrapState(hermes_home=str(home)), mcp_servers=_default_mcp_servers()
+    # The read that decides the layers and the merge that applies them are one
+    # transaction under the root lock (#2995). ``_merge_config_yaml_layers``
+    # takes the lock again; it is re-entrant.
+    with root_config_lock(home):
+        loaded = yaml.safe_load(config.read_text(encoding="utf-8"))
+        if loaded is not None and not isinstance(loaded, dict):
+            raise ValueError(f"{config} is not a YAML mapping")
+        layers: dict[str, Any] = dict(RELEASE_CONFIG_INVARIANTS)
+        agent = (loaded or {}).get("agent")
+        agent = agent if isinstance(agent, dict) else {}
+        has_prompt = any(
+            isinstance(agent.get(k), str) and agent[k].strip()
+            for k in ("system_prompt", "system_prompt_prelude")
         )
-        layers = _deep_merge(layers, _persona_prompt_layer(prompt))
-    # The terminal gate reaches an existing box through this path (#2878):
-    # ``hal0 update`` never runs the overlay, so a terminal-off box would keep
-    # its ``local`` backend, and the gateway's side agents the shell, until
-    # the next reprovision. The recorded decision is the authority here.
-    decision = box_terminal_decision(home)
-    layers = _deep_merge(layers, _terminal_profile_keys(loaded or {}, terminal_enabled=decision))
-    # The default profile's memory header converges here too (memory_servers):
-    # ``hal0 update`` never runs the overlay, so without this the root keeps
-    # whatever header it had while named profiles follow the shared default. A
-    # hand-set "1" is overwritten; ``hal0: {memory_private: true}`` is how a
-    # profile stays private.
-    changed = _merge_config_yaml_layers(
-        config,
-        list_keys=layers,
-        overrides_path=overrides_path if overrides_path is not None else OVERRIDES_PATH,
-        persona_names=_persona_display_names_for_home(home),
-        memory_servers=_MEMORY_REACHING_SERVERS,
-    )
+        if not has_prompt:
+            prompt, _name = _active_persona_render(
+                BootstrapState(hermes_home=str(home)), mcp_servers=_default_mcp_servers()
+            )
+            layers = _deep_merge(layers, _persona_prompt_layer(prompt))
+        # The terminal gate reaches an existing box through this path (#2878):
+        # ``hal0 update`` never runs the overlay, so a terminal-off box would keep
+        # its ``local`` backend, and the gateway's side agents the shell, until
+        # the next reprovision. The recorded decision is the authority here.
+        decision = box_terminal_decision(home)
+        layers = _deep_merge(
+            layers, _terminal_profile_keys(loaded or {}, terminal_enabled=decision)
+        )
+        # The default profile's memory header converges here too (memory_servers):
+        # ``hal0 update`` never runs the overlay, so without this the root keeps
+        # whatever header it had while named profiles follow the shared default. A
+        # hand-set "1" is overwritten; ``hal0: {memory_private: true}`` is how a
+        # profile stays private.
+        changed = _merge_config_yaml_layers(
+            config,
+            list_keys=layers,
+            overrides_path=overrides_path if overrides_path is not None else OVERRIDES_PATH,
+            persona_names=_persona_display_names_for_home(home),
+            memory_servers=_MEMORY_REACHING_SERVERS,
+        )
     # Every profile too, hal0-brain included: the profile phases run only on a
     # provision or a hal0-api start, and a release activation restarts the
     # gateway, not hal0-api, so a brain or clone profile would keep its live
@@ -3532,29 +3555,33 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
     )
     # Toolsets the operator disabled by hand survive: hal0 only ever adds or
     # removes its own two terminal entries (a list value replaces on merge).
-    pre_merge = config_path.read_text(encoding="utf-8") if config_path.exists() else None
-    list_merge_changed = _merge_config_yaml_layers(
-        config_path,
-        list_keys=_deep_merge(
-            _deep_merge(
-                _config_list_keys(
-                    terminal_enabled=terminal_enabled,
-                    existing_disabled=_disabled_toolsets(_parse_yaml_config(pre_merge)),
-                    mcp_servers=mcp_servers,
+    # The read that feeds those layers and the merge that applies them are one
+    # transaction under the root lock (#2995); the merge takes it again
+    # (re-entrant). The ``config set`` calls above each held it on their own.
+    with root_config_lock(hermes_home):
+        pre_merge = config_path.read_text(encoding="utf-8") if config_path.exists() else None
+        list_merge_changed = _merge_config_yaml_layers(
+            config_path,
+            list_keys=_deep_merge(
+                _deep_merge(
+                    _config_list_keys(
+                        terminal_enabled=terminal_enabled,
+                        existing_disabled=_disabled_toolsets(_parse_yaml_config(pre_merge)),
+                        mcp_servers=mcp_servers,
+                    ),
+                    _terminal_saved_layer(
+                        terminal_enabled=terminal_enabled,
+                        before_backend=terminal_backend,
+                        after_backend=_terminal_backend_in_config(pre_merge),
+                        saved_backend=saved_backend,
+                    ),
                 ),
-                _terminal_saved_layer(
-                    terminal_enabled=terminal_enabled,
-                    before_backend=terminal_backend,
-                    after_backend=_terminal_backend_in_config(pre_merge),
-                    saved_backend=saved_backend,
-                ),
+                _persona_prompt_layer(system_prompt),
             ),
-            _persona_prompt_layer(system_prompt),
-        ),
-        overrides_path=OVERRIDES_PATH,
-        persona_names=_hal0_persona_display_names(state),
-        memory_servers=_MEMORY_REACHING_SERVERS,
-    )
+            overrides_path=OVERRIDES_PATH,
+            persona_names=_hal0_persona_display_names(state),
+            memory_servers=_MEMORY_REACHING_SERVERS,
+        )
 
     # Legacy honcho.json cleanup — see _disable_honcho_hermes_host.
     honcho_json_changed = _disable_honcho_hermes_host(hermes_home)
@@ -5500,6 +5527,63 @@ def _profile_lock(dir_fd: int) -> Iterator[None]:
             fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
         os.close(fd)
+
+
+class _HeldRootLocks(threading.local):
+    """The root-config locks the current thread holds, by the home's ``(st_dev, st_ino)``."""
+
+    def __init__(self) -> None:
+        self.homes: set[tuple[int, int]] = set()
+
+
+_HELD_ROOT_LOCKS = _HeldRootLocks()
+
+
+@contextlib.contextmanager
+def root_config_lock(home: Path | str) -> Iterator[None]:
+    """Serialise a read-modify-write of the root ``<home>/config.yaml`` (#2995).
+
+    The root file has several writers that each read it, merge their own keys
+    and atomically replace it: the provisioner, the release activation, the
+    command-approvals route, the persona refresh and the MCP join. Without one
+    lock, two of them in the same window lose one side's change. Every one of
+    them holds this across its read, merge and replace; the lock is
+    ``<home>/.config.yaml.lock``, the file :func:`_profile_lock` already uses
+    for a named profile's directory, taken the same way (mode ``0600``, owned
+    like the directory when root made it). Hermes's own writers (``hermes
+    config set`` and ``migrate``) are covered only when hal0 runs them: they
+    do not take this lock themselves.
+
+    Re-entrant within a thread, so a writer can hold the lock across the read
+    that feeds its merge and call a helper that takes it again; the inner
+    entry does nothing and the outer exit releases it. Threads, and processes,
+    exclude each other. ``home`` is opened from ``/`` without following links
+    (:func:`hal0.security.nofollow.open_dir`), like the writes it protects. A
+    home that does not exist has no ``config.yaml`` to lose an update to, so
+    there is nothing to lock.
+    """
+    dir_fd: int | None
+    try:
+        dir_fd = nofollow.open_dir(home)
+    except FileNotFoundError:
+        dir_fd = None
+    if dir_fd is None:
+        yield
+        return
+    try:
+        st = os.fstat(dir_fd)
+        key = (st.st_dev, st.st_ino)
+        if key in _HELD_ROOT_LOCKS.homes:
+            yield
+            return
+        with _profile_lock(dir_fd):
+            _HELD_ROOT_LOCKS.homes.add(key)
+            try:
+                yield
+            finally:
+                _HELD_ROOT_LOCKS.homes.discard(key)
+    finally:
+        os.close(dir_fd)
 
 
 def _replace_profile_config_at(dir_fd: int, text: str, st: os.stat_result) -> None:

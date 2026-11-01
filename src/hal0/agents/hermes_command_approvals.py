@@ -286,7 +286,11 @@ def _config_set(mode: str) -> list[str]:
 
 
 def _restore_config(text: str) -> None:
-    hp._atomic_write(_config_path(), text)
+    # The replace is a write to the root config.yaml like any other: it must
+    # not interleave with another writer's read-merge-replace (#2995).
+    path = _config_path()
+    with hp.root_config_lock(path.parent):
+        hp._atomic_write(path, text)
 
 
 def _merge_overrides() -> None:
