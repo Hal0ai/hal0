@@ -105,13 +105,14 @@ from hal0.slot_lifecycle_budget import (
 )
 from hal0.slots.activation import autoload_enabled
 from hal0.slots.argv import ResolvedArgv, deny_llama_env, resolve_argv
+from hal0.slots.model_fit import model_runtime_mismatch
 from hal0.slots.naming import (
     slot_container_name,
     slot_instance_token,
     slot_quadlet_name,
     slot_unit_name,
 )
-from hal0.slots.state import RunnerFamilyMismatch, SlotSpawnFailed
+from hal0.slots.state import RunnerFamilyMismatch, SlotModelRuntimeMismatch, SlotSpawnFailed
 from hal0.slots.tune import EffectiveTune, effective_tune
 from hal0.system.seam import SeamTimeout, SystemCtlSeam, is_hal0_service_user
 
@@ -2536,6 +2537,23 @@ class ContainerProvider(Provider):
                 else (lambda: resolve_image_runtime_uid(resolved_image))
             ),
         )
+
+        # The model and the runtime must agree before ANY unit is written: a
+        # halogen checkpoint only loads on the halogen runtime, and that runtime
+        # loads nothing else. The write seam refuses the same pairing, but a
+        # slot file edited by hand, a profile switched under a bound model, or a
+        # ``load -m`` override reaches here without passing it. An empty model
+        # binding is not this refusal (the provider names it, ``slot.model_missing``).
+        slot_label = str(slot_cfg.get("name", "") or token)
+        mismatch = model_runtime_mismatch(model_info, spec_provider, slot=slot_label)
+        if mismatch:
+            raise SlotModelRuntimeMismatch(
+                mismatch,
+                details={
+                    "slot": slot_label,
+                    "model_id": str(model_info.get("_model_key") or model_info.get("id") or ""),
+                },
+            )
 
         # Loud-fail for NPU slots only: a missing FLM tag must not silently
         # fall through to FLM's legacy build_env default. Kokoro/ComfyUI are

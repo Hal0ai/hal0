@@ -322,3 +322,93 @@ def test_npu_wins_over_tts_type() -> None:
 
     provider = _spec_provider_for({"device": "npu", "type": "tts"})
     assert isinstance(provider, FLMProvider)
+
+
+# ── model ↔ runtime agreement at load ─────────────────────────────────────────
+
+_HALOGEN_MODEL_INFO = {"_model_key": "flash-next", "backends": ["halogen"], "path": "/m/f.hgn"}
+_GGUF_MODEL_INFO = {"_model_key": "qwen3-4b", "backends": ["rocm"], "path": "/m/q.gguf"}
+
+
+def _agreement_probe() -> tuple[ContainerProvider, MagicMock]:
+    """A provider whose every unit write is observable through one fake seam."""
+    seam = MagicMock()
+    provider = ContainerProvider()
+    return provider, seam
+
+
+def test_load_sync_refuses_mismatch_before_writing_unit() -> None:
+    """A halogen checkpoint on a llama slot is refused before ANY unit is written."""
+    from hal0.slots.state import SlotModelRuntimeMismatch
+
+    provider, seam = _agreement_probe()
+    slot_cfg = {"name": "agent", "port": 8095, "profile": "chat", "device": "gpu-rocm"}
+
+    with (
+        patch("hal0.providers.container.require_kfd_for_gpu_slot"),
+        patch("hal0.providers.container._SYSTEMCTL_SEAM", seam),
+        patch.object(provider, "_write_and_start_unit") as write_and_start,
+        patch.object(provider, "_render_quadlet_text") as render,
+        pytest.raises(SlotModelRuntimeMismatch) as exc_info,
+    ):
+        provider.load_sync(slot_cfg, _HALOGEN_MODEL_INFO)
+
+    err = exc_info.value
+    assert err.code == "slot.model_runtime_mismatch"
+    assert err.status == 400
+    assert "'flash-next'" in str(err)
+    assert "'agent'" in str(err)
+    assert "llama-server runtime" in str(err)
+    seam.write_quadlet.assert_not_called()
+    write_and_start.assert_not_called()
+    render.assert_not_called()
+
+
+def test_load_sync_refuses_gguf_on_halogen_slot_before_writing_unit() -> None:
+    """The inverse: a halogen-runtime slot handed a GGUF never reaches a unit write."""
+    from types import SimpleNamespace
+
+    from hal0.slots.state import SlotModelRuntimeMismatch
+
+    provider, seam = _agreement_probe()
+    slot_cfg = {"name": "flash", "port": 8096, "profile": "hgn", "device": "gpu-rocm"}
+
+    with (
+        patch(
+            "hal0.providers.container._spec_provider_for",
+            return_value=SimpleNamespace(name="halogen"),
+        ),
+        patch("hal0.providers.container.require_kfd_for_gpu_slot"),
+        patch("hal0.providers.container._SYSTEMCTL_SEAM", seam),
+        patch.object(provider, "_write_and_start_unit") as write_and_start,
+        pytest.raises(SlotModelRuntimeMismatch) as exc_info,
+    ):
+        provider.load_sync(slot_cfg, _GGUF_MODEL_INFO)
+
+    assert exc_info.value.code == "slot.model_runtime_mismatch"
+    assert "not a halogen checkpoint" in str(exc_info.value)
+    seam.write_quadlet.assert_not_called()
+    write_and_start.assert_not_called()
+
+
+def test_load_sync_empty_model_binding_is_not_this_guards_refusal() -> None:
+    """A halogen slot with no model must not trip the guard (the provider names
+    the missing model later, ``slot.model_missing``)."""
+    from types import SimpleNamespace
+
+    provider, _seam = _agreement_probe()
+    slot_cfg = {"name": "flash", "port": 8096, "profile": "hgn", "device": "gpu-rocm"}
+
+    with (
+        patch(
+            "hal0.providers.container._spec_provider_for",
+            return_value=SimpleNamespace(name="halogen"),
+        ),
+        patch("hal0.providers.container.require_kfd_for_gpu_slot"),
+        patch.object(provider, "_render_quadlet_text", return_value="[Container]\n") as render,
+        patch.object(provider, "_write_and_start_unit") as write_and_start,
+    ):
+        provider.load_sync(slot_cfg, {})
+
+    render.assert_called_once()
+    write_and_start.assert_called_once()
