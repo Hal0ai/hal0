@@ -33,6 +33,7 @@ from hal0.registry.detect import (
     detect,
     detection_metadata,
     halogen_registration,
+    has_hgn_magic,
     is_halogen_companion,
     unsupported_moonshine_layout,
 )
@@ -682,10 +683,14 @@ def find_candidates(
 def register_candidate(registry: ModelRegistry, candidate: CandidateModel) -> Model:
     """Build a :class:`Model` from ``candidate`` and add it to ``registry``."""
     curated = candidate.curated_match
-    # A ``.hgn`` checkpoint is classified by its magic bytes and the companions
+    # A halogen checkpoint is classified by its magic bytes and the companions
     # beside it (four bytes and one directory listing, so cheap even in a walk
-    # that reads no GGUF header), then registered like add-from-path does.
-    halogen = detect(candidate.path) if candidate.path.suffix.lower() == ".hgn" else None
+    # that reads no GGUF header), then registered like add-from-path does. The
+    # magic is read whatever the name, so a .gguf-named HGN1 file is not a llama
+    # row. ``.hgn`` still goes through ``detect``: a bad-magic one is a low
+    # confidence halogen guess, and one that holds a GGUF is a llama model.
+    claims_halogen = candidate.path.suffix.lower() == ".hgn" or has_hgn_magic(candidate.path)
+    halogen = detect(candidate.path) if claims_halogen else None
     if halogen is not None and halogen.kind == "halogen":
         halogen_tags, halogen_meta = halogen_registration(halogen)
         model = Model(

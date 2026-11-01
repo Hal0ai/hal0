@@ -545,6 +545,32 @@ class TestHalogenHgn:
         assert r.confidence == "low"
         assert r.raw_hints["gguf_header_read"] == "failed"
 
+    def test_hgn_named_gguf_is_a_gguf(self, tmp_path: Path) -> None:
+        """Magic beats the name both ways: a ``.hgn``-named file that holds a GGUF
+        header is a llama model, or the refusal on a llama slot would call it a
+        halogen checkpoint."""
+        kvs = [("general.architecture", _GGUF_TYPE_STRING, _enc_str("llama"))]
+        p = _write_fixture(tmp_path, self._CKPT, _build_gguf(3, kvs))
+        r = detect(p)
+        assert r.kind == "llama"
+        assert "halogen" not in r.suggested_backends
+        assert r.raw_hints["source"] != "hgn_magic"
+        assert "hgn_magic_read" not in r.raw_hints
+
+    def test_gguf_blob_with_an_hgn_hint_is_a_gguf(self, tmp_path: Path) -> None:
+        kvs = [("general.architecture", _GGUF_TYPE_STRING, _enc_str("llama"))]
+        blob = _write_fixture(tmp_path, "a" * 64, _build_gguf(3, kvs))
+        r = detect(blob, filename_hint=self._CKPT)
+        assert r.kind == "llama"
+
+    def test_an_hgn_companion_stays_a_companion_whatever_it_holds(self, tmp_path: Path) -> None:
+        """A companion is decided by name before the bytes are looked at."""
+        kvs = [("general.architecture", _GGUF_TYPE_STRING, _enc_str("llama"))]
+        p = _write_fixture(tmp_path, "qwen38-flash-next-ngram.hgn", _build_gguf(3, kvs))
+        r = detect(p)
+        assert r.kind == "unknown"
+        assert r.raw_hints["halogen_companion"] is True
+
     def test_extensionless_non_hgn_file_stays_unknown(self, tmp_path: Path) -> None:
         blob = tmp_path / ("c" * 64)
         blob.write_bytes(b"NOPE" + b"\x00" * 60)

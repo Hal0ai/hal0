@@ -1447,6 +1447,51 @@ def test_scan_leaves_a_gguf_row_without_halogen_facts(
     assert "companions" not in m.metadata
 
 
+def test_scan_registers_a_gguf_named_hgn1_file_as_halogen(
+    tmp_path: Path, registry: ModelRegistry
+) -> None:
+    """Content over name, as ``detect`` and add-from-path already decide: as a llama
+    row this would crash-loop on a llama slot and be refused on a halogen one."""
+    root = tmp_path / "models"
+    root.mkdir()
+    (root / "renamed.gguf").write_bytes(b"HGN1" + b"c" * 60)
+    scan_and_register(registry, ModelsConfig(roots=[str(root)]))
+    (m,) = registry.list()
+    assert m.provider == "halogen"
+    assert m.backends == ["halogen"]
+    assert "halogen" in m.tags
+    assert m.metadata["detection_confidence"] == "high"
+
+
+def test_scan_registers_an_hgn_named_gguf_as_a_llama_row(
+    tmp_path: Path, registry: ModelRegistry
+) -> None:
+    root = tmp_path / "models"
+    root.mkdir()
+    write_gguf(root / "renamed.hgn", "llama")
+    scan_and_register(registry, ModelsConfig(roots=[str(root)]))
+    (m,) = registry.list()
+    assert m.provider == "llama-server"
+    assert "halogen" not in m.tags
+
+
+def test_scan_reads_no_gguf_header_for_an_ordinary_gguf(
+    tmp_path: Path, registry: ModelRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Four bytes per candidate is the whole cost: the walk may meet thousands of files."""
+    root = tmp_path / "models"
+    root.mkdir()
+    (root / "qwen3-4b-instruct-q4_k_m.gguf").write_bytes(b"GGUF" + b"x" * 124)
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise AssertionError("detect() reads the GGUF header")
+
+    monkeypatch.setattr("hal0.registry.discover.detect", boom)
+    scan_and_register(registry, ModelsConfig(roots=[str(root)]))
+    (m,) = registry.list()
+    assert m.provider == "llama-server"
+
+
 def test_is_skippable_drops_halogen_companions() -> None:
     from hal0.registry.discover import is_skippable
 

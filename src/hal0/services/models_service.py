@@ -2138,6 +2138,12 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
             "no valid GGUF header found (bad or missing magic bytes); "
             "capabilities/backends are a filename guess"
         )
+    # The same fact for a file named .hgn: registered, but the engine cannot load it.
+    if detection.raw_hints.get("hgn_magic_read") == "failed":
+        metadata["detection_warning"] = (
+            "no valid halogen checkpoint found (the file does not start with HGN1); "
+            "capabilities/backends are a filename guess"
+        )
 
     draft_facts: dict[str, Any] = {}
     if drafter is not None:

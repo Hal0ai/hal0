@@ -56,7 +56,7 @@ from hal0.http_client import async_client
 from hal0.install.perms import ensure_shared_dir
 from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
 from hal0.providers.base import HealthCheck, Mount, Provider, RuntimeLaunchPlan
-from hal0.registry.detect import HALOGEN_TOKENIZER_JSON
+from hal0.registry.detect import HALOGEN_TOKENIZER_JSON, HALOGEN_VISION_SIDECAR
 from hal0.runners.knobs import (
     HALOGEN_DENIED_ENV,
     HALOGEN_DENIED_PREFIXES,
@@ -87,7 +87,7 @@ _DEFAULT_PORT = 8099
 #: The vision tower's weights sit beside the checkpoint under this exact name.
 #: The entrypoint exits 1 when ``HALOGEN_VISION_TOWER`` is set and the file is
 #: absent, so hal0 sets the variable only after checking for it.
-VISION_SIDECAR = "qwen38-flash-next-vision.hgn"
+VISION_SIDECAR = HALOGEN_VISION_SIDECAR
 
 #: Health/infer timeouts (the infer passthrough is for smoke checks; the
 #: dispatcher is the primary request path).
