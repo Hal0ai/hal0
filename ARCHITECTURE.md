@@ -631,16 +631,11 @@ device, layers, threads, port, runner — and names its model and profile.
 A slot write that carries a tuning key is refused with
 `slot.tuning_key_denied`. A model rebind is `PUT /api/slots/{name}/config`
 with `{"model": {"default": ...}}`; there is no separate defaults route.
-`hal0.config.migrations.profile_centric` moves an
-older install onto this shape: it runs after `hal0 update` activates the
-new tree and when `hal0 serve` starts `hal0-api`, backs up every file it
-changes, and checks each converted llama-server slot's launch against its
-plan (`_verify` in `profile_centric_apply.py`; FLM, TTS, STT and image
-slots get no such comparison, so a launch mismatch cannot block them). A
-llama-server slot that does not match keeps launching its pre-conversion
-command, is listed by `hal0 update` (exit 2), and shows as
-`conversion_blocked` on `/api/slots`. `hal0 update --rollback` to a release before the conversion
-puts the backups back first.
+The one-shot conversion that moved a 1.3 install onto this shape
+shipped in 1.4.0 and is gone; the upgrade floor is 1.5.0. A slot file that
+still carries a tuning key fails to load (`slot.unconverted`), is refused at
+launch, and shows as `conversion_blocked` on `/api/slots`; the operator moves
+the keys to a profile by hand.
 
 (Historical: slots once mapped logically onto a single shared `lemond`
 (Lemonade) process with no per-slot systemd unit. The Lemonade runtime

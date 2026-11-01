@@ -427,12 +427,6 @@ Slot runtimes and image pins are converted onto the current runner system by
 config; see [Manage runner images → Upgrading an older
 install](/docs/guides/manage-runner-images-lifecycle/#upgrading-an-older-install).
 
-Slot tuning, profiles and stacks are converted onto the profile-centric model
-by `hal0 profile migrate`, which `hal0 update` also runs for you; see [Update
-and roll back](/docs/guides/update-and-rollback#profile-centric-config-conversion).
-Run `hal0 profile migrate` to preview the plan, and
-`sudo -u hal0 hal0 profile migrate --apply` to convert by hand.
-
 One manual slot migration remains: `hal0 slot migrate-id-keying`, which
 flips name-keyed slot files, state directories and units to id-keyed ones. It
 is **operator-run only** — nothing in `hal0 update` runs it. It previews by

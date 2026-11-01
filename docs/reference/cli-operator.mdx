@@ -104,32 +104,8 @@ and export stay dashboard/API-only (`/api/profiles`).
 | `profile show <name>` | `name` | `--json` |
 | `profile create <name>` | `name` | `--from <profile>` (duplicate a seed or custom profile first), `--flags`, `--ctx-size` (128-16777216), `--thinking`/`--no-thinking`, `--vision` (`auto`\|`off`), `--speculation` (`auto`\|`off`\|`ngram`), `--runner`, `--intent`, `--json` |
 | `profile edit <name>` | `name` | `--flags`, `--ctx-size`, `--clear-ctx-size`, `--thinking`/`--no-thinking`, `--clear-thinking`, `--vision`, `--speculation`, `--runner` (`''` clears), `--intent`, `--json` |
-| `profile migrate` | — | `--apply`, `--restore <archive>`, `--json` |
 
 Seed profiles are read-only: `profile edit` on one is refused with the duplicate-first hint (`profile create <new> --from <seed>`). Edits reach a running slot at its next restart, except `runner`: a launch resolves its image from the slot's `binary`, which is copied from the profile's `runner` only when the profile is applied to the slot (`slot edit <slot> --profile <name>`). After `profile edit --runner`, re-apply the profile to each slot that uses it. A llama-server slot with no profile runs its type's seed (`chat` for an `llm` slot), and one that names a profile that does not exist fails to launch with `slot.profile_missing`.
-
-`profile migrate` moves this box to profile-centric config
-([ADR-0029](/docs/adr/0029-profile-centric-config)).
-It reads this box's slot, profile and stack files and the model registry, and
-prints the profiles it would generate, the slots it would re-point, the keys it
-would drop, and every configured value that does not reach the launch today.
-Those values are dropped, never applied: the conversion keeps what each slot
-launches. Without flags it writes nothing.
-
-- `--apply` converts. `hal0 update` and `hal0 serve` do this automatically.
-  Run it as the service user, `sudo -u hal0 hal0 profile migrate --apply`
-  (it refuses to run as root, which would leave a backup hal0 cannot read).
-  It writes `/var/lib/hal0/backups/profiles-<ts>.tar.gz` first and checks each
-  converted llama-server slot's launch against the plan (other engines are not
-  compared). A slot that does not match is put back and reported as blocked.
-- `--restore <archive>` puts that backup back for a downgrade: the files and
-  the model columns. Stop `hal0-api` first. Until you run `--apply` again,
-  the automatic conversion stands down on that release.
-
-It exits 2 when anything cannot be converted: a slot, a stored profile (even
-one no slot uses), or a stack. `--json` lists those under `blocked`. What still
-needs converting is read from each file's content, so running it again after a
-conversion shows nothing to do.
 
 ## `hal0 mcp` — manage MCP servers
 
