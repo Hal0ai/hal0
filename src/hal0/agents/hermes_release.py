@@ -1415,7 +1415,9 @@ def _restore_config(outgoing: Release, new_id: str, hermes_home: Path) -> bool:
     if not copy.is_file():
         return False
     try:
-        shutil.copy2(copy, hermes_home / "config.yaml")
+        # Overwrites the root config.yaml: not while another writer is mid-merge (#2995).
+        with hp.root_config_lock(hermes_home):
+            shutil.copy2(copy, hermes_home / "config.yaml")
     except OSError as exc:
         log.warning("hermes_release.config_restore_failed", error=str(exc))
         return False
@@ -1428,9 +1430,13 @@ def _config_migrate(layout: Layout, *, run: Runner, hermes_home: Path) -> str | 
         return None
     env = build_env(hermes_home=hermes_home, layout=layout)
     try:
-        proc = run(
-            [str(layout.venv_link / "bin" / "hermes"), "config", "migrate"], env=env, timeout=300
-        )
+        # ``migrate`` rewrites the root config.yaml (#2995).
+        with hp.root_config_lock(hermes_home):
+            proc = run(
+                [str(layout.venv_link / "bin" / "hermes"), "config", "migrate"],
+                env=env,
+                timeout=300,
+            )
     except (OSError, subprocess.SubprocessError) as exc:
         return f"hermes config migrate failed: {exc}"
     if proc.returncode != 0:
