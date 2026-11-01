@@ -259,7 +259,7 @@ even on a fresh install, under `[memory.graph]`:
 - `llm_timeout_s` (default `300`, range 30–3600) — timeout for the Hindsight
   daemon's LLM calls, covering cold slot starts and long reflects.
 - the extraction limits — `extraction_max_concurrent` (default `1`),
-  `extraction_max_tokens` (default `4096`), `extraction_llm_retries`
+  `extraction_max_tokens` (default `16384`), `extraction_llm_retries`
   (default `1`), `extraction_task_retries` (default `2`) and
   `extraction_retry_backoff_s` (default `120`). The extraction slot is a
   shared inference slot, usually one llama-server serving one request at a
@@ -274,6 +274,13 @@ even on a fresh install, under `[memory.graph]`:
   `extraction_retry_backoff_s` are Hindsight's worker-wide settings: every
   queued memory operation (consolidation and mental-model refresh too)
   shares them, since the engine has no retain-only task retry.
+
+  `extraction_max_tokens` must stay strictly above the retain chunk size of
+  every bank: the engine refuses each retain into a bank whose chunk size is
+  not below the cap. The default `16384` clears the 12000-character strategy
+  chunks the Hindsight coding-agent plugin sets. A box whose `hal0.toml`
+  already holds `extraction_max_tokens = 4096` keeps it; saving the graph
+  settings and `hal0 doctor` both warn when a bank's chunk size is not cleared.
 
 The timeout and the extraction limits are propagated to the `hindsight-api`
 service as `HINDSIGHT_API_LLM_TIMEOUT=<n>` and the matching

@@ -2779,6 +2779,52 @@ def check_memory_extraction_throughput(
     return Check(name, title, _PASS if est.get("verdict") == "ok" else _WARN, detail)
 
 
+def _fetch_chunk_check(base: str | None) -> dict[str, Any] | None:
+    from hal0.cli._shared import CliApiError, api_get
+
+    try:
+        payload = api_get("/api/memory/graph/chunk-check", base=base, timeout=30.0)
+    except CliApiError:
+        return None
+    audit = payload.get("chunk_check") if isinstance(payload, dict) else None
+    return audit if isinstance(audit, dict) else None
+
+
+def check_memory_retain_chunk(
+    *,
+    memory: dict[str, Any] | None,
+    base: str | None = None,
+    fetch: Callable[[str | None], dict[str, Any] | None] | None = None,
+) -> Check:
+    """``extraction_max_tokens`` must clear every bank's retain chunk size (#3215).
+
+    Hindsight refuses each retain into a bank whose resolved chunk size is not
+    strictly below the completion cap, and the Memory page follows only one
+    bank, so a coding-agent bank can fail for days unseen. Advisory (``warn``):
+    an unreachable engine skips the check honestly rather than passing it.
+    """
+    name, title = "memory_retain_chunk", "Memory retain chunk size"
+    if memory is None:
+        return Check(name, title, _WARN, "memory engine status unreachable")
+    if memory.get("engine") in (None, "") or not memory.get("enabled", True):
+        return Check(name, title, _PASS, "memory disabled — nothing to check")
+    if not memory.get("reachable"):
+        return Check(name, title, _PASS, "engine unreachable — see the memory row")
+    audit = (fetch or _fetch_chunk_check)(base)
+    if audit is None:
+        return Check(name, title, _WARN, "could not read the banks' retain chunk sizes")
+    if audit.get("verdict") == "warn":
+        return Check(name, title, _WARN, str(audit.get("message") or "a bank is not cleared"))
+    if audit.get("verdict") == "unknown":
+        return Check(name, title, _WARN, "no bank config could be read — check skipped")
+    return Check(
+        name,
+        title,
+        _PASS,
+        f"extraction_max_tokens = {audit.get('max_tokens')} clears {audit.get('checked')} bank(s)",
+    )
+
+
 def check_hermes_gateway_unit(
     *,
     home: Path | None = None,
@@ -2957,6 +3003,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_hindsight_llm_auth(auth=auth_payload),
         check_memory_engine_version(memory=payloads["memory"]),
         check_memory_extraction_throughput(memory=payloads["memory"], base=base),
+        check_memory_retain_chunk(memory=payloads["memory"], base=base),
     ]
     return verify_rows + extra_rows
 
@@ -3047,6 +3094,7 @@ __all__ = [
     "check_mcp_mounts",
     "check_memory_engine_version",
     "check_memory_extraction_throughput",
+    "check_memory_retain_chunk",
     "check_model_store",
     "check_ports",
     "check_seams",

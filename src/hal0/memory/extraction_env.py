@@ -123,8 +123,10 @@ class ExtractionLimits:
     * ``max_concurrent`` -> ``HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT``: in-flight
       extraction calls against the slot. 1 serialises them.
     * ``max_tokens`` -> ``HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS``: per-call
-      completion cap. Must exceed hindsight's retain chunk size (3000) or the
-      daemon refuses to start; the schema floor (3072) keeps that unreachable.
+      completion cap. Hindsight refuses every retain into a bank whose chunk
+      size is not strictly below it: the schema floor (3072) clears the engine
+      default (3000), the 16384 default clears the coding-agent plugin's 12000
+      strategy chunks, and ``retain_chunk_guard`` warns about banks it misses.
     * ``llm_retries`` -> ``HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES``: retries of one
       LLM call inside a retain attempt.
     * ``task_retries`` -> ``HINDSIGHT_API_WORKER_MAX_RETRIES``: requeues of a
@@ -136,7 +138,7 @@ class ExtractionLimits:
     """
 
     max_concurrent: int = 1
-    max_tokens: int = 4096
+    max_tokens: int = 16384
     llm_retries: int = 1
     task_retries: int = 2
     retry_backoff_s: int = 120

@@ -614,7 +614,7 @@ def test_graph_status_echoes_the_extraction_limits(
     body = client.get("/api/memory/graph/status").json()
     assert body["extraction_limits"] == {
         "max_concurrent": 1,
-        "max_tokens": 4096,
+        "max_tokens": 16384,
         "llm_retries": 1,
         "task_retries": 2,
         "retry_backoff_s": 120,

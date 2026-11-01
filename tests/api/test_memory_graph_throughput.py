@@ -141,7 +141,9 @@ def test_enable_on_a_slow_slot_warns_but_still_enables(
 def test_enable_on_a_fast_slot_does_not_warn(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _fake_slots(monkeypatch, p8082=FAST)
+    # 16384 completion tokens (the #3215 default) at FAST's 45 tok/s would take
+    # ~364 s > 300 s, so use a slot fast enough for the default cap.
+    _fake_slots(monkeypatch, p8082={"prompt_tps": 800.0, "decode_tps": 200.0})
 
     body = client.put("/api/memory/graph", json={"enabled": True}).json()
 
@@ -203,7 +205,7 @@ def test_disable_never_probes(client: TestClient, monkeypatch: pytest.MonkeyPatc
 def test_timeout_change_reprojects_the_cached_estimate_without_probing(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    probed = _fake_slots(monkeypatch, p8082={"prompt_tps": 100.0, "decode_tps": 20.0})
+    probed = _fake_slots(monkeypatch, p8082={"prompt_tps": 100.0, "decode_tps": 80.0})
     first = client.put("/api/memory/graph", json={"enabled": True}).json()
     assert first["throughput"]["verdict"] == "ok"  # 35 + 204.8 s < 300 s
 

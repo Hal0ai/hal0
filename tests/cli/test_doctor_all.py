@@ -1479,8 +1479,8 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
 
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
-    # 7 verify rows + 33 extras.
-    assert keys[-34:] == [
+    # 7 verify rows + 34 extras.
+    assert keys[-35:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1515,6 +1515,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "hindsight_llm_auth",
         "memory_engine_version",
         "memory_extraction_throughput",
+        "memory_retain_chunk",
     ]
     assert "api" in keys and "runners" in keys
     assert da.overall_verdict(checks) == "ok"
@@ -2872,3 +2873,38 @@ def test_brain_memory_passes_when_headers_follow_the_opt_in(tmp_path) -> None:
     )
     c = da.check_hermes_brain_memory(home=home)
     assert c.status == "pass" and "private" in c.detail
+
+
+# ── memory retain chunk size (#3215, advisory) ──────────────────────────────
+
+
+def test_retain_chunk_warns_when_a_bank_is_not_cleared() -> None:
+    audit = {"verdict": "warn", "message": "bank x (12000) is not cleared", "max_tokens": 4096}
+    check = da.check_memory_retain_chunk(memory=_LIVE_MEMORY, fetch=lambda _b: audit)
+    assert check.status == "warn" and "12000" in check.detail
+
+
+def test_retain_chunk_passes_when_every_bank_is_cleared() -> None:
+    audit = {"verdict": "ok", "max_tokens": 16384, "checked": 3}
+    check = da.check_memory_retain_chunk(memory=_LIVE_MEMORY, fetch=lambda _b: audit)
+    assert check.status == "pass" and "3 bank(s)" in check.detail
+
+
+def test_retain_chunk_unreadable_is_a_warn_not_a_pass() -> None:
+    assert da.check_memory_retain_chunk(memory=_LIVE_MEMORY, fetch=lambda _b: None).status == "warn"
+    unknown = {"verdict": "unknown"}
+    assert (
+        da.check_memory_retain_chunk(memory=_LIVE_MEMORY, fetch=lambda _b: unknown).status == "warn"
+    )
+
+
+def test_retain_chunk_skips_without_a_live_engine() -> None:
+    def _never(_b: object) -> None:  # pragma: no cover — a call here is the bug
+        raise AssertionError("no fetch without a reachable memory engine")
+
+    for memory in (
+        {"enabled": True, "engine": None},
+        {"enabled": False, "engine": "hindsight"},
+        {"enabled": True, "engine": "hindsight", "reachable": False},
+    ):
+        assert da.check_memory_retain_chunk(memory=memory, fetch=_never).status == "pass"
