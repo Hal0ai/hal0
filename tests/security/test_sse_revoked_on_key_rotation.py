@@ -648,7 +648,8 @@ def test_revocation_wakes_starlette_listener_while_route_polls() -> None:
     from starlette.responses import StreamingResponse as StarletteStreaming
 
     closed = False
-    polls: list[bool] = []
+    polls_before_revocation: list[bool] = []
+    allowed = True
 
     async def app(scope: Any, receive: Any, send: Any) -> None:
         request = Request(scope, receive)
@@ -657,7 +658,11 @@ def test_revocation_wakes_starlette_listener_while_route_polls() -> None:
             nonlocal closed
             try:
                 while True:
-                    polls.append(await request.is_disconnected())
+                    disconnected = await request.is_disconnected()
+                    # A poll that races the revocation may see the stream ending;
+                    # only a poll before it proves the client was not reported gone.
+                    if allowed:
+                        polls_before_revocation.append(disconnected)
                     yield "data: x\n\n"
                     await asyncio.sleep(0.01)
             finally:
@@ -669,7 +674,6 @@ def test_revocation_wakes_starlette_listener_while_route_polls() -> None:
     async def run() -> tuple[list[dict], set]:
         _, receive = _client()
         sent: list[dict] = []
-        allowed = True
 
         async def send(message: dict) -> None:
             sent.append(message)
@@ -694,7 +698,7 @@ def test_revocation_wakes_starlette_listener_while_route_polls() -> None:
     sent, leftover = asyncio.run(run())
     _assert_revoked_end(sent)
     assert closed
-    assert polls and not any(polls)
+    assert polls_before_revocation and not any(polls_before_revocation)
     assert not leftover
     assert live_sockets.open_count() == 0
 
