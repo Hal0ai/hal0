@@ -1761,7 +1761,9 @@ def _read_openwebui_client(db: Path) -> tuple[str, dict[str, Any] | None]:
     """``("ok", row)``, ``("absent", None)`` or ``("unreadable", None)`` for client ``openwebui``.
 
     Opened ``mode=ro`` like :func:`check_bridge_store`: a doctor run must not create
-    ``bridge.db`` or apply a migration. The row carries no key material.
+    ``bridge.db`` or apply a migration. The row carries the key's sha256 digest (never the
+    key, which hal0 does not store) so :func:`check_openwebui_mcp` can compare it with the
+    rendered key without verifying it, which would stamp ``last_seen_at``.
     """
     if not db.exists():
         return "absent", None
@@ -1771,7 +1773,8 @@ def _read_openwebui_client(db: Path) -> tuple[str, dict[str, Any] | None]:
         conn = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True, timeout=2.0)
         try:
             row = conn.execute(
-                "SELECT created_by, revoked_at, scopes FROM clients WHERE name = ?", ("openwebui",)
+                "SELECT created_by, revoked_at, scopes, key_hash FROM clients WHERE name = ?",
+                ("openwebui",),
             ).fetchone()
         finally:
             conn.close()
@@ -1779,11 +1782,12 @@ def _read_openwebui_client(db: Path) -> tuple[str, dict[str, Any] | None]:
         return "unreadable", None
     if row is None:
         return "absent", None
-    created_by, revoked_at, scopes = row
+    created_by, revoked_at, scopes, key_hash = row
     return "ok", {
         "created_by": created_by,
         "revoked": revoked_at is not None,
         "scopes": frozenset(s for s in str(scopes or "").split(",") if s),
+        "key_hash": key_hash,
     }
 
 
@@ -1802,23 +1806,28 @@ def check_openwebui_mcp(
     scope the client holds, each keyed with a ``hal0bk_openwebui.`` key -> an
     installed unit that passes ``--add-host=host.docker.internal:host-gateway`` so
     the container can reach hal0 at all. The row reads files only and never prints a
-    key. It does not verify the key against the store (that would stamp
-    ``last_seen_at``).
+    key. It compares the rendered key's sha256 with the client's stored digest (read-only)
+    rather than verifying it, which would stamp ``last_seen_at``.
 
     * Open WebUI unit not installed: PASS, nothing to wire.
     * Bridge disabled, no client yet, a foreign or revoked client, an unreadable
       store, a unit without ``--add-host`` (upgraded boxes keep their first-install
       unit, #3160): WARN with the repair.
-    * The client exists but the env has no block, or its connections differ from the
-      client's scopes: FAIL. Open WebUI has no hal0 tools although the bridge says it
-      should; ``hal0 bridge rotate openwebui`` re-renders it.
+    * The client exists but the env has no block, its connections differ from the
+      client's scopes, a connection sends the key to a host other than this box, or
+      the rendered key is not the client's current one: FAIL. Open WebUI has no hal0
+      tools (or hands the key to the wrong place) although the bridge says it should;
+      ``hal0 bridge rotate openwebui`` re-renders it.
 
     ADVISORY (never critical): Open WebUI keeps working without its tools.
     """
+    from urllib.parse import urlsplit
+
     from hal0.bridge import keys as bridge_keys
     from hal0.openwebui import env_writer, image_pin
 
     key, label = "openwebui_mcp", "Open WebUI MCP tools"
+    hal0_origin = env_writer._HAL0_V1_URL.rstrip("/").removesuffix("/v1")
     unit = unit_path if unit_path is not None else image_pin.installed_unit_path()
     if not unit.exists():
         return Check(key, label, _PASS, "Open WebUI is not installed")
@@ -1848,9 +1857,10 @@ def check_openwebui_mcp(
             key,
             label,
             _WARN,
-            f"bridge client 'openwebui' was created by {client['created_by']!r}, not by hal0; "
-            "hal0 renders nothing from it. Revoke it and restart hal0-api to let hal0 manage "
-            "Open WebUI's key, or leave Open WebUI without hal0's tools",
+            f"bridge client 'openwebui' was created by {client['created_by']!r}, not by hal0: "
+            "hal0 does not adopt or replace it and renders nothing from it, so Open WebUI has no "
+            "hal0 tools. Revoking it does not hand the name to hal0 (a revoked name stays taken, "
+            "ADR-0043)",
         )
     if client["revoked"]:
         return Check(
@@ -1892,10 +1902,24 @@ def check_openwebui_mcp(
         entry = have.get(ident)
         if entry is None:
             continue
-        if not str(entry.get("url", "")).endswith(f"/mcp/{scope}/mcp"):
-            problems.append(f"{ident} does not point at /mcp/{scope}/mcp")
-        if bridge_keys.name_of(str(entry.get("key", ""))) != "openwebui":
+        url = str(entry.get("url", ""))
+        expected = f"{hal0_origin}/mcp/{scope}/mcp"
+        if url != expected:
+            # The bearer key goes wherever the URL does. The render only ever writes hal0's
+            # own origin, so anything else was edited in.
+            try:
+                host = urlsplit(url).hostname
+            except ValueError:
+                host = None
+            problems.append(
+                f"{ident} points at {host or 'an unreadable URL'} instead of hal0 ({expected}), "
+                "and would send the key there"
+            )
+        entry_key = str(entry.get("key", ""))
+        if bridge_keys.name_of(entry_key) != "openwebui":
             problems.append(f"{ident} carries no openwebui bridge key")
+        elif client.get("key_hash") and bridge_keys.hash_key(entry_key) != client["key_hash"]:
+            problems.append(f"{ident} carries a key the openwebui client no longer accepts")
     if problems:
         return Check(key, label, _FAIL, f"{'; '.join(problems)}; {rotate}")
     try:

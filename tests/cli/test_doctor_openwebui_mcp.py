@@ -34,12 +34,12 @@ class _Box:
         _, key = self.store.add_client("openwebui", created_by, scopes=scopes)
         return key
 
-    def render(self, key: str, scopes=("memory", "agents")) -> None:
+    def render(self, key: str, scopes=("memory", "agents"), url: str = _URL) -> None:
         ids = {"memory": "hal0-memory", "agents": "hal0-agents", "admin": "hal0-admin"}
         conns = [
             {
                 "type": "mcp",
-                "url": f"{_URL}/mcp/{s}/mcp",
+                "url": f"{url}/mcp/{s}/mcp",
                 "auth_type": "bearer",
                 "key": key,
                 "info": {"id": ids[s], "name": s},
@@ -90,10 +90,14 @@ def test_absent_bridge_db_warns_without_creating_it(tmp_path: Path) -> None:
     assert c.status == "warn" and not (tmp_path / "bridge.db").exists()
 
 
-def test_a_client_someone_else_made_warns(box: _Box) -> None:
+def test_a_client_someone_else_made_warns_without_advising_a_revoke(box: _Box) -> None:
     box.mint(created_by="api:admin")
     c = box.check()
     assert c.status == "warn" and "api:admin" in c.detail and "not by hal0" in c.detail
+    # A revoked name stays taken, so "revoke it to let hal0 manage it" would destroy the
+    # operator's credential and fix nothing.
+    assert "Revoke it" not in c.detail and "revoke it" not in c.detail
+    assert "does not hand the name to hal0" in c.detail
 
 
 def test_revoked_client_warns_and_says_it_is_not_reminted(box: _Box) -> None:
@@ -137,7 +141,27 @@ def test_env_with_a_wrong_url_or_key_fails(box: _Box) -> None:
     assert c.status == "fail" and "no openwebui bridge key" in c.detail
     box.render(key)
     box.env.write_text(box.env.read_text().replace("/mcp/memory/mcp", "/mcp/admin/mcp"))
-    assert "does not point at /mcp/memory/mcp" in box.check().detail
+    assert "instead of hal0" in box.check().detail
+
+
+def test_a_connection_that_sends_the_key_off_the_box_fails(box: _Box) -> None:
+    box.render(box.mint(), url="https://api.openai.com")
+    c = box.check()
+    assert c.status == "fail" and "api.openai.com" in c.detail
+    assert "would send the key there" in c.detail
+
+
+def test_a_rotated_away_key_fails_without_printing_either_key(box: _Box) -> None:
+    old = box.mint()
+    box.render(old)
+    _, new = box.store.rotate_client("openwebui")
+    c = box.check()
+    assert c.status == "fail" and "no longer accepts" in c.detail
+    assert old not in c.detail and new not in c.detail
+    # the doctor compared digests: it did not verify the key, so no last_seen stamp
+    assert box.store.get_client("openwebui").last_seen_at is None  # type: ignore[union-attr]
+    box.render(new)
+    assert box.check().status == "pass"
 
 
 def test_unit_without_add_host_warns(box: _Box) -> None:

@@ -128,17 +128,17 @@ def _bridge_mcp_ready() -> bool:
 
 
 def _mcp_base_url() -> str:
-    """hal0's container-side origin: the first ``OPENAI_API_BASE_URLS`` entry, sans ``/v1``."""
+    """The origin the MCP connections, and so the bridge key, are sent to: hal0's own.
+
+    ``/v1`` is the one URL ``env_writer`` treats as "hal0" (``_HAL0_V1_URL``); an
+    ``OPENAI_API_BASE_URLS`` entry for any other address is an operator's own provider and is
+    never given hal0's keys (see ``_apply_client_key``). The MCP origin follows the same rule,
+    so it is that URL minus ``/v1`` whatever the editable list says: the bearer key must not
+    follow a first entry such as ``https://api.openai.com/v1`` to another party.
+    """
     from hal0.openwebui import env_writer
 
-    try:
-        urls = env_writer._read_existing_env(env_writer._default_path()).get(
-            "OPENAI_API_BASE_URLS", ""
-        )
-    except Exception:
-        urls = ""
-    first = (urls or env_writer.default_openwebui_env()["OPENAI_API_BASE_URLS"]).split(";")[0]
-    return first.strip().rstrip("/").removesuffix("/v1")
+    return env_writer._HAL0_V1_URL.rstrip("/").removesuffix("/v1")
 
 
 def _renderable_image_model(model_id: str) -> str | None:

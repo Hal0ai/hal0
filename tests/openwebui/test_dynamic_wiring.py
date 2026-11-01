@@ -469,19 +469,6 @@ def test_resolve_never_creates_bridge_db(tmp_hal0_home: str) -> None:
     assert not paths.bridge_db().exists()
 
 
-def test_resolve_base_url_follows_openai_api_base_urls(tmp_hal0_home: str) -> None:
-    from hal0.openwebui.wiring import resolve_dynamic_env_overrides
-
-    etc = Path(tmp_hal0_home) / "etc" / "hal0"
-    etc.mkdir(parents=True, exist_ok=True)
-    (etc / "openwebui.env").write_text(
-        "OPENAI_API_BASE_URLS=http://10.9.8.7:9999/v1;http://other/v1\n", encoding="utf-8"
-    )
-    out = resolve_dynamic_env_overrides(bridge_key="hal0bk_x.y", mcp_enabled=True)
-    urls = [e["url"] for e in json.loads(out["TOOL_SERVER_CONNECTIONS"])]
-    assert urls and all(u.startswith("http://10.9.8.7:9999/mcp/") for u in urls)
-
-
 def test_resolve_scopes_from_stored_client(tmp_hal0_home: str) -> None:
     from hal0.bridge.store import BridgeStore
     from hal0.config import paths
@@ -497,3 +484,43 @@ def test_resolve_scopes_from_stored_client(tmp_hal0_home: str) -> None:
     out = resolve_dynamic_env_overrides(bridge_key="hal0bk_x.y", bridge_scopes=["memory"])
     ids = [e["info"]["id"] for e in json.loads(out["TOOL_SERVER_CONNECTIONS"])]
     assert ids == ["hal0-memory"]
+
+
+# ── the MCP connections (and the bridge key) only ever point at hal0's own origin ──
+
+
+@pytest.mark.parametrize(
+    "urls",
+    [
+        None,
+        "https://api.openai.com/v1;http://host.docker.internal:8080/v1",
+        "https://api.openai.com/v1;https://api.mistral.ai/v1",
+        "http://10.9.8.7:9999/v1;http://other/v1",
+        "http://host.docker.internal:11434/v1",
+        "https://host.docker.internal.evil.example/v1",
+    ],
+)
+def test_mcp_base_url_is_hal0s_origin_whatever_the_provider_list_says(
+    tmp_hal0_home: str, urls: str | None
+) -> None:
+    from hal0.openwebui import wiring
+
+    target = Path(tmp_hal0_home) / "etc" / "hal0" / "openwebui.env"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if urls is not None:
+        target.write_text(f"OPENAI_API_BASE_URLS={urls}\n", encoding="utf-8")
+    assert wiring._mcp_base_url() == "http://host.docker.internal:8080"
+
+
+def test_the_bridge_key_is_never_rendered_for_a_foreign_origin(tmp_hal0_home: str) -> None:
+    from hal0.openwebui.wiring import resolve_dynamic_env_overrides
+
+    etc = Path(tmp_hal0_home) / "etc" / "hal0"
+    etc.mkdir(parents=True, exist_ok=True)
+    (etc / "openwebui.env").write_text(
+        "OPENAI_API_BASE_URLS=https://api.openai.com/v1;http://host.docker.internal:8080/v1\n",
+        encoding="utf-8",
+    )
+    out = resolve_dynamic_env_overrides(bridge_key="hal0bk_x.y", mcp_enabled=True)
+    urls = [e["url"] for e in json.loads(out["TOOL_SERVER_CONNECTIONS"])]
+    assert urls and all(u.startswith("http://host.docker.internal:8080/mcp/") for u in urls)
