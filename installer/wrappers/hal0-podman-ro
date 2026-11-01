@@ -253,6 +253,17 @@ case "$cmd" in
     container_read '{{json .Config.Cmd}}' "hal0-slot-$1"
     ;;
 
+  container-identity)      # arg: slot token -> prints {"user":...,"unit_sha":...}
+    [[ $# -eq 1 ]] || die "container-identity takes exactly one argument"
+    validate_slot_token "$1"
+    require_podman
+    # #3130 drift: the container's configured --user and the io.hal0.unit-sha
+    # label the renderer stamps. Hardcoded literal --format; `index` on a
+    # missing label (or a nil map) yields "", which is the "started before the
+    # label existed" answer, not an error.
+    container_read '{"user":{{json .Config.User}},"unit_sha":{{json (index .Config.Labels "io.hal0.unit-sha")}}}' "hal0-slot-$1"
+    ;;
+
   check-image-ref)         # arg: image ref — side-effect-free validator probe
     # Exists so the validation regexes can be exercised by the test suite (and
     # by an operator debugging a rejection) without podman, without root and
@@ -313,6 +324,7 @@ usage: hal0-podman-ro <command> [arg]
                              root's store yet" — both map to root caller-side
   container-image <token>    running image of hal0-slot-<token>, or nothing
   container-argv <token>     live command argv of hal0-slot-<token>, or nothing
+  container-identity <token> JSON {user, unit_sha} of hal0-slot-<token>, or nothing
   check-image-ref <ref>      validate an image ref only (no podman call)
   check-slot-token <token>   validate a slot token only (no podman call)
 EOF

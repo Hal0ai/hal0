@@ -46,6 +46,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import hashlib
 import json
 import logging
 import os
@@ -732,6 +733,25 @@ def _slot_model_default(slot_cfg: Mapping[str, Any]) -> str:
     return str(model.get("default") or "") if isinstance(model, Mapping) else ""
 
 
+#: Container label carrying the sha256 of the unit text the container was
+#: launched from (#3130). The hal0-systemctl quadlet validator pins the key.
+UNIT_SHA_LABEL = "io.hal0.unit-sha"
+
+
+def unit_text_sha(text: str) -> str:
+    """sha256 hex of a rendered unit body (the part before its ``Label=`` line)."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def unit_sha_of_text(unit_text: str) -> str | None:
+    """The ``io.hal0.unit-sha`` value stamped into a rendered unit, or None."""
+    prefix = f"Label={UNIT_SHA_LABEL}="
+    for line in unit_text.splitlines():
+        if line.startswith(prefix):
+            return line[len(prefix) :]
+    return None
+
+
 def _render_quadlet_from_plan(
     instance_token: str,
     plan: RuntimeLaunchPlan,
@@ -981,6 +1001,15 @@ def _render_quadlet_from_plan(
     if autoload:
         lines.extend(["", "[Install]", "WantedBy=hal0.target"])
     lines.append("")
+    # #3130: stamp the container with a hash of everything above, so the drift
+    # comparator can tell that a running container predates the unit now on
+    # disk (User=, Volume=, Environment=, --group-add, non-llama Exec= flags —
+    # none of which the argv/image comparison sees). The hash is taken BEFORE
+    # the Label= line is inserted, so it never covers itself; the unit text is
+    # a pure function of (plan, publish_host, network default, autoload), with
+    # nothing clock- or host-volatile in it, so equal config => equal hash.
+    sha = unit_text_sha("\n".join(lines))
+    lines.insert(lines.index("LogDriver=passthrough") + 1, f"Label={UNIT_SHA_LABEL}={sha}")
     return "\n".join(lines)
 
 
@@ -2420,6 +2449,47 @@ class ContainerProvider(Provider):
         except Exception as exc:
             return str(exc) or type(exc).__name__
         return None
+
+    def expected_identity(
+        self, slot_cfg: dict[str, Any], model_info: dict[str, Any]
+    ) -> dict[str, str | None] | None:
+        """What a restart would stamp now: ``{"unit_sha", "user"}``, or None.
+
+        ``unit_sha`` is the hash a fresh render of the unit carries; ``user`` is
+        the plan's pinned ``User=`` ("" when the plan pins none). Returns None
+        when the slot cannot be rendered (the argv path reports that).
+        """
+        try:
+            provider = _spec_provider_for(slot_cfg) or self
+            plan = provider.container_spec(slot_cfg, model_info)
+            text = self._render_quadlet_text(slot_cfg, model_info)
+        except Exception:
+            return None
+        return {"unit_sha": unit_sha_of_text(text), "user": plan.user or ""}
+
+    def running_identity(self, slot: Mapping[str, Any] | str) -> dict[str, str | None] | None:
+        """Live container's ``{"user", "unit_sha"}``, or None when unanswerable.
+
+        ``unit_sha`` is None for a container started before the label existed.
+        Seam-only (``container-identity``): a wrapper predating that verb answers
+        rc 64, which reads as "unknown" here, never as drift.
+        """
+        token = _artefact_token(slot)
+        raw = podman_introspect.container_identity(token)
+        if raw is None:
+            return None
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return None
+        if not isinstance(data, dict):
+            return None
+        user = data.get("user")
+        sha = data.get("unit_sha")
+        return {
+            "user": user if isinstance(user, str) else "",
+            "unit_sha": sha if isinstance(sha, str) and sha else None,
+        }
 
     def unload_sync(self, slot_cfg: dict[str, Any]) -> None:
         """Stop and clean up the slot's Quadlet unit (synchronous).

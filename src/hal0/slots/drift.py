@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Mapping
 from typing import Any, Protocol
 
 from hal0.slots._cfg_helpers import _model_default
@@ -242,6 +243,15 @@ async def compute_config_drift(
     if _image_mismatch(running_image, declared_image):
         diffs.append({"key": "image", "running": running_image, "rendered": declared_image})
 
+    # #3130: the unit's identity/mount/env surface. A render the argv + image
+    # comparison cannot see (User=, Volume=, Environment=, --group-add, a
+    # non-llama Exec= flag) still changes ``io.hal0.unit-sha``. Skipped when
+    # the argv could not be rendered: that case already reports render_error.
+    if rendered:
+        unit_diff = await loop.run_in_executor(None, _unit_identity_diff, provider, cfg, model_info)
+        if unit_diff is not None:
+            diffs.append(unit_diff)
+
     out: dict[str, Any] = {"drifted": bool(diffs), "diffs": diffs}
     if render_error is not None:
         out["render_error"] = render_error
@@ -273,6 +283,66 @@ def _argv_diffs(
     ]
 
 
+def load_would_restart(drift: Mapping[str, Any] | None) -> bool:
+    """Would ``SlotManager.load`` bounce a live slot with this ``config_drift``?
+
+    Not when it cannot re-render (``render_error``, #2660), and not for a
+    ``unit`` diff alone (#3130): that can be a change the operator has not asked
+    to apply yet, which the update banner and ``hal0 update --restart-slots`` own.
+    """
+    if not drift or not drift.get("drifted") or drift.get("render_error"):
+        return False
+    diffs = drift.get("diffs") or []
+    return not diffs or any(d.get("key") != "unit" for d in diffs)
+
+
+def _users_match(running: str, planned: str) -> bool:
+    """``--user`` equality tolerant of a bare uid (``996``) vs ``996:989``."""
+    if running == planned:
+        return True
+    return ":" not in running and running == planned.split(":", 1)[0]
+
+
+def _unit_identity_diff(
+    provider: Any, cfg: dict[str, Any], model_info: dict[str, Any]
+) -> dict[str, Any] | None:
+    """A ``unit`` diff when the running container predates the current render.
+
+    * Labelled container: its ``io.hal0.unit-sha`` differs from the sha a fresh
+      render carries => drift.
+    * Unlabelled container (started before the label shipped; every container
+      on the first update): NOT drift by itself, or every slot on every box
+      would report it. Only the one identity fact that is checkable without a
+      label counts: the plan pins a ``User=`` and the container runs as
+      something else (the #3130 case: ``img`` as root under ``User=996:989``).
+
+    Never raises; any unanswerable side reads as "no drift" (status must not
+    fail, and a wrapper that predates the verb answers nothing).
+    """
+    try:
+        running = provider.running_identity(cfg)
+        expected = provider.expected_identity(cfg, model_info)
+    except Exception:
+        return None
+    if not isinstance(running, dict) or not isinstance(expected, dict):
+        return None
+    want_sha = expected.get("unit_sha")
+    have_sha = running.get("unit_sha")
+    if isinstance(have_sha, str) and have_sha:
+        if want_sha and have_sha != want_sha:
+            return {"key": "unit", "running": have_sha[:12], "rendered": want_sha[:12]}
+        return None
+    want_user = expected.get("user") or ""
+    have_user = running.get("user") or ""
+    if want_user and not _users_match(have_user, want_user):
+        return {
+            "key": "unit",
+            "running": f"user={have_user or 'root'}",
+            "rendered": f"user={want_user}",
+        }
+    return None
+
+
 _RENDER_ERROR_FALLBACK = "the slot's launch command cannot be rendered from its current config"
 
 
@@ -297,4 +367,5 @@ __all__ = [
     "_CONFIG_DRIFT_KEYS",
     "DriftHost",
     "compute_config_drift",
+    "load_would_restart",
 ]

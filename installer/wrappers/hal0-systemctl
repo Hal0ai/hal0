@@ -291,7 +291,7 @@ validate_dropin_body() {  # arg: kind (gateway|hindsight); body on stdin
 #
 #   # comment lines (the two generated-by banners)
 #   [Unit]      Description= StartLimitIntervalSec= StartLimitBurst=
-#   [Container] Image= ContainerName= LogDriver= Network= AddDevice=
+#   [Container] Image= ContainerName= LogDriver= Label= Network= AddDevice=
 #               AddCapability= PodmanArgs= Volume= Environment= PublishPort=
 #               HealthCmd= HealthStartPeriod= HealthInterval= HealthRetries=
 #               HealthTimeout= Exec=
@@ -448,6 +448,11 @@ validate_quadlet_directive() {  # args: section, "Key=Value" line
       [[ "$value" =~ $_QRE_USER ]] || _quadlet_die "bad User: $value"
       [[ -n "$(_hal0_account_ids)" && "$value" == "$(_hal0_account_ids)" ]] \
         || _quadlet_die "User= must be the hal0 account's uid:gid: $value"
+      ;;
+    # The unit-identity stamp (#3130): exactly one key, exactly a sha256, so the
+    # drift comparator can read it back. No other label is accepted.
+    'Container|Label')
+      [[ "$value" =~ ^io\.hal0\.unit-sha=[0-9a-f]{64}$ ]] || _quadlet_die "bad Label: $value"
       ;;
     'Container|AddDevice')
       [[ "$value" =~ $_QRE_DEVICE ]] || _quadlet_die "bad AddDevice: $value"
