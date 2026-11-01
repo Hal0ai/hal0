@@ -2739,6 +2739,74 @@ def apply_mcp_server_entries(
     }
 
 
+def _prune_model_aliases_yaml(
+    config_path: Path, chat_slots: list[dict[str, Any]]
+) -> tuple[list[str], str | None]:
+    """Prune only aliases recorded by hal0 and still equal to what it wrote.
+
+    Alias values have no distinguishing signature. Like hermes-managed MCP
+    manifests, keep explicit ownership; store it in ``hal0.model_aliases`` so
+    the record and deletions commit atomically under the config lock. Unknown
+    aliases (including pre-tracking stale aliases) cannot safely be adopted.
+    An operator-edited stale alias is retained and ownership relinquished.
+    Named-profile writers do not emit model aliases or use this record.
+    """
+    if not config_path.exists():
+        return [], None
+    try:
+        import yaml
+    except ImportError:
+        return [], "PyYAML unavailable"
+    try:
+        with root_config_lock(config_path.parent):
+            data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return [], "config.yaml is not a YAML mapping"
+            aliases = data.get("model_aliases", {})
+            hal0 = data.get("hal0", {})
+            if not isinstance(aliases, dict) or not isinstance(hal0, dict):
+                return [], "model_aliases or hal0 is not a YAML mapping"
+            owned = hal0.get("model_aliases", {})
+            if not isinstance(owned, dict):
+                return [], "hal0.model_aliases is not a YAML mapping"
+            desired = {
+                slot["alias"]: {
+                    "model": slot["model_id"],
+                    "provider": "custom",
+                    "base_url": slot["backend_url"],
+                }
+                for slot in chat_slots
+            }
+            removed = []
+            for alias, previous in owned.items():
+                if (
+                    alias not in desired
+                    and isinstance(previous, dict)
+                    and aliases.get(alias) == previous
+                ):
+                    del aliases[alias]
+                    removed.append(alias)
+            # Only claim complete, successfully written entries. A failed config
+            # set must not erase ownership of an old value that needs a retry.
+            tracked = {
+                alias: value
+                for alias, value in owned.items()
+                if alias in desired and aliases.get(alias) == value
+            }
+            tracked.update(
+                {alias: value for alias, value in desired.items() if aliases.get(alias) == value}
+            )
+            if removed or tracked != owned:
+                hal0["model_aliases"] = tracked
+                data["hal0"] = hal0
+                _atomic_write(
+                    config_path, yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
+                )
+            return removed, None
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        return [], _yaml_error_summary(exc)
+
+
 def _prune_mcp_servers_yaml(
     config_path: Path,
     *,
@@ -3579,6 +3647,9 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
     applied, errors = _apply_config_set(
         pairs, hermes_bin=hermes_bin, hermes_home=hermes_home, run=run
     )
+    removed_aliases, alias_error = _prune_model_aliases_yaml(config_path, chat_slots)
+    if alias_error is not None:
+        errors.append(f"prune model aliases: {alias_error}")
     # Toolsets the operator disabled by hand survive: hal0 only ever adds or
     # removes its own two terminal entries (a list value replaces on merge).
     # The read that feeds those layers and the merge that applies them are one
@@ -3652,13 +3723,15 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
     )
     if status == PhaseStatus.OK and terminal_state_stale:
         status = PhaseStatus.WARN
+    if status == PhaseStatus.OK and alias_error is not None:
+        status = PhaseStatus.WARN
     return PhaseResult(
         status=status,
         hash=new_hash,
         reason=(
             "; ".join(errors[:3])
             if status == PhaseStatus.FAIL
-            else (stale_reason if terminal_state_stale else None)
+            else (stale_reason if terminal_state_stale else alias_error)
         ),
         details={
             "config_path": str(config_path),
@@ -3670,6 +3743,7 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
             "config_migrated": migrated,
             "primary_model": primary["model_id"],
             "chat_slot_count": len(chat_slots),
+            "removed_model_aliases": removed_aliases,
             "persona": persona_name or None,
             "mcp_server_count": len(mcp_servers),
             "delegation_model": (delegation or {}).get("model"),

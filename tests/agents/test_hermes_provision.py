@@ -2214,6 +2214,78 @@ def test_config_write_phase_writes_yaml_idempotently(
     assert out2.hash == first_hash
 
 
+@pytest.mark.parametrize("remaining_name", [None, "renamed"])
+def test_config_write_prunes_deleted_slot_aliases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, remaining_name: str | None
+) -> None:
+    yaml = pytest.importorskip("yaml")
+    from hal0.agents import personas
+
+    monkeypatch.setattr(personas, "PERSONAS_ROOT", tmp_path / "personas")
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "overrides.yaml")
+    slots = [{"name": "old", "type": "llm", "model": "shared-model"}]
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
+    ctx = hp._StepCtx(
+        state=state,
+        io=hp.InstallIO(
+            fetch_slots=lambda: slots,
+            fetch_model_contexts=lambda: {},
+            run=fake_hermes_run(),
+        ),
+    )
+    first = hp._phase_config_write(ctx)
+    assert first.status == hp.PhaseStatus.OK
+    path = Path(first.details["config_path"])
+    data = yaml.safe_load(path.read_text())
+    old = data["model_aliases"]["old"]
+    assert data["hal0"]["model_aliases"] == {"old": old}
+    # Identical values are not evidence of ownership: a hand-added alias and
+    # a pre-tracking alias both survive even when they resemble hal0's output.
+    data["model_aliases"].update(manual=dict(old), untracked=dict(old))
+    path.write_text(yaml.safe_dump(data))
+    slots.clear()
+    if remaining_name:
+        slots.append({"name": remaining_name, "type": "llm", "model": "shared-model"})
+    second = hp._phase_config_write(ctx)
+    assert second.status == hp.PhaseStatus.OK
+    assert second.details["removed_model_aliases"] == ["old"]
+    data = yaml.safe_load(path.read_text())
+    expected = {"manual": old, "untracked": old}
+    if remaining_name:
+        expected[remaining_name] = old
+    assert data["model_aliases"] == expected
+    assert set(data["hal0"]["model_aliases"]) == ({remaining_name} if remaining_name else set())
+    again = hp._phase_config_write(ctx)
+    assert again.hash == second.hash
+    assert again.details["changed"] is False
+
+
+def test_prune_model_aliases_preserves_operator_edits(tmp_path: Path) -> None:
+    yaml = pytest.importorskip("yaml")
+    path = tmp_path / "config.yaml"
+    previous = {"model": "old-model", "provider": "custom", "base_url": "gateway"}
+    edited = {**previous, "model": "operator-model"}
+    path.write_text(
+        yaml.safe_dump(
+            {"model_aliases": {"old": edited}, "hal0": {"model_aliases": {"old": previous}}}
+        )
+    )
+    assert hp._prune_model_aliases_yaml(path, []) == ([], None)
+    data = yaml.safe_load(path.read_text())
+    assert data["model_aliases"] == {"old": edited}
+    assert data["hal0"]["model_aliases"] == {}
+
+
+@pytest.mark.parametrize("text", ["model_aliases: [unclosed", "[]", "hal0: false"])
+def test_prune_model_aliases_reports_bad_yaml_without_writing(tmp_path: Path, text: str) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(text)
+    removed, error = hp._prune_model_aliases_yaml(path, [])
+    assert removed == []
+    assert error is not None
+    assert path.read_text() == text
+
+
 def test_config_write_phase_applies_overrides(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -6090,6 +6162,20 @@ def test_named_profile_memory_timeout_matches_the_default_profile(monkeypatch) -
     assert canonical >= 900
     assert hp._build_profile_mcp_servers("hermes__coder")["hal0-memory"]["timeout"] == canonical
     assert hp._build_brain_profile_mcp_servers()["hal0-memory"]["timeout"] == canonical
+
+
+def test_named_profiles_do_not_write_model_aliases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    yaml = pytest.importorskip("yaml")
+    monkeypatch.setattr("hal0.service_identity.service_key", lambda prefer=None: None)
+    home = _profiles(tmp_path, coder="model_aliases:\n  manual:\n    model: chosen\n", bare="{}\n")
+    report = hp.wire_named_profiles(home)
+    assert report["errors"] == {}
+    coder = yaml.safe_load((home / "profiles" / "coder" / "config.yaml").read_text())
+    bare = yaml.safe_load((home / "profiles" / "bare" / "config.yaml").read_text())
+    assert coder["model_aliases"] == {"manual": {"model": "chosen"}}
+    assert "model_aliases" not in bare
 
 
 def test_wire_named_profiles_refuses_a_symlinked_profiles_root(tmp_path: Path, monkeypatch) -> None:
