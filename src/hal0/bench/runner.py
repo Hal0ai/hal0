@@ -51,7 +51,6 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import re
 import secrets
 import signal
 import subprocess
@@ -64,6 +63,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from hal0.hardware.gpu_name import gpu_display_name
 
 from . import harness
 from .adapters import guidellm, llama_benchy
@@ -262,20 +263,18 @@ def fetch_host(api: str = DEFAULT_API, exclusive: bool = True) -> Host:
 
 
 def _friendly_gpu(hw: dict) -> str:
-    """A display GPU label. hal0's ``gpu_name`` is a raw PCI string ("… Device
-    1586 (rev c1)"); prefer the marketing name that ``cpu_name`` embeds on APUs
-    ("… w/ Radeon 8060S") + the gfx target the platform implies, matching the v1
-    ``Radeon 8060S (gfx1151)`` label the docs already use. Falls back to whatever
-    name is reported."""
-    raw = hw.get("gpu_name") or ""
+    """A display GPU label: the shared display name for the probed GPU, plus the
+    gfx target a Strix Halo box implies, matching the v1 ``Radeon 8060S
+    (gfx1151)`` label the docs already use."""
     gpus = hw.get("gpus") or []
-    name = (gpus[0].get("name") if gpus and isinstance(gpus[0], dict) else "") or raw
-    if "Radeon" in name and "Device" not in name:
-        return name
-    m = re.search(r"Radeon\s+[0-9A-Za-z]+", hw.get("cpu_name") or "")
-    if m:
-        gfx = " (gfx1151)" if hw.get("platform") == "strix-halo" else ""
-        return f"{m.group(0)}{gfx}"
+    raw = (
+        (gpus[0].get("name") if gpus and isinstance(gpus[0], dict) else "")
+        or hw.get("gpu_name")
+        or ""
+    )
+    name = gpu_display_name(raw, cpu_model=hw.get("cpu_name") or "")
+    if name.startswith("Radeon") and hw.get("platform") == "strix-halo":
+        return f"{name} (gfx1151)"
     return name
 
 

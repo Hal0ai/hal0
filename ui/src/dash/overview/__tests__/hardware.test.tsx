@@ -5,6 +5,7 @@ import React from 'react'
 import { createRoot } from 'react-dom/client'
 import { act } from 'react-dom/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { normalizeHardware } from '@/api/hooks/useHardware'
 
 ;(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true
 ;(globalThis as any).React = React
@@ -33,7 +34,16 @@ const OvHardware = (window as any).OvHardware as React.ComponentType<{ onGo: (id
 let host: HTMLDivElement
 let root: ReturnType<typeof createRoot>
 
-const GPU_HW = { computeCapable: true, vulkanCapable: true, gpu: 'Radeon 8060S', cores: '16c · 32t', npu: { present: true } }
+const GPU_HW = {
+  computeCapable: true,
+  vulkanCapable: true,
+  gpu: 'Radeon 8060S',
+  gpuDisplayName: 'Radeon 8060S',
+  cores: '16c · 32t',
+  npu: { present: true },
+}
+const PCI = 'Advanced Micro Devices, Inc. [AMD/ATI] Device 1586 (rev c1)'
+const STRIX_PAYLOAD = { gpu_name: PCI, gpus: [{ name: PCI, compute_capable: true }], cpu_cores: 16, cpu_threads: 32, npu: { present: true } }
 
 function render() {
   act(() => root.render(<OvHardware onGo={() => {}} />))
@@ -68,6 +78,19 @@ describe('OvHardware', () => {
     expect(row('disk').textContent).toContain('/var/lib/hal0 · floor 0.5 GB')
     expect(row('npu').textContent).toContain('no FLM slot loaded')
     expect(row('npu').textContent).toContain('idle')
+  })
+
+  it('captions the GPU row with the display name, not the raw PCI string (#3156)', () => {
+    hw = normalizeHardware({ ...STRIX_PAYLOAD, gpu_display_name: 'Radeon 8060S' })
+    render()
+    expect(row('gpu').textContent).toContain('Radeon 8060S · 0.6 GHz · 47°C · 33 W')
+    expect(host.textContent).not.toContain('Device 1586')
+  })
+
+  it('falls back to the raw probe name when the server sends no display name (#3156)', () => {
+    hw = normalizeHardware(STRIX_PAYLOAD)
+    render()
+    expect(row('gpu').textContent).toContain(`${PCI} · 0.6 GHz`)
   })
 
   it('draws a sparkline on the GPU row after two data updates', () => {

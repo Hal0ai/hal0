@@ -87,6 +87,32 @@ def test_flatten_pass_through_kvm_with_virtio_gpu() -> None:
     assert flat["npu_present"] is False
 
 
+def test_flatten_adds_a_gpu_display_name_beside_the_raw_pci_string() -> None:
+    """#3156: ``gpu_name`` stays the probe's raw string (diagnostics read it);
+    ``gpu_display_name`` is the short label every dashboard surface shows."""
+    info = HardwareInfo(
+        cpu_model="AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+        gpus=[
+            GPUInfo(
+                vendor="amd",
+                name="Advanced Micro Devices, Inc. [AMD/ATI] Device 1586 (rev c1)",
+            )
+        ],
+        npu=NPUInfo(present=True),
+        platform="strix-halo",
+    ).model_dump(mode="python")
+    flat = _flatten_for_ui(info)
+    assert flat["gpu_name"] == "Advanced Micro Devices, Inc. [AMD/ATI] Device 1586 (rev c1)"
+    assert flat["gpu_display_name"] == "Radeon 8060S"
+
+
+def test_flatten_gpu_display_name_is_empty_without_a_gpu() -> None:
+    info = HardwareInfo(
+        cpu_model="AMD EPYC 7763", gpus=[], platform="bare-metal-cpu-only"
+    ).model_dump(mode="python")
+    assert _flatten_for_ui(info)["gpu_display_name"] == ""
+
+
 def test_flatten_passes_through_kfd_present() -> None:
     """``kfd_present`` is a top-level HardwareInfo field (host-truth ROCm
     feasibility signal, matching the backend's own

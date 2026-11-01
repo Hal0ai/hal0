@@ -16,7 +16,10 @@ export interface Hardware {
   platformLabel: string
   cpu: string
   cores: string
+  /** The probe's raw GPU string; on AMD an lspci line such as "… Device 1586 (rev c1)". */
   gpu: string
+  /** The label to show an operator: the server's `gpu_display_name`, or `gpu` when it sends none. */
+  gpuDisplayName: string
   gpuVendor: string
   computeCapable: boolean
   vulkanCapable: boolean
@@ -71,6 +74,7 @@ export function normalizeHardware(raw: any): Hardware {
   const cores = Number(raw?.cpu_cores ?? 0)
   const threads = Number(raw?.cpu_threads ?? cores)
   const gpu0 = raw?.gpus?.[0] ?? {}
+  const gpu = raw?.gpu_name ?? gpu0?.name ?? raw?.gpu ?? ''
   const npu = raw?.npu ?? {}
   // Legacy display-shape (e2e mock-data + HAL0_DATA seed expose ram:{}).
   const ram = raw?.ram ?? {}
@@ -82,7 +86,8 @@ export function normalizeHardware(raw: any): Hardware {
     platformLabel: raw?.platform_label ?? raw?.platform ?? '',
     cpu: raw?.cpu_model ?? raw?.cpu_name ?? raw?.cpu ?? '',
     cores: cores ? `${cores}c · ${threads}t` : (raw?.cores ?? ''),
-    gpu: raw?.gpu_name ?? gpu0?.name ?? raw?.gpu ?? '',
+    gpu,
+    gpuDisplayName: raw?.gpu_display_name || gpu,
     gpuVendor: raw?.gpu_vendor ?? gpu0?.vendor ?? '',
     // `compute_capable` alone is a HOST rocminfo probe — false on a box
     // where /dev/kfd is passed through but rocminfo isn't installed on the
