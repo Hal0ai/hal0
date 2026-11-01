@@ -1894,8 +1894,8 @@ async def _boot_publish_runtime(app: FastAPI, ctx: BootState) -> None:
     app.state.audit_epoch = ctx.audit_epoch
     # Operator Board: thin audited proxy client to the Hermes kanban plugin
     # (loopback :9119). Constructed once per process; the board router funnels
-    # every /api/board/* call through it. Resolves HERMES_DASHBOARD_BASE_URL +
-    # the Hermes session bearer (env HERMES_SESSION_TOKEN) from from_env().
+    # every /api/board/* call through it. Resolves HERMES_DASHBOARD_BASE_URL
+    # from from_env(); the session bearer is read from the shim's token file.
     from hal0.board import HermesKanbanClient
 
     ctx.hermes_kanban = HermesKanbanClient.from_env()
