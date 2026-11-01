@@ -63,6 +63,7 @@ def _full_slot(i: int, *, state: str = "ready") -> dict[str, Any]:
                 "speculation": "profile",
             },
             "reasoning_effort_unavailable": None,
+            "tune_unavailable": {},
         },
         "runtime": "container",
         "container_status": "running",

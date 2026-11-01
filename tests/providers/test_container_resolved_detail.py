@@ -17,6 +17,7 @@ from hal0.providers.container import (
     _spec_provider_for,
     resolved_argv_detail_for_slot,
     resolved_command_for_slot,
+    tune_effective_for_slot,
 )
 
 
@@ -145,3 +146,72 @@ def test_detail_for_a_llama_server_family_profile_is_unchanged() -> None:
     assert detail is not None
     assert "--model" in detail["argv"]
     assert detail["provenance"]
+
+
+# ── halogen: tune_effective is built without the llama resolver ──────────────
+
+
+def _halogen_slot(**kw: Any) -> dict[str, Any]:
+    cfg: dict[str, Any] = {
+        "name": "flash",
+        "port": 8099,
+        "device": "gpu-rocm",
+        "type": "llm",
+        "runtime": "container",
+        "profile": "halogen",
+        "model": {"default": "qwen3.8-flash-next-ht43"},
+    }
+    cfg.update(kw)
+    return cfg
+
+
+def test_tune_effective_for_halogen_slot_has_unavailable_speculation(tmp_hal0_home: str) -> None:
+    te = tune_effective_for_slot(_halogen_slot())
+    assert te is not None
+    assert set(te) == {
+        "ctx_size",
+        "enable_thinking",
+        "reasoning_effort",
+        "reasoning_budget",
+        "vision",
+        "speculation",
+        "sources",
+        "reasoning_effort_unavailable",
+        "tune_unavailable",
+    }
+    assert te["ctx_size"] == 262144 and te["sources"]["ctx_size"] == "profile"
+    assert te["vision"] == "auto" and te["speculation"] == "auto"
+    assert te["reasoning_effort_unavailable"] is None
+    assert te["tune_unavailable"] == {
+        "speculation": "ngram: this engine has no n-gram drafter (auto or off)"
+    }
+
+
+def test_tune_effective_for_halogen_slot_applies_the_slot_tune(tmp_hal0_home: str) -> None:
+    te = tune_effective_for_slot(_halogen_slot(tune={"ctx_size": 65536, "speculation": "off"}))
+    assert te is not None
+    assert (te["ctx_size"], te["sources"]["ctx_size"]) == (65536, "slot")
+    assert (te["speculation"], te["sources"]["speculation"]) == ("off", "slot")
+
+
+def test_tune_effective_for_halogen_slot_none_when_profile_missing(tmp_hal0_home: str) -> None:
+    assert tune_effective_for_slot(_halogen_slot(profile="no-such")) is None
+
+
+def test_tune_effective_for_llama_slot_carries_empty_tune_unavailable() -> None:
+    cfg = {
+        "profile": "p",
+        "port": 8101,
+        "device": "gpu-rocm",
+        "model": {"default": "m"},
+    }
+    with (
+        patch("hal0.providers.container._resolve_profile", return_value=_profile()),
+        patch(
+            "hal0.providers.container._best_effort_model_info",
+            return_value={"_model_key": "m", "path": "m"},
+        ),
+    ):
+        te = tune_effective_for_slot(cfg)
+    assert te is not None
+    assert te["tune_unavailable"] == {}

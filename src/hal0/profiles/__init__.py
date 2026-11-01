@@ -255,7 +255,9 @@ class ProfileCatalog:
     def create(self, name: str, profile: ProfileConfig) -> ResolvedProfile:
         self._validate_name(name)
         profile = profile.model_copy(update={"runner": screen_profile_runner(profile.runner)})
-        screen_profile_flags(profile.flags, runtime_family=_runtime_family(name, profile))
+        family = _runtime_family(name, profile)
+        screen_profile_speculation(name, profile.speculation, runtime_family=family)
+        screen_profile_flags(profile.flags, runtime_family=family)
         with self._lock:
             catalog = load_profiles_config(self._path)
             if name in catalog.profile:
@@ -317,7 +319,12 @@ class ProfileCatalog:
             # flags only when the patch moves the profile to another family, so a
             # tune-only edit still works on a profile holding stale flags.
             family = _runtime_family(name, updated)
-            if patch.flags is not None or family != _runtime_family(name, existing):
+            family_moved = family != _runtime_family(name, existing)
+            # Speculation follows the same rule as flags: a patch that carries it
+            # is always screened, a stored value only when the family moves.
+            if patch.speculation is not None or family_moved:
+                screen_profile_speculation(name, updated.speculation, runtime_family=family)
+            if patch.flags is not None or family_moved:
                 screen_profile_flags(updated.flags, runtime_family=family)
             catalog.profile[name] = updated
             save_profiles_config(catalog, self._path)
@@ -535,6 +542,25 @@ def runner_runtime_family(runner: str | None) -> RuntimeFamily | None:
 
     spec = RUNNER_IMAGES.get(runner.strip())
     return spec.runtime_family if spec is not None else None
+
+
+def screen_profile_speculation(
+    name: str, speculation: str | None, *, runtime_family: str | None
+) -> None:
+    """Refuse a speculation mode the profile's engine cannot run.
+
+    The halogen engine drafts with its own MTP heads (``auto``) or not at all
+    (``off``); it has no n-gram lookup, so ``speculation = "ngram"`` is refused
+    on a halogen-family profile (``profiles.speculation_unsupported``). Every
+    mode stands on the llama-server family.
+    """
+    if runtime_family == "halogen" and speculation == "ngram":
+        raise UnprocessableEntity(
+            f"profile {name!r}: speculation 'ngram' is not available on the halogen engine "
+            "(it takes 'auto' or 'off')",
+            code="profiles.speculation_unsupported",
+            details={"profile": name, "speculation": "ngram", "runtime_family": "halogen"},
+        )
 
 
 def screen_profile_flags(flags: str | None, *, runtime_family: str | None = None) -> None:

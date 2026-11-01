@@ -36,6 +36,13 @@ from hal0.errors import UnprocessableEntity
 #: Engine context window in tokens when no profile ``ctx_size`` narrows it.
 HALOGEN_NATIVE_CTX = 262144
 
+#: Tune values the engine cannot honour, keyed by tune key: the slot's
+#: ``tune_effective.tune_unavailable`` read shape. The engine drafts with its
+#: own MTP heads (``auto``) or not at all (``off``); it has no n-gram lookup.
+HALOGEN_TUNE_UNAVAILABLE: dict[str, str] = {
+    "speculation": "ngram: this engine has no n-gram drafter (auto or off)",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class EngineKnob:

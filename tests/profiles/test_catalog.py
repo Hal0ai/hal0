@@ -776,3 +776,38 @@ def test_update_without_flags_and_without_a_family_change_never_screens(
     edited = catalog.update("keeps-working", ProfilePatch(intent="still editable"))
     assert edited.intent == "still editable"
     assert edited.flags == "-fa on -dev ROCm0"
+
+
+# ── halogen has no n-gram drafter: the profile refuses ``speculation = "ngram"`` ──
+
+
+def test_catalog_refuses_ngram_on_halogen_profile(tmp_hal0_home: str) -> None:
+    catalog = ProfileCatalog()
+    with pytest.raises(UnprocessableEntity) as exc:
+        catalog.create(
+            "flash-ngram",
+            ProfileConfig(flags=_HALOGEN_FLAGS, runner="halogen", speculation="ngram"),
+        )
+    assert exc.value.code == "profiles.speculation_unsupported"
+    assert exc.value.details["runtime_family"] == "halogen"
+    assert "flash-ngram" not in {p.name for p in catalog.list()}
+
+    # auto and off are the two modes the engine takes.
+    for mode in ("auto", "off"):
+        catalog.create(
+            f"flash-{mode}",
+            ProfileConfig(flags=_HALOGEN_FLAGS, runner="halogen", speculation=mode),
+        )
+
+    # The family is the MERGED profile's: an ngram patch on a halogen profile is
+    # refused, and so is moving an ngram llama profile onto halogen.
+    with pytest.raises(UnprocessableEntity) as exc:
+        catalog.update("flash-auto", ProfilePatch(speculation="ngram"))
+    assert exc.value.code == "profiles.speculation_unsupported"
+    assert catalog.resolve("flash-auto").speculation == "auto"
+
+    catalog.create("llama-ngram", ProfileConfig(flags="-fa on", speculation="ngram"))
+    with pytest.raises(UnprocessableEntity) as exc:
+        catalog.update("llama-ngram", ProfilePatch(runner="halogen", flags=_HALOGEN_FLAGS))
+    assert exc.value.code == "profiles.speculation_unsupported"
+    assert catalog.resolve("llama-ngram").runtime_family == "llama-server"

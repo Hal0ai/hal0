@@ -232,7 +232,8 @@ def guard_tune_write(
 
     No-op without a ``tune`` update, and a clear (``tune`` is None) is never
     refused. ``profile`` is None when the caller could not resolve it, which
-    skips the flag-pin check.
+    skips the flag-pin check and the engine-family check (a halogen slot has no
+    n-gram drafter, so ``speculation = "ngram"`` is refused there).
     """
     if "tune" not in updates or updates["tune"] is None:
         return
@@ -246,6 +247,16 @@ def guard_tune_write(
             details={"type": merged_type, "device": merged_device},
         )
     tune = updates["tune"]
+    wants_speculation = (
+        tune.get("speculation") if isinstance(tune, Mapping) else getattr(tune, "speculation", None)
+    )
+    runtime_family = getattr(profile, "runtime_family", None)
+    if runtime_family == "halogen" and wants_speculation == "ngram":
+        raise BadRequest(
+            "speculation 'ngram' is not available on the halogen engine (it takes auto or off)",
+            code="slot.tune_unsupported_value",
+            details={"key": "speculation", "value": "ngram", "runtime_family": "halogen"},
+        )
     wants_thinking = (
         tune.get("enable_thinking")
         if isinstance(tune, Mapping)

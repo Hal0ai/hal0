@@ -1865,7 +1865,13 @@ def _resolve_llama_scalars(
         "spec_plan": spec.as_dict(),
         "profile_reasoning": profile_reasoning,
         "slot_reasoning": slot_reasoning,
-        "tune_effective": {**tune.as_dict(), "reasoning_effort_unavailable": effort_unavailable},
+        "tune_effective": {
+            **tune.as_dict(),
+            "reasoning_effort_unavailable": effort_unavailable,
+            # llama-server takes every tune value; the key is always present so a
+            # reader never has to tell "none" from "this engine does not say".
+            "tune_unavailable": {},
+        },
         "lane_device": lane_device(effective_backend),
         "draft_device": (
             lane_device(effective_backend)
@@ -3246,13 +3252,42 @@ def _resolve_slot_argv(
 def tune_effective_for_slot(
     slot_cfg: dict[str, Any], model_path: str | None = None
 ) -> dict[str, Any] | None:
-    """The slot's ``tune_effective`` read shape, from the launch resolver's scalars.
+    """The slot's ``tune_effective`` read shape.
+
+    A llama-server slot reads it from the launch resolver's scalars. A halogen
+    slot has no llama scalars (``_resolve_preview_bundle`` is llama-only), so
+    its shape is built from :func:`~hal0.slots.tune.effective_tune` directly:
+    the same keys, ``reasoning_effort_unavailable`` ``None`` (the engine has no
+    runner build gate), and ``tune_unavailable`` naming the values the engine
+    cannot run (:data:`~hal0.runners.knobs.HALOGEN_TUNE_UNAVAILABLE`).
 
     ``None`` when the slot's profile does not resolve (best-effort, like the
     other preview helpers).
     """
+    if _is_halogen_slot(slot_cfg):
+        from hal0.runners.knobs import HALOGEN_TUNE_UNAVAILABLE
+
+        try:
+            profile = resolve_slot_profile(slot_cfg)
+        except Exception:
+            return None
+        return {
+            **effective_tune(slot_cfg, profile).as_dict(),
+            "reasoning_effort_unavailable": None,
+            "tune_unavailable": dict(HALOGEN_TUNE_UNAVAILABLE),
+        }
     bundle = _resolve_preview_bundle(slot_cfg, model_path)
     return bundle[1].get("tune_effective") if bundle else None
+
+
+def _is_halogen_slot(slot_cfg: dict[str, Any]) -> bool:
+    """Whether the launch dispatch gives this slot the halogen provider."""
+    from hal0.providers.halogen import HalogenProvider
+
+    try:
+        return isinstance(_spec_provider_for(slot_cfg), HalogenProvider)
+    except UnknownRuntimeFamilyError:
+        return False
 
 
 def resolved_argv_detail_for_slot(
