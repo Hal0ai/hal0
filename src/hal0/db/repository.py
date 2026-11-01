@@ -92,19 +92,6 @@ MODEL_COLUMNS: tuple[str, ...] = (
     "extra",
 )
 
-#: The tuning columns this row used to carry moved to profiles (ADR-0029; SQL
-#: migration 012 copies them to a holding table for the conversion). The file
-#: facts ``chat_template``/``mtp``/``jinja`` keep their columns; ``mtp``/``jinja``
-#: are tri-state (NULL/0/1 -> None/False/True).
-#
-# HAL0-SUNSET: v1.8.0 — the table still has the tuning columns (profile,
-# extra_args, n_gpu_layers, context_size, rope_freq_base, preferred_runner)
-# and ``extra`` may still hold ``_enable_thinking``/``_vision``. Nothing here
-# reads or writes them; they stay so a rollback to a release before ADR-0029
-# finds the schema it expects. Drop them with a new migration once the
-# upgrade floor is past the release that shipped migration 012.
-_RETIRED_TUNING_EXTRA_KEYS: tuple[str, ...] = ("_enable_thinking", "_vision")
-
 
 def now_iso() -> str:
     """ISO-8601 UTC timestamp — matches the ``activity``/``bench`` convention."""
@@ -381,8 +368,6 @@ def row_to_model(row: sqlite3.Row, *, backends: list[str] | None = None) -> Mode
     provider = raw_provider if isinstance(raw_provider, str) else None
     default = bool(metadata.pop(_DEFAULT_EXTRA_KEY, False))
     raw_tokenizer_repo = metadata.pop(_TOKENIZER_REPO_EXTRA_KEY, None)
-    for key in _RETIRED_TUNING_EXTRA_KEYS:
-        metadata.pop(key, None)
 
     tokenizer_repo = (
         raw_tokenizer_repo if isinstance(raw_tokenizer_repo, str) and raw_tokenizer_repo else None
