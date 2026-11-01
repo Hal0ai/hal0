@@ -78,18 +78,40 @@ def _refused(request: httpx.Request) -> httpx.Response:
     raise httpx.ConnectError("connection refused")
 
 
+# Probes the watcher must have made before a hang is judged. A /health that was
+# counted as a strike would stamp ERROR after the second probe and the
+# re-verification under the lock (the refused-connection test below: 3 probes,
+# then ERROR) and the watcher would stop, so a fourth probe is proof the hang
+# was tolerated, not just that it had not been caught yet.
+_PROBES_PAST_THE_STRIKES = 4
+
+# Only reached when the watcher stops probing (the failure this test exists to
+# catch), never on the passing path: the wait below ends on the probes, not on
+# elapsed time, so a loaded host only makes it slower, never wrong.
+_PROBE_WAIT_CEILING_S = 15.0
+
+
 async def test_a_hanging_health_never_stamps_error_on_a_ready_slot(provider: _RealHealth) -> None:
     calls = {"n": 0}
+    enough = asyncio.Event()
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls["n"] += 1
+        if calls["n"] >= _PROBES_PAST_THE_STRIKES:
+            enough.set()
         return _hangs(request)
 
     sm = SlotManager()
     with _http(handler):
         await _ready(sm)
-        await asyncio.sleep(0.3)
-    assert calls["n"] >= 2, "the watcher must have probed more than the strike count"
+        try:
+            await asyncio.wait_for(enough.wait(), timeout=_PROBE_WAIT_CEILING_S)
+        except TimeoutError:
+            pytest.fail(
+                f"the watcher stopped probing after {calls['n']} probes; "
+                f"the slot is {sm.state('chat')}"
+            )
+    assert calls["n"] >= _PROBES_PAST_THE_STRIKES, "the watcher must have probed past the strikes"
     assert sm.state("chat") is SlotState.READY
     await sm._transition("chat", SlotState.OFFLINE, force=True)
 
