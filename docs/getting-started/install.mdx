@@ -143,13 +143,13 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash -s -- --no-start --models-dir
 | `--models-dir=PATH` | Absolute path where Hugging Face pulls land (same as `HAL0_MODELS_DIR`) |
 | `--summary-json=PATH` | Write a versioned, machine-readable install summary to `PATH` once the install finishes (see below) |
 | `--no-owui` | Skip Open WebUI (same as `HAL0_SKIP_OPENWEBUI=1`) |
-| `--no-comfyui` | Skip the starter image models (same as `HAL0_IMAGE_MODELS=none`); the `img` slot still exists, parked |
-| `--no-hermes` | Skip the Hermes agent (same as `HAL0_SKIP_HERMES=1`) |
+| `--no-comfyui` | Skip the starter image models (same as `HAL0_IMAGE_MODELS=none`); the `img` slot still exists, parked. Left on, the installer offers the starter image-model menu, whose default is none, so Enter downloads nothing |
+| `--no-hermes` | Skip the Hermes agent and the Operator Board that goes with it (same as `HAL0_SKIP_HERMES=1`) |
 | `--no-pi` | Skip the Pi agent (same as `HAL0_SKIP_PI=1`) |
 | `--no-agents` | Skip both agents; same as `--no-hermes --no-pi` |
 | `--no-memory` | Skip the Hindsight memory service (same as `HAL0_SKIP_HINDSIGHT=1`) |
 | `--no-brain-model` | Skip the brain model pull (same as `HAL0_SKIP_BRAIN_MODEL=1`) |
-| `--bare`, `--bare-inference` | Synonyms: turn every optional component above off |
+| `--bare`, `--bare-inference` | Synonyms: turn every optional component above off. On a terminal a bare install still asks for the models dir, the Hugging Face token and the optional agent model `[y/N]`; set `HAL0_PULL_AGENT_MODEL=0` and `HAL0_NONINTERACTIVE=1` for a prompt-free bare install |
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -169,14 +169,17 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash -s -- --no-start --models-dir
 ### Choosing components
 
 On an interactive fresh install the installer shows a checklist of the six
-optional components before it starts:
+optional components before it installs them:
 
 - Open WebUI: on
-- ComfyUI (starter image models): on
+- ComfyUI (starter image models): on (the starter image-model menu is offered; its default is none, so Enter downloads nothing)
 - Hermes agent: on
 - Pi agent: off
 - Hindsight memory: on
 - Brain model: on
+
+Flags and the checklist apply at install time only. They never remove a
+component that is already installed.
 
 Pick a preset: `a` keeps the defaults, `b` is bare inference (everything off),
 `p` lets you pick row by row. Enter alone is `a`. A row whose precondition
@@ -184,12 +187,20 @@ fails on this machine is shown greyed with the reason and cannot be turned on.
 
 The checklist does not appear on an upgrade, with `--dev` or `--no-start`,
 without a terminal, with `HAL0_NONINTERACTIVE=1`, or when you pass any
-component flag; those installs use the flags and variables above. Each
-skipped component prints the command that installs it later:
+component flag; those installs use the flags and variables above.
+
+Like every other installer prompt, the checklist needs stdin to be a terminal.
+`curl … | sudo bash` never shows it, even when typed at a terminal: stdin is
+the pipe, so the install takes the defaults. To get the checklist, download the
+script and run `sudo bash install.sh`, or pass the flags above.
+
+To add a skipped component later:
 `hal0 app install openwebui`, `hal0 agent install hermes`,
-`hal0 agent install pi`, `hal0 comfyui models install <id>`, and
+`sudo hal0 agent install pi`, `hal0 comfyui models install <id>`, and
 `hal0 model pull <id>` for the brain model. Hindsight memory has no deferred
-install command; re-run the installer to add it.
+install command; re-run the installer to add it. A re-run also re-enables
+every other component you skipped unless you repeat the opt-outs, for example
+`sudo bash install.sh --no-owui --no-comfyui --no-hermes --no-pi --no-brain-model`.
 
 ### Install log and failure reports
 
@@ -211,7 +222,7 @@ sudo bash installer/install.sh --summary-json=/tmp/hal0-install-summary.json
 
 Writes a `schema: "hal0.install-summary.v1"` JSON document — hal0 version,
 `--dev`/`--no-start` flags, models dir, network bind info, the detected
-hardware class, which brain model was pulled, a warning/error count, and
+hardware class, which brain model was pulled, the `components` map, a warning/error count, and
 measured per-step durations — atomically, so a script polling for the file
 never reads a half-written one. Full field reference and an example payload
 are in `installer/README.md`.

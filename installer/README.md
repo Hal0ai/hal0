@@ -220,7 +220,11 @@ sudo bash installer/install.sh --summary-json=/tmp/hal0-install-summary.json
 
 `components` maps each component id (`openwebui`, `comfyui`, `hermes`, `pi`,
 `hindsight`, `brain`) to `"selected"`, `"skipped"` or `"unavailable:<reason>"`;
-the example shows three of the six. It is additive to schema
+the example shows three of the six. `selected` records the operator's choice
+at install time, not the outcome: a later step may still skip or fail (see
+`warnings`). `skipped` means opted out by flag, env or checklist.
+`unavailable:<reason>` means the checklist could not offer it; headless runs
+report it only for Hindsight. It is additive to schema
 `hal0.install-summary.v1`, so the schema version does not change.
 
 `hardware_class` reads `/etc/hal0/hardware.json` — `id` is its `platform`

@@ -185,7 +185,7 @@ Full step list and the complete env-var table:
 | `--no-pi` / `HAL0_SKIP_PI=1` | Skip the Pi agent (`HAL0_INSTALL_PI=1` installs it unattended) |
 | `--no-memory` / `HAL0_SKIP_HINDSIGHT=1` | Skip the Hindsight memory service |
 | `--no-agents` | Same as `--no-hermes --no-pi` |
-| `--bare` (or `--bare-inference`) | Turn every optional component off: inference only |
+| `--bare` (or `--bare-inference`) | Turn every optional component off: inference only. On a terminal it still asks for the models dir, the Hugging Face token and the optional agent model `[y/N]`; set `HAL0_PULL_AGENT_MODEL=0` and `HAL0_NONINTERACTIVE=1` for a prompt-free bare install |
 | `--no-start` | Provision everything, leave services stopped |
 | `--summary-json=PATH` | Write a versioned, machine-readable install summary (see [`installer/README.md`](./installer/README.md#--summary-jsonpath)) |
 
