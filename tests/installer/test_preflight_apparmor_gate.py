@@ -22,11 +22,19 @@ required) covering:
   non-zero (hard die path preserved)
 * an unrelated `<rt> run` failure never triggers remediation (existing
   keyring/LXC branches stay untouched)
+
+#3234 adds a second branch for the unprivileged-LXC ``socket: permission
+denied`` shape (the guest's own ``flags=(unconfined)`` AppArmor profiles):
+the gate disables them via the same bare-script helper and re-smokes, and the
+``lxc-unprivileged`` fallback no longer names a missing ``features:
+nesting=1`` as the sole cause: it lists nesting as ONE candidate among the
+guest-AppArmor, keyring-quota and subuid causes, each with its check.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import stat
 import subprocess
 from pathlib import Path
@@ -46,7 +54,7 @@ def _write_exec(path: Path, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
 
-def _fake_podman(tmp_path: Path, *, fail_calls: int, fail_stderr: str) -> None:
+def _fake_podman(tmp_path: Path, *, fail_calls: int, fail_stderr: str, fail_rc: int = 243) -> None:
     """A ``podman`` shim: fails (with ``fail_stderr``) for the first
     ``fail_calls`` invocations of ``run``, then succeeds forever after.
     Call count is tracked in a state file so both the outer bash smoke test
@@ -68,11 +76,18 @@ n=$((n + 1))
 echo "$n" > {counter!s}
 if [[ "$n" -le {fail_calls} ]]; then
     echo {fail_stderr!r} >&2
-    exit 243
+    exit {fail_rc}
 fi
 exit 0
 """,
     )
+
+
+def _ns_level_file(tmp_path: Path, value: str = "1", name: str = "ns_level") -> Path:
+    """The ``.ns_level`` stand-in: >0 = nested AppArmor policy namespace (#3234)."""
+    f = tmp_path / name
+    f.write_text(f"{value}\n")
+    return f
 
 
 def _run_gate(tmp_path: Path, env_overrides: dict[str, str]) -> tuple[int, str]:
@@ -89,6 +104,11 @@ def _run_gate(tmp_path: Path, env_overrides: dict[str, str]) -> tuple[int, str]:
         "REPO_ROOT": str(_REPO_ROOT),
         "PY": os.environ.get("HAL0_PYTHON", "python3"),
         "HAL0_APPARMOR_CONF": str(tmp_path / "containers.conf"),
+        # Never let a gate test touch the real /etc/apparmor.d (#3234).
+        "HAL0_APPARMOR_D": str(tmp_path / "apparmor.d"),
+        # Pretend to be inside a nested AppArmor policy namespace unless a test
+        # overrides it; never depend on the machine running the suite.
+        "HAL0_APPARMOR_NS_LEVEL_FILE": str(_ns_level_file(tmp_path)),
         **env_overrides,
     }
     proc = subprocess.run(
@@ -144,7 +164,10 @@ def test_apparmor_remediation_resolves_helper_path_without_repo_root(tmp_path: P
 
 def test_unrelated_failure_does_not_trigger_apparmor_remediation(tmp_path: Path) -> None:
     _fake_podman(tmp_path, fail_calls=10_000, fail_stderr="Error: unable to pull image: not found")
-    rc, output = _run_gate(tmp_path, {})
+    # Pin the platform: the lxc-unprivileged fallback legitimately points at
+    # `aa-status` / apparmor logs (#3234), so the assertion below is only
+    # meaningful for the generic arm.
+    rc, output = _run_gate(tmp_path, {"HAL0_LXC_KIND_OVERRIDE": "none"})
     assert rc != 0, output
     assert "apparmor" not in output.lower()
     assert not (tmp_path / "containers.conf").exists()
@@ -195,3 +218,403 @@ def test_signature_matcher_rejects_unrelated_output() -> None:
     )
     proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
     assert proc.returncode != 0
+
+
+# ── #3234: unprivileged-LXC guest `flags=(unconfined)` profiles ──────────────
+
+_SOCKET_DENIED_STDERR = "Error: netavark: failed to create socket: socket: permission denied"
+_PROFILE_NAMES = ("podman", "crun", "buildah", "runc", "rootlesskit", "slirp4netns")
+_NESTING_HINT = "features: nesting=1"
+
+
+def _fake_apparmor_parser(tmp_path: Path, *, rc: int = 0) -> Path:
+    """An ``apparmor_parser`` shim that logs its argv and exits ``rc``."""
+    log = tmp_path / "apparmor_parser.log"
+    _write_exec(tmp_path / "apparmor_parser", f'echo "$@" >> {log!s}\nexit {rc}')
+    return log
+
+
+def _seed_profiles(apparmor_d: Path, names: tuple[str, ...] = _PROFILE_NAMES) -> None:
+    apparmor_d.mkdir(parents=True, exist_ok=True)
+    for n in names:
+        (apparmor_d / n).write_text(
+            f"profile {n} /usr/bin/{n} flags=(unconfined) {{\n  userns,\n}}\n"
+        )
+
+
+def test_socket_denied_guest_profiles_disabled_and_gate_passes(tmp_path: Path) -> None:
+    # Outer smoke (1) and the helper's first smoke (2) hit the socket denial;
+    # after the six profiles are disabled the helper's retry (3) and the
+    # gate's own re-verify (4) pass.
+    _fake_podman(tmp_path, fail_calls=2, fail_stderr=_SOCKET_DENIED_STDERR, fail_rc=126)
+    parser_log = _fake_apparmor_parser(tmp_path)
+    aa = tmp_path / "apparmor.d"
+    _seed_profiles(aa)
+
+    rc, output = _run_gate(tmp_path, {"HAL0_LXC_KIND_OVERRIDE": "lxc-unprivileged"})
+
+    assert rc == 0, output
+    assert "apparmor remediation applied" in output
+    assert _NESTING_HINT not in output
+    for n in _PROFILE_NAMES:
+        link = aa / "disable" / n
+        assert link.is_symlink(), output
+        assert Path(os.readlink(link)) == aa / n
+    assert parser_log.read_text().splitlines() == [f"-R {aa / n}" for n in _PROFILE_NAMES]
+    # The #1563 containers.conf fix must not fire for this signature.
+    assert not (tmp_path / "containers.conf").exists()
+    # The success line ends with the revert command for what was disabled.
+    for n in _PROFILE_NAMES:
+        assert f"rm {aa}/disable/{n} && apparmor_parser -r {aa}/{n}" in output
+    assert "continuing install (revert: rm " in output
+
+
+def test_socket_denied_without_profile_files_is_not_the_3234_case(tmp_path: Path) -> None:
+    # The helper ran to completion and found no flags=(unconfined) files: say so
+    # and point at the other causes; do NOT print the manual disable loop.
+    _fake_podman(tmp_path, fail_calls=10_000, fail_stderr=_SOCKET_DENIED_STDERR, fail_rc=126)
+    parser_log = _fake_apparmor_parser(tmp_path)
+    aa = tmp_path / "apparmor.d"
+    aa.mkdir()
+
+    rc, output = _run_gate(tmp_path, {"HAL0_LXC_KIND_OVERRIDE": "lxc-unprivileged"})
+
+    assert rc != 0, output
+    assert "runtime can't actually launch a container" in output
+    assert "socket: permission denied" in output
+    assert "typically caused by" in output
+    assert "no guest unconfined profiles present — this is not the #3234 case" in output
+    assert "ln -sf" not in output  # no manual loop when the helper completed
+    assert "THIS container" not in output
+    for hint in ("aa-status", "journalctl -k | grep apparmor", "/proc/key-users", "/etc/subuid"):
+        assert hint in output
+    assert _NESTING_HINT not in output
+    assert "pct stop" not in output
+    assert not (aa / "disable").exists()
+    assert not parser_log.exists()  # nothing to unload -> parser never called
+
+
+def test_socket_denied_helper_missing_prints_guarded_manual_loop(tmp_path: Path) -> None:
+    # The helper script cannot be located (it never ran): the manual remedy is
+    # the only way forward, and it must be guarded so running it on a profile
+    # that is NOT unconfined is a no-op.
+    _fake_podman(tmp_path, fail_calls=10_000, fail_stderr=_SOCKET_DENIED_STDERR, fail_rc=126)
+    rc, output = _run_gate(
+        tmp_path,
+        {"HAL0_LXC_KIND_OVERRIDE": "lxc-unprivileged", "REPO_ROOT": str(tmp_path / "norepo")},
+    )
+
+    assert rc != 0, output
+    assert "can't locate" in output
+    assert "did not run or did not complete" in output
+    assert "mkdir -p /etc/apparmor.d/disable" in output
+    # the printed guard ignores comments (mirrors the python comment stripping)
+    assert "grep -q '^[^#]*flags=(unconfined)'" in output
+    assert "grep -q 'flags=(unconfined)'" not in output
+    assert "apparmor_parser -R" in output
+    for n in _PROFILE_NAMES:
+        assert n in output
+    assert "THIS container" not in output
+    assert "profiles are marked disabled" not in output
+    assert _NESTING_HINT not in output
+
+
+def test_socket_denied_retry_still_failing_is_a_hard_failure(tmp_path: Path) -> None:
+    # Profiles exist and get disabled, but podman still can't open a socket:
+    # the gate re-smokes itself and must stay red (bash never trusts the helper).
+    _fake_podman(tmp_path, fail_calls=10_000, fail_stderr=_SOCKET_DENIED_STDERR, fail_rc=126)
+    _fake_apparmor_parser(tmp_path)
+    aa = tmp_path / "apparmor.d"
+    _seed_profiles(aa)
+
+    rc, output = _run_gate(tmp_path, {"HAL0_LXC_KIND_OVERRIDE": "lxc-unprivileged"})
+
+    assert rc != 0, output
+    assert "runtime can't actually launch a container" in output
+    assert _NESTING_HINT not in output
+    # The helper completed and symlinked the profiles, so the manual loop would
+    # be wrong. But a symlink is not proof they were UNLOADED (the helper creates
+    # the link before `apparmor_parser -R` and tolerates a failed unload), so the
+    # gate must not assert the cause is elsewhere: it says they are marked
+    # disabled and tells the operator how to check and unload by hand.
+    assert "profiles are marked disabled" in output
+    assert "'aa-status'" in output
+    assert "the unload failed" in output
+    assert f"apparmor_parser -R {aa}/<p>" in output
+    assert "profiles already disabled; the cause is elsewhere" not in output
+    assert "ln -sf" not in output
+    assert f"revert: rm {aa}/disable/podman && apparmor_parser -r {aa}/podman" in output
+    for hint in ("aa-status", "journalctl -k | grep apparmor", "/proc/key-users", "/etc/subuid"):
+        assert hint in output
+    # the refreshed (post-remediation) smoke output is printed, labelled as such
+    assert "after remediation" in output
+
+
+def test_apparmor_1563_signature_keeps_precedence_over_socket_denied(tmp_path: Path) -> None:
+    # Output carrying BOTH shapes goes down the #1563 branch (containers.conf),
+    # never the guest-profile one.
+    _fake_podman(
+        tmp_path,
+        fail_calls=2,
+        fail_stderr=f"{_APPARMOR_STDERR} socket: permission denied",
+    )
+    _fake_apparmor_parser(tmp_path)
+    aa = tmp_path / "apparmor.d"
+    _seed_profiles(aa)
+
+    rc, output = _run_gate(tmp_path, {})
+
+    assert rc == 0, output
+    assert "AppArmor profile-load failure detected" in output
+    assert "typically caused by" not in output  # the #3234 branch did not run
+    assert (tmp_path / "containers.conf").exists()
+    assert not (aa / "disable").exists()
+
+
+def test_lxc_unprivileged_fallback_lists_causes_not_nesting_as_sole_cause(tmp_path: Path) -> None:
+    # An unrelated failure on an unprivileged LXC. `podman info` CAN pass
+    # without `features: nesting=1` while every `podman run` fails (that is
+    # this arm's reason to exist), so nesting is neither claimed proven nor the
+    # sole cause: it is one listed candidate next to AppArmor, keyring and
+    # subuid, each with its check.
+    _fake_podman(tmp_path, fail_calls=10_000, fail_stderr="Error: crun: something odd")
+    rc, output = _run_gate(tmp_path, {"HAL0_LXC_KIND_OVERRIDE": "lxc-unprivileged"})
+
+    assert rc != 0, output
+    assert "crun: something odd" in output  # smoke output is printed
+    assert "podman info works but 'podman run' fails" in output
+    # the old sole-cause sentence and any "nesting is proven" claim are gone
+    assert "this needs 'features: nesting=1'" not in output
+    assert "nesting is already" not in output
+    assert "proven" not in output
+    # nesting is still offered, as one candidate with its host-side check
+    assert _NESTING_HINT in output
+    assert "/etc/pve/lxc/<CTID>.conf" in output
+    assert "pct stop <CTID>" in output
+    # host-neutral: Proxmox is one example, Incus/LXD another
+    assert "container HOST" in output
+    assert "security.nesting=true" in output
+    for hint in ("aa-status", "journalctl -k | grep apparmor", "/proc/key-users", "/etc/subuid"):
+        assert hint in output
+
+
+def test_lxc_privileged_and_keyring_arms_unchanged(tmp_path: Path) -> None:
+    _fake_podman(tmp_path, fail_calls=10_000, fail_stderr="Error: crun: something odd")
+    rc, output = _run_gate(tmp_path, {"HAL0_LXC_KIND_OVERRIDE": "lxc-privileged"})
+    assert rc != 0, output
+    assert "set 'features: nesting=1,keyctl=1,fuse=1,mknod=1'" in output
+
+    keyring_dir = tmp_path / "keyring"
+    keyring_dir.mkdir()
+    _fake_podman(
+        keyring_dir,
+        fail_calls=10_000,
+        fail_stderr="crun: create keyring `x`: Disk quota exceeded",
+        fail_rc=126,
+    )
+    rc, output = _run_gate(keyring_dir, {"HAL0_LXC_KIND_OVERRIDE": "lxc-unprivileged"})
+    assert rc != 0, output
+    assert "kernel keyring quota exhausted" in output
+    assert "AppArmor" not in output
+    assert "nesting is already" not in output
+
+
+def test_printed_manual_loop_guard_ignores_comments(tmp_path: Path) -> None:
+    # G1: run the PRINTED grep against real files. A profile that only mentions
+    # the flag in a comment (an enforced profile the operator tightened) must NOT
+    # match, or an operator pasting the loop would disable it.
+    _fake_podman(tmp_path, fail_calls=10_000, fail_stderr=_SOCKET_DENIED_STDERR, fail_rc=126)
+    _, output = _run_gate(
+        tmp_path,
+        {"HAL0_LXC_KIND_OVERRIDE": "lxc-unprivileged", "REPO_ROOT": str(tmp_path / "norepo")},
+    )
+    m = re.search(r"grep -q '([^']*flags=\(unconfined\))' /etc/apparmor\.d/", output)
+    assert m, output
+    pattern = m.group(1)
+
+    def _matches(text: str) -> bool:
+        f = tmp_path / "profile"
+        f.write_text(text)
+        return subprocess.run(["grep", "-q", pattern, str(f)]).returncode == 0
+
+    assert _matches("profile podman /usr/bin/podman flags=(unconfined) {\n  userns,\n}\n")
+    assert _matches("profile crun /usr/bin/crun flags=(unconfined) { # stub\n}\n")
+    assert not _matches(
+        "# was flags=(unconfined) before the operator tightened it\nprofile x /bin/x {\n}\n"
+    )
+    assert not _matches("profile x /bin/x {  # flags=(unconfined)\n  userns,\n}\n")
+    assert not _matches("profile x /bin/x flags=(complain) {\n}\n")
+
+
+def test_unload_failure_is_surfaced_and_the_gate_stays_red(tmp_path: Path) -> None:
+    # G3: `apparmor_parser -R` exits 1 for every profile and podman never
+    # recovers. The helper's summary names the profiles whose unload failed (it
+    # is printed above the gate's own diagnosis), and the gate says the profiles
+    # are only MARKED disabled instead of claiming the cause is elsewhere.
+    _fake_podman(tmp_path, fail_calls=10_000, fail_stderr=_SOCKET_DENIED_STDERR, fail_rc=126)
+    _fake_apparmor_parser(tmp_path, rc=1)
+    aa = tmp_path / "apparmor.d"
+    _seed_profiles(aa, ("podman", "crun"))
+
+    rc, output = _run_gate(tmp_path, {"HAL0_LXC_KIND_OVERRIDE": "lxc-unprivileged"})
+
+    assert rc != 0, output
+    assert "unload failed: podman, crun" in output  # the helper's own summary
+    assert (aa / "disable" / "podman").is_symlink()
+    assert "profiles are marked disabled" in output
+    assert f"apparmor_parser -R {aa}/<p>" in output
+    assert "profiles already disabled; the cause is elsewhere" not in output
+    # checks list and revert hint are kept
+    for hint in ("aa-status", "journalctl -k | grep apparmor", "/proc/key-users", "/etc/subuid"):
+        assert hint in output
+    assert f"revert: rm {aa}/disable/podman && apparmor_parser -r {aa}/podman" in output
+
+
+def test_unload_failure_but_podman_recovers_still_passes(tmp_path: Path) -> None:
+    # The unload failed but `podman run` works (the symlink + a reload will do):
+    # exit semantics are unchanged, the gate passes.
+    _fake_podman(tmp_path, fail_calls=2, fail_stderr=_SOCKET_DENIED_STDERR, fail_rc=126)
+    _fake_apparmor_parser(tmp_path, rc=1)
+    _seed_profiles(tmp_path / "apparmor.d", ("podman",))
+
+    rc, output = _run_gate(tmp_path, {"HAL0_LXC_KIND_OVERRIDE": "lxc-unprivileged"})
+
+    assert rc == 0, output
+    assert "apparmor remediation applied" in output
+    assert "unload failed: podman" in output
+
+
+def _fake_podman_phased(tmp_path: Path, *, first_stderr: str, later_stderr: str) -> None:
+    """A ``podman`` shim whose FIRST ``run`` prints ``first_stderr`` and every
+    later ``run`` prints ``later_stderr`` (all exit 126)."""
+    counter = tmp_path / "podman-calls"
+    _write_exec(
+        tmp_path / "podman",
+        f"""
+if [[ "$1" != "run" ]]; then
+    exit 0
+fi
+n=0
+[[ -f {counter!s} ]] && n=$(cat {counter!s})
+n=$((n + 1))
+echo "$n" > {counter!s}
+if [[ "$n" -le 1 ]]; then
+    echo {first_stderr!r} >&2
+else
+    echo {later_stderr!r} >&2
+fi
+exit 126
+""",
+    )
+
+
+def test_changed_failure_after_remediation_falls_through_to_the_keyring_arm(
+    tmp_path: Path,
+) -> None:
+    # I2: the first smoke shows the socket denial; after the helper runs, the
+    # re-smoke fails DIFFERENTLY (keyring quota). The gate must print the NEW
+    # output and diagnose it with the existing keyring arm, not the stale
+    # AppArmor remedy.
+    _fake_podman_phased(
+        tmp_path,
+        first_stderr=_SOCKET_DENIED_STDERR,
+        later_stderr="crun: create keyring `x`: Disk quota exceeded",
+    )
+    _fake_apparmor_parser(tmp_path)
+    _seed_profiles(tmp_path / "apparmor.d")
+
+    rc, output = _run_gate(tmp_path, {"HAL0_LXC_KIND_OVERRIDE": "lxc-unprivileged"})
+
+    assert rc != 0, output
+    assert "kernel keyring quota exhausted" in output
+    assert "Disk quota exceeded" in output
+    assert "ln -sf" not in output  # the AppArmor manual loop is not printed
+    assert "profiles are marked disabled" not in output
+    assert "no guest unconfined profiles present" not in output
+    assert _NESTING_HINT not in output
+
+
+def test_root_apparmor_namespace_skips_the_3234_branch_entirely(tmp_path: Path) -> None:
+    # Bare metal / privileged container (.ns_level=0): those flags=(unconfined)
+    # stubs are the userns grant. Neither the bash branch nor the helper may run,
+    # and nothing on disk may change; the generic LXC arm diagnoses instead.
+    _fake_podman(tmp_path, fail_calls=10_000, fail_stderr=_SOCKET_DENIED_STDERR, fail_rc=126)
+    parser_log = _fake_apparmor_parser(tmp_path)
+    aa = tmp_path / "apparmor.d"
+    _seed_profiles(aa)
+    zero = _ns_level_file(tmp_path, "0", name="ns_level_zero")
+
+    rc, output = _run_gate(
+        tmp_path,
+        {"HAL0_LXC_KIND_OVERRIDE": "lxc-privileged", "HAL0_APPARMOR_NS_LEVEL_FILE": str(zero)},
+    )
+
+    assert rc != 0, output
+    assert "apparmor remediation" not in output
+    assert "typically caused by" not in output
+    assert "apparmor-preflight" not in output  # the helper never ran
+    assert not (aa / "disable").exists()
+    assert not parser_log.exists()
+    assert "set 'features: nesting=1,keyctl=1,fuse=1,mknod=1'" in output  # generic privileged arm
+
+
+@pytest.mark.parametrize("value", ["abc", ""])
+def test_unparseable_ns_level_skips_the_3234_branch(tmp_path: Path, value: str) -> None:
+    _fake_podman(tmp_path, fail_calls=10_000, fail_stderr=_SOCKET_DENIED_STDERR, fail_rc=126)
+    _seed_profiles(tmp_path / "apparmor.d")
+    bad = _ns_level_file(tmp_path, value, name="ns_level_bad")
+    rc, output = _run_gate(
+        tmp_path,
+        {"HAL0_LXC_KIND_OVERRIDE": "none", "HAL0_APPARMOR_NS_LEVEL_FILE": str(bad)},
+    )
+    assert rc != 0, output
+    assert "typically caused by" not in output
+    assert not (tmp_path / "apparmor.d" / "disable").exists()
+
+
+def _matcher_rc(tmp_path: Path, blob: str, ns_value: str | None = "1") -> int:
+    script = (
+        f"set -uo pipefail\nsource {_PREFLIGHT!s}\n_is_unconfined_profile_network_denial {blob!r}\n"
+    )
+    ns = (
+        tmp_path / "missing_ns"
+        if ns_value is None
+        else _ns_level_file(tmp_path, ns_value, name="ns_for_matcher")
+    )
+    env = {**os.environ, "HAL0_APPARMOR_NS_LEVEL_FILE": str(ns)}
+    return subprocess.run(
+        ["bash", "-c", script], env=env, capture_output=True, text=True
+    ).returncode
+
+
+@pytest.mark.parametrize(
+    "blob",
+    [
+        "Error: netavark: failed to create socket: socket: permission denied",
+        "dial udp 9.9.9.9:53: socket: permission denied",  # verbatim from the issue
+        "dial udp 9.9.9.9:53: SOCKET: PERMISSION DENIED",
+    ],
+)
+def test_socket_denial_matcher_recognizes_known_shapes(tmp_path: Path, blob: str) -> None:
+    assert _matcher_rc(tmp_path, blob) == 0
+
+
+@pytest.mark.parametrize(
+    "blob",
+    [
+        "Error: unable to pull image: not found",
+        # anchored: a path ending in `.socket` is a plain file permission error
+        "Error: open /run/podman/podman.socket: permission denied",
+    ],
+)
+def test_socket_denial_matcher_rejects_other_output(tmp_path: Path, blob: str) -> None:
+    assert _matcher_rc(tmp_path, blob) == 1  # grep no-match, not 127
+
+
+@pytest.mark.parametrize("ns_value", ["0", "abc", "", None])
+def test_socket_denial_matcher_requires_a_nested_namespace(
+    tmp_path: Path, ns_value: str | None
+) -> None:
+    blob = "dial udp 9.9.9.9:53: socket: permission denied"
+    assert _matcher_rc(tmp_path, blob, ns_value) != 0
+    assert _matcher_rc(tmp_path, blob, "2") == 0
