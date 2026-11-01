@@ -45,6 +45,12 @@ metal or a privileged container the very same stubs are the userns grant that
 ``kernel.apparmor_restrict_unprivileged_userns=1`` relies on; disabling them
 would silently and persistently break the operator's own rootless podman. So
 nothing is mutated unless ``.ns_level`` parses as an integer > 0.
+
+The disable symlink and ``apparmor_parser -R`` act on a WHOLE profile file, so a
+file is only touched when EVERY profile block header in it carries
+``flags=(unconfined)`` (see :func:`guest_unconfined_profiles_present`). And a
+symlink is not proof the profile was unloaded: :class:`ApparmorPreflightResult`
+records the profiles whose ``apparmor_parser -R`` failed in ``unload_failed``.
 """
 
 from __future__ import annotations
@@ -185,8 +191,11 @@ class ApparmorPreflightResult:
                           ``socket: permission denied`` inside a nested AppArmor
                           namespace and the guest's ``flags=(unconfined)``
                           profiles were disabled; ``disabled`` lists them,
-                          ``fixed`` says whether the retry smoke passed and
-                          ``detail`` carries the retry's error when it did not.
+                          ``fixed`` says whether the retry smoke passed,
+                          ``unload_failed`` lists the ones whose
+                          ``apparmor_parser -R`` failed (the disable symlink
+                          is in place either way) and ``detail`` carries the
+                          retry's error and/or the unload failures.
                           (A root AppArmor namespace, or no such profile file,
                           yields ``"unrelated"`` with nothing changed.)
     """
@@ -198,6 +207,10 @@ class ApparmorPreflightResult:
     fixed: bool = False
     #: ``guest_profiles_disabled`` only: the profile names that were disabled.
     disabled: list[str] = field(default_factory=list)
+    #: ``guest_profiles_disabled`` only: the subset of ``disabled`` whose
+    #: ``apparmor_parser -R`` failed or could not run, so the profile may still
+    #: be loaded until the next profile reload / reboot.
+    unload_failed: list[str] = field(default_factory=list)
 
 
 def _smoke(run: Callable[..., Any], argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
@@ -226,13 +239,68 @@ def _is_unconfined_profile_network_denial(proc: subprocess.CompletedProcess[str]
     return _SOCKET_DENIED_TOKEN in blob and not _is_apparmor_failure(proc)
 
 
+#: First token of a profile block header, applied to a comment-stripped,
+#: whitespace-stripped line that ends with ``{``: the ``profile`` keyword, a bare
+#: attachment path (``/usr/bin/podman flags=(...) {``) or an attachment variable
+#: (``@{exec_path} {``). ``^hat`` blocks are not profiles of their own (they
+#: belong to the enclosing profile) and rules never end with ``{``.
+_PROFILE_HEADER_START_RE = re.compile(r"(?:profile\s|/|@\{)")
+
+
+def _profile_headers(text: str) -> list[str]:
+    """Profile block headers in ``text``: comment-stripped lines that open a profile.
+
+    A header is a line that, after dropping ``#``-to-end-of-line and surrounding
+    whitespace, ends with ``{`` and starts with ``profile <name>``, a bare
+    ``/path`` or an ``@{var}``. ``include`` / ``abi`` / rule lines and ``}``
+    lines are not headers. The Ubuntu 24.04 stubs this module targets use
+    ONE-LINE headers (``profile podman /usr/bin/podman flags=(unconfined) {``);
+    a header whose ``{`` sits on a following line is deliberately not recognised
+    (the caller then skips the file rather than guessing).
+    """
+    headers: list[str] = []
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if line.endswith("{") and _PROFILE_HEADER_START_RE.match(line):
+            headers.append(line)
+    return headers
+
+
+def _unconfined_stub_verdict(text: str) -> tuple[bool, str | None]:
+    """``(selected, reason)`` for one profile file's text.
+
+    Selected only when at least one profile header exists and EVERY header
+    carries ``flags=(unconfined)``: disabling acts on the whole file, so a file
+    that also holds an enforced profile must be left alone. ``reason`` explains
+    a skip worth warning about (the file does carry an uncommented
+    ``flags=(unconfined)`` token); it is ``None`` for a selected file and for a
+    plain enforced profile, which is the normal case and not worth a warning.
+    """
+    if not any(_UNCONFINED_FLAG_TOKEN in raw.split("#", 1)[0] for raw in text.splitlines()):
+        return False, None
+    headers = _profile_headers(text)
+    if not headers:
+        return False, "no one-line profile header found (the '{' must end the header line)"
+    unflagged = [h for h in headers if _UNCONFINED_FLAG_TOKEN not in h]
+    if unflagged:
+        return False, (
+            f"profile header without {_UNCONFINED_FLAG_TOKEN}: '{unflagged[0]}' "
+            "(disabling the file would unload that profile too)"
+        )
+    return True, None
+
+
 def guest_unconfined_profiles_present(apparmor_d: Path) -> list[str]:
     """Names from :data:`GUEST_UNCONFINED_PROFILES` still marked ``flags=(unconfined)``.
 
-    A profile counts only if its file exists under ``apparmor_d`` and an
-    UNCOMMENTED line contains ``flags=(unconfined)`` (``#`` starts a comment to
-    end of line, so a ``# was flags=(unconfined)`` note does not count). Order
-    follows ``GUEST_UNCONFINED_PROFILES``.
+    A profile counts only if its file exists under ``apparmor_d`` and EVERY
+    profile block header in it (comments stripped; ``#`` starts a comment to end
+    of line, so a ``# was flags=(unconfined)`` note does not count) carries
+    ``flags=(unconfined)`` — see :func:`_unconfined_stub_verdict`. The disable
+    symlink and ``apparmor_parser -R`` act on the WHOLE file, so a customised
+    file that holds an enforced profile next to an unconfined one is skipped
+    (logged at warning with the reason) rather than losing the enforced one.
+    Order follows ``GUEST_UNCONFINED_PROFILES``.
     """
     present: list[str] = []
     for name in GUEST_UNCONFINED_PROFILES:
@@ -240,26 +308,34 @@ def guest_unconfined_profiles_present(apparmor_d: Path) -> list[str]:
             text = (apparmor_d / name).read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        if any(_UNCONFINED_FLAG_TOKEN in line.split("#", 1)[0] for line in text.splitlines()):
+        selected, reason = _unconfined_stub_verdict(text)
+        if selected:
             present.append(name)
+        elif reason is not None:
+            log.warning("containers_apparmor.profile_skipped", profile=name, reason=reason)
     return present
 
 
-def disable_guest_unconfined_profiles(apparmor_d: Path, run: Callable[..., Any]) -> list[str]:
-    """Disable every present guest unconfined profile; return the names handled.
+def _disable_guest_unconfined_profiles(
+    apparmor_d: Path, run: Callable[..., Any]
+) -> tuple[list[str], list[str]]:
+    """Disable every present guest unconfined profile; return ``(names, unload_failed)``.
 
     Per profile: ``<apparmor_d>/disable/<name>`` becomes a symlink to
     ``<apparmor_d>/<name>`` (an existing link or file is replaced), then
     ``apparmor_parser -R <profile>`` unloads it. A non-zero parser exit — or a
-    missing ``apparmor_parser`` — is logged at warning and ignored: the symlink
-    already makes the disable persistent across reboots, and the caller re-smokes.
-    Idempotent.
+    missing ``apparmor_parser`` — is logged at warning, recorded in the second
+    list and otherwise ignored: the symlink already makes the disable persistent
+    across reboots, and the caller re-smokes. The link is created BEFORE the
+    unload, so ``names`` alone does not prove the profile is no longer loaded;
+    ``unload_failed`` is the subset that may still be. Idempotent.
     """
     names = guest_unconfined_profiles_present(apparmor_d)
     if not names:
-        return []
+        return [], []
     disable_dir = apparmor_d / "disable"
     disable_dir.mkdir(parents=True, exist_ok=True)
+    unload_failed: list[str] = []
     for name in names:
         link = disable_dir / name
         if link.is_symlink() or link.exists():
@@ -273,6 +349,7 @@ def disable_guest_unconfined_profiles(apparmor_d: Path, run: Callable[..., Any])
             )
         except FileNotFoundError:
             log.warning("containers_apparmor.parser_missing", profile=name)
+            unload_failed.append(name)
             continue
         if proc.returncode != 0:
             log.warning(
@@ -281,9 +358,19 @@ def disable_guest_unconfined_profiles(apparmor_d: Path, run: Callable[..., Any])
                 rc=proc.returncode,
                 err=(proc.stderr or proc.stdout or "").strip()[:200],
             )
+            unload_failed.append(name)
         else:
             log.info("containers_apparmor.disabled_guest_profile", profile=name)
-    return names
+    return names, unload_failed
+
+
+def disable_guest_unconfined_profiles(apparmor_d: Path, run: Callable[..., Any]) -> list[str]:
+    """Disable every present guest unconfined profile; return the names handled.
+
+    See :func:`_disable_guest_unconfined_profiles` (which also reports the
+    profiles whose unload failed). Idempotent.
+    """
+    return _disable_guest_unconfined_profiles(apparmor_d, run)[0]
 
 
 def _apparmor_already_unconfined(conf_path: Path) -> bool:
@@ -392,7 +479,7 @@ def _remediate_guest_unconfined_profiles(
             ),
         )
     root = apparmor_d if apparmor_d is not None else apparmor_d_root()
-    names = disable_guest_unconfined_profiles(root, run)
+    names, unload_failed = _disable_guest_unconfined_profiles(root, run)
     if not names:
         return ApparmorPreflightResult(
             outcome="unrelated",
@@ -404,11 +491,17 @@ def _remediate_guest_unconfined_profiles(
         )
     retry = _smoke(run, smoke_argv)
     fixed = retry.returncode == 0
+    parts: list[str] = []
+    if not fixed:
+        parts.append((retry.stderr or retry.stdout or "").strip()[:200])
+    if unload_failed:
+        parts.append(f"unload failed: {', '.join(unload_failed)}")
     return ApparmorPreflightResult(
         outcome="guest_profiles_disabled",
-        detail=None if fixed else (retry.stderr or retry.stdout or "").strip()[:200],
+        detail="; ".join(p for p in parts if p) or None,
         fixed=fixed,
         disabled=names,
+        unload_failed=unload_failed,
     )
 
 
@@ -432,8 +525,10 @@ def ensure_podman_apparmor_usable(
        ``/sys/kernel/security/apparmor/.ns_level``) is an integer > 0, disable
        the guest's ``flags=(unconfined)`` podman-family AppArmor profiles under
        ``apparmor_d`` (default ``HAL0_APPARMOR_D`` / ``/etc/apparmor.d``) and
-       retry once → ``guest_profiles_disabled`` (``fixed`` = retry passed). A
-       root AppArmor namespace or no such profile present → ``unrelated``,
+       retry once → ``guest_profiles_disabled`` (``fixed`` = retry passed;
+       ``unload_failed`` = profiles whose ``apparmor_parser -R`` failed). A file
+       is only disabled when EVERY profile header in it is ``flags=(unconfined)``.
+       A root AppArmor namespace or no such profile present → ``unrelated``,
        nothing changed, no retry.
 
     Idempotent: a second call on a converged box re-smokes, passes, and returns
@@ -517,10 +612,13 @@ def _main() -> int:
         revert = "; ".join(
             f"rm {root}/disable/{n} && apparmor_parser -r {root}/{n}" for n in result.disabled
         )
+        unload = (
+            f"; unload failed: {', '.join(result.unload_failed)}" if result.unload_failed else ""
+        )
         # ASCII only: this prints before a UTF-8 stdout is guaranteed.
         print(
             f"apparmor remediation applied: disabled guest profiles {', '.join(result.disabled)}"
-            f" - {verdict}; revert: {revert}"
+            f" - {verdict}{unload}; revert: {revert}"
         )
     return 1 if result.outcome == "retry_failed" else 0
 

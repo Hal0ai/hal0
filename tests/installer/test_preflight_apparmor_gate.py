@@ -34,6 +34,7 @@ guest-AppArmor, keyring-quota and subuid causes, each with its check.
 from __future__ import annotations
 
 import os
+import re
 import stat
 import subprocess
 from pathlib import Path
@@ -226,10 +227,10 @@ _PROFILE_NAMES = ("podman", "crun", "buildah", "runc", "rootlesskit", "slirp4net
 _NESTING_HINT = "features: nesting=1"
 
 
-def _fake_apparmor_parser(tmp_path: Path) -> Path:
-    """An ``apparmor_parser`` shim that logs its argv and exits 0."""
+def _fake_apparmor_parser(tmp_path: Path, *, rc: int = 0) -> Path:
+    """An ``apparmor_parser`` shim that logs its argv and exits ``rc``."""
     log = tmp_path / "apparmor_parser.log"
-    _write_exec(tmp_path / "apparmor_parser", f'echo "$@" >> {log!s}\nexit 0')
+    _write_exec(tmp_path / "apparmor_parser", f'echo "$@" >> {log!s}\nexit {rc}')
     return log
 
 
@@ -307,12 +308,14 @@ def test_socket_denied_helper_missing_prints_guarded_manual_loop(tmp_path: Path)
     assert "can't locate" in output
     assert "did not run or did not complete" in output
     assert "mkdir -p /etc/apparmor.d/disable" in output
-    assert "grep -q 'flags=(unconfined)'" in output
+    # the printed guard ignores comments (mirrors the python comment stripping)
+    assert "grep -q '^[^#]*flags=(unconfined)'" in output
+    assert "grep -q 'flags=(unconfined)'" not in output
     assert "apparmor_parser -R" in output
     for n in _PROFILE_NAMES:
         assert n in output
     assert "THIS container" not in output
-    assert "profiles already disabled" not in output
+    assert "profiles are marked disabled" not in output
     assert _NESTING_HINT not in output
 
 
@@ -329,9 +332,16 @@ def test_socket_denied_retry_still_failing_is_a_hard_failure(tmp_path: Path) -> 
     assert rc != 0, output
     assert "runtime can't actually launch a container" in output
     assert _NESTING_HINT not in output
-    # The helper completed and disabled the profiles, so the manual loop would
-    # be wrong: say the cause is elsewhere and print the revert one-liner.
-    assert "profiles already disabled; the cause is elsewhere" in output
+    # The helper completed and symlinked the profiles, so the manual loop would
+    # be wrong. But a symlink is not proof they were UNLOADED (the helper creates
+    # the link before `apparmor_parser -R` and tolerates a failed unload), so the
+    # gate must not assert the cause is elsewhere: it says they are marked
+    # disabled and tells the operator how to check and unload by hand.
+    assert "profiles are marked disabled" in output
+    assert "'aa-status'" in output
+    assert "the unload failed" in output
+    assert f"apparmor_parser -R {aa}/<p>" in output
+    assert "profiles already disabled; the cause is elsewhere" not in output
     assert "ln -sf" not in output
     assert f"revert: rm {aa}/disable/podman && apparmor_parser -r {aa}/podman" in output
     for hint in ("aa-status", "journalctl -k | grep apparmor", "/proc/key-users", "/etc/subuid"):
@@ -409,6 +419,71 @@ def test_lxc_privileged_and_keyring_arms_unchanged(tmp_path: Path) -> None:
     assert "nesting is already" not in output
 
 
+def test_printed_manual_loop_guard_ignores_comments(tmp_path: Path) -> None:
+    # G1: run the PRINTED grep against real files. A profile that only mentions
+    # the flag in a comment (an enforced profile the operator tightened) must NOT
+    # match, or an operator pasting the loop would disable it.
+    _fake_podman(tmp_path, fail_calls=10_000, fail_stderr=_SOCKET_DENIED_STDERR, fail_rc=126)
+    _, output = _run_gate(
+        tmp_path,
+        {"HAL0_LXC_KIND_OVERRIDE": "lxc-unprivileged", "REPO_ROOT": str(tmp_path / "norepo")},
+    )
+    m = re.search(r"grep -q '([^']*flags=\(unconfined\))' /etc/apparmor\.d/", output)
+    assert m, output
+    pattern = m.group(1)
+
+    def _matches(text: str) -> bool:
+        f = tmp_path / "profile"
+        f.write_text(text)
+        return subprocess.run(["grep", "-q", pattern, str(f)]).returncode == 0
+
+    assert _matches("profile podman /usr/bin/podman flags=(unconfined) {\n  userns,\n}\n")
+    assert _matches("profile crun /usr/bin/crun flags=(unconfined) { # stub\n}\n")
+    assert not _matches(
+        "# was flags=(unconfined) before the operator tightened it\nprofile x /bin/x {\n}\n"
+    )
+    assert not _matches("profile x /bin/x {  # flags=(unconfined)\n  userns,\n}\n")
+    assert not _matches("profile x /bin/x flags=(complain) {\n}\n")
+
+
+def test_unload_failure_is_surfaced_and_the_gate_stays_red(tmp_path: Path) -> None:
+    # G3: `apparmor_parser -R` exits 1 for every profile and podman never
+    # recovers. The helper's summary names the profiles whose unload failed (it
+    # is printed above the gate's own diagnosis), and the gate says the profiles
+    # are only MARKED disabled instead of claiming the cause is elsewhere.
+    _fake_podman(tmp_path, fail_calls=10_000, fail_stderr=_SOCKET_DENIED_STDERR, fail_rc=126)
+    _fake_apparmor_parser(tmp_path, rc=1)
+    aa = tmp_path / "apparmor.d"
+    _seed_profiles(aa, ("podman", "crun"))
+
+    rc, output = _run_gate(tmp_path, {"HAL0_LXC_KIND_OVERRIDE": "lxc-unprivileged"})
+
+    assert rc != 0, output
+    assert "unload failed: podman, crun" in output  # the helper's own summary
+    assert (aa / "disable" / "podman").is_symlink()
+    assert "profiles are marked disabled" in output
+    assert f"apparmor_parser -R {aa}/<p>" in output
+    assert "profiles already disabled; the cause is elsewhere" not in output
+    # checks list and revert hint are kept
+    for hint in ("aa-status", "journalctl -k | grep apparmor", "/proc/key-users", "/etc/subuid"):
+        assert hint in output
+    assert f"revert: rm {aa}/disable/podman && apparmor_parser -r {aa}/podman" in output
+
+
+def test_unload_failure_but_podman_recovers_still_passes(tmp_path: Path) -> None:
+    # The unload failed but `podman run` works (the symlink + a reload will do):
+    # exit semantics are unchanged, the gate passes.
+    _fake_podman(tmp_path, fail_calls=2, fail_stderr=_SOCKET_DENIED_STDERR, fail_rc=126)
+    _fake_apparmor_parser(tmp_path, rc=1)
+    _seed_profiles(tmp_path / "apparmor.d", ("podman",))
+
+    rc, output = _run_gate(tmp_path, {"HAL0_LXC_KIND_OVERRIDE": "lxc-unprivileged"})
+
+    assert rc == 0, output
+    assert "apparmor remediation applied" in output
+    assert "unload failed: podman" in output
+
+
 def _fake_podman_phased(tmp_path: Path, *, first_stderr: str, later_stderr: str) -> None:
     """A ``podman`` shim whose FIRST ``run`` prints ``first_stderr`` and every
     later ``run`` prints ``later_stderr`` (all exit 126)."""
@@ -454,7 +529,7 @@ def test_changed_failure_after_remediation_falls_through_to_the_keyring_arm(
     assert "kernel keyring quota exhausted" in output
     assert "Disk quota exceeded" in output
     assert "ln -sf" not in output  # the AppArmor manual loop is not printed
-    assert "profiles already disabled" not in output
+    assert "profiles are marked disabled" not in output
     assert "no guest unconfined profiles present" not in output
     assert _NESTING_HINT not in output
 

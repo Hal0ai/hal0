@@ -780,7 +780,9 @@ _container_runtime_gate() {
                 warn "  then re-run install.sh:"
                 warn "    mkdir -p /etc/apparmor.d/disable"
                 warn "    for p in podman crun buildah runc rootlesskit slirp4netns; do"
-                warn "      grep -q 'flags=(unconfined)' /etc/apparmor.d/\$p 2>/dev/null || continue"
+                # '^[^#]*' keeps a "# was flags=(unconfined)" comment from matching
+                # (mirrors the comment stripping in containers_apparmor.py).
+                warn "      grep -q '^[^#]*flags=(unconfined)' /etc/apparmor.d/\$p 2>/dev/null || continue"
                 warn "      ln -sf /etc/apparmor.d/\$p /etc/apparmor.d/disable/\$p"
                 warn "      apparmor_parser -R /etc/apparmor.d/\$p"
                 warn "    done"
@@ -788,7 +790,15 @@ _container_runtime_gate() {
                 warn "  Causes seen, with the check for each:"
                 _warn_runtime_run_failure_checks "${rt}"
             elif [[ -n "${revert_hint}" ]]; then
-                warn "  profiles already disabled; the cause is elsewhere. Causes seen, with the check for each:"
+                # A symlink under disable/ proves the profile is MARKED disabled,
+                # not that it was UNLOADED: the helper links first, then runs
+                # `apparmor_parser -R`, and tolerates that failing (or the parser
+                # being absent). So do not claim the cause is elsewhere.
+                warn "  the profiles are marked disabled (symlinked under ${HAL0_APPARMOR_D:-/etc/apparmor.d}/disable/), but ${rt} run"
+                warn "  still fails. If 'aa-status' still lists any of them the unload failed (the output above says"
+                warn "  'unload failed: ...' when the helper saw it) — run 'apparmor_parser -R ${HAL0_APPARMOR_D:-/etc/apparmor.d}/<p>'"
+                warn "  by hand for each listed profile, then re-run install.sh. If none are listed they are unloaded"
+                warn "  and the cause is elsewhere. Causes seen, with the check for each:"
                 _warn_runtime_run_failure_checks "${rt}"
                 warn "  if disabling them was not wanted, revert: ${revert_hint}"
             else

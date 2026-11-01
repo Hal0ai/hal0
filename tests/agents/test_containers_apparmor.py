@@ -559,3 +559,300 @@ def test_commented_out_unconfined_flag_does_not_count(tmp_path: Path) -> None:
         "profile crun /usr/bin/crun flags=(unconfined) { # trailing comment\n  userns,\n}\n"
     )
     assert ca.guest_unconfined_profiles_present(aa) == ["crun"]
+
+
+# ── Greptile round: whole-file safety, unload outcome ────────────────────────
+#
+# The disable symlink and `apparmor_parser -R` act on a WHOLE profile file, so a
+# file is only selected when EVERY profile block header in it carries
+# `flags=(unconfined)`. The stock Ubuntu 24.04 stubs have one-line headers
+# (`profile podman /usr/bin/podman flags=(unconfined) {`); a header split across
+# lines is not recognised and the file is skipped (and logged), never guessed.
+
+_STOCK_STUB = (
+    "# This profile allows everything and only exists to give the\n"
+    '# application a name instead of having the label "unconfined"\n'
+    "\n"
+    "abi <abi/4.0>,\n"
+    "include <tunables/global>\n"
+    "\n"
+    "profile podman /usr/bin/podman flags=(unconfined) {\n"
+    "  userns,\n"
+    "\n"
+    "  # Site-specific additions and overrides. See local/README for details.\n"
+    "  include if exists <local/podman>\n"
+    "}\n"
+)
+
+
+class _LogRecorder:
+    """Stand-in for the module logger: records ``(level, event, kw)``."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str, dict]] = []
+
+    def info(self, event: str, **kw) -> None:
+        self.events.append(("info", event, kw))
+
+    def warning(self, event: str, **kw) -> None:
+        self.events.append(("warning", event, kw))
+
+    def warnings(self) -> list[tuple[str, dict]]:
+        return [(e, kw) for lvl, e, kw in self.events if lvl == "warning"]
+
+
+@pytest.fixture
+def _log(monkeypatch) -> _LogRecorder:
+    rec = _LogRecorder()
+    monkeypatch.setattr(ca, "log", rec)
+    return rec
+
+
+def test_stock_stub_is_selected(tmp_path: Path, _log: _LogRecorder) -> None:
+    aa = tmp_path / "apparmor.d"
+    aa.mkdir()
+    (aa / "podman").write_text(_STOCK_STUB)
+    assert ca.guest_unconfined_profiles_present(aa) == ["podman"]
+    assert _log.warnings() == []
+
+
+def test_mixed_enforced_and_unconfined_profiles_in_one_file_is_skipped(
+    tmp_path: Path, _log: _LogRecorder
+) -> None:
+    # Disabling the file would unload the ENFORCED profile too: leave it alone.
+    aa = tmp_path / "apparmor.d"
+    aa.mkdir()
+    (aa / "podman").write_text(
+        _STOCK_STUB + "\nprofile podman-hardened /usr/local/bin/podman-h {\n  userns,\n}\n"
+    )
+    (aa / "crun").write_text(_STOCK_STUB.replace("podman", "crun"))
+
+    assert ca.guest_unconfined_profiles_present(aa) == ["crun"]
+    skipped = [kw for ev, kw in _log.warnings() if ev == "containers_apparmor.profile_skipped"]
+    assert len(skipped) == 1
+    assert skipped[0]["profile"] == "podman"
+    assert "flags=(unconfined)" in skipped[0]["reason"]
+    assert "podman-hardened" in skipped[0]["reason"]
+
+
+def test_mixed_file_is_not_disabled_end_to_end(tmp_path: Path, _log: _LogRecorder) -> None:
+    aa = tmp_path / "apparmor.d"
+    aa.mkdir()
+    (aa / "podman").write_text(_STOCK_STUB + "\nprofile enforced /usr/bin/e {\n  userns,\n}\n")
+    run, calls = _recorder([_proc(126, _SOCKET_DENIED_STDERR)])
+
+    result = ca.ensure_podman_apparmor_usable(run=run, conf_path=tmp_path / "c.conf", apparmor_d=aa)
+
+    assert result.outcome == "unrelated"
+    assert not (aa / "disable").exists()
+    assert len(calls) == 1  # no parser call, no retry
+
+
+def test_every_header_flagged_in_a_multi_profile_file_is_selected(
+    tmp_path: Path, _log: _LogRecorder
+) -> None:
+    aa = tmp_path / "apparmor.d"
+    aa.mkdir()
+    (aa / "runc").write_text(
+        _STOCK_STUB.replace("podman", "runc")
+        + "\nprofile runc-alt /usr/bin/runc-alt flags=(unconfined) {\n  userns,\n}\n"
+    )
+    assert ca.guest_unconfined_profiles_present(aa) == ["runc"]
+
+
+def test_bare_path_header_counts_and_must_carry_the_flag(
+    tmp_path: Path, _log: _LogRecorder
+) -> None:
+    aa = tmp_path / "apparmor.d"
+    aa.mkdir()
+    (aa / "podman").write_text("/usr/bin/podman flags=(unconfined) {\n  userns,\n}\n")
+    (aa / "crun").write_text(
+        "/usr/bin/crun flags=(unconfined) {\n  userns,\n}\n/usr/bin/other {\n  userns,\n}\n"
+    )
+    assert ca.guest_unconfined_profiles_present(aa) == ["podman"]
+
+
+def test_only_profile_block_headers_are_headers() -> None:
+    text = (
+        "abi <abi/4.0>,\n"
+        "include <tunables/global>\n"
+        "include if exists <local/podman>\n"
+        "profile podman /usr/bin/podman flags=(unconfined) {  # trailing comment\n"
+        "  userns,\n"
+        "  network inet stream,\n"
+        "  /etc/{a,b} r,\n"
+        "  # profile commented /usr/bin/x {\n"
+        "}\n"
+    )
+    assert ca._profile_headers(text) == ["profile podman /usr/bin/podman flags=(unconfined) {"]
+    assert ca._profile_headers("include <tunables/global>\n}\n") == []
+
+
+def test_split_header_is_skipped_and_logged_not_guessed(tmp_path: Path, _log: _LogRecorder) -> None:
+    # The stock stubs use one-line headers; a header whose `{` sits on the next
+    # line is not recognised, so the file is skipped (fail safe) with a reason.
+    aa = tmp_path / "apparmor.d"
+    aa.mkdir()
+    (aa / "podman").write_text(
+        "profile podman /usr/bin/podman flags=(unconfined)\n{\n  userns,\n}\n"
+    )
+    assert ca.guest_unconfined_profiles_present(aa) == []
+    skipped = [kw for ev, kw in _log.warnings() if ev == "containers_apparmor.profile_skipped"]
+    assert [kw["profile"] for kw in skipped] == ["podman"]
+    assert "header" in skipped[0]["reason"]
+
+
+def test_enforced_profile_is_skipped_silently(tmp_path: Path, _log: _LogRecorder) -> None:
+    # An ordinary enforced profile is the normal case, not worth a warning.
+    aa = tmp_path / "apparmor.d"
+    _seed_profiles(aa, ("podman",), enforce=("podman",))
+    assert ca.guest_unconfined_profiles_present(aa) == []
+    assert _log.warnings() == []
+
+
+def test_unload_failure_is_recorded_by_name_and_surfaced_in_detail(tmp_path: Path) -> None:
+    aa = tmp_path / "apparmor.d"
+    _seed_profiles(aa, ("podman", "crun", "runc"))
+    # smoke denial; parser: podman ok, crun exits 1, runc exits 1; retry passes
+    run, _ = _recorder(
+        [
+            _proc(126, _SOCKET_DENIED_STDERR),
+            _proc(0),
+            _proc(1, "apparmor_parser: unable to remove"),
+            _proc(1, "apparmor_parser: unable to remove"),
+            _proc(0),
+        ]
+    )
+
+    result = ca.ensure_podman_apparmor_usable(run=run, conf_path=tmp_path / "c.conf", apparmor_d=aa)
+
+    assert result.outcome == "guest_profiles_disabled"
+    assert result.fixed is True
+    assert result.disabled == ["podman", "crun", "runc"]
+    assert result.unload_failed == ["crun", "runc"]
+    assert "unload failed: crun, runc" in (result.detail or "")
+    # symlinks are still in place: the disable persists across reboots
+    for n in ("podman", "crun", "runc"):
+        assert (aa / "disable" / n).is_symlink()
+
+
+def test_missing_parser_counts_as_unload_failed(tmp_path: Path) -> None:
+    aa = tmp_path / "apparmor.d"
+    _seed_profiles(aa, ("podman", "crun"))
+    seen = {"smoke": 0}
+
+    def _run(argv, **_kw):
+        if argv[0] == "apparmor_parser":
+            raise FileNotFoundError("apparmor_parser")
+        seen["smoke"] += 1
+        return _proc(126, _SOCKET_DENIED_STDERR) if seen["smoke"] == 1 else _proc(0)
+
+    result = ca.ensure_podman_apparmor_usable(
+        run=_run, conf_path=tmp_path / "c.conf", apparmor_d=aa
+    )
+
+    assert result.outcome == "guest_profiles_disabled"
+    assert result.unload_failed == ["podman", "crun"]
+
+
+def test_clean_unload_has_no_unload_failed_and_no_detail(tmp_path: Path) -> None:
+    aa = tmp_path / "apparmor.d"
+    _seed_profiles(aa, ("podman",))
+    run, _ = _recorder([_proc(126, _SOCKET_DENIED_STDERR), _proc(0), _proc(0)])
+    result = ca.ensure_podman_apparmor_usable(run=run, conf_path=tmp_path / "c.conf", apparmor_d=aa)
+    assert result.unload_failed == []
+    assert result.detail is None
+
+
+def test_retry_failure_and_unload_failure_are_both_in_detail(tmp_path: Path) -> None:
+    aa = tmp_path / "apparmor.d"
+    _seed_profiles(aa, ("podman",))
+    run, _ = _recorder(
+        [_proc(126, _SOCKET_DENIED_STDERR), _proc(1, "nope"), _proc(126, _SOCKET_DENIED_STDERR)]
+    )
+    result = ca.ensure_podman_apparmor_usable(run=run, conf_path=tmp_path / "c.conf", apparmor_d=aa)
+    assert result.fixed is False
+    assert "socket: permission denied" in (result.detail or "")
+    assert "unload failed: podman" in (result.detail or "")
+
+
+def test_public_disable_helper_still_returns_names_only(tmp_path: Path) -> None:
+    aa = tmp_path / "apparmor.d"
+    _seed_profiles(aa, ("podman", "crun"))
+    run, _ = _recorder([_proc(1, "boom"), _proc(0)])
+    assert ca.disable_guest_unconfined_profiles(aa, run) == ["podman", "crun"]
+
+
+def test_main_summary_lists_unload_failures(monkeypatch, tmp_path: Path, capsys) -> None:
+    aa = tmp_path / "aa"
+    monkeypatch.setenv("HAL0_APPARMOR_D", str(aa))
+    monkeypatch.setenv("HAL0_APPARMOR_CONF", str(tmp_path / "c.conf"))
+
+    def _fake(**_kw):
+        return ca.ApparmorPreflightResult(
+            outcome="guest_profiles_disabled",
+            disabled=["podman", "crun", "runc"],
+            unload_failed=["crun", "runc"],
+            fixed=False,
+            detail="boom; unload failed: crun, runc",
+        )
+
+    monkeypatch.setattr(ca, "ensure_podman_apparmor_usable", _fake)
+    assert ca._main() == 0  # exit semantics unchanged
+    out = capsys.readouterr().out
+    assert "unload failed: crun, runc" in out
+    assert "podman, crun, runc" in out  # the disabled list is still reported
+    assert "—" not in out  # ASCII only
+
+    def _fake_clean(**_kw):
+        return ca.ApparmorPreflightResult(
+            outcome="guest_profiles_disabled", disabled=["podman"], fixed=True
+        )
+
+    monkeypatch.setattr(ca, "ensure_podman_apparmor_usable", _fake_clean)
+    assert ca._main() == 0
+    assert "unload failed" not in capsys.readouterr().out
+
+
+def _exec(path: Path, body: str) -> None:
+    path.write_text(f"#!/usr/bin/env bash\n{body}\n", encoding="utf-8")
+    path.chmod(0o755)
+
+
+def test_main_end_to_end_with_a_failing_apparmor_parser(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    # Real subprocess path: a `podman` shim (denied once, then fine) and an
+    # `apparmor_parser` shim that exits 1.
+    shims = tmp_path / "bin"
+    shims.mkdir()
+    counter = tmp_path / "podman-calls"
+    _exec(
+        shims / "podman",
+        f"""
+n=0
+[[ -f {counter!s} ]] && n=$(cat {counter!s})
+n=$((n + 1))
+echo "$n" > {counter!s}
+if [[ "$n" -le 1 ]]; then
+    echo 'dial udp 9.9.9.9:53: socket: permission denied' >&2
+    exit 126
+fi
+exit 0
+""",
+    )
+    _exec(shims / "apparmor_parser", "echo 'apparmor_parser: unable to remove' >&2\nexit 1")
+    aa = tmp_path / "apparmor.d"
+    _seed_profiles(aa, ("podman", "crun"))
+    monkeypatch.setenv("PATH", f"{shims}:{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("HAL0_APPARMOR_D", str(aa))
+    monkeypatch.setenv("HAL0_APPARMOR_CONF", str(tmp_path / "c.conf"))
+
+    rc = ca._main()
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "apparmor-preflight: guest_profiles_disabled" in out
+    assert "retry passed" in out
+    assert "unload failed: podman, crun" in out
+    assert (aa / "disable" / "podman").is_symlink()
