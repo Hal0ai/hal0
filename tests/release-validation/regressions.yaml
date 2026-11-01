@@ -2442,8 +2442,8 @@ regressions:
     expect: >-
       Either the directory is hal0-writable (installer/perms row converges it, `doctor perms`
       reports it) or the migration creates its backup somewhere hal0 can write. After
-      `hal0 update --yes`: a runners-*.tar.gz exists, `hal0 runner-images migrate` and
-      `hal0 profile migrate` both say nothing to convert, `hal0 update status` exits 0, and
+      `hal0 update --yes`: a runners-*.tar.gz exists, `hal0 runner-images migrate` says
+      nothing to convert, `hal0 update status` exits 0, and
       post_activation_migrations.ok is true. A job that says `applied` while migrations failed is
       itself the regression. Supersedes the `regressed` result on `runner-system-conversion`.
     v1_4_0_nightly_20261015200136_note: >-

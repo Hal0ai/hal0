@@ -268,11 +268,7 @@ export function UpdatesPage() {
             // services — the running hal0-api keeps serving the current
             // build until the operator bounces it.
             onSuccess: (res) => {
-              const restored = Array.isArray(res?.profile_conversion_restored) ? res.profile_conversion_restored : [];
-              const note = restored.length
-                ? ` Profile conversion undone: restored ${restored.join(", ")}.`
-                : "";
-              window.__hal0Toast && window.__hal0Toast(`Rolled back — restart hal0-api (Settings → Advanced) to run the previous version.${note}`, "warn");
+              window.__hal0Toast && window.__hal0Toast("Rolled back — restart hal0-api (Settings → Advanced) to run the previous version.", "warn");
             },
             onError: (err) => window.__hal0Toast && window.__hal0Toast(`Rollback failed: ${err?.message || "no previous version retained"}`, "err"),
           });

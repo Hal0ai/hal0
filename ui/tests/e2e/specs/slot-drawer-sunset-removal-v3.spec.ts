@@ -29,7 +29,7 @@
  * Vision were handled under `spec-hw-slot-ownership` §1. ADR-0029 then made it
  * a server rule: those keys (and the context window) belong on the slot's
  * PROFILE, and a slot write carrying one is a 400 slot.tuning_key_denied. The
- * profile conversion (`hal0 profile migrate`) carries any already-persisted slot
+ * profile conversion (since removed) carried any already-persisted slot
  * tune onto a profile, so this removal strands nothing.
  *
  * Test roles, stated plainly because they differ:

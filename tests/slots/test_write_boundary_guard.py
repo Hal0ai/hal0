@@ -128,8 +128,8 @@ def test_unconverted_key_in_the_base_does_not_trip_the_payload_guard(
 ) -> None:
     """The guard screens the PAYLOAD, never the merged result.
 
-    Converting an unconverted slot is the one-shot converter's job
-    (``hal0 profile migrate``); the write guard only answers "does this write
+    Converting an unconverted slot is not this guard's job (the one-shot
+    converter is gone); the write guard only answers "does this write
     introduce a tuning key", so a model swap carries no blame for a key that
     was already in the base dict.
     """

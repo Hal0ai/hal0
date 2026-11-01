@@ -76,14 +76,10 @@ export function useUpdateApply() {
 }
 
 // Rollback to the retained previous version. Synchronous on the backend
-// (no job id) — returns {rolled_back, channel, profile_conversion_restored}
-// once the swap completes. `profile_conversion_restored` lists what the
-// ADR-0029 profile conversion's backup put back (empty/absent when the
-// rollback did not cross the conversion).
+// (no job id) — returns {rolled_back, channel} once the swap completes.
 export interface UpdateRollbackResult {
   rolled_back: boolean
   channel: string
-  profile_conversion_restored?: string[]
 }
 
 export function useUpdateRollback() {

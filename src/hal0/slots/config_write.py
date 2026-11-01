@@ -537,8 +537,8 @@ def guard_slot_write_payload(updates: dict[str, Any]) -> None:
         keys are reported with their replacement.
 
     Checked against ``updates`` (the write payload), NEVER the merged result:
-    converting a slot file is the one-shot converter's job
-    (``hal0 profile migrate``), not this guard's.
+    moving a stale tuning key off a slot file is the operator's job (the
+    one-shot converter is gone), not this guard's.
 
     Raises:
         hal0.errors.BadRequest: the payload crosses a partition.

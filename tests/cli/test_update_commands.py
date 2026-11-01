@@ -1486,7 +1486,7 @@ def _run_update_with_convergence(monkeypatch: pytest.MonkeyPatch, convergence: d
     return runner.invoke(app, ["update"])
 
 
-def _convergence(blockers: list[dict]) -> dict:
+def _convergence() -> dict:
     return {
         "post_activation_migrations": {
             "ok": True,
@@ -1494,49 +1494,15 @@ def _convergence(blockers: list[dict]) -> dict:
             "to": 1,
             "error": None,
             "pass_warnings": [],
-            "conversion_blockers": blockers,
         },
-        "converged": not blockers,
+        "converged": True,
     }
 
 
-def test_update_with_a_blocked_slot_prints_the_blocker_and_exits_2(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    blockers = [
-        {"target": "agent.toml", "reason": "--chat-template-file has no profile home"},
-        {"target": "profile:fast", "reason": "--mmproj has no profile home"},
-    ]
-    result = _run_update_with_convergence(monkeypatch, _convergence(blockers))
-    assert result.exit_code == 2, result.output
-    out = " ".join(result.output.split())
-    assert (
-        "profile conversion blocked: agent.toml — --chat-template-file has no profile home" in out
-    )
-    assert "profile conversion blocked: profile:fast — --mmproj has no profile home" in out
-    assert "fix: run `hal0 profile migrate` to see the plan" in out
-    assert "`sudo -u hal0 hal0 profile migrate --apply`" in out
-    assert "update applied." not in out
-
-
-def test_update_without_blockers_exits_0(monkeypatch: pytest.MonkeyPatch) -> None:
-    result = _run_update_with_convergence(monkeypatch, _convergence([]))
+def test_a_converged_update_exits_0(monkeypatch: pytest.MonkeyPatch) -> None:
+    result = _run_update_with_convergence(monkeypatch, _convergence())
     assert result.exit_code == 0, result.output
-    assert "profile conversion blocked" not in result.output
     assert "update applied." in result.output
-
-
-def test_print_convergence_blockers_alone_mean_not_converged(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Even a convergence dict claiming ``converged`` (an API predating the
-    blocker check) is not converged while a blocker is listed."""
-    convergence = _convergence([{"target": "stack:saber", "reason": "row agent: --jinja"}])
-    convergence["converged"] = True
-    assert uc._print_convergence(convergence) is False
-    out = " ".join(capsys.readouterr().out.split())
-    assert "profile conversion blocked: stack:saber — row agent: --jinja" in out
-    assert "fully converged" not in out
 
 
 # ── #2660: a slot that cannot re-render ────────────────────────────────────────
@@ -1617,7 +1583,7 @@ _UNASSIGNED = {
 def test_print_convergence_reports_an_unassigned_model(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    convergence = _convergence([])
+    convergence = _convergence()
     convergence["post_activation_migrations"]["unassigned_models"] = [_UNASSIGNED]
     uc._print_convergence(convergence)
     out = " ".join(capsys.readouterr().out.split())
@@ -1629,7 +1595,7 @@ def test_print_convergence_reports_an_unassigned_model(
 
 
 def test_update_prints_the_unassigned_model(monkeypatch: pytest.MonkeyPatch) -> None:
-    convergence = _convergence([])
+    convergence = _convergence()
     convergence["post_activation_migrations"]["unassigned_models"] = [_UNASSIGNED]
     result = _run_update_with_convergence(monkeypatch, convergence)
     out = " ".join(result.output.split())
@@ -1673,7 +1639,7 @@ def _run_update_with_drift(monkeypatch: pytest.MonkeyPatch, slots: list[dict]) -
     ) -> dict:
         if "prepared" in terminal:
             return {"id": job_id, "state": "prepared", "resolved_version": "9.9.9", "notes": {}}
-        return {"id": job_id, "state": "applied", "convergence": _convergence([])}
+        return {"id": job_id, "state": "applied", "convergence": _convergence()}
 
     monkeypatch.setattr(uc, "api_get", fake_get)
     monkeypatch.setattr(uc, "api_post", fake_post)

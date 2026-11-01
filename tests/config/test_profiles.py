@@ -202,8 +202,8 @@ class TestLoadProfilesConfig:
         ],
     )
     def test_an_unconverted_entry_is_quarantined(self, tmp_path: Path, body: str) -> None:
-        """An entry still in the pre-ADR-0029 shape is set aside (``hal0
-        profile migrate`` converts it); the rest of the catalog loads."""
+        """An entry still in the pre-ADR-0029 shape is set aside (the
+        operator rewrites it by hand); the rest of the catalog loads."""
         p = tmp_path / "profiles.toml"
         p.write_text(body + "\n[profile.fine]\nctx_size = 8192\n", encoding="utf-8")
         cfg = load_profiles_config(path=p)

@@ -68,25 +68,9 @@ def test_success_parses_the_result_envelope(monkeypatch: pytest.MonkeyPatch) -> 
         "from": 1,
         "to": 2,
         "pass_warnings": [],
-        "conversion_blockers": [],
         "unassigned_models": [],
         "model_bundles": [],
     }
-
-
-def test_conversion_blockers_are_relayed_from_the_envelope(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    blockers = [{"target": "profile:fast", "reason": "--mmproj has no profile home"}]
-
-    def _fake_run(cmd, *a, **k):
-        payload = {"from": 2, "to": 2, "conversion_blockers": blockers}
-        return _Completed(stdout=json.dumps({updater_module._MIGRATION_RESULT_KEY: payload}))
-
-    monkeypatch.setattr(updater_module.subprocess, "run", _fake_run)
-
-    result = asyncio.run(_run_post_activation_migrations_after_swap(2, job_id="j1"))
-    assert result["conversion_blockers"] == blockers
 
 
 def test_unassigned_models_are_relayed_from_the_envelope(
@@ -124,7 +108,7 @@ def test_child_script_emits_the_unassigned_models(
     monkeypatch.setattr(
         updater_module,
         "run_post_activation_migrations",
-        lambda *_a, **_k: updater_module.PostActivationResult(1, 1, [], unassigned),
+        lambda *_a, **_k: updater_module.PostActivationResult(1, 1, unassigned),
     )
     monkeypatch.setattr(structlog, "configure", lambda **_k: None)
     monkeypatch.setattr("sys.argv", ["-c", payload])
@@ -133,11 +117,11 @@ def test_child_script_emits_the_unassigned_models(
     assert json.loads(line)[updater_module._MIGRATION_RESULT_KEY]["unassigned_models"] == unassigned
 
 
-def test_child_script_emits_the_blockers(
+def test_child_script_emits_the_result(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """The child script (an ABI between releases) writes the result's
-    ``conversion_blockers`` into its envelope: execute the exact script the
+    ``unassigned_models`` into its envelope: execute the exact script the
     parent sends against a stubbed ``run_post_activation_migrations``."""
     import structlog
 
@@ -151,11 +135,11 @@ def test_child_script_emits_the_blockers(
     asyncio.run(_run_post_activation_migrations_after_swap(1, job_id="j"))
     script, payload = captured["cmd"][2], captured["cmd"][3]
 
-    blockers = [{"target": "agent.toml", "reason": "why"}]
+    unassigned = [{"slot": "agent", "model": "m", "quant": "q", "remedy": "r"}]
     monkeypatch.setattr(
         updater_module,
         "run_post_activation_migrations",
-        lambda *_a, **_k: updater_module.PostActivationResult(1, 3, blockers),
+        lambda *_a, **_k: updater_module.PostActivationResult(1, 3, unassigned),
     )
     monkeypatch.setattr(structlog, "configure", lambda **_k: None)
     monkeypatch.setattr("sys.argv", ["-c", payload])
@@ -164,8 +148,7 @@ def test_child_script_emits_the_blockers(
     assert json.loads(line)[updater_module._MIGRATION_RESULT_KEY] == {
         "from": 1,
         "to": 3,
-        "conversion_blockers": blockers,
-        "unassigned_models": [],
+        "unassigned_models": unassigned,
         "model_bundles": [],
     }
 
@@ -186,7 +169,6 @@ def test_result_envelope_survives_interleaved_log_noise(monkeypatch: pytest.Monk
         "from": 1,
         "to": 2,
         "pass_warnings": [],
-        "conversion_blockers": [],
         "unassigned_models": [],
         "model_bundles": [],
     }

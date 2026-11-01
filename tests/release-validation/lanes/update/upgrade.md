@@ -126,7 +126,7 @@ the fact otherwise:
    job (regressions `upgrade-migration-backups-eacces`, promote_ready).
 9. **'applied' is not 'done'.** After `hal0 update --yes` assert `convergence.converged=true` in
    `/var/lib/hal0/update-jobs/*.json` and that `hal0 update status` exits 0. Then run `hal0
-   runner-images migrate` and `hal0 profile migrate` as dry runs and assert 'nothing to convert',
+   runner-images migrate` as a dry run and assert 'nothing to convert',
    and that `slot.unconverted` and `*_migration_failed` are absent from the hal0-api journal. If
    pending components print no `hal0 update component <id>` line, that is
    `update-components-pending-no-guidance`.
@@ -143,7 +143,7 @@ the fact otherwise:
 
 14. **API downtime across the update.** Run a 1 s `/api/health` poller across `hal0 update --yes`; downtime < ~30 s and no `stop-sigterm timed out` / `Failed with result 'timeout'` for hal0-api (#2727). Time `systemctl restart hal0-api` THREE times with a request in flight: the stall is intermittent.
 
-15. **Daemon load vs validators.** On every update-box boot compare journal `discover.ref_slot_load_failed` / `models.auto_scan_prune_skipped` with `hal0 config validate` and `hal0 profile migrate` output (#2720).
+15. **Daemon load vs validators.** On every update-box boot compare journal `discover.ref_slot_load_failed` / `models.auto_scan_prune_skipped` with `hal0 config validate` output (#2720).
 
 16. **Pins and types.** `hal0 update --target <bogus> --check` must not report "update available" for a different version (#2729); slot TOML `type` must match the profile modality (embedding/reranking/kokoro profiles must not carry `llm`; persisted ones are the known doctor-fix case).
 

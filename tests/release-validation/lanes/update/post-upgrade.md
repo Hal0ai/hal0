@@ -73,8 +73,7 @@ did not ask for?**
 
 8. **Service-user write access to every migration target.** Assert `sudo -u hal0 test -w` on
    `/var/lib/hal0/backups` and every other directory the post-activation migrations write to, not
-   just `*.db` files. A `post_swap_migration_failed` / `hal0.runner_system_migration_failed` /
-   `hal0.profile_centric_migration_failed` pair in the journal verifies (or refutes) the banner's
+   just `*.db` files. A `post_swap_migration_failed` / `hal0.runner_system_migration_failed` pair in the journal verifies (or refutes) the banner's
    'restart retries automatically' claim.
 9. **Drift and routing after a partial migration.** For every slot with `image_mismatch=true` in
    `/api/slots`, `GET /api/updates/slot-drift` must list it or the slot must show an explicit
