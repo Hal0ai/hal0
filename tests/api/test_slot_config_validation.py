@@ -19,6 +19,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from hal0.api.routes.slots import _next_free_slot_port
+from tests.fixtures.model_registration import register_model_file
 
 
 @pytest.fixture
@@ -464,6 +465,7 @@ def test_tune_null_clears_on_flat_shape_file(slot_toml: Path, client: TestClient
 
 
 def test_create_refuses_tune_on_non_llm_slot(tmp_hal0_home: str, client: TestClient) -> None:
+    register_model_file(client, tmp_hal0_home, "bge-small", ["embed"])
     r = client.post(
         "/api/slots",
         json={

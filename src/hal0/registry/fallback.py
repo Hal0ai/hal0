@@ -332,8 +332,16 @@ def resolve_servable_model(model_id: str, cfg: SlotConfig | dict[str, Any]) -> s
     fallback = fallback_local_model(capability, configured_id=model_id)
     if fallback is None or fallback.id == model_id:
         return model_id
+    # The ids go in the message text: ``extra=`` fields never reach the journal
+    # record (#2668), so a bare event name left the operator no way to tell which
+    # model was substituted for which. The leading event name stays greppable.
     log.warning(
-        "slot.model_default_fallback",
+        "slot.model_default_fallback configured=%r fallback=%r capability=%s "
+        "— the configured model is not servable; set the slot's [model].default "
+        "to a registered id (hal0 model list)",
+        model_id,
+        fallback.id,
+        capability,
         extra={
             "configured": model_id,
             "fallback": fallback.id,
