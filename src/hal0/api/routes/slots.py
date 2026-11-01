@@ -1310,77 +1310,48 @@ async def get_slot_resolved(name: str, request: Request) -> dict[str, object]:
     sm = _get_slot_manager(request)
     cfg = await sm.get_config(name)
     detail = resolved_argv_detail_for_slot(cfg)
-    footprint = await _halogen_footprint(request, sm, cfg)
+    footprint = await _halogen_footprint(request, sm, name, cfg)
     if detail is None:
         return {"name": name, "argv": None, "provenance": [], "removed": 0, "footprint": footprint}
     return {"name": name, **detail, "footprint": footprint}
 
 
 async def _halogen_footprint(
-    request: Request, sm: SlotManager, cfg: dict[str, Any]
+    request: Request, sm: SlotManager, name: str, cfg: dict[str, Any]
 ) -> dict[str, object] | None:
     """The drawer's memory readout for a halogen slot, else ``None``.
 
-    ``{"resident_mb", "advisory_cache_mb", "host_free_mb", "verdict"}``:
-    ``resident_mb`` is the runtime's own figure for the bound model at the
-    window the slot is booked for (:func:`hal0.slots.capacity.provider_footprint_mb`
-    over the provider's ``footprint_mb`` hook; the route does no arithmetic,
-    ADR-0039), ``advisory_cache_mb`` is the lookup-table page cache the
-    operator is advised to leave free (never part of ``resident_mb``), and
-    ``host_free_mb`` / ``verdict`` are the advisory GTT check of the one against
-    the host's free pool (:func:`hal0.slots.capacity.gtt_feasibility_verdict`).
-
-    ``None`` is "no readout", not a failure: a slot on another runtime, a slot
-    with no model bound, or a runtime that has no figure. An unreadable pool
-    leaves ``host_free_mb`` ``None`` and the verdict ``"unknown"``; the figure
-    still shows. Nothing here raises: this rides the resolved-command answer.
+    Every figure and the verdict come from
+    :func:`hal0.slots.capacity.halogen_footprint_readout` (ADR-0039); the route
+    only gathers what it needs from the request: the slot's state, read from
+    ``sm.list()`` as :func:`slot_capacity` does, so a loaded slot reads
+    ``"loaded"`` instead of being judged against the pool it already holds, and
+    the host's GPU memory sample, taken only once a figure exists. ``None`` is
+    "no readout", not a failure. Nothing here raises: this rides the
+    resolved-command answer.
     """
-    from hal0.providers.container import _is_halogen_slot, slot_effective_context
-    from hal0.slots.capacity import (
-        HALOGEN_TABLE_CACHE_ADVISORY_MB,
-        gtt_feasibility_verdict,
-        provider_footprint_mb,
-    )
+    from hal0.slots.capacity import halogen_footprint_readout
 
+    state: str | None = None
     try:
-        if not _is_halogen_slot(cfg):
-            return None
-        model_table = cfg.get("model")
-        model_id = model_table.get("default") if isinstance(model_table, dict) else model_table
-        if not model_id:
-            return None
-        info = await sm._resolve_model_info(str(model_id))
-        # The window the slot is booked for: the hook sizes the KV pool from it.
-        ctx, _source = slot_effective_context(
-            cfg, getattr(request.app.state, "model_registry", None)
-        )
-        if ctx:
-            info = {**info, "ctx_tokens": ctx}
-        resident_mb = provider_footprint_mb(cfg, info)
+        names = {name, str(cfg.get("name") or "")}
+        slot = next((s for s in await sm.list() if s.name in names), None)
+        state = str(slot.state) if slot is not None else None
     except Exception:
-        log.warning("slots.resolved_footprint_failed", slot=cfg.get("name"), exc_info=True)
-        return None
-    if resident_mb is None:
-        return None
+        log.warning("slots.resolved_footprint_state_failed", slot=name, exc_info=True)
 
-    gpu = None
     stats = getattr(request.app.state, "hardware_stats", None)
-    if stats is not None:
-        try:
-            gpu = await asyncio.to_thread(stats.gpu_sample)
-        except Exception:
-            log.warning("slots.resolved_footprint_gpu_sample_failed", exc_info=True)
-    verdict = gtt_feasibility_verdict(
-        resident_mb,
-        gtt_free_mb=getattr(gpu, "gtt_free_mb", None),
-        gtt_total_mb=getattr(gpu, "gtt_total_mb", None),
+
+    async def _sample_gpu() -> Any:
+        return None if stats is None else await asyncio.to_thread(stats.gpu_sample)
+
+    return await halogen_footprint_readout(
+        sm,
+        cfg,
+        state=state,
+        model_registry=getattr(request.app.state, "model_registry", None),
+        sample_gpu=_sample_gpu,
     )
-    return {
-        "resident_mb": resident_mb,
-        "advisory_cache_mb": HALOGEN_TABLE_CACHE_ADVISORY_MB,
-        "host_free_mb": verdict["gtt_free_mb"],
-        "verdict": verdict["verdict"],
-    }
 
 
 @router.put("/{name}/config")

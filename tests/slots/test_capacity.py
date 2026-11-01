@@ -581,6 +581,41 @@ class TestGttFeasibilityVerdict:
             "gtt_total_mb": 98304.0,
         }
 
+    @pytest.mark.parametrize("state", ["warming", "ready", "serving", "idle", "READY"])
+    def test_a_resident_slot_reads_loaded_whatever_the_pool_says(self, state: str) -> None:
+        """Its own memory is already out of the free pool: a loaded slot never judges
+        itself against what is left, so a layout bigger than the free pool is "loaded"."""
+        from hal0.slots.capacity import gtt_feasibility_verdict as v
+
+        out = v(75000.0, gtt_free_mb=69632.0, gtt_total_mb=98304.0, state=state)
+        assert out == {
+            "verdict": "loaded",
+            "needed_mb": 75000.0,
+            "gtt_free_mb": 69632.0,
+            "gtt_total_mb": 98304.0,
+        }
+
+    def test_a_resident_slot_reads_loaded_even_with_no_pool_reading(self) -> None:
+        from hal0.slots.capacity import gtt_feasibility_verdict as v
+
+        out = v(75000.0, gtt_free_mb=None, gtt_total_mb=None, state="ready")
+        assert out["verdict"] == "loaded"
+        assert out["gtt_free_mb"] is None
+
+    @pytest.mark.parametrize(
+        "state", [None, "", "offline", "pulling", "starting", "unloading", "error"]
+    )
+    def test_a_slot_not_resident_keeps_the_fit_verdict(self, state: str | None) -> None:
+        """Not loaded yet (or any state holding no weights): the fit check stands."""
+        from hal0.slots.capacity import gtt_feasibility_verdict as v
+
+        assert v(75000.0, gtt_free_mb=69632.0, gtt_total_mb=98304.0, state=state)["verdict"] == (
+            "exceeds"
+        )
+        assert v(40000.0, gtt_free_mb=69632.0, gtt_total_mb=98304.0, state=state)["verdict"] == (
+            "fits"
+        )
+
 
 # ── KV estimate follows the slot profile's window (ADR-0029) ─────────────
 

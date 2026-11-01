@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -319,13 +319,24 @@ _TIGHT_FRACTION = 0.9  # within 10% of free = load may succeed with swap pressur
 
 
 def gtt_feasibility_verdict(
-    needed_mb: float, *, gtt_free_mb: float | None, gtt_total_mb: float | None
+    needed_mb: float,
+    *,
+    gtt_free_mb: float | None,
+    gtt_total_mb: float | None,
+    state: str | None = None,
 ) -> dict[str, Any]:
     """Advisory GTT verdict for a projected footprint. Never blocks.
 
     "unknown" when host truth is unavailable (None counters) or the
     projection is empty — the caller renders NO hint for unknown, never
     a fake verdict.
+
+    ``state`` is the slot's lifecycle state when the footprint is a slot's
+    own. A slot in a resident state (:data:`_RESIDENT_STATES`) already holds
+    that memory, so it is out of the free pool and the check would count the
+    slot against itself: it reads ``"loaded"`` whatever the pool says (even an
+    unreadable one), with the figures echoed as given. Any other state, or
+    ``None``, is the fit check before a load.
     """
     needed = round(float(needed_mb), 1)
     out: dict[str, Any] = {
@@ -333,6 +344,9 @@ def gtt_feasibility_verdict(
         "gtt_free_mb": gtt_free_mb,
         "gtt_total_mb": gtt_total_mb,
     }
+    if needed > 0 and str(state or "").lower() in _RESIDENT_STATES:
+        out["verdict"] = "loaded"
+        return out
     if gtt_free_mb is None or gtt_total_mb is None or needed <= 0:
         out["verdict"] = "unknown"
         return out
@@ -345,6 +359,76 @@ def gtt_feasibility_verdict(
     else:
         out["verdict"] = "fits"
     return out
+
+
+async def halogen_footprint_readout(
+    host: Any,
+    slot_cfg: dict[str, Any],
+    *,
+    state: str | None,
+    model_registry: Any = None,
+    sample_gpu: Callable[[], Awaitable[Any]] | None = None,
+) -> dict[str, Any] | None:
+    """The slot drawer's memory readout for a halogen slot, else ``None``.
+
+    ``{"resident_mb", "advisory_cache_mb", "host_free_mb", "verdict"}``, the one
+    owner of every figure in it (ADR-0039): ``resident_mb`` is the provider's own
+    :meth:`~hal0.providers.base.Provider.footprint_mb` for the slot's bound model
+    at the window the slot is booked for (:func:`provider_footprint_mb`);
+    ``advisory_cache_mb`` is :data:`HALOGEN_TABLE_CACHE_ADVISORY_MB`, the page
+    cache the operator is advised to leave free and never part of the resident
+    figure; ``host_free_mb`` and ``verdict`` are :func:`gtt_feasibility_verdict`
+    of the one against the host's pool, with ``state`` so a loaded slot reads
+    ``"loaded"`` rather than judging its own resident memory as unavailable.
+
+    ``host`` is the slot manager (it resolves the model's facts); ``sample_gpu``
+    is an async callable returning the host's GPU memory sample, awaited only
+    once a figure exists, so a slot with no readout costs no sampling. An
+    unreadable pool leaves ``host_free_mb`` ``None`` and the verdict ``"unknown"``
+    (``"loaded"`` for a resident slot) with the figure kept.
+
+    ``None`` is "no readout", not a failure: a slot on another runtime, a slot
+    with no model bound, or a runtime with no figure. Never raises.
+    """
+    try:
+        from hal0.providers.container import _is_halogen_slot, slot_effective_context
+
+        if not _is_halogen_slot(slot_cfg):
+            return None
+        model_table = slot_cfg.get("model")
+        model_id = model_table.get("default") if isinstance(model_table, dict) else model_table
+        if not model_id:
+            return None
+        info = await host._resolve_model_info(str(model_id))
+        # The window the slot is booked for: the hook sizes the KV pool from it.
+        ctx, _source = slot_effective_context(slot_cfg, model_registry)
+        if ctx:
+            info = {**info, "ctx_tokens": ctx}
+        resident_mb = provider_footprint_mb(slot_cfg, info)
+    except Exception:
+        log.warning("capacity.halogen_footprint_failed", exc_info=True)
+        return None
+    if resident_mb is None:
+        return None
+
+    gpu: Any = None
+    if sample_gpu is not None:
+        try:
+            gpu = await sample_gpu()
+        except Exception:
+            log.warning("capacity.halogen_footprint_gpu_sample_failed", exc_info=True)
+    verdict = gtt_feasibility_verdict(
+        resident_mb,
+        gtt_free_mb=getattr(gpu, "gtt_free_mb", None),
+        gtt_total_mb=getattr(gpu, "gtt_total_mb", None),
+        state=state,
+    )
+    return {
+        "resident_mb": resident_mb,
+        "advisory_cache_mb": HALOGEN_TABLE_CACHE_ADVISORY_MB,
+        "host_free_mb": verdict["gtt_free_mb"],
+        "verdict": verdict["verdict"],
+    }
 
 
 def _slot_cfg_for(slot: Any) -> dict[str, Any] | None:
