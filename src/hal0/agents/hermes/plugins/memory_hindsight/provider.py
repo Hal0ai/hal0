@@ -204,7 +204,7 @@ def _read_memory_private(path: str) -> bool:
     return _memory_private_value(hal0.get("memory_private"))
 
 
-def _config_stat_key(path: str) -> tuple[int, int] | None | str:
+def _config_stat_key(path: str) -> tuple[int, int] | str | None:
     """A cache key for the file: (mtime_ns, size), None when missing, "error" otherwise."""
     try:
         st = os.stat(path)

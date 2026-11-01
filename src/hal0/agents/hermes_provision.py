@@ -5776,7 +5776,7 @@ _UNSET: Any = object()
 
 
 def _profile_wire_desired_for(
-    agent_id: str, *, terminal_enabled: bool | None | Any = _UNSET
+    agent_id: str, *, terminal_enabled: bool | Any | None = _UNSET
 ) -> Callable[[dict[str, Any]], dict[str, Any]]:
     """``desired`` for :func:`_merge_profile_config_at`, folding the terminal gate in.
 
@@ -5795,7 +5795,7 @@ def _profile_wire_desired_for(
 
 
 def wire_named_profiles(
-    home: Path, *, terminal_enabled: bool | None | Any = _UNSET
+    home: Path, *, terminal_enabled: bool | Any | None = _UNSET
 ) -> dict[str, Any]:
     """Give every named Hermes profile hal0's MCP servers and memory (#2891).
 

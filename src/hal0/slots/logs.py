@@ -380,7 +380,7 @@ async def tail_journal_keepalive(
     quiet: bool = True,
     *,
     keepalive_s: float = KEEPALIVE_S,
-) -> AsyncIterator[str | None | JournalDegraded]:
+) -> AsyncIterator[str | JournalDegraded | None]:
     """:func:`tail_journal`, plus a ``None`` yield every ``keepalive_s`` of silence.
 
     ``None`` means "nothing to report, emit a keepalive"; the SSE route turns
