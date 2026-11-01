@@ -418,6 +418,7 @@ def _runas_popen_extras(
 def _dashboard_session_token(
     cfg: AgentConfig,
     *,
+    supplied: str | None = None,
     user: str = "hal0",
     geteuid: Callable[[], int] = os.geteuid,
     getpwnam: Callable[[str], Any] = pwd.getpwnam,
@@ -436,9 +437,18 @@ def _dashboard_session_token(
     The token lives at :func:`dashboard_session_token_path` (0600, owned by
     the agent user). A manual root ``hal0-agent hermes serve`` drops its child
     to ``user`` (#843); a file root mints is handed to that user so the unit's
-    next start can read it. Any failure returns ``None`` and says why on
-    stderr: Hermes then keeps its per-process token, which is exactly the
-    pre-fix behaviour, so this can never block a start.
+    next start can read it.
+
+    ``supplied`` is a token the environment already carries (a ``systemctl
+    edit`` drop-in): it is the token Hermes will run with, so it wins over the
+    file and is written through to it (left untouched when the file already
+    holds exactly that value), keeping the file, which hal0-api reads, equal
+    to the effective token. Without ``supplied`` an existing file is read and
+    a missing or blank one is minted.
+
+    Any failure returns ``None`` and says why on stderr: Hermes then keeps
+    its per-process token (or the caller keeps ``supplied``), so this can
+    never block a start.
     """
     path = dashboard_session_token_path(cfg.agent_id)
     try:
@@ -446,9 +456,12 @@ def _dashboard_session_token(
             existing = path.read_text(encoding="utf-8").strip()
         except FileNotFoundError:
             existing = ""
-        if existing:
+        wanted = (supplied or "").strip()
+        if wanted and existing == wanted:
             return existing
-        token = secrets.token_urlsafe(32)
+        if existing and not wanted:
+            return existing
+        token = wanted or secrets.token_urlsafe(32)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -500,15 +513,17 @@ def _build_hermes_env(cfg: AgentConfig) -> dict[str, str]:
         else:
             env.pop("HERMES_WEB_DIST", None)
     # Stable dashboard session token (#2899). A value already in the env — a
-    # `systemctl edit` drop-in — is the operator's explicit choice and wins;
-    # otherwise mint/read the per-install file. When neither is available the
-    # variable is absent and Hermes mints its own per-process token.
-    if not env.get("HERMES_DASHBOARD_SESSION_TOKEN"):
-        token = _dashboard_session_token(cfg)
-        if token:
-            env["HERMES_DASHBOARD_SESSION_TOKEN"] = token
-        else:
-            env.pop("HERMES_DASHBOARD_SESSION_TOKEN", None)
+    # `systemctl edit` drop-in — is the operator's explicit choice and wins,
+    # and is written through to the token file so hal0-api reads the token
+    # Hermes actually runs with; otherwise mint/read the per-install file. If
+    # the file cannot be written the env value stays; with neither available
+    # the variable is absent and Hermes mints its own per-process token.
+    supplied = (env.get("HERMES_DASHBOARD_SESSION_TOKEN") or "").strip()
+    token = _dashboard_session_token(cfg, supplied=supplied) or supplied
+    if token:
+        env["HERMES_DASHBOARD_SESSION_TOKEN"] = token
+    else:
+        env.pop("HERMES_DASHBOARD_SESSION_TOKEN", None)
     # Drop NOTIFY_SOCKET from the child — the shim owns sd_notify,
     # and a misbehaving Hermes plugin shouldn't be able to send
     # READY=1 / STOPPING=1 to systemd on our behalf.
