@@ -1,0 +1,265 @@
+---
+title: Install in an Incus container
+description: Run hal0 inside an unprivileged Incus system container on a bare-metal Linux host — the clean-host install. The iGPU and NPU pass through as device nodes, the host keeps its own packages and sudoers, and `incus delete` is the uninstall.
+sidebar:
+  order: 14
+---
+
+import { Steps, Aside, Tabs, TabItem, Code, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+A [bare-metal install](/docs/getting-started/bare-metal/) puts hal0 deep
+into the host: systemd units, a service user with `sudoers` grants, a
+rootful podman store, Avahi services and a self-updater that owns
+`/usr/lib/hal0`. On a dedicated appliance that is fine. On a workstation
+you share with other work you may want all of it in a box you can throw
+away. An **unprivileged Incus system container** is that box: it runs
+systemd and nested podman like a normal Ubuntu host, it shares the host
+kernel so the iGPU and XDNA NPU pass through as plain device nodes (the
+same mechanism the [Proxmox guide](/docs/getting-started/proxmox/) uses),
+and its root is an ordinary unprivileged uid on the host.
+
+This is not a Docker or Podman "appliance image", and that is deliberate:
+hal0 is itself a container orchestrator. Boxing it in an OCI container
+would need either nested podman inside the image or the host's container
+socket, and the socket is root on the host. A system container gives the
+installer the systemd it expects and keeps the host's root out of reach.
+
+<Aside type="caution" title="Unprivileged is the point">
+Keep `security.privileged=false` (Incus's default). A privileged
+container's root **is** host root, and the whole reason to do this is
+gone. The quick-path Proxmox script defaults to a privileged CT; this
+guide does not.
+</Aside>
+
+## 1. Prepare the host
+
+The accelerators live on the **host kernel**, because the container shares
+it. Follow the Kernel and firmware and Size the GTT pool sections of
+[GPU drivers and memory](/docs/getting-started/drivers/) on the host
+first: `amdgpu` and `amdxdna` loaded, `/dev/kfd`, `/dev/dri/renderD*` and
+`/dev/accel/accel0` present, GTT raised on the kernel command line. Nothing
+in this guide changes the host beyond that, the Incus packages, and
+optionally a bridge.
+
+Install Incus. Ubuntu 24.04+ and Debian 13 ship the 6.0 LTS series:
+
+```sh
+sudo apt-get update && sudo apt-get install -y incus
+sudo adduser "$USER" incus-admin     # log out and in again, or `newgrp incus-admin`
+sudo incus admin init --minimal
+```
+
+For a newer Incus, use the [Zabbly repository](https://github.com/zabbly/incus)
+instead of the distro package.
+
+### Pick a network
+
+`incus admin init --minimal` creates `incusbr0`, a NAT bridge. The
+container can reach the internet and the host can reach the container, but
+LAN clients cannot, and `hal0.local` mDNS does not cross NAT. For a
+single-user box that is enough: the dashboard is
+`http://<container-ip>:8080` from the host.
+
+If other machines, phones, or Open WebUI clients on the LAN need hal0,
+put the container on the LAN. Two options:
+
+<Tabs>
+  <TabItem label="Bridge (recommended)">
+Create a host bridge once, then attach the container to it. With netplan:
+
+```yaml
+# /etc/netplan/01-br0.yaml  — replace enp5s0 with your NIC
+network:
+  version: 2
+  ethernets:
+    enp5s0:
+      dhcp4: false
+  bridges:
+    br0:
+      interfaces: [enp5s0]
+      dhcp4: true
+```
+
+```sh
+sudo netplan apply
+incus profile device set default eth0 nictype=bridged parent=br0
+```
+
+The container gets its own LAN address from your DHCP server, mDNS works,
+and the host can still talk to it.
+  </TabItem>
+  <TabItem label="Macvlan (quick)">
+```sh
+incus profile device set default eth0 nictype=macvlan parent=enp5s0
+```
+
+One line, no bridge. The catch is a kernel property of macvlan: the
+**host itself cannot reach the container** over that interface. Use it
+when only other LAN machines need hal0.
+  </TabItem>
+</Tabs>
+
+## 2. Create the container
+
+```sh
+incus launch images:ubuntu/26.04 hal0 \
+  -c security.nesting=true \
+  -c security.privileged=false \
+  -c limits.kernel.memlock=unlimited \
+  -c boot.autostart=true
+```
+
+- **`security.nesting=true`** lets podman run inside the container. It
+  does not make the container privileged.
+- **`limits.kernel.memlock=unlimited`** is the same `memlock` relaxation
+  the Proxmox path writes: ROCm pins large host buffers, and the default
+  64 KiB limit stops a GPU slot from loading.
+- **No memory limit.** The GPU's GTT pool is host RAM; capping the
+  container's cgroup would not cap GTT and only confuses the memory bar.
+- **Ubuntu 26.04** is the guest image the Proxmox quick path also uses.
+  Ubuntu 24.04 works too, with the extra AppArmor step in §3. Run
+  `incus image list images:ubuntu` to see what your `images:` remote
+  offers.
+
+## 3. GPU and NPU passthrough
+
+Incus's `gpu` device type forwards `/dev/dri/*` but not `/dev/kfd`, and
+ROCm needs both, so add the three nodes explicitly as `unix-char` devices.
+The `gid` must be the `render` group's id **inside the container**, which
+you can only read once it exists:
+
+```sh
+RENDER_GID=$(incus exec hal0 -- getent group render | cut -d: -f3)
+incus config device add hal0 renderD128 unix-char path=/dev/dri/renderD128 gid=$RENDER_GID
+incus config device add hal0 kfd        unix-char path=/dev/kfd            gid=$RENDER_GID
+incus config device add hal0 accel0     unix-char path=/dev/accel/accel0   gid=$RENDER_GID   # Strix Halo NPU only
+incus exec hal0 -- ls -ln /dev/kfd /dev/dri/ /dev/accel/
+```
+
+Every node should show the container's render gid as its group. The
+device appears immediately; no restart is needed.
+
+<Aside type="caution" title="gid means the CONTAINER's gid, not the host's">
+The host's `render` group and the container's can have different ids, and
+an unprivileged container cannot `chgrp` a forwarded node to fix a wrong
+one from inside — only the `gid=` on the device entry can. hal0's `doctor`
+tells you when the mapping is off. See the Render-group gids section of
+[GPU drivers and memory](/docs/getting-started/drivers/).
+</Aside>
+
+### Ubuntu 24.04 guests: disable the guest's unconfined AppArmor profiles
+
+Ubuntu 24.04 ships `flags=(unconfined)` AppArmor profiles for `podman`,
+`crun`, `buildah`, `runc`, `rootlesskit` and `slirp4netns`. Inside a
+nested container on a current kernel those "unconfined" profiles are still
+enforced for network access, and every `podman` command fails with
+`socket: permission denied` before it can pull an image. hal0's installer
+then stops at its container-runtime gate. Disable them once, before
+installing:
+
+```sh
+incus exec hal0 -- bash -c '
+  for p in podman crun buildah runc rootlesskit slirp4netns; do
+    ln -sf /etc/apparmor.d/$p /etc/apparmor.d/disable/$p
+    apparmor_parser -R /etc/apparmor.d/$p
+  done'
+```
+
+Ubuntu 26.04 guests are not affected. Teaching the installer to detect and
+repair this itself is tracked in
+[#3234](https://github.com/Hal0ai/hal0/issues/3234); until then this step is
+manual.
+
+### Keyring quota
+
+If a container start inside hal0 fails with `crun: create keyring '…':
+Disk quota exceeded`, raise the kernel keyring limits **on the host** and
+persist them under `/etc/sysctl.d/`:
+
+```sh
+sudo sysctl -w kernel.keys.maxbytes=1000000 kernel.keys.maxkeys=1000
+```
+
+## 4. Install hal0
+
+```sh
+incus exec hal0 -- bash -c 'apt-get update && apt-get install -y curl ca-certificates'
+incus exec hal0 -- bash -c 'curl -fsSL https://hal0.dev/install.sh | bash'
+```
+
+The installer detects that it runs in an unprivileged LXC, checks the
+forwarded device nodes and their gids, and prints the exact device entries
+to fix if anything is missing. See [Install hal0](/docs/getting-started/install/)
+for every environment variable and what each step does.
+
+If slots later fail to start with network-namespace errors, tell hal0 to
+render slots with host networking. It still binds each slot to loopback,
+so nothing new is exposed:
+
+```toml
+# /etc/hal0/hal0.toml (inside the container)
+[slots]
+network_mode = "host"
+```
+
+## 5. Verify
+
+```sh
+incus list hal0                       # the container's IP
+incus exec hal0 -- hal0 status        # system + slot + memory health
+incus exec hal0 -- hal0 doctor        # device nodes, gids, runtime, units
+incus exec hal0 -- flm validate       # NPU only: "flm validate ok"
+```
+
+Dashboard at `http://<container-ip>:8080`, Open WebUI at `:3001`. Load a
+model as in [Load your first model](/docs/getting-started/first-model/)
+and check that the slot's backend is `rocm` or `vulkan`, not `cpu`.
+
+## 6. Day two
+
+```sh
+incus snapshot create hal0 pre-update    # cheap, instant
+incus exec hal0 -- hal0 update
+incus snapshot restore hal0 pre-update   # if you need to go back
+incus delete -f hal0                     # uninstall: nothing of hal0 remains on the host
+```
+
+## What the box does and does not contain
+
+An unprivileged container turns "hal0 is root-equivalent on this machine"
+into "hal0 is root-equivalent inside its container". The host's packages,
+your home directory, ssh keys and other services are out of reach, and
+deleting the container is a complete uninstall.
+
+It does not change anything **inside** the box. The bundled agent still
+runs as the same user as `hal0-api` and can still reach every credential
+hal0 holds (see [SECURITY.md](https://github.com/Hal0ai/hal0/blob/main/SECURITY.md)).
+The GPU is shared with the host kernel, so a process that hangs the GPU
+hangs it for everyone. `hal0-api` is still open on whatever network the
+container sits on until you configure an admin key
+([Authentication](/docs/operate/auth/)).
+
+## Next
+
+<CardGrid>
+  <LinkCard
+    title="Load your first model"
+    href="/docs/getting-started/first-model/"
+    description="Pull a model from Hugging Face and assign it to a slot."
+  />
+  <LinkCard
+    title="GPU drivers and memory"
+    href="/docs/getting-started/drivers/"
+    description="Kernel driver requirements, device nodes, render-group gids, and GTT sizing."
+  />
+  <LinkCard
+    title="Install on Proxmox"
+    href="/docs/getting-started/proxmox/"
+    description="The same device-node passthrough on Proxmox VE, with the quick-path CT script."
+  />
+  <LinkCard
+    title="Authentication"
+    href="/docs/operate/auth/"
+    description="Admin and client keys for a box that is not on a trusted LAN."
+  />
+</CardGrid>
