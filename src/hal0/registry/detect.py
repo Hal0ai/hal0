@@ -99,6 +99,14 @@ _HALOGEN_CONTEXT_LENGTH = 262144
 #: for the scan skip but do not enable vision.
 HALOGEN_VISION_SIDECAR = "qwen38-flash-next-vision.hgn"
 
+#: The ngram lookup table by its exact file name, beside the checkpoint. The
+#: engine's entrypoint finds it there; ``hal0 doctor`` reports a checkpoint
+#: without it.
+HALOGEN_NGRAM_TABLE = "qwen38-flash-next-ngram.hgn"
+
+#: The tokenizer the engine reads, relative to the checkpoint's directory.
+HALOGEN_TOKENIZER_JSON = "tokenizer/tokenizer.json"
+
 
 def is_halogen_companion(name: str) -> bool:
     """True when ``name`` is a halogen companion file, not a checkpoint.
@@ -801,6 +809,8 @@ def detect(path: str | Path, *, filename_hint: str | None = None) -> DetectionRe
 
 __all__ = [
     "HALOGEN_COMPANION_SUFFIXES",
+    "HALOGEN_NGRAM_TABLE",
+    "HALOGEN_TOKENIZER_JSON",
     "HALOGEN_VISION_SIDECAR",
     "HGN_MAGIC",
     "DetectionResult",
