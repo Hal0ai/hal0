@@ -274,6 +274,20 @@ def test_an_unreadable_registry_is_not_a_halogen_finding(
     assert _halogen_weight_rows() == []
 
 
+def test_a_corrupt_registry_row_is_not_a_halogen_finding(
+    tmp_hal0_home: str, tmp_path: Path
+) -> None:
+    """``list()`` json-decodes each row's ``extra`` column; a row hand-edited
+    into invalid JSON raises ``JSONDecodeError`` (a ``ValueError``) from the
+    registry read, which must not traceback ``hal0 doctor profiles``."""
+    registry = ModelRegistry()
+    registry.add(_halogen_model(_halogen_dir(tmp_path / "flash")))
+    with sqlite3.connect(registry.db_path) as conn:
+        conn.execute("UPDATE model SET extra = ? WHERE id = ?", ("{not json", "flash-next"))
+
+    assert _halogen_weight_rows() == []
+
+
 def test_a_bug_in_the_row_checks_is_not_swallowed(
     tmp_hal0_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

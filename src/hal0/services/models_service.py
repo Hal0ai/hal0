@@ -454,6 +454,8 @@ async def commit_scan_rows(
         with contextlib.suppress(OSError):
             size_bytes = resolved.stat().st_size
 
+        # No detection_confidence: only add-from-path stores it (its response feeds
+        # the CLI's confidence line); a scan-commit row never did, and still doesn't.
         metadata = detection_metadata(detection, source="scan", include_confidence=False)
         # A halogen checkpoint also carries its tag, companions and native
         # context (the same stamp add-from-path and the auto-scan apply).

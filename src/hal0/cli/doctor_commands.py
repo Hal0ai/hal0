@@ -1991,10 +1991,11 @@ def _halogen_weight_rows() -> list[dict[str, str]]:
 
     A box that has never registered a model has no registry database yet, and a
     read-only audit must not create one. A registry that cannot be read (an I/O
-    error, a database SQLite refuses, the registry's own errors) is not a halogen
-    finding either: ``hal0 doctor models`` is where that surfaces. Only those
-    failures are swallowed, and only around the registry read; anything else,
-    including a bug in the row checks, propagates.
+    error, a database SQLite refuses, a row whose JSON column is corrupt, the
+    registry's own errors) is not a halogen finding either: ``hal0 doctor
+    models`` is where that surfaces. Only those failures are swallowed, and only
+    around the registry read; anything else, including a bug in the row checks,
+    propagates.
     """
     import sqlite3
 
@@ -2005,7 +2006,8 @@ def _halogen_weight_rows() -> list[dict[str, str]]:
         if not registry.db_path.exists():
             return []
         models = registry.list()
-    except (OSError, sqlite3.Error, RegistryError):
+    except (OSError, sqlite3.Error, ValueError, RegistryError):
+        # ValueError: ``list()`` json-decodes each row's ``extra`` column.
         return []
     return _halogen_weight_rows_for(models)
 
