@@ -1477,10 +1477,16 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         lambda **_kw: Check("api-journal", "API journal read", "pass", "stubbed"),
     )
 
+    monkeypatch.setattr(
+        da,
+        "check_img_custom_nodes",
+        lambda: Check("img-custom-nodes", "Image custom nodes", "pass", "stubbed"),
+    )
+
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
-    # 7 verify rows + 34 extras.
-    assert keys[-35:] == [
+    # Verify rows plus the extra evidence rows.
+    assert keys[-36:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1495,6 +1501,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "seed_context_envelope",
         "agent-uid",
         "api-journal",
+        "img-custom-nodes",
         "stt-weights",
         "seams",
         "mcp_mounts",
