@@ -9,7 +9,7 @@ runner (rocmfpx / cpu) from the slot's device instead, so every seam
 inspected a different image than the Quadlet launched — with or without a
 family default set. These tests pin each seam to ``container_spec``'s ref
 for every fixed-family runtime (the shipped ``img``, ``qwen3tts``, ``tts``
-and ``flm`` seeds, plus a Moonshine STT slot).
+and ``flm`` seeds, plus a Moonshine STT slot and a halogen slot).
 """
 
 from __future__ import annotations
@@ -77,6 +77,19 @@ def _flm_cfg() -> dict[str, Any]:
     }
 
 
+def _halogen_cfg() -> dict[str, Any]:
+    """A halogen (Flash-Next) slot: no shipped seed, the engine is opt-in."""
+    return {
+        "name": "flash",
+        "type": "llm",
+        "device": "gpu-rocm",
+        "runtime": "container",
+        "profile": "halogen",
+        "port": 8099,
+        "model": {"default": "qwen3.8-flash-next-ht43"},
+    }
+
+
 def _moonshine_cfg() -> dict[str, Any]:
     """A CPU speech-to-text slot (no shipped seed)."""
     return {
@@ -94,6 +107,7 @@ _SLOTS = [
     pytest.param(_qwen3tts_cfg, "qwen3tts", id="qwen3tts"),
     pytest.param(_tts_cfg, "kokoro", id="tts-kokoro"),
     pytest.param(_flm_cfg, "flm", id="flm"),
+    pytest.param(_halogen_cfg, "halogen", id="halogen"),
     pytest.param(_moonshine_cfg, "moonshine", id="moonshine"),
 ]
 _DEFAULTS = [

@@ -64,6 +64,7 @@ SEED_PROFILE_NAMES = [
     "cpu-chat",
     "embedding",
     "flm",
+    "halogen",
     "kokoro",
     "moonshine",
     "qwen3-tts",
@@ -136,9 +137,11 @@ def test_seed_mtp_is_the_profile_switch_not_a_bool(name: str) -> None:
 @pytest.mark.parametrize("name", SEED_PROFILE_NAMES)
 def test_seed_passes_the_profile_write_screen(name: str) -> None:
     """A seed would be accepted by the same screen every profile save runs."""
-    from hal0.profiles import screen_profile_flags
+    from hal0.config.schema import ProfileConfig
+    from hal0.profiles import runtime_family_of, screen_profile_flags
 
-    screen_profile_flags(_flags(name))
+    family = runtime_family_of(name, ProfileConfig.model_validate(_load()[name]))
+    screen_profile_flags(_flags(name), runtime_family=family)
 
 
 @pytest.mark.parametrize("name", SEED_PROFILE_NAMES)
@@ -222,6 +225,19 @@ def test_typed_seeds_carry_their_mode_flag(name: str, mode_flag: str) -> None:
 def test_long_context_workload_seeds_pin_a_64k_window(name: str) -> None:
     """The bundled agent needs at least 64,000 tokens (ADR-0029 §4)."""
     assert _load()[name]["ctx_size"] == 65536
+
+
+def test_halogen_seed_is_the_share_a_third_layout() -> None:
+    """The halogen engine takes ``HALOGEN_NAME=value`` tokens, names its own
+    runner, and keeps one full conversation warm in about 70 GiB."""
+    seed = _load()["halogen"]
+    assert seed["runner"] == "halogen"
+    assert seed["flags"] == (
+        "HALOGEN_KV_POOL_POSITIONS=262144 HALOGEN_KV_SLOTS=2 "
+        "HALOGEN_MAX_TOK=16384 HALOGEN_WEIGHTS_LOCK=1"
+    )
+    assert seed["ctx_size"] == 262144
+    assert seed["vision"] == "auto"
 
 
 def test_flm_seed_carries_an_explicit_window() -> None:

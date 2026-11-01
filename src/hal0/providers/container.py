@@ -1273,6 +1273,10 @@ def _provider_for_family(slot_cfg: dict[str, Any], family: str | None) -> Any | 
         from hal0.providers.comfyui import ComfyUIProvider
 
         return ComfyUIProvider()
+    if family == "halogen":
+        from hal0.providers.halogen import HalogenProvider
+
+        return HalogenProvider()
     if family not in (None, "llama-server"):
         # A runtime family with no dispatch branch above. This can only
         # happen when someone extends the RuntimeFamily literal without

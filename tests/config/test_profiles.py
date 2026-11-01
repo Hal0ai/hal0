@@ -154,10 +154,12 @@ class TestLoadProfilesConfig:
             SEED_PROFILES, "auto"
         )
 
-    def test_seeds_name_no_runner(self, tmp_path: Path) -> None:
-        """Seeds are device-agnostic: none pins a runner (the slot's binary decides)."""
+    def test_seeds_name_no_runner_except_halogen(self, tmp_path: Path) -> None:
+        """Seeds are device-agnostic: none pins a runner (the slot's binary decides),
+        except halogen, whose engine is one family and so names its own runner."""
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
-        assert all(profile.runner is None for profile in cfg.profile.values())
+        pinned = {name: p.runner for name, p in cfg.profile.items() if p.runner is not None}
+        assert pinned == {"halogen": "halogen"}
 
     def test_load_valid_file(self, tmp_path: Path) -> None:
         p = tmp_path / "profiles.toml"
@@ -434,12 +436,14 @@ def test_every_seed_profile_passes_the_profile_flag_screen() -> None:
     profile editor gets a 400 — and the launch would refuse it. This runs the
     real screen over every seed.
     """
-    from hal0.profiles import screen_profile_flags
+    from hal0.config.schema import ProfileConfig
+    from hal0.profiles import runtime_family_of, screen_profile_flags
 
     for name, profile in SEED_PROFILES.items():
         flags = profile.get("flags", "")
+        family = runtime_family_of(name, ProfileConfig.model_validate(profile))
         try:
-            screen_profile_flags(flags)
+            screen_profile_flags(flags, runtime_family=family)
         except Exception as exc:  # pragma: no cover - only on a regression
             raise AssertionError(
                 f"seed profile {name!r} carries a flag a profile may not set and "

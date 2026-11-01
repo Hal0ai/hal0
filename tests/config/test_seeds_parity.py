@@ -14,6 +14,7 @@ CANONICAL_PROFILES = {
     "kokoro",
     "qwen3-tts",
     "comfyui",
+    "halogen",
     "brain",
     "moonshine",
 }

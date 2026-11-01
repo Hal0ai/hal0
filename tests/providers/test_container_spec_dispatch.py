@@ -85,6 +85,25 @@ def test_npu_transcription_wins_over_moonshine() -> None:
     assert isinstance(result, FLMProvider)
 
 
+def test_spec_provider_halogen_profile_returns_halogen(tmp_hal0_home: str) -> None:
+    from hal0.providers.halogen import HalogenProvider
+
+    # The seeded ``halogen`` profile carries ``runner = "halogen"``; the slot's
+    # type and device must not shadow the family (a halogen slot is ``llm``).
+    result = _spec_provider_for(
+        {"device": "gpu-rocm", "type": "llm", "profile": "halogen", "name": "flash"}
+    )
+    assert isinstance(result, HalogenProvider)
+
+
+def test_provider_for_family_halogen_does_not_resolve_a_profile() -> None:
+    from hal0.providers.container import _provider_for_family
+    from hal0.providers.halogen import HalogenProvider
+
+    result = _provider_for_family({"device": "gpu-rocm", "type": "llm"}, "halogen")
+    assert isinstance(result, HalogenProvider)
+
+
 def test_unknown_runtime_family_fails_loudly() -> None:
     """A RuntimeFamily extension without a dispatch branch must not silently
     fall through to the llama-server default (the F3 fragility)."""

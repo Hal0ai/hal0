@@ -324,7 +324,13 @@ _REPO = Path(__file__).resolve().parents[2]
 def _seed_flags() -> list[tuple[str, str]]:
     from hal0.config.schema import SEED_PROFILES
 
-    return [(name, str(raw.get("flags", ""))) for name, raw in sorted(SEED_PROFILES.items())]
+    # A halogen seed's flags are HALOGEN_NAME=value environment tokens, not
+    # llama argv; its own screen is covered in tests/slots/test_seed_profiles.py.
+    return [
+        (name, str(raw.get("flags", "")))
+        for name, raw in sorted(SEED_PROFILES.items())
+        if raw.get("runner") != "halogen"
+    ]
 
 
 def _addon_flags() -> list[tuple[str, str]]:
