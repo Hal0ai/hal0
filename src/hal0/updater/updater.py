@@ -3246,6 +3246,65 @@ def refresh_gpu_perms_unit(target: Path, *, job_id: str | None = None) -> str:
     return "unchanged" if up_to_date else "installed"
 
 
+#: Where the installer writes the API unit; a module constant so tests redirect it.
+API_UNIT_DST = Path("/etc/systemd/system/hal0-api.service")
+
+
+def refresh_api_unit(target: Path, *, job_id: str | None = None) -> str:
+    """Re-render ``hal0-api.service`` from the activated release (#3160).
+
+    ``install.sh`` used to be the only writer of the API unit, so an upgraded
+    box kept the unit of its first install (no ``TimeoutStopSec``, no journal
+    group). The body now lives in ``installer/systemd/hal0-api.service.in`` and
+    is rendered here and by ``install.sh`` through
+    :func:`hal0.install.api_unit.render_api_unit`.
+
+    Same shape as :func:`refresh_gpu_perms_unit`: privileged-side only (a no-op
+    unless euid 0), best-effort, write only when the bytes differ, then
+    ``daemon-reload``. It NEVER restarts ``hal0-api``: the running daemon is the
+    process driving the update, and the new unit takes effect at the restart the
+    update flow already performs. ``hal0-api.service.d/`` drop-ins are not
+    touched, and per-box values (binary, workdir, env files) are recovered from
+    the installed unit, so operator layout survives.
+
+    A box with no installed unit is skipped: creating it is the installer's job
+    (it also decides enablement). Returns ``"installed"``, ``"unchanged"``,
+    ``"skipped"`` or ``"failed"``.
+    """
+    if os.geteuid() != 0:
+        return "skipped"
+    from hal0.install.api_unit import TEMPLATE_RELPATH, desired_api_unit
+
+    src = target / TEMPLATE_RELPATH
+    dst = API_UNIT_DST
+    if not src.is_file():
+        log.info("updater.api_unit_template_absent", job_id=job_id, src=str(src))
+        return "skipped"
+    if not dst.is_file():
+        log.info("updater.api_unit_not_installed", job_id=job_id, path=str(dst))
+        return "skipped"
+    try:
+        installed = dst.read_text(encoding="utf-8")
+        desired = desired_api_unit(
+            src.read_text(encoding="utf-8"),
+            installed=installed,
+            venv_dir=sys.prefix,
+            current_link=str(_current_symlink()),
+        )
+        if desired == installed:
+            return "unchanged"
+        tmp = dst.with_name(dst.name + ".tmp")
+        tmp.write_text(desired, encoding="utf-8")
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, dst)
+        subprocess.run(["systemctl", "daemon-reload"], check=False, capture_output=True)
+    except (OSError, ValueError) as exc:
+        log.warning("updater.api_unit_refresh_failed", job_id=job_id, error=str(exc))
+        return "failed"
+    log.info("updater.api_unit_refreshed", job_id=job_id, path=str(dst))
+    return "installed"
+
+
 #: Where systemd unit files live; a module constant so tests redirect it.
 SYSTEMD_UNIT_DIR = Path("/etc/systemd/system")
 
@@ -3589,6 +3648,7 @@ def activate_release(dir_name: str, *, job_id: str | None = None) -> dict[str, A
     wrappers = refresh_privileged_wrappers(target, job_id=job_id)
     path_links = refresh_path_links(target, job_id=job_id)
     gpu_perms_unit = refresh_gpu_perms_unit(target, job_id=job_id)
+    api_unit = refresh_api_unit(target, job_id=job_id)
     retired = remove_retired_artifacts(job_id=job_id)
 
     # Heal root-created tombstone locks on existing boxes (#2698), using
@@ -3618,6 +3678,7 @@ def activate_release(dir_name: str, *, job_id: str | None = None) -> dict[str, A
         "wrappers_refreshed": wrappers["refreshed"],
         "path_links_refreshed": path_links,
         "gpu_perms_unit": gpu_perms_unit,
+        "api_unit": api_unit,
         "retired_artifacts_removed": retired,
     }
 
@@ -4615,6 +4676,7 @@ __all__ = [
     "check_outstanding_migrations",
     "discard_release",
     "fetch_release_manifest",
+    "refresh_api_unit",
     "refresh_gpu_perms_unit",
     "refresh_path_links",
     "refresh_privileged_wrappers",

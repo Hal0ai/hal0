@@ -677,9 +677,9 @@ def check_api_journal_access(
 
     hal0-api runs ``User=hal0`` and gets journal read from
     ``SupplementaryGroups=systemd-journal`` on its own unit, written by the
-    installer. ``hal0 update`` does not rewrite ``hal0-api.service``, so re-run
-    the installer once after updating to 1.4.0; until then the API's log views
-    are silently empty. Advisory (``warn``): nothing else breaks. Both probes
+    installer, and ``hal0 update`` re-renders the unit from the release that ships the template (#3160); a box
+    last updated by an older release keeps the old unit until the next update
+    or installer run, and until then the API's log views are silently empty. Advisory (``warn``): nothing else breaks. Both probes
     are injectable for tests.
     """
     probe_ids = process_ids if process_ids is not None else _api_process_ids
@@ -716,9 +716,78 @@ def check_api_journal_access(
         title,
         _WARN,
         f"{_API_UNIT} is not running with the {_JOURNAL_GROUP} group, so /api/logs and "
-        "MCP logs_tail return no lines — re-run the installer once "
-        "(curl -fsSL https://hal0.dev/install.sh | sudo bash); `hal0 update` does not "
-        "rewrite hal0-api.service",
+        "MCP logs_tail return no lines — run `hal0 update` (it re-renders "
+        "hal0-api.service), or re-run the installer "
+        "(curl -fsSL https://hal0.dev/install.sh | sudo bash), then restart hal0-api",
+    )
+
+
+def check_api_unit_current(
+    *,
+    installed: Callable[[], str | None] | None = None,
+    template: Callable[[], str | None] | None = None,
+    venv_dir: str | None = None,
+    current_link: str | None = None,
+) -> Check:
+    """Does the installed ``hal0-api.service`` match the release's template? (#3160)
+
+    ``hal0 update`` re-renders the unit from ``installer/systemd/hal0-api.service.in``
+    with the per-box values recovered from the installed unit. This row renders
+    the same way and compares, so a unit that predates a template change (stop
+    budget, journal group, env files) shows up as a ``warn`` with the fix.
+    Advisory: the daemon runs fine on the old unit. Probes are injectable.
+    """
+    import sys
+
+    from hal0.install.api_unit import TEMPLATE_RELPATH, desired_api_unit
+
+    key, title = "api-unit", "API unit current"
+    unit_path = Path("/etc/systemd/system") / _API_UNIT
+
+    def _read_installed() -> str | None:
+        try:
+            return unit_path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+
+    link = current_link if current_link is not None else str(paths.usr_lib())
+
+    def _read_template() -> str | None:
+        try:
+            return (Path(link) / TEMPLATE_RELPATH).read_text(encoding="utf-8")
+        except OSError:
+            return None
+
+    unit_text = (installed or _read_installed)()
+    if unit_text is None:
+        return Check(key, title, _PASS, f"{_API_UNIT} is not installed system-wide (dev checkout)")
+    tmpl = (template or _read_template)()
+    if tmpl is None:
+        return Check(
+            key,
+            title,
+            _WARN,
+            f"release template {TEMPLATE_RELPATH} not found under {link} — cannot compare "
+            f"{_API_UNIT}",
+        )
+    try:
+        want = desired_api_unit(
+            tmpl,
+            installed=unit_text,
+            venv_dir=venv_dir if venv_dir is not None else sys.prefix,
+            current_link=link,
+        )
+    except ValueError as exc:
+        return Check(key, title, _WARN, f"could not render {_API_UNIT} template: {exc}")
+    if want == unit_text:
+        return Check(key, title, _PASS, f"{_API_UNIT} matches the release template")
+    return Check(
+        key,
+        title,
+        _WARN,
+        f"{_API_UNIT} differs from this release's template (an older install kept its "
+        "original unit) — run `hal0 update` or re-run the installer, then "
+        "`systemctl restart hal0-api`; drop-ins in hal0-api.service.d/ are kept",
     )
 
 
@@ -3197,6 +3266,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_agent_uid_isolation(),
         check_api_journal_access(),
         check_img_custom_nodes(),
+        check_api_unit_current(),
         check_voice_stt_weights(),
         check_seams(),
         check_mcp_mounts(),

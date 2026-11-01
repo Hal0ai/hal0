@@ -1894,10 +1894,7 @@ ui_step "Systemd units" "~2-5s"
 # restricts itself to hal0's own units (src/hal0/api/routes/logs.py).
 # A host without the group gets no directive: systemd refuses to start a unit
 # whose SupplementaryGroups= does not resolve (216/GROUP).
-if getent group systemd-journal >/dev/null 2>&1; then
-    API_JOURNAL_GROUP_LINE="SupplementaryGroups=systemd-journal"
-else
-    API_JOURNAL_GROUP_LINE="# no systemd-journal group on this host: /api/logs cannot read the journal (#2435)"
+if ! getent group systemd-journal >/dev/null 2>&1; then
     warn "no systemd-journal group on this host — hal0-api cannot read the journal; /api/logs will return no lines"
 fi
 
@@ -1905,62 +1902,21 @@ fi
 # moves it to the new tree without rewriting the unit; dev uses the checkout.
 API_WORKDIR="${CURRENT_LINK:-${PREFIX}}"
 API_UNIT="${UNIT_DIR}/hal0-api.service"
-cat > "${API_UNIT}" <<EOF
-[Unit]
-Description=hal0 API daemon
-Documentation=https://github.com/hal0ai/hal0
-# hindsight-api ordering: deliberately NO After=/Wants= on hindsight-api.
-# The engine unit already carries a soft After=hal0-api.service (its
-# extraction LLM fronts through hal0-api), so pointing back at it from here
-# — as #1613 once did — created a bidirectional ordering cycle that systemd
-# resolved by dropping a unit from the cold-boot transaction, failing the
-# boot outright (observed on CT105, 2026-08-21). The #1613 concern (cold
-# engine start outlasting the boot probe) is covered by the runtime
-# self-heal re-probe alone; memory degrades to pgvector briefly instead of
-# the box failing to boot.
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=hal0
-Group=hal0
-# Journal read for /api/logs + MCP logs_tail; this unit's process tree (#2435).
-${API_JOURNAL_GROUP_LINE}
-# hal0-api writes /etc/hal0/* + /var/lib/hal0/* directly — those trees are
-# hal0:hal0 2775/setgid (src/hal0/install/perms.py, P3-perms). Privileged IO
-# (systemd unit writes, daemon-reload, slot start/stop/restart) routes through
-# \`sudo -n /usr/lib/hal0/bin/hal0-systemctl\` — the one narrow seam (see the
-# hal0-systemctl wrapper install below). UMask is the default 0022: no
-# group-writable kludge needed, the setgid dirs already cover group access.
-WorkingDirectory=${API_WORKDIR}
-EnvironmentFile=${API_ENV}
-# Shared Hermes interpreter policy, persisted by \`hal0 agent install hermes\`.
-# Optional so core hal0 services remain installable when Hermes is skipped/degraded.
-EnvironmentFile=-${ETC_DIR}/hermes-python.env
-# Optional (leading \`-\`): the HF_TOKEN secrets file (WS-D, #1106) — absent
-# on a fresh box with no token gathered at install time, and a missing
-# EnvironmentFile= target must not block the unit from starting.
-EnvironmentFile=-${HF_SECRETS_ENV}
-# No --host here (WS-C): the bind host comes from HAL0_BIND_HOST in the
-# EnvironmentFile above — the SAME var \`hal0 serve\` reads — so the unit
-# and the CLI can never disagree on the bind address.
-ExecStart=${HAL0_BIN} serve --port \${HAL0_PORT}
-Restart=on-failure
-RestartSec=3
-# Stop budget (#2727): uvicorn drains requests for up to 20 s
-# (timeout_graceful_shutdown), then each lifespan teardown step is bounded
-# at 3 s, so a normal stop takes ~21 s and one hung step adds 3 s. Past 30 s
-# something is badly wrong, and systemd's 90 s default only stretched the
-# API outage before the same SIGKILL.
-TimeoutStopSec=30
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=hal0-api
-
-[Install]
-WantedBy=multi-user.target
-EOF
+# The unit body lives in ONE template (installer/systemd/hal0-api.service.in),
+# rendered here and by `hal0 update` (updater.refresh_api_unit) through the same
+# stdlib-only renderer, so a fresh install and an upgraded box get the same
+# bytes (#3160). The systemd-journal decision is made inside the renderer.
+API_UNIT_TMPL="${REPO_ROOT}/installer/systemd/hal0-api.service.in"
+[[ -f "${API_UNIT_TMPL}" ]] || die "${API_UNIT_TMPL} not found — incomplete release tree"
+"${PY}" -I "${REPO_ROOT}/src/hal0/install/api_unit.py" render \
+    --template "${API_UNIT_TMPL}" \
+    --bin "${HAL0_BIN}" \
+    --workdir "${API_WORKDIR}" \
+    --api-env "${API_ENV}" \
+    --etc-dir "${ETC_DIR}" \
+    --hf-secrets-env "${HF_SECRETS_ENV}" \
+    > "${API_UNIT}.tmp" || die "failed to render ${API_UNIT}"
+mv -f "${API_UNIT}.tmp" "${API_UNIT}"
 info "wrote ${API_UNIT}"
 
 # P3-perms: hal0-api now ships User=hal0 directly (no drop-in needed — the

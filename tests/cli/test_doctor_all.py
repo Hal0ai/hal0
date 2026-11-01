@@ -1510,11 +1510,17 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         lambda: Check("img-custom-nodes", "Image custom nodes", "pass", "stubbed"),
     )
 
+    monkeypatch.setattr(
+        da,
+        "check_api_unit_current",
+        lambda **_kw: Check("api-unit", "API unit current", "pass", "stubbed"),
+    )
+
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
     assert gtt_leak_slots == [[{"port": 8081}]]
-    # Verify rows plus the extra evidence rows (one more: gtt-leak).
-    assert keys[-40:] == [
+    # Verify rows plus the extra evidence rows (gtt-leak, api-unit).
+    assert keys[-41:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1532,6 +1538,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "agent-uid",
         "api-journal",
         "img-custom-nodes",
+        "api-unit",
         "stt-weights",
         "seams",
         "mcp_mounts",
