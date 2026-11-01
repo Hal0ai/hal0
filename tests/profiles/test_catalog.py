@@ -811,3 +811,30 @@ def test_catalog_refuses_ngram_on_halogen_profile(tmp_hal0_home: str) -> None:
         catalog.update("llama-ngram", ProfilePatch(runner="halogen", flags=_HALOGEN_FLAGS))
     assert exc.value.code == "profiles.speculation_unsupported"
     assert catalog.resolve("llama-ngram").runtime_family == "llama-server"
+
+
+# ── the shipped halogen seed ─────────────────────────────────────────────────
+
+
+def test_seed_halogen_profile_resolves_to_halogen_family(tmp_hal0_home: str) -> None:
+    profile = ProfileCatalog().resolve("halogen")
+    assert profile.seed is True
+    assert profile.runner == "halogen"
+    assert profile.runtime_family == "halogen"
+    assert profile.supported_slot_types == ("llm",)
+    assert profile.ctx_size == 262144
+    assert profile.vision == "auto"
+
+
+def test_seed_halogen_flags_pass_the_family_screen(tmp_hal0_home: str) -> None:
+    from hal0.profiles import screen_profile_flags
+    from hal0.runners.knobs import parse_env_tokens
+
+    profile = ProfileCatalog().resolve("halogen")
+    screen_profile_flags(profile.flags, runtime_family=profile.runtime_family)
+    assert parse_env_tokens(profile.flags) == {
+        "HALOGEN_KV_POOL_POSITIONS": "262144",
+        "HALOGEN_KV_SLOTS": "2",
+        "HALOGEN_MAX_TOK": "16384",
+        "HALOGEN_WEIGHTS_LOCK": "1",
+    }

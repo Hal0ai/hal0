@@ -48,7 +48,7 @@ export interface Profile {
    *  no runtime opinion. */
   runner?: string | null
   /** Runtime family the profile resolves to (llama-server | flm | kokoro |
-   *  qwen3tts | moonshine | comfyui) — derived server-side, never chosen. A
+   *  qwen3tts | moonshine | comfyui | halogen) — derived server-side, never chosen. A
    *  stored `runner` takes first precedence (its registry entry names exactly
    *  one family); only without one do the older device_class/name rules
    *  decide, defaulting to llama-server. The card chips a non-llama-server

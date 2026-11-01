@@ -13,10 +13,12 @@ from unittest.mock import patch
 import pytest
 
 from hal0.config.schema import SEED_PROFILES, ProfileConfig
+from hal0.profiles import ProfileCatalog
 from hal0.providers.container import (
     _spec_provider_for,
     resolved_argv_detail_for_slot,
     resolved_command_for_slot,
+    slot_effective_context,
     tune_effective_for_slot,
 )
 
@@ -215,3 +217,21 @@ def test_tune_effective_for_llama_slot_carries_empty_tune_unavailable() -> None:
         te = tune_effective_for_slot(cfg)
     assert te is not None
     assert te["tune_unavailable"] == {}
+
+
+# ── halogen: a profile without ctx_size runs the engine's native window ──────
+
+
+def test_slot_effective_context_halogen_fallback_is_native(tmp_hal0_home: str) -> None:
+    ProfileCatalog().create(
+        "flash-noctx", ProfileConfig(flags="HALOGEN_KV_SLOTS=2", runner="halogen")
+    )
+    assert slot_effective_context(_halogen_slot(profile="flash-noctx")) == (262144, "fallback")
+
+
+def test_slot_effective_context_halogen_profile_and_slot_windows(tmp_hal0_home: str) -> None:
+    # The seed names its window, so the source is the profile ...
+    assert slot_effective_context(_halogen_slot()) == (262144, "profile")
+    # ... and a slot [tune] window beats it, exactly as on llama-server.
+    narrowed = _halogen_slot(tune={"ctx_size": 65536})
+    assert slot_effective_context(narrowed) == (65536, "slot")

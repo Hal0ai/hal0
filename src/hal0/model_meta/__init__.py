@@ -42,7 +42,7 @@ device_class              Coarse profile bucket driving container device
                           passthrough + card display:
                           ``gpu | cpu | npu | img`` (:data:`DEVICE_CLASSES`).
 runtime family            Which server process a profile launches:
-                          ``llama-server | flm | kokoro | qwen3tts | comfyui``
+                          ``llama-server | flm | kokoro | qwen3tts | moonshine | comfyui | halogen``
                           (:data:`RUNTIME_FAMILIES`; mirrors
                           ``hal0.profiles.RuntimeFamily``).
 slot type                 Dispatcher slot vocabulary:

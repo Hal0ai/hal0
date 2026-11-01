@@ -96,6 +96,7 @@ from hal0.runners import (
     llama_build_from_tag,
     runner_supports_reasoning_effort,
 )
+from hal0.runners.knobs import HALOGEN_NATIVE_CTX, HALOGEN_TUNE_UNAVAILABLE
 from hal0.slot_lifecycle_budget import (
     HEALTH_TIMEOUT_S,
     UNIT_ADMIN_CALLS_ALLOWANCE_S,
@@ -1397,7 +1398,9 @@ def slot_effective_context(
     The ONE resolver views (``slot_view``, ``/v1/models``, the agent anchor
     window, capacity) use, so no surface re-implements the rule. A slot whose
     profile does not resolve yields ``(None, None)``. FLM slots report their
-    profile's window, else 8192. An FLM trio shadow (``served_by`` its anchor)
+    profile's window, else 8192. A halogen slot reports its profile's window,
+    else the engine's native one (:data:`~hal0.runners.knobs.HALOGEN_NATIVE_CTX`,
+    ``"fallback"``). An FLM trio shadow (``served_by`` its anchor)
     runs no process of its own: it reports its anchor's window.
     """
     if str(slot_cfg.get("device") or "") == "npu" and slot_cfg.get("type") in (
@@ -1416,6 +1419,10 @@ def slot_effective_context(
         ctx_size = getattr(profile, "ctx_size", None)
         return (int(ctx_size), "profile") if ctx_size else (_FLM_DEFAULT_CTX, "fallback")
     profile = effective_tune(slot_cfg, profile)
+    if not profile.ctx_size and _is_halogen_slot(slot_cfg):
+        # The engine serves a model of its own family at its native window; a
+        # profile that names none runs that, not the llama-server 8192 fallback.
+        return HALOGEN_NATIVE_CTX, "fallback"
     model_table = slot_cfg.get("model") if isinstance(slot_cfg.get("model"), Mapping) else {}
     model_id = str(model_table.get("default") or "")
     model_info: dict[str, Any] = {}
@@ -3265,8 +3272,6 @@ def tune_effective_for_slot(
     other preview helpers).
     """
     if _is_halogen_slot(slot_cfg):
-        from hal0.runners.knobs import HALOGEN_TUNE_UNAVAILABLE
-
         try:
             profile = resolve_slot_profile(slot_cfg)
         except Exception:

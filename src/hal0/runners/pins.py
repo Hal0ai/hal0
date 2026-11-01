@@ -290,8 +290,8 @@ def release_gate_problems(pins: Mapping[str, RunnerPin] | None = None) -> list[s
 
     * every runner in :data:`hal0.runners.RUNNER_IMAGES` has a row, and every
       row names a registered runner;
-    * every ``default``-tier runner names a tag AND a digest (``cuda`` and
-      ``qwen3tts`` are optional and may stay unpublished);
+    * every ``default``-tier runner names a tag AND a digest (``cuda``,
+      ``qwen3tts`` and ``halogen`` are optional and may stay unpublished);
     * ``standard`` and ``cpu`` name the same llama.cpp ``b<N>`` release;
     * a published ``cuda`` pin is a ``server-cuda-b<M>`` tag with ``M <= N``.
     """

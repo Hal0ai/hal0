@@ -8,7 +8,9 @@
 # model carries (a paired drafter, else its MTP heads) when the runner
 # supports it, "ngram" uses n-gram lookup, "off" never speculates) and an
 # optional `runner` (the profile-carried runtime). No seed sets
-# `speculation`: the default is "auto".
+# `speculation`: the default is "auto". Only `halogen` sets `runner`: its engine
+# is one family, so the seed names its own; every other seed leaves the runner
+# to the slot's binary.
 #
 # What a profile never carries:
 #   * placement — `-ngl`, `-dev`, `--threads`: the slot's typed fields;
