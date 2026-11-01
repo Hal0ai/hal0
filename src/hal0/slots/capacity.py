@@ -365,7 +365,7 @@ async def halogen_footprint_readout(
     host: Any,
     slot_cfg: dict[str, Any],
     *,
-    state: str | None,
+    state: str | None | Callable[[], str | None],
     model_registry: Any = None,
     sample_gpu: Callable[[], Awaitable[Any]] | None = None,
 ) -> dict[str, Any] | None:
@@ -381,9 +381,11 @@ async def halogen_footprint_readout(
     of the one against the host's pool, with ``state`` so a loaded slot reads
     ``"loaded"`` rather than judging its own resident memory as unavailable.
 
-    ``host`` is the slot manager (it resolves the model's facts); ``sample_gpu``
-    is an async callable returning the host's GPU memory sample, awaited only
-    once a figure exists, so a slot with no readout costs no sampling. An
+    ``host`` is the slot manager (it resolves the model's facts); ``state`` is the
+    slot's state or a callable giving it, called only once a figure exists, so a
+    slot with no readout never reads one; ``sample_gpu`` is an async callable
+    returning the host's GPU memory sample, awaited at the same point, so a slot
+    with no readout costs no sampling. An
     unreadable pool leaves ``host_free_mb`` ``None`` and the verdict ``"unknown"``
     (``"loaded"`` for a resident slot) with the figure kept.
 
@@ -400,7 +402,9 @@ async def halogen_footprint_readout(
         if not model_id:
             return None
         info = await host._resolve_model_info(str(model_id))
-        # The window the slot is booked for: the hook sizes the KV pool from it.
+        # The window the slot is booked for, handed to the hook as ``ctx_tokens``
+        # as every sizing path does. A hook may size from the slot's effective
+        # tune instead (halogen's does) and ignore it.
         ctx, _source = slot_effective_context(slot_cfg, model_registry)
         if ctx:
             info = {**info, "ctx_tokens": ctx}
@@ -410,6 +414,13 @@ async def halogen_footprint_readout(
         return None
     if resident_mb is None:
         return None
+
+    if callable(state):
+        try:
+            state = state()
+        except Exception:
+            log.warning("capacity.halogen_footprint_state_failed", exc_info=True)
+            state = None
 
     gpu: Any = None
     if sample_gpu is not None:

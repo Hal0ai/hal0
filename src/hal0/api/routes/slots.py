@@ -1327,18 +1327,20 @@ async def _halogen_footprint(
     non-probing :meth:`SlotManager.state` (the in-memory record, else
     ``state.json``; never ``status()``/``list()``, which probe the unit and
     reconcile), so a loaded slot reads ``"loaded"`` instead of being judged
-    against the pool it already holds, and the host's GPU memory sample, taken
-    only once a figure exists. ``None`` is
+    against the pool it already holds, and the host's GPU memory sample. Both
+    are handed over as callables that run only once a figure exists, so a slot
+    on another runtime reads neither. ``None`` is
     "no readout", not a failure. Nothing here raises: this rides the
     resolved-command answer.
     """
     from hal0.slots.capacity import halogen_footprint_readout
 
-    state: str | None = None
-    try:
-        state = sm.state(name).value
-    except Exception:
-        log.warning("slots.resolved_footprint_state_failed", slot=name, exc_info=True)
+    def _state() -> str | None:
+        try:
+            return str(sm.state(name).value)
+        except Exception:
+            log.warning("slots.resolved_footprint_state_failed", slot=name, exc_info=True)
+            return None
 
     stats = getattr(request.app.state, "hardware_stats", None)
 
@@ -1348,7 +1350,7 @@ async def _halogen_footprint(
     return await halogen_footprint_readout(
         sm,
         cfg,
-        state=state,
+        state=_state,
         model_registry=getattr(request.app.state, "model_registry", None),
         sample_gpu=_sample_gpu,
     )
