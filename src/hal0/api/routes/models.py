@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ValidationError
 
@@ -172,8 +172,28 @@ def _validation_error_details(exc: ValidationError) -> dict[str, str]:
     return out
 
 
+async def _list_all_models(request: Request) -> dict[str, Any]:
+    """The unfiltered aggregate behind ``GET /api/models`` and ``GET /api/models/{id}``."""
+    return await _svc.list_all(
+        registry=request.app.state.model_registry,
+        upstreams=request.app.state.upstreams,
+        cache=getattr(request.app.state, "model_cache", {}),
+        update_state=getattr(request.app.state, "model_update_state", None),
+    )
+
+
 @router.get("")
-async def list_models(request: Request) -> dict[str, Any]:
+async def list_models(
+    request: Request,
+    installed: bool | None = Query(None, description="Keep rows whose installed flag matches"),
+    type: str | None = Query(None, description="Comma list of dispatch types"),
+    capability: str | None = Query(None, description="Comma list; rows must have ALL"),
+    device: str | None = Query(None, description="Comma list of lanes; rows need ANY"),
+    q: str | None = Query(None, description="Case-insensitive substring of id or name"),
+    fields: str | None = Query(None, description="Comma list of row keys to keep (id always)"),
+    limit: int | None = Query(None, ge=1, le=500, description="Page size"),
+    offset: int | None = Query(None, ge=0, description="Page start"),
+) -> dict[str, Any]:
     """Aggregate models from the local registry + every upstream.
 
     Local registry entries (a real file on disk) win on id collision —
@@ -181,13 +201,27 @@ async def list_models(request: Request) -> dict[str, Any]:
     bytes locally and that's the truth. Each row carries ``installed``
     so the UI can render an installed/advertised badge. The three-source
     aggregation lives in :func:`hal0.services.models_service.list_all`.
+
+    The optional query parameters (``installed``, ``type``, ``capability``,
+    ``device``, ``q``, ``fields``, ``limit``, ``offset``) narrow, page and
+    project the rows via :func:`hal0.services.models_service.narrow_models`
+    and add ``total`` to the envelope. With none of them the response is
+    ``list_all``'s payload unchanged.
     """
-    return await _svc.list_all(
-        registry=request.app.state.model_registry,
-        upstreams=request.app.state.upstreams,
-        cache=getattr(request.app.state, "model_cache", {}),
-        update_state=getattr(request.app.state, "model_update_state", None),
-    )
+    payload = await _list_all_models(request)
+    narrowing: dict[str, Any] = {
+        "installed": installed,
+        "type": type,
+        "capability": capability,
+        "device": device,
+        "q": q,
+        "fields": fields,
+        "limit": limit,
+        "offset": offset,
+    }
+    if all(v is None for v in narrowing.values()):
+        return payload
+    return _svc.narrow_models(payload, **narrowing)
 
 
 @router.get("/catalogue")
@@ -832,7 +866,7 @@ async def get_model(model_id: str, request: Request) -> dict[str, Any]:
     registry = request.app.state.model_registry
     if registry.has(model_id):
         return _model_to_dict(registry.get(model_id))
-    listing = await list_models(request)
+    listing = await _list_all_models(request)
     for m in listing["models"]:
         if m["id"] == model_id:
             return m

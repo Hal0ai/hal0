@@ -1314,6 +1314,51 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
         },
         "required": ["text"],
     },
+    "model_list": {
+        "properties": {
+            "installed": {
+                "type": "boolean",
+                "description": "true = only models on this host, false = only upstream-advertised",
+            },
+            "type": {
+                "type": "string",
+                "description": "Comma list of model types to keep (e.g. 'llm,embedding')",
+            },
+            "capability": {
+                "type": "string",
+                "description": "Comma list of capabilities; a model must have ALL (e.g. 'chat,vision')",
+            },
+            "device": {
+                "type": "string",
+                "description": (
+                    "Comma list of lanes a model must be able to run on (gpu-rocm, "
+                    "gpu-vulkan, cpu, npu); ANY matches"
+                ),
+            },
+            "q": {
+                "type": "string",
+                "description": "Case-insensitive substring of the model id or name",
+            },
+            "fields": {
+                "type": "string",
+                "description": "Comma list of row keys to return (id is always kept)",
+            },
+            "limit": {"type": "integer", "description": "Page size, 1-500"},
+            "offset": {"type": "integer", "description": "Rows to skip before the page"},
+        },
+    },
+    "capability_list": {
+        "properties": {
+            "section": {
+                "type": "string",
+                "description": "Comma list of sections to return: backends, catalogs, selections",
+            },
+            "summary": {
+                "type": "boolean",
+                "description": "true = reduce each catalog to count + id/display_name/downloaded",
+            },
+        },
+    },
     "model_inspect": {
         "properties": {
             "hf_repo": {"type": "string", "description": "HuggingFace repo as 'org/name'"},
@@ -3166,7 +3211,11 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "disabled), a runtime slot row, a reserved service, or a live listener — "
         "plus conflicts and the next free port. Check before choosing a port."
     ),
-    "model_list": "Aggregate models from local registry + upstreams.",
+    "model_list": (
+        "Aggregate models from local registry + upstreams. The unfiltered call returns "
+        "every model with full metadata and is large: pass `fields` (e.g. 'id,type') "
+        "and filters (installed, type, capability, device, q, limit, offset) to keep it small."
+    ),
     "model_show": "Show a single model's full metadata (registry + upstream).",
     "model_scan_preview": "Preview what a model scan would register (dry run).",
     "model_catalogue": (
@@ -3196,7 +3245,11 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Consolidated hardware + feature flags + per-runner backend state "
         "(installed/installable/unavailable) — one read for 'what can this box run'."
     ),
-    "capability_list": "Capability overlay state — backends + selections.",
+    "capability_list": (
+        "Capability overlay state — backends + selections + catalogs. The unfiltered "
+        "call is large (every catalog entry): pass `section` (backends, catalogs, "
+        "selections) and/or `summary=true` to shrink it."
+    ),
     "provider_list": "List configured providers.",
     "version_info": "hal0 version + runtime status.",
     "upstream_list": "List all configured upstream LLM providers.",
