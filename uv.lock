@@ -955,7 +955,7 @@ sentry = [
 
 [package.metadata]
 requires-dist = [
-    { name = "fastapi", specifier = ">=0.115,<0.157" },
+    { name = "fastapi", specifier = ">=0.115,<0.163" },
     { name = "guidellm", marker = "extra == 'bench-guidellm'", specifier = "==0.8.1" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.28" },
