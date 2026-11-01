@@ -20,10 +20,10 @@ source "{ui_sh}"
 rows=(
   $'openwebui\tOpen WebUI\tchat UI, podman container\ton\t'
   $'comfyui\tComfyUI\timage/video generation, starter models\ton\t'
-  $'hermes\tHermes agent\tvenv + config + gateway\ton\t'
+  $'hermes\tHermes agent\tvenv + config + gateway; brings the Operator Board and MCP wiring\ton\t'
   $'pi\tPi agent\tterminal coding agent (CLI/TUI)\toff\t'
-  $'hindsight\tHindsight memory\thindsight-api unit\ton\tno usable Python 3.11-3.14'
-  $'brain\tBrain model\t~1-3 GB pull\ton\t'
+  $'hindsight\tHindsight memory\thindsight-api unit, Memory tab, Hermes memory bank\ton\tno usable Python 3.11-3.14'
+  $'brain\tBrain model\t~1-3 GB pull; steward chat and tools\ton\t'
 )
 declare -A result=()
 ui_component_picker rows result
@@ -36,9 +36,9 @@ echo stderr-still-works >&2
 
 @pytest.fixture
 def run_picker(tmp_path):
-    def _run(keys: str, plain: bool) -> dict:
+    def _run(keys, plain, term="xterm", tty_out="/dev/null", cols=None) -> dict:
         keyfile = tmp_path / "keys"
-        keyfile.write_bytes(keys.encode())
+        keyfile.write_bytes(keys.encode("latin-1"))
         # _ui_init_colors forces UI_PLAIN=1 off a non-tty stdout, so the
         # cursor-path case resets it explicitly after sourcing.
         plain_line = "UI_PLAIN=1; HAL0_PLAIN=1" if plain else "UI_PLAIN=0"
@@ -47,8 +47,12 @@ def run_picker(tmp_path):
         env = {
             "PATH": "/usr/bin:/bin",
             "UI_TTY_IN": str(keyfile),
-            "UI_TTY_OUT": "/dev/null",
+            "UI_TTY_OUT": str(tty_out),
         }
+        if term is not None:
+            env["TERM"] = term
+        if cols is not None:
+            env["UI_TTY_COLS"] = str(cols)
         proc = subprocess.run(
             ["bash", str(script)], env=env, capture_output=True, text=True, timeout=30
         )
@@ -93,3 +97,81 @@ def test_read_failure_accepts_current_state(run_picker):
 def test_plain_leading_zero_and_padded_answers(run_picker):
     out = run_picker(keys="p \n08\n 04 \n\n", plain=True)   # 08 ignored, pi on
     assert out["pi"] == "on" and out["openwebui"] == "on"
+
+
+DEFAULTS = {"openwebui": "on", "comfyui": "on", "hermes": "on",
+            "pi": "off", "hindsight": "unavailable", "brain": "on"}
+
+
+def test_cursor_j_k_move(run_picker):
+    assert run_picker(keys="pj \r", plain=False)["comfyui"] == "off"
+    out = run_picker(keys="pjk \r", plain=False)
+    assert out["openwebui"] == "off" and out["comfyui"] == "on"
+
+
+@pytest.mark.parametrize("down", ["\x1b[B", "\x1bOB"])
+def test_cursor_arrow_down_csi_and_ss3(run_picker, down):
+    out = run_picker(keys="p" + down + " \r", plain=False)
+    assert out["comfyui"] == "off" and out["openwebui"] == "on"
+
+
+@pytest.mark.parametrize("up", ["\x1b[A", "\x1bOA"])
+def test_cursor_arrow_up(run_picker, up):
+    out = run_picker(keys="pjj" + up + " \r", plain=False)
+    assert out["comfyui"] == "off" and out["hermes"] == "on"
+
+
+def test_cursor_modified_arrow_is_ignored(run_picker):
+    # Ctrl-Down must not leak "B" (bare preset) or move the cursor.
+    out = run_picker(keys="p\x1b[1;5B \r", plain=False)
+    assert out["openwebui"] == "off" and out["comfyui"] == "on"
+    assert out["hermes"] == "on" and out["brain"] == "on"
+
+
+def test_cursor_a_after_b_restores_defaults(run_picker):
+    assert run_picker(keys="pba\r", plain=False) == DEFAULTS
+
+
+def test_cursor_space_on_unavailable_row(run_picker):
+    out = run_picker(keys="pjjjj \r", plain=False)
+    assert out == DEFAULTS
+
+
+def test_cursor_eof_accepts_current_state(run_picker):
+    out = run_picker(keys="p ", plain=False)           # EOF, no Enter
+    assert out["openwebui"] == "off" and out["pi"] == "off"
+    assert run_picker(keys="", plain=False) == DEFAULTS
+
+
+def test_cursor_unknown_keys_at_preset_line_reprompt(run_picker):
+    # x and an arrow must neither commit defaults nor leak into the checklist.
+    out = run_picker(keys="x\x1b[B\x1b[1;5Ap \r", plain=False)
+    assert out["openwebui"] == "off" and out["comfyui"] == "on"
+
+
+def test_plain_unknown_word_reprompts_and_words_work(run_picker):
+    out = run_picker(keys="zzz\np\n4\n\n", plain=True)
+    assert out["pi"] == "on"
+    assert set(run_picker(keys="bare\n", plain=True).values()) == {"off", "unavailable"}
+    assert run_picker(keys="pick\n4\n\n", plain=True)["pi"] == "on"
+    assert run_picker(keys="all\n", plain=True) == DEFAULTS
+    assert run_picker(keys="defaults\n", plain=True) == DEFAULTS
+
+
+@pytest.mark.parametrize("term", ["dumb", None])
+def test_dumb_or_unset_term_takes_plain_path(run_picker, term):
+    # Plain-path input (lines) only works if the picker did not go char-wise.
+    out = run_picker(keys="p\n4\n\n", plain=False, term=term)
+    assert out["pi"] == "on"
+
+
+def test_rows_fit_terminal_width(run_picker, tmp_path):
+    import re
+    for plain in (True, False):
+        out_file = tmp_path / "tty-out"
+        run_picker(keys="p j\r\n", plain=plain, cols=60, tty_out=out_file)
+        raw = out_file.read_bytes().decode()
+        text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", raw)
+        lines = [ln.rsplit("\r", 1)[-1] for ln in text.split("\n")]
+        assert any("Hermes agent" in ln for ln in lines)
+        assert max(len(ln) for ln in lines) < 60, lines
