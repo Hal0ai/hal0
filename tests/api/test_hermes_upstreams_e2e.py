@@ -267,13 +267,20 @@ def test_owui_chat_id_becomes_hermes_session(
     r = hermes_client.post(
         "/v1/chat/completions",
         json=_chat("coder"),
-        headers={"X-OpenWebUI-Chat-Id": "abc-123"},
+        headers={
+            "X-OpenWebUI-Chat-Id": "abc-123",
+            "X-OpenWebUI-User-Name": "Alexander",
+            "X-OpenWebUI-User-Email": "alexander@example.com",
+            "X-OpenWebUI-User-Id": "u-1",
+            "X-OpenWebUI-User-Role": "admin",
+        },
     )
     assert r.status_code == 200, r.text
     sent = fake_hermes.received_headers[-1]
     assert sent["x-hermes-session-id"] == "owui-abc-123"
-    # The Open WebUI header itself never reaches Hermes (not on the allowlist).
-    assert "x-openwebui-chat-id" not in sent
+    # No Open WebUI header reaches Hermes (none is on the forwardable list): the
+    # user's name, email, id and role stay with hal0.
+    assert not [h for h in sent if h.startswith("x-openwebui-")]
 
 
 def test_client_session_header_wins(hermes_client: TestClient, fake_hermes: FakeHermes) -> None:
