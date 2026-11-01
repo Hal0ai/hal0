@@ -51,9 +51,11 @@ Two defaults worth knowing before you run it:
   GPU compute node directly, and a privileged CT can repair a mis-mapped
   `/dev/kfd` from inside (see §3). The trade is real: a privileged
   container's root is effectively host root. Pass `UNPRIVILEGED=1` for the
-  narrower container. It is validated on Strix Halo (hal0 1.7.1, Ubuntu
-  24.04 template, default unprivileged idmap): ROCm and Vulkan slots load
-  and serve through the idmap-mapped `/dev/kfd` and `/dev/dri/renderD128`
+  narrower container. That quick path is validated on Strix Halo (hal0
+  1.7.1, Ubuntu 24.04 template via `OS_VERSION=24.04`, default unprivileged
+  idmap; the script wrote the devices, cgroup rules, memlock limit and gid
+  alignment, then the stable bootstrap ran inside): ROCm and Vulkan slots
+  load and serve through the idmap-mapped `/dev/kfd` and `/dev/dri/renderD128`
   (about 57 and 73 tok/s on a 0.8B model, on a GPU shared with another
   workload), `flm validate` passes on the mapped NPU node, and slot
   networking works on the default bridge. Prefer it unless you need to
