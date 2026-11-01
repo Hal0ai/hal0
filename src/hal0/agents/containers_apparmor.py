@@ -38,6 +38,13 @@ deny every podman ``socket()`` (``socket: permission denied``) — and the
 comes from the guest's own profiles, not podman's ``containers-default``. The
 fix is the Ubuntu-documented one: symlink each such profile under
 ``/etc/apparmor.d/disable/`` and unload it with ``apparmor_parser -R``.
+
+That fix is only safe inside a NESTED AppArmor policy namespace (an
+unprivileged LXC: ``/sys/kernel/security/apparmor/.ns_level`` > 0). On bare
+metal or a privileged container the very same stubs are the userns grant that
+``kernel.apparmor_restrict_unprivileged_userns=1`` relies on; disabling them
+would silently and persistently break the operator's own rootless podman. So
+nothing is mutated unless ``.ns_level`` parses as an integer > 0.
 """
 
 from __future__ import annotations
@@ -47,7 +54,7 @@ import re
 import subprocess  # nosec B404 — smoke-tests the local podman
 import tomllib
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -130,12 +137,35 @@ GUEST_UNCONFINED_PROFILES: tuple[str, ...] = (
 #: switched one to enforce mode keeps it.
 _UNCONFINED_FLAG_TOKEN = "flags=(unconfined)"
 #: Smoke-output signature of the #3234 denial (matched case-insensitively).
-_SOCKET_DENIED_TOKEN = "socket: permission denied"
+#: Anchored on the ``: `` that precedes ``socket:`` in real output
+#: (``dial udp 9.9.9.9:53: socket: permission denied``) so a path such as
+#: ``open /run/podman/podman.socket: permission denied`` does not match.
+_SOCKET_DENIED_TOKEN = ": socket: permission denied"
+_NS_LEVEL_FILE_DEFAULT = "/sys/kernel/security/apparmor/.ns_level"
 
 
 def apparmor_d_root() -> Path:
     """AppArmor profile dir; ``HAL0_APPARMOR_D`` overrides it (tests)."""
     return Path(os.environ.get("HAL0_APPARMOR_D", "/etc/apparmor.d"))
+
+
+def apparmor_ns_level_file() -> Path:
+    """AppArmor policy-namespace level file; ``HAL0_APPARMOR_NS_LEVEL_FILE`` overrides it (tests)."""
+    return Path(os.environ.get("HAL0_APPARMOR_NS_LEVEL_FILE", _NS_LEVEL_FILE_DEFAULT))
+
+
+def _apparmor_ns_level_raw() -> str:
+    """Stripped text of the ns-level file, or ``"unreadable"`` if it cannot be read."""
+    try:
+        return apparmor_ns_level_file().read_text(encoding="utf-8").strip()
+    except OSError:
+        return "unreadable"
+
+
+def _in_nested_apparmor_namespace() -> bool:
+    """True iff ``.ns_level`` parses as a plain integer > 0 (a nested policy namespace)."""
+    raw = _apparmor_ns_level_raw()
+    return re.fullmatch(r"[0-9]+", raw) is not None and int(raw) > 0
 
 
 @dataclass
@@ -152,11 +182,13 @@ class ApparmorPreflightResult:
     * ``"retry_failed"``— config written but the retry smoke still failed.
     * ``"no_podman"``   — podman is not installed / not on PATH.
     * ``"guest_profiles_disabled"`` — #3234: the smoke failed with
-                          ``socket: permission denied`` and the guest's
-                          ``flags=(unconfined)`` profiles were disabled;
-                          ``detail`` lists them and ``fixed`` says whether the
-                          retry smoke passed. (When the denial shows but no such
-                          profile exists, the outcome is ``"unrelated"``.)
+                          ``socket: permission denied`` inside a nested AppArmor
+                          namespace and the guest's ``flags=(unconfined)``
+                          profiles were disabled; ``disabled`` lists them,
+                          ``fixed`` says whether the retry smoke passed and
+                          ``detail`` carries the retry's error when it did not.
+                          (A root AppArmor namespace, or no such profile file,
+                          yields ``"unrelated"`` with nothing changed.)
     """
 
     outcome: str
@@ -164,6 +196,8 @@ class ApparmorPreflightResult:
     detail: str | None = None
     #: ``guest_profiles_disabled`` only: did the retry smoke pass?
     fixed: bool = False
+    #: ``guest_profiles_disabled`` only: the profile names that were disabled.
+    disabled: list[str] = field(default_factory=list)
 
 
 def _smoke(run: Callable[..., Any], argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
@@ -185,7 +219,7 @@ def _is_apparmor_failure(proc: subprocess.CompletedProcess[str]) -> bool:
 
 
 def _is_unconfined_profile_network_denial(proc: subprocess.CompletedProcess[str]) -> bool:
-    """#3234 signature: ``socket: permission denied`` and NOT the #1563 shape."""
+    """#3234 signature: ``: socket: permission denied`` and NOT the #1563 shape."""
     if proc.returncode == 0:
         return False
     blob = f"{proc.stdout or ''}\n{proc.stderr or ''}".lower()
@@ -195,8 +229,10 @@ def _is_unconfined_profile_network_denial(proc: subprocess.CompletedProcess[str]
 def guest_unconfined_profiles_present(apparmor_d: Path) -> list[str]:
     """Names from :data:`GUEST_UNCONFINED_PROFILES` still marked ``flags=(unconfined)``.
 
-    A profile counts only if its file exists under ``apparmor_d`` and its text
-    contains ``flags=(unconfined)``. Order follows ``GUEST_UNCONFINED_PROFILES``.
+    A profile counts only if its file exists under ``apparmor_d`` and an
+    UNCOMMENTED line contains ``flags=(unconfined)`` (``#`` starts a comment to
+    end of line, so a ``# was flags=(unconfined)`` note does not count). Order
+    follows ``GUEST_UNCONFINED_PROFILES``.
     """
     present: list[str] = []
     for name in GUEST_UNCONFINED_PROFILES:
@@ -204,7 +240,7 @@ def guest_unconfined_profiles_present(apparmor_d: Path) -> list[str]:
             text = (apparmor_d / name).read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        if _UNCONFINED_FLAG_TOKEN in text:
+        if any(_UNCONFINED_FLAG_TOKEN in line.split("#", 1)[0] for line in text.splitlines()):
             present.append(name)
     return present
 
@@ -343,22 +379,36 @@ def _remediate_guest_unconfined_profiles(
     apparmor_d: Path | None,
 ) -> ApparmorPreflightResult:
     """#3234 branch of :func:`ensure_podman_apparmor_usable`."""
+    # Guard BEFORE any mutation: only a nested AppArmor policy namespace (an
+    # unprivileged LXC) makes these profiles the cause. On the root namespace
+    # they are the userns grant, and disabling them would break rootless podman.
+    if not _in_nested_apparmor_namespace():
+        return ApparmorPreflightResult(
+            outcome="unrelated",
+            detail=(
+                "socket denial seen but AppArmor policy namespace is the root namespace "
+                f"(.ns_level={_apparmor_ns_level_raw()}); not the nested-profile case, "
+                "nothing changed"
+            ),
+        )
     root = apparmor_d if apparmor_d is not None else apparmor_d_root()
     names = disable_guest_unconfined_profiles(root, run)
     if not names:
         return ApparmorPreflightResult(
             outcome="unrelated",
             detail=(
-                "socket: permission denied, but no unconfined guest AppArmor profiles "
+                "socket denial seen, but no unconfined guest AppArmor profiles "
                 f"({', '.join(GUEST_UNCONFINED_PROFILES)}) found under {root}: "
                 + (first.stderr or first.stdout or "").strip()[:150]
             ),
         )
     retry = _smoke(run, smoke_argv)
+    fixed = retry.returncode == 0
     return ApparmorPreflightResult(
         outcome="guest_profiles_disabled",
-        detail=", ".join(names),
-        fixed=retry.returncode == 0,
+        detail=None if fixed else (retry.stderr or retry.stdout or "").strip()[:200],
+        fixed=fixed,
+        disabled=names,
     )
 
 
@@ -377,12 +427,14 @@ def ensure_podman_apparmor_usable(
        (skip the write if already set → ``already``) and retry the smoke.
        Retry passes → ``fixed`` / ``already``; still fails → ``retry_failed``.
 
-    4. (#3234) Failure with ``socket: permission denied`` and NOT the #1563
-       signature → disable the guest's ``flags=(unconfined)`` podman-family
-       AppArmor profiles under ``apparmor_d`` (default ``HAL0_APPARMOR_D`` /
-       ``/etc/apparmor.d``) and retry once → ``guest_profiles_disabled``
-       (``fixed`` = retry passed). No such profile present → ``unrelated``,
-       no retry.
+    4. (#3234) Failure with ``: socket: permission denied`` and NOT the #1563
+       signature → only when ``.ns_level`` (``HAL0_APPARMOR_NS_LEVEL_FILE`` /
+       ``/sys/kernel/security/apparmor/.ns_level``) is an integer > 0, disable
+       the guest's ``flags=(unconfined)`` podman-family AppArmor profiles under
+       ``apparmor_d`` (default ``HAL0_APPARMOR_D`` / ``/etc/apparmor.d``) and
+       retry once → ``guest_profiles_disabled`` (``fixed`` = retry passed). A
+       root AppArmor namespace or no such profile present → ``unrelated``,
+       nothing changed, no retry.
 
     Idempotent: a second call on a converged box re-smokes, passes, and returns
     ``ok`` without touching the config.
@@ -427,6 +479,7 @@ __all__ = [
     "GUEST_UNCONFINED_PROFILES",
     "ApparmorPreflightResult",
     "apparmor_d_root",
+    "apparmor_ns_level_file",
     "disable_guest_unconfined_profiles",
     "ensure_podman_apparmor_usable",
     "guest_unconfined_profiles_present",
@@ -445,9 +498,10 @@ def _main() -> int:
 
     ``HAL0_APPARMOR_CONF`` overrides the target config path — used by tests to
     point this at a throwaway file instead of the real
-    ``/etc/containers/containers.conf``. ``HAL0_APPARMOR_D`` likewise
-    overrides the AppArmor profile dir for the #3234 guest-profile remediation
-    (default ``/etc/apparmor.d``). ``HAL0_CONTAINER_SMOKE_IMAGE`` (the
+    ``/etc/containers/containers.conf``. ``HAL0_APPARMOR_D`` and
+    ``HAL0_APPARMOR_NS_LEVEL_FILE`` likewise override the AppArmor profile dir
+    (default ``/etc/apparmor.d``) and the policy-namespace level file for the
+    #3234 guest-profile remediation. ``HAL0_CONTAINER_SMOKE_IMAGE`` (the
     same var installer/lib/preflight.sh's own smoke test honours) overrides
     the probe image, so an air-gapped/mirrored-registry install probes with
     an image it can actually reach instead of a hardcoded quay.io one.
@@ -459,7 +513,15 @@ def _main() -> int:
         print(f"apparmor-preflight-detail: {result.detail}")
     if result.outcome == "guest_profiles_disabled":
         verdict = "retry passed" if result.fixed else "retry still failing"
-        print(f"apparmor remediation applied: disabled guest profiles {result.detail} — {verdict}")
+        root = apparmor_d_root()
+        revert = "; ".join(
+            f"rm {root}/disable/{n} && apparmor_parser -r {root}/{n}" for n in result.disabled
+        )
+        # ASCII only: this prints before a UTF-8 stdout is guaranteed.
+        print(
+            f"apparmor remediation applied: disabled guest profiles {', '.join(result.disabled)}"
+            f" - {verdict}; revert: {revert}"
+        )
     return 1 if result.outcome == "retry_failed" else 0
 
 

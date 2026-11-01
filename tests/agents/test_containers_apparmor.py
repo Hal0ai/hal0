@@ -11,6 +11,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from hal0.agents import containers_apparmor as ca
 
 
@@ -178,6 +180,19 @@ def _is_parser_remove(argv) -> bool:
     return list(argv)[:2] == ["apparmor_parser", "-R"]
 
 
+@pytest.fixture(autouse=True)
+def _nested_apparmor_ns(monkeypatch, tmp_path: Path) -> Path:
+    """Pretend to be inside a nested AppArmor policy namespace (.ns_level=1).
+
+    The #3234 remediation only mutates when /sys/kernel/security/apparmor/.ns_level
+    is > 0; tests must never depend on the machine running the suite.
+    """
+    ns = tmp_path / "ns_level"
+    ns.write_text("1\n")
+    monkeypatch.setenv("HAL0_APPARMOR_NS_LEVEL_FILE", str(ns))
+    return ns
+
+
 def test_socket_denied_disables_all_six_unconfined_profiles_and_retries(tmp_path: Path) -> None:
     conf = tmp_path / "containers.conf"
     aa = tmp_path / "apparmor.d"
@@ -195,7 +210,7 @@ def test_socket_denied_disables_all_six_unconfined_profiles_and_retries(tmp_path
         link = aa / "disable" / n
         assert link.is_symlink()
         assert Path(os.readlink(link)) == aa / n
-        assert n in (result.detail or "")
+        assert n in result.disabled
     parser_calls = [c for c in calls if _is_parser_remove(c)]
     assert parser_calls == [["apparmor_parser", "-R", str(aa / n)] for n in _PROFILE_NAMES]
     # smoke, six parser calls, then exactly one retry smoke (last call)
@@ -214,12 +229,16 @@ def test_socket_denied_retry_still_failing_reports_not_fixed(tmp_path: Path) -> 
     assert result.outcome == "guest_profiles_disabled"
     assert result.fixed is False
     assert (aa / "disable" / "podman").is_symlink()
+    # the retry's own failure text is kept (like the #1563 path), not the stale first one
+    assert "socket: permission denied" in (result.detail or "")
 
 
 def test_socket_denied_signature_is_case_insensitive(tmp_path: Path) -> None:
     aa = tmp_path / "apparmor.d"
     _seed_profiles(aa, ("podman",))
-    run, _calls = _recorder([_proc(126, "Socket: Permission Denied"), _proc(0), _proc(0)])
+    run, _calls = _recorder(
+        [_proc(126, "dial udp 9.9.9.9:53: Socket: Permission Denied"), _proc(0), _proc(0)]
+    )
     result = ca.ensure_podman_apparmor_usable(run=run, conf_path=tmp_path / "c.conf", apparmor_d=aa)
     assert result.outcome == "guest_profiles_disabled"
     assert result.fixed is True
@@ -243,7 +262,7 @@ def test_profile_without_unconfined_flag_is_not_disabled(tmp_path: Path) -> None
     assert [c for c in calls if _is_parser_remove(c)] == [
         ["apparmor_parser", "-R", str(aa / n)] for n in others
     ]
-    assert "crun" not in (result.detail or "")
+    assert "crun" not in result.disabled
 
 
 def test_socket_denied_without_profile_files_does_nothing(tmp_path: Path) -> None:
@@ -276,7 +295,7 @@ def test_1563_signature_keeps_precedence_over_socket_denied(tmp_path: Path) -> N
     conf = tmp_path / "containers.conf"
     aa = tmp_path / "apparmor.d"
     _seed_profiles(aa)
-    both = _APPARMOR_STDERR + "\nsocket: permission denied"
+    both = _APPARMOR_STDERR + "\nError: dial: socket: permission denied"
     run, calls = _recorder([_proc(243, both), _proc(0)])
 
     result = ca.ensure_podman_apparmor_usable(run=run, conf_path=conf, apparmor_d=aa)
@@ -392,10 +411,14 @@ def test_unconfined_flag_must_be_exact_token(tmp_path: Path) -> None:
 def test_is_unconfined_profile_network_denial() -> None:
     f = ca._is_unconfined_profile_network_denial
     assert f(_proc(126, _SOCKET_DENIED_STDERR))
-    assert f(_proc(126, stdout="x SOCKET: PERMISSION DENIED y"))
+    assert f(_proc(126, stdout="x: SOCKET: PERMISSION DENIED y"))
+    # the verbatim line from the issue
+    assert f(_proc(126, "dial udp 9.9.9.9:53: socket: permission denied"))
+    # anchored: a path ending in `.socket` is NOT the signature
+    assert not f(_proc(126, "open /run/podman/podman.socket: permission denied"))
     assert not f(_proc(126, "Error: Disk quota exceeded"))
     # #1563 shape wins even if it also says socket: permission denied
-    assert not f(_proc(243, _APPARMOR_STDERR + " socket: permission denied"))
+    assert not f(_proc(243, _APPARMOR_STDERR + "; dial: socket: permission denied"))
     assert not f(_proc(0, _SOCKET_DENIED_STDERR))
 
 
@@ -419,10 +442,13 @@ def test_env_seam_is_used_when_apparmor_d_not_passed(monkeypatch, tmp_path: Path
 def test_main_prints_summary_for_guest_profiles_disabled(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
+    aa = tmp_path / "aa"
+    monkeypatch.setenv("HAL0_APPARMOR_D", str(aa))
+
     def _fake(**_kw):
         return ca.ApparmorPreflightResult(
             outcome="guest_profiles_disabled",
-            detail="podman, crun",
+            disabled=["podman", "crun"],
             fixed=True,
         )
 
@@ -431,14 +457,105 @@ def test_main_prints_summary_for_guest_profiles_disabled(
     assert ca._main() == 0
     out = capsys.readouterr().out
     assert (
-        "apparmor remediation applied: disabled guest profiles podman, crun — retry passed" in out
+        "apparmor remediation applied: disabled guest profiles podman, crun - retry passed" in out
     )
+    assert "\u2014" not in out  # ASCII only: no em dash on a non-UTF-8 stdout
+    # ends with the revert command for exactly the profiles that were disabled
+    assert f"revert: rm {aa}/disable/podman && apparmor_parser -r {aa}/podman" in out
+    assert f"rm {aa}/disable/crun && apparmor_parser -r {aa}/crun" in out
+    assert "slirp4netns" not in out
 
     def _fake_bad(**_kw):
         return ca.ApparmorPreflightResult(
-            outcome="guest_profiles_disabled", detail="podman", fixed=False
+            outcome="guest_profiles_disabled", disabled=["podman"], fixed=False, detail="boom"
         )
 
     monkeypatch.setattr(ca, "ensure_podman_apparmor_usable", _fake_bad)
     assert ca._main() == 0  # exit semantics unchanged; the bash gate re-smokes itself
-    assert "retry still failing" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "retry still failing" in out
+    assert "apparmor-preflight-detail: boom" in out
+
+
+# ── final-review wave: namespace guard, anchored token, comments ─────────────
+
+
+@pytest.mark.parametrize(
+    ("content", "shown"),
+    [("0\n", "0"), (None, "unreadable"), ("abc\n", "abc"), ("\n", "")],
+)
+def test_root_namespace_never_mutates(
+    monkeypatch, tmp_path: Path, content: str | None, shown: str
+) -> None:
+    # On bare metal / a privileged LXC the guest `flags=(unconfined)` profiles
+    # are the userns grant (kernel.apparmor_restrict_unprivileged_userns=1);
+    # disabling them would silently break the operator's own rootless podman.
+    ns = tmp_path / "ns_level_case"
+    if content is not None:
+        ns.write_text(content)
+    monkeypatch.setenv("HAL0_APPARMOR_NS_LEVEL_FILE", str(ns))
+    aa = tmp_path / "apparmor.d"
+    _seed_profiles(aa)
+    run, calls = _recorder([_proc(126, _SOCKET_DENIED_STDERR)])
+
+    result = ca.ensure_podman_apparmor_usable(run=run, conf_path=tmp_path / "c.conf", apparmor_d=aa)
+
+    assert result.outcome == "unrelated"
+    assert "root namespace" in (result.detail or "")
+    assert f".ns_level={shown}" in (result.detail or "")
+    assert "nothing changed" in (result.detail or "")
+    assert not (aa / "disable").exists()
+    assert len(calls) == 1  # no parser call, no retry
+    assert not any(_is_parser_remove(c) for c in calls)
+
+
+def test_nested_namespace_level_two_still_remediates(monkeypatch, tmp_path: Path) -> None:
+    ns = tmp_path / "ns_level_two"
+    ns.write_text("2\n")
+    monkeypatch.setenv("HAL0_APPARMOR_NS_LEVEL_FILE", str(ns))
+    aa = tmp_path / "apparmor.d"
+    _seed_profiles(aa, ("podman",))
+    run, _ = _recorder([_proc(126, _SOCKET_DENIED_STDERR), _proc(0), _proc(0)])
+    result = ca.ensure_podman_apparmor_usable(run=run, conf_path=tmp_path / "c.conf", apparmor_d=aa)
+    assert result.outcome == "guest_profiles_disabled"
+
+
+def test_ns_level_file_default_path(monkeypatch) -> None:
+    monkeypatch.delenv("HAL0_APPARMOR_NS_LEVEL_FILE", raising=False)
+    assert ca.apparmor_ns_level_file() == Path("/sys/kernel/security/apparmor/.ns_level")
+
+
+def test_issue_verbatim_line_is_remediated(tmp_path: Path) -> None:
+    aa = tmp_path / "apparmor.d"
+    _seed_profiles(aa, ("podman",))
+    run, _ = _recorder(
+        [_proc(126, "dial udp 9.9.9.9:53: socket: permission denied"), _proc(0), _proc(0)]
+    )
+    result = ca.ensure_podman_apparmor_usable(run=run, conf_path=tmp_path / "c.conf", apparmor_d=aa)
+    assert result.outcome == "guest_profiles_disabled"
+    assert result.fixed is True
+
+
+def test_podman_socket_path_denial_is_not_the_signature(tmp_path: Path) -> None:
+    # `open /run/podman/podman.socket: permission denied` is a plain file
+    # permission error, not the AppArmor socket() denial: untouched.
+    aa = tmp_path / "apparmor.d"
+    _seed_profiles(aa)
+    run, calls = _recorder([_proc(125, "Error: open /run/podman/podman.socket: permission denied")])
+    result = ca.ensure_podman_apparmor_usable(run=run, conf_path=tmp_path / "c.conf", apparmor_d=aa)
+    assert result.outcome == "unrelated"
+    assert not (aa / "disable").exists()
+    assert len(calls) == 1
+
+
+def test_commented_out_unconfined_flag_does_not_count(tmp_path: Path) -> None:
+    aa = tmp_path / "apparmor.d"
+    aa.mkdir()
+    (aa / "podman").write_text(
+        "# was flags=(unconfined) before the operator tightened it\n"
+        "profile podman /usr/bin/podman {  # flags=(unconfined)\n  userns,\n}\n"
+    )
+    (aa / "crun").write_text(
+        "profile crun /usr/bin/crun flags=(unconfined) { # trailing comment\n  userns,\n}\n"
+    )
+    assert ca.guest_unconfined_profiles_present(aa) == ["crun"]
