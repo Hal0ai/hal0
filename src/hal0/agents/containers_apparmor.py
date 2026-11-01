@@ -29,6 +29,15 @@ pip-installed. Bare-script invocation skips the ``hal0.agents`` package
 directly, so ``structlog`` — the one third-party import here — is made
 optional below with a stdlib fallback. Everything else is stdlib-only
 (``tomllib`` has been stdlib since 3.11; hal0's floor is 3.12).
+
+#3234: a SECOND, independent remediation lives here. On an UNPRIVILEGED
+Ubuntu 24.04 LXC the guest's own AppArmor profiles for podman / crun / buildah
+/ runc / rootlesskit / slirp4netns are ``flags=(unconfined)`` userns stubs that
+deny every podman ``socket()`` (``socket: permission denied``) — and the
+``apparmor_profile = "unconfined"`` fix above cannot help, because the denial
+comes from the guest's own profiles, not podman's ``containers-default``. The
+fix is the Ubuntu-documented one: symlink each such profile under
+``/etc/apparmor.d/disable/`` and unload it with ``apparmor_parser -R``.
 """
 
 from __future__ import annotations
@@ -58,6 +67,10 @@ except ImportError:  # pragma: no cover - exercised by the early-installer path
         def info(self, event: str, **kw: Any) -> None:
             extra = " ".join(f"{k}={v}" for k, v in kw.items())
             self._logger.info("%s", f"{event} {extra}".rstrip())
+
+        def warning(self, event: str, **kw: Any) -> None:
+            extra = " ".join(f"{k}={v}" for k, v in kw.items())
+            self._logger.warning("%s", f"{event} {extra}".rstrip())
 
     log = _FallbackLog()  # type: ignore[assignment]
 
@@ -103,6 +116,27 @@ _APPARMOR_SIGNATURE_ANY: tuple[str, ...] = (
     "exit status 243",
 )
 
+#: #3234 — guest AppArmor profiles that ship ``flags=(unconfined)`` on Ubuntu
+#: 24.04 and, inside an UNPRIVILEGED LXC, deny every podman ``socket()``.
+GUEST_UNCONFINED_PROFILES: tuple[str, ...] = (
+    "podman",
+    "crun",
+    "buildah",
+    "runc",
+    "rootlesskit",
+    "slirp4netns",
+)
+#: Only a profile whose text carries this token is touched — an operator who
+#: switched one to enforce mode keeps it.
+_UNCONFINED_FLAG_TOKEN = "flags=(unconfined)"
+#: Smoke-output signature of the #3234 denial (matched case-insensitively).
+_SOCKET_DENIED_TOKEN = "socket: permission denied"
+
+
+def apparmor_d_root() -> Path:
+    """AppArmor profile dir; ``HAL0_APPARMOR_D`` overrides it (tests)."""
+    return Path(os.environ.get("HAL0_APPARMOR_D", "/etc/apparmor.d"))
+
 
 @dataclass
 class ApparmorPreflightResult:
@@ -117,11 +151,19 @@ class ApparmorPreflightResult:
     * ``"unrelated"``   — the smoke failed for a NON-apparmor reason; untouched.
     * ``"retry_failed"``— config written but the retry smoke still failed.
     * ``"no_podman"``   — podman is not installed / not on PATH.
+    * ``"guest_profiles_disabled"`` — #3234: the smoke failed with
+                          ``socket: permission denied`` and the guest's
+                          ``flags=(unconfined)`` profiles were disabled;
+                          ``detail`` lists them and ``fixed`` says whether the
+                          retry smoke passed. (When the denial shows but no such
+                          profile exists, the outcome is ``"unrelated"``.)
     """
 
     outcome: str
     wrote_config: bool = False
     detail: str | None = None
+    #: ``guest_profiles_disabled`` only: did the retry smoke pass?
+    fixed: bool = False
 
 
 def _smoke(run: Callable[..., Any], argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
@@ -140,6 +182,72 @@ def _is_apparmor_failure(proc: subprocess.CompletedProcess[str]) -> bool:
     if _APPARMOR_REQUIRED_TOKEN not in blob:
         return False
     return any(sig in blob for sig in _APPARMOR_SIGNATURE_ANY)
+
+
+def _is_unconfined_profile_network_denial(proc: subprocess.CompletedProcess[str]) -> bool:
+    """#3234 signature: ``socket: permission denied`` and NOT the #1563 shape."""
+    if proc.returncode == 0:
+        return False
+    blob = f"{proc.stdout or ''}\n{proc.stderr or ''}".lower()
+    return _SOCKET_DENIED_TOKEN in blob and not _is_apparmor_failure(proc)
+
+
+def guest_unconfined_profiles_present(apparmor_d: Path) -> list[str]:
+    """Names from :data:`GUEST_UNCONFINED_PROFILES` still marked ``flags=(unconfined)``.
+
+    A profile counts only if its file exists under ``apparmor_d`` and its text
+    contains ``flags=(unconfined)``. Order follows ``GUEST_UNCONFINED_PROFILES``.
+    """
+    present: list[str] = []
+    for name in GUEST_UNCONFINED_PROFILES:
+        try:
+            text = (apparmor_d / name).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if _UNCONFINED_FLAG_TOKEN in text:
+            present.append(name)
+    return present
+
+
+def disable_guest_unconfined_profiles(apparmor_d: Path, run: Callable[..., Any]) -> list[str]:
+    """Disable every present guest unconfined profile; return the names handled.
+
+    Per profile: ``<apparmor_d>/disable/<name>`` becomes a symlink to
+    ``<apparmor_d>/<name>`` (an existing link or file is replaced), then
+    ``apparmor_parser -R <profile>`` unloads it. A non-zero parser exit — or a
+    missing ``apparmor_parser`` — is logged at warning and ignored: the symlink
+    already makes the disable persistent across reboots, and the caller re-smokes.
+    Idempotent.
+    """
+    names = guest_unconfined_profiles_present(apparmor_d)
+    if not names:
+        return []
+    disable_dir = apparmor_d / "disable"
+    disable_dir.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        link = disable_dir / name
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        os.symlink(apparmor_d / name, link)
+        try:
+            proc = run(  # nosec B603 — fixed argv from this module
+                ["apparmor_parser", "-R", str(apparmor_d / name)],
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError:
+            log.warning("containers_apparmor.parser_missing", profile=name)
+            continue
+        if proc.returncode != 0:
+            log.warning(
+                "containers_apparmor.parser_remove_failed",
+                profile=name,
+                rc=proc.returncode,
+                err=(proc.stderr or proc.stdout or "").strip()[:200],
+            )
+        else:
+            log.info("containers_apparmor.disabled_guest_profile", profile=name)
+    return names
 
 
 def _apparmor_already_unconfined(conf_path: Path) -> bool:
@@ -227,11 +335,39 @@ def _atomic_write(path: Path, content: str) -> None:
     tmp.replace(path)
 
 
+def _remediate_guest_unconfined_profiles(
+    first: subprocess.CompletedProcess[str],
+    *,
+    run: Callable[..., Any],
+    smoke_argv: tuple[str, ...],
+    apparmor_d: Path | None,
+) -> ApparmorPreflightResult:
+    """#3234 branch of :func:`ensure_podman_apparmor_usable`."""
+    root = apparmor_d if apparmor_d is not None else apparmor_d_root()
+    names = disable_guest_unconfined_profiles(root, run)
+    if not names:
+        return ApparmorPreflightResult(
+            outcome="unrelated",
+            detail=(
+                "socket: permission denied, but no unconfined guest AppArmor profiles "
+                f"({', '.join(GUEST_UNCONFINED_PROFILES)}) found under {root}: "
+                + (first.stderr or first.stdout or "").strip()[:150]
+            ),
+        )
+    retry = _smoke(run, smoke_argv)
+    return ApparmorPreflightResult(
+        outcome="guest_profiles_disabled",
+        detail=", ".join(names),
+        fixed=retry.returncode == 0,
+    )
+
+
 def ensure_podman_apparmor_usable(
     *,
     run: Callable[..., Any] = subprocess.run,
     conf_path: Path = CONTAINERS_CONF,
     smoke_argv: tuple[str, ...] = _SMOKE_ARGV,
+    apparmor_d: Path | None = None,
 ) -> ApparmorPreflightResult:
     """Detect the unconfined-LXC apparmor failure and converge the fix.
 
@@ -240,6 +376,13 @@ def ensure_podman_apparmor_usable(
     3. Failure WITH the signature → write ``apparmor_profile = "unconfined"``
        (skip the write if already set → ``already``) and retry the smoke.
        Retry passes → ``fixed`` / ``already``; still fails → ``retry_failed``.
+
+    4. (#3234) Failure with ``socket: permission denied`` and NOT the #1563
+       signature → disable the guest's ``flags=(unconfined)`` podman-family
+       AppArmor profiles under ``apparmor_d`` (default ``HAL0_APPARMOR_D`` /
+       ``/etc/apparmor.d``) and retry once → ``guest_profiles_disabled``
+       (``fixed`` = retry passed). No such profile present → ``unrelated``,
+       no retry.
 
     Idempotent: a second call on a converged box re-smokes, passes, and returns
     ``ok`` without touching the config.
@@ -253,6 +396,10 @@ def ensure_podman_apparmor_usable(
         return ApparmorPreflightResult(outcome="ok")
 
     if not _is_apparmor_failure(first):
+        if _is_unconfined_profile_network_denial(first):
+            return _remediate_guest_unconfined_profiles(
+                first, run=run, smoke_argv=smoke_argv, apparmor_d=apparmor_d
+            )
         return ApparmorPreflightResult(
             outcome="unrelated",
             detail=(first.stderr or first.stdout or "").strip()[:200],
@@ -277,8 +424,12 @@ def ensure_podman_apparmor_usable(
 
 __all__ = [
     "CONTAINERS_CONF",
+    "GUEST_UNCONFINED_PROFILES",
     "ApparmorPreflightResult",
+    "apparmor_d_root",
+    "disable_guest_unconfined_profiles",
     "ensure_podman_apparmor_usable",
+    "guest_unconfined_profiles_present",
 ]
 
 
@@ -294,7 +445,9 @@ def _main() -> int:
 
     ``HAL0_APPARMOR_CONF`` overrides the target config path — used by tests to
     point this at a throwaway file instead of the real
-    ``/etc/containers/containers.conf``. ``HAL0_CONTAINER_SMOKE_IMAGE`` (the
+    ``/etc/containers/containers.conf``. ``HAL0_APPARMOR_D`` likewise
+    overrides the AppArmor profile dir for the #3234 guest-profile remediation
+    (default ``/etc/apparmor.d``). ``HAL0_CONTAINER_SMOKE_IMAGE`` (the
     same var installer/lib/preflight.sh's own smoke test honours) overrides
     the probe image, so an air-gapped/mirrored-registry install probes with
     an image it can actually reach instead of a hardcoded quay.io one.
@@ -304,6 +457,9 @@ def _main() -> int:
     print(f"apparmor-preflight: {result.outcome} wrote={result.wrote_config}")
     if result.detail:
         print(f"apparmor-preflight-detail: {result.detail}")
+    if result.outcome == "guest_profiles_disabled":
+        verdict = "retry passed" if result.fixed else "retry still failing"
+        print(f"apparmor remediation applied: disabled guest profiles {result.detail} — {verdict}")
     return 1 if result.outcome == "retry_failed" else 0
 
 
