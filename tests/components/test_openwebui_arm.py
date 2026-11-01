@@ -548,3 +548,33 @@ def test_revoke_openwebui_nulls_block(tmp_path) -> None:
     _reconcile(True)
     assert "TOOL_SERVER_CONNECTIONS" not in _env()
     assert store.get_client("openwebui").revoked_at is not None  # not re-minted
+
+
+def test_a_foreign_clients_key_in_the_env_is_never_copied_onto_new_connections(tmp_path) -> None:
+    """A hand edit that pasted another client's key is left as it is, not spread to every scope."""
+    import json
+
+    from hal0.config.paths import openwebui_env
+
+    _installed_unit(tmp_path)
+    store = _bridge(tmp_path)
+    store.add_client("openwebui", "system:openwebui")  # exists, but its key is not in hand
+    env = openwebui_env()
+    env.parent.mkdir(parents=True, exist_ok=True)
+    foreign = "hal0bk_laptop.not-the-openwebui-key"
+    line = json.dumps([{"type": "mcp", "key": foreign, "info": {"id": "hal0-memory"}}])
+    env.write_text(f"TOOL_SERVER_CONNECTIONS={line}\n")
+    assert openwebui_arm._existing_bridge_key() is None
+    _reconcile(True)
+    rendered = json.loads(_env()["TOOL_SERVER_CONNECTIONS"])
+    assert [c["info"]["id"] for c in rendered] == ["hal0-memory"]  # kept, not re-rendered
+
+
+def test_the_openwebui_key_in_the_env_is_carried_forward(tmp_path) -> None:
+    import json
+
+    _installed_unit(tmp_path)
+    _bridge(tmp_path)
+    _reconcile(True)
+    key = json.loads(_env()["TOOL_SERVER_CONNECTIONS"])[0]["key"]
+    assert openwebui_arm._existing_bridge_key() == key

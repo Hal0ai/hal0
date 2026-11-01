@@ -92,9 +92,15 @@ _OWUI_CREATED_BY = "system:openwebui"
 
 
 def _existing_bridge_key() -> str | None:
-    """The bridge key already rendered in ``openwebui.env``'s ``TOOL_SERVER_CONNECTIONS``."""
+    """The ``openwebui`` bridge key already rendered in ``openwebui.env``'s ``TOOL_SERVER_CONNECTIONS``.
+
+    Only a key whose embedded client name is ``openwebui`` counts: a hand edit that
+    pasted another client's key there is never carried forward (or copied onto the
+    other connections) by a later render.
+    """
     import json
 
+    from hal0.bridge import keys
     from hal0.config.paths import openwebui_env
     from hal0.openwebui import env_writer
 
@@ -102,7 +108,7 @@ def _existing_bridge_key() -> str | None:
         raw = env_writer._read_existing_env(openwebui_env()).get("TOOL_SERVER_CONNECTIONS", "")
         for entry in json.loads(raw) if raw else []:
             key = entry.get("key") if isinstance(entry, dict) else None
-            if isinstance(key, str) and key.startswith("hal0bk_"):
+            if isinstance(key, str) and keys.name_of(key) == _OWUI_CLIENT:
                 return key
     except Exception:
         return None
