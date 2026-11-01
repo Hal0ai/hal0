@@ -44,12 +44,16 @@ def test_render_matches_the_normalised_upstream_v0_22_2_unit() -> None:
     d923a5eb with the default config, on a release whose checkout has
     node_modules/.bin (upstream prepends it to PATH). Normalised to current/, it
     must equal hal0's render line for line, PATH included. The documented
-    differences (watchdog, TimeoutStopSec from config, LD_LIBRARY_PATH, node
-    dirs under ~/.hermes) only appear when the hal0 user's Hermes config or
-    home asks for them, and the fixture has none.
+    differences (watchdog, LD_LIBRARY_PATH, node dirs under ~/.hermes) only
+    appear when the hal0 user's Hermes config or home asks for them, and the
+    fixture has none. The one standing difference is TimeoutStopSec: upstream
+    sizes it from the config's drain timeouts (70 for the defaults), hal0 renders
+    a fixed ceiling because root must not read that config (#2895).
     """
     upstream = gu.normalise_text((FIXTURES / "gateway-unit-v0.22.2.service").read_text())
-    assert _norm(regen.render_unit(UID)) == _norm(upstream)
+    assert "TimeoutStopSec=70" in upstream.splitlines()
+    sized = upstream.replace("TimeoutStopSec=70", f"TimeoutStopSec={regen.TIMEOUT_STOP_SEC}")
+    assert _norm(regen.render_unit(UID)) == _norm(sized)
     path_line = next(ln for ln in upstream.splitlines() if ln.startswith('Environment="PATH='))
     assert path_line in regen.render_unit(UID).splitlines()
 
@@ -79,7 +83,17 @@ def test_stale_reason_accepts_only_hal0s_launcher() -> None:
     """#2894: anything but hal0's launcher on current/ is stale, upstream's shim first."""
     v022 = (FIXTURES / "gateway-unit-v0.22.2.service").read_text()
     assert regen.unit_stale_reason(regen.render_unit(UID)) is None
-    assert regen.unit_stale_reason(gu.normalise_text(v022)) is None
+    # The unit every 1.6.x box has differs from the render only in TimeoutStopSec=70 (#2895).
+    v022_stop = regen.unit_stale_reason(gu.normalise_text(v022)) or ""
+    assert "TimeoutStopSec=70" in v022_stop
+    assert (
+        regen.unit_stale_reason(
+            gu.normalise_text(v022).replace(
+                "TimeoutStopSec=70", f"TimeoutStopSec={regen.TIMEOUT_STOP_SEC}"
+            )
+        )
+        is None
+    )
     old = (FIXTURES / "gateway-unit-3ef6bbd2.service").read_text()
     assert "predates Hermes 0.22" in (regen.unit_stale_reason(old) or "")
     shim = (FIXTURES / "gateway-unit-upstream-shim.service").read_text()
@@ -96,6 +110,122 @@ def test_stale_reason_accepts_only_hal0s_launcher() -> None:
         ln for ln in regen.render_unit(UID).splitlines() if not ln.startswith("ExecStart=")
     )
     assert "no ExecStart=" in (regen.unit_stale_reason(no_start) or "")
+
+
+# ── stop timeout (#2895) ───────────────────────────────────────────────────────
+
+
+def _stop_sec(text: str) -> int:
+    (line,) = [ln for ln in text.splitlines() if ln.startswith("TimeoutStopSec=")]
+    return int(line.split("=", 1)[1])
+
+
+def _upstream_stop_sec(drain: float, cron: float) -> int:
+    """Upstream's ``resolve_systemd_timeout_stop_sec`` (gateway/restart.py:342, d923a5eb and 4d043038).
+
+    What the gateway itself expects of ``TimeoutStopSec``: it warns at start,
+    "systemd may SIGKILL the gateway mid-drain", when the unit is shorter.
+    """
+    cron_budget = cron + 10 if cron > 0 else 0
+    return int(max(60, max(drain, cron_budget) + 30))
+
+
+def test_upstream_formula_reproduces_the_defaults_and_the_reported_box() -> None:
+    """Pins the oracle above to the numbers in the issue: 70 for the defaults, 210 for 180 + 30."""
+    assert _upstream_stop_sec(0, 30) == 70
+    assert _upstream_stop_sec(180, 30) == 210
+
+
+@pytest.mark.parametrize(
+    ("drain", "cron"),
+    [(0, 30), (60, 30), (180, 30), (180, 180), (300, 30), (300, 300), (0, 0)],
+)
+def test_the_rendered_stop_timeout_outlasts_a_raised_drain_timeout(drain: int, cron: int) -> None:
+    """#2895: a raised ``agent.restart_drain_timeout`` must not be cut off by systemd."""
+    assert _stop_sec(regen.render_unit(UID)) >= _upstream_stop_sec(drain, cron)
+
+
+def test_the_stop_timeout_is_a_derived_ceiling_not_the_old_fixed_70() -> None:
+    assert regen.TIMEOUT_STOP_SEC == (
+        regen.DRAIN_CEILING_S + regen.CRON_CLEANUP_RESERVE_S + regen.STOP_HEADROOM_S
+    )
+    assert regen.TIMEOUT_STOP_SEC > 70
+    assert regen.validate_unit(regen.render_unit(UID), UID) == []
+
+
+@pytest.mark.parametrize(
+    ("value", "stale"),
+    [
+        ("70", True),  # the unit 1.6.x wrote
+        ("90s", True),
+        ("210", True),  # upstream's own sizing for the reported box: still short of the ceiling
+        (str(regen.TIMEOUT_STOP_SEC - 1), True),
+        (str(regen.TIMEOUT_STOP_SEC), False),
+        (f"{regen.TIMEOUT_STOP_SEC}s", False),
+        ("900", False),  # an operator who raised it further keeps it
+        ("0", False),  # 0 and infinity mean no timeout
+        ("infinity", False),
+        ("2min", False),  # a unit this module cannot read as seconds is left alone
+    ],
+)
+def test_a_unit_with_a_shorter_stop_timeout_is_stale(value: str, stale: bool) -> None:
+    text = regen.render_unit(UID).replace(
+        f"TimeoutStopSec={regen.TIMEOUT_STOP_SEC}", f"TimeoutStopSec={value}"
+    )
+    reason = regen.unit_stale_reason(text)
+    if stale:
+        assert reason is not None and f"TimeoutStopSec={value.removesuffix('s')} " in reason
+        assert "#2895" in reason
+    else:
+        assert reason is None
+
+
+def test_a_hal0_launcher_unit_with_the_old_stop_timeout_is_rewritten_and_restarted(
+    tmp_path: Path,
+) -> None:
+    """The unit 1.6.x boxes carry is hal0's launcher with TimeoutStopSec=70: healed on update."""
+    unit = tmp_path / "hermes-gateway.service"
+    unit.write_text(regen.render_unit(UID).replace(f"={regen.TIMEOUT_STOP_SEC}", "=70"))
+    systemctl = FakeSystemctl(enabled="enabled", active=True)
+
+    result = _regen(tmp_path, systemctl, linger=True)
+
+    assert result.action == "regenerated" and result.unit_rewritten
+    assert unit.read_text() == regen.render_unit(UID)
+    assert systemctl.mutating == [
+        ["systemctl", "daemon-reload"],
+        ["systemctl", "restart", "hermes-gateway.service"],
+    ]
+    # And it is a fixed point: the next run finds nothing to do.
+    assert _regen(tmp_path, FakeSystemctl(enabled="enabled", active=True), linger=True).action == (
+        "noop"
+    )
+
+
+def test_a_stopped_gateway_with_the_old_stop_timeout_is_rewritten_but_not_started(
+    tmp_path: Path,
+) -> None:
+    unit = tmp_path / "hermes-gateway.service"
+    unit.write_text(regen.render_unit(UID).replace(f"={regen.TIMEOUT_STOP_SEC}", "=70"))
+    systemctl = FakeSystemctl(enabled="enabled", active=False)
+    _regen(tmp_path, systemctl, linger=True)
+    assert unit.read_text() == regen.render_unit(UID)
+    assert systemctl.mutating == [["systemctl", "daemon-reload"]]
+
+
+def test_the_restart_that_waits_out_the_stop_is_not_cut_short_by_hal0(tmp_path: Path) -> None:
+    """A restart blocks for up to TimeoutStopSec; hal0's own subprocess timeout must not fire first."""
+    _old_unit(tmp_path)
+    seen: dict[str, float] = {}
+
+    class Recording(FakeSystemctl):
+        def __call__(self, argv: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+            if argv[:2] == ["systemctl", "restart"]:
+                seen["timeout"] = kw["timeout"]
+            return super().__call__(argv, **kw)
+
+    _regen(tmp_path, Recording(enabled="enabled", active=True), linger=True)
+    assert seen["timeout"] > regen.TIMEOUT_STOP_SEC
 
 
 # ── validation ─────────────────────────────────────────────────────────────────

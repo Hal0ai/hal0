@@ -402,6 +402,20 @@ def test_hermes_gateway_routes_through_sudo_with_no_arguments() -> None:
     assert out["action"] == "noop"
 
 
+def test_hermes_gateway_verb_outlasts_a_stop_that_runs_to_its_timeout() -> None:
+    """#2895: a restart waits out TimeoutStopSec; the sudo call must not time out before systemd."""
+    from hal0.agents.hermes_gateway_regen import TIMEOUT_STOP_SEC
+
+    seen: dict[str, Any] = {}
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, _envelope({"action": "noop"}), "")
+
+    UpdateSeam(run=run, is_hal0_user=lambda: True).hermes_gateway()
+    assert seen["timeout"] > TIMEOUT_STOP_SEC
+
+
 def test_hermes_gateway_failure_raises_update_error() -> None:
     run = FakeRun(returncode=1, stderr="hal0-update: hermes gateway: loginctl failed")
     seam = UpdateSeam(run=run, is_hal0_user=lambda: True)

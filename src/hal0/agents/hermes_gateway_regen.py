@@ -33,8 +33,9 @@ template uses upstream's defaults instead, because root must not read
 
 * ``Type=simple`` and no ``WatchdogSec=`` (upstream switches to
   ``Type=notify`` only when the config sets a watchdog);
-* ``TimeoutStopSec=70`` (upstream derives it from the config's drain
-  timeouts; 70 is the value for the defaults);
+* a fixed ``TimeoutStopSec`` (upstream derives it from the config's drain
+  timeouts, 70 for the defaults; hal0 renders the value upstream would derive
+  at the largest drain it supports, see :data:`TIMEOUT_STOP_SEC`, #2895);
 * no ``LD_LIBRARY_PATH`` line, and none of the ``PATH`` entries upstream
   adds under the target user's Hermes home (``~/.hermes/node/bin``,
   ``~/.hermes/node_modules/.bin`` and pm's managed-Node dirs), because finding
@@ -87,8 +88,32 @@ SERVICE_PATH = (
     f"{NODE_BIN}:{AGENT_HOME}/.local/bin:"
     "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 )
-#: Upstream's ``TimeoutStopSec`` for the default drain timeouts.
-TIMEOUT_STOP_SEC = 70
+#: ``TimeoutStopSec`` of the rendered unit (#2895). systemd SIGKILLs the gateway
+#: once it passes, so it must outlast the gateway's own drain or agent turns in
+#: flight are cut off mid-drain. Upstream sizes it per box from the Hermes
+#: config (``gateway/restart.py:342`` ``resolve_systemd_timeout_stop_sec`` at
+#: ``d923a5eb`` and ``4d043038``)::
+#:
+#:     max(60, max(restart_drain_timeout, cron_drain_timeout + 10) + 30)
+#:
+#: which is 70 for the defaults (drain 0, cron drain 30) and 210 for the box in
+#: #2895 (drain 180). Root must not read ``hal0``'s Hermes config and the
+#: ``hal0-update hermes-gateway`` verb takes no arguments, so hal0 renders that
+#: formula at the largest drain it supports instead: a unit that covers any
+#: ``agent.restart_drain_timeout`` and ``agent.cron_drain_timeout`` up to
+#: :data:`DRAIN_CEILING_S` (300 + 10 + 30 = 340 s). A drain raised past the
+#: ceiling is cut off and the gateway warns about it at start. The cost is that
+#: a gateway which ignores SIGTERM is killed after this long rather than 70 s;
+#: one that exits is never waited on, so a normal stop is as fast as before.
+DRAIN_CEILING_S = 300
+#: Upstream's ``CRON_DRAIN_CLEANUP_RESERVE_S``: held back after the cron drain.
+CRON_CLEANUP_RESERVE_S = 10
+#: Upstream's ``SYSTEMD_STOP_HEADROOM_S``: added after the drain budget.
+STOP_HEADROOM_S = 30
+TIMEOUT_STOP_SEC = DRAIN_CEILING_S + CRON_CLEANUP_RESERVE_S + STOP_HEADROOM_S
+#: A ``systemctl restart`` blocks for the stop (up to ``TimeoutStopSec``) and the
+#: start; hal0's own subprocess timeout must outlast both.
+RESTART_TIMEOUT_S = float(TIMEOUT_STOP_SEC + 60)
 
 #: Where logind records lingering users.
 LINGER_DIR = "/var/lib/systemd/linger"
@@ -253,6 +278,25 @@ _LAUNCHER_PREFIX = {
     "ExecStopPost": f'-"{PYTHON}" "-I" "-c" ',
 }
 _LAUNCHER_PATH = f"sys.path.insert(0, '{SRC}')"
+#: ``TimeoutStopSec=`` as plain seconds (``70`` or ``70s``). Other spellings
+#: (``2min``, ``infinity``) are not read, so they are never called stale.
+_STOP_SEC_RE = re.compile(r"^TimeoutStopSec=(\d+)(?:s|sec)?$")
+
+
+def _stop_timeout(text: str) -> int | None:
+    """The unit's ``TimeoutStopSec`` in seconds, or ``None`` if unset or not plain seconds.
+
+    systemd takes the last assignment. ``0`` means no timeout, so it reads as
+    ``None`` too.
+    """
+    found: int | None = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line.startswith("TimeoutStopSec="):
+            continue
+        m = _STOP_SEC_RE.match(line)
+        found = int(m.group(1)) or None if m else None
+    return found
 
 
 def unit_stale_reason(text: str) -> str | None:
@@ -263,6 +307,9 @@ def unit_stale_reason(text: str) -> str | None:
     ``current/venv/bin/python -I -c`` with ``current/src`` on ``sys.path``.
     That covers upstream's release-local shim under ``src/.hermes/bin/``
     (#2894), a unit still naming ``releases/<id>``, and any other launcher.
+    A ``TimeoutStopSec`` shorter than :data:`TIMEOUT_STOP_SEC` is stale too
+    (#2895): every unit written before it carries 70, which cuts off a raised
+    drain. A longer one is an operator's choice and is kept.
     A pure text check: it reads no file and runs nothing.
     """
     if unit_is_old_shape(text):
@@ -283,6 +330,13 @@ def unit_stale_reason(text: str) -> str | None:
                 )
             if not value.startswith(prefix) or _LAUNCHER_PATH not in value:
                 return f"the hermes-gateway unit's {key}= is not hal0's launcher"
+    stop = _stop_timeout(text)
+    if stop is not None and stop < TIMEOUT_STOP_SEC:
+        return (
+            f"the hermes-gateway unit's TimeoutStopSec={stop} is shorter than the "
+            f"{TIMEOUT_STOP_SEC} s hal0 renders, so systemd can SIGKILL the gateway "
+            "mid-drain (#2895)"
+        )
     return None
 
 
@@ -348,9 +402,11 @@ def _is_active(run: Runner, unit: str = GATEWAY_UNIT) -> bool:
     return _active_state(run, unit) is True
 
 
-def _check(run: Runner, argv: list[str], what: str, done: list[str]) -> None:
+def _check(
+    run: Runner, argv: list[str], what: str, done: list[str], *, timeout: float = 120
+) -> None:
     try:
-        proc = _run(run, argv)
+        proc = _run(run, argv, timeout=timeout)
     except (OSError, subprocess.SubprocessError) as exc:
         raise GatewayRegenError(_failure(what, str(exc), done)) from exc
     if proc.returncode != 0:
@@ -760,6 +816,7 @@ def migrate_hashed_units(
                 ["systemctl", "restart", GATEWAY_UNIT],
                 f"systemctl restart {GATEWAY_UNIT}",
                 done,
+                timeout=RESTART_TIMEOUT_S,
             )
             result.restarted = True
             done.append("restarted")
@@ -867,6 +924,7 @@ def install_gateway_unit(
                     ["systemctl", "restart", GATEWAY_UNIT],
                     f"systemctl restart {GATEWAY_UNIT}",
                     done,
+                    timeout=RESTART_TIMEOUT_S,
                 )
                 result.restarted = True
                 done.append("restarted")
@@ -996,7 +1054,11 @@ def regenerate_gateway_unit(
         done.append(f"linger on for {GATEWAY_USER}")
     if was_active:
         _check(
-            run, ["systemctl", "restart", GATEWAY_UNIT], f"systemctl restart {GATEWAY_UNIT}", done
+            run,
+            ["systemctl", "restart", GATEWAY_UNIT],
+            f"systemctl restart {GATEWAY_UNIT}",
+            done,
+            timeout=RESTART_TIMEOUT_S,
         )
         result.restarted = True
         done.append("restarted")

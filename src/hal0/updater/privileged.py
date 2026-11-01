@@ -59,6 +59,7 @@ from typing import Any
 
 import structlog
 
+from hal0.agents.hermes_gateway_regen import RESTART_TIMEOUT_S
 from hal0.log_setup import configure_stderr_logging
 from hal0.system.seam import is_hal0_service_user
 from hal0.updater.updater import (
@@ -97,8 +98,9 @@ _RESULT_KEY = "hal0_update_result"
 _STAGE_TIMEOUT = 1800.0
 _ACTIVATE_TIMEOUT = 1800.0
 _SHORT_TIMEOUT = 60.0
-#: A restart waits out the gateway's TimeoutStopSec (70 s) and its start.
-_GATEWAY_TIMEOUT = 300.0
+#: A restart waits out the gateway's TimeoutStopSec and its start, and the verb
+#: can restart twice: once moving off upstream's suffixed unit, once healing (#2895).
+_GATEWAY_TIMEOUT = 2 * RESTART_TIMEOUT_S
 
 
 def _remediation(detail: str) -> UpdatePrivilegeError:
