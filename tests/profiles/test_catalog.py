@@ -618,3 +618,161 @@ def test_supported_slot_types_halogen_is_llm_only() -> None:
     from hal0.profiles import _supported_slot_types
 
     assert _supported_slot_types("halogen") == ("llm",)
+
+
+# ── Task 5: the flag screen follows the profile's runtime family ──────────────
+#
+# A halogen profile's ``flags`` are ``HALOGEN_NAME=value`` environment tokens,
+# which the llama screen rejects as bare positionals. The catalog routes the
+# screen by the profile's runtime family (``_runtime_family``), computed from
+# the MERGED profile on update.
+
+_HALOGEN_FLAGS = "HALOGEN_KV_POOL_POSITIONS=524288 HALOGEN_KV_SLOTS=4"
+
+
+def test_halogen_profile_accepts_env_tokens(tmp_hal0_home: str) -> None:
+    created = ProfileCatalog().create(
+        "flash-big", ProfileConfig(flags=_HALOGEN_FLAGS, runner="halogen")
+    )
+    assert created.runtime_family == "halogen"
+    assert ProfileCatalog().resolve("flash-big").flags == _HALOGEN_FLAGS
+
+
+def test_halogen_profile_refuses_managed_env(tmp_hal0_home: str) -> None:
+    catalog = ProfileCatalog()
+    with pytest.raises(UnprocessableEntity) as exc:
+        catalog.create("flash-bad", ProfileConfig(flags="HALOGEN_API_PORT=9000", runner="halogen"))
+    assert exc.value.code == "profiles.halogen_flag_denied"
+    assert all(profile.name != "flash-bad" for profile in catalog.list())
+
+
+def test_halogen_profile_refuses_out_of_range_knob(tmp_hal0_home: str) -> None:
+    with pytest.raises(UnprocessableEntity) as exc:
+        ProfileCatalog().create(
+            "flash-range", ProfileConfig(flags="HALOGEN_KV_SLOTS=999", runner="halogen")
+        )
+    assert exc.value.code == "profiles.halogen_flag_out_of_range"
+
+
+def test_halogen_profile_refuses_llama_flags(tmp_hal0_home: str) -> None:
+    """The halogen screen is exclusive: a llama flag is malformed here."""
+    with pytest.raises(UnprocessableEntity) as exc:
+        ProfileCatalog().create("flash-llama", ProfileConfig(flags="-fa on", runner="halogen"))
+    assert exc.value.code == "profiles.halogen_flag_malformed"
+
+
+def test_llama_profile_still_refuses_bare_positional(tmp_hal0_home: str) -> None:
+    """No runner is the llama screen: HALOGEN_* text is a bare positional."""
+    with pytest.raises(BadRequest) as exc:
+        ProfileCatalog().create("llama-bad", ProfileConfig(flags="HALOGEN_KV_SLOTS=2"))
+    assert exc.value.code == "slot.positional_arg_denied"
+
+
+def test_llama_runner_profile_still_refuses_bare_positional(tmp_hal0_home: str) -> None:
+    with pytest.raises(BadRequest) as exc:
+        ProfileCatalog().create(
+            "llama-runner-bad", ProfileConfig(flags="HALOGEN_KV_SLOTS=2", runner="standard")
+        )
+    assert exc.value.code == "slot.positional_arg_denied"
+
+
+def test_screen_profile_flags_routes_on_runtime_family() -> None:
+    from hal0.profiles import screen_profile_flags
+
+    screen_profile_flags(_HALOGEN_FLAGS, runtime_family="halogen")
+    for family in (None, "llama-server", "flm"):
+        with pytest.raises(BadRequest) as exc:
+            screen_profile_flags(_HALOGEN_FLAGS, runtime_family=family)
+        assert exc.value.code == "slot.positional_arg_denied"
+    # The llama screen is the default and keeps accepting llama flags.
+    screen_profile_flags("-fa on")
+    screen_profile_flags("-fa on", runtime_family="llama-server")
+    # Blank text passes under every family.
+    screen_profile_flags(None, runtime_family="halogen")
+    screen_profile_flags("  ", runtime_family="halogen")
+
+
+def test_update_of_a_halogen_profile_screens_with_the_stored_runner(tmp_hal0_home: str) -> None:
+    """A patch with no runner takes the family from the stored profile."""
+    catalog = ProfileCatalog()
+    catalog.create("flash-edit", ProfileConfig(flags="HALOGEN_KV_SLOTS=2", runner="halogen"))
+
+    edited = catalog.update("flash-edit", ProfilePatch(flags="HALOGEN_KV_SLOTS=3"))
+    assert edited.flags == "HALOGEN_KV_SLOTS=3"
+
+    with pytest.raises(UnprocessableEntity) as exc:
+        catalog.update("flash-edit", ProfilePatch(flags="HALOGEN_API_PORT=9000"))
+    assert exc.value.code == "profiles.halogen_flag_denied"
+    with pytest.raises(UnprocessableEntity) as exc:
+        catalog.update("flash-edit", ProfilePatch(flags="-fa on"))
+    assert exc.value.code == "profiles.halogen_flag_malformed"
+    assert catalog.resolve("flash-edit").flags == "HALOGEN_KV_SLOTS=3"
+
+
+def test_update_of_a_llama_profile_still_refuses_halogen_tokens(tmp_hal0_home: str) -> None:
+    catalog = ProfileCatalog()
+    catalog.create("llama-edit", ProfileConfig(flags="-fa on"))
+    with pytest.raises(BadRequest) as exc:
+        catalog.update("llama-edit", ProfilePatch(flags="HALOGEN_KV_SLOTS=2"))
+    assert exc.value.code == "slot.positional_arg_denied"
+    assert catalog.resolve("llama-edit").flags == "-fa on"
+
+
+def test_update_switching_runner_screens_with_the_new_family(tmp_hal0_home: str) -> None:
+    """The family comes from the MERGED profile: the patch's runner wins."""
+    catalog = ProfileCatalog()
+    catalog.create("to-flash", ProfileConfig(flags="-fa on"))
+
+    switched = catalog.update("to-flash", ProfilePatch(runner="halogen", flags=_HALOGEN_FLAGS))
+    assert switched.runtime_family == "halogen"
+    assert switched.flags == _HALOGEN_FLAGS
+
+    back = catalog.update("to-flash", ProfilePatch(runner="standard", flags="-fa on"))
+    assert back.runtime_family == "llama-server"
+    assert back.flags == "-fa on"
+
+
+def test_update_switching_runner_refuses_flags_of_the_old_family(tmp_hal0_home: str) -> None:
+    catalog = ProfileCatalog()
+    catalog.create("mismatch", ProfileConfig(flags="-fa on"))
+    with pytest.raises(UnprocessableEntity) as exc:
+        catalog.update("mismatch", ProfilePatch(runner="halogen", flags="-fa off"))
+    assert exc.value.code == "profiles.halogen_flag_malformed"
+    assert catalog.resolve("mismatch").runner is None
+
+
+def test_update_switching_family_without_flags_screens_the_stored_flags(
+    tmp_hal0_home: str,
+) -> None:
+    """Moving a profile to another family must not strand flags of the old one."""
+    catalog = ProfileCatalog()
+    catalog.create("strand", ProfileConfig(flags="-fa on"))
+    with pytest.raises(UnprocessableEntity) as exc:
+        catalog.update("strand", ProfilePatch(runner="halogen"))
+    assert exc.value.code == "profiles.halogen_flag_malformed"
+    assert catalog.resolve("strand").runner is None
+
+    catalog.create("strand-flash", ProfileConfig(flags="HALOGEN_KV_SLOTS=2", runner="halogen"))
+    with pytest.raises(BadRequest) as bad:
+        catalog.update("strand-flash", ProfilePatch(runner=""))
+    assert bad.value.code == "slot.positional_arg_denied"
+    assert catalog.resolve("strand-flash").runner == "halogen"
+
+
+def test_update_without_flags_and_without_a_family_change_never_screens(
+    tmp_hal0_home: str,
+) -> None:
+    """A tune-only patch keeps working on a profile whose stored flags are stale."""
+    from hal0.config.loader import load_profiles_config, save_profiles_config
+
+    catalog = ProfileCatalog()
+    catalog.create("keeps-working", ProfileConfig(flags="-fa on"))
+    stored = load_profiles_config()
+    stored.profile["keeps-working"] = stored.profile["keeps-working"].model_copy(
+        update={"flags": "-fa on -dev ROCm0"}
+    )
+    save_profiles_config(stored)
+
+    edited = catalog.update("keeps-working", ProfilePatch(intent="still editable"))
+    assert edited.intent == "still editable"
+    assert edited.flags == "-fa on -dev ROCm0"

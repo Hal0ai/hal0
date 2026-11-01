@@ -1035,3 +1035,67 @@ def test_profile_budget_upper_bound_returns_client_error(client: TestClient) -> 
         == 422
     )
     assert client.get("/api/profiles/bounded").json()["reasoning_budget"] == REASONING_BUDGET_MAX
+
+
+# ── Task 5: the flag screen follows the profile's runtime family ───────────────
+
+
+def test_create_halogen_profile_accepts_env_tokens(client: TestClient) -> None:
+    r = client.post(
+        "/api/profiles",
+        json={
+            "name": "flash-big",
+            "flags": "HALOGEN_KV_POOL_POSITIONS=524288 HALOGEN_KV_SLOTS=4",
+            "runner": "halogen",
+        },
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["runtime_family"] == "halogen"
+
+
+def test_create_halogen_profile_refuses_managed_env(client: TestClient) -> None:
+    r = client.post(
+        "/api/profiles",
+        json={"name": "flash-bad", "flags": "HALOGEN_API_PORT=9000", "runner": "halogen"},
+    )
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "profiles.halogen_flag_denied"
+    assert all(p["name"] != "flash-bad" for p in client.get("/api/profiles").json())
+
+
+def test_create_llama_profile_refuses_halogen_tokens(client: TestClient) -> None:
+    r = client.post("/api/profiles", json={"name": "llama-bad", "flags": "HALOGEN_KV_SLOTS=2"})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "slot.positional_arg_denied"
+
+
+def test_update_halogen_profile_screens_with_the_stored_runner(client: TestClient) -> None:
+    created = client.post(
+        "/api/profiles",
+        json={"name": "flash-edit", "flags": "HALOGEN_KV_SLOTS=2", "runner": "halogen"},
+    )
+    assert created.status_code == 201, created.text
+
+    ok = client.put("/api/profiles/flash-edit", json={"flags": "HALOGEN_KV_SLOTS=3"})
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["flags"] == "HALOGEN_KV_SLOTS=3"
+
+    denied = client.put("/api/profiles/flash-edit", json={"flags": "HALOGEN_API_PORT=9000"})
+    assert denied.status_code == 422, denied.text
+    assert denied.json()["error"]["code"] == "profiles.halogen_flag_denied"
+    assert client.get("/api/profiles/flash-edit").json()["flags"] == "HALOGEN_KV_SLOTS=3"
+
+
+def test_update_switching_runner_screens_with_the_new_family(client: TestClient) -> None:
+    created = client.post("/api/profiles", json={"name": "to-flash", "flags": "-fa on"})
+    assert created.status_code == 201, created.text
+
+    refused = client.put("/api/profiles/to-flash", json={"runner": "halogen", "flags": "-fa off"})
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["error"]["code"] == "profiles.halogen_flag_malformed"
+
+    switched = client.put(
+        "/api/profiles/to-flash", json={"runner": "halogen", "flags": "HALOGEN_KV_SLOTS=2"}
+    )
+    assert switched.status_code == 200, switched.text
+    assert switched.json()["runtime_family"] == "halogen"

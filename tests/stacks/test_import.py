@@ -193,6 +193,41 @@ class TestImportStack:
         assert "custom-bad" not in load_profiles_config().profile
         assert not any(r.slug == "s3" for r in catalog.list())
 
+    def test_import_screens_a_halogen_profile_by_its_runtime_family(
+        self, reg: ModelRegistry, tmp_hal0_home: str
+    ) -> None:
+        """An embedded halogen profile carries HALOGEN_* tokens (accepted); the
+        same text on a llama profile, or a managed variable on a halogen one,
+        blocks the whole import."""
+        from hal0.config.loader import load_profiles_config
+        from hal0.errors import UnprocessableEntity
+
+        catalog = StacksCatalog(path=Path(tmp_hal0_home) / "etc/hal0/stacks.toml")
+
+        ok = export_envelope(_stack(), exported_at="t", registry=reg)
+        ok["stack"]["profiles"] = {"flash-ok": {"flags": "HALOGEN_KV_SLOTS=4", "runner": "halogen"}}
+        ok["stack"]["slots"][0]["profile"] = "flash-ok"
+        import_stack(ok, "s4", catalog, registry=reg)
+        assert load_profiles_config().profile["flash-ok"].flags == "HALOGEN_KV_SLOTS=4"
+
+        managed = export_envelope(_stack(), exported_at="t", registry=reg)
+        managed["stack"]["profiles"] = {
+            "flash-bad": {"flags": "HALOGEN_API_PORT=9000", "runner": "halogen"}
+        }
+        managed["stack"]["slots"][0]["profile"] = "flash-bad"
+        with pytest.raises(UnprocessableEntity) as exc:
+            import_stack(managed, "s5", catalog, registry=reg)
+        assert exc.value.code == "profiles.halogen_flag_denied"
+        assert "flash-bad" not in load_profiles_config().profile
+
+        llama = export_envelope(_stack(), exported_at="t", registry=reg)
+        llama["stack"]["profiles"] = {"llama-bad": {"flags": "HALOGEN_KV_SLOTS=4"}}
+        llama["stack"]["slots"][0]["profile"] = "llama-bad"
+        with pytest.raises(BadRequest) as bad:
+            import_stack(llama, "s6", catalog, registry=reg)
+        assert bad.value.code == "slot.positional_arg_denied"
+        assert "llama-bad" not in load_profiles_config().profile
+
 
 def test_a_v140_stack_envelope_with_embedded_mtp_profiles_imports_converted(
     reg: ModelRegistry, tmp_hal0_home: str

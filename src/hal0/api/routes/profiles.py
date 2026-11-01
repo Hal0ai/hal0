@@ -41,6 +41,7 @@ from hal0.profiles import (
     UNSET,
     ProfileCatalog,
     ProfilePatch,
+    runner_runtime_family,
     runtime_family_of,
     screen_profile_flags,
 )
@@ -294,6 +295,10 @@ def list_profiles() -> list[dict[str, Any]]:
 # --reasoning-format none. Hardware/managed denials raise
 # slot.hardware_flag_denied / slot.managed_arg_denied, model-fact flags
 # profiles.model_fact_flag_denied, reasoning-format slot.reasoning_format_none_denied.
+# The screen follows the profile's runtime family: a halogen profile carries
+# HALOGEN_NAME=value tokens instead and is checked by
+# hal0.runners.knobs.screen_halogen_flags (profiles.halogen_flag_malformed /
+# _denied / _out_of_range, all 422).
 
 
 @router.post("", status_code=201)
@@ -310,9 +315,12 @@ async def create_profile(body: ProfileBody, request: Request) -> dict[str, Any]:
         400 slot.hardware_flag_denied: flags carry a slot-owned hardware flag.
         400 slot.managed_arg_denied: flags carry a hal0-managed flag.
         400 profiles.model_fact_flag_denied: flags carry a model-fact flag.
+        422 profiles.halogen_flag_malformed / profiles.halogen_flag_denied /
+            profiles.halogen_flag_out_of_range: a halogen profile's flags are
+            not valid ``HALOGEN_NAME=value`` tokens.
     """
     _check_ctx_size(body.ctx_size)
-    screen_profile_flags(body.flags)
+    screen_profile_flags(body.flags, runtime_family=runner_runtime_family(body.runner))
     async with record_action(
         request, category="profile", action="profile.create", target=body.name
     ) as rec:
@@ -608,6 +616,10 @@ async def update_profile(name: str, body: ProfileUpdateBody, request: Request) -
         400 slot.hardware_flag_denied / slot.managed_arg_denied /
             profiles.model_fact_flag_denied / slot.reasoning_format_none_denied:
             the flags carry a flag a profile may not hold.
+        422 profiles.halogen_flag_malformed / profiles.halogen_flag_denied /
+            profiles.halogen_flag_out_of_range: the profile's runtime family
+            (the body's ``runner``, else the stored one) is halogen and the
+            flags are not valid ``HALOGEN_NAME=value`` tokens.
     """
     catalog = ProfileCatalog()
     before = None
@@ -620,7 +632,9 @@ async def update_profile(name: str, body: ProfileUpdateBody, request: Request) -
     reasoning_budget = body.reasoning_budget if "reasoning_budget" in sent else UNSET
     if ctx_size is not UNSET:
         _check_ctx_size(ctx_size)
-    screen_profile_flags(body.flags)
+    # The family of the MERGED profile: the body's runner, else the stored one.
+    runner = body.runner if body.runner is not None else (existing.runner if existing else None)
+    screen_profile_flags(body.flags, runtime_family=runner_runtime_family(runner))
     async with record_action(
         request,
         category="profile",

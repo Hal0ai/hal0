@@ -254,8 +254,8 @@ class ProfileCatalog:
 
     def create(self, name: str, profile: ProfileConfig) -> ResolvedProfile:
         self._validate_name(name)
-        screen_profile_flags(profile.flags)
         profile = profile.model_copy(update={"runner": screen_profile_runner(profile.runner)})
+        screen_profile_flags(profile.flags, runtime_family=_runtime_family(name, profile))
         with self._lock:
             catalog = load_profiles_config(self._path)
             if name in catalog.profile:
@@ -270,8 +270,6 @@ class ProfileCatalog:
 
     def update(self, name: str, patch: ProfilePatch) -> ResolvedProfile:
         self._guard_custom(name)
-        if patch.flags is not None:
-            screen_profile_flags(patch.flags)
         with self._lock:
             catalog = load_profiles_config(self._path)
             existing = catalog.profile.get(name)
@@ -314,6 +312,13 @@ class ProfileCatalog:
                 cloned_from=existing.cloned_from,
                 intent=patch.intent if patch.intent is not None else existing.intent,
             )
+            # The family comes from the MERGED profile (the patch's runner, else
+            # the stored one). Flags the patch carries are always screened; stored
+            # flags only when the patch moves the profile to another family, so a
+            # tune-only edit still works on a profile holding stale flags.
+            family = _runtime_family(name, updated)
+            if patch.flags is not None or family != _runtime_family(name, existing):
+                screen_profile_flags(updated.flags, runtime_family=family)
             catalog.profile[name] = updated
             save_profiles_config(catalog, self._path)
         return self._resolve_item(name, updated)
@@ -442,6 +447,7 @@ __all__ = [
     "RuntimeFamily",
     "SlotType",
     "resolve_loaded_profile",
+    "runner_runtime_family",
     "runtime_family_of",
     "screen_profile_flags",
     "screen_profile_runner",
@@ -516,8 +522,29 @@ def screen_profile_runner(runner: str | None) -> str | None:
     return key
 
 
-def screen_profile_flags(flags: str | None) -> None:
+def runner_runtime_family(runner: str | None) -> RuntimeFamily | None:
+    """The runtime family a runner key names; ``None`` for blank or unregistered.
+
+    Callers that hold a runner key but no profile (the profile routes, before
+    the catalog sees the write) derive the ``runtime_family`` for
+    :func:`screen_profile_flags` from here.
+    """
+    if runner is None or not runner.strip():
+        return None
+    from hal0.runners import RUNNER_IMAGES  # lazy: runners must not import profiles
+
+    spec = RUNNER_IMAGES.get(runner.strip())
+    return spec.runtime_family if spec is not None else None
+
+
+def screen_profile_flags(flags: str | None, *, runtime_family: str | None = None) -> None:
     """Reject every flag a profile may not carry, before it is persisted.
+
+    ``runtime_family`` picks the screen. ``"halogen"`` routes to
+    :func:`hal0.runners.knobs.screen_halogen_flags`: a halogen profile's flags
+    are ``HALOGEN_NAME=value`` environment tokens, which the llama screen below
+    would refuse as bare positionals. Every other value, and ``None``, is the
+    llama screen.
 
     The catalog is the write seam (routes, import, CLI). A profile may not set
     hardware flags (the slot's typed fields), hal0-managed flags (including
@@ -528,6 +555,11 @@ def screen_profile_flags(flags: str | None) -> None:
     ``--reasoning-format none`` (#2545), in any spelling. The text must be
     valid shell text.
     """
+    if runtime_family == "halogen":
+        from hal0.runners.knobs import screen_halogen_flags
+
+        screen_halogen_flags(flags)
+        return
     if not flags or not flags.strip():
         return
     try:

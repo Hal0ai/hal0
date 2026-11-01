@@ -297,13 +297,13 @@ def _reconcile_profiles(stack: StackConfig, profiles_path: Path | None = None) -
     """
     if not stack.profiles:
         return
-    from hal0.profiles import screen_profile_flags
+    from hal0.profiles import runtime_family_of, screen_profile_flags
 
     pcfg = load_profiles_config(profiles_path)
     changed = False
     incoming = {n: p for n, p in stack.profiles.items() if n not in pcfg.profile}
-    for profile in incoming.values():
-        screen_profile_flags(profile.flags)
+    for name, profile in incoming.items():
+        screen_profile_flags(profile.flags, runtime_family=runtime_family_of(name, profile))
     for name, profile in incoming.items():
         pcfg.profile[name] = profile
         changed = True
