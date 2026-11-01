@@ -38,6 +38,7 @@ from fastapi.responses import Response, StreamingResponse
 
 from hal0.api import image_cache, live_sockets
 from hal0.api.deps import DispatcherDep
+from hal0.dispatcher._capability_resolve import select_slot_by_type
 from hal0.dispatcher.lane_pin import lane_slot_pin, preferred_slot, set_lane_pin, set_upstream_only
 from hal0.dispatcher.stream_usage import ensure_include_usage, strip_usage_only_chunk
 from hal0.memory.extraction_env import MEMORY_ALIAS
@@ -865,7 +866,54 @@ def _capability_slot_for_path(path: str) -> str | None:
     return None
 
 
-async def _wake_capability_slot(request: Request) -> None:
+# The seeded speech slot: the name the ``/audio/speech`` path pin falls back to
+# and the tie-breaker when several tts slots qualify (dispatcher rule 3, #2784).
+_TTS_SLOT = "tts"
+
+
+def _requested_model(body: Mapping[str, Any]) -> str:
+    """The ``model`` a request names, stripped; ``""`` when absent (as the dispatcher reads it)."""
+    raw = body.get("model")
+    return raw.strip() if isinstance(raw, str) else ""
+
+
+async def _retire_stale_error(slot_manager: Any, name: str) -> None:
+    """Converge a cached ERROR slot, which may be a teardown that has since finished.
+
+    #2738: a stop that outlived its budget persists ERROR across an api
+    restart. ``status()`` runs the convergence that retires it; a real ERROR
+    stays ERROR and is skipped by the caller as before.
+    """
+    from hal0.slots.state import SlotState
+
+    if slot_manager.state(name) is SlotState.ERROR:
+        with contextlib.suppress(Exception):
+            await slot_manager.status(name)
+
+
+def _tts_wake_slot(slot_manager: Any, cfgs: list[dict[str, Any]], model: str) -> str | None:
+    """The tts slot a speech request for ``model`` should wake, picked by type (#2989).
+
+    Routing serves a speech request from the slot :func:`select_slot_by_type`
+    picks among the SERVING ``type = "tts"`` slots (#2784). The wake runs that
+    same selection over the OFFLINE ones instead, so an evicted ``voice2`` is
+    woken for its model the way an evicted ``tts`` always was.
+
+    ``None`` when a serving slot already answers (nothing to wake). Otherwise
+    the wakeable pick, else the seeded ``tts`` — routing's own fallback when no
+    slot matches the model.
+    """
+    from hal0.slots.state import SlotState
+
+    def pick(live: Any) -> str | None:
+        return select_slot_by_type(cfgs, "tts", model, seeded_name=_TTS_SLOT, is_serving=live)
+
+    if pick(slot_manager.is_ready_for_dispatch) is not None:
+        return None
+    return pick(lambda name: slot_manager.state(name) is SlotState.OFFLINE) or _TTS_SLOT
+
+
+async def _wake_capability_slot(request: Request, body: Mapping[str, Any]) -> None:
     """DR-1: wake an idle-EVICTED path-pinned capability slot before dispatch.
 
     The idle sweeper unloads embed/rerank/tts/img slots to OFFLINE and
@@ -879,6 +927,10 @@ async def _wake_capability_slot(request: Request) -> None:
     sitting OFFLINE, drive ``SlotManager.load(slot)``, which re-registers the
     upstream (``SlotManager._register_container_upstream``) so the subsequent
     dispatch resolves it instead of 404ing.
+
+    A speech request is not pinned to the slot NAMED ``tts``: routing serves it
+    from any ``type = "tts"`` slot bound to the requested model (#2784), so the
+    wake target is picked the same way (:func:`_tts_wake_slot`, #2989).
 
     Best-effort, same contract as the chat branch: the arbiter image-mode
     guard fires FIRST (NOT swallowed — it is the outcome), then the load runs
@@ -901,22 +953,25 @@ async def _wake_capability_slot(request: Request) -> None:
     except Exception:
         return
     from hal0.slots.activation import is_activated
+    from hal0.slots.state import SlotState
 
+    if slot_name == _TTS_SLOT:
+        # Retire stale ERRORs on every tts slot first, so the pick below sees
+        # a finished teardown as the OFFLINE slot it is (#2738).
+        for cfg in cfgs:
+            if str(cfg.get("type") or "").lower() == "tts" and cfg.get("name"):
+                await _retire_stale_error(slot_manager, str(cfg["name"]))
+        picked = _tts_wake_slot(slot_manager, cfgs, _requested_model(body))
+        if picked is None:
+            return  # routing already reaches a serving slot
+        slot_name = picked
     eligible = {c.get("name") for c in cfgs if is_activated(c)}
     if slot_name not in eligible:
         return
     # Nothing to do unless the slot was actually evicted to OFFLINE — a
     # READY/IDLE/SERVING slot is already routable, and a still-loading slot
     # is handled by the dispatcher's readiness gate.
-    from hal0.slots.state import SlotState
-
-    if slot_manager.state(slot_name) is SlotState.ERROR:
-        # #2738: a cached ERROR may be a teardown that has since finished
-        # (a stop that outlived its budget, persisted across an api
-        # restart). ``status()`` runs the convergence that retires it; a real
-        # ERROR stays ERROR and is skipped below as before.
-        with contextlib.suppress(Exception):
-            await slot_manager.status(slot_name)
+    await _retire_stale_error(slot_manager, slot_name)
     if slot_manager.state(slot_name) is not SlotState.OFFLINE:
         return
     # Mirror the chat branch: NEVER lazy-load onto the GPU against the
@@ -991,7 +1046,7 @@ async def _dispatch_and_forward(
     # DR-1: capability twin of the backend-aware load — wake an idle-EVICTED
     # embed/rerank/tts/img slot (resolved from the request PATH) so its
     # upstream is re-registered before dispatch, instead of 404ing.
-    await _wake_capability_slot(request)
+    await _wake_capability_slot(request, body)
 
     # OBS-1 (§13 / S12): the request seam. Observes the SAME call + response
     # objects the tps_events/ttft_events deques below already do — it does
