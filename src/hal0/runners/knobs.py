@@ -72,7 +72,7 @@ HALOGEN_KNOBS: tuple[EngineKnob, ...] = (
         kind="int",
         default="262144",
         minimum=1024,
-        help="Total token positions the engine reserves for its KV cache, shared by every KV slot.",
+        help="Attention positions kept resident across all conversations, about 29.5 KiB each, so this is the main memory knob; a request reserves its prompt plus max_tokens positions when it is admitted.",
         memory=True,
     ),
     EngineKnob(
@@ -82,16 +82,16 @@ HALOGEN_KNOBS: tuple[EngineKnob, ...] = (
         default="2",
         minimum=1,
         maximum=64,
-        help="How many conversations the engine keeps warm at once, each in its own KV slot.",
+        help="Conversations generating at the same moment (about 115 MB each; past eight total throughput stops growing); the KV pool, not this, decides how many stay resident.",
         memory=True,
     ),
     EngineKnob(
         env="HALOGEN_MAX_TOK",
-        label="Max tokens per pass",
+        label="Prefill chunk",
         kind="enum",
         default="16384",
         choices=("16384", "32768"),
-        help="Most tokens the engine takes in one pass; the larger choice needs more working memory.",
+        help="Largest single prefill call, never the full context; it sizes the working memory (about 12.6 GiB at 32768, 8.1 GiB at 16384), and 16384 costs about 9 % of prefill speed.",
         memory=True,
     ),
     EngineKnob(
@@ -99,14 +99,14 @@ HALOGEN_KNOBS: tuple[EngineKnob, ...] = (
         label="Lock weights in memory",
         kind="bool",
         default="1",
-        help="Pins the model weights in RAM so the kernel never pages them out.",
+        help="Locks the weights in RAM so the kernel cannot reclaim them under memory pressure; needs an unlimited memlock limit, which hal0 sets.",
     ),
     EngineKnob(
         env="HALOGEN_KV8",
         label="8-bit KV cache",
         kind="bool",
         default="0",
-        help="Stores the KV cache in 8 bits per value, which shrinks it but changes the numbers the model produces.",
+        help="Stores the attention cache in 8 bits, about half the pool memory, at the cost of a numeric change (drafted text can differ) and decode 0.2 to 1.9 % slower.",
         memory=True,
     ),
     EngineKnob(
@@ -115,7 +115,7 @@ HALOGEN_KNOBS: tuple[EngineKnob, ...] = (
         kind="enum",
         default="2",
         choices=("0", "1", "2"),
-        help="Selects the engine's prompt-cache mode; 0 turns it off and 2 is the default.",
+        help="2 resumes a cached prompt from anywhere (the default, though a warm answer is not always byte-identical to a cold one), 1 saves only at prefill-chunk boundaries (byte-identical repeats), 0 turns the cache off.",
     ),
     EngineKnob(
         env="HALOGEN_MAX_TOKENS_DEFAULT",
@@ -124,7 +124,7 @@ HALOGEN_KNOBS: tuple[EngineKnob, ...] = (
         default=None,
         minimum=1,
         maximum=65536,
-        help="Cap on generated tokens for a request that sets none of its own; unset keeps the engine's default.",
+        help="Token budget a request gets when it sends none (8192 on chat by default), covering thinking and the answer; it must not exceed the 65536 cap.",
     ),
     EngineKnob(
         env="HALOGEN_HOST_RESERVE_GIB",
@@ -132,7 +132,7 @@ HALOGEN_KNOBS: tuple[EngineKnob, ...] = (
         kind="int",
         default="20",
         minimum=_HOST_RESERVE_FLOOR_GIB,
-        help="Memory in GiB the engine leaves free for the rest of the host, never under 10 so the lookup table keeps its page cache.",
+        help="System RAM in GiB left free when the pool is sized; the lookup table is read through that file cache, so too little makes long prompts crawl, and raising it shrinks the pool (hal0 requires at least 10).",
     ),
 )
 
@@ -192,6 +192,17 @@ HALOGEN_DENIED_ENV: frozenset[str] = frozenset({"HALOGEN_CACHE_DIR", "HALOGEN_CA
 
 _TOKEN = re.compile(r"(HALOGEN_[A-Z0-9_]+)=(.*)")
 _WHOLE_NUMBER = re.compile(r"[0-9]+")
+#: Longest digit string converted with ``int()``. Python refuses 4300+ digits
+#: with ``ValueError`` (a 500 on the API path), and no knob takes a value near
+#: ten digits, so a longer string is out of range without being converted.
+_MAX_INT_DIGITS = 9
+#: Longest slice of a refused value echoed in an error message or ``details``.
+_ECHO_CHARS = 40
+
+
+def _echo(value: str) -> str:
+    """``value`` shortened for an error message or ``details``."""
+    return value if len(value) <= _ECHO_CHARS else value[:_ECHO_CHARS] + "..."
 
 
 def parse_env_tokens(flags: str | None) -> dict[str, str]:
@@ -252,14 +263,16 @@ def _flag_owner(name: str) -> str | None:
 def _range_problem(knob: EngineKnob, value: str) -> str | None:
     """Why ``value`` is not allowed for ``knob``, or ``None`` when it is."""
     if knob.kind == "bool":
-        return None if value in ("0", "1") else f"{knob.env} must be 0 or 1; got {value!r}"
+        return None if value in ("0", "1") else f"{knob.env} must be 0 or 1; got {_echo(value)!r}"
     if knob.kind == "enum":
         if value in knob.choices:
             return None
-        return f"{knob.env} must be one of {', '.join(knob.choices)}; got {value!r}"
+        return f"{knob.env} must be one of {', '.join(knob.choices)}; got {_echo(value)!r}"
     # int
     if _WHOLE_NUMBER.fullmatch(value) is None:
-        return f"{knob.env} must be a whole number; got {value!r}"
+        return f"{knob.env} must be a whole number; got {_echo(value)!r}"
+    if len(value) > _MAX_INT_DIGITS:
+        return f"{knob.env} must be a whole number of at most {_MAX_INT_DIGITS} digits; got {len(value)} digits"
     number = int(value)
     low, high = knob.minimum, knob.maximum
     if low is not None and number < low:
@@ -309,5 +322,5 @@ def screen_halogen_flags(flags: str | None) -> None:
             raise UnprocessableEntity(
                 problem,
                 code="profiles.halogen_flag_out_of_range",
-                details={"flag": name, "value": value},
+                details={"flag": name, "value": _echo(value)},
             )

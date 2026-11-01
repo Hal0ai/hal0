@@ -200,6 +200,36 @@ def test_screen_rejects_out_of_range_int_and_bool_values(bad):
     assert e.value.details["flag"] == bad.split("=")[0]
 
 
+@pytest.mark.parametrize("digits", [10, 4301, 5000])
+def test_screen_huge_digit_string_is_out_of_range_not_a_crash(digits):
+    # int() on >4300 digits raises ValueError (a 500 on the API path); a long
+    # digit string must be a 422 for every int knob, bounded or not.
+    for env in ("HALOGEN_KV_SLOTS", "HALOGEN_KV_POOL_POSITIONS", "HALOGEN_HOST_RESERVE_GIB"):
+        with pytest.raises(UnprocessableEntity) as e:
+            screen_halogen_flags(f"{env}=" + "9" * digits)
+        assert e.value.code == "profiles.halogen_flag_out_of_range"
+        assert e.value.details["flag"] == env
+        assert len(e.value.message) < 200
+        assert len(e.value.details["value"]) < 100
+
+
+def test_screen_nine_digit_int_is_still_range_checked():
+    screen_halogen_flags("HALOGEN_KV_POOL_POSITIONS=999999999")
+    with pytest.raises(UnprocessableEntity) as e:
+        screen_halogen_flags("HALOGEN_KV_SLOTS=999999999")
+    assert e.value.code == "profiles.halogen_flag_out_of_range"
+
+
+def test_kv_slots_help_says_generating_not_resident():
+    help_text = next(k.help for k in HALOGEN_KNOBS if k.env == "HALOGEN_KV_SLOTS")
+    assert "generating" in help_text
+    assert "keeps warm" not in help_text
+
+
+def test_max_tok_label_is_prefill_chunk():
+    assert next(k.label for k in HALOGEN_KNOBS if k.env == "HALOGEN_MAX_TOK") == "Prefill chunk"
+
+
 def test_screen_host_reserve_floor_names_the_page_cache():
     with pytest.raises(UnprocessableEntity) as e:
         screen_halogen_flags("HALOGEN_HOST_RESERVE_GIB=9")
