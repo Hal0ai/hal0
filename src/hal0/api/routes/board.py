@@ -73,16 +73,19 @@ def _truthy(value: str | None) -> bool | None:
     return value.lower() in ("1", "true", "yes", "on")
 
 
-def _int_query(request: Request, name: str) -> int | None:
+def _int_query(request: Request, name: str, *, minimum: int = 0) -> int | None:
     raw = request.query_params.get(name)
     if raw is None:
         return None
     try:
-        return int(raw)
+        value = int(raw)
     except ValueError as exc:
         raise BadRequest(
             f"query param {name!r} must be an integer", code="board.invalid_query"
         ) from exc
+    if value < minimum:
+        raise BadRequest(f"query param {name!r} must be >= {minimum}", code="board.invalid_query")
+    return value
 
 
 async def _read_body(request: Request) -> Any | None:
@@ -271,11 +274,17 @@ async def add_link(request: Request) -> Any:
 
 @router.delete("/links")
 async def remove_link(request: Request) -> Any:
-    body = await _read_body(request)
-    if body is None:
-        # The dashboard still sends parent_id/child_id as query params.
-        qp = request.query_params
-        body = {"parent_id": qp.get("parent_id"), "child_id": qp.get("child_id")}
+    # Hermes reads the ids from the query; a JSON body is a fallback only when
+    # neither id is in the query.
+    qp = request.query_params
+    parent_id, child_id = qp.get("parent_id"), qp.get("child_id")
+    if parent_id is None and child_id is None:
+        body = await _read_body(request)
+        if isinstance(body, dict):
+            parent_id, child_id = body.get("parent_id"), body.get("child_id")
+    if not parent_id or not child_id:
+        raise BadRequest("parent_id and child_id are required", code="board.invalid_query")
+    body = {"parent_id": parent_id, "child_id": child_id}
     async with record_action(
         request, category="board", action="board.link.remove", target=_link_target(body)
     ) as rec:
@@ -425,7 +434,7 @@ def _query_kwargs(request: Request, accepted: frozenset[str]) -> dict[str, Any]:
         if key == "include_archived":
             kwargs[key] = _truthy(request.query_params[key])
         elif key == "tail":
-            kwargs[key] = _int_query(request, key)
+            kwargs[key] = _int_query(request, key, minimum=1)
         else:
             kwargs[key] = request.query_params[key]
     return kwargs

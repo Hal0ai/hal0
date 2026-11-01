@@ -19,6 +19,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from structlog.testing import capture_logs
 
 from hal0.activity import AuditStore
 from hal0.api.middleware import error_codes
@@ -209,14 +210,6 @@ _MUTATIONS = [
     ),
     ("reclaim", "POST", "/tasks/t1/reclaim", {"a": 1}, "/tasks/t1/reclaim", "board.task.reclaim"),
     ("add_link", "POST", "/links", {"parent_id": "p", "child_id": "c"}, "/links", "board.link.add"),
-    (
-        "remove_link",
-        "DELETE",
-        "/links",
-        {"parent_id": "p", "child_id": "c"},
-        "/links",
-        "board.link.remove",
-    ),
     ("create_board", "POST", "/boards", {"slug": "x"}, "/boards", "board.board.create"),
     ("update_board", "PATCH", "/boards/x", {"name": "X"}, "/boards/x", "board.board.update"),
     ("switch_board", "POST", "/boards/x/switch", None, "/boards/x/switch", "board.board.switch"),
@@ -273,12 +266,69 @@ def test_delete_board_forwards_delete_flag(app_client: tuple, recorder: _Recorde
     assert "board.board.delete" in _actions(app.state.audit)
 
 
-def test_remove_link_query_fallback(app_client: tuple, recorder: _Recorder) -> None:
-    client = app_client[1]
-    client.delete("/api/board/links?parent_id=p&child_id=c")
+def test_remove_link_reads_query_ids(app_client: tuple, recorder: _Recorder) -> None:
+    app, client = app_client
+    r = client.delete("/api/board/links?parent_id=p&child_id=c&board=alpha")
+    assert r.status_code == 200
     fwd = _last(recorder)
-    assert fwd["method"] == "DELETE"
-    assert fwd["body"] == {"parent_id": "p", "child_id": "c"}
+    assert (fwd["method"], fwd["path"]) == ("DELETE", f"{P}/links")
+    assert fwd["params"] == {"parent_id": "p", "child_id": "c", "board": "alpha"}
+    assert fwd["body"] is None
+    assert "board.link.remove" in _actions(app.state.audit)
+
+
+def test_remove_link_body_fallback(app_client: tuple, recorder: _Recorder) -> None:
+    _, client = app_client
+    client.request("DELETE", "/api/board/links", json={"parent_id": "p", "child_id": "c"})
+    fwd = _last(recorder)
+    assert fwd["params"] == {"parent_id": "p", "child_id": "c"}
+    assert fwd["body"] is None
+
+
+def test_remove_link_query_wins_over_body(app_client: tuple, recorder: _Recorder) -> None:
+    _, client = app_client
+    client.request(
+        "DELETE",
+        "/api/board/links?parent_id=q1&child_id=q2",
+        json={"parent_id": "b1", "child_id": "b2"},
+    )
+    assert _last(recorder)["params"] == {"parent_id": "q1", "child_id": "q2"}
+
+
+@pytest.mark.parametrize("url", ["/api/board/links", "/api/board/links?parent_id=p"])
+def test_remove_link_missing_id_400(app_client: tuple, recorder: _Recorder, url: str) -> None:
+    _, client = app_client
+    r = client.delete(url)
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "board.invalid_query"
+    assert recorder.requests == []
+
+
+@pytest.mark.parametrize(
+    "url", ["/api/board/tasks/t1/log?tail=-1", "/api/board/tasks/t1/log?tail=0"]
+)
+def test_non_positive_tail_400(app_client: tuple, recorder: _Recorder, url: str) -> None:
+    _, client = app_client
+    r = client.get(url)
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "board.invalid_query"
+    assert recorder.requests == []
+
+
+def test_negative_max_400(app_client: tuple, recorder: _Recorder) -> None:
+    _, client = app_client
+    r = client.post("/api/board/dispatch?max=-2")
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "board.invalid_query"
+    assert recorder.requests == []
+
+
+def test_agent_id_is_header_only(app_client: tuple, recorder: _Recorder) -> None:
+    _, client = app_client
+    client.post("/api/board/tasks", json={"title": "x", "agent_id": "spoof"})
+    fwd = _last(recorder)
+    assert fwd["agent"] != "spoof"
+    assert fwd["body"]["agent_id"] == "spoof"  # body is data, not identity
 
 
 def test_mutation_is_audited(app_client: tuple, recorder: _Recorder) -> None:
@@ -364,6 +414,32 @@ def test_no_token_503(recorder: _Recorder, audit: AuditStore) -> None:
     assert r.status_code == 503
     assert r.json()["error"]["code"] == "board.no_token"
     assert recorder.requests == []
+
+
+def test_upstream_error_is_logged(app_client: tuple, recorder: _Recorder) -> None:
+    _, client = app_client
+    recorder.respond("GET", f"{P}/tasks/ghost", 404, {"detail": "no"})
+    with capture_logs() as logs:
+        client.get("/api/board/tasks/ghost")
+    ev = [e for e in logs if e["event"] == "board.upstream"]
+    assert len(ev) == 1
+    assert ev[0]["code"] == "board.upstream_error"
+    assert ev[0]["status"] == 404
+    assert ev[0]["path"] == "/api/board/tasks/ghost"
+    assert ev[0]["log_level"] == "warning"
+
+
+def test_not_installed_is_logged(audit: AuditStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("hal0.board.auth.hermes_installed", lambda: False)
+    with TestClient(_app(audit)) as c, capture_logs() as logs:
+        c.get("/api/board/board")
+    ev = [e for e in logs if e["event"] == "board.upstream"]
+    assert len(ev) == 1
+    assert (ev[0]["code"], ev[0]["status"], ev[0]["path"]) == (
+        "board.not_installed",
+        503,
+        "/api/board/board",
+    )
 
 
 def test_not_installed_503(audit: AuditStore, monkeypatch: pytest.MonkeyPatch) -> None:
