@@ -667,6 +667,10 @@ async def test_listener_maps_progress_messages(
 ) -> None:
     """Two progress frames become two tracker updates; everything else is ignored."""
     calls = _recording_update(monkeypatch)
+    # The tracker's own clock seam: a frozen clock, so ``elapsed_s`` does not depend on how
+    # long a loaded runner takes to get through the frames (#3202).
+    clock = [1000.0]
+    monkeypatch.setattr(progress, "_now", lambda: clock[0])
     fake_ws.push_json("status", {"status": {"exec_info": {"queue_remaining": 1}}})
     fake_ws.push_json("execution_start", {"prompt_id": "p1"})
     fake_ws.push(b"\x00\x00\x00\x01\xff\xd8preview-jpeg")
@@ -677,6 +681,7 @@ async def test_listener_maps_progress_messages(
     fake_ws.hang_up()
 
     await _follow()
+    clock[0] += 2.5  # elapsed runs from ``claim`` (``progress.start``), not from the last frame
 
     assert calls == [("p1", 1, 4, "3"), ("p1", 2, 4, "3")]
     assert progress.current() == {
@@ -684,7 +689,7 @@ async def test_listener_maps_progress_messages(
         "step": 2,
         "total": 4,
         "node": "3",
-        "elapsed_s": pytest.approx(0.0, abs=1.0),
+        "elapsed_s": 2.5,
         "prompt_id": "p1",
     }
 
