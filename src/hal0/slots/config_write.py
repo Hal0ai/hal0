@@ -487,6 +487,13 @@ def guard_and_normalize_tune(merged: dict[str, Any], updates: dict[str, Any]) ->
     ``slot.tune_pinned_by_flags``), and finally ``merged["tune"]`` is replaced by
     the coerced model dump, so what lands on disk is the typed value (``"off"``
     becomes ``False``), with ``None`` keys dropped and an empty table removed.
+
+    Only the keys *updates* carries are judged. A key already stored in the slot
+    file that this write does not touch is kept when it is valid and dropped
+    when it is not (a hand edit or an older build left it): the read path
+    already ignores such a key (:func:`hal0.slots.tune.slot_tune_table_valid`,
+    the one owner of "which stored keys count"), so refusing the write for it
+    named a row the drawer never shows and left the operator no field to fix.
     """
     if "tune" not in updates:
         return
@@ -500,14 +507,22 @@ def guard_and_normalize_tune(merged: dict[str, Any], updates: dict[str, Any]) ->
 
     from hal0.config.schema import SlotTuneConfig
     from hal0.errors import BadRequest, Hal0Error
-    from hal0.slots.tune import guard_tune_write
+    from hal0.slots.tune import guard_tune_write, slot_tune_table_valid
 
     if not isinstance(tune_update, dict):
         raise BadRequest(
             "tune must be an object of overrides (or null to clear it)",
             code="validation.tune_invalid",
         )
-    raw = {k: v for k, v in (merged.get("tune") or {}).items() if v is not None}
+    stored = {
+        k: v
+        for k, v in (merged.get("tune") or {}).items()
+        if v is not None and k not in tune_update
+    }
+    slot_name = merged.get("name") or (merged.get("slot") or {}).get("name")
+    kept = slot_tune_table_valid({"name": slot_name, "tune": stored})
+    dropped = sorted(set(stored) - set(kept))
+    raw = {**kept, **{k: v for k, v in tune_update.items() if v is not None}}
     bad_bool = [k for k in ("ctx_size", "reasoning_budget") if isinstance(raw.get(k), bool)]
     if bad_bool:
         raise BadRequest(
@@ -544,6 +559,15 @@ def guard_and_normalize_tune(merged: dict[str, Any], updates: dict[str, Any]) ->
                 profile = None
         guard_tune_write(view, updates, profile)
 
+    if dropped:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "slot.tune_stored_key_dropped slot=%s keys=%s: invalid stored [tune] keys were not "
+            "carried into this write, the profile's value applies",
+            slot_name,
+            ",".join(dropped),
+        )
     if normalized:
         merged["tune"] = normalized
     else:

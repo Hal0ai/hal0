@@ -40,6 +40,27 @@ def test_per_key_clear_on_nested_base_drops_empty_table(tmp_hal0_home: str) -> N
     assert "tune" not in out
 
 
+def test_invalid_stored_key_does_not_veto_a_tune_write_on_nested_base(
+    tmp_hal0_home: str,
+) -> None:
+    """#3183: only the keys the write touches are judged; a bad stored key is dropped."""
+    base = _nested()
+    base["tune"] = {"vision": "off", "reasoning_effort": "bogus", "mtp": "off"}
+    out = reconcile_and_guard_slot_config("n", base, {"tune": {"ctx_size": 8192}})
+    assert out["tune"] == {"vision": "off", "ctx_size": 8192}
+    assert "tune" not in out["slot"]
+    assert base["tune"]["reasoning_effort"] == "bogus"  # the caller's dict is not mutated
+
+
+def test_bad_touched_key_is_named_not_the_stored_one(tmp_hal0_home: str) -> None:
+    base = _nested()
+    base["tune"] = {"vision": "off", "reasoning_effort": "bogus"}
+    with pytest.raises(BadRequest) as exc:
+        reconcile_and_guard_slot_config("n", base, {"tune": {"ctx_size": 5}})
+    assert exc.value.code == "validation.tune_invalid"
+    assert [e["loc"] for e in exc.value.details["errors"]] == [["ctx_size"]]
+
+
 @pytest.mark.parametrize("nested", [{"type": "embedding"}, {"device": "npu"}])
 def test_nested_scalars_win_over_stale_root_in_tune_guard(nested: dict) -> None:
     merged = {"type": "llm", "device": "gpu-vulkan", "slot": nested, "tune": {"vision": "off"}}
