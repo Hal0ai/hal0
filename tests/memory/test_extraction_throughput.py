@@ -356,3 +356,12 @@ async def test_busy_slot_is_not_probed_and_not_called_too_slow() -> None:
     assert est.verdict == "unknown"
     assert "busy" in est.detail
     assert [r.url.path for r in slot.requests] == ["/metrics"]
+
+
+async def test_a_large_completion_cap_does_not_call_an_ordinary_slot_too_slow() -> None:
+    # #3215: the 16384 default clears bank chunk sizes; a call does not write that much.
+    est = await _measure(FakeSlot(**FAST), max_tokens=16384)
+
+    assert est.verdict == "ok"
+    assert est.projected_s == pytest.approx(EXTRACTION_PROMPT_TOKENS / 800.0 + 4096 / 45.0)
+    assert "16384" not in est.message()
