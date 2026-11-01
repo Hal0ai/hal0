@@ -125,7 +125,8 @@ ADR-0029 §2 gains these lines, in the same four layers:
    - `DRAFT_BUNDLE["eagle3"]`: `--spec-draft-ngl all --spec-draft-n-max 4`, same KV types.
    - `DRAFT_BUNDLE["simple"]`: `--spec-draft-ngl all --spec-draft-n-max 8 --spec-draft-n-min 0 --spec-draft-p-min 0.75`, same KV types.
    - `DRAFT_BUNDLE["mtp"]`: the existing `MTP_DRAFT_BUNDLE` minus its `--spec-type` token.
-   - `speculation = "ngram"`: `--spec-type ngram-mod --spec-ngram-size-n 24 --spec-ngram-size-m 48 --spec-ngram-n-max 64` (llama.cpp's `--spec-default`).
+   - `speculation = "ngram"`: `--spec-type ngram-mod --spec-ngram-mod-n-match 24 --spec-ngram-mod-n-min 48 --spec-ngram-mod-n-max 64` (llama.cpp's `--spec-default`; the
+     `ngram-mod` flags were renamed before build b11840, see #3180).
    The values are starting points taken from the vendor recipes and upstream
    defaults; `--spec-draft-threads*` and `--spec-draft-poll*` from
    `MTP_DRAFT_BUNDLE` apply to every kind. A profile's own `--spec-draft-*`

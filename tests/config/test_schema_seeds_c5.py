@@ -233,5 +233,5 @@ def test_draft_bundles_per_kind() -> None:
         assert bundle.endswith(sched), kind
         assert bundle.count("--spec-draft-threads ") == 1, kind
     assert NGRAM_BUNDLE == (
-        "--spec-type ngram-mod --spec-ngram-size-n 24 --spec-ngram-size-m 48 --spec-ngram-n-max 64"
+        "--spec-type ngram-mod --spec-ngram-mod-n-match 24 --spec-ngram-mod-n-min 48 --spec-ngram-mod-n-max 64"
     )
