@@ -51,8 +51,17 @@ Two defaults worth knowing before you run it:
   GPU compute node directly, and a privileged CT can repair a mis-mapped
   `/dev/kfd` from inside (see §3). The trade is real: a privileged
   container's root is effectively host root. Pass `UNPRIVILEGED=1` for the
-  older, narrower container — GPU passthrough still works, but device
-  ownership is host-mapped and repairs must happen on the host.
+  narrower container. That quick path is validated on Strix Halo (hal0
+  1.7.1, Ubuntu 24.04 template via `OS_VERSION=24.04`, default unprivileged
+  idmap; the script wrote the devices, cgroup rules, memlock limit and gid
+  alignment, then the stable bootstrap ran inside): ROCm and Vulkan slots
+  load and serve through the idmap-mapped `/dev/kfd` and `/dev/dri/renderD128`
+  (about 57 and 73 tok/s on a 0.8B model, on a GPU shared with another
+  workload), `flm validate` passes on the mapped NPU node, and slot
+  networking works on the default bridge. Prefer it unless you need to
+  repair `/dev/kfd`'s gid from inside the guest: device ownership is
+  host-mapped, so repairs must happen on the host. See the unprivileged
+  notes in §3.
 - **GPU passthrough on by default** (`GPU_PASSTHROUGH=auto`). On a host with
   no accelerator nodes it warns and builds a CPU-only container; set
   `GPU_PASSTHROUGH=0` to skip passthrough deliberately.
@@ -78,28 +87,55 @@ pct create <CTID> local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst \
   --cores 4 --memory 8192 --rootfs local-lvm:20
 ```
 
+For the unprivileged container described below, use `--unprivileged 1` and
+the same `--features`.
+
 The `devN` gid-mapping mechanism below works on both privileged and
 unprivileged containers. The difference is who can repair a wrong mapping
 afterwards: on a privileged CT hal0 aligns `/dev/kfd` to the render gid
 itself, while on an unprivileged one the node's ownership is host-mapped
-and only the host's `devN:` entry can fix it.
+and only the host's `devN:` entry can fix it. That is why every `devN`
+line below carries a `gid=`, `/dev/kfd` included.
 
 Append this to `/etc/pve/lxc/<CTID>.conf` on the host:
 
 ```ini
 # /etc/pve/lxc/<CTID>.conf
 dev0: /dev/dri/renderD128,gid=<render gid INSIDE this container>
-dev1: /dev/kfd                    # ROCm compute (optional)
+dev1: /dev/kfd,gid=<render gid>            # ROCm compute (optional)
 dev2: /dev/accel/accel0,gid=<render gid>   # XDNA NPU (Strix Halo only)
 
-# Device-cgroup rules for the majors above (226 = dri, 234 = kfd,
-# 261 = accel on most kernels — read yours with `stat -c %t`), plus the
-# memlock limit ROCm needs to pin buffers.
+# Device-cgroup rules for the majors above, plus the memlock limit ROCm
+# needs to pin buffers (and `flm validate` needs for the NPU).
 lxc.cgroup2.devices.allow: c 226:* rwm
-lxc.cgroup2.devices.allow: c 234:* rwm
+lxc.cgroup2.devices.allow: c <kfd major>:* rwm
 lxc.cgroup2.devices.allow: c 261:* rwm
 lxc.prlimit.memlock: unlimited
 ```
+
+226 is the DRM major and 261 the accel major on the kernels this was tested
+on. The `/dev/kfd` major is assigned dynamically — 234 on some kernels, 509
+on the 7.0 Proxmox kernel the unprivileged validation ran on — so don't
+copy a number. Read each major from the host, in the decimal number before
+the comma:
+
+```sh
+ls -l /dev/dri/renderD128 /dev/kfd /dev/accel/accel0
+```
+
+(`stat -c %t` also works, but prints the major in hex; the cgroup rules
+want decimal.) `lxc.prlimit.memlock: unlimited` is also what lets
+`flm validate` pass inside the container: it then reports `Memlock Limit:
+infinity`, while a test container without the line failed the check at an
+8 MB limit.
+
+<Aside type="note" title="The stock unprivileged idmap is enough">
+The unprivileged container that was validated (`unprivileged: 1`, the
+`features:` line above, the three `devN` lines, the cgroup rules and the
+memlock line) had no `lxc.idmap` lines and no AppArmor override: the default
+`0 100000 65536` map and the stock profile were sufficient for GPU and NPU
+passthrough. Guest-side notes follow in this section.
+</Aside>
 
 Then apply it:
 
@@ -124,10 +160,13 @@ how to read the correct value with `stat -c %g` and why `getent group
 render` can silently resolve to the wrong group.
 </Aside>
 
-hal0's own preflight checks for exactly this device layout inside an LXC
-and prints the same `dev0`/`dev1`/`dev2` remedy if the nodes or gid mapping
-are missing or wrong — after installing hal0 inside the CT (§4 below),
-`hal0 doctor` will confirm the devices are visible.
+hal0's own preflight checks this device layout inside an LXC and prints the
+matching `devN` line for what it finds wrong: the whole `dev0`/`dev1`/`dev2`
+block when no render node is visible, the `dev0` line when the render node's
+gid is off, and the `dev1` line when `/dev/kfd`'s gid is off. It does not
+check the NPU node's gid, so confirm `/dev/accel/accel0` by hand with
+`ls -ln` after installing hal0 inside the CT (§4 below); `hal0 doctor` then
+confirms the devices are visible.
 
 ### PVE keyring sysctls
 
@@ -137,11 +176,18 @@ set — that's the kernel's session-keyring byte quota, not a missing
 feature flag. Raise it **on the Proxmox host**:
 
 ```sh
-sysctl -w kernel.keys.maxbytes=1000000 kernel.keys.maxkeys=1000
+sysctl -w kernel.keys.maxbytes=1000000
 ```
 
-then re-run `install.sh` inside the container. Persist the values in
+then re-run `install.sh` inside the container. Persist the value in
 `/etc/sysctl.d/` if you don't want to repeat this after a host reboot.
+
+Leave `kernel.keys.maxkeys` alone unless `sysctl kernel.keys.maxkeys` prints
+less than 2000; if it does, raise it to 2000. Proxmox defaults to 2000 keys
+and 20000 bytes, so setting `maxkeys` to a smaller number such as 1000 would
+cut the key-count quota. The byte quota is the one that runs out: with
+`brain`, `utility` and Open WebUI running, an unprivileged guest used about
+11% of it and never hit the error, so apply the bump if you do.
 
 ### AppArmor
 
@@ -150,14 +196,81 @@ AppArmor profile (`lxc.apparmor.profile: unconfined` in the container's
 `.conf`) for the container runtime to launch slots inside the LXC — the
 quick-path script writes it for you, and the installer detects and repairs
 the in-guest half of the same failure (#1563). On an **unprivileged**
-container leave the stock profile in place: it is a narrower trust boundary
-and the runtime works without the override.
+container leave the stock profile in place on the host: it is a narrower
+trust boundary and the runtime works without the override. The guest has its
+own AppArmor profiles, though — see the next subsection.
+
+### Unprivileged Ubuntu 24.04 guests: disable the guest's unconfined AppArmor profiles
+
+An Ubuntu 24.04 guest ships `flags=(unconfined)` AppArmor profiles for
+`podman`, `crun`, `buildah`, `runc`, `rootlesskit` and `slirp4netns`. Inside
+a nested container on some host kernels those "unconfined" profiles are
+still enforced for network access, and every `podman` command fails with
+`socket: permission denied`. It was seen on a Proxmox VE 9.2 host on kernel
+7.0. The installer then stops at its container-runtime gate, and its hint to
+set `nesting=1` is wrong because nesting is already on.
+
+Check podman from inside the CT before you run the installer (Proxmox's
+Ubuntu templates already include the `apparmor` package):
+
+```sh
+pct enter <CTID>
+apt-get update && apt-get install -y podman
+podman run --rm quay.io/podman/hello
+```
+
+If that prints its greeting, skip the rest of this subsection. If it fails
+with `socket: permission denied`, disable the six profiles once:
+
+```sh
+for p in podman crun buildah runc rootlesskit slirp4netns; do
+  [ -e /etc/apparmor.d/$p ] || continue
+  mkdir -p /etc/apparmor.d/disable
+  ln -sf /etc/apparmor.d/$p /etc/apparmor.d/disable/$p
+  if command -v apparmor_parser >/dev/null; then
+    apparmor_parser -R /etc/apparmor.d/$p
+  fi
+done
+podman run --rm quay.io/podman/hello
+```
+
+**The installer repairs this itself.** From the release that ships the fix
+tracked in [#3234](https://github.com/Hal0ai/hal0/issues/3234), hal0's
+installer detects this exact failure — `podman run` failing with `: socket:
+permission denied` — but only inside a nested AppArmor policy namespace,
+which is what an unprivileged LXC is. It never acts on a bare-metal host or
+in a privileged container. It disables only those of the six profiles that
+exist and carry `flags=(unconfined)`, retries, and prints what it changed.
+Until you are on that release, the check is manual.
+
+The denial depends on the **host** kernel: it reproduced on a Proxmox VE 9.2
+host running kernel 7.0 and not on a 6.8 kernel, and Ubuntu 26.04 guests were
+unaffected in our runs.
+
+To put a profile back, whether you or the installer disabled it, run this
+inside the CT:
+
+```sh
+rm /etc/apparmor.d/disable/<name> && apparmor_parser -r /etc/apparmor.d/<name>
+```
+
+The trade-off is small. These stub profiles only grant `userns`, so
+disabling them does not weaken confinement. On a host with
+`kernel.apparmor_restrict_unprivileged_userns=1`, though, it removes that
+grant from unprivileged users of those binaries inside the guest. That
+includes rootless podman as the `hal0` user, which is already unavailable
+inside an unprivileged container (see the rootless podman note below), so
+hal0 loses nothing there.
 
 ### Unprivileged podman network fix
 
-Unprivileged podman-in-LXC has a known bridge-netns teardown race. If slots
-fail to start with network errors, set hal0 to render every slot with host
-networking instead of a bridge netns:
+Unprivileged podman-in-LXC has a known bridge-netns teardown race. The
+validation run did not hit it — an Ubuntu 24.04 guest (podman 4.9.3, netavark
+1.4) on Proxmox VE 9.2 / kernel 7.0 started and stopped containers five times,
+including a slot restart, on the default bridge with no network errors — so
+the default is fine to start with. If slots do fail to start with network
+errors, set hal0 to render every slot with host networking instead of a
+bridge netns:
 
 ```toml
 # /etc/hal0/hal0.toml
@@ -167,6 +280,18 @@ network_mode = "host"
 
 hal0 still fences each slot's process bind to loopback under
 `network_mode = "host"`, so this does not expose slot ports to the LAN.
+
+### Unprivileged containers: rootless podman for the `hal0` user
+
+The installer gives the `hal0` service user a 65536-wide subordinate uid
+range starting at 100000. A default unprivileged container owns only the
+ids 0–65535 (`0 100000 65536`), so that range lies outside its map and
+rootless podman as `hal0` cannot build a user namespace
+([#3236](https://github.com/Hal0ai/hal0/issues/3236)). The install prints
+`podman system migrate (as hal0) failed` and you can ignore it until that
+issue lands. Slots (rootful quadlets) and dashboard image pulls (the
+root-owned `hal0-podman-rw` helper) are unaffected; only running `podman`
+as the `hal0` user itself does not work.
 
 ### Surface true host memory pressure (optional)
 
@@ -210,14 +335,42 @@ every environment variable, and what the 15-step installer does. On a
 GPU/NPU passthrough CT, the hardware probe should now see the iGPU and NPU
 through the forwarded device nodes.
 
+<Aside type="note" title="Some !! lines are expected">
+A `!!` line is a warning, not a failure. A fresh install into an
+unprivileged CT with the GPU and NPU forwarded finished with three:
+
+- `could not create /var/lib/hal0/.config/flm/models as hal0` — appears on
+  any fresh install that has an NPU node; hal0 creates the directory later,
+  when a model is pulled.
+- `podman system migrate (as hal0) failed` — see the rootless podman note in
+  §3.
+- `memory bank seeding incomplete` — the memory engine had only just
+  started; banks are created on first write.
+
+`hal0 doctor all` on the same box reported 31 passes, 5 warnings and no
+failures. The five warnings were: no capability slots active, the open-on-LAN
+auth posture, the agent uid split, memory extraction speed (the `utility`
+slot has no model yet), and `Port DNAT rules` audit unavailable on netavark
+1.4. `systemctl --failed` may also list `proxmox-regenerate-snakeoil.service`,
+a known container artefact.
+</Aside>
+
+<Aside type="note" title="podman inspect is misleading here">
+Inside an unprivileged LXC, `podman inspect` prints `Could not locate device
+<major>:<minor> on host` warnings and reports `HostConfig.Devices: []` even
+though the slot container has its devices. Check with `podman exec
+<container> ls -ln /dev/kfd /dev/dri` instead.
+</Aside>
+
 ## 5. FastFlowLM NPU trio
 
 On an apt-based CT with the NPU device nodes present, the installer's NPU
-prerequisites step handles the **FastFlowLM (FLM)** userspace automatically:
-it best-effort installs `libxrt-npu2` from the container's own configured
-apt sources, then fetches the pinned, SHA-256-verified FastFlowLM `.deb`
-matching the CT's distro (Debian 13 or Ubuntu 24.04/25.10/26.04) directly
-from FastFlowLM's GitHub releases — no third-party apt/PPA source is added.
+prerequisites step handles the **FastFlowLM (FLM)** userspace automatically.
+On Ubuntu it first adds the `lemonade-team/stable` PPA, which is where
+`libxrt-npu2` (the AMDXDNA NPU runtime) ships, then installs it; on Debian 13
+it uses the distribution's own sources. It then fetches the pinned,
+SHA-256-verified FastFlowLM `.deb` matching the CT's distro (Debian 13 or
+Ubuntu 24.04/25.10/26.04) directly from FastFlowLM's GitHub releases.
 A single `flm serve` process backs the **NPU trio** — one chat model plus
 optional embedding and speech-to-text "passengers" sharing the NPU.
 
@@ -233,7 +386,7 @@ flm validate       # → "flm validate ok — NPU runtime reachable"
 hal0 doctor        # re-runs preflight; hardware probe records the NPU
 ```
 
-The seeded `npu` slot serves a chat model on port `8088`. The trio's
+The seeded `flm` slot serves a chat model on port `8088`. The trio's
 embedding and STT passengers are **opt-in** — enable them per slot (the
 `asr` / `embed` keys on the slot's `[npu]` table) once the chat slot is
 loaded. See [Voice (STT/TTS)](/docs/guides/voice-stt-tts/) and
@@ -250,6 +403,7 @@ If `flm validate` reports the NPU is unreachable, re-check that
 
 ```sh
 hal0 status                       # system + slot status
+hal0 doctor all                   # evidence roll-up, including units
 systemctl status hal0-api         # control plane
 journalctl -fu hal0-api           # live logs
 ```
