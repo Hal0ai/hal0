@@ -249,6 +249,8 @@ def attach_slot_profiles(
                             "enable_thinking": tune.enable_thinking,
                             "vision": tune.vision,
                             "speculation": tune.speculation,
+                            "reasoning_effort": tune.reasoning_effort,
+                            "reasoning_budget": tune.reasoning_budget,
                             "runner": getattr(profile, "runner", None),
                             "tune": tune.as_dict(),
                         },
@@ -550,13 +552,16 @@ def _resolve_profile(model: dict[str, Any], depth: int) -> Config:
     if spec is None:
         # The launch tunes with no argv spelling: they change what the slot
         # runs, so they belong in the cell identity (non-defaults only, so a
-        # plain profile hashes the same as one that never named them).
+        # plain profile hashes the same as one that never named them, and a
+        # record stored before effort and budget joined reads as the default).
         tunes = {
             key: profile[key]
             for key, default in (
                 ("speculation", "auto"),
                 ("vision", "auto"),
                 ("enable_thinking", None),
+                ("reasoning_effort", "default"),
+                ("reasoning_budget", -1),
             )
             if key in profile and profile[key] != default
         }
