@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Request
+from fastapi import APIRouter, BackgroundTasks, Query, Request
 
 from hal0.api._audit import record_action
 from hal0.api.deps import CapabilityOrchestratorDep
@@ -28,8 +28,76 @@ router = APIRouter()
 _OWUI_WIRED_SLOTS = frozenset({"embed", "img"})
 
 
+#: Top-level payload sections ``?section=`` can select; the settle keys below
+#: ride along with every selection.
+_SECTIONS = ("backends", "catalogs", "selections")
+_ALWAYS_KEPT = ("backends_settled", "backends_retry_in_s")
+
+
+def _summarize_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {"id": entry.get("id")}
+    if "display_name" in entry:
+        out["display_name"] = entry["display_name"]
+    out["downloaded"] = any(b.get("downloaded") for b in entry.get("backends") or [])
+    return out
+
+
+def narrow_capabilities(
+    state: dict[str, Any], *, section: str | None = None, summary: bool | None = None
+) -> dict[str, Any]:
+    """Select sections of, and optionally summarize, the capabilities payload.
+
+    Pure: ``state`` is not mutated. ``section`` is a comma list of
+    ``backends`` / ``catalogs`` / ``selections``; only those top-level keys
+    are returned, plus ``backends_settled`` and ``backends_retry_in_s``
+    (always kept). An unknown name raises ``capability.unknown_section``.
+
+    ``summary`` (true) reduces every catalog child's entry list
+    (``catalogs[slot][child]``) to ``{"count": N, "entries": [...]}``. Each
+    summarized entry keeps its identity keys: ``id``, ``display_name`` (only
+    when the entry has one) and ``downloaded`` (true when any of the entry's
+    backends has the weights). Backend rows, selections and the settle keys
+    are left unchanged.
+    """
+    out = state
+    names = [n for n in (p.strip() for p in (section or "").split(",")) if n]
+    for name in names:
+        if name not in _SECTIONS:
+            raise BadRequest(
+                f"unknown capabilities section {name!r}",
+                code="capability.unknown_section",
+                details={"section": name, "legal": list(_SECTIONS)},
+            )
+    if names:
+        keep = {*names, *_ALWAYS_KEPT}
+        out = {k: v for k, v in state.items() if k in keep}
+    if summary and "catalogs" in out:
+        out = {
+            **out,
+            "catalogs": {
+                slot: {
+                    child: {
+                        "count": len(entries),
+                        "entries": [_summarize_catalog_entry(e) for e in entries],
+                    }
+                    for child, entries in children.items()
+                }
+                for slot, children in out["catalogs"].items()
+            },
+        }
+    return out
+
+
 @router.get("")
-async def get_capabilities(orchestrator: CapabilityOrchestratorDep) -> dict[str, Any]:
+async def get_capabilities(
+    orchestrator: CapabilityOrchestratorDep,
+    section: str | None = Query(
+        None, description="Comma list of backends, catalogs, selections to return"
+    ),
+    summary: bool | None = Query(
+        None, description="Reduce each catalog's entries to id, display_name and downloaded"
+    ),
+) -> dict[str, Any]:
     """Return the full dashboard payload.
 
     Shape::
@@ -50,8 +118,14 @@ async def get_capabilities(orchestrator: CapabilityOrchestratorDep) -> dict[str,
     the rest of the 30 s retry window while only an unanswerable result is
     held. The dashboard re-polls every ``max(2, backends_retry_in_s)`` seconds
     while unsettled.
+
+    ``section`` and ``summary`` shrink the payload (see
+    :func:`narrow_capabilities`); with neither, the state is returned as is.
     """
-    return await orchestrator.get_state()
+    state = await orchestrator.get_state()
+    if section is None and summary is None:
+        return state
+    return narrow_capabilities(state, section=section, summary=summary)
 
 
 @router.post("/{slot}/{child}")

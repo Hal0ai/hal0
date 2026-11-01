@@ -88,6 +88,18 @@ thinking, reasoning effort/budget, vision, speculation and runner. A model's
 drafter is the file fact `draft` on `model_edit` (path or null to unpair);
 `model_pull` takes `draft_filename` and `draft_repo`, and `model_inspect` returns `drafts`.
 
+`model_list` and `capability_list` return the whole payload when called bare, which is
+large enough on a populated box that clients truncate it. Narrow them instead.
+`model_list` takes `installed` (true keeps models on this host, false the
+upstream-advertised ones), `type`, `capability` (a model must have every one listed),
+`device` (`gpu-rocm`, `gpu-vulkan`, `cpu`, `npu`; any match), `q` (substring of the id or
+name), `fields` (the row keys to return; `id` always stays), and `limit` (1-500) with
+`offset`. The list parameters take a comma-separated string, and the reply gains `total`,
+the number of matches before paging. `capability_list` takes `section` (any of `backends`,
+`catalogs`, `selections`; an unknown name is `400 capability.unknown_section`) and
+`summary=true`, which cuts each catalog entry to its `id`, `display_name` and `downloaded`.
+With no parameters both replies are unchanged.
+
 ### Autonomous — read (no approval)
 
 | Tool | REST route |
