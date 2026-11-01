@@ -38,8 +38,8 @@ it. Follow the Kernel and firmware and Size the GTT pool sections of
 [GPU drivers and memory](/docs/getting-started/drivers/) on the host
 first: `amdgpu` and `amdxdna` loaded, `/dev/kfd`, `/dev/dri/renderD*` and
 `/dev/accel/accel0` present, GTT raised on the kernel command line. Nothing
-in this guide changes the host beyond that, the Incus packages, and
-optionally a bridge.
+in this guide changes the host beyond that, the Incus packages, a storage
+pool, and optionally a bridge or a keyring sysctl (§3).
 
 Install Incus. Ubuntu 24.04+ and Debian 13 ship the 6.0 LTS series:
 
@@ -51,6 +51,31 @@ sudo incus admin init --minimal
 
 For a newer Incus, use the [Zabbly repository](https://github.com/zabbly/incus)
 instead of the distro package.
+
+### Pick a storage pool
+
+`incus admin init --minimal` creates a `dir` pool on the host's root
+filesystem. hal0 runs on it, but two things are worth deciding now:
+
+- **Size.** A fresh hal0 install is about 24 GB of container rootfs —
+  roughly 14 GB under `/var/lib/hal0` and 5 GB of container images under
+  `/var/lib/containers` — and the models you pull later land under
+  `/var/lib/hal0/models` inside the container too. Give the pool at least
+  **60 GB**. `hal0 doctor` flags less than 20 GB free under `/var/lib`, and
+  on a 38 GB disk a fresh install already left it short.
+- **Snapshots.** On a `dir` pool, `incus snapshot create` copies the whole
+  rootfs: it takes time and needs as much free space as the container uses.
+  (On the 38 GB test disk, the first snapshot of an installed hal0 container
+  ran out of space.) A **ZFS or Btrfs** pool snapshots copy-on-write, which
+  is what the day-two flow in §7 assumes.
+
+To get one, answer the storage questions in the interactive
+`sudo incus admin init` instead of using `--minimal`, or add a pool next to
+the default one and launch the container into it with `-s hal0pool` in §2:
+
+```sh
+incus storage create hal0pool zfs size=80GiB     # or: btrfs size=80GiB
+```
 
 ### Pick a network
 
@@ -109,17 +134,21 @@ incus launch images:ubuntu/26.04 hal0 \
   -c boot.autostart=true
 ```
 
+If you created the extra pool in §1, add `-s hal0pool` to the command.
+
 - **`security.nesting=true`** lets podman run inside the container. It
   does not make the container privileged.
 - **`limits.kernel.memlock=unlimited`** is the same `memlock` relaxation
   the Proxmox path writes: ROCm pins large host buffers, and the default
-  64 KiB limit stops a GPU slot from loading.
+  64 KiB limit stops a GPU slot from loading. The NPU check,
+  `flm validate`, also fails under a low memlock limit.
 - **No memory limit.** The GPU's GTT pool is host RAM; capping the
   container's cgroup would not cap GTT and only confuses the memory bar.
 - **Ubuntu 26.04** is the guest image the Proxmox quick path also uses.
-  Ubuntu 24.04 works too, with the extra AppArmor step in §3. Run
-  `incus image list images:ubuntu` to see what your `images:` remote
-  offers.
+  Ubuntu 24.04 works too — this recipe was run end to end on a stock
+  `images:ubuntu/24.04` container — but that image ships without the
+  `apparmor` package, which §4 deals with. Run `incus image list images:ubuntu`
+  to see what your `images:` remote offers.
 
 ## 3. GPU and NPU passthrough
 
@@ -142,55 +171,147 @@ device appears immediately; no restart is needed.
 <Aside type="caution" title="gid means the CONTAINER's gid, not the host's">
 The host's `render` group and the container's can have different ids, and
 an unprivileged container cannot `chgrp` a forwarded node to fix a wrong
-one from inside — only the `gid=` on the device entry can. hal0's `doctor`
-tells you when the mapping is off. See the Render-group gids section of
+one from inside — only the `gid=` on the device entry can. Even two Ubuntu
+24.04 images disagree: the Incus image and the Proxmox template ship
+different render gids, so read yours inside the container rather than
+copying a number from a guide. hal0's `doctor` tells you when the mapping
+is off. See the Render-group gids section of
 [GPU drivers and memory](/docs/getting-started/drivers/).
 </Aside>
 
-### Ubuntu 24.04 guests: disable the guest's unconfined AppArmor profiles
-
-Ubuntu 24.04 ships `flags=(unconfined)` AppArmor profiles for `podman`,
-`crun`, `buildah`, `runc`, `rootlesskit` and `slirp4netns`. Inside a
-nested container on a current kernel those "unconfined" profiles are still
-enforced for network access, and every `podman` command fails with
-`socket: permission denied` before it can pull an image. hal0's installer
-then stops at its container-runtime gate. Disable them once, before
-installing:
-
-```sh
-incus exec hal0 -- bash -c '
-  for p in podman crun buildah runc rootlesskit slirp4netns; do
-    ln -sf /etc/apparmor.d/$p /etc/apparmor.d/disable/$p
-    apparmor_parser -R /etc/apparmor.d/$p
-  done'
-```
-
-Ubuntu 26.04 guests are not affected. Teaching the installer to detect and
-repair this itself is tracked in
-[#3234](https://github.com/Hal0ai/hal0/issues/3234); until then this step is
-manual.
+<Aside type="note" title="What has been validated where">
+The `unix-char` entries are the Incus form of the Proxmox `devN:` lines.
+The mechanism itself — an unprivileged container on the default idmap,
+nodes forwarded with `gid=` — is validated on a Strix Halo under Proxmox:
+ROCm and Vulkan slots serve through the mapped `/dev/kfd` and render node,
+and `flm validate` passes on the mapped NPU node. On Incus, the render-node
+entry and its gid were checked on a CPU-only VM; the `/dev/kfd` and
+`/dev/accel/accel0` entries rely on the same mechanism but have not been run
+on Incus hardware yet.
+</Aside>
 
 ### Keyring quota
 
 If a container start inside hal0 fails with `crun: create keyring '…':
-Disk quota exceeded`, raise the kernel keyring limits **on the host** and
-persist them under `/etc/sysctl.d/`:
+Disk quota exceeded`, raise the kernel keyring byte quota **on the host**
+and persist it under `/etc/sysctl.d/`:
 
 ```sh
-sudo sysctl -w kernel.keys.maxbytes=1000000 kernel.keys.maxkeys=1000
+sudo sysctl -w kernel.keys.maxbytes=1000000
 ```
 
-## 4. Install hal0
+Leave `kernel.keys.maxkeys` alone unless `sysctl kernel.keys.maxkeys` prints
+less than 2000; in that case raise it to 2000. Never lower it — a value of
+1000 would cut the key-count quota on hosts that default to 2000.
+
+## 4. Prepare the guest
+
+The installer installs podman itself, but installing it first lets you
+check that podman can run a container before you commit to a 15-minute
+install. Install `apparmor` alongside it:
 
 ```sh
-incus exec hal0 -- bash -c 'apt-get update && apt-get install -y curl ca-certificates'
+incus exec hal0 -- bash -c 'apt-get update && apt-get install -y curl ca-certificates podman apparmor'
+incus exec hal0 -- podman run --rm quay.io/podman/hello
+```
+
+The second command should print `!... Hello Podman World ...!`.
+
+**Why `apparmor`?** The Incus Ubuntu 24.04 image ships without it, and
+podman does not depend on it. On an Ubuntu 24.04 host, where
+`kernel.apparmor_restrict_unprivileged_userns=1` is the default, rootless
+user namespaces inside the container are then denied: the installer ends
+with `!! podman system migrate (as hal0) failed`, and running the command by
+hand shows `cannot clone: Permission denied`. The package brings the
+`podman` profile that grants the namespace.
+
+### If podman fails with `socket: permission denied`
+
+Once `apparmor` is installed, the guest also has six `flags=(unconfined)`
+profiles — `podman`, `crun`, `buildah`, `runc`, `rootlesskit` and
+`slirp4netns`. On some host kernels those "unconfined" profiles are still
+enforced for network access inside the nested container, and every `podman`
+command then fails with `socket: permission denied` before it can pull an
+image. Skip this section if the `podman run` above printed its greeting: the
+failure was seen on a Proxmox VE host running a 7.0 kernel and did not
+reproduce on a stock Ubuntu 24.04 6.8 kernel with `apparmor` installed. If
+you do hit it, disable the six profiles in the guest. (If you skip the check,
+hal0's installer stops at its container-runtime gate with a hint to re-check
+`nesting=1`; that hint is wrong here, because nesting is already on.)
+
+```sh
+incus exec hal0 -- bash -c '
+  for p in podman crun buildah runc rootlesskit slirp4netns; do
+    [ -e /etc/apparmor.d/$p ] || continue
+    mkdir -p /etc/apparmor.d/disable
+    ln -sf /etc/apparmor.d/$p /etc/apparmor.d/disable/$p
+    if command -v apparmor_parser >/dev/null; then
+      apparmor_parser -R /etc/apparmor.d/$p
+    fi
+  done'
+incus exec hal0 -- podman run --rm quay.io/podman/hello
+```
+
+The loop skips profiles that are not installed, so it is safe on an image
+that has none. Ubuntu 26.04 guests are not affected. The installer will
+detect and repair this itself from the release that ships the fix tracked in
+[#3234](https://github.com/Hal0ai/hal0/issues/3234); until then, this check
+is manual.
+
+## 5. Install hal0
+
+```sh
 incus exec hal0 -- bash -c 'curl -fsSL https://hal0.dev/install.sh | bash'
 ```
 
-The installer detects that it runs in an unprivileged LXC, checks the
-forwarded device nodes and their gids, and prints the exact device entries
-to fix if anything is missing. See [Install hal0](/docs/getting-started/install/)
-for every environment variable and what each step does.
+The installer checks the forwarded device nodes and their gids and prints
+the exact device entries to fix only if something is missing. See
+[Install hal0](/docs/getting-started/install/) for every environment
+variable and what each step does.
+
+The install takes about 15 minutes on a 4-vCPU machine with no GPU. On a
+machine with no usable GPU, set `HAL0_ALLOW_CPU_ONLY=1` (see the
+[install environment variables](/docs/reference/env-vars-install/)):
+
+```sh
+incus exec hal0 -- bash -c 'curl -fsSL https://hal0.dev/install.sh | HAL0_ALLOW_CPU_ONLY=1 bash'
+```
+
+<Aside type="tip">
+If your terminal session might drop, run the install detached and follow
+its log. The installer also writes its own log under `/var/log/hal0/` inside
+the container.
+
+```sh
+incus exec hal0 -- bash -c 'nohup bash -c "curl -fsSL https://hal0.dev/install.sh | bash" > /root/hal0-install.log 2>&1 &'
+incus exec hal0 -- tail -f /root/hal0-install.log
+```
+</Aside>
+
+<Aside type="note" title="Some !! lines are expected">
+A `!!` line is a warning, not a failure; the install exits 0. On a
+box without an NPU or without a fast CPU you will likely see:
+
+- `flm validate failed — NPU hardware may be absent`, followed by "GPU paths
+  still work" — expected when you forwarded no NPU.
+- `memory bank seeding incomplete` — the memory engine had only just
+  started; banks are created on first write.
+- `structured-output probe timed out after 120s` — a slow CPU-only machine,
+  not a verified failure.
+- `podman system migrate (as hal0) failed` — see the next paragraph.
+</Aside>
+
+**Rootless podman for the `hal0` user.** The `podman system migrate (as
+hal0)` warning concerns only running `podman` as the `hal0` user itself.
+hal0's slots run as rootful quadlets and dashboard image pulls go through a
+root-owned helper (`hal0-podman-rw`), so neither is affected. On a stock
+Incus container with `apparmor` installed (§4), `podman system migrate` as
+`hal0` succeeded in testing. It is expected to fail if you narrow the
+container's uid map to 65536 ids — for example with `security.idmap.size:
+65536` — because the installer gives `hal0` a 65536-wide subordinate id
+range that then lies outside the map
+([#3236](https://github.com/Hal0ai/hal0/issues/3236)). The warning is safe
+to ignore in that case.
 
 If slots later fail to start with network-namespace errors, tell hal0 to
 render slots with host networking. It still binds each slot to loopback,
@@ -202,27 +323,46 @@ so nothing new is exposed:
 network_mode = "host"
 ```
 
-## 5. Verify
+## 6. Verify
 
 ```sh
-incus list hal0                       # the container's IP
+incus list hal0                       # use the eth0 address; ignore podman0
 incus exec hal0 -- hal0 status        # system + slot + memory health
-incus exec hal0 -- hal0 doctor        # device nodes, gids, runtime, units
+incus exec hal0 -- hal0 doctor all    # evidence roll-up, including units
 incus exec hal0 -- flm validate       # NPU only: "flm validate ok"
 ```
 
-Dashboard at `http://<container-ip>:8080`, Open WebUI at `:3001`. Load a
+`incus list` shows two IPv4 addresses for the container: the `eth0` one is
+the address you want, and the `podman0` one is podman's internal bridge.
+Dashboard at `http://<eth0-address>:8080`, Open WebUI at `:3001`. Load a
 model as in [Load your first model](/docs/getting-started/first-model/)
 and check that the slot's backend is `rocm` or `vulkan`, not `cpu`.
 
-## 6. Day two
+A fresh install reported 31 passes, 5 warnings and no failures from
+`hal0 doctor all`. The five warnings were: no capability slots active, the
+open-on-LAN auth posture (set an admin key,
+[Authentication](/docs/operate/auth/)), `Port DNAT rules` audit unavailable,
+the agent uid split, and memory extraction speed.
+
+<Aside type="note">
+The bare `hal0 doctor` re-runs the installer's pre-flight checks, which is
+useful for device nodes and gids but is not a health check on a running box.
+Right after an install it can report `node: not found` (the dashboard ships
+prebuilt, so Node is not needed), `port 8080/3001 already in use` (hal0's own
+services), and `disk: … need at least 20 GB` if the pool is small (§1).
+</Aside>
+
+## 7. Day two
 
 ```sh
-incus snapshot create hal0 pre-update    # cheap, instant
+incus snapshot create hal0 pre-update    # cheap on ZFS/Btrfs; a full copy on a dir pool
 incus exec hal0 -- hal0 update
 incus snapshot restore hal0 pre-update   # if you need to go back
 incus delete -f hal0                     # uninstall: nothing of hal0 remains on the host
 ```
+
+On a `dir` pool the snapshot copies the whole container, so check you have
+the free space first (§1).
 
 ## What the box does and does not contain
 
