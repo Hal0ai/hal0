@@ -3,11 +3,13 @@
 // tested without rendering (__tests__/slot-rail-pure.test.ts); slot-rail.jsx only draws the result.
 //
 // The indicator class and label come from slot-status.js (slotIndicatorFromPhase), the one
-// classifier every slot surface shares. The rail adds a single state of its own, `paused`: a slot
-// the GPU arbiter unloaded to make room for image mode.
+// classifier every slot surface shares, and so does the rule for "ready" (isReadyCls) and for
+// "configured" (isSlotConfigured): the dock's slots fraction counts with the same two. The rail
+// adds a single state of its own, `paused`: a slot the GPU arbiter unloaded to make room for
+// image mode.
 
 import type { Slot } from '@/api/hooks/useSlots'
-import { slotIndicatorFromPhase } from './slot-status.js'
+import { isReadyCls, isSlotConfigured, slotIndicatorFromPhase } from './slot-status.js'
 
 export type RailGroup = 'vulkan' | 'rocm' | 'npu' | 'cpu'
 
@@ -66,7 +68,7 @@ export function railRows(
     const ind = slotIndicatorFromPhase(slot, now) as { cls: Exclude<RailCls, 'paused'>; label: string; tooltip: string }
     const paused = imageMode && unloadSet.includes(slot.name)
     const cls: RailCls = paused ? 'paused' : ind.cls
-    const up = cls === 'serving' || cls === 'stale'
+    const up = isReadyCls(cls)
     const toks = typeof slot.metrics?.toks === 'number' ? slot.metrics.toks : null
     const row: RailRow = {
       name: slot.name,
@@ -79,7 +81,7 @@ export function railRows(
       toks,
       mem: up ? memLabel(slot) : NO_MEM,
       up,
-      configured: !!(slot.model || slot.modelDefault),
+      configured: isSlotConfigured(slot),
     }
     return { row, index }
   })
@@ -93,9 +95,10 @@ export function railRows(
   return rows.map((r) => r.row)
 }
 
-/** `ready` is serving plus stale (loaded and healthy); `byGroup` counts the same rows as `up`. `total`
- *  (and each group's) counts configured rows only, the dock's slots fraction; an unconfigured slot
- *  is listed but never up. */
+/** `ready` is the rows that are `up` (isReadyCls: serving or stale, loaded and healthy); `byGroup`
+ *  counts the same rows as `up`. Both figures, like `total` (and each group's), count configured
+ *  rows only, which is the dock's slots fraction (readyCounts in slot-status.js): an unconfigured
+ *  slot is listed but counts toward nothing. */
 export function railCounts(rows: readonly RailRow[]): {
   ready: number
   total: number
@@ -110,10 +113,9 @@ export function railCounts(rows: readonly RailRow[]): {
   let ready = 0
   let total = 0
   for (const r of rows) {
-    if (r.configured) {
-      byGroup[r.group].total += 1
-      total += 1
-    }
+    if (!r.configured) continue
+    byGroup[r.group].total += 1
+    total += 1
     if (r.up) {
       byGroup[r.group].up += 1
       ready += 1

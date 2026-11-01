@@ -3,29 +3,23 @@
 // Derives a chrome/footer-friendly runtime summary from the existing
 // `useSlots()` poll (no extra network traffic): every slot is a podman
 // container, so "runtime up" simply means the slots query resolves and
-// readiness counts come from per-slot container_status/state.
+// readiness counts come from slot-status.js (`readyCounts`), the rule the slot
+// rail's `N / M ready` shares.
 
 import { useQuery } from '@tanstack/react-query'
 import { apiGet } from '../client'
 import { ENDPOINTS } from '../endpoints'
-import { useSlots, type Slot } from './useSlots'
-
-/** A slot counts as ready when its container is running or its state
- *  string says it holds a servable model. */
-const READY_STATES = new Set(['ready', 'serving', 'idle'])
-
-function isSlotReady(s: Slot): boolean {
-  if (s.container_status === 'running') return true
-  return READY_STATES.has(String(s.state ?? '').toLowerCase())
-}
+import { readyCounts } from '@/dash/slot-status.js'
+import { useSlots } from './useSlots'
 
 export interface RuntimeRollup {
   /** 'up' when the slots query resolves; 'down' on error; 'connecting'
    *  before the first response. */
   status: 'up' | 'down' | 'connecting'
-  /** Slots with a running container (or ready/serving/idle state). */
+  /** Configured slots that are ready: loaded and healthy (`isSlotReady`). A
+   *  container that is up but has not reported healthy is still starting. */
   ready: number
-  /** Enabled slots. */
+  /** Configured slots (a model bound). */
   total: number
   /** Alias of `ready` — slots currently holding a servable model. */
   loaded: number
@@ -37,17 +31,15 @@ export interface RuntimeRollup {
  */
 export function useRuntimeRollup(): RuntimeRollup {
   const slots = useSlots()
-  const list = slots.data ?? []
   // #1369: the denominator is the CONFIGURED slots (a model bound), which is
   // what "runtime" means here — a model-less slot has nothing to be ready.
-  // The typed field is `modelDefault` — `inferSlotShape` camelCases the raw
-  // `model_default` — so the wire name here never type-checked.
-  const configured = list.filter((s) => !!(s.model || s.modelDefault))
-  const ready = configured.filter(isSlotReady).length
+  // #3114: `readyCounts` (slot-status.js) owns both figures and the predicate,
+  // so this fraction is the slot rail's `N / M ready` for the same slots.
+  const { ready, total } = readyCounts(slots.data ?? [])
   return {
     status: slots.isSuccess ? 'up' : slots.isError ? 'down' : 'connecting',
     ready,
-    total: configured.length,
+    total,
     loaded: ready,
   }
 }

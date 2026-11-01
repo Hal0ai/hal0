@@ -132,6 +132,61 @@ export function slotIndicatorFromPhase(slot, now = Date.now()) {
 }
 
 /**
+ * The one owner of "ready" (#3114): an indicator class that is loaded and
+ * healthy, `serving` (green) or `stale` (yellow, labelled "ready"). `warming`
+ * (pulling / starting: the container may be up but has not reported healthy),
+ * `error`, `offline` and the rail's `paused` are not ready.
+ *
+ * The slot rail's `N / M ready` and the dock's slots fraction both count with
+ * this, and so does slotButtonPhase, so a slot cannot read "starting" on its
+ * dot and "ready" in a count.
+ *
+ * @param {string} cls - an indicator class from slotIndicatorFromPhase
+ * @returns {boolean}
+ */
+export function isReadyCls(cls) {
+  return cls === "serving" || cls === "stale";
+}
+
+/**
+ * Is the slot ready, by the same classifier that paints its dot?
+ *
+ * @param {object} slot  - normalised slot dict from /api/slots
+ * @param {number} [now] - epoch ms (injectable for tests)
+ * @returns {boolean}
+ */
+export function isSlotReady(slot, now = Date.now()) {
+  return isReadyCls(_containerIndicator(slot, now).cls);
+}
+
+/**
+ * A slot is configured when a model is bound (or defaulted, #1369). A
+ * model-less slot has nothing to be ready, so the counts leave it out.
+ *
+ * @param {object} slot - normalised slot dict from /api/slots
+ * @returns {boolean}
+ */
+export function isSlotConfigured(slot) {
+  return !!(slot?.model || slot?.modelDefault);
+}
+
+/**
+ * The `ready / total` fraction of a slot list: the configured slots, and the
+ * ready ones among them. The dock's slots group reads this.
+ *
+ * @param {object[]} slots
+ * @param {number} [now] - epoch ms (injectable for tests)
+ * @returns {{ ready: number, total: number }}
+ */
+export function readyCounts(slots, now = Date.now()) {
+  const configured = slots.filter(isSlotConfigured);
+  return {
+    ready: configured.filter((s) => isSlotReady(s, now)).length,
+    total: configured.length,
+  };
+}
+
+/**
  * Project the slot snapshot → the Start/Stop button selector used by
  * slots.jsx: "off" (render Start) | "running" (render Stop+Restart) |
  * "transitional" (actions disabled).
@@ -149,7 +204,7 @@ export function slotIndicatorFromPhase(slot, now = Date.now()) {
  */
 export function slotButtonPhase(slot, now = Date.now()) {
   const { cls } = _containerIndicator(slot, now);
-  if (cls === "serving" || cls === "stale") return "running";
+  if (isReadyCls(cls)) return "running";
   if (cls === "warming") return "transitional";
   // "offline" (stopped/idle-not-live) and "error" (crashed) → Start.
   return "off";
