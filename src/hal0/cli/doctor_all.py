@@ -43,6 +43,7 @@ import sqlite3
 import stat
 import subprocess
 import time
+import tomllib
 from collections.abc import Callable
 from functools import wraps
 from pathlib import Path
@@ -659,6 +660,81 @@ def check_api_journal_access(
         "(curl -fsSL https://hal0.dev/install.sh | sudo bash); `hal0 update` does not "
         "rewrite hal0-api.service",
     )
+
+
+@_report_unreadable("img-custom-nodes", "Image custom nodes")
+def check_img_custom_nodes() -> Check:
+    """Report ComfyUI startup failures from this unit invocation only (#3132)."""
+    from rich.text import Text
+
+    from hal0.slots.layout import resolve_slot_stem
+    from hal0.slots.naming import slot_instance_token, slot_unit_name
+
+    key, label = "img-custom-nodes", "Image custom nodes"
+
+    def skipped(reason: str) -> Check:
+        return Check(key, label, _PASS, f"not checked: {reason}")
+
+    directory = paths.slots_config_dir()
+    stem = resolve_slot_stem(directory, "img")
+    if stem is None:
+        return Check(key, label, _PASS, "no img slot configured")
+    try:
+        cfg = tomllib.loads((directory / f"{stem}.toml").read_text())
+    except ValueError:
+        return skipped("img slot config could not be parsed")
+    unit = slot_unit_name(slot_instance_token(cfg) or stem)
+    try:
+        start = subprocess.run(  # nosec B603 B607
+            ["systemctl", "show", unit, "-p", "InvocationID", "--value"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        invocation = start.stdout.strip()
+        if start.returncode or not re.fullmatch(r"[0-9a-fA-F]{32}", invocation):
+            return skipped(f"{unit} has no readable current start")
+        journal = subprocess.run(  # nosec B603 B607
+            [
+                "journalctl",
+                "-b",
+                "-u",
+                unit,
+                f"_SYSTEMD_INVOCATION_ID={invocation}",
+                "-o",
+                "cat",
+                "--no-pager",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except subprocess.SubprocessError:
+        return skipped("systemd/journal query timed out or failed")
+    if journal.returncode or journal.stderr.strip() or not journal.stdout.strip():
+        return skipped("current-start journal unavailable or empty; try `sudo hal0 doctor all`")
+    failures: set[str] = set()
+    for line in Text.from_ansi(journal.stdout).plain.splitlines():
+        match = re.search(
+            r"(?:IMPORT FAILED|PRESTARTUP FAILED)\)\s*:\s*(.+)$"
+            r"|Cannot import (.+?) module for custom nodes(?:\s*:|$)",
+            line,
+        )
+        if match:
+            failures.add(Path((match.group(1) or match.group(2)).strip()).name)
+    if failures:
+        return Check(
+            key,
+            label,
+            _WARN,
+            "custom nodes failed in the current img start: "
+            + ", ".join(sorted(failures))
+            + " — ship dependencies in a derived runner image; see "
+            "https://hal0.dev/docs/guides/manage-runner-images#comfyui-custom-node-dependencies",
+        )
+    return Check(key, label, _PASS, "no custom-node startup failures in the current img start")
 
 
 def _moonshine_slots() -> tuple[dict[str, str], list[str]]:
@@ -3014,6 +3090,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_seed_context_envelope(),
         check_agent_uid_isolation(),
         check_api_journal_access(),
+        check_img_custom_nodes(),
         check_voice_stt_weights(),
         check_seams(),
         check_mcp_mounts(),
