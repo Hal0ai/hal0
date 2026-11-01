@@ -2869,6 +2869,14 @@ def apply_brain_profile_mcp_entries(
     PyYAML is unavailable, matching that function's own degrade-to-OK
     posture — brain wiring is never load-bearing for the registry mutation
     that triggered it.
+
+    The read, edit and replace run under :func:`_profile_lock` on the profile
+    directory, opened without following links the way
+    :func:`_merge_profile_config` opens it, so this join and the provisioning
+    phase that merges into the same file (:func:`_phase_brain_profile_mcp_wire`)
+    do not lose each other's change (#3224). This function is never called
+    with that lock held, and the lock is a different file from the root
+    config's, so taking it here cannot wait on the caller.
     """
     path = Path(hermes_home) / "profiles" / _BRAIN_PROFILE_NAME / "config.yaml"
     if not path.exists():
@@ -2884,38 +2892,54 @@ def apply_brain_profile_mcp_entries(
         }
 
     try:
-        current = path.read_text(encoding="utf-8")
-        data = yaml.safe_load(current) or {}
-        servers = (
-            data.setdefault("mcp_servers", {})
-            if entries or remove_ids
-            else data.get("mcp_servers", {})
-        )
-        removed: list[str] = []
-        for sid in remove_ids:
-            if (
-                sid not in entries
-                and isinstance(servers, dict)
-                and servers.pop(sid, None) is not None
-            ):
-                removed.append(sid)
-        if isinstance(servers, dict):
-            for sid, spec in entries.items():
-                servers[sid] = {
-                    "type": spec.get("type", "http"),
-                    "transport": spec.get("transport", "http"),
-                    "url": spec["url"],
-                    "headers": dict(spec.get("headers") or {}),
-                    "timeout": spec.get("timeout", 60),
-                }
-                # The whole entry is rebuilt, so a false value simply drops
-                # the key — nothing stale survives a header removal.
-                if spec.get("skip_preflight"):
-                    servers[sid]["skip_preflight"] = True
-        out = yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
-        changed = out != current
-        if changed:
-            _atomic_write(path, out)
+        dir_fd = _open_profile_dir(Path(hermes_home), _BRAIN_PROFILE_NAME)
+    except FileNotFoundError:
+        return {"wired": False, "reason": "brain profile config absent", "path": str(path)}
+    except OSError as exc:
+        summary = _nofollow_error(exc, path.parent)
+        return {
+            "wired": False,
+            "error": summary,
+            "path": str(path),
+            "remove_errors": [summary] if remove_ids else [],
+        }
+    try:
+        # One read-edit-replace transaction under the profile's flock, the lock
+        # file inside the verified directory (not on a pathname a rename could
+        # point elsewhere): the provisioning phase and the sweep take it too.
+        with _profile_lock(dir_fd):
+            current = path.read_text(encoding="utf-8")
+            data = yaml.safe_load(current) or {}
+            servers = (
+                data.setdefault("mcp_servers", {})
+                if entries or remove_ids
+                else data.get("mcp_servers", {})
+            )
+            removed: list[str] = []
+            for sid in remove_ids:
+                if (
+                    sid not in entries
+                    and isinstance(servers, dict)
+                    and servers.pop(sid, None) is not None
+                ):
+                    removed.append(sid)
+            if isinstance(servers, dict):
+                for sid, spec in entries.items():
+                    servers[sid] = {
+                        "type": spec.get("type", "http"),
+                        "transport": spec.get("transport", "http"),
+                        "url": spec["url"],
+                        "headers": dict(spec.get("headers") or {}),
+                        "timeout": spec.get("timeout", 60),
+                    }
+                    # The whole entry is rebuilt, so a false value simply drops
+                    # the key — nothing stale survives a header removal.
+                    if spec.get("skip_preflight"):
+                        servers[sid]["skip_preflight"] = True
+            out = yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
+            changed = out != current
+            if changed:
+                _atomic_write(path, out)
     except (OSError, yaml.YAMLError) as exc:
         summary = _yaml_error_summary(exc)
         return {
@@ -2924,6 +2948,8 @@ def apply_brain_profile_mcp_entries(
             "path": str(path),
             "remove_errors": [summary] if remove_ids else [],
         }
+    finally:
+        os.close(dir_fd)
 
     return {
         "wired": True,
