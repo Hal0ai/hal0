@@ -322,6 +322,8 @@ _QUADLET_MAX_LINE=4096
 # table and the regexes are not re-quoted per use.
 _QRE_DESCRIPTION='^hal0 container inference slot \([A-Za-z0-9_.-]{1,64}\)$'
 _QRE_UINT='^[0-9]{1,9}$'
+# [Service] TimeoutStopSec=: as _QRE_UINT, but never 0 in any spelling.
+_QRE_STOP_SEC='^[1-9][0-9]{0,8}$'
 _QRE_IMAGE='^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}$'
 _QRE_CTRNAME='^hal0-slot-[A-Za-z0-9_.-]{1,64}$'
 _QRE_NETWORK='^[A-Za-z0-9_.:-]{1,64}$'
@@ -505,8 +507,10 @@ validate_quadlet_directive() {  # args: section, "Key=Value" line
     'Service|RestartSteps')      [[ "$value" =~ $_QRE_UINT ]]    || _quadlet_die "bad RestartSteps: $value" ;;
     'Service|RestartMaxDelaySec') [[ "$value" =~ $_QRE_UINT ]]   || _quadlet_die "bad RestartMaxDelaySec: $value" ;;
     # A runtime's declared stop grace plus the unit's margin, as a bare number of
-    # seconds: systemd's duration words (`infinity`) are refused.
-    'Service|TimeoutStopSec')    [[ "$value" =~ $_QRE_UINT ]]    || _quadlet_die "bad TimeoutStopSec: $value" ;;
+    # seconds. Refused: systemd's duration words (`infinity`), and 0, which systemd
+    # reads as no timeout at all (config_parse_sec_fix_0), so a stop could block
+    # forever.
+    'Service|TimeoutStopSec')    [[ "$value" =~ $_QRE_STOP_SEC ]] || _quadlet_die "bad TimeoutStopSec: $value" ;;
     'Service|RestartPreventExitStatus') [[ "$value" =~ $_QRE_EXITSTATUS_LIST ]] || _quadlet_die "bad RestartPreventExitStatus: $value" ;;
     'Service|SuccessExitStatus') [[ "$value" =~ $_QRE_EXITSTATUS_LIST ]]        || _quadlet_die "bad SuccessExitStatus: $value" ;;
     'Service|SyslogIdentifier')  [[ "$value" =~ $_QRE_CTRNAME ]] || _quadlet_die "bad SyslogIdentifier: $value" ;;

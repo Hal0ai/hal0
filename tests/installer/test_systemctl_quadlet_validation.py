@@ -309,6 +309,9 @@ def test_stop_grace_keys_accept_a_bare_number() -> None:
     """A runtime's stop grace renders as both spellings of a number and nothing else."""
     _accepts(f"{_HEAD}PodmanArgs=--stop-timeout=120\n\n[Service]\nTimeoutStopSec=150\n", "chat")
     _accepts(f"{_HEAD}PodmanArgs=--stop-timeout 120\n", "chat")
+    # The bounds of the unit's key.
+    _accepts(f"{_HEAD}\n[Service]\nTimeoutStopSec=1\n", "chat")
+    _accepts(f"{_HEAD}\n[Service]\nTimeoutStopSec=999999999\n", "chat")
 
 
 def test_quoted_environment_value_is_one_word_or_refused() -> None:
@@ -579,6 +582,12 @@ ESCALATIONS = {
     "service-timeoutstopsec-infinity": f"{_HEAD}\n[Service]\nTimeoutStopSec=infinity\n",
     "service-timeoutstopsec-duration": f"{_HEAD}\n[Service]\nTimeoutStopSec=2min\n",
     "service-timeoutstopsec-empty": f"{_HEAD}\n[Service]\nTimeoutStopSec=\n",
+    # systemd reads 0 as no timeout at all (config_parse_sec_fix_0), so a stop could
+    # block forever. Every spelling of it goes, and so does a tenth digit.
+    "service-timeoutstopsec-zero": f"{_HEAD}\n[Service]\nTimeoutStopSec=0\n",
+    "service-timeoutstopsec-all-zeros": f"{_HEAD}\n[Service]\nTimeoutStopSec=00\n",
+    "service-timeoutstopsec-leading-zero": f"{_HEAD}\n[Service]\nTimeoutStopSec=0150\n",
+    "service-timeoutstopsec-too-long": f"{_HEAD}\n[Service]\nTimeoutStopSec=1000000000\n",
     "unit-timeoutstopsec": f"[Unit]\nTimeoutStopSec=150\n\n{_HEAD}",
     "container-timeoutstopsec": f"{_HEAD}TimeoutStopSec=150\n",
     # #3066: [Container] User= exists for the img slot to DROP to the hal0
