@@ -132,6 +132,45 @@ def load_shard_shas(registry: Any, model_id: str) -> dict[str, str]:
     }
 
 
+def resplit_first_parts(filename: str, files: dict[str, str]) -> list[str]:
+    """First parts of the split layouts upstream that replaced ``filename``'s.
+
+    ``filename`` is the installed first part (``hf_filename``), ``files`` the
+    repo's current LFS listing. A re-split swaps ``-of-00003`` for another
+    ``-of-N`` (same directory, stem and extension): the installed first part is
+    gone, so re-pulling it can never succeed and an update has to start from the
+    new layout's first part instead. Returns that first part, or several when
+    upstream now carries more than one other layout (the caller must not guess
+    between them), or nothing when ``filename`` is not a split part or its own
+    layout is still listed: two layouts side by side are a valid repo shape, not
+    a re-split.
+
+    Each first part is named from the part count and the extension spelling
+    upstream uses. Whether that layout is complete is the pull's
+    ``_plan_split_parts`` check, not a question for this pure comparison.
+    """
+    path = PurePosixPath(filename)
+    m = SHARD_RE.match(path.name)
+    if m is None or filename in files:
+        return []
+    tot = int(m.group("tot"))
+    stem, ext = m.group("stem"), m.group("ext")
+    firsts: set[str] = set()
+    for rel in files:
+        rp = PurePosixPath(rel)
+        rm = SHARD_RE.match(rp.name)
+        if (
+            rm is not None
+            and rp.parent == path.parent
+            and rm.group("stem") == stem
+            and rm.group("ext").lower() == ext.lower()
+            and int(rm.group("tot")) != tot
+        ):
+            first = f"{stem}-00001-of-{int(rm.group('tot')):05d}.{rm.group('ext')}"
+            firsts.add(str(rp.with_name(first)))
+    return sorted(firsts)
+
+
 def _evaluate_shards(
     filename: str,
     files: dict[str, str],
@@ -141,11 +180,11 @@ def _evaluate_shards(
 
     ``reason`` is ``shard_changed`` (``rels`` = parts whose remote sha differs
     from the recorded one), ``shard_count_changed`` (the installed layout is
-    gone upstream and the same stem now has a different ``-of-N``; ``rels`` =
-    the installed parts), or ``None``. A layout that is still present is never
-    a count change: two layouts side by side are a valid repo shape. Parts
-    with no recorded local sha or no remote LFS entry are skipped, so they
-    never raise a phantom update.
+    gone upstream and the same stem now has a different ``-of-N``, see
+    :func:`resplit_first_parts`; ``rels`` = the installed parts), or ``None``.
+    A layout that is still present is never a count change. Parts with no
+    recorded local sha or no remote LFS entry are skipped, so they never raise
+    a phantom update.
     """
     path = PurePosixPath(filename)
     m = SHARD_RE.match(path.name)
@@ -162,19 +201,8 @@ def _evaluate_shards(
             changed.append(rel)
     if changed:
         return "shard_changed", changed
-    if filename in files:
-        return None, []
-    for rel in files:
-        rp = PurePosixPath(rel)
-        rm = SHARD_RE.match(rp.name)
-        if (
-            rm is not None
-            and rp.parent == path.parent
-            and rm.group("stem") == stem
-            and rm.group("ext").lower() == ext.lower()
-            and int(rm.group("tot")) != tot
-        ):
-            return "shard_count_changed", sorted(shard_shas)
+    if resplit_first_parts(filename, files):
+        return "shard_count_changed", sorted(shard_shas)
     return None, []
 
 

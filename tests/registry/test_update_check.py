@@ -21,6 +21,7 @@ from hal0.registry.store import ModelRegistry
 from hal0.registry.update_check import (
     evaluate_model_update,
     fetch_remote_lfs_shas,
+    resplit_first_parts,
     shard_update_pending,
 )
 
@@ -290,6 +291,43 @@ def test_evaluate_split_count_change_needs_shard_rows() -> None:
     v = evaluate_model_update(_split_model(), {"Qwen/Qwen3-4B-GGUF": remote}, {})
     assert v is not None
     assert v["update_available"] is False
+
+
+def test_resplit_first_parts_names_the_new_layouts_first_part() -> None:
+    four = {f"m/m-{i:05d}-of-00004.gguf": "f" * 64 for i in range(1, 5)}
+    assert resplit_first_parts(_P1, four) == ["m/m-00001-of-00004.gguf"]
+    two = {f"m/m-{i:05d}-of-00002.gguf": "f" * 64 for i in (1, 2)}
+    assert resplit_first_parts(_P1, two) == ["m/m-00001-of-00002.gguf"]
+
+
+def test_resplit_first_parts_keeps_the_directory_and_upstream_extension_case() -> None:
+    files = {"Q4/Big-00001-of-00002.GGUF": "f" * 64, "Q4/Big-00002-of-00002.GGUF": "f" * 64}
+    assert resplit_first_parts("Q4/Big-00001-of-00003.gguf", files) == [
+        "Q4/Big-00001-of-00002.GGUF"
+    ]
+
+
+def test_resplit_first_parts_is_empty_while_the_installed_layout_is_listed() -> None:
+    side_by_side = {**_LOCAL_PARTS, "m/m-00001-of-00004.gguf": "f" * 64}
+    assert resplit_first_parts(_P1, side_by_side) == []
+
+
+def test_resplit_first_parts_ignores_other_stems_and_directories() -> None:
+    elsewhere = {
+        "m/other-00001-of-00004.gguf": "f" * 64,
+        "n/m-00001-of-00004.gguf": "f" * 64,
+        "m/m-Q4_K_M.gguf": "f" * 64,
+    }
+    assert resplit_first_parts(_P1, elsewhere) == []
+
+
+def test_resplit_first_parts_lists_every_candidate_instead_of_picking_one() -> None:
+    both = {"m/m-00001-of-00002.gguf": "f" * 64, "m/m-00001-of-00004.gguf": "f" * 64}
+    assert resplit_first_parts(_P1, both) == ["m/m-00001-of-00002.gguf", "m/m-00001-of-00004.gguf"]
+
+
+def test_resplit_first_parts_is_empty_for_a_single_file_model() -> None:
+    assert resplit_first_parts("qwen3-4b.gguf", {"qwen3-4b-Q8.gguf": "f" * 64}) == []
 
 
 def test_shard_update_pending_clears_after_apply() -> None:
