@@ -369,3 +369,114 @@ def test_ensure_hindsight_alias_keeps_the_file_owner(
     assert d._ensure_hindsight_alias() is True
 
     assert chowned == [(st.st_uid, st.st_gid)]
+
+
+# ── autoUpdate off for the Pi harness only (#3165) ─────────────────────────
+
+
+def test_seeded_hindsight_config_turns_auto_update_off_for_pi(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner
+) -> None:
+    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
+    cfg = d._hindsight_client_config()
+    assert not cfg.exists()
+
+    d._write_hindsight_config()
+
+    data = json.loads(cfg.read_text())
+    assert data["harnesses"] == {"pi": {"autoUpdate": False}}
+    assert "autoUpdate" not in data  # other tools sharing the file keep the default
+    assert d._ensure_hindsight_auto_update_off() is False  # already off: no rewrite
+
+
+def test_auto_update_off_is_added_to_existing_file_without_the_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner
+) -> None:
+    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
+    cfg = d._hindsight_client_config()
+    cfg.parent.mkdir(parents=True)
+    original = {
+        "apiUrl": "http://other:9177",
+        "apiToken": "secret",
+        "banks": {"x": {"bank": "y"}},
+        "harnesses": {"claude-code": {"autoUpdate": True}},
+    }
+    cfg.write_text(json.dumps(original))
+    os.chmod(cfg, 0o640)
+
+    assert d._ensure_hindsight_auto_update_off() is True
+
+    data = json.loads(cfg.read_text())
+    assert data["harnesses"] == {
+        "claude-code": {"autoUpdate": True},
+        "pi": {"autoUpdate": False},
+    }
+    assert {k: v for k, v in data.items() if k != "harnesses"} == {
+        k: v for k, v in original.items() if k != "harnesses"
+    }
+    assert stat.S_IMODE(os.stat(cfg).st_mode) == 0o640
+    assert d._ensure_hindsight_auto_update_off() is False
+
+
+@pytest.mark.parametrize(
+    "operator",
+    [
+        {"autoUpdate": True},
+        {"autoUpdate": False},
+        {"harnesses": {"pi": {"autoUpdate": True}}},
+        {"harnesses": {"pi": {"autoUpdate": False}}},
+    ],
+)
+def test_auto_update_off_never_overrides_an_operator_value(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_runner: _FakeRunner,
+    operator: dict[str, Any],
+) -> None:
+    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
+    cfg = d._hindsight_client_config()
+    cfg.parent.mkdir(parents=True)
+    text = json.dumps({"apiUrl": "http://other:9177", **operator}, indent=4)
+    cfg.write_text(text)
+
+    assert d._ensure_hindsight_auto_update_off() is False
+
+    assert cfg.read_text() == text  # byte-for-byte: not even reformatted
+
+
+@pytest.mark.parametrize(
+    "content", [None, "{not json", "[1, 2]", '{"harnesses": "x"}', '{"harnesses": {"pi": 3}}']
+)
+def test_auto_update_off_leaves_unusable_files_alone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_runner: _FakeRunner,
+    content: str | None,
+) -> None:
+    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
+    cfg = d._hindsight_client_config()
+    if content is not None:
+        cfg.parent.mkdir(parents=True)
+        cfg.write_text(content)
+
+    assert d._ensure_hindsight_auto_update_off() is False
+
+    if content is None:
+        assert not cfg.exists()
+    else:
+        assert cfg.read_text() == content
+
+
+def test_upgrade_turns_auto_update_off_in_existing_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner
+) -> None:
+    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
+    cfg = d._hindsight_client_config()
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text(json.dumps({"apiUrl": "http://other:9177"}))
+
+    assert d.upgrade() == {"hindsight_alias_added": True}
+
+    data = json.loads(cfg.read_text())
+    assert data["apiUrl"] == "http://other:9177"
+    assert data["harnesses"] == {"pi": {"autoUpdate": False}}

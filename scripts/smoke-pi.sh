@@ -5,7 +5,7 @@ set -u
 
 PI_PIN="1.2.0"
 ADAPTER_PIN="5.3.0"
-HINDSIGHT_PIN="0.8.1"
+HINDSIGHT_PIN="0.8.4"
 FAIL=0
 ok()   { printf 'PASS: %s\n' "$*"; }
 bad()  { printf 'FAIL: %s\n' "$*" >&2; FAIL=1; }
@@ -48,6 +48,27 @@ EOF
 # 6. Hindsight dependency resolved at pin
 h="$(cd "$AGENT_DIR/extensions/hindsight" && npm ls @vectorize-io/hindsight-coding-agents 2>/dev/null | grep -o '@vectorize-io/hindsight-coding-agents@[0-9.]*' || true)"
 case "$h" in *"@$HINDSIGHT_PIN") ok "hindsight-coding-agents at pin $HINDSIGHT_PIN";; *) bad "hindsight dep '$h' != $HINDSIGHT_PIN";; esac
+
+# 6b. Custom-message turns. Pi >= 1.2.0 fires before_agent_start for runs started
+# by pi.sendMessage(..., {triggerTurn: true}); those events carry `message`, not
+# `prompt` (vectorize-io/hindsight#5592, #6016). The extension must not read
+# event.prompt unguarded. Static check on the installed dist/pi.js: no code is run.
+pijs="$AGENT_DIR/extensions/hindsight/node_modules/@vectorize-io/hindsight-coding-agents/dist/pi.js"
+if [ ! -f "$pijs" ]; then
+  bad "hindsight dist/pi.js missing"
+elif grep -q 'event\.prompt\.trim()' "$pijs" && ! grep -q 'typeof event\.prompt' "$pijs"; then
+  bad "hindsight pi.js reads event.prompt unguarded: a custom-message turn throws TypeError (fixed upstream in 0.8.4)"
+else
+  ok "hindsight pi.js guards custom-message turns"
+fi
+
+# 6c. Self-update must be off for Pi, or the pin is not the version that runs.
+python3 - "$HOME/.hindsight/coding-agent.json" <<'EOF' && ok "hindsight autoUpdate off for pi" || bad "hindsight autoUpdate not off for pi"
+import json, sys
+c = json.load(open(sys.argv[1]))
+pi = (c.get("harnesses") or {}).get("pi") or {}
+assert pi.get("autoUpdate", c.get("autoUpdate", True)) is False, "autoUpdate is on"
+EOF
 
 # 7. Memory MCP entry
 python3 - "$AGENT_DIR/mcp.json" <<'EOF' && ok "hal0-memory MCP entry" || bad "hal0-memory MCP entry"

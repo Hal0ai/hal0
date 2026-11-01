@@ -126,6 +126,9 @@ _HINDSIGHT_API_URL = "http://127.0.0.1:9177"
 # 0.8.1, the same one the Pi binding rides) applies ``banks.<resolvedId>.bank``
 # as a rename of the destination bank (dist/index.js ``applyBankConfig``).
 _HINDSIGHT_ALIAS_ID = "coding-agent::hal0"
+# The harness name the pinned package's Pi binding resolves its per-harness
+# config section under (``createPiExtension("pi")`` in dist/pi.js).
+_HINDSIGHT_HARNESS = "pi"
 _HINDSIGHT_SHARED_BANK = "coding-agent::hal0-mono"
 
 # Upstream's own built-in defaults, restored on uninstall iff hal0 was
@@ -210,6 +213,7 @@ class PiDriver(AgentDriver):
 
         # Hindsight client config — seeded iff absent (spec D4).
         self._write_hindsight_config()
+        self._ensure_hindsight_auto_update_off()
 
         # Last: stamp the daemon-readable marker (see _write_profile_marker).
         # Ordering matters — the marker asserts the profile above landed.
@@ -273,6 +277,7 @@ class PiDriver(AgentDriver):
         self._write_pi_settings(defaults=False)
         self._write_mcp_config(bearer_token=None)
         alias_added = self._ensure_hindsight_alias()
+        self._ensure_hindsight_auto_update_off()
         # Last, as in install(): the marker asserts the profile above landed.
         self._write_profile_marker()
         return {"hindsight_alias_added": alias_added}
@@ -666,6 +671,9 @@ class PiDriver(AgentDriver):
             payload["banks"] = {_HINDSIGHT_ALIAS_ID: {"bank": _HINDSIGHT_SHARED_BANK}}
         payload["retainTags"] = ["project:{gitProject}"]
         payload["retainMetadata"] = {"repo": "{gitProject}"}
+        # Pi-scoped: the package's daily self-update would otherwise replace the
+        # version hal0 pins (#3165). Other harnesses' settings are untouched.
+        payload["harnesses"] = {_HINDSIGHT_HARNESS: {"autoUpdate": False}}
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -682,18 +690,62 @@ class PiDriver(AgentDriver):
         :meth:`_write_hindsight_config`'s job at install time. The rewrite
         keeps the file's mode and owner and writes through a symlink: it may
         carry a token and may be managed elsewhere."""
-        path = self._hindsight_client_config()
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            st = path.stat()
-        except (OSError, json.JSONDecodeError):
+        loaded = self._load_hindsight_config()
+        if loaded is None:
             return False
-        if not isinstance(data, dict):
-            return False
+        path, data = loaded
         banks = data.setdefault("banks", {})
         if not isinstance(banks, dict) or _HINDSIGHT_ALIAS_ID in banks:
             return False
         banks[_HINDSIGHT_ALIAS_ID] = {"bank": _HINDSIGHT_SHARED_BANK}
+        self._store_hindsight_config(path, data)
+        return True
+
+    def _ensure_hindsight_auto_update_off(self) -> bool:
+        """Turn the package's daily self-update off for Pi only, in an EXISTING
+        coding-agent.json; return True iff the file was changed (#3165).
+
+        The package reads ``autoUpdate`` (default on) from the flat file and
+        lets ``harnesses.pi.autoUpdate`` override it for the Pi binding alone,
+        so the key goes under ``harnesses.pi`` and the other tools sharing the
+        file keep their setting. An operator who set ``autoUpdate`` at either
+        level made a choice that is not ours to override, so the file is only
+        written when neither is present. Same safety as
+        :meth:`_ensure_hindsight_alias`: nothing else is touched, and a
+        missing, unreadable or non-object file is left alone."""
+        loaded = self._load_hindsight_config()
+        if loaded is None:
+            return False
+        path, data = loaded
+        if "autoUpdate" in data:
+            return False
+        harnesses = data.setdefault("harnesses", {})
+        if not isinstance(harnesses, dict):
+            return False
+        section = harnesses.setdefault(_HINDSIGHT_HARNESS, {})
+        if not isinstance(section, dict) or "autoUpdate" in section:
+            return False
+        section["autoUpdate"] = False
+        self._store_hindsight_config(path, data)
+        return True
+
+    def _load_hindsight_config(self) -> tuple[Path, dict[str, Any]] | None:
+        """The shared client config as ``(path, parsed object)``, or None when
+        it is missing, unreadable, invalid JSON or not an object."""
+        path = self._hindsight_client_config()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        return path, data
+
+    def _store_hindsight_config(self, path: Path, data: dict[str, Any]) -> None:
+        """Rewrite the shared client config in place. Keeps the file's mode and
+        owner and writes through a symlink: it may carry a token and may be
+        managed elsewhere."""
+        st = path.stat()
         # Write through a symlink (a dotfiles-managed file) instead of
         # replacing the link with a regular file.
         target = path.resolve()
@@ -709,4 +761,3 @@ class PiDriver(AgentDriver):
         finally:
             os.close(fd)
         tmp.replace(target)
-        return True
