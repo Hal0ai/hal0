@@ -39,7 +39,7 @@ dependencies = [
   # entire MCP surface with the API still reporting healthy. Raise this
   # deliberately, after running tests/mcp/test_admin_route_map_nested.py against
   # the new version.
-  "fastapi>=0.115,<0.157",
+  "fastapi>=0.115,<0.163",
   "uvicorn[standard]>=0.32",
   "httpx>=0.28",
   # hal0.providers.comfyui follows a render's step progress on ComfyUI's
