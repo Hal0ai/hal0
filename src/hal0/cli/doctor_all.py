@@ -44,8 +44,9 @@ import stat
 import subprocess
 import time
 from collections.abc import Callable
+from functools import wraps
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ParamSpec
 
 import typer
 from rich.console import Console
@@ -67,6 +68,32 @@ if TYPE_CHECKING:
     from hal0.bridge.store import BridgeStore
 
 console = Console()
+
+_P = ParamSpec("_P")
+
+
+def _report_unreadable(
+    key: str, label: str
+) -> Callable[[Callable[_P, Check]], Callable[_P, Check]]:
+    """Keep filesystem errors, including errors in helpers, local to their doctor row."""
+
+    def decorate(check: Callable[_P, Check]) -> Callable[_P, Check]:
+        @wraps(check)
+        def guarded(*args: _P.args, **kwargs: _P.kwargs) -> Check:
+            try:
+                return check(*args, **kwargs)
+            except OSError as exc:
+                return Check(
+                    key,
+                    label,
+                    _WARN,
+                    f"could not run this check as this user: {exc} — "
+                    "re-run with `sudo hal0 doctor all`",
+                )
+
+        return guarded
+
+    return decorate
 
 
 # ── extra read-only classifiers (pure — take parsed JSON, return a Check) ──────
@@ -134,6 +161,7 @@ _SECRET_FILES: tuple[Callable[[], Path], ...] = (
 )
 
 
+@_report_unreadable("secret-modes", "Secret file modes")
 def check_secret_file_modes() -> Check:
     """Secret-bearing config files must not be group- or world-readable.
 
@@ -153,8 +181,8 @@ def check_secret_file_modes() -> Check:
         path = resolve()
         try:
             mode = path.stat().st_mode & 0o777
-        except OSError:
-            continue  # absent or unreadable — nothing to assert
+        except FileNotFoundError:
+            continue  # absent — nothing to assert
         if mode & (stat.S_IRWXG | stat.S_IRWXO):
             offenders.append(f"{path.name} is {mode:o} ({path})")
     if offenders:
@@ -170,6 +198,7 @@ def check_secret_file_modes() -> Check:
     return Check("secret-modes", "Secret file modes", _PASS, "secret files are owner-only")
 
 
+@_report_unreadable("hardware_freshness", "Hardware probe freshness")
 def check_hardware_freshness() -> Check:
     """The cached hardware.json must be fresh enough to trust (#1862/H9).
 
@@ -203,6 +232,8 @@ def check_hardware_freshness() -> Check:
         )
     try:
         info = load_hardware_info()
+    except OSError:
+        raise
     except Exception as exc:
         return Check(
             name,
@@ -709,6 +740,7 @@ def _moonshine_profile_check(profile_name: str, slots: list[str]) -> Check:
     )
 
 
+@_report_unreadable("stt-weights", "Moonshine weights")
 def check_voice_stt_weights() -> Check:
     """Moonshine STT weights preflight — the same rule slot spawn enforces.
 
@@ -730,6 +762,8 @@ def check_voice_stt_weights() -> Check:
     """
     try:
         users, unreadable = _moonshine_slots()
+    except OSError:
+        raise
     except Exception:
         users, unreadable = {}, []
     by_profile: dict[str, list[str]] = {}
@@ -761,6 +795,7 @@ def check_voice_stt_weights() -> Check:
     return Check("stt-weights", "Moonshine weights", worst.status, "; ".join(flagged))
 
 
+@_report_unreadable("models", "Model store")
 def check_model_store(
     models: Any,
     *,
@@ -823,12 +858,13 @@ def _read_env_value(
     Mirrors the line convention :mod:`hal0.api._env_store` writes (a plain
     or double-quoted ``KEY=value``, one per line — see ``_line_targets_key``).
     A commented-out line (``# KEY=value``) does not count as set. Returns
-    ``None`` when the file, or the key inside it, is absent — never raises.
+    ``None`` when the file, or the key inside it, is absent. Other filesystem
+    errors propagate to the caller's doctor row guard.
     """
     _read = read_text if read_text is not None else (lambda p: p.read_text(encoding="utf-8"))
     try:
         text = _read(env_path)
-    except OSError:
+    except FileNotFoundError:
         return None
     prefix = f"{key}="
     for line in text.splitlines():
@@ -841,6 +877,7 @@ def _read_env_value(
     return None
 
 
+@_report_unreadable("ui-dist", "Dashboard bundle")
 def check_ui_dist(
     *, api_env_path: Path | None = None, current_ui_dist: Path | None = None
 ) -> Check:
@@ -875,10 +912,7 @@ def check_ui_dist(
         )
 
     override_path = Path(override)
-    try:
-        matches = override_path.resolve() == expected.resolve()
-    except OSError:
-        matches = override_path == expected
+    matches = override_path.resolve() == expected.resolve()
     if matches:
         return Check(
             "ui-dist",
@@ -918,6 +952,7 @@ def _env_file_entries(text: str) -> list[tuple[str, str]]:
     return entries
 
 
+@_report_unreadable("api-env-entries", "api.env entries")
 def check_api_env_entries(
     *, api_env_path: Path | None = None, read_text: Callable[[Path], str] | None = None
 ) -> Check:
@@ -943,9 +978,7 @@ def check_api_env_entries(
         text = _read(path)
     except FileNotFoundError:
         return Check(key, label, _PASS, f"no {path} yet")
-    except PermissionError:
-        return Check(key, label, _WARN, f"cannot read {path}; run hal0 doctor as hal0 or root")
-    except (OSError, UnicodeDecodeError) as exc:
+    except UnicodeDecodeError as exc:
         return Check(key, label, _WARN, f"cannot read {path}: {exc}")
 
     control: list[str] = []
@@ -1013,6 +1046,7 @@ def _hal0_target_enabled_probe() -> bool | None:
     return result.returncode == 0
 
 
+@_report_unreadable("hal0_target", "hal0.target")
 def check_hal0_target(
     *,
     unit_dir: Path | None = None,
@@ -1310,6 +1344,7 @@ def check_mcp_mounts(results: dict[str, dict[str, Any]] | None = None) -> Check:
     )
 
 
+@_report_unreadable("hermes_mcp_auth", "Hermes MCP config auth")
 def check_hermes_mcp_config_auth(
     *,
     auth: dict[str, Any] | None,
@@ -1351,12 +1386,7 @@ def check_hermes_mcp_config_auth(
             _PASS,
             "auth not required — a tokenless config.yaml is expected",
         )
-    try:
-        text = _read(path)
-    except OSError as exc:
-        return Check(
-            "hermes_mcp_auth", "Hermes MCP config auth", _WARN, f"could not read {path}: {exc}"
-        )
+    text = _read(path)
 
     import yaml
 
@@ -1396,6 +1426,7 @@ def _header(server: dict[str, Any], name: str) -> Any:
     return headers.get(name) if isinstance(headers, dict) else None
 
 
+@_report_unreadable("hermes_default_memory", "Hermes default profile memory")
 def check_hermes_default_memory(*, home: Path | None = None) -> Check:
     """The default Hermes profile's memory headers match its ``memory_private`` opt-in.
 
@@ -1422,6 +1453,7 @@ def check_hermes_default_memory(*, home: Path | None = None) -> Check:
     )
 
 
+@_report_unreadable("hermes_brain_memory", "Hermes hal0-brain profile memory")
 def check_hermes_brain_memory(*, home: Path | None = None) -> Check:
     """The ``hal0-brain`` profile's memory headers match its ``memory_private`` opt-in.
 
@@ -1449,7 +1481,7 @@ def _memory_headers_check(key: str, label: str, path: Path, *, subject: str) -> 
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return Check(key, label, _PASS, "not provisioned - nothing to check")
-    except (OSError, UnicodeDecodeError) as exc:
+    except UnicodeDecodeError as exc:
         return Check(key, label, _WARN, f"cannot read {path}: {exc}")
     import yaml
 
@@ -1791,6 +1823,7 @@ def _read_openwebui_client(db: Path) -> tuple[str, dict[str, Any] | None]:
     }
 
 
+@_report_unreadable("openwebui_mcp", "Open WebUI MCP tools")
 def check_openwebui_mcp(
     *,
     enabled: bool | None = None,
@@ -1924,10 +1957,7 @@ def check_openwebui_mcp(
             problems.append(f"{ident} carries a key the openwebui client no longer accepts")
     if problems:
         return Check(key, label, _FAIL, f"{'; '.join(problems)}; {rotate}")
-    try:
-        unit_text = unit.read_text(encoding="utf-8")
-    except OSError as exc:
-        return Check(key, label, _WARN, f"cannot read {unit}: {exc}")
+    unit_text = unit.read_text(encoding="utf-8")
     if _OWUI_ADD_HOST not in unit_text:
         return Check(
             key,
@@ -2267,6 +2297,7 @@ def check_hermes_generation_extras(*, home: Path | None = None, venv: Path | Non
     return Check(key, label, _PASS, f"generation {generation.name} carries the release extras")
 
 
+@_report_unreadable("hermes_command_approvals", "Hermes command approvals")
 def check_hermes_command_approvals(
     *,
     status_fn: Callable[[], dict[str, Any]] | None = None,
@@ -2291,6 +2322,8 @@ def check_hermes_command_approvals(
         return Check(name, label, _PASS, "hermes not provisioned — nothing to check")
     try:
         st = (status_fn or cmd.status)()
+    except OSError:
+        raise
     except Exception as exc:  # a broken read must not crash the roll-up
         return Check(name, label, _WARN, f"could not read the setting: {exc}")
     if st.get("seed_unreadable"):
@@ -2554,6 +2587,7 @@ def check_hermes_api_upstreams(
 HERMES_GATEWAY_UNIT = Path("/etc/systemd/system/hermes-gateway.service")
 
 
+@_report_unreadable("hal0_linger", "hal0 user linger")
 def check_hal0_linger(
     *,
     probe: Callable[[], Any] | None = None,
@@ -2611,10 +2645,7 @@ def check_hal0_linger(
             f"and cron jobs run without a scope. {regenerate}",
         )
     if gateway:
-        try:
-            unit_text = unit.read_text(encoding="utf-8")
-        except OSError:
-            unit_text = ""
+        unit_text = unit.read_text(encoding="utf-8")
         if unit_text and "user@" not in unit_text:
             return Check(
                 name,
@@ -2640,6 +2671,7 @@ def check_hal0_linger(
 _HINDSIGHT_LLM_PLACEHOLDER = "hal0-local-noauth"
 
 
+@_report_unreadable("hindsight_llm_auth", "Memory engine LLM auth")
 def check_hindsight_llm_auth(
     *,
     auth: dict[str, Any] | None,
@@ -2668,7 +2700,7 @@ def check_hindsight_llm_auth(
         for line in env_file.read_text(encoding="utf-8").splitlines():
             if line.startswith("HINDSIGHT_API_LLM_API_KEY="):
                 key = line.split("=", 1)[1].strip()
-    except OSError:
+    except FileNotFoundError:
         key = ""
     if not key or key == _HINDSIGHT_LLM_PLACEHOLDER:
         return Check(
@@ -2798,6 +2830,7 @@ def check_hermes_gateway_unit(
     return Check("hermes-gateway-unit", "Hermes gateway unit", status, row["detail"])
 
 
+@_report_unreadable("hermes_anchor_window", "Hermes anchor context window")
 def check_hermes_anchor_window(
     *,
     base: str | None = None,
@@ -2842,7 +2875,7 @@ def check_hermes_anchor_window(
 
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError) as exc:
+    except yaml.YAMLError as exc:
         return Check(name, title, _WARN, f"could not read {path}: {exc}")
     model_cfg = (data.get("model") or {}) if isinstance(data, dict) else {}
     model_name = str(model_cfg.get("default") or "").strip()

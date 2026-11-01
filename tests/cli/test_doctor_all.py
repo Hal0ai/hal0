@@ -223,7 +223,7 @@ def test_api_env_entries_unreadable_warns(tmp_path: Path) -> None:
 
     c = da.check_api_env_entries(api_env_path=tmp_path / "api.env", read_text=_deny)
     assert c.status == "warn"
-    assert "run hal0 doctor as hal0 or root" in c.detail
+    assert "sudo hal0 doctor all" in c.detail
 
 
 @pytest.mark.parametrize(
