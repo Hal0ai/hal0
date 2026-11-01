@@ -253,6 +253,78 @@ def test_namespace_register_rewrites_when_delete_count_matches() -> None:
     assert len(add_calls) == 1
 
 
+# ── identity-card dedupe reads the in-process dispatcher's shape (#2700) ─────
+#
+# The boot brain lane calls the phases through the in-process MCP dispatcher,
+# whose ``memory_search`` answers ``{"results": [...]}`` — one entry per FACT,
+# every fact of a document carrying that document's id. The phases used to read
+# only ``{"items": ...}`` (the REST shim), so ``existing_ids`` was always empty
+# and a fresh card was added on every hal0-api boot.
+
+
+def _fact(doc_id: str, agent_id: str) -> dict[str, Any]:
+    return {"id": doc_id, "text": "a fact", "metadata": {"agent_id": agent_id}}
+
+
+def _dispatcher_io(
+    *, agent_id: str, shape: str, deleted_by_call: list[list[str]], add_calls: list[Any]
+) -> hp.InstallIO:
+    """An ``mcp_memory_call`` whose search holds ONE prior card of 3 facts."""
+    facts = [_fact("prior-doc", agent_id)] * 3 + [_fact("other-doc", "someone-else")]
+
+    def _call(method, params, **_kw):
+        tool = (params or {}).get("name", "")
+        if tool == "memory_search":
+            return {"ok": True, "result": {shape: facts}}
+        if tool == "memory_delete":
+            ids = params["arguments"]["ids"]
+            deleted_by_call.append(list(ids))
+            return {"ok": True, "result": {"deleted": len(set(ids))}}
+        if tool == "memory_add":
+            add_calls.append(params)
+            return {"ok": True, "result": {"id": "new-doc"}}
+        return {"ok": True, "result": {}}
+
+    return hp.InstallIO(mcp_memory_call=_call)
+
+
+@pytest.mark.parametrize("shape", ["results", "items"])
+def test_namespace_register_dedupes_prior_card_in_either_search_shape(shape: str) -> None:
+    state = hp.BootstrapState(agent_id="hermes-agent")
+    deletes: list[list[str]] = []
+    adds: list[Any] = []
+    io = _dispatcher_io(
+        agent_id=state.agent_id, shape=shape, deleted_by_call=deletes, add_calls=adds
+    )
+
+    result = _register(state, io)
+
+    # One document id, not one per fact; and only OUR card's id.
+    assert deletes == [["prior-doc"]]
+    assert result.details["registered"] is True
+    assert result.details["refreshed_existing"] is True
+    assert len(adds) == 1
+
+
+@pytest.mark.parametrize("shape", ["results", "items"])
+def test_brain_profile_seed_dedupes_prior_card_in_either_search_shape(shape: str) -> None:
+    from hal0.agents.personas import BRAIN_PROFILE_AGENT_ID
+
+    state = hp.BootstrapState(agent_id="hermes-agent")
+    deletes: list[list[str]] = []
+    adds: list[Any] = []
+    io = _dispatcher_io(
+        agent_id=BRAIN_PROFILE_AGENT_ID, shape=shape, deleted_by_call=deletes, add_calls=adds
+    )
+
+    result = hp._phase_brain_profile_seed(hp._StepCtx(state=state, io=io))
+
+    assert deletes == [["prior-doc"]]
+    assert result.details["registered"] is True
+    assert result.details["refreshed_existing"] is True
+    assert len(adds) == 1
+
+
 # ── pipeline ordering ────────────────────────────────────────────────────────
 
 
