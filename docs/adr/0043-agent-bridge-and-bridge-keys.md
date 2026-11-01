@@ -333,11 +333,18 @@ the client rather than asking the operator to (`hal0.bridge.managed`).
   (`hal0 bridge scopes openwebui agents memory admin`); the render follows the
   client's current scopes, one connection per scope, each with the tool
   allow-list `hal0.openwebui.env_writer` carries for `memory` and `agents`
-  (Open WebUI's per-connection `function_name_filter_list`).
+  (Open WebUI's per-connection `function_name_filter_list`). The `agents` list
+  includes `agent_run_answer`, because `agent_run_wait` tells its caller to use
+  it for a run that asks a clarifying question.
 - **Where the key goes.** Into `TOOL_SERVER_CONNECTIONS` in `openwebui.env`
   (mode `0600`, the file that already carries the box's client key), as a bearer
   token on each connection. A bridge key is the only credential on these mounts,
-  so Open WebUI never holds an admin key.
+  so Open WebUI never holds an admin key. The connection URLs are always hal0's
+  own origin (`http://host.docker.internal:8080`, the one `/v1` URL `env_writer`
+  treats as hal0's), never derived from the operator-editable
+  `OPENAI_API_BASE_URLS`: a first entry for another provider must not receive the
+  key. Renders are serialised in hal0-api, so a render that re-reads the key from the
+  file cannot write an old key over a rotated one.
 - **Re-render on every change.** Rotate, re-scope and revoke of this client
   schedule an env re-render; the plaintext key from a rotate is passed straight
   to the render and not stored elsewhere. A revoked client keeps its name, so
@@ -345,8 +352,11 @@ the client rather than asking the operator to (`hal0.bridge.managed`).
 - **Request headers.** With `ENABLE_FORWARD_USER_INFO_HEADERS` on, Open WebUI
   sends `X-OpenWebUI-User-Name` and `X-OpenWebUI-Chat-Id` on its MCP calls. For
   a bridge principal named `openwebui` only, `/mcp/memory` turns them into a
-  `user:<name>` tag and `metadata.session_id` on `memory_add`. For any other
-  principal the headers change nothing.
+  `user:<name>` tag and `metadata.chat_id` on `memory_add`. For any other
+  principal the headers change nothing. The chat id is deliberately not
+  `metadata.session_id`: the memory provider derives the document id
+  `<agent>:<session_id>` from a session id, so every note of a chat would share
+  one document and each write would replace the last.
 - **Host allowlist.** `host.docker.internal` joins the MCP mounts' host and
   origin floor, because that is the name the container reaches hal0 by. It
   resolves only from containers on the box.

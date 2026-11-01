@@ -198,7 +198,7 @@ Open WebUI as tool-server connections you did not add:
 | Connection | Tools Open WebUI may call |
 | --- | --- |
 | hal0 memory (`/mcp/memory/mcp`) | `memory_add`, `memory_search`, `memory_recall`, `memory_list` |
-| Hermes, delegate (`/mcp/agents/mcp`) | `agent_run`, `agent_run_wait`, `agent_run_status`, `agent_run_stop`, `agent_memory_search`, `agents_list` |
+| Hermes, delegate (`/mcp/agents/mcp`) | `agent_run`, `agent_run_wait`, `agent_run_status`, `agent_run_answer`, `agent_run_stop`, `agent_memory_search`, `agents_list` |
 | hal0 admin (`/mcp/admin/mcp`) | Only if you grant it, see below |
 
 Both are reached with one bridge key, held by a client named `openwebui`.
@@ -226,27 +226,27 @@ and in `bridge.db` as a hash; it is not shown anywhere else.
 - **Memory writes say where they came from.** A note a model saves through
   Open WebUI is stored as shared memory tagged `agent:openwebui` and
   `user:<the Open WebUI user's name>`, with the chat id in its metadata
-  (`session_id`). Open WebUI's own memory store is off
+  (`chat_id`). Each note is its own document, so a second note in the same chat
+  does not replace the first. Open WebUI's own memory store is off
   (`ENABLE_MEMORIES=False`), so there is one memory, hal0's.
 - **Writers share one bank.** Notes from Open WebUI, Hermes and the brain land
   in the same bank, so the memory engine has more to extract and consolidate.
   Point that work at a slot or model that is not your chat model with
   `[memory.graph] extraction_slot` or `extraction_model`.
+- **The key only goes to hal0.** The connections always point at hal0's own
+  address, `http://host.docker.internal:8080`, whatever
+  `OPENAI_API_BASE_URLS` lists: an address you added there for another
+  provider never receives the bridge key, and `hal0 doctor` fails the
+  `openwebui_mcp` row if a connection in the file points anywhere else.
 - **The container must reach hal0 as `host.docker.internal`.** The installed
   `hal0-openwebui.service` needs `--add-host=host.docker.internal:host-gateway`.
   `hal0 update` does not rewrite an installed unit, so a box installed before
   that line existed lacks it; `hal0 doctor` reports the `openwebui_mcp` row as
   a warning then.
-- **Image editing.** Alongside image generation, hal0 turns on Open WebUI's
-  image-edit option (`ENABLE_IMAGE_EDIT=True`, OpenAI engine). Open WebUI posts
-  edits to hal0's `/v1/images/edits`, which hal0 routes to the `img` slot's
-  upstream like any `/v1/images` path but does not translate, so an edit works
-  only if that upstream answers it.
-
 If the connections are missing in Open WebUI, run `hal0 doctor all` and read
 the `openwebui_mcp` row: it names the first link that is broken (bridge off,
 no client yet, a client you made, a revoked client, an env file without the
-block, a unit without `--add-host`). After changing `[bridge].enabled`, restart
+block or with a key the client no longer accepts, a unit without `--add-host`). After changing `[bridge].enabled`, restart
 hal0-api. The design is in [ADR-0043](/docs/adr/0043-agent-bridge-and-bridge-keys).
 
 ## Web search
