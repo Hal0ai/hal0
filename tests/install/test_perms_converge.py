@@ -366,3 +366,102 @@ def test_stays_green_after_update_job_image_cache_and_chat_template_writes(
         assert _mode_drift(table) == [], "drift after a chat-template write"
     finally:
         os.umask(old_umask)
+
+
+# ── component 4: agents/ born by the first session-cookie mint (#2719) ────────
+
+
+def _declared_agents_mode() -> int:
+    by_target = {r.target: r for r in perms.ownership_table(service_user="hal0")}
+    return by_target[paths.var_lib() / "agents"].mode
+
+
+@pytest.mark.parametrize("umask", [0o022, 0o077])
+def test_stays_green_after_the_first_session_cookie_mint(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch, umask: int
+) -> None:
+    """#2719: ``agents/`` does not exist on a fresh install; ``_auth`` births it.
+
+    ``POST /api/auth/login`` (and the first agent-chat handshake) mint the
+    first ``hal0_session`` cookie, which creates the HMAC secret and with it
+    ``agents/``. The table declares that dir 0711, ``_auth`` used to chmod it
+    0700, and ``doctor perms`` went red after the first login. Mint through the
+    real writer, under the daemon's umask and a stricter one, and re-run the
+    audit: the drift set must stay empty and the mode must be the table's.
+    """
+    from hal0.api.agents import _auth as agents_auth
+
+    table = perms.ownership_table(service_user="hal0")
+    _materialise_fresh_install(table)
+    agents = paths.var_lib() / "agents"
+    assert not agents.exists(), "agents/ is born by the first mint, not by a fresh install"
+    monkeypatch.setenv("HAL0_AGENT_SECRET_PATH", str(agents / "secret.bin"))
+
+    old_umask = os.umask(umask)
+    try:
+        agents_auth.mint_session_cookie()
+    finally:
+        os.umask(old_umask)
+
+    assert os.stat(agents).st_mode & 0o7777 == _declared_agents_mode()
+    assert _mode_drift(table) == [], "drift after the first session-cookie mint"
+
+
+def test_revoking_sessions_leaves_the_agents_dir_at_the_declared_mode(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deleting ``secret.bin`` is the documented revoke; it must not re-mode ``agents/``.
+
+    The revoke re-runs the first-run branch of ``_load_or_create_secret``, and
+    that branch used to chmod the directory it found, not just one it created.
+    """
+    from hal0.api.agents import _auth as agents_auth
+
+    table = perms.ownership_table(service_user="hal0")
+    _materialise_fresh_install(table)
+    agents = paths.var_lib() / "agents"
+    agents.mkdir()
+    os.chmod(agents, _declared_agents_mode())
+    secret = agents / "secret.bin"
+    monkeypatch.setenv("HAL0_AGENT_SECRET_PATH", str(secret))
+
+    agents_auth.mint_session_cookie()
+    secret.unlink()
+    agents_auth.mint_session_cookie()
+
+    assert secret.is_file()
+    assert os.stat(agents).st_mode & 0o7777 == _declared_agents_mode()
+    assert _mode_drift(table) == []
+
+
+def test_session_secret_is_born_0600_never_chmodded_into_place(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``agents/`` is traversable by other local users (0711), so the secret must
+    never exist wider than 0600, not even for the instant before a chmod.
+
+    The directory used to be 0700, which hid a world-readable birth mode on the
+    tmp file; with the table's 0711 that window is reachable. Neutralise the
+    ``chmod`` on files and zero the umask: the secret is 0600 only if it was
+    created that way.
+    """
+    from hal0.api.agents import _auth as agents_auth
+
+    agents = paths.var_lib() / "agents"
+    monkeypatch.setenv("HAL0_AGENT_SECRET_PATH", str(agents / "secret.bin"))
+    real_chmod = os.chmod
+
+    def dirs_only_chmod(path: str | os.PathLike[str], mode: int, **kw: object) -> None:
+        if Path(path).is_dir():
+            real_chmod(path, mode, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "chmod", dirs_only_chmod)
+    old_umask = os.umask(0)
+    try:
+        paths.var_lib().mkdir(parents=True, exist_ok=True)
+        agents_auth.mint_session_cookie()
+    finally:
+        os.umask(old_umask)
+
+    assert os.stat(agents / "secret.bin").st_mode & 0o7777 == 0o600
+    assert [p.name for p in agents.iterdir()] == ["secret.bin"]

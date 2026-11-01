@@ -88,6 +88,15 @@ SHARED_DIR_MODE = 0o2775
 #: :func:`ensure_shared_dir` instead of the group-writable default.
 SECRETS_DIR_MODE = 0o700
 
+#: The mode ``agents/`` (per-agent sub-homes) is declared at in the table below.
+#: Not "shared" either: traverse-only for everyone, so the ``User=hal0`` unit
+#: can reach its own home without being able to list its siblings. The dashboard
+#: session secret lives directly under it, and the daemon's first-ever mint
+#: (``hal0.api.agents._auth``) is what births the dir on a fresh install, so
+#: that writer passes this to :func:`ensure_shared_dir` rather than keeping its
+#: own copy of the mode (#2719).
+AGENTS_DIR_MODE = 0o711
+
 
 def ensure_shared_dir(path: Path | str, *, mode: int = SHARED_DIR_MODE) -> Path:
     """``mkdir -p`` whose result the process umask cannot narrow (#1896).
@@ -781,7 +790,7 @@ def ownership_table(
             var_lib / "agents",
             state_owner,
             service_group,
-            0o711,
+            AGENTS_DIR_MODE,
             role="agents/ (per-agent sub-homes)",
         ),
         # secrets/ stays root:root even under the flip: systemd reads the

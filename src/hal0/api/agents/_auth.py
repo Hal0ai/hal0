@@ -43,6 +43,8 @@ from urllib.parse import urlsplit
 
 from fastapi import Request, Response
 
+from hal0.install.perms import AGENTS_DIR_MODE, ensure_shared_dir
+
 # Default-deny set of browser origins permitted to call hal0-api from a
 # browser. Operators can override at boot via ``HAL0_ALLOWED_ORIGINS``
 # (comma-separated). The default covers:
@@ -91,9 +93,14 @@ def _secret_path() -> Path:
 def _load_or_create_secret() -> bytes:
     """Return the HMAC secret, generating it on first call.
 
-    The file is created with mode 0600 so only the hal0 service user can
-    read it. The directory is created with mode 0700 for the same
-    reason — leaking the secret would let any LAN host mint cookies.
+    The file is born with mode 0600 so only the hal0 service user can read
+    it — leaking the secret would let any LAN host mint cookies. The
+    directory, when this call has to create it, gets the mode the ownership
+    table declares for ``agents/`` (:data:`hal0.install.perms.AGENTS_DIR_MODE`):
+    that table is the one owner of path modes, so ``hal0 doctor perms`` stays
+    green after the first login (#2719). A directory that already exists is
+    left as it is, which keeps a session revoke (deleting ``secret.bin``) from
+    re-moding it.
     """
     path = _secret_path()
     if path.exists():
@@ -104,16 +111,22 @@ def _load_or_create_secret() -> bytes:
         return path.read_bytes()
 
     # First-run: generate 32 bytes from urandom + drop a tight mode.
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with contextlib.suppress(OSError):
-        os.chmod(path.parent, 0o700)
+    ensure_shared_dir(path.parent, mode=AGENTS_DIR_MODE)
     secret = secrets.token_bytes(32)
-    # Write via a tmp + rename so a torn write never leaves an empty
-    # secret on disk.
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_bytes(secret)
-    os.chmod(tmp, 0o600)
-    tmp.replace(path)
+    # Write via a tmp + rename so a torn write never leaves an empty secret on
+    # disk. ``mkstemp`` births the tmp file 0600: the directory is traversable
+    # by other local users, so a create-then-chmod would leave the secret
+    # readable for the instant between the two.
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(secret)
+        tmp.replace(path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
     return secret
 
 
