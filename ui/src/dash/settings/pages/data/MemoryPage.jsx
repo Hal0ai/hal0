@@ -25,6 +25,8 @@ import {
   limitsPutBody,
   limitsSupported,
 } from './extractionLimits.js'
+import { graphSaveOutcome } from './extractionThroughput.js'
+import { SaveWarnings, ThroughputNote } from './ExtractionThroughputViews.jsx'
 
 export function MemoryPage() {
   // R5 data seam: one typed client supplies the merged reload-class registry.
@@ -233,6 +235,10 @@ function MemoryGraphPanel() {
   };
 
   const [enabled, setEnabled] = useState(false);
+  // #2798: warnings from the last save (PUT /api/memory/graph `warnings`) —
+  // kept on screen until dismissed or the next save, since a toast alone
+  // vanishes before an operator reads a 250-character throughput verdict.
+  const [saveWarnings, setSaveWarnings] = useState([]);
   // #2919: one picker for the engine's model — "slot:<name>" (a local llm
   // slot) or "model:<id>" (an upstream model); engineTarget.js owns the
   // encoding and the PUT body each choice turns into.
@@ -268,19 +274,16 @@ function MemoryGraphPanel() {
   const targetIsUpstream = target.startsWith("model:");
 
   const doSave = async () => {
+    setSaveWarnings([]);
     try {
       const body = { enabled };
       Object.assign(body, engineTargetPutBody(target));
       if (timeoutValid) body.llm_timeout_s = timeoutNum;
       Object.assign(body, limitsPutBody(limits, st));
       const resp = await updateGraph.mutateAsync(body);
-      const perr = resp?.propagation?.error;
-      window.__hal0Toast && window.__hal0Toast(
-        perr
-          ? `Saved, but hindsight-api restart failed — ${perr}`
-          : "Memory graph settings saved",
-        perr ? "err" : "ok",
-      );
+      const { warnings, toast } = graphSaveOutcome(resp);
+      setSaveWarnings(warnings);
+      window.__hal0Toast && window.__hal0Toast(toast.text, toast.kind);
     } catch (e) {
       window.__hal0Toast && window.__hal0Toast(`Save failed — ${e?.message || "see logs"}`, "err");
     }
@@ -343,6 +346,7 @@ function MemoryGraphPanel() {
           )
         }
       />
+      <ThroughputNote status={st} />
       <SRow
         k="Engine running"
         sub={running.reason === "override"
@@ -409,6 +413,8 @@ function MemoryGraphPanel() {
           </>}
         />
       )}
+      {/* Beside the Save button, where the operator's eyes are after clicking it. */}
+      <SaveWarnings warnings={saveWarnings} onDismiss={() => setSaveWarnings([])} />
       <div style={{display: "flex", justifyContent: "flex-end", gap: 8, padding: "8px 12px 4px"}}>
         {st && st.errors > 0 && (
           <button
