@@ -372,3 +372,85 @@ async def test_swap_survives_an_unwritable_toml(
 
     assert slot.state == SlotState.READY
     assert container_stub.load_calls[-1][0].get("model", {}).get("default") == "qwen3.5-0.8b"
+
+
+# ── #2717: a parked unit ends the readiness wait early ──────────────────────
+
+
+def _hang_readiness(container_stub: FakeContainerProvider, *, finish_after: float | None) -> None:
+    """Make the health wait outlast the test: never ready, or ready after a delay."""
+    import asyncio
+
+    async def _wait_ready(port: int, timeout_s: float | None = None) -> None:
+        await asyncio.sleep(finish_after if finish_after is not None else 3600)
+
+    container_stub.wait_ready = _wait_ready  # type: ignore[method-assign]
+
+
+async def test_parked_unit_ends_the_readiness_wait_early(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unit already ``failed`` while /health never answers → fail in ticks, not 180 s."""
+    import asyncio
+
+    monkeypatch.setattr("hal0.slots.manager._UNIT_WATCH_INTERVAL_S", 0.01)
+    sm = SlotManager()
+    _hang_readiness(container_stub, finish_after=None)
+    container_stub.unit_failure_by_slot["chat"] = CRASH_LOOP_REASON
+
+    with pytest.raises(SlotSpawnFailed) as excinfo:
+        await asyncio.wait_for(sm.load("chat"), timeout=5)
+
+    assert CRASH_LOOP_REASON in str(excinfo.value)
+    # Same end state and crash-loop bookkeeping as the post-timeout path.
+    assert sm._current_state("chat") == SlotState.ERROR
+    container_stub.active.discard("chat")
+    slot = await sm.status("chat")
+    assert slot.metadata.get("message") == CRASH_LOOP_REASON
+    assert slot.metadata.get("load_failures") == 1
+
+
+async def test_unit_still_activating_keeps_the_wait_going(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No terminal verdict (``""``) across several ticks → the load still converges."""
+    monkeypatch.setattr("hal0.slots.manager._UNIT_WATCH_INTERVAL_S", 0.01)
+    sm = SlotManager()
+    _hang_readiness(container_stub, finish_after=0.12)
+    calls: list[object] = []
+    original = container_stub.unit_failure_reason
+
+    def _counting(slot: object) -> str:
+        calls.append(slot)
+        return original(slot)
+
+    container_stub.unit_failure_reason = _counting  # type: ignore[method-assign]
+
+    await sm.load("chat")
+
+    assert len(calls) >= 2  # the watcher really ticked while waiting
+    assert sm._current_state("chat") == SlotState.READY
+
+
+async def test_failing_status_check_keeps_the_wait_going(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A status probe that raises is not evidence: the wait runs to its own end."""
+    monkeypatch.setattr("hal0.slots.manager._UNIT_WATCH_INTERVAL_S", 0.01)
+    sm = SlotManager()
+    _hang_readiness(container_stub, finish_after=0.12)
+
+    def _boom(slot: object) -> str:
+        raise RuntimeError("systemctl show exploded")
+
+    container_stub.unit_failure_reason = _boom  # type: ignore[method-assign]
+
+    await sm.load("chat")
+
+    assert sm._current_state("chat") == SlotState.READY

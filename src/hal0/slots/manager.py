@@ -126,6 +126,11 @@ if TYPE_CHECKING:
 #: States in which a slot is already loaded: ``load`` has nothing to start.
 _READY_STATES = (SlotState.READY, SlotState.SERVING, SlotState.IDLE)
 
+#: Cadence of the systemd terminal-state check while a load waits for
+#: readiness (#2717). Slower than the 2 s health poll because each check
+#: shells out to ``systemctl show``; a parked unit is noticed within one tick.
+_UNIT_WATCH_INTERVAL_S = 5.0
+
 log = logging.getLogger(__name__)
 
 
@@ -4024,6 +4029,49 @@ class SlotManager:
                 info["quant"] = derived_quant
         return info
 
+    async def _wait_ready_watching_unit(
+        self,
+        slot_name: str,
+        ready: Awaitable[None],
+        *,
+        model_id: str | None = None,
+    ) -> None:
+        """Await the provider's readiness wait, ending it early on a terminal unit (#2717).
+
+        The provider waiters only poll ``/health``, so a runner that exits 64
+        at once (``RestartPreventExitStatus``) left the load blocked for the
+        whole health window although systemd had parked the unit in ``failed``
+        within a second. Every ~:data:`_UNIT_WATCH_INTERVAL_S` this asks
+        :meth:`unit_failure_reason`; a non-empty answer is systemd's *terminal*
+        verdict (``ActiveState=failed`` — including ``start-limit-hit`` — or
+        ``LoadState=not-found``) and ends the wait with
+        :class:`SlotSpawnFailed` carrying that same reason, exactly what the
+        post-timeout check in :meth:`load` would have raised 180 s later.
+
+        Transient states never abort: ``activating`` (a slow model, or a unit
+        restarting under its ``Restart=`` policy) and ``active`` read ``""``,
+        as does a status probe that errors — absence of evidence keeps waiting.
+        A readiness wait that finishes first (or raises ``TimeoutError``)
+        behaves exactly as before.
+        """
+        waiter = asyncio.ensure_future(ready)
+        try:
+            while True:
+                done, _ = await asyncio.wait({waiter}, timeout=_UNIT_WATCH_INTERVAL_S)
+                if done:
+                    return waiter.result()
+                reason = await self.unit_failure_reason(slot_name)
+                if reason:
+                    raise SlotSpawnFailed(
+                        reason,
+                        details={"slot": slot_name, "model_id": model_id},
+                    )
+        finally:
+            if not waiter.done():
+                waiter.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await waiter
+
     # ── health probe (TIER1 tightened) ───────────────────────────────────────
 
     async def _await_ready(
@@ -4073,7 +4121,9 @@ class SlotManager:
         spec_provider = _spec_provider_for(cfg)
         wait_ready = getattr(spec_provider, "wait_ready", None) or container_provider().wait_ready
         try:
-            await wait_ready(slot_port)
+            await self._wait_ready_watching_unit(
+                slot_name, wait_ready(slot_port), model_id=model_id
+            )
         except TimeoutError as exc:
             log.warning(
                 "slot.container_await_ready_timeout",
