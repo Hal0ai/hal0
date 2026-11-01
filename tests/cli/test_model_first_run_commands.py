@@ -7,6 +7,8 @@ without touching the API or restarting hal0-api.
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -386,3 +388,43 @@ def test_model_run_deadline_covers_the_load_not_just_the_poll(
     assert result.exit_code == 1
     # 95s of load plus at most 5s of polling — not 95 plus a fresh 100.
     assert clock["now"] <= 100.0, f"waited {clock['now']}s against --timeout 100"
+
+
+def test_model_add_registers_a_halogen_checkpoint_with_its_companions(
+    monkeypatch: pytest.MonkeyPatch, tmp_hal0_home: str, tmp_path: Path
+) -> None:
+    """``hal0 model add`` of a ``.hgn`` checkpoint lands the halogen row: the
+    CLI posts to add-from-path, and the service behind it stamps the engine,
+    capabilities, size, companions and native context."""
+    from hal0.registry.store import ModelRegistry
+    from hal0.services import models_service as svc
+
+    d = tmp_path / "halogen-flash-next"
+    (d / "tokenizer").mkdir(parents=True)
+    ckpt = d / "qwen38-flash-next-ht43.hgn"
+    ckpt.write_bytes(b"HGN1" + b"c" * 60)
+    (d / "qwen38-flash-next-ngram.hgn").write_bytes(b"HGN1" + b"n" * 20)
+    (d / "qwen38-flash-next-vision.hgn").write_bytes(b"HGN1" + b"v" * 10)
+    registry = ModelRegistry(registry_dir=tmp_path / "registry")
+
+    def real_post(path: str, *, json: Any = None, **_kw: Any) -> dict[str, Any]:
+        assert path == "/api/models/add-from-path"
+        return asyncio.run(svc.add_from_path(json, registry=registry, event_bus=None))
+
+    monkeypatch.setattr(shared, "api_post", real_post)
+    result = runner.invoke(model_commands.app, ["add", str(ckpt), "--id", "flash-next"])
+
+    assert result.exit_code == 0, result.output
+    assert "flash-next" in result.output
+    assert "chat, vision" in result.output
+    m = registry.get("flash-next")
+    assert m.backends == ["halogen"]
+    assert m.provider == "halogen"
+    assert m.capabilities == ["chat", "vision"]
+    assert m.size_bytes == ckpt.stat().st_size
+    assert "halogen" in m.tags
+    assert m.metadata["companions"] == {
+        "qwen38-flash-next-ngram.hgn": 24,
+        "qwen38-flash-next-vision.hgn": 14,
+    }
+    assert m.metadata["native_ctx"] == 262144

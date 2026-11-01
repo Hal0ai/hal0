@@ -29,7 +29,12 @@ from hal0.config.schema import ModelsConfig
 from hal0.model_meta import capability_from_filename, derive_model_provider
 from hal0.registry import tombstones
 from hal0.registry.curated import CURATED_MODELS, CuratedModel
-from hal0.registry.detect import is_halogen_companion, unsupported_moonshine_layout
+from hal0.registry.detect import (
+    detect,
+    halogen_registration,
+    is_halogen_companion,
+    unsupported_moonshine_layout,
+)
 from hal0.registry.drafters import DrafterInfo, classify_drafter, draft_fit_errors
 from hal0.registry.fileset import SHARD_RE
 from hal0.registry.gguf_header import read_gguf_header
@@ -676,7 +681,24 @@ def find_candidates(
 def register_candidate(registry: ModelRegistry, candidate: CandidateModel) -> Model:
     """Build a :class:`Model` from ``candidate`` and add it to ``registry``."""
     curated = candidate.curated_match
-    if curated is not None:
+    # A ``.hgn`` checkpoint is classified by its magic bytes and the companions
+    # beside it (four bytes and one directory listing, so cheap even in a walk
+    # that reads no GGUF header), then registered like add-from-path does.
+    halogen = detect(candidate.path) if candidate.path.suffix.lower() == ".hgn" else None
+    if halogen is not None and halogen.kind == "halogen":
+        halogen_tags, halogen_meta = halogen_registration(halogen)
+        model = Model(
+            id=candidate.suggested_id,
+            name=candidate.path.stem,
+            path=str(candidate.path),
+            size_bytes=candidate.size_bytes,
+            capabilities=list(halogen.suggested_capabilities),
+            backends=list(halogen.suggested_backends),
+            provider=derive_model_provider(halogen.suggested_backends),
+            tags=halogen_tags,
+            metadata={"discovered": True, "source": "auto-scan", **halogen_meta},
+        )
+    elif curated is not None:
         model = Model(
             id=curated.id,
             name=curated.display_name,

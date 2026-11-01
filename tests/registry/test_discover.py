@@ -1389,6 +1389,60 @@ def test_scan_and_register_picks_up_hgn_by_default(tmp_path: Path, registry: Mod
     assert [Path(m.path).name for m in registry.list()] == ["qwen38-flash-next-ht43.hgn"]
 
 
+def test_scan_registers_a_halogen_checkpoint_with_its_companions(
+    tmp_path: Path, registry: ModelRegistry
+) -> None:
+    """The auto-scan stamps the same halogen row add-from-path does: backend,
+    provider, vision from the exact sidecar, companions and native context."""
+    root = tmp_path / "models"
+    d = _halogen_dir(root)
+    scan_and_register(registry, ModelsConfig(roots=[str(root)]))
+
+    (m,) = registry.list()
+    assert m.id == "qwen38-flash-next-ht43"
+    assert m.backends == ["halogen"]
+    assert m.provider == "halogen"
+    # _halogen_dir's sidecar has the exact name the engine looks for.
+    assert m.capabilities == ["chat", "vision"]
+    assert m.size_bytes == (d / "qwen38-flash-next-ht43.hgn").stat().st_size
+    assert "halogen" in m.tags
+    assert m.metadata["companions"] == {
+        "qwen38-flash-next-ngram.hgn": 64,
+        "qwen38-flash-next-vision.hgn": 64,
+        "qwen38-flash-next-mtp.hgn": 64,
+        "qwen38-flash-next-ht43.overlay.hgn": 64,
+    }
+    assert m.metadata["native_ctx"] == 262144
+    # The generic scan stamp is still there.
+    assert m.metadata["discovered"] is True
+    assert m.metadata["source"] == "auto-scan"
+
+
+def test_scan_gives_a_halogen_checkpoint_no_vision_without_the_exact_sidecar(
+    tmp_path: Path, registry: ModelRegistry
+) -> None:
+    root = tmp_path / "models"
+    d = _halogen_dir(root)
+    (d / "qwen38-flash-next-vision.hgn").unlink()
+    scan_and_register(registry, ModelsConfig(roots=[str(root)]))
+    (m,) = registry.list()
+    assert m.capabilities == ["chat"]
+    assert "qwen38-flash-next-vision.hgn" not in m.metadata["companions"]
+
+
+def test_scan_leaves_a_gguf_row_without_halogen_facts(
+    tmp_path: Path, registry: ModelRegistry
+) -> None:
+    root = tmp_path / "models"
+    root.mkdir()
+    (root / "qwen3-4b-instruct-q4_k_m.gguf").write_bytes(b"x" * 128)
+    scan_and_register(registry, ModelsConfig(roots=[str(root)]))
+    (m,) = registry.list()
+    assert m.provider == "llama-server"
+    assert "halogen" not in m.tags
+    assert "companions" not in m.metadata
+
+
 def test_is_skippable_drops_halogen_companions() -> None:
     from hal0.registry.discover import is_skippable
 

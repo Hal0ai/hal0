@@ -30,7 +30,12 @@ from typing import Any
 
 from hal0.model_meta import RUNTIME_FAMILIES, classify, derive_model_provider
 from hal0.registry import tombstones
-from hal0.registry.detect import DetectionResult, detect, detected_architecture
+from hal0.registry.detect import (
+    DetectionResult,
+    detect,
+    detected_architecture,
+    halogen_registration,
+)
 from hal0.registry.model import _derive_ns
 from hal0.upstreams.filters import apply_filters
 
@@ -449,6 +454,10 @@ async def commit_scan_rows(
         metadata: dict[str, Any] = {"discovered": True, "source": "scan"}
         if detection.context_length is not None:
             metadata["context_length"] = detection.context_length
+        # A halogen checkpoint also carries its tag, companions and native
+        # context (the same stamp add-from-path and the auto-scan apply).
+        halogen_tags, halogen_meta = halogen_registration(detection)
+        metadata.update(halogen_meta)
 
         try:
             model = Model(
@@ -460,6 +469,7 @@ async def commit_scan_rows(
                 capabilities=[str(c) for c in capabilities],
                 backends=[str(b) for b in backends],
                 provider=provider,
+                tags=halogen_tags,
                 metadata=metadata,
                 **facts,
                 # GGUF general.architecture from the header read detect()
@@ -2085,6 +2095,10 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
     metadata: dict[str, Any] = {"discovered": True, "source": "add-from-path"}
     if detection.context_length is not None:
         metadata["context_length"] = detection.context_length
+    # A halogen checkpoint also carries its tag, companions and native context
+    # (the same stamp the scan commit and the auto-scan apply).
+    halogen_tags, halogen_meta = halogen_registration(detection)
+    metadata.update(halogen_meta)
     # #1838: surface how confident detect() actually is instead of
     # dropping it on the floor — an operator who supplied no explicit
     # ``labels`` is trusting auto-detection, and a "medium"/"low" result
@@ -2122,6 +2136,7 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
             # Task 3: stamp provider alongside the detected backends on this
             # NEW row — see commit_scan_rows' matching stamp.
             provider=derive_model_provider(detection.suggested_backends),
+            tags=halogen_tags,
             metadata=metadata,
             # GGUF general.architecture from the header read above — see
             # commit_scan_rows' matching stamp (model↔runner arch fit-check,

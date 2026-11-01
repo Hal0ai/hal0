@@ -104,6 +104,9 @@ HALOGEN_VISION_SIDECAR = "qwen38-flash-next-vision.hgn"
 #: without it.
 HALOGEN_NGRAM_TABLE = "qwen38-flash-next-ngram.hgn"
 
+#: Tag every registered halogen checkpoint carries.
+HALOGEN_TAG = "halogen"
+
 #: The tokenizer the engine reads, relative to the checkpoint's directory.
 HALOGEN_TOKENIZER_JSON = "tokenizer/tokenizer.json"
 
@@ -501,6 +504,29 @@ def _detect_halogen(path: Path, *, name_for_capability: str) -> DetectionResult:
     )
 
 
+def halogen_registration(detection: DetectionResult) -> tuple[list[str], dict[str, Any]]:
+    """``(tags, metadata)`` a registered halogen checkpoint carries.
+
+    ONE helper for every registration path (add-from-path, scan commit, the
+    auto-scan), the way :func:`detected_architecture` is for the architecture
+    hint: the ``halogen`` tag, the companion files found beside the checkpoint
+    (``{name: bytes}``, recorded as a fact about the files) and the engine's
+    fixed ``native_ctx``. The backend, provider and
+    ``chat``/``vision`` capabilities need no help: they already come from the
+    detection's ``suggested_*`` fields. ``([], {})`` for any other kind.
+
+    A ``.hgn`` guess whose magic failed is still ``halogen`` but has no
+    companions listing and no context to claim, so ``companions`` is empty and
+    ``native_ctx`` is left out.
+    """
+    if detection.kind != "halogen":
+        return [], {}
+    metadata: dict[str, Any] = {"companions": dict(detection.raw_hints.get("companions") or {})}
+    if detection.context_length is not None:
+        metadata["native_ctx"] = detection.context_length
+    return [HALOGEN_TAG], metadata
+
+
 def detected_architecture(detection: DetectionResult) -> str | None:
     """The GGUF ``general.architecture`` id a detection carried, or ``None``.
 
@@ -810,12 +836,14 @@ def detect(path: str | Path, *, filename_hint: str | None = None) -> DetectionRe
 __all__ = [
     "HALOGEN_COMPANION_SUFFIXES",
     "HALOGEN_NGRAM_TABLE",
+    "HALOGEN_TAG",
     "HALOGEN_TOKENIZER_JSON",
     "HALOGEN_VISION_SIDECAR",
     "HGN_MAGIC",
     "DetectionResult",
     "detect",
     "detected_architecture",
+    "halogen_registration",
     "is_halogen_companion",
     "quant_from_file_type",
     "quant_from_filename",

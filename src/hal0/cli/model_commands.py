@@ -470,7 +470,7 @@ def model_scan() -> None:
 
 @app.command("add")
 def model_add(
-    path: str = typer.Argument(..., help="Absolute path to a model file (.gguf/.safetensors)"),
+    path: str = typer.Argument(..., help="Absolute path to a model file (.gguf/.safetensors/.hgn)"),
     model_id: str = typer.Option("", "--id", help="Explicit registry id (default: derived)"),
     name: str = typer.Option("", "--name", help="Display name."),
     license_id: str = typer.Option(

@@ -10,6 +10,7 @@ from hal0.registry.detect import (
     HALOGEN_VISION_SIDECAR,
     HGN_MAGIC,
     detect,
+    halogen_registration,
     is_halogen_companion,
 )
 from hal0.registry.gguf_header import (
@@ -556,3 +557,44 @@ class TestHalogenHgn:
         r = detect(p)
         assert r.kind == "llama"
         assert "companions" not in r.raw_hints
+
+
+class TestHalogenRegistration:
+    """What a registered halogen checkpoint carries beyond the generic stamp."""
+
+    def test_tag_and_metadata_come_from_the_detection(self, tmp_path: Path) -> None:
+        p = tmp_path / "qwen38-flash-next-ht43.hgn"
+        p.write_bytes(HGN_MAGIC + b"\x00" * 60)
+        (tmp_path / "qwen38-flash-next-ngram.hgn").write_bytes(HGN_MAGIC + b"n" * 20)
+        (tmp_path / HALOGEN_VISION_SIDECAR).write_bytes(HGN_MAGIC + b"v" * 10)
+
+        tags, metadata = halogen_registration(detect(p))
+
+        assert tags == ["halogen"]
+        assert metadata == {
+            "companions": {
+                "qwen38-flash-next-ngram.hgn": 24,
+                HALOGEN_VISION_SIDECAR: 14,
+            },
+            "native_ctx": 262144,
+        }
+
+    def test_a_checkpoint_without_companions_still_says_so(self, tmp_path: Path) -> None:
+        p = tmp_path / "qwen38-flash-next-ht43.hgn"
+        p.write_bytes(HGN_MAGIC + b"\x00" * 60)
+        assert halogen_registration(detect(p)) == (
+            ["halogen"],
+            {"companions": {}, "native_ctx": 262144},
+        )
+
+    def test_a_degraded_hgn_guess_has_no_context_to_claim(self, tmp_path: Path) -> None:
+        p = tmp_path / "qwen38-flash-next-ht43.hgn"
+        p.write_bytes(b"NOPE" + b"\x00" * 60)
+        tags, metadata = halogen_registration(detect(p))
+        assert tags == ["halogen"]
+        assert metadata == {"companions": {}}
+
+    def test_nothing_for_other_kinds(self, tmp_path: Path) -> None:
+        kvs = [("general.architecture", _GGUF_TYPE_STRING, _enc_str("llama"))]
+        p = _write_fixture(tmp_path, "llama-7b-q4_k_m.gguf", _build_gguf(3, kvs))
+        assert halogen_registration(detect(p)) == ([], {})
