@@ -197,8 +197,16 @@ class BoardClient:
     async def remove_link(
         self, body: Any, *, board: str | None = None, agent_id: str | None = None
     ) -> Any:
-        """``DELETE /links`` carrying a JSON body (httpx allows ``json=`` on DELETE)."""
-        return await self._send("DELETE", "/links", body, board, agent_id)
+        """``DELETE /links``; Hermes reads ``parent_id`` and ``child_id`` as query params.
+
+        ``body`` must carry both keys (a missing key raises ``KeyError``); no JSON body is sent.
+        """
+        return await self._kanban.request_json(
+            "DELETE",
+            "/links",
+            params=_params(board, parent_id=body["parent_id"], child_id=body["child_id"]),
+            agent_id=agent_id,
+        )
 
     async def dispatch_nudge(
         self,

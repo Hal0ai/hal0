@@ -134,7 +134,6 @@ _MUTATIONS: list[tuple[str, tuple[Any, ...], dict[str, Any], str, str, Any]] = [
     ("decompose_task", ("t1", _BODY), {}, "POST", "/tasks/t1/decompose", _BODY),
     ("reclaim_task", ("t1", _BODY), {}, "POST", "/tasks/t1/reclaim", _BODY),
     ("add_link", (_BODY,), {}, "POST", "/links", _BODY),
-    ("remove_link", (_BODY,), {}, "DELETE", "/links", _BODY),
     ("dispatch_nudge", (), {}, "POST", "/dispatch", None),
     ("create_board", (_BODY,), {}, "POST", "/boards", _BODY),
     ("update_board", ("alpha", _BODY), {}, "PATCH", "/boards/alpha", _BODY),
@@ -170,6 +169,18 @@ async def test_mutations_forward_body(
     sent = recorder.requests[-1]
     assert sent["params"] == {"board": "alpha"}
     assert sent["body"] == body
+    assert sent["agent"] == "claude-dev"
+
+
+async def test_remove_link_sends_ids_as_query_params(
+    client: BoardClient, recorder: _Recorder
+) -> None:
+    link = {"parent_id": "p1", "child_id": "c1"}
+    await client.remove_link(link, board="alpha", agent_id="claude-dev")
+    sent = recorder.requests[-1]
+    assert (sent["method"], sent["path"]) == ("DELETE", f"{P}/links")
+    assert sent["params"] == {"parent_id": "p1", "child_id": "c1", "board": "alpha"}
+    assert sent["body"] is None
     assert sent["agent"] == "claude-dev"
 
 
