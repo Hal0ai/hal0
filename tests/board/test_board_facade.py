@@ -206,7 +206,7 @@ def test_resolve_raises_not_installed_when_no_hermes() -> None:
     app = _app()
     with pytest.raises(BoardNotInstalled):
         resolve_board_client(app, installed_check=_check(False))
-    assert app.state.board_installed is False
+    assert getattr(app.state, "board_installed", None) is None
     assert not hasattr(app.state, "board_client")
 
 
@@ -236,17 +236,36 @@ def test_resolve_builds_kanban_client_when_missing() -> None:
     assert client._kanban is app.state.hermes_kanban
 
 
-def test_resolve_checks_installed_once_per_process() -> None:
+def test_resolve_does_not_cache_false_probe() -> None:
+    app = _app()
+    results = iter([False, True])
+    calls: list[int] = []
+
+    def check() -> bool:
+        calls.append(1)
+        return next(results)
+
+    with pytest.raises(BoardNotInstalled):
+        resolve_board_client(app, installed_check=check)
+    client = resolve_board_client(app, installed_check=check)
+    assert isinstance(client, BoardClient)
+    assert calls == [1, 1]
+    assert resolve_board_client(app, installed_check=check) is client
+    assert calls == [1, 1]
+
+
+def test_resolve_caches_true_probe_without_reprobing() -> None:
     app = _app()
     calls: list[int] = []
 
     def check() -> bool:
         calls.append(1)
-        return False
+        return True
 
-    for _ in range(2):
-        with pytest.raises(BoardNotInstalled):
-            resolve_board_client(app, installed_check=check)
+    resolve_board_client(app, installed_check=check)
+    app.state.board_client = None  # force the probe path again
+    resolve_board_client(app, installed_check=check)
+    resolve_board_client(app, installed_check=check)
     assert calls == [1]
 
 

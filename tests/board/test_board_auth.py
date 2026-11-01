@@ -55,6 +55,14 @@ def test_read_token_unreadable_raises_no_token(tmp_path: Path) -> None:
     assert exc.value.details["path"] == str(tmp_path)
 
 
+def test_read_token_binary_raises_no_token(tmp_path: Path) -> None:
+    f = tmp_path / "tok"
+    f.write_bytes(b"\xff\xfe\x00")
+    with pytest.raises(BoardNoToken) as exc:
+        read_dashboard_token(f)
+    assert exc.value.details["path"] == str(f)
+
+
 def test_hermes_installed_env_override() -> None:
     env = {"HERMES_DASHBOARD_BASE_URL": "http://127.0.0.1:9119"}
     assert hermes_installed(env=env, manager_factory=lambda: _Manager([])) is True

@@ -162,7 +162,10 @@ class HermesKanbanClient:
         """
         token = (self._resolve_token() or "").strip()
         if not token:
-            raise BoardNoToken("Hermes dashboard token is empty")
+            raise BoardNoToken(
+                "Hermes dashboard token is empty",
+                details={"path": None, "reason": "blank token from resolver"},
+            )
         return token
 
     # ── generic forward ──────────────────────────────────────────────────
@@ -205,11 +208,15 @@ class HermesKanbanClient:
                     details={"error": str(exc), "target": upstream_path},
                 ) from exc
 
-        resp = await _send(self._current_token())
+        sent_token = self._current_token()
+        resp = await _send(sent_token)
         # A 401 means Hermes rotated the token since the file was read: re-read
-        # it and retry exactly once (a second 401 surfaces below).
+        # it and retry exactly once, but only if it actually changed (resending
+        # the rejected token is pointless). A second 401 surfaces below.
         if resp.status_code == 401:
-            resp = await _send(self._current_token())
+            fresh = self._current_token()
+            if fresh != sent_token:
+                resp = await _send(fresh)
 
         if resp.status_code >= 400:
             try:
@@ -220,6 +227,11 @@ class HermesKanbanClient:
                 "hermes kanban returned an error",
                 details={"upstream_status": resp.status_code, "upstream": detail},
             )
+            if resp.status_code == 401:
+                err.details["hint"] = (
+                    "the dashboard token file does not match the running Hermes; "
+                    "restart hal0-agent@hermes"
+                )
             if 400 <= resp.status_code < 500:
                 err.status = resp.status_code
             raise err

@@ -274,9 +274,10 @@ def resolve_board_client(
 ) -> BoardClient:
     """Return the app's cached :class:`BoardClient`, building it on first use.
 
-    Checks :func:`hal0.board.auth.hermes_installed` once per process (cached on
-    ``app.state.board_installed``) and raises :class:`BoardNotInstalled` when
-    Hermes is absent. ``installed_check`` lets tests inject the probe.
+    Checks :func:`hal0.board.auth.hermes_installed`; only a True result is
+    cached (``app.state.board_installed``). While Hermes is absent every call
+    re-probes and raises :class:`BoardNotInstalled`, so an install done while
+    hal0-api runs is noticed. ``installed_check`` lets tests inject the probe.
     """
     state = app.state
     cached = getattr(state, "board_client", None)
@@ -286,9 +287,10 @@ def resolve_board_client(
     if installed is None:
         if installed_check is None:
             from hal0.board.auth import hermes_installed as installed_check
-        installed = state.board_installed = bool(installed_check())
-    if not installed:
-        raise BoardNotInstalled("the Hermes agent is not installed on this box")
+        installed = bool(installed_check())
+        if not installed:
+            raise BoardNotInstalled("the Hermes agent is not installed on this box")
+        state.board_installed = True
     kanban = getattr(state, "hermes_kanban", None)
     if kanban is None:
         kanban = state.hermes_kanban = HermesKanbanClient.from_env()

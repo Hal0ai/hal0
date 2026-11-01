@@ -26,7 +26,7 @@ def read_dashboard_token(path: Path | None = None) -> str:
     target = path if path is not None else dashboard_session_token_path("hermes")
     try:
         token = target.read_text(encoding="utf-8").strip()
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise BoardNoToken(
             f"Hermes dashboard token file unreadable: {exc.__class__.__name__}",
             details={"path": str(target)},

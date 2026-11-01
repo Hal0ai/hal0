@@ -227,6 +227,7 @@ async def test_401_rereads_token_once_then_succeeds() -> None:
 
 async def test_second_401_surfaces_upstream_error() -> None:
     calls = 0
+    tokens = iter(["tok-a", "tok-b"])
 
     async def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
@@ -236,8 +237,46 @@ async def test_second_401_surfaces_upstream_error() -> None:
     http = httpx.AsyncClient(
         transport=httpx.MockTransport(handler), base_url="http://127.0.0.1:9119"
     )
-    client = HermesKanbanClient(http_client=http, token_resolver=lambda: "tok")
+    client = HermesKanbanClient(http_client=http, token_resolver=lambda: next(tokens))
     with pytest.raises(BoardUpstreamError) as ei:
         await client.request_json("GET", "/board")
     assert ei.value.status == 401
     assert calls == 2  # initial + exactly one retry, never a loop
+    assert "restart" in ei.value.details["hint"]
+
+
+async def test_401_with_unchanged_token_skips_retry() -> None:
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(401, json={"detail": "Unauthorized"})
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://127.0.0.1:9119"
+    )
+    client = HermesKanbanClient(http_client=http, token_resolver=lambda: "same")
+    with pytest.raises(BoardUpstreamError) as ei:
+        await client.request_json("GET", "/board")
+    assert ei.value.status == 401
+    assert calls == 1
+    assert "hint" in ei.value.details
+
+
+async def test_404_has_no_token_hint(recorder: _Recorder) -> None:
+    recorder.responses[("GET", "/api/plugins/kanban/tasks/x")] = httpx.Response(
+        404, json={"detail": "nope"}
+    )
+    client = _make_client(recorder)
+    with pytest.raises(BoardUpstreamError) as ei:
+        await client.request_json("GET", "/tasks/x")
+    assert "hint" not in ei.value.details
+
+
+async def test_blank_resolver_token_error_carries_reason(recorder: _Recorder) -> None:
+    client = _make_client(recorder, token_resolver=lambda: "  ")
+    with pytest.raises(BoardNoToken) as ei:
+        await client.request_json("GET", "/board")
+    assert ei.value.details["path"] is None
+    assert ei.value.details["reason"] == "blank token from resolver"
