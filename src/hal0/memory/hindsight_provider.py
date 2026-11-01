@@ -36,9 +36,10 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx
 import structlog
 
-from hal0.errors import BadRequest
+from hal0.errors import BadRequest, MemoryEngineUnavailable
 from hal0.memory.provider import MemoryProvider
 
 log = structlog.get_logger(__name__)
@@ -1401,6 +1402,8 @@ class HindsightProvider(MemoryProvider):
             # daemon-reachability signal ``_call`` already updated (a 4xx means
             # the daemon is fine AND the write still didn't land).
             self._mark_write_failure(str(exc), reason="retain_failed")
+            if isinstance(exc, (ConnectionError, httpx.NetworkError, httpx.ConnectTimeout)):
+                raise MemoryEngineUnavailable() from exc
             raise
         document_id = resolved_id
         out: dict[str, Any] = {"id": document_id, "timestamp": _now()}

@@ -12,10 +12,32 @@ into :mod:`hal0.mcp.memory`'s docstring.
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from hal0.mcp import memory
+from hal0.memory.hindsight_provider import HindsightProvider
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadError])
+async def test_add_engine_unavailable(failure: type[httpx.RequestError]) -> None:
+    engine = AsyncMock()
+    engine.retain.side_effect = failure("engine unavailable")
+    provider = HindsightProvider(client=engine)
+    dispatcher = memory.make_dispatcher(provider)
+    out = await dispatcher("memory_add", {"text": "note"})
+    assert out == {
+        "status": "error",
+        "error": {
+            "code": "memory.engine_unavailable",
+            "detail": "Memory engine unavailable; retry shortly.",
+            "details": {"retry_after_s": 5},
+        },
+    }
+    assert provider.write_degraded is True
 
 
 class _FakeWrapper:

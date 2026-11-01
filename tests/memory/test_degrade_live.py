@@ -138,8 +138,11 @@ async def test_degraded_tracks_the_write_path_too() -> None:
     client = _FakeClient(error=ConnectionError("connection refused"))
     p = HindsightProvider(client=client, client_id="hermes", unified_bank=True)
 
-    with pytest.raises(ConnectionError):
+    from hal0.errors import MemoryEngineUnavailable
+
+    with pytest.raises(MemoryEngineUnavailable) as caught:
         await p.add("x", dataset="shared", client_id="hermes")
+    assert caught.value.__cause__ is client.error
     assert p.degraded is True
 
 

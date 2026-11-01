@@ -320,6 +320,11 @@ same verdict, belt and braces).
 
 **Autonomous — write** (reversible, low blast radius)
 
+If `memory_add` cannot connect to the memory engine (including a connect
+timeout), it returns `status: "error"` with code `memory.engine_unavailable`,
+a message asking the caller to retry shortly, and `error.details.retry_after_s: 5`.
+An error response from the engine is not reclassified as engine unavailability.
+
 | Tool | Required | Returns |
 |---|---|---|
 | `memory_add` | `text` (non-empty) | `{id, timestamp, operation_id?}` |

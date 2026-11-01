@@ -25,13 +25,38 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from typing import Any
+from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from hal0.api.middleware import error_codes
 from hal0.api.routes import memory as memory_routes
+from hal0.memory.hindsight_provider import HindsightProvider
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadError])
+async def test_add_engine_unavailable(failure: type[httpx.RequestError]) -> None:
+    engine = AsyncMock()
+    engine.retain.side_effect = failure("engine unavailable")
+    provider = HindsightProvider(client=engine)
+    app = FastAPI()
+    error_codes.install(app)
+    app.include_router(memory_routes.router, prefix="/api/memory")
+    app.state.memory_provider = provider
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
+        response = await client.post("http://test/api/memory/add", json={"text": "note"})
+    assert response.status_code == 503
+    assert response.headers["Retry-After"] == "5"
+    assert response.json()["error"] == {
+        "code": "memory.engine_unavailable",
+        "message": "Memory engine unavailable; retry shortly.",
+        "details": {"retry_after_s": 5},
+    }
+    assert provider.write_degraded is True
 
 
 class StubWrapper:
