@@ -1,0 +1,200 @@
+---
+title: Agent bridge API reference
+description: "The /api/bridge routes: add, list, re-scope, rotate and revoke bridge clients, the caller's own record, and the operator's view of delegated runs, with the bridge.* error codes, the paging rule and which routes keep working while the bridge is off — verified against src/hal0/api/routes/bridge.py and src/hal0/bridge/."
+sidebar:
+  order: 80
+---
+
+The `/api/bridge/*` routes are the REST half of the agent bridge ([ADR-0043](/docs/adr/0043-agent-bridge-and-bridge-keys)).
+The operator adds, lists, re-scopes, rotates and revokes **bridge clients** (coding agents on
+other machines, each with a `hal0bk_` key of its own), a client asks who it is, and the operator
+watches and stops the **runs** those clients have delegated to Hermes. `hal0 bridge add`, `list`,
+`revoke`, `rotate` and `scopes` go through the client routes, and the dashboard's bridge card and
+runs tab read the run routes. The agents themselves use the `hal0-agents` MCP server, not these
+routes: see [MCP tools: hal0-agents](/docs/reference/mcp-tools-agents) for its tools and the
+[delegation guide](/docs/guides/delegate-to-agents) for a first run. The auth tiers and the rest of
+the management surface are in the [REST API index](/docs/reference/api/rest-api/).
+
+A failure on any route is the standard envelope `{"error": {"code", "message", "details"}}` with
+the HTTP status in the tables below.
+
+## Auth and the bridge switch
+
+`GET /api/bridge/me` is **BRIDGE** class: a bridge client key or the admin credential opens it,
+and an anonymous caller is `401 auth.required`. Every other `/api/bridge` route is **ADMIN**
+class, so a bridge key is refused with `403 auth.forbidden` before a handler runs; the handlers declare
+no auth dependency of their own.
+
+`[bridge].enabled` is the value hal0-api booted with, so changing it takes a restart. While it is
+false:
+
+| Route | While the bridge is off |
+|---|---|
+| `GET /clients` | Works. `{"items": []}` when there is no `bridge.db`, because a disabled bridge never creates the file. |
+| `DELETE /clients/{name}` | Works, so an operator can end a key before turning the bridge back on. `404 bridge.client_not_found` when there is no `bridge.db`. |
+| `POST /clients`, `PATCH /clients/{name}`, `POST /clients/{name}/rotate` | `404 bridge.disabled`. |
+| `GET /me` | `404 bridge.disabled` for the admin credential; a bridge key gets `401 auth.required` instead, because no bridge key verifies while the bridge is off. |
+| `GET /runs`, `GET /runs/{run_id}`, `GET /runs/{run_id}/events`, `POST /runs/{run_id}/stop` | `404 bridge.disabled`. |
+
+`bridge.disabled` is raised by a router-level dependency, so it wins over body validation: a
+malformed body on a disabled bridge is `404`, not `422`.
+
+`bridge.disabled` (`404`) and `bridge.unavailable` (`503`) are different failures. `disabled` is
+the operator's switch. `unavailable` is a bridge that is switched on but whose run service did not
+start (the store did not open, or the service failed to build; the cause is in the hal0-api log),
+and only the run routes raise it. The client routes' counterpart is `503 bridge.store_unavailable`:
+`bridge.db` exists or should exist but could not be opened.
+
+## Client routes
+
+All routes take and return JSON. A bridge client cannot call any of them except `GET /me`.
+
+| Method | Path | Auth | Body | Response | Errors |
+|---|---|---|---|---|---|
+| POST | `/api/bridge/clients` | ADMIN | `{name, note?, scopes?}`; any other field is refused | `201` `{client, key, onboarding}` | `404 bridge.disabled`; `409 bridge.client_exists`; `422 bridge.invalid_name`, `bridge.invalid_scope`, `validation.invalid`; `503 bridge.store_unavailable` |
+| GET | `/api/bridge/clients` | ADMIN | none | `200` `{items: [client, …]}`, ordered by name, revoked clients included | `503 bridge.store_unavailable` |
+| PATCH | `/api/bridge/clients/{name}` | ADMIN | `{scopes}`, the full replacement list | `200` `{client}` | `404 bridge.disabled`, `bridge.client_not_found`; `422 bridge.invalid_scope`, `validation.invalid`; `503 bridge.store_unavailable` |
+| POST | `/api/bridge/clients/{name}/rotate` | ADMIN | none | `200` `{client, key, onboarding}` | `404 bridge.disabled`, `bridge.client_not_found`; `409 bridge.client_revoked`; `503 bridge.store_unavailable` |
+| DELETE | `/api/bridge/clients/{name}` | ADMIN | none | `200` `{client}` with `revoked_at` set; revoking a revoked client changes nothing | `404 bridge.client_not_found`; `503 bridge.store_unavailable` |
+| GET | `/api/bridge/me` | BRIDGE | none | `200` the caller's record, below | `401 auth.required`; `404 bridge.disabled`; `503 bridge.store_unavailable` (a bridge key only) |
+
+**The client record.** `name`; `created_at` and `last_seen_at` (Unix seconds; `last_seen_at` is
+`null` until the key is first used, and is stamped at most once a minute); `created_by`
+(`api:admin` for a client added over REST); `revoked_at` (`null` while the key is live); `note`;
+and `scopes`, a sorted list. The record never carries key material, not even the hash.
+
+**Names.** A name is 1 to 32 characters from `a-z`, `0-9`, `_` and `-`, starting with a letter or
+a digit. `hermes`, `pi`, `admin`, `anonymous` and `shared` are reserved, and so is any name
+starting `hermes__` or `hal0`; each is `422 bridge.invalid_name`. A revoked client keeps its name,
+so past runs stay attributable and adding it again is `409 bridge.client_exists`.
+
+**Scopes.** A scope opens one MCP server on the box:
+
+| Scope | Server | Mount |
+|---|---|---|
+| `agents` | `hal0-agents` | `/mcp/agents` |
+| `memory` | `hal0-memory` | `/mcp/memory` |
+| `admin` | `hal0-admin` | `/mcp/admin` |
+
+Every client holds `agents`, whatever the request says. Leaving `scopes` out of `POST /clients`
+grants `agents` and `memory`; values are trimmed and lowercased, and an unknown scope is
+`422 bridge.invalid_scope`. A replacement list on `PATCH` is the whole new set (plus `agents`), not
+an addition.
+
+**The key.** `hal0bk_<name>.<token>`. It appears in the `POST /clients` and `rotate` responses and
+nowhere else, ever; hal0 keeps only its hash. Rotating replaces the key at once and the old one
+stops verifying. Rotate, re-scope and revoke also end any open stream of that client that its new
+scopes or key no longer admit. A client named `openwebui` is the one hal0 manages for Open WebUI,
+and rotating, re-scoping or revoking it re-renders Open WebUI's environment in the background.
+
+**`onboarding`.** `{lines: [{server, scope, mcp_url, claude_mcp_add}, …]}`, one line per granted
+scope in the order `agents`, `memory`, `admin`. `claude_mcp_add` is the whole command to paste on
+the client's machine, with the key inlined. The URL base is `[network].public_url` when it is set,
+else the address the request reached hal0-api at, except that a loopback host (what `hal0 bridge`
+calls) becomes the box's default-route address on the API port.
+
+**`GET /me`.** `{name, tier, scopes, created_at, last_seen_at, servers, tools}`. For a bridge key
+it is the client's own record (`tier: "bridge"`); a key whose client was revoked in the meantime is
+`401 auth.required`. For the admin credential it is `name: "admin"`, `tier: "admin"`, every scope,
+`created_at` and `last_seen_at` of `null`. `servers` names the MCP servers the scopes reach and
+`tools` the tools of `hal0-agents`, empty while that server is not mounted. It is the one REST
+route a bridge key opens, so onboarding is checkable with one `curl`.
+
+## Run routes
+
+These are the operator's: they act as the admin, so they see every client's runs. They answer
+`404 bridge.disabled` while the bridge is off and `503 bridge.unavailable` when the run service is
+not running.
+
+| Method | Path | Auth | Query | Response | Errors |
+|---|---|---|---|---|---|
+| GET | `/api/bridge/runs` | ADMIN | `client`, `status` (an exact match; an unknown value matches nothing), `limit` (1 to 200, default 20) | `200` `{items: [run list item, …]}`, newest first | `404 bridge.disabled`; `422 validation.invalid` (a `limit` out of range); `503 bridge.unavailable` |
+| GET | `/api/bridge/runs/{run_id}` | ADMIN | `offset` (0 or more, default 0) | `200` the run view with the output window | `404 bridge.disabled`, `bridge.run_not_found`; `422 validation.invalid`; `503 bridge.unavailable` |
+| GET | `/api/bridge/runs/{run_id}/events` | ADMIN | `since_seq` (0 or more); header `Last-Event-ID` | `200` `text/event-stream`, below | `404 bridge.disabled`, `bridge.run_not_found` (before any stream); `422 validation.invalid`; `503 bridge.unavailable` |
+| POST | `/api/bridge/runs/{run_id}/stop` | ADMIN | none | `200` the run view | `404 bridge.disabled`, `bridge.run_not_found`; `409 bridge.run_not_running`; `502 bridge.agent_unavailable`, `bridge.agent_refused`; `503 bridge.unavailable`, `bridge.agent_unkeyed` |
+
+**The run view.** `run_id`, `agent`, `profile`, `client` (who started it), `status`, `created_at`
+and `updated_at` (Unix seconds), `input_preview` (the first 200 characters of the task, secrets
+masked), `output`, `error`, `usage` (`null` or the usage Hermes reported), `pending` (`null` or
+the approval or clarification the run is waiting on) and `last_seq` (the newest event sequence
+the ledger holds).
+
+**Statuses.** A run is live in `queued`, `running`, `waiting_for_approval`,
+`waiting_for_clarification` and `stopping`, and over in `completed`, `failed`, `cancelled`,
+`interrupted` and `unknown` (Hermes no longer knows the run, so the ledger will not hear more).
+
+**The stop route.** It asks Hermes to stop a live run. The view then reads `stopping` (or another
+live status Hermes reports) until the ledger sees the run end. A run that is already over is
+`409 bridge.run_not_running`. This is the only run route that calls Hermes, so it is the only one
+that can answer the `bridge.agent_*` codes: `bridge.agent_refused` carries Hermes's own `4xx`
+status except `401` and `403` (those mean hal0's key was refused, which is not the caller's fault),
+and `502` for those and every `5xx`.
+
+**The event stream.** The frames are `id: <seq>`, `event: <name>`, `data: <the event as JSON>`,
+where the event is `{seq, ts, event, payload}`. The stream replays the ledger after `since_seq`,
+then follows the run live. After the run's last event comes `event: run.closed` with
+`{run_id, status}` and the stream ends. A `: keepalive` comment goes out after 10 s of silence.
+`since_seq` wins over `Last-Event-ID`, which is what an `EventSource` sends on reconnect (a value
+that is not a number counts as 0); with neither, the replay starts at the oldest stored event. The
+ledger keeps only a run's newest 500 event rows, so on a long run that is not `seq` 1. Once the
+stream has started there is no error frame: a client disconnect, or the run being pruned
+mid-stream, just ends it.
+
+## Output: `output_preview` versus `output`
+
+The two run reads return different shapes on purpose:
+
+- **A list item** is the run view with `output` dropped and `output_preview` added: the first 200
+  characters of the output with secrets masked, or `null` for a run without output. A polled list of
+  200 runs should not carry 200 full outputs, and a list is for finding a run, not reading it.
+- **One run** has `output`: the 16 KiB window that starts `offset` bytes into the whole output,
+  plus `output_offset` (where this window starts), `output_total` (the whole output's length) and
+  `next_offset` (where the next window starts, `null` after the last). Read a long output by calling
+  again with `offset=<next_offset>` until it is `null`. A run whose `output` is `null` has none of
+  the three paging keys.
+
+**Paging rule.** Offsets and sizes count UTF-8 bytes, and a window never splits a character: an
+offset that lands inside one moves forward to the next character, and a window ends on a character
+boundary. An offset past the end is an empty window at the end. A negative `offset` is
+`422 validation.invalid` here.
+
+**The offset belongs to its surface.** `GET /runs/{run_id}` pages the output as the ledger stored
+it. The `agent_run_status` tool of `hal0-agents` pages the *masked* output, so once a secret was
+masked the two surfaces' `output_offset`, `output_total` and `next_offset` differ, and an offset
+from one is not valid on the other. A negative offset is `bridge.invalid_offset` there. These routes
+are the operator's, so the stored `output` and the event payloads on the stream are not masked;
+`output_preview` is the one masked text they return.
+
+## Errors
+
+Codes and statuses come from `BRIDGE_ERROR_STATUS` in `src/hal0/bridge/errors.py`, except the five
+`client` codes, which the client store raises and the routes map.
+
+| Code | Status | Raised by |
+|---|---|---|
+| `bridge.disabled` | 404 | Every route except list and revoke, while `[bridge].enabled` was false at boot. |
+| `bridge.unavailable` | 503 | The run routes, when the run service did not start. |
+| `bridge.store_unavailable` | 503 | The client routes, and `GET /me` for a bridge key, when `bridge.db` could not be opened. |
+| `bridge.client_exists` | 409 | `POST /clients` with a name that has a row, revoked or not. |
+| `bridge.client_not_found` | 404 | `PATCH`, `rotate` and `DELETE` for a name with no row. |
+| `bridge.client_revoked` | 409 | `rotate` for a revoked client; add a new one instead. |
+| `bridge.invalid_name` | 422 | `POST /clients`: not a valid name, or a reserved one. |
+| `bridge.invalid_scope` | 422 | `POST /clients` and `PATCH`: a scope that is not `agents`, `memory` or `admin`. |
+| `bridge.run_not_found` | 404 | The run routes, for an id the ledger does not hold. |
+| `bridge.run_not_running` | 409 | `POST /runs/{run_id}/stop` for a run that is over. |
+| `bridge.agent_unkeyed` | 503 | `stop`, when hal0 holds no API key for the run's profile. |
+| `bridge.agent_unavailable` | 502 | `stop`, when Hermes does not answer. |
+| `bridge.agent_refused` | Hermes's `4xx`, else 502 | `stop`, when Hermes answered with an error status. |
+
+A request the router cannot parse is `422 validation.invalid`, with the offending fields in
+`details.fields`, and the middleware's own refusals are `401 auth.required` and `403 auth.forbidden`.
+
+The other codes in `errors.py` are raised by the `hal0-agents` tools alone, because no REST route
+starts, steers or answers a run, or touches skills and memory: `bridge.unknown_agent` (404),
+`bridge.too_many_runs` (429),
+`bridge.idempotency_conflict`, `bridge.no_pending_request` (409), `bridge.invalid_session_key`,
+`bridge.invalid_idempotency_key`, `bridge.invalid_offset` (422), `bridge.skill_invalid` (422),
+`bridge.skill_not_found` (404), `bridge.skill_readonly` (403), `bridge.too_many_pending` (429),
+`bridge.skill_pending_elsewhere` (409), `bridge.memory_disabled` (503), `bridge.memory_invalid`
+(422), `bridge.memory_failed` (502) and `bridge.internal` (500). They are explained in
+[Failures](/docs/reference/mcp-tools-agents#failures) on the tools page.
