@@ -26,7 +26,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 const idle = { mutate: () => {}, mutateAsync: async () => ({}), isPending: false, reset: () => {} }
 
-const { modelsBox } = vi.hoisted(() => ({ modelsBox: { current: [] as Record<string, unknown>[] } }))
+const { modelsBox, sysBox, profilesBox } = vi.hoisted(() => ({
+  modelsBox: { current: [] as Record<string, unknown>[] },
+  sysBox: { current: { backends: {}, hardware: {} } as Record<string, unknown> },
+  profilesBox: { current: [] as Record<string, unknown>[] },
+}))
 
 vi.mock('@/api/hooks/useSlots', () => ({
   useSlotEdit: () => idle,
@@ -49,14 +53,14 @@ vi.mock('@/api/hooks/useModelsFeasibility', () => ({
 vi.mock('@/api/hooks/useLogs', () => ({ useSlotLogsStream: () => ({ lines: [] }) }))
 vi.mock('@/api/hooks/useRuntimes', async () => {
   const actual = await vi.importActual<typeof import('@/api/hooks/useRuntimes')>('@/api/hooks/useRuntimes')
-  return { ...actual, useSystemInfo: () => ({ data: { backends: {}, hardware: {} }, isLoading: false }) }
+  return { ...actual, useSystemInfo: () => ({ data: sysBox.current, isLoading: false }) }
 })
 vi.mock('@/api/hooks/useRunnerImages', () => ({
   useRunnerImages: () => ({ data: { images: [], families: [] } }),
   useRunnerImagePullJob: () => ({ state: 'idle', inFlight: false, error: null, start: async () => {} }),
 }))
 vi.mock('@/api/hooks/useProfiles', () => ({
-  useProfiles: () => ({ data: [], isLoading: false, isError: false, error: null }),
+  useProfiles: () => ({ data: profilesBox.current, isLoading: false, isError: false, error: null }),
   useProfileCreate: () => ({ mutateAsync: async (b: unknown) => b }),
   useProfileUpdate: () => ({ mutateAsync: async (b: unknown) => b }),
   useProfileDelete: () => ({ mutateAsync: async () => undefined }),
@@ -110,6 +114,8 @@ const byId = (testid: string) => document.querySelector(`[data-testid="${testid}
 afterEach(() => {
   document.body.innerHTML = ''
   modelsBox.current = []
+  sysBox.current = { backends: {}, hardware: {} }
+  profilesBox.current = []
 })
 
 describe('slot drawer Model row', () => {
@@ -157,6 +163,61 @@ describe('slot card swap popover', () => {
     expect(document.querySelectorAll('.swap-pop-item')).toHaveLength(1)
     expect(byId('swap-image-model')).toBeNull()
     expect(byId('swap-image-model-link')).toBeNull()
+    act(() => root.unmount())
+  })
+})
+
+describe('slot card swap popover on a halogen runtime', () => {
+  const HALO_ROW = {
+    id: 'qwen-halo', name: 'qwen-halo', ns: 'pulled', installed: true, type: 'llm', capabilities: ['chat'],
+    backends: ['halogen'], size_bytes: 1_000_000_000, hf_repo: 'org/qwen-halo',
+  }
+  const catalogue = {
+    standard: {
+      title: 'Standard', tier: 'default', device_class: 'gpu', supported_backends: ['rocm', 'vulkan'],
+      runtime_family: 'llama-server', state: 'installed',
+    },
+    halogen: {
+      title: 'halogen (Flash-Next)', tier: 'optional', device_class: 'gpu', supported_backends: ['rocm'],
+      runtime_family: 'halogen', state: 'installed',
+    },
+  }
+  const names = () => Array.from(document.querySelectorAll('.swap-pop-item .nm')).map((el) => el.firstChild?.textContent)
+
+  it('offers a halogen slot only halogen models', () => {
+    modelsBox.current = [QWEN, HALO_ROW]
+    sysBox.current = { backends: catalogue, hardware: {} }
+    const { root } = mountInQuery(
+      React.createElement(InlineSwapPopover, {
+        slot: { ...LLM_SLOT, binary: 'halogen' }, open: true, onClose: () => {}, onPick: () => {},
+      }),
+    )
+    expect(names()).toEqual(['qwen-halo'])
+    act(() => root.unmount())
+  })
+
+  it('follows the runner the slot profile carries when binary is unset', () => {
+    modelsBox.current = [QWEN, HALO_ROW]
+    sysBox.current = { backends: catalogue, hardware: {} }
+    profilesBox.current = [{ name: 'halo', flags: '', runner: 'halogen', supported_slot_types: ['llm'] }]
+    const { root } = mountInQuery(
+      React.createElement(InlineSwapPopover, {
+        slot: { ...LLM_SLOT, profile: 'halo' }, open: true, onClose: () => {}, onPick: () => {},
+      }),
+    )
+    expect(names()).toEqual(['qwen-halo'])
+    act(() => root.unmount())
+  })
+
+  it('keeps halogen models out of a llama slot', () => {
+    modelsBox.current = [QWEN, HALO_ROW]
+    sysBox.current = { backends: catalogue, hardware: {} }
+    const { root } = mountInQuery(
+      React.createElement(InlineSwapPopover, {
+        slot: { ...LLM_SLOT, binary: 'standard' }, open: true, onClose: () => {}, onPick: () => {},
+      }),
+    )
+    expect(names()).toEqual(['qwen'])
     act(() => root.unmount())
   })
 })

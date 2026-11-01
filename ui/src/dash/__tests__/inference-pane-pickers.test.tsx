@@ -246,7 +246,10 @@ const OFF_SLOT = {
 // card LIST (it is a fixed overlay and `.scard` both clips and, on hover,
 // becomes its containing block), so every profile test drives the real
 // SlotCards wiring rather than a card in isolation.
-function mountCards(slots: Record<string, unknown>[]) {
+function mountCards(
+  slots: Record<string, unknown>[],
+  { full = false, models = MODELS }: { full?: boolean; models?: Record<string, unknown>[] } = {},
+) {
   const handlers = {
     onSwap: () => {},
     onStart: () => {},
@@ -259,8 +262,8 @@ function mountCards(slots: Record<string, unknown>[]) {
   const el = () => (
     <SlotCards
       rows={slots.map((s) => ({ s, ind: { cls: 'offline', tooltip: '' } }))}
-      full={false}
-      models={MODELS}
+      full={full}
+      models={models}
       allSlots={slots}
       busyName={null}
       handlers={handlers}
@@ -321,6 +324,63 @@ beforeEach(() => {
 
 afterEach(() => {
   document.body.innerHTML = ''
+})
+
+// halogen (Flash-Next) — the card picker is family-aware: SlotCards derives the
+// family of each slot's effective runner and hands it to ModelPicker, so a
+// halogen slot lists only halogen rows and every other slot never sees them.
+const HALOGEN_BACKEND = {
+  title: 'halogen (Flash-Next)',
+  tier: 'optional',
+  supported_backends: ['rocm'],
+  device_class: 'gpu',
+  runtime_family: 'halogen',
+  state: 'installed',
+}
+const M_HALO = {
+  id: 'mh',
+  longName: 'Qwen-Halo',
+  type: 'llm',
+  capabilities: ['chat'],
+  backends: ['halogen'],
+  installed: true,
+}
+const P_HALO = { name: 'halo', flags: '', runner: 'halogen', supported_slot_types: ['llm'] }
+const HALO_MODELS = [M1, M_HALO]
+const cardOptionIds = (host: HTMLElement, name: string) => {
+  openMenu(host, name)
+  return optionEls(host).map((o) => o.getAttribute('data-option-id')).filter(Boolean)
+}
+
+describe('card model picker on a halogen runtime', () => {
+  beforeEach(() => {
+    systemInfoBox.current = { backends: { ...BACKENDS, halogen: HALOGEN_BACKEND } }
+    profilesBox.current = [P_CUR, P_HALO]
+  })
+
+  it('lists only halogen models for a slot pinned to the halogen runner', () => {
+    const { host } = mountCards([{ ...PROFILE_SLOT, binary: 'halogen', device: 'gpu-rocm' }], {
+      full: true,
+      models: HALO_MODELS,
+    })
+    expect(cardOptionIds(host, 'primary')).toEqual(['mh'])
+  })
+
+  it('follows the runner the slot profile carries when binary is unset', () => {
+    const { host } = mountCards([{ ...PROFILE_SLOT, profile: 'halo', device: 'gpu-rocm' }], {
+      full: true,
+      models: HALO_MODELS,
+    })
+    expect(cardOptionIds(host, 'primary')).toEqual(['mh'])
+  })
+
+  it('leaves a llama slot unchanged: no halogen rows', () => {
+    const { host } = mountCards([{ ...PROFILE_SLOT, binary: 'standard' }], {
+      full: true,
+      models: HALO_MODELS,
+    })
+    expect(cardOptionIds(host, 'primary')).toEqual(['m1'])
+  })
 })
 
 describe('ModelPicker (card-dropdowns Task 1)', () => {

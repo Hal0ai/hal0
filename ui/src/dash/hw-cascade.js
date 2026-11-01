@@ -210,10 +210,17 @@ export function runnerForBackend(backend, deviceClass) {
 }
 
 /**
- * The runner key a slot effectively runs on — the same precedence the slot
- * drawer's Runtime select shows: the slot's (staged) `binary`, else the runner
- * its profile carries, else the lane default (`runnerForBackend`). An NPU slot
- * has no llama runner default ('').
+ * The runner key a slot effectively runs on: the slot's (staged) `binary`, else
+ * the runner its profile carries, else the lane default (`runnerForBackend`).
+ * That is the server's order, not the Runtime select's (which reads "Auto"
+ * while `binary` is unset): applying a runner-carrying profile stamps the
+ * slot's `binary` from `profile.runner` (slots/config_write.py
+ * `_reconcile_device_profile`), and the launch picks its provider from the
+ * profile's runtime family (providers/container.py `_spec_provider_for` ->
+ * `_profile_runtime_family` -> `_provider_for_family`, and
+ * `_fixed_family_provider` in `_resolve_image_ref`), so a slot whose `binary`
+ * is still unset launches on the profile's runner. An NPU slot has no llama
+ * runner default ('').
  *
  * @param {{ binary?: string, profile?: { runner?: string } | null, device?: string }} slot
  */
