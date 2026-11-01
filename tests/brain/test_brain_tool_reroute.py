@@ -156,20 +156,18 @@ def _leaked(content: str, reasoning: str = "") -> dict[str, Any]:
     return {"choices": [{"message": msg, "finish_reason": "stop"}]}
 
 
-class _FakeKanban:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, str]] = []
+class _FakeBoardClient:
+    """A ``BoardClient`` stand-in: an empty Hermes board."""
 
-    async def request_json(self, method: str, path: str, **kw: Any) -> Any:
-        self.calls.append((method, path))
-        return {"columns": []} if path == "/board" else {"ok": True}
+    async def get_board(self, **kw: Any) -> Any:
+        return {"columns": []}
 
 
 def _fake_request(stub: _StubLLM, **brain_chat: Any) -> Any:
     cfg = BrainChatConfig(read_only=False, **brain_chat)
     state = SimpleNamespace(
         board_chat_llm=stub,
-        hermes_kanban=_FakeKanban(),
+        board_client=_FakeBoardClient(),
         approval_queue=ApprovalQueue(),
         self_api_base_url="http://testserver",
         brain_persona_root=Path("/nonexistent-personas-root"),
