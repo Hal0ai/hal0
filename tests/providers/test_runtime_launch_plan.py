@@ -150,10 +150,11 @@ def test_stop_timeout_renders_podman_arg_and_service_key() -> None:
         stop_timeout_s=120,
         restart_prevent_exit_status=(1,),
     )
-    unit = _render_from_plan("flash", plan)
-    assert "PodmanArgs=--stop-timeout=120" in unit
-    assert "TimeoutStopSec=150" in unit
-    assert "RestartPreventExitStatus=64 132 1" in unit
+    # Whole-line matches: a substring check would also pass for ``=1200``.
+    lines = _render_from_plan("flash", plan).splitlines()
+    assert "PodmanArgs=--stop-timeout=120" in lines
+    assert "TimeoutStopSec=150" in lines
+    assert "RestartPreventExitStatus=64 132 1" in lines
 
 
 def test_stop_timeout_follows_ipc_and_ulimits_in_podman_args() -> None:

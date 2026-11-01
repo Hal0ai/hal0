@@ -121,8 +121,11 @@ def test_system_info_backends_carry_knob_denied_names(
     backends = isolated_client.get("/api/system-info").json()["backends"]
     denied = backends["halogen"]["knob_denied"]
     assert {"HALOGEN_API_PORT", "HALOGEN_CTX", "HALOGEN_CACHE_DIR"} <= set(denied)
-    assert denied[-2:] == ["HALOGEN_NPU_*", "HALOGEN_RECORD_*"]
-    assert denied[:-2] == sorted(denied[:-2])
+    exact = [name for name in denied if not name.endswith("*")]
+    globs = [name for name in denied if name.endswith("*")]
+    assert {"HALOGEN_NPU_*", "HALOGEN_RECORD_*"} <= set(globs)
+    assert denied == exact + globs  # exact names first, then the PREFIX* globs
+    assert exact == sorted(exact)
     assert backends["standard"]["knob_denied"] == []
 
 

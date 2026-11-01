@@ -1301,6 +1301,139 @@ class TestLoadSync:
             assert provider.running_argv("chat") is None
 
 
+class TestUnloadStopBound:
+    """``unload_sync`` waits out a runtime's declared stop grace.
+
+    The default bound (``_UNIT_STOP_TIMEOUT_S``) is sized for a llama-server
+    that exits in a blink. The halogen engine declares a 120 s grace
+    (``Provider.stop_grace_s``; the unit renders ``--stop-timeout=120`` and
+    ``TimeoutStopSec=150``), so a client-side ``systemctl stop`` abandoned at
+    20 s would cut the engine's own shutdown short and then remove the Quadlet
+    out from under a container still draining.
+    """
+
+    @staticmethod
+    def _unload(
+        tmp_path: Path, slot_cfg: dict[str, Any], *, stop_raises: bool = False
+    ) -> tuple[list[str], dict[str, float | None]]:
+        """Run ``unload_sync`` over a recording seam; return (event order, stop timeout)."""
+        provider = ContainerProvider()
+        unit_file = tmp_path / "hal0-slot@x.container"
+        unit_file.write_text("[Container]\n")
+        events: list[str] = []
+        timeouts: dict[str, float | None] = {}
+
+        def fake_run(*args: str, check: bool = True, timeout: float | None = None) -> MagicMock:
+            verb = args[1]  # ("systemctl", verb, ...)
+            events.append(verb)
+            timeouts[verb] = timeout
+            if verb == "stop" and stop_raises:
+                raise SeamTimeout(list(args), timeout or 0.0, "deactivating")
+            m = MagicMock()
+            m.returncode = 0
+            return m
+
+        def fake_remove(path: Path, *, timeout: float | None = None) -> None:
+            events.append("remove_quadlet")
+            timeouts["remove_quadlet"] = timeout
+            path.unlink(missing_ok=True)
+
+        with (
+            patch.object(provider, "_run", side_effect=fake_run),
+            patch.object(provider, "_unit_path", return_value=unit_file),
+            patch.object(_container_mod._SYSTEMCTL_SEAM, "remove_quadlet", side_effect=fake_remove),
+        ):
+            provider.unload_sync(slot_cfg)
+        return events, timeouts
+
+    def test_unload_sync_halogen_stop_bound_is_150s(
+        self, tmp_path: Path, tmp_hal0_home: str
+    ) -> None:
+        """grace 120 s + 30 s: the unit's own ``TimeoutStopSec`` for the engine."""
+        _, timeouts = self._unload(tmp_path, {"name": "flash", "profile": "halogen"})
+
+        assert timeouts["stop"] == 150.0
+
+    def test_unload_sync_halogen_follow_ups_keep_the_short_bound(
+        self, tmp_path: Path, tmp_hal0_home: str
+    ) -> None:
+        """Only the stop is widened; the fast admin calls keep their own bound."""
+        _, timeouts = self._unload(tmp_path, {"name": "flash", "profile": "halogen"})
+
+        for verb in ("remove_quadlet", "daemon-reload", "reset-failed"):
+            assert timeouts[verb] == _UNIT_STOP_TIMEOUT_S, verb
+
+    def test_unload_sync_removes_quadlet_only_after_stop_returns(
+        self, tmp_path: Path, tmp_hal0_home: str
+    ) -> None:
+        events, _ = self._unload(tmp_path, {"name": "flash", "profile": "halogen"})
+
+        assert events == ["stop", "remove_quadlet", "daemon-reload", "reset-failed"]
+
+    def test_unload_sync_halogen_stop_timeout_still_tears_down_in_order(
+        self, tmp_path: Path, tmp_hal0_home: str
+    ) -> None:
+        """A stop that outlasts even the widened bound is abandoned, then the
+        same three follow-ups run, still after it."""
+        events, timeouts = self._unload(
+            tmp_path, {"name": "flash", "profile": "halogen"}, stop_raises=True
+        )
+
+        assert events == ["stop", "remove_quadlet", "daemon-reload", "reset-failed"]
+        assert timeouts["stop"] == 150.0
+
+    def test_unload_sync_llama_slot_keeps_the_default_bound(self, tmp_path: Path) -> None:
+        """No spec provider (the llama-server default): nothing widened."""
+        _, timeouts = self._unload(tmp_path, {"name": "chat"})
+
+        assert set(timeouts.values()) == {_UNIT_STOP_TIMEOUT_S}
+
+    def test_unload_sync_runtime_without_a_grace_keeps_the_default_bound(
+        self, tmp_path: Path
+    ) -> None:
+        """``stop_grace_s == 0`` means "podman's default", not "30 s": a
+        provider that declares no grace (ComfyUI here) is not widened."""
+        _, timeouts = self._unload(tmp_path, {"name": "img", "type": "image"})
+
+        assert timeouts["stop"] == _UNIT_STOP_TIMEOUT_S
+
+    def test_a_declared_grace_is_grace_plus_the_unit_margin(self) -> None:
+        provider = MagicMock()
+        provider.stop_grace_s = 45
+        with patch("hal0.providers.container._spec_provider_for", return_value=provider):
+            assert _container_mod.unit_stop_bound_s({"name": "x"}) == 75.0
+
+    def test_no_declared_grace_is_no_widened_bound(self) -> None:
+        """``None`` (not 30 s): the caller keeps its own default."""
+        no_grace = MagicMock()
+        no_grace.stop_grace_s = 0
+        for provider in (None, no_grace):
+            with patch("hal0.providers.container._spec_provider_for", return_value=provider):
+                assert _container_mod.unit_stop_bound_s({"name": "x"}) is None
+
+    def test_a_declared_grace_never_shrinks_the_bound_below_the_default(self) -> None:
+        """The default is a floor: were it ever raised past ``grace + 30``, a
+        declared grace still could not make the stop wait LESS than it does for
+        a runtime that declares none."""
+        provider = MagicMock()
+        provider.stop_grace_s = 1
+        with (
+            patch("hal0.providers.container._spec_provider_for", return_value=provider),
+            patch.object(_container_mod, "_UNIT_STOP_TIMEOUT_S", 100.0),
+        ):
+            assert _container_mod.unit_stop_bound_s({"name": "x"}) == 100.0
+
+    def test_a_dispatch_failure_falls_back_to_the_default_bound(self, tmp_path: Path) -> None:
+        """Teardown must never fail because the provider could not be resolved."""
+        with patch(
+            "hal0.providers.container._spec_provider_for", side_effect=RuntimeError("no branch")
+        ):
+            assert _container_mod.unit_stop_bound_s({"name": "x"}) is None
+            _, timeouts = self._unload(tmp_path, {"name": "x"})
+
+        assert timeouts["stop"] == _UNIT_STOP_TIMEOUT_S
+
+
 class TestImageMismatch:
     """#663 - _image_mismatch compares the running image ref vs the declared profile image.
 

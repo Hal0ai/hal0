@@ -81,7 +81,9 @@ def test_halogen_pins_the_upstream_peonist_image() -> None:
     row = manifest["runners"]["halogen"]
     assert row["image"] == "ghcr.io/peonist-ai/halogen-flash-server"
     assert row["tag"] == "0.18.22"
-    assert row["digest"].startswith("sha256:273714cc")
+    assert (
+        row["digest"] == "sha256:273714ccb64dabb7fac0418ee1b6dd83eb57d2fd44cf286eb68a7c694a27c203"
+    )
 
 
 def test_halogen_runner_shape() -> None:

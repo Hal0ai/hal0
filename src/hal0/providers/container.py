@@ -597,6 +597,13 @@ _HEALTH_REQUEST_TIMEOUT_S = 3.0
 #: reset-failed) so the two stay numerically locked together.
 _UNIT_STOP_TIMEOUT_S = UNIT_ADMIN_CALLS_ALLOWANCE_S / 3
 
+#: Seconds a unit's own stop timeout outlasts the runtime's declared grace
+#: (``RuntimeLaunchPlan.stop_timeout_s``): ``TimeoutStopSec`` renders as the
+#: grace plus this (see :func:`_render_quadlet_from_plan`), and the client-side
+#: ``systemctl stop`` bound (:func:`unit_stop_bound_s`) is the same number so
+#: the client never gives up before systemd does.
+_STOP_TIMEOUT_MARGIN_S = 30
+
 #: Wall-clock bound on the ``systemctl restart`` that actually (re)spawns a
 #: slot's container (#1869/#1870) — the one seam call in the load path that
 #: can legitimately take a while (device attach, a cold netavark setup)
@@ -974,7 +981,11 @@ def _render_quadlet_from_plan(
             "RestartMaxDelaySec=300",
             # A runtime with a stop grace needs the unit's own stop timeout to
             # outlast it by 30 s (the podman --stop-timeout above). Absent by default.
-            *([f"TimeoutStopSec={plan.stop_timeout_s + 30}"] if plan.stop_timeout_s > 0 else []),
+            *(
+                [f"TimeoutStopSec={plan.stop_timeout_s + _STOP_TIMEOUT_MARGIN_S}"]
+                if plan.stop_timeout_s > 0
+                else []
+            ),
             # #2037 fail-fast: the runner entrypoint translates a death
             # before /health ever answered into exit 64 ("died during model
             # load" — corrupt GGUF, bogus flag), which would otherwise burn
@@ -1257,12 +1268,39 @@ def _spec_provider_for(slot_cfg: dict[str, Any]) -> Any | None:
     return _provider_for_family(slot_cfg, _profile_runtime_family(slot_cfg))
 
 
+def unit_stop_bound_s(slot_cfg: Mapping[str, Any]) -> float | None:
+    """The widened ``systemctl stop`` bound for a runtime with a declared grace.
+
+    A runtime that declares one (``Provider.stop_grace_s``; halogen's engine
+    needs 120 s to exit cleanly after SIGTERM) gets ``max(_UNIT_STOP_TIMEOUT_S,
+    stop_grace_s + 30)``, which is the unit's own ``TimeoutStopSec`` (150 s for
+    halogen), so neither :meth:`ContainerProvider.unload_sync` nor
+    :meth:`SlotManager.terminate` abandons a shutdown the engine is still
+    performing correctly.
+
+    ``None`` means "no declared grace": the llama-server default, and every
+    provider whose ``stop_grace_s`` is 0 (podman's default stop timeout, not "no
+    time"). The caller keeps its own default bound. A provider that cannot be
+    resolved is also ``None``: teardown must not fail on a lookup.
+    """
+    try:
+        provider = _spec_provider_for(dict(slot_cfg))
+    except Exception:
+        return None
+    grace = int(getattr(provider, "stop_grace_s", 0) or 0)
+    if grace <= 0:
+        return None
+    return max(_UNIT_STOP_TIMEOUT_S, float(grace + _STOP_TIMEOUT_MARGIN_S))
+
+
 def _provider_for_family(slot_cfg: dict[str, Any], family: str | None) -> Any | None:
     """The dispatch half of :func:`_spec_provider_for`, given the runtime family.
 
-    Never resolves a profile itself, so a caller that must not write (the
-    flags-fold dry run — ``ProfileCatalog.resolve`` can persist a shipped seed
-    profile) supplies a family derived from already-loaded config.
+    Never looks a profile up itself: the caller supplies the family.
+    :func:`_spec_provider_for` reads it from the catalog
+    (:func:`_profile_runtime_family`); :func:`_fixed_family_provider` takes it
+    from a profile the caller has already resolved, so that path does not read
+    the catalog a second time.
     """
     device = str(slot_cfg.get("device", ""))
     slot_type = str(slot_cfg.get("type", ""))
@@ -2559,9 +2597,15 @@ class ContainerProvider(Provider):
         """
         token = slot_instance_token(slot_cfg)
         unit = self._unit_name(token)
+        # A runtime with a declared stop grace (halogen: 120 s) is given that
+        # grace plus the unit's own 30 s margin; everything else keeps the short
+        # bound. Only the stop is widened: the Quadlet removal, daemon-reload and
+        # reset-failed below run strictly after it returns (or is abandoned at
+        # this bound), on their own short bound.
+        stop_bound = unit_stop_bound_s(slot_cfg) or _UNIT_STOP_TIMEOUT_S
         log.info("container.unit_stop", extra={"slot": token, "unit": unit})
         try:
-            self._run("systemctl", "stop", unit, check=False, timeout=_UNIT_STOP_TIMEOUT_S)
+            self._run("systemctl", "stop", unit, check=False, timeout=stop_bound)
         except (subprocess.TimeoutExpired, SeamTimeout):
             # The real (unmocked) seam route raises SeamTimeout (#1869: every
             # ``_run`` call now goes through ``SystemCtlSeam.systemctl`` ->
@@ -2570,7 +2614,7 @@ class ContainerProvider(Provider):
             # stdlib error. Either way the stop is best-effort — see below.
             log.warning(
                 "container.unit_stop_timeout",
-                extra={"slot": token, "unit": unit, "timeout_s": _UNIT_STOP_TIMEOUT_S},
+                extra={"slot": token, "unit": unit, "timeout_s": stop_bound},
             )
         # Remove the Quadlet source so daemon-reload regenerates without it.
         unit_path = self._unit_path(token)

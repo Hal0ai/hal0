@@ -146,3 +146,86 @@ async def test_watcher_does_not_retire_a_newer_error(
 
     assert sm.state("chat") is SlotState.ERROR
     assert "real failure" in sm._states[sm._key("chat")].message
+
+
+# ── a runtime's declared stop grace widens the stop budget ──────────────────
+#
+# The halogen engine needs up to 120 s to exit cleanly after SIGTERM, and says
+# so (``Provider.stop_grace_s``). A 30 s caller-side budget would abandon a
+# shutdown that is going exactly as designed, then report the slot as errored
+# while the engine is still draining.
+
+
+@pytest.fixture
+def halogen_slow_stub(slow_stub: _SlowStopProvider, slot_root: Path) -> _SlowStopProvider:
+    """``slow_stub`` plus a ``flash`` slot whose profile resolves to halogen."""
+    (slot_root / "flash.toml").write_text(
+        "\n".join(
+            [
+                'name = "flash"',
+                "port = 8085",
+                'profile = "halogen"',
+                "[model]",
+                'default = "qwen3-4b-q4_k_m"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return slow_stub
+
+
+async def test_terminate_waits_out_a_halogen_stop_grace(
+    halogen_slow_stub: _SlowStopProvider,
+) -> None:
+    """A stop slower than the generic budget but inside the grace completes."""
+    sm = SlotManager()
+    sm._terminate_timeout_s = 0.05
+    asyncio.get_running_loop().call_later(0.3, halogen_slow_stub.release.set)
+
+    await sm.terminate("flash")  # would raise SlotTerminateTimeout at 0.05 s
+
+    assert [c["name"] for c in halogen_slow_stub.unload_calls] == ["flash"]
+    assert "flash" not in halogen_slow_stub.active
+
+
+async def test_terminate_keeps_the_generic_budget_for_a_slot_without_a_grace(
+    halogen_slow_stub: _SlowStopProvider,
+) -> None:
+    """The contrast: the llama-server ``chat`` slot, same timing, is abandoned."""
+    sm = SlotManager()
+    sm._terminate_timeout_s = 0.05
+    asyncio.get_running_loop().call_later(0.3, halogen_slow_stub.release.set)
+
+    with pytest.raises(SlotTerminateTimeout):
+        await sm.terminate("chat")
+
+    await asyncio.sleep(0.4)  # let the abandoned executor stop finish
+
+
+async def test_unload_waits_out_a_halogen_stop_grace(
+    halogen_slow_stub: _SlowStopProvider,
+) -> None:
+    """``unload`` ends OFFLINE, not in the provisional slow-stop ERROR."""
+    sm = SlotManager()
+    sm._terminate_timeout_s = 0.05
+    await sm._transition("flash", SlotState.READY, force=True)
+    asyncio.get_running_loop().call_later(0.3, halogen_slow_stub.release.set)
+
+    slot = await sm.unload("flash")
+
+    assert slot.state is SlotState.OFFLINE
+    assert not sm._states[sm._key("flash")].extra.get("slow_stop")
+
+
+async def test_an_explicit_terminate_budget_is_not_widened(
+    halogen_slow_stub: _SlowStopProvider,
+) -> None:
+    """A caller that passes ``timeout_s`` is giving a deliberate bound."""
+    sm = SlotManager()
+    asyncio.get_running_loop().call_later(0.3, halogen_slow_stub.release.set)
+
+    with pytest.raises(SlotTerminateTimeout):
+        await sm.terminate("flash", timeout_s=0.05)
+
+    await asyncio.sleep(0.4)
