@@ -800,11 +800,10 @@ async def get_slot_by_name(name: str, request: Request) -> dict[str, object]:
 
 @router.get("/by-id/{slot_id}")
 async def get_slot_by_id(slot_id: int, request: Request) -> dict[str, object]:
-    """Stable-id lookup (rework §11.1): opaque id → current name → snapshot."""
+    """Resolve the stable id to the current name and return the enriched slot payload."""
     sm = _get_slot_manager(request)
     name = sm.slot_id_to_name(slot_id)
-    snap = await sm.status(name, include_config_drift=True)
-    return _slot_to_dict(snap, request)
+    return await get_slot(name, request)
 
 
 @router.post("/{name}/rename")

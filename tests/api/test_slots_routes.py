@@ -2020,6 +2020,44 @@ def test_get_slot_by_name_matches_get_slot(
     assert by_name.json()["coresident_group"] == "npu-flm-trio"
 
 
+@pytest.mark.parametrize("name", ["agent", "stt-npu", "embed-npu"])
+def test_get_slot_by_id_matches_name_lookups(
+    name: str,
+    npu_trio_slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """Stable-id reads include the same enrichment as both name-keyed routes."""
+    plain = isolated_client.get(f"/api/slots/{name}")
+    assert plain.status_code == 200, plain.text
+    body = plain.json()
+    by_name = isolated_client.get(f"/api/slots/by-name/{name}")
+    by_id = isolated_client.get(f"/api/slots/by-id/{body['id']}")
+    assert by_name.status_code == 200, by_name.text
+    assert by_id.status_code == 200, by_id.text
+    assert by_id.json() == by_name.json() == body
+    assert body["coresident_group"] == "npu-flm-trio"
+    assert body["runtime"] == "container"
+    assert "tune_effective" in body
+    if name != "stt-npu":
+        assert "ctx_effective" in body
+        assert "ctx_source" in body
+
+
+def test_get_slot_by_id_unknown_id(
+    npu_trio_slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """An unresolvable id keeps the SlotManager's typed not-found error."""
+    response = isolated_client.get("/api/slots/by-id/999999")
+    assert response.status_code == 404, response.text
+    error = response.json()["error"]
+    assert error["code"] == "slot.not_found"
+    assert error["message"] == "no slot with id=999999"
+    assert error["details"] == {"id": 999999}
+
+
 class _FakeCtxModel:
     """A registry row whose file declares ``native`` tokens of context."""
 

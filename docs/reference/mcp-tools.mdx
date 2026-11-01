@@ -100,6 +100,11 @@ the number of matches before paging. `capability_list` takes `section` (any of `
 `summary=true`, which cuts each catalog entry to its `id`, `display_name` and `downloaded`.
 With no parameters both replies are unchanged.
 
+`slot_status`, `slot_by_name` and `slot_by_id` return the same enriched payload
+for the same local slot, including config and container fields and effective
+context and tuning where applicable. `slot_by_id` resolves the stable id to
+the slot's current name; an unknown id returns `404 slot.not_found`.
+
 ### Autonomous — read (no approval)
 
 | Tool | REST route |
