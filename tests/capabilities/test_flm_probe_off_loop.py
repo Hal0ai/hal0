@@ -20,6 +20,11 @@ what is already known. These tests pin that contract with a provider whose
     cached;
   * a reset during an in-flight probe drops that probe's answer and never
     waits for it; a previously known answer is kept while the re-probe runs.
+
+The "never waits" tests bound a call against wall clock (``_FAST_S``), so they
+carry ``@pytest.mark.timing``: the PR leg enforces every bound, and the main
+``--cov`` leg skips them, where tracing slows the code enough to trip a bound
+with every probe already off the loop (#3267).
 """
 
 from __future__ import annotations
@@ -140,6 +145,7 @@ def _raise() -> Any:
 # ── indirect request paths never wait on the probe ──────────────────────────
 
 
+@pytest.mark.timing
 async def test_models_list_cold_cache_does_not_wait_on_probe(
     slow_probe: _SlowProvider, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -166,6 +172,7 @@ async def test_models_list_cold_cache_does_not_wait_on_probe(
     _assert_probe_ran_off_loop(slow_probe, ticks, threading.get_ident())
 
 
+@pytest.mark.timing
 async def test_capability_validation_cold_cache_does_not_wait_on_probe(
     slow_probe: _SlowProvider, tmp_hal0_home: str, tmp_path: Path
 ) -> None:
@@ -185,6 +192,7 @@ async def test_capability_validation_cold_cache_does_not_wait_on_probe(
     _assert_probe_ran_off_loop(slow_probe, ticks, threading.get_ident())
 
 
+@pytest.mark.timing
 @pytest.mark.parametrize("path", ["capabilities", "backends", "backend"])
 async def test_direct_handlers_cold_cache_do_not_wait_on_probe(
     slow_probe: _SlowProvider, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str
@@ -226,6 +234,7 @@ async def test_direct_handlers_cold_cache_do_not_wait_on_probe(
 # ── one probe per miss, answers cached ──────────────────────────────────────
 
 
+@pytest.mark.timing
 def test_concurrent_cold_cache_callers_start_one_probe(slow_probe: _SlowProvider) -> None:
     """16 concurrent cold-cache callers return at once and start exactly one probe."""
     n = 16
@@ -303,6 +312,7 @@ def test_unanswerable_probe_is_retried_after_the_window(
 # ── reset ───────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.timing
 def test_reset_during_a_probe_drops_its_answer_and_never_waits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -349,6 +359,7 @@ def test_reset_during_a_probe_drops_its_answer_and_never_waits(
         catalog.reset_flm_image_present_cache()
 
 
+@pytest.mark.timing
 def test_known_answer_is_kept_while_a_reset_re_probes(slow_probe: _SlowProvider) -> None:
     """After an FLM pull's reset, NPU must not flicker off during the re-probe."""
     catalog._flm_image_present()
@@ -375,6 +386,7 @@ def _boot_ctx() -> tuple[Any, Any]:
     return app, ctx
 
 
+@pytest.mark.timing
 def test_start_probe_is_non_blocking_on_an_npu_host(slow_probe: _SlowProvider) -> None:
     """``start_flm_image_probe`` returns at once and its answer serves the next call."""
     started = time.monotonic()
@@ -399,6 +411,7 @@ def test_start_and_prime_are_no_ops_without_an_npu(
     assert slow_probe.probe_threads == []
 
 
+@pytest.mark.timing
 async def test_boot_capabilities_phase_starts_the_probe_without_blocking(
     slow_probe: _SlowProvider, tmp_hal0_home: str
 ) -> None:
@@ -509,6 +522,7 @@ async def test_probe_landing_mid_get_state_yields_a_consistent_response(
 # ── FLM pull path keeps the known answer across its reset ───────────────────
 
 
+@pytest.mark.timing
 async def test_flm_pull_reset_keeps_the_known_answer_while_re_probing(
     slow_probe: _SlowProvider, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
