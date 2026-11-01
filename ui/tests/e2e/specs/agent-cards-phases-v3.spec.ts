@@ -18,6 +18,10 @@
  * browser derives (a `ready` overview plus a hot slot), so that test seeds the
  * slot through `window.HAL0_DATA` — `/api/slots` is answered by the in-bundle
  * mock layer and is not reachable through `page.route`.
+ *
+ * The Hermes card also names the model of the slot it orchestrates. That slot
+ * is picked by role (`isDefault` plus `group`/`type`), never by name or array
+ * order — pinned in 'Hermes card backing slot' below (#3159).
  */
 import { test, expect, json, seedSlots, type Page } from '../fixtures/apiMock'
 import type { AgentOverview } from '../../../src/api/hooks/useAgents'
@@ -150,6 +154,8 @@ async function mockCards(
     hermes?: AgentOverview
     pi?: AgentOverview
     slot?: ReturnType<typeof chatSlot>
+    /** The whole `/api/slots` roster, in order; wins over `slot`. */
+    slots?: unknown[]
   },
 ) {
   const agents = opts.agents ?? []
@@ -160,7 +166,7 @@ async function mockCards(
   if (opts.pi) {
     await page.route('**/api/agents/pi/overview*', (route) => json(route, opts.pi))
   }
-  await seedSlots(page, [opts.slot ?? chatSlot('ready')])
+  await seedSlots(page, opts.slots ?? [opts.slot ?? chatSlot('ready')])
   // The Memory tab's live endpoints — keep the shell hermetic.
   await page.route('**/api/memory/graph/status', (route) =>
     json(route, { enabled: false, route: 'upstream' }),
@@ -604,6 +610,64 @@ test.describe('Hermes card phases', () => {
     const restart = card(page, 'hermes').getByTestId('agent-action-restart')
     await expect(restart).toBeVisible()
     await expect(restart).toContainText('Restart')
+  })
+})
+
+// ── Hermes: which slot the card reads ───────────────────────────────────
+
+// A roster whose operator-chosen names carry no hint (never "primary"/"agent"),
+// with an `isDefault` embed slot sorted BEFORE the default chat slot. Every
+// group's representative slot can carry `isDefault: true`, so array order or a
+// bare `.find((s) => s.isDefault)` must not decide which slot Hermes
+// orchestrates. The offline chat slot, also ahead of the right one, is not the
+// default and must lose too.
+const EMBED_SLOT = {
+  name: 'ops-embed-01',
+  type: 'embedding',
+  group: 'embed',
+  isDefault: true,
+  state: 'ready',
+  model: 'ops-embed-model',
+  container_status: 'running',
+  metrics: { toks: 0, ctx: 0 },
+}
+
+const OFFLINE_CHAT_SLOT = {
+  name: 'ops-old-vulkan-01',
+  type: 'llm',
+  group: 'chat',
+  isDefault: false,
+  state: 'offline',
+  model: 'ops-fallback-model-x',
+  container_status: 'stopped',
+  metrics: { toks: 0, ctx: 0 },
+}
+
+const OPS_CHAT_SLOT = {
+  ...chatSlot('ready'),
+  name: 'ops-chat-01',
+  model: 'ops-llm-9000',
+  model_id: 'ops-llm-9000',
+}
+
+test.describe('Hermes card backing slot', () => {
+  test('resolves the chat slot by role, not by name or order, past an isDefault embed slot', async ({
+    page,
+  }) => {
+    await mockCards(page, {
+      agents: [hermesRecord(true)],
+      hermes: hermesOverview({ phase: 'ready' }),
+      slots: [EMBED_SLOT, OFFLINE_CHAT_SLOT, OPS_CHAT_SLOT],
+    })
+    await openAgents(page)
+
+    const front = face(page, 'hermes')
+    await expect(front).toBeVisible({ timeout: FIVE_S })
+    // Exact match: the default chat slot's model, not the embed slot's (a bare
+    // isDefault pick) and not the offline chat slot's (first group/type match).
+    await expect(front.locator('.fc-model')).toHaveText('ops-llm-9000')
+    await expect(front).not.toContainText('ops-embed-model')
+    await expect(front).not.toContainText('ops-fallback-model-x')
   })
 })
 
