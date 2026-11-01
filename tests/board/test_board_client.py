@@ -9,6 +9,7 @@ Run targeted:
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -17,6 +18,7 @@ import pytest
 from hal0.board import (
     DEFAULT_BASE_URL,
     KANBAN_BASE_PATH,
+    BoardNoToken,
     BoardUnreachable,
     BoardUpstreamError,
     HermesKanbanClient,
@@ -62,6 +64,14 @@ def _make_client(recorder: _Recorder, **kw: Any) -> HermesKanbanClient:
     transport = httpx.MockTransport(recorder.handler)
     http = httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:9119")
     return HermesKanbanClient(http_client=http, **kw)
+
+
+@pytest.fixture(autouse=True)
+def _token_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Default resolver reads a tmp token file, never the real install's."""
+    token_file = tmp_path / "default-token"
+    token_file.write_text("TOK", encoding="utf-8")
+    monkeypatch.setattr("hal0.board.auth.dashboard_session_token_path", lambda _a: token_file)
 
 
 @pytest.fixture
@@ -113,7 +123,7 @@ async def test_empty_200_body_returns_empty_dict(recorder: _Recorder) -> None:
 
 
 async def test_headers_inject_token_both_forms(recorder: _Recorder) -> None:
-    client = _make_client(recorder, session_token_resolver=lambda: "TOK")
+    client = _make_client(recorder, token_resolver=lambda: "TOK")
     await client.request_json("GET", "/board")
     h = recorder.requests[-1]["headers"]
     assert h["x-hermes-session-token"] == "TOK"
@@ -121,16 +131,8 @@ async def test_headers_inject_token_both_forms(recorder: _Recorder) -> None:
     assert h["x-hal0-agent"] == "hermes"
 
 
-async def test_headers_no_token_omits_auth(recorder: _Recorder) -> None:
-    client = _make_client(recorder, session_token_resolver=lambda: None)
-    await client.request_json("GET", "/board")
-    h = recorder.requests[-1]["headers"]
-    assert "x-hermes-session-token" not in h
-    assert "authorization" not in h
-
-
 async def test_agent_id_override_outbound(recorder: _Recorder) -> None:
-    client = _make_client(recorder, session_token_resolver=lambda: "TOK")
+    client = _make_client(recorder, token_resolver=lambda: "TOK")
     await client.request_json("GET", "/board", agent_id="claude-dev")
     assert recorder.requests[-1]["headers"]["x-hal0-agent"] == "claude-dev"
 
@@ -173,71 +175,108 @@ async def test_transport_failure_maps_to_503(recorder: _Recorder) -> None:
     assert ei.value.code == "board.unreachable"
 
 
-# ── token harvest from dashboard HTML (the default, rotation-proof resolver) ──
-
-_HTML = '<!doctype html><script>window.__HERMES_SESSION_TOKEN__="{tok}";</script>'
+# ── token file resolution ────────────────────────────────────────────────────
 
 
-async def test_harvests_token_from_dashboard_html(
-    recorder: _Recorder, monkeypatch: pytest.MonkeyPatch
+async def test_no_token_raises_before_request(recorder: _Recorder) -> None:
+    def _missing() -> str:
+        raise BoardNoToken("no token file")
+
+    client = _make_client(recorder, token_resolver=_missing)
+    with pytest.raises(BoardNoToken):
+        await client.request_json("GET", "/board")
+    assert recorder.requests == []
+
+
+async def test_blank_token_never_sent(recorder: _Recorder) -> None:
+    client = _make_client(recorder, token_resolver=lambda: "  ")
+    with pytest.raises(BoardNoToken):
+        await client.request_json("GET", "/board")
+    assert recorder.requests == []
+
+
+async def test_default_resolver_reads_token_file(
+    recorder: _Recorder, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.delenv("HERMES_SESSION_TOKEN", raising=False)
-    recorder.respond_text("GET", "/", 200, _HTML.format(tok="HARVESTED"))
-    client = _make_client(recorder)  # default resolver → no env pin → harvest
-    await client.request_json("GET", "/board")
-    # the dashboard HTML was fetched, then /board carried the harvested bearer
-    assert ("GET", "/") in [(r["method"], r["path"]) for r in recorder.requests]
-    board_req = next(r for r in recorder.requests if r["path"] == f"{KANBAN_BASE_PATH}/board")
-    assert board_req["headers"]["authorization"] == "Bearer HARVESTED"
-    assert board_req["headers"]["x-hermes-session-token"] == "HARVESTED"
-
-
-async def test_harvested_token_is_cached(
-    recorder: _Recorder, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv("HERMES_SESSION_TOKEN", raising=False)
-    recorder.respond_text("GET", "/", 200, _HTML.format(tok="ONCE"))
+    token_file = tmp_path / "dashboard-token"
+    token_file.write_text("FROMFILE\n", encoding="utf-8")
+    monkeypatch.setattr("hal0.board.auth.dashboard_session_token_path", lambda _agent: token_file)
     client = _make_client(recorder)
     await client.request_json("GET", "/board")
-    await client.request_json("GET", "/stats")
-    html_fetches = [r for r in recorder.requests if r["path"] == "/"]
-    assert len(html_fetches) == 1  # cached across requests
+    assert recorder.requests[-1]["headers"]["authorization"] == "Bearer FROMFILE"
 
 
-async def test_env_pin_skips_html_harvest(
-    recorder: _Recorder, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("HERMES_SESSION_TOKEN", "PINNED")
-    recorder.respond_text("GET", "/", 200, _HTML.format(tok="HARVESTED"))
-    client = _make_client(recorder)  # default resolver reads the env pin
-    await client.request_json("GET", "/board")
-    assert all(r["path"] != "/" for r in recorder.requests)  # no harvest
-    board_req = next(r for r in recorder.requests if r["path"] == f"{KANBAN_BASE_PATH}/board")
-    assert board_req["headers"]["authorization"] == "Bearer PINNED"
-
-
-async def test_401_reharvests_token_and_retries(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("HERMES_SESSION_TOKEN", raising=False)
-    # Hermes restarted: HTML now serves a rotated token; the cached one 401s once.
-    state = {"board_calls": 0, "token": "ROTATED"}
+async def test_401_rereads_token_once_then_succeeds() -> None:
+    tokens = iter(["old", "new"])
+    seen: list[str] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/":
-            return httpx.Response(200, text=_HTML.format(tok=state["token"]))
-        if request.url.path == f"{KANBAN_BASE_PATH}/board":
-            state["board_calls"] += 1
-            sent = request.headers.get("authorization")
-            # first attempt presents the (now-stale) token → 401; retry succeeds
-            if state["board_calls"] == 1:
-                return httpx.Response(401, json={"detail": "Unauthorized"})
-            assert sent == "Bearer ROTATED"
-            return httpx.Response(200, json={"columns": []})
-        return httpx.Response(200, json={})
+        sent = request.headers["authorization"]
+        seen.append(sent)
+        if sent == "Bearer old":
+            return httpx.Response(401, json={"detail": "Unauthorized"})
+        return httpx.Response(200, json={"columns": []})
 
     http = httpx.AsyncClient(
         transport=httpx.MockTransport(handler), base_url="http://127.0.0.1:9119"
     )
-    client = HermesKanbanClient(http_client=http)
-    result = await client.request_json("GET", "/board")
-    assert result == {"columns": []}
-    assert state["board_calls"] == 2  # initial + one retry
+    client = HermesKanbanClient(http_client=http, token_resolver=lambda: next(tokens))
+    assert await client.request_json("GET", "/board") == {"columns": []}
+    assert seen == ["Bearer old", "Bearer new"]
+
+
+async def test_second_401_surfaces_upstream_error() -> None:
+    calls = 0
+    tokens = iter(["tok-a", "tok-b"])
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(401, json={"detail": "Unauthorized"})
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://127.0.0.1:9119"
+    )
+    client = HermesKanbanClient(http_client=http, token_resolver=lambda: next(tokens))
+    with pytest.raises(BoardUpstreamError) as ei:
+        await client.request_json("GET", "/board")
+    assert ei.value.status == 401
+    assert calls == 2  # initial + exactly one retry, never a loop
+    assert "restart" in ei.value.details["hint"]
+
+
+async def test_401_with_unchanged_token_skips_retry() -> None:
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(401, json={"detail": "Unauthorized"})
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://127.0.0.1:9119"
+    )
+    client = HermesKanbanClient(http_client=http, token_resolver=lambda: "same")
+    with pytest.raises(BoardUpstreamError) as ei:
+        await client.request_json("GET", "/board")
+    assert ei.value.status == 401
+    assert calls == 1
+    assert "hint" in ei.value.details
+
+
+async def test_404_has_no_token_hint(recorder: _Recorder) -> None:
+    recorder.responses[("GET", "/api/plugins/kanban/tasks/x")] = httpx.Response(
+        404, json={"detail": "nope"}
+    )
+    client = _make_client(recorder)
+    with pytest.raises(BoardUpstreamError) as ei:
+        await client.request_json("GET", "/tasks/x")
+    assert "hint" not in ei.value.details
+
+
+async def test_blank_resolver_token_error_carries_reason(recorder: _Recorder) -> None:
+    client = _make_client(recorder, token_resolver=lambda: "  ")
+    with pytest.raises(BoardNoToken) as ei:
+        await client.request_json("GET", "/board")
+    assert ei.value.details["path"] is None
+    assert ei.value.details["reason"] == "blank token from resolver"

@@ -461,31 +461,6 @@ def test_kanban_runs_creation_and_cancel_routes_are_a_known_gap() -> None:
     assert ("post", "/runs/{run_id}/terminate") in kanban_runs.KANBAN_RUNS_ROUTES
 
 
-@pytest.mark.parametrize("module", ["hal0.board", "hal0.board.hermes_executor"])
-def test_board_token_harvest_matches_both_injection_forms(module: str) -> None:
-    # hal0.board._TOKEN_RE and hal0.board.hermes_executor._TOKEN_RE harvest the
-    # session token from the dashboard's ungated HTML. At 0.22.2 it is injected
-    # two ways (web_server_dashboard.py:165 SPA index, :134 headless page); the
-    # real regexes must read the token back from both. Still true at v0.22.4
-    # (web_server_dashboard.py:139, :172).
-    import importlib
-    import json
-    import secrets
-
-    token_re = importlib.import_module(module)._TOKEN_RE
-    token = secrets.token_urlsafe(32)  # how Hermes mints it (web_server.py:235)
-    forms = (
-        kanban_runs.SESSION_TOKEN_INJECTION_TEMPLATE.format(token=token),
-        kanban_runs.SESSION_TOKEN_HEADLESS_TEMPLATE.format(
-            token_json=json.dumps(token), msg="headless"
-        ),
-    )
-    for rendered in forms:
-        match = token_re.search(rendered)
-        assert match is not None, rendered
-        assert match.group(1) == token
-
-
 def test_hal0_never_sets_the_dashboard_public_url() -> None:
     # From 0.22.2 a non-loopback dashboard.public_url (or its env override
     # HERMES_DASHBOARD_PUBLIC_URL) turns the dashboard auth gate on even for a

@@ -36,8 +36,8 @@ from hal0.board.store import BoardStore
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch: pytest.MonkeyPatch):
     clear_executors()
-    # Pin a session token so the gateway never tries to harvest one.
-    monkeypatch.setenv("HERMES_SESSION_TOKEN", "tok-test")
+    # Never read a real install's token file.
+    monkeypatch.setattr("hal0.board.hermes_executor.read_dashboard_token", lambda: "tok-test")
     yield
     clear_executors()
 

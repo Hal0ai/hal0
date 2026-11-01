@@ -49,7 +49,6 @@ a sync :class:`httpx.Client` (tests inject a ``MockTransport`` — no sockets).
 from __future__ import annotations
 
 import os
-import re
 import secrets
 from collections.abc import Callable
 from typing import Any
@@ -58,9 +57,10 @@ import httpx
 
 from hal0.board import (
     DEFAULT_BASE_URL,
+    BoardNoToken,
     _default_agent_id,
-    _default_session_token,
 )
+from hal0.board.auth import read_dashboard_token
 from hal0.board.dispatch import AttemptHandle, register_executor
 from hal0.http_client import loopback_client_kwargs
 
@@ -99,11 +99,6 @@ _STATE_MAP: dict[str, str] = {
     "lost": STATUS_LOST,
 }
 
-# Hermes injects its per-process session bearer into the dashboard HTML it serves
-# at ``/`` (loopback, no prior auth). Mirrors the async client's harvest so the
-# rotating token needs no manual provisioning.
-_TOKEN_RE = re.compile(r'window\.__HERMES_SESSION_TOKEN__\s*=\s*"([^"]+)"')
-
 # The Hermes worker/run ledger surface (the "detailed worker ledger" the design
 # calls Hermes Kanban). Attempts are dispatched as *runs* here — this is NOT the
 # board CRUD surface, so nothing on hal0's board is mirrored into a Hermes card.
@@ -132,12 +127,12 @@ class _HermesGateway:
         self,
         *,
         base_url: str | None = None,
-        token_resolver: Callable[[], str | None] | None = None,
+        token_resolver: Callable[[], str] | None = None,
         agent_id: str | None = None,
         http_client: httpx.Client | None = None,
     ) -> None:
         self._base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
-        self._resolve_token = token_resolver or _default_session_token
+        self._resolve_token = token_resolver or read_dashboard_token
         self._agent_id = agent_id or _default_agent_id()
         self._owns = http_client is None
         self._http = http_client or httpx.Client(
@@ -145,34 +140,12 @@ class _HermesGateway:
             timeout=httpx.Timeout(30.0, connect=3.0),
             **loopback_client_kwargs(self._base_url),
         )
-        self._session_token: str | None = None
 
-    def _headers(self, token: str | None) -> dict[str, str]:
+    def _headers(self, token: str) -> dict[str, str]:
         headers = {"Content-Type": "application/json", "X-hal0-Agent": self._agent_id}
-        if token:
-            headers["X-Hermes-Session-Token"] = token
-            headers["Authorization"] = f"Bearer {token}"
+        headers["X-Hermes-Session-Token"] = token
+        headers["Authorization"] = f"Bearer {token}"
         return headers
-
-    def _current_token(self, *, force_refresh: bool = False) -> str | None:
-        pinned = self._resolve_token()
-        if pinned:
-            return pinned
-        if force_refresh:
-            self._session_token = None
-        if self._session_token is None:
-            self._session_token = self._fetch_html_token()
-        return self._session_token
-
-    def _fetch_html_token(self) -> str | None:
-        try:
-            resp = self._http.get("/")
-        except httpx.HTTPError:
-            return None
-        if resp.status_code >= 400:
-            return None
-        match = _TOKEN_RE.search(resp.text or "")
-        return match.group(1) if match else None
 
     def request(
         self,
@@ -190,16 +163,15 @@ class _HermesGateway:
         from a live run.
         """
 
-        def _send(token: str | None) -> httpx.Response:
+        def _send(token: str) -> httpx.Response:
             return self._http.request(method, path, headers=self._headers(token), json=json_body)
 
         try:
-            resp = _send(self._current_token())
-            # A 401 on a harvested (non-pinned) token means Hermes rotated it on
-            # restart — drop the cache, re-harvest once, and retry.
-            if resp.status_code == 401 and not self._resolve_token():
-                resp = _send(self._current_token(force_refresh=True))
-        except httpx.HTTPError as exc:
+            resp = _send(self._resolve_token())
+            # A 401 means the token rotated: re-read it and retry once.
+            if resp.status_code == 401:
+                resp = _send(self._resolve_token())
+        except (httpx.HTTPError, BoardNoToken) as exc:
             return 0, {"error": str(exc)}
         if not resp.content:
             return resp.status_code, {}
@@ -232,7 +204,7 @@ class HermesBoardExecutor:
         *,
         gateway: _HermesGateway | None = None,
         base_url: str | None = None,
-        token_resolver: Callable[[], str | None] | None = None,
+        token_resolver: Callable[[], str] | None = None,
         agent_id: str | None = None,
         http_client: httpx.Client | None = None,
     ) -> None:

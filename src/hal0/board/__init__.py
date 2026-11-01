@@ -13,12 +13,14 @@ base-url + error mapping live in exactly one place.
 
 Auth / transport (SPEC §2.G / §7):
 
-* Hermes is loopback-only inside CT105 and gates ``/api/*`` behind an
-  **ephemeral per-process bearer** that rotates every restart. The browser
-  can never set it; hal0-api resolves it server-side via a pluggable
-  ``session_token`` resolver (default: env ``HERMES_SESSION_TOKEN``). It is
-  sent both as ``X-Hermes-Session-Token`` and ``Authorization: Bearer`` so
-  either of Hermes's two accepted forms works.
+* Hermes is loopback-only and gates ``/api/*`` behind a session bearer. The
+  browser can never set it; hal0-api resolves it server-side via a pluggable
+  ``token_resolver`` (default: :func:`hal0.board.auth.read_dashboard_token`,
+  which reads the per-install token file the agent shim mints). The token is
+  re-read on every request, and once more on a 401, so a rotation needs no
+  restart. It is sent both as ``X-Hermes-Session-Token`` and
+  ``Authorization: Bearer`` so either of Hermes's two accepted forms works.
+  A missing or blank token raises :class:`BoardNoToken` before any HTTP.
 * ``X-hal0-Agent`` is attached outbound for audit attribution (resolved from
   ``HAL0_AGENT_ID``; per-request override threaded by the router).
 * Browser session credentials (``Authorization`` / ``Cookie`` /
@@ -37,7 +39,6 @@ Error mapping (``board.*`` codes, surfaced via :class:`hal0.errors.Hal0Error`):
 from __future__ import annotations
 
 import os
-import re
 from collections.abc import Callable
 from typing import Any
 
@@ -45,12 +46,6 @@ import httpx
 
 from hal0.errors import Hal0Error
 from hal0.http_client import async_client
-
-# Hermes injects its per-process session bearer into the dashboard HTML it
-# serves at ``/`` as ``window.__HERMES_SESSION_TOKEN__="<token>"`` (the loopback
-# login entry point — fetching ``/`` needs no prior auth). hal0-api harvests it
-# from there so the rotating token never needs manual provisioning.
-_TOKEN_RE = re.compile(r'window\.__HERMES_SESSION_TOKEN__\s*=\s*"([^"]+)"')
 
 # Loopback Hermes dashboard default (SPEC §2.B / §7). Override with
 # HERMES_DASHBOARD_BASE_URL — the single env var the whole board surface
@@ -75,18 +70,18 @@ class BoardUnreachable(Hal0Error):
     status = 503
 
 
-def _default_session_token() -> str | None:
-    """Resolve an explicitly-pinned Hermes session bearer.
+class BoardNoToken(Hal0Error):
+    """The Hermes dashboard session token file is missing, unreadable or blank."""
 
-    Reads ``HERMES_SESSION_TOKEN`` from the environment. Returns ``None`` when
-    unset — in which case the client falls back to harvesting the live token
-    from the dashboard HTML (see ``_fetch_html_token``), so the rotating
-    per-process token works with zero manual provisioning. Setting the env var
-    pins a token explicitly and skips the HTML harvest (useful in tests or a
-    non-standard deploy).
-    """
-    tok = os.environ.get("HERMES_SESSION_TOKEN")
-    return tok or None
+    code = "board.no_token"
+    status = 503
+
+
+class BoardNotInstalled(Hal0Error):
+    """Hermes is not installed on this box, so there is no kanban to proxy."""
+
+    code = "board.not_installed"
+    status = 503
 
 
 def _default_agent_id() -> str:
@@ -99,11 +94,11 @@ class HermesKanbanClient:
 
     Args:
         base_url: Hermes dashboard base (no trailing ``/api/plugins/kanban``).
-        session_token_resolver: zero-arg callable returning the current
-            Hermes session bearer (or ``None``). Defaults to reading
-            ``HERMES_SESSION_TOKEN``. A callable (not a static value) so a
-            rotating token can be re-read per request without reconstructing
-            the client.
+        token_resolver: zero-arg callable returning the current Hermes session
+            bearer; raises :class:`BoardNoToken` when there is none. Defaults
+            to :func:`hal0.board.auth.read_dashboard_token`. A callable (not a
+            static value) so a rotated token is re-read per request without
+            reconstructing the client.
         agent_id: value for the outbound ``X-hal0-Agent`` header.
         http_client: shared httpx client (tests inject a MockTransport-backed
             one). When omitted the client owns its own and closes it.
@@ -113,12 +108,17 @@ class HermesKanbanClient:
         self,
         *,
         base_url: str | None = None,
-        session_token_resolver: Callable[[], str | None] | None = None,
+        token_resolver: Callable[[], str] | None = None,
         agent_id: str | None = None,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self._base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
-        self._resolve_token = session_token_resolver or _default_session_token
+        if token_resolver is None:
+            # Lazy: hal0.board.auth imports BoardNoToken from this module.
+            from hal0.board.auth import read_dashboard_token
+
+            token_resolver = read_dashboard_token
+        self._resolve_token = token_resolver
         self._agent_id = agent_id or _default_agent_id()
         self._owns = http_client is None
         # async_client keeps the loopback dashboard (and its session bearer)
@@ -127,9 +127,6 @@ class HermesKanbanClient:
             base_url=self._base_url,
             timeout=httpx.Timeout(120.0, connect=3.0),
         )
-        # Cache for the token harvested from the dashboard HTML. Invalidated +
-        # re-harvested on a 401 (covers a Hermes restart rotating the token).
-        self._session_token: str | None = None
 
     @classmethod
     def from_env(cls) -> HermesKanbanClient:
@@ -138,58 +135,38 @@ class HermesKanbanClient:
 
     # ── headers ──────────────────────────────────────────────────────────
 
-    def _headers(self, *, token: str | None, agent_id: str | None = None) -> dict[str, str]:
+    def _headers(self, *, token: str, agent_id: str | None = None) -> dict[str, str]:
         """Build the outbound header set.
 
         Injects the Hermes session bearer in BOTH accepted forms
         (``X-Hermes-Session-Token`` + ``Authorization: Bearer``) plus
         ``X-hal0-Agent`` for audit attribution. ``agent_id`` lets the router
         thread a per-request agent override (e.g. an MCP caller's identity).
-        ``token`` is resolved by the caller (env pin or HTML harvest).
+        ``token`` is resolved by the caller.
         """
         headers: dict[str, str] = {
             "Content-Type": "application/json",
             "X-hal0-Agent": agent_id or self._agent_id,
         }
-        if token:
-            headers["X-Hermes-Session-Token"] = token
-            headers["Authorization"] = f"Bearer {token}"
+        headers["X-Hermes-Session-Token"] = token
+        headers["Authorization"] = f"Bearer {token}"
         return headers
 
     # ── token resolution ─────────────────────────────────────────────────
 
-    async def _current_token(self, *, force_refresh: bool = False) -> str | None:
-        """Return the session bearer to use for the next request.
+    def _current_token(self) -> str:
+        """Return the session bearer for the next request, re-read each call.
 
-        Precedence: an explicit env/resolver pin wins (and skips the HTML
-        harvest); otherwise harvest ``window.__HERMES_SESSION_TOKEN__`` from the
-        dashboard HTML at ``/`` and cache it. ``force_refresh`` drops the cache
-        first (used after a 401 when the per-process token has rotated).
+        Raises :class:`BoardNoToken` when the resolver does (missing file) or
+        returns an empty/whitespace token — an empty bearer is never sent.
         """
-        pinned = self._resolve_token()
-        if pinned:
-            return pinned
-        if force_refresh:
-            self._session_token = None
-        if self._session_token is None:
-            self._session_token = await self._fetch_html_token()
-        return self._session_token
-
-    async def _fetch_html_token(self) -> str | None:
-        """Harvest the per-process token from the dashboard HTML entry page.
-
-        Loopback ``GET /`` serves the dashboard SPA with the token inlined and
-        requires no prior auth. Returns ``None`` on any failure — the caller
-        then forwards without a token and Hermes's 401 is surfaced honestly.
-        """
-        try:
-            resp = await self._http.get("/")
-        except httpx.HTTPError:
-            return None
-        if resp.status_code >= 400:
-            return None
-        match = _TOKEN_RE.search(resp.text or "")
-        return match.group(1) if match else None
+        token = (self._resolve_token() or "").strip()
+        if not token:
+            raise BoardNoToken(
+                "Hermes dashboard token is empty",
+                details={"path": None, "reason": "blank token from resolver"},
+            )
+        return token
 
     # ── generic forward ──────────────────────────────────────────────────
 
@@ -216,7 +193,7 @@ class HermesKanbanClient:
         """
         upstream_path = f"{KANBAN_BASE_PATH}{path}"
 
-        async def _send(token: str | None) -> httpx.Response:
+        async def _send(token: str) -> httpx.Response:
             try:
                 return await self._http.request(
                     method,
@@ -231,12 +208,15 @@ class HermesKanbanClient:
                     details={"error": str(exc), "target": upstream_path},
                 ) from exc
 
-        token = await self._current_token()
-        resp = await _send(token)
-        # A 401 on a harvested (non-pinned) token means Hermes rotated it on
-        # restart — drop the cache, re-harvest once, and retry.
-        if resp.status_code == 401 and not self._resolve_token():
-            resp = await _send(await self._current_token(force_refresh=True))
+        sent_token = self._current_token()
+        resp = await _send(sent_token)
+        # A 401 means Hermes rotated the token since the file was read: re-read
+        # it and retry exactly once, but only if it actually changed (resending
+        # the rejected token is pointless). A second 401 surfaces below.
+        if resp.status_code == 401:
+            fresh = self._current_token()
+            if fresh != sent_token:
+                resp = await _send(fresh)
 
         if resp.status_code >= 400:
             try:
@@ -247,6 +227,11 @@ class HermesKanbanClient:
                 "hermes kanban returned an error",
                 details={"upstream_status": resp.status_code, "upstream": detail},
             )
+            if resp.status_code == 401:
+                err.details["hint"] = (
+                    "the dashboard token file does not match the running Hermes; "
+                    "restart hal0-agent@hermes"
+                )
             if 400 <= resp.status_code < 500:
                 err.status = resp.status_code
             raise err
@@ -266,9 +251,10 @@ class HermesKanbanClient:
 __all__ = [
     "DEFAULT_BASE_URL",
     "KANBAN_BASE_PATH",
+    "BoardNoToken",
+    "BoardNotInstalled",
     "BoardUnreachable",
     "BoardUpstreamError",
     "HermesKanbanClient",
     "_default_agent_id",
-    "_default_session_token",
 ]

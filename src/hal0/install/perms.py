@@ -350,7 +350,7 @@ def ownership_table(
         ),
         PermRow(paths.hal0_toml(), etc_owner, etc_group, 0o600, role="hal0.toml"),
         PermRow(etc / "profiles.toml", etc_owner, etc_group, 0o600, role="profiles.toml"),
-        # api.env carries live tokens (HF/provider keys, HERMES_SESSION_TOKEN)
+        # api.env carries live tokens (HF/provider keys)
         # and, after a rotation, HAL0_ADMIN_KEY/HAL0_CLIENT_KEY. It is owner-only
         # (#1466 — this row said 0644 behind a FIXME(phase4), so the engine whose
         # job is converging the filesystem re-flattened every tightening the

@@ -125,9 +125,7 @@ def _fake_request(
     store.init_schema()
     state = SimpleNamespace(
         board_chat_llm=stub,
-        hermes_kanban=HermesKanbanClient(
-            http_client=kanban_http, session_token_resolver=lambda: "TOK"
-        ),
+        hermes_kanban=HermesKanbanClient(http_client=kanban_http, token_resolver=lambda: "TOK"),
         approval_queue=queue if queue is not None else ApprovalQueue(),
         self_api_base_url="http://testserver",
         brain_persona_root=persona_root or Path("/nonexistent-personas-root"),
