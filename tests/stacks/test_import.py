@@ -275,16 +275,18 @@ class TestImportStack:
         assert load_profiles_config().profile["llama-ngram"].speculation == "ngram"
 
 
-def test_a_v140_stack_envelope_with_embedded_mtp_profiles_imports_converted(
+def test_a_v140_stack_envelope_with_embedded_mtp_profiles_is_refused(
     reg: ModelRegistry, tmp_hal0_home: str
 ) -> None:
-    """Stack schema 3 from hal0 1.4.0 embedded profiles still carrying ``mtp``."""
+    """Stack schema 3 from hal0 1.4.0 embedded profiles still carrying ``mtp``;
+    1.5 and newer have no such field, so the envelope is refused whole."""
     env = export_envelope(_stack(), exported_at="t", registry=reg)
     env["stack"]["profiles"] = {
         "quiet": {"flags": "-fa on", "mtp": "off"},
-        "loud": {"flags": "-b 64", "mtp": "auto"},
+        "loud": {"flags": "-b 64", "speculation": "auto"},
     }
-    parsed = parse_envelope(env)
-    assert parsed.stack.profiles["quiet"].speculation == "off"
-    assert parsed.stack.profiles["loud"].speculation == "auto"
-    assert env["stack"]["profiles"]["quiet"] == {"flags": "-fa on", "mtp": "off"}
+    with pytest.raises(BadRequest) as exc:
+        parse_envelope(env)
+    assert exc.value.code == "stacks.envelope_schema_unsupported"
+    assert exc.value.details["profiles"] == ["quiet"]
+    assert "re-export the stack from hal0 1.5 or newer" in str(exc.value)

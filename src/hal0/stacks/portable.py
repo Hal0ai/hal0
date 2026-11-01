@@ -10,7 +10,6 @@ and injects the registry, so there is no clock or hidden global here.
 
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 import tomllib
@@ -198,21 +197,28 @@ def _refuse_old_schema(data: dict[str, Any]) -> None:
         )
 
 
-def _convert_profiles(data: dict[str, Any]) -> dict[str, Any]:
-    """A copy of ``data`` whose embedded profiles have had the ADR-0031 §7
-    rename applied (a hal0 1.4.0 stack export embeds profiles with ``mtp``).
-    The checksum is still verified against the stack body as exported."""
-    from hal0.config.migrations.speculation_rename import convert_profile_body
+def _refuse_pre_speculation(data: dict[str, Any]) -> None:
+    """Raise BadRequest when an embedded profile predates the ``speculation`` tune.
 
+    A hal0 1.4.x stack export embeds profiles that carry ``mtp``; from 1.5.0 no
+    profile has that field, so no export from 1.5 or newer can. The stack schema
+    version is 3 on both sides of the rename, so the embedded body is the only
+    signal. The envelope is refused whole: re-export it from hal0 1.5 or newer.
+    """
     stack = data.get("stack")
     profiles = stack.get("profiles") if isinstance(stack, dict) else None
     if not isinstance(profiles, dict):
-        return data
-    converted = copy.deepcopy(profiles)
-    for name, body in converted.items():
-        if isinstance(body, dict):
-            convert_profile_body(str(name), body)
-    return {**data, "stack": {**stack, "profiles": converted}}
+        return
+    stale = sorted(
+        str(n) for n, body in profiles.items() if isinstance(body, dict) and "mtp" in body
+    )
+    if stale:
+        raise BadRequest(
+            "stack envelope was exported by a hal0 older than 1.5 (profile(s) "
+            f"{', '.join(stale)} carry 'mtp'); re-export the stack from hal0 1.5 or newer",
+            code="stacks.envelope_schema_unsupported",
+            details={"field": "mtp", "profiles": stale, "supported_min": STACK_ENVELOPE_SCHEMA_MIN},
+        )
 
 
 def parse_envelope(data: Any) -> StackEnvelope:
@@ -224,8 +230,9 @@ def parse_envelope(data: Any) -> StackEnvelope:
             details={"kind": (data.get("kind") if isinstance(data, dict) else None)},
         )
     _refuse_old_schema(data)
+    _refuse_pre_speculation(data)
     try:
-        return StackEnvelope.model_validate(_convert_profiles(data))
+        return StackEnvelope.model_validate(data)
     except Exception as exc:
         raise BadRequest(
             f"invalid stack envelope: {exc}",

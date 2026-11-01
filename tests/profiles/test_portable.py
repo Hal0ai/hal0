@@ -462,23 +462,26 @@ def _v140_envelope(**body: object) -> dict:
     }
 
 
-class TestV140EnvelopeImport:
-    def test_mtp_off_lands_as_speculation_off(self, tmp_hal0_home: str) -> None:
-        cat = _catalog(tmp_hal0_home)
-        import_profile(_v140_envelope(mtp="off"), "old", cat)
-        assert cat.resolve("old").speculation == "off"
+class TestPre15EnvelopeImport:
+    """A hal0 1.4 export carries ``mtp``; 1.5 and newer have no such field, so
+    the envelope is refused whole with a re-export instruction."""
 
-    def test_mtp_auto_lands_as_the_auto_default(self, tmp_hal0_home: str) -> None:
+    @pytest.mark.parametrize("mtp", ["off", "auto"])
+    def test_an_envelope_carrying_mtp_is_refused(self, mtp: str, tmp_hal0_home: str) -> None:
         cat = _catalog(tmp_hal0_home)
-        import_profile(_v140_envelope(mtp="auto"), "old", cat)
-        assert cat.resolve("old").speculation == "auto"
+        with pytest.raises(BadRequest) as exc:
+            import_profile(_v140_envelope(mtp=mtp), "old", cat)
+        assert exc.value.code == "profiles.envelope_schema_unsupported"
+        assert "re-export the profile from hal0 1.5 or newer" in str(exc.value)
+        assert "old" not in {r.name for r in cat.list()}
 
-    def test_a_spec_type_flag_converts_too(self, tmp_hal0_home: str) -> None:
-        env = _v140_envelope(flags="-fa on --spec-type ngram-mod")
-        parsed = parse_envelope(env)
-        assert parsed.profile.speculation == "ngram"
-        assert parsed.profile.flags == "-fa on"
-        assert env["profile"]["flags"] == "-fa on --spec-type ngram-mod"  # input untouched
+    def test_a_current_export_never_carries_mtp(self) -> None:
+        from hal0.profiles.portable import export_envelope
+
+        body = export_envelope("p", ProfileConfig(flags="", speculation="off"), exported_at="t")
+        assert "mtp" not in body["profile"]
+        assert body["profile"]["speculation"] == "off"
+        assert parse_envelope(body).profile.speculation == "off"
 
 
 def test_export_omits_default_reasoning_keys() -> None:

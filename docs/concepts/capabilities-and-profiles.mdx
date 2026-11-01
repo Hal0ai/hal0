@@ -174,7 +174,10 @@ key is stripped and the profile lands with no runtime pinned, reported as
 `runner_stripped` on both the dry run and the commit. Importing never blocks
 on hardware or registry differences. Envelopes use profile schema 2; an
 envelope exported before profile-centric config (schema 1) is refused whole
-rather than imported with fields silently dropped.
+rather than imported with fields silently dropped. So is an envelope exported
+by a hal0 older than 1.5, whose profile still carries `mtp` (the field became
+`speculation`); re-export it from hal0 1.5 or newer. The same goes for a stack
+envelope whose embedded profiles carry `mtp`.
 
 ## Where hardware placement lives: the slot
 
