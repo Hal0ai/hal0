@@ -523,6 +523,25 @@ class TestHalogenHgn:
         assert r.suggested_backends == ["halogen"]
         assert r.raw_hints["source"] == "hgn_magic"
 
+    def test_gguf_named_file_with_hgn_magic_is_halogen(self, tmp_path: Path) -> None:
+        """The content decides, not the name: a ``.gguf``-named file holding
+        ``HGN1`` is a halogen checkpoint, not a failed-header llama guess."""
+        p = tmp_path / "weird.gguf"
+        p.write_bytes(HGN_MAGIC + b"\x00" * 60)
+        r = detect(p)
+        assert r.kind == "halogen"
+        assert r.confidence == "high"
+        assert r.suggested_backends == ["halogen"]
+        assert "gguf_header_read" not in r.raw_hints
+
+    def test_gguf_named_file_with_bad_magic_still_degrades_to_llama(self, tmp_path: Path) -> None:
+        p = tmp_path / "broken.gguf"
+        p.write_bytes(b"NOPE" + b"\x00" * 60)
+        r = detect(p)
+        assert r.kind == "llama"
+        assert r.confidence == "low"
+        assert r.raw_hints["gguf_header_read"] == "failed"
+
     def test_extensionless_non_hgn_file_stays_unknown(self, tmp_path: Path) -> None:
         blob = tmp_path / ("c" * 64)
         blob.write_bytes(b"NOPE" + b"\x00" * 60)

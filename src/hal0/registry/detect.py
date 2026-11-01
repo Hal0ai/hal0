@@ -625,6 +625,12 @@ def detect(path: str | Path, *, filename_hint: str | None = None) -> DetectionRe
     # Try GGUF magic bytes regardless of extension — HF blob cache stores
     # GGUF data under content-hash filenames with no suffix.
     header = read_gguf_header(p)
+    # Not a GGUF: a halogen checkpoint is still recognised by its own magic,
+    # whatever the file is called (an extensionless hub-cache blob, or a
+    # .gguf-named file whose bytes are HGN1). Four bytes, so cheap; a real
+    # GGUF returned a header above and never reaches this read.
+    if header is None and _has_hgn_magic(p):
+        return _detect_halogen(p, name_for_capability=name_for_capability)
     if header is not None or claims_gguf:
         if header is None:
             # Suffix (or the operator-typed hint) claimed .gguf but magic
@@ -788,12 +794,6 @@ def detect(path: str | Path, *, filename_hint: str | None = None) -> DetectionRe
             },
             quant=quant,
         )
-
-    # No .gguf or .hgn name and no GGUF magic: a halogen checkpoint is still
-    # recognised by its own magic (an extensionless hub-cache blob), the same
-    # name-independent read the GGUF header gets above. Four bytes, so cheap.
-    if _has_hgn_magic(p):
-        return _detect_halogen(p, name_for_capability=name_for_capability)
 
     # Non-GGUF file: filename heuristic only.
     return _heuristic_only(p, filename_hint=filename_hint)
