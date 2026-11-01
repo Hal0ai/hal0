@@ -539,22 +539,46 @@ describe('slot drawer on a halogen runtime', () => {
     act(() => llama.root.unmount())
   })
 
-  it("shows the server's reason and disables speculation when tune_unavailable names it", () => {
+  it('keeps Auto and Off enabled when tune_unavailable names the n-gram value', async () => {
+    // The server names the VALUE the engine cannot run, never the whole row:
+    // for a halogen slot that is `ngram` (src/hal0/providers/container.py).
     const reason = 'ngram: this engine has no n-gram drafter (auto or off)'
     const { root } = mount({
       ...HALO_SLOT,
       tune_effective: { ...EFFECTIVE, tune_unavailable: { speculation: reason } },
     })
-    expect(byId('tune-speculation-reason')!.textContent).toBe(reason)
-    expect((byId('tune-speculation-auto') as HTMLButtonElement).disabled).toBe(true)
+    expect(specIds()).toEqual(['auto', 'off'])
+    expect((byId('tune-speculation-auto') as HTMLButtonElement).disabled).toBe(false)
+    expect((byId('tune-speculation-off') as HTMLButtonElement).disabled).toBe(false)
+    expect(byId('tune-speculation-reason')).toBeNull()
+    click('tune-speculation-off')
+    await save()
+    expect((editCalls[0] as any).body.tune).toEqual({ speculation: 'off' })
     act(() => root.unmount())
   })
 
-  it('shows the server reason even before the catalogue says the family', () => {
+  it('drops n-gram before the catalogue says the family when the server names it', () => {
     sysBox.current = { backends: {}, hardware: {} }
     const reason = 'ngram: this engine has no n-gram drafter (auto or off)'
     const { root } = mount({ ...SLOT, tune_effective: { ...EFFECTIVE, tune_unavailable: { speculation: reason } } })
+    expect(specIds()).toEqual(['auto', 'off'])
+    expect((byId('tune-speculation-auto') as HTMLButtonElement).disabled).toBe(false)
+    expect(byId('tune-speculation-reason')).toBeNull()
+    act(() => root.unmount())
+  })
+
+  it("explains a stale n-gram override with the server's text and lets the Profile pill clear it", () => {
+    const reason = 'ngram: this engine has no n-gram drafter (auto or off)'
+    const { root } = mount({
+      ...HALO_SLOT,
+      tune: { speculation: 'ngram' },
+      tune_effective: { ...EFFECTIVE, speculation: 'ngram', tune_unavailable: { speculation: reason } },
+    })
     expect(byId('tune-speculation-reason')!.textContent).toBe(reason)
+    expect((byId('tune-speculation-profile') as HTMLButtonElement).disabled).toBe(false)
+    expect((byId('tune-speculation-auto') as HTMLButtonElement).disabled).toBe(false)
+    click('tune-speculation-profile')
+    expect(byId('tune-speculation-reason')).toBeNull()
     act(() => root.unmount())
   })
 })

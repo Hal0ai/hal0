@@ -59,20 +59,34 @@ function profilePinsThinking(profile) {
   return pinned !== null
 }
 
-/** The options a row offers on this runtime. Halogen has no n-gram drafter. */
-function rowOptions(k, runtimeFamily) {
+/**
+ * The options a row offers on this runtime. Halogen has no n-gram drafter, and
+ * the server says so with `tune_unavailable.speculation`: that key names a tune
+ * VALUE the engine cannot run (hal0.runners.knobs), not a row that cannot take
+ * an override, so only `ngram` goes; Auto and Off stay.
+ */
+function rowOptions(k, runtimeFamily, tuneEffective) {
   const options = ROWS[k].options
-  if (k === 'speculation' && runtimeFamily === 'halogen') return options.filter(([id]) => id !== 'ngram')
+  if (k === 'speculation' && (runtimeFamily === 'halogen' || tuneEffective?.tune_unavailable?.speculation)) {
+    return options.filter(([id]) => id !== 'ngram')
+  }
   return options
+}
+
+/**
+ * The server's text for a speculation override this engine cannot honour, shown
+ * only while one is stored (a stale `ngram`): it explains the unpressed row and
+ * the Profile pill clears it. Never disables the options.
+ */
+function staleOverrideNote(k, tune, tuneEffective) {
+  if (k !== 'speculation' || tune[k] !== 'ngram') return null
+  const text = tuneEffective?.tune_unavailable?.speculation
+  return text ? String(text) : null
 }
 
 /** Reason a row cannot take an override, or null. */
 function disabledReason(key, { profile, model, tuneEffective }) {
   if (key === 'vision' && !model?.mmproj) return 'This model has no vision projector (mmproj).'
-  if (key === 'speculation' && tuneEffective?.tune_unavailable?.speculation) {
-    // The server's own reason text (this engine has no n-gram drafter, ...).
-    return String(tuneEffective.tune_unavailable.speculation)
-  }
   if (key === 'reasoning_effort' && tuneEffective?.reasoning_effort_unavailable) {
     // The server's own reason text (runner build too old, runner unknown, ...).
     return String(tuneEffective.reasoning_effort_unavailable)
@@ -96,6 +110,7 @@ function TuneRow({ k, tune, profile, tuneEffective, runtimeFamily, reason, error
     onChange(next)
   }
   const off = disabled || !!reason
+  const note = reason ? null : staleOverrideNote(k, tune, tuneEffective)
   return (
     <div className={'tune-row' + (has ? ' overridden' : '')} data-testid={`tune-row-${k}`}>
       <div className="tune-lbl">
@@ -117,7 +132,7 @@ function TuneRow({ k, tune, profile, tuneEffective, runtimeFamily, reason, error
           >
             Profile · {profileValueLabel(k, profile, tuneEffective)}
           </button>
-          {rowOptions(k, runtimeFamily)?.map(([id, val, text]) => (
+          {rowOptions(k, runtimeFamily, tuneEffective)?.map(([id, val, text]) => (
             <button
               key={id}
               type="button"
@@ -143,9 +158,9 @@ function TuneRow({ k, tune, profile, tuneEffective, runtimeFamily, reason, error
             />
           )}
         </div>
-        {reason && (
+        {(reason || note) && (
           <div className="hint" data-testid={`tune-${k}-reason`}>
-            {reason}
+            {reason || note}
           </div>
         )}
         {error && !reason && (
