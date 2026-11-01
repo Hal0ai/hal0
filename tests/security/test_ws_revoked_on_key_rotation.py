@@ -51,7 +51,9 @@ class _HoldingUpstream:
         return self
 
     async def __anext__(self):
-        await self._never.wait()  # cancelled by the proxy when the browser side closes
+        await (
+            self._never.wait()
+        )  # never released; the proxy cancels this when the browser side closes
         raise StopAsyncIteration
 
     async def send(self, data: Any) -> None:
