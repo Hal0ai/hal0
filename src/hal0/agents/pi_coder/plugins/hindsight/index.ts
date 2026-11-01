@@ -9,11 +9,12 @@
  * reached through the package's `./dist/*` export map, an internal API —
  * hence the exact pin in this directory's package.json).
  *
- * That extension (verified against 0.8.1):
+ * That extension (verified against 0.8.3):
  *   - seeds (`RuntimeCore.seedIfCold`) when the extension loads / on
  *     "session_start" — no separate wiring to replicate,
  *   - wires "before_agent_start" -> `onPrompt` + injects recalled memory
- *     into the system prompt,
+ *     as a hidden custom message (customType "hindsight", display: false)
+ *     rather than into the system prompt,
  *   - wires "agent_end" -> `onTranscript` (write-back every turn),
  *   - wires "session_shutdown" -> `flush()`, so the last turn's write-back
  *     is not lost at exit,
@@ -26,6 +27,16 @@
  * "prime-agent" label. Bank naming keys off {gitProject}, not the harness,
  * so old and new memories share one bank; the label only shows up in
  * diagnostics, retain tags and the `harnesses.pi` config section.
+ *
+ * AUTO-UPDATE: the package self-updates daily unless `autoUpdate` is off.
+ * hal0 sets `harnesses.pi.autoUpdate: false` in ~/.hindsight/coding-agent.json
+ * (PiDriver._ensure_hindsight_auto_update_off) so the pinned version is the
+ * version that runs.
+ *
+ * KNOWN UPSTREAM BUG (0.8.3): the "before_agent_start" handler calls
+ * `event.prompt.trim()` unguarded, so a run started by a custom message
+ * (`pi.sendMessage(..., { triggerTurn: true })`, Pi >= 1.2.0) throws; fixed
+ * upstream in 0.8.4. See scripts/smoke-pi.sh.
  *
  * Upgrading the pin is a deliberate act: re-verify the dist/ layout and the
  * hook wiring above against the new version before bumping.
