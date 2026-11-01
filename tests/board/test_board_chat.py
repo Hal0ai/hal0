@@ -315,14 +315,16 @@ def test_tool_add_dependency(tmp_path) -> None:
 
 
 def test_tool_remove_dependency(tmp_path) -> None:
-    # The facade's remove_link takes a body dict (DELETE /links with JSON).
+    # remove_link sends DELETE /links with parent_id/child_id as query params
+    # (Hermes reads Query(...)); no JSON body.
     _tool_mutation_case(
         "remove_dependency",
         {"parent_id": "p1", "child_id": "c1"},
         "DELETE",
         "/links",
-        {"parent_id": "p1", "child_id": "c1"},
+        None,
         tmp_path,
+        params={"parent_id": "p1", "child_id": "c1"},
     )
 
 
@@ -738,14 +740,16 @@ def test_llm_error_surfaces(tmp_path) -> None:
     assert events[-1]["type"] == "done"
 
 
-def test_chat_board_not_installed_is_a_tool_error_not_a_crash(tmp_path) -> None:
+def test_chat_board_not_installed_is_a_tool_error_not_a_crash(tmp_path, monkeypatch) -> None:
     """Hermes absent (``board.not_installed``): the board tool answers with an
     error result the model can read, and the turn still terminates cleanly."""
     rec = _Recorder()
     stub = _StubLLM([_tool_call_response("get_board", {}, "c_gb"), _final_response("all clear")])
     app, client = _make_app(rec, stub, tmp_path)
     del app.state.board_client
-    app.state.board_installed = False
+    # resolve_board_client probes while board_installed is unset (None).
+    app.state.board_installed = None
+    monkeypatch.setattr("hal0.board.auth.hermes_installed", lambda: False)
 
     resp = client.post("/api/brain/chat", json={"messages": [{"role": "user", "content": "go"}]})
     events = _sse_events(resp.text)

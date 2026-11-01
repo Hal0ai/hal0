@@ -119,7 +119,7 @@ async def test_add_dependency_posts_link(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_remove_dependency_deletes_link_with_body(tmp_path: Path) -> None:
+async def test_remove_dependency_deletes_link_with_query_ids(tmp_path: Path) -> None:
     hermes = _Hermes()
     req = _request(tmp_path, hermes)
 
@@ -129,7 +129,8 @@ async def test_remove_dependency_deletes_link_with_body(tmp_path: Path) -> None:
 
     (sent,) = hermes.requests
     assert (sent["method"], sent["path"]) == ("DELETE", f"{P}/links")
-    assert sent["body"] == {"parent_id": "p", "child_id": "c"}
+    assert sent["params"] == {"parent_id": "p", "child_id": "c"}
+    assert sent["body"] is None
 
 
 @pytest.mark.asyncio
