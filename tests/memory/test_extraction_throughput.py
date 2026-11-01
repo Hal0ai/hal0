@@ -13,7 +13,7 @@ These tests drive :func:`measure_extraction_throughput` against a fake slot
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, TypedDict
 
 import httpx
 import pytest
@@ -82,13 +82,19 @@ class FakeSlot:
         return httpx.MockTransport(self.handler)
 
 
+class Rates(TypedDict):
+    prompt_tps: float
+    decode_tps: float
+
+
 # The #1834 box: ~12 prompt tok/s on CPU, a few decode tok/s.
-SLOW = {"prompt_tps": 12.0, "decode_tps": 4.0}
+SLOW: Rates = {"prompt_tps": 12.0, "decode_tps": 4.0}
 # A GPU slot: prefill in the hundreds, decode in the tens.
-FAST = {"prompt_tps": 800.0, "decode_tps": 45.0}
+FAST: Rates = {"prompt_tps": 800.0, "decode_tps": 45.0}
 
 
 async def _measure(slot: FakeSlot, **kw: Any) -> ExtractionThroughput:
+    kw.setdefault("model", None)
     kw.setdefault("timeout_s", 300)
     kw.setdefault("max_tokens", 4096)
     return await measure_extraction_throughput("utility", 8081, transport=slot.transport, **kw)
@@ -158,7 +164,7 @@ async def test_zero_metrics_fall_back_to_one_bounded_probe() -> None:
 
 
 async def test_probe_timeout_reports_the_upper_bound_rate() -> None:
-    est = await _measure(FakeSlot(**SLOW, timeout=True))
+    est = await _measure(FakeSlot(**SLOW, timeout=True, metrics="llamacpp:requests_processing 0\n"))
 
     assert est.probe_timed_out is True
     assert est.prompt_tps == pytest.approx(PROBE_PROMPT_TOKENS / PROBE_TIMEOUT_S)
@@ -168,7 +174,9 @@ async def test_probe_timeout_reports_the_upper_bound_rate() -> None:
 
 
 async def test_probe_timeout_is_too_slow_when_prefill_alone_overruns() -> None:
-    est = await _measure(FakeSlot(**SLOW, timeout=True), timeout_s=120)
+    est = await _measure(
+        FakeSlot(**SLOW, timeout=True, metrics="llamacpp:requests_processing 0\n"), timeout_s=120
+    )
 
     assert est.verdict == "too_slow"
     assert "llm_timeout_s = 120 s" in est.message()
@@ -187,7 +195,12 @@ async def test_unreachable_slot_is_unknown() -> None:
         raise httpx.ConnectError("refused", request=request)
 
     est = await measure_extraction_throughput(
-        "utility", 8081, timeout_s=300, max_tokens=4096, transport=httpx.MockTransport(_refuse)
+        "utility",
+        8081,
+        model=None,
+        timeout_s=300,
+        max_tokens=4096,
+        transport=httpx.MockTransport(_refuse),
     )
 
     assert est.verdict == "unknown"
@@ -197,7 +210,7 @@ async def test_unreachable_slot_is_unknown() -> None:
 async def test_portless_slot_never_issues_a_request() -> None:
     slot = FakeSlot(**FAST)
 
-    est = await measure_extraction_throughput("utility", 0, transport=slot.transport)
+    est = await measure_extraction_throughput("utility", 0, model=None, transport=slot.transport)
 
     assert est.verdict == "unknown"
     assert slot.requests == []
@@ -252,6 +265,77 @@ async def test_probe_uses_the_chat_completions_route() -> None:
     body = slot.probe_bodies[0]
     assert body["messages"][0]["role"] == "user"
     assert body["max_tokens"] == PROBE_DECODE_TOKENS
+    assert "model" not in body
+
+
+@pytest.mark.parametrize("model", ["test-chat:small", "test-gguf"])
+async def test_probe_sends_the_known_slot_model(model: str) -> None:
+    slot = FakeSlot(**FAST)
+
+    est = await _measure(slot, model=model)
+
+    assert est.verdict == "ok"
+    assert slot.probe_bodies[0]["model"] == model
+
+
+@pytest.mark.parametrize(
+    "metrics",
+    [
+        None,
+        "",
+        "llamacpp:prompt_tokens_seconds 0\n",
+        "llamacpp:requests_processing invalid\n",
+        "llamacpp:requests_processing NaN\n",
+        "llamacpp:requests_processing +Inf\n",
+    ],
+)
+async def test_timeout_without_busy_signal_stays_unknown_after_reprojection(
+    metrics: str | None,
+) -> None:
+    est = await _measure(FakeSlot(**SLOW, timeout=True, metrics=metrics), timeout_s=60)
+
+    assert est.probe_timed_out is True
+    assert est.prompt_tps is None
+    assert est.projected_s is None
+    assert est.verdict == "unknown"
+    assert "no usable /metrics busy signal" in est.message()
+    assert "queued behind another request" in est.message()
+    assert est.reproject(timeout_s=10, max_tokens=4096).verdict == "unknown"
+
+
+async def test_metrics_transport_failure_does_not_turn_probe_timeout_into_too_slow() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/metrics":
+            raise httpx.ConnectError("metrics unavailable", request=request)
+        raise httpx.ReadTimeout("probe timed out", request=request)
+
+    est = await measure_extraction_throughput(
+        "utility",
+        8081,
+        model="test-chat:small",
+        timeout_s=60,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert est.verdict == "unknown"
+    assert "no usable /metrics busy signal" in est.detail
+
+
+async def test_missing_model_rejection_has_no_model_loading_hint() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/metrics":
+            return httpx.Response(404)
+        assert "model" not in json.loads(request.content)
+        return httpx.Response(400, json={"error": "model is required"})
+
+    est = await measure_extraction_throughput(
+        "utility", 8081, model=None, transport=httpx.MockTransport(handler)
+    )
+
+    assert est.verdict == "unknown"
+    assert "HTTP 400" in est.message()
+    assert "rejected the request" in est.message()
+    assert "is a model loaded on the slot?" not in est.message()
 
 
 async def test_busy_slot_is_not_probed_and_not_called_too_slow() -> None:

@@ -405,26 +405,26 @@ async def graph_status(request: Request) -> dict[str, Any]:
 # ── extraction throughput preflight (#2353) ────────────────────────────────
 
 
-async def _extraction_slot_port(request: Request, slot: str) -> int:
-    """The loopback port of ``slot`` (or the slot an alias names), 0 when unknown."""
+async def _extraction_slot_target(request: Request, slot: str) -> tuple[int, str | None]:
+    """Port and model of ``slot`` (or its alias target), unknown as ``(0, None)``."""
     slot_manager = getattr(request.app.state, "slot_manager", None)
     if slot_manager is None:
-        return 0
-    from hal0.slots._cfg_helpers import _cfg_port
+        return 0, None
+    from hal0.slots._cfg_helpers import _cfg_port, _model_default
     from hal0.slots.manager import SLOT_ALIASES
 
     try:
         cfgs = await slot_manager.iter_configs()
     except Exception:
-        return 0
+        return 0, None
     for name in (slot, SLOT_ALIASES.get(slot)):
         for cfg in cfgs:
             if name and cfg.get("name") == name:
                 try:
-                    return _cfg_port(cfg)
+                    return _cfg_port(cfg), _model_default(cfg) or None
                 except (TypeError, ValueError):
-                    return 0
-    return 0
+                    return 0, None
+    return 0, None
 
 
 async def _measure_throughput(request: Request, slot: str, graph_cfg: MemoryGraphConfig) -> Any:
@@ -436,9 +436,11 @@ async def _measure_throughput(request: Request, slot: str, graph_cfg: MemoryGrap
     """
     from hal0.memory import extraction_env
 
+    port, model = await _extraction_slot_target(request, slot)
     estimate = await extraction_env.measure_extraction_throughput(
         slot,
-        await _extraction_slot_port(request, slot),
+        port,
+        model=model,
         timeout_s=graph_cfg.llm_timeout_s,
         max_tokens=graph_cfg.extraction_max_tokens,
     )

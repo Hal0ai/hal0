@@ -46,6 +46,7 @@ raising, so the API can surface a partial result instead of 500ing.
 
 from __future__ import annotations
 
+import math
 import os
 import shlex
 import subprocess
@@ -826,9 +827,10 @@ class ExtractionThroughput:
     ``prompt_tps`` / ``decode_tps`` are what the slot measured; ``source``
     says where from (``metrics``, ``probe``, or ``none`` when nothing could be
     read, with the reason in ``detail``). ``probe_timed_out`` marks a probe
-    that hit :data:`PROBE_TIMEOUT_S`: the slot then prefilled fewer than
-    ``PROBE_PROMPT_TOKENS / PROBE_TIMEOUT_S`` tokens a second, and
-    ``prompt_tps`` holds that upper bound.
+    that hit :data:`PROBE_TIMEOUT_S`. Only when metrics reported idle does
+    ``prompt_tps`` hold the upper bound
+    ``PROBE_PROMPT_TOKENS / PROBE_TIMEOUT_S``; without a busy signal a queued
+    request cannot be distinguished from slow prefill, so no rate is inferred.
 
     The projection is ``EXTRACTION_PROMPT_TOKENS / prompt_tps + max_tokens /
     decode_tps`` against ``timeout_s``, the formula on the issue.
@@ -850,8 +852,8 @@ class ExtractionThroughput:
     def projected_s(self) -> float | None:
         """Projected seconds for one extraction, or ``None`` when unmeasured.
 
-        After a timed-out probe only the prefill term is known (and only as a
-        lower bound), so the projection is that lower bound alone.
+        After a timed-out probe on an idle slot only the prefill term is known
+        (and only as a lower bound), so the projection is that lower bound alone.
         """
         if not self.prompt_tps or self.prompt_tps <= 0:
             return None
@@ -951,24 +953,29 @@ def parse_throughput_metrics(text: str) -> tuple[float | None, float | None]:
     return found.get(_PROMPT_TPS_METRIC), found.get(_DECODE_TPS_METRIC)
 
 
-def parse_busy_requests(text: str) -> int:
-    """Requests a llama-server ``/metrics`` body says are running or queued."""
+def parse_busy_requests(text: str) -> int | None:
+    """Running/queued requests, or ``None`` when no usable busy signal exists."""
     busy = 0.0
+    found = False
     for line in text.splitlines():
         parts = line.strip().split()
         if len(parts) < 2 or parts[0] not in _BUSY_METRICS:
             continue
         try:
-            busy += max(float(parts[1]), 0.0)
+            value = float(parts[1])
         except ValueError:
-            continue
-    return int(busy)
+            return None
+        if not math.isfinite(value) or value < 0:
+            return None
+        found = True
+        busy += value
+    return math.ceil(busy) if found else None
 
 
-def _probe_body() -> dict[str, Any]:
+def _probe_body(model: str | None) -> dict[str, Any]:
     # /v1/chat/completions: the route extraction itself uses, and the only one
     # FLM slots serve.
-    return {
+    body = {
         "messages": [{"role": "user", "content": _PROBE_SENTENCE * _PROBE_REPEATS}],
         "max_tokens": PROBE_DECODE_TOKENS,
         "temperature": 0,
@@ -978,6 +985,9 @@ def _probe_body() -> dict[str, Any]:
         "ignore_eos": True,
         "cache_prompt": False,
     }
+    if model:
+        body["model"] = model
+    return body
 
 
 def _rates_from_probe(payload: Any, elapsed_s: float) -> tuple[float | None, float | None]:
@@ -1014,6 +1024,7 @@ async def measure_extraction_throughput(
     slot: str,
     port: int,
     *,
+    model: str | None,
     timeout_s: int = DEFAULT_LLM_TIMEOUT_S,
     max_tokens: int = ExtractionLimits.max_tokens,
     host: str = "127.0.0.1",
@@ -1027,6 +1038,10 @@ async def measure_extraction_throughput(
     ``PROBE_PROMPT_TOKENS`` prompt + ``PROBE_DECODE_TOKENS`` decode tokens,
     capped at ``PROBE_TIMEOUT_S``. Never raises: an unreachable slot comes back
     as an ``unknown`` estimate with the reason in ``detail``.
+
+    ``model`` is the slot's model id, omitted from the request when unknown.
+    A timeout without a usable metrics busy signal is unknown: the probe may
+    have queued behind another request rather than measured slow prefill.
 
     ``transport`` is an ``httpx`` transport injection point for tests.
     """
@@ -1051,6 +1066,7 @@ async def measure_extraction_throughput(
     if transport is not None:
         kwargs["transport"] = transport
     async with async_client(**kwargs) as client:
+        busy: int | None = None
         try:
             resp = await client.get(f"{base}/metrics")
             if resp.status_code == 200:
@@ -1058,7 +1074,7 @@ async def measure_extraction_throughput(
                 if p_tps and d_tps:
                     return _result(prompt_tps=p_tps, decode_tps=d_tps, source="metrics")
                 busy = parse_busy_requests(resp.text)
-                if busy > 0:
+                if busy is not None and busy > 0:
                     # A one-request slot working through an extraction would
                     # queue the probe, and a timeout there would read as a
                     # slow slot. Measure nothing rather than mislead.
@@ -1072,10 +1088,20 @@ async def measure_extraction_throughput(
         try:
             resp = await client.post(
                 f"{base}/v1/chat/completions",
-                json=_probe_body(),
+                json=_probe_body(model),
                 timeout=httpx.Timeout(PROBE_TIMEOUT_S),
             )
         except httpx.TimeoutException:
+            if busy is None:
+                return _result(
+                    source="probe",
+                    probe_timed_out=True,
+                    detail=(
+                        f"probe exceeded {PROBE_TIMEOUT_S:.0f} s; no usable /metrics busy "
+                        "signal was available, so it may have queued behind another request; "
+                        "retry when the slot is idle"
+                    ),
+                )
             return _result(
                 prompt_tps=PROBE_PROMPT_TOKENS / PROBE_TIMEOUT_S,
                 source="probe",
@@ -1087,7 +1113,7 @@ async def measure_extraction_throughput(
         elapsed = clock() - started
         if resp.status_code != 200:
             return _result(
-                detail=f"probe returned HTTP {resp.status_code}; is a model loaded on the slot?"
+                detail=f"probe returned HTTP {resp.status_code}; the slot rejected the request"
             )
         try:
             payload = resp.json()
