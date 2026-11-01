@@ -20,11 +20,12 @@ Splitting them is what silently broke this module: every fixture-scoped test
 here ERRORED on a regex that no longer matched anything, so the whole
 secret-handling contract went unasserted.
 
-These tests parse ``installer/install.sh`` as text (the same approach
+The token-handling tests parse ``installer/install.sh`` as text (the same approach
 ``tests/systemd/test_unit_files.py::TestInstallerGatewayWiring`` uses for the
 hermes-gateway wiring) rather than actually running the installer — running
 it end-to-end needs root, systemd, a venv build, etc., which is exercised
 instead by the black-box harness at ``tests/harness/installer-test.sh``.
+The unit-wiring tests render the shipped template through ``hal0.install.api_unit``.
 """
 
 from __future__ import annotations
@@ -35,6 +36,8 @@ import subprocess
 from pathlib import Path
 
 import pytest
+
+from hal0.install.api_unit import TEMPLATE_RELPATH, ApiUnitParams, render_api_unit
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _INSTALL_SH = _REPO_ROOT / "installer" / "install.sh"
@@ -191,30 +194,41 @@ class TestPersistence:
         assert "HF_TOKEN=${HF_TOKEN_VAL}" in persist_block
 
 
+@pytest.fixture(scope="module")
+def rendered_api_unit() -> str:
+    return render_api_unit(
+        (_REPO_ROOT / TEMPLATE_RELPATH).read_text(encoding="utf-8"),
+        ApiUnitParams(
+            bin="/opt/hal0/bin/hal0",
+            workdir="/opt/hal0/current",
+            api_env="/etc/hal0/api.env",
+            etc_dir="/etc/hal0",
+            hf_secrets_env="/var/lib/hal0/secrets/hal0-api.env",
+            journal_group=True,
+        ),
+    )
+
+
 class TestSystemdWiring:
     """hal0-api.service must load the secrets file as an EnvironmentFile."""
 
-    def test_api_env_still_wired(self, install_sh_text: str) -> None:
-        assert re.search(r"^EnvironmentFile=\$\{API_ENV\}$", install_sh_text, re.MULTILINE)
+    def test_api_env_still_wired(self, rendered_api_unit: str) -> None:
+        assert re.search(r"^EnvironmentFile=/etc/hal0/api\.env$", rendered_api_unit, re.MULTILINE)
 
-    def test_hf_secrets_env_wired_optionally(self, install_sh_text: str) -> None:
+    def test_hf_secrets_env_wired_optionally(self, rendered_api_unit: str) -> None:
         # Leading `-` makes a missing file non-fatal (mirrors
         # hal0-agent@.service's `EnvironmentFile=-/etc/hal0/agents/%i.env`
         # and the hermes-gateway secrets drop-in) — a fresh box with no
         # HF_TOKEN gathered at install time must still start hal0-api.
-        assert re.search(r"^EnvironmentFile=-\$\{HF_SECRETS_ENV\}$", install_sh_text, re.MULTILINE)
-
-    def test_hf_secrets_env_wiring_precedes_execstart(self, install_sh_text: str) -> None:
-        api_unit = re.search(
-            r"API_UNIT=.*?\ncat > \"\$\{API_UNIT\}\" <<EOF\n(.*?)\nEOF",
-            install_sh_text,
-            re.DOTALL,
+        assert re.search(
+            r"^EnvironmentFile=-/var/lib/hal0/secrets/hal0-api\.env$",
+            rendered_api_unit,
+            re.MULTILINE,
         )
-        assert api_unit is not None, "hal0-api.service heredoc not found"
-        body = api_unit.group(1)
-        assert "EnvironmentFile=-${HF_SECRETS_ENV}" in body
-        env_idx = body.index("EnvironmentFile=-${HF_SECRETS_ENV}")
-        exec_idx = body.index("ExecStart=")
+
+    def test_hf_secrets_env_wiring_precedes_execstart(self, rendered_api_unit: str) -> None:
+        env_idx = rendered_api_unit.index("\nEnvironmentFile=-/var/lib/hal0/secrets/hal0-api.env\n")
+        exec_idx = rendered_api_unit.index("\nExecStart=")
         assert env_idx < exec_idx, "EnvironmentFile must be declared before ExecStart"
 
 
