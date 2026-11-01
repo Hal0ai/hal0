@@ -59,6 +59,7 @@ from typing import Any
 
 import structlog
 
+from hal0.log_setup import configure_stderr_logging
 from hal0.system.seam import is_hal0_service_user
 from hal0.updater.updater import (
     UpdateError,
@@ -401,7 +402,9 @@ def _pin_logs_to_stderr() -> None:
     structlog is process-global, and a unit test calling ``main()`` directly
     must not leave every later test logging into a closed capture buffer.
     """
-    structlog.configure(logger_factory=structlog.PrintLoggerFactory(file=sys.stderr))
+    # hal0.log_setup keeps traceback locals out of the journal (#3137); the
+    # root helper handles api.env and the client key, so its frames hold them.
+    configure_stderr_logging()
 
 
 def main(argv: list[str] | None = None) -> int:
