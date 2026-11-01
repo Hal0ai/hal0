@@ -595,3 +595,56 @@ describe('sign-in challenge (401 auth.required)', () => {
     expect(text()).not.toContain(KEY)
   })
 })
+
+describe('the client hal0 manages for Open WebUI', () => {
+  const OWUI = {
+    name: 'openwebui',
+    note: '',
+    scopes: ['agents', 'memory'],
+    created_at: NOW_S - 600,
+    created_by: 'system:openwebui',
+    revoked_at: null,
+    last_seen_at: null,
+  }
+
+  function routeClients(items: unknown[]) {
+    vi.mocked(client.apiGet).mockImplementation(async (path: string) => {
+      if (path === '/api/bridge/me') return { name: 'admin', tier: 'admin' }
+      if (path === '/api/bridge/clients') return { items }
+      if (path.startsWith('/api/bridge/runs')) return { items: [] }
+      throw new Error('unexpected GET ' + path)
+    })
+  }
+
+  it('labels the row as managed by Open WebUI, and only that row', async () => {
+    routeClients([OWUI, CLIENTS[0]])
+    await mount()
+
+    const managed = q('[data-testid="bridge-client-openwebui"] [data-testid="bridge-managed"]')
+    expect(managed!.textContent).toBe('managed by Open WebUI')
+    expect(q('[data-testid="bridge-client-laptop"] [data-testid="bridge-managed"]')).toBeNull()
+  })
+
+  it('warns in the revoke confirm that Open WebUI loses its tools and is not re-minted', async () => {
+    routeClients([OWUI, CLIENTS[0]])
+    vi.mocked(client.apiDelete).mockResolvedValue({ client: { ...OWUI, revoked_at: NOW_S } })
+    await mount()
+    await click(q('[data-testid="bridge-client-openwebui"] .mcprow-main'))
+    await click(byText('[data-testid="bridge-client-openwebui"] button', 'Revoke'))
+
+    expect(text()).toContain('Revoke openwebui?')
+    expect(text()).toContain('Open WebUI loses hal0')
+    expect(text()).toContain('does not re-mint a revoked client')
+    expect(client.apiDelete).not.toHaveBeenCalled()
+  })
+
+  it('keeps the plain revoke copy for every other client', async () => {
+    routeClients([OWUI, CLIENTS[0]])
+    await mount()
+    await click(q('[data-testid="bridge-client-laptop"] .mcprow-main'))
+    await click(byText('[data-testid="bridge-client-laptop"] button', 'Revoke'))
+
+    expect(text()).toContain('Revoke laptop?')
+    expect(text()).not.toContain('Open WebUI loses')
+  })
+})

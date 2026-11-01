@@ -78,6 +78,7 @@ const _WIRED_CHIPS = [
   { key: 'images', label: 'Images' },
   { key: 'web_search', label: 'Web search' },
   { key: 'agents', label: 'Agents' },
+  { key: 'mcp', label: 'MCP' },
 ]
 
 function _wiredHint(key, on, wired) {
@@ -100,6 +101,10 @@ function _wiredHint(key, on, wired) {
       return on
         ? 'Hermes answers as: ' + wired.agents.join(', ')
         : 'No Hermes profile is reachable; see hal0 doctor.'
+    case 'mcp':
+      return on
+        ? "Memory and Hermes tools are available to every model in Open WebUI."
+        : "Enable the bridge to give Open WebUI hal0's tools ([bridge].enabled, then restart hal0-api)."
     default:
       return ''
   }

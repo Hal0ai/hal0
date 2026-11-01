@@ -72,7 +72,7 @@ beforeEach(() => {
   box.pending = false
   box.unavailable = false
   box.services = [
-    svc('openwebui', { name: 'OpenWebUI', url: 'http://hal0.lan:3001', wired: { chat: true, voice: true, documents: false, images: false, web_search: false } }),
+    svc('openwebui', { name: 'OpenWebUI', url: 'http://hal0.lan:3001', wired: { chat: true, voice: true, documents: false, images: false, web_search: false, mcp: true } }),
     svc('comfyui', { name: 'ComfyUI', url: 'http://hal0.lan:8188' }),
     svc('hermes', { name: 'Hermes' }),
     svc('n8n', { name: 'n8n', up: false, managed: false, detail: 'not installed' }),
@@ -121,7 +121,7 @@ describe('Overview v2 services rows', () => {
   it('shows OpenWebUI wired chips for true keys only', () => {
     mount()
     const row = host.querySelector('.ov-svc')!
-    expect([...row.querySelectorAll('.ov-chip')].map((c) => c.textContent)).toEqual(['chat', 'voice'])
+    expect([...row.querySelectorAll('.ov-chip')].map((c) => c.textContent)).toEqual(['chat', 'voice', 'mcp'])
   })
 
   it('shows no chips for a service without wired', () => {
