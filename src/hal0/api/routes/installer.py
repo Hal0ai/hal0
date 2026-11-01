@@ -581,9 +581,7 @@ async def update_slot_model(name: str, request: Request) -> dict[str, Any]:
     # Deep-merge: preserve any sibling keys under [model] (e.g. context_size)
     # while updating only model.default — matches update_config semantics.
     existing_model = cfg.get("model")
-    current_model_id = (
-        existing_model.get("default") if isinstance(existing_model, dict) else None
-    )
+    current_model_id = existing_model.get("default") if isinstance(existing_model, dict) else None
     if isinstance(existing_model, dict):
         cfg["model"] = {**existing_model, "default": model_id}
     else:

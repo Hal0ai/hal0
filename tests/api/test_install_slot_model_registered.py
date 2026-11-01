@@ -38,9 +38,7 @@ def _saved_default(path: Path) -> str:
     return tomllib.loads(path.read_text(encoding="utf-8"))["model"]["default"]
 
 
-def test_install_slot_model_refuses_unregistered_id(
-    tmp_hal0_home: str, client: TestClient
-) -> None:
+def test_install_slot_model_refuses_unregistered_id(tmp_hal0_home: str, client: TestClient) -> None:
     toml_path = _seed_slot(tmp_hal0_home, "chat", "gguf-a")
     r = client.put("/api/install/slots/chat/model", json={"model_id": UNKNOWN})
     assert r.status_code == 400, r.text
@@ -49,9 +47,7 @@ def test_install_slot_model_refuses_unregistered_id(
     assert _saved_default(toml_path) == "gguf-a", "the slot file must not be touched"
 
 
-def test_install_slot_model_accepts_registered_id(
-    tmp_hal0_home: str, client: TestClient
-) -> None:
+def test_install_slot_model_accepts_registered_id(tmp_hal0_home: str, client: TestClient) -> None:
     toml_path = _seed_slot(tmp_hal0_home, "chat", "gguf-a")
     register_model_file(client, tmp_hal0_home, "gguf-b")
     r = client.put("/api/install/slots/chat/model", json={"model_id": "gguf-b"})
@@ -59,9 +55,7 @@ def test_install_slot_model_accepts_registered_id(
     assert _saved_default(toml_path) == "gguf-b"
 
 
-def test_install_slot_model_accepts_unchanged_id(
-    tmp_hal0_home: str, client: TestClient
-) -> None:
+def test_install_slot_model_accepts_unchanged_id(tmp_hal0_home: str, client: TestClient) -> None:
     """Re-sending the id the slot already carries is not a new bind (#2668):
     a slot file written before the guard still saves its other fields."""
     toml_path = _seed_slot(tmp_hal0_home, "chat", UNKNOWN)
