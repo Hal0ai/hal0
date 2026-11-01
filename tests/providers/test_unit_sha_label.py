@@ -16,7 +16,7 @@ from hal0.providers.container import (
     unit_sha_of_text,
     unit_text_sha,
 )
-from hal0.slots.drift import _unit_identity_diff, _users_match
+from hal0.slots.drift import _unit_identity_diff, _users_match, load_would_restart
 
 REPO = Path(__file__).resolve().parents[2]
 SYSTEMCTL = REPO / "installer" / "wrappers" / "hal0-systemctl"
@@ -142,3 +142,21 @@ def test_real_render_passes_the_wrapper() -> None:
 def test_podman_ro_wires_container_identity() -> None:
     src = PODMAN_RO.read_text()
     assert "container-identity)" in src and "io.hal0.unit-sha" in src
+
+
+@pytest.mark.parametrize(
+    ("drift", "restarts"),
+    [
+        (None, False),
+        ({"drifted": False, "diffs": []}, False),
+        ({"drifted": True, "diffs": []}, True),
+        ({"drifted": True, "diffs": [{"key": "unit"}]}, False),
+        ({"drifted": True, "diffs": [{"key": "--port"}]}, True),
+        ({"drifted": True, "diffs": [{"key": "unit"}, {"key": "image"}]}, True),
+        ({"drifted": True, "diffs": [{"key": "--port"}], "render_error": "x"}, False),
+    ],
+)
+def test_only_non_unit_drift_makes_a_load_restart(
+    drift: dict[str, Any] | None, restarts: bool
+) -> None:
+    assert load_would_restart(drift) is restarts

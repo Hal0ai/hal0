@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Mapping
 from typing import Any, Protocol
 
 from hal0.slots._cfg_helpers import _model_default
@@ -282,6 +283,19 @@ def _argv_diffs(
     ]
 
 
+def load_would_restart(drift: Mapping[str, Any] | None) -> bool:
+    """Would ``SlotManager.load`` bounce a live slot with this ``config_drift``?
+
+    Not when it cannot re-render (``render_error``, #2660), and not for a
+    ``unit`` diff alone (#3130): that can be a change the operator has not asked
+    to apply yet, which the update banner and ``hal0 update --restart-slots`` own.
+    """
+    if not drift or not drift.get("drifted") or drift.get("render_error"):
+        return False
+    diffs = drift.get("diffs") or []
+    return not diffs or any(d.get("key") != "unit" for d in diffs)
+
+
 def _users_match(running: str, planned: str) -> bool:
     """``--user`` equality tolerant of a bare uid (``996``) vs ``996:989``."""
     if running == planned:
@@ -351,6 +365,7 @@ def _render_error_reason(provider: Any, cfg: dict[str, Any], model_info: dict[st
 
 __all__ = [
     "_CONFIG_DRIFT_KEYS",
+    "load_would_restart",
     "DriftHost",
     "compute_config_drift",
 ]

@@ -65,6 +65,7 @@ from hal0.slots.config_write import (
 )
 from hal0.slots.drift import _CONFIG_DRIFT_KEYS, _argv_values
 from hal0.slots.drift import compute_config_drift as _compute_config_drift
+from hal0.slots.drift import load_would_restart as _load_would_restart
 from hal0.slots.layout import is_id_stem, resolve_slot_stem, shadowed_slot_files
 from hal0.slots.npu.trio import is_npu_trio_shadow
 from hal0.slots.npu.trio import reconcile_trio_slots as _npu_reconcile_trio_slots
@@ -2092,7 +2093,8 @@ class SlotManager:
         * a comparator that raises is likewise treated as "no drift". A
           convergence check that cannot run is not grounds for a restart.
         * a slot that cannot re-render (``render_error``, #2660) is never
-          converged: the re-spawn would fail to render and take it down.
+          converged: the re-spawn would fail to render and take it down;
+        * unit-only drift (#3130) is reported but does not converge here.
         """
         if is_npu_trio_shadow(cfg):
             return False
@@ -2104,9 +2106,7 @@ class SlotManager:
                 extra={"slot": slot_name, "error": str(exc)},
             )
             return False
-        if drift and drift.get("render_error"):
-            return False
-        return bool(drift and drift.get("drifted"))
+        return _load_would_restart(drift)
 
     async def unload(self, slot_name: str) -> Slot:
         """Gracefully unload a slot.  Transitions: → unloading → offline."""

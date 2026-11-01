@@ -6446,8 +6446,7 @@ def _slot_drift_blocks(name: str, answer: SlotDetailAnswer) -> str | None:
     """Why a request must not reach loaded slot ``name``, or ``None`` if it may.
 
     ``SlotManager.load`` restarts a loaded slot whose running config lags its
-    TOML (``_should_converge``: ``config_drift.drifted`` without a
-    ``render_error``), which after ``hal0 update`` re-renders units without
+    TOML (``_should_converge``, :func:`hal0.slots.drift.load_would_restart`), which after ``hal0 update`` re-renders units without
     bouncing them is a full model reload. This mirrors that rule on the slot's
     detail (:func:`_fetch_slot_detail`); a detail read that cannot answer
     blocks too.
@@ -6459,8 +6458,10 @@ def _slot_drift_blocks(name: str, answer: SlotDetailAnswer) -> str | None:
         return f"hal0-api answered slot {name}'s config with HTTP {status}; {_RESTART_SKIP}"
     if body is None:
         return f"hal0-api's config for slot {name} was unreadable; {_RESTART_SKIP}"
+    from hal0.slots.drift import load_would_restart
+
     drift = body.get("config_drift")
-    if isinstance(drift, dict) and drift.get("drifted") and not drift.get("render_error"):
+    if isinstance(drift, dict) and load_would_restart(drift):
         return f"slot {name} has a pending config change; a load would restart it"
     return None
 
