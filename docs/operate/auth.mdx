@@ -168,8 +168,8 @@ routes — `/v1` inference and the read-only status/list routes — stay open, a
 anything arriving over loopback (the CLI, on-box services, the operator at the
 console) is unaffected.
 
-Deciding an approval is stricter than the rest of this posture; see
-[Who can decide an approval](#who-can-decide-an-approval).
+Deciding an approval is stricter: see
+[who can decide](/docs/concepts/agents#who-can-decide-an-approval).
 
 A box with **no** admin key is not covered: the requirement would be
 unsatisfiable, the same first-run carve-out the **bootstrap** class makes, so
@@ -208,31 +208,6 @@ posture explicit, run `hal0 auth require on`; to take the box off the LAN
 instead, set `HAL0_BIND_HOST=127.0.0.1` in `/etc/hal0/api.env` and restart
 `hal0-api` (the value sits in the installer-managed `hal0-network` block, which
 a later `install.sh` run rewrites).
-
-## Who can decide an approval
-
-Approving or denying a gated agent call (`POST /api/agent/approvals/{id}/approve`
-and `/deny`) asks for more than the admin tier, because the bundled agent can hold
-a copy of the admin key. This applies at every posture, `require_auth` off included:
-
-| Caller | Box with an admin key | Box with no admin key |
-| --- | --- | --- |
-| Dashboard session | decides | decides |
-| Any Bearer key or `?api_key=` | `403 auth.forbidden` | `403 auth.forbidden` |
-| No credential | `401 auth.required` | decides |
-
-So on a box with an admin key the dashboard asks you to sign in the first time you
-decide, even over loopback with `require_auth` off. Everything else stays as open as
-the posture above says.
-
-From the CLI, run `sudo hal0 agent approvals approve <id>` or `deny <id>` on the box.
-It talks to hal0-api over a local socket and proves it is root through the kernel,
-not with a key, so it has no remote form.
-
-This is not a hard boundary while the agent runs as the same user as hal0-api, and a
-box with no admin key has no gate at all. See
-[SECURITY.md](https://github.com/Hal0ai/hal0/blob/main/SECURITY.md) and
-[ADR-0046](/docs/adr/0046-approval-decisions-need-a-session-or-root).
 
 ## Endpoints
 

@@ -244,6 +244,30 @@ Gating is per-action, not all-or-nothing. A persona can auto-approve safe reads
 while still routing anything destructive through a human.
 </Aside>
 
+### Who can decide an approval
+
+Approving or denying a gated call (`POST /api/agent/approvals/{id}/approve` and
+`/deny`) asks for more than the admin tier, because the bundled agent can hold a
+copy of the admin key. This applies at every posture, `require_auth` off included:
+
+| Caller | Box with an admin key | Box with no admin key |
+| --- | --- | --- |
+| Dashboard session | decides | decides |
+| Any Bearer key or `?api_key=` | `403 auth.forbidden` | `403 auth.forbidden` |
+| No credential | `401 auth.required` | decides |
+
+So on a box with an admin key the dashboard asks you to sign in the first time you
+decide, even over loopback with `require_auth` off.
+
+From the CLI, run `sudo hal0 agent approvals approve <id>` or `deny <id>` on the box.
+It talks to hal0-api over a local socket and proves it is root through the kernel,
+not with a key, so it has no remote form.
+
+This is not a hard boundary while the agent runs as the same user as hal0-api, and a
+box with no admin key has no gate at all. See
+[SECURITY.md](https://github.com/Hal0ai/hal0/blob/main/SECURITY.md) and
+[ADR-0046](/docs/adr/0046-approval-decisions-need-a-session-or-root).
+
 ## Spending budgets
 
 For agents that can make paid calls (such as routing to an external provider —
