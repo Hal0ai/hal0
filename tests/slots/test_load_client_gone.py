@@ -172,3 +172,45 @@ async def test_client_gone_probe_reads_disconnect_and_ignores_timeouts() -> None
     await queue.put({"type": "http.disconnect"})
     assert await probe() is True
     assert await probe() is True  # sticky
+
+
+async def test_a_closed_probe_never_reads_as_gone() -> None:
+    """A task outliving its request must not see that request as an abandoned client."""
+    from hal0.slots.abandon import ClientGoneProbe
+
+    class _Finished:
+        async def receive(self) -> dict[str, str]:
+            return {"type": "http.disconnect"}
+
+    probe = ClientGoneProbe(_Finished())
+    probe.close()
+
+    assert await probe() is False
+
+
+async def test_a_load_survives_its_waiter_being_cancelled() -> None:
+    import asyncio
+
+    from hal0.slots import abandon
+
+    release = asyncio.Event()
+
+    async def _slow_load() -> str:
+        await release.wait()
+        return "done"
+
+    async def _never_gone() -> bool:
+        return False
+
+    task = asyncio.ensure_future(_slow_load())
+    waiter = asyncio.ensure_future(abandon.wait_for_load(task, _never_gone))
+    await asyncio.sleep(0)
+    waiter.cancel()
+    await asyncio.gather(waiter, return_exceptions=True)
+
+    assert not task.cancelled()
+    assert task in abandon._detached
+    release.set()
+    assert await task == "done"
+    await asyncio.sleep(0)
+    assert task not in abandon._detached

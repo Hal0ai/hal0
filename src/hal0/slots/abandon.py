@@ -66,14 +66,24 @@ class ClientGoneProbe:
     body) is not an answer. Once true the answer sticks. A lock keeps the
     handler's polling and the load task's check from reading ``receive``
     at once.
+
+    :meth:`close` ends it when the request is done: a background task spawned
+    during the request inherits this probe through its context, and a finished
+    request reads as disconnected, which would make that task's own load a no-op.
     """
 
     def __init__(self, request: _HasReceive) -> None:
         self._request = request
         self._gone = False
+        self._closed = False
         self._lock = asyncio.Lock()
 
+    def close(self) -> None:
+        self._closed = True
+
     async def __call__(self) -> bool:
+        if self._closed:
+            return False
         if self._gone:
             return True
         async with self._lock:
@@ -112,8 +122,11 @@ async def wait_for_load[T](task: asyncio.Task[T], probe: AbandonProbe) -> tuple[
 
     Returns ``(True, result)`` when the task finished, re-raising what it raised;
     ``(False, None)`` when the client left first. The task is then left running to
-    completion, referenced here until it ends.
+    completion, referenced here until it ends, including when the waiter itself
+    is cancelled.
     """
+    _detached.add(task)
+    task.add_done_callback(_consume)
     while True:
         done, _ = await asyncio.wait({task}, timeout=POLL_INTERVAL_S)
         if done:
@@ -123,6 +136,4 @@ async def wait_for_load[T](task: asyncio.Task[T], probe: AbandonProbe) -> tuple[
         except Exception:
             gone = False
         if gone:
-            _detached.add(task)
-            task.add_done_callback(_consume)
             return False, None

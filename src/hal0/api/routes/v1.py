@@ -1056,6 +1056,7 @@ async def _dispatch_and_forward(
     try:
         return await _dispatch_and_forward_probed(request, dispatcher, body, probe)
     finally:
+        probe.close()
         abandon_probe.reset(probe_token)
 
 
