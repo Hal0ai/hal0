@@ -1316,6 +1316,20 @@ def runner_family_mismatch(slot_cfg: Mapping[str, Any]) -> RunnerFamilyMismatch 
     )
 
 
+def _refuse_foreign_runner(slot_cfg: Mapping[str, Any], spec_provider: Any | None) -> None:
+    """Raise :func:`runner_family_mismatch`'s refusal when the llama path would launch it.
+
+    The llama path takes its image from ``binary``, so a non-llama runner there would
+    launch with llama-server argv and exit. The write seam refuses this state, which
+    leaves a hand edit. Only this path: a dispatched provider launches its own image,
+    so a stale ``binary`` beside one is inert and that slot keeps loading.
+    """
+    if spec_provider is None:
+        mismatch = runner_family_mismatch(slot_cfg)
+        if mismatch is not None:
+            raise mismatch
+
+
 def readiness_probe_budget_s(slot_cfg: Mapping[str, Any]) -> float | None:
     """Seconds the per-request readiness gate may wait on this slot's health probe.
 
@@ -2459,10 +2473,15 @@ class ContainerProvider(Provider):
         Cheap and local: a registry fact, the host's KFD topology and the file
         system, no network. :meth:`hal0.slots.manager.SlotManager.load` calls it
         before pre-load eviction, because a load that is going to be refused must
-        not cost the box its idle slots first. :meth:`load_sync` calls it again, so
-        it stays authoritative for ``spawn()`` and direct callers. A no-op for a
-        runtime with no ``preflight`` hook whose model agrees with it.
+        not cost the box its idle slots first, and ``swap`` calls it before it tears
+        anything down. :meth:`load_sync` calls it again, so it stays authoritative for
+        ``spawn()`` and direct callers. A no-op for a runtime with no ``preflight``
+        hook whose model and ``binary`` agree with it. The KFD guard
+        (:func:`require_kfd_for_gpu_slot`) is deliberately not here: it costs a sudo
+        and podman round trip, so it stays in :meth:`load_sync`, after eviction.
 
+        * The slot's ``binary`` must belong to the runtime it launches
+          (:func:`_refuse_foreign_runner`).
         * The model and the runtime must agree: a halogen checkpoint only loads on
           the halogen runtime, and that runtime loads nothing else. The write seam
           refuses the same pairing, but a slot file edited by hand, a profile
@@ -2476,6 +2495,7 @@ class ContainerProvider(Provider):
           (a ``SlotConfigError``).
         """
         spec_provider = _spec_provider_for(slot_cfg)
+        _refuse_foreign_runner(slot_cfg, spec_provider)
         slot_label = str(slot_cfg.get("name", "") or slot_instance_token(slot_cfg))
         mismatch = model_runtime_mismatch(model_info, spec_provider, slot=slot_label)
         if mismatch:
@@ -2513,15 +2533,9 @@ class ContainerProvider(Provider):
         # owns the dispatch). ``None`` means the default llama-server GPU provider.
         spec_provider = _spec_provider_for(slot_cfg)
 
-        # The llama path takes its image from ``binary``, so a non-llama runner
-        # here would launch with llama-server argv and exit. The write seam
-        # refuses this state, which leaves a hand edit. Only this path: a
-        # dispatched provider launches its own image, so a stale ``binary``
-        # beside one is inert and that slot keeps loading.
-        if spec_provider is None:
-            mismatch = runner_family_mismatch(slot_cfg)
-            if mismatch is not None:
-                raise mismatch
+        # check_load below refuses this too; asked here as well so a slot that is
+        # refused anyway does not pay for the KFD guard's round trip first.
+        _refuse_foreign_runner(slot_cfg, spec_provider)
 
         # Loud-fail for AMD-GPU slots with no /dev/kfd whose runtime needs it:
         # the Standard runner would silently fall back to its Vulkan backend,

@@ -343,15 +343,7 @@ def _add_halogen(home: str, *, id: str, size_bytes: int = 62 * 2**30, default: b
 
 
 def _halogen_cfg(default: str) -> dict:
-    _seed_halogen_profile()
     return {**_llm_cfg(default, device="gpu-rocm"), "profile": "halogen"}
-
-
-def _seed_halogen_profile() -> None:
-    """Persist the shipped ``halogen`` seed, which the read-only family lookup needs."""
-    from hal0.profiles import ProfileCatalog
-
-    ProfileCatalog().resolve("halogen")
 
 
 def test_a_llama_slot_skips_a_larger_halogen_checkpoint(tmp_hal0_home):

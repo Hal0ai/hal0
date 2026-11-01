@@ -1976,7 +1976,7 @@ class SlotManager:
                 # hits the model registry twice for the same model_id.
                 model_info = await self._resolve_model_info(resolved_model)
                 # A load the runtime is going to refuse (wrong host, a missing
-                # file, a model on the wrong runtime) stops here: before the
+                # file, a model or runner of the wrong runtime) stops here: before the
                 # memory warnings, which would be about a load that never starts,
                 # and before pre-load eviction, which would cost the box its idle
                 # slots for nothing. Runs on the executor because it reads sysfs
@@ -2304,6 +2304,9 @@ class SlotManager:
             raise SlotConfigError("swap requires a non-empty model id")
         slot_name = self._resolve_alias(slot_name)
         self._ensure_known(slot_name)
+        # A swap the runtime is going to refuse stops here, while the slot still
+        # runs its old model and the old model is still the stored default.
+        await self._check_swap(slot_name, new_model_id)
         # ADR-0029: a swap keeps the slot's profile; the model no longer picks
         # one, and the runner stays the slot's own ``binary``.
         # SWAP ATOMICITY (#1791): make the requested model DURABLE before any
@@ -2864,6 +2867,20 @@ class SlotManager:
         await asyncio.get_running_loop().run_in_executor(
             None, check, _launch_cfg(slot_cfg, model_id), model_info
         )
+
+    async def _check_swap(self, slot_name: str, model_id: str) -> None:
+        """Run the container seam's refusals for a swap, with nothing touched yet.
+
+        Judges the model the operator named, not the stand-in :meth:`load` would
+        fall back to: a swap to a checkpoint that is gone is the operator's to hear
+        about, not something to heal by restarting the slot on another model. A
+        model still to be pulled has no file to judge, so ``load`` checks it after
+        the pull. An NPU trio shadow spawns nothing.
+        """
+        cfg = await self._load_slot_config(slot_name)
+        if is_npu_trio_shadow(cfg) or self._needs_pull(model_id):
+            return
+        await self._check_load(cfg, model_id, await self._resolve_model_info(model_id))
 
     async def _guard_gtt_leak(self, slot_name: str, provider: Any | None) -> str | None:
         """Warn when this host holds GPU memory nothing on this box accounts for.
