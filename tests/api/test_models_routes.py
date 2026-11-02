@@ -1502,3 +1502,23 @@ def test_inspect_draft_caches_by_four_coords(
     second = inspect_client.post("/api/models/inspect-draft", json=_DRAFT_BODY)
     assert first.json() == second.json()
     assert len(seen) == 2  # one ranged GET per file, the second call is cached
+
+
+def test_list_models_names_a_failed_pre_015_backup(
+    inspect_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A held migration 015 answers 503 with the fix, not 500 system.internal (#3297)."""
+    from hal0.db.migrate import MigrationBackupError
+    from hal0.registry.sqlite_store import SqliteModelRegistry
+
+    msg = "migration 015 was not applied: backup at /var/lib/hal0/backups could not be written"
+
+    def _boom(self, conn):
+        raise MigrationBackupError(msg)
+
+    monkeypatch.setattr(SqliteModelRegistry, "_ensure_migrated", _boom)
+    resp = inspect_client.get("/api/models")
+    assert resp.status_code == 503
+    err = resp.json()["error"]
+    assert err["code"] == "db.migration_backup_failed"
+    assert "migration 015 was not applied" in err["message"]
