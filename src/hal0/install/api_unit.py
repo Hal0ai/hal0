@@ -215,7 +215,7 @@ def foreign_user(installed: str) -> str | None:
     """
     for raw in installed.splitlines():
         key, sep, value = raw.strip().partition("=")
-        if sep and key == "User" and value.strip() not in ("", "hal0"):
+        if sep and key.strip() == "User" and value.strip() not in ("", "hal0"):
             return value.strip()
     return None
 

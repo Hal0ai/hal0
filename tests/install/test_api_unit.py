@@ -563,3 +563,10 @@ def test_doctor_row_states(monkeypatch: pytest.MonkeyPatch) -> None:
         ).status
         == "warn"
     )
+
+
+def test_foreign_user_tolerates_spaces_around_the_equals() -> None:
+    from hal0.install.api_unit import foreign_user
+
+    assert foreign_user("[Service]\nUser = root\n") == "root"
+    assert foreign_user("[Service]\nUser = hal0\n") is None
