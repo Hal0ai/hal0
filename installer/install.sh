@@ -977,8 +977,35 @@ else
     # yet), so a migrate attempted from THIS block can't even create hal0's
     # rootless storage dir under $HOME and would always hit the warn() path,
     # fresh install or not.
+    #
+    # Nested user namespace (#3236): inside an unprivileged LXC/Incus
+    # container the machine's own uid map is a slice ("0 100000 65536"), not
+    # the full 32-bit identity range. A subuid range allocated here is
+    # measured against ids the container does not own, so newuidmap fails
+    # with EPERM and rootless podman as hal0 can never start. No range that
+    # fits beside the container's own users exists, so skip the allocation
+    # (and the deferred migrate) and say why. Slots and runner-image pulls
+    # run rootful (sudo hal0-podman-rw) and are unaffected.
+    # HAL0_UID_MAP_FILE is a test seam (unit tests cannot fake /proc).
     HAL0_SUBUID_JUST_ALLOCATED=0
-    if ! grep -q '^hal0:' /etc/subuid 2>/dev/null \
+    _uid_map_file="${HAL0_UID_MAP_FILE:-/proc/self/uid_map}"
+    _uid_nested=0
+    if [[ -r "${_uid_map_file}" ]]; then
+        _uid_map_lines=0
+        while read -r _um_in _um_out _um_len; do
+            [[ -n "${_um_len:-}" ]] || continue
+            _uid_map_lines=$(( _uid_map_lines + 1 ))
+            [[ "${_um_in}" == "0" && "${_um_out}" == "0" && "${_um_len}" == "4294967295" ]] \
+                || _uid_nested=1
+        done < "${_uid_map_file}"
+        (( _uid_map_lines == 1 )) || _uid_nested=1
+    fi
+    if (( _uid_nested )); then
+        if ! grep -q '^hal0:' /etc/subuid 2>/dev/null \
+            || ! grep -q '^hal0:' /etc/subgid 2>/dev/null; then
+            info "nested user namespace: skipping rootless uid/gid range for hal0 — rootless podman as hal0 is unavailable; slots and image pulls use the rootful seam"
+        fi
+    elif ! grep -q '^hal0:' /etc/subuid 2>/dev/null \
         || ! grep -q '^hal0:' /etc/subgid 2>/dev/null; then
         SUB_START=100000
         SUB_COUNT=65536

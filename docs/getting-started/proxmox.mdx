@@ -283,15 +283,15 @@ hal0 still fences each slot's process bind to loopback under
 
 ### Unprivileged containers: rootless podman for the `hal0` user
 
-The installer gives the `hal0` service user a 65536-wide subordinate uid
-range starting at 100000. A default unprivileged container owns only the
-ids 0–65535 (`0 100000 65536`), so that range lies outside its map and
-rootless podman as `hal0` cannot build a user namespace
-([#3236](https://github.com/Hal0ai/hal0/issues/3236)). The install prints
-`podman system migrate (as hal0) failed` and you can ignore it until that
-issue lands. Slots (rootful quadlets) and dashboard image pulls (the
-root-owned `hal0-podman-rw` helper) are unaffected; only running `podman`
-as the `hal0` user itself does not work.
+A default unprivileged container owns only the ids 0–65535
+(`0 100000 65536`), so no subordinate uid range fits beside its own users
+and rootless podman as `hal0` cannot build a user namespace
+([#3236](https://github.com/Hal0ai/hal0/issues/3236)). The installer
+detects the nested uid map, skips the `hal0` range and the deferred
+`podman system migrate`, and prints an info line instead of a warning.
+Slots (rootful quadlets) and dashboard image pulls (the root-owned
+`hal0-podman-rw` helper) are unaffected; only running `podman` as the
+`hal0` user itself is unavailable.
 
 ### Surface true host memory pressure (optional)
 
