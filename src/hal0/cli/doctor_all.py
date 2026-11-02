@@ -822,6 +822,68 @@ def check_api_unit_current(
     )
 
 
+def check_migration_015(
+    *,
+    db_path: Path | None = None,
+    backup_problem: Callable[[], str | None] | None = None,
+) -> Check:
+    """Is migration 015 (drops retired model tuning) held by a failed backup? (#3297)
+
+    015 snapshots the database to ``backups/`` before it drops the tuning, and
+    stays unapplied when that write fails, which leaves ``/api/models``
+    answering 503 ``db.migration_backup_failed``. Read-only: opens the
+    database read-only and never migrates. ``fail`` when 015 is pending and the
+    backups directory cannot take the snapshot, ``warn`` when it is pending for
+    another reason. Probes are injectable.
+    """
+    key, title = "migration-015", "Model-tuning migration (015)"
+    db = db_path if db_path is not None else paths.db_path()
+    if not db.exists():
+        return Check(key, title, _PASS, "no database yet (a new install migrates on first start)")
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            rows = conn.execute("SELECT version FROM schema_migrations").fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return Check(key, title, _WARN, f"could not read {db}: {exc}")
+    if 15 in {int(r[0]) for r in rows}:
+        return Check(key, title, _PASS, "migration 015 applied")
+
+    def _probe() -> str | None:
+        backups = paths.var_lib() / "backups"
+        target = backups if backups.exists() else backups.parent
+        if not os.access(target, os.W_OK | os.X_OK):
+            return f"{backups} is not writable by this user"
+        try:
+            free = shutil.disk_usage(target).free
+            need = db.stat().st_size
+        except OSError:
+            return None
+        if free < need:
+            return f"{target} has {free // 2**20} MiB free, the database is {need // 2**20} MiB"
+        return None
+
+    problem = (backup_problem or _probe)()
+    if problem is not None:
+        return Check(
+            key,
+            title,
+            _FAIL,
+            f"migration 015 is pending and its backup cannot be written ({problem}); "
+            "/api/models answers 503 db.migration_backup_failed until it is — free disk "
+            "space there, or run `sudo hal0 doctor perms --fix`, then restart hal0-api",
+        )
+    return Check(
+        key,
+        title,
+        _WARN,
+        "migration 015 is pending (it applies when hal0-api starts) — restart hal0-api and "
+        "check `journalctl -u hal0-api` if /api/models still fails",
+    )
+
+
 @_report_unreadable("img-custom-nodes", "Image custom nodes")
 def check_img_custom_nodes() -> Check:
     """Report ComfyUI startup failures from this unit invocation only (#3132)."""
@@ -3298,6 +3360,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_api_journal_access(),
         check_img_custom_nodes(),
         check_api_unit_current(),
+        check_migration_015(),
         check_voice_stt_weights(),
         check_seams(),
         check_mcp_mounts(),

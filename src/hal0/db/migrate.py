@@ -33,6 +33,7 @@ from pathlib import Path
 import structlog
 
 from hal0.db.connection import tx
+from hal0.errors import Hal0Error
 
 log = structlog.get_logger(__name__)
 
@@ -56,8 +57,16 @@ _RETIRED_TUNING_COLUMNS = (
 _RETIRED_TUNING_EXTRA_KEYS = ("$._enable_thinking", "$._vision")
 
 
-class MigrationBackupError(RuntimeError):
-    """A migration that destroys data was not applied: its backup failed."""
+class MigrationBackupError(Hal0Error):
+    """A migration that destroys data was not applied: its backup failed.
+
+    A typed 503 so a route whose registry migrates lazily answers with the
+    message (it names the backup path and the fix) instead of ``500
+    system.internal`` (#3297).
+    """
+
+    code = "db.migration_backup_failed"
+    status = 503
 
 
 def _ensure_migrations_table(conn: sqlite3.Connection) -> None:

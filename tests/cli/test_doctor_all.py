@@ -1516,11 +1516,17 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         lambda **_kw: Check("api-unit", "API unit current", "pass", "stubbed"),
     )
 
+    monkeypatch.setattr(
+        da,
+        "check_migration_015",
+        lambda **_kw: Check("migration-015", "Model-tuning migration (015)", "pass", "stubbed"),
+    )
+
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
     assert gtt_leak_slots == [[{"port": 8081}]]
     # Verify rows plus the extra evidence rows (gtt-leak, api-unit).
-    assert keys[-41:] == [
+    assert keys[-42:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1539,6 +1545,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "api-journal",
         "img-custom-nodes",
         "api-unit",
+        "migration-015",
         "stt-weights",
         "seams",
         "mcp_mounts",
@@ -3146,3 +3153,41 @@ def test_gtt_leak_skips_when_the_slot_list_is_unavailable(tmp_path: Path) -> Non
 def test_gtt_leak_with_no_arguments_reads_the_live_host() -> None:
     c = da.check_gtt_leak()
     assert c.key == "gtt_leak" and c.status in {"pass", "warn"}
+
+
+# ── migration 015 pending (#3297) ────────────────────────────────────────────
+
+
+def _db_with_versions(path, versions):
+    import sqlite3
+
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT)")
+    conn.executemany("INSERT INTO schema_migrations VALUES (?, 'x')", [(v,) for v in versions])
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_migration_015_applied_passes(tmp_path) -> None:
+    from hal0.cli import doctor_all as da
+
+    db = _db_with_versions(tmp_path / "h.db", [14, 15])
+    assert da.check_migration_015(db_path=db).status == "pass"
+
+
+def test_migration_015_pending_with_failed_backup_fails(tmp_path) -> None:
+    from hal0.cli import doctor_all as da
+
+    db = _db_with_versions(tmp_path / "h.db", [14])
+    check = da.check_migration_015(db_path=db, backup_problem=lambda: "disk full")
+    assert check.status == "fail"
+    assert "db.migration_backup_failed" in check.detail
+    assert "doctor perms --fix" in check.detail
+
+
+def test_migration_015_pending_otherwise_warns(tmp_path) -> None:
+    from hal0.cli import doctor_all as da
+
+    db = _db_with_versions(tmp_path / "h.db", [14])
+    assert da.check_migration_015(db_path=db, backup_problem=lambda: None).status == "warn"
