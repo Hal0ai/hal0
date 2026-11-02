@@ -18,6 +18,9 @@
 -- needs (SQLite 3.35 or newer). `chat_template`, `mtp` and `jinja` are model
 -- file facts and keep their columns.
 --
+-- hal0.db.migrate snapshots the database to backups/hal0-pre-015-<ts>.db first
+-- when any of this still holds a value, and does not run this file if that fails.
+--
 -- Forward-only: there is no down-migration. A release before this one keeps
 -- running on the reduced schema: it reads and writes the `model` table
 -- through a fixed column list that never named the six columns.

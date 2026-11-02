@@ -57,7 +57,7 @@ key layout.
 ├── .first_run_done          # first-run completion sentinel
 ├── registry/
 │   └── ignored-paths.json   # model paths the discovery scan skips (deleted models' kept files)
-├── backups/                 # 0600 tar.gz archives written before a one-shot conversion: runners-<ts>.tar.gz (an older box may also hold profiles-<ts>.tar.gz and the profile-centric*.json records from the 1.4.0 conversion; nothing reads them now and they can be deleted)
+├── backups/                 # 0600 tar.gz archives written before a one-shot conversion: runners-<ts>.tar.gz, and hal0-pre-015-<ts>.db, a 0600 copy of hal0.db taken before schema migration 015 drops retired model tuning (an older box may also hold profiles-<ts>.tar.gz and the profile-centric*.json records from the 1.4.0 conversion; nothing reads them now and they can be deleted)
 ├── models/                  # default model cache (unless overridden — see below)
 ├── slots/<name>/             # per-slot working dir
 ├── agents/

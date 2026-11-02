@@ -664,8 +664,9 @@ def ownership_table(
         ),
         # backups/ — restore points of the post-swap config conversions
         # (``config.migrations.runner_system._backups_dir``: ``runners-*`` and
-        # ``profiles-*`` tarballs) and of root-run tools (registry.toml
-        # retirement, ``slot migrate-id-keying``). Shared by root and the
+        # ``profiles-*`` tarballs), of schema migration 015
+        # (``db.migrate``: ``hal0-pre-015-*.db``) and of root-run tools
+        # (registry.toml retirement, ``slot migrate-id-keying``). Shared by root and the
         # ``User=hal0`` service, so setgid + group-writable. A root-run tool
         # under umask 022 births it ``root:hal0 2755``, which locked hal0-api's
         # post-swap migrations out of their backup write on every retry
