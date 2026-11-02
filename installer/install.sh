@@ -2779,7 +2779,10 @@ if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 && "${IS_UPGRADE}" -eq 0 \
         [[ -n "${_cp_img_reason}" ]] || _cp_img_reason="image models cannot be planned on this box"
     fi
     _cp_pi_reason=""
-    command -v npm >/dev/null 2>&1 || _cp_pi_reason="needs npm (Node.js)"
+    # pi already on the box needs no npm; only a fresh install does.
+    if ! command -v pi >/dev/null 2>&1 && ! command -v npm >/dev/null 2>&1; then
+        _cp_pi_reason="needs npm (Node.js)"
+    fi
 
     # Row defaults follow knobs already set in the environment, so the operator
     # is never shown "on" for something that will not install.
@@ -4551,10 +4554,10 @@ if [[ ${#SMOKE_FAILED[@]} -gt 0 ]]; then
     done
 fi
 
-# Components the operator (or a flag) left out — one line, omitted when none.
+# Components the operator (or a flag) left out; omitted when none.
 # Labels follow the component table; unavailable rows are not "skipped".
-# Upgrades are quiet: the box already has whatever it has. Long lists wrap so
-# ui_box (which does not wrap) keeps its right border.
+# Upgrades are quiet: the box already has whatever it has. Long lists wrap at
+# 76 columns because ui_box does not wrap (its border still breaks below 68).
 if [[ "${IS_UPGRADE}" -eq 0 ]]; then
     _summary_skipped=()
     for _summary_cid in openwebui comfyui hermes pi hindsight brain; do
