@@ -520,3 +520,68 @@ async def test_a_declined_stamp_keeps_the_slot_watched(provider: _RealHealth, ce
         # First ceiling decline leaves READY + a live watcher; the next lap stamps.
         assert await _wait_for(sm, SlotState.ERROR) is SlotState.ERROR
     assert declined["n"] == 1
+
+
+@pytest.mark.parametrize("enters", ["serving", "dispatch ticket"])
+async def test_a_request_entering_during_the_recheck_declines_the_stamp(
+    provider: _RealHealth, enters: str
+) -> None:
+    """The recheck's probe can take 35 s, and a request enters without the slot lock."""
+    sm = SlotManager()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if enters == "serving":
+            sm._serving_count[sm._key("chat")] = 1
+        else:
+            sm.enter_dispatch("chat")
+        return _hangs(request)
+
+    with _http(handler):
+        assert await sm._watchdog._probe_stalled("chat") is False
+
+
+async def test_stalls_during_a_run_do_not_count_toward_the_ceiling(
+    provider: _RealHealth, ceiling: int
+) -> None:
+    """A run that ends leaves a whole ceiling to go, not what it would have used up."""
+    sm = SlotManager()
+    calls = {"n": 0}
+    run_ends_at = ceiling - 1
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == run_ends_at:
+            sm._serving_count.pop(sm._key("chat"))
+        return _hangs(request)
+
+    sm._serving_count[sm._key("chat")] = 1
+    with _http(handler):
+        await _ready(sm)
+        assert await _wait_for(sm, SlotState.ERROR) is SlotState.ERROR
+    assert calls["n"] >= run_ends_at + ceiling
+
+
+async def test_a_dispatch_ticket_defers_the_stamp_without_restarting_the_ceiling(
+    provider: _RealHealth, ceiling: int
+) -> None:
+    """A request the readiness gate will refuse holds a ticket; retries against a hung
+    engine must not keep the slot READY by restarting the count each time."""
+    sm = SlotManager()
+    calls = {"n": 0}
+    release_at = ceiling + 2
+    state_at_release: list[SlotState] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == release_at:
+            state_at_release.append(sm.state("chat"))
+            sm.exit_dispatch("chat")
+        return _hangs(request)
+
+    sm.enter_dispatch("chat")
+    with _http(handler):
+        await _ready(sm)
+        assert await _wait_for(sm, SlotState.ERROR) is SlotState.ERROR
+    assert state_at_release == [SlotState.READY]
+    # The releasing probe reaches the ceiling at once; its recheck is the one more.
+    assert calls["n"] == release_at + 1
