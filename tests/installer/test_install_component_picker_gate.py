@@ -65,6 +65,7 @@ def run_block(tmp_path: Path, block: str):
         tty: bool = False,
         answer: str = "",
         npm: bool = True,
+        pi: bool = False,
         podman: bool = True,
         plan: str = "img\tdesc\t1",
     ) -> Result:
@@ -81,7 +82,9 @@ def run_block(tmp_path: Path, block: str):
             (bindir / "npm").write_text("#!/bin/sh\nexit 0\n")
         if podman:
             (bindir / "podman").write_text("#!/bin/sh\nexit 0\n")
-        for f in ("npm", "podman"):
+        if pi:
+            (bindir / "pi").write_text("#!/bin/sh\nexit 0\n")
+        for f in ("npm", "podman", "pi"):
             if (bindir / f).exists():
                 (bindir / f).chmod(0o755)
         py = venv_bin / "python"
@@ -371,3 +374,66 @@ def test_pi_install_guards_dev_and_no_start(run_pi) -> None:
 def test_pi_off_prints_later_install_hint(run_pi) -> None:
     out = run_pi(env={}).out
     assert "agent install pi" in out and out.count("INFO:") == 1
+
+
+def test_pi_already_installed_counts_as_selected(run_block) -> None:
+    res = run_block(pi=True)
+    assert res.states["pi"] == "selected"
+
+
+def test_pi_absent_and_not_requested_is_skipped(run_block) -> None:
+    assert run_block(pi=False).states["pi"] == "skipped"
+
+
+_PI_START = "    if [[ \"${DEV_MODE}\" -eq 0 && \"${NO_START}\" -eq 0 ]] \\\n       && ! command -v pi"
+_PI_END = "    # Last verify action before the summary"
+
+
+def _run_pi_block(tmp_path: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    text = _INSTALL_SH.read_text(encoding="utf-8")
+    head = text.index(_PI_START)
+    frag = text[head : text.index(_PI_END, head)]
+    script = tmp_path / "pi.sh"
+    script.write_text(
+        "set -euo pipefail\n"
+        'info() { printf "INFO: %s\\n" "$*"; }\n'
+        'warn() { printf "WARN: %s\\n" "$*"; }\n'
+        'HAL0_BIN="hal0"\nDEV_MODE=0\nNO_START=0\n'
+        'hal0() { printf "INSTALL %s\\n" "$*"; }\n'
+        + frag.replace('"${HAL0_BIN}"', "hal0"),
+        encoding="utf-8",
+    )
+    bindir = tmp_path / "nopi"
+    bindir.mkdir(exist_ok=True)
+    return subprocess.run(
+        [shutil.which("bash") or "/bin/bash", str(script)],
+        capture_output=True, text=True, env={"PATH": str(bindir), **env},
+        stdin=subprocess.DEVNULL, timeout=60,
+    )
+
+
+@pytest.mark.parametrize(
+    "env",
+    [{"HAL0_SKIP_PI": "1"}, {"HAL0_SKIP_PI": "1", "HAL0_INSTALL_PI": "1"}, {}],
+)
+def test_pi_hint_printed_once_and_never_installs(tmp_path: Path, env: dict[str, str]) -> None:
+    proc = _run_pi_block(tmp_path, env)
+    assert proc.returncode == 0, proc.stderr
+    assert "INSTALL" not in proc.stdout
+    assert proc.stdout.count("INFO: pi (terminal coding agent) not installed") == 1
+    assert "agent install pi" in proc.stdout
+
+
+def test_pi_installs_when_requested(tmp_path: Path) -> None:
+    proc = _run_pi_block(tmp_path, {"HAL0_INSTALL_PI": "1"})
+    assert proc.returncode == 0, proc.stderr
+    assert "INSTALL agent install pi" in proc.stdout
+    assert "INFO:" not in proc.stdout
+
+
+def test_pi_non_numeric_install_knob_does_not_abort(tmp_path: Path) -> None:
+    proc = _run_pi_block(tmp_path, {"HAL0_INSTALL_PI": "true"})
+    assert proc.returncode == 0, proc.stderr
+    assert "unbound variable" not in proc.stderr
+    assert "INSTALL" not in proc.stdout
+    assert proc.stdout.count("INFO: pi (terminal coding agent) not installed") == 1

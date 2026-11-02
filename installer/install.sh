@@ -2819,7 +2819,6 @@ if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 && "${IS_UPGRADE}" -eq 0 \
     unset _cp_d_owui _cp_d_img _cp_d_hermes _cp_d_pi _cp_d_hind _cp_d_brain
     unset _cp_owui_reason _cp_img_reason _cp_img_plan _cp_pi_reason _cp_rows _cp_res _cp_reasons _cp_kv
 fi
-# shellcheck disable=SC2034  # COMPONENT_STATES is read by the install summary
 _cp_state() {  # _cp_state ID SKIPPED(0|1): unavailable beats skipped beats selected
     if [[ -n "${_cp_unavail[$1]:-}" ]]; then
         COMPONENT_STATES["$1"]="unavailable:${_cp_unavail[$1]}"
@@ -2835,7 +2834,8 @@ _cp_state() {  # _cp_state ID SKIPPED(0|1): unavailable beats skipped beats sele
 _cp_state openwebui "$([[ "${HAL0_SKIP_OPENWEBUI:-0}" == 1 ]] && echo 1 || echo 0)"
 _cp_state comfyui "$([[ "${HAL0_IMAGE_MODELS:-}" == none || "${HAL0_IMAGE_MODELS:-}" == 0 ]] && echo 1 || echo 0)"
 _cp_state hermes "$([[ "${HAL0_SKIP_HERMES:-0}" == 1 ]] && echo 1 || echo 0)"
-_cp_state pi "$([[ "${HAL0_INSTALL_PI:-0}" == 1 && "${HAL0_SKIP_PI:-0}" != 1 ]] && echo 0 || echo 1)"
+# pi already on the box counts as selected: it is not left out, whatever the knobs say.
+_cp_state pi "$({ command -v pi >/dev/null 2>&1 || [[ "${HAL0_INSTALL_PI:-0}" == 1 && "${HAL0_SKIP_PI:-0}" != 1 ]]; } && echo 0 || echo 1)"
 _cp_state hindsight "$([[ "${HAL0_SKIP_HINDSIGHT:-0}" == 1 ]] && echo 1 || echo 0)"
 _cp_state brain "$([[ "${HAL0_SKIP_BRAIN_MODEL:-0}" == 1 ]] && echo 1 || echo 0)"
 unset -f _cp_state
@@ -4421,17 +4421,13 @@ else
     # not merely after the Hermes block. Skipped on --dev / --no-start (no
     # daemon listening). There is no prompt here: the component checklist (or
     # HAL0_INSTALL_PI=1) is the opt-in, and HAL0_SKIP_PI=1 the opt-out.
-    if [[ "${DEV_MODE}" -eq 0 ]] \
-       && [[ "${NO_START}" -eq 0 ]] \
-       && [[ "${HAL0_SKIP_PI:-0}" -ne 1 ]] \
-       && [[ "${HAL0_INSTALL_PI:-0}" -eq 1 ]] \
+    if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 ]] \
        && ! command -v pi >/dev/null 2>&1; then
-        "${HAL0_BIN}" agent install pi || warn "pi install failed — retry later with: sudo ${HAL0_BIN} agent install pi"
-    elif [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 ]] \
-         && [[ "${HAL0_SKIP_PI:-0}" -ne 1 ]] \
-         && [[ "${HAL0_INSTALL_PI:-0}" -ne 1 ]] \
-         && ! command -v pi >/dev/null 2>&1; then
-        info "pi (terminal coding agent) not installed. Add it later with: sudo ${HAL0_BIN} agent install pi"
+        if [[ "${HAL0_SKIP_PI:-0}" != 1 && "${HAL0_INSTALL_PI:-0}" == 1 ]]; then
+            "${HAL0_BIN}" agent install pi || warn "pi install failed — retry later with: sudo ${HAL0_BIN} agent install pi"
+        else
+            info "pi (terminal coding agent) not installed. Add it later with: sudo ${HAL0_BIN} agent install pi"
+        fi
     fi
 
     # Last verify action before the summary (#2066): everything the probes
@@ -4557,25 +4553,49 @@ fi
 
 # Components the operator (or a flag) left out — one line, omitted when none.
 # Labels follow the component table; unavailable rows are not "skipped".
-_summary_skipped=""
-for _summary_cid in openwebui comfyui hermes pi hindsight brain; do
-    if [[ "${COMPONENT_STATES[${_summary_cid}]:-}" == "skipped" ]]; then
-        case "${_summary_cid}" in
-            openwebui) _summary_clabel="Open WebUI" ;;
-            comfyui)   _summary_clabel="ComfyUI" ;;
-            hermes)    _summary_clabel="Hermes agent" ;;
-            pi)        _summary_clabel="Pi agent" ;;
-            hindsight) _summary_clabel="Hindsight memory" ;;
-            brain)     _summary_clabel="Brain model" ;;
-        esac
-        _summary_skipped+="${_summary_skipped:+, }${_summary_clabel}"
+# Upgrades are quiet: the box already has whatever it has. Long lists wrap so
+# ui_box (which does not wrap) keeps its right border.
+if [[ "${IS_UPGRADE}" -eq 0 ]]; then
+    _summary_skipped=()
+    for _summary_cid in openwebui comfyui hermes pi hindsight brain; do
+        if [[ "${COMPONENT_STATES[${_summary_cid}]:-}" == "skipped" ]]; then
+            case "${_summary_cid}" in
+                openwebui) _summary_clabel="Open WebUI" ;;
+                comfyui)   _summary_clabel="ComfyUI" ;;
+                hermes)    _summary_clabel="Hermes agent" ;;
+                pi)        _summary_clabel="Pi agent" ;;
+                hindsight) _summary_clabel="Hindsight memory" ;;
+                brain)     _summary_clabel="Brain model" ;;
+            esac
+            _summary_skipped+=("${_summary_clabel}")
+        fi
+    done
+    if [[ ${#_summary_skipped[@]} -gt 0 ]]; then
+        _summary_prefix="Components skipped: "
+        _summary_cur=""
+        _summary_wrapped=()
+        for _summary_clabel in "${_summary_skipped[@]}"; do
+            if [[ -z "${_summary_cur}" ]]; then
+                _summary_cur="${_summary_clabel}"
+            elif (( ${#_summary_prefix} + ${#_summary_cur} + 2 + ${#_summary_clabel} + 1 > 76 )); then
+                _summary_wrapped+=("${_summary_cur},")
+                _summary_cur="${_summary_clabel}"
+            else
+                _summary_cur+=", ${_summary_clabel}"
+            fi
+        done
+        _summary_wrapped+=("${_summary_cur}")
+        SUMMARY_LINES+=("")
+        _summary_first=1
+        for _summary_cur in "${_summary_wrapped[@]}"; do
+            if [[ "${_summary_first}" -eq 1 ]]; then
+                SUMMARY_LINES+=("$(printf '%s%s%s%s' "${_summary_prefix}" "${DIM}" "${_summary_cur}" "${RST}")")
+                _summary_first=0
+            else
+                SUMMARY_LINES+=("$(printf '%*s%s%s%s' "${#_summary_prefix}" "" "${DIM}" "${_summary_cur}" "${RST}")")
+            fi
+        done
     fi
-done
-if [[ -n "${_summary_skipped}" ]]; then
-    SUMMARY_LINES+=(
-        ""
-        "$(printf 'Components skipped: %s%s%s' "${DIM}" "${_summary_skipped}" "${RST}")"
-    )
 fi
 
 SUMMARY_LINES+=(
