@@ -25,7 +25,7 @@ import pytest
 REPO = Path(__file__).parent.parent.parent
 INSTALL_SH = REPO / "installer" / "install.sh"
 
-_START = "starter image models"
+_START = "# ── starter image models"
 _END = "# ── NPU prerequisites"
 
 
