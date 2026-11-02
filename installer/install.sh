@@ -2746,6 +2746,10 @@ fi
 # install summary has a record on headless runs too.
 declare -A COMPONENT_STATES=()
 declare -A _cp_unavail=()
+# HAL0_SKIP_SETUP=1 skips the brain pull and the starter image models whatever
+# the rows say, so those two rows are unavailable, not a tickable false promise.
+_cp_setup_reason=""
+[[ "${HAL0_SKIP_SETUP:-0}" == "1" ]] && _cp_setup_reason="HAL0_SKIP_SETUP=1"
 if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 && "${IS_UPGRADE}" -eq 0 \
       && "${COMPONENT_FLAG_GIVEN}" -eq 0 ]] && _interactive; then
     _cp_owui_reason=""
@@ -2762,6 +2766,7 @@ if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 && "${IS_UPGRADE}" -eq 0 \
         _cp_img_reason="${_cp_img_reason%%$'\n'*}"
         [[ -n "${_cp_img_reason}" ]] || _cp_img_reason="image models cannot be planned on this box"
     fi
+    [[ -n "${_cp_setup_reason}" ]] && _cp_img_reason="${_cp_setup_reason}"
     _cp_pi_reason=""
     # pi already on the box needs no npm; only a fresh install does.
     if ! command -v pi >/dev/null 2>&1 && ! command -v npm >/dev/null 2>&1; then
@@ -2782,7 +2787,7 @@ if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 && "${IS_UPGRADE}" -eq 0 \
         "hermes"$'\t'"Hermes agent"$'\t'"venv + config + gateway; brings the Operator Board and MCP wiring"$'\t'"${_cp_d_hermes}"$'\t'
         "pi"$'\t'"Pi agent"$'\t'"terminal coding agent (CLI/TUI)"$'\t'"${_cp_d_pi}"$'\t'"${_cp_pi_reason}"
         "hindsight"$'\t'"Hindsight memory"$'\t'"hindsight-api unit, Memory tab, Hermes memory bank"$'\t'"${_cp_d_hind}"$'\t'"${HINDSIGHT_UNAVAILABLE_REASON}"
-        "brain"$'\t'"Brain model"$'\t'"~1-3 GB pull; steward chat and tools"$'\t'"${_cp_d_brain}"$'\t'
+        "brain"$'\t'"Brain model"$'\t'"~1-3 GB pull; steward chat and tools"$'\t'"${_cp_d_brain}"$'\t'"${_cp_setup_reason}"
     )
     declare -A _cp_res=()
     ui_component_picker _cp_rows _cp_res
@@ -2807,6 +2812,7 @@ if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 && "${IS_UPGRADE}" -eq 0 \
     _cp_reasons=(
         "openwebui=${_cp_owui_reason}" "comfyui=${_cp_img_reason}"
         "pi=${_cp_pi_reason}" "hindsight=${HINDSIGHT_UNAVAILABLE_REASON}"
+        "brain=${_cp_setup_reason}"
     )
     for _cp_kv in "${_cp_reasons[@]}"; do
         [[ "${_cp_res[${_cp_kv%%=*}]:-}" == "unavailable" ]] && _cp_unavail["${_cp_kv%%=*}"]="${_cp_kv#*=}"
@@ -2826,6 +2832,11 @@ _cp_state() {  # _cp_state ID SKIPPED(0|1): unavailable beats skipped beats sele
 # A box that cannot run Hindsight is "unavailable", not merely skipped, even on
 # a headless run where the picker never computed the reason.
 [[ -n "${HINDSIGHT_UNAVAILABLE_REASON}" ]] && _cp_unavail[hindsight]="${HINDSIGHT_UNAVAILABLE_REASON}"
+# Likewise HAL0_SKIP_SETUP=1 on a headless run.
+if [[ -n "${_cp_setup_reason}" ]]; then
+    _cp_unavail[brain]="${_cp_setup_reason}"
+    _cp_unavail[comfyui]="${_cp_setup_reason}"
+fi
 _cp_state openwebui "$([[ "${HAL0_SKIP_OPENWEBUI:-0}" == 1 ]] && echo 1 || echo 0)"
 _cp_state comfyui "$([[ "${HAL0_IMAGE_MODELS:-}" == none || "${HAL0_IMAGE_MODELS:-}" == 0 ]] && echo 1 || echo 0)"
 _cp_state hermes "$([[ "${HAL0_SKIP_HERMES:-0}" == 1 ]] && echo 1 || echo 0)"
@@ -2834,7 +2845,7 @@ _cp_state pi "$({ command -v pi >/dev/null 2>&1 || [[ "${HAL0_INSTALL_PI:-0}" ==
 _cp_state hindsight "$([[ "${HAL0_SKIP_HINDSIGHT:-0}" == 1 ]] && echo 1 || echo 0)"
 _cp_state brain "$([[ "${HAL0_SKIP_BRAIN_MODEL:-0}" == 1 ]] && echo 1 || echo 0)"
 unset -f _cp_state
-unset _cp_unavail
+unset _cp_unavail _cp_setup_reason
 
 # ── Hermes terminal tool: explicit opt-in, DEFAULTS OFF ─────────────────────
 # The bundled agent can be given a terminal tool. Its only viable backend on
