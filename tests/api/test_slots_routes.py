@@ -2688,7 +2688,13 @@ def test_resolved_is_null_for_a_non_llama_slot(
     )
     r = isolated_client.get("/api/slots/voice/resolved")
     assert r.status_code == 200, r.text
-    assert r.json() == {"name": "voice", "argv": None, "provenance": [], "removed": 0}
+    assert r.json() == {
+        "name": "voice",
+        "argv": None,
+        "provenance": [],
+        "removed": 0,
+        "footprint": None,
+    }
 
 
 def test_resolved_is_null_for_an_npu_slot(
@@ -2698,7 +2704,13 @@ def test_resolved_is_null_for_an_npu_slot(
 ) -> None:
     r = isolated_client.get("/api/slots/agent/resolved")
     assert r.status_code == 200, r.text
-    assert r.json() == {"name": "agent", "argv": None, "provenance": [], "removed": 0}
+    assert r.json() == {
+        "name": "agent",
+        "argv": None,
+        "provenance": [],
+        "removed": 0,
+        "footprint": None,
+    }
 
 
 def test_resolved_for_a_llama_slot_still_returns_argv_and_provenance(
@@ -2713,6 +2725,7 @@ def test_resolved_for_a_llama_slot_still_returns_argv_and_provenance(
     assert isinstance(body["argv"], list) and "--model" in body["argv"]
     assert body["provenance"]
     assert {"base", "profile"} <= {p["source"] for p in body["provenance"]}
+    assert body["footprint"] is None
 
 
 def test_resolved_states_the_speculation_in_effect(
@@ -2753,15 +2766,26 @@ def test_resolved_states_the_speculation_in_effect(
 _RUNTIME_MISMATCH = "slot.model_runtime_mismatch"
 
 
-def _register_halogen_model(client: TestClient, home: str, model_id: str = "flash-next") -> None:
-    """Register a halogen checkpoint the way ``detect`` classifies a ``.hgn``."""
+def _register_halogen_model(
+    client: TestClient, home: str, model_id: str = "flash-next", *, size_bytes: int | None = None
+) -> None:
+    """Register a halogen checkpoint the way ``detect`` classifies a ``.hgn``.
+
+    ``size_bytes`` is the checkpoint size the registry row claims, for a provider
+    that sizes its memory from it (the row otherwise reads 0).
+    """
     path = Path(home) / "models" / f"{model_id}.hgn"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"HGN1" + b"\x00" * 12)
-    r = client.post(
-        "/api/models",
-        json={"id": model_id, "path": str(path), "backends": ["halogen"], "provider": "halogen"},
-    )
+    row: dict[str, Any] = {
+        "id": model_id,
+        "path": str(path),
+        "backends": ["halogen"],
+        "provider": "halogen",
+    }
+    if size_bytes:
+        row["size_bytes"] = size_bytes
+    r = client.post("/api/models", json=row)
     assert r.status_code == 201, r.text
 
 
@@ -2879,3 +2903,390 @@ def test_put_config_judges_the_post_write_pair(
         json={"profile": "hgn", "model": {"default": "flash-next"}},
     )
     assert r.status_code == 200, r.text
+
+
+# ── GET /api/slots/{name}/resolved: halogen live memory readout ──────────────
+#
+# The drawer's "This layout: ~N GiB resident" line. The arithmetic is the
+# provider's ``footprint_mb`` hook over ``hal0.slots.capacity`` (ADR-0039); the
+# route only gathers the slot's model and window, asks, and sets the answer
+# beside the host's free pool. The hook is stubbed here: its figure is pinned in
+# ``test_capacity_halogen``, this pins what the route does with one.
+
+_GIB = 1024.0
+
+
+def _stub_halogen_footprint(
+    monkeypatch: pytest.MonkeyPatch, gib: float | None
+) -> list[dict[str, Any]]:
+    """Make the halogen provider answer ``gib`` GiB; the model_info it was asked about."""
+    from hal0.providers.halogen import HalogenProvider
+
+    asked: list[dict[str, Any]] = []
+
+    def _hook(self: Any, model_info: Any, slot_cfg: Any, profile: Any) -> float | None:
+        asked.append(dict(model_info))
+        return None if gib is None else gib * _GIB
+
+    monkeypatch.setattr(HalogenProvider, "footprint_mb", _hook)
+    return asked
+
+
+def _host_gtt(app: FastAPI, *, total_gib: float | None, used_gib: float | None) -> None:
+    """Pin the pool sample the readout reads; ``None`` counters model a host without GTT."""
+    from types import SimpleNamespace
+
+    from hal0.hardware.gpu_view import GPUMemorySample
+
+    sample = GPUMemorySample(
+        vendor="amd",
+        is_uma=True,
+        vram_total_mb=None,
+        gtt_total_mb=None if total_gib is None else total_gib * _GIB,
+        total_mb=None if total_gib is None else total_gib * _GIB,
+        vram_used_mb=None,
+        gtt_used_mb=None if used_gib is None else used_gib * _GIB,
+        used_mb=None if used_gib is None else used_gib * _GIB,
+        gpu_busy=None,
+        util_is_forced_high=False,
+    )
+    app.state.hardware_stats = SimpleNamespace(gpu_sample=lambda: sample)
+
+
+def _bound_halogen_slot(
+    client: TestClient, home: str, name: str = "flash", *, size_bytes: int | None = None
+) -> None:
+    """A slot on the halogen runner with the registered checkpoint bound to it."""
+    _halogen_slot(home, name)
+    _register_halogen_model(client, home, size_bytes=size_bytes)
+    r = client.put(f"/api/slots/{name}/config", json={"model": {"default": "flash-next"}})
+    assert r.status_code == 200, r.text
+
+
+def test_resolved_footprint_for_a_halogen_slot(
+    container_stub: dict[str, Any],
+    isolated_app: FastAPI,
+    isolated_client: TestClient,
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The provider's 72 GiB, the 10 GiB lookup-table advisory kept apart from it,
+    and the pool's free MiB beside them."""
+    from hal0.runners.knobs import HALOGEN_NATIVE_CTX
+
+    _bound_halogen_slot(isolated_client, tmp_hal0_home)
+    asked = _stub_halogen_footprint(monkeypatch, 72.0)
+    _host_gtt(isolated_app, total_gib=128.0, used_gib=20.0)
+    r = isolated_client.get("/api/slots/flash/resolved")
+    assert r.status_code == 200, r.text
+    assert r.json()["footprint"] == {
+        "resident_mb": 72.0 * _GIB,
+        "advisory_cache_mb": 10 * 1024,
+        "host_free_mb": 108.0 * _GIB,
+        "verdict": "fits",
+    }
+    # The hook was asked about the slot's bound checkpoint and the window it is booked for.
+    assert len(asked) == 1
+    assert asked[0]["_model_key"] == "flash-next"
+    assert asked[0]["ctx_tokens"] == HALOGEN_NATIVE_CTX
+
+
+def test_resolved_footprint_through_the_providers_own_hook(
+    container_stub: dict[str, Any],
+    isolated_app: FastAPI,
+    isolated_client: TestClient,
+    tmp_hal0_home: str,
+) -> None:
+    """Nothing stubbed: the readout is the provider's figure for a registry row with a
+    real ``size_bytes``, at the slot's own layout and window, beside the pool. (A row
+    with no size reads ``footprint: null``, as the stubbed no-figure test pins.)"""
+    from hal0.runners.knobs import HALOGEN_NATIVE_CTX
+    from hal0.slots.capacity import halogen_footprint_mb
+
+    checkpoint_bytes = 53 * 2**30
+    _bound_halogen_slot(isolated_client, tmp_hal0_home, size_bytes=checkpoint_bytes)
+    _host_gtt(isolated_app, total_gib=128.0, used_gib=20.0)
+    r = isolated_client.get("/api/slots/flash/resolved")
+    assert r.status_code == 200, r.text
+    fp = r.json()["footprint"]
+    assert fp is not None
+    # The seed layout: the profile names no knob, so every one is at its default,
+    # and the pool is booked at the larger of itself and the native window.
+    assert fp["resident_mb"] == pytest.approx(
+        halogen_footprint_mb(
+            checkpoint_bytes=checkpoint_bytes,
+            pool_positions=HALOGEN_NATIVE_CTX,
+            kv_slots=2,
+            max_tok=16384,
+            kv8=False,
+            vision=False,
+        )
+    )
+    assert fp["advisory_cache_mb"] == 10 * 1024
+    assert fp["host_free_mb"] == 108.0 * _GIB
+    assert fp["verdict"] == "fits"
+
+
+@pytest.mark.parametrize(
+    ("total_gib", "used_gib", "verdict"),
+    [
+        (128.0, 20.0, "fits"),  # 72 of 108 free
+        (128.0, 50.0, "tight"),  # 72 of 78 free: within 10% of what is free
+        (128.0, 80.0, "exceeds"),  # 72 of 48 free
+        (64.0, 0.0, "exceeds_total"),  # 72 of a 64 pool: it never fits
+    ],
+)
+def test_resolved_footprint_verdict_follows_the_pool(
+    total_gib: float,
+    used_gib: float,
+    verdict: str,
+    container_stub: dict[str, Any],
+    isolated_app: FastAPI,
+    isolated_client: TestClient,
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _bound_halogen_slot(isolated_client, tmp_hal0_home)
+    _stub_halogen_footprint(monkeypatch, 72.0)
+    _host_gtt(isolated_app, total_gib=total_gib, used_gib=used_gib)
+    fp = isolated_client.get("/api/slots/flash/resolved").json()["footprint"]
+    assert fp["verdict"] == verdict
+    assert fp["host_free_mb"] == (total_gib - used_gib) * _GIB
+
+
+def _pin_slot_state(
+    app: FastAPI, state: str, *, where: str = "memory", name: str = "flash"
+) -> None:
+    """Hold ``name`` in ``state`` where ``SlotManager.state`` reads it: the in-memory
+    record, or (``where="disk"``) a ``state.json`` with no record cached yet. The unit
+    is left down, so a ``status()`` reconcile would read a resident state as OFFLINE."""
+    import time as _time
+
+    from hal0.slots.state import SlotState, SlotStateRecord, write_state_atomic
+
+    sm: SlotManager = app.state.slot_manager
+    record = SlotStateRecord(
+        name=name,
+        state=SlotState(state),
+        model_id="flash-next",
+        port=8097,
+        updated_at=_time.time(),
+        message="pinned by test",
+        extra={},
+    )
+    if where == "disk":
+        sm._states.pop(sm._key(name), None)
+        write_state_atomic(sm._state_file_for(name), record)
+    else:
+        sm._states[sm._key(name)] = record
+
+
+@pytest.mark.parametrize(
+    ("state", "where"),
+    [("ready", "memory"), ("warming", "memory"), ("ready", "disk")],
+)
+def test_resolved_footprint_reads_loaded_for_a_resident_slot(
+    state: str,
+    where: str,
+    container_stub: dict[str, Any],
+    isolated_app: FastAPI,
+    isolated_client: TestClient,
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A loaded layout already holds its memory: 72 GiB against 48 GiB left is "loaded",
+    not "exceeds". The figures stay as they are."""
+    _bound_halogen_slot(isolated_client, tmp_hal0_home)
+    _stub_halogen_footprint(monkeypatch, 72.0)
+    _host_gtt(isolated_app, total_gib=128.0, used_gib=80.0)
+    _pin_slot_state(isolated_app, state, where=where)
+    fp = isolated_client.get("/api/slots/flash/resolved").json()["footprint"]
+    assert fp == {
+        "resident_mb": 72.0 * _GIB,
+        "advisory_cache_mb": 10 * 1024,
+        "host_free_mb": 48.0 * _GIB,
+        "verdict": "loaded",
+    }
+
+
+def test_resolved_footprint_never_probes_the_slot_for_its_state(
+    container_stub: dict[str, Any],
+    isolated_app: FastAPI,
+    isolated_client: TestClient,
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The state is the manager's own record: ``status()`` and ``list()`` probe the
+    unit and reconcile, and the drawer's readout must not trigger either."""
+    _bound_halogen_slot(isolated_client, tmp_hal0_home)
+    _stub_halogen_footprint(monkeypatch, 72.0)
+    _host_gtt(isolated_app, total_gib=128.0, used_gib=80.0)
+    _pin_slot_state(isolated_app, "ready")
+
+    async def _probed(self: Any, *args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the resolved readout probed the slot")
+
+    monkeypatch.setattr(SlotManager, "status", _probed)
+    monkeypatch.setattr(SlotManager, "list", _probed)
+    fp = isolated_client.get("/api/slots/flash/resolved").json()["footprint"]
+    assert fp["verdict"] == "loaded"
+
+
+def test_resolved_reads_no_slot_state_for_a_llama_slot(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The state is read only once the slot is known to be halogen: a llama drawer
+    must not read ``state.json`` (and fill the cache) for a figure it never shows."""
+    asked: list[str] = []
+    real = SlotManager.state
+
+    def _spy(self: Any, name: str) -> Any:
+        asked.append(name)
+        return real(self, name)
+
+    monkeypatch.setattr(SlotManager, "state", _spy)
+    r = isolated_client.get("/api/slots/chat/resolved")
+    assert r.status_code == 200, r.text
+    assert r.json()["footprint"] is None
+    assert asked == []
+
+
+def test_resolved_reads_the_slot_state_once_for_a_halogen_slot(
+    container_stub: dict[str, Any],
+    isolated_app: FastAPI,
+    isolated_client: TestClient,
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _bound_halogen_slot(isolated_client, tmp_hal0_home)
+    _stub_halogen_footprint(monkeypatch, 72.0)
+    _host_gtt(isolated_app, total_gib=128.0, used_gib=20.0)
+    asked: list[str] = []
+    real = SlotManager.state
+
+    def _spy(self: Any, name: str) -> Any:
+        asked.append(name)
+        return real(self, name)
+
+    monkeypatch.setattr(SlotManager, "state", _spy)
+    r = isolated_client.get("/api/slots/flash/resolved")
+    assert r.status_code == 200, r.text
+    assert r.json()["footprint"]["verdict"] == "fits"
+    assert asked == ["flash"]
+
+
+def test_resolved_footprint_keeps_the_fit_verdict_for_an_offline_slot(
+    container_stub: dict[str, Any],
+    isolated_app: FastAPI,
+    isolated_client: TestClient,
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same pool, the slot not loaded: the layout is judged against what is free."""
+    _bound_halogen_slot(isolated_client, tmp_hal0_home)
+    _stub_halogen_footprint(monkeypatch, 72.0)
+    _host_gtt(isolated_app, total_gib=128.0, used_gib=80.0)
+    _pin_slot_state(isolated_app, "offline")
+    fp = isolated_client.get("/api/slots/flash/resolved").json()["footprint"]
+    assert fp["verdict"] == "exceeds"
+
+
+def test_resolved_footprint_asks_the_hook_without_a_window_when_none_resolves(
+    container_stub: dict[str, Any],
+    isolated_app: FastAPI,
+    isolated_client: TestClient,
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No resolvable window: the model's own facts go to the hook untouched, with no
+    ``ctx_tokens`` invented for it, and the readout still answers."""
+    _bound_halogen_slot(isolated_client, tmp_hal0_home)
+    asked = _stub_halogen_footprint(monkeypatch, 72.0)
+    _host_gtt(isolated_app, total_gib=128.0, used_gib=20.0)
+    monkeypatch.setattr(
+        "hal0.providers.container.slot_effective_context", lambda cfg, registry=None: (None, None)
+    )
+    r = isolated_client.get("/api/slots/flash/resolved")
+    assert r.status_code == 200, r.text
+    assert r.json()["footprint"]["resident_mb"] == 72.0 * _GIB
+    assert len(asked) == 1
+    assert asked[0]["_model_key"] == "flash-next"
+    assert "ctx_tokens" not in asked[0]
+
+
+def test_resolved_footprint_is_unknown_when_the_host_has_no_pool_reading(
+    container_stub: dict[str, Any],
+    isolated_app: FastAPI,
+    isolated_client: TestClient,
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No GTT counters: the figure still shows, the free pool and verdict do not claim anything."""
+    _bound_halogen_slot(isolated_client, tmp_hal0_home)
+    _stub_halogen_footprint(monkeypatch, 72.0)
+    _host_gtt(isolated_app, total_gib=None, used_gib=None)
+    fp = isolated_client.get("/api/slots/flash/resolved").json()["footprint"]
+    assert fp == {
+        "resident_mb": 72.0 * _GIB,
+        "advisory_cache_mb": 10 * 1024,
+        "host_free_mb": None,
+        "verdict": "unknown",
+    }
+
+
+def test_resolved_footprint_survives_a_failing_pool_sample(
+    container_stub: dict[str, Any],
+    isolated_app: FastAPI,
+    isolated_client: TestClient,
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    def _boom() -> None:
+        raise OSError("sysfs gone")
+
+    _bound_halogen_slot(isolated_client, tmp_hal0_home)
+    _stub_halogen_footprint(monkeypatch, 72.0)
+    isolated_app.state.hardware_stats = SimpleNamespace(gpu_sample=_boom)
+    r = isolated_client.get("/api/slots/flash/resolved")
+    assert r.status_code == 200, r.text
+    fp = r.json()["footprint"]
+    assert fp["resident_mb"] == 72.0 * _GIB
+    assert fp["host_free_mb"] is None
+    assert fp["verdict"] == "unknown"
+
+
+def test_resolved_footprint_is_null_when_the_provider_has_no_figure(
+    container_stub: dict[str, Any],
+    isolated_app: FastAPI,
+    isolated_client: TestClient,
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No figure is no readout, not an error and not a guess from the file size."""
+    _bound_halogen_slot(isolated_client, tmp_hal0_home)
+    _stub_halogen_footprint(monkeypatch, None)
+    _host_gtt(isolated_app, total_gib=128.0, used_gib=20.0)
+    r = isolated_client.get("/api/slots/flash/resolved")
+    assert r.status_code == 200, r.text
+    assert r.json()["footprint"] is None
+
+
+def test_resolved_footprint_is_null_for_a_halogen_slot_with_no_model(
+    container_stub: dict[str, Any],
+    isolated_app: FastAPI,
+    isolated_client: TestClient,
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _halogen_slot(tmp_hal0_home)
+    asked = _stub_halogen_footprint(monkeypatch, 72.0)
+    _host_gtt(isolated_app, total_gib=128.0, used_gib=20.0)
+    r = isolated_client.get("/api/slots/flash/resolved")
+    assert r.status_code == 200, r.text
+    assert r.json()["footprint"] is None
+    assert asked == []

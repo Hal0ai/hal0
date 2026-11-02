@@ -15,7 +15,7 @@
 
 import { applyRunnerChoice } from "./hw-cascade.js";
 import { deviceBackend } from "@/api/hooks/useRuntimes";
-import { diffFlags } from "./flags-tune.js";
+import { diffFlags, envPairs } from "./flags-tune.js";
 
 // Lane token → display title (hw-cascade.js's runnerOptions/laneValues deal
 // only in the raw backend tokens — rocm/vulkan/cuda/cpu — so the display copy
@@ -106,6 +106,31 @@ function tuneChanges(next, prev, overrides) {
 		.map(([label, , from, to]) => ({ label, from, to }));
 }
 
+// Whether a profile row is a halogen-family one: the family the server derived
+// for it, else the family of its runner in the catalogue.
+function isHalogenProfile(profile, backends) {
+	const family = profile?.runtime_family || (backends || {})[profile?.runner]?.runtime_family;
+	return family === "halogen";
+}
+
+// The HALOGEN_NAME=value variables two flag texts disagree on: names set in one
+// and not the other, and names whose value differs (the last token of a name
+// wins, as on the server). diffFlags cannot see these, since they are not flag
+// pairs.
+function envChanges(nextText, prevText) {
+	const last = (text) => {
+		const out = new Map();
+		for (const { name, value } of envPairs(text)) out.set(name, value);
+		return out;
+	};
+	const next = last(nextText);
+	const prev = last(prevText);
+	let n = 0;
+	for (const [name, value] of next) if (!prev.has(name) || prev.get(name) !== value) n += 1;
+	for (const name of prev.keys()) if (!next.has(name)) n += 1;
+	return n;
+}
+
 /**
  * Apply preview for a profile pick — every consequence of switching a slot to
  * another profile, in one structure, computed BEFORE anything is written
@@ -117,7 +142,8 @@ function tuneChanges(next, prev, overrides) {
  * The lines are DERIVED, never re-guessed: the runtime and lane come out of
  * the same hw-cascade.js `applyRunnerChoice` the Hardware group's Runtime
  * select drives (and that the server's profile-wins reconcile mirrors, Task
- * 5), and the flag count comes out of flags-tune.js's shlex-lite `diffFlags`.
+ * 5), and the flag count comes out of flags-tune.js's shlex-lite `diffFlags`
+ * (plus, for a halogen profile, its HALOGEN_* variable changes).
  *
  * A line with nothing true to say is OMITTED rather than faked (`lane: null`,
  * `flags: 0`), with ONE exception the mockup calls out: a profile pinning no
@@ -192,11 +218,17 @@ export function profileApplyPreview({
 	// "changes N flags": the flag pairs that differ between the outgoing and
 	// the incoming profile. The profile is the whole tune now, so a pair the
 	// outgoing profile had and the incoming one lacks counts too.
+	// A halogen profile keeps HALOGEN_* variables in its flags text, which are not
+	// flag pairs, so a swap to or from one adds its variable changes to the count.
 	const d = diffFlags(profile.flags || "", currentProfile?.flags || "");
+	const envDiff =
+		isHalogenProfile(profile, backends) || isHalogenProfile(currentProfile, backends)
+			? envChanges(profile.flags || "", currentProfile?.flags || "")
+			: 0;
 	return {
 		runtime,
 		lane,
-		flags: d.added.length + d.changed.length + d.removed.length,
+		flags: d.added.length + d.changed.length + d.removed.length + envDiff,
 		tune: tuneChanges(profile, currentProfile, tune),
 		restart: true,
 	};

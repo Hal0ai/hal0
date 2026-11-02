@@ -8,6 +8,11 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  envPairs,
+  findHalogenDenied,
+  findHalogenMalformed,
+  findHalogenOutOfRange,
+  setEnvToken,
   MANAGED_FLAGS,
   MODEL_FACT_FLAGS,
   SPEC_TYPE_REFUSAL,
@@ -27,6 +32,7 @@ import {
   tokenizeFlags,
   FLAG_ALIASES,
 } from '../flags-tune.js'
+import { HALOGEN_DENIED, HALOGEN_KNOBS } from './fixtures/halogen-knobs'
 
 describe("canonFlag", () => {
   it("folds a short alias to its long form", () => {
@@ -343,5 +349,228 @@ describe('reasoning-format none (case and spacing)', () => {
   })
   it('other formats pass', () => {
     expect(findModelFactFlags('--reasoning-format DeepSeek')).toEqual([])
+  })
+})
+
+
+// ── HALOGEN_* env tokens (the halogen profile's flags text) ─────────────────
+
+describe('envPairs', () => {
+  it('reads NAME=value tokens in order', () => {
+    expect(envPairs('HALOGEN_KV_SLOTS=4 HALOGEN_KV8=1')).toEqual([
+      { name: 'HALOGEN_KV_SLOTS', value: '4' },
+      { name: 'HALOGEN_KV8', value: '1' },
+    ])
+  })
+
+  it('keeps a quoted value whole, quotes stripped', () => {
+    expect(envPairs('HALOGEN_THINKING_BUDGET_MESSAGE="Time is up." HALOGEN_KV8=1')).toEqual([
+      { name: 'HALOGEN_THINKING_BUDGET_MESSAGE', value: 'Time is up.' },
+      { name: 'HALOGEN_KV8', value: '1' },
+    ])
+    expect(envPairs("HALOGEN_X='a b'")).toEqual([{ name: 'HALOGEN_X', value: 'a b' }])
+  })
+
+  it('splits on the first = only, so a value may carry =', () => {
+    expect(envPairs('HALOGEN_X=a=b')).toEqual([{ name: 'HALOGEN_X', value: 'a=b' }])
+  })
+
+  it('reads newline-separated tokens and skips tokens that are not NAME=value', () => {
+    expect(envPairs('HALOGEN_A=1\nHALOGEN_B=2')).toEqual([
+      { name: 'HALOGEN_A', value: '1' },
+      { name: 'HALOGEN_B', value: '2' },
+    ])
+    expect(envPairs('-fa on HALOGEN_A=1 bare')).toEqual([{ name: 'HALOGEN_A', value: '1' }])
+  })
+
+  it('keeps duplicates, later last, and survives blank or unbalanced text', () => {
+    expect(envPairs('HALOGEN_A=1 HALOGEN_A=2').map((p) => p.value)).toEqual(['1', '2'])
+    expect(envPairs('')).toEqual([])
+    expect(envPairs(undefined)).toEqual([])
+    expect(envPairs('HALOGEN_A="open')).toEqual([])
+  })
+})
+
+describe('setEnvToken', () => {
+  it('appends a missing token, to blank text without a leading space', () => {
+    expect(setEnvToken('', 'HALOGEN_KV_SLOTS', '4')).toBe('HALOGEN_KV_SLOTS=4')
+    expect(setEnvToken('HALOGEN_KV8=1', 'HALOGEN_KV_SLOTS', '4')).toBe('HALOGEN_KV8=1 HALOGEN_KV_SLOTS=4')
+    expect(setEnvToken('HALOGEN_KV8=1  \n', 'HALOGEN_KV_SLOTS', '4')).toBe('HALOGEN_KV8=1 HALOGEN_KV_SLOTS=4')
+  })
+
+  it('replaces a token in place and leaves the others, their quoting and their spacing alone', () => {
+    const text = 'HALOGEN_A="Time is up."  HALOGEN_KV_SLOTS=2\nHALOGEN_B=\'x y\''
+    expect(setEnvToken(text, 'HALOGEN_KV_SLOTS', '4')).toBe(
+      'HALOGEN_A="Time is up."  HALOGEN_KV_SLOTS=4\nHALOGEN_B=\'x y\'',
+    )
+  })
+
+  it('writes a value that needs quoting so it reads back whole', () => {
+    for (const value of ['Time is up.', "it's", 'say "hi"', 'a$b']) {
+      const out = setEnvToken('HALOGEN_KV8=1', 'HALOGEN_MSG', value)
+      expect(envPairs(out)).toEqual([
+        { name: 'HALOGEN_KV8', value: '1' },
+        { name: 'HALOGEN_MSG', value },
+      ])
+    }
+  })
+
+  it('removes a token on null (and on an empty value, which the server calls malformed)', () => {
+    expect(setEnvToken('A=1 HALOGEN_KV_SLOTS=4 B=2', 'HALOGEN_KV_SLOTS', null)).toBe('A=1 B=2')
+    expect(setEnvToken('HALOGEN_KV_SLOTS=4 B=2', 'HALOGEN_KV_SLOTS', null)).toBe('B=2')
+    expect(setEnvToken('A=1 HALOGEN_KV_SLOTS=4', 'HALOGEN_KV_SLOTS', null)).toBe('A=1')
+    expect(setEnvToken('HALOGEN_KV_SLOTS=4', 'HALOGEN_KV_SLOTS', null)).toBe('')
+    expect(setEnvToken('A=1 HALOGEN_KV_SLOTS=4', 'HALOGEN_KV_SLOTS', '')).toBe('A=1')
+    expect(setEnvToken('A=1', 'HALOGEN_KV_SLOTS', null)).toBe('A=1')
+  })
+
+  it('collapses duplicates of the token onto one (the server reads the last)', () => {
+    expect(setEnvToken('HALOGEN_A=1 B=2 HALOGEN_A=3', 'HALOGEN_A', '9')).toBe('B=2 HALOGEN_A=9')
+    expect(setEnvToken('HALOGEN_A=1 B=2 HALOGEN_A=3', 'HALOGEN_A', null)).toBe('B=2')
+  })
+
+  it('does not match a name that merely starts or ends with the target', () => {
+    expect(setEnvToken('HALOGEN_KV_SLOTS_MAX=7', 'HALOGEN_KV_SLOTS', '4')).toBe(
+      'HALOGEN_KV_SLOTS_MAX=7 HALOGEN_KV_SLOTS=4',
+    )
+  })
+
+  it('leaves text with an unbalanced quote untouched rather than gluing onto it', () => {
+    expect(setEnvToken('HALOGEN_A="open', 'HALOGEN_B', '1')).toBe('HALOGEN_A="open')
+  })
+
+  it('round-trips with envPairs', () => {
+    let text = ''
+    text = setEnvToken(text, 'HALOGEN_KV_SLOTS', '4')
+    text = setEnvToken(text, 'HALOGEN_MAX_TOK', '32768')
+    text = setEnvToken(text, 'HALOGEN_KV_SLOTS', '8')
+    expect(envPairs(text)).toEqual([
+      { name: 'HALOGEN_KV_SLOTS', value: '8' },
+      { name: 'HALOGEN_MAX_TOK', value: '32768' },
+    ])
+    text = setEnvToken(text, 'HALOGEN_KV_SLOTS', null)
+    expect(text).toBe('HALOGEN_MAX_TOK=32768')
+  })
+})
+
+describe('findHalogenDenied', () => {
+  it('names an exact denied variable as typed', () => {
+    expect(findHalogenDenied('HALOGEN_API_PORT=1', HALOGEN_KNOBS, HALOGEN_DENIED)).toEqual(['HALOGEN_API_PORT'])
+  })
+
+  it('treats a trailing * as a prefix', () => {
+    expect(findHalogenDenied('HALOGEN_NPU_DEVICE=0 HALOGEN_RECORD_PATH=/x', HALOGEN_KNOBS, HALOGEN_DENIED)).toEqual([
+      'HALOGEN_NPU_DEVICE',
+      'HALOGEN_RECORD_PATH',
+    ])
+  })
+
+  it('dedupes, keeps first-seen order, and passes the curated knobs and unlisted names', () => {
+    const text = 'HALOGEN_KV_SLOTS=4 HALOGEN_CTX=1 HALOGEN_FUTURE_KNOB=2 HALOGEN_PORT=9 HALOGEN_CTX=2'
+    expect(findHalogenDenied(text, HALOGEN_KNOBS, HALOGEN_DENIED)).toEqual(['HALOGEN_CTX', 'HALOGEN_PORT'])
+  })
+
+  it('does not treat a longer name as an exact match, or a * entry as a literal name', () => {
+    expect(findHalogenDenied('HALOGEN_API_PORT_X=1 HALOGEN_NPU=1', HALOGEN_KNOBS, HALOGEN_DENIED)).toEqual([])
+    // a typed `*` is no name at all (the shape screen refuses it as malformed)
+    expect(findHalogenDenied('HALOGEN_NPU_*=1', HALOGEN_KNOBS, HALOGEN_DENIED)).toEqual([])
+  })
+
+  it('is empty for clean, blank, malformed or unbalanced text and a missing list', () => {
+    expect(findHalogenDenied('HALOGEN_KV_SLOTS=4', HALOGEN_KNOBS, HALOGEN_DENIED)).toEqual([])
+    expect(findHalogenDenied('', HALOGEN_KNOBS, HALOGEN_DENIED)).toEqual([])
+    expect(findHalogenDenied('-fa on', HALOGEN_KNOBS, HALOGEN_DENIED)).toEqual([])
+    expect(findHalogenDenied('HALOGEN_A="open', HALOGEN_KNOBS, HALOGEN_DENIED)).toEqual([])
+    expect(findHalogenDenied('HALOGEN_API_PORT=1', HALOGEN_KNOBS, undefined)).toEqual([])
+  })
+
+  it('names a denied variable whatever its value; the empty value is findHalogenMalformed\'s too', () => {
+    expect(findHalogenDenied('HALOGEN_API_PORT=', HALOGEN_KNOBS, HALOGEN_DENIED)).toEqual(['HALOGEN_API_PORT'])
+    expect(findHalogenMalformed('HALOGEN_API_PORT=')).toEqual(['HALOGEN_API_PORT='])
+  })
+})
+
+describe('findHalogenMalformed', () => {
+  it('flags tokens that are not HALOGEN_NAME=value, by the spelling typed', () => {
+    expect(findHalogenMalformed('HALOGEN_KV8=1 -fa on')).toEqual(['-fa', 'on'])
+    expect(findHalogenMalformed('HALOGEN_KV8')).toEqual(['HALOGEN_KV8'])
+    expect(findHalogenMalformed('halogen_kv8=1')).toEqual(['halogen_kv8=1'])
+    expect(findHalogenMalformed('OTHER_KV8=1')).toEqual(['OTHER_KV8=1'])
+  })
+
+  it('flags an empty value and a value with a line break', () => {
+    expect(findHalogenMalformed('HALOGEN_KV8=')).toEqual(['HALOGEN_KV8='])
+    expect(findHalogenMalformed('HALOGEN_MSG="a\nb"')).toHaveLength(1)
+  })
+
+  // The two refusals knobs.parse_env_tokens adds (_CONTROL_BYTE, _MAX_VALUE_BYTES):
+  // the unit file cannot carry either, so the profile would save and fail every load.
+  it('flags a value holding any control byte, not only a line feed', () => {
+    expect(findHalogenMalformed('HALOGEN_A="a\tb"')).toHaveLength(1)
+    expect(findHalogenMalformed('HALOGEN_A="a\x01b"')).toHaveLength(1)
+    expect(findHalogenMalformed('HALOGEN_A="a\x7fb"')).toHaveLength(1)
+    expect(findHalogenMalformed('HALOGEN_A="a b"')).toEqual([])
+  })
+
+  it('flags a value over 1024 bytes, counted in UTF-8 bytes', () => {
+    expect(findHalogenMalformed(`HALOGEN_A=${'a'.repeat(1024)}`)).toEqual([])
+    expect(findHalogenMalformed(`HALOGEN_A=${'a'.repeat(1025)}`)).toHaveLength(1)
+    expect(findHalogenMalformed(`HALOGEN_A=${'\u00e9'.repeat(512)}`)).toEqual([])
+    expect(findHalogenMalformed(`HALOGEN_A=${'\u00e9'.repeat(513)}`)).toHaveLength(1)
+  })
+
+  it('accepts quoted values and is empty for clean, blank or unbalanced text', () => {
+    expect(findHalogenMalformed('HALOGEN_MSG="Time is up." HALOGEN_KV8=1')).toEqual([])
+    expect(findHalogenMalformed('')).toEqual([])
+    expect(findHalogenMalformed('HALOGEN_A="open')).toEqual([])
+  })
+})
+
+describe('findHalogenOutOfRange', () => {
+  const bad = (text: string) => findHalogenOutOfRange(text, HALOGEN_KNOBS)
+
+  it('accepts every in-range value, the bounds included', () => {
+    expect(
+      bad(
+        'HALOGEN_KV_SLOTS=1 HALOGEN_KV_SLOTS=64 HALOGEN_KV_POOL_POSITIONS=1024 HALOGEN_MAX_TOK=32768 ' +
+          'HALOGEN_KV8=0 HALOGEN_WEIGHTS_LOCK=1 HALOGEN_PROMPT_CACHE=0 HALOGEN_MAX_TOKENS_DEFAULT=65536 ' +
+          'HALOGEN_HOST_RESERVE_GIB=10',
+      ),
+    ).toEqual([])
+  })
+
+  it('refuses an int below its minimum or above its maximum', () => {
+    expect(bad('HALOGEN_KV_SLOTS=0')[0]).toMatchObject({ name: 'HALOGEN_KV_SLOTS', value: '0' })
+    expect(bad('HALOGEN_KV_SLOTS=0')[0].message).toContain('at least 1')
+    expect(bad('HALOGEN_KV_SLOTS=65')[0].message).toContain('at most 64')
+    expect(bad('HALOGEN_HOST_RESERVE_GIB=9')[0].message).toContain('at least 10')
+    expect(bad('HALOGEN_MAX_TOKENS_DEFAULT=65537')[0].message).toContain('at most 65536')
+  })
+
+  it('refuses an int that is not a whole number, or has more than 9 digits', () => {
+    expect(bad('HALOGEN_KV_SLOTS=2.5')[0].message).toContain('whole number')
+    expect(bad('HALOGEN_KV_SLOTS=-1')[0].message).toContain('whole number')
+    expect(bad('HALOGEN_KV_SLOTS=abc')[0].message).toContain('whole number')
+    expect(bad('HALOGEN_KV_POOL_POSITIONS=1234567890')[0].message).toContain('9 digits')
+  })
+
+  it('refuses a bool other than 0 or 1 and an enum outside its choices', () => {
+    expect(bad('HALOGEN_KV8=2')[0].message).toContain('0 or 1')
+    expect(bad('HALOGEN_KV8=true')[0].message).toContain('0 or 1')
+    expect(bad('HALOGEN_MAX_TOK=8192')[0].message).toContain('16384, 32768')
+    expect(bad('HALOGEN_PROMPT_CACHE=3')[0].message).toContain('0, 1, 2')
+  })
+
+  it('judges the last value of a repeated name, as the server does', () => {
+    expect(bad('HALOGEN_KV_SLOTS=999 HALOGEN_KV_SLOTS=4')).toEqual([])
+    expect(bad('HALOGEN_KV_SLOTS=4 HALOGEN_KV_SLOTS=999')).toHaveLength(1)
+  })
+
+  it('ignores names no knob curates, and blank, malformed or empty-knob input', () => {
+    expect(bad('HALOGEN_FUTURE_KNOB=anything')).toEqual([])
+    expect(bad('')).toEqual([])
+    expect(bad('-fa on')).toEqual([])
+    expect(findHalogenOutOfRange('HALOGEN_KV_SLOTS=0', [])).toEqual([])
+    expect(findHalogenOutOfRange('HALOGEN_KV_SLOTS=0', undefined)).toEqual([])
   })
 })

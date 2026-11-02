@@ -157,12 +157,24 @@ export function isFlagToken(tok) {
 // token (the container.py JSON-token round-trip this must not break). Returns
 // { tokens, error } — error is a message string when a quote is unbalanced.
 export function tokenizeFlags(text) {
+  const { tokens, error } = scanFlagTokens(text);
+  return { tokens: tokens.map((t) => t.value), error };
+}
+
+// The same split as tokenizeFlags, but each token also carries where it sits in
+// the source text: `start`/`end` bound its source slice, quotes included, so an
+// edit (setEnvToken) can rewrite one token and leave every other byte alone.
+// Returns { tokens: [{ value, start, end }], error }; an unbalanced quote drops
+// the half-read token, as tokenizeFlags always has.
+export function scanFlagTokens(text) {
   const tokens = [];
   const s = String(text || "");
   let i = 0;
   const n = s.length;
   let cur = "";
   let started = false;
+  let start = 0;
+  let end = 0;
   let quote = null;
   while (i < n) {
     const ch = s[i];
@@ -170,20 +182,26 @@ export function tokenizeFlags(text) {
       if (ch === quote) { quote = null; }
       else { cur += ch; }
       i += 1;
+      end = i;
       continue;
     }
-    if (ch === '"' || ch === "'") { quote = ch; started = true; i += 1; continue; }
+    if (ch === '"' || ch === "'") {
+      if (!started) start = i;
+      quote = ch; started = true; i += 1; end = i; continue;
+    }
     if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r") {
-      if (started) { tokens.push(cur); cur = ""; started = false; }
+      if (started) { tokens.push({ value: cur, start, end }); cur = ""; started = false; }
       i += 1;
       continue;
     }
+    if (!started) start = i;
     cur += ch;
     started = true;
     i += 1;
+    end = i;
   }
   if (quote) return { tokens, error: "unbalanced quote in launch flags" };
-  if (started) tokens.push(cur);
+  if (started) tokens.push({ value: cur, start, end });
   return { tokens, error: null };
 }
 
@@ -642,4 +660,194 @@ export function diffFlags(nextText, prevText) {
 export function flagsEquivalent(a, b) {
   const d = diffFlags(a, b);
   return !d.diverged;
+}
+
+
+// ── HALOGEN_* env tokens ─────────────────────────────────────────────────────
+//
+// A halogen-family profile's `flags` text is not llama-server arguments: it is
+// a sequence of `HALOGEN_NAME=value` tokens (shell-quoted values allowed, e.g.
+// `HALOGEN_THINKING_BUDGET_MESSAGE="Time is up."`) that become the engine's
+// environment. The helpers below read and rewrite that text for the engine
+// block of the profile drawer, and mirror the server's screen inline
+// (hal0.runners.knobs.parse_env_tokens / screen_halogen_flags):
+//
+//   · shape        — every token is `HALOGEN_[A-Z0-9_]+=value`, value non-empty,
+//                    free of control bytes and at most 1024 bytes
+//                                                  (profiles.halogen_flag_malformed)
+//   · denied names — the slot, the model row, the tune fields and hal0 own them
+//                    (profiles.halogen_flag_denied)
+//   · knob ranges  — a curated knob's value is in its range or choices
+//                    (profiles.halogen_flag_out_of_range)
+//
+// Nothing about the server's sets is hard-coded here: the denied names and the
+// knob rows ride on /api/system-info (`backends[<runner>].knob_denied` / `.knobs`).
+
+const ENV_TOKEN = /^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/;
+// The server's token shape (`_TOKEN` + a non-empty value).
+const HALOGEN_TOKEN = /^HALOGEN_[A-Z0-9_]+=([\s\S]+)$/;
+// What the unit file cannot carry in a value, refused by knobs.parse_env_tokens
+// (`_CONTROL_BYTE`, `_MAX_VALUE_BYTES`): any control byte (a line break, a tab,
+// DEL...) and more than this many UTF-8 bytes.
+const CONTROL_BYTE = /[\x00-\x1f\x7f]/;
+export const HALOGEN_MAX_VALUE_BYTES = 1024;
+// Longest digit string an int knob accepts (knobs._MAX_INT_DIGITS).
+const MAX_INT_DIGITS = 9;
+const ECHO_CHARS = 40;
+
+/** Why a HALOGEN_* value cannot be stored: 'control', 'long', or null when it can. */
+export function halogenValueProblem(value) {
+  if (CONTROL_BYTE.test(value)) return "control";
+  if (new TextEncoder().encode(value).length > HALOGEN_MAX_VALUE_BYTES) return "long";
+  return null;
+}
+
+export const echo = (value) => (value.length <= ECHO_CHARS ? value : `${value.slice(0, ECHO_CHARS)}...`);
+
+// `NAME=value` tokens of `text` in order, value unquoted (shlex-like: a quoted
+// value stays one piece). Tokens of any other shape are skipped, a repeated
+// name is listed each time (the server reads the last), and text with an
+// unbalanced quote yields only the tokens before it.
+export function envPairs(text) {
+  const out = [];
+  for (const tok of scanFlagTokens(text).tokens) {
+    const m = ENV_TOKEN.exec(tok.value);
+    if (m) out.push({ name: m[1], value: m[2] });
+  }
+  return out;
+}
+
+// A value as it is written into the text: bare when plain, else single-quoted
+// (a ' inside becomes '"'"'), which tokenizeFlags and the server's shlex read
+// back as the same value.
+function quoteEnvValue(value) {
+  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+// Remove [start, end) from `src` with one neighbouring run of blanks, so the
+// tokens either side stay a single space apart. Line breaks are never eaten.
+function cutToken(src, start, end) {
+  let a = start;
+  let b = end;
+  while (b < src.length && (src[b] === " " || src[b] === "\t")) b += 1;
+  if (b === end) {
+    while (a > 0 && (src[a - 1] === " " || src[a - 1] === "\t")) a -= 1;
+  }
+  return src.slice(0, a) + src.slice(b);
+}
+
+// Set (replace in place, or append) or remove (`value` null, undefined or '')
+// the `name=value` token in `text`. Every other token keeps its quoting and the
+// whitespace around it. A name repeated in the text collapses onto one token at
+// the last one's place, which is the one the server reads. Text with an
+// unbalanced quote comes back unchanged: nothing can be placed safely in it.
+export function setEnvToken(text, name, value) {
+  const src = String(text ?? "");
+  const { tokens, error } = scanFlagTokens(src);
+  if (error) return src;
+  const hits = tokens.filter((t) => {
+    const m = ENV_TOKEN.exec(t.value);
+    return m && m[1] === name;
+  });
+  const remove = value === null || value === undefined || value === "";
+  const token = remove ? "" : `${name}=${quoteEnvValue(String(value))}`;
+  if (hits.length === 0) {
+    if (remove) return src;
+    const base = src.trimEnd();
+    return base ? `${base} ${token}` : token;
+  }
+  let out = src;
+  // Back to front, so each cut leaves the earlier offsets valid.
+  for (let i = hits.length - 1; i >= 0; i -= 1) {
+    const { start, end } = hits[i];
+    if (i === hits.length - 1 && !remove) out = out.slice(0, start) + token + out.slice(end);
+    else out = cutToken(out, start, end);
+  }
+  return out;
+}
+
+// Tokens of `text` that are not `HALOGEN_NAME=value` (an llama flag, a bare
+// word, a lowercase name, a token with no value, a value holding a control
+// byte or over 1024 bytes), by the spelling typed. Deduped, order-preserved; empty = clean. Text with an
+// unbalanced quote is the quote error's to report, so it yields [] here.
+export function findHalogenMalformed(text) {
+  const { tokens, error } = scanFlagTokens(text);
+  if (error) return [];
+  const seen = new Set();
+  const out = [];
+  for (const { value } of tokens) {
+    const m = HALOGEN_TOKEN.exec(value);
+    if ((m && !halogenValueProblem(m[1])) || seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+  }
+  return out;
+}
+
+// The denied variables in `text`, by the name typed (deduped, order-preserved;
+// empty = clean). `denied` is the runner's `knob_denied` list from system-info:
+// exact names, plus prefixes written with a trailing `*`. `knobs` is accepted
+// so the call reads like findHalogenOutOfRange's, but it exempts nothing: the
+// server screens ownership before a knob's range, so a curated name that a
+// denied entry also covers is still refused.
+export function findHalogenDenied(text, _knobs, denied) {
+  const exact = new Set();
+  const prefixes = [];
+  for (const entry of Array.isArray(denied) ? denied : []) {
+    if (entry.endsWith("*")) prefixes.push(entry.slice(0, -1));
+    else exact.add(entry);
+  }
+  if (exact.size === 0 && prefixes.length === 0) return [];
+  const seen = new Set();
+  const out = [];
+  for (const { name } of envPairs(text)) {
+    if (seen.has(name)) continue;
+    if (exact.has(name) || prefixes.some((p) => name.startsWith(p))) {
+      seen.add(name);
+      out.push(name);
+    }
+  }
+  return out;
+}
+
+// Why `value` is outside `knob`'s range, or null when it is in it (the
+// server's knobs._range_problem).
+function rangeProblem(knob, value) {
+  const got = `got ${echo(value)}`;
+  if (knob.kind === "bool") {
+    return value === "0" || value === "1" ? null : `${knob.env} must be 0 or 1; ${got}`;
+  }
+  if (knob.kind === "enum") {
+    return (knob.choices || []).includes(value)
+      ? null
+      : `${knob.env} must be one of ${(knob.choices || []).join(", ")}; ${got}`;
+  }
+  if (!/^[0-9]+$/.test(value)) return `${knob.env} must be a whole number; ${got}`;
+  if (value.length > MAX_INT_DIGITS) {
+    return `${knob.env} must be a whole number of at most ${MAX_INT_DIGITS} digits; got ${value.length} digits`;
+  }
+  const n = Number(value);
+  if (knob.minimum != null && n < knob.minimum) return `${knob.env} must be at least ${knob.minimum}; got ${n}`;
+  if (knob.maximum != null && n > knob.maximum) return `${knob.env} must be at most ${knob.maximum}; got ${n}`;
+  return null;
+}
+
+// Curated knobs in `text` whose value is out of range, as
+// [{ name, value, message }] in order of first appearance. The last value of a
+// repeated name is the one judged, as on the server; a name no knob curates
+// passes (the rest of the engine's flag reference stays free text), and so does
+// a token with no value (findHalogenMalformed names that one).
+export function findHalogenOutOfRange(text, knobs) {
+  const byEnv = new Map((Array.isArray(knobs) ? knobs : []).map((k) => [k.env, k]));
+  if (byEnv.size === 0) return [];
+  const last = new Map();
+  for (const { name, value } of envPairs(text)) last.set(name, value);
+  const out = [];
+  for (const [name, value] of last) {
+    const knob = byEnv.get(name);
+    if (!knob || value === "") continue;
+    const message = rangeProblem(knob, value);
+    if (message) out.push({ name, value, message });
+  }
+  return out;
 }

@@ -12,6 +12,7 @@ import { createPortal } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { HALOGEN_DENIED, HALOGEN_KNOBS } from './fixtures/halogen-knobs'
 
 ;(globalThis as unknown as { window: typeof globalThis }).window = globalThis
 ;(globalThis as unknown as { React: typeof React }).React = React
@@ -19,14 +20,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 ;(globalThis as unknown as { Icons: unknown }).Icons = new Proxy({}, { get: () => null })
 ;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-const { profilesBox, modelsBox, toasts, feasCalls, editCalls, restartCalls, createCalls } = vi.hoisted(() => ({
+const { profilesBox, modelsBox, sysBox, resolvedBox, updateGate, toasts, feasCalls, editCalls, restartCalls, createCalls, updateCalls } = vi.hoisted(() => ({
   profilesBox: { current: [] as Record<string, unknown>[] },
+  sysBox: { current: { backends: {}, hardware: {} } as Record<string, unknown> },
   modelsBox: { current: [] as Record<string, unknown>[] },
+  resolvedBox: { current: undefined as Record<string, unknown> | undefined },
+  // When set, a profile update stays in flight until this promise settles.
+  updateGate: { current: null as Promise<void> | null },
   toasts: [] as string[],
   feasCalls: [] as unknown[],
   editCalls: [] as unknown[],
   restartCalls: [] as string[],
   createCalls: [] as unknown[],
+  updateCalls: [] as unknown[],
 }))
 
 const idle = { mutate: () => {}, mutateAsync: async () => ({}), isPending: false, reset: () => {} }
@@ -48,7 +54,7 @@ vi.mock('@/api/hooks/useSlots', () => ({
   }),
   useSlotLoad: () => idle,
   useSlotSwap: () => idle,
-  useSlotResolved: () => ({ data: undefined }),
+  useSlotResolved: () => ({ data: resolvedBox.current }),
   useSlots: () => ({ data: [], isLoading: false }),
   useSlotRename: () => idle,
 }))
@@ -63,7 +69,7 @@ vi.mock('@/api/hooks/useModelsFeasibility', () => ({
 vi.mock('@/api/hooks/useLogs', () => ({ useSlotLogsStream: () => ({ lines: [] }) }))
 vi.mock('@/api/hooks/useRuntimes', async () => {
   const actual = await vi.importActual<typeof import('@/api/hooks/useRuntimes')>('@/api/hooks/useRuntimes')
-  return { ...actual, useSystemInfo: () => ({ data: { backends: {}, hardware: {} }, isLoading: false }) }
+  return { ...actual, useSystemInfo: () => ({ data: sysBox.current, isLoading: false }) }
 })
 vi.mock('@/api/hooks/useRunnerImages', () => ({
   useRunnerImages: () => ({ data: { images: [], families: [] } }),
@@ -77,7 +83,13 @@ vi.mock('@/api/hooks/useProfiles', () => ({
       return b
     },
   }),
-  useProfileUpdate: () => ({ mutateAsync: async (b: unknown) => b }),
+  useProfileUpdate: () => ({
+    mutateAsync: async (b: unknown) => {
+      updateCalls.push(b)
+      if (updateGate.current) await updateGate.current
+      return b
+    },
+  }),
   useProfileDelete: () => ({ mutateAsync: async () => undefined }),
   useProfileExport: () => ({ mutateAsync: async () => ({}) }),
   useProfileImport: () => ({ mutateAsync: async () => ({}) }),
@@ -148,9 +160,13 @@ function typeInto(testid: string, value: string) {
 beforeEach(() => {
   profilesBox.current = [PROFILE]
   modelsBox.current = [MODEL]
+  resolvedBox.current = undefined
+  sysBox.current = { backends: {}, hardware: {} }
   editCalls.length = 0
   restartCalls.length = 0
   createCalls.length = 0
+  updateCalls.length = 0
+  updateGate.current = null
   toasts.length = 0
   feasCalls.length = 0
   ;(window as any).__hal0Toast = (m: string) => toasts.push(m)
@@ -451,5 +467,412 @@ describe('slot drawer Tune block', () => {
     const emb = mount({ ...SLOT, type: 'embedding' })
     expect(byId('slot-tune-block')).toBeNull()
     act(() => emb.root.unmount())
+  })
+})
+
+// ── halogen (Flash-Next) slots: family-aware picker + speculation row ──────
+const RUNNERS = {
+  standard: {
+    title: 'Standard', tier: 'default', device_class: 'gpu', supported_backends: ['rocm', 'vulkan'],
+    runtime_family: 'llama-server', state: 'installed',
+  },
+  halogen: {
+    title: 'halogen (Flash-Next)', tier: 'optional', device_class: 'gpu', supported_backends: ['rocm'],
+    runtime_family: 'halogen', state: 'installed', knobs: HALOGEN_KNOBS, knob_denied: HALOGEN_DENIED,
+  },
+}
+const HALO_MODEL = { id: 'qwen-halo', capabilities: ['chat'], backends: ['halogen'], installed: true }
+const LLAMA_MODEL = { id: 'qwen', capabilities: ['chat'], backends: ['rocm', 'vulkan'], installed: true }
+const HALO_PROFILE = { ...PROFILE, name: 'halogen-chat', runner: 'halogen', used_by: [] }
+const HALO_SLOT = { ...SLOT, binary: 'halogen', profile: 'halogen-chat', model: 'qwen-halo', model_id: 'qwen-halo' }
+
+const specIds = () =>
+  Array.from(document.querySelectorAll('[data-testid^="tune-speculation-"]'))
+    .map((el) => el.getAttribute('data-testid')!.replace('tune-speculation-', ''))
+    .filter((id) => id !== 'profile' && id !== 'reason')
+const pickerOptionIds = () => {
+  act(() => byId('slot-model-swap')!.click())
+  return Array.from(document.querySelectorAll('[data-option-id]')).map((el) => el.getAttribute('data-option-id'))
+}
+
+describe('slot drawer on a halogen runtime', () => {
+  beforeEach(() => {
+    sysBox.current = { backends: RUNNERS, hardware: { rocm: true } }
+    profilesBox.current = [PROFILE, HALO_PROFILE]
+    modelsBox.current = [LLAMA_MODEL, HALO_MODEL]
+  })
+
+  it('offers a halogen slot only halogen models', () => {
+    const { root } = mount(HALO_SLOT)
+    const ids = pickerOptionIds()
+    expect(ids).toContain('qwen-halo')
+    expect(ids).not.toContain('qwen')
+    act(() => root.unmount())
+  })
+
+  it('keeps halogen models out of a llama slot', () => {
+    const { root } = mount({ ...SLOT, binary: 'standard' })
+    const ids = pickerOptionIds()
+    expect(ids).toContain('qwen')
+    expect(ids).not.toContain('qwen-halo')
+    act(() => root.unmount())
+  })
+
+  it('reads the family from the lane default when no runtime is pinned', () => {
+    const { root } = mount({ ...SLOT, binary: '' })
+    const ids = pickerOptionIds()
+    expect(ids).toContain('qwen')
+    expect(ids).not.toContain('qwen-halo')
+    act(() => root.unmount())
+  })
+
+  it('follows the runner the profile carries when the slot pins none', () => {
+    const { root } = mount({ ...HALO_SLOT, binary: '' })
+    expect(pickerOptionIds()).not.toContain('qwen')
+    expect(specIds()).toEqual(['auto', 'off'])
+    act(() => root.unmount())
+  })
+
+  it('drops the n-gram speculation pill for halogen, keeps it for llama', () => {
+    const halo = mount(HALO_SLOT)
+    expect(specIds()).toEqual(['auto', 'off'])
+    act(() => halo.root.unmount())
+    document.body.innerHTML = ''
+    const llama = mount({ ...SLOT, binary: 'standard' })
+    expect(specIds()).toEqual(['auto', 'off', 'ngram'])
+    act(() => llama.root.unmount())
+  })
+
+  it('keeps Auto and Off enabled when tune_unavailable names the n-gram value', async () => {
+    // The server names the VALUE the engine cannot run, never the whole row:
+    // for a halogen slot that is `ngram` (src/hal0/providers/container.py).
+    const reason = 'ngram: this engine has no n-gram drafter (auto or off)'
+    const { root } = mount({
+      ...HALO_SLOT,
+      tune_effective: { ...EFFECTIVE, tune_unavailable: { speculation: reason } },
+    })
+    expect(specIds()).toEqual(['auto', 'off'])
+    expect((byId('tune-speculation-auto') as HTMLButtonElement).disabled).toBe(false)
+    expect((byId('tune-speculation-off') as HTMLButtonElement).disabled).toBe(false)
+    expect(byId('tune-speculation-reason')).toBeNull()
+    click('tune-speculation-off')
+    await save()
+    expect((editCalls[0] as any).body.tune).toEqual({ speculation: 'off' })
+    act(() => root.unmount())
+  })
+
+  it('drops n-gram before the catalogue says the family when the server names it', () => {
+    sysBox.current = { backends: {}, hardware: {} }
+    const reason = 'ngram: this engine has no n-gram drafter (auto or off)'
+    const { root } = mount({ ...SLOT, tune_effective: { ...EFFECTIVE, tune_unavailable: { speculation: reason } } })
+    expect(specIds()).toEqual(['auto', 'off'])
+    expect((byId('tune-speculation-auto') as HTMLButtonElement).disabled).toBe(false)
+    expect(byId('tune-speculation-reason')).toBeNull()
+    act(() => root.unmount())
+  })
+
+  it("explains a stale n-gram override with the server's text and lets the Profile pill clear it", () => {
+    const reason = 'ngram: this engine has no n-gram drafter (auto or off)'
+    const { root } = mount({
+      ...HALO_SLOT,
+      tune: { speculation: 'ngram' },
+      tune_effective: { ...EFFECTIVE, speculation: 'ngram', tune_unavailable: { speculation: reason } },
+    })
+    expect(byId('tune-speculation-reason')!.textContent).toBe(reason)
+    expect((byId('tune-speculation-profile') as HTMLButtonElement).disabled).toBe(false)
+    expect((byId('tune-speculation-auto') as HTMLButtonElement).disabled).toBe(false)
+    click('tune-speculation-profile')
+    expect(byId('tune-speculation-reason')).toBeNull()
+    act(() => root.unmount())
+  })
+})
+
+// ── halogen engine settings: the profile's HALOGEN_* flags, edited in place ─
+const engineBlock = () => byId('slot-engine-block')
+const engineField = (env: string) => byId(`engine-input-${env}`) as HTMLInputElement | null
+
+describe('slot drawer engine settings (halogen)', () => {
+  const CUSTOM = { ...HALO_PROFILE, flags: 'HALOGEN_KV_SLOTS=4', resolved_flags: 'HALOGEN_KV_SLOTS=4' }
+  const SEED = { ...CUSTOM, name: 'halogen-seed', seed: true }
+  beforeEach(() => {
+    sysBox.current = { backends: RUNNERS, hardware: { rocm: true } }
+    modelsBox.current = [LLAMA_MODEL, HALO_MODEL]
+  })
+
+  it('shows a seed profile read-only and offers to duplicate it', () => {
+    profilesBox.current = [PROFILE, SEED]
+    const { root } = mount({ ...HALO_SLOT, profile: 'halogen-seed' })
+    expect(byId('pf-engine-settings')).not.toBeNull()
+    expect(engineField('HALOGEN_KV_SLOTS')!.value).toBe('4')
+    expect(engineField('HALOGEN_KV_SLOTS')!.disabled).toBe(true)
+    expect(byId('slot-engine-apply')).toBeNull()
+    expect(byId('slot-engine-duplicate')).not.toBeNull()
+    act(() => root.unmount())
+  })
+
+  it('Duplicate on the engine block opens the profile drawer on a custom copy of the seed', () => {
+    profilesBox.current = [PROFILE, SEED]
+    const { root } = mount({ ...HALO_SLOT, profile: 'halogen-seed' })
+    click('slot-engine-duplicate')
+    expect((byId('pf-input-name') as HTMLInputElement).value).toBe('halogen-seed-custom')
+    act(() => root.unmount())
+  })
+
+  it('saves a custom profile edit through the profile update, never the slot', async () => {
+    profilesBox.current = [PROFILE, CUSTOM]
+    const { root } = mount(HALO_SLOT)
+    expect(engineField('HALOGEN_KV_SLOTS')!.disabled).toBe(false)
+    expect(byId('slot-engine-duplicate')).toBeNull()
+    expect((byId('slot-engine-apply') as HTMLButtonElement).disabled).toBe(true)
+    typeInto('engine-input-HALOGEN_KV_SLOTS', '8')
+    expect(updateCalls).toHaveLength(0)
+    await act(async () => byId('slot-engine-apply')!.click())
+    expect(updateCalls).toEqual([{ name: 'halogen-chat', body: { flags: 'HALOGEN_KV_SLOTS=8' } }])
+    expect(editCalls).toHaveLength(0)
+    act(() => root.unmount())
+  })
+
+  it('writes a toggle and an enum choice into the same flags text', async () => {
+    profilesBox.current = [PROFILE, CUSTOM]
+    const { root } = mount(HALO_SLOT)
+    click('engine-opt-HALOGEN_MAX_TOK-32768')
+    click('engine-switch-HALOGEN_KV8')
+    await act(async () => byId('slot-engine-apply')!.click())
+    expect((updateCalls[0] as { body: { flags: string } }).body.flags).toBe(
+      'HALOGEN_KV_SLOTS=4 HALOGEN_MAX_TOK=32768 HALOGEN_KV8=1',
+    )
+    act(() => root.unmount())
+  })
+
+  it('freezes the controls while Save to profile is in flight, so no edit is dropped', async () => {
+    profilesBox.current = [PROFILE, CUSTOM]
+    let release!: () => void
+    updateGate.current = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const { root } = mount(HALO_SLOT)
+    typeInto('engine-input-HALOGEN_KV_SLOTS', '8')
+    let pending!: Promise<void>
+    act(() => {
+      pending = Promise.resolve(byId('slot-engine-apply')!.click())
+    })
+    expect(updateCalls).toHaveLength(1)
+    expect(byId('slot-engine-apply')!.textContent).toBe('Saving…')
+    expect(engineField('HALOGEN_KV_SLOTS')!.disabled).toBe(true)
+    expect((byId('engine-switch-HALOGEN_KV8') as HTMLButtonElement).disabled).toBe(true)
+    expect((byId('engine-opt-HALOGEN_MAX_TOK-32768') as HTMLButtonElement).disabled).toBe(true)
+    expect(byId('engine-reset-HALOGEN_KV_SLOTS')).toBeNull()
+    await act(async () => {
+      release()
+      await pending
+    })
+    expect(engineField('HALOGEN_KV_SLOTS')!.disabled).toBe(false)
+    act(() => root.unmount())
+  })
+
+  it('names a control character in a stored value instead of calling the token malformed', () => {
+    profilesBox.current = [
+      PROFILE,
+      { ...CUSTOM, flags: 'HALOGEN_THINKING_BUDGET_MESSAGE="a\tb"', resolved_flags: 'HALOGEN_THINKING_BUDGET_MESSAGE="a\tb"' },
+    ]
+    const { root } = mount(HALO_SLOT)
+    const msg = byId('pf-engine-error')!.textContent!
+    expect(msg).toContain('HALOGEN_THINKING_BUDGET_MESSAGE')
+    expect(msg).toContain('control character')
+    expect(msg).not.toContain('is not a HALOGEN_NAME=value setting')
+    act(() => root.unmount())
+  })
+
+  it('caps each name in the "(also: ...)" echo at 40 characters, like the server', () => {
+    const long = 'x'.repeat(100)
+    const flags = `-fa on ${long}`
+    profilesBox.current = [PROFILE, { ...CUSTOM, flags, resolved_flags: flags }]
+    const { root } = mount(HALO_SLOT)
+    const msg = byId('pf-engine-error')!.textContent!
+    expect(msg).toContain('(also: on, ' + 'x'.repeat(40) + '...)')
+    expect(msg).not.toContain('x'.repeat(41))
+    act(() => root.unmount())
+  })
+
+  it('names an over-long stored value with the byte limit', () => {
+    const flags = `HALOGEN_THINKING_BUDGET_MESSAGE=${'x'.repeat(1025)}`
+    profilesBox.current = [PROFILE, { ...CUSTOM, flags, resolved_flags: flags }]
+    const { root } = mount(HALO_SLOT)
+    const msg = byId('pf-engine-error')!.textContent!
+    expect(msg).toContain('HALOGEN_THINKING_BUDGET_MESSAGE')
+    expect(msg).toContain('1024 bytes')
+    act(() => root.unmount())
+  })
+
+  it('names a rejected value in the block and holds the save', async () => {
+    profilesBox.current = [PROFILE, CUSTOM]
+    const { root } = mount(HALO_SLOT)
+    typeInto('engine-input-HALOGEN_KV_SLOTS', '100')
+    expect(byId('pf-engine-error')!.textContent).toContain('HALOGEN_KV_SLOTS')
+    expect((byId('slot-engine-apply') as HTMLButtonElement).disabled).toBe(true)
+    await act(async () => byId('slot-engine-apply')!.click())
+    expect(updateCalls).toHaveLength(0)
+    act(() => root.unmount())
+  })
+
+  it('keeps an unsaved engine edit out of the slot Save', async () => {
+    profilesBox.current = [PROFILE, CUSTOM]
+    const { root } = mount(HALO_SLOT)
+    typeInto('engine-input-HALOGEN_KV_SLOTS', '8')
+    await save()
+    expect(editCalls).toHaveLength(0)
+    act(() => root.unmount())
+  })
+
+  it('renders no block for a llama slot, nor for a halogen runner that serves no knobs', () => {
+    profilesBox.current = [PROFILE, CUSTOM]
+    const llama = mount({ ...SLOT, binary: 'standard' })
+    expect(engineBlock()).toBeNull()
+    expect(byId('pf-engine-settings')).toBeNull()
+    act(() => llama.root.unmount())
+    document.body.innerHTML = ''
+    sysBox.current = {
+      backends: { ...RUNNERS, halogen: { ...RUNNERS.halogen, knobs: [] } },
+      hardware: { rocm: true },
+    }
+    const bare = mount(HALO_SLOT)
+    expect(engineBlock()).toBeNull()
+    act(() => bare.root.unmount())
+  })
+})
+
+// ── the profile decides the family; `binary` is inert under it (mirrors the launch dispatch) ─
+describe('slot drawer family precedence (profile over binary)', () => {
+  const CUSTOM = { ...HALO_PROFILE, flags: 'HALOGEN_KV_SLOTS=4', resolved_flags: 'HALOGEN_KV_SLOTS=4' }
+  const LLAMA_HALOGEN_FLAGS = { ...PROFILE, name: 'custom-llama', flags: '-fa on', resolved_flags: '-fa on' }
+  beforeEach(() => {
+    sysBox.current = { backends: RUNNERS, hardware: { rocm: true } }
+    modelsBox.current = [LLAMA_MODEL, HALO_MODEL]
+    profilesBox.current = [PROFILE, CUSTOM, LLAMA_HALOGEN_FLAGS]
+    resolvedBox.current = {
+      name: 'halogen-chat', argv: null, provenance: [], removed: 0,
+      footprint: { resident_mb: 72 * 1024, advisory_cache_mb: 0, host_free_mb: 108 * 1024, verdict: 'fits' },
+    }
+  })
+
+  it('binary=standard on a halogen profile keeps the engine block and readout and hides n-gram', () => {
+    const { root } = mount({ ...HALO_SLOT, binary: 'standard' })
+    expect(engineBlock()).not.toBeNull()
+    expect(byId('slot-engine-footprint')).not.toBeNull()
+    expect(specIds()).toEqual(['auto', 'off'])
+    const ids = pickerOptionIds()
+    expect(ids).toContain('qwen-halo')
+    expect(ids).not.toContain('qwen')
+    act(() => root.unmount())
+  })
+
+  it('binary=halogen on a llama profile shows no engine block and no false -fa error', () => {
+    const { root } = mount({ ...SLOT, binary: 'halogen', profile: 'custom-llama' })
+    expect(engineBlock()).toBeNull()
+    expect(byId('pf-engine-settings')).toBeNull()
+    expect(byId('pf-engine-error')).toBeNull()
+    expect(document.body.textContent).not.toContain('is not a HALOGEN_NAME=value setting')
+    expect(specIds()).toEqual(['auto', 'off', 'ngram'])
+    const ids = pickerOptionIds()
+    expect(ids).toContain('qwen')
+    expect(ids).not.toContain('qwen-halo')
+    act(() => root.unmount())
+  })
+})
+
+// ── halogen live memory readout: the server's footprint under the engine settings ─
+const GIB = 1024
+const FOOTPRINT = { resident_mb: 72 * GIB, advisory_cache_mb: 10 * GIB, host_free_mb: 108 * GIB, verdict: 'fits' }
+const resolvedWith = (footprint: Record<string, unknown> | null | undefined) => ({
+  name: 'halogen-chat',
+  argv: null,
+  provenance: [],
+  removed: 0,
+  ...(footprint === undefined ? {} : { footprint }),
+})
+const footText = () => byId('slot-engine-footprint-text')?.textContent
+const footVerdict = () => byId('slot-engine-footprint-verdict')
+
+describe('slot drawer halogen memory readout', () => {
+  const CUSTOM = { ...HALO_PROFILE, flags: 'HALOGEN_KV_SLOTS=4', resolved_flags: 'HALOGEN_KV_SLOTS=4' }
+  beforeEach(() => {
+    sysBox.current = { backends: RUNNERS, hardware: { rocm: true } }
+    profilesBox.current = [PROFILE, CUSTOM]
+    modelsBox.current = [LLAMA_MODEL, HALO_MODEL]
+  })
+
+  it('states the layout, the advised cache, the free pool and the verdict', () => {
+    resolvedBox.current = resolvedWith(FOOTPRINT)
+    const { root } = mount(HALO_SLOT)
+    expect(footText()).toBe(
+      'This layout: ~72 GiB resident · +10 GiB lookup-table cache advised · box has 108 GiB free',
+    )
+    expect(footVerdict()!.textContent).toBe('fits')
+    expect(footVerdict()!.className).toContain('ok')
+    // Inside the engine block, under its settings: no pane of its own.
+    expect(engineBlock()!.contains(byId('slot-engine-footprint'))).toBe(true)
+    act(() => root.unmount())
+  })
+
+  it.each([
+    ['fits', 'fits', 'ok'],
+    ['tight', 'tight', 'warn'],
+    ['exceeds', "won't fit", 'err'],
+    ['exceeds_total', "won't fit", 'err'],
+    ['loaded', 'loaded', 'ok'],
+  ])('words a %s verdict as "%s" in the %s tone', (verdict, word, tone) => {
+    resolvedBox.current = resolvedWith({ ...FOOTPRINT, verdict })
+    const { root } = mount(HALO_SLOT)
+    expect(footVerdict()!.textContent).toBe(word)
+    expect(footVerdict()!.className).toContain(tone)
+    act(() => root.unmount())
+  })
+
+  it('keeps the figure but claims no free pool and no verdict when the host reading is unknown', () => {
+    resolvedBox.current = resolvedWith({ ...FOOTPRINT, host_free_mb: null, verdict: 'unknown' })
+    const { root } = mount(HALO_SLOT)
+    expect(footText()).toBe('This layout: ~72 GiB resident · +10 GiB lookup-table cache advised')
+    expect(footVerdict()).toBeNull()
+    act(() => root.unmount())
+  })
+
+  it('shows one decimal below 10 GiB and drops the advisory when it is zero', () => {
+    resolvedBox.current = resolvedWith({
+      resident_mb: 3.5 * GIB, advisory_cache_mb: 0, host_free_mb: 0, verdict: 'exceeds',
+    })
+    const { root } = mount(HALO_SLOT)
+    expect(footText()).toBe('This layout: ~3.5 GiB resident · box has 0 GiB free')
+    act(() => root.unmount())
+  })
+
+  it('renders nothing while the answer is loading, or when the server has no figure', () => {
+    resolvedBox.current = undefined
+    const loading = mount(HALO_SLOT)
+    expect(engineBlock()).not.toBeNull()
+    expect(byId('slot-engine-footprint')).toBeNull()
+    act(() => loading.root.unmount())
+    document.body.innerHTML = ''
+    resolvedBox.current = resolvedWith(null)
+    const none = mount(HALO_SLOT)
+    expect(engineBlock()).not.toBeNull()
+    expect(byId('slot-engine-footprint')).toBeNull()
+    act(() => none.root.unmount())
+  })
+
+  it('shows on a seed profile too, where the settings are read-only', () => {
+    profilesBox.current = [PROFILE, { ...CUSTOM, name: 'halogen-seed', seed: true }]
+    resolvedBox.current = resolvedWith(FOOTPRINT)
+    const { root } = mount({ ...HALO_SLOT, profile: 'halogen-seed' })
+    expect(byId('slot-engine-apply')).toBeNull()
+    expect(footText()).toContain('~72 GiB resident')
+    act(() => root.unmount())
+  })
+
+  it('renders no readout for a llama slot', () => {
+    resolvedBox.current = resolvedWith(FOOTPRINT)
+    const { root } = mount({ ...SLOT, binary: 'standard' })
+    expect(engineBlock()).toBeNull()
+    expect(byId('slot-engine-footprint')).toBeNull()
+    act(() => root.unmount())
   })
 })

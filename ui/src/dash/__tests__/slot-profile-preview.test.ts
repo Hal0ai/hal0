@@ -331,3 +331,43 @@ describe('profileApplyPreview — slot overrides', () => {
     expect(preview({ ...args, tune: { enable_thinking: false } })!.tune.map((t) => t.label)).not.toContain('thinking')
   })
 })
+
+describe('profileApplyPreview — halogen flags', () => {
+  // HALOGEN_NAME=value tokens are not flag pairs, so diffFlags cannot see them:
+  // the count comes from the env pairs of both texts (last value per name).
+  const withHalogen = {
+    ...backends,
+    halogen: {
+      title: 'halogen (Flash-Next)', blurb: '', tier: 'optional',
+      supported_backends: ['rocm'], device_class: 'gpu',
+      runtime_family: 'halogen', state: 'installed',
+    },
+  }
+  const flagsChanged = (next: string, prev: string, extra: Partial<ProfileRow> = {}) =>
+    (profileApplyPreview({
+      profile: { name: 'b', runner: 'halogen', flags: next, ...extra },
+      backends: withHalogen,
+      options: optionsFor('gpu-rocm'),
+      baselineRunner: 'halogen',
+      currentDevice: 'gpu-rocm',
+      currentProfile: { name: 'a', runner: 'halogen', flags: prev },
+      tune: {},
+    }) as Preview).flags
+
+  it('counts a HALOGEN_* value that differs between two halogen profiles', () => {
+    expect(flagsChanged('HALOGEN_KV_SLOTS=8', 'HALOGEN_KV_SLOTS=4')).toBe(1)
+  })
+  it('counts names the swap adds and drops', () => {
+    expect(flagsChanged('HALOGEN_KV8=1', 'HALOGEN_KV_SLOTS=4')).toBe(2)
+    expect(flagsChanged('HALOGEN_KV_SLOTS=4 HALOGEN_KV8=1', 'HALOGEN_KV_SLOTS=4')).toBe(1)
+  })
+  it('reads the last value of a repeated name, as the server does', () => {
+    expect(flagsChanged('HALOGEN_KV_SLOTS=2', 'HALOGEN_KV_SLOTS=1 HALOGEN_KV_SLOTS=2')).toBe(0)
+  })
+  it('reports nothing for the same tokens in another order', () => {
+    expect(flagsChanged('HALOGEN_KV8=1 HALOGEN_KV_SLOTS=4', 'HALOGEN_KV_SLOTS=4 HALOGEN_KV8=1')).toBe(0)
+  })
+  it('knows a halogen profile by its server-derived runtime_family too', () => {
+    expect(flagsChanged('HALOGEN_KV_SLOTS=8', 'HALOGEN_KV_SLOTS=4', { runner: '', runtime_family: 'halogen' } as never)).toBe(1)
+  })
+})

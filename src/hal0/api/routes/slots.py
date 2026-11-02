@@ -1300,15 +1300,60 @@ async def get_slot_resolved(name: str, request: Request) -> dict[str, object]:
     Kokoro, Moonshine, Qwen3-TTS, ComfyUI) answers
     ``{"argv": None, "provenance": [], "removed": 0}`` rather than an error or
     an invented command, as does a slot that cannot launch.
+
+    Every answer carries ``footprint``: the halogen slot's live memory readout
+    (:func:`_halogen_footprint`), ``None`` for any other slot and for a halogen
+    slot that has no figure to give.
     """
     from hal0.providers.container import resolved_argv_detail_for_slot
 
     sm = _get_slot_manager(request)
     cfg = await sm.get_config(name)
     detail = resolved_argv_detail_for_slot(cfg)
+    footprint = await _halogen_footprint(request, sm, name, cfg)
     if detail is None:
-        return {"name": name, "argv": None, "provenance": [], "removed": 0}
-    return {"name": name, **detail}
+        return {"name": name, "argv": None, "provenance": [], "removed": 0, "footprint": footprint}
+    return {"name": name, **detail, "footprint": footprint}
+
+
+async def _halogen_footprint(
+    request: Request, sm: SlotManager, name: str, cfg: dict[str, Any]
+) -> dict[str, object] | None:
+    """The drawer's memory readout for a halogen slot, else ``None``.
+
+    Every figure and the verdict come from
+    :func:`hal0.slots.capacity.halogen_footprint_readout` (ADR-0039); the route
+    only gathers what it needs from the request: the slot's state, read with the
+    non-probing :meth:`SlotManager.state` (the in-memory record, else
+    ``state.json``; never ``status()``/``list()``, which probe the unit and
+    reconcile), so a loaded slot reads ``"loaded"`` instead of being judged
+    against the pool it already holds, and the host's GPU memory sample. Both
+    are handed over as callables that run only once a figure exists, so a slot
+    on another runtime reads neither. ``None`` is
+    "no readout", not a failure. Nothing here raises: this rides the
+    resolved-command answer.
+    """
+    from hal0.slots.capacity import halogen_footprint_readout
+
+    def _state() -> str | None:
+        try:
+            return str(sm.state(name).value)
+        except Exception:
+            log.warning("slots.resolved_footprint_state_failed", slot=name, exc_info=True)
+            return None
+
+    stats = getattr(request.app.state, "hardware_stats", None)
+
+    async def _sample_gpu() -> Any:
+        return None if stats is None else await asyncio.to_thread(stats.gpu_sample)
+
+    return await halogen_footprint_readout(
+        sm,
+        cfg,
+        state=_state,
+        model_registry=getattr(request.app.state, "model_registry", None),
+        sample_gpu=_sample_gpu,
+    )
 
 
 @router.put("/{name}/config")

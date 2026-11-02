@@ -610,8 +610,24 @@ function useSlotsInvalidator() {
   }
 }
 
-export function useSlotRestart() {
+/**
+ * Invalidator for the mutations that change what a slot holds in memory (load,
+ * unload, restart, swap). Also marks every `['slot-resolved']` query stale: its
+ * halogen readout's verdict is a function of the slot's state ("loaded" versus
+ * judged against the free pool), so an open drawer must follow the change
+ * instead of keeping the old verdict until its staleTime runs out.
+ */
+function useSlotLifecycleInvalidator() {
+  const qc = useQueryClient()
   const invalidate = useSlotsInvalidator()
+  return () => {
+    invalidate()
+    qc.invalidateQueries({ queryKey: ['slot-resolved'] })
+  }
+}
+
+export function useSlotRestart() {
+  const invalidate = useSlotLifecycleInvalidator()
   return useMutation({
     mutationFn: (name: string) => slotPost(ENDPOINTS.slotRestart(name)),
     onSuccess: invalidate,
@@ -619,7 +635,7 @@ export function useSlotRestart() {
 }
 
 export function useSlotLoad() {
-  const invalidate = useSlotsInvalidator()
+  const invalidate = useSlotLifecycleInvalidator()
   return useMutation({
     mutationFn: (name: string) => slotPost(ENDPOINTS.slotLoad(name)),
     onSuccess: invalidate,
@@ -627,7 +643,7 @@ export function useSlotLoad() {
 }
 
 export function useSlotUnload() {
-  const invalidate = useSlotsInvalidator()
+  const invalidate = useSlotLifecycleInvalidator()
   return useMutation({
     mutationFn: (name: string) => slotPost(ENDPOINTS.slotUnload(name)),
     onSuccess: invalidate,
@@ -635,7 +651,7 @@ export function useSlotUnload() {
 }
 
 export function useSlotSwap() {
-  const invalidate = useSlotsInvalidator()
+  const invalidate = useSlotLifecycleInvalidator()
   return useMutation({
     mutationFn: ({ name, model_id }: { name: string; model_id: string }) =>
       slotPost(ENDPOINTS.slotSwap(name), { model_id }),
@@ -684,9 +700,14 @@ export function useSlotEdit() {
     // Voice section reflects fields that only live in the slot TOML (e.g.
     // default_voice) via useSlotConfig(['slot-config', name]); without this
     // the dropdown stays stale after a save and reverts on reopen.
+    //
+    // And the resolved readout: a Save that changes the profile, a tune
+    // `ctx_size` or `vision` moves a halogen slot's `resident_mb`, so a drawer
+    // reopened inside the readout's staleTime must not show the old figure.
     onSuccess: (_data, { name }) => {
       invalidate()
       qc.invalidateQueries({ queryKey: ['slot-config', name] })
+      qc.invalidateQueries({ queryKey: ['slot-resolved', name] })
     },
   })
 }
@@ -760,6 +781,23 @@ export interface FlagProvenance {
   source: ProvenanceSource
 }
 
+/**
+ * A halogen slot's live memory readout (GET /api/slots/{name}/resolved).
+ * Every figure is the server's (ADR-0039); the UI only words them.
+ */
+export interface SlotFootprint {
+  /** What the layout holds once loaded, MiB. */
+  resident_mb: number
+  /** Lookup-table page cache advised on top, MiB. Reclaimable; not in `resident_mb`. */
+  advisory_cache_mb: number
+  /** The host's free GTT pool, MiB; null when the host gave no reading. */
+  host_free_mb: number | null
+  /** Advisory fit of `resident_mb` against the pool; never blocks a load. A slot
+   *  already holding the layout reads 'loaded' instead of being judged against
+   *  the memory that is left. */
+  verdict: 'fits' | 'tight' | 'exceeds' | 'exceeds_total' | 'loaded' | 'unknown'
+}
+
 /** Full resolved-command payload from GET /api/slots/{name}/resolved. */
 export interface SlotResolved {
   name: string
@@ -776,6 +814,9 @@ export interface SlotResolved {
     variant: string | null
     unavailable_reason: string | null
   }
+  /** Memory readout for a halogen slot; null for any other slot, and for a
+   *  halogen slot with no model bound or no figure to give. */
+  footprint?: SlotFootprint | null
 }
 
 /**

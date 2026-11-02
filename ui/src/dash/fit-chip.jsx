@@ -3,6 +3,7 @@
 // picker (inference-pane.jsx), so the two can never drift. Verdict word lives
 // in the title/aria-label; the chip itself is icon + estimated GB only.
 import React from 'react'
+import { FIT_VERDICTS } from './fit-verdicts.js'
 import { draftVariantLabel, slotBolt } from './spec-state.js'
 
 const svgProps = {
@@ -24,16 +25,9 @@ const GLYPH = {
   err: <path d="M4 4l8 8M12 4l-8 8" />,
 }
 
-const VERDICTS = {
-  fits: { tone: 'ok', word: 'fits' },
-  tight: { tone: 'warn', word: 'tight' },
-  exceeds: { tone: 'err', word: "won't fit" },
-  exceeds_total: { tone: 'err', word: "won't fit" },
-}
-
 /** Icon + `~N GB` chip. Unknown verdicts render nothing (warn-never-block). */
 export function FitChip({ verdict, neededMb }) {
-  const v = VERDICTS[verdict]
+  const v = FIT_VERDICTS[verdict]
   if (!v) return null
   const gb = Math.round((neededMb ?? 0) / 1024)
   const title = `${v.word} · needs ~${gb} GB`

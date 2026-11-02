@@ -20,7 +20,7 @@ import { useModels, usePullJob } from "@/api/hooks/useModels";
 // Host-truth GTT feasibility signal (993ea3b6, drawer overhaul Task 11d) —
 // feeds the per-row fit chips on the Model picker.
 import { useModelsFeasibility } from "@/api/hooks/useModelsFeasibility";
-import { useProfiles } from "@/api/hooks/useProfiles";
+import { useProfiles, useProfileUpdate } from "@/api/hooks/useProfiles";
 import { useSystemInfo, deviceBackend } from "@/api/hooks/useRuntimes";
 import {
 	applyRunnerChoice,
@@ -28,6 +28,7 @@ import {
 	laneValues,
 	runnerOptions,
 	selectedRunnerKey,
+	effectiveRuntimeFamily,
 } from "./hw-cascade.js";
 // llama.cpp build-provenance formatter (h0/runner-provenance) — shared with
 // the Runner Images page so option labels and the RunnerCard can't drift.
@@ -40,7 +41,16 @@ import { formatProvenanceShort } from "./runner-images.jsx";
 // Profiles view's not-pulled runtime chip uses — reused verbatim here for
 // the Runtime RichSelect's inline Pull affordance rather than a second
 // hook that could resolve a pull target differently.
-import { runtimeChips, useRunnerPull, ProfileDrawer, ctxLabel } from "./profiles.jsx";
+import {
+	runtimeChips,
+	useRunnerPull,
+	ProfileDrawer,
+	ctxLabel,
+	halogenEngine,
+	halogenFlagsError,
+} from "./profiles.jsx";
+import { EngineSettings } from "./engine-settings.jsx";
+import { footprintLine } from "./halogen-footprint.js";
 import { RichSelect } from "./rich-select.jsx";
 import { FitChip, ModalityTag } from "./fit-chip.jsx";
 import { TuneBlock, tuneApplies } from "./slot-tune-block.jsx";
@@ -86,6 +96,119 @@ const {
 	useRef: useRefSM,
 	useCallback: useCallbackSM,
 } = React;
+
+// The halogen engine's settings for the slot's profile. Engine knobs live in
+// the profile's flags text as HALOGEN_NAME=value tokens (ADR-0029: the profile
+// owns the tune), so this block edits THAT profile through the profile update —
+// it never writes flags to the slot, and it commits on its own button rather
+// than on Save: a profile is shared, and the drawer's Cancel must not look as
+// if it could undo a profile write. A seed is read-only (the server refuses a
+// PUT with profiles.seed_immutable), so it shows the values and offers the same
+// "Duplicate & edit" fork the Profile row does.
+//
+// Mounted only for a halogen slot whose runner serves knobs, and keyed by the
+// profile name, so a profile pick starts a fresh draft and the hook below stays
+// out of every other slot's render.
+function SlotEngineBlock({ profile, engine, footprint, onDuplicate }) {
+	const update = useProfileUpdate();
+	const line = footprintLine(footprint);
+	const stored = profile.flags || "";
+	const readOnly = !!profile.seed;
+	// The unsaved text, with the stored text it started from: a profile that
+	// changed underneath (another tab, the refetch that follows our own save)
+	// retires the draft instead of overwriting the newer text.
+	const [draft, setDraft] = useStateSM(null);
+	const [saving, setSaving] = useStateSM(false);
+	const live = draft && draft.base === stored ? draft : null;
+	const flags = live ? live.flags : stored;
+	const dirty = !!live && !live.sent && flags !== stored;
+	const error = readOnly ? null : halogenFlagsError(flags, engine);
+	const toast = (msg, kind) => window.__hal0Toast && window.__hal0Toast(msg, kind);
+	const apply = async () => {
+		if (!dirty || error || saving) return;
+		setSaving(true);
+		try {
+			await update.mutateAsync({ name: profile.name, body: { flags } });
+			// Keep showing the saved text until the profile list refetches.
+			setDraft({ ...live, sent: true });
+			toast(`Profile ${profile.name} updated`, "ok");
+		} catch (err) {
+			toast(err?.message || "Could not save the engine settings", "err");
+		} finally {
+			setSaving(false);
+		}
+	};
+	return (
+		<div className="form-row" data-testid="slot-engine-block">
+			<div className="form-lbl">
+				<span>Engine</span>
+				<FieldInfoIcon description="The halogen engine's own settings. They are stored on the profile as HALOGEN_* flags, so every slot using the profile gets them." />
+			</div>
+			<div className="form-ctl">
+				<EngineSettings
+					knobs={engine.knobs}
+					flags={flags}
+					// Frozen while the save is in flight: `apply` closes over the draft from
+					// the click, so an edit made now would be dropped when it lands.
+					readOnly={readOnly || saving}
+					error={error}
+					onChange={(next) => setDraft({ base: stored, flags: next, sent: false })}
+				/>
+				{/* The server's memory figure for the SAVED profile, so an unsaved
+				    edit above does not move it until "Save to profile". */}
+				{line && (
+					<div
+						className="hint"
+						data-testid="slot-engine-footprint"
+						title="From the saved profile and the model bound to this slot"
+					>
+						<span data-testid="slot-engine-footprint-text">{line.text}</span>
+						{line.verdict && (
+							<>
+								{" "}
+								<span
+									className={`chip ${line.verdict.tone}`}
+									data-testid="slot-engine-footprint-verdict"
+									title={line.verdict.title}
+								>
+									{line.verdict.word}
+								</span>
+							</>
+						)}
+					</div>
+				)}
+				<div className="tune-foot">
+					<span className="hint" data-testid="slot-engine-note">
+						{readOnly
+							? `Profile ${profile.name} is a seed and read-only. Duplicate it to change these.`
+							: `Saved to profile ${profile.name}, read when the slot starts.`}
+					</span>
+					<span className="pf-grow" />
+					{readOnly ? (
+						<button
+							type="button"
+							className="btn ghost sm"
+							data-testid="slot-engine-duplicate"
+							onClick={onDuplicate}
+						>
+							Duplicate & edit
+						</button>
+					) : (
+						<button
+							type="button"
+							className="btn ghost sm"
+							data-testid="slot-engine-apply"
+							disabled={!dirty || !!error || saving}
+							onClick={apply}
+						>
+							{saving ? "Saving…" : "Save to profile"}
+						</button>
+					)}
+				</div>
+			</div>
+		</div>
+	);
+}
 
 // Map a slot lifecycle state to a chip color class.
 //   running healthy/serving → green (ok); starting/pulling → amber (warn);
@@ -1578,6 +1701,29 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		? runtimeOptions.find((o) => o.key === runtimeSel)
 		: null;
 	const laneVals = laneValues(selectedRuntimeOption);
+	// The runtime family this slot will launch on: the staged profile's family
+	// decides (as the launch dispatch does), `binary` and the lane default only
+	// while no profile row is known. ONE value, threaded to the model picker and
+	// the Tune block: a halogen slot binds only halogen models and has no
+	// n-gram drafter.
+	const runtimeFamily = effectiveRuntimeFamily({
+		binary,
+		profile: stagedProfileRow,
+		device: pendingDevice,
+		backends: hwBackends,
+	});
+	// The engine block shows for a halogen-family slot whose staged profile row
+	// is a real one (a quarantined entry has no flags) and whose runner serves
+	// knobs. Gated on the profile's own runner, never the slot's `binary`: the
+	// launch dispatch ignores `binary` for the family, and the knobs are the
+	// profile's flags. Null otherwise, which is every llama slot.
+	const halogenSlotEngine =
+		runtimeFamily === "halogen" && stagedProfileRow && !stagedProfileRow.quarantined
+			? (() => {
+					const engine = halogenEngine(stagedProfileRow.runner, hwBackends);
+					return engine && engine.knobs.length > 0 ? engine : null;
+				})()
+			: null;
 
 	return (
 		<>
@@ -1809,6 +1955,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								const compatible = compatibleModels(modelsQuery.data, {
 									type: slot.type,
 									slot,
+									runtimeFamily,
 								});
 								const cur = slot.model_id || slot.model || "";
 								const has = compatible.some((m) => m.id === cur);
@@ -1933,6 +2080,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 									canSaveAsProfile={!!cloneBaseRow}
 									onReset={() => setTuneForm({})}
 									disabled={degraded}
+									runtimeFamily={runtimeFamily}
 								/>
 							) : (
 								<div className="hint" data-testid="slot-launch-tune-note">
@@ -1940,6 +2088,20 @@ function EditSlotDrawer({ open, slot, onClose }) {
 									The model only holds facts about its file (chat template,
 									jinja, MTP heads): use “Edit model…”.
 								</div>
+							)}
+
+							{/* Halogen engine settings: the staged profile's HALOGEN_* flags,
+							    edited through the profile update, not the slot. */}
+							{halogenSlotEngine && (
+								<SlotEngineBlock
+									key={stagedProfileRow.name}
+									profile={stagedProfileRow}
+									engine={halogenSlotEngine}
+									footprint={resolvedQuery.data?.footprint}
+									onDuplicate={() =>
+										setProfileDrawer({ mode: "clone", source: stagedProfileRow })
+									}
+								/>
 							)}
 						</>
 					)}
@@ -2930,6 +3092,8 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
 	// useQuery's own caching means useModels() costs ~nothing when closed.
 	const modelsQuery = useModels();
 	const hwQuery = useHardware();
+	const profilesQuery = useProfiles();
+	const systemInfoQuery = useSystemInfo();
 	// UI-5 (state-driven): a live-container pick is stashed here and confirmed
 	// through the shared ConfirmDialog before committing. Must be declared
 	// before the early return (rules-of-hooks).
@@ -2939,12 +3103,21 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
 	const isContainer = slot.runtime === "container";
 	const ramFreeGb = hwQuery.data?.ram?.free ?? 0;
 	const isImage = slot.type === IMAGE_SLOT_TYPE;
+	// Same family rule as the drawer's picker: halogen slots offer halogen models only.
+	const profileRows = Array.isArray(profilesQuery.data) ? profilesQuery.data : [];
+	const runtimeFamily = effectiveRuntimeFamily({
+		binary: slot.binary,
+		profile: profileRows.find((p) => p.name === effectiveProfileName(slot)) || null,
+		device: slot.device,
+		backends: systemInfoQuery.data?.backends,
+	});
 	// No registry rows to offer an image slot (see IMAGE_SLOT_TYPE above).
 	const compatible = isImage
 		? []
 		: compatibleModels(modelsQuery.data, {
 				type: slot.type,
 				slot,
+				runtimeFamily,
 			});
 
 	// N2: container swap = cold systemctl restart (not a hot in-place swap).

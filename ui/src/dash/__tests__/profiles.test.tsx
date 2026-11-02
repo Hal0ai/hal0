@@ -96,6 +96,8 @@ vi.mock('@/api/hooks/useRunnerImages', () => ({
   }),
 }))
 
+import { HALOGEN_DENIED, HALOGEN_KNOBS } from './fixtures/halogen-knobs'
+
 await import('../primitives.jsx')
 const { ProfileDrawer, ProfileCard, ImportModal } = await import('../profiles.jsx')
 
@@ -924,5 +926,240 @@ describe('ProfileCard quarantined row (#2653)', () => {
     const del = host.querySelector('[data-testid="pf-btn-delete-broken"]') as HTMLButtonElement
     act(() => del.click())
     expect(onDelete).toHaveBeenCalledTimes(1)
+  })
+})
+
+
+// ── Halogen engine settings: the engine block above a collapsed Advanced flags ──
+
+const HALOGEN_BACKEND = {
+  image: 'registry.example/halogen-flash-server:1',
+  runtime_family: 'halogen',
+  device_class: 'gpu',
+  backend: 'rocm',
+  title: 'halogen (Flash-Next)',
+  blurb: 'Peonist engine for Qwen3.8-Flash-Next.',
+  tier: 'optional',
+  supported_backends: ['rocm'],
+  knobs: HALOGEN_KNOBS,
+  knob_denied: HALOGEN_DENIED,
+  state: 'installed',
+}
+
+describe('ProfileDrawer halogen engine settings', () => {
+  const drawer = (mode: string, source?: Record<string, unknown>) =>
+    mount(React.createElement(ProfileDrawer, { mode, source, onClose: () => {}, onSaved: () => {} }))
+  const halogenBox = () => {
+    systemInfoBox.current = { backends: { ...BACKENDS, halogen: HALOGEN_BACKEND }, hardware: GPU_HARDWARE }
+  }
+  const engine = (host: HTMLElement) => host.querySelector('[data-testid="pf-engine-settings"]')
+  const toggle = (host: HTMLElement) => field(host, 'pf-advanced-toggle')
+
+  it('shows the engine block, and collapses the flags field, only for a halogen-runner form', () => {
+    halogenBox()
+    const { host, root } = drawer('edit', { name: 'flash', flags: 'HALOGEN_KV_SLOTS=4', runner: 'halogen' })
+    expect(engine(host)).not.toBeNull()
+    expect(host.querySelectorAll('[data-testid^="engine-knob-"]')).toHaveLength(8)
+    expect((field(host, 'engine-input-HALOGEN_KV_SLOTS') as HTMLInputElement).value).toBe('4')
+    expect(field(host, 'pf-input-flags')).toBeNull()
+    expect(toggle(host)).not.toBeNull()
+    act(() => root.unmount())
+  })
+
+  it('renders exactly as before for a llama runner, an Auto runner and a runner the registry lacks', () => {
+    halogenBox()
+    for (const runner of ['standard', '', 'gone']) {
+      const { host, root } = drawer('edit', { name: 'x', flags: '-fa on', runner })
+      expect(engine(host)).toBeNull()
+      expect(toggle(host)).toBeNull()
+      expect(field(host, 'pf-input-flags')).not.toBeNull()
+      act(() => root.unmount())
+    }
+  })
+
+  it('degrades to the llama shape while system-info has not loaded the runner', () => {
+    systemInfoBox.current = { backends: BACKENDS, hardware: GPU_HARDWARE }
+    const { host, root } = drawer('edit', { name: 'flash', flags: '', runner: 'halogen' })
+    expect(engine(host)).toBeNull()
+    expect(field(host, 'pf-input-flags')).not.toBeNull()
+    act(() => root.unmount())
+  })
+
+  it('follows the Runtime select: the block appears when halogen is picked and goes when it is not', () => {
+    halogenBox()
+    const { host, root } = drawer('create')
+    expect(engine(host)).toBeNull()
+    pick(select(host), 'halogen')
+    expect(engine(host)).not.toBeNull()
+    expect(field(host, 'pf-input-flags')).toBeNull()
+    pick(select(host), 'standard')
+    expect(engine(host)).toBeNull()
+    expect(field(host, 'pf-input-flags')).not.toBeNull()
+    act(() => root.unmount())
+  })
+
+  const specOptions = (host: HTMLElement) =>
+    Array.from((field(host, 'pf-select-speculation') as HTMLSelectElement).options).map(o => o.value)
+
+  it('hides the n-gram speculation option for a halogen runner, which has no n-gram drafter', () => {
+    halogenBox()
+    const { host, root } = drawer('edit', { name: 'flash', flags: '', runner: 'halogen' })
+    expect(specOptions(host)).toEqual(['auto', 'off'])
+    act(() => root.unmount())
+  })
+
+  it('offers n-gram again for a llama runner, an Auto runner and a runner the registry lacks', () => {
+    halogenBox()
+    for (const runner of ['standard', '', 'gone']) {
+      const { host, root } = drawer('edit', { name: 'x', flags: '', runner })
+      expect(specOptions(host)).toEqual(['auto', 'off', 'ngram'])
+      act(() => root.unmount())
+    }
+  })
+
+  it('follows the Runtime select for the n-gram option', () => {
+    halogenBox()
+    const { host, root } = drawer('create')
+    expect(specOptions(host)).toContain('ngram')
+    pick(select(host), 'halogen')
+    expect(specOptions(host)).toEqual(['auto', 'off'])
+    pick(select(host), 'standard')
+    expect(specOptions(host)).toContain('ngram')
+    act(() => root.unmount())
+  })
+
+  it('keeps a stored n-gram choice visible on a halogen form, labelled as unsupported, so the select never lies', () => {
+    halogenBox()
+    const { host, root } = drawer('edit', { name: 'flash', flags: '', runner: 'halogen', speculation: 'ngram' })
+    const sel = field(host, 'pf-select-speculation') as HTMLSelectElement
+    expect(sel.value).toBe('ngram')
+    expect(sel.selectedOptions[0].text).toContain('not available on this runtime')
+    act(() => root.unmount())
+  })
+
+  it('the Advanced disclosure opens the free-text flags, kept in step with the controls', () => {
+    halogenBox()
+    const { host, root } = drawer('edit', { name: 'flash', flags: 'HALOGEN_KV_SLOTS=4', runner: 'halogen' })
+    expect(toggle(host)?.getAttribute('aria-expanded')).toBe('false')
+    act(() => toggle(host)!.click())
+    expect(toggle(host)?.getAttribute('aria-expanded')).toBe('true')
+    const flags = field(host, 'pf-input-flags') as HTMLTextAreaElement
+    expect(flags.value).toBe('HALOGEN_KV_SLOTS=4')
+    setValue(field(host, 'engine-input-HALOGEN_KV_SLOTS') as HTMLInputElement, '8')
+    expect((field(host, 'pf-input-flags') as HTMLTextAreaElement).value).toBe('HALOGEN_KV_SLOTS=8')
+    setValue(field(host, 'pf-input-flags') as HTMLTextAreaElement, 'HALOGEN_KV_SLOTS=3 HALOGEN_KV8=1')
+    expect((field(host, 'engine-input-HALOGEN_KV_SLOTS') as HTMLInputElement).value).toBe('3')
+    expect(field(host, 'engine-switch-HALOGEN_KV8')?.getAttribute('aria-checked')).toBe('true')
+    act(() => root.unmount())
+  })
+
+  it('saves what the controls wrote as the profile flags', async () => {
+    halogenBox()
+    const { host, root } = drawer('create')
+    setValue(field(host, 'pf-input-name') as HTMLInputElement, 'flash')
+    pick(select(host), 'halogen')
+    setValue(field(host, 'engine-input-HALOGEN_KV_SLOTS') as HTMLInputElement, '4')
+    act(() => field(host, 'engine-opt-HALOGEN_MAX_TOK-32768')!.click())
+    await submit(host)
+    expect(createCalls).toHaveLength(1)
+    const body = createCalls[0] as Record<string, unknown>
+    expect(body.runner).toBe('halogen')
+    expect(body.flags).toBe('HALOGEN_KV_SLOTS=4 HALOGEN_MAX_TOK=32768')
+    act(() => root.unmount())
+  })
+
+  it('refuses HALOGEN_API_PORT=1 inline, in the engine block, and does not save', async () => {
+    halogenBox()
+    const { host, root } = drawer('edit', { name: 'flash', flags: 'HALOGEN_API_PORT=1', runner: 'halogen' })
+    await submit(host)
+    expect(updateCalls).toHaveLength(0)
+    expect(engine(host)?.textContent).toContain('HALOGEN_API_PORT')
+    expect(engine(host)?.textContent).toContain("can't be set on a profile")
+    // Removing the token releases the save.
+    act(() => toggle(host)!.click())
+    setValue(field(host, 'pf-input-flags') as HTMLTextAreaElement, 'HALOGEN_KV_SLOTS=4')
+    await submit(host)
+    expect(updateCalls).toHaveLength(1)
+    act(() => root.unmount())
+  })
+
+  it('refuses every denied name the server lists, prefixes included, and a stored one on save', async () => {
+    halogenBox()
+    for (const flags of ['HALOGEN_CTX=4096', 'HALOGEN_NPU_X=1', 'HALOGEN_RECORD_PATH=/x']) {
+      updateCalls.length = 0
+      const { host, root } = drawer('edit', { name: 'old', flags, runner: 'halogen' })
+      await submit(host)
+      expect(updateCalls).toHaveLength(0)
+      expect(engine(host)?.textContent).toContain(flags.split('=')[0])
+      act(() => root.unmount())
+    }
+  })
+
+  it('refuses a value outside the knob range, a non-env token and an unbalanced quote', async () => {
+    halogenBox()
+    const cases: Array<[string, string]> = [
+      ['HALOGEN_KV_SLOTS=999', 'at most 64'],
+      ['HALOGEN_KV8=2', '0 or 1'],
+      ['HALOGEN_MAX_TOK=8192', '16384, 32768'],
+      ['-fa on', 'HALOGEN_NAME=value'],
+      ['HALOGEN_MSG="open', 'unbalanced quote'],
+    ]
+    for (const [flags, message] of cases) {
+      updateCalls.length = 0
+      const { host, root } = drawer('edit', { name: 'old', flags, runner: 'halogen' })
+      await submit(host)
+      expect(updateCalls).toHaveLength(0)
+      expect(engine(host)?.textContent).toContain(message)
+      act(() => root.unmount())
+    }
+  })
+
+  it('does not run the llama screens on halogen flags, and quoted values pass whole', async () => {
+    halogenBox()
+    const { host, root } = drawer('edit', {
+      name: 'old',
+      flags: 'HALOGEN_THINKING_BUDGET_MESSAGE="Time is up." HALOGEN_FUTURE_KNOB=7',
+      runner: 'halogen',
+    })
+    await submit(host)
+    expect(updateCalls).toHaveLength(1)
+    expect((updateCalls[0] as { body: Record<string, unknown> }).body.flags).toBe(
+      'HALOGEN_THINKING_BUDGET_MESSAGE="Time is up." HALOGEN_FUTURE_KNOB=7',
+    )
+    act(() => root.unmount())
+  })
+
+  it('opens the Advanced flags when the error comes from the text it holds', async () => {
+    halogenBox()
+    const { host, root } = drawer('edit', { name: 'old', flags: 'HALOGEN_API_PORT=1', runner: 'halogen' })
+    expect(field(host, 'pf-input-flags')).toBeNull()
+    await submit(host)
+    expect(field(host, 'pf-input-flags')).not.toBeNull()
+    expect(field(host, 'pf-input-flags')?.getAttribute('aria-invalid')).toBe('true')
+    act(() => root.unmount())
+  })
+
+  it('a halogen runner that serves no knobs keeps the plain flags field and still screens its shape', async () => {
+    systemInfoBox.current = {
+      backends: { ...BACKENDS, halogen: { ...HALOGEN_BACKEND, knobs: [], knob_denied: [] } },
+      hardware: GPU_HARDWARE,
+    }
+    const { host, root } = drawer('edit', { name: 'flash', flags: '-fa on', runner: 'halogen' })
+    expect(engine(host)).toBeNull()
+    expect(toggle(host)).toBeNull()
+    await submit(host)
+    expect(updateCalls).toHaveLength(0)
+    expect(field(host, 'pf-input-flags')).not.toBeNull()
+    expect(host.textContent).toContain('HALOGEN_NAME=value')
+    act(() => root.unmount())
+  })
+
+  it('the llama screens still run on a llama runner when the same text is typed', async () => {
+    halogenBox()
+    const { host, root } = drawer('edit', { name: 'old', flags: 'HALOGEN_KV_SLOTS=4', runner: 'standard' })
+    await submit(host)
+    expect(updateCalls).toHaveLength(0)
+    expect(host.textContent).toContain('has no flag in front of it')
+    act(() => root.unmount())
   })
 })
