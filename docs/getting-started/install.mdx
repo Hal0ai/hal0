@@ -187,8 +187,9 @@ fails on this machine is shown greyed with the reason and cannot be turned on.
 
 The answer on screen wins over the environment: a row toggled on overrides an env
 knob that would have skipped it (the installer unsets the matching
-`HAL0_SKIP_<X>`, or `HAL0_IMAGE_MODELS=none` for ComfyUI). The chosen set is
-written to the install log as one line.
+`HAL0_SKIP_<X>`, or `HAL0_IMAGE_MODELS=none` for ComfyUI). `HAL0_SKIP_SETUP=1` is
+not a per-row knob: it still skips the brain and image-model steps whatever those
+rows say. The chosen set is written to the install log as one line.
 
 The checklist does not appear on an upgrade, with `--dev` or `--no-start`,
 without a terminal, with `HAL0_NONINTERACTIVE=1`, or when you pass any
@@ -203,9 +204,10 @@ To add a skipped component later:
 `hal0 app install openwebui`, `hal0 agent install hermes`,
 `sudo hal0 agent install pi`, `hal0 comfyui models install <id>`, and
 `hal0 model pull <id>` for the brain model. Hindsight memory has no deferred
-install command; re-run the installer to add it. A re-run also re-enables
-every other component you skipped unless you repeat the opt-outs, for example
-`sudo bash install.sh --no-owui --no-comfyui --no-hermes --no-pi --no-brain-model`.
+install command; re-run the installer to add it. A re-run also re-enables the
+other components you skipped, except Pi, which stays opt-in, unless you repeat
+the opt-outs, for example
+`sudo bash install.sh --no-owui --no-comfyui --no-hermes --no-brain-model`.
 
 ### Install log and failure reports
 
