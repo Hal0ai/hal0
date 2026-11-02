@@ -683,6 +683,29 @@ def guard_and_normalize_tune(merged: dict[str, Any], updates: dict[str, Any]) ->
         merged.pop("tune", None)
 
 
+#: Stored tune keys whose validity depends on the profile's engine family, so a
+#: profile switch must re-judge them (#3281).
+_PROFILE_JUDGED_TUNE_KEYS = ("ctx_size", "speculation")
+
+
+def _tune_updates_for_profile_switch(
+    merged: dict[str, Any], updates: dict[str, Any]
+) -> dict[str, Any]:
+    """*updates*, plus the stored engine-family-sensitive tune keys on a profile switch.
+
+    ``guard_and_normalize_tune`` judges only the keys a write carries, so a
+    ``profile`` change alone left a stored ``ctx_size`` past a halogen engine's
+    native window unjudged (the next load exited 2). Carrying those stored keys
+    into the same guard keeps one code path and one error
+    (``slot.tune_unsupported_value``).
+    """
+    if "profile" not in updates or "tune" in updates:
+        return updates
+    stored = merged.get("tune") or {}
+    carried = {k: stored[k] for k in _PROFILE_JUDGED_TUNE_KEYS if stored.get(k) is not None}
+    return {**updates, "tune": carried} if carried else updates
+
+
 def reconcile_and_guard_slot_config(
     slot_name: str,
     base: dict[str, Any],
@@ -714,7 +737,7 @@ def reconcile_and_guard_slot_config(
     guard_slot_write_payload(updates)
     merged = reconcile_slot_updates(base, updates)
     check_runner_family(merged, set(updates.keys()))
-    guard_and_normalize_tune(merged, updates)
+    guard_and_normalize_tune(merged, _tune_updates_for_profile_switch(merged, updates))
     check_npu_exclusivity(slot_name, merged, slots_dir=slots_dir)
     # Only the keys this apply actually carries drive the SC-4 guard — an
     # unrelated stack field must not be blocked by a stale duplicate-default
