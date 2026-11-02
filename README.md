@@ -197,8 +197,8 @@ On a Proxmox host:
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Hal0ai/hal0/main/scripts/proxmox-ve/hal0.sh)"
 ```
 
-Creates a privileged Ubuntu 26.04 LXC, forwards the host's GPU and NPU nodes
-when it has any, and runs the standard bootstrap inside it. Pass
+Creates a privileged Ubuntu 26.04 LXC, forwards the host's AMD GPU and NPU
+nodes when it has any, and runs the standard bootstrap inside it. Pass
 `UNPRIVILEGED=1` for the narrower container. `--advanced` opens whiptail
 prompts; every parameter has an env-var override (`CTID`, `RAM_MB`,
 `STORAGE`, …). See
