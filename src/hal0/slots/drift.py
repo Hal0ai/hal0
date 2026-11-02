@@ -43,6 +43,12 @@ from hal0.slots.npu.trio import is_npu_trio_shadow
 # str(port)]``), so a stale unit shows up as a plain value divergence — and
 # ``SlotManager._should_converge`` reads this same comparator to decide whether
 # an explicit load must re-render the unit.
+#
+# ``--device`` (#3235): the lane's ``-dev`` pin. The ``standard`` runner serves
+# the rocm and vulkan lanes from ONE image, so a same-image lane switch is
+# invisible to the image comparison below; the flag is the only signal. A
+# container started before the slot layer pinned ``--device`` carries none, so
+# it reads as one diff and the next ``slot load`` restarts it once.
 _CONFIG_DRIFT_KEYS: tuple[str, ...] = (
     "--ctx-size",
     "--model",
@@ -50,6 +56,7 @@ _CONFIG_DRIFT_KEYS: tuple[str, ...] = (
     "--port",
     "-b",
     "-ub",
+    "--device",
 )
 
 

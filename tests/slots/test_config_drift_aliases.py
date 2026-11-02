@@ -458,3 +458,78 @@ async def test_load_does_not_converge_a_slot_that_cannot_render(
     await sm.load("chat")
     assert len(container_stub.load_calls) == 1
     assert container_stub.unload_calls == []
+
+
+# ── #3235: lane (--device) drift on a same-image / cross-image switch ───────
+
+
+def test_device_flag_is_a_drift_key() -> None:
+    """``-dev`` canonicalizes onto the compared ``--device`` key (#3235)."""
+    assert "--device" in _CONFIG_DRIFT_KEYS
+    assert _argv_values(["-dev", "ROCm0"], _CONFIG_DRIFT_KEYS)["--device"] == "ROCm0"
+
+
+async def test_same_image_lane_switch_surfaces_as_drift_and_converges(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """#3235: vulkan -> rocm resolves to the SAME ``standard`` image, so only
+    ``--device`` differs. It must report drift and make ``load`` re-converge."""
+    base = ["--model", "/mnt/ai-models/qwen.gguf"]
+    container_stub.expected_argv_by_slot["chat"] = [*base, "--device", "ROCm0"]
+    container_stub.running_argv_by_slot["chat"] = [*base, "--device", "Vulkan0"]
+    container_stub.running_image_by_slot["chat"] = _STANDARD_IMAGE
+
+    sm = SlotManager()
+    await sm.load("chat")
+    snap = await sm.status("chat", include_config_drift=True)
+
+    drift = snap.metadata.get("config_drift")
+    assert drift is not None and drift["drifted"] is True
+    assert drift["diffs"] == [{"key": "--device", "running": "Vulkan0", "rendered": "ROCm0"}]
+
+    await sm.load("chat")
+    assert len(container_stub.load_calls) == 2
+
+
+async def test_cross_image_lane_switch_reports_device_and_image(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """A lane switch that also changes the image reports both diffs."""
+    base = ["--model", "/mnt/ai-models/qwen.gguf"]
+    container_stub.expected_argv_by_slot["chat"] = [*base, "--device", "Vulkan0"]
+    container_stub.running_argv_by_slot["chat"] = [*base, "-dev", "ROCm0"]
+    container_stub.running_image_by_slot["chat"] = "ghcr.io/hal0ai/hal0-toolbox-cpu:retired"
+
+    sm = SlotManager()
+    await sm.load("chat")
+    snap = await sm.status("chat", include_config_drift=True)
+
+    drift = snap.metadata.get("config_drift")
+    assert drift is not None
+    keys = [d["key"] for d in drift["diffs"]]
+    assert keys == ["--device", "image"]
+
+
+async def test_running_without_device_flag_is_one_drift_diff(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """A container predating the per-lane ``--device`` pin carries none: one
+    diff (running None), and no drift when the render pins none either."""
+    base = ["--model", "/mnt/ai-models/qwen.gguf"]
+    container_stub.expected_argv_by_slot["chat"] = [*base, "--device", "Vulkan0"]
+    container_stub.running_argv_by_slot["chat"] = list(base)
+    container_stub.running_image_by_slot["chat"] = _STANDARD_IMAGE
+
+    sm = SlotManager()
+    await sm.load("chat")
+    snap = await sm.status("chat", include_config_drift=True)
+    drift = snap.metadata.get("config_drift")
+    assert drift is not None
+    assert drift["diffs"] == [{"key": "--device", "running": None, "rendered": "Vulkan0"}]
+
+    container_stub.expected_argv_by_slot["chat"] = list(base)
+    snap = await sm.status("chat", include_config_drift=True)
+    assert snap.metadata.get("config_drift") == {"drifted": False, "diffs": []}
