@@ -2561,6 +2561,20 @@ class SlotManager:
                 self._deregister_container_upstream(slot_name)
                 observed = SlotState.OFFLINE
                 rec = self._states.get(self._key(slot_name)) or rec
+            elif rec.extra.get("stall_ceiling"):
+                # #3311: the mark says "the engine was left running", which is
+                # no longer true once the unit is dead. Keep the ERROR, its
+                # message and port, but retire the mark so the GTT-leak checks
+                # stop counting this slot as a memory holder.
+                await self._transition(
+                    slot_name,
+                    SlotState.ERROR,
+                    model_id=rec.model_id,
+                    port=rec.port,
+                    message=rec.message,
+                    force=True,
+                )
+                rec = self._states.get(self._key(slot_name)) or rec
         elif observed in (SlotState.OFFLINE, SlotState.ERROR) and active:
             # Inverse drift — state.json says we're not running, but
             # the unit is active. Adoption picks the slot up.
