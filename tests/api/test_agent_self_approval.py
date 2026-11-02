@@ -6,10 +6,14 @@ box admin key, and ``POST /api/agent/approvals/{id}/approve`` is an ADMIN route
 the auth layer opens to that key. So the tier check alone cannot tell an agent
 from its owner; the route's own check has to.
 
-The last two tests pin what this does NOT close. ADR-0048 records why: while an
-agent holds the admin key, or can read the session secret, it can obtain a
-session and decide with that. They are here so the day ADR-0024 items 1 and 4
-land, they fail and this docstring gets rewritten.
+The ``test_known_gap_*`` tests document what this does NOT close (ADR-0048 says
+why: while an agent holds the admin key, or can read the session secret, it can
+obtain a session and decide with that). They are records, not tripwires: they
+log in with the test's literal ``ADMIN_KEY``, mint a cookie from the test
+process, or send no key, so none of them fails when ADR-0024 items 1 and 4 land.
+Only ``test_agent_credential_is_the_admin_key_and_the_tier_alone_would_admit_it``
+trips, and only on item 1 (the agent stops being given the admin key); rewrite
+this docstring and the gap tests then.
 """
 
 from __future__ import annotations

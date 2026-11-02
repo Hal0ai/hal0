@@ -109,7 +109,12 @@ real gate ADR-0004 promises. A process running as `hal0` can still:
 
 Items 1 to 3 and 5 close only with ADR-0024 items 1 and 4: the agent stops holding
 the admin key, and stops being the same UID. `tests/api/test_agent_self_approval.py`
-pins 1, 2 and 4 as known gaps, so that work has to rewrite them.
+records 1, 2 and 4 as `test_known_gap_*` tests, but they are documentation, not
+tripwires: they log in with the test's own `ADMIN_KEY`, mint a cookie from the
+test process, or send no key, so none fails when that work lands. Only
+`test_agent_credential_is_the_admin_key_and_the_tier_alone_would_admit_it` trips,
+and only on item 1 (the agent stops being provisioned the admin key). Rewrite the
+gap tests as part of that work.
 
 ## Consequences
 

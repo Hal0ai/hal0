@@ -239,6 +239,68 @@ async def test_an_unbindable_socket_never_fails_the_boot(app: Any, tmp_path: Pat
     await stop()
 
 
+async def test_a_chmod_failure_closes_the_listener_and_never_fails_the_boot(
+    app: Any, sock_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _boom(*_a: Any, **_k: Any) -> None:
+        raise PermissionError("no chmod")
+
+    monkeypatch.setattr(approval_socket.os, "chmod", _boom)
+    stop = await approval_socket.start_server(app, path=sock_path, decider_uid=os.getuid())
+    await stop()
+    assert not sock_path.exists()
+    with pytest.raises(approval_socket.ApprovalSocketUnavailable):
+        approval_socket.send_decision("deny", "x", path=sock_path)
+
+
+async def test_stop_waits_for_a_slow_handler_up_to_the_bound(
+    app: Any, sock_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(approval_socket, "_STOP_TIMEOUT_S", 0.3)
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def _slow(_app: Any, *_a: Any) -> dict[str, Any]:
+        await release.wait()
+        finished.set()
+        return {"status": 200}
+
+    monkeypatch.setattr(approval_socket, "_decide", _slow)
+    stop = await approval_socket.start_server(app, path=sock_path, decider_uid=os.getuid())
+    request = asyncio.create_task(_send("deny", "x", sock_path))
+    await asyncio.sleep(0.1)  # handler is now in flight
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    stopper = asyncio.create_task(stop())
+    await asyncio.sleep(0.1)
+    assert not stopper.done()  # waiting on the handler, not returning at once
+    release.set()
+    await stopper
+    assert finished.is_set()
+    assert loop.time() - started < 0.3
+    assert (await request)["status"] == 200
+
+
+async def test_stop_gives_up_on_a_stuck_handler_after_the_bound(
+    app: Any, sock_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(approval_socket, "_STOP_TIMEOUT_S", 0.2)
+    release = asyncio.Event()
+
+    async def _stuck(_app: Any, *_a: Any) -> dict[str, Any]:
+        await release.wait()
+        return {"status": 200}
+
+    monkeypatch.setattr(approval_socket, "_decide", _stuck)
+    stop = await approval_socket.start_server(app, path=sock_path, decider_uid=os.getuid())
+    request = asyncio.create_task(_send("deny", "x", sock_path))
+    await asyncio.sleep(0.1)
+    await asyncio.wait_for(stop(), 2.0)  # returns despite the stuck handler
+    release.set()
+    await request
+
+
 def test_client_reports_a_missing_listener(sock_path: Path) -> None:
     with pytest.raises(approval_socket.ApprovalSocketUnavailable, match="is hal0-api running"):
         approval_socket.send_decision("deny", "x", path=sock_path)

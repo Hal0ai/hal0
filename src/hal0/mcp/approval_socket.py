@@ -59,6 +59,7 @@ ACTOR: Final[str] = "cli:root"
 _MAX_REQUEST_BYTES: Final[int] = 1024
 _READ_TIMEOUT_S: Final[float] = 5.0
 _DISCARD_TIMEOUT_S: Final[float] = 0.2
+_STOP_TIMEOUT_S: Final[float] = 2.0
 
 #: How long the CLI waits for a reply. ``approve`` awaits the gated tool itself,
 #: and a slot load can take minutes. The decision stands if the wait runs out.
@@ -208,7 +209,14 @@ async def start_server(
         )
         # Root reaches a 0600 socket regardless of owner, and nobody else who
         # could reach it would pass the peer check anyway.
-        os.chmod(target, 0o600)
+        try:
+            os.chmod(target, 0o600)
+        except OSError:
+            # Bound but not locked down: do not leave a listener behind.
+            server.close()
+            with contextlib.suppress(OSError):
+                target.unlink(missing_ok=True)
+            raise
     except (OSError, ValueError) as exc:
         log.warning("hal0.approvals.socket_unavailable", path=str(target), error=str(exc))
 
@@ -221,6 +229,9 @@ async def start_server(
         server.close()
         with contextlib.suppress(OSError):
             target.unlink(missing_ok=True)
+        # Let in-flight decisions finish, but never hold shutdown hostage.
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(server.wait_closed(), _STOP_TIMEOUT_S)
 
     return _stop
 
