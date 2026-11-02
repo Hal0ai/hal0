@@ -449,8 +449,8 @@ sudo hal0 agent approvals approve <id>   # let it run
 sudo hal0 agent approvals deny <id>      # reject it
 ```
 
-Deciding takes root or a dashboard session, never an API key; see
-[who can decide](/docs/concepts/agents#who-can-decide-an-approval).
+Deciding needs root or a dashboard session, not an API key
+([who can decide](/docs/concepts/agents#who-can-decide-an-approval)).
 
 Each pending row shows the request id, the tool, the requesting agent,
 when it was enqueued, and a one-line summary of the primary argument. The
