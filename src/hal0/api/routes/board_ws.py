@@ -169,10 +169,16 @@ async def proxy_board_events(browser_ws: WebSocket) -> None:
     finally:
         for t in tasks:
             t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        with contextlib.suppress(Exception):
-            await cm.__aexit__(None, None, None)
-        await _close_browser(browser_ws, code)
+        try:
+            # wait, not gather: a cancelled gather raises its child's CancelledError in
+            # place of the caller's, so an enclosing anyio cancel scope no longer
+            # recognises its own cancellation and lets it escape (#3320).
+            await asyncio.wait(tasks)
+        finally:
+            # A cancel landing in the wait above must not leave the upstream open.
+            with contextlib.suppress(Exception):
+                await cm.__aexit__(None, None, None)
+            await _close_browser(browser_ws, code)
 
 
 __all__ = ["proxy_board_events"]

@@ -7,13 +7,15 @@ Run targeted:
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
+import anyio
 import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from starlette.websockets import WebSocketDisconnect
+from starlette.websockets import WebSocketDisconnect, WebSocketState
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 from websockets.frames import Close
 
@@ -278,3 +280,94 @@ def test_ws_https_base_becomes_wss(app_client, monkeypatch) -> None:
     with client.websocket_connect("/api/board/events") as ws, pytest.raises(WebSocketDisconnect):
         ws.receive_text()
     assert urls[0].startswith("wss://hermes.test/api/plugins/kanban/events")
+
+
+# ---------------------------------------------------------------------------
+# Cancellation that lands during the proxy's own teardown (#3320).
+
+
+class _UnwindingUpstream:
+    """Holds until the proxy cancels its pump, then runs ``on_unwind`` before the pump ends.
+
+    ``on_unwind`` therefore cancels the proxy while its teardown is still waiting for
+    this pump, the window that #3320 hit by chance on a loaded runner.
+    """
+
+    def __init__(self, on_unwind) -> None:
+        self._on_unwind = on_unwind
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self._on_unwind()
+            raise
+        raise StopAsyncIteration
+
+    async def send(self, data) -> None:
+        return None
+
+
+class _LeavingBrowser:
+    """A browser socket whose peer has already left: the first receive says so."""
+
+    application_state = WebSocketState.CONNECTED
+    app = SimpleNamespace(state=SimpleNamespace())
+    url = SimpleNamespace(path="/api/board/events")
+
+    def __init__(self) -> None:
+        self.query_params: dict[str, str] = {}
+        self.close_codes: list[int] = []
+
+    async def receive(self) -> dict:
+        return {"type": "websocket.disconnect"}
+
+    async def close(self, code: int = 1000) -> None:
+        self.close_codes.append(code)
+
+
+@pytest.fixture
+def proxy_seams(monkeypatch):
+    """Stub what the proxy resolves before it connects; only the connect varies."""
+    monkeypatch.setattr(board_ws_mod, "resolve_board_client", lambda app: None)
+    monkeypatch.setattr(board_ws_mod, "read_dashboard_token", lambda: "tok")
+
+    def install(on_unwind) -> _FakeConnect:
+        fake = _FakeConnect(_UnwindingUpstream(on_unwind), [])
+        monkeypatch.setattr(board_ws_mod, "connect", fake)
+        return fake
+
+    return install
+
+
+async def test_cancel_scope_stays_recognisable_through_teardown(proxy_seams) -> None:
+    """An enclosing cancel scope must still recognise its own cancellation.
+
+    ``asyncio.gather`` hands a cancelled caller the *child's* ``CancelledError``,
+    which has lost the scope's message, so the scope lets it escape. That is the
+    ``concurrent.futures.CancelledError`` the ``TestClient`` raised at close (#3320).
+    """
+    browser = _LeavingBrowser()
+    with anyio.CancelScope() as scope:
+        fake = proxy_seams(scope.cancel)
+        await board_ws_mod.proxy_board_events(browser)
+
+    assert scope.cancelled_caught
+    assert fake.exited
+    assert browser.close_codes == [1000]
+
+
+async def test_cancelling_the_proxy_during_teardown_still_closes_both_sides(proxy_seams) -> None:
+    """A task cancel (server shutdown) mid-teardown must not skip the closes below it."""
+    browser = _LeavingBrowser()
+    fake = proxy_seams(lambda: task.cancel())
+    task = asyncio.ensure_future(board_ws_mod.proxy_board_events(browser))
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert fake.exited
+    assert browser.close_codes == [1000]
