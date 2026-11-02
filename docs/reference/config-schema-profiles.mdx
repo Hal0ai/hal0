@@ -93,11 +93,11 @@ copy — they can't be edited or deleted, only cloned.
 | Key | Type | Default | Constraints |
 |---|---|---|---|
 | `flags` | str | `""` | free llama-server flags: KV cache types, batch sizes, sampling, reasoning, `--parallel`. Screened on write and again at launch (below). |
-| `ctx_size` | int \| null | `null` | `128`–`16777216`. `null` = the model's native window, dense-capped at 32768, else 8192. |
+| `ctx_size` | int \| null | `null` | `128`–`16777216`. `null` = the model's native window, dense-capped at 32768, else 8192. On a halogen-runner profile a value past `262144` also needs `HALOGEN_ROPE_YARN` in `flags` (`422 profiles.halogen_flag_out_of_range`). |
 | `enable_thinking` | bool \| null | `null` | request-time reasoning default for slots running this profile |
 | `vision` | `"auto"\|"off"` | `"auto"` | `auto` loads the model's mmproj when it has one |
-| `speculation` | `"auto"\|"off"\|"ngram"` | `"auto"` | `auto` drafts with the model's paired drafter when the runner can run it, else with its MTP heads when it has them and the runner supports it; `ngram` uses n-gram lookup and needs no file; `off` never speculates. Replaces `mtp`: a stored or posted `mtp` is refused (`422 profiles.field_renamed` over the API) |
-| `runner` | str \| null | `null` | optional `RUNNER_IMAGES` registry key; applying the profile sets the slot's `binary` to this key and, for a single-backend runner, also derives the slot's `device` (profile wins). Validated on write — an unknown key 422s `profiles.unknown_runner`. `null` = flags-only tune (every seed profile). |
+| `speculation` | `"auto"\|"off"\|"ngram"` | `"auto"` | `auto` drafts with the model's paired drafter when the runner can run it, else with its MTP heads when it has them and the runner supports it; `ngram` uses n-gram lookup and needs no file (refused on a halogen-runner profile, `422 profiles.speculation_unsupported`: that engine takes `auto` or `off`); `off` never speculates. Replaces `mtp`: a stored or posted `mtp` is refused (`422 profiles.field_renamed` over the API) |
+| `runner` | str \| null | `null` | optional `RUNNER_IMAGES` registry key; applying the profile sets the slot's `binary` to this key and, for a single-backend runner, also derives the slot's `device` (profile wins). Validated on write — an unknown key 422s `profiles.unknown_runner`. `null` = flags-only tune; `halogen` is the one seed profile that sets `runner`. |
 | `cloned_from` | str \| null | `null` | provenance |
 | `intent` | str | `""` | dashboard card headline |
 

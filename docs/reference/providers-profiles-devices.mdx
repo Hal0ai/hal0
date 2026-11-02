@@ -24,13 +24,14 @@ process. Concrete implementations:
 | `ComfyUIProvider` | `providers/comfyui.py` | Image generation. |
 | `KokoroProvider` | `providers/kokoro.py` | TTS. |
 | `Qwen3TTSProvider` | `providers/qwen3tts.py` | TTS. |
+| `HalogenProvider` | `providers/halogen.py` | Qwen3.8-Flash-Next on the halogen engine (ROCm, gfx1151). |
 | `MoonshineProvider` | `providers/moonshine.py` | STT (CPU, ONNX). |
 
 Every `Provider` is stateless — no per-slot mutable state lives on the instance.
 Abstract methods: `build_env()`, `start_cmd()`, `health()`, `infer()`,
 `container_spec()`. `_spec_provider_for` dispatches each slot to its family
-provider by `runtime_family` — FLM, Kokoro, Qwen3TTS, Moonshine, ComfyUI each
-build their own `RuntimeLaunchPlan` (frozen dataclass: image, command/argv,
+provider by `runtime_family` — FLM, Kokoro, Qwen3TTS, Moonshine, ComfyUI,
+halogen each build their own `RuntimeLaunchPlan` (frozen dataclass: image, command/argv,
 env, typed mounts with read-only/SELinux flags, devices, cap_add,
 security_opt, port, network_mode, extra_args, optional health check); only
 plain llama-server slots fall through to `ContainerProvider.container_spec`.
@@ -98,7 +99,7 @@ different profile.
 | `enable_thinking` | Request-time reasoning default for slots running this profile (`true`/`false`/unset). |
 | `vision` | `auto` (default; loads the model's mmproj when it has one) or `off`. |
 | `speculation` | `auto` (default; drafts with the model's paired drafter when the runner can run it, else with its MTP heads when it has them and the runner supports it), `ngram` (n-gram lookup, no file needed) or `off`. Replaces `mtp`. Whether the file *has* heads is a model fact (the model's `mtp` field, else the `mtp` tag); the paired drafter is the model's `draft` field. |
-| `runner` | Optional `RUNNER_IMAGES` registry key (str \| null, default null). Applying this profile to a slot sets the slot's `binary` to this runner key, and — only for a single-backend runner — derives the slot's `device` too (the profile wins over the slot's prior device within a device class). `null` (the default; every seed profile) means a flags-only tune that never touches the slot's runtime/device. |
+| `runner` | Optional `RUNNER_IMAGES` registry key (str \| null, default null). Applying this profile to a slot sets the slot's `binary` to this runner key, and — only for a single-backend runner — derives the slot's `device` too (the profile wins over the slot's prior device within a device class). `null` (the default; every seed profile except `halogen`) means a flags-only tune that never touches the slot's runtime/device. |
 | `cloned_from` | Provenance — set when a profile was cloned from a seed. |
 | `intent` | Dashboard card headline. |
 
@@ -125,10 +126,11 @@ still referenced by a slot). Seed profiles are
 only cloned.
 
 A resolved profile (`ResolvedProfile`) adds derived fields: `runtime_family`
-(`llama-server, flm, kokoro, qwen3tts, moonshine, comfyui` — classified structurally off
-name, not by sniffing an image string), `supported_slot_types` (e.g.
-`flm` → `llm, embedding, transcription`; `kokoro`/`qwen3tts` → `tts`; `moonshine` →
-`transcription`; `comfyui` → `image`; everything else → `llm, embedding, reranking`),
+(`llama-server, flm, kokoro, qwen3tts, moonshine, comfyui, halogen` — classified structurally
+off the profile's `runner`, else its seed name, not by sniffing an image string),
+`supported_slot_types` (e.g. `flm` → `llm, embedding, transcription`;
+`kokoro`/`qwen3tts` → `tts`; `moonshine` → `transcription`; `comfyui` → `image`;
+`halogen` → `llm`; everything else → `llm, embedding, reranking`),
 `used_by` (slot names referencing the profile), and static `tps`/`rtf` numbers from the
 bench table.
 
@@ -156,7 +158,11 @@ A llama-server slot's command is built from four layers, lowest precedence first
 
 ### Seed profiles
 
-The code-shipped seeds are `chat`, `agent`, `utility`, `coding`, `embedding`, `reranking`, `cpu-chat`, `flm`, `kokoro`, `moonshine`, `qwen3-tts`, `comfyui` and `brain`. `ctx_size` is set by `agent`, `utility` and `brain` (`65536`), `embedding` and `reranking` (`4096`) and `flm` (`16384`). `vision = "off"` is set by `agent`, `coding` and `brain`. No seed sets `speculation`, `enable_thinking` or `runner`. A seed with no `ctx_size` follows the model's native window, capped at 32768 (8192 when the native window is unknown). The shipped slots point at these seeds.
+The code-shipped seeds are `chat`, `agent`, `utility`, `coding`, `embedding`, `reranking`, `cpu-chat`, `flm`, `kokoro`, `moonshine`, `qwen3-tts`, `comfyui`, `brain` and `halogen`. `ctx_size` is set by `agent`, `utility` and `brain` (`65536`), `embedding` and `reranking` (`4096`), `flm` (`16384`) and `halogen` (`262144`). `vision = "off"` is set by `agent`, `coding` and `brain`; `halogen` sets `vision = "auto"`. No seed sets `speculation` or `enable_thinking`, and `halogen` is the one seed that sets `runner` (`runner = "halogen"`). A seed with no `ctx_size` follows the model's native window, capped at 32768 (8192 when the native window is unknown). The shipped slots point at these seeds.
+
+### Halogen profiles
+
+A profile whose `runner` is `halogen` (the seed `halogen`, or a clone) configures an engine with no command-line flags: its `flags` are `HALOGEN_NAME=value` environment tokens, and the llama-server flag screen above does not apply to it. The halogen screen accepts only `^HALOGEN_[A-Z0-9_]+=.+$` tokens and refuses the names another layer owns (the listener, checkpoint and model id; the slot tune's context, thinking, reasoning, vision and speculation variables; `HALOGEN_DOWNLOAD`, `HALOGEN_API_KEY*`, `HALOGEN_NPU_*`, `HALOGEN_CACHE_DIR`, `HALOGEN_CACHE_FILE` and `HALOGEN_RECORD_*`), range-checks the curated engine settings, and refuses `HALOGEN_HOST_RESERVE_GIB` under 10, each with a 422 (`profiles.halogen_flag_malformed`, `profiles.halogen_flag_denied` with the owner of the name in `details`, `profiles.halogen_flag_out_of_range`). A profile `ctx_size` past the engine's native 262144 positions is refused the same way (`profiles.halogen_flag_out_of_range`) unless `flags` carries `HALOGEN_ROPE_YARN`. `speculation = "ngram"` is refused for the family (`profiles.speculation_unsupported`, 422; on a slot, `slot.tune_unsupported_value`, 400, which also refuses a context past the native window). `GET /api/system-info` lists each setting under `backends.halogen.knobs` and the refused names under `backends.halogen.knob_denied` (both are empty for every other runner). See [Run Flash-Next on halogen](/docs/guides/run-flash-next-on-halogen/#engine-settings).
 
 ## Runner images
 
@@ -176,10 +182,11 @@ The registry today:
 | `comfyui` | `comfyui` | `rocm` (device_class `img`) | `default` (ComfyUI) | Image and video generation. |
 | `qwen3tts` | `qwen3tts` | `rocm` | `optional` (Qwen3 TTS) | GPU TTS. |
 | `cuda` | `llama-server` | `cuda` | `optional` (NVIDIA CUDA) | NVIDIA GPUs. Pins the upstream `ghcr.io/ggml-org/llama.cpp` `server-cuda-b<N>` image rather than a hal0 build. |
+| `halogen` | `halogen` | `rocm` (device_class `gpu`) | `optional` (halogen (Flash-Next)) | Peonist's closed-source engine for Qwen3.8-Flash-Next on Strix Halo (gfx1151); checkpoints are `.hgn` files (`format_arch` `hgn`) and no llama drafter kinds apply. Pins the vendor's `ghcr.io/peonist-ai/halogen-flash-server` by tag and digest. Never derived from a device: a slot gets it from the `halogen` profile or the runtime picker. See [Run Flash-Next on halogen](/docs/guides/run-flash-next-on-halogen/). |
 
-Every other runner's image is `ghcr.io/hal0ai/hal0-runner-<key>`.
+Every other runner's image is `ghcr.io/hal0ai/hal0-runner-<key>`; `cuda` and `halogen` are the two external images (ADR-0047).
 
-A slot's `binary` field selects a runner key directly; left empty, it derives one from the slot's `device` via `hal0.runners.runner_for_backend` (`cuda` → `cuda`, `cpu` → `cpu`, anything else → `standard`). Either way, the slot's actual launch image is resolved through `hal0.providers.container._resolve_image_ref`: `slot.image_pin` (the debug-only escape hatch) outranks `[slots].default_images[<runner key>]` (an operator's per-runner override, settable from the dashboard), which outranks the `HAL0_RUNNER_IMAGE_<KEY>` env override (see [Environment variables: bootstrap, install-time & preflight](/docs/reference/env-vars-install/)), which outranks the `manifest.json` pin. A slot dispatched to a non-llama provider (ComfyUI, FLM, Kokoro, Moonshine, Qwen3-TTS) resolves through that provider instead, in the same order keyed by its runner key: `image_pin`, then (ComfyUI only) a plain `image` string, then `[slots].default_images[<key>]`, then the env override or pin.
+A slot's `binary` field selects a runner key directly; left empty, it derives one from the slot's `device` via `hal0.runners.runner_for_backend` (`cuda` → `cuda`, `cpu` → `cpu`, anything else → `standard`). Either way, the slot's actual launch image is resolved through `hal0.providers.container._resolve_image_ref`: `slot.image_pin` (the debug-only escape hatch) outranks `[slots].default_images[<runner key>]` (an operator's per-runner override, settable from the dashboard), which outranks the `HAL0_RUNNER_IMAGE_<KEY>` env override (see [Environment variables: bootstrap, install-time & preflight](/docs/reference/env-vars-install/)), which outranks the `manifest.json` pin. A slot dispatched to a non-llama provider (ComfyUI, FLM, Kokoro, Moonshine, Qwen3-TTS, halogen) resolves through that provider instead, in the same order keyed by its runner key: `image_pin`, then (ComfyUI only) a plain `image` string, then `[slots].default_images[<key>]`, then the env override or pin.
 
 ### Unsupported quantizations
 

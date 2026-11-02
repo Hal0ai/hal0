@@ -1,0 +1,401 @@
+---
+title: Run Flash-Next on halogen
+description: Serve Qwen3.8-Flash-Next with Peonist's halogen engine as an optional hal0 runner — the licence in short, host requirements, the memory it takes, staging the weights, creating the slot, the engine settings, and how to stop it without costing yourself a reboot.
+sidebar:
+  order: 17
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components';
+
+## What it is
+
+**halogen** is Peonist's inference engine for Qwen3.8-Flash-Next on AMD Strix
+Halo (gfx1151, ROCm). hal0 can run it as the runtime of one `llm` slot, so the
+model is served through hal0's own `/v1`, slot lifecycle, dashboard, memory
+accounting and update path, the same as any other runtime. The runner key is
+`halogen` (title **halogen (Flash-Next)**, tier **optional**), and the image is
+the vendor's own, pinned in `manifest.json` by tag `0.18.22` and digest
+`sha256:273714ccb64dabb7fac0418ee1b6dd83eb57d2fd44cf286eb68a7c694a27c203`. hal0
+never builds, patches or mirrors it. The design is recorded in ADR-0047
+(`docs/adr/0047-halogen-is-an-external-image-optional-runner.md` in the
+repository).
+
+The image is **ungated for now**. hal0's hardware gate for this runner
+(`gates/halogen.toml` in the runner-images repository) has no passing report for
+this digest yet, so the pin's `lanes_gated` list is empty. hal0 does not refuse
+the image for that, but treat your first load as a test run. The pin gains
+`lanes_gated: ["rocm"]` once the gate has passed for exactly this digest.
+
+It is opt-in. A box that never creates a halogen slot does not pull the image,
+register a model or see a new slot. The only visible differences are the
+**halogen (Flash-Next)** entry in the Runtime selects (listed after the default
+runtimes) and under **Optional runtimes** on the Runner Images page, and the
+`halogen` profile in the profile list.
+
+<Aside type="caution" title="One model, and most of the box">
+The engine runs one model family and is closed source. Its weights stay
+resident and its KV pool is reserved up front, so it is the biggest tenant on a
+128 GB machine by a wide margin. hal0 ships a layout that shares the box (below),
+but plan the rest of the box around it.
+</Aside>
+
+## The licence in short
+
+The engine is covered by the **Peonist EULA v0.1** (effective 25 August 2026,
+`LICENSE.md` in the
+[vendor repository](https://github.com/peonist-ai/halogen-flash-server/blob/v0.18.22/LICENSE.md)).
+In plain terms:
+
+- You may run it for any purpose, commercial and production use included, on any
+  number of machines, with no key and no fee.
+- You may redistribute it **unmodified**, including by mirroring it into your own
+  registry, with the EULA and `THIRD-PARTY-NOTICES.md` travelling with it. You
+  may not redistribute a modified image, or present a derivative as halogen.
+- It performs **no telemetry** and opens **no outbound connection**. The one
+  exception is `HALOGEN_DOWNLOAD`, which fetches weights from a repository you
+  name; hal0 never sets it, so the container stays offline.
+- You may benchmark it and publish the results. The vendor asks that you state
+  the version and the prompt set.
+- Saying that your product runs on halogen needs no permission; using the names
+  to endorse something does (see the vendor's
+  [trademark policy](https://github.com/peonist-ai/halogen-flash-server/blob/v0.18.22/TRADEMARKS.md)).
+- The model weights are **not** covered. They are separate files with their own
+  licence (Qwen3.8-Flash-Next's), and you are responsible for complying with it.
+- It is built for gfx1151 only and comes with no warranty.
+
+## Host requirements
+
+| Requirement | Detail |
+|---|---|
+| Chip | AMD Strix Halo (gfx1151) only. The engine's entrypoint refuses any GPU whose KFD `gfx_target_version` is not `110501`, and hal0 checks the same before it loads the slot. |
+| OS | Native Linux on the machine that owns the GPU, with ROCm/KFD. WSL2 is not supported. |
+| Devices | `/dev/kfd` and a render node under `/dev/dri`. hal0 passes the device nodes, the numeric render and video group ids, `--ipc=host`, an unlimited memlock limit and `apparmor`/`seccomp` unconfined (the same as its other GPU runners, and what a Proxmox LXC guest needs). |
+| Kernel | AMD's two gfx1151 KFD fixes and `CONFIG_HSA_AMD_SVM`. The vendor puts the floor at Linux 6.18.4, Ubuntu 24.04 HWE `6.17.0-19.19~24.04.2` or Ubuntu 24.04 OEM `6.14.0-1018`, each or later. Without SVM every read-only weight registration fails. The vendor's [troubleshooting page](https://github.com/peonist-ai/halogen-flash-server/blob/v0.18.22/docs/troubleshooting.md) shows how to read both from the KFD node's `properties` file. |
+| BIOS | Set the UMA frame buffer (the GPU carve-out) to its **minimum**, not Auto. The engine wants host RAM, not dedicated VRAM. |
+| Disk | A checkpoint plus its lookup table is about 110 GB for `ht43` and 119 GB for `v2`, on a local drive if you can (see [the memory it takes](#the-memory-it-takes)). |
+
+## The memory it takes
+
+The engine holds, once loaded: the checkpoint's weights (62.1 GiB for `v2`,
+53.7 GiB for `ht43`), a KV pool of about 29,500 bytes per position (16,712 with the
+8-bit KV cache), about 115 MiB per KV slot, prefill working memory of
+`8.8 GiB × MAX_TOK/32768 + 3.8 GiB`, and a prompt cache of about 115 MiB per
+entry (24 entries). It also streams a 47.7 GiB **lookup table** through the file
+cache on every request. The table is not resident, but it wants about 10 GiB of
+cache, or long prompts read from disk and crawl.
+
+What the vendor measures for `v2` at four layouts (`ht43` takes about 8 GiB less
+in every row):
+
+| Layout | The engine takes (`v2`) |
+|---|---|
+| The engine's Quickstart: pool 524,288, 4 slots, `MAX_TOK` 32768 | about 89 GiB |
+| Pool 262,144, 2 slots | about 82 GiB |
+| Pool 262,144, 2 slots, `MAX_TOK` 16384 (**hal0's seed**) | about 77 GiB |
+| Context 131,072, pool 131,072, 2 slots, `MAX_TOK` 16384 | about 74 GiB |
+
+hal0 books the seed layout at about 72 GiB on `ht43` and about 80 GiB on `v2`,
+plus 0.84 GiB when the vision tower loads: the vendor's row, with the prompt cache
+added. The Unified memory bar and the Slots page use that figure while the slot
+starts, then the larger of it and what the container measures. The lookup table's
+10 GiB of cache is shown as an advisory, never counted as resident.
+
+<Aside type="note" title="Read the engine's line, not `free`">
+At startup the engine logs how much room it left the rest of the machine:
+
+```
+host memory left for everything else: 465 contiguous 2 MiB blocks (12.4 GiB total, most of it not contiguous)
+```
+
+Size your other workloads to that line. With the weights locked in RAM, which
+the seed profile does (`HALOGEN_WEIGHTS_LOCK=1`), `free` and `MemAvailable` drop
+by the weights' size and are right. If the lock cannot be taken, the engine says
+so and runs unlocked, and then `free` overstates the memory available by about
+the size of the weights (62 GiB for `v2`), because the kernel counts them as
+reclaimable cache. Read it with `hal0 slot logs flash`.
+</Aside>
+
+When the box runs out of contiguous memory, allocations do not fail cleanly: the
+engine, or whatever asked for the memory, can stall for minutes at 100% of one
+core with no output. It looks exactly like a hang and is not a crash. hal0's
+admission refuses a load that its estimate says will not fit and evicts only idle,
+unpinned slots first. `agent`, `utility` and `npu` are pinned by default, so a
+halogen load does not take them down unless you un-pinned them.
+
+## Stage the weights
+
+hal0 does not download halogen's weights (it never sets `HALOGEN_DOWNLOAD`).
+Fetch them into your model store, then register the checkpoint. `hal0 model store`
+shows the store (the default is `/var/lib/hal0/models`).
+
+The repository `peonist-ai/halogen-qwen3.8-flash-next` holds every checkpoint and
+is about 307 GB, so ask for the files you need. For `ht43` (about 110 GB):
+
+```bash
+hf download peonist-ai/halogen-qwen3.8-flash-next \
+  --include qwen38-flash-next-ht43.hgn \
+  --include qwen38-flash-next-ngram.hgn \
+  --include qwen38-flash-next-vision.hgn \
+  --include "tokenizer/*" \
+  --local-dir <store>/halogen-flash-next
+```
+
+For `v2`, swap the first `--include` for `qwen38-flash-next-v2.hgn` (about 119 GB).
+Fetching the whole repository works too (`hf download peonist-ai/halogen-qwen3.8-flash-next
+--local-dir <store>/halogen-flash-next`), at 307 GB, and it holds both checkpoints
+if you want to switch later.
+
+The engine finds the lookup table (`qwen38-flash-next-ngram.hgn`), the vision
+sidecar (`qwen38-flash-next-vision.hgn`) and `tokenizer/` **beside** the
+checkpoint by name, so keep them in one directory. The vision sidecar is optional:
+without it the model serves text only.
+
+Register the checkpoint:
+
+```bash
+hal0 model add <store>/halogen-flash-next/qwen38-flash-next-ht43.hgn \
+  --id qwen3.8-flash-next-ht43
+```
+
+hal0 recognises a halogen checkpoint by its first four bytes (`HGN1`), whatever
+the file is called; a `.hgn` file without those bytes is only a low-confidence
+guess. The lookup table, vision sidecar, draft head and `*.overlay.hgn` files are
+companions, not models: `hal0 model scan` skips them, and `hal0 model add` on one
+is refused with `models.halogen_companion` (409) and points you at the checkpoint
+it belongs to. The `.hgn` extension is in the default `[models].file_extensions`;
+if you set that list yourself, add `".hgn"` to it.
+
+<Aside type="note">
+The registry refuses a mismatch by name, both when you save a slot and again at
+load (`slot.model_runtime_mismatch`, 400): a halogen checkpoint on a llama.cpp
+slot, or a GGUF on a halogen slot. The profile decides which runtime a slot
+launches, so a slot whose runtime is set to halogen under a llama.cpp profile is
+refused with `slot.runner_family_mismatch` (409); pick the `halogen` profile. A
+GGUF of Flash-Next does not run on halogen in this release.
+</Aside>
+
+To check what you staged, run `hal0 doctor profiles`. It reports each registered
+checkpoint: a failure (exit code 1) when the file is gone, does not start with
+`HGN1`, or has no `tokenizer/tokenizer.json` beside it, and a warning, ending on the
+exact `hf download` line, when the lookup table is missing. The vision sidecar is
+reported but never required. With `--json` the finding is
+`HAL0-HALOGEN-WEIGHTS-INCOMPLETE`.
+
+## Create the slot
+
+<Steps>
+1. Pull the image ahead of time. The `halogen` catalogue row ships with the
+   runner-images repository, so sync the catalogue first (**Sync now** on the Runner
+   Images page, or `hal0 runner-images sync`), then pull (the page's **Pull**, or
+   `hal0 runner-images pull halogen`). Then create a slot that runs the `halogen`
+   profile on the ROCm lane:
+
+   ```bash
+   hal0 slot create flash --type llm --hardware rocm --profile halogen \
+     --model qwen3.8-flash-next-ht43
+   ```
+
+   In the dashboard, open **Slots**, create a slot, pick **halogen (Flash-Next)**
+   in the **Runtime** select, and choose a checkpoint; the model picker lists only
+   halogen checkpoints.
+2. Load it: `hal0 slot load flash`. Before it touches anything, hal0 refuses a
+   host with no gfx1151 GPU (`slot.host_unsupported`, 409) and a checkpoint that is
+   missing, does not start with `HGN1`, or has no `tokenizer/tokenizer.json`
+   beside it (`slot.model_missing`), so a refused load costs the box none of its
+   idle slots. Then the engine reads the checkpoint and reserves the KV pool,
+   which takes minutes, not seconds. hal0 waits up to 10 minutes for the engine
+   to answer `/health` and report its capability probe `ok`. If the probe reads
+   `failed` for a full minute while the engine responds, hal0 stops waiting for
+   it, because that is the front end missing the engine's capability line and not
+   a broken engine. It then sends one short chat turn with thinking off (at most
+   32 tokens, within 60 seconds) to check the output before the slot reads ready.
+   If the engine has still not answered after the 10 minutes, the slot stays in
+   `warming` and is not ready; if systemd has parked the unit in `failed`, the
+   wait ends within seconds and the slot reports the failure.
+3. Call it through hal0 like any slot: `hal0/flash` (or the model id,
+   `qwen3.8-flash-next-ht43`) on `/v1/chat/completions`. Streaming, tool calls,
+   structured output and images (with the vision sidecar) pass through.
+</Steps>
+
+The slot's port stays on loopback behind hal0's `/v1`, which is the
+authenticated edge; the engine's own API key is never set.
+
+## `ht43` or `v2`
+
+| | `v2` | `ht43` |
+|---|---|---|
+| Weights in memory | 62.1 GiB | 53.7 GiB |
+| Prompts | the reference | read somewhat slower |
+| Decode with the draft head | the reference | a few percent slower |
+
+**Use `ht43` unless the box is dedicated to the engine.** hal0's seed, the
+examples here and the gate run all use it, because the 8 GiB it gives back is the
+difference between sharing the box comfortably and sharing it barely. On a
+machine of its own, `v2` is the vendor's default. The choice is the model on the
+slot: change it in the slot drawer's model picker or with
+`hal0 slot edit flash --model <id>`, then restart the slot.
+
+## What you see in the console
+
+- **The dock.** The `flash` pip follows the slot (starting, ready, error), and
+  the ticker carries its load, ready and failure events.
+- **Memory.** `flash` appears in the Unified memory bar and on the Slots page at the
+  estimate while it starts, then at the larger of the estimate and the container's
+  measured memory (see [the memory it takes](#the-memory-it-takes)).
+- **The slot drawer's memory line.** Under the **Engine** block, a line reads
+  `This layout: ~72 GiB resident · +10 GiB lookup-table cache advised · box has N
+  GiB free`, with a chip that says `fits`, `tight`, `won't fit` or `loaded`. It
+  comes from the `footprint` field of `GET /api/slots/{name}/resolved` (see
+  [the slot tune API](/docs/reference/api/rest-api/#slot-tune-api)), is computed
+  from the saved profile and the slot's model, and does not move until you
+  **Save to profile**. The chip is advice and never blocks a load.
+- **The slot message.** A load hal0 refuses, or a start the engine fails, says why
+  in the slot message and in the journal.
+- **Logs.** `hal0 slot logs flash` carries the engine's startup lines, including
+  `host memory left for everything else` and, after a stop,
+  `GTT in use after the engine exited`.
+
+## Engine settings
+
+The engine has no command-line flags. Everything it reads is a `HALOGEN_*`
+environment variable, so a halogen profile's `flags` are `HALOGEN_NAME=value`
+tokens, not llama-server flags (the profile is the whole tune, ADR-0029). The
+profile drawer shows an **Engine** block for a halogen profile, above the
+free-text **Advanced** flags, and the slot drawer shows the same block for the
+slot's profile with **Save to profile**. A seed profile is read-only: use
+**Duplicate & edit**. Changes are read when the slot starts, so restart it.
+
+| Setting | Variable | Seed | Effect |
+|---|---|---|---|
+| KV pool positions | `HALOGEN_KV_POOL_POSITIONS` | 262144 | Attention positions kept resident across all conversations, about 29,500 bytes each. The main memory lever. |
+| KV slots | `HALOGEN_KV_SLOTS` | 2 | Conversations generating at once, about 115 MiB each. The pool, not this, decides how many stay resident. |
+| Prefill chunk | `HALOGEN_MAX_TOK` | 16384 | Largest single prefill call (16384 or 32768). 16384 saves roughly 4 to 5 GiB of working memory for about 9% slower prefill. |
+| Lock weights | `HALOGEN_WEIGHTS_LOCK` | 1 | Locks the weights in RAM so the kernel cannot reclaim them under pressure. |
+| 8-bit KV cache | `HALOGEN_KV8` | off | About half the pool memory. A numeric change: drafted text can differ. |
+| Prompt cache | `HALOGEN_PROMPT_CACHE` | 2 | 2 resumes a cached prompt from anywhere, 1 only at prefill-chunk boundaries, 0 turns it off. |
+| Default max tokens | `HALOGEN_MAX_TOKENS_DEFAULT` | unset | Budget for a request that sends none (8192 on chat by default). |
+| Host memory reserve | `HALOGEN_HOST_RESERVE_GIB` | 20 | RAM left free when the pool is sized. hal0 refuses a value under 10, because the lookup table then has no page cache. |
+
+hal0 owns the rest. The listener (`HALOGEN_API_PORT`, `HALOGEN_BIND`), the
+checkpoint and the model id come from the slot and the model row. Context,
+thinking, reasoning effort and budget, vision and speculation come from the
+slot's **Tune** block (ADR-0045), which maps onto `HALOGEN_CTX`,
+`HALOGEN_ENABLE_THINKING`, `HALOGEN_REASONING_EFFORT`,
+`HALOGEN_MAX_THINKING_TOKENS`, `HALOGEN_VISION_TOWER` and
+`HALOGEN_DRAFTER_DEFAULT`/`HALOGEN_PLD`. A profile that names any of these is
+refused (`profiles.halogen_flag_denied`, 422), and the error names the owner
+(`slot port`, `model row`, `tune` or `hal0`). Vision `auto` loads the
+tower only when `qwen38-flash-next-vision.hgn` sits beside the checkpoint (0.84 GiB
+resident); `off` never does. Speculation takes `auto` (the
+engine's own draft head plus prompt lookup) or `off`. **There is no `ngram`
+option:** the engine has no n-gram drafter, so the drawer hides it and a write
+that asks for it is refused rather than silently running `auto`
+(`slot.tune_unsupported_value` on a slot, `profiles.speculation_unsupported` on a
+profile). A context window past the engine's native 262,144 positions is refused
+the same way unless the profile's flags carry `HALOGEN_ROPE_YARN`, because the
+engine would exit at once; that is `slot.tune_unsupported_value` on a slot and
+`profiles.halogen_flag_out_of_range` on a profile.
+
+Every other `HALOGEN_*` variable in the vendor's
+[flag reference](https://github.com/peonist-ai/halogen-flash-server/blob/v0.18.22/docs/FLAGS.md)
+can be typed into the **Advanced** flags, as `HALOGEN_NAME=value` tokens with a
+value (anything else is `profiles.halogen_flag_malformed`). The exceptions are the
+names hal0 owns
+(`HALOGEN_API_PORT`, `HALOGEN_PORT`, `HALOGEN_BIND`, `HALOGEN_ENGINE`,
+`HALOGEN_CHECKPOINT`, `HALOGEN_MODEL_ID`, `HALOGEN_TOKENIZER`,
+`HALOGEN_NGRAM_TABLE`, `HALOGEN_MTP_HEAD`), the tune's names above, and
+`HALOGEN_DOWNLOAD`, `HALOGEN_API_KEY*`, `HALOGEN_NPU_*`, `HALOGEN_CACHE_DIR`,
+`HALOGEN_CACHE_FILE` and `HALOGEN_RECORD_*`. A curated setting outside its range
+is `profiles.halogen_flag_out_of_range`. `GET /api/system-info` lists the curated
+settings under `backends.halogen.knobs` and every refused name under
+`backends.halogen.knob_denied`.
+
+## Stopping it, and when a start fails
+
+<Aside type="caution" title="Never kill -9 the engine">
+An unclean exit can leave tens of GiB of GPU memory held by the driver with no
+process behind it (the vendor's issue #79). Every later start then hangs at
+"reserving the KV pool" until the machine reboots. Do not `kill -9` the engine,
+`podman kill` or `podman rm -f` the container, or remove the slot's unit while it
+runs.
+</Aside>
+
+Stop and unload through hal0 (`hal0 slot unload flash`, the dashboard, or an
+eviction). The engine handles SIGTERM itself: it asks the engine to exit, waits up
+to 30 seconds, only then sends SIGKILL and waits up to 30 more, and finally logs
+the GTT it left. hal0 gives the unit 120 seconds for all of that (podman
+`--stop-timeout=120`, systemd `TimeoutStopSec=150`) and does not remove the unit
+or the container while it runs, so a stop can take up to two minutes.
+
+hal0 does **not** restart a halogen slot after the engine's own failure exits. The
+engine exits with status 1 for every runtime failure and status 2 for a configuration
+it refuses, and hal0's unit (`RestartPreventExitStatus=64 132 1 2`) never restarts
+after either, because a restart after an unclean exit is the loop that hangs. The
+slot stays in `error` (its unit in `failed`), with the reason in the journal and the
+slot message, and a start that fails this way ends the load's wait within seconds
+instead of running out the 10 minutes. Read it with `hal0 slot logs flash`, fix the cause, then
+load it yourself: `hal0 slot load flash`. A container killed from outside is not one
+of those exits: the unit restarts it the way it restarts any slot.
+
+A running slot is watched with a patient probe. hal0 asks `GET /health` with a
+35-second read timeout, and a read timeout or an HTTP 503 (the front end is up and
+the engine's own PING failed) reads as **stalled**, not dead: the engine can go
+silent for minutes when the box is short of memory, and taking it down then is what
+leaves the driver holding its memory. Only a connection that really breaks counts
+against the slot. A request that arrives during a stall waits at most five seconds
+and then gets a retryable 503 (`slot.loading`).
+
+### The GTT-leak warning
+
+Before it loads a halogen slot, hal0 checks the GPU's memory, and the `gtt_leak` row of
+`hal0 doctor all` checks the same thing. If the GPU holds more than 8 GiB, no process
+holds `/dev/kfd`, and no other GPU slot of this box is loading, loaded or stopping (or
+failed with its process possibly still alive), hal0 **warns** (in the log, in the slot
+message while the slot starts, and in the doctor row) and goes on with the load; it
+never refuses on this, and it says nothing when it cannot read one of those figures.
+The warning names both possible causes:
+
+- **Another guest holds the memory.** The GPU's counters are host-wide while hal0 only
+  sees its own slots, so on a hypervisor whose guests share the GPU, a sibling guest's
+  Vulkan slot looks exactly like this. Nothing is wrong, and nothing needs a reboot.
+- **A previous GPU process did not give the memory back** (the vendor's issue #79). A
+  start on top of a real leak can hang at "reserving the KV pool". The fix is to
+  **reboot the machine that owns the GPU**. On a hypervisor that is the host, and it
+  takes every guest with it. Restarting hal0, the container or the slot does not release it.
+
+To check by hand on that machine:
+
+```bash
+cat /sys/class/drm/card*/device/mem_info_gtt_used
+fuser -v /dev/kfd
+```
+
+If the first figure is large and nothing holds `/dev/kfd`, either something outside this
+box holds the memory or it has leaked: check the other guests first. The warning can only
+fire while no other GPU slot of this box could hold the memory, so a box running a Vulkan
+slot such as `utility` (which holds GPU memory without appearing under `/dev/kfd`) never
+trips it. The row warns and never fails.
+
+## What hal0 does not do with it
+
+- **The Anthropic and Responses wires.** The engine also serves
+  `/v1/messages` and `/v1/responses`, but hal0's `/v1` has neither route and the
+  slot port is loopback-fenced, so a client that speaks only those wires cannot
+  reach the engine through hal0. `/v1/chat/completions` and `/v1/completions` work.
+- **The NPU sidecar.** The engine can serve small models on the Ryzen AI NPU
+  (`HALOGEN_NPU_MODELS`). hal0 does not set it: FLM remains the NPU lane
+  (ADR-0003), and the sidecar has open hard-hang reports upstream.
+- **A GGUF of Flash-Next, the 1M-context configurations and the on-disk prompt
+  cache.** Not in this release.
+
+## See also
+
+- [Manage runner images](/docs/guides/manage-runner-images/) — the pin table, the
+  Runner Images page and how an image is chosen.
+- [Pull and register models](/docs/guides/pull-and-register-models/) — registering
+  a file you downloaded yourself.
+- [Manage slots](/docs/guides/manage-slots/) — creating, editing and restarting a
+  slot.
+- [Strix Halo](/docs/concepts/strix-halo/) — why one memory pool is shared.
+- [Providers, profiles & devices](/docs/reference/providers-profiles-devices/) —
+  the `halogen` runtime family and profile.

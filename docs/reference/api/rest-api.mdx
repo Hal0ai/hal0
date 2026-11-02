@@ -79,12 +79,32 @@ silently paper over.
 Only supplied keys change. A null key removes one override; `{"tune":null}`
 removes all. Slot creation applies the same type/device and thinking guards.
 
-Slot snapshots and `GET /api/slots/{name}/resolved` expose `tune_effective`:
-`ctx_size`, `enable_thinking`, `reasoning_effort`, `reasoning_budget`, `vision`,
-`speculation`, `sources`, and `reasoning_effort_unavailable`. Sources are
-`profile`, `slot` or `profile-flags`; unavailable is a string or null. This is
-an additive read contract. Model feasibility accepts a `slot` name per model
+Slot snapshots (`GET /api/slots`, `GET /api/slots/{name}`) expose
+`tune_effective`: `ctx_size`, `enable_thinking`, `reasoning_effort`,
+`reasoning_budget`, `vision`, `speculation`, `sources`,
+`reasoning_effort_unavailable` and `tune_unavailable`. So does
+`GET /api/slots/{name}/resolved` for a llama-server slot; the answer for a halogen
+slot, like that of every other non-llama runtime, has `argv: null` and no
+`tune_effective`. Sources are `profile`, `slot` or `profile-flags`;
+`reasoning_effort_unavailable` is a string or null. `tune_unavailable` maps each
+tune value the slot's engine cannot run to the reason, and is `{}` on a
+llama-server slot; on a halogen slot it is
+`{"speculation": "ngram: this engine has no n-gram drafter (auto or off)"}`.
+This is an additive read contract. Model feasibility accepts a `slot` name per model
 row to resolve its profile plus tune for the candidate; explicit `ctx` wins.
+
+Every `GET /api/slots/{name}/resolved` answer also carries `footprint`: `null` for a
+slot that is not on the halogen runtime and for a halogen slot with no model bound
+or no figure, otherwise `{"resident_mb", "advisory_cache_mb", "host_free_mb",
+"verdict"}`. `resident_mb` is the memory the engine's layout holds once loaded (the
+checkpoint, KV pool, per-slot state, working memory, prompt cache and vision tower,
+never the lookup table); `advisory_cache_mb` is the page cache the lookup table
+wants, about 10 GiB, which is advised and never part of `resident_mb`;
+`host_free_mb` is the host's free GTT pool, `null` when the host does not expose it.
+`verdict` is the advisory fit of the first against the third: `fits`, `tight`
+(within 10% of what is free), `exceeds`, `exceeds_total` (more than the whole pool)
+or `unknown` (no host reading), and `loaded` when the slot already holds the memory.
+It never blocks a load.
 
 ## Router groups
 

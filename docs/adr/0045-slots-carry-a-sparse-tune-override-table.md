@@ -2,7 +2,9 @@
 
 ## Status
 
-**ACCEPTED (2026-10-30).** An operator decision. Amends ADR-0029.
+**ACCEPTED (2026-10-30).** An operator decision. Amends ADR-0029. Amended by
+ADR-0047: the `tune_effective` read gains `tune_unavailable`, and
+`speculation = "ngram"` is refused for a halogen slot or profile.
 
 ## Context
 
