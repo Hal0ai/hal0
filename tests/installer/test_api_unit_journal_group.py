@@ -201,7 +201,8 @@ def test_installer_never_adds_hal0_to_the_journal_group() -> None:
 def test_only_the_api_unit_gets_the_journal_group() -> None:
     """No other unit, drop-in, heredoc or installer helper gets the grant."""
     for path in sorted(INSTALLER.rglob("*")):
-        if not path.is_file() or path == API_TEMPLATE:
+        # installer/ holds Python the suite imports, so __pycache__ appears here.
+        if not path.is_file() or path == API_TEMPLATE or "__pycache__" in path.parts:
             continue
         for line in _code_lines(path):
             if re.search(r"SupplementaryGroups\s*=", line):
