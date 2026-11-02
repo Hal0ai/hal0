@@ -75,6 +75,8 @@ applying. Add those subsections to a version's section to surface them; see
 
 - **Writes through the bridge teach tools stay private by default while Hermes's own notes are shared.** `agent_memory_add` still writes to the profile's private namespace unless the caller asks for the shared one; the shared-by-default change above covers Hermes profiles, the brain and Open WebUI, not this tool (ADR-0043).
 
+- **The Proxmox quick path no longer says a privileged container is required for GPU/NPU passthrough.** The `--advanced` prompt and the README now describe both shapes: an unprivileged container passes the devices through too, and a wrong device mapping is repaired on the host. The default stays privileged until #3327. ADR-0050 records that hal0 ships no OCI appliance and that an unprivileged LXC is the wrapper.
+
 ### Fixed
 
 - **An image request no longer unloads the LLMs while the img slot is crash-looping.** During the backoff, or while the slot was parked, each request drained and unloaded the LLM set, was refused, then reloaded it, interrupting chat and agent work for an image that could not be produced. It now answers 503 with `Retry-After` straight away and leaves the LLMs loaded. ([#3299](https://github.com/Hal0ai/hal0/issues/3299))

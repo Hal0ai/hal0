@@ -16,12 +16,13 @@
 # Defaults are the production hal0 shape:
 #
 #   * PRIVILEGED container. hal0 runs rootful podman slots that open the
-#     GPU compute node directly; an unprivileged container maps device
-#     ownership through the host's idmap, which costs hal0-user probes
-#     their GPU visibility and makes /dev/kfd gid repair impossible from
-#     inside (#1953). Set UNPRIVILEGED=1 for a CPU-only/Vulkan container.
-#     A privileged container's root is effectively host root — that is the
-#     trade this default makes, deliberately, for hardware access.
+#     GPU compute node directly, and a privileged container lets hal0 repair
+#     a mis-mapped /dev/kfd gid from inside (#1953). A privileged container's
+#     root is effectively host root — that is the trade this default makes,
+#     deliberately, for hardware access. UNPRIVILEGED=1 builds the narrower
+#     container: the GPU and NPU still pass through (validated on Strix Halo
+#     with OS_VERSION=24.04), and a wrong device mapping is repaired on the
+#     host. See ADR-0050 and docs/getting-started/proxmox.mdx.
 #   * Ubuntu 26.04. The FastFlowLM .deb and the toolbox images track it,
 #     and it ships a Python new enough for hal0's venv without backports.
 #   * nesting/keyctl/fuse/mknod features — podman-in-LXC needs them.
@@ -126,7 +127,7 @@ OS_TYPE="${OS_TYPE:-ubuntu}"
 OS_VERSION="${OS_VERSION:-26.04}"
 TEMPLATE_STORAGE="${TEMPLATE_STORAGE:-local}"
 # Privileged by default — see the header comment for why. UNPRIVILEGED=1
-# still produces the old vanilla container.
+# builds the narrower container, with the same device passthrough.
 UNPRIVILEGED="${UNPRIVILEGED:-0}"
 FEATURES="${FEATURES:-nesting=1,keyctl=1,fuse=1,mknod=1}"
 # auto = forward whatever the host actually has; 1 = same but fail if the
@@ -169,7 +170,7 @@ prompt_advanced() {
     fi
     PASSWORD=$(whiptail --passwordbox "Root password (blank = none, use pct enter)" 8 60 "" --title "hal0 LXC" 3>&1 1>&2 2>&3) || exit 1
 
-    if whiptail --yesno "Use a PRIVILEGED container? (recommended — required for GPU/NPU passthrough)" 8 70 --title "hal0 LXC"; then
+    if whiptail --yesno "Use a PRIVILEGED container?\n\nYes: hal0 can repair /dev/kfd from inside, but the container's root is effectively host root.\n\nNo: unprivileged. The GPU and NPU still pass through, and a wrong device mapping is repaired on the host." 14 70 --title "hal0 LXC"; then
         UNPRIVILEGED=0
     else
         UNPRIVILEGED=1
