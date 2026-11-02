@@ -365,7 +365,7 @@ async def halogen_footprint_readout(
     host: Any,
     slot_cfg: dict[str, Any],
     *,
-    state: str | None | Callable[[], str | None],
+    state: str | Callable[[], str | None] | None,
     model_registry: Any = None,
     sample_gpu: Callable[[], Awaitable[Any]] | None = None,
 ) -> dict[str, Any] | None:
