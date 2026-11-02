@@ -274,6 +274,20 @@ class SlotCrashLooping(SlotError):
     status = 503
 
 
+class SlotStallCeiling(SlotError):
+    """Load refused: the slot's ERROR is the stall ceiling's (#3282).
+
+    The engine answered nothing for the whole ceiling, but its unit is alive
+    and tearing a silent engine down is what leaves the driver holding its
+    memory. So the per-request lazy ``load()`` must not ``terminate()`` it the
+    way it does for a crashed slot; only the operator's ``hal0 slot restart``
+    clears this.
+    """
+
+    code = "slot.stall_ceiling"
+    status = 503
+
+
 class SlotTerminateTimeout(SlotError):
     """The container stop did not return inside its timeout (#1224).
 
@@ -509,6 +523,7 @@ __all__ = [
     "SlotOutputSanityFailed",
     "SlotPinned",
     "SlotSpawnFailed",
+    "SlotStallCeiling",
     "SlotState",
     "SlotStateRecord",
     "is_dispatchable_state",

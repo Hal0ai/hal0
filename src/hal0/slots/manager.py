@@ -102,6 +102,7 @@ from hal0.slots.state import (
     SlotOutputSanityFailed,
     SlotPinned,
     SlotSpawnFailed,
+    SlotStallCeiling,
     SlotState,
     SlotStateRecord,
     SlotTerminateTimeout,
@@ -1372,6 +1373,11 @@ class SlotManager:
         carried_extra: dict[str, Any] = dict(prior.extra) if prior else {}
         if extra:
             carried_extra.update(extra)
+        if not (extra and extra.get("stall_ceiling")):
+            # #3282: the stall-ceiling mark belongs to the one ERROR that
+            # stamped it; any other transition (leaving ERROR, or a different
+            # ERROR) retires it.
+            carried_extra.pop("stall_ceiling", None)
         if not (extra and extra.get("slow_stop")):
             # #2738: the slow-stop mark belongs to the one ERROR that stamped
             # it; any other transition (including a different ERROR) retires it.
@@ -1868,6 +1874,19 @@ class SlotManager:
                 # Fall through into the normal load below, which re-renders
                 # the unit from the current TOML.
             elif current == SlotState.ERROR:
+                # #3282: the stall ceiling's ERROR is a live unit with a silent
+                # engine. terminate() here would SIGTERM/SIGKILL it (the exact
+                # teardown that leaks the driver's memory), at request cadence.
+                # Refuse without touching the unit; ``restart`` goes through
+                # OFFLINE first and is unaffected.
+                stalled_rec = self._states.get(self._key(slot_name))
+                if stalled_rec is not None and stalled_rec.extra.get("stall_ceiling"):
+                    raise SlotStallCeiling(
+                        f"slot {slot_name!r} hit the stall ceiling: its model server "
+                        f"stopped answering /health. The engine was left running; "
+                        f"run `hal0 slot restart {slot_name}` to recycle it",
+                        details={"slot": slot_name, "restart": f"hal0 slot restart {slot_name}"},
+                    )
                 # Crash-loop breaker (issue i4): an ERROR slot is freely
                 # re-loadable per LEGAL_TRANSITIONS, but per-request lazy-
                 # load callers (dispatcher, v1 routes) must not respawn it
@@ -4619,6 +4638,15 @@ class SlotManager:
                 },
             )
             return None
+
+        # #3282: the stall ceiling's ERROR sticks. Adoption's non-strict probe
+        # reads a stall as healthy, so without this the slot would flip back to
+        # READY (and a fresh watcher) on the next status()/list(). Adopt only
+        # once the engine actually answers again.
+        if prior is not None and prior.extra.get("stall_ceiling"):
+            detail_ok, still_stalled = await self._watchdog._probe_health_detail(slot_name)
+            if not detail_ok or still_stalled:
+                return None
 
         # #790: an active unit is not necessarily ready. A still-loading or
         # wedged container is active to systemd while its model server isn't

@@ -342,8 +342,12 @@ A running slot is watched with a patient probe. hal0 asks `GET /health` with a
 the engine's own PING failed) reads as **stalled**, not dead: the engine can go
 silent for minutes when the box is short of memory, and taking it down then is what
 leaves the driver holding its memory. Only a connection that really breaks counts
-against the slot. A request that arrives during a stall waits at most five seconds
-and then gets a retryable 503 (`slot.loading`).
+against the slot. A stall is not tolerated forever: after 900 seconds (and at least ten
+probes) with no answered probe, and no request in flight, the slot turns to ERROR with a
+message naming the stall ceiling. The engine is not killed. The ERROR holds, even if the
+unit is still active, until the engine answers again or you run `hal0 slot restart <name>`;
+the next request is refused until then. A request that arrives during a stall waits at most
+five seconds and then gets a retryable 503 (`slot.loading`).
 
 ### The GTT-leak warning
 

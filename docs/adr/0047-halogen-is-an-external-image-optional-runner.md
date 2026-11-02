@@ -187,7 +187,11 @@ Four properties of the engine shape the decisions below:
    holding its memory. A stall is tolerated only up to a ceiling: 10 consecutive
    `stalled` probes spanning at least 900 s (the warming watchdog's figure), with
    no answered probe between, stamp the slot ERROR with a message naming the stall
-   ceiling. The engine is not killed; any answered probe resets the count. The
+   ceiling and marking it as the ceiling's. The engine is not killed, and the ERROR
+   sticks: adoption re-promotes the slot only once the engine answers again, and
+   the next request is refused (the lazy load does not terminate it) until
+   `hal0 slot restart <name>`. A slot with requests in flight is never stamped.
+   Any answered probe resets the count. The
    per-request readiness gate waits at most 5 s on that
    probe and reads a stall as "starting", so a request gets the retryable
    `slot.loading` 503 and does not sit out the stall.

@@ -89,9 +89,11 @@ _WARMING_STALE_AFTER_S: float = 900.0
 # hangs forever, which would sit READY indefinitely. So the slot goes ERROR
 # (no SIGKILL; the unit is left alone) once the stall has run BOTH this many
 # CONSECUTIVE probes AND this long without one answer in between. Any answered
-# probe resets both. 900 s matches the warming watchdog above; the probe floor
-# keeps a fast-failing stalled probe (an instant 503 every 2 s) from tripping
-# the ceiling on count alone and a slow one (35 s read timeouts) on time alone.
+# probe resets both. 900 s matches the warming watchdog above. A probe takes at
+# most ~40 s (the 35 s read timeout plus the poll interval), so 900 s already
+# implies at least 22 probes and the 10-strike condition never binds on its own;
+# it is a floor for a stub that answers instantly, where time alone would
+# otherwise decide.
 _STALL_CEILING_S: float = 900.0
 _STALL_CEILING_STRIKES: int = 10
 
@@ -101,6 +103,7 @@ class WatchdogHost(Protocol):
 
     _fail_watchers: dict[int, asyncio.Task[None]]
     _states: dict[int, SlotStateRecord]
+    _serving_count: dict[int, int]
 
     def _current_state(self, name: str) -> SlotState: ...
     def _key(self, name: str) -> int: ...
@@ -167,7 +170,7 @@ class SlotWatchdog:
         message: str,
         still_faulted: Callable[[], Awaitable[bool]],
         extra: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> bool:
         """Flip a confirmed-faulted slot to ``to_state`` under the per-slot lock.
 
         ``load``/``unload``/``restart`` hold ``host._lock(name)`` for the whole
@@ -180,11 +183,14 @@ class SlotWatchdog:
         we re-verify BOTH the live state AND the fault itself (``still_faulted``)
         before stamping — a load that converged healthy while the watcher waited
         for the lock is left untouched.
+
+        Returns whether it stamped: a caller that keeps watching must tell a
+        declined stamp (the slot is still live) from one that landed.
         """
         host = self._host
         async with host._lock(slot_name):
             if host._current_state(slot_name) not in _FAIL_WATCH_LIVE_STATES:
-                return
+                return False
             try:
                 faulted = await still_faulted()
             except Exception as exc:
@@ -192,11 +198,11 @@ class SlotWatchdog:
                     "slot.fail_watch_recheck_failed",
                     extra={"slot": slot_name, "error": str(exc)},
                 )
-                return
+                return False
             if not faulted:
                 # Fault cleared while we waited for the lock (a concurrent
                 # load/restart converged the slot) — leave it alone.
-                return
+                return False
             try:
                 await host._transition(
                     slot_name,
@@ -210,13 +216,21 @@ class SlotWatchdog:
                     "slot.fail_watch_transition_failed",
                     extra={"slot": slot_name, "error": str(exc)},
                 )
+                return False
+            return True
 
     async def _probe_unhealthy(self, slot_name: str) -> bool:
         """True when the model server still fails its /health probe."""
         return not await self.probe_health(slot_name)
 
     async def _probe_stalled(self, slot_name: str) -> bool:
-        """True when the model server's /health still reads ``stalled``."""
+        """True when /health still reads ``stalled`` and nothing is being served.
+
+        A long in-flight run holds the engine's PING down by itself, so a slot
+        with requests in flight is never stamped on a stall (#3282).
+        """
+        if self._host._serving_count.get(self._host._key(slot_name), 0) > 0:
+            return False
         healthy, stalled = await self._probe_health_detail(slot_name)
         return healthy and stalled
 
@@ -329,7 +343,7 @@ class SlotWatchdog:
                                 "stalled_s": round(now - stalled_since, 1),
                             },
                         )
-                        await self._stamp_locked(
+                        stamped = await self._stamp_locked(
                             slot_name,
                             SlotState.ERROR,
                             message=(
@@ -338,9 +352,18 @@ class SlotWatchdog:
                                 "consecutive probes)"
                             ),
                             still_faulted=lambda: self._probe_stalled(slot_name),
-                            extra={"health_ok": False},
+                            # ``stall_ceiling`` makes this ERROR stick: adoption
+                            # and the lazy load() both refuse it (#3282).
+                            extra={"health_ok": False, "stall_ceiling": True},
                         )
-                        return
+                        if stamped:
+                            return
+                        # Declined (the engine answered, or a request is in
+                        # flight): the slot is still live, so keep watching with
+                        # a fresh count rather than leave it unwatched.
+                        stall_probes = 0
+                        stalled_since = None
+                        continue
                     stall_probes = 0
                     stalled_since = None
                     if healthy:
