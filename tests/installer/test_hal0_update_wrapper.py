@@ -117,6 +117,12 @@ def test_hermes_gateway_forwards_no_arguments(installed: Path) -> None:
     assert argv == ["-I", "-m", "hal0.updater.privileged", "hermes-gateway"]
 
 
+def test_refresh_api_unit_forwards_no_arguments(installed: Path) -> None:
+    rc, argv, _ = _run(installed, "refresh-api-unit")
+    assert rc == 0
+    assert argv == ["-I", "-m", "hal0.updater.privileged", "refresh-api-unit"]
+
+
 def test_isolated_mode_is_always_used(installed: Path) -> None:
     """`-I` drops PYTHON* env vars, user site, and the CWD from sys.path.
 
@@ -128,6 +134,7 @@ def test_isolated_mode_is_always_used(installed: Path) -> None:
         ("stage", "stable"),
         ("activate", "hal0-1.0.0"),
         ("hermes-gateway",),
+        ("refresh-api-unit",),
     ):
         _, argv, _ = _run(installed, *args)
         assert argv[0] == "-I"
@@ -141,7 +148,7 @@ def test_help_lists_exactly_the_granted_verbs(installed: Path) -> None:
         check=False,
     )
     assert proc.returncode == 0
-    for verb in ("check", "stage", "activate", "discard", "hermes-gateway"):
+    for verb in ("check", "stage", "activate", "discard", "hermes-gateway", "refresh-api-unit"):
         assert verb in proc.stdout
 
 
@@ -323,6 +330,8 @@ def test_check_activate_discard_do_not_resolve_releases_url(
         ("discard", "hal0-" + "a" * 200),
         ("hermes-gateway", "/etc/passwd"),
         ("hermes-gateway", "--unit", "x"),
+        ("refresh-api-unit", "/etc/passwd"),
+        ("refresh-api-unit", "--unit", "x"),
     ],
 )
 def test_bad_input_is_refused_before_the_interpreter_runs(

@@ -224,8 +224,8 @@ def journalctl_failure_reason(stderr: str, returncode: int | None, unit: str) ->
         return (
             f"hal0-api cannot read the journal (journalctl: {detail}) — "
             "hal0-api.service is missing SupplementaryGroups=systemd-journal; "
-            "run `hal0 update` (it re-renders the unit) or re-run the installer, then "
-            "restart hal0-api (`hal0 doctor all` row 'API journal read' tracks it)"
+            "run `sudo /usr/lib/hal0/bin/hal0-update refresh-api-unit` and restart hal0-api "
+            "(`hal0 doctor all` row 'API journal read' tracks it)"
         )
     if lines:
         return f"journalctl exited with status {returncode}: {lines[-1]}"

@@ -203,6 +203,11 @@ case "${cmd}" in
     exec "${PY}" -I -m hal0.updater.privileged hermes-gateway
     ;;
 
+  refresh-api-unit)           # no arguments: re-render hal0-api.service from current
+    [[ $# -eq 0 ]] || die "refresh-api-unit takes no arguments"
+    exec "${PY}" -I -m hal0.updater.privileged refresh-api-unit
+    ;;
+
   discard)                    # discard <hal0-VERSION>   (rm -rf semantics)
     dir_name="${1:-}"; validate_dir_name "${dir_name}"
     exec "${PY}" -I -m hal0.updater.privileged discard "${dir_name}"
@@ -218,6 +223,8 @@ usage: hal0-update <command> [args]
   discard <hal0-VERSION>           remove a staged ${LIB_ROOT}/<dir> tree
   hermes-gateway                   rewrite an old-shape hermes-gateway unit, turn
                                    linger on for hal0 (never starts a stopped unit)
+  refresh-api-unit                 re-render hal0-api.service from the active release
+                                   (daemon-reload only, never restarts it)
 EOF
     ;;
 

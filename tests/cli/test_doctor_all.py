@@ -1826,8 +1826,9 @@ def test_api_journal_passes_when_process_holds_the_group() -> None:
 def test_api_journal_warns_when_process_lacks_the_group() -> None:
     check = _journal(ids=(999, {999, 44}))
     assert check.status == "warn"
-    # Fix text: re-run the installer once after updating to 1.4.0;
-    # `hal0 update` does not rewrite hal0-api.service.
+    # Fix text names the seam verb and the installer, never a plain `hal0 update`,
+    # which stops before activation when no newer release exists.
+    assert "refresh-api-unit" in check.detail
     assert "install.sh" in check.detail
     assert "/api/logs" in check.detail
     assert "systemd-journal" in check.detail

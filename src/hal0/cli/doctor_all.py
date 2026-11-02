@@ -668,6 +668,13 @@ def _journal_group_gid() -> int | None:
         return None
 
 
+#: `hal0 update` is no remedy here: with no newer release it stops before activation.
+_API_UNIT_REMEDY = (
+    "run `sudo /usr/lib/hal0/bin/hal0-update refresh-api-unit`, "
+    "then `sudo systemctl restart hal0-api`"
+)
+
+
 def check_api_journal_access(
     *,
     process_ids: Callable[[], tuple[int, set[int]] | None] | None = None,
@@ -677,10 +684,10 @@ def check_api_journal_access(
 
     hal0-api runs ``User=hal0`` and gets journal read from
     ``SupplementaryGroups=systemd-journal`` on its own unit, written by the
-    installer, and ``hal0 update`` re-renders the unit from the release that ships the template (#3160); a box
-    last updated by an older release keeps the old unit until the next update
-    or installer run, and until then the API's log views are silently empty. Advisory (``warn``): nothing else breaks. Both probes
-    are injectable for tests.
+    installer and refreshed whenever an update or rollback activates a release
+    (#3160). A unit that still lacks it leaves the API's log views silently empty
+    until it is refreshed and ``hal0-api`` restarts. Advisory (``warn``): nothing
+    else breaks. Both probes are injectable for tests.
     """
     probe_ids = process_ids if process_ids is not None else _api_process_ids
     probe_gid = journal_gid if journal_gid is not None else _journal_group_gid
@@ -716,9 +723,8 @@ def check_api_journal_access(
         title,
         _WARN,
         f"{_API_UNIT} is not running with the {_JOURNAL_GROUP} group, so /api/logs and "
-        "MCP logs_tail return no lines — run `hal0 update` (it re-renders "
-        "hal0-api.service), or re-run the installer "
-        "(curl -fsSL https://hal0.dev/install.sh | sudo bash), then restart hal0-api",
+        f"MCP logs_tail return no lines — {_API_UNIT_REMEDY}, or re-run the installer "
+        "(curl -fsSL https://hal0.dev/install.sh | sudo bash)",
     )
 
 
@@ -731,15 +737,16 @@ def check_api_unit_current(
 ) -> Check:
     """Does the installed ``hal0-api.service`` match the release's template? (#3160)
 
-    ``hal0 update`` re-renders the unit from ``installer/systemd/hal0-api.service.in``
-    with the per-box values recovered from the installed unit. This row renders
+    Activating a release re-renders the unit from
+    ``installer/systemd/hal0-api.service.in`` with the per-box values recovered
+    from the installed unit. This row renders
     the same way and compares, so a unit that predates a template change (stop
     budget, journal group, env files) shows up as a ``warn`` with the fix.
     Advisory: the daemon runs fine on the old unit. Probes are injectable.
     """
     import sys
 
-    from hal0.install.api_unit import TEMPLATE_RELPATH, desired_api_unit
+    from hal0.install.api_unit import TEMPLATE_RELPATH, desired_api_unit, loses_bind_host
 
     key, title = "api-unit", "API unit current"
     unit_path = Path("/etc/systemd/system") / _API_UNIT
@@ -781,13 +788,21 @@ def check_api_unit_current(
         return Check(key, title, _WARN, f"could not render {_API_UNIT} template: {exc}")
     if want == unit_text:
         return Check(key, title, _PASS, f"{_API_UNIT} matches the release template")
+    if loses_bind_host(unit_text):
+        return Check(
+            key,
+            title,
+            _WARN,
+            f"{_API_UNIT} passes --host but api.env does not set HAL0_BIND_HOST, so a refresh "
+            f"is held to keep the API on its address — set HAL0_BIND_HOST in api.env, then "
+            f"{_API_UNIT_REMEDY}",
+        )
     return Check(
         key,
         title,
         _WARN,
-        f"{_API_UNIT} differs from this release's template (an older install kept its "
-        "original unit) — run `hal0 update` or re-run the installer, then "
-        "`systemctl restart hal0-api`; drop-ins in hal0-api.service.d/ are kept",
+        f"{_API_UNIT} differs from this release's template (an earlier refresh failed, or "
+        f"it was edited by hand) — {_API_UNIT_REMEDY}; drop-ins in hal0-api.service.d/ are kept",
     )
 
 

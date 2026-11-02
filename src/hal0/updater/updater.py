@@ -2001,6 +2001,13 @@ def run_post_activation_migrations(
     ``unassigned_models`` lists every slot the runner-system conversion
     unassigned a model from.
     """
+    # hal0-api.service (#3160) depends on no config, so it goes before the fatal
+    # conversions and lands even when one of them stops this sequence. An actual
+    # update and install.sh only (same gate as the component catalog): the boot
+    # net leaves it to the next update, and doctor row `api-unit` reports it.
+    if converge_companions:
+        converge_api_unit(job_id=job_id)
+
     # The runner-system conversion (ADR-0028) runs FIRST and is fatal: it
     # rewrites raw TOML before anything validates config, because a removed
     # runner key in ``[slots].default_images`` fails config load. It backs up
@@ -3259,13 +3266,21 @@ def refresh_api_unit(target: Path, *, job_id: str | None = None) -> str:
     is rendered here and by ``install.sh`` through
     :func:`hal0.install.api_unit.render_api_unit`.
 
-    Same shape as :func:`refresh_gpu_perms_unit`: privileged-side only (a no-op
-    unless euid 0), best-effort, write only when the bytes differ, then
-    ``daemon-reload``. It NEVER restarts ``hal0-api``: the running daemon is the
-    process driving the update, and the new unit takes effect at the restart the
-    update flow already performs. ``hal0-api.service.d/`` drop-ins are not
-    touched, and per-box values (binary, workdir, env files) are recovered from
-    the installed unit, so operator layout survives.
+    Called only from a fresh interpreter of the activated release, by way of
+    :func:`converge_api_unit`, and deliberately NOT from
+    :func:`activate_release`. That function runs in the outgoing release, so a
+    call there could not reach the upgrade that introduces it, and on a rollback
+    the re-pip has already removed the renderer it would import.
+
+    Privileged-side only (a no-op unless euid 0), best-effort, write only when
+    the bytes differ, then ``daemon-reload``. A failed reload puts the previous
+    file back: a later run compares bytes, so a new file systemd never loaded
+    would read as ``"unchanged"`` forever. It NEVER restarts ``hal0-api``: the
+    running daemon is the process driving the update, and the new unit takes
+    effect at the restart the update flow already performs.
+    ``hal0-api.service.d/`` drop-ins are not touched, and per-box values (binary,
+    workdir, env files) are recovered from the installed unit, so operator layout
+    survives.
 
     A box with no installed unit is skipped: creating it is the installer's job
     (it also decides enablement). Returns ``"installed"``, ``"unchanged"``,
@@ -3273,7 +3288,7 @@ def refresh_api_unit(target: Path, *, job_id: str | None = None) -> str:
     """
     if os.geteuid() != 0:
         return "skipped"
-    from hal0.install.api_unit import TEMPLATE_RELPATH, desired_api_unit
+    from hal0.install.api_unit import TEMPLATE_RELPATH, desired_api_unit, loses_bind_host
 
     src = target / TEMPLATE_RELPATH
     dst = API_UNIT_DST
@@ -3285,6 +3300,13 @@ def refresh_api_unit(target: Path, *, job_id: str | None = None) -> str:
         return "skipped"
     try:
         installed = dst.read_text(encoding="utf-8")
+        if loses_bind_host(installed):
+            log.warning(
+                "updater.api_unit_refresh_held",
+                job_id=job_id,
+                remedy="set HAL0_BIND_HOST in api.env, then run hal0-update refresh-api-unit",
+            )
+            return "skipped"
         desired = desired_api_unit(
             src.read_text(encoding="utf-8"),
             installed=installed,
@@ -3293,16 +3315,58 @@ def refresh_api_unit(target: Path, *, job_id: str | None = None) -> str:
         )
         if desired == installed:
             return "unchanged"
-        tmp = dst.with_name(dst.name + ".tmp")
-        tmp.write_text(desired, encoding="utf-8")
-        os.chmod(tmp, 0o644)
-        os.replace(tmp, dst)
-        subprocess.run(["systemctl", "daemon-reload"], check=False, capture_output=True)
+        _write_unit_atomic(dst, desired)
     except (OSError, ValueError) as exc:
         log.warning("updater.api_unit_refresh_failed", job_id=job_id, error=str(exc))
         return "failed"
+    try:
+        reload = subprocess.run(
+            ["systemctl", "daemon-reload"], check=False, capture_output=True, timeout=30
+        )
+        reload_error = None if reload.returncode == 0 else f"rc={reload.returncode}"
+    except (OSError, subprocess.SubprocessError) as exc:
+        reload_error = str(exc)
+    if reload_error is not None:
+        log.warning(
+            "updater.api_unit_refresh_failed", job_id=job_id, error=f"daemon-reload: {reload_error}"
+        )
+        with contextlib.suppress(OSError):
+            _write_unit_atomic(dst, installed)
+        return "failed"
     log.info("updater.api_unit_refreshed", job_id=job_id, path=str(dst))
     return "installed"
+
+
+def _write_unit_atomic(dst: Path, text: str) -> None:
+    tmp = dst.with_name(dst.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, dst)
+
+
+def converge_api_unit(*, job_id: str | None = None) -> str:
+    """Refresh ``hal0-api.service`` from the release this process belongs to (#3160).
+
+    The one entry point, and an ABI like the migration child's script: it runs in
+    a fresh interpreter of the just-activated code, reached from
+    :func:`run_post_activation_migrations` on an update and from
+    :func:`_refresh_api_unit_after_swap` on a rollback. An update already runs the
+    incoming migrations and has already installed the incoming ``hal0-update``
+    wrapper (:func:`refresh_privileged_wrappers`, in the outgoing release's
+    ``activate_release``), so this works on the first update from a release that
+    has never heard of it. Never raises: a stale unit is what ``hal0 doctor all``
+    row ``api-unit`` reports, not a reason to fail an update.
+    """
+    from hal0.updater.privileged import UpdateSeam
+
+    try:
+        outcome = str(UpdateSeam(job_id=job_id).refresh_api_unit().get("api_unit", "failed"))
+    except Exception as exc:
+        log.warning("updater.api_unit_refresh_failed", job_id=job_id, error=str(exc))
+        return "failed"
+    if outcome == "failed":
+        log.warning("updater.api_unit_refresh_failed", job_id=job_id, error="root side failed")
+    return outcome
 
 
 #: Where systemd unit files live; a module constant so tests redirect it.
@@ -3648,7 +3712,6 @@ def activate_release(dir_name: str, *, job_id: str | None = None) -> dict[str, A
     wrappers = refresh_privileged_wrappers(target, job_id=job_id)
     path_links = refresh_path_links(target, job_id=job_id)
     gpu_perms_unit = refresh_gpu_perms_unit(target, job_id=job_id)
-    api_unit = refresh_api_unit(target, job_id=job_id)
     retired = remove_retired_artifacts(job_id=job_id)
 
     # Heal root-created tombstone locks on existing boxes (#2698), using
@@ -3678,7 +3741,6 @@ def activate_release(dir_name: str, *, job_id: str | None = None) -> dict[str, A
         "wrappers_refreshed": wrappers["refreshed"],
         "path_links_refreshed": path_links,
         "gpu_perms_unit": gpu_perms_unit,
-        "api_unit": api_unit,
         "retired_artifacts_removed": retired,
     }
 
@@ -3758,6 +3820,44 @@ async def _rerender_units_after_swap(job_id: str | None) -> None:
         )
 
 
+async def _refresh_api_unit_after_swap(job_id: str | None) -> None:
+    """On a rollback, refresh ``hal0-api.service`` through the rolled-back code.
+
+    An update reaches :func:`converge_api_unit` through the migration child, which
+    a rollback does not run. A fresh interpreter for the same reason as
+    :func:`_rerender_units_after_swap`, and the target may predate the function:
+    such a release has no template or seam verb either and keeps the newer unit,
+    which its code runs under unchanged. Non-fatal.
+    """
+    script = (
+        "from hal0.updater import updater\n"
+        "refresh = getattr(updater, 'converge_api_unit', None)\n"
+        "print(refresh() if refresh else 'absent')\n"
+    )
+    try:
+        proc = await asyncio.to_thread(
+            subprocess.run,
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except Exception as exc:
+        log.warning("updater.api_unit_refresh_failed", job_id=job_id, error=str(exc))
+        return
+    if proc.returncode != 0:
+        log.warning(
+            "updater.api_unit_refresh_failed",
+            job_id=job_id,
+            rc=proc.returncode,
+            stderr=(proc.stderr or "")[-500:],
+        )
+        return
+    log.info(
+        "updater.api_unit_rollback_refresh", job_id=job_id, outcome=(proc.stdout or "").strip()
+    )
+
+
 #: Sentinel key on the single JSON stdout line the migration subprocess
 #: emits. Mirrors :data:`hal0.updater.privileged._RESULT_KEY`'s exact
 #: contract: structured logs go to STDERR (see the script built below) so
@@ -3782,6 +3882,7 @@ _NON_FATAL_MIGRATION_FAILURE_EVENTS: tuple[str, ...] = (
     "updater.components_converge_failed",
     "updater.kokoro_bundle_pull_failed",
     "components.hermes_gateway_regen_failed",
+    "updater.api_unit_refresh_failed",
 )
 
 
@@ -4403,6 +4504,7 @@ class Updater:
         # binary flags it may not accept.
         if not _is_editable_install():
             await _rerender_units_after_swap(self.job_id)
+            await _refresh_api_unit_after_swap(self.job_id)
 
         # Re-record what we just swapped away from so a double-rollback
         # bounces between the two installs (matches haloai semantics).
@@ -4674,6 +4776,7 @@ __all__ = [
     "assert_release_dir_name",
     "assert_trusted_release_dir",
     "check_outstanding_migrations",
+    "converge_api_unit",
     "discard_release",
     "fetch_release_manifest",
     "refresh_api_unit",

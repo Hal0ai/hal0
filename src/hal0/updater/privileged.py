@@ -65,12 +65,14 @@ from hal0.system.seam import is_hal0_service_user
 from hal0.updater.updater import (
     UpdateError,
     UpdatePrivilegeError,
+    _current_symlink,
     _require_release_version,
     _usr_lib_root,
     activate_release,
     assert_release_dir_name,
     assert_trusted_release_dir,
     discard_release,
+    refresh_api_unit,
     stage_release,
 )
 
@@ -304,6 +306,17 @@ class UpdateSeam:
         except GatewayRegenError as exc:
             raise UpdateError(f"hermes gateway: {exc}", details={}) from exc
 
+    def refresh_api_unit(self) -> dict[str, Any]:
+        """Re-render ``hal0-api.service`` from the active release, as root (#3160).
+
+        Routed: ``sudo -n hal0-update refresh-api-unit``, a fresh root interpreter
+        of the code ``activate`` just installed. Unrouted, the same primitive runs
+        in-process, and is a no-op unless root. Returns ``{"api_unit": <outcome>}``.
+        """
+        if self.routed:
+            return self._invoke("refresh-api-unit", timeout=_SHORT_TIMEOUT)
+        return {"api_unit": refresh_api_unit(_current_symlink().resolve(), job_id=self._job_id)}
+
     def discard(self, dir_name: str) -> None:
         """Remove a staged ``<usr_lib>/<dir_name>`` tree (idempotent)."""
         name = _validate_dir_name(dir_name)
@@ -424,7 +437,7 @@ def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if not args:
         print(
-            "usage: python -m hal0.updater.privileged <check|stage|activate|discard|hermes-gateway>",
+            "usage: python -m hal0.updater.privileged <check|stage|activate|discard|hermes-gateway|refresh-api-unit>",
             file=sys.stderr,
         )
         return 64
@@ -471,6 +484,16 @@ def main(argv: list[str] | None = None) -> int:
                 raise UpdateError(f"hermes gateway: {exc}", details={}) from exc
             print(f"hal0-update: {regen.message}", file=sys.stderr)
             _emit(regen.as_dict())
+            return 0
+        if verb == "refresh-api-unit":
+            # No arguments cross this boundary. The template comes from the tree
+            # `current` names, held to the same root-owned test as `activate`,
+            # because root writes the result into /etc/systemd/system.
+            if rest:
+                raise UpdateError("refresh-api-unit takes no arguments", details={"argv": rest})
+            target = _current_symlink().resolve()
+            assert_trusted_release_dir(target)
+            _emit({"api_unit": refresh_api_unit(target)})
             return 0
         if verb == "discard":
             if len(rest) != 1:

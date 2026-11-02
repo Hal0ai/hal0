@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
+import io
 import os
 import subprocess
 import sys
+from contextlib import redirect_stdout
 from pathlib import Path
 
 import pytest
 
+import hal0.updater.privileged as privileged
 import hal0.updater.updater as updater_mod
 from hal0.cli import doctor_all as da
 from hal0.install import api_unit
@@ -71,9 +75,6 @@ def test_install_sh_render_matches_updater_render_byte_for_byte(
     monkeypatch.setattr(api_unit, "host_has_journal_group", lambda: journal)
     # The script path decides via the real host; force the same answer there by
     # driving main() in-process with the identical argv install.sh builds.
-    import io
-    from contextlib import redirect_stdout
-
     argv = [
         "render",
         "--template", str(TEMPLATE),
@@ -225,7 +226,7 @@ def test_refresh_skips_without_unit_template_or_root(box, monkeypatch) -> None:
     assert updater_mod.refresh_api_unit(target) == "skipped"  # no installed unit
     dst.write_text(_old(fb))
     (target / api_unit.TEMPLATE_RELPATH).unlink()
-    assert updater_mod.refresh_api_unit(target) == "skipped"  # old release: rollback path
+    assert updater_mod.refresh_api_unit(target) == "skipped"  # a tree without the template
     assert dst.read_text() == _old(fb)
     monkeypatch.setattr(os, "geteuid", lambda: 1000)
     assert updater_mod.refresh_api_unit(target) == "skipped"
@@ -241,6 +242,206 @@ def test_refresh_preserves_custom_layout(box) -> None:
     new = dst.read_text()
     assert "EnvironmentFile=/srv/etc/api.env" in new
     assert "WorkingDirectory=/srv/cur" in new
+
+
+def test_failed_daemon_reload_restores_the_file_so_the_next_run_retries(box, monkeypatch) -> None:
+    target, dst, _d, calls, fb = box
+    dst.write_text(_old(fb))
+    good_run = updater_mod.subprocess.run
+
+    def bad_reload(argv, **_kw):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 1, "", b"")
+
+    monkeypatch.setattr(updater_mod.subprocess, "run", bad_reload)
+    assert updater_mod.refresh_api_unit(target) == "failed"
+    assert dst.read_text() == _old(fb)
+    assert not dst.with_name(dst.name + ".tmp").exists()
+
+    def hung_reload(argv, **_kw):
+        raise subprocess.TimeoutExpired(argv, 30)
+
+    monkeypatch.setattr(updater_mod.subprocess, "run", hung_reload)
+    assert updater_mod.refresh_api_unit(target) == "failed"
+    assert dst.read_text() == _old(fb)
+
+    monkeypatch.setattr(updater_mod.subprocess, "run", good_run)
+    assert updater_mod.refresh_api_unit(target) == "installed"
+    assert "TimeoutStopSec=30" in dst.read_text()
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["/x\nExecStartPre=/bin/evil", "/x\r", "/x\0", "/x\\"],
+    ids=["lf", "cr", "nul", "backslash"],
+)
+def test_render_refuses_a_value_that_would_break_out_of_its_directive(bad: str) -> None:
+    with pytest.raises(ValueError, match="unsafe value"):
+        render_api_unit(_tmpl(), ApiUnitParams(**{**PARAMS.__dict__, "workdir": bad}))
+
+
+def test_refresh_holds_a_host_flag_unit_when_api_env_has_no_bind_host(box, tmp_path) -> None:
+    """A pre-WS-C unit binds through --host. Re-rendering it would fall back to
+    loopback at the next restart unless api.env carries HAL0_BIND_HOST."""
+    target, dst, _d, calls, fb = box
+    env = tmp_path / "api.env"
+    env.write_text("HAL0_PORT=8080\n")
+    old = (
+        _old(fb)
+        .replace("/etc/hal0/api.env", str(env))
+        .replace("serve --port", "serve --host 0.0.0.0 --port")
+    )
+    dst.write_text(old)
+    assert updater_mod.refresh_api_unit(target) == "skipped"
+    assert dst.read_text() == old
+    assert calls == []
+    assert da.check_api_unit_current(
+        installed=lambda: old, template=_tmpl, venv_dir="/v", current_link="/c"
+    ).detail.count("HAL0_BIND_HOST")
+
+    env.write_text("HAL0_BIND_HOST=0.0.0.0\nHAL0_PORT=8080\n")
+    assert updater_mod.refresh_api_unit(target) == "installed"
+    assert "serve --port" in dst.read_text() and "serve --host" not in dst.read_text()
+
+
+# ── first update and rollback (#3160) ────────────────────────────────────────
+
+
+def test_activate_release_never_refreshes_the_unit_in_process(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """activate_release runs the OUTGOING release: a call here misses the upgrade
+    that introduces it, and on a rollback imports a renderer the re-pip removed."""
+    monkeypatch.setattr(updater_mod, "_is_editable_install", lambda: False)
+    monkeypatch.setattr(updater_mod, "_reinstall_into_venv", lambda *_a, **_k: None)
+    monkeypatch.setitem(sys.modules, "hal0.install.api_unit", None)  # the older package
+
+    def forbidden(*_a, **_k):
+        raise AssertionError("activate_release must not refresh the API unit")
+
+    monkeypatch.setattr(updater_mod, "refresh_api_unit", forbidden)
+    root = updater_mod._usr_lib_root()
+    (root / "hal0-1.0.0").mkdir(parents=True)
+    result = updater_mod.activate_release("hal0-1.0.0")
+    assert result["target"].endswith("hal0-1.0.0")
+    assert "api_unit" not in result
+
+
+def _route_seam_to_root_side(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """Make UpdateSeam behave as hal0: its sudo call runs the root entry point."""
+    argvs: list[list[str]] = []
+
+    def fake_sudo(argv, **_kw):
+        argvs.append(list(argv))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = privileged.main(argv[3:])
+        return subprocess.CompletedProcess(argv, rc, buf.getvalue(), "")
+
+    monkeypatch.setattr(privileged.UpdateSeam, "routed", property(lambda _s: True))
+    real_init = privileged.UpdateSeam.__init__
+
+    def init(self, **kw):
+        real_init(self, **{**kw, "run": fake_sudo})
+
+    monkeypatch.setattr(privileged.UpdateSeam, "__init__", init)
+    return argvs
+
+
+def test_first_update_refreshes_through_the_incoming_seam_verb(box, monkeypatch, tmp_path) -> None:
+    """The outgoing release's activate_release has no hook. It installs the
+    incoming wrapper and swaps `current`; the incoming migration child then
+    calls run_post_activation_migrations, the shape every older commit() uses."""
+    target, dst, _d, _c, fb = box
+    dst.write_text(_old(fb))
+    link = tmp_path / "current"
+    link.symlink_to(target)
+    monkeypatch.setattr(updater_mod, "_current_symlink", lambda: link)
+    monkeypatch.setattr(privileged, "_current_symlink", lambda: link)
+    trusted: list[Path] = []
+    monkeypatch.setattr(privileged, "assert_trusted_release_dir", trusted.append)
+    argvs = _route_seam_to_root_side(monkeypatch)
+    stop = RuntimeError("the fatal conversion stops the sequence here")
+
+    def conversion(**_kw):
+        raise stop
+
+    monkeypatch.setattr("hal0.config.migrations.runner_system.migrate_runner_system", conversion)
+    with pytest.raises(RuntimeError):
+        updater_mod.run_post_activation_migrations(1, job_id="job-1")
+
+    assert argvs == [["sudo", "-n", privileged.SEAM_BIN, "refresh-api-unit"]]
+    assert trusted == [target.resolve()]
+    new = dst.read_text()
+    assert "TimeoutStopSec=30" in new and "SupplementaryGroups=systemd-journal" in new
+
+
+def test_refresh_verb_refuses_arguments_and_an_untrusted_tree(box, monkeypatch, tmp_path) -> None:
+    target, dst, _d, _c, fb = box
+    dst.write_text(_old(fb))
+    link = tmp_path / "current"
+    link.symlink_to(target)
+    monkeypatch.setattr(privileged, "_current_symlink", lambda: link)
+    assert privileged.main(["refresh-api-unit", "/etc/passwd"]) == 1
+
+    def untrusted(_path):
+        raise updater_mod.UpdatePrivilegeError("not root-owned", details={})
+
+    monkeypatch.setattr(privileged, "assert_trusted_release_dir", untrusted)
+    assert privileged.main(["refresh-api-unit"]) == 1
+    assert dst.read_text() == _old(fb)
+
+
+def test_converge_contains_a_wrapper_without_the_verb(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed wrapper refresh leaves the old one, which exits 64 on the verb."""
+
+    def stale_wrapper(argv, **_kw):
+        return subprocess.CompletedProcess(argv, 64, "", "hal0-update: bad cmd\n")
+
+    monkeypatch.setattr(privileged.UpdateSeam, "routed", property(lambda _s: True))
+    real_init = privileged.UpdateSeam.__init__
+    monkeypatch.setattr(
+        privileged.UpdateSeam,
+        "__init__",
+        lambda self, **kw: real_init(self, **{**kw, "run": stale_wrapper}),
+    )
+    assert updater_mod.converge_api_unit() == "failed"
+
+
+def test_boot_net_does_not_touch_the_unit(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[str | None] = []
+    monkeypatch.setattr(
+        updater_mod, "converge_api_unit", lambda *, job_id=None: seen.append(job_id)
+    )
+
+    def conversion(**_kw):
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr("hal0.config.migrations.runner_system.migrate_runner_system", conversion)
+    assert updater_mod.check_outstanding_migrations() is None
+    assert seen == []
+
+
+def test_rollback_to_a_release_without_the_function_stays_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real fresh interpreter importing an older package with no hook at all."""
+    pkg = tmp_path / "older" / "hal0" / "updater"
+    pkg.mkdir(parents=True)
+    (pkg.parent / "__init__.py").write_text("")
+    (pkg / "__init__.py").write_text("")
+    (pkg / "updater.py").write_text("OLD = True\n")
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path / "older"))
+    results: list[subprocess.CompletedProcess[str]] = []
+    real_run = subprocess.run
+
+    def spy(*a, **k):
+        results.append(real_run(*a, **k))
+        return results[-1]
+
+    monkeypatch.setattr(updater_mod.subprocess, "run", spy)
+    asyncio.run(updater_mod._refresh_api_unit_after_swap("job-1"))
+    assert [(r.returncode, r.stdout.strip()) for r in results] == [(0, "absent")]
 
 
 # ── doctor row ───────────────────────────────────────────────────────────────
@@ -269,7 +470,8 @@ def test_doctor_row_states(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(api_unit, "Path", lambda p: _Exists(p))
     assert _row(current).status == "pass"
     stale = _row(OLD_UNIT)
-    assert stale.status == "warn" and "hal0 update" in stale.detail
+    assert stale.status == "warn" and "refresh-api-unit" in stale.detail
+    assert "`hal0 update`" not in stale.detail
     assert _row(None).status == "pass"
     assert (
         da.check_api_unit_current(

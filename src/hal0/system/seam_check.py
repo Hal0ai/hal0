@@ -87,7 +87,7 @@ SEAMS: tuple[SeamSpec, ...] = (
         "hal0-update",
         probe=("check",),
         required=True,
-        role="self-update (stage / activate / discard / hermes-gateway)",
+        role="self-update (stage / activate / discard / hermes-gateway / refresh-api-unit)",
     ),
     SeamSpec("hal0-agentenv", probe=None, required=False, role="bundled-agent env files"),
     SeamSpec("hal0-benchctl", probe=None, required=False, role="benchmark harness"),

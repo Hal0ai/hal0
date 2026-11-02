@@ -7,8 +7,9 @@ an in-place ``hal0 update`` produce the same bytes for the same inputs:
 * ``installer/install.sh`` runs this file as a script
   (``python -I api_unit.py render ...``) — stdlib only, so it works before the
   venv exists.
-* ``hal0.updater.updater.refresh_api_unit`` imports it root-side during
-  ``activate`` and ``hal0 doctor all`` compares the installed unit with it.
+* ``hal0.updater.updater.refresh_api_unit`` imports it root-side, in a fresh
+  interpreter of the activated release, and ``hal0 doctor all`` compares the
+  installed unit with it.
 
 Only values that differ per box are substituted; ``${HAL0_PORT}`` stays a
 literal systemd expansion read from ``api.env`` at start, so the port and the
@@ -35,6 +36,10 @@ _JOURNAL_LINE_ABSENT = (
 )
 
 _TOKEN = re.compile(r"@(HAL0_[A-Z_]+)@")
+
+#: A line break would split a directive, as would a trailing backslash, which
+#: continues it onto the next line. Values reach unquoted directives as root.
+_UNSAFE_VALUE = re.compile(r"[\r\n\0]")
 
 
 @dataclass(frozen=True)
@@ -71,6 +76,10 @@ def render_api_unit(template: str, params: ApiUnitParams) -> str:
         "HAL0_HF_SECRETS_ENV": params.hf_secrets_env,
         "HAL0_BIN": params.bin,
     }
+
+    for value in values.values():
+        if _UNSAFE_VALUE.search(value) or value.endswith("\\"):
+            raise ValueError(f"unsafe value for a systemd directive: {value!r}")
 
     def _sub(match: re.Match[str]) -> str:
         name = match.group(1)
@@ -154,6 +163,26 @@ def desired_api_unit(
         journal_group=host_has_journal_group(),
     )
     return render_api_unit(template, params)
+
+
+def loses_bind_host(installed: str, *, read: Callable[[str], str] | None = None) -> bool:
+    """Would re-rendering this unit move the API off the address it binds today?
+
+    Units from before WS-C pass ``--host`` on ``ExecStart``; the template reads
+    ``HAL0_BIND_HOST`` from ``api.env`` instead, and ``hal0 serve`` falls back to
+    loopback when that is unset. Nothing adds the variable to an old ``api.env``,
+    so rewriting such a unit would drop a LAN box off the network at its next
+    restart. An unreadable ``api.env`` counts as not setting it.
+    """
+    if not re.search(r"^\s*ExecStart=.*\s--host[\s=]", installed, re.MULTILINE):
+        return False
+    api_env = recover_params(installed).get("api_env") or f"{DEFAULT_ETC_DIR}/api.env"
+    reader = read if read is not None else (lambda p: Path(p).read_text(encoding="utf-8"))
+    try:
+        text = reader(api_env)
+    except OSError:
+        return True
+    return not re.search(r"^\s*HAL0_BIND_HOST=\S", text, re.MULTILINE)
 
 
 def main(argv: list[str] | None = None) -> int:
