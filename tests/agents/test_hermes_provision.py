@@ -6626,35 +6626,50 @@ def test_uv_install_dir_is_never_chmodded_through_a_link(
 
 # ── operator model choice survives re-provision (#3309) ──────────────────────
 
-_SLOTS = [{"alias": "agent", "model_id": "qwen3:8b", "backend_url": "http://127.0.0.1:8080/v1"}]
 
-
-def _model_cfg(default: str | None, provider: str | None) -> str:
+def _cfg(default: str | None, provider: str | None = None, base_url: str | None = None) -> str:
     lines = ["model:"]
-    if default is not None:
-        lines.append(f"  default: {default}")
-    if provider is not None:
-        lines.append(f"  provider: {provider}")
+    for key, val in (("default", default), ("provider", provider), ("base_url", base_url)):
+        if val is not None:
+            lines.append(f"  {key}: {val}")
     return "\n".join(lines) + "\n"
 
 
+_LOCAL = "http://127.0.0.1:8080/v1"
+
+
 @pytest.mark.parametrize(
-    ("cfg", "expected"),
+    ("cfg", "live", "route", "kept"),
     [
-        (None, False),
-        ("agent:\n  max_turns: 1\n", False),
-        (_model_cfg("hal0/agent", "custom"), False),
-        (_model_cfg("qwen3:8b", "custom"), False),
-        (_model_cfg("MiniMax-M2.7", "minimax"), True),
-        (_model_cfg("MiniMax-M2.7", "custom"), True),
-        (_model_cfg("hal0/agent", "anthropic"), True),
-        (_model_cfg(None, "openrouter"), True),
+        (None, True, None, None),
+        ("agent:\n  max_turns: 1\n", True, None, None),
+        (_cfg("hal0/agent", "custom", _LOCAL), True, None, None),
+        (_cfg("hal0/utility", "custom", _LOCAL), True, None, None),  # known limit
+        (_cfg("qwen3:8b", "custom", _LOCAL), False, None, None),  # primary is managed
+        ("model: minimax/foo\n", True, None, "minimax/foo"),  # scalar
+        (_cfg("MiniMax-M2.7", "minimax", "https://api.minimax.io/v1"), True, None, "MiniMax-M2.7"),
+        (_cfg("hal0/agent", "anthropic"), True, None, "hal0/agent"),
+        (_cfg("qwen3:8b", "custom", "https://llm.example.net/v1"), False, None, "qwen3:8b"),
+        (_cfg(None, "openrouter"), True, None, "openrouter"),
+        # direct id on custom + loopback: routes / unknown keep, gone converges
+        (_cfg("llama-old", "custom", _LOCAL), True, True, "llama-old"),
+        (_cfg("llama-old", "custom", _LOCAL), True, None, "llama-old"),
+        (_cfg("llama-old", "custom", _LOCAL), True, False, None),
+        # live-resolve box with the old direct primary id: converge
+        (_cfg("qwen3:8b", "custom", _LOCAL), True, None, None),
     ],
 )
-def test_operator_model_choice_detection(cfg: str | None, expected: bool) -> None:
-    assert (
-        hp._operator_model_choice(cfg, primary_model_id="qwen3:8b", chat_slots=_SLOTS) is expected
+def test_operator_model_choice_detection(cfg, live, route, kept) -> None:
+    got = hp._operator_model_choice(
+        cfg,
+        primary_model_id="qwen3:8b",
+        live_resolve=live,
+        route_ready=lambda _m, _u: route,
     )
+    assert got == kept
+
+
+_LAST: dict[str, Any] = {}
 
 
 def _run_config_write(
@@ -6664,11 +6679,7 @@ def _run_config_write(
     monkeypatch.setattr(
         hp,
         "_resolve_primary_slot",
-        lambda **_kw: {
-            "model": "qwen3:8b",
-            "base_url": "http://127.0.0.1:8080/v1",
-            "context_length": 8000,
-        },
+        lambda **_kw: {"model": "qwen3:8b", "base_url": _LOCAL, "context_length": 8000},
     )
     monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "no-overrides.yaml")
     from hal0.agents import personas as _personas
@@ -6684,9 +6695,15 @@ def _run_config_write(
         calls.append([str(a) for a in argv])
         return subprocess.CompletedProcess(argv, 0, "", "")
 
-    io = hp.InstallIO(fetch_slots=lambda: [], fetch_model_contexts=lambda: {}, run=run)
+    io = hp.InstallIO(
+        fetch_slots=lambda: [],
+        fetch_model_contexts=lambda: {},
+        run=run,
+        fetch_model_route_ready=lambda _m, _u: None,
+    )
     state = hp.BootstrapState(hermes_home=str(home))
-    hp._phase_config_write(hp._StepCtx(state=state, io=io))
+    _LAST["out"] = hp._phase_config_write(hp._StepCtx(state=state, io=io))
+    _LAST["state"] = state
     return calls
 
 
@@ -6695,15 +6712,28 @@ def _set_keys(calls: list[list[str]]) -> set[str]:
 
 
 def test_config_write_keeps_operator_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    keys = _set_keys(
-        _run_config_write(tmp_path, monkeypatch, _model_cfg("MiniMax-M2.7", "minimax"))
-    )
+    cfg = _cfg("MiniMax-M2.7", "minimax", "https://api.minimax.io/v1")
+    keys = _set_keys(_run_config_write(tmp_path, monkeypatch, cfg))
     assert not keys & set(hp.MODEL_WIRING_KEYS)
     assert "providers.custom.base_url" in keys
+    out = _LAST["out"]
+    assert out.details["operator_model_kept"] == "MiniMax-M2.7"
+    assert out.details["primary_model"] == "MiniMax-M2.7"
+    assert _LAST["state"].operator_model_kept == "MiniMax-M2.7"
 
 
 def test_config_write_converges_managed_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    keys = _set_keys(_run_config_write(tmp_path, monkeypatch, _model_cfg("hal0/agent", "custom")))
+    keys = _set_keys(_run_config_write(tmp_path, monkeypatch, _cfg("hal0/agent", "custom", _LOCAL)))
     assert set(hp.MODEL_WIRING_KEYS) <= keys
+    assert _LAST["out"].details["operator_model_kept"] is None
+
+
+def test_chat_smoke_skips_a_kept_model(tmp_path: Path) -> None:
+    home = tmp_path / "hh"
+    home.mkdir()
+    (home / "config.yaml").write_text(_cfg("m", "minimax", "https://x.example/v1"))
+    state = hp.BootstrapState(hermes_home=str(home))
+    ok, detail = hp._smoke_chat_completions(state, None)  # type: ignore[arg-type]
+    assert ok is None and "operator model kept (m)" in detail
