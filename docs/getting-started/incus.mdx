@@ -226,6 +226,15 @@ with `!! podman system migrate (as hal0) failed`, and running the command by
 hand shows `cannot clone: Permission denied`. The package brings the
 `podman` profile that grants the namespace.
 
+### Rootless podman as `hal0` is unavailable in an unprivileged container
+
+Inside an unprivileged container the uid map is a slice (`0 100000 65536`), so
+there is no subordinate uid/gid range that fits beside the container's own
+users. The installer detects the nested map, skips the `hal0` range and the
+deferred `podman system migrate`, and prints an info line instead of a
+warning. Slots and dashboard runner-image pulls run rootful and are
+unaffected; only `podman` run by hand as the `hal0` user is unavailable.
+
 ### If podman fails with `socket: permission denied`
 
 Once `apparmor` is installed, the guest also has six `flags=(unconfined)`
