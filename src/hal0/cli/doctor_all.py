@@ -746,7 +746,12 @@ def check_api_unit_current(
     """
     import sys
 
-    from hal0.install.api_unit import TEMPLATE_RELPATH, desired_api_unit, loses_bind_host
+    from hal0.install.api_unit import (
+        TEMPLATE_RELPATH,
+        desired_api_unit,
+        foreign_user,
+        loses_bind_host,
+    )
 
     key, title = "api-unit", "API unit current"
     unit_path = Path("/etc/systemd/system") / _API_UNIT
@@ -754,7 +759,7 @@ def check_api_unit_current(
     def _read_installed() -> str | None:
         try:
             return unit_path.read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeError):
             return None
 
     link = current_link if current_link is not None else str(paths.usr_lib())
@@ -788,6 +793,17 @@ def check_api_unit_current(
         return Check(key, title, _WARN, f"could not render {_API_UNIT} template: {exc}")
     if want == unit_text:
         return Check(key, title, _PASS, f"{_API_UNIT} matches the release template")
+    user = foreign_user(unit_text)
+    if user is not None:
+        return Check(
+            key,
+            title,
+            _WARN,
+            f"{_API_UNIT} runs as User={user}, not hal0, so a refresh is held (it would move "
+            f"the API to hal0 on the next restart) — re-run the installer "
+            f"(curl -fsSL https://hal0.dev/install.sh | sudo bash) or fix ownership so the "
+            f"unit runs as hal0, then {_API_UNIT_REMEDY}",
+        )
     if loses_bind_host(unit_text):
         return Check(
             key,

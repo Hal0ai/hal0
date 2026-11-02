@@ -304,6 +304,90 @@ def test_refresh_holds_a_host_flag_unit_when_api_env_has_no_bind_host(box, tmp_p
     assert "serve --port" in dst.read_text() and "serve --host" not in dst.read_text()
 
 
+V093_UNIT = """[Service]
+User=root
+UMask=0002
+WorkingDirectory=/usr/lib/hal0/current
+EnvironmentFile=/etc/hal0/api.env
+ExecStart=/usr/lib/hal0/venv/bin/hal0 serve --port ${HAL0_PORT}
+"""
+
+
+def test_refresh_holds_a_user_root_unit_and_doctor_says_why(box) -> None:
+    """A 0.9.3-0.9.8 unit runs as root; rendering User=hal0 would break it at restart."""
+    target, dst, _d, calls, fb = box
+    old = V093_UNIT.replace("/usr/lib/hal0/venv/bin/hal0", str(fb))
+    dst.write_text(old)
+    assert updater_mod.refresh_api_unit(target) == "skipped"
+    assert dst.read_text() == old
+    assert calls == []
+    row = da.check_api_unit_current(
+        installed=lambda: V093_UNIT, template=_tmpl, venv_dir="/v", current_link="/c"
+    )
+    assert row.status == "warn"
+    assert "User=root" in row.detail and "installer" in row.detail and "ownership" in row.detail
+    assert api_unit.foreign_user(V093_UNIT) == "root"
+    assert api_unit.foreign_user(OLD_UNIT) is None
+    assert api_unit.foreign_user("[Service]\nExecStart=/x\n") is None
+
+
+def test_non_utf8_api_env_holds_instead_of_raising(tmp_path: Path) -> None:
+    env = tmp_path / "api.env"
+    env.write_bytes(b"\xff\xfe\x00bad")
+    unit = f"[Service]\nEnvironmentFile={env}\nExecStart=/x serve --host 0.0.0.0\n"
+    assert api_unit.loses_bind_host(unit) is True
+
+
+def test_api_env_symlink_is_not_followed(tmp_path: Path) -> None:
+    real = tmp_path / "real.env"
+    real.write_text("HAL0_BIND_HOST=0.0.0.0\n")
+    link = tmp_path / "api.env"
+    link.symlink_to(real)
+    unit = f"[Service]\nEnvironmentFile={link}\nExecStart=/x serve --host 0.0.0.0\n"
+    assert api_unit.loses_bind_host(unit) is True
+    real.rename(link.with_name("x"))
+    link.unlink()
+    (tmp_path / "x").rename(link)
+    assert api_unit.loses_bind_host(unit) is False
+
+
+def test_unit_write_fsyncs_and_cleans_its_temp_on_error(tmp_path: Path, monkeypatch) -> None:
+    dst = tmp_path / "u.service"
+    synced: list[int] = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(os, "fsync", lambda fd: (synced.append(fd), real_fsync(fd))[1])
+    updater_mod._write_unit_atomic(dst, "a\n")
+    assert synced and dst.read_text() == "a\n"
+    monkeypatch.setattr(os, "replace", lambda *_a: (_ for _ in ()).throw(OSError("boom")))
+    with pytest.raises(OSError):
+        updater_mod._write_unit_atomic(dst, "b\n")
+    assert not list(tmp_path.glob("*.tmp")) and dst.read_text() == "a\n"
+
+
+def test_failed_restore_is_logged(box, monkeypatch) -> None:
+    target, dst, _d, _c, fb = box
+    dst.write_text(_old(fb))
+    monkeypatch.setattr(
+        updater_mod.subprocess,
+        "run",
+        lambda argv, **_kw: subprocess.CompletedProcess(argv, 1, "", b""),
+    )
+    real = updater_mod._write_unit_atomic
+    n = {"i": 0}
+
+    def flaky(d, t):
+        n["i"] += 1
+        if n["i"] == 2:
+            raise OSError("disk full")
+        real(d, t)
+
+    warned: list[str] = []
+    monkeypatch.setattr(updater_mod, "_write_unit_atomic", flaky)
+    monkeypatch.setattr(updater_mod.log, "warning", lambda event, **kw: warned.append(event))
+    assert updater_mod.refresh_api_unit(target) == "failed"
+    assert "updater.api_unit_restore_failed" in warned
+
+
 # ── first update and rollback (#3160) ────────────────────────────────────────
 
 

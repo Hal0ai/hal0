@@ -3288,7 +3288,12 @@ def refresh_api_unit(target: Path, *, job_id: str | None = None) -> str:
     """
     if os.geteuid() != 0:
         return "skipped"
-    from hal0.install.api_unit import TEMPLATE_RELPATH, desired_api_unit, loses_bind_host
+    from hal0.install.api_unit import (
+        TEMPLATE_RELPATH,
+        desired_api_unit,
+        foreign_user,
+        loses_bind_host,
+    )
 
     src = target / TEMPLATE_RELPATH
     dst = API_UNIT_DST
@@ -3300,6 +3305,16 @@ def refresh_api_unit(target: Path, *, job_id: str | None = None) -> str:
         return "skipped"
     try:
         installed = dst.read_text(encoding="utf-8")
+        user = foreign_user(installed)
+        if user is not None:
+            log.warning(
+                "updater.api_unit_refresh_held",
+                job_id=job_id,
+                user=user,
+                remedy="the unit runs as a non-hal0 account; re-run the installer or fix "
+                "ownership so it runs as hal0, then run hal0-update refresh-api-unit",
+            )
+            return "skipped"
         if loses_bind_host(installed):
             log.warning(
                 "updater.api_unit_refresh_held",
@@ -3330,8 +3345,12 @@ def refresh_api_unit(target: Path, *, job_id: str | None = None) -> str:
         log.warning(
             "updater.api_unit_refresh_failed", job_id=job_id, error=f"daemon-reload: {reload_error}"
         )
-        with contextlib.suppress(OSError):
+        try:
             _write_unit_atomic(dst, installed)
+        except OSError as exc:
+            log.warning(
+                "updater.api_unit_restore_failed", job_id=job_id, path=str(dst), error=str(exc)
+            )
         return "failed"
     log.info("updater.api_unit_refreshed", job_id=job_id, path=str(dst))
     return "installed"
@@ -3339,9 +3358,17 @@ def refresh_api_unit(target: Path, *, job_id: str | None = None) -> str:
 
 def _write_unit_atomic(dst: Path, text: str) -> None:
     tmp = dst.with_name(dst.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.chmod(tmp, 0o644)
-    os.replace(tmp, dst)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, dst)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+        raise
 
 
 def converge_api_unit(*, job_id: str | None = None) -> str:

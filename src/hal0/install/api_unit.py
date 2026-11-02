@@ -19,7 +19,9 @@ bind host are never baked into the unit.
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import stat
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -165,6 +167,23 @@ def desired_api_unit(
     return render_api_unit(template, params)
 
 
+#: api.env is a small KEY=VALUE file; anything bigger is not one.
+_API_ENV_MAX_BYTES = 64 * 1024
+
+
+def _read_api_env(path: str) -> str:
+    """Read ``api.env`` as root: no symlink, regular file only, size capped."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > _API_ENV_MAX_BYTES:
+            raise OSError(f"{path} is not a regular file under {_API_ENV_MAX_BYTES} bytes")
+        with os.fdopen(fd, "rb", closefd=False) as f:
+            return f.read(_API_ENV_MAX_BYTES + 1).decode("utf-8")
+    finally:
+        os.close(fd)
+
+
 def loses_bind_host(installed: str, *, read: Callable[[str], str] | None = None) -> bool:
     """Would re-rendering this unit move the API off the address it binds today?
 
@@ -172,17 +191,33 @@ def loses_bind_host(installed: str, *, read: Callable[[str], str] | None = None)
     ``HAL0_BIND_HOST`` from ``api.env`` instead, and ``hal0 serve`` falls back to
     loopback when that is unset. Nothing adds the variable to an old ``api.env``,
     so rewriting such a unit would drop a LAN box off the network at its next
-    restart. An unreadable ``api.env`` counts as not setting it.
+    restart. An unreadable or undecodable ``api.env`` counts as not setting it.
     """
     if not re.search(r"^\s*ExecStart=.*\s--host[\s=]", installed, re.MULTILINE):
         return False
     api_env = recover_params(installed).get("api_env") or f"{DEFAULT_ETC_DIR}/api.env"
-    reader = read if read is not None else (lambda p: Path(p).read_text(encoding="utf-8"))
+    reader = read if read is not None else _read_api_env
     try:
         text = reader(api_env)
-    except OSError:
+    except (OSError, UnicodeError):
         return True
     return not re.search(r"^\s*HAL0_BIND_HOST=\S", text, re.MULTILINE)
+
+
+def foreign_user(installed: str) -> str | None:
+    """The ``User=`` an installed unit runs as, when it is not ``hal0``.
+
+    The template renders ``User=hal0``/``Group=hal0``. A unit from 0.9.3-0.9.8
+    runs as ``root`` (``UMask=0002``); re-rendering it and restarting would move
+    a root-run API to ``hal0`` onto root-owned trees (217/USER or EACCES), so the
+    refresh is held for any account other than ``hal0``. ``None`` when the unit
+    names ``hal0`` or no ``User=`` at all.
+    """
+    for raw in installed.splitlines():
+        key, sep, value = raw.strip().partition("=")
+        if sep and key == "User" and value.strip() not in ("", "hal0"):
+            return value.strip()
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
