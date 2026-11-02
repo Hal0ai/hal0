@@ -43,7 +43,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -56,15 +56,26 @@ from hal0.http_client import async_client
 from hal0.install.perms import ensure_shared_dir
 from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
 from hal0.providers.base import HealthCheck, Mount, Provider, RuntimeLaunchPlan
+from hal0.registry.detect import (
+    HALOGEN_TOKENIZER_JSON,
+    HALOGEN_VISION_SIDECAR,
+    has_hgn_magic,
+)
 from hal0.runners.knobs import (
     HALOGEN_DENIED_ENV,
     HALOGEN_DENIED_PREFIXES,
     HALOGEN_MANAGED_ENV,
     HALOGEN_MANAGED_PREFIXES,
     HALOGEN_TUNE_ENV,
+    knob_value,
     parse_env_tokens,
+    whole_number,
 )
 from hal0.slots import output_sanity
+from hal0.slots.capacity import HALOGEN_CACHE_ENTRIES_DEFAULT, halogen_footprint_mb
+from hal0.slots.gtt_guard import GFX1151
+from hal0.slots.model_fit import model_runtime_mismatch
+from hal0.slots.state import SlotHostUnsupported
 from hal0.slots.tune import EffectiveTune, effective_tune
 
 log = logging.getLogger(__name__)
@@ -78,7 +89,7 @@ _DEFAULT_PORT = 8099
 #: The vision tower's weights sit beside the checkpoint under this exact name.
 #: The entrypoint exits 1 when ``HALOGEN_VISION_TOWER`` is set and the file is
 #: absent, so hal0 sets the variable only after checking for it.
-VISION_SIDECAR = "qwen38-flash-next-vision.hgn"
+VISION_SIDECAR = HALOGEN_VISION_SIDECAR
 
 #: Health/infer timeouts (the infer passthrough is for smoke checks; the
 #: dispatcher is the primary request path).
@@ -101,9 +112,22 @@ class HalogenInferError(Hal0Error):
     status = 502
 
 
+def _is_readable_file(path: Path) -> bool:
+    """``Path.is_file``, False for a path it cannot stat.
+
+    ``is_file`` raises ``PermissionError`` under a parent directory this account
+    cannot read (a model store with the wrong group, which the doctor's permission
+    rows exist for) instead of answering, and the refusal must stay typed.
+    """
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
 def vision_sidecar_present(checkpoint: str) -> bool:
     """True when the vision sidecar file sits beside ``checkpoint``."""
-    return (Path(checkpoint).parent / VISION_SIDECAR).is_file()
+    return _is_readable_file(Path(checkpoint).parent / VISION_SIDECAR)
 
 
 def _profile_env(profile_flags: str) -> dict[str, str]:
@@ -175,6 +199,16 @@ def halogen_env(
     return env
 
 
+def _cache_entries(carried: Mapping[str, str]) -> int:
+    """The profile's ``HALOGEN_CACHE_ENTRIES``, or the engine's default when absent or odd.
+
+    Reachable as free text, not a curated knob, so it has no :data:`HALOGEN_KNOBS`
+    row: the screen lets any value through and only sizing reads it.
+    """
+    entries = whole_number(carried.get("HALOGEN_CACHE_ENTRIES", ""))
+    return HALOGEN_CACHE_ENTRIES_DEFAULT if entries is None else entries
+
+
 def _probe_failure(status: str, detail: str) -> dict[str, Any]:
     """A sentinel verdict for a round trip that did not complete."""
     return {"ok": False, "status": status, "sample": "", "detail": detail}
@@ -204,6 +238,30 @@ def _slot_model_default(slot_cfg: Mapping[str, Any]) -> str:
     return ""
 
 
+def _model_missing(
+    slot_cfg: Mapping[str, Any], message: str, **details: str
+) -> UnprocessableEntity:
+    """The ``slot.model_missing`` refusal: the engine must never start on a file it cannot read."""
+    return UnprocessableEntity(
+        message,
+        code="slot.model_missing",
+        details={"slot": str(slot_cfg.get("name") or ""), **details},
+    )
+
+
+def _gfx_name(version: int) -> str:
+    """``110501`` as ``gfx1151`` (major, then minor and stepping as hex digits)."""
+    return f"gfx{version // 10000}{version // 100 % 100:x}{version % 100:x}"
+
+
+def _gfx_version(raw: Any) -> int | None:
+    """One reported KFD gfx target as an integer; ``None`` for anything unreadable."""
+    try:
+        return int(str(raw).strip())
+    except ValueError:
+        return None
+
+
 class HalogenProvider(Provider):
     """Provider for the halogen Flash-Next engine (ROCm, one model family).
 
@@ -217,6 +275,11 @@ class HalogenProvider(Provider):
     #: ROCm-only image (``RUNNER_IMAGES["halogen"].supported_backends ==
     #: ("rocm",)``); ``container_spec`` forwards ``/dev/kfd``.
     gpu_runtime_needs_rocm = True
+
+    #: Ask the manager for its warn-only suspected-GTT-leak check before a load
+    #: (:meth:`hal0.slots.manager.SlotManager._guard_gtt_leak`): a stopped engine
+    #: that leaked its GPU memory leaves the next load short of it.
+    gtt_leak_guard = True
 
     #: The entrypoint's own stop is SIGTERM, 30 s, SIGKILL, up to 30 s more,
     #: then a GTT report; hal0 gives it 120 s and never removes the unit sooner.
@@ -331,11 +394,10 @@ class HalogenProvider(Provider):
 
         checkpoint = str(model_info.get("path") or "")
         if not checkpoint:
-            raise UnprocessableEntity(
+            raise _model_missing(
+                slot_cfg,
                 f"slot {slot_cfg.get('name')!r} has no halogen checkpoint to launch; "
                 "assign a model whose file is a .hgn checkpoint",
-                code="slot.model_missing",
-                details={"slot": str(slot_cfg.get("name") or "")},
             )
         model_id = str(model_info.get("_model_key") or _slot_model_default(slot_cfg))
 
@@ -407,6 +469,135 @@ class HalogenProvider(Provider):
             if parent and not _covers(store, parent):
                 roots.append(parent)
         return roots
+
+    # ── Host and file preflight ────────────────────────────────────────────────
+
+    def preflight(
+        self,
+        slot_cfg: Mapping[str, Any],
+        model_info: Mapping[str, Any],
+        *,
+        gfx_versions: Sequence[int | str],
+    ) -> None:
+        """Refuse a load this host or this model directory cannot serve, before it costs anything.
+
+        Called by :meth:`hal0.providers.container.ContainerProvider.check_load`,
+        before pre-load eviction on a manager load and again from ``load_sync``,
+        with the host's KFD gfx targets (:func:`hal0.providers._gpu.kfd_gfx_target_versions`:
+        integers, ``110501`` for gfx1151, ``0`` for a CPU node, ``[]`` when the
+        topology cannot be read). The rules, in order:
+
+        * a non-empty target list with no gfx1151 in it raises
+          :class:`~hal0.slots.state.SlotHostUnsupported` (``slot.host_unsupported``,
+          409). ``[]`` is "cannot tell" and skips this rule, so a box whose sysfs is
+          not visible is never refused on a guess;
+        * the checkpoint file must exist and start with the ``HGN1`` magic, and the
+          tokenizer must sit beside it (``tokenizer/tokenizer.json``), or
+          ``slot.model_missing`` names the path. The engine's entrypoint exits at
+          start on any of them, so a garbage ``.hgn`` must not get as far as
+          pre-load eviction.
+
+        Reads the file system and nothing else (a stat per file, four bytes of the
+        checkpoint): no network, no engine.
+        """
+        if gfx_versions:
+            found = {v for v in map(_gfx_version, gfx_versions) if v is not None}
+            if GFX1151 not in found:
+                targets = ", ".join(_gfx_name(v) for v in sorted(found) if v > 0)
+                seen = (
+                    f"this host reports {targets}"
+                    if targets
+                    else "no gfx1151 GPU is visible to this guest (its KFD topology has no GPU "
+                    "node; check that the GPU and /dev/kfd are passed through)"
+                )
+                raise SlotHostUnsupported(
+                    f"the halogen engine runs only on gfx1151 (Strix Halo); {seen}",
+                    details={"slot": str(slot_cfg.get("name") or ""), "targets": sorted(found)},
+                )
+        checkpoint = str(model_info.get("path") or "")
+        if not checkpoint:
+            raise _model_missing(
+                slot_cfg,
+                f"slot {slot_cfg.get('name')!r} has no halogen checkpoint to launch; "
+                "assign a model whose file is a .hgn checkpoint",
+            )
+        if not _is_readable_file(Path(checkpoint)):
+            raise _model_missing(
+                slot_cfg,
+                f"halogen checkpoint {checkpoint} does not exist or cannot be read; "
+                "restore the file or assign another model to the slot",
+                path=checkpoint,
+            )
+        if not has_hgn_magic(Path(checkpoint)):
+            raise _model_missing(
+                slot_cfg,
+                f"halogen checkpoint {checkpoint} cannot be read or does not start with HGN1, "
+                "so the engine cannot load it; restore the file or assign another model "
+                "to the slot",
+                path=checkpoint,
+            )
+        tokenizer = Path(checkpoint).parent / HALOGEN_TOKENIZER_JSON
+        if not _is_readable_file(tokenizer):
+            raise _model_missing(
+                slot_cfg,
+                f"halogen tokenizer {tokenizer} not found or unreadable beside the checkpoint "
+                f"{checkpoint}; "
+                "restore the checkpoint's tokenizer directory",
+                path=str(tokenizer),
+            )
+
+    # ── Memory footprint ───────────────────────────────────────────────────────
+
+    def footprint_mb(
+        self,
+        model_info: Mapping[str, Any],
+        slot_cfg: Mapping[str, Any],
+        profile: Any,
+    ) -> float | None:
+        """Resident memory (MiB) the engine will hold, from the slot's own layout.
+
+        Argument gathering only; the arithmetic is
+        :func:`hal0.slots.capacity.halogen_footprint_mb` (ADR-0039). The inputs
+        are read as :meth:`container_spec` reads them: the checkpoint's size from
+        the registry row, the KV pool, KV slot count, prefill chunk, 8-bit KV
+        switch and prompt-cache entries from the profile's ``HALOGEN_*`` flags (a
+        missing or odd value is the default), and the context window and vision
+        from the slot's effective tune. The pool is booked at ``max(pool, window)`` so a small
+        pool setting never books less than the window needs, and the vision
+        tower counts only when vision is on AND its sidecar sits beside the
+        checkpoint, the same condition that sets ``HALOGEN_VISION_TOWER``.
+
+        ``None`` (the caller then uses the generic estimate) for a model that is
+        not a halogen checkpoint, or a checkpoint of unknown size.
+        """
+        if model_runtime_mismatch(model_info, self):
+            return None  # a known non-halogen row: not this engine's memory
+        try:
+            checkpoint_bytes = int(model_info.get("size_bytes") or 0)
+        except (TypeError, ValueError, OverflowError):
+            checkpoint_bytes = 0
+        if checkpoint_bytes <= 0:
+            return None
+
+        try:
+            carried = _profile_env(getattr(profile, "flags", "") or "")
+        except UnprocessableEntity:
+            carried = {}  # the launch refuses these flags; sizing falls back to defaults
+        tune = effective_tune(slot_cfg, profile)
+        pool = int(knob_value(carried, "HALOGEN_KV_POOL_POSITIONS"))
+        window = tune.ctx_size if isinstance(tune.ctx_size, int) else 0
+        checkpoint = str(model_info.get("path") or "")
+        return halogen_footprint_mb(
+            checkpoint_bytes=checkpoint_bytes,
+            pool_positions=max(pool, window),
+            kv_slots=int(knob_value(carried, "HALOGEN_KV_SLOTS")),
+            max_tok=int(knob_value(carried, "HALOGEN_MAX_TOK")),
+            kv8=knob_value(carried, "HALOGEN_KV8") == "1",
+            vision=tune.vision == "auto"
+            and bool(checkpoint)
+            and vision_sidecar_present(checkpoint),
+            cache_entries=_cache_entries(carried),
+        )
 
     # ── Health / readiness / sentinel ──────────────────────────────────────────
 

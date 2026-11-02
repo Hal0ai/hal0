@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -184,7 +185,11 @@ def default_model_cache_check(model_id: str) -> bool:
         return False
 
 
-def fallback_local_model(capability: str, configured_id: str = "") -> Model | None:
+def fallback_local_model(
+    capability: str,
+    configured_id: str = "",
+    fits: Callable[[Model], bool] | None = None,
+) -> Model | None:
     """Pick a locally-registered model (file on disk) to stand in for a
     non-servable slot default.
 
@@ -195,6 +200,11 @@ def fallback_local_model(capability: str, configured_id: str = "") -> Model | No
     ``chat``) can never be served into a text slot — the live
     ``ltx-2-19b-dev-fp8`` incident, where a 25GB video model was the
     largest "chat" candidate and llama-server then failed to load it.
+
+    ``fits``, when given, is the caller's own screen on top of those: a model it
+    answers False for is not a candidate at all, so it can win no step below,
+    the type default included. :func:`resolve_servable_model` passes the slot's
+    runtime fit. ``None`` screens nothing further.
 
     Selection order (a text slot wants a look-alike of its configured id,
     not merely the biggest model on the box):
@@ -232,6 +242,8 @@ def fallback_local_model(capability: str, configured_id: str = "") -> Model | No
         # even if it leaked into the chat candidate pool via a default
         # capability guess (see looks_diffusion_or_nontext).
         if looks_diffusion_or_nontext(m):
+            continue
+        if fits is not None and not fits(m):
             continue
         path = getattr(m, "path", "") or ""
         if not path:
@@ -308,7 +320,7 @@ def resolve_servable_model(model_id: str, cfg: SlotConfig | dict[str, Any]) -> s
       * the configured model is already registered with a file on disk;
       * the configured id is a known curated model (still to be pulled —
         don't pre-empt a legitimate download with a fallback);
-      * no local model matches the slot's capability.
+      * no local model matches the slot's capability and runtime.
     """
     from hal0.slots._cfg_helpers import _cfg_to_dict
 
@@ -329,7 +341,18 @@ def resolve_servable_model(model_id: str, cfg: SlotConfig | dict[str, Any]) -> s
     capability = SLOT_TYPE_TO_CAPABILITY.get(slot_type)
     if not capability:
         return model_id
-    fallback = fallback_local_model(capability, configured_id=model_id)
+    # A stand-in the slot's runtime would refuse is no stand-in: a llama slot must
+    # still self-heal to a GGUF with a far larger ``.hgn`` under the store, and a
+    # halogen slot's refusal must name its missing checkpoint, not a GGUF nobody
+    # chose. The same rule as the load guard, from the one module that owns it.
+    from hal0.slots.model_fit import model_runtime_mismatch, slot_runtime_provider
+
+    runtime = slot_runtime_provider(cfg)
+    fallback = fallback_local_model(
+        capability,
+        configured_id=model_id,
+        fits=lambda m: model_runtime_mismatch(m.model_dump(), runtime) is None,
+    )
     if fallback is None or fallback.id == model_id:
         return model_id
     # The ids go in the message text: ``extra=`` fields never reach the journal

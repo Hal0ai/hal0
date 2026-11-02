@@ -378,3 +378,121 @@ async def test_incoming_footprint_survives_an_unreadable_slot_config() -> None:
     mb = await _estimate_incoming_footprint_mb(host, "m", slot_name="ghost")  # type: ignore[arg-type]
 
     assert mb == pytest.approx(1000.0 + 131072 / 1000 * 0.5, abs=0.1)
+
+
+# ── incoming footprint asks the slot's provider first ────────────────────────
+
+
+class _StubFootprintProvider:
+    """A provider whose ``footprint_mb`` answers a fixed figure."""
+
+    def __init__(self, mb: float | None) -> None:
+        self._mb = mb
+        self.calls: list[tuple[Any, Any, Any]] = []
+
+    def footprint_mb(self, model_info: Any, slot_cfg: Any, profile: Any) -> float | None:
+        self.calls.append((model_info, slot_cfg, profile))
+        return self._mb
+
+
+_SEVENTY_GIB_MB = 70 * 1024.0
+
+
+async def test_preload_evict_uses_provider_footprint(tmp_hal0_home: str) -> None:
+    """The slot's provider sizes the incoming load; the estimate is the fallback."""
+    from unittest.mock import patch
+
+    from hal0.slots.preload_evict import _estimate_incoming_footprint_mb
+
+    provider = _StubFootprintProvider(_SEVENTY_GIB_MB)
+    host = _FootprintHost(
+        {"name": "chat", "type": "llm", "model": {"default": "m"}}, _big_window_model()
+    )
+
+    with patch("hal0.providers.container._spec_provider_for", return_value=provider):
+        mb = await _estimate_incoming_footprint_mb(host, "m", slot_name="chat")  # type: ignore[arg-type]
+
+    assert mb == pytest.approx(_SEVENTY_GIB_MB)
+    assert host.loaded == ["chat"]  # one config read feeds both the window and the provider
+    ((model_info, slot_cfg, profile),) = provider.calls
+    assert model_info["size_bytes"] == 1000 * 1024 * 1024  # the INCOMING model, not the slot's
+    assert model_info["ctx_tokens"] == 32768  # the slot's resolved window rides along
+    assert slot_cfg["name"] == "chat"
+    assert profile is not None
+
+
+async def test_admission_request_carries_the_provider_figure(tmp_hal0_home: str) -> None:
+    """``admit`` books the provider's 70 GiB, not the 1 GiB the file-size estimate gives."""
+    import asyncio
+    from unittest.mock import patch
+
+    from hal0.slots.preload_evict import admit
+
+    class _AdmitHost(_FootprintHost):
+        _preload_evict_enabled = True
+        _preload_evict_headroom_mb = 512.0
+        _preload_reserved_mb: dict[str, float] = {}  # noqa: RUF012
+        _admission_lock = asyncio.Lock()
+
+        def _probe_host_free_mb(self) -> float:
+            return 20 * 1024.0
+
+        def _sweep_candidates(self) -> dict[str, float]:
+            return {}
+
+    host = _AdmitHost(
+        {"name": "chat", "type": "llm", "model": {"default": "m"}}, _big_window_model()
+    )
+
+    with (
+        patch(
+            "hal0.providers.container._spec_provider_for",
+            return_value=_StubFootprintProvider(_SEVENTY_GIB_MB),
+        ),
+        pytest.raises(PreloadEvictionFailed) as exc,
+    ):
+        async with admit(host, slot_name="chat", model_id="m"):  # type: ignore[arg-type]
+            pytest.fail("a 70 GiB load into 20 GiB free must not be admitted")
+
+    assert exc.value.details["needed_mb"] == pytest.approx(_SEVENTY_GIB_MB)
+
+
+@pytest.mark.parametrize(
+    "provider",
+    [
+        pytest.param(_StubFootprintProvider(None), id="provider-has-no-figure"),
+        pytest.param(object(), id="provider-lacks-the-hook"),
+        pytest.param(None, id="llama-default-no-provider"),
+    ],
+)
+async def test_incoming_footprint_falls_back_without_a_provider_figure(
+    tmp_hal0_home: str, provider: Any
+) -> None:
+    from unittest.mock import patch
+
+    from hal0.slots.preload_evict import _estimate_incoming_footprint_mb
+
+    host = _FootprintHost(
+        {"name": "chat", "type": "llm", "model": {"default": "m"}}, _big_window_model()
+    )
+
+    with patch("hal0.providers.container._spec_provider_for", return_value=provider):
+        mb = await _estimate_incoming_footprint_mb(host, "m", slot_name="chat")  # type: ignore[arg-type]
+
+    assert mb == pytest.approx(1000.0 + 32768 / 1000 * 0.5, abs=0.1)
+
+
+async def test_incoming_footprint_does_not_ask_a_provider_without_a_slot() -> None:
+    """The slot-less call has no slot config to hand over: the estimate stands."""
+    from unittest.mock import patch
+
+    from hal0.slots.preload_evict import _estimate_incoming_footprint_mb
+
+    provider = _StubFootprintProvider(_SEVENTY_GIB_MB)
+    host = _FootprintHost({}, _big_window_model())
+
+    with patch("hal0.providers.container._spec_provider_for", return_value=provider):
+        mb = await _estimate_incoming_footprint_mb(host, "m")  # type: ignore[arg-type]
+
+    assert provider.calls == []
+    assert mb == pytest.approx(1000.0 + 131072 / 1000 * 0.5, abs=0.1)

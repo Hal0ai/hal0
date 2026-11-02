@@ -1351,3 +1351,150 @@ def test_scan_leaves_an_already_paired_registered_model_alone(
     assert result["paired_drafts"] == []
     assert registry.get("x").draft == str(first.resolve())
     assert {"path": str(extra.resolve()), "reason": "drafter_unpaired"} in result["skipped"]
+
+
+def _halogen_dir(root: Path) -> Path:
+    """A halogen download dir: one checkpoint, its companions, a tokenizer/."""
+    d = root / "halogen-flash-next"
+    (d / "tokenizer").mkdir(parents=True)
+    (d / "qwen38-flash-next-ht43.hgn").write_bytes(b"HGN1" + b"c" * 60)
+    (d / "qwen38-flash-next-ngram.hgn").write_bytes(b"HGN1" + b"n" * 60)
+    (d / "qwen38-flash-next-vision.hgn").write_bytes(b"HGN1" + b"v" * 60)
+    (d / "qwen38-flash-next-mtp.hgn").write_bytes(b"HGN1" + b"m" * 60)
+    (d / "qwen38-flash-next-ht43.overlay.hgn").write_bytes(b"HGN1" + b"o" * 60)
+    (d / "tokenizer" / "tokenizer.json").write_text("{}")
+    return d
+
+
+def test_scan_skips_halogen_companions(tmp_path: Path) -> None:
+    """Only the checkpoint is a candidate; ngram/vision/mtp/overlay companions
+    and the tokenizer/ directory never become registry rows."""
+    root = tmp_path / "models"
+    _halogen_dir(root)
+    candidates = find_candidates(
+        roots=[root],
+        extensions=[".gguf", ".safetensors", ".hgn"],
+        known_paths=set(),
+    )
+    assert [c.path.name for c in candidates] == ["qwen38-flash-next-ht43.hgn"]
+    assert candidates[0].suggested_id == "qwen38-flash-next-ht43"
+
+
+def test_scan_and_register_picks_up_hgn_by_default(tmp_path: Path, registry: ModelRegistry) -> None:
+    """``.hgn`` is in the default ``[models].file_extensions``, so a stock
+    config registers the checkpoint and none of its companions."""
+    root = tmp_path / "models"
+    _halogen_dir(root)
+    scan_and_register(registry, ModelsConfig(roots=[str(root)]))
+    assert [Path(m.path).name for m in registry.list()] == ["qwen38-flash-next-ht43.hgn"]
+
+
+def test_scan_registers_a_halogen_checkpoint_with_its_companions(
+    tmp_path: Path, registry: ModelRegistry
+) -> None:
+    """The auto-scan stamps the same halogen row add-from-path does: backend,
+    provider, vision from the exact sidecar, companions and native context."""
+    root = tmp_path / "models"
+    d = _halogen_dir(root)
+    scan_and_register(registry, ModelsConfig(roots=[str(root)]))
+
+    (m,) = registry.list()
+    assert m.id == "qwen38-flash-next-ht43"
+    assert m.backends == ["halogen"]
+    assert m.provider == "halogen"
+    # _halogen_dir's sidecar has the exact name the engine looks for.
+    assert m.capabilities == ["chat", "vision"]
+    assert m.size_bytes == (d / "qwen38-flash-next-ht43.hgn").stat().st_size
+    assert "halogen" in m.tags
+    assert m.metadata["companions"] == {
+        "qwen38-flash-next-ngram.hgn": 64,
+        "qwen38-flash-next-vision.hgn": 64,
+        "qwen38-flash-next-mtp.hgn": 64,
+        "qwen38-flash-next-ht43.overlay.hgn": 64,
+    }
+    assert m.metadata["native_ctx"] == 262144
+    # The detection facts add-from-path records, so the same file registered by
+    # either route carries the same keys (and the registry's context column).
+    assert m.metadata["context_length"] == 262144
+    assert m.metadata["detection_confidence"] == "high"
+    # The generic scan stamp is still there.
+    assert m.metadata["discovered"] is True
+    assert m.metadata["source"] == "auto-scan"
+
+
+def test_scan_gives_a_halogen_checkpoint_no_vision_without_the_exact_sidecar(
+    tmp_path: Path, registry: ModelRegistry
+) -> None:
+    root = tmp_path / "models"
+    d = _halogen_dir(root)
+    (d / "qwen38-flash-next-vision.hgn").unlink()
+    scan_and_register(registry, ModelsConfig(roots=[str(root)]))
+    (m,) = registry.list()
+    assert m.capabilities == ["chat"]
+    assert "qwen38-flash-next-vision.hgn" not in m.metadata["companions"]
+
+
+def test_scan_leaves_a_gguf_row_without_halogen_facts(
+    tmp_path: Path, registry: ModelRegistry
+) -> None:
+    root = tmp_path / "models"
+    root.mkdir()
+    (root / "qwen3-4b-instruct-q4_k_m.gguf").write_bytes(b"x" * 128)
+    scan_and_register(registry, ModelsConfig(roots=[str(root)]))
+    (m,) = registry.list()
+    assert m.provider == "llama-server"
+    assert "halogen" not in m.tags
+    assert "companions" not in m.metadata
+
+
+def test_scan_registers_a_gguf_named_hgn1_file_as_halogen(
+    tmp_path: Path, registry: ModelRegistry
+) -> None:
+    """Content over name, as ``detect`` and add-from-path already decide: as a llama
+    row this would crash-loop on a llama slot and be refused on a halogen one."""
+    root = tmp_path / "models"
+    root.mkdir()
+    (root / "renamed.gguf").write_bytes(b"HGN1" + b"c" * 60)
+    scan_and_register(registry, ModelsConfig(roots=[str(root)]))
+    (m,) = registry.list()
+    assert m.provider == "halogen"
+    assert m.backends == ["halogen"]
+    assert "halogen" in m.tags
+    assert m.metadata["detection_confidence"] == "high"
+
+
+def test_scan_registers_an_hgn_named_gguf_as_a_llama_row(
+    tmp_path: Path, registry: ModelRegistry
+) -> None:
+    root = tmp_path / "models"
+    root.mkdir()
+    write_gguf(root / "renamed.hgn", "llama")
+    scan_and_register(registry, ModelsConfig(roots=[str(root)]))
+    (m,) = registry.list()
+    assert m.provider == "llama-server"
+    assert "halogen" not in m.tags
+
+
+def test_scan_reads_no_gguf_header_for_an_ordinary_gguf(
+    tmp_path: Path, registry: ModelRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Four bytes per candidate is the whole cost: the walk may meet thousands of files."""
+    root = tmp_path / "models"
+    root.mkdir()
+    (root / "qwen3-4b-instruct-q4_k_m.gguf").write_bytes(b"GGUF" + b"x" * 124)
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise AssertionError("detect() reads the GGUF header")
+
+    monkeypatch.setattr("hal0.registry.discover.detect", boom)
+    scan_and_register(registry, ModelsConfig(roots=[str(root)]))
+    (m,) = registry.list()
+    assert m.provider == "llama-server"
+
+
+def test_is_skippable_drops_halogen_companions() -> None:
+    from hal0.registry.discover import is_skippable
+
+    assert is_skippable(Path("/m/qwen38-flash-next-ngram.hgn"))
+    assert is_skippable(Path("/m/qwen38-flash-next-mtp.hgn"))
+    assert not is_skippable(Path("/m/qwen38-flash-next-ht43.hgn"))

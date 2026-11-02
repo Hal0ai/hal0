@@ -1221,7 +1221,13 @@ def _models_outside_mount_roots(
 def _unregistered_store_files(
     store_dir: Path, exts: set[str], registered_paths: set[str]
 ) -> list[str]:
-    """Model files physically in ``store_dir`` that no registry entry names."""
+    """Model files physically in ``store_dir`` that no registry entry names.
+
+    A halogen companion (ngram table, vision sidecar, mtp head, overlay) is a
+    ``.hgn`` file but never a model — the scan skips it, so this audit does too.
+    """
+    from hal0.registry.detect import is_halogen_companion
+
     if not store_dir.is_dir():
         return []
     return [
@@ -1230,6 +1236,7 @@ def _unregistered_store_files(
         if f.is_file()
         and f.suffix.lower() in exts
         and not f.name.startswith(".")
+        and not is_halogen_companion(f.name)
         and str(f) not in registered_paths
     ]
 
@@ -1524,7 +1531,7 @@ def doctor_models(
     except Exception as exc:  # config unreadable — report, keep going
         if not json_output:
             console.print(f"[yellow]![/yellow]  could not read hal0.toml: {exc}")
-        scan_roots, effective, exts = [], "", {".gguf", ".safetensors"}
+        scan_roots, effective, exts = [], "", {".gguf", ".safetensors", ".hgn"}
     unregistered: list[str] = []
     store_missing = False
     if effective:
@@ -1889,12 +1896,129 @@ def _local_image_repos() -> set[str] | None:
     return {line.strip() for line in proc.stdout.splitlines() if line.strip() and line != "<none>"}
 
 
+#: The HF repo the halogen checkpoint, lookup table and tokenizer come from; it
+#: names the repair line a row with a missing lookup table ends on.
+_HALOGEN_HF_REPO = "peonist-ai/halogen-qwen3.8-flash-next"
+
+
+def check_halogen_weights(registry: Any) -> list[dict[str, str]]:
+    """One row per registered halogen checkpoint: is everything beside it?
+
+    ``registry`` is anything with ``list() -> list[Model]``. Only models whose
+    provider is ``halogen`` (a row with no stored provider resolves through its
+    backends, as everywhere else) get a row, labelled with the model id:
+
+      * ``fail`` — the checkpoint is missing, does not start with the ``HGN1``
+        magic, or ``tokenizer/tokenizer.json`` is not beside it. The engine
+        cannot load it.
+      * ``warn`` — the checkpoint and tokenizer are fine but the ngram lookup
+        table is not beside it. The ``detail`` ends on the exact fetch line.
+      * ``ok`` — checkpoint, lookup table and tokenizer are all in place.
+
+    The vision sidecar is optional, so its presence is only ever information
+    appended to ``detail``.
+    """
+    return _halogen_weight_rows_for(registry.list())
+
+
+def _halogen_weight_rows_for(models: list[Any]) -> list[dict[str, str]]:
+    """The rows :func:`check_halogen_weights` documents, over already-listed models."""
+    from hal0.model_meta import derive_model_provider
+    from hal0.registry.detect import (
+        HALOGEN_NGRAM_TABLE,
+        HALOGEN_TOKENIZER_JSON,
+        HALOGEN_VISION_SIDECAR,
+        HGN_MAGIC,
+    )
+
+    rows: list[dict[str, str]] = []
+    for model in models:
+        provider = getattr(model, "provider", None) or derive_model_provider(
+            getattr(model, "backends", None)
+        )
+        if provider != "halogen":
+            continue
+        checkpoint = Path(model.path)
+        directory = checkpoint.parent
+
+        try:
+            with checkpoint.open("rb") as fh:
+                magic = fh.read(len(HGN_MAGIC))
+        except OSError:
+            rows.append(
+                {
+                    "label": model.id,
+                    "status": "fail",
+                    "detail": f"checkpoint {checkpoint} is missing or unreadable",
+                }
+            )
+            continue
+        if magic != HGN_MAGIC:
+            rows.append(
+                {
+                    "label": model.id,
+                    "status": "fail",
+                    "detail": f"{checkpoint} is not an HGN1 checkpoint (bad magic) — re-fetch it",
+                }
+            )
+            continue
+
+        table_ok = (directory / HALOGEN_NGRAM_TABLE).is_file()
+        tokenizer_ok = (directory / HALOGEN_TOKENIZER_JSON).is_file()
+        vision = "present" if (directory / HALOGEN_VISION_SIDECAR).is_file() else "absent"
+        info = f"vision sidecar {vision}"
+
+        if not tokenizer_ok:
+            missing = HALOGEN_TOKENIZER_JSON
+            if not table_ok:
+                missing += f" and {HALOGEN_NGRAM_TABLE}"
+            status, detail = "fail", f"{missing} not found beside {checkpoint}; {info}"
+        elif not table_ok:
+            fetch = f"hf download {_HALOGEN_HF_REPO} {HALOGEN_NGRAM_TABLE} --local-dir {directory}"
+            status = "warn"
+            detail = (
+                f"lookup table {HALOGEN_NGRAM_TABLE} not found beside {checkpoint}; {info}\n{fetch}"
+            )
+        else:
+            status = "ok"
+            detail = f"{checkpoint.name}: lookup table and tokenizer present; {info}"
+        rows.append({"label": model.id, "status": status, "detail": detail})
+    return rows
+
+
+def _halogen_weight_rows() -> list[dict[str, str]]:
+    """``check_halogen_weights`` over the local registry; ``[]`` when there is none.
+
+    A box that has never registered a model has no registry database yet, and a
+    read-only audit must not create one. A registry that cannot be read (an I/O
+    error, a database SQLite refuses, a row whose JSON column is corrupt, the
+    registry's own errors) is not a halogen finding either: ``hal0 doctor
+    models`` is where that surfaces. Only those failures are swallowed, and only
+    around the registry read; anything else, including a bug in the row checks,
+    propagates.
+    """
+    import sqlite3
+
+    from hal0.registry.store import ModelRegistry, RegistryError
+
+    try:
+        registry = ModelRegistry()
+        if not registry.db_path.exists():
+            return []
+        models = registry.list()
+    except (OSError, sqlite3.Error, ValueError, RegistryError):
+        # ValueError: ``list()`` json-decodes each row's ``extra`` column.
+        return []
+    return _halogen_weight_rows_for(models)
+
+
 def _render_profiles(title: str, rows: list[dict[str, str]]) -> None:
-    """Print profile audit rows with an ok/warn/drift badge, drift/warn detailed."""
+    """Print profile audit rows with an ok/warn/drift/fail badge, non-ok detailed."""
     badge = {
         "ok": "[green]ok[/green]",
         "warn": "[yellow]warn[/yellow]",
         "drift": "[red]DRIFT[/red]",
+        "fail": "[red]FAIL[/red]",
     }
     console.print(f"\n[bold]{title}[/bold]")
     if not rows:
@@ -1905,13 +2029,21 @@ def _render_profiles(title: str, rows: list[dict[str, str]]) -> None:
         if r["status"] == "ok":
             console.print(f"  {badge['ok']}  {r['label']}  [dim]{r['detail']}[/dim]")
         else:
-            console.print(f"  {badge[r['status']]}  {r['label']} — {r['detail']}")
+            # A detail's later lines are commands to copy (the halogen fetch
+            # line): print them verbatim and unwrapped, whatever the width.
+            head, *commands = r["detail"].splitlines() or [""]
+            console.print(f"  {badge[r['status']]}  {r['label']} — {head}")
+            for line in commands:
+                console.print(f"      {line}", soft_wrap=True, markup=False, highlight=False)
 
 
 def _diagnose_profiles(
-    ref_rows: list[dict[str, str]], img_rows: list[dict[str, str]]
+    ref_rows: list[dict[str, str]],
+    img_rows: list[dict[str, str]],
+    halogen_rows: list[dict[str, str]] | None = None,
 ) -> list[Diagnosis]:
-    """§2.4: dangling slot→profile refs (fail) + un-pulled images (warn)."""
+    """§2.4: dangling slot→profile refs (fail) + un-pulled images (warn) +
+    halogen checkpoints missing something the engine needs (fail/warn)."""
     diagnoses: list[Diagnosis] = [
         Diagnosis(
             id="HAL0-PROFILE-REF-DANGLES",
@@ -1946,6 +2078,23 @@ def _diagnose_profiles(
         for r in img_rows
         if r["status"] == "warn"
     ]
+    for r in halogen_rows or []:
+        if r["status"] not in ("fail", "warn"):
+            continue
+        # A warn row ends on the exact fetch command; a fail row has none.
+        last_line = r["detail"].splitlines()[-1]
+        fetch = [NextStep(kind="command", label=last_line, target=last_line)]
+        diagnoses.append(
+            Diagnosis(
+                id="HAL0-HALOGEN-WEIGHTS-INCOMPLETE",
+                severity="fail" if r["status"] == "fail" else "warn",
+                confidence="high",
+                summary=f"halogen model {r['label']} is missing files the engine needs",
+                detail=r["detail"],
+                evidence=[Evidence(kind="table_row", summary=r["detail"], data=r)],
+                next_steps=fetch if last_line.startswith("hf download ") else [],
+            )
+        )
     if not diagnoses:
         return [
             Diagnosis(
@@ -1973,17 +2122,21 @@ def doctor_profiles(
 ) -> None:
     """Audit the slot↔profile layer: dangling references + un-pulled images.
 
-    Two checks, surfaced before a slot has to fail on start:
+    Checks surfaced before a slot has to fail on start:
 
       * broken refs — a slot's ``profile = "..."`` names a profile that no longer
-        exists (the slot dies with KeyError at start). This is the only failing
-        check.
+        exists (the slot dies with KeyError at start). A failing check.
       * image present — an in-use profile's toolbox image isn't pulled locally
         (advisory; the first slot start pulls it).
+      * halogen checkpoints — a registered ``.hgn`` model whose checkpoint is
+        missing or not ``HGN1``, or whose ``tokenizer/tokenizer.json`` is not
+        beside it, cannot load (a failing check); a missing ngram lookup table
+        only warns, with the ``hf download`` line that fetches it.
 
     Exit codes:
       0 — no broken references (advisory warnings may still be printed).
-      1 — at least one slot references a missing profile.
+      1 — at least one slot references a missing profile, or a halogen
+          checkpoint cannot load.
     """
     try:
         from hal0.config.loader import list_slots, load_slot_config
@@ -2028,8 +2181,10 @@ def doctor_profiles(
 
     ref_rows = check_slot_profile_refs(slot_profiles, valid_names, slot_types, slot_devices)
     img_rows = check_profile_images_present(profiles, _local_image_repos())
+    halogen_rows = _halogen_weight_rows()
 
     broken = [r for r in ref_rows if r["status"] == "drift"]
+    halogen_failed = [r for r in halogen_rows if r["status"] == "fail"]
 
     type_rows = check_slot_type_vs_profile(
         [(n, slot_types.get(n, ""), p) for n, p in slot_profiles],
@@ -2043,11 +2198,13 @@ def doctor_profiles(
         type_rows = [r for r in type_rows if r["status"] != "drift"]
 
     if json_output:
-        console.print_json(render_json(_diagnose_profiles(ref_rows, img_rows)))
-        raise typer.Exit(1 if broken or type_drift else 0)
+        console.print_json(render_json(_diagnose_profiles(ref_rows, img_rows, halogen_rows)))
+        raise typer.Exit(1 if broken or type_drift or halogen_failed else 0)
 
     _render_profiles("Slot → profile references", ref_rows)
     _render_profiles("Profile images (in-use)", img_rows)
+    if halogen_rows:
+        _render_profiles("Halogen checkpoints", halogen_rows)
     if type_drift:
         _render_profiles("Slot type vs profile", type_drift)
 
@@ -2061,6 +2218,12 @@ def doctor_profiles(
     if type_drift:
         console.print(
             f"\n[red]✗[/red]  {len(type_drift)} slot(s) have the wrong type for their profile."
+        )
+        raise typer.Exit(1)
+    if halogen_failed:
+        console.print(
+            f"\n[red]✗[/red]  {len(halogen_failed)} halogen checkpoint(s) cannot load — "
+            "see each row above."
         )
         raise typer.Exit(1)
     console.print("\n[green]✓[/green]  every slot resolves to a real profile.")

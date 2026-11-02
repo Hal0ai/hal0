@@ -26,7 +26,9 @@ from hal0.providers._gpu import (
     GpuPreflightError,
     converge_kfd_device_group,
     host_is_amd_gpu,
+    kfd_gfx_target_versions,
     kfd_present,
+    kfd_proc_count,
     kfd_status,
     require_kfd_for_gpu_slot,
     resolve_kfd_target_gid,
@@ -1145,3 +1147,97 @@ class TestTheUidProbeIsLazy:
             amd_host=True,
             runner_uid=0,
         )
+
+
+# ── KFD sysfs readers (the GTT-leak guard and the gfx-target preflight) ─────────
+
+
+def _kfd_tree(
+    root,
+    *,
+    procs: tuple[int, ...] | None = (),
+    nodes: tuple[object, ...] | None = (),
+):
+    """A ``/sys``-shaped tree: ``class/kfd/kfd/{proc/<pid>/, topology/nodes/<n>/properties}``.
+
+    ``procs=None`` / ``nodes=None`` leave that half of the tree absent. A node is
+    its ``gfx_target_version`` (an int), or any other object written verbatim as
+    the whole ``properties`` file.
+    """
+    kfd = root / "class" / "kfd" / "kfd"
+    kfd.mkdir(parents=True, exist_ok=True)
+    if procs is not None:
+        proc = kfd / "proc"
+        proc.mkdir(exist_ok=True)
+        for pid in procs:
+            (proc / str(pid)).mkdir()
+    if nodes is not None:
+        topo = kfd / "topology" / "nodes"
+        topo.mkdir(parents=True, exist_ok=True)
+        for index, node in enumerate(nodes):
+            d = topo / str(index)
+            d.mkdir()
+            body = (
+                f"cpu_cores_count 0\ngfx_target_version {node}\nsimd_count 0\n"
+                if isinstance(node, int)
+                else str(node)
+            )
+            (d / "properties").write_text(body)
+    return root
+
+
+class TestKfdProcCount:
+    def test_counts_one_entry_per_kfd_process(self, tmp_path) -> None:
+        _kfd_tree(tmp_path, procs=(4242, 9001))
+        assert kfd_proc_count(str(tmp_path)) == 2
+
+    def test_an_empty_table_is_zero_not_unknown(self, tmp_path) -> None:
+        _kfd_tree(tmp_path, procs=())
+        assert kfd_proc_count(str(tmp_path)) == 0
+
+    def test_unreadable_is_none_not_zero(self, tmp_path) -> None:
+        """No KFD at all (no ROCm, or sysfs not visible) must not read as 'no
+        process holds the GPU': the guard refuses only on a positive zero."""
+        assert kfd_proc_count(str(tmp_path)) is None
+        _kfd_tree(tmp_path, procs=None)
+        assert kfd_proc_count(str(tmp_path)) is None
+
+    def test_a_proc_path_that_is_a_file_is_none(self, tmp_path) -> None:
+        kfd = tmp_path / "class" / "kfd" / "kfd"
+        kfd.mkdir(parents=True)
+        (kfd / "proc").write_text("")
+        assert kfd_proc_count(str(tmp_path)) is None
+
+    def test_reads_the_real_default_root_without_raising(self) -> None:
+        assert kfd_proc_count() is None or kfd_proc_count() >= 0
+
+
+class TestKfdGfxTargetVersions:
+    def test_returns_every_nodes_version(self, tmp_path) -> None:
+        # Node 0 is the CPU (gfx_target_version 0), node 1 the iGPU.
+        _kfd_tree(tmp_path, nodes=(0, 110501))
+        assert kfd_gfx_target_versions(str(tmp_path)) == [0, 110501]
+
+    def test_two_gpus(self, tmp_path) -> None:
+        _kfd_tree(tmp_path, nodes=(0, 110501, 110000))
+        assert kfd_gfx_target_versions(str(tmp_path)) == [0, 110501, 110000]
+
+    def test_nodes_are_read_in_numeric_order(self, tmp_path) -> None:
+        _kfd_tree(tmp_path, nodes=tuple(range(100, 112)))
+        assert kfd_gfx_target_versions(str(tmp_path)) == list(range(100, 112))
+
+    def test_unreadable_is_an_empty_list(self, tmp_path) -> None:
+        assert kfd_gfx_target_versions(str(tmp_path)) == []
+        _kfd_tree(tmp_path, nodes=None)
+        assert kfd_gfx_target_versions(str(tmp_path)) == []
+
+    def test_a_node_without_the_property_is_skipped(self, tmp_path) -> None:
+        _kfd_tree(tmp_path, nodes=("cpu_cores_count 8\n", 110501))
+        assert kfd_gfx_target_versions(str(tmp_path)) == [110501]
+
+    def test_a_malformed_value_is_skipped(self, tmp_path) -> None:
+        _kfd_tree(tmp_path, nodes=("gfx_target_version unknown\n", 110501))
+        assert kfd_gfx_target_versions(str(tmp_path)) == [110501]
+
+    def test_reads_the_real_default_root_without_raising(self) -> None:
+        assert isinstance(kfd_gfx_target_versions(), list)

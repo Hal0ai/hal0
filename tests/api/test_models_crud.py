@@ -1651,3 +1651,115 @@ def test_unpair_via_symlinked_path_is_not_repaired_by_scan(
     result = scan_and_register(registry, ModelsConfig(roots=[str(crud_models_root)]))
     assert result["paired_drafts"] == []
     assert registry.get("tgt").draft is None
+
+
+# ── halogen .hgn checkpoints register with their companions ─────────────────
+
+_HALOGEN_CKPT = "qwen38-flash-next-ht43.hgn"
+_HALOGEN_TABLE = "qwen38-flash-next-ngram.hgn"
+_HALOGEN_VISION = "qwen38-flash-next-vision.hgn"
+
+
+def _write_halogen_dir(root: Path, *, vision: bool = True) -> Path:
+    """A halogen download dir: HGN1 checkpoint, ngram table, optional vision sidecar."""
+    d = root / "halogen-flash-next"
+    (d / "tokenizer").mkdir(parents=True)
+    (d / _HALOGEN_CKPT).write_bytes(b"HGN1" + b"c" * 60)
+    (d / _HALOGEN_TABLE).write_bytes(b"HGN1" + b"n" * 20)
+    (d / "tokenizer" / "tokenizer.json").write_text("{}", encoding="utf-8")
+    if vision:
+        (d / _HALOGEN_VISION).write_bytes(b"HGN1" + b"v" * 10)
+    return d
+
+
+def _assert_halogen_row(entry: dict[str, Any], ckpt: Path, *, vision: bool) -> None:
+    assert entry["backends"] == ["halogen"]
+    assert entry["provider"] == "halogen"
+    assert entry["capabilities"] == (["chat", "vision"] if vision else ["chat"])
+    assert entry["size_bytes"] == ckpt.stat().st_size
+    assert "halogen" in entry["tags"]
+    companions = {_HALOGEN_TABLE: 24}
+    if vision:
+        companions[_HALOGEN_VISION] = 14
+    assert entry["metadata"]["companions"] == companions
+    assert entry["metadata"]["native_ctx"] == 262144
+    assert entry["metadata"]["context_length"] == 262144
+
+
+def test_add_from_path_registers_a_halogen_checkpoint_with_its_companions(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    d = _write_halogen_dir(crud_models_root)
+    ckpt = d / _HALOGEN_CKPT
+
+    r = crud_client.post("/api/models/add-from-path", json={"path": str(ckpt), "id": "flash-next"})
+
+    assert r.status_code == 201, r.text
+    _assert_halogen_row(r.json(), ckpt, vision=True)
+    assert r.json()["metadata"]["detection_confidence"] == "high"
+    # What the response says is what the registry holds.
+    _assert_halogen_row(crud_client.get("/api/models/flash-next").json(), ckpt, vision=True)
+
+
+def test_add_from_path_halogen_without_the_vision_sidecar_is_chat_only(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    d = _write_halogen_dir(crud_models_root, vision=False)
+    ckpt = d / _HALOGEN_CKPT
+
+    r = crud_client.post("/api/models/add-from-path", json={"path": str(ckpt), "id": "flash-next"})
+
+    assert r.status_code == 201, r.text
+    _assert_halogen_row(r.json(), ckpt, vision=False)
+
+
+def test_scan_commit_rows_registers_a_halogen_checkpoint_with_its_companions(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    d = _write_halogen_dir(crud_models_root)
+    ckpt = d / _HALOGEN_CKPT
+
+    r = crud_client.post(
+        "/api/models/scan", json={"rows": [{"path": str(ckpt), "id": "flash-next"}]}
+    )
+
+    assert r.status_code == 200, r.text
+    assert r.json()["added"] == ["flash-next"]
+    _assert_halogen_row(crud_client.get("/api/models/flash-next").json(), ckpt, vision=True)
+
+
+def test_auto_scan_registers_a_halogen_checkpoint_and_no_companion(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    d = _write_halogen_dir(crud_models_root)
+    ckpt = d / _HALOGEN_CKPT
+
+    r = crud_client.post("/api/models/scan", json={})
+
+    assert r.status_code == 200, r.text
+    assert r.json()["added"] == ["qwen38-flash-next-ht43"]
+    scanned = crud_client.get("/api/models/qwen38-flash-next-ht43").json()
+    _assert_halogen_row(scanned, ckpt, vision=True)
+    # The auto-scan records the same detection facts add-from-path does.
+    assert scanned["metadata"]["detection_confidence"] == "high"
+
+
+def test_add_from_path_refuses_a_halogen_companion_and_names_its_checkpoint(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    d = _write_halogen_dir(crud_models_root)
+
+    r = crud_client.post("/api/models/add-from-path", json={"path": str(d / _HALOGEN_TABLE)})
+
+    assert r.status_code == 409, r.text
+    error = r.json()["error"]
+    assert error["code"] == "models.halogen_companion"
+    assert _HALOGEN_CKPT in error["message"]
+    assert error["details"]["checkpoints"] == [_HALOGEN_CKPT]
+    # Nothing was registered for the companion.
+    assert crud_client.get("/api/models").json()["models"] == []

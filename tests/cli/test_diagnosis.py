@@ -160,6 +160,7 @@ _EXPECTED_TAXONOMY = frozenset(
         "HAL0-MODEL-FLM-STORE-NOT-WRITABLE",
         "HAL0-PROFILE-REF-DANGLES",
         "HAL0-PROFILE-IMAGE-MISSING",
+        "HAL0-HALOGEN-WEIGHTS-INCOMPLETE",
         "HAL0-PERMS-HERMES-DRIFT",
         "HAL0-PERMS-TREE-NOT-SHARED",
         "HAL0-PERMS-PATH-OWNERSHIP-DRIFT",
@@ -183,6 +184,29 @@ def test_diagnosis_id_taxonomy_snapshot() -> None:
     see spec-21-4-doctor.md §7 risk #1: bump a schema version + CHANGELOG
     note, never a silent rename."""
     assert DIAGNOSIS_IDS == _EXPECTED_TAXONOMY
+
+
+def test_every_id_doctor_commands_emits_is_in_the_taxonomy() -> None:
+    """A ``HAL0-*`` id spelled in ``doctor_commands.py`` (the halogen rows'
+    ``HAL0-HALOGEN-WEIGHTS-INCOMPLETE`` among them) that is not in the frozen
+    set is an unregistered contract: a consumer validating against
+    ``DIAGNOSIS_IDS`` would reject it, and the snapshot above would not notice."""
+    import ast
+    import re
+    from pathlib import Path
+
+    import hal0.cli.doctor_commands as doctor_commands
+
+    tree = ast.parse(Path(doctor_commands.__file__).read_text(encoding="utf-8"))
+    spelled = {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and re.fullmatch(r"HAL0-[A-Z0-9]+(?:-[A-Z0-9]+)*", node.value)
+    }
+    assert "HAL0-HALOGEN-WEIGHTS-INCOMPLETE" in spelled  # the scan sees the new rows
+    assert spelled - DIAGNOSIS_IDS == set()
 
 
 def test_every_taxonomy_id_follows_the_shape() -> None:

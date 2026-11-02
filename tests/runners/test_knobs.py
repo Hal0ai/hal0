@@ -21,8 +21,10 @@ from hal0.runners.knobs import (
     HALOGEN_NATIVE_CTX,
     HALOGEN_TUNE_ENV,
     EngineKnob,
+    knob_value,
     parse_env_tokens,
     screen_halogen_flags,
+    whole_number,
 )
 
 
@@ -294,3 +296,39 @@ def test_parse_env_tokens_bounds_a_value_at_the_validators_1024_bytes() -> None:
         assert "1024" in str(exc_info.value)
     # High bytes are legal, as they are in the unit file.
     assert parse_env_tokens("HALOGEN_X=é") == {"HALOGEN_X": "é"}
+
+
+# ── knob_value: the sizing read ────────────────────────────────────────────
+
+
+def test_knob_value_reads_the_flag() -> None:
+    assert knob_value({"HALOGEN_KV_SLOTS": "4"}, "HALOGEN_KV_SLOTS") == "4"
+
+
+def test_knob_value_is_the_default_when_absent() -> None:
+    assert knob_value({}, "HALOGEN_KV_SLOTS") == "2"
+
+
+@pytest.mark.parametrize("value", ["lots", "0", "65", "-1", "9" * 5000])
+def test_knob_value_is_the_default_when_the_screen_would_refuse_it(value: str) -> None:
+    assert knob_value({"HALOGEN_KV_SLOTS": value}, "HALOGEN_KV_SLOTS") == "2"
+
+
+def test_knob_value_of_a_knob_with_no_default_is_empty() -> None:
+    assert knob_value({}, "HALOGEN_MAX_TOKENS_DEFAULT") == ""
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("0", 0),
+        ("200", 200),
+        ("", None),
+        ("-5", None),
+        ("1.5", None),
+        ("٣", None),
+        ("9" * 10, None),
+    ],
+)
+def test_whole_number(value: str, expected: int | None) -> None:
+    assert whole_number(value) == expected

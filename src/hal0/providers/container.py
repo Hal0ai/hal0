@@ -81,6 +81,7 @@ from hal0.providers import podman_introspect
 from hal0.providers._gpu import (
     gpu_visibility_env,
     is_nvidia_gpu_device,
+    kfd_gfx_target_versions,
     nvidia_cdi_devices,
     require_kfd_for_gpu_slot,
     resolve_gpu_device_paths,
@@ -105,13 +106,14 @@ from hal0.slot_lifecycle_budget import (
 )
 from hal0.slots.activation import autoload_enabled
 from hal0.slots.argv import ResolvedArgv, deny_llama_env, resolve_argv
+from hal0.slots.model_fit import model_runtime_mismatch
 from hal0.slots.naming import (
     slot_container_name,
     slot_instance_token,
     slot_quadlet_name,
     slot_unit_name,
 )
-from hal0.slots.state import RunnerFamilyMismatch, SlotSpawnFailed
+from hal0.slots.state import RunnerFamilyMismatch, SlotModelRuntimeMismatch, SlotSpawnFailed
 from hal0.slots.tune import EffectiveTune, effective_tune
 from hal0.system.seam import SeamTimeout, SystemCtlSeam, is_hal0_service_user
 
@@ -1314,6 +1316,20 @@ def runner_family_mismatch(slot_cfg: Mapping[str, Any]) -> RunnerFamilyMismatch 
     )
 
 
+def _refuse_foreign_runner(slot_cfg: Mapping[str, Any], spec_provider: Any | None) -> None:
+    """Raise :func:`runner_family_mismatch`'s refusal when the llama path would launch it.
+
+    The llama path takes its image from ``binary``, so a non-llama runner there would
+    launch with llama-server argv and exit. The write seam refuses this state, which
+    leaves a hand edit. Only this path: a dispatched provider launches its own image,
+    so a stale ``binary`` beside one is inert and that slot keeps loading.
+    """
+    if spec_provider is None:
+        mismatch = runner_family_mismatch(slot_cfg)
+        if mismatch is not None:
+            raise mismatch
+
+
 def readiness_probe_budget_s(slot_cfg: Mapping[str, Any]) -> float | None:
     """Seconds the per-request readiness gate may wait on this slot's health probe.
 
@@ -2451,6 +2467,49 @@ class ContainerProvider(Provider):
             autoload=autoload_enabled(slot_cfg),
         )
 
+    def check_load(self, slot_cfg: dict[str, Any], model_info: dict[str, Any]) -> None:
+        """Refuse a load this slot's runtime can already tell it cannot serve.
+
+        Cheap and local: a registry fact, the host's KFD topology and the file
+        system, no network. :meth:`hal0.slots.manager.SlotManager.load` calls it
+        before pre-load eviction, because a load that is going to be refused must
+        not cost the box its idle slots first, and ``swap`` calls it before it tears
+        anything down. :meth:`load_sync` calls it again, so it stays authoritative for
+        ``spawn()`` and direct callers. A no-op for a runtime with no ``preflight``
+        hook whose model and ``binary`` agree with it. The KFD guard
+        (:func:`require_kfd_for_gpu_slot`) is deliberately not here: it costs a sudo
+        and podman round trip, so it stays in :meth:`load_sync`, after eviction.
+
+        * The slot's ``binary`` must belong to the runtime it launches
+          (:func:`_refuse_foreign_runner`).
+        * The model and the runtime must agree: a halogen checkpoint only loads on
+          the halogen runtime, and that runtime loads nothing else. The write seam
+          refuses the same pairing, but a slot file edited by hand, a profile
+          switched under a bound model, or a ``load -m`` override reaches here
+          without passing it. An empty model binding is not this refusal (the
+          provider names it, ``slot.model_missing``).
+        * A runtime that can refuse a host it cannot run on (halogen: gfx1151 only,
+          a checkpoint with its tokenizer beside it) says so. The provider owns the
+          rule; this seam only hands it the host's KFD gfx targets, read lazily so
+          no other runtime pays for the sysfs walk. Raises whatever it refuses with
+          (a ``SlotConfigError``).
+        """
+        spec_provider = _spec_provider_for(slot_cfg)
+        _refuse_foreign_runner(slot_cfg, spec_provider)
+        slot_label = str(slot_cfg.get("name", "") or slot_instance_token(slot_cfg))
+        mismatch = model_runtime_mismatch(model_info, spec_provider, slot=slot_label)
+        if mismatch:
+            raise SlotModelRuntimeMismatch(
+                mismatch,
+                details={
+                    "slot": slot_label,
+                    "model_id": str(model_info.get("_model_key") or model_info.get("id") or ""),
+                },
+            )
+        preflight = getattr(spec_provider, "preflight", None)
+        if preflight is not None:
+            preflight(slot_cfg, model_info, gfx_versions=kfd_gfx_target_versions())
+
     def load_sync(
         self,
         slot_cfg: dict[str, Any],
@@ -2470,19 +2529,13 @@ class ContainerProvider(Provider):
         token = slot_instance_token(slot_cfg)
 
         # The slot's runtime family, resolved ONCE for both loud-fail guards
-        # below (and re-resolved inside _render_quadlet_text, which owns the
-        # dispatch). ``None`` means the default llama-server GPU provider.
+        # below (and re-resolved inside check_load and _render_quadlet_text, which
+        # owns the dispatch). ``None`` means the default llama-server GPU provider.
         spec_provider = _spec_provider_for(slot_cfg)
 
-        # The llama path takes its image from ``binary``, so a non-llama runner
-        # here would launch with llama-server argv and exit. The write seam
-        # refuses this state, which leaves a hand edit. Only this path: a
-        # dispatched provider launches its own image, so a stale ``binary``
-        # beside one is inert and that slot keeps loading.
-        if spec_provider is None:
-            mismatch = runner_family_mismatch(slot_cfg)
-            if mismatch is not None:
-                raise mismatch
+        # check_load below refuses this too; asked here as well so a slot that is
+        # refused anyway does not pay for the KFD guard's round trip first.
+        _refuse_foreign_runner(slot_cfg, spec_provider)
 
         # Loud-fail for AMD-GPU slots with no /dev/kfd whose runtime needs it:
         # the Standard runner would silently fall back to its Vulkan backend,
@@ -2536,6 +2589,9 @@ class ContainerProvider(Provider):
                 else (lambda: resolve_image_runtime_uid(resolved_image))
             ),
         )
+
+        # The last line of defence for a caller that skipped SlotManager.load.
+        self.check_load(slot_cfg, model_info)
 
         # Loud-fail for NPU slots only: a missing FLM tag must not silently
         # fall through to FLM's legacy build_env default. Kokoro/ComfyUI are

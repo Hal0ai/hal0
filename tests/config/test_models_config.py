@@ -16,6 +16,7 @@ class TestModelsConfigDefaults:
         assert cfg.auto_scan_on_start is True
         assert ".gguf" in cfg.file_extensions
         assert ".safetensors" in cfg.file_extensions
+        assert ".hgn" in cfg.file_extensions
 
     def test_attached_to_hal0_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("HAL0_HOME", raising=False)

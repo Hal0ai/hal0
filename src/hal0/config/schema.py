@@ -2716,7 +2716,7 @@ class ModelsConfig(BaseModel):
         description="Run the discovery scan during app startup.",
     )
     file_extensions: list[str] = Field(
-        default_factory=lambda: [".gguf", ".safetensors"],
+        default_factory=lambda: [".gguf", ".safetensors", ".hgn"],
         description=(
             "Filename suffixes treated as candidate model files (lowercase, includes the dot)."
         ),

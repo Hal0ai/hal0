@@ -30,7 +30,15 @@ from typing import Any
 
 from hal0.model_meta import RUNTIME_FAMILIES, classify, derive_model_provider
 from hal0.registry import tombstones
-from hal0.registry.detect import DetectionResult, detect, detected_architecture
+from hal0.registry.detect import (
+    DetectionResult,
+    detect,
+    detected_architecture,
+    detection_metadata,
+    halogen_companion_owners,
+    halogen_registration,
+    is_halogen_companion,
+)
 from hal0.registry.model import _derive_ns
 from hal0.upstreams.filters import apply_filters
 
@@ -446,9 +454,13 @@ async def commit_scan_rows(
         with contextlib.suppress(OSError):
             size_bytes = resolved.stat().st_size
 
-        metadata: dict[str, Any] = {"discovered": True, "source": "scan"}
-        if detection.context_length is not None:
-            metadata["context_length"] = detection.context_length
+        # No detection_confidence: only add-from-path stores it (its response feeds
+        # the CLI's confidence line); a scan-commit row never did, and still doesn't.
+        metadata = detection_metadata(detection, source="scan", include_confidence=False)
+        # A halogen checkpoint also carries its tag, companions and native
+        # context (the same stamp add-from-path and the auto-scan apply).
+        halogen_tags, halogen_meta = halogen_registration(detection)
+        metadata.update(halogen_meta)
 
         try:
             model = Model(
@@ -460,6 +472,7 @@ async def commit_scan_rows(
                 capabilities=[str(c) for c in capabilities],
                 backends=[str(b) for b in backends],
                 provider=provider,
+                tags=halogen_tags,
                 metadata=metadata,
                 **facts,
                 # GGUF general.architecture from the header read detect()
@@ -2025,6 +2038,27 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
             details={"path": str(path), "allowed": sorted(allowed_exts)},
         )
 
+    # A halogen companion (ngram table, vision sidecar, mtp head, overlay) is a
+    # ``.hgn`` file but never a model: the engine finds it beside its checkpoint
+    # by name, and a row for it could be assigned to a slot that cannot load it.
+    # Point the operator at the checkpoint it belongs to instead.
+    if is_halogen_companion(path.name) or is_halogen_companion(resolved.name):
+        from hal0.errors import Conflict
+
+        owners = halogen_companion_owners(resolved)
+        if len(owners) == 1:
+            hint = f"register the checkpoint it belongs to: {owners[0]}"
+        elif owners:
+            hint = f"register the checkpoint it belongs to ({', '.join(owners)})"
+        else:
+            hint = "register the halogen checkpoint beside it instead"
+        raise Conflict(
+            f"{path.name} is a halogen companion file, not a model — {hint}. "
+            "The engine finds companions beside their checkpoint by name.",
+            code="models.halogen_companion",
+            details={"path": str(path), "checkpoints": owners},
+        )
+
     # #1838: pass the operator-typed name for the capability filename-token
     # fallback — a HF hub-cache symlink resolves to a sha-named blob whose
     # name carries no signal at all, which would otherwise silently hide a
@@ -2082,17 +2116,19 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
     except OSError:
         size_bytes = 0
 
-    metadata: dict[str, Any] = {"discovered": True, "source": "add-from-path"}
-    if detection.context_length is not None:
-        metadata["context_length"] = detection.context_length
     # #1838: surface how confident detect() actually is instead of
     # dropping it on the floor — an operator who supplied no explicit
     # ``labels`` is trusting auto-detection, and a "medium"/"low" result
     # (filename guess) needs to reach the API response and the CLI line,
     # not just detect()'s return value.
     explicit_labels = isinstance(raw_labels, list) and raw_labels
-    if not explicit_labels:
-        metadata["detection_confidence"] = detection.confidence
+    metadata = detection_metadata(
+        detection, source="add-from-path", include_confidence=not explicit_labels
+    )
+    # A halogen checkpoint also carries its tag, companions and native context
+    # (the same stamp the scan commit and the auto-scan apply).
+    halogen_tags, halogen_meta = halogen_registration(detection)
+    metadata.update(halogen_meta)
     # A failed GGUF header read is a fact about the FILE, not the requested
     # capability — surface it even when the caller supplied explicit
     # ``labels`` (only capability got overridden; the bytes on disk may
@@ -2100,6 +2136,12 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
     if detection.raw_hints.get("gguf_header_read") == "failed":
         metadata["detection_warning"] = (
             "no valid GGUF header found (bad or missing magic bytes); "
+            "capabilities/backends are a filename guess"
+        )
+    # The same fact for a file named .hgn: registered, but the engine cannot load it.
+    if detection.raw_hints.get("hgn_magic_read") == "failed":
+        metadata["detection_warning"] = (
+            "no valid halogen checkpoint found (the file does not start with HGN1); "
             "capabilities/backends are a filename guess"
         )
 
@@ -2122,6 +2164,7 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
             # Task 3: stamp provider alongside the detected backends on this
             # NEW row — see commit_scan_rows' matching stamp.
             provider=derive_model_provider(detection.suggested_backends),
+            tags=halogen_tags,
             metadata=metadata,
             # GGUF general.architecture from the header read above — see
             # commit_scan_rows' matching stamp (model↔runner arch fit-check,

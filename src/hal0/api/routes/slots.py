@@ -1131,7 +1131,11 @@ def _model_not_resolvable(model_id: str, slot: str) -> Hal0Error:
 async def _guard_model_fits_slot(
     request: Request, name: str, cfg: dict[str, Any] | None, model_id: str | None
 ) -> None:
-    """Refuse an FLM model on a non-FLM slot (and vice versa) before any write.
+    """Refuse a model the slot's engine cannot run, before any write.
+
+    Two rules ride this one guard: an FLM model on a non-FLM slot (and vice
+    versa), and a halogen checkpoint on a non-halogen slot (and a non-halogen
+    model on a halogen one, ``slot.model_runtime_mismatch``).
 
     ``cfg`` is the slot config AS IT WILL BE after the request. Off the event
     loop: the FLM-id check reads the host-flm probe (same reason as
@@ -1140,9 +1144,21 @@ async def _guard_model_fits_slot(
     if not model_id or cfg is None:
         return
     from hal0.slots.config_write import check_model_fits_slot
+    from hal0.slots.model_fit import slot_model_runtime_mismatch
 
     registry = getattr(request.app.state, "model_registry", None)
-    await asyncio.to_thread(check_model_fits_slot, name, cfg, model_id, registry)
+
+    def _check() -> str | None:
+        check_model_fits_slot(name, cfg, model_id, registry)
+        return slot_model_runtime_mismatch(name, cfg, model_id, registry)
+
+    mismatch = await asyncio.to_thread(_check)
+    if mismatch:
+        raise BadRequest(
+            mismatch,
+            code="slot.model_runtime_mismatch",
+            details={"slot": name, "model_id": model_id},
+        )
 
 
 async def _guard_model_registered(

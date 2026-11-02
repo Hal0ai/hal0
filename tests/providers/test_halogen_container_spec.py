@@ -197,6 +197,9 @@ def test_load_sync_prepares_before_it_starts_the_unit(_cache_dir_calls: list[str
     order: list[str] = []
     with (
         patch("hal0.providers.container.require_kfd_for_gpu_slot"),
+        # The host and file preflight reads the real sysfs and file system; it has
+        # its own tests (test_halogen_preflight.py), and this one is about ordering.
+        patch.object(HalogenProvider, "preflight"),
         patch.object(
             HalogenProvider, "prepare_load", side_effect=lambda cfg: order.append("prepare")
         ) as prepare,
@@ -554,13 +557,16 @@ def test_load_still_launches_an_engine_profile_over_a_stale_runner() -> None:
     this state keeps loading. Only a new write of the pair is refused."""
     cfg = _cfg(type="tts", device="gpu-rocm", profile="qwen3-tts", binary="kokoro")
     assert runner_family_mismatch(cfg) is not None
+    # A registry-shaped TTS row: a halogen checkpoint here would (rightly) trip the
+    # model/runtime guard, and this test is only about the inert stale `binary`.
+    tts_info = {"_model_key": "qwen3-tts", "backends": [], "provider": "qwen3-tts"}
     provider = ContainerProvider()
     with (
         patch("hal0.providers.container.require_kfd_for_gpu_slot"),
         patch.object(provider, "_render_quadlet_text", return_value="unit"),
         patch.object(provider, "_write_and_start_unit") as start,
     ):
-        provider.load_sync(cfg, _info())
+        provider.load_sync(cfg, tts_info)
     start.assert_called_once()
 
 

@@ -313,3 +313,82 @@ def test_comfyui_slot_skips_registry_when_registry_is_down(tmp_hal0_home, monkey
         "model": {"default": "sdxl-base"},
     }
     assert _mgr()._resolve_servable_model("sdxl-base", cfg) == "sdxl-base"
+
+
+# ── runtime fit: a stand-in must be one the slot's runtime can load ────────────
+#
+# Auto-scan registers a ``.hgn`` checkpoint with ``capabilities=["chat"]``, so it
+# joins the chat pool, and at 54 to 62 GiB it wins the pool's size pick. Handed to
+# a llama slot, the load guard refuses it and the slot never recovers.
+
+
+def _add_halogen(home: str, *, id: str, size_bytes: int = 62 * 2**30, default: bool = False) -> str:
+    """Register a halogen checkpoint row with its ``.hgn`` file on disk."""
+    model_file = Path(home) / f"{id}.hgn"
+    model_file.write_bytes(b"HGN1")
+    ModelRegistry().add(
+        Model(
+            id=id,
+            name=id,
+            path=str(model_file),
+            size_bytes=size_bytes,
+            capabilities=["chat"],
+            backends=["halogen"],
+            provider="halogen",
+            tags=["halogen"],
+            default=default,
+        )
+    )
+    return id
+
+
+def _halogen_cfg(default: str) -> dict:
+    return {**_llm_cfg(default, device="gpu-rocm"), "profile": "halogen"}
+
+
+def test_a_llama_slot_skips_a_larger_halogen_checkpoint(tmp_hal0_home):
+    _add_model(tmp_hal0_home, id="small", capability="chat", size_bytes=5 * 2**30)
+    _add_halogen(tmp_hal0_home, id="qwen3.8-flash-next-v2")
+    assert _mgr()._resolve_servable_model("ghost-model", _llm_cfg("ghost-model")) == "small"
+
+
+def test_a_llama_slot_skips_a_halogen_checkpoint_that_shares_its_name(tmp_hal0_home):
+    """The name-similarity pick would otherwise beat the GGUF outright."""
+    _add_model(tmp_hal0_home, id="small", capability="chat", size_bytes=5 * 2**30)
+    _add_halogen(tmp_hal0_home, id="qwen3.8-flash-next-v2")
+    cfg = _llm_cfg("qwen3.8-27b-ghost")
+    assert _mgr()._resolve_servable_model("qwen3.8-27b-ghost", cfg) == "small"
+
+
+def test_a_llama_slot_with_only_a_halogen_checkpoint_keeps_its_configured_id(tmp_hal0_home):
+    _add_halogen(tmp_hal0_home, id="qwen3.8-flash-next-v2")
+    assert _mgr()._resolve_servable_model("ghost-model", _llm_cfg("ghost-model")) == "ghost-model"
+
+
+def test_a_halogen_type_default_is_no_stand_in_for_a_llama_slot(tmp_hal0_home):
+    """The filter runs on the candidate loop, so Step 0's type default goes through it too."""
+    _add_model(tmp_hal0_home, id="small", capability="chat", size_bytes=5 * 2**30)
+    _add_halogen(tmp_hal0_home, id="qwen3.8-flash-next-v2", default=True)
+    assert _mgr()._resolve_servable_model("ghost-model", _llm_cfg("ghost-model")) == "small"
+
+
+def test_a_halogen_slot_gets_no_gguf_stand_in(tmp_hal0_home):
+    """The refusal then names the checkpoint the operator chose, not a GGUF they never did."""
+    _add_model(tmp_hal0_home, id="big-gguf", capability="chat", size_bytes=40 * 2**30)
+    cfg = _halogen_cfg("qwen3.8-flash-next-ht43")
+    assert (
+        _mgr()._resolve_servable_model("qwen3.8-flash-next-ht43", cfg) == "qwen3.8-flash-next-ht43"
+    )
+
+
+def test_a_halogen_slot_may_fall_back_to_another_halogen_checkpoint(tmp_hal0_home):
+    _add_model(tmp_hal0_home, id="big-gguf", capability="chat", size_bytes=90 * 2**30)
+    _add_halogen(tmp_hal0_home, id="qwen3.8-flash-next-v2")
+    cfg = _halogen_cfg("qwen3.8-flash-next-ht43")
+    assert _mgr()._resolve_servable_model("qwen3.8-flash-next-ht43", cfg) == "qwen3.8-flash-next-v2"
+
+
+def test_the_bare_fallback_keeps_its_old_shape(tmp_hal0_home):
+    """No runtime to judge against: the delegator and direct callers see the whole pool."""
+    _add_halogen(tmp_hal0_home, id="qwen3.8-flash-next-v2")
+    assert SlotManager._fallback_local_model("chat").id == "qwen3.8-flash-next-v2"

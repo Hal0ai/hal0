@@ -2746,3 +2746,136 @@ def test_resolved_states_the_speculation_in_effect(
         "unavailable_reason": "drafter needs llama.cpp b11669 or newer; this runner image is b11596",
     }
     assert "--spec-type" not in body["argv"]
+
+
+# ── model ↔ runtime agreement (halogen) ──────────────────────────────────────
+
+_RUNTIME_MISMATCH = "slot.model_runtime_mismatch"
+
+
+def _register_halogen_model(client: TestClient, home: str, model_id: str = "flash-next") -> None:
+    """Register a halogen checkpoint the way ``detect`` classifies a ``.hgn``."""
+    path = Path(home) / "models" / f"{model_id}.hgn"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"HGN1" + b"\x00" * 12)
+    r = client.post(
+        "/api/models",
+        json={"id": model_id, "path": str(path), "backends": ["halogen"], "provider": "halogen"},
+    )
+    assert r.status_code == 201, r.text
+
+
+def _halogen_slot(home: str, name: str = "flash") -> Path:
+    """A slot whose profile runs the halogen runner, bound to nothing yet."""
+    etc = Path(home) / "etc" / "hal0"
+    (etc / "slots").mkdir(parents=True, exist_ok=True)
+    (etc / "profiles.toml").write_text('[profile.hgn]\nrunner = "halogen"\n', encoding="utf-8")
+    toml = etc / "slots" / f"{name}.toml"
+    toml.write_text(
+        f'name = "{name}"\nport = 8097\ndevice = "gpu-rocm"\ntype = "llm"\n'
+        'runtime = "container"\nprofile = "hgn"\n',
+        encoding="utf-8",
+    )
+    return toml
+
+
+def test_halogen_model_on_agent_slot_is_refused(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+    tmp_hal0_home: str,
+) -> None:
+    """PUT a halogen checkpoint onto a llama slot: 400, nothing written."""
+    _register_halogen_model(isolated_client, tmp_hal0_home)
+    r = isolated_client.put("/api/slots/chat/config", json={"model": {"default": "flash-next"}})
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert err["code"] == _RUNTIME_MISMATCH
+    assert "'flash-next'" in err["message"]
+    assert "'chat'" in err["message"]
+    assert "llama-server runtime" in err["message"]
+    assert "flash-next" not in (slot_root / "chat.toml").read_text()
+
+
+@pytest.mark.parametrize("verb", ["load", "swap"])
+def test_halogen_model_load_or_swap_onto_llama_slot_is_refused(
+    verb: str,
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+    tmp_hal0_home: str,
+) -> None:
+    _register_halogen_model(isolated_client, tmp_hal0_home)
+    r = isolated_client.post(f"/api/slots/chat/{verb}", json={"model_id": "flash-next"})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == _RUNTIME_MISMATCH
+    assert container_stub["load_calls"] == []
+
+
+def test_create_llama_slot_with_halogen_model_is_refused(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+    tmp_hal0_home: str,
+) -> None:
+    _register_halogen_model(isolated_client, tmp_hal0_home)
+    r = isolated_client.post(
+        "/api/slots",
+        json={"name": "fresh", "device": "gpu-vulkan", "profile": "chat", "model": "flash-next"},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == _RUNTIME_MISMATCH
+    assert not (slot_root / "fresh.toml").exists()
+
+
+def test_gguf_on_halogen_slot_is_refused(
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+    tmp_hal0_home: str,
+) -> None:
+    """PUT a GGUF onto a slot whose profile runs halogen: 400, nothing written."""
+    toml = _halogen_slot(tmp_hal0_home)
+    register_model_file(isolated_client, tmp_hal0_home, "qwen3-8b")
+    r = isolated_client.put("/api/slots/flash/config", json={"model": {"default": "qwen3-8b"}})
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert err["code"] == _RUNTIME_MISMATCH
+    assert "'qwen3-8b'" in err["message"]
+    assert "'flash'" in err["message"]
+    assert "halogen runtime" in err["message"]
+    assert "qwen3-8b" not in toml.read_text()
+
+
+def test_halogen_model_on_halogen_slot_passes_the_guard(
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+    tmp_hal0_home: str,
+) -> None:
+    toml = _halogen_slot(tmp_hal0_home)
+    _register_halogen_model(isolated_client, tmp_hal0_home)
+    r = isolated_client.put("/api/slots/flash/config", json={"model": {"default": "flash-next"}})
+    assert r.status_code == 200, r.text
+    assert 'default = "flash-next"' in toml.read_text()
+
+
+def test_put_config_judges_the_post_write_pair(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Moving a slot onto a halogen profile AND a halogen model in one write is
+    judged on the final pair (the guard sees the merged config), so it is not
+    refused as a halogen model on the llama slot the slot used to be."""
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: True)
+    (Path(tmp_hal0_home) / "etc" / "hal0" / "profiles.toml").write_text(
+        '[profile.hgn]\nrunner = "halogen"\n', encoding="utf-8"
+    )
+    _register_halogen_model(isolated_client, tmp_hal0_home)
+    r = isolated_client.put(
+        "/api/slots/chat/config",
+        json={"profile": "hgn", "model": {"default": "flash-next"}},
+    )
+    assert r.status_code == 200, r.text

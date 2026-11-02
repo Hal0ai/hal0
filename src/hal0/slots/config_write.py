@@ -363,22 +363,32 @@ def _profile_is_flm(profile_name: Any) -> bool:
 
     The launch path picks FastFlowLM from the profile's runtime family even
     with no ``device``/``provider`` on the slot (``_spec_provider_for``), so
-    the fit check must too. Reads ``profiles.toml`` directly, never
-    ``ProfileCatalog.resolve`` (which can persist a shipped seed): an unseeded
-    ``flm`` profile is recognised by name, as ``_runtime_family`` does.
+    the fit check must too. See :func:`profile_runtime_family`.
+    """
+    return profile_runtime_family(profile_name) == "flm"
+
+
+def profile_runtime_family(profile_name: Any) -> str | None:
+    """The runtime family of the slot's profile, read-only; ``None`` when unknown.
+
+    Reads ``profiles.toml`` directly, never ``ProfileCatalog.resolve`` (which can
+    persist a shipped seed): an unseeded ``flm`` profile is recognised by name,
+    as ``_runtime_family`` does. Any failure reads as "unknown", never an error:
+    this runs on the write path, which only refuses a positively identified
+    mismatch.
     """
     if not isinstance(profile_name, str) or not profile_name:
-        return False
+        return None
     try:
         from hal0.config.loader import load_profiles_config
         from hal0.profiles import runtime_family_of
 
         prof = load_profiles_config().profile.get(profile_name)
         if prof is None:
-            return profile_name == "flm"
-        return runtime_family_of(profile_name, prof) == "flm"
+            return "flm" if profile_name == "flm" else None
+        return str(runtime_family_of(profile_name, prof))
     except Exception:
-        return False
+        return None
 
 
 def model_is_flm(model_id: str, registry: Any) -> bool | None:

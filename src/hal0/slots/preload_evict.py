@@ -256,7 +256,10 @@ async def _estimate_incoming_footprint_mb(
     ``slot_name``: the slot about to load it. Its profile sets the context
     window (ADR-0029), so the KV share is sized from that, not the model.
 
-    Reuses :func:`hal0.slots.capacity.estimate_file_size_kv_mb` — registry
+    Asks the slot's provider first (:func:`hal0.slots.capacity.provider_footprint_mb`:
+    a runtime whose memory is not weights plus a per-token KV share, halogen,
+    knows its own figure). Otherwise reuses
+    :func:`hal0.slots.capacity.estimate_file_size_kv_mb` — registry
     file size plus the coarse KV-cache estimate — the exact formula
     :func:`hal0.slots.capacity.build_per_slot` falls back to for a
     resident slot with no live cgroup/FLM figure yet. There is nothing
@@ -281,7 +284,7 @@ async def _estimate_incoming_footprint_mb(
     "never swallow into a fabricated number" convention in this module tree
     (see capacity.py's Tier-1 fixes).
     """
-    from hal0.slots.capacity import estimate_file_size_kv_mb
+    from hal0.slots.capacity import estimate_file_size_kv_mb, provider_footprint_mb
 
     info = model_info if model_info is not None else await host._resolve_model_info(model_id)
     if not info:
@@ -292,10 +295,16 @@ async def _estimate_incoming_footprint_mb(
         model_mb = 0.0
     if model_mb <= 0:
         return 0.0
+    slot_cfg: dict[str, Any] | None = None
     if slot_name:
-        ctx = await _slot_ctx_tokens(host, slot_name, info)
+        slot_cfg = await _slot_config_or_none(host, slot_name)
+        ctx = _slot_ctx_tokens(slot_cfg, info)
         if ctx:
             info = {**info, "ctx_tokens": ctx}
+    if slot_cfg is not None:
+        provider_mb = provider_footprint_mb(slot_cfg, info)
+        if provider_mb is not None:
+            return provider_mb
     return estimate_file_size_kv_mb(model_mb, info)
 
 
@@ -309,14 +318,21 @@ class _ResolvedModel:
         return self._info
 
 
-async def _slot_ctx_tokens(
-    host: PreloadEvictHost, slot_name: str, info: dict[str, Any]
-) -> int | None:
+async def _slot_config_or_none(host: PreloadEvictHost, slot_name: str) -> dict[str, Any] | None:
+    """The slot's config, or ``None`` when it cannot be read (sizing never raises)."""
+    try:
+        return await host._load_slot_config(slot_name)
+    except Exception:
+        return None
+
+
+def _slot_ctx_tokens(slot_cfg: dict[str, Any] | None, info: dict[str, Any]) -> int | None:
     from hal0.providers.container import slot_effective_context
 
+    if slot_cfg is None:
+        return None
     try:
-        cfg = await host._load_slot_config(slot_name)
-        ctx, _source = slot_effective_context(cfg, _ResolvedModel(info))
+        ctx, _source = slot_effective_context(slot_cfg, _ResolvedModel(info))
     except Exception:
         return None
     return int(ctx) if ctx else None

@@ -309,6 +309,33 @@ class RunnerFamilyMismatch(SlotConfigError):
     status = 409
 
 
+class SlotModelRuntimeMismatch(SlotConfigError):
+    """The model and the slot's runtime cannot run together (halogen <-> the rest).
+
+    A halogen ``.hgn`` checkpoint loads only on the halogen runtime, and the
+    halogen runtime loads nothing else. Raised by the slot-config write guard
+    before a mismatched bind is stored and by ``ContainerProvider.load_sync``
+    before any unit is written. A ``SlotConfigError`` subclass, so every caller
+    that already handles a refused config keeps handling this one (HTTP 400).
+    """
+
+    code = "slot.model_runtime_mismatch"
+    status = 400
+
+
+class SlotHostUnsupported(SlotConfigError):
+    """The host cannot run this slot's runtime (halogen: gfx1151 only).
+
+    Raised by a runtime provider's ``preflight`` hook from
+    ``ContainerProvider.load_sync`` before any unit is written. Surfaced as 409:
+    the slot's runtime and this host's hardware conflict, and either one can
+    resolve it (another runtime, or a host with the supported GPU).
+    """
+
+    code = "slot.host_unsupported"
+    status = 409
+
+
 class NpuExclusivityViolation(SlotError):
     """Two ``device=npu, type=llm, enabled=true`` slots cannot coexist.
 
@@ -475,6 +502,8 @@ __all__ = [
     "SlotCrashLooping",
     "SlotError",
     "SlotHealthFailed",
+    "SlotHostUnsupported",
+    "SlotModelRuntimeMismatch",
     "SlotNotFound",
     "SlotNotReady",
     "SlotOutputSanityFailed",

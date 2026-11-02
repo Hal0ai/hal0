@@ -29,7 +29,14 @@ from hal0.config.schema import ModelsConfig
 from hal0.model_meta import capability_from_filename, derive_model_provider
 from hal0.registry import tombstones
 from hal0.registry.curated import CURATED_MODELS, CuratedModel
-from hal0.registry.detect import unsupported_moonshine_layout
+from hal0.registry.detect import (
+    detect,
+    detection_metadata,
+    halogen_registration,
+    has_hgn_magic,
+    is_halogen_companion,
+    unsupported_moonshine_layout,
+)
 from hal0.registry.drafters import DrafterInfo, classify_drafter, draft_fit_errors
 from hal0.registry.fileset import SHARD_RE
 from hal0.registry.gguf_header import read_gguf_header
@@ -441,6 +448,12 @@ def _is_skippable(p: Path) -> bool:
         return True
     if "mmproj" in name.lower():
         return True
+    # Halogen companions (ngram table, vision sidecar, mtp head, overlay) sit
+    # beside a checkpoint and are found by the engine by name; only the
+    # checkpoint is a model. Checked ahead of the drafter pairing, which would
+    # otherwise take "-mtp.hgn" for a drafter.
+    if is_halogen_companion(name):
+        return True
     if _HEX_BLOB_RE.match(p.stem):
         return True
     if SHARD_RE.match(name):
@@ -670,7 +683,28 @@ def find_candidates(
 def register_candidate(registry: ModelRegistry, candidate: CandidateModel) -> Model:
     """Build a :class:`Model` from ``candidate`` and add it to ``registry``."""
     curated = candidate.curated_match
-    if curated is not None:
+    # A halogen checkpoint is classified by its magic bytes and the companions
+    # beside it (four bytes and one directory listing, so cheap even in a walk
+    # that reads no GGUF header), then registered like add-from-path does. The
+    # magic is read whatever the name, so a .gguf-named HGN1 file is not a llama
+    # row. ``.hgn`` still goes through ``detect``: a bad-magic one is a low
+    # confidence halogen guess, and one that holds a GGUF is a llama model.
+    claims_halogen = candidate.path.suffix.lower() == ".hgn" or has_hgn_magic(candidate.path)
+    halogen = detect(candidate.path) if claims_halogen else None
+    if halogen is not None and halogen.kind == "halogen":
+        halogen_tags, halogen_meta = halogen_registration(halogen)
+        model = Model(
+            id=candidate.suggested_id,
+            name=candidate.path.stem,
+            path=str(candidate.path),
+            size_bytes=candidate.size_bytes,
+            capabilities=list(halogen.suggested_capabilities),
+            backends=list(halogen.suggested_backends),
+            provider=derive_model_provider(halogen.suggested_backends),
+            tags=halogen_tags,
+            metadata={**detection_metadata(halogen, source="auto-scan"), **halogen_meta},
+        )
+    elif curated is not None:
         model = Model(
             id=curated.id,
             name=curated.display_name,

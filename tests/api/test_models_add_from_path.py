@@ -485,3 +485,50 @@ def test_add_from_path_draft_not_found_422(add_path_client: tuple[TestClient, Pa
     )
     assert r.status_code == 422, r.text
     assert r.json()["error"]["code"] == "model.draft_not_found"
+
+
+# ── halogen: a .hgn name with no magic ─────────────────────────────────────
+
+
+def test_a_bad_magic_hgn_says_so_in_the_response(
+    add_path_client: tuple[TestClient, Path],
+) -> None:
+    """The row is still registered (recoverable with ``model rm``), but the bytes are
+    wrong and the doctor will call it unloadable: the response must not read as a
+    confident registration."""
+    client, root = add_path_client
+    target = root / "qwen38-flash-next-ht43.hgn"
+    target.write_bytes(b"NOPE" + b"\x00" * 60)
+
+    r = client.post("/api/models/add-from-path", json={"path": str(target)})
+
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["metadata"]["detection_confidence"] == "low"
+    assert "HGN1" in body["metadata"]["detection_warning"]
+    assert "GGUF" not in body["metadata"]["detection_warning"]
+
+
+def test_a_bad_magic_hgn_warns_even_with_explicit_labels(
+    add_path_client: tuple[TestClient, Path],
+) -> None:
+    """A fact about the file, like the GGUF warning: labels only override the capability."""
+    client, root = add_path_client
+    target = root / "qwen38-flash-next-ht43.hgn"
+    target.write_bytes(b"NOPE" + b"\x00" * 60)
+
+    r = client.post("/api/models/add-from-path", json={"path": str(target), "labels": ["chat"]})
+
+    assert r.status_code == 201, r.text
+    assert "HGN1" in r.json()["metadata"]["detection_warning"]
+
+
+def test_a_good_hgn_has_no_warning(add_path_client: tuple[TestClient, Path]) -> None:
+    client, root = add_path_client
+    target = root / "qwen38-flash-next-ht43.hgn"
+    target.write_bytes(b"HGN1" + b"\x00" * 60)
+
+    r = client.post("/api/models/add-from-path", json={"path": str(target)})
+
+    assert r.status_code == 201, r.text
+    assert "detection_warning" not in r.json()["metadata"]

@@ -322,3 +322,219 @@ def test_npu_wins_over_tts_type() -> None:
 
     provider = _spec_provider_for({"device": "npu", "type": "tts"})
     assert isinstance(provider, FLMProvider)
+
+
+# ── model ↔ runtime agreement at load ─────────────────────────────────────────
+
+_HALOGEN_MODEL_INFO = {"_model_key": "flash-next", "backends": ["halogen"], "path": "/m/f.hgn"}
+_GGUF_MODEL_INFO = {"_model_key": "qwen3-4b", "backends": ["rocm"], "path": "/m/q.gguf"}
+
+
+def _agreement_probe() -> tuple[ContainerProvider, MagicMock]:
+    """A provider whose every unit write is observable through one fake seam."""
+    seam = MagicMock()
+    provider = ContainerProvider()
+    return provider, seam
+
+
+def test_load_sync_refuses_mismatch_before_writing_unit() -> None:
+    """A halogen checkpoint on a llama slot is refused before ANY unit is written."""
+    from hal0.slots.state import SlotModelRuntimeMismatch
+
+    provider, seam = _agreement_probe()
+    slot_cfg = {"name": "agent", "port": 8095, "profile": "chat", "device": "gpu-rocm"}
+
+    with (
+        patch("hal0.providers.container.require_kfd_for_gpu_slot"),
+        patch("hal0.providers.container._SYSTEMCTL_SEAM", seam),
+        patch.object(provider, "_write_and_start_unit") as write_and_start,
+        patch.object(provider, "_render_quadlet_text") as render,
+        pytest.raises(SlotModelRuntimeMismatch) as exc_info,
+    ):
+        provider.load_sync(slot_cfg, _HALOGEN_MODEL_INFO)
+
+    err = exc_info.value
+    assert err.code == "slot.model_runtime_mismatch"
+    assert err.status == 400
+    assert "'flash-next'" in str(err)
+    assert "'agent'" in str(err)
+    assert "llama-server runtime" in str(err)
+    seam.write_quadlet.assert_not_called()
+    write_and_start.assert_not_called()
+    render.assert_not_called()
+
+
+def test_load_sync_refuses_gguf_on_halogen_slot_before_writing_unit() -> None:
+    """The inverse: a halogen-runtime slot handed a GGUF never reaches a unit write."""
+    from types import SimpleNamespace
+
+    from hal0.slots.state import SlotModelRuntimeMismatch
+
+    provider, seam = _agreement_probe()
+    slot_cfg = {"name": "flash", "port": 8096, "profile": "hgn", "device": "gpu-rocm"}
+
+    with (
+        patch(
+            "hal0.providers.container._spec_provider_for",
+            return_value=SimpleNamespace(name="halogen"),
+        ),
+        patch("hal0.providers.container.require_kfd_for_gpu_slot"),
+        patch("hal0.providers.container._SYSTEMCTL_SEAM", seam),
+        patch.object(provider, "_write_and_start_unit") as write_and_start,
+        pytest.raises(SlotModelRuntimeMismatch) as exc_info,
+    ):
+        provider.load_sync(slot_cfg, _GGUF_MODEL_INFO)
+
+    assert exc_info.value.code == "slot.model_runtime_mismatch"
+    assert "not a halogen checkpoint" in str(exc_info.value)
+    seam.write_quadlet.assert_not_called()
+    write_and_start.assert_not_called()
+
+
+def test_load_sync_empty_model_binding_is_not_this_guards_refusal() -> None:
+    """A halogen slot with no model must not trip the guard (the provider names
+    the missing model later, ``slot.model_missing``)."""
+    from types import SimpleNamespace
+
+    provider, _seam = _agreement_probe()
+    slot_cfg = {"name": "flash", "port": 8096, "profile": "hgn", "device": "gpu-rocm"}
+
+    with (
+        patch(
+            "hal0.providers.container._spec_provider_for",
+            return_value=SimpleNamespace(name="halogen"),
+        ),
+        patch("hal0.providers.container.require_kfd_for_gpu_slot"),
+        patch.object(provider, "_render_quadlet_text", return_value="[Container]\n") as render,
+        patch.object(provider, "_write_and_start_unit") as write_and_start,
+    ):
+        provider.load_sync(slot_cfg, {})
+
+    render.assert_called_once()
+    write_and_start.assert_called_once()
+
+
+# ── provider preflight at load ────────────────────────────────────────────────
+
+
+class _PreflightProvider:
+    """A runtime provider with a ``preflight`` hook that records its call."""
+
+    name = "stub"
+
+    def __init__(self, raises: Exception | None = None) -> None:
+        self.raises = raises
+        self.calls: list[tuple[dict[str, Any], dict[str, Any], list[int]]] = []
+
+    def preflight(
+        self, slot_cfg: dict[str, Any], model_info: dict[str, Any], *, gfx_versions: list[int]
+    ) -> None:
+        self.calls.append((slot_cfg, model_info, gfx_versions))
+        if self.raises is not None:
+            raise self.raises
+
+
+_PREFLIGHT_MODEL_INFO = {"_model_key": "m", "path": "/m/x.gguf", "backends": ["rocm"]}
+_PREFLIGHT_SLOT_CFG = {"name": "flash", "port": 8096, "profile": "hgn", "device": "gpu-rocm"}
+
+
+def test_load_sync_runs_the_provider_preflight_with_the_hosts_gfx_targets() -> None:
+    stub = _PreflightProvider()
+    provider = ContainerProvider()
+
+    with (
+        patch("hal0.providers.container._spec_provider_for", return_value=stub),
+        patch("hal0.providers.container.require_kfd_for_gpu_slot"),
+        patch("hal0.providers.container.kfd_gfx_target_versions", return_value=[0, 110501]),
+        patch.object(provider, "_render_quadlet_text", return_value="[Container]\n"),
+        patch.object(provider, "_write_and_start_unit") as write_and_start,
+    ):
+        provider.load_sync(_PREFLIGHT_SLOT_CFG, _PREFLIGHT_MODEL_INFO)
+
+    assert stub.calls == [(_PREFLIGHT_SLOT_CFG, _PREFLIGHT_MODEL_INFO, [0, 110501])]
+    write_and_start.assert_called_once()
+
+
+def test_load_sync_refuses_before_writing_a_unit_when_preflight_raises() -> None:
+    from hal0.slots.state import SlotConfigError
+
+    refusal = SlotConfigError("this host cannot run it", code="slot.host_unsupported")
+    stub = _PreflightProvider(raises=refusal)
+    provider = ContainerProvider()
+
+    with (
+        patch("hal0.providers.container._spec_provider_for", return_value=stub),
+        patch("hal0.providers.container.require_kfd_for_gpu_slot"),
+        patch("hal0.providers.container.kfd_gfx_target_versions", return_value=[]),
+        patch.object(provider, "_render_quadlet_text") as render,
+        patch.object(provider, "_write_and_start_unit") as write_and_start,
+        pytest.raises(SlotConfigError) as exc_info,
+    ):
+        provider.load_sync(_PREFLIGHT_SLOT_CFG, _PREFLIGHT_MODEL_INFO)
+
+    assert exc_info.value is refusal
+    assert exc_info.value.code == "slot.host_unsupported"
+    render.assert_not_called()
+    write_and_start.assert_not_called()
+
+
+def test_load_sync_runs_preflight_after_the_runtime_agreement_guard() -> None:
+    """A model on the wrong runtime is refused for THAT reason first; the host's
+    gfx targets are not even read."""
+    from hal0.slots.state import SlotModelRuntimeMismatch
+
+    stub = _PreflightProvider()
+    stub.name = "halogen"
+    provider = ContainerProvider()
+
+    with (
+        patch("hal0.providers.container._spec_provider_for", return_value=stub),
+        patch("hal0.providers.container.require_kfd_for_gpu_slot"),
+        patch("hal0.providers.container.kfd_gfx_target_versions") as gfx,
+        patch.object(provider, "_write_and_start_unit") as write_and_start,
+        pytest.raises(SlotModelRuntimeMismatch),
+    ):
+        provider.load_sync(_PREFLIGHT_SLOT_CFG, _GGUF_MODEL_INFO)
+
+    assert stub.calls == []
+    gfx.assert_not_called()
+    write_and_start.assert_not_called()
+
+
+def test_load_sync_skips_a_provider_with_no_preflight_hook() -> None:
+    """Every provider that predates the hook keeps loading, and the host's gfx
+    targets are not read for them."""
+    from types import SimpleNamespace
+
+    provider = ContainerProvider()
+
+    with (
+        patch(
+            "hal0.providers.container._spec_provider_for",
+            return_value=SimpleNamespace(name="kokoro"),
+        ),
+        patch("hal0.providers.container.require_kfd_for_gpu_slot"),
+        patch("hal0.providers.container.kfd_gfx_target_versions") as gfx,
+        patch.object(provider, "_render_quadlet_text", return_value="[Container]\n"),
+        patch.object(provider, "_write_and_start_unit") as write_and_start,
+    ):
+        provider.load_sync(_PREFLIGHT_SLOT_CFG, _PREFLIGHT_MODEL_INFO)
+
+    gfx.assert_not_called()
+    write_and_start.assert_called_once()
+
+
+def test_load_sync_default_llama_provider_has_no_preflight() -> None:
+    provider = ContainerProvider()
+
+    with (
+        patch("hal0.providers.container._spec_provider_for", return_value=None),
+        patch("hal0.providers.container.require_kfd_for_gpu_slot"),
+        patch("hal0.providers.container.kfd_gfx_target_versions") as gfx,
+        patch.object(provider, "_render_quadlet_text", return_value="[Container]\n"),
+        patch.object(provider, "_write_and_start_unit") as write_and_start,
+    ):
+        provider.load_sync(_PREFLIGHT_SLOT_CFG, _PREFLIGHT_MODEL_INFO)
+
+    gfx.assert_not_called()
+    write_and_start.assert_called_once()
