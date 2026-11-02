@@ -445,6 +445,9 @@ def test_first_update_refreshes_through_the_incoming_seam_verb(box, monkeypatch,
     trusted: list[Path] = []
     monkeypatch.setattr(privileged, "assert_trusted_release_dir", trusted.append)
     argvs = _route_seam_to_root_side(monkeypatch)
+    monkeypatch.setattr(
+        updater_mod, "converge_podman_forward_unit", lambda *, job_id=None: "skipped"
+    )
     stop = RuntimeError("the fatal conversion stops the sequence here")
 
     def conversion(**_kw):
