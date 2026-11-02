@@ -83,6 +83,17 @@ _WARMING_INACTIVE_STRIKES: int = 3
 # load is never demoted — 900s (15 min) is ~5x the 180s per-attempt health-wait
 # ceiling, comfortably clear of any real large-model load.
 _WARMING_STALE_AFTER_S: float = 900.0
+# READY-side stall ceiling (#3282). A provider's ``"stalled"`` /health answer
+# (a read timeout or its engine-silent 503) is never a strike, because tearing
+# down a slow engine leaks its GPU memory. The flip side is a front end that
+# hangs forever, which would sit READY indefinitely. So the slot goes ERROR
+# (no SIGKILL; the unit is left alone) once the stall has run BOTH this many
+# CONSECUTIVE probes AND this long without one answer in between. Any answered
+# probe resets both. 900 s matches the warming watchdog above; the probe floor
+# keeps a fast-failing stalled probe (an instant 503 every 2 s) from tripping
+# the ceiling on count alone and a slow one (35 s read timeouts) on time alone.
+_STALL_CEILING_S: float = 900.0
+_STALL_CEILING_STRIKES: int = 10
 
 
 class WatchdogHost(Protocol):
@@ -204,6 +215,11 @@ class SlotWatchdog:
         """True when the model server still fails its /health probe."""
         return not await self.probe_health(slot_name)
 
+    async def _probe_stalled(self, slot_name: str) -> bool:
+        """True when the model server's /health still reads ``stalled``."""
+        healthy, stalled = await self._probe_health_detail(slot_name)
+        return healthy and stalled
+
     async def _unit_inactive(self, slot_name: str) -> bool:
         """True when the container unit still reads inactive to systemd."""
         return not await self.is_active(slot_name)
@@ -223,6 +239,8 @@ class SlotWatchdog:
         host = self._host
         health_failures = 0
         warming_inactive = 0
+        stall_probes = 0
+        stalled_since: float | None = None
         try:
             while True:
                 await asyncio.sleep(_FAIL_WATCH_INTERVAL_S)
@@ -289,7 +307,43 @@ class SlotWatchdog:
                     # the model server's /health — a crashed/wedged server is
                     # active to systemd while /health fails, so an is-active-
                     # only watcher leaves it lying as dispatchable READY.
-                    if await self.probe_health(slot_name):
+                    healthy, stalled = await self._probe_health_detail(slot_name)
+                    if healthy and stalled:
+                        # Inconclusive, still tolerated — but only up to the
+                        # stall ceiling (#3282).
+                        health_failures = 0
+                        stall_probes += 1
+                        now = time.monotonic()
+                        if stalled_since is None:
+                            stalled_since = now
+                        if (
+                            stall_probes < _STALL_CEILING_STRIKES
+                            or now - stalled_since < _STALL_CEILING_S
+                        ):
+                            continue
+                        log.warning(
+                            "slot.fail_watch_stall_ceiling",
+                            extra={
+                                "slot": slot_name,
+                                "stalled_probes": stall_probes,
+                                "stalled_s": round(now - stalled_since, 1),
+                            },
+                        )
+                        await self._stamp_locked(
+                            slot_name,
+                            SlotState.ERROR,
+                            message=(
+                                f"model server /health stalled past the stall ceiling "
+                                f"({_STALL_CEILING_S:.0f} s, {_STALL_CEILING_STRIKES} "
+                                "consecutive probes)"
+                            ),
+                            still_faulted=lambda: self._probe_stalled(slot_name),
+                            extra={"health_ok": False},
+                        )
+                        return
+                    stall_probes = 0
+                    stalled_since = None
+                    if healthy:
                         health_failures = 0
                         continue
                     health_failures += 1
@@ -407,14 +461,26 @@ class SlotWatchdog:
         probe's whole read timeout to arrive, which the watcher's inline await
         tolerates (a dead unit is only noticed later during a stall).
         """
+        healthy, _stalled = await self._probe_health_detail(slot_name, strict=strict)
+        return healthy
+
+    async def _probe_health_detail(
+        self, slot_name: str, *, strict: bool = False
+    ) -> tuple[bool, bool]:
+        """:meth:`probe_health` plus whether the answer was a provider stall.
+
+        Returns ``(healthy, stalled)``. ``stalled`` is only ever ``True`` on a
+        provider's explicit ``"stalled"`` answer, which the caller counts toward
+        the stall ceiling (:data:`_STALL_CEILING_S`).
+        """
         cfg = await self._host._maybe_load_config(slot_name)
         if not cfg:
-            return not strict
+            return (not strict, False)
         if is_npu_trio_shadow(cfg):
-            return True
+            return (True, False)
         port = _cfg_port(cfg)
         if not port:
-            return not strict
+            return (not strict, False)
 
         from hal0.providers.container import container_provider
 
@@ -433,10 +499,10 @@ class SlotWatchdog:
                 "slot.health_probe_failed",
                 extra={"slot": slot_name, "error": str(exc)},
             )
-            return not strict
+            return (not strict, False)
         if health.get("status") == "stalled":
-            return not strict
-        return bool(health.get("ok"))
+            return (not strict, True)
+        return (bool(health.get("ok")), False)
 
     async def readiness_check(self, slot_name: str) -> tuple[bool, str]:
         """Check whether a container-backed slot is ready to serve requests.
@@ -494,6 +560,8 @@ __all__ = [
     "_FAIL_WATCH_INTERVAL_S",
     "_FAIL_WATCH_LIVE_STATES",
     "_HEALTH_FAIL_STRIKES",
+    "_STALL_CEILING_S",
+    "_STALL_CEILING_STRIKES",
     "_WARMING_INACTIVE_STRIKES",
     "_WARMING_STALE_AFTER_S",
     "SlotWatchdog",

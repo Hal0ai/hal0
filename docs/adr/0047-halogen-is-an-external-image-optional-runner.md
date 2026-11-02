@@ -184,7 +184,11 @@ Four properties of the engine shape the decisions below:
    failed) reads `stalled`, still counted healthy. Only a connection that breaks,
    or any other status, strikes the slot. The engine can go silent for minutes
    under host memory pressure, and taking it down then is what leaves the driver
-   holding its memory. The per-request readiness gate waits at most 5 s on that
+   holding its memory. A stall is tolerated only up to a ceiling: 10 consecutive
+   `stalled` probes spanning at least 900 s (the warming watchdog's figure), with
+   no answered probe between, stamp the slot ERROR with a message naming the stall
+   ceiling. The engine is not killed; any answered probe resets the count. The
+   per-request readiness gate waits at most 5 s on that
    probe and reads a stall as "starting", so a request gets the retryable
    `slot.loading` 503 and does not sit out the stall.
 
@@ -375,8 +379,8 @@ and registry work, and the drawers all merged). Vendor files are at tag
   `TEARDOWN_MARGIN_S`. `src/hal0/slots/manager.py:2964`:
   `SlotManager.terminate`, which waits for the widened bound; `:4212`:
   `_wait_ready_watching_unit`, which ends a readiness wait on a unit systemd has
-  parked in `failed`. `src/hal0/slots/watchdog.py:441`: `readiness_check`, the
-  per-request gate that bounds the liveness probe (`:483`); `:85`: the 900 s
+  parked in `failed`. `src/hal0/slots/watchdog.py:507`: `readiness_check`, the
+  per-request gate that bounds the liveness probe (`:549`); `:96`: the 900 s stall ceiling; `:85`: the 900 s
   warming watchdog. `installer/wrappers/hal0-systemctl:415`: the root-side
   `--stop-timeout` check.
 - `src/hal0/profiles/__init__.py`: `_runtime_family` (`:162`, from

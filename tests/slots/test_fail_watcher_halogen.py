@@ -221,3 +221,69 @@ async def test_a_stall_is_inconclusive_to_both_probe_modes(provider: _RealHealth
     with _http(_hangs):
         assert await sm._probe_health("chat") is True
         assert await sm._probe_health("chat", strict=True) is False
+
+
+# --- stall ceiling (#3282) ---------------------------------------------------
+
+
+@pytest.fixture
+def ceiling(monkeypatch: pytest.MonkeyPatch) -> int:
+    """A tiny ceiling: 5 consecutive stalled probes over 0 s."""
+    monkeypatch.setattr(wd_mod, "_STALL_CEILING_STRIKES", 5)
+    monkeypatch.setattr(wd_mod, "_STALL_CEILING_S", 0.0)
+    return 5
+
+
+async def test_stalls_below_the_ceiling_stay_ready(provider: _RealHealth, ceiling: int) -> None:
+    calls = {"n": 0}
+    stall_until = ceiling - 1
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return _hangs(request) if calls["n"] <= stall_until else httpx.Response(200, json={})
+
+    sm = SlotManager()
+    with _http(handler):
+        await _ready(sm)
+        deadline = time.monotonic() + 5.0
+        while calls["n"] < stall_until + 4 and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+    assert calls["n"] >= stall_until + 4
+    assert sm.state("chat") is SlotState.READY
+    await sm._transition("chat", SlotState.OFFLINE, force=True)
+
+
+async def test_stalls_at_the_ceiling_stamp_error_naming_it(
+    provider: _RealHealth, ceiling: int
+) -> None:
+    sm = SlotManager()
+    with _http(_hangs):
+        await _ready(sm)
+        assert await _wait_for(sm, SlotState.ERROR) is SlotState.ERROR
+    record = sm._states[sm._key("chat")]
+    assert "stall ceiling" in (record.message or "")
+    assert "5 consecutive probes" in (record.message or "")
+    assert record.extra.get("health_ok") is False
+
+
+async def test_an_answered_probe_resets_the_stall_counter(
+    provider: _RealHealth, ceiling: int
+) -> None:
+    """ceiling-1 stalls, one answer, ceiling-1 more: never N in a row."""
+    calls = {"n": 0}
+    cycle = ceiling  # (ceiling-1) stalls then one 200, repeated
+    total = cycle * 3
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(200, json={}) if calls["n"] % cycle == 0 else _hangs(request)
+
+    sm = SlotManager()
+    with _http(handler):
+        await _ready(sm)
+        deadline = time.monotonic() + 10.0
+        while calls["n"] < total and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+    assert calls["n"] >= total
+    assert sm.state("chat") is SlotState.READY
+    await sm._transition("chat", SlotState.OFFLINE, force=True)
