@@ -380,7 +380,7 @@ and registry work, and the drawers all merged). Vendor files are at tag
   `SlotManager.terminate`, which waits for the widened bound; `:4212`:
   `_wait_ready_watching_unit`, which ends a readiness wait on a unit systemd has
   parked in `failed`. `src/hal0/slots/watchdog.py:507`: `readiness_check`, the
-  per-request gate that bounds the liveness probe (`:549`); `:96`: the 900 s stall ceiling; `:85`: the 900 s
+  per-request gate that bounds the liveness probe (`:549`); `:95`: the 900 s stall ceiling; `:85`: the 900 s
   warming watchdog. `installer/wrappers/hal0-systemctl:415`: the root-side
   `--stop-timeout` check.
 - `src/hal0/profiles/__init__.py`: `_runtime_family` (`:162`, from
