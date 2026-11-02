@@ -668,6 +668,13 @@ def _journal_group_gid() -> int | None:
         return None
 
 
+#: `hal0 update` is no remedy here: with no newer release it stops before activation.
+_API_UNIT_REMEDY = (
+    "run `sudo /usr/lib/hal0/bin/hal0-update refresh-api-unit`, "
+    "then `sudo systemctl restart hal0-api`"
+)
+
+
 def check_api_journal_access(
     *,
     process_ids: Callable[[], tuple[int, set[int]] | None] | None = None,
@@ -677,10 +684,10 @@ def check_api_journal_access(
 
     hal0-api runs ``User=hal0`` and gets journal read from
     ``SupplementaryGroups=systemd-journal`` on its own unit, written by the
-    installer. ``hal0 update`` does not rewrite ``hal0-api.service``, so re-run
-    the installer once after updating to 1.4.0; until then the API's log views
-    are silently empty. Advisory (``warn``): nothing else breaks. Both probes
-    are injectable for tests.
+    installer and refreshed whenever an update or rollback activates a release
+    (#3160). A unit that still lacks it leaves the API's log views silently empty
+    until it is refreshed and ``hal0-api`` restarts. Advisory (``warn``): nothing
+    else breaks. Both probes are injectable for tests.
     """
     probe_ids = process_ids if process_ids is not None else _api_process_ids
     probe_gid = journal_gid if journal_gid is not None else _journal_group_gid
@@ -716,9 +723,102 @@ def check_api_journal_access(
         title,
         _WARN,
         f"{_API_UNIT} is not running with the {_JOURNAL_GROUP} group, so /api/logs and "
-        "MCP logs_tail return no lines — re-run the installer once "
-        "(curl -fsSL https://hal0.dev/install.sh | sudo bash); `hal0 update` does not "
-        "rewrite hal0-api.service",
+        f"MCP logs_tail return no lines — {_API_UNIT_REMEDY}, or re-run the installer "
+        "(curl -fsSL https://hal0.dev/install.sh | sudo bash)",
+    )
+
+
+def check_api_unit_current(
+    *,
+    installed: Callable[[], str | None] | None = None,
+    template: Callable[[], str | None] | None = None,
+    venv_dir: str | None = None,
+    current_link: str | None = None,
+) -> Check:
+    """Does the installed ``hal0-api.service`` match the release's template? (#3160)
+
+    Activating a release re-renders the unit from
+    ``installer/systemd/hal0-api.service.in`` with the per-box values recovered
+    from the installed unit. This row renders
+    the same way and compares, so a unit that predates a template change (stop
+    budget, journal group, env files) shows up as a ``warn`` with the fix.
+    Advisory: the daemon runs fine on the old unit. Probes are injectable.
+    """
+    import sys
+
+    from hal0.install.api_unit import (
+        TEMPLATE_RELPATH,
+        desired_api_unit,
+        foreign_user,
+        loses_bind_host,
+    )
+
+    key, title = "api-unit", "API unit current"
+    unit_path = Path("/etc/systemd/system") / _API_UNIT
+
+    def _read_installed() -> str | None:
+        try:
+            return unit_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            return None
+
+    link = current_link if current_link is not None else str(paths.usr_lib())
+
+    def _read_template() -> str | None:
+        try:
+            return (Path(link) / TEMPLATE_RELPATH).read_text(encoding="utf-8")
+        except OSError:
+            return None
+
+    unit_text = (installed or _read_installed)()
+    if unit_text is None:
+        return Check(key, title, _PASS, f"{_API_UNIT} is not installed system-wide (dev checkout)")
+    tmpl = (template or _read_template)()
+    if tmpl is None:
+        return Check(
+            key,
+            title,
+            _WARN,
+            f"release template {TEMPLATE_RELPATH} not found under {link} — cannot compare "
+            f"{_API_UNIT}",
+        )
+    try:
+        want = desired_api_unit(
+            tmpl,
+            installed=unit_text,
+            venv_dir=venv_dir if venv_dir is not None else sys.prefix,
+            current_link=link,
+        )
+    except ValueError as exc:
+        return Check(key, title, _WARN, f"could not render {_API_UNIT} template: {exc}")
+    if want == unit_text:
+        return Check(key, title, _PASS, f"{_API_UNIT} matches the release template")
+    user = foreign_user(unit_text)
+    if user is not None:
+        return Check(
+            key,
+            title,
+            _WARN,
+            f"{_API_UNIT} runs as User={user}, not hal0, so a refresh is held (it would move "
+            f"the API to hal0 on the next restart) — re-run the installer "
+            f"(curl -fsSL https://hal0.dev/install.sh | sudo bash) or fix ownership so the "
+            f"unit runs as hal0, then {_API_UNIT_REMEDY}",
+        )
+    if loses_bind_host(unit_text):
+        return Check(
+            key,
+            title,
+            _WARN,
+            f"{_API_UNIT} passes --host but api.env does not set HAL0_BIND_HOST, so a refresh "
+            f"is held to keep the API on its address — set HAL0_BIND_HOST in api.env, then "
+            f"{_API_UNIT_REMEDY}",
+        )
+    return Check(
+        key,
+        title,
+        _WARN,
+        f"{_API_UNIT} differs from this release's template (an earlier refresh failed, or "
+        f"it was edited by hand) — {_API_UNIT_REMEDY}; drop-ins in hal0-api.service.d/ are kept",
     )
 
 
@@ -3197,6 +3297,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_agent_uid_isolation(),
         check_api_journal_access(),
         check_img_custom_nodes(),
+        check_api_unit_current(),
         check_voice_stt_weights(),
         check_seams(),
         check_mcp_mounts(),

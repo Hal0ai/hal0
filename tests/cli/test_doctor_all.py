@@ -1510,11 +1510,17 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         lambda: Check("img-custom-nodes", "Image custom nodes", "pass", "stubbed"),
     )
 
+    monkeypatch.setattr(
+        da,
+        "check_api_unit_current",
+        lambda **_kw: Check("api-unit", "API unit current", "pass", "stubbed"),
+    )
+
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
     assert gtt_leak_slots == [[{"port": 8081}]]
-    # Verify rows plus the extra evidence rows (one more: gtt-leak).
-    assert keys[-40:] == [
+    # Verify rows plus the extra evidence rows (gtt-leak, api-unit).
+    assert keys[-41:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1532,6 +1538,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "agent-uid",
         "api-journal",
         "img-custom-nodes",
+        "api-unit",
         "stt-weights",
         "seams",
         "mcp_mounts",
@@ -1819,8 +1826,9 @@ def test_api_journal_passes_when_process_holds_the_group() -> None:
 def test_api_journal_warns_when_process_lacks_the_group() -> None:
     check = _journal(ids=(999, {999, 44}))
     assert check.status == "warn"
-    # Fix text: re-run the installer once after updating to 1.4.0;
-    # `hal0 update` does not rewrite hal0-api.service.
+    # Fix text names the seam verb and the installer, never a plain `hal0 update`,
+    # which stops before activation when no newer release exists.
+    assert "refresh-api-unit" in check.detail
     assert "install.sh" in check.detail
     assert "/api/logs" in check.detail
     assert "systemd-journal" in check.detail

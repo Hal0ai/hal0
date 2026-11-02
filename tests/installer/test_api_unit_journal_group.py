@@ -8,10 +8,8 @@ unit's process tree: the installer must not add ``hal0`` to the group in
 and would inherit it. No other shipped unit, drop-in or heredoc may carry
 it either.
 
-Driven by extracting the hal0-api unit block from install.sh and running it
-against a tmp ``UNIT_DIR`` with a stub ``getent`` on ``PATH`` (the same
-extract-and-run technique ``test_install_client_key.py`` uses), so the test
-checks the rendered unit, not just the script text.
+Render through ``hal0.install.api_unit`` with controlled host group lookup.
+Also run the installer block to check its warning and template/renderer wiring.
 """
 
 from __future__ import annotations
@@ -19,11 +17,17 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
+
+import pytest
+
+from hal0.install import api_unit
 
 INSTALLER = Path(__file__).resolve().parents[2] / "installer"
 INSTALL_SH = INSTALLER / "install.sh"
 AGENT_UNIT = INSTALLER / "systemd" / "hal0-agent@.service"
+API_TEMPLATE = INSTALLER.parent / api_unit.TEMPLATE_RELPATH
 
 _DIRECTIVE = "SupplementaryGroups=systemd-journal"
 
@@ -35,7 +39,7 @@ def _extract_block() -> str:
     return text[start:end]
 
 
-def _render_unit(tmp_path: Path, *, group_exists: bool) -> tuple[str, str]:
+def _run_installer_block(tmp_path: Path, *, group_exists: bool, repo: Path) -> tuple[str, str]:
     """Run the extracted block; return (rendered unit text, combined output)."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -55,6 +59,8 @@ def _render_unit(tmp_path: Path, *, group_exists: bool) -> tuple[str, str]:
         "set -euo pipefail\n"
         'info() { echo "INFO: $*"; }\n'
         'warn() { echo "WARN: $*"; }\n'
+        'die() { echo "ERROR: $*" >&2; exit 1; }\n'
+        f'PY="{sys.executable}" REPO_ROOT="{repo}"\n'
         f'UNIT_DIR="{unit_dir}"\n'
         'PREFIX=/opt/hal0 CURRENT_LINK="" API_ENV=/etc/hal0/api.env ETC_DIR=/etc/hal0\n'
         "HF_SECRETS_ENV=/etc/hal0/hf.env HAL0_BIN=/opt/hal0/bin/hal0\n" + _extract_block()
@@ -71,25 +77,95 @@ def _render_unit(tmp_path: Path, *, group_exists: bool) -> tuple[str, str]:
     return (unit_dir / "hal0-api.service").read_text(encoding="utf-8"), proc.stdout + proc.stderr
 
 
+def _render_unit(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], *, group_exists: bool
+) -> str:
+    def getgrnam(name: str) -> object:
+        assert name == "systemd-journal"
+        if not group_exists:
+            raise KeyError(name)
+        return object()
+
+    monkeypatch.setattr("grp.getgrnam", getgrnam)
+    assert (
+        api_unit.main(
+            [
+                "render",
+                "--template",
+                str(API_TEMPLATE),
+                "--bin",
+                "/opt/hal0/bin/hal0",
+                "--workdir",
+                "/opt/hal0",
+                "--api-env",
+                "/etc/hal0/api.env",
+                "--etc-dir",
+                "/etc/hal0",
+                "--hf-secrets-env",
+                "/etc/hal0/hf.env",
+            ]
+        )
+        == 0
+    )
+    return capsys.readouterr().out
+
+
+def test_installer_renders_through_template_and_renderer(tmp_path: Path) -> None:
+    # Instrument copies so merely naming the files in install.sh cannot pass.
+    repo = tmp_path / "repo"
+    template = repo / api_unit.TEMPLATE_RELPATH
+    template.parent.mkdir(parents=True)
+    template.write_text(API_TEMPLATE.read_text() + "# template used\n", encoding="utf-8")
+    renderer = repo / "src/hal0/install/api_unit.py"
+    renderer.parent.mkdir(parents=True)
+    renderer.write_text(
+        (INSTALLER.parent / "src/hal0/install/api_unit.py")
+        .read_text()
+        .replace(
+            "from __future__ import annotations",
+            'from __future__ import annotations\nimport sys\nsys.stdout.write("# renderer used\\n")',
+        ),
+        encoding="utf-8",
+    )
+    unit, _out = _run_installer_block(tmp_path, group_exists=True, repo=repo)
+    assert "# template used\n" in unit
+    assert "# renderer used\n" in unit
+    assert "EnvironmentFile=/etc/hal0/api.env\n" in unit
+    assert "ExecStart=/opt/hal0/bin/hal0 serve --port ${HAL0_PORT}\n" in unit
+    assert "@HAL0_" not in unit
+
+
 def _service_section(unit: str) -> str:
     m = re.search(r"^\[Service\]\n(.*?)(?=^\[|\Z)", unit, re.MULTILINE | re.DOTALL)
     assert m is not None, "no [Service] section in rendered unit"
     return m.group(1)
 
 
-def test_rendered_api_unit_carries_journal_group(tmp_path: Path) -> None:
-    unit, _out = _render_unit(tmp_path, group_exists=True)
+def test_rendered_api_unit_carries_journal_group(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    unit = _render_unit(monkeypatch, capsys, group_exists=True)
     service = _service_section(unit)
     assert re.search(rf"^{re.escape(_DIRECTIVE)}$", service, re.MULTILINE), service
     # Sits with the identity block, after User=/Group=.
     assert service.index("User=hal0") < service.index(_DIRECTIVE)
 
 
-def test_missing_journal_group_still_renders_a_startable_unit(tmp_path: Path) -> None:
+def test_missing_journal_group_still_renders_a_startable_unit(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     """A host without systemd-journal must not get a unit naming an unknown
     group: systemd refuses to start a unit whose SupplementaryGroups= does not
     resolve (status=216/GROUP)."""
-    unit, out = _render_unit(tmp_path, group_exists=False)
+    unit = _render_unit(monkeypatch, capsys, group_exists=False)
+    warning = _extract_block().split("API_WORKDIR=", 1)[0]
+    proc = subprocess.run(
+        ["bash", "-c", 'getent() { return 2; }; warn() { echo "WARN: $*"; };\n' + warning],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    out = proc.stdout + proc.stderr
     assert not re.search(r"^SupplementaryGroups=", unit, re.MULTILINE), unit
     assert "User=hal0" in unit
     assert "ExecStart=" in unit
@@ -122,26 +198,27 @@ def test_installer_never_adds_hal0_to_the_journal_group() -> None:
                 assert "journal" not in line, f"{script.name}: {line}"
 
 
-def test_only_the_api_unit_heredoc_gets_the_journal_group() -> None:
-    """install.sh writes several units from heredocs. The directive may appear
-    once, in the API_JOURNAL_GROUP_LINE assignment the hal0-api heredoc
-    expands; no other heredoc and no installer helper may carry it."""
-    hits = [
-        ln for ln in _code_lines(INSTALL_SH) if "systemd-journal" in ln and "Supplementary" in ln
-    ]
-    assert hits == ['API_JOURNAL_GROUP_LINE="SupplementaryGroups=systemd-journal"'], hits
-    for script in _installer_scripts()[1:]:
-        for line in _code_lines(script):
-            assert not ("SupplementaryGroups" in line and "journal" in line), f"{script}: {line}"
+def test_only_the_api_unit_gets_the_journal_group() -> None:
+    """No other unit, drop-in, heredoc or installer helper gets the grant."""
+    for path in sorted(INSTALLER.rglob("*")):
+        # installer/ holds Python the suite imports, so __pycache__ appears here.
+        if not path.is_file() or path == API_TEMPLATE or "__pycache__" in path.parts:
+            continue
+        for line in _code_lines(path):
+            if re.search(r"SupplementaryGroups\s*=", line):
+                assert "journal" not in line.lower(), f"{path}: {line}"
+            assert "HAL0_API_JOURNAL_GROUP_LINE" not in line, f"{path}: {line}"
 
 
 def test_no_shipped_unit_or_dropin_gets_the_journal_group() -> None:
     """``installer/systemd/`` holds the agent template, its hermes drop-in,
-    the bench units and hindsight-api. None of them may carry the group."""
+    the bench units and hindsight-api. Only the API template may grant the group."""
     files = sorted(p for p in (INSTALLER / "systemd").rglob("*") if p.is_file())
     assert AGENT_UNIT in files
     assert any(p.parent.name == "hal0-agent@hermes.service.d" for p in files), files
     for unit in files:
+        if unit == API_TEMPLATE:
+            continue
         text = unit.read_text(encoding="utf-8")
         assert "systemd-journal" not in text, unit
         assert not re.search(r"^\s*SupplementaryGroups=", text, re.MULTILINE), unit
