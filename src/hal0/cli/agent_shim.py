@@ -551,6 +551,10 @@ _READY_TIMEOUT_S = 90.0
 # Watchdog ping interval — half of the unit's WatchdogSec (60s) so a
 # single miss doesn't trip the watchdog.
 _WATCHDOG_INTERVAL_S = 25.0
+# How often the heartbeat wait looks at the child. Its exit must end the shim
+# promptly: the shim is the unit's main process, so a shim still waiting out the
+# heartbeat holds the stop open until TimeoutStopSec=15 SIGKILLs it (#2861).
+_CHILD_POLL_S = 0.5
 # Health-probe timeout for each heartbeat. Longer than the start-up wait's 1 s
 # poll: a dashboard slowed by host load (a big model loading next door) is
 # alive, and a 1 s probe let it miss two pings and get SIGABRTed. A healthy
@@ -599,7 +603,12 @@ def cmd_serve(cfg: AgentConfig) -> int:
         **runas,
     )
 
+    stop_requested = False
+
     def _forward_signal(signum: int, _frame: object) -> None:
+        nonlocal stop_requested
+        if signum != signal.SIGHUP:
+            stop_requested = True
         with contextlib.suppress(ProcessLookupError):
             child.send_signal(signum)
 
@@ -609,13 +618,20 @@ def cmd_serve(cfg: AgentConfig) -> int:
     # overrides.yaml on SIGHUP. Pass through unchanged.
     signal.signal(signal.SIGHUP, _forward_signal)
 
+    def _stopped_as_asked() -> bool:
+        # Hermes finishes its graceful shutdown by re-raising the signal, so a
+        # clean stop reads as death-by-SIGTERM. Passing that on as -15 would make
+        # the exit status 241 and the unit Failed; the same death with no stop
+        # requested stays a failure, so Restart=on-failure still revives it.
+        return stop_requested and child.returncode in (-signal.SIGTERM, -signal.SIGINT)
+
     # Block until /api/health responds OR the child exits OR we time out.
     ready = _wait_for_ready(child, cfg, _READY_TIMEOUT_S)
     if not ready:
         # Child either crashed or never opened the socket. Don't sd_notify
         # READY — systemd will mark us failed and trigger Restart.
         rc = child.wait() if child.poll() is None else (child.returncode or 1)
-        return rc or 1
+        return 0 if _stopped_as_asked() else (rc or 1)
 
     _sd_notify(f"READY=1\nSTATUS={ready_status}\n")
 
@@ -625,10 +641,26 @@ def cmd_serve(cfg: AgentConfig) -> int:
     while child.poll() is None:
         if _is_ready(cfg, timeout=_HEARTBEAT_PROBE_TIMEOUT_S):
             _sd_notify("WATCHDOG=1\n")
-        time.sleep(_WATCHDOG_INTERVAL_S)
+        _sleep_while_alive(child, _WATCHDOG_INTERVAL_S)
 
     _sd_notify("STOPPING=1\n")
-    return child.returncode or 0
+    return 0 if _stopped_as_asked() else (child.returncode or 0)
+
+
+def _sleep_while_alive(child: subprocess.Popen[bytes], seconds: float) -> None:
+    """Sleep up to ``seconds``, returning soon after ``child`` exits.
+
+    One long ``time.sleep`` cannot do this. A signal handler that returns does not
+    cut a sleep short (PEP 475): Python sleeps out the remainder, and a child's
+    exit does not wake it at all.
+    """
+
+    deadline = time.monotonic() + seconds
+    while child.poll() is None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(remaining, _CHILD_POLL_S))
 
 
 def _wait_for_ready(
@@ -657,8 +689,10 @@ def cmd_stop(cfg: AgentConfig) -> int:
     env, mirroring what ``hermes dashboard --stop`` does upstream.
 
     For Type=notify units, systemd already SIGTERMs the main pid on
-    its own; this command is the manual fallback + the basis for
-    ``status``.
+    its own, but only after this command returns. Under ``ExecStop=`` systemd
+    exports ``$MAINPID``, so the serving shim is told first: otherwise it sees its
+    child die of SIGTERM with no stop requested and reports a failure. Run by hand
+    there is no ``$MAINPID``, and only the dashboard is signalled.
     """
 
     needle = str(cfg.bin)
@@ -666,6 +700,11 @@ def cmd_stop(cfg: AgentConfig) -> int:
     if not pids:
         # Already stopped — exit 0 so retries are idempotent.
         return 0
+
+    main_pid = os.environ.get("MAINPID", "")
+    if main_pid.isdecimal() and int(main_pid) > 0:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(int(main_pid), signal.SIGTERM)
 
     for pid in pids:
         try:

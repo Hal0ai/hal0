@@ -1,17 +1,23 @@
 """Tests for ``hal0-agent`` — the systemd-unit shim.
 
 Most coverage is at the unit level: argv parsing, config resolution,
-the Hermes argv builder, and the readiness-poll edges. ``cmd_serve``
-isn't exercised end-to-end (it would block on a real subprocess and
-HTTP poll); instead we test the building blocks it composes from.
+the Hermes argv builder, and the readiness-poll edges. ``cmd_serve`` is
+exercised end-to-end only for its stop path (``TestServeStop``), against a stub
+child with the HTTP poll patched out; otherwise we test the building blocks it
+composes from.
 """
 
 from __future__ import annotations
 
+import contextlib
 import os
+import signal
 import socket
 import subprocess
 import sys
+import textwrap
+import time
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace as _NS
 from typing import Any
@@ -676,12 +682,14 @@ class TestServeHeartbeat:
         monkeypatch.setattr(agent_shim, "_wait_for_ready", lambda *_a: True)
         monkeypatch.setattr(agent_shim, "_is_ready", _is_ready)
         monkeypatch.setattr(agent_shim, "_sd_notify", lambda msg: notified.append(msg) or True)
-        monkeypatch.setattr(agent_shim.time, "sleep", lambda _s: None)
+        sleeps: list[float] = []
+        monkeypatch.setattr(agent_shim, "_sleep_while_alive", lambda _c, s: sleeps.append(s))
 
         assert agent_shim.cmd_serve(cfg) == 0
         assert agent_shim._HEARTBEAT_PROBE_TIMEOUT_S == 5.0
         assert probes == [5.0, 5.0]
         assert notified.count("WATCHDOG=1\n") == 2
+        assert sleeps == [agent_shim._WATCHDOG_INTERVAL_S] * 2
 
     def test_startup_wait_keeps_the_one_second_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Only the heartbeat waits longer; the start-up poll still uses 1 s."""
@@ -895,3 +903,178 @@ def test_runas_extras_noop_when_user_absent() -> None:
     env: dict[str, str] = {"HOME": "/root"}
     extras = agent_shim._runas_popen_extras(env, geteuid=lambda: 0, getpwnam=_raise)
     assert extras == {}
+
+
+# ---------------------------------------------------------------------------
+# Stopping the unit (#2861)
+# ---------------------------------------------------------------------------
+
+# Well under the unit's TimeoutStopSec=15 and the shim's 25 s heartbeat sleep.
+_PROMPT_EXIT_S = 5.0
+
+_SERVE_DRIVER = textwrap.dedent(
+    """
+    import sys
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from hal0.cli import agent_shim
+
+    child_src, pid_file = sys.argv[1], Path(sys.argv[2])
+    agent_shim._build_hermes_argv = lambda cfg: [sys.executable, "-c", child_src, str(pid_file)]
+    agent_shim._build_hermes_env = lambda cfg: None
+    agent_shim._dashboard_ready_status = lambda cfg: "ok"
+    agent_shim._runas_popen_extras = lambda env: {}
+    agent_shim._is_ready = lambda cfg, timeout=1.0: pid_file.exists()
+    agent_shim._sd_notify = lambda state: print(state.split("=")[0], flush=True)
+    cfg = SimpleNamespace(
+        agent_type="hermes", hermes_bin=Path(sys.executable), home=pid_file.parent
+    )
+    raise SystemExit(agent_shim.cmd_serve(cfg))
+    """
+)
+
+# Dies of SIGTERM with the default disposition, which is what Hermes ends on:
+# uvicorn re-raises it into a handler that restores SIG_DFL and kills itself.
+_DASHBOARD_STUB = textwrap.dedent(
+    """
+    import os, sys, time
+    open(sys.argv[1], "w").write(str(os.getpid()))
+    time.sleep(120)
+    """
+)
+
+
+@pytest.mark.timing
+class TestServeStop:
+    """A real ``cmd_serve`` in its own process, parked in its heartbeat sleep."""
+
+    @pytest.fixture
+    def serving(self, tmp_path: Path) -> Iterator[tuple[subprocess.Popen[str], int]]:
+        pid_file = tmp_path / "dashboard.pid"
+        shim = subprocess.Popen(
+            [sys.executable, "-c", _SERVE_DRIVER, _DASHBOARD_STUB, str(pid_file)],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        dashboard_pid = 0
+        try:
+            assert shim.stdout is not None
+            # WATCHDOG is sent immediately before the heartbeat sleep.
+            for line in shim.stdout:
+                if line.strip() == "WATCHDOG":
+                    break
+            else:
+                pytest.fail("shim exited before its first heartbeat")
+            dashboard_pid = int(pid_file.read_text())
+            yield shim, dashboard_pid
+        finally:
+            shim.kill()
+            shim.wait()
+            if dashboard_pid:
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(dashboard_pid, signal.SIGKILL)
+
+    def _exit_code(self, shim: subprocess.Popen[str]) -> int:
+        """The shim's exit status, failing if it outlives the dashboard."""
+        started = time.monotonic()
+        try:
+            code = shim.wait(timeout=_PROMPT_EXIT_S)
+        except subprocess.TimeoutExpired:
+            pytest.fail(f"shim still running {time.monotonic() - started:.1f} s after the stop")
+        return code
+
+    def test_stop_exits_promptly_and_cleanly(
+        self, serving: tuple[subprocess.Popen[str], int]
+    ) -> None:
+        """The ExecStop order: the shim is told first, then the dashboard is signalled."""
+        shim, dashboard_pid = serving
+        os.kill(shim.pid, signal.SIGTERM)
+        os.kill(dashboard_pid, signal.SIGTERM)
+        assert self._exit_code(shim) == 0
+
+    def test_systemd_sigterm_to_the_shim_alone_stops_the_dashboard(
+        self, serving: tuple[subprocess.Popen[str], int]
+    ) -> None:
+        shim, _ = serving
+        os.kill(shim.pid, signal.SIGTERM)
+        assert self._exit_code(shim) == 0
+
+    def test_outside_sigterm_to_the_dashboard_stays_a_failure(
+        self, serving: tuple[subprocess.Popen[str], int]
+    ) -> None:
+        """No stop was requested, so ``Restart=on-failure`` must still bring it back."""
+        shim, dashboard_pid = serving
+        os.kill(dashboard_pid, signal.SIGTERM)
+        assert self._exit_code(shim) != 0
+
+    def test_crashed_dashboard_is_noticed_without_waiting_out_the_heartbeat(
+        self, serving: tuple[subprocess.Popen[str], int]
+    ) -> None:
+        shim, dashboard_pid = serving
+        os.kill(dashboard_pid, signal.SIGKILL)
+        assert self._exit_code(shim) != 0
+
+    def test_forced_kill_during_a_stop_stays_a_failure(
+        self, serving: tuple[subprocess.Popen[str], int]
+    ) -> None:
+        """A dashboard that had to be SIGKILLed did not shut down cleanly."""
+        shim, dashboard_pid = serving
+        os.kill(shim.pid, signal.SIGTERM)
+        os.kill(dashboard_pid, signal.SIGKILL)
+        assert self._exit_code(shim) != 0
+
+
+class TestSleepWhileAlive:
+    """The heartbeat wait: the whole interval while alive, cut short by an exit."""
+
+    def _run(self, monkeypatch: pytest.MonkeyPatch, polls: list[int | None]) -> float:
+        clock = _NS(now=0.0)
+
+        def _sleep(seconds: float) -> None:
+            assert seconds <= agent_shim._CHILD_POLL_S
+            clock.now += seconds
+
+        monkeypatch.setattr(agent_shim.time, "monotonic", lambda: clock.now)
+        monkeypatch.setattr(agent_shim.time, "sleep", _sleep)
+        answers = iter(polls)
+        child = _NS(poll=lambda: next(answers, None))
+        agent_shim._sleep_while_alive(child, 25.0)  # type: ignore[arg-type]
+        return clock.now
+
+    def test_live_child_waits_the_full_interval(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert self._run(monkeypatch, []) == pytest.approx(25.0)
+
+    def test_exit_ends_the_wait_within_one_poll(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        waited = self._run(monkeypatch, [None, None, 0])
+        assert waited == pytest.approx(2 * agent_shim._CHILD_POLL_S)
+
+
+class TestCmdStopSignals:
+    def _run(
+        self, monkeypatch: pytest.MonkeyPatch, *, main_pid: str | None
+    ) -> list[tuple[int, int]]:
+        sent: list[tuple[int, int]] = []
+        scans = iter([[111], []])
+        monkeypatch.setattr(agent_shim, "_find_child_pids", lambda *_: next(scans))
+        monkeypatch.setattr(agent_shim.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+        if main_pid is None:
+            monkeypatch.delenv("MAINPID", raising=False)
+        else:
+            monkeypatch.setenv("MAINPID", main_pid)
+        assert agent_shim.cmd_stop(_cfg()) == 0
+        return sent
+
+    def test_under_the_unit_the_shim_hears_of_the_stop_first(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assert self._run(monkeypatch, main_pid="222") == [
+            (222, signal.SIGTERM),
+            (111, signal.SIGTERM),
+        ]
+
+    @pytest.mark.parametrize("main_pid", [None, "", "0", "not-a-pid"])
+    def test_standalone_signals_only_the_dashboard(
+        self, monkeypatch: pytest.MonkeyPatch, main_pid: str | None
+    ) -> None:
+        assert self._run(monkeypatch, main_pid=main_pid) == [(111, signal.SIGTERM)]
