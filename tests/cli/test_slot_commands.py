@@ -404,6 +404,37 @@ def test_cli_slot_edit_rejects_bad_tune_values(
     assert put_capture == {}
 
 
+def test_cli_slot_edit_profile_sends_only_the_profile(put_capture: dict[str, Any]) -> None:
+    """#3281: a stored ctx in range rides the server-side re-judge; the CLI sends
+    just the profile and reports success."""
+    result = runner.invoke(slot_commands.app, ["edit", "chat", "--profile", "halogen"])
+    assert result.exit_code == 0, result.output
+    assert put_capture["body"] == {"profile": "halogen"}
+
+
+def test_cli_slot_edit_profile_surfaces_the_tune_guard_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3281: the server refuses a halogen switch whose stored ctx is past the
+    native window with ``slot.tune_unsupported_value``; the CLI exits non-zero and
+    names HALOGEN_ROPE_YARN."""
+    from hal0.cli._shared import CliApiError
+
+    def refusing_put(path: str, *, json: dict[str, Any] | None = None, **kw: Any) -> Any:
+        raise CliApiError(
+            "context 524288 is past this engine's native 262144-token window; that needs "
+            "HALOGEN_ROPE_YARN in the profile's flags, or the engine refuses to start",
+            code="slot.tune_unsupported_value",
+            status=400,
+        )
+
+    monkeypatch.setattr(slot_commands, "_api_unreachable", lambda _u: False)
+    monkeypatch.setattr(slot_commands, "api_put", refusing_put)
+    result = runner.invoke(slot_commands.app, ["edit", "chat", "--profile", "halogen"])
+    assert result.exit_code != 0, result.output
+    assert "HALOGEN_ROPE_YARN" in result.output
+
+
 def test_cli_slot_edit_with_nothing_is_a_usage_error(put_capture: dict[str, Any]) -> None:
     result = runner.invoke(slot_commands.app, ["edit", "chat"])
     assert result.exit_code == 2

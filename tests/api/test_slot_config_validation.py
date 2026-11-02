@@ -458,6 +458,46 @@ def test_tune_ctx_past_the_native_window_refused_on_halogen_slot(
     assert halogen_slot_toml.read_bytes() == before
 
 
+def _stored_ctx_slot(slot_toml: Path, ctx: int) -> None:
+    with slot_toml.open("a", encoding="utf-8") as fh:
+        fh.write(f"\n[tune]\nctx_size = {ctx}\n")
+
+
+def test_switch_to_halogen_profile_rejudges_stored_ctx(
+    slot_toml: Path, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3281: a stored ctx past the native window is refused on the profile switch,
+    by the same guard (and code) the tune write path uses."""
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: True)
+    _stored_ctx_slot(slot_toml, 524288)
+    before = slot_toml.read_bytes()
+
+    r = client.put("/api/slots/chat/config", json={"profile": "halogen"})
+
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert err["code"] == "slot.tune_unsupported_value"
+    assert "HALOGEN_ROPE_YARN" in err["message"]
+    assert err["details"]["key"] == "ctx_size"
+    assert slot_toml.read_bytes() == before
+
+
+def test_switch_to_halogen_profile_allows_stored_ctx_in_range(
+    slot_toml: Path, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("hal0.providers._gpu.kfd_present", lambda *a, **k: True)
+    monkeypatch.setattr("hal0.providers._gpu.render_node_present", lambda *a, **k: True)
+    _stored_ctx_slot(slot_toml, 262144)
+
+    r = client.put("/api/slots/chat/config", json={"profile": "halogen"})
+
+    assert r.status_code == 200, r.text
+    on_disk = _read(slot_toml)
+    assert on_disk["profile"] == "halogen"
+    assert on_disk["tune"]["ctx_size"] == 262144
+
+
 def test_tune_ctx_as_a_string_is_judged_by_its_value_on_halogen_slot(
     halogen_slot_toml: Path, client: TestClient
 ) -> None:
