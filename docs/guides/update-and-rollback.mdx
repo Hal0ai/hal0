@@ -191,7 +191,7 @@ the migration if that fails. To read a model's old tune back from the copy:
 
 ```bash
 sudo sqlite3 /var/lib/hal0/backups/hal0-pre-015-<timestamp>.db \
-  "SELECT id, profile, extra_args, n_gpu_layers, context_size, rope_freq_base, preferred_runner FROM model"
+  "SELECT id, profile, extra_args, n_gpu_layers, context_size, rope_freq_base, preferred_runner, extra FROM model"
 ```
 
 ## Upgrading to 1.3.0
