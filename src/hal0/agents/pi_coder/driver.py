@@ -253,7 +253,7 @@ class PiDriver(AgentDriver):
                 f"pi was installed for {marker_home}, but this process runs as "
                 f"{Path.home()}: run this as the user who installed pi — re-run as "
                 "the user whose home holds the profile, e.g. "
-                f"`sudo HOME={marker_home} hal0 agent upgrade pi`, or uninstall "
+                f"`sudo HOME={marker_home} hal0 update component pi`, or uninstall "
                 "and reinstall pi."
             )
         # install() starts over from an unusable settings.json / mcp.json; an
@@ -269,7 +269,7 @@ class PiDriver(AgentDriver):
         except (subprocess.CalledProcessError, OSError) as exc:
             raise AgentError(
                 f"npm install for the hindsight extension failed ({exc}); re-run "
-                "`sudo hal0 agent upgrade pi` once the registry is reachable"
+                "`sudo hal0 update component pi` once the registry is reachable"
             ) from exc
         self._deploy_theme()
         # Packages only: the default provider/model/theme are the operator's

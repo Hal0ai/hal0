@@ -1378,6 +1378,7 @@ def test_components_returns_catalog_rows(isolated_client: TestClient) -> None:
         "openwebui",
         "runner-images",
         "hermes",
+        "pi",
         "hindsight",
     }
     assert isinstance(body["pending"], int)
@@ -1389,6 +1390,12 @@ def test_components_returns_catalog_rows(isolated_client: TestClient) -> None:
 def test_component_converge_unknown_id_404(isolated_client: TestClient) -> None:
     resp = isolated_client.post("/api/updates/components/nope/converge")
     assert resp.status_code == 404
+
+
+def test_component_converge_refuses_pi_and_names_the_command(isolated_client: TestClient) -> None:
+    r = isolated_client.post("/api/updates/components/pi/converge", json={})
+    assert r.status_code == 400
+    assert "sudo hal0 update component pi" in r.text
 
 
 def test_component_converge_returns_job_and_completes(isolated_client: TestClient) -> None:

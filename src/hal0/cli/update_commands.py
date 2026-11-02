@@ -16,6 +16,7 @@ Surface:
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from enum import StrEnum
@@ -1226,6 +1227,9 @@ def update_component_cmd(
         die("--check cannot be combined with --target or --clear-override")
         return
     body = _component_body(component_id, target, clear_override)
+    if component_id == "pi" and not check:
+        _update_pi()
+        return
     url = _api_base()
     if _api_unreachable(url):
         raise typer.Exit(1)
@@ -1247,6 +1251,50 @@ def update_component_cmd(
             console.print("[dim]aborted.[/dim]")
             return
     _converge_component(component_id, body)
+
+
+def _update_pi() -> None:
+    """Re-pin an installed pi in this process; the one component the daemon cannot converge.
+
+    :meth:`PiDriver.upgrade` re-pins the global npm prefix and redeploys into
+    the invoking user's ``~/.pi``, neither of which the ``hal0`` service user
+    can write, so this needs root and no daemon. The driver refuses to run as a
+    different user than the one that installed pi and raises
+    :class:`AgentError` when pi is not installed; both surface here as a plain
+    error line.
+    """
+    from hal0.components.pi_arm import UPDATE_COMMAND
+
+    if os.geteuid() != 0:
+        die(
+            f"run as root ({UPDATE_COMMAND}) — pi updates the invoking user's "
+            "home and the global npm prefix."
+        )
+        return
+
+    # Call-time imports: the manager pulls in every driver lazily, and a test
+    # (or a dev box missing one driver's dependencies) swaps `_driver_for`.
+    from hal0.agents.manager import AgentError, _driver_for
+    from hal0.components.pi_arm import converge_pi
+    from hal0.components.state import record_component_result
+
+    upgrade = getattr(_driver_for("pi"), "upgrade", None)
+    if upgrade is None:
+        die("pi driver has no upgrade.")
+        return
+    console.print("[bold]Updating pi[/bold] → ~/.pi (extensions · pins · memory wiring) …")
+    try:
+        # The driver reports what it changed outside pi's own tree; a stand-in
+        # driver that returns nothing changed nothing.
+        result = upgrade() or {}
+    except AgentError as exc:
+        die(f"pi update failed: {exc}")
+        return
+    # Replaces the remedy the post-update pass recorded while pi was behind.
+    record_component_result("pi", converge_pi())
+    if result.get("hindsight_alias_added"):
+        console.print("Hindsight bank alias added to coding-agent.json")
+    console.print(Panel("[bold green]Updated[/bold green] pi", border_style="green"))
 
 
 def _converge_component(component_id: str, body: dict | None = None) -> None:

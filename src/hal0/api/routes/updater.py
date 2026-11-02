@@ -1112,6 +1112,15 @@ async def converge_component_route(component_id: str, request: Request) -> dict[
         raise ComponentNotFound(
             f"no component {component_id!r}", details={"component": component_id}
         )
+    if component_id == "pi":
+        from hal0.components.pi_arm import UPDATE_COMMAND
+
+        # A job would "apply" while changing nothing: the arm only reports.
+        raise BadRequest(
+            f"the daemon cannot update pi, which lives in the installing user's home; "
+            f"run `{UPDATE_COMMAND}` on the box",
+            details={"component": component_id},
+        )
     # Parse the body BEFORE the busy check, deliberately: `await
     # request.json()` yields control back to the event loop, so if the busy
     # check ran first, two concurrent converge POSTs could both observe an

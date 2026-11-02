@@ -88,7 +88,7 @@ const PI_OVERVIEW: AgentOverview = {
   memory: { mcp_entry: true, hindsight_config: true, hindsight_api_reachable: true },
   commands: {
     install: 'sudo hal0 agent install pi',
-    upgrade: 'sudo hal0 agent upgrade pi',
+    upgrade: 'sudo hal0 update component pi',
     uninstall: 'sudo hal0 agent uninstall pi',
   },
 }
@@ -643,7 +643,7 @@ describe('deriveCardModel: Pi', () => {
     expect(m.version).toEqual({ label: 'v0.84.4', sub: 'adapter 2.31.0', pinLabel: 'v1.2.0 · adapter 5.3.0' })
     expect(m.commands).toEqual({
       install: 'sudo hal0 agent install pi',
-      upgrade: 'sudo hal0 agent upgrade pi',
+      upgrade: 'sudo hal0 update component pi',
       uninstall: 'sudo hal0 agent uninstall pi',
     })
   })
@@ -651,7 +651,7 @@ describe('deriveCardModel: Pi', () => {
   it('pi commands default when the overview is missing, and prefer the overview when present', () => {
     expect(deriveCardModel({ ...PI, overview: null }).commands).toEqual({
       install: 'sudo hal0 agent install pi',
-      upgrade: 'sudo hal0 agent upgrade pi',
+      upgrade: 'sudo hal0 update component pi',
       uninstall: 'sudo hal0 agent uninstall pi',
     })
     const custom = { ...PI_OVERVIEW, commands: { install: 'a', upgrade: 'b', uninstall: 'c' } }

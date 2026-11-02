@@ -8,7 +8,13 @@ from hal0.services.registry import service_by_id
 
 def test_catalog_ids_and_order() -> None:
     # Order is the converge order: hindsight LAST (slowest, service-stopping).
-    assert [c.id for c in COMPONENTS] == ["openwebui", "runner-images", "hermes", "hindsight"]
+    assert [c.id for c in COMPONENTS] == [
+        "openwebui",
+        "runner-images",
+        "hermes",
+        "pi",
+        "hindsight",
+    ]
 
 
 def test_component_by_id() -> None:

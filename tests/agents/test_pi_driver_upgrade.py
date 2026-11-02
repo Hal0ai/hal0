@@ -115,7 +115,7 @@ def test_upgrade_refuses_wrong_user(
     with pytest.raises(AgentError, match="run this as the user who installed pi") as err:
         d.upgrade()
     # The error names the way out: the home the marker holds, or a reinstall.
-    assert "sudo HOME=/somewhere/else hal0 agent upgrade pi" in str(err.value)
+    assert "sudo HOME=/somewhere/else hal0 update component pi" in str(err.value)
     assert "uninstall and reinstall pi" in str(err.value)
     assert fake_runner.calls == []
     assert not d._settings_file().exists()
@@ -302,7 +302,7 @@ def test_upgrade_wraps_a_failing_hindsight_npm_install(
     d = _driver_with_marker(tmp_path, monkeypatch, _NpmFailsRunner())
     with pytest.raises(AgentError, match="npm install for the hindsight extension failed") as err:
         d.upgrade()
-    assert "sudo hal0 agent upgrade pi" in str(err.value)
+    assert "sudo hal0 update component pi" in str(err.value)
     assert isinstance(err.value.__cause__, subprocess.CalledProcessError)
 
 

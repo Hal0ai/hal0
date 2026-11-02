@@ -40,7 +40,9 @@ def test_order_and_flags_update_path() -> None:
     assert [c[0] for c in calls] == ["openwebui", "runner-images", "hermes", "hindsight"]
     assert calls[3][1] == {"job_id": "j1", "upgrade": True}  # hindsight kwarg spelling
     assert calls[0][1] == {"job_id": "j1", "apply": True}
-    assert set(results) == {"openwebui", "runner-images", "hermes", "hindsight"}
+    # pi is unpatched: its real arm reports without changing anything.
+    assert results["pi"]["status"] == "skipped"
+    assert set(results) == {"openwebui", "runner-images", "hermes", "pi", "hindsight"}
 
 
 def test_boot_path_is_diagnose_only() -> None:
@@ -69,6 +71,7 @@ def test_results_recorded_to_state_store() -> None:
         "openwebui",
         "runner-images",
         "hermes",
+        "pi",
         "hindsight",
     }
 

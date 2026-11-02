@@ -335,7 +335,7 @@ def test_overview_pi_installed_behind_pin(client_pi):
         "pin": {"pi": "1.2.0", "adapter": "5.3.0"},
         "update_available": True,
     }
-    assert body["commands"]["upgrade"] == "sudo hal0 agent upgrade pi"
+    assert body["commands"]["upgrade"] == "sudo hal0 update component pi"
     assert (
         body["profile"]["home_readable"] is False and body["profile"]["checks"][0]["id"] == "binary"
     )
@@ -1119,7 +1119,7 @@ def test_overview_pi_build_timeout_answers_a_neutral_partial_overview(client_pi,
     assert body["phase"] == "installed" and body["status"] == "installed"
     assert body["version"] == {"installed": None, "pin": None, "update_available": False}
     assert body["profile"]["checks"] == []
-    assert body["commands"]["upgrade"] == "sudo hal0 agent upgrade pi"
+    assert body["commands"]["upgrade"] == "sudo hal0 update component pi"
     assert body["generated_at"].endswith("Z")
 
 

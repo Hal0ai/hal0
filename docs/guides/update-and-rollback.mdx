@@ -371,11 +371,13 @@ then installs the current release.
 
 ## Component updates
 
-Four components carry their own release-pinned version alongside hal0
-itself: OpenWebUI (the companion container), runner images, Hermes, and
+Five components carry their own release-pinned version alongside hal0
+itself: OpenWebUI (the companion container), runner images, Hermes, Pi, and
 Hindsight. None of them float independently — each pin travels *inside*
-the hal0 release, so a normal `hal0 update` converges all four as part of
-applying. Reach for `hal0 update status` and `hal0 update component <id>`
+the hal0 release, so a normal `hal0 update` converges all of them as part of
+applying, except Pi. Pi lives in the home of the user who installed it, so
+`hal0 update` only reports it; re-pin it with `sudo hal0 update component pi`
+(see [Update pi](/docs/guides/run-agents#update-pi)). Reach for `hal0 update status` and `hal0 update component <id>`
 for a narrower view, or to retry just the piece that's stuck.
 
 ```sh
