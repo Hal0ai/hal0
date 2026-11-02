@@ -6,7 +6,7 @@ Documentation=https://github.com/hal0ai/hal0
 # extraction LLM fronts through hal0-api), so pointing back at it from here
 # — as #1613 once did — created a bidirectional ordering cycle that systemd
 # resolved by dropping a unit from the cold-boot transaction, failing the
-# boot outright (observed on CT105, 2026-08-21). The #1613 concern (cold
+# boot outright (observed in the field, 2026-08-21). The #1613 concern (cold
 # engine start outlasting the boot probe) is covered by the runtime
 # self-heal re-probe alone; memory degrades to pgvector briefly instead of
 # the box failing to boot.
@@ -23,7 +23,7 @@ Group=hal0
 # hal0:hal0 2775/setgid (src/hal0/install/perms.py, P3-perms). Privileged IO
 # (systemd unit writes, daemon-reload, slot start/stop/restart) routes through
 # `sudo -n /usr/lib/hal0/bin/hal0-systemctl` — the one narrow seam (see the
-# hal0-systemctl wrapper install below). UMask is the default 0022: no
+# hal0-systemctl wrapper install in install.sh). UMask is the default 0022: no
 # group-writable kludge needed, the setgid dirs already cover group access.
 WorkingDirectory=@HAL0_API_WORKDIR@
 EnvironmentFile=@HAL0_API_ENV@
