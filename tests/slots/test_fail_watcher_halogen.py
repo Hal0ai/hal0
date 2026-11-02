@@ -576,3 +576,66 @@ async def test_a_dispatch_ticket_alone_does_not_defer_the_stamp(
     assert sm.in_flight_count("chat") == 1
     # The ceiling's probes, then the recheck: not one extra lap.
     assert calls["n"] == ceiling + 1
+
+
+# --- the mark retires once the unit is dead (#3311) ---------------------------
+
+
+async def test_a_dead_unit_retires_the_ceiling_mark_and_the_leak_check_warns(
+    provider: _RealHealth, ceiling: int, tmp_path: Path
+) -> None:
+    from hal0.cli import doctor_all as da
+    from hal0.hardware.gpu_view import GPUMemorySample
+
+    sm = SlotManager()
+    with _http(_hangs):
+        await _stalled_to_error(sm)
+    before = sm._states[sm._key("chat")]
+    message, port = before.message, before.port
+    assert message and port == 8081
+
+    provider.active.discard("chat")
+    snap = await sm.status("chat")
+
+    rec = sm._states[sm._key("chat")]
+    assert snap.state is SlotState.ERROR
+    assert "stall_ceiling" not in rec.extra
+    assert "stall_ceiling" not in snap.metadata
+    assert rec.state is SlotState.ERROR
+    assert rec.message == message
+    assert rec.port == port
+    assert snap.port == port
+
+    kfd = tmp_path / "class" / "kfd" / "kfd" / "proc"
+    kfd.mkdir(parents=True)
+    sample = GPUMemorySample(
+        vendor="amd",
+        is_uma=True,
+        vram_total_mb=512.0,
+        gtt_total_mb=98304.0,
+        total_mb=98304.0,
+        vram_used_mb=100.0,
+        gtt_used_mb=30 * 1024.0,
+        used_mb=30 * 1024.0,
+        gpu_busy=0.0,
+        util_is_forced_high=False,
+    )
+    slots = [
+        {
+            "name": "chat",
+            "state": snap.state.value,
+            "backend": snap.backend,
+            "metadata": dict(snap.metadata),
+        }
+    ]
+    check = da.check_gtt_leak(slots, sample=sample, sys_root=str(tmp_path))
+    assert check.status == "warn"
+
+
+async def test_a_live_unit_keeps_the_ceiling_mark(provider: _RealHealth, ceiling: int) -> None:
+    sm = SlotManager()
+    with _http(_hangs):
+        await _stalled_to_error(sm)
+        snap = await sm.status("chat")
+    assert snap.state is SlotState.ERROR
+    assert sm._states[sm._key("chat")].extra.get("stall_ceiling") is True

@@ -382,13 +382,13 @@ and registry work, and the drawers all merged). Vendor files are at tag
   `load_sync` (`:2513`),
   `runner_family_mismatch` (`:1274`), the liveness dispatch (`:2295`),
   `tune_effective_for_slot` (`:3457`). `src/hal0/slot_lifecycle_budget.py:140`:
-  `TEARDOWN_MARGIN_S`. `src/hal0/slots/manager.py:2989`:
-  `SlotManager.terminate`, which waits for the widened bound; `:4237`:
+  `TEARDOWN_MARGIN_S`. `src/hal0/slots/manager.py:3022`:
+  `SlotManager.terminate`, which waits for the widened bound; `:4270`:
   `_wait_ready_watching_unit`, which ends a readiness wait on a unit systemd has
   parked in `failed`. `src/hal0/slots/watchdog.py:584`: `readiness_check`, the
   per-request gate that bounds the liveness probe (`:625`); `:97`: the 900 s stall
   ceiling; `:103`: the 30 s re-probe interval; `:554`: `stall_ceiling_cleared`, the
-  re-probe adoption asks (`src/hal0/slots/manager.py:4654`); `:85`: the 900 s
+  re-probe adoption asks (`src/hal0/slots/manager.py:4689`); `:85`: the 900 s
   warming watchdog. `installer/wrappers/hal0-systemctl:415`: the root-side
   `--stop-timeout` check.
 - `src/hal0/profiles/__init__.py`: `_runtime_family` (`:162`, from
@@ -424,9 +424,9 @@ and registry work, and the drawers all merged). Vendor files are at tag
 - `src/hal0/slots/gtt_guard.py`: `GTT_LEAK_THRESHOLD_MB` (`:41`), `GFX1151`
   (`:44`), `gtt_leak_message` (`:64`, the one leak rule) and
   `slot_may_hold_gpu_memory` (`:105`). `SlotManager._guard_gtt_leak`
-  (`src/hal0/slots/manager.py:2910`) runs it at load, after `check_load`
-  (`:2009`) and before pre-load eviction (`:2018`, `:2030`), for a provider that
-  sets `gtt_leak_guard`; the slot message is set at `:2618`.
+  (`src/hal0/slots/manager.py:2943`) runs it at load, after `check_load`
+  (`:2028`) and before pre-load eviction (`:2037`, `:2049`), for a provider that
+  sets `gtt_leak_guard`; the slot message is set at `:2645`.
   `src/hal0/cli/doctor_all.py:259`: `check_gtt_leak`, the `gtt_leak` row.
   `src/hal0/cli/doctor_commands.py:1904`: `check_halogen_weights`, and `:2089`
   `HAL0-HALOGEN-WEIGHTS-INCOMPLETE`.
