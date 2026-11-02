@@ -27,7 +27,10 @@ table inet netavark { # handle 2
 }
 """
 
-SLOTS = [{"name": "agent", "port": 8081}, {"name": "embed", "port": 8083}]
+SLOTS = [
+    {"name": "agent", "port": 8081, "state": "ready"},
+    {"name": "embed", "port": 8083, "state": "ready"},
+]
 
 
 @pytest.fixture
@@ -68,10 +71,86 @@ def test_absent_netavark_table_warns_rather_than_failing(
     def boom() -> list[netavark.DnatRule]:
         raise NetavarkUnavailable("nft failed (1): No such file or directory")
 
+    def no_iptables() -> set[int]:
+        raise NetavarkUnavailable("iptables not found")
+
     monkeypatch.setattr(netavark, "read_dnat_rules", boom)
+    monkeypatch.setattr(netavark, "read_iptables_dnat_ports", no_iptables)
     check = check_port_dnat(SLOTS)
     assert check.status == _WARN
     assert "unavailable" in check.detail
+
+
+# netavark 1.4 / iptables-nft capture (#3237): no ``inet netavark`` table.
+IPT = """\
+-P PREROUTING ACCEPT
+-N NETAVARK-HOSTPORT-DNAT
+-N NETAVARK-HOSTPORT-MASQ
+-N NETAVARK-HOSTPORT-SETMARK
+-N NETAVARK-DN-1d6d3f4e6a2c4
+-A PREROUTING -m addrtype --dst-type LOCAL -j NETAVARK-HOSTPORT-DNAT
+-A NETAVARK-HOSTPORT-DNAT -d 127.0.0.1/32 -p tcp -m multiport --dports 8081 -j NETAVARK-DN-1d6d3f4e6a2c4
+-A NETAVARK-DN-1d6d3f4e6a2c4 -d 127.0.0.1/32 -p tcp -m tcp --dport 8081 -j DNAT --to-destination 10.88.0.80:8081
+-A NETAVARK-DN-1d6d3f4e6a2c4 -d 127.0.0.1/32 -p tcp -m tcp --dport 8083 -j DNAT --to-destination 10.88.0.92:8083
+-A NETAVARK-DN-1D8721804F16F -p tcp -m tcp --dport 8084 -j NETAVARK-HOSTPORT-SETMARK
+-A NETAVARK-DN-1D8721804F16F -p tcp -m tcp --dport 8084 -j DNAT --to-destination 10.88.0.7:8084
+"""
+
+# CT105-shaped payload: offline slots (and host-network ComfyUI) have no rule.
+CT105 = [
+    {"name": "utility", "port": 8081, "state": "serving", "type": "llm"},
+    {"name": "tts", "port": 8084, "state": "idle", "type": "tts"},
+    {"name": "rerank", "port": 8083, "state": "unloaded", "type": "reranking"},
+    {"name": "embed", "port": 8089, "state": "stopped", "type": "embedding"},
+    {"name": "ops", "port": 8091, "state": "unloaded", "type": "llm"},
+    {"name": "img", "port": 8188, "state": "idle", "type": "image", "provider": "comfyui"},
+]
+
+
+@pytest.fixture
+def no_nft_table(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom() -> list[netavark.DnatRule]:
+        raise NetavarkUnavailable("nft failed (1): No such file or directory")
+
+    monkeypatch.setattr(netavark, "read_dnat_rules", boom)
+
+
+def test_parse_iptables_dnat_ports_reads_only_dnat_rules() -> None:
+    assert netavark.parse_iptables_dnat_ports(IPT) == {8081, 8083, 8084}
+
+
+def test_iptables_backend_with_rules_passes(
+    no_nft_table: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(netavark, "read_iptables_dnat_ports", lambda: {8081, 8083})
+    check = check_port_dnat(SLOTS)
+    assert check.status == _PASS
+    assert "iptables backend" in check.detail
+
+
+def test_iptables_backend_missing_rule_warns_and_names_port(
+    no_nft_table: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        netavark,
+        "read_iptables_dnat_ports",
+        lambda: netavark.parse_iptables_dnat_ports(IPT.replace("--dport 8083", "--dport 9999")),
+    )
+    check = check_port_dnat(SLOTS)
+    assert check.status == _WARN
+    assert "8083" in check.detail
+    assert "8081" not in check.detail
+
+
+def test_read_iptables_dnat_ports_runs_the_read_only_listing() -> None:
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout=IPT, stderr="")
+
+    assert netavark.read_iptables_dnat_ports(runner=runner) == {8081, 8083, 8084}
+    assert calls == [["iptables", "-t", "nat", "-S"]]
 
 
 # ── doctor all: Container netns (the leak's source) ──────────────────────────
@@ -147,3 +226,23 @@ def test_prune_dnat_rejects_a_bad_handle_before_spawning_anything(handle: object
     with pytest.raises(ValueError):
         _seam(calls).prune_dnat(8083, handle)  # type: ignore[arg-type]
     assert calls == []
+
+
+def test_iptables_backend_offline_and_host_network_slots_do_not_warn(
+    no_nft_table: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        netavark, "read_iptables_dnat_ports", lambda: netavark.parse_iptables_dnat_ports(IPT)
+    )
+    assert check_port_dnat(CT105).status == _PASS
+
+
+def test_iptables_backend_loaded_slot_without_rule_warns(
+    no_nft_table: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(netavark, "read_iptables_dnat_ports", lambda: {8081})
+    check = check_port_dnat(CT105)
+    assert check.status == _WARN
+    assert "8084" in check.detail
+    assert "8083" not in check.detail
+    assert "8188" not in check.detail

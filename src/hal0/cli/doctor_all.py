@@ -1581,7 +1581,53 @@ def check_port_dnat(slots: Any, audit: Callable[..., Any] | None = None) -> Chec
         rules = netavark.read_dnat_rules()
         live = netavark.read_live_container_ips()
     except (netavark.NetavarkUnavailable, OSError, subprocess.SubprocessError) as exc:
-        return Check("port_dnat", label, _WARN, f"audit unavailable: {exc}")
+        # No ``inet netavark`` table: netavark 1.4 keeps its rules in the
+        # iptables-nft ``nat`` table instead (#3237). Only warn if that
+        # backend lacks the rules too.
+        try:
+            published = netavark.read_iptables_dnat_ports()
+        except (netavark.NetavarkUnavailable, OSError, subprocess.SubprocessError):
+            return Check("port_dnat", label, _WARN, f"audit unavailable: {exc}")
+        # A stopped slot has no container, hence no rule by design; ComfyUI
+        # runs with network_mode="host" (providers/comfyui.py), so it never
+        # publishes through netavark. Judge only loaded, netavark-published
+        # slots (arbiter.py:302 is the existing image-slot test).
+        from hal0.slots.state import is_dispatchable_state
+
+        judged = sorted(
+            {
+                int(s["port"])
+                for s in slots
+                if isinstance(s, dict)
+                and s.get("port")
+                and is_dispatchable_state(s.get("state") or "")
+                and s.get("type") != "image"
+                and str(s.get("provider") or "").lower() != "comfyui"
+            }
+        )
+        if not judged:
+            return Check(
+                "port_dnat",
+                label,
+                _PASS,
+                "no loaded netavark-published slots (netavark iptables backend)",
+            )
+        missing = [p for p in judged if p not in published]
+        if missing:
+            return Check(
+                "port_dnat",
+                label,
+                _WARN,
+                f"no DNAT rule for port(s) {', '.join(map(str, missing))} "
+                "(netavark iptables backend)",
+            )
+        return Check(
+            "port_dnat",
+            label,
+            _PASS,
+            f"{len(judged)} loaded port(s) have a DNAT rule (netavark iptables backend; "
+            "stale-rule audit needs the nft table)",
+        )
 
     verdicts = (audit or netavark.audit_ports)(ports, rules, live)
     corrupt = [v for v in verdicts if v.corrupt]
