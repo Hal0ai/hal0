@@ -768,6 +768,38 @@ def test_print_convergence_reports_a_nonfatal_pass_warning(
     assert "Migration incomplete" not in out
 
 
+def test_print_convergence_names_a_slot_file_still_carrying_tuning_keys(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from hal0.slot_view import CONVERSION_FIX
+
+    converged = uc._print_convergence(
+        {
+            "post_activation_migrations": {
+                "ok": True,
+                "from": 1,
+                "to": 1,
+                "error": None,
+                "conversion_blockers": [
+                    {
+                        "target": "agent.toml",
+                        "slot": "agent",
+                        "reason": f"this slot file still carries [model].ctx_size — fix: {CONVERSION_FIX}",
+                    }
+                ],
+            },
+            # A parent that predates the check says converged; the report decides.
+            "converged": True,
+        }
+    )
+    out = capsys.readouterr().out
+    assert converged is False
+    assert "agent.toml" in out
+    assert "[model].ctx_size" in out  # not eaten as Rich markup
+    assert CONVERSION_FIX in out
+    assert "fully converged" not in out
+
+
 # ── _poll_job across the restart window (#1540) ───────────────────────────────
 #
 # These are the first tests to exercise _poll_job itself. Every pre-existing

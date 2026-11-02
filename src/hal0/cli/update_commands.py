@@ -363,6 +363,16 @@ def _print_convergence(convergence: dict | None) -> bool:
             )
         )
 
+    # ADR-0029: a slot file still carrying tuning keys refuses to launch until an
+    # operator moves them onto a profile. ``reason`` carries the fix.
+    blockers = [b for b in post_migrations.get("conversion_blockers") or [] if isinstance(b, dict)]
+    for blocker in blockers:
+        console.print(
+            f"[yellow]![/yellow] slot file {escape(str(blocker.get('target') or '?'))} will not "
+            f"launch: {escape(str(blocker.get('reason') or 'it still carries tuning keys'))}",
+            soft_wrap=True,
+        )
+
     # ADR-0028 §7 / #2694: a slot whose model the runner-system conversion
     # unassigned. Not a blocker (the conversion did what it must), but the
     # operator must hear it here, not only in the journal: the running
@@ -406,7 +416,7 @@ def _print_convergence(convergence: dict | None) -> bool:
             soft_wrap=True,
         )
 
-    converged = bool(convergence.get("converged"))
+    converged = bool(convergence.get("converged")) and not blockers
     if converged:
         console.print("[dim]on-disk config is fully converged.[/dim]")
     return converged

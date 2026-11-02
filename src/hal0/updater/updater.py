@@ -1843,10 +1843,16 @@ class PostActivationResult(tuple):
     not fetch (#2739, ADR-0030): ``{"model", "outcome", "path", "remedy",
     "error"?}``. Not a blocker either: a failed fetch leaves the slot's spawn
     preflight naming the same remedy.
+    ``conversion_blockers`` lists every slot file that still carries tuning
+    keys (ADR-0029): ``{"target", "slot", "reason"}``. These block: such a slot
+    refuses to launch until an operator moves the keys onto a profile, so the
+    install is not converged. The name is the one 1.7.x reads from this envelope,
+    so the update that crosses the removal of the conversion reports them too.
     """
 
     unassigned_models: list[dict[str, str]]
     model_bundles: list[dict[str, str]]
+    conversion_blockers: list[dict[str, str]]
 
     def __new__(
         cls,
@@ -1854,9 +1860,11 @@ class PostActivationResult(tuple):
         target: int,
         unassigned_models: list[dict[str, str]] | None = None,
         model_bundles: list[dict[str, str]] | None = None,
+        conversion_blockers: list[dict[str, str]] | None = None,
     ) -> PostActivationResult:
         obj = super().__new__(cls, (source, target))
         obj.model_bundles = list(model_bundles or [])
+        obj.conversion_blockers = list(conversion_blockers or [])
         obj.unassigned_models = list(unassigned_models or [])
         return obj
 
@@ -1965,7 +1973,8 @@ def run_post_activation_migrations(
     Returns the ``(source, target)`` schema-version tuple for breadcrumb
     logging, the same shape ``commit()`` already returned, as a
     :class:`PostActivationResult` whose ``unassigned_models`` lists every
-    slot the runner-system conversion unassigned a model from.
+    slot the runner-system conversion unassigned a model from, and whose
+    ``conversion_blockers`` lists every slot file still carrying tuning keys.
     """
     # The runner-system conversion (ADR-0028) runs FIRST and is fatal: it
     # rewrites raw TOML before anything validates config, because a removed
@@ -2072,6 +2081,23 @@ def run_post_activation_migrations(
         # genuine bug, and the box keeps its current working components
         # either way — never a reason to fail an update.
 
+    # ADR-0029: nothing converts a slot file any more, so a file still carrying
+    # tuning keys stays that way and the slot refuses to launch. Say so here:
+    # this is the last step that can stop `hal0 update` calling the box converged.
+    blockers: list[dict[str, str]] = []
+    try:
+        from hal0.slot_view import unconverted_slot_files
+
+        blockers = unconverted_slot_files()
+    except Exception as exc:
+        log.warning("updater.unconverted_slot_scan_failed", job_id=job_id, error=str(exc))
+    if blockers:
+        log.warning(
+            "updater.unconverted_slots",
+            job_id=job_id,
+            slots=[b["target"] for b in blockers],
+        )
+
     return PostActivationResult(
         migration_info[0],
         migration_info[1],
@@ -2079,6 +2105,7 @@ def run_post_activation_migrations(
         # ``backup``, so a slot that lost its model was told only to the journal.
         list(getattr(conversion, "unassigned", None) or []),
         model_bundles,
+        blockers,
     )
 
 
@@ -3725,7 +3752,7 @@ async def _run_post_activation_migrations_after_swap(
 
     Returns ``{"from": int, "to": int, "pass_warnings": list[str],
     "unassigned_models": list[dict],
-    "model_bundles": list[dict]}``
+    "model_bundles": list[dict], "conversion_blockers": list[dict]}``
     (each list is empty when the incoming release predates it).
     """
     payload = json.dumps(
@@ -3739,7 +3766,8 @@ async def _run_post_activation_migrations_after_swap(
         + repr(_MIGRATION_RESULT_KEY)
         + ": {'from': result[0], 'to': result[1],"
         " 'unassigned_models': list(getattr(result, 'unassigned_models', None) or []),"
-        " 'model_bundles': list(getattr(result, 'model_bundles', None) or [])}})"
+        " 'model_bundles': list(getattr(result, 'model_bundles', None) or []),"
+        " 'conversion_blockers': list(getattr(result, 'conversion_blockers', None) or [])}})"
         " + chr(10))\n"
     )
     script = (
@@ -3823,6 +3851,7 @@ async def _run_post_activation_migrations_after_swap(
                     "pass_warnings": pass_warnings,
                     "unassigned_models": list(result.get("unassigned_models") or []),
                     "model_bundles": list(result.get("model_bundles") or []),
+                    "conversion_blockers": list(result.get("conversion_blockers") or []),
                 }
         raise UpdateError(
             "post-activation migrations subprocess exited 0 but produced no result marker",
@@ -4057,6 +4086,7 @@ class Updater:
         pass_warnings: list[str] = []
         unassigned: list[dict[str, str]] = []
         model_bundles: list[dict[str, str]] = []
+        blockers: list[dict[str, str]] = []
         try:
             migration_result = await _run_post_activation_migrations_after_swap(
                 manifest.min_data_version,
@@ -4066,6 +4096,7 @@ class Updater:
             pass_warnings = list(migration_result.get("pass_warnings") or [])
             unassigned = list(migration_result.get("unassigned_models") or [])
             model_bundles = list(migration_result.get("model_bundles") or [])
+            blockers = list(migration_result.get("conversion_blockers") or [])
         except Exception as exc:
             # LOUD, not silent (#1960's failure-mode decision): the tree is
             # already active by this point — the symlink swap and venv re-pip
@@ -4140,8 +4171,11 @@ class Updater:
                 # #2739: engine bundles the upgrade fetched (kokoro-v1), or
                 # could not fetch, with the remedy. Not a blocker.
                 "model_bundles": model_bundles,
+                # ADR-0029: slot files still carrying tuning keys. Each refuses
+                # to launch until it is fixed, so the install is not converged.
+                "conversion_blockers": blockers,
             },
-            "converged": migrations_error is None,
+            "converged": migrations_error is None and not blockers,
         }
         log.info(
             "updater.convergence",
@@ -4149,6 +4183,7 @@ class Updater:
             converged=convergence["converged"],
             post_activation_migrations_ok=migrations_error is None,
             post_activation_migrations_pass_warnings=pass_warnings,
+            conversion_blockers=[b.get("target") for b in blockers if isinstance(b, dict)],
             unassigned_models=[u.get("slot") for u in unassigned if isinstance(u, dict)],
             model_bundles=[
                 f"{b.get('model')}:{b.get('outcome')}" for b in model_bundles if isinstance(b, dict)

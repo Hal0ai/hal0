@@ -46,6 +46,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import tomllib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -77,6 +78,7 @@ __all__ = [
     "resolve_tune_effective",
     "serialize_slot",
     "synthesize_upstream_entries",
+    "unconverted_slot_files",
 ]
 
 
@@ -425,6 +427,36 @@ def conversion_blocked(cfg: Any) -> dict[str, Any] | None:
         "reason": f"this slot file still carries {', '.join(found)} (not converted)",
         "fix": CONVERSION_FIX,
     }
+
+
+def unconverted_slot_files() -> list[dict[str, str]]:
+    """Every slot file on disk that still carries tuning keys (ADR-0029).
+
+    ``{"target": file name, "slot": display name, "reason": what and the fix}``,
+    sorted by file. Reads the raw TOML because a typed load refuses these files.
+    A file that does not parse is skipped: it has its own load error, and nothing
+    here can say whether it carries a tune.
+    """
+    from hal0.config import paths
+    from hal0.slots.layout import read_slot_display_name
+
+    found: list[dict[str, str]] = []
+    for path in sorted(paths.slots_config_dir().glob("*.toml")):
+        try:
+            raw = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+            continue
+        blocked = conversion_blocked(raw)
+        if blocked is None:
+            continue
+        found.append(
+            {
+                "target": path.name,
+                "slot": read_slot_display_name(path) or path.stem,
+                "reason": f"{blocked['reason']} — fix: {blocked['fix']}",
+            }
+        )
+    return found
 
 
 def resolve_ctx_effective(cfg: Any, model_registry: Any) -> tuple[int | None, str | None]:

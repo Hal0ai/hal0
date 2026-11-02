@@ -70,6 +70,7 @@ def test_success_parses_the_result_envelope(monkeypatch: pytest.MonkeyPatch) -> 
         "pass_warnings": [],
         "unassigned_models": [],
         "model_bundles": [],
+        "conversion_blockers": [],
     }
 
 
@@ -150,6 +151,7 @@ def test_child_script_emits_the_result(
         "to": 3,
         "unassigned_models": unassigned,
         "model_bundles": [],
+        "conversion_blockers": [],
     }
 
 
@@ -171,6 +173,7 @@ def test_result_envelope_survives_interleaved_log_noise(monkeypatch: pytest.Monk
         "pass_warnings": [],
         "unassigned_models": [],
         "model_bundles": [],
+        "conversion_blockers": [],
     }
 
 
@@ -436,3 +439,42 @@ def test_skips_the_catalogue_sync_pass(monkeypatch: pytest.MonkeyPatch) -> None:
     assert seen["rerender"] is True
     # ...and never downloads a model bundle (#2739): it only logs the remedy.
     assert seen["fetch_model_bundles"] is False
+
+
+def test_child_script_emits_the_conversion_blockers(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The envelope is an ABI between releases: a slot file still carrying tuning
+    keys has to get from the incoming tree's child to the parent, whichever
+    release the parent is."""
+    import structlog
+
+    captured: dict[str, Any] = {}
+
+    def _fake_run(cmd, *a, **k):
+        captured["cmd"] = list(cmd)
+        return _Completed(stdout=_envelope(1, 1))
+
+    monkeypatch.setattr(updater_module.subprocess, "run", _fake_run)
+    asyncio.run(_run_post_activation_migrations_after_swap(1, job_id="j"))
+    script, payload = captured["cmd"][2], captured["cmd"][3]
+
+    blockers = [{"target": "agent.toml", "slot": "agent", "reason": "r"}]
+    monkeypatch.setattr(
+        updater_module,
+        "run_post_activation_migrations",
+        lambda *_a, **_k: updater_module.PostActivationResult(1, 1, None, None, blockers),
+    )
+    monkeypatch.setattr(structlog, "configure", lambda **_k: None)
+    monkeypatch.setattr("sys.argv", ["-c", payload])
+    exec(script, {})  # the script under test is our own literal
+    line = capsys.readouterr().out.strip().splitlines()[-1]
+    emitted = json.loads(line)[updater_module._MIGRATION_RESULT_KEY]
+    assert emitted["conversion_blockers"] == blockers
+
+    def _parent_run(cmd, *a, **k):
+        return _Completed(stdout=line)
+
+    monkeypatch.setattr(updater_module.subprocess, "run", _parent_run)
+    relayed = asyncio.run(_run_post_activation_migrations_after_swap(1, job_id="j"))
+    assert relayed["conversion_blockers"] == blockers

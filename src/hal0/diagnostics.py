@@ -129,6 +129,7 @@ DIAGNOSIS_IDS: frozenset[str] = frozenset(
         "HAL0-PROFILE-REF-DANGLES",
         "HAL0-PROFILE-IMAGE-MISSING",
         "HAL0-HALOGEN-WEIGHTS-INCOMPLETE",
+        "HAL0-SLOT-UNCONVERTED",
         # doctor perms
         "HAL0-PERMS-HERMES-DRIFT",
         "HAL0-PERMS-TREE-NOT-SHARED",

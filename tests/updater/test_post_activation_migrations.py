@@ -387,3 +387,23 @@ def test_a_converged_install_has_no_unassigned_models(
     _stub_every_pass: dict[str, list[Any]],
 ) -> None:
     assert run_post_activation_migrations().unassigned_models == []
+
+
+def test_a_slot_file_carrying_tuning_keys_is_reported_as_a_blocker(
+    _stub_every_pass: dict[str, list[Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entry = {"target": "agent.toml", "slot": "agent", "reason": "r"}
+    monkeypatch.setattr("hal0.slot_view.unconverted_slot_files", lambda: [entry])
+
+    assert run_post_activation_migrations().conversion_blockers == [entry]
+
+
+def test_a_failed_slot_scan_never_fails_the_migrations(
+    _stub_every_pass: dict[str, list[Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _boom() -> list[dict[str, str]]:
+        raise RuntimeError("scan failed")
+
+    monkeypatch.setattr("hal0.slot_view.unconverted_slot_files", _boom)
+
+    assert run_post_activation_migrations().conversion_blockers == []

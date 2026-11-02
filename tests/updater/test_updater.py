@@ -1735,6 +1735,7 @@ def test_commit_runs_post_activation_migrations_after_the_swap(
         "pass_warnings": [],
         "unassigned_models": [],
         "model_bundles": [],
+        "conversion_blockers": [],
     }
     assert result["convergence"]["converged"] is True
 
@@ -1768,6 +1769,37 @@ def test_commit_carries_the_unassigned_models_without_failing_convergence(
     post = result["convergence"]["post_activation_migrations"]
     assert post["unassigned_models"] == [entry]
     assert result["convergence"]["converged"] is True
+
+
+def test_commit_is_not_converged_while_a_slot_file_carries_tuning_keys(
+    synthetic_release: dict[str, Any], cosign_skip: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0029: such a slot refuses to launch, so the update must not call the
+    install converged."""
+    entry = {"target": "agent.toml", "slot": "agent", "reason": "still carries ctx_size"}
+
+    class _Completed:
+        def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def _fake_run(cmd, *a, **k):
+        if any("run_post_activation_migrations" in part for part in list(cmd)):
+            payload = {"from": 1, "to": 1, "conversion_blockers": [entry]}
+            envelope = json.dumps({updater_module._MIGRATION_RESULT_KEY: payload})
+            return _Completed(stdout=envelope)
+        return _Completed()
+
+    monkeypatch.setattr(updater_module, "_is_editable_install", lambda: False)
+    monkeypatch.setattr("hal0.updater.updater.subprocess.run", _fake_run)
+
+    result = asyncio.run(Updater().apply())
+
+    post = result["convergence"]["post_activation_migrations"]
+    assert post["conversion_blockers"] == [entry]
+    assert post["ok"] is True
+    assert result["convergence"]["converged"] is False
 
 
 def test_commit_carries_a_failed_model_bundle_pull_without_failing_convergence(

@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import pytest
 
+from hal0.config import paths
 from hal0.errors import UnprocessableEntity
 from hal0.providers.container import _refuse_unconverted
-from hal0.slot_view import CONVERSION_FIX, conversion_blocked
+from hal0.slot_view import CONVERSION_FIX, conversion_blocked, unconverted_slot_files
 
 _BLOCKED = {
     "name": "agent",
@@ -52,3 +53,23 @@ def test_the_typed_load_refuses_and_says_what_to_do() -> None:
         SlotConfig.model_validate({**_BLOCKED, "type": "llm"})
     assert "delete them from the slot file" in str(exc.value)
     assert "profile migrate" not in str(exc.value)
+
+
+def test_the_scan_names_each_slot_file_with_the_fix() -> None:
+    root = paths.slots_config_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "143.toml").write_text(
+        '[slot]\nid = 143\nname = "agent"\nport = 8082\n[model]\ncontext_size = 8192\n'
+    )
+    (root / "clean.toml").write_text('name = "clean"\nport = 8083\nprofile = "chat"\n')
+    (root / "broken.toml").write_text("this is = = not toml")
+
+    found = unconverted_slot_files()
+
+    assert [(f["target"], f["slot"]) for f in found] == [("143.toml", "agent")]
+    assert "[model].context_size" in found[0]["reason"]
+    assert CONVERSION_FIX in found[0]["reason"]
+
+
+def test_the_scan_is_empty_without_a_slots_directory() -> None:
+    assert unconverted_slot_files() == []
