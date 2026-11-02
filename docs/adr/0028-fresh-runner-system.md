@@ -5,7 +5,7 @@
 Accepted (2026-10-11). Supersedes the runner parts of ADR-0025 (its default
 model and agent-lane decisions stand, its fork-freezing and migration plan do
 not). Amends ADR-0006 decision 3 and ADR-0027 decisions 1, 2 and 4. Amended by
-ADR-0046: `halogen` is a second external-image runner beside `cuda` (decision 1),
+ADR-0047: `halogen` is a second external-image runner beside `cuda` (decision 1),
 and an external optional row may be gated by its own gate file instead of a
 recipe (decision 4).
 

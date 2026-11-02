@@ -1,4 +1,4 @@
-# ADR-0046: halogen is an external-image optional runner for Flash-Next
+# ADR-0047: halogen is an external-image optional runner for Flash-Next
 
 ## Status
 
