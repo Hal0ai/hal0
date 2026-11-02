@@ -21,6 +21,15 @@ describe('componentForService', () => {
 })
 
 describe('componentCell', () => {
+  it.each([
+    ['update-available', '1 → 2 available'],
+    ['newer-than-pin', '1 newer than pin'],
+    ['unknown', '1 — pin unknown'],
+  ])('Pi advisory status %s is muted and never pending', (status, label) => {
+    const row = { id: 'pi', service_id: null, installed: '1', pinned: '2', status }
+    expect(componentCell(row)).toEqual({ label, tone: 'muted' })
+    expect(pendingCount([row])).toBe(0)
+  })
   it('converged renders version + ok tone', () => {
     expect(componentCell(rows[1])).toEqual({ label: '0.9.2 ✓', tone: 'ok' })
   })

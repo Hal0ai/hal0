@@ -18,21 +18,19 @@ from typing import Any
 UPDATE_COMMAND = "sudo hal0 update component pi"
 
 
-def _version_label(pi: str | None, adapter: str | None) -> str:
-    return f"{pi or 'none'} (adapter {adapter or 'none'})"
+def _version_label(versions: dict[str, str | None]) -> str:
+    return f"{versions.get('pi') or 'none'} (adapter {versions.get('adapter') or 'none'})"
 
 
-def pinned_pi() -> str:
-    """``<pi> (adapter <adapter>)`` from the installer script; raises when unreadable."""
+def _pins() -> dict[str, str]:
     from hal0.agents.manager import installer_script_path
     from hal0.agents.overview import pi_pins
 
-    pins = pi_pins(installer_script_path("pi"))
-    return _version_label(pins["pi"], pins["adapter"])
+    return pi_pins(installer_script_path("pi"))
 
 
-def installed_pi() -> str | None:
-    """The installed versions in :func:`pinned_pi`'s shape, or ``None`` when not installed.
+def _installed_versions() -> dict[str, str | None] | None:
+    """Pi and adapter versions, or ``None`` when Pi is not installed.
 
     Pi counts as installed when the driver's profile marker exists and ``pi``
     is an npm install on PATH, the same two facts the daemon's Agents card reads.
@@ -43,26 +41,48 @@ def installed_pi() -> str | None:
     if not PiDriver()._profile_marker_path().exists():
         return None
     binary = shutil.which("pi")
-    versions = pi_installed_versions(Path(binary) if binary else None)
+    return pi_installed_versions(Path(binary) if binary else None)
+
+
+def pinned_pi() -> str:
+    """``<pi> (adapter <adapter>)`` from the installer script; raises when unreadable."""
+    return _version_label(_pins())
+
+
+def installed_pi() -> str | None:
+    """The installed versions in :func:`pinned_pi`'s shape, or ``None`` when not installed."""
+    versions = _installed_versions()
+    return _version_label(versions) if versions is not None else None
+
+
+def pin_state() -> tuple[str, str | None]:
+    """``(status, note)`` of Pi against its pin.
+
+    Advisory: none of these statuses counts as pending. A pending row exits
+    `hal0 update` with 2 because that pass should have cleared it, and nothing
+    in the pass can re-pin Pi, so a pin bump would otherwise fail every
+    successful update. A Pi newer than the pin (``pi update`` exists) gets no
+    command to run, because the command would downgrade it.
+    """
+    from hal0.agents.overview import pi_update_available
+
+    versions = _installed_versions()
     if versions is None:
-        return None
-    return _version_label(versions.get("pi"), versions.get("adapter"))
+        return "not-installed", None
+    try:
+        pins = _pins()
+    except (OSError, ValueError) as exc:
+        return "unknown", f"cannot read pi's pin: {exc}"
+    if pi_update_available(versions, pins):
+        return "update-available", f"behind its pin; run '{UPDATE_COMMAND}' to update it"
+    if versions == pins:
+        return "converged", None
+    return "newer-than-pin", "newer than the version this hal0 release pins; nothing to do"
 
 
 def converge_pi(*, job_id: str | None = None, apply: bool = True) -> dict[str, Any]:
     """Status dict for Pi; read-only whatever ``apply`` says (see the module docstring)."""
-    installed = installed_pi()
-    if installed is None:
-        return {"status": "skipped", "reason": "pi not installed"}
-    try:
-        pinned = pinned_pi()
-    except (OSError, ValueError) as exc:
-        return {"status": "skipped", "installed": installed, "reason": str(exc)}
-    if installed == pinned:
-        return {"status": "converged", "installed": installed, "pinned": pinned}
-    return {
-        "status": "stale",
-        "installed": installed,
-        "pinned": pinned,
-        "remedy": f"run '{UPDATE_COMMAND}'",
-    }
+    status, note = pin_state()
+    if status in ("not-installed", "unknown"):
+        return {"status": "skipped", "reason": note or "pi not installed"}
+    return {"status": "stale" if status == "update-available" else status}

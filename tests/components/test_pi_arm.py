@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from hal0.agents.pi_coder import PiDriver
+from hal0.cli.update_commands import _COMPONENT_PENDING
 from hal0.components import pi_arm, status
 from hal0.components.registry import component_by_id
 
@@ -66,8 +67,13 @@ def test_behind_the_pin_reports_and_never_touches_the_driver(apply: bool) -> Non
         result = pi_arm.converge_pi(job_id="j", apply=apply)
     upgrade.assert_not_called()
     assert result["status"] == "stale"
-    assert result["installed"] == "1.9.0 (adapter none)"
-    assert result["remedy"] == "run 'sudo hal0 update component pi'"
+
+
+@pytest.mark.usefixtures("marker")
+def test_newer_than_the_pin_is_not_stale() -> None:
+    a, b, c = _on_box("2.1.0", "1.0.0")
+    with a, b, c:
+        assert pi_arm.converge_pi()["status"] == "newer-than-pin"
 
 
 @pytest.mark.usefixtures("marker")
@@ -78,13 +84,51 @@ def test_unreadable_pin_is_skipped_not_a_sticky_failure() -> None:
     assert result["status"] == "skipped" and "no PI_PKG" in result["reason"]
 
 
+def _row() -> tuple[dict, int]:
+    snap = status.component_status_snapshot()
+    return next(r for r in snap["components"] if r["id"] == "pi"), snap["pending"]
+
+
 @pytest.mark.usefixtures("marker")
-def test_status_row_behind_the_pin_is_pending() -> None:
-    a, b, c = _on_box("1.9.0", "1.0.0")
+@pytest.mark.parametrize(
+    ("pi", "adapter", "expected", "note"),
+    [
+        ("2.0.0", "1.0.0", "converged", None),
+        ("1.9.0", "1.0.0", "update-available", "sudo hal0 update component pi"),
+        ("2.0.0", None, "update-available", "sudo hal0 update component pi"),
+        ("2.1.0", "1.0.0", "newer-than-pin", "nothing to do"),
+    ],
+)
+def test_status_row_is_advisory(pi: str, adapter: str | None, expected: str, note: str | None):
+    a, b, c = _on_box(pi, adapter)
     with a, b, c:
-        row = next(r for r in status.component_status_snapshot()["components"] if r["id"] == "pi")
-    assert row["status"] == "pending"
+        row, pending = _row()
+    assert row["status"] == expected
+    assert pending == 0
+    assert row["remedy"] is None
     assert row["pinned"] == "2.0.0 (adapter 1.0.0)"
+    assert (row["note"] is None) if note is None else (note in row["note"])
+    assert expected not in status._PENDING_STATUSES
+    assert expected not in _COMPONENT_PENDING
+
+
+@pytest.mark.usefixtures("marker")
+def test_newer_row_offers_no_command() -> None:
+    a, b, c = _on_box("2.1.0", "1.0.0")
+    with a, b, c:
+        row, _ = _row()
+    assert "hal0 update component" not in row["note"]
+
+
+@pytest.mark.usefixtures("marker")
+def test_unreadable_pin_row_is_unknown_and_not_pending() -> None:
+    a, b, _ = _on_box("2.0.0", "1.0.0")
+    with a, b, patch("hal0.agents.overview.pi_pins", side_effect=ValueError("no PI_PKG")):
+        row, pending = _row()
+    assert row["status"] == "unknown" and row["pinned"] == "unknown"
+    assert pending == 0
+    assert "unknown" not in status._PENDING_STATUSES
+    assert "unknown" not in _COMPONENT_PENDING
 
 
 def test_status_row_without_pi_is_not_installed_and_not_pending() -> None:

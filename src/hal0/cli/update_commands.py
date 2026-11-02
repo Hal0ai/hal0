@@ -1035,8 +1035,9 @@ def update(
 # stuck.
 
 #: Component statuses that mean "not converged yet" — everything else
-#: (currently just "converged", plus the openwebui-only "override" and
-#: "not-installed") counts as settled for the purposes of the exit code.
+#: (currently just "converged", plus the openwebui-only "override",
+#: "not-installed" and pi's advisory statuses) counts as settled for the
+#: purposes of the exit code.
 _COMPONENT_PENDING = (
     "pending",
     "stale",
@@ -1290,7 +1291,6 @@ def _update_pi() -> None:
     except AgentError as exc:
         die(f"pi update failed: {exc}")
         return
-    # Replaces the remedy the post-update pass recorded while pi was behind.
     record_component_result("pi", converge_pi())
     if result.get("hindsight_alias_added"):
         console.print("Hindsight bank alias added to coding-agent.json")

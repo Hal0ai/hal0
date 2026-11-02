@@ -1480,7 +1480,9 @@ def test_cli_banner_reports_server_side_restart_and_does_not_double_restart(
 # ── ADR-0029: profile-conversion blockers after an update ──────────────────────
 
 
-def _run_update_with_convergence(monkeypatch: pytest.MonkeyPatch, convergence: dict) -> object:
+def _run_update_with_convergence(
+    monkeypatch: pytest.MonkeyPatch, convergence: dict, components: list[dict] | None = None
+) -> object:
     monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
     monkeypatch.setattr(uc, "_interactive", lambda: False)
     monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: False)
@@ -1489,7 +1491,7 @@ def _run_update_with_convergence(monkeypatch: pytest.MonkeyPatch, convergence: d
         if path == "/api/updates/slot-drift":
             return {"count": 0, "slots": []}
         if path == "/api/updates/components":
-            return {"components": [], "pending": 0}
+            return {"components": components or [], "pending": 0}
         return {
             "current": "0.0.0",
             "latest": "9.9.9",
@@ -1882,3 +1884,45 @@ def test_update_status_prints_a_component_note_under_the_table(
     flat = " ".join(result.output.split())
     assert "hermes: Hermes config keys applied; restart hal0-agent@hermes" in flat
     assert flat.index("Hermes config keys applied") > flat.index("Components")
+
+
+# ── #2991: Pi's row is advisory, because `hal0 update` cannot re-pin it ───────
+
+_PI_ADVISORY = ["update-available", "newer-than-pin", "unknown"]
+
+
+def _pi_row(status: str) -> dict:
+    return _component_row(id="pi", name="Pi", status=status, note=f"pi note {status}")
+
+
+@pytest.mark.parametrize("status", _PI_ADVISORY)
+def test_update_status_exits_0_on_a_pi_advisory_row(
+    monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+
+    def fake_get(path: str, **kwargs: object) -> dict:
+        if path == "/api/updates/components":
+            return {"components": [_pi_row(status)], "pending": 0}
+        return {
+            "current": "1.0.0",
+            "latest": "1.0.0",
+            "channel": "stable",
+            "update_available": False,
+            "manifest": {},
+        }
+
+    monkeypatch.setattr(uc, "api_get", fake_get)
+    result = runner.invoke(app, ["update", "status"])
+    assert result.exit_code == 0, result.output
+    assert f"pi note {status}" in result.output
+
+
+@pytest.mark.parametrize("status", _PI_ADVISORY)
+def test_update_exits_0_on_a_pi_advisory_row(monkeypatch: pytest.MonkeyPatch, status: str) -> None:
+    result = _run_update_with_convergence(
+        monkeypatch, {"converged": True}, components=[_pi_row(status)]
+    )
+    assert result.exit_code == 0, result.output
+    assert f"pi note {status}" in result.output
+    assert "update applied." in result.output
