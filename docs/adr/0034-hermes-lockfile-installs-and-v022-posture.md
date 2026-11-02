@@ -314,6 +314,28 @@ board executor harvests are unchanged at NEW.
      only the sources above, and rewrites one unit from a template in a
      root-owned tree. The agent is already treated as root-equivalent on the
      box (ADR-0002 Option C); nothing here narrows or widens that.
+   - **Amendment (2026-11-02, #3211): `hal0 update` also refreshes
+     `hal0-podman-forward.service` through a new `refresh-podman-forward`
+     verb.** That unit was written only by `install.sh`, so an upgraded box kept
+     the one from its first install, and a box that gained Docker later never had
+     it enabled. The verb has the same route and shape as `refresh-api-unit`: it
+     takes **no arguments** (the wrapper refuses any), the sudoers grant does not
+     change, and it runs in a fresh root interpreter of the activated code from
+     `run_post_activation_migrations`, so it reaches the first update that
+     introduces it. A rollback does not run it and leaves the newer unit in
+     place.
+   - As root the verb reads the unit from the tree `current` names, which must
+     pass `assert_trusted_release_dir`, and the installed unit. It writes
+     `root:root 0644` atomically when the bytes differ, runs `systemctl
+     daemon-reload` (a failed reload puts the previous file back), then
+     `systemctl reenable` and `systemctl restart --no-block`. Unlike
+     `refresh-api-unit` it creates the unit on a box that has none, and it
+     changes firewall state: on a box with Docker the run inserts `podman0`
+     `ACCEPT` rules at the top of `DOCKER-USER`, ahead of operator rules there.
+     **A masked unit is the operator's opt-out:** when the unit file is a link to
+     `/dev/null` the verb logs a hold and changes nothing. Root-equivalence is as
+     above: the verb takes no input and adds no capability beyond what the
+     `hal0` account already has through `hal0-update`.
 7. **New: hal0 turns session pruning off.** The config overlay writes
    `sessions.auto_prune: false` at the pin bump, so an upgrade deletes no
    session history. Retention policy is a later decision with its own

@@ -208,6 +208,11 @@ case "${cmd}" in
     exec "${PY}" -I -m hal0.updater.privileged refresh-api-unit
     ;;
 
+  refresh-podman-forward)     # no arguments: refresh hal0-podman-forward.service from current
+    [[ $# -eq 0 ]] || die "refresh-podman-forward takes no arguments"
+    exec "${PY}" -I -m hal0.updater.privileged refresh-podman-forward
+    ;;
+
   discard)                    # discard <hal0-VERSION>   (rm -rf semantics)
     dir_name="${1:-}"; validate_dir_name "${dir_name}"
     exec "${PY}" -I -m hal0.updater.privileged discard "${dir_name}"
@@ -225,6 +230,8 @@ usage: hal0-update <command> [args]
                                    linger on for hal0 (never starts a stopped unit)
   refresh-api-unit                 re-render hal0-api.service from the active release
                                    (daemon-reload only, never restarts it)
+  refresh-podman-forward           refresh + enable hal0-podman-forward.service from
+                                   the active release (leaves a masked unit alone)
 EOF
     ;;
 

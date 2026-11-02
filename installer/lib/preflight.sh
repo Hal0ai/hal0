@@ -1076,8 +1076,8 @@ preflight_podman_network_backend() {
 # podman-published port (e.g. OpenWebUI's 0.0.0.0:3001) are reachable from the
 # host itself but DROPped for every other host — a reverse proxy or LAN client
 # can't connect. The hal0-podman-forward.service unit closes the gap by adding
-# an ACCEPT for the podman0 bridge into DOCKER-USER; install.sh enables it when
-# docker is present. This check is purely advisory — it never fails (returns 0)
+# an ACCEPT for the podman0 bridge into DOCKER-USER on each Docker start; install.sh
+# and hal0 update enable it. This check is purely advisory — it never fails (returns 0)
 # and only runs its checks when BOTH runtimes are present (the conflict source).
 # It also needs root + iptables; under an unprivileged `hal0 doctor` the probes
 # quietly no-op.

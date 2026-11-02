@@ -290,6 +290,9 @@ _MIGRATION_PASS_LABELS: dict[str, str] = {
     "updater.components_converge_failed": "component convergence",
     "updater.retired_skills_prune_failed": "retired bundled-skill cleanup",
     "updater.kokoro_bundle_pull_failed": "kokoro-v1 bundle pull (run: hal0 model pull kokoro-v1)",
+    "updater.podman_forward_unit_refresh_failed": (
+        "hal0-podman-forward.service refresh (see journalctl -u hal0-api)"
+    ),
     "updater.api_unit_refresh_failed": "hal0-api.service refresh (see hal0 doctor all)",
     "components.hermes_gateway_regen_failed": (
         "hermes gateway unit regeneration (run: sudo hal0 agent install hermes)"

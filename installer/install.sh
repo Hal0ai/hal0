@@ -2030,9 +2030,9 @@ fi
 # podman<->Docker FORWARD reconciliation unit. Only meaningful when Docker is
 # co-installed with podman: Docker flips the iptables FORWARD policy to DROP and
 # clobbers the implicit ACCEPT podman relies on, which makes podman-published
-# ports (OpenWebUI :3001) unreachable off-host. Laid down unconditionally;
-# enabled below only when docker is present. The unit self-guards (no-op without
-# iptables/podman0/Docker), so shipping it on a docker-free box is harmless.
+# ports (OpenWebUI :3001) unreachable off-host. Laid down and enabled
+# unconditionally: docker.service pulls it in, so it never runs on a docker-free
+# box and takes effect by itself if Docker is installed later (#3211).
 PODMAN_FWD_UNIT_SRC="${REPO_ROOT}/packaging/systemd/hal0-podman-forward.service"
 PODMAN_FWD_UNIT_DST="${UNIT_DIR}/hal0-podman-forward.service"
 if [[ -f "${PODMAN_FWD_UNIT_SRC}" ]]; then
@@ -3439,7 +3439,7 @@ else
     hal0_migration_step "post-activation migrations" <<'PYEOF'
 from hal0.updater.updater import run_post_activation_migrations
 
-source, target = run_post_activation_migrations()
+source, target = run_post_activation_migrations(converge_podman_forward=False)
 if target != source:
     print(f"  hal0.toml schema migrated {source} -> {target}")
 else:
@@ -4138,12 +4138,19 @@ else
     # co-installed alongside podman: Docker sets iptables FORWARD policy to DROP
     # and rewrites the chain on every start, which drops external traffic to
     # podman-published ports (OpenWebUI :3001) — reachable from the host but not
-    # from a reverse proxy / LAN client. The hal0-podman-forward unit re-adds an
-    # ACCEPT for the podman0 bridge into DOCKER-USER at boot and on each docker
-    # restart. The unit self-guards, so enabling it is safe; we gate on docker
-    # actually being present to avoid shipping a firewall unit on podman-only boxes.
-    if [[ -f "${PODMAN_FWD_UNIT_DST}" ]] && command -v docker >/dev/null 2>&1; then
-        if systemctl enable --now hal0-podman-forward >/dev/null 2>&1; then
+    # from a reverse proxy / LAN client. The hal0-podman-forward unit adds an
+    # ACCEPT for the podman0 bridge to DOCKER-USER on each Docker start.
+    #
+    # Enabled with or without Docker (#3211): its only install target is
+    # docker.service, so on a podman-only box it stays inert until Docker shows
+    # up. reenable also clears the multi-user.target link older releases made.
+    # restart, not --now: --now is a no-op on a unit an older release left
+    # active, and the run here covers a Docker that is already up. --no-block so
+    # a pending Docker start job cannot hold the install. A masked unit fails
+    # reenable and stays masked: that is the operator's opt-out.
+    if [[ -f "${PODMAN_FWD_UNIT_DST}" ]]; then
+        if systemctl reenable hal0-podman-forward >/dev/null 2>&1 \
+            && systemctl restart --no-block hal0-podman-forward >/dev/null 2>&1; then
             info "hal0-podman-forward enabled (keeps podman ports reachable alongside Docker)"
         else
             warn "hal0-podman-forward did not enable; check 'journalctl -u hal0-podman-forward'"

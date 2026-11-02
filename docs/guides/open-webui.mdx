@@ -301,6 +301,41 @@ The MCP chip is lit when `[bridge].enabled` is on and a bridge client named
 container can reach hal0; the `openwebui_mcp` row in `hal0 doctor all` checks
 both.
 
+## Running next to Docker
+
+Open WebUI's port 3001 is published by podman, and Docker can set the kernel's
+`FORWARD` chain policy to `DROP`. That policy would leave port 3001 answering on
+the box itself but timing out from every other host on the LAN. The
+`hal0-podman-forward` unit prevents this: each time Docker starts, it adds an
+`ACCEPT` for the `podman0` bridge to Docker's `DOCKER-USER` chain. The installer
+enables it, and `hal0 update` refreshes and enables it after switching to the new
+release, then runs it once. It does nothing on a box without Docker.
+
+If port 3001 only answers locally, check the rules as root:
+
+```sh
+iptables -S FORWARD | head -1
+iptables -S DOCKER-USER | grep podman0
+```
+
+With `-P FORWARD DROP` and no `podman0` rules, run
+`systemctl restart hal0-podman-forward` and look at
+`journalctl -u hal0-podman-forward` if the rules still don't appear. A Docker
+installed from the snap has a different service name and doesn't trigger the
+unit, so run that restart after each Docker start.
+
+The rules go at the top of `DOCKER-USER`, so they take effect ahead of any rules
+of your own there and allow all traffic to and from `podman0`. If you filter that
+traffic yourself, opt out by masking the unit, which the installer and
+`hal0 update` both leave alone, and then remove the rules it added. A plain
+`systemctl disable` is not enough, because the next update enables the unit again.
+
+```sh
+systemctl mask hal0-podman-forward
+iptables -D DOCKER-USER -i podman0 -j ACCEPT
+iptables -D DOCKER-USER -o podman0 -j ACCEPT
+```
+
 ## When the env file re-renders
 
 `/etc/hal0/openwebui.env` re-renders automatically — you never edit it by
