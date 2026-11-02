@@ -1,10 +1,11 @@
 """installer/install.sh's interactive component checklist call site.
 
 The block is inline in install.sh, so it is sliced out by its banner and run
-under real bash with ``ui_component_picker`` stubbed (the real widget lives in
-installer/lib/ui.sh on a sibling branch). The stub records that it was called
-and the rows it was given, and answers from ``PICKER_ANSWER`` (``id=on|off|
-unavailable`` pairs; unlisted rows keep their default).
+under real bash with ``ui_component_picker`` stubbed. The stub records that it
+was called and the rows it was given, and answers from ``PICKER_ANSWER``
+(``id=on|off|unavailable`` pairs; unlisted rows keep their default). One test
+at the end runs the real widget from installer/lib/ui.sh through the same call
+site, with keystrokes read from a file via ``UI_TTY_IN``.
 """
 
 from __future__ import annotations
@@ -21,10 +22,20 @@ _INSTALL_SH = Path(__file__).resolve().parents[2] / "installer" / "install.sh"
 _START = "# ── Components: interactive checklist ──"
 _END = "# ── Hermes terminal tool: explicit opt-in, DEFAULTS OFF"
 
+
+def _interactive_slice() -> str:
+    """The real ``_interactive`` from install.sh, with only the tty probe swapped for $TTY."""
+    text = _INSTALL_SH.read_text(encoding="utf-8")
+    head = text.index("_interactive() {")
+    fn = text[head : text.index("\n}\n", head) + 3]
+    probe = "[[ -t 0 ]] && [[ -r /dev/tty ]]"
+    assert probe in fn
+    return fn.replace(probe, '[[ "${TTY:-0}" == "1" ]]') + "\n"
+
+
 _STUBS = r"""
-info() { :; }
+info() { printf 'INFO: %s\n' "$*"; }
 warn() { printf 'WARN: %s\n' "$*"; }
-_interactive() { [[ "${TTY:-0}" == "1" ]]; }
 ui_component_picker() {
     local -n _rows="$1" _res="$2"
     : >"$PICKER_CALLED"
@@ -95,6 +106,7 @@ def run_block(tmp_path: Path, block: str):
         script = tmp_path / "block.sh"
         script.write_text(
             "set -euo pipefail\n"
+            + _interactive_slice()
             + _STUBS
             + f'VENV_DIR="{tmp_path / "venv"}"\n'
             + 'DEV_MODE="${DEV_MODE:-0}"; NO_START="${NO_START:-0}"\n'
@@ -139,9 +151,11 @@ def run_block(tmp_path: Path, block: str):
 
 
 def test_non_interactive_never_calls_picker(run_block) -> None:
-    r = run_block(env={"HAL0_NONINTERACTIVE": "1"})
+    # tty=True: only HAL0_NONINTERACTIVE=1 may be what keeps the picker away.
+    assert run_block(tty=True).picker_called is True
+    r = run_block(env={"HAL0_NONINTERACTIVE": "1"}, tty=True)
     assert r.picker_called is False and r.env == {"HAL0_NONINTERACTIVE": "1"}
-    r = run_block(env={"HAL0_NONINTERACTIVE": "1", "HAL0_INSTALL_PI": "1"})
+    r = run_block(env={"HAL0_NONINTERACTIVE": "1", "HAL0_INSTALL_PI": "1"}, tty=True)
     assert r.env == {"HAL0_NONINTERACTIVE": "1", "HAL0_INSTALL_PI": "1"}
 
 
@@ -221,7 +235,7 @@ def test_headless_states_come_from_environment(run_block) -> None:
         ({"HAL0_SKIP_HERMES": "1"}, "hermes"),
         ({"HAL0_SKIP_HINDSIGHT": "1"}, "hindsight"),
         ({"HAL0_SKIP_BRAIN_MODEL": "1"}, "brain"),
-        ({"HAL0_SKIP_PI": "1"}, "pi"),
+        ({"HAL0_SKIP_PI": "1", "HAL0_INSTALL_PI": "1"}, "pi"),
     ],
 )
 def test_env_skip_knobs_make_row_default_off(run_block, env, row) -> None:
@@ -448,3 +462,141 @@ def test_pi_non_numeric_install_knob_does_not_abort(tmp_path: Path) -> None:
     assert "unbound variable" not in proc.stderr
     assert "INSTALL" not in proc.stdout
     assert proc.stdout.count("INFO: pi (terminal coding agent) not installed") == 1
+
+
+# ── The picker answer wins over env knobs; the chosen set is logged ─────────
+
+
+@pytest.mark.parametrize(
+    ("env", "row", "gone"),
+    [
+        ({"HAL0_SKIP_OPENWEBUI": "1"}, "openwebui", ["HAL0_SKIP_OPENWEBUI"]),
+        ({"HAL0_IMAGE_MODELS": "none"}, "comfyui", ["HAL0_IMAGE_MODELS"]),
+        ({"HAL0_IMAGE_MODELS": "0"}, "comfyui", ["HAL0_IMAGE_MODELS"]),
+        ({"HAL0_SKIP_HERMES": "1"}, "hermes", ["HAL0_SKIP_HERMES"]),
+        ({"HAL0_SKIP_PI": "1"}, "pi", ["HAL0_SKIP_PI"]),
+        ({"HAL0_SKIP_HINDSIGHT": "1"}, "hindsight", ["HAL0_SKIP_HINDSIGHT"]),
+        ({"HAL0_SKIP_BRAIN_MODEL": "1"}, "brain", ["HAL0_SKIP_BRAIN_MODEL"]),
+    ],
+)
+def test_row_toggled_on_clears_its_env_knob(run_block, env, row, gone) -> None:
+    r = run_block(tty=True, env=env, answer=f"{row}=on")
+    for knob in gone:
+        assert knob not in r.env, r.env
+    assert r.states[row] == "selected"
+    if row == "pi":
+        assert r.env["HAL0_INSTALL_PI"] == "1"
+
+
+def test_comfyui_on_keeps_a_real_image_models_choice(run_block) -> None:
+    r = run_block(tty=True, env={"HAL0_IMAGE_MODELS": "recommended"}, answer="comfyui=on")
+    assert r.env["HAL0_IMAGE_MODELS"] == "recommended"
+
+
+def test_chosen_set_is_logged(run_block) -> None:
+    r = run_block(tty=True, answer="hermes=off pi=on")
+    assert r.proc is not None
+    assert (
+        "INFO: Components: openwebui on, comfyui on, hermes off, pi on, hindsight on, brain on"
+        in r.proc.stdout
+    )
+
+
+def test_real_widget_through_call_site_hermes_off_pi_on(tmp_path: Path, block: str) -> None:
+    """p, Hermes off (row 3), Pi on (row 4), Enter: the real widget, real call site."""
+    ui_sh = _INSTALL_SH.parent / "lib" / "ui.sh"
+    bindir = tmp_path / "rbin"
+    bindir.mkdir()
+    for tool in ("env", "grep", "sed"):
+        (bindir / tool).symlink_to(shutil.which(tool) or f"/usr/bin/{tool}")
+    for tool in ("npm", "podman"):
+        (bindir / tool).write_text("#!/bin/sh\nexit 0\n")
+        (bindir / tool).chmod(0o755)
+    venv_bin = tmp_path / "rvenv" / "bin"
+    venv_bin.mkdir(parents=True)
+    py = venv_bin / "python"
+    py.write_text("#!/bin/sh\nprintf 'img\\tdesc\\t1'\n")
+    py.chmod(0o755)
+    keys = tmp_path / "keys"
+    keys.write_bytes(b"p\n3\n4\n\n")
+    out = tmp_path / "tty-out"
+    script = tmp_path / "real.sh"
+    script.write_text(
+        "set -euo pipefail\n"
+        f'source "{ui_sh}"\n'
+        "UI_PLAIN=1; HAL0_PLAIN=1\n"
+        'info() { printf "INFO: %s\\n" "$*"; }\n'
+        'warn() { printf "WARN: %s\\n" "$*"; }\n'
+        + _interactive_slice()
+        + f'VENV_DIR="{tmp_path / "rvenv"}"\n'
+        + "DEV_MODE=0; NO_START=0; IS_UPGRADE=0; COMPONENT_FLAG_GIVEN=0\n"
+        + 'HINDSIGHT_UNAVAILABLE_REASON=""\n'
+        + block
+        + '\nenv | grep ^HAL0_ | sed "s/^/ENV /" || true\n',
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [shutil.which("bash") or "/bin/bash", str(script)],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": str(bindir),
+            "TTY": "1",
+            "UI_TTY_IN": str(keys),
+            "UI_TTY_OUT": str(out),
+            "TERM": "dumb",
+        },
+        stdin=subprocess.DEVNULL,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    knobs = dict(re.findall(r"^ENV (HAL0_\w+)=(.*)$", proc.stdout, re.M))
+    assert knobs.get("HAL0_SKIP_HERMES") == "1"
+    assert knobs.get("HAL0_INSTALL_PI") == "1" and "HAL0_SKIP_PI" not in knobs
+    assert "HAL0_SKIP_OPENWEBUI" not in knobs and "HAL0_SKIP_BRAIN_MODEL" not in knobs
+    assert "hermes off, pi on" in proc.stdout
+
+
+# ── Skip lines name their later-install command ─────────────────────────────
+
+
+def _skip_line(start: str, stop: str, env: dict[str, str]) -> str:
+    text = _INSTALL_SH.read_text(encoding="utf-8")
+    prefix, _, start = start.rpartition("\n")
+    head = text.index(start)
+    frag = prefix + "\n" + text[head : text.index(stop, head)] + "\nelse\n    echo ELSE\nfi\n"
+    proc = subprocess.run(
+        [
+            shutil.which("bash") or "/bin/bash",
+            "-c",
+            'set -euo pipefail\ninfo() { printf "INFO: %s\\n" "$*"; }\nDEV_MODE=0; NO_START=0\n'
+            + frag,
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout
+
+
+def test_brain_skip_line_names_later_install() -> None:
+    out = _skip_line(
+        'if [[ "${DEV_MODE}" -eq 1 ]]; then\n    info "dev mode — skipping the brain model pull',
+        "\nelse\n",
+        {"HAL0_SKIP_BRAIN_MODEL": "1"},
+    )
+    assert "Skipping the brain model pull" in out
+    assert "Pull one later with 'hal0 model pull <id>' or from the dashboard." in out
+
+
+def test_comfyui_skip_line_names_later_install() -> None:
+    out = _skip_line(
+        "if false; then :\n"
+        + 'elif [[ "${HAL0_SKIP_SETUP:-0}" == "1" || "${HAL0_IMAGE_MODELS:-}" == "none"',
+        '\nelif [[ "${NO_START}" -eq 1 ]]',
+        {"HAL0_IMAGE_MODELS": "none"},
+    )
+    assert "Skipping the starter image models" in out
+    assert "Install one later with 'hal0 comfyui models install <id>' or from the dashboard." in out

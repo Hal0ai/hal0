@@ -260,7 +260,8 @@ Components (each flag skips one optional piece; env twin in parentheses):
   --no-owui           skip Open WebUI (HAL0_SKIP_OPENWEBUI=1)
   --no-comfyui        skip ComfyUI starter image models (HAL0_IMAGE_MODELS=none)
   --no-hermes         skip the Hermes agent (HAL0_SKIP_HERMES=1)
-  --no-pi             skip the Pi agent (HAL0_SKIP_PI=1)
+  --no-pi             skip the Pi agent (HAL0_SKIP_PI=1; Pi installs unattended
+                      only with HAL0_INSTALL_PI=1)
   --no-agents         --no-hermes and --no-pi together
   --no-memory         skip Hindsight memory (HAL0_SKIP_HINDSIGHT=1)
   --no-brain-model    skip the brain model pull (HAL0_SKIP_BRAIN_MODEL=1)
@@ -268,9 +269,9 @@ Components (each flag skips one optional piece; env twin in parentheses):
   --bare-inference    synonym for --bare
 Any component flag also suppresses the interactive component picker.
 
-Interactive prompts (models dir, HuggingFace token, Hermes terminal tool) only
-run when stdin is a terminal. Set HAL0_NONINTERACTIVE=1 to force the flag/env
-values everywhere.
+Interactive prompts (component checklist, models dir, HuggingFace token, Hermes
+terminal tool) only run when stdin is a terminal. Set HAL0_NONINTERACTIVE=1 to
+force the flag/env values everywhere.
 
 HAL0_HERMES_TERMINAL=1 gives the bundled Hermes agent a terminal tool, letting
 it run commands as the hal0 user (root-equivalent on this box). It is OFF by
@@ -2802,16 +2803,24 @@ if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 && "${IS_UPGRADE}" -eq 0 \
     )
     declare -A _cp_res=()
     ui_component_picker _cp_rows _cp_res
-    [[ "${_cp_res[openwebui]:-on}" == "on" ]] || export HAL0_SKIP_OPENWEBUI=1
-    [[ "${_cp_res[comfyui]:-on}" == "on" ]] || export HAL0_IMAGE_MODELS=none
-    [[ "${_cp_res[hermes]:-on}" == "on" ]] || export HAL0_SKIP_HERMES=1
+    # The answer on screen wins over a knob already in the environment: a row
+    # ticked on clears the skip knob that would otherwise still skip it.
+    if [[ "${_cp_res[openwebui]:-on}" == "on" ]]; then unset HAL0_SKIP_OPENWEBUI; else export HAL0_SKIP_OPENWEBUI=1; fi
+    if [[ "${_cp_res[comfyui]:-on}" == "on" ]]; then
+        [[ "${HAL0_IMAGE_MODELS:-}" == none || "${HAL0_IMAGE_MODELS:-}" == 0 ]] && unset HAL0_IMAGE_MODELS
+    else
+        export HAL0_IMAGE_MODELS=none
+    fi
+    if [[ "${_cp_res[hermes]:-on}" == "on" ]]; then unset HAL0_SKIP_HERMES; else export HAL0_SKIP_HERMES=1; fi
     if [[ "${_cp_res[pi]:-off}" == "on" ]]; then
+        unset HAL0_SKIP_PI
         export HAL0_INSTALL_PI=1
     else
         export HAL0_SKIP_PI=1
     fi
-    [[ "${_cp_res[hindsight]:-on}" == "on" ]] || export HAL0_SKIP_HINDSIGHT=1
-    [[ "${_cp_res[brain]:-on}" == "on" ]] || export HAL0_SKIP_BRAIN_MODEL=1
+    if [[ "${_cp_res[hindsight]:-on}" == "on" ]]; then unset HAL0_SKIP_HINDSIGHT; else export HAL0_SKIP_HINDSIGHT=1; fi
+    if [[ "${_cp_res[brain]:-on}" == "on" ]]; then unset HAL0_SKIP_BRAIN_MODEL; else export HAL0_SKIP_BRAIN_MODEL=1; fi
+    info "Components: openwebui ${_cp_res[openwebui]:-on}, comfyui ${_cp_res[comfyui]:-on}, hermes ${_cp_res[hermes]:-on}, pi ${_cp_res[pi]:-off}, hindsight ${_cp_res[hindsight]:-on}, brain ${_cp_res[brain]:-on}"
     _cp_reasons=(
         "openwebui=${_cp_owui_reason}" "comfyui=${_cp_img_reason}"
         "pi=${_cp_pi_reason}" "hindsight=${HINDSIGHT_UNAVAILABLE_REASON}"
@@ -2925,7 +2934,7 @@ ui_step "Steward + agent models" "~1-5 min (model download; size varies)"
 if [[ "${DEV_MODE}" -eq 1 ]]; then
     info "dev mode — skipping the brain model pull (no system writes)"
 elif [[ "${HAL0_SKIP_BRAIN_MODEL:-0}" == "1" || "${HAL0_SKIP_SETUP:-0}" == "1" ]]; then
-    info "Skipping the brain model pull (HAL0_SKIP_BRAIN_MODEL/HAL0_SKIP_SETUP set)."
+    info "Skipping the brain model pull (HAL0_SKIP_BRAIN_MODEL/HAL0_SKIP_SETUP set). Pull one later with 'hal0 model pull <id>' or from the dashboard."
 else
     HF_TOKEN="${HF_TOKEN_VAL}" HAL0_BRAIN_MODEL="${HAL0_BRAIN_MODEL:-}" \
         "${VENV_DIR}/bin/python" -I -m hal0.install.brain_model \
@@ -3056,7 +3065,7 @@ _img_list=()
 if [[ "${DEV_MODE}" -eq 1 ]]; then
     :  # dev mode writes nothing to the system store — no offer, no notice
 elif [[ "${HAL0_SKIP_SETUP:-0}" == "1" || "${HAL0_IMAGE_MODELS:-}" == "none" || "${HAL0_IMAGE_MODELS:-}" == "0" ]]; then
-    info "Skipping the starter image models (HAL0_SKIP_SETUP/HAL0_IMAGE_MODELS set to skip)."
+    info "Skipping the starter image models (HAL0_SKIP_SETUP/HAL0_IMAGE_MODELS set to skip). Install one later with 'hal0 comfyui models install <id>' or from the dashboard."
 elif [[ "${NO_START}" -eq 1 ]]; then
     # The step starts the img slot (and pulls ComfyUI's runtime) once a model lands,
     # which --no-start promises not to do: skip the whole step, not just the start.
@@ -4669,7 +4678,7 @@ PYEOF
     done
     export HAL0_STEP_DURATIONS_BLOB="${_summary_steps_blob}"
 
-    # Component choices (A2's COMPONENT_STATES), same RS-joined blob shape.
+    # Component choices (COMPONENT_STATES), same RS-joined blob shape.
     _summary_components_blob=""
     for _summary_cid in "${!COMPONENT_STATES[@]}"; do
         _summary_components_blob+="${_summary_cid}=${COMPONENT_STATES[$_summary_cid]}"$'\x1e'
