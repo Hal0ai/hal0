@@ -18,6 +18,7 @@ on what you have actually enabled through hal0's own capability slots:
 | Chat | — | Yes — points at hal0's own `/v1` |
 | Voice (Call mode) | — | Yes — STT/TTS point at hal0's `/v1/audio/*` |
 | Document uploads (RAG) | An **embed**-capable slot is enabled | No |
+| Shared Hindsight memory | You installed the `hal0_hindsight_rag` Filter (see below) | No |
 | Image generation | The **img** capability has an installed model the API can render | No |
 | Web search | A search provider is installed | No — none ships today |
 | hal0's tools (MCP) | `[bridge].enabled` is on and hal0 has minted the `openwebui` bridge client | No |
@@ -56,6 +57,64 @@ siblings are left unset — Open WebUI falls back to its own bundled
 sentence-transformers model rather than a broken hal0 route. See [Enable
 memory](/docs/guides/enable-memory) and [Choose
 models](/docs/guides/choose-models) for picking an embed model.
+
+## Shared Hindsight memory in RAG
+
+hal0 can add relevant shared Hindsight memory to every chat with one of its own
+slot models as another native Open WebUI source. It does not copy memory into Open
+WebUI's vector database: a global inlet Filter calls
+`POST /api/memory/context` and adds the returned raw chunks and facts to the
+same list of sources uploads use. Uploaded documents and Hindsight memory
+therefore share Open WebUI's normal source and citation UI.
+
+Automatic recall is deliberately **shared-only**. The endpoint accepts no
+bank, dataset, private toggle or caller-controlled agent identity. Private and
+project memory stays with the explicit hal0-memory tools.
+
+Only a model listed with `owned_by` `hal0` gets this, so raw memory never goes to
+a cloud model. Turns to a remote upstream or a Hermes profile (which recalls for
+itself) skip the Filter, and so does a workspace model you built over a slot,
+because Open WebUI does not say where it runs. All of them can still call the
+memory tools.
+
+<Aside type="caution">
+Do not enable this on a box with Open WebUI users you do not trust. Any user's
+`memory_add` lands in shared memory (`user:<name>` is a tag, not a permission),
+and the Filter then injects that note into other users' turns, in chats that can
+also hold `agent_run`. The reminder hal0 adds to the system message tells a model
+not to obey retrieved text. It cannot make the model comply.
+</Aside>
+
+Each turn waits for recall before the model starts. Against a large bank that
+is several seconds. If recall takes longer than the Filter's `timeout_seconds`
+valve (10 seconds), or Hindsight is down, the chat continues without memory
+context and says nothing about it.
+
+The Filter is not installed by default. To have hal0 manage it, add an Open
+WebUI admin token to `/etc/hal0/api.env` and converge the component; hal0
+creates and globally enables only its own Function ID:
+
+```sh
+# add HAL0_OPENWEBUI_ADMIN_TOKEN=<Open-WebUI-admin-token> to /etc/hal0/api.env
+sudo systemctl restart hal0-api.service
+hal0 update component openwebui
+```
+
+Without a token, import it once under **Admin → Functions** from this URL, keep
+the ID `hal0_hindsight_rag`, save it, and turn on both **Active** and **Global**:
+
+```text
+http://host.docker.internal:8080/api/memory/openwebui-function/hal0_hindsight_rag.py
+```
+
+hal0 never uses Open WebUI's bulk Function sync, never touches other Functions,
+and will not overwrite a user-owned Function that happens to use the same ID.
+To stop recall, turn the Function off in that same screen. hal0 leaves it
+installed and off. Clearing the token does not stop it: the Function keeps
+running, and hal0 only stops updating it. A token Open WebUI refuses shows as
+`hindsight_rag: auth_rejected` in the component's converge result.
+Without a token hal0 cannot update a Function you imported by hand, so import it
+again if a release note says the Filter changed.
 
 ## Image generation
 
