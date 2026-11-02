@@ -698,7 +698,8 @@ class GpuArbiter:
         waits a full grace.
 
         A failed unload rolls the switch back to LLM mode and re-raises (#3059):
-        image mode is never left recorded with an LLM slot on the GPU.
+        image mode is never left recorded with an LLM slot on the GPU. A switch
+        whose img load the crash-loop breaker would refuse never starts (#3299).
 
         Already in image mode, nothing is flipped, but a saved-set slot still
         loaded (an api restart mid-switch) is unloaded first (#3059), and the img
@@ -752,6 +753,10 @@ class GpuArbiter:
                 details={"hint": "seed the img (ComfyUI) slot first"},
                 code="gpu.img_slot_missing",
             )
+        img_name = str(img_cfg.get("name") or "img")
+        # A load the crash-loop breaker will refuse is refused here, before the
+        # switch drains and unloads the LLM set for nothing (#3299).
+        self._manager.check_crash_loop_gate(img_name)
         llm_slots = self._llm_slots_to_unload()
 
         # Persist BEFORE unloads begin (crash-recovery ordering): a
@@ -778,7 +783,6 @@ class GpuArbiter:
                 break
             await asyncio.sleep(_DRAIN_POLL_S)
 
-        img_name = str(img_cfg.get("name") or "img")
         await self._await_loads(llm_slots, llm_slots, img_name)
         await self._unload_for_img(llm_slots, llm_slots, img_name)
 

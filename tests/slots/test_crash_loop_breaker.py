@@ -324,3 +324,65 @@ async def test_backoff_gate_emits_no_events(
             await sm.load("chat")
 
     assert len(bus.events) == n_events
+
+
+# ── the read-only gate the GPU arbiter asks before a switch (#3299) ──────────
+
+
+async def test_gate_refuses_what_load_would_refuse_without_touching_the_slot(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    sm = SlotManager()
+    await _fail_load_once(sm, container_stub)
+    unloads_before = len(container_stub.unload_calls)
+
+    with pytest.raises(SlotCrashLooping) as exc_info:
+        sm.check_crash_loop_gate("chat")
+
+    assert exc_info.value.details["retry_after_s"] >= 1
+    assert sm._current_state("chat") == SlotState.ERROR
+    assert len(container_stub.unload_calls) == unloads_before
+    assert container_stub.load_calls == []
+
+
+async def test_gate_lets_a_half_open_trial_through(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    sm = SlotManager()
+    await _fail_load_once(sm, container_stub)
+    _rewind_backoff(sm)
+
+    sm.check_crash_loop_gate("chat")
+
+
+async def test_gate_applies_only_in_the_states_load_gates(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """load() gates ERROR and a stale mid-lifecycle state, not OFFLINE or READY."""
+    sm = SlotManager()
+    await _fail_load_once(sm, container_stub)
+
+    await sm._transition("chat", SlotState.WARMING, force=True)
+    with pytest.raises(SlotCrashLooping):
+        sm.check_crash_loop_gate("chat")
+
+    for state in (SlotState.OFFLINE, SlotState.READY):
+        await sm._transition("chat", state, force=True)
+        sm.check_crash_loop_gate("chat")
+
+
+async def test_gate_defers_to_a_load_still_in_progress(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """A slot mid-load is not a stale state: load() would wait for that load's
+    outcome before deciding, so the gate does not answer for it."""
+    sm = SlotManager()
+    await _fail_load_once(sm, container_stub)
+    await sm._transition("chat", SlotState.WARMING, force=True)
+
+    async with sm._lock("chat"):
+        sm.check_crash_loop_gate("chat")

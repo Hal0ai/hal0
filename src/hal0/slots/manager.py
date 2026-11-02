@@ -1752,6 +1752,25 @@ class SlotManager:
             },
         )
 
+    def check_crash_loop_gate(self, slot_name: str) -> None:
+        """Raise :class:`SlotCrashLooping` when :meth:`load` would refuse *slot_name* now.
+
+        Read-only, for a caller that pays for a load before it starts one: the
+        GPU arbiter asks this before a switch unloads the LLM set (#3299). It
+        answers for the states ``load`` gates. A slot whose lock is held is not
+        answered for: ``load`` would wait for that lifecycle operation first.
+        """
+        name = self._resolve_alias(slot_name)
+        if self.is_busy(name):
+            return
+        if self._current_state(name) in (
+            SlotState.ERROR,
+            SlotState.PULLING,
+            SlotState.STARTING,
+            SlotState.WARMING,
+        ):
+            self._check_crash_loop_gate(name)
+
     def reset_load_failures(self, slot_name: str) -> None:
         """Clear the crash-loop breaker for *slot_name* (operator intent).
 

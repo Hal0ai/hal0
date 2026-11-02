@@ -22,7 +22,7 @@ import pytest
 from hal0.slots.arbiter import GpuMode
 from hal0.slots.manager import SlotManager
 from hal0.slots.preload_evict import _gather_candidates
-from hal0.slots.state import SlotState
+from hal0.slots.state import SlotCrashLooping, SlotState
 from tests.slots.conftest import FakeContainerProvider
 
 
@@ -104,6 +104,84 @@ async def test_img_slot_unloaded_or_crashed_in_image_mode_is_reloaded_by_ensure_
 
     assert loads == [("img", "sdxl-turbo")]
     assert sm.is_ready_for_dispatch("img")
+
+
+# ── the crash-loop breaker refuses before the switch unloads anything (#3299) ──
+
+
+async def _crash_looping_img(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[SlotManager, list[str]]:
+    """chat serving on the GPU in LLM mode; img in ERROR with one load failure.
+
+    Returns the manager and the list recording every ``unload``.
+    """
+    sm = await _img_manager(slot_root, container_stub)
+    container_stub.active.discard("img")
+    await sm._transition("img", SlotState.ERROR, force=True)
+    sm._load_failures[sm._key("img")] = (1, time.monotonic())
+    container_stub.active.add("chat")
+    await sm._transition("chat", SlotState.READY, force=True)
+    assert "chat" in await _llm_slots(sm)
+
+    unloads: list[str] = []
+    real_unload = sm.unload
+
+    async def _unload(name: str, *args: Any, **kwargs: Any) -> Any:
+        unloads.append(name)
+        return await real_unload(name, *args, **kwargs)
+
+    monkeypatch.setattr(sm, "unload", _unload)
+    return sm, unloads
+
+
+async def _llm_slots(sm: SlotManager) -> list[str]:
+    sm.arbiter._refresh_group_cache(await sm.iter_configs())
+    return sm.arbiter._llm_slots_to_unload()
+
+
+async def test_image_request_inside_the_backoff_leaves_chat_loaded(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sm, unloads = await _crash_looping_img(slot_root, container_stub, monkeypatch)
+
+    with pytest.raises(SlotCrashLooping) as exc_info:
+        await sm.arbiter.ensure_img()
+
+    assert exc_info.value.status == 503
+    assert exc_info.value.details["retry_after_s"] >= 1
+    assert unloads == []
+    assert sm.is_ready_for_dispatch("chat")
+    assert sm.arbiter.mode is GpuMode.LLM
+    assert sm._current_state("img") == SlotState.ERROR
+
+
+async def test_half_open_breaker_still_gets_its_trial_through_the_switch(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sm, unloads = await _crash_looping_img(slot_root, container_stub, monkeypatch)
+    key = sm._key("img")
+    count, stamped = sm._load_failures[key]
+    sm._load_failures[key] = (count, stamped - 10_000.0)
+
+    loads: list[str] = []
+
+    async def _load(name: str, model_id: str | None = None) -> None:
+        loads.append(name)
+        await sm._transition(name, SlotState.READY, force=True)
+
+    monkeypatch.setattr(sm, "load", _load)
+    await sm.arbiter.ensure_img()
+
+    assert unloads == ["chat"]
+    assert loads == ["img"]
+    assert sm.arbiter.mode is GpuMode.IMG
 
 
 # ── the idle reaper leaves the resident ComfyUI slot alone (#3050) ───────────
