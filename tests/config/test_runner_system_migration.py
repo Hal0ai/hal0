@@ -892,6 +892,48 @@ def test_restore_backup_puts_the_old_state_back(old_box: dict[str, Path], api_do
     assert _preferred_runners() == {"plain": None, "fpx": "rocmfpx", "forge": "promptforge"}
 
 
+def _seed_post_015_db() -> Path:
+    db = paths.db_path()
+    db.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE TABLE model (id TEXT PRIMARY KEY, path TEXT, quant TEXT, hf_filename TEXT)"
+    )
+    conn.execute("INSERT INTO model VALUES ('fpx', '/m/fpx.gguf', NULL, NULL)")
+    conn.commit()
+    conn.close()
+    return db
+
+
+def test_set_preferred_runners_is_a_no_op_without_the_column(tmp_hal0_home: str) -> None:
+    db = _seed_post_015_db()
+    rs._set_preferred_runners(db, [("fpx", "rocmfpx")])  # must not raise
+    conn = sqlite3.connect(str(db))
+    try:
+        assert [r[1] for r in conn.execute("PRAGMA table_info(model)")] == [
+            "id",
+            "path",
+            "quant",
+            "hf_filename",
+        ]
+        assert conn.execute("SELECT id FROM model").fetchall() == [("fpx",)]
+    finally:
+        conn.close()
+
+
+def test_restore_backup_finishes_on_a_post_015_database(
+    tmp_hal0_home: str, tmp_path: Path, api_down: None
+) -> None:
+    _seed_post_015_db()
+    runners = json.dumps([{"id": "fpx", "preferred_runner": "rocmfpx"}]).encode()
+    archive = _archive(
+        tmp_path, {"slots/chat.toml": b'name = "chat"\n', "preferred_runner.json": runners}
+    )
+    restored = restore_backup(archive)
+    assert any(r.endswith("chat.toml") for r in restored)
+    assert restore_marker().is_file()
+
+
 def test_restore_leaves_a_marker_the_boot_conversion_honours(
     old_box: dict[str, Path], api_down: None
 ) -> None:

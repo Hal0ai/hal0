@@ -628,6 +628,11 @@ def _db_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
 
 
+def _has_preferred_runner(conn: sqlite3.Connection) -> bool:
+    """False once migration 015 dropped ``model.preferred_runner``."""
+    return "preferred_runner" in _db_columns(conn, "model")
+
+
 def _shards_of(extra: object) -> tuple[str, ...]:
     """The further files of a split model, from the registry ``extra`` JSON blob."""
     if not isinstance(extra, str) or not extra:
@@ -716,7 +721,7 @@ def _plan_preferred_runner(
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         try:
-            if "preferred_runner" not in _db_columns(conn, "model"):
+            if not _has_preferred_runner(conn):
                 return []
             for mid, value in conn.execute(
                 "SELECT id, preferred_runner FROM model WHERE preferred_runner IS NOT NULL "
@@ -741,9 +746,14 @@ def _plan_preferred_runner(
 
 
 def _set_preferred_runners(db_path: Path, pairs: Iterable[tuple[str, str | None]]) -> None:
-    """``UPDATE model SET preferred_runner`` for each ``(model id, value)``, one transaction."""
+    """``UPDATE model SET preferred_runner`` for each ``(model id, value)``, one transaction.
+
+    A no-op when the column is gone (post-015 database).
+    """
     conn = sqlite3.connect(str(db_path))
     try:
+        if not _has_preferred_runner(conn):
+            return  # migration 015 dropped the column; nothing to restore
         with conn:
             conn.executemany(
                 "UPDATE model SET preferred_runner = ? WHERE id = ?",
