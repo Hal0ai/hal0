@@ -1390,9 +1390,8 @@ def _phase_home_init(ctx: _StepCtx) -> PhaseResult:
 # WATCHER opens ``$HERMES_HOME/kanban.db`` via a raw sqlite path — never
 # through ``hermes_cli.kanban_db.connect()``. ``connect()``'s first-call
 # auto-init is the ONLY thing that has ever created the schema, and today that
-# only fires when hal0's HP-executor registers (``HERMES_DASHBOARD_BASE_URL``
-# set — see ``board/hermes_executor.py``). A box whose executor never
-# registers therefore has a watcher that hits ``no such table: tasks`` /
+# only fires when something else on the box touches the kanban DB first. A box
+# where nothing does therefore has a watcher that hits ``no such table: tasks`` /
 # ``kanban_notify_subs`` every tick. Operator-validated fix (both live boxes):
 # calling ``init_db(<kanban.db>)`` creates all the tables and the watcher
 # errors go to zero. The watcher is PINNED UPSTREAM Hermes

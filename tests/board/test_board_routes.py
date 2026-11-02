@@ -1,10 +1,9 @@
 """Tests for the /api/board/* router — src/hal0/api/routes/board.py.
 
-hal0 now OWNS the board: the router reads/writes a local BoardStore instead of
-proxying to Hermes. These assert the FROZEN wire contract (paths, payload
-shapes, status codes) is preserved store-backed, audit rows land for every
-mutation with the right action + actor, and — the R4 win — the board serves
-with NO Hermes client wired.
+The routes are an audited proxy to the Hermes kanban plugin through the
+``BoardClient`` facade. A recorder ``httpx.MockTransport`` sits behind a real
+``HermesKanbanClient``; a real ``AuditStore`` records mutations. Asserts the
+recorded Hermes method/path/query/body, the audit rows, and error mapping.
 
 Run targeted:
     PYTHONPATH=src .venv/bin/python -m pytest tests/board/test_board_routes.py -q
@@ -12,34 +11,62 @@ Run targeted:
 
 from __future__ import annotations
 
-import asyncio
+import json
 from collections.abc import Iterator
+from typing import Any
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from structlog.testing import capture_logs
 
 from hal0.activity import AuditStore
 from hal0.api.middleware import error_codes
 from hal0.api.routes import board
-from hal0.board.store import BoardStore
+from hal0.board import KANBAN_BASE_PATH, BoardNoToken, HermesKanbanClient
+from hal0.board.client import BoardClient
+
+P = KANBAN_BASE_PATH
 
 
-def _build_app(store: BoardStore, audit: AuditStore) -> FastAPI:
+class _Recorder:
+    def __init__(self) -> None:
+        self.requests: list[dict[str, Any]] = []
+        self.responses: dict[tuple[str, str], httpx.Response] = {}
+        self.fail_connect = False
+
+    def respond(self, method: str, path: str, status: int, body: Any) -> None:
+        self.responses[(method, path)] = httpx.Response(status, json=body)
+
+    async def handler(self, request: httpx.Request) -> httpx.Response:
+        if self.fail_connect:
+            raise httpx.ConnectError("connection refused", request=request)
+        self.requests.append(
+            {
+                "method": request.method,
+                "path": request.url.path,
+                "params": dict(request.url.params),
+                "body": json.loads(request.content) if request.content else None,
+                "agent": request.headers.get("x-hal0-agent"),
+            }
+        )
+        resp = self.responses.get((request.method, request.url.path))
+        return resp or httpx.Response(200, json={"ok": True})
+
+
+def _app(audit: AuditStore) -> FastAPI:
     app = FastAPI()
     error_codes.install(app)
     app.include_router(board.router, prefix="/api/board", tags=["board"])
-    app.state.board_store = store
-    app.state.hermes_kanban = None  # board owns state locally — no proxy needed
     app.state.audit = audit
+    app.state.board_legacy_done = True
     return app
 
 
 @pytest.fixture
-def store(tmp_path) -> BoardStore:
-    s = BoardStore(tmp_path / "board.db")
-    asyncio.run(s.ensure_initialized(None))
-    return s
+def recorder() -> _Recorder:
+    return _Recorder()
 
 
 @pytest.fixture
@@ -50,257 +77,375 @@ def audit(tmp_path) -> AuditStore:
 
 
 @pytest.fixture
-def app_client(store: BoardStore, audit: AuditStore) -> Iterator[tuple[FastAPI, TestClient]]:
-    app = _build_app(store, audit)
+def app_client(recorder: _Recorder, audit: AuditStore) -> Iterator[tuple[FastAPI, TestClient]]:
+    app = _app(audit)
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(recorder.handler), base_url="http://hermes.test"
+    )
+    kanban = HermesKanbanClient(
+        base_url="http://hermes.test", token_resolver=lambda: "tok", http_client=http
+    )
+    app.state.board_client = BoardClient(kanban)
+    app.state.board_installed = True
     with TestClient(app) as c:
         yield app, c
 
 
-def _audit_actions(audit: AuditStore) -> list[str]:
+def _last(recorder: _Recorder) -> dict[str, Any]:
+    return recorder.requests[-1]
+
+
+def _actions(audit: AuditStore) -> list[str]:
     return [r["action"] for r in audit.query(category="board")]
 
 
-# ── reads: contract shapes, no Hermes ───────────────────────────────────────
+# ── reads ───────────────────────────────────────────────────────────────────
 
 
-def test_board_read_returns_all_visible_lanes(app_client: tuple) -> None:
-    _app, client = app_client
-    r = client.get("/api/board/board")
+@pytest.mark.parametrize(
+    "name,hal0_path,upstream",
+    [
+        ("board", "/board", "/board"),
+        ("task", "/tasks/t1", "/tasks/t1"),
+        ("task_log", "/tasks/t1/log", "/tasks/t1/log"),
+        ("boards", "/boards", "/boards"),
+        ("profiles", "/profiles", "/profiles"),
+        ("assignees", "/assignees", "/assignees"),
+        ("stats", "/stats", "/stats"),
+        ("diagnostics", "/diagnostics", "/diagnostics"),
+        ("workers_active", "/workers/active", "/workers/active"),
+        ("run", "/runs/r1", "/runs/r1"),
+        ("config", "/config", "/config"),
+        ("orchestration", "/orchestration", "/orchestration"),
+    ],
+)
+def test_read_row_forwards(
+    app_client: tuple, recorder: _Recorder, name: str, hal0_path: str, upstream: str
+) -> None:
+    client = app_client[1]
+    recorder.respond("GET", f"{P}{upstream}", 200, {"row": name})
+    r = client.get(f"/api/board{hal0_path}?board=alpha")
     assert r.status_code == 200
-    lanes = r.json()["lanes"]
-    assert list(lanes.keys()) == [
-        "triage",
-        "todo",
-        "scheduled",
-        "ready",
-        "running",
-        "blocked",
-        "review",
-        "done",
-    ]
+    assert r.json() == {"row": name}
+    fwd = _last(recorder)
+    assert (fwd["method"], fwd["path"]) == ("GET", f"{P}{upstream}")
+    assert fwd["params"] == {"board": "alpha"}
 
 
-def test_include_archived_query(app_client: tuple) -> None:
-    _app, client = app_client
-    r = client.get("/api/board/board?include_archived=true")
-    assert "archived" in r.json()["lanes"]
+def test_get_board_query_params_pass_through(app_client: tuple, recorder: _Recorder) -> None:
+    client = app_client[1]
+    client.get("/api/board/board?tenant=t&include_archived=yes&workflow_template_id=w&board=b")
+    assert _last(recorder)["params"] == {
+        "tenant": "t",
+        "include_archived": "true",
+        "workflow_template_id": "w",
+        "board": "b",
+    }
+    client.get("/api/board/board?include_archived=0")
+    assert _last(recorder)["params"] == {"include_archived": "false"}
+    client.get("/api/board/board")
+    assert _last(recorder)["params"] == {}
 
 
-def test_boards_config_orchestration_reads(app_client: tuple) -> None:
-    _app, client = app_client
-    assert client.get("/api/board/boards").status_code == 200
-    cfg = client.get("/api/board/config").json()
-    assert cfg == {"tick_interval": 5, "failure_limit": 3, "claim_ttl": 600, "max_in_flight": 4}
-    orch = client.get("/api/board/orchestration").json()
-    assert set(orch) >= {"orchestrator_profile", "auto_decompose", "tick_interval"}
+def test_task_log_tail_is_int(app_client: tuple, recorder: _Recorder) -> None:
+    client = app_client[1]
+    client.get("/api/board/tasks/t1/log?tail=50")
+    assert _last(recorder)["params"] == {"tail": "50"}
 
 
-def test_stats_shape(app_client: tuple) -> None:
-    _app, client = app_client
-    stats = client.get("/api/board/stats").json()
-    assert "total" in stats and "by_status" in stats
+def test_invalid_tail_400_without_upstream_call(app_client: tuple, recorder: _Recorder) -> None:
+    client = app_client[1]
+    r = client.get("/api/board/tasks/t1/log?tail=lots")
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "board.invalid_query"
+    assert recorder.requests == []
 
 
-# ── mutations: forward to store + audit ─────────────────────────────────────
+def test_agent_header_is_forwarded(app_client: tuple, recorder: _Recorder) -> None:
+    client = app_client[1]
+    client.get("/api/board/stats", headers={"X-hal0-Agent": "claude-dev"})
+    assert _last(recorder)["agent"] == "claude-dev"
 
 
-def test_create_task_returns_envelope_and_audits(app_client: tuple) -> None:
-    app, client = app_client
-    r = client.post("/api/board/tasks", json={"title": "hi", "status": "todo"})
+def test_no_etag_header(app_client: tuple, recorder: _Recorder) -> None:
+    client = app_client[1]
+    recorder.respond("GET", f"{P}/tasks/t1", 200, {"id": "t1", "revision": 3})
+    r = client.get("/api/board/tasks/t1")
     assert r.status_code == 200
-    task = r.json()["task"]
-    assert task["title"] == "hi"
-    assert task["status"] == "todo"
-    assert "board.task.create" in _audit_actions(app.state.audit)
-    # audit target is the created id
-    rows = app.state.audit.query(action="board.task.create")
-    assert rows[0]["target"] == task["id"]
+    assert "etag" not in r.headers
 
 
-def test_update_task_moves_lane_and_audits(app_client: tuple, store: BoardStore) -> None:
-    app, client = app_client
-    tid = store.create_task({"title": "a", "status": "todo"})["task"]["id"]
-    r = client.patch(f"/api/board/tasks/{tid}", json={"status": "done"})
-    assert r.status_code == 200
-    assert r.json()["status"] == "done"
-    assert "board.task.update" in _audit_actions(app.state.audit)
+# ── mutations: forward + audit ──────────────────────────────────────────────
 
-
-def test_delete_task_and_audits(app_client: tuple, store: BoardStore) -> None:
-    app, client = app_client
-    tid = store.create_task({"title": "a"})["task"]["id"]
-    r = client.delete(f"/api/board/tasks/{tid}")
-    assert r.status_code == 200
-    assert client.get(f"/api/board/tasks/{tid}").status_code == 404
-    assert "board.task.delete" in _audit_actions(app.state.audit)
-
-
-def test_comment_audits(app_client: tuple, store: BoardStore) -> None:
-    app, client = app_client
-    tid = store.create_task({"title": "a"})["task"]["id"]
-    r = client.post(f"/api/board/tasks/{tid}/comments", json={"body": "lgtm"})
-    assert r.status_code == 200
-    assert r.json()["comment_count"] == 1
-    assert "board.task.comment" in _audit_actions(app.state.audit)
-
-
-def test_bulk_audits_and_updates(app_client: tuple, store: BoardStore) -> None:
-    app, client = app_client
-    a = store.create_task({"title": "a", "status": "todo"})["task"]["id"]
-    b = store.create_task({"title": "b", "status": "todo"})["task"]["id"]
-    r = client.post("/api/board/tasks/bulk", json={"ids": [a, b], "status": "ready"})
-    assert r.status_code == 200
-    assert r.json()["updated"] == 2
-    assert "board.task.bulk" in _audit_actions(app.state.audit)
-
-
-def test_links_add_remove_audit(app_client: tuple, store: BoardStore) -> None:
-    app, client = app_client
-    p = store.create_task({"title": "p"})["task"]["id"]
-    c = store.create_task({"title": "c"})["task"]["id"]
-    r = client.post("/api/board/links", json={"parent_id": p, "child_id": c})
-    assert r.status_code == 200
-    assert client.get(f"/api/board/tasks/{p}").json()["deps"]["children"] == [c]
-    r = client.request("DELETE", f"/api/board/links?parent_id={p}&child_id={c}")
-    assert r.status_code == 200
-    assert client.get(f"/api/board/tasks/{p}").json()["deps"]["children"] == []
-    actions = _audit_actions(app.state.audit)
-    assert "board.link.add" in actions and "board.link.remove" in actions
-
-
-def test_reassign_specify_decompose_reclaim_audit(app_client: tuple, store: BoardStore) -> None:
-    app, client = app_client
-    tid = store.create_task({"title": "a", "status": "running"})["task"]["id"]
-    assert (
-        client.post(f"/api/board/tasks/{tid}/reassign", json={"profile": "dev"}).status_code == 200
-    )
-    assert client.get(f"/api/board/tasks/{tid}").json()["assignee"] == "dev"
-    assert client.post(f"/api/board/tasks/{tid}/specify", json={}).status_code == 200
-    assert client.post(f"/api/board/tasks/{tid}/decompose", json={}).status_code == 200
-    assert client.post(f"/api/board/tasks/{tid}/reclaim", json={}).status_code == 200
-    assert client.get(f"/api/board/tasks/{tid}").json()["status"] == "ready"
-    actions = _audit_actions(app.state.audit)
-    for a in (
+# (name, method, hal0 path, json body, upstream path, audit action)
+_MUTATIONS = [
+    ("create_task", "POST", "/tasks", {"title": "hi"}, "/tasks", "board.task.create"),
+    ("update_task", "PATCH", "/tasks/t1", {"status": "done"}, "/tasks/t1", "board.task.update"),
+    ("delete_task", "DELETE", "/tasks/t1", None, "/tasks/t1", "board.task.delete"),
+    (
+        "comment",
+        "POST",
+        "/tasks/t1/comments",
+        {"body": "x"},
+        "/tasks/t1/comments",
+        "board.task.comment",
+    ),
+    ("bulk", "POST", "/tasks/bulk", {"ids": ["a", "b"]}, "/tasks/bulk", "board.task.bulk"),
+    (
+        "reassign",
+        "POST",
+        "/tasks/t1/reassign",
+        {"profile": "d"},
+        "/tasks/t1/reassign",
         "board.task.reassign",
-        "board.task.specify",
+    ),
+    ("specify", "POST", "/tasks/t1/specify", {"a": 1}, "/tasks/t1/specify", "board.task.specify"),
+    (
+        "decompose",
+        "POST",
+        "/tasks/t1/decompose",
+        {"a": 1},
+        "/tasks/t1/decompose",
         "board.task.decompose",
-        "board.task.reclaim",
-    ):
-        assert a in actions
+    ),
+    ("reclaim", "POST", "/tasks/t1/reclaim", {"a": 1}, "/tasks/t1/reclaim", "board.task.reclaim"),
+    ("add_link", "POST", "/links", {"parent_id": "p", "child_id": "c"}, "/links", "board.link.add"),
+    ("create_board", "POST", "/boards", {"slug": "x"}, "/boards", "board.board.create"),
+    ("update_board", "PATCH", "/boards/x", {"name": "X"}, "/boards/x", "board.board.update"),
+    ("switch_board", "POST", "/boards/x/switch", None, "/boards/x/switch", "board.board.switch"),
+    (
+        "update_profile",
+        "PATCH",
+        "/profiles/dev",
+        {"d": "x"},
+        "/profiles/dev",
+        "board.profile.update",
+    ),
+    (
+        "update_orch",
+        "PUT",
+        "/orchestration",
+        {"auto_decompose": False},
+        "/orchestration",
+        "board.orchestration.update",
+    ),
+]
 
 
-def test_dispatch_nudge_audits(app_client: tuple) -> None:
+@pytest.mark.parametrize(
+    "name,method,path,body,upstream,action", _MUTATIONS, ids=[m[0] for m in _MUTATIONS]
+)
+def test_mutation_row_forwards_and_audits(
+    app_client: tuple, recorder: _Recorder, name, method, path, body, upstream, action
+) -> None:
+    app, client = app_client
+    r = client.request(method, f"/api/board{path}?board=alpha", json=body)
+    assert r.status_code == 200
+    fwd = _last(recorder)
+    assert (fwd["method"], fwd["path"]) == (method, f"{P}{upstream}")
+    assert fwd["params"] == {"board": "alpha"}
+    assert fwd["body"] == body
+    assert action in _actions(app.state.audit)
+
+
+def test_dispatch_nudge_forwards_and_audits(app_client: tuple, recorder: _Recorder) -> None:
     app, client = app_client
     r = client.post("/api/board/dispatch?max=4")
     assert r.status_code == 200
-    assert r.json() == {"dispatched": 0}
-    assert "board.dispatch.nudge" in _audit_actions(app.state.audit)
+    fwd = _last(recorder)
+    assert (fwd["method"], fwd["path"], fwd["params"]) == ("POST", f"{P}/dispatch", {"max": "4"})
+    assert "board.dispatch.nudge" in _actions(app.state.audit)
 
 
-def test_board_crud_and_switch_audit(app_client: tuple) -> None:
+def test_delete_board_forwards_delete_flag(app_client: tuple, recorder: _Recorder) -> None:
     app, client = app_client
-    assert client.post("/api/board/boards", json={"slug": "proj-x", "name": "X"}).status_code == 200
-    assert client.post("/api/board/boards/proj-x/switch", json={}).status_code == 200
-    assert client.patch("/api/board/boards/proj-x", json={"name": "Y"}).status_code == 200
-    assert client.delete("/api/board/boards/proj-x").status_code == 200
-    actions = _audit_actions(app.state.audit)
-    for a in (
-        "board.board.create",
-        "board.board.switch",
-        "board.board.update",
-        "board.board.delete",
-    ):
-        assert a in actions
+    client.delete("/api/board/boards/x?delete=true")
+    assert _last(recorder)["params"] == {"delete": "true"}
+    client.delete("/api/board/boards/x")
+    assert _last(recorder)["params"] == {"delete": "false"}
+    assert "board.board.delete" in _actions(app.state.audit)
 
 
-def test_profile_and_orchestration_mutations_audit(app_client: tuple) -> None:
+def test_remove_link_reads_query_ids(app_client: tuple, recorder: _Recorder) -> None:
     app, client = app_client
-    assert client.patch("/api/board/profiles/dev", json={"label": "Dev"}).status_code == 200
-    r = client.put("/api/board/orchestration", json={"auto_decompose": True})
+    r = client.delete("/api/board/links?parent_id=p&child_id=c&board=alpha")
     assert r.status_code == 200
-    assert r.json()["auto_decompose"] is True
-    actions = _audit_actions(app.state.audit)
-    assert "board.profile.update" in actions and "board.orchestration.update" in actions
+    fwd = _last(recorder)
+    assert (fwd["method"], fwd["path"]) == ("DELETE", f"{P}/links")
+    assert fwd["params"] == {"parent_id": "p", "child_id": "c", "board": "alpha"}
+    assert fwd["body"] is None
+    assert "board.link.remove" in _actions(app.state.audit)
 
 
-# ── actor derivation (unchanged contract) ───────────────────────────────────
+def test_remove_link_body_fallback(app_client: tuple, recorder: _Recorder) -> None:
+    _, client = app_client
+    client.request("DELETE", "/api/board/links", json={"parent_id": "p", "child_id": "c"})
+    fwd = _last(recorder)
+    assert fwd["params"] == {"parent_id": "p", "child_id": "c"}
+    assert fwd["body"] is None
 
 
-def test_actor_mcp_from_agent_header(app_client: tuple, store: BoardStore) -> None:
-    app, client = app_client
-    tid = store.create_task({"title": "a"})["task"]["id"]
-    client.patch(
-        f"/api/board/tasks/{tid}", json={"status": "done"}, headers={"X-hal0-Agent": "claude-dev"}
+def test_remove_link_query_wins_over_body(app_client: tuple, recorder: _Recorder) -> None:
+    _, client = app_client
+    client.request(
+        "DELETE",
+        "/api/board/links?parent_id=q1&child_id=q2",
+        json={"parent_id": "b1", "child_id": "b2"},
     )
-    rows = app.state.audit.query(action="board.task.update")
+    assert _last(recorder)["params"] == {"parent_id": "q1", "child_id": "q2"}
+
+
+@pytest.mark.parametrize("url", ["/api/board/links", "/api/board/links?parent_id=p"])
+def test_remove_link_missing_id_400(app_client: tuple, recorder: _Recorder, url: str) -> None:
+    _, client = app_client
+    r = client.delete(url)
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "board.invalid_query"
+    assert recorder.requests == []
+
+
+@pytest.mark.parametrize(
+    "url", ["/api/board/tasks/t1/log?tail=-1", "/api/board/tasks/t1/log?tail=0"]
+)
+def test_non_positive_tail_400(app_client: tuple, recorder: _Recorder, url: str) -> None:
+    _, client = app_client
+    r = client.get(url)
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "board.invalid_query"
+    assert recorder.requests == []
+
+
+def test_negative_max_400(app_client: tuple, recorder: _Recorder) -> None:
+    _, client = app_client
+    r = client.post("/api/board/dispatch?max=-2")
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "board.invalid_query"
+    assert recorder.requests == []
+
+
+def test_agent_id_is_header_only(app_client: tuple, recorder: _Recorder) -> None:
+    _, client = app_client
+    client.post("/api/board/tasks", json={"title": "x", "agent_id": "spoof"})
+    fwd = _last(recorder)
+    assert fwd["agent"] != "spoof"
+    assert fwd["body"]["agent_id"] == "spoof"  # body is data, not identity
+
+
+def test_mutation_is_audited(app_client: tuple, recorder: _Recorder) -> None:
+    app, client = app_client
+    recorder.respond("POST", f"{P}/tasks", 200, {"task": {"id": "t9", "title": "hi"}})
+    client.post("/api/board/tasks", json={"title": "hi"}, headers={"X-hal0-Agent": "claude-dev"})
+    rows = app.state.audit.query(action="board.task.create")
+    assert len(rows) == 1
     assert rows[0]["actor"] == "mcp:claude-dev"
-
-
-def test_actor_dashboard_without_agent_header(app_client: tuple, store: BoardStore) -> None:
-    app, client = app_client
-    tid = store.create_task({"title": "a"})["task"]["id"]
-    client.patch(f"/api/board/tasks/{tid}", json={"status": "ready"})
-    rows = app.state.audit.query(action="board.task.update")
-    assert rows[0]["actor"] == "dashboard"
-
-
-def test_audit_row_after_is_set(app_client: tuple, store: BoardStore) -> None:
-    app, client = app_client
-    tid = store.create_task({"title": "a"})["task"]["id"]
-    client.patch(f"/api/board/tasks/{tid}", json={"status": "done"})
-    rows = app.state.audit.query(action="board.task.update")
+    assert rows[0]["target"] == "t9"
     assert rows[0]["after"] is not None
+    assert _last(recorder)["agent"] == "claude-dev"
 
 
-# ── error mapping (JSON envelope) ───────────────────────────────────────────
+def test_actor_dashboard_without_agent_header(app_client: tuple) -> None:
+    app, client = app_client
+    client.patch("/api/board/tasks/t2", json={"status": "ready"})
+    assert app.state.audit.query(action="board.task.update")[0]["actor"] == "dashboard"
 
 
-def test_missing_task_returns_404(app_client: tuple) -> None:
-    _app, client = app_client
-    r = client.get("/api/board/tasks/t_ghost")
+# ── errors ──────────────────────────────────────────────────────────────────
+
+
+def test_board_404_passes_through(app_client: tuple, recorder: _Recorder) -> None:
+    client = app_client[1]
+    recorder.respond("GET", f"{P}/board", 404, {"detail": "no such board"})
+    r = client.get("/api/board/board?board=gone")
     assert r.status_code == 404
-    assert r.json()["error"]["code"] == "board.task_not_found"
+    assert r.json()["error"]["code"] == "board.upstream_error"
 
 
-def test_invalid_status_returns_409(app_client: tuple, store: BoardStore) -> None:
-    _app, client = app_client
-    tid = store.create_task({"title": "a"})["task"]["id"]
-    r = client.patch(f"/api/board/tasks/{tid}", json={"status": "nonsense"})
-    assert r.status_code == 409
-    assert r.json()["error"]["code"] == "board.invalid_status"
+def test_upstream_500_maps_to_502(app_client: tuple, recorder: _Recorder) -> None:
+    client = app_client[1]
+    recorder.respond("GET", f"{P}/board", 500, {"detail": "boom"})
+    r = client.get("/api/board/board")
+    assert r.status_code == 502
 
 
-def test_invalid_body_returns_400(app_client: tuple) -> None:
-    _app, client = app_client
+def test_upstream_error_on_mutation_is_audited_as_error(
+    app_client: tuple, recorder: _Recorder
+) -> None:
+    app, client = app_client
+    recorder.respond("PATCH", f"{P}/tasks/t1", 404, {"detail": "gone"})
+    r = client.patch("/api/board/tasks/t1", json={"status": "done"})
+    assert r.status_code == 404
+    assert app.state.audit.query(action="board.task.update")[0]["outcome"] == "error"
+
+
+def test_invalid_json_body_400_without_upstream_call(
+    app_client: tuple, recorder: _Recorder
+) -> None:
+    client = app_client[1]
     r = client.post(
-        "/api/board/tasks", content=b"{not json", headers={"Content-Type": "application/json"}
+        "/api/board/tasks", content=b"{nope", headers={"Content-Type": "application/json"}
     )
     assert r.status_code == 400
     assert r.json()["error"]["code"] == "board.invalid_body"
+    assert recorder.requests == []
 
 
-# ── board serves with no Hermes client (R4: core works without Hermes) ───────
+def test_unreachable_503(app_client: tuple, recorder: _Recorder) -> None:
+    client = app_client[1]
+    recorder.fail_connect = True
+    r = client.get("/api/board/board")
+    assert r.status_code == 503
+    assert r.json()["error"]["code"] == "board.unreachable"
 
 
-def test_board_serves_without_hermes_client(tmp_path) -> None:
-    """No app.state.board_store pre-injected and hermes_kanban=None: the router
-    lazily builds the store and seeds a clean empty board."""
-    import hal0.config.paths as paths_mod
+def test_no_token_503(recorder: _Recorder, audit: AuditStore) -> None:
+    app = _app(audit)
 
-    # Isolate the default db path so the lazily-built store lands in tmp.
-    audit = AuditStore(tmp_path / "audit.db")
-    audit.init_schema()
-    app = FastAPI()
-    error_codes.install(app)
-    app.include_router(board.router, prefix="/api/board")
-    app.state.audit = audit
-    app.state.hermes_kanban = None
-    orig = paths_mod.db_path
-    paths_mod.db_path = lambda: tmp_path / "hal0.db"  # type: ignore[assignment]
-    try:
-        with TestClient(app) as client:
-            r = client.get("/api/board/board")
-            assert r.status_code == 200
-            assert "todo" in r.json()["lanes"]
-    finally:
-        paths_mod.db_path = orig  # type: ignore[assignment]
+    def no_token() -> str:
+        raise BoardNoToken("no dashboard token")
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(recorder.handler), base_url="http://hermes.test"
+    )
+    app.state.board_client = BoardClient(
+        HermesKanbanClient(base_url="http://hermes.test", token_resolver=no_token, http_client=http)
+    )
+    with TestClient(app) as c:
+        r = c.get("/api/board/board")
+    assert r.status_code == 503
+    assert r.json()["error"]["code"] == "board.no_token"
+    assert recorder.requests == []
+
+
+def test_upstream_error_is_logged(app_client: tuple, recorder: _Recorder) -> None:
+    _, client = app_client
+    recorder.respond("GET", f"{P}/tasks/ghost", 404, {"detail": "no"})
+    with capture_logs() as logs:
+        client.get("/api/board/tasks/ghost")
+    ev = [e for e in logs if e["event"] == "board.upstream"]
+    assert len(ev) == 1
+    assert ev[0]["code"] == "board.upstream_error"
+    assert ev[0]["status"] == 404
+    assert ev[0]["path"] == "/api/board/tasks/ghost"
+    assert ev[0]["log_level"] == "warning"
+
+
+def test_not_installed_is_logged(audit: AuditStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("hal0.board.auth.hermes_installed", lambda: False)
+    with TestClient(_app(audit)) as c, capture_logs() as logs:
+        c.get("/api/board/board")
+    ev = [e for e in logs if e["event"] == "board.upstream"]
+    assert len(ev) == 1
+    assert (ev[0]["code"], ev[0]["status"], ev[0]["path"]) == (
+        "board.not_installed",
+        503,
+        "/api/board/board",
+    )
+
+
+def test_not_installed_503(audit: AuditStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("hal0.board.auth.hermes_installed", lambda: False)
+    app = _app(audit)  # no board_client / board_installed on state
+    with TestClient(app) as c:
+        r = c.get("/api/board/board")
+    assert r.status_code == 503
+    assert r.json()["error"]["code"] == "board.not_installed"

@@ -247,6 +247,20 @@ def test_resolve_builds_kanban_client_when_missing() -> None:
     assert client._kanban is app.state.hermes_kanban
 
 
+def test_resolve_cached_false_means_not_installed_without_probing() -> None:
+    app = _app()
+    app.state.board_installed = False
+    calls: list[int] = []
+
+    def check() -> bool:
+        calls.append(1)
+        return True
+
+    with pytest.raises(BoardNotInstalled):
+        resolve_board_client(app, installed_check=check)
+    assert calls == []
+
+
 def test_resolve_does_not_cache_false_probe() -> None:
     app = _app()
     results = iter([False, True])

@@ -1,142 +1,178 @@
-"""Operator Board events-WS — streams the hal0-local ``card_event`` feed.
+"""Operator Board events-WS proxy — browser ⇄ Hermes kanban ``/events``.
 
-hal0 owns the board, so the ``/api/board/events`` WS no longer proxies to the
-Hermes kanban ``/events`` upstream. It polls the local
-:class:`hal0.board.store.BoardStore` event log and pushes the SAME frozen frame
-shape the proxy relayed:
+The Hermes kanban plugin pushes ``{"events": [...], "cursor": N}`` frames on
+``/api/plugins/kanban/events``. Browsers cannot set ``Authorization`` on a WS
+upgrade, so Hermes takes the dashboard session token as the ``?token=`` query
+param. This proxy:
 
-    {"events": [ {id, kind, task_id, board, at, json}, ... ], "cursor": N}
+* resolves the board client first, so a box without Hermes closes the browser
+  socket before any upstream attempt,
+* reads the stable dashboard token from the per-install token file
+  (:func:`hal0.board.auth.read_dashboard_token`) — never from the browser,
+* threads only ``since`` / ``board`` / ``tenant`` from the browser query,
+* bidi-pumps frames and tears both directions down when either side closes.
 
-Every board mutation (operator's REST write, the agent chat's tool call, a
-future worker's writeback) appends a ``card_event`` row, so this one transport
-reflects them all — the frozen "board reflects ALL mutations through the
-/events WS" rule (ui/CONTRACTS.md), now sourced from hal0's own store.
-
-Wire contract preserved:
-
-* the browser passes ``since`` (last cursor) and ``board`` (pin) as query
-  params; ``since`` absent ⇒ stream only NEW events from now (no history dump),
-  ``since=<n>`` ⇒ resume/replay from that cursor.
-* each frame carries the max ``cursor`` seen, which the browser echoes back as
-  ``?since=`` on reconnect.
-
-No token, no upstream, no loopback dependency — the events are local.
+Every failure to reach the upstream closes the browser socket with ``1011`` so
+the client's reconnect logic engages. The token is never logged.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
+from urllib.parse import urlencode, urlsplit
 
 import structlog
 from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect, WebSocketState
+from websockets.asyncio.client import connect
+from websockets.exceptions import ConnectionClosed, ConnectionClosedOK
+
+from hal0.board import (
+    DEFAULT_BASE_URL,
+    KANBAN_BASE_PATH,
+    BoardNotInstalled,
+    BoardNoToken,
+    HermesKanbanClient,
+)
+from hal0.board.auth import read_dashboard_token
+from hal0.board.client import resolve_board_client
 
 log = structlog.get_logger(__name__)
 
-#: How often the poller checks the store for new events (Hermes polled its
-#: task_events table at 300ms; matched here for parity).
-POLL_INTERVAL_SECONDS = 0.3
+# Query params the browser may thread upstream. The token is NOT in this set.
+_PASSTHROUGH_QUERY = ("since", "board", "tenant")
 
-#: Max events per frame (bounds a burst after a long disconnect).
-_FRAME_LIMIT = 200
-
-
-async def _ensure_store(browser_ws: WebSocket):
-    """Return the app-state BoardStore, building + first-boot-initialising it on
-    first use (mirrors the REST route's ``_store`` helper) so the WS works even
-    when it is the first board surface touched this process."""
-    from hal0.board.store import BoardStore
-
-    app = browser_ws.scope.get("app")
-    state = getattr(app, "state", None)
-    if state is None:
-        return None
-    store = getattr(state, "board_store", None)
-    if store is None:
-        store = BoardStore()
-        state.board_store = store
-    if not store.initialized:
-        client = getattr(state, "hermes_kanban", None)
-        await store.ensure_initialized(client)
-    return store
+WS_PING_INTERVAL_SECONDS = 20.0
+WS_OPEN_TIMEOUT_SECONDS = 5.0
 
 
-def _start_cursor(browser_ws: WebSocket, store) -> int:
-    """Resolve the initial cursor from ``?since=``.
+def _http_to_ws(base_url: str) -> str:
+    """Map an http(s) base URL to its ws(s) equivalent."""
+    parts = urlsplit(base_url)
+    scheme = "wss" if parts.scheme == "https" else "ws"
+    return f"{scheme}://{parts.netloc}"
 
-    Absent/blank ⇒ start at the latest cursor (only NEW events). A parseable
-    integer (including 0) ⇒ start there so the client can replay a gap.
-    """
-    raw = browser_ws.query_params.get("since")
-    if raw is None or raw == "":
-        return store.latest_cursor()
+
+def _upstream_base_url(browser_ws: WebSocket) -> str:
+    kanban = getattr(browser_ws.app.state, "hermes_kanban", None)
+    if isinstance(kanban, HermesKanbanClient):
+        return kanban.base_url
+    return DEFAULT_BASE_URL
+
+
+def _build_upstream_url(browser_ws: WebSocket, *, token: str) -> str:
+    qs: dict[str, str] = {}
+    for key in _PASSTHROUGH_QUERY:
+        val = browser_ws.query_params.get(key)
+        if val:
+            qs[key] = val
+    qs["token"] = token
+    ws_base = _http_to_ws(_upstream_base_url(browser_ws))
+    return f"{ws_base}{KANBAN_BASE_PATH}/events?{urlencode(qs)}"
+
+
+async def _close_browser(browser_ws: WebSocket, code: int) -> None:
+    if browser_ws.application_state == WebSocketState.CONNECTED:
+        with contextlib.suppress(Exception):
+            await browser_ws.close(code=code)
+
+
+def _forwardable_code(exc: ConnectionClosed) -> int:
+    """The upstream close code when it is one a server may send, else 1011."""
+    rcvd = exc.rcvd
+    code = rcvd.code if rcvd is not None else None
+    if code is None or code in (1005, 1006, 1015) or not 1000 <= code < 5000:
+        return 1011
+    return int(code)
+
+
+async def _upstream_to_browser(upstream, browser_ws: WebSocket) -> int:
+    """Relay upstream frames to the browser; return the browser close code."""
     try:
-        return int(raw)
-    except ValueError:
-        return store.latest_cursor()
+        async for frame in upstream:
+            if isinstance(frame, bytes):
+                await browser_ws.send_bytes(frame)
+            else:
+                await browser_ws.send_text(frame)
+    except ConnectionClosedOK:
+        return 1000
+    except WebSocketDisconnect:
+        return 1000
+    except ConnectionClosed as exc:
+        # Forward the upstream's own close code (Hermes sends 1008 for an
+        # archived or stale board slug) so the browser can tell why.
+        return _forwardable_code(exc)
+    except Exception as exc:
+        log.warning("board.events_pump_error", error=type(exc).__name__)
+        return 1011
+    return 1000
+
+
+async def _browser_to_upstream(browser_ws: WebSocket, upstream) -> int:
+    try:
+        while True:
+            msg = await browser_ws.receive()
+            if msg["type"] == "websocket.disconnect":
+                return 1000
+            data = msg.get("text")
+            if data is None:
+                data = msg.get("bytes")
+            if data is not None:
+                await upstream.send(data)
+    except WebSocketDisconnect:
+        return 1000
+    except Exception as exc:
+        log.warning("board.events_pump_error", error=type(exc).__name__)
+        return 1011
 
 
 async def proxy_board_events(browser_ws: WebSocket) -> None:
-    """Stream local board events to an already-accepted browser WS.
-
-    Named ``proxy_board_events`` for call-site stability (the route imports it),
-    though it no longer proxies — it tails the local store. Runs a poll loop
-    alongside a browser-drain task; either side closing ends the bridge.
-    """
-    store = await _ensure_store(browser_ws)
-    if store is None:
-        log.warning("hal0.board_ws.no_store")
-        if browser_ws.application_state == WebSocketState.CONNECTED:
-            with contextlib.suppress(Exception):
-                await browser_ws.close(code=1011)
+    """Bridge an accepted browser WS to the upstream kanban events WS."""
+    path = browser_ws.url.path
+    try:
+        resolve_board_client(browser_ws.app)
+        token = read_dashboard_token()
+    except BoardNotInstalled:
+        log.warning("board.events_not_installed", path=path)
+        await _close_browser(browser_ws, 1011)
+        return
+    except BoardNoToken:
+        log.warning("board.events_no_token", path=path)
+        await _close_browser(browser_ws, 1011)
         return
 
-    board = browser_ws.query_params.get("board")
-    cursor = _start_cursor(browser_ws, store)
-    stop = asyncio.Event()
-
-    async def drain_browser() -> None:
-        """Consume inbound frames purely to notice the browser disconnecting."""
-        try:
-            while True:
-                await browser_ws.receive_text()
-        except (WebSocketDisconnect, RuntimeError):
-            pass
-        finally:
-            stop.set()
-
-    async def poll() -> None:
-        nonlocal cursor
-        try:
-            while not stop.is_set():
-                events, new_cursor = store.events_since(cursor, board=board, limit=_FRAME_LIMIT)
-                if events:
-                    cursor = new_cursor
-                    if browser_ws.application_state != WebSocketState.CONNECTED:
-                        break
-                    await browser_ws.send_text(json.dumps({"events": events, "cursor": cursor}))
-                # Sleep one tick, but wake early if the browser drain signals stop.
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(stop.wait(), timeout=POLL_INTERVAL_SECONDS)
-        except (WebSocketDisconnect, RuntimeError):
-            pass
-        except Exception as exc:  # pragma: no cover — defensive
-            log.warning("hal0.board_ws.poll_error", error=str(exc))
-        finally:
-            stop.set()
-
-    drain = asyncio.create_task(drain_browser())
+    url = _build_upstream_url(browser_ws, token=token)
+    cm = connect(
+        url,
+        ping_interval=WS_PING_INTERVAL_SECONDS,
+        open_timeout=WS_OPEN_TIMEOUT_SECONDS,
+        # Loopback upstream: never route through an environment proxy (#2526).
+        proxy=None,
+    )
     try:
-        await poll()
+        upstream = await cm.__aenter__()
+    except Exception as exc:
+        # Never log ``exc``/``url``: either may carry the ?token= query.
+        log.warning("board.events_upstream_failed", error=type(exc).__name__)
+        await _close_browser(browser_ws, 1011)
+        return
+
+    tasks = [
+        asyncio.ensure_future(_upstream_to_browser(upstream, browser_ws)),
+        asyncio.ensure_future(_browser_to_upstream(browser_ws, upstream)),
+    ]
+    code = 1000
+    try:
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        code = next(iter(done)).result()
     finally:
-        drain.cancel()
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         with contextlib.suppress(Exception):
-            await drain
-        if browser_ws.application_state == WebSocketState.CONNECTED:
-            with contextlib.suppress(Exception):
-                await browser_ws.close()
+            await cm.__aexit__(None, None, None)
+        await _close_browser(browser_ws, code)
 
 
-__all__ = ["POLL_INTERVAL_SECONDS", "proxy_board_events"]
+__all__ = ["proxy_board_events"]

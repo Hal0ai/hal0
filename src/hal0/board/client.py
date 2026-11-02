@@ -292,6 +292,8 @@ def resolve_board_client(
     if cached is not None:
         return cached
     installed = getattr(state, "board_installed", None)
+    if installed is False:
+        raise BoardNotInstalled("the Hermes agent is not installed on this box")
     if installed is None:
         if installed_check is None:
             from hal0.board.auth import hermes_installed as installed_check

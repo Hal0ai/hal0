@@ -21,20 +21,56 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from starlette.responses import Response
 from starlette.websockets import WebSocketDisconnect
 
+import hal0.api.routes.board_ws as board_ws_mod
 from hal0.api import auth as auth_mod
 from hal0.api import create_app, live_sockets
 from hal0.api.agents import _auth
+from hal0.board import HermesKanbanClient
+from hal0.board.client import BoardClient
 from tests.realtime.conftest import default_backends
 
 ORIGIN = {"origin": "http://127.0.0.1:8080"}
 ADMIN_KEY = "test-admin-key-2801"
 CLIENT_KEY = "test-client-key-2801"
 _SESSION_UPDATE = json.dumps({"type": "session.update", "session": {}})
+
+
+class _HoldingUpstream:
+    """Fake Hermes kanban socket that emits nothing and stays open."""
+
+    def __init__(self) -> None:
+        self._never = asyncio.Event()
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        await (
+            self._never.wait()
+        )  # never released; the proxy cancels this when the browser side closes
+        raise StopAsyncIteration
+
+    async def send(self, data: Any) -> None:
+        return None
+
+
+class _HoldingConnect:
+    """Stand-in for ``websockets.asyncio.client.connect`` yielding the holder."""
+
+    def __call__(self, url: str, **kw: Any) -> _HoldingConnect:
+        return self
+
+    async def __aenter__(self) -> _HoldingUpstream:
+        return _HoldingUpstream()
+
+    async def __aexit__(self, *a: Any) -> None:
+        return None
 
 
 @pytest.fixture(autouse=True)
@@ -63,6 +99,21 @@ def app_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Test
     auth_mod._require_auth_cache = None
     app = create_app()
     app.state.realtime_backends = default_backends()
+    # The board feed proxies to Hermes; give it a fake upstream that holds the
+    # socket open so these tests exercise revocation, not the proxy's 1011.
+    kanban = HermesKanbanClient(
+        base_url="http://hermes.test:9119",
+        token_resolver=lambda: "tok",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda r: httpx.Response(200, json={})),
+            base_url="http://hermes.test:9119",
+        ),
+    )
+    app.state.hermes_kanban = kanban
+    app.state.board_client = BoardClient(kanban)
+    app.state.board_installed = True
+    monkeypatch.setattr(board_ws_mod, "read_dashboard_token", lambda: "tok")
+    monkeypatch.setattr(board_ws_mod, "connect", _HoldingConnect())
     with TestClient(app) as c:
         yield c
     auth_mod._require_auth_cache = None

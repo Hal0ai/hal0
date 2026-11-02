@@ -1894,23 +1894,13 @@ async def _boot_publish_runtime(app: FastAPI, ctx: BootState) -> None:
     app.state.audit_epoch = ctx.audit_epoch
     # Operator Board: thin audited proxy client to the Hermes kanban plugin
     # (loopback :9119). Constructed once per process; the board router funnels
-    # every /api/board/* call through it. Resolves HERMES_DASHBOARD_BASE_URL
-    # from from_env(); the session bearer is read from the shim's token file.
+    # every /api/board/* call through it. from_env() resolves the dashboard
+    # base URL (HERMES_DASHBOARD_BASE_URL, loopback default); the session
+    # bearer is re-read per request from the shim's token file.
     from hal0.board import HermesKanbanClient
 
     ctx.hermes_kanban = HermesKanbanClient.from_env()
     app.state.hermes_kanban = ctx.hermes_kanban
-    # KB-5 executor bridge (HP-executor): register the concrete Hermes
-    # BoardExecutor ONLY when Hermes is configured (env presence — no network
-    # call at startup). Inert otherwise: the KB-5 registry stays empty and the
-    # board runs fully with no executor (the seam's shipped state).
-    try:
-        from hal0.board.hermes_executor import register as _register_hermes_executor
-
-        if _register_hermes_executor(app):
-            log.info("board.hermes_executor_registered")
-    except Exception as exc:  # optional bridge must never block startup
-        log.warning("board.hermes_executor_register_failed", error=str(exc))
     await ctx.events.emit(
         "system.restart",
         "info",

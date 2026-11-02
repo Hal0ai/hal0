@@ -13,8 +13,8 @@ Hermes version bump that would break an adapter must re-vendor a fixture and
 consciously update a frozen signature/value here BEFORE the adapter lane builds
 against a verified surface.
 
-Lanes: hal0-memory, hal0-provider, hal0-voice, hal0-hermes-executor,
-hal0-hermes-automation, plus the cross-cutting security checklist (item 4).
+Lanes: hal0-memory, hal0-provider, hal0-voice, hal0-hermes-automation, plus the
+cross-cutting security checklist (item 4).
 """
 
 import tomllib
@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.fixtures.hermes.contracts import api_surface, config_defaults, kanban_runs
+from tests.fixtures.hermes.contracts import api_surface, config_defaults
 from tests.fixtures.hermes.contracts.memory_loader import (
     MEMORY_PLUGIN_SUBDIR,
     USER_PLUGIN_SUBDIR,
@@ -417,16 +417,14 @@ def test_automation_jobs_routes_are_frozen() -> None:
     )
 
 
-# ── lane: hal0-hermes-kanban (board executor bridge, KB-5) ────────────────
-# R5 §7 "drift-watch blind spot": hal0.board.hermes_executor.HermesBoardExecutor
-# dispatches board attempts to the Hermes kanban plugin's run ledger, and
-# hal0.agents.hermes_provision provisions the kanban DB schema — neither
-# surface was in tracked_files/contract fixtures until this lane.
+# ── lane: hal0-hermes-kanban (kanban DB schema provisioning) ──────────────
+# hal0.agents.hermes_provision provisions the kanban DB schema; the table
+# roster it checks is frozen here against upstream.
 
 
 def test_kanban_db_table_roster_is_frozen() -> None:
-    # The 7-table schema hal0's kanban_db_init provisioning phase
-    # (hal0.agents.hermes_provision._phase_kanban_db_init) checks for.
+    from hal0.agents.hermes_provision import KANBAN_DB_EXPECTED_TABLES
+
     assert {
         "tasks",
         "task_links",
@@ -435,30 +433,7 @@ def test_kanban_db_table_roster_is_frozen() -> None:
         "task_runs",
         "task_attachments",
         "kanban_notify_subs",
-    } == kanban_runs.KANBAN_DB_TABLES
-
-
-def test_kanban_runs_routes_present() -> None:
-    # Routes HermesBoardExecutor.inspect()/.reconcile() read today (both GET
-    # {WORKER_BASE_PATH}/{run_id}).
-    assert ("get", "/runs/{run_id}") in kanban_runs.KANBAN_RUNS_ROUTES
-    assert kanban_runs.KANBAN_PLUGIN_MOUNT_PREFIX == "/api/plugins/kanban"
-
-
-def test_kanban_runs_creation_and_cancel_routes_are_a_known_gap() -> None:
-    # KNOWN GAP (see kanban_runs.py module docstring + the hermes-bump
-    # runbook): HermesBoardExecutor.dispatch()/.cancel() call
-    # POST {WORKER_BASE_PATH} and POST {WORKER_BASE_PATH}/{run_id}/cancel,
-    # but the pinned upstream kanban plugin has neither route — only
-    # POST /dispatch (batch auto-dispatch) and POST /runs/{run_id}/terminate.
-    # This test is a canary: if a future Hermes bump adds either route, THIS
-    # ASSERTION STARTS FAILING — that is a signal to extend
-    # KANBAN_RUNS_ROUTES and re-check the executor bridge, not to delete the
-    # test. Do not "fix" this by adding the routes to the fixture without
-    # re-verifying upstream source.
-    assert ("post", "/runs") not in kanban_runs.KANBAN_RUNS_ROUTES
-    assert ("post", "/runs/{run_id}/cancel") not in kanban_runs.KANBAN_RUNS_ROUTES
-    assert ("post", "/runs/{run_id}/terminate") in kanban_runs.KANBAN_RUNS_ROUTES
+    } == set(KANBAN_DB_EXPECTED_TABLES)
 
 
 def test_hal0_never_sets_the_dashboard_public_url() -> None:

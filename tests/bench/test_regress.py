@@ -1,6 +1,6 @@
 """test_regress.py — regression detection math (DESIGN §11) + the
 ``bench.regression`` journal/board wiring (Phase 4), against FAKED
-AuditStore/BoardStore (no real SQLite audit/board db touched)."""
+AuditStore and a faked ``api_post`` (no real audit db or API touched)."""
 
 from __future__ import annotations
 
@@ -59,43 +59,45 @@ class ExplodingAuditStore(FakeAuditStore):
         raise RuntimeError("db locked")
 
 
-class FakeBoardStore:
-    instances: ClassVar[list[FakeBoardStore]] = []
+class FakeBoardApi:
+    """Stands in for ``hal0.cli._shared.api_post``: records each board POST."""
 
-    def __init__(self):
-        self.tasks: list[dict] = []
-        FakeBoardStore.instances.append(self)
+    calls: ClassVar[list[tuple[str, dict]]] = []
 
-    def create_task(self, body: dict) -> dict:
-        self.tasks.append(body)
-        return {"task": body}
+    def __call__(self, path: str, *, json: dict | None = None, **_: object) -> dict:
+        FakeBoardApi.calls.append((path, json or {}))
+        return {"task": json}
 
 
-class ExplodingBoardStore(FakeBoardStore):
-    def create_task(self, body: dict) -> dict:
-        raise RuntimeError("board db locked")
+class ExplodingBoardApi(FakeBoardApi):
+    def __call__(self, path: str, **_: object) -> dict:
+        raise RuntimeError("api down")
+
+
+def _patch_board(monkeypatch, api) -> None:
+    monkeypatch.setattr("hal0.cli._shared.api_post", api)
 
 
 def _reset():
     FakeAuditStore.instances = []
-    FakeBoardStore.instances = []
+    FakeBoardApi.calls = []
 
 
 class TestJournalFlags:
     def test_no_flags_writes_nothing(self, monkeypatch):
         _reset()
         monkeypatch.setattr(regress, "AuditStore", FakeAuditStore)
-        monkeypatch.setattr(regress, "BoardStore", FakeBoardStore)
+        _patch_board(monkeypatch, FakeBoardApi())
 
         journal_flags([], "roster")
 
         assert FakeAuditStore.instances == []
-        assert FakeBoardStore.instances == []
+        assert FakeBoardApi.calls == []
 
     def test_emits_one_audit_event_summarising_every_flag(self, monkeypatch):
         _reset()
         monkeypatch.setattr(regress, "AuditStore", FakeAuditStore)
-        monkeypatch.setattr(regress, "BoardStore", FakeBoardStore)
+        _patch_board(monkeypatch, FakeBoardApi())
         flags = [_flag(0), _flag(1)]
 
         journal_flags(flags, "roster")
@@ -113,37 +115,37 @@ class TestJournalFlags:
     def test_board_task_only_above_threshold(self, monkeypatch):
         _reset()
         monkeypatch.setattr(regress, "AuditStore", FakeAuditStore)
-        monkeypatch.setattr(regress, "BoardStore", FakeBoardStore)
+        _patch_board(monkeypatch, FakeBoardApi())
 
         at_threshold = [_flag(i) for i in range(BOARD_TASK_THRESHOLD)]
         journal_flags(at_threshold, "roster")
-        assert FakeBoardStore.instances == []  # <= threshold: no task
+        assert FakeBoardApi.calls == []  # <= threshold: no task
 
         _reset()
         monkeypatch.setattr(regress, "AuditStore", FakeAuditStore)
-        monkeypatch.setattr(regress, "BoardStore", FakeBoardStore)
+        _patch_board(monkeypatch, FakeBoardApi())
         above_threshold = [_flag(i) for i in range(BOARD_TASK_THRESHOLD + 1)]
         journal_flags(above_threshold, "roster")
-        [board] = FakeBoardStore.instances
-        [task] = board.tasks
-        assert task["status"] == "triage"
+        [(path, task)] = FakeBoardApi.calls
+        assert path == "/api/board/tasks"
+        assert set(task) == {"title", "body", "triage"}
+        assert task["triage"] is True
         assert str(BOARD_TASK_THRESHOLD + 1) in task["title"]
 
     def test_audit_failure_never_raises_and_board_task_still_attempted(self, monkeypatch):
         _reset()
         monkeypatch.setattr(regress, "AuditStore", ExplodingAuditStore)
-        monkeypatch.setattr(regress, "BoardStore", FakeBoardStore)
+        _patch_board(monkeypatch, FakeBoardApi())
         flags = [_flag(i) for i in range(BOARD_TASK_THRESHOLD + 1)]
 
         journal_flags(flags, "roster")  # must not raise
 
-        [board] = FakeBoardStore.instances
-        assert board.tasks  # board path still ran despite the audit failure
+        assert FakeBoardApi.calls  # board path still ran despite the audit failure
 
     def test_board_failure_never_raises(self, monkeypatch):
         _reset()
         monkeypatch.setattr(regress, "AuditStore", FakeAuditStore)
-        monkeypatch.setattr(regress, "BoardStore", ExplodingBoardStore)
+        _patch_board(monkeypatch, ExplodingBoardApi())
         flags = [_flag(i) for i in range(BOARD_TASK_THRESHOLD + 1)]
 
         journal_flags(flags, "roster")  # must not raise

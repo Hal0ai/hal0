@@ -24,7 +24,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from hal0.activity import AuditStore
-from hal0.board.store import BoardStore
 from hal0.config.paths import activity_db
 
 from .store import Store, _record_ts
@@ -138,12 +137,13 @@ def journal_flags(flags: list[Flag], suite_id: str) -> None:
     ``system.*`` — see that module + ``hal0.events.EventBus``'s ``sink``
     hook). This module runs CLI-side (``hal0 bench run``/``worker``), off
     hal0-api's FastAPI event loop, so it cannot reach ``app.state.events``;
-    ``AuditStore``/``BoardStore`` are both plain, dependency-free classes a
-    standalone process can open directly against the SAME on-disk store
-    (``hal0.config.paths.activity_db`` / the default board db — both
-    HAL0_HOME-aware, so tests never touch a real box's state; module-level
-    names, not lazy imports, so the test suite can inject a fake journal the
-    same way ``harness.BENCHCTL`` is monkeypatched elsewhere in this package).
+    ``AuditStore`` is a plain, dependency-free class a standalone process can
+    open directly against the SAME on-disk store
+    (``hal0.config.paths.activity_db``, HAL0_HOME-aware, so tests never touch a
+    real box's state; a module-level name, not a lazy import, so the test suite
+    can inject a fake journal the same way ``harness.BENCHCTL`` is
+    monkeypatched elsewhere in this package). The board task goes through the
+    running API (``POST /api/board/tasks``), which fronts the Hermes kanban.
 
     Journaling is diagnostic, never load-bearing: any failure here is logged
     to stderr and swallowed, never raised — a broken audit/board write must
@@ -185,16 +185,18 @@ def journal_flags(flags: list[Flag], suite_id: str) -> None:
     if len(flags) <= BOARD_TASK_THRESHOLD:
         return
     try:
-        BoardStore().create_task(
-            {
+        from hal0.cli._shared import api_post
+
+        api_post(
+            "/api/board/tasks",
+            json={
+                "triage": True,
                 "title": f"bench regression: {len(flags)} cell(s) in {suite_id!r}",
                 "body": "\n".join(
                     f"- {f.model_id} {f.cell_key[:16]} {f.delta_pct}% vs {f.trailing_median}"
                     for f in flags
                 ),
-                "status": "triage",
-                "created_by": "bench",
-            }
+            },
         )
     except Exception as exc:  # a board write must never break the session either
         print(f"[regress] board task creation failed: {exc!r}", file=sys.stderr)
