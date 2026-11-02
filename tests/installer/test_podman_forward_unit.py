@@ -164,3 +164,10 @@ def test_installer_reruns_a_unit_left_active_by_an_older_release() -> None:
     block = _install_block()
     assert "systemctl restart --no-block hal0-podman-forward" in block
     assert "--now" not in block
+
+
+def test_installer_migration_step_leaves_the_unit_to_the_start_stage() -> None:
+    """The heredoc also runs under --no-start, as root, so the seam runs in-process."""
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    calls = re.findall(r"run_post_activation_migrations\((.*?)\)", text)
+    assert calls == ["converge_podman_forward=False"]

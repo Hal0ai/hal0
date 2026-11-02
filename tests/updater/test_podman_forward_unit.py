@@ -300,6 +300,21 @@ def test_boot_net_does_not_touch_the_unit(monkeypatch: pytest.MonkeyPatch) -> No
     assert seen == []
 
 
+def test_kwarg_skips_the_seam(monkeypatch: pytest.MonkeyPatch) -> None:
+    """install.sh's path: --no-start must not touch the firewall."""
+    monkeypatch.setattr(updater_mod, "converge_api_unit", lambda *, job_id=None: "skipped")
+    argvs = _route_seam_to_root_side(monkeypatch)
+
+    def conversion(**_kw: Any) -> None:
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr("hal0.config.migrations.runner_system.migrate_runner_system", conversion)
+    with pytest.raises(RuntimeError):
+        updater_mod.run_post_activation_migrations(1, converge_podman_forward=False)
+
+    assert argvs == []
+
+
 def test_verb_refuses_arguments_and_an_untrusted_tree(
     monkeypatch: pytest.MonkeyPatch, unit_dst: Path, release: Path, tmp_path: Path
 ) -> None:

@@ -1877,6 +1877,7 @@ def run_post_activation_migrations(
     repair_hermes_venv: bool = True,
     upgrade_memory_engine_venv: bool = True,
     converge_companions: bool = True,
+    converge_podman_forward: bool = True,
     honour_restore_marker: bool = False,
     rerender_after_runner_conversion: bool = False,
     fetch_model_bundles: bool = True,
@@ -1957,6 +1958,12 @@ def run_post_activation_migrations(
     passes ``True``; an actual update passes the default ``False`` and
     converts again.
 
+    ``converge_podman_forward`` gates the hal0-podman-forward refresh, which on a
+    box with Docker changes firewall state. ``install.sh`` passes ``False``: it
+    lays the unit down itself and enables it only in its start stage, so
+    ``--no-start`` leaves the firewall alone. It has no effect unless
+    ``converge_companions`` is also true.
+
     ``converge_companions`` gates whether the component catalog
     (:func:`hal0.components.runner.converge_components`, the final pass
     below) is even allowed to mutate. It maps straight to that call's
@@ -1982,7 +1989,8 @@ def run_post_activation_migrations(
     # net leaves it to the next update, and doctor row `api-unit` reports it.
     if converge_companions:
         converge_api_unit(job_id=job_id)
-        converge_podman_forward_unit(job_id=job_id)
+        if converge_podman_forward:
+            converge_podman_forward_unit(job_id=job_id)
 
     # The runner-system conversion (ADR-0028) runs FIRST and is fatal: it
     # rewrites raw TOML before anything validates config, because a removed

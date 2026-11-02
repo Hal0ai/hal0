@@ -3439,7 +3439,7 @@ else
     hal0_migration_step "post-activation migrations" <<'PYEOF'
 from hal0.updater.updater import run_post_activation_migrations
 
-source, target = run_post_activation_migrations()
+source, target = run_post_activation_migrations(converge_podman_forward=False)
 if target != source:
     print(f"  hal0.toml schema migrated {source} -> {target}")
 else:

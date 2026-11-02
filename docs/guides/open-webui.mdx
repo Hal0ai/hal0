@@ -327,7 +327,8 @@ unit, so run that restart after each Docker start.
 The rules go at the top of `DOCKER-USER`, so they take effect ahead of any rules
 of your own there and allow all traffic to and from `podman0`. If you filter that
 traffic yourself, opt out by masking the unit, which the installer and
-`hal0 update` both leave alone, and then remove the rules it added:
+`hal0 update` both leave alone, and then remove the rules it added. A plain
+`systemctl disable` is not enough, because the next update enables the unit again.
 
 ```sh
 systemctl mask hal0-podman-forward
