@@ -109,8 +109,9 @@ def slot_may_hold_gpu_memory(slot: Any, *, unit_active: bool = False) -> bool:
     returns for one. ``unloading`` counts: the stop is issued but the process may
     still be up. ``error`` counts only when the process may still be alive, which
     is when the slot carries ``slow_stop`` (hal0 stopped waiting on a teardown that
-    may still finish) or the caller says the unit is active (``unit_active``, a
-    probe only the manager can make). A crashed engine in ``error`` whose process
+    may still finish) or ``stall_ceiling`` (the engine went silent and hal0 left it
+    running), or the caller says the unit is active (``unit_active``, a probe only
+    the manager can make). A crashed engine in ``error`` whose process
     is gone is the leak case, so it must NOT shield the box.
 
     A backend that cannot be read counts as a holder: unprovable reads as "may
@@ -121,7 +122,7 @@ def slot_may_hold_gpu_memory(slot: Any, *, unit_active: bool = False) -> bool:
     metadata = _field(slot, "metadata")
     meta = metadata if isinstance(metadata, Mapping) else {}
     if state == "error":
-        if not (meta.get("slow_stop") or unit_active):
+        if not (meta.get("slow_stop") or meta.get("stall_ceiling") or unit_active):
             return False
     elif state not in _HOLDING_STATES:
         return False

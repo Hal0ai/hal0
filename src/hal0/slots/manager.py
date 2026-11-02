@@ -1878,9 +1878,15 @@ class SlotManager:
                 # engine. terminate() here would SIGTERM/SIGKILL it (the exact
                 # teardown that leaks the driver's memory), at request cadence.
                 # Refuse without touching the unit; ``restart`` goes through
-                # OFFLINE first and is unaffected.
+                # OFFLINE first and is unaffected. Only while the unit is alive:
+                # once it has died there is no engine left to protect, so the
+                # normal ERROR path below reloads it.
                 stalled_rec = self._states.get(self._key(slot_name))
-                if stalled_rec is not None and stalled_rec.extra.get("stall_ceiling"):
+                if (
+                    stalled_rec is not None
+                    and stalled_rec.extra.get("stall_ceiling")
+                    and await self._is_active(slot_name)
+                ):
                     raise SlotStallCeiling(
                         f"slot {slot_name!r} hit the stall ceiling: its model server "
                         f"stopped answering /health. The engine was left running; "
@@ -4640,13 +4646,16 @@ class SlotManager:
             return None
 
         # #3282: the stall ceiling's ERROR sticks. Adoption's non-strict probe
-        # reads a stall as healthy, so without this the slot would flip back to
-        # READY (and a fresh watcher) on the next status()/list(). Adopt only
-        # once the engine actually answers again.
+        # reads a stall (or a probe that raises) as healthy, so without this the
+        # slot would flip back to READY (and a fresh watcher) on the next
+        # status()/list(). Adopt only once the engine actually answers again;
+        # that strict answer is also the /health verdict below, so a silent
+        # engine cannot hold this call for the probe's whole read timeout.
+        stall_cleared = False
         if prior is not None and prior.extra.get("stall_ceiling"):
-            detail_ok, still_stalled = await self._watchdog._probe_health_detail(slot_name)
-            if not detail_ok or still_stalled:
+            if not await self._watchdog.stall_ceiling_cleared(slot_name, cfg):
                 return None
+            stall_cleared = True
 
         # #790: an active unit is not necessarily ready. A still-loading or
         # wedged container is active to systemd while its model server isn't
@@ -4657,7 +4666,7 @@ class SlotManager:
         # gracefully (inconclusive → True) so a probe transport error never
         # 500s the best-effort /api/slots list, and short-circuits NPU trio
         # shadows (no own model server) to healthy.
-        healthy = await self._probe_health(slot_name)
+        healthy = stall_cleared or await self._probe_health(slot_name)
         resolved = SlotState.READY if healthy else SlotState.WARMING
         extras: dict[str, Any] = {
             # W3: mirror the device-derived EFFECTIVE backend, not a

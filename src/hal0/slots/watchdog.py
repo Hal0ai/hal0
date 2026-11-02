@@ -96,6 +96,11 @@ _WARMING_STALE_AFTER_S: float = 900.0
 # otherwise decide.
 _STALL_CEILING_S: float = 900.0
 _STALL_CEILING_STRIKES: int = 10
+# How often a slot already at the stall ceiling re-probes from status()/list().
+# Each probe can wait out the readiness budget, and GET /api/slots, the metrics
+# sampler and preload eviction all go through status(), so an unthrottled probe
+# would slow every one of those calls for as long as the engine stays silent.
+_STALL_REPROBE_INTERVAL_S: float = 30.0
 
 
 class WatchdogHost(Protocol):
@@ -119,6 +124,9 @@ class SlotWatchdog:
 
     def __init__(self, host: WatchdogHost) -> None:
         self._host = host
+        # Last re-probe of a stall-ceiling ERROR, by slot key (#3282). Only ever
+        # holds a probe that did not clear the ceiling: a clear removes the entry.
+        self._stall_reprobed_at: dict[int, float] = {}
 
     def update(self, name: str, new_state: SlotState) -> None:
         """Spawn or cancel the per-slot fail-watcher to match ``new_state``.
@@ -357,6 +365,8 @@ class SlotWatchdog:
                             extra={"health_ok": False, "stall_ceiling": True},
                         )
                         if stamped:
+                            # A fresh ERROR gets a fresh re-probe.
+                            self._stall_reprobed_at.pop(host._key(slot_name), None)
                             return
                         # Declined (the engine answered, or a request is in
                         # flight): the slot is still live, so keep watching with
@@ -527,6 +537,36 @@ class SlotWatchdog:
             return (not strict, True)
         return (bool(health.get("ok")), False)
 
+    async def stall_ceiling_cleared(self, slot_name: str, cfg: dict[str, Any]) -> bool:
+        """True only when a stall-ceiling ERROR's engine demonstrably answers again.
+
+        Strict: a stall, a transport error, a missing port and a probe that
+        outlasts the readiness budget all read as "not cleared", so the ERROR
+        stays. Bounded and throttled because status() and list() are the callers
+        (:data:`_STALL_REPROBE_INTERVAL_S`). The timestamp is taken before the
+        probe so concurrent callers skip it instead of queueing behind it; the
+        cost is that a recovered engine can read ERROR for up to one interval.
+        """
+        from hal0.providers.container import readiness_probe_budget_s
+
+        key = self._host._key(slot_name)
+        now = time.monotonic()
+        last = self._stall_reprobed_at.get(key)
+        if last is not None and now - last < _STALL_REPROBE_INTERVAL_S:
+            return False
+        self._stall_reprobed_at[key] = now
+        try:
+            healthy, stalled = await asyncio.wait_for(
+                self._probe_health_detail(slot_name, strict=True),
+                readiness_probe_budget_s(cfg),
+            )
+        except TimeoutError:
+            return False
+        if not healthy or stalled:
+            return False
+        self._stall_reprobed_at.pop(key, None)
+        return True
+
     async def readiness_check(self, slot_name: str) -> tuple[bool, str]:
         """Check whether a container-backed slot is ready to serve requests.
 
@@ -585,6 +625,7 @@ __all__ = [
     "_HEALTH_FAIL_STRIKES",
     "_STALL_CEILING_S",
     "_STALL_CEILING_STRIKES",
+    "_STALL_REPROBE_INTERVAL_S",
     "_WARMING_INACTIVE_STRIKES",
     "_WARMING_STALE_AFTER_S",
     "SlotWatchdog",

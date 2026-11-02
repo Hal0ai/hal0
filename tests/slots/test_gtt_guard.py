@@ -168,6 +168,14 @@ def test_an_error_slot_with_an_abandoned_teardown_may_still_hold_memory() -> Non
     )
 
 
+def test_an_error_slot_at_the_stall_ceiling_may_still_hold_memory() -> None:
+    """The doctor reads the API's slot dict and cannot probe the unit, so the mark
+    alone must say the silent engine was left running (#3282)."""
+    assert slot_may_hold_gpu_memory(
+        {"name": "a", "state": "error", "backend": "rocm", "metadata": {"stall_ceiling": True}}
+    )
+
+
 @pytest.mark.parametrize("backend", ["cpu", "flm", "npu"])
 def test_cpu_and_npu_slots_hold_no_gtt(backend: str) -> None:
     """An FLM slot is resident on the NPU; counting it would hide a real leak on

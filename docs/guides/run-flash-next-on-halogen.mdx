@@ -345,8 +345,9 @@ leaves the driver holding its memory. Only a connection that really breaks count
 against the slot. A stall is not tolerated forever: after 900 seconds (and at least ten
 probes) with no answered probe, and no request in flight, the slot turns to ERROR with a
 message naming the stall ceiling. The engine is not killed. The ERROR holds, even if the
-unit is still active, until the engine answers again or you run `hal0 slot restart <name>`;
-the next request is refused until then. A request that arrives during a stall waits at most
+unit is still active, until the engine answers again (hal0 checks at most every 30 seconds)
+or you run `hal0 slot restart <name>`; the next request is refused until then. If the unit
+has died by then, the next request reloads the slot as usual. A request that arrives during a stall waits at most
 five seconds and then gets a retryable 503 (`slot.loading`).
 
 ### The GTT-leak warning

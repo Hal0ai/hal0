@@ -24,7 +24,7 @@ from hal0.providers.container import ContainerProvider
 from hal0.providers.halogen import HalogenProvider
 from hal0.slots import watchdog as wd_mod
 from hal0.slots.manager import SlotManager
-from hal0.slots.state import SlotState
+from hal0.slots.state import SlotStallCeiling, SlotState
 from tests.slots.conftest import FakeContainerProvider
 
 
@@ -324,11 +324,90 @@ async def test_the_ceiling_error_recovers_when_the_engine_answers(
     await sm._transition("chat", SlotState.OFFLINE, force=True)
 
 
+async def test_a_raising_probe_keeps_the_ceiling_error(provider: _RealHealth, ceiling: int) -> None:
+    """A probe that raises proves nothing, so it must not read as the engine answering."""
+    sm = SlotManager()
+    with _http(_hangs):
+        await _stalled_to_error(sm)
+
+    async def boom(port: int, slot_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+        raise RuntimeError("probe transport blew up")
+
+    provider.health = boom  # type: ignore[method-assign]
+    assert (await sm.status("chat")).state is SlotState.ERROR
+    assert sm._states[sm._key("chat")].extra.get("stall_ceiling") is True
+
+
+async def test_a_slow_probe_keeps_the_ceiling_error_and_returns_within_the_bound(
+    provider: _RealHealth, ceiling: int
+) -> None:
+    async def slow(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(30.0)
+        return httpx.Response(200, json={})
+
+    sm = SlotManager()
+    with _http(_hangs):
+        await _stalled_to_error(sm)
+    started = time.monotonic()
+    with _http(slow), patch.object(HalogenProvider, "readiness_budget_s", 0.05):
+        assert (await sm.status("chat")).state is SlotState.ERROR
+    assert time.monotonic() - started < 5.0
+    assert sm._states[sm._key("chat")].extra.get("stall_ceiling") is True
+
+
+async def test_the_ceiling_error_reprobes_at_most_once_per_interval(
+    provider: _RealHealth, ceiling: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """status() and list() must not each pay for a probe of a silent engine."""
+    calls = {"n": 0}
+
+    def counted(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return _hangs(request)
+
+    sm = SlotManager()
+    with _http(_hangs):
+        await _stalled_to_error(sm)
+    with _http(counted):
+        await asyncio.gather(*(sm.status("chat") for _ in range(4)))
+        await sm.list()
+        await sm.status("chat")
+    assert calls["n"] == 1
+    # An engine that recovers inside the interval waits for the next probe…
+    with _http(lambda request: httpx.Response(200, json={})):
+        assert (await sm.status("chat")).state is SlotState.ERROR
+        # …and the next one past it clears the ERROR.
+        monkeypatch.setattr(wd_mod, "_STALL_REPROBE_INTERVAL_S", 0.0)
+        assert (await sm.status("chat")).state is SlotState.READY
+    await sm._transition("chat", SlotState.OFFLINE, force=True)
+
+
+async def test_a_new_ceiling_error_is_probed_at_once(provider: _RealHealth, ceiling: int) -> None:
+    """The throttle belongs to one ERROR; a later stamp must not inherit it."""
+    sm = SlotManager()
+    with _http(_hangs):
+        await _stalled_to_error(sm)
+        assert (await sm.status("chat")).state is SlotState.ERROR
+        await _stalled_to_error(sm)
+    with _http(lambda request: httpx.Response(200, json={})):
+        assert (await sm.status("chat")).state is SlotState.READY
+    await sm._transition("chat", SlotState.OFFLINE, force=True)
+
+
+async def test_the_ceiling_error_counts_as_holding_gpu_memory(
+    provider: _RealHealth, ceiling: int
+) -> None:
+    from hal0.slots.gtt_guard import slot_may_hold_gpu_memory
+
+    sm = SlotManager()
+    with _http(_hangs):
+        await _stalled_to_error(sm)
+        assert slot_may_hold_gpu_memory(await sm.status("chat"))
+
+
 async def test_lazy_load_refuses_a_ceiling_error_without_killing_the_engine(
     provider: _RealHealth, ceiling: int
 ) -> None:
-    from hal0.slots.state import SlotStallCeiling
-
     sm = SlotManager()
     terminated: list[str] = []
 
@@ -342,6 +421,24 @@ async def test_lazy_load_refuses_a_ceiling_error_without_killing_the_engine(
             await sm.load("chat")
     assert terminated == []
     assert sm.state("chat") is SlotState.ERROR
+
+
+async def test_lazy_load_reloads_a_ceiling_error_whose_unit_has_died(
+    provider: _RealHealth, ceiling: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No engine is left to protect, so this is an ordinary ERROR: never the refusal."""
+
+    async def ready_at_once(self: SlotManager, *a: object, **kw: object) -> SlotState:
+        return SlotState.READY
+
+    monkeypatch.setattr(SlotManager, "_await_ready", ready_at_once)
+    sm = SlotManager()
+    with _http(_hangs):
+        await _stalled_to_error(sm)
+        provider.active.discard("chat")
+        assert (await sm.load("chat")).state is SlotState.READY
+    assert "stall_ceiling" not in sm._states[sm._key("chat")].extra
+    await sm._transition("chat", SlotState.OFFLINE, force=True)
 
 
 async def test_restart_still_recycles_a_ceiling_error(provider: _RealHealth, ceiling: int) -> None:
