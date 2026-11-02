@@ -276,6 +276,44 @@ board executor harvests are unchanged at NEW.
      is re-verified. The converge arm's call after a build or a converged
      no-op stays. The verb, its sudoers grant, its validation and its
      never-run-Hermes posture do not change.
+   - **Amendment (2026-11-02, #3160): `hal0 update` re-renders the API unit
+     through a new `refresh-api-unit` verb.** `hal0-api.service` was written
+     only by `install.sh`, so an upgraded box kept the unit of its first
+     install. The body now lives in `installer/systemd/hal0-api.service.in`,
+     and `hal0-update refresh-api-unit` re-renders it, as root, after an
+     update or a rollback. Like `hermes-gateway`, the verb takes **no
+     arguments**: the wrapper refuses any. The sudoers grant does not change,
+     because the `hal0-update` grant has no argument list and already names
+     the wrapper.
+   - As root the verb reads only: the template from the tree `current`
+     names, which must pass the same root-owned test as `activate`
+     (`assert_trusted_release_dir`); the installed unit; `sys.prefix`; the
+     `current` link; a `systemd-journal` group lookup; and `api.env`, reduced
+     to one boolean (does it set `HAL0_BIND_HOST`). Per-box values (binary,
+     working directory, env-file paths) are recovered from the installed unit
+     and substituted into the template; a value that would break out of its
+     directive is refused. It never restarts `hal0-api`, never touches
+     `hal0-api.service.d/` drop-ins, and writes `root:root 0644` atomically,
+     then runs `systemctl daemon-reload`. A failed reload puts the previous
+     file back. It does not create a unit on a box that has none.
+   - **Two holds keep a refresh from changing who runs the API or where it
+     listens.** (1) Bind host: a pre-WS-C unit passes `--host` on `ExecStart`
+     and the template reads `HAL0_BIND_HOST` from `api.env`; if `api.env` does
+     not set it (or cannot be read as a small regular UTF-8 file, without
+     following a symlink), the refresh is held so a LAN box is not dropped to
+     loopback. (2) Account: any `User=` other than `hal0` (the 0.9.3-0.9.8
+     unit ran as `root`) is held, because the template renders
+     `User=hal0`/`Group=hal0` and the restart would move a root-run API onto
+     root-owned trees. A held refresh is not an error: `hal0 doctor all`
+     row `api-unit` says which hold applies and the fix (set
+     `HAL0_BIND_HOST`; or re-run the installer, or fix ownership so the unit
+     runs as `hal0`).
+   - **Root-equivalence (ADR-0002, Bypass B).** The `hal0` account, and so
+     the bundled agent, can invoke this verb, exactly as it can every other
+     `hal0-update` verb. It adds no capability: it takes no input, reads
+     only the sources above, and rewrites one unit from a template in a
+     root-owned tree. The agent is already treated as root-equivalent on the
+     box (ADR-0002 Option C); nothing here narrows or widens that.
 7. **New: hal0 turns session pruning off.** The config overlay writes
    `sessions.auto_prune: false` at the pin bump, so an upgrade deletes no
    session history. Retention policy is a later decision with its own
