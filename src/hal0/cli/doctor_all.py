@@ -822,6 +822,59 @@ def check_api_unit_current(
     )
 
 
+class _NeedsSudo(str):
+    """A backup probe that cannot judge hal0's access from this uid."""
+
+
+def _hal0_ids() -> tuple[int, int] | None:
+    try:
+        return pwd.getpwnam("hal0").pw_uid, grp.getgrnam("hal0").gr_gid
+    except KeyError:
+        return None
+
+
+def _backup_probe(db: Path, backups: Path) -> str | None:
+    """Why hal0 could not write migration 015's snapshot, or ``None``.
+
+    Judges *hal0's* access, not the caller's: as root from the directory's
+    owner/group/mode bits, as a hal0 member with ``os.access``, and otherwise
+    returns :class:`_NeedsSudo` rather than guessing.
+    """
+    try:
+        if backups.exists() and not backups.is_dir():
+            return f"{backups} exists but is not a directory"
+        target = backups if backups.exists() else backups.parent
+        st = target.stat()
+    except OSError as exc:
+        return f"{backups} cannot be inspected ({exc})"
+    ids = _hal0_ids()
+    need = db.stat().st_size if db.exists() else 0
+    euid = os.geteuid()
+    if ids is not None and euid == 0:
+        uid, gid = ids
+        if st.st_uid == uid:
+            bits = stat.S_IWUSR | stat.S_IXUSR
+        elif st.st_gid == gid:
+            bits = stat.S_IWGRP | stat.S_IXGRP
+        else:
+            bits = stat.S_IWOTH | stat.S_IXOTH
+        if (st.st_mode & bits) != bits:
+            return f"{backups} is not writable by hal0"
+    else:
+        if ids is not None and euid != ids[0] and ids[1] not in os.getgroups():
+            return _NeedsSudo("re-run with sudo for the backup check")
+        if not os.access(target, os.W_OK | os.X_OK):
+            return f"{backups} is not writable by this user"
+    try:
+        free = shutil.disk_usage(target).free
+    except OSError:
+        return None
+    if free < need:
+        return f"{target} has {free // 2**20} MiB free, the database is {need // 2**20} MiB"
+    return None
+
+
+@_report_unreadable("migration-015", "Model-tuning migration (015)")
 def check_migration_015(
     *,
     db_path: Path | None = None,
@@ -832,40 +885,34 @@ def check_migration_015(
     015 snapshots the database to ``backups/`` before it drops the tuning, and
     stays unapplied when that write fails, which leaves ``/api/models``
     answering 503 ``db.migration_backup_failed``. Read-only: opens the
-    database read-only and never migrates. ``fail`` when 015 is pending and the
-    backups directory cannot take the snapshot, ``warn`` when it is pending for
-    another reason. Probes are injectable.
+    database read-only and never migrates. ``fail`` when 015 is pending, would
+    destroy tuning, and the backups directory cannot take the snapshot;
+    ``warn`` when it is pending for another reason. Probes are injectable.
     """
+    from hal0.db.migrate import _has_retired_tuning
+
     key, title = "migration-015", "Model-tuning migration (015)"
     db = db_path if db_path is not None else paths.db_path()
     if not db.exists():
         return Check(key, title, _PASS, "no database yet (a new install migrates on first start)")
     try:
-        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True)
         try:
             rows = conn.execute("SELECT version FROM schema_migrations").fetchall()
+            applied = 15 in {int(r[0]) for r in rows}
+            needs_backup = not applied and _has_retired_tuning(conn)
         finally:
             conn.close()
     except sqlite3.Error as exc:
         return Check(key, title, _WARN, f"could not read {db}: {exc}")
-    if 15 in {int(r[0]) for r in rows}:
+    if applied:
         return Check(key, title, _PASS, "migration 015 applied")
 
-    def _probe() -> str | None:
-        backups = paths.var_lib() / "backups"
-        target = backups if backups.exists() else backups.parent
-        if not os.access(target, os.W_OK | os.X_OK):
-            return f"{backups} is not writable by this user"
-        try:
-            free = shutil.disk_usage(target).free
-            need = db.stat().st_size
-        except OSError:
-            return None
-        if free < need:
-            return f"{target} has {free // 2**20} MiB free, the database is {need // 2**20} MiB"
-        return None
-
-    problem = (backup_problem or _probe)()
+    problem = None
+    if needs_backup:
+        problem = (backup_problem or (lambda: _backup_probe(db, paths.var_lib() / "backups")))()
+    if isinstance(problem, _NeedsSudo):
+        return Check(key, title, _WARN, f"migration 015 is pending; {problem}")
     if problem is not None:
         return Check(
             key,
