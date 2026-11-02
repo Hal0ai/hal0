@@ -222,7 +222,10 @@ sudo bash installer/install.sh --summary-json=/tmp/hal0-install-summary.json
 `hindsight`, `brain`) to `"selected"`, `"skipped"` or `"unavailable:<reason>"`;
 the example shows three of the six. `selected` records the operator's choice
 at install time, not the outcome: a later step may still skip or fail (see
-`warnings`). `skipped` means opted out by flag, env or checklist.
+`warnings`). `skipped` means opted out by flag, env or checklist, or, for
+Pi, not opted in: a default headless install skips Pi with no opt-out to pass
+(Pi is opt-in through `HAL0_INSTALL_PI=1` or the checklist row). A box where
+`pi` is already on `PATH` records Pi as `selected` even with `--no-pi`.
 `unavailable:<reason>` means the checklist could not offer it; headless runs
 report it only for Hindsight. It is additive to schema
 `hal0.install-summary.v1`, so the schema version does not change.

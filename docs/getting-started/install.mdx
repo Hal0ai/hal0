@@ -185,6 +185,11 @@ Pick a preset: `a` keeps the defaults, `b` is bare inference (everything off),
 `p` lets you pick row by row. Enter alone is `a`. A row whose precondition
 fails on this machine is shown greyed with the reason and cannot be turned on.
 
+The answer on screen wins over the environment: a row toggled on overrides an env
+knob that would have skipped it (the installer unsets the matching
+`HAL0_SKIP_<X>`, or `HAL0_IMAGE_MODELS=none` for ComfyUI). The chosen set is
+written to the install log as one line.
+
 The checklist does not appear on an upgrade, with `--dev` or `--no-start`,
 without a terminal, with `HAL0_NONINTERACTIVE=1`, or when you pass any
 component flag; those installs use the flags and variables above.
