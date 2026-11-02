@@ -2991,17 +2991,6 @@ def test_resolved_footprint_for_a_halogen_slot(
     assert asked[0]["ctx_tokens"] == HALOGEN_NATIVE_CTX
 
 
-def _halogen_provider_sizes_itself() -> bool:
-    """Whether ``HalogenProvider`` carries its own ``footprint_mb`` (the capacity lane's hook)."""
-    from hal0.providers.halogen import HalogenProvider
-
-    return "footprint_mb" in vars(HalogenProvider)
-
-
-@pytest.mark.skipif(
-    not _halogen_provider_sizes_itself(),
-    reason="HalogenProvider has no footprint_mb of its own on this branch",
-)
 def test_resolved_footprint_through_the_providers_own_hook(
     container_stub: dict[str, Any],
     isolated_app: FastAPI,
