@@ -6655,6 +6655,11 @@ _LOCAL = "http://127.0.0.1:8080/v1"
         (_cfg("llama-old", "custom", _LOCAL), True, True, "llama-old"),
         (_cfg("llama-old", "custom", _LOCAL), True, None, "llama-old"),
         (_cfg("llama-old", "custom", _LOCAL), True, False, None),
+        # placeholder literal and non-live-resolve pins are hal0's
+        (_cfg("primary", "custom", _LOCAL), True, True, None),
+        (_cfg("primary", "custom", _LOCAL), False, True, None),
+        (_cfg("llama-old", "custom", _LOCAL), False, True, None),
+        (_cfg("llama-old", "custom", _LOCAL), False, None, None),
         # live-resolve box with the old direct primary id: converge
         (_cfg("qwen3:8b", "custom", _LOCAL), True, None, None),
     ],

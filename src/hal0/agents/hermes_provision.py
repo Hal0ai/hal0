@@ -1593,7 +1593,7 @@ def _resolve_primary_slot(
     # record it in details["fallbacks"] (#702 fallback observability)
     # instead of inferring it from the model name.
     fallback = {
-        "model": "primary",
+        "model": _PLACEHOLDER_PRIMARY_MODEL,
         "base_url": _DEFAULT_PRIMARY_BACKEND_URL,
         "context_length": 32768,
         "placeholder": True,
@@ -2368,6 +2368,7 @@ def _fmt_config_value(value: Any) -> str:
 MODEL_WIRING_KEYS = ("model.default", "model.provider", "model.base_url")
 
 
+_PLACEHOLDER_PRIMARY_MODEL = "primary"
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
@@ -2426,8 +2427,10 @@ def _operator_model_choice(
     carrying a managed id); a scalar ``model:``; or a direct id on custom +
     loopback that hal0 would not write, unless the endpoint affirmatively says
     it no longer routes (``False``: stale, converge). ``True``/``None`` keep.
-    Any ``hal0/*`` virtual and the primary's own id count as hal0's, so a
-    picked ``hal0/utility`` still resets to the agent slot.
+    Any ``hal0/*`` virtual, the primary's own id and the no-ready-slot
+    placeholder count as hal0's, so a picked ``hal0/utility`` still resets to
+    the agent slot. With ``live_resolve`` off every direct id on custom +
+    loopback is hal0's pin, so a local pick resets in that mode.
     """
     foreign = _foreign_model_wiring(config_text)
     if foreign is not None:
@@ -2438,7 +2441,11 @@ def _operator_model_choice(
     default, _provider, base_url = block
     if default in (_model_default_id(primary_model_id, live_resolve), primary_model_id):
         return None
-    if default.startswith("hal0/"):
+    if default.startswith("hal0/") or default == _PLACEHOLDER_PRIMARY_MODEL:
+        return None
+    if not live_resolve:
+        # HAL0_HERMES_LIVE_RESOLVE=0: hal0 itself pins a direct id here, so an
+        # old pin after a slot swap is hal0's. A local pick resets in this mode.
         return None
     return None if route_ready(default, base_url) is False else default
 
