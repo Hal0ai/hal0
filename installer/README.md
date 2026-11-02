@@ -210,12 +210,25 @@ sudo bash installer/install.sh --summary-json=/tmp/hal0-install-summary.json
   "network": { "bind_host": "0.0.0.0", "port": 8080, "openwebui_port": 3001 },
   "hardware_class": { "id": "strix-halo", "label": "AMD Radeon 8060S" },
   "brain_model": "lfm2.5-2.6b",
+  "components": { "openwebui": "selected", "hermes": "skipped", "hindsight": "unavailable:no usable Python 3.11-3.14" },
   "warnings": 1,
   "errors": 0,
   "elapsed_seconds": 612,
   "step_durations_seconds": { "Pre-flight checks": 6, "Python environment": 54, "...": 0 }
 }
 ```
+
+`components` maps each component id (`openwebui`, `comfyui`, `hermes`, `pi`,
+`hindsight`, `brain`) to `"selected"`, `"skipped"` or `"unavailable:<reason>"`;
+the example shows three of the six. `selected` records the operator's choice
+at install time, not the outcome: a later step may still skip or fail (see
+`warnings`). `skipped` means opted out by flag, env or checklist, or, for
+Pi, not opted in: a default headless install skips Pi with no opt-out to pass
+(Pi is opt-in through `HAL0_INSTALL_PI=1` or the checklist row). A box where
+`pi` is already on `PATH` records Pi as `selected` even with `--no-pi`.
+`unavailable:<reason>` means the checklist could not offer it; headless runs
+report it only for Hindsight. It is additive to schema
+`hal0.install-summary.v1`, so the schema version does not change.
 
 `hardware_class` reads `/etc/hal0/hardware.json` — `id` is its `platform`
 value, `label` the primary GPU's name (absent file → `"unknown"`/
