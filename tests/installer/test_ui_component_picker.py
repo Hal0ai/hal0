@@ -175,3 +175,52 @@ def test_rows_fit_terminal_width(run_picker, tmp_path):
         lines = [ln.rsplit("\r", 1)[-1] for ln in text.split("\n")]
         assert any("Hermes agent" in ln for ln in lines)
         assert max(len(ln) for ln in lines) < 60, lines
+
+
+DEFAULTS = {"openwebui": "on", "comfyui": "on", "hermes": "on",
+            "pi": "off", "hindsight": "unavailable", "brain": "on"}
+
+
+@pytest.mark.parametrize("plain", [True, False])
+def test_lost_terminal_returns_defaults(run_picker, plain):
+    # Every write to the picker's terminal fails; under set -e that must not
+    # abort the installer, the picker falls through with the current state.
+    out = run_picker(keys="", plain=plain, tty_out="/dev/full")
+    assert out == DEFAULTS
+
+
+def test_zero_width_winsize_falls_back_to_80(run_picker, tmp_path):
+    import re
+    out_file = tmp_path / "tty-out"
+    run_picker(keys="\n", plain=True, cols=0, tty_out=out_file)
+    text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out_file.read_bytes().decode())
+    widest = max(len(ln) for ln in text.split("\n"))
+    assert 60 < widest < 80, widest
+
+
+def _bold_under_pty(term):
+    import os
+    import pty
+
+    master, slave = pty.openpty()
+    env = {"PATH": "/usr/bin:/bin"}
+    if term is not None:
+        env["TERM"] = term
+    proc = subprocess.run(
+        ["bash", "-c", f'source "{UI_SH}"; printf "[%s%s]" "$BOLD" "$DIM"'],
+        env=env, stdout=slave, stderr=subprocess.DEVNULL, timeout=30,
+    )
+    os.close(slave)
+    data = os.read(master, 4096).decode()
+    os.close(master)
+    assert proc.returncode == 0
+    return data
+
+
+@pytest.mark.parametrize("term", ["dumb", None])
+def test_dumb_or_unset_term_emits_no_sgr(term):
+    assert "\x1b[" not in _bold_under_pty(term)
+
+
+def test_color_term_still_emits_sgr():
+    assert "\x1b[1m" in _bold_under_pty("xterm")

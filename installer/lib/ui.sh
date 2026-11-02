@@ -32,6 +32,7 @@ _ui_init_colors() {
     UI_PLAIN="${HAL0_PLAIN:-0}"
     if [[ -n "${NO_COLOR:-}" ]]; then UI_PLAIN=1; fi
     if ! [[ -t 1 ]]; then UI_PLAIN=1; fi
+    if [[ -z "${TERM:-}" || "${TERM}" == "dumb" ]]; then UI_PLAIN=1; fi
 
     if [[ "${UI_PLAIN}" == "1" ]]; then
         RED=; YEL=; GRN=; BLU=; AMBER=
@@ -392,6 +393,13 @@ ui_box() {
 # The helpers below read the picker's locals through bash dynamic scope
 # (_up_* variables), so only ui_component_picker may call them.
 
+# Write to the picker terminal (fd 3). A lost terminal must not abort an
+# installer running under set -e, so a failed write is dropped silently.
+_ui_picker_out() {
+    # shellcheck disable=SC2059  # callers pass a literal format
+    printf "$@" >&3 2>/dev/null || true
+}
+
 # Terminal width for clipping: UI_TTY_COLS, else `stty size` on fd 4, else 80.
 _ui_picker_width() {
     local _up_sz _up_w=""
@@ -401,7 +409,7 @@ _ui_picker_width() {
         _up_sz="$(stty size <&4 2>/dev/null)" || _up_sz=""
         _up_w="${_up_sz##* }"
     fi
-    [[ "$_up_w" =~ ^[0-9]+$ ]] || _up_w=80
+    [[ "$_up_w" =~ ^[1-9][0-9]*$ ]] || _up_w=80
     (( _up_w >= 20 )) || _up_w=20
     _up_cols="$_up_w"
 }
@@ -429,7 +437,7 @@ _ui_picker_render() {
         _up_avail=$((_up_cols - 1 - _up_plen))
         if [[ -n "${_up_reason[$_up_i]}" ]]; then
             _up_full="[-] ${_up_labels[$_up_i]}  (${_up_reason[$_up_i]})"
-            printf '%s%s%s%s%s\n' "$_up_clear" "$_up_lead" "${DIM}" "${_up_full:0:_up_avail}" "${RST}" >&3
+            _ui_picker_out '%s%s%s%s%s\n' "$_up_clear" "$_up_lead" "${DIM}" "${_up_full:0:_up_avail}" "${RST}"
         else
             if [[ "${_up_cur[$_up_i]}" == "on" ]]; then _up_mark="x"; else _up_mark=" "; fi
             _up_head="[${_up_mark}] ${_up_labels[$_up_i]}"
@@ -437,17 +445,17 @@ _ui_picker_render() {
             _up_full="${_up_full:0:_up_avail}"
             _up_hd="${_up_full:0:${#_up_head}}"
             _up_sm="${_up_full:${#_up_head}}"
-            printf '%s%s%s%s%s%s\n' "$_up_clear" "$_up_lead" "$_up_hd" "${DIM}" "$_up_sm" "${RST}" >&3
+            _ui_picker_out '%s%s%s%s%s%s\n' "$_up_clear" "$_up_lead" "$_up_hd" "${DIM}" "$_up_sm" "${RST}"
         fi
         _up_lines=$((_up_lines + 1))
     done
     if [[ "${1:-0}" == "1" ]]; then
         if [[ "$_up_mode" == "plain" ]]; then
             _up_hint="number toggles, a) defaults  b) bare  d) done"
-            printf '  %s%s%s\n' "${DIM}" "${_up_hint:0:_up_cols-3}" "${RST}" >&3
+            _ui_picker_out '  %s%s%s\n' "${DIM}" "${_up_hint:0:_up_cols-3}" "${RST}"
         else
             _up_hint="j/k or arrows move, space toggles, a) defaults  b) bare, Enter accepts"
-            printf '\033[2K\r  %s%s%s\n' "${DIM}" "${_up_hint:0:_up_cols-3}" "${RST}" >&3
+            _ui_picker_out '\033[2K\r  %s%s%s\n' "${DIM}" "${_up_hint:0:_up_cols-3}" "${RST}"
         fi
         _up_lines=$((_up_lines + 1))
     fi
@@ -483,13 +491,13 @@ _ui_picker_readkey() {
     IFS= read -rsn1 _up_b <&4 || return 1
     if [[ "$_up_b" != $'\033' ]]; then _up_key="$_up_b"; return 0; fi
     _up_key="IGNORE"
-    IFS= read -rsn1 -t 0.1 _up_b <&4 || return 0
+    IFS= read -rsn1 -t 0.5 _up_b <&4 || return 0
     case "$_up_b" in
         "[")
             _up_seq="["
             while (( _up_k < 32 )); do
                 _up_k=$((_up_k + 1))
-                IFS= read -rsn1 -t 0.1 _up_b <&4 || break
+                IFS= read -rsn1 -t 0.5 _up_b <&4 || break
                 _up_seq+="$_up_b"
                 if [[ -n "$_up_b" ]]; then
                     printf -v _up_o '%d' "'$_up_b"
@@ -498,7 +506,7 @@ _ui_picker_readkey() {
             done
             ;;
         O)
-            if IFS= read -rsn1 -t 0.1 _up_b <&4; then _up_seq="O$_up_b"; fi
+            if IFS= read -rsn1 -t 0.5 _up_b <&4; then _up_seq="O$_up_b"; fi
             ;;
     esac
     case "$_up_seq" in
@@ -531,7 +539,7 @@ ui_component_picker() {
     { exec 3>"${UI_TTY_OUT:-/dev/tty}"; } 2>/dev/null || exec 3>/dev/null
     _ui_picker_width
 
-    printf '\n%sWhich components should be installed?%s\n' "${BOLD}" "${RST}" >&3
+    _ui_picker_out '\n%sWhich components should be installed?%s\n' "${BOLD}" "${RST}"
     _up_pos=-1
     _ui_picker_render 0
     _up_pos=0
@@ -539,13 +547,13 @@ ui_component_picker() {
     # Preset line: loop until a recognised answer; EOF accepts the defaults.
     if [[ "$_up_mode" == "plain" ]]; then
         while :; do
-            printf '  a) defaults  b) bare inference  p) pick  [a]: ' >&3
+            _ui_picker_out '  a) defaults  b) bare inference  p) pick  [a]: '
             if ! IFS= read -r _up_choice <&4; then
-                printf '\n' >&3
+                _ui_picker_out '\n'
                 _up_action="a"
                 break
             fi
-            printf '\n' >&3
+            _ui_picker_out '\n'
             _up_choice="${_up_choice//[[:space:]]/}"
             case "${_up_choice,,}" in
                 ""|a|all|defaults) _up_action="a"; break ;;
@@ -554,7 +562,7 @@ ui_component_picker() {
             esac
         done
     else
-        printf '  a) defaults  b) bare inference  p) pick  [a]: ' >&3
+        _ui_picker_out '  a) defaults  b) bare inference  p) pick  [a]: '
         while :; do
             if ! _ui_picker_readkey; then _up_action="a"; break; fi
             case "$_up_key" in
@@ -563,7 +571,7 @@ ui_component_picker() {
                 p|P) _up_action="p"; break ;;
             esac
         done
-        printf '%s\n' "${_up_action}" >&3
+        _ui_picker_out '%s\n' "${_up_action}"
     fi
 
     case "$_up_action" in
@@ -572,9 +580,9 @@ ui_component_picker() {
             if [[ "$_up_mode" == "plain" ]]; then
                 while :; do
                     _ui_picker_render 1
-                    printf '  > ' >&3
+                    _ui_picker_out '  > '
                     IFS= read -r _up_line <&4 || break
-                    printf '\n' >&3
+                    _ui_picker_out '\n'
                     _up_line="${_up_line//[[:space:]]/}"
                     case "$_up_line" in
                         ""|d|D) break ;;
