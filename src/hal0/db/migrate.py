@@ -143,9 +143,23 @@ def _has_retired_tuning(conn: sqlite3.Connection) -> bool:
 
     An empty holding table holds nothing, which is also what a brand-new
     database looks like when 012 and 015 run in one pass. Reads the live schema
-    rather than assuming it, because a second process can finish 015 between the
-    caller's "still pending?" check and this query.
+    rather than assuming it, because a second connection can finish 015 between
+    the caller's "still pending?" check and this query, and reads it all in one
+    read transaction so that cannot happen between these reads either.
     """
+    if conn.in_transaction:
+        return _retired_tuning_present(conn)
+    conn.execute("BEGIN")
+    try:
+        return _retired_tuning_present(conn)
+    finally:
+        # SQLite rolls back on its own after some errors; do not mask that error.
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+
+
+def _retired_tuning_present(conn: sqlite3.Connection) -> bool:
+    """:func:`_has_retired_tuning`'s reads, on the caller's one snapshot."""
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if "model" not in tables:
         return False

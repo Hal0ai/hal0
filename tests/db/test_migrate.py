@@ -12,10 +12,15 @@ Covers:
 from __future__ import annotations
 
 import contextlib
+import sqlite3
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 from hal0.db.connection import connect
-from hal0.db.migrate import applied_versions, migrate
+from hal0.db.migrate import _has_retired_tuning, applied_versions, migrate
 
 
 def _write_migration(migrations_dir: Path, version: int, sql: str) -> None:
@@ -153,3 +158,80 @@ class TestPackagedStoreMigration:
         with connect(tmp_path / "t.db") as conn:
             migrate(conn)
             assert migrate(conn) == []
+
+
+class _PeerFinishes015(sqlite3.Connection):
+    """Runs ``peer_drop`` right after the first read whose SQL holds ``trigger``.
+
+    The read is fetched first: a statement only opens its snapshot when stepped.
+    """
+
+    trigger = ""
+    peer_drop: Callable[[], None] | None = None
+
+    def execute(self, sql: str, *args: Any) -> Any:
+        if self.peer_drop is None or self.trigger not in sql:
+            return super().execute(sql, *args)
+        rows = super().execute(sql, *args).fetchall()
+        peer_drop, self.peer_drop = self.peer_drop, None
+        peer_drop()
+        return iter(rows)
+
+
+class TestRetiredTuningCheckRace:
+    @pytest.mark.parametrize(
+        ("trigger", "drop", "expected"),
+        [
+            ("sqlite_master", "DROP TABLE legacy_model_tuning", False),
+            ("table_info", "ALTER TABLE model DROP COLUMN preferred_runner", True),
+        ],
+    )
+    def test_a_peer_finishing_015_mid_check_cannot_crash_it(
+        self, tmp_path: Path, trigger: str, drop: str, expected: bool
+    ) -> None:
+        db = tmp_path / "hal0.db"
+        with connect(db) as setup:
+            setup.execute("CREATE TABLE model (id TEXT, preferred_runner TEXT)")
+            setup.execute("CREATE TABLE legacy_model_tuning (id TEXT)")
+            if expected:
+                setup.execute("INSERT INTO model VALUES ('m', 'standard')")
+
+        def peer_drop() -> None:
+            with connect(db) as peer:
+                peer.execute(drop)
+
+        conn = sqlite3.connect(db, isolation_level=None, factory=_PeerFinishes015)
+        conn.trigger = trigger
+        conn.peer_drop = peer_drop
+        try:
+            assert _has_retired_tuning(conn) is expected
+            assert conn.peer_drop is None
+            assert not conn.in_transaction
+        finally:
+            conn.close()
+
+    def test_the_check_leaves_a_callers_transaction_open(self, tmp_path: Path) -> None:
+        with connect(tmp_path / "hal0.db") as conn:
+            conn.execute("BEGIN")
+            assert _has_retired_tuning(conn) is False
+            assert conn.in_transaction
+            conn.execute("ROLLBACK")
+
+    def test_a_read_error_after_an_automatic_rollback_is_not_masked(self, tmp_path: Path) -> None:
+        class _IoErrorMidCheck(sqlite3.Connection):
+            def execute(self, sql: str, *args: Any) -> Any:
+                if "table_info" in sql:
+                    super().execute("ROLLBACK")  # what SQLite does on an I/O error
+                    raise sqlite3.OperationalError("disk I/O error")
+                return super().execute(sql, *args)
+
+        db = tmp_path / "hal0.db"
+        with connect(db) as setup:
+            setup.execute("CREATE TABLE model (id TEXT)")
+
+        conn = sqlite3.connect(db, isolation_level=None, factory=_IoErrorMidCheck)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
+                _has_retired_tuning(conn)
+        finally:
+            conn.close()
