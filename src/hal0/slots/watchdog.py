@@ -110,7 +110,6 @@ class WatchdogHost(Protocol):
     _states: dict[int, SlotStateRecord]
     _serving_count: dict[int, int]
 
-    def in_flight_count(self, slot_name: str) -> int: ...
     def _current_state(self, name: str) -> SlotState: ...
     def _key(self, name: str) -> int: ...
     def _lock(self, name: str) -> asyncio.Lock: ...
@@ -236,14 +235,20 @@ class SlotWatchdog:
         """True when /health still reads ``stalled`` and nothing is being served.
 
         A long in-flight run holds the engine's PING down by itself, so a slot
-        with requests in flight is never stamped on a stall (#3282). Read again
-        after the probe: it can take 35 s, and a request enters without the slot
-        lock this recheck runs under.
+        being served is never stamped on a stall (#3282). Read again after the
+        probe: it can take 35 s, and a request enters without the slot lock this
+        recheck runs under. Serving only, not dispatch tickets: a ticket held at
+        the readiness gate on a hung engine is the retry traffic the ceiling
+        exists for, and a stamped request is only refused, nothing is killed.
         """
-        if self._host.in_flight_count(slot_name) > 0:
+        if self._is_serving(slot_name):
             return False
         healthy, stalled = await self._probe_health_detail(slot_name)
-        return healthy and stalled and self._host.in_flight_count(slot_name) == 0
+        return healthy and stalled and not self._is_serving(slot_name)
+
+    def _is_serving(self, slot_name: str) -> bool:
+        """True while a request is inside ``serving()`` on this slot."""
+        return self._host._serving_count.get(self._host._key(slot_name), 0) > 0
 
     async def _unit_inactive(self, slot_name: str) -> bool:
         """True when the container unit still reads inactive to systemd."""
@@ -337,13 +342,9 @@ class SlotWatchdog:
                         # Inconclusive, still tolerated — but only up to the
                         # stall ceiling (#3282).
                         health_failures = 0
-                        if host._serving_count.get(host._key(slot_name), 0) > 0:
+                        if self._is_serving(slot_name):
                             # A run holds the engine's PING down by itself, so
                             # its stalls say nothing about a hung front end.
-                            # Serving only, not dispatch tickets: a request the
-                            # readiness gate is about to refuse holds a ticket
-                            # for up to 5 s, and retries against a hung engine
-                            # must not keep restarting the ceiling.
                             stall_probes = 0
                             stalled_since = None
                             continue
@@ -381,15 +382,11 @@ class SlotWatchdog:
                             # A fresh ERROR gets a fresh re-probe.
                             self._stall_reprobed_at.pop(host._key(slot_name), None)
                             return
-                        # Declined: the slot is still live, so keep watching
-                        # rather than leave it unwatched. A decline for a request
-                        # in flight proves nothing about the engine, so the count
-                        # stands and the next lap decides (a run resets it above,
-                        # a refused request's ticket is gone). Only a decline
-                        # with nothing in flight means the engine answered.
-                        if host.in_flight_count(slot_name) == 0:
-                            stall_probes = 0
-                            stalled_since = None
+                        # Declined (the engine answered, or a request is being
+                        # served): the slot is still live, so keep watching with
+                        # a fresh count rather than leave it unwatched.
+                        stall_probes = 0
+                        stalled_since = None
                         continue
                     stall_probes = 0
                     stalled_since = None

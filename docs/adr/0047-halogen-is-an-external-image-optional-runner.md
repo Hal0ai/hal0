@@ -385,9 +385,9 @@ and registry work, and the drawers all merged). Vendor files are at tag
   `TEARDOWN_MARGIN_S`. `src/hal0/slots/manager.py:2989`:
   `SlotManager.terminate`, which waits for the widened bound; `:4237`:
   `_wait_ready_watching_unit`, which ends a readiness wait on a unit systemd has
-  parked in `failed`. `src/hal0/slots/watchdog.py:587`: `readiness_check`, the
-  per-request gate that bounds the liveness probe (`:628`); `:97`: the 900 s stall
-  ceiling; `:103`: the 30 s re-probe interval; `:557`: `stall_ceiling_cleared`, the
+  parked in `failed`. `src/hal0/slots/watchdog.py:584`: `readiness_check`, the
+  per-request gate that bounds the liveness probe (`:625`); `:97`: the 900 s stall
+  ceiling; `:103`: the 30 s re-probe interval; `:554`: `stall_ceiling_cleared`, the
   re-probe adoption asks (`src/hal0/slots/manager.py:4654`); `:85`: the 900 s
   warming watchdog. `installer/wrappers/hal0-systemctl:415`: the root-side
   `--stop-timeout` check.
