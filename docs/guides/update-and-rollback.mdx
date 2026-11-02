@@ -169,15 +169,30 @@ Slot files carry placement only; every tune (flags, context window, thinking
 default, vision, speculation) lives on a profile ([ADR-0029](/docs/adr/0029-profile-centric-config)).
 The one-shot conversion that moved older installs onto this shape shipped in
 1.4.0 and has been removed; the upgrade floor is 1.5.0, so every install that
-can update here has already been through it.
+can update here has already run it.
 
-A slot file that still carries a tuning key anyway (restored from an old
-backup, say, or edited by hand) fails to load with `slot.unconverted`, and the
-slot refuses to launch. `hal0 config validate` names the file
-and the keys, and `/api/slots` reports it as `conversion_blocked`. Delete the
-keys from the file, put their values on a profile (`hal0 profile create`), and
-name it with `profile = "<name>"` in the slot file. Nothing launches such a slot
-with its old settings.
+Running it did not always finish the job. The conversion could block a slot it
+could not convert safely, and on 1.7.x such a slot kept launching from its saved
+argv. A slot file can also pick up a tuning key later, restored from an old
+backup or edited by hand. Any slot file that still carries a tuning key now fails
+to load with `slot.unconverted`, and the slot refuses to launch. Nothing launches
+it with its old settings, and nothing rewrites the file.
+
+These report such a file: `hal0 update` names it and exits 2, `hal0 doctor
+profiles` fails on it, `hal0 config validate` names the file and the keys, and
+`/api/slots` reports it as `conversion_blocked`. To fix it, delete the keys from
+the file, put their values on a profile (`hal0 profile create`), and name it with
+`profile = "<name>"` in the slot file.
+
+Schema migration 015 then drops the old model tuning from the database for good.
+When any of it still held a value, hal0 first saves a copy of the database as
+`/var/lib/hal0/backups/hal0-pre-015-<timestamp>.db` (mode 0600) and does not run
+the migration if that fails. To read a model's old tune back from the copy:
+
+```bash
+sudo sqlite3 /var/lib/hal0/backups/hal0-pre-015-<timestamp>.db \
+  "SELECT id, profile, extra_args, n_gpu_layers, context_size, rope_freq_base, preferred_runner FROM model"
+```
 
 ## Upgrading to 1.3.0
 

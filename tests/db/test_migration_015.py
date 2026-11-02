@@ -105,6 +105,58 @@ def test_registry_works_on_the_reduced_schema(tmp_path: Path) -> None:
     assert {m.id for m in reg.list()} == {"m1"}
 
 
+#: ``MODEL_COLUMNS`` of v1.7.1's ``hal0.db.repository``, which that release's
+#: registry writes through and reads rows by. A rollback to it lands on this
+#: schema, so 015 must not drop anything named here.
+_V171_MODEL_COLUMNS = (
+    "id",
+    "source_repo",
+    "revision",
+    "path",
+    "mmproj",
+    "draft",
+    "draft_kind",
+    "architecture",
+    "context_length",
+    "mtp",
+    "jinja",
+    "name",
+    "size_bytes",
+    "quant",
+    "license",
+    "hf_filename",
+    "chat_template",
+    "capabilities",
+    "tags",
+    "sha256",
+    "pulled_at",
+    "created_at",
+    "updated_at",
+    "extra",
+)
+
+
+def test_a_rollback_to_v171_finds_every_column_it_uses(tmp_path: Path) -> None:
+    with connect(tmp_path / "t.db") as conn:
+        migrate(conn)
+        cols = ", ".join(_V171_MODEL_COLUMNS)
+        marks = ", ".join("?" for _ in _V171_MODEL_COLUMNS)
+        row = {c: None for c in _V171_MODEL_COLUMNS} | {
+            "id": "m",
+            "path": "/m",
+            "name": "",
+            "size_bytes": 0,
+            "license": "unknown",
+            "hf_filename": "",
+        }
+        # The shape of v1.7.1's registry add, get, list and remove.
+        conn.execute(f"INSERT INTO model ({cols}) VALUES ({marks})", list(row.values()))
+        assert conn.execute(f"SELECT {cols} FROM model WHERE id = 'm'").fetchone()["path"] == "/m"
+        assert len(conn.execute(f"SELECT {cols} FROM model").fetchall()) == 1
+        conn.execute("DELETE FROM model WHERE id = 'm'")
+        assert conn.execute("SELECT COUNT(*) FROM model").fetchone()[0] == 0
+
+
 # ── the backup guard in migrate() ─────────────────────────────────────────────
 
 

@@ -1074,15 +1074,10 @@ The agent chat proxy is gone: `/api/agents/{id}/events`, `/submit` and
 
 ### Migrations left to you
 
-Two migrations are deliberately left to you, because both rewrite state in
-ways that want a human deciding when. The **slot-flag fold**
-(`hal0 slot migrate-flags`) moves per-slot tunes onto their bound model; it
-is a dry run until `--apply`, and `--apply` refuses while `hal0-api` or any
-`hal0-slot@*` unit is active unless you add `--stop-services`. Back up
-`hal0.db` and your slot dirs first, and expect it to refuse the whole run —
-rather than write half of it — when slots share a model with divergent
-tunes. **Slot id-keying** (`hal0 slot migrate-id-keying`) is optional and
-reversible; the runtime reads either layout, so run it in a downtime window.
+One migration is deliberately left to you, because it rewrites state in a way
+that wants a human deciding when. **Slot id-keying**
+(`hal0 slot migrate-id-keying`) is optional and reversible; the runtime reads
+either layout, so run it in a downtime window.
 
 Everything else — schema migrations, the config-load repairs, and the
 runner-system conversion (`hal0 runner-images migrate`, which archives every

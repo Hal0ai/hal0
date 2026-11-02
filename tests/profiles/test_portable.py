@@ -447,7 +447,7 @@ class TestPublishedAddonRoundTrip:
         assert again["checksum"] == published["checksum"]
 
 
-# ── a v1.4.0 envelope (schema 2, profile ``mtp``) imports, converted ───────
+# ── a v1.4.0 envelope (schema 2, profile ``mtp``) is refused ───────────────
 
 
 def _v140_envelope(**body: object) -> dict:
@@ -475,11 +475,13 @@ class TestPre15EnvelopeImport:
         assert "re-export the profile from hal0 1.5 or newer" in str(exc.value)
         assert "old" not in {r.name for r in cat.list()}
 
-    def test_a_current_export_never_carries_mtp(self) -> None:
+    def test_a_current_export_is_not_refused(self) -> None:
+        """The refusal rests on ProfileConfig having no ``mtp`` field. Adding one
+        would make every export carry it, and every re-import of it fail."""
         from hal0.profiles.portable import export_envelope
 
+        assert "mtp" not in ProfileConfig.model_fields
         body = export_envelope("p", ProfileConfig(flags="", speculation="off"), exported_at="t")
-        assert "mtp" not in body["profile"]
         assert body["profile"]["speculation"] == "off"
         assert parse_envelope(body).profile.speculation == "off"
 
