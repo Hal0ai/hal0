@@ -39,7 +39,7 @@ _READ_ONLY_CONFIG_HINT = "[brain_chat] read_only=true"
 class _RecordingStore:
     """A ``BoardClient`` stand-in: records every board call, returns empty shapes.
 
-    Board tools call the facade (ADR-0046), so "did the board get touched?" is
+    Board tools call the facade (ADR-0048), so "did the board get touched?" is
     a facade question. Placed on ``app.state.board_client``.
     """
 

@@ -232,7 +232,7 @@ def approval_socket() -> Path:
 
     Under ``var_lib()`` rather than ``/run/hal0``: only ``hal0-agent@`` declares
     that runtime directory, so a box without an agent would have no place to bind
-    it, and an update does not rewrite the API unit. See ADR-0046. Under HAL0_HOME
+    it, and an update does not rewrite the API unit. See ADR-0048. Under HAL0_HOME
     it lands in the tmp tree, so tests are auto-isolated.
     """
     return var_lib() / "approvals.sock"

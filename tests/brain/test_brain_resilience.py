@@ -68,7 +68,7 @@ def _final(text: str) -> dict[str, Any]:
 
 
 class _FakeStore:
-    """A ``BoardClient`` stand-in for the steward's board tools (ADR-0046).
+    """A ``BoardClient`` stand-in for the steward's board tools (ADR-0048).
 
     ``raise_on`` names the store method that blows up, so the loop's
     "a tool raised" paths can be driven without a real board.

@@ -1524,7 +1524,7 @@ export function useBoardChat(board?: string): UseBoardChatResult {
       })
   }
 
-  // A mutation, not a bare fetch: deciding needs a session (ADR-0046), and the
+  // A mutation, not a bare fetch: deciding needs a session (ADR-0048), and the
   // global mutation handler answers the 401 with the sign-in drawer and retries.
   // On any other failure the card stays pending and the bell is the fallback.
   const decideApproval = useMutation({

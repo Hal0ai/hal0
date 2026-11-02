@@ -1,4 +1,4 @@
-# ADR-0046: Approval decisions need a session or root
+# ADR-0048: Approval decisions need a session or root
 
 ## Status
 

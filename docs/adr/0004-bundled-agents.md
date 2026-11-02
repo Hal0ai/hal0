@@ -60,7 +60,7 @@ Concretely:
   (`src/hal0/api/routes/approvals.py`) backs the dashboard's approvals
   bell and the `hal0 agent approvals` CLI off one
   `hal0.mcp.approval_queue.ApprovalQueue`. Deciding takes a browser session or
-  root ([ADR-0046](0046-approval-decisions-need-a-session-or-root.md)). There is deliberately no
+  root ([ADR-0048](0048-approval-decisions-need-a-session-or-root.md)). There is deliberately no
   per-agent "trust this agent, skip approval" setting — untrusted content
   reaching the agent's context must still clear a human click for a
   destructive call.

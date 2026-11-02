@@ -108,7 +108,7 @@ agent can still exchange the admin key it holds for a session at
 REST route behind a gated tool directly and skip the queue. On a box with **no**
 admin key nothing can sign in, so the inbox stays open to anonymous callers, an
 agent that drops its key included. Configure an admin key if you rely on the inbox.
-[ADR-0046](docs/adr/0046-approval-decisions-need-a-session-or-root.md) has the
+[ADR-0048](docs/adr/0048-approval-decisions-need-a-session-or-root.md) has the
 full list.
 
 ### If you cannot accept it

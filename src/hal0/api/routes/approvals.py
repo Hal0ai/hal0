@@ -35,7 +35,7 @@ but on a LAN-reachable box with an admin key configured,
 session/key for any caller that didn't arrive over loopback, even though
 the ``require_auth`` toggle itself is still off.
 
-Approve and deny ask for more (ADR-0046): the ADMIN tier does not say whether a
+Approve and deny ask for more (ADR-0048): the ADMIN tier does not say whether a
 person is deciding, and the bundled agent holds a copy of the admin key. Both
 routes run :func:`hal0.api.auth.approval_decision_refusal`, which refuses a key
 of any tier. The root CLI decides over its own socket instead
@@ -105,7 +105,7 @@ def _queue(request: Request) -> ApprovalQueue:
 
 
 def _require_decider(request: Request) -> None:
-    """Refuse a caller that may not decide (ADR-0046); the message names the way in."""
+    """Refuse a caller that may not decide (ADR-0048); the message names the way in."""
     refusal = approval_decision_refusal(request)
     if refusal is None:
         return

@@ -1,4 +1,4 @@
-"""ADR-0024 item 2 / ADR-0046: a key holder cannot decide an approval over REST.
+"""ADR-0024 item 2 / ADR-0048: a key holder cannot decide an approval over REST.
 
 Agents are provisioned with ``service_key(prefer="admin")``
 (``hal0.agents.hermes_provision``, ``hal0.agents.pi_coder.driver``), i.e. the
@@ -6,7 +6,7 @@ box admin key, and ``POST /api/agent/approvals/{id}/approve`` is an ADMIN route
 the auth layer opens to that key. So the tier check alone cannot tell an agent
 from its owner; the route's own check has to.
 
-The last two tests pin what this does NOT close. ADR-0046 records why: while an
+The last two tests pin what this does NOT close. ADR-0048 records why: while an
 agent holds the admin key, or can read the session secret, it can obtain a
 session and decide with that. They are here so the day ADR-0024 items 1 and 4
 land, they fail and this docstring gets rewritten.
@@ -216,7 +216,7 @@ def test_reading_the_inbox_keeps_its_ordinary_posture() -> None:
 
 
 class TestKeylessBox:
-    """No admin key: nothing can sign in, so the conflict ADR-0046 names is live here."""
+    """No admin key: nothing can sign in, so the conflict ADR-0048 names is live here."""
 
     @pytest.fixture(autouse=True)
     def _no_admin_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -257,7 +257,7 @@ class TestKeylessBox:
 
 
 def test_known_gap_the_admin_key_still_buys_a_session() -> None:
-    """Pinned, not endorsed: ADR-0046's main limit. Closed by ADR-0024 items 1 and 4."""
+    """Pinned, not endorsed: ADR-0048's main limit. Closed by ADR-0024 items 1 and 4."""
     box = _Box()
     aid = box.enqueue()
     agent = box.client

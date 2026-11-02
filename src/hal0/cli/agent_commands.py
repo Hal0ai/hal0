@@ -1864,7 +1864,7 @@ def approvals_list() -> None:
 
 
 def _decide_as_root(action: Literal["approve", "deny"], approval_id: str) -> dict[str, Any]:
-    """Send one decision over hal0-api's root-only socket (ADR-0046); return the entry.
+    """Send one decision over hal0-api's root-only socket (ADR-0048); return the entry.
 
     An API key cannot decide, on this box or any other, so there is no remote
     form of this command and no REST fallback.

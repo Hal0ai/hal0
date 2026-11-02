@@ -1,4 +1,4 @@
-"""``hal0 agent approvals approve|deny`` decide over the root socket (ADR-0046)."""
+"""``hal0 agent approvals approve|deny`` decide over the root socket (ADR-0048)."""
 
 from __future__ import annotations
 

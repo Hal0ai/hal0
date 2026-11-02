@@ -1,6 +1,6 @@
 """Operator Board routes — ``/api/board/*``, a live proxy to the Hermes kanban.
 
-The Operator Board IS the Hermes kanban (ADR-0046): these routes forward to the
+The Operator Board IS the Hermes kanban (ADR-0048): these routes forward to the
 kanban plugin through the :class:`hal0.board.client.BoardClient` facade and add
 only what hal0 owns — the audit trail and the error envelope. hal0 keeps no
 board state of its own.

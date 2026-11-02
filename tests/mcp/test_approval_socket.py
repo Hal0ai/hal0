@@ -1,4 +1,4 @@
-"""The root CLI's decision socket (ADR-0046).
+"""The root CLI's decision socket (ADR-0048).
 
 These run a real unix socket, so the UID under test is the one the kernel
 reports through ``SO_PEERCRED``, not a value the test supplied. The suite does

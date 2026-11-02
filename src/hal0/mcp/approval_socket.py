@@ -1,4 +1,4 @@
-"""The root CLI's path to an approval decision (ADR-0046).
+"""The root CLI's path to an approval decision (ADR-0048).
 
 ``hal0 agent approvals approve|deny`` must work for root and must not be
 forgeable by a process running as ``hal0``, the account the bundled agent and

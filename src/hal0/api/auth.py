@@ -85,7 +85,7 @@ identity resolvers, ``GET /api/bridge/me``) read it there through
 :func:`_still_admitted` verifies a second time, live, so revoking a key ends
 the streams it opened.
 
-Who may decide an approval (ADR-0046)
+Who may decide an approval (ADR-0048)
 -------------------------------------
 Approving a gated call needs more than the ADMIN tier, or a key holder could
 approve its own. :func:`approval_decision_refusal` is that check, and the two
@@ -148,7 +148,7 @@ class AuthPrincipal:
 
     ``source`` is diagnostic (audit logging / debugging), with one exception:
     :func:`approval_decision_refusal` reads it, because deciding an approval
-    needs a session and not merely the tier (ADR-0046). Everywhere else
+    needs a session and not merely the tier (ADR-0048). Everywhere else
     ``tier`` is what authorizes, and for a bridge principal so is ``scopes``.
 
     ``name`` and ``scopes`` are set for the ``bridge`` tier only: the bridge
@@ -957,7 +957,7 @@ def _still_admitted(auth_class: AuthClass, scope: dict[str, Any]) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Who may decide an approval (ADR-0046) — see the module docstring.
+# Who may decide an approval (ADR-0048) — see the module docstring.
 
 
 def approval_decision_refusal(scope: Any) -> tuple[int, str] | None:
@@ -975,7 +975,7 @@ def approval_decision_refusal(scope: Any) -> tuple[int, str] | None:
       such a box can sign in, so refusing would strand the dashboard, and the
       keyless posture is open by design (see "Posture-coupled ADMIN gate"). It
       also means this check is no gate on that box: anything that can reach the
-      API can decide by not sending a key. ADR-0046 records that conflict.
+      API can decide by not sending a key. ADR-0048 records that conflict.
 
     Accepts a raw ASGI scope or a Starlette ``Request``/``WebSocket``.
     """

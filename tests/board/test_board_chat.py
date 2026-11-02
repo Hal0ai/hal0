@@ -2,7 +2,7 @@
 
 The LLM backend is injected via app.state.board_chat_llm (a stub). Board
 tools call a BoardClient over a recording httpx.MockTransport (the Hermes
-kanban facade, ADR-0046). Asserts SSE framing, tool→Hermes-request mapping,
+kanban facade, ADR-0048). Asserts SSE framing, tool→Hermes-request mapping,
 per-tool audit, ?board threading, loop termination, and error handling.
 
 Run targeted:
@@ -179,7 +179,7 @@ def _make_app(
     app = FastAPI()
     error_codes.install(app)
     app.include_router(brain.router, prefix="/api/brain")
-    # The chat's board tools go through the BoardClient facade (ADR-0046).
+    # The chat's board tools go through the BoardClient facade (ADR-0048).
     app.state.board_client = _board_client(recorder)
     app.state.board_installed = True
     if platform is not None:
