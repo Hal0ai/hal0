@@ -226,6 +226,31 @@ def test_headless_states_come_from_environment(run_block) -> None:
     assert r2.states["pi"] == "skipped"
 
 
+def test_skip_setup_marks_brain_and_comfyui_unavailable(run_block) -> None:
+    r = run_block(tty=True, env={"HAL0_SKIP_SETUP": "1"})
+    assert r.rows["brain"] == "HAL0_SKIP_SETUP=1"
+    assert r.rows["comfyui"] == "HAL0_SKIP_SETUP=1"
+    assert r.rows["hermes"] == "" and r.rows["openwebui"] == ""
+    assert r.states["brain"] == "unavailable:HAL0_SKIP_SETUP=1"
+    assert r.states["comfyui"] == "unavailable:HAL0_SKIP_SETUP=1"
+    assert r.states["hermes"] == "selected"
+
+
+def test_skip_setup_unavailable_answer_exports_skips(run_block) -> None:
+    r = run_block(
+        tty=True, env={"HAL0_SKIP_SETUP": "1"}, answer="brain=unavailable comfyui=unavailable"
+    )
+    assert r.env["HAL0_SKIP_BRAIN_MODEL"] == "1" and r.env["HAL0_IMAGE_MODELS"] == "none"
+    assert r.states["brain"] == "unavailable:HAL0_SKIP_SETUP=1"
+
+
+def test_skip_setup_headless_states_unavailable(run_block) -> None:
+    r = run_block(env={"HAL0_SKIP_SETUP": "1"})
+    assert r.picker_called is False
+    assert r.states["brain"] == "unavailable:HAL0_SKIP_SETUP=1"
+    assert r.states["comfyui"] == "unavailable:HAL0_SKIP_SETUP=1"
+
+
 @pytest.mark.parametrize(
     ("env", "row"),
     [

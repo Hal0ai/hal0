@@ -188,8 +188,9 @@ fails on this machine is shown greyed with the reason and cannot be turned on.
 The answer on screen wins over the environment: a row toggled on overrides an env
 knob that would have skipped it (the installer unsets the matching
 `HAL0_SKIP_<X>`, or `HAL0_IMAGE_MODELS=none` for ComfyUI). `HAL0_SKIP_SETUP=1` is
-not a per-row knob: it still skips the brain and image-model steps whatever those
-rows say. The chosen set is written to the install log as one line.
+not a per-row knob: it skips the brain and image-model steps whatever those rows
+say, so the checklist shows the Brain model and ComfyUI rows greyed as unavailable
+(`HAL0_SKIP_SETUP=1`) and they cannot be ticked on. The chosen set is written to the install log as one line.
 
 The checklist does not appear on an upgrade, with `--dev` or `--no-start`,
 without a terminal, with `HAL0_NONINTERACTIVE=1`, or when you pass any
