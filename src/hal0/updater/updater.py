@@ -1982,6 +1982,7 @@ def run_post_activation_migrations(
     # net leaves it to the next update, and doctor row `api-unit` reports it.
     if converge_companions:
         converge_api_unit(job_id=job_id)
+        converge_podman_forward_unit(job_id=job_id)
 
     # The runner-system conversion (ADR-0028) runs FIRST and is fatal: it
     # rewrites raw TOML before anything validates config, because a removed
@@ -3242,18 +3243,41 @@ def refresh_gpu_perms_unit(target: Path, *, job_id: str | None = None) -> str:
 PODMAN_FORWARD_UNIT_DST = Path("/etc/systemd/system/hal0-podman-forward.service")
 
 
+def _systemctl_error(*args: str) -> str | None:
+    """Run one bounded ``systemctl`` call; a description of the failure, or None."""
+    try:
+        done = subprocess.run(["systemctl", *args], check=False, capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return str(exc)
+    if done.returncode == 0:
+        return None
+    stderr = (done.stderr or b"").decode(errors="replace").strip()[:400]
+    return f"rc={done.returncode} {stderr}".strip()
+
+
 def refresh_podman_forward_unit(target: Path, *, job_id: str | None = None) -> str:
-    """Install/refresh ``hal0-podman-forward.service`` from the activated release (#3211).
+    """Install/refresh ``hal0-podman-forward.service`` from the active release (#3211).
 
-    Same #1689 shape as :func:`refresh_gpu_perms_unit`: without this, a box that
-    only ever runs ``hal0 update`` keeps the unit it was installed with, and one
-    that gained Docker after install never has it enabled at all, so Open WebUI
-    stays unreachable from the LAN.
+    ``install.sh`` used to be the only writer of this unit, so a box that only
+    runs ``hal0 update`` kept the one it was installed with, and one that gained
+    Docker after install never had it enabled. Open WebUI stayed unreachable from
+    the LAN on both.
 
-    Privileged-side ONLY (a no-op unless euid 0) and best-effort: a failure is
-    logged and never fails an otherwise-successful activate.
+    Called only from a fresh interpreter of the activated release, by way of
+    :func:`converge_podman_forward_unit`, and deliberately NOT from
+    :func:`activate_release`: that function runs in the outgoing release, so a
+    call there could not reach the upgrade that introduces it. A rollback does
+    not call this and leaves the newer unit in place.
 
-    Returns one of ``"installed"``, ``"unchanged"``, ``"skipped"``, ``"failed"``.
+    A masked unit is the operator's opt-out and is held. The unit inserts ACCEPT
+    rules at the top of ``DOCKER-USER``, ahead of any operator rules there, and
+    replacing the ``/dev/null`` link would undo that choice on every update.
+
+    Privileged-side only (a no-op unless euid 0) and best-effort. Writes only
+    when the bytes differ, then ``daemon-reload``; a failed reload puts the
+    previous file back, because a later run compares bytes and a file systemd
+    never loaded would read as ``"unchanged"`` forever. Returns ``"installed"``,
+    ``"unchanged"``, ``"skipped"`` or ``"failed"``.
     """
     if os.geteuid() != 0:
         return "skipped"
@@ -3262,47 +3286,67 @@ def refresh_podman_forward_unit(target: Path, *, job_id: str | None = None) -> s
         log.info("updater.podman_forward_unit_absent", job_id=job_id, src=str(src))
         return "skipped"
     dst = PODMAN_FORWARD_UNIT_DST
+    if dst.is_symlink() and os.path.realpath(dst) == os.devnull:
+        log.warning(
+            "updater.podman_forward_unit_held",
+            job_id=job_id,
+            remedy="the unit is masked; run systemctl unmask hal0-podman-forward "
+            "to let hal0 manage it again",
+        )
+        return "skipped"
     try:
         desired = src.read_text(encoding="utf-8")
-        up_to_date = dst.is_file() and dst.read_text(encoding="utf-8") == desired
+        installed = dst.read_text(encoding="utf-8") if dst.is_file() else None
+        up_to_date = installed == desired
         if not up_to_date:
             _write_unit_atomic(dst, desired)
-        subprocess.run(["systemctl", "daemon-reload"], check=False, capture_output=True)
-        # reenable, not enable: it also clears the multi-user.target link older
-        # releases made. Not skipped on matching content, so a failed enable
-        # self-heals on the next activate.
-        enabled = subprocess.run(
-            ["systemctl", "reenable", "hal0-podman-forward.service"],
-            check=False,
-            capture_output=True,
-        )
-        if enabled.returncode != 0:
-            log.warning(
-                "updater.podman_forward_unit_enable_failed",
-                job_id=job_id,
-                returncode=enabled.returncode,
-                stderr=(enabled.stderr or b"").decode(errors="replace").strip()[:400],
-            )
-            return "failed"
-        # Converge NOW, so the box does not wait for its next Docker start.
-        # restart because `start` is a no-op on a unit an older release left
-        # active. --no-block because After=docker.service would otherwise hold
-        # the update for as long as a Docker start job takes.
-        started = subprocess.run(
-            ["systemctl", "restart", "--no-block", "hal0-podman-forward.service"],
-            check=False,
-            capture_output=True,
-        )
-        if started.returncode != 0:
-            log.warning(
-                "updater.podman_forward_unit_start_failed",
-                job_id=job_id,
-                returncode=started.returncode,
-                detail="unit installed and enabled; convergence deferred to next Docker start",
-            )
-    except OSError as exc:
-        log.warning("updater.podman_forward_unit_failed", job_id=job_id, error=str(exc))
+    except (OSError, ValueError) as exc:
+        log.warning("updater.podman_forward_unit_refresh_failed", job_id=job_id, error=str(exc))
         return "failed"
+    if not up_to_date:
+        reload_error = _systemctl_error("daemon-reload")
+        if reload_error is not None:
+            log.warning(
+                "updater.podman_forward_unit_refresh_failed",
+                job_id=job_id,
+                error=f"daemon-reload: {reload_error}",
+            )
+            try:
+                if installed is None:
+                    dst.unlink(missing_ok=True)
+                else:
+                    _write_unit_atomic(dst, installed)
+            except OSError as exc:
+                log.warning(
+                    "updater.podman_forward_unit_restore_failed",
+                    job_id=job_id,
+                    path=str(dst),
+                    error=str(exc),
+                )
+            return "failed"
+    # reenable, not enable: it also clears the multi-user.target link older
+    # releases made. Not skipped on matching content, so a failed enable
+    # self-heals on the next update.
+    enable_error = _systemctl_error("reenable", "hal0-podman-forward.service")
+    if enable_error is not None:
+        log.warning(
+            "updater.podman_forward_unit_refresh_failed",
+            job_id=job_id,
+            error=f"reenable: {enable_error}",
+        )
+        return "failed"
+    # Converge NOW, so the box does not wait for its next Docker start. restart
+    # because `start` is a no-op on a unit an older release left active. --no-block
+    # because After=docker.service would otherwise hold the update for as long as
+    # a Docker start job takes.
+    start_error = _systemctl_error("restart", "--no-block", "hal0-podman-forward.service")
+    if start_error is not None:
+        log.warning(
+            "updater.podman_forward_unit_start_failed",
+            job_id=job_id,
+            error=start_error,
+            detail="unit installed and enabled; convergence deferred to next Docker start",
+        )
     log.info("updater.podman_forward_unit_installed", job_id=job_id, path=str(dst))
     return "unchanged" if up_to_date else "installed"
 
@@ -3447,6 +3491,34 @@ def converge_api_unit(*, job_id: str | None = None) -> str:
         return "failed"
     if outcome == "failed":
         log.warning("updater.api_unit_refresh_failed", job_id=job_id, error="root side failed")
+    return outcome
+
+
+def converge_podman_forward_unit(*, job_id: str | None = None) -> str:
+    """Refresh ``hal0-podman-forward.service`` from the activated release (#3211).
+
+    Same route as :func:`converge_api_unit`, for the same reason: this runs in a
+    fresh interpreter of the just-activated code, through the ``hal0-update``
+    wrapper the outgoing ``activate_release`` has already refreshed, so it works
+    on the first update from a release that has never heard of it. Never raises.
+    """
+    from hal0.updater.privileged import UpdateSeam
+
+    try:
+        outcome = str(
+            UpdateSeam(job_id=job_id)
+            .refresh_podman_forward_unit()
+            .get("podman_forward_unit", "failed")
+        )
+    except Exception as exc:
+        log.warning("updater.podman_forward_unit_refresh_failed", job_id=job_id, error=str(exc))
+        return "failed"
+    if outcome == "failed":
+        log.warning(
+            "updater.podman_forward_unit_refresh_failed",
+            job_id=job_id,
+            error="root side failed",
+        )
     return outcome
 
 
@@ -3793,7 +3865,6 @@ def activate_release(dir_name: str, *, job_id: str | None = None) -> dict[str, A
     wrappers = refresh_privileged_wrappers(target, job_id=job_id)
     path_links = refresh_path_links(target, job_id=job_id)
     gpu_perms_unit = refresh_gpu_perms_unit(target, job_id=job_id)
-    podman_forward_unit = refresh_podman_forward_unit(target, job_id=job_id)
     retired = remove_retired_artifacts(job_id=job_id)
 
     # Heal root-created tombstone locks on existing boxes (#2698), using
@@ -3823,7 +3894,6 @@ def activate_release(dir_name: str, *, job_id: str | None = None) -> dict[str, A
         "wrappers_refreshed": wrappers["refreshed"],
         "path_links_refreshed": path_links,
         "gpu_perms_unit": gpu_perms_unit,
-        "podman_forward_unit": podman_forward_unit,
         "retired_artifacts_removed": retired,
     }
 
@@ -3966,6 +4036,7 @@ _NON_FATAL_MIGRATION_FAILURE_EVENTS: tuple[str, ...] = (
     "updater.kokoro_bundle_pull_failed",
     "components.hermes_gateway_regen_failed",
     "updater.api_unit_refresh_failed",
+    "updater.podman_forward_unit_refresh_failed",
 )
 
 
@@ -4809,6 +4880,7 @@ __all__ = [
     "assert_trusted_release_dir",
     "check_outstanding_migrations",
     "converge_api_unit",
+    "converge_podman_forward_unit",
     "discard_release",
     "fetch_release_manifest",
     "refresh_api_unit",

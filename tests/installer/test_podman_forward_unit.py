@@ -35,7 +35,9 @@ def _exec_start_script() -> str:
     return match.group(1).replace("\\\n", " ")
 
 
-def _fake_iptables(bin_dir: Path, *, chain: bool, rules_present: bool) -> Path:
+def _fake_iptables(
+    bin_dir: Path, *, chain: bool, rules_present: bool, insert_fails: bool = False
+) -> Path:
     """An iptables that logs its argv and answers -L and -C as the box would."""
     calls = bin_dir / "iptables.calls"
     script = bin_dir / "iptables"
@@ -45,6 +47,7 @@ def _fake_iptables(bin_dir: Path, *, chain: bool, rules_present: bool) -> Path:
         'case " $* " in\n'
         f'  *" -L "*) {"exit 0" if chain else "exit 1"} ;;\n'
         f'  *" -C "*) {"exit 0" if rules_present else "exit 1"} ;;\n'
+        f'  *" -I "*) {"exit 4" if insert_fails else "exit 0"} ;;\n'
         "esac\n"
         "exit 0\n",
         encoding="utf-8",
@@ -78,8 +81,8 @@ def test_rule_is_added_before_the_bridge_exists(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert _inserts(calls) == [
-        "-w 5 -I DOCKER-USER -i podman0 -j ACCEPT",
-        "-w 5 -I DOCKER-USER -o podman0 -j ACCEPT",
+        "-w 30 -I DOCKER-USER -i podman0 -j ACCEPT",
+        "-w 30 -I DOCKER-USER -o podman0 -j ACCEPT",
     ]
 
 
@@ -92,6 +95,16 @@ def test_existing_rules_are_not_duplicated(tmp_path: Path) -> None:
 
     assert _run_exec_start(tmp_path).returncode == 0
     assert _inserts(calls) == []
+
+
+def test_failed_first_insert_fails_the_unit(tmp_path: Path) -> None:
+    """Without set -e the second insert's success would hide the first failure."""
+    calls = _fake_iptables(tmp_path, chain=True, rules_present=False, insert_fails=True)
+
+    result = _run_exec_start(tmp_path)
+
+    assert result.returncode != 0
+    assert _inserts(calls) == ["-w 30 -I DOCKER-USER -i podman0 -j ACCEPT"]
 
 
 def test_no_docker_chain_is_a_clean_noop(tmp_path: Path) -> None:
@@ -149,5 +162,5 @@ def test_installer_enables_without_requiring_docker_today() -> None:
 
 def test_installer_reruns_a_unit_left_active_by_an_older_release() -> None:
     block = _install_block()
-    assert "systemctl restart hal0-podman-forward" in block
+    assert "systemctl restart --no-block hal0-podman-forward" in block
     assert "--now" not in block

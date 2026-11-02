@@ -4145,10 +4145,12 @@ else
     # docker.service, so on a podman-only box it stays inert until Docker shows
     # up. reenable also clears the multi-user.target link older releases made.
     # restart, not --now: --now is a no-op on a unit an older release left
-    # active, and the run here covers a Docker that is already up.
+    # active, and the run here covers a Docker that is already up. --no-block so
+    # a pending Docker start job cannot hold the install. A masked unit fails
+    # reenable and stays masked: that is the operator's opt-out.
     if [[ -f "${PODMAN_FWD_UNIT_DST}" ]]; then
         if systemctl reenable hal0-podman-forward >/dev/null 2>&1 \
-            && systemctl restart hal0-podman-forward >/dev/null 2>&1; then
+            && systemctl restart --no-block hal0-podman-forward >/dev/null 2>&1; then
             info "hal0-podman-forward enabled (keeps podman ports reachable alongside Docker)"
         else
             warn "hal0-podman-forward did not enable; check 'journalctl -u hal0-podman-forward'"

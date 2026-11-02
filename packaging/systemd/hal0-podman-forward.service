@@ -31,14 +31,21 @@ After=docker.service
 [Service]
 Type=oneshot
 # No iptables / no Docker (DOCKER-USER chain) => nothing to do. Otherwise ensure
-# both directions of the podman0 ACCEPT exist exactly once. -w waits for the
-# xtables lock: netavark and dockerd write the same tables during boot, and a
-# lost lock on the -L probe would otherwise read as "no Docker".
+# both directions of the podman0 ACCEPT exist exactly once. set -e comes after
+# the probe so a failed insert fails the unit instead of being hidden by the
+# next line. -w waits for the xtables lock, because netavark and dockerd write
+# the same tables during boot. A lock timeout on the -L probe still exits 0 with
+# no rule (it cannot be told apart from a missing chain), so the wait is long.
+#
+# Operators who filter podman traffic in DOCKER-USER: these rules go at the top
+# of that chain, ahead of yours. `systemctl mask hal0-podman-forward` opts out,
+# and the installer and hal0 update both leave a masked unit alone.
 ExecStart=/usr/bin/env bash -c '\
   command -v iptables >/dev/null 2>&1 || exit 0; \
-  iptables -w 5 -L DOCKER-USER -n >/dev/null 2>&1 || exit 0; \
-  iptables -w 5 -C DOCKER-USER -i podman0 -j ACCEPT 2>/dev/null || iptables -w 5 -I DOCKER-USER -i podman0 -j ACCEPT; \
-  iptables -w 5 -C DOCKER-USER -o podman0 -j ACCEPT 2>/dev/null || iptables -w 5 -I DOCKER-USER -o podman0 -j ACCEPT'
+  iptables -w 30 -L DOCKER-USER -n >/dev/null 2>&1 || exit 0; \
+  set -e; \
+  iptables -w 30 -C DOCKER-USER -i podman0 -j ACCEPT 2>/dev/null || iptables -w 30 -I DOCKER-USER -i podman0 -j ACCEPT; \
+  iptables -w 30 -C DOCKER-USER -o podman0 -j ACCEPT 2>/dev/null || iptables -w 30 -I DOCKER-USER -o podman0 -j ACCEPT'
 
 StandardOutput=journal
 StandardError=journal

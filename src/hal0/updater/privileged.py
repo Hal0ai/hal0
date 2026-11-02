@@ -73,6 +73,7 @@ from hal0.updater.updater import (
     assert_trusted_release_dir,
     discard_release,
     refresh_api_unit,
+    refresh_podman_forward_unit,
     stage_release,
 )
 
@@ -317,6 +318,23 @@ class UpdateSeam:
             return self._invoke("refresh-api-unit", timeout=_SHORT_TIMEOUT)
         return {"api_unit": refresh_api_unit(_current_symlink().resolve(), job_id=self._job_id)}
 
+    def refresh_podman_forward_unit(self) -> dict[str, Any]:
+        """Refresh ``hal0-podman-forward.service`` from the active release, as root (#3211).
+
+        Routed: ``sudo -n hal0-update refresh-podman-forward``, a fresh root
+        interpreter of the code ``activate`` just installed. Unrouted, the same
+        primitive runs in-process, and is a no-op unless root. Returns
+        ``{"podman_forward_unit": <outcome>}``.
+        """
+        if self.routed:
+            # Up to three systemctl calls of 30 s each on the root side.
+            return self._invoke("refresh-podman-forward", timeout=_SHORT_TIMEOUT * 2)
+        return {
+            "podman_forward_unit": refresh_podman_forward_unit(
+                _current_symlink().resolve(), job_id=self._job_id
+            )
+        }
+
     def discard(self, dir_name: str) -> None:
         """Remove a staged ``<usr_lib>/<dir_name>`` tree (idempotent)."""
         name = _validate_dir_name(dir_name)
@@ -437,7 +455,7 @@ def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if not args:
         print(
-            "usage: python -m hal0.updater.privileged <check|stage|activate|discard|hermes-gateway|refresh-api-unit>",
+            "usage: python -m hal0.updater.privileged <check|stage|activate|discard|hermes-gateway|refresh-api-unit|refresh-podman-forward>",
             file=sys.stderr,
         )
         return 64
@@ -494,6 +512,18 @@ def main(argv: list[str] | None = None) -> int:
             target = _current_symlink().resolve()
             assert_trusted_release_dir(target)
             _emit({"api_unit": refresh_api_unit(target)})
+            return 0
+        if verb == "refresh-podman-forward":
+            # No arguments cross this boundary, and the same root-owned test as
+            # refresh-api-unit, because root writes the unit into
+            # /etc/systemd/system and runs it.
+            if rest:
+                raise UpdateError(
+                    "refresh-podman-forward takes no arguments", details={"argv": rest}
+                )
+            target = _current_symlink().resolve()
+            assert_trusted_release_dir(target)
+            _emit({"podman_forward_unit": refresh_podman_forward_unit(target)})
             return 0
         if verb == "discard":
             if len(rest) != 1:

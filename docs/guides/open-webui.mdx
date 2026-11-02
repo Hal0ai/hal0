@@ -308,7 +308,8 @@ Open WebUI's port 3001 is published by podman, and Docker can set the kernel's
 the box itself but timing out from every other host on the LAN. The
 `hal0-podman-forward` unit prevents this: each time Docker starts, it adds an
 `ACCEPT` for the `podman0` bridge to Docker's `DOCKER-USER` chain. The installer
-and `hal0 update` both enable it, and it does nothing on a box without Docker.
+enables it, and `hal0 update` refreshes and enables it after switching to the new
+release, then runs it once. It does nothing on a box without Docker.
 
 If port 3001 only answers locally, check the rules as root:
 
@@ -322,6 +323,17 @@ With `-P FORWARD DROP` and no `podman0` rules, run
 `journalctl -u hal0-podman-forward` if the rules still don't appear. A Docker
 installed from the snap has a different service name and doesn't trigger the
 unit, so run that restart after each Docker start.
+
+The rules go at the top of `DOCKER-USER`, so they take effect ahead of any rules
+of your own there and allow all traffic to and from `podman0`. If you filter that
+traffic yourself, opt out by masking the unit, which the installer and
+`hal0 update` both leave alone, and then remove the rules it added:
+
+```sh
+systemctl mask hal0-podman-forward
+iptables -D DOCKER-USER -i podman0 -j ACCEPT
+iptables -D DOCKER-USER -o podman0 -j ACCEPT
+```
 
 ## When the env file re-renders
 

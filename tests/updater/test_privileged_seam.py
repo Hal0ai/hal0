@@ -151,10 +151,19 @@ def test_seam_argv_is_the_whole_grant_surface() -> None:
     seam.discard("hal0-1.0.0")
     seam.hermes_gateway()
     seam.refresh_api_unit()
+    seam.refresh_podman_forward_unit()
     seam.assert_privileges() if Path(SEAM_BIN).exists() else None
 
     verbs = {call[3] for call in run.calls}
-    assert verbs <= {"check", "stage", "activate", "discard", "hermes-gateway", "refresh-api-unit"}
+    assert verbs <= {
+        "check",
+        "stage",
+        "activate",
+        "discard",
+        "hermes-gateway",
+        "refresh-api-unit",
+        "refresh-podman-forward",
+    }
     assert all(call[:3] == ["sudo", "-n", SEAM_BIN] for call in run.calls)
 
 
