@@ -55,7 +55,7 @@ chat messages — that is the `hermes-e2e` stateful lane.
    wheel shipping no `web_dist` is adjudicated
    (`known-issues: hermes-wheel-missing-web-dist`, open #1829) — what you assert is the honest
    degradation: the STATUS string names the gap, `:9119/api/status` still 200s, and the brain
-   board tools work through the local BoardStore rewire. While there, record the installed
+   board tools answer through the Hermes kanban facade (`hal0.board`). While there, record the installed
    hermes-agent version and compare against the update box's — a fresh install shipping OLDER
    hermes than an upgraded box (0.18.2 vs 0.19.0 in rc.6) is a packaging smell worth one line.
    Check whether the wheel came from the pin (`dist-info/direct_url.json` names the vetted
@@ -126,10 +126,10 @@ chat messages — that is the `hermes-e2e` stateful lane.
 22. **MCP client on mcp 2.x.** The v0.22.4 venv carries mcp 2.3 (v0.22.2 had 2.0), which dropped
    `streamablehttp_client`. `provision.json` `mcp_wire` must be `ok` with stage `connected` for
    both servers (not an `ImportError` at stage `import`), and check 2b still applies.
-23. **Board token harvest.** `curl -s http://127.0.0.1:9119/ | grep -c __HERMES_SESSION_TOKEN__`
-   must be at least 1, and neither `systemctl show hal0-agent@hermes -p Environment` nor
+23. **Board token file.** `sudo test -s /var/lib/hal0/state/agents/hermes/dashboard-session-token && echo present`
+   must print `present`, and neither `systemctl show hal0-agent@hermes -p Environment` nor
    `config.yaml` may set `HERMES_DASHBOARD_PUBLIC_URL` / `dashboard.public_url`: either one
-   turns the dashboard login on and the token disappears from the page.
+   turns the dashboard login on; the board's loopback token path is only validated with it off.
 24. **No unmanaged gateway (v0.22.3+), passive checks only.** The dashboard's default Chat tab
    runs its turns in the dashboard process (its TUI attaches to the dashboard's own `/api/ws`). A
    profile-scoped chat (the profile switcher, for example `hal0-brain`) and `hermes chat` are

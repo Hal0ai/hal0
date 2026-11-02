@@ -165,9 +165,11 @@ the `hal0-brain` persona's tool policy (when one exists):
 
 - A local set of board and platform tools purpose-built for the steward:
   board reads/writes (`get_board`, `move_task`, `create_task`, `comment_task`,
-  dependency and orchestration verbs, `nudge_dispatcher`, …) against hal0's
-  own `BoardStore` — the same store `/api/board/*` answers from, not a Hermes
-  proxy — and platform tools (`list_slots`, `get_slot`, `slot_load/unload/
+  dependency and orchestration verbs, `nudge_dispatcher`, …) that read and
+  write the Hermes kanban through the same `/api/board` proxy the dashboard
+  uses (hal0 keeps no board store of its own; with Hermes down the tools
+  report `board.not_installed`, `board.unreachable` or `board.no_token`) — and
+  platform tools (`list_slots`, `get_slot`, `slot_load/unload/
   restart`, `list_models`, `hardware_stats`, `list_agents`) that re-enter
   hal0-api's own REST routes over self-HTTP.
 - The full [`hal0-admin` MCP catalog](/docs/reference/mcp-tools) minus a

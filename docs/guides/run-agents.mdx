@@ -175,7 +175,7 @@ parallel fan-out for subagent work that needs no shell; no bundled skill or
 persona uses it.
 
 Everything else — chat, memory, personas, the kanban board (its workers are
-spawned by hal0's own dispatcher, not `delegate_task`), and the hal0 MCP tools
+spawned by Hermes's own dispatcher, not `delegate_task`), and the hal0 MCP tools
 (slot state, model management, hardware readouts) — is unaffected: those go
 through the hal0 API, not a shell.
 
@@ -456,7 +456,7 @@ dashboard's Agent → Approvals tab renders the same queue. See
 gated admin tools.
 
 ![The hal0 Operator Board — the Hermes task kanban in the dashboard](/screenshots/operator-board.png)
-*The Operator Board (dashboard ▸ Board) — Hermes agent tasks move across Triage → To-do → Scheduled → Ready lanes.*
+*The Operator Board (dashboard ▸ Board) — the Hermes kanban, proxied through hal0-api; agent tasks move across Triage → To-do → Scheduled → Ready lanes. With no Hermes agent installed the page shows an install prompt, and the API answers `board.not_installed`, `board.unreachable` or `board.no_token` (503).*
 
 ## Spending budget
 
