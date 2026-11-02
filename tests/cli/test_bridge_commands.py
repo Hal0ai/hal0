@@ -9,6 +9,7 @@ app so the ``bridge`` registration in :mod:`hal0.cli.main` is covered too.
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -366,9 +367,16 @@ def _run_view(
     }
 
 
-def _two_runs(fake_api: FakeApi) -> list[list[str]]:
+@pytest.fixture
+def frozen_clock(monkeypatch: pytest.MonkeyPatch) -> float:
+    """Pin the clock ``_age`` reads, so a stalled runner cannot change an age cell (#3330)."""
+    now = 1_800_000_000.0
+    monkeypatch.setattr(bridge_commands, "time", SimpleNamespace(time=lambda: now))
+    return now
+
+
+def _two_runs(fake_api: FakeApi, now: float) -> list[list[str]]:
     """Load two runs into the fake API and return the cells the table must show."""
-    now = time.time()
     fake_api.runs = [
         _run_view(
             "run_" + "a" * 32, "claude-code", "running", started=now - 7200, updated=now - 90
@@ -381,9 +389,11 @@ def _two_runs(fake_api: FakeApi) -> list[list[str]]:
     ]
 
 
-def test_runs_table(fake_api: FakeApi, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_runs_table(
+    fake_api: FakeApi, frozen_clock: float, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _console_width(monkeypatch, 200)
-    expected = _two_runs(fake_api)
+    expected = _two_runs(fake_api, frozen_clock)
     res = runner.invoke(app, ["bridge", "runs"])
     assert res.exit_code == 0, res.output
     header = res.stdout.splitlines()[1]
@@ -394,11 +404,11 @@ def test_runs_table(fake_api: FakeApi, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_runs_table_keeps_cells_whole_at_80_columns(
-    fake_api: FakeApi, monkeypatch: pytest.MonkeyPatch
+    fake_api: FakeApi, frozen_clock: float, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """At 80 columns no cell wraps onto a second line: one row per run."""
     _console_width(monkeypatch, 80)
-    expected = _two_runs(fake_api)
+    expected = _two_runs(fake_api, frozen_clock)
     res = runner.invoke(app, ["bridge", "runs"])
     assert res.exit_code == 0, res.output
     rows = [line.split() for line in res.stdout.splitlines()[2:]]
@@ -453,8 +463,8 @@ def test_runs_with_an_unreachable_api_exits_one(monkeypatch: pytest.MonkeyPatch)
     assert called == []
 
 
-def test_age_formats() -> None:
-    now = time.time()
+def test_age_formats(frozen_clock: float) -> None:
+    now = frozen_clock
     assert bridge_commands._age(now - 5) == "5s"
     assert bridge_commands._age(now - 300) == "5m"
     assert bridge_commands._age(now - 7300) == "2h"
