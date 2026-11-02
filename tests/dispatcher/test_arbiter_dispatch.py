@@ -115,6 +115,9 @@ class _ArbiterSlotManager:
         )
 
     # group lookups must stay inside tmp_path (no host TOML leakage)
+    def check_crash_loop_gate(self, _name: str) -> None:
+        return None
+
     def _config_file(self, name: str) -> Path:
         return self._tmp / "slots" / f"{name}.toml"
 

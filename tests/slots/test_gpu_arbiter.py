@@ -36,6 +36,7 @@ from hal0.slots.arbiter import (
     GpuSlotStillLoading,
     gpu_exclusive_group,
 )
+from hal0.slots.state import SlotCrashLooping
 
 # ── fake SlotManager ─────────────────────────────────────────────────────────
 
@@ -118,6 +119,8 @@ class FakeManager:
         self.slot_states: dict[str, Any] = dict(slot_states or {})
         # Slots whose lock a load (or other lifecycle op) holds right now.
         self.busy: set[str] = set()
+        # Slots the crash-loop breaker refuses right now.
+        self.crash_looping: set[str] = set()
 
     async def iter_configs(self) -> list[dict[str, Any]]:
         return [dict(c) for c in self.configs]
@@ -127,6 +130,12 @@ class FakeManager:
 
     def is_busy(self, name: str) -> bool:
         return name in self.busy
+
+    def check_crash_loop_gate(self, name: str) -> None:
+        if name in self.crash_looping:
+            raise SlotCrashLooping(
+                f"{name} is crash-looping", details={"slot": name, "retry_after_s": 30}
+            )
 
     def state(self, name: str) -> str:
         if name in self.slot_states:
@@ -2675,6 +2684,24 @@ async def test_ensure_img_in_img_mode_rolls_back_when_the_reload_fails(
     assert ("load", "chat", None) in fake_mgr.calls
     assert ("load", "agent", None) in fake_mgr.calls
     assert _read_state(state_path)["saved_llm_slots"] == []
+
+
+async def test_switch_refused_by_the_breaker_leaves_the_llm_slots_alone(
+    fake_mgr: FakeManager, state_path: Path
+) -> None:
+    """#3299: the breaker will refuse the img load, so the switch never starts:
+    nothing unloaded, nothing reloaded, image mode never recorded."""
+    fake_mgr.crash_looping.add("img")
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+
+    with pytest.raises(SlotCrashLooping) as exc_info:
+        await arb.ensure_img()
+
+    assert exc_info.value.details["retry_after_s"] == 30
+    assert fake_mgr.calls == []
+    assert arb.mode is GpuMode.LLM
+    assert fake_mgr.is_ready_for_dispatch("chat")
+    assert fake_mgr.is_ready_for_dispatch("agent")
 
 
 async def test_concurrent_requests_cold_start_a_down_img_slot_once(
