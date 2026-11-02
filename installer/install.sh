@@ -4555,6 +4555,29 @@ if [[ ${#SMOKE_FAILED[@]} -gt 0 ]]; then
     done
 fi
 
+# Components the operator (or a flag) left out — one line, omitted when none.
+# Labels follow the component table; unavailable rows are not "skipped".
+_summary_skipped=""
+for _summary_cid in openwebui comfyui hermes pi hindsight brain; do
+    if [[ "${COMPONENT_STATES[${_summary_cid}]:-}" == "skipped" ]]; then
+        case "${_summary_cid}" in
+            openwebui) _summary_clabel="Open WebUI" ;;
+            comfyui)   _summary_clabel="ComfyUI" ;;
+            hermes)    _summary_clabel="Hermes agent" ;;
+            pi)        _summary_clabel="Pi agent" ;;
+            hindsight) _summary_clabel="Hindsight memory" ;;
+            brain)     _summary_clabel="Brain model" ;;
+        esac
+        _summary_skipped+="${_summary_skipped:+, }${_summary_clabel}"
+    fi
+done
+if [[ -n "${_summary_skipped}" ]]; then
+    SUMMARY_LINES+=(
+        ""
+        "$(printf 'Components skipped: %s%s%s' "${DIM}" "${_summary_skipped}" "${RST}")"
+    )
+fi
+
 SUMMARY_LINES+=(
     ""
     "$(printf '%sNext steps:%s' "${BOLD}" "${RST}")"
@@ -4623,6 +4646,13 @@ PYEOF
     done
     export HAL0_STEP_DURATIONS_BLOB="${_summary_steps_blob}"
 
+    # Component choices (A2's COMPONENT_STATES), same RS-joined blob shape.
+    _summary_components_blob=""
+    for _summary_cid in "${!COMPONENT_STATES[@]}"; do
+        _summary_components_blob+="${_summary_cid}=${COMPONENT_STATES[$_summary_cid]}"$'\x1e'
+    done
+    export HAL0_COMPONENTS_BLOB="${_summary_components_blob}"
+
     "${PY}" -I - \
         "${SUMMARY_JSON_PATH}" \
         "$(_ui_read_version)" \
@@ -4662,6 +4692,14 @@ for entry in blob.split("\x1e"):
         except ValueError:
             pass
 
+# Component choices: id -> selected | skipped | unavailable:<reason>, same
+# RS-joined blob (HAL0_COMPONENTS_BLOB). Additive to v1; {} when absent.
+components = {}
+for entry in os.environ.get("HAL0_COMPONENTS_BLOB", "").split("\x1e"):
+    cid, sep, state = entry.partition("=")
+    if sep and cid:
+        components[cid] = state
+
 payload = {
     "schema": "hal0.install-summary.v1",
     "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -4683,6 +4721,7 @@ payload = {
     "errors": int(err_count),
     "elapsed_seconds": int(elapsed_seconds),
     "step_durations_seconds": steps,
+    "components": components,
 }
 
 path = pathlib.Path(out_file)
