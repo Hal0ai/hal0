@@ -83,6 +83,24 @@ _WARMING_INACTIVE_STRIKES: int = 3
 # load is never demoted — 900s (15 min) is ~5x the 180s per-attempt health-wait
 # ceiling, comfortably clear of any real large-model load.
 _WARMING_STALE_AFTER_S: float = 900.0
+# READY-side stall ceiling (#3282). A provider's ``"stalled"`` /health answer
+# (a read timeout or its engine-silent 503) is never a strike, because tearing
+# down a slow engine leaks its GPU memory. The flip side is a front end that
+# hangs forever, which would sit READY indefinitely. So the slot goes ERROR
+# (no SIGKILL; the unit is left alone) once the stall has run BOTH this many
+# CONSECUTIVE probes AND this long without one answer in between. Any answered
+# probe resets both. 900 s matches the warming watchdog above. A probe takes at
+# most ~40 s (the 35 s read timeout plus the poll interval), so 900 s already
+# implies at least 22 probes and the 10-strike condition never binds on its own;
+# it is a floor for a stub that answers instantly, where time alone would
+# otherwise decide.
+_STALL_CEILING_S: float = 900.0
+_STALL_CEILING_STRIKES: int = 10
+# How often a slot already at the stall ceiling re-probes from status()/list().
+# Each probe can wait out the readiness budget, and GET /api/slots, the metrics
+# sampler and preload eviction all go through status(), so an unthrottled probe
+# would slow every one of those calls for as long as the engine stays silent.
+_STALL_REPROBE_INTERVAL_S: float = 30.0
 
 
 class WatchdogHost(Protocol):
@@ -90,6 +108,7 @@ class WatchdogHost(Protocol):
 
     _fail_watchers: dict[int, asyncio.Task[None]]
     _states: dict[int, SlotStateRecord]
+    _serving_count: dict[int, int]
 
     def _current_state(self, name: str) -> SlotState: ...
     def _key(self, name: str) -> int: ...
@@ -105,6 +124,9 @@ class SlotWatchdog:
 
     def __init__(self, host: WatchdogHost) -> None:
         self._host = host
+        # Last re-probe of a stall-ceiling ERROR, by slot key (#3282). Only ever
+        # holds a probe that did not clear the ceiling: a clear removes the entry.
+        self._stall_reprobed_at: dict[int, float] = {}
 
     def update(self, name: str, new_state: SlotState) -> None:
         """Spawn or cancel the per-slot fail-watcher to match ``new_state``.
@@ -156,7 +178,7 @@ class SlotWatchdog:
         message: str,
         still_faulted: Callable[[], Awaitable[bool]],
         extra: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> bool:
         """Flip a confirmed-faulted slot to ``to_state`` under the per-slot lock.
 
         ``load``/``unload``/``restart`` hold ``host._lock(name)`` for the whole
@@ -169,11 +191,14 @@ class SlotWatchdog:
         we re-verify BOTH the live state AND the fault itself (``still_faulted``)
         before stamping — a load that converged healthy while the watcher waited
         for the lock is left untouched.
+
+        Returns whether it stamped: a caller that keeps watching must tell a
+        declined stamp (the slot is still live) from one that landed.
         """
         host = self._host
         async with host._lock(slot_name):
             if host._current_state(slot_name) not in _FAIL_WATCH_LIVE_STATES:
-                return
+                return False
             try:
                 faulted = await still_faulted()
             except Exception as exc:
@@ -181,11 +206,11 @@ class SlotWatchdog:
                     "slot.fail_watch_recheck_failed",
                     extra={"slot": slot_name, "error": str(exc)},
                 )
-                return
+                return False
             if not faulted:
                 # Fault cleared while we waited for the lock (a concurrent
                 # load/restart converged the slot) — leave it alone.
-                return
+                return False
             try:
                 await host._transition(
                     slot_name,
@@ -199,10 +224,31 @@ class SlotWatchdog:
                     "slot.fail_watch_transition_failed",
                     extra={"slot": slot_name, "error": str(exc)},
                 )
+                return False
+            return True
 
     async def _probe_unhealthy(self, slot_name: str) -> bool:
         """True when the model server still fails its /health probe."""
         return not await self.probe_health(slot_name)
+
+    async def _probe_stalled(self, slot_name: str) -> bool:
+        """True when /health still reads ``stalled`` and nothing is being served.
+
+        A long in-flight run holds the engine's PING down by itself, so a slot
+        being served is never stamped on a stall (#3282). Read again after the
+        probe: it can take 35 s, and a request enters without the slot lock this
+        recheck runs under. Serving only, not dispatch tickets: a ticket held at
+        the readiness gate on a hung engine is the retry traffic the ceiling
+        exists for, and a stamped request is only refused, nothing is killed.
+        """
+        if self._is_serving(slot_name):
+            return False
+        healthy, stalled = await self._probe_health_detail(slot_name)
+        return healthy and stalled and not self._is_serving(slot_name)
+
+    def _is_serving(self, slot_name: str) -> bool:
+        """True while a request is inside ``serving()`` on this slot."""
+        return self._host._serving_count.get(self._host._key(slot_name), 0) > 0
 
     async def _unit_inactive(self, slot_name: str) -> bool:
         """True when the container unit still reads inactive to systemd."""
@@ -223,6 +269,8 @@ class SlotWatchdog:
         host = self._host
         health_failures = 0
         warming_inactive = 0
+        stall_probes = 0
+        stalled_since: float | None = None
         try:
             while True:
                 await asyncio.sleep(_FAIL_WATCH_INTERVAL_S)
@@ -289,7 +337,60 @@ class SlotWatchdog:
                     # the model server's /health — a crashed/wedged server is
                     # active to systemd while /health fails, so an is-active-
                     # only watcher leaves it lying as dispatchable READY.
-                    if await self.probe_health(slot_name):
+                    healthy, stalled = await self._probe_health_detail(slot_name)
+                    if healthy and stalled:
+                        # Inconclusive, still tolerated — but only up to the
+                        # stall ceiling (#3282).
+                        health_failures = 0
+                        if self._is_serving(slot_name):
+                            # A run holds the engine's PING down by itself, so
+                            # its stalls say nothing about a hung front end.
+                            stall_probes = 0
+                            stalled_since = None
+                            continue
+                        stall_probes += 1
+                        now = time.monotonic()
+                        if stalled_since is None:
+                            stalled_since = now
+                        if (
+                            stall_probes < _STALL_CEILING_STRIKES
+                            or now - stalled_since < _STALL_CEILING_S
+                        ):
+                            continue
+                        log.warning(
+                            "slot.fail_watch_stall_ceiling",
+                            extra={
+                                "slot": slot_name,
+                                "stalled_probes": stall_probes,
+                                "stalled_s": round(now - stalled_since, 1),
+                            },
+                        )
+                        stamped = await self._stamp_locked(
+                            slot_name,
+                            SlotState.ERROR,
+                            message=(
+                                f"model server /health stalled past the stall ceiling "
+                                f"({_STALL_CEILING_S:.0f} s, {_STALL_CEILING_STRIKES} "
+                                "consecutive probes)"
+                            ),
+                            still_faulted=lambda: self._probe_stalled(slot_name),
+                            # ``stall_ceiling`` makes this ERROR stick: adoption
+                            # and the lazy load() both refuse it (#3282).
+                            extra={"health_ok": False, "stall_ceiling": True},
+                        )
+                        if stamped:
+                            # A fresh ERROR gets a fresh re-probe.
+                            self._stall_reprobed_at.pop(host._key(slot_name), None)
+                            return
+                        # Declined (the engine answered, or a request is being
+                        # served): the slot is still live, so keep watching with
+                        # a fresh count rather than leave it unwatched.
+                        stall_probes = 0
+                        stalled_since = None
+                        continue
+                    stall_probes = 0
+                    stalled_since = None
+                    if healthy:
                         health_failures = 0
                         continue
                     health_failures += 1
@@ -407,14 +508,26 @@ class SlotWatchdog:
         probe's whole read timeout to arrive, which the watcher's inline await
         tolerates (a dead unit is only noticed later during a stall).
         """
+        healthy, _stalled = await self._probe_health_detail(slot_name, strict=strict)
+        return healthy
+
+    async def _probe_health_detail(
+        self, slot_name: str, *, strict: bool = False
+    ) -> tuple[bool, bool]:
+        """:meth:`probe_health` plus whether the answer was a provider stall.
+
+        Returns ``(healthy, stalled)``. ``stalled`` is only ever ``True`` on a
+        provider's explicit ``"stalled"`` answer, which the caller counts toward
+        the stall ceiling (:data:`_STALL_CEILING_S`).
+        """
         cfg = await self._host._maybe_load_config(slot_name)
         if not cfg:
-            return not strict
+            return (not strict, False)
         if is_npu_trio_shadow(cfg):
-            return True
+            return (True, False)
         port = _cfg_port(cfg)
         if not port:
-            return not strict
+            return (not strict, False)
 
         from hal0.providers.container import container_provider
 
@@ -433,10 +546,40 @@ class SlotWatchdog:
                 "slot.health_probe_failed",
                 extra={"slot": slot_name, "error": str(exc)},
             )
-            return not strict
+            return (not strict, False)
         if health.get("status") == "stalled":
-            return not strict
-        return bool(health.get("ok"))
+            return (not strict, True)
+        return (bool(health.get("ok")), False)
+
+    async def stall_ceiling_cleared(self, slot_name: str, cfg: dict[str, Any]) -> bool:
+        """True only when a stall-ceiling ERROR's engine demonstrably answers again.
+
+        Strict: a stall, a transport error, a missing port and a probe that
+        outlasts the readiness budget all read as "not cleared", so the ERROR
+        stays. Bounded and throttled because status() and list() are the callers
+        (:data:`_STALL_REPROBE_INTERVAL_S`). The timestamp is taken before the
+        probe so concurrent callers skip it instead of queueing behind it; the
+        cost is that a recovered engine can read ERROR for up to one interval.
+        """
+        from hal0.providers.container import readiness_probe_budget_s
+
+        key = self._host._key(slot_name)
+        now = time.monotonic()
+        last = self._stall_reprobed_at.get(key)
+        if last is not None and now - last < _STALL_REPROBE_INTERVAL_S:
+            return False
+        self._stall_reprobed_at[key] = now
+        try:
+            healthy, stalled = await asyncio.wait_for(
+                self._probe_health_detail(slot_name, strict=True),
+                readiness_probe_budget_s(cfg),
+            )
+        except TimeoutError:
+            return False
+        if not healthy or stalled:
+            return False
+        self._stall_reprobed_at.pop(key, None)
+        return True
 
     async def readiness_check(self, slot_name: str) -> tuple[bool, str]:
         """Check whether a container-backed slot is ready to serve requests.
@@ -494,6 +637,9 @@ __all__ = [
     "_FAIL_WATCH_INTERVAL_S",
     "_FAIL_WATCH_LIVE_STATES",
     "_HEALTH_FAIL_STRIKES",
+    "_STALL_CEILING_S",
+    "_STALL_CEILING_STRIKES",
+    "_STALL_REPROBE_INTERVAL_S",
     "_WARMING_INACTIVE_STRIKES",
     "_WARMING_STALE_AFTER_S",
     "SlotWatchdog",

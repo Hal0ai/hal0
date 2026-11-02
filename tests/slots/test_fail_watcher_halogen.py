@@ -24,7 +24,7 @@ from hal0.providers.container import ContainerProvider
 from hal0.providers.halogen import HalogenProvider
 from hal0.slots import watchdog as wd_mod
 from hal0.slots.manager import SlotManager
-from hal0.slots.state import SlotState
+from hal0.slots.state import SlotStallCeiling, SlotState
 from tests.slots.conftest import FakeContainerProvider
 
 
@@ -221,3 +221,358 @@ async def test_a_stall_is_inconclusive_to_both_probe_modes(provider: _RealHealth
     with _http(_hangs):
         assert await sm._probe_health("chat") is True
         assert await sm._probe_health("chat", strict=True) is False
+
+
+# --- stall ceiling (#3282) ---------------------------------------------------
+
+
+@pytest.fixture
+def ceiling(monkeypatch: pytest.MonkeyPatch) -> int:
+    """A tiny ceiling: 5 consecutive stalled probes over 0 s."""
+    monkeypatch.setattr(wd_mod, "_STALL_CEILING_STRIKES", 5)
+    monkeypatch.setattr(wd_mod, "_STALL_CEILING_S", 0.0)
+    return 5
+
+
+async def test_stalls_below_the_ceiling_stay_ready(provider: _RealHealth, ceiling: int) -> None:
+    calls = {"n": 0}
+    stall_until = ceiling - 1
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return _hangs(request) if calls["n"] <= stall_until else httpx.Response(200, json={})
+
+    sm = SlotManager()
+    with _http(handler):
+        await _ready(sm)
+        deadline = time.monotonic() + 5.0
+        while calls["n"] < stall_until + 4 and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+    assert calls["n"] >= stall_until + 4
+    assert sm.state("chat") is SlotState.READY
+    await sm._transition("chat", SlotState.OFFLINE, force=True)
+
+
+async def test_stalls_at_the_ceiling_stamp_error_naming_it(
+    provider: _RealHealth, ceiling: int
+) -> None:
+    sm = SlotManager()
+    with _http(_hangs):
+        await _ready(sm)
+        assert await _wait_for(sm, SlotState.ERROR) is SlotState.ERROR
+    record = sm._states[sm._key("chat")]
+    assert "stall ceiling" in (record.message or "")
+    assert "5 consecutive probes" in (record.message or "")
+    assert record.extra.get("health_ok") is False
+
+
+async def test_an_answered_probe_resets_the_stall_counter(
+    provider: _RealHealth, ceiling: int
+) -> None:
+    """ceiling-1 stalls, one answer, ceiling-1 more: never N in a row."""
+    calls = {"n": 0}
+    cycle = ceiling  # (ceiling-1) stalls then one 200, repeated
+    total = cycle * 3
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(200, json={}) if calls["n"] % cycle == 0 else _hangs(request)
+
+    sm = SlotManager()
+    with _http(handler):
+        await _ready(sm)
+        deadline = time.monotonic() + 10.0
+        while calls["n"] < total and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+    assert calls["n"] >= total
+    assert sm.state("chat") is SlotState.READY
+    await sm._transition("chat", SlotState.OFFLINE, force=True)
+
+
+# --- the ceiling's ERROR sticks (#3282) --------------------------------------
+
+
+async def _stalled_to_error(sm: SlotManager) -> None:
+    await _ready(sm)
+    assert await _wait_for(sm, SlotState.ERROR) is SlotState.ERROR
+    assert sm._states[sm._key("chat")].extra.get("stall_ceiling") is True
+
+
+async def test_the_ceiling_error_persists_across_status_and_list(
+    provider: _RealHealth, ceiling: int
+) -> None:
+    """Adoption's non-strict probe reads a stall as healthy; it must not undo the ERROR."""
+    sm = SlotManager()
+    with _http(_hangs):
+        await _stalled_to_error(sm)
+        for _ in range(3):
+            assert (await sm.status("chat")).state is SlotState.ERROR
+            await sm.list()
+            assert sm.state("chat") is SlotState.ERROR
+
+
+async def test_the_ceiling_error_recovers_when_the_engine_answers(
+    provider: _RealHealth, ceiling: int
+) -> None:
+    sm = SlotManager()
+    with _http(_hangs):
+        await _stalled_to_error(sm)
+    with _http(lambda request: httpx.Response(200, json={})):
+        await sm.status("chat")
+        assert sm.state("chat") is SlotState.READY
+        assert "stall_ceiling" not in sm._states[sm._key("chat")].extra
+    await sm._transition("chat", SlotState.OFFLINE, force=True)
+
+
+async def test_a_raising_probe_keeps_the_ceiling_error(provider: _RealHealth, ceiling: int) -> None:
+    """A probe that raises proves nothing, so it must not read as the engine answering."""
+    sm = SlotManager()
+    with _http(_hangs):
+        await _stalled_to_error(sm)
+
+    async def boom(port: int, slot_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+        raise RuntimeError("probe transport blew up")
+
+    provider.health = boom  # type: ignore[method-assign]
+    assert (await sm.status("chat")).state is SlotState.ERROR
+    assert sm._states[sm._key("chat")].extra.get("stall_ceiling") is True
+
+
+async def test_a_slow_probe_keeps_the_ceiling_error_and_returns_within_the_bound(
+    provider: _RealHealth, ceiling: int
+) -> None:
+    async def slow(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(30.0)
+        return httpx.Response(200, json={})
+
+    sm = SlotManager()
+    with _http(_hangs):
+        await _stalled_to_error(sm)
+    started = time.monotonic()
+    with _http(slow), patch.object(HalogenProvider, "readiness_budget_s", 0.05):
+        assert (await sm.status("chat")).state is SlotState.ERROR
+    assert time.monotonic() - started < 5.0
+    assert sm._states[sm._key("chat")].extra.get("stall_ceiling") is True
+
+
+async def test_the_ceiling_error_reprobes_at_most_once_per_interval(
+    provider: _RealHealth, ceiling: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """status() and list() must not each pay for a probe of a silent engine."""
+    calls = {"n": 0}
+
+    def counted(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return _hangs(request)
+
+    sm = SlotManager()
+    with _http(_hangs):
+        await _stalled_to_error(sm)
+    with _http(counted):
+        await asyncio.gather(*(sm.status("chat") for _ in range(4)))
+        await sm.list()
+        await sm.status("chat")
+    assert calls["n"] == 1
+    # An engine that recovers inside the interval waits for the next probe…
+    with _http(lambda request: httpx.Response(200, json={})):
+        assert (await sm.status("chat")).state is SlotState.ERROR
+        # …and the next one past it clears the ERROR.
+        monkeypatch.setattr(wd_mod, "_STALL_REPROBE_INTERVAL_S", 0.0)
+        assert (await sm.status("chat")).state is SlotState.READY
+    await sm._transition("chat", SlotState.OFFLINE, force=True)
+
+
+async def test_a_new_ceiling_error_is_probed_at_once(provider: _RealHealth, ceiling: int) -> None:
+    """The throttle belongs to one ERROR; a later stamp must not inherit it."""
+    sm = SlotManager()
+    with _http(_hangs):
+        await _stalled_to_error(sm)
+        assert (await sm.status("chat")).state is SlotState.ERROR
+        await _stalled_to_error(sm)
+    with _http(lambda request: httpx.Response(200, json={})):
+        assert (await sm.status("chat")).state is SlotState.READY
+    await sm._transition("chat", SlotState.OFFLINE, force=True)
+
+
+async def test_the_ceiling_error_counts_as_holding_gpu_memory(
+    provider: _RealHealth, ceiling: int
+) -> None:
+    from hal0.slots.gtt_guard import slot_may_hold_gpu_memory
+
+    sm = SlotManager()
+    with _http(_hangs):
+        await _stalled_to_error(sm)
+        assert slot_may_hold_gpu_memory(await sm.status("chat"))
+
+
+async def test_lazy_load_refuses_a_ceiling_error_without_killing_the_engine(
+    provider: _RealHealth, ceiling: int
+) -> None:
+    sm = SlotManager()
+    terminated: list[str] = []
+
+    async def spy(name: str, *a: Any, **kw: Any) -> None:
+        terminated.append(name)
+
+    sm.terminate = spy  # type: ignore[method-assign]
+    with _http(_hangs):
+        await _stalled_to_error(sm)
+        with pytest.raises(SlotStallCeiling, match="hal0 slot restart chat"):
+            await sm.load("chat")
+    assert terminated == []
+    assert sm.state("chat") is SlotState.ERROR
+
+
+async def test_lazy_load_reloads_a_ceiling_error_whose_unit_has_died(
+    provider: _RealHealth, ceiling: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No engine is left to protect, so this is an ordinary ERROR: never the refusal."""
+
+    async def ready_at_once(self: SlotManager, *a: object, **kw: object) -> SlotState:
+        return SlotState.READY
+
+    monkeypatch.setattr(SlotManager, "_await_ready", ready_at_once)
+    sm = SlotManager()
+    with _http(_hangs):
+        await _stalled_to_error(sm)
+        provider.active.discard("chat")
+        assert (await sm.load("chat")).state is SlotState.READY
+    assert "stall_ceiling" not in sm._states[sm._key("chat")].extra
+    await sm._transition("chat", SlotState.OFFLINE, force=True)
+
+
+async def test_restart_still_recycles_a_ceiling_error(provider: _RealHealth, ceiling: int) -> None:
+    sm = SlotManager()
+    terminated: list[str] = []
+
+    async def spy(name: str, *a: Any, **kw: Any) -> None:
+        terminated.append(name)
+
+    loaded: list[str] = []
+
+    async def fake_load(name: str, *a: Any, **kw: Any) -> None:
+        loaded.append(name)
+
+    sm.terminate = spy  # type: ignore[method-assign]
+    sm.load = fake_load  # type: ignore[method-assign]
+    with _http(_hangs):
+        await _stalled_to_error(sm)
+        await sm.restart("chat")
+    assert terminated == ["chat"]
+    assert loaded == ["chat"]
+    assert sm.state("chat") is SlotState.OFFLINE
+    assert "stall_ceiling" not in sm._states[sm._key("chat")].extra
+
+
+async def test_dispatcher_lazy_load_yields_non_retryable_slot_load_failed(
+    provider: _RealHealth, ceiling: int
+) -> None:
+    from hal0.dispatcher.router import SlotLoadFailed
+
+    sm = SlotManager()
+    with _http(_hangs):
+        await _stalled_to_error(sm)
+        from hal0.dispatcher.router import Dispatcher
+
+        d = Dispatcher.__new__(Dispatcher)
+        d._slot_manager = sm  # type: ignore[attr-defined]
+        call = type("C", (), {"slot_name": "chat", "upstream_name": "u"})()
+        with pytest.raises(SlotLoadFailed):
+            await d._ensure_slot_loaded_backend_aware(call)  # type: ignore[attr-defined]
+
+
+async def test_no_stamp_while_a_request_is_in_flight(provider: _RealHealth, ceiling: int) -> None:
+    sm = SlotManager()
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return _hangs(request)
+
+    with _http(handler):
+        await _ready(sm)
+        sm._serving_count[sm._key("chat")] = 1
+        deadline = time.monotonic() + 5.0
+        while calls["n"] < ceiling * 3 and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert calls["n"] >= ceiling * 3
+        assert sm.state("chat") is SlotState.READY
+        # …and the watcher is still alive: once idle, the stall is judged.
+        sm._serving_count.pop(sm._key("chat"))
+        assert await _wait_for(sm, SlotState.ERROR) is SlotState.ERROR
+
+
+async def test_a_declined_stamp_keeps_the_slot_watched(provider: _RealHealth, ceiling: int) -> None:
+    """The recheck under the lock answers: the watcher resets and keeps going."""
+    sm = SlotManager()
+    real = sm._watchdog._probe_stalled
+    declined = {"n": 0}
+
+    async def decline_once(name: str) -> bool:
+        if declined["n"] == 0:
+            declined["n"] += 1
+            return False
+        return await real(name)
+
+    sm._watchdog._probe_stalled = decline_once  # type: ignore[method-assign]
+    with _http(_hangs):
+        await _ready(sm)
+        # First ceiling decline leaves READY + a live watcher; the next lap stamps.
+        assert await _wait_for(sm, SlotState.ERROR) is SlotState.ERROR
+    assert declined["n"] == 1
+
+
+async def test_a_request_entering_service_during_the_recheck_declines_the_stamp(
+    provider: _RealHealth,
+) -> None:
+    """The recheck's probe can take 35 s, and a request enters without the slot lock."""
+    sm = SlotManager()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sm._serving_count[sm._key("chat")] = 1
+        return _hangs(request)
+
+    with _http(handler):
+        assert await sm._watchdog._probe_stalled("chat") is False
+
+
+async def test_stalls_during_a_run_do_not_count_toward_the_ceiling(
+    provider: _RealHealth, ceiling: int
+) -> None:
+    """A run that ends leaves a whole ceiling to go, not what it would have used up."""
+    sm = SlotManager()
+    calls = {"n": 0}
+    run_ends_at = ceiling - 1
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == run_ends_at:
+            sm._serving_count.pop(sm._key("chat"))
+        return _hangs(request)
+
+    sm._serving_count[sm._key("chat")] = 1
+    with _http(handler):
+        await _ready(sm)
+        assert await _wait_for(sm, SlotState.ERROR) is SlotState.ERROR
+    assert calls["n"] >= run_ends_at + ceiling
+
+
+async def test_a_dispatch_ticket_alone_does_not_defer_the_stamp(
+    provider: _RealHealth, ceiling: int
+) -> None:
+    """A ticket held at the readiness gate on a hung engine is the retry traffic the
+    ceiling exists for: it must neither reset the count nor decline the stamp."""
+    sm = SlotManager()
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return _hangs(request)
+
+    sm.enter_dispatch("chat")
+    with _http(handler):
+        await _ready(sm)
+        assert await _wait_for(sm, SlotState.ERROR) is SlotState.ERROR
+    assert sm.in_flight_count("chat") == 1
+    # The ceiling's probes, then the recheck: not one extra lap.
+    assert calls["n"] == ceiling + 1

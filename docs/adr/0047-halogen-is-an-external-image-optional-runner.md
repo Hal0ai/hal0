@@ -184,7 +184,17 @@ Four properties of the engine shape the decisions below:
    failed) reads `stalled`, still counted healthy. Only a connection that breaks,
    or any other status, strikes the slot. The engine can go silent for minutes
    under host memory pressure, and taking it down then is what leaves the driver
-   holding its memory. The per-request readiness gate waits at most 5 s on that
+   holding its memory. A stall is tolerated only up to a ceiling: 10 consecutive
+   `stalled` probes spanning at least 900 s (the warming watchdog's figure), with
+   no answered probe between, stamp the slot ERROR with a message naming the stall
+   ceiling and marking it as the ceiling's. The engine is not killed, and the ERROR
+   sticks: adoption re-promotes the slot only once a strict probe, bounded by the
+   readiness budget and made at most once per 30 s, sees the engine answer. While
+   the unit is alive the next request is refused (the lazy load does not terminate
+   it) until `hal0 slot restart <name>`; a unit that has died takes the normal ERROR
+   path and reloads. The GTT-leak check counts the marked slot as holding GPU memory.
+   A slot with requests in flight is never stamped, and stalled probes during a run
+   do not count. Any answered probe resets the count. The per-request readiness gate waits at most 5 s on that
    probe and reads a stall as "starting", so a request gets the retryable
    `slot.loading` 503 and does not sit out the stall.
 
@@ -372,11 +382,13 @@ and registry work, and the drawers all merged). Vendor files are at tag
   `load_sync` (`:2513`),
   `runner_family_mismatch` (`:1274`), the liveness dispatch (`:2295`),
   `tune_effective_for_slot` (`:3457`). `src/hal0/slot_lifecycle_budget.py:140`:
-  `TEARDOWN_MARGIN_S`. `src/hal0/slots/manager.py:2964`:
-  `SlotManager.terminate`, which waits for the widened bound; `:4212`:
+  `TEARDOWN_MARGIN_S`. `src/hal0/slots/manager.py:2989`:
+  `SlotManager.terminate`, which waits for the widened bound; `:4237`:
   `_wait_ready_watching_unit`, which ends a readiness wait on a unit systemd has
-  parked in `failed`. `src/hal0/slots/watchdog.py:441`: `readiness_check`, the
-  per-request gate that bounds the liveness probe (`:483`); `:85`: the 900 s
+  parked in `failed`. `src/hal0/slots/watchdog.py:584`: `readiness_check`, the
+  per-request gate that bounds the liveness probe (`:625`); `:97`: the 900 s stall
+  ceiling; `:103`: the 30 s re-probe interval; `:554`: `stall_ceiling_cleared`, the
+  re-probe adoption asks (`src/hal0/slots/manager.py:4654`); `:85`: the 900 s
   warming watchdog. `installer/wrappers/hal0-systemctl:415`: the root-side
   `--stop-timeout` check.
 - `src/hal0/profiles/__init__.py`: `_runtime_family` (`:162`, from
@@ -412,9 +424,9 @@ and registry work, and the drawers all merged). Vendor files are at tag
 - `src/hal0/slots/gtt_guard.py`: `GTT_LEAK_THRESHOLD_MB` (`:41`), `GFX1151`
   (`:44`), `gtt_leak_message` (`:64`, the one leak rule) and
   `slot_may_hold_gpu_memory` (`:105`). `SlotManager._guard_gtt_leak`
-  (`src/hal0/slots/manager.py:2885`) runs it at load, after `check_load`
-  (`:1984`) and before pre-load eviction (`:1993`, `:2005`), for a provider that
-  sets `gtt_leak_guard`; the slot message is set at `:2593`.
+  (`src/hal0/slots/manager.py:2910`) runs it at load, after `check_load`
+  (`:2009`) and before pre-load eviction (`:2018`, `:2030`), for a provider that
+  sets `gtt_leak_guard`; the slot message is set at `:2618`.
   `src/hal0/cli/doctor_all.py:259`: `check_gtt_leak`, the `gtt_leak` row.
   `src/hal0/cli/doctor_commands.py:1904`: `check_halogen_weights`, and `:2089`
   `HAL0-HALOGEN-WEIGHTS-INCOMPLETE`.
