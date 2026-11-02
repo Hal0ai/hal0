@@ -93,7 +93,7 @@ copy — they can't be edited or deleted, only cloned.
 | Key | Type | Default | Constraints |
 |---|---|---|---|
 | `flags` | str | `""` | free llama-server flags: KV cache types, batch sizes, sampling, reasoning, `--parallel`. Screened on write and again at launch (below). |
-| `ctx_size` | int \| null | `null` | `128`–`16777216`. `null` = the model's native window, dense-capped at 32768, else 8192. |
+| `ctx_size` | int \| null | `null` | `128`–`16777216`. `null` = the model's native window, dense-capped at 32768, else 8192. On a halogen-runner profile a value past `262144` also needs `HALOGEN_ROPE_YARN` in `flags` (`422 profiles.halogen_flag_out_of_range`). |
 | `enable_thinking` | bool \| null | `null` | request-time reasoning default for slots running this profile |
 | `vision` | `"auto"\|"off"` | `"auto"` | `auto` loads the model's mmproj when it has one |
 | `speculation` | `"auto"\|"off"\|"ngram"` | `"auto"` | `auto` drafts with the model's paired drafter when the runner can run it, else with its MTP heads when it has them and the runner supports it; `ngram` uses n-gram lookup and needs no file (refused on a halogen-runner profile, `422 profiles.speculation_unsupported`: that engine takes `auto` or `off`); `off` never speculates. Replaces `mtp`: a stored or posted `mtp` is refused (`422 profiles.field_renamed` over the API) |

@@ -20,10 +20,17 @@ never builds, patches or mirrors it. The design is recorded in ADR-0047
 (`docs/adr/0047-halogen-is-an-external-image-optional-runner.md` in the
 repository).
 
+The image is **ungated for now**. hal0's hardware gate for this runner
+(`gates/halogen.toml` in the runner-images repository) has no passing report for
+this digest yet, so the pin's `lanes_gated` list is empty. hal0 does not refuse
+the image for that, but treat your first load as a test run. The pin gains
+`lanes_gated: ["rocm"]` once the gate has passed for exactly this digest.
+
 It is opt-in. A box that never creates a halogen slot does not pull the image,
 register a model or see a new slot. The only visible differences are the
-**halogen (Flash-Next)** entry under **Optional runtimes** in the pickers and on
-the Runner Images page, and the `halogen` profile in the profile list.
+**halogen (Flash-Next)** entry in the Runtime selects (listed after the default
+runtimes) and under **Optional runtimes** on the Runner Images page, and the
+`halogen` profile in the profile list.
 
 <Aside type="caution" title="One model, and most of the box">
 The engine runs one model family and is closed source. Its weights stay
@@ -113,7 +120,7 @@ engine, or whatever asked for the memory, can stall for minutes at 100% of one
 core with no output. It looks exactly like a hang and is not a crash. hal0's
 admission refuses a load that its estimate says will not fit and evicts only idle,
 unpinned slots first. `agent`, `utility` and `npu` are pinned by default, so a
-halogen load never takes them down.
+halogen load does not take them down unless you un-pinned them.
 
 ## Stage the weights
 
@@ -150,17 +157,29 @@ hal0 model add <store>/halogen-flash-next/qwen38-flash-next-ht43.hgn \
   --id qwen3.8-flash-next-ht43
 ```
 
-hal0 recognises a halogen checkpoint by its `.hgn` extension or by its first four
-bytes (`HGN1`), and treats the lookup table, vision sidecar, draft head and
-`*.overlay.hgn` files as companions rather than models. `hal0 model scan` finds checkpoints the
-same way. The `.hgn` extension is in the default `[models].file_extensions`; if you
-set that list yourself, add `".hgn"` to it.
+hal0 recognises a halogen checkpoint by its first four bytes (`HGN1`), whatever
+the file is called; a `.hgn` file without those bytes is only a low-confidence
+guess. The lookup table, vision sidecar, draft head and `*.overlay.hgn` files are
+companions, not models: `hal0 model scan` skips them, and `hal0 model add` on one
+is refused with `models.halogen_companion` (409) and points you at the checkpoint
+it belongs to. The `.hgn` extension is in the default `[models].file_extensions`;
+if you set that list yourself, add `".hgn"` to it.
 
 <Aside type="note">
 The registry refuses a mismatch by name, both when you save a slot and again at
-load: a halogen checkpoint on a llama.cpp slot, or a GGUF on a halogen slot. A
+load (`slot.model_runtime_mismatch`, 400): a halogen checkpoint on a llama.cpp
+slot, or a GGUF on a halogen slot. The profile decides which runtime a slot
+launches, so a slot whose runtime is set to halogen under a llama.cpp profile is
+refused with `slot.runner_family_mismatch` (409); pick the `halogen` profile. A
 GGUF of Flash-Next does not run on halogen in this release.
 </Aside>
+
+To check what you staged, run `hal0 doctor profiles`. It reports each registered
+checkpoint: a failure (exit code 1) when the file is gone, does not start with
+`HGN1`, or has no `tokenizer/tokenizer.json` beside it, and a warning, ending on the
+exact `hf download` line, when the lookup table is missing. The vision sidecar is
+reported but never required. With `--json` the finding is
+`HAL0-HALOGEN-WEIGHTS-INCOMPLETE`.
 
 ## Create the slot
 
@@ -177,13 +196,22 @@ GGUF of Flash-Next does not run on halogen in this release.
    ```
 
    In the dashboard, open **Slots**, create a slot, pick **halogen (Flash-Next)**
-   under **Optional runtimes**, and choose a checkpoint; the model picker lists
-   only halogen checkpoints.
-2. Load it: `hal0 slot load flash`. The engine reads the checkpoint and reserves
-   the KV pool, which takes minutes, not seconds. hal0 waits up to 10 minutes for
-   the engine to answer `/health` and pass its own capability probe, then sends one
-   short chat turn with thinking off to check the output before the slot reads
-   ready.
+   in the **Runtime** select, and choose a checkpoint; the model picker lists only
+   halogen checkpoints.
+2. Load it: `hal0 slot load flash`. Before it touches anything, hal0 refuses a
+   host with no gfx1151 GPU (`slot.host_unsupported`, 409) and a checkpoint that is
+   missing, does not start with `HGN1`, or has no `tokenizer/tokenizer.json`
+   beside it (`slot.model_missing`), so a refused load costs the box none of its
+   idle slots. Then the engine reads the checkpoint and reserves the KV pool,
+   which takes minutes, not seconds. hal0 waits up to 10 minutes for the engine
+   to answer `/health` and report its capability probe `ok`. If the probe reads
+   `failed` for a full minute while the engine responds, hal0 stops waiting for
+   it, because that is the front end missing the engine's capability line and not
+   a broken engine. It then sends one short chat turn with thinking off (at most
+   32 tokens, within 60 seconds) to check the output before the slot reads ready.
+   If the engine has still not answered after the 10 minutes, the slot stays in
+   `warming` and is not ready; if systemd has parked the unit in `failed`, the
+   wait ends within seconds and the slot reports the failure.
 3. Call it through hal0 like any slot: `hal0/flash` (or the model id,
    `qwen3.8-flash-next-ht43`) on `/v1/chat/completions`. Streaming, tool calls,
    structured output and images (with the vision sidecar) pass through.
@@ -197,7 +225,7 @@ authenticated edge; the engine's own API key is never set.
 | | `v2` | `ht43` |
 |---|---|---|
 | Weights in memory | 62.1 GiB | 53.7 GiB |
-| Prompts | the reference | read about 6 to 10% slower |
+| Prompts | the reference | read somewhat slower |
 | Decode with the draft head | the reference | a few percent slower |
 
 **Use `ht43` unless the box is dedicated to the engine.** hal0's seed, the
@@ -214,6 +242,13 @@ slot: change it in the slot drawer's model picker or with
 - **Memory.** `flash` appears in the Unified memory bar and on the Slots page at the
   estimate while it starts, then at the larger of the estimate and the container's
   measured memory (see [the memory it takes](#the-memory-it-takes)).
+- **The slot drawer's memory line.** Under the **Engine** block, a line reads
+  `This layout: ~72 GiB resident · +10 GiB lookup-table cache advised · box has N
+  GiB free`, with a chip that says `fits`, `tight`, `won't fit` or `loaded`. It
+  comes from the `footprint` field of `GET /api/slots/{name}/resolved` (see
+  [the slot tune API](/docs/reference/api/rest-api/#slot-tune-api)), is computed
+  from the saved profile and the slot's model, and does not move until you
+  **Save to profile**. The chip is advice and never blocks a load.
 - **The slot message.** A load hal0 refuses, or a start the engine fails, says why
   in the slot message and in the journal.
 - **Logs.** `hal0 slot logs flash` carries the engine's startup lines, including
@@ -248,21 +283,32 @@ slot's **Tune** block (ADR-0045), which maps onto `HALOGEN_CTX`,
 `HALOGEN_ENABLE_THINKING`, `HALOGEN_REASONING_EFFORT`,
 `HALOGEN_MAX_THINKING_TOKENS`, `HALOGEN_VISION_TOWER` and
 `HALOGEN_DRAFTER_DEFAULT`/`HALOGEN_PLD`. A profile that names any of these is
-refused, and the error names the field that owns it. Vision `auto` loads the
+refused (`profiles.halogen_flag_denied`, 422), and the error names the owner
+(`slot port`, `model row`, `tune` or `hal0`). Vision `auto` loads the
 tower only when `qwen38-flash-next-vision.hgn` sits beside the checkpoint (0.84 GiB
 resident); `off` never does. Speculation takes `auto` (the
 engine's own draft head plus prompt lookup) or `off`. **There is no `ngram`
 option:** the engine has no n-gram drafter, so the drawer hides it and a write
-that asks for it is refused rather than silently running `auto`.
+that asks for it is refused rather than silently running `auto`
+(`slot.tune_unsupported_value` on a slot, `profiles.speculation_unsupported` on a
+profile). A context window past the engine's native 262,144 positions is refused
+the same way unless the profile's flags carry `HALOGEN_ROPE_YARN`, because the
+engine would exit at once; that is `slot.tune_unsupported_value` on a slot and
+`profiles.halogen_flag_out_of_range` on a profile.
 
 Every other `HALOGEN_*` variable in the vendor's
 [flag reference](https://github.com/peonist-ai/halogen-flash-server/blob/v0.18.22/docs/FLAGS.md)
-can be typed into the **Advanced** flags. The exceptions are the names hal0 owns
+can be typed into the **Advanced** flags, as `HALOGEN_NAME=value` tokens with a
+value (anything else is `profiles.halogen_flag_malformed`). The exceptions are the
+names hal0 owns
 (`HALOGEN_API_PORT`, `HALOGEN_PORT`, `HALOGEN_BIND`, `HALOGEN_ENGINE`,
 `HALOGEN_CHECKPOINT`, `HALOGEN_MODEL_ID`, `HALOGEN_TOKENIZER`,
 `HALOGEN_NGRAM_TABLE`, `HALOGEN_MTP_HEAD`), the tune's names above, and
 `HALOGEN_DOWNLOAD`, `HALOGEN_API_KEY*`, `HALOGEN_NPU_*`, `HALOGEN_CACHE_DIR`,
-`HALOGEN_CACHE_FILE` and `HALOGEN_RECORD_*`.
+`HALOGEN_CACHE_FILE` and `HALOGEN_RECORD_*`. A curated setting outside its range
+is `profiles.halogen_flag_out_of_range`. `GET /api/system-info` lists the curated
+settings under `backends.halogen.knobs` and every refused name under
+`backends.halogen.knob_denied`.
 
 ## Stopping it, and when a start fails
 
@@ -281,21 +327,33 @@ the GTT it left. hal0 gives the unit 120 seconds for all of that (podman
 `--stop-timeout=120`, systemd `TimeoutStopSec=150`) and does not remove the unit
 or the container while it runs, so a stop can take up to two minutes.
 
-hal0 does **not** restart a halogen slot that fails. The engine exits with status
-1 for every runtime failure and status 2 for a configuration it refuses, and hal0's
-unit never restarts after either, because a restart after an unclean exit is the loop
-that hangs. The slot stays in `error` (its unit in `failed`), with the reason in the journal
-and the slot message. Read it with `hal0 slot logs flash`, fix the cause, then load it yourself:
-`hal0 slot load flash`.
+hal0 does **not** restart a halogen slot after the engine's own failure exits. The
+engine exits with status 1 for every runtime failure and status 2 for a configuration
+it refuses, and hal0's unit (`RestartPreventExitStatus=64 132 1 2`) never restarts
+after either, because a restart after an unclean exit is the loop that hangs. The
+slot stays in `error` (its unit in `failed`), with the reason in the journal and the
+slot message, and a start that fails this way ends the load's wait within seconds
+instead of running out the 10 minutes. Read it with `hal0 slot logs flash`, fix the cause, then
+load it yourself: `hal0 slot load flash`. A container killed from outside is not one
+of those exits: the unit restarts it the way it restarts any slot.
+
+A running slot is watched with a patient probe. hal0 asks `GET /health` with a
+35-second read timeout, and a read timeout or an HTTP 503 (the front end is up and
+the engine's own PING failed) reads as **stalled**, not dead: the engine can go
+silent for minutes when the box is short of memory, and taking it down then is what
+leaves the driver holding its memory. Only a connection that really breaks counts
+against the slot. A request that arrives during a stall waits at most five seconds
+and then gets a retryable 503 (`slot.loading`).
 
 ### The GTT-leak warning
 
 Before it loads a halogen slot, hal0 checks the GPU's memory, and the `gtt_leak` row of
-`hal0 doctor all` checks the same thing. If the GPU holds more than 8 GiB that none of
-hal0's slots account for, no GPU slot is loaded or starting and no process holds
-`/dev/kfd`, hal0 **warns** (in the log, the slot message and the doctor row) and goes on
-with the load; it never refuses on this, and it says nothing when it cannot read one of
-those figures. The warning names both possible causes:
+`hal0 doctor all` checks the same thing. If the GPU holds more than 8 GiB, no process
+holds `/dev/kfd`, and no other GPU slot of this box is loading, loaded or stopping (or
+failed with its process possibly still alive), hal0 **warns** (in the log, in the slot
+message while the slot starts, and in the doctor row) and goes on with the load; it
+never refuses on this, and it says nothing when it cannot read one of those figures.
+The warning names both possible causes:
 
 - **Another guest holds the memory.** The GPU's counters are host-wide while hal0 only
   sees its own slots, so on a hypervisor whose guests share the GPU, a sibling guest's
@@ -314,9 +372,9 @@ fuser -v /dev/kfd
 
 If the first figure is large and nothing holds `/dev/kfd`, either something outside this
 box holds the memory or it has leaked: check the other guests first. The warning can only
-fire while no GPU slot of this box is loaded or starting, so a box running a Vulkan slot
-such as `utility` (which holds GPU memory without appearing under `/dev/kfd`) never trips
-it.
+fire while no other GPU slot of this box could hold the memory, so a box running a Vulkan
+slot such as `utility` (which holds GPU memory without appearing under `/dev/kfd`) never
+trips it. The row warns and never fails.
 
 ## What hal0 does not do with it
 

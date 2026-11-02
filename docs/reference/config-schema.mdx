@@ -67,7 +67,7 @@ Root model `Hal0Config`, `extra="allow"`.
 | `preload_evict_headroom_mb` | int | `1024` | `>= 0` |
 | `publish_host` | str | `"127.0.0.1"` | non-empty, no whitespace/`:`/`/` |
 | `network_mode` | str | `""` | must be `""` or `"host"` |
-| `default_images` | dict[str,str] | `{}` | keys must be a `RUNNER_IMAGES` runner key (`standard`, `cpu`, `cuda`, `flm`, `kokoro`, `moonshine`, `qwen3tts`, `comfyui`) — any other key is a config error; values must be non-empty image refs; sending `null` for a runner key clears its override |
+| `default_images` | dict[str,str] | `{}` | keys must be a `RUNNER_IMAGES` runner key (`standard`, `cpu`, `cuda`, `halogen`, `flm`, `kokoro`, `moonshine`, `qwen3tts`, `comfyui`) — any other key is a config error; values must be non-empty image refs; sending `null` for a runner key clears its override |
 
 ### `[dispatcher]`
 
@@ -344,8 +344,9 @@ refused because the engine has no n-gram drafter.
 
 Unsupported slot types/devices fail with `slot.tune_not_supported`; a thinking
 override pinned by profile flags fails with `slot.tune_pinned_by_flags`; a value
-the slot's engine cannot run (speculation `ngram` on a halogen slot) fails with
-`slot.tune_unsupported_value`.
+the slot's engine cannot run (speculation `ngram` on a halogen slot, or a halogen
+context past the engine's native 262144 positions with no `HALOGEN_ROPE_YARN` in
+the profile's flags) fails with `slot.tune_unsupported_value` (400).
 Legacy root-level tuning keys remain refused with `slot.tuning_key_denied`.
 Effort flags require a resolved runner build of at least 11840.
 
