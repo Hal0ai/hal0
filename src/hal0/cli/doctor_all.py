@@ -1581,7 +1581,29 @@ def check_port_dnat(slots: Any, audit: Callable[..., Any] | None = None) -> Chec
         rules = netavark.read_dnat_rules()
         live = netavark.read_live_container_ips()
     except (netavark.NetavarkUnavailable, OSError, subprocess.SubprocessError) as exc:
-        return Check("port_dnat", label, _WARN, f"audit unavailable: {exc}")
+        # No ``inet netavark`` table: netavark 1.4 keeps its rules in the
+        # iptables-nft ``nat`` table instead (#3237). Only warn if that
+        # backend lacks the rules too.
+        try:
+            published = netavark.read_iptables_dnat_ports()
+        except (netavark.NetavarkUnavailable, OSError, subprocess.SubprocessError):
+            return Check("port_dnat", label, _WARN, f"audit unavailable: {exc}")
+        missing = [p for p in ports if p not in published]
+        if missing:
+            return Check(
+                "port_dnat",
+                label,
+                _WARN,
+                f"no DNAT rule for port(s) {', '.join(map(str, missing))} "
+                "(netavark iptables backend)",
+            )
+        return Check(
+            "port_dnat",
+            label,
+            _PASS,
+            f"{len(ports)} port(s) have a DNAT rule (netavark iptables backend; "
+            "stale-rule audit needs the nft table)",
+        )
 
     verdicts = (audit or netavark.audit_ports)(ports, rules, live)
     corrupt = [v for v in verdicts if v.corrupt]

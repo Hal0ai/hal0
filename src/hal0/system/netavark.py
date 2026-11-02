@@ -233,6 +233,33 @@ def read_dnat_rules(*, runner: Runner = subprocess.run, timeout: float = 10.0) -
     return parse_dnat_rules(out)
 
 
+#: One DNAT rule from ``iptables -t nat -S`` on the iptables-nft backend
+#: (netavark 1.4 / Ubuntu 24.04): ``-A NETAVARK-DN-<hash> … --dport 8081 -j DNAT
+#: --to-destination 10.88.0.80:8081``. Only the published port is kept.
+_IPTABLES_DNAT_RE = re.compile(
+    r"^-A\s+NETAVARK-DN-\S+\s.*--dport\s+(?P<dport>\d{1,5})\s.*-j\s+DNAT\b"
+)
+
+
+def parse_iptables_dnat_ports(iptables_output: str) -> set[int]:
+    """Published ports that have a netavark DNAT rule in ``iptables -t nat -S``."""
+    return {
+        int(m.group("dport"))
+        for line in iptables_output.splitlines()
+        if (m := _IPTABLES_DNAT_RE.match(line.strip()))
+    }
+
+
+def read_iptables_dnat_ports(*, runner: Runner = subprocess.run, timeout: float = 10.0) -> set[int]:
+    """DNAT-published ports under the iptables-nft backend. Raises
+    :class:`NetavarkUnavailable` when ``iptables`` is missing or fails."""
+    try:
+        out = _run(runner, ["iptables", "-t", "nat", "-S"], timeout=timeout)
+    except FileNotFoundError as exc:
+        raise NetavarkUnavailable(f"iptables not found: {exc}") from exc
+    return parse_iptables_dnat_ports(out)
+
+
 def read_live_container_ips(*, runner: Runner = subprocess.run, timeout: float = 15.0) -> set[str]:
     """IPv4 addresses of every **running** container.
 
