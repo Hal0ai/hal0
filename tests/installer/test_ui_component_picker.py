@@ -65,8 +65,14 @@ def run_picker(tmp_path):
 
 def test_enter_accepts_defaults(run_picker):
     out = run_picker(keys="\n", plain=True)
-    assert out == {"openwebui": "on", "comfyui": "on", "hermes": "on",
-                   "pi": "off", "hindsight": "unavailable", "brain": "on"}
+    assert out == {
+        "openwebui": "on",
+        "comfyui": "on",
+        "hermes": "on",
+        "pi": "off",
+        "hindsight": "unavailable",
+        "brain": "on",
+    }
 
 
 def test_bare_preset_turns_every_available_row_off(run_picker):
@@ -75,7 +81,7 @@ def test_bare_preset_turns_every_available_row_off(run_picker):
 
 
 def test_plain_pick_toggles_by_number(run_picker):
-    out = run_picker(keys="p\n4\n1\n\n", plain=True)   # pi on, openwebui off
+    out = run_picker(keys="p\n4\n1\n\n", plain=True)  # pi on, openwebui off
     assert out["pi"] == "on" and out["openwebui"] == "off"
 
 
@@ -85,22 +91,28 @@ def test_plain_pick_cannot_toggle_unavailable_row(run_picker):
 
 
 def test_cursor_pick_space_and_enter(run_picker):
-    out = run_picker(keys="p \r", plain=False)            # toggles row 1 off
+    out = run_picker(keys="p \r", plain=False)  # toggles row 1 off
     assert out["openwebui"] == "off" and out["hermes"] == "on"
 
 
 def test_read_failure_accepts_current_state(run_picker):
-    out = run_picker(keys="", plain=True)                 # EOF at the preset line
+    out = run_picker(keys="", plain=True)  # EOF at the preset line
     assert out["pi"] == "off" and out["brain"] == "on"
 
 
 def test_plain_leading_zero_and_padded_answers(run_picker):
-    out = run_picker(keys="p \n08\n 04 \n\n", plain=True)   # 08 ignored, pi on
+    out = run_picker(keys="p \n08\n 04 \n\n", plain=True)  # 08 ignored, pi on
     assert out["pi"] == "on" and out["openwebui"] == "on"
 
 
-DEFAULTS = {"openwebui": "on", "comfyui": "on", "hermes": "on",
-            "pi": "off", "hindsight": "unavailable", "brain": "on"}
+DEFAULTS = {
+    "openwebui": "on",
+    "comfyui": "on",
+    "hermes": "on",
+    "pi": "off",
+    "hindsight": "unavailable",
+    "brain": "on",
+}
 
 
 def test_cursor_j_k_move(run_picker):
@@ -138,7 +150,7 @@ def test_cursor_space_on_unavailable_row(run_picker):
 
 
 def test_cursor_eof_accepts_current_state(run_picker):
-    out = run_picker(keys="p ", plain=False)           # EOF, no Enter
+    out = run_picker(keys="p ", plain=False)  # EOF, no Enter
     assert out["openwebui"] == "off" and out["pi"] == "off"
     assert run_picker(keys="", plain=False) == DEFAULTS
 
@@ -167,6 +179,7 @@ def test_dumb_or_unset_term_takes_plain_path(run_picker, term):
 
 def test_rows_fit_terminal_width(run_picker, tmp_path):
     import re
+
     for plain in (True, False):
         out_file = tmp_path / "tty-out"
         run_picker(keys="p j\r\n", plain=plain, cols=60, tty_out=out_file)
@@ -177,8 +190,14 @@ def test_rows_fit_terminal_width(run_picker, tmp_path):
         assert max(len(ln) for ln in lines) < 60, lines
 
 
-DEFAULTS = {"openwebui": "on", "comfyui": "on", "hermes": "on",
-            "pi": "off", "hindsight": "unavailable", "brain": "on"}
+DEFAULTS = {
+    "openwebui": "on",
+    "comfyui": "on",
+    "hermes": "on",
+    "pi": "off",
+    "hindsight": "unavailable",
+    "brain": "on",
+}
 
 
 @pytest.mark.parametrize("plain", [True, False])
@@ -191,6 +210,7 @@ def test_lost_terminal_returns_defaults(run_picker, plain):
 
 def test_zero_width_winsize_falls_back_to_80(run_picker, tmp_path):
     import re
+
     out_file = tmp_path / "tty-out"
     run_picker(keys="\n", plain=True, cols=0, tty_out=out_file)
     text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out_file.read_bytes().decode())
@@ -208,7 +228,10 @@ def _bold_under_pty(term):
         env["TERM"] = term
     proc = subprocess.run(
         ["bash", "-c", f'source "{UI_SH}"; printf "[%s%s]" "$BOLD" "$DIM"'],
-        env=env, stdout=slave, stderr=subprocess.DEVNULL, timeout=30,
+        env=env,
+        stdout=slave,
+        stderr=subprocess.DEVNULL,
+        timeout=30,
     )
     os.close(slave)
     data = os.read(master, 4096).decode()
