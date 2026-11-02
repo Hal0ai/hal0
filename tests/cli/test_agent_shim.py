@@ -944,16 +944,29 @@ _DASHBOARD_STUB = textwrap.dedent(
     """
 )
 
+# Survives the shim's forwarded SIGTERM, so only a SIGKILL can end it.
+_STUBBORN_DASHBOARD_STUB = textwrap.dedent(
+    """
+    import os, signal, sys, time
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    open(sys.argv[1], "w").write(str(os.getpid()))
+    time.sleep(120)
+    """
+)
+
 
 @pytest.mark.timing
 class TestServeStop:
     """A real ``cmd_serve`` in its own process, parked in its heartbeat sleep."""
 
     @pytest.fixture
-    def serving(self, tmp_path: Path) -> Iterator[tuple[subprocess.Popen[str], int]]:
+    def serving(
+        self, request: pytest.FixtureRequest, tmp_path: Path
+    ) -> Iterator[tuple[subprocess.Popen[str], int]]:
         pid_file = tmp_path / "dashboard.pid"
+        stub = getattr(request, "param", _DASHBOARD_STUB)
         shim = subprocess.Popen(
-            [sys.executable, "-c", _SERVE_DRIVER, _DASHBOARD_STUB, str(pid_file)],
+            [sys.executable, "-c", _SERVE_DRIVER, stub, str(pid_file)],
             stdout=subprocess.PIPE,
             text=True,
         )
@@ -1015,6 +1028,7 @@ class TestServeStop:
         os.kill(dashboard_pid, signal.SIGKILL)
         assert self._exit_code(shim) != 0
 
+    @pytest.mark.parametrize("serving", [_STUBBORN_DASHBOARD_STUB], indirect=True)
     def test_forced_kill_during_a_stop_stays_a_failure(
         self, serving: tuple[subprocess.Popen[str], int]
     ) -> None:
