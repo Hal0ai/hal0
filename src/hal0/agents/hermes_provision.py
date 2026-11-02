@@ -154,6 +154,9 @@ class BootstrapState:
     #: default), so later phases gate profiles on it rather than on a marker a
     #: non-root run may have failed to replace (#2878).
     terminal_enabled: bool | None = None
+    #: The Hermes model the operator picked, kept by config_write (#3309); the
+    #: smoke probes read it so a kept pick is not reported as drift.
+    operator_model_kept: str | None = None
 
 
 def _utcnow() -> str:
@@ -1590,7 +1593,7 @@ def _resolve_primary_slot(
     # record it in details["fallbacks"] (#702 fallback observability)
     # instead of inferring it from the model name.
     fallback = {
-        "model": "primary",
+        "model": _PLACEHOLDER_PRIMARY_MODEL,
         "base_url": _DEFAULT_PRIMARY_BACKEND_URL,
         "context_length": 32768,
         "placeholder": True,
@@ -2360,6 +2363,91 @@ def _fmt_config_value(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     return str(value)
+
+
+MODEL_WIRING_KEYS = ("model.default", "model.provider", "model.base_url")
+
+
+_PLACEHOLDER_PRIMARY_MODEL = "primary"
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _model_block(config_text: str | None) -> tuple[str, str, str] | None:
+    """``(default, provider, base_url)`` from ``config.yaml``'s ``model`` key.
+
+    Hermes also accepts a scalar ``model: <id>``; that reads as a default with
+    no provider or base_url. ``None`` when there is no usable ``model`` key.
+    """
+    model = (_parse_yaml_config(config_text) or {}).get("model")
+    if isinstance(model, str):
+        return model.strip(), "", ""
+    if not isinstance(model, dict):
+        return None
+
+    def _s(key: str) -> str:
+        v = model.get(key)
+        return v.strip() if isinstance(v, str) else ""
+
+    return _s("default"), _s("provider"), _s("base_url")
+
+
+def _foreign_model_wiring(config_text: str | None) -> str | None:
+    """The model name when the wiring is plainly not hal0's, else ``None``.
+
+    Config-only (no I/O): a ``provider`` other than ``custom``, or a
+    non-loopback ``base_url``, is where hal0 never points Hermes. Shared by the
+    provision phase, the HERMES.md render and the smoke probes.
+    """
+    block = _model_block(config_text)
+    if block is None:
+        return None
+    default, provider, base_url = block
+    if provider not in ("", "custom"):
+        return default or provider
+    if base_url:
+        from urllib.parse import urlparse
+
+        if (urlparse(base_url).hostname or "") not in _LOOPBACK_HOSTS:
+            return default or base_url
+    return None
+
+
+def _operator_model_choice(
+    config_text: str | None,
+    *,
+    primary_model_id: str,
+    live_resolve: bool,
+    route_ready: Callable[[str, str], bool | None],
+) -> str | None:
+    """The model the operator picked in Hermes, or ``None`` (#3309).
+
+    hal0 writes ``hal0/agent`` under live-resolve (the primary slot's model id
+    otherwise), always ``provider: custom`` on a loopback ``base_url``. Kept as
+    the operator's: a foreign provider or non-loopback ``base_url`` (even
+    carrying a managed id); a scalar ``model:``; or a direct id on custom +
+    loopback that hal0 would not write, unless the endpoint affirmatively says
+    it no longer routes (``False``: stale, converge). ``True``/``None`` keep.
+    Any ``hal0/*`` virtual, the primary's own id and the no-ready-slot
+    placeholder count as hal0's, so a picked ``hal0/utility`` still resets to
+    the agent slot. With ``live_resolve`` off every direct id on custom +
+    loopback is hal0's pin, so a local pick resets in that mode.
+    """
+    foreign = _foreign_model_wiring(config_text)
+    if foreign is not None:
+        return foreign
+    block = _model_block(config_text)
+    if block is None or not block[0]:
+        return None
+    default, _provider, base_url = block
+    if default in (_model_default_id(primary_model_id, live_resolve), primary_model_id):
+        return None
+    if default.startswith("hal0/") or default == _PLACEHOLDER_PRIMARY_MODEL:
+        return None
+    if not live_resolve:
+        # HAL0_HERMES_LIVE_RESOLVE=0: hal0 itself pins a direct id here, so an
+        # old pin after a slot swap is hal0's. A local pick resets in this mode.
+        return None
+    return None if route_ready(default, base_url) is False else default
 
 
 def _build_config_overlay(
@@ -3643,6 +3731,19 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
         approvals_mode=approvals_mode,
     )
     ctx.state.terminal_enabled = terminal_enabled
+    # A model the operator picked in Hermes is theirs (#3309): leave the three
+    # model-wiring keys alone together so default/provider/base_url stay
+    # consistent. providers.custom (the gateway wiring) is still converged.
+    kept_model = _operator_model_choice(
+        config_before,
+        primary_model_id=primary["model_id"],
+        live_resolve=live_resolve_enabled,
+        route_ready=ctx.io.fetch_model_route_ready,
+    )
+    ctx.state.operator_model_kept = kept_model
+    if kept_model is not None:
+        pairs = [(k, v) for k, v in pairs if k not in MODEL_WIRING_KEYS]
+        log.info("hermes_provision.operator_model_kept", config=str(config_path), model=kept_model)
     applied, errors = _apply_config_set(
         pairs, hermes_bin=hermes_bin, hermes_home=hermes_home, run=run
     )
@@ -3740,7 +3841,8 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
             "keys_total": len(pairs),
             "list_merge_changed": list_merge_changed,
             "config_migrated": migrated,
-            "primary_model": primary["model_id"],
+            "primary_model": kept_model or primary["model_id"],
+            "operator_model_kept": kept_model,
             "chat_slot_count": len(chat_slots),
             "removed_model_aliases": removed_aliases,
             "persona": persona_name or None,
@@ -6821,6 +6923,14 @@ def render_live_context(
             "context_length": primary_raw["context_length"],
             "backend": primary_raw.get("backend"),
         }
+    # An operator's own model pick (#3309) is what config.yaml names, so
+    # HERMES.md names it too.
+    try:
+        kept_for_template = _foreign_model_wiring(
+            (hermes_home / "config.yaml").read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeDecodeError):
+        kept_for_template = None
     # Remediation must name a command valid for the box's actual state
     # (#1892 register `expect`): when an llm slot already exists but has no
     # model bound, `hal0 slot create` would collide with it — the right
@@ -6924,9 +7034,14 @@ def render_live_context(
             hermes_version=_hermes_version_pin(),
             primary=primary_for_template,
             model_default=(
-                ""
-                if primary_for_template is None
-                else _model_default_id(primary_for_template["model_id"], _live_resolve_enabled())
+                kept_for_template
+                or (
+                    ""
+                    if primary_for_template is None
+                    else _model_default_id(
+                        primary_for_template["model_id"], _live_resolve_enabled()
+                    )
+                )
             ),
             chat_slots=chat_slots,
             peer_agents=[],
@@ -8149,7 +8264,7 @@ def _wrapper_bin() -> Path:
     return HERMES_CLI_INSTALL_PATH
 
 
-def _smoke_chat_completions(state: BootstrapState, _io: InstallIO) -> tuple[bool, str]:
+def _smoke_chat_completions(state: BootstrapState, _io: InstallIO) -> tuple[bool | None, str]:
     """POST against model.base_url/chat/completions; assert 'ready' in reply.
 
     Reads the live config.yaml so we hit whatever model_automap left
@@ -8167,6 +8282,11 @@ def _smoke_chat_completions(state: BootstrapState, _io: InstallIO) -> tuple[bool
     model_cfg = cfg.get("model") or {}
     base_url = model_cfg.get("base_url", "")
     model_name = model_cfg.get("default", "")
+    kept = state.operator_model_kept or _foreign_model_wiring(config_path.read_text())
+    if kept:
+        # The operator's own pick (#3309): hal0 does not own its endpoint or
+        # credentials, so a failed round-trip is not a hal0 wiring defect.
+        return (None, f"operator model kept ({kept}); chat round-trip not probed")
     if not base_url:
         return (False, "model.base_url unset in config.yaml")
     if not model_name:
@@ -8400,6 +8520,9 @@ def _smoke_hermes_md_contains_primary(
     except (OSError, yaml.YAMLError) as exc:
         return (False, f"config parse: {exc}")
     primary = str((cfg.get("model") or {}).get("default") or "").strip()
+    kept = state.operator_model_kept or _foreign_model_wiring(config.read_text())
+    if kept:
+        return (None, f"operator model kept ({kept}); not compared with HERMES.md")
     if not primary:
         # No verdict is reachable; report skipped, never a pass (#1793).
         return (None, "no primary configured; nothing to compare HERMES.md against")
@@ -9801,6 +9924,14 @@ def bootstrap_cli(
     if verbose:
         target = (state_root or _DEFAULT_STATE_ROOT) / _STATE_FILE_NAME
         print(f"state: {target}")
+    cw = report.step("config_write")
+    kept = (cw.details if cw else {}).get("operator_model_kept")
+    if kept:
+        print(
+            f"kept your Hermes model choice '{kept}'. To return to the hal0 agent slot: "
+            "hermes config set model.default hal0/agent; "
+            "hermes config set model.provider custom; then reprovision --repair"
+        )
     if report.failed:
         print(f"bootstrap failed in steps: {', '.join(report.failed)}")
         return 1

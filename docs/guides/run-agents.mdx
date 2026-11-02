@@ -42,31 +42,29 @@ starts the systemd unit (`hal0-agent@hermes`).
 
 The Hermes release runs on Python 3.14. The uv that ships in hal0's own venv fetches a managed CPython 3.14 under `/var/lib/hal0/hermes/python/`, so the first build needs the network. The interpreter order is a `HAL0_HERMES_PYTHON` override, then the uv-managed CPython, then a system interpreter that links SQLite 3.51.3 or newer. hal0's own interpreter is never used. See the [interpreter policy](/docs/operate/services#hermes-interpreter-policy).
 
-Run it as root — provisioning writes under root-owned `/var/lib/hal0` and
+Run it as root: provisioning writes under root-owned `/var/lib/hal0` and
 then chowns the provisioned trees to the shared agent runtime user. As a
 normal user it aborts cleanly up front with a `sudo` hint.
 
-Pass `--switch` to atomically uninstall whatever agent is currently
-installed before installing this one.
+Pass `--switch` to uninstall the current agent before installing this one.
 
 ### Hermes version, session history and linger
 
-hal0 1.6.0 installs one reviewed Hermes release: v0.22.4 (commit
-`4d043038`). Moving from the previous pin (0.19.0) changes two things you may
-notice:
+hal0 1.6.0 installs one reviewed Hermes release, v0.22.4 (`4d043038`). Moving from the previous pin (0.19.0) changes two things:
 
-- **Session history is kept.** From 0.22, Hermes deletes ended sessions that
-  have been idle for 90 days, at startup. hal0 writes `sessions.auto_prune:
-  false` into Hermes's config, so nothing is pruned. To prune anyway, set
+- **Session history is kept.** From 0.22, Hermes deletes sessions idle 90 days. hal0 writes `sessions.auto_prune: false`, so nothing is
+  pruned. To prune, set
   `sessions.auto_prune: true` in `/etc/hal0/agents/hermes/overrides.yaml` and
   run `hal0 agent reprovision hermes`.
 - **The `hal0` user lingers.** Installing the Hermes gateway turns on systemd
   linger for `hal0`. Hermes's scheduled jobs and kanban workers run through
-  `hal0`'s own systemd manager, which only runs while the user lingers.
-  `hal0 doctor all` reports it on the `hal0_linger` row, and
-  `hal0 agent uninstall hermes` turns it off.
+  `hal0`'s systemd manager, which needs the linger.
+  `hal0 doctor all` reports it (`hal0_linger`); `hal0 agent uninstall hermes`
+  turns it off.
 
-`hal0 update` renders the gateway unit from hal0's own template (the root verb `hal0-update hermes-gateway`) and turns linger on once the pinned Hermes release is live. It restarts the gateway only if it was running and never enables, starts or stops it, so a gateway you disabled stays off. If that step fails, `hal0 update`, `hal0 update status` and `hal0 doctor all` (the `hal0_linger` row) print `sudo hal0 agent install hermes`; run it as the fix. `hal0 agent install hermes` and the installer also leave a disabled or masked gateway off.
+A Hermes model you pick is kept through `reprovision --repair`. To go back, run `hermes config set model.default hal0/agent` and `hermes config set model.provider custom`, then `--repair`.
+
+`hal0 update` renders the gateway unit from hal0's own template (the root verb `hal0-update hermes-gateway`) and turns linger on once the pinned Hermes release is live. It restarts the gateway only if it was running and never enables, starts or stops it, so a disabled gateway stays off. If that step fails, `hal0 update`, `hal0 update status` and `hal0 doctor all` print `sudo hal0 agent install hermes`; run it as the fix. It and the installer leave a disabled or masked gateway off.
 
 ### The Hermes gateway and profile chat
 
