@@ -1,6 +1,6 @@
 """The steward's board tools call the Hermes kanban through ``BoardClient``.
 
-ADR-0048: ``/api/board/*`` is a live proxy to the Hermes kanban plugin, so the
+ADR-0046: ``/api/board/*`` is a live proxy to the Hermes kanban plugin, so the
 hal0-brain chat tools talk to the SAME facade (``app.state.board_client``)
 instead of a local store. Every assertion here is on the request the
 ``MockTransport`` behind the real client recorded (method, path, query, body).

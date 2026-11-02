@@ -1,4 +1,4 @@
-"""One-shot converter: pre-1.8 hal0 board store → Hermes kanban (ADR-0048).
+"""One-shot converter: pre-1.8 hal0 board store → Hermes kanban (ADR-0046).
 
 The Operator Board is now a live proxy to the Hermes kanban plugin and hal0's
 own SQLite board store is gone. A box upgraded from a release that still held

@@ -195,7 +195,7 @@ Each spike: confirm a REAL source exists, propose the exact endpoint + effort, r
 
 > Authored & frozen by the UI lead from SPEC §4. The board UI reaches `/api/board/*`
 > via the typed-hook + React Query pattern (`useBoard.ts`) over the existing Vite proxy.
-> The operator board IS the Hermes kanban (ADR-0048): these routes are a live, audited
+> The operator board IS the Hermes kanban (ADR-0046): these routes are a live, audited
 > proxy to the kanban plugin on the loopback Hermes dashboard, and `/events` is proxied
 > too. hal0 keeps no board state of its own. Hermes is REQUIRED: with no Hermes agent
 > the routes answer `503 board.not_installed`, with the dashboard down `503 board.unreachable`,

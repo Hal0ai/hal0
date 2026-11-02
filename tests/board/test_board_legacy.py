@@ -1,4 +1,4 @@
-"""Legacy hal0 board → Hermes kanban one-shot converter (ADR-0048)."""
+"""Legacy hal0 board → Hermes kanban one-shot converter (ADR-0046)."""
 
 from __future__ import annotations
 

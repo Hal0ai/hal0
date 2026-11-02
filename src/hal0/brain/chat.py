@@ -988,7 +988,7 @@ async def _dispatch_admin_tool(request: Request, name: str, args: dict[str, Any]
 
 # ── board tools (the Hermes kanban, through the BoardClient facade) ──────────
 #
-# ADR-0048: /api/board/* is a live proxy to the Hermes kanban plugin. The
+# ADR-0046: /api/board/* is a live proxy to the Hermes kanban plugin. The
 # steward's board tools call the SAME ``BoardClient`` facade the REST routes and
 # MCP tools use, so the steward answers from the board the operator sees. A
 # facade failure (Hermes absent, unreachable, no token, upstream error) comes
@@ -1293,7 +1293,7 @@ async def _dispatch_tool(
     the loop can keep stepping against). Each MUTATION writes a
     ``board.chat.turn`` audit row with ``rec.after`` = result; reads write
     none — matching the REST router's audited-mutations / unaudited-reads
-    split. Board tools call the ``BoardClient`` facade (ADR-0048); a facade
+    split. Board tools call the ``BoardClient`` facade (ADR-0046); a facade
     ``Hal0Error`` comes back as ``{"error": code, "detail": details}``.
     """
     # Persona surface filter applies to LOCAL tools too — the admin path
