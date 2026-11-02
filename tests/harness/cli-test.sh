@@ -285,8 +285,20 @@ run_row "cli-agent-status-help" 0 "agent status --help" -- \
 run_row "cli-agent-log-help" 0 "agent log --help" -- \
     "${HAL0_BIN}" agent log --help
 
-run_row "cli-agent-upgrade-help" 0 "agent upgrade --help" -- \
-    "${HAL0_BIN}" agent upgrade --help
+# `agent upgrade pi` became `update component pi` (#2991); it has no alias.
+_gone_log="${SCRIPT_DIR}/reports/cli-cli-agent-upgrade-gone.log"
+_gone_start=$(start_ms)
+set +e
+"${HAL0_BIN}" agent upgrade pi >"${_gone_log}" 2>&1
+_gone_rc=$?
+set -e
+if [[ "${_gone_rc}" -eq 2 ]] && grep -qi "no such command" "${_gone_log}"; then
+    add_row "cli-agent-upgrade-gone" "pass" "$(since_ms "${_gone_start}")" \
+        "agent upgrade refused (exit=2)"
+else
+    add_row "cli-agent-upgrade-gone" "fail" "$(since_ms "${_gone_start}")" \
+        "expected exit 2 + 'No such command', got exit=${_gone_rc}: $(tail -n1 "${_gone_log}" 2>/dev/null | tr -d '\n')"
+fi
 
 run_row "cli-agent-uninstall-help" 0 "agent uninstall --help (--keep-memory present)" -- \
     "${HAL0_BIN}" agent uninstall --help

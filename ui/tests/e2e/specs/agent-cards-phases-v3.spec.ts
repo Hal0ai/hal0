@@ -120,7 +120,7 @@ function piOverview(over: Partial<AgentOverview> = {}): AgentOverview {
     memory: { mcp_entry: true, hindsight_config: true, hindsight_api_reachable: true },
     commands: {
       install: 'sudo hal0 agent install pi',
-      upgrade: 'sudo hal0 agent upgrade pi',
+      upgrade: 'sudo hal0 update component pi',
       uninstall: 'sudo hal0 agent uninstall pi',
     },
     ...over,
@@ -697,7 +697,7 @@ test.describe('Pi card phases', () => {
 
     const copy = card(page, 'pi').getByTestId('agent-action-copy-upgrade')
     await expect(copy).toBeVisible()
-    await expect(copy).toHaveAttribute('data-command', 'sudo hal0 agent upgrade pi')
+    await expect(copy).toHaveAttribute('data-command', 'sudo hal0 update component pi')
     // No unit, so no Restart anywhere on the card.
     await expect(card(page, 'pi').getByTestId('agent-action-restart')).toHaveCount(0)
   })

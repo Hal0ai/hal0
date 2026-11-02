@@ -49,6 +49,12 @@ export function componentCell(row: ComponentRow): { label: string; tone: 'ok' | 
   if (row.status === 'not-installed') return { label: 'not installed', tone: 'muted' }
   if (row.status === 'converged' || row.status === 'override')
     return { label: `${short(row.installed, row.pin_label)} ✓`, tone: 'ok' }
+  // Pi's advisory statuses: `hal0 update` cannot re-pin it, so none counts as pending.
+  if (row.status === 'update-available')
+    return { label: `${short(row.installed)} → ${short(row.pinned)} available`, tone: 'muted' }
+  if (row.status === 'newer-than-pin')
+    return { label: `${short(row.installed)} newer than pin`, tone: 'muted' }
+  if (row.status === 'unknown') return { label: `${short(row.installed)} — pin unknown`, tone: 'muted' }
   return { label: `${short(row.installed)} → ${short(row.pinned, row.pin_label)} pending`, tone: 'pending' }
 }
 

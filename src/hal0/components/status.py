@@ -105,17 +105,22 @@ def component_status_snapshot() -> dict[str, Any]:
             pinned = "unknown"
 
         override = _override(comp.id)
-        override_note: str | None = None
+        derived_note: str | None = None
         if last.get("status") in _FAILURE_STATUSES:
             derived = last["status"]
         elif installed is None:
             derived = "not-installed"
+        elif comp.id == "pi":
+            # Advisory: see pin_state. None of its statuses is pending.
+            from hal0.components.pi_arm import pin_state
+
+            derived, derived_note = pin_state()
         elif last.get("status") == "busy":
             # The last pass found the Hermes builder lock held and did not
             # run: not a failure, but not confirmed converged either.
             derived = "pending"
         elif comp.id == "hermes" and override is not None:
-            derived, override_note = _hermes_override_state(override, installed)
+            derived, derived_note = _hermes_override_state(override, installed)
         elif installed == pinned and comp.id == "hermes" and _hermes_needs_build():
             # A pre-layout host's stamp already equals the pin, but the next
             # update still has to migrate it (ADR-0032 decision 6).
@@ -144,7 +149,7 @@ def component_status_snapshot() -> dict[str, Any]:
                 "remedy": last.get("remedy"),
                 # An informational line from the last converge that is not a
                 # failure (e.g. Hermes config keys applied on a converged box).
-                "note": last.get("note") or override_note,
+                "note": last.get("note") or derived_note,
                 "ts": last.get("ts"),
                 "detail": last.get("detail") or [],
             }

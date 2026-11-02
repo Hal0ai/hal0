@@ -348,7 +348,7 @@ from zero.
   is missing or an unmanaged `gateway run --idle-exit` runs) and `API journal
   read`; the `hermes-api` row warns instead of failing when you turned the
   gateway off.
-- **`sudo hal0 agent upgrade pi`** reruns the pinned pi installer and
+- **`sudo hal0 update component pi`** (`sudo hal0 agent upgrade pi` in 1.6.0) reruns the pinned pi installer and
   redeploys hal0's two extensions, leaving your own extensions, provider,
   model and theme alone.
 - **Upgrade floor is 1.4.0.** A 1.3.x box steps through 1.5.0 first, then

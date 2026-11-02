@@ -143,7 +143,7 @@ const COMMANDS: Record<string, CardModel['commands']> = {
   hermes: { install: 'sudo hal0 agent install hermes', upgrade: null, uninstall: null },
   pi: {
     install: 'sudo hal0 agent install pi',
-    upgrade: 'sudo hal0 agent upgrade pi',
+    upgrade: 'sudo hal0 update component pi',
     uninstall: 'sudo hal0 agent uninstall pi',
   },
 }

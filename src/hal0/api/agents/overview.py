@@ -63,6 +63,7 @@ from hal0.api.agents.restart import unit_is_active
 from hal0.api.routes import agents as agents_routes
 from hal0.api.routes.approvals import _queue
 from hal0.api.routes.updater import _update_jobs
+from hal0.components.pi_arm import UPDATE_COMMAND as PI_UPDATE_COMMAND
 from hal0.components.status import component_status_snapshot
 from hal0.services.systemd import unit_state
 
@@ -863,7 +864,7 @@ async def _gather_pi() -> dict[str, Any]:
         },
         "commands": {
             "install": "sudo hal0 agent install pi",
-            "upgrade": "sudo hal0 agent upgrade pi",
+            "upgrade": PI_UPDATE_COMMAND,
             "uninstall": "sudo hal0 agent uninstall pi",
         },
     }
@@ -945,7 +946,7 @@ def _neutral_pi() -> dict[str, Any]:
         "memory": {"mcp_entry": None, "hindsight_config": None, "hindsight_api_reachable": False},
         "commands": {
             "install": "sudo hal0 agent install pi",
-            "upgrade": "sudo hal0 agent upgrade pi",
+            "upgrade": PI_UPDATE_COMMAND,
             "uninstall": "sudo hal0 agent uninstall pi",
         },
         "partial": True,

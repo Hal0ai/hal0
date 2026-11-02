@@ -18,9 +18,9 @@ from typing import Any
 class ComponentDef:
     id: str
     name: str
-    kind: str  # "container-unit" | "slot-images" | "venv"
+    kind: str  # "container-unit" | "slot-images" | "venv" | "npm-global"
     #: Join key into hal0.services.registry (dashboard rollup); None = no
-    #: service row (runner-images).
+    #: service row (runner-images, pi).
     service_id: str | None
     pinned: Callable[[], str]
     installed: Callable[[], str | None]
@@ -87,6 +87,24 @@ def _hermes_converge(**kwargs: Any) -> dict[str, Any]:
     return converge_hermes(**kwargs)
 
 
+def _pi_pinned() -> str:
+    from hal0.components.pi_arm import pinned_pi
+
+    return pinned_pi()
+
+
+def _pi_installed() -> str | None:
+    from hal0.components.pi_arm import installed_pi
+
+    return installed_pi()
+
+
+def _pi_converge(**kwargs: Any) -> dict[str, Any]:
+    from hal0.components.pi_arm import converge_pi
+
+    return converge_pi(**kwargs)
+
+
 def _hindsight_pinned() -> str:
     from hal0.memory.engine_upgrade import HINDSIGHT_API_PIN
 
@@ -137,6 +155,15 @@ COMPONENTS: tuple[ComponentDef, ...] = (
         pinned=_hermes_pinned,
         installed=_hermes_installed,
         converge=_hermes_converge,
+    ),
+    ComponentDef(
+        id="pi",
+        name="Pi",
+        kind="npm-global",
+        service_id=None,
+        pinned=_pi_pinned,
+        installed=_pi_installed,
+        converge=_pi_converge,
     ),
     ComponentDef(
         id="hindsight",

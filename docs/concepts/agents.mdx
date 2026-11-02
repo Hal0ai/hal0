@@ -145,13 +145,13 @@ marker in the agent's data dir plus a `pi`-on-PATH probe — the daemon
 cannot read the operator's `0700` home, so it never inspects `~/.pi`
 directly.
 
-Re-pin an installed pi with `sudo hal0 agent upgrade pi`, run the same way you
+Re-pin an installed pi with `sudo hal0 update component pi`, run the same way you
 installed it. It reruns the pinned installer and redeploys hal0's two
 extensions, and leaves extensions you added, your default provider, model and
 theme alone. It refuses when pi's profile is in a different home or pi is not
 installed. A fresh `hal0 agent install pi` from a
 git checkout seeds a name-keyed `banks` alias (`coding-agent::hal0` to
-`coding-agent::hal0-mono`) in `~/.hindsight/coding-agent.json`; `upgrade pi`
+`coding-agent::hal0-mono`) in `~/.hindsight/coding-agent.json`; the update
 adds the alias to an existing file.
 
 The dashboard's Agents view shows Pi as a live card: the installed pi and
@@ -159,7 +159,7 @@ adapter versions against the pins (with an update badge when it is behind),
 and the profile checks for the binary, the hal0 provider and hindsight
 extensions, the theme and the memory wiring. The daemon still never installs,
 upgrades or uninstalls Pi, so the card does not run anything: it copies
-`sudo hal0 agent upgrade pi` (and the uninstall and reinstall commands) for you
+`sudo hal0 update component pi` (and the uninstall and reinstall commands) for you
 to run on the box. See [The Agents view](/docs/guides/agents-view#pi).
 
 ## hal0-brain: the steward that drives hal0 itself

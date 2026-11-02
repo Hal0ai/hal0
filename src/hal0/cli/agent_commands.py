@@ -318,44 +318,6 @@ def _install_pi() -> None:
     )
 
 
-def _upgrade_pi() -> None:
-    """Foreground, CLI-local pi upgrade — the sibling of :func:`_install_pi`.
-
-    Runs :meth:`PiDriver.upgrade` in-process for the same reason install does:
-    it re-pins the global npm prefix and redeploys into the invoking user's
-    ``~/.pi``, neither of which the ``hal0`` system user can write. The driver
-    refuses to run as a different user than the one that installed pi and
-    raises :class:`AgentError` when pi is not installed; both surface here as
-    a plain error line.
-    """
-    if os.geteuid() != 0:
-        die(
-            "run as root (sudo hal0 agent upgrade pi) — pi upgrades the "
-            "invoking user's home and the global npm prefix."
-        )
-        return
-
-    # Call-time imports: the manager pulls in every driver lazily, and a test
-    # (or a dev box missing one driver's dependencies) swaps `_driver_for`.
-    from hal0.agents.manager import AgentError, _driver_for
-
-    upgrade = getattr(_driver_for("pi"), "upgrade", None)
-    if upgrade is None:
-        die("pi driver has no upgrade.")
-        return
-    console.print("[bold]Upgrading pi[/bold] → ~/.pi (extensions · pins · memory wiring) …")
-    try:
-        # The driver reports what it changed outside pi's own tree; a stand-in
-        # driver that returns nothing changed nothing.
-        result = upgrade() or {}
-    except AgentError as exc:
-        die(f"pi upgrade failed: {exc}")
-        return
-    if result.get("hindsight_alias_added"):
-        console.print("Hindsight bank alias added to coding-agent.json")
-    console.print(Panel("[bold green]Upgraded[/bold green] pi", border_style="green"))
-
-
 def _restart_hermes_after_posture_change() -> None:
     """Restart the Hermes consumers so a tool-posture change takes hold.
 
@@ -2348,31 +2310,6 @@ def agent_dashboard_token(
         )
         raise typer.Exit(1)
     typer.echo(token)
-
-
-@app.command("upgrade")
-def agent_upgrade(
-    name: str = typer.Argument(..., help="Bundled agent name (pi)."),
-) -> None:
-    """Re-pin an installed pi: rerun its pinned installer and redeploy hal0's extensions.
-
-    Re-pins pi, redeploys hal0's extensions into ``~/.pi`` and re-stamps the
-    install marker (:meth:`PiDriver.upgrade`); run it the same way you
-    installed pi (``sudo hal0 agent upgrade pi``). It refuses when pi's
-    profile is in a different home or pi is not installed. Hermes updates with
-    ``hal0 update component hermes``.
-    """
-    if name == "hermes":
-        die(
-            "Hermes updates with `hal0 update component hermes` "
-            "(`--target <sha>` for a vetted commit other than the pin); "
-            "`hal0 agent upgrade` re-pins pi only."
-        )
-        return
-    if name != "pi":
-        die(f"upgrade currently only supports `pi`; got {name!r}.")
-        return
-    _upgrade_pi()
 
 
 # Note: there is no per-agent `rotate-token` subcommand here — agent
