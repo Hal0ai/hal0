@@ -2362,6 +2362,38 @@ def _fmt_config_value(value: Any) -> str:
     return str(value)
 
 
+MODEL_WIRING_KEYS = ("model.default", "model.provider", "model.base_url")
+
+
+def _operator_model_choice(
+    config_text: str | None,
+    *,
+    primary_model_id: str,
+    chat_slots: list[dict[str, Any]],
+) -> bool:
+    """True when ``config_text`` holds a model the operator picked in Hermes (#3309).
+
+    hal0's own ``model.*`` values are ``hal0/*`` virtuals (live-resolve) or a
+    local slot's model id, always with ``provider: custom``. Anything else, a
+    ``provider`` other than ``custom`` or a ``default`` that names no hal0
+    virtual or slot model, was chosen in Hermes and survives a re-provision.
+    A box on hal0's own values, or with no ``model`` block, is not an operator
+    choice and keeps tracking the agent slot.
+    """
+    model = (_parse_yaml_config(config_text) or {}).get("model")
+    if not isinstance(model, dict):
+        return False
+    provider = model.get("provider")
+    default = model.get("default")
+    if isinstance(provider, str) and provider.strip() not in ("", "custom"):
+        return True
+    if isinstance(default, str) and default.strip():
+        managed = {primary_model_id, *(str(s.get("model_id", "")) for s in chat_slots)}
+        name = default.strip()
+        return not (name.startswith("hal0/") or name in managed)
+    return False
+
+
 def _build_config_overlay(
     *,
     primary: dict[str, Any],
@@ -3643,6 +3675,14 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
         approvals_mode=approvals_mode,
     )
     ctx.state.terminal_enabled = terminal_enabled
+    # A model the operator picked in Hermes is theirs (#3309): leave the three
+    # model-wiring keys alone together so default/provider/base_url stay
+    # consistent. providers.custom (the gateway wiring) is still converged.
+    if _operator_model_choice(
+        config_before, primary_model_id=primary["model_id"], chat_slots=chat_slots
+    ):
+        pairs = [(k, v) for k, v in pairs if k not in MODEL_WIRING_KEYS]
+        log.info("hermes_provision.operator_model_kept", config=str(config_path))
     applied, errors = _apply_config_set(
         pairs, hermes_bin=hermes_bin, hermes_home=hermes_home, run=run
     )

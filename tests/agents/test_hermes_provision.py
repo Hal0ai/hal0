@@ -6622,3 +6622,88 @@ def test_uv_install_dir_is_never_chmodded_through_a_link(
         _uv_prober(), _UvRunner(managed), fallback_bin=Path("/nonexistent/uv")
     )
     assert stat.S_IMODE(victim.stat().st_mode) == 0o700
+
+
+# ── operator model choice survives re-provision (#3309) ──────────────────────
+
+_SLOTS = [{"alias": "agent", "model_id": "qwen3:8b", "backend_url": "http://127.0.0.1:8080/v1"}]
+
+
+def _model_cfg(default: str | None, provider: str | None) -> str:
+    lines = ["model:"]
+    if default is not None:
+        lines.append(f"  default: {default}")
+    if provider is not None:
+        lines.append(f"  provider: {provider}")
+    return "\n".join(lines) + "\n"
+
+
+@pytest.mark.parametrize(
+    ("cfg", "expected"),
+    [
+        (None, False),
+        ("agent:\n  max_turns: 1\n", False),
+        (_model_cfg("hal0/agent", "custom"), False),
+        (_model_cfg("qwen3:8b", "custom"), False),
+        (_model_cfg("MiniMax-M2.7", "minimax"), True),
+        (_model_cfg("MiniMax-M2.7", "custom"), True),
+        (_model_cfg("hal0/agent", "anthropic"), True),
+        (_model_cfg(None, "openrouter"), True),
+    ],
+)
+def test_operator_model_choice_detection(cfg: str | None, expected: bool) -> None:
+    assert (
+        hp._operator_model_choice(cfg, primary_model_id="qwen3:8b", chat_slots=_SLOTS) is expected
+    )
+
+
+def _run_config_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, existing: str | None
+) -> list[list[str]]:
+    """Run _phase_config_write with a recording runner; return every argv."""
+    monkeypatch.setattr(
+        hp,
+        "_resolve_primary_slot",
+        lambda **_kw: {
+            "model": "qwen3:8b",
+            "base_url": "http://127.0.0.1:8080/v1",
+            "context_length": 8000,
+        },
+    )
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "no-overrides.yaml")
+    from hal0.agents import personas as _personas
+
+    monkeypatch.setattr(_personas, "PERSONAS_ROOT", tmp_path / "personas-empty")
+    home = tmp_path / "hh"
+    home.mkdir()
+    if existing is not None:
+        (home / "config.yaml").write_text(existing, encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def run(argv, **_kw):
+        calls.append([str(a) for a in argv])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    io = hp.InstallIO(fetch_slots=lambda: [], fetch_model_contexts=lambda: {}, run=run)
+    state = hp.BootstrapState(hermes_home=str(home))
+    hp._phase_config_write(hp._StepCtx(state=state, io=io))
+    return calls
+
+
+def _set_keys(calls: list[list[str]]) -> set[str]:
+    return {c[3] for c in calls if c[1:3] == ["config", "set"]}
+
+
+def test_config_write_keeps_operator_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    keys = _set_keys(
+        _run_config_write(tmp_path, monkeypatch, _model_cfg("MiniMax-M2.7", "minimax"))
+    )
+    assert not keys & set(hp.MODEL_WIRING_KEYS)
+    assert "providers.custom.base_url" in keys
+
+
+def test_config_write_converges_managed_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keys = _set_keys(_run_config_write(tmp_path, monkeypatch, _model_cfg("hal0/agent", "custom")))
+    assert set(hp.MODEL_WIRING_KEYS) <= keys
