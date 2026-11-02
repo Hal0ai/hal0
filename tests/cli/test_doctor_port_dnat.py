@@ -27,7 +27,10 @@ table inet netavark { # handle 2
 }
 """
 
-SLOTS = [{"name": "agent", "port": 8081}, {"name": "embed", "port": 8083}]
+SLOTS = [
+    {"name": "agent", "port": 8081, "state": "ready"},
+    {"name": "embed", "port": 8083, "state": "ready"},
+]
 
 
 @pytest.fixture
@@ -89,7 +92,19 @@ IPT = """\
 -A NETAVARK-HOSTPORT-DNAT -d 127.0.0.1/32 -p tcp -m multiport --dports 8081 -j NETAVARK-DN-1d6d3f4e6a2c4
 -A NETAVARK-DN-1d6d3f4e6a2c4 -d 127.0.0.1/32 -p tcp -m tcp --dport 8081 -j DNAT --to-destination 10.88.0.80:8081
 -A NETAVARK-DN-1d6d3f4e6a2c4 -d 127.0.0.1/32 -p tcp -m tcp --dport 8083 -j DNAT --to-destination 10.88.0.92:8083
+-A NETAVARK-DN-1D8721804F16F -p tcp -m tcp --dport 8084 -j NETAVARK-HOSTPORT-SETMARK
+-A NETAVARK-DN-1D8721804F16F -p tcp -m tcp --dport 8084 -j DNAT --to-destination 10.88.0.7:8084
 """
+
+# CT105-shaped payload: offline slots (and host-network ComfyUI) have no rule.
+CT105 = [
+    {"name": "utility", "port": 8081, "state": "serving", "type": "llm"},
+    {"name": "tts", "port": 8084, "state": "idle", "type": "tts"},
+    {"name": "rerank", "port": 8083, "state": "unloaded", "type": "reranking"},
+    {"name": "embed", "port": 8089, "state": "stopped", "type": "embedding"},
+    {"name": "ops", "port": 8091, "state": "unloaded", "type": "llm"},
+    {"name": "img", "port": 8188, "state": "idle", "type": "image", "provider": "comfyui"},
+]
 
 
 @pytest.fixture
@@ -101,7 +116,7 @@ def no_nft_table(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_parse_iptables_dnat_ports_reads_only_dnat_rules() -> None:
-    assert netavark.parse_iptables_dnat_ports(IPT) == {8081, 8083}
+    assert netavark.parse_iptables_dnat_ports(IPT) == {8081, 8083, 8084}
 
 
 def test_iptables_backend_with_rules_passes(
@@ -134,7 +149,7 @@ def test_read_iptables_dnat_ports_runs_the_read_only_listing() -> None:
         calls.append(argv)
         return subprocess.CompletedProcess(argv, 0, stdout=IPT, stderr="")
 
-    assert netavark.read_iptables_dnat_ports(runner=runner) == {8081, 8083}
+    assert netavark.read_iptables_dnat_ports(runner=runner) == {8081, 8083, 8084}
     assert calls == [["iptables", "-t", "nat", "-S"]]
 
 
@@ -211,3 +226,23 @@ def test_prune_dnat_rejects_a_bad_handle_before_spawning_anything(handle: object
     with pytest.raises(ValueError):
         _seam(calls).prune_dnat(8083, handle)  # type: ignore[arg-type]
     assert calls == []
+
+
+def test_iptables_backend_offline_and_host_network_slots_do_not_warn(
+    no_nft_table: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        netavark, "read_iptables_dnat_ports", lambda: netavark.parse_iptables_dnat_ports(IPT)
+    )
+    assert check_port_dnat(CT105).status == _PASS
+
+
+def test_iptables_backend_loaded_slot_without_rule_warns(
+    no_nft_table: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(netavark, "read_iptables_dnat_ports", lambda: {8081})
+    check = check_port_dnat(CT105)
+    assert check.status == _WARN
+    assert "8084" in check.detail
+    assert "8083" not in check.detail
+    assert "8188" not in check.detail
