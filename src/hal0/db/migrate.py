@@ -153,7 +153,9 @@ def _has_retired_tuning(conn: sqlite3.Connection) -> bool:
     try:
         return _retired_tuning_present(conn)
     finally:
-        conn.execute("ROLLBACK")
+        # SQLite rolls back on its own after some errors; do not mask that error.
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
 
 
 def _retired_tuning_present(conn: sqlite3.Connection) -> bool:

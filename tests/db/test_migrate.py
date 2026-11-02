@@ -216,3 +216,22 @@ class TestRetiredTuningCheckRace:
             assert _has_retired_tuning(conn) is False
             assert conn.in_transaction
             conn.execute("ROLLBACK")
+
+    def test_a_read_error_after_an_automatic_rollback_is_not_masked(self, tmp_path: Path) -> None:
+        class _IoErrorMidCheck(sqlite3.Connection):
+            def execute(self, sql: str, *args: Any) -> Any:
+                if "table_info" in sql:
+                    super().execute("ROLLBACK")  # what SQLite does on an I/O error
+                    raise sqlite3.OperationalError("disk I/O error")
+                return super().execute(sql, *args)
+
+        db = tmp_path / "hal0.db"
+        with connect(db) as setup:
+            setup.execute("CREATE TABLE model (id TEXT)")
+
+        conn = sqlite3.connect(db, isolation_level=None, factory=_IoErrorMidCheck)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
+                _has_retired_tuning(conn)
+        finally:
+            conn.close()
