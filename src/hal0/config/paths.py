@@ -227,6 +227,17 @@ def bridge_db() -> Path:
     return var_lib() / "bridge.db"
 
 
+def approval_socket() -> Path:
+    """Return the root CLI's approval decision socket (/var/lib/hal0/approvals.sock).
+
+    Under ``var_lib()`` rather than ``/run/hal0``: only ``hal0-agent@`` declares
+    that runtime directory, so a box without an agent would have no place to bind
+    it, and an update does not rewrite the API unit. See ADR-0048. Under HAL0_HOME
+    it lands in the tmp tree, so tests are auto-isolated.
+    """
+    return var_lib() / "approvals.sock"
+
+
 #: Conventional external model-store mount and the historic default for slot
 #: container bind-mounts. Most hal0 deployments target an NFS / fast-disk
 #: mount here; overridable per-install via ``[models].store`` or the

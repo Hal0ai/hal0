@@ -558,7 +558,7 @@ are `Hermes-Agent` (service shape, via the hal0-owned `hermes` wrapper —
 side. Install either with `hal0 agent install <name>`. Destructive MCP
 calls (`model_pull`, `slot_delete`, `config_write`, …) gate through a header bell + inbox modal
 in the dashboard, with CLI parity via
-`hal0 agent approvals {list,approve,deny}`.
+`hal0 agent approvals {list,approve,deny}` (deciding needs `sudo`).
 
 The **hal0-brain steward** is a third, built-in persona wired to the
 dashboard's top-bar agent chat — no install step. It drives the platform

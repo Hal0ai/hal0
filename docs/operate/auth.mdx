@@ -168,6 +168,9 @@ routes — `/v1` inference and the read-only status/list routes — stay open, a
 anything arriving over loopback (the CLI, on-box services, the operator at the
 console) is unaffected.
 
+Deciding an approval is stricter: see
+[who can decide](/docs/concepts/agents#who-can-decide-an-approval).
+
 A box with **no** admin key is not covered: the requirement would be
 unsatisfiable, the same first-run carve-out the **bootstrap** class makes, so
 the keyless default stays open to the LAN. `hal0 doctor all` reports both

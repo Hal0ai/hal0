@@ -2886,6 +2886,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 ("bridge", ctx.stop_bridge),
             ):
                 stack.push_async_callback(_bounded_shutdown_step(name, stop))
+            # The root CLI's way to decide an approval (ADR-0048). Never fails
+            # the boot: without it the dashboard still decides.
+            from hal0.mcp import approval_socket
+
+            stack.push_async_callback(
+                _bounded_shutdown_step("approval_socket", await approval_socket.start_server(app))
+            )
             ctx.metrics_service.start()
             stack.push_async_callback(
                 _bounded_shutdown_step("metrics_service", ctx.metrics_service.stop)
@@ -3263,9 +3270,10 @@ def create_app() -> FastAPI:
 
     # Approval inbox. The dashboard bell, the MCP admin
     # server's gated-tool enqueue, and the ``hal0 agent approvals``
-    # CLI all read from the same lifespan-scoped ApprovalQueue. GETs
-    # require any token; POST approve/deny require admin (writer)
-    # scope — declared inside the route module.
+    # CLI all read from the same lifespan-scoped ApprovalQueue. The prefix is
+    # ADMIN class; approve and deny also refuse every key and take a session
+    # only (ADR-0048, declared in the route module). The CLI decides over
+    # hal0.mcp.approval_socket, not through these routes.
     app.include_router(
         approvals_routes.router,
         prefix="/api/agent/approvals",

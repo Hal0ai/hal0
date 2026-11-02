@@ -34,6 +34,12 @@ but on a LAN-reachable box with an admin key configured,
 :mod:`hal0.api.auth`'s posture-coupled gate (#1822) requires an admin
 session/key for any caller that didn't arrive over loopback, even though
 the ``require_auth`` toggle itself is still off.
+
+Approve and deny ask for more (ADR-0048): the ADMIN tier does not say whether a
+person is deciding, and the bundled agent holds a copy of the admin key. Both
+routes run :func:`hal0.api.auth.approval_decision_refusal`, which refuses a key
+of any tier. The root CLI decides over its own socket instead
+(:mod:`hal0.mcp.approval_socket`).
 """
 
 from __future__ import annotations
@@ -48,7 +54,9 @@ from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
 from hal0.api._audit import record_action
+from hal0.api.auth import approval_decision_refusal
 from hal0.api.middleware.error_codes import Hal0Error
+from hal0.errors import Forbidden, Unauthorized
 from hal0.mcp.approval_queue import ApprovalQueue
 
 router = APIRouter()
@@ -96,6 +104,24 @@ def _queue(request: Request) -> ApprovalQueue:
     return q
 
 
+def _require_decider(request: Request) -> None:
+    """Refuse a caller that may not decide (ADR-0048); the message names the way in."""
+    refusal = approval_decision_refusal(request)
+    if refusal is None:
+        return
+    if refusal[0] == 401:
+        raise Unauthorized(
+            "sign in to the dashboard to decide an approval, or run "
+            "`sudo hal0 agent approvals approve|deny <id>` on the box",
+            code=refusal[1],
+        )
+    raise Forbidden(
+        "an API key cannot decide an approval; use the dashboard, or "
+        "`sudo hal0 agent approvals approve|deny <id>` on the box",
+        code=refusal[1],
+    )
+
+
 @router.get("")
 async def list_pending(request: Request) -> dict[str, Any]:
     """Return every entry still in the ``pending`` state.
@@ -121,6 +147,8 @@ async def approve_approval(approval_id: str, request: Request) -> dict[str, Any]
     async with record_action(
         request, category="approval", action="approval.approve", target=approval_id
     ) as rec:
+        # Inside the audit block, so a refused attempt leaves an error row.
+        _require_decider(request)
         try:
             result = await queue.approve(approval_id)
         except KeyError:
@@ -144,6 +172,7 @@ async def deny_approval(approval_id: str, request: Request) -> dict[str, Any]:
     async with record_action(
         request, category="approval", action="approval.deny", target=approval_id
     ) as rec:
+        _require_decider(request)
         try:
             result = await queue.deny(approval_id)
         except KeyError:
