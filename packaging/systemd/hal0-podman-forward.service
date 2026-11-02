@@ -10,30 +10,39 @@ Documentation=https://github.com/Hal0ai/hal0
 #   podman-published port (e.g. OpenWebUI's 0.0.0.0:3001) are DROPped for
 #   every host except the box itself: reachable from localhost, dead from a
 #   reverse proxy or LAN client. Docker rewrites FORWARD on every start, so
-#   the fix must re-apply after Docker (After=/PartOf=/WantedBy=docker.service)
-#   and at boot (WantedBy=multi-user.target).
+#   the fix must re-apply on every Docker start: After= plus
+#   WantedBy=docker.service, which also covers a Docker installed or first
+#   started long after boot.
 #
-# What it does: re-adds an ACCEPT for the podman0 bridge into DOCKER-USER —
-#   the one chain Docker preserves across restarts. Self-guarding + idempotent:
-#   a no-op when iptables, podman0, or the DOCKER-USER chain are absent.
+# What it does: adds an ACCEPT for the podman0 bridge to DOCKER-USER, the one
+#   chain Docker preserves across restarts. Idempotent, and a no-op when
+#   iptables or the DOCKER-USER chain is absent.
+#
+# Two things here are load-bearing (#3211):
+#   - No test for the podman0 link. netavark creates the bridge with the first
+#     container, which can be well after Docker is up. -i/-o match by interface
+#     name, so the rule is valid before the bridge exists and survives netavark
+#     deleting and recreating it. Testing for the link made the unit exit 0
+#     with no rule on any box where Docker won that race.
+#   - No RemainAfterExit. Staying "active" would turn the next Docker start
+#     into a no-op for this unit, so one early run would be the only run.
 After=docker.service
-PartOf=docker.service
 
 [Service]
 Type=oneshot
-RemainAfterExit=yes
-# No iptables / no podman bridge / no Docker (DOCKER-USER chain) => nothing to
-# do. Otherwise ensure both directions of the podman0 ACCEPT exist exactly once.
+# No iptables / no Docker (DOCKER-USER chain) => nothing to do. Otherwise ensure
+# both directions of the podman0 ACCEPT exist exactly once. -w waits for the
+# xtables lock: netavark and dockerd write the same tables during boot, and a
+# lost lock on the -L probe would otherwise read as "no Docker".
 ExecStart=/usr/bin/env bash -c '\
   command -v iptables >/dev/null 2>&1 || exit 0; \
-  ip link show podman0 >/dev/null 2>&1 || exit 0; \
-  iptables -L DOCKER-USER -n >/dev/null 2>&1 || exit 0; \
-  iptables -C DOCKER-USER -i podman0 -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER -i podman0 -j ACCEPT; \
-  iptables -C DOCKER-USER -o podman0 -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER -o podman0 -j ACCEPT'
+  iptables -w 5 -L DOCKER-USER -n >/dev/null 2>&1 || exit 0; \
+  iptables -w 5 -C DOCKER-USER -i podman0 -j ACCEPT 2>/dev/null || iptables -w 5 -I DOCKER-USER -i podman0 -j ACCEPT; \
+  iptables -w 5 -C DOCKER-USER -o podman0 -j ACCEPT 2>/dev/null || iptables -w 5 -I DOCKER-USER -o podman0 -j ACCEPT'
 
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=hal0-podman-forward
 
 [Install]
-WantedBy=docker.service multi-user.target
+WantedBy=docker.service

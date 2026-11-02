@@ -3238,6 +3238,75 @@ def refresh_gpu_perms_unit(target: Path, *, job_id: str | None = None) -> str:
     return "unchanged" if up_to_date else "installed"
 
 
+#: Where the installer writes the unit; a module constant so tests redirect it.
+PODMAN_FORWARD_UNIT_DST = Path("/etc/systemd/system/hal0-podman-forward.service")
+
+
+def refresh_podman_forward_unit(target: Path, *, job_id: str | None = None) -> str:
+    """Install/refresh ``hal0-podman-forward.service`` from the activated release (#3211).
+
+    Same #1689 shape as :func:`refresh_gpu_perms_unit`: without this, a box that
+    only ever runs ``hal0 update`` keeps the unit it was installed with, and one
+    that gained Docker after install never has it enabled at all, so Open WebUI
+    stays unreachable from the LAN.
+
+    Privileged-side ONLY (a no-op unless euid 0) and best-effort: a failure is
+    logged and never fails an otherwise-successful activate.
+
+    Returns one of ``"installed"``, ``"unchanged"``, ``"skipped"``, ``"failed"``.
+    """
+    if os.geteuid() != 0:
+        return "skipped"
+    src = target / "packaging" / "systemd" / "hal0-podman-forward.service"
+    if not src.is_file():
+        log.info("updater.podman_forward_unit_absent", job_id=job_id, src=str(src))
+        return "skipped"
+    dst = PODMAN_FORWARD_UNIT_DST
+    try:
+        desired = src.read_text(encoding="utf-8")
+        up_to_date = dst.is_file() and dst.read_text(encoding="utf-8") == desired
+        if not up_to_date:
+            _write_unit_atomic(dst, desired)
+        subprocess.run(["systemctl", "daemon-reload"], check=False, capture_output=True)
+        # reenable, not enable: it also clears the multi-user.target link older
+        # releases made. Not skipped on matching content, so a failed enable
+        # self-heals on the next activate.
+        enabled = subprocess.run(
+            ["systemctl", "reenable", "hal0-podman-forward.service"],
+            check=False,
+            capture_output=True,
+        )
+        if enabled.returncode != 0:
+            log.warning(
+                "updater.podman_forward_unit_enable_failed",
+                job_id=job_id,
+                returncode=enabled.returncode,
+                stderr=(enabled.stderr or b"").decode(errors="replace").strip()[:400],
+            )
+            return "failed"
+        # Converge NOW, so the box does not wait for its next Docker start.
+        # restart because `start` is a no-op on a unit an older release left
+        # active. --no-block because After=docker.service would otherwise hold
+        # the update for as long as a Docker start job takes.
+        started = subprocess.run(
+            ["systemctl", "restart", "--no-block", "hal0-podman-forward.service"],
+            check=False,
+            capture_output=True,
+        )
+        if started.returncode != 0:
+            log.warning(
+                "updater.podman_forward_unit_start_failed",
+                job_id=job_id,
+                returncode=started.returncode,
+                detail="unit installed and enabled; convergence deferred to next Docker start",
+            )
+    except OSError as exc:
+        log.warning("updater.podman_forward_unit_failed", job_id=job_id, error=str(exc))
+        return "failed"
+    log.info("updater.podman_forward_unit_installed", job_id=job_id, path=str(dst))
+    return "unchanged" if up_to_date else "installed"
+
+
 #: Where the installer writes the API unit; a module constant so tests redirect it.
 API_UNIT_DST = Path("/etc/systemd/system/hal0-api.service")
 
@@ -3724,6 +3793,7 @@ def activate_release(dir_name: str, *, job_id: str | None = None) -> dict[str, A
     wrappers = refresh_privileged_wrappers(target, job_id=job_id)
     path_links = refresh_path_links(target, job_id=job_id)
     gpu_perms_unit = refresh_gpu_perms_unit(target, job_id=job_id)
+    podman_forward_unit = refresh_podman_forward_unit(target, job_id=job_id)
     retired = remove_retired_artifacts(job_id=job_id)
 
     # Heal root-created tombstone locks on existing boxes (#2698), using
@@ -3753,6 +3823,7 @@ def activate_release(dir_name: str, *, job_id: str | None = None) -> dict[str, A
         "wrappers_refreshed": wrappers["refreshed"],
         "path_links_refreshed": path_links,
         "gpu_perms_unit": gpu_perms_unit,
+        "podman_forward_unit": podman_forward_unit,
         "retired_artifacts_removed": retired,
     }
 
@@ -4743,6 +4814,7 @@ __all__ = [
     "refresh_api_unit",
     "refresh_gpu_perms_unit",
     "refresh_path_links",
+    "refresh_podman_forward_unit",
     "refresh_privileged_wrappers",
     "release_dir_name",
     "releases_url",
