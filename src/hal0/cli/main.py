@@ -251,8 +251,7 @@ app.add_typer(update_app, name="update")
 
 
 def _convert_runner_system_before_boot() -> None:
-    """Run the runner-system (ADR-0028) and profile-centric (ADR-0029)
-    conversions before the API is imported.
+    """Run the runner-system (ADR-0028) conversion before the API is imported.
 
     ``uvicorn.run("hal0.api:app")`` imports :mod:`hal0.api`, whose module-level
     ``create_app()`` loads ``hal0.toml``; a removed runner key in
@@ -276,19 +275,6 @@ def _convert_runner_system_before_boot() -> None:
             error=str(exc),
             remedy="run `hal0 runner-images migrate` to see the plan, fix the named file, "
             "then --apply",
-        )
-    # The profile-centric conversion (ADR-0029) runs straight after, on the
-    # converted runner keys.
-    try:
-        from hal0.config.migrations.profile_centric_apply import migrate_profile_centric
-
-        rerender = bool(migrate_profile_centric(honour_restore_marker=True).backup) or rerender
-    except Exception as exc:
-        structlog.get_logger(__name__).error(
-            "hal0.profile_centric_migration_failed",
-            error=str(exc),
-            remedy="run `hal0 profile migrate` to see the plan, fix the named slot or "
-            "profile, then --apply",
         )
     if rerender:
         try:

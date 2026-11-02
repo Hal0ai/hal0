@@ -100,12 +100,6 @@ def fork_only_brain(tmp_hal0_home: str, tmp_path: Path) -> Path:
 @pytest.fixture
 def _only_runner_system_is_real(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stub every post-activation pass except the runner-system conversion."""
-    from hal0.config.migrations.profile_centric_apply import ConversionReport
-
-    monkeypatch.setattr(
-        "hal0.config.migrations.profile_centric_apply.migrate_profile_centric",
-        lambda **_kw: ConversionReport(dry_run=False),
-    )
     monkeypatch.setattr(
         "hal0.updater.updater._maybe_run_config_migrations", lambda *_a, **_kw: (1, 2)
     )
@@ -159,13 +153,10 @@ def test_real_conversion_unassigns_and_the_result_carries_it(
     import tomllib
 
     assert tomllib.loads(fork_only_brain.read_text())["model"]["default"] == ""
-    # Unassigning is not a blocker (it must not flip `converged`).
-    assert result.conversion_blockers == []
 
 
 def _convergence_as_commit_builds_it(migration_result: dict[str, Any]) -> dict[str, Any]:
     """The `convergence` dict `Updater.commit()` returns (updater.py, `post_activation_migrations`)."""
-    blockers = list(migration_result.get("conversion_blockers") or [])
     return {
         "post_activation_migrations": {
             "ok": True,
@@ -173,10 +164,9 @@ def _convergence_as_commit_builds_it(migration_result: dict[str, Any]) -> dict[s
             "to": migration_result["to"],
             "error": None,
             "pass_warnings": list(migration_result.get("pass_warnings") or []),
-            "conversion_blockers": blockers,
             "unassigned_models": list(migration_result.get("unassigned_models") or []),
         },
-        "converged": not blockers,
+        "converged": True,
     }
 
 

@@ -241,7 +241,7 @@ never a victim, and only resident slots (`READY`/`IDLE`) are considered at all.
 
 <Aside type="caution">
 The old `lru = true` eviction opt-in is retired. The eviction sweep ignores the key (with a
-one-time `slot.lru_flag_retired` warning per slot), `hal0 profile migrate --apply` removes it,
+one-time `slot.lru_flag_retired` warning per slot),
 and a slot file that still carries it fails the strict slot load with the replacement named — use
 `priority`/`pinned` instead. Slots that never set `lru` are now evictable where they
 previously were not.
@@ -259,7 +259,7 @@ Every write of a slot file goes through `guard_slot_write_payload` (`hal0.slots.
 
 To rebind a slot's model, send `PUT /api/slots/{name}/config` with `{"model": {"default": "<model id>"}}`, or use `slot_edit` or `model_swap` over MCP. `PATCH /api/slots/{name}/defaults` no longer exists.
 
-A slot file on disk that still carries a tuning key is refused at launch with `slot.unconverted`, and the typed slot-config loader rejects it too, until `hal0 profile migrate --apply` removes the key. The exception is a slot the conversion blocked: while its file is unchanged since, it keeps launching the command it ran before the conversion, and `GET /api/slots` reports it as `conversion_blocked` (`reason`, `fix`, `running_pre_conversion`).
+A slot file on disk that still carries a tuning key is refused at launch with `slot.unconverted`, and the typed slot-config loader rejects it too (`hal0 config validate` names the file and the keys), until you delete the keys from the file and put their values on a profile. `GET /api/slots` reports such a slot as `conversion_blocked` (`reason`, `fix`).
 
 ## Launch composition and effective context
 

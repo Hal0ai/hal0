@@ -10,7 +10,6 @@ model resolution (unlike stacks).
 
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 from pathlib import Path
@@ -81,19 +80,23 @@ class ProfileEnvelope(BaseModel):
 ENVELOPE_SCHEMA_MIN = 2
 
 
-def _convert_body(data: dict[str, Any]) -> dict[str, Any]:
-    """A copy of ``data`` whose profile body has had the ADR-0031 §7 rename
-    applied: a hal0 1.4.0 export carries ``mtp`` (and maybe ``--spec-type`` in
-    ``flags``), which ``ProfileConfig`` refuses. A conversion at import, not an
-    alias; the checksum is still verified against the body as exported."""
-    from hal0.config.migrations.speculation_rename import convert_profile_body
+def _refuse_pre_speculation(data: dict[str, Any]) -> None:
+    """Raise BadRequest when the profile body predates the ``speculation`` tune.
 
+    A hal0 1.4.x export carries the boolean-era ``mtp`` field; from 1.5.0 the
+    profile has ``speculation`` instead and no ``mtp`` field exists, so no
+    export from 1.5 or newer can carry it. The envelope schema version is 2
+    on both sides of the rename, so the body is the only signal. It is refused
+    whole rather than converted: re-export it from hal0 1.5 or newer.
+    """
     body = data.get("profile")
-    if not isinstance(body, dict):
-        return data
-    body = copy.deepcopy(body)
-    convert_profile_body(str(data.get("name") or ""), body)
-    return {**data, "profile": body}
+    if isinstance(body, dict) and "mtp" in body:
+        raise BadRequest(
+            "profile envelope was exported by a hal0 older than 1.5 (its profile carries "
+            "'mtp'); re-export the profile from hal0 1.5 or newer",
+            code="profiles.envelope_schema_unsupported",
+            details={"field": "mtp", "supported_min": ENVELOPE_SCHEMA_MIN},
+        )
 
 
 def parse_envelope(data: Any) -> ProfileEnvelope:
@@ -116,8 +119,9 @@ def parse_envelope(data: Any) -> ProfileEnvelope:
             code="profiles.envelope_schema_unsupported",
             details={"got": declared, "supported_min": ENVELOPE_SCHEMA_MIN},
         )
+    _refuse_pre_speculation(data)
     try:
-        return ProfileEnvelope.model_validate(_convert_body(data))
+        return ProfileEnvelope.model_validate(data)
     except Exception as exc:
         raise BadRequest(
             f"invalid profile envelope: {exc}",

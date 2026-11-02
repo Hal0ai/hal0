@@ -1830,13 +1830,11 @@ def repair_hermes_mcp_client(
 
 
 class PostActivationResult(tuple):
-    """``(source, target)`` schema versions, plus the conversion blockers.
+    """``(source, target)`` schema versions, plus the conversion reports.
 
     Still a 2-tuple, so every caller that unpacks ``source, target =`` (the
     install.sh re-run path) or indexes ``result[0]`` / ``result[1]`` (the
     post-swap child script, an ABI between releases) keeps working.
-    ``conversion_blockers`` lists what the profile-centric conversion
-    (ADR-0029) could not convert: ``{"target": ..., "reason": ...}``.
     ``unassigned_models`` lists every slot whose model the runner-system
     conversion unassigned (ADR-0028 §7, #2694):
     ``{"slot", "model", "quant", "remedy"}``. Not a blocker: the conversion
@@ -1845,51 +1843,30 @@ class PostActivationResult(tuple):
     not fetch (#2739, ADR-0030): ``{"model", "outcome", "path", "remedy",
     "error"?}``. Not a blocker either: a failed fetch leaves the slot's spawn
     preflight naming the same remedy.
+    ``conversion_blockers`` lists every slot file that still carries tuning
+    keys (ADR-0029): ``{"target", "slot", "reason"}``. These block: such a slot
+    refuses to launch until an operator moves the keys onto a profile, so the
+    install is not converged. The name is the one 1.7.x reads from this envelope,
+    so the update that crosses the removal of the conversion reports them too.
     """
 
-    conversion_blockers: list[dict[str, str]]
     unassigned_models: list[dict[str, str]]
     model_bundles: list[dict[str, str]]
+    conversion_blockers: list[dict[str, str]]
 
     def __new__(
         cls,
         source: int,
         target: int,
-        conversion_blockers: list[dict[str, str]] | None = None,
         unassigned_models: list[dict[str, str]] | None = None,
         model_bundles: list[dict[str, str]] | None = None,
+        conversion_blockers: list[dict[str, str]] | None = None,
     ) -> PostActivationResult:
         obj = super().__new__(cls, (source, target))
-        obj.conversion_blockers = list(conversion_blockers or [])
         obj.model_bundles = list(model_bundles or [])
+        obj.conversion_blockers = list(conversion_blockers or [])
         obj.unassigned_models = list(unassigned_models or [])
         return obj
-
-
-def conversion_blockers(report: Any) -> list[dict[str, str]]:
-    """What a profile-centric conversion run left for the operator.
-
-    One ``{"target", "reason"}`` per entry of ``plan.blockers``: a blocked
-    slot (its file, with :attr:`SlotPlan.error`), a profile
-    (``profile:<name>``) or a stack (``stack:<name>``) with its reasons.
-    """
-    plan = getattr(report, "plan", None)
-    if plan is None:
-        return []
-    slot_errors = {s.file: s.error for s in getattr(plan, "blocked", [])}
-    profile_reasons = getattr(plan, "blocked_profiles", {}) or {}
-    stack_errors = {st.stack: st.errors for st in getattr(plan, "stacks", []) if st.errors}
-    out: list[dict[str, str]] = []
-    for target in plan.blockers:
-        if target.startswith("profile:"):
-            reasons = profile_reasons.get(target.removeprefix("profile:")) or []
-            reason = "; ".join(str(r) for r in reasons)
-        elif target.startswith("stack:"):
-            reason = "; ".join(str(e) for e in stack_errors.get(target.removeprefix("stack:"), []))
-        else:
-            reason = str(slot_errors.get(target) or "")
-        out.append({"target": str(target), "reason": reason or "cannot be converted as it is"})
-    return out
 
 
 def run_post_activation_migrations(
@@ -1995,11 +1972,9 @@ def run_post_activation_migrations(
 
     Returns the ``(source, target)`` schema-version tuple for breadcrumb
     logging, the same shape ``commit()`` already returned, as a
-    :class:`PostActivationResult` whose ``conversion_blockers`` lists every
-    slot, profile or stack the profile-centric conversion left blocked
-    (an empty list when the install converged), and whose
-    ``unassigned_models`` lists every slot the runner-system conversion
-    unassigned a model from.
+    :class:`PostActivationResult` whose ``unassigned_models`` lists every
+    slot the runner-system conversion unassigned a model from, and whose
+    ``conversion_blockers`` lists every slot file still carrying tuning keys.
     """
     # The runner-system conversion (ADR-0028) runs FIRST and is fatal: it
     # rewrites raw TOML before anything validates config, because a removed
@@ -2009,14 +1984,7 @@ def run_post_activation_migrations(
     from hal0.config.migrations.runner_system import migrate_runner_system
 
     conversion = migrate_runner_system(job_id=job_id, honour_restore_marker=honour_restore_marker)
-    # The profile-centric conversion (ADR-0029) runs next, on the converted
-    # runner keys, and is fatal the same way: it moves every tune onto a
-    # profile, verifies each converted slot's launch, and rolls back every
-    # write before raising.
-    from hal0.config.migrations.profile_centric_apply import migrate_profile_centric
-
-    profiles = migrate_profile_centric(job_id=job_id, honour_restore_marker=honour_restore_marker)
-    if rerender_after_runner_conversion and (conversion.backup or profiles.backup):
+    if rerender_after_runner_conversion and conversion.backup:
         try:
             rerender_slot_units(job_id=job_id)
         except Exception as exc:
@@ -2113,14 +2081,31 @@ def run_post_activation_migrations(
         # genuine bug, and the box keeps its current working components
         # either way — never a reason to fail an update.
 
+    # ADR-0029: nothing converts a slot file any more, so a file still carrying
+    # tuning keys stays that way and the slot refuses to launch. Say so here:
+    # this is the last step that can stop `hal0 update` calling the box converged.
+    blockers: list[dict[str, str]] = []
+    try:
+        from hal0.slot_view import unconverted_slot_files
+
+        blockers = unconverted_slot_files()
+    except Exception as exc:
+        log.warning("updater.unconverted_slot_scan_failed", job_id=job_id, error=str(exc))
+    if blockers:
+        log.warning(
+            "updater.unconverted_slots",
+            job_id=job_id,
+            slots=[b["target"] for b in blockers],
+        )
+
     return PostActivationResult(
         migration_info[0],
         migration_info[1],
-        conversion_blockers(profiles),
         # #2694: the runner-system report used to be dropped here except its
         # ``backup``, so a slot that lost its model was told only to the journal.
         list(getattr(conversion, "unassigned", None) or []),
         model_bundles,
+        blockers,
     )
 
 
@@ -3766,8 +3751,8 @@ async def _run_post_activation_migrations_after_swap(
     subprocess can produce, not just a non-zero return code.
 
     Returns ``{"from": int, "to": int, "pass_warnings": list[str],
-    "conversion_blockers": list[dict], "unassigned_models": list[dict],
-    "model_bundles": list[dict]}``
+    "unassigned_models": list[dict],
+    "model_bundles": list[dict], "conversion_blockers": list[dict]}``
     (each list is empty when the incoming release predates it).
     """
     payload = json.dumps(
@@ -3780,9 +3765,9 @@ async def _run_post_activation_migrations_after_swap(
         "sys.stdout.write(json.dumps({"
         + repr(_MIGRATION_RESULT_KEY)
         + ": {'from': result[0], 'to': result[1],"
-        " 'conversion_blockers': list(getattr(result, 'conversion_blockers', None) or []),"
         " 'unassigned_models': list(getattr(result, 'unassigned_models', None) or []),"
-        " 'model_bundles': list(getattr(result, 'model_bundles', None) or [])}})"
+        " 'model_bundles': list(getattr(result, 'model_bundles', None) or []),"
+        " 'conversion_blockers': list(getattr(result, 'conversion_blockers', None) or [])}})"
         " + chr(10))\n"
     )
     script = (
@@ -3864,9 +3849,9 @@ async def _run_post_activation_migrations_after_swap(
                     "from": int(result["from"]),
                     "to": int(result["to"]),
                     "pass_warnings": pass_warnings,
-                    "conversion_blockers": list(result.get("conversion_blockers") or []),
                     "unassigned_models": list(result.get("unassigned_models") or []),
                     "model_bundles": list(result.get("model_bundles") or []),
+                    "conversion_blockers": list(result.get("conversion_blockers") or []),
                 }
         raise UpdateError(
             "post-activation migrations subprocess exited 0 but produced no result marker",
@@ -4099,9 +4084,9 @@ class Updater:
         # no editable-install branch is needed here.
         migrations_error: str | None = None
         pass_warnings: list[str] = []
-        blockers: list[dict[str, str]] = []
         unassigned: list[dict[str, str]] = []
         model_bundles: list[dict[str, str]] = []
+        blockers: list[dict[str, str]] = []
         try:
             migration_result = await _run_post_activation_migrations_after_swap(
                 manifest.min_data_version,
@@ -4109,9 +4094,9 @@ class Updater:
             )
             migration_info = (migration_result["from"], migration_result["to"])
             pass_warnings = list(migration_result.get("pass_warnings") or [])
-            blockers = list(migration_result.get("conversion_blockers") or [])
             unassigned = list(migration_result.get("unassigned_models") or [])
             model_bundles = list(migration_result.get("model_bundles") or [])
+            blockers = list(migration_result.get("conversion_blockers") or [])
         except Exception as exc:
             # LOUD, not silent (#1960's failure-mode decision): the tree is
             # already active by this point — the symlink swap and venv re-pip
@@ -4179,10 +4164,6 @@ class Updater:
                 "to": migration_info[1],
                 "error": migrations_error,
                 "pass_warnings": pass_warnings,
-                # ADR-0029: slots/profiles/stacks the profile-centric
-                # conversion left for the operator. The release is applied,
-                # but the install is not converged until they are fixed.
-                "conversion_blockers": blockers,
                 # ADR-0028 §7 / #2694: slots the runner-system conversion
                 # unassigned a model from. Reported with a remedy, but not a
                 # blocker: the conversion did what it must.
@@ -4190,6 +4171,9 @@ class Updater:
                 # #2739: engine bundles the upgrade fetched (kokoro-v1), or
                 # could not fetch, with the remedy. Not a blocker.
                 "model_bundles": model_bundles,
+                # ADR-0029: slot files still carrying tuning keys. Each refuses
+                # to launch until it is fixed, so the install is not converged.
+                "conversion_blockers": blockers,
             },
             "converged": migrations_error is None and not blockers,
         }
@@ -4199,7 +4183,7 @@ class Updater:
             converged=convergence["converged"],
             post_activation_migrations_ok=migrations_error is None,
             post_activation_migrations_pass_warnings=pass_warnings,
-            conversion_blockers=[b["target"] for b in blockers],
+            conversion_blockers=[b.get("target") for b in blockers if isinstance(b, dict)],
             unassigned_models=[u.get("slot") for u in unassigned if isinstance(u, dict)],
             model_bundles=[
                 f"{b.get('model')}:{b.get('outcome')}" for b in model_bundles if isinstance(b, dict)
@@ -4299,38 +4283,24 @@ class Updater:
             )
 
         log.info("updater.rollback_start", job_id=self.job_id, previous=str(prior_path))
-        # ADR-0029: a release before the profile-centric conversion cannot read
-        # the converted config. Undo the conversion first (files, model
-        # columns, migration 012's bookkeeping) or refuse with the manual steps.
-        profile_restore = _restore_profile_conversion_for(prior_path, job_id=self.job_id)
         # ADR-0045: a release before per-slot [tune] refuses a slot file that
         # carries the table, a profile with reasoning keys and a stack entry with
-        # tune. Strip them (after the profile restore, which may put these files
-        # back) and leave a .bak-<stamp> copy of each file touched.
+        # tune. Strip them and leave a .bak-<stamp> copy of each file touched.
         tune_backups: dict[str, _TuneBackup] = {}
         # Steps 8 + 8b via the same privileged primitive commit() uses: swap the
         # symlink back and re-pip the prior tree so the next hal0-api restart
         # actually serves the rolled-back version. On a pip failure activate
         # swaps *forward* again, so `current` and site-packages stay consistent.
         # The strip sits inside the same protection: on any failure (a
-        # cancellation included) those files get their keys back and the
-        # reverted profile conversion is re-applied, so nothing is left half-done.
+        # cancellation included) those files get their keys back, so nothing
+        # is left half-done.
         try:
             tune_stripped = _strip_tune_config_for(
                 prior_path, job_id=self.job_id, backups_out=tune_backups
             )
             activated = await seam.activate(prior_path.name)
         except BaseException:
-            # This comes first, so a re-conversion below sees the files as they were.
             _restore_tune_backups(tune_backups, job_id=self.job_id)
-            if profile_restore:
-                # Still on this release: convert again so it keeps running.
-                from hal0.config.migrations.profile_centric_apply import (
-                    migrate_profile_centric,
-                )
-
-                with contextlib.suppress(Exception):
-                    migrate_profile_centric(job_id=self.job_id)
             raise
         current_str = activated.get("previous")
         current_target = Path(current_str) if current_str else None
@@ -4378,44 +4348,8 @@ class Updater:
             "rolled_back_to": str(prior_path),
             "previous_now": str(current_target) if current_target else None,
             "schema_warning": warning,
-            "profile_conversion_restored": profile_restore,
             "tune_stripped": tune_stripped,
         }
-
-
-#: A release tree that ships the profile-centric conversion (ADR-0029).
-_PROFILE_CENTRIC_MARKER = Path("src/hal0/config/migrations/profile_centric_apply.py")
-
-
-def _restore_profile_conversion_for(prior_path: Path, *, job_id: str | None) -> list[str]:
-    """Undo the profile-centric conversion before rolling back to ``prior_path``
-    when that release predates it. Returns what was restored (empty when the
-    target understands the converted config, or nothing was converted).
-
-    Raises :class:`UpdateRollbackUnavailable` with the manual steps when the
-    conversion backups cannot be restored.
-    """
-    if (prior_path / _PROFILE_CENTRIC_MARKER).is_file():
-        return []
-    from hal0.config.migrations.profile_centric_apply import (
-        ProfileConversionError,
-        conversion_backups,
-        restore_for_rollback,
-    )
-
-    try:
-        return restore_for_rollback(job_id=job_id)
-    except ProfileConversionError as exc:
-        backups = conversion_backups()
-        raise UpdateRollbackUnavailable(
-            f"cannot roll back to {prior_path.name}: it predates the profile-centric "
-            f"config this install was converted to, and the conversion could not be "
-            f"undone ({exc.message}). To roll back by hand: `sudo systemctl stop hal0-api`; "
-            "for each backup, newest first, run "
-            "`sudo -u hal0 hal0 profile migrate --restore <backup>`; "
-            "`sudo systemctl start hal0-api`; then run `hal0 update --rollback` again.",
-            details={"previous": str(prior_path), "backups": backups, "error": exc.message},
-        ) from exc
 
 
 #: A release tree that understands per-slot tune overrides (ADR-0045): the

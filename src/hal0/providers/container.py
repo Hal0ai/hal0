@@ -45,7 +45,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import dataclasses
 import hashlib
 import json
 import logging
@@ -1651,208 +1650,14 @@ def _refuse_unconverted(slot_cfg: Mapping[str, Any]) -> None:
 
     found = slot_tuning_keys(slot_cfg)
     if found:
-        pin = blocked_slot_pin(slot_cfg)
-        why = f" The conversion blocked it: {pin['reason']}." if pin else ""
         raise UnprocessableEntity(
             f"slot {slot_cfg.get('name')!r} still carries {', '.join(found)}, which belong "
-            f"on a profile now (ADR-0029).{why} See `hal0 profile migrate`, fix the slot "
-            "file, then run `sudo -u hal0 hal0 profile migrate --apply`",
+            "on a profile now (ADR-0029). Delete those keys from the slot file, put the "
+            "values on a profile (`hal0 profile create`), and name it with "
+            '`profile = "<name>"` in the slot file',
             code="slot.unconverted",
-            details={
-                "slot": str(slot_cfg.get("name") or ""),
-                "keys": found,
-                "blocked": pin["reason"] if pin else None,
-            },
+            details={"slot": str(slot_cfg.get("name") or ""), "keys": found},
         )
-
-
-def _has_tuning_keys(slot_cfg: Mapping[str, Any]) -> bool:
-    from hal0.config.schema import slot_tuning_keys
-
-    return bool(slot_tuning_keys(slot_cfg))
-
-
-# HAL0-SUNSET: v1.8.0 — the blocked-slot pin (this function, _pinned_segments,
-# _placement_only and their launch/preview branches) goes with the
-# profile-centric conversion (config.migrations.profile_centric_apply).
-def blocked_slot_pin(slot_cfg: Mapping[str, Any]) -> dict[str, Any] | None:
-    """The profile-centric conversion's record for a slot it blocked, while the
-    slot file is still exactly the one it blocked (else ``None``).
-
-    The record keeps the slot's pre-conversion launch argv, so a converter
-    problem never takes a working slot down: it keeps launching as it did
-    until the operator fixes it.
-    """
-    import hashlib
-    import json
-
-    from hal0.config import paths
-    from hal0.config.migrations.profile_centric import LEDGER_FILE
-    from hal0.slots.layout import resolve_slot_stem
-
-    name = str(slot_cfg.get("name") or "")
-    if not name:
-        return None
-    try:
-        doc = json.loads((paths.var_lib() / LEDGER_FILE).read_text(encoding="utf-8") or "{}")
-        slots_dir = paths.slots_config_dir()
-        stem = resolve_slot_stem(slots_dir, name)
-        if stem is None:
-            return None
-        current = hashlib.sha256((slots_dir / f"{stem}.toml").read_bytes()).hexdigest()
-    except (OSError, ValueError):
-        return None
-    blocked = doc.get("blocked") if isinstance(doc, dict) else None
-    pin = blocked.get(f"{stem}.toml") if isinstance(blocked, dict) else None
-    if not isinstance(pin, dict) or pin.get("file") != current:
-        return None
-    return pin
-
-
-def _pinned_segments(
-    pin: Mapping[str, Any],
-    placement: Mapping[str, Any],
-    port: int,
-    model_path: str,
-    scalars: Mapping[str, Any],
-) -> list[tuple[str, list[str]]]:
-    """The launch segments for a slot the conversion blocked.
-
-    Only the recorded tune is taken from the ledger, and it is screened like a
-    profile (managed, hardware and model-fact flags refuse; the #2545 strip
-    applies). The base (host, port, model, alias), the model facts (template,
-    projector) and the placement are rebuilt from today's slot and model, so a
-    moved model file or an edited ledger can neither stale nor redirect the
-    launch. A recorded ``--spec-type`` is consumed the same way (ADR-0031 §3:
-    hal0 owns it): the slot speculates with today's plan for the model, in the
-    model layer, or not at all when today's plan is none. Raises
-    ``slot.unconverted`` when the record is not a list of strings.
-    """
-    from hal0.slots.argv import _split_pairs
-
-    argv = pin.get("argv")
-    if not isinstance(argv, list) or not all(isinstance(t, str) for t in argv):
-        raise UnprocessableEntity(
-            f"slot {placement.get('name')!r} was blocked by the profile-centric conversion and "
-            "its recorded pre-conversion launch is unreadable; fix the slot file, then run "
-            "`sudo -u hal0 hal0 profile migrate --apply`",
-            code="slot.unconverted",
-            details={"slot": str(placement.get("name") or ""), "blocked": pin.get("reason")},
-        )
-
-    def _value(pair: Any) -> str | None:
-        if pair.values:
-            return str(pair.values[0])
-        flag = str(pair.flag or "")
-        return flag.split("=", 1)[1] if "=" in flag else None
-
-    def _int(raw: str | None) -> int | None:
-        try:
-            return int(raw) if raw is not None else None
-        except ValueError:
-            return None
-
-    ctx = ngl = threads = None
-    jinja = no_jinja = template = projector = no_projector = speculate = False
-    tune: list[str] = []
-    for pair in _split_pairs(list(argv)):
-        canon = pair.canon
-        if canon in (
-            "--host",
-            "--port",
-            "--model",
-            "--alias",
-            "--device",
-            "--mmproj-device",
-            "--metrics",
-        ):
-            continue  # rebuilt from today's slot and model
-        if canon == "--ctx-size":
-            ctx = _int(_value(pair))
-        elif canon == "--jinja":
-            jinja = True
-        elif canon == "--no-jinja":
-            no_jinja = True
-        elif canon in ("--chat-template", "--chat-template-file"):
-            template = True
-        elif canon == "--mmproj":
-            projector = True
-        elif canon in ("--no-mmproj", "--no-mmproj-auto"):
-            no_projector = True
-        elif canon == "--mmproj-auto":
-            continue
-        elif canon == "--n-gpu-layers":
-            ngl = _int(_value(pair))
-        elif canon == "--threads":
-            threads = _int(_value(pair))
-        elif canon == "--spec-draft-device":
-            # Consumed: the slot layer re-derives it (MTP only) below.
-            continue
-        elif canon == "--spec-type":
-            speculate = True
-        else:
-            tune += [str(pair.flag), *pair.values] if pair.flag else list(pair.values)
-
-    base = ["--host", "0.0.0.0", "--port", str(port)]
-    if model_path:
-        base += ["--model", model_path]
-    if scalars.get("model_alias"):
-        base += ["--alias", str(scalars["model_alias"])]
-    base += ["--ctx-size", str(ctx or scalars["context_size"])]
-    # A recorded --no-jinja is a model fact the profile layer may not carry:
-    # it is consumed here and the model's own jinja fact decides.
-    if no_jinja:
-        jinja = bool(scalars.get("jinja"))
-    model: list[str] = ["--jinja"] if jinja else []
-    if template and scalars.get("chat_template_path"):
-        model += ["--chat-template-file", str(scalars["chat_template_path"])]
-    if projector and not no_projector and scalars.get("mmproj"):
-        model += ["--mmproj", str(scalars["mmproj"])]
-    spec_type = str(scalars.get("spec_type") or "") if speculate else ""
-    if spec_type:
-        model += ["--spec-type", spec_type]
-        if scalars.get("draft_model"):
-            model += ["--spec-draft-model", str(scalars["draft_model"])]
-    slot: list[str] = []
-    device = lane_device(scalars["backend"]) if scalars.get("backend") else None
-    # A recorded --device is skipped above; today's slot decides it.
-    if device:
-        slot += ["--device", device]
-    slot_ngl = scalars.get("slot_n_gpu_layers")
-    if slot_ngl is not None or ngl is not None:
-        slot += ["-ngl", str(int(slot_ngl if slot_ngl is not None else ngl))]
-    slot_threads = scalars.get("slot_threads") or threads
-    if slot_threads:
-        slot += ["--threads", str(int(slot_threads))]
-    if scalars.get("slot_metrics", True):
-        slot += ["--metrics"]
-    # Only embedded MTP heads are pinned; a recorded device on an external
-    # drafter type (or with no --spec-type at all) is dropped. A CPU slot's
-    # drafter runs on the host CPU: no draft device.
-    if spec_type == "draft-mtp" and device and device != "none":
-        slot += ["--spec-draft-device", device]
-    return [("base", base), ("model", model), ("profile", tune), ("slot", slot)]
-
-
-def _placement_only(slot_cfg: Mapping[str, Any]) -> dict[str, Any]:
-    """The slot without its tuning keys, on its type's seed: what a blocked
-    slot's runner image, devices and environment are resolved from."""
-    from hal0.config.schema import (
-        SLOT_TUNING_MODEL_KEYS,
-        SLOT_TUNING_SERVER_KEYS,
-        SLOT_TUNING_TOP_KEYS,
-    )
-
-    out = {k: v for k, v in slot_cfg.items() if k not in SLOT_TUNING_TOP_KEYS}
-    out.pop("defaults", None)
-    out["profile"] = TYPE_DEFAULT_PROFILE.get(str(slot_cfg.get("type") or ""), "chat")
-    if isinstance(out.get("model"), Mapping):
-        out["model"] = {k: v for k, v in out["model"].items() if k not in SLOT_TUNING_MODEL_KEYS}
-    if isinstance(out.get("server"), Mapping):
-        out["server"] = {k: v for k, v in out["server"].items() if k not in SLOT_TUNING_SERVER_KEYS}
-    if isinstance(out.get("slot"), Mapping):
-        out["slot"] = {k: v for k, v in out["slot"].items() if k not in SLOT_TUNING_TOP_KEYS}
-    return out
 
 
 def _reasoning_segments(
@@ -2126,18 +1931,6 @@ class ContainerProvider(Provider):
           existence filter and no GID ``--group-add`` (the CDI spec injects
           nodes + permissions itself).
         """
-        # A slot the profile-centric conversion blocked keeps launching with
-        # its pre-conversion argv while its file is unchanged (ADR-0029 §7).
-        pin = blocked_slot_pin(slot_cfg) if _has_tuning_keys(slot_cfg) else None
-        if pin is not None and pin.get("argv") is None:
-            pin = None
-        if pin is not None:
-            slot_cfg = _placement_only(slot_cfg)
-            log.warning(
-                "slot.launch_pinned_pre_conversion slot=%s reason=%s",
-                slot_cfg.get("name"),
-                pin.get("reason"),
-            )
         profile = resolve_slot_profile(slot_cfg)
         # for_launch: this is the real container-spec build — side-effect logs
         # (MTP auto-off breadcrumb) fire here, never on preview/status renders.
@@ -2196,9 +1989,6 @@ class ContainerProvider(Provider):
             slot_reasoning=scalars["slot_reasoning"],
             env=merged_env or None,
         )
-        if pin is not None:
-            pinned = _pinned_segments(pin, slot_cfg, port, model_path, scalars)
-            return dataclasses.replace(plan, command=resolve_argv(pinned).argv)
         return plan
 
     # ── ContainerProvider-specific control plane ──────────────────────────────
@@ -3368,34 +3158,6 @@ def _resolve_preview_bundle(
     return model_info, scalars
 
 
-def strict_slot_argv(slot_cfg: dict[str, Any]) -> ResolvedArgv:
-    """The argv a llama slot launches with, raising on any failure.
-
-    The profile-centric conversion verifies with this, not the fail-open
-    preview: a registry or catalog error must abort (and roll back) the run,
-    never pass for an argv mismatch. Only a model with no registry row falls
-    back, exactly as the launch does, to ``--model <model id>``.
-    """
-    from hal0.registry.store import ModelNotFound, ModelRegistry
-
-    profile = resolve_slot_profile(slot_cfg)
-    model_table = slot_cfg.get("model") if isinstance(slot_cfg.get("model"), dict) else {}
-    model_id = str(model_table.get("default") or "")
-    model_info: dict[str, Any] = {}
-    if model_id:
-        model_info["_model_key"] = model_id
-        try:
-            model = ModelRegistry().get(model_id)
-        except ModelNotFound:
-            model = None
-        if model is not None:
-            model_info.update(model.model_dump())
-        model_info["path"] = str(model_info.get("path") or model_id)
-    scalars = _resolve_llama_scalars(slot_cfg, model_info, profile)
-    port = int(slot_cfg.get("port") or slot_cfg.get("slot", {}).get("port") or 0)
-    return resolve_argv(_segments_from_scalars(port, str(model_info.get("path") or ""), scalars))
-
-
 def _resolve_slot_argv(
     slot_cfg: dict[str, Any],
     model_path: str | None = None,
@@ -3427,21 +3189,6 @@ def _resolve_slot_argv(
         non_llama = True
     if non_llama:
         return None
-    pin = blocked_slot_pin(slot_cfg) if _has_tuning_keys(slot_cfg) else None
-    if pin is not None and pin.get("argv") is not None:
-        # A slot the conversion blocked launches its pre-conversion tune, on
-        # today's base and placement — exactly as container_spec builds it.
-        placement = _placement_only(slot_cfg)
-        placed = _resolve_preview_bundle(placement, model_path)
-        if placed is None:
-            return None
-        info, sc = placed
-        port = int(placement.get("port") or placement.get("slot", {}).get("port") or 0)
-        try:
-            segments = _pinned_segments(pin, placement, port, str(info.get("path") or ""), sc)
-            return str(sc["image"]), resolve_argv(segments), sc["spec_plan"]
-        except Hal0Error:
-            return None
     resolved = _resolve_preview_bundle(slot_cfg, model_path)
     if resolved is None:
         return None

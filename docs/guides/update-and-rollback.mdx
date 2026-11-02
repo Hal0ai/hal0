@@ -163,49 +163,36 @@ Settings → Updates page shows next to the channel.
 
 </Steps>
 
-## Profile-centric config conversion
+## Profile-centric config
 
 Slot files carry placement only; every tune (flags, context window, thinking
 default, vision, speculation) lives on a profile ([ADR-0029](/docs/adr/0029-profile-centric-config)).
-`hal0 update` converts an older install once, automatically, after the
-runner-system conversion; `hal0 serve` also runs it when it starts `hal0-api`,
-before config is validated. The conversion gives every slot the profile that
-keeps what it launches today, generating one where needed, and reports every
-value that never reached a launch (those are dropped, never applied). Before it
-writes anything it backs up every file it changes, plus the model tuning rows,
-to `/var/lib/hal0/backups/profiles-<ts>.tar.gz`. A run with nothing to write
-makes no backup, and a rerun converts nothing that is already in the new shape.
+The one-shot conversion that moved older installs onto this shape shipped in
+1.4.0 and has been removed; the upgrade floor is 1.5.0, so every install that
+can update here has already run it.
 
-Preview the plan without changing anything, or run it by hand as the service
-user:
+Running it did not always finish the job. The conversion could block a slot it
+could not convert safely, and on 1.7.x such a slot kept launching from its saved
+argv. A slot file can also pick up a tuning key later, restored from an old
+backup or edited by hand. Any slot file that still carries a tuning key now fails
+to load with `slot.unconverted`, and the slot refuses to launch. Nothing launches
+it with its old settings, and nothing rewrites the file.
 
-```sh
-hal0 profile migrate                         # preview: profiles to generate, slots to re-point, dropped values
-sudo -u hal0 hal0 profile migrate --apply    # convert (backs up first)
+These report such a file: `hal0 update` names it and exits 2, `hal0 doctor
+profiles` fails on it, `hal0 config validate` names the file and the keys, and
+`/api/slots` reports it as `conversion_blocked`. To fix it, delete the keys from
+the file, put their values on a profile (`hal0 profile create`), and name it with
+`profile = "<name>"` in the slot file.
+
+Schema migration 015 then drops the old model tuning from the database for good.
+When any of it still held a value, hal0 first saves a copy of the database as
+`/var/lib/hal0/backups/hal0-pre-015-<timestamp>.db` (mode 0600) and does not run
+the migration if that fails. To read a model's old tune back from the copy:
+
+```bash
+sudo sqlite3 /var/lib/hal0/backups/hal0-pre-015-<timestamp>.db \
+  "SELECT id, profile, extra_args, n_gpu_layers, context_size, rope_freq_base, preferred_runner, extra FROM model"
 ```
-
-Run `--apply` as `hal0`, not as root, so the backup stays readable by
-`hal0-api` and `hal0 update --rollback`.
-
-Four launch changes are reported rather than applied silently:
-
-- a slot without a usable profile gets its type's seed (`embedding`, `reranking`);
-- `--jinja` is no longer added in embedding or reranking mode;
-- the MTP draft device follows the slot's own device;
-- forced MTP stops on a runner without MTP support.
-
-If a slot, stored profile or stack cannot be converted, `hal0 update` prints
-each blocker with its reason and the fix, and exits **2** (applied, not
-converged); `hal0 profile migrate` also exits 2 while anything is blocked. A
-blocked slot launches with its recorded pre-conversion tune only while its
-file is unchanged and still carries the old tuning keys; the recorded tune
-covers the launch flags and context window, while host, port, model, chat
-template, projector and placement come from the current slot and model.
-Editing the slot file drops the record. If tuning keys remain, the slot then
-refuses to launch (`slot.unconverted`) until the conversion succeeds or you
-remove them; once they are gone it launches under its profile (or its type's
-seed). Every other slot still converts. To go back, see "Rolling
-back past the profile-centric conversion" below.
 
 ## Upgrading to 1.3.0
 
@@ -425,8 +412,7 @@ also shows `busy` for a pass that found another Hermes build running; that
 is not a failure, and the next update retries. The update also regenerates the gateway unit and enables linger for the `hal0` user; it shows a component note such as "Hermes config keys applied; restart hal0-agent@hermes to load agent.system_prompt" in `hal0 update` and `hal0 update status` when a restart is still pending.
 
 <Aside type="note">
-An apply that leaves a component unconverged, or a slot blocked by the
-profile-centric conversion, still reports the update as applied, but exits **2** —
+An apply that leaves a component unconverged still reports the update as applied, but exits **2** —
 distinct from a failed update (exit 1). `hal0 update` prints the same
 convergence report and component table inline after an apply, so you
 don't need a separate `hal0 update status` call to see what's left.
@@ -458,7 +444,7 @@ If no previous-version record exists, there's nothing to roll back to.
 
 Rollback swaps the code tree only. It does not restore `profiles.toml`,
 slot files or any other config: that is config state, deliberately decoupled
-from the code tree. The one exception is the profile-centric conversion below.
+from the code tree.
 
 Rolling back from 1.6.0 to 1.5.x leaves Hermes running on the release 1.6.0 built, and leaves the Hermes build failing until you update again. 1.6.0 records a Python 3.14 interpreter in `/etc/hal0/hermes-python.env`, and 1.5.x accepts only 3.12, so its Hermes converge stops with `Hermes Python must be exactly 3.12: <path> reports 3.14`. The 1.5.x MCP probe also fails against the mcp 2.0 client in the new venv, so every `hal0 update` on 1.5.x reports the Hermes venv as broken and `hal0 agent reprovision hermes` and `hal0 agent reprovision hermes` fail at `mcp_wire`. Do not edit `hermes-python.env` to point 1.5.x at a 3.12 interpreter: 1.5's builder then replaces the release symlink at `/var/lib/hal0/venvs/hermes` with a 0.19.0 venv and leaves a stray `/var/lib/hal0/venvs/hermes.rollback-<pid>` behind. Update back to 1.6.0 instead, which clears these errors.
 
@@ -473,60 +459,6 @@ once `img` restarts under 1.6.x, the gate refuses image prompts on a box whose
 `hal0-api` does not answer on `127.0.0.1:8080` (another port, or
 `HAL0_BIND_HOST` set to a specific address), because 1.6.x's unit no longer
 passes the gate hal0's address or `HAL0_COMFYUI_GATE_FAIL_OPEN`.
-
-### Rolling back past the profile-centric conversion
-
-The release that moves to profile-centric config
-([ADR-0029](/docs/adr/0029-profile-centric-config)) converts the slot,
-profile and stack files on its first start. An older release cannot read the
-converted files. So when `hal0 update --rollback` targets a release from before
-the conversion, it puts every conversion backup back first
-(`/var/lib/hal0/backups/profiles-<ts>.tar.gz`, newest first) and then swaps:
-
-- the slot files, `profiles.toml` and `stacks.toml` return to the state the
-  older release left them in;
-- the model tuning returns to the `model` columns, which the conversion left
-  in place;
-- the conversion's database bookkeeping (migration 012) is forgotten.
-
-The rollback response lists what was restored under
-`profile_conversion_restored`. Restart `hal0-api` as usual.
-
-If a backup is missing, the rollback refuses before it changes anything and
-prints the steps to do it by hand:
-
-```sh
-sudo systemctl stop hal0-api
-sudo -u hal0 hal0 profile migrate --restore /var/lib/hal0/backups/profiles-<ts>.tar.gz   # each backup, newest first
-sudo systemctl start hal0-api   # the restore marker keeps it from converting again
-hal0 update --rollback
-```
-
-Updating forward again converts the files again.
-
-### Rolling back past the speculation rename
-
-The release that adds speculative-decoding drafters renames the profile field
-`mtp` to `speculation` (`auto`, `off` or `ngram`). `hal0 update` rewrites
-`profiles.toml` once: `mtp = "off"` becomes `speculation = "off"`, `mtp = "auto"`
-is dropped (auto is the default), and a `--spec-type` found in a profile's
-`flags` is removed (an `ngram-*` value becomes `speculation = "ngram"`). Before
-it writes, it copies the file beside itself as `profiles.toml.bak-<UTC
-stamp>`, in the same directory as `profiles.toml`.
-
-An older release does not know `speculation`, so it quarantines every profile
-that carries the field (a slot that names one fails with `profiles.invalid`). Before `hal0 update --rollback`
-to such a release, put the backup back:
-
-```sh
-sudo systemctl stop hal0-api
-sudo cp /etc/hal0/profiles.toml.bak-<UTC stamp> /etc/hal0/profiles.toml
-hal0 update --rollback
-```
-
-Profiles you created or edited after the update are lost with the copy. After
-the update, the API and CLI refuse `mtp` on a profile (`422
-profiles.field_renamed`, `hal0 profile ... --mtp` exits 2); there is no alias.
 
 ## Repin the OpenWebUI companion container
 
@@ -553,5 +485,5 @@ container back to the release pin. `--check` prints the status row only;
 
 ## See also
 
-- [Edit configuration](/docs/guides/configure) — `/etc/hal0` is preserved across updates; the profile-centric conversion rewrites slot, profile and stack files only after a backup.
+- [Edit configuration](/docs/guides/configure) — `/etc/hal0` is preserved across updates.
 - [Logs and activity](/docs/guides/logs-and-activity) — watch the apply job and `hal0-api` restart.

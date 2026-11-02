@@ -481,9 +481,8 @@ The `img` slot resolves its image in this order: `image_pin` (top-level or
 Runner Images page — see
 [Manage runner images](/docs/guides/manage-runner-images)), then the
 `comfyui` runner's resolved image (`HAL0_RUNNER_IMAGE_COMFYUI`, then the
-`manifest.json` pin for `comfyui`). A bare `image` string left in an older
-`img` slot file is moved to `image_pin` by the profile-centric conversion that
-`hal0 update` runs. Clear `image_pin` in `/etc/hal0/slots/img.toml` if you
+`manifest.json` pin for `comfyui`). A bare `image` string is no longer read:
+use `image_pin`. Clear `image_pin` in `/etc/hal0/slots/img.toml` if you
 want the resolved default.
 
 ## Troubleshooting

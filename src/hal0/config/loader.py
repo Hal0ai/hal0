@@ -670,7 +670,7 @@ def _slot_validation_reason(exc: Exception) -> tuple[str, list[str]]:
     if unknown:
         parts.append(
             "SlotConfig declares every key a slot file may carry (ADR-0029); remove the "
-            "key, or run `hal0 profile migrate` for a file written before ADR-0029"
+            "key, or move a pre-ADR-0029 tuning key onto a profile"
         )
     return "; ".join(parts) or str(exc), unknown
 

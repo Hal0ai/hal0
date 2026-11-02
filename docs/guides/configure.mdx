@@ -138,10 +138,9 @@ A slot write that carries a tuning key is refused with
 `chat_template`, `workers`, `mtp`, `speculation`, `enable_thinking`, `vision`, or
 `[server].extra_args`. Set the window and flags with `hal0 profile
 create|edit` and point the slot at that profile. A slot file that still
-carries one of those keys fails to load with `slot.unconverted`; `hal0 update`
-converts such files once, automatically, and `hal0 profile migrate` previews
-the conversion (see [Update and roll
-back](/docs/guides/update-and-rollback#profile-centric-config-conversion)).
+carries one of those keys fails to load with `slot.unconverted`; delete the
+keys from the file and put their values on a profile (`hal0 config validate`
+names the file and the keys).
 
 ## Launch flags are screened on the profile
 
@@ -202,5 +201,5 @@ pattern so a write is either fully applied or not at all.
 
 - [Configuration schema reference](/docs/reference/config-schema) — every key in `hal0.toml` and the per-slot files.
 - [Manage slots](/docs/guides/manage-slots) — placement on the slot, and picking its model and profile.
-- [Update and roll back](/docs/guides/update-and-rollback) — how updates preserve `/etc/hal0`, and the profile-centric conversion.
+- [Update and roll back](/docs/guides/update-and-rollback) — how updates preserve `/etc/hal0`.
 - [Connect MCP servers](/docs/guides/connect-mcp) — the `mcp-servers/<id>.toml` files.

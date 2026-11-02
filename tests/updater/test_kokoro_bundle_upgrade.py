@@ -76,15 +76,9 @@ def upgraded_tts_box(store: Path) -> Path:
 @pytest.fixture
 def _only_kokoro_pass_is_real(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stub every post-activation pass except the kokoro bundle pass."""
-    from hal0.config.migrations.profile_centric_apply import ConversionReport
-
     monkeypatch.setattr(
         "hal0.config.migrations.runner_system.migrate_runner_system",
         lambda **_kw: SimpleNamespace(backup=None, unassigned=[]),
-    )
-    monkeypatch.setattr(
-        "hal0.config.migrations.profile_centric_apply.migrate_profile_centric",
-        lambda **_kw: ConversionReport(dry_run=False),
     )
     monkeypatch.setattr(
         "hal0.updater.updater._maybe_run_config_migrations", lambda *_a, **_kw: (1, 2)
@@ -140,7 +134,6 @@ def test_upgrade_pulls_the_bundle_and_replaces_the_old_layout(
     check_kokoro_bundle(bundle)
     # Only the curated HF coordinates, never a GitHub release URL.
     assert all("/mikkoph/kokoro-onnx/resolve/" in p for p in seen)
-    assert result.conversion_blockers == []
 
 
 def test_second_run_is_a_no_op(
@@ -166,7 +159,6 @@ def test_offline_upgrade_still_succeeds_and_names_the_remedy(
     (entry,) = result.model_bundles
     assert entry["outcome"] == "failed"
     assert entry["remedy"] == "hal0 model pull kokoro-v1"
-    assert result.conversion_blockers == []
     assert (upgraded_tts_box / "model.gguf").exists(), "a failed pull removes nothing"
 
 

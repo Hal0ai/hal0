@@ -498,7 +498,7 @@ class SlotConfig(BaseModel):
     # Quadlet ``[Install] WantedBy=hal0.target`` stanza gated by
     # ``SlotManager.load()``'s empty-model guard, and every routability check
     # already required a model id. A file still carrying ``enabled`` is refused
-    # (REMOVED_SLOT_KEYS); the profile-centric conversion strips it.
+    # (REMOVED_SLOT_KEYS).
     # HAL0-SUNSET: v2.0.0 — runtime is Literal["container"] only; field is ceremony, drop it.
     runtime: Literal["container"] = Field(
         default="container",
@@ -686,16 +686,16 @@ class SlotConfig(BaseModel):
     def _refuse_tuning_keys(cls, data: Any) -> Any:
         """A slot file still carrying tuning keys has not been converted.
 
-        ADR-0029 moved every tune onto the slot's profile; the one-shot
-        conversion (``hal0 profile migrate``) removes these keys. A file that
-        still has one fails to load with ``slot.unconverted`` rather than
-        launching with a value nothing reads.
+        ADR-0029 moved every tune onto the slot's profile. A file that still
+        has one of these keys fails to load with ``slot.unconverted`` rather
+        than launching with a value nothing reads.
         """
         found = slot_tuning_keys(data)
         if found:
             raise ValueError(
                 f"slot.unconverted: {', '.join(found)} belong(s) on a profile now "
-                "(ADR-0029); run `hal0 profile migrate` to convert this slot"
+                "(ADR-0029); delete them from the slot file, put the values on a "
+                'profile (`hal0 profile create`) and name it with `profile = "<name>"`'
             )
         return data
 

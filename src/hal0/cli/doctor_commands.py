@@ -2041,9 +2041,11 @@ def _diagnose_profiles(
     ref_rows: list[dict[str, str]],
     img_rows: list[dict[str, str]],
     halogen_rows: list[dict[str, str]] | None = None,
+    unconverted_rows: list[dict[str, str]] | None = None,
 ) -> list[Diagnosis]:
     """§2.4: dangling slot→profile refs (fail) + un-pulled images (warn) +
-    halogen checkpoints missing something the engine needs (fail/warn)."""
+    halogen checkpoints missing something the engine needs (fail/warn) + slot
+    files still carrying tuning keys (fail)."""
     diagnoses: list[Diagnosis] = [
         Diagnosis(
             id="HAL0-PROFILE-REF-DANGLES",
@@ -2095,6 +2097,24 @@ def _diagnose_profiles(
                 next_steps=fetch if last_line.startswith("hf download ") else [],
             )
         )
+    diagnoses += [
+        Diagnosis(
+            id="HAL0-SLOT-UNCONVERTED",
+            severity="fail",
+            confidence="high",
+            summary=f"slot {r['label']} will not launch: its file still carries tuning keys",
+            detail=r["detail"],
+            evidence=[Evidence(kind="table_row", summary=r["detail"], data=r)],
+            next_steps=[
+                NextStep(
+                    kind="command",
+                    label="hal0 config validate",
+                    target="hal0 config validate",
+                )
+            ],
+        )
+        for r in unconverted_rows or []
+    ]
     if not diagnoses:
         return [
             Diagnosis(
@@ -2132,11 +2152,14 @@ def doctor_profiles(
         missing or not ``HGN1``, or whose ``tokenizer/tokenizer.json`` is not
         beside it, cannot load (a failing check); a missing ngram lookup table
         only warns, with the ``hf download`` line that fetches it.
+      * unconverted slot files — a slot file still carrying tuning keys
+        (ADR-0029) refuses to launch until they move onto a profile. A failing
+        check; nothing converts these automatically any more.
 
     Exit codes:
       0 — no broken references (advisory warnings may still be printed).
-      1 — at least one slot references a missing profile, or a halogen
-          checkpoint cannot load.
+      1 — at least one slot references a missing profile, a halogen checkpoint
+          cannot load, or a slot file still carries tuning keys.
     """
     try:
         from hal0.config.loader import list_slots, load_slot_config
@@ -2166,7 +2189,23 @@ def doctor_profiles(
     slot_types: dict[str, str] = {}
     slot_devices: dict[str, str] = {}
     slot_files: dict[str, Path] = {}
+    from hal0.slot_view import unconverted_slot_files
+
+    # Later lines of a detail print verbatim, which keeps "[model].x" literal:
+    # on the first line Rich would read it as markup.
+    unconverted = unconverted_slot_files()
+    unconverted_rows = [
+        {
+            "label": u["slot"],
+            "status": "fail",
+            "detail": f"{u['target']} will not launch (slot.unconverted)\n{u['reason']}",
+        }
+        for u in unconverted
+    ]
+    unconverted_stems = {u["target"].removesuffix(".toml") for u in unconverted}
     for slot_name in list_slots():
+        if slot_name in unconverted_stems:
+            continue  # reported as its own row, with the fix
         try:
             cfg = load_slot_config(slot_name)
         except Exception as exc:
@@ -2198,8 +2237,10 @@ def doctor_profiles(
         type_rows = [r for r in type_rows if r["status"] != "drift"]
 
     if json_output:
-        console.print_json(render_json(_diagnose_profiles(ref_rows, img_rows, halogen_rows)))
-        raise typer.Exit(1 if broken or type_drift or halogen_failed else 0)
+        console.print_json(
+            render_json(_diagnose_profiles(ref_rows, img_rows, halogen_rows, unconverted_rows))
+        )
+        raise typer.Exit(1 if broken or type_drift or halogen_failed or unconverted_rows else 0)
 
     _render_profiles("Slot → profile references", ref_rows)
     _render_profiles("Profile images (in-use)", img_rows)
@@ -2207,6 +2248,8 @@ def doctor_profiles(
         _render_profiles("Halogen checkpoints", halogen_rows)
     if type_drift:
         _render_profiles("Slot type vs profile", type_drift)
+    if unconverted_rows:
+        _render_profiles("Slot files still carrying tuning keys", unconverted_rows)
 
     if broken:
         console.print(
@@ -2224,6 +2267,12 @@ def doctor_profiles(
         console.print(
             f"\n[red]✗[/red]  {len(halogen_failed)} halogen checkpoint(s) cannot load — "
             "see each row above."
+        )
+        raise typer.Exit(1)
+    if unconverted_rows:
+        console.print(
+            f"\n[red]✗[/red]  {len(unconverted_rows)} slot file(s) still carry tuning keys and "
+            "will not launch — see each row above."
         )
         raise typer.Exit(1)
     console.print("\n[green]✓[/green]  every slot resolves to a real profile.")

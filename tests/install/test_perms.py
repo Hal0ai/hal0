@@ -967,7 +967,7 @@ _HAL0_API_WRITE_LABELS = [
     "images/cache/",
     "update-jobs/",
     "models/chat-templates/",
-    # post-swap migration restore points (runner_system, profile_centric, #2657)
+    # post-swap migration restore points (runner_system, #2657)
     "backups/",
 ]
 

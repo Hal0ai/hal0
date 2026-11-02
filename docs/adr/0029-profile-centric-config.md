@@ -4,6 +4,12 @@
 
 Amended by ADR-0045: slots may carry six sparse tune overrides over their profile.
 
+The one-shot conversion, its blocked-slot pin and the retired model tuning
+columns shipped in 1.4.0 and were removed once the upgrade floor passed 1.4
+(#3084, SQL migration 015). A slot file that still carries a tuning key now
+fails to load and refuses to launch; the operator moves the keys by hand.
+The decisions below describe the shape, not the removed machinery.
+
 Proposed (2026-10-12). It supersedes the v1.0 "hardware/model write
 boundary", which had no ADR. That boundary came from the
 `spec-flags-ownership` and `spec-hw-slot-ownership` design specs (now only in

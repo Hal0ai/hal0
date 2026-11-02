@@ -46,6 +46,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import tomllib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -77,6 +78,7 @@ __all__ = [
     "resolve_tune_effective",
     "serialize_slot",
     "synthesize_upstream_entries",
+    "unconverted_slot_files",
 ]
 
 
@@ -398,36 +400,63 @@ def _has_context_window(cfg: Any) -> bool:
     return str(cfg.get("type") or "llm") in ("llm", "embedding", "reranking")
 
 
-#: How an operator fixes a slot the profile-centric conversion blocked.
+#: How an operator fixes a slot file that still carries tuning keys.
 CONVERSION_FIX = (
-    "run `hal0 profile migrate` to see why, edit the slot file, then run "
-    "`sudo -u hal0 hal0 profile migrate --apply`"
+    "delete the tuning keys from the slot file, put their values on a profile "
+    '(`hal0 profile create`), and name it with `profile = "<name>"` in the slot file; '
+    "`hal0 config validate` confirms the file loads"
 )
 
 
 def conversion_blocked(cfg: Any) -> dict[str, Any] | None:
-    """``{"reason", "fix", "running_pre_conversion"}`` for a slot the
-    profile-centric conversion could not convert (ADR-0029), else ``None``.
+    """``{"reason", "fix"}`` for a slot file that still carries tuning keys
+    (ADR-0029), else ``None``.
 
-    ``running_pre_conversion`` says the slot still launches the command it ran
-    before the conversion (the conversion's pin), so it keeps working until
-    it is fixed.
+    Such a file fails to load (``slot.unconverted``) and the slot will not
+    launch until the keys are moved onto a profile.
     """
     try:
         from hal0.config.schema import slot_tuning_keys
-        from hal0.providers.container import blocked_slot_pin
 
-        if not slot_tuning_keys(cfg):
-            return None
-        pin = blocked_slot_pin(cfg)
+        found = slot_tuning_keys(cfg)
     except Exception:
         return None
-    reason = str(pin.get("reason") or "") if pin else ""
+    if not found:
+        return None
     return {
-        "reason": reason or "this slot file still carries tuning keys (not converted)",
+        "reason": f"this slot file still carries {', '.join(found)} (not converted)",
         "fix": CONVERSION_FIX,
-        "running_pre_conversion": bool(pin and isinstance(pin.get("argv"), list)),
     }
+
+
+def unconverted_slot_files() -> list[dict[str, str]]:
+    """Every slot file on disk that still carries tuning keys (ADR-0029).
+
+    ``{"target": file name, "slot": display name, "reason": what and the fix}``,
+    sorted by file. Reads the raw TOML because a typed load refuses these files.
+    A file that does not parse is skipped: it has its own load error, and nothing
+    here can say whether it carries a tune.
+    """
+    from hal0.config import paths
+    from hal0.slots.layout import read_slot_display_name
+
+    found: list[dict[str, str]] = []
+    for path in sorted(paths.slots_config_dir().glob("*.toml")):
+        try:
+            raw = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+            continue
+        blocked = conversion_blocked(raw)
+        if blocked is None:
+            continue
+        found.append(
+            {
+                "target": path.name,
+                "slot": read_slot_display_name(path) or path.stem,
+                "reason": f"{blocked['reason']} — fix: {blocked['fix']}",
+            }
+        )
+    return found
 
 
 def resolve_ctx_effective(cfg: Any, model_registry: Any) -> tuple[int | None, str | None]:

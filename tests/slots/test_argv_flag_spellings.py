@@ -6,8 +6,7 @@ llama-server accepts short and alternative spellings for most flags
 …) and rewrites ``_`` to ``-`` in a ``--long`` flag before matching. A screen
 keyed on one spelling let ``-m /etc/shadow`` redirect the model (llama-server
 keeps the last ``-m``). These tests drive every denied flag, in every
-spelling, through the write-side screen, the launch-side screen and the
-blocked-slot pinned path.
+spelling, through the write-side screen and the launch-side screen.
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from hal0.errors import BadRequest, Hal0Error
+from hal0.errors import BadRequest
 from hal0.profiles import screen_profile_flags
 from hal0.slots.argv import (
     FLAG_ALIASES,
@@ -236,12 +235,6 @@ def test_each_preset_switch_is_refused(preset: str) -> None:
         assert exc.value.code == "slot.host_owned_flag_denied"
 
 
-def test_the_preset_switch_is_refused_on_the_pinned_path() -> None:
-    with pytest.raises(Hal0Error) as exc:
-        _pinned(["-fa", "auto", "--gpt-oss-20b-default"])
-    assert exc.value.code == "slot.host_owned_flag_denied"
-
-
 @pytest.mark.parametrize(
     "tokens",
     [
@@ -389,149 +382,3 @@ def test_legitimate_tuning_flags_still_pass(flags: str) -> None:
 
     screen_profile_flags(flags)
     resolve_argv([("profile", shlex.split(flags))])
-
-
-# ── the blocked-slot pinned path ────────────────────────────────────────────
-
-
-def _pinned(argv: list[str], *, jinja: bool = True, **extra: object) -> list[str]:
-    """Resolve a blocked slot's recorded tune the way the launch does."""
-    from hal0.providers.container import _pinned_segments
-
-    scalars = {
-        "model_alias": "real-model",
-        "context_size": 8192,
-        "chat_template_path": None,
-        "mmproj": None,
-        "slot_n_gpu_layers": 99,
-        "slot_threads": None,
-        "slot_metrics": True,
-        "backend": "rocm",
-        "jinja": jinja,
-        **extra,
-    }
-    segments = _pinned_segments(
-        {"argv": argv}, {"name": "agent"}, 8081, "/models/real.gguf", scalars
-    )
-    return resolve_argv(segments).argv
-
-
-@pytest.mark.parametrize(
-    "tokens",
-    [
-        ["-m", "/etc/shadow"],
-        ["-m=/etc/shadow"],
-        ["--model=/etc/shadow"],
-        ["--model", "/etc/shadow"],
-        ["-a", "evil"],
-        ["--port", "9"],
-        ["--host=0.0.0.0"],
-    ],
-)
-def test_pinned_tune_cannot_redirect_the_base(tokens: list[str]) -> None:
-    """A recorded (or hand-edited) tune's managed flags are dropped, in any
-    spelling, and rebuilt from today's slot and model."""
-    argv = _pinned(["--host", "127.0.0.1", "-fa", "auto", *tokens])
-    assert argv[argv.index("--model") + 1] == "/models/real.gguf"
-    assert "/etc/shadow" not in argv
-    assert argv[argv.index("--alias") + 1] == "real-model"
-    assert argv[argv.index("--port") + 1] == "8081"
-    assert "-m" not in argv and "-a" not in argv
-    assert argv.count("--port") == 1
-
-
-_PINNED_REFUSED = [(canon, tokens) for canon, tokens in CASES if canon in HOST_OWNED_FLAGS]
-
-
-@pytest.mark.parametrize(
-    ("canon", "tokens"), _PINNED_REFUSED, ids=lambda v: " ".join(v) if isinstance(v, list) else v
-)
-def test_pinned_tune_with_a_host_owned_flag_refuses_to_launch(
-    canon: str, tokens: list[str]
-) -> None:
-    with pytest.raises(Hal0Error) as exc:
-        _pinned(["-fa", "auto", *tokens])
-    assert exc.value.code == "slot.host_owned_flag_denied"
-
-
-def test_pinned_tune_with_a_bare_positional_refuses_to_launch() -> None:
-    with pytest.raises(Hal0Error) as exc:
-        _pinned(["/etc/shadow", "-fa", "auto"])
-    assert exc.value.code == "slot.positional_arg_denied"
-
-
-@pytest.mark.parametrize("model_jinja", [True, False])
-@pytest.mark.parametrize("spelling", [["--no-jinja"], ["--no_jinja"], ["--jinja", "--no-jinja"]])
-def test_pinned_tune_with_no_jinja_still_launches(model_jinja: bool, spelling: list[str]) -> None:
-    """A recorded ``--no-jinja`` (a model fact the profile layer may not carry)
-    is consumed when the pinned launch is rebuilt, and the model's jinja fact
-    decides — the slot launches instead of being refused."""
-    argv = _pinned(["-fa", "auto", *spelling, "-b", "512"], jinja=model_jinja)
-    assert ("--jinja" in argv) is model_jinja
-    assert "--no-jinja" not in argv and "--no_jinja" not in argv
-    assert argv[argv.index("-b") + 1] == "512"
-
-
-@pytest.mark.parametrize("spelling", [["-mmdev", "ROCm0"], ["--mmproj-device=none"]])
-def test_pinned_tune_with_a_projector_device_still_launches(spelling: list[str]) -> None:
-    """The projector device is placement: dropped from the record and left to
-    follow the slot's device."""
-    argv = _pinned(["-fa", "auto", *spelling])
-    assert "-mmdev" not in argv
-    assert not any(t.startswith("--mmproj-device") for t in argv)
-
-
-_MTP_PIN = ["-fa", "auto", "--spec-type", "draft-mtp", "--spec-draft-n-max", "4"]
-
-
-def test_pinned_tune_spec_type_moves_to_the_model_layer_from_todays_plan() -> None:
-    """ADR-0031 §3: a recorded ``--spec-type`` (every pre-conversion MTP tune
-    carries one) is consumed, not refused; today's speculation plan spells it
-    in the model layer, with its drafter and the slot's draft device."""
-    from hal0.providers.container import _pinned_segments
-
-    scalars = {
-        "model_alias": "real-model",
-        "context_size": 8192,
-        "chat_template_path": None,
-        "mmproj": None,
-        "slot_n_gpu_layers": 99,
-        "slot_threads": None,
-        "slot_metrics": True,
-        "backend": "vulkan",
-        "jinja": True,
-        "spec_type": "draft-dflash",
-        "draft_model": "/models/d.gguf",
-    }
-    segs = dict(_pinned_segments({"argv": _MTP_PIN}, {"name": "a"}, 8081, "/m.gguf", scalars))
-    assert segs["model"][-4:] == [
-        "--spec-type",
-        "draft-dflash",
-        "--spec-draft-model",
-        "/models/d.gguf",
-    ]
-    assert "--spec-type" not in segs["profile"]
-    assert segs["profile"][-2:] == ["--spec-draft-n-max", "4"]  # the recorded tune
-    # An external drafter follows the model's devices: the recorded device is dropped.
-    assert "--spec-draft-device" not in segs["slot"]
-
-
-def test_pinned_device_comes_from_todays_slot_not_the_ledger() -> None:
-    argv = _pinned(["--device", "ROCm0", "-fa", "auto"], backend="vulkan")
-    assert argv[argv.index("--device") + 1] == "Vulkan0"
-    assert argv.count("--device") == 1
-
-
-def test_pinned_draft_device_is_kept_for_mtp_and_dropped_without_a_spec_type() -> None:
-    mtp = _pinned(_MTP_PIN, spec_type="draft-mtp", draft_model=None)
-    assert mtp[mtp.index("--spec-draft-device") + 1] == "ROCm0"
-    bare = _pinned(
-        ["-fa", "auto", "--spec-draft-device", "Vulkan0"], spec_type="draft-mtp", draft_model=None
-    )
-    assert "--spec-draft-device" not in bare
-
-
-def test_pinned_tune_spec_type_is_dropped_when_today_does_not_speculate() -> None:
-    argv = _pinned(_MTP_PIN, spec_type=None, draft_model=None)
-    assert "--spec-type" not in argv
-    assert "--spec-draft-device" not in argv

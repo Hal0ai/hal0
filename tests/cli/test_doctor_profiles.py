@@ -180,6 +180,49 @@ def test_doctor_profiles_reports_id_keyed_slot_by_real_name(
     assert "143" not in summary
 
 
+def _write_unconverted_slot(tmp_hal0_home: str) -> None:
+    root = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "143.toml").write_text(
+        '[slot]\nid = 143\nname = "agent"\nport = 8082\nprofile = "chat"\n'
+        "[model]\ncontext_size = 8192\n",
+        encoding="utf-8",
+    )
+
+
+def test_doctor_profiles_fails_on_a_slot_file_carrying_tuning_keys(
+    tmp_hal0_home: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from hal0.slot_view import CONVERSION_FIX
+
+    _write_unconverted_slot(tmp_hal0_home)
+
+    with pytest.raises(typer.Exit) as exc_info:
+        doctor_profiles(json_output=False)
+
+    assert exc_info.value.exit_code == 1
+    out = " ".join(capsys.readouterr().out.split())
+    assert "agent" in out
+    assert "[model].context_size" in out
+    assert CONVERSION_FIX in out
+    assert "every slot resolves" not in out
+
+
+def test_doctor_profiles_json_reports_the_unconverted_slot(
+    tmp_hal0_home: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_unconverted_slot(tmp_hal0_home)
+
+    with pytest.raises(typer.Exit) as exc_info:
+        doctor_profiles(json_output=True)
+
+    assert exc_info.value.exit_code == 1
+    out = jsonlib.loads(capsys.readouterr().out)
+    row = next(d for d in out if d["id"] == "HAL0-SLOT-UNCONVERTED")
+    assert row["severity"] == "fail"
+    assert "agent" in row["summary"]
+
+
 # ── check_slot_type_vs_profile / repair_slot_types (#2693) ────────────────────
 
 

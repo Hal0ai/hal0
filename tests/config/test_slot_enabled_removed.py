@@ -54,12 +54,6 @@ def test_stale_enabled_key_is_refused_with_its_replacement() -> None:
     assert "model-presence" in str(parse.value)
 
 
-def test_the_conversion_strips_enabled() -> None:
-    from hal0.config.migrations import profile_centric as pc
-
-    assert "enabled" in pc.SLOT_DROP_KEYS
-
-
 @pytest.mark.parametrize("name", sorted(p.stem for p in _SEEDED_SLOTS_DIR.glob("*.toml")))
 def test_no_seed_toml_declares_enabled(name: str) -> None:
     """Shipped seeds express activation only through ``[model].default``."""

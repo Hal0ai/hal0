@@ -140,14 +140,10 @@ edit an existing slot or `hal0 slot create --profile <profile>` a new one
 infeasibility — a ROCm-only runtime profile on a host with no `/dev/kfd`, for
 example — never whether the slot's bound model happens to run well under it.
 
-A slot whose file the profile-centric conversion could not convert shows a
-**conversion blocked** badge with the reason and the fix. It launches with
-its recorded pre-conversion tune only while its file is unchanged and still
-carries the old tuning keys (placement and the model come from the current
-slot). Editing the file drops the record: if tuning keys remain, the slot
-refuses to launch (`slot.unconverted`) until the conversion succeeds or you
-remove them. See
-[Update and roll back](/docs/guides/update-and-rollback#profile-centric-config-conversion).
+A slot file that still carries tuning keys shows a **conversion blocked**
+badge with the reason and the fix. The slot refuses to launch
+(`slot.unconverted`) until you delete those keys from the file and put their
+values on a profile.
 
 ### Model: swap and the file facts
 

@@ -130,7 +130,7 @@ def test_migration_014_idempotent_and_targeted(tmp_path: Path) -> None:
         migrate(conn, _pre_014(tmp_path))
         files = _seed(conn, tmp_path)
 
-        assert migrate(conn) == [14]
+        assert migrate(conn) == [14, 15]
         _assert_only_targets_gone(conn, files)
 
         # A second boot is a no-op ...
@@ -150,7 +150,7 @@ def test_migration_014_does_not_rely_on_foreign_keys(tmp_path: Path) -> None:
         files = _seed(conn, tmp_path)
         conn.execute("PRAGMA foreign_keys=OFF")
 
-        assert migrate(conn) == [14]
+        assert migrate(conn) == [14, 15]
 
         _assert_only_targets_gone(conn, files)
         for table in ("model_file", "model_backend"):
@@ -162,5 +162,5 @@ def test_migration_014_does_not_rely_on_foreign_keys(tmp_path: Path) -> None:
 
 def test_migration_014_on_an_empty_registry_is_a_noop(tmp_path: Path) -> None:
     with connect(tmp_path / "t.db") as conn:
-        assert migrate(conn)[-1] == 14
+        assert 14 in migrate(conn)
         assert _snapshot(conn) == {table: [] for table in _SNAPSHOT_QUERIES}

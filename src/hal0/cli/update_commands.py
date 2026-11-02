@@ -363,16 +363,13 @@ def _print_convergence(convergence: dict | None) -> bool:
             )
         )
 
-    # ADR-0029: whatever the profile-centric conversion could not convert.
-    # One line each, no table: the slot file (or ``profile:<name>`` /
-    # ``stack:<name>``), why, and how to fix it.
+    # ADR-0029: a slot file still carrying tuning keys refuses to launch until an
+    # operator moves them onto a profile. ``reason`` carries the fix.
     blockers = [b for b in post_migrations.get("conversion_blockers") or [] if isinstance(b, dict)]
     for blocker in blockers:
         console.print(
-            f"[yellow]![/yellow] profile conversion blocked: {blocker.get('target')} — "
-            f"{blocker.get('reason') or 'cannot be converted as it is'} — fix: run "
-            "`hal0 profile migrate` to see the plan, edit the named file or profile, "
-            "then run `sudo -u hal0 hal0 profile migrate --apply`",
+            f"[yellow]![/yellow] slot file {escape(str(blocker.get('target') or '?'))} will not "
+            f"launch: {escape(str(blocker.get('reason') or 'it still carries tuning keys'))}",
             soft_wrap=True,
         )
 

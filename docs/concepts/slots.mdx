@@ -116,11 +116,11 @@ apply) routes through. If you're adding a new way to write a slot config,
 route it through that shared gate rather than hand-rolling a merge.
 </Aside>
 
-A slot file written before profile-centric config that still carries a
-tuning key fails to load with `slot.unconverted` until it is converted.
-`hal0 update` converts such files once, automatically; `hal0 profile migrate`
-previews the conversion and `sudo -u hal0 hal0 profile migrate --apply` runs
-it. See [Update and roll back](/docs/guides/update-and-rollback#profile-centric-config-conversion).
+A slot file that still carries a tuning key (a file written before
+profile-centric config, or edited by hand) fails to load with
+`slot.unconverted` and the slot does not launch. `hal0 config validate` names
+the file and the keys. Delete the keys from the slot file, put their values on
+a profile (`hal0 profile create`), and name it with `profile = "<name>"`.
 
 A slot with no `profile` runs its type's seed profile (`embedding` and
 `reranking` carry their mode flag; an `llm` slot runs `chat`). A slot that
