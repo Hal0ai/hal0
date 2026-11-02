@@ -33,12 +33,28 @@ def run_summary_py(tmp_path: Path):
         out = tmp_path / "out" / "summary.json"
         env = {**os.environ, "HAL0_COMPONENTS_BLOB": components}
         args = [
-            str(out), "1.2.3", "0", "0", "/opt/hal0", "/models",
-            "0.0.0.0", "8080", "3001", "cls", "Class", "none", "0", "0", "5",
+            str(out),
+            "1.2.3",
+            "0",
+            "0",
+            "/opt/hal0",
+            "/models",
+            "0.0.0.0",
+            "8080",
+            "3001",
+            "cls",
+            "Class",
+            "none",
+            "0",
+            "0",
+            "5",
         ]
         subprocess.run(
             [sys.executable, "-I", "-", *args],
-            input=_summary_py(), text=True, env=env, check=True,
+            input=_summary_py(),
+            text=True,
+            env=env,
+            check=True,
             capture_output=True,
         )
         return json.loads(out.read_text(encoding="utf-8"))
@@ -64,8 +80,8 @@ def test_summary_json_components_empty_when_blob_missing(run_summary_py) -> None
 # ── bash half: blob build + "Components skipped" summary line ───────────────
 
 _SKIP_START = "# Components the operator (or a flag) left out"
-_SKIP_END = "SUMMARY_LINES+=(\n    \"\"\n    \"$(printf '%sNext steps"
-_BLOB_START = "    _summary_components_blob=\"\""
+_SKIP_END = 'SUMMARY_LINES+=(\n    ""\n    "$(printf \'%sNext steps'
+_BLOB_START = '    _summary_components_blob=""'
 _BLOB_END = 'export HAL0_COMPONENTS_BLOB="${_summary_components_blob}"'
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -80,14 +96,17 @@ def _fragment(start: str, end: str, *, include_end: bool = False) -> str:
 def _bash(script: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [shutil.which("bash") or "/bin/bash", "-c", "set -euo pipefail\n" + script],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
 
 
 def _skipped_lines(states: str, *, upgrade: int = 0) -> list[str]:
     proc = _bash(
         "declare -A COMPONENT_STATES=()\n"
-        + states + "\n"
+        + states
+        + "\n"
         + f"IS_UPGRADE={upgrade}\nDIM=''\nRST=''\nSUMMARY_LINES=()\n"
         + _fragment(_SKIP_START, _SKIP_END)
         + '\nfor l in "${SUMMARY_LINES[@]}"; do printf "L|%s\\n" "$l"; done\n'
@@ -138,7 +157,9 @@ def test_skipped_line_wraps_inside_box_width() -> None:
 
 def _blob(states: str) -> str:
     proc = _bash(
-        "declare -A COMPONENT_STATES=()\n" + states + "\n"
+        "declare -A COMPONENT_STATES=()\n"
+        + states
+        + "\n"
         + _fragment(_BLOB_START, _BLOB_END, include_end=True)
         + '\nprintf "%s" "$HAL0_COMPONENTS_BLOB"\n'
     )

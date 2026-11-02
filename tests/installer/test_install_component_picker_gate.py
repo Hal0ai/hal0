@@ -239,8 +239,12 @@ def test_env_install_pi_defaults_pi_on_and_survives(run_block) -> None:
 def test_default_row_defaults(run_block) -> None:
     r = run_block(tty=True)
     assert r.defaults == {
-        "openwebui": "on", "comfyui": "on", "hermes": "on",
-        "pi": "off", "hindsight": "on", "brain": "on",
+        "openwebui": "on",
+        "comfyui": "on",
+        "hermes": "on",
+        "pi": "off",
+        "hindsight": "on",
+        "brain": "on",
     }
 
 
@@ -255,9 +259,16 @@ def _capture_lines() -> str:
 
 def _is_upgrade(current_link: str) -> str:
     out = subprocess.run(
-        [shutil.which("bash") or "/bin/bash", "-c",
-         f'set -euo pipefail\nCURRENT_LINK="$1"\n{_capture_lines()}echo "$IS_UPGRADE"', "x", current_link],
-        capture_output=True, text=True, check=True,
+        [
+            shutil.which("bash") or "/bin/bash",
+            "-c",
+            f'set -euo pipefail\nCURRENT_LINK="$1"\n{_capture_lines()}echo "$IS_UPGRADE"',
+            "x",
+            current_link,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
     )
     return out.stdout.strip()
 
@@ -325,9 +336,7 @@ def run_pi(tmp_path: Path):
             '_interactive() { [[ "${TTY:-0}" == "1" ]]; }\n'
             f'_tty_read() {{ : >"{tty_flag}"; }}\n'
             f'HAL0_BIN="{hal0}"\n'
-            f'DEV_MODE="{dev}"; NO_START="{no_start}"\n'
-            + pi_block
-            + "\n",
+            f'DEV_MODE="{dev}"; NO_START="{no_start}"\n' + pi_block + "\n",
             encoding="utf-8",
         )
         proc = subprocess.run(
@@ -385,7 +394,7 @@ def test_pi_absent_and_not_requested_is_skipped(run_block) -> None:
     assert run_block(pi=False).states["pi"] == "skipped"
 
 
-_PI_START = "    if [[ \"${DEV_MODE}\" -eq 0 && \"${NO_START}\" -eq 0 ]] \\\n       && ! command -v pi"
+_PI_START = '    if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 ]] \\\n       && ! command -v pi'
 _PI_END = "    # Last verify action before the summary"
 
 
@@ -399,16 +408,18 @@ def _run_pi_block(tmp_path: Path, env: dict[str, str]) -> subprocess.CompletedPr
         'info() { printf "INFO: %s\\n" "$*"; }\n'
         'warn() { printf "WARN: %s\\n" "$*"; }\n'
         'HAL0_BIN="hal0"\nDEV_MODE=0\nNO_START=0\n'
-        'hal0() { printf "INSTALL %s\\n" "$*"; }\n'
-        + frag.replace('"${HAL0_BIN}"', "hal0"),
+        'hal0() { printf "INSTALL %s\\n" "$*"; }\n' + frag.replace('"${HAL0_BIN}"', "hal0"),
         encoding="utf-8",
     )
     bindir = tmp_path / "nopi"
     bindir.mkdir(exist_ok=True)
     return subprocess.run(
         [shutil.which("bash") or "/bin/bash", str(script)],
-        capture_output=True, text=True, env={"PATH": str(bindir), **env},
-        stdin=subprocess.DEVNULL, timeout=60,
+        capture_output=True,
+        text=True,
+        env={"PATH": str(bindir), **env},
+        stdin=subprocess.DEVNULL,
+        timeout=60,
     )
 
 
