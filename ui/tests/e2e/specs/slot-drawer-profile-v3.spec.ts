@@ -16,8 +16,6 @@ import { pickRichOption, richSelectOption } from '../fixtures/richSelect'
 // ─── Slot fixtures ──────────────────────────────────────────────────────────
 
 const CHAT_CONTAINER = MOCK_DATA.slots.find(s => s.name === 'chat')!
-const NPU_SLOT = MOCK_DATA.slots.find(s => s.name === 'npu')!
-const TTS_SLOT = MOCK_DATA.slots.find(s => s.name === 'tts')!
 
 // ─── HAL0_DATA seed helper (mirrors pattern from slot-edit-controls-v3) ────
 
@@ -39,20 +37,6 @@ async function seedSlots(page: Page, slots: any[]) {
 
 test.describe('C7 — slot-owned hardware grid; no drawer profile selector', () => {
 
-  test.skip('C7a — GPU slot: drawer has HW grid and no profile select', async ({ page }) => {
-    await seedSlots(page, [CHAT_CONTAINER, NPU_SLOT, TTS_SLOT])
-    await page.goto('/#slots/chat')
-    await expect(page.locator('.drawer')).toBeVisible()
-
-    // Device has no control in the drawer any more — it rides the model at
-    // creation and is fixed for the slot's lifetime.
-    await expect(page.getByTestId('slot-hw-device')).toHaveCount(0)
-    await expect(page.getByTestId('slot-hw-ngl')).toBeVisible()
-    await expect(page.getByTestId('slot-hw-threads')).toBeVisible()
-    await expect(page.getByTestId('slot-hw-runtime')).toBeVisible()
-    await expect(page.locator('.drawer .form-row', { hasText: 'Profile' }).locator('select')).toHaveCount(0)
-  })
-
   test('C7a2 — slot card still surfaces the bound profile chip', async ({ page }) => {
     await seedSlots(page, [CHAT_CONTAINER])
     await page.goto('/#slots/chat')
@@ -63,43 +47,6 @@ test.describe('C7 — slot-owned hardware grid; no drawer profile selector', () 
     // profile name), which strict-mode-violates on two matches.
     await expect(page.getByTestId('infer-profile-chat')).toBeVisible()
     await expect(page.getByTestId('infer-profile-chat')).toContainText(CHAT_CONTAINER.profile || '')
-  })
-
-  test.skip('C7b — obsolete: profile changes no longer drive slot config/restart', async ({ page }) => {
-    const configPuts: any[] = []
-    const restartCalls: string[] = []
-
-    await page.route('**/api/slots/chat/config', async (route) => {
-      if (route.request().method() === 'PUT') {
-        configPuts.push(JSON.parse(route.request().postData() || '{}'))
-      }
-      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
-    })
-    await page.route('**/api/slots/chat/defaults', (route) =>
-      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
-    )
-    await page.route('**/api/slots/chat/restart', async (route) => {
-      restartCalls.push(route.request().method())
-      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
-    })
-
-    await seedSlots(page, [CHAT_CONTAINER])
-    await page.goto('/#slots/chat')
-    await expect(page.locator('.drawer')).toBeVisible()
-
-    // Change profile to vulkan
-    const profileRow = page.locator('.drawer .form-row', { hasText: 'Profile' })
-    await profileRow.locator('select').selectOption('vulkan')
-
-    await page.locator('.drawer').getByRole('button', { name: 'Save', exact: true }).click()
-
-    // PUT /config must include profile: "vulkan"
-    await expect.poll(() => configPuts.length).toBeGreaterThan(0)
-    expect(configPuts[0].profile).toBe('vulkan')
-
-    // Restart must fire after the config PUT
-    await expect.poll(() => restartCalls.length).toBeGreaterThan(0)
-    expect(restartCalls[0]).toBe('POST')
   })
 
   // C7c — no-op Save: no empty config PUT and no restart.
@@ -138,57 +85,6 @@ test.describe('C7 — slot-owned hardware grid; no drawer profile selector', () 
   // writes land, WITHOUT waiting for the slow POST /restart to resolve. This
   // is the fix for "save/edit hangs the dash" — restart can take model-load
   // seconds-to-minutes and must never block the UI.
-  test.skip('C7g — obsolete: profile-change restart moved out of slot drawer', async ({ page }) => {
-    let restartStarted = false
-    let releaseRestart: () => void = () => {}
-    const restartGate = new Promise<void>((resolve) => { releaseRestart = resolve })
-
-    await page.route('**/api/slots/chat/config', (route) =>
-      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
-    )
-    await page.route('**/api/slots/chat/defaults', (route) =>
-      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
-    )
-    // Hold the restart request open for the whole assertion window — it stays
-    // "in flight" so we can prove the drawer does not wait on it.
-    await page.route('**/api/slots/chat/restart', async (route) => {
-      restartStarted = true
-      await restartGate
-      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
-    })
-
-    await seedSlots(page, [CHAT_CONTAINER])
-    await page.goto('/#slots/chat')
-    await expect(page.locator('.drawer')).toBeVisible()
-
-    await page.locator('.drawer .form-row', { hasText: 'Profile' }).locator('select').selectOption('vulkan')
-    await page.locator('.drawer').getByRole('button', { name: 'Save', exact: true }).click()
-
-    // The restart must have been kicked off…
-    await expect.poll(() => restartStarted).toBe(true)
-    // …but the drawer must close while it is STILL pending (non-blocking).
-    await expect(page.locator('.drawer')).toBeHidden()
-
-    releaseRestart() // let the held request settle for clean teardown
-  })
-
-  test.skip('C7d — NPU slot: no profile editor; HW grid owns placement', async ({ page }) => {
-    await seedSlots(page, [NPU_SLOT])
-    await page.goto('/#slots/npu')
-    await expect(page.locator('.drawer')).toBeVisible()
-
-    await expect(page.getByTestId('slot-hw-device')).toHaveCount(0)
-    await expect(page.locator('.drawer .form-row', { hasText: 'Profile' }).locator('select')).toHaveCount(0)
-  })
-
-  test.skip('C7e — TTS slot: no profile editor', async ({ page }) => {
-    await seedSlots(page, [TTS_SLOT])
-    await page.goto('/#slots/tts')
-    await expect(page.locator('.drawer')).toBeVisible()
-
-    await expect(page.locator('.drawer .form-row', { hasText: 'Profile' }).locator('select')).toHaveCount(0)
-  })
-
   // C7f — Create modal (D2): device rides the MODEL, not a slot profile.
   // The simplified create picks a model (which carries tune/device/runner) and
   // names it; the POST body derives `device` from the model and omits `profile`.
