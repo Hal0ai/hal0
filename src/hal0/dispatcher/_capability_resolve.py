@@ -384,8 +384,8 @@ def guard_chat_slot_capability(
     serves both paths; an ``--embedding`` slot serves only embeddings.
 
     A missing config, a non-``llm`` slot or an FLM/NPU slot (recognised by
-    :func:`~hal0.slots.config_write.slot_is_flm`, not the deprecated
-    ``provider`` label) is always a no-op: only a slot we can positively identify
+    :func:`~hal0.slots.config_write.slot_is_flm`, not the ``provider`` label,
+    which shipped FLM slots leave unset) is always a no-op: only a slot we can positively identify
     as a plain chat slot is rejected.
     """
     if not cfg:
