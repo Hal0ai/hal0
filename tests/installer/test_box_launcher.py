@@ -1028,6 +1028,50 @@ def test_no_memory_controller_warns_instead_of_failing(box: BoxHarness) -> None:
     assert "--memory=" not in out and "memory controller" in out
 
 
+# ── bootstrap's verified cosign reaches the box ───────────────────────────
+
+_BOX_COSIGN = "/var/tmp/hal0-bootstrap-cosign"
+
+
+def _bootstrap_cosign(box: BoxHarness) -> Path:
+    work = box.tmp / "hal0-install-xyz"
+    work.mkdir()
+    cosign = work / "cosign"
+    _write_exec(cosign, "echo cosign")
+    return cosign
+
+
+def _installer_exec(box: BoxHarness) -> Call:
+    return [c for c in box.podman_calls_named("exec") if "install.sh" in c.argv][-1]
+
+
+def test_bootstrap_cosign_is_copied_into_the_box(box: BoxHarness) -> None:
+    cosign = _bootstrap_cosign(box)
+    box.install(HAL0_BOOTSTRAP_COSIGN=str(cosign))
+    kept = box.host / "var" / "lib" / "hal0-box" / "cosign"
+    assert kept.read_text() == cosign.read_text()
+    assert stat.S_IMODE(kept.stat().st_mode) == 0o755
+    cps = [c for c in box.podman_calls_named("cp") if c.argv.endswith(f"hal0-box:{_BOX_COSIGN}")]
+    assert len(cps) == 1 and cps[0].user == "hal0box" and str(kept) in cps[0].argv
+    run = _installer_exec(box).argv
+    assert f"HAL0_BOOTSTRAP_COSIGN={_BOX_COSIGN}" in run and str(cosign) not in run
+    assert box.first_index(f"podman cp {kept}") < box.first_index("podman exec -e")
+
+
+def test_rebuild_copies_the_kept_cosign_again(box: BoxHarness) -> None:
+    box.install(HAL0_BOOTSTRAP_COSIGN=str(_bootstrap_cosign(box)))
+    box.rebuild()
+    cps = [c for c in box.podman_calls_named("cp") if c.argv.endswith(f"hal0-box:{_BOX_COSIGN}")]
+    assert len(cps) == 2
+    assert f"HAL0_BOOTSTRAP_COSIGN={_BOX_COSIGN}" in _installer_exec(box).argv
+
+
+def test_no_bootstrap_cosign_hands_nothing_over(box: BoxHarness) -> None:
+    box.install()
+    assert not (box.host / "var" / "lib" / "hal0-box" / "cosign").exists()
+    assert "HAL0_BOOTSTRAP_COSIGN" not in _installer_exec(box).argv
+
+
 def test_bootstrap_work_dir_is_removed_after_success(box: BoxHarness) -> None:
     work = box.tmp / "hal0-install-abc123"
     work.mkdir()

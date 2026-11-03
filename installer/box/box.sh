@@ -86,6 +86,12 @@ RUN_USER_DIR="${HOST_ROOT}/run/user"
 BOX_UNIT="${BOX_NAME}.service"
 # Where the verified tree is copied inside the box.
 BOX_SRC=/usr/local/src/hal0
+# bootstrap's verified cosign: a root-owned copy for every later install or
+# rebuild, and where it is copied inside the box for install.sh to persist.
+# /var/tmp, because the box's systemd mounts a tmpfs over /tmp that podman cp
+# does not write into.
+COSIGN_STATE="${STATE_DIR}/cosign"
+BOX_COSIGN=/var/tmp/hal0-bootstrap-cosign
 # Nested network self-test (design decision 2): a container inside the box
 # fetches a plain-HTTP connectivity endpoint. Pinned by index digest.
 SELFTEST_IMAGE="${HAL0_BOX_SELFTEST_IMAGE:-docker.io/library/busybox:1.37@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec}"
@@ -401,6 +407,14 @@ box_stage_tree() {
         rm -f "${STATE_DIR}/verified"
     fi
     rm -f "${STATE_DIR}/installed"
+    # bootstrap hands its verified cosign over as a path on this host, which
+    # does not exist inside the box. Keep a root-owned copy; the installer run
+    # copies it in.
+    if [[ -n "${HAL0_BOOTSTRAP_COSIGN:-}" && -f "${HAL0_BOOTSTRAP_COSIGN}" && -x "${HAL0_BOOTSTRAP_COSIGN}" ]]; then
+        install -m 0755 "${HAL0_BOOTSTRAP_COSIGN}" "${COSIGN_STATE}.new" \
+            && mv -f "${COSIGN_STATE}.new" "${COSIGN_STATE}" \
+            || warn "could not keep bootstrap's cosign; the first in-box hal0 update will need cosign installed"
+    fi
 }
 
 box_host_packages() {
@@ -601,18 +615,22 @@ box_self_test() {
 }
 
 # Every HAL0_* setting the operator gave bootstrap reaches install.sh, except
-# the launcher's own and bootstrap's temp-dir hand-off, which is ours to clean.
+# the launcher's own, bootstrap's temp-dir hand-off, which is ours to clean,
+# and host paths that mean nothing inside the box (cosign is re-pointed).
 box_installer_env() {
     local v
     BOX_INSTALLER_ENV=()
     while IFS= read -r v; do
         case "${v}" in
-            HAL0_BOX_*|HAL0_BOOTSTRAP_WORK|HAL0_BOOTSTRAP_KEEP_TMP|HAL0_BOOTSTRAP_VERIFIED) continue ;;
+            HAL0_BOX_*|HAL0_BOOTSTRAP_WORK|HAL0_BOOTSTRAP_KEEP_TMP|HAL0_BOOTSTRAP_VERIFIED|HAL0_BOOTSTRAP_COSIGN) continue ;;
             HAL0_*) BOX_INSTALLER_ENV+=(-e "${v}=${!v}") ;;
         esac
     done < <(compgen -e)
     if [[ -f "${STATE_DIR}/verified" ]]; then
         BOX_INSTALLER_ENV+=(-e HAL0_BOOTSTRAP_VERIFIED=1)
+    fi
+    if [[ -f "${COSIGN_STATE}" ]]; then
+        BOX_INSTALLER_ENV+=(-e "HAL0_BOOTSTRAP_COSIGN=${BOX_COSIGN}")
     fi
 }
 
@@ -622,6 +640,10 @@ box_run_installer() {
     as_box podman exec "${BOX_NAME}" mkdir -p "${BOX_SRC}"
     as_box podman cp "${STATE_TREE}/." "${BOX_NAME}:${BOX_SRC}" \
         || die "could not copy the release tree into the box"
+    if [[ -f "${COSIGN_STATE}" ]]; then
+        as_box podman cp "${COSIGN_STATE}" "${BOX_NAME}:${BOX_COSIGN}" \
+            || die "could not copy bootstrap's verified cosign into the box"
+    fi
     box_installer_env
     log "running the hal0 installer inside the box (log: ${INSTALL_LOG#"${HOST_ROOT}"})"
     as_box podman exec "${BOX_INSTALLER_ENV[@]+"${BOX_INSTALLER_ENV[@]}"}" "${BOX_NAME}" \
@@ -823,7 +845,7 @@ box_delete_user() {
 # The launcher's per-install files in the state dir. A plain uninstall drops
 # these but keeps the saved tree, so the data it keeps can still be purged
 # later with the launcher in it.
-BOX_STATE_INSTALL_FILES=(installed install-args verified firewall)
+BOX_STATE_INSTALL_FILES=(installed install-args verified firewall cosign)
 
 cmd_uninstall() {
     local purge=0 yes=0 arg u f kept=0 foreign=0
