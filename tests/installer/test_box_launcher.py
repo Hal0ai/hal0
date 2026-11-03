@@ -397,6 +397,10 @@ class BoxHarness:
         return self.host / "home" / "hal0box" / ".config" / "systemd" / "user" / "hal0-box.service"
 
     def dropin_path(self) -> Path:
+        # The useradd stub gives every user uid 2001.
+        return self.host / "etc" / "systemd" / "system" / "user@2001.service.d" / "hal0-box.conf"
+
+    def legacy_dropin_path(self) -> Path:
         return self.host / "etc" / "systemd" / "system" / "user@.service.d" / "hal0-box.conf"
 
     def rebuild(self, check: bool = True):
@@ -726,8 +730,8 @@ def test_rootless_podman_only_ever_runs_as_the_box_user(box: BoxHarness) -> None
 
 def test_install_writes_units_with_memlock(box: BoxHarness) -> None:
     box.install()
-    dropin = box.host / "etc" / "systemd" / "system" / "user@.service.d" / "hal0-box.conf"
-    assert "LimitMEMLOCK=infinity" in dropin.read_text()
+    assert "LimitMEMLOCK=infinity" in box.dropin_path().read_text()
+    assert not box.legacy_dropin_path().exists()
     unit = box.host / "home" / "hal0box" / ".config" / "systemd" / "user" / "hal0-box.service"
     text = unit.read_text()
     assert "LimitMEMLOCK=infinity" in text and "start hal0-box" in text and "--rm" not in text
@@ -825,6 +829,39 @@ def test_shim_execs_hal0_in_the_box_and_routes_uninstall(box: BoxHarness) -> Non
     assert box.podman_calls_named("exec")[-1].argv.endswith("hal0-box hal0 status")
     box.shim("uninstall", "--purge", "--yes")
     assert not shim.exists() and "hal0box" not in box.subuid() and not box.user_exists()
+
+
+def test_memlock_dropin_is_scoped_to_the_box_user(box: BoxHarness) -> None:
+    # user@.service.d would apply to every user's manager on the host.
+    box.install()
+    assert box.dropin_path().is_file()
+    assert not box.legacy_dropin_path().parent.exists()
+
+
+def test_install_replaces_a_legacy_host_wide_dropin(box: BoxHarness) -> None:
+    legacy = box.legacy_dropin_path()
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("[Service]\nLimitMEMLOCK=infinity\nDelegate=cpu cpuset io memory pids\n")
+    box.install()
+    assert not legacy.exists() and not legacy.parent.exists()
+    assert "LimitMEMLOCK=infinity" in box.dropin_path().read_text()
+    assert any(c.argv == "systemctl restart user@2001.service" for c in box.calls())
+
+
+def test_uninstall_removes_a_legacy_host_wide_dropin(box: BoxHarness) -> None:
+    box.install()
+    legacy = box.legacy_dropin_path()
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("[Service]\nLimitMEMLOCK=infinity\n")
+    box.purge()
+    assert not legacy.exists() and not box.dropin_path().exists()
+
+
+def test_install_forwards_the_huggingface_token(box: BoxHarness) -> None:
+    box.install(HF_TOKEN="hf_example", HUGGING_FACE_HUB_TOKEN="hf_twin")
+    exec_call = next(c for c in box.podman_calls_named("exec") if "install.sh" in c.argv)
+    assert "HF_TOKEN=hf_example" in exec_call.argv
+    assert "HUGGING_FACE_HUB_TOKEN=hf_twin" in exec_call.argv
 
 
 def test_uninstall_is_idempotent(box: BoxHarness) -> None:
