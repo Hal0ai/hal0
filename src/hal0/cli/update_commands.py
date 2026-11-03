@@ -1152,13 +1152,14 @@ def _print_component_table(rows: list[dict]) -> bool:
         # cannot converge the component, so it never replaces this line.
         command = f"hal0 update component {row['id']}"
         remedy = row.get("remedy")
+        shown = ""
         if row.get("error") or remedy:
+            shown = str(remedy or f"retry with: {command}")
             console.print(
-                f"[yellow]![/yellow] {row['id']}: {row.get('error') or ''} "
-                f"[dim]{remedy or 'retry with: ' + command}[/dim]"
+                f"[yellow]![/yellow] {row['id']}: {row.get('error') or ''} [dim]{shown}[/dim]"
             )
-        if command not in str(remedy or ""):
-            console.print(f"[yellow]![/yellow] {row['id']}: pending — run `{command}`")
+        if command not in shown:
+            console.print(f"[yellow]![/yellow] {row['id']}: not converged — run `{command}`")
     return all_ok
 
 

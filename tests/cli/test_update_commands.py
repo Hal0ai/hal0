@@ -1088,6 +1088,16 @@ def test_pending_component_does_not_repeat_a_remedy_that_names_the_command(
     assert result.output.count("hal0 update component hindsight") == 1, result.output
 
 
+def test_pending_component_with_error_and_no_remedy_names_the_command_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fallback "retry with" text already names the command; no second line."""
+    _stub_pending_components(monkeypatch, [_component_row(id="hindsight", error="boom")])
+    result = runner.invoke(app, ["update", "status"])
+    out = " ".join(result.output.split())
+    assert out.count("hal0 update component hindsight") == 1, result.output
+
+
 def test_nothing_to_apply_still_names_the_converge_command_for_pending_components(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
