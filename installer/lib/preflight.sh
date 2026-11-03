@@ -10,12 +10,13 @@
 #          shells this in executable mode.
 # Provides (all functions return 0 on success, non-zero on failure; none
 # of them exit the calling shell):
-#   hal0_lxc_kind              — platform classification: none |
+#   hal0_lxc_kind              — platform classification: none | box |
 #                                lxc-privileged | lxc-unprivileged. Decides
 #                                which remedies are possible from inside (a
 #                                privileged LXC can repair a forwarded device
 #                                node itself; an unprivileged one cannot).
-#                                hal0_in_lxc is the "any LXC?" predicate.
+#                                hal0_in_lxc is the "any LXC?" predicate (true
+#                                for the two lxc-* kinds only, never for box).
 #   preflight_systemd          — systemctl on PATH
 #   preflight_python           — `${PY:-python3}` resolvable + version 3.12–3.14
 #                                (matches pyproject.toml's requires-python
@@ -143,6 +144,14 @@ fi
 # hal0_lxc_kind — where is this install running?
 #
 #   none              — bare metal, a VM, or any container that is not LXC
+#                       or a podman box
+#   box               — a rootless podman box (the hal0 box): detected from
+#                       /run/.containerenv or /run/systemd/container reading
+#                       "podman". Checked BEFORE the LXC probe because a box
+#                       can itself run inside an LXC, and the box is the
+#                       boundary the operator can act on. Its root is not in
+#                       the device group, so remedies point at the host that
+#                       created the box, never at Proxmox `devN:` entries.
 #   lxc-privileged    — an LXC whose root IS host root (no uid remap)
 #   lxc-unprivileged  — an LXC behind a uid/gid remap
 #
@@ -159,9 +168,16 @@ fi
 # host offset ("0 100000 65536").
 #
 # HAL0_LXC_KIND_OVERRIDE is a test seam (unit tests cannot fake /proc).
+# HAL0_CONTAINER_RUN_DIR (default /run) is a second seam for the box markers.
 hal0_lxc_kind() {
     if [[ -n "${HAL0_LXC_KIND_OVERRIDE:-}" ]]; then
         printf '%s\n' "${HAL0_LXC_KIND_OVERRIDE}"
+        return 0
+    fi
+    local run_dir="${HAL0_CONTAINER_RUN_DIR:-/run}"
+    if [[ -e "${run_dir}/.containerenv" ]] \
+        || grep -qx 'podman' "${run_dir}/systemd/container" 2>/dev/null; then
+        printf 'box\n'
         return 0
     fi
     if [[ ! -f /run/systemd/container ]] \
@@ -180,7 +196,10 @@ hal0_lxc_kind() {
 
 # Convenience predicate for the common "is this any LXC at all" question.
 hal0_in_lxc() {
-    [[ "$(hal0_lxc_kind)" != "none" ]]
+    case "$(hal0_lxc_kind)" in
+        lxc-privileged | lxc-unprivileged) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 # ── individual checks ───────────────────────────────────────────────────────
@@ -1155,7 +1174,10 @@ preflight_gpu() {
 
     local lxc_kind in_container=""
     lxc_kind="$(hal0_lxc_kind)"
-    [[ "${lxc_kind}" != "none" ]] && in_container="lxc"
+    case "${lxc_kind}" in
+        lxc-privileged | lxc-unprivileged) in_container="lxc" ;;
+        box) in_container="box" ;;
+    esac
     # Test seam: force the container classification (unit tests can't fake
     # /proc/1/environ). Never set in production.
     [[ -n "${HAL0_GPU_CONTAINER_OVERRIDE:-}" ]] && in_container="${HAL0_GPU_CONTAINER_OVERRIDE}"
@@ -1182,6 +1204,13 @@ preflight_gpu() {
             warn "    dev2: /dev/accel/accel0,gid=<render gid>   # XDNA NPU (Strix Halo only)"
             warn "  then: pct stop <CTID> && pct start <CTID>. Full guide: https://hal0.dev/docs/getting-started/proxmox/"
             # Gated install: no devices in an LXC is the opt-in CPU-only case.
+            [[ "${gate}" == "1" ]] && return "${HAL0_GPU_RC_NO_DEVICE}"
+        elif [[ "${in_container}" == "box" ]]; then
+            warn "gpu: no /dev/dri/renderD* inside this box — GPU slots will run CPU-only"
+            warn "  The box was created without the host's GPU devices. On the HOST, make sure the render node"
+            warn "  (and /dev/kfd, /dev/accel/accel0 for ROCm / the NPU) exist and are readable by the box's"
+            warn "  device group, then re-create the box."
+            # Same opt-in CPU-only case as an LXC with nothing forwarded.
             [[ "${gate}" == "1" ]] && return "${HAL0_GPU_RC_NO_DEVICE}"
         else
             warn "gpu: no /dev/dri/renderD* — no GPU driver bound (CPU-only install?)"
@@ -1218,6 +1247,9 @@ preflight_gpu() {
                 # Gated install: devices present but a mis-mapped gid → silent
                 # CPU-only fallback. This is the #1 broken-install shape.
                 [[ "${gate}" == "1" ]] && return "${HAL0_GPU_RC_BROKEN_GID}"
+            elif [[ "${in_container}" == "box" ]]; then
+                warn "  Fix on the HOST (device group / udev rule for the render node), then re-create the box."
+                [[ "${gate}" == "1" ]] && return "${HAL0_GPU_RC_BROKEN_GID}"
             fi
         elif [[ "${grpname}" != "${want_group}" ]]; then
             # M3: the gid resolves to a REAL group, just not the render one —
@@ -1233,6 +1265,9 @@ preflight_gpu() {
                 warn "  (gid= must be the '${want_group}' group's id INSIDE the container, not the host's)"
                 # Gated install: same broken-install shape as the no-group
                 # case above — a wrong group is just as silently CPU-only.
+                [[ "${gate}" == "1" ]] && return "${HAL0_GPU_RC_BROKEN_GID}"
+            elif [[ "${in_container}" == "box" ]]; then
+                warn "  Fix on the HOST (device group / udev rule for the render node), then re-create the box."
                 [[ "${gate}" == "1" ]] && return "${HAL0_GPU_RC_BROKEN_GID}"
             fi
         else
@@ -1291,6 +1326,8 @@ preflight_gpu() {
             if [[ "${in_container}" == "lxc" ]]; then
                 info "  To ALSO enable the ROCm lane, forward it from the Proxmox HOST"
                 info "  (/etc/pve/lxc/<CTID>.conf):  dev1: /dev/kfd   then pct stop/start."
+            elif [[ "${in_container}" == "box" ]]; then
+                info "  To ALSO enable the ROCm lane, expose /dev/kfd to the box on the host, then re-create it."
             fi
         else
             warn "gpu: AMD GPU visible but /dev/kfd is MISSING — no ROCm compute node"
@@ -1306,6 +1343,8 @@ preflight_gpu() {
                 warn "  Forward it from the Proxmox HOST (/etc/pve/lxc/<CTID>.conf):"
                 warn "    dev1: /dev/kfd"
                 warn "  then: pct stop <CTID> && pct start <CTID>"
+            elif [[ "${in_container}" == "box" ]]; then
+                warn "  Expose /dev/kfd to the box on the HOST (load amdkfd there if absent), then re-create the box."
             else
                 warn "  Load the amdkfd driver (it ships with amdgpu; check 'dmesg | grep -i kfd')."
             fi
@@ -1356,10 +1395,15 @@ preflight_gpu() {
             warn "gpu: ${kfd_path} is root-owned (gid ${kfd_gid}, mode ${kfd_mode}) while ${node} uses gid ${render_gid}"
             warn "  The compute node is forwarded and the rootful slot containers can use it,"
             warn "  but the hal0 service user cannot — so GPU slots get refused on a working box (#1953)."
-            warn "  Fix IN PLACE (no re-forward, no reboot):"
-            warn "    chgrp ${render_gid} ${kfd_path} && chmod 0660 ${kfd_path}"
-            warn "  Unprivileged LXC (chgrp returns EPERM): set it on the Proxmox host instead:"
-            warn "    dev1: ${kfd_path},gid=${render_gid}   (the gid INSIDE the container)"
+            if [[ "${in_container}" == "box" ]]; then
+                warn "  A box cannot change a host device's group. Fix it on the HOST (device group / udev rule"
+                warn "  so ${kfd_path} is group-readable by the render group), then re-create the box."
+            else
+                warn "  Fix IN PLACE (no re-forward, no reboot):"
+                warn "    chgrp ${render_gid} ${kfd_path} && chmod 0660 ${kfd_path}"
+                warn "  Unprivileged LXC (chgrp returns EPERM): set it on the Proxmox host instead:"
+                warn "    dev1: ${kfd_path},gid=${render_gid}   (the gid INSIDE the container)"
+            fi
             [[ "${gate}" == "1" ]] && return "${HAL0_GPU_RC_KFD_GID}"
         fi
     fi

@@ -758,6 +758,10 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
                     warn "  host: dev1: ${_kfd_path},gid=${_render_gid:-<render gid inside the container>}"
                     warn "  (the gid INSIDE the container), then: pct stop <CTID> && pct start <CTID>. See hal0 issue #1953."
                     ;;
+                box)
+                    warn "  Podman box: a box cannot change a host device's group. Fix the device group / udev rule for"
+                    warn "  ${_kfd_path} on the HOST (so it is group-readable by gid ${_render_gid:-<render gid>}), then re-create the box."
+                    ;;
                 lxc-privileged)
                     # Privileged: chgrp should have worked. It didn't, so the
                     # cause is local (read-only /dev, a stale gid that no group
@@ -3353,7 +3357,13 @@ else
             # missing NPU hardware (e.g., installing on a non-Strix-Halo
             # host) is a perfectly valid configuration.
             if command -v flm >/dev/null 2>&1; then
-                if flm validate >/dev/null 2>&1; then
+                # In a podman box root is not in the device group, so the
+                # probe must run as the service user that actually opens the NPU.
+                _flm_probe=(flm validate)
+                if [[ "$(hal0_lxc_kind)" == "box" ]]; then
+                    _flm_probe=(hal0_run_without_log_fd runuser -u hal0 -- flm validate)
+                fi
+                if "${_flm_probe[@]}" >/dev/null 2>&1; then
                     info "flm validate ok — NPU runtime reachable"
                 else
                     warn "flm validate failed — NPU hardware may be absent or libxrt-npu2 mismatched"
