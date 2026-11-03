@@ -183,6 +183,47 @@ def test_pull_unknown_model_returns_invalid_source(
     assert fake_run_pull == []
 
 
+def test_pull_curated_entry_with_empty_coords_returns_invalid_source(
+    client_isolated: TestClient, fake_run_pull: list[dict[str, Any]]
+) -> None:
+    """A curated stub with empty hf_repo/hf_file (qwen3-4b-npu) gets the same 422
+    an unknown id gets, before any job is queued (#2723)."""
+    r = client_isolated.post("/api/models/qwen3-4b-npu/pull")
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "model.invalid_source"
+    assert fake_run_pull == []
+    assert "qwen3-4b-npu" not in client_isolated.app.state.model_pull_jobs  # type: ignore[attr-defined]
+
+
+def test_pull_status_reconcile_fills_null_error_fields(
+    client_isolated: TestClient,
+    app_isolated: FastAPI,
+    tmp_hal0_home: str,
+) -> None:
+    """A persisted snapshot carries ``error: null``; the restart reconcile must
+    still fill the interrupted-pull message and code (#2723)."""
+    job_dir = Path(tmp_hal0_home) / "var-lib" / "hal0" / "model-pull-jobs"
+    job_dir.mkdir(parents=True, exist_ok=True)
+    (job_dir / "qwen3-4b.json").write_text(
+        json.dumps(
+            {
+                "id": "j1",
+                "model_id": "qwen3-4b",
+                "state": "queued",
+                "error": None,
+                "error_code": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    app_isolated.state.model_pull_jobs = {}
+
+    body = client_isolated.get("/api/models/qwen3-4b/pull/status").json()
+    assert body["state"] == "failed"
+    assert body["error_code"] == "pull.interrupted"
+    assert body["error"]
+
+
 def test_pull_body_hf_coords_used_when_id_not_registered(
     client_isolated: TestClient,
     app_isolated: FastAPI,

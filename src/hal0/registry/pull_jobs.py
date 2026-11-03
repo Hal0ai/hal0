@@ -159,8 +159,12 @@ def reconcile_persisted(persisted: dict[str, Any], registry: Any | None = None) 
                 pass
         persisted = dict(persisted)
         persisted["state"] = "failed"
-        persisted.setdefault("error", "pull interrupted by hal0-api restart; re-run the pull")
-        persisted.setdefault("error_code", "pull.interrupted")
+        # A persisted snapshot carries ``error: null`` for a job that never
+        # failed, so ``setdefault`` would keep the None (#2723): fill on falsy.
+        if not persisted.get("error"):
+            persisted["error"] = "pull interrupted by hal0-api restart; re-run the pull"
+        if not persisted.get("error_code"):
+            persisted["error_code"] = "pull.interrupted"
     return persisted
 
 
@@ -174,7 +178,8 @@ def resolve_pull_source(request: Request, model_id: str) -> tuple[str, str]:
 
     Raises ``PullInvalidSource`` (422) when neither path yields a repo
     + filename — typically because the caller hand-registered a model
-    and never set its HF coordinates.
+    and never set its HF coordinates, or the curated entry is a stub with
+    empty coordinates (``qwen3-4b-npu``).
     """
     registry = request.app.state.model_registry
     try:
@@ -186,8 +191,10 @@ def resolve_pull_source(request: Request, model_id: str) -> tuple[str, str]:
     except Exception:
         pass
     curated = get_curated(model_id)
-    if curated is not None:
-        return curated.hf_repo, curated.hf_file
+    # A curated stub without HF coordinates (qwen3-4b-npu) is not pullable;
+    # refuse it like an unknown id rather than queue a job that cannot run (#2723).
+    if curated is not None and curated.hf_repo.strip() and curated.hf_file.strip():
+        return curated.hf_repo.strip(), curated.hf_file.strip()
     raise PullInvalidSource(
         f"no hugging face source for model {model_id!r} — set hf_repo + hf_filename"
         " on the registry entry or pick a curated model id",
