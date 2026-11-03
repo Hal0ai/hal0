@@ -156,6 +156,31 @@ test.describe('sidebar Services zone', () => {
     await expect(svc.locator('[data-testid="svc-openwebui"]')).toHaveAttribute('rel', /noopener/)
   })
 
+  test('behind a proxy with no HAL0_OPENWEBUI_PUBLIC_URL the OpenWebUI row is a visible hint, not a link', async ({
+    page,
+  }) => {
+    await page.route('**/api/config/urls', (route) =>
+      json(route, {
+        api: 'https://hal0.example',
+        openwebui: '',
+        openwebui_enabled: true,
+        openwebui_reason: 'proxy_needs_public_url',
+        hermes: '',
+        hermes_enabled: false,
+        comfyui: '',
+        comfyui_reason: 'proxy_needs_public_url',
+      }),
+    )
+    await page.goto('/#dashboard')
+    const svc = page.locator('.sb-services')
+    await expect(svc).toBeVisible({ timeout: FIVE_S })
+
+    await expect(svc.locator('[data-testid="svc-openwebui"]')).toHaveCount(0)
+    await expect(svc.locator('[data-testid="svc-openwebui-hint"]')).toContainText(
+      'Set HAL0_OPENWEBUI_PUBLIC_URL in /etc/hal0/api.env',
+    )
+  })
+
   test('sidebar Services Kanban option routes to the Operator Board', async ({ page }) => {
     await page.goto('/#dashboard')
     await page.locator('[data-testid="svc-board"]').click()

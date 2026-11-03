@@ -702,14 +702,15 @@ function ServiceLinks({ route, onGo, onLaunch, testPrefix }) {
         )}
         {owuiHint && (
           <div
-            className="sb-row sb-svc"
+            className="sb-row sb-svc sb-svc-hint"
+            role="note"
             data-testid={testPrefix + "openwebui-hint"}
-            title={owuiHint}
-            aria-disabled="true"
-            style={{ opacity: 0.6, cursor: "default" }}
           >
             {Icons.chat}
-            <span className="lbl">OpenWebUI</span>
+            <span className="lbl">
+              OpenWebUI
+              <span className="sb-svc-hint-text">{owuiHint}</span>
+            </span>
           </div>
         )}
         {hermes && (
