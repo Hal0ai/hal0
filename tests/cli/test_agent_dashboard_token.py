@@ -59,4 +59,5 @@ def test_unreadable_file_says_run_as_root(
     monkeypatch.setattr(Path, "read_text", _deny)
     result = runner.invoke(agent_commands.app, ["dashboard-token"])
     assert result.exit_code == 1
-    assert "hal0 user" in result.output
+    # Rich wraps the message at the terminal width; compare it unwrapped.
+    assert "hal0 user" in " ".join(result.output.split())
