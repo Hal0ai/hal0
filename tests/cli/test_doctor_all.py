@@ -1594,7 +1594,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
     keys = [c.key for c in checks]
     assert gtt_leak_slots == [[{"port": 8081}]]
     # Verify rows plus the extra evidence rows (gtt-leak, api-unit).
-    assert keys[-43:] == [
+    assert keys[-44:] == [
         "auth",
         "models",
         "registry-toml",
