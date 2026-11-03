@@ -47,6 +47,17 @@ class ModelNotFound(RegistryError):
     status = 404
 
 
+class ModelRowUnreadable(RegistryError):
+    """The model's registry row exists but cannot be read back as a ``Model``.
+
+    Distinct from :class:`ModelNotFound`: callers must not treat it as
+    "absent" (hal0#2637).
+    """
+
+    code = "model.row_unreadable"
+    status = 500
+
+
 class ModelAlreadyExists(RegistryError):
     """add() called but the model id is already present."""
 
@@ -115,6 +126,7 @@ __all__ = [
     "ModelAlreadyExists",
     "ModelNotFound",
     "ModelRegistry",
+    "ModelRowUnreadable",
     "RegistryError",
     "SqliteModelRegistry",
     "merge_update",
