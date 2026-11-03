@@ -113,3 +113,10 @@ def test_swap_failure_is_recorded_not_raised(
     result = refresh_path_links(tmp_path / "release-tree")
 
     assert result["hal0"] == "failed"
+
+
+def test_suite_never_targets_the_host_path_link(tmp_path: Path) -> None:
+    """The autouse fixture in tests/conftest.py keeps root runs off /usr/local/bin (#2261)."""
+    from hal0.updater import updater as updater_mod
+
+    assert tmp_path in updater_mod.HAL0_PATH_LINK_DST.parents

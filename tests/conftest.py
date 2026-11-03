@@ -354,6 +354,23 @@ def _isolate_hal0_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
 
 
+@pytest.fixture(autouse=True)
+def _isolate_path_link_dst(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep ``activate_release`` from repointing the host's ``/usr/local/bin/hal0``.
+
+    ``activate_release`` always calls ``refresh_path_links``, which links the
+    running venv's ``hal0`` / ``hal0-agent`` shims into ``HAL0_PATH_LINK_DST``
+    whenever ``os.geteuid() == 0``. A suite run as root on an installed box
+    therefore rewrote the real links to point into the test venv, and they
+    dangled once an ephemeral uv env went away (#2261). Redirect the constant
+    for every test; ``tests/updater/test_path_link_refresh.py`` sets its own
+    destination after this fixture and wins.
+    """
+    monkeypatch.setattr(
+        "hal0.updater.updater.HAL0_PATH_LINK_DST", tmp_path / "usr-local-bin" / "hal0"
+    )
+
+
 @pytest.fixture(scope="function")
 def app(tmp_hal0_home: str) -> FastAPI:
     """Return a fresh FastAPI app instance, filesystem-isolated under tmp_hal0_home.
