@@ -1191,8 +1191,19 @@ def test_read_ram_in_box_keeps_host_budget(tmp_path: Path) -> None:
     _v2_chain(tmp_path)
     _write(tmp_path, "run/systemd/container", "podman\n")
     _write(tmp_path, "run/.containerenv", "")
+    _write(tmp_path, "etc/hal0-box-release", "HAL0_BOX=1\n")
 
     assert read_ram(tmp_path).source == "system"
+
+
+def test_read_ram_in_another_podman_container_stays_container(tmp_path: Path) -> None:
+    # A toolbox or CI container is not the hal0 box: its marker keeps "container".
+    _meminfo(tmp_path, total_kb=64 * 1024 * 1024, available_kb=40 * 1024 * 1024)
+    _v2_chain(tmp_path)
+    _write(tmp_path, "run/systemd/container", "podman\n")
+    _write(tmp_path, "run/.containerenv", "")
+
+    assert read_ram(tmp_path).source == "container"
 
 
 def test_read_ram_in_box_with_real_cgroup_limit_is_container(tmp_path: Path) -> None:

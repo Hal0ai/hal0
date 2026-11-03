@@ -146,8 +146,12 @@ fi
 #   none              — bare metal, a VM, or any container that is not LXC
 #                       or a podman box
 #   box               — a rootless podman box (the hal0 box): detected from
-#                       /run/.containerenv or /run/systemd/container reading
-#                       "podman". Checked BEFORE the LXC probe because a box
+#                       /etc/hal0-box-release, which only the box image
+#                       carries, together with /run/.containerenv or
+#                       /run/systemd/container reading "podman" (any podman
+#                       container, toolbox or CI included, has those, so
+#                       they are not enough alone). Checked BEFORE the LXC
+#                       probe because a box
 #                       can itself run inside an LXC, and the box is the
 #                       boundary the operator can act on. Its root cannot
 #                       change a device node's group (the node's owner is not
@@ -169,15 +173,18 @@ fi
 # host offset ("0 100000 65536").
 #
 # HAL0_LXC_KIND_OVERRIDE is a test seam (unit tests cannot fake /proc).
-# HAL0_CONTAINER_RUN_DIR (default /run) is a second seam for the box markers.
+# HAL0_CONTAINER_RUN_DIR (default /run) and HAL0_BOX_RELEASE_FILE (default
+# /etc/hal0-box-release) are seams for the box markers.
 hal0_lxc_kind() {
     if [[ -n "${HAL0_LXC_KIND_OVERRIDE:-}" ]]; then
         printf '%s\n' "${HAL0_LXC_KIND_OVERRIDE}"
         return 0
     fi
     local run_dir="${HAL0_CONTAINER_RUN_DIR:-/run}"
-    if [[ -e "${run_dir}/.containerenv" ]] \
-        || grep -qx 'podman' "${run_dir}/systemd/container" 2>/dev/null; then
+    local release="${HAL0_BOX_RELEASE_FILE:-/etc/hal0-box-release}"
+    if [[ -f "${release}" ]] \
+        && { [[ -e "${run_dir}/.containerenv" ]] \
+            || grep -qx 'podman' "${run_dir}/systemd/container" 2>/dev/null; }; then
         printf 'box\n'
         return 0
     fi

@@ -1251,6 +1251,11 @@ def test_rebuild_without_an_install_fails_clearly(box: BoxHarness) -> None:
     assert res.returncode != 0 and "not installed" in res.stdout
 
 
+def test_image_carries_the_box_marker() -> None:
+    run = _CONTAINERFILE.read_text().split("\nRUN ", 1)[1]
+    assert "/etc/hal0-box-release" in run
+
+
 def test_image_has_unattended_upgrades() -> None:
     text = _CONTAINERFILE.read_text()
     install = text.split("\nRUN ", 1)[1].split("apt-get install", 1)[1].split("\n && ", 1)[0]

@@ -44,14 +44,25 @@ async def test_mdns_outside_box_has_no_reason(monkeypatch) -> None:
 def test_in_box_markers(tmp_path: Path) -> None:
     assert box.in_box(tmp_path) is False
     _write(tmp_path, "run/.containerenv", "")
+    # Any podman container (toolbox, distrobox, CI) has .containerenv.
+    assert box.in_box(tmp_path) is False
+    _write(tmp_path, "etc/hal0-box-release", "HAL0_BOX=1\n")
     assert box.in_box(tmp_path) is True
 
 
 def test_in_box_systemd_marker_podman(tmp_path: Path) -> None:
     _write(tmp_path, "run/systemd/container", "podman\n")
+    assert box.in_box(tmp_path) is False
+    _write(tmp_path, "etc/hal0-box-release", "HAL0_BOX=1\n")
     assert box.in_box(tmp_path) is True
+
+
+def test_in_box_release_file_alone_is_not_enough(tmp_path: Path) -> None:
+    _write(tmp_path, "etc/hal0-box-release", "HAL0_BOX=1\n")
+    assert box.in_box(tmp_path) is False
 
 
 def test_in_box_not_fooled_by_lxc(tmp_path: Path) -> None:
     _write(tmp_path, "run/systemd/container", "lxc\n")
+    _write(tmp_path, "etc/hal0-box-release", "HAL0_BOX=1\n")
     assert box.in_box(tmp_path) is False

@@ -26,17 +26,41 @@ def _bash(snippet: str, env_extra: dict[str, str]) -> subprocess.CompletedProces
     )
 
 
+def _box_env(tmp_path: Path, release: bool = True) -> dict[str, str]:
+    env = {
+        "HAL0_CONTAINER_RUN_DIR": str(tmp_path),
+        "HAL0_BOX_RELEASE_FILE": str(tmp_path / "hal0-box-release"),
+    }
+    if release:
+        (tmp_path / "hal0-box-release").write_text("HAL0_BOX=1\n")
+    return env
+
+
 def test_containerenv_marker_is_a_box(tmp_path: Path) -> None:
     (tmp_path / ".containerenv").touch()
-    r = _bash("hal0_lxc_kind", {"HAL0_CONTAINER_RUN_DIR": str(tmp_path)})
+    r = _bash("hal0_lxc_kind", _box_env(tmp_path))
     assert r.stdout.strip() == "box", r.stderr
 
 
 def test_systemd_container_podman_is_a_box(tmp_path: Path) -> None:
     (tmp_path / "systemd").mkdir()
     (tmp_path / "systemd" / "container").write_text("podman\n")
-    r = _bash("hal0_lxc_kind", {"HAL0_CONTAINER_RUN_DIR": str(tmp_path)})
+    r = _bash("hal0_lxc_kind", _box_env(tmp_path))
     assert r.stdout.strip() == "box", r.stderr
+
+
+def test_other_podman_container_is_not_a_box(tmp_path: Path) -> None:
+    # toolbox, distrobox and CI containers all have /run/.containerenv.
+    (tmp_path / ".containerenv").touch()
+    (tmp_path / "systemd").mkdir()
+    (tmp_path / "systemd" / "container").write_text("podman\n")
+    r = _bash("hal0_lxc_kind", _box_env(tmp_path, release=False))
+    assert r.stdout.strip() != "box", r.stderr
+
+
+def test_release_file_alone_is_not_a_box(tmp_path: Path) -> None:
+    r = _bash("hal0_lxc_kind", _box_env(tmp_path))
+    assert r.stdout.strip() != "box", r.stderr
 
 
 def test_lxc_marker_is_not_a_box(tmp_path: Path) -> None:
@@ -53,7 +77,7 @@ def test_no_marker_is_not_a_box(tmp_path: Path) -> None:
 
 def test_in_lxc_is_false_for_a_box(tmp_path: Path) -> None:
     (tmp_path / ".containerenv").touch()
-    assert _bash("hal0_in_lxc", {"HAL0_CONTAINER_RUN_DIR": str(tmp_path)}).returncode == 1
+    assert _bash("hal0_in_lxc", _box_env(tmp_path)).returncode == 1
     assert _bash("hal0_in_lxc", {"HAL0_LXC_KIND_OVERRIDE": "box"}).returncode == 1
 
 

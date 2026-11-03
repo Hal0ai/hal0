@@ -17,6 +17,9 @@
 #   box's user namespace and the gid is mapped, so it can take the group. The
 #   device boundary is the box as a whole (the hal0box host user), not root's
 #   group membership inside it.
+# - /etc/hal0-box-release marks this image as the hal0 box. hal0 (box.py,
+#   preflight.sh) needs it as well as podman's markers, which every podman
+#   container has.
 # - Root linger is preset, or Open WebUI's network namespace gets stranded.
 # - DefaultLimitMEMLOCK=infinity, because the box's systemd otherwise caps
 #   every unit below what ROCm needs.
@@ -53,6 +56,7 @@ RUN printf 'APT::Sandbox::User "root";\n' > /etc/apt/apt.conf.d/99-box-build \
     done \
  && mkdir -p /etc/systemd/system.conf.d /var/lib/systemd/linger /etc/containers \
  && printf '[Manager]\nDefaultLimitMEMLOCK=infinity\n' > /etc/systemd/system.conf.d/hal0-box.conf \
+ && printf 'HAL0_BOX=1\n' > /etc/hal0-box-release \
  && touch /var/lib/systemd/linger/root \
  && printf 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n' > /etc/apt/apt.conf.d/20auto-upgrades \
  && printf 'account required pam_permit.so\n' > /etc/pam.d/common-account \
