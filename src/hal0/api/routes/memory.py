@@ -392,6 +392,7 @@ async def graph_status(request: Request) -> dict[str, Any]:
           "errors":          int,
           "last_built_at":   iso8601 | None,
           "last_error":      str | None,
+          "chunk_check":     dict | None,    # #3326: ChunkAudit of the failing banks
         }
     """
     wrapper = _wrapper(request)
@@ -415,6 +416,13 @@ async def graph_status(request: Request) -> dict[str, Any]:
     # provider/base_url/model beats every drop-in and must not stay hidden.
     status["engine_llm"] = await asyncio.to_thread(_ee.effective_engine_llm)
     await _augment_build_counters(request, status)
+    # #3326: why the failing banks fail, when the cap is the reason. Additive;
+    # ``None`` when nothing is failing or the engine cannot be read.
+    status["chunk_check"] = await _status_chunk_check(
+        request,
+        graph_cfg.extraction_max_tokens,
+        set((status.get("failed_by_bank") or {}).keys()),
+    )
     return status
 
 
@@ -536,8 +544,13 @@ async def _all_banks(client: Any) -> list[Any] | None:
         offset += page
 
 
-async def _audit_retain_chunks(request: Request, max_tokens: int) -> ChunkAudit | None:
+async def _audit_retain_chunks(
+    request: Request, max_tokens: int, *, only_banks: set[str] | None = None
+) -> ChunkAudit | None:
     """Check every bank's retain chunk size against ``max_tokens`` (#3215).
+
+    ``only_banks`` narrows the audit to those bank ids (the status payload checks
+    just the banks that have failures).
 
     ``None`` when the engine is unreachable or its bank list cannot be read, so
     callers skip the check rather than report a clean result they did not earn.
@@ -546,6 +559,8 @@ async def _audit_retain_chunks(request: Request, max_tokens: int) -> ChunkAudit 
     client = getattr(provider, "hindsight_client", None) if provider is not None else None
     if client is None:
         return None
+    if only_banks is not None:
+        return await audit_bank_chunks(client.request_json, sorted(only_banks), max_tokens)
     banks = await _all_banks(client)
     if not banks:
         return None
@@ -555,6 +570,32 @@ async def _audit_retain_chunks(request: Request, max_tokens: int) -> ChunkAudit 
         if (b.get("bank_id") if isinstance(b, dict) else b)
     ]
     return await audit_bank_chunks(client.request_json, ids, max_tokens)
+
+
+#: How long ``GET /graph/status`` reuses a chunk audit. The dashboard polls the
+#: status every few seconds, and the audit reads one config per failing bank.
+_CHUNK_CHECK_TTL_S = 30.0
+
+
+async def _status_chunk_check(
+    request: Request, max_tokens: int, failing_banks: set[str]
+) -> dict[str, Any] | None:
+    """The chunk audit of the failing banks, for the status payload (#3326).
+
+    ``None`` when no bank has failures (nothing to explain) or the engine could
+    not be read. Remembered for :data:`_CHUNK_CHECK_TTL_S` per (cap, banks).
+    """
+    if not failing_banks:
+        return None
+    key = (max_tokens, tuple(sorted(failing_banks)))
+    cache = getattr(request.app.state, "chunk_check_cache", None)
+    now = time.monotonic()
+    if cache is not None and cache[0] == key and now - cache[1] < _CHUNK_CHECK_TTL_S:
+        return cache[2]
+    audit = await _audit_retain_chunks(request, max_tokens, only_banks=failing_banks)
+    result = audit.as_dict() if audit is not None else None
+    request.app.state.chunk_check_cache = (key, now, result)
+    return result
 
 
 @router.get("/graph/chunk-check")
