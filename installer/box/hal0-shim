@@ -6,7 +6,8 @@
 # placeholder with the root-owned launcher it keeps under /var/lib/hal0-box.
 #
 #   sudo hal0 <args>          runs `hal0 <args>` inside the box
-#   sudo hal0 uninstall       removes the box, its user and all its data
+#   sudo hal0 uninstall       removes the box and keeps its data (volumes, user);
+#                             --purge [--yes] also deletes them. Args pass through.
 #   sudo hal0 box <command>   box lifecycle: status, start, stop, logs, rebuild
 #
 # Root only: the box belongs to the dedicated hal0box user, and only root can

@@ -257,6 +257,7 @@ class BoxHarness:
             env=self.env(**extra),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
             text=True,
             timeout=60,
         )
@@ -305,8 +306,44 @@ class BoxHarness:
     def install(self, *args: str, check: bool = True, **extra: str):
         return self.run("install", str(self.tree), *args, check=check, **extra)
 
-    def uninstall(self, check: bool = True):
-        return self.run("uninstall", check=check)
+    def uninstall(self, *args: str, check: bool = True, **extra: str):
+        return self.run("uninstall", *args, check=check, **extra)
+
+    def purge(self, check: bool = True):
+        return self.uninstall("--purge", "--yes", check=check)
+
+    def shim(self, *args: str, check: bool = True, **extra: str):
+        res = subprocess.run(
+            ["bash", str(self.shim_path()), *args],
+            env=self.env(**extra),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            timeout=60,
+        )
+        if check and res.returncode != 0:
+            raise AssertionError(f"hal0 {' '.join(args)} exited {res.returncode}:\n{res.stdout}")
+        return res
+
+    def user_exists(self) -> bool:
+        p = self.state / "users"
+        return p.exists() and any(
+            line.startswith("hal0box:") for line in p.read_text().splitlines()
+        )
+
+    def volumes(self) -> set[str]:
+        d = self.state / "volumes"
+        return {v.name for v in d.iterdir()} if d.exists() else set()
+
+    def container_exists(self) -> bool:
+        return (self.state / "containers" / "hal0-box").exists()
+
+    def unit_path(self) -> Path:
+        return self.host / "home" / "hal0box" / ".config" / "systemd" / "user" / "hal0-box.service"
+
+    def dropin_path(self) -> Path:
+        return self.host / "etc" / "systemd" / "system" / "user@.service.d" / "hal0-box.conf"
 
     def rebuild(self, check: bool = True):
         return self.run("rebuild", check=check)
@@ -660,24 +697,24 @@ def test_shim_raises_memlock_and_requires_root(box: BoxHarness) -> None:
 def test_shim_execs_hal0_in_the_box_and_routes_uninstall(box: BoxHarness) -> None:
     box.install()
     shim = box.shim_path()
-    subprocess.run(["bash", str(shim), "status"], env=box.env(), check=True, timeout=30)
+    box.shim("status")
     assert box.podman_calls_named("exec")[-1].argv.endswith("hal0-box hal0 status")
-    subprocess.run(["bash", str(shim), "uninstall"], env=box.env(), check=True, timeout=30)
-    assert not shim.exists() and "hal0box" not in box.subuid()
+    box.shim("uninstall", "--purge", "--yes")
+    assert not shim.exists() and "hal0box" not in box.subuid() and not box.user_exists()
 
 
 def test_uninstall_is_idempotent(box: BoxHarness) -> None:
     box.add_device("dri/renderD128", gid=993)
     box.install()
     assert "hal0box:993:1" in box.subgid()
-    box.uninstall()
-    assert box.uninstall().returncode == 0
+    box.purge()
+    assert box.purge().returncode == 0
     assert "hal0box" not in box.subuid() and "hal0box" not in box.subgid()
     assert not (box.host / "var" / "lib" / "hal0-box").exists()
-    assert not (
-        box.host / "etc" / "systemd" / "system" / "user@.service.d" / "hal0-box.conf"
-    ).exists()
+    assert not box.dropin_path().exists()
     assert not box.shim_path().exists()
+    box.uninstall()
+    assert box.uninstall().returncode == 0
 
 
 def test_uninstall_after_partial_install_cleans_what_remains(box: BoxHarness) -> None:
@@ -695,11 +732,105 @@ def test_uninstall_keeps_a_foreign_hal0_cli(box: BoxHarness) -> None:
     assert shim.exists()
 
 
-def test_uninstall_only_resets_box_user(box: BoxHarness) -> None:
+def test_purge_only_resets_box_user(box: BoxHarness) -> None:
     box.install()
-    box.uninstall()
+    box.purge()
     resets = box.podman_calls_named("system reset")
     assert resets and all(c.user == "hal0box" for c in resets)
+
+
+# ── uninstall keeps data unless --purge ───────────────────────────────────
+
+
+def test_default_uninstall_keeps_the_box_data(box: BoxHarness) -> None:
+    box.add_device("dri/renderD128", gid=993)
+    box.install()
+    res = box.uninstall()
+    # Removed: the container, its unit, the shim, the drop-in, linger.
+    assert not box.container_exists()
+    assert not box.unit_path().exists()
+    assert not box.shim_path().exists()
+    assert not box.dropin_path().exists()
+    assert any(c.argv.startswith("loginctl disable-linger hal0box") for c in box.calls())
+    # Kept: the user, its sub-ID lines (volume ownership depends on them)
+    # and the three state volumes.
+    assert box.user_exists()
+    assert "hal0box:" in box.subuid() and "hal0box:993:1" in box.subgid()
+    assert box.volumes() == {"hal0-box-etc", "hal0-box-var", "hal0-box-containers"}
+    assert box.podman_calls("system reset") == 0
+    assert not any(c.argv.startswith("userdel") for c in box.calls())
+    assert "--purge" in res.stdout
+
+
+def test_reinstall_after_default_uninstall_reuses_the_volumes(box: BoxHarness) -> None:
+    box.install()
+    box.uninstall()
+    box.install()
+    assert box.state_is_healthy()
+    assert len(box.podman_calls_named("volume create")) == 3
+    assert box.subuid().count("hal0box:") == 1
+
+
+def test_purge_refuses_non_interactive_without_yes(box: BoxHarness) -> None:
+    box.install()
+    res = box.uninstall("--purge", check=False)
+    assert res.returncode != 0 and "--yes" in res.stdout
+    assert box.state_is_healthy() and box.user_exists()
+    assert box.podman_calls("rm") == 0
+
+
+def test_purge_with_yes_removes_user_and_data(box: BoxHarness) -> None:
+    box.install()
+    box.purge()
+    assert not box.user_exists() and box.volumes() == set()
+    assert "hal0box" not in box.subuid()
+    assert not (box.host / "var" / "lib" / "hal0-box").exists()
+
+
+def _uninstall_on_tty(box: BoxHarness, typed: str, *args: str) -> tuple[int, str]:
+    import pty
+
+    master, slave = pty.openpty()
+    try:
+        os.write(master, typed.encode() + b"\n")
+        res = subprocess.run(
+            ["bash", str(box.tree / "installer" / "box" / "box.sh"), "uninstall", *args],
+            env=box.env(),
+            stdin=slave,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=60,
+        )
+    finally:
+        os.close(slave)
+        os.close(master)
+    return res.returncode, res.stdout
+
+
+def test_purge_on_a_tty_needs_typed_delete(box: BoxHarness) -> None:
+    box.install()
+    rc, out = _uninstall_on_tty(box, "yes", "--purge")
+    assert rc != 0 and "DELETE" in out
+    assert box.user_exists() and box.state_is_healthy()
+    rc, out = _uninstall_on_tty(box, "DELETE", "--purge")
+    assert rc == 0, out
+    assert not box.user_exists()
+
+
+def test_uninstall_help_changes_nothing(box: BoxHarness) -> None:
+    box.install()
+    for res in (box.uninstall("--help"), box.shim("uninstall", "--help")):
+        assert "--purge" in res.stdout and "usage" in res.stdout.lower()
+    assert box.state_is_healthy() and box.user_exists()
+    assert box.podman_calls("rm") == 0
+
+
+def test_uninstall_unknown_flag_exits_2(box: BoxHarness) -> None:
+    box.install()
+    res = box.shim("uninstall", "--purg", check=False)
+    assert res.returncode == 2 and "--purg" in res.stdout
+    assert box.state_is_healthy() and box.user_exists()
 
 
 def test_bootstrap_work_dir_is_removed_after_success(box: BoxHarness) -> None:

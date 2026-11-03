@@ -1,6 +1,6 @@
 ---
 title: Install in a rootless podman box
-description: Opt-in install of hal0 inside one rootless podman container on a Linux host or LXC (v1.8.0). One command, GPU and NPU passed through as device nodes, a thin host shim, and an uninstall that removes the box, its user and its data.
+description: Opt-in install of hal0 inside one rootless podman container on a Linux host or LXC (v1.8.0). One command, GPU and NPU passed through as device nodes, a thin host shim, and an uninstall that keeps the box's data unless you purge it.
 sidebar:
   order: 16
 ---
@@ -130,7 +130,7 @@ Logs are `/var/log/hal0-box-build.log`, `/var/log/hal0-box-selftest.log` and
 | `sudo hal0 box exec -- <command>` | Run a command inside the box. |
 | `sudo hal0 <args>` | Run a `hal0` command inside the box, for example `sudo hal0 doctor all`. |
 | `sudo hal0 box rebuild` | Build a new image and container on the same volumes, then run the installer again. |
-| `sudo hal0 uninstall` | Remove the box. |
+| `sudo hal0 uninstall [--purge]` | Remove the box and keep its data, or with `--purge` delete the data too. |
 
 The box applies OS security fixes with `unattended-upgrades`. A rebuild is for
 larger changes to the base image and for repairing a damaged root filesystem.
@@ -149,12 +149,35 @@ update in the box with `sudo hal0 update`, or run the install command again.
 sudo hal0 uninstall
 ```
 
-This stops the box, removes its container, images and volumes, deletes the
-`hal0box` user and its home, drops the sub-ID ranges, systemd drop-in and
-firewall rules the launcher added, removes the shim, and deletes the saved
-tree and logs. **It deletes every model and all hal0 data in the box.** Copy
-anything you want to keep out of the volumes first. GPU drivers, firmware and
-kernel arguments on the host are left as they were.
+This stops the box and removes its container and image, its user unit, the
+`hal0` shim, the `hal0box` user's linger, the systemd drop-in, the firewall
+rules and AppArmor changes the launcher made, and the logs. It **keeps the
+box's data**: the three state volumes (`hal0-box-etc`, `hal0-box-var` and
+`hal0-box-containers`, which hold the config, models and history), the
+`hal0box` user that owns them, and its sub-ID ranges in `/etc/subuid` and
+`/etc/subgid`. The user and its ranges stay because the volumes' file
+ownership is expressed in that user's ID mapping; with a different range the
+kept files would belong to the wrong IDs. The launcher's saved tree in
+`/var/lib/hal0-box` also stays, so the data can be purged later. Running the
+install command again reuses all of it.
+
+To delete the data as well:
+
+```sh
+sudo hal0 uninstall --purge
+```
+
+`--purge` additionally resets the box user's podman store (the volumes and
+images), stops every process of the `hal0box` user, deletes the user and its
+home, drops its sub-ID ranges and removes `/var/lib/hal0-box`. **It deletes
+every model and all hal0 data in the box.** It asks you to type `DELETE`;
+without a terminal it refuses unless you pass `--yes` (`--force`, `-f` and
+`HAL0_FORCE=1` work too). If the shim is already gone after a plain uninstall,
+run the launcher directly:
+`sudo bash /var/lib/hal0-box/tree/installer/box/box.sh uninstall --purge`.
+
+`sudo hal0 uninstall --help` prints these options. GPU drivers, firmware and
+kernel arguments on the host are left as they were in both cases.
 
 ## What is not tested yet
 

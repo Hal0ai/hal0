@@ -9,7 +9,7 @@
 #
 # Usage:   box.sh install <tree> [install.sh args...]
 #          box.sh preflight
-#          box.sh uninstall
+#          box.sh uninstall [--purge [--yes]]
 #          box.sh rebuild
 #          box.sh status | start | stop
 #          box.sh logs [journalctl args...]
@@ -638,7 +638,7 @@ _box_install_failed() {
     local rc=$?
     [[ "${rc}" == 0 ]] && return 0
     log "the box install did not finish. Re-run the same install command to retry (state on the box volumes is kept),"
-    log "or remove everything with: sudo bash ${STATE_TREE#"${HOST_ROOT}"}/installer/box/box.sh uninstall"
+    log "or remove the box with: sudo bash ${STATE_TREE#"${HOST_ROOT}"}/installer/box/box.sh uninstall (add --purge to also delete its data)"
 }
 
 # ── commands ──────────────────────────────────────────────────────────────
@@ -689,29 +689,91 @@ box_install_flow() {
     log "host commands run through the box: sudo hal0 <command>; box lifecycle: sudo hal0 box status|start|stop|logs"
 }
 
+uninstall_usage() {
+    cat <<EOF
+usage: hal0 uninstall [--purge [--yes]]
+       box.sh uninstall [--purge [--yes]]
+
+Removes the hal0 box: its container and image, its user unit, the host
+hal0 shim, the ${BOX_USER} user's linger, the systemd drop-in, and the
+firewall rules and AppArmor changes the launcher made.
+
+Keeps the box's data: the ${BOX_USER} user, its sub-ID ranges (the volumes'
+file ownership depends on them) and the state volumes $(_box_volume_names)
+(config, models, history). Installing again reuses them.
+
+  --purge        also delete the data: the volumes and the rest of the box
+                 user's podman store, the ${BOX_USER} user and its home, and
+                 its sub-ID ranges. Asks you to type DELETE.
+  --yes, -y      skip the DELETE prompt (required when not on a terminal).
+                 --force, -f and HAL0_FORCE=1 do the same.
+  -h, --help     show this help
+EOF
+}
+
+_box_volume_names() {
+    local vol out=()
+    for vol in "${BOX_VOLUMES[@]}"; do out+=("${vol%%:*}"); done
+    printf '%s' "${out[*]}"
+}
+
+# --purge deletes every model and all box data, so it needs a typed DELETE on
+# a terminal, or --yes when there is none to ask on.
+box_confirm_purge() {
+    local answer=""
+    [[ -t 0 ]] || die "refusing to --purge without a terminal to confirm on: it deletes every model and all hal0 data in the box. Re-run with --purge --yes to do it non-interactively."
+    printf 'This deletes the %s user, the box volumes and every model and all hal0 data in them.\nType DELETE to confirm: ' "${BOX_USER}"
+    read -r answer || answer=""
+    [[ "${answer}" == DELETE ]] || die "not confirmed; nothing was changed"
+}
+
+# The launcher's per-install files in the state dir. A plain uninstall drops
+# these but keeps the saved tree, so the data it keeps can still be purged
+# later with the launcher in it.
+BOX_STATE_INSTALL_FILES=(installed install-args verified firewall)
+
 cmd_uninstall() {
+    local purge=0 yes=0 arg u f kept=0
+    [[ "${HAL0_FORCE:-0}" == 1 ]] && yes=1
+    for arg in "$@"; do
+        case "${arg}" in
+            --purge) purge=1 ;;
+            --yes|-y|--force|-f) yes=1 ;;
+            -h|--help) uninstall_usage; return 0 ;;
+            *) log "ERROR: unknown uninstall option: ${arg}"; uninstall_usage >&2; exit 2 ;;
+        esac
+    done
     box_require_root
-    local u
-    log "removing the hal0 box, its user and all hal0 data in it"
+    [[ "${purge}" == 0 || "${yes}" == 1 ]] || box_confirm_purge
+    if [[ "${purge}" == 1 ]]; then
+        log "removing the hal0 box, its user and all hal0 data in it"
+    else
+        log "removing the hal0 box; its data (the ${BOX_USER} user and the state volumes) is kept"
+    fi
     if box_user_exists; then
         u="$(id -u "${BOX_USER}")"
         as_box systemctl --user disable --now "${BOX_UNIT}" >/dev/null 2>&1 || true
         as_box podman rm -f "${BOX_NAME}" >/dev/null 2>&1 || true
-        # Only ever as the box user: as root this would wipe the host's own
-        # containers and images.
-        as_box podman system reset --force >/dev/null 2>&1 || true
+        as_box podman image rm -f "${BOX_IMAGE}" >/dev/null 2>&1 || true
+        as_box rm -f "${BOX_HOME}/.config/systemd/user/${BOX_UNIT}" 2>/dev/null || true
+        as_box systemctl --user daemon-reload >/dev/null 2>&1 || true
+        if [[ "${purge}" == 1 ]]; then
+            # Only ever as the box user: as root this would wipe the host's
+            # own containers and images.
+            as_box podman system reset --force >/dev/null 2>&1 || true
+        fi
         loginctl disable-linger "${BOX_USER}" 2>/dev/null || true
         systemctl stop "user@${u}.service" 2>/dev/null || true
-        pkill -u "${BOX_USER}" 2>/dev/null || true
-        userdel -r "${BOX_USER}" 2>/dev/null || true
+        if [[ "${purge}" == 1 ]]; then
+            pkill -u "${BOX_USER}" 2>/dev/null || true
+            userdel -r "${BOX_USER}" 2>/dev/null || true
+        else
+            kept=1
+        fi
     else
         log "user ${BOX_USER} is already gone; cleaning what remains"
     fi
     box_firewall_close
-    local f
-    for f in "${SUBUID_FILE}" "${SUBGID_FILE}"; do
-        [[ -f "${f}" ]] && _box_write_subids "${f}"
-    done
     if [[ -f "${DROPIN}" ]]; then
         rm -f "${DROPIN}"
         rmdir "$(dirname "${DROPIN}")" 2>/dev/null || true
@@ -721,6 +783,17 @@ cmd_uninstall() {
         rm -f "${SHIM_PATH}"
     fi
     rm -f "${BUILD_LOG}" "${SELFTEST_LOG}" "${INSTALL_LOG}"
+    if [[ "${kept}" == 1 ]]; then
+        for f in "${BOX_STATE_INSTALL_FILES[@]}"; do
+            rm -f "${STATE_DIR:?}/${f}"
+        done
+        log "removed the box. Kept: the ${BOX_USER} user, its sub-ID ranges and the volumes $(_box_volume_names)."
+        log "Installing again reuses them. To delete them too: sudo bash ${STATE_TREE#"${HOST_ROOT}"}/installer/box/box.sh uninstall --purge"
+        return 0
+    fi
+    for f in "${SUBUID_FILE}" "${SUBGID_FILE}"; do
+        [[ -f "${f}" ]] && _box_write_subids "${f}"
+    done
     rm -rf "${STATE_DIR}"
     log "removed"
 }
@@ -788,7 +861,7 @@ usage() {
 usage: box.sh <command>
   install <tree> [install.sh args...]   install hal0 in a rootless podman box
   preflight                             check this host can run the box
-  uninstall                             remove the box, its user and its data
+  uninstall [--purge [--yes]]           remove the box; --purge also deletes its user and data
   rebuild                               new image and container, same volumes
   status | start | stop                 the box's user unit
   logs [journalctl args...]             the box's journal
@@ -802,7 +875,7 @@ main() {
     case "${cmd}" in
         install) cmd_install "$@" ;;
         preflight) cmd_preflight ;;
-        uninstall) cmd_uninstall ;;
+        uninstall) cmd_uninstall "$@" ;;
         rebuild) cmd_rebuild ;;
         status) cmd_status ;;
         start|stop) cmd_unit "${cmd}" ;;
