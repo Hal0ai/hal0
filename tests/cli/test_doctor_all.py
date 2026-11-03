@@ -1309,6 +1309,64 @@ def test_anchor_window_warns_when_the_fetch_explodes(tmp_path) -> None:  # type:
     assert "connection refused" in c.detail
 
 
+# ── check_hermes_model_choice (#3325) ─────────────────────────────────────────
+
+
+def _model_cfg(tmp_path, body: str):  # type: ignore[no-untyped-def]
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(body)
+    return cfg
+
+
+_PICKED = "model:\n  default: anthropic/claude-x\n  provider: openrouter\n"
+_PICKED_LOCAL = (
+    "model:\n  default: anthropic/claude-x\n  provider: openai\n"
+    "  base_url: http://127.0.0.1:9999/v1\n"
+)
+
+
+def test_model_choice_passes_when_not_provisioned(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    c = da.check_hermes_model_choice(config_path=tmp_path / "nope.yaml")
+    assert c.status == "pass" and "not provisioned" in c.detail
+
+
+def test_model_choice_passes_quietly_when_hal0_owns_the_model(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    cfg = _model_cfg(
+        tmp_path,
+        "model:\n  default: hal0/agent\n  provider: custom\n  base_url: http://127.0.0.1:8080/v1\n",
+    )
+    c = da.check_hermes_model_choice(config_path=cfg)
+    assert c.status == "pass" and "kept your" not in c.detail
+
+
+def test_model_choice_names_kept_pick_provider_and_way_back(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from hal0.agents.hermes_provision import kept_model_notice
+
+    c = da.check_hermes_model_choice(
+        config_path=_model_cfg(tmp_path, _PICKED), route_ready=lambda *_a: None
+    )
+    assert c.status == "pass"
+    assert kept_model_notice("anthropic/claude-x") in c.detail
+    assert "openrouter" in c.detail
+
+
+def test_model_choice_warns_when_loopback_route_is_dead_and_is_read_only(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    cfg = _model_cfg(tmp_path, _PICKED_LOCAL)
+    before = cfg.read_text()
+    c = da.check_hermes_model_choice(config_path=cfg, route_ready=lambda *_a: False)
+    assert c.status == "warn"
+    assert "not answering" in c.detail and "hermes config set model.default hal0/agent" in c.detail
+    assert cfg.read_text() == before
+
+
+def test_model_choice_never_probes_a_third_party_provider(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    def _boom(*_a):  # type: ignore[no-untyped-def]
+        raise AssertionError("probed a non-loopback provider")
+
+    cfg = _model_cfg(tmp_path, _PICKED + "  base_url: https://openrouter.ai/api/v1\n")
+    assert da.check_hermes_model_choice(config_path=cfg, route_ready=_boom).status == "pass"
+
+
 # ── build_all_checks orchestration ────────────────────────────────────────────
 
 
@@ -1444,6 +1502,11 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
             "hermes_anchor_window", "Hermes anchor context window", "pass", "stubbed"
         ),
     )
+    monkeypatch.setattr(
+        da,
+        "check_hermes_model_choice",
+        lambda **_kw: Check("hermes_model_choice", "Hermes model choice", "pass", "stubbed"),
+    )
 
     # Board rows read the real token file / api.env / dashboard otherwise.
     monkeypatch.setattr(
@@ -1526,7 +1589,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
     keys = [c.key for c in checks]
     assert gtt_leak_slots == [[{"port": 8081}]]
     # Verify rows plus the extra evidence rows (gtt-leak, api-unit).
-    assert keys[-42:] == [
+    assert keys[-43:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1564,6 +1627,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "hermes-dashboard-token",
         "hermes-kanban",
         "hermes_anchor_window",
+        "hermes_model_choice",
         "hal0_linger",
         "hindsight_llm_auth",
         "memory_engine_version",
