@@ -70,7 +70,7 @@ from hal0.agents.hermes_layout import (
     release_root_for,
 )
 from hal0.agents.role_slots import candidate_from_slot_mapping, resolve_role_slots
-from hal0.install.perms import SECRETS_DIR_MODE, ensure_shared_dir
+from hal0.install.perms import SECRETS_DIR_MODE, ensure_shared_dir, state_root_owner
 from hal0.security import nofollow
 from hal0.slot_lifecycle_budget import STACK_APPLY_SLOT_ALLOWANCE, slot_lifecycle_timeout_s
 from hal0.slots.state import SlotState, is_dispatchable_state, provider_requires_model
@@ -4492,7 +4492,13 @@ def _render_template(name: str, **vars_: Any) -> str:
     return env.get_template(name).render(**vars_)
 
 
-def _atomic_write(path: Path, content: str, *, mode: int | None = None) -> str:
+def _atomic_write(
+    path: Path,
+    content: str,
+    *,
+    mode: int | None = None,
+    owner: tuple[int, int] | None = None,
+) -> str:
     """Tmp-write + rename for atomicity. Returns the sha256 of content.
 
     The replacement file inherits ``mode`` when given, else the mode of the
@@ -4517,7 +4523,7 @@ def _atomic_write(path: Path, content: str, *, mode: int | None = None) -> str:
     ``hal0`` service account swapped for a symlink is refused instead of
     followed by a root repair (#2975).
     """
-    nofollow.write_file(path, content, mode=mode)
+    nofollow.write_file(path, content, mode=mode, owner=owner)
     return content_hash(content)
 
 
@@ -9838,7 +9844,11 @@ def _write_run_report(report: InstallReport, state_root: Path | None) -> None:
     }
     # _atomic_write, not a fixed ``provision.json.tmp``: the state root is
     # service-writable and a root repair writes this report (#2903).
-    _atomic_write(root / _STATE_FILE_NAME, json.dumps(data, indent=2, sort_keys=True) + "\n")
+    _atomic_write(
+        root / _STATE_FILE_NAME,
+        json.dumps(data, indent=2, sort_keys=True) + "\n",
+        owner=state_root_owner(),
+    )
 
 
 #: ``details["source"]`` of an ``install`` phase a converge rewrote.
@@ -9897,7 +9907,9 @@ def record_converged_release(
     )
     if not failed and not data.get("completed_at"):
         data["completed_at"] = now
-    _atomic_write(target, json.dumps(data, indent=2, sort_keys=True) + "\n")
+    _atomic_write(
+        target, json.dumps(data, indent=2, sort_keys=True) + "\n", owner=state_root_owner()
+    )
     return True
 
 

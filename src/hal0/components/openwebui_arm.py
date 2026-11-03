@@ -47,7 +47,9 @@ from typing import Any
 import structlog
 
 from hal0.config.paths import var_lib
+from hal0.install import perms
 from hal0.openwebui import image_pin
+from hal0.security import nofollow
 from hal0.system.seam import SEAM_BIN, is_hal0_service_user
 
 log = structlog.get_logger(__name__)
@@ -373,11 +375,8 @@ def _env_reconcile_fields(
 
 def _write_override(digest: str) -> None:
     """Write the override marker atomically (tmp + rename)."""
-    path = override_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(digest + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    # A root-run first write adopts the service-owned state root (#3260).
+    nofollow.write_file(override_path(), digest + "\n", owner=perms.state_root_owner())
 
 
 def read_pin_override() -> str | None:

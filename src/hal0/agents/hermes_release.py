@@ -48,6 +48,8 @@ import structlog
 from hal0.agents import hermes_platforms as hpl
 from hal0.agents import hermes_provision as hp
 from hal0.agents.hermes_layout import GATEWAY_UNIT_PATH, release_root_for
+from hal0.install import perms
+from hal0.security import nofollow
 
 log = structlog.get_logger(__name__)
 
@@ -1966,8 +1968,8 @@ def write_stamp(release: Release, stamp_file: Path | None) -> str | None:
     if stamp_file is None:
         return None
     try:
-        stamp_file.parent.mkdir(parents=True, exist_ok=True)
-        stamp_file.write_text(release.ref[:12] + "\n", encoding="utf-8")
+        # A root-run first write adopts the service-owned state root (#3260).
+        nofollow.write_file(stamp_file, release.ref[:12] + "\n", owner=perms.state_root_owner())
     except OSError as exc:
         return f"venv.pin stamp not written: {exc}"
     return None

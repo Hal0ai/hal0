@@ -171,6 +171,26 @@ def ensure_shared_dir(path: Path | str, *, mode: int = SHARED_DIR_MODE) -> Path:
     return path
 
 
+def state_root_owner() -> tuple[int, int] | None:
+    """``(uid, gid)`` a root-run writer should give a NEW file under the state root.
+
+    A root caller (``install.sh``, ``hal0 update``) adopts the service-owned
+    state root's identity so the file it births is readable and rewritable by
+    the unprivileged service afterwards (#2670, #3260); the identity comes from
+    the directory itself, so no account lookup is needed and a root-owned
+    development tree yields ``(0, 0)``. An unprivileged caller, or a state root
+    that cannot be read, returns ``None``: the writer keeps its own identity,
+    exactly as before. Never widens anything: it only copies an owner that
+    already controls the directory the file lives in.
+    """
+    if os.geteuid() != 0:
+        return None
+    try:
+        return nofollow.dir_owner(paths.var_lib())
+    except OSError:
+        return None
+
+
 def _is_within(candidate: Path, root: Path) -> bool:
     """True when ``candidate`` (already resolved) sits at or under ``root``."""
     try:
@@ -455,6 +475,39 @@ def ownership_table(
             glob="components.json",
             child_mode=0o600,
             role="state/ (+ components.json)",
+        ),
+        # Override markers written by a root-run converge (#3260): same
+        # root-run-first-write class as components.json. 0644 is the mode the
+        # writers already birth them at; the row only heals the owner.
+        PermRow(
+            var_lib / "state",
+            state_owner,
+            service_group,
+            SHARED_DIR_MODE,
+            glob="*.pin-override",
+            child_mode=0o644,
+            role="state/ (+ *.pin-override markers)",
+        ),
+        # Hermes last-run report and venv stamp, same class (#3260). The dir
+        # is declared at 0755, the mode install-time mkdir births it at, so
+        # the row never widens it.
+        PermRow(
+            var_lib / "state" / "agents" / "hermes",
+            state_owner,
+            service_group,
+            0o755,
+            glob="provision.json",
+            child_mode=0o644,
+            role="state/agents/hermes (+ provision.json)",
+        ),
+        PermRow(
+            var_lib / "state" / "agents" / "hermes",
+            state_owner,
+            service_group,
+            0o755,
+            glob="venv.pin",
+            child_mode=0o644,
+            role="state/agents/hermes (+ venv.pin)",
         ),
         # *.lock siblings under the state root — same root-run-install hazard
         # as the /etc/hal0 lock row above. `.first-run.lock` needs its own row:
@@ -1299,4 +1352,5 @@ __all__ = [
     "observe",
     "ownership_table",
     "plan",
+    "state_root_owner",
 ]
