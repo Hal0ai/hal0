@@ -208,6 +208,19 @@ def is_ambiguous(status: str) -> bool:
     return status in AMBIGUOUS_STATUSES
 
 
+def is_transient_probe_failure(status: str) -> bool:
+    """True for a failed round-trip worth ONE re-probe before it convicts.
+
+    A transport error or a 5xx says the answer did not arrive (a connection
+    reset on the first real chat turn, a runner returning 500 once), not that
+    the model talked nonsense.  Unlike :data:`AMBIGUOUS_STATUSES` it is not
+    parked as inconclusive: a repeat on the re-probe is a conviction.
+    """
+    if status == "probe_transport_error":
+        return True
+    return status.startswith("probe_http_5") and status[len("probe_http_") :].isdigit()
+
+
 @dataclass(frozen=True, slots=True)
 class SanityVerdict:
     """Outcome of one output-sanity probe.

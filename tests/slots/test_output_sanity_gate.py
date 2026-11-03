@@ -1386,6 +1386,58 @@ async def test_await_ready_halogen_a_clock_failure_parks_the_slot_warming(
     assert sentinel.sentinel_ports == [8081]
 
 
+def _script_sentinel(sentinel: _HalogenSentinel, verdicts: list[dict[str, Any]]) -> None:
+    async def _verify(port: int) -> dict[str, Any]:
+        sentinel.sentinel_ports.append(port)
+        return verdicts[min(len(sentinel.sentinel_ports), len(verdicts)) - 1]
+
+    sentinel.provider.verify_inference = _verify
+
+
+@pytest.mark.parametrize("status", ["probe_transport_error", "probe_http_500", "probe_http_503"])
+async def test_await_ready_halogen_one_transient_failure_is_reprobed(
+    halogen_slot: Callable[[dict[str, Any]], tuple[SlotManager, _HalogenSentinel]],
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+) -> None:
+    """#3287: a single transport error / 5xx must not convict; the re-probe decides."""
+    monkeypatch.setattr("hal0.slots.manager._HALOGEN_REPROBE_PAUSE_S", 0.0)
+    sm, sentinel = halogen_slot({})
+    _script_sentinel(
+        sentinel, [{"ok": False, "status": status}, {"ok": True, "status": "ok", "sample": "Paris"}]
+    )
+
+    assert await sm._await_ready("chat", 8081) is SlotState.READY
+    assert sentinel.sentinel_ports == [8081, 8081]
+
+
+@pytest.mark.parametrize("status", ["probe_transport_error", "probe_http_500"])
+async def test_await_ready_halogen_a_repeated_transient_failure_convicts(
+    halogen_slot: Callable[[dict[str, Any]], tuple[SlotManager, _HalogenSentinel]],
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+) -> None:
+    """The re-probe is bounded to one: a repeat is a conviction."""
+    monkeypatch.setattr("hal0.slots.manager._HALOGEN_REPROBE_PAUSE_S", 0.0)
+    sm, sentinel = halogen_slot({})
+    _script_sentinel(sentinel, [{"ok": False, "status": status}])
+
+    with pytest.raises(SlotOutputSanityFailed) as excinfo:
+        await sm._await_ready("chat", 8081)
+    assert excinfo.value.details["probe_status"] == status
+    assert sentinel.sentinel_ports == [8081, 8081]
+
+
+async def test_await_ready_halogen_garbage_is_not_reprobed(
+    halogen_slot: Callable[[dict[str, Any]], tuple[SlotManager, _HalogenSentinel]],
+) -> None:
+    """A judged-the-model failure convicts on the first probe."""
+    sm, sentinel = halogen_slot({"ok": False, "status": "incoherent_output", "sample": ")))"})
+    with pytest.raises(SlotOutputSanityFailed):
+        await sm._await_ready("chat", 8081)
+    assert sentinel.sentinel_ports == [8081]
+
+
 async def test_await_ready_halogen_wait_timeout_skips_the_sentinel(
     halogen_slot: Callable[[dict[str, Any]], tuple[SlotManager, _HalogenSentinel]],
     monkeypatch: pytest.MonkeyPatch,
