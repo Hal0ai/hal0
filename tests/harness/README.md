@@ -50,7 +50,8 @@ bash scripts/harness.sh
 
 Output is a colourised table + a JSON report at
 `tests/harness/reports/harness.json`. The exit code is 1 if any row is
-`fail`, or if the slot-lifecycle rows (`runtime-slot-load`, and the
+`fail`, if a tier script exited non-zero (a crashed tier leaves its rows
+`missing`; the failure line names the tier and its exit code, #2381), or if the slot-lifecycle rows (`runtime-slot-load`, and the
 `runtime-chat-roundtrip` it gates) were left unverified by a `deferred`
 slot load and the run did not allow it. That is the normal outcome of a
 `--dev` run today, so a contributor checking install + CLI runs:
