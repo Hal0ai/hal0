@@ -783,6 +783,43 @@ async def test_approval_after_the_run_ended_is_withdrawn(
     assert queue.list_pending() == []
 
 
+async def test_the_inbox_row_is_withdrawn_before_the_run_reads_as_ended(
+    svc: BridgeService,
+    planner: Planner,
+    store: BridgeStore,
+    cc: Caller,
+    queue: ApprovalQueue,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reader of a terminal status never finds the run's approval still in the inbox.
+
+    ``wait_run`` and ``get_run`` read the ledger directly, so the row has to go
+    first: the status they would see as terminal is not written until it has.
+    """
+    seen: list[str] = []
+    run_ids: list[str] = []
+    real_withdraw = queue.withdraw
+
+    async def withdraw(approval_id: str, reason: str) -> dict[str, Any] | None:
+        row = store.get_run(run_ids[0])
+        assert row is not None
+        seen.append(row.status)
+        return await real_withdraw(approval_id, reason)
+
+    monkeypatch.setattr(queue, "withdraw", withdraw)
+    planner.plan(
+        statuses=("waiting_for_approval",),
+        frames=_then(_approval, ("run.cancelled", {})),
+        pending_approval="req1",
+    )
+    v = await svc.start_run(cc, agent="hermes", input="rm -rf tmp")
+    run_ids.append(v["run_id"])
+    done = await svc.wait_run(cc, v["run_id"], timeout_s=3)
+    assert done["status"] == "cancelled"
+    assert seen and not any(status in TERMINAL_STATUSES for status in seen)
+    assert queue.list_pending() == []
+
+
 async def _gated_run(svc: BridgeService, planner: Planner, store: BridgeStore, cc: Caller) -> str:
     """Start a run that waits for approval ``req1``; returns once its inbox row exists."""
     planner.plan(statuses=("waiting_for_approval",), frames=_approval, pending_approval="req1")
