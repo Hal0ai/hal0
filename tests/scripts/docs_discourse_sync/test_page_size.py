@@ -142,6 +142,7 @@ def test_split_cli_env_vars_and_runner_images_pages_have_distinct_topics() -> No
     docs = {d.rel_key: d for d in discovery.discover_docs(REPO_ROOT / "docs")}
     for original, second in (
         ("reference/cli", "reference/cli-operator"),
+        ("reference/cli", "reference/cli-doctor-agents"),
         ("reference/env-vars", "reference/env-vars-install"),
         ("guides/manage-runner-images", "guides/manage-runner-images-lifecycle"),
     ):
