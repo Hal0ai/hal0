@@ -62,6 +62,7 @@ from hal0.api.agents.memory_stats import get_agent_memory_stats, memory_reachabl
 from hal0.api.agents.restart import unit_is_active
 from hal0.api.routes import agents as agents_routes
 from hal0.api.routes.approvals import _queue
+from hal0.api.routes.config import hermes_public_url
 from hal0.api.routes.updater import _update_jobs
 from hal0.components.pi_arm import UPDATE_COMMAND as PI_UPDATE_COMMAND
 from hal0.components.status import component_status_snapshot
@@ -728,9 +729,7 @@ async def _gather_hermes(request: Request) -> dict[str, Any]:
         "doctor": doctor,
         "approvals": {key: approvals_full.get(key) for key in ("mode", "effective", "in_sync")},
         "memory": memory,
-        "links": {
-            "desktop": os.environ.get("HAL0_HERMES_PUBLIC_URL", "").strip().rstrip("/") or None
-        },
+        "links": {"desktop": hermes_public_url() or None},
         "degraded": degraded,
     }
 

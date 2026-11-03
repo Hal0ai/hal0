@@ -75,7 +75,10 @@ def _browser_url(request: Request, sdef: ServiceDef) -> str | None:
     """Browser-reachable URL for a service, mirroring config.py semantics.
 
     Public-URL env wins; otherwise a service with a ``port`` falls back to
-    ``http://<request-host>:<port>``. Loopback-only services (hermes,
+    ``http://<request-host>:<port>``, except behind a reverse proxy, where the
+    forwarded host is the proxy and not the service, so there is no link (the
+    dashboard's hint comes from ``*_reason`` in ``GET /api/config/urls``).
+    Loopback-only services (hermes,
     hindsight) have no ``port`` and no fallback — link only when the env is
     set. ComfyUI's ``port=8188`` answers on the LAN by default and, under
     ``[network].comfyui_listen = "loopback"``, on the box itself only (or
@@ -90,10 +93,8 @@ def _browser_url(request: Request, sdef: ServiceDef) -> str | None:
     if sdef.port is None:
         return None
     if _behind_proxy(request):
-        host = request.headers.get("x-forwarded-host") or _resolve_host(request)
-    else:
-        host = _resolve_host(request)
-    return f"http://{_host_without_port(host)}:{sdef.port}"
+        return None
+    return f"http://{_host_without_port(_resolve_host(request))}:{sdef.port}"
 
 
 def _mdns_url(sdef: ServiceDef, hostname: str, advertised: list[str]) -> str | None:

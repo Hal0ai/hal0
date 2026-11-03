@@ -85,12 +85,14 @@ export function EditorCard() {
           )}
           {!access.onBox && (
             <span className="ie-offbox" id="editor-offbox" data-testid="editor-offbox">
-              {OFF_BOX_NOTE}
+              {access.needsPublicUrl ?? OFF_BOX_NOTE}
             </span>
           )}
         </div>
 
-        {!access.onBox && <TunnelCommand tunnel={access.tunnel} testid="editor" />}
+        {!access.onBox && !access.needsPublicUrl && (
+          <TunnelCommand tunnel={access.tunnel} testid="editor" />
+        )}
 
         <p className="ie-muted" data-testid="editor-note">
           {EDITOR_NOTE}

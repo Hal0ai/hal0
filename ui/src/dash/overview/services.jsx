@@ -75,7 +75,7 @@ export function OvServices({ onGo }) {
                   <span
                     className="ov-open"
                     data-testid="ov-svc-open-comfyui"
-                    title={OFF_BOX_NOTE}
+                    title={editor.needsPublicUrl ?? OFF_BOX_NOTE}
                     aria-disabled="true"
                     style={{ cursor: 'not-allowed', opacity: 0.5 }}
                     onClick={(e) => e.stopPropagation()}

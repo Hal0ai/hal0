@@ -38,7 +38,7 @@ export function OvImageEngine({ onGo }) {
               Open editor ↗
             </button>
           ) : (
-            <button type="button" className="ov-lnk" disabled title={OFF_BOX_NOTE} style={{ cursor: 'not-allowed', opacity: 0.5 }}>
+            <button type="button" className="ov-lnk" disabled title={access.needsPublicUrl ?? OFF_BOX_NOTE} style={{ cursor: 'not-allowed', opacity: 0.5 }}>
               Open editor ↗
             </button>
           )}
