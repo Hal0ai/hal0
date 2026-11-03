@@ -79,7 +79,7 @@ requirement line) instead of linking to it.
 hal0 builds the Hermes venv with `python3.12 -m venv`, then
 `pip install -r installer/agents/hermes/requirements.txt`. That file holds
 one line,
-`hermes-agent[web,mcp] @ git+https://github.com/NousResearch/hermes-agent.git@<sha>`,
+`hermes-agent[web,mcp,acp] @ git+https://github.com/NousResearch/hermes-agent.git@<sha>`,
 and the sha must be in `VETTED_HERMES_REFS`
 (`src/hal0/agents/hermes_provision.py`). Upstream broke both halves:
 
@@ -198,7 +198,7 @@ Facts about today's code that constrain the design:
 3. **The vetted-ref freeze stays, and the requirements format does not
    change.** `installer/agents/hermes/requirements.txt` keeps its single
    active line in today's format:
-   `hermes-agent[web,mcp] @ git+https://github.com/NousResearch/hermes-agent.git@<40-hex sha>`.
+   `hermes-agent[web,mcp,acp] @ git+https://github.com/NousResearch/hermes-agent.git@<40-hex sha>`.
    Only its consumer changes. The builder reads the URL, the extras and the
    ref from that line and checks the ref out, instead of handing the line to
    pip. `_hermes_requirement_line`, `hermes_pinned_ref` and
