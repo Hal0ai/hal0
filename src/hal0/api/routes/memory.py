@@ -595,6 +595,7 @@ async def _augment_build_counters(request: Request, status: dict[str, Any]) -> N
         return
 
     in_flight = builds_ok = errors = 0
+    failed_by_bank: dict[str, int] = {}
     last_built: str | None = None
     saw_stats = False
     for entry in banks:
@@ -609,7 +610,10 @@ async def _augment_build_counters(request: Request, status: dict[str, Any]) -> N
         in_flight += int(st.get("pending_operations") or 0)
         in_flight += int(by_status.get("processing") or 0) + int(by_status.get("claimed") or 0)
         builds_ok += int(by_status.get("completed") or 0)
-        errors += int(st.get("failed_operations") or by_status.get("failed") or 0)
+        bank_failed = int(st.get("failed_operations") or by_status.get("failed") or 0)
+        errors += bank_failed
+        if bank_failed > 0:
+            failed_by_bank[str(bank_id)] = bank_failed
         built = st.get("last_consolidated_at")
         if built and (last_built is None or built > last_built):
             last_built = built
@@ -618,6 +622,9 @@ async def _augment_build_counters(request: Request, status: dict[str, Any]) -> N
         status["in_flight"] = in_flight
         status["builds_ok"] = builds_ok
         status["errors"] = errors
+        # Additive (#3241): which banks the summed ``errors`` came from, so the
+        # dashboard can name them. Only banks with failures appear.
+        status["failed_by_bank"] = failed_by_bank
         status["last_built_at"] = last_built
 
 

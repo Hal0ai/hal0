@@ -11,7 +11,7 @@ import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
-import { graphSaveOutcome, saveWarnings, throughputNote } from '../extractionThroughput.js'
+import { bankFailureNotes, graphSaveOutcome, saveWarnings, throughputNote } from '../extractionThroughput.js'
 
 // primitives.jsx (Banner) is a window-globals dash module: `React` and `Icons`
 // resolve off globalThis at import time, so install them before the dynamic
@@ -19,7 +19,7 @@ import { graphSaveOutcome, saveWarnings, throughputNote } from '../extractionThr
 ;(globalThis as unknown as { React: typeof React }).React = React
 ;(globalThis as unknown as { Icons: unknown }).Icons = new Proxy({}, { get: () => null })
 
-const { SaveWarnings, ThroughputNote } = await import('../ExtractionThroughputViews.jsx')
+const { BankFailures, SaveWarnings, ThroughputNote } = await import('../ExtractionThroughputViews.jsx')
 
 const TOO_SLOW_MESSAGE =
   "extraction slot 'cpu' measured 12.0 prompt tok/s and 3.0 decode tok/s (from probe); one " +
@@ -170,5 +170,30 @@ describe('<ThroughputNote> beside the extraction slot picker', () => {
   it('renders nothing when there is no cached throughput', () => {
     expect(renderToStaticMarkup(<ThroughputNote status={status({ throughput: null })} />)).toBe('')
     expect(renderToStaticMarkup(<ThroughputNote status={undefined} />)).toBe('')
+  })
+})
+
+describe('per-bank failures (#3241)', () => {
+  it('names each failing bank, largest first', () => {
+    const status = { errors: 7230, failed_by_bank: { 'private__hermes': 3, 'agent__coder': 7227, shared: 0 } }
+    expect(bankFailureNotes(status)).toEqual([
+      'Bank "agent__coder" has 7227 failed operations.',
+      'Bank "private__hermes" has 3 failed operations.',
+    ])
+  })
+
+  it('says nothing for a missing, empty or malformed field', () => {
+    expect(bankFailureNotes(undefined)).toEqual([])
+    expect(bankFailureNotes({})).toEqual([])
+    expect(bankFailureNotes({ failed_by_bank: {} })).toEqual([])
+    expect(bankFailureNotes({ failed_by_bank: ['x'] })).toEqual([])
+    expect(bankFailureNotes({ failed_by_bank: { a: 'x', b: -1 } })).toEqual([])
+  })
+
+  it('uses singular for one failure and renders a Banner per bank', () => {
+    const html = renderToStaticMarkup(<BankFailures status={{ failed_by_bank: { shared: 1 } }} />)
+    expect(html).toContain('mem-graph-bank-failures')
+    expect(html).toContain('Bank &quot;shared&quot; has 1 failed operation.')
+    expect(renderToStaticMarkup(<BankFailures status={{}} />)).toBe('')
   })
 })

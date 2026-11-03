@@ -924,7 +924,24 @@ def test_graph_status_aggregates_real_counters_from_hindsight(hal0_home: Path) -
     assert body["builds_ok"] == 8  # 3 + 5 completed
     assert body["in_flight"] == 3  # 2 pending + 1 processing
     assert body["errors"] == 1  # failed_operations on shared
+    assert body["failed_by_bank"] == {"shared": 1}  # #3241: only failing banks
     assert body["last_built_at"] == "2026-07-04T02:00:00Z"  # newest across banks
+
+
+def test_graph_status_names_each_failing_bank(hal0_home: Path) -> None:
+    # #3241: the summed `errors` stays, and `failed_by_bank` names the banks.
+    wrapper = _HindsightyWrapper(
+        {
+            "shared": {"operations_by_status": {"completed": 2}},
+            "agent__coder": {"failed_operations": 7227},
+            "private__hermes": {"operations_by_status": {"failed": 3}},
+        }
+    )
+    app = _build_app(wrapper, "utility")
+    with TestClient(app) as c:
+        body = c.get("/api/memory/graph/status").json()
+    assert body["errors"] == 7230
+    assert body["failed_by_bank"] == {"agent__coder": 7227, "private__hermes": 3}
 
 
 def test_status_unavailable_when_no_wrapper(
