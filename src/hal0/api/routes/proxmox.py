@@ -18,7 +18,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field, ValidationError
 
-from hal0.api.middleware.error_codes import Hal0Error
+from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.hardware import pve
 
 router = APIRouter()
@@ -117,13 +117,13 @@ async def put_proxmox_config(request: Request) -> dict[str, Any]:
     try:
         raw = await request.json()
     except Exception as exc:
-        raise Hal0Error(
+        raise BadRequest(
             "request body must be valid JSON",
             details={"error": str(exc)},
             code="request.invalid_json",
         ) from exc
     if not isinstance(raw, dict):
-        raise Hal0Error("request body must be a JSON object")
+        raise BadRequest("request body must be a JSON object", code="request.invalid_json")
 
     try:
         body = ProxmoxConfigBody.model_validate(raw)
@@ -203,13 +203,13 @@ async def test_proxmox_config(request: Request) -> dict[str, Any]:
     try:
         raw = await request.json()
     except Exception as exc:
-        raise Hal0Error(
+        raise BadRequest(
             "request body must be valid JSON",
             details={"error": str(exc)},
             code="request.invalid_json",
         ) from exc
     if not isinstance(raw, dict):
-        raise Hal0Error("request body must be a JSON object")
+        raise BadRequest("request body must be a JSON object", code="request.invalid_json")
 
     try:
         body = ProxmoxTestBody.model_validate(raw)
