@@ -82,6 +82,7 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- **Deleting a model whose registry row cannot be read is refused instead of reporting success.** `DELETE /api/models/{id}` (and `hal0 model rm`) used to treat any read error on the row, such as invalid JSON in its `extra` column, as "no row": the row was dropped, no file was removed or tombstoned, the response said `deleted: true`, and the next scan registered the GGUF again. Only "not in the registry" now counts as absent. Any other read error answers `500 model.row_unreadable` before a slot is unloaded or anything is deleted, and the journal logs `models.delete_row_unreadable` with the cause. (#2637)
 - **`store.path_escape_warn` is logged once per path instead of on every status poll.** A running slot whose model file sits outside the model store root re-resolved it on each poll and filled the hal0-api journal; the warning now fires the first time a path escapes and repeats log at debug level. (#3349)
 
 - **A halogen slot is no longer torn down by one transient error on its first chat turn.** The readiness sentinel convicted on a single transport error or 5xx, stopping a load that had taken minutes. It now pauses briefly and probes once more, and only a repeat fails the load, matching the corroboration rule of the generic output-sanity gate ([#3287](https://github.com/Hal0ai/hal0/issues/3287)).

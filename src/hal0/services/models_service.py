@@ -907,7 +907,9 @@ async def cascade_delete_model(
     The file set is captured inside that lock just before the row goes,
     because the row's ``model_file`` rows cascade away with it. File removal
     never raises and never undoes the row delete: a refused or failed file
-    is reported in ``files_kept``. ``roots`` defaults to
+    is reported in ``files_kept``. A row that exists but cannot be read back
+    raises ``ModelRowUnreadable`` (``model.row_unreadable``) before anything
+    is touched. ``roots`` defaults to
     :func:`deletion_roots`.
 
     The caller emits ``model.deleted`` *after* this returns so subscribers
@@ -918,6 +920,10 @@ async def cascade_delete_model(
     import asyncio
 
     from hal0.registry.pull import mark_deleting, pull_job_file, unmark_deleting
+
+    # Refuse an unreadable row before anything is touched: no slot unload,
+    # no default cleared, no row removed (hal0#2637).
+    await asyncio.to_thread(_read_row_for_delete, registry, model_id)
 
     # No new pull/update job can start for this id until the delete is done.
     mark_deleting(model_id)
@@ -987,6 +993,28 @@ async def cancel_active_pull(
             await asyncio.wait_for(job.progress_event.wait(), timeout=min(0.5, remaining))
 
 
+def _read_row_for_delete(registry: Any, model_id: str) -> Any | None:
+    """The row's ``Model``, or ``None`` only when the id is not registered.
+
+    Any other read failure raises :class:`ModelRowUnreadable`: carrying on
+    with no model would drop the row but leave its files and tombstones
+    behind, so the next scan re-registers the GGUF (ADR-0026, hal0#2637).
+    """
+    from hal0.registry.store import ModelNotFound, ModelRowUnreadable
+
+    try:
+        return registry.get(model_id)
+    except ModelNotFound:
+        return None
+    except Exception as exc:
+        log.warning("models.delete_row_unreadable id=%s err=%s", model_id, exc)
+        raise ModelRowUnreadable(
+            f"registry row for {model_id!r} cannot be read ({exc}); nothing was deleted. "
+            "Repair the row or remove it directly in the registry database.",
+            details={"model_id": model_id, "error": str(exc)},
+        ) from exc
+
+
 def _remove_row_and_files(
     registry: Any,
     model_id: str,
@@ -998,10 +1026,7 @@ def _remove_row_and_files(
     from hal0.registry.discover import SCAN_DELETE_LOCK
 
     with SCAN_DELETE_LOCK:
-        try:
-            model = registry.get(model_id)
-        except Exception:
-            model = None
+        model = _read_row_for_delete(registry, model_id)
         planned = plan_model_files(registry, model) if model is not None else []
         removed = bool(registry.remove(model_id))
         if removed:

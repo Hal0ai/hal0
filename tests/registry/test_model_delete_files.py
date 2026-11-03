@@ -847,3 +847,61 @@ def test_custom_store_file_is_tombstoned_when_kept_and_not_rescanned(
 
     scan_and_register(registry, load_hal0_config().models)
     assert registry.list() == []
+
+
+# ── unreadable registry row (hal0#2637) ──────────────────────────────────────
+
+
+def _corrupt_extra(registry: ModelRegistry, model_id: str) -> None:
+    """Make ``row_to_model`` raise: invalid JSON in the ``extra`` column."""
+    with connect(registry.db_path) as conn, tx(conn):
+        conn.execute("UPDATE model SET extra = ? WHERE id = ?", ("{not json", model_id))
+
+
+def test_unreadable_row_refuses_delete_and_changes_nothing(
+    registry: ModelRegistry, root: Path
+) -> None:
+    from hal0.registry.store import ModelRowUnreadable
+
+    f = _write(root / "broken.gguf")
+    registry.add(Model(id="broken", path=str(f)))
+    _corrupt_extra(registry, "broken")
+
+    with pytest.raises(ModelRowUnreadable) as ei:
+        _delete(registry, "broken", [root])
+
+    assert ei.value.code == "model.row_unreadable"
+    assert ei.value.details["model_id"] == "broken"
+    # Row and file are both still there: the delete did not half-happen.
+    assert registry.has("broken")
+    assert f.exists()
+
+
+def test_unreadable_row_does_not_unload_slots(registry: ModelRegistry, root: Path) -> None:
+    """The refusal comes before the cascade touches any referrer slot."""
+    from hal0.registry.store import ModelRowUnreadable
+
+    f = _write(root / "broken2.gguf")
+    registry.add(Model(id="broken2", path=str(f)))
+    _corrupt_extra(registry, "broken2")
+
+    class _SlotManager:
+        def __init__(self) -> None:
+            self.touched = False
+
+        def __getattr__(self, name: str) -> Any:
+            self.touched = True
+            raise AssertionError(f"slot manager used: {name}")
+
+    sm = _SlotManager()
+    affected = [{"name": "chat", "path": "/nonexistent/chat.toml", "config": {}}]
+    with pytest.raises(ModelRowUnreadable):
+        asyncio.run(svc.cascade_delete_model(registry, sm, "broken2", affected, roots=[str(root)]))
+    assert sm.touched is False
+
+
+def test_missing_row_is_still_a_plain_no_op(registry: ModelRegistry, root: Path) -> None:
+    """Only "not found" counts as absent: no error, nothing deleted."""
+    out = _delete(registry, "ghost", [root])
+    assert out["deleted"] is False
+    assert out["files_removed"] == []
