@@ -32,4 +32,11 @@
 # `hermes-venv-missing-mcp-extra`). The provisioning `mcp_wire` phase now
 # hard-fails when the venv client cannot import/connect — do not drop this
 # extra.
-hermes-agent[web,mcp] @ git+https://github.com/NousResearch/hermes-agent.git@4d04303818b61bf3aa09278af48356315515965b
+#
+# The `acp` extra pulls `agent-client-protocol`, which upstream gates behind
+# this extra. Without it `hermes acp` cannot start ("its protocol packages are
+# missing from this install") and anything driving Hermes over the Agent Client
+# Protocol fails at launch (#3344). Releases are immutable, so it has to be in
+# the pin; `hermes pm install --extra acp` into the live venv does not survive
+# the next rebuild.
+hermes-agent[web,mcp,acp] @ git+https://github.com/NousResearch/hermes-agent.git@4d04303818b61bf3aa09278af48356315515965b
