@@ -21,6 +21,7 @@ from collections.abc import Callable, Iterable
 from typing import Any
 
 from hal0.errors import CapabilityMismatch, Hal0Error
+from hal0.slots._cfg_helpers import non_chat_signal
 from hal0.slots.activation import slot_model_id
 from hal0.slots.manager import SLOT_ALIASES
 from hal0.upstreams.registry import Upstream, UpstreamRegistry
@@ -363,9 +364,62 @@ def guard_capability_mismatch(
     )
 
 
+def guard_chat_slot_capability(
+    cfg: dict[str, Any] | None,
+    path: str,
+    *,
+    model: str = "",
+    resolution_path: str = "",
+) -> None:
+    """Raise a typed 409 when an embeddings/rerank request lands on a chat slot (#2672).
+
+    The reverse of :func:`guard_capability_mismatch`: a chat (``type="llm"``,
+    llama-server) slot started without ``--embedding``/``--reranking`` answers
+    ``/v1/embeddings`` and ``/v1/rerank`` with a raw 501 naming a llama-server
+    flag a hal0 user cannot act on. Keyed on the slot's *mode flag* (via
+    :func:`~hal0.slots._cfg_helpers.non_chat_signal`), not its role, so a chat
+    slot whose profile carries ``--embedding`` / ``--reranking`` still passes.
+    ``--reranking`` implies llama-server's embedding mode, so a reranking slot
+    serves both paths; an ``--embedding`` slot serves only embeddings.
+
+    A missing config, a non-``llm`` slot or a non-llama-server provider (FLM
+    NPU, ComfyUI, …) is always a no-op: only a slot we can positively identify
+    as a plain chat slot is rejected.
+    """
+    if not cfg:
+        return
+    needed: tuple[str, ...]
+    if any(frag in path for frag in _RERANK_PATHS):
+        needed, wanted = ("reranking",), "reranking"
+    elif any(frag in path for frag in _EMBED_PATHS):
+        needed, wanted = ("embedding", "reranking"), "embedding"
+    else:
+        return
+    if str(cfg.get("type") or "").strip().lower() != "llm":
+        return
+    if str(cfg.get("provider") or "llama-server").strip().lower() not in ("", "llama-server"):
+        return
+    if non_chat_signal(cfg) in needed:
+        return
+    slot = str(cfg.get("name") or "")
+    raise CapabilityMismatch(
+        f"model {model!r} resolved to the chat slot {slot!r}, which is not running in "
+        f"{wanted} mode and cannot serve {path!r}; address an {wanted} slot instead",
+        details={
+            "model": model,
+            "path": path,
+            "slot": slot,
+            "slot_type": "llm",
+            "requires": wanted,
+            "resolution_path": resolution_path,
+        },
+    )
+
+
 __all__ = [
     "LegacyResolutionFailed",
     "guard_capability_mismatch",
+    "guard_chat_slot_capability",
     "resolve_by_capability",
     "select_slot_by_type",
 ]
