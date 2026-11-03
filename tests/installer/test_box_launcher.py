@@ -680,6 +680,18 @@ def test_containerfile_pins_identity_and_limits() -> None:
     assert text.count("\nRUN ") == 1
 
 
+def test_device_comments_do_not_claim_box_root_is_locked_out() -> None:
+    # Box root holds CAP_SETGID in the box's user namespace and the device gid
+    # is mapped, so it can join the group and open the node. The boundary is
+    # the box as a whole (the hal0box host user), not the box's root account.
+    adr = next((_REPO_ROOT / "docs" / "adr").glob("0051-*.md")).read_text()
+    for text in (_CONTAINERFILE.read_text(), adr):
+        flat = " ".join(text.replace("#", " ").split())
+        assert "cannot open the devices" not in flat
+        assert "not in the device group and cannot open" not in flat
+        assert "CAP_SETGID" in flat
+
+
 # ── Task 2: install, self-test, shim and uninstall ────────────────────────
 
 

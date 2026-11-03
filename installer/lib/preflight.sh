@@ -149,9 +149,10 @@ fi
 #                       /run/.containerenv or /run/systemd/container reading
 #                       "podman". Checked BEFORE the LXC probe because a box
 #                       can itself run inside an LXC, and the box is the
-#                       boundary the operator can act on. Its root is not in
-#                       the device group, so remedies point at the host that
-#                       created the box, never at Proxmox `devN:` entries.
+#                       boundary the operator can act on. Its root cannot
+#                       change a device node's group (the node's owner is not
+#                       mapped into the box), so remedies point at the host
+#                       that created the box, never at Proxmox `devN:` entries.
 #   lxc-privileged    — an LXC whose root IS host root (no uid remap)
 #   lxc-unprivileged  — an LXC behind a uid/gid remap
 #

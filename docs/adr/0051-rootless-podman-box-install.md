@@ -87,9 +87,13 @@ same as the host on a gigabit link.
    `unmask=/proc/sys` and an explicit device list. The seccomp filter stays and
    host disks stay hidden. Nested netavark needs the writable `/proc/sys`, and
    kernel-wide sysctls stay denied.
-6. Devices are reached by group mapping (`--gidmap +g<gid>:@<gid>`). Box root is
-   not in the device group and cannot open the node. Slots and hal0 run as the
-   hal0 user, which joins the group. A root-owned device node (gid 0) is skipped
+6. Devices are reached by group mapping (`--gidmap +g<gid>:@<gid>`), never by
+   making box root the node's owner. Slots and hal0 run as the hal0 user, which
+   joins the group. Box root is not a member but can still open the node: it
+   holds CAP_SETGID in the box's user namespace and the gid is mapped, so it
+   can take the group. The device boundary is the box as a whole, that is the
+   `hal0box` host user, and only nodes in a dedicated device group are mapped
+   (a privileged host group such as `disk` or `shadow` is refused). A root-owned device node (gid 0) is skipped
    with a message that names the udev rule the host needs.
 7. A narrow ID map is supported. Inside a 65536-wide LXC map the box uses a
    narrow range, and 65534 is mapped through so apt and PAM work.

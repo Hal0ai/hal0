@@ -1,8 +1,9 @@
 """``hal0_lxc_kind`` recognises a rootless podman box, and the box remedies
 never send the operator to Proxmox.
 
-The box root is not in the device group, so a broken ``/dev/kfd`` group can
-only be fixed on the host that created the box. ``hal0_in_lxc`` must stay
+The box root cannot change a device node's group (the node's owner is not
+mapped into the box), so a broken ``/dev/kfd`` group can only be fixed on the
+host that created the box. ``hal0_in_lxc`` must stay
 LXC-only so the LXC remedies are not emitted for a box.
 """
 

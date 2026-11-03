@@ -13,7 +13,10 @@
 #   the state volumes. install.sh finds the account and leaves it alone.
 # - Device groups carry the host's gids (mapped through with --gidmap), and
 #   hal0 joins them so it can open /dev/kfd and render nodes. Box root is not
-#   in those groups and cannot open the devices, by design.
+#   a member, but it can still reach the devices: it holds CAP_SETGID in the
+#   box's user namespace and the gid is mapped, so it can take the group. The
+#   device boundary is the box as a whole (the hal0box host user), not root's
+#   group membership inside it.
 # - Root linger is preset, or Open WebUI's network namespace gets stranded.
 # - DefaultLimitMEMLOCK=infinity, because the box's systemd otherwise caps
 #   every unit below what ROCm needs.
