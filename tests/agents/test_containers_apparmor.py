@@ -222,15 +222,120 @@ def test_socket_denied_disables_all_six_unconfined_profiles_and_retries(tmp_path
 def test_socket_denied_retry_still_failing_reports_not_fixed(tmp_path: Path) -> None:
     aa = tmp_path / "apparmor.d"
     _seed_profiles(aa, ("podman",))
-    run, _calls = _recorder(
-        [_proc(126, _SOCKET_DENIED_STDERR), _proc(0), _proc(126, _SOCKET_DENIED_STDERR)]
+    run, calls = _recorder(
+        [
+            _proc(126, _SOCKET_DENIED_STDERR),
+            _proc(0),  # apparmor_parser -R
+            _proc(126, _SOCKET_DENIED_STDERR),  # retry smoke
+            _proc(0),  # rollback: apparmor_parser -r
+        ]
     )
     result = ca.ensure_podman_apparmor_usable(run=run, conf_path=tmp_path / "c.conf", apparmor_d=aa)
     assert result.outcome == "guest_profiles_disabled"
     assert result.fixed is False
-    assert (aa / "disable" / "podman").is_symlink()
     # the retry's own failure text is kept (like the #1563 path), not the stale first one
     assert "socket: permission denied" in (result.detail or "")
+    # a false positive does not leave the profile disabled for nothing
+    assert result.rolled_back == ["podman"]
+    assert result.disabled == []
+    assert not (aa / "disable" / "podman").is_symlink()
+    assert calls[-1] == ["apparmor_parser", "-r", str(aa / "podman")]
+    assert "rolled back: podman" in (result.detail or "")
+
+
+def test_rollback_only_touches_links_this_run_created(tmp_path: Path) -> None:
+    aa = tmp_path / "apparmor.d"
+    _seed_profiles(aa, ("podman", "crun"))
+    (aa / "disable").mkdir()
+    (aa / "disable" / "podman").symlink_to(aa / "podman")  # the operator's own link
+    run, calls = _recorder(
+        [
+            _proc(126, _SOCKET_DENIED_STDERR),
+            _proc(0),
+            _proc(0),
+            _proc(126, _SOCKET_DENIED_STDERR),
+            _proc(0),
+        ]
+    )
+    result = ca.ensure_podman_apparmor_usable(run=run, conf_path=tmp_path / "c.conf", apparmor_d=aa)
+    assert result.fixed is False
+    assert result.preexisting == ["podman"]
+    assert result.rolled_back == ["crun"]
+    assert result.disabled == ["podman"]
+    assert (aa / "disable" / "podman").is_symlink()  # kept
+    assert not (aa / "disable" / "crun").is_symlink()
+    assert [c for c in calls if c[:2] == ["apparmor_parser", "-r"]] == [
+        ["apparmor_parser", "-r", str(aa / "crun")]
+    ]
+
+
+def test_rollback_reload_failure_still_removes_the_link(tmp_path: Path) -> None:
+    aa = tmp_path / "apparmor.d"
+    _seed_profiles(aa, ("podman",))
+    run, _ = _recorder(
+        [_proc(126, _SOCKET_DENIED_STDERR), _proc(0), _proc(126, _SOCKET_DENIED_STDERR), _proc(1)]
+    )
+    result = ca.ensure_podman_apparmor_usable(run=run, conf_path=tmp_path / "c.conf", apparmor_d=aa)
+    assert result.rolled_back == ["podman"]
+    assert not (aa / "disable" / "podman").is_symlink()
+
+
+def test_failed_unload_keeps_the_links_even_when_the_retry_fails(tmp_path: Path) -> None:
+    aa = tmp_path / "apparmor.d"
+    _seed_profiles(aa, ("podman", "crun"))
+    run, calls = _recorder(
+        [
+            _proc(126, _SOCKET_DENIED_STDERR),
+            _proc(0),
+            _proc(1, "unable to remove"),
+            _proc(126, _SOCKET_DENIED_STDERR),
+        ]
+    )
+    result = ca.ensure_podman_apparmor_usable(run=run, conf_path=tmp_path / "c.conf", apparmor_d=aa)
+    assert result.fixed is False
+    assert result.rolled_back == []
+    assert result.disabled == ["podman", "crun"]
+    assert not any(c[:2] == ["apparmor_parser", "-r"] for c in calls)
+
+
+def test_successful_retry_never_rolls_back(tmp_path: Path) -> None:
+    aa = tmp_path / "apparmor.d"
+    _seed_profiles(aa, ("podman",))
+    run, calls = _recorder([_proc(126, _SOCKET_DENIED_STDERR), _proc(0), _proc(0)])
+    result = ca.ensure_podman_apparmor_usable(run=run, conf_path=tmp_path / "c.conf", apparmor_d=aa)
+    assert result.fixed is True
+    assert result.rolled_back == []
+    assert (aa / "disable" / "podman").is_symlink()
+    assert not any(c[:2] == ["apparmor_parser", "-r"] for c in calls)
+
+
+def test_one_unlinkable_entry_does_not_abort_the_rest(tmp_path: Path) -> None:
+    aa = tmp_path / "apparmor.d"
+    _seed_profiles(aa, ("podman", "crun", "runc"))
+    stuck = aa / "disable" / "crun"
+    stuck.mkdir(parents=True)
+    (stuck / "keep").write_text("x")  # a non-empty dir: unlink() raises OSError
+    run, _ = _recorder([_proc(126, _SOCKET_DENIED_STDERR), _proc(0), _proc(0), _proc(0)])
+
+    result = ca.ensure_podman_apparmor_usable(run=run, conf_path=tmp_path / "c.conf", apparmor_d=aa)
+
+    assert result.outcome == "guest_profiles_disabled"
+    assert result.link_failed == ["crun"]
+    assert result.disabled == ["podman", "runc"]
+    assert (aa / "disable" / "podman").is_symlink()
+    assert (aa / "disable" / "runc").is_symlink()
+    assert "could not disable: crun" in (result.detail or "")
+
+
+def test_every_link_failing_is_unrelated_and_says_why(tmp_path: Path) -> None:
+    aa = tmp_path / "apparmor.d"
+    _seed_profiles(aa, ("podman",))
+    (aa / "disable").write_text("a file where the directory should be")  # mkdir fails
+    run, calls = _recorder([_proc(126, _SOCKET_DENIED_STDERR)])
+    result = ca.ensure_podman_apparmor_usable(run=run, conf_path=tmp_path / "c.conf", apparmor_d=aa)
+    assert result.outcome == "unrelated"
+    assert "could not create the disable link for podman" in (result.detail or "")
+    assert len(calls) == 1  # no parser call, no retry
 
 
 def test_socket_denied_signature_is_case_insensitive(tmp_path: Path) -> None:
@@ -307,16 +412,6 @@ def test_1563_signature_keeps_precedence_over_socket_denied(tmp_path: Path) -> N
     assert not any(_is_parser_remove(c) for c in calls)
 
 
-def test_1563_plain_path_unchanged_with_apparmor_d_given(tmp_path: Path) -> None:
-    conf = tmp_path / "containers.conf"
-    aa = tmp_path / "apparmor.d"
-    _seed_profiles(aa)
-    run, _calls = _recorder([_proc(243, _APPARMOR_STDERR), _proc(0)])
-    result = ca.ensure_podman_apparmor_usable(run=run, conf_path=conf, apparmor_d=aa)
-    assert result.outcome == "fixed"
-    assert not (aa / "disable").exists()
-
-
 def test_unrelated_failure_leaves_guest_profiles_alone(tmp_path: Path) -> None:
     aa = tmp_path / "apparmor.d"
     _seed_profiles(aa)
@@ -332,11 +427,9 @@ def test_disable_is_idempotent_and_still_retries(tmp_path: Path) -> None:
     _seed_profiles(aa)
     n = len(_PROFILE_NAMES)
 
-    run1, _ = _recorder(
-        [_proc(126, _SOCKET_DENIED_STDERR)] + [_proc(0)] * n + [_proc(126, _SOCKET_DENIED_STDERR)]
-    )
+    run1, _ = _recorder([_proc(126, _SOCKET_DENIED_STDERR)] + [_proc(0)] * n + [_proc(0)])
     first = ca.ensure_podman_apparmor_usable(run=run1, conf_path=tmp_path / "c.conf", apparmor_d=aa)
-    assert first.fixed is False
+    assert first.fixed is True
     snapshot = sorted(p.name for p in (aa / "disable").iterdir())
     targets = {p.name: os.readlink(p) for p in (aa / "disable").iterdir()}
 
@@ -471,10 +564,48 @@ def test_main_prints_summary_for_guest_profiles_disabled(
         )
 
     monkeypatch.setattr(ca, "ensure_podman_apparmor_usable", _fake_bad)
-    assert ca._main() == 0  # exit semantics unchanged; the bash gate re-smokes itself
+    # an unresolved remediation exits non-zero so install.sh's late re-check notices
+    assert ca._main() == ca.EXIT_GUEST_FIX_UNRESOLVED == 3
     out = capsys.readouterr().out
     assert "retry still failing" in out
     assert "apparmor-preflight-detail: boom" in out
+    assert ".ns_level=1" in out  # the value the guard read is visible in the log
+
+
+def test_main_revert_names_only_what_this_run_disabled(monkeypatch, tmp_path: Path, capsys) -> None:
+    aa = tmp_path / "aa"
+    monkeypatch.setenv("HAL0_APPARMOR_D", str(aa))
+    monkeypatch.setenv("HAL0_APPARMOR_CONF", str(tmp_path / "c.conf"))
+
+    def _fake(**_kw):
+        return ca.ApparmorPreflightResult(
+            outcome="guest_profiles_disabled",
+            disabled=["podman", "crun"],
+            preexisting=["podman"],  # the operator's own link
+            fixed=True,
+        )
+
+    monkeypatch.setattr(ca, "ensure_podman_apparmor_usable", _fake)
+    assert ca._main() == 0
+    out = capsys.readouterr().out
+    assert f"revert: rm {aa}/disable/crun && apparmor_parser -r {aa}/crun" in out
+    assert "rm " + str(aa) + "/disable/podman" not in out
+
+
+def test_main_summary_reports_rollback_and_no_revert(monkeypatch, tmp_path: Path, capsys) -> None:
+    monkeypatch.setenv("HAL0_APPARMOR_D", str(tmp_path / "aa"))
+    monkeypatch.setenv("HAL0_APPARMOR_CONF", str(tmp_path / "c.conf"))
+
+    def _fake(**_kw):
+        return ca.ApparmorPreflightResult(
+            outcome="guest_profiles_disabled", rolled_back=["podman"], fixed=False
+        )
+
+    monkeypatch.setattr(ca, "ensure_podman_apparmor_usable", _fake)
+    assert ca._main() == 3
+    out = capsys.readouterr().out
+    assert "rolled back (not disabled): podman" in out
+    assert "revert:" not in out  # nothing left disabled to revert
 
 
 # ── final-review wave: namespace guard, anchored token, comments ─────────────
@@ -768,12 +899,19 @@ def test_retry_failure_and_unload_failure_are_both_in_detail(tmp_path: Path) -> 
     aa = tmp_path / "apparmor.d"
     _seed_profiles(aa, ("podman",))
     run, _ = _recorder(
-        [_proc(126, _SOCKET_DENIED_STDERR), _proc(1, "nope"), _proc(126, _SOCKET_DENIED_STDERR)]
+        [
+            _proc(126, _SOCKET_DENIED_STDERR),
+            _proc(1, "nope"),
+            _proc(126, _SOCKET_DENIED_STDERR),
+        ]
     )
     result = ca.ensure_podman_apparmor_usable(run=run, conf_path=tmp_path / "c.conf", apparmor_d=aa)
     assert result.fixed is False
     assert "socket: permission denied" in (result.detail or "")
     assert "unload failed: podman" in (result.detail or "")
+    # inconclusive retry (the profile may still be loaded): the link is kept
+    assert result.rolled_back == []
+    assert (aa / "disable" / "podman").is_symlink()
 
 
 def test_public_disable_helper_still_returns_names_only(tmp_path: Path) -> None:
@@ -798,7 +936,7 @@ def test_main_summary_lists_unload_failures(monkeypatch, tmp_path: Path, capsys)
         )
 
     monkeypatch.setattr(ca, "ensure_podman_apparmor_usable", _fake)
-    assert ca._main() == 0  # exit semantics unchanged
+    assert ca._main() == 3  # fixed=False -> non-zero
     out = capsys.readouterr().out
     assert "unload failed: crun, runc" in out
     assert "podman, crun, runc" in out  # the disabled list is still reported
