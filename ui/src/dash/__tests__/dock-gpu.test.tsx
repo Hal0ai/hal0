@@ -578,6 +578,21 @@ describe('the dock GPU tab', () => {
     expect(box_.querySelector('.foot-downloads')).not.toBeNull()
   })
 
+  it('exposes the footer tabs as a tablist with aria-selected tracking the active tab', async () => {
+    mount(open())
+    const list = document.querySelector('.foot-tabs')!
+    expect(list.getAttribute('role')).toBe('tablist')
+    const tabs = Array.from(list.querySelectorAll('[role="tab"]'))
+    expect(tabs).toHaveLength(3)
+    const selected = () => tabs.filter((t) => t.getAttribute('aria-selected') === 'true').map((t) => t.getAttribute('data-testid'))
+    expect(selected()).toEqual(['dock-tab-events'])
+    await click(byId('dock-tab-gpu'))
+    expect(selected()).toEqual(['dock-tab-gpu'])
+    await click(byId('dock-tab-downloads'))
+    expect(selected()).toEqual(['dock-tab-downloads'])
+    for (const t of tabs) expect(t.getAttribute('aria-selected')).toMatch(/^(true|false)$/)
+  })
+
   it('clicking the segment opens the dock on the gpu tab', async () => {
     const onToggle = vi.fn()
     const host = mount(<Dock route="slots" param="image" expanded={false} onToggle={onToggle} />)
