@@ -31,30 +31,29 @@ process to babysit.
 curl -fsSL https://hal0.dev/install.sh | sudo bash
 ```
 
-> **v1.7.1 is the current stable release** (2026-10-26). It rebuilds image
-> generation around a catalog of image models, with no config-schema
-> migration and an ordinary `hal0 update` from any 1.4.x or later box; a 1.3.x
-> box hops through 1.5.0 first. Run `hal0 slot restart img` once after the
-> update so ComfyUI loads its new GPU gate. 1.7.0 removes
-> `hal0 comfyui orchestrate-models`, `POST /api/comfyui/models/fetch`,
-> `[image].idle_restore_minutes` and the `gen.capabilities` answer-file key,
-> and takes image models out of `hal0 model pull`; read the 1.7.0
-> **Breaking** and **Migrations** notes in [CHANGELOG.md](CHANGELOG.md) for
-> the replacements. Coming from before 1.6.0, read the 1.6.0 notes too; a box
-> that has not re-run the installer since 1.4.0 should do so once to pick up
-> the Hindsight limits, the Open WebUI client key and the Hermes wrappers. The project has followed semver
-> since v1.0.0; a minor release's **Breaking** notes flag behaviour changes an
-> operator or a script may notice. Upgrades start at 1.4.0; on anything older,
-> read [Upgrading from an older release](#upgrading-from-an-older-release)
-> first.
+> **v1.8.0 is the current stable release** (2026-11-03). It adds the agent
+> bridge, Open WebUI's tools and shared memory, an installer component
+> checklist, an opt-in rootless podman box, slot tune overrides and the
+> optional halogen runner, and it makes the Operator Board the Hermes kanban.
+> It updates with an ordinary `hal0 update` from any 1.5.0 or later box; a
+> 1.3.x or 1.4.x box steps through 1.5.0 first. Read the 1.8.0 **Breaking**
+> and **Migrations** notes in [CHANGELOG.md](CHANGELOG.md) before you take
+> it: `hal0 agent upgrade` is now `sudo hal0 update component pi`, approval
+> decisions need a signed-in session or root, a slot file that still carries
+> tuning keys refuses to launch (and `hal0 update` exits 2 naming it), and
+> schema migration 015 drops the retired model tuning after writing a backup.
+> The project has followed semver since v1.0.0; a minor release's
+> **Breaking** notes flag behaviour changes an operator or a script may
+> notice. Upgrades start at 1.5.0; on anything older, read
+> [Upgrading from an older release](#upgrading-from-an-older-release) first.
 
-> **What 1.7.1 brings:** the dock, one status strip on every page for the
-> GPU's state and controls, slot and service health, downloads and a live
-> journal + activity feed; a slot rail beside the Inference pane; ComfyUI's
-> editor on the LAN again, and ComfyUI running as the `hal0` account inside
-> its container instead of root; an upgrade floor of 1.5.0; and twenty fixes
-> from the 1.7 fix wave. See [What's new](#whats-new) and
-> [Upgrading to 1.7.1](#upgrading-to-171).
+> **What 1.8.0 brings:** the agent bridge for remote coding agents; Open
+> WebUI with hal0's tools and shared Hindsight memory; an installer that
+> shows a component checklist (`--bare` for inference only); `install.sh
+> --box` for a rootless podman install; per-slot tune overrides; the optional
+> halogen runner; Hindsight 1.1.0; and the Hermes kanban as the Operator
+> Board. See [What's new](#whats-new) and
+> [Upgrading to 1.8.0](#upgrading-to-180).
 
 > **⚡ The installer is the whole setup.** There is no separate first-run
 > wizard afterwards. `install.sh` asks where models should live, optionally
@@ -237,6 +236,36 @@ pull, and an interrupted pull resumes via HTTP `Range` instead of restarting
 from zero.
 
 ## What's new
+
+### Shipped in 1.8.0
+
+- **The agent bridge.** `hal0 bridge add|list|revoke|rotate|scopes` admits a
+  remote coding agent with a revocable `hal0bk_` key bound to its name. The
+  `hal0-agents` MCP server delegates runs to the bundled Hermes agent,
+  `hal0-memory` shares memory, and `hal0-admin` is there only with
+  `--scope admin`. ADR-0043.
+- **Open WebUI with hal0's tools and shared memory.** Every chat gets the
+  memory and Hermes delegate tools through a managed `openwebui` bridge
+  client, and the `hal0_hindsight_rag` Filter adds shared Hindsight chunks to
+  Open WebUI's own RAG sources (opt-in). ADR-0049.
+- **An installer component checklist.** `--no-owui`, `--no-comfyui`,
+  `--no-hermes`, `--no-pi`, `--no-memory`, `--no-brain-model`, `--no-agents`
+  and `--bare`; an interactive fresh install shows a six-row checklist.
+- **An opt-in rootless podman box.** `install.sh --box` builds a systemd box
+  under a dedicated `hal0box` user and runs the unchanged installer in it;
+  `sudo hal0 box status|start|stop|logs|exec|rebuild` and `sudo hal0
+  uninstall` manage it. Bare metal stays the default. ADR-0051.
+- **Slot tune overrides.** A sparse `[tune]` table on a slot for context,
+  thinking, reasoning effort and budget, vision and speculation, inherited
+  from the profile when absent. ADR-0045.
+- **The Operator Board is the Hermes kanban.** `/api/board/*` is a live,
+  audited proxy to the Hermes kanban plugin; hal0 keeps no board of its own.
+  ADR-0046.
+- **halogen**, an optional external-image runner for Qwen3.8-Flash-Next on
+  Strix Halo, pinned by digest. ADR-0047.
+- **Hindsight 1.1.0**, typed profile reasoning knobs, narrowable model and
+  capability lists, and approval decisions that need a session or root
+  (ADR-0048).
 
 ### Shipped in 1.7.1
 
@@ -1006,6 +1035,36 @@ is `.../download/v1.3.0/stable.json`), then takes the 1.5.0 hop.
 Or reinstall from scratch with `sudo bash installer/uninstall.sh --purge`,
 which deletes `/etc/hal0` and `/var/lib/hal0`, models included, followed by
 the normal one-liner.
+
+### Upgrading to 1.8.0
+
+1.8.0 follows the same `hal0 update` path from any 1.x box at 1.5.0 or
+later. Before you take it:
+
+- **A 1.3.x or 1.4.x box steps through 1.5.0 first.** `hal0 update` stops
+  before it downloads anything and prints the installer command for 1.5.0;
+  run that, then update again.
+- **Fix any slot file that still carries tuning keys.** Such a slot now
+  refuses to start with `slot.unconverted` (422), `hal0 update` lists the
+  file and exits 2, and `hal0 doctor profiles` fails on it. Delete the keys
+  from the slot file, put their values on a profile (`hal0 profile create`),
+  and name it with `profile = "<name>"`; `hal0 config validate` confirms the
+  file loads. `hal0 profile migrate` is removed.
+- **Approvals need a session or root.** Script decisions with a signed-in
+  session (`POST /api/auth/login`) or `sudo hal0 agent approvals approve|deny
+  <id>`; a bare API key gets `403 auth.forbidden`.
+- **`hal0 agent upgrade` is now `sudo hal0 update component pi`.** A plain
+  `hal0 update` never re-pins Pi.
+- **The board needs Hermes.** Cards in the old hal0 board migrate into the
+  Hermes kanban at the first board request (or export to
+  `board-legacy-export-<timestamp>.json` when Hermes is not installed). Unset
+  `HERMES_SESSION_TOKEN` in `/etc/hal0/api.env`.
+- **A pre-015 backup is written.** Schema migration 015 drops the retired
+  model tuning; when any of it holds a value, hal0 first writes
+  `/var/lib/hal0/backups/hal0-pre-015-<timestamp>.db`. Rollback to 1.7.x
+  still works.
+- **The memory engine moves to Hindsight 1.1.0.** The upgrade copies
+  `.pg0` to `.pg0.pre-1.0.0` and needs 1.5 times its size free.
 
 ### Upgrading to 1.7.1
 

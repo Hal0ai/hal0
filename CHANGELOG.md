@@ -30,6 +30,19 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-11-03
+
+### Highlights
+
+- **The agent bridge.** `hal0 bridge add <name>` admits a remote coding agent (Claude Code, Codex, a CI job) with a revocable `hal0bk_` key of its own, and its `hal0-agents`, `hal0-memory` and opt-in `hal0-admin` MCP servers let it delegate to the bundled Hermes agent and share hal0 memory (ADR-0043).
+- **Open WebUI gets hal0's tools and shared memory.** Every chat carries the memory and Hermes delegate tools, and an optional Filter cites shared Hindsight memory beside uploaded documents (ADR-0049).
+- **The installer shows a component checklist.** `--no-owui`, `--no-comfyui`, `--no-hermes`, `--no-pi`, `--no-memory` and `--no-brain-model` skip one component each, and `--bare` installs inference only.
+- **An opt-in rootless podman box.** `install.sh --box` runs hal0 inside one rootless podman container under a dedicated `hal0box` user, managed by `sudo hal0 box ...`; bare metal stays the default (ADR-0051).
+- **Slot tune overrides.** A slot can carry a sparse `[tune]` table (context, thinking, reasoning effort and budget, vision, speculation) that overrides its profile, in REST, CLI, MCP, stacks and the console (ADR-0045).
+- **The Operator Board is the Hermes kanban.** `/api/board/*` proxies the Hermes kanban plugin and existing hal0 cards migrate into it (ADR-0046).
+- **halogen, an optional runner for Qwen3.8-Flash-Next on Strix Halo.** The vendor's image is pinned by digest and serves one `llm` slot through hal0's `/v1` (ADR-0047).
+- **Hindsight memory engine 1.1.0,** and Hermes profiles and the brain now write shared memory by default.
+
 ### Breaking
 
 - **`hal0 agent upgrade` is gone: use `sudo hal0 update component pi`.** There is no alias, and `hal0 agent upgrade` now exits 2 as an unknown command. The new command does what the old one did, as root in the CLI. Pi now appears in `hal0 update status` and `GET /api/updates/components`. A plain `hal0 update` never re-pins it. The row is advisory and never changes the exit code of `hal0 update` or `hal0 update status`: it reads `update-available` when Pi is behind its pin, `newer-than-pin` when it is ahead, and `unknown` when the pin cannot be read. The Agents card's `commands.upgrade` carries the new command. Like #2865, this is a deliberate exception to the rule that CLI commands are removed only in a major release, approved by the operator. (#2991)
@@ -97,6 +110,9 @@ applying. Add those subsections to a version's section to surface them; see
 ### Migrations
 
 - **The Hindsight memory engine's database migrates one way to 1.1.0.** The first start of hindsight-api 1.1.0 runs five of the engine's schema migrations on `/var/lib/hal0/memory/hindsight/.pg0`; the last of them clears placeholder `event_date` values that made retain fail on older PostgreSQL releases. Before the new engine starts, the upgrade stops the old engine and copies `.pg0` to `.pg0.pre-1.0.0`, and it needs 1.5 times the size of `.pg0` free to do so. If 1.1.0 does not answer `/health` and report its version, the old venv and that copy are both restored. The copy is kept after a successful upgrade; the next run that finds the engine on 1.1.0 deletes only older copies such as `.pg0.pre-0.9.2`. Memories, documents, directives, mental models and bank settings are carried over unchanged. `hal0 update --rollback` leaves the engine on 1.1.0, as it did for 1.0.0.
+- **Schema migration 015 runs on the first start of hal0-api 1.8.0 and cannot be undone in place.** When the dropped model tuning still holds a value, `/var/lib/hal0/backups/hal0-pre-015-<timestamp>.db` is written first (mode 0600) and the migration is held if that backup fails; rollback to 1.7.x works because 1.7.x runs on the reduced schema. See Breaking.
+- **Cards in a box's hal0 board move to the Hermes kanban.** At the first board request they are migrated into the Hermes board of the same slug (in `triage`), or exported to `board-legacy-export-<timestamp>.json` in the hal0 state directory when Hermes is not installed. See Breaking.
+- **Memory is shared by default only for new writes.** Notes written before 1.8.0 stay private; nothing is converted, and `hal0 update` and `reprovision --repair` converge the default profile's `X-hal0-Private` header. See Changed.
 
 ## [1.7.1] — 2026-10-27
 
