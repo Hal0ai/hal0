@@ -80,6 +80,7 @@ applying. Add those subsections to a version's section to surface them; see
 ### Fixed
 
 - **A halogen slot is no longer torn down by one transient error on its first chat turn.** The readiness sentinel convicted on a single transport error or 5xx, stopping a load that had taken minutes. It now pauses briefly and probes once more, and only a repeat fails the load, matching the corroboration rule of the generic output-sanity gate ([#3287](https://github.com/Hal0ai/hal0/issues/3287)).
+- **Scan commit no longer registers a halogen companion file as a model.** `POST /api/models/scan` with a row pointing at an ngram table, vision sidecar, mtp head or overlay `.hgn` file created a model row that a slot could not load. The row is now skipped with `models.halogen_companion` and the same hint add-from-path gives, and the rest of the batch still commits ([#3280](https://github.com/Hal0ai/hal0/issues/3280)).
 
 - **An image request no longer unloads the LLMs while the img slot is crash-looping.** During the backoff, or while the slot was parked, each request drained and unloaded the LLM set, was refused, then reloaded it, interrupting chat and agent work for an image that could not be produced. It now answers 503 with `Retry-After` straight away and leaves the LLMs loaded. ([#3299](https://github.com/Hal0ai/hal0/issues/3299))
 

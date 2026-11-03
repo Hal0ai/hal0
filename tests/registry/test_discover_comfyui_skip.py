@@ -210,3 +210,24 @@ def test_scan_and_register_drops_stale_row_without_a_scan_root_over_it(
 
     assert result["reconciled"] == ["old"]
     assert not registry.has("old")
+
+
+def test_scan_commit_skips_halogen_companion_keeps_checkpoint(
+    store: Path, registry: ModelRegistry
+) -> None:
+    """A companion .hgn row is skipped with ``models.halogen_companion`` (same
+    refusal as add-from-path); the checkpoint beside it still registers."""
+    ckpt = _write(store / "qwen38-flash-next-ht43.hgn")
+    ckpt.write_bytes(b"HGN1" + b"\x00" * 60)
+    table = _write(store / "qwen38-flash-next-ngram.hgn")
+
+    result = asyncio.run(
+        svc.commit_scan_rows([{"path": str(table)}, {"path": str(ckpt)}], registry, None)
+    )
+
+    assert len(result["added"]) == 1
+    assert not registry.has("qwen38-flash-next-ngram")
+    [skip] = result["skipped"]
+    assert skip["path"] == str(table.resolve())
+    assert skip["reason"] == "models.halogen_companion"
+    assert "qwen38-flash-next-ht43.hgn" in skip["message"]
