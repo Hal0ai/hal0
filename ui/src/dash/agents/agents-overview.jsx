@@ -26,7 +26,6 @@
 // the same. No ES imports across dash/* (main.tsx load order is the contract).
 
 import { useQueryClient } from "@tanstack/react-query";
-import { logsHashForUnit } from "../logs-hash";
 
 const { useState, useEffect, useRef } = React;
 
@@ -475,7 +474,7 @@ function AgentsOverview() {
             .catch((err) => _toast(`Re-mirror failed: ${_errText(err)}`, "err"))
       : null,
     // LogsView (extras.jsx) reads ?unit= off the hash (hal0#2931).
-    openLogs: (unit) => { window.location.hash = unit ? logsHashForUnit(unit) : "#logs"; },
+    openLogs: (unit) => { window.location.hash = unit ? "#logs?unit=" + encodeURIComponent(unit) : "#logs"; },
     // The Activity surface is the dock's Events tab; the dock listens for this event.
     openActivity: () => { window.dispatchEvent(new CustomEvent("hal0:open-events")); },
     // The approval queue modal is owned by App (main.jsx) and opened by event.

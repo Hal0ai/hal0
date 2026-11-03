@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-// hal0#2931: LogsView honours #logs?unit=<unit>.
+// hal0#2931: LogsView honours the unit App parses from #logs?unit=<unit>.
 import React from 'react'
 import { createRoot } from 'react-dom/client'
 import { act } from 'react-dom/test-utils'
@@ -28,21 +28,20 @@ vi.mock('@/api/hooks/useAgents', () => ({
   useUnitLogTail: (...a: unknown[]) => unitTail(...a),
 }))
 
-async function mount(hash: string) {
-  window.location.hash = hash
+async function mount(unit: string | null) {
   await import('../extras.jsx')
   const LogsView = (window as any).LogsView
   const host = document.createElement('div')
   document.body.appendChild(host)
   await act(async () => {
-    createRoot(host).render(<LogsView />)
+    createRoot(host).render(<LogsView unit={unit} />)
   })
   return host
 }
 
 const buttons = (h: HTMLElement) => [...h.querySelectorAll('button')].map((b) => b.textContent)
 
-describe('LogsView ?unit=', () => {
+describe('LogsView unit prop', () => {
   beforeEach(() => {
     unitTail.mockReset()
     slotStream.mockReset()
@@ -54,7 +53,7 @@ describe('LogsView ?unit=', () => {
   })
 
   it('a non-slot unit opens the unit channel and tails that unit', async () => {
-    const h = await mount('#logs?unit=hal0-agent%40hermes.service')
+    const h = await mount('hal0-agent@hermes.service')
     expect(buttons(h)).toContain('unit')
     expect(unitTail).toHaveBeenLastCalledWith('hal0-agent@hermes.service', 400, true)
     expect(h.textContent).toContain('hermes: exited with status 1')
@@ -62,14 +61,14 @@ describe('LogsView ?unit=', () => {
   })
 
   it('a slot unit selects that slot in the slot picker', async () => {
-    const h = await mount('#logs?unit=hal0-slot%40primary.service')
+    const h = await mount('hal0-slot@primary.service')
     expect(buttons(h)).not.toContain('unit')
     expect((h.querySelector('select') as HTMLSelectElement).value).toBe('primary')
     expect(slotStream).toHaveBeenLastCalledWith('primary', expect.anything())
   })
 
-  it('plain #logs offers no unit channel and tails nothing', async () => {
-    const h = await mount('#logs')
+  it('no unit offers no unit channel and tails nothing', async () => {
+    const h = await mount(null)
     expect(buttons(h)).not.toContain('unit')
     expect(unitTail).toHaveBeenLastCalledWith('', 400, false)
   })

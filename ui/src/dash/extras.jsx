@@ -12,7 +12,7 @@
 
 import { useLogsHistorical, useLogsStream, useSlotLogsStream, parseRawLevel } from '@/api/hooks/useLogs'
 import { useUnitLogTail } from '@/api/hooks/useAgents'
-import { parseLogsUnit, slotForUnit } from './logs-hash'
+import { slotForUnit } from './logs-hash'
 import { useSlots } from '@/api/hooks/useSlots'
 
 const { useState: useStateX } = React;
@@ -30,7 +30,7 @@ const UNIT_CHANNEL = ["unit", "unit"];
 // ════════════════════════════════════════════════════════════════════
 // LOGS
 // ════════════════════════════════════════════════════════════════════
-function LogsView() {
+function LogsView({ unit: unitProp = null }) {
   const [channel, setChannel] = useStateX("events");
   const [level, setLevel] = useStateX(null);
   const [slotFilter, setSlotFilter] = useStateX(null);
@@ -40,16 +40,10 @@ function LogsView() {
   const [pendingCount, setPendingCount] = useStateX(0);
   const scrollRef = React.useRef(null);
 
-  // #logs?unit=<unit> deep link (the agent card's Unit logs control). A slot
-  // unit selects that slot in the existing picker; any other unit gets its own
-  // `unit` channel. Re-read on hashchange: the page stays mounted when the
-  // card is clicked while already on #logs.
-  const [unit, setUnit] = useStateX(() => parseLogsUnit(window.location.hash));
-  React.useEffect(() => {
-    const onHash = () => setUnit(parseLogsUnit(window.location.hash));
-    window.addEventListener("hashchange", onHash);
-    return () => window.removeEventListener("hashchange", onHash);
-  }, []);
+  // #logs?unit=<unit> deep link (the agent card's Unit logs control); App
+  // parses the hash and passes `unit`. A slot unit selects that slot in the
+  // existing picker; any other unit gets its own `unit` channel.
+  const unit = unitProp && unitProp.trim() ? unitProp.trim() : null;
   const unitSlot = unit ? slotForUnit(unit) : null;
   const unitOnly = unit && !unitSlot ? unit : null;
   React.useEffect(() => {
