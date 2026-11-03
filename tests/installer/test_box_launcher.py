@@ -151,7 +151,11 @@ S="${HAL0_STUB_STATE}"; touch "$S/ufw_rules"
 case "${1:-}" in
     status)
         if [[ -f "$S/ufw_active" ]]; then
-            echo "Status: active"; echo
+            echo "Status: active"
+            # A real ufw writes the rule table after the header; a reader that
+            # stops at the first line (head -1, grep -q) must not break on it.
+            [[ -f "$S/ufw_slow" ]] && sleep 0.2
+            echo
             while IFS= read -r r; do [[ -n "$r" ]] && printf '%-26s ALLOW       Anywhere\n' "$r"; done < "$S/ufw_rules"
         else
             echo "Status: inactive"
@@ -776,6 +780,15 @@ def test_missing_apparmor_helper_fails_clearly(box: BoxHarness) -> None:
 
 def test_active_firewall_gets_published_ports(box: BoxHarness) -> None:
     box.set_firewall("ufw", active=True)
+    box.install()
+    assert {"8080/tcp", "3001/tcp", "8188/tcp"} <= box.firewall_allowed()
+
+
+def test_active_ufw_is_detected_when_its_table_is_written_late(box: BoxHarness) -> None:
+    # Regression for hal0#3364: `ufw status | head -1 | grep -q` under pipefail
+    # killed ufw with SIGPIPE whenever head exited before ufw finished writing.
+    box.set_firewall("ufw", active=True)
+    (box.state / "ufw_slow").write_text("")
     box.install()
     assert {"8080/tcp", "3001/tcp", "8188/tcp"} <= box.firewall_allowed()
 
