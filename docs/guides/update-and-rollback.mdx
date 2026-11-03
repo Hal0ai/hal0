@@ -275,6 +275,11 @@ The first `hal0 update` to 1.6.0 changes how Hermes is installed. One step is ne
   (`hal0 profile create`), name it with `profile = "<name>"`, and confirm with
   `hal0 config validate`. Nothing rewrites the file for you, and
   `hal0 profile migrate` is removed.
+- **An existing install stays as it is.** The rootless podman box is an opt-in
+  for a fresh install (`install.sh --box`). `hal0 update` never moves a
+  bare-metal or LXC install into a box, and `--box` refuses to run over an
+  existing install. There is no converter yet; see
+  [Install in a rootless podman box](/docs/getting-started/box/).
 - **Approval decisions need a signed-in session or root.** A script that
   approved or denied with the admin key must sign in first
   (`POST /api/auth/login`) or use `sudo hal0 agent approvals approve|deny <id>`

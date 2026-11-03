@@ -1050,6 +1050,9 @@ later. Before you take it:
   from the slot file, put their values on a profile (`hal0 profile create`),
   and name it with `profile = "<name>"`; `hal0 config validate` confirms the
   file loads. `hal0 profile migrate` is removed.
+- **An existing install stays as it is.** The rootless podman box is an
+  opt-in for a fresh install (`install.sh --box`); `hal0 update` never moves
+  an install into a box, and there is no converter yet.
 - **Approvals need a session or root.** Script decisions with a signed-in
   session (`POST /api/auth/login`) or `sudo hal0 agent approvals approve|deny
   <id>`; a bare API key gets `403 auth.forbidden`.
