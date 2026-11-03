@@ -1,0 +1,224 @@
+---
+title: Install in a rootless podman box
+description: Opt-in install of hal0 inside one rootless podman container on a Linux host or LXC (v1.8.0). One command, GPU and NPU passed through as device nodes, a thin host shim, and an uninstall that keeps the box's data unless you purge it.
+sidebar:
+  order: 16
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components';
+
+<Aside type="caution" title="Opt-in, new in v1.8.0">
+The box is an **opt-in** install. A normal install is still the
+[bare-metal install](/docs/getting-started/bare-metal/), and that stays the
+default. The box has been exercised on VMs, on a CPU-only bare-metal desktop
+and on AMD hardware inside an LXC, but not on a true bare-metal AMD host. Read
+[What is not tested yet](#what-is-not-tested-yet) before you choose it for a
+machine you depend on.
+</Aside>
+
+The box puts the whole hal0 install, including its systemd units, its service
+user and its nested podman store for the slots, inside **one rootless podman
+container**. On the host there is a dedicated `hal0box` user, the box itself, a
+`hal0` command that forwards into it, and three published ports. The box's root
+is an ordinary unprivileged user on the host. The GPU and NPU device nodes are
+passed in by group, and the box never runs `--privileged`.
+
+The installer inside the box is the same one a bare-metal host runs. The
+decision and its evidence are in
+[ADR-0051](https://github.com/Hal0ai/hal0/blob/main/docs/adr/0051-rootless-podman-box-install.md).
+
+<Aside type="note" title="What the box does not protect">
+A rootless container shares the host kernel. A kernel bug reachable from a user
+namespace is the same class of exposure as an unprivileged LXC, and the box does
+not remove it. Inside the box the `hal0` account is still root-equivalent and
+the bundled agent can still reach every credential the box holds, as
+`SECURITY.md` describes. The box keeps that inside the box. It does not close it.
+</Aside>
+
+## 1. Host prerequisites
+
+The installer checks these before it changes anything and says what to fix.
+
+| Requirement | Notes |
+|---|---|
+| **Root** | Run the install with `sudo`. The launcher creates the `hal0box` user and maps the device groups. |
+| **cgroup v2** | The unified hierarchy must be mounted. A cgroup v1 host fails preflight. |
+| **podman 4.9 or newer** | On apt, dnf, pacman and zypper hosts the launcher installs podman, `passt` and `uidmap` (or `shadow`) if they are missing. |
+| **passt / pasta, recent** | A 2024-02 `passt` (Ubuntu 24.04) stalls nested outbound connections inside an LXC. The launcher runs a self-test that fetches a page from a container nested in the box and stops with a remedy if it stalls. Install a newer `passt` and re-run. |
+| **`/dev/net/tun` and `/dev/fuse`** | Needed on any host. In an LXC, add both to the container on the Proxmox host (`pct set <id> --dev<N> /dev/net/tun`, and the same for `/dev/fuse`, or `features: fuse=1`) and restart it. |
+| **Free ports 8080, 3001, 8188** | The box publishes exactly these. Preflight fails if another process listens on one. |
+| **IDs 20000-59999 free, inside an unprivileged LXC** | In a container with a narrow (65536-wide) ID map the box always uses sub-IDs 20000-59999 plus 65534. Preflight refuses if a host user or group, or another user's `/etc/subuid` or `/etc/subgid` range, already uses an ID there, because box files would then be owned by that account. |
+| **GPU and NPU device nodes** | `/dev/kfd`, `/dev/dri/renderD*` and `/dev/accel/accel*` are passed in when present. With none, the box is CPU-only. |
+
+Some things stay on the host and cannot move into the box: the kernel, the
+`amdgpu` and `amdxdna` drivers, firmware, and the GTT kernel argument, which
+needs a reboot. Set those up first with
+[GPU drivers and memory](/docs/getting-started/drivers/).
+
+A device node owned by root (gid 0, as `/dev/kfd` is on some stock kernels)
+cannot be reached from the box. The launcher skips it with a message. Give the
+node a device group with a host udev rule, for example in
+`/etc/udev/rules.d/70-hal0-kfd.rules`:
+
+```text
+KERNEL=="kfd", GROUP="render", MODE="0660"
+```
+
+then run `sudo udevadm control --reload && sudo udevadm trigger` and install
+again.
+
+The device's group is mapped into the box, so the `hal0box` user gains that
+group's rights on the host. Preflight therefore refuses a node whose host group
+is a privileged one (`disk`, `shadow`, `adm`, `sudo`, `wheel`, `kmem`, `tty`,
+`root`, `systemd-journal`, `docker`, `lxd`, `libvirt`, `input` and similar).
+Give such a node a dedicated device group with a udev rule like the one above.
+
+The launcher creates the `hal0box` user itself, records that in
+`/var/lib/hal0-box/owner` and gives the account the comment `hal0 box`. If a
+`hal0box` user already exists without both, preflight refuses rather than take
+over an account hal0 did not create, and `hal0 uninstall --purge` never deletes
+such a user. Remove or rename that user first.
+
+If a hal0 install already exists on the host, `/usr/local/bin/hal0` is not the
+box shim and preflight refuses. Install without `--box`, or remove the existing
+install first. Converting an existing install is not supported (see below).
+
+## 2. Install
+
+```sh
+curl -fsSL https://hal0.dev/install.sh | sudo bash -s -- --box
+```
+
+`--box` is consumed by the bootstrap script. It verifies the signed release
+tarball exactly as for a bare-metal install, then hands the verified tree to
+`installer/box/box.sh`. Other installer flags (for example `--bare`) pass
+through to the installer inside the box.
+
+The launcher then, in order: runs preflight, installs any missing host
+packages, creates the `hal0box` user and its sub-ID ranges, builds the box
+image from a digest-pinned Ubuntu 26.04 base, creates the container, starts it
+as a user unit that survives reboots, runs the network self-test, copies the
+verified tree in (with the cosign build bootstrap verified, so the first
+in-box `hal0 update` can check signatures) and runs the hal0 installer there,
+waits for `/api/health`,
+opens the three ports on an active `ufw` or `firewalld`, and installs the `hal0`
+shim. A first install takes a quarter of an hour or more. It is safe to re-run
+the same command if it stops part-way, and the state kept on the box volumes
+is reused.
+
+Logs are `/var/log/hal0-box-build.log`, `/var/log/hal0-box-selftest.log` and
+`/var/log/hal0-box-install.log`.
+
+## 3. What changes compared with a bare-metal install
+
+- **`hal0.local` does not work.** Multicast does not cross the pasta network
+  boundary, so the box reports mDNS as unavailable instead of announcing a name.
+  Use the host's address or its own name.
+- **The port list is fixed at creation:** `8080` (API), `3001` (Open WebUI) and
+  `8188` (ComfyUI). A slot port, a changed `HAL0_PORT` or a non-loopback
+  `[slots].publish_host` does not reach the LAN. `hal0 doctor` shows a
+  "Box boundary" row that warns about these.
+- **Model stores on other host paths** must be mounted into the box when it is
+  created. The box sees only its own volumes. A mounted NFS share also needs its
+  group mapped.
+- **`journalctl` and `/etc/hal0` are inside the box.** Use the shim:
+  `sudo hal0 box logs` for the box unit, and
+  `sudo hal0 box exec -- journalctl -u hal0-api -n 100` or
+  `sudo hal0 box exec -- bash` for anything else.
+- **Firewall.** If `ufw` or `firewalld` is active, the launcher opens the three
+  ports and removes exactly those rules on uninstall. With another firewall,
+  open `8080`, `3001` and `8188` yourself.
+- **`hal0` on the host is a shim.** `sudo hal0 <args>` runs `hal0 <args>` inside
+  the box. It needs root, because the box belongs to `hal0box`. The client
+  address hal0 logs for a LAN client is the real one.
+- **Inside an LXC the box has a memory limit.** A box nested in an LXC would
+  otherwise see the Proxmox host's memory rather than the LXC's, so the
+  launcher creates it with `--memory` set to the LXC's memory as the LXC
+  reports it, and hal0 budgets against that. This needs the cgroup v2 memory
+  controller in the LXC; without it the launcher warns. After changing the
+  LXC's memory, run `sudo hal0 box rebuild` to apply the new limit.
+- **State lives on three volumes**, `/etc/hal0`, `/var/lib/hal0` and
+  `/var/lib/containers`, owned by the `hal0box` user. The box's root filesystem
+  is disposable.
+
+## 4. Lifecycle
+
+| Command | What it does |
+|---|---|
+| `sudo hal0 box status` | Box unit state, the box's systemd state, and whether the install completed. |
+| `sudo hal0 box start` / `stop` | Start or stop the box unit. |
+| `sudo hal0 box logs [journalctl args]` | The box unit's journal on the host. |
+| `sudo hal0 box exec -- <command>` | Run a command inside the box. |
+| `sudo hal0 <args>` | Run a `hal0` command inside the box, for example `sudo hal0 doctor all`. |
+| `sudo hal0 box rebuild` | Build a new image and container on the same volumes, then run the installer again. |
+| `sudo hal0 uninstall [--purge]` | Remove the box and keep its data, or with `--purge` delete the data too. |
+
+The box applies OS security fixes with `unattended-upgrades`. A rebuild is for
+larger changes to the base image and for repairing a damaged root filesystem.
+
+<Aside type="caution" title="A rebuild reinstalls the version saved at install time">
+`rebuild` re-runs the installer from the verified tree saved when the box was
+installed, with the same installer arguments. After an in-box `hal0 update`, a
+rebuild therefore reinstalls the **older** version over the same volumes. Rebuild
+across versions has not been tested on a GPU host. To move to a newer release,
+update in the box with `sudo hal0 update`, or run the install command again.
+</Aside>
+
+## 5. Uninstall
+
+```sh
+sudo hal0 uninstall
+```
+
+This stops the box and removes its container and image, its user unit, the
+`hal0` shim, the `hal0box` user's linger, the systemd drop-in, the firewall
+rules and AppArmor changes the launcher made, and the logs. It **keeps the
+box's data**: the three state volumes (`hal0-box-etc`, `hal0-box-var` and
+`hal0-box-containers`, which hold the config, models and history), the
+`hal0box` user that owns them, and its sub-ID ranges in `/etc/subuid` and
+`/etc/subgid`. The user and its ranges stay because the volumes' file
+ownership is expressed in that user's ID mapping; with a different range the
+kept files would belong to the wrong IDs. The launcher's saved tree in
+`/var/lib/hal0-box` also stays, so the data can be purged later. Running the
+install command again reuses all of it.
+
+To delete the data as well:
+
+```sh
+sudo hal0 uninstall --purge
+```
+
+`--purge` additionally resets the box user's podman store (the volumes and
+images), stops every process of the `hal0box` user, deletes the user and its
+home, drops its sub-ID ranges and removes `/var/lib/hal0-box`. **It deletes
+every model and all hal0 data in the box.** It asks you to type `DELETE`;
+without a terminal it refuses unless you pass `--yes` (`--force`, `-f` and
+`HAL0_FORCE=1` work too). If the shim is already gone after a plain uninstall,
+run the launcher directly:
+`sudo bash /var/lib/hal0-box/tree/installer/box/box.sh uninstall --purge`.
+
+`sudo hal0 uninstall --help` prints these options. GPU drivers, firmware and
+kernel arguments on the host are left as they were in both cases.
+
+## What is not tested yet
+
+These are untested, not known to work:
+
+- **A true bare-metal AMD host.** AMD was tested inside an LXC. Plain hosts were
+  tested in VMs, and on a bare-metal desktop with NVIDIA and with CPU only.
+- **Converting an existing install.** There is no converter. A box install starts
+  from a clean host (Phase 2 in ADR-0051).
+- **A rebuild that upgrades across versions on a GPU host**, and the
+  older-version behaviour above. A same-version rebuild was tested once on a
+  CPU-only bare-metal host: the models and a marker file survived, and the
+  install took 251 s.
+- **ComfyUI's `img` slot, halogen, and the Hermes terminal tool** inside the box.
+  In one run `flm-embed` also failed to load ("container stopped") and was not
+  traced.
+- **Client identity on podman 6.** The real client address was confirmed on
+  podman 4.9 and 5.7.
+- **WSL.**
+
+Measured performance matched the rootful install within a tok/s on ROCm and
+Vulkan (199 vs 198 and 225 vs 225 tok/s in the test model), and downloads ran
+at the host's link speed.

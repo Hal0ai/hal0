@@ -856,3 +856,117 @@ exit 0
     assert "retry passed" in out
     assert "unload failed: podman, crun" in out
     assert (aa / "disable" / "podman").is_symlink()
+
+
+# ── --nested-box (podman box launcher) ───────────────────────────────────────
+
+
+def _seed_box(aa: Path) -> None:
+    _seed_profiles(aa, ("podman", "runc"), enforce=("runc",))
+    (aa / "usr.bin.pasta").write_text("profile pasta /usr/bin/pasta {\n}\n")
+    (aa / "usr.bin.passt").write_text("profile passt /usr/bin/passt {\n}\n")
+    (aa / "usr.bin.other").write_text("profile other /usr/bin/other {\n}\n")
+
+
+def test_nested_only_disables_pasta_profiles(tmp_path: Path) -> None:
+    aa = tmp_path / "aa"
+    _seed_box(aa)
+    nested = ca.nested_disable_list(aa, ns_level=1)
+    assert nested == ["podman", "usr.bin.pasta", "usr.bin.passt"]
+    assert "usr.bin.other" not in nested and "runc" not in nested
+    assert ca.nested_disable_list(aa, ns_level=0) == []
+
+
+def test_nested_list_skips_absent_pasta_profiles(tmp_path: Path) -> None:
+    aa = tmp_path / "aa"
+    aa.mkdir()
+    assert ca.nested_disable_list(aa, ns_level=2) == []
+
+
+def _box_env(monkeypatch, tmp_path: Path, level: str) -> Path:
+    aa = tmp_path / "aa"
+    _seed_box(aa)
+    lvl = tmp_path / "ns_level"
+    lvl.write_text(level)
+    monkeypatch.setenv("HAL0_APPARMOR_D", str(aa))
+    monkeypatch.setenv("HAL0_APPARMOR_NS_LEVEL_FILE", str(lvl))
+    return aa
+
+
+def test_nested_box_main_bare_metal_changes_nothing(monkeypatch, tmp_path: Path) -> None:
+    aa = _box_env(monkeypatch, tmp_path, "0\n")
+    monkeypatch.setattr("sys.argv", ["containers_apparmor.py", "--nested-box"])
+    assert ca._main() == 0
+    assert not (aa / "disable").exists()
+
+
+def test_nested_box_main_unreadable_ns_level_changes_nothing(monkeypatch, tmp_path: Path) -> None:
+    aa = _box_env(monkeypatch, tmp_path, "0")
+    monkeypatch.setenv("HAL0_APPARMOR_NS_LEVEL_FILE", str(tmp_path / "missing"))
+    monkeypatch.setattr("sys.argv", ["containers_apparmor.py", "--nested-box"])
+    assert ca._main() == 0
+    assert not (aa / "disable").exists()
+
+
+def test_nested_box_main_disables_list(monkeypatch, tmp_path: Path) -> None:
+    aa = _box_env(monkeypatch, tmp_path, "1\n")
+    calls: list[list[str]] = []
+
+    def _run(argv, **_kw):
+        calls.append(list(argv))
+        return _proc(0)
+
+    monkeypatch.setattr(ca.subprocess, "run", _run)
+    assert ca._nested_box_main(_run) == 0
+    for name in ("podman", "usr.bin.pasta", "usr.bin.passt"):
+        assert (aa / "disable" / name).is_symlink()
+    assert not (aa / "disable" / "usr.bin.other").exists()
+    assert not (aa / "disable" / "runc").exists()
+    assert [c[0] for c in calls] == ["apparmor_parser"] * 3
+
+
+def test_nested_box_revert_lines_name_only_what_this_run_disabled(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    # The box launcher records the revert lines and undoes them on uninstall,
+    # so a profile the operator had disabled already must not be listed.
+    aa = _box_env(monkeypatch, tmp_path, "1\n")
+    (aa / "disable").mkdir()
+    (aa / "disable" / "podman").symlink_to(aa / "podman")
+
+    assert ca._nested_box_main(lambda argv, **_kw: _proc(0)) == 0
+    reverts = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("revert:")]
+
+    assert reverts == [
+        f"revert: rm {aa}/disable/{n} && apparmor_parser -r {aa}/{n}"
+        for n in ("usr.bin.pasta", "usr.bin.passt")
+    ]
+    assert (aa / "disable" / "podman").is_symlink()
+
+    # A second run disabled nothing new, so it names nothing to revert.
+    assert ca._nested_box_main(lambda argv, **_kw: _proc(0)) == 0
+    assert "revert:" not in capsys.readouterr().out
+
+
+def test_nested_box_runs_as_bare_script_without_hal0(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+
+    script = Path(ca.__file__)
+    lvl = tmp_path / "ns_level"
+    lvl.write_text("0\n")
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HAL0_APPARMOR_NS_LEVEL_FILE": str(lvl),
+        "HAL0_APPARMOR_D": str(tmp_path / "aa"),
+    }
+    proc = subprocess.run(
+        [sys.executable, "-I", str(script), "--nested-box"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "nothing changed" in proc.stdout

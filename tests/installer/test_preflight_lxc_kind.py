@@ -29,7 +29,7 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PREFLIGHT = _REPO_ROOT / "installer" / "lib" / "preflight.sh"
 
-_ADMITTED = {"none", "lxc-privileged", "lxc-unprivileged"}
+_ADMITTED = {"none", "box", "lxc-privileged", "lxc-unprivileged"}
 
 
 def _run(snippet: str, env_extra: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -62,6 +62,7 @@ def test_override_seam_is_honoured(kind: str) -> None:
 def test_in_lxc_predicate_agrees_with_the_classifier() -> None:
     for kind, expected_rc in (
         ("none", 1),
+        ("box", 1),
         ("lxc-privileged", 0),
         ("lxc-unprivileged", 0),
     ):

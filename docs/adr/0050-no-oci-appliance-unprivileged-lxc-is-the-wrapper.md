@@ -6,6 +6,11 @@
 operator took while the Incus install guide (#3255) was being written. Nothing
 about an install changes with this record.
 
+**Amended by [ADR-0051](0051-rootless-podman-box-install.md)** (decisions 1
+and 2): hal0 also offers an opt-in rootless podman box (`install.sh --box`,
+v1.8.0). The statement that a wrapper protects the host, not the credentials
+inside it, stands.
+
 ## Context
 
 A bare-metal install puts hal0 deep into the host: systemd units, a `hal0`

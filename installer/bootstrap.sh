@@ -19,6 +19,11 @@
 #   curl -fsSLO https://hal0.dev/install.sh
 #   sudo bash install.sh
 #
+# Pass --box (anywhere in the args) to hand the verified tree to the box
+# launcher (installer/box/box.sh install <tree> [args...]) instead of install.sh:
+#
+#   curl -fsSL https://hal0.dev/install.sh | sudo bash -s -- --box
+#
 # Env overrides:
 #   HAL0_RELEASES_URL           full URL to a hal0.releases.v1 manifest
 #                               (default: https://releases.hal0.dev/<channel>.json)
@@ -542,6 +547,20 @@ cosign_verify() {
 
 # ── main ──────────────────────────────────────────────────────────────────
 main() {
+    # --box is consumed here and never reaches the installers: it selects the
+    # box launcher (installer/box/box.sh) instead of install.sh. Everything
+    # else is passed through untouched, in order.
+    local use_box=0 arg
+    local -a passthrough=()
+    for arg in "$@"; do
+        if [[ "${arg}" == "--box" ]]; then
+            use_box=1
+        else
+            passthrough+=("${arg}")
+        fi
+    done
+    set -- ${passthrough[@]+"${passthrough[@]}"}
+
     validate_channel
     local admission_identity
     admission_identity="$(manifest_admission_identity "${HAL0_CHANNEL}")" \
@@ -607,6 +626,9 @@ main() {
     tar -xzf "${tarball}" --strip-components=1 -C "${unpacked}"
     [[ -x "${unpacked}/installer/install.sh" ]] \
         || die "extracted tree is missing installer/install.sh — corrupt tarball?"
+    if [[ "${use_box}" == "1" && ! -x "${unpacked}/installer/box/box.sh" ]]; then
+        die "this release does not include the box launcher (installer/box/box.sh) — --box needs a newer release"
+    fi
 
     ok "ready — handing off to installer"
     printf '\n'
@@ -632,6 +654,10 @@ main() {
     # Pass through stdin so install.sh's interactive prompts work when
     # the user invoked us as `sudo bash install.sh`. When invoked via
     # curl|bash, stdin is closed and install.sh falls back to defaults.
+    # --box: same verified tree, handed to the box launcher instead.
+    if [[ "${use_box}" == "1" ]]; then
+        exec "${unpacked}/installer/box/box.sh" install "${unpacked}" "$@"
+    fi
     exec bash "${unpacked}/installer/install.sh" "$@"
 }
 

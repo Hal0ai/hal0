@@ -1181,3 +1181,60 @@ async def test_collect_survives_a_raising_engine_read(
     )
 
     assert _gpu(budget).image_engine_gb == 6.0
+
+
+# ── Podman box ───────────────────────────────────────────────────────────────
+
+
+def test_read_ram_in_box_keeps_host_budget(tmp_path: Path) -> None:
+    _meminfo(tmp_path, total_kb=64 * 1024 * 1024, available_kb=40 * 1024 * 1024)
+    _v2_chain(tmp_path)
+    _write(tmp_path, "run/systemd/container", "podman\n")
+    _write(tmp_path, "run/.containerenv", "")
+    _write(tmp_path, "etc/hal0-box-release", "HAL0_BOX=1\n")
+
+    assert read_ram(tmp_path).source == "system"
+
+
+def test_read_ram_in_another_podman_container_stays_container(tmp_path: Path) -> None:
+    # A toolbox or CI container is not the hal0 box: its marker keeps "container".
+    _meminfo(tmp_path, total_kb=64 * 1024 * 1024, available_kb=40 * 1024 * 1024)
+    _v2_chain(tmp_path)
+    _write(tmp_path, "run/systemd/container", "podman\n")
+    _write(tmp_path, "run/.containerenv", "")
+
+    assert read_ram(tmp_path).source == "container"
+
+
+def test_read_ram_in_box_with_real_cgroup_limit_is_container(tmp_path: Path) -> None:
+    _meminfo(tmp_path, total_kb=64 * 1024 * 1024, available_kb=40 * 1024 * 1024)
+    _v2_chain(tmp_path, leaf=str(8 * _GIB))
+    _write(tmp_path, "run/.containerenv", "")
+
+    ram = read_ram(tmp_path)
+
+    assert ram.source == "container"
+    assert ram.limit_gb == 8.0
+
+
+def test_read_ram_in_box_reads_the_launchers_memory_limit(tmp_path: Path) -> None:
+    # Nested in an LXC, the box sees the Proxmox host's MemTotal (a fresh
+    # procfs, no lxcfs). box.sh passes the LXC's MemTotal as --memory, which
+    # appears as memory.max at the box's cgroup namespace root.
+    _meminfo(tmp_path, total_kb=128 * 1024 * 1024, available_kb=100 * 1024 * 1024)
+    _v2_chain(tmp_path, top=str(48 * _GIB))
+    _write(tmp_path, "run/systemd/container", "podman\n")
+    _write(tmp_path, "run/.containerenv", "")
+
+    ram = read_ram(tmp_path)
+
+    assert ram.source == "container"
+    assert ram.limit_gb == 48.0
+
+
+def test_read_ram_lxc_unchanged(tmp_path: Path) -> None:
+    _meminfo(tmp_path, total_kb=50331648, available_kb=48069259)
+    _v2_chain(tmp_path)
+    _write(tmp_path, "run/systemd/container", "lxc\n")
+
+    assert read_ram(tmp_path).source == "container"

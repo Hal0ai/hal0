@@ -26,6 +26,7 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 from hal0.services import systemd
+from hal0.system import box
 
 _ADDON_PREFIX = "hal0-addon-"
 _AVAHI_UNIT = "avahi-daemon.service"
@@ -70,12 +71,19 @@ async def status() -> dict[str, object]:
     rule.
     """
     d = services_dir()
-    return {
-        "available": await systemd.unit_is_active(_AVAHI_UNIT),
+    in_box = box.in_box()
+    out: dict[str, object] = {
+        "available": False if in_box else await systemd.unit_is_active(_AVAHI_UNIT),
         "hostname": mdns_hostname(),
-        "base_advertised": (d / "hal0.service").is_file(),
-        "advertised": advertised_ids(),
+        "base_advertised": False if in_box else (d / "hal0.service").is_file(),
+        "advertised": [] if in_box else advertised_ids(),
     }
+    if in_box:
+        out["reason"] = (
+            "running inside the hal0 box: multicast does not cross the pasta "
+            "network boundary, so mDNS names are not announced to the LAN"
+        )
+    return out
 
 
 def _service_group_xml(name: str, port: int) -> str:

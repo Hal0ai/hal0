@@ -111,6 +111,16 @@ agent that drops its key included. Configure an admin key if you rely on the inb
 [ADR-0048](docs/adr/0048-approval-decisions-need-a-session-or-root.md) has the
 full list.
 
+### The opt-in podman box does not change this
+
+`install.sh --box` (v1.8.0, ADR-0051) runs hal0 inside one rootless podman
+container. That protects the host from root inside the box in the same way an
+unprivileged LXC does, and it does not protect against kernel bugs reachable
+from a user namespace. Inside the box the `hal0` account and the credential
+chain above are unchanged: an agent made to run a command still reaches every
+credential the box holds. The agent user split (#3134) is still the control for
+that.
+
 ### If you cannot accept it
 
 - Run the box without the bundled agent (do not install/enable `hal0-agent@*`), or

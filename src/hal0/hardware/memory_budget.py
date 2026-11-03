@@ -46,6 +46,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from hal0.system.box import in_box as _in_box
+
 if TYPE_CHECKING:
     # Annotation only. A runtime import would close a cycle: gpu_view imports
     # probe, and probe's cgroup reader delegates to this module.
@@ -406,6 +408,14 @@ def read_ram(root: Path = Path("/")) -> RamBudget:
     lxcfs already reports the guest limit as ``MemTotal``. ``free`` is
     ``max(0, limit - used)``.
 
+    Inside a rootless podman box (:func:`hal0.system.box.in_box`) the container
+    marker is ignored: with no real cgroup limit the reading is the host's and
+    ``source`` stays ``"system"``; a finite cgroup limit still reports
+    ``"container"``. A box nested in an LXC sees the physical host's
+    ``MemTotal`` (a fresh procfs, no lxcfs) and not the LXC's limit, so the
+    launcher (``installer/box/box.sh``) creates it with ``--memory`` set to the
+    LXC's ``MemTotal``; that limit is the finite cgroup limit read here.
+
     ``source`` is ``"container"`` when ``<root>/run/systemd/container`` exists,
     something (lxcfs) is mounted over ``/proc/meminfo``, or the chain carried a
     finite limit, otherwise ``"system"``. ``"system"`` therefore means the
@@ -421,6 +431,11 @@ def read_ram(root: Path = Path("/")) -> RamBudget:
     except OSError:
         marked = False
     marked = marked or _meminfo_is_mounted_over(root)
+    if _in_box(root) and chain_mb is None:
+        # A podman box shares the host kernel's memory view: no lxcfs, and the
+        # systemd marker only says "container". Without a real cgroup limit
+        # this is the host budget, so GTT crediting (#3072) must keep working.
+        marked = False
     return RamBudget(
         limit_gb=_gb(limit_mb),
         used_gb=_gb(used_mb),
