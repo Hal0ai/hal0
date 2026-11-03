@@ -19,6 +19,10 @@ export interface ConfigUrls {
   api: string
   openwebui: string
   openwebui_enabled: boolean
+  // Why `openwebui` is "" : 'proxy_needs_public_url' when the dashboard was reached through a
+  // reverse proxy and HAL0_OPENWEBUI_PUBLIC_URL is not set (the proxy's :3001 is not Open WebUI).
+  // "" whenever the link is set. Absent from an older hal0.
+  openwebui_reason?: string
   hermes: string
   hermes_enabled: boolean
   // ComfyUI's own web UI. Defaults to http://<host>:8188 (the request host and ComfyUI's port);
@@ -33,7 +37,10 @@ export interface ConfigUrls {
   // derived http://<host>:8188 answers from other machines too. False under "loopback", where it
   // answers on the box itself only. Absent from an older hal0 (which was always loopback).
   comfyui_lan?: boolean
-
+  // 'proxy_needs_public_url' when `comfyui` is "" for the same reason as `openwebui_reason`
+  // (HAL0_COMFYUI_PUBLIC_URL unset behind a proxy). "" whenever the link is set. Absent from an
+  // older hal0.
+  comfyui_reason?: string
 }
 
 export function useConfigUrls() {

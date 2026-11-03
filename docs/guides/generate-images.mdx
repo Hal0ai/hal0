@@ -436,7 +436,9 @@ the editor buttons follow it, and `GET /api/config/urls` reports it as `comfyui_
   machine, then open `http://127.0.0.1:8188` there.
 - **Behind a proxy you run**, in either mode: set `HAL0_COMFYUI_PUBLIC_URL` in
   `/etc/hal0/api.env` to a URL you made reachable yourself (`comfyui_public`
-  is then true). hal0 does not proxy or sign in to it for you.
+  is then true). hal0 does not proxy or sign in to it for you. Without it, a
+  dashboard reached through a proxy has no editor link: the proxy's `:8188` is
+  not ComfyUI, so the dashboard asks you to set the variable instead.
 
 A change applies at the next `hal0 slot restart img`. A path through hal0's own
 sign-in is not available ([#3049](https://github.com/Hal0ai/hal0/issues/3049)).

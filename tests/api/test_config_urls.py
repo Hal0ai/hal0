@@ -58,8 +58,12 @@ def test_urls_openwebui_enabled_false_when_systemctl_missing(
     assert resp.json()["openwebui_enabled"] is False
 
 
-def test_urls_behind_proxy_without_public_url_uses_openwebui_port(client: TestClient) -> None:
-    """Proxy deploys without custom DNS still get the default :3001 link."""
+def test_urls_behind_proxy_without_public_url_has_no_openwebui_link(
+    monkeypatch,
+    client: TestClient,
+) -> None:
+    """Behind a proxy the forwarded host is the proxy, so :3001 there is not Open WebUI (#3381)."""
+    monkeypatch.delenv("HAL0_OPENWEBUI_PUBLIC_URL", raising=False)
     # `openwebui_enabled` shells out to the *real* systemctl on whatever host
     # runs this test — on a dev box with hal0-openwebui.service genuinely
     # active it would come back True regardless of test config, leaking host
@@ -79,7 +83,8 @@ def test_urls_behind_proxy_without_public_url_uses_openwebui_port(client: TestCl
         )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["openwebui"] == "http://ai-dev.example.com:3001", body
+    assert body["openwebui"] == "", body
+    assert body["openwebui_reason"] == "proxy_needs_public_url", body
     assert body["openwebui_enabled"] is False, body
     assert body["api"] == "https://ai-dev.example.com", body
 
@@ -101,6 +106,7 @@ def test_urls_public_url_env_wins_behind_proxy(
     body = resp.json()
     # Trailing slash stripped so links concat predictably.
     assert body["openwebui"] == "https://hal0-chat.example.com", body
+    assert body["openwebui_reason"] == "", body
     assert body["api"] == "https://hal0.example.com", body
 
 
@@ -198,12 +204,12 @@ def test_urls_comfyui_public_url_env_wins(
     assert body["comfyui"] == "https://comfyui.example.com", body
 
 
-def test_urls_comfyui_behind_proxy_without_env_uses_port_8188(client: TestClient) -> None:
-    """Proxy deploys without the env var still get a host:8188 link.
+def test_urls_comfyui_behind_proxy_without_env_has_no_link(monkeypatch, client: TestClient) -> None:
+    """Behind a proxy with no HAL0_COMFYUI_PUBLIC_URL there is no link, and a reason (#3381).
 
-    The port-stripped forwarded host keeps the link reachable on the LAN
-    even before an operator declares a dedicated ComfyUI subdomain.
+    The forwarded host is the proxy; its :8188 is not ComfyUI.
     """
+    monkeypatch.delenv("HAL0_COMFYUI_PUBLIC_URL", raising=False)
     resp = client.get(
         "/api/config/urls",
         headers={
@@ -213,7 +219,33 @@ def test_urls_comfyui_behind_proxy_without_env_uses_port_8188(client: TestClient
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["comfyui"] == "http://hal0.example.com:8188", body
+    assert body["comfyui"] == "", body
+    assert body["comfyui_reason"] == "proxy_needs_public_url", body
+    assert body["comfyui_public"] is False, body
+
+
+def test_urls_reasons_are_empty_on_a_direct_hit_and_with_declared_urls(
+    monkeypatch, client: TestClient
+) -> None:
+    """``*_reason`` is ``""`` whenever the link is set: a direct hit, or a declared URL via a proxy."""
+    monkeypatch.delenv("HAL0_COMFYUI_PUBLIC_URL", raising=False)
+    monkeypatch.delenv("HAL0_OPENWEBUI_PUBLIC_URL", raising=False)
+    body = client.get("/api/config/urls", headers={"host": "hal0-test.lan:8080"}).json()
+    assert body["openwebui_reason"] == "" and body["comfyui_reason"] == "", body
+    monkeypatch.setenv("HAL0_COMFYUI_PUBLIC_URL", "https://comfyui.example.com")
+    monkeypatch.setenv("HAL0_OPENWEBUI_PUBLIC_URL", "https://chat.example.com")
+    body = client.get("/api/config/urls", headers=_PROXY_HEADERS).json()
+    assert body["openwebui_reason"] == "" and body["comfyui_reason"] == "", body
+
+
+def test_urls_proxy_reasons_are_per_app(monkeypatch, client: TestClient) -> None:
+    """Declaring one app's URL does not hide the other's reason."""
+    monkeypatch.setenv("HAL0_OPENWEBUI_PUBLIC_URL", "https://chat.example.com")
+    monkeypatch.delenv("HAL0_COMFYUI_PUBLIC_URL", raising=False)
+    body = client.get("/api/config/urls", headers=_PROXY_HEADERS).json()
+    assert body["openwebui"] == "https://chat.example.com", body
+    assert body["openwebui_reason"] == "", body
+    assert body["comfyui"] == "" and body["comfyui_reason"] == "proxy_needs_public_url", body
 
 
 _PROXY_HEADERS = {"x-forwarded-host": "hal0.example.com", "x-forwarded-proto": "https"}
