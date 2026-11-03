@@ -1687,6 +1687,94 @@ def check_netns_durability(probe: Callable[[], Any] | None = None) -> Check:
     return Check("netns", label, _PASS, f"{len(state.sandbox_keys)} netns durable")
 
 
+#: Ports the podman box forwards to the host: hal0-api, Open WebUI, ComfyUI.
+_BOX_FORWARDED_PORTS: tuple[int, ...] = (8080, 3001, 8188)
+_BOX_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", ""})
+
+
+def _box_publish_hosts() -> dict[str, str]:
+    """Slot name -> effective ``[slots].publish_host`` for slots whose port the box does not forward.
+
+    ``publish_host`` is one global setting (:class:`hal0.config.schema.SlotsConfig`),
+    applied to every slot. A slot already on a forwarded port (ComfyUI's 8188) is
+    omitted. A slot whose config cannot be read keeps its entry: unknown is not
+    proof that it is reachable. Fail-soft to ``{}``.
+    """
+    from hal0.config import loader
+
+    try:
+        host = (loader.load_hal0_config().slots.publish_host or "").strip()
+        layout = loader.list_slot_layout()
+    except Exception:
+        return {}
+    out: dict[str, str] = {}
+    for stem, kind in layout.items():
+        name, port = stem, None
+        try:
+            cfg = (
+                loader.load_slot_config_by_id(int(stem))
+                if kind == "id"
+                else loader.load_slot_config(stem)
+            )
+            name, port = cfg.name or stem, cfg.port
+        except Exception:
+            pass
+        if port in _BOX_FORWARDED_PORTS:
+            continue
+        out[name] = host
+    return out
+
+
+def check_box_boundary(
+    in_box: Callable[[], bool] | None = None,
+    publish_hosts: Callable[[], dict[str, str]] | None = None,
+    api_port: Callable[[], int] | None = None,
+) -> Check:
+    """What crosses the podman box boundary? (box install, opt-in)
+
+    Inside the box only :data:`_BOX_FORWARDED_PORTS` reach the host. ``warn`` when
+    a slot's ``publish_host`` is not loopback (the operator expects that slot
+    port on the LAN, but it is published inside the box and never forwarded),
+    or when ``HAL0_PORT`` moved the API off 8080 (the forward is fixed). ``pass``
+    off-box and when nothing is stranded.
+    """
+    label = "Box boundary"
+    from hal0.config import network
+    from hal0.system import box
+
+    forwarded = ", ".join(str(p) for p in _BOX_FORWARDED_PORTS)
+    try:
+        inside = (in_box or box.in_box)()
+    except OSError as exc:
+        return Check("box", label, _WARN, f"cannot tell whether this is the box: {exc}")
+    if not inside:
+        return Check("box", label, _PASS, "not running in the hal0 box")
+
+    problems: list[str] = []
+    try:
+        hosts = (publish_hosts or _box_publish_hosts)()
+    except Exception as exc:
+        hosts = {}
+        problems.append(f"slot publish hosts unreadable: {exc}")
+    exposed = sorted(
+        name for name, host in hosts.items() if host.strip().lower() not in _BOX_LOOPBACK_HOSTS
+    )
+    if exposed:
+        problems.append(
+            f"slot(s) {', '.join(exposed)} publish on a non-loopback publish_host, but slot "
+            f"ports are not forwarded out of the box (forwarded: {forwarded})"
+        )
+    port = (api_port or network.api_port)()
+    if port != _BOX_FORWARDED_PORTS[0]:
+        problems.append(
+            f"API port is {port}, but the box forwards {_BOX_FORWARDED_PORTS[0]}; "
+            "the API is unreachable from the host"
+        )
+    if problems:
+        return Check("box", label, _WARN, "; ".join(problems))
+    return Check("box", label, _PASS, f"forwarded ports: {forwarded}")
+
+
 def _default_mcp_probe_targets() -> tuple[tuple[str, str], ...]:
     """(name, mount-root URL) pairs for hal0's two bundled MCP servers."""
     return (
@@ -3493,6 +3581,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_ports(slots_payload),
         check_port_dnat(slots_payload),
         check_netns_durability(),
+        check_box_boundary(),
         check_hal0_target(),
         check_secret_file_modes(),
         check_hardware_freshness(),

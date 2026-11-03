@@ -1542,6 +1542,11 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "check_netns_durability",
         lambda *_a, **_k: Check("netns", "Container netns", "pass", "stubbed"),
     )
+    monkeypatch.setattr(
+        da,
+        "check_box_boundary",
+        lambda *_a, **_k: Check("box", "Box boundary", "pass", "stubbed"),
+    )
 
     # Agent-UID row (ADR-0002) shells out to systemctl otherwise; neutralise it
     # so this composition test asserts the row list, not the host's units.
@@ -1599,6 +1604,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "ports",
         "port_dnat",
         "netns",
+        "box",
         "hal0_target",
         "secret-modes",
         "hardware_freshness",
@@ -3355,3 +3361,37 @@ def test_backup_probe_non_directory_backups_fails_row(tmp_path) -> None:
     backups = tmp_path / "backups"
     backups.write_text("x")
     assert "not a directory" in da._backup_probe(tmp_path / "h.db", backups)
+
+
+# -- Box boundary row ----------------------------------------------------------
+
+
+def test_box_row_passes_off_box() -> None:
+    c = da.check_box_boundary(in_box=lambda: False)
+    assert (c.key, c.label, c.status) == ("box", "Box boundary", "pass")
+
+
+def test_box_row_passes_in_box_when_nothing_stranded() -> None:
+    c = da.check_box_boundary(
+        in_box=lambda: True, publish_hosts=lambda: {"utility": "127.0.0.1"}, api_port=lambda: 8080
+    )
+    assert c.status == "pass" and "8080, 3001, 8188" in c.detail
+
+
+def test_box_row_warns_on_unreachable_publish() -> None:
+    c = da.check_box_boundary(
+        in_box=lambda: True, publish_hosts=lambda: {"utility": "0.0.0.0"}, api_port=lambda: 8080
+    )
+    assert c.status == "warn" and "utility" in c.detail and "8080" in c.detail
+    assert "3001" in c.detail and "8188" in c.detail
+
+
+def test_box_row_warns_on_changed_api_port() -> None:
+    c = da.check_box_boundary(in_box=lambda: True, publish_hosts=lambda: {}, api_port=lambda: 9000)
+    assert c.status == "warn" and "9000" in c.detail
+
+
+def test_box_default_providers_read_real_config(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("HAL0_PORT", "9001")
+    c = da.check_box_boundary(in_box=lambda: True, publish_hosts=lambda: {})
+    assert c.status == "warn" and "9001" in c.detail
