@@ -538,6 +538,44 @@ def test_narrow_map_uses_inner_range(box: BoxHarness) -> None:
     assert "hal0box:20000:40000" in box.subgid() and "hal0box:65534:1" in box.subgid()
 
 
+def test_narrow_map_refuses_a_host_user_in_its_range(box: BoxHarness) -> None:
+    box.set_uid_map("0 100000 65536")
+    (box.state / "users").write_text("alice:30000:Alice\n")
+    res = box.preflight(check=False)
+    assert res.returncode != 0 and "alice" in res.stdout and "30000" in res.stdout
+    assert box.install(check=False).returncode != 0
+    assert "hal0box" not in box.subuid()
+
+
+def test_narrow_map_refuses_a_host_group_in_its_range(box: BoxHarness) -> None:
+    box.set_uid_map("0 100000 65536")
+    (box.state / "groups").write_text("render:993\nproject:59999\n")
+    res = box.preflight(check=False)
+    assert res.returncode != 0 and "project" in res.stdout and "59999" in res.stdout
+
+
+def test_narrow_map_refuses_another_users_sub_ids_in_its_range(box: BoxHarness) -> None:
+    box.set_uid_map("0 100000 65536")
+    (box.host / "etc" / "subgid").write_text("bob:10000:15000\n")
+    res = box.preflight(check=False)
+    assert res.returncode != 0 and "bob:10000:15000" in res.stdout
+
+
+def test_narrow_map_allows_accounts_outside_its_range(box: BoxHarness) -> None:
+    box.set_uid_map("0 100000 65536")
+    (box.state / "users").write_text("alice:1000:Alice\nbob:60000:Bob\n")
+    (box.state / "groups").write_text("render:993\nnogroup:65534\n")
+    (box.host / "etc" / "subuid").write_text("carol:60000:5000\n")
+    box.preflight()
+    box.dry_run()
+    box.dry_run()
+
+
+def test_wide_map_ignores_accounts_in_the_narrow_range(box: BoxHarness) -> None:
+    (box.state / "users").write_text("alice:30000:Alice\n")
+    box.preflight()
+
+
 def test_wide_map_gets_one_range_after_existing_ones(box: BoxHarness) -> None:
     (box.host / "etc" / "subuid").write_text("ubuntu:100000:65536\n")
     (box.host / "etc" / "subgid").write_text("ubuntu:100000:65536\n")

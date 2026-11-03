@@ -47,6 +47,7 @@ The installer checks these before it changes anything and says what to fix.
 | **passt / pasta, recent** | A 2024-02 `passt` (Ubuntu 24.04) stalls nested outbound connections inside an LXC. The launcher runs a self-test that fetches a page from a container nested in the box and stops with a remedy if it stalls. Install a newer `passt` and re-run. |
 | **`/dev/net/tun` and `/dev/fuse`** | Needed on any host. In an LXC, add both to the container on the Proxmox host (`pct set <id> --dev<N> /dev/net/tun`, and the same for `/dev/fuse`, or `features: fuse=1`) and restart it. |
 | **Free ports 8080, 3001, 8188** | The box publishes exactly these. Preflight fails if another process listens on one. |
+| **IDs 20000-59999 free, inside an unprivileged LXC** | In a container with a narrow (65536-wide) ID map the box always uses sub-IDs 20000-59999 plus 65534. Preflight refuses if a host user or group, or another user's `/etc/subuid` or `/etc/subgid` range, already uses an ID there, because box files would then be owned by that account. |
 | **GPU and NPU device nodes** | `/dev/kfd`, `/dev/dri/renderD*` and `/dev/accel/accel*` are passed in when present. With none, the box is CPU-only. |
 
 Some things stay on the host and cannot move into the box: the kernel, the

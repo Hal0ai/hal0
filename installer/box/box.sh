@@ -212,7 +212,7 @@ box_busy_ports() {
 
 # ── preflight ─────────────────────────────────────────────────────────────
 box_preflight() {
-    local fail=0 busy
+    local fail=0 busy conflicts line
     [[ -f "${CGROUP_DIR}/cgroup.controllers" ]] \
         || { log "ERROR: cgroup v2 (unified hierarchy) is required for rootless podman with systemd; this host mounts cgroup v1 at /sys/fs/cgroup."; fail=1; }
     _box_is_dev "${DEV_ROOT}/net/tun" \
@@ -226,6 +226,15 @@ box_preflight() {
     if box_user_exists && ! box_user_is_ours; then
         log "ERROR: $(box_foreign_user_message)"
         fail=1
+    fi
+    if box_is_narrow; then
+        conflicts="$(box_narrow_range_conflicts)"
+        if [[ -n "${conflicts}" ]]; then
+            log "ERROR: this host has a narrow ID map, so the box must use IDs ${BOX_NARROW_START}-$((BOX_NARROW_START + BOX_NARROW_COUNT - 1)), but these already use IDs in that range:"
+            while IFS= read -r line; do log "  ${line}"; done <<<"${conflicts}"
+            log "  Box files would be owned by those IDs. Move the accounts or ranges out of ${BOX_NARROW_START}-$((BOX_NARROW_START + BOX_NARROW_COUNT - 1)), then re-run."
+            fail=1
+        fi
     fi
     box_discover_devices || fail=1
     if [[ "${#BOX_DEVICE_ARGS[@]}" -eq 0 ]]; then
@@ -253,6 +262,27 @@ box_is_narrow() {
     local w
     w="$(box_uid_map_width)"
     [[ -n "${w}" && "${w}" -lt 1000000 ]]
+}
+
+# The narrow map's fixed sub-ID range: IDs 20000..59999 of this container.
+BOX_NARROW_START=20000
+BOX_NARROW_COUNT=40000
+
+# Prints every host account and every other user's sub-ID range that falls in
+# the narrow range. Box files would be owned by those IDs, so a box process
+# could read and write that account's files (and the reverse).
+box_narrow_range_conflicts() {
+    local lo="${BOX_NARROW_START}" hi=$((BOX_NARROW_START + BOX_NARROW_COUNT))
+    getent passwd 2>/dev/null | awk -F: -v lo="${lo}" -v hi="${hi}" \
+        '$3 >= lo && $3 < hi { printf "user %s (uid %s)\n", $1, $3 }'
+    getent group 2>/dev/null | awk -F: -v lo="${lo}" -v hi="${hi}" \
+        '$3 >= lo && $3 < hi { printf "group %s (gid %s)\n", $1, $3 }'
+    local f
+    for f in "${SUBUID_FILE}" "${SUBGID_FILE}"; do
+        [[ -f "${f}" ]] || continue
+        awk -F: -v lo="${lo}" -v hi="${hi}" -v u="${BOX_USER}" -v f="${f#"${HOST_ROOT}"}" \
+            '$1 != u && $2 + 0 < hi && $2 + $3 > lo { printf "%s range %s\n", f, $0 }' "${f}"
+    done
 }
 
 # First free start after every range any other user already holds, so an
@@ -285,13 +315,13 @@ box_subids() {
     local uid_lines=() gid_lines=() existing start gid
     BOX_IDMAP_ARGS=()
     if box_is_narrow; then
-        uid_lines=("${BOX_USER}:20000:40000" "${BOX_USER}:65534:1")
+        uid_lines=("${BOX_USER}:${BOX_NARROW_START}:${BOX_NARROW_COUNT}" "${BOX_USER}:65534:1")
         gid_lines=("${uid_lines[@]}")
         BOX_IDMAP_ARGS=(--uidmap "+u65534:@65534" --gidmap "+g65534:@65534")
-        log "narrow ID map ($(box_uid_map_width)): the box gets sub-IDs 20000:40000 and 65534:1"
+        log "narrow ID map ($(box_uid_map_width)): the box gets sub-IDs ${BOX_NARROW_START}:${BOX_NARROW_COUNT} and 65534:1"
     else
         existing="$(awk -F: -v u="${BOX_USER}" '$1 == u && $3 >= 65536 { print; exit }' "${SUBUID_FILE}" 2>/dev/null || true)"
-        if [[ -z "${existing}" || "${existing}" == "${BOX_USER}:20000:40000" ]]; then
+        if [[ -z "${existing}" || "${existing}" == "${BOX_USER}:${BOX_NARROW_START}:${BOX_NARROW_COUNT}" ]]; then
             start="$(_box_next_start)"
             existing="${BOX_USER}:${start}:65536"
         fi
