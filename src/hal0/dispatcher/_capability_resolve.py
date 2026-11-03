@@ -23,6 +23,7 @@ from typing import Any
 from hal0.errors import CapabilityMismatch, Hal0Error
 from hal0.slots._cfg_helpers import non_chat_signal
 from hal0.slots.activation import slot_model_id
+from hal0.slots.config_write import slot_is_flm
 from hal0.slots.manager import SLOT_ALIASES
 from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
@@ -382,8 +383,9 @@ def guard_chat_slot_capability(
     ``--reranking`` implies llama-server's embedding mode, so a reranking slot
     serves both paths; an ``--embedding`` slot serves only embeddings.
 
-    A missing config, a non-``llm`` slot or a non-llama-server provider (FLM
-    NPU, ComfyUI, …) is always a no-op: only a slot we can positively identify
+    A missing config, a non-``llm`` slot or an FLM/NPU slot (recognised by
+    :func:`~hal0.slots.config_write.slot_is_flm`, not the deprecated
+    ``provider`` label) is always a no-op: only a slot we can positively identify
     as a plain chat slot is rejected.
     """
     if not cfg:
@@ -397,7 +399,9 @@ def guard_chat_slot_capability(
         return
     if str(cfg.get("type") or "").strip().lower() != "llm":
         return
-    if str(cfg.get("provider") or "llama-server").strip().lower() not in ("", "llama-server"):
+    if slot_is_flm(cfg):
+        # The FLM anchor serves embeddings/STT through its own [npu] modalities,
+        # not llama-server mode flags; ``provider`` is not set on shipped FLM slots.
         return
     if non_chat_signal(cfg) in needed:
         return

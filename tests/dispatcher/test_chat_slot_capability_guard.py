@@ -60,6 +60,16 @@ def test_profile_carrying_the_mode_flag_passes() -> None:
     guard_chat_slot_capability(_chat_cfg(profile="embedding"), EMBED_PATH)
 
 
+def test_shipped_flm_toml_is_a_noop() -> None:
+    import tomllib
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    raw = tomllib.loads((root / "installer/etc-hal0/slots/flm.toml").read_text())
+    cfg = {**raw, **(raw.get("slot") or {})}
+    guard_chat_slot_capability(cfg, EMBED_PATH, model="flm")
+
+
 @pytest.mark.parametrize(
     "cfg",
     [
@@ -67,6 +77,8 @@ def test_profile_carrying_the_mode_flag_passes() -> None:
         {},
         {"name": "embed", "type": "embedding"},
         {"name": "flm", "type": "llm", "provider": "flm"},
+        # Shipped installer/etc-hal0/slots/flm.toml shape: no ``provider``.
+        {"name": "flm", "type": "llm", "device": "npu", "profile": "flm"},
         {"name": "img", "type": "image"},
     ],
 )

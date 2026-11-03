@@ -53,6 +53,8 @@ from fastapi.responses import Response, StreamingResponse
 
 from hal0.dispatcher._capability_resolve import (
     _DEFAULT_MODEL,
+    _EMBED_PATHS,
+    _RERANK_PATHS,
     LegacyResolutionFailed,
     guard_capability_mismatch,
     guard_chat_slot_capability,
@@ -1792,7 +1794,7 @@ class Dispatcher:
         slot = call.slot_name or call.container_slot_name
         if not slot or self._slot_manager is None:
             return
-        if not any(frag in path for frag in ("/embeddings", "/rerank")):
+        if not any(frag in path for frag in (*_EMBED_PATHS, *_RERANK_PATHS)):
             return
         try:
             configs = await self._slot_manager.iter_configs()
