@@ -1001,8 +1001,9 @@ def wrappers(
     :func:`hal0.updater.updater.refresh_privileged_wrappers` /
     :func:`hal0.updater.updater.refresh_path_links` calls
     ``hal0 update commit`` makes automatically on every FHS activation.
-    Use this on an editable checkout (``scripts/deploy.sh``'s dev-deploy
-    target), which never goes through activation at all.
+    ``refresh_path_links`` refuses a venv other than the installed one, so
+    the PATH links are only refreshed when this runs from
+    ``<usr-lib root>/venv`` (#3360); a dev checkout reports them skipped.
     """
     from hal0.updater.updater import (
         _editable_install_path,
@@ -1043,10 +1044,16 @@ def wrappers(
             console.print(f"[green]✓[/green]  {name} PATH link refreshed")
         elif status == "missing":
             console.print(f"[yellow]![/yellow]  {name}: no shim found in this venv — skipped")
+        elif status == "skipped":
+            console.print(
+                f"[yellow]![/yellow]  {name}: this venv is not the installed one — PATH link "
+                "left alone; re-run with the installed venv's `hal0` "
+                "(`sudo /usr/lib/hal0/venv/bin/hal0 doctor wrappers --fix`)"
+            )
         else:
             console.print(f"[red]✗[/red]  {name} PATH link refresh failed")
 
-    if wrappers_result["errors"] or "failed" in links_result.values():
+    if wrappers_result["errors"] or {"failed", "skipped"} & set(links_result.values()):
         raise typer.Exit(1)
 
 
