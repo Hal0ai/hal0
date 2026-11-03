@@ -72,8 +72,10 @@ opens on **Controls**.
   "Hermes restarted", and `Hermes restart failed: <reason>` when it fails.
   **Restart gateway** toasts "Hermes gateway restarted", and
   `Gateway restart failed: <reason>` when it fails.
-- **Unit logs** opens the Logs page, and **Tool activity** opens the activity
-  log on the Slots page. Neither acts on the agent.
+- **Unit logs** opens the Logs page on the agent's unit
+  (`#logs?unit=hal0-agent@hermes.service`): a `unit` channel tails that unit's
+  journal. **Tool activity** opens the activity log on the Slots page. Neither
+  acts on the agent.
 - **Persona** lists the personas, with the active one marked. Picking one in
   the list changes nothing; **Activate** makes it the active persona (a toast
   says "Persona activated") and is enabled only when the pick differs from the

@@ -83,7 +83,7 @@ applying. Add those subsections to a version's section to surface them; see
 ### Fixed
 
 - **`store.path_escape_warn` is logged once per path instead of on every status poll.** A running slot whose model file sits outside the model store root re-resolved it on each poll and filled the hal0-api journal; the warning now fires the first time a path escapes and repeats log at debug level. (#3349)
-
+- **The agent card's Unit logs control now opens the Logs page on that unit.** `#logs?unit=<unit>` selects the slot for a `hal0-slot@<name>` unit and otherwise adds a `unit` channel that tails the unit's journal. It used to open the unfiltered page. (#2931)
 - **A halogen slot is no longer torn down by one transient error on its first chat turn.** The readiness sentinel convicted on a single transport error or 5xx, stopping a load that had taken minutes. It now pauses briefly and probes once more, and only a repeat fails the load, matching the corroboration rule of the generic output-sanity gate ([#3287](https://github.com/Hal0ai/hal0/issues/3287)).
 - **Scan commit no longer registers a halogen companion file as a model.** `POST /api/models/scan` with a row pointing at an ngram table, vision sidecar, mtp head or overlay `.hgn` file created a model row that a slot could not load. The row is now skipped with `models.halogen_companion` and the same hint add-from-path gives, and the rest of the batch still commits ([#3280](https://github.com/Hal0ai/hal0/issues/3280)).
 

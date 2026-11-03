@@ -10,7 +10,9 @@
 // only thing the comment did was send a reader looking for files that were
 // deleted with the chat page in #439.
 
-import { useLogsHistorical, useLogsStream, useSlotLogsStream } from '@/api/hooks/useLogs'
+import { useLogsHistorical, useLogsStream, useSlotLogsStream, parseRawLevel } from '@/api/hooks/useLogs'
+import { useUnitLogTail } from '@/api/hooks/useAgents'
+import { parseLogsUnit, slotForUnit } from './logs-hash'
 import { useSlots } from '@/api/hooks/useSlots'
 
 const { useState: useStateX } = React;
@@ -20,7 +22,10 @@ const { useState: useStateX } = React;
 //   events → structured hal0 event stream (all subsystems, coarse lifecycle)
 //   slot   → a single slot's RAW journald output (detailed model-load lines)
 //   merged → hal0 events + the selected slot's raw logs, interleaved by ts
+//   unit   → one systemd unit's journal tail, only offered when the page was
+//            opened with #logs?unit=<unit> for a non-slot unit (hal0#2931)
 const LOG_CHANNELS = [["events", "events"], ["slot", "slot"], ["merged", "merged"]];
+const UNIT_CHANNEL = ["unit", "unit"];
 
 // ════════════════════════════════════════════════════════════════════
 // LOGS
@@ -34,6 +39,31 @@ function LogsView() {
   const [paused, setPaused] = useStateX(false);
   const [pendingCount, setPendingCount] = useStateX(0);
   const scrollRef = React.useRef(null);
+
+  // #logs?unit=<unit> deep link (the agent card's Unit logs control). A slot
+  // unit selects that slot in the existing picker; any other unit gets its own
+  // `unit` channel. Re-read on hashchange: the page stays mounted when the
+  // card is clicked while already on #logs.
+  const [unit, setUnit] = useStateX(() => parseLogsUnit(window.location.hash));
+  React.useEffect(() => {
+    const onHash = () => setUnit(parseLogsUnit(window.location.hash));
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+  const unitSlot = unit ? slotForUnit(unit) : null;
+  const unitOnly = unit && !unitSlot ? unit : null;
+  React.useEffect(() => {
+    if (unitSlot) {
+      setSlotFilter(unitSlot);
+      setChannel("merged");
+    } else if (unitOnly) {
+      setChannel("unit");
+    } else {
+      setChannel(c => (c === "unit" ? "events" : c));
+    }
+  }, [unitSlot, unitOnly]);
+  const unitTail = useUnitLogTail(unitOnly || "", 400, channel === "unit" && !!unitOnly);
+  const channels = unitOnly ? [...LOG_CHANNELS, UNIT_CHANNEL] : LOG_CHANNELS;
 
   // Slot list for the dropdown — real slots from /api/slots, not scraped
   // from log rows (which is why the dropdown used to go empty once real
@@ -74,14 +104,18 @@ function LogsView() {
   // (ts+source+msg) — raw slot lines get a client-arrival ts so genuine
   // repeats keep distinct keys and are preserved.
   const seen = new Set();
-  const buf = [...eventRows, ...rawRows]
+  const unitRows = channel === "unit" && unitOnly
+    ? (unitTail.data?.lines ?? []).map(msg => ({ ts: "", source: unitOnly, level: parseRawLevel(msg), msg }))
+    : [];
+  // Unit lines keep journal order and every repeat: no dedup, no ts sort.
+  const buf = (channel === "unit" ? unitRows : [...eventRows, ...rawRows]
     .filter(e => {
       const k = `${e.ts}|${e.source}|${e.msg}`;
       if (seen.has(k)) return false;
       seen.add(k);
       return true;
     })
-    .sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
+    .sort((a, b) => (a.ts || '').localeCompare(b.ts || '')));
 
   const fil = e => {
     if (level && (e.level || "info") !== level) return false;
@@ -96,6 +130,12 @@ function LogsView() {
     ? { tone: "err", msg: "Failed to load journal history — check the API." }
     : slotLogs.degraded
     ? { tone: "warn", msg: `Slot logs unavailable — ${slotLogs.degraded}` }
+    : channel === "unit" && unitTail.isError
+    ? { tone: "err", msg: `Failed to read the journal for ${unitOnly} — check the API.` }
+    : channel === "unit" && unitTail.data?.hint
+    ? { tone: "warn", msg: unitTail.data.hint }
+    : channel === "unit" && unitTail.data === null
+    ? { tone: "warn", msg: `This daemon cannot tail ${unitOnly}.` }
     : channel === "slot" && !slotFilter
     ? { tone: "info", msg: "Select a slot to view its detailed logs." }
     : (wantEvents && live.disconnected) || (wantSlotLogs && slotLogs.disconnected)
@@ -155,8 +195,8 @@ function LogsView() {
       <div className="card" style={{overflow: "hidden", marginBottom: 12, position: "relative"}}>
         <div style={{padding: "10px 14px", borderBottom: "1px solid var(--line)", display: "flex", alignItems: "center", gap: 8, background: "var(--bg)", flexWrap: "wrap"}}>
           <div className="mono" style={{display: "inline-flex", border: "1px solid var(--line)", borderRadius: 4, overflow: "hidden", fontSize: 11}}>
-            {LOG_CHANNELS.map(([k, l], i) => (
-              <button key={k} onClick={() => setChannel(k)} style={{padding: "4px 11px", background: channel === k ? "var(--accent-soft)" : "transparent", color: channel === k ? "var(--accent)" : "var(--fg-3)", border: "none", borderRight: i < LOG_CHANNELS.length - 1 ? "1px solid var(--line)" : "none", cursor: "pointer", fontFamily: "var(--jbm)", fontSize: 11}}>{l}</button>
+            {channels.map(([k, l], i) => (
+              <button key={k} onClick={() => setChannel(k)} style={{padding: "4px 11px", background: channel === k ? "var(--accent-soft)" : "transparent", color: channel === k ? "var(--accent)" : "var(--fg-3)", border: "none", borderRight: i < channels.length - 1 ? "1px solid var(--line)" : "none", cursor: "pointer", fontFamily: "var(--jbm)", fontSize: 11}}>{l}</button>
             ))}
           </div>
           <div className="mono" style={{display: "inline-flex", border: "1px solid var(--line)", borderRadius: 4, overflow: "hidden", fontSize: 11, marginLeft: 8}}>
