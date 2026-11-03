@@ -158,13 +158,29 @@ describe('dock-pure', () => {
   })
 
   it('export filters carry severity, a single activity category and the slot term', () => {
-    expect(exportFilters({ ...DOCK_FILTERS_DEFAULT, severity: 'warn', source: 'slot', slot: 'brain' })).toEqual({
+    expect(exportFilters({ ...DOCK_FILTERS_DEFAULT, severity: 'warn', source: 'slot', slot: 'brain' }, events)).toEqual({
       severity: 'warn',
       category: 'slot',
       search: 'brain',
     })
-    expect(exportFilters({ ...DOCK_FILTERS_DEFAULT, source: 'comfyui' })).toEqual({})
-    expect(exportFilters(DOCK_FILTERS_DEFAULT)).toEqual({})
+    expect(exportFilters(DOCK_FILTERS_DEFAULT, events)).toEqual({})
+  })
+
+  it('export filters carry any category present on the activity rows', () => {
+    const rows = mergeFeeds([], [
+      rec({ id: 30, category: 'backend' }),
+      rec({ id: 31, category: 'mcp' }),
+      rec({ id: 32, category: 'comfyui' }),
+    ])
+    for (const category of ['backend', 'mcp', 'comfyui']) {
+      expect(exportFilters({ ...DOCK_FILTERS_DEFAULT, source: category }, rows)).toEqual({ category })
+    }
+  })
+
+  it('export filters leave out a source with no activity rows', () => {
+    // `hal0` is a journal-only source; `comfyui` here is a journal line, not an activity category.
+    expect(exportFilters({ ...DOCK_FILTERS_DEFAULT, source: 'hal0' }, events)).toEqual({})
+    expect(exportFilters({ ...DOCK_FILTERS_DEFAULT, source: 'comfyui' }, events)).toEqual({})
   })
 })
 

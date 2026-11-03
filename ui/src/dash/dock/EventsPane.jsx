@@ -118,7 +118,7 @@ export function EventsPane({ events, filters, onFilters, slotNames = [], disconn
           <a
             className="foot-pane-link"
             data-testid="dock-export"
-            href={activityExportUrl('csv', exportFilters(filters))}
+            href={activityExportUrl('csv', exportFilters(filters, events))}
             title="Exports the activity trail with these filters. Journal lines are on the Logs page."
           >Export ↓</a>
         </span>
