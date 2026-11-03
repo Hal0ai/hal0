@@ -113,3 +113,22 @@ def test_swap_failure_is_recorded_not_raised(
     result = refresh_path_links(tmp_path / "release-tree")
 
     assert result["hal0"] == "failed"
+
+
+def test_suite_never_targets_a_host_system_path(tmp_path: Path) -> None:
+    """The autouse fixture in tests/conftest.py keeps root runs off host paths (#2261).
+
+    Every destination ``activate_release`` can write or delete as root must sit
+    under ``tmp_path`` for a test that did not redirect it itself.
+    """
+    from hal0.system import seam_check
+    from hal0.updater import updater as updater_mod
+
+    for dest in (
+        updater_mod.HAL0_PATH_LINK_DST,
+        seam_check.SEAM_BIN_DIR,
+        seam_check.SUDOERS_DIR,
+        updater_mod.SYSTEMD_UNIT_DIR,
+        updater_mod.GPU_PERMS_UNIT_DST,
+    ):
+        assert tmp_path in dest.parents, dest
