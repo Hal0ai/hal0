@@ -67,6 +67,12 @@ _SANITISE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 _BY_ID_DIRNAME = "by-id"
 
+#: ``(resolved path, store root)`` pairs already warned about by
+#: :func:`assert_under_store`. A running slot re-resolves on every status
+#: poll, so the warn-severity escape would otherwise log at WARNING on each
+#: poll (#3349). Process-lifetime; a restart warns once again.
+_warned_escapes: set[tuple[Path, Path]] = set()
+
 
 class StorePathEscape(Hal0Error):
     """A derived store path resolved outside the configured store root.
@@ -115,7 +121,8 @@ def assert_under_store(
     derivation) raises :class:`StorePathEscape`. ``severity="warn"`` (an
     already-running slot's resolve) logs and returns the resolved path
     unchanged instead — a live container must never be torn down by a
-    sanity check (plan §23.3a).
+    sanity check (plan §23.3a). The warning is logged once per
+    ``(resolved path, store root)`` pair per process; repeats log at DEBUG.
     """
     resolved = Path(p).resolve()
     root = store_root().resolve()
@@ -123,7 +130,12 @@ def assert_under_store(
         resolved.relative_to(root)
     except ValueError:
         if severity == "warn":
-            log.warning("store.path_escape_warn path=%s store_root=%s", resolved, root)
+            key = (resolved, root)
+            if key in _warned_escapes:
+                log.debug("store.path_escape_warn (repeat) path=%s store_root=%s", resolved, root)
+            else:
+                _warned_escapes.add(key)
+                log.warning("store.path_escape_warn path=%s store_root=%s", resolved, root)
             return resolved
         raise StorePathEscape(
             f"path {resolved} escapes model store root {root}",
