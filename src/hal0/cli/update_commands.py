@@ -877,6 +877,13 @@ def update(
     target_version = (target or "").lstrip("v") or None
     if not body.get("update_available") and not target_version:
         console.print("[dim]nothing to apply.[/dim]")
+        # A failed post-activation migration pass leaves components pending
+        # with nothing left for `hal0 update` itself to apply (#2664): show
+        # the table so the converge command is not hidden behind `status`.
+        # Tolerant fetch, exit code unchanged.
+        rows = _component_rows_tolerant()
+        if rows and any(r.get("status") in _COMPONENT_PENDING for r in rows):
+            _print_component_table(rows)
         return
 
     # Refuse before staging: an editable/dev install has no FHS tree to swap,
@@ -1137,11 +1144,21 @@ def _print_component_table(rows: list[dict]) -> bool:
             )
         if row.get("note"):
             console.print(f"[yellow]![/yellow] {row['id']}: {escape(str(row['note']))}")
-        if row.get("status") in _COMPONENT_PENDING and (row.get("error") or row.get("remedy")):
-            remedy = row.get("remedy") or f"retry with: hal0 update component {row['id']}"
+        if row.get("status") not in _COMPONENT_PENDING:
+            continue
+        # A pending row always names the verb that converges it (#2664). The
+        # row's own error/remedy text can be empty (a migration failure stops
+        # the converge pass before it records one) or point at a verb that
+        # cannot converge the component, so it never replaces this line.
+        command = f"hal0 update component {row['id']}"
+        remedy = row.get("remedy")
+        if row.get("error") or remedy:
             console.print(
-                f"[yellow]![/yellow] {row['id']}: {row.get('error') or ''} [dim]{remedy}[/dim]"
+                f"[yellow]![/yellow] {row['id']}: {row.get('error') or ''} "
+                f"[dim]{remedy or 'retry with: ' + command}[/dim]"
             )
+        if command not in str(remedy or ""):
+            console.print(f"[yellow]![/yellow] {row['id']}: pending — run `{command}`")
     return all_ok
 
 
