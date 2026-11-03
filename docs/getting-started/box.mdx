@@ -98,7 +98,9 @@ The launcher then, in order: runs preflight, installs any missing host
 packages, creates the `hal0box` user and its sub-ID ranges, builds the box
 image from a digest-pinned Ubuntu 26.04 base, creates the container, starts it
 as a user unit that survives reboots, runs the network self-test, copies the
-verified tree in and runs the hal0 installer there, waits for `/api/health`,
+verified tree in (with the cosign build bootstrap verified, so the first
+in-box `hal0 update` can check signatures) and runs the hal0 installer there,
+waits for `/api/health`,
 opens the three ports on an active `ufw` or `firewalld`, and installs the `hal0`
 shim. A first install takes a quarter of an hour or more. It is safe to re-run
 the same command if it stops part-way, and the state kept on the box volumes

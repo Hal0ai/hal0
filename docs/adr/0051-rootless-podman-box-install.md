@@ -137,13 +137,29 @@ same as the host on a gigabit link.
     the host's memory, not the container marker's guess. When the host is
     itself a container (an LXC), the box would see the physical host's memory
     instead of the LXC's limit, so the launcher creates it with `--memory` set
-    to the LXC's `MemTotal`, and hal0 reads that cgroup limit. `hal0 doctor` gains a
-    `box` row, "Box boundary", that warns when a slot publishes on a
-    non-loopback host or the API port moved off 8080, since only 8080, 3001 and
-    8188 are forwarded.
+    to the LXC's `MemTotal`, and hal0 reads that cgroup limit. hal0 knows it
+    is in the box from `/etc/hal0-box-release`, which only the box image
+    carries, together with podman's markers; those alone match any podman
+    container. `hal0 doctor` gains a `box` row, "Box boundary", that warns
+    when a slot publishes on a non-loopback host or the API port moved off
+    8080, since only 8080, 3001 and 8188 are forwarded.
 17. The launcher opens the three ports on an active `ufw` or `firewalld` and
     removes exactly those rules on uninstall. The bare-metal installer has no
     firewall handling and is unchanged.
+18. Uninstall matches the bare-metal one: by default it removes the box and
+    keeps its data, that is the three volumes, the `hal0box` user and its
+    sub-ID ranges, because the volumes' file ownership is expressed in that
+    user's ID mapping. `--purge` deletes them after a typed `DELETE`, or with
+    `--yes` when there is no terminal, and fails loudly if the user cannot be
+    deleted. The launcher records that it created `hal0box` and never adopts
+    or purges a `hal0box` user it did not create.
+19. Root never writes into the box user's home, where a planted symlink could
+    redirect the write. The image is built from a root-owned context under
+    `/var/lib/hal0-box`, and the user unit is written by the box user itself.
+    Device nodes in privileged host groups (`disk`, `shadow`, `sudo` and the
+    like) are refused, a narrow ID map is refused when a host account already
+    uses its range, and an interactive `hal0 box exec` gets its own pty so a
+    box process never holds root's terminal.
 
 ## What the box does not protect
 
