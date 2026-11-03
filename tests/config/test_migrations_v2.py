@@ -46,6 +46,6 @@ def test_unversioned_config_walks_all_the_way_to_v2() -> None:
 
 
 def test_v2_to_v2_is_a_noop() -> None:
-    out, version = run_migrations({"meta": {"schema_version": 2}, "x": {"y": 1}})
+    out, version = run_migrations({"meta": {"schema_version": 2}, "x": {"y": 1}}, target_version=2)
     assert version == 2
     assert out["x"] == {"y": 1}

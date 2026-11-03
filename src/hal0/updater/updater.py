@@ -2008,6 +2008,27 @@ def run_post_activation_migrations(
 
     migration_info = _maybe_run_config_migrations(min_data_version, job_id=job_id)
 
+    # The hindsight-api drop-in is written only by a graph-settings save, so a
+    # config step that changes an extraction limit (v3, #3326) must be carried to
+    # it here. An actual update only: a boot-time restart of the engine is a
+    # surprise memory outage, the same reason the engine pass is skipped there.
+    if upgrade_memory_engine_venv:
+        try:
+            from hal0.memory.extraction_env import reconcile_extraction_dropin
+
+            dropin = reconcile_extraction_dropin()
+            if dropin.get("status") in ("applied", "failed"):
+                log.info(
+                    "updater.extraction_dropin_reconciled",
+                    job_id=job_id,
+                    status=dropin["status"],
+                    error=dropin.get("error"),
+                )
+        except Exception as exc:
+            log.warning("updater.extraction_dropin_reconcile_failed", job_id=job_id, error=str(exc))
+            # Non-fatal: the engine keeps its current cap and saving the graph
+            # settings (or `hal0 doctor`'s chunk row) names the way out.
+
     # Retire a leftover registry.toml: back it up, rename it, never import
     # it (every box at the 1.3.0 floor already did its first-boot import).
     # Non-fatal: nothing reads the file, so a box that cannot retire it
