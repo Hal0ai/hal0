@@ -188,7 +188,7 @@ hal0_lxc_kind() {
         printf 'box\n'
         return 0
     fi
-    if [[ ! -f /run/systemd/container ]] \
+    if [[ ! -f "${run_dir}/systemd/container" ]] \
         && ! grep -qa 'container=lxc' /proc/1/environ 2>/dev/null; then
         printf 'none\n'
         return 0
