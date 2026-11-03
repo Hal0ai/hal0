@@ -1181,3 +1181,34 @@ async def test_collect_survives_a_raising_engine_read(
     )
 
     assert _gpu(budget).image_engine_gb == 6.0
+
+
+# ── Podman box ───────────────────────────────────────────────────────────────
+
+
+def test_read_ram_in_box_keeps_host_budget(tmp_path: Path) -> None:
+    _meminfo(tmp_path, total_kb=64 * 1024 * 1024, available_kb=40 * 1024 * 1024)
+    _v2_chain(tmp_path)
+    _write(tmp_path, "run/systemd/container", "podman\n")
+    _write(tmp_path, "run/.containerenv", "")
+
+    assert read_ram(tmp_path).source == "system"
+
+
+def test_read_ram_in_box_with_real_cgroup_limit_is_container(tmp_path: Path) -> None:
+    _meminfo(tmp_path, total_kb=64 * 1024 * 1024, available_kb=40 * 1024 * 1024)
+    _v2_chain(tmp_path, leaf=str(8 * _GIB))
+    _write(tmp_path, "run/.containerenv", "")
+
+    ram = read_ram(tmp_path)
+
+    assert ram.source == "container"
+    assert ram.limit_gb == 8.0
+
+
+def test_read_ram_lxc_unchanged(tmp_path: Path) -> None:
+    _meminfo(tmp_path, total_kb=50331648, available_kb=48069259)
+    _v2_chain(tmp_path)
+    _write(tmp_path, "run/systemd/container", "lxc\n")
+
+    assert read_ram(tmp_path).source == "container"

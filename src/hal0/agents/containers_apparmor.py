@@ -317,7 +317,7 @@ def guest_unconfined_profiles_present(apparmor_d: Path) -> list[str]:
 
 
 def _disable_guest_unconfined_profiles(
-    apparmor_d: Path, run: Callable[..., Any]
+    apparmor_d: Path, run: Callable[..., Any], names: list[str] | None = None
 ) -> tuple[list[str], list[str]]:
     """Disable every present guest unconfined profile; return ``(names, unload_failed)``.
 
@@ -330,7 +330,8 @@ def _disable_guest_unconfined_profiles(
     unload, so ``names`` alone does not prove the profile is no longer loaded;
     ``unload_failed`` is the subset that may still be. Idempotent.
     """
-    names = guest_unconfined_profiles_present(apparmor_d)
+    if names is None:
+        names = guest_unconfined_profiles_present(apparmor_d)
     if not names:
         return [], []
     disable_dir = apparmor_d / "disable"
@@ -371,6 +372,57 @@ def disable_guest_unconfined_profiles(apparmor_d: Path, run: Callable[..., Any])
     profiles whose unload failed). Idempotent.
     """
     return _disable_guest_unconfined_profiles(apparmor_d, run)[0]
+
+
+#: Box mode: the pasta / passt user-mode networking helpers. Their stock
+#: profiles are ENFORCING (no ``flags=(unconfined)``), so the unconfined-stub
+#: guard above cannot select them; inside a nested AppArmor namespace they
+#: still deny the helper's namespace setup. Named explicitly and only ever
+#: acted on when ``ns_level`` > 0.
+NESTED_BOX_PROFILES: tuple[str, ...] = ("usr.bin.pasta", "usr.bin.passt")
+
+
+def nested_disable_list(apparmor_d: Path, ns_level: int) -> list[str]:
+    """Profile file names to disable for a podman box on this host.
+
+    ``ns_level`` <= 0 (bare metal, privileged container: the root AppArmor
+    namespace) returns ``[]``: there those profiles are the host's own policy
+    and nothing may be disabled. Nested, the list is the existing #3234 set
+    (:func:`guest_unconfined_profiles_present`, ``flags=(unconfined)`` stubs
+    only) plus any of :data:`NESTED_BOX_PROFILES` that exist as regular files
+    under ``apparmor_d``. Fixed names only; never a glob.
+    """
+    if ns_level <= 0:
+        return []
+    names = guest_unconfined_profiles_present(apparmor_d)
+    for name in NESTED_BOX_PROFILES:
+        if (apparmor_d / name).is_file() and name not in names:
+            names.append(name)
+    return names
+
+
+def _ns_level_value() -> int:
+    """``.ns_level`` as an int; unreadable or malformed reads as 0 (not nested)."""
+    raw = _apparmor_ns_level_raw()
+    return int(raw) if re.fullmatch(r"[0-9]+", raw) else 0
+
+
+def _nested_box_main(run: Callable[..., Any] = subprocess.run) -> int:
+    """``--nested-box``: disable :func:`nested_disable_list`; exit 0 when not nested."""
+    level = _ns_level_value()
+    if level <= 0:
+        print(f"apparmor-nested-box: root AppArmor namespace (.ns_level={level}); nothing changed")
+        return 0
+    root = apparmor_d_root()
+    names, unload_failed = _disable_guest_unconfined_profiles(
+        root, run, nested_disable_list(root, level)
+    )
+    print(f"apparmor-nested-box: disabled {', '.join(names) or 'nothing'}")
+    if unload_failed:
+        print(f"apparmor-nested-box: unload failed (symlink in place): {', '.join(unload_failed)}")
+    for n in names:
+        print(f"revert: rm {root}/disable/{n} && apparmor_parser -r {root}/{n}")
+    return 0
 
 
 def _apparmor_already_unconfined(conf_path: Path) -> bool:
@@ -572,12 +624,14 @@ def ensure_podman_apparmor_usable(
 __all__ = [
     "CONTAINERS_CONF",
     "GUEST_UNCONFINED_PROFILES",
+    "NESTED_BOX_PROFILES",
     "ApparmorPreflightResult",
     "apparmor_d_root",
     "apparmor_ns_level_file",
     "disable_guest_unconfined_profiles",
     "ensure_podman_apparmor_usable",
     "guest_unconfined_profiles_present",
+    "nested_disable_list",
 ]
 
 
@@ -586,6 +640,10 @@ def _main() -> int:
     (install.sh's post-install re-check) and as a bare script
     (``python containers_apparmor.py``, install.sh's early
     ``_container_runtime_gate`` remediation, #1563).
+
+    ``--nested-box`` (podman box launcher, before hal0 or podman is usable)
+    instead disables :func:`nested_disable_list` and exits 0; at ``.ns_level``
+    0 it changes nothing.
 
     Runs the convergent preflight and prints ``<outcome> wrote=<bool>``. Exit 0
     unless the retry still failed after writing the fix (``retry_failed`` → 1),
@@ -601,6 +659,10 @@ def _main() -> int:
     the probe image, so an air-gapped/mirrored-registry install probes with
     an image it can actually reach instead of a hardcoded quay.io one.
     """
+    import sys
+
+    if "--nested-box" in sys.argv[1:]:
+        return _nested_box_main()
     conf_path = Path(os.environ.get("HAL0_APPARMOR_CONF", str(CONTAINERS_CONF)))
     result = ensure_podman_apparmor_usable(conf_path=conf_path, smoke_argv=_default_smoke_argv())
     print(f"apparmor-preflight: {result.outcome} wrote={result.wrote_config}")
