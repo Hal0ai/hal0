@@ -53,8 +53,11 @@ from fastapi.responses import Response, StreamingResponse
 
 from hal0.dispatcher._capability_resolve import (
     _DEFAULT_MODEL,
+    _EMBED_PATHS,
+    _RERANK_PATHS,
     LegacyResolutionFailed,
     guard_capability_mismatch,
+    guard_chat_slot_capability,
     resolve_by_capability,
     select_slot_by_type,
 )
@@ -644,6 +647,8 @@ class Dispatcher:
                 model=call.requested_model or call.resolved_model,
                 resolution_path=call.resolution_path,
             )
+            # Reverse direction (#2672): embeddings/rerank naming a chat slot.
+            await self._guard_chat_slot(request.url.path, call)
         except Hal0Error as exc:
             log.warning(
                 "dispatch.capability_mismatch",
@@ -1783,6 +1788,26 @@ class Dispatcher:
         return "idle"
 
     # ── internals ────────────────────────────────────────────────────────
+
+    async def _guard_chat_slot(self, path: str, call: UpstreamCall) -> None:
+        """Typed 409 when ``/embeddings`` or ``/rerank`` resolved to a plain chat slot (#2672)."""
+        slot = call.slot_name or call.container_slot_name
+        if not slot or self._slot_manager is None:
+            return
+        if not any(frag in path for frag in (*_EMBED_PATHS, *_RERANK_PATHS)):
+            return
+        try:
+            configs = await self._slot_manager.iter_configs()
+        except Exception:  # TIER2 — inventory is best-effort; never block a request on it
+            log.warning("dispatch.chat_slot_inventory_failed", slot=slot, path=path)
+            return
+        cfg = next((c for c in configs if c.get("name") == slot), None)
+        guard_chat_slot_capability(
+            cfg,
+            path,
+            model=call.requested_model or call.resolved_model,
+            resolution_path=call.resolution_path,
+        )
 
     async def _tts_slot_for(self, path: str, model: str) -> str | None:
         """Serving ``type = "tts"`` slot for a speech request, picked by type (#2784).
