@@ -18,6 +18,7 @@ re-rooted under a tmp dir through the launcher's test seams:
 
 from __future__ import annotations
 
+import os
 import shutil
 import stat
 import subprocess
@@ -129,6 +130,7 @@ exit 0
 """,
     "systemctl": r"""
 case "$*" in
+    *is-active*--quiet*|*--quiet*is-active*) ;;
     *is-active*) echo active ;;
 esac
 exit 0
@@ -224,7 +226,9 @@ class BoxHarness:
         self.uid_map.write_text("         0          0 4294967295\n")
         (self.state / "groups").write_text("render:993\nvideo:44\n")
         for name, body in _STUBS.items():
-            _write_exec(self.bin / name, _LOG + "\n" + _FAIL_NEXT + "\n" + body)
+            # runuser only forwards; failures are injected in the command it runs.
+            fail = "" if name == "runuser" else _FAIL_NEXT
+            _write_exec(self.bin / name, _LOG + "\n" + fail + "\n" + body)
         # The verified tree as bootstrap hands it over: the launcher runs from it.
         shutil.copytree(_BOX_DIR, self.tree / "installer" / "box")
         _write_exec(self.tree / "installer" / "install.sh", "exit 0")
@@ -298,8 +302,8 @@ class BoxHarness:
         res = self.run("preflight", check=check)
         return res.stdout if check else res
 
-    def install(self, *args: str, check: bool = True):
-        return self.run("install", str(self.tree), *args, check=check)
+    def install(self, *args: str, check: bool = True, **extra: str):
+        return self.run("install", str(self.tree), *args, check=check, **extra)
 
     def uninstall(self, check: bool = True):
         return self.run("uninstall", check=check)
@@ -539,3 +543,167 @@ def test_containerfile_pins_identity_and_limits() -> None:
     )
     assert "|| exit 1" in run
     assert text.count("\nRUN ") == 1
+
+
+# ── Task 2: install, self-test, shim and uninstall ────────────────────────
+
+
+def test_install_runs_the_installer_in_the_box(box: BoxHarness) -> None:
+    res = box.install("--no-pi", HAL0_BOOTSTRAP_VERIFIED="1", HAL0_CHANNEL="nightly")
+    assert box.ran_installer(times=1)
+    run = box.installer_runs()[0]
+    assert run.startswith("bash /usr/local/src/hal0/installer/install.sh") and run.endswith(
+        "--no-pi"
+    )
+    exec_call = next(c for c in box.podman_calls_named("exec") if "install.sh" in c.argv)
+    assert (
+        "HAL0_BOOTSTRAP_VERIFIED=1" in exec_call.argv and "HAL0_CHANNEL=nightly" in exec_call.argv
+    )
+    assert "HAL0_BOOTSTRAP_WORK" not in exec_call.argv and "HAL0_BOX_" not in exec_call.argv
+    assert box.podman_calls("cp") == 1
+    assert "http://192.0.2.10:8080" in res.stdout
+    assert box.state_is_healthy()
+
+
+def test_rootless_podman_only_ever_runs_as_the_box_user(box: BoxHarness) -> None:
+    box.install()
+    podman = [c for c in box.calls() if c.argv.startswith("podman ")]
+    assert podman
+    assert all(c.user == "hal0box" for c in podman if c.argv != "podman --version")
+
+
+def test_install_writes_units_with_memlock(box: BoxHarness) -> None:
+    box.install()
+    dropin = box.host / "etc" / "systemd" / "system" / "user@.service.d" / "hal0-box.conf"
+    assert "LimitMEMLOCK=infinity" in dropin.read_text()
+    unit = box.host / "home" / "hal0box" / ".config" / "systemd" / "user" / "hal0-box.service"
+    text = unit.read_text()
+    assert "LimitMEMLOCK=infinity" in text and "start hal0-box" in text and "--rm" not in text
+    assert any(c.argv.startswith("loginctl enable-linger hal0box") for c in box.calls())
+
+
+def test_install_rerun_converges(box: BoxHarness) -> None:
+    box.install()
+    box.fail_next("podman create")
+    assert box.install(check=False).returncode != 0
+    assert not box.state_is_healthy()
+    box.install()
+    assert box.podman_calls("create") >= 3 and box.state_is_healthy()
+    assert box.subuid().count("hal0box:") == 1
+
+
+def test_failed_installer_is_not_reported_healthy(box: BoxHarness) -> None:
+    box.fail_next("install.sh")
+    res = box.install(check=False)
+    assert res.returncode != 0 and "re-run" in res.stdout.lower()
+    assert not box.state_is_healthy()
+    status = box.run("status", check=False)
+    assert status.returncode != 0 and "incomplete" in status.stdout
+
+
+def test_self_test_failure_stops_before_installer(box: BoxHarness) -> None:
+    box.fail_next("wget")
+    res = box.install(check=False)
+    assert res.returncode != 0 and "passt" in res.stdout
+    assert not box.ran_installer()
+
+
+def test_nested_apparmor_runs_before_first_podman_call(box: BoxHarness) -> None:
+    box.install()
+    assert box.first_index("containers_apparmor.py --nested-box") < box.first_index("podman ")
+
+
+def test_image_has_podman_for_the_self_test() -> None:
+    run = _CONTAINERFILE.read_text().split("\nRUN ", 1)[1]
+    install = run.split("apt-get install", 1)[1].split("\n && ", 1)[0]
+    assert " podman" in install
+
+
+def test_missing_apparmor_helper_fails_clearly(box: BoxHarness) -> None:
+    (box.tree / "src" / "hal0" / "agents" / "containers_apparmor.py").unlink()
+    res = box.install(check=False)
+    assert res.returncode != 0 and "containers_apparmor.py" in res.stdout
+    assert box.podman_calls("create") == 0
+
+
+def test_active_firewall_gets_published_ports(box: BoxHarness) -> None:
+    box.set_firewall("ufw", active=True)
+    box.install()
+    assert {"8080/tcp", "3001/tcp", "8188/tcp"} <= box.firewall_allowed()
+
+
+def test_uninstall_removes_only_the_firewall_rules_it_added(box: BoxHarness) -> None:
+    box.set_firewall("firewalld", active=True)
+    (box.state / "firewalld_rules").write_text("3001/tcp\n")
+    box.install()
+    box.install()
+    box.uninstall()
+    assert box.firewall_allowed() == {"3001/tcp"}
+
+
+def test_inactive_firewall_is_left_alone(box: BoxHarness) -> None:
+    box.install()
+    assert box.firewall_allowed() == set()
+    assert not any(c.argv.startswith("ufw allow") for c in box.calls())
+
+
+def test_shim_raises_memlock_and_requires_root(box: BoxHarness) -> None:
+    res = box.shim_as_user()
+    assert res.returncode != 0 and "sudo" in res.stdout
+    box.install()
+    text = box.shim_text()
+    assert "ulimit -Hl unlimited" in text and "hal0-box-shim" in text
+    assert "@BOX_SH@" not in text
+    assert os.access(box.shim_path(), os.X_OK)
+
+
+def test_shim_execs_hal0_in_the_box_and_routes_uninstall(box: BoxHarness) -> None:
+    box.install()
+    shim = box.shim_path()
+    subprocess.run(["bash", str(shim), "status"], env=box.env(), check=True, timeout=30)
+    assert box.podman_calls_named("exec")[-1].argv.endswith("hal0-box hal0 status")
+    subprocess.run(["bash", str(shim), "uninstall"], env=box.env(), check=True, timeout=30)
+    assert not shim.exists() and "hal0box" not in box.subuid()
+
+
+def test_uninstall_is_idempotent(box: BoxHarness) -> None:
+    box.add_device("dri/renderD128", gid=993)
+    box.install()
+    assert "hal0box:993:1" in box.subgid()
+    box.uninstall()
+    assert box.uninstall().returncode == 0
+    assert "hal0box" not in box.subuid() and "hal0box" not in box.subgid()
+    assert not (box.host / "var" / "lib" / "hal0-box").exists()
+    assert not (
+        box.host / "etc" / "systemd" / "system" / "user@.service.d" / "hal0-box.conf"
+    ).exists()
+    assert not box.shim_path().exists()
+
+
+def test_uninstall_after_partial_install_cleans_what_remains(box: BoxHarness) -> None:
+    box.fail_next("useradd")
+    assert box.install(check=False).returncode != 0
+    assert box.uninstall().returncode == 0
+    assert "hal0box" not in box.subuid() and not (box.host / "var" / "lib" / "hal0-box").exists()
+
+
+def test_uninstall_keeps_a_foreign_hal0_cli(box: BoxHarness) -> None:
+    shim = box.shim_path()
+    shim.parent.mkdir(parents=True)
+    shim.write_text("#!/bin/sh\n# a bare-metal hal0 CLI\n")
+    box.uninstall()
+    assert shim.exists()
+
+
+def test_uninstall_only_resets_box_user(box: BoxHarness) -> None:
+    box.install()
+    box.uninstall()
+    resets = box.podman_calls_named("system reset")
+    assert resets and all(c.user == "hal0box" for c in resets)
+
+
+def test_bootstrap_work_dir_is_removed_after_success(box: BoxHarness) -> None:
+    work = box.tmp / "hal0-install-abc123"
+    work.mkdir()
+    box.install(HAL0_BOOTSTRAP_WORK=str(work))
+    assert not work.exists()

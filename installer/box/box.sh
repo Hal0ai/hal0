@@ -9,6 +9,10 @@
 #
 # Usage:   box.sh install <tree> [install.sh args...]
 #          box.sh preflight
+#          box.sh uninstall
+#          box.sh status | start | stop
+#          box.sh logs [journalctl args...]
+#          box.sh exec -- <command...>
 #
 # The box is the container `hal0-box`, owned by the dedicated host user
 # `hal0box`, built from the image `localhost/hal0-box:local`. Design,
@@ -33,6 +37,10 @@
 #   HAL0_BOX_DRY_RUN=1          `install` prints the podman create argv and stops.
 #   HAL0_BOX_ALLOW_LOW_MEMLOCK=1  do not fail when the memlock hard limit
 #                               cannot be raised (an unprivileged test).
+#
+# Overrides an operator may need:
+#   HAL0_BOX_SELFTEST_IMAGE     image for the nested network self-test
+#   HAL0_BOX_SELFTEST_URL       plain-HTTP URL the self-test fetches
 
 set -euo pipefail
 
@@ -56,10 +64,50 @@ SUBGID_FILE="${HOST_ROOT}/etc/subgid"
 CGROUP_DIR="${HOST_ROOT}/sys/fs/cgroup"
 SHIM_PATH="${HOST_ROOT}/usr/local/bin/hal0"
 SHIM_MARKER="hal0-box-shim"
+# Root-owned launcher state: the verified tree (rebuild and the shim run from
+# it), the installer args, and the firewall rules this launcher added.
+STATE_DIR="${HOST_ROOT}/var/lib/hal0-box"
+STATE_TREE="${STATE_DIR}/tree"
+LOG_DIR="${HOST_ROOT}/var/log"
+BUILD_LOG="${LOG_DIR}/hal0-box-build.log"
+SELFTEST_LOG="${LOG_DIR}/hal0-box-selftest.log"
+INSTALL_LOG="${LOG_DIR}/hal0-box-install.log"
+DROPIN="${HOST_ROOT}/etc/systemd/system/user@.service.d/hal0-box.conf"
+BOX_HOME="${HOST_ROOT}/home/${BOX_USER}"
+RUN_USER_DIR="${HOST_ROOT}/run/user"
+BOX_UNIT="${BOX_NAME}.service"
+# Where the verified tree is copied inside the box.
+BOX_SRC=/usr/local/src/hal0
+# Nested network self-test (design decision 2): a container inside the box
+# fetches a plain-HTTP connectivity endpoint. Pinned by index digest.
+SELFTEST_IMAGE="${HAL0_BOX_SELFTEST_IMAGE:-docker.io/library/busybox:1.37@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec}"
+SELFTEST_URL="${HAL0_BOX_SELFTEST_URL:-http://connectivity-check.ubuntu.com/}"
+PODMAN_MIN_VERSION=4.9
+# Extra `podman build` flags; `rebuild` sets --no-cache.
+BOX_BUILD_ARGS=()
 
 log() { printf '[hal0-box %s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 warn() { log "WARNING: $*"; }
 die() { log "ERROR: $*"; exit 1; }
+
+# Run a command as the box user, in its home, with its user manager's
+# runtime dir. The memlock raise is inherited by podman (decision 6).
+as_box() {
+    local u
+    u="$(id -u "${BOX_USER}")"
+    (
+        cd "${BOX_HOME}" 2>/dev/null || cd /
+        ulimit -Hl unlimited 2>/dev/null || true
+        ulimit -Sl unlimited 2>/dev/null || true
+        exec runuser -u "${BOX_USER}" -- env \
+            HOME="${BOX_HOME}" \
+            XDG_RUNTIME_DIR="${RUN_USER_DIR}/${u}" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=${RUN_USER_DIR}/${u}/bus" \
+            "$@"
+    )
+}
+
+box_user_exists() { id -u "${BOX_USER}" >/dev/null 2>&1; }
 
 box_require_root() {
     [[ "$(id -u)" == 0 ]] || die "box.sh must run as root (it creates the ${BOX_USER} user and maps device groups)"
@@ -253,6 +301,326 @@ box_render_containerfile() {
     printf '%s\n' "${text//@BASE_IMAGE@/${BOX_BASE_IMAGE}}" > "${dir}/Containerfile"
 }
 
+
+# ── host setup ────────────────────────────────────────────────────────────
+# Keep a root-owned copy of the verified tree: the shim and `rebuild` run from
+# it after bootstrap's temp dir is gone. Root runs the launcher and the
+# AppArmor helper from this copy, so the box user must not be able to write it.
+box_stage_tree() {
+    local tree="$1"; shift
+    local src dst
+    mkdir -p "${STATE_DIR}"
+    chmod 0755 "${STATE_DIR}"
+    src="$(cd "${tree}" && pwd -P)"
+    dst="$(cd "${STATE_DIR}" && pwd -P)/tree"
+    if [[ "${src}" != "${dst}" ]]; then
+        rm -rf "${STATE_TREE}.new"
+        cp -a "${src}/." "${STATE_TREE}.new"
+        rm -rf "${STATE_TREE}"
+        mv "${STATE_TREE}.new" "${STATE_TREE}"
+    fi
+    chown -R 0:0 "${STATE_TREE}"
+    chmod -R go-w,go+rX "${STATE_TREE}"
+    # The installer args, so `rebuild` re-runs the installer the same way.
+    printf '%s\0' "$@" > "${STATE_DIR}/install-args"
+    # install.sh refuses an unverified tree. Remember that bootstrap verified
+    # this one, so a rebuild from the kept copy passes the same gate.
+    if [[ "${HAL0_BOOTSTRAP_VERIFIED:-0}" == 1 ]]; then
+        : > "${STATE_DIR}/verified"
+    elif [[ "${src}" != "${dst}" ]]; then
+        rm -f "${STATE_DIR}/verified"
+    fi
+    rm -f "${STATE_DIR}/installed"
+}
+
+box_host_packages() {
+    local missing=() cmd
+    for cmd in podman pasta newuidmap newgidmap python3; do
+        command -v "${cmd}" >/dev/null 2>&1 || missing+=("${cmd}")
+    done
+    [[ "${#missing[@]}" -eq 0 ]] && return 0
+    log "installing host packages (missing: ${missing[*]})"
+    if command -v apt-get >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get -qq update \
+            && DEBIAN_FRONTEND=noninteractive apt-get -qq install -y podman uidmap passt python3 >/dev/null
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf -q -y install podman passt shadow-utils python3
+    elif command -v pacman >/dev/null 2>&1; then
+        pacman -S --needed --noconfirm podman passt shadow python
+    elif command -v zypper >/dev/null 2>&1; then
+        zypper -q -n install podman passt shadow python3
+    else
+        die "missing ${missing[*]} and no known package manager; install podman (4.9 or newer), passt, uidmap/shadow and python3, then re-run"
+    fi || die "host package install failed; install podman, passt, uidmap and python3 by hand, then re-run"
+}
+
+# Disable the guest AppArmor profiles that block rootless podman inside an
+# unprivileged LXC (the #3234 family), before the first rootless podman call.
+# The helper only touches profiles when /sys/kernel/security/apparmor/.ns_level
+# is above 0, so it is a no-op on bare metal. It is run as a bare script, the
+# form installer/lib/preflight.sh uses, because hal0 is not installed yet.
+# A missing helper means the launcher and the tree disagree; fail rather than
+# guess, because skipping it surfaces later as an opaque podman error.
+box_nested_apparmor() {
+    local helper="${STATE_TREE}/src/hal0/agents/containers_apparmor.py"
+    [[ -f "${helper}" ]] \
+        || die "the release tree has no src/hal0/agents/containers_apparmor.py, which the box launcher needs; this tree does not match the launcher"
+    python3 "${helper}" --nested-box \
+        || die "containers_apparmor.py --nested-box failed; rootless podman would be blocked by the guest's AppArmor profiles"
+}
+
+box_check_podman() {
+    local v
+    v="$(podman --version 2>/dev/null | awk '{print $NF}')" || v=""
+    [[ -n "${v}" ]] || die "podman is not runnable on this host"
+    if [[ "$(printf '%s\n%s\n' "${PODMAN_MIN_VERSION}" "${v}" | sort -V | head -1)" != "${PODMAN_MIN_VERSION}" ]]; then
+        die "podman ${v} is too old; the box needs podman ${PODMAN_MIN_VERSION} or newer"
+    fi
+    log "podman ${v}"
+}
+
+# The box user, its sub-IDs, the user@.service drop-in and a lingering user
+# manager, so the box starts at boot with nobody logged in.
+box_user_setup() {
+    local u want
+    if ! box_user_exists; then
+        useradd -m -d "${BOX_HOME}" -s /usr/sbin/nologin -c "hal0 box" "${BOX_USER}" \
+            || die "could not create the ${BOX_USER} user"
+        log "created user ${BOX_USER}"
+    fi
+    u="$(id -u "${BOX_USER}")"
+    box_subids
+    want="$(printf '[Service]\nLimitMEMLOCK=infinity\nDelegate=cpu cpuset io memory pids\n')"
+    mkdir -p "$(dirname "${DROPIN}")"
+    if [[ ! -f "${DROPIN}" || "$(cat "${DROPIN}")" != "${want}" ]]; then
+        printf '%s\n' "${want}" > "${DROPIN}"
+        systemctl daemon-reload
+        loginctl enable-linger "${BOX_USER}"
+        systemctl restart "user@${u}.service"
+    else
+        loginctl enable-linger "${BOX_USER}"
+        systemctl start "user@${u}.service"
+    fi
+    local _
+    for _ in $(seq 1 30); do
+        systemctl is-active --quiet "user@${u}.service" && [[ -S "${RUN_USER_DIR}/${u}/bus" ]] && break
+        sleep 1
+    done
+    systemctl is-active --quiet "user@${u}.service" \
+        || die "the ${BOX_USER} user manager (user@${u}.service) did not start; see: journalctl -u user@${u}.service"
+}
+
+# Rootless podman clamps --ulimit memlock to the hard limit of the shell that
+# runs `podman create` (decision 6), so raise it here and fail if we cannot.
+box_raise_memlock() {
+    ulimit -Hl unlimited 2>/dev/null || true
+    ulimit -Sl unlimited 2>/dev/null || true
+    [[ "$(ulimit -Hl)" == unlimited ]] && return 0
+    if [[ "${HAL0_BOX_ALLOW_LOW_MEMLOCK:-0}" == 1 ]]; then
+        warn "memlock hard limit is $(ulimit -Hl), not unlimited (allowed by HAL0_BOX_ALLOW_LOW_MEMLOCK)"
+        return 0
+    fi
+    die "could not raise the memlock hard limit to unlimited; GPU runners need it. Run as real root, not inside a limited shell."
+}
+
+box_build_image() {
+    local dir="${BOX_HOME}/box" groups="${BOX_DEVICE_GROUPS[*]:-}"
+    box_render_containerfile "${dir}"
+    chown -R "${BOX_USER}:" "${dir}"
+    mkdir -p "${LOG_DIR}"
+    log "building the box image (log: ${BUILD_LOG#"${HOST_ROOT}"})"
+    as_box podman build "$@" --build-arg "HAL0_BOX_DEVICE_GROUPS=${groups}" -t "${BOX_IMAGE}" "${dir}" \
+        > "${BUILD_LOG}" 2>&1 \
+        || die "box image build failed, see ${BUILD_LOG#"${HOST_ROOT}"}"
+}
+
+box_write_unit() {
+    local podman_bin dir="${BOX_HOME}/.config/systemd/user"
+    podman_bin="$(command -v podman)"
+    mkdir -p "${dir}"
+    # A persistent unit, not quadlet: quadlet's --rm --replace would destroy
+    # the box on stop (decision 7).
+    cat > "${dir}/${BOX_UNIT}" <<EOF
+[Unit]
+Description=hal0 in a rootless podman box
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Environment=PODMAN_SYSTEMD_UNIT=%n
+LimitMEMLOCK=infinity
+Type=forking
+PIDFile=%t/${BOX_NAME}.pid
+ExecStart=${podman_bin} start ${BOX_NAME}
+ExecStop=${podman_bin} stop -t 60 ${BOX_NAME}
+TimeoutStopSec=90
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+EOF
+    chown -R "${BOX_USER}:" "${BOX_HOME}/.config"
+}
+
+# Removes an existing box container (state on volumes stays), then creates
+# and starts a fresh one. A re-run after any failure converges here.
+box_create_and_start() {
+    if as_box podman container exists "${BOX_NAME}"; then
+        log "replacing the existing ${BOX_NAME} container"
+        as_box systemctl --user stop "${BOX_UNIT}" >/dev/null 2>&1 || true
+        as_box podman rm -f "${BOX_NAME}" >/dev/null \
+            || die "could not remove the old ${BOX_NAME} container"
+    fi
+    box_create_argv
+    as_box "${BOX_CREATE_ARGV[@]}" >/dev/null || die "podman create failed"
+    box_write_unit
+    as_box systemctl --user daemon-reload
+    as_box systemctl --user enable "${BOX_UNIT}" >/dev/null 2>&1 || true
+    as_box systemctl --user restart "${BOX_UNIT}" \
+        || die "the ${BOX_UNIT} user unit did not start; see: sudo hal0 box logs, or journalctl --user -u ${BOX_UNIT} as ${BOX_USER}"
+}
+
+box_wait_systemd() {
+    local state="" _
+    for _ in $(seq 1 60); do
+        state="$(as_box podman exec "${BOX_NAME}" systemctl is-system-running 2>/dev/null | tail -1)" || true
+        case "${state}" in
+            running) break ;;
+            degraded) warn "the box's systemd is degraded (podman exec ${BOX_NAME} systemctl --failed shows why)"; break ;;
+        esac
+        sleep 2
+    done
+    case "${state}" in
+        running|degraded) log "box systemd: ${state}" ;;
+        *) die "the box's systemd did not come up (state: ${state:-unknown})" ;;
+    esac
+}
+
+# Decision 2: a nested container makes an outbound TCP connection through the
+# box's pasta. Old passt builds stall here, and the installer would otherwise
+# hang much later on its first image pull.
+box_self_test() {
+    log "self-test: outbound connection from a container nested in the box"
+    if ! as_box podman exec "${BOX_NAME}" timeout 300 \
+        podman run --rm --pull=missing "${SELFTEST_IMAGE}" \
+        wget -q -T 30 -O /dev/null "${SELFTEST_URL}" > "${SELFTEST_LOG}" 2>&1; then
+        log "ERROR: a container nested in the box could not reach ${SELFTEST_URL}."
+        log "  With working host networking this is the known stall of older passt/pasta"
+        log "  builds (2024-02 and earlier) under nested containers. Install a newer passt"
+        log "  package on the host (2026-01 or later), then re-run this install."
+        log "  Details: ${SELFTEST_LOG#"${HOST_ROOT}"}"
+        exit 1
+    fi
+}
+
+# Every HAL0_* setting the operator gave bootstrap reaches install.sh, except
+# the launcher's own and bootstrap's temp-dir hand-off, which is ours to clean.
+box_installer_env() {
+    local v
+    BOX_INSTALLER_ENV=()
+    while IFS= read -r v; do
+        case "${v}" in
+            HAL0_BOX_*|HAL0_BOOTSTRAP_WORK|HAL0_BOOTSTRAP_KEEP_TMP|HAL0_BOOTSTRAP_VERIFIED) continue ;;
+            HAL0_*) BOX_INSTALLER_ENV+=(-e "${v}=${!v}") ;;
+        esac
+    done < <(compgen -e)
+    if [[ -f "${STATE_DIR}/verified" ]]; then
+        BOX_INSTALLER_ENV+=(-e HAL0_BOOTSTRAP_VERIFIED=1)
+    fi
+}
+
+box_run_installer() {
+    log "copying the verified tree into the box"
+    as_box podman exec "${BOX_NAME}" rm -rf "${BOX_SRC}"
+    as_box podman exec "${BOX_NAME}" mkdir -p "${BOX_SRC}"
+    as_box podman cp "${STATE_TREE}/." "${BOX_NAME}:${BOX_SRC}" \
+        || die "could not copy the release tree into the box"
+    box_installer_env
+    log "running the hal0 installer inside the box (log: ${INSTALL_LOG#"${HOST_ROOT}"})"
+    as_box podman exec "${BOX_INSTALLER_ENV[@]+"${BOX_INSTALLER_ENV[@]}"}" "${BOX_NAME}" \
+        bash "${BOX_SRC}/installer/install.sh" "$@" 2>&1 | tee "${INSTALL_LOG}" \
+        || die "the hal0 installer failed inside the box, see ${INSTALL_LOG#"${HOST_ROOT}"}"
+}
+
+# Host-local HTTP differs by podman version, so health is checked inside.
+box_wait_health() {
+    local _
+    for _ in $(seq 1 60); do
+        as_box podman exec "${BOX_NAME}" curl -fsS -m 4 -o /dev/null "http://127.0.0.1:${BOX_PORTS[0]}/api/health" \
+            >/dev/null 2>&1 && return 0
+        sleep 5
+    done
+    die "hal0 did not answer /api/health inside the box within 5 minutes"
+}
+
+# An active ufw or firewalld would block LAN clients. Open exactly the
+# published ports and record each rule this launcher added, so uninstall
+# removes those and never a rule the operator had before.
+box_firewall_open() {
+    local rec="${STATE_DIR}/firewall" p rule
+    touch "${rec}"
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | head -1 | grep -q '^Status: active'; then
+        for p in "${BOX_PORTS[@]}"; do
+            rule="ufw ${p}/tcp"
+            grep -qxF "${rule}" "${rec}" && continue
+            if ufw status 2>/dev/null | awk '{print $1, $2}' | grep -qxF "${p}/tcp ALLOW"; then
+                continue
+            fi
+            ufw allow "${p}/tcp" comment "${BOX_NAME}" >/dev/null && printf '%s\n' "${rule}" >> "${rec}"
+        done
+        log "ufw is active: allowed ${BOX_PORTS[*]}/tcp"
+    elif command -v firewall-cmd >/dev/null 2>&1 && [[ "$(firewall-cmd --state 2>/dev/null)" == running ]]; then
+        for p in "${BOX_PORTS[@]}"; do
+            rule="firewalld ${p}/tcp"
+            grep -qxF "${rule}" "${rec}" && continue
+            firewall-cmd -q --permanent --query-port="${p}/tcp" && continue
+            firewall-cmd -q --permanent --add-port="${p}/tcp" \
+                && firewall-cmd -q --add-port="${p}/tcp" \
+                && printf '%s\n' "${rule}" >> "${rec}"
+        done
+        log "firewalld is running: allowed ${BOX_PORTS[*]}/tcp"
+    fi
+}
+
+box_firewall_close() {
+    local rec="${STATE_DIR}/firewall" kind port
+    [[ -f "${rec}" ]] || return 0
+    while read -r kind port; do
+        case "${kind}" in
+            ufw) ufw delete allow "${port}" >/dev/null 2>&1 || true ;;
+            firewalld)
+                firewall-cmd -q --permanent --remove-port="${port}" >/dev/null 2>&1 || true
+                firewall-cmd -q --remove-port="${port}" >/dev/null 2>&1 || true
+                ;;
+        esac
+    done < "${rec}"
+}
+
+box_install_shim() {
+    local text
+    text="$(cat "${BOX_SELF_DIR}/hal0-shim")"
+    mkdir -p "$(dirname "${SHIM_PATH}")"
+    printf '%s\n' "${text//@BOX_SH@/${STATE_TREE}/installer/box/box.sh}" > "${SHIM_PATH}.new"
+    chmod 0755 "${SHIM_PATH}.new"
+    mv "${SHIM_PATH}.new" "${SHIM_PATH}"
+}
+
+# bootstrap.sh's EXIT trap died at its exec into us, so its temp dir is ours
+# to remove after a successful install, as install.sh does on bare metal.
+box_cleanup_bootstrap_work() {
+    local work="${HAL0_BOOTSTRAP_WORK:-}"
+    [[ -n "${work}" && "${HAL0_BOOTSTRAP_KEEP_TMP:-0}" != 1 ]] || return 0
+    [[ -d "${work}" && "$(basename "${work}")" == hal0-install-* ]] || return 0
+    rm -rf "${work}"
+}
+
+_box_install_failed() {
+    local rc=$?
+    [[ "${rc}" == 0 ]] && return 0
+    log "the box install did not finish. Re-run the same install command to retry (state on the box volumes is kept),"
+    log "or remove everything with: sudo bash ${STATE_TREE#"${HOST_ROOT}"}/installer/box/box.sh uninstall"
+}
+
 # ── commands ──────────────────────────────────────────────────────────────
 cmd_preflight() {
     box_require_root
@@ -265,14 +633,114 @@ cmd_install() {
     shift
     box_require_root
     box_preflight || die "preflight failed; nothing was changed"
-    box_subids
-    box_create_argv
     if [[ "${HAL0_BOX_DRY_RUN:-0}" == 1 ]]; then
+        box_subids
+        box_create_argv
         printf '%s\n' "--- podman create argv ---"
         printf '%s\n' "${BOX_CREATE_ARGV[@]}"
         return 0
     fi
-    die "box install is not implemented yet"
+    box_stage_tree "${tree}" "$@"
+    box_install_flow "$@"
+}
+
+# Everything after preflight. Expects STATE_TREE to hold the tree to install.
+box_install_flow() {
+    local t0="${SECONDS}" ip
+    trap _box_install_failed EXIT
+    box_host_packages
+    box_nested_apparmor
+    box_check_podman
+    box_user_setup
+    box_raise_memlock
+    box_build_image "${BOX_BUILD_ARGS[@]+"${BOX_BUILD_ARGS[@]}"}"
+    box_create_and_start
+    box_wait_systemd
+    box_self_test
+    box_run_installer "$@"
+    box_wait_health
+    box_firewall_open
+    box_install_shim
+    date -u +%Y-%m-%dT%H:%M:%SZ > "${STATE_DIR}/installed"
+    trap - EXIT
+    box_cleanup_bootstrap_work
+    ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    log "done in $((SECONDS - t0))s. Dashboard: http://${ip:-<this-host>}:${BOX_PORTS[0]}"
+    log "host commands run through the box: sudo hal0 <command>; box lifecycle: sudo hal0 box status|start|stop|logs"
+}
+
+cmd_uninstall() {
+    box_require_root
+    local u
+    log "removing the hal0 box, its user and all hal0 data in it"
+    if box_user_exists; then
+        u="$(id -u "${BOX_USER}")"
+        as_box systemctl --user disable --now "${BOX_UNIT}" >/dev/null 2>&1 || true
+        as_box podman rm -f "${BOX_NAME}" >/dev/null 2>&1 || true
+        # Only ever as the box user: as root this would wipe the host's own
+        # containers and images.
+        as_box podman system reset --force >/dev/null 2>&1 || true
+        loginctl disable-linger "${BOX_USER}" 2>/dev/null || true
+        systemctl stop "user@${u}.service" 2>/dev/null || true
+        pkill -u "${BOX_USER}" 2>/dev/null || true
+        userdel -r "${BOX_USER}" 2>/dev/null || true
+    else
+        log "user ${BOX_USER} is already gone; cleaning what remains"
+    fi
+    box_firewall_close
+    local f
+    for f in "${SUBUID_FILE}" "${SUBGID_FILE}"; do
+        [[ -f "${f}" ]] && _box_write_subids "${f}"
+    done
+    if [[ -f "${DROPIN}" ]]; then
+        rm -f "${DROPIN}"
+        rmdir "$(dirname "${DROPIN}")" 2>/dev/null || true
+        systemctl daemon-reload 2>/dev/null || true
+    fi
+    if [[ -f "${SHIM_PATH}" ]] && grep -q "${SHIM_MARKER}" "${SHIM_PATH}"; then
+        rm -f "${SHIM_PATH}"
+    fi
+    rm -f "${BUILD_LOG}" "${SELFTEST_LOG}" "${INSTALL_LOG}"
+    rm -rf "${STATE_DIR}"
+    log "removed"
+}
+
+cmd_status() {
+    box_require_root
+    box_user_exists || { log "the hal0 box is not installed"; return 3; }
+    local state
+    as_box systemctl --user --no-pager status "${BOX_UNIT}" || true
+    state="$(as_box podman exec "${BOX_NAME}" systemctl is-system-running 2>/dev/null | tail -1)" || true
+    log "box systemd: ${state:-not running}"
+    if [[ -f "${STATE_DIR}/installed" ]]; then
+        log "install: complete ($(cat "${STATE_DIR}/installed"))"
+    else
+        log "install: incomplete. Re-run the install, or: sudo hal0 box rebuild"
+        return 1
+    fi
+}
+
+cmd_unit() {
+    box_require_root
+    box_user_exists || die "the hal0 box is not installed"
+    as_box systemctl --user "$1" "${BOX_UNIT}"
+}
+
+cmd_logs() {
+    box_require_root
+    box_user_exists || die "the hal0 box is not installed"
+    [[ $# -gt 0 ]] || set -- -n 200
+    as_box podman exec "${BOX_NAME}" journalctl --no-pager "$@"
+}
+
+cmd_exec() {
+    [[ "${1:-}" == -- ]] && shift
+    [[ $# -gt 0 ]] || die "usage: box.sh exec -- <command...>"
+    box_require_root
+    box_user_exists || die "the hal0 box is not installed"
+    local flags=(-i)
+    [[ -t 0 && -t 1 ]] && flags+=(-t)
+    as_box podman exec "${flags[@]}" "${BOX_NAME}" "$@"
 }
 
 usage() {
@@ -280,6 +748,10 @@ usage() {
 usage: box.sh <command>
   install <tree> [install.sh args...]   install hal0 in a rootless podman box
   preflight                             check this host can run the box
+  uninstall                             remove the box, its user and its data
+  status | start | stop                 the box's user unit
+  logs [journalctl args...]             the box's journal
+  exec -- <command...>                  run a command inside the box
 EOF
 }
 
@@ -289,6 +761,11 @@ main() {
     case "${cmd}" in
         install) cmd_install "$@" ;;
         preflight) cmd_preflight ;;
+        uninstall) cmd_uninstall ;;
+        status) cmd_status ;;
+        start|stop) cmd_unit "${cmd}" ;;
+        logs) cmd_logs "$@" ;;
+        exec) cmd_exec "$@" ;;
         -h|--help|help) usage ;;
         *) usage >&2; exit 2 ;;
     esac

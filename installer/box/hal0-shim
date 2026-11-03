@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# hal0-box-shim
+#
+# The host's `hal0` command for a box install (#3332). installer/box/box.sh
+# installs this file as /usr/local/bin/hal0 and replaces the BOX_SH
+# placeholder with the root-owned launcher it keeps under /var/lib/hal0-box.
+#
+#   sudo hal0 <args>          runs `hal0 <args>` inside the box
+#   sudo hal0 uninstall       removes the box, its user and all its data
+#   sudo hal0 box <command>   box lifecycle: status, start, stop, logs, rebuild
+#
+# Root only: the box belongs to the dedicated hal0box user, and only root can
+# act as that user and raise the memlock limit the box's processes need.
+
+set -euo pipefail
+
+BOX_SH="@BOX_SH@"
+
+if [[ "$(id -u)" != 0 ]]; then
+    echo "hal0: the box is managed as root; run: sudo hal0 $*" >&2
+    exit 1
+fi
+
+case "${1:-}" in
+    uninstall)
+        shift
+        exec bash "${BOX_SH}" uninstall "$@"
+        ;;
+    box)
+        shift
+        exec bash "${BOX_SH}" "$@"
+        ;;
+esac
+
+# Rootless podman clamps a process's memlock to the caller's hard limit, and
+# ROCm needs it unlimited.
+if ! { ulimit -Hl unlimited && ulimit -Sl unlimited; } 2>/dev/null; then
+    echo "hal0: warning: could not raise the memlock limit; GPU work may fail" >&2
+fi
+
+exec bash "${BOX_SH}" exec -- hal0 "$@"

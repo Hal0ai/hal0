@@ -20,6 +20,9 @@
 # - common-account uses pam_permit: the guest's unix-chkpwd AppArmor profile
 #   in some LXC hosts denies the box's binary by path. This is a
 #   single-purpose box with no interactive accounts.
+# - podman is in the image because the launcher's network self-test runs a
+#   nested container before install.sh; install.sh installs the same distro
+#   package anyway.
 # - The RUN is one && chain so any failed step fails the build.
 FROM @BASE_IMAGE@
 ARG HAL0_BOX_DEVICE_GROUPS=""
@@ -27,7 +30,7 @@ RUN printf 'APT::Sandbox::User "root";\n' > /etc/apt/apt.conf.d/99-box-build \
  && apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       systemd systemd-sysv dbus ca-certificates curl iproute2 kmod procps sudo \
-      gnupg nftables iptables libpam-systemd \
+      gnupg nftables iptables libpam-systemd podman \
  && rm -f /etc/apt/apt.conf.d/99-box-build \
  && rm -rf /var/lib/apt/lists/* \
  && systemctl mask getty.target console-getty.service systemd-firstboot.service \
