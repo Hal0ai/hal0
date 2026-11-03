@@ -129,6 +129,7 @@ override: `HAL0_FLM_MODELS_DIR`.
 |---|---|---|---|
 | `enabled` | bool | `true` | — |
 | `unified_bank` | bool | `true` | — |
+| `bank` | str | `"shared"` | Hindsight bank behind the `shared` namespace (ADR-0052); letters, digits, `.`, `_`, `:`, `-`, max 128, must start alphanumeric; not `agents` or `private__*`. Run `hal0 memory migrate platform` before changing it; restart hal0-api |
 | `engine` | str | `"hindsight"` | one of `hindsight`, `mem0`, `pgvector` — `"cognee"` is explicitly rejected (retired) |
 | `graph` | table | — | see below |
 | `embedding` | table | — | see below |

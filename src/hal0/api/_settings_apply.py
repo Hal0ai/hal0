@@ -132,7 +132,7 @@ SERVICE_HAL0_API: str = "hal0-api"
 #   * ``[dispatcher].{stream_total_timeout_s, → service-restart[hal0-api]
 #     stream_idle_timeout_s}``                (stall-guard bounds, same
 #                                            create_app-time wiring).
-#   * ``[memory].unified_bank``             → service-restart[hal0-api]
+#   * ``[memory].{unified_bank,bank}``      → service-restart[hal0-api]
 #                                            (constructor arg to
 #                                            HindsightProvider, built once
 #                                            at create_app time — same
@@ -309,6 +309,7 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     },
     # [memory] — HindsightProvider constructor arg, built once at boot.
     "memory.unified_bank": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
+    "memory.bank": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
     # [realtime] — every key is read live off app.state.hal0_config.realtime
     # on each WS connect (routes/realtime.py), which the settings PUT
     # refreshes in place, so all of them apply immediately.

@@ -156,8 +156,9 @@ Callers identify themselves via the `X-hal0-Agent` header, and the same
 identity resolves the same memory namespace whether it arrives over REST or
 MCP.
 
-Namespaces map onto Hindsight **banks** — `shared` is the `shared` bank,
-`private:<agent>` is the `private__<agent>` bank. `[memory].unified_bank`
+Namespaces map onto Hindsight **banks** — `shared` is the bank named by
+`[memory] bank` (default `shared`; ADR-0052), `private:<agent>` is the
+`private__<agent>` bank. `[memory].unified_bank`
 (default `true`) changes what a private write actually does: instead of
 forking a separate `private:<agent>` bank, the write still lands in `shared`
 but is stamped with a `visibility:private` tag plus an `agent:<id>` tag, and
