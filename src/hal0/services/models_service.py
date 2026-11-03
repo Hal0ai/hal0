@@ -367,6 +367,31 @@ def suggest_id_from_path(p: Path) -> str:
     return _normalise_id(p.stem)
 
 
+def halogen_companion_refusal(path: Path, resolved: Path) -> Any | None:
+    """The ``models.halogen_companion`` refusal for a companion file, else ``None``.
+
+    Shared by add-from-path (raises it) and scan-commit (reports it per row), so
+    both entry points refuse with the same code and message.
+    """
+    if not (is_halogen_companion(path.name) or is_halogen_companion(resolved.name)):
+        return None
+    from hal0.errors import Conflict
+
+    owners = halogen_companion_owners(resolved)
+    if len(owners) == 1:
+        hint = f"register the checkpoint it belongs to: {owners[0]}"
+    elif owners:
+        hint = f"register the checkpoint it belongs to ({', '.join(owners)})"
+    else:
+        hint = "register the halogen checkpoint beside it instead"
+    return Conflict(
+        f"{path.name} is a halogen companion file, not a model — {hint}. "
+        "The engine finds companions beside their checkpoint by name.",
+        code="models.halogen_companion",
+        details={"path": str(path), "checkpoints": owners},
+    )
+
+
 async def commit_scan_rows(
     rows: list[Any],
     registry: Any,
@@ -409,6 +434,15 @@ async def commit_scan_rows(
         # ComfyUI's tree belongs to the image catalog: skip the row, keep the batch.
         if is_comfyui_asset(path):
             skipped.append({"path": str(resolved), "reason": "image_asset"})
+            continue
+
+        # A halogen companion is never a model: skip the row (same refusal as
+        # add-from-path), keep the batch.
+        refusal = halogen_companion_refusal(path, resolved)
+        if refusal is not None:
+            skipped.append(
+                {"path": str(resolved), "reason": refusal.code, "message": refusal.message}
+            )
             continue
 
         # #1838: see add_from_path's matching comment — pass the operator-
@@ -2042,22 +2076,9 @@ async def add_from_path(body: dict[str, Any], *, registry: Any, event_bus: Any) 
     # ``.hgn`` file but never a model: the engine finds it beside its checkpoint
     # by name, and a row for it could be assigned to a slot that cannot load it.
     # Point the operator at the checkpoint it belongs to instead.
-    if is_halogen_companion(path.name) or is_halogen_companion(resolved.name):
-        from hal0.errors import Conflict
-
-        owners = halogen_companion_owners(resolved)
-        if len(owners) == 1:
-            hint = f"register the checkpoint it belongs to: {owners[0]}"
-        elif owners:
-            hint = f"register the checkpoint it belongs to ({', '.join(owners)})"
-        else:
-            hint = "register the halogen checkpoint beside it instead"
-        raise Conflict(
-            f"{path.name} is a halogen companion file, not a model — {hint}. "
-            "The engine finds companions beside their checkpoint by name.",
-            code="models.halogen_companion",
-            details={"path": str(path), "checkpoints": owners},
-        )
+    refusal = halogen_companion_refusal(path, resolved)
+    if refusal is not None:
+        raise refusal
 
     # #1838: pass the operator-typed name for the capability filename-token
     # fallback — a HF hub-cache symlink resolves to a sha-named blob whose
