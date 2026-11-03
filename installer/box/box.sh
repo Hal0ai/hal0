@@ -73,6 +73,8 @@ STATE_TREE="${STATE_DIR}/tree"
 # with the user's comment it proves hal0 owns the account, so a pre-existing
 # hal0box user is never adopted, rebuilt into or purged.
 OWNER_FILE="${STATE_DIR}/owner"
+# The image build context (root-owned, readable by the box user).
+BUILD_DIR="${STATE_DIR}/build"
 BOX_GECOS="hal0 box"
 LOG_DIR="${HOST_ROOT}/var/log"
 BUILD_LOG="${LOG_DIR}/hal0-box-build.log"
@@ -462,10 +464,16 @@ box_raise_memlock() {
     die "could not raise the memlock hard limit to unlimited; GPU runners need it. Run as real root, not inside a limited shell."
 }
 
+# The build context lives in the root-owned state dir, never in the box
+# user's home: root writing there would follow any symlink the box user
+# planted (to /etc/shadow, say). The box user only needs to read it.
 box_build_image() {
-    local dir="${BOX_HOME}/box" groups="${BOX_DEVICE_GROUPS[*]:-}"
+    local dir="${BUILD_DIR}" groups="${BOX_DEVICE_GROUPS[*]:-}"
+    rm -rf "${dir}"
+    mkdir -p "${dir}"
+    chmod 0755 "${STATE_DIR}" "${dir}"
     box_render_containerfile "${dir}"
-    chown -R "${BOX_USER}:" "${dir}"
+    chmod 0644 "${dir}/Containerfile"
     mkdir -p "${LOG_DIR}"
     log "building the box image (log: ${BUILD_LOG#"${HOST_ROOT}"})"
     as_box podman build "$@" --build-arg "HAL0_BOX_DEVICE_GROUPS=${groups}" -t "${BOX_IMAGE}" "${dir}" \
@@ -473,13 +481,15 @@ box_build_image() {
         || die "box image build failed, see ${BUILD_LOG#"${HOST_ROOT}"}"
 }
 
+# Written by the box user, so root never writes through a path in a home the
+# box user controls.
 box_write_unit() {
     local podman_bin dir="${BOX_HOME}/.config/systemd/user"
     podman_bin="$(command -v podman)"
-    mkdir -p "${dir}"
+    as_box mkdir -p "${dir}" || die "could not create ${dir#"${HOST_ROOT}"} as ${BOX_USER}"
     # A persistent unit, not quadlet: quadlet's --rm --replace would destroy
     # the box on stop (decision 7).
-    cat > "${dir}/${BOX_UNIT}" <<EOF
+    as_box tee "${dir}/${BOX_UNIT}" >/dev/null <<EOF || die "could not write the ${BOX_UNIT} user unit as ${BOX_USER}"
 [Unit]
 Description=hal0 in a rootless podman box
 Wants=network-online.target
@@ -498,7 +508,6 @@ Restart=on-failure
 [Install]
 WantedBy=default.target
 EOF
-    chown -R "${BOX_USER}:" "${BOX_HOME}/.config"
 }
 
 # Removes an existing box container (state on volumes stays), then creates

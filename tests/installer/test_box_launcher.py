@@ -123,7 +123,7 @@ for a in "$@"; do
 done
 name="${!#}"
 echo "${name}:2001:${comment}" >> "${HAL0_STUB_STATE}/users"
-[[ -n "${home}" ]] && mkdir -p "${home}"
+[[ -n "${home}" ]] && /usr/bin/mkdir -p "${home}"
 exit 0
 """,
     "userdel": r"""
@@ -210,6 +210,10 @@ if [[ "${1:-}" == -I ]]; then echo "192.0.2.10 "; else echo "testhost"; fi
     "loginctl": "exit 0",
     "sleep": "exit 0",
     "pkill": "exit 0",
+    # Real file tools, logged so the acting user of every write is visible.
+    "tee": 'exec /usr/bin/tee "$@"',
+    "mkdir": 'exec /usr/bin/mkdir "$@"',
+    "chmod": 'exec /usr/bin/chmod "$@"',
     "chown": "exit 0",
     "pasta": "exit 0",
     "newuidmap": "exit 0",
@@ -883,7 +887,7 @@ def test_purge_fails_when_box_processes_survive(box: BoxHarness) -> None:
     assert (box.host / "var" / "lib" / "hal0-box").exists()
 
 
-def test_purge_fails_when_userdel_fails(box: BoxHarness) -> None:
+def test_purge_fails_when_the_user_cannot_be_deleted(box: BoxHarness) -> None:
     box.install()
     box.fail_next("userdel")
     res = box.purge(check=False)
@@ -938,6 +942,50 @@ def test_plain_uninstall_leaves_a_foreign_user_alone(box: BoxHarness) -> None:
     assert box.user_exists() and "hal0box:300000:65536" in box.subuid()
     assert not any(c.user == "hal0box" for c in box.calls())
     assert not any(c.argv.startswith("loginctl disable-linger") for c in box.calls())
+
+
+# ── root never writes through the box user's home ─────────────────────────
+
+
+def _plant_home(box: BoxHarness) -> Path:
+    home = box.host / "home" / "hal0box"
+    home.mkdir(parents=True)
+    return home
+
+
+def test_containerfile_is_rendered_outside_the_box_home(box: BoxHarness) -> None:
+    home = _plant_home(box)
+    victim = box.tmp / "victim"
+    victim.mkdir()
+    (home / "box").symlink_to(victim)
+    box.install()
+    assert list(victim.iterdir()) == []
+    build_dir = box.host / "var" / "lib" / "hal0-box" / "build"
+    cf = build_dir / "Containerfile"
+    assert "\nFROM docker.io/library/ubuntu:26.04@sha256:" in cf.read_text()
+    assert stat.S_IMODE(cf.stat().st_mode) == 0o644
+    assert stat.S_IMODE(build_dir.stat().st_mode) == 0o755
+    build = box.podman_calls_named("build")[0]
+    assert build.user == "hal0box" and build.argv.endswith(str(build_dir))
+
+
+def test_user_unit_is_written_by_the_box_user(box: BoxHarness) -> None:
+    home = _plant_home(box)
+    box.install()
+    unit = home / ".config" / "systemd" / "user" / "hal0-box.service"
+    writes = [c for c in box.calls() if c.argv.startswith("tee") and str(unit) in c.argv]
+    assert writes and all(c.user == "hal0box" for c in writes)
+    assert "start hal0-box" in unit.read_text()
+
+
+def test_root_never_writes_or_chowns_under_the_box_home(box: BoxHarness) -> None:
+    box.install()
+    box.rebuild()
+    box.uninstall()
+    home = str(box.host / "home" / "hal0box")
+    for c in box.calls():
+        if c.user == "root" and c.argv.split(" ", 1)[0] in {"tee", "mkdir", "chmod", "chown", "rm"}:
+            assert home not in c.argv, c
 
 
 def test_bootstrap_work_dir_is_removed_after_success(box: BoxHarness) -> None:
