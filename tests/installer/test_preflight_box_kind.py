@@ -20,7 +20,9 @@ _INSTALL_SH = _REPO_ROOT / "installer" / "install.sh"
 def _bash(snippet: str, env_extra: dict[str, str]) -> subprocess.CompletedProcess[str]:
     script = f"source {_PREFLIGHT!s} >/dev/null 2>&1\n{snippet}\n"
     env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": "/tmp", **env_extra}
-    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, check=False)
+    return subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, env=env, check=False
+    )
 
 
 def test_containerenv_marker_is_a_box(tmp_path: Path) -> None:
