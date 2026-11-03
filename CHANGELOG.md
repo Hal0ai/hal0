@@ -79,6 +79,8 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- **A halogen slot is no longer torn down by one transient error on its first chat turn.** The readiness sentinel convicted on a single transport error or 5xx, stopping a load that had taken minutes. It now pauses briefly and probes once more, and only a repeat fails the load, matching the corroboration rule of the generic output-sanity gate ([#3287](https://github.com/Hal0ai/hal0/issues/3287)).
+
 - **An image request no longer unloads the LLMs while the img slot is crash-looping.** During the backoff, or while the slot was parked, each request drained and unloaded the LLM set, was refused, then reloaded it, interrupting chat and agent work for an image that could not be produced. It now answers 503 with `Retry-After` straight away and leaves the LLMs loaded. ([#3299](https://github.com/Hal0ai/hal0/issues/3299))
 
 - **`speculation = "ngram"` launches again on the pinned runner.** hal0 passed the `ngram-mod` size flags under the names llama.cpp removed before build b11840 (`--spec-ngram-size-n`, `--spec-ngram-size-m`, `--spec-ngram-n-max`), so a profile or slot `[tune]` set to `ngram` made llama-server exit 64 at argument parsing and the slot crash-loop. The bundle now uses `--spec-ngram-mod-n-match`, `--spec-ngram-mod-n-min` and `--spec-ngram-mod-n-max` with the same values (#3180).

@@ -340,6 +340,11 @@ class Slot:
 _SLOW_STOP_CONVERGED_MESSAGE = "stop took longer than the terminate budget; converged to offline (auto-reloads on next request)"
 
 
+# Pause before the single re-probe of a halogen sentinel that hit a transport
+# error or 5xx. Module-level so tests can zero it.
+_HALOGEN_REPROBE_PAUSE_S = 3.0
+
+
 class SlotManager:
     """Manages the lifecycle of all hal0 inference slots.
 
@@ -4584,6 +4589,17 @@ class SlotManager:
             return SlotState.READY
 
         verdict = await provider.verify_inference(slot_port)
+        first_status = str(verdict.get("status") or "")
+        if not verdict.get("ok") and output_sanity.is_transient_probe_failure(first_status):
+            # No corroboration, no conviction (same rule as the generic gate):
+            # one transport error / 5xx must not tear down a load that took
+            # minutes. Pause briefly and probe once more; only a repeat convicts.
+            log.warning(
+                "slot.output_sanity_reprobe",
+                extra={"slot": slot_name, "port": slot_port, "status": first_status},
+            )
+            await asyncio.sleep(_HALOGEN_REPROBE_PAUSE_S)
+            verdict = await provider.verify_inference(slot_port)
         ok = bool(verdict.get("ok"))
         status = str(verdict.get("status") or "")
         sample = str(verdict.get("sample") or "")
