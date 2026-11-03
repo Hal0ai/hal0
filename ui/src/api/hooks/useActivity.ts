@@ -368,15 +368,27 @@ export function useActivityStream(opts: UseActivityStreamOptions = {}): Activity
         clearTimeout(flushTimerRef.current)
         flushTimerRef.current = null
       }
-      // Don't drop buffered frames on teardown — a setState here wouldn't
-      // run its updater (unmounting), so merge straight into the persistent
-      // cache: the remounted pane (SlotsView swaps panes on /api/slots
-      // resolve) rehydrates complete and the cursor stays truthful.
+      // Don't drop buffered frames on teardown. Two destinations:
+      //  - the persistent cache, written directly because on a real unmount
+      //    React never runs the setState updater: the remounted pane
+      //    (SlotsView swaps panes on /api/slots resolve) rehydrates complete
+      //    and the cursor stays truthful;
+      //  - setRecords, because the consumer may stay mounted (the dock closes
+      //    its stream when the tab hides, follow flips false). sinceRef has
+      //    already moved past these frames, so without this the live ring
+      //    never shows them until a remount. mergeBatch dedups by id, so the
+      //    two writes cannot double-add.
       const batch = pendingRef.current
       pendingRef.current = []
       if (batch.length) {
         const merged = mergeBatch(_ringCache.get(filterKey) ?? [], batch)
         if (merged != null) _ringCache.set(filterKey, merged)
+        setRecords((prev) => {
+          const next = mergeBatch(prev, batch)
+          if (next == null) return prev
+          _ringCache.set(filterKey, next)
+          return next
+        })
       }
       if (esRef.current) {
         esRef.current.close()
