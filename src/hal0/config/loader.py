@@ -862,13 +862,23 @@ def load_profiles_config(path: Path | None = None) -> ProfilesConfig:
     that name it). Unknown top-level keys are logged and kept as written.
 
     Raises:
-        ConfigParseError: If the TOML itself does not parse.
+        ConfigParseError: If the TOML itself does not parse, or if a top-level
+            ``profile`` key is present but is not a table (an ``[[profile]]``
+            array or a scalar). Reading that as "no custom profiles" would let
+            the next :func:`save_profiles_config` overwrite the operator's file
+            with an empty catalogue.
     """
     target = path if path is not None else paths.profiles_toml()
     if not Path(target).exists():
         return ProfilesConfig.model_validate({"profile": SEED_PROFILES})
     raw = _read_toml(Path(target))
-    entries = raw.get("profile") if isinstance(raw.get("profile"), dict) else {}
+    entries = raw.get("profile", {})
+    if not isinstance(entries, dict):
+        raise ConfigParseError(
+            f"profiles.toml at {target}: top-level 'profile' must be a table "
+            f"([profile.<name>]), got {type(entries).__name__}; fix the file by hand",
+            details={"path": str(target), "reason": f"profile is {type(entries).__name__}"},
+        )
     cfg = ProfilesConfig()
     for name, entry in entries.items():
         try:

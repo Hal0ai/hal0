@@ -23,7 +23,9 @@
 # Flags:
 #   --allow-deferred        accept a run whose slot lifecycle was deferred
 #
-# Exit 1 if any row FAILs, or if the slot-lifecycle rows were deferred
+# Exit 1 if any row FAILs, if a tier script exited non-zero (a crashed tier
+# leaves its rows `missing`, which no row-level check would see), or if the
+# slot-lifecycle rows were deferred
 # (runtime-slot-load can't start a systemd unit under --dev, so the chat
 # round-trip is skipped) without --allow-deferred / HAL0_HARNESS_ALLOW_DEFERRED=1.
 # An allowed run names those rows on its OK line. scripts/harness-gate.py
@@ -68,20 +70,25 @@ run_tier() {
     printf '\n%s═════════════════════════════════════════════════════%s\n' "${BOLD}" "${RST}"
     printf '%s  Tier: %s%s\n' "${BOLD}" "${name}" "${RST}"
     printf '%s═════════════════════════════════════════════════════%s\n' "${BOLD}" "${RST}"
-    if ! bash "${script}"; then
-        return 1
-    fi
+    bash "${script}" || return $?
 }
 
-# Always run installer + cli + runtime + cleanup. We tolerate FAIL rows
-# inside a tier (they go in the JSON); only abort the pipeline if a
-# tier script itself can't complete.
-INSTALLER_RC=0; CLI_RC=0; RUNTIME_RC=0; AGENTS_RC=0; CLEANUP_RC=0
-run_tier "installer" "${HARNESS_DIR}/installer-test.sh"    || INSTALLER_RC=$?
-run_tier "cli"       "${HARNESS_DIR}/cli-test.sh"          || CLI_RC=$?
-run_tier "runtime"   "${HARNESS_DIR}/runtime-test.sh"      || RUNTIME_RC=$?
-run_tier "agents"    "${HARNESS_DIR}/agents-test.sh"       || AGENTS_RC=$?
-run_tier "cleanup"   "${HARNESS_DIR}/harness-cleanup.sh"   || CLEANUP_RC=$?
+# Always run every tier, even after one crashes, so cleanup still runs. FAIL
+# rows inside a tier go in the JSON; a tier script that itself exits non-zero
+# is recorded here as NAME=RC and handed to harness-gate.py, which fails the
+# run and names the tier.
+run_tier_recorded() {
+    local name="$1" rc=0
+    run_tier "$@" || rc=$?
+    if (( rc != 0 )); then
+        GATE_ARGS+=(--crashed-tier "${name}=${rc}")
+    fi
+}
+run_tier_recorded "installer" "${HARNESS_DIR}/installer-test.sh"
+run_tier_recorded "cli"       "${HARNESS_DIR}/cli-test.sh"
+run_tier_recorded "runtime"   "${HARNESS_DIR}/runtime-test.sh"
+run_tier_recorded "agents"    "${HARNESS_DIR}/agents-test.sh"
+run_tier_recorded "cleanup"   "${HARNESS_DIR}/harness-cleanup.sh"
 
 # Optional remote leg: scripts/release-test.sh produces its own JSON
 # (tests/release-gate-report.json) with the same row shape. We merge

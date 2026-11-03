@@ -167,16 +167,19 @@ async def test_multi_source_observation_is_refused_with_its_document_ids(unified
 
 
 @pytest.mark.asyncio
-async def test_multi_source_refusal_deletes_nothing_else_in_the_call() -> None:
+@pytest.mark.parametrize("unified", [True, False])
+async def test_multi_source_refusal_deletes_nothing_else_in_the_call(unified: bool) -> None:
     """The refusal comes before any delete, so an approved bulk call that
-    includes a multi-source observation does not half-apply."""
+    includes a multi-source observation does not half-apply. Legacy multi-bank
+    mode used to delete the plain document ids first (#2780)."""
     client = EngineShapeClient(
         [*_multi_source_units(), _world("060ad4de-0000-4000-8000-00000000000c", "doc-c", [])]
     )
-    p = _provider(client)
+    p = _provider(client, unified=unified)
     with pytest.raises(ObservationMultiSourceDelete):
         await p.delete(["doc-c", OBS], client_id="rvskeptic", dataset="shared")
     assert client.deleted == []
+    assert OBS in client.ids()
 
 
 @pytest.mark.asyncio

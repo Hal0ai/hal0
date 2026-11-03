@@ -743,13 +743,18 @@ box_wait_health() {
 # published ports and record each rule this launcher added, so uninstall
 # removes those and never a rule the operator had before.
 box_firewall_open() {
-    local rec="${STATE_DIR}/firewall" p rule
+    local rec="${STATE_DIR}/firewall" p rule ufw_status
     touch "${rec}"
-    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | head -1 | grep -q '^Status: active'; then
+    # Never end a pipe early here (head -1, grep -q): under pipefail the
+    # writer then dies of SIGPIPE (141) and the whole test reads as false,
+    # so an active ufw would be skipped. Capture the output, then match it.
+    if command -v ufw >/dev/null 2>&1 \
+        && ufw_status="$(ufw status 2>/dev/null)" && [[ "${ufw_status}" == "Status: active"* ]]; then
         for p in "${BOX_PORTS[@]}"; do
             rule="ufw ${p}/tcp"
             grep -qxF "${rule}" "${rec}" && continue
-            if ufw status 2>/dev/null | awk '{print $1, $2}' | grep -qxF "${p}/tcp ALLOW"; then
+            ufw_status="$(ufw status 2>/dev/null)" || true
+            if awk -v want="${p}/tcp ALLOW" '$1 " " $2 == want { found = 1 } END { exit !found }' <<<"${ufw_status}"; then
                 continue
             fi
             ufw allow "${p}/tcp" comment "${BOX_NAME}" >/dev/null && printf '%s\n' "${rule}" >> "${rec}"

@@ -187,13 +187,15 @@ export function segmentActions(
     .slice(0, 2)
 }
 
-const EXPORT_CATEGORIES = new Set(['slot', 'model', 'profile', 'capability', 'system'])
-
-/** The activity export's filter set for the dock's filters. Only the keys it sets are present. */
-export function exportFilters(f: DockFilters): ActivityFilters {
+/** The activity export's filter set for the dock's filters. Only the keys it sets are present.
+ *  The source chip becomes the export's `category` when it names an activity category: one that
+ *  appears as `record.category` on the activity rows. The set is read from the rows, so a category
+ *  the backend adds (backend, mcp, comfyui, ...) needs no change here. A journal-only source such as
+ *  `hal0` has no activity rows, so it adds no category. */
+export function exportFilters(f: DockFilters, events: readonly DockEvent[]): ActivityFilters {
   const out: ActivityFilters = {}
   if (f.severity !== 'all') out.severity = f.severity
-  if (EXPORT_CATEGORIES.has(f.source)) out.category = f.source
+  if (f.source !== 'all' && events.some((e) => e.record?.category === f.source)) out.category = f.source
   if (f.slot !== 'all') out.search = f.slot
   return out
 }

@@ -287,9 +287,10 @@ even on a fresh install, under `[memory.graph]`:
   `extraction_max_tokens` must stay strictly above the retain chunk size of
   every bank: the engine refuses each retain into a bank whose chunk size is
   not below the cap. The default `16384` clears the 12000-character strategy
-  chunks the Hindsight coding-agent plugin sets. A box whose `hal0.toml`
-  already holds `extraction_max_tokens = 4096` keeps it; saving the graph
-  settings and `hal0 doctor` both warn when a bank's chunk size is not cleared.
+  chunks the Hindsight coding-agent plugin sets. `hal0 update` raises a saved
+  value of `12000` or less to `16384` and restarts the engine so the drop-in
+  matches; a larger value is left alone. Saving the graph settings and
+  `hal0 doctor` both warn when a bank's chunk size is not cleared.
 
   hal0 also owns Hindsight's retain wall limit (`HINDSIGHT_API_RETAIN_WALL_TIMEOUT`),
   which cancels a retain that runs too long and marks it failed without a

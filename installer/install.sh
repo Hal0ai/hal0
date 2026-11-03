@@ -2525,6 +2525,16 @@ fi
 # FAILURE (not OS/LXC sniffing), idempotent, unit-tested against recorded fakes
 # (see src/hal0/agents/containers_apparmor.py).
 #
+# The same module carries a SECOND, independent remediation (#3234): on an
+# UNPRIVILEGED LXC (a nested AppArmor policy namespace, `.ns_level` > 0) the
+# guest's own `flags=(unconfined)` profiles for podman/crun/buildah/runc/
+# rootlesskit/slirp4netns deny every podman `socket()`, which the containers.conf
+# fix cannot help. It disables those profiles, retries once, and rolls them back
+# if the retry still fails. The denial reproduced on a Proxmox VE host running
+# the 7.0 kernel and not on a 6.8 kernel, so it is detected from the smoke
+# failure and the namespace level, never from the OS or kernel version. This
+# re-check exits non-zero (3) when that remediation ran but did not resolve it.
+#
 # #1563: this used to be the ONLY place this fix ran — long after
 # `preflight_container_runtime` (line ~338, required mode) had already
 # hard-`die()`d on the exact same failure, making this dead code on the

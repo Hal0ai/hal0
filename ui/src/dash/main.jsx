@@ -134,7 +134,7 @@ class ViewErrorBoundary extends React.Component {
 function App() {
   const [tweaks, setTweak] = useTweaks(TWEAK_DEFAULTS);
   const { active: activeBanners } = useBanners();
-  const [{ route, param }, setRouteState] = useStateA(parseRoute());
+  const [{ route, param, query }, setRouteState] = useStateA(parseRoute());
   const [approvalsOpen, setApprovalsOpen] = useStateA(false);
   const [footerOpen, setFooterOpen] = useStateA(false);
   const [paletteOpen, setPaletteOpen] = useStateA(false);
@@ -290,7 +290,8 @@ function App() {
       // modelParam drives the Models tabs the same way slotParam drives the
       // Slots tabs — #models/profiles deep-links the Profiles tab.
       case "models":   return <ModelsView modelParam={param} />;
-      case "logs":     return <LogsView />;
+      // ?unit= comes from parseRoute: the agent card's Unit logs control (hal0#2931).
+      case "logs":     return <LogsView unit={query.unit || null} />;
       // v0.5 nav: Agent is a tabbed shell hosting Memory + MCP. #memory and
       // #mcp are kept as routes that resolve to their tab inside AgentView (so
       // MemoryView's internal #memory/<section> nav round-trips and old

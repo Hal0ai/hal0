@@ -1799,9 +1799,8 @@ class HindsightProvider(MemoryProvider):
         one source document deletes that document; one that maps to more is
         refused whole with :class:`ObservationMultiSourceDelete`, so a single
         id never reaches more than one document. In unified mode the refusal
-        comes before anything in the call is deleted; legacy multi-bank mode
-        deletes the call's plain document ids first and resolves observation
-        ids after (#2780).
+        comes before anything in the call is deleted, in legacy multi-bank mode
+        too (#2780).
         """
         deleted = 0
         # We don't know which bank each document_id lives in without a
@@ -1829,30 +1828,20 @@ class HindsightProvider(MemoryProvider):
                 if any(removed):
                     deleted += 1
             return {"deleted": deleted}
-        # Legacy multi-bank mode needs no gate — _allowed_namespaces never
+        # Legacy multi-bank mode needs no ACL gate — _allowed_namespaces never
         # yields a foreign private bank and each project has its own bank, so
-        # bank isolation already protects both. The id is tried as a document
-        # id first (no scan on the common path); only an id that misses every
-        # bank is resolved, so a fact or observation id still deletes.
-        missed: list[str] = []
-        for given_id in ids:
-            if await self._delete_document_anywhere(given_id, banks):
+        # bank isolation already protects both. The scan only translates fact
+        # and observation ids into document ids. Like unified mode it resolves
+        # every id and refuses a multi-source observation before the first
+        # delete (#2780). An id the scan cannot resolve is still tried as a
+        # document id, so a plain document the scan misses keeps deleting.
+        resolved = await self._deletable_ids(set(ids), banks, client_id, dataset, enforce_acl=False)
+        _refuse_multi_source(ids, resolved)
+        for given_id in dict.fromkeys(ids):
+            docs = resolved.get(given_id, [given_id])
+            removed = [await self._delete_document_anywhere(doc, banks) for doc in docs]
+            if any(removed):
                 deleted += 1
-            else:
-                missed.append(given_id)
-        if missed:
-            resolved = await self._deletable_ids(
-                set(missed), banks, client_id, dataset, enforce_acl=False
-            )
-            resolved = {
-                given_id: [d for d in docs if d != given_id] for given_id, docs in resolved.items()
-            }
-            _refuse_multi_source(missed, resolved)
-            for given_id in missed:
-                docs = resolved.get(given_id, [])
-                removed = [await self._delete_document_anywhere(doc, banks) for doc in docs]
-                if any(removed):
-                    deleted += 1
         return {"deleted": deleted}
 
     # ── recall (fan-out added in Task P1-3) ────────────────────────────

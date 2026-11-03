@@ -764,6 +764,17 @@ class RunWatcher:
             return changes
 
         async with self._lock(tail.run_id):
+            # The inbox row goes before the terminal status is written: ``wait_run``
+            # and ``get_run`` read the ledger directly, so a run they see as ended
+            # must not still hold a pending approval. The lock keeps ``_refile``
+            # from putting a row back in between.
+            current = await asyncio.to_thread(self._store.get_run, tail.run_id)
+            if (
+                current is not None
+                and current.status not in TERMINAL_STATUSES
+                and _is_pending(current, "approval.request")
+            ):
+                await self._withdraw(current, f"the run ended ({status})")
             result = await asyncio.to_thread(
                 _record_sync, self._store, tail.run_id, event, decide, skip_terminal=True
             )
@@ -774,9 +785,6 @@ class RunWatcher:
             tail.last_seq = max(tail.last_seq, event[0])
         if result is None:
             return
-        before, _after, _changed = result
-        if _is_pending(before, "approval.request"):
-            await self._withdraw(before, f"the run ended ({status})")
         bus_type, severity = _BUS_FOR_STATUS[status]
         await self._emit(tail, bus_type, severity, f"{_bus_message(tail)}: {status}", status)
         self._changed(tail.run_id)

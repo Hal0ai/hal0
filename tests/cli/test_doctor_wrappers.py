@@ -100,3 +100,26 @@ def test_fix_reports_errors_with_nonzero_exit(
     assert result.exit_code == 1
     assert "permission denied" in result.output
     assert "PATH link refresh failed" in result.output
+
+
+def test_fix_reports_skipped_foreign_venv_with_nonzero_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3360: a refused (foreign) venv is not a silent success."""
+    monkeypatch.setattr(
+        "hal0.updater.updater._editable_install_path", lambda: str(tmp_path / "opt-hal0")
+    )
+    monkeypatch.setattr("hal0.cli.doctor_commands.os.geteuid", lambda: 0)
+    monkeypatch.setattr(
+        "hal0.updater.updater.refresh_privileged_wrappers",
+        lambda *a, **k: {"refreshed": [], "sudoers_refreshed": [], "errors": {}},
+    )
+    monkeypatch.setattr(
+        "hal0.updater.updater.refresh_path_links",
+        lambda *a, **k: {"hal0": "skipped", "hal0-agent": "skipped"},
+    )
+
+    result = runner.invoke(app, ["doctor", "wrappers", "--fix"])
+
+    assert result.exit_code == 1
+    assert "not the installed one" in result.output
