@@ -110,14 +110,19 @@ exec "$@"
 if [[ $# -eq 1 && "$1" == -u ]]; then echo "${HAL0_STUB_UID:-0}"; exit 0; fi
 name="${!#}"
 line="$(grep "^${name}:" "${HAL0_STUB_STATE}/users" 2>/dev/null)" || { echo "id: '${name}': no such user" >&2; exit 1; }
-uid="${line#*:}"
+uid="$(cut -d: -f2 <<<"${line}")"
 if [[ "${1:-}" == -u ]]; then echo "${uid}"; else echo "uid=${uid}(${name}) gid=${uid}(${name})"; fi
 """,
+    # users lines are "<name>:<uid>:<gecos>".
     "useradd": r"""
-home=""; prev=""
-for a in "$@"; do [[ "$prev" == -d || "$prev" == --home-dir ]] && home="$a"; prev="$a"; done
+home=""; comment=""; prev=""
+for a in "$@"; do
+    [[ "$prev" == -d || "$prev" == --home-dir ]] && home="$a"
+    [[ "$prev" == -c || "$prev" == --comment ]] && comment="$a"
+    prev="$a"
+done
 name="${!#}"
-echo "${name}:2001" >> "${HAL0_STUB_STATE}/users"
+echo "${name}:2001:${comment}" >> "${HAL0_STUB_STATE}/users"
 [[ -n "${home}" ]] && mkdir -p "${home}"
 exit 0
 """,
@@ -127,6 +132,11 @@ grep -v "^${name}:" "${HAL0_STUB_STATE}/users" > "${HAL0_STUB_STATE}/users.tmp" 
 mv "${HAL0_STUB_STATE}/users.tmp" "${HAL0_STUB_STATE}/users"
 [[ "${1:-}" == -r && -n "${HAL0_BOX_HOST_ROOT:-}" ]] && rm -rf "${HAL0_BOX_HOST_ROOT}/home/${name}"
 exit 0
+""",
+    # A "stuck" file makes the box user's processes survive every kill.
+    "pgrep": r"""
+[[ -f "${HAL0_STUB_STATE}/stuck" ]] && { echo 4242; exit 0; }
+exit 1
 """,
     "systemctl": r"""
 case "$*" in
@@ -170,11 +180,28 @@ exit 0
 if [[ "${1:-}" == -c && "${2:-}" == %g && -f "${3:-}.gid" ]]; then cat "$3.gid"; exit 0; fi
 exec /usr/bin/stat "$@"
 """,
+    # passwd from the users file, group from the groups file ("<name>:<gid>").
     "getent": r"""
-if [[ "${1:-}" == group ]]; then
-    grep -E "^[^:]*:${2}$|^${2}:" "${HAL0_STUB_STATE}/groups" 2>/dev/null | head -1 | awk -F: '{print $1":x:"$2":"}' | grep . && exit 0
-    exit 2
-fi
+db="${1:-}"; key="${2:-}"; found=1
+case "${db}" in
+    passwd)
+        while IFS=: read -r n u g; do
+            [[ -n "$n" ]] || continue
+            if [[ -z "${key}" || "${key}" == "$n" || "${key}" == "$u" ]]; then
+                echo "$n:x:$u:$u:$g:/home/$n:/usr/sbin/nologin"; found=0
+            fi
+        done < <(cat "${HAL0_STUB_STATE}/users" 2>/dev/null)
+        ;;
+    group)
+        while IFS=: read -r n gid; do
+            [[ -n "$n" ]] || continue
+            if [[ -z "${key}" || "${key}" == "$n" || "${key}" == "${gid}" ]]; then
+                echo "$n:x:${gid}:"; found=0
+            fi
+        done < <(cat "${HAL0_STUB_STATE}/groups" 2>/dev/null)
+        ;;
+esac
+[[ "${found}" == 0 ]] && exit 0
 exit 2
 """,
     "hostname": r"""
@@ -831,6 +858,38 @@ def test_uninstall_unknown_flag_exits_2(box: BoxHarness) -> None:
     res = box.shim("uninstall", "--purg", check=False)
     assert res.returncode == 2 and "--purg" in res.stdout
     assert box.state_is_healthy() and box.user_exists()
+
+
+# ── purge really deletes the user, or says it did not ─────────────────────
+
+
+def test_purge_terminates_the_box_user_before_userdel(box: BoxHarness) -> None:
+    box.install()
+    box.purge()
+    calls = box.all_calls()
+    assert "loginctl terminate-user hal0box" in calls
+    assert box.first_index("loginctl terminate-user hal0box") < box.first_index("userdel")
+
+
+def test_purge_fails_when_box_processes_survive(box: BoxHarness) -> None:
+    box.install()
+    (box.state / "stuck").write_text("")
+    res = box.purge(check=False)
+    assert res.returncode != 0 and "still running" in res.stdout
+    assert "removed" not in res.stdout.splitlines()[-1]
+    assert any(c.argv.startswith("pkill -KILL -u hal0box") for c in box.calls())
+    assert not any(c.argv.startswith("userdel") for c in box.calls())
+    assert box.user_exists() and "hal0box:" in box.subuid()
+    assert (box.host / "var" / "lib" / "hal0-box").exists()
+
+
+def test_purge_fails_when_userdel_fails(box: BoxHarness) -> None:
+    box.install()
+    box.fail_next("userdel")
+    res = box.purge(check=False)
+    assert res.returncode != 0 and "userdel" in res.stdout
+    assert box.user_exists() and "hal0box:" in box.subuid()
+    assert (box.host / "var" / "lib" / "hal0-box").exists()
 
 
 def test_bootstrap_work_dir_is_removed_after_success(box: BoxHarness) -> None:

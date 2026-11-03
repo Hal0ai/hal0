@@ -727,6 +727,32 @@ box_confirm_purge() {
     [[ "${answer}" == DELETE ]] || die "not confirmed; nothing was changed"
 }
 
+# Ends every process of the box user, with a bounded wait. userdel refuses a
+# user with live processes, so a survivor stops the purge here, before any
+# sub-ID or state is touched.
+box_terminate_user() {
+    local _
+    loginctl terminate-user "${BOX_USER}" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+        pgrep -u "${BOX_USER}" >/dev/null 2>&1 || return 0
+        pkill -KILL -u "${BOX_USER}" 2>/dev/null || true
+        sleep 0.5
+    done
+    pgrep -u "${BOX_USER}" >/dev/null 2>&1 || return 0
+    die "processes of ${BOX_USER} are still running after SIGKILL (see: pgrep -a -u ${BOX_USER}). The user, its sub-ID ranges and the launcher state were kept. Stop them and re-run: sudo bash ${STATE_TREE#"${HOST_ROOT}"}/installer/box/box.sh uninstall --purge"
+}
+
+# Deletes the box user and its home. A user that is still there afterwards
+# is a failed purge, never a silent success.
+box_delete_user() {
+    local out rc=0
+    out="$(userdel -r "${BOX_USER}" 2>&1)" || rc=$?
+    if box_user_exists; then
+        die "userdel -r ${BOX_USER} failed (exit ${rc}): ${out:-no output}. The user, its sub-ID ranges and the launcher state were kept; fix the cause and re-run: sudo bash ${STATE_TREE#"${HOST_ROOT}"}/installer/box/box.sh uninstall --purge"
+    fi
+    [[ "${rc}" == 0 ]] || warn "userdel -r ${BOX_USER} exited ${rc} (${out:-no output}); the user is gone, but check that ${BOX_HOME#"${HOST_ROOT}"} was removed"
+}
+
 # The launcher's per-install files in the state dir. A plain uninstall drops
 # these but keeps the saved tree, so the data it keeps can still be purged
 # later with the launcher in it.
@@ -765,8 +791,8 @@ cmd_uninstall() {
         loginctl disable-linger "${BOX_USER}" 2>/dev/null || true
         systemctl stop "user@${u}.service" 2>/dev/null || true
         if [[ "${purge}" == 1 ]]; then
-            pkill -u "${BOX_USER}" 2>/dev/null || true
-            userdel -r "${BOX_USER}" 2>/dev/null || true
+            box_terminate_user
+            box_delete_user
         else
             kept=1
         fi
