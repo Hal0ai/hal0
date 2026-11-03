@@ -67,6 +67,12 @@ KERNEL=="kfd", GROUP="render", MODE="0660"
 then run `sudo udevadm control --reload && sudo udevadm trigger` and install
 again.
 
+The device's group is mapped into the box, so the `hal0box` user gains that
+group's rights on the host. Preflight therefore refuses a node whose host group
+is a privileged one (`disk`, `shadow`, `adm`, `sudo`, `wheel`, `kmem`, `tty`,
+`root`, `systemd-journal`, `docker`, `lxd`, `libvirt`, `input` and similar).
+Give such a node a dedicated device group with a udev rule like the one above.
+
 The launcher creates the `hal0box` user itself, records that in
 `/var/lib/hal0-box/owner` and gives the account the comment `hal0 box`. If a
 `hal0box` user already exists without both, preflight refuses rather than take

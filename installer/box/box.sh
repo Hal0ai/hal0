@@ -158,12 +158,21 @@ _box_is_dev() {
 }
 
 # ── devices ───────────────────────────────────────────────────────────────
+# Host groups a device node must never carry into the box: mapping one would
+# give hal0box (and anything in the box) that group's rights on the host,
+# such as raw disks (disk), password hashes (shadow), logs (adm,
+# systemd-journal), terminals (tty) or sudo. Matched by the group name as the
+# host resolves the node's gid.
+BOX_DEVICE_GROUP_DENYLIST=(root bin daemon sys adm tty disk lp kmem shadow
+    sudo wheel admin staff utmp utmpx systemd-journal docker lxd libvirt input)
+
 # Fills:
 #   BOX_DEVICE_ARGS   --device <host>:<box> pairs for GPU and NPU nodes
 #   BOX_DEVICE_GIDS   unique non-zero host gids of those nodes
 #   BOX_DEVICE_GROUPS "<gid>:<name>" specs for the image build
 # Returns 1 (after logging why) when a node's gid collides with hal0's pinned
-# 970: mapping it would make the device group and hal0's own group one gid.
+# 970 (mapping it would make the device group and hal0's own group one gid),
+# or when the node's host group is on BOX_DEVICE_GROUP_DENYLIST.
 box_discover_devices() {
     BOX_DEVICE_ARGS=()
     BOX_DEVICE_GIDS=()
@@ -183,10 +192,15 @@ box_discover_devices() {
             bad=1
             continue
         fi
+        name="$(getent group "${gid}" 2>/dev/null | cut -d: -f1)" || name=""
+        if [[ -n "${name}" && " ${BOX_DEVICE_GROUP_DENYLIST[*]} " == *" ${name} "* ]]; then
+            log "ERROR: /dev/${rel} belongs to the host group ${name} (gid ${gid}). Mapping it into the box would give the ${BOX_USER} user that group's rights on this host, so the box refuses it. Give the node a dedicated device group with a host udev rule (for example GROUP=\"render\"), then re-run."
+            bad=1
+            continue
+        fi
         BOX_DEVICE_ARGS+=(--device "${node}:/dev/${rel}")
         if [[ " ${BOX_DEVICE_GIDS[*]:-} " != *" ${gid} "* ]]; then
             BOX_DEVICE_GIDS+=("${gid}")
-            name="$(getent group "${gid}" 2>/dev/null | cut -d: -f1)" || name=""
             [[ "${name}" =~ ^[a-z_][a-z0-9_-]*$ ]] || name="hal0dev${gid}"
             BOX_DEVICE_GROUPS+=("${gid}:${name}")
         fi

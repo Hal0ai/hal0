@@ -177,7 +177,9 @@ cat "${HAL0_STUB_STATE}/listen" 2>/dev/null
 exit 0
 """,
     "stat": r"""
-if [[ "${1:-}" == -c && "${2:-}" == %g && -f "${3:-}.gid" ]]; then cat "$3.gid"; exit 0; fi
+# A fake node's gid lives at <state>/gids/<node path>, outside the dev tree,
+# so the launcher's device globs never see it.
+if [[ "${1:-}" == -c && "${2:-}" == %g && -f "${HAL0_STUB_STATE}/gids${3:-}" ]]; then cat "${HAL0_STUB_STATE}/gids$3"; exit 0; fi
 exec /usr/bin/stat "$@"
 """,
     # passwd from the users file, group from the groups file ("<name>:<gid>").
@@ -315,7 +317,9 @@ class BoxHarness:
         node = self.dev / rel
         node.parent.mkdir(parents=True, exist_ok=True)
         node.write_text("")
-        Path(f"{node}.gid").write_text(f"{gid}\n")
+        gid_file = Path(f"{self.state}/gids{node}")
+        gid_file.parent.mkdir(parents=True, exist_ok=True)
+        gid_file.write_text(f"{gid}\n")
 
     def add_device(self, rel: str, gid: int) -> None:
         self._fake_node(rel, gid)
@@ -527,6 +531,17 @@ def test_device_gid_collision_fails(box: BoxHarness) -> None:
     box.add_device("dri/renderD128", gid=970)
     res = box.preflight(check=False)
     assert res.returncode != 0 and "970" in res.stdout
+
+
+@pytest.mark.parametrize("group", ["disk", "shadow", "sudo", "kmem", "tty", "adm"])
+def test_device_in_a_privileged_group_is_refused(box: BoxHarness, group: str) -> None:
+    (box.state / "groups").write_text(f"render:993\n{group}:42\n")
+    box.add_device("dri/renderD128", gid=42)
+    res = box.preflight(check=False)
+    assert res.returncode != 0 and group in res.stdout and "renderD128" in res.stdout
+    res = box.install(check=False)
+    assert res.returncode != 0 and box.podman_calls("create") == 0
+    assert "hal0box:42:1" not in box.subgid()
 
 
 def test_narrow_map_uses_inner_range(box: BoxHarness) -> None:
