@@ -884,6 +884,7 @@ a { color: inherit; text-decoration: none; }
 }
 .foot-tab:hover { color: var(--fg-2); }
 .foot-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.foot-tab:focus-visible { outline: 2px solid var(--accent-line, var(--accent)); outline-offset: -2px; }
 
 .foot-downloads {
   max-height: 280px;

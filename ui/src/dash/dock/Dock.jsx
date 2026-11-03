@@ -204,15 +204,15 @@ export function Dock({ route, param, expanded = false, onToggle }) {
     <div className={"footer" + (expanded ? " expanded" : "")} data-testid="dock">
       {expanded && (
         <div className="dock-x" data-testid="dock-expanded">
-          <div className="foot-tabs">
-            <button className={"foot-tab" + (footerTab === "journal" ? " active" : "")} data-testid="dock-tab-events" onClick={() => setFooterTab("journal")}>events</button>
+          <div className="foot-tabs" role="tablist" aria-label="Dock panes">
+            <button className={"foot-tab" + (footerTab === "journal" ? " active" : "")} data-testid="dock-tab-events" role="tab" aria-selected={footerTab === "journal"} onClick={() => setFooterTab("journal")}>events</button>
             {gpu.view && (
-              <button className={"foot-tab" + (footerTab === "gpu" ? " active" : "")} data-testid="dock-tab-gpu" onClick={() => setFooterTab("gpu")}>
+              <button className={"foot-tab" + (footerTab === "gpu" ? " active" : "")} data-testid="dock-tab-gpu" role="tab" aria-selected={footerTab === "gpu"} onClick={() => setFooterTab("gpu")}>
                 <span className={"dotc tone-" + gpu.view.tone} aria-hidden="true" />
                 gpu
               </button>
             )}
-            <button className={"foot-tab" + (footerTab === "downloads" ? " active" : "")} data-testid="dock-tab-downloads" onClick={() => setFooterTab("downloads")}>downloads</button>
+            <button className={"foot-tab" + (footerTab === "downloads" ? " active" : "")} data-testid="dock-tab-downloads" role="tab" aria-selected={footerTab === "downloads"} onClick={() => setFooterTab("downloads")}>downloads</button>
           </div>
           {footerTab === "gpu" && gpu.view ? (
             <GpuPane gpu={gpu} actions={gpuActions} />

@@ -274,6 +274,20 @@ describe('the dock events pane', () => {
     expect(msgs()).toEqual(['boom'])
   })
 
+  it('the empty-filter clear is a focusable button that resets the filters', async () => {
+    seedMerged()
+    mount(dock(true))
+    await type(document.querySelector('input.foot-pane-search') as HTMLInputElement, 'no-such-text')
+    expect(rows()).toHaveLength(0)
+    const clear = byId('dock-clear-filters') as HTMLButtonElement
+    expect(clear.tagName).toBe('BUTTON')
+    expect(clear.type).toBe('button')
+    expect(clear.tabIndex).toBeGreaterThanOrEqual(0)
+    await click(clear)
+    expect(rows()).toHaveLength(4)
+    expect(byId('dock-clear-filters')).toBeNull()
+  })
+
   it('an activity row opens its detail with actor, outcome and before/after', async () => {
     box.ring = [jr({ id: 1 })]
     box.records = [
