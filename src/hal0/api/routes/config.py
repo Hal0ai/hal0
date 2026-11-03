@@ -234,6 +234,25 @@ def _comfyui_link(request: Request) -> str:
     return f"http://{_host_without_port(_resolve_host(request))}:{_COMFYUI_PORT}"
 
 
+def _lan_ip_link(request: Request, port: int, primary: str) -> str:
+    """``http://<LAN IP>:<port>``: the link that needs no name resolution, or ``""`` for none.
+
+    ``.local`` names do not resolve on every client (some Android and Windows setups, another
+    VLAN or subnet, a VPN), so the dashboard offers this next to the name-based link. The
+    address is the one :func:`api_base_url` uses for ``prefer_lan``
+    (:func:`hal0.config.network.primary_lan_ip`). ``""`` behind a reverse proxy (the proxy case
+    is ``*_reason``), when the box has no LAN address, and when it would repeat ``primary``
+    (the page was already reached by that address).
+    """
+    if _behind_proxy(request):
+        return ""
+    lan = network.primary_lan_ip()
+    if lan is None:
+        return ""
+    link = f"http://{lan}:{port}"
+    return "" if link == primary else link
+
+
 @router.get("/urls")
 async def get_urls(request: Request) -> dict[str, object]:
     """Return the canonical URLs the dashboard should advertise.
@@ -246,13 +265,26 @@ async def get_urls(request: Request) -> dict[str, object]:
           "openwebui":         "http://<host>:3001" | "https://chat.<host>",
           "openwebui_enabled": true | false,
           "openwebui_reason":  "" | "proxy_needs_public_url",
+          "openwebui_ip":      "" | "http://<LAN IP>:3001",
           "hermes":            "" | "https://hermes.<host>",
           "hermes_enabled":    true | false,
           "comfyui":           "http://<host>:8188" | "https://comfyui.<host>",
           "comfyui_public":    true | false,
           "comfyui_lan":       true | false,
           "comfyui_reason":    "" | "proxy_needs_public_url",
+          "comfyui_ip":        "" | "http://<LAN IP>:8188",
         }
+
+    ``openwebui_ip`` / ``comfyui_ip`` are the fallback for clients that cannot resolve a
+    ``.local`` name: the same app on the box's main LAN address
+    (:func:`hal0.config.network.primary_lan_ip`, the address ``prefer_lan`` uses), on the
+    same port as the name-based link. They are ``""`` behind a reverse proxy, when the
+    box has no LAN address, and when the request already came in on that address (it
+    would repeat ``openwebui`` / ``comfyui``). ``comfyui_ip`` is also ``""`` while
+    ComfyUI binds loopback (``comfyui_lan`` false). They are independent of
+    ``HAL0_<APP>_PUBLIC_URL``: a declared URL stays the primary link, and the IP link
+    is the direct-LAN route to the same app. Hermes has none: its dashboard binds
+    loopback only, so no address reaches it.
 
     ``openwebui`` / ``comfyui`` are ``""`` and the matching ``*_reason`` is
     ``"proxy_needs_public_url"`` when the request came through a reverse proxy
@@ -312,6 +344,8 @@ async def get_urls(request: Request) -> dict[str, object]:
         "comfyui_public": bool(_comfyui_public_url()),
         "comfyui_lan": editor_on_lan(),
         "comfyui_reason": "" if comfyui else PROXY_NEEDS_PUBLIC_URL,
+        "openwebui_ip": _lan_ip_link(request, _OPENWEBUI_PORT, openwebui),
+        "comfyui_ip": (_lan_ip_link(request, _COMFYUI_PORT, comfyui) if editor_on_lan() else ""),
     }
 
 
