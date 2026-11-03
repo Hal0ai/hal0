@@ -69,6 +69,11 @@ SHIM_MARKER="hal0-box-shim"
 # it), the installer args, and the firewall rules this launcher added.
 STATE_DIR="${HOST_ROOT}/var/lib/hal0-box"
 STATE_TREE="${STATE_DIR}/tree"
+# Written when this launcher creates the box user ("<user>:<uid>"). Together
+# with the user's comment it proves hal0 owns the account, so a pre-existing
+# hal0box user is never adopted, rebuilt into or purged.
+OWNER_FILE="${STATE_DIR}/owner"
+BOX_GECOS="hal0 box"
 LOG_DIR="${HOST_ROOT}/var/log"
 BUILD_LOG="${LOG_DIR}/hal0-box-build.log"
 SELFTEST_LOG="${LOG_DIR}/hal0-box-selftest.log"
@@ -116,6 +121,20 @@ as_box() {
 }
 
 box_user_exists() { id -u "${BOX_USER}" >/dev/null 2>&1; }
+
+# True when the box user exists and this launcher created it: the owner
+# marker names its current uid and its comment is the one useradd was given.
+box_user_is_ours() {
+    local u gecos
+    u="$(id -u "${BOX_USER}" 2>/dev/null)" || return 1
+    gecos="$(getent passwd "${BOX_USER}" 2>/dev/null | cut -d: -f5)" || gecos=""
+    [[ "${gecos}" == "${BOX_GECOS}" && -f "${OWNER_FILE}" \
+        && "$(cat "${OWNER_FILE}" 2>/dev/null)" == "${BOX_USER}:${u}" ]]
+}
+
+box_foreign_user_message() {
+    printf '%s' "a ${BOX_USER} user already exists on this host and hal0 did not create it (no ${OWNER_FILE#"${HOST_ROOT}"} marker for its uid, or its comment is not \"${BOX_GECOS}\"). The box would take over that account and a purge would delete it. Remove or rename that user, then re-run."
+}
 
 box_require_root() {
     [[ "$(id -u)" == 0 ]] || die "box.sh must run as root (it creates the ${BOX_USER} user and maps device groups)"
@@ -192,6 +211,10 @@ box_preflight() {
         || { log "ERROR: /dev/fuse is missing; the box's container storage needs it. On a Proxmox LXC add it on the host with: pct set <id> --dev<N> /dev/fuse (or features: fuse=1), then restart the container."; fail=1; }
     if [[ -e "${SHIM_PATH}" ]] && ! grep -q "${SHIM_MARKER}" "${SHIM_PATH}" 2>/dev/null; then
         log "ERROR: /usr/local/bin/hal0 already exists and is not the box shim, so hal0 looks installed on this host already. Remove that install first (sudo bash installer/uninstall.sh --purge from its release tree), or install without --box."
+        fail=1
+    fi
+    if box_user_exists && ! box_user_is_ours; then
+        log "ERROR: $(box_foreign_user_message)"
         fail=1
     fi
     box_discover_devices || fail=1
@@ -397,10 +420,13 @@ box_check_podman() {
 box_user_setup() {
     local u want
     if ! box_user_exists; then
-        useradd -m -d "${BOX_HOME}" -s /usr/sbin/nologin -c "hal0 box" "${BOX_USER}" \
+        useradd -m -d "${BOX_HOME}" -s /usr/sbin/nologin -c "${BOX_GECOS}" "${BOX_USER}" \
             || die "could not create the ${BOX_USER} user"
+        mkdir -p "${STATE_DIR}"
+        printf '%s:%s\n' "${BOX_USER}" "$(id -u "${BOX_USER}")" > "${OWNER_FILE}"
         log "created user ${BOX_USER}"
     fi
+    box_user_is_ours || die "$(box_foreign_user_message)"
     u="$(id -u "${BOX_USER}")"
     box_subids
     want="$(printf '[Service]\nLimitMEMLOCK=infinity\nDelegate=cpu cpuset io memory pids\n')"
@@ -759,7 +785,7 @@ box_delete_user() {
 BOX_STATE_INSTALL_FILES=(installed install-args verified firewall)
 
 cmd_uninstall() {
-    local purge=0 yes=0 arg u f kept=0
+    local purge=0 yes=0 arg u f kept=0 foreign=0
     [[ "${HAL0_FORCE:-0}" == 1 ]] && yes=1
     for arg in "$@"; do
         case "${arg}" in
@@ -770,13 +796,19 @@ cmd_uninstall() {
         esac
     done
     box_require_root
+    if box_user_exists && ! box_user_is_ours; then
+        [[ "${purge}" == 0 ]] || die "refusing to purge: $(box_foreign_user_message)"
+        foreign=1
+    fi
     [[ "${purge}" == 0 || "${yes}" == 1 ]] || box_confirm_purge
     if [[ "${purge}" == 1 ]]; then
         log "removing the hal0 box, its user and all hal0 data in it"
     else
         log "removing the hal0 box; its data (the ${BOX_USER} user and the state volumes) is kept"
     fi
-    if box_user_exists; then
+    if [[ "${foreign}" == 1 ]]; then
+        warn "$(box_foreign_user_message) Leaving that user, its processes and its sub-ID ranges alone."
+    elif box_user_exists; then
         u="$(id -u "${BOX_USER}")"
         as_box systemctl --user disable --now "${BOX_UNIT}" >/dev/null 2>&1 || true
         as_box podman rm -f "${BOX_NAME}" >/dev/null 2>&1 || true
@@ -817,9 +849,11 @@ cmd_uninstall() {
         log "Installing again reuses them. To delete them too: sudo bash ${STATE_TREE#"${HOST_ROOT}"}/installer/box/box.sh uninstall --purge"
         return 0
     fi
-    for f in "${SUBUID_FILE}" "${SUBGID_FILE}"; do
-        [[ -f "${f}" ]] && _box_write_subids "${f}"
-    done
+    if [[ "${foreign}" == 0 ]]; then
+        for f in "${SUBUID_FILE}" "${SUBGID_FILE}"; do
+            [[ -f "${f}" ]] && _box_write_subids "${f}"
+        done
+    fi
     rm -rf "${STATE_DIR}"
     log "removed"
 }

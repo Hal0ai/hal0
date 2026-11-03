@@ -66,6 +66,12 @@ KERNEL=="kfd", GROUP="render", MODE="0660"
 then run `sudo udevadm control --reload && sudo udevadm trigger` and install
 again.
 
+The launcher creates the `hal0box` user itself, records that in
+`/var/lib/hal0-box/owner` and gives the account the comment `hal0 box`. If a
+`hal0box` user already exists without both, preflight refuses rather than take
+over an account hal0 did not create, and `hal0 uninstall --purge` never deletes
+such a user. Remove or rename that user first.
+
 If a hal0 install already exists on the host, `/usr/local/bin/hal0` is not the
 box shim and preflight refuses. Install without `--box`, or remove the existing
 install first. Converting an existing install is not supported (see below).

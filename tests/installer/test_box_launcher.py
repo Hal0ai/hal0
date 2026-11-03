@@ -892,6 +892,54 @@ def test_purge_fails_when_userdel_fails(box: BoxHarness) -> None:
     assert (box.host / "var" / "lib" / "hal0-box").exists()
 
 
+# ── a hal0box user hal0 did not create is never adopted ───────────────────
+
+
+def _foreign_user(box: BoxHarness, gecos: str = "Someone Else") -> None:
+    with (box.state / "users").open("a") as f:
+        f.write(f"hal0box:1500:{gecos}\n")
+
+
+def test_install_records_that_hal0_created_the_user(box: BoxHarness) -> None:
+    box.install()
+    marker = box.host / "var" / "lib" / "hal0-box" / "owner"
+    assert marker.read_text().strip() == "hal0box:2001"
+    assert "hal0box:2001:hal0 box" in (box.state / "users").read_text()
+
+
+def test_preexisting_foreign_user_is_refused(box: BoxHarness) -> None:
+    _foreign_user(box)
+    res = box.preflight(check=False)
+    assert res.returncode != 0 and "did not create" in res.stdout
+    res = box.install(check=False)
+    assert res.returncode != 0 and "did not create" in res.stdout
+    assert box.podman_calls("create") == 0 and "hal0box" not in box.subuid()
+
+
+def test_foreign_user_with_matching_comment_but_no_marker_is_refused(box: BoxHarness) -> None:
+    _foreign_user(box, gecos="hal0 box")
+    res = box.install(check=False)
+    assert res.returncode != 0 and "did not create" in res.stdout
+
+
+def test_purge_refuses_a_foreign_user(box: BoxHarness) -> None:
+    _foreign_user(box)
+    (box.host / "etc" / "subuid").write_text("hal0box:300000:65536\n")
+    res = box.purge(check=False)
+    assert res.returncode != 0 and "did not create" in res.stdout
+    assert box.user_exists() and "hal0box:300000:65536" in box.subuid()
+    assert not any(c.argv.startswith(("userdel", "podman", "pkill")) for c in box.calls())
+
+
+def test_plain_uninstall_leaves_a_foreign_user_alone(box: BoxHarness) -> None:
+    _foreign_user(box)
+    (box.host / "etc" / "subuid").write_text("hal0box:300000:65536\n")
+    box.uninstall()
+    assert box.user_exists() and "hal0box:300000:65536" in box.subuid()
+    assert not any(c.user == "hal0box" for c in box.calls())
+    assert not any(c.argv.startswith("loginctl disable-linger") for c in box.calls())
+
+
 def test_bootstrap_work_dir_is_removed_after_success(box: BoxHarness) -> None:
     work = box.tmp / "hal0-install-abc123"
     work.mkdir()
