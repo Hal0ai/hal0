@@ -815,7 +815,6 @@ def plan(
         "reuse": 2,
         "embed": 1,
         "rerank": 1,
-        "batch": 3,
         "http_pp": 0,
         "http_tg": 1,
     }
