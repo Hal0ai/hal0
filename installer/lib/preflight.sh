@@ -609,7 +609,9 @@ _is_apparmor_profile_load_failure() {
 }
 
 # Guest-profile AppArmor denial signature (#3234): on an UNPRIVILEGED Ubuntu
-# 24.04 LXC the guest's own `flags=(unconfined)` AppArmor profiles for
+# 24.04 LXC (reproduced on a Proxmox VE host running the 7.0 kernel; NOT on a
+# 6.8 kernel, and Ubuntu 26.04 guests were unaffected, so this is gated on the
+# symptom + a nested namespace, never on the OS or kernel version) the guest's own `flags=(unconfined)` AppArmor profiles for
 # podman/crun/buildah/runc/rootlesskit/slirp4netns are enforced inside the
 # nested container namespace and deny every podman socket() — `<rt> run` dies
 # with `... : socket: permission denied` even though `<rt> info` works (seen on
@@ -635,19 +637,52 @@ _apparmor_nested_namespace() {
     (( 10#${v} > 0 ))
 }
 
+# The `.ns_level` text the guard read ("unreadable" when it cannot be read),
+# so the nested-namespace decision is visible in the install log instead of
+# inferred. Same file, same seam as _apparmor_nested_namespace.
+_apparmor_ns_level_text() {
+    local f="${HAL0_APPARMOR_NS_LEVEL_FILE:-/sys/kernel/security/apparmor/.ns_level}" v=""
+    if [[ -r "${f}" ]]; then
+        read -r v < "${f}" 2>/dev/null || true
+        printf '%s' "${v}"
+    else
+        printf 'unreadable'
+    fi
+}
+
+# Podman-only: the helper (containers_apparmor.py) only drives `podman run`
+# and the printed remedy is podman-specific, so a docker `run` failure with the
+# same text never enters the guest-profile branch.
 _is_unconfined_profile_network_denial() {
-    local blob="$1"
+    local rt="$1" blob="$2"
+    [[ "${rt}" == podman ]] || return 1
     _apparmor_nested_namespace || return 1
     printf '%s\n' "${blob}" | grep -qiF -- ': socket: permission denied'
 }
 
-# Names of the guest profiles currently disabled (symlinked under
-# <apparmor.d>/disable/), as `;`-joined revert commands. Read from the
-# filesystem, never parsed from the helper's output.
+# Guest profiles that already had a disable/<p> link BEFORE the helper ran (an
+# operator's own, or an earlier run's), space-separated. Snapshotted by
+# _apparmor_unconfined_remediate so the revert hint below never offers to
+# re-enable something this run did not disable.
+_HAL0_APPARMOR_PREEXISTING=""
+_apparmor_snapshot_preexisting_disables() {
+    local d="${HAL0_APPARMOR_D:-/etc/apparmor.d}" p
+    _HAL0_APPARMOR_PREEXISTING=""
+    for p in podman crun buildah runc rootlesskit slirp4netns; do
+        [[ -L "${d}/disable/${p}" ]] && _HAL0_APPARMOR_PREEXISTING+=" ${p} "
+    done
+    return 0
+}
+
+# Names of the guest profiles THIS run disabled (symlinked under
+# <apparmor.d>/disable/ now, but not before the helper ran), as `;`-joined
+# revert commands. Read from the filesystem, never parsed from the helper's
+# output. Empty when the helper rolled its changes back.
 _apparmor_guest_revert_hint() {
     local d="${HAL0_APPARMOR_D:-/etc/apparmor.d}" p out=""
     for p in podman crun buildah runc rootlesskit slirp4netns; do
         [[ -L "${d}/disable/${p}" ]] || continue
+        [[ "${_HAL0_APPARMOR_PREEXISTING}" == *" ${p} "* ]] && continue
         out+="${out:+; }rm ${d}/disable/${p} && apparmor_parser -r ${d}/${p}"
     done
     printf '%s' "${out}"
@@ -675,9 +710,11 @@ _apparmor_guest_revert_hint() {
 # below, against the exact same configured image.
 #
 # #3234: records how the helper went in _HAL0_APPARMOR_HELPER_STATE so the
-# caller can tell "never ran" (script/python missing) and "ran but crashed or
-# exited non-zero" from "ran to completion" — the return value is unchanged
-# (the re-smoke verdict). Read from this variable, never from the output.
+# caller can tell "never ran" (script/python missing), "ran but crashed" and
+# "ran to completion but the fix did not take" (exit 3,
+# EXIT_GUEST_FIX_UNRESOLVED in the helper: it rolled back whatever it
+# disabled) from "ran to completion" — the return value is unchanged (the
+# re-smoke verdict). Read from this variable, never from the output.
 _HAL0_APPARMOR_HELPER_STATE=""
 _apparmor_unconfined_remediate() {
     local rt="$1"
@@ -700,12 +737,13 @@ _apparmor_unconfined_remediate() {
     # HAL0_CONTAINER_SMOKE_IMAGE, if set in the environment, is inherited by
     # this subprocess automatically — the script reads the same var name.
     local out helper_rc=0
+    _apparmor_snapshot_preexisting_disables
     out="$("${py}" -I "${script}" 2>&1)" || helper_rc=$?
-    if [[ "${helper_rc}" -eq 0 ]]; then
-        _HAL0_APPARMOR_HELPER_STATE="ok"
-    else
-        _HAL0_APPARMOR_HELPER_STATE="failed"
-    fi
+    case "${helper_rc}" in
+        0) _HAL0_APPARMOR_HELPER_STATE="ok" ;;
+        3) _HAL0_APPARMOR_HELPER_STATE="unresolved" ;;
+        *) _HAL0_APPARMOR_HELPER_STATE="failed" ;;
+    esac
     printf '%s\n' "${out}" | sed 's/^/  /'
     _container_run_smoke_test "${rt}"
 }
@@ -742,6 +780,10 @@ _warn_runtime_run_failure_checks() {
 # and re-probe BEFORE giving up, since the fix for this exact signature
 # already exists (containers_apparmor.py) but used to only run long after
 # this gate had already hard-died.
+_err_runtime_run_failed() {
+    err "$1 info/version succeeded but '$1 run' failed — the runtime can't actually launch a container"
+}
+
 _container_runtime_gate() {
     local rt="$1" revert_hint
     if _container_run_smoke_test "${rt}"; then
@@ -755,7 +797,7 @@ _container_runtime_gate() {
             info "  apparmor remediation applied — ${rt} run now succeeds, continuing install"
             return 0
         fi
-        err "${rt} info/version succeeded but '${rt} run' failed — the runtime can't actually launch a container"
+        _err_runtime_run_failed "${rt}"
         # NOTE: this branch only fires on an LXC that ALREADY has
         # 'lxc.apparmor.profile: unconfined' on the Proxmox host (that's the
         # detection signature above) — telling the operator to set it again
@@ -778,11 +820,12 @@ _container_runtime_gate() {
     # is skipped and the generic arms below run. The remediation helper runs
     # containers_apparmor.py, which disables the profiles; the verdict is
     # still this gate's own re-smoke (nothing here parses its output).
-    if _is_unconfined_profile_network_denial "${_HAL0_CONTAINER_SMOKE_OUTPUT}"; then
+    if _is_unconfined_profile_network_denial "${rt}" "${_HAL0_CONTAINER_SMOKE_OUTPUT}"; then
         warn "  ${rt} run: ${_HAL0_CONTAINER_SMOKE_OUTPUT}"
-        warn "  every ${rt} socket() is being denied — typically caused by the guest's own 'flags=(unconfined)'"
-        warn "  AppArmor profiles for podman/crun/buildah/runc/rootlesskit/slirp4netns, enforced inside a nested"
-        warn "  container namespace (seen on Ubuntu 24.04 guests; #3234). Attempting to disable them..."
+        warn "  every ${rt} socket() is being denied inside a nested AppArmor policy namespace"
+        warn "  (.ns_level=$(_apparmor_ns_level_text), which is > 0) — typically caused by the guest's own"
+        warn "  'flags=(unconfined)' AppArmor profiles for podman/crun/buildah/runc/rootlesskit/slirp4netns"
+        warn "  (seen on Ubuntu 24.04 guests; #3234). Attempting to disable them..."
         if _apparmor_unconfined_remediate "${rt}"; then
             revert_hint="$(_apparmor_guest_revert_hint)"
             info "  apparmor remediation applied — ${rt} run now succeeds, continuing install${revert_hint:+ (revert: ${revert_hint})}"
@@ -795,11 +838,11 @@ _container_runtime_gate() {
         if [[ "${_HAL0_APPARMOR_HELPER_STATE}" != "missing" ]]; then
             warn "  ${rt} run (after remediation): ${_HAL0_CONTAINER_SMOKE_OUTPUT}"
         fi
-        if _is_unconfined_profile_network_denial "${_HAL0_CONTAINER_SMOKE_OUTPUT}"; then
-            err "${rt} info/version succeeded but '${rt} run' failed — the runtime can't actually launch a container"
+        if _is_unconfined_profile_network_denial "${rt}" "${_HAL0_CONTAINER_SMOKE_OUTPUT}"; then
+            _err_runtime_run_failed "${rt}"
             revert_hint="$(_apparmor_guest_revert_hint)"
-            if [[ "${_HAL0_APPARMOR_HELPER_STATE}" != "ok" ]]; then
-                # The helper never ran or did not complete: the manual loop is
+            if [[ "${_HAL0_APPARMOR_HELPER_STATE}" == "missing" || "${_HAL0_APPARMOR_HELPER_STATE}" == "failed" ]]; then
+                # The helper never ran or crashed (exit != 0 and != 3): the manual loop is
                 # the only way forward. Guarded so a profile that is not
                 # flags=(unconfined) is left alone.
                 warn "  automated remediation did not run or did not complete. If this guest has a nested AppArmor"
@@ -816,6 +859,11 @@ _container_runtime_gate() {
                 warn "  If none of those files exist or none carry flags=(unconfined), the cause is elsewhere."
                 warn "  Causes seen, with the check for each:"
                 _warn_runtime_run_failure_checks "${rt}"
+                if [[ "${_HAL0_APPARMOR_HELPER_STATE}" == "failed" && -n "${revert_hint}" ]]; then
+                    # The helper crashed part-way (e.g. mid-loop): it may already
+                    # have disabled some profiles. Say how to undo exactly those.
+                    warn "  the helper may already have disabled some profiles before it stopped; to undo: ${revert_hint}"
+                fi
             elif [[ -n "${revert_hint}" ]]; then
                 # A symlink under disable/ proves the profile is MARKED disabled,
                 # not that it was UNLOADED: the helper links first, then runs
@@ -828,6 +876,13 @@ _container_runtime_gate() {
                 warn "  and the cause is elsewhere. Causes seen, with the check for each:"
                 _warn_runtime_run_failure_checks "${rt}"
                 warn "  if disabling them was not wanted, revert: ${revert_hint}"
+            elif [[ "${_HAL0_APPARMOR_HELPER_STATE}" == "unresolved" ]]; then
+                # The helper completed, disabled the profiles for a retry, the
+                # retry still failed, and it put them back (rollback), so they
+                # are not what is denying the socket. Nothing to revert.
+                warn "  the automated fix disabled the guest profiles, ${rt} run still failed, and it re-enabled them"
+                warn "  (nothing to revert): they are not the cause. Causes seen, with the check for each:"
+                _warn_runtime_run_failure_checks "${rt}"
             else
                 warn "  no guest unconfined profiles present — this is not the #3234 case. Causes seen, with the"
                 warn "  check for each:"
@@ -836,7 +891,7 @@ _container_runtime_gate() {
             return 1
         fi
     fi
-    err "${rt} info/version succeeded but '${rt} run' failed — the runtime can't actually launch a container"
+    _err_runtime_run_failed "${rt}"
     if printf '%s\n' "${_HAL0_CONTAINER_SMOKE_OUTPUT}" \
         | grep -qiE 'create keyring.*(disk quota exceeded|quota exceeded)|keyring.*edquot'; then
         warn "  ${rt} run: ${_HAL0_CONTAINER_SMOKE_OUTPUT}"
@@ -844,7 +899,7 @@ _container_runtime_gate() {
         warn "  nesting/keyctl config. Check: cat /proc/key-users (look for a uid near its byte quota)"
         warn "  remedy: reboot this container to clear leaked session keyrings, or as root: keyctl clear @s /"
         warn "  find + kill the leaked keyring holders, or raise the quota: sysctl kernel.keys.maxbytes (and"
-        warn "  kernel.keys.maxkeys) higher on the PROXMOX HOST, then re-run install.sh"
+        warn "  kernel.keys.maxkeys) higher on the container HOST (the Proxmox node, or the Incus/LXD host), then re-run install.sh"
     elif [[ "$(hal0_lxc_kind)" == "lxc-unprivileged" ]]; then
         # `<rt> info` CAN pass here without `features: nesting=1` while every
         # `<rt> run` fails (see the false-OK note above), so nesting is neither
@@ -859,8 +914,9 @@ _container_runtime_gate() {
         _warn_runtime_run_failure_checks "${rt}"
     elif [[ "$(hal0_lxc_kind)" == "lxc-privileged" ]]; then
         warn "  inside a PRIVILEGED Proxmox/LXC container the usual cause is missing container features rather"
-        warn "  than the uid map: set 'features: nesting=1,keyctl=1,fuse=1,mknod=1' in /etc/pve/lxc/<CTID>.conf"
-        warn "  on the PROXMOX HOST, then: pct stop <CTID> && pct start <CTID>"
+        warn "  than the uid map. Enable them on the container HOST: Proxmox: set 'features: nesting=1,keyctl=1,fuse=1,mknod=1'"
+        warn "  in /etc/pve/lxc/<CTID>.conf, then: pct stop <CTID> && pct start <CTID>; Incus/LXD: set"
+        warn "  'security.nesting=true' on the instance, then restart it"
     else
         warn "  inspect the error above (cgroup/mount-namespace setup, subuid/newuidmap, or a daemon issue)"
     fi
