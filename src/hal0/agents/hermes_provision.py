@@ -9916,6 +9916,19 @@ def record_converged_release(
 # ── CLI surface ──────────────────────────────────────────────────────────────
 
 
+def kept_model_notice(kept: str) -> str:
+    """The line naming a kept operator model pick and the way back (#3315).
+
+    One string shared by the reprovision print and the ``hermes_model_choice``
+    doctor row, so the two never drift.
+    """
+    return (
+        f"kept your Hermes model choice '{kept}'. To return to the hal0 agent slot: "
+        "hermes config set model.default hal0/agent; "
+        "hermes config set model.provider custom; then reprovision --repair"
+    )
+
+
 def bootstrap_cli(
     *,
     repair: bool,
@@ -9939,11 +9952,7 @@ def bootstrap_cli(
     cw = report.step("config_write")
     kept = (cw.details if cw else {}).get("operator_model_kept")
     if kept:
-        print(
-            f"kept your Hermes model choice '{kept}'. To return to the hal0 agent slot: "
-            "hermes config set model.default hal0/agent; "
-            "hermes config set model.provider custom; then reprovision --repair"
-        )
+        print(kept_model_notice(kept))
     if report.failed:
         print(f"bootstrap failed in steps: {', '.join(report.failed)}")
         return 1

@@ -154,6 +154,7 @@ def test_all_finishes_and_preserves_exit_code(
         "check_hermes_mcp_config_auth",
         "check_hermes_command_approvals",
         "check_hermes_anchor_window",
+        "check_hermes_model_choice",
     }
     for name in vars(da):
         if name.startswith("check_") and name not in real_checks:

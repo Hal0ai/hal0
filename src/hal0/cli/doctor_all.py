@@ -3388,6 +3388,55 @@ def check_hermes_anchor_window(
     return Check(name, title, _PASS, window.message())
 
 
+@_report_unreadable("hermes_model_choice", "Hermes model choice")
+def check_hermes_model_choice(
+    *,
+    config_path: Path | None = None,
+    route_ready: Callable[[str, str], bool | None] | None = None,
+) -> Check:
+    """Surface a Hermes model pick hal0 kept through reprovision (#3325).
+
+    ``hermes reprovision --repair`` keeps a model the operator picked in Hermes
+    (#3309) and says so once, on the terminal. This row keeps that fact visible
+    afterwards: it names the kept model, its provider and the way back. It warns
+    when the pick points at a hal0 endpoint that affirmatively does not route
+    the model (the agent would fail every turn). Read-only: it never writes the
+    Hermes config, and only probes a loopback ``base_url`` (never a third-party
+    provider).
+    """
+    from urllib.parse import urlparse
+
+    from hal0.agents import hermes_provision as hp
+
+    name, title = "hermes_model_choice", "Hermes model choice"
+    path = config_path if config_path is not None else (hp.HERMES_HOME_DEFAULT / "config.yaml")
+    if not path.exists():
+        return Check(name, title, _PASS, "hermes not provisioned — nothing to check")
+    text = path.read_text(encoding="utf-8")
+    kept = hp._operator_model_choice(
+        text,
+        primary_model_id="",
+        live_resolve=hp._live_resolve_enabled(),
+        route_ready=lambda _m, _b: None,
+    )
+    if kept is None:
+        return Check(name, title, _PASS, "hal0 manages the Hermes model (no operator pick kept)")
+    block = hp._model_block(text)
+    provider, base_url = (block[1], block[2]) if block else ("", "")
+    where = f"provider {provider or 'custom'}" + (f", {base_url}" if base_url else "")
+    notice = f"{hp.kept_model_notice(kept)} [{where}]"
+    if not base_url or (urlparse(base_url).hostname or "") in hp._LOOPBACK_HOSTS:
+        probe = route_ready if route_ready is not None else hp._fetch_model_route_ready
+        try:
+            ready = probe(kept, base_url)
+        except Exception:  # a read-only row must never raise
+            ready = None
+        if ready is False:
+            target = base_url or "the hal0 gateway"
+            return Check(name, title, _WARN, f"'{kept}' is not answering on {target}. {notice}")
+    return Check(name, title, _PASS, notice)
+
+
 # ── orchestration ──────────────────────────────────────────────────────────────
 
 # GET /api/slots is the slowest read-only route hal0 serves: the aggregator
@@ -3474,6 +3523,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_hermes_dashboard_token(),
         check_hermes_kanban_reachable(),
         check_hermes_anchor_window(base=base),
+        check_hermes_model_choice(),
         check_hal0_linger(),
         check_hindsight_llm_auth(auth=auth_payload),
         check_memory_engine_version(memory=payloads["memory"]),
@@ -3567,6 +3617,7 @@ __all__ = [
     "check_hermes_dashboard_token",
     "check_hermes_kanban_reachable",
     "check_hermes_mcp_config_auth",
+    "check_hermes_model_choice",
     "check_hindsight_llm_auth",
     "check_mcp_mounts",
     "check_memory_engine_version",
