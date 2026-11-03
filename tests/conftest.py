@@ -355,19 +355,31 @@ def _isolate_hal0_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_path_link_dst(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Keep ``activate_release`` from repointing the host's ``/usr/local/bin/hal0``.
+def _isolate_privileged_host_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep ``activate_release`` and its ``refresh_*`` helpers off the host's system paths.
 
-    ``activate_release`` always calls ``refresh_path_links``, which links the
-    running venv's ``hal0`` / ``hal0-agent`` shims into ``HAL0_PATH_LINK_DST``
-    whenever ``os.geteuid() == 0``. A suite run as root on an installed box
-    therefore rewrote the real links to point into the test venv, and they
-    dangled once an ephemeral uv env went away (#2261). Redirect the constant
-    for every test; ``tests/updater/test_path_link_refresh.py`` sets its own
-    destination after this fixture and wins.
+    ``activate_release`` runs every root-gated writer unconditionally: it links
+    the running venv's ``hal0`` / ``hal0-agent`` shims into ``HAL0_PATH_LINK_DST``,
+    installs the sudo wrappers and sudoers grants, refreshes the GPU-perms unit,
+    and ``remove_retired_artifacts`` unlinks retired wrappers, sudoers files and
+    ``hal0-slot@*`` units. Under ``os.geteuid() == 0`` a suite run on an installed
+    box would rewrite or delete the real files; the PATH links were observed
+    dangling into an ephemeral uv env (#2261). Point every one of those
+    destinations under ``tmp_path`` for every test.
+
+    Tests that care about a destination (``test_path_link_refresh``,
+    ``test_wrapper_refresh``'s ``seam_dirs``, ``test_retired_artifacts``,
+    ``test_gpu_perms_unit``) patch it themselves after this fixture and win.
     """
     monkeypatch.setattr(
         "hal0.updater.updater.HAL0_PATH_LINK_DST", tmp_path / "usr-local-bin" / "hal0"
+    )
+    monkeypatch.setattr("hal0.system.seam_check.SEAM_BIN_DIR", tmp_path / "usr-lib-hal0-bin")
+    monkeypatch.setattr("hal0.system.seam_check.SUDOERS_DIR", tmp_path / "etc-sudoers.d")
+    monkeypatch.setattr("hal0.updater.updater.SYSTEMD_UNIT_DIR", tmp_path / "etc-systemd-system")
+    monkeypatch.setattr(
+        "hal0.updater.updater.GPU_PERMS_UNIT_DST",
+        tmp_path / "etc-systemd-system" / "hal0-gpu-perms.service",
     )
 
 
