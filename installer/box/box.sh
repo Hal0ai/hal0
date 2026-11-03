@@ -113,6 +113,9 @@ log() { printf '[hal0-box %s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 warn() { log "WARNING: $*"; }
 die() { log "ERROR: $*"; exit 1; }
 
+# Extra runuser flags; cmd_exec sets --pty for an interactive exec.
+BOX_RUNUSER_FLAGS=()
+
 # Run a command as the box user, in its home, with its user manager's
 # runtime dir. The memlock raise is inherited by podman (decision 6).
 as_box() {
@@ -122,7 +125,7 @@ as_box() {
         cd "${BOX_HOME}" 2>/dev/null || cd /
         ulimit -Hl unlimited 2>/dev/null || true
         ulimit -Sl unlimited 2>/dev/null || true
-        exec runuser -u "${BOX_USER}" -- env \
+        exec runuser "${BOX_RUNUSER_FLAGS[@]+"${BOX_RUNUSER_FLAGS[@]}"}" -u "${BOX_USER}" -- env \
             HOME="${BOX_HOME}" \
             XDG_RUNTIME_DIR="${RUN_USER_DIR}/${u}" \
             DBUS_SESSION_BUS_ADDRESS="unix:path=${RUN_USER_DIR}/${u}/bus" \
@@ -1051,6 +1054,18 @@ cmd_exec() {
     box_user_exists || die "the hal0 box is not installed"
     local flags=(-i)
     [[ -t 0 && -t 1 ]] && flags+=(-t)
+    # On a terminal, never hand root's tty to a box-user process: it could
+    # push input into root's shell with TIOCSTI. runuser --pty gives the box
+    # user a new pseudo-terminal and relays it. Without one, setsid at least
+    # drops the controlling terminal, which TIOCSTI needs.
+    if [[ -t 0 ]]; then
+        if [[ "$(runuser --help 2>&1)" == *--pty* ]]; then
+            BOX_RUNUSER_FLAGS=(--pty)
+        else
+            as_box setsid -w podman exec "${flags[@]}" "${BOX_NAME}" "$@"
+            return
+        fi
+    fi
     as_box podman exec "${flags[@]}" "${BOX_NAME}" "$@"
 }
 

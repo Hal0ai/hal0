@@ -99,6 +99,7 @@ esac
 exit 0
 """,
     "runuser": r"""
+[[ "${1:-}" == --help ]] && { echo " -P, --pty                       create a new pseudo-terminal"; exit 0; }
 user=""
 while [[ $# -gt 0 ]]; do
     case "$1" in -u) user="$2"; shift 2 ;; --) shift; break ;; *) shift ;; esac
@@ -1194,6 +1195,74 @@ def test_apparmor_revert_leaves_a_link_it_did_not_make(box: BoxHarness) -> None:
     link.write_text("an operator's file\n")
     box.purge()
     assert link.read_text() == "an operator's file\n"
+
+
+# ── interactive exec never hands root's terminal to the box user ──────────
+
+
+def _runuser_calls(box: BoxHarness) -> list[str]:
+    return [c.argv for c in box.calls() if c.argv.startswith("runuser") and "podman exec" in c.argv]
+
+
+def test_exec_on_a_terminal_gives_the_box_user_its_own_pty(box: BoxHarness) -> None:
+    import pty
+
+    box.install()
+    n = len(_runuser_calls(box))
+    master, slave = pty.openpty()
+    try:
+        res = subprocess.run(
+            ["bash", str(box.shim_path()), "status"],
+            env=box.env(),
+            stdin=slave,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=60,
+        )
+    finally:
+        os.close(slave)
+        os.close(master)
+    assert res.returncode == 0, res.stdout
+    call = _runuser_calls(box)[n:][-1]
+    assert call.startswith("runuser --pty -u hal0box"), call
+
+
+def test_exec_on_a_terminal_without_runuser_pty_drops_the_tty(box: BoxHarness) -> None:
+    import pty
+
+    box.install()
+    # An old runuser without --pty: fall back to setsid, so the box process
+    # has no controlling terminal for TIOCSTI.
+    old = box.bin / "runuser"
+    old.write_text(old.read_text().replace("-P, --pty", "-m, --preserve"))
+    master, slave = pty.openpty()
+    try:
+        res = subprocess.run(
+            ["bash", str(box.shim_path()), "status"],
+            env=box.env(),
+            stdin=slave,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=60,
+        )
+    finally:
+        os.close(slave)
+        os.close(master)
+    assert res.returncode == 0, res.stdout
+    call = [c for c in box.calls() if c.argv.startswith("runuser") and "hal0 status" in c.argv][-1]
+    assert "--pty" not in call.argv and " setsid -w podman exec" in call.argv
+
+
+def test_exec_without_a_terminal_keeps_plain_runuser(box: BoxHarness) -> None:
+    box.install()
+    n = len(_runuser_calls(box))
+    box.shim("status")
+    call = _runuser_calls(box)[n:][-1]
+    assert call.startswith("runuser -u hal0box"), call
+    # Only exec gets a pty: the launcher's own steps never do.
+    assert not any("--pty" in c for c in _runuser_calls(box))
 
 
 def test_bootstrap_work_dir_is_removed_after_success(box: BoxHarness) -> None:
