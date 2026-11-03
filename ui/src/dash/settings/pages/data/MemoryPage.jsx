@@ -26,7 +26,7 @@ import {
   limitsSupported,
 } from './extractionLimits.js'
 import { graphSaveOutcome } from './extractionThroughput.js'
-import { SaveWarnings, ThroughputNote } from './ExtractionThroughputViews.jsx'
+import { BankFailures, SaveWarnings, ThroughputNote } from './ExtractionThroughputViews.jsx'
 
 export function MemoryPage() {
   // R5 data seam: one typed client supplies the merged reload-class registry.
@@ -413,6 +413,7 @@ function MemoryGraphPanel() {
           </>}
         />
       )}
+      <BankFailures status={st} />
       {/* Beside the Save button, where the operator's eyes are after clicking it. */}
       <SaveWarnings warnings={saveWarnings} onDismiss={() => setSaveWarnings([])} />
       <div style={{display: "flex", justifyContent: "flex-end", gap: 8, padding: "8px 12px 4px"}}>

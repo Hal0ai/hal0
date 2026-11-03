@@ -60,3 +60,18 @@ export function graphSaveOutcome(resp) {
   }
   return { warnings, toast: { text: 'Memory graph settings saved', kind: 'ok' } }
 }
+
+/**
+ * Per-bank failure notices from GET /api/memory/graph/status (#3241).
+ * `failed_by_bank` is `{ [bank_id]: failed_count }`, only banks with failures.
+ * Returns one sentence per bank with a positive count, largest first; anything
+ * malformed (or an API that predates the field) yields none.
+ */
+export function bankFailureNotes(status) {
+  const raw = status?.failed_by_bank
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return []
+  return Object.entries(raw)
+    .filter(([, n]) => Number.isFinite(n) && n > 0)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([bank, n]) => `Bank "${bank}" has ${n} failed operation${n === 1 ? '' : 's'}.`)
+}
