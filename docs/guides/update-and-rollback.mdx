@@ -213,7 +213,10 @@ pass, but a few things are worth doing or checking. The full list is in the
   It re-installs the sudo wrappers, their sudoers drop-ins and the
   `/usr/local/bin/hal0` (+ `hal0-agent`) links from the active tree. Without
   `--fix` it only reports which tree it would refresh from. A later
-  `hal0 update` also fixes the link.
+  `hal0 update` also fixes the link. The links are only refreshed from the
+  installed venv: run the command as `sudo /usr/lib/hal0/venv/bin/hal0 doctor
+  wrappers --fix` if another `hal0` is first on your `PATH`; from any other
+  venv it skips the links and exits 1.
 - **Reprovision Hermes before using OAuth-connected skills.** The agent's
   half of the OAuth connect flow lives in its persona file, which `hal0 update`
   does not rewrite. On an already-provisioned box run

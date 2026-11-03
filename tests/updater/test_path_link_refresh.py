@@ -3,9 +3,9 @@ link (or `hal0-agent`'s sibling), only `install.sh` did.
 
 These tests pin :func:`hal0.updater.updater.refresh_path_links`: privileged-side
 only (a no-op unless euid 0), reads its source shims from the ACTUAL running
-venv (``sys.prefix``) rather than the release tree, and is best-effort per
-link so a missing `hal0-agent` shim never fails an otherwise-successful
-activation.
+venv (``sys.prefix``) rather than the release tree, refuses a ``sys.prefix``
+that is not the installed venv (#3360), and is best-effort per link so a
+missing `hal0-agent` shim never fails an otherwise-successful activation.
 """
 
 from __future__ import annotations
@@ -14,16 +14,21 @@ from pathlib import Path
 
 import pytest
 
-from hal0.updater.updater import refresh_path_links
+from hal0.updater.updater import _usr_lib_root, refresh_path_links
 
 
-def _fake_venv(tmp_path: Path, *, shims: tuple[str, ...]) -> Path:
-    venv = tmp_path / "venv"
+def _fake_venv(root: Path, *, shims: tuple[str, ...]) -> Path:
+    venv = root / "venv"
     bin_dir = venv / "bin"
     bin_dir.mkdir(parents=True)
     for name in shims:
         (bin_dir / name).write_text("#!/bin/sh\n", encoding="utf-8")
     return venv
+
+
+def _installed_venv(*, shims: tuple[str, ...]) -> Path:
+    """A fake venv at the installed location (``<usr-lib root>/venv``)."""
+    return _fake_venv(_usr_lib_root(), shims=shims)
 
 
 @pytest.fixture
@@ -51,7 +56,7 @@ def test_root_links_both_shims_from_the_running_venv(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, link_dst: Path
 ) -> None:
     monkeypatch.setattr("hal0.updater.updater.os.geteuid", lambda: 0)
-    venv = _fake_venv(tmp_path, shims=("hal0", "hal0-agent"))
+    venv = _installed_venv(shims=("hal0", "hal0-agent"))
     monkeypatch.setattr("hal0.updater.updater.sys.prefix", str(venv))
 
     result = refresh_path_links(tmp_path / "release-tree", job_id="job-1")
@@ -70,7 +75,7 @@ def test_missing_agent_shim_is_skipped_not_fatal(
     """An older release / a venv still provisioning may lack hal0-agent —
     the hal0 link must still succeed."""
     monkeypatch.setattr("hal0.updater.updater.os.geteuid", lambda: 0)
-    venv = _fake_venv(tmp_path, shims=("hal0",))
+    venv = _installed_venv(shims=("hal0",))
     monkeypatch.setattr("hal0.updater.updater.sys.prefix", str(venv))
 
     result = refresh_path_links(tmp_path / "release-tree")
@@ -89,7 +94,7 @@ def test_re_linking_is_idempotent_and_replaces_a_stale_target(
     link_dst.parent.mkdir(parents=True, exist_ok=True)
     link_dst.symlink_to(old_venv / "bin" / "hal0")
 
-    new_venv = _fake_venv(tmp_path / "new", shims=("hal0", "hal0-agent"))
+    new_venv = _installed_venv(shims=("hal0", "hal0-agent"))
     monkeypatch.setattr("hal0.updater.updater.sys.prefix", str(new_venv))
 
     result = refresh_path_links(tmp_path / "release-tree")
@@ -98,11 +103,41 @@ def test_re_linking_is_idempotent_and_replaces_a_stale_target(
     assert Path(link_dst).resolve() == (new_venv / "bin" / "hal0").resolve()
 
 
+def test_foreign_prefix_is_refused_and_leaves_links_untouched(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    link_dst: Path,
+) -> None:
+    """#3360: a root run from a dev checkout / ephemeral uv env must not repoint PATH.
+
+    ``sys.prefix`` outside the installed venv (``<usr-lib root>/venv``) is
+    refused per link — nothing is written and any existing link is kept.
+    """
+    monkeypatch.setattr("hal0.updater.updater.os.geteuid", lambda: 0)
+    installed = _installed_venv(shims=("hal0", "hal0-agent"))
+    link_dst.parent.mkdir(parents=True, exist_ok=True)
+    link_dst.symlink_to(installed / "bin" / "hal0")
+    foreign = _fake_venv(tmp_path / "ephemeral-uv-env", shims=("hal0", "hal0-agent"))
+    monkeypatch.setattr("hal0.updater.updater.sys.prefix", str(foreign))
+
+    swaps: list[tuple[Path, Path]] = []
+    monkeypatch.setattr(
+        "hal0.updater.updater._atomic_symlink_swap", lambda src, dst: swaps.append((src, dst))
+    )
+
+    result = refresh_path_links(tmp_path / "release-tree", job_id="job-2")
+
+    assert result == {"hal0": "skipped", "hal0-agent": "skipped"}
+    assert swaps == []
+    assert link_dst.resolve() == (installed / "bin" / "hal0").resolve()
+    assert not link_dst.with_name("hal0-agent").exists()
+
+
 def test_swap_failure_is_recorded_not_raised(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, link_dst: Path
 ) -> None:
     monkeypatch.setattr("hal0.updater.updater.os.geteuid", lambda: 0)
-    venv = _fake_venv(tmp_path, shims=("hal0",))
+    venv = _installed_venv(shims=("hal0",))
     monkeypatch.setattr("hal0.updater.updater.sys.prefix", str(venv))
 
     def _boom(*a, **k):
