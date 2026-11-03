@@ -1,0 +1,52 @@
+# hal0 box image. Rendered by installer/box/box.sh, which replaces @BASE_IMAGE@
+# with the digest-pinned base, then built as the box user:
+#   podman build --build-arg HAL0_BOX_DEVICE_GROUPS="<gid>:<name> ..." -t localhost/hal0-box:local
+#
+# The rootfs is disposable: /etc/hal0, /var/lib/hal0 and /var/lib/containers
+# live on volumes, and a rebuild is a new image plus the same installer.
+#
+# Notes on the choices below (see the box design doc, decisions 6, 8 and 12):
+# - APT::Sandbox::User "root" only for this build: apt's _apt sandbox user
+#   cannot drop privileges inside a narrow rootless ID map. Removed again in
+#   the same RUN so the shipped image keeps apt's default sandbox.
+# - hal0 is pinned to uid and gid 970 so a rebuilt box keeps file ownership on
+#   the state volumes. install.sh finds the account and leaves it alone.
+# - Device groups carry the host's gids (mapped through with --gidmap), and
+#   hal0 joins them so it can open /dev/kfd and render nodes. Box root is not
+#   in those groups and cannot open the devices, by design.
+# - Root linger is preset, or Open WebUI's network namespace gets stranded.
+# - DefaultLimitMEMLOCK=infinity, because the box's systemd otherwise caps
+#   every unit below what ROCm needs.
+# - common-account uses pam_permit: the guest's unix-chkpwd AppArmor profile
+#   in some LXC hosts denies the box's binary by path. This is a
+#   single-purpose box with no interactive accounts.
+# - The RUN is one && chain so any failed step fails the build.
+FROM @BASE_IMAGE@
+ARG HAL0_BOX_DEVICE_GROUPS=""
+RUN printf 'APT::Sandbox::User "root";\n' > /etc/apt/apt.conf.d/99-box-build \
+ && apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      systemd systemd-sysv dbus ca-certificates curl iproute2 kmod procps sudo \
+      gnupg nftables iptables libpam-systemd \
+ && rm -f /etc/apt/apt.conf.d/99-box-build \
+ && rm -rf /var/lib/apt/lists/* \
+ && systemctl mask getty.target console-getty.service systemd-firstboot.service \
+      systemd-remount-fs.service proc-sys-fs-binfmt_misc.automount \
+      sys-kernel-config.mount sys-kernel-debug.mount sys-kernel-tracing.mount \
+ && groupadd --system -g 970 hal0 \
+ && useradd --system -u 970 -g 970 --home-dir /var/lib/hal0 \
+      --shell /usr/sbin/nologin --comment "hal0 service user" hal0 \
+ && for spec in ${HAL0_BOX_DEVICE_GROUPS}; do \
+      gid="${spec%%:*}" && name="${spec#*:}" \
+      && if getent group "${gid}" >/dev/null; then name="$(getent group "${gid}" | cut -d: -f1)"; \
+         elif getent group "${name}" >/dev/null; then groupmod -g "${gid}" "${name}"; \
+         else groupadd -g "${gid}" "${name}"; fi \
+      && usermod -aG "${name}" hal0 || exit 1; \
+    done \
+ && mkdir -p /etc/systemd/system.conf.d /var/lib/systemd/linger /etc/containers \
+ && printf '[Manager]\nDefaultLimitMEMLOCK=infinity\n' > /etc/systemd/system.conf.d/hal0-box.conf \
+ && touch /var/lib/systemd/linger/root \
+ && printf 'account required pam_permit.so\n' > /etc/pam.d/common-account \
+ && printf '[storage]\ndriver="overlay"\nrunroot="/run/containers/storage"\ngraphroot="/var/lib/containers/storage"\n[storage.options.overlay]\nignore_chown_errors="true"\n' > /etc/containers/storage.conf
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]
