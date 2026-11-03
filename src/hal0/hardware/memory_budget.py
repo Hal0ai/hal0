@@ -411,7 +411,10 @@ def read_ram(root: Path = Path("/")) -> RamBudget:
     Inside a rootless podman box (:func:`hal0.system.box.in_box`) the container
     marker is ignored: with no real cgroup limit the reading is the host's and
     ``source`` stays ``"system"``; a finite cgroup limit still reports
-    ``"container"``.
+    ``"container"``. A box nested in an LXC sees the physical host's
+    ``MemTotal`` (a fresh procfs, no lxcfs) and not the LXC's limit, so the
+    launcher (``installer/box/box.sh``) creates it with ``--memory`` set to the
+    LXC's ``MemTotal``; that limit is the finite cgroup limit read here.
 
     ``source`` is ``"container"`` when ``<root>/run/systemd/container`` exists,
     something (lxcfs) is mounted over ``/proc/meminfo``, or the chain carried a

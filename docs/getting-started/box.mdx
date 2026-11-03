@@ -122,6 +122,12 @@ Logs are `/var/log/hal0-box-build.log`, `/var/log/hal0-box-selftest.log` and
 - **`hal0` on the host is a shim.** `sudo hal0 <args>` runs `hal0 <args>` inside
   the box. It needs root, because the box belongs to `hal0box`. The client
   address hal0 logs for a LAN client is the real one.
+- **Inside an LXC the box has a memory limit.** A box nested in an LXC would
+  otherwise see the Proxmox host's memory rather than the LXC's, so the
+  launcher creates it with `--memory` set to the LXC's memory as the LXC
+  reports it, and hal0 budgets against that. This needs the cgroup v2 memory
+  controller in the LXC; without it the launcher warns. After changing the
+  LXC's memory, run `sudo hal0 box rebuild` to apply the new limit.
 - **State lives on three volumes**, `/etc/hal0`, `/var/lib/hal0` and
   `/var/lib/containers`, owned by the `hal0box` user. The box's root filesystem
   is disposable.

@@ -30,7 +30,7 @@
 #
 # Test seams (unit tests cannot touch the real host):
 #   HAL0_BOX_HOST_ROOT          prefix for every host path written or read
-#                               (/etc, /home, /run/user, /var, /usr/local,
+#                               (/etc, /home, /run, /var, /usr/local, /proc/meminfo,
 #                               /sys/fs/cgroup). Empty in production.
 #   HAL0_BOX_DEV_ROOT           where device nodes are discovered (default /dev).
 #                               When set, plain files stand in for char devices.
@@ -297,6 +297,36 @@ box_subids() {
     _box_write_subids "${SUBGID_FILE}" "${gid_lines[@]}"
 }
 
+# ── memory ────────────────────────────────────────────────────────────────
+# True when this host is itself a container: systemd's container marker, or a
+# narrow ID map (an unprivileged LXC).
+box_outer_is_container() {
+    [[ -s "${HOST_ROOT}/run/systemd/container" ]] && return 0
+    box_is_narrow
+}
+
+# Fills BOX_MEMORY_ARGS. Nested in an LXC, the box mounts a fresh procfs that
+# shows the physical host's MemTotal (lxcfs only covers the LXC's own
+# /proc/meminfo), and the LXC's memory limit sits above the box's cgroup
+# namespace, so inside the box nothing shows the real budget and hal0 would
+# plan for the whole host's RAM. Passing the LXC's MemTotal, as read here on
+# the launcher's side, as --memory gives the box a real cgroup limit, which
+# hal0's read_ram reports as the container's budget. On a host that is not a
+# container no limit is set, so read_ram keeps the host's own RAM.
+box_memory_args() {
+    local kb
+    BOX_MEMORY_ARGS=()
+    box_outer_is_container || return 0
+    kb="$(awk '$1 == "MemTotal:" { print $2; exit }' "${HOST_ROOT}/proc/meminfo" 2>/dev/null)" || kb=""
+    [[ "${kb}" =~ ^[0-9]+$ && "${kb}" -gt 0 ]] || { warn "cannot read MemTotal from /proc/meminfo; the box gets no memory limit and hal0 inside may plan for the physical host's RAM"; return 0; }
+    if ! grep -qw memory "${CGROUP_DIR}/cgroup.controllers" 2>/dev/null; then
+        warn "this container has no cgroup v2 memory controller, so the box cannot be given this container's memory limit ($((kb / 1024)) MiB); hal0 inside may plan for the physical host's RAM. Enable the memory controller for this container on its host."
+        return 0
+    fi
+    BOX_MEMORY_ARGS=("--memory=$((kb * 1024))")
+    log "this host is a container: the box is limited to its ${kb} kB of memory"
+}
+
 # ── create argv ───────────────────────────────────────────────────────────
 # Fills BOX_CREATE_ARGV. Needs box_discover_devices and box_subids first.
 box_create_argv() {
@@ -308,6 +338,7 @@ box_create_argv() {
     for vol in "${BOX_VOLUMES[@]}"; do
         volumes+=(--volume "${vol}")
     done
+    box_memory_args
     BOX_CREATE_ARGV=(
         podman create
         --name "${BOX_NAME}"
@@ -324,6 +355,7 @@ box_create_argv() {
         --network "${BOX_NETWORK}"
         "${volumes[@]}"
         --ulimit memlock=-1:-1
+        "${BOX_MEMORY_ARGS[@]+"${BOX_MEMORY_ARGS[@]}"}"
         --conmon-pidfile "${HOST_ROOT}/run/user/${u}/${BOX_NAME}.pid"
         "${BOX_IMAGE}"
     )

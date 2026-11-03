@@ -1206,6 +1206,21 @@ def test_read_ram_in_box_with_real_cgroup_limit_is_container(tmp_path: Path) -> 
     assert ram.limit_gb == 8.0
 
 
+def test_read_ram_in_box_reads_the_launchers_memory_limit(tmp_path: Path) -> None:
+    # Nested in an LXC, the box sees the Proxmox host's MemTotal (a fresh
+    # procfs, no lxcfs). box.sh passes the LXC's MemTotal as --memory, which
+    # appears as memory.max at the box's cgroup namespace root.
+    _meminfo(tmp_path, total_kb=128 * 1024 * 1024, available_kb=100 * 1024 * 1024)
+    _v2_chain(tmp_path, top=str(48 * _GIB))
+    _write(tmp_path, "run/systemd/container", "podman\n")
+    _write(tmp_path, "run/.containerenv", "")
+
+    ram = read_ram(tmp_path)
+
+    assert ram.source == "container"
+    assert ram.limit_gb == 48.0
+
+
 def test_read_ram_lxc_unchanged(tmp_path: Path) -> None:
     _meminfo(tmp_path, total_kb=50331648, available_kb=48069259)
     _v2_chain(tmp_path)

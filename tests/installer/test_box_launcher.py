@@ -988,6 +988,46 @@ def test_root_never_writes_or_chowns_under_the_box_home(box: BoxHarness) -> None
             assert home not in c.argv, c
 
 
+# ── memory limit when the host is itself a container ──────────────────────
+
+_LXC_MEMTOTAL_KB = 50331648  # 48 GiB, as lxcfs shows the LXC's limit
+
+
+def _outer_lxc(box: BoxHarness, marker: str | None = "lxc\n") -> None:
+    proc = box.host / "proc"
+    proc.mkdir(exist_ok=True)
+    (proc / "meminfo").write_text(
+        f"MemTotal:       {_LXC_MEMTOTAL_KB} kB\nMemAvailable:   40000000 kB\n"
+    )
+    if marker is not None:
+        (box.host / "run" / "systemd").mkdir(parents=True, exist_ok=True)
+        (box.host / "run" / "systemd" / "container").write_text(marker)
+
+
+def test_box_in_an_lxc_gets_the_lxc_memory_as_a_cgroup_limit(box: BoxHarness) -> None:
+    _outer_lxc(box)
+    argv = box.dry_run()
+    assert f"--memory={_LXC_MEMTOTAL_KB * 1024}" in argv
+
+
+def test_box_in_a_narrow_map_gets_a_memory_limit(box: BoxHarness) -> None:
+    _outer_lxc(box, marker=None)
+    box.set_uid_map("0 100000 65536")
+    assert f"--memory={_LXC_MEMTOTAL_KB * 1024}" in box.dry_run()
+
+
+def test_bare_metal_box_has_no_memory_limit(box: BoxHarness) -> None:
+    _outer_lxc(box, marker=None)
+    assert not any(a.startswith("--memory") for a in box.dry_run())
+
+
+def test_no_memory_controller_warns_instead_of_failing(box: BoxHarness) -> None:
+    _outer_lxc(box)
+    (box.host / "sys" / "fs" / "cgroup" / "cgroup.controllers").write_text("cpu pids\n")
+    out = box.run("install", str(box.tree), HAL0_BOX_DRY_RUN="1").stdout
+    assert "--memory=" not in out and "memory controller" in out
+
+
 def test_bootstrap_work_dir_is_removed_after_success(box: BoxHarness) -> None:
     work = box.tmp / "hal0-install-abc123"
     work.mkdir()

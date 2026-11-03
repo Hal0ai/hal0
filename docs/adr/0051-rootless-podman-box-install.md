@@ -128,7 +128,10 @@ same as the host on a gigabit link.
     `usr.bin.pasta` and `usr.bin.passt`.
 16. Honest signals inside the box. mDNS reports itself unavailable instead of
     "announced", because multicast does not cross pasta. Memory budgeting reads
-    the host's memory, not the container marker's guess. `hal0 doctor` gains a
+    the host's memory, not the container marker's guess. When the host is
+    itself a container (an LXC), the box would see the physical host's memory
+    instead of the LXC's limit, so the launcher creates it with `--memory` set
+    to the LXC's `MemTotal`, and hal0 reads that cgroup limit. `hal0 doctor` gains a
     `box` row, "Box boundary", that warns when a slot publishes on a
     non-loopback host or the API port moved off 8080, since only 8080, 3001 and
     8188 are forwarded.
