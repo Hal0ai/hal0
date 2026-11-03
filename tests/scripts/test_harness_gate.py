@@ -149,7 +149,31 @@ def test_unknown_gate_argument_is_usage_error(tmp_path: Path) -> None:
     assert res.returncode == 2
 
 
-def _sandbox(tmp_path: Path, runtime_rows: list[dict[str, object]]) -> Path:
+def test_crashed_tier_fails_and_is_named(tmp_path: Path) -> None:
+    rows = [_row("runtime-slot-load", "pass"), _row("runtime-chat-roundtrip", "pass")]
+    res = _gate(_report(tmp_path, rows), "--crashed-tier", "cli=3")
+    assert res.returncode == 1
+    out = res.stdout + res.stderr
+    assert "harness FAILED" in out
+    assert "harness OK" not in out
+    assert "cli (exit 3)" in out
+
+
+def test_crashed_tier_fails_even_when_deferred_allowed(tmp_path: Path) -> None:
+    res = _gate(_report(tmp_path, _DEV_ROWS), "--allow-deferred", "--crashed-tier", "cli=3")
+    assert res.returncode == 1
+
+
+@pytest.mark.parametrize("spec", ["", "cli", "=3"])
+def test_malformed_crashed_tier_is_usage_error(tmp_path: Path, spec: str) -> None:
+    assert _gate(_report(tmp_path, _DEV_ROWS), "--crashed-tier", spec).returncode == 2
+
+
+def _sandbox(
+    tmp_path: Path,
+    runtime_rows: list[dict[str, object]],
+    crash: dict[str, int] | None = None,
+) -> Path:
     """Copy the real harness.sh + its Python helpers into a hermetic tree.
 
     harness.sh derives every path from its own location, so stub tier
@@ -180,11 +204,15 @@ def _sandbox(tmp_path: Path, runtime_rows: list[dict[str, object]]) -> Path:
     }
     for tier, script in scripts_by_tier.items():
         payload = json.dumps({"summary": {}, "rows": tier_rows[tier]})
-        (harness_dir / script).write_text(
-            "#!/usr/bin/env bash\n"
-            f"echo 'stub tier {tier} ran'\n"
-            f'cat > "$(dirname "$0")/reports/{tier}.json" <<\'JSON\'\n{payload}\nJSON\n'
-        )
+        if tier in (crash or {}):
+            # Crash before writing a report, as a `set -e` abort would.
+            body = f"echo 'stub tier {tier} ran'\nexit {(crash or {})[tier]}\n"
+        else:
+            body = (
+                f"echo 'stub tier {tier} ran'\n"
+                f'cat > "$(dirname "$0")/reports/{tier}.json" <<\'JSON\'\n{payload}\nJSON\n'
+            )
+        (harness_dir / script).write_text("#!/usr/bin/env bash\n" + body)
     return scripts / "harness.sh"
 
 
@@ -262,3 +290,24 @@ def test_harness_sh_rejects_unknown_flag_before_running_tiers(tmp_path: Path) ->
     assert res.returncode == 2
     assert "--allow-deferred" in res.stderr
     assert "stub tier" not in res.stdout
+
+
+def test_harness_sh_fails_when_a_tier_script_crashes(tmp_path: Path) -> None:
+    rows = [_row("runtime-slot-load", "pass"), _row("runtime-chat-roundtrip", "pass")]
+    res = _harness(_sandbox(tmp_path, rows, crash={"cli": 3}))
+    assert res.returncode == 1, res.stdout + res.stderr
+    out = res.stdout + res.stderr
+    assert "cli (exit 3)" in out
+    assert "harness OK" not in out
+    # Later tiers still ran, so cleanup is not skipped by an earlier crash.
+    assert "stub tier cleanup ran" in res.stdout
+    report = json.loads(
+        (tmp_path / "repo" / "tests" / "harness" / "reports" / "harness.json").read_text()
+    )
+    assert {t["name"]: t["status"] for t in report["tiers"]}["cli"] == "missing"
+
+
+def test_harness_sh_crash_fails_even_with_allow_deferred(tmp_path: Path) -> None:
+    res = _harness(_sandbox(tmp_path, _DEV_RUNTIME, crash={"cleanup": 7}), "--allow-deferred")
+    assert res.returncode == 1
+    assert "cleanup (exit 7)" in res.stdout + res.stderr
