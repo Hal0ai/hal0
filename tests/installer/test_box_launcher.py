@@ -919,6 +919,19 @@ def _uninstall_on_tty(box: BoxHarness, typed: str, *args: str) -> tuple[int, str
     return res.returncode, res.stdout
 
 
+def test_purge_after_a_plain_uninstall_deletes_the_kept_data(box: BoxHarness) -> None:
+    box.install()
+    box.uninstall()
+    n = len(box.calls())
+    box.purge()
+    later = box.all_calls()[n:]
+    # The user manager is down after the plain uninstall; it is started again
+    # so the box user's podman can reset its store.
+    start = later.index("systemctl start user@2001.service")
+    assert start < next(i for i, a in enumerate(later) if a.startswith("podman system reset"))
+    assert not box.user_exists() and box.volumes() == set() and "hal0box" not in box.subuid()
+
+
 def test_purge_on_a_tty_needs_typed_delete(box: BoxHarness) -> None:
     box.install()
     rc, out = _uninstall_on_tty(box, "yes", "--purge")

@@ -950,6 +950,9 @@ cmd_uninstall() {
         warn "$(box_foreign_user_message) Leaving that user, its processes and its sub-ID ranges alone."
     elif box_user_exists; then
         u="$(id -u "${BOX_USER}")"
+        # A plain uninstall stopped the user manager. Start it again so the
+        # box user's systemctl --user and podman have their runtime dir.
+        systemctl start "user@${u}.service" 2>/dev/null || true
         as_box systemctl --user disable --now "${BOX_UNIT}" >/dev/null 2>&1 || true
         as_box podman rm -f "${BOX_NAME}" >/dev/null 2>&1 || true
         as_box podman image rm -f "${BOX_IMAGE}" >/dev/null 2>&1 || true
