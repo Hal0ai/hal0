@@ -707,3 +707,58 @@ def test_bootstrap_work_dir_is_removed_after_success(box: BoxHarness) -> None:
     work.mkdir()
     box.install(HAL0_BOOTSTRAP_WORK=str(work))
     assert not work.exists()
+
+
+# ── Task 7: state on volumes and rebuild ──────────────────────────────────
+
+_VOLUMES = (
+    "hal0-box-etc:/etc/hal0",
+    "hal0-box-var:/var/lib/hal0",
+    "hal0-box-containers:/var/lib/containers",
+)
+
+
+def test_create_mounts_state_volumes(box: BoxHarness) -> None:
+    mounts = _flag_value(box.dry_run(), "--volume")
+    for mount in _VOLUMES:
+        assert mount in mounts
+
+
+def test_install_creates_each_volume_once(box: BoxHarness) -> None:
+    box.install()
+    box.install()
+    created = [c.argv.split()[-1] for c in box.podman_calls_named("volume create")]
+    assert sorted(created) == ["hal0-box-containers", "hal0-box-etc", "hal0-box-var"]
+
+
+def test_rebuild_keeps_volumes_and_reruns_installer(box: BoxHarness) -> None:
+    box.install("--no-pi", HAL0_BOOTSTRAP_VERIFIED="1")
+    box.rebuild()
+    assert box.podman_calls_named("volume rm") == []
+    assert box.podman_calls("system reset") == 0
+    assert box.ran_installer(times=2)
+    assert box.installer_runs()[1].endswith("--no-pi")
+    last_exec = [c for c in box.podman_calls_named("exec") if "install.sh" in c.argv][-1]
+    assert "HAL0_BOOTSTRAP_VERIFIED=1" in last_exec.argv
+    builds = box.podman_calls_named("build")
+    assert len(builds) == 2 and "--no-cache" in builds[1].argv
+    assert box.state_is_healthy()
+
+
+def test_rebuild_after_an_install_without_args_passes_none(box: BoxHarness) -> None:
+    box.install()
+    box.rebuild()
+    first, second = box.installer_runs()
+    assert first == second == "bash /usr/local/src/hal0/installer/install.sh"
+
+
+def test_rebuild_without_an_install_fails_clearly(box: BoxHarness) -> None:
+    res = box.rebuild(check=False)
+    assert res.returncode != 0 and "not installed" in res.stdout
+
+
+def test_image_has_unattended_upgrades() -> None:
+    text = _CONTAINERFILE.read_text()
+    install = text.split("\nRUN ", 1)[1].split("apt-get install", 1)[1].split("\n && ", 1)[0]
+    assert "unattended-upgrades" in install
+    assert 'APT::Periodic::Unattended-Upgrade "1"' in text

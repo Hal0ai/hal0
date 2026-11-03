@@ -10,6 +10,7 @@
 # Usage:   box.sh install <tree> [install.sh args...]
 #          box.sh preflight
 #          box.sh uninstall
+#          box.sh rebuild
 #          box.sh status | start | stop
 #          box.sh logs [journalctl args...]
 #          box.sh exec -- <command...>
@@ -85,6 +86,13 @@ SELFTEST_URL="${HAL0_BOX_SELFTEST_URL:-http://connectivity-check.ubuntu.com/}"
 PODMAN_MIN_VERSION=4.9
 # Extra `podman build` flags; `rebuild` sets --no-cache.
 BOX_BUILD_ARGS=()
+# State lives on volumes and the rootfs is disposable (decision 9): a rebuild
+# is a new image plus the same installer, which never clobbers config.
+BOX_VOLUMES=(
+    "hal0-box-etc:/etc/hal0"
+    "hal0-box-var:/var/lib/hal0"
+    "hal0-box-containers:/var/lib/containers"
+)
 
 log() { printf '[hal0-box %s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 warn() { log "WARNING: $*"; }
@@ -267,10 +275,13 @@ box_subids() {
 # ── create argv ───────────────────────────────────────────────────────────
 # Fills BOX_CREATE_ARGV. Needs box_discover_devices and box_subids first.
 box_create_argv() {
-    local u gid gidmap=()
+    local u gid vol gidmap=() volumes=()
     u="$(id -u "${BOX_USER}" 2>/dev/null || echo '<uid>')"
     for gid in "${BOX_DEVICE_GIDS[@]+"${BOX_DEVICE_GIDS[@]}"}"; do
         gidmap+=(--gidmap "+g${gid}:@${gid}")
+    done
+    for vol in "${BOX_VOLUMES[@]}"; do
+        volumes+=(--volume "${vol}")
     done
     BOX_CREATE_ARGV=(
         podman create
@@ -286,6 +297,7 @@ box_create_argv() {
         "${gidmap[@]+"${gidmap[@]}"}"
         "${BOX_IDMAP_ARGS[@]+"${BOX_IDMAP_ARGS[@]}"}"
         --network "${BOX_NETWORK}"
+        "${volumes[@]}"
         --ulimit memlock=-1:-1
         --conmon-pidfile "${HOST_ROOT}/run/user/${u}/${BOX_NAME}.pid"
         "${BOX_IMAGE}"
@@ -322,7 +334,8 @@ box_stage_tree() {
     chown -R 0:0 "${STATE_TREE}"
     chmod -R go-w,go+rX "${STATE_TREE}"
     # The installer args, so `rebuild` re-runs the installer the same way.
-    printf '%s\0' "$@" > "${STATE_DIR}/install-args"
+    : > "${STATE_DIR}/install-args"
+    [[ $# -eq 0 ]] || printf '%s\0' "$@" > "${STATE_DIR}/install-args"
     # install.sh refuses an unverified tree. Remember that bootstrap verified
     # this one, so a rebuild from the kept copy passes the same gate.
     if [[ "${HAL0_BOOTSTRAP_VERIFIED:-0}" == 1 ]]; then
@@ -471,6 +484,13 @@ box_create_and_start() {
         as_box podman rm -f "${BOX_NAME}" >/dev/null \
             || die "could not remove the old ${BOX_NAME} container"
     fi
+    local vol
+    for vol in "${BOX_VOLUMES[@]}"; do
+        vol="${vol%%:*}"
+        as_box podman volume exists "${vol}" \
+            || as_box podman volume create "${vol}" >/dev/null \
+            || die "could not create the ${vol} volume"
+    done
     box_create_argv
     as_box "${BOX_CREATE_ARGV[@]}" >/dev/null || die "podman create failed"
     box_write_unit
@@ -705,6 +725,26 @@ cmd_uninstall() {
     log "removed"
 }
 
+# A new image and container on the same volumes, then the installer again
+# with the args of the original install. Picks up base OS changes that
+# unattended-upgrades does not cover, and repairs a damaged rootfs.
+cmd_rebuild() {
+    box_require_root
+    [[ -d "${STATE_TREE}" ]] && box_user_exists \
+        || die "the hal0 box is not installed; nothing to rebuild"
+    local args=()
+    if [[ -f "${STATE_DIR}/install-args" ]]; then
+        mapfile -d '' -t args < "${STATE_DIR}/install-args"
+    fi
+    log "rebuilding the box; the state volumes are kept"
+    # Stop first so the published ports are free for preflight.
+    as_box systemctl --user stop "${BOX_UNIT}" >/dev/null 2>&1 || true
+    box_preflight || die "preflight failed; the box is stopped. Fix the above and re-run: sudo hal0 box rebuild"
+    box_stage_tree "${STATE_TREE}" "${args[@]+"${args[@]}"}"
+    BOX_BUILD_ARGS=(--no-cache)
+    box_install_flow "${args[@]+"${args[@]}"}"
+}
+
 cmd_status() {
     box_require_root
     box_user_exists || { log "the hal0 box is not installed"; return 3; }
@@ -749,6 +789,7 @@ usage: box.sh <command>
   install <tree> [install.sh args...]   install hal0 in a rootless podman box
   preflight                             check this host can run the box
   uninstall                             remove the box, its user and its data
+  rebuild                               new image and container, same volumes
   status | start | stop                 the box's user unit
   logs [journalctl args...]             the box's journal
   exec -- <command...>                  run a command inside the box
@@ -762,6 +803,7 @@ main() {
         install) cmd_install "$@" ;;
         preflight) cmd_preflight ;;
         uninstall) cmd_uninstall ;;
+        rebuild) cmd_rebuild ;;
         status) cmd_status ;;
         start|stop) cmd_unit "${cmd}" ;;
         logs) cmd_logs "$@" ;;

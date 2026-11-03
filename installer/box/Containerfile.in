@@ -20,6 +20,8 @@
 # - common-account uses pam_permit: the guest's unix-chkpwd AppArmor profile
 #   in some LXC hosts denies the box's binary by path. This is a
 #   single-purpose box with no interactive accounts.
+# - unattended-upgrades applies security fixes to the box's OS; anything
+#   larger is a `box.sh rebuild` (decision 9).
 # - podman is in the image because the launcher's network self-test runs a
 #   nested container before install.sh; install.sh installs the same distro
 #   package anyway.
@@ -30,7 +32,7 @@ RUN printf 'APT::Sandbox::User "root";\n' > /etc/apt/apt.conf.d/99-box-build \
  && apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       systemd systemd-sysv dbus ca-certificates curl iproute2 kmod procps sudo \
-      gnupg nftables iptables libpam-systemd podman \
+      gnupg nftables iptables libpam-systemd podman unattended-upgrades \
  && rm -f /etc/apt/apt.conf.d/99-box-build \
  && rm -rf /var/lib/apt/lists/* \
  && systemctl mask getty.target console-getty.service systemd-firstboot.service \
@@ -49,6 +51,7 @@ RUN printf 'APT::Sandbox::User "root";\n' > /etc/apt/apt.conf.d/99-box-build \
  && mkdir -p /etc/systemd/system.conf.d /var/lib/systemd/linger /etc/containers \
  && printf '[Manager]\nDefaultLimitMEMLOCK=infinity\n' > /etc/systemd/system.conf.d/hal0-box.conf \
  && touch /var/lib/systemd/linger/root \
+ && printf 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n' > /etc/apt/apt.conf.d/20auto-upgrades \
  && printf 'account required pam_permit.so\n' > /etc/pam.d/common-account \
  && printf '[storage]\ndriver="overlay"\nrunroot="/run/containers/storage"\ngraphroot="/var/lib/containers/storage"\n[storage.options.overlay]\nignore_chown_errors="true"\n' > /etc/containers/storage.conf
 STOPSIGNAL SIGRTMIN+3
