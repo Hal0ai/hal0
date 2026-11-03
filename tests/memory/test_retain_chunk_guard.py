@@ -179,3 +179,64 @@ def test_unreachable_engine_skips_the_check(
     assert client.get("/api/memory/graph/chunk-check").json() == {"chunk_check": None}
     r = client.put("/api/memory/graph", json={"llm_timeout_s": 600})
     assert r.status_code == 200 and "warnings" not in r.json()
+
+
+# ── GET /graph/status carries the audit of the failing banks (#3326) ─────────
+
+
+class _StatsProvider(_Provider):
+    """A provider whose banks also answer ``/stats``, so ``failed_by_bank`` fills."""
+
+    def __init__(self, bodies: dict[str, Any], failed: dict[str, int]) -> None:
+        super().__init__(bodies)
+        self.failed = failed
+        self.config_reads: list[str] = []
+
+    async def _request_json(self, method: str, path: str) -> Any:
+        if path.endswith("/stats"):
+            bank = path.split("/banks/")[1].rsplit("/stats", 1)[0].replace("%3A", ":")
+            return {"failed_operations": self.failed.get(bank, 0)}
+        if path.endswith("/config"):
+            self.config_reads.append(path)
+        return await super()._request_json(method, path)
+
+
+def test_status_explains_failing_banks_with_the_chunk_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = _StatsProvider(BANKS, {PLUGIN_BANK: 7300})
+    (client,) = list(_client(tmp_path, monkeypatch, provider, OLD_TOML))[:1]
+
+    body = client.get("/api/memory/graph/status").json()
+
+    assert body["failed_by_bank"] == {PLUGIN_BANK: 7300}
+    assert body["chunk_check"]["verdict"] == "warn"
+    assert body["chunk_check"]["conflicts"] == [{"bank_id": PLUGIN_BANK, "chunk_size": 12000}]
+    # Only the failing bank is read, and a second poll reuses the audit.
+    assert len(provider.config_reads) == 1
+    client.get("/api/memory/graph/status")
+    assert len(provider.config_reads) == 1
+
+
+def test_status_chunk_check_is_null_when_nothing_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = _StatsProvider(BANKS, {})
+    (client,) = list(_client(tmp_path, monkeypatch, provider, OLD_TOML))[:1]
+
+    body = client.get("/api/memory/graph/status").json()
+
+    assert body["chunk_check"] is None
+    assert provider.config_reads == []
+
+
+def test_status_chunk_check_is_ok_when_the_cap_clears_the_failing_bank(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = _StatsProvider(BANKS, {PLUGIN_BANK: 5})
+    (client,) = list(_client(tmp_path, monkeypatch, provider, {}))[:1]
+
+    body = client.get("/api/memory/graph/status").json()
+
+    assert body["failed_by_bank"] == {PLUGIN_BANK: 5}
+    assert body["chunk_check"]["verdict"] == "ok"
