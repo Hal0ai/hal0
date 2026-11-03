@@ -210,6 +210,7 @@ if [[ "${1:-}" == -I ]]; then echo "192.0.2.10 "; else echo "testhost"; fi
     "loginctl": "exit 0",
     "sleep": "exit 0",
     "pkill": "exit 0",
+    "apparmor_parser": "exit 0",
     # Real file tools, logged so the acting user of every write is visible.
     "tee": 'exec /usr/bin/tee "$@"',
     "mkdir": 'exec /usr/bin/mkdir "$@"',
@@ -221,10 +222,23 @@ if [[ "${1:-}" == -I ]]; then echo "192.0.2.10 "; else echo "testhost"; fi
     "apt-get": "exit 0",
 }
 
+# Like the real helper: disables each profile named in <state>/aa_names under
+# <state>/aa and prints a revert line only for the ones it newly disabled.
 _APPARMOR_STUB = """#!/usr/bin/env python3
 import os, sys
-with open(os.path.join(os.environ["HAL0_STUB_STATE"], "calls.log"), "a") as f:
+state = os.environ["HAL0_STUB_STATE"]
+with open(os.path.join(state, "calls.log"), "a") as f:
     f.write("root\\tcontainers_apparmor.py " + " ".join(sys.argv[1:]) + "\\n")
+names_file = os.path.join(state, "aa_names")
+if os.path.exists(names_file):
+    aa = os.path.join(state, "aa")
+    os.makedirs(os.path.join(aa, "disable"), exist_ok=True)
+    for name in open(names_file).read().split():
+        link = os.path.join(aa, "disable", name)
+        if os.path.islink(link):
+            continue
+        os.symlink(os.path.join(aa, name), link)
+        print(f"revert: rm {link} && apparmor_parser -r {os.path.join(aa, name)}")
 """
 
 
@@ -1070,6 +1084,51 @@ def test_no_bootstrap_cosign_hands_nothing_over(box: BoxHarness) -> None:
     box.install()
     assert not (box.host / "var" / "lib" / "hal0-box" / "cosign").exists()
     assert "HAL0_BOOTSTRAP_COSIGN" not in _installer_exec(box).argv
+
+
+# ── AppArmor changes are recorded and reverted ────────────────────────────
+
+
+def _nested_apparmor(box: BoxHarness, *names: str) -> Path:
+    aa = box.state / "aa"
+    (aa / "disable").mkdir(parents=True)
+    for n in ("usr.bin.pasta", "usr.bin.passt", "operator.profile"):
+        (aa / n).write_text("profile x {}\n")
+    (box.state / "aa_names").write_text(" ".join(names) + "\n")
+    return aa
+
+
+def test_uninstall_reverts_the_apparmor_profiles_the_box_disabled(box: BoxHarness) -> None:
+    aa = _nested_apparmor(box, "usr.bin.pasta", "usr.bin.passt")
+    # Disabled by the operator before hal0: never reverted.
+    (aa / "disable" / "operator.profile").symlink_to(aa / "operator.profile")
+    box.install()
+    box.install()
+    record = box.host / "var" / "lib" / "hal0-box" / "apparmor"
+    assert record.read_text().splitlines() == [
+        f"{aa}/disable/usr.bin.pasta {aa}/usr.bin.pasta",
+        f"{aa}/disable/usr.bin.passt {aa}/usr.bin.passt",
+    ]
+    box.uninstall()
+    assert not (aa / "disable" / "usr.bin.pasta").exists()
+    assert not (aa / "disable" / "usr.bin.passt").exists()
+    assert (aa / "disable" / "operator.profile").is_symlink()
+    reloads = [c.argv for c in box.calls() if c.argv.startswith("apparmor_parser -r")]
+    assert reloads == [
+        f"apparmor_parser -r {aa}/usr.bin.pasta",
+        f"apparmor_parser -r {aa}/usr.bin.passt",
+    ]
+    assert not record.exists()
+
+
+def test_apparmor_revert_leaves_a_link_it_did_not_make(box: BoxHarness) -> None:
+    aa = _nested_apparmor(box, "usr.bin.pasta")
+    box.install()
+    link = aa / "disable" / "usr.bin.pasta"
+    link.unlink()
+    link.write_text("an operator's file\n")
+    box.purge()
+    assert link.read_text() == "an operator's file\n"
 
 
 def test_bootstrap_work_dir_is_removed_after_success(box: BoxHarness) -> None:

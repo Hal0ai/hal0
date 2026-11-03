@@ -925,6 +925,29 @@ def test_nested_box_main_disables_list(monkeypatch, tmp_path: Path) -> None:
     assert [c[0] for c in calls] == ["apparmor_parser"] * 3
 
 
+def test_nested_box_revert_lines_name_only_what_this_run_disabled(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    # The box launcher records the revert lines and undoes them on uninstall,
+    # so a profile the operator had disabled already must not be listed.
+    aa = _box_env(monkeypatch, tmp_path, "1\n")
+    (aa / "disable").mkdir()
+    (aa / "disable" / "podman").symlink_to(aa / "podman")
+
+    assert ca._nested_box_main(lambda argv, **_kw: _proc(0)) == 0
+    reverts = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("revert:")]
+
+    assert reverts == [
+        f"revert: rm {aa}/disable/{n} && apparmor_parser -r {aa}/{n}"
+        for n in ("usr.bin.pasta", "usr.bin.passt")
+    ]
+    assert (aa / "disable" / "podman").is_symlink()
+
+    # A second run disabled nothing new, so it names nothing to revert.
+    assert ca._nested_box_main(lambda argv, **_kw: _proc(0)) == 0
+    assert "revert:" not in capsys.readouterr().out
+
+
 def test_nested_box_runs_as_bare_script_without_hal0(tmp_path: Path) -> None:
     import subprocess
     import sys

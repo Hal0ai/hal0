@@ -125,7 +125,9 @@ same as the host on a gigabit link.
     guest's profiles block rootless podman outright (the #3234 family).
     `src/hal0/agents/containers_apparmor.py --nested-box` disables them only
     when `.ns_level > 0`, never on bare metal, and its list includes
-    `usr.bin.pasta` and `usr.bin.passt`.
+    `usr.bin.pasta` and `usr.bin.passt`. The launcher records each profile the
+    helper newly disabled, and uninstall re-enables exactly those, never a
+    profile the operator had disabled before.
 16. Honest signals inside the box. mDNS reports itself unavailable instead of
     "announced", because multicast does not cross pasta. Memory budgeting reads
     the host's memory, not the container marker's guess. When the host is

@@ -73,6 +73,8 @@ STATE_TREE="${STATE_DIR}/tree"
 # with the user's comment it proves hal0 owns the account, so a pre-existing
 # hal0box user is never adopted, rebuilt into or purged.
 OWNER_FILE="${STATE_DIR}/owner"
+# AppArmor profiles the launcher disabled, one "<disable link> <profile>" a line.
+APPARMOR_RECORD="${STATE_DIR}/apparmor"
 # The image build context (root-owned, readable by the box user).
 BUILD_DIR="${STATE_DIR}/build"
 BOX_GECOS="hal0 box"
@@ -445,12 +447,40 @@ box_host_packages() {
 # form installer/lib/preflight.sh uses, because hal0 is not installed yet.
 # A missing helper means the launcher and the tree disagree; fail rather than
 # guess, because skipping it surfaces later as an opaque podman error.
+#
+# The helper prints a "revert: rm <link> && apparmor_parser -r <profile>"
+# line for each profile it newly disabled. Those are appended to
+# ${APPARMOR_RECORD}, so uninstall undoes exactly what the box changed and
+# never a profile the operator had disabled already.
 box_nested_apparmor() {
-    local helper="${STATE_TREE}/src/hal0/agents/containers_apparmor.py"
+    local helper="${STATE_TREE}/src/hal0/agents/containers_apparmor.py" out line entry
     [[ -f "${helper}" ]] \
         || die "the release tree has no src/hal0/agents/containers_apparmor.py, which the box launcher needs; this tree does not match the launcher"
-    python3 "${helper}" --nested-box \
-        || die "containers_apparmor.py --nested-box failed; rootless podman would be blocked by the guest's AppArmor profiles"
+    out="$(python3 "${helper}" --nested-box)" \
+        || { printf '%s\n' "${out}"; die "containers_apparmor.py --nested-box failed; rootless podman would be blocked by the guest's AppArmor profiles"; }
+    [[ -z "${out}" ]] || printf '%s\n' "${out}"
+    while IFS= read -r line; do
+        [[ "${line}" =~ ^revert:\ rm\ ([^ ]+)\ \&\&\ apparmor_parser\ -r\ ([^ ]+)$ ]] || continue
+        entry="${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"
+        grep -qxF -- "${entry}" "${APPARMOR_RECORD}" 2>/dev/null || printf '%s\n' "${entry}" >> "${APPARMOR_RECORD}"
+    done <<<"${out}"
+}
+
+# Re-enables each recorded profile: removes the disable link only when it is
+# still the symlink the helper made, then reloads the profile.
+box_apparmor_revert() {
+    local link profile
+    [[ -f "${APPARMOR_RECORD}" ]] || return 0
+    while read -r link profile; do
+        [[ -n "${link}" && -n "${profile}" ]] || continue
+        if [[ -L "${link}" && "$(readlink "${link}")" == "${profile}" ]]; then
+            rm -f "${link}"
+            apparmor_parser -r "${profile}" >/dev/null 2>&1 \
+                || warn "could not reload AppArmor profile ${profile}; it loads again at the next boot, or run: apparmor_parser -r ${profile}"
+            log "re-enabled AppArmor profile ${profile##*/}"
+        fi
+    done < "${APPARMOR_RECORD}"
+    rm -f "${APPARMOR_RECORD}"
 }
 
 box_check_podman() {
@@ -895,6 +925,7 @@ cmd_uninstall() {
         log "user ${BOX_USER} is already gone; cleaning what remains"
     fi
     box_firewall_close
+    box_apparmor_revert
     if [[ -f "${DROPIN}" ]]; then
         rm -f "${DROPIN}"
         rmdir "$(dirname "${DROPIN}")" 2>/dev/null || true

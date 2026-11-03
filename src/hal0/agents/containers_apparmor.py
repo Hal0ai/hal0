@@ -414,14 +414,18 @@ def _nested_box_main(run: Callable[..., Any] = subprocess.run) -> int:
         print(f"apparmor-nested-box: root AppArmor namespace (.ns_level={level}); nothing changed")
         return 0
     root = apparmor_d_root()
-    names, unload_failed = _disable_guest_unconfined_profiles(
-        root, run, nested_disable_list(root, level)
-    )
+    wanted = nested_disable_list(root, level)
+    # Disabled before this run (by the operator, or by an earlier run that
+    # already recorded it): never offered for revert, so the box launcher's
+    # uninstall only undoes what it changed.
+    already = {n for n in wanted if (root / "disable" / n).is_symlink()}
+    names, unload_failed = _disable_guest_unconfined_profiles(root, run, wanted)
     print(f"apparmor-nested-box: disabled {', '.join(names) or 'nothing'}")
     if unload_failed:
         print(f"apparmor-nested-box: unload failed (symlink in place): {', '.join(unload_failed)}")
     for n in names:
-        print(f"revert: rm {root}/disable/{n} && apparmor_parser -r {root}/{n}")
+        if n not in already:
+            print(f"revert: rm {root}/disable/{n} && apparmor_parser -r {root}/{n}")
     return 0
 
 
