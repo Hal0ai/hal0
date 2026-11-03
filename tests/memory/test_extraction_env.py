@@ -984,3 +984,80 @@ def test_drop_in_carries_the_wall_limit_and_follows_the_timeout() -> None:
     out = render_drop_in(3600, limits=ExtractionLimits(llm_retries=1))
     assert "HINDSIGHT_API_LLM_TIMEOUT=3600\n" in out
     assert "HINDSIGHT_API_RETAIN_WALL_TIMEOUT=14400\n" in out
+
+
+# ── reconcile_extraction_dropin (#3326) ──────────────────────────────────────
+
+
+def _redirect_drop_in(monkeypatch, tmp_path: Path) -> Path:
+    import hal0.memory.extraction_env as ee
+
+    drop_in = tmp_path / "hindsight-api.service.d" / "extraction-model.conf"
+    monkeypatch.setattr(ee, "DROP_IN_DIR", drop_in.parent)
+    monkeypatch.setattr(ee, "DROP_IN_PATH", drop_in)
+    return drop_in
+
+
+def _write_graph_config(monkeypatch, tmp_path: Path, **graph) -> None:
+    import tomli_w
+
+    home = tmp_path / "home"
+    cfg_dir = home / "etc" / "hal0"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    (cfg_dir / "hal0.toml").write_bytes(tomli_w.dumps({"memory": {"graph": graph}}).encode())
+    monkeypatch.setenv("HAL0_HOME", str(home))
+
+
+def test_reconcile_skips_a_box_without_a_drop_in(monkeypatch, tmp_path: Path):
+    from hal0.memory.extraction_env import reconcile_extraction_dropin
+
+    drop_in = _redirect_drop_in(monkeypatch, tmp_path)
+    seam = SystemCtlSeam(run=_forbidden, is_hal0_user=lambda: False)
+
+    assert reconcile_extraction_dropin(seam=seam)["status"] == "skipped"
+    assert not drop_in.exists()
+
+
+def test_reconcile_rewrites_a_stale_cap_and_restarts(monkeypatch, tmp_path: Path):
+    from hal0.memory.extraction_env import ExtractionLimits, reconcile_extraction_dropin
+
+    drop_in = _redirect_drop_in(monkeypatch, tmp_path)
+    _write_graph_config(monkeypatch, tmp_path, extraction_max_tokens=16384)
+    drop_in.parent.mkdir(parents=True)
+    drop_in.write_text(render_drop_in(300, limits=ExtractionLimits(max_tokens=4096)))
+    calls, run = _seam_recorder()
+    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: False)
+
+    result = reconcile_extraction_dropin(seam=seam)
+
+    assert result["status"] == "applied"
+    assert "HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS=16384" in drop_in.read_text()
+    assert ["systemctl", "restart", "hindsight-api.service"] in [c[0] for c in calls]
+
+
+def test_reconcile_leaves_a_current_drop_in_alone(monkeypatch, tmp_path: Path):
+    from hal0.memory.extraction_env import reconcile_extraction_dropin
+
+    drop_in = _redirect_drop_in(monkeypatch, tmp_path)
+    _write_graph_config(monkeypatch, tmp_path)
+    drop_in.parent.mkdir(parents=True)
+    drop_in.write_text(render_drop_in(300))
+    seam = SystemCtlSeam(run=_forbidden, is_hal0_user=lambda: False)
+
+    assert reconcile_extraction_dropin(seam=seam) == {"status": "converged"}
+
+
+def test_reconcile_reports_a_failed_write_without_raising(monkeypatch, tmp_path: Path):
+    from hal0.memory.extraction_env import reconcile_extraction_dropin
+
+    drop_in = _redirect_drop_in(monkeypatch, tmp_path)
+    _write_graph_config(monkeypatch, tmp_path, extraction_max_tokens=20000)
+    drop_in.parent.mkdir(parents=True)
+    drop_in.write_text("stale")
+    _, run = _seam_recorder(rc=1, stderr="boom")
+    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: False)
+
+    result = reconcile_extraction_dropin(seam=seam)
+
+    assert result["status"] == "failed"
+    assert result["error"]
