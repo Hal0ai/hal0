@@ -12,7 +12,6 @@ and the flip-back's config restore.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -22,6 +21,8 @@ import structlog
 
 from hal0.agents import hermes_release as _rel
 from hal0.config.paths import var_lib
+from hal0.install import perms
+from hal0.security import nofollow
 from hal0.system.seam import is_hal0_service_user
 
 log = structlog.get_logger(__name__)
@@ -311,10 +312,8 @@ def _settle_override(
     path = override_path()
     try:
         if target_ref is not None:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_name(path.name + ".tmp")
-            tmp.write_text(target_ref + "\n", encoding="utf-8")
-            os.replace(tmp, path)
+            # A root-run first write adopts the service-owned state root (#3260).
+            nofollow.write_file(path, target_ref + "\n", owner=perms.state_root_owner())
         elif clear_override:
             path.unlink(missing_ok=True)
     except OSError as exc:

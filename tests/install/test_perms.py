@@ -188,7 +188,7 @@ def test_component_state_row_repairs_root_created_cache(tmp_hal0_home: str) -> N
     directory.mkdir(parents=True)
     cache = directory / "components.json"
     cache.write_text("{}")
-    unrelated = directory / "hermes.pin-override"
+    unrelated = directory / "unrelated.json"
     unrelated.write_text("pin")
     row = next(r for r in perms.ownership_table() if r.target == directory)
     assert (row.owner, row.group, row.mode) == ("hal0", "hal0", 0o2775)
@@ -1142,3 +1142,21 @@ def test_commit_refuses_a_directory_swapped_for_a_link_after_plan(tmp_path: Path
     with pytest.raises(OSError):
         perms.commit(pl)
     assert oct((victim / "shadow").stat().st_mode & 0o7777) == oct(0o600)
+
+
+def test_pin_override_and_hermes_state_rows_declare_service_owner(tmp_hal0_home: str) -> None:
+    """#3260: the root-run first-write files heal to the service owner, never wider."""
+    table = perms.ownership_table()
+    state = paths.var_lib() / "state"
+    hermes = state / "agents" / "hermes"
+    by_glob = {(r.target, r.glob): r for r in table if r.glob is not None}
+    for key in (
+        (state, "*.pin-override"),
+        (hermes, "provision.json"),
+        (hermes, "venv.pin"),
+    ):
+        row = by_glob[key]
+        assert (row.owner, row.group) == ("hal0", "hal0")
+        assert row.child_mode == 0o644
+        assert row.optional
+    assert by_glob[(hermes, "provision.json")].mode == 0o755
