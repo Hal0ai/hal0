@@ -66,28 +66,30 @@ def test_migrate_already_latest_does_not_rewrite(monkeypatch, tmp_path: Path) ->
 def test_migrate_runs_the_real_runner_when_behind(monkeypatch, tmp_path: Path) -> None:
     """A config behind the latest schema is migrated forward and stamped.
 
-    Only v1 is registered today, so to exercise the real upgrade path we
-    register a temporary v2 migration. The command must run it, stamp
-    ``meta.schema_version = 2``, and leave valid TOML on disk.
+    To exercise the real upgrade path with a transform of its own, register a
+    temporary migration one step past the head. The command must run it, stamp
+    that version, and leave valid TOML on disk.
     """
     from hal0.config import migrations as mig
 
     path = _set_home(monkeypatch, tmp_path)
+    head = mig.latest_version()
+    step = head + 1
     with open(path, "wb") as f:
-        tomli_w.dump({"meta": {"schema_version": 1}, "slots": {"port_range_start": 8081}}, f)
+        tomli_w.dump({"meta": {"schema_version": head}, "slots": {"port_range_start": 8081}}, f)
 
-    def _v2(data: dict) -> dict:
+    def _next(data: dict) -> dict:
         out = dict(data)
-        out["slots"] = {**out.get("slots", {}), "migrated_by_v2": True}
+        out["slots"] = {**out.get("slots", {}), "migrated_by_next": True}
         return out
 
-    # Register a throwaway v2 migration just for this test, then clean up.
-    monkeypatch.setitem(mig.MIGRATIONS, 2, _v2)
+    # Register a throwaway migration just for this test; monkeypatch undoes it.
+    monkeypatch.setitem(mig.MIGRATIONS, step, _next)
 
     result = runner.invoke(config_commands.app, ["migrate"])
     assert result.exit_code == 0, result.output
 
     with open(path, "rb") as f:
         data = tomllib.load(f)
-    assert data["meta"]["schema_version"] == 2
-    assert data["slots"]["migrated_by_v2"] is True
+    assert data["meta"]["schema_version"] == step
+    assert data["slots"]["migrated_by_next"] is True

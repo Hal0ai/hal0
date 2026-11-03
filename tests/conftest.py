@@ -6,10 +6,12 @@ import atexit
 import os
 import shutil
 import tempfile
+import warnings
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from starlette.exceptions import StarletteDeprecationWarning
 
 # Test collection must not import the application against the host's FHS
 # config. In particular, /etc/hal0/hal0.toml may be root-only on a deployed
@@ -28,6 +30,15 @@ if not os.environ.get("HAL0_HOME") and not os.access("/etc/hal0/hal0.toml", os.R
     atexit.register(shutil.rmtree, _collection_hal0_home, ignore_errors=True)
 
 from fastapi import FastAPI  # noqa: E402
+
+# starlette >= 1.3 warns at import time that its TestClient wants `httpx2`
+# instead of `httpx`. That warning fires exactly once, in this module, so it is
+# silenced here and not in pyproject's `filterwarnings`: an ini filter loses to a
+# command-line `-W error` (which is applied after it), so `pytest -W error`
+# died at conftest import. A filter installed by the module itself wins over
+# both.
+warnings.filterwarnings("ignore", category=StarletteDeprecationWarning)
+
 from fastapi.testclient import TestClient  # noqa: E402
 
 from hal0.api import create_app, memory_source  # noqa: E402

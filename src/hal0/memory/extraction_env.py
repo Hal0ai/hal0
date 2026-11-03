@@ -622,6 +622,42 @@ def apply_extraction_slot(
     return result
 
 
+def reconcile_extraction_dropin(
+    *, restart: bool = True, seam: SystemCtlSeam | None = None
+) -> dict[str, Any]:
+    """Re-render the extraction drop-in when it no longer matches ``hal0.toml``.
+
+    ``hal0.toml`` is the source of truth, but the drop-in is written only by a
+    graph-settings save. A config migration that changes an extraction limit
+    (v3 raises a stored ``extraction_max_tokens`` that cannot clear the coding-agent
+    plugin's chunks, #3326) would therefore leave the engine on the old cap until
+    someone saved the settings by hand.
+
+    Acts only on a box that already has a drop-in: a box without one never ran the
+    memory engine, and writing one is install.sh's job. Never raises. Returns
+    ``{"status": "skipped"|"converged"|"applied"|"failed", ...}``.
+    """
+    if not DROP_IN_PATH.exists():
+        return {"status": "skipped", "reason": "no drop-in on this box"}
+    try:
+        from hal0.config.loader import load_hal0_config
+
+        graph = load_hal0_config().memory.graph
+    except Exception as exc:
+        return {"status": "skipped", "reason": f"hal0.toml unreadable: {_detail(exc)}"}
+    limits = ExtractionLimits.from_config(graph)
+    if drop_in_matches(graph.llm_timeout_s, limits=limits):
+        return {"status": "converged"}
+    result = apply_extraction_slot(
+        graph.extraction_slot,
+        timeout_s=graph.llm_timeout_s,
+        limits=limits,
+        restart=restart,
+        seam=seam,
+    )
+    return {"status": "failed" if result.get("error") else "applied", **result}
+
+
 def restart_hindsight_background(*, seam: SystemCtlSeam | None = None) -> bool:
     """Restart ``hindsight-api`` through the privileged seam, fire-and-forget.
 
@@ -1194,6 +1230,7 @@ __all__ = [
     "measure_extraction_throughput",
     "parse_busy_requests",
     "parse_throughput_metrics",
+    "reconcile_extraction_dropin",
     "render_drop_in",
     "resolve_extraction_window",
 ]

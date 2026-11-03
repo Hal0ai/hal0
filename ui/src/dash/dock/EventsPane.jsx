@@ -128,7 +128,7 @@ export function EventsPane({ events, filters, onFilters, slotNames = [], disconn
           <div className="foot-pane-empty">No events yet</div>
         ) : filtered.length === 0 ? (
           <div className="foot-pane-empty">
-            No events match. <span className="foot-pane-clear" onClick={() => onFilters(DOCK_FILTERS_DEFAULT)}>Clear filters</span>
+            No events match. <button type="button" className="foot-pane-clear" data-testid="dock-clear-filters" onClick={() => onFilters(DOCK_FILTERS_DEFAULT)}>Clear filters</button>
           </div>
         ) : filtered.map((e) => {
           const open = openIds.has(e.id)

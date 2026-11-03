@@ -1027,6 +1027,90 @@ def test_update_status_exits_2_when_a_component_is_pending(
     assert "Hindsight" in result.output
 
 
+def _stub_pending_components(monkeypatch: pytest.MonkeyPatch, rows: list[dict]) -> None:
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+
+    def fake_get(path: str, **kwargs: object) -> dict:
+        if path == "/api/updates/components":
+            return {"components": rows, "pending": len(rows)}
+        return {
+            "current": "1.0.0",
+            "latest": "1.0.0",
+            "channel": "stable",
+            "update_available": False,
+            "manifest": {},
+        }
+
+    monkeypatch.setattr(uc, "api_get", fake_get)
+
+
+def test_pending_component_without_error_or_remedy_names_the_converge_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2664: a failed migration pass leaves rows pending with error/remedy null."""
+    _stub_pending_components(
+        monkeypatch,
+        [_component_row(id="openwebui", name="Open WebUI"), _component_row(id="hermes")],
+    )
+    result = runner.invoke(app, ["update", "status"])
+    out = " ".join(result.output.split())
+    assert result.exit_code == 2, result.output
+    assert "hal0 update component openwebui" in out
+    assert "hal0 update component hermes" in out
+
+
+def test_pending_component_keeps_its_remedy_and_still_names_the_converge_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A remedy that points at bare `hal0 update` cannot converge the component."""
+    _stub_pending_components(
+        monkeypatch,
+        [_component_row(id="hermes", status="stale", remedy="run 'hal0 update'")],
+    )
+    result = runner.invoke(app, ["update", "status"])
+    out = " ".join(result.output.split())
+    assert "run 'hal0 update'" in out
+    assert "hal0 update component hermes" in out
+
+
+def test_pending_component_does_not_repeat_a_remedy_that_names_the_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_pending_components(
+        monkeypatch,
+        [
+            _component_row(
+                id="hindsight", error="boom", remedy="run hal0 update component hindsight"
+            )
+        ],
+    )
+    result = runner.invoke(app, ["update", "status"])
+    assert result.output.count("hal0 update component hindsight") == 1, result.output
+
+
+def test_pending_component_with_error_and_no_remedy_names_the_command_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fallback "retry with" text already names the command; no second line."""
+    _stub_pending_components(monkeypatch, [_component_row(id="hindsight", error="boom")])
+    result = runner.invoke(app, ["update", "status"])
+    out = " ".join(result.output.split())
+    assert out.count("hal0 update component hindsight") == 1, result.output
+
+
+def test_nothing_to_apply_still_names_the_converge_command_for_pending_components(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2664: no update offered, components pending -> table + command, rc 0."""
+    _stub_pending_components(monkeypatch, [_component_row(id="openwebui")])
+    monkeypatch.setattr(uc, "api_post", lambda path, **kwargs: pytest.fail("posted"))
+    result = runner.invoke(app, ["update"])
+    out = " ".join(result.output.split())
+    assert result.exit_code == 0, result.output
+    assert "nothing to apply" in out
+    assert "hal0 update component openwebui" in out
+
+
 def test_update_status_exits_0_when_all_components_converged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

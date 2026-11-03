@@ -16,6 +16,7 @@ import pytest
 
 from hal0.config import migrations as migrations_module
 from hal0.config.loader import load_hal0_config, save_hal0_config
+from hal0.config.migrations import latest_version
 from hal0.config.schema import Hal0Config
 from hal0.updater import updater as updater_module
 
@@ -62,7 +63,7 @@ def test_a_fresh_v1_file_is_stamped_without_writing_defaults(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The fresh-install case: install.sh writes a minimal v1 hal0.toml and the
-    first migration run stamps v2. The round-trip must not expand the file with
+    first migration run stamps the head version. The round-trip must not expand the file with
     every model default (which would pin them) or drop an unknown key."""
     import tomllib
 
@@ -74,10 +75,11 @@ def test_a_fresh_v1_file_is_stamped_without_writing_defaults(
     )
     monkeypatch.setattr(updater_module.paths, "hal0_toml", lambda: toml_path)
 
-    assert updater_module._maybe_run_config_migrations(1) == (1, 2)
+    head = latest_version()
+    assert updater_module._maybe_run_config_migrations(1) == (1, head)
     raw = tomllib.loads(toml_path.read_text(encoding="utf-8"))
     assert raw == {
-        "meta": {"schema_version": 2},
+        "meta": {"schema_version": head},
         "slots": {"port_range_start": 8081},
         "operator_notes": {"kept": True},
     }

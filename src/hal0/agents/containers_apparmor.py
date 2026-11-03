@@ -44,13 +44,24 @@ unprivileged LXC: ``/sys/kernel/security/apparmor/.ns_level`` > 0). On bare
 metal or a privileged container the very same stubs are the userns grant that
 ``kernel.apparmor_restrict_unprivileged_userns=1`` relies on; disabling them
 would silently and persistently break the operator's own rootless podman. So
-nothing is mutated unless ``.ns_level`` parses as an integer > 0.
+nothing is mutated unless ``.ns_level`` parses as an integer > 0. The denial
+was reproduced on a Proxmox VE host running the 7.0 kernel (kernel
+7.0.6-pve); it did NOT reproduce inside a 6.8 kernel, and Ubuntu 26.04 guests
+were unaffected, so the fix is kernel-dependent and gated on the symptom, never
+on the OS.
 
 The disable symlink and ``apparmor_parser -R`` act on a WHOLE profile file, so a
 file is only touched when EVERY profile block header in it carries
 ``flags=(unconfined)`` (see :func:`guest_unconfined_profiles_present`). And a
 symlink is not proof the profile was unloaded: :class:`ApparmorPreflightResult`
 records the profiles whose ``apparmor_parser -R`` failed in ``unload_failed``.
+
+If the retry smoke still fails AND every profile unloaded cleanly (so the retry
+is conclusive), the links this run created are removed again and the profiles
+reloaded (``apparmor_parser -r``), so a false positive does not leave profiles
+disabled for nothing; links that already existed are never touched
+(``preexisting``). When an unload failed the links stay: that profile may still
+be loaded and the retry proves nothing about it.
 """
 
 from __future__ import annotations
@@ -125,9 +136,12 @@ def _default_smoke_argv() -> tuple[str, ...]:
 _APPARMOR_REQUIRED_TOKEN = "apparmor"
 _APPARMOR_SIGNATURE_ANY: tuple[str, ...] = (
     "install profile containers-default",
-    "access denied",
     "exit status 243",
 )
+#: ``apparmor_parser`` and ``access denied`` on the SAME line, in that order —
+#: exactly preflight.sh's ``apparmor_parser.*access denied`` (grep is
+#: line-based). A bare "access denied" elsewhere in the output does not count.
+_APPARMOR_PARSER_DENIED_RE = re.compile(r"apparmor_parser.*access denied")
 
 #: #3234 — guest AppArmor profiles that ship ``flags=(unconfined)`` on Ubuntu
 #: 24.04 and, inside an UNPRIVILEGED LXC, deny every podman ``socket()``.
@@ -195,8 +209,10 @@ class ApparmorPreflightResult:
                           ``unload_failed`` lists the ones whose
                           ``apparmor_parser -R`` failed (the disable symlink
                           is in place either way) and ``detail`` carries the
-                          retry's error and/or the unload failures.
-                          (A root AppArmor namespace, or no such profile file,
+                          retry's error and/or the unload failures. When the
+                          retry failed, the links THIS run created were removed
+                          again and listed in ``rolled_back`` (and left out of
+                          ``disabled``). (A root AppArmor namespace, or no such profile file,
                           yields ``"unrelated"`` with nothing changed.)
     """
 
@@ -211,6 +227,16 @@ class ApparmorPreflightResult:
     #: ``apparmor_parser -R`` failed or could not run, so the profile may still
     #: be loaded until the next profile reload / reboot.
     unload_failed: list[str] = field(default_factory=list)
+    #: ``guest_profiles_disabled`` only: profiles that already had a
+    #: ``disable/<name>`` entry before this run (the operator's own, or an earlier
+    #: run's). Never rolled back, never offered in the revert command.
+    preexisting: list[str] = field(default_factory=list)
+    #: ``guest_profiles_disabled`` only: profiles this run disabled and then
+    #: re-enabled because the retry smoke still failed.
+    rolled_back: list[str] = field(default_factory=list)
+    #: ``guest_profiles_disabled`` only: profiles whose disable link could not be
+    #: created (``OSError``); the remaining profiles were still processed.
+    link_failed: list[str] = field(default_factory=list)
 
 
 def _smoke(run: Callable[..., Any], argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
@@ -228,7 +254,9 @@ def _is_apparmor_failure(proc: subprocess.CompletedProcess[str]) -> bool:
     blob = f"{proc.stdout or ''}\n{proc.stderr or ''}".lower()
     if _APPARMOR_REQUIRED_TOKEN not in blob:
         return False
-    return any(sig in blob for sig in _APPARMOR_SIGNATURE_ANY)
+    if any(sig in blob for sig in _APPARMOR_SIGNATURE_ANY):
+        return True
+    return any(_APPARMOR_PARSER_DENIED_RE.search(line) for line in blob.splitlines())
 
 
 def _is_unconfined_profile_network_denial(proc: subprocess.CompletedProcess[str]) -> bool:
@@ -318,30 +346,43 @@ def guest_unconfined_profiles_present(apparmor_d: Path) -> list[str]:
 
 def _disable_guest_unconfined_profiles(
     apparmor_d: Path, run: Callable[..., Any], names: list[str] | None = None
-) -> tuple[list[str], list[str]]:
-    """Disable every present guest unconfined profile; return ``(names, unload_failed)``.
+) -> tuple[list[str], list[str], list[str]]:
+    """Disable every present guest unconfined profile.
+
+    Returns ``(names, unload_failed, link_failed)``.
 
     Per profile: ``<apparmor_d>/disable/<name>`` becomes a symlink to
     ``<apparmor_d>/<name>`` (an existing link or file is replaced), then
     ``apparmor_parser -R <profile>`` unloads it. A non-zero parser exit — or a
-    missing ``apparmor_parser`` — is logged at warning, recorded in the second
-    list and otherwise ignored: the symlink already makes the disable persistent
-    across reboots, and the caller re-smokes. The link is created BEFORE the
-    unload, so ``names`` alone does not prove the profile is no longer loaded;
-    ``unload_failed`` is the subset that may still be. Idempotent.
+    missing ``apparmor_parser`` — is logged at warning, recorded in
+    ``unload_failed`` and otherwise ignored: the symlink already makes the
+    disable persistent across reboots, and the caller re-smokes. The link is
+    created BEFORE the unload, so ``names`` alone does not prove the profile is
+    no longer loaded; ``unload_failed`` is the subset that may still be. An
+    ``OSError`` creating one profile's link (``mkdir`` / ``unlink`` /
+    ``symlink``) is logged, recorded in ``link_failed`` and does not abort the
+    rest; such a profile is left out of ``names``. Idempotent.
     """
     if names is None:
         names = guest_unconfined_profiles_present(apparmor_d)
     if not names:
-        return [], []
+        return [], [], []
     disable_dir = apparmor_d / "disable"
-    disable_dir.mkdir(parents=True, exist_ok=True)
+    handled: list[str] = []
     unload_failed: list[str] = []
+    link_failed: list[str] = []
     for name in names:
         link = disable_dir / name
-        if link.is_symlink() or link.exists():
-            link.unlink()
-        os.symlink(apparmor_d / name, link)
+        try:
+            disable_dir.mkdir(parents=True, exist_ok=True)
+            if link.is_symlink() or link.exists():
+                link.unlink()
+            os.symlink(apparmor_d / name, link)
+        except OSError as exc:
+            log.warning("containers_apparmor.link_failed", profile=name, err=str(exc)[:200])
+            link_failed.append(name)
+            continue
+        handled.append(name)
         try:
             proc = run(  # nosec B603 — fixed argv from this module
                 ["apparmor_parser", "-R", str(apparmor_d / name)],
@@ -362,7 +403,49 @@ def _disable_guest_unconfined_profiles(
             unload_failed.append(name)
         else:
             log.info("containers_apparmor.disabled_guest_profile", profile=name)
-    return names, unload_failed
+    return handled, unload_failed, link_failed
+
+
+def _rollback_guest_profiles(
+    apparmor_d: Path, run: Callable[..., Any], names: list[str]
+) -> list[str]:
+    """Undo :func:`_disable_guest_unconfined_profiles` for ``names``; return those undone.
+
+    Removes ``<apparmor_d>/disable/<name>`` (only when it is still a symlink —
+    anything else is left alone) and reloads the profile with
+    ``apparmor_parser -r``. A reload that fails or cannot run is logged; the
+    link is gone either way, so the next profile reload / reboot restores it.
+    """
+    undone: list[str] = []
+    for name in names:
+        link = apparmor_d / "disable" / name
+        try:
+            if not link.is_symlink():
+                continue
+            link.unlink()
+        except OSError as exc:
+            log.warning(
+                "containers_apparmor.rollback_unlink_failed", profile=name, err=str(exc)[:200]
+            )
+            continue
+        undone.append(name)
+        try:
+            proc = run(  # nosec B603 — fixed argv from this module
+                ["apparmor_parser", "-r", str(apparmor_d / name)],
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError:
+            log.warning("containers_apparmor.rollback_parser_missing", profile=name)
+            continue
+        if proc.returncode != 0:
+            log.warning(
+                "containers_apparmor.rollback_reload_failed",
+                profile=name,
+                rc=proc.returncode,
+                err=(proc.stderr or proc.stdout or "").strip()[:200],
+            )
+    return undone
 
 
 def disable_guest_unconfined_profiles(apparmor_d: Path, run: Callable[..., Any]) -> list[str]:
@@ -419,8 +502,10 @@ def _nested_box_main(run: Callable[..., Any] = subprocess.run) -> int:
     # already recorded it): never offered for revert, so the box launcher's
     # uninstall only undoes what it changed.
     already = {n for n in wanted if (root / "disable" / n).is_symlink()}
-    names, unload_failed = _disable_guest_unconfined_profiles(root, run, wanted)
+    names, unload_failed, link_failed = _disable_guest_unconfined_profiles(root, run, wanted)
     print(f"apparmor-nested-box: disabled {', '.join(names) or 'nothing'}")
+    if link_failed:
+        print(f"apparmor-nested-box: could not disable: {', '.join(link_failed)}")
     if unload_failed:
         print(f"apparmor-nested-box: unload failed (symlink in place): {', '.join(unload_failed)}")
     for n in names:
@@ -535,29 +620,52 @@ def _remediate_guest_unconfined_profiles(
             ),
         )
     root = apparmor_d if apparmor_d is not None else apparmor_d_root()
-    names, unload_failed = _disable_guest_unconfined_profiles(root, run)
+    candidates = guest_unconfined_profiles_present(root)
+    preexisting = [n for n in candidates if (root / "disable" / n).is_symlink()]
+    names, unload_failed, link_failed = _disable_guest_unconfined_profiles(root, run, candidates)
     if not names:
+        why = (
+            f"could not create the disable link for {', '.join(link_failed)}"
+            if link_failed
+            else "no unconfined guest AppArmor profiles "
+            f"({', '.join(GUEST_UNCONFINED_PROFILES)}) found under {root}"
+        )
         return ApparmorPreflightResult(
             outcome="unrelated",
-            detail=(
-                "socket denial seen, but no unconfined guest AppArmor profiles "
-                f"({', '.join(GUEST_UNCONFINED_PROFILES)}) found under {root}: "
-                + (first.stderr or first.stdout or "").strip()[:150]
-            ),
+            detail=f"socket denial seen, but {why}: "
+            + (first.stderr or first.stdout or "").strip()[:150],
         )
     retry = _smoke(run, smoke_argv)
     fixed = retry.returncode == 0
+    rolled_back: list[str] = []
     parts: list[str] = []
     if not fixed:
         parts.append((retry.stderr or retry.stdout or "").strip()[:200])
+        # A false positive (the denial was not these profiles) must not leave
+        # them disabled for nothing: undo only what THIS run created. Only when
+        # the retry is CONCLUSIVE, i.e. every profile really unloaded: if an
+        # ``apparmor_parser -R`` failed, that profile may still be loaded, the
+        # retry says nothing about it, and the symlink is the operator's way
+        # forward (the next reload / reboot or a manual -R), so keep it all.
+        if not unload_failed:
+            rolled_back = _rollback_guest_profiles(
+                root, run, [n for n in names if n not in preexisting]
+            )
+        if rolled_back:
+            parts.append(f"rolled back: {', '.join(rolled_back)}")
     if unload_failed:
         parts.append(f"unload failed: {', '.join(unload_failed)}")
+    if link_failed:
+        parts.append(f"could not disable: {', '.join(link_failed)}")
     return ApparmorPreflightResult(
         outcome="guest_profiles_disabled",
         detail="; ".join(p for p in parts if p) or None,
         fixed=fixed,
-        disabled=names,
-        unload_failed=unload_failed,
+        disabled=[n for n in names if n not in rolled_back],
+        unload_failed=[n for n in unload_failed if n not in rolled_back],
+        preexisting=preexisting,
+        rolled_back=rolled_back,
+        link_failed=link_failed,
     )
 
 
@@ -584,6 +692,9 @@ def ensure_podman_apparmor_usable(
        retry once → ``guest_profiles_disabled`` (``fixed`` = retry passed;
        ``unload_failed`` = profiles whose ``apparmor_parser -R`` failed). A file
        is only disabled when EVERY profile header in it is ``flags=(unconfined)``.
+       If the retry still fails and every unload succeeded, the links this run
+       created are removed and the profiles reloaded (``rolled_back``); links
+       that existed before, and runs with a failed unload, are kept.
        A root AppArmor namespace or no such profile present → ``unrelated``,
        nothing changed, no retry.
 
@@ -625,8 +736,14 @@ def ensure_podman_apparmor_usable(
     )
 
 
+#: ``_main`` exit code: the #3234 remediation ran to completion but the retry
+#: smoke still failed. Distinct from 1 (``retry_failed`` / an uncaught crash);
+#: preflight.sh maps it to ``_HAL0_APPARMOR_HELPER_STATE=unresolved``.
+EXIT_GUEST_FIX_UNRESOLVED = 3
+
 __all__ = [
     "CONTAINERS_CONF",
+    "EXIT_GUEST_FIX_UNRESOLVED",
     "GUEST_UNCONFINED_PROFILES",
     "NESTED_BOX_PROFILES",
     "ApparmorPreflightResult",
@@ -650,8 +767,11 @@ def _main() -> int:
     0 it changes nothing.
 
     Runs the convergent preflight and prints ``<outcome> wrote=<bool>``. Exit 0
-    unless the retry still failed after writing the fix (``retry_failed`` → 1),
-    so the installer can surface a genuine, unresolved apparmor blocker.
+    unless the fix did not take: ``retry_failed`` -> 1, and a
+    ``guest_profiles_disabled`` run whose retry smoke still failed
+    (``fixed=False``) -> :data:`EXIT_GUEST_FIX_UNRESOLVED` (3), so the installer
+    can surface a genuine, unresolved blocker. 3 is distinct from a crash
+    (Python's own 1) so install.sh can tell "ran, did not help" from "died".
 
     ``HAL0_APPARMOR_CONF`` overrides the target config path — used by tests to
     point this at a throwaway file instead of the real
@@ -675,17 +795,25 @@ def _main() -> int:
     if result.outcome == "guest_profiles_disabled":
         verdict = "retry passed" if result.fixed else "retry still failing"
         root = apparmor_d_root()
-        revert = "; ".join(
-            f"rm {root}/disable/{n} && apparmor_parser -r {root}/{n}" for n in result.disabled
-        )
-        unload = (
-            f"; unload failed: {', '.join(result.unload_failed)}" if result.unload_failed else ""
-        )
+        # Only what THIS run disabled: a link that existed before is the
+        # operator's, and the printed revert must not re-enable it.
+        mine = [n for n in result.disabled if n not in result.preexisting]
+        revert = "; ".join(f"rm {root}/disable/{n} && apparmor_parser -r {root}/{n}" for n in mine)
+        notes = ""
+        if result.rolled_back:
+            notes += f"; rolled back (not disabled): {', '.join(result.rolled_back)}"
+        if result.unload_failed:
+            notes += f"; unload failed: {', '.join(result.unload_failed)}"
+        if result.link_failed:
+            notes += f"; could not disable: {', '.join(result.link_failed)}"
         # ASCII only: this prints before a UTF-8 stdout is guaranteed.
         print(
-            f"apparmor remediation applied: disabled guest profiles {', '.join(result.disabled)}"
-            f" - {verdict}{unload}; revert: {revert}"
+            f"apparmor remediation applied: disabled guest profiles {', '.join(result.disabled) or 'none'}"
+            f" - {verdict}{notes}; .ns_level={_apparmor_ns_level_raw()}"
+            + (f"; revert: {revert}" if revert else "")
         )
+        if not result.fixed:
+            return EXIT_GUEST_FIX_UNRESOLVED
     return 1 if result.outcome == "retry_failed" else 0
 
 
