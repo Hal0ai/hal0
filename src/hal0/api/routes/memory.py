@@ -790,9 +790,13 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
     try:
         body = await request.json()
     except Exception as exc:
-        raise Hal0Error("request body must be valid JSON", details={"error": str(exc)}) from exc
+        raise BadRequest(
+            "request body must be valid JSON",
+            code="request.invalid_json",
+            details={"error": str(exc)},
+        ) from exc
     if not isinstance(body, dict):
-        raise Hal0Error("request body must be a JSON object")
+        raise BadRequest("request body must be a JSON object", code="request.invalid_json")
 
     wrapper = _wrapper(request)
 
@@ -1187,7 +1191,7 @@ async def memory_search(request: Request) -> dict[str, Any]:
     body = await _read_json_body(request)
     query = body.get("query")
     if not isinstance(query, str) or not query:
-        raise Hal0Error(
+        raise BadRequest(
             "memory_search requires 'query' (non-empty string)",
             details={"path": "/api/memory/search"},
         )
@@ -1452,7 +1456,7 @@ async def memory_delete(request: Request) -> dict[str, int]:
     body = await _read_json_body(request)
     ids = body.get("ids")
     if not isinstance(ids, list) or not ids:
-        raise Hal0Error(
+        raise BadRequest(
             "memory_delete requires 'ids' (non-empty list)",
             details={"path": "/api/memory/delete"},
         )
@@ -1496,12 +1500,13 @@ async def _read_json_body(request: Request) -> dict[str, Any]:
     try:
         body = await request.json()
     except Exception as exc:
-        raise Hal0Error(
+        raise BadRequest(
             "request body must be valid JSON",
+            code="request.invalid_json",
             details={"error": str(exc)},
         ) from exc
     if not isinstance(body, dict):
-        raise Hal0Error("request body must be a JSON object")
+        raise BadRequest("request body must be a JSON object", code="request.invalid_json")
     return body
 
 

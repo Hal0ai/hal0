@@ -23,7 +23,7 @@ from fastapi import APIRouter, Request
 from pydantic import ValidationError
 
 from hal0.api._redact import redact_config
-from hal0.api.middleware.error_codes import Hal0Error
+from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.comfyui.reach import editor_on_lan
 from hal0.config import network
 from hal0.config.loader import hal0_config_txn, load_hal0_config
@@ -335,9 +335,13 @@ async def update_models_config(request: Request) -> dict[str, Any]:
     try:
         body = await request.json()
     except Exception as exc:
-        raise Hal0Error("request body must be valid JSON", details={"error": str(exc)}) from exc
+        raise BadRequest(
+            "request body must be valid JSON",
+            code="request.invalid_json",
+            details={"error": str(exc)},
+        ) from exc
     if not isinstance(body, dict):
-        raise Hal0Error("request body must be a JSON object")
+        raise BadRequest("request body must be a JSON object", code="request.invalid_json")
 
     # Serialized read-modify-write (#1721): this route used to load, merge and
     # save hal0.toml with no lock at all, so it could persist its own
