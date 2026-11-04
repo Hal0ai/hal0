@@ -157,6 +157,13 @@ memory slot falls back to agent. A model-bound memory slot wins even while cold.
 Config migration v4 preserves upgrades by writing `"utility"` only when
 `[memory.graph].extraction_slot` is missing; explicit values and upstreams persist.
 
+`extraction_max_concurrent` sets both `HINDSIGHT_API_LLM_MAX_CONCURRENT` and
+`HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT` to the same rendered value. The global
+limit covers consolidation, reflect and mental-model refresh as well as retain;
+these operations share the LLM concurrency budget. A long reflect or
+consolidation can hold the default single permit and delay queued retains until
+the call finishes or reaches `llm_timeout_s`.
+
 #### `[memory.priority]`
 
 `extra="forbid"`. These keys reserve the shared-memory scheduling contract;

@@ -2123,7 +2123,7 @@ class MemoryGraphConfig(BaseModel):
     # slot, usually one llama-server with --parallel 1; unbounded extraction
     # (hindsight's own defaults: 32 concurrent LLM calls, 64000 completion
     # tokens, 3 retries at each of two layers) saturates it and the retain
-    # queue never drains. Each knob maps 1:1 onto a hindsight-api env var in
+    # queue never drains. The knobs map onto hindsight-api env vars in
     # the drop-in hal0 already owns; the ranges below are also what the
     # root-side drop-in validator (installer/wrappers/hal0-systemctl) accepts.
     extraction_max_concurrent: int = Field(
@@ -2131,9 +2131,10 @@ class MemoryGraphConfig(BaseModel):
         ge=1,
         le=8,
         description=(
-            "How many extraction LLM calls Hindsight may have in flight at once "
-            "against the extraction slot (HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT). "
-            "1 serialises them, which is right for a single llama-server; raise it "
+            "How many LLM calls Hindsight may have in flight at once against the "
+            "extraction target (HINDSIGHT_API_LLM_MAX_CONCURRENT and "
+            "HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT). This also bounds consolidation, "
+            "reflect and mental-model refresh. 1 serialises them; raise it "
             "only for a slot that genuinely serves parallel requests. Applied via "
             "the hindsight-api drop-in; the daemon restarts to pick it up."
         ),

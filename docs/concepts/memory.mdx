@@ -306,7 +306,13 @@ even on a fresh install, under `[memory.graph]`:
   a retry ladder that ends — a document that cannot be extracted lands under
   **Retry failed** on the Memory page instead of occupying the slot for
   hours. Raise `extraction_max_concurrent` only for a slot that genuinely
-  serves parallel requests. Note that `extraction_task_retries` and
+  serves parallel requests. This setting controls both the process-wide
+  `HINDSIGHT_API_LLM_MAX_CONCURRENT` and retain-specific
+  `HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT` with the same rendered value,
+  so consolidation, reflect and mental-model refresh share the concurrency
+  budget too. With the default single permit, a long reflect or consolidation
+  can delay queued retains until that call finishes or reaches `llm_timeout_s`.
+  Note that `extraction_task_retries` and
   `extraction_retry_backoff_s` are Hindsight's worker-wide settings: every
   queued memory operation (consolidation and mental-model refresh too)
   shares them, since the engine has no retain-only task retry.
