@@ -69,6 +69,8 @@
   color: var(--fg-3);
 }
 
+.svcp-ip-link { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+
 /* Meta rows — the slot-met label register: mono, small, tiered fg. */
 .svcp-meta {
   display: flex;

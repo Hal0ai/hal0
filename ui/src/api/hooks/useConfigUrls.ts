@@ -23,6 +23,8 @@ export interface ConfigUrls {
   // reverse proxy and HAL0_OPENWEBUI_PUBLIC_URL is not set (the proxy's :3001 is not Open WebUI).
   // "" whenever the link is set. Absent from an older hal0.
   openwebui_reason?: string
+  /** Direct LAN-IP fallback when the name based link may not resolve. */
+  openwebui_ip?: string
   hermes: string
   hermes_enabled: boolean
   // ComfyUI's own web UI. Defaults to http://<host>:8188 (the request host and ComfyUI's port);
@@ -41,6 +43,8 @@ export interface ConfigUrls {
   // (HAL0_COMFYUI_PUBLIC_URL unset behind a proxy). "" whenever the link is set. Absent from an
   // older hal0.
   comfyui_reason?: string
+  /** Direct LAN-IP fallback when the name based link may not resolve. */
+  comfyui_ip?: string
 }
 
 export function useConfigUrls() {

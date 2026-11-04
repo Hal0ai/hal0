@@ -281,6 +281,34 @@ test.describe('Image Gen live wiring: editor card', () => {
     await expect(page.getByTestId('editor-offbox')).toHaveCount(0)
   })
 
+  test('shows the API-provided IP fallback beside the ComfyUI editor link', async ({ page }) => {
+    const mock = makeImageGenMock({ urls: {
+      api: 'http://localhost:8080',
+      openwebui: '', openwebui_enabled: false,
+      hermes: '', hermes_enabled: false,
+      comfyui: 'http://hal0.local:8188', comfyui_ip: 'http://192.0.2.10:8188',
+      comfyui_lan: true, comfyui_public: false, comfyui_reason: '',
+    } })
+    await routeImageGen(page, mock)
+    await gotoImageGen(page, 'engine')
+    await expect(page.getByTestId('editor-open')).toHaveAttribute('href', 'http://hal0.local:8188')
+    await expect(page.getByTestId('editor-ip-fallback')).toHaveAttribute('href', 'http://192.0.2.10:8188')
+  })
+
+  test('shows the PUBLIC_URL hint instead of any ComfyUI link behind a proxy', async ({ page }) => {
+    const mock = makeImageGenMock({ urls: {
+      api: 'https://hal0.example', openwebui: '', openwebui_enabled: false,
+      hermes: '', hermes_enabled: false,
+      comfyui: '', comfyui_ip: '', comfyui_lan: true, comfyui_public: false,
+      comfyui_reason: 'proxy_needs_public_url',
+    } })
+    await routeImageGen(page, mock)
+    await gotoImageGen(page, 'engine')
+    await expect(page.getByTestId('editor-open')).toBeDisabled()
+    await expect(page.getByTestId('editor-offbox')).toHaveText('Set HAL0_COMFYUI_PUBLIC_URL in /etc/hal0/api.env')
+    await expect(page.getByTestId('editor-ip-fallback')).toHaveCount(0)
+  })
+
   test('a workflow link does not pretend to open a workflow', async ({ page }) => {
     // ComfyUI cannot open a workflow from a link (comfyanonymous/ComfyUI#9858): every chip opens the
     // editor, and the card says where the workflow is.

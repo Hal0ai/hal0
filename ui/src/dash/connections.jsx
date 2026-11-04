@@ -883,14 +883,10 @@ function LocalEndpointsPanel() {
   const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:8080'
   const apiBase = (cfg.data?.api || origin).replace(/\/$/, '')
   const gatewayV1 = apiBase + '/v1'
-  const host = typeof window !== 'undefined' ? window.location.hostname : 'hal0'
-  const port =
-    typeof window !== 'undefined' && window.location.port
-      ? window.location.port
-      : typeof window !== 'undefined' && window.location.protocol === 'https:'
-        ? '443'
-        : '80'
-  const tls = typeof window !== 'undefined' && window.location.protocol === 'https:'
+  const apiUrl = (() => { try { return new URL(apiBase) } catch { return null } })()
+  const host = apiUrl?.hostname || 'hal0'
+  const port = apiUrl?.port || (apiUrl?.protocol === 'https:' ? '443' : '80')
+  const tls = apiUrl?.protocol === 'https:'
 
   const serving = slots.filter((s) => epState(s) === 'serving').length
   const reachable = slots.filter((s) => !['offline', 'error'].includes(epState(s))).length
@@ -967,13 +963,9 @@ function McpServersPanel() {
 
   const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:8080'
   void (cfg.data?.api || origin)
-  const host = typeof window !== 'undefined' ? window.location.hostname : 'hal0'
-  const port =
-    typeof window !== 'undefined' && window.location.port
-      ? window.location.port
-      : typeof window !== 'undefined' && window.location.protocol === 'https:'
-        ? '443'
-        : '80'
+  const apiUrl = (() => { try { return new URL(cfg.data?.api || origin) } catch { return null } })()
+  const host = apiUrl?.hostname || 'hal0'
+  const port = apiUrl?.port || (apiUrl?.protocol === 'https:' ? '443' : '80')
 
   const toolTotal = servers.reduce((a, m) => a + (m.tools.length || m.toolCount || 0), 0)
   const mcpUp = servers.filter((m) => m.up).length

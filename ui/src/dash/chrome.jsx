@@ -667,6 +667,7 @@ function NavList({ route, param, onGo, testPrefix }) {
 function ServiceLinks({ route, onGo, onLaunch, testPrefix }) {
   const cfg = useConfigUrls();
   const owui = cfg.data?.openwebui_enabled ? (cfg.data.openwebui || "") : "";
+  const owuiIp = cfg.data?.openwebui_enabled ? (cfg.data.openwebui_ip || "") : "";
   // Behind a proxy with no declared URL hal0 sends no link: say what to set, not a dead link.
   const owuiHint = cfg.data?.openwebui_enabled && !owui && cfg.data?.openwebui_reason === PROXY_NEEDS_PUBLIC_URL
     ? publicUrlHint("OPENWEBUI") : "";
@@ -699,6 +700,13 @@ function ServiceLinks({ route, onGo, onLaunch, testPrefix }) {
             {Icons.chat}
             <span className="lbl">OpenWebUI</span>
             <span className="sb-svc-ext">{Icons.ext}</span>
+          </a>
+        )}
+        {owui && owuiIp && (
+          <a className="sb-row sb-svc sb-svc-ip" data-testid={testPrefix + "openwebui-ip"}
+            href={owuiIp} target="_blank" rel="noopener noreferrer"
+            onClick={() => onLaunch && onLaunch()}>
+            <span className="lbl">Can't reach it? Try the IP link</span>
           </a>
         )}
         {owuiHint && (

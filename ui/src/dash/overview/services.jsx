@@ -8,6 +8,8 @@ import { useServices } from '@/api/hooks/useServices'
 import { servicesForWidget } from '../services-widget-pure'
 import { OFF_BOX_NOTE } from '../image/editor-reach'
 import { useEditorAccess } from '../image/useEditorAccess'
+import { useConfigUrls } from '@/api/hooks/useConfigUrls'
+import { PROXY_NEEDS_PUBLIC_URL, publicUrlHint } from '@/api/publicUrlHint'
 
 // The four companions lead, in this order; any other service follows (servicesForWidget orders and caps).
 const SERVICE_ORDER = ['openwebui', 'comfyui', 'hermes', 'n8n']
@@ -16,6 +18,7 @@ const WIRED_KEYS = ['chat', 'voice', 'documents', 'images', 'web_search', 'mcp']
 export function OvServices({ onGo }) {
   const svc = useServices()
   const editor = useEditorAccess()
+  const configUrls = useConfigUrls().data
   const rows = servicesForWidget(svc, SERVICE_ORDER, 8)
   const upCount = rows.filter((s) => s.up).length
 
@@ -40,8 +43,22 @@ export function OvServices({ onGo }) {
         rows.map((s) => {
           const disabled = s.unit_state?.unit_file_state === 'disabled' || (!s.up && !s.managed)
           const isComfy = s.id === 'comfyui'
-          const openUrl = isComfy ? editor.url : s.url
-          const openable = s.up && (isComfy || s.url)
+          const isOpenWebui = s.id === 'openwebui'
+          const isHermes = s.id === 'hermes'
+          const openUrl = isComfy ? editor.url : isOpenWebui
+            ? (configUrls?.openwebui_enabled ? configUrls.openwebui || null : null)
+            : isHermes
+              ? (configUrls?.hermes_enabled ? configUrls.hermes || null : null)
+              : s.url
+          const ipUrl = isComfy ? editor.ipUrl : isOpenWebui && openUrl
+            ? configUrls?.openwebui_ip || null
+            : null
+          const publicUrlHintText = isComfy && editor.needsPublicUrl
+            ? editor.needsPublicUrl
+            : isOpenWebui && configUrls?.openwebui_enabled && !openUrl && configUrls?.openwebui_reason === PROXY_NEEDS_PUBLIC_URL
+              ? publicUrlHint('OPENWEBUI')
+            : null
+          const openable = s.up && (isComfy ? (editor.onBox ? Boolean(editor.url) : editor.linkAvailable) : Boolean(openUrl))
           const wired = WIRED_KEYS.filter((k) => s.wired?.[k] === true)
           return (
             <div
@@ -62,6 +79,14 @@ export function OvServices({ onGo }) {
                   {s.id}
                 </div>
                 <div className="ov-det">{disabled ? 'disabled' : s.detail || '—'}</div>
+                {publicUrlHintText && <div className="ov-det" role="note" data-testid={`ov-svc-open-${s.id}-hint`}>{publicUrlHintText}</div>}
+                {openUrl && ipUrl && ipUrl !== openUrl ? (
+                  <a className="ov-det ov-ip-fallback" data-testid={`ov-svc-open-${s.id}-ip`}
+                    href={ipUrl} target="_blank" rel="noopener noreferrer"
+                    onClick={(e) => e.stopPropagation()}>
+                    Can't reach it? Try the IP link
+                  </a>
+                ) : null}
               </div>
               <div className="ov-wired">
                 {wired.map((w) => (
