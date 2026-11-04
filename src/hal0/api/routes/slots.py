@@ -1237,12 +1237,13 @@ async def delete_slot(
 
     Being *seeded* protects nothing. Every name in
     :data:`hal0.install.static_seeds.STATIC_SEED_SLOTS` (``flm``, ``tts``,
-    ``rerank``, ``utility``, ``img``, ``agent``, ``brain``, ``qwen3tts``,
+    ``rerank``, ``memory``, ``img``, ``agent``, ``brain``, ``qwen3tts``,
     ``coder``, ``embed`` — note there is no ``primary`` and no ``stt``) deletes
     like any other slot, and deleting one writes a tombstone so the boot-time
     seeding pass honours the deletion instead of resurrecting it. Recreating
-    the name clears the tombstone. Two of those seeds (``agent``, ``utility``)
-    are pinned by default, which is the only reason they need ``force``.
+    the name clears the tombstone. Of those seeds, ``agent`` is pinned by
+    default, which is the only reason it needs ``force``. Existing ``utility``
+    slots remain pinned by default as well.
     """
     sm = _get_slot_manager(request)
     # Snapshot before the delete so the composite refresh below knows which
