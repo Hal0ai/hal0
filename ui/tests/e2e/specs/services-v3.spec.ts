@@ -145,10 +145,16 @@ test.describe('Services v3 (/services)', () => {
     let urls: Record<string, unknown> = {
       api: 'http://hal0.example:8080',
       openwebui: 'http://hal0.example:3001', openwebui_ip: 'http://192.0.2.10:3001', openwebui_enabled: true,
-      hermes: '', hermes_enabled: false, comfyui: '', comfyui_ip: '',
+      hermes: 'https://hermes.example', hermes_enabled: true, comfyui: '', comfyui_ip: '',
     }
     await page.route('**/api/config/urls', (route) => json(route, urls))
-    await page.route('**/api/services', (route) => json(route, SERVICES_PAYLOAD))
+    const servicesPayload = {
+      ...SERVICES_PAYLOAD,
+      services: SERVICES_PAYLOAD.services.map((service) => service.id === 'hermes'
+        ? { ...service, url: 'http://wrong-host:9119' }
+        : service),
+    }
+    await page.route('**/api/services', (route) => json(route, servicesPayload))
     await page.addInitScript(() => {
       ;(window as any).__openedLinks = []
       window.open = ((url: string) => { (window as any).__openedLinks.push(url); return null }) as any
@@ -161,6 +167,10 @@ test.describe('Services v3 (/services)', () => {
     await expect(openwebui).toContainText('http://hal0.example:3001')
     await openwebui.getByTestId('svcp-open-openwebui').click()
     await expect.poll(() => page.evaluate(() => (window as any).__openedLinks)).toContain('http://hal0.example:3001')
+    const hermes = page.getByTestId('svcp-card-hermes')
+    await hermes.getByTestId('svcp-open-hermes').click()
+    await expect.poll(() => page.evaluate(() => (window as any).__openedLinks)).toContain('https://hermes.example')
+    await expect(hermes).not.toContainText('http://wrong-host:9119')
 
     urls = {
       api: 'https://hal0.example', openwebui: '', openwebui_ip: '', openwebui_enabled: true,
@@ -172,6 +182,7 @@ test.describe('Services v3 (/services)', () => {
     await expect(openwebui.getByTestId('svcp-openwebui-ip')).toHaveCount(0)
     await expect(openwebui.getByTestId('svcp-openwebui-hint')).toHaveText('Set HAL0_OPENWEBUI_PUBLIC_URL in /etc/hal0/api.env')
     await expect(openwebui).not.toContainText('http://hal0.local:3001')
+    await expect(hermes.getByTestId('svcp-open-hermes')).toHaveCount(0)
   })
 
   test('renders "source pending" when the endpoint is not available', async ({ page }) => {

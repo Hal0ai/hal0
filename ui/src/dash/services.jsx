@@ -277,17 +277,18 @@ function ServiceCard({ svc, onAction, busyId, actionMsg, component }) {
   const uptime = svc.up ? uptimeFrom(svc.unit_state?.since) : null
   const isComfy = svc.id === 'comfyui'
   const isOpenWebui = svc.id === 'openwebui'
+  const isHermes = svc.id === 'hermes'
   const configUrls = useConfigUrls().data
   const openwebuiUrl = configUrls?.openwebui_enabled ? configUrls.openwebui || '' : ''
   const openwebuiIp = openwebuiUrl ? configUrls?.openwebui_ip || '' : ''
+  const hermesUrl = configUrls?.hermes_enabled ? configUrls.hermes || '' : ''
   const openwebuiHint = isOpenWebui && configUrls?.openwebui_enabled && !openwebuiUrl && configUrls?.openwebui_reason === PROXY_NEEDS_PUBLIC_URL
     ? publicUrlHint('OPENWEBUI') : ''
-  // ComfyUI listens on the box's loopback only: its link, like the Image Gen pane's, opens from a
-  // page on the box and says how to reach it from anywhere else. Every other service links as the
-  // API gave it.
+  // ComfyUI's editor reach follows the Image Gen pane. OpenWebUI and Hermes use the canonical
+  // links from /api/config/urls; health and wiring remain sourced from /api/services.
   const editor = useEditorAccess()
   const comfyOffBox = isComfy && !editor.onBox
-  const serviceUrl = isComfy ? editor.url : isOpenWebui ? openwebuiUrl : svc.url
+  const serviceUrl = isComfy ? editor.url : isOpenWebui ? openwebuiUrl : isHermes ? hermesUrl : svc.url
 
   return (
     <div className={'svcp-card' + (svc.up ? ' svcp-card-up' : '')} data-testid={`svcp-card-${svc.id}`}>

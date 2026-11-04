@@ -17,6 +17,8 @@ export interface EditorAccess {
   url: string | null
   /** Server-provided direct IP fallback, when available. */
   ipUrl: string | null
+  /** Whether `/api/config/urls` supplied a primary URL, including off-box URLs. */
+  linkAvailable: boolean
   /** The command that forwards the editor's port here (for the page that is not on the box). */
   tunnel: string
   /**
@@ -34,11 +36,11 @@ export function useEditorAccess(): EditorAccess {
   const lan = urls?.comfyui_lan === true
   // hal0 sends no link behind a proxy without a declared URL: the page's host:8188 is the proxy's.
   if (urls?.comfyui_reason === PROXY_NEEDS_PUBLIC_URL) {
-    return { onBox: false, lan, url: null, ipUrl: null, tunnel: tunnelCommand(host), needsPublicUrl: publicUrlHint('COMFYUI') }
+    return { onBox: false, lan, url: null, ipUrl: null, linkAvailable: false, tunnel: tunnelCommand(host), needsPublicUrl: publicUrlHint('COMFYUI') }
   }
   const onBox = isOnBox(host, urls?.comfyui_public, lan)
 
 
-  return { onBox, lan, url: onBox ? link : null, ipUrl: onBox ? ipUrl : null, tunnel: tunnelCommand(host), needsPublicUrl: null }
+  return { onBox, lan, url: onBox ? link : null, ipUrl: onBox ? ipUrl : null, linkAvailable: Boolean(link), tunnel: tunnelCommand(host), needsPublicUrl: null }
 
 }

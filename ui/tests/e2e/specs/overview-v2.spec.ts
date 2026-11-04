@@ -179,7 +179,7 @@ test.describe('Overview v2 (#dashboard)', () => {
     let urls: Record<string, unknown> = {
       api: 'http://hal0.example:8080',
       openwebui: 'http://hal0.example:3001', openwebui_ip: 'http://192.0.2.10:3001', openwebui_enabled: true,
-      hermes: '', hermes_enabled: false,
+      hermes: 'https://hermes.example', hermes_enabled: true,
       comfyui: 'http://hal0.local:8188', comfyui_ip: 'http://192.0.2.10:8188', comfyui_lan: true, comfyui_public: false,
     }
     await page.route('**/api/config/urls', (route) => json(route, urls))
@@ -187,6 +187,7 @@ test.describe('Overview v2 (#dashboard)', () => {
       services: [
         { id: 'openwebui', name: 'OpenWebUI', managed: true, up: true, detail: 'reachable', url: 'http://wrong-host:3001' },
         { id: 'comfyui', name: 'ComfyUI', managed: true, up: true, detail: 'running', url: 'http://wrong-host:8188' },
+        { id: 'hermes', name: 'Hermes', managed: true, up: true, detail: 'running', url: 'http://wrong-host:9119' },
       ],
     }))
     await page.addInitScript(() => {
@@ -199,6 +200,8 @@ test.describe('Overview v2 (#dashboard)', () => {
     await expect(services.getByTestId('ov-svc-open-comfyui-ip')).toHaveAttribute('href', 'http://192.0.2.10:8188')
     await services.getByTestId('ov-svc-open-openwebui').click()
     await expect.poll(() => page.evaluate(() => (window as any).__openedLinks)).toContain('http://hal0.example:3001')
+    await services.getByTestId('ov-svc-open-hermes').click()
+    await expect.poll(() => page.evaluate(() => (window as any).__openedLinks)).toContain('https://hermes.example')
 
     urls = {
       api: 'https://hal0.example', openwebui: '', openwebui_ip: '', openwebui_enabled: true,
@@ -209,8 +212,24 @@ test.describe('Overview v2 (#dashboard)', () => {
     await expect(services.getByTestId('ov-svc-open-openwebui-hint')).toHaveText('Set HAL0_OPENWEBUI_PUBLIC_URL in /etc/hal0/api.env')
     await expect(services.getByTestId('ov-svc-open-comfyui-hint')).toHaveText('Set HAL0_COMFYUI_PUBLIC_URL in /etc/hal0/api.env')
     await expect(services.getByTestId('ov-svc-openwebui-ip')).toHaveCount(0)
-    await expect(services.getByTestId('ov-svc-open-comfyui')).toHaveAttribute('title', 'Set HAL0_COMFYUI_PUBLIC_URL in /etc/hal0/api.env')
+    await expect(services.getByTestId('ov-svc-open-comfyui')).toHaveCount(0)
     await expect(services.getByTestId('ov-svc-open-comfyui-ip')).toHaveCount(0)
+    await expect(services.getByTestId('ov-svc-open-hermes')).toHaveCount(0)
+  })
+
+  test('does not offer a ComfyUI launch action before config URLs are available', async ({ page }) => {
+    await seedSlots(page, idleBox())
+    await upToDate(page)
+    await page.route('**/api/config/urls', (route) => json(route, {}))
+    await page.route('**/api/services', (route) => json(route, {
+      services: [{ id: 'comfyui', name: 'ComfyUI', managed: true, up: true, detail: 'running', url: 'http://wrong-host:8188' }],
+    }))
+    await page.goto('/#dashboard')
+    const services = card(page, 'Services')
+    const comfyRow = services.locator('.ov-svc').filter({ hasText: 'comfyui' })
+    await expect(comfyRow).toBeVisible()
+    await expect(comfyRow).toContainText('running')
+    await expect(comfyRow.getByTestId('ov-svc-open-comfyui')).toHaveCount(0)
   })
 
   test('a box with no img slot has no Image engine card', async ({ page }) => {

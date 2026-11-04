@@ -44,9 +44,12 @@ export function OvServices({ onGo }) {
           const disabled = s.unit_state?.unit_file_state === 'disabled' || (!s.up && !s.managed)
           const isComfy = s.id === 'comfyui'
           const isOpenWebui = s.id === 'openwebui'
+          const isHermes = s.id === 'hermes'
           const openUrl = isComfy ? editor.url : isOpenWebui
             ? (configUrls?.openwebui_enabled ? configUrls.openwebui || null : null)
-            : s.url
+            : isHermes
+              ? (configUrls?.hermes_enabled ? configUrls.hermes || null : null)
+              : s.url
           const ipUrl = isComfy ? editor.ipUrl : isOpenWebui && openUrl
             ? configUrls?.openwebui_ip || null
             : null
@@ -55,7 +58,7 @@ export function OvServices({ onGo }) {
             : isOpenWebui && configUrls?.openwebui_enabled && !openUrl && configUrls?.openwebui_reason === PROXY_NEEDS_PUBLIC_URL
               ? publicUrlHint('OPENWEBUI')
             : null
-          const openable = s.up && (isComfy || Boolean(openUrl))
+          const openable = s.up && (isComfy ? (editor.onBox ? Boolean(editor.url) : editor.linkAvailable) : Boolean(openUrl))
           const wired = WIRED_KEYS.filter((k) => s.wired?.[k] === true)
           return (
             <div
