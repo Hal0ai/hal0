@@ -1949,10 +1949,8 @@ def test_resolve_auxiliary_tasks_never_renders_main_without_utility_slot() -> No
         assert aux[task]["base_url"] == _HAL0_V1
 
 
-def test_resolve_auxiliary_tasks_routes_to_npu_virtual_when_utility_on_npu() -> None:
-    # Utility role lives on the NPU slot (name 'npu', role not surfaced by
-    # /api/slots) and there is NO slot named 'utility'. Aux group degrades
-    # hal0/npu (the NPU virtual) so the gateway routes to the NPU slot.
+def test_resolve_auxiliary_tasks_shared_mode_uses_main_even_with_npu() -> None:
+    # Shared mode follows the configured agent target, not a ready NPU.
     slots = [
         _ROLE_SLOTS[0],  # chat
         {
@@ -1964,14 +1962,32 @@ def test_resolve_auxiliary_tasks_routes_to_npu_virtual_when_utility_on_npu() -> 
             "context_length": 18000,
         },
     ]
-    aux = hp._resolve_auxiliary_tasks(slots, hal0_base_url=_HAL0_V1)
+    aux = hp._resolve_auxiliary_tasks(slots, hal0_base_url=_HAL0_V1, extraction_slot="agent")
     for task in ("compression", "title_generation", "skills_hub", "mcp"):
         assert aux[task] == {
             "provider": "custom",
-            "model": "hal0/npu",
+            "model": "",
             "base_url": _HAL0_V1,
         }
     assert aux["vision"] == {"provider": "custom", "model": "", "base_url": _HAL0_V1}
+
+    upgraded = hp._resolve_auxiliary_tasks(
+        slots, hal0_base_url=_HAL0_V1, extraction_slot="utility"
+    )
+    assert upgraded["compression"]["model"] == "hal0/npu"
+
+
+def test_resolve_auxiliary_tasks_uses_bound_memory_when_cold() -> None:
+    slots = [
+        _ROLE_SLOTS[0],
+        {"name": "memory", "type": "llm", "state": "offline", "model_default": "memory-m"},
+        _ROLE_SLOTS[1],
+    ]
+    dedicated = hp._resolve_auxiliary_tasks(slots, hal0_base_url=_HAL0_V1, extraction_slot="memory")
+    shared = hp._resolve_auxiliary_tasks(slots, hal0_base_url=_HAL0_V1, extraction_slot="agent")
+    for task in ("compression", "title_generation", "skills_hub", "mcp"):
+        assert dedicated[task]["model"] == "hal0/memory"
+        assert shared[task]["model"] == ""
 
 
 def test_overlay_emits_delegation_and_auxiliary_keys() -> None:
@@ -2029,9 +2045,14 @@ def test_config_write_renders_role_slots_from_live_state(
     from hal0.agents import personas as _personas
 
     monkeypatch.setattr(_personas, "PERSONAS_ROOT", tmp_path / "personas-empty")
+    from hal0.config.schema import Hal0Config
+
+    old_box = Hal0Config()
+    old_box.memory.graph.extraction_slot = "utility"
     io = hp.InstallIO(
         fetch_slots=lambda: list(_ROLE_SLOTS),
         fetch_model_contexts=lambda: {},
+        load_config=lambda: old_box,
         run=fake_hermes_run(),
     )
     out = hp._phase_config_write(hp._StepCtx(state=state, io=io))

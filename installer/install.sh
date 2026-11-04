@@ -1488,7 +1488,7 @@ if [[ ! -f "${HAL0_TOML}" ]]; then
 # Validate:  hal0 config validate
 
 [meta]
-schema_version = 1
+schema_version = $("${PY}" -c 'from hal0.config.schema import CURRENT_SCHEMA_VERSION; print(CURRENT_SCHEMA_VERSION)')
 
 [slots]
 port_range_start = 8081
@@ -2581,7 +2581,7 @@ fi
 ui_step "Container slot seeds" "~1-2s"
 
 # ── Container slot seeds (A10) ────────────────────────────────────────────
-# Pre-populate /etc/hal0/slots/{flm,tts,rerank,utility,img,agent,brain,…}.toml
+# Pre-populate /etc/hal0/slots/{flm,tts,rerank,memory,img,agent,brain,…}.toml
 # if absent (the loop below is the single source of truth). Idempotent: never
 # overwrite an operator-edited file. Each slot is seeded unconditionally so
 # the dashboard can show its tile on any hal0 install; each gates on its own
@@ -2658,7 +2658,7 @@ slot_seed_tombstoned() {
 
 SEEDED_NEW_SLOTS=()
 SEEDED_EXISTING_SLOTS=0
-for seed_slot in flm tts rerank utility img agent brain qwen3tts coder embed; do
+for seed_slot in flm tts rerank memory img agent brain qwen3tts coder embed; do
     SLOT_TOML="${ETC_DIR}/slots/${seed_slot}.toml"
     SLOT_SRC="${REPO_ROOT}/installer/etc-hal0/slots/${seed_slot}.toml"
     if slot_seed_tombstoned "${seed_slot}"; then
@@ -2706,7 +2706,7 @@ if (( ${#SEEDED_NEW_SLOTS[@]} > 0 )); then
 fi
 
 # EXPECTED, NOT A BUG: the loop above closes gaps, so upgrading a box that
-# predates a curated slot ADDS it (most often `utility`, added after the
+# predates a curated slot ADDS it (for example `memory`, added after the
 # original seed set). A parallel boot-time closer does the same thing —
 # hal0.install.static_seeds.seed_static_slots, wired into hal0-api startup — so
 # the slot also appears after a plain service restart with no installer run.
@@ -3741,8 +3741,8 @@ smoke_structured_output() {
     #   * kwarg-ABSENT body — model + messages + response_format ONLY.
     #     Extra kwargs (temperature, max_tokens, …) mask template-branch
     #     differences between slot backends.
-    # hal0/utility is the canonical virtual alias (normalize/resolver.py):
-    # it routes to the cheap helper slot and falls back to the anchor, so
+    # hal0/agent is the canonical chat alias (normalize/resolver.py):
+    # it routes to the agent anchor, so
     # the probe works on any box with at least one loaded model.
     #
     # Returns 0 pass, 1 fail, 2 skipped, 3 timed out (curl exit 28: the model
@@ -3756,7 +3756,7 @@ smoke_structured_output() {
     # error is a failure, but sending the request would only retry its load.
     SMOKE_STRUCTURED_NOTE=""
     local body resp
-    body='{"model":"hal0/utility","messages":[{"role":"user","content":"Reply with only a JSON object of the form {\"ok\": true}."}],"response_format":{"type":"json_object"}}'
+    body='{"model":"hal0/agent","messages":[{"role":"user","content":"Reply with only a JSON object of the form {\"ok\": true}."}],"response_format":{"type":"json_object"}}'
     # KB-1 auth: same key discovery as the hindsight EnvironmentFile above —
     # a fresh open-LAN box has no api.env and needs no header.
     local -a auth=()
@@ -3765,8 +3765,8 @@ smoke_structured_output() {
         key="$(grep -oP '(?<=^HAL0_CLIENT_KEY=).*' /etc/hal0/api.env 2>/dev/null | head -1 || true)"
         [[ -n "${key}" ]] && auth=(-H "Authorization: Bearer ${key}")
     fi
-    # Which slot hal0/utility would land on, read from /api/slots without
-    # touching it. Mirrors resolve_chain: the first of utility, agent with a
+    # Which slot hal0/agent would land on, read from /api/slots without
+    # touching it. Mirrors resolve_chain: agent with a
     # bound model, else the first model-bound llm slot. Bound means the
     # configured model (model_default), which is what the resolver reads; a
     # row's model_id is the runtime snapshot and outlives a cleared binding.
@@ -3802,7 +3802,7 @@ if not bound:
     print("unbound")
     sys.exit(0)
 by_name = {str(s.get("name") or "").lower(): s for s in bound}
-slot = by_name.get("utility") or by_name.get("agent") or bound[0]
+slot = by_name.get("agent") or bound[0]
 state = str(slot.get("status") or slot.get("state") or "unknown").split()[0]
 if state == "error":
     verdict = "error"

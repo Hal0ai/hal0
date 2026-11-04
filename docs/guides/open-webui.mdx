@@ -190,13 +190,13 @@ client of hal0.
   session state. Clients that send `X-Hermes-Session-Id` or
   `X-Hermes-Session-Key` have both forwarded to Hermes.
 - **`/v1/responses` is not available** through hal0. Use chat completions.
-- **Titles, tags and follow-ups do not use the Hermes profile.** hal0 sets
-  Open WebUI's external task model to the `utility` slot
-  (`TASK_MODEL_EXTERNAL=utility`), so those calls never cost an agent turn.
-  If `utility` cannot stay loaded beside your chat slot, each title call
-  loads it, and the first message of every chat waits. To use another model,
-  edit `TASK_MODEL_EXTERNAL` in `/etc/hal0/openwebui.env`: hal0 keeps a hand
-  edit to it across re-renders. A task model chosen on Open WebUI's admin
+- **Titles, tags and follow-ups do not use the Hermes profile.** New installs
+  set `TASK_MODEL_EXTERNAL=hal0/agent`, so those calls use the agent slot.
+  Existing `openwebui.env` files keep their task model, including `utility`
+  on older boxes. To use another model, edit `TASK_MODEL_EXTERNAL` in
+  `/etc/hal0/openwebui.env`: hal0 keeps a hand edit across re-renders.
+  `hal0 doctor all` warns if that value names a slot that no longer exists.
+  A task model chosen on Open WebUI's admin
   screens does not survive a restart, because hal0 runs it with
   `ENABLE_PERSISTENT_CONFIG=False`.
 - **One chat is one Hermes session.** hal0 turns Open WebUI's chat id
