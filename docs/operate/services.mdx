@@ -190,11 +190,15 @@ WantedBy=multi-user.target
   Settings → Data → Memory, or `hal0 memory graph enable --slot|--model|--local`)
   is therefore a config write that applies at once and never restarts the
   engine. The drop-in also carries `HINDSIGHT_API_LLM_TIMEOUT` and the extraction
-  limits (`HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT`,
+  limits (`HINDSIGHT_API_LLM_MAX_CONCURRENT`, `HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT`,
   `HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS`,
   `HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES`, `HINDSIGHT_API_WORKER_MAX_RETRIES`,
   `HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS`, and the derived
-  `HINDSIGHT_API_RETAIN_WALL_TIMEOUT`). Changing one of those
+  `HINDSIGHT_API_RETAIN_WALL_TIMEOUT`). Both concurrency keys use the same
+  rendered `extraction_max_concurrent`, bounding consolidation, reflect and
+  mental-model refresh along with retain. At the default of one, a long
+  reflect or consolidation can delay retains until it finishes or reaches
+  `llm_timeout_s`. Changing one of those
   rewrites the file and restarts hindsight-api, and the first save after
   upgrading from a release that pinned a slot id there repairs the drop-in the
   same way. That drop-in lives under `/etc/systemd/system`
@@ -205,7 +209,7 @@ WantedBy=multi-user.target
   `propagation.error` and the engine keeps the drop-in it had —
   check `hal0 doctor` for the seam rows. The wrapper allow-lists the drop-in
   body on the root side: only `#` comments, a single `[Service]` header and
-  `Environment=` assignments of the seven keys above are accepted
+  `Environment=` assignments of the keys listed above are accepted
   (`HINDSIGHT_API_LLM_MODEL` must be a `hal0/<name>` value), so a
   hand-crafted fragment (`ExecStart=`, `User=`, any other directive) is
   rejected rather than written. Run

@@ -113,6 +113,19 @@ def test_live_gateway_body_is_accepted_byte_for_byte() -> None:
     _accepts("gateway", _gateway_dropin_body())
 
 
+@pytest.mark.parametrize("value", ["1", "8", "999999"])
+def test_global_hindsight_concurrency_accepts_bounded_integers(value: str) -> None:
+    _accepts("hindsight", f"[Service]\nEnvironment=HINDSIGHT_API_LLM_MAX_CONCURRENT={value}\n")
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", "-1", "1.5", "1000000", "$(id)", "1 LD_PRELOAD=/tmp/evil.so", '"1"', "1%u"],
+)
+def test_global_hindsight_concurrency_rejects_non_integer_payloads(value: str) -> None:
+    _rejects("hindsight", f"[Service]\nEnvironment=HINDSIGHT_API_LLM_MAX_CONCURRENT={value}\n")
+
+
 # ── the escalation payloads ────────────────────────────────────────────────
 
 _MODEL = "Environment=HINDSIGHT_API_LLM_MODEL=hal0/chat\n"

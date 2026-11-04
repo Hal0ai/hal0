@@ -158,6 +158,7 @@ def test_render_drop_in_carries_the_extraction_limits():
     from hal0.memory.extraction_env import ExtractionLimits
 
     out = render_drop_in()
+    assert "Environment=HINDSIGHT_API_LLM_MAX_CONCURRENT=1\n" in out
     assert "HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT=1" in out
     assert "HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS=16384" in out
     assert "HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES=1" in out
@@ -168,6 +169,7 @@ def test_render_drop_in_carries_the_extraction_limits():
         max_concurrent=2, max_tokens=8192, llm_retries=0, task_retries=5, retry_backoff_s=30
     )
     out = render_drop_in(limits=tuned)
+    assert "Environment=HINDSIGHT_API_LLM_MAX_CONCURRENT=2\n" in out
     assert "HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT=2" in out
     assert "HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS=8192" in out
     assert "HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES=0" in out
@@ -201,6 +203,25 @@ def test_drop_in_matches_sees_a_limits_change(monkeypatch, tmp_path: Path):
     path.write_text(render_drop_in(300), encoding="utf-8")
     assert drop_in_matches(300) is True
     assert drop_in_matches(300, limits=ExtractionLimits(max_concurrent=2)) is False
+
+
+def test_drop_in_matches_detects_retain_only_concurrency(monkeypatch, tmp_path: Path):
+    import hal0.memory.extraction_env as ee
+
+    path = tmp_path / "extraction-model.conf"
+    monkeypatch.setattr(ee, "DROP_IN_PATH", path)
+    current = render_drop_in()
+    path.write_text(
+        "".join(
+            line
+            for line in current.splitlines(keepends=True)
+            if not line.startswith("Environment=HINDSIGHT_API_LLM_MAX_CONCURRENT=")
+        ),
+        encoding="utf-8",
+    )
+    assert drop_in_matches() is False
+    path.write_text(current, encoding="utf-8")
+    assert drop_in_matches() is True
 
 
 def test_apply_threads_limits_into_drop_in_and_status(monkeypatch, tmp_path: Path):
@@ -939,8 +960,17 @@ def test_shipped_hindsight_unit_defaults_to_the_memory_alias():
     unit = Path(__file__).resolve().parents[2] / "installer" / "systemd" / "hindsight-api.service"
     models = re.findall(r"^Environment=HINDSIGHT_API_LLM_MODEL=(\S+)$", unit.read_text(), re.M)
     assert models == [MEMORY_ALIAS]
+    from hal0.config.schema import MemoryGraphConfig
+
+    default_concurrency = MemoryGraphConfig().extraction_max_concurrent
+    for name in ("HINDSIGHT_API_LLM_MAX_CONCURRENT", "HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT"):
+        values = re.findall(rf"^Environment={name}=(\d+)$", unit.read_text(), re.M)
+        assert values == [str(default_concurrency)]
     # …and it is the same line the drop-in writes, so the two never disagree.
     assert f"Environment=HINDSIGHT_API_LLM_MODEL={MEMORY_ALIAS}" in render_drop_in()
+    rendered = render_drop_in()
+    assert f"Environment=HINDSIGHT_API_LLM_MAX_CONCURRENT={default_concurrency}" in rendered
+    assert f"Environment=HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT={default_concurrency}" in rendered
 
 
 # ── retain wall limit (#3214) ──────────────────────────────────────────────
@@ -1018,13 +1048,17 @@ def test_reconcile_skips_a_box_without_a_drop_in(monkeypatch, tmp_path: Path):
     assert not drop_in.exists()
 
 
-def test_reconcile_rewrites_a_stale_cap_and_restarts(monkeypatch, tmp_path: Path):
+@pytest.mark.parametrize("stale_kind", ["token_cap", "retain_only"])
+def test_reconcile_rewrites_stale_limits_and_restarts(monkeypatch, tmp_path: Path, stale_kind):
     from hal0.memory.extraction_env import ExtractionLimits, reconcile_extraction_dropin
 
     drop_in = _redirect_drop_in(monkeypatch, tmp_path)
     _write_graph_config(monkeypatch, tmp_path, extraction_max_tokens=16384)
     drop_in.parent.mkdir(parents=True)
-    drop_in.write_text(render_drop_in(300, limits=ExtractionLimits(max_tokens=4096)))
+    stale = render_drop_in(300, limits=ExtractionLimits(max_tokens=4096))
+    if stale_kind == "retain_only":
+        stale = render_drop_in(300).replace("Environment=HINDSIGHT_API_LLM_MAX_CONCURRENT=1\n", "")
+    drop_in.write_text(stale)
     calls, run = _seam_recorder()
     seam = SystemCtlSeam(run=run, is_hal0_user=lambda: False)
 
@@ -1032,6 +1066,7 @@ def test_reconcile_rewrites_a_stale_cap_and_restarts(monkeypatch, tmp_path: Path
 
     assert result["status"] == "applied"
     assert "HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS=16384" in drop_in.read_text()
+    assert "Environment=HINDSIGHT_API_LLM_MAX_CONCURRENT=1\n" in drop_in.read_text()
     assert ["systemctl", "restart", "hindsight-api.service"] in [c[0] for c in calls]
 
 
