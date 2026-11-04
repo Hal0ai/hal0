@@ -826,13 +826,19 @@ export interface SlotResolved {
  */
 export function useSlotResolved(
   name: string | null | undefined,
-  options: { enabled?: boolean } = {},
+  options: { enabled?: boolean; flags?: string; profile?: string } = {},
 ) {
+  const { flags, profile } = options
+  const params = new URLSearchParams()
+  if (flags !== undefined) params.set('flags', flags)
+  if (profile !== undefined) params.set('profile', profile)
+  const query = params.toString()
   return useQuery<SlotResolved>({
-    queryKey: ['slot-resolved', name],
-    queryFn: () => apiGet<SlotResolved>(ENDPOINTS.slotResolved(name as string)),
+    queryKey: ['slot-resolved', name, profile, flags],
+    queryFn: () => apiGet<SlotResolved>(ENDPOINTS.slotResolved(name as string) + (query ? `?${query}` : '')),
     enabled: !!name && (options.enabled !== false),
     staleTime: 8_000,
+    refetchInterval: 8_000,
   })
 }
 

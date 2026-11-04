@@ -20,11 +20,12 @@ import { HALOGEN_DENIED, HALOGEN_KNOBS } from './fixtures/halogen-knobs'
 ;(globalThis as unknown as { Icons: unknown }).Icons = new Proxy({}, { get: () => null })
 ;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-const { profilesBox, modelsBox, sysBox, resolvedBox, updateGate, toasts, feasCalls, editCalls, restartCalls, createCalls, updateCalls } = vi.hoisted(() => ({
+const { profilesBox, modelsBox, sysBox, resolvedBox, resolvedCalls, updateGate, toasts, feasCalls, editCalls, restartCalls, createCalls, updateCalls } = vi.hoisted(() => ({
   profilesBox: { current: [] as Record<string, unknown>[] },
   sysBox: { current: { backends: {}, hardware: {} } as Record<string, unknown> },
   modelsBox: { current: [] as Record<string, unknown>[] },
   resolvedBox: { current: undefined as Record<string, unknown> | undefined },
+  resolvedCalls: [] as unknown[],
   // When set, a profile update stays in flight until this promise settles.
   updateGate: { current: null as Promise<void> | null },
   toasts: [] as string[],
@@ -54,7 +55,7 @@ vi.mock('@/api/hooks/useSlots', () => ({
   }),
   useSlotLoad: () => idle,
   useSlotSwap: () => idle,
-  useSlotResolved: () => ({ data: resolvedBox.current }),
+  useSlotResolved: (...args: unknown[]) => { resolvedCalls.push(args); return { data: resolvedBox.current } },
   useSlots: () => ({ data: [], isLoading: false }),
   useSlotRename: () => idle,
 }))
@@ -161,6 +162,7 @@ beforeEach(() => {
   profilesBox.current = [PROFILE]
   modelsBox.current = [MODEL]
   resolvedBox.current = undefined
+  resolvedCalls.length = 0
   sysBox.current = { backends: {}, hardware: {} }
   editCalls.length = 0
   restartCalls.length = 0
@@ -799,6 +801,14 @@ describe('slot drawer halogen memory readout', () => {
     sysBox.current = { backends: RUNNERS, hardware: { rocm: true } }
     profilesBox.current = [PROFILE, CUSTOM]
     modelsBox.current = [LLAMA_MODEL, HALO_MODEL]
+  })
+
+  it('previews the staged engine flags through the resolver', () => {
+    resolvedBox.current = resolvedWith(FOOTPRINT)
+    const { root } = mount(HALO_SLOT)
+    typeInto('engine-input-HALOGEN_KV_SLOTS', '8')
+    expect(resolvedCalls.some((args: any) => args[1]?.flags === 'HALOGEN_KV_SLOTS=8' && args[1]?.profile === 'halogen-chat')).toBe(true)
+    act(() => root.unmount())
   })
 
   it('states the layout, the advised cache, the free pool and the verdict', () => {

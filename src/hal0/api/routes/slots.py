@@ -1290,7 +1290,9 @@ async def get_slot_voices(name: str, request: Request) -> dict[str, object]:
 
 
 @router.get("/{name}/resolved")
-async def get_slot_resolved(name: str, request: Request) -> dict[str, object]:
+async def get_slot_resolved(
+    name: str, request: Request, flags: str | None = None, profile: str | None = None
+) -> dict[str, object]:
     """Return the resolved llama-server argv with per-flag provenance.
 
     The auditable single-source-of-truth view: the deduped command plus, for
@@ -1310,14 +1312,24 @@ async def get_slot_resolved(name: str, request: Request) -> dict[str, object]:
     sm = _get_slot_manager(request)
     cfg = await sm.get_config(name)
     detail = resolved_argv_detail_for_slot(cfg)
-    footprint = await _halogen_footprint(request, sm, name, cfg)
+    preview_profile = None
+    if flags is not None or profile is not None:
+        from hal0.providers.container import resolve_slot_profile
+
+        cfg = {**cfg, **({"profile": profile} if profile is not None else {})}
+        preview_profile = resolve_slot_profile(cfg)
+        if flags is not None:
+            from dataclasses import replace
+
+            preview_profile = replace(preview_profile, flags=flags)
+    footprint = await _halogen_footprint(request, sm, name, cfg, profile=preview_profile)
     if detail is None:
         return {"name": name, "argv": None, "provenance": [], "removed": 0, "footprint": footprint}
     return {"name": name, **detail, "footprint": footprint}
 
 
 async def _halogen_footprint(
-    request: Request, sm: SlotManager, name: str, cfg: dict[str, Any]
+    request: Request, sm: SlotManager, name: str, cfg: dict[str, Any], *, profile: Any = None
 ) -> dict[str, object] | None:
     """The drawer's memory readout for a halogen slot, else ``None``.
 
@@ -1353,6 +1365,7 @@ async def _halogen_footprint(
         state=_state,
         model_registry=getattr(request.app.state, "model_registry", None),
         sample_gpu=_sample_gpu,
+        profile=profile,
     )
 
 
