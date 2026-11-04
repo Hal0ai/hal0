@@ -158,10 +158,14 @@ export function restartDriftMessages(result: RestartSlotsResult): string[] {
 
 let restartToastId: number | null = null
 
+function clearRestartWarning() {
+  if (restartToastId !== null) useToastStore.getState().dismiss(restartToastId)
+  restartToastId = null
+}
+
 function showRestartWarning(message: string) {
-  const store = useToastStore.getState()
-  if (restartToastId !== null) store.dismiss(restartToastId)
-  restartToastId = store.push(message, 'warn', 0)
+  clearRestartWarning()
+  restartToastId = useToastStore.getState().push(message, 'warn', 0)
 }
 
 export function useRestartDriftedSlots() {
@@ -177,6 +181,7 @@ export function useRestartDriftedSlots() {
       showRestartWarning(`Could not restart drifted slots: ${error.message}`)
     },
     onSuccess: (result) => {
+      clearRestartWarning()
       const messages = restartDriftMessages(result)
       if (messages.length) {
         showRestartWarning(messages.join(' · '))

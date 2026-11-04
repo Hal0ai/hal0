@@ -130,6 +130,27 @@ test.describe('Post-update slot drift', () => {
     await expect(page.locator('.hal0-toast')).toHaveCount(1)
   })
 
+  for (const failure of ['request', 'partial'] as const) {
+    test(`clears a ${failure} warning after a successful retry`, async ({ page }) => {
+      await upToDate(page)
+      let attempts = 0
+      await page.route('**/api/updates/slot-drift', (route) => json(route, attempts >= 2 ? CLEAN : DRIFT))
+      await page.route('**/api/updates/restart-slots', (route) => {
+        attempts++
+        if (attempts === 1 && failure === 'request') return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'system.unavailable', message: 'service unavailable' } }) })
+        if (attempts === 1) return json(route, { restarted: [], failed: [{ slot: 'chat', error: 'unit failed' }], skipped_busy: [], skipped_render_error: [], count: 0 })
+        return json(route, { restarted: ['chat'], failed: [], skipped_busy: [], skipped_render_error: [], count: 1 })
+      })
+      await page.goto('/#dashboard')
+      const action = page.locator('.ov-att', { hasText: 'slots need restart' }).getByRole('button', { name: 'restart drifted slots' })
+      await action.click()
+      await expect(page.locator('.hal0-toast')).toContainText(failure === 'request' ? 'service unavailable' : 'unit failed')
+      await action.click()
+      await expect(page.locator('.hal0-toast')).toHaveCount(0)
+      await expect(page.locator('.ov-att', { hasText: 'slots need restart' })).toHaveCount(0)
+    })
+  }
+
   test('a clean box shows no drift anywhere', async ({ page }) => {
     await upToDate(page)
     await page.route('**/api/updates/slot-drift', (route) => json(route, CLEAN))

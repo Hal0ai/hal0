@@ -14,10 +14,12 @@ from hal0.api.routes.updater import restart_drifted
 async def test_restart_slots_result_matches_ui_type() -> None:
     sm = SimpleNamespace(
         list=AsyncMock(return_value=[SimpleNamespace(name="chat"), SimpleNamespace(name="brain")]),
-        compute_config_drift=AsyncMock(side_effect=[
-            {"drifted": True, "diffs": []},
-            {"drifted": True, "diffs": [], "render_error": "bad config"},
-        ]),
+        compute_config_drift=AsyncMock(
+            side_effect=[
+                {"drifted": True, "diffs": []},
+                {"drifted": True, "diffs": [], "render_error": "bad config"},
+            ]
+        ),
         restart=AsyncMock(side_effect=RuntimeError("unit failed")),
     )
     result = await restart_drifted(sm)
@@ -34,6 +36,9 @@ async def test_restart_slots_result_matches_ui_type() -> None:
         "count": "number",
     }
     assert result == {
-        "restarted": [], "failed": [{"slot": "chat", "error": "unit failed"}],
-        "skipped_busy": [], "skipped_render_error": ["brain"], "count": 0,
+        "restarted": [],
+        "failed": [{"slot": "chat", "error": "unit failed"}],
+        "skipped_busy": [],
+        "skipped_render_error": ["brain"],
+        "count": 0,
     }
