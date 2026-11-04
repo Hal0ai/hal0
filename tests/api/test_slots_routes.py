@@ -232,9 +232,7 @@ def test_list_slots_uses_binding_for_offline_model_id_but_keeps_loaded_model(
 
     path = slot_root / "chat.toml"
     path.write_text(
-        path.read_text(encoding="utf-8").replace(
-            'default = "qwen3-4b-q4_k_m"', 'default = ""'
-        ),
+        path.read_text(encoding="utf-8").replace('default = "qwen3-4b-q4_k_m"', 'default = ""'),
         encoding="utf-8",
     )
 
