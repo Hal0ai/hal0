@@ -1488,7 +1488,7 @@ if [[ ! -f "${HAL0_TOML}" ]]; then
 # Validate:  hal0 config validate
 
 [meta]
-schema_version = $("${PY}" -c 'from hal0.config.schema import CURRENT_SCHEMA_VERSION; print(CURRENT_SCHEMA_VERSION)')
+schema_version = $("${PY}" -I -c 'from hal0.config.schema import CURRENT_SCHEMA_VERSION; print(CURRENT_SCHEMA_VERSION)')
 
 [slots]
 port_range_start = 8081
