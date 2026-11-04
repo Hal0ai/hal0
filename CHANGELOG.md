@@ -38,6 +38,10 @@ applying. Add those subsections to a version's section to surface them; see
 
 - **`/mcp/*` accepts the box's own names by default.** The host allowlist of the MCP servers' DNS-rebinding guard defaulted to localhost only, so a remote MCP client calling the box by its address was refused. It now also carries every LAN address, the hostname, its mDNS `.local` name and the `[network].public_url` host, each bare and with the API port, on top of `HAL0_MCP_ALLOWED_HOSTS` (ADR-0043).
 
+### Fixed
+
+- **An exclusive bench session survives a canceled slot stop.** A slot that is reloaded while the bench takes the GPU (the dispatcher lazy-loading it, the memory extraction path re-rendering it) makes systemd cancel the window's stop job, and the window treated the cancellation as a failed stop: the whole session raised and every cell was recorded as failed with no measurement. The window now re-checks the unit's state after the stop, counts a unit that is already down as stopped, and retries the stop once for a unit that is still running — only a unit that keeps running aborts the session. (#3409)
+
 ## [1.7.1] — 2026-10-27
 
 ### Highlights
