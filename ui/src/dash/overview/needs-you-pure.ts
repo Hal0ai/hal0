@@ -49,7 +49,7 @@ export interface AttentionInput {
   notifications: NotificationItem[]
   diagnoses: DiagnosisRow[]
   failing: string[]
-  drift: { count: number; slots: string[] } | null
+  drift: { count: number; slots: string[]; renderErrors?: Array<{ slot: string; error: string }> } | null
   handlers?: AttentionHandlers
 }
 
@@ -71,7 +71,7 @@ function diagnosisItem(d: DiagnosisRow, h: AttentionHandlers): InboxItem | null 
   }
 }
 
-function driftItem(drift: { count: number; slots: string[] }, h: AttentionHandlers): InboxItem {
+function driftItem(drift: NonNullable<AttentionInput['drift']>, h: AttentionHandlers): InboxItem {
   const names = drift.slots.filter(Boolean).join(', ')
   return {
     key: 'drift',
@@ -80,7 +80,8 @@ function driftItem(drift: { count: number; slots: string[] }, h: AttentionHandle
     body:
       `${drift.count} slot${drift.count === 1 ? ' needs' : 's need'} restart` +
       (names ? ` — ${names}` : '') +
-      ', still running the pre-update launch command. Restarting briefly interrupts any in-flight request on those slots.',
+      ', still running the pre-update launch command. Restarting briefly interrupts any in-flight request on those slots.' +
+      (drift.renderErrors?.length ? ` Cannot render launch configuration: ${drift.renderErrors.map(({ slot, error }) => `${slot}: ${error}`).join('; ')}. Fix the configuration before restarting.` : ''),
     actions: [
       h.driftPending
         ? { label: 'restarting…', disabled: true, run: noop }

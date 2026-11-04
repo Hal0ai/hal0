@@ -92,6 +92,31 @@ test.describe('Post-update slot drift', () => {
     await expect(page.locator('.ov-att', { hasText: 'slots need restart' })).toHaveCount(0)
   })
 
+  for (const source of ['bell', 'overview'] as const) {
+    test(`${source} explains partial restart outcomes`, async ({ page }) => {
+      await upToDate(page)
+      await page.route('**/api/updates/slot-drift', (route) => json(route, {
+        count: 1, slots: [{ slot: 'brain', diffs: [], render_error: 'invalid tune key' }], auto_restart: null,
+      }))
+      await page.route('**/api/updates/restart-slots', (route) => json(route, {
+        restarted: ['ok'], count: 1, failed: [{ slot: 'chat', error: 'unit failed' }],
+        skipped_busy: ['embed'], skipped_render_error: ['brain'],
+      }))
+      await page.goto('/#dashboard')
+      await expect(page.locator('.ov-att', { hasText: 'slots need restart' })).toContainText('brain: invalid tune key')
+      if (source === 'bell') {
+        await page.getByTestId('tb-bell').click()
+        await page.getByTestId('notif-sec-updates').getByRole('button', { name: 'Restart' }).click()
+      } else {
+        await page.locator('.ov-att', { hasText: 'slots need restart' }).getByRole('button', { name: 'restart drifted slots' }).click()
+      }
+      const toast = page.locator('.hal0-toast', { hasText: 'Failed to restart chat: unit failed' })
+      await expect(toast).toContainText('Skipped busy slots: embed')
+      await expect(toast).toContainText('could not be rendered: brain')
+      if (source === 'overview') await page.screenshot({ path: 'test-results/slot-drift-outcomes.png', animations: 'disabled' })
+    })
+  }
+
   test('a clean box shows no drift anywhere', async ({ page }) => {
     await upToDate(page)
     await page.route('**/api/updates/slot-drift', (route) => json(route, CLEAN))
