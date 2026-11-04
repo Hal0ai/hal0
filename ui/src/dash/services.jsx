@@ -18,6 +18,8 @@ import { useUpdateJob } from '@/api/hooks/useUpdates'
 import { componentForService, componentCell, RETRYABLE_STATUSES } from './components-pure'
 import { EditorOffBox, EditorOpenButton } from './image/ComfyEditorLink'
 import { useEditorAccess } from './image/useEditorAccess'
+import { useConfigUrls } from '@/api/hooks/useConfigUrls'
+import { PROXY_NEEDS_PUBLIC_URL, publicUrlHint } from '@/api/publicUrlHint'
 
 const { useState, useEffect, useRef } = React
 
@@ -274,11 +276,18 @@ function ServiceCard({ svc, onAction, busyId, actionMsg, component }) {
   const busy = busyId === svc.id
   const uptime = svc.up ? uptimeFrom(svc.unit_state?.since) : null
   const isComfy = svc.id === 'comfyui'
+  const isOpenWebui = svc.id === 'openwebui'
+  const configUrls = useConfigUrls().data
+  const openwebuiUrl = configUrls?.openwebui_enabled ? configUrls.openwebui || '' : ''
+  const openwebuiIp = openwebuiUrl ? configUrls?.openwebui_ip || '' : ''
+  const openwebuiHint = isOpenWebui && configUrls?.openwebui_enabled && !openwebuiUrl && configUrls?.openwebui_reason === PROXY_NEEDS_PUBLIC_URL
+    ? publicUrlHint('OPENWEBUI') : ''
   // ComfyUI listens on the box's loopback only: its link, like the Image Gen pane's, opens from a
   // page on the box and says how to reach it from anywhere else. Every other service links as the
   // API gave it.
   const editor = useEditorAccess()
   const comfyOffBox = isComfy && !editor.onBox
+  const serviceUrl = isComfy ? editor.url : isOpenWebui ? openwebuiUrl : svc.url
 
   return (
     <div className={'svcp-card' + (svc.up ? ' svcp-card-up' : '')} data-testid={`svcp-card-${svc.id}`}>
@@ -291,10 +300,10 @@ function ServiceCard({ svc, onAction, busyId, actionMsg, component }) {
         </span>
         {isComfy ? (
           <EditorOpenButton testid="svcp-open-comfyui">{SIcons.ext}</EditorOpenButton>
-        ) : svc.url && (
+        ) : serviceUrl && (
           <button className="svc-btn" title={`Open ${svc.name}`}
             data-testid={`svcp-open-${svc.id}`}
-            onClick={() => window.open(svc.url, '_blank', 'noopener')}>
+            onClick={() => window.open(serviceUrl, '_blank', 'noopener')}>
             {SIcons.ext}
           </button>
         )}
@@ -302,12 +311,18 @@ function ServiceCard({ svc, onAction, busyId, actionMsg, component }) {
 
       <div className="svcp-desc">{svc.description}</div>
       <div className="svcp-detail">{svc.detail}{svc.stat ? ` · ${svc.stat.value} ${svc.stat.label}` : ''}</div>
+      {openwebuiHint && <div className="svcp-detail" role="note" data-testid="svcp-openwebui-hint">{openwebuiHint}</div>}
+      {isOpenWebui && openwebuiUrl && openwebuiIp && openwebuiIp !== openwebuiUrl && (
+        <a className="svcp-detail svcp-ip-link" data-testid="svcp-openwebui-ip" href={openwebuiIp} target="_blank" rel="noopener noreferrer">
+          Can't reach it? Try the IP link
+        </a>
+      )}
       {svc.wired && <WiredChips wired={svc.wired} />}
       {component && <ComponentVersionLine component={component} />}
 
       <div className="svcp-meta mono">
         {svc.unit && <span className="svcp-meta-row">unit <b>{svc.unit}</b> · {svc.unit_state?.active_state ?? 'unknown'}{svc.unit_state?.unit_file_state && svc.unit_state.unit_file_state !== 'unknown' ? ` · ${svc.unit_state.unit_file_state}` : ''}</span>}
-        {svc.url && !comfyOffBox && <span className="svcp-meta-row">url <b>{svc.url}</b></span>}
+        {serviceUrl && !comfyOffBox && <span className="svcp-meta-row">url <b>{serviceUrl}</b></span>}
         {svc.mdns_url && <span className="svcp-meta-row">mdns <b>{svc.mdns_url}</b></span>}
         {!svc.url && svc.loopback_port && <span className="svcp-meta-row">bind <b>127.0.0.1:{svc.loopback_port}</b> (loopback-only)</span>}
         {!svc.managed && <span className="svcp-meta-row svcp-unmanaged">external — not managed by hal0</span>}

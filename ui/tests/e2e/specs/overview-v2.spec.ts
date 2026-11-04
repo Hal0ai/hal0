@@ -173,6 +173,46 @@ function card(page: Page, title: string) {
 }
 
 test.describe('Overview v2 (#dashboard)', () => {
+  test('OpenWebUI and ComfyUI use config URLs on Overview, with IP alternatives and proxy hints', async ({ page }) => {
+    await seedSlots(page, idleBox())
+    await upToDate(page)
+    let urls: Record<string, unknown> = {
+      api: 'http://hal0.example:8080',
+      openwebui: 'http://hal0.example:3001', openwebui_ip: 'http://192.0.2.10:3001', openwebui_enabled: true,
+      hermes: '', hermes_enabled: false,
+      comfyui: 'http://hal0.local:8188', comfyui_ip: 'http://192.0.2.10:8188', comfyui_lan: true, comfyui_public: false,
+    }
+    await page.route('**/api/config/urls', (route) => json(route, urls))
+    await page.route('**/api/services', (route) => json(route, {
+      services: [
+        { id: 'openwebui', name: 'OpenWebUI', managed: true, up: true, detail: 'reachable', url: 'http://wrong-host:3001' },
+        { id: 'comfyui', name: 'ComfyUI', managed: true, up: true, detail: 'running', url: 'http://wrong-host:8188' },
+      ],
+    }))
+    await page.addInitScript(() => {
+      ;(window as any).__openedLinks = []
+      window.open = ((url: string) => { (window as any).__openedLinks.push(url); return null }) as any
+    })
+    await page.goto('/#dashboard')
+    const services = card(page, 'Services')
+    await expect(services.getByTestId('ov-svc-open-openwebui-ip')).toHaveAttribute('href', 'http://192.0.2.10:3001')
+    await expect(services.getByTestId('ov-svc-open-comfyui-ip')).toHaveAttribute('href', 'http://192.0.2.10:8188')
+    await services.getByTestId('ov-svc-open-openwebui').click()
+    await expect.poll(() => page.evaluate(() => (window as any).__openedLinks)).toContain('http://hal0.example:3001')
+
+    urls = {
+      api: 'https://hal0.example', openwebui: '', openwebui_ip: '', openwebui_enabled: true,
+      openwebui_reason: 'proxy_needs_public_url', hermes: '', hermes_enabled: false,
+      comfyui: '', comfyui_ip: '', comfyui_lan: true, comfyui_public: false, comfyui_reason: 'proxy_needs_public_url',
+    }
+    await page.reload()
+    await expect(services.getByTestId('ov-svc-open-openwebui-hint')).toHaveText('Set HAL0_OPENWEBUI_PUBLIC_URL in /etc/hal0/api.env')
+    await expect(services.getByTestId('ov-svc-open-comfyui-hint')).toHaveText('Set HAL0_COMFYUI_PUBLIC_URL in /etc/hal0/api.env')
+    await expect(services.getByTestId('ov-svc-openwebui-ip')).toHaveCount(0)
+    await expect(services.getByTestId('ov-svc-open-comfyui')).toHaveAttribute('title', 'Set HAL0_COMFYUI_PUBLIC_URL in /etc/hal0/api.env')
+    await expect(services.getByTestId('ov-svc-open-comfyui-ip')).toHaveCount(0)
+  })
+
   test('a box with no img slot has no Image engine card', async ({ page }) => {
     await seedSlots(page, idleBox())
     await upToDate(page)
