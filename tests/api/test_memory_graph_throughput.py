@@ -78,9 +78,13 @@ def _slot_manager() -> MagicMock:
 @pytest.fixture
 def hal0_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "hal0-home"
-    (home / "etc").mkdir(parents=True)
+    (home / "etc" / "hal0").mkdir(parents=True)
     (home / "var-lib").mkdir(parents=True)
-    (home / "etc" / "hal0.toml").write_text(tomli_w.dumps({"meta": {"schema_version": 1}}))
+    (home / "etc" / "hal0" / "hal0.toml").write_text(
+        tomli_w.dumps(
+            {"meta": {"schema_version": 3}, "memory": {"graph": {"extraction_slot": "utility"}}}
+        )
+    )
     monkeypatch.setenv("HAL0_HOME", str(home))
     return home
 

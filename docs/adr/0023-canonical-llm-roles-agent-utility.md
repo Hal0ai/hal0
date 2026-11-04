@@ -2,6 +2,10 @@
 
 ## Status
 
+Amended by [ADR-0053](0053-memory-slot-and-chat-priority.md) for the memory
+chain/default and the staged retirement of fresh utility seeding. Existing
+utility slots and explicitly stored extraction targets are preserved.
+
 **ACCEPTED.** Shipped in `v0.8.0-beta.3` (2026-06-23), per
 `CHANGELOG.md`: "Canonical LLM roles + Hindsight-native memory extraction
 (ADR-0023)." Unlike the other reconstructed ADRs in this tree, no

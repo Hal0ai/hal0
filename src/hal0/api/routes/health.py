@@ -96,13 +96,13 @@ async def _extraction_target_resolves(request: Request, provider: Any) -> bool |
     extraction_slot = getattr(provider, "extraction_slot", None)
     if not extraction_slot:
         return None
-    from hal0.api.routes.memory import _enabled_llm_slots
+    from hal0.api.routes.memory import _enabled_llm_slots, _extraction_slot_resolves
 
     try:
         available = await _enabled_llm_slots(request)
     except Exception:  # pragma: no cover — defensive, matches _enabled_llm_slots' own fail-soft
         return None
-    return extraction_slot in available
+    return _extraction_slot_resolves(extraction_slot, available)
 
 
 async def _memory_write_health(request: Request) -> dict[str, Any] | None:

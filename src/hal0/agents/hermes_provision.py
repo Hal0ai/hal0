@@ -8813,7 +8813,7 @@ def _memory_engine_ready(
     from it with its own LLM call to hal0's gateway as ``hal0/memory``
     (``installer/systemd/hindsight-api.service``). hal0 resolves that to the
     upstream ``[memory.graph].extraction_model`` when set, else to
-    ``hal0/<extraction_slot>`` (``utility`` by default, falling back to the
+    ``hal0/<extraction_slot>`` (``memory`` by default, falling back to the
     ``agent`` anchor when that slot has no model), and loads the slot if it is
     cold. So the probe runs when that call cannot reach a slot (memory off,
     the ``pgvector`` engine, which calls no model, an engine LLM pointed away

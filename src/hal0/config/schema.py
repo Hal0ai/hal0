@@ -102,7 +102,7 @@ _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # Schema version for migrations.  Bumped when a backwards-incompatible
 # config-shape change lands.  See PLAN.md §5 Tier 3.
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 4
 
 # Capabilities-file schema version. Independent of ``hal0.toml``'s
 # ``meta.schema_version``. v2 (since v0.2) means CapabilitySelection uses
@@ -2081,12 +2081,13 @@ class MemoryGraphConfig(BaseModel):
         ),
     )
     extraction_slot: str = Field(
-        default="utility",
+        default="memory",
         description=(
             "The local llm slot Hindsight uses for graph extraction / "
             "consolidation / reflect while extraction_model is unset. hindsight-api "
             "calls the fixed id hal0/memory; hal0's /v1 resolves it to this slot "
-            "per call, so a change needs no engine restart. Validated against the "
+            "per call, falling back to agent when memory has no bound model "
+            "(ADR-0053), so a change needs no engine restart. Validated against the "
             "live enabled-llm-slot set by the API at set-time."
         ),
     )
@@ -2634,11 +2635,27 @@ class MemoryEmbeddingConfig(BaseModel):
         return v
 
 
+class MemoryPriorityConfig(BaseModel):
+    """[memory.priority] shared-memory scheduling settings (ADR-0053).
+
+    Config contract only: request admission and preemption are implemented
+    separately. Upgrades explicitly opt out via migration v4.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    enabled: bool = Field(default=True, description="Enable shared-memory chat priority.")
+    quiet_gap_s: int = Field(default=30, ge=0, description="Quiet time after chat, in seconds.")
+    max_defer_s: int = Field(
+        default=300, ge=0, description="Starvation admission threshold, in seconds."
+    )
+
+
 class MemoryConfig(BaseModel):
     """[memory] section of hal0.toml.
 
     Container for the per-subsystem memory tunables. Today carries
-    ``[memory.graph]`` and ``[memory.embedding]`` (issue #116).
+    ``[memory.graph]``, ``[memory.embedding]`` and ``[memory.priority]``.
     Future memory features (retention, prune-policy, archival) land under a
     single namespace rather than scattering top-level tables.
     """
@@ -2656,6 +2673,7 @@ class MemoryConfig(BaseModel):
         ),
     )
     graph: MemoryGraphConfig = Field(default_factory=MemoryGraphConfig)
+    priority: MemoryPriorityConfig = Field(default_factory=MemoryPriorityConfig)
     embedding: MemoryEmbeddingConfig = Field(default_factory=MemoryEmbeddingConfig)
     unified_bank: bool = Field(
         default=True,
@@ -3744,6 +3762,7 @@ __all__ = [
     "MemoryConfig",
     "MemoryEmbeddingConfig",
     "MemoryGraphConfig",
+    "MemoryPriorityConfig",
     "MetaConfig",
     "ModelConfig",
     "ModelsConfig",

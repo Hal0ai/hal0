@@ -3478,13 +3478,14 @@ _WARM_SLOTS = [_slot_row("agent", "ready", "m1"), _slot_row("utility", "ready", 
 
 
 def _memory_cfg(**graph: Any) -> Any:
-    """A ``load_config()`` stand-in carrying just the ``[memory]`` table."""
+    """An upgraded utility-based box carrying just the ``[memory]`` table."""
     from types import SimpleNamespace
 
     from hal0.config.schema import MemoryGraphConfig
 
     engine = graph.pop("engine", "hindsight")
     enabled = graph.pop("enabled", True)
+    graph.setdefault("extraction_slot", "utility")
     return SimpleNamespace(
         memory=SimpleNamespace(enabled=enabled, engine=engine, graph=MemoryGraphConfig(**graph))
     )
@@ -3503,8 +3504,8 @@ def _box_io(
 ) -> hp.InstallIO:
     """``InstallIO`` for a box whose hal0-api answers its slot list with
     ``(status, rows)``, whose memory engine calls ``hal0/memory`` on the
-    gateway (unless ``engine_llm`` says otherwise), and whose ``[memory]`` is
-    the schema default (unless ``memory``). Each slot's detail reports no
+    gateway (unless ``engine_llm`` says otherwise), and whose ``[memory]`` keeps
+    an upgraded utility target (unless ``memory``). Each slot's detail reports no
     pending config change unless it is named in ``drifted``; ``detail``
     replaces the detail answer outright. ``calls`` records each slot-list read
     (``"slots"``) and detail read (``"detail:<name>"``)."""
@@ -3890,7 +3891,7 @@ def test_virtual_anchor_with_no_live_slot_still_skips(
         hp, "_smoke_chat_completions", lambda s, io: pytest.fail("probe must not run")
     )
     state = hp.BootstrapState(hermes_home=str(hh))
-    out = hp._phase_smoke_tests(hp._StepCtx(state=state))
+    out = hp._phase_smoke_tests(hp._StepCtx(state=state, io=hp.InstallIO(load_config=_memory_cfg)))
     assert out.details["results"]["chat_completions"]["skipped"] is True
     assert "slot agent is offline" in out.details["results"]["chat_completions"]["detail"]
     assert {s.split(":")[0] for s in out.details["skipped"]} == {
@@ -4472,7 +4473,7 @@ def test_is_gateway_base_url(url: str, expected: bool) -> None:
 class TestMemoryEngineGate:
     """memory_roundtrip's ``memory_add`` makes hindsight extract with its own
     LLM call to ``hal0/memory`` on the gateway, which loads the extraction slot
-    (``utility`` by default, the agent anchor when utility has no model) if it
+    (the configured ``utility``, or agent when utility has no model) if it
     is cold. The REAL probe runs against a recording memory seam, so any
     attempt shows in ``calls``."""
 

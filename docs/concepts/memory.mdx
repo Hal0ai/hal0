@@ -247,6 +247,29 @@ text isn't offered — an id the gateway can't resolve just makes every recall
 fail soft to vector-only ordering. The picker links out to Settings →
 Capabilities, where the underlying `rerank` slot itself is configured.
 
+## Memory mode and priority settings
+
+`GET /api/memory/graph/status` reports one configured `mode`:
+
+- `dedicated`: `[memory.graph].extraction_slot = "memory"`, with a model bound
+  to the memory slot and no upstream `extraction_model`.
+- `shared`: the memory slot has no model bound, or extraction explicitly targets
+  `agent`, even if memory still has a model bound.
+- `custom`: extraction targets any other slot (including `utility`) or an upstream
+  `extraction_model`. Reading status never rewrites these settings.
+
+Binding defines dedicated mode independently of whether the slot is ready.
+`slot_resolves` and memory write-health checks also recognize the memory-to-agent
+fallback, so an empty memory slot with a bound agent is routable.
+
+`[memory.priority]` declares `enabled = true`, `quiet_gap_s = 30`, and
+`max_defer_s = 300` for fresh configurations. Config migration v4 disables
+priority on upgrades when `enabled` is absent, including a partially configured
+table, and preserves explicit values. These are configuration keys only in
+this stage; chat-priority admission and cancellation are follow-up work.
+See [ADR-0053](https://github.com/Hal0ai/hal0/blob/main/docs/adr/0053-memory-slot-and-chat-priority.md) for the accepted
+design and remaining validation.
+
 ## Graph extraction
 
 Storing facts is one thing; running an LLM over them to build a knowledge
@@ -258,8 +281,12 @@ even on a fresh install, under `[memory.graph]`:
   **not** cancel in-flight extraction or stop the daemon — Hindsight keeps
   extracting either way; the flag only controls how hal0 labels and routes
   it.
-- `extraction_slot` (default `"utility"`) — the local `type=llm` slot
-  Hindsight's extraction/consolidation/reflect calls are routed to.
+- `extraction_slot` (default `"memory"`) — the local `type=llm` slot
+  Hindsight's extraction/consolidation/reflect calls are routed to. With the
+  default, `hal0/memory` resolves through `(memory, agent)`; an absent or
+  model-less memory slot shares agent, and a bound memory slot is loaded on
+  demand. Upgrades retain explicit targets; migration v4 writes `"utility"`
+  when this setting was missing.
 - `extraction_model` (default unset) — an upstream model id hal0's `/v1`
   routes (an OpenRouter or MiniMax id, for example). When set, the engine
   runs on it instead of the slot. Hindsight always calls the one virtual id

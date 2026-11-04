@@ -74,6 +74,7 @@ _EXPECTED_EXTRA_POLICY: dict[str, str] = {
     # Deliberate silent-drop of retired keys -> ignore
     "MemoryGraphConfig": "ignore",
     "MemoryEmbeddingConfig": "ignore",
+    "MemoryPriorityConfig": "forbid",
     # Leaf tunables / entries with no legitimate unknown key -> forbid
     "NpuConfig": "forbid",
     "ImageGenConfig": "forbid",

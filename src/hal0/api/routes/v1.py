@@ -39,7 +39,13 @@ from fastapi.responses import Response, StreamingResponse
 from hal0.api import image_cache, live_sockets
 from hal0.api.deps import DispatcherDep
 from hal0.dispatcher._capability_resolve import select_slot_by_type
-from hal0.dispatcher.lane_pin import lane_slot_pin, preferred_slot, set_lane_pin, set_upstream_only
+from hal0.dispatcher.lane_pin import (
+    MEMORY_REQUEST_ATTR,
+    lane_slot_pin,
+    preferred_slot,
+    set_lane_pin,
+    set_upstream_only,
+)
 from hal0.dispatcher.stream_usage import ensure_include_usage, strip_usage_only_chunk
 from hal0.memory.extraction_env import MEMORY_ALIAS
 from hal0.slots.abandon import ClientGoneProbe, abandon_probe
@@ -705,6 +711,7 @@ async def _normalize_chat_body(request: Request, body: dict[str, Any]) -> dict[s
     pinned: str | None = None
     upstream_only = False
     if raw_model == MEMORY_ALIAS:
+        setattr(request.state, MEMORY_REQUEST_ATTR, True)
         # #2919: the memory engine's one fixed id. A slot target continues
         # below exactly as ``hal0/<extraction_slot>`` would; an upstream
         # target becomes that id as-is — no slot lookup, no lane pin, no slot
