@@ -1,4 +1,4 @@
-"""Tests for the ADR-0015 ``hal0 mcp`` verbs: test/allow/gate/block/expose/add/remove.
+"""Tests for the ADR-0015 ``hal0 mcp`` verbs: test/allow/gate/block/expose.
 
 Pins each command's request shape (path, method, body) against the API
 surface added in :mod:`hal0.api.routes.mcp` — a mismatched field name
@@ -237,21 +237,12 @@ def test_expose_no_flags_dies(api: dict[str, Any]) -> None:
     assert not api["patches"]
 
 
-# ── `hal0 mcp add` / `hal0 mcp remove` (aliases) ─────────────────────────────
+# ── `hal0 mcp add` / `hal0 mcp remove` are gone (#2864) ──────────────────────
 
 
-def test_add_is_install_alias(api: dict[str, Any]) -> None:
-    api["post_response"] = {"installed": {"id": "github", "name": "GitHub", "tools": 3}}
-    result = runner.invoke(mcp_commands.app, ["add", "npm:@modelcontextprotocol/server-github"])
-    assert result.exit_code == 0, result.output
-    assert api["posts"] == [
-        ("/api/mcp/install", {"url": "npm:@modelcontextprotocol/server-github"})
-    ]
-    assert "installed" in result.output
-
-
-def test_remove_is_uninstall_alias(api: dict[str, Any]) -> None:
-    api["delete_response"] = {"uninstalled": "github"}
-    result = runner.invoke(mcp_commands.app, ["remove", "github", "--force"])
-    assert result.exit_code == 0, result.output
-    assert api["deletes"] == ["/api/mcp/github"]
+@pytest.mark.parametrize("verb", ["add", "remove"])
+def test_add_remove_are_not_commands(api: dict[str, Any], verb: str) -> None:
+    result = runner.invoke(mcp_commands.app, [verb, "github"])
+    assert result.exit_code == 2
+    assert not api["posts"]
+    assert not api["deletes"]
