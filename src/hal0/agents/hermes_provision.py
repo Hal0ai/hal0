@@ -7294,7 +7294,10 @@ def _resolve_auxiliary_tasks(
     else:
         auxiliary_slot = "utility"
     role_map = resolve_role_slots(
-        "hermes", candidates, auxiliary_slot=auxiliary_slot, npu_fallback=auxiliary_slot == "utility"
+        "hermes",
+        candidates,
+        auxiliary_slot=auxiliary_slot,
+        npu_fallback=auxiliary_slot == "utility",
     )
     by_role = {entry.role: entry for entry in role_map.entries}
     task_roles = {

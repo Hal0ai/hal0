@@ -1971,9 +1971,7 @@ def test_resolve_auxiliary_tasks_shared_mode_uses_main_even_with_npu() -> None:
         }
     assert aux["vision"] == {"provider": "custom", "model": "", "base_url": _HAL0_V1}
 
-    upgraded = hp._resolve_auxiliary_tasks(
-        slots, hal0_base_url=_HAL0_V1, extraction_slot="utility"
-    )
+    upgraded = hp._resolve_auxiliary_tasks(slots, hal0_base_url=_HAL0_V1, extraction_slot="utility")
     assert upgraded["compression"]["model"] == "hal0/npu"
 
 
