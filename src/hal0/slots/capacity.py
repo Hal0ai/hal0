@@ -256,7 +256,9 @@ def provider_footprint_mb(
         hook = getattr(provider, "footprint_mb", None)
         if hook is None:
             return None
-        mb = hook(model_info, slot_cfg, profile if profile is not None else resolve_slot_profile(slot_cfg))
+        mb = hook(
+            model_info, slot_cfg, profile if profile is not None else resolve_slot_profile(slot_cfg)
+        )
     except Hal0Error as exc:
         log.debug("capacity.provider_footprint_refused: %s", exc)
         return None

@@ -193,10 +193,15 @@ test.describe('slot drawer profile row (ADR-0029)', () => {
     } }
     const resolvedUrls: string[] = []
     let verdict = 'fits'
+    let releaseDraftResponse!: () => void
+    const draftResponse = new Promise<void>(resolve => { releaseDraftResponse = resolve })
     await page.route('**/api/system-info', route => json(route, systemInfo))
     await mockProfiles(page, [profile])
     await page.route('**/api/slots/flash/resolved*', async route => {
       resolvedUrls.push(route.request().url())
+      if (route.request().url().includes('flags=HALOGEN_KV_POOL_POSITIONS%3D524288')) {
+        await draftResponse
+      }
       await json(route, { name: 'flash', argv: null, provenance: [], removed: 0,
         footprint: { resident_mb: 72 * 1024, advisory_cache_mb: 10 * 1024, host_free_mb: 108 * 1024, verdict } })
     })
@@ -205,11 +210,19 @@ test.describe('slot drawer profile row (ADR-0029)', () => {
     await expect(page.getByTestId('slot-engine-footprint-verdict')).toHaveText('fits')
     await page.getByTestId('engine-input-HALOGEN_KV_POOL_POSITIONS').fill('524288')
     await expect.poll(() => resolvedUrls.some(url => url.includes('flags=HALOGEN_KV_POOL_POSITIONS%3D524288'))).toBe(true)
+    await expect(page.getByTestId('slot-engine-footprint')).toBeVisible()
+    await expect(page.getByTestId('slot-engine-footprint-verdict')).toHaveText('fits')
+    releaseDraftResponse()
     const requestsAfterDraft = resolvedUrls.length
     verdict = 'loaded'
     await expect.poll(() => resolvedUrls.length, { timeout: 12_000 }).toBeGreaterThan(requestsAfterDraft)
     await expect(page.getByTestId('slot-engine-footprint-verdict')).toHaveText('loaded')
     await expect(page.getByTestId('engine-input-HALOGEN_KV_POOL_POSITIONS')).toHaveValue('524288')
+    await page.getByTestId('engine-input-HALOGEN_KV_POOL_POSITIONS').fill('1')
+    await expect(page.getByTestId('pf-engine-error')).toBeVisible()
+    await expect(page.getByTestId('slot-engine-footprint')).toBeVisible()
+    await expect(page.getByTestId('slot-engine-footprint-verdict')).toHaveText('loaded')
+    await page.getByTestId('engine-input-HALOGEN_KV_POOL_POSITIONS').fill('524288')
     await page.getByTestId('slot-engine-footprint').scrollIntoViewIfNeeded()
     await page.screenshot({ path: 'test-results/slot-memory-readout.png', fullPage: true })
   })
