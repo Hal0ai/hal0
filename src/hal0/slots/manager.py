@@ -2643,6 +2643,18 @@ class SlotManager:
                 # #2715: an offline slot keeps a stale ``model_id`` from its
                 # last load; it is not serving anything, so don't claim it is.
                 meta["message"] = no_model_assigned_message(slot_name)
+        # The state record intentionally retains the last loaded model across
+        # transitions. Keep exposing that id while the container is loaded,
+        # because it still describes what is being served, but let the current
+        # TOML binding own the API field once an unassigned slot is offline.
+        model_id = rec.model_id
+        if (
+            cfg
+            and observed == SlotState.OFFLINE
+            and not _model_default(cfg)
+            and provider_requires_model(provider)
+        ):
+            model_id = None
         # The GTT-leak suspicion is the load's own message while the slot is
         # still coming up (the case it explains: a start that hangs reserving
         # the KV pool); any message already set — an error, a missing model —
@@ -2666,7 +2678,7 @@ class SlotManager:
                 name=slot_name,
                 state=observed,
                 port=rec.port,
-                model_id=rec.model_id,
+                model_id=model_id,
                 backend=backend,
                 metadata=meta,
                 last_used_at=self._last_used.get(self._key(slot_name)),
