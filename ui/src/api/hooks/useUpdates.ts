@@ -6,7 +6,7 @@
 
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { apiGet, apiPost, apiPut } from '../client'
+import { apiGet, apiPost, apiPut, Hal0Error } from '../client'
 import { ENDPOINTS } from '../endpoints'
 import { useToastStore } from '@/stores/useToastStore'
 
@@ -156,6 +156,14 @@ export function restartDriftMessages(result: RestartSlotsResult): string[] {
   return messages
 }
 
+let restartToastId: number | null = null
+
+function showRestartWarning(message: string) {
+  const store = useToastStore.getState()
+  if (restartToastId !== null) store.dismiss(restartToastId)
+  restartToastId = store.push(message, 'warn', 0)
+}
+
 export function useRestartDriftedSlots() {
   const qc = useQueryClient()
   return useMutation({
@@ -164,10 +172,14 @@ export function useRestartDriftedSlots() {
         ENDPOINTS.updateRestartSlots,
         slots && slots.length ? { slots } : {},
       ),
+    onError: (error) => {
+      if (error instanceof Hal0Error && error.status === 401 && error.code === 'auth.required') return
+      showRestartWarning(`Could not restart drifted slots: ${error.message}`)
+    },
     onSuccess: (result) => {
       const messages = restartDriftMessages(result)
       if (messages.length) {
-        useToastStore.getState().push(messages.join(' · '), 'warn', 0)
+        showRestartWarning(messages.join(' · '))
       }
       qc.invalidateQueries({ queryKey: ['updates', 'slot-drift'] })
       qc.invalidateQueries({ queryKey: ['slots'] })

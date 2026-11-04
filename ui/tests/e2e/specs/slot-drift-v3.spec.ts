@@ -106,6 +106,8 @@ test.describe('Post-update slot drift', () => {
       await expect(page.locator('.ov-att', { hasText: 'slots need restart' })).toContainText('brain: invalid tune key')
       if (source === 'bell') {
         await page.getByTestId('tb-bell').click()
+        await expect(page.getByTestId('notif-sec-updates')).toContainText('brain: invalid tune key')
+        await page.screenshot({ path: 'test-results/slot-drift-bell.png', animations: 'disabled' })
         await page.getByTestId('notif-sec-updates').getByRole('button', { name: 'Restart' }).click()
       } else {
         await page.locator('.ov-att', { hasText: 'slots need restart' }).getByRole('button', { name: 'restart drifted slots' }).click()
@@ -116,6 +118,17 @@ test.describe('Post-update slot drift', () => {
       if (source === 'overview') await page.screenshot({ path: 'test-results/slot-drift-outcomes.png', animations: 'disabled' })
     })
   }
+
+  test('reports a failed restart request', async ({ page }) => {
+    await upToDate(page)
+    await page.route('**/api/updates/slot-drift', (route) => json(route, DRIFT))
+    await page.route('**/api/updates/restart-slots', (route) => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'system.unavailable', message: 'service unavailable' } }) }))
+    await page.goto('/#dashboard')
+    await page.locator('.ov-att', { hasText: 'slots need restart' }).getByRole('button', { name: 'restart drifted slots' }).click()
+    await expect(page.locator('.hal0-toast')).toContainText('service unavailable')
+    await page.locator('.ov-att', { hasText: 'slots need restart' }).getByRole('button', { name: 'restart drifted slots' }).click()
+    await expect(page.locator('.hal0-toast')).toHaveCount(1)
+  })
 
   test('a clean box shows no drift anywhere', async ({ page }) => {
     await upToDate(page)
