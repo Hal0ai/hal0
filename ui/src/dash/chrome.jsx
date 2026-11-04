@@ -183,7 +183,7 @@ function NotificationBell() {
   // One shared source for every "needs the operator's eye" signal.
   const {
     approvals, errorSlots, activePulls, failedPulls,
-    hasUpdate, hal0Ch, driftCount,
+    hasUpdate, hal0Ch, driftCount, driftErrors,
     updatableModels, updateAllModels,
     devMsgs, clearJob, restartDrifted,
     count,
@@ -319,6 +319,7 @@ function NotificationBell() {
             <span className="notif-dot" style={{ background: "var(--warn)" }} />
             <span className="notif-msg">
               {driftCount} slot{driftCount !== 1 ? "s" : ""} running a pre-update config — restart to apply
+              {driftErrors && <>. Cannot render launch configuration: {driftErrors}. Fix the configuration before restarting.</>}
             </span>
             <button
               className="notif-act"

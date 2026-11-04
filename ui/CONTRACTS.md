@@ -288,3 +288,10 @@ flat task list the hook buckets by `status`). Empty board ⇒ all 8 lanes render
 ## Acceptance
 - Pixel parity vs the kanban board prototype.
 - `npm run typecheck` + Playwright E2E green; every SPEC §5 feature covered in multiple shapes.
+
+### Post-update slot drift
+
+- `GET /api/updates/slot-drift` may include `render_error` on a slot; show the reason.
+- `POST /api/updates/restart-slots` returns `restarted`, `failed` (slot and error),
+  `skipped_busy`, `skipped_render_error`, and `count`. Report unsuccessful outcomes
+  even when other slots restarted.
