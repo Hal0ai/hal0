@@ -5,7 +5,7 @@
 
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
 import { PROXY_NEEDS_PUBLIC_URL, publicUrlHint } from '@/api/publicUrlHint'
-import { EDITOR_PORT, isOnBox, tunnelCommand } from './editor-reach'
+import { isOnBox, tunnelCommand } from './editor-reach'
 
 export interface EditorAccess {
   /** The editor can be opened from this page. */
