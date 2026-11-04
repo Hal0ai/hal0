@@ -1242,8 +1242,11 @@ async def delete_slot(
     like any other slot, and deleting one writes a tombstone so the boot-time
     seeding pass honours the deletion instead of resurrecting it. Recreating
     the name clears the tombstone. Of those seeds, ``agent`` is pinned by
-    default, which is the only reason it needs ``force``. Existing ``utility``
-    slots remain pinned by default as well.
+    default, which is the only reason it needs ``force``. An existing
+    ``utility`` slot stays pinned the same way — through the default anchor
+    set (``agent``/``utility``/``npu``) that
+    :func:`hal0.slots.reaper.is_pinned` applies when the slot's own ``pinned``
+    key is absent. ``SlotConfig.pinned`` itself defaults to ``False``.
     """
     sm = _get_slot_manager(request)
     # Snapshot before the delete so the composite refresh below knows which

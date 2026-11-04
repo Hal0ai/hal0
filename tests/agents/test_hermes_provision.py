@@ -1988,6 +1988,58 @@ def test_resolve_auxiliary_tasks_uses_bound_memory_when_cold() -> None:
         assert shared[task]["model"] == ""
 
 
+def test_resolve_auxiliary_tasks_memory_lane_uses_the_slot_name() -> None:
+    # The memory lane is addressed by SLOT NAME: `hal0/<name>` resolves by
+    # name (normalize.resolver._slot_matches_name). A slot whose display
+    # label differs from its name must still get a lane id that names a
+    # real slot.
+    slots = [
+        _ROLE_SLOTS[0],
+        {
+            "name": "memory",
+            "label": "Long-term memory",
+            "role_hint": "memory",
+            "type": "llm",
+            "state": "offline",
+            "model_default": "memory-m",
+        },
+    ]
+    aux = hp._resolve_auxiliary_tasks(slots, hal0_base_url=_HAL0_V1, extraction_slot="memory")
+
+    for task in ("compression", "title_generation", "skills_hub", "mcp"):
+        assert aux[task]["model"] == "hal0/memory"
+
+
+def test_resolve_auxiliary_tasks_keeps_the_npu_lane_when_memory_is_unbound() -> None:
+    # A fresh install seeds the memory slot UNBOUND (no [model].default),
+    # and the configured extraction slot is "memory". The aux task has no
+    # dedicated slot to land on, so it must still reach the NPU virtual
+    # lane instead of dropping to the main chat model.
+    slots = [
+        _ROLE_SLOTS[0],
+        _ROLE_SLOTS[1],
+        {
+            "name": "memory",
+            "type": "llm",
+            "state": "offline",
+            "model_id": "",
+        },
+        {
+            "name": "flm",
+            "type": "llm",
+            "state": "ready",
+            "device_class": "npu",
+            "model_id": "gemma4-it:e2b",
+            "backend_url": "http://127.0.0.1:8001/v1",
+            "context_length": 18000,
+        },
+    ]
+    aux = hp._resolve_auxiliary_tasks(slots, hal0_base_url=_HAL0_V1, extraction_slot="memory")
+
+    for task in ("compression", "title_generation", "skills_hub", "mcp"):
+        assert aux[task]["model"] == "hal0/npu"
+
+
 def test_overlay_emits_delegation_and_auxiliary_keys() -> None:
     deleg = hp._resolve_delegation(_ROLE_SLOTS, hal0_base_url=_HAL0_V1)
     aux = hp._resolve_auxiliary_tasks(_ROLE_SLOTS, hal0_base_url=_HAL0_V1)

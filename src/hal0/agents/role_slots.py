@@ -43,6 +43,11 @@ class RoleSlotCandidate(BaseModel):
     capabilities: tuple[str, ...] = ()
     device_class: str | None = None
     role_hint: str | None = None
+    #: The slot's routable NAME. ``hal0/<name>`` resolves by slot name
+    #: (normalize.resolver._slot_matches_name), so a lane id built from
+    #: ``label`` can name a slot that does not exist. ``label`` is a
+    #: mutable display label and may differ.
+    name: str | None = None
 
 
 class RoleSlotEntry(BaseModel):
@@ -55,6 +60,9 @@ class RoleSlotEntry(BaseModel):
     ready: bool
     capabilities: tuple[str, ...]
     basis: str
+    #: The slot's routable NAME (see RoleSlotCandidate.name). None when
+    #: the role has no slot behind it.
+    name: str | None = None
 
 
 class RoleSlotMap(BaseModel):
@@ -99,6 +107,9 @@ def candidate_from_slot_mapping(slot: Mapping[str, Any]) -> RoleSlotCandidate:
         slot_id=_string(raw_id),
         label=_string(
             slot.get("label") or slot.get("name") or slot.get("alias") or slot.get("slug")
+        ),
+        name=_string(
+            slot.get("name") or slot.get("label") or slot.get("alias") or slot.get("slug")
         ),
         model=_string(
             slot.get("model_default")
@@ -154,6 +165,7 @@ def _entry(
             ready=False,
             capabilities=(),
             basis=basis,
+            name=None,
         )
     return RoleSlotEntry(
         role=role,
@@ -163,6 +175,7 @@ def _entry(
         ready=candidate.ready,
         capabilities=candidate.capabilities,
         basis=basis,
+        name=candidate.name,
     )
 
 

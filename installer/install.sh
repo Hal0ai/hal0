@@ -1488,7 +1488,12 @@ if [[ ! -f "${HAL0_TOML}" ]]; then
 # Validate:  hal0 config validate
 
 [meta]
-schema_version = $("${PY}" -I -c 'from hal0.config.schema import CURRENT_SCHEMA_VERSION; print(CURRENT_SCHEMA_VERSION)')
+# The venv interpreter, NOT "${PY}": hal0 is pip-installed into the venv
+# only, so the base interpreter cannot import hal0.config.schema. Using
+# "${PY}" here wrote an empty schema_version (the heredoc's status is
+# cat's, so install.sh still exited 0) and left a /etc/hal0/hal0.toml that
+# tomllib cannot parse — the API then silently fell back to defaults.
+schema_version = $("${VENV_DIR}/bin/python" -I -c 'from hal0.config.schema import CURRENT_SCHEMA_VERSION; print(CURRENT_SCHEMA_VERSION)')
 
 [slots]
 port_range_start = 8081

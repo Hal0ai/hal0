@@ -7297,7 +7297,14 @@ def _resolve_auxiliary_tasks(
         "hermes",
         candidates,
         auxiliary_slot=auxiliary_slot,
-        npu_fallback=auxiliary_slot == "utility",
+        # The NPU virtual lane (`hal0/npu`) is a FALLBACK for when no
+        # dedicated auxiliary slot is bound — it is not the "utility"
+        # mode's privilege. Gating it on auxiliary_slot == "utility"
+        # dropped it for every fresh install, where the configured
+        # extraction slot is "memory" (config/schema.py, memory.graph
+        # default) and for "agent" mode. Only agent mode opts out
+        # entirely: there the aux task inherits the main chat model.
+        npu_fallback=auxiliary_slot is not None,
     )
     by_role = {entry.role: entry for entry in role_map.entries}
     task_roles = {
@@ -7311,15 +7318,19 @@ def _resolve_auxiliary_tasks(
     for task in (*_MAIN_AUX_TASKS, *_UTILITY_AUX_TASKS):
         entry = by_role[task_roles[task]]
         custom = entry.basis not in {"main", "main_fallback"}
+        # The memory lane is addressed by SLOT NAME, not by the slot's
+        # display label: `hal0/<name>` resolves by name
+        # (normalize.resolver._slot_matches_name). A role_hint match whose
+        # label differs from the name would otherwise build a lane id that
+        # names no slot.
+        lane = entry.name or entry.label or ""
         tasks[task] = {
             # Always "custom": Hermes' doctor rejects provider "main" as an
             # unknown provider (#2882). Without a dedicated slot the model
             # stays empty so the task inherits the main chat model through
             # the hal0 endpoint.
             "provider": "custom",
-            "model": (f"hal0/{entry.label}" if entry.basis == "memory" else entry.model)
-            if custom
-            else "",
+            "model": (f"hal0/{lane}" if entry.basis == "memory" else entry.model) if custom else "",
             "base_url": hal0_base_url,
         }
     return tasks

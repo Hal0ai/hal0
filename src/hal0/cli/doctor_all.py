@@ -216,8 +216,21 @@ def check_openwebui_task_model(slots: list[dict[str, Any]] | None = None) -> Che
     )
     if not target or slots is None:
         return Check(key, label, _PASS, "no task slot to validate")
-    name = target.removeprefix("hal0/")
     names = {str(slot.get("name")) for slot in slots if isinstance(slot, dict)}
+    # `hal0/<x>` is always a local lane (the prefix names a slot, never an
+    # upstream model). A BARE value is a slot reference only when it is in
+    # the slot vocabulary — the live slots, the seed names, and the
+    # retired `utility` seed. Anything else is an upstream model id
+    # (``TASK_MODEL_EXTERNAL`` may name one), which this row must not
+    # warn about.
+    from hal0.install.static_seeds import STATIC_SEED_SLOTS
+
+    if target.startswith("hal0/"):
+        name = target.removeprefix("hal0/")
+    elif target in names or target in STATIC_SEED_SLOTS or target == "utility":
+        name = target
+    else:
+        return Check(key, label, _PASS, f"task model {target} is not a slot reference")
     if name not in names:
         return Check(
             key,

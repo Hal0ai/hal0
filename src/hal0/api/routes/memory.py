@@ -982,7 +982,6 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
         if propagation is not None:
             out["propagation"] = propagation
 
-    # Extraction dispatches to hal0/<extraction_slot> whether or not the
     if slot_changed or model_changed:
         # Hermes writes auxiliary targets at provision time. Reuse its tracked
         # repair path when the configured target changes; an absent Hermes is

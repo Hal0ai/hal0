@@ -34,6 +34,36 @@ def test_openwebui_task_model_warns_for_removed_slot(
     assert da.check_openwebui_task_model(slots).status == "pass"
 
 
+def test_openwebui_task_model_ignores_an_upstream_model_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # TASK_MODEL_EXTERNAL may legitimately hold an upstream model id, not a
+    # slot name. The row only warns about a slot reference.
+    env = tmp_path / "openwebui.env"
+    monkeypatch.setattr(da.paths, "openwebui_env", lambda: env)
+    slots = [{"name": "agent"}, {"name": "memory"}]
+
+    env.write_text("TASK_MODEL_EXTERNAL=qwen3:30b-a3b\n", encoding="utf-8")
+    row = da.check_openwebui_task_model(slots)
+    assert row.status == "pass"
+
+    env.write_text("TASK_MODEL_EXTERNAL=bge-base-en-v1.5-q4_k_m\n", encoding="utf-8")
+    assert da.check_openwebui_task_model(slots).status == "pass"
+
+
+def test_openwebui_task_model_warns_for_a_missing_hal0_lane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = tmp_path / "openwebui.env"
+    monkeypatch.setattr(da.paths, "openwebui_env", lambda: env)
+    slots = [{"name": "agent"}, {"name": "memory"}]
+
+    env.write_text("TASK_MODEL_EXTERNAL=hal0/utility\n", encoding="utf-8")
+    row = da.check_openwebui_task_model(slots)
+    assert row.status == "warn"
+    assert "hal0/utility" in row.detail
+
+
 # ── check_auth_posture ────────────────────────────────────────────────────────
 
 
