@@ -103,7 +103,7 @@ test.describe('Post-update slot drift', () => {
         skipped_busy: ['embed'], skipped_render_error: ['brain'],
       }))
       await page.goto('/#dashboard')
-      await expect(page.locator('.ov-att', { hasText: 'slots need restart' })).toContainText('brain: invalid tune key')
+      await expect(page.locator('.ov-att', { hasText: 'slots need restart' }).locator('.ov-body')).toHaveText('1 slot needs restart — brain, still running the pre-update launch command. Restarting briefly interrupts any in-flight request on those slots. Cannot render launch configuration: brain: invalid tune key. Fix the configuration before restarting.')
       if (source === 'bell') {
         await page.getByTestId('tb-bell').click()
         await expect(page.getByTestId('notif-sec-updates')).toContainText('brain: invalid tune key')
@@ -113,8 +113,7 @@ test.describe('Post-update slot drift', () => {
         await page.locator('.ov-att', { hasText: 'slots need restart' }).getByRole('button', { name: 'restart drifted slots' }).click()
       }
       const toast = page.locator('.hal0-toast', { hasText: 'Failed to restart chat: unit failed' })
-      await expect(toast).toContainText('Skipped busy slots: embed')
-      await expect(toast).toContainText('could not be rendered: brain')
+      await expect(toast.locator('.toast-msg')).toHaveText('Failed to restart chat: unit failed · Skipped busy slots: embed · Skipped slots whose launch configuration could not be rendered: brain. Fix their configuration before restarting.')
       if (source === 'overview') await page.screenshot({ path: 'test-results/slot-drift-outcomes.png', animations: 'disabled' })
     })
   }
