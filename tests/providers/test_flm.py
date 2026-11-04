@@ -830,6 +830,29 @@ def test_flm_id_to_tag_empty_catalog_returns_none() -> None:
         assert flm.flm_id_to_tag("gemma4-it-e2b-FLM") is None
 
 
+def test_flm_id_to_tag_memoizes_hits_and_never_misses() -> None:
+    """A resolved id is remembered past the catalog; an unknown id is re-asked."""
+    import hal0.providers.flm as flm
+
+    calls: list[int] = []
+    catalog = [{"tag": "gemma4-it:e2b", "installed": False, "capabilities": ["chat"]}]
+
+    def _served() -> list[dict[str, Any]]:
+        calls.append(1)
+        return catalog
+
+    with patch("hal0.providers.flm.flm_served_models", _served):
+        assert flm.flm_id_to_tag("gemma4-it-e2b-FLM") == "gemma4-it:e2b"
+        assert flm.flm_id_to_tag("gemma4-it-e2b-FLM") == "gemma4-it:e2b"
+        assert len(calls) == 1  # second answer came from the memo
+        # A miss is not stored: once FLM lists the id, it resolves.
+        assert flm.flm_id_to_tag("qwen3-0.6b-FLM") is None
+        catalog.append({"tag": "qwen3:0.6b", "installed": False, "capabilities": ["chat"]})
+        assert flm.flm_id_to_tag("qwen3-0.6b-FLM") == "qwen3:0.6b"
+    flm.reset_flm_catalog_cache()
+    assert flm._FLM_ID_TAG_MEMO == {}
+
+
 # ─── parse_flm_progress units (incl. terabyte) ───────────────────────────────
 
 
