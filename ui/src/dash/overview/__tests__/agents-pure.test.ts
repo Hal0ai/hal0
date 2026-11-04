@@ -60,32 +60,9 @@ describe('hermesRow', () => {
     expect(r.ctx).toBeNull()
   })
 
-  it('lists a configured profile whose server is down apart from the served ones (#3157)', () => {
-    const ov = {
-      ...OV_HERMES,
-      api_server: { healthy: true, profiles: ['default', 'coder'] },
-      profiles: [
-        { name: 'default', healthy: true },
-        { name: 'coder', healthy: true },
-        { name: 'ghost', healthy: false },
-      ],
-    } as any
-    const r = hermesRow(ov, null, null)
-    expect(r.profiles).toEqual(['default', 'coder'])
-    expect(r.down).toEqual(['ghost'])
-  })
-
-  it('has nothing down when the gateway is down, or the server sends no profiles list', () => {
-    const profiles = [{ name: 'default', healthy: false }, { name: 'ghost', healthy: false }]
-    const gatewayDown = { ...OV_HERMES, api_server: { healthy: false, profiles: [] }, profiles } as any
-    expect(hermesRow(gatewayDown, null, null).down).toEqual([])
-    expect(hermesRow(OV_HERMES, null, null).down).toEqual([])
-  })
-
   it('has empty lists when the overview carries none', () => {
     const r = hermesRow({ name: 'hermes', kind: 'daemon', installed: true } as any, null, null)
     expect(r.profiles).toEqual([])
-    expect(r.down).toEqual([])
     expect(r.channels).toEqual([])
     expect(r.version).toBeNull()
     expect(r.pyLine).toBeNull()

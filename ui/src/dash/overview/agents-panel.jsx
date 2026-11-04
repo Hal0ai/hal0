@@ -31,7 +31,6 @@ function runsEmptyLine(runsQ, clients) {
 
 function HermesAgent({ row }) {
   const n = row.profiles.length
-  const k = row.down.length
   return (
     <div className="ov-agent">
       <div className="ov-avatar">H</div>
@@ -44,7 +43,7 @@ function HermesAgent({ row }) {
           </window.OvPill>
           <span className="ov-sub">{[row.version, row.pyLine].filter(Boolean).join(' · ') || '—'}</span>
         </div>
-        {n + k > 0 && (
+        {n > 0 && (
           <div className="ov-profiles">
             profiles
             {row.profiles.map((p) => (
@@ -53,15 +52,8 @@ function HermesAgent({ row }) {
                 {p}
               </span>
             ))}
-            {row.down.map((p) => (
-              <span className="ov-p" key={p}>
-                <span className="ov-dot err ov-d" />
-                {p}
-              </span>
-            ))}
             <span>
               · {n} {n === 1 ? 'profile' : 'profiles'} serving
-              {k > 0 ? ` · ${k} down` : ''}
             </span>
           </div>
         )}

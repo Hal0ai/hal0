@@ -5,7 +5,6 @@ import React from 'react'
 import { createRoot } from 'react-dom/client'
 import { act } from 'react-dom/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { normalizeHardware } from '@/api/hooks/useHardware'
 
 ;(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true
 ;(globalThis as any).React = React
@@ -34,16 +33,7 @@ const OvHardware = (window as any).OvHardware as React.ComponentType<{ onGo: (id
 let host: HTMLDivElement
 let root: ReturnType<typeof createRoot>
 
-const GPU_HW = {
-  computeCapable: true,
-  vulkanCapable: true,
-  gpu: 'Radeon 8060S',
-  gpuDisplayName: 'Radeon 8060S',
-  cores: '16c · 32t',
-  npu: { present: true },
-}
-const PCI = 'Advanced Micro Devices, Inc. [AMD/ATI] Device 1586 (rev c1)'
-const STRIX_PAYLOAD = { gpu_name: PCI, gpus: [{ name: PCI, compute_capable: true }], cpu_cores: 16, cpu_threads: 32, npu: { present: true } }
+const GPU_HW = { computeCapable: true, vulkanCapable: true, gpu: 'Radeon 8060S', cores: '16c · 32t', npu: { present: true } }
 
 function render() {
   act(() => root.render(<OvHardware onGo={() => {}} />))
@@ -53,7 +43,7 @@ beforeEach(() => {
   hw = GPU_HW
   stats = { gpu_util: 0.33, gpu_clock_mhz: 600, gpu_temp_c: 47, cpu_util: 0.12, npu_status: { ok: false } }
   power = { gpu_power_w: 33, cpu_temp_c: 52 }
-  health = { status: 'ok', checks: { disk_state: { ok: true, free_mb: 124 * 1024, total_mb: 248 * 1024, floor_mb: 512, path: '/var/lib/hal0' } } }
+  health = { status: 'ok', checks: { disk_state: { ok: true, free_mb: 124 * 1024, floor_mb: 512, path: '/var/lib/hal0' } } }
   slots = []
   ram = { usedGb: 13.14, limitGb: 106.2, source: 'container' }
   host = document.createElement('div')
@@ -78,19 +68,6 @@ describe('OvHardware', () => {
     expect(row('disk').textContent).toContain('/var/lib/hal0 · floor 0.5 GB')
     expect(row('npu').textContent).toContain('no FLM slot loaded')
     expect(row('npu').textContent).toContain('idle')
-  })
-
-  it('captions the GPU row with the display name, not the raw PCI string (#3156)', () => {
-    hw = normalizeHardware({ ...STRIX_PAYLOAD, gpu_display_name: 'Radeon 8060S' })
-    render()
-    expect(row('gpu').textContent).toContain('Radeon 8060S · 0.6 GHz · 47°C · 33 W')
-    expect(host.textContent).not.toContain('Device 1586')
-  })
-
-  it('falls back to the raw probe name when the server sends no display name (#3156)', () => {
-    hw = normalizeHardware(STRIX_PAYLOAD)
-    render()
-    expect(row('gpu').textContent).toContain(`${PCI} · 0.6 GHz`)
   })
 
   it('draws a sparkline on the GPU row after two data updates', () => {
@@ -126,20 +103,6 @@ describe('OvHardware', () => {
     render()
     expect(row('npu').textContent).toContain('flm-a + flm-b coresident')
     expect(row('npu').textContent).toContain('active')
-  })
-
-  it('fills the disk bar to used over total from the health check (#3158)', () => {
-    render()
-    const fill = row('disk').querySelector('.ov-track i') as HTMLElement | null
-    expect(fill).not.toBeNull()
-    expect(fill!.style.width).toBe('50%')
-  })
-
-  it('leaves the disk bar empty when the check carries no total', () => {
-    health = { status: 'ok', checks: { disk_state: { ok: true, free_mb: 124 * 1024, floor_mb: 512, path: '/var/lib/hal0' } } }
-    render()
-    expect(row('disk').querySelector('.ov-track i')).toBeNull()
-    expect(row('disk').textContent).toContain('124 GB free')
   })
 
   it('shows dashes for unsourced RAM and disk', () => {

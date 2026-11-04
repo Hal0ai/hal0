@@ -13,7 +13,7 @@ import { PROXY_NEEDS_PUBLIC_URL, publicUrlHint } from '@/api/publicUrlHint'
 
 // The four companions lead, in this order; any other service follows (servicesForWidget orders and caps).
 const SERVICE_ORDER = ['openwebui', 'comfyui', 'hermes', 'n8n']
-const WIRED_KEYS = ['chat', 'voice', 'documents', 'images', 'web_search', 'mcp']
+const WIRED_KEYS = ['chat', 'voice', 'documents', 'images', 'web_search']
 
 export function OvServices({ onGo }) {
   const svc = useServices()
@@ -100,7 +100,7 @@ export function OvServices({ onGo }) {
                   <span
                     className="ov-open"
                     data-testid="ov-svc-open-comfyui"
-                    title={editor.needsPublicUrl ?? OFF_BOX_NOTE}
+                    title={OFF_BOX_NOTE}
                     aria-disabled="true"
                     style={{ cursor: 'not-allowed', opacity: 0.5 }}
                     onClick={(e) => e.stopPropagation()}

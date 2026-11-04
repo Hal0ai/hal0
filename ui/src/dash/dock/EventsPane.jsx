@@ -118,7 +118,7 @@ export function EventsPane({ events, filters, onFilters, slotNames = [], disconn
           <a
             className="foot-pane-link"
             data-testid="dock-export"
-            href={activityExportUrl('csv', exportFilters(filters, events))}
+            href={activityExportUrl('csv', exportFilters(filters))}
             title="Exports the activity trail with these filters. Journal lines are on the Logs page."
           >Export ↓</a>
         </span>
@@ -128,7 +128,7 @@ export function EventsPane({ events, filters, onFilters, slotNames = [], disconn
           <div className="foot-pane-empty">No events yet</div>
         ) : filtered.length === 0 ? (
           <div className="foot-pane-empty">
-            No events match. <button type="button" className="foot-pane-clear" data-testid="dock-clear-filters" onClick={() => onFilters(DOCK_FILTERS_DEFAULT)}>Clear filters</button>
+            No events match. <span className="foot-pane-clear" onClick={() => onFilters(DOCK_FILTERS_DEFAULT)}>Clear filters</span>
           </div>
         ) : filtered.map((e) => {
           const open = openIds.has(e.id)

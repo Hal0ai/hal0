@@ -46,17 +46,13 @@ export function EditorOpenButton({ testid, className = 'svc-btn', children }) {
       </>
     )
   }
-  const why = access.needsPublicUrl ?? OFF_BOX_NOTE
   return (
-    <span
-      title={access.needsPublicUrl ? why : `${OFF_BOX_NOTE}. ${access.tunnel}`}
-      data-testid={`${testid}-wrap`}
-    >
+    <span title={`${OFF_BOX_NOTE}. ${access.tunnel}`} data-testid={`${testid}-wrap`}>
       <button
         type="button"
         className={className}
         disabled
-        aria-label={`Open ComfyUI. ${why}`}
+        aria-label={`Open ComfyUI. ${OFF_BOX_NOTE}`}
         data-testid={testid}
       >
         {children}
@@ -74,15 +70,6 @@ export function EditorOpenButton({ testid, className = 'svc-btn', children }) {
 export function EditorOffBox({ testid }) {
   const access = useEditorAccess()
   if (access.onBox) return null
-  if (access.needsPublicUrl) {
-    return (
-      <div className="ie-tunnel-block">
-        <span className="ie-offbox" data-testid={`${testid}-offbox`}>
-          {access.needsPublicUrl}
-        </span>
-      </div>
-    )
-  }
   return (
     <div className="ie-tunnel-block">
       <span className="ie-offbox" data-testid={`${testid}-offbox`}>

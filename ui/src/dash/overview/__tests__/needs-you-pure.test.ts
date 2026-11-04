@@ -33,11 +33,6 @@ describe('mergeAttention', () => {
     expect(restart).toHaveBeenCalledOnce()
   })
 
-  it('explains slots whose configuration cannot render', () => {
-    const [row] = mergeAttention({ notifications: [], diagnoses: [], failing: [], drift: { count: 1, slots: ['brain'], renderErrors: [{ slot: 'brain', error: 'invalid tune key' }] } })
-    expect(row.body).toContain('brain: invalid tune key')
-  })
-
   it('shows a disabled restarting… action while the drift restart is in flight', () => {
     const [d] = mergeAttention({
       notifications: [], diagnoses: [], failing: [],

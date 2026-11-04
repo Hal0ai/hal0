@@ -51,7 +51,7 @@ export function OvNeedsYou({ onGo }) {
   const failing = failingChecks(health.data)
   const driftCount = driftQ.data?.count ?? 0
   const drift = driftCount > 0
-    ? { count: driftCount, slots: (driftQ.data?.slots ?? []).map((s) => s.slot).filter(Boolean), renderErrors: (driftQ.data?.slots ?? []).filter((s) => s.render_error).map((s) => ({ slot: s.slot, error: s.render_error })) }
+    ? { count: driftCount, slots: (driftQ.data?.slots ?? []).map((s) => s.slot).filter(Boolean) }
     : null
 
   const openDoctor = () => go('settings/doctor')

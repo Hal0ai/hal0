@@ -77,36 +77,6 @@ describe('OvAgents', () => {
     expect([...hermes.querySelectorAll('.ov-chip')].map((c) => c.textContent)).toEqual(['telegram', 'webhook', 'api'])
   })
 
-  it('paints a configured profile whose server is down as a red dot, not an absent one (#3157)', () => {
-    overviews.hermes = {
-      ...OV_HERMES,
-      api_server: { healthy: true, profiles: ['default', 'coder'] },
-      profiles: [
-        { name: 'default', healthy: true },
-        { name: 'coder', healthy: true },
-        { name: 'ghost', healthy: false },
-      ],
-    }
-    mount()
-    const dots = [...host.querySelectorAll('.ov-agent')[0].querySelectorAll('.ov-profiles .ov-p')]
-    expect(dots.map((d) => d.textContent)).toEqual(['default', 'coder', 'ghost'])
-    expect(dots.map((d) => d.querySelector('.ov-dot')?.classList.contains('up'))).toEqual([true, true, false])
-    expect(dots.map((d) => d.querySelector('.ov-dot')?.classList.contains('err'))).toEqual([false, false, true])
-    expect(host.querySelector('.ov-profiles')?.textContent).toContain('2 profiles serving · 1 down')
-  })
-
-  it('keeps the profile row when only down profiles remain', () => {
-    overviews.hermes = {
-      ...OV_HERMES,
-      api_server: { healthy: true, profiles: [] },
-      profiles: [{ name: 'ghost', healthy: false }],
-    }
-    mount()
-    const hermes = host.querySelectorAll('.ov-agent')[0]
-    expect(hermes.querySelectorAll('.ov-profiles .ov-dot.err')).toHaveLength(1)
-    expect(hermes.querySelector('.ov-profiles')?.textContent).toContain('0 profiles serving · 1 down')
-  })
-
   it('fills the ctx bar from the primary slot', () => {
     slots = [{ metrics: { ctx: 33000 }, ctx_effective: 66000 }]
     mount()

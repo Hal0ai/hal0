@@ -9,22 +9,18 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 ;(globalThis as any).FieldInfoIcon = ({ description }: any) => <span data-sub={description} />
 
 // Per-test data; the mocks below read it at call time.
-const state: { memory: any; services: any[] } = { memory: undefined, services: [] }
+const state: { memory: any } = { memory: undefined }
 
 vi.mock('@/api/hooks/useStatsHardware', () => ({
   useStatsHardware: () => ({ data: { cpu_util: 0.1, memory: state.memory }, isPending: false }),
   useMemoryBudget: () => ({ data: state.memory }),
-}))
-vi.mock('@/api/hooks/useServicesHealth', async (importActual) => ({
-  ...(await importActual<object>()),
-  useServicesHealth: () => ({ services: state.services, pending: false, error: false }),
 }))
 vi.mock('@/api/hooks/useHardware', async (importActual) => ({
   ...(await importActual<object>()),
   useHardware: () => ({ data: { computeCapable: true } }),
 }))
 
-import { HardwarePanel, ServicesPanel, _pct } from './OverviewPage.jsx'
+import { HardwarePanel, _pct } from './OverviewPage.jsx'
 
 describe('_pct', () => {
   it('renders the 0..1 API fraction as a percentage', () => {
@@ -111,77 +107,5 @@ describe('Live hardware panel reads the memory budget', () => {
   it('hides the pool row when there is no GPU pool', () => {
     const r = rows({ gpu: null, ram: ram(), render_free_gb: null })
     expect([...r.keys()].some((k) => k === 'VRAM' || k.startsWith('GPU pool'))).toBe(false)
-  })
-})
-
-// #2705: a deliberately stopped service (ComfyUI parked on a fresh install) is
-// grey "stopped" here exactly as it is in the dock — never the warn "⚠ down".
-const svc = (over: Record<string, unknown>) => ({
-  id: 'x',
-  name: 'X',
-  up: true,
-  state: 'up',
-  detail: '',
-  url: null,
-  stat: null,
-  ...over,
-})
-
-function serviceRows(services: any[]): Array<{ name: string; chip: HTMLElement }> {
-  state.services = services
-  const host = document.createElement('div')
-  document.body.appendChild(host)
-  act(() => {
-    createRoot(host).render(<ServicesPanel />)
-  })
-  return [...host.querySelectorAll('.s-row')]
-    .filter((row) => row.querySelector('.ac .chip'))
-    .map((row) => ({
-      name: row.querySelector('.k span')!.textContent!,
-      chip: row.querySelector('.ac .chip') as HTMLElement,
-    }))
-}
-
-describe('Services panel service state', () => {
-  it('renders a stopped service as the neutral grey state, not the down warning', () => {
-    const [row] = serviceRows([
-      svc({ id: 'comfyui', name: 'ComfyUI', up: false, state: 'stopped', detail: 'stopped — starts on demand' }),
-    ])
-    expect(row.chip.textContent).toContain('stopped')
-    expect(row.chip.textContent).not.toContain('⚠')
-    expect(row.chip.textContent).not.toContain('down')
-    expect(row.chip.style.color).toBe('var(--fg-4)')
-  })
-
-  it('keeps up as ok and down as the warning', () => {
-    const rows = serviceRows([
-      svc({ id: 'a', name: 'A', up: true, state: 'up' }),
-      svc({ id: 'b', name: 'B', up: false, state: 'down' }),
-    ])
-    const byName = new Map(rows.map((r) => [r.name, r.chip]))
-    expect(byName.get('A')!.textContent).toBe('● up')
-    expect(byName.get('A')!.style.color).toBe('var(--ok)')
-    expect(byName.get('B')!.textContent).toBe('⚠ down')
-    expect(byName.get('B')!.style.color).toBe('var(--warn)')
-  })
-
-  it('floats only failed services to the top; stopped does not read as degraded', () => {
-    const rows = serviceRows([
-      svc({ id: 'a', name: 'A', up: true, state: 'up' }),
-      svc({ id: 'c', name: 'C', up: false, state: 'stopped' }),
-      svc({ id: 'b', name: 'B', up: false, state: 'down' }),
-    ])
-    expect(rows.map((r) => r.name)).toEqual(['B', 'A', 'C'])
-  })
-
-  it('falls back to the legacy boolean when an older backend omits state', () => {
-    const rows = serviceRows([
-      svc({ id: 'a', name: 'A', up: true, state: undefined }),
-      svc({ id: 'b', name: 'B', up: false, state: undefined }),
-    ])
-    expect(rows.map((r) => [r.name, r.chip.textContent])).toEqual([
-      ['B', '⚠ down'],
-      ['A', '● up'],
-    ])
   })
 })

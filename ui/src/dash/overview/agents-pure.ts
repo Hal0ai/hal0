@@ -4,7 +4,6 @@
 
 import type { AgentOverview, AgentRecord } from '@/api/hooks/useAgents'
 import type { BridgeRun } from '@/api/hooks/useBridge'
-import { downProfiles } from '@/dash/agents/agent-phase'
 import { pctOf, relTime } from './overview-pure'
 
 const DASH = '—'
@@ -16,10 +15,7 @@ export interface HermesRow {
   state: HermesState
   version: string | null
   pyLine: string | null
-  /** Profiles the API server serves. */
   profiles: string[]
-  /** Configured profiles whose server is not answering (#3157). */
-  down: string[]
   ctx: { used: number; max: number; pct: number } | null
   persona: string | null
   approvals: string | null
@@ -123,7 +119,7 @@ function stateOf(
   return slotServing(slot) ? 'serving' : 'ready'
 }
 
-/** The Hermes row: state word, version, served and down profiles, ctx fill of the slot it orchestrates, channels. */
+/** The Hermes row: state word, version, served profiles, ctx fill of the slot it orchestrates, channels. */
 export function hermesRow(
   ov: AgentOverview | null,
   personas: PersonasLike | null,
@@ -144,7 +140,6 @@ export function hermesRow(
     version: text(live.describe) ?? shortRef(live.ref),
     pyLine: minor ? `py ${minor}` : null,
     profiles: strings(ov?.api_server?.profiles),
-    down: downProfiles(ov),
     ctx:
       pct !== null && typeof used === 'number' && typeof max === 'number'
         ? { used, max, pct: Math.round(pct) }

@@ -45,7 +45,7 @@ export function OvHardware({ onGo: _onGo }) {
   const rows = hardwareRows({
     hasGpu,
     hasNpu,
-    gpuName: hw.data?.gpuDisplayName || null,
+    gpuName: hw.data?.gpu || null,
     cores: hw.data?.cores || null,
     stats: st,
     power: power.data,

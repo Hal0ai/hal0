@@ -14,7 +14,6 @@ import { ENDPOINTS } from '@/api/endpoints'
 import { useUpdateState } from '@/api/hooks/useUpdates'
 import { useServicesHealth } from '@/api/hooks/useServicesHealth'
 import { slotIndicatorFromPhase } from '../slot-status.js'
-import { serviceTone } from '../status-copy'
 import { isImageGenRoute } from '../slots-route'
 import { useImageRunStore } from '@/stores/useImageRunStore'
 import { useStatusLineActions } from '../image/useStatusLineActions'
@@ -178,9 +177,9 @@ export function Dock({ route, param, expanded = false, onToggle }) {
           id: s.id,
           label: s.name || s.id,
           // 'stopped' is deliberate (grey pip, out of the ready count);
-          // only a failed/unknown service reads red. serviceTone owns the
-          // mapping so the Settings > Overview panel cannot drift from it.
-          tone: serviceTone(s),
+          // only a failed/unknown service reads red. Older backends omit
+          // `state` — fall back to the boolean.
+          tone: s.state === 'stopped' ? 'off' : (s.state ? (s.state === 'up' ? 'up' : 'err') : (s.up ? 'up' : 'err')),
           title: s.detail || `${s.name || s.id} down`,
         }))),
   ];
@@ -204,15 +203,15 @@ export function Dock({ route, param, expanded = false, onToggle }) {
     <div className={"footer" + (expanded ? " expanded" : "")} data-testid="dock">
       {expanded && (
         <div className="dock-x" data-testid="dock-expanded">
-          <div className="foot-tabs" role="tablist" aria-label="Dock panes">
-            <button className={"foot-tab" + (footerTab === "journal" ? " active" : "")} data-testid="dock-tab-events" role="tab" aria-selected={footerTab === "journal"} onClick={() => setFooterTab("journal")}>events</button>
+          <div className="foot-tabs">
+            <button className={"foot-tab" + (footerTab === "journal" ? " active" : "")} data-testid="dock-tab-events" onClick={() => setFooterTab("journal")}>events</button>
             {gpu.view && (
-              <button className={"foot-tab" + (footerTab === "gpu" ? " active" : "")} data-testid="dock-tab-gpu" role="tab" aria-selected={footerTab === "gpu"} onClick={() => setFooterTab("gpu")}>
+              <button className={"foot-tab" + (footerTab === "gpu" ? " active" : "")} data-testid="dock-tab-gpu" onClick={() => setFooterTab("gpu")}>
                 <span className={"dotc tone-" + gpu.view.tone} aria-hidden="true" />
                 gpu
               </button>
             )}
-            <button className={"foot-tab" + (footerTab === "downloads" ? " active" : "")} data-testid="dock-tab-downloads" role="tab" aria-selected={footerTab === "downloads"} onClick={() => setFooterTab("downloads")}>downloads</button>
+            <button className={"foot-tab" + (footerTab === "downloads" ? " active" : "")} data-testid="dock-tab-downloads" onClick={() => setFooterTab("downloads")}>downloads</button>
           </div>
           {footerTab === "gpu" && gpu.view ? (
             <GpuPane gpu={gpu} actions={gpuActions} />

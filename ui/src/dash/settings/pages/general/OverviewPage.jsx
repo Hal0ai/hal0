@@ -27,7 +27,6 @@ import { ApplyBadge } from '../../shared/ApplyBadge.jsx'
 import { SRow } from '../../shared/SRow.jsx'
 import { formatGpuUtil } from '@/lib/gpuUtil'
 import { gpuPoolLabel } from '@/dash/memory-map-pure'
-import { serviceTone } from '@/dash/status-copy'
 
 function _mb(mb) {
   const n = Number(mb)
@@ -49,19 +48,11 @@ function _ms(v) {
   return v == null ? '—' : `${Math.round(v)} ms`
 }
 
-// tone: 'up' green, 'off' grey (deliberately stopped), 'err' warn.
-const _CHIP_TONE = {
-  up: { color: 'var(--ok)', glyph: '● ' },
-  off: { color: 'var(--fg-4)', glyph: '● ' },
-  err: { color: 'var(--warn)', glyph: '⚠ ' },
-}
-const _TONE_LABEL = { up: 'up', off: 'stopped', err: 'down' }
-
-function _statusChip(tone, label) {
-  const { color, glyph } = _CHIP_TONE[tone]
+function _statusChip(ok, label) {
+  const color = ok ? 'var(--ok)' : 'var(--warn)'
   return (
     <span className="chip" style={{ fontSize: 10, color, borderColor: color }}>
-      {glyph}{label}
+      {ok ? '● ' : '⚠ '}{label}
     </span>
   )
 }
@@ -79,38 +70,35 @@ function HealthOverviewPanel() {
       <SRow
         k="Overall status"
         sub={degraded ? failing.join(', ') || 'one or more checks failing' : 'all checks passing'}
-        v={_statusChip(degraded ? 'err' : 'up', degraded ? 'degraded' : 'ok')}
+        v={_statusChip(!degraded, degraded ? 'degraded' : 'ok')}
       />
     </div>
   )
 }
 
-export function ServicesPanel() {
+function ServicesPanel() {
   const { services, pending } = useServicesHealth()
-  // Tone comes from the dock's mapping (serviceTone) so a deliberately
-  // stopped service reads grey here too, never "⚠ down" (#2705).
-  const rows = services.map(s => ({ s, tone: serviceTone(s) }))
-  // Failed services float to the top so a problem is visible without
-  // scrolling the healthy rows; stopped is not degraded.
-  const ordered = [...rows].sort((a, b) => (a.tone === 'err') === (b.tone === 'err') ? 0 : a.tone === 'err' ? -1 : 1)
+  // Degraded services float to the top so a problem is visible without
+  // scrolling the healthy rows.
+  const ordered = [...services].sort((a, b) => (a.up === b.up ? 0 : a.up ? 1 : -1))
 
   return (
     <div className="s-panel" style={{ marginTop: 12 }}>
       <div className="s-row" style={{ paddingBottom: 4, borderBottom: '1px solid var(--line)' }}>
-        <div className="k"><span>Services</span><FieldInfoIcon description="/api/services/health · per-service up / stopped / down" /></div>
+        <div className="k"><span>Services</span><FieldInfoIcon description="/api/services/health · per-service up/down" /></div>
       </div>
       {pending && <div style={{ padding: 12, color: 'var(--fg-4)', fontFamily: 'var(--jbm)', fontSize: 12 }}>source pending</div>}
       {!pending && ordered.length === 0 && (
         <div style={{ padding: 12, color: 'var(--fg-4)', fontFamily: 'var(--jbm)', fontSize: 12 }}>No services reported.</div>
       )}
-      {ordered.map(({ s, tone }) => (
+      {ordered.map(s => (
         <SRow
           key={s.id}
           k={s.name}
           sub={s.detail}
           mono
           v={s.stat ? <span style={{ color: 'var(--fg-3)' }}>{s.stat.label}: {s.stat.value}</span> : null}
-          actions={_statusChip(tone, _TONE_LABEL[tone])}
+          actions={_statusChip(s.up, s.up ? 'up' : 'down')}
         />
       ))}
     </div>
@@ -167,7 +155,7 @@ export function HardwarePanel() {
           ) : (
             <SRow k="GPU" sub="No GPU compute access on this box" mono v={<span style={{ color: 'var(--fg-4)' }}>—</span>} />
           )}
-          {hasNpu && H.npu_status && <SRow k="NPU" sub="XDNA/FastFlowLM model residency" v={_statusChip(H.npu_status.ok ? 'up' : 'err', `${H.npu_status.ok ? 'ok' : 'not ok'} · ${_mb(H.npu_status.model_mb)}`)} />}
+          {hasNpu && H.npu_status && <SRow k="NPU" sub="XDNA/FastFlowLM model residency" v={_statusChip(H.npu_status.ok, `${H.npu_status.ok ? 'ok' : 'not ok'} · ${_mb(H.npu_status.model_mb)}`)} />}
         </>
       )}
     </div>
