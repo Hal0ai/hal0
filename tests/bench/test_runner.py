@@ -549,15 +549,27 @@ class TestSessionIntegration:
     @staticmethod
     def _fake_slots(monkeypatch, active="hal0-slot@2.service\nhal0-slot@8.service", fail=None):
         """Route ExclusiveSlots' systemctl calls through a recorder; ``fail``
-        maps ``(verb, id)`` to the ``(rc, stdout, stderr)`` that call returns."""
+        maps ``(verb, id)`` to the ``(rc, stdout, stderr)`` that call returns.
+
+        The unprivileged ``systemctl is-active`` state probe (#3409) is
+        answered from the fake's own bookkeeping: a unit it actually stopped
+        is down, a unit whose stop failed is still up."""
         calls: list[list[str]] = []
         fail = fail or {}
+        down: set[str] = set()
 
         def fake(argv):
             calls.append(argv)
             if argv[:2] == ["systemctl", "list-units"]:
                 return 0, active, ""
-            return fail.get(tuple(argv[-2:]), (0, "", ""))
+            if argv[:2] == ["systemctl", "is-active"]:
+                slot = argv[-1].removeprefix("hal0-slot@").removesuffix(".service")
+                state = "inactive" if slot in down else "active"
+                return (0 if state == "active" else 3), f"{state}\n", ""
+            result = fail.get(tuple(argv[-2:]), (0, "", ""))
+            if len(argv) > 1 and argv[-2] == "stop" and result[0] == 0:
+                down.add(argv[-1])
+            return result
 
         monkeypatch.setattr(harness, "_default_shell_runner", fake)
         monkeypatch.setattr(harness.time, "sleep", lambda _s: None)
@@ -708,7 +720,9 @@ class TestSessionIntegration:
 
         assert result.cells_failed == 12
         assert not calls_file.exists()  # no sweep ran without exclusivity
-        assert self._verbs(calls, "stop") == ["2", "8"]
+        # The failed stop of slot 8 is retried ONCE inside the window (#3409) —
+        # and the window never re-cycles the slots on a later sweep.
+        assert self._verbs(calls, "stop") == ["2", "8", "8"]
         assert self._verbs(calls, "start") == ["2"]
         notes = [r["note"] for r in store.iter_records()]
         assert len(notes) == 12
