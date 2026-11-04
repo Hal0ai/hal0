@@ -1199,6 +1199,13 @@ _FLM_CATALOG_LOCK = threading.Lock()
 # never overwrite a newer answer (#2334). Never taken while holding
 # _FLM_CATALOG_LOCK.
 _FLM_CATALOG_PROBE_LOCK = threading.Lock()
+#: hal0 ``<tag>-FLM`` id -> FLM native ``family:size`` tag, filled by
+#: :func:`flm_id_to_tag` the first time the catalog resolves an id. The map is
+#: a pure naming transform, so it outlives the catalog TTL: a configured but
+#: stopped NPU slot then costs no ``flm list`` probe per request. Only hits are
+#: stored (an unknown id may appear once FLM lists it). Plain-dict item
+#: assignment is atomic, so it takes no lock.
+_FLM_ID_TAG_MEMO: dict[str, str] = {}
 
 
 def _classify_flm_model(entry: dict[str, Any]) -> list[str]:
@@ -1477,6 +1484,7 @@ def reset_flm_catalog_cache() -> None:
         _FLM_CATALOG_CACHE = None
         _FLM_CATALOG_CACHED_AT = 0.0
         _FLM_CATALOG_UNANSWERED = False
+    _FLM_ID_TAG_MEMO.clear()
 
 
 def is_flm_tag(model_id: str) -> bool:
@@ -1536,9 +1544,15 @@ def flm_id_to_tag(model_id: str) -> str | None:
     """
     if not model_id.endswith("-FLM"):
         return None
+    known = _FLM_ID_TAG_MEMO.get(model_id)
+    if known is not None:
+        return known
     for m in flm_served_models():
         tag = m.get("tag")
         if isinstance(tag, str) and tag.replace(":", "-") + "-FLM" == model_id:
+            # The id -> tag map is a pure naming transform: once resolved it
+            # cannot change, so remember it and never ask the catalog again.
+            _FLM_ID_TAG_MEMO[model_id] = tag
             return tag
     return None
 
@@ -1546,11 +1560,12 @@ def flm_id_to_tag(model_id: str) -> str | None:
 async def flm_id_to_tag_async(model_id: str) -> str | None:
     """:func:`flm_id_to_tag` for async callers: the catalog read never blocks the loop.
 
-    Only a ``-FLM`` id reads the catalog; that read goes through
+    Only an unresolved ``-FLM`` id reads the catalog; that read goes through
     :func:`flm_served_models_async` first, so a cold cache is probed on a
-    worker thread (#2334).
+    worker thread (#2334). A memoized id answers without touching the
+    catalog, so a configured-but-stopped NPU slot costs no probe per request.
     """
-    if model_id.endswith("-FLM"):
+    if model_id.endswith("-FLM") and model_id not in _FLM_ID_TAG_MEMO:
         await flm_served_models_async()
     return flm_id_to_tag(model_id)
 

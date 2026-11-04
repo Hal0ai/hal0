@@ -104,3 +104,45 @@ async def test_llm_slot_views_translates_flm_id_to_colon_tag():
     with patch("hal0.providers.flm.flm_served_models", lambda: fake_catalog):
         views = await hal0_llm_slot_views(_FakeSlotManager(cfgs))
     assert views[0]["model_id"] == "gemma4-it:e2b"
+
+
+@pytest.mark.asyncio
+async def test_llm_slot_views_flm_probe_runs_once_with_expired_cache_and_stopped_slot():
+    """Repeated ``hal0/*`` requests never re-probe FLM for a known ``-FLM`` id.
+
+    With the 5-minute catalog cache expired and the FLM slot stopped, every
+    ``-FLM`` -> tag translation used to launch a one-shot ``flm list``
+    container. The id -> tag map is a pure naming transform, so it is
+    memoized once resolved: at most one probe, however many requests follow.
+    """
+    import hal0.providers.flm as flm
+
+    cfgs = [
+        {
+            "name": "npu",
+            "type": "llm",
+            "device": "npu",
+            "model": {"default": "gemma4-it-e2b-FLM"},
+        },
+    ]
+    probes: list[int] = []
+
+    def _probe():
+        probes.append(1)
+        # First probe answers (slot was up); later probes would find no
+        # running slot and nothing to ask.
+        return [{"model": "gemma4-it:e2b", "installed": True}] if len(probes) == 1 else None
+
+    flm.reset_flm_catalog_cache()
+    try:
+        with patch("hal0.providers.flm._probe_flm_catalog", _probe):
+            first = await hal0_llm_slot_views(_FakeSlotManager(cfgs))
+            for _ in range(3):
+                # Expire the catalog cache, as five idle minutes would.
+                flm._FLM_CATALOG_CACHED_AT = 0.0
+                views = await hal0_llm_slot_views(_FakeSlotManager(cfgs))
+                assert views[0]["model_id"] == "gemma4-it:e2b"
+        assert first[0]["model_id"] == "gemma4-it:e2b"
+        assert len(probes) == 1
+    finally:
+        flm.reset_flm_catalog_cache()
