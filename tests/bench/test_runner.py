@@ -551,9 +551,10 @@ class TestSessionIntegration:
         """Route ExclusiveSlots' systemctl calls through a recorder; ``fail``
         maps ``(verb, id)`` to the ``(rc, stdout, stderr)`` that call returns.
 
-        The unprivileged ``systemctl is-active`` state probe (#3409) is
-        answered from the fake's own bookkeeping: a unit it actually stopped
-        is down, a unit whose stop failed is still up."""
+        The unprivileged ``systemctl is-active`` state probe (#3409) and the
+        queued-job probe (#3414 review) are answered from the fake's own
+        bookkeeping: a unit it actually stopped is down, a unit whose stop
+        failed is still up, and no replacement start job is queued."""
         calls: list[list[str]] = []
         fail = fail or {}
         down: set[str] = set()
@@ -566,6 +567,8 @@ class TestSessionIntegration:
                 slot = argv[-1].removeprefix("hal0-slot@").removesuffix(".service")
                 state = "inactive" if slot in down else "active"
                 return (0 if state == "active" else 3), f"{state}\n", ""
+            if argv[:2] == ["systemctl", "list-jobs"]:
+                return 0, "", ""
             result = fail.get(tuple(argv[-2:]), (0, "", ""))
             if len(argv) > 1 and argv[-2] == "stop" and result[0] == 0:
                 down.add(argv[-1])

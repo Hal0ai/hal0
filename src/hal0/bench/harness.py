@@ -139,6 +139,11 @@ UNIT_STATES: frozenset[str] = frozenset(
     }
 )
 
+#: systemd job types that can bring a stopped slot back up. A queued job of
+#: either type means ``inactive`` is temporary, not proof that the slot will
+#: stay down for the exclusive benchmark window (#3414 review).
+_START_JOB_TYPES: frozenset[str] = frozenset({"start", "restart"})
+
 #: The unprivileged runner reads/writes this default when a cell's flags omit
 #: an explicit host label — matches ``run_benchmarks.sh``'s ``HOST_LABEL``
 #: default. Overridable via the ``HOST_LABEL`` env var for parity with the
@@ -589,10 +594,11 @@ class ExclusiveSlots:
     and the unit is then often down or on its way down: the window's goal is
     met even though the exit status says otherwise. So a non-zero stop is
     followed by a STATE check (an unprivileged ``systemctl is-active``): a
-    unit that is not running counts as stopped, and a unit that IS still
-    running gets ONE more stop attempt (which also closes the race a second
-    start job creates). Only a unit that is still running after that retry
-    aborts the window.
+    unit that is not running counts as stopped only when systemd has no
+    queued start/restart job for it, and a unit that IS still running gets
+    ONE more stop attempt (which also closes the race a second start job
+    creates). Only a unit that is still running — or still has a queued
+    start/restart job — after that retry aborts the window.
     """
 
     def __init__(self, runner: Callable[[list[str]], tuple[int, str, str]] | None = None) -> None:
@@ -637,10 +643,13 @@ class ExclusiveSlots:
         wins, and reports the cancellation as a failed stop even though the
         unit is often already down or coming down. So the unit's STATE decides
         (``systemctl is-active``, unprivileged — the same read the active-slot
-        listing already does): a unit that is not running counts as stopped,
-        and a unit that IS still running gets ONE more stop attempt, which
-        also closes the race a second start job creates. Only a unit that is
-        still running after the retry aborts the window.
+        listing already does): a unit that is not running counts as stopped
+        only when ``systemctl list-jobs`` confirms that no start/restart job
+        is queued for it. Otherwise the replacement job can still bring the
+        slot up during the benchmark. A unit that IS still running gets ONE
+        more stop attempt, which replaces the queued start job. Only a unit
+        that is still running — or still has a queued start/restart job —
+        after the retry aborts the window.
         """
         reason = ""
         state: str | None = None
@@ -651,14 +660,63 @@ class ExclusiveSlots:
             reason = err.strip() or str(rc)
             state = self._unit_state(slot_id)
             if state is not None and state in UNIT_DOWN_STATES:
-                # The stop job was canceled, but the unit is down: the goal of
-                # the window is met, so this is not a failure.
-                return None
+                pending_job = self._pending_start_job(slot_id)
+                if pending_job is None:
+                    # The stop job was canceled, but the unit is down and no
+                    # queued job can bring it back: the window's goal is met.
+                    return None
+                if pending_job == "unknown":
+                    if attempt == 2:
+                        return (
+                            f"{reason} (could not confirm that no start/restart job is queued "
+                            "after a retry)"
+                        )
+                    continue
+                if attempt == 2:
+                    return f"{reason} ({pending_job} job still queued after a retry)"
+                # A replacement start/restart job is queued. Retry the stop:
+                # systemd's default job mode replaces the conflicting job.
+                continue
             if attempt == 2:
                 break
         if state is None:
             return f"{reason} (state unknown after a retry)"
         return f"{reason} (unit still {state} after a retry)"
+
+    def _pending_start_job(self, slot_id: str) -> str | None:
+        """Return the queued job type that can start ``slot_id`` again.
+
+        ``"start"`` or ``"restart"`` means systemd has a queued job for the
+        unit; ``None`` means it has none; ``"unknown"`` means the unprivileged
+        ``systemctl list-jobs`` probe could not answer. The caller treats the
+        unknown result conservatively: it cannot prove the slot will stay
+        down, so the exclusive window must not proceed.
+        """
+        unit = f"hal0-slot@{slot_id}.service"
+        rc, out, _err = self._run(
+            [
+                "systemctl",
+                "list-jobs",
+                "--no-legend",
+                "--no-pager",
+                "--plain",
+                "--full",
+                unit,
+            ]
+        )
+        if rc != 0:
+            return "unknown"
+        for line in out.splitlines():
+            fields = line.split()
+            if not fields:
+                continue
+            if len(fields) < 3:
+                return "unknown"
+            if fields[1] != unit:
+                continue
+            if fields[2] in _START_JOB_TYPES:
+                return fields[2]
+        return None
 
     def _unit_state(self, slot_id: str) -> str | None:
         """The systemd ``ActiveState`` of ``hal0-slot@<id>.service``.
