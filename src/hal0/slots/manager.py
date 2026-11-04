@@ -1087,9 +1087,7 @@ class SlotManager:
         if self._identity is None:
             return 0
         count = 0
-        configured_names = {
-            name for _sid, name, _path in self._iter_configured_slots()
-        }
+        configured_names = {name for _sid, name, _path in self._iter_configured_slots()}
         for row in self._identity.list_all():
             if row.name not in configured_names and self._port_authority is not None:
                 self._port_authority.release(row.id)
@@ -1118,9 +1116,7 @@ class SlotManager:
                 _, _, grp, _ = self._derive_identity_fields(name, cfg)
                 # include_listeners=False: the slot's own server socket must
                 # not block seeding its own claim.
-                if grp is None and not self._port_authority.is_free(
-                    port, include_listeners=False
-                ):
+                if grp is None and not self._port_authority.is_free(port, include_listeners=False):
                     log.warning(
                         "slot.port_seed_conflict",
                         extra={"slot": name, "port": port},
