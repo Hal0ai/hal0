@@ -19,6 +19,51 @@ from rich.console import Console
 from hal0.cli import doctor_all as da
 from hal0.cli.doctor_verify import Check
 
+
+def test_openwebui_task_model_warns_for_removed_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = tmp_path / "openwebui.env"
+    env.write_text("TASK_MODEL_EXTERNAL=utility\n", encoding="utf-8")
+    monkeypatch.setattr(da.paths, "openwebui_env", lambda: env)
+    slots = [{"name": "agent"}, {"name": "memory"}]
+    row = da.check_openwebui_task_model(slots)
+    assert row.status == "warn"
+    assert "utility" in row.detail
+    env.write_text("TASK_MODEL_EXTERNAL=hal0/agent\n", encoding="utf-8")
+    assert da.check_openwebui_task_model(slots).status == "pass"
+
+
+def test_openwebui_task_model_ignores_an_upstream_model_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # TASK_MODEL_EXTERNAL may legitimately hold an upstream model id, not a
+    # slot name. The row only warns about a slot reference.
+    env = tmp_path / "openwebui.env"
+    monkeypatch.setattr(da.paths, "openwebui_env", lambda: env)
+    slots = [{"name": "agent"}, {"name": "memory"}]
+
+    env.write_text("TASK_MODEL_EXTERNAL=qwen3:30b-a3b\n", encoding="utf-8")
+    row = da.check_openwebui_task_model(slots)
+    assert row.status == "pass"
+
+    env.write_text("TASK_MODEL_EXTERNAL=bge-base-en-v1.5-q4_k_m\n", encoding="utf-8")
+    assert da.check_openwebui_task_model(slots).status == "pass"
+
+
+def test_openwebui_task_model_warns_for_a_missing_hal0_lane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = tmp_path / "openwebui.env"
+    monkeypatch.setattr(da.paths, "openwebui_env", lambda: env)
+    slots = [{"name": "agent"}, {"name": "memory"}]
+
+    env.write_text("TASK_MODEL_EXTERNAL=hal0/utility\n", encoding="utf-8")
+    row = da.check_openwebui_task_model(slots)
+    assert row.status == "warn"
+    assert "hal0/utility" in row.detail
+
+
 # ── check_auth_posture ────────────────────────────────────────────────────────
 
 
@@ -1594,7 +1639,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
     keys = [c.key for c in checks]
     assert gtt_leak_slots == [[{"port": 8081}]]
     # Verify rows plus the extra evidence rows (gtt-leak, api-unit).
-    assert keys[-44:] == [
+    assert keys[-45:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1626,6 +1671,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "bridge-store",
         "agent-bridge",
         "openwebui_mcp",
+        "openwebui-task-model",
         "hermes_generation",
         "hermes_command_approvals",
         "hermes_delegation_slot",
