@@ -50,7 +50,7 @@ Root model `Hal0Config`, `extra="allow"`.
 
 | Key | Type | Default | Constraints |
 |---|---|---|---|
-| `schema_version` | int | `1` | `>= 1` |
+| `schema_version` | int | `4` | `>= 1` |
 
 ### `[slots]`
 
@@ -131,6 +131,7 @@ override: `HAL0_FLM_MODELS_DIR`.
 | `unified_bank` | bool | `true` | — |
 | `engine` | str | `"hindsight"` | one of `hindsight`, `mem0`, `pgvector` — `"cognee"` is explicitly rejected (retired) |
 | `graph` | table | — | see below |
+| `priority` | table | — | see below |
 | `embedding` | table | — | see below |
 
 #### `[memory.graph]`
@@ -140,7 +141,7 @@ override: `HAL0_FLM_MODELS_DIR`.
 | Key | Type | Default | Constraints |
 |---|---|---|---|
 | `enabled` | bool | `false` | informational only |
-| `extraction_slot` | str | `"utility"` | regex `^[a-z0-9][a-z0-9_-]{0,31}$`; the local slot the engine runs on while `extraction_model` is unset |
+| `extraction_slot` | str | `"memory"` | regex `^[a-z0-9][a-z0-9_-]{0,31}$`; the local slot the engine runs on while `extraction_model` is unset |
 | `extraction_model` | str \| null | `null` | an upstream model id hal0's `/v1` routes (regex `^[A-Za-z0-9][A-Za-z0-9_./:-]{0,127}$`, never `hal0/…`); set → the engine runs on it instead of `extraction_slot`, validated against the live upstream catalogs at set-time |
 | `llm_timeout_s` | int | `300` | `30-3600` |
 | `extraction_max_concurrent` | int | `1` | `1-8` |
@@ -150,6 +151,26 @@ override: `HAL0_FLM_MODELS_DIR`.
 | `extraction_retry_backoff_s` | int | `120` | `10-3600` |
 
 `hindsight-api` always calls one virtual model id, `hal0/memory`, which the `extraction-model.conf` systemd drop-in sets. hal0's `/v1` resolves it on every call to `hal0/<extraction_slot>`, or to `extraction_model` when that is set. Changing `extraction_slot` or `extraction_model` therefore applies at once and does not restart the engine. Changing `llm_timeout_s` or one of the `extraction_*` limits rewrites the drop-in and restarts hindsight-api, as does the first save after an upgrade when the drop-in is missing or stale. An `extraction_model` that no configured upstream advertises is rejected (422 `config.memory_graph_model_invalid`, listing the pickable ids) and the config is left as it was. A `HINDSIGHT_API_LLM_PROVIDER`, `HINDSIGHT_API_LLM_BASE_URL` or `HINDSIGHT_API_LLM_MODEL` line in `/etc/hal0/hindsight-llm.env` overrides both settings; see [Services](/docs/operate/services/#hindsight-apiservice).
+
+`hal0/memory` has the canonical chain `(memory, agent)`: an absent or model-less
+memory slot falls back to agent. A model-bound memory slot wins even while cold.
+Config migration v4 preserves upgrades by writing `"utility"` only when
+`[memory.graph].extraction_slot` is missing; explicit values and upstreams persist.
+
+#### `[memory.priority]`
+
+`extra="forbid"`. These keys reserve the shared-memory scheduling contract;
+admission, deferral and preemption are implemented in a later stage.
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `enabled` | bool | `true` | migration v4 writes `false` on upgrades when this key is absent, even in a partially present table |
+| `quiet_gap_s` | int | `30` | non-negative; quiet time after non-memory traffic |
+| `max_defer_s` | int | `300` | non-negative; starvation admission threshold, not a completion deadline |
+
+Migration v4 preserves every explicitly stored priority value. There is no stored
+hold-budget setting: the later gate derives it from half the memory engine's
+`llm_timeout_s`. Existing retry/backoff values remain operator-owned.
 
 #### `[memory.embedding]`
 

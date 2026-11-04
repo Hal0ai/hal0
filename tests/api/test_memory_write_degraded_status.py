@@ -99,7 +99,7 @@ async def test_failing_retain_shows_up_on_status_without_touching_memory_degrade
     genuine failure with a model already bound, not the no-chat-model window
     (that's ``TestNoChatModelWindow`` below).
     """
-    _route_extraction_slot(monkeypatch, "utility")
+    _route_extraction_slot(monkeypatch, "memory")
     app, c = _build(True)
     engine = _AcceptingClient()
     provider = HindsightProvider(client=engine, client_id="hermes", unified_bank=True)
@@ -237,7 +237,7 @@ async def test_auto_retry_fires_once_a_chat_model_resolves(
     await provider.write_health(max_age_s=0)
 
     # A chat model just became routable — the extraction slot now resolves.
-    _route_extraction_slot(monkeypatch, "utility")
+    _route_extraction_slot(monkeypatch, "memory")
 
     with c:
         body = c.get("/api/status").json()
@@ -263,7 +263,7 @@ async def test_auto_retry_is_bounded_by_a_cooldown(
     engine._failed_ids = ["op-1", "op-2"]
     await provider.write_health(max_age_s=0)
 
-    _route_extraction_slot(monkeypatch, "utility")
+    _route_extraction_slot(monkeypatch, "memory")
 
     with c:
         c.get("/api/status")
@@ -277,3 +277,18 @@ async def test_auto_retry_is_bounded_by_a_cooldown(
 
     assert provider._auto_retry_sweeps_done == first_sweep_count == 1
     assert "op-3" not in engine.retried
+
+
+@pytest.mark.asyncio
+async def test_shared_memory_chain_recovers_dead_letters_when_only_agent_is_bound(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, c = _build(True)
+    engine = _NoChatModelClient(["op-shared"])
+    provider = HindsightProvider(client=engine, client_id="hermes", unified_bank=True)
+    app.state.memory_provider = provider
+    _route_extraction_slot(monkeypatch, "agent")
+    with c:
+        body = c.get("/api/status").json()
+    assert engine.retried == ["op-shared"]
+    assert body["memory_write_health"]["reason"] != "no_chat_model"

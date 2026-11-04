@@ -46,6 +46,7 @@ from hal0.memory.namespace import (
     resolve_write_dataset,
 )
 from hal0.memory.retain_chunk_guard import ChunkAudit, audit_bank_chunks
+from hal0.normalize.resolver import DEFAULT_CHAINS
 
 router = APIRouter()
 
@@ -261,6 +262,12 @@ async def _enabled_llm_slots(request: Request) -> list[str]:
     return sorted(alias_map.keys())
 
 
+def _extraction_slot_resolves(slot: str | None, available: list[str]) -> bool:
+    """The default memory target may share agent when its own binding is empty."""
+    chain = DEFAULT_CHAINS[MEMORY_ALIAS] if slot == "memory" else (slot,)
+    return any(name in available for name in chain)
+
+
 #: Last warm attempt per upstream name (monotonic seconds): an offline
 #: provider is re-fetched at most once per :data:`_WARM_RETRY_S`, not on
 #: every status poll.
@@ -385,7 +392,8 @@ async def graph_status(request: Request) -> dict[str, Any]:
         {
           "enabled":         bool,
           "extraction_slot": str,            # the local llm slot used for extraction
-          "slot_resolves":   bool,           # does extraction_slot match an enabled llm slot?
+          "mode":            str,            # dedicated | shared | custom
+          "slot_resolves":   bool,           # does the extraction slot (or memory fallback) have a model?
           "available_slots": [str, ...],     # enabled llm slots the operator can pick
           "in_flight":       int,
           "builds_ok":       int,
@@ -399,11 +407,19 @@ async def graph_status(request: Request) -> dict[str, Any]:
     status = wrapper.graph_status()
     available = await _enabled_llm_slots(request)
     status["available_slots"] = available
-    status["slot_resolves"] = status.get("extraction_slot") in available
+    status["slot_resolves"] = _extraction_slot_resolves(status.get("extraction_slot"), available)
     # llm_timeout_s and the extraction limits (#1834) live in hal0.toml (not
     # on the provider) — echo them so the dashboard's graph panel can edit
     # them without a second config fetch.
     graph_cfg = load_hal0_config().memory.graph
+    # Configuration and model binding define the mode, never live readiness.
+    # Custom slots/upstreams remain visible without rewriting operator intent.
+    if graph_cfg.extraction_model or graph_cfg.extraction_slot not in {"memory", "agent"}:
+        status["mode"] = "custom"
+    elif graph_cfg.extraction_slot == "memory" and "memory" in available:
+        status["mode"] = "dedicated"
+    else:
+        status["mode"] = "shared"
     status["llm_timeout_s"] = graph_cfg.llm_timeout_s
     status["extraction_limits"] = ExtractionLimits.from_config(graph_cfg).as_dict()
     status["throughput"] = _cached_throughput(request, status.get("extraction_slot"), graph_cfg)

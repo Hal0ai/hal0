@@ -36,6 +36,7 @@ import { SettingsPreviewDrawer } from '../../shared/SettingsPreviewDrawer.jsx'
 // GET /api/settings/fields `live_target` (real resolver, real slot state).
 const _CANONICAL_CHAINS = {
   'hal0/agent': ['agent'],
+  'hal0/memory': ['memory', 'agent'],
   'hal0/utility': ['utility', 'agent'],
   'hal0/npu': ['npu', 'utility', 'agent'],
   'hal0/brain': ['brain', 'agent'],
