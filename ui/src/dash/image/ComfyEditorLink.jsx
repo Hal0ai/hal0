@@ -28,6 +28,7 @@ export function EditorOpenButton({ testid, className = 'svc-btn', children }) {
   if (access.onBox && access.url) {
     const url = access.url
     return (
+      <>
       <button
         type="button"
         className={className}
@@ -37,6 +38,12 @@ export function EditorOpenButton({ testid, className = 'svc-btn', children }) {
       >
         {children}
       </button>
+      {access.ipUrl && access.ipUrl !== url && (
+        <a className="ie-muted" data-testid={`${testid}-ip`} href={access.ipUrl} target="_blank" rel="noopener noreferrer">
+          Can't reach it? Try the IP link
+        </a>
+      )}
+      </>
     )
   }
   const why = access.needsPublicUrl ?? OFF_BOX_NOTE
@@ -83,5 +90,16 @@ export function EditorOffBox({ testid }) {
       </span>
       <TunnelCommand tunnel={access.tunnel} testid={testid} />
     </div>
+  )
+}
+
+/** Secondary direct-IP path for clients that cannot resolve the advertised host name. */
+export function EditorIpFallback({ testid }) {
+  const access = useEditorAccess()
+  if (!access.url || !access.ipUrl || access.url === access.ipUrl) return null
+  return (
+    <a className="ie-muted" data-testid={testid} href={access.ipUrl} target="_blank" rel="noopener noreferrer">
+      Can't reach it? Try the IP link
+    </a>
   )
 }

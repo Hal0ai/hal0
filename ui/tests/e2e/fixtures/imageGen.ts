@@ -325,6 +325,7 @@ export function makeImageGenMock(over: Partial<ImageGenMock> = {}): ImageGenMock
       hermes: '',
       hermes_enabled: false,
       comfyui: 'http://localhost:8188',
+      comfyui_ip: '',
       comfyui_public: false,
     },
     memory: memoryBudget(),
