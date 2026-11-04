@@ -104,7 +104,12 @@ wants, about 10 GiB, which is advised and never part of `resident_mb`;
 `verdict` is the advisory fit of the first against the third: `fits`, `tight`
 (within 10% of what is free), `exceeds`, `exceeds_total` (more than the whole pool)
 or `unknown` (no host reading), and `loaded` when the slot already holds the memory.
-It never blocks a load.
+It never blocks a load. The drawer may pass `profile` and `flags` query parameters to
+preview the currently displayed engine settings; `flags` replaces the selected
+profile's flags for sizing only. Omit them for the saved slot profile. The
+preview uses the same provider footprint resolver and does not persist settings.
+While the slot drawer is open, the UI refreshes this readout every eight seconds
+so a load or unload performed elsewhere updates its verdict.
 
 ## Router groups
 

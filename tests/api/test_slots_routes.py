@@ -2963,6 +2963,22 @@ def _bound_halogen_slot(
     assert r.status_code == 200, r.text
 
 
+def test_resolved_footprint_previews_draft_without_saving(
+    container_stub: dict[str, Any],
+    isolated_app: FastAPI,
+    isolated_client: TestClient,
+    tmp_hal0_home: str,
+) -> None:
+    _bound_halogen_slot(isolated_client, tmp_hal0_home, size_bytes=53 * 2**30)
+    _host_gtt(isolated_app, total_gib=128.0, used_gib=20.0)
+    url = "/api/slots/flash/resolved"
+    saved = isolated_client.get(url).json()["footprint"]["resident_mb"]
+    preview = isolated_client.get(url, params={"flags": "HALOGEN_KV_POOL_POSITIONS=524288"})
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["footprint"]["resident_mb"] > saved
+    assert isolated_client.get(url).json()["footprint"]["resident_mb"] == saved
+
+
 def test_resolved_footprint_for_a_halogen_slot(
     container_stub: dict[str, Any],
     isolated_app: FastAPI,
