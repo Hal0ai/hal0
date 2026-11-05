@@ -52,6 +52,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from hal0.slots._cfg_helpers import _model_default
+from hal0.slots.config_write import _cfg_effective_provider
 from hal0.slots.state import DISPATCHABLE_STATES, SlotState, SlotStateRecord
 
 if TYPE_CHECKING:
@@ -190,7 +191,9 @@ class SlotInterface:
         # On-disk launch config (synthesized from state.json for in-memory slots).
         config = await self._m.get_config(name)
         # Resolved model metadata (registry dump + FLM tag).
-        model_resolution = await self._m._resolve_model_info(snap.model_id)
+        model_resolution = await self._m._resolve_model_info(
+            snap.model_id, provider=_cfg_effective_provider(config)
+        )
         # Authoritative port claim, if a PortAuthority is wired.
         port_claim = self._port_claim(slot_id, name)
         # Last failure surfaces only while the slot is wedged in ERROR.

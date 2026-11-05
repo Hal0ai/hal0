@@ -239,7 +239,9 @@ class PreloadEvictHost(Protocol):
     def _sweep_candidates(self) -> dict[str, float]: ...
     def _probe_host_free_mb(self) -> float: ...
     async def _load_slot_config(self, name: str) -> dict[str, Any]: ...
-    async def _resolve_model_info(self, model_id: str | None) -> dict[str, Any]: ...
+    async def _resolve_model_info(
+        self, model_id: str | None, *, provider: str | None = None
+    ) -> dict[str, Any]: ...
     async def list(self) -> list[Any]: ...
     async def unload(self, name: str) -> Any: ...
 
@@ -286,7 +288,16 @@ async def _estimate_incoming_footprint_mb(
     """
     from hal0.slots.capacity import estimate_file_size_kv_mb, provider_footprint_mb
 
-    info = model_info if model_info is not None else await host._resolve_model_info(model_id)
+    slot_cfg: dict[str, Any] | None = None
+    if slot_name:
+        slot_cfg = await _slot_config_or_none(host, slot_name)
+    if model_info is not None:
+        info = model_info
+    else:
+        from hal0.slots.config_write import _cfg_effective_provider
+
+        provider = _cfg_effective_provider(slot_cfg) if slot_cfg is not None else None
+        info = await host._resolve_model_info(model_id, provider=provider)
     if not info:
         return 0.0
     try:
@@ -295,9 +306,7 @@ async def _estimate_incoming_footprint_mb(
         model_mb = 0.0
     if model_mb <= 0:
         return 0.0
-    slot_cfg: dict[str, Any] | None = None
-    if slot_name:
-        slot_cfg = await _slot_config_or_none(host, slot_name)
+    if slot_cfg is not None:
         ctx = _slot_ctx_tokens(slot_cfg, info)
         if ctx:
             info = {**info, "ctx_tokens": ctx}
