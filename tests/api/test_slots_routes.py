@@ -214,6 +214,52 @@ def test_list_merges_real_and_synthetic(
     assert by_name["haloai"]["kind"] == "remote"
 
 
+def test_list_slots_uses_divergent_binding_for_non_serving_model_id(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+    isolated_app: FastAPI,
+    tmp_hal0_home: str,
+) -> None:
+    """A non-serving slot reports its configured model, not its stale state id."""
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "chat",
+        [
+            'name = "chat"',
+            "port = 8081",
+            'device = "gpu-vulkan"',
+            'provider = "llama-server"',
+            'runtime = "container"',
+            'profile = "chat"',
+            "[model]",
+            'default = "other-model-xyz"',
+        ],
+    )
+    sm: SlotManager = isolated_app.state.slot_manager
+    # Seed a prior loaded record; with the container down, status reconciles it
+    # to OFFLINE and must project the TOML binding instead of this stale id.
+    import time
+
+    from hal0.slots.state import SlotState, SlotStateRecord
+
+    sm._states[sm._key("chat")] = SlotStateRecord(
+        name="chat",
+        state=SlotState.READY,
+        model_id="qwen3-4b-q4_k_m",
+        port=8081,
+        updated_at=time.time(),
+        message="",
+        extra={},
+    )
+
+    r = isolated_client.get("/api/slots")
+    assert r.status_code == 200, r.text
+    chat = next(entry for entry in r.json() if entry["name"] == "chat")
+    assert chat["state"] == "offline"
+    assert chat["model_id"] == "other-model-xyz"
+
+
 def test_list_real_wins_on_name_collision(
     slot_root: Path,
     container_stub: dict[str, Any],

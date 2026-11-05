@@ -2620,6 +2620,13 @@ class SlotManager:
         provider = _cfg_effective_provider(cfg) if cfg else None
         if provider:
             meta["provider"] = provider
+        model_id = rec.model_id
+        if (
+            cfg
+            and observed not in (SlotState.READY, SlotState.SERVING, SlotState.IDLE)
+            and provider_requires_model(provider)
+        ):
+            model_id = _model_default(cfg) or None
         # #2694: a slot still serving a model whose binding was emptied (the
         # ADR-0028 runner-system conversion unassigns a fork-only quant, or a
         # hand edit) used to read idle with the old model_id and no message —
@@ -2666,7 +2673,7 @@ class SlotManager:
                 name=slot_name,
                 state=observed,
                 port=rec.port,
-                model_id=rec.model_id,
+                model_id=model_id,
                 backend=backend,
                 metadata=meta,
                 last_used_at=self._last_used.get(self._key(slot_name)),
