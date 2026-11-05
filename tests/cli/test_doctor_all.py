@@ -1619,6 +1619,14 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(
         da,
+        "check_fabric_clock",
+        lambda slots=None, **_kw: Check(
+            "fabric_clock", "NPU/GPU fabric-clock guard", "pass", "stubbed"
+        ),
+    )
+
+    monkeypatch.setattr(
+        da,
         "check_img_custom_nodes",
         lambda: Check("img-custom-nodes", "Image custom nodes", "pass", "stubbed"),
     )
@@ -1639,7 +1647,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
     keys = [c.key for c in checks]
     assert gtt_leak_slots == [[{"port": 8081}]]
     # Verify rows plus the extra evidence rows (gtt-leak, api-unit).
-    assert keys[-45:] == [
+    assert keys[-46:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1654,6 +1662,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "secret-modes",
         "hardware_freshness",
         "gtt_leak",
+        "fabric_clock",
         "seed_context_envelope",
         "agent-uid",
         "api-journal",
@@ -3444,3 +3453,88 @@ def test_box_default_providers_read_real_config(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("HAL0_PORT", "9001")
     c = da.check_box_boundary(in_box=lambda: True, publish_hosts=lambda: {})
     assert c.status == "warn" and "9001" in c.detail
+
+
+# ── check_fabric_clock ───────────────────────────────────────────────────────
+
+
+def _fclk_sysfs(root: Path, *, perf: str, marked_index: int | None) -> str:
+    device = root / "class" / "drm" / "card1" / "device"
+    device.mkdir(parents=True)
+    levels = [
+        "0: 400Mhz",
+        "1: 800Mhz",
+        "2: 1200Mhz",
+        "3: 1600Mhz",
+        "4: 1800Mhz",
+        "5: 1900Mhz",
+        "6: 1950Mhz",
+        "7: 2000Mhz",
+    ]
+    if marked_index is not None:
+        levels[marked_index] += " *"
+    (device / "pp_dpm_fclk").write_text("\n".join(levels) + "\n")
+    (device / "power_dpm_force_performance_level").write_text(perf)
+    return str(root)
+
+
+def test_fabric_clock_passes_without_slot_list() -> None:
+    c = da.check_fabric_clock(None)
+    assert c.status == "pass" and "unavailable" in c.detail
+
+
+def test_fabric_clock_passes_with_no_npu_gpu_pairing() -> None:
+    slots = [{"name": "chat", "state": "ready", "backend": "vulkan"}]
+    c = da.check_fabric_clock(slots)
+    assert c.status == "pass" and "no NPU+GPU" in c.detail
+
+
+def test_fabric_clock_passes_when_held(tmp_path: Path) -> None:
+    slots = [
+        {"name": "flm", "state": "ready", "backend": "flm"},
+        {"name": "chat", "state": "ready", "backend": "vulkan"},
+    ]
+    c = da.check_fabric_clock(slots, sys_root=_fclk_sysfs(tmp_path, perf="manual", marked_index=7))
+    assert c.status == "pass" and "held" in c.detail
+
+
+def test_fabric_clock_warns_when_npu_and_gpu_configured_and_unheld(tmp_path: Path) -> None:
+    slots = [
+        {"name": "flm", "state": "ready", "backend": "flm"},
+        {"name": "chat", "state": "idle", "backend": "vulkan"},
+    ]
+    c = da.check_fabric_clock(slots, sys_root=_fclk_sysfs(tmp_path, perf="auto", marked_index=0))
+    assert c.status == "warn"
+    assert "flm" in c.detail and "chat" in c.detail
+    assert "hal0-fabric-clock hold" in c.detail
+
+
+def test_fabric_clock_passes_unreadable_when_sysfs_absent(tmp_path: Path) -> None:
+    slots = [
+        {"name": "flm", "state": "ready", "backend": "flm"},
+        {"name": "chat", "state": "ready", "backend": "vulkan"},
+    ]
+    c = da.check_fabric_clock(slots, sys_root=str(tmp_path / "no-such-sys"))
+    assert c.status == "pass"
+    assert "unreadable" in c.detail
+
+
+def test_fabric_clock_ignores_synthetic_hal0_composite(tmp_path: Path) -> None:
+    """review P2-5: the API always folds in a synthetic composite row named
+    ``hal0`` (backend='vulkan' from slot_view synthesis). Counting it as a
+    real, individually-configured GPU slot turned every box with an NPU
+    slot and NO real GPU slot configured into a false WARN naming ``hal0``
+    — exclude ``_synthetic`` rows so only genuine per-slot configs pair.
+    """
+    slots = [
+        {"name": "flm", "state": "ready", "backend": "flm"},
+        {
+            "name": "hal0",
+            "state": "serving",
+            "backend": "vulkan",
+            "_synthetic": True,
+        },
+    ]
+    c = da.check_fabric_clock(slots, sys_root=_fclk_sysfs(tmp_path, perf="auto", marked_index=0))
+    assert c.status == "pass", c.detail
+    assert "hal0" not in c.detail

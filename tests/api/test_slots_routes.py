@@ -470,6 +470,65 @@ def test_load_success_path_dispatches_via_container(
     assert load_calls[0]["model_info"]["_model_key"] == "qwen3-4b-q4_k_m"
 
 
+def test_fabric_clock_refusal_maps_to_409_config_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_hal0_home: str,
+    slot_root: Path,
+    container_stub: dict[str, Any],
+) -> None:
+    """review P2-3: a real refusal through SlotManager.load() — not a direct
+    `_guard_fabric_clock` call — must surface through the existing
+    ``SlotConfigError`` → 409 mapping (SlotFabricClockHazard IS a
+    SlotConfigError, carrying its own ``slot.fabric_clock_unheld`` code and
+    the operator-facing remediation message), and the refused NPU slot must
+    come back OFFLINE (not ERROR) with no load-failure counted, because the
+    pairing was refused, not broken.
+
+    ``HAL0_FABRIC_CLOCK_GUARD`` must be set, and the clock-state patch
+    applied, BEFORE ``isolated_app``/``isolated_client`` construct their
+    SlotManager in the app lifespan — hence the explicit local app/client
+    here instead of the shared fixtures (which resolve too early for a
+    policy env var set from inside the test body).
+    """
+    from hal0.slots import fabric_clock_guard as fcg
+
+    monkeypatch.setenv("HAL0_FABRIC_CLOCK_GUARD", "refuse")
+    not_held = fcg.FabricClockState(
+        readable=True, held=False, active_index=0, top_index=7, perf_level="auto", device="card0"
+    )
+    monkeypatch.setattr(fcg, "read_fabric_clock", lambda *a, **k: not_held)
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "npu",
+        [
+            'name = "npu"',
+            "port = 8088",
+            'device = "npu"',
+            'runtime = "container"',
+            'profile = "flm"',
+            "[model]",
+            'default = "gemma3:4b"',
+        ],
+    )
+
+    app = create_app()
+    with TestClient(app) as client:
+        # chat (gpu-vulkan) is already up; the clock is readable and NOT held.
+        chat_r = client.post("/api/slots/chat/load")
+        assert chat_r.status_code == 200, chat_r.text
+
+        r = client.post("/api/slots/npu/load")
+        assert r.status_code == 409, r.text
+        assert r.json()["error"]["code"] == "slot.fabric_clock_unheld", r.text
+
+        status_r = client.get("/api/slots/npu")
+        assert status_r.status_code == 200, status_r.text
+        body = status_r.json()
+        assert body["state"] == "offline", body
+        load_failures = body.get("load_failures") or body.get("metadata", {}).get("load_failures")
+        assert not load_failures, body
+
+
 def test_agent_hermes_is_no_longer_an_alias_for_agent(
     tmp_hal0_home: str,
     container_stub: dict[str, Any],
