@@ -910,7 +910,7 @@ async def enqueue_update(
 
 
 def list_all(jobs: dict[str, PullJob], registry: Any) -> list[dict[str, Any]]:
-    """Return all pull jobs (active in-memory + persisted terminal from disk).
+    """Return all pull jobs (active persisted + in-memory + terminal snapshots).
 
     Dedup: in-memory jobs win over persisted snapshots for the same model_id.
     Entries are enriched via :func:`hal0.services.models_service.pull_entry` and
@@ -918,18 +918,24 @@ def list_all(jobs: dict[str, PullJob], registry: Any) -> list[dict[str, Any]]:
     """
     from hal0.services.models_service import pull_entry
 
-    # Start with persisted TERMINAL jobs from disk.
-    # Non-terminal snapshots (e.g. "running" from a crash) are skipped
-    # — there is no matching in-memory job to reconcile them.
+    # Persisted active jobs may belong to an external process, such as the
+    # install-time brain pull. Expose their progress while their durable state
+    # remains active. If the registry already has the installed file, reconcile
+    # a stale snapshot to completed as in the per-model status route.
     persisted = list_persisted_jobs()
     by_model: dict[str, dict[str, Any]] = {}
     for p in persisted:
-        state = p.get("state")
-        if state not in ("completed", "failed", "cancelled"):
-            continue
         mid = p.get("model_id")
         if isinstance(mid, str) and mid:
-            by_model[mid] = p
+            if p.get("state") in ("queued", "running"):
+                reconciled = reconcile_persisted(p, registry)
+                by_model[mid] = (
+                    reconciled
+                    if reconciled.get("state") == "completed"
+                    else p
+                )
+            else:
+                by_model[mid] = p
 
     # Overlay in-memory jobs (they win — reflect live state)
     for mid, job in jobs.items():
