@@ -1442,7 +1442,8 @@ async def memory_list(
     private-mode case to the private bucket alone, unlike ``/search``.)
 
     ``?bank=`` is a convenience alias for the dashboard's Hindsight bank
-    browser: a bank id (``private__hermes``) is translated to the matching
+    browser: a bank id (``private__hermes``, or the platform bank's own name)
+    is translated to the matching
     dataset namespace (``private:hermes``) when no explicit ``?dataset=`` is
     given. If both are supplied and conflict, the explicit ``dataset`` wins.
 
@@ -1458,7 +1459,13 @@ async def memory_list(
     agent's.
     """
     if bank is not None:
-        bank_dataset = bank_to_namespace(bank)
+        # The platform bank ([memory] bank, ADR-0052) answers for ``shared``
+        # whatever the operator named it; any other bank id keeps the
+        # ``private__<agent>`` -> ``private:<agent>`` spelling.
+        platform_bank = getattr(
+            getattr(request.app.state, "memory_provider", None), "platform_bank", "shared"
+        )
+        bank_dataset = "shared" if bank == platform_bank else bank_to_namespace(bank)
         if dataset is None:
             dataset = bank_dataset
         elif dataset != bank_dataset:
