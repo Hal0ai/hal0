@@ -226,11 +226,13 @@ def test_occupancy_contract_field_shape(client: TestClient, monkeypatch):
         "name",
         "model",
         "state",
+        "engine",
         "cols",
         "gb",
         "active",
         "last_used_age_s",
     }
+    assert body["slots"][0]["engine"] == "flm"
 
 
 # ── (e) per-capability activity ──────────────────────────────────────────────
@@ -341,3 +343,35 @@ def test_occupancy_warns_when_xdna_and_flm_both_loaded(client: TestClient, monke
     assert {"flm", "xdna-qwen"} <= names
     assert body["shared_warning"] is not None
     assert "time-sliced" in body["shared_warning"]
+
+
+def test_occupancy_engine_field_and_single_tenant(client: TestClient, monkeypatch):
+    """``engine`` distinguishes flm vs xdna holders; single_tenant false when shared."""
+    monkeypatch.setattr(hw_mod, "_npu_status", AsyncMock(return_value={"ok": True}))
+    monkeypatch.setattr(npu_columns, "cached_aie_columns", AsyncMock(return_value=None))
+    _wire(
+        client,
+        [
+            _FakeSlot("flm", SlotState.READY, model_id="gemma3:4b", backend="flm"),
+            _FakeSlot("xdna-qwen", SlotState.READY, model_id="qwen3-xdna", backend="npu"),
+        ],
+    )
+
+    body = client.get("/api/npu/occupancy").json()
+    by_name = {s["name"]: s for s in body["slots"]}
+    assert by_name["flm"]["engine"] == "flm"
+    assert by_name["xdna-qwen"]["engine"] == "xdna"
+    assert body["single_tenant"] is False
+
+
+def test_occupancy_single_tenant_true_for_one_holder(client: TestClient, monkeypatch):
+    monkeypatch.setattr(hw_mod, "_npu_status", AsyncMock(return_value={"ok": True}))
+    monkeypatch.setattr(npu_columns, "cached_aie_columns", AsyncMock(return_value=None))
+    _wire(
+        client,
+        [_FakeSlot("xdna-qwen", SlotState.READY, model_id="qwen3-xdna", backend="npu")],
+    )
+
+    body = client.get("/api/npu/occupancy").json()
+    assert body["single_tenant"] is True
+    assert body["slots"][0]["engine"] == "xdna"
