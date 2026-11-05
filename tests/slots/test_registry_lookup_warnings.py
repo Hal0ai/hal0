@@ -121,9 +121,18 @@ async def test_active_self_managed_reload_and_status_drift_stay_quiet(
 
     manager = SlotManager()
     with caplog.at_level(logging.WARNING):
+        # The first load resolves the model through manager._load's
+        # _resolve_model_info — the call site the fix threads the provider
+        # through. Nothing clears the log between the legs, so a warning
+        # raised by any of them fails the assertion below.
         await manager.load("qwen3tts")
-        caplog.clear()
+        # An ACTIVE-slot reload: a second load() on an already-READY slot
+        # short-circuits before _load, so it never reaches the resolver.
+        # Unload first, so the reload really re-enters the load path.
+        await manager.unload("qwen3tts")
         await manager.load("qwen3tts")
+        # The status drift check resolves the model again, through
+        # drift.compute_config_drift.
         await manager.status("qwen3tts", include_config_drift=True)
 
     assert "slot.model_not_in_registry" not in caplog.messages
