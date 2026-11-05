@@ -64,15 +64,31 @@ held() {
 
 hold_dev() {
   lvl=$(grep . "$1/pp_dpm_fclk" 2>/dev/null | tail -n 1 | cut -d: -f1)
-  perf=$(cat "$1/power_dpm_force_performance_level" 2>/dev/null) || perf=""
-  [ -n "$lvl" ] && [ -n "$perf" ] || return 2
-  if wr "$1/power_dpm_force_performance_level" manual && wr "$1/pp_dpm_fclk" "$lvl"; then
-    if held "$1"; then
-      echo "hal0-fabric-clock: $1: held at level $lvl"
-      return 0
-    fi
+  prev_perf=$(cat "$1/power_dpm_force_performance_level" 2>/dev/null) || prev_perf=""
+  [ -n "$lvl" ] && [ -n "$prev_perf" ] || return 2
+  # Save the pre-hold perf level so any failure after the first write (the
+  # manual switch) restores it instead of leaving the device stuck in
+  # `manual` with no fclk actually pinned (review P2-7): a `manual` level
+  # with an unwanted/default fclk is worse than `auto`, since it looks held
+  # but isn't, and nothing else will ever flip it back on its own.
+  rollback() {
+    wr "$1/power_dpm_force_performance_level" "$prev_perf" 2>/dev/null
+  }
+  if ! wr "$1/power_dpm_force_performance_level" manual; then
+    echo "hal0-fabric-clock: $1: could not set manual perf level (level $lvl)" >&2
+    return 1
   fi
-  echo "hal0-fabric-clock: $1: could not hold it (level $lvl)" >&2
+  if ! wr "$1/pp_dpm_fclk" "$lvl"; then
+    echo "hal0-fabric-clock: $1: could not pin fclk level $lvl, rolling back to $prev_perf" >&2
+    rollback "$1"
+    return 1
+  fi
+  if held "$1"; then
+    echo "hal0-fabric-clock: $1: held at level $lvl"
+    return 0
+  fi
+  echo "hal0-fabric-clock: $1: could not hold it (level $lvl), rolling back to $prev_perf" >&2
+  rollback "$1"
   return 1
 }
 
