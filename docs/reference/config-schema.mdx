@@ -35,7 +35,8 @@ below) — see [Environment variables](/docs/reference/env-vars/) for the full l
 | `/etc/hal0/manifest.json` | JSON | Release manifest — the `runners` table of runner-image pins. |
 | `/etc/hal0/api.env`, `/etc/hal0/openwebui.env` | env-file (`KEY=value`) | systemd `EnvironmentFile=` — secrets/keys, not part of the Pydantic schema. |
 
-`hal0.toml` and `slots/<name>.toml` are documented on this page. `providers.toml`,
+`hal0.toml` is documented on this page; `slots/<name>.toml` is documented in
+[Config schema: slot files](/docs/reference/config-schema-slots/). `providers.toml`,
 `upstreams.toml`, `profiles.toml`, `stacks.toml`, `agents/<name>.toml`, `hardware.json`
 and `manifest.json` are documented in
 [Config schema: providers, profiles, stacks & agents](/docs/reference/config-schema-profiles/).
@@ -129,6 +130,7 @@ override: `HAL0_FLM_MODELS_DIR`.
 |---|---|---|---|
 | `enabled` | bool | `true` | — |
 | `unified_bank` | bool | `true` | — |
+| `bank` | str | `"shared"` | Hindsight bank behind the `shared` namespace (ADR-0052); letters, digits, `.`, `_`, `:`, `-`, max 128, must start alphanumeric; not `agents` or `private__*`. Run `hal0 memory migrate platform` before changing it; restart hal0-api |
 | `engine` | str | `"hindsight"` | one of `hindsight`, `mem0`, `pgvector` — `"cognee"` is explicitly rejected (retired) |
 | `graph` | table | — | see below |
 | `priority` | table | — | see below |
@@ -349,136 +351,8 @@ Each key also has a `HAL0_METRICS_*` environment variable that overrides it
 (precedence: env var > `[metrics]` TOML table > default) — see
 [Environment variables](/docs/reference/env-vars/) for that list.
 
-## Slot `[tune]` table
+## Slot files
 
-An LLM slot outside the NPU lane may contain:
-
-```toml
-[tune]
-ctx_size = 8192
-enable_thinking = false
-reasoning_effort = "low"
-reasoning_budget = 512
-vision = "off"
-speculation = "ngram"
-```
-
-All keys are optional and inherit the profile when absent. Context accepts
-128–16777216. Effort accepts `default|minimal|low|medium|high|xhigh|max`;
-`default` emits no effort flag. Budget is -1 through 16777216 (-1 emits no
-budget flag; 0 ends reasoning immediately). Vision accepts `auto|off` and
-speculation accepts `auto|off|ngram`, except on a halogen slot, where `ngram` is
-refused because the engine has no n-gram drafter.
-
-Unsupported slot types/devices fail with `slot.tune_not_supported`; a thinking
-override pinned by profile flags fails with `slot.tune_pinned_by_flags`; a value
-the slot's engine cannot run (speculation `ngram` on a halogen slot, or a halogen
-context past the engine's native 262144 positions with no `HALOGEN_ROPE_YARN` in
-the profile's flags) fails with `slot.tune_unsupported_value` (400).
-Legacy root-level tuning keys remain refused with `slot.tuning_key_denied`.
-Effort flags require a resolved runner build of at least 11840.
-
-## `slots/<name>.toml`
-
-Root model `SlotConfig`, `extra="forbid"`: every key a slot file may carry is a field
-below, and a key that is not fails the load, naming the key and the file
-(`failed to validate slot config 'x' at /etc/hal0/slots/x.toml: unknown key 'lru' ...`).
-Both a nested `[slot]` table and flat top-level scalars are accepted on load and normalized
-(`[slot]` wins over a root scalar of the same name, as it does on the launch path). The same
-vocabulary gates every write: `POST /api/slots`, `PUT /api/slots/{name}/config` and the
-in-process writers (`SlotManager.create` / `update_config`, stacks apply) refuse an unknown key
-with a 400 `validation.unknown_keys`, and a key hal0 removed (`enabled`, `backend`, `lru`) with
-a 400 `slot.removed_key_denied` that names its replacement.
-
-| Key | Type | Default | Req | Constraints |
-|---|---|---|---|---|
-| `id` | int \| null | `null` | — | `>= 1` |
-| `name` | str | — | **required** | regex `^[a-z0-9][a-z0-9_-]{0,31}$` |
-| `type` | str \| null | `null` | — | slot kind (`llm`, `embedding`, `reranking`, `tts`, `transcription`, `image`, …); a type-less llm-shaped file is healed to `llm` on load |
-| `default` | bool \| null | `null` | — | the slot is its type's default; the first slot of a type becomes it at create, and at most one slot per type may be |
-| `served_by` | str \| null | `null` | — | FLM trio shadows only: the NPU anchor slot whose process serves this one |
-| `port` | int | — | **required** | `8081-8200` |
-| `device` | str | `"gpu-rocm"` | — | one of `gpu-rocm, gpu-vulkan, gpu-cuda, cpu, npu` |
-| `gpu_index` | int \| null | `null` | — | `>= 0` |
-| `n_gpu_layers` | int | `-1` | — | `-1` = all, `0` = CPU-only |
-| `threads` | int | `0` | — | `>= 0`; `0` = unset |
-| `metrics` | bool | `true` | — | emits `--metrics`, enabling llama-server's loopback-only `/metrics` endpoint; without it `/metrics` 501s and hal0's tok/s and request-count collection can never populate (#1810) |
-| `binary` | str | `""` | — | key into `RUNNER_IMAGES` |
-| `image_pin` | str \| null | `null` | — | debug-only escape-hatch image ref override (ADR-0006) — not the intended path to a shipped runtime; use `profile.runner` or the slot drawer's Runtime selector instead |
-| `provider` | str | `"llama-server"` | — | one of `llama-server, flm, moonshine, kokoro, qwen3tts, comfyui`; **deprecated**, legacy label only — all slots run as podman containers now |
-| `runtime` | `"container"` | `"container"` | — | only value; deprecated field |
-| `profile` | str \| null | `null` | — | a seed name or a `profiles.toml` entry; the profile is the slot's whole tune (ADR-0029). `null` = the slot type's seed (`embedding`, `reranking`), else `chat`; a profileless `tts`, `transcription` or `image` slot uses its engine's default instead (`kokoro`, or `qwen3-tts` on the Qwen3-TTS engine; `moonshine`; ComfyUI's built-in flag bundle). A name the catalog does not have fails the launch with `slot.profile_missing` |
-| `output_sanity` | bool \| null | `null` | — | `false` exempts this one slot from the output-sanity gate; `null` = the gate runs. See [Slot lifecycle](/docs/reference/slot-lifecycle/) |
-| `system_prompt` | str \| null | `null` | — | persona text for `hal0/<slot>` delegation; absent = no system message |
-| `default_voice` | str \| null | `null` | — | TTS slots |
-| `default_speed` | float \| null | `null` | — | `0.25-4.0` |
-| `default_response_format` | str \| null | `null` | — | one of `mp3, wav, opus, flac, pcm` |
-| `idle_timeout_s` | int | `300` | — | `>= 0`; `0` disables IDLE-TTL eviction for this slot only — pressure and pre-load eviction are separate paths, exempted by `pinned`. `idle_timeout_s` does not apply to the ComfyUI `img` slot, which idle, pressure and pre-load eviction never unload. Read via the raw-dict sweep path (not the typed loader), an out-of-range value there is clamped/floored at read time, not errored — the typed `POST`/`PUT` API path still hard-rejects via pydantic's `ge` |
-| `pinned` | bool | `false` | — | exempts the slot from auto-eviction; blocks manual unload without `force` |
-| `autoload` | bool \| null | `null` | — | `true` → the Quadlet unit gets `[Install] WantedBy=hal0.target` and the slot starts at boot; `false` → unit exists, nothing starts it. `null` (key absent) is the migration shim: derived from a non-empty `model.default`. `POST /api/slots` persists an explicit value (`false`) |
-| `priority` | int | `50` | — | `0-100`; eviction order, lowest evicted first, `last_used` breaks ties. `100` is *not* a pin — use `pinned`. Read via the raw-dict sweep path, an out-of-range TOML value is clamped to `0-100` at read time, not errored — the typed `POST`/`PUT` API path still hard-rejects via pydantic's `ge`/`le` |
-| `model` | table | — | — | `[model]`, see below |
-| `server` | table | — | — | `[server]`, see below |
-| `npu` | table \| null | `null` | — | `[npu]`, see below |
-| `image` (alias `image_gen`) | table | — | — | `[image]`, see below |
-
-There is **no catch-all**: a table or key the schema does not declare is an error, not a place
-to park a hand edit. There is **no `enabled` field** — a non-empty `model.default` is the
-activation signal. Boot start is separate and explicit (`autoload`). `enabled`, `backend` (now
-`device`), `lru` (now `priority` / `pinned`) and a bare `image = "<ref>"` (now `image_pin`) are
-retired; delete or rewrite them by hand, because a file that still carries
-one fails the load with the replacement named. See
-[Slot lifecycle](/docs/reference/slot-lifecycle/) for the activation model.
-
-A slot holds placement (device, layers, threads, runner), its model and its profile, and nothing else about how the model runs. A write that carries a tuning key (`parallel`, `chat_template`, `workers`, `ctx_size`, `mtp`, `enable_thinking`, `vision`, `[model].context_size`, `[model].ctx_size`, `[model].n_gpu_layers`, `[model].rope_freq_base`, `[model].extra` or `[server].extra_args`) is refused with a 400 `slot.tuning_key_denied` ("belongs on a profile"). A slot file on disk that still carries one is refused at launch with `slot.unconverted`: delete the keys from the file and put their values on a profile (`hal0 profile create`).
-
-<Aside type="note">
-The slot's `device` is the single authoritative hardware fact; a profile carries no
-hardware placement. See
-[Providers, profiles & devices](/docs/reference/providers-profiles-devices/).
-</Aside>
-
-### `[model]` (nested under a slot)
-
-`extra="forbid"`.
-
-| Key | Type | Default | Constraints |
-|---|---|---|---|
-| `default` | str | `""` | model id from the registry |
-
-The slot's `[model]` table names its model and nothing else about it. Base tune
-lives on the profile, and six sparse overrides belong in `[tune]` (ADR-0045).
-A write carrying tuning under `[model]` is rejected with
-`slot.tuning_key_denied`.
-
-### `[server]` (nested under a slot)
-
-`extra="forbid"`.
-
-| Key | Type | Default | Constraints |
-|---|---|---|---|
-| `env` | dict[str,str] \| null | `null` | keys must match `^[A-Za-z_][A-Za-z0-9_]*$`; values must not contain `\n`/`\r` |
-
-`env` may not set a llama-server option. Names that start with `LLAMA_ARG_`, and `LLAMA_API_KEY`, `HF_TOKEN` and `MTMD_BACKEND_DEVICE`, are refused with a 400 `slot.llama_env_denied`, at write time and again at launch: each of them sets a llama-server option. A `LLAMA_ARG_*` name sets what the matching flag sets, so it belongs in the profile's `flags` and only when that flag is allowed there. `LLAMA_API_KEY`, `HF_TOKEN` and `MTMD_BACKEND_DEVICE` set `--api-key`, `--hf-token` and `--mmproj-device`, which hal0 owns and no profile may set either.
-
-### `[npu]` (nested under a slot)
-
-`extra="forbid"`.
-
-| Key | Type | Default |
-|---|---|---|
-| `asr` | bool | `false` |
-| `embed` | bool | `false` |
-| `chat` | bool | `true` |
-
-### `[image]` (nested under a slot, alias for `image_gen`)
-
-`extra="forbid"`.
-
-| Key | Type | Default | Constraints |
-|---|---|---|---|
-| `default_size` | str | `""` | — (format `WxH`; empty means the model's native size) |
-| `default_steps` | int | `0` | `>= 0`; `0` means the model-class default |
-
-A `/v1/images/generations` request that sets no `size` or `steps` gets these when they are set,
-and the model's own defaults otherwise.
+The per-slot configuration \u2014 `/etc/hal0/slots/<name>.toml` and the
+`[tune]` override table \u2014 is documented in
+[Config schema: slot files](/docs/reference/config-schema-slots/).

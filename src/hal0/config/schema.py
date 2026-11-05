@@ -2716,6 +2716,19 @@ class MemoryConfig(BaseModel):
             "(private:<agent> / project:<id> banks + fan-out recall)."
         ),
     )
+    bank: str = Field(
+        default="shared",
+        description=(
+            "Name of the Hindsight bank that holds the platform's memory — the "
+            "engine bank behind the 'shared' namespace (ADR-0052). The namespace "
+            "grammar ('shared' | 'private:<agent>') is unchanged; only the bank "
+            "id the provider talks to differs. The default 'shared' leaves "
+            "existing installs untouched. Changing it points hal0-api at a "
+            "different bank, so run 'hal0 memory migrate platform' first to "
+            "clone the existing bank's data into the new name, then restart "
+            "hal0-api."
+        ),
+    )
     # HAL0-SUNSET: v2.0.0 — 'cognee' engine literal retired here. It is no
     # longer an accepted config value (was previously a back-compat alias
     # that resolved to hindsight at runtime). provider_from_config's runtime
@@ -2734,6 +2747,27 @@ class MemoryConfig(BaseModel):
             "still carrying it must be updated to 'hindsight'."
         ),
     )
+
+    @field_validator("bank")
+    @classmethod
+    def _bank_is_addressable(cls, v: str) -> str:
+        # Same grammar as hal0.api.routes.memory_admin._BANK_RE: the bank id
+        # travels in /api/memory/banks/{bank_id} paths, so anything that route
+        # would refuse is refused here at config load instead of at first use.
+        s = str(v or "").strip()
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}", s):
+            raise ValueError(
+                f"memory.bank {v!r} must start with a letter or digit and use only "
+                "letters, digits, '.', '_', ':' and '-' (max 128 chars)"
+            )
+        # ``private__<agent>`` is the per-agent bank family and ``agents`` the
+        # retired identity-card bank (ADR-0005); a platform bank named like
+        # either would alias them.
+        if s.startswith("private__") or s == "agents":
+            raise ValueError(
+                f"memory.bank {v!r} collides with a reserved bank name ('private__*' and 'agents')"
+            )
+        return s
 
     @field_validator("engine")
     @classmethod
