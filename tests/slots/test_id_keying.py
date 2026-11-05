@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from hal0.config import paths
 from hal0.ports.authority import PortAuthority
 from hal0.slots.identity import SlotIdentityStore
 from hal0.slots.manager import SlotManager
@@ -177,6 +178,46 @@ async def test_fold_identity_populates_rows_and_claims(hal0_home: Path) -> None:
     assert sm._port_authority.held_by(agent.id) == 8082
     # idempotent: a second fold changes nothing.
     assert await sm.fold_identity() == 2
+
+
+async def test_fold_identity_releases_claim_for_retired_slot(hal0_home: Path) -> None:
+    sm = _manager(hal0_home)
+    retired = await _create(sm, "stt-cpu", port=8094)
+    retired_id = retired.slot_id
+    assert sm._port_authority.held_by(retired_id) == 8094
+
+    (paths.slots_config_dir() / "stt-cpu.toml").unlink()
+    await _create(SlotManager(), "stt", port=8094)
+
+    await sm.fold_identity()
+
+    assert sm._port_authority.held_by(retired_id) is None
+    stt = sm._identity.get_by_name("stt")
+    assert stt is not None
+    assert sm._port_authority.held_by(stt.id) == 8094
+
+
+async def test_fold_identity_allows_flm_trio_to_share_existing_group_claim(
+    hal0_home: Path,
+) -> None:
+    bare = SlotManager()
+    for name in ("flm", "flm-stt", "flm-embed"):
+        await _create(
+            bare,
+            name,
+            port=8088,
+            device="npu",
+            provider="flm",
+            model={"default": ""},
+        )
+
+    sm = _manager(hal0_home)
+    await sm.fold_identity()
+
+    claims = sm._port_authority.claims()
+    assert len(claims) == 1
+    assert claims[0].port == 8088
+    assert claims[0].owner_label in {"slot:flm", "slot:flm-stt", "slot:flm-embed"}
 
 
 async def test_bare_manager_unchanged(hal0_home: Path) -> None:
