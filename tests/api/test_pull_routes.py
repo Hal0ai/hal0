@@ -907,7 +907,7 @@ def test_list_pulls_reconciles_persisted_install_time_pull_against_registry(
     pulls = response.json()
     assert len(pulls) == 1
     assert pulls[0]["state"] == "completed"
-    assert pulls[0]["path"] == str(model_file)
+    assert pulls[0]["dest_path"] == str(model_file)
 
 
 # ── ADR-0031 §4: a paired drafter is screened before it is downloaded ───────
