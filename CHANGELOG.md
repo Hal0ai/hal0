@@ -89,6 +89,7 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- **Expected staged-weight model IDs no longer warn as missing from the registry.** Qwen3-TTS and Moonshine slot lookups stay quiet across loads, active-slot reloads, status drift checks and routing; unexpected misses and registry-backed Kokoro misses continue to warn. Registry hits still enrich model metadata. (#3408)
 - **Slot snapshots agree on model bindings and port ownership.** Boot reconciliation reports conflicts when a requested port belongs to a slot outside the same coresident group, `/api/slots` clears stale model ids for non-serving slots whose binding is empty, and each state-stream transition frame retains its own state, message, timestamp, and corrected model binding.
 
 - **Offline, unassigned slots that require a model now report `model_id: null` in `/api/slots`.** `GET /api/slots` and `GET /api/slots/{name}` no longer expose an id retained from an earlier load when the slot is offline, its `[model].default` is empty, and its provider requires an explicit model. A loaded slot still reports the model it is serving, even if the binding was cleared after the load. (#3407)

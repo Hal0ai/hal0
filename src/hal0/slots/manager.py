@@ -109,6 +109,7 @@ from hal0.slots.state import (
     SlotStateRecord,
     SlotTerminateTimeout,
     is_transition_legal,
+    provider_registry_miss_is_expected,
     provider_requires_model,
     read_state,
     write_state_atomic,
@@ -2090,7 +2091,9 @@ class SlotManager:
                 # Resolved once and threaded through both the pre-load
                 # eviction estimate and _spawn_locked below so a load never
                 # hits the model registry twice for the same model_id.
-                model_info = await self._resolve_model_info(resolved_model)
+                model_info = await self._resolve_model_info(
+                    resolved_model, provider=_cfg_effective_provider(cfg)
+                )
                 # A load the runtime is going to refuse (wrong host, a missing
                 # file, a model or runner of the wrong runtime) stops here: before the
                 # memory warnings, which would be about a load that never starts,
@@ -3018,7 +3021,9 @@ class SlotManager:
         ``except Exception -> ERROR`` branch records a stable error envelope.
         """
         if model_info is None:
-            model_info = await self._resolve_model_info(model_id)
+            model_info = await self._resolve_model_info(
+                model_id, provider=_cfg_effective_provider(slot_cfg)
+            )
 
         cfg = _launch_cfg(slot_cfg, model_id)
 
@@ -3060,7 +3065,11 @@ class SlotManager:
         cfg = await self._load_slot_config(slot_name)
         if is_npu_trio_shadow(cfg) or self._needs_pull(model_id):
             return
-        await self._check_load(cfg, model_id, await self._resolve_model_info(model_id))
+        await self._check_load(
+            cfg,
+            model_id,
+            await self._resolve_model_info(model_id, provider=_cfg_effective_provider(cfg)),
+        )
 
     async def _guard_gtt_leak(self, slot_name: str, provider: Any | None) -> str | None:
         """Warn when this host holds GPU memory nothing on this box accounts for.
@@ -4454,7 +4463,9 @@ class SlotManager:
         if key is not None:
             self._cfg_cache.pop(key, None)
 
-    async def _resolve_model_info(self, model_id: str | None) -> dict[str, Any]:
+    async def _resolve_model_info(
+        self, model_id: str | None, *, provider: str | None = None
+    ) -> dict[str, Any]:
         """Look up model metadata from the registry.
 
         Returns an empty dict when model_id is None or the registry isn't
@@ -4501,7 +4512,8 @@ class SlotManager:
             # Not fatal — the slot manager is not the authoritative gate
             # on "is this model installed"; the toolbox will surface its
             # own load error if the path is wrong.
-            log.warning("slot.model_not_in_registry", extra={"model_id": model_id})
+            if not provider_registry_miss_is_expected(provider):
+                log.warning("slot.model_not_in_registry", extra={"model_id": model_id})
             return info
         except NotImplementedError:
             log.warning("slot.registry_stub", extra={"model_id": model_id})
