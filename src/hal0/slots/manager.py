@@ -145,14 +145,34 @@ def _snapshot_model_id(
     observed: SlotState,
     model_id: str | None,
 ) -> str | None:
-    """Hide a stale binding from snapshots that are not actively serving."""
-    if (
-        cfg
-        and observed not in (SlotState.READY, SlotState.SERVING, SlotState.IDLE)
-        and not _model_default(cfg)
-        and provider_requires_model(provider)
-    ):
+    """Project the model id a snapshot reports for a slot.
+
+    One owner for the rule (ADR-0029): the slot binding owns which model the
+    slot *should* run, the state record owns which model it *is* running.
+
+    The chain, in order:
+
+    - a self-managed provider keeps its own id, and a serving slot
+      (``ready``, ``serving``, ``idle``) reports the model it is serving;
+    - a non-serving slot whose ``[model].default`` binding is empty reports
+      ``null``, so a stale id from an earlier load is not exposed
+      (#3412, #3453);
+    - a cold slot (``offline``, ``error``) reports its configured binding
+      rather than the id its state record retained (#3439);
+    - a loading slot (``pulling``, ``starting``, ``warming``) reports the
+      in-flight id its state record carries — the model being pulled or
+      warmed — not the binding, which is only persisted after the readiness
+      wait (#3439, r4480727490).
+    """
+    if not cfg or not provider_requires_model(provider):
+        return model_id
+    if observed in _READY_STATES:
+        return model_id
+    binding = _model_default(cfg)
+    if not binding:
         return None
+    if observed in (SlotState.OFFLINE, SlotState.ERROR):
+        return binding
     return model_id
 
 
