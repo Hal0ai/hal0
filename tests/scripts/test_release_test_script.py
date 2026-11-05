@@ -14,6 +14,9 @@ Three regressions are pinned here:
 * #2351 — the gate never asserted unload: the only ``slot unload`` calls
   were in the EXIT-trap cleanup, failures swallowed, no row written. An
   ``unload`` row now requires every loaded slot to unload to ``offline``.
+* #3435 — an offline, model-less FLM seed no longer reports a sticky model_id.
+  The NPU row must use an installed catalog tag, while respecting a bound
+  model and skipping when the catalog has no installed weights.
 * #2784 — ``/v1/audio/speech`` routes only to the slot named ``tts``, so the
   kokoro row drives the seeded ``tts`` slot through ``capabilities set voice
   tts`` instead of creating a ``<prefix>-kokoro`` slot that never routes;
@@ -78,13 +81,21 @@ try:
 except FileNotFoundError:
     slots = {}
 if "slot list --json" in cmd:
-    print(json.dumps([{"name": n, "status": st} for n, st in slots.items()]))
+    rows = [{"name": n, "status": st} for n, st in slots.items()]
+    if os.environ.get("STUB_FLM_SLOT_JSON"):
+        flm = json.loads(os.environ["STUB_FLM_SLOT_JSON"])
+        flm["status"] = slots.get("flm", flm.get("status", "offline"))
+        rows = [r for r in rows if r["name"] != "flm"] + [flm]
+    print(json.dumps(rows))
+    sys.exit(0)
+if "/api/slots/flm/models" in cmd:
+    print(os.environ.get("STUB_FLM_CATALOG_JSON", '{"models": []}'))
     sys.exit(0)
 if cmd.startswith("echo "):
     print("http://127.0.0.1:1")
     sys.exit(0)
 if "/dev/accel/accel0" in cmd:
-    sys.exit(1)
+    sys.exit(0 if os.environ.get("STUB_NPU") else 1)
 if "/v1/models" in cmd:
     print("1")
     sys.exit(0)
@@ -359,6 +370,61 @@ def test_no_llama_server_llm_model_means_skip_not_flm_slot(tmp_path: Path) -> No
     _proc, cmds = _run(tmp_path, HAL0_TEST_BIN="/opt/test/hal0", STUB_MODELS_JSON=only_flm)
     created = [c for c in cmds if "slot create" in c and "--type llm" in c and "--hardware" in c]
     assert not [c for c in created if "flm-npu-model" in c and ("vulkan" in c or "rocm" in c)]
+
+
+# ── #3435: the NPU row resolves an available model without model_id ─────────
+
+
+@pytest.mark.parametrize(
+    ("slot", "catalog", "expected_model", "expected_status"),
+    [
+        (
+            {"name": "flm", "status": "offline", "model_id": None},
+            {"models": [
+                {"model": "not-installed:1b", "installed": False},
+                {"model": "installed:1b", "installed": True},
+            ]},
+            "installed:1b",
+            "pass",
+        ),
+        (
+            {"name": "flm", "status": "offline", "model_id": None},
+            {"models": [{"model": "not-installed:1b", "installed": False}]},
+            None,
+            "skip",
+        ),
+        (
+            {"name": "flm", "status": "offline", "model_default": "bound:1b", "model_id": None},
+            {"models": [{"model": "other:1b", "installed": True}]},
+            "bound:1b",
+            "pass",
+        ),
+    ],
+)
+def test_flm_row_resolves_model_for_seed_and_bound_slot(
+    tmp_path: Path, slot: dict, catalog: dict, expected_model: str | None, expected_status: str
+) -> None:
+    proc, cmds = _run(
+        tmp_path,
+        HAL0_TEST_BIN="/opt/test/hal0",
+        STUB_NPU="1",
+        STUB_FLM_SLOT_JSON=json.dumps(slot),
+        STUB_FLM_CATALOG_JSON=json.dumps(catalog),
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    row = _rows_by_name(tmp_path)["flm"]
+    assert row["status"] == expected_status, row
+    loads = [c for c in cmds if c.startswith("/opt/test/hal0 slot load flm ")]
+    if expected_model:
+        assert loads == [f"/opt/test/hal0 slot load flm -m {expected_model}"]
+        assert expected_model in row["detail"]
+    else:
+        assert not loads
+    catalog_calls = [c for c in cmds if "/api/slots/flm/models" in c]
+    assert bool(catalog_calls) == (not slot.get("model_default"))
+    if catalog_calls:
+        assert "/etc/hal0/api.env" in catalog_calls[0]
+        assert "Authorization: Bearer $HAL0_ADMIN_KEY" in catalog_calls[0]
 
 
 # ── #2351: the unload row asserts every loaded slot unloads to offline ──────

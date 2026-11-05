@@ -30,6 +30,11 @@ memory engine, the agent board, upgrade behavior — surfaces a fixed matrix can
 they depend on multi-step, stateful operator workflows.
 </Aside>
 
+The `flm` row loads the existing NPU slot with its configured model when one is
+set. For a model-less seed, it selects an installed tag from the FLM catalog.
+It skips when the slot or installed FLM weights are absent; a `pass` means the
+NPU slot actually reached ready.
+
 ## The release-validation kit, in more detail
 
 `tests/release-validation/` (orchestrated by the `rc-validate` Claude Code workflow) runs nine
