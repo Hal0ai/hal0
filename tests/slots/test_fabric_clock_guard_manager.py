@@ -115,3 +115,133 @@ async def test_env_override_wins_over_configured_policy(monkeypatch: pytest.Monk
     monkeypatch.setenv("HAL0_FABRIC_CLOCK_GUARD", "off")
     manager = SlotManager(fabric_clock_guard="refuse")
     assert manager._fabric_clock_guard == "off"
+
+
+# ── review P1-1: cross-slot admission lock for concurrent cold loads ─────────
+
+
+async def test_concurrent_cold_loads_admit_exactly_one_counterpart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two concurrent cold loads (one NPU, one GPU) must not both pass.
+
+    Before the admission lock + `_fabric_pending` reservation, each load's
+    `list()` scan ran before either had published STARTING, so both saw "no
+    counterpart yet" and both proceeded — the exact hazard this guard
+    exists to prevent. `list()` here returns a fixed empty snapshot (no one
+    is OFFLINE→STARTING yet from `list()`'s point of view) so the only thing
+    that can catch the race is the reservation set.
+    """
+    import asyncio
+
+    manager = _manager("refuse")
+    await _wire(manager=manager, monkeypatch=monkeypatch, others=[], state=_NOT_HELD)
+
+    results: dict[str, object] = {}
+
+    async def attempt(name: str, cfg: dict) -> None:
+        try:
+            results[name] = await manager._guard_fabric_clock(name, cfg)
+        except SlotFabricClockHazard as exc:
+            results[name] = exc
+
+    await asyncio.gather(
+        attempt("flm", {"device": "npu"}),
+        attempt("chat", {"device": "gpu"}),
+    )
+    outcomes = list(results.values())
+    refused = [o for o in outcomes if isinstance(o, SlotFabricClockHazard)]
+    admitted = [o for o in outcomes if o is None]
+    assert len(refused) == 1, f"expected exactly one refusal, got {outcomes!r}"
+    assert len(admitted) == 1, f"expected exactly one admission, got {outcomes!r}"
+
+
+# ── review P1-2: a live ERROR counterpart is not offline ─────────────────────
+
+
+async def test_live_error_counterpart_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    manager = _manager("refuse")
+    gpu = Slot("chat", state=SlotState.ERROR, backend="vulkan", model_id="m1")
+    await _wire(monkeypatch, manager, others=[gpu], state=_NOT_HELD)
+    monkeypatch.setattr(manager, "_is_active", lambda name: _true())
+    with pytest.raises(SlotFabricClockHazard):
+        await manager._guard_fabric_clock("flm", {"device": "npu"})
+
+
+async def test_dead_error_counterpart_is_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    manager = _manager("refuse")
+    gpu = Slot("chat", state=SlotState.ERROR, backend="vulkan", model_id="m1")
+    await _wire(monkeypatch, manager, others=[gpu], state=_NOT_HELD)
+    monkeypatch.setattr(manager, "_is_active", lambda name: _false())
+    assert await manager._guard_fabric_clock("flm", {"device": "npu"}) is None
+
+
+async def _true() -> bool:
+    return True
+
+
+async def _false() -> bool:
+    return False
+
+
+# ── review P2-4: CUDA is not the iGPU this guard protects ────────────────────
+
+
+async def test_cuda_incoming_load_not_refused_beside_npu(monkeypatch: pytest.MonkeyPatch) -> None:
+    manager = _manager("refuse")
+    npu = Slot("flm", state=SlotState.READY, backend="flm", model_id="m1")
+    await _wire(monkeypatch, manager, others=[npu], state=_NOT_HELD)
+    assert await manager._guard_fabric_clock("chat", {"device": "gpu-cuda"}) is None
+
+
+# ── review P2-3: a real refusal restores state and skips failure bookkeeping ──
+
+
+async def test_real_load_refusal_restores_offline_without_failure_count(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_hal0_home: str,
+    slot_root,
+) -> None:
+    """A real `SlotManager.load()` call (not a direct `_guard_fabric_clock`
+    call) must: raise `SlotFabricClockHazard`, leave the refused slot
+    OFFLINE (not ERROR), and record no load failure — refusing a pairing is
+    not the same as the slot itself being broken, so it must not feed
+    crash-loop backoff/park bookkeeping.
+    """
+    from pathlib import Path
+
+    root = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+    (root / "npu.toml").write_text(
+        "\n".join(
+            [
+                'name = "npu"',
+                "port = 8088",
+                'device = "npu"',
+                'runtime = "container"',
+                'profile = "flm"',
+                "[model]",
+                'default = "gemma3:4b"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    manager = _manager("refuse")
+    chat = Slot("chat", state=SlotState.READY, backend="vulkan", model_id="m1")
+
+    async def listing(*, exclude: str | None = None) -> list[Slot]:
+        return [s for s in (chat,) if s.name != exclude]
+
+    monkeypatch.setattr(manager, "list", listing)
+    monkeypatch.setattr(
+        "hal0.slots.fabric_clock_guard.read_fabric_clock", lambda *a, **k: _NOT_HELD
+    )
+
+    with pytest.raises(SlotFabricClockHazard):
+        await manager.load("npu", "gemma3:4b")
+
+    state_value = manager.state("npu")
+    assert state_value == SlotState.OFFLINE, state_value
+    rec = manager._states.get(manager._key("npu"))
+    load_failures = (rec.extra or {}).get("load_failures") if rec else None
+    assert not load_failures, rec.extra if rec else None

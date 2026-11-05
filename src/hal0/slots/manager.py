@@ -549,6 +549,18 @@ class SlotManager:
             .lower()
         )
         self._fabric_clock_guard: str = policy if policy in ("refuse", "warn", "off") else "refuse"
+        # Cross-slot admission lock for the fabric-clock guard (review P1):
+        # a slot's _guard_fabric_clock check and its publication as a live
+        # counterpart (STARTING) are not atomic — without this lock, two
+        # concurrent cold loads (one NPU, one GPU) can each see "no
+        # counterpart yet" and both proceed. `_fabric_pending` holds slots
+        # that passed the guard but have not yet reached a state visible to
+        # `list()` (i.e. between the check and the STARTING transition);
+        # `_guard_fabric_clock` treats pending entries as live counterparts
+        # too, and callers must pop their own entry once the slot either
+        # fails or becomes visible via `_transition(..., STARTING, ...)`.
+        self._fabric_admission_lock: asyncio.Lock = asyncio.Lock()
+        self._fabric_pending: dict[str, str] = {}
         self._admission_lock: asyncio.Lock = asyncio.Lock()
         self._idle_monitor_interval_s: float = idle_monitor_interval_s
         # Idle/eviction background loop (P3-slots §1b) — SlotReaper owns its
@@ -2095,6 +2107,13 @@ class SlotManager:
                             "fabric_clock_warning": fabric_clock_warning,
                         },
                     )
+                    # STARTING is now visible to `list()` on its own (every
+                    # other caller of `_guard_fabric_clock` sees this slot as
+                    # a live counterpart via its state, not via the pending
+                    # reservation) — drop the reservation so it cannot wedge
+                    # the opposite device class if this slot later errors out
+                    # further down and is retried.
+                    self._release_fabric_pending(slot_name)
                     await self._spawn_locked(slot_name, cfg, resolved_model, model_info=model_info)
                     await self._transition(
                         slot_name,
@@ -2153,7 +2172,28 @@ class SlotManager:
                                 "error": str(exc),
                             },
                         )
+            except SlotFabricClockHazard:
+                # review P2-3: a refusal is not a load failure — the slot
+                # never started. By the time this try block runs, the
+                # pre-attempt branches above have already driven any
+                # READY/ERROR/stale-inflight slot to OFFLINE (the only state
+                # a cold load proceeds from), so OFFLINE is always the
+                # correct state to restore — not ERROR, and not a load
+                # failure count that would trip crash-loop backoff/park for
+                # what is a refused pairing, not a broken slot. The existing
+                # generic-exception → 409 ``slot.config_error`` mapping still
+                # applies: this re-raise is unchanged, only the state side
+                # effects are.
+                self._release_fabric_pending(slot_name)
+                await self._transition(
+                    slot_name,
+                    SlotState.OFFLINE,
+                    port=_cfg_port(cfg),
+                    force=True,
+                )
+                raise
             except Exception as exc:
+                self._release_fabric_pending(slot_name)
                 error_message = str(exc)
                 gate_extra: dict[str, Any] = {}
                 if isinstance(exc, SlotOutputSanityFailed):
@@ -3092,6 +3132,15 @@ class SlotManager:
         (or the state was unreadable), else ``None``; raises
         :class:`SlotFabricClockHazard` when the policy is ``refuse`` and the
         clock is readable and not held.
+
+        Runs under ``_fabric_admission_lock`` end-to-end (review P1): the
+        counterpart scan, the sysfs read, and — on success — reserving this
+        slot in ``_fabric_pending`` all happen atomically, so a second
+        concurrent cold load of the opposite device class cannot slip through
+        the window between "no counterpart yet" and this slot's own STARTING
+        transition becoming visible via :meth:`list`. The caller MUST pop its
+        reservation (:meth:`_release_fabric_pending`) once the slot either
+        fails to load or reaches a state `list()` reports on its own.
         """
         if self._fabric_clock_guard == "off":
             return None
@@ -3104,65 +3153,106 @@ class SlotManager:
 
         device = (cfg or {}).get("device") if isinstance(cfg, Mapping) else None
         this_is_npu = device == "npu"
-        this_is_gpu = not this_is_npu and device not in (None, "cpu")
+        eff_backend = _cfg_effective_backend(cfg) if cfg else None
+        # review P2-4: CUDA targets a discrete NVIDIA GPU, not the gfx1151
+        # iGPU this guard protects — never classify it as the "gpu" side.
+        this_is_gpu = not this_is_npu and device not in (None, "cpu") and eff_backend != "cuda"
         if not this_is_npu and not this_is_gpu:
             return None
-        try:
-            others = await self.list(exclude=slot_name)
-        except Exception as exc:  # pragma: no cover - defensive
-            log.warning(
-                "slot.fabric_clock_guard_unreadable: %s: %s",
-                slot_name,
-                exc,
-                extra={"slot": slot_name},
-            )
-            return None
-        counterpart_predicate = slot_uses_gpu if this_is_npu else slot_uses_npu
-        counterparts = [
-            s.name
-            for s in others
-            if s.state
-            in (
-                SlotState.STARTING,
-                SlotState.WARMING,
-                SlotState.READY,
-                SlotState.SERVING,
-                SlotState.IDLE,
-                SlotState.UNLOADING,
-            )
-            and counterpart_predicate(s)
-        ]
-        if not counterparts:
-            return None
-        try:
-            state = await asyncio.to_thread(read_fabric_clock)
-        except Exception as exc:  # pragma: no cover - defensive
-            log.warning(
-                "slot.fabric_clock_guard_unreadable: %s: %s",
-                slot_name,
-                exc,
-                extra={"slot": slot_name},
-            )
-            return None
-        npu_slot = slot_name if this_is_npu else (counterparts[0] if counterparts else None)
-        gpu_slots = counterparts if this_is_npu else [slot_name]
-        if state.readable and state.held:
-            return None
-        message = fabric_clock_message(state, npu_slot, gpu_slots)
-        if not state.readable:
-            log.warning(
-                "slot.fabric_clock_unreadable: %s: %s",
-                slot_name,
-                message,
-                extra={"slot": slot_name},
-            )
-            return message
-        if self._fabric_clock_guard == "warn":
-            log.warning(
-                "slot.fabric_clock_unheld: %s: %s", slot_name, message, extra={"slot": slot_name}
-            )
-            return message
-        raise SlotFabricClockHazard(message, details={"slot": slot_name})
+        async with self._fabric_admission_lock:
+            try:
+                others = await self.list(exclude=slot_name)
+            except Exception as exc:  # pragma: no cover - defensive
+                log.warning(
+                    "slot.fabric_clock_guard_unreadable: %s: %s",
+                    slot_name,
+                    exc,
+                    extra={"slot": slot_name},
+                )
+                return None
+            counterpart_predicate = slot_uses_gpu if this_is_npu else slot_uses_npu
+            # A live-but-unhealthy counterpart (ERROR with its unit/container
+            # still running) is still occupying the GPU/NPU (review P1-2):
+            # state.py's ERROR explicitly covers "process alive, engine
+            # silent". Only a confirmed-dead ERROR slot is treated as
+            # offline. Checked via the same liveness probe `load()` already
+            # uses for its own ERROR branch (`_is_active`).
+            counterparts: list[str] = []
+            for s in others:
+                if not counterpart_predicate(s):
+                    continue
+                if s.state in (
+                    SlotState.STARTING,
+                    SlotState.WARMING,
+                    SlotState.READY,
+                    SlotState.SERVING,
+                    SlotState.IDLE,
+                    SlotState.UNLOADING,
+                ):
+                    counterparts.append(s.name)
+                elif s.state is SlotState.ERROR:
+                    try:
+                        live = await self._is_active(s.name)
+                    except Exception:  # pragma: no cover - defensive
+                        live = False
+                    if live:
+                        counterparts.append(s.name)
+            # Pending reservations (review P1-1): a concurrent cold load that
+            # already passed this guard but hasn't published STARTING yet.
+            for pending_name, pending_class in self._fabric_pending.items():
+                if pending_name == slot_name:
+                    continue
+                wants_gpu_counterpart = this_is_npu and pending_class == "gpu"
+                wants_npu_counterpart = this_is_gpu and pending_class == "npu"
+                if wants_gpu_counterpart or wants_npu_counterpart:
+                    counterparts.append(pending_name)
+            if not counterparts:
+                self._fabric_pending[slot_name] = "npu" if this_is_npu else "gpu"
+                return None
+            try:
+                state = await asyncio.to_thread(read_fabric_clock)
+            except Exception as exc:  # pragma: no cover - defensive
+                log.warning(
+                    "slot.fabric_clock_guard_unreadable: %s: %s",
+                    slot_name,
+                    exc,
+                    extra={"slot": slot_name},
+                )
+                return None
+            npu_slot = slot_name if this_is_npu else (counterparts[0] if counterparts else None)
+            gpu_slots = counterparts if this_is_npu else [slot_name]
+            if state.readable and state.held:
+                self._fabric_pending[slot_name] = "npu" if this_is_npu else "gpu"
+                return None
+            message = fabric_clock_message(state, npu_slot, gpu_slots)
+            if not state.readable:
+                log.warning(
+                    "slot.fabric_clock_unreadable: %s: %s",
+                    slot_name,
+                    message,
+                    extra={"slot": slot_name},
+                )
+                self._fabric_pending[slot_name] = "npu" if this_is_npu else "gpu"
+                return message
+            if self._fabric_clock_guard == "warn":
+                log.warning(
+                    "slot.fabric_clock_unheld: %s: %s",
+                    slot_name,
+                    message,
+                    extra={"slot": slot_name},
+                )
+                self._fabric_pending[slot_name] = "npu" if this_is_npu else "gpu"
+                return message
+            raise SlotFabricClockHazard(message, details={"slot": slot_name})
+
+    def _release_fabric_pending(self, slot_name: str) -> None:
+        """Drop *slot_name*'s cross-slot fabric-clock reservation, if any.
+
+        Called once the slot either becomes visible to `list()` on its own
+        (STARTING published) or the load gives up — a reservation left behind
+        would wrongly block the opposite device class forever.
+        """
+        self._fabric_pending.pop(slot_name, None)
 
     async def terminate(self, slot_name: str, *, timeout_s: float | None = None) -> None:
         """Stop the slot's container unit and deregister its upstream.
