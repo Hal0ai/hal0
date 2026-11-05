@@ -10,6 +10,7 @@ best-effort (returns a status dict rather than raising) so an unprivileged hal0
 from __future__ import annotations
 
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -19,10 +20,15 @@ from hal0.memory.extraction_env import (
     EXTRACTION_FLOOR_ENV,
     EXTRACTION_MIN_CONTEXT_TOKENS,
     MEMORY_ALIAS,
+    ExtractionLimits,
     apply_extraction_slot,
+    clamp_to_parallel,
+    concurrency_clamp_warning,
     drop_in_matches,
+    effective_limits,
     extraction_floor,
     extraction_model_name,
+    extraction_slot_parallel,
     memory_engine_target,
     render_drop_in,
     resolve_extraction_window,
@@ -1096,3 +1102,110 @@ def test_reconcile_reports_a_failed_write_without_raising(monkeypatch, tmp_path:
 
     assert result["status"] == "failed"
     assert result["error"]
+
+
+# ── extraction concurrency is held to the slot's --parallel (#3347) ──────────
+
+
+def _graph(**kw):
+    from hal0.config.schema import MemoryGraphConfig
+
+    return MemoryGraphConfig(**kw)
+
+
+def _write_slot(tmp_path: Path, name: str = "memory") -> Path:
+    slots = tmp_path / "slots"
+    slots.mkdir(exist_ok=True)
+    (slots / f"{name}.toml").write_text('name = "memory"\nport = 8092\n', encoding="utf-8")
+    return slots
+
+
+@pytest.mark.parametrize(
+    ("configured", "parallel", "rendered"),
+    [(8, 2, 2), (2, 2, 2), (1, 2, 1), (8, None, 8), (4, 0, 4)],
+)
+def test_clamp_to_parallel_holds_concurrency_to_the_slot(configured, parallel, rendered):
+    base = ExtractionLimits(max_concurrent=configured)
+    out = clamp_to_parallel(base, parallel)
+    assert out.max_concurrent == rendered
+    # Nothing else about the limits moves.
+    assert replace(out, max_concurrent=configured) == base
+
+
+def test_effective_limits_reads_the_extraction_slots_parallel(monkeypatch, tmp_path: Path):
+    slots = _write_slot(tmp_path)
+    seen: list[dict] = []
+
+    def _parallel(raw):
+        seen.append(raw)
+        return 2
+
+    monkeypatch.setattr("hal0.providers.container.slot_parallel_sequences", _parallel)
+    graph = _graph(extraction_slot="memory", extraction_max_concurrent=8)
+    assert extraction_slot_parallel(graph, slots_dir=slots) == 2
+    assert effective_limits(graph, slots_dir=slots).max_concurrent == 2
+    assert seen and seen[0]["port"] == 8092
+    # The recorded config is untouched: hal0.toml keeps what the operator asked for.
+    assert graph.extraction_max_concurrent == 8
+
+
+def test_effective_limits_leaves_concurrency_alone_when_the_slot_is_unknown(tmp_path: Path):
+    graph = _graph(extraction_slot="memory", extraction_max_concurrent=8)
+    # No slot TOML on disk.
+    assert extraction_slot_parallel(graph, slots_dir=tmp_path) is None
+    assert effective_limits(graph, slots_dir=tmp_path).max_concurrent == 8
+
+
+def test_an_upstream_target_is_never_clamped(monkeypatch, tmp_path: Path):
+    slots = _write_slot(tmp_path)
+    monkeypatch.setattr("hal0.providers.container.slot_parallel_sequences", lambda raw: 1)
+    graph = _graph(
+        extraction_slot="memory", extraction_model="MiniMax-M2.5", extraction_max_concurrent=8
+    )
+    assert extraction_slot_parallel(graph, slots_dir=slots) is None
+    assert effective_limits(graph, slots_dir=slots).max_concurrent == 8
+
+
+def test_unresolvable_slot_never_raises(monkeypatch, tmp_path: Path):
+    slots = _write_slot(tmp_path)
+
+    def _boom(_raw):
+        raise RuntimeError("profile exploded")
+
+    monkeypatch.setattr("hal0.providers.container.slot_parallel_sequences", _boom)
+    assert extraction_slot_parallel(_graph(extraction_slot="memory"), slots_dir=slots) is None
+
+
+def test_concurrency_warning_names_the_numbers_only_when_it_clamps():
+    graph = _graph(extraction_slot="memory", extraction_max_concurrent=8)
+    msg = concurrency_clamp_warning(graph, 2)
+    assert msg is not None
+    assert "extraction_max_concurrent = 8" in msg
+    assert "'memory'" in msg and "--parallel 2" in msg
+    assert concurrency_clamp_warning(graph, 8) is None
+    assert concurrency_clamp_warning(graph, 16) is None
+    assert concurrency_clamp_warning(graph, None) is None
+
+
+def test_clamped_limits_render_into_the_drop_in():
+    out = render_drop_in(300, limits=clamp_to_parallel(ExtractionLimits(max_concurrent=8), 2))
+    assert "Environment=HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT=2\n" in out
+
+
+def test_reconcile_compares_against_the_clamped_limits(monkeypatch, tmp_path: Path):
+    """The update reconcile must not rewrite a clamped drop-in back to the raw
+    ``extraction_max_concurrent`` (and restart the engine) on every update."""
+    from hal0.memory import extraction_env as ee
+
+    graph = _graph(extraction_slot="memory", extraction_max_concurrent=8)
+    clamped = clamp_to_parallel(ExtractionLimits.from_config(graph), 2)
+    drop_in = tmp_path / "extraction-model.conf"
+    drop_in.write_text(render_drop_in(graph.llm_timeout_s, limits=clamped), encoding="utf-8")
+
+    monkeypatch.setattr(ee, "DROP_IN_PATH", drop_in)
+    monkeypatch.setattr(ee, "extraction_slot_parallel", lambda g, **_k: 2)
+    monkeypatch.setattr(
+        "hal0.config.loader.load_hal0_config",
+        lambda *a, **k: type("C", (), {"memory": type("M", (), {"graph": graph})()})(),
+    )
+    assert ee.reconcile_extraction_dropin()["status"] == "converged"

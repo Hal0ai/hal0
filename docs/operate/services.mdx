@@ -293,7 +293,7 @@ owning unit, its probe strategy, and which lifecycle verbs it permits:
 
 | Service | Purpose | Unit | Allowed actions |
 |---|---|---|---|
-| OpenWebUI | Chat UI companion (podman container, LAN `:3001`) | `hal0-openwebui.service` | start, stop, restart, enable, disable |
+| OpenWebUI | Chat UI companion (podman container, LAN `:3001`; behind a reverse proxy, set [`HAL0_OPENWEBUI_PUBLIC_URL`](/docs/reference/env-vars/) — Open WebUI emits root-absolute asset URLs, so it needs its own (sub)domain, not a path prefix) | `hal0-openwebui.service` | start, stop, restart, enable, disable |
 | ComfyUI | Image generation engine (runs as the seeded `img` slot container, LAN `:8188` by default; `[network].comfyui_listen = "loopback"` fences it to the box) | `hal0-slot@img.service` | start, restart (no stop) |
 
 | Hermes | Bundled agent + its own dashboard (loopback `:9119`) | `hal0-agent@hermes.service` | start, stop, restart, enable, disable |

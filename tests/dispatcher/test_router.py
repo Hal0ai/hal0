@@ -138,6 +138,32 @@ async def test_registry_exact_routes_to_bound_upstream_when_online() -> None:
 
 
 @pytest.mark.asyncio
+async def test_dispatch_carries_the_request_read_timeout_onto_the_call() -> None:
+    """#3347: the route layer's per-request read timeout (the memory engine's
+    llm_timeout_s) reaches the call the dispatcher forwards."""
+    from hal0.dispatcher.lane_pin import set_read_timeout
+
+    primary = make_slot("chat", "http://127.0.0.1:8081/v1")
+
+    async def online(_u: Upstream) -> bool:
+        return True
+
+    dispatcher = Dispatcher(
+        upstream_registry=FakeUpstreamRegistry([primary]),
+        model_registry=FakeModelRegistry(routes={"qwen3-4b": "chat"}),
+        is_online=online,
+        cached_models=lambda name: ["qwen3-4b"] if name == "chat" else [],
+    )
+    plain = await dispatcher.dispatch(make_request(), body={"model": "qwen3-4b", "messages": []})
+    assert plain.read_timeout_s is None
+
+    request = make_request()
+    set_read_timeout(request, 900)
+    call = await dispatcher.dispatch(request, body={"model": "qwen3-4b", "messages": []})
+    assert call.read_timeout_s == 900.0
+
+
+@pytest.mark.asyncio
 async def test_registry_remaps_body_when_requested_model_not_in_slot() -> None:
     """Slot-as-truth: rewrite body.model to what the slot actually has loaded."""
     primary = make_slot("chat")

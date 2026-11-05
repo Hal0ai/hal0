@@ -282,8 +282,57 @@ def test_comfyui_argv_uses_opt_comfyui_workdir() -> None:
     payload = spec.command[2]
     assert "/opt/ComfyUI" in payload
     assert "--port 8188" in payload
-    assert payload.startswith("cd /opt/ComfyUI && exec python main.py")
+    assert payload.startswith("cd /opt/ComfyUI && ")
+    assert "exec python main.py" in payload
     assert "--listen 0.0.0.0" in payload
+
+
+def _with_optional_dirs(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
+    monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(root))
+    (root / "python").mkdir(parents=True)
+    (root / "web").mkdir()
+
+
+def test_comfyui_start_prepares_the_writable_python_before_launching(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A custom node's pip install lands in a mounted environment, not the image (#3132)."""
+    _with_optional_dirs(monkeypatch, tmp_path)
+    spec = ComfyUIProvider().container_spec(_img_cfg(), {})
+    pairs = {(m.source, m.target) for m in spec.mounts}
+    assert (str(tmp_path / "python"), "/opt/hal0-python") in pairs
+    payload = spec.command[2]
+    prepare = payload.index("python /opt/hal0-python/hal0_python_env.py")
+    activate = payload.index(". /opt/hal0-python/current/bin/activate")
+    assert prepare < activate < payload.index("exec python main.py")
+
+
+def test_comfyui_start_command_survives_systemd_and_the_listen_rewrite() -> None:
+    """systemd expands ``$`` in ``ExecStart=`` even inside single quotes, and the renderer
+    finds ``--listen 0.0.0.0`` in the payload to apply ``comfyui_listen`` (ADR-0041)."""
+    spec = ComfyUIProvider().container_spec(_img_cfg(), {})
+    assert "$" not in spec.command[2]
+    assert spec.command[2].count("--listen 0.0.0.0") == 1
+
+
+def test_comfyui_gives_nodes_the_web_directory_they_write_into(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The image has no /opt/ComfyUI/web, and Custom-Scripts creates web/extensions there."""
+    _with_optional_dirs(monkeypatch, tmp_path)
+    spec = ComfyUIProvider().container_spec(_img_cfg(), {})
+    pairs = {(m.source, m.target) for m in spec.mounts}
+    assert (str(tmp_path / "web"), "/opt/ComfyUI/web") in pairs
+
+
+def test_comfyui_without_the_optional_dirs_still_launches() -> None:
+    """On a data root hal0 cannot write, podman exits 125 on a missing mount source, and
+    ComfyUI runs fine without these two, on the image's Python."""
+    spec = ComfyUIProvider().container_spec(_img_cfg(), {})
+    targets = {m.target for m in spec.mounts}
+    assert "/opt/hal0-python" not in targets
+    assert "/opt/ComfyUI/web" not in targets
+    assert "/opt/ComfyUI/custom_nodes" in targets
 
 
 def test_comfyui_extra_model_paths_mount_is_read_only() -> None:

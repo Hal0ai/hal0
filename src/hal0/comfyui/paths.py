@@ -73,6 +73,11 @@ def custom_nodes_dir() -> Path:
     return data_root() / "custom_nodes"
 
 
+def python_env_dir() -> Path:
+    """Directory of the writable Python environment custom nodes install into (#3132)."""
+    return data_root() / "python"
+
+
 def extra_model_paths_file() -> Path:
     """The ``extra_model_paths.yaml`` that maps ComfyUI's model types onto :data:`SUBDIRS`."""
     return data_root() / "extra_model_paths.yaml"
