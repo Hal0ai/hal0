@@ -86,6 +86,8 @@ from hal0.providers._gpu import (
     resolve_gpu_device_paths,
     resolve_gpu_group_ids,
     resolve_image_runtime_uid,
+    resolve_npu_device_paths,
+    resolve_npu_group_ids,
     runtime_lane_for_provider,
 )
 from hal0.providers.base import HealthCheck, Provider, RuntimeLaunchPlan
@@ -1095,6 +1097,7 @@ def _llama_argv_segments(
     lane_device: str | None = None,
     profile_reasoning: Sequence[str] = (),
     slot_reasoning: Sequence[str] = (),
+    runner_key: str | None = None,
 ) -> list[tuple[str, list[str]]]:
     """The labelled llama-server argv segments (SINGLE SOURCE, ADR-0029).
 
@@ -1160,6 +1163,28 @@ def _llama_argv_segments(
         slot += ["--metrics"]
     if draft_device and spec_type == "draft-mtp":
         slot += ["--spec-draft-device", draft_device]
+    # XDNA (AMD NPU) runner: fixed launch geometry for the AIE engine —
+    # single NPU device, full offload, flash-attn on, no polling spin
+    # (NPU scheduling doesn't benefit from it), single parallel slot, and a
+    # cache-reuse window tuned for the xclbin's prefix-cache behaviour. Last
+    # in the "slot" layer so it wins over the dynamic device/-ngl/--threads
+    # tokens above by resolve_argv's last-wins dedupe; a slot's own
+    # extra_args (a later segment) can still override any of these.
+    if runner_key == "xdna":
+        slot += [
+            "--device",
+            "XDNA0",
+            "-ngl",
+            "99",
+            "-fa",
+            "on",
+            "--poll",
+            "0",
+            "-np",
+            "1",
+            "--cache-reuse",
+            "256",
+        ]
     # A slot [tune] override is the last word: it beats the profile's typed
     # field and its free flags by last-wins dedupe.
     slot += list(slot_reasoning)
@@ -1192,6 +1217,8 @@ def _llama_launch_plan(
     env: dict[str, str] | None = None,
     profile_reasoning: Sequence[str] = (),
     slot_reasoning: Sequence[str] = (),
+    runner_key: str | None = None,
+    ulimits: list[str] | None = None,
 ) -> RuntimeLaunchPlan:
     """Build the GPU/llama-server :class:`RuntimeLaunchPlan`.
 
@@ -1219,6 +1246,7 @@ def _llama_launch_plan(
         lane_device=lane_device,
         profile_reasoning=profile_reasoning,
         slot_reasoning=slot_reasoning,
+        runner_key=runner_key,
     )
     command = resolve_argv(segments).argv
 
@@ -1254,6 +1282,7 @@ def _llama_launch_plan(
         # Empty network_mode → loopback publish derived from port by the renderer.
         network_mode="",
         health=HealthCheck(cmd=f"curl -fsS http://127.0.0.1:{port}/health || exit 1"),
+        ulimits=list(ulimits) if ulimits else [],
     )
 
 
@@ -1987,11 +2016,30 @@ class ContainerProvider(Provider):
             devices = []
             group_ids = []
 
+        runner = _effective_runner(slot_cfg, profile)
+        runner_key = getattr(runner, "key", None)
+        ulimits: list[str] = []
+        if runner_key == "xdna":
+            # XDNA2 NPU: same accel-node + memlock treatment flm uses for its
+            # toolbox container (see hal0.providers.flm.container_spec) —
+            # factored into hal0.providers._gpu so neither drifts.
+            devices = [p for p in resolve_npu_device_paths() if _dev_node_exists(p)]
+            group_ids = resolve_npu_group_ids()
+            ulimits = ["memlock=-1"]
+
         # gpu_index visibility env (per device family), merged UNDER the
         # slot's [server].env so an operator's explicit key always wins.
         vis_env = gpu_visibility_env(scalars["device"], scalars["gpu_index"])
         server_env = scalars["server_env"] or {}
         merged_env = {**vis_env, **server_env}
+        if runner_key == "xdna":
+            from hal0.runners.knobs import xdna_env_defaults
+
+            # Defaults first, then whatever's already resolved (visibility +
+            # [server].env, which includes any operator GGML_XDNA_*/pmode/
+            # host_xrt knob tokens) — an explicit key always wins over the
+            # default per the XDNA knob-set contract.
+            merged_env = {**xdna_env_defaults(), **merged_env}
 
         plan = _llama_launch_plan(
             image=scalars["image"],
@@ -2017,6 +2065,8 @@ class ContainerProvider(Provider):
             profile_reasoning=scalars["profile_reasoning"],
             slot_reasoning=scalars["slot_reasoning"],
             env=merged_env or None,
+            runner_key=runner_key,
+            ulimits=ulimits,
         )
         return plan
 
