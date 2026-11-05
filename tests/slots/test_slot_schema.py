@@ -25,7 +25,7 @@ EXPECTED_MAPPING = {
     # install actually receives named a lane no slot could validly run.
     "brain": (8089, "gpu-rocm", "brain"),
     "agent": (8081, "gpu-rocm", "agent"),  # ADR-0029 seed (64K window)
-    "utility": (8090, "gpu-rocm", "utility"),  # ADR-0029 seed (64K window)
+    "memory": (8091, "gpu-rocm", "memory"),  # ADR-0053 seed (32K window)
     "flm": (8088, "npu", "flm"),
     "img": (8188, "gpu-rocm", "comfyui"),
     "qwen3tts": (8095, "gpu-rocm", "qwen3-tts"),

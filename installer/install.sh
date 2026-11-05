@@ -1488,7 +1488,12 @@ if [[ ! -f "${HAL0_TOML}" ]]; then
 # Validate:  hal0 config validate
 
 [meta]
-schema_version = 1
+# The venv interpreter, NOT "${PY}": hal0 is pip-installed into the venv
+# only, so the base interpreter cannot import hal0.config.schema. Using
+# "${PY}" here wrote an empty schema_version (the heredoc's status is
+# cat's, so install.sh still exited 0) and left a /etc/hal0/hal0.toml that
+# tomllib cannot parse — the API then silently fell back to defaults.
+schema_version = $("${VENV_DIR}/bin/python" -I -c 'from hal0.config.schema import CURRENT_SCHEMA_VERSION; print(CURRENT_SCHEMA_VERSION)')
 
 [slots]
 port_range_start = 8081
@@ -2581,7 +2586,7 @@ fi
 ui_step "Container slot seeds" "~1-2s"
 
 # ── Container slot seeds (A10) ────────────────────────────────────────────
-# Pre-populate /etc/hal0/slots/{flm,tts,rerank,utility,img,agent,brain,…}.toml
+# Pre-populate /etc/hal0/slots/{flm,tts,rerank,memory,img,agent,brain,…}.toml
 # if absent (the loop below is the single source of truth). Idempotent: never
 # overwrite an operator-edited file. Each slot is seeded unconditionally so
 # the dashboard can show its tile on any hal0 install; each gates on its own
@@ -2658,7 +2663,7 @@ slot_seed_tombstoned() {
 
 SEEDED_NEW_SLOTS=()
 SEEDED_EXISTING_SLOTS=0
-for seed_slot in flm tts rerank utility img agent brain qwen3tts coder embed; do
+for seed_slot in flm tts rerank memory img agent brain qwen3tts coder embed; do
     SLOT_TOML="${ETC_DIR}/slots/${seed_slot}.toml"
     SLOT_SRC="${REPO_ROOT}/installer/etc-hal0/slots/${seed_slot}.toml"
     if slot_seed_tombstoned "${seed_slot}"; then
@@ -2706,7 +2711,7 @@ if (( ${#SEEDED_NEW_SLOTS[@]} > 0 )); then
 fi
 
 # EXPECTED, NOT A BUG: the loop above closes gaps, so upgrading a box that
-# predates a curated slot ADDS it (most often `utility`, added after the
+# predates a curated slot ADDS it (for example `memory`, added after the
 # original seed set). A parallel boot-time closer does the same thing —
 # hal0.install.static_seeds.seed_static_slots, wired into hal0-api startup — so
 # the slot also appears after a plain service restart with no installer run.
@@ -3161,27 +3166,27 @@ fi
 ui_step "NPU prerequisites (FastFlowLM)" "~10-60s (apt hosts only)"
 
 # Pinned FLM .deb — bump in lockstep with ADR-0009 and the flm runner
-# image tag in manifest.json (both 1.0.10 as of v1.6.1). NOTE (since 0.9.43):
+# image tag in manifest.json (both 1.0.12). NOTE (since 0.9.43):
 # FLM rejects a CLI flag passed twice, so FLMProvider.container_spec must
 # never repeat a mode flag (--asr/--embed) the model already implies.
-FLM_DEB_VERSION="1.0.10"
+FLM_DEB_VERSION="1.0.12"
 # Upstream ships a SEPARATE .deb per distro, each built against that release's
 # boost/libedit ABI: ubuntu24.04 (boost1.83), ubuntu25.10 + ubuntu26.04
 # (boost1.90), and debian13. Pick the artefact matching THIS host so
 # `apt-get install ./deb` resolves the .deb's boost/libedit/libxrt deps from the
 # host's own repos — no hardcoded SONAME list, and newer Ubuntu is first-class.
-# Since 1.0 FLM no longer links ffmpeg or fftw, and the 1.0.10 .deb needs
+# Since 1.0 FLM no longer links ffmpeg or fftw, and the 1.0.12 .deb needs
 # libxrt2 >= 2.25.0 (the lemonade-team PPA below ships it).
 # (Older installers pinned ONLY the ubuntu24.04 build and then had to SKIP host
 # FastFlowLM on every ffmpeg>=7 distro — even though the matching build existed.)
-# SHA-256 pinned per artefact, verified on download 2026-10-23; if upstream
+# SHA-256 pinned per artefact, verified on download 2026-11-05; if upstream
 # rebuilds under the same tag these drift — bump in lockstep with FLM_DEB_VERSION.
 _flm_sha_for_suffix() {
     case "$1" in
-        ubuntu24.04) echo "1f6cd57b92f3685fc83d23b87551152d073c66d5abf58de07cdc3b7de779b82d" ;;
-        ubuntu25.10) echo "45c3385cc41ade8436931ff8b2ea96ee2de6e80944c46ada180da6af57ea5e38" ;;
-        ubuntu26.04) echo "e63cd8109ebc8890b464d3cece9ebea969726cbf73901232eb5a9f9fac7fe617" ;;
-        debian13)    echo "1ecf6eb742126d0ed48bcd0143b48532b4e5694eacf207c4e3f57c0e5ea94693" ;;
+        ubuntu24.04) echo "5e74d047ee09d0c58d532bc2b70b0cbb508a18a36b33efb0ea615867d4506815" ;;
+        ubuntu25.10) echo "7f19326ab21f51d6992b041a98d47bbf0c6a763fa0a62b6b92c8bd80c33610ae" ;;
+        ubuntu26.04) echo "a0170f98c1ad338b1dbe01396248ebb6622affe256857f9b7b514043634f7e9e" ;;
+        debian13)    echo "52243ededf50366a537e7a7e1b156c130420c0d5840658a81696aef8f3c8423a" ;;
     esac
 }
 # Resolve host distro -> .deb suffix. For Ubuntu, pick the HIGHEST shipped build
@@ -3741,8 +3746,8 @@ smoke_structured_output() {
     #   * kwarg-ABSENT body — model + messages + response_format ONLY.
     #     Extra kwargs (temperature, max_tokens, …) mask template-branch
     #     differences between slot backends.
-    # hal0/utility is the canonical virtual alias (normalize/resolver.py):
-    # it routes to the cheap helper slot and falls back to the anchor, so
+    # hal0/agent is the canonical chat alias (normalize/resolver.py):
+    # it routes to the agent anchor, so
     # the probe works on any box with at least one loaded model.
     #
     # Returns 0 pass, 1 fail, 2 skipped, 3 timed out (curl exit 28: the model
@@ -3756,7 +3761,7 @@ smoke_structured_output() {
     # error is a failure, but sending the request would only retry its load.
     SMOKE_STRUCTURED_NOTE=""
     local body resp
-    body='{"model":"hal0/utility","messages":[{"role":"user","content":"Reply with only a JSON object of the form {\"ok\": true}."}],"response_format":{"type":"json_object"}}'
+    body='{"model":"hal0/agent","messages":[{"role":"user","content":"Reply with only a JSON object of the form {\"ok\": true}."}],"response_format":{"type":"json_object"}}'
     # KB-1 auth: same key discovery as the hindsight EnvironmentFile above —
     # a fresh open-LAN box has no api.env and needs no header.
     local -a auth=()
@@ -3765,8 +3770,8 @@ smoke_structured_output() {
         key="$(grep -oP '(?<=^HAL0_CLIENT_KEY=).*' /etc/hal0/api.env 2>/dev/null | head -1 || true)"
         [[ -n "${key}" ]] && auth=(-H "Authorization: Bearer ${key}")
     fi
-    # Which slot hal0/utility would land on, read from /api/slots without
-    # touching it. Mirrors resolve_chain: the first of utility, agent with a
+    # Which slot hal0/agent would land on, read from /api/slots without
+    # touching it. Mirrors resolve_chain: agent with a
     # bound model, else the first model-bound llm slot. Bound means the
     # configured model (model_default), which is what the resolver reads; a
     # row's model_id is the runtime snapshot and outlives a cleared binding.
@@ -3802,7 +3807,7 @@ if not bound:
     print("unbound")
     sys.exit(0)
 by_name = {str(s.get("name") or "").lower(): s for s in bound}
-slot = by_name.get("utility") or by_name.get("agent") or bound[0]
+slot = by_name.get("agent") or bound[0]
 state = str(slot.get("status") or slot.get("state") or "unknown").split()[0]
 if state == "error":
     verdict = "error"
