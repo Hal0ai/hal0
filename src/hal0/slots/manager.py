@@ -107,6 +107,7 @@ from hal0.slots.state import (
     SlotStateRecord,
     SlotTerminateTimeout,
     is_transition_legal,
+    provider_registry_miss_is_expected,
     provider_requires_model,
     read_state,
     write_state_atomic,
@@ -2950,9 +2951,7 @@ class SlotManager:
         await self._check_load(
             cfg,
             model_id,
-            await self._resolve_model_info(
-                model_id, provider=_cfg_effective_provider(cfg)
-            ),
+            await self._resolve_model_info(model_id, provider=_cfg_effective_provider(cfg)),
         )
 
     async def _guard_gtt_leak(self, slot_name: str, provider: Any | None) -> str | None:
@@ -4259,7 +4258,7 @@ class SlotManager:
             # Not fatal — the slot manager is not the authoritative gate
             # on "is this model installed"; the toolbox will surface its
             # own load error if the path is wrong.
-            if provider_requires_model(provider):
+            if not provider_registry_miss_is_expected(provider):
                 log.warning("slot.model_not_in_registry", extra={"model_id": model_id})
             return info
         except NotImplementedError:
