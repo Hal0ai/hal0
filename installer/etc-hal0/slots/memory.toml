@@ -1,0 +1,12 @@
+# Memory extraction slot (ADR-0053). No model is bound automatically.
+# On existing boxes this empty tile is added by the boot-time seed closer;
+# operator-authored utility slots remain untouched.
+name = "memory"
+type = "llm"
+device = "gpu-rocm"
+runtime = "container"
+profile = "memory"
+port = 8091
+n_gpu_layers = -1
+threads = 0
+pinned = false
