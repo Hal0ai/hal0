@@ -214,6 +214,40 @@ def test_list_merges_real_and_synthetic(
     assert by_name["haloai"]["kind"] == "remote"
 
 
+def test_list_slots_uses_binding_for_offline_model_id_but_keeps_loaded_model(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+    isolated_app: FastAPI,
+) -> None:
+    """An offline slot must not expose the model from its last state record.
+
+    While the container is still active, however, that id describes the model
+    it is actually serving even after the TOML binding has been cleared.
+    """
+    loaded = isolated_client.post("/api/slots/chat/load")
+    assert loaded.status_code == 200, loaded.text
+    model_id = loaded.json()["model_id"]
+    assert model_id == "qwen3-4b-q4_k_m"
+
+    path = slot_root / "chat.toml"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace('default = "qwen3-4b-q4_k_m"', 'default = ""'),
+        encoding="utf-8",
+    )
+
+    loaded_rows = isolated_client.get("/api/slots").json()
+    loaded_chat = next(row for row in loaded_rows if row["name"] == "chat")
+    assert loaded_chat["model_id"] == model_id
+
+    container_stub["active"].discard("chat")
+    isolated_app.state._slots_snapshot_cache = None
+    offline_rows = isolated_client.get("/api/slots").json()
+    offline_chat = next(row for row in offline_rows if row["name"] == "chat")
+    assert offline_chat["status"] == "offline"
+    assert offline_chat["model_id"] is None
+
+
 def test_list_real_wins_on_name_collision(
     slot_root: Path,
     container_stub: dict[str, Any],
