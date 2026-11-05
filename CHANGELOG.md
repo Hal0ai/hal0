@@ -86,6 +86,7 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- **FLM model catalogs refresh after pull and slot lifecycle events.** A long-lived catalog cache no longer delays newly installed or newly served FLM models until its TTL expires; generation checks discard stale probes that race an invalidation.
 - **Hindsight's concurrency budget now covers consolidation, reflect and mental-model refresh as well as retain.** The shipped systemd unit defaults `HINDSIGHT_API_LLM_MAX_CONCURRENT` to `1` before a graph drop-in exists; the managed drop-in sets it to the same rendered value as `HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT`, and the root-side wrapper accepts the global key with the existing bounded-integer validation. Saving graph settings or running `hal0 update` repairs an existing retain-only drop-in and restarts Hindsight. (#3387)
 - **Slot drift restart reports incomplete outcomes.** The dashboard names failed and skipped slots, and shows configuration render errors in the bell and Overview. (#3372)
 - **A configured but stopped NPU slot no longer launches an `flm list` container on every `hal0/<role>` request.** hal0 now remembers each `<tag>-FLM` id's FastFlowLM tag once the catalog has resolved it, so the 5-minute catalog expiry cannot trigger a fresh probe for an id it already knows. `reset_flm_catalog_cache()` (run after an FLM pull) clears the memory.
