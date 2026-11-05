@@ -836,12 +836,26 @@ def test_list_pulls_exposes_active_persisted_install_time_pull(
     client_isolated: TestClient,
     app_isolated: FastAPI,
     tmp_hal0_home: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A pull owned by the installer is visible even though it is not in app state.
 
     Its durable progress snapshot is the shared surface between installer and
     API, so listing must retain the active state and current byte count.
     """
+    from hal0.registry.model import Model
+
+    existing_model = tmp_path / "previous-version.gguf"
+    existing_model.write_bytes(b"previous")
+    app_isolated.state.model_registry.add(
+        Model(
+            id="qwen3-4b",
+            name="qwen3-4b",
+            path=str(existing_model),
+            size_bytes=existing_model.stat().st_size,
+        )
+    )
     job_dir = Path(tmp_hal0_home) / "var-lib" / "hal0" / "model-pull-jobs"
     job_dir.mkdir(parents=True, exist_ok=True)
     (job_dir / "qwen3-4b.json").write_text(
@@ -856,6 +870,9 @@ def test_list_pulls_exposes_active_persisted_install_time_pull(
         encoding="utf-8",
     )
     app_isolated.state.model_pull_jobs = {}
+    from hal0.registry import pull_jobs
+
+    monkeypatch.setattr(pull_jobs, "worker_process_is_alive", lambda _snapshot: True)
 
     response = client_isolated.get("/api/models/pulls")
 
@@ -865,6 +882,38 @@ def test_list_pulls_exposes_active_persisted_install_time_pull(
     assert pulls[0]["model_id"] == "qwen3-4b"
     assert pulls[0]["state"] == "running"
     assert pulls[0]["bytes_downloaded"] == 512
+
+
+def test_list_pulls_reconciles_abandoned_active_snapshot(
+    client_isolated: TestClient,
+    app_isolated: FastAPI,
+    tmp_hal0_home: str,
+) -> None:
+    """An active snapshot with no matching live worker must not stick in UI."""
+    job_dir = Path(tmp_hal0_home) / "var-lib" / "hal0" / "model-pull-jobs"
+    job_dir.mkdir(parents=True, exist_ok=True)
+    (job_dir / "qwen3-4b.json").write_text(
+        json.dumps(
+            {
+                "id": "abandoned-job",
+                "model_id": "qwen3-4b",
+                "state": "running",
+                "bytes_downloaded": 512,
+                "worker_pid": 999999999,
+                "worker_start_token": "missing-process",
+            }
+        ),
+        encoding="utf-8",
+    )
+    app_isolated.state.model_pull_jobs = {}
+
+    response = client_isolated.get("/api/models/pulls")
+
+    assert response.status_code == 200, response.text
+    pulls = response.json()
+    assert len(pulls) == 1
+    assert pulls[0]["state"] == "failed"
+    assert pulls[0]["error"] == "pull interrupted by hal0-api restart; re-run the pull"
 
 
 def test_list_pulls_reconciles_persisted_install_time_pull_against_registry(

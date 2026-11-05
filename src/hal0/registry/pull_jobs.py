@@ -93,6 +93,7 @@ from hal0.registry.pull import (
     refuse_image_asset,
     run_flm_pull,
     run_pull,
+    worker_process_is_alive,
 )
 from hal0.upstreams.huggingface import hf_token_from_env
 
@@ -121,10 +122,10 @@ def load_persisted(model_id: str, registry: Any | None = None) -> dict[str, Any]
 def reconcile_persisted(persisted: dict[str, Any], registry: Any | None = None) -> dict[str, Any]:
     """Repair a persisted snapshot that was left in a non-terminal state.
 
-    A snapshot only reaches disk-fallback when its job is absent from the
-    in-memory dict — which after a restart means the worker that owned it is
-    gone. A ``queued``/``running`` snapshot can therefore never make further
-    progress.
+    An active snapshot is retained only when its exact writing process (PID and
+    Linux process-start token) is still alive. This permits install-time pulls
+    in a sibling process to remain visible while stale snapshots converge to a
+    terminal state after a crash or restart.
 
     Before declaring it failed, cross-check ground truth (#MR-2): the terminal
     on-disk write is fail-soft, so a pull that actually completed can be left
@@ -136,6 +137,8 @@ def reconcile_persisted(persisted: dict[str, Any], registry: Any | None = None) 
     cancelled) are returned unchanged.
     """
     if persisted.get("state") in ("queued", "running"):
+        if worker_process_is_alive(persisted):
+            return persisted
         model_id = persisted.get("model_id")
         if registry is not None and model_id:
             try:
@@ -919,23 +922,14 @@ def list_all(jobs: dict[str, PullJob], registry: Any) -> list[dict[str, Any]]:
     from hal0.services.models_service import pull_entry
 
     # Persisted active jobs may belong to an external process, such as the
-    # install-time brain pull. Expose their progress while their durable state
-    # remains active. If the registry already has the installed file, reconcile
-    # a stale snapshot to completed as in the per-model status route.
+    # install-time brain pull. Reconcile each through the process-identity and
+    # installed-file checks shared with the per-model status route.
     persisted = list_persisted_jobs()
     by_model: dict[str, dict[str, Any]] = {}
     for p in persisted:
         mid = p.get("model_id")
         if isinstance(mid, str) and mid:
-            if p.get("state") in ("queued", "running"):
-                reconciled = reconcile_persisted(p, registry)
-                by_model[mid] = (
-                    reconciled
-                    if reconciled.get("state") == "completed"
-                    else p
-                )
-            else:
-                by_model[mid] = p
+            by_model[mid] = reconcile_persisted(p, registry)
 
     # Overlay in-memory jobs (they win — reflect live state)
     for mid, job in jobs.items():
