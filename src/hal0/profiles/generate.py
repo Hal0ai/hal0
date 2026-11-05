@@ -85,8 +85,8 @@ class LlmCallContext:
 
     base_url: str = "http://127.0.0.1:8080"
     headers: dict[str, str] = field(default_factory=dict)
-    #: Virtual model addressing the cheap helper slot (hal0.normalize.resolver),
-    #: the same role hal0.agents.role_slots reserves for utility-tier work.
+    #: Keep the utility alias for existing boxes; its resolver chain falls back
+    #: to agent when a fresh install has no utility slot.
     model: str = "hal0/utility"
 
 

@@ -168,7 +168,7 @@ def test_llama_seed_capabilities_avoid_the_npu_only_lanes() -> None:
         "coder",
         "embed",
         "rerank",
-        "utility",
+        "memory",
     }
 
 
