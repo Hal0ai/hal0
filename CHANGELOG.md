@@ -90,6 +90,7 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- **The fold-identity port-conflict regression test now reserves its intended port even when a host process is listening on 8088.** (#3458)
 - **Expected staged-weight model IDs no longer warn as missing from the registry.** Qwen3-TTS and Moonshine slot lookups stay quiet across loads, active-slot reloads, status drift checks and routing; unexpected misses and registry-backed Kokoro misses continue to warn. Registry hits still enrich model metadata. (#3408)
 - **Slot snapshots agree on model bindings and port ownership.** Boot reconciliation reports conflicts when a requested port belongs to a slot outside the same coresident group, `/api/slots` clears stale model ids for non-serving slots whose binding is empty, and each state-stream transition frame retains its own state, message, timestamp, and corrected model binding.
 

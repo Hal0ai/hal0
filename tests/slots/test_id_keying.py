@@ -247,7 +247,9 @@ async def test_fold_identity_reports_coresident_port_held_by_other_group(
     # A live unrelated claim already holds the shared TOML port.
     brain = sm._ensure_identity("brain", await sm._load_slot_config("brain"))
     assert brain is not None
-    sm._port_authority.acquire(brain.id, preferred=8088, owner_label="slot:brain")
+    sm._port_authority.acquire(
+        brain.id, preferred=8088, owner_label="slot:brain", include_listeners=False
+    )
 
     with caplog.at_level("WARNING"):
         await sm.fold_identity()
