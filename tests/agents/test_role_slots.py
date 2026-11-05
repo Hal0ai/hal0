@@ -13,6 +13,7 @@ def _slot(label: str, **values: Any) -> RoleSlotCandidate:
     defaults: dict[str, Any] = {
         "slot_id": f"slot-{label}",
         "label": label,
+        "name": label,
         "model": f"model-{label}",
         "ready": True,
         "capabilities": ("llm",),
@@ -209,3 +210,38 @@ def test_generation_changes_for_each_advertised_mapping_input() -> None:
             resolve_role_slots("hermes", [_slot("agent"), changed]).generation
             != baseline.generation
         )
+
+
+def test_candidate_keeps_the_routable_name_apart_from_the_label() -> None:
+    # A slot whose display label differs from its name: the name is what
+    # `hal0/<name>` resolves (normalize.resolver._slot_matches_name).
+    candidate = candidate_from_slot_mapping(
+        {
+            "id": "opaque-3",
+            "name": "memory",
+            "label": "Long-term memory",
+            "model_default": "memory-m",
+            "state": "ready",
+            "type": "llm",
+        }
+    )
+
+    assert candidate.name == "memory"
+    assert candidate.label == "Long-term memory"
+
+
+def test_entry_carries_the_routable_name() -> None:
+    candidate = RoleSlotCandidate(
+        slot_id="slot-memory",
+        label="Memory",
+        name="memory",
+        model="memory-m",
+        ready=True,
+        capabilities=("llm",),
+        role_hint="memory",
+    )
+    result = resolve_role_slots("hermes", [_slot("agent"), candidate], auxiliary_slot="memory")
+    entries = {entry.role: entry for entry in result.entries}
+
+    assert entries["compression"].name == "memory"
+    assert entries["compression"].label == "Memory"

@@ -1802,6 +1802,23 @@ class SlotsConfig(BaseModel):
             "capture."
         ),
     )
+    fabric_clock_guard: str = Field(
+        default="refuse",
+        description=(
+            "Policy when an NPU slot (device=npu, the `flm` recipe) would load "
+            "alongside a GPU slot (vulkan/rocm/hip) that is up or loading, or "
+            "vice versa, while the Proxmox host's AMD GPU fabric clock is not "
+            "held at its top DPM level (hal0.slots.fabric_clock_guard; "
+            "ROCm/TheRock#8709 — a fclk DPM change mid-flight can hang the box "
+            "or corrupt NPU results on Strix Halo). `refuse` (default) blocks "
+            "the load with the host-side fix in the error; `warn` logs and "
+            "stores the warning on the slot like the GTT-leak check but still "
+            "loads; `off` skips the check entirely. An unreadable fabric-clock "
+            "state (expected inside hal0's own container — the sysfs write is "
+            "host-only, but the read should still work) always warns, never "
+            "refuses. Overridable per-process with HAL0_FABRIC_CLOCK_GUARD."
+        ),
+    )
     publish_host: str = Field(
         default="127.0.0.1",
         description=(
@@ -1918,6 +1935,17 @@ class SlotsConfig(BaseModel):
                 "(no spaces, ':', or '/'; IPv6 literals are not supported here)"
             )
         return host
+
+    @field_validator("fabric_clock_guard")
+    @classmethod
+    def _fabric_clock_guard_known(cls, v: str) -> str:
+        policy = str(v).strip().lower()
+        if policy not in ("refuse", "warn", "off"):
+            raise ValueError(
+                f"[slots].fabric_clock_guard {v!r} is not supported "
+                "(use 'refuse', 'warn', or 'off')"
+            )
+        return policy
 
     @field_validator("network_mode")
     @classmethod

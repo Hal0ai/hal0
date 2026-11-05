@@ -321,6 +321,19 @@ class SlotConfigError(SlotError):
     status = 400
 
 
+class SlotFabricClockHazard(SlotConfigError):
+    """NPU and GPU slots would run together with the fabric clock unheld.
+
+    Refused by default (``[slots].fabric_clock_guard = "refuse"``); the
+    manager's ``_guard_fabric_clock`` raises this before the load starts so
+    the operator sees the host-side fix before a hang, not after one. See
+    ``hal0.slots.fabric_clock_guard`` and the ADR for the hazard.
+    """
+
+    code = "slot.fabric_clock_unheld"
+    status = 409
+
+
 class RunnerFamilyMismatch(SlotConfigError):
     """A slot's ``binary`` names a runner its launch would not dispatch to.
 
@@ -527,6 +540,7 @@ __all__ = [
     "SlotConfigError",
     "SlotCrashLooping",
     "SlotError",
+    "SlotFabricClockHazard",
     "SlotHealthFailed",
     "SlotHostUnsupported",
     "SlotModelRuntimeMismatch",
