@@ -1,0 +1,181 @@
+#!/bin/sh
+# hal0: hold the AMD GPU fabric clock (fclk) at its top DPM level on the
+# Proxmox HOST, so NPU inference (XDNA2) and GPU work (gfx1151) can run
+# together safely. Without this, a fclk DPM change mid-flight can hang the
+# box or corrupt NPU results (upstream ROCm/TheRock#8709; fix expected in
+# BIOS/SMU firmware). hal0's guest container can only READ the sysfs files
+# below, never write them, so this script runs on the Proxmox host, not
+# inside the LXC. See docs/adr for the hazard and scripts/proxmox-ve/README.md
+# for install instructions.
+#
+# Usage: hal0-fabric-clock hold | release | status
+# Exit codes: 0 held (hold/status) or released (release); 1 not held / failed;
+#             2 the clock controls could not be read at all.
+#
+# HAL0_SYSFS overrides the /sys root, for testing against a fake tree.
+set -u
+SYS="${HAL0_SYSFS:-/sys}"
+
+wr() { { echo "$2" > "$1"; } 2>/dev/null; }
+
+devices() {
+  for d in "$SYS"/class/drm/card*/device; do
+    if [ -e "$d/pp_dpm_fclk" ] && [ -e "$d/power_dpm_force_performance_level" ]; then
+      echo "$d"
+    fi
+  done | sort -u
+}
+
+# Prefer the SoC GPU (gfx1151) named by KFD topology; every other AMD device
+# with a fabric-clock control is a fallback for a box whose topology cannot
+# be read (or isn't Strix Halo at all).
+soc_gpu() {
+  for p in "$SYS"/class/kfd/kfd/topology/nodes/*/properties; do
+    [ -r "$p" ] || continue
+    v=$(awk '$1 == "gfx_target_version" {print $2; exit}' "$p" 2>/dev/null)
+    case "$v" in 1105[0-9][0-9]) ;; *) continue ;; esac
+    minor=$(awk '$1 == "drm_render_minor" {print $2; exit}' "$p" 2>/dev/null)
+    case "$minor" in '' | *[!0-9]*) continue ;; esac
+    [ -e "$SYS/class/drm/renderD$minor/device" ] || continue
+    want=$(readlink -f "$SYS/class/drm/renderD$minor/device" 2>/dev/null)
+    [ -n "$want" ] || continue
+    for d in "$SYS"/class/drm/card*/device; do
+      [ -e "$d" ] || continue
+      real=$(readlink -f "$d" 2>/dev/null)
+      if [ "$real" = "$want" ]; then
+        echo "$d"
+        return 0
+      fi
+    done
+  done
+  return 0
+}
+
+# True (exit 0) when the clock is held, 1 when not held, 2 when it cannot be read.
+held() {
+  perf=$(cat "$1/power_dpm_force_performance_level" 2>/dev/null) || perf=""
+  fclk=$(cat "$1/pp_dpm_fclk" 2>/dev/null) || fclk=""
+  [ -n "$perf" ] && [ -n "$fclk" ] || return 2
+  top=$(printf '%s\n' "$fclk" | grep . | tail -n 1)
+  [ "$perf" = high ] && return 0
+  [ "$perf" = manual ] || return 1
+  [ "$(printf '%s\n' "$fclk" | grep -c '\*')" = 1 ] && [ "${top%\*}" != "$top" ]
+}
+
+hold_dev() {
+  lvl=$(grep . "$1/pp_dpm_fclk" 2>/dev/null | tail -n 1 | cut -d: -f1)
+  perf=$(cat "$1/power_dpm_force_performance_level" 2>/dev/null) || perf=""
+  [ -n "$lvl" ] && [ -n "$perf" ] || return 2
+  if wr "$1/power_dpm_force_performance_level" manual && wr "$1/pp_dpm_fclk" "$lvl"; then
+    if held "$1"; then
+      echo "hal0-fabric-clock: $1: held at level $lvl"
+      return 0
+    fi
+  fi
+  echo "hal0-fabric-clock: $1: could not hold it (level $lvl)" >&2
+  return 1
+}
+
+do_hold() {
+  soc=$(soc_gpu)
+  if [ -n "$soc" ]; then
+    hold_dev "$soc"
+    s=$?
+    [ "$s" = 2 ] && echo "hal0-fabric-clock: $soc (the SoC GPU): clock controls unreadable" >&2
+    [ "$s" = 0 ]
+    return
+  fi
+  [ -n "$(devices)" ] || {
+    echo "hal0-fabric-clock: no amdgpu device with pp_dpm_fclk under $SYS/class/drm" >&2
+    return 1
+  }
+  echo "hal0-fabric-clock: no SoC GPU found in KFD topology; holding every readable amdgpu device"
+  rc=0
+  held_n=0
+  for d in $(devices); do
+    hold_dev "$d"
+    s=$?
+    case "$s" in
+      0) held_n=$((held_n + 1)) ;;
+      *) rc=1 ;;
+    esac
+  done
+  [ "$held_n" -gt 0 ] || rc=1
+  return "$rc"
+}
+
+do_release() {
+  soc=$(soc_gpu)
+  rc=0
+  if [ -n "$soc" ]; then
+    target_list=$soc
+  else
+    target_list=$(devices)
+  fi
+  for d in $target_list; do
+    held "$d"
+    [ "$?" = 2 ] && continue
+    if wr "$d/power_dpm_force_performance_level" auto; then
+      echo "hal0-fabric-clock: $d: released (auto)"
+    else
+      echo "hal0-fabric-clock: $d: could not release it" >&2
+      rc=1
+    fi
+  done
+  return "$rc"
+}
+
+do_status() {
+  soc=$(soc_gpu)
+  if [ -n "$soc" ]; then
+    held "$soc"
+    s=$?
+    case "$s" in
+      0)
+        echo "$soc (the SoC GPU): held ($(cat "$soc/power_dpm_force_performance_level" 2>/dev/null))"
+        return 0
+        ;;
+      2)
+        echo "$soc (the SoC GPU): unreadable"
+        return 2
+        ;;
+      *)
+        echo "$soc (the SoC GPU): NOT held ($(cat "$soc/power_dpm_force_performance_level" 2>/dev/null))"
+        return 1
+        ;;
+    esac
+  fi
+  [ -n "$(devices)" ] || {
+    echo "hal0-fabric-clock: no amdgpu device with a fabric-clock control"
+    return 2
+  }
+  rc=0
+  held_n=0
+  for d in $(devices); do
+    held "$d"
+    s=$?
+    case "$s" in
+      0)
+        echo "$d: held ($(cat "$d/power_dpm_force_performance_level" 2>/dev/null))"
+        held_n=$((held_n + 1))
+        ;;
+      2) echo "$d: unreadable, skipped" ;;
+      *)
+        echo "$d: NOT held ($(cat "$d/power_dpm_force_performance_level" 2>/dev/null))"
+        rc=1
+        ;;
+    esac
+  done
+  [ "$held_n" -gt 0 ] || rc=1
+  return "$rc"
+}
+
+case "${1:-status}" in
+  hold) do_hold; exit ;;
+  release) do_release; exit ;;
+  status) do_status; exit ;;
+  *)
+    echo "usage: hal0-fabric-clock hold | release | status" >&2
+    exit 2
+    ;;
+esac

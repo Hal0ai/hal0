@@ -68,7 +68,7 @@ async def test_npu_container_slot_spawns_with_flm_tag(
         ),
         patch("hal0.agents.hermes_refresh.spawn_context_refresh", lambda *a, **k: None),
     ):
-        sm = SlotManager()
+        sm = SlotManager(fabric_clock_guard="off")
         await sm.load("npu", "gemma3:4b")
 
     assert fake_provider.load_sync.called, "ContainerProvider.load_sync must be called"
@@ -101,7 +101,7 @@ async def test_npu_container_slot_spawns_with_toml_default(
         ),
         patch("hal0.agents.hermes_refresh.spawn_context_refresh", lambda *a, **k: None),
     ):
-        sm = SlotManager()
+        sm = SlotManager(fabric_clock_guard="off")
         await sm.load("npu")  # no explicit model_id
 
     assert fake_provider.load_sync.called
@@ -179,7 +179,7 @@ async def test_registry_style_model_id_does_not_take_flm_path(
 
         mock_reg_instance.get.side_effect = ModelNotFound("qwopus3.6-27b-v2")
 
-        sm = SlotManager()
+        sm = SlotManager(fabric_clock_guard="off")
         await sm.load("npu", "qwopus3.6-27b-v2")
 
     # Registry.get was called with the plain id — the FLM early-return
@@ -226,7 +226,7 @@ async def test_await_ready_health_timeout_stays_non_dispatchable(
         ),
         patch("hal0.agents.hermes_refresh.spawn_context_refresh", lambda *a, **k: None),
     ):
-        mgr = SlotManager()
+        mgr = SlotManager(fabric_clock_guard="off")
         await mgr.load("npu", "gemma3:4b")
 
         assert mgr.state("npu") == SlotState.WARMING, (
@@ -267,7 +267,7 @@ async def test_flm_inference_gate_runs_once_and_promotes_to_ready(
         ),
         patch("hal0.agents.hermes_refresh.spawn_context_refresh", lambda *a, **k: None),
     ):
-        mgr = SlotManager()
+        mgr = SlotManager(fabric_clock_guard="off")
         await mgr.load("npu", "gemma3:4b")
 
         assert mgr.state("npu") == SlotState.READY
@@ -301,7 +301,7 @@ async def test_flm_inference_gate_passes_assigned_model(
         ),
         patch("hal0.agents.hermes_refresh.spawn_context_refresh", lambda *a, **k: None),
     ):
-        mgr = SlotManager()
+        mgr = SlotManager(fabric_clock_guard="off")
         await mgr.load("npu", "gemma3:4b")
 
         assert mgr.state("npu") == SlotState.READY
@@ -363,7 +363,7 @@ async def test_flm_inference_gate_probes_the_override_model(
         ),
         patch("hal0.agents.hermes_refresh.spawn_context_refresh", lambda *a, **k: None),
     ):
-        mgr = SlotManager()
+        mgr = SlotManager(fabric_clock_guard="off")
         await mgr.load("npu", override)
 
         assert mgr.state("npu") == SlotState.READY
@@ -398,7 +398,7 @@ async def test_flm_inference_gate_wedged_npu_stays_warming(
         ),
         patch("hal0.agents.hermes_refresh.spawn_context_refresh", lambda *a, **k: None),
     ):
-        mgr = SlotManager()
+        mgr = SlotManager(fabric_clock_guard="off")
         await mgr.load("npu", "gemma3:4b")
 
         assert mgr.state("npu") == SlotState.WARMING, (

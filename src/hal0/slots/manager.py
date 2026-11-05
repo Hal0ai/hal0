@@ -30,9 +30,10 @@ import asyncio
 import contextlib
 import copy
 import logging
+import os
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -98,6 +99,7 @@ from hal0.slots.state import (
     IllegalSlotTransition,
     SlotConfigError,
     SlotCrashLooping,
+    SlotFabricClockHazard,
     SlotNotFound,
     SlotOutputSanityFailed,
     SlotPinned,
@@ -395,6 +397,7 @@ class SlotManager:
         upstreams_registry: Any | None = None,
         identity_store: Any | None = None,
         port_authority: Any | None = None,
+        fabric_clock_guard: str = "refuse",
     ) -> None:
         # Stable-id identity bridge + single port allocator (rework §11.1/§11.2).
         # Both are OPT-IN (default None): a bare ``SlotManager()`` — every unit
@@ -535,6 +538,17 @@ class SlotManager:
         self._preload_evict_enabled: bool = preload_evict_enabled
         self._preload_evict_headroom_mb: float = float(preload_evict_headroom_mb)
         self._preload_reserved_mb: dict[str, float] = {}
+        # Fabric-clock hazard policy (NPU + GPU together on Strix Halo; see
+        # hal0.slots.fabric_clock_guard and [slots].fabric_clock_guard).
+        # HAL0_FABRIC_CLOCK_GUARD overrides the configured policy per-process,
+        # matching the env-override convention used across hal0 (e.g.
+        # HAL0_CONTAINER_RUNTIME, HAL0_BIND_HOST).
+        policy = (
+            (os.environ.get("HAL0_FABRIC_CLOCK_GUARD") or fabric_clock_guard or "refuse")
+            .strip()
+            .lower()
+        )
+        self._fabric_clock_guard: str = policy if policy in ("refuse", "warn", "off") else "refuse"
         self._admission_lock: asyncio.Lock = asyncio.Lock()
         self._idle_monitor_interval_s: float = idle_monitor_interval_s
         # Idle/eviction background loop (P3-slots §1b) — SlotReaper owns its
@@ -1395,6 +1409,9 @@ class SlotManager:
             # The GTT-leak suspicion belongs to one load attempt: an empty value
             # (this load found none) or the slot going down retires it.
             carried_extra.pop("gtt_leak_warning", None)
+        if not carried_extra.get("fabric_clock_warning") or to_state == SlotState.OFFLINE:
+            # Same lifetime as gtt_leak_warning: one load attempt's warning.
+            carried_extra.pop("fabric_clock_warning", None)
         if to_state in (SlotState.READY, SlotState.IDLE):
             # Converged healthy — clear the crash-loop breaker and its
             # carried extras. Covers load() success AND out-of-band
@@ -1406,6 +1423,8 @@ class SlotManager:
             # …and the GTT-leak suspicion: it explains a load that might hang,
             # and this one came up.
             carried_extra.pop("gtt_leak_warning", None)
+            # …and the fabric-clock warning, for the same reason.
+            carried_extra.pop("fabric_clock_warning", None)
             # …and the crash-line evidence: it explains the failures the
             # breaker counted, so it retires with them.
             carried_extra.pop("last_crash_line", None)
@@ -2044,6 +2063,14 @@ class SlotManager:
                 # by a slot evicted to make room cannot read as a leak. Advisory
                 # only — it never refuses; the text rides the STARTING record.
                 leak_warning = await self._guard_gtt_leak(slot_name, _spec_provider_or_none(cfg))
+                # Fabric-clock hazard (NPU + GPU together on Strix Halo,
+                # ROCm/TheRock#8709): refuses by default (raises
+                # SlotFabricClockHazard, caught by the except below which
+                # stamps ERROR and re-raises), or stores a warning like the
+                # GTT-leak check when [slots].fabric_clock_guard = "warn", or
+                # is skipped entirely when "off". See
+                # hal0.slots.fabric_clock_guard and _guard_fabric_clock.
+                fabric_clock_warning = await self._guard_fabric_clock(slot_name, cfg)
                 # Pre-load eviction (O26): estimate resolved_model's
                 # footprint and, if projected free memory is short, evict
                 # idle, non-pinned resident slots (lowest `priority` first,
@@ -2063,7 +2090,10 @@ class SlotManager:
                         SlotState.STARTING,
                         model_id=resolved_model,
                         port=_cfg_port(cfg),
-                        extra={"gtt_leak_warning": leak_warning},
+                        extra={
+                            "gtt_leak_warning": leak_warning,
+                            "fabric_clock_warning": fabric_clock_warning,
+                        },
                     )
                     await self._spawn_locked(slot_name, cfg, resolved_model, model_info=model_info)
                     await self._transition(
@@ -2670,6 +2700,13 @@ class SlotManager:
             and observed in (SlotState.STARTING, SlotState.WARMING)
         ):
             meta["message"] = leak_warning
+        fabric_clock_warning = rec.extra.get("fabric_clock_warning")
+        if (
+            fabric_clock_warning
+            and not meta.get("message")
+            and observed in (SlotState.STARTING, SlotState.WARMING)
+        ):
+            meta["message"] = fabric_clock_warning
         breaker = self._breaker_snapshot(slot_name)
         if breaker:
             meta["breaker"] = breaker
@@ -3039,6 +3076,93 @@ class SlotManager:
                 },
             )
         return message
+
+    async def _guard_fabric_clock(
+        self, slot_name: str, cfg: Mapping[str, Any] | None
+    ) -> str | None:
+        """Guard the Strix Halo NPU+GPU fabric-clock hazard (ROCm/TheRock#8709).
+
+        Reads the fabric-clock state (:mod:`hal0.slots.fabric_clock_guard`) only
+        when ``slot_name`` uses the NPU and some other slot uses the GPU (or
+        vice versa) and that other slot is up, loading, or unloading. ``off``
+        skips the check entirely; an unreadable state always warns, never
+        raises (hal0's own container cannot write the sysfs files, only read
+        them, so unreadable is the ordinary in-container case). Returns the
+        warning text to store on the slot's state when the policy is ``warn``
+        (or the state was unreadable), else ``None``; raises
+        :class:`SlotFabricClockHazard` when the policy is ``refuse`` and the
+        clock is readable and not held.
+        """
+        if self._fabric_clock_guard == "off":
+            return None
+        from hal0.slots.fabric_clock_guard import (
+            fabric_clock_message,
+            read_fabric_clock,
+            slot_uses_gpu,
+            slot_uses_npu,
+        )
+
+        device = (cfg or {}).get("device") if isinstance(cfg, Mapping) else None
+        this_is_npu = device == "npu"
+        this_is_gpu = not this_is_npu and device not in (None, "cpu")
+        if not this_is_npu and not this_is_gpu:
+            return None
+        try:
+            others = await self.list(exclude=slot_name)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning(
+                "slot.fabric_clock_guard_unreadable: %s: %s",
+                slot_name,
+                exc,
+                extra={"slot": slot_name},
+            )
+            return None
+        counterpart_predicate = slot_uses_gpu if this_is_npu else slot_uses_npu
+        counterparts = [
+            s.name
+            for s in others
+            if s.state
+            in (
+                SlotState.STARTING,
+                SlotState.WARMING,
+                SlotState.READY,
+                SlotState.SERVING,
+                SlotState.IDLE,
+                SlotState.UNLOADING,
+            )
+            and counterpart_predicate(s)
+        ]
+        if not counterparts:
+            return None
+        try:
+            state = await asyncio.to_thread(read_fabric_clock)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning(
+                "slot.fabric_clock_guard_unreadable: %s: %s",
+                slot_name,
+                exc,
+                extra={"slot": slot_name},
+            )
+            return None
+        npu_slot = slot_name if this_is_npu else (counterparts[0] if counterparts else None)
+        gpu_slots = counterparts if this_is_npu else [slot_name]
+        if state.readable and state.held:
+            return None
+        message = fabric_clock_message(state, npu_slot, gpu_slots)
+        if not state.readable:
+            log.warning(
+                "slot.fabric_clock_unreadable: %s: %s",
+                slot_name,
+                message,
+                extra={"slot": slot_name},
+            )
+            return message
+        if self._fabric_clock_guard == "warn":
+            log.warning(
+                "slot.fabric_clock_unheld: %s: %s", slot_name, message, extra={"slot": slot_name}
+            )
+            return message
+        raise SlotFabricClockHazard(message, details={"slot": slot_name})
 
     async def terminate(self, slot_name: str, *, timeout_s: float | None = None) -> None:
         """Stop the slot's container unit and deregister its upstream.

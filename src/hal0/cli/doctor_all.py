@@ -358,6 +358,52 @@ def check_gtt_leak(
     return Check(name, title, _PASS, f"{in_use}, none unexplained")
 
 
+def check_fabric_clock(slots: Any = None, *, sys_root: str = "/sys") -> Check:
+    """Strix Halo NPU+GPU fabric-clock hazard (ROCm/TheRock#8709).
+
+    PASS when no configured slot uses the NPU, or no NPU+GPU pairing is
+    possible, or the clock is held. WARN when an NPU slot and a GPU slot are
+    both configured (regardless of current load state — the hazard is about
+    what CAN run together, not just what is up right now) and the fabric
+    clock is readable but not held: the detail names the exact host-side
+    commands. An unreadable sysfs state PASSes as 'unreadable' — expected
+    inside hal0's own container, since the hold can only be written on the
+    Proxmox host; this is advisory, never a fail.
+    """
+    from hal0.slots.fabric_clock_guard import (
+        fabric_clock_message,
+        read_fabric_clock,
+        slot_uses_gpu,
+        slot_uses_npu,
+    )
+
+    name, title = "fabric_clock", "NPU/GPU fabric-clock guard"
+    if not isinstance(slots, list):
+        return Check(name, title, _PASS, "slot list unavailable, fabric-clock check skipped")
+    npu_slots = [s for s in slots if isinstance(s, dict) and slot_uses_npu(s)]
+    gpu_slots = [s for s in slots if isinstance(s, dict) and slot_uses_gpu(s)]
+    if not npu_slots or not gpu_slots:
+        return Check(name, title, _PASS, "no NPU+GPU slot pairing configured")
+    state = read_fabric_clock(sys_root)
+    if not state.readable:
+        return Check(
+            name,
+            title,
+            _PASS,
+            "fabric-clock state unreadable (expected inside hal0's container; the hold is "
+            "written on the Proxmox host) — "
+            + fabric_clock_message(state, npu_slots[0].get("name"), []),
+        )
+    if state.held:
+        return Check(name, title, _PASS, f"held ({state.perf_level})")
+    message = fabric_clock_message(
+        state,
+        npu_slots[0].get("name"),
+        [str(s.get("name")) for s in gpu_slots if s.get("name")],
+    )
+    return Check(name, title, _WARN, message)
+
+
 def check_seed_context_envelope(*, slots_dir: Path | None = None) -> Check:
     """A slot profile's ``ctx_size`` must fit this box's memory envelope (#1868).
 
@@ -3632,6 +3678,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_secret_file_modes(),
         check_hardware_freshness(),
         check_gtt_leak(slots_payload),
+        check_fabric_clock(slots_payload),
         check_seed_context_envelope(),
         check_agent_uid_isolation(),
         check_api_journal_access(),
