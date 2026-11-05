@@ -735,11 +735,15 @@ def check_api_journal_access(
     probe_gid = journal_gid if journal_gid is not None else _journal_group_gid
     key, title = "api-journal", "API journal read"
 
-    # Probe the process first: a root-run API reads the journal without the
-    # group, so a host that lacks it is not a problem for that API.
     ids = probe_ids()
     if ids is not None and ids[0] == 0:
-        return Check(key, title, _PASS, f"{_API_UNIT} runs as root and can read the journal")
+        return Check(
+            key,
+            title,
+            _WARN,
+            f"{_API_UNIT} is unexpectedly running as root; it should run as the "
+            f"hal0 user with the {_JOURNAL_GROUP} group",
+        )
     gid = probe_gid()
     if gid is None:
         return Check(
