@@ -145,29 +145,28 @@ def _snapshot_model_id(
     observed: SlotState,
     model_id: str | None,
 ) -> str | None:
-    """Project the model id a snapshot should report for a slot.
+    """Project the model id a snapshot reports for a slot.
 
-    One owner, one rule per state of the world:
+    One owner for the rule (ADR-0029): the slot binding owns which model the
+    slot *should* run, the state record owns which model it *is* running.
 
-    - serving (``ready`` / ``serving`` / ``idle``): the record's id names the
-      model the slot is serving, even if the binding was cleared after the
-      load;
-    - no binding: a slot with no ``[model].default`` has no model to name, so
-      the field is ``null`` in every non-serving state (#3412, #3453);
-    - cold (``offline`` / ``error``): the binding owns the field. A cold slot
-      serves nothing, so it reports the model it is bound to rather than the
-      id its state record carried over from an earlier load;
-    - in flight (``pulling`` / ``starting`` / ``warming`` / ``unloading``):
-      the record's id is what the slot is actually doing — the model being
-      pulled or warmed, which an explicit ``/load`` request records before the
-      new binding is persisted.
+    The chain, in order:
 
-    Self-managed providers (``kokoro``, ``qwen3tts``, ``moonshine``,
-    ``vibevoice``) serve a baked-in model and keep their own id.
+    - a self-managed provider keeps its own id, and a serving slot
+      (``ready``, ``serving``, ``idle``) reports the model it is serving;
+    - a non-serving slot whose ``[model].default`` binding is empty reports
+      ``null``, so a stale id from an earlier load is not exposed
+      (#3412, #3453);
+    - a cold slot (``offline``, ``error``) reports its configured binding
+      rather than the id its state record retained (#3439);
+    - a loading slot (``pulling``, ``starting``, ``warming``) reports the
+      in-flight id its state record carries — the model being pulled or
+      warmed — not the binding, which is only persisted after the readiness
+      wait (#3439, r4480727490).
     """
     if not cfg or not provider_requires_model(provider):
         return model_id
-    if observed in (SlotState.READY, SlotState.SERVING, SlotState.IDLE):
+    if observed in _READY_STATES:
         return model_id
     binding = _model_default(cfg)
     if not binding:
