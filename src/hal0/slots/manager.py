@@ -1087,6 +1087,10 @@ class SlotManager:
         if self._identity is None:
             return 0
         count = 0
+        configured_names = {name for _sid, name, _path in self._iter_configured_slots()}
+        for row in self._identity.list_all():
+            if row.name not in configured_names and self._port_authority is not None:
+                self._port_authority.release(row.id)
         # Iterate (slot_id, name) pairs via the bilingual enumerator. An
         # id-keyed slot already owns an identity row, so ``_ensure_identity``
         # get-or-creates by its REAL name and no-ops — the digit stem never
@@ -1112,7 +1116,7 @@ class SlotManager:
                 _, _, grp, _ = self._derive_identity_fields(name, cfg)
                 # include_listeners=False: the slot's own server socket must
                 # not block seeding its own claim.
-                if not self._port_authority.is_free(port, include_listeners=False):
+                if grp is None and not self._port_authority.is_free(port, include_listeners=False):
                     log.warning(
                         "slot.port_seed_conflict",
                         extra={"slot": name, "port": port},
@@ -2643,6 +2647,18 @@ class SlotManager:
                 # #2715: an offline slot keeps a stale ``model_id`` from its
                 # last load; it is not serving anything, so don't claim it is.
                 meta["message"] = no_model_assigned_message(slot_name)
+        # The state record intentionally retains the last loaded model across
+        # transitions. Keep exposing that id while the container is loaded,
+        # because it still describes what is being served, but let the current
+        # TOML binding own the API field once an unassigned slot is offline.
+        model_id = rec.model_id
+        if (
+            cfg
+            and observed == SlotState.OFFLINE
+            and not _model_default(cfg)
+            and provider_requires_model(provider)
+        ):
+            model_id = None
         # The GTT-leak suspicion is the load's own message while the slot is
         # still coming up (the case it explains: a start that hangs reserving
         # the KV pool); any message already set — an error, a missing model —
@@ -2666,7 +2682,7 @@ class SlotManager:
                 name=slot_name,
                 state=observed,
                 port=rec.port,
-                model_id=rec.model_id,
+                model_id=model_id,
                 backend=backend,
                 metadata=meta,
                 last_used_at=self._last_used.get(self._key(slot_name)),

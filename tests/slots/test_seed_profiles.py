@@ -9,7 +9,8 @@ hint fields (``device_class``, ``backend``, ``quant``, boolean ``mtp``).
 
 The catalog is one file (``seed_profiles.toml``); the demoted-seed file and
 its first-reference adoption are gone. The seed set covers every slot hal0
-ships, so the ``agent`` / ``utility`` / ``coding`` workloads are seeds.
+ships, so the ``agent`` / ``memory`` / ``coding`` workloads are seeds. The
+``utility`` profile remains available for existing slots.
 """
 
 from __future__ import annotations
@@ -66,6 +67,7 @@ SEED_PROFILE_NAMES = [
     "flm",
     "halogen",
     "kokoro",
+    "memory",
     "moonshine",
     "qwen3-tts",
     "reranking",

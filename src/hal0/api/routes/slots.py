@@ -1237,12 +1237,16 @@ async def delete_slot(
 
     Being *seeded* protects nothing. Every name in
     :data:`hal0.install.static_seeds.STATIC_SEED_SLOTS` (``flm``, ``tts``,
-    ``rerank``, ``utility``, ``img``, ``agent``, ``brain``, ``qwen3tts``,
+    ``rerank``, ``memory``, ``img``, ``agent``, ``brain``, ``qwen3tts``,
     ``coder``, ``embed`` — note there is no ``primary`` and no ``stt``) deletes
     like any other slot, and deleting one writes a tombstone so the boot-time
     seeding pass honours the deletion instead of resurrecting it. Recreating
-    the name clears the tombstone. Two of those seeds (``agent``, ``utility``)
-    are pinned by default, which is the only reason they need ``force``.
+    the name clears the tombstone. Of those seeds, ``agent`` is pinned by
+    default, which is the only reason it needs ``force``. An existing
+    ``utility`` slot stays pinned the same way — through the default anchor
+    set (``agent``/``utility``/``npu``) that
+    :func:`hal0.slots.reaper.is_pinned` applies when the slot's own ``pinned``
+    key is absent. ``SlotConfig.pinned`` itself defaults to ``False``.
     """
     sm = _get_slot_manager(request)
     # Snapshot before the delete so the composite refresh below knows which
@@ -1256,6 +1260,13 @@ async def delete_slot(
     # advertised by /v1/models (hard-404ing on dispatch) until an
     # unrelated slot went ready or hal0-api restarted. Evict here.
     await _refresh_composite_catalogue(request, before)
+    if name == "memory":
+        try:
+            from hal0.api.agents.repair import reprovision_hermes_auxiliary
+
+            await reprovision_hermes_auxiliary(request)
+        except Exception as exc:
+            log.warning("slots.memory_hermes_aux_reprovision_unavailable", error=str(exc))
     if name in _OWUI_WIRED_SLOT_NAMES:
         from hal0.components.openwebui_arm import reconcile_openwebui_env_background
 
@@ -1439,6 +1450,13 @@ async def update_slot_config(name: str, request: Request) -> dict[str, object]:
     # ``ready`` event. Re-derive it now rather than advertising the old id
     # until some unrelated slot happens to go ready.
     await _refresh_composite_catalogue(request, before)
+    if name == "memory" and _bound_model_id(before or {}) != _bound_model_id(projected):
+        try:
+            from hal0.api.agents.repair import reprovision_hermes_auxiliary
+
+            await reprovision_hermes_auxiliary(request)
+        except Exception as exc:
+            log.warning("slots.memory_hermes_aux_reprovision_unavailable", error=str(exc))
     # NOTE (#1369): this route is a PURE config write — no lifecycle side
     # effect. It used to unload a running slot on an ``enabled: false`` body
     # (so the faded card matched reality); with the field gone, config edits

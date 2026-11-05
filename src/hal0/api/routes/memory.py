@@ -982,6 +982,17 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
         if propagation is not None:
             out["propagation"] = propagation
 
+    if slot_changed or model_changed:
+        # Hermes writes auxiliary targets at provision time. Reuse its tracked
+        # repair path when the configured target changes; an absent Hermes is
+        # normal on boxes that do not bundle it.
+        try:
+            from hal0.api.agents.repair import reprovision_hermes_auxiliary
+
+            await reprovision_hermes_auxiliary(request)
+        except Exception as exc:
+            log.warning("memory.hermes_aux_reprovision_unavailable", error=str(exc))
+
     # Extraction dispatches to hal0/<extraction_slot> whether or not the
     # reporting gate is on, so a slot change measures regardless of it.
     # Throughput preflight (#2353), outside the config lock: the probe can take
