@@ -34,9 +34,12 @@
 | Chat stream | `POST /v1/chat/completions` `{model:"<slot-name>", messages, stream:true}` | — | OpenAI SSE frames |
 
 `model_id` in the slot-list and slot-detail shapes is nullable: it is `null`
-for an offline slot with no model assignment whose provider requires an
-explicit model. While the slot is loaded, it names the model being served,
-even if the assignment was cleared after the load.
+for a slot in a non-serving state (anything other than `ready`, `serving` or
+`idle`) with no model assignment whose provider requires an explicit model.
+While the slot is loaded, it names the model being served, even if the
+assignment was cleared after the load. FE: a `null` `model_id` is the
+documented value for any non-serving state — `error`, `offline`, `pulling`,
+`starting`, `warming`, `unloading` — not only for `offline`.
 
 **Existing FE primitives to REUSE (do not rebuild):** `slot-status.js → slotIndicatorFromPhase()`,
 `memory-map.jsx → MemoryMap/useMemoryMapModel`, `inference-pane.jsx`,
