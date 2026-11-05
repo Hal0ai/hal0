@@ -1,0 +1,172 @@
+---
+title: Image workflows and troubleshooting
+description: Build and launch ComfyUI workflows, reach the editor, set the img slot's image defaults, and diagnose image-generation failures.
+sidebar:
+  order: 72
+---
+
+[Generate images](/docs/guides/generate-images/) covers installing image models,
+checking whether they fit, generating from the dashboard, API or Open WebUI,
+and what a render does to chat. This page covers ComfyUI editor workflows, the
+`img` slot's `[image]` defaults, and troubleshooting.
+
+## Workflows and the ComfyUI editor
+
+ComfyUI's own editor is where video, image-edit and upscale models run, and
+where you build a workflow of your own. The **Engine** tab's editor card lists a
+chip for each installed model's workflow, plus a `custom` chip for each workflow
+that no catalog model owns, from the workflows folder
+(`<model store>/comfyui/workflows`, where you can drop a `<name>.json`) or
+ComfyUI's own saved workflows. A chip opens the editor, not the workflow:
+ComfyUI cannot open a workflow from a link, so pick it in the editor's Workflows
+sidebar. The API lists the same names, and queues one:
+
+```sh
+curl http://localhost:8080/api/comfyui/workflows
+curl -X POST http://localhost:8080/api/comfyui/workflows/my-workflow/launch
+```
+
+`launch` posts the API-format workflow file to ComfyUI as a prompt, so the GPU
+gate treats it like an editor prompt; it answers 404 for a name that is not a
+file and 503 `image.gate_refused` when the gate refuses the prompt.
+
+### Reaching the editor
+
+`comfyui_listen` under `[network]` in `/etc/hal0/hal0.toml` says where ComfyUI's
+web UI answers ([ADR-0041](/docs/adr/0041-the-comfyui-editor-answers-on-the-lan));
+the editor buttons follow it, and `GET /api/config/urls` reports it as `comfyui_lan`.
+
+- **`"lan"` (the default).** `http://<host>:8188` answers from any machine on
+  your network; the Discovery (mDNS) card on the Services page announces it as
+  `http://<host>.local:8188`. ComfyUI has no sign-in of its own, so keep this
+  for a network you trust.
+- **`"loopback"`.** The port is fenced to the box like every other slot. The
+  button works only from a page at `localhost`, `127.0.0.1` or `[::1]`;
+  elsewhere it is disabled (`Only reachable on the box itself`) and the card
+  gives `ssh -L 8188:127.0.0.1:8188 <user>@<hal0 host>` to run on your own
+  machine, then open `http://127.0.0.1:8188` there.
+- **Behind a proxy you run**, in either mode: set `HAL0_COMFYUI_PUBLIC_URL` in
+  `/etc/hal0/api.env` to a URL you made reachable yourself (`comfyui_public`
+  is then true). hal0 does not proxy or sign in to it for you. Unset behind a
+  proxy, the dashboard shows a hint to set it, not a link.
+
+A change applies at the next `hal0 slot restart img`. A path through hal0's own
+sign-in is not available ([#3049](https://github.com/Hal0ai/hal0/issues/3049)).
+
+A prompt you queue in the editor goes through the GPU gate, a custom node that
+asks hal0 for image mode first and refuses the prompt when hal0 cannot hand over
+the GPU. How it works, and the one-time `hal0 slot restart img` after an update,
+are in [ComfyUI's editor and the GPU gate](/docs/guides/image-mode-and-gpu-gate#comfyuis-editor-and-the-gpu-gate).
+
+## The `[image]` settings
+
+The `img` slot's `[image]` table carries `default_size`
+(`""` by default, meaning the model's native size, such as `1024x1024` for SDXL
+and `512x512` for SD 1.5) and `default_steps` (`0` means the model-class
+default). A request's own `size`, or `steps` in `extra_body`, wins. Set
+these from **Settings → AI Capabilities → Image generation**, or edit the
+slot's TOML directly (see [Edit configuration](/docs/guides/configure)).
+
+The panel's **Default size** is a select: `Model native` (the empty value),
+`512x512`, `768x768`, `1024x1024`, `1328x1328`, or `Custom…` with a `WxH` field.
+A custom size is saved as typed, so it has to be a size the server renders as
+is: lower-case `x`, each side 64 to 2048 and a multiple of 8. A size saved
+earlier that the rule rejects opens as Custom with a note on the size the engine
+renders instead (it floors each side), and does not block saving other fields.
+**Default steps** is a whole number, `0` for the model's default. Both apply to
+the next request without a restart.
+
+Image mode has no setting: it ends when generation stops (see
+[How long image mode lasts](/docs/guides/image-mode-and-gpu-gate#how-long-image-mode-lasts)).
+
+Once ComfyUI is up, hal0 leaves its container running: idle-timeout,
+memory-pressure and pre-load eviction never unload the `img` slot, whatever
+its `idle_timeout_s` says, so a ComfyUI editor session is never cut off. Idle,
+ComfyUI holds next to no GPU memory, and switching back to inference frees its
+models. `hal0 slot unload img` still stops it by hand.
+
+### Which container image the `img` slot runs
+
+The `img` slot resolves its image in this order: `image_pin` (top-level or
+`[slot]`-nested, honored verbatim), the legacy bare `image` value (also
+top-level or `[slot]`-nested and still honored for ComfyUI), then
+`[slots].default_images.comfyui` in `hal0.toml` (the operator's choice of
+launch image for ComfyUI, set from the Runner Images page — see
+[Manage runner images](/docs/guides/manage-runner-images)), then the
+`comfyui` runner's resolved image (`HAL0_RUNNER_IMAGE_COMFYUI`, then the
+`manifest.json` pin for `comfyui`). The migration lane folds the legacy
+`image` value into `image_pin`; use `image_pin` for new configurations. Clear
+`image_pin` in `/etc/hal0/slots/img.toml` if you want the resolved default.
+
+## Troubleshooting
+
+**Install fails with 507 `comfyui.insufficient_disk`.** The filesystem under the
+model store cannot hold what is still to download. The message gives the GB
+needed, less what is already staged, and the GB free. Free space or move the
+model store (Settings → Storage), then install again: the staged bytes resume.
+
+**The Models tab says `The image model folder is not readable`, or an install
+answers 409 `comfyui.models_dir_not_writable`.** The hal0 user cannot read or
+write the models tree. The tab shows two commands to run on the host,
+`sudo chgrp -R <hal0 group> <path>` and `sudo chmod -R 2775 <path>`; then
+**Retry**.
+
+**Install is disabled and the tab says `Image generation is unavailable on this
+host`.** The host has no ROCm lane (ComfyUI needs `/dev/kfd` and a render node),
+so `GET /api/comfyui/models` reports `engine.available: false` with that
+reason. The catalog is still listed, with no fit chips and no GPU segment.
+
+**Generate answers 409 `image.model_not_installed`.** The model's weights are not
+all on disk. The dashboard shows the message with **Open Models**; the API's
+`error.details` carries `model`, the `install` call and `missing_gb`.
+
+**Generate answers 422 `image.wont_fit`, or the button reads `Won't fit`.** The
+model at that size needs more GPU pool or RAM than this box has free; the reason
+names the budget. Nothing was unloaded. Pick a smaller size or a model that fits
+(the card offers one), or free memory. See
+[Will it fit?](/docs/guides/generate-images#will-it-fit).
+
+**A prompt is refused by the GPU gate.** The dock's GPU segment reads
+`GPU gate refused a prompt · hh:mm` with the reason, `/v1` answers 503
+`image.gate_refused` and `GET /api/comfyui/status` carries it as
+`gate_refusal`. Queue the prompt again once the reason is gone; **Dismiss**
+hides the line until the next refusal. See
+[ComfyUI's editor and the GPU gate](/docs/guides/image-mode-and-gpu-gate#comfyuis-editor-and-the-gpu-gate).
+
+**After an update, the GPU segment reads `The image engine runs an older GPU gate`, or
+says image generation is blocked.** Run `hal0 slot restart img` once, or press
+**Restart engine** on the Engine tab. A running `img` container keeps the gate it
+started with.
+
+**A render fails at `SaveImage` with `Permission denied`, or `hal0-api`'s journal
+logs `comfyui.data_dir_not_writable`.** ComfyUI runs as the `hal0` account, and
+one of the data root's `output`, `input`, `user`, `custom_nodes` or `home`
+directories is not writable by it: a data root laid down by hand under another
+account, or on a share. As root, once:
+`chgrp -R <hal0 group> <dir> && chmod -R g+ws <dir>` on the directory the log
+names. A data root hal0 created is already `hal0:hal0 2775`; the models
+directory may stay read-only.
+
+**The Engine tab reads `ComfyUI is stopped` or `ComfyUI isn't answering`.**
+Stopped is fine: the next render starts the engine, and a cold start can take up
+to 2 minutes. If the container is up and ComfyUI does not answer, the card shows
+the last lines of its log; **Logs** has the last 200.
+
+**The editor button is disabled.** ComfyUI is fenced (`comfyui_listen =
+"loopback"`) and the page is not on the box; see [Reaching the editor](#reaching-the-editor).
+
+**`http://<host>:8188` is refused after an update.** The `img` container keeps
+its old bind; run `hal0 slot restart img` once.
+
+**`hal0-addon-comfyui` is still announced under `"loopback"`.** Toggle the
+Discovery card on the Services page once; either direction removes it.
+
+## See also
+
+- [Generate images](/docs/guides/generate-images) — install image models, check
+  their fit, and generate from the dashboard, API or Open WebUI.
+- [Image mode and the GPU gate](/docs/guides/image-mode-and-gpu-gate) — the engine status, switching and
+  pinning by hand, and the gate.
+- [Manage slots](/docs/guides/manage-slots) — the `img` slot lifecycle.
+- [Edit configuration](/docs/guides/configure) — the `[image]` table.
+- [Logs and activity](/docs/guides/logs-and-activity) — tail `hal0-slot@img`.
