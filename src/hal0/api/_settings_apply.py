@@ -298,6 +298,12 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
         "apply_class": "service-restart",
         "services": [SERVICE_HAL0_API],
     },
+    # Read once when SlotManager is constructed (api/__init__.py), so a
+    # change needs the API process to come back up.
+    "slots.fabric_clock_guard": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
     # [dispatcher] — same create_app-time wiring as the other two entries.
     "dispatcher.direct_read_timeout_s": {
         "apply_class": "service-restart",
