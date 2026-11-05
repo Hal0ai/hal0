@@ -1120,6 +1120,14 @@ def _write_slot(tmp_path: Path, name: str = "memory") -> Path:
     return slots
 
 
+def _write_id_keyed_slot(tmp_path: Path, stem: str = "7") -> Path:
+    """An id-keyed slot file: the stem is the id, the display name is in the body."""
+    slots = tmp_path / "slots"
+    slots.mkdir(exist_ok=True)
+    (slots / f"{stem}.toml").write_text('name = "memory"\nport = 8092\n', encoding="utf-8")
+    return slots
+
+
 @pytest.mark.parametrize(
     ("configured", "parallel", "rendered"),
     [(8, 2, 2), (2, 2, 2), (1, 2, 1), (8, None, 8), (4, 0, 4)],
@@ -1147,6 +1155,27 @@ def test_effective_limits_reads_the_extraction_slots_parallel(monkeypatch, tmp_p
     assert seen and seen[0]["port"] == 8092
     # The recorded config is untouched: hal0.toml keeps what the operator asked for.
     assert graph.extraction_max_concurrent == 8
+
+
+def test_effective_limits_reads_the_parallel_on_an_id_keyed_layout(monkeypatch, tmp_path: Path):
+    """#3473: the clamp must resolve the slot through the layout authority.
+
+    On an id-keyed box the extraction slot lives at ``slots/<id>.toml`` and its
+    display name is in the file body, so a name-keyed-only read found nothing
+    and the clamp silently did not apply.
+    """
+    slots = _write_id_keyed_slot(tmp_path)
+    seen: list[dict] = []
+
+    def _parallel(raw):
+        seen.append(raw)
+        return 2
+
+    monkeypatch.setattr("hal0.providers.container.slot_parallel_sequences", _parallel)
+    graph = _graph(extraction_slot="memory", extraction_max_concurrent=8)
+    assert extraction_slot_parallel(graph, slots_dir=slots) == 2
+    assert effective_limits(graph, slots_dir=slots).max_concurrent == 2
+    assert seen and seen[0]["port"] == 8092
 
 
 def test_effective_limits_leaves_concurrency_alone_when_the_slot_is_unknown(tmp_path: Path):
