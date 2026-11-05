@@ -7764,8 +7764,9 @@ def _merge_env_file(path: Path, updates: dict[str, str]) -> None:
 #: unprivileged (D hardened-perms). Mirrors the hal0-slotctl seam: a non-root
 #: provisioner cannot write the secrets vault
 #: (/var/lib/hal0/secrets/agents/<agent>.env, 0600 root:root) or the driver env
-#: (/etc/hal0/agents/<agent>.env, 0644 root:root) directly, so it delegates the
-#: write to this root helper over `sudo -n`. Env-overridable for tests.
+#: (/etc/hal0/agents/<agent>.env, 0600 root:root driver env; it can carry
+#: HAL0_MCP_TOKEN, a live secret) directly, so it delegates the write to this
+#: root helper over `sudo -n`. Env-overridable for tests.
 _HAL0_AGENTENV = os.environ.get("HAL0_AGENTENV", "/usr/lib/hal0/bin/hal0-agentenv")
 
 #: The agent this provisioner manages; the seam re-validates it server-side.
