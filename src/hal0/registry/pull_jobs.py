@@ -148,7 +148,8 @@ def reconcile_persisted(persisted: dict[str, Any], registry: Any | None = None) 
                     if p and Path(p).exists():
                         persisted = dict(persisted)
                         persisted["state"] = "completed"
-                        persisted.setdefault("path", str(p))
+                        if not persisted.get("path"):
+                            persisted["path"] = str(p)
                         size = getattr(model, "size_bytes", None)
                         if size:
                             persisted.setdefault("size_bytes", size)

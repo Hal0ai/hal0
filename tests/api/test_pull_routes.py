@@ -944,6 +944,7 @@ def test_list_pulls_reconciles_persisted_install_time_pull_against_registry(
                 "model_id": "qwen3-4b",
                 "state": "running",
                 "bytes_downloaded": 4,
+                "path": None,
             }
         ),
         encoding="utf-8",
