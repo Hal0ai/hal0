@@ -125,6 +125,17 @@ def test_split_config_schema_pages_have_distinct_topics() -> None:
     assert second.external_id == "hal0-docs--reference--config-schema-profiles"
 
 
+def test_split_config_schema_slot_files_page_has_distinct_topic() -> None:
+    # The slot-file half (slots/<name>.toml and the [tune] table) moved out of
+    # config-schema so that page renders under the Discourse headroom. The
+    # original keeps its topic; the new page gets one of its own.
+    docs = {d.rel_key: d for d in discovery.discover_docs(REPO_ROOT / "docs")}
+    first = docs["reference/config-schema"]
+    second = docs["reference/config-schema-slots"]
+    assert first.external_id == "hal0-docs--reference--config-schema"
+    assert second.external_id == "hal0-docs--reference--config-schema-slots"
+
+
 def test_split_manage_slots_pages_have_distinct_topics() -> None:
     # Same shape as the config-schema split: the original keeps its topic,
     # the dashboard half gets a topic of its own.
