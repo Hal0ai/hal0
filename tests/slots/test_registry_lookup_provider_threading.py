@@ -23,6 +23,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
 #: The slot tree under test, resolved from the repo checkout rather than from
 #: the imported package — an installed (non-editable) hal0 would point at a
 #: site-packages copy, and this scan must read the working tree.
@@ -98,7 +100,7 @@ def _scan_tree(tree: ast.Module, aliases: set[str]) -> list[tuple[str, int, ast.
 def _scan() -> list[tuple[str, str, int, ast.Call]]:
     """Every resolver call in the slot tree: (module, function, line, call)."""
     sites: list[tuple[str, str, int, ast.Call]] = []
-    for path in sorted(_SLOTS_DIR.glob("*.py")):
+    for path in sorted(_SLOTS_DIR.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         aliases = _resolver_aliases(tree)
         for func, lineno, call in _scan_tree(tree, aliases):
@@ -108,6 +110,26 @@ def _scan() -> list[tuple[str, str, int, ast.Call]]:
 
 def _keyword_names(call: ast.Call) -> set[str]:
     return {kw.arg for kw in call.keywords if kw.arg is not None}
+
+
+def test_scan_finds_unthreaded_lookup_in_subdirectory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A nested slot module must be included in the provider-threading guard."""
+    nested = tmp_path / "npu"
+    nested.mkdir()
+    (nested / "trio.py").write_text(
+        "async def nested_lookup(host, model_id):\n    await host._resolve_model_info(model_id)\n",
+        encoding="utf-8",
+    )
+    module = __import__(__name__, fromlist=["_SLOTS_DIR"])
+    monkeypatch.setattr(module, "_SLOTS_DIR", tmp_path)
+
+    unthreaded = [
+        (name, func) for name, func, _, call in _scan() if "provider" not in _keyword_names(call)
+    ]
+
+    assert unthreaded == [("trio.py", "nested_lookup")]
 
 
 def _provider_value(call: ast.Call) -> ast.expr | None:
