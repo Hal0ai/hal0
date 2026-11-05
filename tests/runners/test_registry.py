@@ -44,6 +44,7 @@ def test_registry_has_every_expected_key() -> None:
         "qwen3tts",
         "cuda",
         "halogen",
+        "xdna",
     }
 
 
@@ -52,7 +53,15 @@ def test_every_runner_shape_is_sane(key: str) -> None:
     runner = RUNNER_IMAGES[key]
     assert isinstance(runner, Runner)
     assert runner.key == key
-    assert runner.image  # resolves through the pin table
+    if key == "xdna":
+        # Not published yet (manifest.json tag: null); the runner-images
+        # recipe lands separately. ``.image`` raises until it does.
+        from hal0.runners.pins import RunnerPinsError
+
+        with pytest.raises(RunnerPinsError):
+            _ = runner.image
+    else:
+        assert runner.image  # resolves through the pin table
     assert runner.runtime_family in _REAL_FAMILIES
     assert runner.device_class in _REAL_DEVICE_CLASSES
     assert isinstance(runner.supports, RunnerSupports)
@@ -215,7 +224,7 @@ def test_tiers_are_the_operator_decided_sets() -> None:
         assert runner.tier in RUNNER_TIERS, f"{key}: unknown tier {runner.tier!r}"
         by_tier[runner.tier].add(key)
     assert by_tier["default"] == {"standard", "cpu", "flm", "kokoro", "moonshine", "comfyui"}
-    assert by_tier["optional"] == {"qwen3tts", "cuda", "halogen"}
+    assert by_tier["optional"] == {"qwen3tts", "cuda", "halogen", "xdna"}
 
 
 def test_at_most_one_default_per_family_and_device_class() -> None:

@@ -217,6 +217,23 @@ RUNNER_IMAGES: dict[str, Runner] = {
             " Opt-in; a large download (about 10 GB)."
         ),
     ),
+    # Tether's ggml-xdna llama.cpp fork on the AMD XDNA2 NPU (open kernels,
+    # plain GGUF). Optional tier: opt-in, time-sliced with flm on shared NPU
+    # hardware (see the ggml-xdna ADR for the full rationale).
+    "xdna": Runner(
+        key="xdna",
+        runtime_family="llama-server",
+        supports=RunnerSupports(),
+        device_class="npu",
+        backend="npu",
+        supported_backends=("npu",),
+        format_arch="gguf",
+        title="NPU (ggml-xdna)",
+        blurb=(
+            "Tether ggml-xdna llama.cpp fork on the AMD XDNA2 NPU; plain GGUF,"
+            " open kernels. Opt-in."
+        ),
+    ),
     "cuda": Runner(
         key="cuda",
         runtime_family="llama-server",
