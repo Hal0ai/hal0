@@ -219,6 +219,7 @@ def test_occupancy_contract_field_shape(client: TestClient, monkeypatch):
         "single_tenant",
         "columns_available",
         "slots",
+        "shared_warning",
     }
     assert set(body.keys()) == top_keys
     assert set(body["slots"][0].keys()) == {
@@ -306,3 +307,37 @@ def test_occupancy_subslot_activity_independent(client: TestClient, monkeypatch)
     assert by_name["npu"]["active"] is False
     assert by_name["npu-stt"]["active"] is True
     assert by_name["npu-embed"]["active"] is False
+
+
+# ── xdna/flm coexistence (xdna-runner plan §4) ────────────────────────────────
+
+
+def test_occupancy_single_npu_slot_has_no_shared_warning(client: TestClient, monkeypatch):
+    monkeypatch.setattr(hw_mod, "_npu_status", AsyncMock(return_value={"ok": True}))
+    monkeypatch.setattr(npu_columns, "cached_aie_columns", AsyncMock(return_value=None))
+    _wire(
+        client,
+        [_FakeSlot("npu", SlotState.SERVING, model_id="gemma3:4b", backend="flm")],
+    )
+
+    body = client.get("/api/npu/occupancy").json()
+    assert body["shared_warning"] is None
+
+
+def test_occupancy_warns_when_xdna_and_flm_both_loaded(client: TestClient, monkeypatch):
+    """An xdna (backend=npu) slot and the flm anchor both loaded → shared_warning."""
+    monkeypatch.setattr(hw_mod, "_npu_status", AsyncMock(return_value={"ok": True}))
+    monkeypatch.setattr(npu_columns, "cached_aie_columns", AsyncMock(return_value=None))
+    _wire(
+        client,
+        [
+            _FakeSlot("flm", SlotState.READY, model_id="gemma3:4b", backend="flm"),
+            _FakeSlot("xdna-qwen", SlotState.READY, model_id="qwen3-xdna", backend="npu"),
+        ],
+    )
+
+    body = client.get("/api/npu/occupancy").json()
+    names = {s["name"] for s in body["slots"]}
+    assert {"flm", "xdna-qwen"} <= names
+    assert body["shared_warning"] is not None
+    assert "time-sliced" in body["shared_warning"]

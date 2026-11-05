@@ -24,6 +24,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Request
 
 from hal0.dispatcher.npu_swap_status import (
@@ -31,6 +32,8 @@ from hal0.dispatcher.npu_swap_status import (
     fetch_npu_swap_status,
 )
 from hal0.slots.naming import slot_container_name, slot_token_for
+
+log = structlog.get_logger(__name__)
 
 router = APIRouter()
 
@@ -361,6 +364,23 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
             used.update(slot_view["cols"])
         cols_used = min(len(used), _NPU_COLS)
 
+    # Coexistence (xdna-runner plan): an xdna (llama-server/npu backend) slot
+    # and the flm trio each independently hold the one physical NPU — hal0
+    # never blocks either from loading alongside the other (spec-hw-slot-
+    # ownership never arbitrates npu/cpu devices), but time-slicing throughput
+    # is a real cost the operator should see. Surface it as a warning on the
+    # occupancy payload (and the activation log) rather than silently.
+    loaded_names = [s["name"] for s in slots_out if s["state"] in _LOADED_VIEW_STATES]
+    npu_shared_warning: str | None = None
+    if len(loaded_names) > 1:
+        npu_shared_warning = (
+            f"NPU shared with slot {loaded_names[0]!r}; throughput is time-sliced"
+        )
+        log.warning(
+            "npu.shared_occupancy",
+            slots=loaded_names,
+        )
+
     return {
         "present": True,
         "rows": _NPU_ROWS,
@@ -373,6 +393,7 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
         "single_tenant": True,
         "columns_available": columns_available,
         "slots": slots_out,
+        "shared_warning": npu_shared_warning,
     }
 
 
