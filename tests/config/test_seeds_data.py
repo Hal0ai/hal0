@@ -23,13 +23,15 @@ from hal0.config.schema import (
 
 # The seeded catalog (ADR-0029 decision 4): one profile per runtime family, the
 # generic llama-server workloads, and the canonical seeds the shipped slots
-# name (agent / utility / coding / brain). There are no demoted seeds: the
+# name (agent / memory / coding / brain). The utility profile remains for
+# existing slots. There are no demoted seeds: the
 # retired ``dense`` / ``moe`` / ``thinking`` / ``chat-long-context`` tunes
 # are published as community addon envelopes instead.
 KEEP_NAMES = {
     "chat",
     "agent",
     "utility",
+    "memory",
     "coding",
     "cpu-chat",
     "embedding",
@@ -78,6 +80,7 @@ class TestSeedProfilesAreProfileCentric:
         profiles = seeds.seed_profiles()
         assert profiles["agent"]["ctx_size"] == 65536
         assert profiles["utility"]["ctx_size"] == 65536
+        assert profiles["memory"]["ctx_size"] == 32768
         assert profiles["brain"]["ctx_size"] == 65536
         assert profiles["embedding"]["ctx_size"] == 4096
         assert profiles["reranking"]["ctx_size"] == 4096

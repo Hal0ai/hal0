@@ -619,7 +619,7 @@ function PhaseBand(props) {
               primary={!broken} busy={busy === "restart"} onClick={actions.restart && (() => run("restart", actions.restart))} />
             <ActBtn live={live} testid="agent-action-repair" label="Repair" primary={broken}
               busy={busy === "repair"} onClick={actions.repair && (() => ask("repair"))} />
-            <ActBtn live={live} testid="agent-action-logs" icon="logs" label="Logs" free onClick={actions.openLogs} />
+            <ActBtn live={live} testid="agent-action-logs" icon="logs" label="Logs" free onClick={actions.openLogs && (() => actions.openLogs(HERMES_UNIT))} />
           </div>
           {status}
         </>
@@ -655,7 +655,7 @@ function PhaseBand(props) {
           <div className="fc-acts">
             <ActBtn live={live} testid="agent-action-restart" icon="refresh" label="Restart" busyLabel="Restarting…"
               busy={busy === "restart"} onClick={actions.restart && (() => run("restart", actions.restart))} />
-            <ActBtn live={live} testid="agent-action-logs" icon="logs" label="Logs" free onClick={actions.openLogs} />
+            <ActBtn live={live} testid="agent-action-logs" icon="logs" label="Logs" free onClick={actions.openLogs && (() => actions.openLogs(HERMES_UNIT))} />
           </div>
           {status}
         </>
@@ -858,7 +858,7 @@ function HermesControls({ live, model, actions, busy, run, editPersona }) {
         <ActBtn live={live} testid="agent-action-restart-gateway" icon="refresh" label="Restart gateway" busyLabel="Restarting…"
           busy={busy === "restartGateway"} disabled={working}
           onClick={actions.restartGateway && (() => run("restartGateway", actions.restartGateway))} />
-        <ActBtn live={live} testid="agent-action-logs" icon="logs" label="Unit logs" free onClick={actions.openLogs} />
+        <ActBtn live={live} testid="agent-action-logs" icon="logs" label="Unit logs" free onClick={actions.openLogs && (() => actions.openLogs(HERMES_UNIT))} />
         <ActBtn live={live} testid="agent-action-activity" icon="tools" label="Tool activity" free onClick={actions.openActivity} />
       </div>
 

@@ -10,14 +10,13 @@
  * device switch driven by a profile (profiles no longer declare a backend).
  * Its save/restart contract lives in slot-drawer-inline-model-v3.
  */
-import { test, expect, MOCK_DATA, type Page } from '../fixtures/apiMock'
+import { test, expect, json, MOCK_DATA, type Page } from '../fixtures/apiMock'
 import { pickRichOption, richSelectOption } from '../fixtures/richSelect'
+import { HALOGEN_DENIED, HALOGEN_KNOBS } from '../../../src/dash/__tests__/fixtures/halogen-knobs'
 
 // ─── Slot fixtures ──────────────────────────────────────────────────────────
 
 const CHAT_CONTAINER = MOCK_DATA.slots.find(s => s.name === 'chat')!
-const NPU_SLOT = MOCK_DATA.slots.find(s => s.name === 'npu')!
-const TTS_SLOT = MOCK_DATA.slots.find(s => s.name === 'tts')!
 
 // ─── HAL0_DATA seed helper (mirrors pattern from slot-edit-controls-v3) ────
 
@@ -39,20 +38,6 @@ async function seedSlots(page: Page, slots: any[]) {
 
 test.describe('C7 — slot-owned hardware grid; no drawer profile selector', () => {
 
-  test.skip('C7a — GPU slot: drawer has HW grid and no profile select', async ({ page }) => {
-    await seedSlots(page, [CHAT_CONTAINER, NPU_SLOT, TTS_SLOT])
-    await page.goto('/#slots/chat')
-    await expect(page.locator('.drawer')).toBeVisible()
-
-    // Device has no control in the drawer any more — it rides the model at
-    // creation and is fixed for the slot's lifetime.
-    await expect(page.getByTestId('slot-hw-device')).toHaveCount(0)
-    await expect(page.getByTestId('slot-hw-ngl')).toBeVisible()
-    await expect(page.getByTestId('slot-hw-threads')).toBeVisible()
-    await expect(page.getByTestId('slot-hw-runtime')).toBeVisible()
-    await expect(page.locator('.drawer .form-row', { hasText: 'Profile' }).locator('select')).toHaveCount(0)
-  })
-
   test('C7a2 — slot card still surfaces the bound profile chip', async ({ page }) => {
     await seedSlots(page, [CHAT_CONTAINER])
     await page.goto('/#slots/chat')
@@ -63,43 +48,6 @@ test.describe('C7 — slot-owned hardware grid; no drawer profile selector', () 
     // profile name), which strict-mode-violates on two matches.
     await expect(page.getByTestId('infer-profile-chat')).toBeVisible()
     await expect(page.getByTestId('infer-profile-chat')).toContainText(CHAT_CONTAINER.profile || '')
-  })
-
-  test.skip('C7b — obsolete: profile changes no longer drive slot config/restart', async ({ page }) => {
-    const configPuts: any[] = []
-    const restartCalls: string[] = []
-
-    await page.route('**/api/slots/chat/config', async (route) => {
-      if (route.request().method() === 'PUT') {
-        configPuts.push(JSON.parse(route.request().postData() || '{}'))
-      }
-      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
-    })
-    await page.route('**/api/slots/chat/defaults', (route) =>
-      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
-    )
-    await page.route('**/api/slots/chat/restart', async (route) => {
-      restartCalls.push(route.request().method())
-      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
-    })
-
-    await seedSlots(page, [CHAT_CONTAINER])
-    await page.goto('/#slots/chat')
-    await expect(page.locator('.drawer')).toBeVisible()
-
-    // Change profile to vulkan
-    const profileRow = page.locator('.drawer .form-row', { hasText: 'Profile' })
-    await profileRow.locator('select').selectOption('vulkan')
-
-    await page.locator('.drawer').getByRole('button', { name: 'Save', exact: true }).click()
-
-    // PUT /config must include profile: "vulkan"
-    await expect.poll(() => configPuts.length).toBeGreaterThan(0)
-    expect(configPuts[0].profile).toBe('vulkan')
-
-    // Restart must fire after the config PUT
-    await expect.poll(() => restartCalls.length).toBeGreaterThan(0)
-    expect(restartCalls[0]).toBe('POST')
   })
 
   // C7c — no-op Save: no empty config PUT and no restart.
@@ -138,57 +86,6 @@ test.describe('C7 — slot-owned hardware grid; no drawer profile selector', () 
   // writes land, WITHOUT waiting for the slow POST /restart to resolve. This
   // is the fix for "save/edit hangs the dash" — restart can take model-load
   // seconds-to-minutes and must never block the UI.
-  test.skip('C7g — obsolete: profile-change restart moved out of slot drawer', async ({ page }) => {
-    let restartStarted = false
-    let releaseRestart: () => void = () => {}
-    const restartGate = new Promise<void>((resolve) => { releaseRestart = resolve })
-
-    await page.route('**/api/slots/chat/config', (route) =>
-      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
-    )
-    await page.route('**/api/slots/chat/defaults', (route) =>
-      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
-    )
-    // Hold the restart request open for the whole assertion window — it stays
-    // "in flight" so we can prove the drawer does not wait on it.
-    await page.route('**/api/slots/chat/restart', async (route) => {
-      restartStarted = true
-      await restartGate
-      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
-    })
-
-    await seedSlots(page, [CHAT_CONTAINER])
-    await page.goto('/#slots/chat')
-    await expect(page.locator('.drawer')).toBeVisible()
-
-    await page.locator('.drawer .form-row', { hasText: 'Profile' }).locator('select').selectOption('vulkan')
-    await page.locator('.drawer').getByRole('button', { name: 'Save', exact: true }).click()
-
-    // The restart must have been kicked off…
-    await expect.poll(() => restartStarted).toBe(true)
-    // …but the drawer must close while it is STILL pending (non-blocking).
-    await expect(page.locator('.drawer')).toBeHidden()
-
-    releaseRestart() // let the held request settle for clean teardown
-  })
-
-  test.skip('C7d — NPU slot: no profile editor; HW grid owns placement', async ({ page }) => {
-    await seedSlots(page, [NPU_SLOT])
-    await page.goto('/#slots/npu')
-    await expect(page.locator('.drawer')).toBeVisible()
-
-    await expect(page.getByTestId('slot-hw-device')).toHaveCount(0)
-    await expect(page.locator('.drawer .form-row', { hasText: 'Profile' }).locator('select')).toHaveCount(0)
-  })
-
-  test.skip('C7e — TTS slot: no profile editor', async ({ page }) => {
-    await seedSlots(page, [TTS_SLOT])
-    await page.goto('/#slots/tts')
-    await expect(page.locator('.drawer')).toBeVisible()
-
-    await expect(page.locator('.drawer .form-row', { hasText: 'Profile' }).locator('select')).toHaveCount(0)
-  })
-
   // C7f — Create modal (D2): device rides the MODEL, not a slot profile.
   // The simplified create picks a model (which carries tune/device/runner) and
   // names it; the POST body derives `device` from the model and omits `profile`.
@@ -286,6 +183,49 @@ test.describe('slot drawer profile row (ADR-0029)', () => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(rows) }),
     )
   }
+
+  test('sizes staged halogen flags and refreshes the open drawer', async ({ page }) => {
+    const slot = { ...CHAT, name: 'flash', binary: 'halogen', profile: 'my-halogen', model: 'flash-model', model_id: 'flash-model' }
+    const profile = { ...MY_TUNE, name: 'my-halogen', runner: 'halogen', flags: 'HALOGEN_KV_POOL_POSITIONS=262144', resolved_flags: 'HALOGEN_KV_POOL_POSITIONS=262144' }
+    const systemInfo = { hardware: { gpus: [{ compute_capable: true }] }, features: {}, backends: {
+      halogen: { title: 'halogen', runtime_family: 'halogen', device_class: 'gpu', backend: 'rocm',
+        supported_backends: ['rocm'], format_arch: 'hgn', knobs: HALOGEN_KNOBS, knob_denied: HALOGEN_DENIED, state: 'installed' },
+    } }
+    const resolvedUrls: string[] = []
+    let verdict = 'fits'
+    let releaseDraftResponse!: () => void
+    const draftResponse = new Promise<void>(resolve => { releaseDraftResponse = resolve })
+    await page.route('**/api/system-info', route => json(route, systemInfo))
+    await mockProfiles(page, [profile])
+    await page.route('**/api/slots/flash/resolved*', async route => {
+      resolvedUrls.push(route.request().url())
+      if (route.request().url().includes('flags=HALOGEN_KV_POOL_POSITIONS%3D524288')) {
+        await draftResponse
+      }
+      await json(route, { name: 'flash', argv: null, provenance: [], removed: 0,
+        footprint: { resident_mb: 72 * 1024, advisory_cache_mb: 10 * 1024, host_free_mb: 108 * 1024, verdict } })
+    })
+    await seedSlots(page, [slot])
+    await page.goto('/#slots/flash')
+    await expect(page.getByTestId('slot-engine-footprint-verdict')).toHaveText('fits')
+    await page.getByTestId('engine-input-HALOGEN_KV_POOL_POSITIONS').fill('524288')
+    await expect.poll(() => resolvedUrls.some(url => url.includes('flags=HALOGEN_KV_POOL_POSITIONS%3D524288'))).toBe(true)
+    await expect(page.getByTestId('slot-engine-footprint')).toBeVisible()
+    await expect(page.getByTestId('slot-engine-footprint-verdict')).toHaveText('fits')
+    releaseDraftResponse()
+    const requestsAfterDraft = resolvedUrls.length
+    verdict = 'loaded'
+    await expect.poll(() => resolvedUrls.length, { timeout: 12_000 }).toBeGreaterThan(requestsAfterDraft)
+    await expect(page.getByTestId('slot-engine-footprint-verdict')).toHaveText('loaded')
+    await expect(page.getByTestId('engine-input-HALOGEN_KV_POOL_POSITIONS')).toHaveValue('524288')
+    await page.getByTestId('engine-input-HALOGEN_KV_POOL_POSITIONS').fill('1')
+    await expect(page.getByTestId('pf-engine-error')).toBeVisible()
+    await expect(page.getByTestId('slot-engine-footprint')).toBeVisible()
+    await expect(page.getByTestId('slot-engine-footprint-verdict')).toHaveText('loaded')
+    await page.getByTestId('engine-input-HALOGEN_KV_POOL_POSITIONS').fill('524288')
+    await page.getByTestId('slot-engine-footprint').scrollIntoViewIfNeeded()
+    await page.screenshot({ path: 'test-results/slot-memory-readout.png', fullPage: true })
+  })
 
   test('shows the effective context and its source, read-only — no ceiling input', async ({ page }) => {
     await mockProfiles(page, [MY_TUNE, SEED])

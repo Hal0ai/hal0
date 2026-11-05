@@ -7,7 +7,7 @@
 // Slot metrics rev fast — they get a 2.5s refetch; the list rev slowly
 // (slot defs change on edit), so 5s is enough.
 
-import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query'
+import { keepPreviousData, useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
 import { api, apiGet, isSignedOut, SIGNED_OUT_MESSAGE } from '../client'
 import { ENDPOINTS } from '../endpoints'
@@ -826,13 +826,20 @@ export interface SlotResolved {
  */
 export function useSlotResolved(
   name: string | null | undefined,
-  options: { enabled?: boolean } = {},
+  options: { enabled?: boolean; flags?: string; profile?: string; refetchInterval?: number | false } = {},
 ) {
+  const { flags, profile } = options
+  const params = new URLSearchParams()
+  if (flags !== undefined) params.set('flags', flags)
+  if (profile !== undefined) params.set('profile', profile)
+  const query = params.toString()
   return useQuery<SlotResolved>({
-    queryKey: ['slot-resolved', name],
-    queryFn: () => apiGet<SlotResolved>(ENDPOINTS.slotResolved(name as string)),
+    queryKey: ['slot-resolved', name, profile, flags],
+    queryFn: () => apiGet<SlotResolved>(ENDPOINTS.slotResolved(name as string) + (query ? `?${query}` : '')),
     enabled: !!name && (options.enabled !== false),
+    placeholderData: keepPreviousData,
     staleTime: 8_000,
+    refetchInterval: options.refetchInterval ?? false,
   })
 }
 

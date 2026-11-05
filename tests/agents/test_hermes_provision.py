@@ -1949,10 +1949,8 @@ def test_resolve_auxiliary_tasks_never_renders_main_without_utility_slot() -> No
         assert aux[task]["base_url"] == _HAL0_V1
 
 
-def test_resolve_auxiliary_tasks_routes_to_npu_virtual_when_utility_on_npu() -> None:
-    # Utility role lives on the NPU slot (name 'npu', role not surfaced by
-    # /api/slots) and there is NO slot named 'utility'. Aux group degrades
-    # hal0/npu (the NPU virtual) so the gateway routes to the NPU slot.
+def test_resolve_auxiliary_tasks_shared_mode_uses_main_even_with_npu() -> None:
+    # Shared mode follows the configured agent target, not a ready NPU.
     slots = [
         _ROLE_SLOTS[0],  # chat
         {
@@ -1964,14 +1962,82 @@ def test_resolve_auxiliary_tasks_routes_to_npu_virtual_when_utility_on_npu() -> 
             "context_length": 18000,
         },
     ]
-    aux = hp._resolve_auxiliary_tasks(slots, hal0_base_url=_HAL0_V1)
+    aux = hp._resolve_auxiliary_tasks(slots, hal0_base_url=_HAL0_V1, extraction_slot="agent")
     for task in ("compression", "title_generation", "skills_hub", "mcp"):
         assert aux[task] == {
             "provider": "custom",
-            "model": "hal0/npu",
+            "model": "",
             "base_url": _HAL0_V1,
         }
     assert aux["vision"] == {"provider": "custom", "model": "", "base_url": _HAL0_V1}
+
+    upgraded = hp._resolve_auxiliary_tasks(slots, hal0_base_url=_HAL0_V1, extraction_slot="utility")
+    assert upgraded["compression"]["model"] == "hal0/npu"
+
+
+def test_resolve_auxiliary_tasks_uses_bound_memory_when_cold() -> None:
+    slots = [
+        _ROLE_SLOTS[0],
+        {"name": "memory", "type": "llm", "state": "offline", "model_default": "memory-m"},
+        _ROLE_SLOTS[1],
+    ]
+    dedicated = hp._resolve_auxiliary_tasks(slots, hal0_base_url=_HAL0_V1, extraction_slot="memory")
+    shared = hp._resolve_auxiliary_tasks(slots, hal0_base_url=_HAL0_V1, extraction_slot="agent")
+    for task in ("compression", "title_generation", "skills_hub", "mcp"):
+        assert dedicated[task]["model"] == "hal0/memory"
+        assert shared[task]["model"] == ""
+
+
+def test_resolve_auxiliary_tasks_memory_lane_uses_the_slot_name() -> None:
+    # The memory lane is addressed by SLOT NAME: `hal0/<name>` resolves by
+    # name (normalize.resolver._slot_matches_name). A slot whose display
+    # label differs from its name must still get a lane id that names a
+    # real slot.
+    slots = [
+        _ROLE_SLOTS[0],
+        {
+            "name": "memory",
+            "label": "Long-term memory",
+            "role_hint": "memory",
+            "type": "llm",
+            "state": "offline",
+            "model_default": "memory-m",
+        },
+    ]
+    aux = hp._resolve_auxiliary_tasks(slots, hal0_base_url=_HAL0_V1, extraction_slot="memory")
+
+    for task in ("compression", "title_generation", "skills_hub", "mcp"):
+        assert aux[task]["model"] == "hal0/memory"
+
+
+def test_resolve_auxiliary_tasks_keeps_the_npu_lane_when_memory_is_unbound() -> None:
+    # A fresh install seeds the memory slot UNBOUND (no [model].default),
+    # and the configured extraction slot is "memory". The aux task has no
+    # dedicated slot to land on, so it must still reach the NPU virtual
+    # lane instead of dropping to the main chat model.
+    slots = [
+        _ROLE_SLOTS[0],
+        _ROLE_SLOTS[1],
+        {
+            "name": "memory",
+            "type": "llm",
+            "state": "offline",
+            "model_id": "",
+        },
+        {
+            "name": "flm",
+            "type": "llm",
+            "state": "ready",
+            "device_class": "npu",
+            "model_id": "gemma4-it:e2b",
+            "backend_url": "http://127.0.0.1:8001/v1",
+            "context_length": 18000,
+        },
+    ]
+    aux = hp._resolve_auxiliary_tasks(slots, hal0_base_url=_HAL0_V1, extraction_slot="memory")
+
+    for task in ("compression", "title_generation", "skills_hub", "mcp"):
+        assert aux[task]["model"] == "hal0/npu"
 
 
 def test_overlay_emits_delegation_and_auxiliary_keys() -> None:
@@ -2029,9 +2095,14 @@ def test_config_write_renders_role_slots_from_live_state(
     from hal0.agents import personas as _personas
 
     monkeypatch.setattr(_personas, "PERSONAS_ROOT", tmp_path / "personas-empty")
+    from hal0.config.schema import Hal0Config
+
+    old_box = Hal0Config()
+    old_box.memory.graph.extraction_slot = "utility"
     io = hp.InstallIO(
         fetch_slots=lambda: list(_ROLE_SLOTS),
         fetch_model_contexts=lambda: {},
+        load_config=lambda: old_box,
         run=fake_hermes_run(),
     )
     out = hp._phase_config_write(hp._StepCtx(state=state, io=io))
@@ -3478,13 +3549,14 @@ _WARM_SLOTS = [_slot_row("agent", "ready", "m1"), _slot_row("utility", "ready", 
 
 
 def _memory_cfg(**graph: Any) -> Any:
-    """A ``load_config()`` stand-in carrying just the ``[memory]`` table."""
+    """An upgraded utility-based box carrying just the ``[memory]`` table."""
     from types import SimpleNamespace
 
     from hal0.config.schema import MemoryGraphConfig
 
     engine = graph.pop("engine", "hindsight")
     enabled = graph.pop("enabled", True)
+    graph.setdefault("extraction_slot", "utility")
     return SimpleNamespace(
         memory=SimpleNamespace(enabled=enabled, engine=engine, graph=MemoryGraphConfig(**graph))
     )
@@ -3503,8 +3575,8 @@ def _box_io(
 ) -> hp.InstallIO:
     """``InstallIO`` for a box whose hal0-api answers its slot list with
     ``(status, rows)``, whose memory engine calls ``hal0/memory`` on the
-    gateway (unless ``engine_llm`` says otherwise), and whose ``[memory]`` is
-    the schema default (unless ``memory``). Each slot's detail reports no
+    gateway (unless ``engine_llm`` says otherwise), and whose ``[memory]`` keeps
+    an upgraded utility target (unless ``memory``). Each slot's detail reports no
     pending config change unless it is named in ``drifted``; ``detail``
     replaces the detail answer outright. ``calls`` records each slot-list read
     (``"slots"``) and detail read (``"detail:<name>"``)."""
@@ -3890,7 +3962,7 @@ def test_virtual_anchor_with_no_live_slot_still_skips(
         hp, "_smoke_chat_completions", lambda s, io: pytest.fail("probe must not run")
     )
     state = hp.BootstrapState(hermes_home=str(hh))
-    out = hp._phase_smoke_tests(hp._StepCtx(state=state))
+    out = hp._phase_smoke_tests(hp._StepCtx(state=state, io=hp.InstallIO(load_config=_memory_cfg)))
     assert out.details["results"]["chat_completions"]["skipped"] is True
     assert "slot agent is offline" in out.details["results"]["chat_completions"]["detail"]
     assert {s.split(":")[0] for s in out.details["skipped"]} == {
@@ -4472,7 +4544,7 @@ def test_is_gateway_base_url(url: str, expected: bool) -> None:
 class TestMemoryEngineGate:
     """memory_roundtrip's ``memory_add`` makes hindsight extract with its own
     LLM call to ``hal0/memory`` on the gateway, which loads the extraction slot
-    (``utility`` by default, the agent anchor when utility has no model) if it
+    (the configured ``utility``, or agent when utility has no model) if it
     is cold. The REAL probe runs against a recording memory seam, so any
     attempt shows in ``calls``."""
 

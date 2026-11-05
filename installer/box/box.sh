@@ -82,7 +82,14 @@ LOG_DIR="${HOST_ROOT}/var/log"
 BUILD_LOG="${LOG_DIR}/hal0-box-build.log"
 SELFTEST_LOG="${LOG_DIR}/hal0-box-selftest.log"
 INSTALL_LOG="${LOG_DIR}/hal0-box-install.log"
-DROPIN="${HOST_ROOT}/etc/systemd/system/user@.service.d/hal0-box.conf"
+# The memlock and cgroup-delegation drop-in is scoped to the box user's own
+# user manager (user@<uid>.service.d). The bare user@.service.d path would
+# grant unlimited locked memory and delegated controllers to every user on
+# the host; installs from before this change wrote it there, so install and
+# uninstall both remove that legacy file.
+SYSTEMD_SYSTEM_DIR="${HOST_ROOT}/etc/systemd/system"
+LEGACY_DROPIN="${SYSTEMD_SYSTEM_DIR}/user@.service.d/hal0-box.conf"
+box_dropin_path() { printf '%s/user@%s.service.d/hal0-box.conf' "${SYSTEMD_SYSTEM_DIR}" "$1"; }
 BOX_HOME="${HOST_ROOT}/home/${BOX_USER}"
 RUN_USER_DIR="${HOST_ROOT}/run/user"
 BOX_UNIT="${BOX_NAME}.service"
@@ -554,10 +561,18 @@ box_user_setup() {
     box_user_is_ours || die "$(box_foreign_user_message)"
     u="$(id -u "${BOX_USER}")"
     box_subids
+    local dropin legacy=0
+    dropin="$(box_dropin_path "${u}")"
+    if [[ -f "${LEGACY_DROPIN}" ]]; then
+        rm -f "${LEGACY_DROPIN}"
+        rmdir "$(dirname "${LEGACY_DROPIN}")" 2>/dev/null || true
+        legacy=1
+        log "removed the host-wide ${LEGACY_DROPIN#"${HOST_ROOT}"}; the box user gets its own drop-in"
+    fi
     want="$(printf '[Service]\nLimitMEMLOCK=infinity\nDelegate=cpu cpuset io memory pids\n')"
-    mkdir -p "$(dirname "${DROPIN}")"
-    if [[ ! -f "${DROPIN}" || "$(cat "${DROPIN}")" != "${want}" ]]; then
-        printf '%s\n' "${want}" > "${DROPIN}"
+    mkdir -p "$(dirname "${dropin}")"
+    if [[ "${legacy}" == 1 || ! -f "${dropin}" || "$(cat "${dropin}")" != "${want}" ]]; then
+        printf '%s\n' "${want}" > "${dropin}"
         systemctl daemon-reload
         loginctl enable-linger "${BOX_USER}"
         systemctl restart "user@${u}.service"
@@ -691,7 +706,9 @@ box_self_test() {
     fi
 }
 
-# Every HAL0_* setting the operator gave bootstrap reaches install.sh, except
+# Every HAL0_* setting the operator gave bootstrap reaches install.sh, and so
+# does a HuggingFace token (HF_TOKEN / HUGGING_FACE_HUB_TOKEN, which install.sh
+# reads for gated pulls), except
 # the launcher's own, bootstrap's temp-dir hand-off, which is ours to clean,
 # and host paths that mean nothing inside the box (cosign is re-pointed).
 box_installer_env() {
@@ -700,7 +717,7 @@ box_installer_env() {
     while IFS= read -r v; do
         case "${v}" in
             HAL0_BOX_*|HAL0_BOOTSTRAP_WORK|HAL0_BOOTSTRAP_KEEP_TMP|HAL0_BOOTSTRAP_VERIFIED|HAL0_BOOTSTRAP_COSIGN) continue ;;
-            HAL0_*) BOX_INSTALLER_ENV+=(-e "${v}=${!v}") ;;
+            HAL0_*|HF_TOKEN|HUGGING_FACE_HUB_TOKEN) BOX_INSTALLER_ENV+=(-e "${v}=${!v}") ;;
         esac
     done < <(compgen -e)
     if [[ -f "${STATE_DIR}/verified" ]]; then
@@ -743,13 +760,18 @@ box_wait_health() {
 # published ports and record each rule this launcher added, so uninstall
 # removes those and never a rule the operator had before.
 box_firewall_open() {
-    local rec="${STATE_DIR}/firewall" p rule
+    local rec="${STATE_DIR}/firewall" p rule ufw_status
     touch "${rec}"
-    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | head -1 | grep -q '^Status: active'; then
+    # Never end a pipe early here (head -1, grep -q): under pipefail the
+    # writer then dies of SIGPIPE (141) and the whole test reads as false,
+    # so an active ufw would be skipped. Capture the output, then match it.
+    if command -v ufw >/dev/null 2>&1 \
+        && ufw_status="$(ufw status 2>/dev/null)" && [[ "${ufw_status}" == "Status: active"* ]]; then
         for p in "${BOX_PORTS[@]}"; do
             rule="ufw ${p}/tcp"
             grep -qxF "${rule}" "${rec}" && continue
-            if ufw status 2>/dev/null | awk '{print $1, $2}' | grep -qxF "${p}/tcp ALLOW"; then
+            ufw_status="$(ufw status 2>/dev/null)" || true
+            if awk -v want="${p}/tcp ALLOW" '$1 " " $2 == want { found = 1 } END { exit !found }' <<<"${ufw_status}"; then
                 continue
             fi
             ufw allow "${p}/tcp" comment "${BOX_NAME}" >/dev/null && printf '%s\n' "${rule}" >> "${rec}"
@@ -976,11 +998,14 @@ cmd_uninstall() {
     fi
     box_firewall_close
     box_apparmor_revert
-    if [[ -f "${DROPIN}" ]]; then
-        rm -f "${DROPIN}"
-        rmdir "$(dirname "${DROPIN}")" 2>/dev/null || true
-        systemctl daemon-reload 2>/dev/null || true
-    fi
+    local d reload=0
+    for d in "${LEGACY_DROPIN}" "${SYSTEMD_SYSTEM_DIR}"/user@*.service.d/hal0-box.conf; do
+        [[ -f "${d}" ]] || continue
+        rm -f "${d}"
+        rmdir "$(dirname "${d}")" 2>/dev/null || true
+        reload=1
+    done
+    [[ "${reload}" == 1 ]] && { systemctl daemon-reload 2>/dev/null || true; }
     if [[ -f "${SHIM_PATH}" ]] && grep -q "${SHIM_MARKER}" "${SHIM_PATH}"; then
         rm -f "${SHIM_PATH}"
     fi

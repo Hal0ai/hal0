@@ -215,6 +215,10 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
         "apply_class": "service-restart",
         "services": [SERVICE_HAL0_API],
     },
+    # [memory.priority] — persisted immediately; scheduling is a later stage.
+    "memory.priority.enabled": {"apply_class": "immediate", "services": []},
+    "memory.priority.quiet_gap_s": {"apply_class": "immediate", "services": []},
+    "memory.priority.max_defer_s": {"apply_class": "immediate", "services": []},
     # [memory.graph] — ADR-0023: extraction_slot + llm_timeout_s propagate to
     # hindsight-api via a systemd drop-in + restart (handled in the
     # /api/memory/graph PUT handler, which is the sole writer; the generic
@@ -291,6 +295,12 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
         "services": [SERVICE_HAL0_API],
     },
     "slots.preload_evict_headroom_mb": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
+    # Read once when SlotManager is constructed (api/__init__.py), so a
+    # change needs the API process to come back up.
+    "slots.fabric_clock_guard": {
         "apply_class": "service-restart",
         "services": [SERVICE_HAL0_API],
     },

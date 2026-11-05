@@ -1873,8 +1873,14 @@ def build_trigger(
     platform_extras: tuple[str, ...] | list[str] = (),
     *,
     hermes_home: Path | str | None = None,
+    pin_extras: tuple[str, ...] | list[str] = (),
 ) -> str | None:
     """Why a build is needed, or ``None`` (ADR-0032 decision 6's three triggers).
+
+    ``pin_extras`` are the extras the requirements pin asks for. A live release
+    built before the pin gained one of them (``acp``, #3344) is rebuilt even
+    though its ref still matches: releases are immutable, so the package cannot
+    be added in place.
 
     A fourth (ADR-0034 decision 1's amendment): a configured platform's extra
     (``platform_extras``) is missing from the live venv. Packages an operator
@@ -1908,6 +1914,9 @@ def build_trigger(
         return f"live ref {live.ref[:12]} differs from target {ref[:12]}"
     if live.python_minor != minor:
         return f"live interpreter {live.python_minor} differs from target {minor}"
+    absent = [e for e in pin_extras if e not in set(live.data.get("extras") or ())]
+    if absent:
+        return f"the pin's extras are missing from the live release: {', '.join(absent)}"
     home = Path(hermes_home) if hermes_home is not None else hp.HERMES_HOME_DEFAULT
     generation = hpl.committed_generation(home, live.src)
     if generation is not None:
@@ -2165,7 +2174,9 @@ def ensure_release(
                 return ReleaseOutcome(
                     status="build_failed", ref=target, error=str(exc), remedy=REPAIR_REMEDY
                 )
-            trigger = build_trigger(layout, target, minor, platform_extras, hermes_home=home)
+            trigger = build_trigger(
+                layout, target, minor, platform_extras, hermes_home=home, pin_extras=pin.extras
+            )
             if trigger is None and not force:
                 notes = []
                 if relinked:

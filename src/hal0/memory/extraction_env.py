@@ -120,8 +120,11 @@ class ExtractionLimits:
     completion tokens, two layers of 3 retries), which on a slow slot turn one
     stuck extraction into a queue that never drains.
 
-    * ``max_concurrent`` -> ``HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT``: in-flight
-      extraction calls against the slot. 1 serialises them.
+    * ``max_concurrent`` -> ``HINDSIGHT_API_LLM_MAX_CONCURRENT`` and
+      ``HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT``: in-flight LLM calls, including
+      consolidation, reflect and mental-model refresh. The slot ``--parallel``
+      clamp applies to both rendered values. 1 serialises them, so a long
+      reflect or consolidation can delay retains until completion or timeout.
     * ``max_tokens`` -> ``HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS``: per-call
       completion cap. Hindsight refuses every retain into a bank whose chunk
       size is not strictly below it: the schema floor (3072) clears the engine
@@ -208,6 +211,7 @@ _DROP_IN_TEMPLATE = (
     "[Service]\n"
     "Environment=HINDSIGHT_API_LLM_MODEL=" + MEMORY_ALIAS + "\n"
     "Environment=HINDSIGHT_API_LLM_TIMEOUT={timeout_s}\n"
+    "Environment=HINDSIGHT_API_LLM_MAX_CONCURRENT={max_concurrent}\n"
     "Environment=HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT={max_concurrent}\n"
     "Environment=HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS={max_tokens}\n"
     "Environment=HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES={llm_retries}\n"
@@ -620,6 +624,42 @@ def apply_extraction_slot(
 
     log.info("hal0.memory.extraction_slot_applied", slot=slot, model=model)
     return result
+
+
+def reconcile_extraction_dropin(
+    *, restart: bool = True, seam: SystemCtlSeam | None = None
+) -> dict[str, Any]:
+    """Re-render the extraction drop-in when it no longer matches ``hal0.toml``.
+
+    ``hal0.toml`` is the source of truth, but the drop-in is written only by a
+    graph-settings save. A config migration that changes an extraction limit
+    (v3 raises a stored ``extraction_max_tokens`` that cannot clear the coding-agent
+    plugin's chunks, #3326) would therefore leave the engine on the old cap until
+    someone saved the settings by hand.
+
+    Acts only on a box that already has a drop-in: a box without one never ran the
+    memory engine, and writing one is install.sh's job. Never raises. Returns
+    ``{"status": "skipped"|"converged"|"applied"|"failed", ...}``.
+    """
+    if not DROP_IN_PATH.exists():
+        return {"status": "skipped", "reason": "no drop-in on this box"}
+    try:
+        from hal0.config.loader import load_hal0_config
+
+        graph = load_hal0_config().memory.graph
+    except Exception as exc:
+        return {"status": "skipped", "reason": f"hal0.toml unreadable: {_detail(exc)}"}
+    limits = ExtractionLimits.from_config(graph)
+    if drop_in_matches(graph.llm_timeout_s, limits=limits):
+        return {"status": "converged"}
+    result = apply_extraction_slot(
+        graph.extraction_slot,
+        timeout_s=graph.llm_timeout_s,
+        limits=limits,
+        restart=restart,
+        seam=seam,
+    )
+    return {"status": "failed" if result.get("error") else "applied", **result}
 
 
 def restart_hindsight_background(*, seam: SystemCtlSeam | None = None) -> bool:
@@ -1194,6 +1234,7 @@ __all__ = [
     "measure_extraction_throughput",
     "parse_busy_requests",
     "parse_throughput_metrics",
+    "reconcile_extraction_dropin",
     "render_drop_in",
     "resolve_extraction_window",
 ]

@@ -71,13 +71,14 @@ def _slot_manager(*names: str) -> MagicMock:
 def hal0_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point loader at a tmp HAL0_HOME with a minimal hal0.toml."""
     home = tmp_path / "hal0-home"
-    etc = home / "etc"
+    etc = home / "etc" / "hal0"
     etc.mkdir(parents=True)
     (home / "var-lib").mkdir(parents=True)
     (etc / "hal0.toml").write_text(
         tomli_w.dumps(
             {
-                "meta": {"schema_version": 1},
+                "meta": {"schema_version": 3},
+                "memory": {"graph": {"extraction_slot": "utility"}},
             }
         )
     )
@@ -1037,3 +1038,34 @@ def test_retry_failed_unavailable_without_hindsight_client(hal0_home: Path) -> N
         r = c.post("/api/memory/graph/retry")
     assert r.status_code == 503
     assert r.json()["error"]["code"] == "memory.unavailable"
+
+
+@pytest.mark.parametrize(
+    ("slot", "model", "bound", "expected"),
+    [
+        ("memory", None, False, "shared"),
+        ("memory", None, True, "dedicated"),
+        ("agent", None, True, "shared"),
+        ("utility", None, True, "custom"),
+        ("other", None, False, "custom"),
+        ("memory", "vendor/model", True, "custom"),
+    ],
+)
+def test_mode_follows_configuration_and_binding_not_readiness(
+    hal0_home: Path, slot: str, model: str | None, bound: bool, expected: str
+) -> None:
+    config = {"memory": {"graph": {"extraction_slot": slot}}}
+    if model:
+        config["memory"]["graph"]["extraction_model"] = model
+    (hal0_home / "etc" / "hal0" / "hal0.toml").write_text(tomli_w.dumps(config))
+    app = _build_app(StubWrapper(extraction_slot=slot), "agent")
+    app.state.slot_manager.iter_configs.return_value.append(
+        {"name": "memory", "type": "llm", "model": {"default": "memory-model" if bound else ""}}
+    )
+    # No live/ready slot or upstream catalog: a cold binding is still dedicated.
+    with TestClient(app) as client:
+        status = client.get("/api/memory/graph/status")
+    assert status.status_code == 200
+    assert status.json()["mode"] == expected
+    if slot == "memory" and not model and not bound:
+        assert status.json()["slot_resolves"] is True

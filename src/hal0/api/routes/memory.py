@@ -46,6 +46,7 @@ from hal0.memory.namespace import (
     resolve_write_dataset,
 )
 from hal0.memory.retain_chunk_guard import ChunkAudit, audit_bank_chunks
+from hal0.normalize.resolver import DEFAULT_CHAINS
 
 router = APIRouter()
 
@@ -261,6 +262,12 @@ async def _enabled_llm_slots(request: Request) -> list[str]:
     return sorted(alias_map.keys())
 
 
+def _extraction_slot_resolves(slot: str | None, available: list[str]) -> bool:
+    """The default memory target may share agent when its own binding is empty."""
+    chain = DEFAULT_CHAINS[MEMORY_ALIAS] if slot == "memory" else (slot,)
+    return any(name in available for name in chain)
+
+
 #: Last warm attempt per upstream name (monotonic seconds): an offline
 #: provider is re-fetched at most once per :data:`_WARM_RETRY_S`, not on
 #: every status poll.
@@ -385,24 +392,34 @@ async def graph_status(request: Request) -> dict[str, Any]:
         {
           "enabled":         bool,
           "extraction_slot": str,            # the local llm slot used for extraction
-          "slot_resolves":   bool,           # does extraction_slot match an enabled llm slot?
+          "mode":            str,            # dedicated | shared | custom
+          "slot_resolves":   bool,           # does the extraction slot (or memory fallback) have a model?
           "available_slots": [str, ...],     # enabled llm slots the operator can pick
           "in_flight":       int,
           "builds_ok":       int,
           "errors":          int,
           "last_built_at":   iso8601 | None,
           "last_error":      str | None,
+          "chunk_check":     dict | None,    # #3326: ChunkAudit of the failing banks
         }
     """
     wrapper = _wrapper(request)
     status = wrapper.graph_status()
     available = await _enabled_llm_slots(request)
     status["available_slots"] = available
-    status["slot_resolves"] = status.get("extraction_slot") in available
+    status["slot_resolves"] = _extraction_slot_resolves(status.get("extraction_slot"), available)
     # llm_timeout_s and the extraction limits (#1834) live in hal0.toml (not
     # on the provider) — echo them so the dashboard's graph panel can edit
     # them without a second config fetch.
     graph_cfg = load_hal0_config().memory.graph
+    # Configuration and model binding define the mode, never live readiness.
+    # Custom slots/upstreams remain visible without rewriting operator intent.
+    if graph_cfg.extraction_model or graph_cfg.extraction_slot not in {"memory", "agent"}:
+        status["mode"] = "custom"
+    elif graph_cfg.extraction_slot == "memory" and "memory" in available:
+        status["mode"] = "dedicated"
+    else:
+        status["mode"] = "shared"
     status["llm_timeout_s"] = graph_cfg.llm_timeout_s
     status["extraction_limits"] = ExtractionLimits.from_config(graph_cfg).as_dict()
     status["throughput"] = _cached_throughput(request, status.get("extraction_slot"), graph_cfg)
@@ -415,6 +432,13 @@ async def graph_status(request: Request) -> dict[str, Any]:
     # provider/base_url/model beats every drop-in and must not stay hidden.
     status["engine_llm"] = await asyncio.to_thread(_ee.effective_engine_llm)
     await _augment_build_counters(request, status)
+    # #3326: why the failing banks fail, when the cap is the reason. Additive;
+    # ``None`` when nothing is failing or the engine cannot be read.
+    status["chunk_check"] = await _status_chunk_check(
+        request,
+        graph_cfg.extraction_max_tokens,
+        set((status.get("failed_by_bank") or {}).keys()),
+    )
     return status
 
 
@@ -536,8 +560,13 @@ async def _all_banks(client: Any) -> list[Any] | None:
         offset += page
 
 
-async def _audit_retain_chunks(request: Request, max_tokens: int) -> ChunkAudit | None:
+async def _audit_retain_chunks(
+    request: Request, max_tokens: int, *, only_banks: set[str] | None = None
+) -> ChunkAudit | None:
     """Check every bank's retain chunk size against ``max_tokens`` (#3215).
+
+    ``only_banks`` narrows the audit to those bank ids (the status payload checks
+    just the banks that have failures).
 
     ``None`` when the engine is unreachable or its bank list cannot be read, so
     callers skip the check rather than report a clean result they did not earn.
@@ -546,6 +575,8 @@ async def _audit_retain_chunks(request: Request, max_tokens: int) -> ChunkAudit 
     client = getattr(provider, "hindsight_client", None) if provider is not None else None
     if client is None:
         return None
+    if only_banks is not None:
+        return await audit_bank_chunks(client.request_json, sorted(only_banks), max_tokens)
     banks = await _all_banks(client)
     if not banks:
         return None
@@ -555,6 +586,32 @@ async def _audit_retain_chunks(request: Request, max_tokens: int) -> ChunkAudit 
         if (b.get("bank_id") if isinstance(b, dict) else b)
     ]
     return await audit_bank_chunks(client.request_json, ids, max_tokens)
+
+
+#: How long ``GET /graph/status`` reuses a chunk audit. The dashboard polls the
+#: status every few seconds, and the audit reads one config per failing bank.
+_CHUNK_CHECK_TTL_S = 30.0
+
+
+async def _status_chunk_check(
+    request: Request, max_tokens: int, failing_banks: set[str]
+) -> dict[str, Any] | None:
+    """The chunk audit of the failing banks, for the status payload (#3326).
+
+    ``None`` when no bank has failures (nothing to explain) or the engine could
+    not be read. Remembered for :data:`_CHUNK_CHECK_TTL_S` per (cap, banks).
+    """
+    if not failing_banks:
+        return None
+    key = (max_tokens, tuple(sorted(failing_banks)))
+    cache = getattr(request.app.state, "chunk_check_cache", None)
+    now = time.monotonic()
+    if cache is not None and cache[0] == key and now - cache[1] < _CHUNK_CHECK_TTL_S:
+        return cache[2]
+    audit = await _audit_retain_chunks(request, max_tokens, only_banks=failing_banks)
+    result = audit.as_dict() if audit is not None else None
+    request.app.state.chunk_check_cache = (key, now, result)
+    return result
 
 
 @router.get("/graph/chunk-check")
@@ -790,9 +847,13 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
     try:
         body = await request.json()
     except Exception as exc:
-        raise Hal0Error("request body must be valid JSON", details={"error": str(exc)}) from exc
+        raise BadRequest(
+            "request body must be valid JSON",
+            code="request.invalid_json",
+            details={"error": str(exc)},
+        ) from exc
     if not isinstance(body, dict):
-        raise Hal0Error("request body must be a JSON object")
+        raise BadRequest("request body must be a JSON object", code="request.invalid_json")
 
     wrapper = _wrapper(request)
 
@@ -920,6 +981,17 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
         out["target"] = {"kind": target_kind, "model": _target_model, "alias": MEMORY_ALIAS}
         if propagation is not None:
             out["propagation"] = propagation
+
+    if slot_changed or model_changed:
+        # Hermes writes auxiliary targets at provision time. Reuse its tracked
+        # repair path when the configured target changes; an absent Hermes is
+        # normal on boxes that do not bundle it.
+        try:
+            from hal0.api.agents.repair import reprovision_hermes_auxiliary
+
+            await reprovision_hermes_auxiliary(request)
+        except Exception as exc:
+            log.warning("memory.hermes_aux_reprovision_unavailable", error=str(exc))
 
     # Extraction dispatches to hal0/<extraction_slot> whether or not the
     # reporting gate is on, so a slot change measures regardless of it.
@@ -1187,7 +1259,7 @@ async def memory_search(request: Request) -> dict[str, Any]:
     body = await _read_json_body(request)
     query = body.get("query")
     if not isinstance(query, str) or not query:
-        raise Hal0Error(
+        raise BadRequest(
             "memory_search requires 'query' (non-empty string)",
             details={"path": "/api/memory/search"},
         )
@@ -1452,7 +1524,7 @@ async def memory_delete(request: Request) -> dict[str, int]:
     body = await _read_json_body(request)
     ids = body.get("ids")
     if not isinstance(ids, list) or not ids:
-        raise Hal0Error(
+        raise BadRequest(
             "memory_delete requires 'ids' (non-empty list)",
             details={"path": "/api/memory/delete"},
         )
@@ -1496,12 +1568,13 @@ async def _read_json_body(request: Request) -> dict[str, Any]:
     try:
         body = await request.json()
     except Exception as exc:
-        raise Hal0Error(
+        raise BadRequest(
             "request body must be valid JSON",
+            code="request.invalid_json",
             details={"error": str(exc)},
         ) from exc
     if not isinstance(body, dict):
-        raise Hal0Error("request body must be a JSON object")
+        raise BadRequest("request body must be a JSON object", code="request.invalid_json")
     return body
 
 

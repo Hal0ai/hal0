@@ -2,11 +2,14 @@
 """Decide the exit status of a hal0 harness run (scripts/harness.sh).
 
 Usage:
-    scripts/harness-gate.py <harness.json> [--allow-deferred]
+    scripts/harness-gate.py <harness.json> [--allow-deferred] [--crashed-tier NAME=RC ...]
 
 A run fails when:
 
 * any row is ``fail``; or
+* a tier script exited non-zero (``--crashed-tier NAME=RC``, passed by
+  scripts/harness.sh). A crashed tier leaves its rows ``missing`` in the
+  report, so no row-level check would otherwise see it; or
 * the slot-lifecycle group is unverified — ``runtime-slot-load`` was
   recorded ``deferred`` (``--dev`` installs cannot start a systemd slot
   unit, see tests/harness/runtime-test.sh) — unless the run opts in with
@@ -34,7 +37,10 @@ from pathlib import Path
 # runtime-chat-roundtrip is recorded `skip` whenever the load did not happen.
 SLOT_LIFECYCLE_ROWS = ("runtime-slot-load", "runtime-chat-roundtrip")
 ALLOW_ENV = "HAL0_HARNESS_ALLOW_DEFERRED"
-USAGE = f"usage: {Path(sys.argv[0]).name} <harness.json> [--allow-deferred]"
+USAGE = (
+    f"usage: {Path(sys.argv[0]).name} <harness.json> "
+    "[--allow-deferred] [--crashed-tier NAME=RC ...]"
+)
 
 
 def unverified_slot_rows(rows: list[dict]) -> list[dict]:
@@ -64,9 +70,21 @@ def _colours(stream: object) -> dict[str, str]:
 def main(argv: list[str]) -> int:
     args = argv[1:]
     allow = os.environ.get(ALLOW_ENV) == "1"
-    if "--allow-deferred" in args:
-        allow = True
-        args = [a for a in args if a != "--allow-deferred"]
+    crashed: list[str] = []
+    rest: list[str] = []
+    it = iter(args)
+    for a in it:
+        if a == "--allow-deferred":
+            allow = True
+        elif a == "--crashed-tier":
+            spec = next(it, "")
+            if "=" not in spec or not spec.split("=", 1)[0]:
+                print(USAGE, file=sys.stderr)
+                return 2
+            crashed.append(spec)
+        else:
+            rest.append(a)
+    args = rest
     if len(args) != 1 or args[0].startswith("-"):
         print(USAGE, file=sys.stderr)
         return 2
@@ -79,6 +97,17 @@ def main(argv: list[str]) -> int:
 
     out, err = _colours(sys.stdout), _colours(sys.stderr)
     failed = False
+    if crashed:
+        named_tiers = ", ".join(
+            f"{c.split('=', 1)[0]} (exit {c.split('=', 1)[1]})" for c in crashed
+        )
+        print(
+            f"\n{err['red']}{err['bold']}harness FAILED{err['rst']} — tier script crashed: "
+            f"{named_tiers}.\n"
+            "  Its rows are missing from the report; see the tier output above.",
+            file=sys.stderr,
+        )
+        failed = True
     if fails:
         print(
             f"\n{err['red']}{err['bold']}harness FAILED{err['rst']} — {fails} row(s) failed.",

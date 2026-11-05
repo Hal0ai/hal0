@@ -228,12 +228,15 @@ def halogen_footprint_mb(
 def provider_footprint_mb(
     slot_cfg: Mapping[str, Any],
     model_info: Mapping[str, Any],
+    *,
+    profile: Any = None,
 ) -> float | None:
     """The slot's provider's own footprint (MiB) for ``model_info``, else ``None``.
 
     The shared first step of the two sizing call sites — pre-load eviction
     (:func:`hal0.slots.preload_evict._estimate_incoming_footprint_mb`) and
-    :func:`build_per_slot`. ``None`` sends the caller to
+    :func:`build_per_slot`. A supplied ``profile`` is used for a preview; otherwise
+    the profile is resolved from the slot config. ``None`` sends the caller to
     :func:`estimate_file_size_kv_mb`: no provider (the llama default), a
     provider without the hook or with no figure, a figure that is not a
     positive number, or any failure asking. Sizing must never raise.
@@ -253,7 +256,9 @@ def provider_footprint_mb(
         hook = getattr(provider, "footprint_mb", None)
         if hook is None:
             return None
-        mb = hook(model_info, slot_cfg, resolve_slot_profile(slot_cfg))
+        mb = hook(
+            model_info, slot_cfg, profile if profile is not None else resolve_slot_profile(slot_cfg)
+        )
     except Hal0Error as exc:
         log.debug("capacity.provider_footprint_refused: %s", exc)
         return None
@@ -368,6 +373,7 @@ async def halogen_footprint_readout(
     state: str | Callable[[], str | None] | None,
     model_registry: Any = None,
     sample_gpu: Callable[[], Awaitable[Any]] | None = None,
+    profile: Any = None,
 ) -> dict[str, Any] | None:
     """The slot drawer's memory readout for a halogen slot, else ``None``.
 
@@ -381,7 +387,8 @@ async def halogen_footprint_readout(
     of the one against the host's pool, with ``state`` so a loaded slot reads
     ``"loaded"`` rather than judging its own resident memory as unavailable.
 
-    ``host`` is the slot manager (it resolves the model's facts); ``state`` is the
+    ``host`` is the slot manager (it resolves the model's facts); ``profile`` may
+    supply an alternate resolved profile for a client-side preview; ``state`` is the
     slot's state or a callable giving it, called only once a figure exists, so a
     slot with no readout never reads one; ``sample_gpu`` is an async callable
     returning the host's GPU memory sample, awaited at the same point, so a slot
@@ -408,7 +415,7 @@ async def halogen_footprint_readout(
         ctx, _source = slot_effective_context(slot_cfg, model_registry)
         if ctx:
             info = {**info, "ctx_tokens": ctx}
-        resident_mb = provider_footprint_mb(slot_cfg, info)
+        resident_mb = provider_footprint_mb(slot_cfg, info, profile=profile)
     except Exception:
         log.warning("capacity.halogen_footprint_failed", exc_info=True)
         return None

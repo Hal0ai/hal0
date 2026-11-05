@@ -1904,6 +1904,11 @@ function QueueTab({ queue, roster, refresh, onQueueModel }: {
           plan — what's stale and why
           {plan?.registry_error && <span style={{ color: 'var(--warn)' }}> (registry unreachable)</span>}
         </h4>
+        {plan?.skipped_suites?.map((s: { suite: string; error: string }) => (
+          <div key={s.suite} style={{ fontFamily: mono, fontSize: 11, color: 'var(--warn)', marginBottom: 6 }}>
+            suite {s.suite} skipped: {s.error}
+          </div>
+        ))}
         {planLoading ? (
           <div style={{ color: 'var(--fg-3)' }}>computing plan&hellip;</div>
         ) : plan?.cells?.length ? (

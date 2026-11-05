@@ -78,7 +78,10 @@ beforeEach(() => {
     svc('n8n', { name: 'n8n', up: false, managed: false, detail: 'not installed' }),
     svc('extra', { name: 'extra' }),
   ]
-  box.urls = { comfyui: 'http://localhost:8188', comfyui_public: false }
+  box.urls = {
+    openwebui: 'http://localhost:3001', openwebui_enabled: true,
+    comfyui: 'http://localhost:8188', comfyui_public: false,
+  }
   opened = []
   went = []
   vi.spyOn(window, 'open').mockImplementation((...args: unknown[]) => {
@@ -166,7 +169,7 @@ describe('Overview v2 services rows', () => {
 
   it('shows the ComfyUI arrow disabled off the box with OFF_BOX_NOTE, and it opens nothing', () => {
     visit('hal0.lan')
-    box.urls = { comfyui: 'http://hal0.lan:8188', comfyui_public: false }
+    box.urls = { openwebui: 'http://hal0.lan:3001', openwebui_enabled: true, comfyui: 'http://hal0.lan:8188', comfyui_public: false }
     mount()
     expect(comfyOpen().getAttribute('aria-disabled')).toBe('true')
     expect(comfyOpen().getAttribute('title')).toBe(OFF_BOX_NOTE)
@@ -177,7 +180,10 @@ describe('Overview v2 services rows', () => {
 
   it('still opens the other services from anywhere', () => {
     visit('hal0.lan')
-    box.urls = { comfyui: 'http://hal0.lan:8188', comfyui_public: false }
+    box.urls = {
+      openwebui: 'http://hal0.lan:3001', openwebui_enabled: true,
+      comfyui: 'http://hal0.lan:8188', comfyui_public: false,
+    }
     mount()
     click(host.querySelector('[data-testid="ov-svc-open-openwebui"]')!)
     expect(opened).toEqual([['http://hal0.lan:3001', '_blank', 'noopener']])

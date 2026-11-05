@@ -9,8 +9,10 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
+import pytest
+
 from hal0.config import paths
-from hal0.config.loader import load_profiles_config, save_profiles_config
+from hal0.config.loader import ConfigParseError, load_profiles_config, save_profiles_config
 from hal0.config.schema import SEED_PROFILES, ProfileConfig, ProfilesConfig
 
 # ── save_profiles_config ──────────────────────────────────────────────────────
@@ -77,3 +79,49 @@ class TestSaveProfilesConfig:
 
         reloaded = load_profiles_config()
         assert "v2" in reloaded.profile
+
+
+# ── non-table [profile] (hal0#2650) ───────────────────────────────────────────
+
+
+class TestNonTableProfileKey:
+    """A ``profile`` key that is not a table must fail loud, never read as empty."""
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            '[[profile]]\nname = "mine"\nflags = "-fa on"\n',  # array of tables
+            'profile = "oops"\n',  # scalar string
+            "profile = 3\n",  # scalar int
+        ],
+        ids=["array-of-tables", "string", "int"],
+    )
+    def test_load_raises_and_file_untouched(self, tmp_path: Path, body: str) -> None:
+        target = tmp_path / "profiles.toml"
+        target.write_text(body)
+
+        with pytest.raises(ConfigParseError, match="must be a table"):
+            load_profiles_config(target)
+
+        assert target.read_text() == body
+
+    def test_load_then_save_cannot_clobber(self, tmp_path: Path) -> None:
+        """The read-modify-write path aborts at load, so save never runs."""
+        target = tmp_path / "profiles.toml"
+        body = '[[profile]]\nname = "mine"\n'
+        target.write_text(body)
+
+        with pytest.raises(ConfigParseError):
+            save_profiles_config(load_profiles_config(target), path=target)
+
+        assert target.read_text() == body
+
+    def test_empty_profile_table_still_loads(self, tmp_path: Path) -> None:
+        target = tmp_path / "profiles.toml"
+        target.write_text("[profile]\n")
+        assert set(SEED_PROFILES) <= set(load_profiles_config(target).profile)
+
+    def test_missing_profile_key_still_loads(self, tmp_path: Path) -> None:
+        target = tmp_path / "profiles.toml"
+        target.write_text('other = "kept"\n')
+        assert set(SEED_PROFILES) <= set(load_profiles_config(target).profile)

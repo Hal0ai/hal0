@@ -75,3 +75,15 @@ export function bankFailureNotes(status) {
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .map(([bank, n]) => `Bank "${bank}" has ${n} failed operation${n === 1 ? '' : 's'}.`)
 }
+
+/**
+ * Why the failing banks fail, when the extraction cap is the reason (#3326).
+ * `chunk_check` is the status payload's audit of the banks that have failed
+ * operations. Only a `warn` verdict with a message is shown; null, `ok`,
+ * `unknown` or an API that predates the field yield nothing.
+ */
+export function chunkCheckNote(status) {
+  const check = status?.chunk_check
+  if (!check || typeof check !== 'object' || check.verdict !== 'warn') return null
+  return typeof check.message === 'string' && check.message ? check.message : null
+}

@@ -2008,6 +2008,27 @@ def run_post_activation_migrations(
 
     migration_info = _maybe_run_config_migrations(min_data_version, job_id=job_id)
 
+    # The hindsight-api drop-in is written only by a graph-settings save, so a
+    # config step that changes an extraction limit (v3, #3326) must be carried to
+    # it here. An actual update only: a boot-time restart of the engine is a
+    # surprise memory outage, the same reason the engine pass is skipped there.
+    if upgrade_memory_engine_venv:
+        try:
+            from hal0.memory.extraction_env import reconcile_extraction_dropin
+
+            dropin = reconcile_extraction_dropin()
+            if dropin.get("status") in ("applied", "failed"):
+                log.info(
+                    "updater.extraction_dropin_reconciled",
+                    job_id=job_id,
+                    status=dropin["status"],
+                    error=dropin.get("error"),
+                )
+        except Exception as exc:
+            log.warning("updater.extraction_dropin_reconcile_failed", job_id=job_id, error=str(exc))
+            # Non-fatal: the engine keeps its current cap and saving the graph
+            # settings (or `hal0 doctor`'s chunk row) names the way out.
+
     # Retire a leftover registry.toml: back it up, rename it, never import
     # it (every box at the 1.3.0 floor already did its first-boot import).
     # Non-fatal: nothing reads the file, so a box that cannot retire it
@@ -3769,10 +3790,12 @@ def refresh_path_links(target: Path, *, job_id: str | None = None) -> dict[str, 
 
     ``target`` names the release tree only for log context; the link SOURCE
     is always THIS process's actual venv (``sys.prefix`` — the same signal
-    :func:`refresh_gpu_perms_unit` trusts), because the CLI shim lives in the
-    venv's ``bin/``, not the release tree, and by the time this runs
-    :func:`activate_release` has already re-pip'd ``target`` into that venv
-    (a no-op re-pip for an editable install).
+    :func:`refresh_gpu_perms_unit` trusts) — but only when that venv is the
+    installed one (``<usr-lib root>/venv``); a foreign ``sys.prefix`` is refused
+    and every link reports ``"skipped"`` (#3360). The source is the venv
+    because the CLI shim lives in the venv's ``bin/``, not the release tree,
+    and by the time this runs :func:`activate_release` has already re-pip'd
+    ``target`` into that venv (a no-op re-pip for an editable install).
 
     Best-effort per link, using the same atomic swap :func:`activate_release`
     uses for the release symlink itself (:func:`_atomic_symlink_swap`) so a
@@ -3781,18 +3804,33 @@ def refresh_path_links(target: Path, *, job_id: str | None = None) -> dict[str, 
     is skipped, not fatal — the same "never wedge an otherwise-successful
     activate" policy as :func:`refresh_privileged_wrappers`.
 
-    Returns ``{"hal0": "linked"|"missing"|"failed", "hal0-agent": ...}``
+    Returns ``{"hal0": "linked"|"missing"|"failed"|"skipped", "hal0-agent": ...}``
     (empty dict when not root).
     """
     if os.geteuid() != 0:
         return {}
 
-    venv_bin = Path(sys.prefix) / "bin"
-    results: dict[str, str] = {}
-    for src_name, dst in (
+    links = (
         ("hal0", HAL0_PATH_LINK_DST),
         ("hal0-agent", HAL0_PATH_LINK_DST.with_name("hal0-agent")),
-    ):
+    )
+    installed_venv = (_usr_lib_root() / "venv").resolve()
+    prefix = Path(sys.prefix).resolve()
+    if not prefix.is_relative_to(installed_venv):
+        # A root process running from a dev checkout (`uv run`) or an ephemeral
+        # build env must never repoint the system PATH links at that venv — when
+        # it is ephemeral they dangle and `hal0` vanishes from PATH (#3360, #2261).
+        log.warning(
+            "updater.path_links_foreign_prefix",
+            job_id=job_id,
+            sys_prefix=str(prefix),
+            installed_venv=str(installed_venv),
+        )
+        return {name: "skipped" for name, _ in links}
+
+    venv_bin = Path(sys.prefix) / "bin"
+    results: dict[str, str] = {}
+    for src_name, dst in links:
         src = venv_bin / src_name
         if not src.is_file():
             results[src_name] = "missing"

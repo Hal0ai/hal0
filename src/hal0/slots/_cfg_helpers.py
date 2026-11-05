@@ -85,6 +85,32 @@ def non_chat_type_from_flags(flags: str | list[str] | tuple[str, ...] | None) ->
     return None
 
 
+def non_chat_signal(cfg: dict[str, Any] | Any) -> str | None:
+    """Non-chat type implied by a slot config's argv/flags or its profile, or ``None``.
+
+    The one owner of "does this ``llm``-typed slot actually run a llama-server
+    embedding/reranking mode?": the slot's own ``argv``/``flags`` win, then the
+    profile name, then the flags the profile resolves to. An unresolvable
+    profile is not evidence either way.
+    """
+    for key in ("argv", "flags"):
+        found = non_chat_type_from_flags(cfg.get(key))
+        if found:
+            return found
+    profile = str(cfg.get("profile") or "").strip()
+    if not profile:
+        return None
+    found = infer_non_chat_type(profile)
+    if found in ("reranking", "embedding"):
+        return found
+    try:
+        from hal0.profiles import ProfileCatalog
+
+        return non_chat_type_from_flags(ProfileCatalog().resolve(profile).flags)
+    except Exception:  # unresolvable profile: not evidence either way
+        return None
+
+
 def infer_non_chat_type(*names: str | None) -> str | None:
     """Non-chat slot type implied by the first profile/slot name that names one.
 

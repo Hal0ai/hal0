@@ -51,3 +51,35 @@ def test_planner_attaches_effective_tune(box) -> None:
     assert prof["vision"] == "auto"  # profile says "off"
     assert prof["enable_thinking"] is False
     assert prof["tune"]["sources"]["vision"] == "slot"
+
+
+@pytest.mark.usefixtures("box")
+def test_api_plan_reports_an_invalid_suite_instead_of_a_500(
+    isolated_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One suite with an unknown cell kind is skipped with its reason; the other
+    suites still plan (hal0#3348)."""
+    from hal0.api.routes import benchmarks as routes
+    from hal0.bench.suites import suite_from_dict
+
+    bad = suite_from_dict(
+        {
+            "suite": {"id": "concurrency", "priority": 50},
+            "selector": {"installed": True},
+            "matrix": {"lanes": ["default"], "depths": [2048], "samplers": ["greedy"], "reps": 3},
+            "cells": {"kinds": ["batch"]},
+            "staleness": {"max_age_days": 30},
+        }
+    )
+    monkeypatch.setattr(routes, "fetch_registry_models", lambda api: _registry())
+    monkeypatch.setattr(routes, "load_suites", lambda d: {"concurrency": bad, "roster": _suite()})
+
+    resp = isolated_client.get("/api/benchmarks/plan")
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["suites_considered"] == ["roster"]
+    assert [s["suite"] for s in body["skipped_suites"]] == ["concurrency"]
+    assert "unknown cell kind" in body["skipped_suites"][0]["error"]
+    assert any(c["suite"] == "roster" for c in body["cells"])

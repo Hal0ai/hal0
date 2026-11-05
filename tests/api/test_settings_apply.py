@@ -59,6 +59,10 @@ def test_registry_declares_three_apply_classes() -> None:
 @pytest.mark.parametrize(
     "key, expected_class, expected_services",
     [
+        # [memory.priority] — saved immediately; scheduling follows in H0-196.
+        ("memory.priority.enabled", "immediate", []),
+        ("memory.priority.quiet_gap_s", "immediate", []),
+        ("memory.priority.max_defer_s", "immediate", []),
         # [telemetry]
         ("telemetry.enabled", "immediate", []),
         ("telemetry.channel", "immediate", []),

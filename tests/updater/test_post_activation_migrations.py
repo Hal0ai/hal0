@@ -27,6 +27,7 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
         "image_keys": [],
         "hermes_venv": [],
         "converge_components": [],
+        "extraction_dropin": [],
     }
 
     def _runner_system(*, dry_run=False, job_id=None, honour_restore_marker=False):
@@ -77,6 +78,14 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
     monkeypatch.setattr("hal0.updater.updater.strip_retired_image_keys", _image_keys)
     monkeypatch.setattr("hal0.updater.updater.repair_hermes_mcp_client", _hermes_venv)
     monkeypatch.setattr("hal0.components.runner.converge_components", _converge_components)
+
+    def _extraction_dropin(**_kwargs):
+        calls["extraction_dropin"].append(True)
+        return {"status": "converged"}
+
+    monkeypatch.setattr(
+        "hal0.memory.extraction_env.reconcile_extraction_dropin", _extraction_dropin
+    )
     return calls
 
 
@@ -151,6 +160,7 @@ def test_runs_every_pass(_stub_every_pass: dict[str, list[Any]]) -> None:
     assert _stub_every_pass["vulkan_migration"] == ["j1"]
     assert _stub_every_pass["image_keys"] == ["j1"]
     assert _stub_every_pass["hermes_venv"] == [("j1", True)]
+    assert _stub_every_pass["extraction_dropin"] == [True]
     assert _stub_every_pass["converge_components"] == [
         {
             "job_id": "j1",
@@ -331,6 +341,8 @@ def test_boot_safety_net_diagnoses_the_venv_without_installing(
     check_outstanding_migrations(job_id="boot")
 
     assert _stub_every_pass["hermes_venv"] == [("boot", False)]
+    # A boot-time restart of the engine is a surprise memory outage (#3326).
+    assert _stub_every_pass["extraction_dropin"] == []
     assert _stub_every_pass["converge_components"] == [
         {
             "job_id": "boot",

@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 //
 // The slot drawer's halogen memory readout rides GET /api/slots/{name}/resolved
-// (`['slot-resolved', name]`), and its verdict flips on the slot's state: a
+// (`['slot-resolved', name, profile, flags]`), and its verdict flips on the slot's state: a
 // loaded slot reads "loaded", an unloaded one is judged against the free pool.
 // So a load, unload, restart or swap must mark that query stale, or a drawer
 // left open across one keeps the old verdict until its staleTime runs out.

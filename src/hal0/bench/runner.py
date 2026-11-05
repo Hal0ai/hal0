@@ -129,7 +129,6 @@ _EXPECTED_S = {
     "reuse": 180,
     "embed": 120,
     "rerank": 120,
-    "batch": 600,
     "mtp": 300,
     # Phase-3 OSS-adapter kinds (llama-benchy over HTTP): a bit more than the
     # Tier-A seam values above for the HTTP round-trip + warmup overhead.

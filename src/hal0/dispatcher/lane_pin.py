@@ -31,6 +31,11 @@ from hal0.slots.state import SlotState, slot_selection_rank
 #: dispatcher) can never drift onto different keys.
 LANE_PIN_ATTR = "hal0_lane_slot"
 
+#: The caller used hal0/memory, regardless of its resolved slot or upstream.
+#: Set only by chat normalization before rewriting the alias (ADR-0053).
+#: Shared-slot scheduling must use this identity, never infer it from a model.
+MEMORY_REQUEST_ATTR = "hal0_memory_request"
+
 #: Attribute marking a request that may ONLY be served by a remote upstream
 #: (#2919). The memory engine's ``hal0/memory`` alias rewrites to a bare
 #: upstream model id at the route layer; without this marker a cold or
@@ -48,6 +53,7 @@ UTILITY_SLOT_NAME = "utility"
 
 __all__ = [
     "LANE_PIN_ATTR",
+    "MEMORY_REQUEST_ATTR",
     "UPSTREAM_ONLY_ATTR",
     "lane_slot_pin",
     "preferred_slot",

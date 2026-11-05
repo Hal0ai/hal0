@@ -23,7 +23,7 @@ from fastapi import APIRouter, Request
 from pydantic import ValidationError
 
 from hal0.api._redact import redact_config
-from hal0.api.middleware.error_codes import Hal0Error
+from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.comfyui.reach import editor_on_lan
 from hal0.config import network
 from hal0.config.loader import hal0_config_txn, load_hal0_config
@@ -175,13 +175,38 @@ def _host_without_port(host: str) -> str:
     return host.rsplit(":", 1)[0] if ":" in host else host
 
 
+def _declared_url(env_var: str) -> str:
+    """The URL the operator declared in ``env_var``, trailing slash trimmed, or ``""``."""
+    return os.environ.get(env_var, "").strip().rstrip("/")
+
+
 def _comfyui_public_url() -> str:
     """The URL the operator declared for ComfyUI (``HAL0_COMFYUI_PUBLIC_URL``), or ``""``."""
-    return os.environ.get("HAL0_COMFYUI_PUBLIC_URL", "").strip().rstrip("/")
+    return _declared_url("HAL0_COMFYUI_PUBLIC_URL")
+
+
+def openwebui_public_url() -> str:
+    """The URL the operator declared for Open WebUI (``HAL0_OPENWEBUI_PUBLIC_URL``), or ``""``."""
+    return _declared_url("HAL0_OPENWEBUI_PUBLIC_URL")
+
+
+def hermes_public_url() -> str:
+    """The URL the operator declared for the Hermes dashboard (``HAL0_HERMES_PUBLIC_URL``), or ``""``.
+
+    The one place that reads it: ``/api/config/urls`` and the Hermes agent overview's
+    ``links.desktop`` both call this, so the two cannot disagree.
+    """
+    return _declared_url("HAL0_HERMES_PUBLIC_URL")
+
+
+# ``<app>_reason`` in ``GET /api/config/urls`` when the page was reached through a reverse proxy and the
+# operator declared no ``HAL0_<APP>_PUBLIC_URL``: the proxy's ``host:<app port>`` is not the app, so
+# hal0 returns no link instead of a dead one.
+PROXY_NEEDS_PUBLIC_URL = "proxy_needs_public_url"
 
 
 def _comfyui_link(request: Request) -> str:
-    """Resolve the link the dashboard should use to open ComfyUI.
+    """Resolve the link the dashboard should use to open ComfyUI, or ``""`` for none.
 
     ``HAL0_COMFYUI_PUBLIC_URL`` (set in /etc/hal0/api.env) wins when
     defined — it's how a reverse-proxy deploy declares a clean HTTPS
@@ -189,22 +214,43 @@ def _comfyui_link(request: Request) -> str:
     an HTTPS dashboard opening the bare ``http://<host>:8188`` fallback is
     blocked by the browser as mixed content, so the workflow links appear
     dead. Without the env var we fall back to ``http://<host>:8188`` on the
-    request host (the port-stripped forwarded host behind a proxy). That link
-    answers from other machines while ComfyUI binds the LAN
-    (``[network].comfyui_listen = "lan"``, the default; ``comfyui_lan`` in the
-    response). Under ``"loopback"`` it works only where ComfyUI's loopback is:
-    a browser on the box itself, or one that tunnels port 8188 to it; the
-    dashboard then opens only a declared URL (``comfyui_public``).
+    request host. That link answers from other machines while ComfyUI binds
+    the LAN (``[network].comfyui_listen = "lan"``, the default;
+    ``comfyui_lan`` in the response). Under ``"loopback"`` it works only
+    where ComfyUI's loopback is: a browser on the box itself, or one that
+    tunnels port 8188 to it; the dashboard then opens only a declared URL
+    (``comfyui_public``).
+
+    Behind a reverse proxy with no declared URL there is no fallback: the
+    forwarded host is the proxy, and port 8188 on the proxy is not ComfyUI.
+    The link is ``""`` and ``comfyui_reason`` says why.
     """
 
     public = _comfyui_public_url()
     if public:
         return public
     if _behind_proxy(request):
-        host = request.headers.get("x-forwarded-host") or _resolve_host(request)
-    else:
-        host = _resolve_host(request)
-    return f"http://{_host_without_port(host)}:{_COMFYUI_PORT}"
+        return ""
+    return f"http://{_host_without_port(_resolve_host(request))}:{_COMFYUI_PORT}"
+
+
+def _lan_ip_link(request: Request, port: int, primary: str) -> str:
+    """``http://<LAN IP>:<port>``: the link that needs no name resolution, or ``""`` for none.
+
+    ``.local`` names do not resolve on every client (some Android and Windows setups, another
+    VLAN or subnet, a VPN), so the dashboard offers this next to the name-based link. The
+    address is the one :func:`api_base_url` uses for ``prefer_lan``
+    (:func:`hal0.config.network.primary_lan_ip`). ``""`` behind a reverse proxy (the proxy case
+    is ``*_reason``), when the box has no LAN address, and when it would repeat ``primary``
+    (the page was already reached by that address).
+    """
+    if _behind_proxy(request):
+        return ""
+    lan = network.primary_lan_ip()
+    if lan is None:
+        return ""
+    link = f"http://{lan}:{port}"
+    return "" if link == primary else link
 
 
 @router.get("/urls")
@@ -218,12 +264,34 @@ async def get_urls(request: Request) -> dict[str, object]:
           "api":               "http://<host>:8080" | "https://<host>",
           "openwebui":         "http://<host>:3001" | "https://chat.<host>",
           "openwebui_enabled": true | false,
+          "openwebui_reason":  "" | "proxy_needs_public_url",
+          "openwebui_ip":      "" | "http://<LAN IP>:3001",
           "hermes":            "" | "https://hermes.<host>",
           "hermes_enabled":    true | false,
           "comfyui":           "http://<host>:8188" | "https://comfyui.<host>",
           "comfyui_public":    true | false,
           "comfyui_lan":       true | false,
+          "comfyui_reason":    "" | "proxy_needs_public_url",
+          "comfyui_ip":        "" | "http://<LAN IP>:8188",
         }
+
+    ``openwebui_ip`` / ``comfyui_ip`` are the fallback for clients that cannot resolve a
+    ``.local`` name: the same app on the box's main LAN address
+    (:func:`hal0.config.network.primary_lan_ip`, the address ``prefer_lan`` uses), on the
+    same port as the name-based link. They are ``""`` behind a reverse proxy, when the
+    box has no LAN address, and when the request already came in on that address (it
+    would repeat ``openwebui`` / ``comfyui``). ``comfyui_ip`` is also ``""`` while
+    ComfyUI binds loopback (``comfyui_lan`` false). They are independent of
+    ``HAL0_<APP>_PUBLIC_URL``: a declared URL stays the primary link, and the IP link
+    is the direct-LAN route to the same app. Hermes has none: its dashboard binds
+    loopback only, so no address reaches it.
+
+    ``openwebui`` / ``comfyui`` are ``""`` and the matching ``*_reason`` is
+    ``"proxy_needs_public_url"`` when the request came through a reverse proxy
+    (``X-Forwarded-*``) and the operator declared no ``HAL0_OPENWEBUI_PUBLIC_URL`` /
+    ``HAL0_COMFYUI_PUBLIC_URL``. The proxy's ``host:3001`` / ``host:8188`` is not the
+    app, so there is no link to give; the dashboard tells the operator which variable
+    to set in ``/etc/hal0/api.env``. A ``*_reason`` is ``""`` whenever the link is set.
 
     ``comfyui_public`` is true only when ``HAL0_COMFYUI_PUBLIC_URL`` is set, that
     is, when ``comfyui`` is a URL the operator declared. ``comfyui_lan`` is true
@@ -243,11 +311,8 @@ async def get_urls(request: Request) -> dict[str, object]:
 
     Without the env var, LAN-direct deploys fall back to
     ``http://<host>:3001`` (matching the systemd unit's bound port).
-    Reverse-proxy deploys without the env var fall back to the same
-    hostname on OpenWebUI's fixed port, ``http://<host>:3001``. This is
-    the open-source default path: operators can expose the service port
-    directly without needing custom DNS. Set ``HAL0_OPENWEBUI_PUBLIC_URL``
-    when OpenWebUI lives on a distinct hostname.
+    Reverse-proxy deploys without the env var get no link (see above):
+    the forwarded host is the proxy, not OpenWebUI.
 
     Hermes is different: its dashboard binds ``127.0.0.1:9119`` (loopback)
     so — unlike OpenWebUI — there is NO browser-reachable host:port
@@ -257,50 +322,30 @@ async def get_urls(request: Request) -> dict[str, object]:
     key is ``""`` / ``hermes_enabled = false`` so the dashboard renders the
     hermes health row without a dead-end link.
     """
-    public = os.environ.get("HAL0_OPENWEBUI_PUBLIC_URL", "").strip().rstrip("/")
-    hermes = os.environ.get("HAL0_HERMES_PUBLIC_URL", "").strip().rstrip("/")
-    host = _resolve_host(request)
-    enabled = await _openwebui_is_active()
+    public = openwebui_public_url()
+    hermes = hermes_public_url()
+    behind_proxy = _behind_proxy(request)
     comfyui = _comfyui_link(request)
-    comfyui_public = bool(_comfyui_public_url())
-    comfyui_lan = editor_on_lan()
-
-    api_url = api_base_url(request)
-
     if public:
-        return {
-            "api": api_url,
-            "openwebui": public,
-            "openwebui_enabled": enabled,
-            "hermes": hermes,
-            "hermes_enabled": bool(hermes),
-            "comfyui": comfyui,
-            "comfyui_public": comfyui_public,
-            "comfyui_lan": comfyui_lan,
-        }
+        openwebui = public
+    elif behind_proxy:
+        openwebui = ""
+    else:
+        openwebui = f"http://{_resolve_host(request)}:{_OPENWEBUI_PORT}"
 
-    if _behind_proxy(request):
-        forwarded_host = request.headers.get("x-forwarded-host") or host
-        openwebui_host = _host_without_port(forwarded_host)
-        return {
-            "api": api_url,
-            "openwebui": f"http://{openwebui_host}:{_OPENWEBUI_PORT}",
-            "openwebui_enabled": enabled,
-            "hermes": hermes,
-            "hermes_enabled": bool(hermes),
-            "comfyui": comfyui,
-            "comfyui_public": comfyui_public,
-            "comfyui_lan": comfyui_lan,
-        }
     return {
-        "api": api_url,
-        "openwebui": f"http://{host}:{_OPENWEBUI_PORT}",
-        "openwebui_enabled": enabled,
+        "api": api_base_url(request),
+        "openwebui": openwebui,
+        "openwebui_enabled": await _openwebui_is_active(),
+        "openwebui_reason": "" if openwebui else PROXY_NEEDS_PUBLIC_URL,
         "hermes": hermes,
         "hermes_enabled": bool(hermes),
         "comfyui": comfyui,
-        "comfyui_public": comfyui_public,
-        "comfyui_lan": comfyui_lan,
+        "comfyui_public": bool(_comfyui_public_url()),
+        "comfyui_lan": editor_on_lan(),
+        "comfyui_reason": "" if comfyui else PROXY_NEEDS_PUBLIC_URL,
+        "openwebui_ip": _lan_ip_link(request, _OPENWEBUI_PORT, openwebui),
+        "comfyui_ip": (_lan_ip_link(request, _COMFYUI_PORT, comfyui) if editor_on_lan() else ""),
     }
 
 
@@ -335,9 +380,13 @@ async def update_models_config(request: Request) -> dict[str, Any]:
     try:
         body = await request.json()
     except Exception as exc:
-        raise Hal0Error("request body must be valid JSON", details={"error": str(exc)}) from exc
+        raise BadRequest(
+            "request body must be valid JSON",
+            code="request.invalid_json",
+            details={"error": str(exc)},
+        ) from exc
     if not isinstance(body, dict):
-        raise Hal0Error("request body must be a JSON object")
+        raise BadRequest("request body must be a JSON object", code="request.invalid_json")
 
     # Serialized read-modify-write (#1721): this route used to load, merge and
     # save hal0.toml with no lock at all, so it could persist its own

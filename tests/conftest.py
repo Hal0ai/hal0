@@ -6,10 +6,12 @@ import atexit
 import os
 import shutil
 import tempfile
+import warnings
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from starlette.exceptions import StarletteDeprecationWarning
 
 # Test collection must not import the application against the host's FHS
 # config. In particular, /etc/hal0/hal0.toml may be root-only on a deployed
@@ -28,6 +30,15 @@ if not os.environ.get("HAL0_HOME") and not os.access("/etc/hal0/hal0.toml", os.R
     atexit.register(shutil.rmtree, _collection_hal0_home, ignore_errors=True)
 
 from fastapi import FastAPI  # noqa: E402
+
+# starlette >= 1.3 warns at import time that its TestClient wants `httpx2`
+# instead of `httpx`. That warning fires exactly once, in this module, so it is
+# silenced here and not in pyproject's `filterwarnings`: an ini filter loses to a
+# command-line `-W error` (which is applied after it), so `pytest -W error`
+# died at conftest import. A filter installed by the module itself wins over
+# both.
+warnings.filterwarnings("ignore", category=StarletteDeprecationWarning)
+
 from fastapi.testclient import TestClient  # noqa: E402
 
 from hal0.api import create_app, memory_source  # noqa: E402
@@ -276,6 +287,21 @@ def _slot_output_sanity_passes_by_default(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 @pytest.fixture(autouse=True)
+def _flm_id_tag_memo_isolated() -> Iterator[None]:
+    """Start and end every test with an empty FLM ``-FLM`` id -> tag memo.
+
+    ``flm_id_to_tag`` memoizes resolved ids at module scope; without this a
+    test that resolved ``gemma4-it-e2b-FLM`` against a fake catalog would
+    answer for every later test that expects the id to be unknown.
+    """
+    from hal0.providers import flm
+
+    flm._FLM_ID_TAG_MEMO.clear()
+    yield
+    flm._FLM_ID_TAG_MEMO.clear()
+
+
+@pytest.fixture(autouse=True)
 def _store_not_nfs_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """Force ``hal0.config.store.is_nfs_path`` to False for the whole suite.
 
@@ -352,6 +378,35 @@ def _isolate_hal0_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # which appends API_SERVER_KEY to profile .env files under HERMES_HOME. A
     # suite run on a box with a live Hermes tree must never touch it.
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_privileged_host_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep ``activate_release`` and its ``refresh_*`` helpers off the host's system paths.
+
+    ``activate_release`` runs every root-gated writer unconditionally: it links
+    the running venv's ``hal0`` / ``hal0-agent`` shims into ``HAL0_PATH_LINK_DST``,
+    installs the sudo wrappers and sudoers grants, refreshes the GPU-perms unit,
+    and ``remove_retired_artifacts`` unlinks retired wrappers, sudoers files and
+    ``hal0-slot@*`` units. Under ``os.geteuid() == 0`` a suite run on an installed
+    box would rewrite or delete the real files; the PATH links were observed
+    dangling into an ephemeral uv env (#2261). Point every one of those
+    destinations under ``tmp_path`` for every test.
+
+    Tests that care about a destination (``test_path_link_refresh``,
+    ``test_wrapper_refresh``'s ``seam_dirs``, ``test_retired_artifacts``,
+    ``test_gpu_perms_unit``) patch it themselves after this fixture and win.
+    """
+    monkeypatch.setattr(
+        "hal0.updater.updater.HAL0_PATH_LINK_DST", tmp_path / "usr-local-bin" / "hal0"
+    )
+    monkeypatch.setattr("hal0.system.seam_check.SEAM_BIN_DIR", tmp_path / "usr-lib-hal0-bin")
+    monkeypatch.setattr("hal0.system.seam_check.SUDOERS_DIR", tmp_path / "etc-sudoers.d")
+    monkeypatch.setattr("hal0.updater.updater.SYSTEMD_UNIT_DIR", tmp_path / "etc-systemd-system")
+    monkeypatch.setattr(
+        "hal0.updater.updater.GPU_PERMS_UNIT_DST",
+        tmp_path / "etc-systemd-system" / "hal0-gpu-perms.service",
+    )
 
 
 @pytest.fixture(scope="function")

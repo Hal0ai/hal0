@@ -4,7 +4,7 @@ ADR-0023 replaced the inert cognee-era ``route``/``upstream`` enum with a single
 ``extraction_slot`` knob. These pin the contract every memory-graph surface
 depends on:
 
-  - default OFF + ``extraction_slot == "utility"``.
+  - default OFF + ``extraction_slot == "memory"``.
   - the slot-name grammar (lowercase alnum/-/_, ≤32, leading alphanumeric).
   - legacy ``route``/``upstream`` keys in an old hal0.toml are silently dropped
     on load (``extra="ignore"``) rather than failing validation.
@@ -29,14 +29,14 @@ class TestMemoryGraphDefaults:
         assert isinstance(c.memory, MemoryConfig)
         assert isinstance(c.memory.graph, MemoryGraphConfig)
         assert c.memory.graph.enabled is False
-        assert c.memory.graph.extraction_slot == "utility"
+        assert c.memory.graph.extraction_slot == "memory"
 
     def test_disabled_round_trips(self) -> None:
         """An off-by-default block must round-trip cleanly."""
         mg = MemoryGraphConfig()
         dumped = mg.model_dump()
         rebuilt = MemoryGraphConfig.model_validate(dumped)
-        assert rebuilt.extraction_slot == "utility"
+        assert rebuilt.extraction_slot == "memory"
 
     def test_legacy_route_upstream_keys_are_no_longer_emitted(self) -> None:
         """The dumped block carries only the ADR-0023 fields."""
@@ -133,7 +133,7 @@ class TestLegacyKeyDrop:
         mg = MemoryGraphConfig.model_validate(legacy)
         assert mg.enabled is True
         # Legacy route value did NOT become the extraction_slot; default holds.
-        assert mg.extraction_slot == "utility"
+        assert mg.extraction_slot == "memory"
         dumped = mg.model_dump()
         assert "route" not in dumped
         assert "upstream" not in dumped
@@ -144,4 +144,19 @@ class TestLegacyKeyDrop:
             {"memory": {"graph": {"enabled": False, "route": "agent", "upstream": None}}}
         )
         assert c.memory.graph.enabled is False
-        assert c.memory.graph.extraction_slot == "utility"
+        assert c.memory.graph.extraction_slot == "memory"
+
+
+def test_fresh_memory_priority_defaults_round_trip() -> None:
+    cfg = Hal0Config()
+    assert cfg.meta.schema_version == 4
+    assert cfg.memory.priority.enabled is True
+    assert cfg.memory.priority.quiet_gap_s == 30
+    assert cfg.memory.priority.max_defer_s == 300
+    assert Hal0Config.model_validate(cfg.model_dump()).memory.priority == cfg.memory.priority
+
+
+@pytest.mark.parametrize("key", ["quiet_gap_s", "max_defer_s"])
+def test_memory_priority_rejects_negative_seconds(key: str) -> None:
+    with pytest.raises(ValidationError):
+        MemoryConfig.model_validate({"priority": {key: -1}})

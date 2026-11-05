@@ -13,6 +13,7 @@ import { OFF_BOX_NOTE } from './editor-reach'
 import { EDITOR_NOTE, WORKFLOW_HINT, workflowChips } from './engine-pure'
 import { TunnelCommand } from './TunnelCommand'
 import { useEditorAccess } from './useEditorAccess'
+import { EditorIpFallback } from './ComfyEditorLink'
 
 const OPEN_LABEL = 'Open ComfyUI editor ↗'
 
@@ -85,12 +86,15 @@ export function EditorCard() {
           )}
           {!access.onBox && (
             <span className="ie-offbox" id="editor-offbox" data-testid="editor-offbox">
-              {OFF_BOX_NOTE}
+              {access.needsPublicUrl ?? OFF_BOX_NOTE}
             </span>
           )}
         </div>
+        <EditorIpFallback testid="editor-ip-fallback" />
 
-        {!access.onBox && <TunnelCommand tunnel={access.tunnel} testid="editor" />}
+        {!access.onBox && !access.needsPublicUrl && (
+          <TunnelCommand tunnel={access.tunnel} testid="editor" />
+        )}
 
         <p className="ie-muted" data-testid="editor-note">
           {EDITOR_NOTE}

@@ -104,6 +104,39 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/Hal0ai/hal0/main/scripts
 - **No reverse proxy / TLS.** The dashboard listens on `0.0.0.0:8080`
   with no auth (per ADR-0012). Treat the LXC as LAN-only.
 - **No backup / migration.** Standard `pct` / Proxmox tooling applies.
+- **No GPU fabric-clock hold.** See below — that is a separate, opt-in
+  install, and only needed when a box runs NPU and GPU slots together.
+
+## GPU fabric-clock guard (NPU + GPU together on Strix Halo)
+
+On Strix Halo (gfx1151 iGPU + XDNA2 NPU), running an NPU slot (`flm`) and a
+GPU slot (Vulkan/ROCm/HIP) at the same time can hang the box or corrupt NPU
+results if the GPU's fabric clock (fclk) changes DPM level mid-flight
+(upstream ROCm/TheRock#8709; see [ADR-0054](../../docs/adr/0054-gpu-fabric-clock-guard.md)).
+The fix is to pin the fabric clock at its top DPM level — which can only be
+done on the **Proxmox host**, not inside the LXC (the sysfs controls are
+guest-readable but not guest-writable).
+
+Install on the Proxmox host, as root, from this directory:
+
+```bash
+install -m 755 hal0-fabric-clock /usr/local/sbin/
+install -m 644 hal0-fabric-clock.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now hal0-fabric-clock.service
+```
+
+This holds the clock at boot and after every suspend/hibernate/hybrid-sleep
+(a resume can hand it back to the driver). Check it any time with
+`hal0-fabric-clock status`, or hold it for one session without installing the
+unit with `hal0-fabric-clock hold`. Cost: about 1 W of idle power while held.
+Inside the guest, `hal0 doctor all`'s `fabric_clock` row reads the same sysfs
+files (read-only) and warns with these same commands if an NPU slot and a
+GPU slot are both configured and the clock is not held; `[slots].fabric_clock_guard`
+(default `refuse`) blocks a conflicting load until it is.
+
+Undo: `systemctl disable --now hal0-fabric-clock.service`, then
+`hal0-fabric-clock release` (or just reboot the host).
 
 ## Test plan
 

@@ -235,18 +235,6 @@ def install_cmd(
     )
 
 
-# ── `hal0 mcp add` (ADR-0015 §Decision 4 — alias of install) ────────────────
-
-
-@app.command("add")
-def add_cmd(
-    url_spec: str = typer.Argument(..., help="MCP server URL or spec (oci://…, npm:…, etc.)."),
-    json_out: bool = typer.Option(False, "--json", help="Emit raw JSON instead of the panel."),
-) -> None:
-    """Alias of ``hal0 mcp install``."""
-    install_cmd(url_spec, json_out)
-
-
 # ── `hal0 mcp uninstall` ─────────────────────────────────────────────────────
 
 
@@ -277,18 +265,6 @@ def uninstall_cmd(
             border_style="yellow",
         )
     )
-
-
-# ── `hal0 mcp remove` (ADR-0015 §Decision 4 — alias of uninstall) ───────────
-
-
-@app.command("remove")
-def remove_cmd(
-    server_id: str = typer.Argument(..., help="MCP server id to remove."),
-    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation prompt."),
-) -> None:
-    """Alias of ``hal0 mcp uninstall``."""
-    uninstall_cmd(server_id, force)
 
 
 # ── `hal0 mcp restart` ───────────────────────────────────────────────────────

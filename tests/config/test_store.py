@@ -96,6 +96,35 @@ class TestAssertUnderStore:
         result = store.assert_under_store(escaping, severity="warn")
         assert result == escaping.resolve()
 
+    def test_warn_logs_once_per_path(self, monkeypatch, tmp_path, caplog) -> None:
+        monkeypatch.setenv("HAL0_MODEL_STORE", str(tmp_path / "store"))
+        monkeypatch.setattr(store, "_warned_escapes", set())
+        first = tmp_path / "elsewhere" / "a.gguf"
+        other = tmp_path / "elsewhere" / "b.gguf"
+
+        def warnings() -> list[str]:
+            return [
+                r.getMessage()
+                for r in caplog.records
+                if r.levelname == "WARNING" and "store.path_escape_warn" in r.getMessage()
+            ]
+
+        with caplog.at_level("DEBUG", logger=store.log.name):
+            store.assert_under_store(first, severity="warn")
+            assert len(warnings()) == 1
+            assert store.assert_under_store(first, severity="warn") == first.resolve()
+            assert len(warnings()) == 1  # same path again: no new WARNING
+            store.assert_under_store(other, severity="warn")
+            assert len(warnings()) == 2  # a different path warns
+
+    def test_fail_severity_still_raises_after_warn(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.setenv("HAL0_MODEL_STORE", str(tmp_path / "store"))
+        monkeypatch.setattr(store, "_warned_escapes", set())
+        escaping = tmp_path / "elsewhere" / "file.gguf"
+        store.assert_under_store(escaping, severity="warn")
+        with pytest.raises(store.StorePathEscape):
+            store.assert_under_store(escaping, severity="fail")
+
     def test_path_under_store_passes_both_severities(self, monkeypatch, tmp_path) -> None:
         root = tmp_path / "store"
         root.mkdir()

@@ -2,7 +2,7 @@
 // with stream / severity / source / slot / search filters. The ticker on the collapsed dock draws
 // the same rows (`EventRow`), without the stripe or the detail.
 
-import { useState } from 'react'
+import { memo, useState } from 'react'
 import { activityExportUrl } from '@/api/hooks/useActivity'
 import { DOCK_FILTERS_DEFAULT, actorLabel, exportFilters, filterEvents, sourceGroups } from './dock-pure'
 import { _srcHue, _shortTs, highlightFoot } from '../chrome.jsx'
@@ -73,7 +73,7 @@ function ChipGroup({ testid, label, items, value, onPick }) {
   )
 }
 
-export function EventsPane({ events, filters, onFilters, slotNames = [], disconnected = false }) {
+export const EventsPane = memo(function EventsPane({ events, filters, onFilters, slotNames = [], disconnected = false }) {
   const [openIds, setOpenIds] = useState(() => new Set())
   const filtered = filterEvents(events, filters)
   const set = (patch) => onFilters({ ...filters, ...patch })
@@ -118,7 +118,7 @@ export function EventsPane({ events, filters, onFilters, slotNames = [], disconn
           <a
             className="foot-pane-link"
             data-testid="dock-export"
-            href={activityExportUrl('csv', exportFilters(filters))}
+            href={activityExportUrl('csv', exportFilters(filters, events))}
             title="Exports the activity trail with these filters. Journal lines are on the Logs page."
           >Export ↓</a>
         </span>
@@ -128,7 +128,7 @@ export function EventsPane({ events, filters, onFilters, slotNames = [], disconn
           <div className="foot-pane-empty">No events yet</div>
         ) : filtered.length === 0 ? (
           <div className="foot-pane-empty">
-            No events match. <span className="foot-pane-clear" onClick={() => onFilters(DOCK_FILTERS_DEFAULT)}>Clear filters</span>
+            No events match. <button type="button" className="foot-pane-clear" data-testid="dock-clear-filters" onClick={() => onFilters(DOCK_FILTERS_DEFAULT)}>Clear filters</button>
           </div>
         ) : filtered.map((e) => {
           const open = openIds.has(e.id)
@@ -142,4 +142,4 @@ export function EventsPane({ events, filters, onFilters, slotNames = [], disconn
       </div>
     </div>
   )
-}
+})

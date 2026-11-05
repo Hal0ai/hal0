@@ -219,7 +219,10 @@ Three things to know before citing γ as validation:
 - A row whose image, model or hardware is missing is recorded `skip`, and
   the script exits 0 when no row is `fail`. A run counts as validation for
   a slot or provider change only if that change's row reads `pass` in
-  `tests/release-gate-report.json`.
+  `tests/release-gate-report.json`. On an NPU box with the FLM runner pinned,
+  the `flm` row uses the slot's configured model or an installed chat model from
+  `/api/slots/flm/models`; if neither exists, it warns `NPU lane NOT TESTED`.
+  A missing seeded slot or unreadable catalog fails the row.
 
 ```sh
 # Set HAL0_TEST_SSH_KEY to whatever key authorises you on your test host

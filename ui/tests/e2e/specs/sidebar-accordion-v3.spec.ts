@@ -28,6 +28,7 @@ async function mockConfigUrls(page: import('@playwright/test').Page) {
     json(route, {
       api: 'http://hal0.example:8080',
       openwebui: 'http://hal0.example:3001',
+      openwebui_ip: 'http://192.0.2.10:3001',
       openwebui_enabled: true,
       hermes: 'http://hal0.example:9119',
       hermes_enabled: true,
@@ -147,6 +148,8 @@ test.describe('sidebar Services zone', () => {
       'href',
       'http://hal0.example:3001',
     )
+    await expect(svc.locator('[data-testid="svc-openwebui-ip"]')).toHaveAttribute('href', 'http://192.0.2.10:3001')
+    await expect(svc.locator('[data-testid="svc-openwebui-ip"]')).toContainText("Can't reach it? Try the IP link")
     await expect(svc.locator('[data-testid="svc-hermes"]')).toHaveAttribute(
       'href',
       'http://hal0.example:9119',
@@ -154,6 +157,33 @@ test.describe('sidebar Services zone', () => {
     // External links open in a new tab safely.
     await expect(svc.locator('[data-testid="svc-openwebui"]')).toHaveAttribute('target', '_blank')
     await expect(svc.locator('[data-testid="svc-openwebui"]')).toHaveAttribute('rel', /noopener/)
+  })
+
+  test('behind a proxy with no HAL0_OPENWEBUI_PUBLIC_URL the OpenWebUI row is a visible hint, not a link', async ({
+    page,
+  }) => {
+    await page.route('**/api/config/urls', (route) =>
+      json(route, {
+        api: 'https://hal0.example',
+        openwebui: '',
+        openwebui_ip: '',
+        openwebui_enabled: true,
+        openwebui_reason: 'proxy_needs_public_url',
+        hermes: '',
+        hermes_enabled: false,
+        comfyui: '',
+        comfyui_ip: '',
+        comfyui_reason: 'proxy_needs_public_url',
+      }),
+    )
+    await page.goto('/#dashboard')
+    const svc = page.locator('.sb-services')
+    await expect(svc).toBeVisible({ timeout: FIVE_S })
+
+    await expect(svc.locator('[data-testid="svc-openwebui"]')).toHaveCount(0)
+    await expect(svc.locator('[data-testid="svc-openwebui-hint"]')).toContainText(
+      'Set HAL0_OPENWEBUI_PUBLIC_URL in /etc/hal0/api.env',
+    )
   })
 
   test('sidebar Services Kanban option routes to the Operator Board', async ({ page }) => {

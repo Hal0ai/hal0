@@ -336,3 +336,21 @@ def test_permission_denied_hint_omits_group_advice_for_owner_only_files(
     assert "usermod" not in out, f"group advice on an owner-only file: {result.output}"
     assert "sudo" in out
     assert "owner-only" in out
+
+
+def test_new_hal0_config_keeps_fresh_memory_defaults_after_migration(monkeypatch, tmp_path: Path):
+    import tomllib
+
+    from hal0.config.migrations import run_migrations
+    from hal0.config.schema import Hal0Config
+
+    home = tmp_path / "hal0-home"
+    monkeypatch.setenv("HAL0_HOME", str(home))
+    monkeypatch.setenv("EDITOR", "true")
+    result = runner.invoke(config_commands.app, ["edit", "hal0"])
+    assert result.exit_code == 0, result.output
+    raw = tomllib.loads((home / "etc" / "hal0" / "hal0.toml").read_text())
+    migrated, _ = run_migrations(raw)
+    cfg = Hal0Config.model_validate(migrated)
+    assert cfg.memory.graph.extraction_slot == "memory"
+    assert cfg.memory.priority.enabled is True

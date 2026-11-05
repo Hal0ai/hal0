@@ -59,6 +59,12 @@ Operators deleted models in the dashboard and saw them come back.
    2. Unload referencing slots and clear their slot defaults.
    3. Remove the row and call `delete_model_files_on_disk`.
 
+   A registry row that exists but cannot be read back (for example invalid
+   JSON in `extra`) refuses the whole delete with 500 `model.row_unreadable`
+   before step 1 touches anything. Only a missing row counts as absent:
+   treating a read error as absent would drop the row with no file set to
+   remove or tombstone, and the next scan would re-register the file.
+
    Step 3 runs in a worker thread under `SCAN_DELETE_LOCK`, which the whole
    of `scan_and_register` also holds. Without it, a scan landing between
    the row removal and the tombstone would re-register the file, and the

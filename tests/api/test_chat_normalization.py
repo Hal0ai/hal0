@@ -180,10 +180,10 @@ async def test_memory_alias_slot_target_does_not_mark_the_request_upstream_only(
 @pytest.mark.asyncio
 async def test_memory_alias_without_config_falls_back_to_the_default_slot():
     """A bare app (no hal0_config on state) behaves like the schema default
-    (extraction_slot=utility)."""
+    (extraction_slot=memory, falling back to agent)."""
     req = _make_request(cfgs=_UTILITY_AND_AGENT, loaded={"big", "small"})
     out = await v1._normalize_chat_body(req, {"model": "hal0/memory", "messages": []})
-    assert out["model"] == "small"
+    assert out["model"] == "big"
 
 
 @pytest.mark.asyncio
@@ -808,3 +808,28 @@ async def test_normalize_chat_body_caches_canonical_messages_in_request_body():
     cached = _json.loads(req._body)
     assert cached["messages"][0]["role"] == "system"
     assert cached["messages"][-1]["role"] == "user"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["agent", "utility", "memory", "upstream"])
+async def test_memory_identity_survives_alias_resolution(target):
+    from hal0.config.schema import MemoryGraphConfig
+    from hal0.dispatcher.lane_pin import MEMORY_REQUEST_ATTR
+
+    graph = MemoryGraphConfig(
+        extraction_slot=target if target != "upstream" else "agent",
+        extraction_model="vendor/model" if target == "upstream" else None,
+    )
+    req = _make_request(cfgs=_UTILITY_AND_AGENT, loaded={"big", "small"}, graph=graph)
+    await v1._normalize_chat_body(req, {"model": "hal0/memory", "messages": []})
+    assert getattr(req.state, MEMORY_REQUEST_ATTR, False) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["hal0/agent", "hal0/utility", "utility", "big", "vendor/model"])
+async def test_other_requests_sharing_memory_targets_are_not_tagged(model):
+    from hal0.dispatcher.lane_pin import MEMORY_REQUEST_ATTR
+
+    req = _make_request(cfgs=_UTILITY_AND_AGENT, loaded={"big", "small"})
+    await v1._normalize_chat_body(req, {"model": model, "messages": []})
+    assert getattr(req.state, MEMORY_REQUEST_ATTR, False) is False
