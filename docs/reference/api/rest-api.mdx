@@ -80,9 +80,11 @@ Only supplied keys change. A null key removes one override; `{"tune":null}`
 removes all. Slot creation applies the same type/device and thinking guards.
 
 Slot snapshots (`GET /api/slots`, `GET /api/slots/{name}`) expose
-`model_id`: it is `null` for an offline, unassigned slot whose provider requires
-an explicit model; while the slot is loaded, it identifies the model being
-served even if the slot's binding was cleared after the load.
+`model_id`: it is `null` for a slot in a non-serving state (anything other than
+`ready`, `serving` or `idle`) whose `[model].default` binding is empty and
+whose provider requires an explicit model; while the slot is loaded, it
+identifies the model being served even if the slot's binding was cleared after
+the load.
 
 Slot snapshots also expose
 `tune_effective`: `ctx_size`, `enable_thinking`, `reasoning_effort`,
@@ -126,7 +128,7 @@ so a load or unload performed elsewhere updates its verdict.
 | `/api/settings` | ADMIN | Root config read/write/reload, JSON schema, apply-plan registry, schema-driven field metadata (`fields`), and a dry-run ChangeSet preview (`preview`) sharing the same diff the write path applies. |
 | `/api/settings/models/store` | ADMIN | Model store path get/set/migrate (part of the `/api/settings` prefix). |
 | `/api/settings/proxmox` | ADMIN | Proxmox integration config (host/token) + live cluster status. See [Proxmox integration](/docs/reference/api/rest-api-credentials#proxmox-integration-apisettingsproxmox) — no dedicated exposure rule; it inherits ADMIN from the generic `/api/settings` prefix. |
-| `/api/slots` | CLIENT (list) / ADMIN (else) | Slot lifecycle — list, create, delete, restart, model swap, resolved-argv provenance by layer, metrics, capacity. Slot views carry `ctx_effective`, `ctx_source` and, for a slot file that still carries tuning keys, `conversion_blocked`. Their `model_id` is `null` for an offline, unassigned slot whose provider requires an explicit model. A slot write that carries a tuning key is refused with `slot.tuning_key_denied`; rebind a model with `PUT /api/slots/{name}/config` and `{"model": {"default": ...}}`. See [Slot lifecycle](/docs/reference/slot-lifecycle/). |
+| `/api/slots` | CLIENT (list) / ADMIN (else) | Slot lifecycle — list, create, delete, restart, model swap, resolved-argv provenance by layer, metrics, capacity. Slot views carry `ctx_effective`, `ctx_source` and, for a slot file that still carries tuning keys, `conversion_blocked`. Their `model_id` is `null` for a slot in a non-serving state (anything other than `ready`, `serving` or `idle`) whose `[model].default` binding is empty and whose provider requires an explicit model. A slot write that carries a tuning key is refused with `slot.tuning_key_denied`; rebind a model with `PUT /api/slots/{name}/config` and `{"model": {"default": ...}}`. See [Slot lifecycle](/docs/reference/slot-lifecycle/). |
 | `/api/models` | CLIENT (GET) / ADMIN (mutations) | Model registry — list, pull, delete, inspect, scan, catalogue, update checks, and speculative-decoding drafters (`PUT /api/models/{id}` takes `{"draft": path\|null}`; `DELETE /api/models/{id}/draft` unpairs and deletes the file; `POST /api/models/inspect-draft` fit-checks a drafter against a target before download; the pull body takes `draft_filename` and `draft_repo`; `POST /api/models/inspect` also returns `drafts` and `companion_repos`). The registry holds no image models: a pull of an image catalog id, and a create, update or add-from-path whose `path` is in ComfyUI's models folder, answer 422 `model.image_asset`. `GET /api/models/health` is registered by `hardware.router`, not `models.router` — it's mounted ahead of `/api/models` so the literal path wins over the `{model_id}` catch-all. `GET /api/models` also takes `installed`, `type`, `capability`, `device`, `q`, `fields`, `limit` and `offset` to filter, project and page the list (the reply gains `total`); with none of them it returns the full list. See [Model roster & benchmarks](/docs/reference/model-roster-benchmark/). |
 | `/api/runner-images` | CLIENT (list/detail) / ADMIN (sync/pull) | Runner Image catalogue — sync from `images.json`, pull-job orchestration, tag removal and restart-affected-slots for GHCR-hosted runner images. |
 | `/api/ports` | CLIENT (GET) / ADMIN (else) | Port allocation view. |
