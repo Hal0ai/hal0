@@ -64,7 +64,13 @@ const toast = (msg, kind = 'info') =>
   typeof window !== 'undefined' && window.__hal0Toast && window.__hal0Toast(msg, kind)
 
 const round1 = (n) => Math.round((n || 0) * 10) / 10
-const isNpuSlot = (s) => s.device_class === 'npu' || devKind(s.device) === 'npu'
+// Trio-eligible NPU slot — device_class npu, but excludes the xdna
+// (ggml-xdna llama-server) runner: xdna slots share the NPU but are never
+// FLM trio members (no modality roles, never the anchor, never a shadow).
+// They get their own XdnaSlotCard in the occupancy card's RIGHT region.
+const isNpuSlot = (s) =>
+  (s.device_class === 'npu' || devKind(s.device) === 'npu') &&
+  String(s.runner || '').toLowerCase() !== 'xdna'
 
 // owner hues — assigned by slot index so each resident FLM reads as its own
 // owner. Three cohesive accents (deep-indigo → teal → sage); single-tenant NPU
