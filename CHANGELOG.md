@@ -86,6 +86,7 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- **Offline, unassigned slots that require a model now report `model_id: null` in `/api/slots`.** `GET /api/slots` and `GET /api/slots/{name}` no longer expose an id retained from an earlier load when the slot is offline, its `[model].default` is empty, and its provider requires an explicit model. A loaded slot still reports the model it is serving, even if the binding was cleared after the load. (#3407)
 - **Hindsight's concurrency budget now covers consolidation, reflect and mental-model refresh as well as retain.** The shipped systemd unit defaults `HINDSIGHT_API_LLM_MAX_CONCURRENT` to `1` before a graph drop-in exists; the managed drop-in sets it to the same rendered value as `HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT`, and the root-side wrapper accepts the global key with the existing bounded-integer validation. Saving graph settings or running `hal0 update` repairs an existing retain-only drop-in and restarts Hindsight. (#3387)
 - **Slot drift restart reports incomplete outcomes.** The dashboard names failed and skipped slots, and shows configuration render errors in the bell and Overview. (#3372)
 - **A configured but stopped NPU slot no longer launches an `flm list` container on every `hal0/<role>` request.** hal0 now remembers each `<tag>-FLM` id's FastFlowLM tag once the catalog has resolved it, so the 5-minute catalog expiry cannot trigger a fresh probe for an id it already knows. `reset_flm_catalog_cache()` (run after an FLM pull) clears the memory.
