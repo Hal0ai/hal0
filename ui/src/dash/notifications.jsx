@@ -114,6 +114,7 @@ export function useNotifications() {
   const hasUpdate = !!(hal0Ch && hal0Ch.available && hal0Ch.available !== hal0Ch.current)
   const drift = useSlotDrift()
   const driftCount = drift.data?.count ?? 0
+  const driftErrors = (drift.data?.slots ?? []).filter((s) => s.render_error).map((s) => `${s.slot}: ${s.render_error}`).join('; ')
   const restartDrifted = useRestartDriftedSlots()
 
   const devMsgs = useDevMessages()
@@ -241,6 +242,7 @@ export function useNotifications() {
         body: (
           <>
             {driftCount} slot{driftCount !== 1 ? 's' : ''} running a pre-update config — restart to apply.
+            {driftErrors && <> Cannot render launch configuration: {driftErrors}. Fix the configuration before restarting.</>}
           </>
         ),
         actions: [
@@ -278,12 +280,12 @@ export function useNotifications() {
     }
 
     return items
-  }, [approvals, errorSlots, failedPulls, hasUpdate, hal0Ch, driftCount, devMsgs, driftBusy, clearJob, restartDrifted])
+  }, [approvals, errorSlots, failedPulls, hasUpdate, hal0Ch, driftCount, driftErrors, devMsgs, driftBusy, clearJob, restartDrifted])
 
   return {
     // raw derived values — the bell renders its existing per-section JSX from these
     approvals, errorSlots, activePulls, failedPulls,
-    hasUpdate, hal0Ch, driftCount,
+    hasUpdate, hal0Ch, driftCount, driftErrors,
     updatableModels, updateAllModels,
     devMsgs, clearJob, restartDrifted,
     count,

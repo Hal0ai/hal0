@@ -109,9 +109,8 @@ const {
 // Mounted only for a halogen slot whose runner serves knobs, and keyed by the
 // profile name, so a profile pick starts a fresh draft and the hook below stays
 // out of every other slot's render.
-function SlotEngineBlock({ profile, engine, footprint, onDuplicate }) {
+function SlotEngineBlock({ profile, engine, slotName, open, onDuplicate }) {
 	const update = useProfileUpdate();
-	const line = footprintLine(footprint);
 	const stored = profile.flags || "";
 	const readOnly = !!profile.seed;
 	// The unsaved text, with the stored text it started from: a profile that
@@ -123,6 +122,8 @@ function SlotEngineBlock({ profile, engine, footprint, onDuplicate }) {
 	const flags = live ? live.flags : stored;
 	const dirty = !!live && !live.sent && flags !== stored;
 	const error = readOnly ? null : halogenFlagsError(flags, engine);
+	const preview = useSlotResolved(slotName, { profile: profile.name, flags, enabled: !!open && !error, refetchInterval: 8_000 });
+	const line = footprintLine(preview.data?.footprint);
 	const toast = (msg, kind) => window.__hal0Toast && window.__hal0Toast(msg, kind);
 	const apply = async () => {
 		if (!dirty || error || saving) return;
@@ -154,13 +155,12 @@ function SlotEngineBlock({ profile, engine, footprint, onDuplicate }) {
 					error={error}
 					onChange={(next) => setDraft({ base: stored, flags: next, sent: false })}
 				/>
-				{/* The server's memory figure for the SAVED profile, so an unsaved
-				    edit above does not move it until "Save to profile". */}
+				{/* The server sizes the displayed profile and flags, including a draft. */}
 				{line && (
 					<div
 						className="hint"
 						data-testid="slot-engine-footprint"
-						title="From the saved profile and the model bound to this slot"
+						title="From the displayed settings and the model bound to this slot"
 					>
 						<span data-testid="slot-engine-footprint-text">{line.text}</span>
 						{line.verdict && (
@@ -2097,7 +2097,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
 									key={stagedProfileRow.name}
 									profile={stagedProfileRow}
 									engine={halogenSlotEngine}
-									footprint={resolvedQuery.data?.footprint}
+									slotName={slot.name}
+									open={open}
 									onDuplicate={() =>
 										setProfileDrawer({ mode: "clone", source: stagedProfileRow })
 									}

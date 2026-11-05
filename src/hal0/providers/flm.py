@@ -1175,13 +1175,11 @@ class FLMProvider(Provider):
 # hal0.capabilities.catalog, which calls flm_served_models() to learn
 # which model tags the NPU advertises.
 #
-# Design call: cache the probe result with a short TTL. A `flm pull` (or a
-# toolbox/host FLM upgrade) changes what's installed WITHOUT restarting
-# hal0-api, so a restart-only cache would show a stale catalog for the rest of
-# the process lifetime. A 5-minute TTL bounds that staleness cheaply; tests and
-# the force-refresh CLI/UI hook call reset_flm_catalog_cache() to invalidate
-# immediately.
-_FLM_CATALOG_TTL_S = 300.0
+# Catalog changes are invalidated by lifecycle events below (pull completion
+# and FLM slot launch).  Keep a long backstop for out-of-band operator changes
+# such as replacing the runner image directly; the normal event paths never
+# wait for this window.
+_FLM_CATALOG_TTL_S = 3600.0
 
 _FLM_CATALOG_CACHE: list[dict[str, Any]] | None = None
 _FLM_CATALOG_CACHED_AT: float = 0.0
@@ -1190,15 +1188,24 @@ _FLM_CATALOG_CACHED_AT: float = 0.0
 #: :func:`flm_catalog` reports ``None``, so "could not ask" never reads as
 #: "FLM serves nothing" to a caller that acts on absence.
 _FLM_CATALOG_UNANSWERED: bool = False
-#: Guards the cache, its timestamp and the unanswered flag as one unit, so a
-#: reader never pairs one probe's catalog with another probe's flag. The probe
-#: itself runs outside the lock: a slow ``flm list`` must not block readers.
+#: Monotonic invalidation generation. A reset that races a slow probe must
+#: prevent that pre-event answer from being installed after the reset.
+_FLM_CATALOG_GENERATION = 0
+#: Guards the cache, its timestamp, unanswered flag and generation as one unit,
+#: so a reader never pairs one probe's catalog with another probe's state.
+#: The probe itself runs outside the lock: a slow ``flm list`` must not block
+#: readers.
 _FLM_CATALOG_LOCK = threading.Lock()
 # Held for the whole cold-cache probe so concurrent callers share one
-# ``flm list -j`` instead of each spawning its own, and a slower probe can
-# never overwrite a newer answer (#2334). Never taken while holding
-# _FLM_CATALOG_LOCK.
+# ``flm list -j`` instead of each spawning its own.
 _FLM_CATALOG_PROBE_LOCK = threading.Lock()
+#: hal0 ``<tag>-FLM`` id -> FLM native ``family:size`` tag, filled by
+#: :func:`flm_id_to_tag` the first time the catalog resolves an id. The map is
+#: a pure naming transform, so it outlives the catalog TTL: a configured but
+#: stopped NPU slot then costs no ``flm list`` probe per request. Only hits are
+#: stored (an unknown id may appear once FLM lists it). Plain-dict item
+#: assignment is atomic, so it takes no lock.
+_FLM_ID_TAG_MEMO: dict[str, str] = {}
 
 
 def _classify_flm_model(entry: dict[str, Any]) -> list[str]:
@@ -1376,7 +1383,8 @@ def flm_catalog() -> list[dict[str, Any]] | None:
             "family":       "embed-gemma",       # details.family — useful for grouping
         }
 
-    Cached at module scope with a 5-minute TTL (:data:`_FLM_CATALOG_TTL_S`);
+    Cached at module scope with a one-hour backstop TTL
+    (:data:`_FLM_CATALOG_TTL_S`);
     subsequent calls inside the window are O(1). A failed probe is cached for
     the same TTL as "no answer" (``None`` here, ``[]`` from
     :func:`flm_served_models`) — call :func:`reset_flm_catalog_cache` to force
@@ -1395,47 +1403,50 @@ def flm_catalog() -> list[dict[str, Any]] | None:
 
 
 def _probe_and_cache_flm_catalog() -> list[dict[str, Any]] | None:
-    """Run the ``flm list -j`` probe and store the result; caller holds
-    :data:`_FLM_CATALOG_PROBE_LOCK`."""
+    """Probe and cache a stable result; caller holds the probe lock."""
     import time
 
     global _FLM_CATALOG_CACHE, _FLM_CATALOG_CACHED_AT, _FLM_CATALOG_UNANSWERED
-    raw = _probe_flm_catalog()
-    now = time.monotonic()
-    if raw is None:
+    while True:
         with _FLM_CATALOG_LOCK:
-            _FLM_CATALOG_CACHE = []
+            generation = _FLM_CATALOG_GENERATION
+        raw = _probe_flm_catalog()
+        now = time.monotonic()
+        if raw is None:
+            out: list[dict[str, Any]] = []
+            unanswered = True
+        else:
+            out = []
+            for entry in raw:
+                if not isinstance(entry, dict):
+                    continue
+                tag = entry.get("model") or entry.get("name")
+                if not isinstance(tag, str) or not tag:
+                    continue
+                details = entry.get("details") if isinstance(entry.get("details"), dict) else {}
+                out.append(
+                    {
+                        "tag": tag,
+                        "capabilities": _classify_flm_model(entry),
+                        "installed": bool(entry.get("installed")),
+                        "size_bytes": int(entry.get("size") or 0),
+                        "footprint_gb": float(entry.get("footprint") or 0.0),
+                        "family": str(details.get("family") or ""),
+                    }
+                )
+            # A non-empty reply with no usable entry says nothing about which
+            # tags are served: keep it "no answer", not "empty".
+            unanswered = bool(raw) and not out
+
+        with _FLM_CATALOG_LOCK:
+            if generation != _FLM_CATALOG_GENERATION:
+                # An event invalidated this probe. Retry after releasing the
+                # cache lock so no pre-event answer becomes visible.
+                continue
+            _FLM_CATALOG_CACHE = out
             _FLM_CATALOG_CACHED_AT = now
-            _FLM_CATALOG_UNANSWERED = True
-        return None
-
-    out: list[dict[str, Any]] = []
-    for entry in raw:
-        if not isinstance(entry, dict):
-            continue
-        tag = entry.get("model") or entry.get("name")
-        if not isinstance(tag, str) or not tag:
-            continue
-        details = entry.get("details") if isinstance(entry.get("details"), dict) else {}
-        out.append(
-            {
-                "tag": tag,
-                "capabilities": _classify_flm_model(entry),
-                "installed": bool(entry.get("installed")),
-                "size_bytes": int(entry.get("size") or 0),
-                "footprint_gb": float(entry.get("footprint") or 0.0),
-                "family": str(details.get("family") or ""),
-            }
-        )
-
-    # A non-empty reply with no usable entry (e.g. ``{"models": [{}]}``) says
-    # nothing about which tags are served: keep it "no answer", not "empty".
-    unanswered = bool(raw) and not out
-    with _FLM_CATALOG_LOCK:
-        _FLM_CATALOG_CACHE = out
-        _FLM_CATALOG_CACHED_AT = now
-        _FLM_CATALOG_UNANSWERED = unanswered
-    return None if unanswered else out
+            _FLM_CATALOG_UNANSWERED = unanswered
+            return None if unanswered else out
 
 
 def _flm_catalog_fresh() -> bool:
@@ -1466,17 +1477,19 @@ async def flm_served_models_async() -> list[dict[str, Any]]:
 
 
 def reset_flm_catalog_cache() -> None:
-    """Drop the cached FLM catalog so the next call re-probes immediately.
+    """Invalidate the catalog after a FLM model/image/lifecycle event.
 
-    Exposed for tests and for the "refresh catalog" CLI/UI hook. The 5-minute
-    TTL bounds staleness on its own; this forces an out-of-band refresh (e.g.
-    right after a ``flm pull``).
+    The next read probes immediately. A one-hour TTL remains only as a
+    backstop for changes made outside hal0's event paths.
     """
-    global _FLM_CATALOG_CACHE, _FLM_CATALOG_CACHED_AT, _FLM_CATALOG_UNANSWERED
+    global _FLM_CATALOG_CACHE, _FLM_CATALOG_CACHED_AT
+    global _FLM_CATALOG_UNANSWERED, _FLM_CATALOG_GENERATION
     with _FLM_CATALOG_LOCK:
+        _FLM_CATALOG_GENERATION += 1
         _FLM_CATALOG_CACHE = None
         _FLM_CATALOG_CACHED_AT = 0.0
         _FLM_CATALOG_UNANSWERED = False
+    _FLM_ID_TAG_MEMO.clear()
 
 
 def is_flm_tag(model_id: str) -> bool:
@@ -1536,9 +1549,15 @@ def flm_id_to_tag(model_id: str) -> str | None:
     """
     if not model_id.endswith("-FLM"):
         return None
+    known = _FLM_ID_TAG_MEMO.get(model_id)
+    if known is not None:
+        return known
     for m in flm_served_models():
         tag = m.get("tag")
         if isinstance(tag, str) and tag.replace(":", "-") + "-FLM" == model_id:
+            # The id -> tag map is a pure naming transform: once resolved it
+            # cannot change, so remember it and never ask the catalog again.
+            _FLM_ID_TAG_MEMO[model_id] = tag
             return tag
     return None
 
@@ -1546,11 +1565,12 @@ def flm_id_to_tag(model_id: str) -> str | None:
 async def flm_id_to_tag_async(model_id: str) -> str | None:
     """:func:`flm_id_to_tag` for async callers: the catalog read never blocks the loop.
 
-    Only a ``-FLM`` id reads the catalog; that read goes through
+    Only an unresolved ``-FLM`` id reads the catalog; that read goes through
     :func:`flm_served_models_async` first, so a cold cache is probed on a
-    worker thread (#2334).
+    worker thread (#2334). A memoized id answers without touching the
+    catalog, so a configured-but-stopped NPU slot costs no probe per request.
     """
-    if model_id.endswith("-FLM"):
+    if model_id.endswith("-FLM") and model_id not in _FLM_ID_TAG_MEMO:
         await flm_served_models_async()
     return flm_id_to_tag(model_id)
 

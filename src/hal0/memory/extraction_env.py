@@ -120,8 +120,11 @@ class ExtractionLimits:
     completion tokens, two layers of 3 retries), which on a slow slot turn one
     stuck extraction into a queue that never drains.
 
-    * ``max_concurrent`` -> ``HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT``: in-flight
-      extraction calls against the slot. 1 serialises them.
+    * ``max_concurrent`` -> ``HINDSIGHT_API_LLM_MAX_CONCURRENT`` and
+      ``HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT``: in-flight LLM calls, including
+      consolidation, reflect and mental-model refresh. The slot ``--parallel``
+      clamp applies to both rendered values. 1 serialises them, so a long
+      reflect or consolidation can delay retains until completion or timeout.
     * ``max_tokens`` -> ``HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS``: per-call
       completion cap. Hindsight refuses every retain into a bank whose chunk
       size is not strictly below it: the schema floor (3072) clears the engine
@@ -208,6 +211,7 @@ _DROP_IN_TEMPLATE = (
     "[Service]\n"
     "Environment=HINDSIGHT_API_LLM_MODEL=" + MEMORY_ALIAS + "\n"
     "Environment=HINDSIGHT_API_LLM_TIMEOUT={timeout_s}\n"
+    "Environment=HINDSIGHT_API_LLM_MAX_CONCURRENT={max_concurrent}\n"
     "Environment=HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT={max_concurrent}\n"
     "Environment=HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS={max_tokens}\n"
     "Environment=HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES={llm_retries}\n"

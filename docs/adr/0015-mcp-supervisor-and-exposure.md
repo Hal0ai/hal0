@@ -218,9 +218,9 @@ stay `501`.
   extended to accept a `tools` argument).
 - `hal0 mcp expose <id> --hermes/--no-hermes [--brain/--no-brain]` —
   `PATCH /{id}/exposure`, triggers Decision 2.
-- `hal0 mcp add`/`hal0 mcp remove` ship as `install`/`uninstall`
-  aliases (same handler, same route) — existing verb names are kept,
-  not renamed.
+- `hal0 mcp add`/`hal0 mcp remove` shipped as `install`/`uninstall`
+  aliases. They were removed in #2864 (CHANGELOG **Breaking**); `install`
+  and `uninstall` are the only verbs.
 
 ### 5. REST
 

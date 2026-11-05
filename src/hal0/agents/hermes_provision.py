@@ -3671,14 +3671,26 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
     }
     slots_all = ctx.io.fetch_slots()
     chat_slots = _collect_chat_slots(slots_all, contexts=ctx.io.fetch_model_contexts())
-    # feat/hermes-role-slots: delegation ← `agent` slot; auxiliary ← `utility`
-    # slot. Both hit hal0's /v1 endpoint, so a missing slot degrades safely
+    # Delegation follows agent; auxiliary follows the configured memory target.
+    # Both hit hal0's /v1 endpoint, so a missing slot degrades safely
     # (delegation omitted / aux → empty model).
     hal0_v1_base = primary["backend_url"]
     delegation = _resolve_delegation(
         slots_all, hal0_base_url=hal0_v1_base, slot_name=read_delegation_slot()
     )
-    auxiliary_tasks = _resolve_auxiliary_tasks(slots_all, hal0_base_url=hal0_v1_base)
+    try:
+        graph_config = ctx.io.load_config().memory.graph
+        extraction_slot = graph_config.extraction_slot
+        extraction_model = graph_config.extraction_model
+    except Exception as exc:
+        log.warning("hermes_provision.memory_target_unreadable", error=str(exc))
+        extraction_slot, extraction_model = "utility", None
+    auxiliary_tasks = _resolve_auxiliary_tasks(
+        slots_all,
+        hal0_base_url=hal0_v1_base,
+        extraction_slot=extraction_slot,
+        extraction_model=extraction_model,
+    )
     # Probe-driven mcp_servers: mcp_wire runs immediately BEFORE us in the linear
     # pipeline, so its live probe result is available via output_of. Fall back to
     # the builtin inventory when the probe found nothing (degraded MCP layer).
@@ -7262,17 +7274,38 @@ def _resolve_auxiliary_tasks(
     slots: list[dict[str, Any]],
     *,
     hal0_base_url: str,
+    extraction_slot: str = "utility",
+    extraction_model: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Build the ``auxiliary_tasks`` template dict (task → {provider, model, base_url}).
 
     The typed adapter preserves stable IDs and explicit role hints, then the
-    shared resolver applies utility preference, NPU virtual addressing, and
-    main fallback. This function only translates resolved roles back into the
+    shared resolver applies the configured extraction target and main fallback.
+    Custom extraction targets keep the prior utility preference.
+    This function only translates resolved roles back into the
     existing Hermes auxiliary overlay keys.
     """
     candidates = [candidate_from_slot_mapping(slot) for slot in slots if isinstance(slot, dict)]
 
-    role_map = resolve_role_slots("hermes", candidates)
+    if not extraction_model and extraction_slot == "memory":
+        auxiliary_slot = "memory"
+    elif not extraction_model and extraction_slot == "agent":
+        auxiliary_slot = None
+    else:
+        auxiliary_slot = "utility"
+    role_map = resolve_role_slots(
+        "hermes",
+        candidates,
+        auxiliary_slot=auxiliary_slot,
+        # The NPU virtual lane (`hal0/npu`) is a FALLBACK for when no
+        # dedicated auxiliary slot is bound — it is not the "utility"
+        # mode's privilege. Gating it on auxiliary_slot == "utility"
+        # dropped it for every fresh install, where the configured
+        # extraction slot is "memory" (config/schema.py, memory.graph
+        # default) and for "agent" mode. Only agent mode opts out
+        # entirely: there the aux task inherits the main chat model.
+        npu_fallback=auxiliary_slot is not None,
+    )
     by_role = {entry.role: entry for entry in role_map.entries}
     task_roles = {
         "vision": "vision",
@@ -7284,14 +7317,20 @@ def _resolve_auxiliary_tasks(
     tasks: dict[str, dict[str, Any]] = {}
     for task in (*_MAIN_AUX_TASKS, *_UTILITY_AUX_TASKS):
         entry = by_role[task_roles[task]]
-        custom = entry.basis in {"utility", "npu_virtual"}
+        custom = entry.basis not in {"main", "main_fallback"}
+        # The memory lane is addressed by SLOT NAME, not by the slot's
+        # display label: `hal0/<name>` resolves by name
+        # (normalize.resolver._slot_matches_name). A role_hint match whose
+        # label differs from the name would otherwise build a lane id that
+        # names no slot.
+        lane = entry.name or entry.label or ""
         tasks[task] = {
             # Always "custom": Hermes' doctor rejects provider "main" as an
             # unknown provider (#2882). Without a dedicated slot the model
             # stays empty so the task inherits the main chat model through
             # the hal0 endpoint.
             "provider": "custom",
-            "model": entry.model if custom else "",
+            "model": (f"hal0/{lane}" if entry.basis == "memory" else entry.model) if custom else "",
             "base_url": hal0_base_url,
         }
     return tasks
@@ -7725,8 +7764,9 @@ def _merge_env_file(path: Path, updates: dict[str, str]) -> None:
 #: unprivileged (D hardened-perms). Mirrors the hal0-slotctl seam: a non-root
 #: provisioner cannot write the secrets vault
 #: (/var/lib/hal0/secrets/agents/<agent>.env, 0600 root:root) or the driver env
-#: (/etc/hal0/agents/<agent>.env, 0644 root:root) directly, so it delegates the
-#: write to this root helper over `sudo -n`. Env-overridable for tests.
+#: (/etc/hal0/agents/<agent>.env, 0600 root:root driver env; it can carry
+#: HAL0_MCP_TOKEN, a live secret) directly, so it delegates the write to this
+#: root helper over `sudo -n`. Env-overridable for tests.
 _HAL0_AGENTENV = os.environ.get("HAL0_AGENTENV", "/usr/lib/hal0/bin/hal0-agentenv")
 
 #: The agent this provisioner manages; the seam re-validates it server-side.
@@ -8813,7 +8853,7 @@ def _memory_engine_ready(
     from it with its own LLM call to hal0's gateway as ``hal0/memory``
     (``installer/systemd/hindsight-api.service``). hal0 resolves that to the
     upstream ``[memory.graph].extraction_model`` when set, else to
-    ``hal0/<extraction_slot>`` (``utility`` by default, falling back to the
+    ``hal0/<extraction_slot>`` (``memory`` by default, falling back to the
     ``agent`` anchor when that slot has no model), and loads the slot if it is
     cold. So the probe runs when that call cannot reach a slot (memory off,
     the ``pgvector`` engine, which calls no model, an engine LLM pointed away

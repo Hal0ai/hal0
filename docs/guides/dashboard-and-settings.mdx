@@ -58,7 +58,8 @@ into one panel, grouped into sections:
   controls and a link to the full downloads pane.
 - **updates** — an available hal0 release, slots running a pre-update
   config that need a restart, and any model updates available on
-  Hugging Face.
+  Hugging Face. Restart reports slots that fail or are skipped; slots whose
+  launch configuration cannot render need their configuration fixed first.
 - **messages** — developer/system notices pushed into the dashboard at
   runtime.
 
@@ -114,7 +115,14 @@ services exist. Each card shows:
   loopback-only; ComfyUI's link opens from anywhere while it binds the LAN, the
   default, and under `[network].comfyui_listen = "loopback"` only from a page on
   the box itself, disabled anywhere else beside an SSH tunnel command), and mDNS
-  `.local` URL when advertised;
+  `.local` URL when advertised. Behind a reverse proxy there is no browser URL
+  at all — the proxy's `:3001` and `:8188` are not the apps — so the card names
+  the variable to set instead (`HAL0_OPENWEBUI_PUBLIC_URL` or
+  `HAL0_COMFYUI_PUBLIC_URL`, in `/etc/hal0/api.env`) rather than linking a dead
+  address (see [Environment variables](/docs/reference/env-vars/));
+- a LAN-IP fallback link — "Can't reach it? Try the IP link" — beside the
+  name-based link, for clients that cannot resolve a `.local` name: the same app
+  on the box's main LAN address, at the same port;
 
 - lifecycle buttons (Restart/Start/Stop) limited to the verbs that service
   actually permits — ComfyUI exposes Start/Restart only, since a raw

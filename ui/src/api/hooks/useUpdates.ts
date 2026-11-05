@@ -6,8 +6,9 @@
 
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { apiGet, apiPost, apiPut } from '../client'
+import { apiGet, apiPost, apiPut, Hal0Error } from '../client'
 import { ENDPOINTS } from '../endpoints'
+import { useToastStore } from '@/stores/useToastStore'
 
 export interface UpdateChannel {
   current: string
@@ -122,6 +123,7 @@ export function useSetUpdateChannel() {
 export interface SlotDriftEntry {
   slot: string
   diffs: Array<{ key: string; running: string | null; rendered: string | null }>
+  render_error?: string
 }
 
 export interface SlotDrift {
@@ -142,7 +144,28 @@ export function useSlotDrift() {
 export interface RestartSlotsResult {
   restarted: string[]
   failed: Array<{ slot: string; error: string }>
+  skipped_busy: string[]
+  skipped_render_error: string[]
   count: number
+}
+
+export function restartDriftMessages(result: RestartSlotsResult): string[] {
+  const messages = result.failed.map(({ slot, error }) => `Failed to restart ${slot}: ${error}`)
+  if (result.skipped_busy.length) messages.push(`Skipped busy slots: ${result.skipped_busy.join(', ')}`)
+  if (result.skipped_render_error.length) messages.push(`Skipped slots whose launch configuration could not be rendered: ${result.skipped_render_error.join(', ')}. Fix their configuration before restarting.`)
+  return messages
+}
+
+let restartToastId: number | null = null
+
+function clearRestartWarning() {
+  if (restartToastId !== null) useToastStore.getState().dismiss(restartToastId)
+  restartToastId = null
+}
+
+function showRestartWarning(message: string) {
+  clearRestartWarning()
+  restartToastId = useToastStore.getState().push(message, 'warn', 0)
 }
 
 export function useRestartDriftedSlots() {
@@ -153,7 +176,16 @@ export function useRestartDriftedSlots() {
         ENDPOINTS.updateRestartSlots,
         slots && slots.length ? { slots } : {},
       ),
-    onSuccess: () => {
+    onError: (error) => {
+      if (error instanceof Hal0Error && error.status === 401 && error.code === 'auth.required') return
+      showRestartWarning(`Could not restart drifted slots: ${error.message}`)
+    },
+    onSuccess: (result) => {
+      clearRestartWarning()
+      const messages = restartDriftMessages(result)
+      if (messages.length) {
+        showRestartWarning(messages.join(' · '))
+      }
       qc.invalidateQueries({ queryKey: ['updates', 'slot-drift'] })
       qc.invalidateQueries({ queryKey: ['slots'] })
     },

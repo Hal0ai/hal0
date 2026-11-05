@@ -28,6 +28,7 @@ export function EditorOpenButton({ testid, className = 'svc-btn', children }) {
   if (access.onBox && access.url) {
     const url = access.url
     return (
+      <>
       <button
         type="button"
         className={className}
@@ -37,15 +38,25 @@ export function EditorOpenButton({ testid, className = 'svc-btn', children }) {
       >
         {children}
       </button>
+      {access.ipUrl && access.ipUrl !== url && (
+        <a className="ie-muted" data-testid={`${testid}-ip`} href={access.ipUrl} target="_blank" rel="noopener noreferrer">
+          Can't reach it? Try the IP link
+        </a>
+      )}
+      </>
     )
   }
+  const why = access.needsPublicUrl ?? OFF_BOX_NOTE
   return (
-    <span title={`${OFF_BOX_NOTE}. ${access.tunnel}`} data-testid={`${testid}-wrap`}>
+    <span
+      title={access.needsPublicUrl ? why : `${OFF_BOX_NOTE}. ${access.tunnel}`}
+      data-testid={`${testid}-wrap`}
+    >
       <button
         type="button"
         className={className}
         disabled
-        aria-label={`Open ComfyUI. ${OFF_BOX_NOTE}`}
+        aria-label={`Open ComfyUI. ${why}`}
         data-testid={testid}
       >
         {children}
@@ -63,6 +74,15 @@ export function EditorOpenButton({ testid, className = 'svc-btn', children }) {
 export function EditorOffBox({ testid }) {
   const access = useEditorAccess()
   if (access.onBox) return null
+  if (access.needsPublicUrl) {
+    return (
+      <div className="ie-tunnel-block">
+        <span className="ie-offbox" data-testid={`${testid}-offbox`}>
+          {access.needsPublicUrl}
+        </span>
+      </div>
+    )
+  }
   return (
     <div className="ie-tunnel-block">
       <span className="ie-offbox" data-testid={`${testid}-offbox`}>
@@ -70,5 +90,16 @@ export function EditorOffBox({ testid }) {
       </span>
       <TunnelCommand tunnel={access.tunnel} testid={testid} />
     </div>
+  )
+}
+
+/** Secondary direct-IP path for clients that cannot resolve the advertised host name. */
+export function EditorIpFallback({ testid }) {
+  const access = useEditorAccess()
+  if (!access.url || !access.ipUrl || access.url === access.ipUrl) return null
+  return (
+    <a className="ie-muted" data-testid={testid} href={access.ipUrl} target="_blank" rel="noopener noreferrer">
+      Can't reach it? Try the IP link
+    </a>
   )
 }

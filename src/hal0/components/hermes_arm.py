@@ -154,8 +154,11 @@ def hermes_build_trigger(venv: Path | None = None) -> str | None:
             and not rel.complete_releases(layout)
         ):
             return None
-        ref = rel.require_vetted(read_pin_override() or rel.read_pin().ref)
-        return rel.build_trigger(layout, ref, rel.target_minor(ref), rel.configured_extras())
+        pin = rel.read_pin()
+        ref = rel.require_vetted(read_pin_override() or pin.ref)
+        return rel.build_trigger(
+            layout, ref, rel.target_minor(ref), rel.configured_extras(), pin_extras=pin.extras
+        )
     except Exception:
         return None
 
@@ -393,7 +396,8 @@ def converge_hermes(
     override = None if clear_override else marker
     overridden = False
     try:
-        pin_ref = rel.require_vetted(rel.read_pin().ref)
+        pin = rel.read_pin()
+        pin_ref = rel.require_vetted(pin.ref)
         if target_ref is not None and target_ref.strip() == pin_ref:
             # Pinning the release pin's own commit is the same as clearing: it
             # must not hold the box off a later pin bump.
@@ -438,7 +442,7 @@ def converge_hermes(
         return {**result, "status": "build_failed", "error": str(exc)}
     # Read before any drop to hal0: only root sees the gateway's secrets vault.
     platform_extras = rel.configured_extras()
-    trigger = rel.build_trigger(layout, target, minor, platform_extras)
+    trigger = rel.build_trigger(layout, target, minor, platform_extras, pin_extras=pin.extras)
     if trigger is None:
         if apply:
             _config_backstop(result, job_id=job_id)

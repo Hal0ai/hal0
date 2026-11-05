@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from hal0.api import create_app
 from hal0.api.routes import settings as settings_routes
 from hal0.config.loader import HAL0_TOML_LOCK
+from hal0.config.schema import CURRENT_SCHEMA_VERSION
 
 
 @pytest.fixture
@@ -43,7 +44,7 @@ def test_get_settings_returns_default_config_when_no_toml(isolated_client: TestC
     assert "dispatcher" in body
     assert "telemetry" in body
     # Schema defaults.
-    assert body["meta"]["schema_version"] == 1
+    assert body["meta"]["schema_version"] == CURRENT_SCHEMA_VERSION
     assert body["telemetry"]["enabled"] is False
     assert body["telemetry"]["channel"] == "stable"
 

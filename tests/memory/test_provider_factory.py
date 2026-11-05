@@ -95,3 +95,18 @@ def test_factory_seeds_hindsight_graph_gate_from_config():
     # ADR-0023: the configured extraction_slot reaches the provider.
     assert status["extraction_slot"] == "utility"
     assert "route" not in status
+
+
+def test_provider_defaults_agree_with_fresh_memory_config():
+    from hal0.config.schema import MemoryGraphConfig
+    from hal0.memory.hindsight_provider import HindsightProvider
+    from hal0.memory.pgvector_provider import PgVectorProvider
+
+    default_slot = MemoryGraphConfig().extraction_slot
+    assert default_slot == "memory"
+    assert HindsightProvider(client=object()).graph_status()["extraction_slot"] == default_slot
+    assert PgVectorProvider().graph_status()["extraction_slot"] == default_slot
+    cfg = _cfg()
+    del cfg.memory.graph.extraction_slot
+    with patch("hal0.memory._build_hindsight_client", return_value=object()):
+        assert provider_from_config(cfg).graph_status()["extraction_slot"] == default_slot

@@ -309,3 +309,15 @@ def test_agent_virtual_name_resolves_to_agent_slot():
     assert r.matched_name == "agent"
     assert r.model_id == "big-35b"
     assert r.fallback is False
+
+
+@pytest.mark.parametrize("memory_model", [None, "", "memory-model"])
+def test_memory_chain_uses_binding_and_falls_back_to_agent(memory_model):
+    slots = _slots()
+    if memory_model is not None:
+        slots.append(SlotView("memory", "cpu", memory_model, 32768))
+    result = resolve_chain("hal0/memory", slots, loaded={"big-35b"})
+    assert result is not None
+    assert result.model_id == (memory_model or "big-35b")
+    assert result.matched_name == ("memory" if memory_model else "agent")
+    assert result.needs_load is bool(memory_model)

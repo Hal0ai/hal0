@@ -152,7 +152,9 @@ export function EngineCard({ status, env, visible = true }) {
   const [logsOpen, setLogsOpen] = useState(false)
   // Where the editor answers: the LAN ([network].comfyui_listen = "lan") or the box's loopback.
   const access = useEditorAccess()
-  const pageHost = typeof window === 'undefined' ? '' : window.location.hostname
+  const pageHost = (() => {
+    try { return new URL(access.url || '').host } catch { return '' }
+  })()
 
   const arbiter = env?.arbiter ?? null
   const actions = useStatusLineActions({ resetKey: `${status?.engine ?? ''}|${arbiter?.mode ?? ''}` })
@@ -222,7 +224,7 @@ export function EngineCard({ status, env, visible = true }) {
                 <dd>
                   {access.lan ? (
                     <>
-                      <code>{pageHost}:{EDITOR_PORT}</code>
+                      <code>{pageHost || 'ComfyUI'}</code>
                       <span className="ie-dim"> · from any machine on your network</span>
                     </>
                   ) : (

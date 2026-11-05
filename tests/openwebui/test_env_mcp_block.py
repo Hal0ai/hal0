@@ -39,7 +39,7 @@ def _overrides(**kw):
 
 def test_static_defaults_include_task_model_and_user_headers() -> None:
     env = default_openwebui_env()
-    assert env["TASK_MODEL_EXTERNAL"] == "utility"
+    assert env["TASK_MODEL_EXTERNAL"] == "hal0/agent"
     assert env["ENABLE_FORWARD_USER_INFO_HEADERS"] == "True"
     assert env["ENABLE_MEMORIES"] == "False"
     assert "FORWARD_USER_INFO_HEADER_JWT_SECRET" not in env

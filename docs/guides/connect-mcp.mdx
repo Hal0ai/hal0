@@ -22,7 +22,7 @@ hal0 mcp install git+https://github.com/example/some-mcp-server
 hal0 mcp install https://some-mcp-server.example.com/mcp
 ```
 
-`hal0 mcp install` (alias: `hal0 mcp add`) accepts an OCI image ref, an
+`hal0 mcp install` accepts an OCI image ref, an
 npm/uvx package specifier, a git URL, or a streamable-http/sse manifest
 URL. Each installed server persists as its own file,
 `/etc/hal0/mcp-servers/<id>.toml`, mode `0600`. A **freshly installed
@@ -33,7 +33,7 @@ sections to actually let an agent use it.
 hal0 mcp list                # bundled + installed
 hal0 mcp list --json
 hal0 mcp status <id>         # tools, env, connected clients
-hal0 mcp uninstall <id>      # alias: hal0 mcp remove <id>
+hal0 mcp uninstall <id>
 hal0 mcp uninstall <id> --force
 ```
 

@@ -50,7 +50,15 @@ def _live_release(ref=PIN, minor="3.14"):
     (rdir / "venv" / "bin").mkdir(parents=True)
     (rdir / "venv" / "bin" / "python").write_text("", encoding="utf-8")
     (rdir / "release.json").write_text(
-        json.dumps({"id": rid, "ref": ref, "python_minor": minor, "legacy": False}),
+        json.dumps(
+            {
+                "id": rid,
+                "ref": ref,
+                "python_minor": minor,
+                "legacy": False,
+                "extras": list(rel.read_pin().extras),
+            }
+        ),
         encoding="utf-8",
     )
     layout.current.symlink_to(f"releases/{rid}")
