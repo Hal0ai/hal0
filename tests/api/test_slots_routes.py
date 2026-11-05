@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -33,7 +34,7 @@ from fastapi.testclient import TestClient
 
 from hal0.api import create_app
 from hal0.slots.manager import SlotManager
-from hal0.slots.state import SlotState
+from hal0.slots.state import SlotState, SlotStateRecord
 from hal0.upstreams.registry import Upstream
 from tests.fixtures.model_registration import register_model_file
 from tests.fixtures.slot_probe import probe_slot_name
@@ -247,6 +248,93 @@ def test_list_slots_uses_binding_for_offline_model_id_but_keeps_loaded_model(
     offline_chat = next(row for row in offline_rows if row["name"] == "chat")
     assert offline_chat["status"] == "offline"
     assert offline_chat["model_id"] is None
+
+
+def test_list_slots_uses_divergent_binding_for_non_serving_model_id(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+    isolated_app: FastAPI,
+    tmp_hal0_home: str,
+) -> None:
+    """A cold slot reports its configured model, not its stale state id."""
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "chat",
+        [
+            'name = "chat"',
+            "port = 8081",
+            'device = "gpu-vulkan"',
+            'provider = "llama-server"',
+            'runtime = "container"',
+            'profile = "chat"',
+            "[model]",
+            'default = "other-model-xyz"',
+        ],
+    )
+    sm: SlotManager = isolated_app.state.slot_manager
+    # Seed a prior loaded record; with the container down, status reconciles it
+    # to OFFLINE and must project the TOML binding instead of this stale id.
+    sm._states[sm._key("chat")] = SlotStateRecord(
+        name="chat",
+        state=SlotState.READY,
+        model_id="qwen3-4b-q4_k_m",
+        port=8081,
+        updated_at=time.time(),
+        message="",
+        extra={},
+    )
+
+    r = isolated_client.get("/api/slots")
+    assert r.status_code == 200, r.text
+    chat = next(entry for entry in r.json() if entry["name"] == "chat")
+    assert chat["state"] == "offline"
+    assert chat["model_id"] == "other-model-xyz"
+
+
+def test_list_slots_keeps_in_flight_model_id_while_loading(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+    isolated_app: FastAPI,
+    tmp_hal0_home: str,
+) -> None:
+    """A loading slot reports the model it is pulling, not the binding.
+
+    ``_load()`` records the resolved model while the slot pulls and warms it,
+    and only persists it as the new default after the readiness wait. The
+    snapshot must not replace that in-flight id with the stale binding.
+    """
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "chat",
+        [
+            'name = "chat"',
+            "port = 8081",
+            'device = "gpu-vulkan"',
+            'provider = "llama-server"',
+            'runtime = "container"',
+            'profile = "chat"',
+            "[model]",
+            'default = "other-model-xyz"',
+        ],
+    )
+    sm: SlotManager = isolated_app.state.slot_manager
+    sm._states[sm._key("chat")] = SlotStateRecord(
+        name="chat",
+        state=SlotState.WARMING,
+        model_id="in-flight-model-abc",
+        port=8081,
+        updated_at=time.time(),
+        message="",
+        extra={},
+    )
+
+    r = isolated_client.get("/api/slots")
+    assert r.status_code == 200, r.text
+    chat = next(entry for entry in r.json() if entry["name"] == "chat")
+    assert chat["state"] == "warming"
+    assert chat["model_id"] == "in-flight-model-abc"
 
 
 def test_list_real_wins_on_name_collision(
