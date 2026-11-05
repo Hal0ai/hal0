@@ -2144,7 +2144,11 @@ class MemoryGraphConfig(BaseModel):
             "extraction slot; the daemon restarts to pick it up. It also sets "
             "the retain wall limit (HINDSIGHT_API_RETAIN_WALL_TIMEOUT, which "
             "hal0 derives, see extraction_llm_retries): the wall limit is "
-            "always above llm_timeout_s x (extraction_llm_retries + 1)."
+            "always above llm_timeout_s x (extraction_llm_retries + 1). "
+            "Hindsight sends these calls non-streaming through hal0's /v1, so "
+            "hal0 also uses this value as the read timeout for hal0/memory "
+            "requests when it is longer than [dispatcher].direct_read_timeout_s; "
+            "a shorter value never lowers that setting."
         ),
     )
     # Extraction limits (#1834). The extraction slot is a shared inference
@@ -2163,8 +2167,11 @@ class MemoryGraphConfig(BaseModel):
             "extraction target (HINDSIGHT_API_LLM_MAX_CONCURRENT and "
             "HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT). This also bounds consolidation, "
             "reflect and mental-model refresh. 1 serialises them; raise it "
-            "only for a slot that genuinely serves parallel requests. Applied via "
-            "the hindsight-api drop-in; the daemon restarts to pick it up."
+            "only for a slot that genuinely serves parallel requests. hal0 holds "
+            "the rendered value to the extraction slot's --parallel (calls beyond "
+            "it queue inside llama-server and time out), keeps this setting as "
+            "you wrote it, and warns on save and in graph status when it clamps. "
+            "Applied via the hindsight-api drop-in; the daemon restarts to pick it up."
         ),
     )
     extraction_max_tokens: int = Field(
