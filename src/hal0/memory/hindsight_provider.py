@@ -557,7 +557,7 @@ class HindsightProvider(MemoryProvider):
         client_id: str = "anonymous",
         reranker: Any = None,
         graph_enabled: bool = False,
-        extraction_slot: str = "utility",
+        extraction_slot: str = "memory",
         unified_bank: bool = False,
         bank: str = _SHARED,
     ) -> None:

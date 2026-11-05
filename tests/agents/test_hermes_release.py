@@ -1201,6 +1201,18 @@ def test_a_312_release_of_a_ref_capped_below_314_never_loops(tree) -> None:
         assert tools.calls == []
 
 
+def test_a_pin_extra_missing_from_the_live_release_triggers_a_rebuild(tree) -> None:
+    """The pin gained `acp` (#3344) without its ref moving: same-ref boxes rebuild."""
+    assert _ensure(tree, FakeTools(lock=True)).ok
+    layout = rel.Layout.for_venv(tree["venv"])
+    minor = rel.target_minor(PIN)
+    live_extras = tuple(rel.live_release(layout).data["extras"])
+    assert rel.build_trigger(layout, PIN, minor, pin_extras=live_extras) is None
+    assert rel.build_trigger(layout, PIN, minor, pin_extras=(*live_extras, "acp")) == (
+        "the pin's extras are missing from the live release: acp"
+    )
+
+
 def test_the_minor_trigger_fires_when_the_ref_admits_314(tree, monkeypatch) -> None:
     assert _ensure(tree, FakeTools()).ok  # 3.12, under the 3ef6bbd2 record
     layout = rel.Layout.for_venv(tree["venv"])

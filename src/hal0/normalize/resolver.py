@@ -24,11 +24,13 @@ _ANCHOR_NAME = "agent"
 _VIRTUAL_PREFIX = "hal0/"
 
 # Canonical virtual names -> ordered chain of slot names; the first model-bound one wins.
-# These three are the *advertised* names (the Hermes / OpenWebUI picker). ANY other
+# These include the reserved memory-engine alias. Any other
 # enabled llm slot `X` is still addressable as `hal0/X` via the generalized chain
 # built in `_chain_for` — the mapping is read from the live slot set, not frozen here.
 DEFAULT_CHAINS: dict[str, tuple[str, ...]] = {
     "hal0/agent": (_ANCHOR_NAME,),
+    # ADR-0053: an empty or absent memory slot shares the agent anchor.
+    "hal0/memory": ("memory", _ANCHOR_NAME),
     # hal0/utility → the cheap helper slot (loaded on demand when cold); falls
     # back to the anchor only when utility has no bound model (#2741).
     "hal0/utility": ("utility", _ANCHOR_NAME),

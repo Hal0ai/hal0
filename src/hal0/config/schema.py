@@ -102,7 +102,7 @@ _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # Schema version for migrations.  Bumped when a backwards-incompatible
 # config-shape change lands.  See PLAN.md §5 Tier 3.
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 4
 
 # Capabilities-file schema version. Independent of ``hal0.toml``'s
 # ``meta.schema_version``. v2 (since v0.2) means CapabilitySelection uses
@@ -1802,6 +1802,23 @@ class SlotsConfig(BaseModel):
             "capture."
         ),
     )
+    fabric_clock_guard: str = Field(
+        default="refuse",
+        description=(
+            "Policy when an NPU slot (device=npu, the `flm` recipe) would load "
+            "alongside a GPU slot (vulkan/rocm/hip) that is up or loading, or "
+            "vice versa, while the Proxmox host's AMD GPU fabric clock is not "
+            "held at its top DPM level (hal0.slots.fabric_clock_guard; "
+            "ROCm/TheRock#8709 — a fclk DPM change mid-flight can hang the box "
+            "or corrupt NPU results on Strix Halo). `refuse` (default) blocks "
+            "the load with the host-side fix in the error; `warn` logs and "
+            "stores the warning on the slot like the GTT-leak check but still "
+            "loads; `off` skips the check entirely. An unreadable fabric-clock "
+            "state (expected inside hal0's own container — the sysfs write is "
+            "host-only, but the read should still work) always warns, never "
+            "refuses. Overridable per-process with HAL0_FABRIC_CLOCK_GUARD."
+        ),
+    )
     publish_host: str = Field(
         default="127.0.0.1",
         description=(
@@ -1918,6 +1935,17 @@ class SlotsConfig(BaseModel):
                 "(no spaces, ':', or '/'; IPv6 literals are not supported here)"
             )
         return host
+
+    @field_validator("fabric_clock_guard")
+    @classmethod
+    def _fabric_clock_guard_known(cls, v: str) -> str:
+        policy = str(v).strip().lower()
+        if policy not in ("refuse", "warn", "off"):
+            raise ValueError(
+                f"[slots].fabric_clock_guard {v!r} is not supported "
+                "(use 'refuse', 'warn', or 'off')"
+            )
+        return policy
 
     @field_validator("network_mode")
     @classmethod
@@ -2081,12 +2109,13 @@ class MemoryGraphConfig(BaseModel):
         ),
     )
     extraction_slot: str = Field(
-        default="utility",
+        default="memory",
         description=(
             "The local llm slot Hindsight uses for graph extraction / "
             "consolidation / reflect while extraction_model is unset. hindsight-api "
             "calls the fixed id hal0/memory; hal0's /v1 resolves it to this slot "
-            "per call, so a change needs no engine restart. Validated against the "
+            "per call, falling back to agent when memory has no bound model "
+            "(ADR-0053), so a change needs no engine restart. Validated against the "
             "live enabled-llm-slot set by the API at set-time."
         ),
     )
@@ -2122,7 +2151,7 @@ class MemoryGraphConfig(BaseModel):
     # slot, usually one llama-server with --parallel 1; unbounded extraction
     # (hindsight's own defaults: 32 concurrent LLM calls, 64000 completion
     # tokens, 3 retries at each of two layers) saturates it and the retain
-    # queue never drains. Each knob maps 1:1 onto a hindsight-api env var in
+    # queue never drains. The knobs map onto hindsight-api env vars in
     # the drop-in hal0 already owns; the ranges below are also what the
     # root-side drop-in validator (installer/wrappers/hal0-systemctl) accepts.
     extraction_max_concurrent: int = Field(
@@ -2130,9 +2159,10 @@ class MemoryGraphConfig(BaseModel):
         ge=1,
         le=8,
         description=(
-            "How many extraction LLM calls Hindsight may have in flight at once "
-            "against the extraction slot (HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT). "
-            "1 serialises them, which is right for a single llama-server; raise it "
+            "How many LLM calls Hindsight may have in flight at once against the "
+            "extraction target (HINDSIGHT_API_LLM_MAX_CONCURRENT and "
+            "HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT). This also bounds consolidation, "
+            "reflect and mental-model refresh. 1 serialises them; raise it "
             "only for a slot that genuinely serves parallel requests. Applied via "
             "the hindsight-api drop-in; the daemon restarts to pick it up."
         ),
@@ -2634,11 +2664,27 @@ class MemoryEmbeddingConfig(BaseModel):
         return v
 
 
+class MemoryPriorityConfig(BaseModel):
+    """[memory.priority] shared-memory scheduling settings (ADR-0053).
+
+    Config contract only: request admission and preemption are implemented
+    separately. Upgrades explicitly opt out via migration v4.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    enabled: bool = Field(default=True, description="Enable shared-memory chat priority.")
+    quiet_gap_s: int = Field(default=30, ge=0, description="Quiet time after chat, in seconds.")
+    max_defer_s: int = Field(
+        default=300, ge=0, description="Starvation admission threshold, in seconds."
+    )
+
+
 class MemoryConfig(BaseModel):
     """[memory] section of hal0.toml.
 
     Container for the per-subsystem memory tunables. Today carries
-    ``[memory.graph]`` and ``[memory.embedding]`` (issue #116).
+    ``[memory.graph]``, ``[memory.embedding]`` and ``[memory.priority]``.
     Future memory features (retention, prune-policy, archival) land under a
     single namespace rather than scattering top-level tables.
     """
@@ -2656,6 +2702,7 @@ class MemoryConfig(BaseModel):
         ),
     )
     graph: MemoryGraphConfig = Field(default_factory=MemoryGraphConfig)
+    priority: MemoryPriorityConfig = Field(default_factory=MemoryPriorityConfig)
     embedding: MemoryEmbeddingConfig = Field(default_factory=MemoryEmbeddingConfig)
     unified_bank: bool = Field(
         default=True,
@@ -3778,6 +3825,7 @@ __all__ = [
     "MemoryConfig",
     "MemoryEmbeddingConfig",
     "MemoryGraphConfig",
+    "MemoryPriorityConfig",
     "MetaConfig",
     "ModelConfig",
     "ModelsConfig",

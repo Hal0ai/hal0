@@ -287,6 +287,21 @@ def _slot_output_sanity_passes_by_default(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 @pytest.fixture(autouse=True)
+def _flm_id_tag_memo_isolated() -> Iterator[None]:
+    """Start and end every test with an empty FLM ``-FLM`` id -> tag memo.
+
+    ``flm_id_to_tag`` memoizes resolved ids at module scope; without this a
+    test that resolved ``gemma4-it-e2b-FLM`` against a fake catalog would
+    answer for every later test that expects the id to be unknown.
+    """
+    from hal0.providers import flm
+
+    flm._FLM_ID_TAG_MEMO.clear()
+    yield
+    flm._FLM_ID_TAG_MEMO.clear()
+
+
+@pytest.fixture(autouse=True)
 def _store_not_nfs_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """Force ``hal0.config.store.is_nfs_path`` to False for the whole suite.
 

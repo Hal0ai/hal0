@@ -11,7 +11,13 @@ import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
-import { bankFailureNotes, graphSaveOutcome, saveWarnings, throughputNote } from '../extractionThroughput.js'
+import {
+  bankFailureNotes,
+  chunkCheckNote,
+  graphSaveOutcome,
+  saveWarnings,
+  throughputNote,
+} from '../extractionThroughput.js'
 
 // primitives.jsx (Banner) is a window-globals dash module: `React` and `Icons`
 // resolve off globalThis at import time, so install them before the dynamic
@@ -195,5 +201,40 @@ describe('per-bank failures (#3241)', () => {
     expect(html).toContain('mem-graph-bank-failures')
     expect(html).toContain('Bank &quot;shared&quot; has 1 failed operation.')
     expect(renderToStaticMarkup(<BankFailures status={{}} />)).toBe('')
+  })
+})
+
+describe('chunk check on failing banks (#3326)', () => {
+  const warn = {
+    verdict: 'warn',
+    max_tokens: 4096,
+    message: 'extraction_max_tokens = 4096 is not above the retain chunk size of 1 bank(s).',
+  }
+
+  it('returns the message only for a warn verdict', () => {
+    expect(chunkCheckNote({ chunk_check: warn })).toBe(warn.message)
+    expect(chunkCheckNote({ chunk_check: { verdict: 'ok', message: 'x' } })).toBeNull()
+    expect(chunkCheckNote({ chunk_check: { verdict: 'unknown' } })).toBeNull()
+    expect(chunkCheckNote({ chunk_check: { verdict: 'warn' } })).toBeNull()
+    expect(chunkCheckNote({ chunk_check: null })).toBeNull()
+    expect(chunkCheckNote({})).toBeNull()
+    expect(chunkCheckNote(undefined)).toBeNull()
+  })
+
+  it('shows the cause above the per-bank notes', () => {
+    const html = renderToStaticMarkup(
+      <BankFailures status={{ failed_by_bank: { shared: 2 }, chunk_check: warn }} />,
+    )
+    expect(html).toContain('mem-graph-chunk-check')
+    expect(html).toContain('is not above the retain chunk size')
+    expect(html.indexOf('mem-graph-chunk-check')).toBeLessThan(html.indexOf('has 2 failed operations'))
+  })
+
+  it('shows no cause for a failing bank the cap does clear', () => {
+    const html = renderToStaticMarkup(
+      <BankFailures status={{ failed_by_bank: { shared: 2 }, chunk_check: { verdict: 'ok' } }} />,
+    )
+    expect(html).not.toContain('mem-graph-chunk-check')
+    expect(html).toContain('has 2 failed operations')
   })
 })

@@ -642,6 +642,10 @@ a { color: inherit; text-decoration: none; }
 /* The ↗ external-link glyph sits muted at the row's trailing edge. */
 .sb-row.sb-svc .sb-svc-ext { display: inline-flex; color: var(--fg-5); }
 .sb-row.sb-svc:hover .sb-svc-ext { color: var(--fg-3); }
+/* OpenWebUI behind a proxy with no HAL0_OPENWEBUI_PUBLIC_URL: no link, a visible hint (#3381). */
+.sb-row.sb-svc.sb-svc-hint { height: auto; align-items: flex-start; padding-top: 6px; padding-bottom: 6px; cursor: default; }
+.sb-row.sb-svc.sb-svc-hint:hover { background: transparent; color: var(--fg-2); }
+.sb-svc-hint-text { display: block; font-size: 11px; line-height: 1.35; color: var(--fg-4); white-space: normal; overflow-wrap: anywhere; }
 
 .sb-spacer { flex: 1; }
 .sb-status {

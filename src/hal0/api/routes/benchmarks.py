@@ -180,7 +180,9 @@ def get_roster() -> dict[str, Any]:
 def get_plan(suite: str | None = None) -> dict[str, Any]:
     """Current staleness report: what would run and why (design §6; the board's
     Plan pill). The registry fetch degrades to an empty candidate set rather
-    than failing the whole dashboard load."""
+    than failing the whole dashboard load. A suite the planner rejects (unknown
+    cell kind, missing adapter tool, ...) is listed under ``skipped_suites``
+    with its reason; the other suites still plan."""
     api = _api_base()
     store = _store()
     suites = load_suites(suite_dir())
@@ -202,8 +204,16 @@ def get_plan(suite: str | None = None) -> dict[str, Any]:
         registry_error = str(exc)
 
     cells: list[dict[str, Any]] = []
+    planned: list[str] = []
+    skipped: list[dict[str, str]] = []
     for s in target_suites:
-        for c in plan(s, models, store):
+        try:
+            stale = plan(s, models, store)
+        except ValueError as exc:
+            skipped.append({"suite": s.id, "error": str(exc)})
+            continue
+        planned.append(s.id)
+        for c in stale:
             cells.append(
                 {
                     "cell_key": c.cell_key,
@@ -219,7 +229,8 @@ def get_plan(suite: str | None = None) -> dict[str, Any]:
             )
     return {
         "suite": suite,
-        "suites_considered": [s.id for s in target_suites],
+        "suites_considered": planned,
+        "skipped_suites": skipped,
         "stale_count": len(cells),
         "cells": cells,
         "registry_error": registry_error,

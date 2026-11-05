@@ -22,6 +22,7 @@ from rich.syntax import Syntax
 from hal0.cli._shared import CliApiError, _api_base, _api_unreachable, api_get, die
 from hal0.config import paths as _config_paths
 from hal0.config.paths import UPSTREAMS_TOML_MODE
+from hal0.config.schema import CURRENT_SCHEMA_VERSION
 
 #: Canonical mode for a freshly-seeded hal0.toml — matches perms.py's
 #: PermRow for the file. No shared constant exists yet (perms.py inlines
@@ -274,7 +275,7 @@ def config_edit(
         if which == ConfigFile.hal0:
             seed_content = (
                 "# hal0 configuration — see `hal0 config show` for the live shape.\n"
-                "[meta]\nschema_version = 1\n\n"
+                f"[meta]\nschema_version = {CURRENT_SCHEMA_VERSION}\n\n"
                 "[slots]\nport_range_start = 8081\nport_range_end = 8099\n"
             )
             seed_mode = HAL0_TOML_SEED_MODE

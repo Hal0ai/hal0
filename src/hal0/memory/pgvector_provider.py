@@ -41,7 +41,7 @@ class PgVectorProvider(MemoryProvider):
         self._client_id = client_id
         self._rows: list[dict[str, Any]] = []
         self._graph_enabled = False
-        self._extraction_slot = "utility"
+        self._extraction_slot = "memory"
         self._rerank_enabled = False
         # Emit the degrade warning exactly once per provider instance so log
         # consumers see it on construction rather than being spammed on each

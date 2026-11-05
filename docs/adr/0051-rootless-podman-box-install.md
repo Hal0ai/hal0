@@ -99,7 +99,8 @@ same as the host on a gigabit link.
    narrow range, and 65534 is mapped through so apt and PAM work.
 8. Limits are fixed at creation. Rootless podman clamps `--ulimit memlock` to
    the hard limit of the shell running `podman create`, so the launcher raises
-   it first and sets `LimitMEMLOCK=infinity` on `user@.service` and the box
+   it first and sets `LimitMEMLOCK=infinity` on the box user's
+   `user@<uid>.service` (never the host-wide `user@.service`) and the box
    unit, and `DefaultLimitMEMLOCK=infinity` inside.
 9. The box is a persistent user unit that runs `podman start` on a created
    container. A quadlet would generate `--rm --replace` and destroy the box on

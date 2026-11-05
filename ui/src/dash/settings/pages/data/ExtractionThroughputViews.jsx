@@ -4,7 +4,7 @@
 // react-dom/server; MemoryGraphPanel owns the state and the data. The reading
 // of the API payloads lives in extractionThroughput.js.
 import { Banner } from '../../../primitives.jsx'
-import { bankFailureNotes, throughputNote } from './extractionThroughput.js'
+import { bankFailureNotes, chunkCheckNote, throughputNote } from './extractionThroughput.js'
 
 const NOTE_COLOR = { warn: 'var(--warn)', ok: 'var(--ok)', muted: 'var(--fg-4)' }
 
@@ -47,14 +47,18 @@ export function ThroughputNote({ status }) {
 
 /**
  * One warn Banner per bank with failed operations, so an operator can see which
- * bank is failing rather than only the summed error count (#3241).
+ * bank is failing rather than only the summed error count (#3241). When the
+ * extraction cap is below a failing bank's retain chunk size, an error Banner
+ * above them says so and names the fix (#3326).
  * @param {{ status?: any }} props
  */
 export function BankFailures({ status }) {
   const notes = bankFailureNotes(status)
+  const cause = chunkCheckNote(status)
   if (notes.length === 0) return null
   return (
     <div data-testid="mem-graph-bank-failures" style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: '4px 12px 8px' }}>
+      {cause && <div data-testid="mem-graph-chunk-check"><Banner kind="err" body={cause} /></div>}
       {notes.map((n) => (
         <Banner key={n} kind="warn" body={n} />
       ))}

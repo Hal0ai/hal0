@@ -13,6 +13,7 @@ import { useMemoryEnabled } from '@/api/hooks/useMemory'
 import { useUpdateState, useSlotDrift, useRestartDriftedSlots } from '@/api/hooks/useUpdates'
 import { useApprovalList, useApproveApproval, useDenyApproval } from '@/api/hooks/useAgents'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
+import { PROXY_NEEDS_PUBLIC_URL, publicUrlHint } from '@/api/publicUrlHint'
 import { useNotifications, hal0Notify, dismissNotifMessage, NOTIF_KIND_HUE } from './notifications.jsx'
 import { SessionChip } from './auth/SessionChip.jsx'
 import { NAV_GROUPS as SETTINGS_NAV_GROUPS, VALID_IDS as SETTINGS_IDS } from './settings/SettingsNav.jsx'
@@ -182,7 +183,7 @@ function NotificationBell() {
   // One shared source for every "needs the operator's eye" signal.
   const {
     approvals, errorSlots, activePulls, failedPulls,
-    hasUpdate, hal0Ch, driftCount,
+    hasUpdate, hal0Ch, driftCount, driftErrors,
     updatableModels, updateAllModels,
     devMsgs, clearJob, restartDrifted,
     count,
@@ -318,6 +319,7 @@ function NotificationBell() {
             <span className="notif-dot" style={{ background: "var(--warn)" }} />
             <span className="notif-msg">
               {driftCount} slot{driftCount !== 1 ? "s" : ""} running a pre-update config — restart to apply
+              {driftErrors && <>. Cannot render launch configuration: {driftErrors}. Fix the configuration before restarting.</>}
             </span>
             <button
               className="notif-act"
@@ -665,6 +667,10 @@ function NavList({ route, param, onGo, testPrefix }) {
 function ServiceLinks({ route, onGo, onLaunch, testPrefix }) {
   const cfg = useConfigUrls();
   const owui = cfg.data?.openwebui_enabled ? (cfg.data.openwebui || "") : "";
+  const owuiIp = cfg.data?.openwebui_enabled ? (cfg.data.openwebui_ip || "") : "";
+  // Behind a proxy with no declared URL hal0 sends no link: say what to set, not a dead link.
+  const owuiHint = cfg.data?.openwebui_enabled && !owui && cfg.data?.openwebui_reason === PROXY_NEEDS_PUBLIC_URL
+    ? publicUrlHint("OPENWEBUI") : "";
   const hermes = cfg.data?.hermes_enabled ? (cfg.data.hermes || "") : "";
   return (
     <div className="sb-services">
@@ -695,6 +701,26 @@ function ServiceLinks({ route, onGo, onLaunch, testPrefix }) {
             <span className="lbl">OpenWebUI</span>
             <span className="sb-svc-ext">{Icons.ext}</span>
           </a>
+        )}
+        {owui && owuiIp && (
+          <a className="sb-row sb-svc sb-svc-ip" data-testid={testPrefix + "openwebui-ip"}
+            href={owuiIp} target="_blank" rel="noopener noreferrer"
+            onClick={() => onLaunch && onLaunch()}>
+            <span className="lbl">Can't reach it? Try the IP link</span>
+          </a>
+        )}
+        {owuiHint && (
+          <div
+            className="sb-row sb-svc sb-svc-hint"
+            role="note"
+            data-testid={testPrefix + "openwebui-hint"}
+          >
+            {Icons.chat}
+            <span className="lbl">
+              OpenWebUI
+              <span className="sb-svc-hint-text">{owuiHint}</span>
+            </span>
+          </div>
         )}
         {hermes && (
           <a

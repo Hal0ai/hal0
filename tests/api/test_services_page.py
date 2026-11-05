@@ -144,6 +144,29 @@ def test_list_services_200_all_ids(svc_client: TestClient) -> None:
     assert by_id["hermes"]["wired"] is None
 
 
+def test_list_services_behind_proxy_has_no_dead_host_port_links(
+    svc_client: TestClient, monkeypatch
+) -> None:
+    """Behind a proxy the forwarded host is the proxy, so ``host:3001`` / ``host:8188`` is not
+    the service: no link without ``HAL0_<APP>_PUBLIC_URL`` (#3381), the declared URL with it."""
+    monkeypatch.delenv("HAL0_OPENWEBUI_PUBLIC_URL", raising=False)
+    monkeypatch.delenv("HAL0_COMFYUI_PUBLIC_URL", raising=False)
+    proxy = {"x-forwarded-host": "hal0.example.com", "x-forwarded-proto": "https"}
+
+    def listed() -> dict:
+        with contextlib.ExitStack() as stack:
+            for p in _stub_all_down():
+                stack.enter_context(p)
+            return _services_by_id(svc_client.get("/api/services", headers=proxy).json())
+
+    by_id = listed()
+    assert by_id["openwebui"]["url"] is None
+    assert by_id["comfyui"]["url"] is None
+
+    monkeypatch.setenv("HAL0_OPENWEBUI_PUBLIC_URL", "https://chat.example.com/")
+    assert listed()["openwebui"]["url"] == "https://chat.example.com"
+
+
 # ── 1b. OpenWebUI wired chips ───────────────────────────────────────────────
 
 

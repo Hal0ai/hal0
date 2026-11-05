@@ -92,6 +92,64 @@ test.describe('Post-update slot drift', () => {
     await expect(page.locator('.ov-att', { hasText: 'slots need restart' })).toHaveCount(0)
   })
 
+  for (const source of ['bell', 'overview'] as const) {
+    test(`${source} explains partial restart outcomes`, async ({ page }) => {
+      await upToDate(page)
+      await page.route('**/api/updates/slot-drift', (route) => json(route, {
+        count: 1, slots: [{ slot: 'brain', diffs: [], render_error: 'invalid tune key' }], auto_restart: null,
+      }))
+      await page.route('**/api/updates/restart-slots', (route) => json(route, {
+        restarted: ['ok'], count: 1, failed: [{ slot: 'chat', error: 'unit failed' }],
+        skipped_busy: ['embed'], skipped_render_error: ['brain'],
+      }))
+      await page.goto('/#dashboard')
+      await expect(page.locator('.ov-att', { hasText: 'slots need restart' }).locator('.ov-body')).toHaveText('1 slot needs restart — brain, still running the pre-update launch command. Restarting briefly interrupts any in-flight request on those slots. Cannot render launch configuration: brain: invalid tune key. Fix the configuration before restarting.')
+      if (source === 'bell') {
+        await page.getByTestId('tb-bell').click()
+        await expect(page.getByTestId('notif-sec-updates')).toContainText('brain: invalid tune key')
+        await page.screenshot({ path: 'test-results/slot-drift-bell.png', animations: 'disabled' })
+        await page.getByTestId('notif-sec-updates').getByRole('button', { name: 'Restart' }).click()
+      } else {
+        await page.locator('.ov-att', { hasText: 'slots need restart' }).getByRole('button', { name: 'restart drifted slots' }).click()
+      }
+      const toast = page.locator('.hal0-toast', { hasText: 'Failed to restart chat: unit failed' })
+      await expect(toast.locator('.toast-msg')).toHaveText('Failed to restart chat: unit failed · Skipped busy slots: embed · Skipped slots whose launch configuration could not be rendered: brain. Fix their configuration before restarting.')
+      if (source === 'overview') await page.screenshot({ path: 'test-results/slot-drift-outcomes.png', animations: 'disabled' })
+    })
+  }
+
+  test('reports a failed restart request', async ({ page }) => {
+    await upToDate(page)
+    await page.route('**/api/updates/slot-drift', (route) => json(route, DRIFT))
+    await page.route('**/api/updates/restart-slots', (route) => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'system.unavailable', message: 'service unavailable' } }) }))
+    await page.goto('/#dashboard')
+    await page.locator('.ov-att', { hasText: 'slots need restart' }).getByRole('button', { name: 'restart drifted slots' }).click()
+    await expect(page.locator('.hal0-toast')).toContainText('service unavailable')
+    await page.locator('.ov-att', { hasText: 'slots need restart' }).getByRole('button', { name: 'restart drifted slots' }).click()
+    await expect(page.locator('.hal0-toast')).toHaveCount(1)
+  })
+
+  for (const failure of ['request', 'partial'] as const) {
+    test(`clears a ${failure} warning after a successful retry`, async ({ page }) => {
+      await upToDate(page)
+      let attempts = 0
+      await page.route('**/api/updates/slot-drift', (route) => json(route, attempts >= 2 ? CLEAN : DRIFT))
+      await page.route('**/api/updates/restart-slots', (route) => {
+        attempts++
+        if (attempts === 1 && failure === 'request') return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'system.unavailable', message: 'service unavailable' } }) })
+        if (attempts === 1) return json(route, { restarted: [], failed: [{ slot: 'chat', error: 'unit failed' }], skipped_busy: [], skipped_render_error: [], count: 0 })
+        return json(route, { restarted: ['chat'], failed: [], skipped_busy: [], skipped_render_error: [], count: 1 })
+      })
+      await page.goto('/#dashboard')
+      const action = page.locator('.ov-att', { hasText: 'slots need restart' }).getByRole('button', { name: 'restart drifted slots' })
+      await action.click()
+      await expect(page.locator('.hal0-toast')).toContainText(failure === 'request' ? 'service unavailable' : 'unit failed')
+      await action.click()
+      await expect(page.locator('.hal0-toast')).toHaveCount(0)
+      await expect(page.locator('.ov-att', { hasText: 'slots need restart' })).toHaveCount(0)
+    })
+  }
+
   test('a clean box shows no drift anywhere', async ({ page }) => {
     await upToDate(page)
     await page.route('**/api/updates/slot-drift', (route) => json(route, CLEAN))

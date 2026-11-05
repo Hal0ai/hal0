@@ -61,6 +61,7 @@ from hal0.slot_lifecycle_budget import (
     OUTPUT_SANITY_CPU_TIMEOUT_S,
     OUTPUT_SANITY_TIMEOUT_S,
 )
+from hal0.slots._cfg_helpers import non_chat_signal
 
 log = logging.getLogger(__name__)
 
@@ -300,7 +301,7 @@ def skip_reason(cfg: Mapping[str, Any] | None) -> str | None:
     # #2693: a stale/wrong ``type="llm"`` on a reranker/embedder must not send
     # it through a chat completion it cannot answer. The profile name or the
     # launch flags (``--reranking`` / ``--embedding``) are the stronger signal.
-    non_chat = _non_chat_signal(cfg)
+    non_chat = non_chat_signal(cfg)
     if non_chat is not None:
         return f"non_chat_{non_chat}"
     return None
@@ -309,7 +310,7 @@ def skip_reason(cfg: Mapping[str, Any] | None) -> str | None:
 def _profile_family(cfg: Mapping[str, Any]) -> str | None:
     """The slot profile's runtime family, or ``None`` when it cannot be told.
 
-    Resolved through the catalog exactly as :func:`_non_chat_signal` resolves
+    Resolved through the catalog exactly as :func:`~hal0.slots._cfg_helpers.non_chat_signal` resolves
     the profile's flags. An unresolvable profile is not evidence either way, so
     it reads as "unknown" and the slot stays on the generic gate.
     """
@@ -320,28 +321,6 @@ def _profile_family(cfg: Mapping[str, Any]) -> str | None:
         from hal0.profiles import ProfileCatalog
 
         return str(ProfileCatalog().resolve(profile).runtime_family)
-    except Exception:  # unresolvable profile: not evidence either way
-        return None
-
-
-def _non_chat_signal(cfg: Mapping[str, Any]) -> str | None:
-    """Non-chat type implied by the slot's argv/flags or its profile, or ``None``."""
-    from hal0.slots._cfg_helpers import infer_non_chat_type, non_chat_type_from_flags
-
-    for key in ("argv", "flags"):
-        found = non_chat_type_from_flags(cfg.get(key))
-        if found:
-            return found
-    profile = str(cfg.get("profile") or "").strip()
-    if not profile:
-        return None
-    found = infer_non_chat_type(profile)
-    if found in ("reranking", "embedding"):
-        return found
-    try:
-        from hal0.profiles import ProfileCatalog
-
-        return non_chat_type_from_flags(ProfileCatalog().resolve(profile).flags)
     except Exception:  # unresolvable profile: not evidence either way
         return None
 

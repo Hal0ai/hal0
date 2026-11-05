@@ -160,8 +160,8 @@ def test_get_model_resolves_virtual_name(client, monkeypatch):
 
 def test_get_model_resolves_the_memory_alias_to_the_slot(client, monkeypatch):
     """#2919: hindsight-api probes ``hal0/memory``; with the default config
-    (extraction_slot=utility, no upstream model) it resolves through the
-    utility→agent chain like ``hal0/utility`` does, id round-tripped."""
+    (extraction_slot=memory, no upstream model) an absent memory binding
+    resolves through the memory→agent chain, id round-tripped."""
     sm = _FakeSlotManager()
     mr = _FakeModelRegistry()
     client.app.state.slot_manager = sm

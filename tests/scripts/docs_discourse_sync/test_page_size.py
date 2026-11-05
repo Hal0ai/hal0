@@ -158,6 +158,18 @@ def test_split_run_agents_pages_have_distinct_topics() -> None:
     assert docs["guides/agents-view"].external_id == "hal0-docs--guides--agents-view"
 
 
+def test_split_generate_images_pages_have_distinct_topics() -> None:
+    # ComfyUI workflows, image defaults and troubleshooting moved out of the
+    # image-generation guide. The original keeps its topic; the new page gets
+    # a topic of its own.
+    docs = {d.rel_key: d for d in discovery.discover_docs(REPO_ROOT / "docs")}
+    assert docs["guides/generate-images"].external_id == "hal0-docs--guides--generate-images"
+    assert (
+        docs["guides/image-workflows-troubleshooting"].external_id
+        == "hal0-docs--guides--image-workflows-troubleshooting"
+    )
+
+
 def _doc(rel_key: str, body_md: str) -> discovery.Doc:
     section, _, slug = rel_key.partition("/")
     return discovery.Doc(

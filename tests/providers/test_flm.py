@@ -18,6 +18,8 @@ These tests pin both halves of that contract.
 from __future__ import annotations
 
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -830,6 +832,29 @@ def test_flm_id_to_tag_empty_catalog_returns_none() -> None:
         assert flm.flm_id_to_tag("gemma4-it-e2b-FLM") is None
 
 
+def test_flm_id_to_tag_memoizes_hits_and_never_misses() -> None:
+    """A resolved id is remembered past the catalog; an unknown id is re-asked."""
+    import hal0.providers.flm as flm
+
+    calls: list[int] = []
+    catalog = [{"tag": "gemma4-it:e2b", "installed": False, "capabilities": ["chat"]}]
+
+    def _served() -> list[dict[str, Any]]:
+        calls.append(1)
+        return catalog
+
+    with patch("hal0.providers.flm.flm_served_models", _served):
+        assert flm.flm_id_to_tag("gemma4-it-e2b-FLM") == "gemma4-it:e2b"
+        assert flm.flm_id_to_tag("gemma4-it-e2b-FLM") == "gemma4-it:e2b"
+        assert len(calls) == 1  # second answer came from the memo
+        # A miss is not stored: once FLM lists the id, it resolves.
+        assert flm.flm_id_to_tag("qwen3-0.6b-FLM") is None
+        catalog.append({"tag": "qwen3:0.6b", "installed": False, "capabilities": ["chat"]})
+        assert flm.flm_id_to_tag("qwen3-0.6b-FLM") == "qwen3:0.6b"
+    flm.reset_flm_catalog_cache()
+    assert flm._FLM_ID_TAG_MEMO == {}
+
+
 # ─── parse_flm_progress units (incl. terabyte) ───────────────────────────────
 
 
@@ -924,4 +949,60 @@ def test_flm_catalog_answer_after_reset_replaces_a_failed_probe() -> None:
         assert catalog is not None
         assert [m["tag"] for m in catalog] == ["qwen3:0.6b"]
     finally:
+        flm.reset_flm_catalog_cache()
+
+
+def test_flm_catalog_refreshes_after_lifecycle_invalidation() -> None:
+    """A lifecycle event refreshes installed state without waiting for the TTL."""
+    import hal0.providers.flm as flm
+
+    answers = iter(
+        [
+            [{"model": "qwen3:0.6b", "installed": False}],
+            [{"model": "qwen3:0.6b", "installed": True}],
+        ]
+    )
+    flm.reset_flm_catalog_cache()
+    try:
+        with patch.object(flm, "_probe_flm_catalog", lambda: next(answers)):
+            assert flm.flm_catalog()[0]["installed"] is False
+            flm.reset_flm_catalog_cache()
+            assert flm.flm_catalog()[0]["installed"] is True
+    finally:
+        flm.reset_flm_catalog_cache()
+
+
+def test_flm_catalog_discards_probe_started_before_lifecycle_invalidation() -> None:
+    """A slow pre-event probe cannot overwrite the post-event catalog."""
+    import hal0.providers.flm as flm
+
+    first_probe_started = threading.Event()
+    release_first_probe = threading.Event()
+    calls = 0
+
+    def probe() -> list[dict[str, Any]]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_probe_started.set()
+            assert release_first_probe.wait(timeout=2)
+            return [{"model": "old:tag", "installed": False}]
+        return [{"model": "new:tag", "installed": True}]
+
+    flm.reset_flm_catalog_cache()
+    try:
+        with patch.object(flm, "_probe_flm_catalog", probe):
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                pending = executor.submit(flm.flm_catalog)
+                assert first_probe_started.wait(timeout=2)
+                flm.reset_flm_catalog_cache()
+                release_first_probe.set()
+                catalog = pending.result(timeout=2)
+
+            assert catalog is not None
+            assert [entry["tag"] for entry in catalog] == ["new:tag"]
+            assert calls == 2
+            assert [entry["tag"] for entry in flm.flm_catalog()] == ["new:tag"]
+    finally:
+        release_first_probe.set()
         flm.reset_flm_catalog_cache()
