@@ -154,10 +154,96 @@ def slot_model_runtime_mismatch(
     return model_runtime_mismatch(info, slot_runtime_provider(cfg), slot=slot_name)
 
 
+# ── xdna model fit (fused vs per-op) ───────────────────────────────────────
+
+#: The ``general.architecture`` string a Qwen3.5 GGUF carries.
+_XDNA_FUSED_ARCH = "qwen35"
+
+#: The embedding length the fused SSM kernel is sized for.
+_XDNA_FUSED_EMBEDDING_LENGTH = 1024
+
+#: The tensor the correctness-bearing requant touches (see the spike notes
+#: and the ggml-xdna ADR): GLU_A=0 plus this tensor's Q5_K requant is the
+#: fused path's whole correctness story. Its absence, or any other type,
+#: means the model was not requantized for the fused kernel.
+_XDNA_FUSED_TENSOR = "blk.0.ssm_out.weight"
+
+#: ggml type id for Q5_K (see ggml.h's ``ggml_type``; not imported from
+#: elsewhere in the tree because nothing else needs the full enum).
+_GGML_TYPE_Q5_K = 13
+
+_GGML_TYPE_NAMES = {_GGML_TYPE_Q5_K: "Q5_K"}
+
+
+def _ggml_type_name(ttype: int | None) -> str:
+    if ttype is None:
+        return "missing"
+    return _GGML_TYPE_NAMES.get(ttype, f"type {ttype}")
+
+
+@dataclass(frozen=True)
+class XdnaFit:
+    """The xdna (ggml-xdna NPU runner) classification for a GGUF model.
+
+    ``xdna_path`` is ``\"fused\"`` (the SSM block runs as one fused NPU
+    kernel) or ``\"per-op\"`` (falls back to per-operator dispatch); ``reason``
+    is a one-line human-readable explanation of which fact decided it.
+    """
+
+    xdna_path: str
+    reason: str
+
+
+def xdna_model_fit(path: Any) -> XdnaFit:
+    """Classify a GGUF model's xdna runner fit: fused vs per-op.
+
+    ``fused`` requires all three: Qwen3.5 architecture (``general.architecture
+    == \"qwen35\"``), ``embedding_length == 1024``, and the
+    ``blk.0.ssm_out.weight`` tensor requantized to Q5_K -- the combination the
+    spike measured correctness and throughput numbers against. Anything short
+    of that is ``per-op`` (still a supported, just slower, xdna path).
+
+    Raises ``ValueError`` when ``path`` is not a GGUF file: xdna fit is a
+    GGUF-metadata question and has nothing to say about other formats (a
+    halogen ``.hgn`` checkpoint, for instance).
+    """
+    from hal0.registry.gguf_header import read_gguf_header, read_gguf_tensor_type_by_name
+
+    header = read_gguf_header(path)
+    if header is None:
+        raise ValueError(f"{path!s} is not a GGUF file; xdna fit only classifies GGUF models")
+
+    arch = str(header.get("general.architecture") or "")
+    if arch != _XDNA_FUSED_ARCH:
+        return XdnaFit("per-op", f"architecture {arch!r} is not {_XDNA_FUSED_ARCH!r}")
+
+    embedding_length = header.get(f"{arch}.embedding_length")
+    if embedding_length != _XDNA_FUSED_EMBEDDING_LENGTH:
+        return XdnaFit(
+            "per-op",
+            f"embedding_length {embedding_length!r} is not {_XDNA_FUSED_EMBEDDING_LENGTH}",
+        )
+
+    tensor_type = read_gguf_tensor_type_by_name(path, _XDNA_FUSED_TENSOR)
+    if tensor_type != _GGML_TYPE_Q5_K:
+        return XdnaFit(
+            "per-op",
+            f"{_XDNA_FUSED_TENSOR} is {_ggml_type_name(tensor_type)}, not Q5_K",
+        )
+
+    return XdnaFit(
+        "fused",
+        f"{_XDNA_FUSED_ARCH} architecture, embedding_length "
+        f"{_XDNA_FUSED_EMBEDDING_LENGTH}, {_XDNA_FUSED_TENSOR} is Q5_K",
+    )
+
+
 __all__ = [
     "HALOGEN",
     "RuntimeRef",
+    "XdnaFit",
     "model_runtime_mismatch",
     "slot_model_runtime_mismatch",
     "slot_runtime_provider",
+    "xdna_model_fit",
 ]
