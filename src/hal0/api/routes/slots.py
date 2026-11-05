@@ -92,11 +92,14 @@ async def list_flm_models(request: Request):
     Shape: ``{"models": [{"model": tag, "installed": bool,
     "capabilities": [...], "family": str}]}`` — ``model``/``installed`` keep the
     dashboard filter contract. The container-exec + host-probe fan-out lives in
-    :func:`hal0.slots.flm_catalog.list_models`.
+    :func:`hal0.slots.flm_catalog.catalog`. ``probe_ok`` is false only when
+    the underlying FLM probe gave no answer.
     """
     # Container exec + host ``flm list`` both block; keep them off the event
-    # loop (#2334).
-    return {"models": await asyncio.to_thread(_flm_catalog.list_models)}
+    # loop (#2334). ``models`` stays fail-soft for the dashboard; probe_ok
+    # lets automation distinguish an empty catalog from an unanswered probe.
+    catalog = await asyncio.to_thread(_flm_catalog.catalog)
+    return {"models": catalog if catalog is not None else [], "probe_ok": catalog is not None}
 
 
 class NotImplementedYet(Hal0Error):
@@ -1898,7 +1901,7 @@ async def slot_state_stream(name: str, request: Request) -> StreamingResponse:
                     "name": rec.name,
                     "state": rec.state.value,
                     "port": rec.port,
-                    "model_id": rec.model_id,
+                    "model_id": await sm.model_id_for_record(rec),
                     "message": rec.message,
                     "updated_at": rec.updated_at,
                 }

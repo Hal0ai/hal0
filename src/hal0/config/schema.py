@@ -1802,6 +1802,23 @@ class SlotsConfig(BaseModel):
             "capture."
         ),
     )
+    fabric_clock_guard: str = Field(
+        default="refuse",
+        description=(
+            "Policy when an NPU slot (device=npu, the `flm` recipe) would load "
+            "alongside a GPU slot (vulkan/rocm/hip) that is up or loading, or "
+            "vice versa, while the Proxmox host's AMD GPU fabric clock is not "
+            "held at its top DPM level (hal0.slots.fabric_clock_guard; "
+            "ROCm/TheRock#8709 — a fclk DPM change mid-flight can hang the box "
+            "or corrupt NPU results on Strix Halo). `refuse` (default) blocks "
+            "the load with the host-side fix in the error; `warn` logs and "
+            "stores the warning on the slot like the GTT-leak check but still "
+            "loads; `off` skips the check entirely. An unreadable fabric-clock "
+            "state (expected inside hal0's own container — the sysfs write is "
+            "host-only, but the read should still work) always warns, never "
+            "refuses. Overridable per-process with HAL0_FABRIC_CLOCK_GUARD."
+        ),
+    )
     publish_host: str = Field(
         default="127.0.0.1",
         description=(
@@ -1918,6 +1935,17 @@ class SlotsConfig(BaseModel):
                 "(no spaces, ':', or '/'; IPv6 literals are not supported here)"
             )
         return host
+
+    @field_validator("fabric_clock_guard")
+    @classmethod
+    def _fabric_clock_guard_known(cls, v: str) -> str:
+        policy = str(v).strip().lower()
+        if policy not in ("refuse", "warn", "off"):
+            raise ValueError(
+                f"[slots].fabric_clock_guard {v!r} is not supported "
+                "(use 'refuse', 'warn', or 'off')"
+            )
+        return policy
 
     @field_validator("network_mode")
     @classmethod
@@ -2695,6 +2723,19 @@ class MemoryConfig(BaseModel):
             "(private:<agent> / project:<id> banks + fan-out recall)."
         ),
     )
+    bank: str = Field(
+        default="shared",
+        description=(
+            "Name of the Hindsight bank that holds the platform's memory — the "
+            "engine bank behind the 'shared' namespace (ADR-0052). The namespace "
+            "grammar ('shared' | 'private:<agent>') is unchanged; only the bank "
+            "id the provider talks to differs. The default 'shared' leaves "
+            "existing installs untouched. Changing it points hal0-api at a "
+            "different bank, so run 'hal0 memory migrate platform' first to "
+            "clone the existing bank's data into the new name, then restart "
+            "hal0-api."
+        ),
+    )
     # HAL0-SUNSET: v2.0.0 — 'cognee' engine literal retired here. It is no
     # longer an accepted config value (was previously a back-compat alias
     # that resolved to hindsight at runtime). provider_from_config's runtime
@@ -2713,6 +2754,27 @@ class MemoryConfig(BaseModel):
             "still carrying it must be updated to 'hindsight'."
         ),
     )
+
+    @field_validator("bank")
+    @classmethod
+    def _bank_is_addressable(cls, v: str) -> str:
+        # Same grammar as hal0.api.routes.memory_admin._BANK_RE: the bank id
+        # travels in /api/memory/banks/{bank_id} paths, so anything that route
+        # would refuse is refused here at config load instead of at first use.
+        s = str(v or "").strip()
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}", s):
+            raise ValueError(
+                f"memory.bank {v!r} must start with a letter or digit and use only "
+                "letters, digits, '.', '_', ':' and '-' (max 128 chars)"
+            )
+        # ``private__<agent>`` is the per-agent bank family and ``agents`` the
+        # retired identity-card bank (ADR-0005); a platform bank named like
+        # either would alias them.
+        if s.startswith("private__") or s == "agents":
+            raise ValueError(
+                f"memory.bank {v!r} collides with a reserved bank name ('private__*' and 'agents')"
+            )
+        return s
 
     @field_validator("engine")
     @classmethod

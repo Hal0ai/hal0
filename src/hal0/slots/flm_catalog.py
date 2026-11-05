@@ -17,6 +17,9 @@ id-keyed slots, so it always fell through to the host binary.)
 
 Interface contract:
 
+    catalog() -> list[dict[str, Any]] | None
+        Same rows as ``list_models``, but ``None`` preserves a failed probe.
+
     list_models() -> list[dict[str, Any]]
         ``[{"model": tag, "installed": bool, "capabilities": [...],
         "family": str}]`` — ``model``/``installed`` keep the dashboard filter
@@ -29,17 +32,7 @@ from __future__ import annotations
 from typing import Any
 
 
-def list_models() -> list[dict[str, Any]]:
-    """Return the full FLM catalog for the drawer's NPU model dropdowns.
-
-    Never raises — a fully-unreachable probe returns ``[]``.
-    """
-    from hal0.providers.flm import flm_served_models
-
-    try:
-        catalog = flm_served_models()
-    except Exception:
-        catalog = []
+def _model_rows(models: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
             "model": e.get("tag"),
@@ -47,6 +40,26 @@ def list_models() -> list[dict[str, Any]]:
             "capabilities": e.get("capabilities", []),
             "family": e.get("family", ""),
         }
-        for e in catalog
+        for e in models
         if e.get("tag")
     ]
+
+
+def catalog() -> list[dict[str, Any]] | None:
+    """Dashboard-shaped catalog, preserving ``None`` for an unanswered probe."""
+    from hal0.providers.flm import flm_catalog
+
+    models = flm_catalog()
+    return None if models is None else _model_rows(models)
+
+
+def list_models() -> list[dict[str, Any]]:
+    """Return the full FLM catalog for the drawer's NPU model dropdowns.
+
+    Never raises — a fully-unreachable probe returns ``[]``.
+    """
+    try:
+        models = catalog()
+    except Exception:
+        return []
+    return models if models is not None else []

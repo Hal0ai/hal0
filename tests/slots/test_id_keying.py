@@ -220,6 +220,47 @@ async def test_fold_identity_allows_flm_trio_to_share_existing_group_claim(
     assert claims[0].owner_label in {"slot:flm", "slot:flm-stt", "slot:flm-embed"}
 
 
+async def test_fold_identity_reports_coresident_port_held_by_other_group(
+    hal0_home: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A coresident seed may share only with a holder in its own group."""
+    sm = _manager(hal0_home)
+    from hal0.slot_config import write_slot_toml
+
+    for name, device in (
+        ("brain", "gpu-rocm"),
+        ("flm", "npu"),
+        ("stt-npu", "npu"),
+        ("tts-npu", "npu"),
+    ):
+        write_slot_toml(
+            sm._config_file(name),
+            {
+                "name": name,
+                "type": "llm" if name in ("brain", "flm") else "transcription",
+                "device": device,
+                "provider": "llama-server",
+                "port": 8088,
+                "model": {"default": "some-model"},
+            },
+        )
+    # A live unrelated claim already holds the shared TOML port.
+    brain = sm._ensure_identity("brain", await sm._load_slot_config("brain"))
+    assert brain is not None
+    sm._port_authority.acquire(brain.id, preferred=8088, owner_label="slot:brain")
+
+    with caplog.at_level("WARNING"):
+        await sm.fold_identity()
+
+    conflicts = [r for r in caplog.records if r.message == "slot.port_seed_conflict"]
+    assert len(conflicts) == 3
+    assert sm._port_authority.held_by(brain.id) == 8088
+    for name in ("flm", "stt-npu", "tts-npu"):
+        row = sm._identity.get_by_name(name)
+        assert row is not None
+        assert sm._port_authority.held_by(row.id) is None
+
+
 async def test_bare_manager_unchanged(hal0_home: Path) -> None:
     """No injected stores → no id, no authority (legacy behaviour intact)."""
     sm = SlotManager()
