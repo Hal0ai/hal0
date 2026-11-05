@@ -2,10 +2,10 @@
 
 ADR-0023 retired ``chat``/``primary`` as slot/role names. The canonical llm
 roles are now ``agent`` (default/anchor, replaces ``chat``) + ``utility`` (cheap
-helper, now seeded). The Hermes-era ``agent-hermes → agent`` alias is gone too.
+helper on existing boxes). The Hermes-era ``agent-hermes → agent`` alias is gone too.
 
 Verifies:
-  1. SEEDED_SLOTS carries ``utility`` + ``agent`` and NOT ``chat``/``primary``.
+  1. SEEDED_SLOTS carries ``memory`` + ``agent`` and NOT ``utility``/``chat``/``primary``.
   2. SLOT_ALIASES carries only the rerank rename and the NPU curated-model routes.
   3. Aliases do NOT appear in SlotManager.list() or iter_configs().
   4. DEFAULT_CHAINS advertises agent/utility/npu (NOT hal0/chat) and ends every
@@ -26,9 +26,10 @@ from hal0.slots.manager import NPU_SEEDED_SLOTS, SEEDED_SLOTS, SLOT_ALIASES, Slo
 # ── 1. Module-level constant checks ──────────────────────────────────────────
 
 
-def test_seeded_slots_uses_utility_not_chat():
-    """ADR-0023: ``utility`` is seeded; ``chat``/``primary`` are retired."""
-    assert "utility" in SEEDED_SLOTS
+def test_seeded_slots_uses_memory_not_utility_or_chat():
+    """New installs seed memory; existing utility slots remain valid."""
+    assert "memory" in SEEDED_SLOTS
+    assert "utility" not in SEEDED_SLOTS
     assert "chat" not in SEEDED_SLOTS
     assert "primary" not in SEEDED_SLOTS
 

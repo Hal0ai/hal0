@@ -199,6 +199,48 @@ def check_secret_file_modes() -> Check:
     return Check("secret-modes", "Secret file modes", _PASS, "secret files are owner-only")
 
 
+@_report_unreadable("openwebui-task-model", "Open WebUI task model")
+def check_openwebui_task_model(slots: list[dict[str, Any]] | None = None) -> Check:
+    """Warn when Open WebUI's configured task slot has been removed."""
+    key, label = "openwebui-task-model", "Open WebUI task model"
+    env_path = paths.openwebui_env()
+    if not env_path.is_file():
+        return Check(key, label, _PASS, "Open WebUI env is absent")
+    target = next(
+        (
+            line.partition("=")[2].strip().strip("\"'")
+            for line in env_path.read_text(encoding="utf-8").splitlines()
+            if line.startswith("TASK_MODEL_EXTERNAL=")
+        ),
+        "",
+    )
+    if not target or slots is None:
+        return Check(key, label, _PASS, "no task slot to validate")
+    names = {str(slot.get("name")) for slot in slots if isinstance(slot, dict)}
+    # `hal0/<x>` is always a local lane (the prefix names a slot, never an
+    # upstream model). A BARE value is a slot reference only when it is in
+    # the slot vocabulary — the live slots, the seed names, and the
+    # retired `utility` seed. Anything else is an upstream model id
+    # (``TASK_MODEL_EXTERNAL`` may name one), which this row must not
+    # warn about.
+    from hal0.install.static_seeds import STATIC_SEED_SLOTS
+
+    if target.startswith("hal0/"):
+        name = target.removeprefix("hal0/")
+    elif target in names or target in STATIC_SEED_SLOTS or target == "utility":
+        name = target
+    else:
+        return Check(key, label, _PASS, f"task model {target} is not a slot reference")
+    if name not in names:
+        return Check(
+            key,
+            label,
+            _WARN,
+            f"TASK_MODEL_EXTERNAL={target} names no slot; set it to hal0/agent in {env_path}",
+        )
+    return Check(key, label, _PASS, f"task slot {name} exists")
+
+
 @_report_unreadable("hardware_freshness", "Hardware probe freshness")
 def check_hardware_freshness() -> Check:
     """The cached hardware.json must be fresh enough to trust (#1862/H9).
@@ -693,11 +735,15 @@ def check_api_journal_access(
     probe_gid = journal_gid if journal_gid is not None else _journal_group_gid
     key, title = "api-journal", "API journal read"
 
-    # Probe the process first: a root-run API reads the journal without the
-    # group, so a host that lacks it is not a problem for that API.
     ids = probe_ids()
     if ids is not None and ids[0] == 0:
-        return Check(key, title, _PASS, f"{_API_UNIT} runs as root and can read the journal")
+        return Check(
+            key,
+            title,
+            _WARN,
+            f"{_API_UNIT} is unexpectedly running as root; it should run as the "
+            f"hal0 user with the {_JOURNAL_GROUP} group",
+        )
     gid = probe_gid()
     if gid is None:
         return Check(
@@ -3605,6 +3651,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_bridge_store(api_running=payloads["health"] is not None),
         check_agent_bridge(base=base),
         check_openwebui_mcp(),
+        check_openwebui_task_model(slots_payload),
         check_hermes_generation_extras(),
         check_hermes_command_approvals(),
         check_hermes_delegation_slot(slots_payload),
