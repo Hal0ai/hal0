@@ -337,7 +337,10 @@ else:
         | python3 -c '
 import json, sys
 try:
-    models = json.load(sys.stdin)["models"]
+    payload = json.load(sys.stdin)
+    if payload.get("probe_ok") is not True:
+        raise SystemExit(1)
+    models = payload["models"]
     print(next((m["model"] for m in models
                 if isinstance(m, dict) and m.get("installed") and m.get("model")
                 and "chat" in (m.get("capabilities") or [])), ""))

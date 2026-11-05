@@ -91,7 +91,7 @@ if cmd.startswith("echo "):
 if "/dev/accel/accel0" in cmd:
     sys.exit(0 if os.environ.get("STUB_NPU_PRESENT") else 1)
 if "/api/slots/flm/models" in cmd:
-    print(os.environ.get("STUB_FLM_MODELS_JSON", '{"models": []}'))
+    print(os.environ.get("STUB_FLM_MODELS_JSON", '{"models": [], "probe_ok": true}'))
     sys.exit(0)
 if "/v1/models" in cmd:
     print("1")
@@ -223,11 +223,12 @@ def test_seeded_flm_slot_uses_installed_catalog_model(tmp_path: Path) -> None:
         STUB_FLM_SLOT_JSON=json.dumps({"name": "flm", "status": "offline", "model_id": None}),
         STUB_FLM_MODELS_JSON=json.dumps(
             {
+                "probe_ok": True,
                 "models": [
                     {"model": "not-installed:1b", "installed": False, "capabilities": ["chat"]},
                     {"model": "embed:1b", "installed": True, "capabilities": ["embed"]},
                     {"model": "installed:1b", "installed": True, "capabilities": ["chat"]},
-                ]
+                ],
             }
         ),
     )
@@ -250,6 +251,22 @@ def test_flm_without_installed_model_warns_that_npu_was_not_tested(tmp_path: Pat
     row = _rows_by_name(tmp_path)["flm"]
     assert row["status"] == "skip"
     assert "NPU lane NOT TESTED" in proc.stderr
+    assert not [c for c in cmds if "slot load flm" in c]
+
+
+def test_flm_failed_catalog_probe_fails_instead_of_skipping(tmp_path: Path) -> None:
+    proc, cmds = _run(
+        tmp_path,
+        HAL0_TEST_BIN="/opt/test/hal0",
+        STUB_NPU_PRESENT="1",
+        STUB_FLM_SLOT_JSON=json.dumps({"name": "flm", "status": "offline", "model_id": None}),
+        STUB_FLM_MODELS_JSON=json.dumps({"models": [], "probe_ok": False}),
+    )
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    row = _rows_by_name(tmp_path)["flm"]
+    assert row["status"] == "fail"
+    assert "catalog" in row["detail"]
+    assert "NPU lane was not tested" in row["detail"]
     assert not [c for c in cmds if "slot load flm" in c]
 
 
