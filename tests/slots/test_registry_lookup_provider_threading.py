@@ -119,17 +119,14 @@ def test_scan_finds_unthreaded_lookup_in_subdirectory(
     nested = tmp_path / "npu"
     nested.mkdir()
     (nested / "trio.py").write_text(
-        "async def nested_lookup(host, model_id):\n"
-        "    await host._resolve_model_info(model_id)\n",
+        "async def nested_lookup(host, model_id):\n    await host._resolve_model_info(model_id)\n",
         encoding="utf-8",
     )
     module = __import__(__name__, fromlist=["_SLOTS_DIR"])
     monkeypatch.setattr(module, "_SLOTS_DIR", tmp_path)
 
     unthreaded = [
-        (name, func)
-        for name, func, _, call in _scan()
-        if "provider" not in _keyword_names(call)
+        (name, func) for name, func, _, call in _scan() if "provider" not in _keyword_names(call)
     ]
 
     assert unthreaded == [("trio.py", "nested_lookup")]
