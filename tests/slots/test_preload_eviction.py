@@ -207,7 +207,7 @@ def _write_slot(
 def _stub_model_info(size_mb: float) -> Any:
     """Fake SlotManager._resolve_model_info returning a fixed file size."""
 
-    async def _info(model_id: str | None) -> dict[str, Any]:
+    async def _info(model_id: str | None, *, provider: str | None = None) -> dict[str, Any]:
         return {"size_bytes": int(size_mb * 1024 * 1024)}
 
     return _info
@@ -304,7 +304,9 @@ class _FootprintHost:
         self.loaded.append(name)
         return self._slot_cfg
 
-    async def _resolve_model_info(self, model_id: str | None) -> dict[str, Any]:
+    async def _resolve_model_info(
+        self, model_id: str | None, *, provider: str | None = None
+    ) -> dict[str, Any]:
         return self._info
 
 
@@ -409,7 +411,10 @@ async def test_preload_evict_uses_provider_footprint(tmp_hal0_home: str) -> None
         {"name": "chat", "type": "llm", "model": {"default": "m"}}, _big_window_model()
     )
 
-    with patch("hal0.providers.container._spec_provider_for", return_value=provider):
+    with (
+        patch("hal0.slots.config_write._cfg_effective_provider", return_value=None),
+        patch("hal0.providers.container._spec_provider_for", return_value=provider),
+    ):
         mb = await _estimate_incoming_footprint_mb(host, "m", slot_name="chat")  # type: ignore[arg-type]
 
     assert mb == pytest.approx(_SEVENTY_GIB_MB)
@@ -445,6 +450,7 @@ async def test_admission_request_carries_the_provider_figure(tmp_hal0_home: str)
     )
 
     with (
+        patch("hal0.slots.config_write._cfg_effective_provider", return_value=None),
         patch(
             "hal0.providers.container._spec_provider_for",
             return_value=_StubFootprintProvider(_SEVENTY_GIB_MB),
@@ -476,7 +482,10 @@ async def test_incoming_footprint_falls_back_without_a_provider_figure(
         {"name": "chat", "type": "llm", "model": {"default": "m"}}, _big_window_model()
     )
 
-    with patch("hal0.providers.container._spec_provider_for", return_value=provider):
+    with (
+        patch("hal0.slots.config_write._cfg_effective_provider", return_value=None),
+        patch("hal0.providers.container._spec_provider_for", return_value=provider),
+    ):
         mb = await _estimate_incoming_footprint_mb(host, "m", slot_name="chat")  # type: ignore[arg-type]
 
     assert mb == pytest.approx(1000.0 + 32768 / 1000 * 0.5, abs=0.1)

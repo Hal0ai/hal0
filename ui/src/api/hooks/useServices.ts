@@ -113,6 +113,7 @@ export function useServiceAction() {
       apiPost<ServiceActionResult>(ENDPOINTS.serviceAction(id), { action }),
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ['services'] })
+      qc.invalidateQueries({ queryKey: ['config', 'urls'] })
     },
   })
 }

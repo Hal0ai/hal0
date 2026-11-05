@@ -4,6 +4,12 @@
 
 Amended by ADR-0045: slots may carry six sparse tune overrides over their profile.
 
+Amended (2026-11-04): the `HAL0-SUNSET` markers cited in decision 7 below are
+historical, not pending. The marker this ADR pointed at in
+`src/hal0/db/repository.py` was `# HAL0-SUNSET: v1.8.0`; it went out with the
+rest of the conversion chain in #3262 (`6c657f56`), so that file carries no
+`HAL0-SUNSET` marker today.
+
 The one-shot conversion, its blocked-slot pin and the retired model tuning
 columns shipped in 1.4.0 and were removed once the upgrade floor passed 1.4
 (#3084, SQL migration 015). A slot file that still carries a tuning key now
@@ -387,6 +393,13 @@ exactly once. It follows ADR-0028's contract:
     still runs its pre-conversion tune), and the dashboard badges it.
     `blocked_slot_pin` and its launch branch are deleted together with the
     converter (HAL0-SUNSET v1.7.0).
+    *Amended (2026-11-04).* That deletion has already run: #3262 (`6c657f56`)
+    removed the converter, `blocked_slot_pin` and its launch branch, and the
+    marker they carried. The `HAL0-SUNSET v1.7.0` above is the plan as this
+    ADR was written; the code carried `# HAL0-SUNSET: v1.8.0`, and the removal
+    is in the unreleased section of `CHANGELOG.md` (#3084, approved for
+    v1.7.2). A slot the converter blocked now fails to load with
+    `slot.unconverted` instead of launching from its recorded argv.
   - **Steady state writes nothing.** A run with nothing to write and no model
     tuning to clear returns its report only: no backup, no audit entry, no
     unit re-render. A slot that failed its launch check stays blocked
@@ -440,6 +453,14 @@ exactly once. It follows ADR-0028's contract:
     release's `hal0-api` is still running during the update.
   - A later release drops them with its own migration, once the upgrade floor
     is past this release (HAL0-SUNSET v1.7.0 in `db/repository.py`).
+    *Amended (2026-11-04).* The "later release" is SQL migration 015
+    (`src/hal0/db/migrations/015_drop_retired_model_tuning.sql`), which drops
+    the six tuning columns, the `legacy_model_tuning` holding table and the
+    `_enable_thinking` / `_vision` keys of `extra` (#3084). The marker this
+    ADR pointed at was `# HAL0-SUNSET: v1.8.0` in
+    `src/hal0/db/repository.py`; it was removed with the rest of the
+    conversion chain in #3262 (`6c657f56`), so that file carries no
+    `HAL0-SUNSET` marker today.
 - **Backup.** Before the first write, the converter writes
   `/var/lib/hal0/backups/profiles-<ts>.tar.gz` (mode 0600). It holds every file
   the converter changes, plus a JSON dump of the holding table. There is no

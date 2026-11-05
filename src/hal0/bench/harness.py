@@ -88,6 +88,8 @@ __all__ = [
     "BENCHCTL",
     "MAX_ATTEMPTS",
     "SYSTEMCTL_SEAM",
+    "UNIT_DOWN_STATES",
+    "UNIT_STATES",
     "CellResult",
     "ExclusiveSlots",
     "LaneSpec",
@@ -105,6 +107,42 @@ SYSTEMCTL_SEAM = "/usr/lib/hal0/bin/hal0-systemctl"
 #: Crash-retry cap for the llama-bench init-time segfault (see module docstring).
 #: Matches the shell harness's fixed ``for attempt in 1 2 3 4 5 6``.
 MAX_ATTEMPTS = 6
+
+#: systemd ``ActiveState`` values that mean the unit is NOT running — the
+#: exclusive window's goal (a free GPU) is met for that unit (#3409).
+#:
+#: ``inactive`` covers a unit that is stopped and a unit that no longer
+#: exists (``systemctl is-active`` prints ``inactive`` for both, with exit
+#: status 3 or 4 depending on the systemd version); ``failed`` is a unit whose
+#: container died; ``unknown`` is a unit systemd cannot resolve — none of the
+#: three can be holding the GPU.
+#:
+#: EVERY OTHER state (``active``, ``reloading``, ``activating``,
+#: ``deactivating``) means the unit is up or on its way up: the window must
+#: treat it as still running.
+UNIT_DOWN_STATES: frozenset[str] = frozenset({"inactive", "failed", "unknown"})
+
+#: Every systemd ``ActiveState`` name — the closed set a state probe may
+#: answer with. Output outside it is not a state at all (a probe that failed,
+#: or a host whose ``systemctl`` speaks another dialect) and is read as "no
+#: answer", never as "the unit is down".
+UNIT_STATES: frozenset[str] = frozenset(
+    {
+        "active",
+        "reloading",
+        "inactive",
+        "failed",
+        "activating",
+        "deactivating",
+        "maintenance",
+        "unknown",
+    }
+)
+
+#: systemd job types that can bring a stopped slot back up. A queued job of
+#: either type means ``inactive`` is temporary, not proof that the slot will
+#: stay down for the exclusive benchmark window (#3414 review).
+_START_JOB_TYPES: frozenset[str] = frozenset({"start", "restart"})
 
 #: The unprivileged runner reads/writes this default when a cell's flags omit
 #: an explicit host label — matches ``run_benchmarks.sh``'s ``HOST_LABEL``
@@ -548,6 +586,19 @@ class ExclusiveSlots:
     window cycled can always be started again, and every slot that still
     fails to restart is kept in :attr:`restore_failures` for the caller to
     surface in the session result rather than only on stderr.
+
+    A CANCELED stop job is not a failed stop (#3409). systemd answers
+    ``Job for hal0-slot@<id>.service canceled.`` when a conflicting job (a
+    concurrent start/restart of the same unit — the dispatcher lazy-loading
+    the slot, the memory extraction path re-rendering it) cancels the stop,
+    and the unit is then often down or on its way down: the window's goal is
+    met even though the exit status says otherwise. So a non-zero stop is
+    followed by a STATE check (an unprivileged ``systemctl is-active``): a
+    unit that is not running counts as stopped only when systemd has no
+    queued start/restart job for it, and a unit that IS still running gets
+    ONE more stop attempt (which also closes the race a second start job
+    creates). Only a unit that is still running — or still has a queued
+    start/restart job — after that retry aborts the window.
     """
 
     def __init__(self, runner: Callable[[list[str]], tuple[int, str, str]] | None = None) -> None:
@@ -570,18 +621,117 @@ class ExclusiveSlots:
         for slot_id in self._active_slot_ids():
             if slot_id in self._stopped:
                 continue
-            rc, _out, err = self._run(["sudo", "-n", SYSTEMCTL_SEAM, "stop", slot_id])
-            if rc != 0:
+            reason = self._stop_slot(slot_id)
+            if reason is not None:
                 # Best-effort restart of whatever we DID manage to stop before
                 # surfacing the failure — never leave a slot down silently.
                 self._restore()
-                raise RuntimeError(
-                    f"[exclusive] could not stop hal0-slot@{slot_id}: {err.strip() or rc}"
-                )
+                raise RuntimeError(f"[exclusive] could not stop hal0-slot@{slot_id}: {reason}")
             self._stopped.append(slot_id)
             newly_stopped = True
         if newly_stopped:
             time.sleep(3)
+
+    def _stop_slot(self, slot_id: str) -> str | None:
+        """Stop one slot unit through the privileged seam.
+
+        ``None`` when the unit is down — the window's goal — and an error
+        message when it is still running.
+
+        A non-zero exit from the seam is NOT the end of the story (#3409):
+        systemd cancels a stop job when a conflicting job for the same unit
+        wins, and reports the cancellation as a failed stop even though the
+        unit is often already down or coming down. So the unit's STATE decides
+        (``systemctl is-active``, unprivileged — the same read the active-slot
+        listing already does): a unit that is not running counts as stopped
+        only when ``systemctl list-jobs`` confirms that no start/restart job
+        is queued for it. Otherwise the replacement job can still bring the
+        slot up during the benchmark. A unit that IS still running gets ONE
+        more stop attempt, which replaces the queued start job. Only a unit
+        that is still running — or still has a queued start/restart job —
+        after the retry aborts the window.
+        """
+        reason = ""
+        state: str | None = None
+        for attempt in (1, 2):
+            rc, _out, err = self._run(["sudo", "-n", SYSTEMCTL_SEAM, "stop", slot_id])
+            if rc == 0:
+                return None
+            reason = err.strip() or str(rc)
+            state = self._unit_state(slot_id)
+            if state is not None and state in UNIT_DOWN_STATES:
+                pending_job = self._pending_start_job(slot_id)
+                if pending_job is None:
+                    # The stop job was canceled, but the unit is down and no
+                    # queued job can bring it back: the window's goal is met.
+                    return None
+                if pending_job == "unknown":
+                    if attempt == 2:
+                        return (
+                            f"{reason} (could not confirm that no start/restart job is queued "
+                            "after a retry)"
+                        )
+                    continue
+                if attempt == 2:
+                    return f"{reason} ({pending_job} job still queued after a retry)"
+                # A replacement start/restart job is queued. Retry the stop:
+                # systemd's default job mode replaces the conflicting job.
+                continue
+            if attempt == 2:
+                break
+        if state is None:
+            return f"{reason} (state unknown after a retry)"
+        return f"{reason} (unit still {state} after a retry)"
+
+    def _pending_start_job(self, slot_id: str) -> str | None:
+        """Return the queued job type that can start ``slot_id`` again.
+
+        ``"start"`` or ``"restart"`` means systemd has a queued job for the
+        unit; ``None`` means it has none; ``"unknown"`` means the unprivileged
+        ``systemctl list-jobs`` probe could not answer. The caller treats the
+        unknown result conservatively: it cannot prove the slot will stay
+        down, so the exclusive window must not proceed.
+        """
+        unit = f"hal0-slot@{slot_id}.service"
+        rc, out, _err = self._run(
+            [
+                "systemctl",
+                "list-jobs",
+                "--no-legend",
+                "--no-pager",
+                "--plain",
+                "--full",
+                unit,
+            ]
+        )
+        if rc != 0:
+            return "unknown"
+        for line in out.splitlines():
+            fields = line.split()
+            if not fields:
+                continue
+            if len(fields) < 3:
+                return "unknown"
+            if fields[1] != unit:
+                continue
+            if fields[2] in _START_JOB_TYPES:
+                return fields[2]
+        return None
+
+    def _unit_state(self, slot_id: str) -> str | None:
+        """The systemd ``ActiveState`` of ``hal0-slot@<id>.service``.
+
+        ``None`` when the probe cannot answer (no systemd on the host, an
+        unreadable unit, output that is not a state name) — the caller then
+        reads the unit as still running, which is the conservative direction:
+        the window aborts rather than measuring next to a live model.
+        """
+        _rc, out, _err = self._run(["systemctl", "is-active", f"hal0-slot@{slot_id}.service"])
+        for line in out.splitlines():
+            state = line.strip()
+            if state in UNIT_STATES:
+                return state
+        return None
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
         self._restore()
