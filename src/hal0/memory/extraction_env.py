@@ -61,7 +61,6 @@ import structlog
 from hal0.agents.anchor_window import (
     SLOTS_DIR,
     AnchorWindow,
-    _read_slot_raw,
     resolve_anchor_window,
 )
 from hal0.system.seam import SystemCtlSeam
@@ -568,6 +567,33 @@ def clamp_to_parallel(limits: ExtractionLimits, parallel: int | None) -> Extract
     return replace(limits, max_concurrent=parallel)
 
 
+def _extraction_slot_config(name: str, slots_dir: Path) -> dict[str, Any] | None:
+    """The extraction slot's on-disk config, flattened; ``None`` when unreadable.
+
+    The slot is resolved through the ONE bilingual authority,
+    :func:`hal0.slots.layout.resolve_slot_stem`, so an id-keyed layout
+    (``slots/<id>.toml`` with the display name in the body) resolves too. A
+    name-keyed-only read found nothing there and left the concurrency clamp
+    silently unapplied (#3473).
+
+    Read unvalidated on purpose: this feeds a status route and the update
+    reconcile, both of which must degrade, never raise, on a slot file the
+    typed loader would reject.
+    """
+    from hal0.config.loader import _flatten_slot_toml, _read_toml
+    from hal0.slots.layout import resolve_slot_stem
+
+    try:
+        stem = resolve_slot_stem(slots_dir, name)
+        if stem is None:
+            return None
+        raw = _read_toml(Path(slots_dir) / f"{stem}.toml")
+        return _flatten_slot_toml(raw, slot_name=name)
+    except Exception:
+        log.debug("hal0.memory.extraction_slot_unreadable", slot=name)
+        return None
+
+
 def extraction_slot_parallel(
     graph: MemoryGraphConfig, *, slots_dir: Path = SLOTS_DIR
 ) -> int | None:
@@ -580,7 +606,7 @@ def extraction_slot_parallel(
     kind, _target = memory_engine_target(graph)
     if kind != "slot":
         return None
-    raw = _read_slot_raw(graph.extraction_slot, slots_dir)
+    raw = _extraction_slot_config(graph.extraction_slot, slots_dir)
     if raw is None:
         return None
     from hal0.providers.container import slot_parallel_sequences
