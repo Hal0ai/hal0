@@ -1898,7 +1898,7 @@ async def slot_state_stream(name: str, request: Request) -> StreamingResponse:
                     "name": rec.name,
                     "state": rec.state.value,
                     "port": rec.port,
-                    "model_id": rec.model_id,
+                    "model_id": await sm.model_id_for_record(rec),
                     "message": rec.message,
                     "updated_at": rec.updated_at,
                 }

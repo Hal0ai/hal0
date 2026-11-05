@@ -138,6 +138,23 @@ _UNIT_WATCH_INTERVAL_S = 5.0
 log = logging.getLogger(__name__)
 
 
+def _snapshot_model_id(
+    cfg: SlotConfig | dict[str, Any] | None,
+    provider: str | None,
+    observed: SlotState,
+    model_id: str | None,
+) -> str | None:
+    """Hide a stale binding from snapshots that are not actively serving."""
+    if (
+        cfg
+        and observed not in (SlotState.READY, SlotState.SERVING, SlotState.IDLE)
+        and not _model_default(cfg)
+        and provider_requires_model(provider)
+    ):
+        return None
+    return model_id
+
+
 class RegistryUnavailableError(Hal0Error):
     """The model registry could not be consulted (outage, not a miss).
 
@@ -1142,7 +1159,16 @@ class SlotManager:
                 _, _, grp, _ = self._derive_identity_fields(name, cfg)
                 # include_listeners=False: the slot's own server socket must
                 # not block seeding its own claim.
-                if grp is None and not self._port_authority.is_free(port, include_listeners=False):
+                # A coresident trio may share a port only with the claim that
+                # already carries its group; a different group still conflicts.
+                holder = next(
+                    (claim for claim in self._port_authority.claims() if claim.port == port),
+                    None,
+                )
+                holder_group = holder.coresident_group if holder is not None else None
+                if not self._port_authority.is_free(port, include_listeners=False) and not (
+                    grp is not None and holder_group == grp
+                ):
                     log.warning(
                         "slot.port_seed_conflict",
                         extra={"slot": name, "port": port},
@@ -1578,6 +1604,12 @@ class SlotManager:
         for q in dead:
             with contextlib.suppress(ValueError):
                 self._subscribers.remove(q)
+
+    async def model_id_for_record(self, rec: SlotStateRecord) -> str | None:
+        """Apply the current binding correction to a historical state record."""
+        cfg = await self._maybe_load_config(rec.name)
+        provider = _cfg_effective_provider(cfg) if cfg else None
+        return _snapshot_model_id(cfg, provider, rec.state, rec.model_id)
 
     async def state_stream(self) -> AsyncIterator[SlotStateRecord]:
         """Async generator yielding every slot state transition as it happens.
@@ -2718,17 +2750,9 @@ class SlotManager:
                 # last load; it is not serving anything, so don't claim it is.
                 meta["message"] = no_model_assigned_message(slot_name)
         # The state record intentionally retains the last loaded model across
-        # transitions. Keep exposing that id while the container is loaded,
-        # because it still describes what is being served, but let the current
-        # TOML binding own the API field once an unassigned slot is offline.
-        model_id = rec.model_id
-        if (
-            cfg
-            and observed == SlotState.OFFLINE
-            and not _model_default(cfg)
-            and provider_requires_model(provider)
-        ):
-            model_id = None
+        # transitions. Keep exposing that id while the container is serving,
+        # but clear it from non-serving snapshots when no model is configured.
+        model_id = _snapshot_model_id(cfg, provider, observed, rec.model_id)
         # The GTT-leak suspicion is the load's own message while the slot is
         # still coming up (the case it explains: a start that hangs reserving
         # the KV pool); any message already set — an error, a missing model —

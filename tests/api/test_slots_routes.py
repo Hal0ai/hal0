@@ -33,6 +33,7 @@ from fastapi.testclient import TestClient
 
 from hal0.api import create_app
 from hal0.slots.manager import SlotManager
+from hal0.slots.state import SlotState
 from hal0.upstreams.registry import Upstream
 from tests.fixtures.model_registration import register_model_file
 from tests.fixtures.slot_probe import probe_slot_name
@@ -1342,6 +1343,140 @@ async def test_state_stream_emits_transition_event(
         assert "port" in payload
         assert "model_id" in payload
         assert "updated_at" in payload
+
+
+async def test_state_stream_transition_uses_corrected_model_snapshot(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_app: FastAPI,
+) -> None:
+    """Transition SSE rows agree with the manager snapshot after binding edits."""
+    with TestClient(isolated_app):
+        sm: SlotManager = isolated_app.state.slot_manager
+        await sm.load("chat")
+        from hal0.slot_config import write_slot_toml
+
+        cfg = await sm._load_slot_config("chat")
+        cfg.setdefault("model", {})["default"] = ""
+        write_slot_toml(sm._config_file("chat"), cfg)
+        sm._invalidate_cfg_cache("chat")
+
+        from hal0.api.routes.slots import slot_state_stream
+
+        class _ReqShim:
+            class _AppShim:
+                state = isolated_app.state
+
+            app = _AppShim()
+
+        response = await slot_state_stream("chat", _ReqShim())  # type: ignore[arg-type]
+        agen = response.body_iterator
+        first = await asyncio.wait_for(agen.__anext__(), timeout=1.0)
+        if isinstance(first, bytes):
+            first = first.decode("utf-8")
+        initial_payload = json.loads(first.split("data: ", 1)[1])
+        assert initial_payload["model_id"] == "qwen3-4b-q4_k_m"
+
+        next_frame_task = asyncio.create_task(agen.__anext__())
+        for _ in range(50):
+            if sm._subscribers:
+                break
+            await asyncio.sleep(0.01)
+        assert sm._subscribers
+        await sm._transition("chat", SlotState.ERROR, model_id="qwen3-4b-q4_k_m", force=True)
+        frame = await asyncio.wait_for(next_frame_task, timeout=2.0)
+        if isinstance(frame, bytes):
+            frame = frame.decode("utf-8")
+        await agen.aclose()
+        payload = json.loads(
+            next(line for line in frame.splitlines() if line.startswith("data: "))[6:]
+        )
+        assert payload["state"] == "error"
+        assert payload["model_id"] is None
+
+
+async def test_state_stream_preserves_each_queued_transition(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backlogged frames keep their own state, message, and model binding."""
+    with TestClient(isolated_app):
+        sm: SlotManager = isolated_app.state.slot_manager
+        await sm.load("chat")
+        from hal0.slot_config import write_slot_toml
+
+        cfg = await sm._load_slot_config("chat")
+        cfg.setdefault("model", {})["default"] = ""
+        write_slot_toml(sm._config_file("chat"), cfg)
+        sm._invalidate_cfg_cache("chat")
+
+        queue: asyncio.Queue[Any] = asyncio.Queue()
+
+        async def queued_stream() -> Any:
+            while True:
+                yield await queue.get()
+
+        monkeypatch.setattr(sm, "state_stream", queued_stream)
+        from hal0.api.routes.slots import slot_state_stream
+
+        class _ReqShim:
+            class _AppShim:
+                state = isolated_app.state
+
+            app = _AppShim()
+
+        response = await slot_state_stream("chat", _ReqShim())  # type: ignore[arg-type]
+        agen = response.body_iterator
+        await asyncio.wait_for(agen.__anext__(), timeout=1.0)  # initial snapshot
+
+        error = await sm._transition("chat", SlotState.ERROR, message="load failed", force=True)
+        offline = await sm._transition(
+            "chat", SlotState.OFFLINE, message="container stopped", force=True
+        )
+        queue.put_nowait(error)
+        queue.put_nowait(offline)
+
+        payloads = []
+        for _ in range(2):
+            frame = await asyncio.wait_for(agen.__anext__(), timeout=2.0)
+            if isinstance(frame, bytes):
+                frame = frame.decode("utf-8")
+            payloads.append(
+                json.loads(
+                    next(line for line in frame.splitlines() if line.startswith("data: "))[6:]
+                )
+            )
+        await agen.aclose()
+
+        assert [(row["state"], row["message"]) for row in payloads] == [
+            ("error", "load failed"),
+            ("offline", "container stopped"),
+        ]
+        assert [row["model_id"] for row in payloads] == [None, None]
+
+
+async def test_error_snapshot_clears_model_id_when_binding_empty(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_app: FastAPI,
+) -> None:
+    with TestClient(isolated_app):
+        sm: SlotManager = isolated_app.state.slot_manager
+        await sm.load("chat")
+        from hal0.slot_config import write_slot_toml
+
+        cfg = await sm._load_slot_config("chat")
+        cfg.setdefault("model", {})["default"] = ""
+        write_slot_toml(sm._config_file("chat"), cfg)
+        sm._invalidate_cfg_cache("chat")
+        await sm._transition("chat", SlotState.ERROR, model_id="qwen3-4b-q4_k_m", force=True)
+
+        snap = await sm.status("chat")
+        assert snap.state == SlotState.ERROR
+        assert snap.model_id is None
+        assert "has no model assigned" in snap.metadata["message"]
 
 
 async def test_state_stream_subscriber_cleaned_up_on_close(
