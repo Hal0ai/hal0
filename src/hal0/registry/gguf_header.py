@@ -461,6 +461,63 @@ def read_gguf_tensor_types(path: str | Path) -> frozenset[int] | None:
             f.close()
 
 
+def read_gguf_tensor_type_by_name(path: str | Path, name: str) -> int | None:
+    """The ggml type id of the tensor named ``name``, or ``None``.
+
+    ``None`` means the file is not GGUF, the tensor-info block could not be
+    reached, or no tensor in the file is named ``name``. Walks the same path
+    as :func:`read_gguf_tensor_types` but stops as soon as the match is found
+    instead of collecting every type seen.
+    """
+    p = Path(path)
+    try:
+        size = p.stat().st_size
+        f = open(p, "rb")  # noqa: SIM115 - closed below
+    except OSError:
+        return None
+    try:
+        window = min(size, _TENSOR_INFO_WINDOW_BYTES)
+        if window < 24:
+            return None
+        try:
+            mm: mmap.mmap | None = mmap.mmap(f.fileno(), window, access=mmap.ACCESS_READ)
+            buf: bytes | mmap.mmap = mm  # type: ignore[assignment]
+        except (OSError, ValueError):
+            mm = None
+            buf = f.read(window)
+        try:
+            r = _Reader(buf, window)
+            if r.read(4) != _GGUF_MAGIC:
+                return None
+            r.u32()  # version
+            tensor_count = r.u64()
+            kv_count = r.u64()
+            try:
+                for _ in range(kv_count):
+                    r.gguf_string()
+                    _skip_value(r, r.u32())
+                for _ in range(tensor_count):
+                    tname = r.gguf_string()
+                    n_dims = r.u32()
+                    if n_dims > 8:
+                        raise GGUFParseError(f"implausible n_dims {n_dims}")
+                    r.skip(8 * n_dims)
+                    ttype = r.u32()
+                    r.skip(8)  # data offset
+                    if tname == name:
+                        return ttype
+            except GGUFParseError:
+                return None
+            return None
+        finally:
+            if mm is not None:
+                with _suppress_close():
+                    mm.close()
+    finally:
+        with _suppress_close():
+            f.close()
+
+
 # ── tiny helper ───────────────────────────────────────────────────────────
 
 
@@ -478,5 +535,6 @@ __all__ = [
     "GGUFParseError",
     "read_gguf_header",
     "read_gguf_header_bytes",
+    "read_gguf_tensor_type_by_name",
     "read_gguf_tensor_types",
 ]
