@@ -58,7 +58,12 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from hal0.agents.anchor_window import SLOTS_DIR, AnchorWindow, resolve_anchor_window
+from hal0.agents.anchor_window import (
+    SLOTS_DIR,
+    AnchorWindow,
+    _read_slot_raw,
+    resolve_anchor_window,
+)
 from hal0.system.seam import SystemCtlSeam
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -125,6 +130,10 @@ class ExtractionLimits:
       consolidation, reflect and mental-model refresh. The slot ``--parallel``
       clamp applies to both rendered values. 1 serialises them, so a long
       reflect or consolidation can delay retains until completion or timeout.
+      The configured value remains in ``hal0.toml``; the rendered value is held
+      to the extraction slot's ``--parallel`` by :func:`effective_limits`
+      (#3347), because calls queued inside llama-server still spend their
+      read timeout.
     * ``max_tokens`` -> ``HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS``: per-call
       completion cap. Hindsight refuses every retain into a bank whose chunk
       size is not strictly below it: the schema floor (3072) clears the engine
@@ -545,6 +554,69 @@ def memory_engine_target(graph: MemoryGraphConfig) -> tuple[str, str]:
     return ("slot", extraction_model_name(graph.extraction_slot))
 
 
+def clamp_to_parallel(limits: ExtractionLimits, parallel: int | None) -> ExtractionLimits:
+    """``limits`` with ``max_concurrent`` held to the slot's ``--parallel`` (#3347).
+
+    Calls beyond the slot's sequences queue inside llama-server, and that wait
+    counts against the caller's read timeout, so a larger value only converts
+    capacity the slot does not have into 504s. ``parallel`` of ``None`` (no
+    explicit ``--parallel``, an upstream target, an unreadable slot) leaves the
+    configured value alone: hal0 has no number to hold it to.
+    """
+    if parallel is None or parallel < 1 or limits.max_concurrent <= parallel:
+        return limits
+    return replace(limits, max_concurrent=parallel)
+
+
+def extraction_slot_parallel(
+    graph: MemoryGraphConfig, *, slots_dir: Path = SLOTS_DIR
+) -> int | None:
+    """The ``--parallel`` the extraction slot launches with, or ``None`` when unknown.
+
+    ``None`` for an upstream target (no local slot is in play), a slot whose TOML
+    cannot be read, and a slot that sets no explicit ``--parallel``. Never raises:
+    this feeds a status route and the update reconcile.
+    """
+    kind, _target = memory_engine_target(graph)
+    if kind != "slot":
+        return None
+    raw = _read_slot_raw(graph.extraction_slot, slots_dir)
+    if raw is None:
+        return None
+    from hal0.providers.container import slot_parallel_sequences
+
+    try:
+        return slot_parallel_sequences(raw)
+    except Exception:
+        log.debug("hal0.memory.extraction_parallel_unresolved", slot=graph.extraction_slot)
+        return None
+
+
+def effective_limits(graph: MemoryGraphConfig, *, slots_dir: Path = SLOTS_DIR) -> ExtractionLimits:
+    """The limits the drop-in is rendered from: ``[memory.graph]`` held to the slot (#3347).
+
+    The one answer for the graph PUT, the update reconcile and the status
+    route, so the file they write and compare against cannot disagree.
+    """
+    return clamp_to_parallel(
+        ExtractionLimits.from_config(graph), extraction_slot_parallel(graph, slots_dir=slots_dir)
+    )
+
+
+def concurrency_clamp_warning(graph: MemoryGraphConfig, parallel: int | None) -> str | None:
+    """Operator-facing sentence when ``extraction_max_concurrent`` exceeds the slot, else ``None``."""
+    configured = graph.extraction_max_concurrent
+    if parallel is None or configured <= parallel:
+        return None
+    return (
+        f"[memory.graph].extraction_max_concurrent = {configured} is above extraction slot "
+        f"{graph.extraction_slot!r}'s --parallel {parallel}; hal0 renders {parallel} into "
+        "HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT so extra calls do not queue inside "
+        "llama-server and time out. Lower extraction_max_concurrent, or raise the slot's "
+        "--parallel, to make the two agree."
+    )
+
+
 def apply_extraction_slot(
     slot: str,
     *,
@@ -649,7 +721,7 @@ def reconcile_extraction_dropin(
         graph = load_hal0_config().memory.graph
     except Exception as exc:
         return {"status": "skipped", "reason": f"hal0.toml unreadable: {_detail(exc)}"}
-    limits = ExtractionLimits.from_config(graph)
+    limits = effective_limits(graph)
     if drop_in_matches(graph.llm_timeout_s, limits=limits):
         return {"status": "converged"}
     result = apply_extraction_slot(

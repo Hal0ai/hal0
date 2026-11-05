@@ -422,6 +422,14 @@ async def graph_status(request: Request) -> dict[str, Any]:
         status["mode"] = "shared"
     status["llm_timeout_s"] = graph_cfg.llm_timeout_s
     status["extraction_limits"] = ExtractionLimits.from_config(graph_cfg).as_dict()
+    # #3347: the extraction slot's --parallel and the limits actually rendered
+    # into the drop-in (max_concurrent held to it), so a clamp is visible.
+    slot_parallel = await asyncio.to_thread(_ee.extraction_slot_parallel, graph_cfg)
+    status["extraction_slot_parallel"] = slot_parallel
+    status["effective_extraction_limits"] = _ee.clamp_to_parallel(
+        ExtractionLimits.from_config(graph_cfg), slot_parallel
+    ).as_dict()
+    status["concurrency_warning"] = _ee.concurrency_clamp_warning(graph_cfg, slot_parallel)
     status["throughput"] = _cached_throughput(request, status.get("extraction_slot"), graph_cfg)
     # #2919: what hal0/memory resolves to, and what else it could — the picker.
     status["extraction_model"] = graph_cfg.extraction_model
@@ -883,6 +891,12 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
         timeout_changed = new_cfg.llm_timeout_s != cfg.memory.graph.llm_timeout_s
         new_limits = ExtractionLimits.from_config(new_cfg)
         limits_changed = new_limits != ExtractionLimits.from_config(cfg.memory.graph)
+        # #3347: hal0.toml keeps what the operator asked for; the drop-in gets
+        # it held to the extraction slot's --parallel. Slot changes can move the
+        # clamp without touching a limit, which the drift check below catches.
+        slot_parallel = await asyncio.to_thread(_ee.extraction_slot_parallel, new_cfg)
+        render_limits = _ee.clamp_to_parallel(new_limits, slot_parallel)
+        clamp_warning = _ee.concurrency_clamp_warning(new_cfg, slot_parallel)
 
         # Validate an EXPLICIT slot change against the live slot set —
         # reject an unknown / non-llm slot with the valid options so the
@@ -929,7 +943,7 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
         if not needs_propagation:
             from hal0.memory.extraction_env import drop_in_matches
 
-            needs_propagation = not drop_in_matches(new_cfg.llm_timeout_s, limits=new_limits)
+            needs_propagation = not drop_in_matches(new_cfg.llm_timeout_s, limits=render_limits)
 
         # Flip the live wrapper's reported state BEFORE persisting.
         try:
@@ -969,7 +983,7 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
             # cancellation (see _propagate_shielded) so this lock's critical
             # section can't be exited early while the worker is still live.
             propagation = await _propagate_shielded(
-                new_cfg.extraction_slot, new_cfg.llm_timeout_s, new_limits
+                new_cfg.extraction_slot, new_cfg.llm_timeout_s, render_limits
             )
 
         out = new_cfg.model_dump(mode="json")
@@ -1016,6 +1030,8 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
         out["throughput"] = throughput
         if throughput["verdict"] == "too_slow":
             out["warnings"] = [throughput["message"]]
+    if clamp_warning:
+        out["warnings"] = [*out.get("warnings", []), clamp_warning]
     # #3215: warn when the cap does not clear a bank's retain chunk size. Outside
     # the config lock for the same reason as the probe; a down engine skips it.
     audit = await _audit_retain_chunks(request, new_cfg.extraction_max_tokens)

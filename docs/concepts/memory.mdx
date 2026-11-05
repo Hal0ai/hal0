@@ -293,7 +293,12 @@ even on a fresh install, under `[memory.graph]`:
   `hal0/memory`; hal0 resolves it to the slot or the model on every call,
   so the switch applies without an engine restart.
 - `llm_timeout_s` (default `300`, range 30–3600) — timeout for the Hindsight
-  daemon's LLM calls, covering cold slot starts and long reflects.
+  daemon's LLM calls, covering cold slot starts and long reflects. Hindsight
+  sends these calls non-streaming through hal0's `/v1`, where
+  `[dispatcher].direct_read_timeout_s` (default 300, maximum 600) would
+  otherwise cut them off first and Hindsight would retry. hal0 therefore reads
+  the larger of the two as the read timeout for `hal0/memory` requests; a
+  smaller `llm_timeout_s` never lowers the dispatcher setting.
 - the extraction limits — `extraction_max_concurrent` (default `1`),
   `extraction_max_tokens` (default `16384`), `extraction_llm_retries`
   (default `1`), `extraction_task_retries` (default `2`) and
@@ -312,7 +317,13 @@ even on a fresh install, under `[memory.graph]`:
   so consolidation, reflect and mental-model refresh share the concurrency
   budget too. With the default single permit, a long reflect or consolidation
   can delay queued retains until that call finishes or reaches `llm_timeout_s`.
-  Note that `extraction_task_retries` and
+  hal0 holds the value rendered into the drop-in to the extraction slot's
+  `--parallel`; calls beyond it queue inside llama-server, and that wait counts
+  against the read timeout. `hal0.toml` keeps what you set; saving graph settings
+  warns when the value is clamped, and `GET /api/memory/graph/status` reports
+  `extraction_slot_parallel`, `effective_extraction_limits` and
+  `concurrency_warning`. A slot with no explicit `--parallel`, or an upstream
+  `extraction_model`, is not clamped. Note that `extraction_task_retries` and
   `extraction_retry_backoff_s` are Hindsight's worker-wide settings: every
   queued memory operation (consolidation and mental-model refresh too)
   shares them, since the engine has no retain-only task retry.
