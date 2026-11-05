@@ -166,7 +166,16 @@ export const META_ENUMS_FALLBACK: MetaEnums = Object.freeze({
   // (drawer overhaul PR-3, Task 8) — a client running against an older
   // backend without /api/meta/enums now offers the same options the write
   // path (`PUT /api/models/{id}` `provider`) actually accepts.
-  runtime_families: ['llama-server', 'flm', 'kokoro', 'qwen3tts', 'moonshine', 'comfyui', 'halogen'],
+  runtime_families: [
+    'llama-server',
+    'flm',
+    'kokoro',
+    'qwen3tts',
+    'moonshine',
+    'comfyui',
+    'halogen',
+    'xdna',
+  ],
   backend_to_device: {
     rocm: 'gpu-rocm',
     vulkan: 'gpu-vulkan',
@@ -174,6 +183,7 @@ export const META_ENUMS_FALLBACK: MetaEnums = Object.freeze({
     flm: 'npu',
     moonshine: 'cpu',
     kokoro: 'cpu',
+    xdna: 'npu',
   },
   device_default_profiles: {
     'gpu-rocm': 'chat',
@@ -282,4 +292,40 @@ export function deviceById(
 ): MetaDevice | undefined {
   const key = String(id || '').toLowerCase()
   return meta.devices.find((d) => d.id === key)
+}
+
+/**
+ * Runtime family for a slot — the slot's own `runtime_family`/`runner` wins
+ * over device-class inference. Device-class 'npu' alone used to imply
+ * 'flm' (the npu device row's `default_profile`); now that the xdna
+ * (ggml-xdna llama-server) runner also reports device_class 'npu', that
+ * shortcut mislabels it as FLM. Always prefer the slot's own identity.
+ */
+export function runtimeFamilyForSlot(slot?: {
+  runtime_family?: string | null
+  runner?: string | null
+  device?: string | null
+} | null): string {
+  const family = String(slot?.runtime_family || '').toLowerCase()
+  if (family) return family
+  const runner = String(slot?.runner || '').toLowerCase()
+  if (runner === 'xdna') return 'llama-server'
+  if (runner === 'flm') return 'flm'
+  return devKind(slot?.device) === 'npu' ? 'flm' : 'llama-server'
+}
+
+/**
+ * Device label for a slot — 'FLM · NPU' only for actual FLM slots. An xdna
+ * slot shares device_class 'npu' but is a plain GGUF llama-server runner,
+ * so it gets its own label instead of inheriting the FLM device row's.
+ */
+export function deviceLabelForSlot(
+  slot?: { runtime_family?: string | null; runner?: string | null; device?: string | null } | null,
+  meta: MetaEnums = META_ENUMS_FALLBACK,
+): string {
+  const runner = String(slot?.runner || '').toLowerCase()
+  if (runner === 'xdna' || runtimeFamilyForSlot(slot) === 'llama-server') {
+    if (devKind(slot?.device, meta) === 'npu') return 'ggml-xdna · NPU'
+  }
+  return deviceById(slot?.device, meta)?.label ?? String(slot?.device || '')
 }

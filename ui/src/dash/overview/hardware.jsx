@@ -38,8 +38,16 @@ export function OvHardware({ onGo: _onGo }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [st])
 
+  // Slots that light up the "npu" row's slot-name caption: the coresident
+  // FLM trio members, plus any xdna (ggml-xdna llama-server) slot — xdna
+  // isn't coresident with the trio, but it's still an NPU-class runner and
+  // the row must count it instead of silently dropping it from the caption.
   const npuSlots = (slotsQuery.data ?? [])
-    .filter((s) => (s.device || '') === 'npu' && s.coresident)
+    .filter(
+      (s) =>
+        ((s.device || '') === 'npu' && s.coresident) ||
+        String(s.runner || '').toLowerCase() === 'xdna',
+    )
     .map((s) => s.name)
 
   const rows = hardwareRows({
