@@ -67,16 +67,23 @@ def _read_text(path: Path) -> str | None:
 
 
 def _parse_levels(raw: str) -> tuple[tuple[str, ...], int | None, int | None]:
-    """``("0: 400Mhz", "1: 800Mhz*", …) -> (lines, active_index, top_index)``."""
+    """``("0: 400Mhz", "1: 800Mhz*", …) -> (lines, active_index, top_index)``.
+
+    ``active_index`` is only ever a single, unambiguous marker: a tree with
+    zero or more than one ``*`` marker (e.g. a torn read, or firmware
+    reporting two active levels) is treated as having no reliable active
+    index at all, mirroring the shell side's ``exactly one`` requirement.
+    """
     lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
-    active_index: int | None = None
+    active_indexes: list[int] = []
     top_index: int | None = None
     for i, line in enumerate(lines):
         head = line.split(":", 1)[0].strip()
         if head.isdigit():
             top_index = i if top_index is None or i > top_index else top_index
         if "*" in line:
-            active_index = i
+            active_indexes.append(i)
+    active_index = active_indexes[0] if len(active_indexes) == 1 else None
     return tuple(lines), active_index, top_index
 
 
@@ -249,6 +256,11 @@ def slot_uses_gpu(slot: Any) -> bool:
     """True when ``slot`` runs on the GPU (vulkan/rocm/hip, i.e. the gfx1151 iGPU)."""
     backend, device_class = _backend_tokens(slot)
     if device_class == "npu" or backend in _NPU_BACKENDS:
+        return False
+    if backend == "cuda":
+        # CUDA runs on a discrete NVIDIA GPU, not the gfx1151 iGPU whose
+        # fabric clock this guard protects; never fold it into the generic
+        # device_class == "gpu" fallback below.
         return False
     if device_class == "gpu":
         return True

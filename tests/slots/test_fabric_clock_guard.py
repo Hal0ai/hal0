@@ -80,6 +80,29 @@ def test_not_held_manual_but_lower_level_marked(tmp_path: Path) -> None:
     assert state.top_index == 7
 
 
+def test_not_held_when_multiple_markers_even_at_top(tmp_path: Path) -> None:
+    """review P2-6: shell requires exactly one `*`; Python must too.
+
+    A tree with both level 0 and level 7 (top) starred — e.g. a torn sysfs
+    read, or a firmware quirk reporting two "active" levels — used to
+    overwrite ``active_index`` with whichever marker was seen last, so a
+    0-and-7-starred tree read as ``active_index == 7 == top_index`` and
+    ``held == True``. That is the shell's own ``exactly one`` precondition
+    stated inversely: with more than one marker, there is no reliable
+    active level at all, and the clock must read as NOT held.
+    """
+    device = _fake_card(tmp_path)
+    lines = list(_LEVELS)
+    lines[0] = lines[0] + " *"
+    lines[7] = lines[7] + " *"
+    (device / "pp_dpm_fclk").write_text("\n".join(lines) + "\n")
+    (device / "power_dpm_force_performance_level").write_text("manual")
+    state = read_fabric_clock(tmp_path)
+    assert state.readable
+    assert state.active_index is None
+    assert not state.held
+
+
 def test_unreadable_when_no_amdgpu_device(tmp_path: Path) -> None:
     (tmp_path / "class" / "drm").mkdir(parents=True)
     state = read_fabric_clock(tmp_path)
@@ -132,6 +155,12 @@ def test_slot_uses_gpu_true_for_gpu_backends(backend: str) -> None:
 
 def test_slot_uses_gpu_false_for_npu_backend() -> None:
     assert not slot_uses_gpu({"backend": "flm"})
+
+
+def test_slot_uses_gpu_false_for_cuda_backend() -> None:
+    """review P2-4: CUDA is a discrete NVIDIA GPU, not the gfx1151 iGPU."""
+    assert not slot_uses_gpu({"backend": "cuda"})
+    assert not slot_uses_gpu({"backend": "cuda", "device_class": "gpu"})
 
 
 def test_slot_uses_npu_false_for_gpu_backend() -> None:
