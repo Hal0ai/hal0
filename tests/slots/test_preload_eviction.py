@@ -207,7 +207,9 @@ def _write_slot(
 def _stub_model_info(size_mb: float) -> Any:
     """Fake SlotManager._resolve_model_info returning a fixed file size."""
 
-    async def _info(model_id: str | None) -> dict[str, Any]:
+    async def _info(
+        model_id: str | None, *, provider: str | None = None
+    ) -> dict[str, Any]:
         return {"size_bytes": int(size_mb * 1024 * 1024)}
 
     return _info
