@@ -30,7 +30,7 @@ import re
 import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from hal0.errors import UnprocessableEntity
 
@@ -445,6 +445,34 @@ XDNA_PMODES: tuple[str, ...] = ("default", "turbo", "balanced", "powersaver", "p
 def xdna_env_defaults() -> dict[str, str]:
     """hal0's default ``GGML_XDNA_*``/``OMP_WAIT_POLICY`` env for an xdna slot."""
     return dict(XDNA_ENV_DEFAULTS)
+
+
+#: Doc string for the optional ``[xdna].host_xrt`` slot-config key (84b3b186's
+#: pattern: an absolute host path RO-bind-mounted into the container, with
+#: ``HAL0_XDNA_HOST_XRT`` set to the same path so the entrypoint prefers it
+#: over the image's baked XRT).
+XDNA_HOST_XRT_DOC = (
+    "Absolute host path to an XRT install, RO bind-mounted into the "
+    "container as HAL0_XDNA_HOST_XRT; unset uses the image's baked XRT."
+)
+
+
+def xdna_knob_schema() -> dict[str, Any]:
+    """The xdna runner's dashboard knob schema (``GET /api/runners/xdna/knobs``).
+
+    ``{"pmodes": [...], "env": [{"name", "default", "doc"}, ...], "host_xrt":
+    {"doc": ...}}`` — built straight off :data:`XDNA_PMODES`,
+    :data:`XDNA_ENV_DOCS` and :data:`XDNA_ENV_DEFAULTS` so the dashboard never
+    hardcodes the knob set.
+    """
+    return {
+        "pmodes": list(XDNA_PMODES),
+        "env": [
+            {"name": name, "default": XDNA_ENV_DEFAULTS.get(name), "doc": doc}
+            for name, doc in sorted(XDNA_ENV_DOCS.items())
+        ],
+        "host_xrt": {"doc": XDNA_HOST_XRT_DOC},
+    }
 
 
 def screen_xdna_env(env: Mapping[str, str] | None) -> None:
