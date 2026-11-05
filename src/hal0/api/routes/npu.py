@@ -244,6 +244,11 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
         if mapped_state == "serving":
             any_serving = True
 
+        meta = getattr(s, "metadata", None) or {}
+        provider = str(meta.get("provider") or "").lower()
+        backend = str(getattr(s, "backend", None) or meta.get("backend") or "").lower()
+        engine = "xdna" if (provider != "flm" and backend == "npu") else "flm"
+
         tag = _model_tag(getattr(s, "model_id", None))
         gb = _flm_footprint_gb(tag)
 
@@ -270,6 +275,7 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
                 "name": s.name,
                 "model": tag,
                 "state": mapped_state,
+                "engine": engine,
                 "cols": cols,
                 "gb": gb,
                 "active": mapped_state == "serving"
@@ -306,6 +312,7 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
                     "name": s.name + "-stt",
                     "model": "whisper-v3:turbo",
                     "state": mapped_state if stt_live else "off",
+                    "engine": "flm",
                     "cols": list(range(_NPU_COLS)) if stt_live else [],
                     "gb": None,
                     "active": stt_live and stt_age is not None and stt_age <= _ACTIVE_WINDOW_S,
@@ -320,6 +327,7 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
                     "name": s.name + "-embed",
                     "model": "embedding-gemma",
                     "state": mapped_state if embed_live else "off",
+                    "engine": "flm",
                     "cols": list(range(_NPU_COLS)) if embed_live else [],
                     "gb": None,
                     "active": embed_live
@@ -390,7 +398,7 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
         "cols_total": _NPU_COLS,
         "cols_used": cols_used,
         "serving": any_serving,
-        "single_tenant": True,
+        "single_tenant": len(loaded_names) <= 1,
         "columns_available": columns_available,
         "slots": slots_out,
         "shared_warning": npu_shared_warning,
