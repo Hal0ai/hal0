@@ -19,16 +19,28 @@ that no catalog model owns, from the workflows folder
 (`<model store>/comfyui/workflows`, where you can drop a `<name>.json`) or
 ComfyUI's own saved workflows. A chip opens the editor, not the workflow:
 ComfyUI cannot open a workflow from a link, so pick it in the editor's Workflows
-sidebar. The API lists the same names, and queues one:
+sidebar.
+
+The API lists names from both directories, but listing a workflow does not mean
+it can be launched through the API. `launch` reads the file unchanged and posts
+it to ComfyUI's `/prompt`, which accepts only API format
+(`{node_id: {class_type, inputs}}`). Catalog workflows use API format. A
+workflow saved through the editor's normal save action uses the editor's UI
+format; use **Save (API Format)** and put the exported file at
+`<model store>/comfyui/workflows/<name>.json` before launching it. A UI-format
+file posted unchanged is not queued, although the endpoint can still answer 202
+with a null `prompt_id`.
+
+Launch an API-format file:
 
 ```sh
 curl http://localhost:8080/api/comfyui/workflows
 curl -X POST http://localhost:8080/api/comfyui/workflows/my-workflow/launch
 ```
 
-`launch` posts the API-format workflow file to ComfyUI as a prompt, so the GPU
-gate treats it like an editor prompt; it answers 404 for a name that is not a
-file and 503 `image.gate_refused` when the gate refuses the prompt.
+The GPU gate treats the launch like an editor prompt; `launch` answers 404 for a
+name that is not a file and 503 `image.gate_refused` when the gate refuses the
+prompt.
 
 ### Reaching the editor
 
@@ -88,15 +100,16 @@ models. `hal0 slot unload img` still stops it by hand.
 ### Which container image the `img` slot runs
 
 The `img` slot resolves its image in this order: `image_pin` (top-level or
-`[slot]`-nested, honored verbatim), the legacy bare `image` value (also
-top-level or `[slot]`-nested and still honored for ComfyUI), then
-`[slots].default_images.comfyui` in `hal0.toml` (the operator's choice of
-launch image for ComfyUI, set from the Runner Images page — see
+`[slot]`-nested, honored verbatim), then `[slots].default_images.comfyui` in
+`hal0.toml` (the operator's choice of launch image for ComfyUI, set from the
+Runner Images page — see
 [Manage runner images](/docs/guides/manage-runner-images)), then the
 `comfyui` runner's resolved image (`HAL0_RUNNER_IMAGE_COMFYUI`, then the
-`manifest.json` pin for `comfyui`). The migration lane folds the legacy
-`image` value into `image_pin`; use `image_pin` for new configurations. Clear
-`image_pin` in `/etc/hal0/slots/img.toml` if you want the resolved default.
+`manifest.json` pin for `comfyui`). A bare `image` key is not renamed to
+`image_pin` by the runner migration, and the slot loader rejects it. To keep a
+custom image, rename the key to `image_pin`. To use the resolved default,
+remove both `image` and `image_pin` from
+`/etc/hal0/slots/img.toml`.
 
 ## Troubleshooting
 
@@ -142,10 +155,18 @@ started with.
 logs `comfyui.data_dir_not_writable`.** ComfyUI runs as the `hal0` account, and
 one of the data root's `output`, `input`, `user`, `custom_nodes` or `home`
 directories is not writable by it: a data root laid down by hand under another
-account, or on a share. As root, once:
-`chgrp -R <hal0 group> <dir> && chmod -R g+ws <dir>` on the directory the log
-names. A data root hal0 created is already `hal0:hal0 2775`; the models
-directory may stay read-only.
+account, or on a share. As root, repair the directory the log names with:
+
+```sh
+chgrp -R <hal0 group> <dir> &&
+find <dir> -type d -exec chmod g+rwsx {} + &&
+find <dir> -type f -exec chmod g+rw {} +
+```
+
+The directory rule grants the `hal0` group read, write and search permissions
+and keeps directories setgid; the file rule grants group read and write
+without adding execute bits. A data root hal0 created is already `hal0:hal0
+2775`; the models directory may stay read-only.
 
 **The Engine tab reads `ComfyUI is stopped` or `ComfyUI isn't answering`.**
 Stopped is fine: the next render starts the engine, and a cold start can take up

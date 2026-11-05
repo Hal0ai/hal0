@@ -142,14 +142,15 @@ Resolution order, from `hal0.providers.container._resolve_image_ref`:
 
 Slots on a non-llama runtime (ComfyUI, FLM, Kokoro, Moonshine, Qwen3-TTS,
 halogen) follow the same order, keyed by their runtime's runner key (`comfyui`,
-`flm`, `kokoro`, `moonshine`, `qwen3tts`, `halogen`) rather than a `binary`: `image_pin`
-(top-level or `[slot]`-nested), then `[slots].default_images[<key>]`, then the
-env override or pin. The `img` (ComfyUI) slot also honors an older plain
-`image` string between `image_pin` and the launch-image override — see
-[Image workflows and troubleshooting](/docs/guides/image-workflows-troubleshooting#which-container-image-the-img-slot-runs). The image pull, slot status,
-drift check and load-time GPU preflight all resolve the same ref the slot
-launches, including for a slot with no profile or `image_pin` (for example a
-bare `type = "tts"` slot that falls back to Kokoro).
+`flm`, `kokoro`, `moonshine`, `qwen3tts`, `halogen`) rather than a `binary`:
+`image_pin` (top-level or `[slot]`-nested), then
+`[slots].default_images[<key>]`, then the env override or pin. The `img`
+(ComfyUI) slot follows the same order. Its retired bare `image` key is rejected
+by the slot loader; rename it to `image_pin` to keep a custom image — see
+[Image workflows and troubleshooting](/docs/guides/image-workflows-troubleshooting#which-container-image-the-img-slot-runs).
+The image pull, slot status, drift check and load-time GPU preflight all resolve
+the same ref the slot launches, including for a slot with no profile or
+`image_pin` (for example a bare `type = "tts"` slot that falls back to Kokoro).
 
 ## ComfyUI custom-node dependencies
 
@@ -172,12 +173,21 @@ not checked.
 
 The mounted data directories must still be writable by `hal0`. If the
 ComfyUI data root (`/var/lib/hal0/models/comfyui` by default) was created
-under another account or on a share, make its `output`, `input`, `user`
-and `custom_nodes` directories writable first, as root:
-`chgrp -R <hal0 group> <dir> && chmod -R g+ws <dir>`. A data root hal0
-created is already `hal0:hal0 2775`. Otherwise `SaveImage` can fail with
-`Permission denied`; the API journal logs `comfyui.data_dir_not_writable`
-with the command.
+under another account or on a share, make its `output`, `input`, `user`,
+`custom_nodes` and `home` directories writable first. As root, repair the
+directory the journal names with:
+
+```sh
+chgrp -R <hal0 group> <dir> &&
+find <dir> -type d -exec chmod g+rwsx {} + &&
+find <dir> -type f -exec chmod g+rw {} +
+```
+
+The directory rule grants the `hal0` group read, write and search permissions
+and keeps directories setgid; the file rule grants group read and write
+without adding execute bits. A data root hal0 created is already `hal0:hal0
+2775`. Otherwise `SaveImage` can fail with `Permission denied`; the API journal
+logs `comfyui.data_dir_not_writable`.
 
 ## The Runner Images page
 
