@@ -380,8 +380,19 @@ def check_fabric_clock(slots: Any = None, *, sys_root: str = "/sys") -> Check:
     name, title = "fabric_clock", "NPU/GPU fabric-clock guard"
     if not isinstance(slots, list):
         return Check(name, title, _PASS, "slot list unavailable, fabric-clock check skipped")
-    npu_slots = [s for s in slots if isinstance(s, dict) and slot_uses_npu(s)]
-    gpu_slots = [s for s in slots if isinstance(s, dict) and slot_uses_gpu(s)]
+    # review P2-5: the API always folds in a synthetic composite row (the
+    # `hal0` "all slots" pseudo-slot, assigned backend='vulkan' by
+    # slot_view synthesis) so it reads as a real, individually-configured
+    # GPU slot. Counting it here turns every box with any GPU slot
+    # configured into a false WARN naming `hal0` as the offending slot —
+    # exclude synthetic/non-local rows and only pair real slot configs.
+    real_slots = [
+        s
+        for s in slots
+        if isinstance(s, dict) and not s.get("_synthetic") and s.get("name") != "hal0"
+    ]
+    npu_slots = [s for s in real_slots if slot_uses_npu(s)]
+    gpu_slots = [s for s in real_slots if slot_uses_gpu(s)]
     if not npu_slots or not gpu_slots:
         return Check(name, title, _PASS, "no NPU+GPU slot pairing configured")
     state = read_fabric_clock(sys_root)

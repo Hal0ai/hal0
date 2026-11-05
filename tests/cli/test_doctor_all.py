@@ -3517,3 +3517,24 @@ def test_fabric_clock_passes_unreadable_when_sysfs_absent(tmp_path: Path) -> Non
     c = da.check_fabric_clock(slots, sys_root=str(tmp_path / "no-such-sys"))
     assert c.status == "pass"
     assert "unreadable" in c.detail
+
+
+def test_fabric_clock_ignores_synthetic_hal0_composite(tmp_path: Path) -> None:
+    """review P2-5: the API always folds in a synthetic composite row named
+    ``hal0`` (backend='vulkan' from slot_view synthesis). Counting it as a
+    real, individually-configured GPU slot turned every box with an NPU
+    slot and NO real GPU slot configured into a false WARN naming ``hal0``
+    — exclude ``_synthetic`` rows so only genuine per-slot configs pair.
+    """
+    slots = [
+        {"name": "flm", "state": "ready", "backend": "flm"},
+        {
+            "name": "hal0",
+            "state": "serving",
+            "backend": "vulkan",
+            "_synthetic": True,
+        },
+    ]
+    c = da.check_fabric_clock(slots, sys_root=_fclk_sysfs(tmp_path, perf="auto", marked_index=0))
+    assert c.status == "pass", c.detail
+    assert "hal0" not in c.detail
