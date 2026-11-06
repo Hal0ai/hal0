@@ -356,7 +356,7 @@ API, so a direct `POST` bypasses it. Restart shows no such prompt.
 ComfyUI has no Stop button at all — the registry grants it only `start`
 and `restart`. Its "start" is not a raw `systemctl start`: the route
 substitutes the GPU-arbiter switchover (`_comfyui_start`,
-`src/hal0/api/routes/services.py:187-208`, delegating to the same
+`src/hal0/api/routes/services.py:233-256`, delegating to the same
 `comfyui_switchover` handler the FirstRun repair flow uses) so resident LLM
 slots get drained before the iGPU is handed to ComfyUI. Stopping is
 arbiter-managed too, per its card hint: "stop is GPU-arbiter managed —

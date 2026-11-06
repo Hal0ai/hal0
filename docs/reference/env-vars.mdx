@@ -79,6 +79,7 @@ rely on the default rather than setting it explicitly, verify which code path ap
 | Variable | Default | Controls |
 |---|---|---|
 | `HAL0_SLOT_OUTPUT_SANITY` | unset (gate ON) | `0`/`false`/`no`/`off` disables the [output-sanity gate](/docs/reference/slot-lifecycle/) box-wide, so a `type = "llm"` slot reaches `READY` on the health probe alone. Per-slot equivalent: `output_sanity = false` in the slot TOML. |
+| `HAL0_FABRIC_CLOCK_GUARD` | unset (falls back to `[slots].fabric_clock_guard`, then `refuse`) | Per-process override of the fabric-clock guard policy — `refuse`, `warn` or `off`. The guard refuses (by default) to load an NPU slot beside a GPU slot while the host's AMD GPU fabric clock is not held at its top DPM level, because a mid-flight fclk change can hang the box or corrupt NPU results on Strix Halo (ADR-0054). Set it in the `hal0-api` unit's environment to change the policy without touching `hal0.toml`. |
 
 ## Metrics
 

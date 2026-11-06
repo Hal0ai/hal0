@@ -35,6 +35,7 @@ publishing an unqualified "auth is/isn't enforced" claim.
 | `/v1/audio/transcriptions` | POST | multipart/form-data. `model` form field is **required** — 400 `request.missing_model` if absent. See the `/v1/audio/transcriptions` entry under Request body deviations, below. |
 | `/v1/audio/speech` | POST | JSON body. `model` is **required** (400 `request.missing_model` if missing/blank) — a deliberate deviation from the dispatcher's usual default-model fallback. |
 | `/v1/images/generations` | POST | ComfyUI-backed. **Not** a passthrough — see the `/v1/images/generations` entry under Request body deviations, below. |
+| `/v1/systemone` | POST | Hindsight's "System One" decision gate. hal0's own route, not an OpenAI one — a raw proxy: the body goes out unchanged and the backend's status and body come straight back. See the `/v1/systemone` section below. |
 | `/v1/realtime` | WebSocket | Separate module (`realtime.py`) — not covered in depth by this pass. |
 
 ### Not implemented
@@ -47,6 +48,32 @@ path strings, not reachable over HTTP):
 - `/v1/moderations`
 - `/v1/assistants`, `/v1/threads`, `/v1/files`, `/v1/fine_tuning/*`, `/v1/batches`
 - `/v1/responses` — not available through hal0, including for Hermes models; use `/v1/chat/completions`.
+
+## `/v1/systemone` — the Hindsight decision gate
+
+`POST /v1/systemone` is hal0's own route, not an OpenAI one. It is the
+"System One" decision gate the Hindsight engine calls for cheap, frequent
+judgements — recall ranking and pruning, consolidation decisions, reflect
+sufficiency, page-delta gating. It gained a home in the router in 1.8.0
+(ADR-0056) because the engine used to call the decision backend's port
+directly: the call never counted as slot activity, so `idle_timeout_s` could
+unload the slot in the middle of it.
+
+The route is a raw proxy. The body goes out unchanged and the backend's status
+and body come straight back:
+
+- If a slot carries the experimental `[npu].decision` tag, the call is
+  forwarded there instead — with decision priority (it jumps ahead of queued
+  chat in the admission queue) and a slot-activity stamp that resets the idle
+  timer. The slot is lazy-loaded first, the way a chat slot is.
+- Otherwise it is proxied to the CPU `hs-decide` server named by
+  `[memory.decision]` — `base_url` when it is set, else
+  `http://127.0.0.1:<port>`. A body with no `model` gets
+  `[memory.decision].model` (`hs-decide-1-flash`) filled in.
+
+The proxy timeout is `[memory.decision].timeout_s`. A decision call that waits
+in a slot's admission queue is bounded by
+`[dispatcher].admission_wait_timeout_s`.
 
 ## Request body deviations from standard OpenAI shape
 
