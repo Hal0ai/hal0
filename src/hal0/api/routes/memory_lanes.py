@@ -18,6 +18,7 @@ Four endpoints backing the memory-showcase UI branch:
 from __future__ import annotations
 
 import logging
+import re
 import time
 from datetime import UTC
 from typing import Any
@@ -28,7 +29,7 @@ from fastapi import APIRouter, Request, Response
 
 from hal0.api.routes.memory import MemoryUnavailable
 from hal0.config.loader import load_hal0_config
-from hal0.errors import BadRequest, Hal0Error, NotFound
+from hal0.errors import BadRequest, Forbidden, Hal0Error, NotFound
 
 router = APIRouter()
 
@@ -51,6 +52,33 @@ class MemoryEngineUnreachable(Hal0Error):
 class MemoryEngineError(Hal0Error):
     code = "memory.engine_error"
     status = 502
+
+
+#: The only engine paths DELETE may reach through the passthrough: a single
+#: directive or mental model. Every bank-scoped delete (the bank itself, its
+#: memories, config, documents) has a dedicated, classified route in
+#: memory_admin — the #1024 bank wipe carries an echoed ?confirm= gate there —
+#: and must not be reachable as a one-call generic DELETE here.
+_DELETE_ALLOWED = re.compile(r"^v1/default/banks/[^/]+/(directives|mental-models)/[^/]+/?$")
+
+#: Non-DELETE verbs that still destroy data (bulk delete / clear / reset
+#: endpoints) are refused outright for the same reason.
+_DESTRUCTIVE_VERB_SUFFIX = re.compile(r"/(delete|clear|reset|wipe|purge)/?$")
+
+
+def _check_method(method: str, path: str) -> None:
+    if method == "DELETE" and not _DELETE_ALLOWED.match(path):
+        raise Forbidden(
+            f"DELETE {path!r} is not allowed through the engine passthrough; "
+            "use the dedicated /api/memory/banks/... route",
+            code="memory.engine_delete_not_allowed",
+        )
+    if method != "GET" and _DESTRUCTIVE_VERB_SUFFIX.search(path):
+        raise Forbidden(
+            f"{method} {path!r} is a destructive engine endpoint and is not "
+            "allowed through the passthrough",
+            code="memory.engine_delete_not_allowed",
+        )
 
 
 def _allowed(path: str) -> bool:
@@ -80,6 +108,7 @@ def _timeout_for(method: str, path: str) -> float:
 async def _passthrough(request: Request, path: str, method: str) -> Response:
     if not _allowed(path):
         raise NotFound(f"no such engine path: {path!r}", code="memory.engine_path_not_allowed")
+    _check_method(method, path)
 
     client = _client(request)
 

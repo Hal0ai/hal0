@@ -2944,7 +2944,12 @@ class MemoryConsoleConfig(BaseModel):
         default=False,
         description="Install/run the Hindsight Control Plane service.",
     )
-    port: int = Field(default=9999, ge=1, le=65535)
+    port: int = Field(
+        default=9999,
+        ge=1,
+        le=65535,
+        description="Port the Hindsight Control Plane binds; changing it moves the console link.",
+    )
     bind: str = Field(
         default="127.0.0.1",
         description="Bind address — kept loopback by default; proxy through hal0-api.",
