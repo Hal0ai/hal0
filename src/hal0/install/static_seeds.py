@@ -1,7 +1,7 @@
 """Static slot-config seeds shipped in ``installer/etc-hal0/slots/``.
 
 ``install.sh``'s "Container slot seeds" loop copies these files
-(``flm``/``tts``/``rerank``/``utility``/``img``/``agent``/``brain``)
+(``flm``/``tts``/``rerank``/``memory``/``img``/``agent``/``brain``)
 into ``/etc/hal0/slots/`` on a FRESH install only — bash, so it runs
 before hal0's own venv exists. That loop never re-runs on ``hal0
 update``: an existing box upgrading past a release that adds a new
@@ -35,12 +35,12 @@ log = structlog.get_logger(__name__)
 
 #: Slot names with a static seed TOML in installer/etc-hal0/slots/.
 #: MUST mirror install.sh's:
-#:   for seed_slot in flm tts rerank utility img agent brain qwen3tts coder embed; do
+#:   for seed_slot in flm tts rerank memory img agent brain qwen3tts coder embed; do
 STATIC_SEED_SLOTS: tuple[str, ...] = (
     "flm",
     "tts",
     "rerank",
-    "utility",
+    "memory",
     "img",
     "agent",
     "brain",
@@ -78,7 +78,7 @@ LLAMA_SEED_CAPABILITIES: dict[str, str] = {
     "coder": "coder",
     "embed": "embed",
     "rerank": "rerank",
-    "utility": "utility",
+    "memory": "chat",
 }
 
 #: The top-level ``device = "..."`` assignment in a seed TOML. The seeds keep
@@ -99,7 +99,7 @@ _DEFAULT_WINDOW_CAP = 32768
 #: resolves through the routing fallback chain to one of these —
 #: ``LLAMA_SEED_CAPABILITIES`` maps both to ``"chat"``). #1868's "a box that
 #: cannot afford 64K should say so loudly rather than silently seeding less"
-#: floor applies only to these two; embed/rerank/coder/utility have no such
+#: floor applies only to these two; embed/rerank/coder/memory have no such
 #: hard minimum, so they clamp down freely.
 _HERMES_ANCHOR_SEEDS = frozenset({"agent", "brain"})
 

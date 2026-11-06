@@ -364,7 +364,7 @@ def graph_enable_cmd(
     slot: str | None = typer.Option(
         None,
         "--slot",
-        help="Local llm slot the memory engine runs on (e.g. 'utility'). "
+        help="Local llm slot the memory engine runs on (e.g. 'memory'). "
         "Must be an enabled type=llm slot; the server validates against the live "
         "slot set. Omit to keep the current slot.",
     ),
