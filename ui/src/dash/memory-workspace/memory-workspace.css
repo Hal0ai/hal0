@@ -1,0 +1,30 @@
+/* hal0 v3 dashboard — Memory workspace (Hindsight 1.2 showcase) styling.
+ * Reuses the shared .card/.btn/.tbl/.badge/.empty/.mono primitives; this
+ * file only covers layout that is specific to this view. */
+
+.memws-header { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.memws-header h1 { margin: 0; font-size: 1.1rem; }
+.memws-bank-select { margin-left: auto; }
+
+.memws-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border, #2a2a35); margin-bottom: 14px; }
+.memws-tab { background: none; border: none; padding: 8px 12px; cursor: pointer; opacity: .7; border-bottom: 2px solid transparent; }
+.memws-tab.active { opacity: 1; border-bottom-color: var(--accent, #7aa2f7); }
+
+.memws-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+
+.memws-kb { display: grid; grid-template-columns: 280px 1fr; gap: 12px; align-items: start; }
+.memws-tree { list-style: none; margin: 0; padding: 0; }
+.memws-tree li { padding: 2px 0; }
+
+.memws-pre { white-space: pre-wrap; word-break: break-word; max-height: 420px; overflow: auto; padding: 8px; background: var(--bg-2, #15151c); border-radius: 6px; }
+
+.memws-form { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; max-width: 480px; }
+.memws-form label { display: flex; flex-direction: column; gap: 4px; font-size: .85rem; }
+.memws-form textarea { min-height: 70px; }
+
+.memws-chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+
+.memws-toggles { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.memws-toggles label { display: flex; align-items: center; gap: 8px; font-size: .85rem; }
+
+.mem-error { padding: 12px; }
