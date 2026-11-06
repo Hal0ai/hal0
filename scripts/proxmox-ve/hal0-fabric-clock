@@ -87,6 +87,18 @@ hold_dev() {
     echo "hal0-fabric-clock: $1: held at level $lvl"
     return 0
   fi
+  # Some Strix Halo firmware (seen on kernel 7.0.14-pve, SMU 14.0.x) accepts
+  # the manual pin but never marks the active pp_dpm_fclk level with `*`, so a
+  # manual hold can't be verified from sysfs. `high` forces every DPM domain,
+  # fclk included, to its top level, and it reads as held both here and in the
+  # guest's guard. Measured with gpu_metrics: fclk stays at 2000 MHz under
+  # `high` and drifts between 1898 and 1957 MHz under `auto`.
+  if ! grep -q '\*' "$1/pp_dpm_fclk" 2>/dev/null; then
+    if wr "$1/power_dpm_force_performance_level" high && held "$1"; then
+      echo "hal0-fabric-clock: $1: held via perf level high (firmware does not mark the active fclk level)"
+      return 0
+    fi
+  fi
   echo "hal0-fabric-clock: $1: could not hold it (level $lvl), rolling back to $prev_perf" >&2
   rollback "$1"
   return 1

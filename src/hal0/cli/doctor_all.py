@@ -1088,7 +1088,11 @@ def check_img_custom_nodes() -> Check:
     if journal.returncode or journal.stderr.strip() or not journal.stdout.strip():
         return skipped("current-start journal unavailable or empty; try `sudo hal0 doctor all`")
     failures: set[str] = set()
+    env_failure = ""
     for line in Text.from_ansi(journal.stdout).plain.splitlines():
+        # hal0_python_env.py's one line: nodes are then back on the read-only image.
+        if "comfyui.python_env_failed" in line:
+            env_failure = line.partition("comfyui.python_env_failed")[2].strip()
         match = re.search(
             r"(?:IMPORT FAILED|PRESTARTUP FAILED)\)\s*:\s*(.+)$"
             r"|Cannot import (.+?) module for custom nodes(?:\s*:|$)",
@@ -1096,16 +1100,19 @@ def check_img_custom_nodes() -> Check:
         )
         if match:
             failures.add(Path((match.group(1) or match.group(2)).strip()).name)
-    if failures:
-        return Check(
-            key,
-            label,
-            _WARN,
-            "custom nodes failed in the current img start: "
-            + ", ".join(sorted(failures))
-            + " — ship dependencies in a derived runner image; see "
-            "https://hal0.dev/docs/guides/manage-runner-images#comfyui-custom-node-dependencies",
+    guide = "https://hal0.dev/docs/guides/manage-runner-images#comfyui-custom-node-dependencies"
+    problems = []
+    if env_failure:
+        problems.append(
+            f"the writable Python environment could not be prepared ({env_failure}), "
+            "so nodes cannot install packages"
         )
+    if failures:
+        problems.append(
+            "custom nodes failed in the current img start: " + ", ".join(sorted(failures))
+        )
+    if problems:
+        return Check(key, label, _WARN, "; ".join(problems) + f" — see {guide}")
     return Check(key, label, _PASS, "no custom-node startup failures in the current img start")
 
 

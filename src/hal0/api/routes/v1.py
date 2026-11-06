@@ -44,6 +44,7 @@ from hal0.dispatcher.lane_pin import (
     lane_slot_pin,
     preferred_slot,
     set_lane_pin,
+    set_read_timeout,
     set_upstream_only,
 )
 from hal0.dispatcher.stream_usage import ensure_include_usage, strip_usage_only_chunk
@@ -364,6 +365,18 @@ def _memory_alias_target(request: Request) -> tuple[str, str]:
     if graph is None:
         graph = MemoryGraphConfig()
     return memory_engine_target(graph)
+
+
+def _memory_alias_timeout_s(request: Request) -> float:
+    """``[memory.graph].llm_timeout_s`` off the live config cache (schema default
+    on a bare app), the call budget the memory engine itself runs under (#3347)."""
+    from hal0.config.schema import MemoryGraphConfig
+
+    cfg = getattr(request.app.state, "hal0_config", None)
+    graph = getattr(getattr(cfg, "memory", None), "graph", None)
+    if graph is None:
+        graph = MemoryGraphConfig()
+    return float(graph.llm_timeout_s)
 
 
 async def _rewrite_chat_slot_alias(request: Request, body: dict[str, Any]) -> dict[str, Any]:
@@ -720,6 +733,9 @@ async def _normalize_chat_body(request: Request, body: dict[str, Any]) -> dict[s
         # upstream or fails with dispatch.upstream_unavailable, never the
         # agent anchor (not even on a cold or offline catalog).
         kind, target = _memory_alias_target(request)
+        # #3347: Hindsight sends this call non-streaming with its own budget
+        # (llm_timeout_s); the dispatcher must not cut it earlier than that.
+        set_read_timeout(request, _memory_alias_timeout_s(request))
         if kind == "upstream":
             body = {**body, "model": target}
             set_upstream_only(request, target)

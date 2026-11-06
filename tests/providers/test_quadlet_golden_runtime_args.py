@@ -65,6 +65,8 @@ Volume=<data_root>/input:/opt/ComfyUI/input
 Volume=<data_root>/user:/opt/ComfyUI/user
 Volume=<data_root>/custom_nodes:/opt/ComfyUI/custom_nodes
 Volume=<data_root>/home:/home/hal0
+Volume=<data_root>/python:/opt/hal0-python
+Volume=<data_root>/web:/opt/ComfyUI/web
 Volume=<data_root>/extra_model_paths.yaml:/opt/ComfyUI/extra_model_paths.yaml:ro
 Volume=<hal0_home>/var-lib/hal0/comfyui-gate:/opt/hal0-gate:ro
 Environment=HAL0_COMFYUI_STATUS_URL=http://127.0.0.1:8080/api/comfyui/arbiter
@@ -76,7 +78,7 @@ Environment=HOME=/home/hal0
 Environment=USER=hal0
 Environment=LOGNAME=hal0
 PodmanArgs=--ipc=host
-Exec=bash -lc 'cd /opt/ComfyUI && exec python main.py --listen 0.0.0.0 --port 8188 --temp-directory /tmp --use-pytorch-cross-attention'
+Exec=bash -lc 'cd /opt/ComfyUI && python /opt/hal0-python/hal0_python_env.py; test -f /opt/hal0-python/current/bin/activate && . /opt/hal0-python/current/bin/activate; exec python main.py --listen 0.0.0.0 --port 8188 --temp-directory /tmp --use-pytorch-cross-attention'
 
 [Service]
 Restart=always

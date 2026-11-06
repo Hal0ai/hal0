@@ -327,11 +327,11 @@ The first `hal0 update` to 1.6.0 changes how Hermes is installed. One step is ne
   [The dock](/docs/guides/dashboard-and-settings#the-dock).
 - **ComfyUI and custom nodes run as `hal0`.** Restart `img` to apply.
   Its mounted data directories must be writable by `hal0`; `/opt/venv` and
-  `/opt/ComfyUI` otherwise remain read-only to it. Nodes that install
-  dependencies at startup fail even if the slot is ready. Ship dependencies
-  in a derived runner image; `hal0 doctor all` names failed nodes from the
-  current start. See [ComfyUI custom-node dependencies](/docs/guides/manage-runner-images#comfyui-custom-node-dependencies)
-  for image selection and data-directory permissions.
+  `/opt/ComfyUI` otherwise remain read-only to it. On 1.7.1, nodes
+  that install dependencies at startup fail even if the slot is ready; 1.8.0
+  gives them a writable Python environment. `hal0 doctor all` names failed
+  nodes from the current start. See [ComfyUI custom-node dependencies](/docs/guides/manage-runner-images#comfyui-custom-node-dependencies)
+  for the environment, image selection and data-directory permissions.
 
 ## Upgrading to 1.7.0
 

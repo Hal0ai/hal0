@@ -202,12 +202,24 @@ other offline slot.
 (or, after `migrate-id-keying`, its stable numeric id — see
 `hal0.slots.layout`), so SSE readers never observe a torn write.
 
-On the API snapshot, `model_id` is `null` when a slot is `offline`, has no
-`[model].default` binding, and its provider requires an explicit model. This
-prevents the snapshot from exposing the stale id retained by the state record
-for an earlier load. While the slot is loaded, `model_id` continues to identify
-the model being served, even if its binding was cleared after the load.
-Self-managed providers do not require an explicit model (see below).
+On the API snapshot, `model_id` follows the slot's state:
+
+- a **serving** slot — `ready`, `serving` or `idle` — reports the model it is
+  serving, even if its binding was cleared after the load;
+- a **non-serving** slot whose `[model].default` binding is empty reports
+  `null`, next to its "no model assigned" message, rather than the id its
+  state record carries from an earlier load;
+- a **cold** slot — `offline` or `error` — with a binding reports that
+  binding, so a divergent binding is not masked by the stale id the state
+  record retained;
+- a **loading** slot — `pulling`, `starting` or `warming` — with a binding
+  reports the model it is actually pulling or warming rather than the
+  binding: an explicit load of a model other than the binding records that
+  model while the load runs, and the binding is only persisted after the
+  readiness wait.
+
+A slot whose provider requires an explicit model follows these rules;
+self-managed providers do not require an explicit model (see below).
 
 ## Self-managed providers
 
