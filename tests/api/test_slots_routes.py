@@ -292,6 +292,55 @@ def test_list_slots_uses_divergent_binding_for_non_serving_model_id(
     assert chat["model_id"] == "other-model-xyz"
 
 
+def test_list_slots_uses_divergent_binding_for_error_state_model_id(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+    isolated_app: FastAPI,
+    tmp_hal0_home: str,
+) -> None:
+    """An errored slot reports its configured model, not its stale state id.
+
+    ``error`` is the state a slot is in whenever a load failed — the routine
+    operator path, and the one where a stale id misleads most (#3439). The
+    cold-slot rule owns the field for every non-serving state, so the
+    divergent binding must win here exactly as it does for ``offline``.
+    """
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "chat",
+        [
+            'name = "chat"',
+            "port = 8081",
+            'device = "gpu-vulkan"',
+            'provider = "llama-server"',
+            'runtime = "container"',
+            'profile = "chat"',
+            "[model]",
+            'default = "other-model-xyz"',
+        ],
+    )
+    sm: SlotManager = isolated_app.state.slot_manager
+    # Seed the record a failed load leaves behind: the id from the last
+    # successful load, with the slot now in ERROR. The binding names a
+    # different model, so the snapshot must project the binding.
+    sm._states[sm._key("chat")] = SlotStateRecord(
+        name="chat",
+        state=SlotState.ERROR,
+        model_id="qwen3-4b-q4_k_m",
+        port=8081,
+        updated_at=time.time(),
+        message="load failed",
+        extra={},
+    )
+
+    r = isolated_client.get("/api/slots")
+    assert r.status_code == 200, r.text
+    chat = next(entry for entry in r.json() if entry["name"] == "chat")
+    assert chat["state"] == "error"
+    assert chat["model_id"] == "other-model-xyz"
+
+
 def test_list_slots_keeps_in_flight_model_id_while_loading(
     slot_root: Path,
     container_stub: dict[str, Any],
