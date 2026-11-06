@@ -205,6 +205,42 @@ def test_agents_filters_coding_agent_banks(client: TestClient, recorder: _Record
         "qwen-code",
     ]
     assert "hindsight-coding-agents@0.8.5" in body["install"]["command"]
+    assert body["console_url"] is None
+
+
+def test_agents_console_url_disabled_by_default(
+    client: TestClient, recorder: _Recorder
+) -> None:
+    recorder.respond("GET", "/v1/default/banks", 200, {"banks": []})
+    r = client.get("/api/memory/agents")
+    assert r.status_code == 200
+    assert r.json()["console_url"] is None
+
+
+def test_agents_console_url_enabled(
+    client: TestClient, recorder: _Recorder, monkeypatch
+) -> None:
+    from hal0.api.routes import memory_lanes as mod
+
+    class _Console:
+        enabled = True
+        port = 9999
+        url = None
+
+    class _MemCfg:
+        public_url = None
+        console = _Console()
+
+    class _Cfg:
+        memory = _MemCfg()
+
+    monkeypatch.setattr(mod, "load_hal0_config", lambda: _Cfg())
+    recorder.respond("GET", "/v1/default/banks", 200, {"banks": []})
+    r = client.get("/api/memory/agents")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["console_url"] is not None
+    assert body["console_url"].endswith(":9999")
 
 
 def test_models_shape(client: TestClient) -> None:

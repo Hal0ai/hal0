@@ -21,6 +21,7 @@ import logging
 import re
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Request, Response
@@ -282,6 +283,30 @@ def _public_hindsight_url(request: Request, cfg: Any) -> str:
     return f"http://{host}:9177"
 
 
+def _console_url(request: Request, cfg: Any) -> str | None:
+    """Hindsight Control Plane console URL from ``[memory.console]``, or None.
+
+    Returns None when the console is disabled. If ``[memory.console]`` has no
+    explicit ``url``, derive one from ``memory.public_url`` (host) plus the
+    console port; else fall back to the inbound request's hostname.
+    """
+    console = getattr(cfg.memory, "console", None)
+    if console is None or not getattr(console, "enabled", False):
+        return None
+    url = getattr(console, "url", None)
+    if url:
+        return str(url)
+    port = getattr(console, "port", 9999)
+    public_url = getattr(cfg.memory, "public_url", None)
+    host = None
+    if public_url:
+        parsed = urlparse(str(public_url))
+        host = parsed.hostname
+    if not host:
+        host = request.url.hostname or "127.0.0.1"
+    return f"http://{host}:{port}"
+
+
 @router.get("/agents")
 async def get_agents(request: Request) -> dict[str, Any]:
     cfg = load_hal0_config()
@@ -307,6 +332,7 @@ async def get_agents(request: Request) -> dict[str, Any]:
     return {
         "banks": bank_ids,
         "install": {"harnesses": _HARNESSES, "command": command},
+        "console_url": _console_url(request, cfg),
     }
 
 
