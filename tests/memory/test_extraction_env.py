@@ -1238,3 +1238,100 @@ def test_reconcile_compares_against_the_clamped_limits(monkeypatch, tmp_path: Pa
         lambda *a, **k: type("C", (), {"memory": type("M", (), {"graph": graph})()})(),
     )
     assert ee.reconcile_extraction_dropin()["status"] == "converged"
+
+
+# ── showcase drop-in apply / reconcile (#3492) ───────────────────────────────
+
+
+def _redirect_showcase(monkeypatch, tmp_path: Path) -> tuple[Path, Path]:
+    import hal0.memory.extraction_env as ee
+
+    extraction = _redirect_drop_in(monkeypatch, tmp_path)
+    showcase = extraction.parent / "showcase-lanes.conf"
+    monkeypatch.setattr(ee, "SHOWCASE_DROP_IN_PATH", showcase)
+    return extraction, showcase
+
+
+def _showcase_cfg():
+    from hal0.config.schema import MemoryDecisionConfig, MemoryLanesConfig, MemoryModelsConfig
+
+    return {
+        "models": MemoryModelsConfig(),
+        "decision": MemoryDecisionConfig(provider="local"),
+        "lanes": MemoryLanesConfig(),
+    }
+
+
+def test_apply_showcase_writes_through_the_seam_verb_then_restarts():
+    """The unprivileged path: body on stdin to the dedicated verb (never a
+    path argument), then daemon-reload + restart — in that order."""
+    from hal0.memory.extraction_env import apply_showcase_dropin, render_showcase_env
+
+    calls, run = _seam_recorder()
+    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: True)
+
+    result = apply_showcase_dropin(**_showcase_cfg(), seam=seam)
+
+    assert result["error"] is None
+    assert result["written"] and result["daemon_reloaded"] and result["restarted"]
+    argvs = [c[0] for c in calls]
+    assert argvs[0][-1] == "write-hindsight-showcase-dropin"
+    assert SEAM_BIN in argvs[0]
+    assert calls[0][1] == render_showcase_env(**_showcase_cfg())
+    assert argvs[1][-1] == "daemon-reload"
+    assert argvs[2][-2:] == ["svc-restart", "hindsight"]
+
+
+def test_apply_showcase_reports_a_refused_write_and_skips_the_restart():
+    from hal0.memory.extraction_env import apply_showcase_dropin
+
+    calls, run = _seam_recorder(rc=64, stderr="drop-in rejected: nope")
+    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: True)
+
+    result = apply_showcase_dropin(**_showcase_cfg(), seam=seam)
+
+    assert result["written"] is False and result["restarted"] is False
+    assert "drop-in rejected" in result["error"]
+    assert len(calls) == 1
+
+
+def test_apply_showcase_without_restart_only_writes(monkeypatch, tmp_path: Path):
+    from hal0.memory.extraction_env import apply_showcase_dropin
+
+    _, showcase = _redirect_showcase(monkeypatch, tmp_path)
+    seam = SystemCtlSeam(run=_forbidden, is_hal0_user=lambda: False)
+
+    result = apply_showcase_dropin(**_showcase_cfg(), restart=False, seam=seam)
+
+    assert result["written"] and not result["restarted"]
+    assert "\n[Service]\n" in showcase.read_text()
+
+
+def test_showcase_reconcile_skips_a_box_without_the_engine(monkeypatch, tmp_path: Path):
+    from hal0.memory.extraction_env import reconcile_showcase_dropin
+
+    _, showcase = _redirect_showcase(monkeypatch, tmp_path)
+    seam = SystemCtlSeam(run=_forbidden, is_hal0_user=lambda: False)
+
+    assert reconcile_showcase_dropin(seam=seam)["status"] == "skipped"
+    assert not showcase.exists()
+
+
+def test_showcase_reconcile_creates_then_converges(monkeypatch, tmp_path: Path):
+    """An updated box with the engine but no showcase drop-in gets one (and a
+    restart); the next pass is a no-op that touches nothing privileged."""
+    from hal0.memory.extraction_env import reconcile_showcase_dropin
+
+    extraction, showcase = _redirect_showcase(monkeypatch, tmp_path)
+    _write_graph_config(monkeypatch, tmp_path)
+    extraction.parent.mkdir(parents=True)
+    extraction.write_text(render_drop_in(300))
+    calls, run = _seam_recorder()
+
+    result = reconcile_showcase_dropin(seam=SystemCtlSeam(run=run, is_hal0_user=lambda: False))
+
+    assert result["status"] == "applied"
+    assert "HINDSIGHT_API_EMBEDDINGS_" in showcase.read_text()
+    assert ["systemctl", "restart", "hindsight-api.service"] in [c[0] for c in calls]
+    quiet = SystemCtlSeam(run=_forbidden, is_hal0_user=lambda: False)
+    assert reconcile_showcase_dropin(seam=quiet) == {"status": "converged"}

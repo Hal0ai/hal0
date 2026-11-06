@@ -883,6 +883,93 @@ def reconcile_extraction_dropin(
     return {"status": "failed" if result.get("error") else "applied", **result}
 
 
+def apply_showcase_dropin(
+    *,
+    models: MemoryModelsConfig,
+    decision: MemoryDecisionConfig,
+    lanes: MemoryLanesConfig,
+    restart: bool = True,
+    seam: SystemCtlSeam | None = None,
+) -> dict[str, Any]:
+    """Write the showcase drop-in and (best-effort) restart hindsight-api (#3492).
+
+    The :func:`apply_extraction_slot` shape for ``[memory.models]`` /
+    ``[memory.decision]`` / ``[memory.lanes]``: render with
+    :func:`render_showcase_env`, write through the privileged
+    ``write-hindsight-showcase-dropin`` seam verb (allow-listed root-side),
+    then ``daemon-reload`` + ``restart hindsight-api`` — the engine reads
+    these env vars only at start. Never raises; returns
+    ``{"drop_in", "written", "daemon_reloaded", "restarted", "error"}``.
+    Blocking: event-loop callers must hop a thread.
+    """
+    seam = seam if seam is not None else SystemCtlSeam()
+    result: dict[str, Any] = {
+        "drop_in": str(SHOWCASE_DROP_IN_PATH),
+        "written": False,
+        "daemon_reloaded": False,
+        "restarted": False,
+        "error": None,
+    }
+    try:
+        seam.write_hindsight_showcase_dropin(
+            render_showcase_env(models=models, decision=decision, lanes=lanes),
+            path=SHOWCASE_DROP_IN_PATH,
+            timeout=_SYSTEMCTL_TIMEOUT_S,
+        )
+        result["written"] = True
+    except (OSError, subprocess.SubprocessError) as exc:
+        result["error"] = (
+            f"could not write {SHOWCASE_DROP_IN_PATH}: {_detail(exc)}{_stale_wrapper_hint(exc)}"
+        )
+        log.warning("hal0.memory.showcase_dropin_write_failed", error=str(exc))
+        return result
+
+    if not restart:
+        return result
+
+    for step, args in (
+        ("daemon_reloaded", ("systemctl", "daemon-reload")),
+        ("restarted", ("systemctl", "restart", SERVICE)),
+    ):
+        try:
+            seam.systemctl(*args, check=True, timeout=_SYSTEMCTL_TIMEOUT_S)
+            result[step] = True
+        except (OSError, subprocess.SubprocessError) as exc:
+            result["error"] = f"{' '.join(args)} failed: {_detail(exc)}"
+            log.warning("hal0.memory.showcase_restart_failed", step=step, error=str(exc))
+            return result
+
+    log.info("hal0.memory.showcase_dropin_applied")
+    return result
+
+
+def reconcile_showcase_dropin(
+    *, restart: bool = True, seam: SystemCtlSeam | None = None
+) -> dict[str, Any]:
+    """Re-render the showcase drop-in when it no longer matches ``hal0.toml``.
+
+    Like :func:`reconcile_extraction_dropin`, acts only on a box whose engine
+    is installed (the extraction drop-in exists); there it also *creates* the
+    showcase drop-in on first run, which is how an existing box picks up the
+    1.2 models/decision/lanes env after an update. Never raises. Returns
+    ``{"status": "skipped"|"converged"|"applied"|"failed", ...}``.
+    """
+    if not DROP_IN_PATH.exists():
+        return {"status": "skipped", "reason": "no memory engine on this box"}
+    try:
+        from hal0.config.loader import load_hal0_config
+
+        mem = load_hal0_config().memory
+    except Exception as exc:
+        return {"status": "skipped", "reason": f"hal0.toml unreadable: {_detail(exc)}"}
+    if showcase_drop_in_matches(models=mem.models, decision=mem.decision, lanes=mem.lanes):
+        return {"status": "converged"}
+    result = apply_showcase_dropin(
+        models=mem.models, decision=mem.decision, lanes=mem.lanes, restart=restart, seam=seam
+    )
+    return {"status": "failed" if result.get("error") else "applied", **result}
+
+
 def restart_hindsight_background(*, seam: SystemCtlSeam | None = None) -> bool:
     """Restart ``hindsight-api`` through the privileged seam, fire-and-forget.
 
@@ -1449,6 +1536,7 @@ __all__ = [
     "ExtractionThroughput",
     "ExtractionWindow",
     "apply_extraction_slot",
+    "apply_showcase_dropin",
     "drop_in_matches",
     "extraction_floor",
     "extraction_model_name",
@@ -1456,6 +1544,7 @@ __all__ = [
     "parse_busy_requests",
     "parse_throughput_metrics",
     "reconcile_extraction_dropin",
+    "reconcile_showcase_dropin",
     "render_drop_in",
     "resolve_extraction_window",
 ]

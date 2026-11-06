@@ -2014,9 +2014,25 @@ def run_post_activation_migrations(
     # surprise memory outage, the same reason the engine pass is skipped there.
     if upgrade_memory_engine_venv:
         try:
-            from hal0.memory.extraction_env import reconcile_extraction_dropin
+            from hal0.memory.extraction_env import (
+                reconcile_extraction_dropin,
+                reconcile_showcase_dropin,
+                restart_hindsight_background,
+            )
 
+            # #3492: write the showcase drop-in first without a restart, so a
+            # box where both drifted pays for one engine restart, not two.
+            showcase = reconcile_showcase_dropin(restart=False)
+            if showcase.get("status") in ("applied", "failed"):
+                log.info(
+                    "updater.showcase_dropin_reconciled",
+                    job_id=job_id,
+                    status=showcase["status"],
+                    error=showcase.get("error"),
+                )
             dropin = reconcile_extraction_dropin()
+            if showcase.get("status") == "applied" and dropin.get("status") != "applied":
+                restart_hindsight_background()
             if dropin.get("status") in ("applied", "failed"):
                 log.info(
                     "updater.extraction_dropin_reconciled",

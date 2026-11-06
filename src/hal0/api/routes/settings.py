@@ -47,6 +47,7 @@ Validation failures return the structured error envelope with
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -152,6 +153,28 @@ async def get_settings(request: Request) -> dict[str, Any]:
     return _config_to_dict(cfg)
 
 
+#: Settings prefixes that live in hindsight-api's showcase drop-in (#3492).
+_SHOWCASE_PREFIXES = ("memory.models.", "memory.decision.", "memory.lanes.")
+
+
+async def _apply_showcase_dropin(cs: Any) -> dict[str, Any] | None:
+    """Carry a changed ``[memory.models|decision|lanes]`` value to the engine.
+
+    Those keys reach hindsight-api only through its showcase drop-in, read at
+    start — persisting ``hal0.toml`` alone would leave the daemon on the old
+    values. Runs only when one of them actually changed; the restart waits on
+    a hindsight-api cold start, so it hops a thread. ``None`` when nothing to do.
+    """
+    if not any(c.path.startswith(_SHOWCASE_PREFIXES) for c in cs.changes):
+        return None
+    from hal0.memory.extraction_env import apply_showcase_dropin
+
+    mem = cs.merged.memory
+    return await asyncio.to_thread(
+        apply_showcase_dropin, models=mem.models, decision=mem.decision, lanes=mem.lanes
+    )
+
+
 @router.put("")
 async def update_settings(request: Request) -> dict[str, Any]:
     """Apply a partial update to hal0.toml.
@@ -235,8 +258,12 @@ async def update_settings(request: Request) -> dict[str, Any]:
     # #1511): only leaves whose value actually changed, each with its own
     # before/after and reload class, so the UI can toast from truth
     # instead of re-deriving "what changed" from the raw PATCH body.
+    showcase = await _apply_showcase_dropin(cs)
+
     config_view = _config_to_dict(cs.merged)
     config_view["_hal0"] = {"apply_plan": cs.plan, "changeset": changeset_payload(cs)}
+    if showcase is not None:
+        config_view["_hal0"]["showcase_dropin"] = showcase
     return config_view
 
 
