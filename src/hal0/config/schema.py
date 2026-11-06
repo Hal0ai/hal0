@@ -2928,6 +2928,15 @@ class MemoryConfig(BaseModel):
     decision: MemoryDecisionConfig = Field(default_factory=MemoryDecisionConfig)
     lanes: MemoryLanesConfig = Field(default_factory=MemoryLanesConfig)
     console: MemoryConsoleConfig = Field(default_factory=MemoryConsoleConfig)
+    public_url: str | None = Field(
+        default=None,
+        description=(
+            "The URL coding agents should reach the Hindsight engine at, e.g. "
+            "through a reverse proxy. Used by the GET /api/memory/agents "
+            "install one-liner in place of guessing <request host>:9177 when "
+            "set."
+        ),
+    )
     unified_bank: bool = Field(
         default=True,
         description=(

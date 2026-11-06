@@ -241,17 +241,20 @@ async def get_lanes(request: Request) -> dict[str, Any]:
                         "GET", f"/v1/default/banks/{bank_id}/operations"
                     )
                     ops = ops_resp.get("operations") or ops_resp.get("items") or []
-                except Exception:  # noqa: BLE001 - fail-soft per bank
-                    ops = []
+                except Exception as exc:  # noqa: BLE001 - fail-soft per bank
+                    banks.append({"bank_id": bank_id, "error": str(exc)})
+                    continue
                 banks.append(_bank_queue_row(bank_id, ops))
         except Exception:  # noqa: BLE001 - fail-soft aggregator, never 5xx
             banks = []
 
     npu = None
     try:
-        from hal0.npu import flm as _flm  # type: ignore
+        from hal0.api.routes.npu import npu_occupancy
 
-        npu = _flm.slot_status("memory")  # best-effort; shape owned by flm module
+        occ = await npu_occupancy(request)
+        if occ and occ.get("present"):
+            npu = occ
     except Exception:  # noqa: BLE001
         npu = None
 

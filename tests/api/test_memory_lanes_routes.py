@@ -165,6 +165,25 @@ def test_lanes_basic_shape(client: TestClient, recorder: _Recorder) -> None:
     assert body["llm"]["per_op"]["reflect"]["max_concurrent"] >= 1
 
 
+def test_lanes_bank_operations_error_included(client: TestClient, recorder: _Recorder) -> None:
+    recorder.respond(
+        "GET", "/v1/default/banks", 200, {"banks": [{"bank_id": "broken"}]}
+    )
+    recorder.respond("GET", "/v1/default/banks/broken/operations", 500, {"detail": "boom"})
+    r = client.get("/api/memory/lanes")
+    assert r.status_code == 200
+    body = r.json()
+    bank_row = next(b for b in body["banks"] if b["bank_id"] == "broken")
+    assert "error" in bank_row and isinstance(bank_row["error"], str)
+
+
+def test_lanes_npu_absent_is_null(client: TestClient, recorder: _Recorder) -> None:
+    recorder.respond("GET", "/v1/default/banks", 200, {"banks": []})
+    r = client.get("/api/memory/lanes")
+    assert r.status_code == 200
+    assert r.json()["npu"] is None
+
+
 def test_agents_filters_coding_agent_banks(client: TestClient, recorder: _Recorder) -> None:
     recorder.respond(
         "GET",
