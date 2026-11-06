@@ -72,6 +72,37 @@ def test_v1_systemone_proxies_to_hs_decide_default(
     assert seen["body"]["model"] == "hs-decide-1-flash"
 
 
+@pytest.mark.parametrize(
+    ("cfg_kwargs", "expected"),
+    [
+        ({}, "http://127.0.0.1:9178/v1/systemone"),
+        ({"port": 9300}, "http://127.0.0.1:9300/v1/systemone"),
+        ({"base_url": "http://decide.lan:7000/"}, "http://decide.lan:7000/v1/systemone"),
+    ],
+)
+def test_v1_systemone_uses_real_memory_decision_config(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, cfg_kwargs, expected
+) -> None:
+    """The real [memory.decision] schema: port default, base_url override wins."""
+    from hal0.config.schema import MemoryDecisionConfig
+
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        return httpx.Response(200, json={"ok": True})
+
+    _install_mock_transport(monkeypatch, handler)
+    client.app.state.slot_manager = None
+    client.app.state.hal0_config = SimpleNamespace(
+        memory=SimpleNamespace(decision=MemoryDecisionConfig(**cfg_kwargs))
+    )
+
+    r = client.post("/v1/systemone", json={"prompt": "x"})
+    assert r.status_code == 200
+    assert seen["url"] == expected
+
+
 def test_v1_systemone_routes_to_decision_slot_when_configured(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

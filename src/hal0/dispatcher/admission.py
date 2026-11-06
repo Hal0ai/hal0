@@ -173,9 +173,7 @@ class AdmissionRegistry:
         }
 
     @asynccontextmanager
-    async def acquire(
-        self, slot_name: str, priority: int, timeout_s: float
-    ) -> AsyncIterator[None]:
+    async def acquire(self, slot_name: str, priority: int, timeout_s: float) -> AsyncIterator[None]:
         """Admit this request to ``slot_name``, released on context exit.
 
         No-op (immediate admission, nothing to release) when the slot has no

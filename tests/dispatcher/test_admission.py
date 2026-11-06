@@ -20,9 +20,11 @@ async def test_noop_for_unconfigured_slot() -> None:
     """A slot with no max_inflight configured never blocks."""
     reg = AdmissionRegistry()
     # Never calling configure() == no max_inflight set.
-    async with reg.acquire("brain", PRIORITY_DEFAULT, timeout_s=1.0):
-        async with reg.acquire("brain", PRIORITY_DEFAULT, timeout_s=1.0):
-            pass  # both admitted immediately, no queueing at all
+    async with (
+        reg.acquire("brain", PRIORITY_DEFAULT, timeout_s=1.0),
+        reg.acquire("brain", PRIORITY_DEFAULT, timeout_s=1.0),
+    ):
+        pass  # both admitted immediately, no queueing at all
 
 
 @pytest.mark.asyncio
@@ -155,6 +157,8 @@ async def test_configure_none_clears_cap() -> None:
     reg.configure("flm", None)
     assert reg.status() == {}
     # Now unconfigured: no blocking at all.
-    async with reg.acquire("flm", PRIORITY_DEFAULT, timeout_s=1.0):
-        async with reg.acquire("flm", PRIORITY_DEFAULT, timeout_s=1.0):
-            pass
+    async with (
+        reg.acquire("flm", PRIORITY_DEFAULT, timeout_s=1.0),
+        reg.acquire("flm", PRIORITY_DEFAULT, timeout_s=1.0),
+    ):
+        pass

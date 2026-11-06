@@ -79,6 +79,27 @@ alternative, not the default path.
    `HAL0_FLM_DECISION`. FLM reserves ~1.8GB extra NPU memory when enabled.
    Most deployments should leave this unset and use `[memory.decision]`.
 
+### Relationship to the #3333 background gate
+
+`main` already ships a narrower fix for a related problem: `hal0.api.background_gate`
+(#3333, merged as #3483). On a slot with `--parallel 1`, that gate holds new
+BACKGROUND `hal0/memory` chat requests at the gateway while a FOREGROUND user
+request for the same slot is waiting or in flight. The two layers stack:
+
+1. **Gateway (`background_gate`)** decides *whether* a background chat request
+   may start. It applies only to `/v1/chat/completions` on slots whose
+   parallelism is known and `<= 1`.
+2. **Dispatcher admission (this ADR)** orders requests that have already been
+   let through, per slot, up to `max_inflight`: decision (`/v1/systemone`,
+   priority 0) first, then everything else (priority 1) in arrival order.
+
+`/v1/systemone` decision calls never pass through the background gate, so
+decisions still go first even while a user turn is pending. A background
+request that got past the gate and is already queued at admission keeps its
+place ahead of a user request that arrives later, because both are priority 1
+and admission is first-in first-out. Neither layer can preempt a call already
+running in the backend.
+
 ## Consequences
 
 - Non-FLM slots without `max_inflight` see zero behavior change — the

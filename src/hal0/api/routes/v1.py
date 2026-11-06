@@ -1923,7 +1923,12 @@ async def systemone(request: Request) -> Response:
     if slot_name is not None:
         return await _forward_to_decision_slot(request, slot_manager, slot_name, body)
 
-    base_url = getattr(decision_cfg, "base_url", "http://127.0.0.1:9178")
+    resolver = getattr(decision_cfg, "resolved_base_url", None)
+    base_url = str(
+        resolver()
+        if callable(resolver)
+        else getattr(decision_cfg, "base_url", None) or "http://127.0.0.1:9178"
+    )
     default_model = getattr(decision_cfg, "model", "hs-decide-1-flash")
     timeout_s = getattr(decision_cfg, "timeout_s", 30.0)
     if not body.get("model"):
