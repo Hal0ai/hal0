@@ -314,6 +314,26 @@ def test_directives_get_shape_guard(client: TestClient, recorder: _Recorder) -> 
     assert r.json()["error"]["code"] == "memory.engine_shape"
 
 
+def test_knowledge_base_tree_and_page_forward(client: TestClient, recorder: _Recorder) -> None:
+    recorder.respond(
+        "GET", "/v1/default/banks/shared/knowledge-base/tree", 200, {"nodes": [{"id": "f1", "name": "Showcase"}]}
+    )
+    r = client.get("/api/memory/banks/shared/knowledge-base/tree")
+    assert r.status_code == 200
+    assert recorder.requests[-1]["path"] == "/v1/default/banks/shared/knowledge-base/tree"
+
+    recorder.respond("GET", "/v1/default/banks/shared/knowledge-base/pages/p1", 200, {"id": "p1"})
+    r = client.get("/api/memory/banks/shared/knowledge-base/pages/p1")
+    assert r.status_code == 200
+
+    recorder.respond(
+        "POST", "/v1/default/banks/shared/knowledge-base/pages/p1/refresh", 200, {"queued": True}
+    )
+    r = client.post("/api/memory/banks/shared/knowledge-base/pages/p1/refresh")
+    assert r.status_code == 200
+    assert recorder.requests[-1]["method"] == "POST"
+
+
 def test_bank_create_put_and_delete_forward(client: TestClient, recorder: _Recorder) -> None:
     r = client.put("/api/memory/banks/scratch", json={"retain_extraction_mode": "concise"})
     assert r.status_code == 200
