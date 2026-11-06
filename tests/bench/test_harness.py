@@ -1226,6 +1226,107 @@ class TestExclusiveSlots:
         assert runner.starts() == ["agent"]
         assert slots.restore_failures == []
 
+    def test_a_coloured_queued_start_job_still_aborts_the_window(self) -> None:
+        """#3445: systemd colours the unit-name cell of a ``list-jobs`` row, so
+        the escape lands ON the value the guard compares. The mangled cell
+        never equals the bare unit name, the row was skipped, and the probe
+        answered a confident "no queued job" — a FAIL-OPEN answer for a guard
+        that must fail closed. The window must still refuse to measure while
+        a start job is queued."""
+        calls: list[list[str]] = []
+
+        def runner(argv):
+            calls.append(argv)
+            if argv[0] == "systemctl":
+                if "is-active" in argv:
+                    return 3, "inactive\n", ""
+                if "list-jobs" in argv:
+                    # The shape systemd emits with colours on: the unit name
+                    # and the job state are wrapped in SGR escapes.
+                    return (
+                        0,
+                        "11137 \x1b[0;1;39mhal0-slot@agent.service\x1b[0m start "
+                        "\x1b[0;1;39mrunning\x1b[0m\n",
+                        "",
+                    )
+                return 0, "hal0-slot@agent.service", ""
+            if argv[-2:] == ["stop", "agent"]:
+                return 1, "", "Job for hal0-slot@agent.service canceled."
+            return 0, "", ""
+
+        with pytest.raises(RuntimeError) as excinfo, ExclusiveSlots(runner=runner):
+            pass
+
+        message = str(excinfo.value)
+        assert "could not stop hal0-slot@agent" in message
+        assert "start job" in message
+        assert "queued" in message
+        # The retry ran, and the window never released the slot.
+        assert len([c for c in calls if c[-2:] == ["stop", "agent"]]) == 2
+        assert [c[-1] for c in calls if c[-2:] == ["start", "agent"]] == []
+
+    def test_a_coloured_restart_job_still_aborts_the_window(self) -> None:
+        """#3445: the colour lands on the unit cell whatever the job type is —
+        a queued ``restart`` must be caught by the same guard."""
+        calls: list[list[str]] = []
+
+        def runner(argv):
+            calls.append(argv)
+            if argv[0] == "systemctl":
+                if "is-active" in argv:
+                    return 3, "inactive\n", ""
+                if "list-jobs" in argv:
+                    return (
+                        0,
+                        "11137 \x1b[0;1;39mhal0-slot@agent.service\x1b[0m restart "
+                        "\x1b[0;1;39mwaiting\x1b[0m\n",
+                        "",
+                    )
+                return 0, "hal0-slot@agent.service", ""
+            if argv[-2:] == ["stop", "agent"]:
+                return 1, "", "Job for hal0-slot@agent.service canceled."
+            return 0, "", ""
+
+        with pytest.raises(RuntimeError) as excinfo, ExclusiveSlots(runner=runner):
+            pass
+
+        message = str(excinfo.value)
+        assert "could not stop hal0-slot@agent" in message
+        assert "restart job" in message
+        assert len([c for c in calls if c[-2:] == ["stop", "agent"]]) == 2
+        assert [c[-1] for c in calls if c[-2:] == ["start", "agent"]] == []
+
+    def test_an_unreadable_coloured_row_fails_closed(self) -> None:
+        """#3445: a row the stripper cannot make sense of is an UNANSWERABLE
+        probe, and an unanswerable probe must not be read as "no queued
+        job" — the window refuses instead of measuring beside a live slot."""
+        calls: list[list[str]] = []
+
+        def runner(argv):
+            calls.append(argv)
+            if argv[0] == "systemctl":
+                if "is-active" in argv:
+                    return 3, "inactive\n", ""
+                if "list-jobs" in argv:
+                    # An escape the stripper does not know (an OSC sequence).
+                    return (
+                        0,
+                        "11137 \x1b]8;;http://x/hal0-slot@agent.service\x07 start running\n",
+                        "",
+                    )
+                return 0, "hal0-slot@agent.service", ""
+            if argv[-2:] == ["stop", "agent"]:
+                return 1, "", "Job for hal0-slot@agent.service canceled."
+            return 0, "", ""
+
+        with pytest.raises(RuntimeError) as excinfo, ExclusiveSlots(runner=runner):
+            pass
+
+        message = str(excinfo.value)
+        assert "could not stop hal0-slot@agent" in message
+        assert "could not confirm" in message
+        assert len([c for c in calls if c[-2:] == ["stop", "agent"]]) == 2
+
     def test_a_unit_still_running_after_the_retry_aborts_the_window(self) -> None:
         """#3409: only a unit that is genuinely still running after the retry
         aborts the window — and whatever it had already stopped is restored

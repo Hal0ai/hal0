@@ -32,6 +32,7 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- **An exclusive bench window no longer measures beside a slot with a queued start job when systemd colours its output.** The window's queued-job guard parsed `systemctl list-jobs` and compared the unit-name cell against the bare unit name. systemd colours that cell, so a colour-mangled cell never matched, the row was skipped, and the guard answered "no job queued" — a fail-open answer that let the window run next to a slot systemd was about to bring back up. The guard now strips the colour escapes before it parses, and treats a row it still cannot read as an unanswerable probe (which aborts the window) rather than as "no job queued". (#3445)
 - **An exclusive bench window re-stops a slot that comes back mid-window.** The window decided which slots to stop by membership in its own stop list, so a slot that was reloaded while the window held it (the dispatcher lazy-loading it, the memory extraction path re-rendering it, an operator loading it) was skipped and kept serving traffic next to the benchmark. The window now judges a slot by its current state: a slot that is running again is stopped again, a slot that stayed down is left alone, and the release still restores each slot exactly once. (#3415)
 
 ## [1.8.0] — 2026-11-03
