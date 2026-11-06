@@ -6,6 +6,7 @@ CANONICAL_PROFILES = {
     "chat",
     "agent",
     "utility",
+    "memory",
     "coding",
     "embedding",
     "reranking",
@@ -22,7 +23,7 @@ CANONICAL_PROFILES = {
 
 def test_seed_catalog_is_canonical_and_complete() -> None:
     """ADR-0029 decision 4: the canonical seeds the shipped slots name
-    (agent / utility / coding) are seeds proper."""
+    (agent / memory / coding) are seeds proper."""
     assert set(seeds.seed_profiles()) == CANONICAL_PROFILES
 
 
@@ -100,9 +101,9 @@ def test_shared_service_seeds_serve_one_sequence() -> None:
     """#2692: without ``--parallel`` llama-server runs ``-np auto`` (4
     sequences in ONE unified KV pool). One combined overflow then 500s every
     in-flight request on the slot, so the slots that front several callers
-    (utility: Hindsight + Hermes + brain; agent: Hermes) pin one sequence.
+    (memory: Hindsight + Hermes; agent: chat + shared memory) pin one sequence.
     #2714: brain (steward, UI and v1 traffic) was missed by #2692."""
-    for name in ("utility", "agent", "brain"):
+    for name in ("utility", "memory", "agent", "brain"):
         tokens = _flag_tokens(name)
         assert "--parallel" in tokens, name
         assert tokens[tokens.index("--parallel") + 1] == "1", name

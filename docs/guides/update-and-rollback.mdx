@@ -265,6 +265,49 @@ The first `hal0 update` to 1.6.0 changes how Hermes is installed. One step is ne
 - **The agent chat proxy is removed.** `/api/agents/{id}/events`, `/submit` and `/session/*` return 404.
 - **Key rotation now ends open sockets and streams** (WebSocket close code `4401`, SSE `event: revoked`).
 
+## Upgrading to 1.8.0
+
+- **The upgrade floor is still 1.5.0.** `hal0 update` on a 1.3.x or 1.4.x box
+  stops before it downloads anything and prints the installer command that
+  steps the box through 1.5.0; run that, then update again. See
+  [Upgrading from an older release](#upgrading-from-an-older-release).
+- **Fix any slot file that still carries tuning keys.** `hal0 update` lists
+  each such file and exits 2, `hal0 doctor profiles` fails on it, and the slot
+  refuses to start with `slot.unconverted` (422) until the keys move to a
+  profile. Delete the keys from the slot file, put their values on a profile
+  (`hal0 profile create`), name it with `profile = "<name>"`, and confirm with
+  `hal0 config validate`. Nothing rewrites the file for you, and
+  `hal0 profile migrate` is removed.
+- **An existing install stays as it is.** The rootless podman box is an opt-in
+  for a fresh install (`install.sh --box`). `hal0 update` never moves a
+  bare-metal or LXC install into a box, and `--box` refuses to run over an
+  existing install. There is no converter yet; see
+  [Install in a rootless podman box](/docs/getting-started/box/).
+- **Approval decisions need a signed-in session or root.** A script that
+  approved or denied with the admin key must sign in first
+  (`POST /api/auth/login`) or use `sudo hal0 agent approvals approve|deny <id>`
+  on the box; a bare API key gets `403 auth.forbidden`.
+- **Re-pin Pi with `sudo hal0 update component pi`.** `hal0 agent upgrade` is
+  gone and exits 2. A plain `hal0 update` never re-pins Pi; `hal0 update
+  status` now shows a Pi row. See [Component updates](#component-updates).
+- **The Operator Board needs a running Hermes.** `/api/board/*` proxies the
+  Hermes kanban. Cards in a box's old hal0 board migrate into the Hermes
+  board at the first board request, or export to
+  `board-legacy-export-<timestamp>.json` in the hal0 state directory when
+  Hermes is not installed. Remove `HERMES_SESSION_TOKEN` from
+  `/etc/hal0/api.env`; `hal0 doctor` warns while it is set.
+- **Schema migration 015 writes a backup first.** It irreversibly drops the
+  retired model tuning. When any of it holds a value, hal0 writes
+  `/var/lib/hal0/backups/hal0-pre-015-<timestamp>.db` (mode 0600) before it
+  runs, and holds the migration if that write fails, in which case the model
+  list answers `500 system.internal` until the backup succeeds. Rolling back
+  to 1.7.x still works.
+- **The memory engine moves to Hindsight 1.1.0.** The upgrade stops the old
+  engine and copies `.pg0` to `.pg0.pre-1.0.0`, which needs 1.5 times its size
+  free; it restores both if 1.1.0 does not come up. New memory writes from
+  Hermes profiles and the brain are shared by default; older notes stay
+  private.
+
 ## Upgrading to 1.7.1
 
 - **The upgrade floor is 1.5.0.** `hal0 update` on a 1.3.x or 1.4.x box
@@ -276,7 +319,7 @@ The first `hal0 update` to 1.6.0 changes how Hermes is installed. One step is ne
   `http://<host>:8188` stays refused from other machines until the engine
   restarts. To keep the editor fenced to the box, set
   `[network].comfyui_listen = "loopback"` in `/etc/hal0/hal0.toml` before the
-  restart. See [Reaching the editor](/docs/guides/generate-images#reaching-the-editor).
+  restart. See [Reaching the editor](/docs/guides/image-workflows-troubleshooting#reaching-the-editor).
 - **The GPU's controls are in the dock.** Hold, keep, unpin and stop image
   mode live in the dock's GPU segment and **gpu** tab on every page; the
   Engine tab keeps Restart engine and Logs, and the Slots page's Activity
@@ -284,11 +327,11 @@ The first `hal0 update` to 1.6.0 changes how Hermes is installed. One step is ne
   [The dock](/docs/guides/dashboard-and-settings#the-dock).
 - **ComfyUI and custom nodes run as `hal0`.** Restart `img` to apply.
   Its mounted data directories must be writable by `hal0`; `/opt/venv` and
-  `/opt/ComfyUI` otherwise remain read-only to it. Nodes that install
-  dependencies at startup fail even if the slot is ready. Ship dependencies
-  in a derived runner image; `hal0 doctor all` names failed nodes from the
-  current start. See [ComfyUI custom-node dependencies](/docs/guides/manage-runner-images#comfyui-custom-node-dependencies)
-  for image selection and data-directory permissions.
+  `/opt/ComfyUI` otherwise remain read-only to it. On 1.7.1, nodes
+  that install dependencies at startup fail even if the slot is ready; 1.8.0
+  gives them a writable Python environment. `hal0 doctor all` names failed
+  nodes from the current start. See [ComfyUI custom-node dependencies](/docs/guides/manage-runner-images#comfyui-custom-node-dependencies)
+  for the environment, image selection and data-directory permissions.
 
 ## Upgrading to 1.7.0
 

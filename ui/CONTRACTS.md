@@ -22,7 +22,7 @@
 
 | Need | Endpoint | Poll | Shape (relevant fields) |
 |---|---|---|---|
-| Slot list | `GET /api/slots` | 5s | `[{name, state, backend, device, model_id, port, tokens_per_sec, ttft_seconds, requests_processing, mem_rss_mb, kv_cache_usage, ctx, uptime_seconds}]` |
+| Slot list | `GET /api/slots` | 5s | `[{name, state, backend, device, model_id (nullable), port, tokens_per_sec, ttft_seconds, requests_processing, mem_rss_mb, kv_cache_usage, ctx, uptime_seconds}]` |
 | Slot detail | `GET /api/slots/{name}` | 2.5s | same shape, single |
 | Slot metrics | `GET /api/slots/metrics` | 2.5s | `{slot: {tokens_per_sec, ttft_seconds, ...}}` |
 | Slot capacity | `GET /api/slots/capacity` | 5s | `{per_slot: {slot: {vram_mb, ram_mb, mem_mb, state, model_id}}}` |
@@ -32,6 +32,17 @@
 | Approvals | `GET /api/agent/approvals` + SSE `GET /api/agent/approvals/events` | SSE | `{approvals:[{id, agent, tool, args, client_id, enqueued_at, state}]}` |
 | Service links | `GET /api/config/urls` | 60s | `{api, openwebui, openwebui_enabled, openwebui_reason, hermes, hermes_enabled, comfyui, comfyui_public, comfyui_lan, comfyui_reason, openwebui_ip, comfyui_ip}`. `openwebui` / `comfyui` are `""` and the matching `*_reason` is `"proxy_needs_public_url"` when the request came through a reverse proxy and no `HAL0_OPENWEBUI_PUBLIC_URL` / `HAL0_COMFYUI_PUBLIC_URL` is declared; `*_reason` is `""` whenever the link is set. FE: never build `host:port` from the page host as a fallback for an empty link; show the "set `HAL0_<APP>_PUBLIC_URL` in `/etc/hal0/api.env`" hint. A `*_reason` is absent from an older hal0. `openwebui_ip` / `comfyui_ip` are `http://<LAN IP>:<app port>` for clients that cannot resolve a `.local` name: the box's main LAN address (`primary_lan_ip()`), same port as the name-based link. Each is `""` behind a reverse proxy, with no LAN address, when the page was already reached by that address, and (`comfyui_ip`) while `comfyui_lan` is false. FE: offer it beside the primary link, only when non-empty; they are absent from an older hal0. Hermes has none (loopback-only). |
 | Chat stream | `POST /v1/chat/completions` `{model:"<slot-name>", messages, stream:true}` | — | OpenAI SSE frames |
+
+`model_id` in the slot-list and slot-detail shapes is nullable, and follows
+the slot's state. A serving slot (`ready`, `serving`, `idle`) names the model
+it is serving, even if the assignment was cleared after the load. A cold slot
+(`offline`, `error`) names its configured `[model].default` assignment, so a
+divergent assignment is not masked by a stale id. A loading slot (`pulling`,
+`starting`, `warming`) names the model it is actually pulling or warming.
+FE: a `null` `model_id` is the documented value for any non-serving state —
+`error`, `offline`, `pulling`, `starting`, `warming`, `unloading` — with no
+model assignment whose provider requires an explicit model, not only for
+`offline`.
 
 **Existing FE primitives to REUSE (do not rebuild):** `slot-status.js → slotIndicatorFromPhase()`,
 `memory-map.jsx → MemoryMap/useMemoryMapModel`, `inference-pane.jsx`,
