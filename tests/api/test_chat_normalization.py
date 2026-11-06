@@ -381,6 +381,13 @@ class _OmniRequest:
             upstream_models={"_container": ["big"]},
         )
         self.app = SimpleNamespace(state=state)
+        # #3333: chat_completions brackets every request with the background
+        # gate, which reads request.state (the lane pin / memory-alias mark)
+        # and request.is_disconnected. This is a user request, so it takes
+        # the foreground arm — state just needs to exist, and a live client
+        # is never disconnected.
+        self.state = SimpleNamespace()
+        self.is_disconnected = lambda: False
 
     async def body(self):
         return self._raw

@@ -34,8 +34,10 @@ _SLOTS_DIR = Path(__file__).resolve().parents[2] / "src" / "hal0" / "slots"
 _RESOLVER = "_resolve_model_info"
 
 #: The call sites the fix threads a provider through, as
-#: ``(module, enclosing function)``. A new lookup site must be added here with
-#: its provider threading; a removed one must disappear.
+#: ``(module, enclosing function)``, where ``module`` is the path relative to
+#: the slot tree (``capacity.py``, ``npu/trio.py``) so two modules sharing a
+#: basename stay distinct. A new lookup site must be added here with its
+#: provider threading; a removed one must disappear.
 _PINNED_CALL_SITES: frozenset[tuple[str, str]] = frozenset(
     {
         ("capacity.py", "halogen_footprint_readout"),
@@ -104,7 +106,11 @@ def _scan() -> list[tuple[str, str, int, ast.Call]]:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         aliases = _resolver_aliases(tree)
         for func, lineno, call in _scan_tree(tree, aliases):
-            sites.append((path.name, func, lineno, call))
+            # Key by the slot-tree-relative path, not the basename: two modules
+            # can share a basename (``trio.py`` and ``npu/trio.py``), and the
+            # basename would collapse them into one pinned entry.
+            module = path.relative_to(_SLOTS_DIR).as_posix()
+            sites.append((module, func, lineno, call))
     return sites
 
 
@@ -129,7 +135,36 @@ def test_scan_finds_unthreaded_lookup_in_subdirectory(
         (name, func) for name, func, _, call in _scan() if "provider" not in _keyword_names(call)
     ]
 
-    assert unthreaded == [("trio.py", "nested_lookup")]
+    assert unthreaded == [("npu/trio.py", "nested_lookup")]
+
+
+def test_scan_keeps_same_basename_siblings_distinct(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two slot modules sharing a basename must not collapse into one entry.
+
+    Keying the scan by basename would merge ``trio.py`` and ``npu/trio.py``
+    into one pinned pair, so dropping the provider from one of them would
+    leave the pinned set unchanged and the drift check green.
+    """
+    nested = tmp_path / "npu"
+    nested.mkdir()
+    (tmp_path / "trio.py").write_text(
+        "async def lookup(host, model_id):\n"
+        "    await host._resolve_model_info(model_id, provider=host.effective_provider)\n",
+        encoding="utf-8",
+    )
+    (nested / "trio.py").write_text(
+        "async def lookup(host, model_id):\n"
+        "    await host._resolve_model_info(model_id, provider=host.effective_provider)\n",
+        encoding="utf-8",
+    )
+    module = __import__(__name__, fromlist=["_SLOTS_DIR"])
+    monkeypatch.setattr(module, "_SLOTS_DIR", tmp_path)
+
+    found = {(name, func) for name, func, _, _ in _scan()}
+
+    assert found == {("trio.py", "lookup"), ("npu/trio.py", "lookup")}
 
 
 def _provider_value(call: ast.Call) -> ast.expr | None:
