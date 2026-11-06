@@ -2593,7 +2593,6 @@ class HindsightProvider(MemoryProvider):
         bank = self._bank_of(self._write_namespace(dataset, client_id))
         return await self._call("get_document", bank_id=bank, document_id=document_id)
 
-
     async def bank_stats(
         self,
         *,

@@ -103,9 +103,7 @@ def test_engine_version_and_health_passthrough(client: TestClient, recorder: _Re
 
 
 def test_engine_post_body_forwarded(client: TestClient, recorder: _Recorder) -> None:
-    recorder.respond(
-        "POST", "/v1/default/banks/shared/reflect", 200, {"ok": True}
-    )
+    recorder.respond("POST", "/v1/default/banks/shared/reflect", 200, {"ok": True})
     r = client.post("/api/memory/engine/v1/default/banks/shared/reflect", json={"q": "x"})
     assert r.status_code == 200
     import json as _json
@@ -146,9 +144,7 @@ def test_engine_no_provider_503() -> None:
 
 
 def test_lanes_basic_shape(client: TestClient, recorder: _Recorder) -> None:
-    recorder.respond(
-        "GET", "/v1/default/banks", 200, {"banks": [{"bank_id": "shared"}]}
-    )
+    recorder.respond("GET", "/v1/default/banks", 200, {"banks": [{"bank_id": "shared"}]})
     recorder.respond(
         "GET",
         "/v1/default/banks/shared/operations",
@@ -166,9 +162,7 @@ def test_lanes_basic_shape(client: TestClient, recorder: _Recorder) -> None:
 
 
 def test_lanes_bank_operations_error_included(client: TestClient, recorder: _Recorder) -> None:
-    recorder.respond(
-        "GET", "/v1/default/banks", 200, {"banks": [{"bank_id": "broken"}]}
-    )
+    recorder.respond("GET", "/v1/default/banks", 200, {"banks": [{"bank_id": "broken"}]})
     recorder.respond("GET", "/v1/default/banks/broken/operations", 500, {"detail": "boom"})
     r = client.get("/api/memory/lanes")
     assert r.status_code == 200
@@ -208,18 +202,14 @@ def test_agents_filters_coding_agent_banks(client: TestClient, recorder: _Record
     assert body["console_url"] is None
 
 
-def test_agents_console_url_disabled_by_default(
-    client: TestClient, recorder: _Recorder
-) -> None:
+def test_agents_console_url_disabled_by_default(client: TestClient, recorder: _Recorder) -> None:
     recorder.respond("GET", "/v1/default/banks", 200, {"banks": []})
     r = client.get("/api/memory/agents")
     assert r.status_code == 200
     assert r.json()["console_url"] is None
 
 
-def test_agents_console_url_enabled(
-    client: TestClient, recorder: _Recorder, monkeypatch
-) -> None:
+def test_agents_console_url_enabled(client: TestClient, recorder: _Recorder, monkeypatch) -> None:
     from hal0.api.routes import memory_lanes as mod
 
     class _Console:

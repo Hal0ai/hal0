@@ -31,7 +31,9 @@ def _api_reachable(monkeypatch):
 def test_kb_tree(monkeypatch):
     monkeypatch.setattr(
         "hal0.cli.memory_kb_commands.api_get",
-        lambda path, **kw: {"nodes": [{"id": "f1", "name": "Showcase", "type": "folder", "children": []}]},
+        lambda path, **kw: {
+            "nodes": [{"id": "f1", "name": "Showcase", "type": "folder", "children": []}]
+        },
     )
     r = runner.invoke(memory_commands.app, ["kb", "tree", "shared", "--json"])
     assert r.exit_code == 0
@@ -103,7 +105,12 @@ def test_models_bare_invocation(monkeypatch):
         lambda path, **kw: {
             "embeddings": {"provider": "openai", "model": "text-embedding-3-small"},
             "reranker": {"provider": "cohere", "model": "rerank-v3"},
-            "decision": {"enabled": True, "provider": "local", "model": "hal0-hs-decide", "reachable": True},
+            "decision": {
+                "enabled": True,
+                "provider": "local",
+                "model": "hal0-hs-decide",
+                "reachable": True,
+            },
         },
     )
     r = runner.invoke(memory_commands.app, ["models", "--json"])
@@ -122,7 +129,9 @@ def test_agents_install_dry_run(monkeypatch):
             }
         },
     )
-    r = runner.invoke(memory_commands.app, ["agents", "install", "claude-code", "--dry-run", "--json"])
+    r = runner.invoke(
+        memory_commands.app, ["agents", "install", "claude-code", "--dry-run", "--json"]
+    )
     assert r.exit_code == 0
     payload = json.loads(r.output)
     assert "install claude-code" in payload["command"]
@@ -140,7 +149,9 @@ def test_agents_install_runs_and_merges_config(monkeypatch, tmp_path):
         },
     )
     config_path = tmp_path / "coding-agent.json"
-    monkeypatch.setattr("hal0.cli.memory_models_agents_commands._hindsight_config_path", lambda: config_path)
+    monkeypatch.setattr(
+        "hal0.cli.memory_models_agents_commands._hindsight_config_path", lambda: config_path
+    )
 
     r = runner.invoke(memory_commands.app, ["agents", "install", "claude-code", "--json"])
     assert r.exit_code == 0
@@ -158,7 +169,9 @@ def test_agents_install_merges_existing_retain_tags(monkeypatch, tmp_path):
     )
     config_path = tmp_path / "coding-agent.json"
     config_path.write_text(json.dumps({"retainTags": ["agent:cursor"], "other": "kept"}))
-    monkeypatch.setattr("hal0.cli.memory_models_agents_commands._hindsight_config_path", lambda: config_path)
+    monkeypatch.setattr(
+        "hal0.cli.memory_models_agents_commands._hindsight_config_path", lambda: config_path
+    )
 
     r = runner.invoke(memory_commands.app, ["agents", "install", "codex", "--json"])
     assert r.exit_code == 0

@@ -101,9 +101,13 @@ def _merge_coding_agent_config(path: Path, harness: str) -> dict[str, Any]:
 
 @agents_app.command("install")
 def agents_install_cmd(
-    harness: str = typer.Argument(..., help="Coding-agent harness name (e.g. claude-code, cursor, codex)."),
+    harness: str = typer.Argument(
+        ..., help="Coding-agent harness name (e.g. claude-code, cursor, codex)."
+    ),
     dry_run: bool = typer.Option(
-        False, "--dry-run", help="Print the installer command and config merge without running/writing."
+        False,
+        "--dry-run",
+        help="Print the installer command and config merge without running/writing.",
     ),
     json_out: bool = typer.Option(False, "--json", help="Emit raw JSON instead of a panel."),
 ) -> None:
@@ -115,7 +119,9 @@ def agents_install_cmd(
         die(str(exc))
         return
     install = agents.get("install", {}) if isinstance(agents, dict) else {}
-    command = install.get("command") or f"{_HINDSIGHT_COMMAND} install {harness} --server self-hosted"
+    command = (
+        install.get("command") or f"{_HINDSIGHT_COMMAND} install {harness} --server self-hosted"
+    )
     # The template command carries a literal "<harness>" placeholder.
     command = command.replace("<harness>", harness)
 
@@ -125,7 +131,11 @@ def agents_install_cmd(
         if json_out:
             typer.echo(jsonlib.dumps(payload, indent=2, sort_keys=True))
         else:
-            console.print(Panel(f"[yellow]Would run:[/yellow] {command}\n[yellow]Would write:[/yellow] {config_path}"))
+            console.print(
+                Panel(
+                    f"[yellow]Would run:[/yellow] {command}\n[yellow]Would write:[/yellow] {config_path}"
+                )
+            )
         return
 
     try:
@@ -141,14 +151,21 @@ def agents_install_cmd(
     if json_out:
         typer.echo(
             jsonlib.dumps(
-                {"command": command, "config_path": str(config_path), "config": merged, "stdout": proc.stdout},
+                {
+                    "command": command,
+                    "config_path": str(config_path),
+                    "config": merged,
+                    "stdout": proc.stdout,
+                },
                 indent=2,
                 sort_keys=True,
             )
         )
         return
     console.print(Panel(proc.stdout or "[dim](no output)[/dim]", title=f"installer · {harness}"))
-    console.print(Panel(jsonlib.dumps(merged, indent=2, sort_keys=True), title=f"wrote {config_path}"))
+    console.print(
+        Panel(jsonlib.dumps(merged, indent=2, sort_keys=True), title=f"wrote {config_path}")
+    )
 
 
-__all__ = ["models_app", "agents_app"]
+__all__ = ["agents_app", "models_app"]

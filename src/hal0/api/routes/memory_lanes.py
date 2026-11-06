@@ -18,8 +18,8 @@ Four endpoints backing the memory-showcase UI branch:
 from __future__ import annotations
 
 import logging
-import re
 import time
+from datetime import UTC
 from typing import Any
 from urllib.parse import urlparse
 
@@ -58,9 +58,7 @@ def _allowed(path: str) -> bool:
         return False
     if path in _EXACT_PATHS:
         return True
-    if path == _BANKS_PREFIX or path.startswith(_BANKS_PREFIX + "/"):
-        return True
-    return False
+    return path == _BANKS_PREFIX or path.startswith(_BANKS_PREFIX + "/")
 
 
 def _client(request: Request) -> Any:
@@ -127,9 +125,7 @@ async def _passthrough(request: Request, path: str, method: str) -> Response:
     return Response(content=__import__("json").dumps(data), media_type="application/json")
 
 
-@router.api_route(
-    "/engine/{path:path}", methods=["GET", "POST", "PATCH", "PUT", "DELETE"]
-)
+@router.api_route("/engine/{path:path}", methods=["GET", "POST", "PATCH", "PUT", "DELETE"])
 async def engine_passthrough(path: str, request: Request) -> Response:
     """Allowlisted raw passthrough to the Hindsight REST API."""
     return await _passthrough(request, path, request.method)
@@ -149,7 +145,7 @@ async def _decision_health(decision_cfg: Any) -> dict[str, Any]:
             resp = await http.get(f"{url}/health")
             resp.raise_for_status()
             body = resp.json()
-    except Exception:  # noqa: BLE001 - fail-soft status card
+    except Exception:
         return out
     out.update(body)
     out["reachable"] = True
@@ -194,13 +190,13 @@ def _age_s(created_at: Any, now: float) -> float | None:
     if not created_at:
         return None
     try:
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         ts = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
         if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
+            ts = ts.replace(tzinfo=UTC)
         return max(0.0, now - ts.timestamp())
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
 
 
@@ -242,11 +238,11 @@ async def get_lanes(request: Request) -> dict[str, Any]:
                         "GET", f"/v1/default/banks/{bank_id}/operations"
                     )
                     ops = ops_resp.get("operations") or ops_resp.get("items") or []
-                except Exception as exc:  # noqa: BLE001 - fail-soft per bank
+                except Exception as exc:
                     banks.append({"bank_id": bank_id, "error": str(exc)})
                     continue
                 banks.append(_bank_queue_row(bank_id, ops))
-        except Exception:  # noqa: BLE001 - fail-soft aggregator, never 5xx
+        except Exception:
             banks = []
 
     npu = None
@@ -256,7 +252,7 @@ async def get_lanes(request: Request) -> dict[str, Any]:
         occ = await npu_occupancy(request)
         if occ and occ.get("present"):
             npu = occ
-    except Exception:  # noqa: BLE001
+    except Exception:
         npu = None
 
     return {"decision": decision, "llm": llm, "banks": banks, "npu": npu}
@@ -321,7 +317,7 @@ async def get_agents(request: Request) -> dict[str, Any]:
                 for b in (bank_resp.get("banks") or bank_resp.get("items") or [])
             ]
             bank_ids = [b for b in all_ids if b and str(b).startswith("coding-agent::")]
-        except Exception:  # noqa: BLE001 - fail-soft
+        except Exception:
             bank_ids = []
 
     url = _public_hindsight_url(request, cfg)

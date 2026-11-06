@@ -10,7 +10,15 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from hal0.cli._shared import CliApiError, _api_base, _api_unreachable, api_delete, api_get, api_post, die
+from hal0.cli._shared import (
+    CliApiError,
+    _api_base,
+    _api_unreachable,
+    api_delete,
+    api_get,
+    api_post,
+    die,
+)
 
 app = typer.Typer(help="Manage a bank's Hindsight directives.")
 console = Console()
@@ -47,7 +55,11 @@ def directive_list_cmd(
     t.add_column("text")
     t.add_column("active")
     for d in items:
-        t.add_row(str(d.get("id", "—")), str(d.get("text", d.get("content", "—"))), str(d.get("active", "—")))
+        t.add_row(
+            str(d.get("id", "—")),
+            str(d.get("text", d.get("content", "—"))),
+            str(d.get("active", "—")),
+        )
     console.print(t)
 
 
@@ -67,7 +79,9 @@ def directive_add_cmd(
     if json_out:
         typer.echo(jsonlib.dumps(result, indent=2, sort_keys=True))
         return
-    console.print(Panel(f"[bold green]Directive created[/bold green]\n{result}", border_style="green"))
+    console.print(
+        Panel(f"[bold green]Directive created[/bold green]\n{result}", border_style="green")
+    )
 
 
 @app.command("rm")
@@ -86,7 +100,9 @@ def directive_rm_cmd(
     if json_out:
         typer.echo(jsonlib.dumps(result, indent=2, sort_keys=True))
         return
-    console.print(Panel(f"[bold green]Directive {directive_id} deleted[/bold green]", border_style="green"))
+    console.print(
+        Panel(f"[bold green]Directive {directive_id} deleted[/bold green]", border_style="green")
+    )
 
 
 __all__ = ["app"]

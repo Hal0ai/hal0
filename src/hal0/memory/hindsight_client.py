@@ -333,7 +333,6 @@ class HindsightRestClient:
             "GET", f"/v1/default/banks/{bank_id}/knowledge-base/pages/{page}"
         )
 
-
     # ── single-memory curation (PATCH /memories/{memory_id}) ────────────────
 
     async def get_memory(self, *, bank_id, memory_id):

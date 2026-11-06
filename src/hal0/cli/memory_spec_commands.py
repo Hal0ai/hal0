@@ -23,10 +23,16 @@ console = Console()
 
 @app.command("apply")
 def spec_apply_cmd(
-    dry_run: bool = typer.Option(False, "--dry-run", help="Plan only — POST /import?dry_run=true, no writes."),
-    bank: str | None = typer.Option(None, "--bank", help="Apply only this bank (default: every bank in the spec)."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Plan only — POST /import?dry_run=true, no writes."
+    ),
+    bank: str | None = typer.Option(
+        None, "--bank", help="Apply only this bank (default: every bank in the spec)."
+    ),
     api: str = typer.Option(DEFAULT_API, "--api", help="Hindsight API base URL."),
-    json_out: bool = typer.Option(False, "--json", help="Emit the raw JSON report instead of a table."),
+    json_out: bool = typer.Option(
+        False, "--json", help="Emit the raw JSON report instead of a table."
+    ),
 ) -> None:
     """Apply (or dry-run) the bank spec: templates, config_extra, knowledge-base pages."""
     report = apply_spec(api=api, dry_run=dry_run, bank_filter=bank)

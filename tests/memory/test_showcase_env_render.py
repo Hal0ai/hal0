@@ -27,7 +27,9 @@ def test_render_showcase_env_per_op_override_wins_over_global() -> None:
         llm_max_concurrent=2,
         reflect={"max_concurrent": 5, "virtual_model": "hal0/utility", "timeout_s": 900},
     )
-    out = render_showcase_env(models=MemoryModelsConfig(), decision=MemoryDecisionConfig(), lanes=lanes)
+    out = render_showcase_env(
+        models=MemoryModelsConfig(), decision=MemoryDecisionConfig(), lanes=lanes
+    )
     assert "Environment=HINDSIGHT_API_REFLECT_LLM_MAX_CONCURRENT=5" in out
     assert "Environment=HINDSIGHT_API_REFLECT_LLM_MODEL=hal0/utility" in out
     assert "Environment=HINDSIGHT_API_REFLECT_LLM_TIMEOUT=900" in out
@@ -45,5 +47,7 @@ def test_render_showcase_env_decision_off_omits_decision_env() -> None:
 
 
 def test_render_showcase_env_is_deterministic() -> None:
-    args = dict(models=MemoryModelsConfig(), decision=MemoryDecisionConfig(), lanes=MemoryLanesConfig())
+    args = dict(
+        models=MemoryModelsConfig(), decision=MemoryDecisionConfig(), lanes=MemoryLanesConfig()
+    )
     assert render_showcase_env(**args) == render_showcase_env(**args)

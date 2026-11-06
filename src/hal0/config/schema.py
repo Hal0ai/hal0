@@ -2786,13 +2786,26 @@ class MemoryDecisionConfig(BaseModel):
         le=65535,
         description="Port the local hal0-hs-decide service binds.",
     )
+    base_url: str | None = Field(
+        default=None,
+        description=(
+            "Override for where hal0 proxies POST /v1/systemone. Unset means "
+            "http://127.0.0.1:<port> (the local hal0-hs-decide service)."
+        ),
+    )
+
+    def resolved_base_url(self) -> str:
+        """The System One server URL: ``base_url`` if set, else the local port."""
+        return (self.base_url or f"http://127.0.0.1:{self.port}").rstrip("/")
 
     @field_validator("provider")
     @classmethod
     def _decision_provider_known(cls, v: str) -> str:
         allowed = {"local", "hindsight-cloud", "off"}
         if v not in allowed:
-            raise ValueError(f"memory.decision.provider must be one of {sorted(allowed)}, got {v!r}")
+            raise ValueError(
+                f"memory.decision.provider must be one of {sorted(allowed)}, got {v!r}"
+            )
         return v
 
 
@@ -2860,15 +2873,9 @@ class MemoryLanesConfig(BaseModel):
             "mental-model-refresh together), independent of any per-op cap."
         ),
     )
-    timeout_s: int = Field(
-        default=600, ge=30, le=3600, description="HINDSIGHT_API_LLM_TIMEOUT."
-    )
-    reasoning_effort: str = Field(
-        default="none", description="HINDSIGHT_API_LLM_REASONING_EFFORT."
-    )
-    strict_schema: bool = Field(
-        default=False, description="HINDSIGHT_API_LLM_STRICT_SCHEMA."
-    )
+    timeout_s: int = Field(default=600, ge=30, le=3600, description="HINDSIGHT_API_LLM_TIMEOUT.")
+    reasoning_effort: str = Field(default="none", description="HINDSIGHT_API_LLM_REASONING_EFFORT.")
+    strict_schema: bool = Field(default=False, description="HINDSIGHT_API_LLM_STRICT_SCHEMA.")
     retain: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
     consolidation: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
     reflect: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)

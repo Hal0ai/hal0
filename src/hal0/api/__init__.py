@@ -114,6 +114,8 @@ from hal0.api.routes import (
 )
 from hal0.api.routes import (
     memory_admin as memory_admin_routes,
+)
+from hal0.api.routes import (
     memory_lanes as memory_lanes_routes,
 )
 from hal0.api.routes import (

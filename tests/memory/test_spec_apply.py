@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 
 import httpx
-import pytest
 
 from hal0.memory import spec_apply as sa
 
@@ -15,7 +14,9 @@ def _spec_dir(tmp_path, banks=None, config_extra=None, knowledge=None):
     (d / "templates").mkdir(parents=True)
     banks = banks or {"shared": "shared"}
     (d / "banks.json").write_text(
-        json.dumps({"banks": banks, "config_extra": config_extra or {}, "knowledge": knowledge or {}})
+        json.dumps(
+            {"banks": banks, "config_extra": config_extra or {}, "knowledge": knowledge or {}}
+        )
     )
     for tname in set(banks.values()):
         (d / "templates" / f"{tname}.json").write_text(json.dumps({"version": "1", "name": tname}))
@@ -128,7 +129,9 @@ def test_apply_spec_bank_filter(tmp_path):
     d = _spec_dir(tmp_path, banks={"shared": "shared", "private": "shared"})
     calls: list[tuple[str, str]] = []
     client = httpx.Client(transport=httpx.MockTransport(_handler_factory(calls)))
-    report = sa.apply_spec(api="http://x", spec_dir=d, dry_run=True, bank_filter="private", client=client)
+    report = sa.apply_spec(
+        api="http://x", spec_dir=d, dry_run=True, bank_filter="private", client=client
+    )
     assert [b.bank for b in report.banks] == ["private"]
 
 

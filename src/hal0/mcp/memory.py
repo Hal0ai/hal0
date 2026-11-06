@@ -2356,7 +2356,6 @@ def _memory_tool_definitions() -> dict[str, Tool]:
             ctx, "memory_documents_get", _merged(args, document_id=document_id, dataset=dataset)
         )
 
-
     @server.tool(
         name="memory_bank_stats",
         description=(

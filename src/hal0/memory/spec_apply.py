@@ -98,14 +98,18 @@ class SpecApplyClient:
         if self._owns_client:
             self._client.close()
 
-    def __enter__(self) -> "SpecApplyClient":
+    def __enter__(self) -> SpecApplyClient:
         return self
 
     def __exit__(self, *exc: Any) -> None:
         self.close()
 
     def call(
-        self, method: str, path: str, body: dict[str, Any] | None = None, params: dict[str, Any] | None = None
+        self,
+        method: str,
+        path: str,
+        body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         resp = self._client.request(method, f"{self.base}{path}", json=body, params=params)
         resp.raise_for_status()
@@ -150,13 +154,24 @@ def apply_spec(
                 if kb:
                     tree = c.call("GET", f"/{bank}/knowledge-base/tree")
                     nodes = _walk(
-                        tree.get("nodes") or tree.get("roots") or tree.get("children") or tree.get("items") or []
+                        tree.get("nodes")
+                        or tree.get("roots")
+                        or tree.get("children")
+                        or tree.get("items")
+                        or []
                     )
                     folder = next(
-                        (n for n in nodes if n.get("name") == kb["folder"] and _kind(n) == "folder"), None
+                        (
+                            n
+                            for n in nodes
+                            if n.get("name") == kb["folder"] and _kind(n) == "folder"
+                        ),
+                        None,
                     )
                     if folder is None:
-                        folder = c.call("POST", f"/{bank}/knowledge-base/folders", {"name": kb["folder"]})
+                        folder = c.call(
+                            "POST", f"/{bank}/knowledge-base/folders", {"name": kb["folder"]}
+                        )
                         br.folder_created = kb["folder"]
                     pages = {n.get("name"): n for n in nodes if _kind(n) == "page"}
                     for p in kb["pages"]:
@@ -165,7 +180,11 @@ def apply_spec(
                             c.call(
                                 "PATCH",
                                 f"/{bank}/knowledge-base/pages/{pid}",
-                                {k: p[k] for k in ("source_query", "tags", "max_tokens", "trigger") if k in p},
+                                {
+                                    k: p[k]
+                                    for k in ("source_query", "tags", "max_tokens", "trigger")
+                                    if k in p
+                                },
                             )
                             br.pages_updated.append(p["name"])
                         else:
