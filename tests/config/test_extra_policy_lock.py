@@ -75,6 +75,11 @@ _EXPECTED_EXTRA_POLICY: dict[str, str] = {
     "MemoryGraphConfig": "ignore",
     "MemoryEmbeddingConfig": "ignore",
     "MemoryPriorityConfig": "forbid",
+    "MemoryModelsConfig": "ignore",
+    "MemoryDecisionConfig": "ignore",
+    "MemoryLaneOpConfig": "ignore",
+    "MemoryLanesConfig": "ignore",
+    "MemoryConsoleConfig": "ignore",
     # Leaf tunables / entries with no legitimate unknown key -> forbid
     "NpuConfig": "forbid",
     "ImageGenConfig": "forbid",

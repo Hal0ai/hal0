@@ -101,6 +101,24 @@ never clobbered, and a unit you disabled or masked (for example
 `hermes-gateway.service`) is left off on re-run; the installer prints the
 `systemctl` command to turn it back on.
 
+## Memory slot on new installs
+
+New installs include an empty `memory` LLM slot on port 8091 with the `memory`
+profile (32K context, one sequence, thinking off). No model is assigned or
+downloaded for it. Memory extraction uses the agent slot until you bind a
+model to `memory`; existing installs keep their configured extraction target
+and any existing `utility` slot. The retired utility slot is no longer seeded
+on new installs. New Open WebUI task calls and the installer's structured
+output probe use `hal0/agent`; an existing `openwebui.env` is left untouched.
+
+For a dedicated memory model, `lfm2.5-2.6b` is the recommended starting pick.
+It is the small model already used by the brain seed (about 2.87 GB Q8_0),
+and the v1.4.0 nightly validation report
+(`tests/release-validation/reports/v1.4.0-nightly.20261014214325.md`)
+records a successful Hindsight fact extraction through the gateway with
+structured JSON output. Bind it explicitly in the memory slot drawer; hal0
+does not assign it to the memory slot automatically.
+
 ## Starter image model
 
 On a box that can run the ComfyUI image engine (it needs a ROCm lane: `/dev/kfd`

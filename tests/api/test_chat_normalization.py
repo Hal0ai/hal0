@@ -381,6 +381,13 @@ class _OmniRequest:
             upstream_models={"_container": ["big"]},
         )
         self.app = SimpleNamespace(state=state)
+        # #3333: chat_completions brackets every request with the background
+        # gate, which reads request.state (the lane pin / memory-alias mark)
+        # and request.is_disconnected. This is a user request, so it takes
+        # the foreground arm — state just needs to exist, and a live client
+        # is never disconnected.
+        self.state = SimpleNamespace()
+        self.is_disconnected = lambda: False
 
     async def body(self):
         return self._raw
@@ -814,22 +821,25 @@ async def test_normalize_chat_body_caches_canonical_messages_in_request_body():
 @pytest.mark.parametrize("target", ["agent", "utility", "memory", "upstream"])
 async def test_memory_identity_survives_alias_resolution(target):
     from hal0.config.schema import MemoryGraphConfig
-    from hal0.dispatcher.lane_pin import MEMORY_REQUEST_ATTR
+    from hal0.dispatcher.lane_pin import MEMORY_REQUEST_ATTR, read_timeout_override
 
     graph = MemoryGraphConfig(
         extraction_slot=target if target != "upstream" else "agent",
         extraction_model="vendor/model" if target == "upstream" else None,
+        llm_timeout_s=900,
     )
     req = _make_request(cfgs=_UTILITY_AND_AGENT, loaded={"big", "small"}, graph=graph)
     await v1._normalize_chat_body(req, {"model": "hal0/memory", "messages": []})
     assert getattr(req.state, MEMORY_REQUEST_ATTR, False) is True
+    assert read_timeout_override(req) == 900.0
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", ["hal0/agent", "hal0/utility", "utility", "big", "vendor/model"])
 async def test_other_requests_sharing_memory_targets_are_not_tagged(model):
-    from hal0.dispatcher.lane_pin import MEMORY_REQUEST_ATTR
+    from hal0.dispatcher.lane_pin import MEMORY_REQUEST_ATTR, read_timeout_override
 
     req = _make_request(cfgs=_UTILITY_AND_AGENT, loaded={"big", "small"})
     await v1._normalize_chat_body(req, {"model": model, "messages": []})
     assert getattr(req.state, MEMORY_REQUEST_ATTR, False) is False
+    assert read_timeout_override(req) is None

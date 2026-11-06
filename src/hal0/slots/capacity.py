@@ -408,7 +408,11 @@ async def halogen_footprint_readout(
         model_id = model_table.get("default") if isinstance(model_table, dict) else model_table
         if not model_id:
             return None
-        info = await host._resolve_model_info(str(model_id))
+        from hal0.slots.config_write import _cfg_effective_provider
+
+        info = await host._resolve_model_info(
+            str(model_id), provider=_cfg_effective_provider(slot_cfg)
+        )
         # The window the slot is booked for, handed to the hook as ``ctx_tokens``
         # as every sizing path does. A hook may size from the slot's effective
         # tune instead (halogen's does) and ignore it.

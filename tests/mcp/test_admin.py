@@ -983,7 +983,11 @@ def test_memory_extended_toolset_is_fully_classified() -> None:
         assert admin._ANNOTATIONS[t].destructiveHint is True
     catalog = admin.AUTONOMOUS_READ_TOOLS | admin.AUTONOMOUS_WRITE_TOOLS | admin.GATED_TOOLS
     all_memory = {t for t in catalog if t.startswith("memory_")}
-    assert len(all_memory) == 26  # legacy 5 + the 21 above
+    # legacy 5 + the 21 above + 4 Hindsight 1.2 showcase reads (kb/documents)
+    assert len(all_memory) == 30
+    for t in ("memory_kb_tree", "memory_kb_read", "memory_documents_list", "memory_documents_get"):
+        assert t in admin.AUTONOMOUS_READ_TOOLS, f"{t} must be classified AUTONOMOUS_READ"
+        assert admin._ANNOTATIONS[t].readOnlyHint is True
 
 
 def test_memory_extended_annotations_match_the_memory_mount_verbatim() -> None:
