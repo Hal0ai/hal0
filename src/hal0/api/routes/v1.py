@@ -37,6 +37,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import Response, StreamingResponse
 
 from hal0.api import image_cache, live_sockets
+from hal0.api.background_gate import DEFAULT_MAX_WAIT_S as BACKGROUND_GATE_MAX_WAIT_S
+from hal0.api.background_gate import get_background_gate
 from hal0.api.deps import DispatcherDep
 from hal0.dispatcher._capability_resolve import select_slot_by_type
 from hal0.dispatcher.lane_pin import (
@@ -1557,19 +1559,97 @@ async def chat_completions(request: Request, dispatcher: DispatcherDep) -> Respo
     # unconditional request._body=json(body) rewrite would corrupt the
     # multipart upload / inject a meaningless enable_thinking.
     body = await _normalize_chat_body(request, body)
-    if body.get("omni") is True:
-        looped = await _maybe_run_omni_loop(request, body)
-        if looped is not None:
-            return looped
-    # Strip the knob before forwarding so the upstream never sees it
-    # — strict-mode backends would reject the unknown field.
-    if "omni" in body:
-        body = {k: v for k, v in body.items() if k != "omni"}
-        import contextlib
+    # #3333: on a single-parallel slot, a BACKGROUND (hal0/memory) request
+    # yields the slot to any FOREGROUND (user) request already waiting on or
+    # running on it, so Hindsight extraction/reflect/consolidation can never
+    # queue a user's chat turn behind itself for minutes. See
+    # hal0.api.background_gate for the full design and its in-flight-call
+    # caveat (an already-dispatched background call cannot be preempted).
+    gate_cm = await _background_gate_context(request, body)
+    async with gate_cm:
+        if body.get("omni") is True:
+            looped = await _maybe_run_omni_loop(request, body)
+            if looped is not None:
+                return looped
+        # Strip the knob before forwarding so the upstream never sees it
+        # — strict-mode backends would reject the unknown field.
+        if "omni" in body:
+            body = {k: v for k, v in body.items() if k != "omni"}
+            import contextlib
 
-        with contextlib.suppress(Exception):
-            request._body = json.dumps(body).encode("utf-8")  # type: ignore[attr-defined]
-    return await _dispatch_and_forward(request, dispatcher, body=body)
+            with contextlib.suppress(Exception):
+                request._body = json.dumps(body).encode("utf-8")  # type: ignore[attr-defined]
+        return await _dispatch_and_forward(request, dispatcher, body=body)
+
+
+def _gate_slot_key(request: Request, body: dict[str, Any]) -> str:
+    """The slot name a background/foreground chat request's gate is keyed on.
+
+    Prefers the lane pin (:func:`hal0.dispatcher.lane_pin.lane_slot_pin`) set
+    by ``_normalize_chat_body`` when the resolver matched a model-bound slot
+    — on a single-slot box both a user's chat lane and ``hal0/memory``'s
+    extraction target converge on that one slot name. Falls back to the
+    resolved model id so the gate still groups same-model requests when no
+    pin was set (e.g. anchor fallback); an empty/missing model disables
+    gating for this request (``wait_background`` is simply never called).
+    """
+    pin = lane_slot_pin(request)
+    if pin:
+        return pin
+    model_id = body.get("model")
+    return model_id if isinstance(model_id, str) else ""
+
+
+async def _background_gate_context(request: Request, body: dict[str, Any]):
+    """Apply the #3333 gate: block here if BACKGROUND, else bracket FOREGROUND.
+
+    Returns an async context manager to wrap the actual dispatch in. The
+    background wait happens BEFORE the context manager is entered (there is
+    nothing to bracket a wait with — a background request doesn't register
+    itself while waiting, only once it is clear to proceed), so this is an
+    ``async def`` returning a context manager rather than being one itself.
+    """
+    import contextlib
+
+    slot_key = _gate_slot_key(request, body)
+    if not slot_key:
+        return contextlib.nullcontext()
+    gate = get_background_gate(request.app.state)
+    is_background = bool(getattr(request.state, MEMORY_REQUEST_ATTR, False))
+    if not is_background:
+        return gate.foreground(slot_key)
+    parallel = _gated_slot_parallel(request)
+    if parallel is None or parallel > 1:
+        # Unknown or multi-sequence slot: nothing is being starved, pass
+        # through (safe default — #3333 point 3).
+        return contextlib.nullcontext()
+    waited = await gate.wait_background(
+        slot_key,
+        max_wait_s=BACKGROUND_GATE_MAX_WAIT_S,
+        is_disconnected=request.is_disconnected,
+    )
+    if waited > 0:
+        log.info("hal0.background_gate.yielded", slot=slot_key, waited_s=round(waited, 3))
+    log.info("hal0.background_gate.proceeded", slot=slot_key, waited_s=round(waited, 3))
+    return contextlib.nullcontext()
+
+
+def _gated_slot_parallel(request: Request) -> int | None:
+    """``--parallel`` of the current ``hal0/memory`` target slot, or ``None``.
+
+    Thin wrapper over :func:`hal0.memory.extraction_env.extraction_slot_parallel`
+    reading the same live ``[memory.graph]`` cache as :func:`_memory_alias_target`,
+    so the gate and the alias resolution can never disagree about which slot
+    (or whether it's local at all) is in play.
+    """
+    from hal0.config.schema import MemoryGraphConfig
+    from hal0.memory.extraction_env import extraction_slot_parallel
+
+    cfg = getattr(request.app.state, "hal0_config", None)
+    graph = getattr(getattr(cfg, "memory", None), "graph", None)
+    if graph is None:
+        graph = MemoryGraphConfig()
+    return extraction_slot_parallel(graph)
 
 
 # Pre-canon NPU-trio slot names, kept as routable model aliases after the
