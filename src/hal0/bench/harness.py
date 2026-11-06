@@ -73,6 +73,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -143,6 +144,23 @@ UNIT_STATES: frozenset[str] = frozenset(
 #: either type means ``inactive`` is temporary, not proof that the slot will
 #: stay down for the exclusive benchmark window (#3414 review).
 _START_JOB_TYPES: frozenset[str] = frozenset({"start", "restart"})
+
+#: ANSI CSI escape sequences, as systemd emits them when it colours its
+#: output (``SYSTEMD_COLORS=1``, or a terminal it believes is a TTY). The
+#: unit-name cell of a ``list-jobs`` row is one of the coloured cells, so the
+#: escape lands ON the value the exclusive window has to compare (#3445).
+_ANSI_CSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI CSI escape sequences from ``text``.
+
+    systemd colours the cells of its table output, and the escape sequences
+    land inside the values, not beside them — so a colour-mangled cell never
+    equals the bare value it should be compared against.
+    """
+    return _ANSI_CSI.sub("", text)
+
 
 #: The unprivileged runner reads/writes this default when a cell's flags omit
 #: an explicit host label — matches ``run_benchmarks.sh``'s ``HOST_LABEL``
@@ -742,6 +760,12 @@ class ExclusiveSlots:
         ``systemctl list-jobs`` probe could not answer. The caller treats the
         unknown result conservatively: it cannot prove the slot will stay
         down, so the exclusive window must not proceed.
+
+        The output is colour-stripped before it is parsed (#3445): systemd
+        colours the unit-name cell of a job row, and a mangled cell never
+        equals the bare unit name — the row was skipped and the probe fell
+        through to a confident ``None`` ("no queued job"), which is a FAIL-OPEN
+        answer for the guard this method exists to serve.
         """
         unit = f"hal0-slot@{slot_id}.service"
         rc, out, _err = self._run(
@@ -757,7 +781,12 @@ class ExclusiveSlots:
         )
         if rc != 0:
             return "unknown"
-        for line in out.splitlines():
+        for raw_line in out.splitlines():
+            line = _strip_ansi(raw_line)
+            if "\x1b" in line:
+                # An escape this stripper does not know: the row cannot be
+                # read, so the probe cannot answer. Fail closed.
+                return "unknown"
             fields = line.split()
             if not fields:
                 continue
