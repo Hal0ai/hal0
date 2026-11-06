@@ -44,7 +44,10 @@ per-request so the guard owns the *body* bound and a stall always produces the
 diagnostic frame below (a bare `httpx.ReadTimeout` would tear the stream with no
 terminal frame). `direct_read_timeout_s` still bounds the wait for response
 headers on those requests — the guard's own clocks only start once headers
-arrive, so a header wait needs its own bound. Only with **both** stall-guard
+arrive, so a header wait needs its own bound. Non-streaming `hal0/memory`
+requests (the Hindsight memory engine) are the exception to the default: they
+use `[memory.graph].llm_timeout_s` as their read timeout when it is longer than
+`direct_read_timeout_s`. Only with **both** stall-guard
 bounds set to `0` is the client's
 read timeout kept on the streaming path, as a per-read transport backstop; if it
 trips, the guard still converts it into a diagnostic frame with reason `read`.

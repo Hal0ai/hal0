@@ -32,11 +32,14 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
+import httpx
 import structlog
 from fastapi import APIRouter, Request
 from fastapi.responses import Response, StreamingResponse
 
 from hal0.api import image_cache, live_sockets
+from hal0.api.background_gate import DEFAULT_MAX_WAIT_S as BACKGROUND_GATE_MAX_WAIT_S
+from hal0.api.background_gate import get_background_gate
 from hal0.api.deps import DispatcherDep
 from hal0.dispatcher._capability_resolve import select_slot_by_type
 from hal0.dispatcher.lane_pin import (
@@ -44,6 +47,7 @@ from hal0.dispatcher.lane_pin import (
     lane_slot_pin,
     preferred_slot,
     set_lane_pin,
+    set_read_timeout,
     set_upstream_only,
 )
 from hal0.dispatcher.stream_usage import ensure_include_usage, strip_usage_only_chunk
@@ -364,6 +368,18 @@ def _memory_alias_target(request: Request) -> tuple[str, str]:
     if graph is None:
         graph = MemoryGraphConfig()
     return memory_engine_target(graph)
+
+
+def _memory_alias_timeout_s(request: Request) -> float:
+    """``[memory.graph].llm_timeout_s`` off the live config cache (schema default
+    on a bare app), the call budget the memory engine itself runs under (#3347)."""
+    from hal0.config.schema import MemoryGraphConfig
+
+    cfg = getattr(request.app.state, "hal0_config", None)
+    graph = getattr(getattr(cfg, "memory", None), "graph", None)
+    if graph is None:
+        graph = MemoryGraphConfig()
+    return float(graph.llm_timeout_s)
 
 
 async def _rewrite_chat_slot_alias(request: Request, body: dict[str, Any]) -> dict[str, Any]:
@@ -720,6 +736,9 @@ async def _normalize_chat_body(request: Request, body: dict[str, Any]) -> dict[s
         # upstream or fails with dispatch.upstream_unavailable, never the
         # agent anchor (not even on a cold or offline catalog).
         kind, target = _memory_alias_target(request)
+        # #3347: Hindsight sends this call non-streaming with its own budget
+        # (llm_timeout_s); the dispatcher must not cut it earlier than that.
+        set_read_timeout(request, _memory_alias_timeout_s(request))
         if kind == "upstream":
             body = {**body, "model": target}
             set_upstream_only(request, target)
@@ -1541,19 +1560,97 @@ async def chat_completions(request: Request, dispatcher: DispatcherDep) -> Respo
     # unconditional request._body=json(body) rewrite would corrupt the
     # multipart upload / inject a meaningless enable_thinking.
     body = await _normalize_chat_body(request, body)
-    if body.get("omni") is True:
-        looped = await _maybe_run_omni_loop(request, body)
-        if looped is not None:
-            return looped
-    # Strip the knob before forwarding so the upstream never sees it
-    # — strict-mode backends would reject the unknown field.
-    if "omni" in body:
-        body = {k: v for k, v in body.items() if k != "omni"}
-        import contextlib
+    # #3333: on a single-parallel slot, a BACKGROUND (hal0/memory) request
+    # yields the slot to any FOREGROUND (user) request already waiting on or
+    # running on it, so Hindsight extraction/reflect/consolidation can never
+    # queue a user's chat turn behind itself for minutes. See
+    # hal0.api.background_gate for the full design and its in-flight-call
+    # caveat (an already-dispatched background call cannot be preempted).
+    gate_cm = await _background_gate_context(request, body)
+    async with gate_cm:
+        if body.get("omni") is True:
+            looped = await _maybe_run_omni_loop(request, body)
+            if looped is not None:
+                return looped
+        # Strip the knob before forwarding so the upstream never sees it
+        # — strict-mode backends would reject the unknown field.
+        if "omni" in body:
+            body = {k: v for k, v in body.items() if k != "omni"}
+            import contextlib
 
-        with contextlib.suppress(Exception):
-            request._body = json.dumps(body).encode("utf-8")  # type: ignore[attr-defined]
-    return await _dispatch_and_forward(request, dispatcher, body=body)
+            with contextlib.suppress(Exception):
+                request._body = json.dumps(body).encode("utf-8")  # type: ignore[attr-defined]
+        return await _dispatch_and_forward(request, dispatcher, body=body)
+
+
+def _gate_slot_key(request: Request, body: dict[str, Any]) -> str:
+    """The slot name a background/foreground chat request's gate is keyed on.
+
+    Prefers the lane pin (:func:`hal0.dispatcher.lane_pin.lane_slot_pin`) set
+    by ``_normalize_chat_body`` when the resolver matched a model-bound slot
+    — on a single-slot box both a user's chat lane and ``hal0/memory``'s
+    extraction target converge on that one slot name. Falls back to the
+    resolved model id so the gate still groups same-model requests when no
+    pin was set (e.g. anchor fallback); an empty/missing model disables
+    gating for this request (``wait_background`` is simply never called).
+    """
+    pin = lane_slot_pin(request)
+    if pin:
+        return pin
+    model_id = body.get("model")
+    return model_id if isinstance(model_id, str) else ""
+
+
+async def _background_gate_context(request: Request, body: dict[str, Any]):
+    """Apply the #3333 gate: block here if BACKGROUND, else bracket FOREGROUND.
+
+    Returns an async context manager to wrap the actual dispatch in. The
+    background wait happens BEFORE the context manager is entered (there is
+    nothing to bracket a wait with — a background request doesn't register
+    itself while waiting, only once it is clear to proceed), so this is an
+    ``async def`` returning a context manager rather than being one itself.
+    """
+    import contextlib
+
+    slot_key = _gate_slot_key(request, body)
+    if not slot_key:
+        return contextlib.nullcontext()
+    gate = get_background_gate(request.app.state)
+    is_background = bool(getattr(request.state, MEMORY_REQUEST_ATTR, False))
+    if not is_background:
+        return gate.foreground(slot_key)
+    parallel = _gated_slot_parallel(request)
+    if parallel is None or parallel > 1:
+        # Unknown or multi-sequence slot: nothing is being starved, pass
+        # through (safe default — #3333 point 3).
+        return contextlib.nullcontext()
+    waited = await gate.wait_background(
+        slot_key,
+        max_wait_s=BACKGROUND_GATE_MAX_WAIT_S,
+        is_disconnected=request.is_disconnected,
+    )
+    if waited > 0:
+        log.info("hal0.background_gate.yielded", slot=slot_key, waited_s=round(waited, 3))
+    log.info("hal0.background_gate.proceeded", slot=slot_key, waited_s=round(waited, 3))
+    return contextlib.nullcontext()
+
+
+def _gated_slot_parallel(request: Request) -> int | None:
+    """``--parallel`` of the current ``hal0/memory`` target slot, or ``None``.
+
+    Thin wrapper over :func:`hal0.memory.extraction_env.extraction_slot_parallel`
+    reading the same live ``[memory.graph]`` cache as :func:`_memory_alias_target`,
+    so the gate and the alias resolution can never disagree about which slot
+    (or whether it's local at all) is in play.
+    """
+    from hal0.config.schema import MemoryGraphConfig
+    from hal0.memory.extraction_env import extraction_slot_parallel
+
+    cfg = getattr(request.app.state, "hal0_config", None)
+    graph = getattr(getattr(cfg, "memory", None), "graph", None)
+    if graph is None:
+        graph = MemoryGraphConfig()
+    return extraction_slot_parallel(graph)
 
 
 # Pre-canon NPU-trio slot names, kept as routable model aliases after the
@@ -1796,6 +1893,123 @@ async def _maybe_run_omni_loop(request: Request, body: dict[str, Any]) -> Respon
 @router.post("/completions")
 async def completions(request: Request, dispatcher: DispatcherDep) -> Response:
     return await _dispatch_and_forward(request, dispatcher)
+
+
+@router.post("/systemone")
+async def systemone(request: Request) -> Response:
+    """Hindsight's "System One" decision gate — fast, cheap, frequent calls.
+
+    Historically this bypassed the hal0 router entirely: clients hit the
+    FLM/decision slot's port directly, so the request never counted as
+    slot activity and ``idle_timeout_s`` unloaded the slot mid-use. This
+    route gives it an actual home:
+
+    1. If any configured slot sets ``[npu].decision`` (EXPERIMENTAL,
+       usually unset), forward there with priority 0 (admission jumps
+       ahead of queued chat — see ``hal0.dispatcher.admission``), lazy-load
+       it like chat does, and stamp slot activity so the idle timer resets.
+    2. Otherwise (the default), proxy straight to the CPU hs-decide
+       System One server configured under ``[memory.decision]``.
+
+    Either way the client gets exactly what it would have gotten hitting
+    the backend directly — same body in, same body/status out.
+    """
+    body = await _read_json_body(request)
+    cfg = getattr(request.app.state, "hal0_config", None)
+    decision_cfg = getattr(getattr(cfg, "memory", None), "decision", None)
+    slot_manager = getattr(request.app.state, "slot_manager", None)
+
+    slot_name = await _find_decision_slot(slot_manager, body.get("model"))
+    if slot_name is not None:
+        return await _forward_to_decision_slot(request, slot_manager, slot_name, body)
+
+    resolver = getattr(decision_cfg, "resolved_base_url", None)
+    base_url = str(
+        resolver()
+        if callable(resolver)
+        else getattr(decision_cfg, "base_url", None) or "http://127.0.0.1:9178"
+    )
+    default_model = getattr(decision_cfg, "model", "hs-decide-1-flash")
+    timeout_s = getattr(decision_cfg, "timeout_s", 30.0)
+    if not body.get("model"):
+        body = {**body, "model": default_model}
+    return await _proxy_to_decision_server(base_url, timeout_s, body)
+
+
+async def _find_decision_slot(slot_manager: Any, requested_model: Any) -> str | None:
+    """Return the first slot whose ``[npu].decision`` tag is set, if any.
+
+    EXPERIMENTAL opt-in path (course correction: decision calls default to
+    the CPU hs-decide server, NOT an FLM slot). When more than one slot
+    configures a decision tag, prefer the one whose tag matches the
+    requested ``model`` (``d3:*``); fall back to the first configured one.
+    """
+    if slot_manager is None:
+        return None
+    try:
+        configs = await slot_manager.iter_configs()
+    except Exception:  # defensive — a config read failure must not 500 /v1/systemone
+        return None
+    candidates = [c for c in configs if (c.get("npu") or {}).get("decision")]
+    if not candidates:
+        return None
+    if requested_model:
+        for c in candidates:
+            if c["npu"]["decision"] == requested_model:
+                return c.get("name")
+    return candidates[0].get("name")
+
+
+async def _forward_to_decision_slot(
+    request: Request,
+    slot_manager: Any,
+    slot_name: str,
+    body: dict[str, Any],
+) -> Response:
+    """Lazy-load ``slot_name``, forward with decision priority, stamp activity."""
+    from hal0.dispatcher.admission import PRIORITY_DECISION
+    from hal0.dispatcher.admission import REGISTRY as admission_registry
+
+    await slot_manager.load(slot_name)
+    cfg = await slot_manager.get_config(slot_name)
+    port = cfg.get("port")
+    _stamp_slot_last_used(request.app.state, slot_name)
+    cap_fn = getattr(slot_manager, "effective_max_inflight", None)
+    cap = cap_fn(slot_name) if callable(cap_fn) else cfg.get("max_inflight")
+    admission_registry.configure(slot_name, cap if isinstance(cap, int) else None)
+    timeout_s = getattr(
+        getattr(getattr(request.app.state, "hal0_config", None), "memory", None),
+        "decision",
+        None,
+    )
+    read_timeout_s = getattr(timeout_s, "timeout_s", 30.0)
+    wait_s = getattr(
+        getattr(getattr(request.app.state, "hal0_config", None), "dispatcher", None),
+        "admission_wait_timeout_s",
+        1800.0,
+    )
+    async with admission_registry.acquire(slot_name, PRIORITY_DECISION, timeout_s=float(wait_s)):
+        resp = await _proxy_to_decision_server(f"http://127.0.0.1:{port}", read_timeout_s, body)
+    _touch_npu_shadow_count(request, slot_name)
+    return resp
+
+
+async def _proxy_to_decision_server(
+    base_url: str, timeout_s: float, body: dict[str, Any]
+) -> Response:
+    """Raw proxy of a /v1/systemone call — same shape in, same shape out."""
+    url = base_url.rstrip("/") + "/v1/systemone"
+    async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=timeout_s)) as client:
+        try:
+            upstream_resp = await client.post(url, json=body)
+        except httpx.HTTPError as exc:
+            from hal0.dispatcher.router import UpstreamUnavailable
+
+            raise UpstreamUnavailable(
+                f"upstream decision server {url} did not respond: {exc}",
+                details={"url": url},
+            ) from exc
+    return _wrap_npu_trio_response(upstream_resp)
 
 
 @router.post("/embeddings")

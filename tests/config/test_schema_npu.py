@@ -55,7 +55,8 @@ def test_npu_dumps_under_its_toml_table_name() -> None:
     )
     data = slot.model_dump()
     # chat defaults to True (feat(schema): add chat field to NpuConfig).
-    assert data["npu"] == {"asr": True, "embed": False, "chat": True}
+    # decision is the optional, experimental d3:<tag> (absent == None).
+    assert data["npu"] == {"asr": True, "embed": False, "chat": True, "decision": None}
     assert "extra" not in data
 
 

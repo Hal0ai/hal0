@@ -16,6 +16,8 @@ import pytest
 
 from hal0.slots.manager import SlotManager
 
+pytestmark = pytest.mark.usefixtures("container_stub")
+
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 
@@ -41,9 +43,32 @@ def _write_npu_container_slot(root: Path, name: str = "npu", port: int = 8088) -
 def _make_container_provider_mock() -> MagicMock:
     """Build a MagicMock ContainerProvider with load_sync and wait_ready stubs."""
     provider = MagicMock()
-    provider.load_sync = MagicMock(return_value=None)
+    started_ports: set[int] = set()
+
+    def load_sync(cfg: dict, *args: object, **kwargs: object) -> None:
+        port = cfg.get("port") if isinstance(cfg, dict) else None
+        if port is not None:
+            started_ports.add(port)
+
+    provider.load_sync = MagicMock(side_effect=load_sync)
     # wait_ready is async — replace with a coroutine that returns immediately.
     provider.wait_ready = AsyncMock(return_value=None)
+
+    def is_active(cfg: dict, *args: object, **kwargs: object) -> bool:
+        # review P3-8: a bare MagicMock().is_active(cfg) was truthy for
+        # EVERY slot, including ones a test never touched (e.g. slot_root's
+        # unrelated "chat" fixture slot). SlotManager._is_active →
+        # container_provider().is_active() feeds both `_maybe_adopt_running_
+        # slot` (treats "truthy" as "this unconfigured slot is secretly
+        # running, adopt it READY") and `status()`'s post-load reconcile
+        # (treats "falsy" as "the unit died, flip back to OFFLINE"). A
+        # single blanket True/False value can't satisfy both: it must track
+        # which slot this mock actually `load_sync`'d — true for that one,
+        # false for every untouched sibling slot in the fixture's TOML dir.
+        port = cfg.get("port") if isinstance(cfg, dict) else None
+        return port in started_ports
+
+    provider.is_active = MagicMock(side_effect=is_active)
     return provider
 
 
