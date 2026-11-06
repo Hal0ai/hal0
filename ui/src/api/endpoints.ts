@@ -569,7 +569,9 @@ export const ENDPOINTS = {
   // Authenticated allowlisted passthrough to the Hindsight engine; `sub` is
   // the upstream path with its leading slash stripped (e.g.
   // `v1/default/banks`). Shape = hindsight-1.2.0-openapi.json.
-  memoryEngine: (sub: string) => `/api/memory/engine/${sub.replace(/^\/+/, '')}`,
+  // NOTE: distinct from `memoryEngine` above (the pre-existing Overview
+  // "engine card" endpoint) — this one is parameterized passthrough.
+  memoryEnginePath: (sub: string) => `/api/memory/engine/${sub.replace(/^\/+/, '')}`,
   // Decision-lane / LLM-lane / per-bank queue health (NPU box only; `npu` is
   // null off-box).
   memoryLanes: '/api/memory/lanes',

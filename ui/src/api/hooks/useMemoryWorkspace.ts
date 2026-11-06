@@ -98,7 +98,7 @@ export function useMemoryEngineQuery<T = unknown>(
 ) {
   return useQuery({
     queryKey: ['memory', 'engine', sub],
-    queryFn: () => apiGet<T>(ENDPOINTS.memoryEngine(sub as string)),
+    queryFn: () => apiGet<T>(ENDPOINTS.memoryEnginePath(sub as string)),
     enabled: (opts?.enabled ?? true) && !!sub,
     refetchInterval: opts?.refetchInterval,
   })
@@ -125,7 +125,7 @@ export function useMemoryEngineMutation<TBody = unknown, TResp = unknown>(
   const invalidate = useInvalidateMemoryEngine()
   return useMutation({
     mutationFn: ({ sub, body }: { sub: string; body?: TBody }) => {
-      const url = ENDPOINTS.memoryEngine(sub)
+      const url = ENDPOINTS.memoryEnginePath(sub)
       if (method === 'delete') return apiDelete<TResp>(url)
       if (method === 'patch') return apiPatch<TResp>(url, body as Record<string, unknown>)
       return apiPost<TResp>(url, body as Record<string, unknown>)
