@@ -2733,6 +2733,22 @@ class MemoryPriorityConfig(BaseModel):
     )
 
 
+#: #3492: value shapes the ``hal0-systemctl`` showcase allow-list accepts
+#: (installer/wrappers/hal0-systemctl, ``validate_dropin_directive showcase``).
+#: Checked here too so a value the root side would refuse is rejected at save
+#: time instead of leaving the drop-in stale behind a saved ``hal0.toml``.
+_SHOWCASE_PROVIDER_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
+_SHOWCASE_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./:-]{0,159}$")
+_SHOWCASE_VIRTUAL_MODEL_RE = re.compile(r"^hal0/[A-Za-z0-9_.-]{1,64}$")
+_SHOWCASE_EFFORT_RE = re.compile(r"^[a-z]{1,16}$")
+
+
+def _showcase_shape(v: str, pattern: re.Pattern[str], what: str) -> str:
+    if not pattern.fullmatch(v) or ".." in v:
+        raise ValueError(f"{what} {v!r} must match {pattern.pattern} (no '..')")
+    return v
+
+
 class MemoryModelsConfig(BaseModel):
     """[memory.models] section of hal0.toml — Hindsight 1.2 embed/rerank models.
 
@@ -2766,6 +2782,16 @@ class MemoryModelsConfig(BaseModel):
         default=True,
         description="HINDSIGHT_API_RERANKER_LOCAL_BUCKET_BATCHING.",
     )
+
+    @field_validator("embeddings_provider", "reranker_provider")
+    @classmethod
+    def _showcase_provider(cls, v: str) -> str:
+        return _showcase_shape(v, _SHOWCASE_PROVIDER_RE, "provider")
+
+    @field_validator("embeddings_model", "reranker_model")
+    @classmethod
+    def _showcase_model(cls, v: str) -> str:
+        return _showcase_shape(v, _SHOWCASE_MODEL_RE, "model id")
 
 
 class MemoryDecisionConfig(BaseModel):
@@ -2844,6 +2870,11 @@ class MemoryDecisionConfig(BaseModel):
         """The System One server URL: ``base_url`` if set, else the local port."""
         return (self.base_url or f"http://127.0.0.1:{self.port}").rstrip("/")
 
+    @field_validator("model")
+    @classmethod
+    def _decision_model_shape(cls, v: str) -> str:
+        return _showcase_shape(v, _SHOWCASE_MODEL_RE, "decision model id")
+
     @field_validator("provider")
     @classmethod
     def _decision_provider_known(cls, v: str) -> str:
@@ -2893,6 +2924,18 @@ class MemoryLaneOpConfig(BaseModel):
         description="Per-op HINDSIGHT_API_{OP}_LLM_STRICT_SCHEMA override.",
     )
 
+    @field_validator("virtual_model")
+    @classmethod
+    def _op_virtual_model_shape(cls, v: str | None) -> str | None:
+        return (
+            None if v is None else _showcase_shape(v, _SHOWCASE_VIRTUAL_MODEL_RE, "virtual_model")
+        )
+
+    @field_validator("reasoning_effort")
+    @classmethod
+    def _op_effort_shape(cls, v: str | None) -> str | None:
+        return None if v is None else _showcase_shape(v, _SHOWCASE_EFFORT_RE, "reasoning_effort")
+
 
 class MemoryLanesConfig(BaseModel):
     """[memory.lanes] section of hal0.toml — global + per-op LLM concurrency lanes.
@@ -2926,6 +2969,11 @@ class MemoryLanesConfig(BaseModel):
     consolidation: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
     reflect: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
     mental_model_refresh: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
+
+    @field_validator("reasoning_effort")
+    @classmethod
+    def _effort_shape(cls, v: str) -> str:
+        return _showcase_shape(v, _SHOWCASE_EFFORT_RE, "reasoning_effort")
 
 
 class MemoryConsoleConfig(BaseModel):

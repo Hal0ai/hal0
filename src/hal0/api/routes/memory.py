@@ -794,7 +794,10 @@ async def retry_failed_extractions(request: Request) -> dict[str, Any]:
 
 
 async def _propagate_shielded(
-    slot: str, timeout_s: int, limits: ExtractionLimits | None = None
+    slot: str,
+    timeout_s: int,
+    limits: ExtractionLimits | None = None,
+    memory: Any = None,
 ) -> dict[str, Any]:
     """Propagate an extraction-slot/timeout/limits change, safe against cancellation.
 
@@ -819,11 +822,32 @@ async def _propagate_shielded(
     early either — an unshielded ``await task`` there would exit and
     release the lock exactly like the bug this function exists to close.
     """
-    from hal0.memory.extraction_env import apply_extraction_slot
-
-    task = asyncio.ensure_future(
-        asyncio.to_thread(apply_extraction_slot, slot, timeout_s=timeout_s, limits=limits)
+    from hal0.memory.extraction_env import (
+        SHOWCASE_DROP_IN_PATH,
+        apply_extraction_slot,
+        apply_showcase_dropin,
     )
+
+    def _apply() -> dict[str, Any]:
+        # #3492: the showcase drop-in's concurrency caps are held to the
+        # extraction limit and win over it (later drop-in), so a graph change
+        # re-renders it too — written without its own restart; the extraction
+        # apply below does the one reload + restart for both.
+        showcase = None
+        if memory is not None and SHOWCASE_DROP_IN_PATH.exists():
+            showcase = apply_showcase_dropin(
+                models=memory.models,
+                decision=memory.decision,
+                lanes=memory.lanes,
+                graph=memory.graph,
+                restart=False,
+            )
+        result = apply_extraction_slot(slot, timeout_s=timeout_s, limits=limits)
+        if showcase is not None:
+            result["showcase_dropin"] = showcase
+        return result
+
+    task = asyncio.ensure_future(asyncio.to_thread(_apply))
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
@@ -983,7 +1007,7 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
             # cancellation (see _propagate_shielded) so this lock's critical
             # section can't be exited early while the worker is still live.
             propagation = await _propagate_shielded(
-                new_cfg.extraction_slot, new_cfg.llm_timeout_s, render_limits
+                new_cfg.extraction_slot, new_cfg.llm_timeout_s, render_limits, cfg.memory
             )
 
         out = new_cfg.model_dump(mode="json")
