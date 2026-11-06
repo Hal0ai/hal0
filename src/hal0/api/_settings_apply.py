@@ -237,6 +237,75 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     "memory.graph.extraction_llm_retries": {"apply_class": "immediate", "services": []},
     "memory.graph.extraction_task_retries": {"apply_class": "immediate", "services": []},
     "memory.graph.extraction_retry_backoff_s": {"apply_class": "immediate", "services": []},
+    # [memory.models] / [memory.decision] / [memory.lanes] — Hindsight 1.2
+    # showcase. These render into hindsight-api's showcase-lanes.conf drop-in
+    # (extraction_env.render_showcase_env), which the engine reads only at
+    # start. Until the privileged showcase drop-in writer lands, a save is
+    # persisted and the operator re-renders + restarts hindsight-api by hand
+    # — so manual-restart, never a silent "applied".
+    "memory.models.embeddings_provider": {"apply_class": "manual-restart", "services": []},
+    "memory.models.embeddings_model": {"apply_class": "manual-restart", "services": []},
+    "memory.models.reranker_provider": {"apply_class": "manual-restart", "services": []},
+    "memory.models.reranker_model": {"apply_class": "manual-restart", "services": []},
+    "memory.models.reranker_bucket_batching": {"apply_class": "manual-restart", "services": []},
+    "memory.decision.enabled": {"apply_class": "manual-restart", "services": []},
+    "memory.decision.provider": {"apply_class": "manual-restart", "services": []},
+    "memory.decision.model": {"apply_class": "manual-restart", "services": []},
+    "memory.decision.threads": {"apply_class": "manual-restart", "services": []},
+    "memory.decision.max_concurrent": {"apply_class": "manual-restart", "services": []},
+    "memory.decision.max_request_tokens": {"apply_class": "manual-restart", "services": []},
+    "memory.decision.timeout_s": {"apply_class": "manual-restart", "services": []},
+    "memory.decision.port": {"apply_class": "manual-restart", "services": []},
+    "memory.decision.base_url": {"apply_class": "manual-restart", "services": []},
+    "memory.lanes.llm_max_concurrent": {"apply_class": "manual-restart", "services": []},
+    "memory.lanes.timeout_s": {"apply_class": "manual-restart", "services": []},
+    "memory.lanes.reasoning_effort": {"apply_class": "manual-restart", "services": []},
+    "memory.lanes.strict_schema": {"apply_class": "manual-restart", "services": []},
+    "memory.lanes.retain.max_concurrent": {"apply_class": "manual-restart", "services": []},
+    "memory.lanes.retain.virtual_model": {"apply_class": "manual-restart", "services": []},
+    "memory.lanes.retain.timeout_s": {"apply_class": "manual-restart", "services": []},
+    "memory.lanes.retain.reasoning_effort": {"apply_class": "manual-restart", "services": []},
+    "memory.lanes.retain.strict_schema": {"apply_class": "manual-restart", "services": []},
+    "memory.lanes.consolidation.max_concurrent": {"apply_class": "manual-restart", "services": []},
+    "memory.lanes.consolidation.virtual_model": {"apply_class": "manual-restart", "services": []},
+    "memory.lanes.consolidation.timeout_s": {"apply_class": "manual-restart", "services": []},
+    "memory.lanes.consolidation.reasoning_effort": {
+        "apply_class": "manual-restart",
+        "services": [],
+    },
+    "memory.lanes.consolidation.strict_schema": {"apply_class": "manual-restart", "services": []},
+    "memory.lanes.reflect.max_concurrent": {"apply_class": "manual-restart", "services": []},
+    "memory.lanes.reflect.virtual_model": {"apply_class": "manual-restart", "services": []},
+    "memory.lanes.reflect.timeout_s": {"apply_class": "manual-restart", "services": []},
+    "memory.lanes.reflect.reasoning_effort": {"apply_class": "manual-restart", "services": []},
+    "memory.lanes.reflect.strict_schema": {"apply_class": "manual-restart", "services": []},
+    "memory.lanes.mental_model_refresh.max_concurrent": {
+        "apply_class": "manual-restart",
+        "services": [],
+    },
+    "memory.lanes.mental_model_refresh.virtual_model": {
+        "apply_class": "manual-restart",
+        "services": [],
+    },
+    "memory.lanes.mental_model_refresh.timeout_s": {
+        "apply_class": "manual-restart",
+        "services": [],
+    },
+    "memory.lanes.mental_model_refresh.reasoning_effort": {
+        "apply_class": "manual-restart",
+        "services": [],
+    },
+    "memory.lanes.mental_model_refresh.strict_schema": {
+        "apply_class": "manual-restart",
+        "services": [],
+    },
+    # [memory.console] + memory.public_url — read per request by
+    # GET /api/memory/agents (console_url, install one-liner): immediate.
+    # Installing/running the console service itself is the installer's job.
+    "memory.console.enabled": {"apply_class": "immediate", "services": []},
+    "memory.console.port": {"apply_class": "immediate", "services": []},
+    "memory.console.bind": {"apply_class": "immediate", "services": []},
+    "memory.public_url": {"apply_class": "immediate", "services": []},
     # [activity] — the AuditStore is constructed once at create_app
     # (api/__init__.py); retention/max_rows/enabled land on restart.
     "activity.enabled": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},

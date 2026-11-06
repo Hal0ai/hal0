@@ -116,6 +116,44 @@ def test_engine_disallowed_path_404(client: TestClient) -> None:
     assert r.status_code == 404
 
 
+@pytest.mark.parametrize(
+    "sub",
+    [
+        "v1/default/banks/shared/directives/dir-1",
+        "v1/default/banks/shared/mental-models/mm-1",
+    ],
+)
+def test_engine_item_delete_forwarded(client: TestClient, recorder: _Recorder, sub: str) -> None:
+    r = client.delete(f"/api/memory/engine/{sub}")
+    assert r.status_code == 200
+    assert recorder.requests[-1]["method"] == "DELETE"
+    assert recorder.requests[-1]["path"] == f"/{sub}"
+
+
+@pytest.mark.parametrize(
+    ("method", "sub"),
+    [
+        # #1024: a bank wipe must go through memory_admin's ?confirm= gate.
+        ("DELETE", "v1/default/banks/shared"),
+        ("DELETE", "v1/default/banks/shared/memories"),
+        ("DELETE", "v1/default/banks/shared/documents/doc-1"),
+        ("DELETE", "v1/default/banks/shared/config"),
+        ("DELETE", "v1/default/banks/shared/directives"),
+        ("POST", "v1/default/banks/shared/memories/delete"),
+        ("POST", "v1/default/banks/shared/clear"),
+        ("PUT", "v1/default/banks/shared/reset"),
+    ],
+)
+def test_engine_destructive_bank_calls_refused(
+    client: TestClient, recorder: _Recorder, method: str, sub: str
+) -> None:
+    before = len(recorder.requests)
+    r = client.request(method, f"/api/memory/engine/{sub}")
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "memory.engine_delete_not_allowed"
+    assert len(recorder.requests) == before, "refused call must never reach the engine"
+
+
 def test_engine_path_traversal_404(client: TestClient) -> None:
     r = client.get("/api/memory/engine/v1/default/banks/../../etc/passwd")
     assert r.status_code in (404, 400)
