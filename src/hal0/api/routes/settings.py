@@ -48,6 +48,7 @@ Validation failures return the structured error envelope with
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 from pathlib import Path
@@ -162,17 +163,36 @@ async def _apply_showcase_dropin(cs: Any) -> dict[str, Any] | None:
 
     Those keys reach hindsight-api only through its showcase drop-in, read at
     start — persisting ``hal0.toml`` alone would leave the daemon on the old
-    values. Runs only when one of them actually changed; the restart waits on
-    a hindsight-api cold start, so it hops a thread. ``None`` when nothing to do.
+    values. Runs only when one of them actually changed. ``None`` when nothing
+    to do.
+
+    Called inside :func:`hal0_config_txn` (the graph PUT's
+    ``_propagate_extraction_slot`` precedent) so two saves cannot write their
+    drop-ins in the opposite order to their ``hal0.toml`` writes. The worker
+    thread cannot be cancelled, so the wait is shielded and a cancelled caller
+    still waits it out before the lock is released.
     """
     if not any(c.path.startswith(_SHOWCASE_PREFIXES) for c in cs.changes):
         return None
     from hal0.memory.extraction_env import apply_showcase_dropin
 
     mem = cs.merged.memory
-    return await asyncio.to_thread(
-        apply_showcase_dropin, models=mem.models, decision=mem.decision, lanes=mem.lanes
+    task = asyncio.ensure_future(
+        asyncio.to_thread(
+            apply_showcase_dropin,
+            models=mem.models,
+            decision=mem.decision,
+            lanes=mem.lanes,
+            graph=mem.graph,
+        )
     )
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(task)
+        raise
 
 
 @router.put("")
@@ -231,6 +251,8 @@ async def update_settings(request: Request) -> dict[str, Any]:
                 details={"error": str(exc), "errno": getattr(exc, "errno", None)},
             ) from exc
 
+        showcase = await _apply_showcase_dropin(cs)
+
     event_bus = getattr(request.app.state, "events", None)
     if event_bus is not None:
         # Surface a footer chip when the operator saves the config. The
@@ -258,8 +280,6 @@ async def update_settings(request: Request) -> dict[str, Any]:
     # #1511): only leaves whose value actually changed, each with its own
     # before/after and reload class, so the UI can toast from truth
     # instead of re-deriving "what changed" from the raw PATCH body.
-    showcase = await _apply_showcase_dropin(cs)
-
     config_view = _config_to_dict(cs.merged)
     config_view["_hal0"] = {"apply_plan": cs.plan, "changeset": changeset_payload(cs)}
     if showcase is not None:

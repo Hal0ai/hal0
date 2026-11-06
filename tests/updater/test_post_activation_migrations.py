@@ -95,7 +95,7 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
 
     monkeypatch.setattr("hal0.memory.extraction_env.reconcile_showcase_dropin", _showcase_dropin)
     monkeypatch.setattr(
-        "hal0.memory.extraction_env.restart_hindsight_background",
+        "hal0.memory.extraction_env.reload_and_restart_hindsight",
         lambda: calls["hindsight_restart"].append(True),
     )
     return calls

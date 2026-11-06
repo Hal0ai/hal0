@@ -1335,3 +1335,112 @@ def test_showcase_reconcile_creates_then_converges(monkeypatch, tmp_path: Path):
     assert ["systemctl", "restart", "hindsight-api.service"] in [c[0] for c in calls]
     quiet = SystemCtlSeam(run=_forbidden, is_hal0_user=lambda: False)
     assert reconcile_showcase_dropin(seam=quiet) == {"status": "converged"}
+
+
+def test_showcase_caps_are_held_to_the_extraction_ceiling():
+    """#3492 review: showcase-lanes.conf sorts after extraction-model.conf, so
+    its caps are the ones the engine runs with — they must not undo the slot
+    --parallel clamp. Ops routed off the memory slot keep their own cap."""
+    from hal0.config.schema import (
+        MemoryDecisionConfig,
+        MemoryLaneOpConfig,
+        MemoryLanesConfig,
+        MemoryModelsConfig,
+    )
+    from hal0.memory.extraction_env import render_showcase_env
+
+    lanes = MemoryLanesConfig(
+        llm_max_concurrent=4,
+        retain=MemoryLaneOpConfig(max_concurrent=6),
+        reflect=MemoryLaneOpConfig(max_concurrent=5, virtual_model="hal0/primary"),
+    )
+    body = render_showcase_env(
+        models=MemoryModelsConfig(), decision=MemoryDecisionConfig(), lanes=lanes, ceiling=1
+    )
+    env = dict(
+        line.removeprefix("Environment=").split("=", 1)
+        for line in body.splitlines()
+        if line.startswith("Environment=")
+    )
+    assert env["HINDSIGHT_API_LLM_MAX_CONCURRENT"] == "1"
+    assert env["HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT"] == "1"
+    assert env["HINDSIGHT_API_CONSOLIDATION_LLM_MAX_CONCURRENT"] == "1"
+    assert env["HINDSIGHT_API_REFLECT_LLM_MAX_CONCURRENT"] == "5"
+
+
+def test_effective_concurrency_across_both_dropins_keeps_the_slot_clamp():
+    """Merge the two drop-ins the way systemd does (lexical order, later
+    assignment wins) and check every shared name lands at or under the clamp."""
+    from hal0.config.schema import (
+        MemoryDecisionConfig,
+        MemoryLaneOpConfig,
+        MemoryLanesConfig,
+        MemoryModelsConfig,
+    )
+    from hal0.memory.extraction_env import ExtractionLimits, render_showcase_env
+
+    clamped = ExtractionLimits(max_concurrent=1)
+    extraction = render_drop_in(300, limits=clamped)
+    showcase = render_showcase_env(
+        models=MemoryModelsConfig(),
+        decision=MemoryDecisionConfig(),
+        lanes=MemoryLanesConfig(llm_max_concurrent=8, retain=MemoryLaneOpConfig(max_concurrent=8)),
+        ceiling=clamped.max_concurrent,
+    )
+
+    def _env(body: str) -> dict[str, str]:
+        return dict(
+            line.removeprefix("Environment=").split("=", 1)
+            for line in body.splitlines()
+            if line.startswith("Environment=")
+        )
+
+    first, last = _env(extraction), _env(showcase)
+    effective = {**first, **last}  # extraction-model.conf < showcase-lanes.conf
+    shared = set(first) & set(last)
+    assert shared, "the two drop-ins are expected to share the concurrency names"
+    for name in shared:
+        if name.endswith("_MAX_CONCURRENT"):
+            assert int(effective[name]) <= clamped.max_concurrent, name
+
+
+def test_reload_and_restart_reloads_first_and_reports_a_seam_timeout():
+    from hal0.memory.extraction_env import reload_and_restart_hindsight
+    from hal0.system.seam import SeamTimeout
+
+    calls, run = _seam_recorder()
+    ok = reload_and_restart_hindsight(seam=SystemCtlSeam(run=run, is_hal0_user=lambda: False))
+    assert ok == {"daemon_reloaded": True, "restarted": True, "error": None}
+    assert [c[0] for c in calls] == [
+        ["systemctl", "daemon-reload"],
+        ["systemctl", "restart", "hindsight-api.service"],
+    ]
+
+    class _Seam:
+        def systemctl(self, *args, **kwargs):
+            if "restart" in args:
+                raise SeamTimeout(list(args), 30, "activating")
+
+    out = reload_and_restart_hindsight(seam=_Seam())  # type: ignore[arg-type]
+    assert out["daemon_reloaded"] is True and out["restarted"] is False
+    assert "did not return within 30s" in out["error"]
+
+
+@pytest.mark.parametrize(
+    ("section", "body"),
+    [
+        ("lanes", {"reasoning_effort": "x-high"}),
+        ("lanes", {"retain": {"virtual_model": "gpt-4o"}}),
+        ("lanes", {"retain": {"reasoning_effort": "High"}}),
+        ("models", {"embeddings_model": "../../etc/passwd"}),
+        ("models", {"reranker_provider": "Local Thing"}),
+        ("decision", {"model": "a b"}),
+    ],
+)
+def test_schema_refuses_values_the_showcase_wrapper_would(section, body):
+    from pydantic import ValidationError
+
+    from hal0.config.schema import MemoryConfig
+
+    with pytest.raises(ValidationError):
+        MemoryConfig.model_validate({section: body})

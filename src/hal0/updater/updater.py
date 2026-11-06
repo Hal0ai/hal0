@@ -2017,7 +2017,7 @@ def run_post_activation_migrations(
             from hal0.memory.extraction_env import (
                 reconcile_extraction_dropin,
                 reconcile_showcase_dropin,
-                restart_hindsight_background,
+                reload_and_restart_hindsight,
             )
 
             # #3492: write the showcase drop-in first without a restart, so a
@@ -2032,7 +2032,9 @@ def run_post_activation_migrations(
                 )
             dropin = reconcile_extraction_dropin()
             if showcase.get("status") == "applied" and dropin.get("status") != "applied":
-                restart_hindsight_background()
+                # The extraction reconcile did not reload+restart, so do it
+                # here — reload first, or the engine restarts on the old env.
+                reload_and_restart_hindsight()
             if dropin.get("status") in ("applied", "failed"):
                 log.info(
                     "updater.extraction_dropin_reconciled",
