@@ -1962,7 +1962,8 @@ async def _forward_to_decision_slot(
     body: dict[str, Any],
 ) -> Response:
     """Lazy-load ``slot_name``, forward with decision priority, stamp activity."""
-    from hal0.dispatcher.admission import PRIORITY_DECISION, REGISTRY as admission_registry
+    from hal0.dispatcher.admission import PRIORITY_DECISION
+    from hal0.dispatcher.admission import REGISTRY as admission_registry
 
     await slot_manager.load(slot_name)
     cfg = await slot_manager.get_config(slot_name)
