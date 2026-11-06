@@ -41,6 +41,7 @@ vi.mock('@/api/hooks/useSlots', () => ({
   useSlotResolved: () => ({ data: undefined }),
   useSlots: () => ({ data: [], isLoading: false }),
   useSlotRename: () => idle,
+  useSlotConfig: () => ({ data: {} }),
 }))
 vi.mock('@/api/hooks/useHardware', () => ({ useHardware: () => ({ data: undefined }) }))
 vi.mock('@/api/hooks/useModels', () => ({
