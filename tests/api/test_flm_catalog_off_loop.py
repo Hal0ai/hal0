@@ -272,6 +272,7 @@ async def test_slots_flm_models_probes_off_loop(slow_flm_list: _SlowFlmList) -> 
     body = await slots_routes.list_flm_models(_request())  # type: ignore[arg-type]
 
     slow_flm_list.assert_ran_off_loop()
+    assert body["probe_ok"] is True
     assert {m["model"] for m in body["models"]} == {"embed-gemma:300m", "qwen3:0.6b"}
 
 

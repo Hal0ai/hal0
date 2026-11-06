@@ -86,6 +86,10 @@ _LEGACY_MODELS_MOUNTS = ("/root/comfy-models",)
 # traversable as hal0). ComfyUI's own temp dir goes to the container's /tmp.
 _COMFYUI_HOME_MOUNT = "/home/hal0"
 _COMFYUI_TEMP_PARENT = "/tmp"
+# The writable Python environment custom nodes install into, and the script that
+# prepares it (#3132): see hal0/comfyui/assets/hal0_python_env.py.
+_COMFYUI_PYTHON_MOUNT = "/opt/hal0-python"
+_PYTHON_ENV_SCRIPT = "hal0_python_env.py"
 # The GPU-gate custom node, shipped as a package asset (hal0.comfyui.assets)
 # and synced into custom_nodes/ once per process (see provision_data_root).
 _GPU_GATE_NODE = "hal0_gpu_gate.py"
@@ -469,6 +473,8 @@ def _writable_mount_sources(root: Path) -> list[Path]:
         comfyui_paths.user_dir(),
         comfyui_paths.custom_nodes_dir(),
         root / "home",
+        comfyui_paths.python_env_dir(),
+        root / "web",
     ]
 
 
@@ -556,15 +562,14 @@ def _write_atomically(dest: Path, data: bytes) -> None:
         raise
 
 
-def _sync_gpu_gate_node() -> bool:
-    """Copy the packaged GPU-gate node into ``custom_nodes/`` when it is missing or differs.
+def _sync_asset(name: str, dest: Path) -> bool:
+    """Copy the packaged asset ``name`` to ``dest`` when it is missing or differs.
 
-    Returns True once the node is current, False when the directory is not
+    Returns True once the file is current, False when the directory is not
     writable (already reported, once per process, with the remedy).
     """
-    shipped = importlib.resources.files("hal0.comfyui.assets").joinpath(_GPU_GATE_NODE)
+    shipped = importlib.resources.files("hal0.comfyui.assets").joinpath(name)
     wanted = shipped.read_bytes()
-    dest = comfyui_paths.custom_nodes_dir() / _GPU_GATE_NODE
     try:
         if dest.read_bytes() == wanted:
             return True
@@ -573,8 +578,8 @@ def _sync_gpu_gate_node() -> bool:
     try:
         _write_atomically(dest, wanted)
     except PermissionError:
-        # A box whose installer copied the node as root, with a custom_nodes
-        # directory the hal0 user cannot write. The node stays as it is.
+        # A box whose installer copied the file as root, with a directory the
+        # hal0 user cannot write. The file stays as it is.
         _warn_once(
             ("node-permission", str(dest)),
             "cannot update %s: make %s writable by the hal0 user or group "
@@ -586,6 +591,43 @@ def _sync_gpu_gate_node() -> bool:
     return True
 
 
+def _sync_gpu_gate_node() -> bool:
+    """Keep the packaged GPU-gate node current in ``custom_nodes/``."""
+    return _sync_asset(_GPU_GATE_NODE, comfyui_paths.custom_nodes_dir() / _GPU_GATE_NODE)
+
+
+def _sync_python_env_script() -> bool:
+    """Keep the script the container's start command runs current in its mounted directory."""
+    return _sync_asset(_PYTHON_ENV_SCRIPT, comfyui_paths.python_env_dir() / _PYTHON_ENV_SCRIPT)
+
+
+def _optional_mounts(root: Path) -> list[Mount]:
+    """The mounts ComfyUI can start without, for the directories that exist.
+
+    Podman exits 125 on a missing bind-mount source, and a data root hal0 cannot
+    write stays without these. ComfyUI then starts on the image's Python, and the
+    nodes that need them fail on their own.
+    """
+    candidates = (
+        (comfyui_paths.python_env_dir(), _COMFYUI_PYTHON_MOUNT),
+        (root / "web", f"{_COMFYUI_APP_DIR}/web"),
+    )
+    return [Mount(str(source), target) for source, target in candidates if source.is_dir()]
+
+
+def python_env_preamble(mount: str = _COMFYUI_PYTHON_MOUNT) -> str:
+    """The start command's steps that put ComfyUI on the writable Python environment.
+
+    Prepare it under the image's Python, then activate it, so the ``python`` that
+    runs next is the environment's. Each step may fail without ending the command:
+    a missing script or environment leaves the image's Python in place, and a stale
+    activation whose interpreter is gone falls through to it on ``PATH``. No ``$``:
+    systemd expands it in ``ExecStart=`` even inside single quotes.
+    """
+    activate = f"{mount}/current/bin/activate"
+    return f"python {mount}/{_PYTHON_ENV_SCRIPT}; test -f {activate} && . {activate}; "
+
+
 def provision_data_root() -> None:
     """Make the ComfyUI data root ready to bind-mount; idempotent and best-effort.
 
@@ -593,7 +635,8 @@ def provision_data_root() -> None:
     which crash-looped the img slot on any box where the tree hadn't been
     provisioned (fresh install, or a store root that moved after install). So
     this creates the mounted directories, writes ``extra_model_paths.yaml`` if
-    it is absent or empty, and syncs the GPU-gate custom node.
+    it is absent or empty, and syncs the GPU-gate custom node and the script that
+    prepares the writable Python environment.
 
     Directories are checked on every render, since they are cheap and podman
     needs each one. The file writes happen at most once per process per data
@@ -606,7 +649,7 @@ def provision_data_root() -> None:
     root_key = str(comfyui_paths.data_root())
     _run_step(_ensure_data_dirs, root_key)
     _check_writable_mount_sources()
-    for step in (_ensure_extra_model_paths, _sync_gpu_gate_node):
+    for step in (_ensure_extra_model_paths, _sync_gpu_gate_node, _sync_python_env_script):
         memo = (root_key, step.__name__)
         if memo not in _provisioned and _run_step(step, root_key):
             _provisioned.add(memo)
@@ -904,12 +947,17 @@ class ComfyUIProvider(Provider):
 
         Mirrors `docker inspect comfyui` on CT105 (migration = replicate
         what works):
-          * argv: ``bash -lc 'cd /opt/ComfyUI && exec python main.py …'``
-            — the image needs the login shell to activate /opt/venv.
+          * argv: ``bash -lc 'cd /opt/ComfyUI && <python env>; exec python main.py …'``
+            — the image needs the login shell to activate /opt/venv, and
+            :func:`python_env_preamble` then moves ComfyUI onto a writable
+            environment layered over it, so a custom node's ``pip install``
+            lands on the data root (#3132).
           * mounts: ``<data_root>/models → /opt/hal0-models`` plus
             output/input/user/custom_nodes into /opt/ComfyUI, a persistent
-            ``home`` at /home/hal0, and extra_model_paths.yaml read-only into
-            the app dir.
+            ``home`` at /home/hal0, the Python environment at /opt/hal0-python,
+            ``web`` at /opt/ComfyUI/web (which the image lacks and nodes create
+            ``web/extensions`` in), and extra_model_paths.yaml read-only into the
+            app dir.
           * identity (#3066): ``User=<hal0 uid>:<hal0 gid>`` with hal0's host
             supplementary groups added, so ComfyUI runs as the account that
             owns the data it mounts — not root. $HOME is the mounted home,
@@ -939,7 +987,8 @@ class ComfyUIProvider(Provider):
 
         flags = self._profile_flags(slot_cfg)
         payload = (
-            f"cd {_COMFYUI_APP_DIR} && exec python main.py --listen 0.0.0.0 --port {port} "
+            f"cd {_COMFYUI_APP_DIR} && {python_env_preamble()}"
+            f"exec python main.py --listen 0.0.0.0 --port {port} "
             f"--temp-directory {_COMFYUI_TEMP_PARENT} {flags}"
         ).strip()
         command: list[str] = ["bash", "-lc", payload]
@@ -957,6 +1006,7 @@ class ComfyUIProvider(Provider):
             Mount(str(comfyui_paths.user_dir()), f"{_COMFYUI_APP_DIR}/user"),
             Mount(str(comfyui_paths.custom_nodes_dir()), f"{_COMFYUI_APP_DIR}/custom_nodes"),
             Mount(str(data_root / "home"), _COMFYUI_HOME_MOUNT),
+            *_optional_mounts(data_root),
             Mount(
                 str(comfyui_paths.extra_model_paths_file()),
                 f"{_COMFYUI_APP_DIR}/extra_model_paths.yaml",

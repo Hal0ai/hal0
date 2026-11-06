@@ -1,0 +1,79 @@
+{
+  "banks": {
+    "shared": "shared",
+    "private__hermes": "private"
+  },
+  "knowledge": {
+    "shared": {
+      "folder": "hal0",
+      "pages": [
+        {
+          "name": "Architecture",
+          "tags": [
+            "project:hal0"
+          ],
+          "max_tokens": 3000,
+          "trigger": {
+            "mode": "delta",
+            "refresh_after_consolidation": true,
+            "min_refresh_interval_seconds": 1800,
+            "budget": "low"
+          },
+          "source_query": "Explain hal0's architecture: components, slots, runtimes, model store, memory system, and how requests flow."
+        },
+        {
+          "name": "Operations runbook",
+          "tags": [
+            "project:hal0"
+          ],
+          "max_tokens": 3000,
+          "trigger": {
+            "mode": "delta",
+            "refresh_after_consolidation": true,
+            "min_refresh_interval_seconds": 1800,
+            "budget": "low"
+          },
+          "source_query": "Write a runbook for operating hal0: common commands, deploy/upgrade steps, recovery from known failures."
+        },
+        {
+          "name": "Open issues & weak points",
+          "tags": [
+            "project:hal0"
+          ],
+          "max_tokens": 2500,
+          "trigger": {
+            "mode": "delta",
+            "refresh_after_consolidation": true,
+            "min_refresh_interval_seconds": 1800,
+            "budget": "low"
+          },
+          "source_query": "What known bugs, fragile areas, open problems and failure modes does hal0 have, and their current status?"
+        }
+      ]
+    }
+  },
+  "config_extra": {
+    "shared": {
+      "memory_defense": {
+        "enabled": true,
+        "rules": [
+          {
+            "on": "sensitive_data",
+            "action": "redact"
+          }
+        ]
+      }
+    },
+    "private__hermes": {
+      "memory_defense": {
+        "enabled": true,
+        "rules": [
+          {
+            "on": "sensitive_data",
+            "action": "redact"
+          }
+        ]
+      }
+    }
+  }
+}

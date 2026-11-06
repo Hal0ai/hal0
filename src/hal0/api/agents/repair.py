@@ -331,6 +331,49 @@ async def repair_agent(agent_id: str, request: Request) -> dict[str, Any]:
     return dict(jobs[job_id])
 
 
+async def reprovision_hermes_auxiliary(request: Request) -> None:
+    """Converge Hermes auxiliary routing after a memory target or binding edit.
+
+    Repairs run for minutes and reject concurrent requests. Coalesce edits made
+    while one is running into one follow-up repair, which reads the latest slot
+    and graph config when it starts.
+    """
+    try:
+        await repair_agent("hermes", request)
+    except NotFound:
+        return  # Hermes is optional.
+    except Conflict as exc:
+        if exc.code != "agent.busy":
+            raise
+        state = request.app.state
+        if getattr(state, "_hermes_aux_retry_pending", False):
+            return
+        state._hermes_aux_retry_pending = True
+        _spawn_update_task(request, _retry_hermes_auxiliary(request))
+
+
+async def _retry_hermes_auxiliary(request: Request) -> None:
+    """Wait behind an existing repair/update, then apply the latest config."""
+    try:
+        deadline = time.monotonic() + 2 * _BOOTSTRAP_TIMEOUT_S
+        while time.monotonic() < deadline:
+            await asyncio.sleep(2)
+            try:
+                await repair_agent("hermes", request)
+                return
+            except NotFound:
+                return
+            except Conflict as exc:
+                if exc.code == "agent.busy":
+                    continue
+                raise
+        log.error("hermes.aux_reprovision_timeout")
+    except Exception as exc:
+        log.warning("hermes.aux_reprovision_failed", error=str(exc))
+    finally:
+        request.app.state._hermes_aux_retry_pending = False
+
+
 def _touch(job: dict[str, Any]) -> None:
     job["updated_at"] = time.time()
     _persist_job(job)
@@ -614,4 +657,10 @@ async def run_repair_job(
         _touch(job)
 
 
-__all__ = ["reconcile_stale_repair_job", "repair_agent", "router", "run_repair_job"]
+__all__ = [
+    "reconcile_stale_repair_job",
+    "repair_agent",
+    "reprovision_hermes_auxiliary",
+    "router",
+    "run_repair_job",
+]
