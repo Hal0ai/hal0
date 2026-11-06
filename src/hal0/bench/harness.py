@@ -599,6 +599,13 @@ class ExclusiveSlots:
     ONE more stop attempt (which also closes the race a second start job
     creates). Only a unit that is still running — or still has a queued
     start/restart job — after that retry aborts the window.
+
+    A slot that COMES BACK while the window holds it is stopped again
+    (#3415). The stop list says what this window stopped — and must restore
+    at release — not that the slot is still down, so the window judges a
+    slot by its CURRENT state: a slot that is up again is stopped again, a
+    slot that stayed down is left alone (the unit's start limit is finite),
+    and the release still restarts each slot exactly once.
     """
 
     def __init__(self, runner: Callable[[list[str]], tuple[int, str, str]] | None = None) -> None:
@@ -612,25 +619,69 @@ class ExclusiveSlots:
         return self
 
     def refresh(self) -> None:
-        """Stop every slot that is active now and not already stopped by this
-        instance. ``__enter__`` calls it once; a caller holding the window
-        open across many sweeps calls it again, because a stopped slot can
-        come back mid-window (the dispatcher lazy-loads it on a request, or an
-        operator loads it) and would otherwise sit next to the benchmark."""
-        newly_stopped = False
-        for slot_id in self._active_slot_ids():
-            if slot_id in self._stopped:
-                continue
+        """Stop every slot that is running now, and stop again every slot this
+        window already stopped that has come back mid-window.
+
+        ``__enter__`` calls it once; a caller holding the window open across
+        many sweeps calls it again, because a stopped slot can come back
+        mid-window (the dispatcher lazy-loads it on a request, or an operator
+        loads it) and would otherwise sit next to the benchmark.
+
+        A slot this window stopped is judged by its CURRENT state, not by its
+        membership in the stop list: the list says what the window stopped
+        (and must restore at release), not that the slot is still down
+        (#3415).
+        """
+        stopped_any = False
+        for slot_id in self._slots_to_stop():
             reason = self._stop_slot(slot_id)
             if reason is not None:
                 # Best-effort restart of whatever we DID manage to stop before
                 # surfacing the failure — never leave a slot down silently.
                 self._restore()
                 raise RuntimeError(f"[exclusive] could not stop hal0-slot@{slot_id}: {reason}")
-            self._stopped.append(slot_id)
-            newly_stopped = True
-        if newly_stopped:
+            if slot_id not in self._stopped:
+                # A slot that came back is stopped a second time; it stays ONE
+                # entry in the stop list, so the release restores it once.
+                self._stopped.append(slot_id)
+            stopped_any = True
+        if stopped_any:
             time.sleep(3)
+
+    def _slots_to_stop(self) -> list[str]:
+        """The slots that must be down for this window, in a stable order.
+
+        Every slot the active listing reports, plus every slot this window
+        already stopped that is up AGAIN.
+
+        A slot this window stopped is skipped ONLY while it is still down:
+        membership in the stop list says what to restore at release, not that
+        the slot is down (#3415). A slot that came back is stopped again even
+        though the stop list already names it.
+
+        The listing is a snapshot, so a slot that came back mid-window may not
+        be in it yet (systemd is still bringing the unit up). The state of
+        every slot this window stopped decides that case.
+        """
+        listed = self._active_slot_ids()
+        candidates: list[str] = []
+        for slot_id in listed:
+            if slot_id in self._stopped and not self._slot_is_running(slot_id):
+                continue
+            candidates.append(slot_id)
+        for slot_id in self._stopped:
+            if slot_id not in listed and self._slot_is_running(slot_id):
+                candidates.append(slot_id)
+        return candidates
+
+    def _slot_is_running(self, slot_id: str) -> bool:
+        """Whether the slot unit is up right now.
+
+        A state the probe cannot answer is read as running: the window then
+        stops the slot again rather than measuring next to a live model.
+        """
+        state = self._unit_state(slot_id)
+        return state is None or state not in UNIT_DOWN_STATES
 
     def _stop_slot(self, slot_id: str) -> str | None:
         """Stop one slot unit through the privileged seam.
