@@ -66,6 +66,7 @@ Root model `Hal0Config`, `extra="allow"`.
 | `evict_pressure_mb` | int | `8192` | `>= 0` |
 | `preload_evict_enabled` | bool | `true` | — |
 | `preload_evict_headroom_mb` | int | `1024` | `>= 0` |
+| `fabric_clock_guard` | str | `"refuse"` | `refuse`, `warn` or `off`. Policy when an NPU slot (`device = "npu"`) would load beside a GPU slot (`vulkan`/`rocm`/`hip`) while the host's AMD GPU fabric clock is not held at its top DPM level — a mid-flight fclk change can hang the box or corrupt NPU results on Strix Halo (ADR-0054). `refuse` blocks the load with the host-side fix in the error; `warn` logs it and stores the warning on the slot but still loads; `off` skips the check. An unreadable fabric-clock state always warns, never refuses. Overridable per-process with `HAL0_FABRIC_CLOCK_GUARD` |
 | `publish_host` | str | `"127.0.0.1"` | non-empty, no whitespace/`:`/`/` |
 | `network_mode` | str | `""` | must be `""` or `"host"` |
 | `default_images` | dict[str,str] | `{}` | keys must be a `RUNNER_IMAGES` runner key (`standard`, `cpu`, `cuda`, `halogen`, `flm`, `kokoro`, `moonshine`, `qwen3tts`, `comfyui`) — any other key is a config error; values must be non-empty image refs; sending `null` for a runner key clears its override |
@@ -81,6 +82,7 @@ Root model `Hal0Config`, `extra="allow"`.
 | `stream_total_timeout_s` | float | `900.0` | `0.0-86400.0` (`0` disables) |
 | `stream_idle_timeout_s` | float | `300.0` | `0.0-86400.0` (`0` disables) |
 | `prefetch_parallel_cap` | int | `4` | `>= 1` |
+| `admission_wait_timeout_s` | float | `1800.0` | `1.0-86400.0`. Max seconds a request may wait in a slot's admission queue (only slots with `max_inflight` set) before the dispatcher gives up and answers `503` with `Retry-After` instead of forwarding. The read-timeout clock for the forward itself starts only after admission, so this bound is independent of `direct_read_timeout_s` |
 
 `stream_total_timeout_s` / `stream_idle_timeout_s` are the streaming **stall
 guard**: a chatty never-terminating upstream resets the transport read timer
@@ -132,9 +134,14 @@ override: `HAL0_FLM_MODELS_DIR`.
 | `unified_bank` | bool | `true` | — |
 | `bank` | str | `"shared"` | Hindsight bank behind the `shared` namespace (ADR-0052); letters, digits, `.`, `_`, `:`, `-`, max 128, must start alphanumeric; not `agents` or `private__*`. Run `hal0 memory migrate platform` before changing it; restart hal0-api |
 | `engine` | str | `"hindsight"` | one of `hindsight`, `mem0`, `pgvector` — `"cognee"` is explicitly rejected (retired) |
+| `public_url` | str \| null | `null` | the URL coding agents should reach the Hindsight engine at (e.g. through a reverse proxy). `GET /api/memory/agents` uses it in place of guessing `<request host>:9177` |
 | `graph` | table | — | see below |
 | `priority` | table | — | see below |
 | `embedding` | table | — | see below |
+| `models` | table | — | see below |
+| `decision` | table | — | see below |
+| `lanes` | table | — | see below |
+| `console` | table | — | see below |
 
 #### `[memory.graph]`
 
@@ -191,6 +198,82 @@ hold-budget setting: the later gate derives it from half the memory engine's
 | `rerank_model` | str | `"builtin.jina-reranker-v1-tiny-en-q8"` | non-empty |
 | `rerank_connect_timeout_s` | float | `1.0` | `0.05-10.0` |
 | `rerank_read_timeout_s` | float | `8.0` | `0.05-60.0` |
+
+#### `[memory.models]`
+
+`extra="ignore"`. The embed/rerank models the Hindsight 1.2 engine runs, both
+CPU and in-process by default — no external gateway hop.
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `embeddings_provider` | str | `"local"` | `local` runs the embedding model in-process on CPU |
+| `embeddings_model` | str | `"hindsight-ai/hs-embed-1"` | the local embedding model id |
+| `reranker_provider` | str | `"local"` | `local` runs the reranker in-process on CPU |
+| `reranker_model` | str | `"hindsight-ai/hs-rerank-1"` | the local reranker model id |
+| `reranker_bucket_batching` | bool | `true` | batch the reranker over a bucket of candidates |
+
+These keys are rendered into the engine's `HINDSIGHT_API_EMBEDDINGS_*` and
+`HINDSIGHT_API_RERANKER_*` environment by the installer and the
+extraction-env drop-in renderer.
+
+#### `[memory.decision]`
+
+`extra="ignore"`. The Hindsight 1.2 decision model — one cheap forward pass
+that replaces many of the engine's LLM calls (recall ranking and pruning,
+consolidation judgments, reflect sufficiency, page-delta gating).
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `enabled` | bool | `true` | whether the decision-model lane runs at all |
+| `provider` | str | `"local"` | `local` (the hal0-managed `hal0-hs-decide` service), `hindsight-cloud` (the hosted decision model), or `off` (the engine falls back to its LLM lane for decision-gated operations) |
+| `model` | str | `"hs-decide-1-flash"` | the decision model id (`HINDSIGHT_API_DECISION_MODEL_MODEL`) |
+| `threads` | int | `8` | `1-64`; CPU thread count for the local `hal0-hs-decide` server |
+| `max_concurrent` | int | `4` | `1-64` (`HINDSIGHT_API_DECISION_MODEL_MAX_CONCURRENT`) |
+| `max_request_tokens` | int | `4096` | `256-32768` (`HINDSIGHT_API_DECISION_MODEL_MAX_REQUEST_TOKENS`) — a CPU latency budget cap |
+| `timeout_s` | int | `60` | `5-600`; HTTP timeout for decision-model calls |
+| `port` | int | `9178` | `1-65535`; the port the local `hal0-hs-decide` service binds |
+| `base_url` | str \| null | `null` | overrides where hal0 proxies `POST /v1/systemone`; unset means `http://127.0.0.1:<port>` |
+
+`provider = "local"` with `base_url = "http://127.0.0.1:<port>"` is the verified
+working local shape. The engine still wants a non-empty API key even for a
+local base URL.
+
+#### `[memory.lanes]`
+
+`extra="ignore"`. The global and per-operation LLM concurrency lanes. The
+engine caps **all** of its LLM calls process-wide, so one global cap plus a
+per-operation override replaces the hand-maintained drop-in hal0 used to ship.
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `llm_max_concurrent` | int | `1` | `1-32`; the global cap across every engine LLM call — retain, consolidation, reflect and mental-model refresh together (`HINDSIGHT_API_LLM_MAX_CONCURRENT`) |
+| `timeout_s` | int | `600` | `30-3600` (`HINDSIGHT_API_LLM_TIMEOUT`) |
+| `reasoning_effort` | str | `"none"` | `HINDSIGHT_API_LLM_REASONING_EFFORT` |
+| `strict_schema` | bool | `false` | `HINDSIGHT_API_LLM_STRICT_SCHEMA` |
+| `retain` | table | — | per-operation override, see below |
+| `consolidation` | table | — | per-operation override, see below |
+| `reflect` | table | — | per-operation override, see below |
+| `mental_model_refresh` | table | — | per-operation override, see below |
+
+Each per-operation table carries the same five keys, all optional:
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `max_concurrent` | int \| null | `null` | unset falls back to `[memory.lanes].llm_max_concurrent` |
+| `virtual_model` | str \| null | `null` | per-operation hal0 virtual model override (e.g. `hal0/utility` for a burst lane) instead of the shared `hal0/memory` alias |
+| `timeout_s` | int \| null | `null` | per-operation LLM timeout override |
+| `reasoning_effort` | str \| null | `null` | per-operation `HINDSIGHT_API_{OP}_LLM_REASONING_EFFORT` override |
+| `strict_schema` | bool \| null | `null` | per-operation `HINDSIGHT_API_{OP}_LLM_STRICT_SCHEMA` override |
+
+#### `[memory.console]`
+
+`extra="ignore"`. The optional Hindsight Control Plane UI.
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `enabled` | bool | `false` | install and run the `hal0-memory-console.service`; off by default, because node may not be present on a given box |
+| `port` | int | `9999` | `1-65535`; the port the console binds — changing it moves the console link |
+| `bind` | str | `"127.0.0.1"` | bind address; kept on loopback by default, proxy through hal0-api |
 
 ### `[updates]`
 
@@ -263,7 +346,7 @@ disable rerouting, say so out loud: `off`, `none` or `disabled`.
 `HAL0_ALLOWED_ORIGINS` for the REST and WebSocket origin checks, read live on
 the next request, plus where ComfyUI's web UI answers. The bind host, port and
 hostname stay in `api.env`. See
-[Allow the public URL](/docs/operate/auth#allow-the-public-url) and
+[Allow the public URL](/docs/operate/tls-and-open-webui#allow-the-public-url) and
 [Reaching the editor](/docs/guides/image-workflows-troubleshooting#reaching-the-editor).
 
 
