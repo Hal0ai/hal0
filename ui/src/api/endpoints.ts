@@ -565,4 +565,16 @@ export const ENDPOINTS = {
   boardOrchestration: '/api/board/orchestration', // GET | PUT (4 knobs)
   boardEvents: '/api/board/events',          // WS ?since=&board= (local BoardStore poll — no token/tenant, see board_ws.py)
   brainChat: '/api/brain/chat',              // POST (SSE) — hal0-brain steward chat
+  // ── Memory workspace (Hindsight 1.2 showcase, H0-?) ──────────────────────
+  // Authenticated allowlisted passthrough to the Hindsight engine; `sub` is
+  // the upstream path with its leading slash stripped (e.g.
+  // `v1/default/banks`). Shape = hindsight-1.2.0-openapi.json.
+  memoryEngine: (sub: string) => `/api/memory/engine/${sub.replace(/^\/+/, '')}`,
+  // Decision-lane / LLM-lane / per-bank queue health (NPU box only; `npu` is
+  // null off-box).
+  memoryLanes: '/api/memory/lanes',
+  // Connected coding-agent banks + the harness install one-liners.
+  memoryAgents: '/api/memory/agents',
+  // Embedding / reranker / decision model identities.
+  memoryModels: '/api/memory/models',
 } as const
