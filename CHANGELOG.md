@@ -30,6 +30,10 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Fixed
+
+- **An exclusive bench window re-stops a slot that comes back mid-window.** The window decided which slots to stop by membership in its own stop list, so a slot that was reloaded while the window held it (the dispatcher lazy-loading it, the memory extraction path re-rendering it, an operator loading it) was skipped and kept serving traffic next to the benchmark. The window now judges a slot by its current state: a slot that is running again is stopped again, a slot that stayed down is left alone, and the release still restores each slot exactly once. (#3415)
+
 ## [1.8.0] — 2026-11-03
 
 ### Highlights

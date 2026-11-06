@@ -808,6 +808,61 @@ class _SlotRunner:
         raise AssertionError(f"unexpected call: {argv}")
 
 
+class _StatefulSlotRunner:
+    """A ``systemctl`` double whose units have REAL state (#3415).
+
+    ``systemctl list-units --state=active`` lists the units that are up;
+    ``systemctl is-active`` reports each unit's own ``ActiveState``. A unit
+    the seam stopped is down, a unit the test brought back is up again, and a
+    unit that is coming back up is ``activating`` — which the active listing
+    does NOT report, but which the state probe does.
+    """
+
+    def __init__(self, slots: list[str]) -> None:
+        self._slots = list(slots)
+        self.calls: list[list[str]] = []
+        self.up: set[str] = set(slots)
+        self.activating: set[str] = set()
+
+    def bring_back(self, slot_id: str) -> None:
+        """The slot came back: it is up again."""
+        self.up.add(slot_id)
+
+    def start_coming_up(self, slot_id: str) -> None:
+        """The slot is coming back up: systemd has it in ``activating``."""
+        self.activating.add(slot_id)
+
+    def __call__(self, argv: list[str], timeout: float | None = None):
+        self.calls.append(list(argv))
+        if argv and argv[0] == "systemctl":
+            if "is-active" in argv:
+                slot = argv[-1].removeprefix("hal0-slot@").removesuffix(".service")
+                if slot in self.activating:
+                    return 3, "activating\n", ""
+                if slot in self.up:
+                    return 0, "active\n", ""
+                return 3, "inactive\n", ""
+            if "list-jobs" in argv:
+                return 0, "", ""
+            units = [f"hal0-slot@{slot}.service" for slot in sorted(self.up)]
+            return 0, "\n".join(units), ""
+        if argv and argv[0] == "sudo":
+            verb, slot = argv[-2], argv[-1]
+            if verb == "stop":
+                self.up.discard(slot)
+                self.activating.discard(slot)
+            elif verb == "start":
+                self.up.add(slot)
+            return 0, "", ""
+        raise AssertionError(f"unexpected call: {argv}")
+
+    def stops(self) -> list[str]:
+        return [c[-1] for c in self.calls if c and c[0] == "sudo" and c[-2] == "stop"]
+
+    def starts(self) -> list[str]:
+        return [c[-1] for c in self.calls if c and c[0] == "sudo" and c[-2] == "start"]
+
+
 class TestExclusiveSlots:
     def test_stops_active_non_npu_slots_on_enter(self, tmp_path) -> None:
         runner = _SlotRunner(["hal0-slot@agent.service", "hal0-slot@npu.service"])
@@ -1122,6 +1177,54 @@ class TestExclusiveSlots:
         assert slots.restore_failures == []
         assert len([c for c in calls if c[-2:] == ["stop", "agent"]]) == 2
         assert [c[-1] for c in calls if c[-2:] == ["start", "agent"]] == ["agent"]
+
+    def test_a_slot_that_returns_mid_window_is_stopped_again(self, monkeypatch) -> None:
+        """#3415: a slot that comes back mid-window (the dispatcher lazy-loads
+        it, an operator loads it, the extraction path re-renders it) must be
+        stopped AGAIN — the stop list says what to restore at release, not
+        that the slot is still down."""
+        monkeypatch.setattr(_harness_mod.time, "sleep", lambda _s: None)
+        runner = _StatefulSlotRunner(["memory"])
+
+        with ExclusiveSlots(runner=runner) as slots:
+            runner.bring_back("memory")  # the slot came back mid-window
+            slots.refresh()
+
+        assert runner.stops() == ["memory", "memory"]
+        # The stop list holds ONE entry per slot, so the release restores it
+        # exactly once.
+        assert runner.starts() == ["memory"]
+        assert slots.restore_failures == []
+
+    def test_a_slot_that_is_coming_back_up_is_stopped_again(self, monkeypatch) -> None:
+        """#3415: systemd reports a slot that is coming back up as
+        ``activating``, which the active listing does not list — the window
+        must still stop it, or it serves traffic next to the benchmark."""
+        monkeypatch.setattr(_harness_mod.time, "sleep", lambda _s: None)
+        runner = _StatefulSlotRunner(["memory"])
+
+        with ExclusiveSlots(runner=runner) as slots:
+            runner.start_coming_up("memory")
+            slots.refresh()
+
+        assert runner.stops() == ["memory", "memory"]
+        assert runner.starts() == ["memory"]
+        assert slots.restore_failures == []
+
+    def test_a_slot_that_stays_down_is_not_stopped_again(self, monkeypatch) -> None:
+        """#3415: the window re-stops a slot only while it is UP again — a
+        slot that stayed down must not be cycled a second time (the unit's
+        start limit)."""
+        monkeypatch.setattr(_harness_mod.time, "sleep", lambda _s: None)
+        runner = _StatefulSlotRunner(["agent"])
+
+        with ExclusiveSlots(runner=runner) as slots:
+            slots.refresh()
+            slots.refresh()
+
+        assert runner.stops() == ["agent"]
+        assert runner.starts() == ["agent"]
+        assert slots.restore_failures == []
 
     def test_a_unit_still_running_after_the_retry_aborts_the_window(self) -> None:
         """#3409: only a unit that is genuinely still running after the retry
