@@ -33,21 +33,6 @@ from tests.fixtures.model_registration import register_model_file
 from tests.fixtures.slot_probe import probe_slot_name
 
 
-@pytest.fixture(autouse=True)
-def _hermetic_port_listeners(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Blind the port registry to the HOST's real sockets.
-
-    ``hal0.ports`` counts live listeners as claims (correct on a real box),
-    but tests asserting auto-assigned ports would otherwise depend on
-    whatever happens to be listening on the CI machine. Mirrors the same
-    fixture in ``tests/api/conftest.py`` (not inherited across sibling
-    packages).
-    """
-    from hal0 import ports as _ports
-
-    monkeypatch.setattr(_ports, "_listener_claims", lambda start, end: [])
-
-
 class FakeContainerProvider:
     """In-memory ContainerProvider double mirroring the surface SlotManager
     touches, with per-call recording.
