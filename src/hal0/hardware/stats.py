@@ -13,6 +13,7 @@ See PLAN.md §3.
 from __future__ import annotations
 
 import contextlib
+import shutil
 import socket
 from pathlib import Path
 from typing import Any
@@ -241,6 +242,52 @@ class HardwareStats:
         """
         return [p for p, used in self.slot_port_occupancy().items() if used]
 
+    def npu_pmode(self) -> str | None:
+        """Return the active xdna/XRT power mode, or None.
+
+        Parses ``xrt-smi examine`` (the AMD XRT tool for the XDNA NPU)
+        looking for a ``Power Mode`` / ``Mode`` field. Best-effort: no
+        binary, no device, or an unparseable report all yield None —
+        this never blocks (no retries) and never fabricates a value.
+        """
+        if shutil.which("xrt-smi") is None:
+            return None
+        rc, out, _ = _run(["xrt-smi", "examine"])
+        if rc != 0 or not out:
+            return None
+        for line in out.splitlines():
+            stripped = line.strip()
+            low = stripped.lower()
+            if (low.startswith("power mode") or low.startswith("mode")) and ":" in stripped:
+                val = stripped.split(":", 1)[1].strip()
+                if val:
+                    return val
+        return None
+
+    def npu_fclk(self) -> str | None:
+        """Return the active NPU fabric clock reading, or None.
+
+        Reads the ``*``-marked (active) line of
+        ``/sys/class/drm/*/device/pp_dpm_fclk`` across every DRM device
+        (the NPU's accel node isn't guaranteed to be ``card0``). Returns
+        the raw marked line's value token (e.g. ``"1800Mhz"``); None when
+        no device exposes the file or no line is marked active.
+        """
+        try:
+            drm_devices = sorted(Path("/sys/class/drm").glob("*/device/pp_dpm_fclk"))
+        except OSError:
+            drm_devices = []
+        for path in drm_devices:
+            txt = self._read_text(path)
+            if not txt:
+                continue
+            for line in txt.splitlines():
+                if line.rstrip().endswith("*"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return parts[1]
+        return None
+
     def snapshot(self, *, include_slot_ports: bool = False) -> dict[str, Any]:
         """Return a JSON-safe dict of all available stats.
 
@@ -277,6 +324,8 @@ class HardwareStats:
             # such counter (the UI renders an em-dash).
             "gpu_clock_mhz": self.gpu_clock_mhz(),
             "gpu_temp_c": self.gpu_temp_c(),
+            "npu_pmode": self.npu_pmode(),
+            "npu_fclk": self.npu_fclk(),
         }
         if include_slot_ports:
             out["slot_ports_occupied"] = self.occupied_slot_ports()
