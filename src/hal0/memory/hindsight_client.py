@@ -320,6 +320,20 @@ class HindsightRestClient:
         resp.raise_for_status()
         return resp.json()
 
+    # ── knowledge base (folders/pages — #showcase) ──────────────────────────
+
+    async def get_knowledge_base_tree(self, *, bank_id):
+        """GET the bank's knowledge-base folder/page tree."""
+        return await self.request_json("GET", f"/v1/default/banks/{bank_id}/knowledge-base/tree")
+
+    async def get_knowledge_base_page(self, *, bank_id, page_id):
+        """GET one knowledge-base page's content and metadata."""
+        page = quote(str(page_id), safe="")
+        return await self.request_json(
+            "GET", f"/v1/default/banks/{bank_id}/knowledge-base/pages/{page}"
+        )
+
+
     # ── single-memory curation (PATCH /memories/{memory_id}) ────────────────
 
     async def get_memory(self, *, bank_id, memory_id):

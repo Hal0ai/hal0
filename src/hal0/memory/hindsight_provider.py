@@ -2549,6 +2549,51 @@ class HindsightProvider(MemoryProvider):
             "list_tags", bank_id=bank, q=q, source=source, limit=limit, offset=offset
         )
 
+    # ── knowledge base (folders/pages — #showcase) ──────────────────────────
+
+    async def knowledge_base_tree(
+        self, *, dataset: str = _SHARED, client_id: str | None = None
+    ) -> dict[str, Any]:
+        bank = self._bank_of(self._write_namespace(dataset, client_id))
+        return await self._call("get_knowledge_base_tree", bank_id=bank)
+
+    async def knowledge_base_page(
+        self, page_id: str, *, dataset: str = _SHARED, client_id: str | None = None
+    ) -> dict[str, Any]:
+        bank = self._bank_of(self._write_namespace(dataset, client_id))
+        return await self._call("get_knowledge_base_page", bank_id=bank, page_id=page_id)
+
+    # ── documents (raw retained documents — #showcase) ──────────────────────
+
+    async def list_documents(
+        self,
+        *,
+        dataset: str = _SHARED,
+        client_id: str | None = None,
+        q: str | None = None,
+        tags: list[str] | None = None,
+        tags_match: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> dict[str, Any]:
+        bank = self._bank_of(self._write_namespace(dataset, client_id))
+        return await self._call(
+            "list_documents",
+            bank_id=bank,
+            q=q,
+            tags=tags,
+            tags_match=tags_match,
+            limit=limit if limit is not None else 100,
+            offset=offset if offset is not None else 0,
+        )
+
+    async def get_document(
+        self, document_id: str, *, dataset: str = _SHARED, client_id: str | None = None
+    ) -> dict[str, Any]:
+        bank = self._bank_of(self._write_namespace(dataset, client_id))
+        return await self._call("get_document", bank_id=bank, document_id=document_id)
+
+
     async def bank_stats(
         self,
         *,
