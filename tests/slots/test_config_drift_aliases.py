@@ -142,7 +142,9 @@ async def test_no_false_drift_for_registry_id_model_and_alias(
     model_id = "Qwopus3.5-4B-Coder-MTP-Q6_K"
     model_path = "/mnt/ai-models/qwopus/Qwopus3.5-4B-Coder-MTP-Q6_K.gguf"
 
-    async def _fake_info(self: SlotManager, mid: str | None) -> dict[str, object]:
+    async def _fake_info(
+        self: SlotManager, mid: str | None, *, provider: str | None = None
+    ) -> dict[str, object]:
         return {"_model_key": model_id, "path": model_path}
 
     monkeypatch.setattr(SlotManager, "_resolve_model_info", _fake_info)
@@ -178,7 +180,9 @@ async def test_real_model_drift_still_flagged_after_resolution(
     model_id = "Qwopus3.5-4B-Coder-MTP-Q6_K"
     model_path = "/mnt/ai-models/qwopus/Qwopus3.5-4B-Coder-MTP-Q6_K.gguf"
 
-    async def _fake_info(self: SlotManager, mid: str | None) -> dict[str, object]:
+    async def _fake_info(
+        self: SlotManager, mid: str | None, *, provider: str | None = None
+    ) -> dict[str, object]:
         return {"_model_key": model_id, "path": model_path}
 
     monkeypatch.setattr(SlotManager, "_resolve_model_info", _fake_info)
@@ -222,7 +226,9 @@ async def test_no_false_drift_when_registry_key_is_the_slugified_id(
     registry_key = "qwopus3-5-4b-coder-mtp-q6-k"
     model_path = "/mnt/ai-models/qwopus/Qwopus3.5-4B-Coder-MTP-Q6_K.gguf"
 
-    async def _fake_info(self: SlotManager, mid: str | None) -> dict[str, object]:
+    async def _fake_info(
+        self: SlotManager, mid: str | None, *, provider: str | None = None
+    ) -> dict[str, object]:
         return {"_model_key": registry_key, "path": model_path}
 
     monkeypatch.setattr(SlotManager, "_resolve_model_info", _fake_info)
@@ -266,7 +272,9 @@ async def test_drift_resolves_the_servable_model_like_the_launch_path(
         resolved_for.append(model_id)
         return servable_id if model_id == toml_id else model_id
 
-    async def _fake_info(self: SlotManager, mid: str | None) -> dict[str, object]:
+    async def _fake_info(
+        self: SlotManager, mid: str | None, *, provider: str | None = None
+    ) -> dict[str, object]:
         # Only the SERVABLE id has a file on disk — the raw catalog id misses,
         # exactly as the live registry did.
         if mid == servable_id:

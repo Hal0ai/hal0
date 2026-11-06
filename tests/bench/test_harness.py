@@ -789,6 +789,14 @@ class _SlotRunner:
     def __call__(self, argv: list[str], timeout: float | None = None):
         self.calls.append(list(argv))
         if argv and argv[0] == "systemctl":
+            if "is-active" in argv:
+                # A unit this stub has stopped is down; every other unit is up.
+                slot = argv[-1].removeprefix("hal0-slot@").removesuffix(".service")
+                if slot in self.stopped:
+                    return 3, "inactive\n", ""
+                return 0, "active\n", ""
+            if "list-jobs" in argv:
+                return 0, "", ""
             return 0, "\n".join(self._active_units), ""
         if argv and argv[0] == "sudo":
             verb, unit = argv[-2], argv[-1]
@@ -961,6 +969,189 @@ class TestExclusiveSlots:
 
         with ExclusiveSlots(runner=runner):
             pass  # must not raise
+
+    # ── #3409: a canceled stop job is not a failed stop ───────────────────
+
+    def test_a_canceled_stop_of_an_inactive_unit_is_not_a_failure(self) -> None:
+        """#3409: systemd reports ``Job for … canceled`` when a conflicting
+        job cancels the stop. The unit is then often already down — the
+        window's goal is met — so the session must NOT abort every cell."""
+        calls: list[list[str]] = []
+
+        def runner(argv):
+            calls.append(argv)
+            if argv[0] == "systemctl":
+                if "is-active" in argv:
+                    return 3, "inactive\n", ""
+                if "list-jobs" in argv:
+                    return 0, "", ""
+                return 0, "hal0-slot@agent.service", ""
+            if argv[-2:] == ["stop", "agent"]:
+                return 1, "", "Job for hal0-slot@agent.service canceled."
+            return 0, "", ""
+
+        with ExclusiveSlots(runner=runner) as slots:
+            pass  # must not raise
+
+        assert slots.restore_failures == []
+        # The stop was attempted once and not retried: the unit was down.
+        stops = [c for c in calls if c[-2:] == ["stop", "agent"]]
+        assert len(stops) == 1
+        # The state probe is an UNPRIVILEGED read, like the active-slot
+        # listing — it must not go through the sudo seam.
+        probes = [c for c in calls if c[0] == "systemctl" and "is-active" in c]
+        assert probes == [["systemctl", "is-active", "hal0-slot@agent.service"]]
+        # The queued-job probe is also an UNPRIVILEGED, unellipsized read.
+        job_probes = [c for c in calls if c[0] == "systemctl" and "list-jobs" in c]
+        assert job_probes == [
+            [
+                "systemctl",
+                "list-jobs",
+                "--no-legend",
+                "--no-pager",
+                "--plain",
+                "--full",
+                "hal0-slot@agent.service",
+            ]
+        ]
+        # The slot is back when the window closes.
+        assert [c[-1] for c in calls if c[-2:] == ["start", "agent"]] == ["agent"]
+
+    def test_a_canceled_stop_with_a_queued_start_job_is_retried(self) -> None:
+        """#3414 review: ``inactive`` is not enough while a replacement start
+        job is queued. The window must replace that job before it proceeds."""
+        calls: list[list[str]] = []
+
+        def runner(argv):
+            calls.append(argv)
+            if argv[0] == "systemctl":
+                if "is-active" in argv:
+                    return 3, "inactive\n", ""
+                if "list-jobs" in argv:
+                    return 0, "42 hal0-slot@agent.service start waiting\n", ""
+                return 0, "hal0-slot@agent.service", ""
+            if argv[-2:] == ["stop", "agent"]:
+                first = sum(1 for c in calls if c[-2:] == ["stop", "agent"]) == 1
+                if first:
+                    return 1, "", "Job for hal0-slot@agent.service canceled."
+                return 0, "", ""
+            return 0, "", ""
+
+        with ExclusiveSlots(runner=runner) as slots:
+            pass  # must not raise
+
+        assert slots.restore_failures == []
+        assert len([c for c in calls if c[-2:] == ["stop", "agent"]]) == 2
+        assert [c[-1] for c in calls if c[-2:] == ["start", "agent"]] == ["agent"]
+
+    def test_a_queued_restart_job_after_the_retry_aborts_the_window(self) -> None:
+        """#3414 review: if the replacement start/restart job survives the
+        retry, the window must not measure beside a slot that can still start."""
+        calls: list[list[str]] = []
+
+        def runner(argv):
+            calls.append(argv)
+            if argv[0] == "systemctl":
+                if "is-active" in argv:
+                    return 3, "inactive\n", ""
+                if "list-jobs" in argv:
+                    return 0, "42 hal0-slot@agent.service restart waiting\n", ""
+                return 0, "hal0-slot@agent.service", ""
+            if argv[-2:] == ["stop", "agent"]:
+                return 1, "", "Job for hal0-slot@agent.service canceled."
+            return 0, "", ""
+
+        with pytest.raises(RuntimeError) as excinfo, ExclusiveSlots(runner=runner):
+            pass
+
+        message = str(excinfo.value)
+        assert "could not stop hal0-slot@agent" in message
+        assert "restart job" in message
+        assert "queued" in message
+        assert len([c for c in calls if c[-2:] == ["stop", "agent"]]) == 2
+        assert [c for c in calls if c[-2:] == ["start", "agent"]] == []
+
+    def test_an_uninspectable_job_queue_does_not_accept_an_inactive_unit(self) -> None:
+        """#3414 review: ``inactive`` may be accepted only after the queued-job
+        probe confirms there is no start/restart job. An unreadable job queue
+        is not that confirmation."""
+        calls: list[list[str]] = []
+
+        def runner(argv):
+            calls.append(argv)
+            if argv[0] == "systemctl":
+                if "is-active" in argv:
+                    return 3, "inactive\n", ""
+                if "list-jobs" in argv:
+                    return 1, "", "Failed to list jobs"
+                return 0, "hal0-slot@agent.service", ""
+            if argv[-2:] == ["stop", "agent"]:
+                return 1, "", "Job for hal0-slot@agent.service canceled."
+            return 0, "", ""
+
+        with pytest.raises(RuntimeError) as excinfo, ExclusiveSlots(runner=runner):
+            pass
+
+        message = str(excinfo.value)
+        assert "could not stop hal0-slot@agent" in message
+        assert "could not confirm" in message
+        assert len([c for c in calls if c[-2:] == ["stop", "agent"]]) == 2
+
+    def test_a_canceled_stop_is_retried_once_and_the_retry_wins(self) -> None:
+        """#3409: a unit that is STILL running when the stop job was canceled
+        gets one more stop attempt — which also closes the race a second
+        start job creates."""
+        calls: list[list[str]] = []
+
+        def runner(argv):
+            calls.append(argv)
+            if argv[0] == "systemctl":
+                if "is-active" in argv:
+                    return 0, "active\n", ""
+                return 0, "hal0-slot@agent.service", ""
+            if argv[-2:] == ["stop", "agent"]:
+                first = sum(1 for c in calls if c[-2:] == ["stop", "agent"]) == 1
+                if first:
+                    return 1, "", "Job for hal0-slot@agent.service canceled."
+                return 0, "", ""
+            return 0, "", ""
+
+        with ExclusiveSlots(runner=runner) as slots:
+            pass  # must not raise
+
+        assert slots.restore_failures == []
+        assert len([c for c in calls if c[-2:] == ["stop", "agent"]]) == 2
+        assert [c[-1] for c in calls if c[-2:] == ["start", "agent"]] == ["agent"]
+
+    def test_a_unit_still_running_after_the_retry_aborts_the_window(self) -> None:
+        """#3409: only a unit that is genuinely still running after the retry
+        aborts the window — and whatever it had already stopped is restored
+        first."""
+        calls: list[list[str]] = []
+
+        def runner(argv):
+            calls.append(argv)
+            if argv[0] == "systemctl":
+                if "is-active" in argv:
+                    return 0, "active\n", ""
+                return 0, "hal0-slot@a.service\nhal0-slot@b.service", ""
+            if argv[-2:] == ["stop", "a"]:
+                return 0, "", ""
+            if argv[-2:] == ["stop", "b"]:
+                return 1, "", "Job for hal0-slot@b.service canceled."
+            return 0, "", ""
+
+        with pytest.raises(RuntimeError) as excinfo, ExclusiveSlots(runner=runner):
+            pass
+
+        message = str(excinfo.value)
+        assert "could not stop hal0-slot@b" in message
+        assert "Job for hal0-slot@b.service canceled." in message
+        # b was stopped twice (the retry) and is NOT restored — it was never
+        # down. a, which WAS stopped, is restored.
+        assert len([c for c in calls if c[-2:] == ["stop", "b"]]) == 2
+        assert [c[-1] for c in calls if c[-2:] == ["start", "a"]] == ["a"]
+        assert [c for c in calls if c[-2:] == ["start", "b"]] == []
 
 
 def test_module_exposes_the_privileged_seam_paths() -> None:

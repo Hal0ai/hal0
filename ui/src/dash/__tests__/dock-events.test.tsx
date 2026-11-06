@@ -451,6 +451,21 @@ describe('the dock events pane', () => {
     }
   })
 
+  it('hal0:open-events resets stale filters before expanding the dock', async () => {
+    seedMerged()
+    const onToggle = vi.fn()
+    const host = mount(<Dock route="slots" param="inference" expanded={true} onToggle={onToggle} />)
+    await click(chip('activity'))
+    expect(tags()).toEqual(['A'])
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('hal0:open-events'))
+    })
+    await act(async () => {})
+    expect(tags()).toEqual(['J', 'J', 'A', 'J'])
+    expect(host.querySelector('[data-testid="dock-tab-events"]')?.getAttribute('aria-selected')).toBe('true')
+    expect(onToggle).not.toHaveBeenCalled()
+  })
+
   it('hal0:open-events expands the dock on the events tab', async () => {
     seedMerged()
     const onToggle = vi.fn()

@@ -68,8 +68,10 @@ export function Dock({ route, param, expanded = false, onToggle }) {
     // The notification bell's "Open downloads pane →" row reuses the same
     // expand-and-switch behaviour.
     window.addEventListener("hal0:open-downloads", onPullStarted);
-    // The agent cards' "Activity" link opens the events tab.
+    // Opening the pane from an agent card must not inherit filters from the
+    // previous events visit; the destination is the complete event timeline.
     const onOpenEvents = () => {
+      setFilters({ ...DOCK_FILTERS_DEFAULT });
       setFooterTab("journal");
       if (!expanded && onToggle) onToggle();
     };

@@ -1,0 +1,13 @@
+[Unit]
+Description=hal0 System One decision model (hs-decide-1-flash, CPU)
+Before=hindsight-api.service
+[Service]
+User=hal0
+WorkingDirectory=/var/lib/hal0/memory/hindsight-decision
+Environment=HF_HOME=/var/lib/hal0/memory/hindsight/hf-cache
+Environment=HS_DECIDE_THREADS=8
+ExecStart=/var/lib/hal0/memory/hindsight-decision/.venv/bin/python /var/lib/hal0/memory/hindsight-decision/hs_decide_serve.py --model /var/lib/hal0/memory/hindsight/hf-cache/hub/models--hindsight-ai--hs-decide-1-flash/snapshots/b9a782058dbc81ad59d9397bf2a9fed946778cb3 --port 9178 --max-tokens 8192
+Nice=5
+Restart=on-failure
+[Install]
+WantedBy=multi-user.target
